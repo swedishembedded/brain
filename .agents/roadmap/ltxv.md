@@ -3315,6 +3315,32 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 ## Recorded gaps (kept current)
 
+- **Single-stage generation past the distilled schedule's token count**:
+  **closed in Phase 19**. `generate` ran `LTX2_DISTILLED_SIGMAS` at the
+  requested resolution; `ltx_pipelines.distilled` only ever runs it at
+  `width // 2, height // 2` and then refines at full size with
+  `STAGE_2_DISTILLED_SIGMAS`. Past ~6k video tokens the one-stage form
+  disintegrates the END of the clip (blowup ratio 14.66 at 8160 tokens
+  against 1.03-1.06 at 1024-5600). Now routed by `should_two_stage` /
+  `SINGLE_STAGE_MAX_TOKENS`. **Still open: STG, joint audio/video guidance
+  and CFG rescale** - upstream's `MultiModalGuiderParams` carries
+  `stg_scale` and `rescale_scale` (0.45 for the HQ preset) and this port
+  folds plain CFG only, which is a pre-existing simplification this module's
+  own doc already records, not something Phase 19 introduced.
+
+- **The latent upscalers were called in the wrong latent space**: **closed in
+  Phase 19**, and it was pre-existing rather than new.
+  `ltx_core.model.upsampler.model.upsample_video` un-normalizes with the
+  VAE's `per_channel_statistics`, upsamples, and re-normalizes; all three
+  call sites in this crate (the new two-stage one plus `generate_dfr`'s
+  spatial video, keyframe-slot and temporal rounds) called
+  `LatentUpsampler::upsample` bare, costing half the latent's variance. The
+  reason it survived a green parity suite is worth carrying forward:
+  `upsampler_parity.rs` computed `max_abs`, PRINTED it, and asserted on
+  COSINE alone, and cosine cannot see a scale error. It now asserts both.
+  **Note that no test drives `generate_dfr` end to end**, so the DFR half of
+  that fix is gated by the helper's own test, not by a whole-pipeline run.
+
 - **The LTX int8 tier does not run on `backend-vulkan` at all.** Every
   attempt panics with `GPU device lost while waiting for a submit to
   complete` (`crates/backend-vulkan/src/lib.rs`'s `wait_for_fences`), at
@@ -4039,7 +4065,13 @@ halving lands on the VAE's 32-px stride - upstream asserts the same in
 an optional re-noised seed, so one body serves a single-stage run and both
 stages of a two-stage one. **A single-stage run is bit-identical to before
 this phase**: the stage seed salt is 0, so `seeded_noise(o.seed ^ 0)` and
-`o.seed ^ 0x4e_4f_49_53_45 ^ 0` are the original expressions.
+`o.seed ^ 0x4e_4f_49_53_45 ^ 0` are the original expressions. That is not
+only an argument from the code - a full real 25-frame 1280x704 generation
+(real 22B Q8_0 DiT, real Gemma-4 encoder, real conv VAE, same
+`--start-frame`, seed 42, guidance 3.0) run before and after produces a
+final latent with the **same md5**, `998e25a13b5c59b93515402ce4fce990`, and
+the same clip metric to three decimals (median 3.401, max 3.580, blowup
+1.05).
 
 #### 3 - root cause B: the latent upscalers were never un-normalized around
 
