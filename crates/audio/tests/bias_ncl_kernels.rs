@@ -22,10 +22,10 @@ fn buf(g: &Gpu, data: &[f32]) -> DeviceBuffer {
 fn fwd_ref(x: &[f32], bias: &[f32], rows: usize, c: usize, inner: usize) -> Vec<f32> {
     let mut y = x.to_vec();
     for row in 0..rows {
-        for ch in 0..c {
+        for (ch, &b) in bias.iter().enumerate().take(c) {
             let base = row * c * inner + ch * inner;
             for l in 0..inner {
-                y[base + l] += bias[ch];
+                y[base + l] += b;
             }
         }
     }
