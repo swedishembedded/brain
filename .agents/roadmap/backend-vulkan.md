@@ -708,3 +708,12 @@ Which is why the committed default is unchanged and the fix is one uncomment
 away, with this table next to it. The decision of when to turn it on is a
 placement decision per workload, and it should be made with these numbers in
 hand rather than by a patch silently changing under a benchmark.
+
+**State this session left the box in**: `.cargo/config.toml` was used for
+every measurement above and then removed, so a build here resolves the
+unmodified crates.io wgpu 29.0.4 exactly as before. That is deliberate on two
+counts - the throughput table above means the patch should be a considered
+choice rather than a silent default, and another agent was benchmarking on
+this box at the time, where halving upload throughput under their measurements
+would have been worse than unhelpful. Turning it back on is
+`cp .cargo/config.toml.example .cargo/config.toml` and editing the one path.
