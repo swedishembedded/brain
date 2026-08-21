@@ -546,6 +546,14 @@ fn padded_context_len(cfg: &LtxDitConfig, n: usize) -> usize {
 /// the real `[t, cross_attention_dim]` context `LtxDit::forward`/
 /// `crate::dit::forward_q_streamed` expect.
 ///
+/// The projection is not a bare `Linear`: see
+/// `gemma4::AggregateEmbed::forward`'s doc for the per-token/per-state RMS
+/// normalization, interleaved column order and rescale that
+/// `ltx_core.text_encoders.gemma.feature_extractor.FeatureExtractorV2`
+/// applies around it, and for what this pipeline produced while they were
+/// missing. The `<bos>` this function's `tokenize` prepends belongs to the
+/// same reference-fidelity fix.
+///
 /// Returns `(ctx_cond, ctx_uncond, context_valid, context_len)`.
 /// `context_len` is the reference's own fixed Gemma-4 tokenizer width
 /// (`GEMMA4_MAX_PROMPT_TOKENS`'s doc - `TOKENIZER_MAX_LENGTH = 1024`, NOT a
@@ -626,6 +634,7 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
         connector_registers: dit_cfg.connector_num_learnable_registers,
         use_connector: dit_cfg.use_embeddings_connector,
         uncond_encoded: guidance > 1.0,
+        encode_revision: crate::text_cache::ENCODE_REVISION,
     };
     if let Some(hit) = crate::text_cache::load(&cache_key) {
         return Ok((hit.ctx_cond, hit.ctx_uncond, hit.context_valid, hit.context_len));
@@ -689,9 +698,37 @@ fn real_text_context(path: &str, prompt: &str, dit_cfg: &LtxDitConfig, guidance:
     // `GEMMA4_CONTEXT_LEN`'s doc for why the padded side of this also has to
     // be exactly 1024, not a shape-derived guess.
     const GEMMA4_MAX_PROMPT_TOKENS: usize = 1024;
+    // **The leading `<bos>` is the reference's, not an embellishment.**
+    // `LTXGemmaTokenizer.tokenize_with_weights` (`ltx_core/text_encoders/
+    // gemma/tokenizer.py`) prepends it unconditionally, and says why in its
+    // own class doc: "Gemma 3 already emits it via post_processor; Gemma 4
+    // does not, so we prepend". This crate's `data::qwen_tokenizer::QwenBpe`
+    // is deliberately template-free (`template_prefix`'s doc - callers that
+    // want an HF-equivalent encoding prepend it themselves), so nothing added
+    // it here and every prompt was encoded one token short of what the
+    // checkpoint was trained on, with each caption token sitting at the
+    // position the next one down should hold.
+    //
+    // Looked up by content rather than hard-coded: an id constant would be a
+    // second, unverifiable copy of the checkpoint's own vocabulary. A
+    // checkpoint whose tokenizer declares no `<bos>` at all keeps the old
+    // behaviour rather than inventing a token - it is not this function's
+    // place to decide what such a file meant.
+    let bos_id = tok.special_id("<bos>");
+    if bos_id.is_none() {
+        tracing::warn!("the text encoder's tokenizer declares no <bos>; encoding without the leading BOS the reference prepends");
+    }
     let tokenize = |s: &str| -> Vec<u32> {
-        let mut ids = tok.encode(s);
+        // `text.strip()`, same line of the reference.
+        let mut ids = tok.encode(s.trim());
         ids.truncate(GEMMA4_MAX_PROMPT_TOKENS);
+        match bos_id {
+            Some(bos) if ids.first() != Some(&bos) => {
+                ids.insert(0, bos);
+                ids.truncate(GEMMA4_MAX_PROMPT_TOKENS);
+            }
+            _ => {}
+        }
         if ids.is_empty() {
             vec![0u32]
         } else {

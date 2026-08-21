@@ -38,9 +38,10 @@
 //! encoder checkpoint's identity (path, byte length and modification time -
 //! its content without reading it), the precision tier the encoder ran at,
 //! the three DiT config fields that shape the result, and whether the
-//! unconditional branch was computed. Anything else changing cannot change
-//! the answer; anything here changing produces a different filename AND fails
-//! the verification if it somehow did not.
+//! unconditional branch was computed - PLUS [`ENCODE_REVISION`], which
+//! describes the encode itself rather than an input. Anything else changing
+//! cannot change the answer; anything here changing produces a different
+//! filename AND fails the verification if it somehow did not.
 //!
 //! # Where it lives
 //!
@@ -70,7 +71,30 @@ pub struct Key {
     /// Whether the unconditional branch was really encoded (`guidance > 1.0`)
     /// or is the all-zero stand-in.
     pub uncond_encoded: bool,
+    /// Which revision of the encode's own ARITHMETIC produced the entry -
+    /// [`ENCODE_REVISION`].
+    ///
+    /// Every other field above describes an INPUT. This one describes the
+    /// function, and it has to be here for the same reason the others do: a
+    /// cache whose key cannot express "we compute this differently now"
+    /// silently serves a context the current pipeline would never produce,
+    /// which is exactly the wrong-prompt failure this module's header says it
+    /// must not have. The checkpoint identity does not cover it - the bug
+    /// that forced this field changed `gemma4::AggregateEmbed`, not any file
+    /// on disk.
+    pub encode_revision: u32,
 }
+
+/// Bump whenever a change to the text encode makes previously-cached entries
+/// wrong rather than merely stale - i.e. whenever the same prompt and the
+/// same checkpoint would now produce different numbers.
+///
+/// * `1` - the original encode.
+/// * `2` - `gemma4::AggregateEmbed::forward` gained the reference's
+///   per-token/per-state RMS normalization, interleaved column order and
+///   `sqrt(out_dim/hidden)` rescale, and the prompt gained the leading
+///   `<bos>` `LTXGemmaTokenizer` prepends.
+pub const ENCODE_REVISION: u32 = 2;
 
 impl Key {
     /// The key material as JSON - written into the cache file and compared on
@@ -86,6 +110,7 @@ impl Key {
             "connector_registers": self.connector_registers,
             "use_connector": self.use_connector,
             "uncond_encoded": self.uncond_encoded,
+            "encode_revision": self.encode_revision,
         })
     }
 
@@ -221,6 +246,7 @@ mod tests {
             connector_registers: 2,
             use_connector: true,
             uncond_encoded: false,
+            encode_revision: ENCODE_REVISION,
         }
     }
 
@@ -241,6 +267,7 @@ mod tests {
             Key { connector_registers: 4, ..base.clone() },
             Key { use_connector: false, ..base.clone() },
             Key { uncond_encoded: true, ..base.clone() },
+            Key { encode_revision: base.encode_revision + 1, ..base.clone() },
         ];
         for v in variants {
             assert_ne!(v.digest(), d, "this field does not affect the cache key: {v:?}");
