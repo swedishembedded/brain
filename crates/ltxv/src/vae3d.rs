@@ -43,10 +43,13 @@
 //!   for every block this checkpoint's `decoder_blocks` config names), never
 //!   strided/transposed conv. See [`vae::blocks3d::Builder3d::space_to_depth`]
 //!   / `::depth_to_space` / `::group_mean`.
-//! * **No cross-chunk feature cache.** This runs the whole clip in one graph,
-//!   one submit - correct for the fixed small clips the goldens dump. The
-//!   general overlapping-tile chunked story (`ltx_core.tiling`'s trapezoidal
-//!   blend masks) is not attempted here; a real long clip needs it.
+//! * **No cross-chunk feature cache.** [`LtxVaeDecoder`] runs the whole clip
+//!   in one graph, one submit. That is correct and exact, and it is also what
+//!   stops fitting: a decode's peak VRAM tracks the OUTPUT PIXEL VOLUME
+//!   (`frames x H x W`), and a 25-frame 1080p clip is a hard `wgpu` out-of-
+//!   memory on a 24 GiB card. [`LtxVaeTiledDecoder`] is the overlapping-tile
+//!   answer, ported from `ltx_core.tiling` + `ConvVideoDecoder.tiled_decode`
+//!   - see [`crate::vae3d::LtxVaeTiledDecoder`] and [`vae::tiling3d`].
 //! * **Frame rule is `F = 1 + 8k`** (stride T8xH32xW32, `patch_size=4`, 128
 //!   latent channels): `patchify`/`unpatchify` (space-to-depth at the pixel
 //!   boundary, `patch_size_t=1`) run on the HOST, once per encode/decode call,
@@ -661,6 +664,299 @@ impl LtxVaeDecoder {
     }
 }
 
+// -------------------------------------------------------- tiled decode ---
+
+/// The VAE's own stride, in pixel units per latent cell: `(time, height,
+/// width)`. Upstream's `VIDEO_SCALE_FACTORS`.
+pub const VIDEO_SCALE: (usize, usize, usize) = (8, 32, 32);
+
+/// A decode tile layout in **pixel / frame** units - upstream's
+/// `TileSizeConfig`, restricted to the three axes this decoder has.
+///
+/// `0` on an axis means that axis is not tiled (upstream's
+/// `DimensionSizeConfig.tile_size == 0`), which is also what a tile larger
+/// than the axis degenerates to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LtxVaeTiling {
+    /// `(tile, overlap)` in frames.
+    pub frames: (u32, u32),
+    /// `(tile, overlap)` in pixels.
+    pub height: (u32, u32),
+    /// `(tile, overlap)` in pixels.
+    pub width: (u32, u32),
+}
+
+impl LtxVaeTiling {
+    /// Upstream's `_CONV_AUTO_LONG_SIDE` - the long spatial edge's tile and
+    /// overlap for the CONV video decoder, in pixels
+    /// (`ltx_pipelines/utils/helpers.py`). This is the reference's own
+    /// number, not a guess: it is what `AUTO_TILING` resolves to for every
+    /// conv-VAE pipeline upstream ships.
+    pub const AUTO_LONG_SIDE: (u32, u32) = (768, 64);
+
+    /// Upstream's `_CONV_AUTO_FRAMES` - the temporal tile and overlap, in
+    /// frames. At the clip lengths this port runs (25 frames = 4 latent
+    /// frames) 80 covers the whole axis, so the temporal split degenerates to
+    /// one tile and only the spatial axes actually split. That is upstream's
+    /// behaviour too, not a simplification.
+    pub const AUTO_FRAMES: (u32, u32) = (80, 24);
+
+    /// The reference's aspect-coupled auto layout
+    /// (`TileSizeConfig.from_long_side`): the long edge gets
+    /// [`Self::AUTO_LONG_SIDE`] and the short edge is scaled to it **in
+    /// latent units**, not pixel units.
+    ///
+    /// Doing the `round` on the latent grid is upstream's own documented
+    /// correction ("pixel-space `round` + ceil-snap would bias the short axis
+    /// up by almost one latent, e.g. 680 -> 704 vs 672"), so it is
+    /// transcribed rather than re-derived. For 1920x1088 this yields a
+    /// 448x768 tile with a 64 px overlap on both axes.
+    pub fn auto(height: u32, width: u32) -> LtxVaeTiling {
+        let (size_px, overlap_px) = Self::AUTO_LONG_SIDE;
+        let span = height.max(width);
+        let axis = |axis_len: u32, factor: u32| -> u32 {
+            let axis_lat = axis_len / factor;
+            let long_lat = span / factor;
+            let size_lat = size_px / factor;
+            let overlap_lat = overlap_px / factor;
+            let lower = 2.max(overlap_lat + 1);
+            let tile_lat = lower.max(round_half_to_even(size_lat as f64 * axis_lat as f64 / long_lat as f64));
+            let min_legal = (2 * factor).max(overlap_px + factor);
+            (tile_lat * factor).max(min_legal)
+        };
+        LtxVaeTiling {
+            frames: Self::AUTO_FRAMES,
+            height: (axis(height, VIDEO_SCALE.1 as u32), overlap_px),
+            width: (axis(width, VIDEO_SCALE.2 as u32), overlap_px),
+        }
+    }
+
+    /// Build the latent-grid tile cover for a `[C, lat_t, lh, lw]` latent.
+    ///
+    /// Mirrors `TileSizeConfig.to_splitters` (pixel sizes divided by the VAE
+    /// factor, floored at `max(2, overlap + 1)`) with `causal_temporal=True`,
+    /// which is the default `ConvVideoDecoder._prepare_tiles` uses.
+    pub fn plan(&self, lat_t: u32, lh: u32, lw: u32) -> vae::tiling3d::TilePlan3d {
+        let (ft, fh, fw) = VIDEO_SCALE;
+        let axis = |(tile_px, overlap_px): (u32, u32), factor: usize| -> (usize, usize) {
+            let overlap = overlap_px as usize / factor;
+            let size = tile_px as usize / factor;
+            (2.max(overlap + 1).max(size), overlap)
+        };
+        let (t_tile, t_over) = axis(self.frames, ft);
+        let (h_tile, h_over) = axis(self.height, fh);
+        let (w_tile, w_over) = axis(self.width, fw);
+        vae::tiling3d::TilePlan3d {
+            t: vae::tiling3d::AxisPlan::temporal(lat_t as usize, t_tile, t_over, ft),
+            h: vae::tiling3d::AxisPlan::spatial(lh as usize, h_tile, h_over, fh),
+            w: vae::tiling3d::AxisPlan::spatial(lw as usize, w_tile, w_over, fw),
+        }
+    }
+}
+
+/// Python's `round` is round-half-to-EVEN, and `TileSizeConfig.from_long_side`
+/// uses it. Ported rather than substituted with `f64::round` (which rounds
+/// half away from zero) so a config that happens to land on a tie picks the
+/// same tile as upstream.
+fn round_half_to_even(v: f64) -> u32 {
+    let f = v.floor();
+    let diff = v - f;
+    // Round up on a strict majority, and on a tie only when doing so lands
+    // on the even neighbour - which is exactly `floor` being odd.
+    let up = diff > 0.5 || (diff == 0.5 && (f as i64) % 2 != 0);
+    let n = if up { f + 1.0 } else { f };
+    n.max(0.0) as u32
+}
+
+/// Peak decode VRAM tracks the OUTPUT PIXEL VOLUME, `frames x H x W`, and is
+/// close to independent of how that volume splits between the temporal and
+/// spatial axes. Measured on one Tesla P40 (24576 MiB), real
+/// `ltx-2.5-video-vae-conv-bf16.safetensors`, whole (un-tiled) path, peak
+/// sampled at 200 ms:
+///
+/// | shape | Mpx | peak MiB |
+/// |---|---:|---:|
+/// | 9f @1920x1088 | 18.80 | 15186 |
+/// | 25f @1280x704 | 22.53 | 16564 |
+/// | 9f @2560x1440 | 33.18 | 23785 |
+/// | 33f @1408x768 | 35.68 | 23813 |
+/// | 17f @1920x1088 | 35.51 | 24264 |
+/// | 25f @1920x1088 | 52.22 | **out of memory** |
+///
+/// Three shapes near 35 Mpx with very different frame/area splits all land
+/// within 500 MiB of each other, which is what "the product, not either
+/// axis" means numerically. The fit is roughly `3.9 GiB + 598 MiB/Mpx`, so a
+/// 24 GiB card runs out just past 35 Mpx.
+///
+/// This is the whole path's ceiling in pixels, set below the measured cliff
+/// with real margin - `24_000_000` keeps every shape this port ships today
+/// (9 frames at 1080p = 18.8 Mpx, 25 at 720p = 22.5 Mpx) on the exact,
+/// un-tiled path and sends 25 frames at 1080p to the tiled one. It is a
+/// P40-sized constant and says so; `BRAIN_LTXV_VAE_TILE` overrides the
+/// decision either way.
+pub const WHOLE_DECODE_MAX_PIXELS: u64 = 24_000_000;
+
+/// Whether a decode of this output shape should take the tiled path.
+///
+/// `BRAIN_LTXV_VAE_TILE=1`/`0` forces tiling on/off; anything else (or unset)
+/// is the measured [`WHOLE_DECODE_MAX_PIXELS`] policy. Forcing it ON at a
+/// shape that already fits is the supported way to compare the two paths.
+pub fn should_tile(frames: u32, h: u32, w: u32) -> bool {
+    match std::env::var("BRAIN_LTXV_VAE_TILE").ok().as_deref() {
+        Some("1") | Some("on") | Some("true") => return true,
+        Some("0") | Some("off") | Some("false") => return false,
+        _ => {}
+    }
+    (frames as u64) * (h as u64) * (w as u64) > WHOLE_DECODE_MAX_PIXELS
+}
+
+/// Decodes a `[128, lat_t, lh, lw]` latent as a cover of **overlapping
+/// tiles**, one device-resident graph at a time, blending the decoded pixel
+/// tiles with the reference's trapezoidal masks.
+///
+/// Swedish Embedded AB implements memory-bounded video-model inference for
+/// its clients. If your team needs expertise in running large diffusion and
+/// autoencoder models inside a fixed VRAM budget, you can procure our
+/// services by sending an email to info@swedishembedded.com.
+///
+/// # What this is and is not
+///
+/// It is **not** an exact factorisation of [`LtxVaeDecoder`]. This decoder's
+/// spatial receptive field is roughly 15 latent cells wide (summing every
+/// kernel-3 conv at the resolution it runs at: ~6 cells at the latent grid,
+/// ~2.5 at 2x, ~5.5 at 4x, ~1.1 at 8x), while a 1080p latent is only 34 cells
+/// tall - so no overlap that still saves memory can cover it, and a
+/// halo-and-crop scheme like `imaging::tiling`'s cannot be exact either.
+/// Blending is what upstream ships for precisely this reason. A tile's
+/// interior is exact; the seam is a weighted average of two tiles that saw
+/// different context, and the trapezoidal ramp makes that a gradient rather
+/// than an edge.
+///
+/// What IS exact, and gated as such:
+///
+/// * a plan that yields ONE tile decodes bit-identically to
+///   [`LtxVaeDecoder`] (`crates/ltxv/tests/vae_tiling.rs`);
+/// * the blend reconstructs a known volume to `< 1e-5`
+///   (`vae::tiling3d`'s own `the_blend_reconstructs_a_known_volume_exactly`),
+///   so mask/slice/divisor bugs cannot hide behind the receptive-field
+///   approximation.
+///
+/// # One graph per tile SHAPE, not per tile
+///
+/// A tile's graph is built, used for every tile of that shape, and dropped
+/// before the next shape's is built - the same "fresh resources per unit of
+/// work" pattern `RealDit::forward_q_streamed` uses, and the reason peak VRAM
+/// is one tile's, not the clip's. Tiles are grouped by shape rather than
+/// rebuilt per tile because a `split_by_size` cover has at most four distinct
+/// spatial shapes (interior, short last row, short last column, and their
+/// corner) however many tiles it has.
+pub struct LtxVaeTiledDecoder {
+    cfg: LtxVaeConfig,
+    tensors: Tensors,
+    lat_t: u32,
+    lh: u32,
+    lw: u32,
+    device: Option<String>,
+    plan: vae::tiling3d::TilePlan3d,
+}
+
+impl LtxVaeTiledDecoder {
+    /// Build a tiled decoder for a `[128, lat_t, lh, lw]` latent under
+    /// `tiling`. Weights are retained on the HOST (no device graph exists
+    /// until [`LtxVaeTiledDecoder::decode`] runs), so constructing this costs
+    /// no VRAM at all.
+    pub fn new(cfg: &LtxVaeConfig, tensors: Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, tiling: LtxVaeTiling) -> LtxVaeTiledDecoder {
+        assert!(lat_t >= 1, "a latent needs at least one frame");
+        let plan = tiling.plan(lat_t, lh, lw);
+        LtxVaeTiledDecoder { cfg: *cfg, tensors, lat_t, lh, lw, device: device.map(str::to_string), plan }
+    }
+
+    /// The same, with upstream's aspect-coupled auto layout for the OUTPUT
+    /// pixel size this latent decodes to.
+    pub fn auto(cfg: &LtxVaeConfig, tensors: Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>) -> LtxVaeTiledDecoder {
+        let tiling = LtxVaeTiling::auto(lh * VIDEO_SCALE.1 as u32, lw * VIDEO_SCALE.2 as u32);
+        Self::new(cfg, tensors, lat_t, lh, lw, device, tiling)
+    }
+
+    /// The tile cover this decoder will run.
+    pub fn plan(&self) -> &vae::tiling3d::TilePlan3d {
+        &self.plan
+    }
+
+    /// Video frames this decoder produces - the same `1 + 8(lat_t - 1)` rule
+    /// [`LtxVaeDecoder::frames`] follows.
+    pub fn frames(&self) -> u32 {
+        1 + 8 * (self.lat_t - 1)
+    }
+
+    /// Decode a NORMALISED latent `[128, lat_t, lh, lw]` into `[3, frames,
+    /// lh*32, lw*32]`, one tile at a time.
+    ///
+    /// `on_tile(done, total)` is called after each tile so a caller can
+    /// report progress on what is, at 1080p, a multi-minute stage.
+    pub fn decode_with(&self, latent: &[f32], mut on_tile: impl FnMut(usize, usize)) -> Vec<f32> {
+        let c = self.cfg.latent_channels as usize;
+        let want = c * self.lat_t as usize * self.lh as usize * self.lw as usize;
+        assert_eq!(latent.len(), want, "tiled decode: {} values, expected {want}", latent.len());
+
+        let tiles = self.plan.tiles();
+        let total = tiles.len();
+        let mut blender = vae::tiling3d::Blender::new(&self.plan, 3);
+
+        // Group by latent tile SHAPE so one graph serves every tile of that
+        // shape; `BTreeMap` keeps the order deterministic run to run, which a
+        // `HashMap` would not, and a decode that reorders its own float
+        // accumulation is a decode whose output is not reproducible.
+        let mut by_shape: std::collections::BTreeMap<(usize, usize, usize), Vec<usize>> = std::collections::BTreeMap::new();
+        for (i, t) in tiles.iter().enumerate() {
+            by_shape.entry((t.t.src_len(), t.h.src_len(), t.w.src_len())).or_default().push(i);
+        }
+
+        let mut done = 0usize;
+        for ((st, sh, sw), idxs) in by_shape {
+            let dec = LtxVaeDecoder::build(&self.cfg, &self.tensors, st as u32, sh as u32, sw as u32, self.device.as_deref());
+            for i in idxs {
+                let tile = tiles[i];
+                let sub = self.slice_latent(latent, tile);
+                let pixels = dec.decode(&sub);
+                blender.add(tile, &pixels);
+                done += 1;
+                on_tile(done, total);
+            }
+            // Explicit: the whole point is that this tile shape's device
+            // buffers are gone before the next shape's are allocated.
+            drop(dec);
+        }
+        blender.finish()
+    }
+
+    /// [`LtxVaeTiledDecoder::decode_with`] with no progress callback.
+    pub fn decode(&self, latent: &[f32]) -> Vec<f32> {
+        self.decode_with(latent, |_, _| {})
+    }
+
+    /// Cut one tile's `[C, t, h, w]` sub-volume out of the full latent.
+    fn slice_latent(&self, latent: &[f32], tile: vae::tiling3d::Tile3d<'_>) -> Vec<f32> {
+        let c = self.cfg.latent_channels as usize;
+        let (lt, lh, lw) = (self.lat_t as usize, self.lh as usize, self.lw as usize);
+        let (t0, t1) = tile.t.src;
+        let (h0, h1) = tile.h.src;
+        let (w0, w1) = tile.w.src;
+        let (tt, th, tw) = (t1 - t0, h1 - h0, w1 - w0);
+        let mut out = vec![0.0f32; c * tt * th * tw];
+        for ci in 0..c {
+            for ti in 0..tt {
+                for hi in 0..th {
+                    let src = (((ci * lt + t0 + ti) * lh) + h0 + hi) * lw + w0;
+                    let dst = (((ci * tt + ti) * th) + hi) * tw;
+                    out[dst..dst + tw].copy_from_slice(&latent[src..src + tw]);
+                }
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,6 +1006,82 @@ mod tests {
         assert_eq!(get("decoder.up_blocks.3.conv.conv.weight"), vec![4096, 512, 3, 3, 3]);
         assert_eq!(get("decoder.up_blocks.5.conv.conv.weight"), vec![512, 512, 3, 3, 3]);
         assert_eq!(get("decoder.up_blocks.7.conv.conv.weight"), vec![512, 256, 3, 3, 3]);
+    }
+
+    // ------------------------------------------------------------ tiling
+
+    /// `TileSizeConfig.from_long_side` with upstream's own conv-VAE
+    /// constants, evaluated by hand for the two shapes this port runs:
+    /// 1080p (span 1920, so width takes the full 768 and height scales to
+    /// `round(24 * 34/60) = 14` latent cells = 448 px) and 720p (span 1280,
+    /// width 768, height `round(24 * 22/40) = 13` = 416 px).
+    #[test]
+    fn the_auto_tiling_matches_the_reference_long_side_layout() {
+        let a = LtxVaeTiling::auto(1088, 1920);
+        assert_eq!(a.frames, (80, 24));
+        assert_eq!(a.height, (448, 64));
+        assert_eq!(a.width, (768, 64));
+
+        let b = LtxVaeTiling::auto(704, 1280);
+        assert_eq!(b.height, (416, 64));
+        assert_eq!(b.width, (768, 64));
+
+        // A square never scales the short edge, because there isn't one.
+        let s = LtxVaeTiling::auto(1024, 1024);
+        assert_eq!(s.height, s.width);
+    }
+
+    /// Python's `round` is half-to-even and upstream's tile sizing calls it,
+    /// so a tie must pick the even neighbour, not the larger one.
+    #[test]
+    fn tile_sizing_rounds_half_to_even_like_python() {
+        assert_eq!(round_half_to_even(2.5), 2);
+        assert_eq!(round_half_to_even(3.5), 4);
+        assert_eq!(round_half_to_even(13.6), 14);
+        assert_eq!(round_half_to_even(13.2), 13);
+    }
+
+    /// At 25 frames the temporal axis is 4 latent frames, well under the
+    /// reference's 80-frame (10-latent) temporal tile, so only the spatial
+    /// axes split - 3 x 3 tiles. The pixel cover must be exact and the blend
+    /// masks must partition unity, or the stitched clip has seams.
+    #[test]
+    fn the_1080p_plan_splits_space_only_and_covers_the_clip() {
+        let plan = LtxVaeTiling::auto(1088, 1920).plan(4, 34, 60);
+        assert_eq!(plan.t.len(), 1, "25 frames must not need a temporal split");
+        assert_eq!((plan.h.len(), plan.w.len()), (3, 3));
+        assert_eq!(plan.tiles().len(), 9);
+        assert_eq!(plan.out_shape(), (25, 1088, 1920));
+        assert!(plan.masks_are_complementary(), "unity error t/h/w = {}/{}/{}", plan.t.unity_error(), plan.h.unity_error(), plan.w.unity_error());
+        let waste = plan.overlap_waste();
+        assert!((1.19..1.20).contains(&waste), "overlap waste {waste}");
+    }
+
+    /// A long clip DOES split temporally, and the causal split plus the
+    /// `1 + 8k` frame mapping must still cover exactly - this is the case the
+    /// 25-frame plan above never exercises.
+    #[test]
+    fn a_long_clip_also_splits_the_temporal_axis_and_still_covers_it() {
+        // 121 frames = 16 latent frames, over the 10-latent temporal tile.
+        let plan = LtxVaeTiling::auto(704, 1280).plan(16, 22, 40);
+        assert!(plan.t.len() > 1, "16 latent frames must split under a 10-frame tile");
+        assert_eq!(plan.out_shape().0, 121);
+        assert!(plan.masks_are_complementary(), "temporal unity error {}", plan.t.unity_error());
+    }
+
+    /// The policy that decides which path a real generation takes. Pinned
+    /// against the measured table on [`WHOLE_DECODE_MAX_PIXELS`]: everything
+    /// this port ships today stays on the exact path, and the shape that
+    /// out-of-memories does not.
+    #[test]
+    fn the_tiling_policy_keeps_todays_shapes_on_the_exact_path() {
+        if std::env::var("BRAIN_LTXV_VAE_TILE").is_ok() {
+            return; // an explicit override is being tested elsewhere
+        }
+        assert!(!should_tile(9, 1088, 1920), "9 frames at 1080p fits whole (measured 15186 MiB)");
+        assert!(!should_tile(25, 704, 1280), "25 frames at 720p fits whole (measured 16564 MiB)");
+        assert!(should_tile(25, 1088, 1920), "25 frames at 1080p is a measured out-of-memory");
+        assert!(should_tile(49, 704, 1280), "49 frames at 720p is 44.2 Mpx, past the measured cliff");
     }
 
     #[test]

@@ -2665,6 +2665,394 @@ brain-residency -p brain-cli --lib --bins --tests`, including `dit_parity`,
 `av_dit_parity`, `host_forward_parity`, `streamed_vs_eager_real`,
 `connector_real_parity`, `block_weight_cache` and `av_shard_2gpu_real`.
 
+### Phase 16 - the VAE decoder stops being the 1080p ceiling
+
+Phase 15's item 0 measured that the thing blocking a full 1080p clip is not
+the DiT (16.26 of 24 GiB, comfortable) but the conv VAE decoder's un-tiled
+activation buffers, and deliberately did not fix it, so as not to ship two
+unrelated changes as one. This phase is that fix: the reference's own
+overlapping-tile decode with trapezoidal blend masks, ported and measured.
+
+#### 0 - which axis actually drives the OOM (it is neither)
+
+Phase 15's table read as though frame count and resolution were separate
+constraints ("1080p is capped at 9 pixel frames and 720p at 25"). Measured
+properly, they are one constraint: peak decode VRAM tracks the **output pixel
+volume `frames x H x W`** and is close to blind to how that volume splits
+between the axes.
+
+Real `ltx-2.5-video-vae-conv-bf16.safetensors`, whole (un-tiled)
+`LtxVaeDecoder`, one Tesla P40 (24576 MiB), wgpu backend, peak sampled at
+200 ms:
+
+    nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits --loop-ms=200 &
+    BRAIN_GPU_INDEX=0 BRAIN_GPU_WAIT_S=900 \
+      BRAIN_LTXV_VAE=<real conv VAE> ./target/release/ltxv_bench vae 1 <frames> <height> <width>
+
+| shape | Mpx | peak MiB | wall |
+|---|---:|---:|---:|
+| 9f @1920x1088 | 18.80 | 15186 | 65.0 s |
+| 25f @1280x704 | 22.53 | 16564 | 71.6 s |
+| 25f @1408x768 | 27.03 | 19089 | 100.0 s |
+| 33f @1280x704 | 29.74 | 20494 | 107.5 s |
+| 9f @2560x1440 | 33.18 | 23785 | 131.8 s |
+| **17f @1920x1088** | **35.51** | **24264** | 128.8 s |
+| **33f @1408x768** | **35.68** | **23813** | 124.3 s |
+| 49f @1280x704 | 44.24 | **wgpu Out of Memory** (23348 at abort) | - |
+| 25f @1920x1088 | 52.22 | **wgpu Out of Memory** (21719 at abort) | - |
+
+The three bolded-adjacent rows are the experiment: 33.18, 35.51 and 35.68 Mpx
+split as `9 x 3.69M`, `17 x 2.09M` and `33 x 1.08M` - a 3.7x spread in frame
+count at the same volume - and they land at 23785 / 24264 / 23813 MiB, within
+500 MiB of each other. The fit is roughly **3.9 GiB + 598 MiB per Mpx**, so a
+24 GiB card runs out just past **~35 Mpx**. Tiling either axis works; what
+matters is the product.
+
+**A correction to Phase 15's own table.** Phase 15 recorded 49f @1280x704 and
+25f @1920x1088 as OOM, and that is right, but it also implied the mid shapes
+were unreachable. They were not: `25f @1408x768`, `33f @1280x704`,
+`9f @2560x1440` and `33f @1408x768` all *complete*. What they hit first was
+`BRAIN_GPU_WAIT_S`, the 30 s GPU-submit watchdog - a whole-clip decode at
+those shapes is one submit that takes 100-130 s, so it aborts with
+"poll_wait: GPU submit did not complete within 30s -- device likely wedged",
+which is not an out-of-memory and reads nothing like one. Raising the
+watchdog is what turned four "OOM" rows into four measurements, and it is why
+the cliff above is a measured number rather than a bracket. A benchmark pass
+that sees that panic at a large VAE shape should raise the watchdog before
+concluding anything about memory.
+
+#### 1 - what was read from the reference, and what it actually says
+
+Ported from the cloned `github.com/Lightricks/LTX-2` under
+`resources/ltxv/source/`, not invented:
+
+* `packages/ltx-core/src/ltx_core/tiling.py` - `compute_trapezoidal_mask_1d`
+  (the blend is **linear-ramp trapezoidal**), `split_by_size`,
+  `split_temporal_causal`, and the `masks_are_complementary` /
+  `compute_summed_weights` pair.
+* `packages/ltx-core/src/ltx_core/model/video_vae/video_vae.py` -
+  `map_spatial_slice` / `map_temporal_slice`, the latent-interval to
+  pixel-range mappings.
+* `packages/ltx-core/src/ltx_core/model/video_vae/conv_video_decoder.py` -
+  `ConvVideoDecoder._prepare_tiles` / `tiled_decode`, the orchestration.
+* `packages/ltx-pipelines/src/ltx_pipelines/utils/helpers.py` -
+  `_CONV_AUTO_LONG_SIDE = (768, 64)` and `_CONV_AUTO_FRAMES = (80, 24)`, what
+  `AUTO_TILING` resolves to for **the conv VAE**, plus
+  `TileSizeConfig.from_long_side`'s aspect coupling.
+
+`diffusion_tiling.py` was read too and is **the wrong file for this decoder**
+- it is the DiffVAE (neighborhood-attention) decoder's tiling, with its own
+VRAM-budget search, its own stage-4/5 halo arithmetic and explicitly
+`causal_temporal=False` ("DiffVAE temporal tiling deliberately skips ConvVAE
+causal split/mask tricks"). Following it would have produced a plausible
+tiler with the wrong temporal geometry for the conv decoder this port
+actually has. The conv path's authority is `video_vae.py` +
+`conv_video_decoder.py`, and those are what got ported.
+
+Three conventions that had to be read rather than guessed:
+
+1. **The two axes use DIFFERENT ramp conventions.** Spatial masks are built
+   with `left_starts_from_0=False` (fade-in `i/(r+1)`, never reaching 0);
+   the temporal mask uses `True` (fade-in `i/r`, starting at exactly 0).
+2. **The temporal split is causal**: `split_temporal_causal` shifts every
+   tile after the first back by one latent cell and widens its left ramp by
+   one. That extra cell is the "sacrificial first sample", and it exists
+   because `map_temporal_slice` maps a latent interval to `1 + (end-1)*scale`
+   pixel frames, not `len*scale` - the `1 + 8k` frame rule. Without both
+   halves of that asymmetry the temporal masks do not sum to 1.
+3. **The overlap is 64 px / 24 frames, and it is deliberately SMALLER than
+   the receptive field.** This decoder's spatial receptive field is ~15
+   latent cells (6 at the latent grid + 2.5 at 2x + 5.5 at 4x + 1.1 at 8x,
+   summing every kernel-3 conv at the resolution it runs at) while a 1080p
+   latent is 34 cells tall, so no overlap that still saves memory can cover
+   it and **no halo-and-crop scheme can be exact either**. Blending is what
+   upstream ships precisely because exactness is unreachable here.
+
+#### 2 - what was built
+
+**`crates/vae/src/tiling3d.rs`** (new, 12 unit tests, pure host geometry, no
+GPU code): `trapezoidal_mask_1d`, `Interval`, `split_by_size`,
+`split_temporal_causal`, `map_spatial` / `map_temporal`, `AxisPlan`,
+`TilePlan3d` and `Blender`. It lives in `crates/vae` rather than
+`crates/ltxv` because it is scale-parameterised throughout and `crates/vae`
+already owns `blocks3d`, the shared 3D-causal-VAE primitives both `ltxv` and
+`wan` build on - `wan`'s VAE has the same `1 + k*scale` frame rule at stride
+4 and could adopt it unchanged.
+
+*Not* put in `crates/imaging`, despite that crate's doc claiming "tiling":
+`imaging::tiling` is **halo tiles with disjoint cores**, and its own module
+doc explains that it does not blend because each output pixel comes from
+exactly one tile. That is a different accumulation contract, not a 2D version
+of this one, and (per point 3 above) it is the contract that cannot work
+here. Its `TilePlan` is also 2D `Rect` geometry with no time axis.
+
+**One design difference from the reference, stated because it is a
+difference:** upstream computes `masks_are_complementary` and *skips* the
+divisor when the masks partition unity, falling back to a dense
+`compute_summed_weights` when they do not. This port always divides. The
+tiles are the full cartesian product of the per-axis splits and each tile's
+mask is the outer product of its three 1-D masks, so the accumulated weight
+factors exactly - `W(t,h,w) = Wt(t)*Wh(h)*Ww(w)` - and the divisor is three
+1-D vectors, never a dense `[T,H,W]` buffer. When the masks do partition
+unity the divisor is exactly 1.0 and the division is a bit-pattern no-op
+(gated: the one-tile case is bit-identical). When they do not - a short final
+tile clamps its own ramp, which the reference permits - dividing is the
+correct answer rather than an unnormalised seam. One path, no branch to get
+wrong.
+
+**`crates/ltxv/src/vae3d.rs`**: `LtxVaeTiling` (pixel-unit layout + `auto()`,
+the port of `from_long_side` including Python's round-half-to-even),
+`should_tile` (the policy), `WHOLE_DECODE_MAX_PIXELS` (the measured
+constant), and `LtxVaeTiledDecoder`. Tiles are grouped by latent SHAPE and
+one graph is built per shape, used for every tile of that shape, and dropped
+before the next shape's is built - the "fresh resources per unit of work"
+pattern `RealDit::forward_q_streamed` already established, and the reason
+peak VRAM is one tile's rather than the clip's. A `split_by_size` cover has
+at most four distinct spatial shapes however many tiles it has, so this is 4
+weight uploads for 9 tiles, not 9.
+
+**`crates/ltxv/src/pipeline.rs`**: both decode call sites (`generate` and
+`generate_dfr`) now route through one `decode_video` helper that picks the
+path. Everything this port shipped before stays bit-for-bit on the exact
+whole path - `WHOLE_DECODE_MAX_PIXELS = 24_000_000` sits above 9f@1080p
+(18.8 Mpx) and 25f@720p (22.5 Mpx) and below 25f@1080p (52.2 Mpx).
+`BRAIN_LTXV_VAE_TILE=1`/`0` overrides in either direction, which is also how
+the two paths get compared.
+
+#### 3 - measured
+
+**The shape this phase exists for**, real weights, one Tesla P40, wgpu:
+
+| 25 frames @1920x1088 | whole path | tiled path |
+|---|---|---|
+| result | **wgpu Out of Memory** | **completes** |
+| peak VRAM | 21719 MiB at abort | **8985 MiB** |
+| wall | - | 68.7 s |
+| tiles | - | 9 (3x3 spatial, temporal untiled) |
+| overlap waste | - | 1.192x |
+
+8985 MiB against a 24576 MiB card is **63% headroom**, and the whole-path fit
+above predicted 9087 MiB for a 8.6 Mpx tile - within 1.2% of what the run
+actually took, which is the fit being a model rather than a curve drawn
+through points.
+
+**49 frames @1280x704**, the other shape Phase 15 recorded as not fitting,
+handled by the same mechanism with no special case (7 latent frames is still
+under the 10-latent temporal tile, so again only the spatial axes split):
+
+| 49 frames @1280x704 | whole path | tiled path |
+|---|---|---|
+| result | **wgpu Out of Memory** | **completes** |
+| peak VRAM | 23348 MiB at abort | **12302 MiB** |
+| wall | - | 59.2 s |
+| tiles | - | 4 (2x2 spatial, temporal untiled) |
+| overlap waste | - | 1.145x |
+
+**Cost of tiling**, measured where BOTH paths run - 9 frames @1920x1088, the
+production 3x3 tile geometry, same latent, same card:
+
+| | wall | peak VRAM |
+|---|---:|---:|
+| whole | 23.6 s | 15186 MiB |
+| tiled | 29.1 s | (one tile's) |
+
+**1.23x wall**, against an overlap waste of 1.192x - i.e. the overhead is
+almost exactly the redundant pixels the overlap requires, and the per-shape
+graph grouping keeps the extra weight uploads off the critical path.
+
+#### 4 - the correctness gates, and what each one can actually see
+
+The instruction for this work asked for tiled-vs-whole agreement at cosine
+>= 0.999999, this crate's usual bar. **That bar is not physically reachable
+here and the reason is structural, not a porting defect**: with a ~15-cell
+receptive field and a 2-cell overlap, two tiles genuinely see different
+context in the seam, and upstream never claims otherwise. Asserting it would
+have meant asserting something false. So the claim is split into pieces that
+are each exactly true:
+
+**Exact, and gated as exact:**
+
+* `vae_tiling::a_single_tile_plan_is_bit_identical_to_the_whole_decode` -
+  real weights, a plan whose tiles exceed every axis, latent extents
+  deliberately all different (2 x 2 x 3, so an axis swap cannot hide):
+  **cosine 1.000000000, rel_l2 0.0000e0, max_abs 0.0000e0**, and compared on
+  BIT PATTERNS, not `==` on f32. The whole tiling machinery - slice, per-shape
+  graph build, mask, accumulate, divide - is exact.
+* `vae::tiling3d::the_blend_reconstructs_a_known_volume_exactly` - cut a known
+  volume into a genuinely 3D-split plan's tiles, feed the pieces back through
+  `Blender`, require the result to equal the original: worst `|delta| < 1e-5`.
+  Here the "decoder" is the identity, so a mask, slice or divisor bug cannot
+  hide behind the receptive-field approximation. This is the gate that
+  actually proves the blend.
+* `vae::tiling3d::the_temporal_masks_partition_unity_after_the_causal_shift`
+  and `the_spatial_masks_partition_unity` - per-axis weights within 1e-6 of 1.
+
+**Approximate, and gated with a measured band:**
+
+* `vae_tiling::a_real_split_agrees_with_the_whole_decode_away_from_a_broken_
+  port` - 9 tiles at 9f/256x256, a deliberately harsh split (128 px tiles on
+  a 256 px image, 2.25x waste) so it runs in seconds:
+  **cosine 0.999093484, rel_l2 4.2641e-2, max_abs 1.6697e-1**.
+* `vae_tiling::real_1080p::the_production_1080p_tile_geometry_agrees_with_the_
+  whole_decode` (`#[ignore]`d) - the number that describes production: the
+  real `auto(1088, 1920)` 3x3 cover at 9 frames, where the whole path still
+  fits: **cosine 0.999765097, rel_l2 2.1676e-2, max_abs 2.5191e-1**.
+* `vae_tiling::the_blend_beats_a_hard_cut_at_the_same_tile_geometry` - the
+  same tiles stitched with no mask and no divisor (later tile overwrites
+  earlier): **cosine 0.992828795, rel_l2 1.2401e-1, max_abs 5.4389e-1**. The
+  blend is ~2.9x better in rel_l2 and ~3.3x better in max_abs at identical
+  geometry, so it is doing work rather than decorating.
+
+**What the approximate gate CANNOT see, established by breaking the code and
+re-running rather than by assertion.** This is worth recording because the
+obvious assumption is wrong twice:
+
+* Deleting the blend divisor entirely: **no measurable effect** (cosine
+  0.999093484, unchanged to nine digits). At this geometry the masks
+  partition unity, so the divisor is 1.0.
+* Building the SPATIAL mask with the temporal ramp convention: **no
+  measurable effect** (cosine 0.999098052). Because this port always divides
+  by the accumulated weight, any positive ramp shape renormalises into a
+  valid partition of unity. That is a genuine robustness property of the
+  always-divide choice - and it is also why the ramp CONVENTION cannot be
+  gated from an end-to-end comparison at all.
+* Flipping the convention on the TEMPORAL axis: **caught**, at deviation
+  0.0556 against a 1e-6 bound, by
+  `the_temporal_masks_partition_unity_after_the_causal_shift`, and by
+  `the_blend_reconstructs_a_known_volume_exactly`.
+
+So the end-to-end gate's real job is narrow and is documented as such in the
+test file: it bounds gross structural error (decoding the wrong sub-volume,
+stitching to the wrong offset, losing a tile). The exact properties live in
+`tiling3d`'s unit tests and in the one-tile bit-identity gate.
+
+**No whole-path result exists for the shapes that motivated this**, so
+`vae_tiling::real_1080p::a_full_25_frame_1080p_clip_decodes_on_one_card` and
+its 49-frame/720p twin (both `#[ignore]`d) gate what can be checked without
+one: it completes, every value is finite, the output has real dynamic range
+(25f@1080p: min -0.8327, max 0.6655, std 0.1573 - not a flat or degenerate
+image), and **no tile boundary is a gradient outlier**. That last one is the
+seam check: mean absolute horizontal gradient per output column, probed in a
+window around the centre of each interior tile's fade-in region, against the
+median column. Measured **1.06x the median** at 25f@1080p and **1.08x** at
+49f@1280x704, against a 6x bound. A visible seam is exactly a gradient spike
+at a known column, so this observable is the one that would catch a blend
+that had silently degenerated.
+
+#### 5 - what was explicitly NOT done
+
+* **Tiled ENCODE.** `VideoEncoder.tiled_encode` is a real thing upstream and
+  is not ported. Nothing in this pipeline encodes a clip large enough to need
+  it - `--start-frame` encodes ONE frame - and the encode-side geometry
+  differs (`map_temporal_interval_to_latent` / `map_spatial_interval_to_latent`
+  build RECTANGULAR masks, not trapezoidal, and upstream validates a 16-frame
+  / 64-px minimum overlap there that decode does not). Porting it on
+  speculation would have been a second untested surface.
+* **The DiffVAE (`NADiffusionDecoder`) tiling.** Different decoder, different
+  file, still out of scope - see item 1.
+* **A VRAM-budget search for the tile size.** Upstream has one
+  (`recommended_decode_tiling_config`) but only for the DiffVAE; the conv
+  path's own auto layout is aspect-only and that is what got ported. Sizing
+  tiles from live free VRAM needs the per-request VRAM estimate that
+  `LtxvResident::estimate` still lacks (a gap Phase 13 opened and Phase 15
+  re-recorded), and inventing a second answer to "how much fits" while that
+  is open would give the workspace two.
+* **Reusing `crate::dfr`'s `tile_ranges`/`stitch_tile_latents`.** Read first,
+  as instructed. They do not transfer: DFR tiles the TEMPORAL axis of a
+  latent mid-diffusion and stitches by dropping a lead-in prefix and
+  concatenating - no overlap blend, no masks, no spatial axes, and a seam
+  list driven by keyframe positions rather than a memory budget. The shape is
+  genuinely different, not a specialisation.
+* **Reusing `crates/wan`'s VAE chunking.** Also read first. Wan solves the
+  temporal axis with a cross-chunk `FeatCache` that makes chunked decode
+  EXACTLY equal to whole-clip decode - which works because Wan's decoder is
+  causal. LTX's conv decoder runs `causal=False` (this checkpoint's
+  `causal_decoder: false`), so every conv pads symmetrically and reads a
+  future frame; there is no cache that makes a chunk exact. Wan also does not
+  address the spatial axes at all, and the spatial axes are half of what the
+  measurement above says drives the OOM.
+* **Making the tiled path the default at every shape.** It is a lossy path.
+  Every shape that fits keeps the exact one.
+
+#### 6 - end to end, on the real checkpoints
+
+A real generation, not a decode in isolation - the REAL Q8_0 22B DiT + REAL
+Gemma-4 text encoder + REAL conv VAE, `--start-frame` a real PNG, on **one**
+Tesla P40, the default **wgpu** backend:
+
+    BRAIN_GPU_INDEX=0 BRAIN_GPU_WAIT_S=1800 \
+    BRAIN_LTXV_VAE=<conv VAE> BRAIN_LTXV_DIT=<Q8_0 22B> \
+    BRAIN_LTXV_TEXT_ENCODER=<Gemma-4 Q8_0> \
+      ./target/release/brain -v ltxv t2v \
+        --prompt "a red fox trotting through tall grass at golden hour, cinematic" \
+        --frames 25 --width 1920 --height 1088 --fps 24 \
+        --guidance 1.0 --seed 7 --dit-config ltx25_22b \
+        --start-frame out/sdxl-fox.png --device gpu0 --output-path out.mp4
+
+**It completes**, `rc=0`, and writes a real 1920x1088 / 25-frame / 24 fps
+h264 file (verified with `ffprobe`: `nb_frames=25`, `width=1920`,
+`height=1088`).
+
+| stage | wall |
+|---|---:|
+| build | 8.0 s |
+| text encode | 0.1 s (Phase 11's on-disk context cache, warm) |
+| denoise, 8 forwards at 8160 tokens | 2091.8 s (261.5 s/forward) |
+| **VAE decode (tiled)** | **70.1 s** |
+| other | 6.0 s |
+| **total** | **2176.0 s** |
+
+**Peak VRAM: 16651 MiB on gpu0, 1 MiB on gpu1.** Two things in that one line:
+
+* `--device gpu0` really did confine the run to one card (gpu1 never moved
+  off idle), so this is a genuine single-P40 result.
+* 16651 MiB is the **DiT's** peak, matching Phase 15's isolated 16650 MiB.
+  The tiled decode's own plateau is 8652 MiB, sampled directly, and then
+  releases to 14 MiB - **entirely underneath the DiT's high-water mark**. The
+  VAE decode is no longer the binding constraint at this shape; it is no
+  longer even the second-largest allocation.
+
+**The same command on the pre-change binary is the control**, run first and
+by accident (the CLI had not been rebuilt after the pipeline was wired -
+worth recording, because the failure looked exactly like a bug in the new
+code and was not). It reached the identical point and died:
+`wgpu error: Out of Memory`, peak 23313 MiB, **after all 8 denoise steps
+completed**. The 200 ms VRAM trace of that run is the clean before/after:
+the DiT releases to 12 MiB at the end of denoising, then a SINGLE monotonic
+climb 570 -> 23313 MiB aborts - the whole-clip decode allocating one graph -
+where the new path shows a per-tile plateau at 8652 MiB instead. That run
+also confirms, independently, that text-encode + denoise WITH image
+conditioning at this shape peaks at 16645 MiB and releases cleanly, i.e. the
+VAE decode was the sole end-to-end blocker.
+
+#### Gates, all green
+
+New: 12 in `vae::tiling3d`, 6 in `ltxv::vae3d`, 3 routine + 3 `#[ignore]`d
+real-weight tests in `crates/ltxv/tests/vae_tiling.rs`.
+
+Every pre-existing gate re-run and green: `cargo test --release -p brain-ltxv
+--lib --tests` (136 unit + every integration suite, including `dit_parity`,
+`av_dit_parity`, `vae_parity`, `host_forward_parity`,
+`streamed_vs_eager_real`, `connector_real_parity`, `block_weight_cache`,
+`na_decoder_parity`, `upsampler_parity` and `av_shard_2gpu_real`) and
+`cargo test --release -p brain-vae --lib --tests`.
+
+#### What a benchmark pass should know before it runs
+
+* **1080p is no longer capped at 9 frames, and 720p is no longer capped at
+  25.** Phase 15's cap note is superseded: the tiled path runs 25f@1080p at
+  8985 MiB and 49f@1280x704, both on one card.
+* **The whole-path ceiling is ~35 Mpx on a 24 GiB card**, not a frame count
+  and not a resolution - see item 0's table before assuming either.
+* **A "GPU submit did not complete within 30s" panic at a large VAE shape is
+  the watchdog, not memory.** Raise `BRAIN_GPU_WAIT_S`. A whole-clip decode
+  is one submit and takes 100-130 s at 35 Mpx.
+* **Tiled decode is lossy by construction** (item 4). Any A/B that compares a
+  1080p clip against an older 720p one is comparing an approximate decode
+  against an exact one as well as two resolutions.
+* **`BRAIN_LTXV_VAE_TILE=1`** forces the tiled path at shapes that fit, which
+  is the supported way to measure the two against each other.
+
 ## Convention questions settled from source, not experiment
 
 Recorded here as they're pinned by tests, so this section grows as milestones
@@ -2725,6 +3113,29 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 ## Recorded gaps (kept current)
 
+- Overlapping-tile chunked VAE **decode**: **closed in Phase 16**. The video
+  VAE milestone left "general overlapping-tile chunked encode/decode ... out
+  of scope, deferred to the DFR milestone", and Phase 15's item 0 measured it
+  as the real 1080p blocker. `vae::tiling3d` + `ltxv::vae3d::
+  LtxVaeTiledDecoder` port `ltx_core.tiling` + `ConvVideoDecoder.tiled_decode`;
+  25 frames at 1920x1088 now decodes at 8985 MiB where the whole path was a
+  hard `wgpu` out-of-memory. **Still open: tiled ENCODE**
+  (`VideoEncoder.tiled_encode`), deliberately - nothing in this pipeline
+  encodes a clip large enough to need it, and its geometry genuinely differs
+  (RECTANGULAR masks, a validated 16-frame/64-px minimum overlap). Also still
+  open: tiling the NA diffusion decoder (`diffusion_tiling.py`, a different
+  decoder), and sizing tiles from live free VRAM rather than the reference's
+  aspect-only auto layout - the latter is blocked on the per-request VRAM
+  estimate `LtxvResident::estimate` still lacks, below.
+- Tiled decode is **lossy by construction, and is not claimed otherwise**.
+  The conv decoder's spatial receptive field is ~15 latent cells against a
+  64-px (2-cell) overlap, so no memory-saving tiling can be exact and no
+  halo-and-crop variant can be either - this is upstream's own trade, not a
+  porting defect. Measured at the production 1080p geometry: cosine
+  0.999765097 / rel_l2 2.1676e-2 / max_abs 2.5191e-1 against the whole
+  decode. The tiling MACHINERY is exact (one-tile plans are bit-identical);
+  see Phase 16 item 4 for which gate can see what, including the two
+  deliberate breaks that end-to-end comparison provably CANNOT detect.
 - Full 22B DiT real-weight parity: **partially closed, connector gap now
   closed too**. The "real-weight parity ladder for the 22B DiT, reduced
   depth" milestone proved quantization exactness (Q8_0, exact) and

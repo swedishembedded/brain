@@ -864,6 +864,37 @@ pub fn tc_to_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize) -> Vec<f32> 
     out
 }
 
+/// The one VAE-decode call site both [`generate`] and [`generate_dfr`] use:
+/// decode a `[C, lat_t, lh, lw]` latent, taking the WHOLE-clip path when it
+/// fits and the overlapping-tile path when it does not.
+///
+/// Which path runs is [`crate::vae3d::should_tile`]'s measured output-pixel-volume
+/// policy (with `BRAIN_LTXV_VAE_TILE` as the override). Every shape this port
+/// shipped before this change stays on the exact whole path bit for bit; what
+/// the tiled path adds is the shapes that used to abort with a `wgpu`
+/// out-of-memory - 25 frames at 1080p above all, which is 52.2 Mpx against a
+/// measured ~35 Mpx ceiling on a 24 GiB card.
+///
+/// Takes `vweights` BY VALUE because the tiled path needs them across
+/// several graph builds (one per distinct tile shape), where the whole path
+/// needed them only until its single graph was recorded. They are dropped as
+/// early as each path allows.
+fn decode_video(vcfg: &LtxVaeConfig, vweights: vae::blocks::Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, latent: &[f32]) -> (Vec<f32>, usize) {
+    let frames = 1 + 8 * (lat_t - 1);
+    let (h, w) = (lh * 32, lw * 32);
+    if crate::vae3d::should_tile(frames, h, w) {
+        let dec = crate::vae3d::LtxVaeTiledDecoder::auto(vcfg, vweights, lat_t, lh, lw, device);
+        let n = dec.plan().tiles().len();
+        tracing::info!(tiles = n, waste = dec.plan().overlap_waste(), frames, h, w, "VAE decode: tiled (whole-clip decode would not fit)");
+        let px = dec.decode_with(latent, |done, total| tracing::debug!(done, total, "vae tile"));
+        (px, dec.frames() as usize)
+    } else {
+        let dec = LtxVaeDecoder::build(vcfg, &vweights, lat_t, lh, lw, device);
+        drop(vweights);
+        (dec.decode(latent), dec.frames() as usize)
+    }
+}
+
 /// Geometry (positions/masks) and initial content for appending one or more
 /// `lh*lw`-token image-conditioning blocks after `base_t` noise tokens - one
 /// block per `(pixel_frame_idx, cond_latent_tokens)` pair in `blocks`, each
@@ -1993,10 +2024,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // conditioning frame is the source image itself, not a new frame to
     // render.
     let chw = tc_to_chw(&final_latent[..t * in_channels], in_channels, lat_t, lh, lw);
-    let dec = LtxVaeDecoder::build(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref());
-    drop(vweights);
-    let pixels = dec.decode(&chw);
-    let frames = dec.frames() as usize;
+    let (pixels, frames) = decode_video(&vcfg, vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref(), &chw);
     let (w, h) = (o.width, o.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
@@ -2422,10 +2450,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     let decode_t = Instant::now();
     let vraw = read_any(&paths.vae)?;
     let vweights = crate::import::import_vae(vraw, &vcfg)?;
-    let dec = LtxVaeDecoder::build(&vcfg, &vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref());
-    drop(vweights);
-    let pixels = dec.decode(&video_chw);
-    let frames = dec.frames() as usize;
+    let (pixels, frames) = decode_video(&vcfg, vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref(), &video_chw);
     let (w, h) = (base.width, base.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
