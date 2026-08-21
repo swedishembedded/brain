@@ -630,8 +630,13 @@ gates are all green with this milestone's changes in place.
 
 ## Recorded gaps (expected, not yet reached)
 
-- No full 5-minute generation on this machine (no discrete GPU, ~21 GB
-  usable RAM) - only a short single-chunk generation is exercised here.
+- No full 5-minute generation on this machine - superseded by the more
+  precise Phase 10/11 diagnosis below (this isn't just "no discrete GPU":
+  even a SHORT generation cannot complete here). `generate::generate`
+  itself is NOT single-chunk-only (it loops over the real
+  `denoise::chunk_starts`, so a long song is the general case, not a
+  special one) - what's actually unexercised is any real run long enough
+  to invoke that loop more than once.
 - No NPU export path planned in the initial port.
 - No real multi-device execution for the DiT's `model::Shardable` slice
   (this machine has no discrete GPU at all) - only single-device
