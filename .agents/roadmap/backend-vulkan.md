@@ -376,11 +376,14 @@ with zero errors.
 **Measured roofline for this box** (`gpu_core::roof`, GPU-timestamp based),
 against the GP102 playbook's theoretical 11.758 TFLOP/s / 346 GB/s / ~47 TOP/s:
 
-| roof | measured | % of spec |
-|---|---:|---:|
-| fp32 FMA | 10.62 TFLOP/s | **90.3%** |
-| DRAM bandwidth | 287.4 GB/s | **83.1%** |
-| packed int8 DP4A | 43.24 TOP/s | **92.0%** |
+| roof | `backend-wgpu` | `backend-vulkan` | % of spec |
+|---|---:|---:|---:|
+| fp32 FMA | 10 697 GFLOP/s | 10 638 GFLOP/s | **91.0% / 90.5%** |
+| DRAM bandwidth | 287.9 GB/s | 286.8 GB/s | **83.2% / 82.9%** |
+| packed int8 DP4A | 43 604 GOP/s | 43 416 GOP/s | **92.8% / 92.4%** |
+
+Best of three runs each on a fully idle box (both cards at 0 MiB, 0%), the two
+backends agreeing within ~1% on every roof after the fix above.
 
 Two of the three sit in the 85-90% band sec27 says to expect; DRAM at 83% is
 slightly under it and is the same number on both backends, so it is the card,
