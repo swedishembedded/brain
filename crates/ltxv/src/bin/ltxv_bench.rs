@@ -63,8 +63,27 @@
 //!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]     video DiT block stack (fp32, synthetic weights)
 //!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode
 //!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres)
+//!   ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]   decode a DUMPED latent (see ltxv::latentdump), optionally a latent-cell crop
 //!
-//! `vae` needs `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
+//! `vae` and `decode` need `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
+//!
+//! ## What `decode` is for
+//!
+//! A generation is two stages that fail in visually identical ways - a bad
+//! latent and a bad decode both look like smeared, warped video. `decode`
+//! separates them: it takes a latent dumped by
+//! `BRAIN_LTXV_LATENT_DUMP=<path>` on a real run and decodes it AGAIN,
+//! through either path, at either a full or a cropped extent, printing the
+//! per-latent-frame latent statistics and the per-pixel-frame
+//! frame-to-frame difference curve. Two `decode` runs over the SAME dump
+//! differ only in the decoder, so any difference between their curves is the
+//! decoder's; a curve that is already broken in the whole-path arm is the
+//! DiT's.
+//!
+//! The crop exists because the shape that motivates all of this
+//! (25 frames at 1920x1088, 52.2 Mpx) cannot be whole-decoded on a 24 GiB
+//! card at all - but a spatial crop of its latent can, which is what makes a
+//! whole-vs-tiled comparison possible at the real resolution.
 
 use std::time::Instant;
 
@@ -183,6 +202,124 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
     }
     let p = profile(dec.gpu(), "ltxv video VAE decode (real weights)", dec.steps(), reps);
     p.print_top(roofs, 20);
+}
+
+// ---------------------------------------------------------------- decode ---
+
+/// Decode a latent dumped by `BRAIN_LTXV_LATENT_DUMP` (see
+/// [`ltxv::latentdump`]) through an explicitly chosen path, over an optional
+/// latent-cell crop, and print what the two halves of a generation each
+/// contribute to a temporal-stability defect: the per-latent-frame latent
+/// statistics (the DiT's output, before any decoder touches it) and the
+/// per-pixel-frame frame-to-frame difference curve (the decoded result).
+fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
+    let vae = std::env::var("BRAIN_LTXV_VAE").unwrap_or_else(|_| panic!("set BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>"));
+    let (shape, data) = ltxv::latentdump::read(path).unwrap_or_else(|e| panic!("{e}"));
+    let cfg = LtxVaeConfig::conv25();
+
+    // The latent's own statistics, per latent frame. This is the DiT's output
+    // and no decoder has touched it: a frame whose std or extremes are out of
+    // line with its neighbours is a generation defect, full stop.
+    println!("\n=== latent {path}: [{}, {}, {}, {}] ===", shape.c, shape.t, shape.h, shape.w);
+    let plane = (shape.h * shape.w) as usize;
+    for ti in 0..shape.t as usize {
+        let (mut n, mut sum, mut sq, mut lo, mut hi) = (0usize, 0f64, 0f64, f32::INFINITY, f32::NEG_INFINITY);
+        for ci in 0..shape.c as usize {
+            for &v in &data[(ci * shape.t as usize + ti) * plane..(ci * shape.t as usize + ti + 1) * plane] {
+                n += 1;
+                sum += v as f64;
+                sq += (v as f64) * (v as f64);
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        let mean = sum / n as f64;
+        println!("  latent frame {ti}: mean {mean:+.5} std {:.5} min {lo:+.4} max {hi:+.4}", (sq / n as f64 - mean * mean).max(0.0).sqrt());
+    }
+    // Adjacent-latent-frame distance, the latent-space twin of the pixel
+    // frame-to-frame curve.
+    for ti in 1..shape.t as usize {
+        let (mut acc, mut n) = (0f64, 0usize);
+        for ci in 0..shape.c as usize {
+            let a = &data[(ci * shape.t as usize + ti - 1) * plane..(ci * shape.t as usize + ti) * plane];
+            let b = &data[(ci * shape.t as usize + ti) * plane..(ci * shape.t as usize + ti + 1) * plane];
+            for (x, y) in a.iter().zip(b) {
+                acc += (x - y).abs() as f64;
+                n += 1;
+            }
+        }
+        println!("  latent frames {} -> {ti}: mean |delta| {:.5}", ti - 1, acc / n as f64);
+    }
+
+    // `BRAIN_LTXV_DECODE_LF_SUBST=dst=src` overwrites latent frame `dst` with
+    // latent frame `src` before decoding. Decoding once with and once without
+    // it, and differencing the two results per pixel frame, measures which
+    // pixel frames a given latent frame actually controls - the decoder's
+    // temporal receptive field, observed rather than derived from the
+    // `1 + 8k` rule. That is the measurement that tells a defect confined to
+    // one latent frame apart from one confined to a range of pixel frames.
+    let mut data = data;
+    if let Ok(spec) = std::env::var("BRAIN_LTXV_DECODE_LF_SUBST") {
+        let (d, s) = spec.split_once('=').unwrap_or_else(|| panic!("BRAIN_LTXV_DECODE_LF_SUBST wants dst=src, got {spec}"));
+        let (d, s): (usize, usize) = (d.trim().parse().unwrap(), s.trim().parse().unwrap());
+        assert!(d < shape.t as usize && s < shape.t as usize, "latent frames {d}/{s} out of range for t={}", shape.t);
+        for ci in 0..shape.c as usize {
+            let (dst, src) = ((ci * shape.t as usize + d) * plane, (ci * shape.t as usize + s) * plane);
+            let row: Vec<f32> = data[src..src + plane].to_vec();
+            data[dst..dst + plane].copy_from_slice(&row);
+        }
+        println!("  substituted latent frame {d} <- {s}");
+    }
+
+    // The crop, in latent cells. A crop keeps every latent frame (the axis the
+    // defect under investigation lives on) and narrows the spatial extent
+    // until a whole-clip decode fits on one card.
+    let (h0, h1, w0, w1) = crop.unwrap_or((0, shape.h, 0, shape.w));
+    assert!(h0 < h1 && h1 <= shape.h && w0 < w1 && w1 <= shape.w, "crop {h0}..{h1} x {w0}..{w1} out of range for {}x{}", shape.h, shape.w);
+    let (lh, lw) = (h1 - h0, w1 - w0);
+    let mut cropped = Vec::with_capacity(shape.c as usize * shape.t as usize * (lh * lw) as usize);
+    for ci in 0..shape.c as usize {
+        for ti in 0..shape.t as usize {
+            let base = (ci * shape.t as usize + ti) * plane;
+            for y in h0..h1 {
+                let row = base + (y * shape.w) as usize;
+                cropped.extend_from_slice(&data[row + w0 as usize..row + w1 as usize]);
+            }
+        }
+    }
+
+    let frames = 1 + 8 * (shape.t - 1);
+    let (ph, pw) = (lh * 32, lw * 32);
+    println!("\ndecoding [{}, {}, {lh}, {lw}] ({h0}..{h1} x {w0}..{w1}) -> {frames} frames at {pw}x{ph}, path = {mode}", shape.c, shape.t);
+
+    let raw = checkpoint::safetensors::read(&vae).unwrap_or_else(|e| panic!("reading {vae}: {e}"));
+    let weights = ltxv::import::import_vae(raw, &cfg).unwrap_or_else(|e| panic!("importing {vae}: {e}"));
+    let t0 = Instant::now();
+    let pixels = match mode {
+        "whole" => {
+            let dec = LtxVaeDecoder::build(&cfg, &weights, shape.t, lh, lw, Some("gpu"));
+            dec.decode(&cropped)
+        }
+        "tiled" => {
+            let dec = ltxv::vae3d::LtxVaeTiledDecoder::auto(&cfg, weights, shape.t, lh, lw, Some("gpu"));
+            println!("  {} tiles, overlap waste {:.3}x", dec.plan().tiles().len(), dec.plan().overlap_waste());
+            dec.decode_with(&cropped, |_, _| {})
+        }
+        other => panic!("unknown decode path {other} (whole|tiled)"),
+    };
+    println!("  decoded in {:.1} s", t0.elapsed().as_secs_f64());
+
+    let diffs = ltxv::clipmetric::frame_to_frame_diffs(&pixels, frames as usize, ph as usize, pw as usize);
+    println!("\nframe-to-frame mean |delta| (128x128 probe, 0-255 units):");
+    for (i, d) in diffs.iter().enumerate() {
+        println!("  frame {:>3} <- {:>3}: {d:8.3}", i + 1, i);
+    }
+    println!("blowup ratio (max/median) = {:.2}", ltxv::clipmetric::blowup_ratio(&diffs));
+
+    if let Ok(out) = std::env::var("BRAIN_LTXV_PIXEL_DUMP") {
+        ltxv::latentdump::write(&out, ltxv::latentdump::LatentShape { c: 3, t: frames, h: ph, w: pw }, &pixels).unwrap_or_else(|e| panic!("{e}"));
+        println!("wrote decoded pixels to {out}");
+    }
 }
 
 // -------------------------------------------------------------- streamed ---
@@ -318,8 +455,13 @@ fn main() {
         "dit" => bench_dit(arg(2, 2) as usize, arg(3, 8), arg(4, 1024), arg(5, 256)),
         "vae" => bench_vae(arg(2, 2) as usize, arg(3, 17), arg(4, 384), arg(5, 384)),
         "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false)),
+        "decode" => {
+            let path = a.get(2).map(|s| s.as_str()).unwrap_or_else(|| panic!("usage: ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]"));
+            let crop = (a.len() >= 8).then(|| (arg(4, 0), arg(5, 0), arg(6, 0), arg(7, 0)));
+            bench_decode(path, a.get(3).map(|s| s.as_str()).unwrap_or("tiled"), crop);
+        }
         other => {
-            eprintln!("unknown mode {other} (dit|vae|streamed)");
+            eprintln!("unknown mode {other} (dit|vae|streamed|decode)");
             std::process::exit(1);
         }
     }

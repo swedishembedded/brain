@@ -882,6 +882,7 @@ pub fn tc_to_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize) -> Vec<f32> 
 fn decode_video(vcfg: &LtxVaeConfig, vweights: vae::blocks::Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, latent: &[f32]) -> (Vec<f32>, usize) {
     let frames = 1 + 8 * (lat_t - 1);
     let (h, w) = (lh * 32, lw * 32);
+    crate::latentdump::dump_if_requested(crate::latentdump::LatentShape { c: (latent.len() / (lat_t * lh * lw) as usize) as u32, t: lat_t, h: lh, w: lw }, latent);
     if crate::vae3d::should_tile(frames, h, w) {
         let dec = crate::vae3d::LtxVaeTiledDecoder::auto(vcfg, vweights, lat_t, lh, lw, device);
         let n = dec.plan().tiles().len();
