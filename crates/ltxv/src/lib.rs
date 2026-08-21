@@ -118,6 +118,7 @@ pub mod av_modelgrad;
 pub mod block;
 pub mod caps;
 pub mod config;
+pub mod devplan;
 pub mod dfr;
 pub mod dit;
 pub mod duration_head;
@@ -140,6 +141,7 @@ pub mod vocoder;
 pub mod weightcache;
 
 pub use config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
+pub use devplan::{DevicePlan, Placement};
 pub use dit::{load_tiny_weights, AvDitTaps, DitBatch, DitTaps, LtxAvDit, LtxDit};
 pub use pipeline::{GenOpts, Paths};
 pub use vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};

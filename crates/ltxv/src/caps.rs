@@ -151,6 +151,12 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         start_frame: inv.get_str("start_frame"),
         end_frame: inv.get_str("end_frame"),
         conditioning_strength: inv.get_f64("conditioning_strength").unwrap_or(d.conditioning_strength as f64).clamp(0.0, 1.0) as f32,
+        // Not an invocation parameter: placement is the SERVER's decision,
+        // not the caller's. A resident instance overrides it (see
+        // `crates/cli/src/resident_ltxv.rs`, which hands each concurrently
+        // admitted generation its own card); a one-shot CLI run keeps the
+        // default, which uses both cards for one generation's CFG pair.
+        devices: d.devices,
     };
     use crate::vae3d::LtxVaeConfig;
     let vcfg = LtxVaeConfig::conv25();
@@ -209,6 +215,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         start_frame: None,
         end_frame: None,
         conditioning_strength: d.conditioning_strength,
+        devices: d.devices,
     };
     let temporal_upsample_rounds = inv.get_i64("temporal_upsample_rounds").unwrap_or(0).max(0) as usize;
     let opts = DfrOpts { base, temporal_upsample_rounds };

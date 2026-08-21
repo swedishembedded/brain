@@ -66,6 +66,17 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                              end here" literally. Anchor two different
                              instants, or use --start-frame alone.
 
+Placement:
+  On a box with two or more schedulable cards (see --device) and
+  --guidance > 1.0, the conditional and unconditional forwards of every
+  denoise step run CONCURRENTLY, one per card, and the text encoder runs on
+  the card the conditional forward will not use. The result is bit-identical
+  to running them one after another (the two forwards are independent, so no
+  reduction is split) - measured 1.94x wall on two Tesla P40s. Set
+  BRAIN_LTXV_CFG_PARALLEL=0 to force the old single-card behaviour; --device
+  gpu0 also confines the run to one card, since placement never leaves the
+  schedulable set --device names.
+
 Weights (flag wins over the environment variable):
   --vae <path>              $BRAIN_LTXV_VAE       the causal 3D video VAE
   --dit <path>              $BRAIN_LTXV_DIT       real 22B DiT GGUF (only

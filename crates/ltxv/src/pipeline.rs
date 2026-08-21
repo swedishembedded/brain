@@ -254,6 +254,17 @@ pub struct GenOpts {
     /// against the same run at 1.0) - but it is NOT a motion knob: see
     /// `end_frame`'s doc for the one thing that is.
     pub conditioning_strength: f32,
+    /// Which physical card each stage of this generation runs on - see
+    /// [`crate::devplan`]. [`DevicePlan::Auto`] (the default) runs the
+    /// conditional and unconditional DiT forwards of every CFG step
+    /// concurrently on two cards when the machine has two schedulable ones,
+    /// and is byte-for-byte the old single-device behaviour when it does not.
+    ///
+    /// It affects placement and nothing else: the two forwards are
+    /// independent computations over independent inputs, so the folded
+    /// velocity is bit-identical either way (gated by
+    /// `crates/ltxv/tests/cfg_parallel.rs`).
+    pub devices: crate::devplan::DevicePlan,
 }
 
 impl Default for GenOpts {
@@ -280,6 +291,7 @@ impl Default for GenOpts {
             start_frame: None,
             end_frame: None,
             conditioning_strength: 1.0,
+            devices: crate::devplan::DevicePlan::default(),
         }
     }
 }
@@ -1336,14 +1348,52 @@ mod conditioned_latent_tests {
 /// it as the reference's `timesteps_from_mask(denoise_mask, sigma)`
 /// (`ltx_pipelines.utils.helpers`), which is `sigma` broadcast uniformly
 /// only when nothing is frozen.
+///
+/// # Why the two CFG branches are their own method
+///
+/// [`Self::forward_cfg_pair`] exists because the pair - not the individual
+/// forward - is the unit a placement decision applies to. Both branches read
+/// the SAME latent, timesteps, positions and mask; only the text context
+/// differs, and nothing produced by one is read by the other. Whether they
+/// run one after another on one card or at the same time on two is therefore
+/// a property of the DENOISER (does its forward open its own device?), not of
+/// the loop, and this is where a denoiser states it. The default is the
+/// sequential pair every call site had before device plans existed.
 trait Denoiser {
-    #[allow(clippy::too_many_arguments)]
-    fn forward(&self, latent: &[f32], timesteps: &[f32], positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, context_valid: &[f32], t: usize) -> Vec<f32>;
+    fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32>;
+
+    /// One CFG step's conditional and unconditional forwards.
+    ///
+    /// Default: sequentially, on whatever device this denoiser already runs
+    /// on - byte-for-byte the old behaviour, and the only correct answer for
+    /// a denoiser (like [`LtxDit`]) that holds ONE `Gpu` handle built at
+    /// construction, since dispatching its forward from a differently-scoped
+    /// thread would not move a single byte onto the other card. [`RealDit`]
+    /// overrides it: `forward_q_streamed` opens a fresh `Gpu` inside every
+    /// call, so scoping the call is enough to move the whole forward.
+    fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+        Ok((self.forward(i, cond), self.forward(i, uncond)))
+    }
+}
+
+/// Everything one denoise-step forward needs that is IDENTICAL across the
+/// conditional and unconditional branches. The text context is what differs
+/// between them, so it stays a separate argument; grouping the rest is what
+/// makes "run this pair, wherever" expressible as one call instead of a
+/// nine-argument closure repeated twice.
+struct StepInputs<'a> {
+    latent: &'a [f32],
+    timesteps: &'a [f32],
+    positions: &'a [f32],
+    keyframes_mask: &'a [f32],
+    context_len: usize,
+    context_valid: &'a [f32],
+    t: usize,
 }
 
 impl Denoiser for LtxDit {
-    fn forward(&self, latent: &[f32], timesteps: &[f32], positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, context_valid: &[f32], t: usize) -> Vec<f32> {
-        LtxDit::forward(self, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid).out
+    fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
+        LtxDit::forward(self, i.latent, i.timesteps, i.positions, i.keyframes_mask, context, i.context_len, i.t, i.context_valid).out
     }
 }
 
@@ -1388,27 +1438,87 @@ struct RealDit {
     head: Tensors,
     device: Option<String>,
     cache: crate::block::GenerationCache,
+    /// Which card each CFG branch runs on - see [`crate::devplan`]. Resolved
+    /// once, in [`generate`], so every step of one generation makes the same
+    /// placement decision.
+    place: crate::devplan::Placement,
 }
 
 impl Denoiser for RealDit {
-    fn forward(&self, latent: &[f32], timesteps: &[f32], positions: &[f32], keyframes_mask: &[f32], context: &[f32], context_len: usize, context_valid: &[f32], t: usize) -> Vec<f32> {
+    fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
         crate::dit::forward_q_streamed(
             &self.cfg,
             &self.src,
             &self.head,
             self.device.as_deref(),
             crate::block::QTier::Int8,
-            latent,
-            timesteps,
-            positions,
-            keyframes_mask,
+            i.latent,
+            i.timesteps,
+            i.positions,
+            i.keyframes_mask,
             context,
-            context_len,
-            t,
-            context_valid,
+            i.context_len,
+            i.t,
+            i.context_valid,
             &self.cache,
         )
     }
+
+    /// The two forwards, one per card, at the same time.
+    ///
+    /// Safe to share `&self` across the two threads for reasons that are
+    /// properties of the fields, not assumptions about them:
+    ///
+    /// * `src` is a `MmapGguf` - an immutable mapping, read-only from both;
+    /// * `head` is an owned tensor map, never written after construction;
+    /// * `cache` is the checkpoint-scoped [`crate::weightcache`] store, whose
+    ///   whole `RwLock`+`Arc` design exists so a reader holds no lock across
+    ///   its device upload. Both branches therefore hit the SAME already-
+    ///   quantized host bytes and upload them independently to their own
+    ///   card, which is why two cards cost one checkpoint read, not two;
+    /// * `cfg`/`device`/`place` are plain `Copy`/immutable data.
+    ///
+    /// The connector-routing half of the cache is read by both branches too,
+    /// and they genuinely differ there (the conditional and unconditional
+    /// contexts are different inputs, so they occupy two of the store's four
+    /// connector slots) - it is `MAX_CONNECTOR_ENTRIES = 4` precisely so one
+    /// generation's pair fits without either branch evicting the other's.
+    ///
+    /// Each branch opens its own `Gpu` inside `forward_q_streamed`, so no
+    /// device handle crosses a thread boundary and each card's VRAM is
+    /// released when its own call returns.
+    fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+        dispatch_cfg_pair(self, &self.place, i, cond, uncond)
+    }
+}
+
+/// Run one CFG step's two forwards under `place`: sequentially when both
+/// branches land on the same device, and concurrently - one thread per card,
+/// each scoped with `with_gpu` - when they do not.
+///
+/// A free function rather than a method body so the gate
+/// (`the_concurrent_cfg_pair_is_bit_identical_to_the_sequential_one`) drives
+/// THIS code with a per-call-device denoiser it can build in milliseconds,
+/// instead of a copy of it that could drift from what `RealDit` really runs.
+///
+/// `D: Sync` is the whole safety argument, checked by the compiler at every
+/// call site rather than asserted in prose: a denoiser that could not be
+/// shared across the two threads cannot reach this function.
+fn dispatch_cfg_pair<D: Denoiser + Sync>(dit: &D, place: &crate::devplan::Placement, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+    if !place.cfg_is_parallel() {
+        return Ok((dit.forward(i, cond), dit.forward(i, uncond)));
+    }
+    let (cond_gpu, uncond_gpu) = (place.cond, place.uncond);
+    std::thread::scope(|s| {
+        let u = s.spawn(move || crate::devplan::on_gpu(uncond_gpu, || dit.forward(i, uncond)));
+        let c = crate::devplan::on_gpu(cond_gpu, || dit.forward(i, cond));
+        // Join before propagating either error: an early return would drop
+        // the scope's guard and block on the same join anyway, and reporting
+        // the conditional branch's failure while the unconditional one is
+        // still uploading 13 GB reads as a hang.
+        let u = u.join().map_err(|_| format!("ltxv: the unconditional CFG branch panicked on gpu{uncond_gpu:?}"))?;
+        Ok((c?, u?))
+    })
 }
 
 /// `to_denoised` (`ltx_core.utils.to_denoised`): the model predicts a
@@ -1553,14 +1663,14 @@ fn denoise(
             Some(f) => f.mask.iter().map(|&m| m * sigma as f32).collect(),
             None => vec![sigma as f32; t],
         };
-        tracing::trace!(step = i + 1, branch = "cond", sigma, "forward starting");
-        let cond = dit.forward(&latent, &timesteps, positions, keyframes_mask, ctx_cond, context_len, context_valid, t);
+        let inputs = StepInputs { latent: &latent, timesteps: &timesteps, positions, keyframes_mask, context_len, context_valid, t };
         let velocity = if cfg_on {
-            tracing::trace!(step = i + 1, branch = "uncond", sigma, "forward starting");
-            let uncond = dit.forward(&latent, &timesteps, positions, keyframes_mask, ctx_uncond, context_len, context_valid, t);
+            tracing::trace!(step = i + 1, branch = "cond+uncond", sigma, "forward pair starting");
+            let (cond, uncond) = dit.forward_cfg_pair(&inputs, ctx_cond, ctx_uncond)?;
             cond.iter().zip(&uncond).map(|(&c, &u)| u + guidance * (c - u)).collect()
         } else {
-            cond
+            tracing::trace!(step = i + 1, branch = "cond", sigma, "forward starting");
+            dit.forward(&inputs, ctx_cond)
         };
         if !velocity.iter().all(|v| v.is_finite()) {
             let bad = velocity.iter().filter(|v| !v.is_finite()).count();
@@ -1663,6 +1773,12 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // original path); or the real 22B checkpoint, streamed int8-compute,
     // when `--dit-config ltx25_22b` names it (needs `Paths::dit` - see this
     // module's doc and `RealDit`'s doc) ----
+    // Resolve the placement ONCE, before anything is built: every stage of
+    // this generation must agree about which card it is on, and a plan
+    // re-resolved per step could drift if the thread's ambient selection
+    // changed underneath it (see `crate::devplan`).
+    let place = o.devices.resolve(o.device.as_deref());
+    tracing::info!(cond_gpu = ?place.cond, uncond_gpu = ?place.uncond, text_gpu = ?place.text, cfg_parallel = place.cfg_is_parallel() && o.guidance > 1.0, "device placement resolved");
     progress(0, total, "build transformer");
     let build_t = Instant::now();
     let dit: Box<dyn Denoiser> = if o.dit_config == "tiny" {
@@ -1694,7 +1810,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
         let cs = cache.stats();
         tracing::info!(cached_blocks = cs.blocks, cached_bytes = cs.bytes, "checkpoint weight cache attached");
-        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache })
+        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache, place })
     };
     timings.build_dit = build_t.elapsed().as_secs_f32();
     tracing::info!(secs = timings.build_dit, "transformer built");
@@ -1736,7 +1852,11 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         Some(te_path) => {
             tracing::info!(path = %te_path, "encoding the prompt with the real text encoder");
             let te_t = std::time::Instant::now();
-            let r = real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref())
+            // On the card the conditional DiT forward will NOT use, when the
+            // plan has one to spare: the 12B encoder's own device footprint
+            // is then released from a card that is not about to hold the
+            // denoise loop's activations. See `crate::devplan`.
+            let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref()))?
                 .inspect(|(_, _, _, n)| tracing::info!(context_len = n, "prompt encoded"))
                 .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?;
             timings.text_encode = te_t.elapsed().as_secs_f32();
@@ -2457,11 +2577,11 @@ mod tests {
         latents_seen: std::cell::RefCell<Vec<Vec<f32>>>,
     }
     impl Denoiser for FakeDit {
-        fn forward(&self, latent: &[f32], timesteps: &[f32], _positions: &[f32], _keyframes_mask: &[f32], context: &[f32], _context_len: usize, _context_valid: &[f32], _t: usize) -> Vec<f32> {
+        fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
             self.seen.borrow_mut().push(context[0]);
-            self.timesteps_seen.borrow_mut().push(timesteps.to_vec());
-            self.latents_seen.borrow_mut().push(latent.to_vec());
-            vec![context[0]; latent.len()]
+            self.timesteps_seen.borrow_mut().push(i.timesteps.to_vec());
+            self.latents_seen.borrow_mut().push(i.latent.to_vec());
+            vec![context[0]; i.latent.len()]
         }
     }
 
@@ -2616,5 +2736,113 @@ mod tests {
         // Steps 0 and 1 ran (forwards 1,2), step 2's progress callback
         // flipped the token, step 3 refused: two forwards, not four.
         assert_eq!(dit.seen.borrow().len(), 2);
+    }
+
+    /// A denoiser with the one property that makes concurrent CFG dispatch
+    /// possible at all, and the one `FakeDit` cannot have: **the device is
+    /// chosen INSIDE the forward call**, so scoping the call moves the whole
+    /// forward onto another card. `LtxDit::new` opens its own `Gpu`, so
+    /// building a fresh one per call reproduces exactly what
+    /// `dit::forward_q_streamed` does for the real 22B checkpoint, at a
+    /// config that runs in milliseconds and needs no fixture.
+    ///
+    /// Real kernels on a real device, deliberately - a host-arithmetic fake
+    /// would gate the thread plumbing while saying nothing about whether two
+    /// physical cards agree bit for bit, which is the claim under test.
+    struct PerCallDeviceDit {
+        cfg: LtxDitConfig,
+        w: Tensors,
+        place: crate::devplan::Placement,
+    }
+    impl Denoiser for PerCallDeviceDit {
+        fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
+            Denoiser::forward(&LtxDit::new(self.cfg, self.w.clone(), None), i, context)
+        }
+        fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+            dispatch_cfg_pair(self, &self.place, i, cond, uncond)
+        }
+    }
+
+    /// The gate for concurrent CFG dispatch: running the conditional and
+    /// unconditional forwards at the same time on two cards must produce
+    /// **bit-identical** results to running them one after another on one.
+    ///
+    /// Not a tolerance, and not `assert_eq!` on `f32` (which calls two NaNs
+    /// unequal): a bit-pattern comparison, because the claim is exactness.
+    /// It should hold trivially - the two forwards are independent
+    /// computations, not two halves of one reduction, so no sum is
+    /// reassociated by moving one of them - and if it ever does not, that is
+    /// a real defect (a nondeterministic kernel, an uninitialised read)
+    /// worth failing on rather than papering over with a wider bound.
+    ///
+    /// Runs on whatever this box has: with two schedulable cards it really
+    /// dispatches across both; with one (or none) `DevicePlan::Auto` resolves
+    /// `Single` and the test degenerates to "the same thing twice", which
+    /// still gates the fold and the plumbing.
+    #[test]
+    fn the_concurrent_cfg_pair_is_bit_identical_to_the_sequential_one() {
+        let cfg = LtxDitConfig::tiny();
+        let w = random_tiny_weights(&cfg, 0xC0FFEE);
+        let (t, ctx_len) = (8usize, 4usize);
+        let inputs_owned = (
+            (0..t * cfg.in_channels as usize).map(|i| (i as f32 * 0.013).sin()).collect::<Vec<f32>>(),
+            vec![0.7f32; t],
+            grid_positions(2, 2, 2),
+            vec![0.0f32; t],
+            vec![1.0f32; ctx_len],
+        );
+        let i = StepInputs {
+            latent: &inputs_owned.0,
+            timesteps: &inputs_owned.1,
+            positions: &inputs_owned.2,
+            keyframes_mask: &inputs_owned.3,
+            context_len: ctx_len,
+            context_valid: &inputs_owned.4,
+            t,
+        };
+        let d = cfg.cross_attention_dim as usize;
+        let cond: Vec<f32> = (0..ctx_len * d).map(|k| (k as f32 * 0.021).cos()).collect();
+        let uncond: Vec<f32> = (0..ctx_len * d).map(|k| (k as f32 * 0.017).sin()).collect();
+
+        let seq = PerCallDeviceDit { cfg, w: w.clone(), place: crate::devplan::Placement::single() };
+        let (c0, u0) = seq.forward_cfg_pair(&i, &cond, &uncond).expect("the sequential pair always runs");
+
+        let place = crate::devplan::DevicePlan::Auto.resolve(None);
+        let par = PerCallDeviceDit { cfg, w, place };
+        let (c1, u1) = par.forward_cfg_pair(&i, &cond, &uncond).expect("the concurrent pair must run, not error");
+
+        assert_eq!(c0.len(), c1.len());
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+        assert_eq!(bits(&c0), bits(&c1), "the conditional branch changed value by being placed on {:?} (cfg_parallel={})", place.cond, place.cfg_is_parallel());
+        assert_eq!(bits(&u0), bits(&u1), "the unconditional branch changed value by being placed on {:?}", place.uncond);
+        // The two branches must genuinely differ - a gate where cond == uncond
+        // would pass even if the dispatch handed the same context to both.
+        assert_ne!(bits(&c0), bits(&u0), "the two contexts must produce different velocities, or this gate proves nothing");
+    }
+
+    /// `denoise`'s CFG step must route through `forward_cfg_pair`, not
+    /// through two bare `forward` calls - otherwise a denoiser that CAN use
+    /// two cards silently keeps using one, and the whole placement decision
+    /// becomes dead code that no test would notice.
+    #[test]
+    fn the_cfg_step_routes_through_the_pair_method() {
+        #[derive(Default)]
+        struct PairCounter {
+            pairs: std::sync::atomic::AtomicUsize,
+        }
+        impl Denoiser for PairCounter {
+            fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
+                vec![context[0]; i.latent.len()]
+            }
+            fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+                self.pairs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok((self.forward(i, cond), self.forward(i, uncond)))
+            }
+        }
+        let dit = PairCounter::default();
+        let sigmas = vec![1.0, 0.5, 0.0];
+        let positions = grid_positions(1, 1, 1);
+        denoise(&dit, &sigmas, vec![0.0; 1], &positions, &[0.0f32], &[1.0f32], &[0.0f32], 1, &[1.0f32], 1, 5.0, 0.0, 1.0, 7, 4, None, &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+        assert_eq!(dit.pairs.load(std::sync::atomic::Ordering::Relaxed), 2, "one pair dispatch per CFG step");
     }
 }
