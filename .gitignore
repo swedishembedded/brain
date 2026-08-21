@@ -68,6 +68,13 @@ out/depth.ppm
 scripts/gates/*-perf-baselines/
 scripts/gates/*-perf-baselines.json
 
+# Local dependency overrides: a `paths` entry naming a checkout on THIS machine
+# by absolute path, so it is machine-specific by construction and never
+# portable. The committed template is `.cargo/config.toml.example`; the shared,
+# portable form of the same override is the `[patch]` table in the workspace
+# root Cargo.toml.
+/.cargo/config.toml
+
 # Binary model tensors must NEVER be committed — they are multi-MB blobs that bloat
 # history irreversibly. Test goldens are regenerated/fetched, not tracked.
 *.safetensors

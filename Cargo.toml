@@ -245,6 +245,9 @@ brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
 # entries ([target.'cfg(target_arch = "wasm32")'.dependencies]) stay explicit
 # in their crates: they need `default-features = false`, which a member cannot
 # apply on top of a defaulted workspace entry.
+# The published 29 carries a Vulkan staging-memory defect that costs this
+# project real VRAM on every upload; the fix and how to consume it are in the
+# `[patch]` note at the very bottom of this file.
 wgpu = "29"
 pollster = "0.4"
 # Image codecs, default-features off; each consumer adds exactly the codec
@@ -333,3 +336,44 @@ opt-level = 3
 # at a fraction of the link cost. Revisit only with a measured regression on
 # a real perf-gate baseline, not by assumption.
 lto = "thin"
+
+# ---------------------------------------------------------------------------
+# Dependency overrides
+# ---------------------------------------------------------------------------
+#
+# wgpu 29 as published carries a Vulkan defect that costs this project real
+# VRAM. `wgpu-hal`'s `create_buffer` asks `gpu-allocator` for
+# `MemoryLocation::CpuToGpu` for every `MAP_WRITE` buffer, whose preferred
+# memory-property bits include `DEVICE_LOCAL`. On a card whose driver exposes a
+# host-visible memory type drawn from the whole VRAM heap - NVIDIA does, over
+# all 24 GiB on this project's P40s - every staging buffer
+# `Queue::write_buffer` allocates therefore lands in video memory, and
+# `gpu-allocator` pools freed blocks rather than returning them to the driver.
+# Uploading N bytes of weights costs N bytes of VRAM for the destination plus N
+# more that is never handed back: an exact, reproducible 2.00x, measured
+# through `nvidia-smi` deltas. With the fix, 1.00x - equal to a hand-written
+# Vulkan backend on the same card. The gate is
+# `crates/gpu-core/tests/vram_overhead.rs`; the full root-cause ledger is
+# `.agents/roadmap/backend-vulkan.md`.
+#
+# The fix lives on a fork branch cut from the v29.0.4 tag - the exact version
+# resolved by the pin above - so consuming it needs no API migration in
+# `crates/backend-wgpu`. Uncomment to build against it:
+#
+# [patch.crates-io]
+# wgpu = { git = "https://github.com/swedishembedded/wgpu", branch = "v29-staging-host-memory" }
+#
+# Patching `wgpu` alone is enough: its `wgpu-core`/`wgpu-hal`/`wgpu-types`/
+# `naga` dependencies are path deps inside that repo, so the whole tree comes
+# from the fork - verified, `Cargo.lock` picks up all five.
+#
+# It is commented out rather than active because the branch exists only in a
+# local clone so far; this session had no push credentials for the fork. Push
+# it, then uncomment - nothing else here needs to change.
+#
+# To work on the dependency itself rather than consume a pinned rev, override
+# it with a local checkout instead: copy `.cargo/config.toml.example` to
+# `.cargo/config.toml` (gitignored) and point its `paths` entry at the
+# checkout. That is a build-time source substitution - it takes precedence over
+# the `[patch]` above, touches neither this manifest nor `Cargo.lock`, and
+# picks up the working tree on every rebuild.

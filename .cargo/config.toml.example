@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Template for a LOCAL, machine-specific dependency override. Copy to
+# `.cargo/config.toml` (which is gitignored) and edit the paths:
+#
+#     cp .cargo/config.toml.example .cargo/config.toml
+#
+# ---------------------------------------------------------------------------
+# What this is for
+# ---------------------------------------------------------------------------
+#
+# The GPU stack this workspace builds on is a dependency we sometimes have to
+# FIX rather than merely consume - see `.agents/roadmap/backend-vulkan.md` for
+# the Vulkan staging-memory defect that made that necessary the first time.
+# Cargo has two different mechanisms for that, and they are not
+# interchangeable:
+#
+# * `[patch.crates-io]` in the workspace root `Cargo.toml` - committed, shared,
+#   points at a git URL. This is what CI and a fresh clone get. It changes the
+#   dependency graph, so it belongs in the manifest and in git.
+#
+# * `paths` here - a build-time SOURCE SUBSTITUTION. It needs no change to any
+#   `Cargo.toml`, does not touch `Cargo.lock`, and is meant for exactly one
+#   thing: "I am editing this dependency right now, in a checkout on this
+#   machine". Every rebuild picks up the working tree as it stands, with no
+#   commit, no push, and no `rev` to bump. It takes precedence over the
+#   committed `[patch]` above, so a developer with a local checkout builds
+#   against their edits while everyone else builds against the pinned git rev.
+#
+# Expect cargo to print, on every invocation, a warning that the override
+# "has altered the original list of dependencies". That is inherent to the
+# mechanism, not a sign of a broken setup: a crate's manifest inside its own
+# git repo never lists exactly the dependencies its published form does
+# (dev-dependencies on sibling test crates, version requirements narrowed at
+# publish time). Cargo says the warning may become a hard error one day. If it
+# ever does, the local override moves to a `[patch.crates-io]` table with a
+# `path = ...` here instead - the same table the manifest uses, just pointed at
+# a directory - at the cost of rewriting `Cargo.lock` in the working tree,
+# which `paths` does not do.
+#
+# The override is only applied to packages already in the dependency graph, and
+# the local checkout's version must match the one being replaced (e.g. a
+# `wgpu = "29"` workspace pin needs a 29.x checkout, not trunk). Cargo scans the
+# directory for packages, so listing a workspace ROOT overrides all of its
+# members at once - `wgpu`, `wgpu-core`, `wgpu-hal`, `wgpu-types` and `naga`
+# from one entry.
+#
+# ---------------------------------------------------------------------------
+
+paths = [
+    # A local checkout of the wgpu fork, on a branch whose version matches this
+    # workspace's `wgpu` pin. Delete the entry to build against crates.io (or
+    # against the committed `[patch]` git rev) instead.
+    "/path/to/wgpu",
+    # Only needed if a dependency is being edited that this workspace pulls in
+    # directly rather than through wgpu. gpu-allocator is currently a
+    # transitive dependency of wgpu-hal only, and needs no local override.
+    # "/path/to/gpu-allocator",
+]
