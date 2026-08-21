@@ -208,6 +208,64 @@ pub fn check_conv(n: &NodeProto, at: usize, k: i64, stride: i64, pad: i64) -> Re
     Ok(())
 }
 
+/// [`check_conv`]'s general form: independent per-axis kernel/stride/pad, for
+/// a release whose 2D convs are NOT square-symmetric (CAM++'s `FCM` stem
+/// downsamples frequency only, stride `(2,1)`. `check_conv` cannot express
+/// that - it asserts `strides == [s, s]`).
+pub fn check_conv2d(
+    n: &NodeProto,
+    at: usize,
+    kh: i64,
+    kw: i64,
+    sh: i64,
+    sw: i64,
+    ph: i64,
+    pw: i64,
+) -> Result<(), String> {
+    let want = |name: &str, got: Vec<i64>, want: Vec<i64>| -> Result<(), String> {
+        if got != want {
+            return Err(format!(
+                "import: Conv at node {at} has {name} {got:?}, expected {want:?} for this architecture"
+            ));
+        }
+        Ok(())
+    };
+    want("kernel_shape", read::attr_ints(n, "kernel_shape", &[kh, kw]), vec![kh, kw])?;
+    want("strides", read::attr_ints(n, "strides", &[sh, sw]), vec![sh, sw])?;
+    want("pads", read::attr_ints(n, "pads", &[ph, pw, ph, pw]), vec![ph, pw, ph, pw])?;
+    want("dilations", read::attr_ints(n, "dilations", &[1, 1]), vec![1, 1])?;
+    let g = read::attr_int(n, "group", 1);
+    if g != 1 {
+        return Err(format!("import: Conv at node {at} has group {g}; this walk imports dense convs (group 1)"));
+    }
+    Ok(())
+}
+
+/// [`check_conv`] for a 1D `Conv` (kernel/stride/pad/dilation are each a
+/// single value, not a 2-vector) - CAM++'s D-TDNN is entirely `Conv1d`, some
+/// of it dilated (`check_conv` hardcodes `dilations == [1, 1]` and would
+/// reject every dilated node here as a mismatch, not just report the wrong
+/// shape).
+pub fn check_conv1d(n: &NodeProto, at: usize, k: i64, stride: i64, pad: i64, dilation: i64) -> Result<(), String> {
+    let want = |name: &str, got: Vec<i64>, want: Vec<i64>| -> Result<(), String> {
+        if got != want {
+            return Err(format!(
+                "import: Conv at node {at} has {name} {got:?}, expected {want:?} for this architecture"
+            ));
+        }
+        Ok(())
+    };
+    want("kernel_shape", read::attr_ints(n, "kernel_shape", &[k]), vec![k])?;
+    want("strides", read::attr_ints(n, "strides", &[stride]), vec![stride])?;
+    want("pads", read::attr_ints(n, "pads", &[pad, pad]), vec![pad, pad])?;
+    want("dilations", read::attr_ints(n, "dilations", &[dilation]), vec![dilation])?;
+    let g = read::attr_int(n, "group", 1);
+    if g != 1 {
+        return Err(format!("import: Conv at node {at} has group {g}; this walk imports dense convs (group 1)"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +376,43 @@ mod tests {
         assert!(check_conv(n, 0, 3, 1, 1).is_ok());
         let err = check_conv(n, 0, 3, 2, 1).unwrap_err();
         assert!(err.contains("strides"), "{err}");
+    }
+
+    /// `check_conv2d` is `check_conv`'s general form: it must accept the exact
+    /// geometry AND reject an asymmetric stride swap that `check_conv` cannot
+    /// even express (a `(2,1)` graph checked as `(1,2)`).
+    #[test]
+    fn check_conv2d_accepts_asymmetric_geometry_and_rejects_a_swap() {
+        let m = graph();
+        let g = read::graph(&m).unwrap();
+        let n = &g.node[0];
+        assert!(check_conv2d(n, 0, 3, 3, 1, 1, 1, 1).is_ok());
+        let err = check_conv2d(n, 0, 3, 3, 1, 2, 1, 1).unwrap_err();
+        assert!(err.contains("strides"), "{err}");
+    }
+
+    /// A 1D dilated `Conv` (CAM++'s `CAMLayer.linear_local`, `k=3, dilation=2,
+    /// pad=2`): `check_conv1d` must accept the exact geometry and reject a
+    /// dilation mismatch by name, not just any shape mismatch.
+    #[test]
+    fn check_conv1d_accepts_dilated_geometry_and_rejects_a_dilation_mismatch() {
+        let mut g = GraphBuilder::new("walk1d");
+        g.input_f32("x", &[1, 4, 10]);
+        g.output_f32("y", &[1, 4, 10]);
+        g.init_f32("w", &[4, 4, 3], vec![0.0; 48]);
+        g.add(
+            Node::new("Conv", &["x", "w"], &["y"])
+                .name("conv1d")
+                .attr_ints("kernel_shape", &[3])
+                .attr_ints("strides", &[1])
+                .attr_ints("pads", &[2, 2])
+                .attr_ints("dilations", &[2]),
+        );
+        let m = crate::decode_model(&g.finish()).unwrap();
+        let gr = read::graph(&m).unwrap();
+        let n = &gr.node[0];
+        assert!(check_conv1d(n, 0, 3, 1, 2, 2).is_ok());
+        let err = check_conv1d(n, 0, 3, 1, 2, 1).unwrap_err();
+        assert!(err.contains("dilations"), "{err}");
     }
 }
