@@ -12,9 +12,15 @@ Five chained components, ~19B parameters total:
 
 1. **Global LLM** - a real Qwen3-8B (`hidden=4096, layers=36, heads=32,
    kv_heads=8, head_dim=128, vocab=200000` - the checkpoint's own
-   `qwen_7B/qwen_7B/config.json`, not the smaller published Qwen3-8B preset),
+   `language_model/config.json`, not the smaller published Qwen3-8B preset),
    reused verbatim from `crates/qwen3`. Autoregressive, CFG-guided: one
-   semantic RVQ code per 25 Hz frame.
+   semantic RVQ code per 25 Hz frame. The checkpoint ships a SECOND
+   language-model directory, `qwen_7B/qwen_7B/`, matching the same gross
+   dims but NOT this architecture (`config.json`: `"architectures":
+   ["AbabForCausalLM"]`, `"model_type": "mixtral"`, with per-layer
+   LayerNorm alpha/beta residual-scaling MiniMax's native training
+   checkpoint carries and plain Qwen3 does not) - `language_model/`, not
+   `qwen_7B/qwen_7B/`, is the one this port loads through `crates/qwen3`.
 2. **RVQ depth decoder** (0.65B) - a 4-layer causal transformer that
    autoregressively predicts the 7 residual codebooks per frame from the
    Global LLM's hidden state, and owns the residual-code embedding table.
@@ -61,10 +67,10 @@ vocoder 207 MB, RVQ depth decoder 1.3 GB - `resources/minimax-music3/`,
 gitignored) were fetched and dumped; every `state_dict.load_state_dict(...,
 strict=True)` succeeded on the first try, confirming the tensor names/shapes
 recorded from the checkpoint's real safetensors headers were exactly right.
-Real weights for the DiT (9.7 GB) and the Global LLM (17.2 GB via the
-pre-split `language_model/`, or 18.5 GB via `qwen_7B/` - the pre-split dir
-is simpler and is what those milestones will use, not the manual key-split
-this roadmap's Phase 0 draft assumed) are deferred to their own milestones.
+Real weights for the DiT (9.7 GB) and the Global LLM (17.2 GB, from
+`language_model/` - see Phase 9's own note on why that directory, not the
+repository's other, same-shaped but architecturally different
+`qwen_7B/qwen_7B/`) are deferred to their own milestones.
 
 Measured output shapes (real dims, batch=1): condition encoder
 `(1,5,32768) -> (1,17,2048)`; vocoder `(1,128,6) -> (1,2,3072)`; RVQ depth
@@ -368,6 +374,62 @@ host-staged residual handoff both match `dit::forward` bit-for-bit;
 `shard_cost`-driven `plan_balanced` produces a well-formed partition at
 both `::tiny()` and the real 36-layer config's shape.
 
+## Phase 9: Global LLM
+
+`crates/minimaxmusic3::global_llm` - a real Qwen3-8B, reused VERBATIM from
+`crates/qwen3` (no local reimplementation at all, unlike every other
+component). This module owns only streamed import and the training
+objective this port adds.
+
+A real find mid-milestone: the checkpoint ships TWO differently-shaped
+language-model directories. `qwen_7B/qwen_7B/`'s own `config.json` reads
+`"architectures": ["AbabForCausalLM"]`, `"model_type": "mixtral"`, with
+per-layer LayerNorm alpha/beta residual-scaling constants - MiniMax's
+native training-checkpoint format, NOT reusable through `crates/qwen3`
+despite matching `hidden=4096, layers=36, heads=32, kv_heads=8,
+head_dim=128, vocab=200000` on the surface. `language_model/`'s own
+`config.json` reads `"architectures": ["Qwen3ForCausalLM"]`,
+`"model_type": "qwen3"`, standard fields throughout - a genuine Qwen3
+re-export, the one this port actually loads. An earlier working
+assumption (recorded in this ledger's own Phase 1 entry before this was
+checked) had the two backwards; corrected in place rather than left
+stale. `crates/qwen3::import::hf_source` + `Qwen::new_shard_i8` stream it
+one tensor at a time, quantized to int8 (DP4A) as it goes - int8 is not
+merely smaller-and-nice-to-have for an 8B model on a machine with no
+discrete GPU and ~21 GB usable RAM; it is what makes the model resident
+at all (fp32 would need ~2x the checkpoint's own bf16 size).
+
+Real-weight parity: a single REAL decoder layer (layer 0), streamed via a
+1-layer `model::Shard` (never the whole 36-layer stack), compared against
+`transformers.Qwen3DecoderLayer` loaded with the SAME real weights
+(`tools/goldens/minimaxmusic3_global_llm_dump_reference.py` - no
+`diffusers` PR dependency, plain `transformers>=4.51`, already in
+`requirements.txt`) - the same "real weights, too big to load whole"
+discipline `qwen35_dump_real_layer_reference.py` established for an
+unrelated model in this repo. Cosine 1.000000000, first try, confirming
+both that `language_model/` really is what its `config.json` claims and
+that the streaming import is correct.
+
+The training objective this milestone adds: ordinary next-token
+cross-entropy restricted to audio-code target positions
+(`global_llm::audio_code_batch`, `model::Batch::LmWeighted` - weight 0 on
+every position whose target is still inside the prompt, 1 once the
+target is the first audio-code token and onward), reusing
+`crates/qwen3`'s own already-gradchecked weighted-CE gradient rather than
+a new loss kernel. Proven trainable at `QwenConfig::tiny()` scale (plain
+AdamW, 300 steps, loss collapses to under 10% of its start) - the real
+8B checkpoint is inference-only here (`new_shard_i8` has no backward),
+matching every other real-scale exercise this port records as a
+hardware-bound gap rather than attempting.
+
+Prompt assembly text, the CFG-guided AR sampling loop, and the
+depth-decoder feedback loop are M7 (pipeline glue) scope - this module
+owns only the special-token/offset constants both milestones read from
+one place (`AUDIO_CODE_OFFSET`, `AUDIO_END_TOKEN_ID`, `AUDIO_CFG_TOKEN_ID`,
+the prompt template's structure tokens), confirmed against the reference
+`diffusers` PR's own `MiniMaxMusic3TextEncoderStep`/
+`MiniMaxMusic3SemanticGenerationStep` classes.
+
 ## Not yet done
 
 - [ ] Joint generator+discriminator training against the real vocoder
@@ -377,8 +439,6 @@ both `::tiny()` and the real 36-layer config's shape.
 - [ ] Multi-resolution discriminator (several `(n_fft, hop)` STFT
       settings, summed) - the single-resolution version generalizes
       directly but this has not been exercised
-- [ ] Global LLM: streamed import via `crates/qwen3` + an audio-code
-      cross-entropy training objective
 - [ ] Pipeline: prompt assembly, two-axis CFG (AR logits + DiT
       zero-conditioning), chunk windowing/overlap-splice, vocoder
       crop-and-stitch - one real short end-to-end WAV on this machine
@@ -398,3 +458,8 @@ both `::tiny()` and the real 36-layer config's shape.
   (`dit_shard::DitStage`) - an explicit, documented scope decision
   (matching `ltxv::LtxDit`'s own precedent), not an oversight: this
   crate's real DiT training path is the single-device `dit_train::Trainer`.
+- No real-scale (8B, `language_model/`'s real weights) audio-code CE
+  training run - the real checkpoint is imported int8/inference-only
+  (`Qwen::new_shard_i8` has no backward); the training objective itself is
+  proven correct at `QwenConfig::tiny()` scale only, same hardware-bound
+  reasoning as every other real-scale training gap this ledger records.

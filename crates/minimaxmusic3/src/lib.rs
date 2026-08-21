@@ -36,8 +36,11 @@
 //! Reused as-is rather than reimplemented: `crates/qwen3` for the Global LLM
 //! (a real Qwen3-8B architecture, `hidden=4096, layers=36, heads=32,
 //! kv_heads=8, head_dim=128, vocab=200000` - confirmed against the real
-//! checkpoint's own `config.json`, NOT the smaller published Qwen3-8B's
-//! `vocab=151936` preset), `data::qwen_tokenizer::QwenBpe` for tokenization,
+//! checkpoint's own `language_model/config.json`, NOT the smaller published
+//! Qwen3-8B's `vocab=151936` preset - see `global_llm::import`'s own doc
+//! for why `language_model/` specifically, not the checkpoint's other,
+//! same-shaped but architecturally different `qwen_7B/qwen_7B/` directory),
+//! `data::qwen_tokenizer::QwenBpe` for tokenization,
 //! `audio::conv` (forward AND backward) for every conv/conv-transpose in the
 //! vocoder, `model::block`'s `Bidir`/`rope2d_partial`/`LayerNorm`/`swiglu`/
 //! `kv_expand` Step-builders for the DiT's bidirectional partial-RoPE
@@ -62,9 +65,12 @@
 //! pipeline-parallel sharding (`dit_shard::DitStage` - inference-time
 //! layer-range splitting across devices, no backward through the pipeline;
 //! `dit_train::Trainer` remains this crate's real, single-device DiT
-//! training path). The Global LLM's own wiring, joint
-//! generator+discriminator training, and serving land
-//! component-by-component, one crate module at a time.
+//! training path). The Global LLM (`global_llm`) has streamed real-weight
+//! import (real-layer parity cosine 1.0 against `transformers`) and an
+//! audio-code-restricted training objective (`Batch::LmWeighted`, proven
+//! at `QwenConfig::tiny()` scale) - its own prompt-assembly/AR-sampling
+//! orchestration, joint generator+discriminator training, and serving
+//! land component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
 pub mod config;
@@ -76,6 +82,7 @@ pub mod dit_int8;
 pub mod dit_lora;
 pub mod dit_shard;
 pub mod dit_train;
+pub mod global_llm;
 pub mod lora;
 pub mod train;
 pub mod vocoder;
