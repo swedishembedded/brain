@@ -222,48 +222,122 @@ struct LtxvInstance {
     cache: Option<ltxv::block::GenerationCache>,
 }
 
+fn device_name(device: Device) -> Option<String> {
+    match device {
+        Device::Cpu => Some("cpu".to_string()),
+        Device::Gpu(_) => Some("gpu".to_string()),
+        Device::Npu(_) => None,
+    }
+}
+
+/// The cards a batch of LTX generations may spread across, this instance's
+/// assigned one FIRST.
+///
+/// Reads `ambient_compute_set()` - the same `--device`/`BRAIN_DEVICE`
+/// resolution every other placement decision in this workspace goes through -
+/// so `--device gpu0` really does confine a batch to one card instead of the
+/// pool quietly discovering a second one the operator excluded. A CPU or NPU
+/// assignment yields a one-wide pool: there is no second CPU to spread across,
+/// and this model has no NPU path at all.
+///
+/// The assigned card goes first because [`residency::DevicePool`] offers work
+/// in list order, so a batch of one - the overwhelmingly common shape - runs
+/// exactly where residency placed it and nowhere else.
+fn ltxv_device_pool(assigned: Device) -> residency::DevicePool {
+    let Device::Gpu(mine) = assigned else { return residency::DevicePool::new(vec![assigned]) };
+    let mut gpus: Vec<Device> = gpu_core::devices::ambient_compute_set().gpus.iter().map(|&i| Device::Gpu(i)).collect();
+    if let Some(at) = gpus.iter().position(|&d| d == Device::Gpu(mine)) {
+        gpus.swap(0, at);
+    } else {
+        gpus.insert(0, assigned);
+    }
+    residency::DevicePool::new(gpus)
+}
+
 impl LtxvInstance {
-    fn device_name(&self) -> Option<String> {
-        match self.device {
-            Device::Cpu => Some("cpu".to_string()),
-            Device::Gpu(_) => Some("gpu".to_string()),
-            Device::Npu(_) => None,
+    /// ONE generation, on `device`, under `plan` - the whole body of
+    /// [`Instance::run`], lifted out of `&mut self` so a batch can run
+    /// several of these on several cards at once. It takes nothing but shared
+    /// references, which is what makes that safe rather than merely
+    /// convenient.
+    fn run_on(paths: &ltxv::pipeline::Paths, device: Device, plan: ltxv::devplan::DevicePlan, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        match action {
+            "t2v" => {
+                let mut p = ltxv::caps::gen_params_from(inv)?;
+                p.opts.device = device_name(device);
+                p.opts.devices = plan;
+                crate::resident_llm::on_device(device, || ltxv::caps::generate_on(paths, inv, &p, progress))?
+            }
+            "dfr" => {
+                // DFR needs the two latent-upscaler paths on top of the VAE
+                // `paths` already carries - resolved fresh from the
+                // environment per call, the same "nothing worth caching yet"
+                // reasoning this module's own doc gives for the VAE path.
+                let mut p = ltxv::caps::dfr_params_from(inv)?;
+                p.opts.base.device = device_name(device);
+                p.opts.base.devices = plan;
+                let dfr_paths = ltxv::pipeline::DfrPaths::from_env()?;
+                crate::resident_llm::on_device(device, || ltxv::caps::dfr_on(&dfr_paths, inv, &p, progress))?
+            }
+            other => Err(format!("ltxv: unknown action '{other}'")),
         }
     }
 }
 
 impl Instance for LtxvInstance {
+    /// A single request gets the whole machine: [`ltxv::devplan::DevicePlan::
+    /// Auto`] runs this generation's two classifier-free-guidance forwards on
+    /// two cards concurrently when the machine has two (bit-identical to
+    /// running them one after another - see `crates/ltxv/tests/
+    /// cfg_parallel.rs`).
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        match action {
-            "t2v" => {
-                let mut p = ltxv::caps::gen_params_from(inv)?;
-                p.opts.device = self.device_name();
-                crate::resident_llm::on_device(self.device, || ltxv::caps::generate_on(&self.paths, inv, &p, progress))?
-            }
-            "dfr" => {
-                // DFR needs the two latent-upscaler paths on top of the VAE
-                // `self.paths` already carries - resolved fresh from the
-                // environment per call, the same "nothing worth caching yet"
-                // reasoning this module's own doc gives for the VAE path.
-                let mut p = ltxv::caps::dfr_params_from(inv)?;
-                p.opts.base.device = self.device_name();
-                let dfr_paths = ltxv::pipeline::DfrPaths::from_env()?;
-                crate::resident_llm::on_device(self.device, || ltxv::caps::dfr_on(&dfr_paths, inv, &p, progress))?
-            }
-            other => Err(format!("ltxv: unknown action '{other}'")),
-        }
+        Self::run_on(&self.paths, self.device, ltxv::devplan::DevicePlan::Auto, action, inv, progress)
     }
 
-    /// Sequential, deliberately: a "batch" here is N independent generations
-    /// run one after another, since nothing in this pipeline batches a
-    /// denoise loop across prompts. What they DO share - and what makes the
-    /// second and later ones cheap rather than merely correct - is the
-    /// checkpoint's block-weight cache: request 1 populates it, every later
-    /// request in the batch starts warm on its first denoise step.
-    /// Per-request cancellation still works: each job's own `inv.cancel` is
-    /// polled inside its own denoise loop.
+    /// **Concurrent, one generation per card.** A "batch" here is N
+    /// independent generations - nothing in this pipeline batches a denoise
+    /// loop across prompts, since each request has its own latent, its own
+    /// schedule and its own step count - so the throughput win is not
+    /// batching, it is running them on different cards at the same time.
+    ///
+    /// Two things make that safe and worth doing:
+    ///
+    /// * **The weight cache is shared and per-checkpoint.** N concurrent
+    ///   generations against one checkpoint pay the cold-disk read ONCE
+    ///   between them (`ltxv::weightcache`: an `RwLock` over the slot table
+    ///   handing out `Arc`s, with no lock held across a device upload), so
+    ///   the second card starts warm on whatever the first has already
+    ///   quantized instead of re-reading 23.6 GB of its own.
+    /// * **One request per card, never two.** A real generation's DiT
+    ///   forward was measured at 16.26 GiB peak on a 24 GiB P40 at the 1080p
+    ///   token count and its VAE decode at 16.18 GiB at 720p; two on one card
+    ///   is a hard out-of-memory abort, not a slowdown. That ceiling is
+    ///   [`residency::DevicePool`]'s whole contract, and it is gated there
+    ///   rather than assumed here.
+    ///
+    /// Each concurrent request therefore runs [`ltxv::devplan::DevicePlan::
+    /// Single`] on its own card - the two-card CFG split of [`Instance::run`]
+    /// would have both requests reaching for both cards. One request in the
+    /// batch, or one card in the pool, falls back to exactly the old serial
+    /// path with `Auto` placement, so nothing about the common shape changed.
+    ///
+    /// Per-request cancellation still works unchanged: each job's own
+    /// `inv.cancel` is polled inside its own denoise loop, on its own thread.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
+        let pool = ltxv_device_pool(self.device);
+        if pool.width() < 2 || invs.len() < 2 {
+            return invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect();
+        }
+        // Each generation's own `ltxv::pipeline::generate` logs the placement
+        // it resolved (`device placement resolved`, `--trace-ltxv`), so what
+        // ran where is already visible per request; this file adds no second,
+        // possibly-disagreeing account of it.
+        let paths = &self.paths;
+        pool.run_all(
+            invs.len(),
+            |i, dev, emit| LtxvInstance::run_on(paths, dev, ltxv::devplan::DevicePlan::Single, action, &invs[i], &mut |p| emit(p)),
+            |i, p| progress(i, p),
+        )
     }
 
     /// The block-weight cache's own hit/miss/eviction counters and current
@@ -496,6 +570,115 @@ mod tests {
         assert_eq!(misses_b, misses_a, "generation 2 must not miss on a single block - it must start warm from its very first layer");
         assert!(hits_b > hits_a, "generation 2 must actually have read the cache");
         assert!(secs_b < secs_a, "generation 2 must be faster than the cold one: {secs_b:.1} s vs {secs_a:.1} s");
+    }
+
+    /// The pool a batch spreads across must (a) start at the card residency
+    /// assigned, so a one-request batch runs exactly where it was placed, and
+    /// (b) never contain a card `--device`/`BRAIN_DEVICE` excluded, which is
+    /// why it reads `ambient_compute_set()` rather than the raw card list.
+    /// A CPU assignment is one-wide: there is no second CPU to spread across.
+    #[test]
+    fn the_batch_pool_starts_at_the_assigned_card_and_stays_inside_the_schedulable_set() {
+        let allowed = &gpu_core::devices::ambient_compute_set().gpus;
+        assert_eq!(ltxv_device_pool(Device::Cpu).devices(), &[Device::Cpu], "a CPU assignment has no pool to spread across");
+
+        for &g in allowed {
+            let pool = ltxv_device_pool(Device::Gpu(g));
+            assert_eq!(pool.devices().first(), Some(&Device::Gpu(g)), "the assigned card must be offered work first");
+            assert_eq!(pool.width(), allowed.len(), "the pool is exactly the schedulable set");
+            for d in pool.devices() {
+                let Device::Gpu(i) = d else { panic!("a GPU pool must hold only GPUs, got {d:?}") };
+                assert!(allowed.contains(i), "gpu{i} is outside the schedulable set {allowed:?}");
+            }
+        }
+        // An assignment outside the schedulable set (a stale placement, a
+        // restriction applied after activation) must still be able to run:
+        // the pool prepends it rather than silently relocating the request.
+        let odd = Device::Gpu(u32::from(u16::MAX));
+        assert_eq!(ltxv_device_pool(odd).devices().first(), Some(&odd));
+    }
+
+    /// **N concurrent real generations, one per card.** The end-to-end proof
+    /// for concurrent admission: four independent requests with four
+    /// different prompts against ONE checkpoint must (a) all produce sane
+    /// clips, (b) share the checkpoint's block-weight cache so the cold-disk
+    /// cost is paid once rather than four times, and (c) finish in materially
+    /// less than four times the single-request wall clock.
+    ///
+    /// The comparison is against a MEASURED serial baseline in the same
+    /// process, warm cache on both sides, not against an estimate: the first
+    /// generation pays a ~250 s cold read that would otherwise be counted as
+    /// "concurrency" and inflate the ratio.
+    ///
+    /// The ratio floor is deliberately loose. Two cards cannot do better than
+    /// 2x, and a real run gives back some of that to the host-side stages a
+    /// generation still runs single-threaded (adaLN, RoPE tables, VAE
+    /// decode). Gating "well under Nx" is the claim worth making; gating a
+    /// specific speedup would be gating this box's CPU.
+    ///
+    /// `#[ignore]`d - real multi-minute generations. Run explicitly:
+    ///
+    /// ```text
+    /// BRAIN_LTXV_VAE=... BRAIN_LTXV_DIT=... \
+    ///   cargo test --release -p brain-cli --bins -- --ignored --nocapture \
+    ///   concurrent_generations_share
+    /// ```
+    #[test]
+    #[ignore = "real multi-minute generations against real LTX-2.5 checkpoints"]
+    fn concurrent_generations_share_one_cache_and_overlap_across_the_cards() {
+        let Some(r) = LtxvResident::from_env() else {
+            eprintln!("skipped: set BRAIN_LTXV_VAE (and BRAIN_LTXV_DIT) to real LTX-2.5 checkpoints");
+            return;
+        };
+        assert!(r.paths.dit.is_some(), "this harness needs BRAIN_LTXV_DIT: it is about the real checkpoint");
+        let width = ltxv_device_pool(Device::Gpu(0)).width();
+        eprintln!("pool width: {width}");
+        let key = InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string());
+        let mut inst = r.activate(&key, Device::Gpu(0)).expect("activate");
+
+        let request = |prompt: &str| {
+            Invocation::new()
+                .set("prompt", json!(prompt))
+                .set("dit_config", json!("ltx25_22b"))
+                .set("frames", json!(9))
+                .set("width", json!(64))
+                .set("height", json!(64))
+                // Guidance 1.0: ONE forward per step, so this measures
+                // request-level concurrency and not the two-card CFG split,
+                // which is a different claim gated elsewhere
+                // (`ltxv/tests/cfg_parallel.rs`).
+                .set("guidance", json!(1.0))
+        };
+        let prompts = ["a red kite over a grey harbour", "a slow pan across a snowbound pine forest", "rain on a neon street, reflections in the puddles", "a paper boat drifting down a rain gutter"];
+        let metric = |inst: &dyn Instance, name: &str| inst.metrics().into_iter().find(|(k, _)| k == name).and_then(|(_, v)| v.as_u64()).unwrap_or(0);
+        let frames_of = |o: &capability::Outcome| o.blobs.values().map(|b| b.bytes.len()).sum::<usize>();
+
+        // Warm the shared cache, and get the per-request serial baseline off
+        // an already-warm run.
+        inst.run("t2v", &request(prompts[0]), &mut |_| {}).expect("warm-up generation");
+        let t0 = std::time::Instant::now();
+        inst.run("t2v", &request(prompts[0]), &mut |_| {}).expect("baseline generation");
+        let one_secs = t0.elapsed().as_secs_f64();
+        let misses_before = metric(inst.as_ref(), "ltxv_block_cache_misses");
+
+        for n in [2usize, 4] {
+            let invs: Vec<Invocation> = prompts.iter().take(n).map(|p| request(p)).collect();
+            let t = std::time::Instant::now();
+            let out = inst.run_batch("t2v", &invs, &mut |_, _| {});
+            let secs = t.elapsed().as_secs_f64();
+            assert_eq!(out.len(), n);
+            for (i, r) in out.iter().enumerate() {
+                let o = r.as_ref().unwrap_or_else(|e| panic!("request {i} of {n} failed: {e}"));
+                assert!(frames_of(o) > 0, "request {i} of {n} produced no frame bytes");
+            }
+            let serial = one_secs * n as f64;
+            let ratio = secs / one_secs;
+            println!("{n} concurrent: {secs:.1} s   vs {serial:.1} s serial ({ratio:.2}x the single-request cost, ideal {:.2}x)", (n as f64 / width.min(n) as f64));
+            assert_eq!(metric(inst.as_ref(), "ltxv_block_cache_misses"), misses_before, "concurrent requests must share the warm cache, not re-read the checkpoint each");
+            if width >= 2 {
+                assert!(ratio < n as f64 * 0.8, "{n} concurrent requests took {ratio:.2}x the single-request cost - no material overlap across {width} cards");
+            }
+        }
     }
 
     #[test]

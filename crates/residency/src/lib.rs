@@ -20,6 +20,7 @@
 pub mod admission;
 pub mod bridge;
 pub mod budget;
+pub mod devpool;
 pub mod executor;
 pub mod jobs;
 pub mod log;
@@ -31,6 +32,7 @@ pub mod place;
 pub mod scheduler;
 pub mod supply;
 
+pub use devpool::DevicePool;
 pub use executor::{Executor, InFlightJob, Job};
 pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};
 pub use model::{Instance, ResidentModel};
