@@ -433,6 +433,17 @@ struct DeviceShared {
     /// "wedged submit" when the driver actually dropped the device out from
     /// under us.
     device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether a `Queue::write_buffer` has happened with no submission since.
+    ///
+    /// `write_buffer` does not talk to the GPU: wgpu copies the bytes into a
+    /// staging buffer it allocates for the call and records a copy into its
+    /// pending-writes encoder. Nothing reaches the device - and no staging
+    /// buffer can be reclaimed - until a `queue.submit` carries that encoder.
+    /// So `flush` has to know that uploads are outstanding even when no
+    /// DISPATCH is; see [`WgpuBackend::flush_inner`]. On `DeviceShared` rather
+    /// than on the handle because the queue those writes are pending on is
+    /// shared, so a flush through any handle must submit them.
+    writes_pending: std::sync::atomic::AtomicBool,
     /// `wgpu::AdapterInfo::vendor` (PCI vendor ID, e.g. `0x8086` = Intel).
     /// Read once at adapter query time and carried unchanged through
     /// `new_like` (same physical device, same vendor). Exists solely to gate
@@ -558,6 +569,7 @@ impl DeviceShared {
             #[cfg(not(target_arch = "wasm32"))]
             gpu_profile,
             device_lost,
+            writes_pending: std::sync::atomic::AtomicBool::new(false),
             vendor_id,
             faulted,
         }
@@ -1335,8 +1347,30 @@ impl WgpuBackend {
 
     /// [`Self::flush`] body, with the device's io lock already held.
     fn flush_inner(&self) {
+        use std::sync::atomic::Ordering::AcqRel;
         let steps: Vec<WgpuStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        // Every path below ends in a `queue.submit`, which carries wgpu's
+        // pending-writes encoder along with the dispatches, so any outstanding
+        // host write is submitted by it. Claim the flag up front either way.
+        let writes_pending = self.shared.writes_pending.swap(false, AcqRel);
         if steps.is_empty() {
+            // No dispatches - but uploads are work too, and unsubmitted ones
+            // are not free. `Queue::write_buffer` only copies into a staging
+            // buffer wgpu allocates for the call and records a copy; nothing
+            // reaches the device, and no staging buffer can be reclaimed,
+            // until a submission carries it. Returning early here meant an
+            // upload-only phase - a model load, this repo's largest upload
+            // workload by far - never submitted at all, so it held every
+            // staging buffer it had ever allocated live simultaneously, and
+            // the driver held the pinned host pages behind each of them.
+            // Measured through `crates/gpu-core/tests/vram_overhead.rs` with
+            // the Vulkan staging allocator traced underneath: all 1536 staging
+            // buffers of a 1 GiB chunked upload were created before the first
+            // was released.
+            if writes_pending {
+                self.queue().submit(None);
+                self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1739,6 +1773,7 @@ impl WgpuBackend {
         let _io = self.shared.io.lock().unwrap_or_else(|e| e.into_inner());
         self.flush_inner();
         self.queue().write_buffer(buf, 0, bytemuck::cast_slice(data));
+        self.shared.writes_pending.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// [`Self::write`] at a byte offset of `offset_words * 4` — see the
@@ -1748,6 +1783,7 @@ impl WgpuBackend {
         let _io = self.shared.io.lock().unwrap_or_else(|e| e.into_inner());
         self.flush_inner();
         self.queue().write_buffer(buf, offset_words * 4, bytemuck::cast_slice(data));
+        self.shared.writes_pending.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Block until all submitted GPU work has completed, letting wgpu reclaim the
