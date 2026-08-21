@@ -61,7 +61,8 @@ them all - `s3dit`, `fastvlm`, `qwen3vl`, `sam1`, `sam2`, `scrfd`, `arcface`,
 `vqgan`, `codeformer`, `rrdbnet`, `clip`, `t5encoder`, `sdxlunet`,
 `controlnet`, `pulid`, `instantid`, `autoencoderkl`, `deepseek2ocr`,
 `nemotronasr`, `qwen3asr`, `mimi`, `ecapatdnn`, `chronos2`, `fincast`,
-`kronos`, `genieredux`, ...) is reached the same uniform way.
+`kronos`, `minimaxmusic3`, `genieredux`, ...) is reached the same uniform
+way.
 
 ## Infrastructure verbs (unchanged, not per-architecture)
 
