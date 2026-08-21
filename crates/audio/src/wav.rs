@@ -88,27 +88,7 @@ pub fn read(path: impl AsRef<Path>) -> io::Result<Wav> {
 
 /// Encode mono f32 samples (clamped to [-1,1]) as a 16-bit PCM WAV byte buffer.
 pub fn encode(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-    let data_len = samples.len() * 2;
-    let mut out = Vec::with_capacity(44 + data_len);
-    let byte_rate = sample_rate * 2;
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&byte_rate.to_le_bytes());
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
-    out.extend_from_slice(&16u16.to_le_bytes()); // bits
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&(data_len as u32).to_le_bytes());
-    for &s in samples {
-        let v = (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    out
+    encode_multi(&[samples], sample_rate)
 }
 
 /// Write mono f32 samples as a 16-bit PCM WAV file.
@@ -116,4 +96,96 @@ pub fn write(path: impl AsRef<Path>, samples: &[f32], sample_rate: u32) -> io::R
     let bytes = encode(samples, sample_rate);
     let mut f = std::fs::File::create(path)?;
     f.write_all(&bytes)
+}
+
+/// Encode multi-channel f32 samples as an interleaved 16-bit PCM WAV byte
+/// buffer. `channels` holds one contiguous, equal-length slice per channel
+/// (planar - e.g. a vocoder's own `[channels, samples]` output row-major,
+/// no interleaving needed from the caller); `channels.len()` becomes the
+/// WAV's channel count (2 for the stereo vocoders this exists for, but not
+/// hardcoded to 2 - a mono `encode` is just `encode_multi(&[samples], ...)`).
+pub fn encode_multi(channels: &[&[f32]], sample_rate: u32) -> Vec<u8> {
+    assert!(!channels.is_empty(), "wav::encode_multi: at least one channel is required");
+    let n_channels = channels.len();
+    let frames = channels[0].len();
+    for c in channels {
+        assert_eq!(c.len(), frames, "wav::encode_multi: every channel must have the same length");
+    }
+    let block_align = 2 * n_channels as u32;
+    let data_len = frames * n_channels * 2;
+    let mut out = Vec::with_capacity(44 + data_len);
+    let byte_rate = sample_rate * block_align;
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&(n_channels as u16).to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&(block_align as u16).to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data_len as u32).to_le_bytes());
+    for f in 0..frames {
+        for c in channels {
+            let v = (c[f].clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Write multi-channel f32 samples ([`encode_multi`]'s own planar layout)
+/// as an interleaved 16-bit PCM WAV file.
+pub fn write_multi(path: impl AsRef<Path>, channels: &[&[f32]], sample_rate: u32) -> io::Result<()> {
+    let bytes = encode_multi(channels, sample_rate);
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_encode_is_unchanged_by_the_encode_multi_refactor() {
+        let samples = [0.0f32, 0.5, -0.5, 1.0, -1.0];
+        let bytes = encode(&samples, 44100);
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(u16le(&bytes[22..24]), 1, "channel count");
+        assert_eq!(u32le(&bytes[24..28]), 44100, "sample rate");
+        assert_eq!(u16le(&bytes[32..34]), 2, "block align");
+        let parsed = parse(&bytes).unwrap();
+        assert_eq!(parsed.sample_rate, 44100);
+        assert_eq!(parsed.samples.len(), samples.len());
+    }
+
+    #[test]
+    fn encode_multi_interleaves_channels_in_frame_order() {
+        let left = [1.0f32, -1.0, 0.0];
+        let right = [-1.0f32, 1.0, 0.0];
+        let bytes = encode_multi(&[&left, &right], 8000);
+        assert_eq!(u16le(&bytes[22..24]), 2, "channel count");
+        assert_eq!(u16le(&bytes[32..34]), 4, "block align (2 channels * 2 bytes)");
+        let data = &bytes[44..];
+        // Frame 0: left=1.0 -> 32767, right=-1.0 -> -32767.
+        assert_eq!(i16::from_le_bytes([data[0], data[1]]), 32767);
+        assert_eq!(i16::from_le_bytes([data[2], data[3]]), -32767);
+        // Frame 1: left=-1.0 -> -32767, right=1.0 -> 32767.
+        assert_eq!(i16::from_le_bytes([data[4], data[5]]), -32767);
+        assert_eq!(i16::from_le_bytes([data[6], data[7]]), 32767);
+        let parsed = parse(&bytes).unwrap();
+        assert_eq!(parsed.samples.len(), 3, "3 frames regardless of channel count");
+    }
+
+    #[test]
+    #[should_panic(expected = "same length")]
+    fn encode_multi_rejects_mismatched_channel_lengths() {
+        let left = [0.0f32, 0.0];
+        let right = [0.0f32];
+        encode_multi(&[&left, &right], 8000);
+    }
 }
