@@ -106,6 +106,28 @@ pub fn layernorm_rows_with_stats(
     (y, mean, inv)
 }
 
+/// `erf` via Abramowitz & Stegun 7.1.26 (`|err| < 1.5e-7`) - the same
+/// approximation `crates/kernels/wgsl/gelu_erf.wgsl` uses, so host callers
+/// that skip the device (a one-shot forward too small to justify a round
+/// trip) stay numerically consistent with the kernel they would otherwise
+/// dispatch. Before this, the identical formula existed independently in
+/// `mimi`, `fastvlm` and `gelu_erf.wgsl` itself - one more copy any of those
+/// could drift from unnoticed.
+pub fn erf(x: f32) -> f32 {
+    let s = x.signum();
+    let ax = x.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * ax);
+    let poly = ((((1.061_405_4 * t - 1.453_152) * t + 1.421_413_7) * t - 0.284_496_74) * t + 0.254_829_6) * t;
+    s * (1.0 - poly * (-ax * ax).exp())
+}
+
+/// Exact (erf) GELU, matching `torch.nn.GELU()`'s default
+/// (`approximate='none'`) / `F.gelu`'s default - as opposed to `model::block`'s
+/// dispatched `gelu.wgsl`, which is the GPT-2 tanh approximation.
+pub fn gelu_exact(x: f32) -> f32 {
+    0.5 * x * (1.0 + erf(x * std::f32::consts::FRAC_1_SQRT_2))
+}
+
 /// SiLU / swish: `x * sigmoid(x)`.
 #[inline]
 pub fn silu(x: f32) -> f32 {
@@ -397,6 +419,27 @@ mod tests {
         let got = rmsnorm_rows(&x, &g, rows, d, eps);
         for (i, (a, b)) in got.iter().zip(&want).enumerate() {
             assert!((a - b).abs() < 1e-5, "element {i}: host {a} vs wgsl {b}");
+        }
+    }
+
+    /// [`gelu_exact`] must match `gelu_erf.wgsl`, not just its own formula -
+    /// the whole point of centralising this is that host callers stay
+    /// consistent with the kernel they are standing in for.
+    #[test]
+    fn gelu_exact_matches_the_wgsl_kernel() {
+        let mut r = Lcg::new(13);
+        let x: Vec<f32> = (0..256).map(|_| r.scaled(6.0)).collect();
+
+        let gpu = gpu_core::Gpu::new_cpu(&[("gelu_erf", kernels::GELU_ERF)]);
+        let xb = gpu.storage_init("x", &x);
+        let ob = gpu.storage(x.len() as u64);
+        let step = gpu.step(0, &[&xb, &ob], &[x.len() as u32], x.len() as u32);
+        gpu.submit(&[], &[step]);
+        let want = gpu.read(&ob, x.len());
+
+        for (i, (&v, &w)) in x.iter().zip(&want).enumerate() {
+            let got = gelu_exact(v);
+            assert!((got - w).abs() < 1e-6, "element {i} (x={v}): host {got} vs wgsl {w}");
         }
     }
 

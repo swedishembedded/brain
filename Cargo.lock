@@ -1654,15 +1654,9 @@ name = "brain-s3tokenizer"
 version = "1.0.0"
 dependencies = [
  "brain-audio",
- "brain-backend-cpu",
- "brain-checkpoint",
- "brain-data",
- "brain-gpu-core",
- "brain-kernels",
  "brain-model",
  "brain-onnx",
  "brain-testutil",
- "serde_json",
 ]
 
 [[package]]

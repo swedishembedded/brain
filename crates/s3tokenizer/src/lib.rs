@@ -24,11 +24,22 @@
 //! ONNX-only upstream releases. Imported via `crates/onnx`'s
 //! coverage-checked `walk`.
 //!
-//! Status: architecture registered (`crates/arch`), name reserved. Import,
-//! forward, and the exact-token-id parity gate are not yet implemented.
+//! Status: **v2 done** - `speech_tokenizer_v2.onnx` import
+//! ([`import::import_s3tokenizer`]) and forward ([`model::forward`]) are
+//! implemented and gated by exact-integer-match parity against a real ONNX
+//! reference dump (`crates/s3tokenizer/tests/s3tokenizer_parity.rs`). **v3 is
+//! a deliberate, recorded gap**: `speech_tokenizer_v3.onnx`'s 12-layer MinMo
+//! encoder is a distinct architecture (not just `n_audio_layer: 12` on this
+//! one - CosyVoice 3's own release notes describe a different encoder
+//! backbone), and has not been read, imported or config-modeled here. Adding
+//! it is a follow-up milestone, not a config flag on `S3TokenizerConfig::v2`.
 //!
 //! Swedish Embedded AB implements solutions for from-scratch, dependency-light
 //! neural network inference on constrained and embedded targets for its
 //! clients. If your team needs expertise in porting speech/audio models to a
 //! from-scratch GPU/CPU engine, you can procure our services by sending an
 //! email to info@swedishembedded.com.
+
+pub mod config;
+pub mod import;
+pub mod model;

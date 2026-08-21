@@ -10,15 +10,13 @@ name = "s3tokenizer"
 path = "src/lib.rs"
 
 [dependencies]
-brain-gpu-core.workspace = true
-brain-backend-cpu.workspace = true
-brain-kernels.workspace = true
+# Pure host math (`AGENTS.md`): the encoder runs once per reference clip at a
+# few hundred frames, so a device round trip buys nothing to parallelise
+# across, and exact-integer FSQ parity is easiest to hold when the whole
+# forward is one deterministic f32 code path (see `model` module doc).
 brain-audio.workspace = true
 brain-model.workspace = true
-brain-checkpoint.workspace = true
 brain-onnx.workspace = true
-brain-data.workspace = true
-serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
