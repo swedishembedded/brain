@@ -42,28 +42,37 @@
 //! consumed and for the full root-cause write-up it points at.
 //! `--device vulkan` is no longer needed to avoid the doubling.
 //!
-//! **It is not free, and this file is why we know.** The upload-throughput
-//! probes below (added with the fix, precisely so the cost side could not be
-//! assumed) measure host-staged uploads on this card at roughly HALF the
-//! throughput of the old VRAM-staged ones - 0.43 vs 1.16 GB/s for 1 GiB at
-//! the 4 MiB chunk size real weight upload uses, on an idle box, and stable
-//! at 0.4-0.55 GB/s across five runs and every granularity tried.
+//! **It was not free, and this file is why we know.** The upload-throughput
+//! probes below were added with the placement fix, precisely so the cost side
+//! could not be assumed - and they immediately found that host-staged uploads
+//! ran at roughly HALF the old VRAM-staged ones (0.43 vs 1.16 GB/s for 1 GiB
+//! at the 4 MiB chunk size real weight upload uses). Two causes, both since
+//! fixed, and both found by measuring rather than reasoning:
 //!
-//! The cause is NOT settled. The obvious candidate was volume of live
-//! staging: `wgpu_core` allocates a fresh staging buffer per `write_buffer`
-//! and holds every one of them until the next submission, so uploading 1 GiB
-//! means 1 GiB of staging live at once, which in host memory is 1 GiB the
-//! driver must page-pin per upload where the same thing in VRAM was nearly
-//! free. The `ChunkedFlushed` probe tests that directly by submitting after
-//! every chunk, bounding live staging to one chunk - and it does NOT recover
-//! the throughput. (That probe pays 256 submit+fence round trips of its own,
-//! so it is inconclusive rather than a clean refutation.) Meanwhile the
-//! native Vulkan backend asks for the same memory properties and gets the
-//! same memory type, yet uploads several times faster, which points at how
-//! the upload is issued - one reused, once-mapped staging buffer versus a
-//! fresh allocate/map/unmap per write - rather than at where the memory
-//! lives. Read all four throughput rows together before drawing a
-//! conclusion; the roadmap ledger has the full table.
+//! 1. **Host memory is expensive to ALLOCATE, and device memory is not.**
+//!    `vkAllocateMemory` from a device-local heap hands back an address range
+//!    the driver already owns - ~4.8 ms for 256 MiB on this card, and flat in
+//!    the size. From a host heap it has to commit and pin the pages, at ~127
+//!    ms for 64 MiB and ~545 ms for 256 MiB: linear, and about 0.5 GB/s,
+//!    which is slower than the upload those pages exist to carry. With a
+//!    fresh allocation behind every `write_buffer`, pinning rather than
+//!    copying became the whole cost. `wgpu-hal` now recycles upload staging
+//!    buffers instead of allocating one per write.
+//! 2. **These probes were not submitting the upload at all.** `write_buffer`
+//!    only copies into a staging buffer and records a copy; nothing reaches
+//!    the device until a `queue.submit`, and `backend-wgpu`'s `flush` used to
+//!    return early when no DISPATCH was pending, treating uploads as not
+//!    being work. Tracing the Vulkan staging allocator underneath this file
+//!    showed all 1536 staging buffers of a 1 GiB chunked upload created
+//!    before the first was released - one unbroken run of allocations, then
+//!    one unbroken run of frees at teardown. See
+//!    `crates/backend-wgpu/tests/upload_flush.rs`, which pins the contract.
+//!
+//! With both fixed, on the same card: 4.84 GB/s in 4 MiB chunks, 5.71 GB/s in
+//! 64 MiB chunks, 3.59 GB/s in one write - against 1.11-1.18 GB/s for the
+//! original VRAM-staged path. So the placement fix is no longer a trade: it
+//! costs half the VRAM AND uploads several times faster. The roadmap ledger
+//! has the full before/during/after table.
 //!
 //! Six probes, each isolating one candidate cause:
 //!   1. `storage_init` (the exact path model weight import takes) at two sizes
