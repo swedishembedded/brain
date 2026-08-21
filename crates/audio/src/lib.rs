@@ -18,6 +18,7 @@
 pub mod asr_caps;
 pub mod asr_frontend;
 pub mod conv;
+pub mod istft;
 pub mod mel;
 pub mod snake;
 pub mod wav;
