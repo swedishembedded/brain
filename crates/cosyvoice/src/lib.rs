@@ -45,11 +45,25 @@
 //! config change with no code change, recorded here as an unreachable gap,
 //! not claimed as support.
 //!
-//! Status: architecture registered (`crates/arch`), name reserved. Import,
-//! forward, training, and the serving contract are not yet implemented.
+//! Status: the speech-token LM (`Qwen2LM`, CosyVoice 2 only - see
+//! [`llm`]/[`config`]/[`llm_import`]) is implemented: import from the real
+//! `llm.pt`, prompt assembly, and autoregressive generation with
+//! `ras_sampling` ([`sampling`]). Forward parity against real-weight goldens
+//! (`testdata/golden/cosyvoice/llm_real_*`) is proven at the prefill
+//! hidden-state and logits rungs; exact AR-token reproduction is a
+//! documented, honest gap (the reference sampler draws from torch's own RNG,
+//! which this port does not reproduce bit-for-bit - see [`sampling`]'s module
+//! doc). CosyVoice 3's `CosyVoice3LM` is a deliberate follow-up, not
+//! implemented. The flow decoder and HiFT vocoder do not exist yet, so the
+//! pipeline as a whole is **still not servable end-to-end**.
 //!
 //! Swedish Embedded AB implements solutions for from-scratch, dependency-light
 //! neural network inference on constrained and embedded targets for its
 //! clients. If your team needs expertise in porting speech/audio models to a
 //! from-scratch GPU/CPU engine, you can procure our services by sending an
 //! email to info@swedishembedded.com.
+
+pub mod config;
+pub mod llm;
+pub mod llm_import;
+pub mod sampling;
