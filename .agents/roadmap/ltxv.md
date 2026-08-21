@@ -4222,3 +4222,174 @@ was possible at all at a shape whose whole-clip decode does not fit.
 * **Score clips with `blowup_ratio`, not by eye.** It is one number, it is
   resolution-independent, and it is the only thing in this crate that sees
   this class of defect.
+
+### Phase 20 - the prompt starts reaching the picture
+
+Plain text-to-video ignored its prompt. Not "loosely followed" - ignored:
+two unrelated captions, everything else identical, decoded to the same
+picture of the same person. Reported against the real stack (real Q8_0 22B
+DiT, real Gemma-4 12B Q8_0 encoder, real conv VAE) and reproduced here on the
+same box, two Tesla P40s.
+
+The defect was never in this crate's conditioning plumbing. It was in
+`crates/gemma4`, in the one module of the text path that had been built from
+a checkpoint header instead of from source.
+
+#### 0 - the observable, and what it ruled out first
+
+The report framed this as a divergence between the image-conditioned path
+(`frozen: Some(..)`, which appeared to follow prompts) and the plain one
+(`frozen: None`, which did not). Reading `generate`/`denoise_stage`/`denoise`
+refutes that outright: `ctx_cond`/`ctx_uncond`/`context_valid`/`context_len`
+are built ONCE in `generate`, before the stage plan exists, and reach
+`StepInputs` through the same fields whatever `o.start_frame` is. Image
+conditioning changes `latent`, `timesteps`, `positions`, `keyframes_mask` and
+`denoise_t_count`; it cannot change the text context, and no `frozen.is_some()`
+test guards anything on the context path. `context_stub` is likewise selected
+only by `paths.text_encoder.is_none()`, which is a checkpoint being absent,
+not a start frame.
+
+So the question became "does the context discriminate between prompts AT
+ALL", and that is answerable without a GPU, because `crate::text_cache`
+already writes every encoded context to disk. Over the session's cached
+contexts (`[1024, 4096]` each, 40-ish valid rows):
+
+* every pair of DISTINCT caption token rows within one prompt sat at cosine
+  **0.9963**;
+* the mean row of *"a bright red vintage convertible car driving fast through
+  an empty desert highway at sunset"* and the mean row of *"a slow pan across
+  a snowbound pine forest"* sat at cosine **0.99984** of each other;
+* `||mean row||` was **975** against a mean residual of **49**.
+
+Every row of every prompt's context was the same vector plus 5% of noise.
+The DiT's cross-attention was being handed a constant, so it sampled its
+unconditional prior - which is exactly what "a generic cinematic drama scene
+that has nothing to do with the prompt" is.
+
+Confirmed end to end before touching anything: the two prompts above at
+512x512 / 25 frames / seed 7 / guidance 1.0, no image conditioning, produced
+the same close-up of the same woman's face, whole-clip mean absolute pixel
+delta **6.67** of 255.
+
+#### 1 - the root cause, and how it got in
+
+`gemma4::AggregateEmbed::forward` - LTX's own
+`text_embedding_projection.video_aggregate_embed`, `Linear(3840*49 -> 4096)` -
+concatenated the 49 raw hidden states per token and applied the linear.
+
+`tools/goldens/gemma4_dump_reference.py` said in as many words why: "there is
+no reference implementation to import ... This is a documented judgment call,
+not a confirmed detail: the real module's internal structure (whether it has
+a bias, an extra norm before the linear, etc.) is not derivable from a
+tensor-name/shape header alone". The premise was false. The module is
+`ltx_core.text_encoders.gemma.feature_extractor.FeatureExtractorV2`, it is in
+`resources/ltxv/source/`, and it does three things the guess did not:
+
+1. **per-token, per-STATE RMS normalization** over the hidden axis
+   (`norm_and_concat_per_token_rms`: `x * rsqrt(mean(x^2) + 1e-6)`, no
+   learned weight, no mean subtraction, independently for each of the 49
+   states);
+2. **an interleaved column order** - `torch.stack(hidden_states, dim=-1)`
+   gives `[T, D, L]` and `.reshape(B, T, D*L)` flattens it `d`-major,
+   `l`-minor, so input column `d*n_states + k` is state `k`'s coordinate
+   `d`. The port had `k*hidden + d`: `n_states` contiguous blocks. That is a
+   permutation of the weight matrix's columns, on its own enough to make the
+   output unrelated to the caption;
+3. **`_rescale_norm`** - `* sqrt(out_dim / hidden_size)`, 1.0328 at the real
+   config.
+
+(1) is why the output was near-constant: the 49 raw Gemma states differ in
+magnitude by orders of magnitude, so an un-normalized concatenation is
+dominated by whichever states are largest, and their token-to-token variation
+is small next to their common component. (2) is why what little signal
+survived was not the caption's.
+
+A fourth, smaller divergence on the same path: `LTXGemmaTokenizer.
+tokenize_with_weights` prepends `<bos>` unconditionally and says why in its
+class doc - "Gemma 3 already emits it via post_processor; Gemma 4 does not,
+so we prepend". `data::qwen_tokenizer::QwenBpe` is deliberately
+template-free, so nothing added it and every prompt was encoded one token
+short, each caption token sitting one position early. Confirmed from the
+cached contexts before it was fixed: row 0 differed between prompts starting
+"a ..." and "A Belgian ...", which a shared leading BOS could not do.
+
+#### 2 - the fix
+
+* `gemma4::AggregateEmbed::forward` applies the normalization, the
+  interleaved order and the rescale. The reference additionally zeroes padded
+  positions; this function only ever sees a prompt's real tokens (`ltxv::
+  pipeline` pads afterwards, and the connector overwrites the padded tail
+  with its learnable registers), so there is no mask to thread.
+* `ltxv::pipeline::real_text_context`'s `tokenize` strips the prompt and
+  prepends the tokenizer's own `<bos>`, looked up by content. A checkpoint
+  that declares none keeps the old behaviour and says so.
+* `tools/goldens/gemma4_dump_reference.py` grew `feature_extractor_v2`, a
+  transcription of the reference's input transform, and its module doc now
+  records that the guess was wrong rather than leaving the old justification
+  standing.
+* `text_cache::Key` grew `encode_revision` (`ENCODE_REVISION = 2`). Every
+  other key field describes an INPUT; this one describes the function. Without
+  it the disk cache - whose whole header is an argument about never serving a
+  wrong context - would have gone on serving pre-fix contexts for every prompt
+  already encoded this session, against an unchanged checkpoint.
+
+#### 3 - after, on the same box
+
+Same two prompts, same seed, same shape, nothing else changed:
+
+| | row-to-row cos within a prompt | cos(mean_A, mean_B) | `\|\|mean row\|\|` vs residual | clip delta |
+|---|---:|---:|---:|---:|
+| before | 0.9963 | 0.99984 | 975 vs 49 | 6.67 |
+| after | 0.4676 | 0.8828 | 202 vs 219 | **100.57** |
+
+The caption went from a 5% residual to the dominant component of its own
+context.
+
+What the clips show, looked at rather than scored:
+
+* *"a bright red vintage convertible car driving fast through an empty desert
+  highway at sunset, dust clouds behind it"* - a red vintage convertible seen
+  from behind, driving away down an empty two-lane desert highway, the sun low
+  on the horizon between distant hills, dust kicked up along the roadside.
+  Every clause of the prompt is in the frame.
+* *"a slow pan across a snowbound pine forest"* - deep snow, pine trunks,
+  snow-laden branches, a slow lateral drift.
+
+Before the fix both of these were the same woman's face.
+
+#### 4 - gates
+
+Weight-free, milliseconds:
+
+* `gemma4::model::the_projection_rms_normalizes_every_layer_slice_and_rescales`
+  - scaling one token's one state slice by any positive factor must not change
+  that token's output (the defining property of the per-state norm, and
+  exactly what a plain concatenate-then-project lacks), the surviving scale is
+  `sqrt(out_dim/hidden)`, and the one-hot weight rows pin the interleaved
+  column order.
+* `gemma4::model::an_all_zero_layer_slice_stays_finite` - the `+1e-6` inside
+  the rsqrt, which is load bearing for a zero state.
+* `gemma4`'s `gemma4_tiny_matches_reference` `aggregate_out` tap now pins the
+  real formula rather than the guess, at the suite's own cosine 0.999999 bar.
+  The fixture was regenerated; the dumper is the source of truth for it.
+* `text_cache::every_key_field_changes_the_digest` covers `encode_revision`.
+
+Real weights, `#[ignore]`d:
+
+* `prompt_adherence_real::two_unrelated_prompts_do_not_produce_the_same_clip`
+  - two full real generations at 384x192 / 9 frames, no image conditioning,
+  guidance 1.0 so the clip is the conditional branch's own answer and not a
+  CFG difference. Measured 80.04 against a floor of 20.0. This is the
+  perceptual half, and it is what proves the weight-free gates above are
+  testing something a viewer can see.
+
+#### 5 - what this says about the rest of the port
+
+Every parity gate in `crates/ltxv` was green throughout. They had to be: a
+DiT forward against a golden is correct at any context, and the context was
+structurally perfect - right shape, right validity mask, right padding, right
+connector routing. It just carried no information. Shape-level parity cannot
+see a semantic-level defect, and "the module's internals are not derivable
+from the header" is a claim to go and check in the reference, not a licence to
+guess. The reference was already vendored in `resources/ltxv/source/` the
+whole time.
