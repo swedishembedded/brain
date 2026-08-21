@@ -84,32 +84,8 @@ pub fn step(cfg: &DepthDecoderConfig, base: &DepthDecoderWeights, adapters: &Has
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::depth_decoder::AttnW;
-    use crate::depth_decoder::MlpW;
+    use crate::depth_decoder::random_weights;
     use data::rng::Lcg;
-
-    fn random_weights(cfg: &DepthDecoderConfig, seed: u64) -> DepthDecoderWeights {
-        let mut r = Lcg::new(seed);
-        let d = cfg.hidden_size as usize;
-        let inter = cfg.intermediate_size as usize;
-        let lin = |out: usize, inn: usize, r: &mut Lcg| r.vec_scaled(out * inn, 0.2);
-        let layers = (0..cfg.num_layers as usize)
-            .map(|_| BlockW {
-                ln1: vec![1.0; d],
-                attn: AttnW { wq: lin(d, d, &mut r), wk: lin(d, d, &mut r), wv: lin(d, d, &mut r), wo: lin(d, d, &mut r) },
-                ln2: vec![1.0; d],
-                mlp: MlpW { gate: lin(inter, d, &mut r), up: lin(inter, d, &mut r), down: lin(d, inter, &mut r) },
-            })
-            .collect();
-        DepthDecoderWeights {
-            audio_embeddings: lin((cfg.audio_vocab_size * (cfg.num_codebooks - 1)) as usize, d, &mut r),
-            projection: lin(d, d, &mut r),
-            pos_embedding: lin(cfg.max_position_embeddings as usize, d, &mut r),
-            layers,
-            norm: vec![1.0; d],
-            audio_heads: (0..cfg.num_codebooks as usize - 1).map(|_| lin(cfg.audio_vocab_size as usize, d, &mut r)).collect(),
-        }
-    }
 
     fn rank2_adapters(cfg: &DepthDecoderConfig, base: &DepthDecoderWeights, seed: u64) -> HashMap<String, LoraW> {
         let mut r = Lcg::new(seed);

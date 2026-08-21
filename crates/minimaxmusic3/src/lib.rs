@@ -68,9 +68,12 @@
 //! training path). The Global LLM (`global_llm`) has streamed real-weight
 //! import (real-layer parity cosine 1.0 against `transformers`) and an
 //! audio-code-restricted training objective (`Batch::LmWeighted`, proven
-//! at `QwenConfig::tiny()` scale) - its own prompt-assembly/AR-sampling
-//! orchestration, joint generator+discriminator training, and serving
-//! land component-by-component, one crate module at a time.
+//! at `QwenConfig::tiny()` scale). `pipeline::generate_frames` wires it
+//! together with the depth decoder into the full CFG-guided AR
+//! generation loop (two `qwen3::Qwen` instances, one per CFG branch,
+//! stepped in lockstep). Chunk denoising through the DiT, vocoder
+//! stitching, joint generator+discriminator training, and serving land
+//! component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
 pub mod config;
@@ -84,6 +87,7 @@ pub mod dit_shard;
 pub mod dit_train;
 pub mod global_llm;
 pub mod lora;
+pub mod pipeline;
 pub mod train;
 pub mod vocoder;
 

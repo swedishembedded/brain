@@ -425,38 +425,45 @@ pub fn backward(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, cache: &Forwa
     (d_h, d_layers, d_norm, d_pos_embedding_rows)
 }
 
+/// Random weights at `cfg`'s dims, deterministic from `seed` - shared by
+/// this crate's own tests (`depth_decoder`, `depth_lora`, `pipeline`); a
+/// gradcheck/wiring fixture always needs a small, random-weight instance,
+/// never the real checkpoint, so this lives once here rather than as
+/// three near-identical private copies.
+#[cfg(test)]
+pub(crate) fn random_weights(cfg: &DepthDecoderConfig, seed: u64) -> DepthDecoderWeights {
+    use data::rng::Lcg;
+    let mut r = Lcg::new(seed);
+    let d = cfg.hidden_size as usize;
+    let inter = cfg.intermediate_size as usize;
+    let lin = |out: usize, inn: usize, r: &mut Lcg| r.vec_scaled(out * inn, 0.2);
+    let mut layers = Vec::with_capacity(cfg.num_layers as usize);
+    for _ in 0..cfg.num_layers {
+        layers.push(BlockW {
+            ln1: vec![1.0; d],
+            attn: AttnW { wq: lin(d, d, &mut r), wk: lin(d, d, &mut r), wv: lin(d, d, &mut r), wo: lin(d, d, &mut r) },
+            ln2: vec![1.0; d],
+            mlp: MlpW { gate: lin(inter, d, &mut r), up: lin(inter, d, &mut r), down: lin(d, inter, &mut r) },
+        });
+    }
+    let mut audio_heads = Vec::with_capacity(cfg.num_codebooks as usize - 1);
+    for _ in 0..cfg.num_codebooks - 1 {
+        audio_heads.push(lin(cfg.audio_vocab_size as usize, d, &mut r));
+    }
+    DepthDecoderWeights {
+        audio_embeddings: lin((cfg.audio_vocab_size * (cfg.num_codebooks - 1)) as usize, d, &mut r),
+        projection: lin(d, d, &mut r),
+        pos_embedding: lin(cfg.max_position_embeddings as usize, d, &mut r),
+        layers,
+        norm: vec![1.0; d],
+        audio_heads,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use data::rng::Lcg;
-
-    fn random_weights(cfg: &DepthDecoderConfig, seed: u64) -> DepthDecoderWeights {
-        let mut r = Lcg::new(seed);
-        let d = cfg.hidden_size as usize;
-        let inter = cfg.intermediate_size as usize;
-        let lin = |out: usize, inn: usize, r: &mut Lcg| r.vec_scaled(out * inn, 0.2);
-        let mut layers = Vec::with_capacity(cfg.num_layers as usize);
-        for _ in 0..cfg.num_layers {
-            layers.push(BlockW {
-                ln1: vec![1.0; d],
-                attn: AttnW { wq: lin(d, d, &mut r), wk: lin(d, d, &mut r), wv: lin(d, d, &mut r), wo: lin(d, d, &mut r) },
-                ln2: vec![1.0; d],
-                mlp: MlpW { gate: lin(inter, d, &mut r), up: lin(inter, d, &mut r), down: lin(d, inter, &mut r) },
-            });
-        }
-        let mut audio_heads = Vec::with_capacity(cfg.num_codebooks as usize - 1);
-        for _ in 0..cfg.num_codebooks - 1 {
-            audio_heads.push(lin(cfg.audio_vocab_size as usize, d, &mut r));
-        }
-        DepthDecoderWeights {
-            audio_embeddings: lin((cfg.audio_vocab_size * (cfg.num_codebooks - 1)) as usize, d, &mut r),
-            projection: lin(d, d, &mut r),
-            pos_embedding: lin(cfg.max_position_embeddings as usize, d, &mut r),
-            layers,
-            norm: vec![1.0; d],
-            audio_heads,
-        }
-    }
 
     #[test]
     fn forward_shape_matches_tiny_config() {
