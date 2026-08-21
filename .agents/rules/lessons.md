@@ -1758,3 +1758,63 @@ symptom:**
 * **Look at the frames.** Nine evenly spaced PNGs read by eye settled in one
   minute what the pixel-delta number had been arguing about for a whole
   session.
+
+## 51. Two backends compiling the same WGSL are not running the same code, and only a per-backend roofline can see it
+
+`backend-vulkan` and `backend-wgpu` both feed `crates/kernels`' WGSL through
+naga. That made "the kernels are identical, so kernel efficiency must be
+identical" feel like a safe assumption, and it was wrong by a factor of two:
+the native Vulkan path used `naga::back::spv::Options::default()`
+(`force_loop_bounding: true`, bounds policy `Restrict`) while the wgpu path
+asks for `ShaderRuntimeChecks::unchecked()`, and `backend-cpu` asks Cranelift
+for `MemFlags::trusted()`. Same source, three backends, two rule sets - and
+the odd one out measured 5.05 TFLOP/s where its sibling measured 10.62 on the
+same card.
+
+Three things this cost, each generalisable:
+
+1. **Nothing had ever rooflined that backend.** `gpu_core::roof` existed and
+   worked; every caller just happened to run on the default. A backend with no
+   measured roof has no measured anything - the deficit was invisible for as
+   long as it went unprobed, and one `roof::measure` call per backend found it.
+2. **The roof memo keyed on the adapter description alone**, so once both
+   backends were probed in one process the first one's number was served as
+   the second's. A roof is a property of the (device, BACKEND) pair. Any cache
+   whose key omits a dimension the value actually depends on will eventually
+   answer confidently for the wrong thing - and here the wrong thing was off
+   by 2x, which is large enough to invert a design decision.
+3. **A cross-backend switch has to be spelled once.** The fix reads the same
+   `BRAIN_GPU_CHECKED` variable the wgpu backend reads, because a second,
+   independently-named knob is how the two drifted apart in the first place.
+
+Corollary for anything comparing backends: measure the roof on the backend you
+are about to grade against it, never the roof the other backend left in the
+cache; and when a "% of peak" moves after a backend swap, suspect the
+compilation options before the silicon.
+
+## 52. Vulkan validation layers are one `apt-get download` away, even with no root and none installed
+
+Two sessions' worth of "GPU device lost" on `backend-vulkan` was diagnosed in a
+single run, by the layer, naming the exact VUID
+(`VUID-vkCmdDispatch-None-08114`, a descriptor set using a destroyed buffer).
+The blocker had looked structural: `/usr/share/vulkan/explicit_layer.d` holds
+only Intel and Mesa layers on this box, and there is no root to install more.
+Neither fact matters.
+
+```
+apt-get download vulkan-validationlayers   # no root needed to DOWNLOAD
+dpkg-deb -x vulkan-validationlayers_*.deb vvl
+VK_ADD_LAYER_PATH=vvl/usr/share/vulkan/explicit_layer.d \
+LD_LIBRARY_PATH=vvl/usr/lib/x86_64-linux-gnu \
+VK_LOADER_LAYERS_ENABLE='*validation*'  <any binary>
+```
+
+`VK_LOADER_LAYERS_ENABLE` (loader 1.3.234+; this box has 1.4.304) force-enables
+a layer from outside the process, so **no debug path has to be added to any
+`VkInstance` creation site** to get a diagnosis - which matters when the
+instance is created in a crate you were told not to modify, or in a dependency.
+
+The general shape: before reading synchronisation code cold, check whether the
+API you are debugging has a validation/sanitizer mode and whether it can be
+switched on from the environment. "The layer is not installed" is a statement
+about the current filesystem, not about what is reachable.
