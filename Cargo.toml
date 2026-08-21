@@ -350,11 +350,21 @@ lto = "thin"
 # `Queue::write_buffer` allocates therefore lands in video memory, and
 # `gpu-allocator` pools freed blocks rather than returning them to the driver.
 # Uploading N bytes of weights costs N bytes of VRAM for the destination plus N
-# more that is never handed back: an exact, reproducible 2.00x, measured
-# through `nvidia-smi` deltas. With the fix, 1.00x - equal to a hand-written
-# Vulkan backend on the same card. The gate is
-# `crates/gpu-core/tests/vram_overhead.rs`; the full root-cause ledger is
-# `.agents/roadmap/backend-vulkan.md`.
+# more: an exact, reproducible 2.00x, measured through `nvidia-smi` deltas.
+# With the fix, 1.00x - equal to a hand-written Vulkan backend on the same
+# card. The gate is `crates/gpu-core/tests/vram_overhead.rs`; the full
+# root-cause ledger is `.agents/roadmap/backend-vulkan.md`.
+#
+# Steering staging into host memory made uploads slower at first, badly enough
+# that the fix shipped opt-in with the cost written down next to it. That is
+# resolved: host memory is expensive to ALLOCATE (the driver pins the pages, at
+# ~0.5 GB/s on a P40, against ~100x cheaper and size-independent for
+# device-local memory), so a fresh allocation per `write_buffer` made pinning
+# the whole cost of uploading. The fork now recycles upload staging buffers, so
+# the pages are pinned once. Measured on a P40, 1 GiB in the 4 MiB chunks real
+# weight upload uses: 1.16 GB/s before any of this, 0.43 GB/s with host staging
+# alone, 4.84 GB/s with the reuse. Half the VRAM and roughly four times the
+# upload throughput, so this is no longer a trade to be weighed per workload.
 #
 # The fix lives on a fork branch cut from the v29.0.4 tag - the exact version
 # resolved by the pin above - so consuming it needs no API migration in
@@ -367,9 +377,14 @@ lto = "thin"
 # `naga` dependencies are path deps inside that repo, so the whole tree comes
 # from the fork - verified, `Cargo.lock` picks up all five.
 #
-# It is commented out rather than active because the branch exists only in a
-# local clone so far; this session had no push credentials for the fork. Push
-# it, then uncomment - nothing else here needs to change.
+# It is still commented out for ONE remaining reason, and it is no longer about
+# whether the fix is worth having: the branch exists only in a local clone.
+# `git ls-remote` on the fork lists `trunk` and nothing else, so uncommenting
+# this line as it stands would fail every build here and in CI at dependency
+# resolution, not at compile time. Push the branch, then uncomment - nothing
+# else needs to change. Until then a local checkout is consumed through
+# `.cargo/config.toml`'s `paths` override (see `.cargo/config.toml.example`),
+# which is how every number quoted above was measured.
 #
 # To work on the dependency itself rather than consume a pinned rev, override
 # it with a local checkout instead: copy `.cargo/config.toml.example` to

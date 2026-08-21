@@ -717,3 +717,247 @@ choice rather than a silent default, and another agent was benchmarking on
 this box at the time, where halving upload throughput under their measurements
 would have been worse than unhelpful. Turning it back on is
 `cp .cargo/config.toml.example .cargo/config.toml` and editing the one path.
+
+## 2026-08-21 (later the same day): the upload regression is gone, and it was two bugs, not one
+
+The section above left host-memory staging shipping OPT-IN, because it halved
+upload throughput (1.16 -> 0.43 GB/s at the 4 MiB chunk size real weight
+upload uses) and named the cause as "not settled". It is settled. There were
+two independent causes, neither of them the memory placement itself, and both
+are now fixed. The fix is better than the pre-fix baseline on **both** axes,
+so it is no longer a trade to weigh per workload.
+
+Hardware for everything below: **Tesla P40** (GP102, 24 GiB, driver
+570.195.03), two of them in one box, 138 GiB host RAM. The box was NOT idle -
+another agent was running real LTX-2.5 generations on one or both cards
+throughout - which is called out per measurement where it matters.
+
+### Cause 1: host memory is expensive to ALLOCATE; device memory is not
+
+This is the whole of the wgpu-side regression, and it is arithmetic rather
+than a hypothesis. Measured directly with a standalone raw-`ash` probe (no
+wgpu in the path at all), `vkAllocateMemory` + `vkMapMemory` on this card:
+
+| block size | host-visible, NOT device local (type 8) | device local + host visible (type 10) |
+|---|---:|---:|
+| 4 MiB | 7.7 ms | 2.2 ms |
+| 16 MiB | 28.2 ms | 0.6 ms |
+| 64 MiB | 126.9 ms | 1.3 ms |
+| 256 MiB | 544.8 ms | 4.8 ms |
+
+Host allocation is **linear in size at about 0.5 GB/s** - the driver has to
+commit and pin the pages so the GPU can DMA from them. Device-local
+allocation is flat in size and ~100x cheaper, because the driver is handing
+back an address range it already owns.
+
+Half a gigabyte per second is *slower than the upload the pages exist to
+carry*. So once staging moved to host memory, and with `gpu-allocator`
+sub-allocating from 64 MiB blocks on a non-device-local heap and destroying a
+block as soon as it empties, page pinning stopped being a setup step and
+became the entire cost of uploading. The arithmetic closes exactly: 1 GiB of
+staging needs 16 fresh 64 MiB host blocks, 16 x (126.9 + 9.3) ms = **2.18 s**,
+against a total measured upload time of 2.50 s. ~87% of the upload was
+`vkAllocateMemory`. The same 1 GiB through the old `DEVICE_LOCAL` placement,
+whose allocations are nearly free, took 0.88 s.
+
+The same probe priced the fix before any of it was written: with the staging
+buffers created once and reused, the same 256 MiB upload went from 0.28 GB/s
+to 5.33-7.66 GB/s depending on shape.
+
+### Cause 2: `backend-wgpu` was never submitting upload-only work at all
+
+This one is in this repo, not in wgpu, and it is the reason the first fix
+appeared to do nothing when measured through `vram_overhead.rs`.
+
+`Queue::write_buffer` does not talk to the GPU. wgpu copies the bytes into a
+staging buffer it allocates for the call and records a copy into its
+pending-writes encoder; nothing reaches the device, and **no staging buffer
+can be reclaimed**, until a `queue.submit` carries that encoder.
+`WgpuBackend::flush_inner` returned early whenever the pending DISPATCH list
+was empty - treating "nothing to do" as a property of dispatches alone - so a
+phase that only uploads never submitted.
+
+Traced, not deduced. With the Vulkan staging allocator instrumented
+underneath a 1 GiB chunked upload, the event log is one unbroken run of 1536
+allocations followed by one unbroken run of 1536 frees at device teardown,
+with **zero** interleaving:
+
+```
+EV 0    TAKE hit=false parked=0          buckets=0
+...                                     (1536 takes, every one a miss)
+EV 1536 PARK parked=4294967296          buckets=4
+...                                     (1536 parks, all at the end)
+```
+
+A staging pool cannot recycle a buffer that is never released, so the hit
+rate was exactly 0%. It also means a model load held every staging buffer it
+had ever allocated live simultaneously - which is its own contribution to the
+original 2.00x resident finding, independent of where the memory lived.
+
+Fixed in `crates/backend-wgpu/src/lib.rs`: a `writes_pending` flag on
+`DeviceShared` (the queue is shared, so a flush through any handle must submit
+them), and `flush` submits when writes are outstanding and no dispatch is.
+An idle flush still submits nothing, because `poll_wait` calls flush once per
+step and a queue round trip in each would be its own regression. Both halves
+are pinned by `crates/backend-wgpu/tests/upload_flush.rs`, which was confirmed
+red before the fix and green after.
+
+### What was built in the fork
+
+The branch `v29-staging-host-memory` is **two commits on top of the v29.0.4
+tag, one per problem fixed** (it was rebuilt from three, and from messages
+naming this box's specific card, so upstream-facing text stays about the
+behaviour rather than about our hardware):
+
+* **`a9fe884bd` - stage uploads in host memory, not in the VRAM heap.** The
+  placement fix from the previous session, unchanged in substance.
+* **`c7187db0c` - reuse upload staging buffers instead of pinning pages per
+  write.** A per-device `StagingBufferPool` in `wgpu-hal/src/vulkan`.
+  `destroy_buffer` parks a staging buffer keyed by size class instead of
+  destroying it; `create_buffer` takes one back out, already allocated, bound
+  and mapped. This is the same strategy as this repo's own
+  `crates/vulkan/src/context.rs::with_staging` - one buffer, allocated and
+  mapped once, written and copied from over and over - ported to wgpu-hal's
+  own abstractions rather than copied.
+  A full pool **evicts by age rather than turning arrivals away**, and that
+  detail is not cosmetic. Refusing them was tried first and made the pool
+  worthless under a mixed workload: 25 large one-shot staging buffers (a 1 GiB
+  `write_f32` makes one) took the whole capacity, then 1582 consecutive 4 MiB
+  parks were refused and all 1607 later takes missed. A 0% hit rate with the
+  pool nominally full. Evicting the least recently parked buffer instead lets
+  the pool follow the workload.
+
+Design points that took the actual thought:
+
+* **No synchronization of its own, and this is not laziness.**
+  `destroy_buffer` already destroys the buffer and frees its memory
+  immediately, so the caller must ALREADY guarantee no submission references
+  it; handing it back out instead is strictly weaker than destroying it. The
+  `wgpu_hal::Device` trait documents exactly this latitude - backends "are
+  allowed to allocate GPU memory for buffers from allocation pools, and this
+  call is permitted to simply return `buffer`'s storage to that pool". No
+  fence, barrier or deferred-free list is needed, and adding one would have
+  been cargo-culting the earlier "device lost" bug rather than reasoning about
+  this one.
+* **It cannot hold device memory.** Only buffers actually steered into
+  host-visible non-device-local memory are eligible, so the pool can never
+  reintroduce the resident cost `bc0a87788` removed.
+* **It cannot leak application-visible bytes.** Eligibility also requires
+  `MemoryFlags::TRANSIENT`, which `wgpu_core::resource::StagingBuffer::new`
+  sets and nothing else in the workspace does. A buffer an application created
+  itself with the same usage is never recycled, so it can never observe a
+  previous one's contents.
+* **It is bounded by the application's own peak.** A buffer only enters the
+  pool by having been handed out first, and a new one is only allocated when
+  every parked buffer of its class is in use, so parked-plus-live staging
+  never exceeds the most the application ever had live at once. The
+  `MemoryHints` fraction of the host heap on top of that is a backstop, not
+  the operative bound.
+* **Size classes** double below 64 MiB and step by 64 MiB above it, so one
+  upload's buffer matches the next one's request without rounding a 700 MiB
+  request up to 1 GiB. Three unit tests in `wgpu-hal` pin that a class is
+  never smaller than the request, that the waste is bounded, and that a class
+  size maps to itself.
+
+### The numbers
+
+**`crates/gpu-core/tests/vram_overhead.rs`, 1 GiB, best of three** - the
+project's own gate, so this is the row that counts. Final column taken on a
+**completely idle box**, both cards at 0 MiB / 0% util:
+
+| upload shape | stock wgpu 29.0.4 | + host staging alone | + reuse + flush fix |
+|---|---:|---:|---:|
+| one `write_f32` of 1 GiB | 1.11 GB/s | 0.50 GB/s | **3.76 GB/s** |
+| `write_f32_chunked`, 64 MiB | 1.18 GB/s | 0.48 GB/s | **4.96 GB/s** |
+| `write_f32_chunked`, 4 MiB (the real weight path) | 1.16 GB/s | 0.43 GB/s | **4.70 GB/s** |
+| 4 MiB chunks, submitting per chunk | not measured | 0.51 GB/s | **5.06 GB/s** |
+
+So the shape that matters, the one real weight upload uses, went from
+1.16 GB/s before any of this to **4.70 GB/s** - about **4.05x the original**,
+and roughly 11x the intermediate state that made the fix ship opt-in.
+
+**Resident cost: unchanged at 1.00x, on every probe.** That same idle run:
+
+```
+wgpu-256mib             256 gpu0    256    1.00x
+wgpu-1024mib           1024 gpu0   1024    1.00x
+wgpu-1024mib-alloconly 1024 gpu0   1026    1.00x
+wgpu-1024mib-chunked64 1024 gpu0   1026    1.00x
+native-vulkan-1024mib  1024 gpu1   1024    1.00x
+native-vulkan-drop-x4  1024 gpu1      0    0.00x
+backend fix: wgpu=1.00x native-vulkan=1.00x (delta 0.00x)
+```
+
+The stock path was 2.00x. So the 4x throughput comes on top of the halved
+VRAM, not instead of it - which is the whole reason this stops being a trade.
+
+**A caveat for whoever runs this next.** These are `nvidia-smi` deltas, so
+they are only meaningful on a quiet box. While another agent's LTX
+generations were allocating and freeing gigabytes on both cards, the
+secondary ratios read 7.61x, 5.45x, -6.41x, 33.12x and similar nonsense, and
+`native-vulkan-drop-x4` failed its assertion twice on pure contamination -
+it passes cleanly at 0 MiB whenever the box is actually idle. The
+`wgpu-1024mib` and `backend fix` rows were the only two that held steady
+regardless of load. Do not read a failure of this file as a regression
+without checking `nvidia-smi` first.
+
+**Cross-checked independently.** A standalone wgpu program built directly
+against the fork (no brain in the path) measured the same three arms on the
+idle card, 1 GiB, best of three: stock 3.05 / 2.48 / 2.49 GB/s at 4 / 64 /
+1024 MiB chunks, host staging alone 0.46 / 0.35 / 0.45, and with the pool
+3.00 / 3.45 / 5.19 - rising to 4.65-5.33 GB/s at 4 MiB once the pool is warm
+past the first two passes. The first upload into a cold pool still pays the
+pinning once (~0.44 GB/s); nothing after it does.
+
+### State of the `[patch]`
+
+**Still commented out, and for exactly one reason, which is no longer about
+whether the fix is worth having:** the fork branch is not pushed.
+`git ls-remote` on `github.com/swedishembedded/wgpu` lists `trunk` and nothing
+else, so uncommenting the `[patch.crates-io]` git entry as it stands would
+fail every build here and in CI at dependency RESOLUTION - before a single
+line compiles. This pass was explicitly asked to hold off on pushing, so the
+entry stays commented with the note next to it rewritten to say so. Push the
+branch, uncomment the one line, done; nothing else needs to change.
+
+Everything above was measured through `.cargo/config.toml`'s `paths` override
+(gitignored, machine-local, template in `.cargo/config.toml.example`) pointed
+at the local wgpu fork checkout ([path/to/wgpu]). **That override was left in
+place**,
+unlike the previous session which removed it - the fix is now strictly better
+on both axes, so a build on this box picking it up is a benefit rather than a
+silent regression under someone else's benchmark. Delete the file to build
+against stock crates.io wgpu again.
+
+### End to end, and the test-suite results
+
+`cargo test -p brain-gpu-core -p brain-backend-wgpu --tests`: **all green**,
+including the two new `upload_flush.rs` cases. `cargo test -p brain-ltxv
+--tests`: **52 passed, 0 failed** across 20 test binaries - the whole
+production graphics path under every model in the repo. `make release`
+builds clean against the patched dependency.
+
+One test needs the same warning as the resident probes above.
+`roofline::measuring_twice_agrees` failed once during a run that overlapped a
+neighbouring generation, on two back-to-back compute measurements disagreeing
+(7019 vs 2707 GFLOP/s) - while the very next test in the same binary measured
+7106. It passes 6/6 on a quiet box. It measures dispatch throughput, which
+nothing in this work touches; treat a failure there as "check `nvidia-smi`
+first", same as the resident rows.
+
+A real generation through the production path with the fix active: 25 frames
+at 512x512, real VAE decode, **11.2 s total** (denoise 0.6 s = 0.138 s/forward,
+VAE 10.3 s), valid mp4 written. So the graphics path is correct end to end,
+not merely green under tests.
+
+The full **LTX-2.5 22B** generation was attempted at the same shape and did
+NOT complete: it reached a 20.9 GiB peak on one 24 GiB card and then hit
+`wgpu error: Out of Memory`. That is the weight-residency sizing question in
+`crates/ltxv` (the Q8_0 DiT is 23.6 GB on its own, so a single card needs the
+streaming/multi-card path), not a staging question - and that code was being
+actively changed in the working tree at the time by another agent, so it was
+left alone rather than tuned blind. Worth noting which direction the fix
+pushes it, though: the ledger above records that this checkpoint needed ~44 GB
+of peak VRAM through unpatched wgpu and so could not be attempted on a 24 GB
+card at all. Reaching 20.9 GiB before running out is the halved staging cost
+doing its job; what is left is a residency window, not a 2x.
