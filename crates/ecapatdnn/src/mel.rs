@@ -99,6 +99,7 @@ pub fn log_mel(samples: &[f32]) -> (Vec<f32>, usize) {
         fmin: FMIN,
         fmax: FMAX,
         slaney: true,
+        center: false,
     };
     let fb = mel_filterbank(&cfg); // [N_MELS, bins]
     let bins = N_FFT / 2 + 1;
