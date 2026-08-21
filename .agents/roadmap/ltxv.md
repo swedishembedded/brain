@@ -3315,6 +3315,21 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 ## Recorded gaps (kept current)
 
+- **The LTX int8 tier does not run on `backend-vulkan` at all.** Every
+  attempt panics with `GPU device lost while waiting for a submit to
+  complete` (`crates/backend-vulkan/src/lib.rs`'s `wait_for_fences`), at
+  every shape tried and independently of device residency: 48 layers at
+  T=3520 with a full resident window (19192 MiB), the same with residency
+  off (**6769 MiB**, nowhere near a memory limit), two layers at 512 tokens,
+  and `cargo test -p brain-ltxv --test int8_compute` (both tests). Found
+  while checking Phase 18's backend-aware residency budget, which reserves
+  far less on this backend precisely because it does NOT carry wgpu's
+  measured 2.00x per-uploaded-buffer resident cost - so this is the backend
+  where device residency should pay MOST, and the budget for it is written,
+  gated and unverifiable against real weights until this is fixed. Not
+  diagnosed further: it predates Phase 18 and is a backend defect, not a
+  model one.
+
 - Overlapping-tile chunked VAE **decode**: **closed in Phase 16**. The video
   VAE milestone left "general overlapping-tile chunked encode/decode ... out
   of scope, deferred to the DFR milestone", and Phase 15's item 0 measured it
@@ -3561,3 +3576,323 @@ land. Known traps already identified from reading (not yet test-pinned):
   from its name; it is spatial/temporal tiling of a video-only token sequence
   for tiled inference, unrelated to the A<->V cross-attention that actually
   couples the streams.
+
+### Phase 18 - the forward stops being a PCIe benchmark
+
+Phase 17 left a real 48-layer 720p forward at **111.9 s wall against 15.5 s of
+GPU kernel time - 13.9% of the wall was compute.** This phase is the
+architectural fix for the other 86%, and the first thing it did was kill the
+hypothesis it was commissioned on.
+
+#### 0 - the premise was wrong, and one measurement said so
+
+The brief was: `forward_q_streamed` opens a fresh `Gpu` per call and re-uploads
+all 48 already-quantized blocks (~13 GB) on every one of a generation's 8-16
+forwards, so device residency is the fix. The design is real and the
+re-uploading is real. Its cost was not what anyone thought.
+
+Instrumenting the one bucket that used to hide all of it (`block GPU
+upload+forward+wait`, 99.3 s of the 111.9 s) split it four ways. Real
+`ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, 48 layers, T=3520, cache-warm,
+one Tesla P40, `BRAIN_PROFILE=1 ltxv_bench streamed 48 3520 1024 1`:
+
+| stage | ms | share of 111.9 s |
+|---|---:|---:|
+| **block adaLN combine+slice (host, per block)** | **35 966** | **32.1%** |
+| block submit + output readback (contains all 15.5 s of GPU kernel) | 22 430 | 20.0% |
+| block activation+modulation upload & record | 14 253 | 12.7% |
+| **block parity-tap readback, DISCARDED** | **11 651** | **10.4%** |
+| adaLN-single model table (host, once per call) | 10 269 | 9.2% |
+| block WEIGHT upload to device | **~9 000** | ~8% |
+| RoPE build / patchify / connector / open_device | 1 100 | 1.0% |
+
+The weight re-upload - the thing this phase was chartered to remove - was
+**~9 s of 99 s**. What actually dominated:
+
+1. **`dit::adaln::add_table` + `slice_mod`, on the host, once per BLOCK.** At
+   the real width that is a `[3520, 36864]` f32 combine (519 MB written) plus
+   nine `[3520, 4096]` slices, then nine 57.7 MB uploads - per block, times 48,
+   times every step, for a table whose only per-block input is a **147 KB**
+   `scale_shift_table`. ~1 GB of host memcpy and ~519 MB of PCIe per block:
+   **~25 GB of PCIe per forward.**
+2. **`LtxBlockQ::forward` read back its three parity taps on every block** -
+   `attn1_out`/`attn2_out`/`ff_out`, each a full `[t, dim]` - and
+   `forward_q_streamed` threw all three away. 173 MB per block, **8.3 GB per
+   forward**, 11.7 s, for values nothing read.
+
+This is §F.2 arriving through the same door Phase 14 recorded it: the profiler
+named a stage, a plausible story was told about which line inside it dominated,
+and the story was wrong by an order of magnitude. The cheap check - split the
+bucket before optimizing it - is what turned a ~9 s fix into a ~64 s one.
+
+#### 1 - what was built
+
+**`crates/ltxv/src/devres.rs`** (new) - the device-residency lifecycle:
+`DitSession` (one card, one generation: one `Gpu` held open, plus an optional
+`BlockWindow`), `BlockWindow` (a fixed number of device SLOTS over the model's
+blocks), the VRAM budget, and `run_blocks`, which is now the ONE block-stack
+implementation for every residency mode.
+
+**`crates/weightset` gets its first production consumer.** Phase 13 checked it
+for the HOST cache and correctly declined (variable-sized blobs under a shared
+byte budget across an unbounded set of checkpoints - `residency`'s
+`EvictionPolicy` problem). This is the other problem, the one its module doc
+describes: *a fixed-size window of device slots over a model's weight groups*
+visited *in an order known exactly in advance*. A denoise loop is
+`Schedule::cyclic(48, passes)` against a known slot budget, the slots are
+uniform (every block is the same shape), and `CyclicScan` pins the longest
+prefix and rotates the tail by furthest-next-use. Used as-is; no second window
+was written. The cursor is the layer index taken against a 2-pass schedule -
+from position `l` the remaining `[l, 2n)` range holds every group exactly once
+more, which is the whole lookahead Bélády needs, and deriving it from `l`
+rather than a running counter means an aborted forward cannot desynchronise it.
+
+**`crates/kernels/wgsl/adaln_row.wgsl`** (new - the only kernel this phase
+adds). `out[r,d] = tbl[row*D+d] + tab[r*NR*D + row*D + d]`, optionally
+`1.0 +` that. §F.3 was done first and the tree genuinely has no fit:
+`bias_add` broadcasts a row but only IN PLACE, `region_copy` preserves the
+source layout rather than compacting a strided row out of it, and
+`add_chan_bcast`/`broadcast_add_hw` are NCHW spatial ops. Coalesced by
+construction (consecutive threads walk consecutive `d`, contiguous in both
+operands), no reduction, no shared memory, no barrier - a pure streaming op,
+which is the right shape for something whose entire job is to not be PCIe.
+Measured at **211 ms per 48-layer forward**, 1.3% of GPU kernel time, against
+the 36.0 s + ~25 GB it replaces.
+
+**`crates/ltxv/src/block.rs`**: `ModBufs` (the device-side twin of `Mod`) with
+two fills - `upload` (host combine+slice, the reference definition of the
+arithmetic, still what every tap-producing/parity path takes) and `derive`
+(nine `adaln_row` dispatches from a per-FORWARD table upload plus the block's
+resident `scale_shift_table`). `LtxBlockQ` gains `sst_buf` (147 KB, resident
+with the weights) and `forward_prod` (modulation derived on device, no taps,
+context uploaded once per forward). `forward_on`/`forward_timed` split the
+per-call SCRATCH handle from the block's own - a resident block's activations
+must not be charged against `memauth` through its long-lived weight handle,
+since a `Gpu`'s grants are released when the HANDLE drops, not the buffer.
+`BlockTimings` makes the four-way split above a permanent, readable number
+instead of one this phase had to add by hand.
+
+**`crates/ltxv/src/dit.rs`**: `forward_q_streamed_in(session, ...)` is the
+entry point production takes; `forward_q_streamed` is now a thin wrapper over
+it with a session that keeps nothing - same function, one body, and the arm
+the bit-identity gate compares against. **`crates/ltxv/src/pipeline.rs`**:
+`RealDit` holds one session PER CARD, keyed on `devices::current_gpu()`, so
+the concurrent CFG pair gets two sessions on two cards and `Single` gets one;
+`generate`'s existing `drop(dit)` before the VAE decode releases both.
+
+#### 2 - the VRAM finding that decided the whole budget
+
+**Device residency of the weights is NOT where the win is on this hardware, and
+the number that says so is a wgpu defect this repo had already measured.**
+
+`crates/gpu-core/tests/vram_overhead.rs` records that on a non-ReBAR Pascal
+card under the default wgpu backend every uploaded storage buffer costs
+**2.00x** its size resident, and that brain's own native Vulkan backend
+measures 1.00x. `.agents/rules/kernels.md` sec D records the other half: that
+staging is only retired by a **blocking readback**. Both bit, in order:
+
+* Pre-filling 48 blocks with no drain reached **24392 MiB of a 24576 MiB card**
+  and aborted (`wgpu error: Out of Memory`).
+* With a one-word drain per block (`paramstore::upload::Uploader::drain`'s
+  trick, reused) the resident cost fell to a measured **297 MiB/block**, i.e.
+  1.1x - the doubling is drainable after all, which the earlier measurement did
+  not separate.
+* But wgpu's allocator pool is **elastic and greedy**: with nothing else
+  holding memory it grows to 16522 MiB at T=3520 and stays there; under
+  pressure from long-lived allocations it works in 5702 MiB. It does not back
+  off when an allocation fails, it errors. So the pool must be BUDGETED at its
+  greedy size, not its need.
+* And the order matters: filling the window lazily, block by block, lost the
+  race against the pool and aborted at 24009 MiB by block 28. `weightset`'s own
+  `slot_contents` doc says a caller must load the initial pins; what this phase
+  added is WHEN - `DitSession::prefill` runs before the RoPE tables, the
+  connector, or any block has allocated anything.
+
+The measured slots/peak relation at T=3520 is linear and now published:
+`peak_MiB ~= 16522 + 285 * resident_blocks`. The shipped reserve
+(`activation_reserve_bytes`) is fitted to the greedy plateau plus real
+headroom, which gives 20 resident blocks at 720p and a 22087 MiB peak.
+
+**A killed hypothesis, with its number:** chaining the activations across all
+48 blocks (leaving `x` on the card, one upload and one readback per FORWARD
+instead of per block) removes ~5.6 GB of round trip and saves about **3 s**. It
+also removes the one blocking readback per block that makes the pool shrink,
+and the pool then goes from 5.7 GiB to 16.5 GiB. Ten GiB of pool is worth ~35
+resident blocks. Reverted; `forward_prod` keeps the per-block readback and says
+why.
+
+**And the residency win itself, measured both ways at 720p:** 0 resident
+blocks 52.09 s, 24 resident blocks 51.83 s, 25 resident blocks 47.90 s at a
+23623 MiB peak. Residency is worth a few seconds here, not tens - because near
+a full card the driver starts spilling new allocations (the same per-forward
+adaLN upload costs 0.51 s at 0 resident blocks and 7.5 s at 25). The mechanism
+is right and is kept; on this backend, at this resolution, it is a minority of
+the win and is budgeted conservatively rather than maximised.
+
+#### 3 - measured, 720p (T=3520), 48 real layers, cache-warm, one Tesla P40
+
+`BRAIN_GPU_INDEX=0 BRAIN_GPU_WAIT_S=1800 BRAIN_PROFILE=1
+BRAIN_LTXV_DIT=<real Q8_0 22B> ./target/release/ltxv_bench streamed 48 3520 1024 1 [resident]`,
+`nvidia-smi --query-gpu=index,memory.used --loop-ms=200` throughout.
+
+| | before (Phase 17) | after |
+|---|---:|---:|
+| wall, 48 layers, cache-hit call | **111.86 s** | **50.48 s** (2.22x) |
+| GPU kernel time (timestamp queries) | 15 536 ms | 16 196 ms |
+| **GPU compute share of wall** | **13.9%** | **32.1%** |
+| block adaLN combine+slice (host) | 35 966 ms | **0 ms** |
+| discarded parity-tap readback | 11 651 ms | **0 ms** |
+| block weight upload to device | ~9 000 ms | 6 206 ms (20 of 48 resident) |
+| peak VRAM | 16 522 MiB | 22 087 MiB |
+| resident blocks | 0 | 20 |
+
+Output statistics identical to every digit printed across every arm of every
+run in this phase - `len=450560 mean=0.060893 std=0.683607 min=-1.330047
+max=1.784977 nonfinite=0` - which is the same evidence Phase 14 used and the
+same standard.
+
+**1080p (T=8160), same command at `streamed 48 8160 1024 1`**, against Phase
+15's own published number for the identical shape:
+
+| | before (Phase 15) | after |
+|---|---:|---:|
+| wall, 48 layers, cache-hit call | **246.7 s** | **151.40 s** (1.63x) |
+| GPU kernel time | 47 313 ms | 47 313 ms |
+| **GPU compute share of wall** | **19.2%** | **31.3%** |
+| resident blocks | 0 | 0 (the budget correctly declines at this shape) |
+| peak VRAM | 16 650 MiB | 23 878 MiB |
+
+Output statistics identical to Phase 15's own published line for this shape -
+`len=1044480 mean=0.043124 std=0.698590 min=-1.510173 max=1.889706
+nonfinite=0` - which is bit-identity re-confirmed at a token count the tiny
+gates never reach. The peak is higher and the reason is named rather than
+glossed: the per-forward `[t, 9*dim]` adaLN table is 1.2 GB at this token
+count, and wgpu's pool grows into whatever is left. It fits, with 698 MiB
+spare, and a benchmark pass should know that number is thin.
+
+**GPU compute is now the largest single item in a real forward.** The runner-up
+is `ada_layer_norm_single`'s own model-level host GEMM at 10.2 s (20%), which
+Phase 14 already published an available bit-identical AVX2-across-`M` fix for
+and which is now the next target; then the per-forward adaLN table upload
+(7.5 s), which is only that expensive because residency leaves the card nearly
+full.
+
+#### 4 - the Vulkan backend: budgeted for, and separately broken
+
+The 2.00x cost above is wgpu's, not the hardware's, so the budget is
+**backend-aware**: `activation_reserve_bytes(t, backend)` reserves 2.0 MiB/token
+on `backend-vulkan` (which recycles transients explicitly at every flush and
+measures 1.00x resident) against 5.2 MiB/token on wgpu, so the SAME card is
+budgeted the **whole 48-block window at 720p** there instead of 20. Gated
+(`the_slot_policy_is_bounded_by_the_layer_count_and_shrinks_as_tokens_grow`
+asserts the Vulkan budget is strictly larger and full at 720p).
+
+That budget could not be confirmed on real weights, because **the LTX int8
+tier does not currently run on `backend-vulkan` at all**, and that is
+pre-existing rather than anything this phase introduced. Measured, in
+increasing order of decisiveness:
+
+* `BRAIN_DEVICE=vulkan ltxv_bench streamed 48 3520 1024 1 1`, 48 resident:
+  `GPU device lost while waiting for a submit to complete` at 19192 MiB.
+* The same command with residency OFF (`BRAIN_LTXV_RESIDENT_BLOCKS=0`): the
+  same panic at **6769 MiB**, nowhere near any memory limit.
+* `streamed 2 512 128 1 1` - two layers, 512 tokens: the same panic.
+* `BRAIN_DEVICE=vulkan cargo test -p brain-ltxv --test int8_compute`: both
+  tests, neither of which touches `adaln_row`, `devres` or any of this phase's
+  code, fail with the same panic.
+
+So the failure is in the backend and predates this work. Recorded as a gap
+below rather than chased here. The consequence worth stating: on hardware where
+`backend-vulkan` does work, this phase's residency window should pay
+considerably MORE than the 720p numbers above show, because the 2.00x and the
+greedy pool are both wgpu's.
+
+#### 5 - correctness
+
+Bit-identity is the whole contract: this phase changes WHEN and BY WHAT ROUTE
+bytes reach the card, never what a kernel reads. `adaln_row` reproduces
+`add_table`'s operand order (`tbl[i] + tab[..]`) and `slice_mod`'s `1.0 + x`
+exactly - one f32 add, then one more - so it is bit-identical rather than
+close.
+
+New: `crates/ltxv/tests/device_residency.rs` (5 + 1 `#[ignore]`d real-weight),
+4 in `ltxv::devres`. Compared on BIT PATTERNS, never `==` on `f32`:
+
+* `a_device_resident_forward_is_bit_identical_to_the_streaming_one` - three
+  forwards at DIFFERENT latents through one resident session vs. the transient
+  path, plus the residency assertions that stop it passing vacuously (every
+  block uploads exactly once for the whole session; every visit of every
+  forward is a hit) and an assertion that the three forwards really do differ.
+* `on_device_modulation_is_bit_identical_to_the_host_combine_and_slice` - the
+  gate the other two CANNOT provide, since both run the device path: the
+  chained stack against the EAGER `LtxDit::forward_q`, which goes through
+  `add_table` + `slice_mod` on the host. **Mutation-verified twice**: swapping
+  two of `MOD_ROWS`' nine row indices fails it, and deleting the `plus_one` add
+  fails it at element 0 (`-3.613038e-2` vs `-3.761481e-2`).
+* `a_narrow_window_is_bit_identical_and_still_uploads_less_than_streaming` -
+  the graceful-degrade path is production code, so it is gated: bit-identical,
+  and the upload count is asserted EXACTLY (`pinned + tail * passes`), not
+  bounded.
+* `a_zero_slot_session_falls_back_to_streaming_and_is_still_exact`.
+* `the_slot_policy_never_over_promises` + the `devres` unit tests - the budget
+  must be monotone in the token count, never exceed the layer count, reach zero
+  rather than a negative count, and budget Vulkan strictly above wgpu.
+
+Every pre-existing gate re-run and green: the FULL `cargo test --release
+-p brain-ltxv -p brain-residency -p brain-weightset --lib --tests`, including
+`dit_parity`, `av_dit_parity`, `host_forward_parity`, `streamed_vs_eager_real`,
+`connector_real_parity`, `block_weight_cache`, `vae_parity`, `vae_tiling`,
+`na_decoder_parity`, `upsampler_parity`, `av_shard_2gpu_real`, `cfg_parallel`
+and `anchor_real`.
+
+#### 6 - the graceful path, and what is charged against what
+
+Nothing here may abort where it could degrade:
+
+* The slot budget is `(usable_vram - activation_reserve(t, backend)) /
+  cached_block_bytes`, clamped to the layer count. `usable_vram` is the
+  `memauth` authority's live headroom when `--limit-vram-total` is published
+  and the card's own DEVICE_LOCAL heap otherwise.
+* Under a published ceiling the headroom is **divided by the schedulable card
+  count**, because the flag is a process-wide TOTAL and the two concurrent CFG
+  branches build their sessions at the same moment on two threads - without the
+  division both would plan a full window and the loser would be refused
+  mid-upload.
+* `can_charge_a_block` re-checks the LIVE headroom immediately before each
+  ~270 MB weight upload and degrades that block to streaming (traced at `warn`,
+  counted in `ResidencyStats::refusals`) rather than letting `Gpu::storage`'s
+  infallible facade panic. Free when no ceiling is published.
+* Fewer slots than layers is not a failure mode, it is the design: `CyclicScan`
+  pins the prefix and streams the tail, still bit-identical. Zero slots is
+  exactly the pre-residency behaviour.
+* `BRAIN_LTXV_RESIDENT_BLOCKS=<n|0>` overrides the computed count - the bisect
+  handle every measurement in this entry used.
+
+#### 7 - what was explicitly NOT done
+
+* **Device residency for the fp32 `LtxDit` path** (`forward_blocks`/
+  `forward_blocks_q`). Those are the parity-bisect entry points: they retain
+  every block's output and every tap by design, are never on the production
+  path, and `LtxDit` is `!Sync`. Making them resident would risk the parity
+  ladder to speed up something no generation runs.
+* **DFR.** Checked rather than assumed: `crates/ltxv/src/dfr.rs` is pure host
+  geometry with no device code at all, and `pipeline::generate_dfr` builds a
+  tiny random-weight `LtxDit`, never `forward_q_streamed`. It does not have
+  this pattern, so nothing was changed there.
+* **Moving `ada_layer_norm_single`'s model-level table to the GPU.** It is now
+  the largest non-compute item (10.2 s, 20%) and a GPU GEMM would be ~0.3 s AND
+  delete the 7.5 s upload - but it reassociates, so it is not bit-identical and
+  is a numerics decision, not an optimization. Phase 14's own available
+  bit-identical AVX2-across-`M` win is the in-scope next step.
+* **Deduplicating identical timestep rows.** Phase 14 tracked it; it would
+  collapse both the 10.2 s host GEMM and the 7.5 s upload to near zero,
+  bit-identically, since a real step has 1-2 distinct rows. Still tracked, now
+  with a second reason to want it.
+* **Making `shift_kv`/`one_plus_scale_kv` device-resident.** They are per-block
+  `[ctx_len, dim]` broadcasts (33.6 MB/block, ~1.6 GB/forward - the ~6% of the
+  modulation traffic this phase did not remove). Resident they would cost
+  1.6 GB of VRAM, and deriving them with `adaln_row` against a zero table would
+  turn `v` into `v + 0.0`, which differs from `v` for `-0.0`. Left alone rather
+  than trade a bit-identity guarantee for 6%.
+* **Fixing `backend-vulkan`.** See item 4: real, pre-existing, out of scope.
+
