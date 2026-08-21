@@ -16,14 +16,54 @@
 //! shape as `bench_matmul.rs`. Needs `nvidia-smi` on `$PATH` (skips cleanly
 //! otherwise).
 //!
-//! **Result** (P40 ×2, non-ReBAR, measured 2026-08-07):
-//! the doubling is real, exactly 2.00x, upload-triggered (allocation alone is
-//! 1.00x), independent of `COPY_SRC`/`COPY_DST` usage flags and independent of
-//! upload chunk size — but it is **specific to the default wgpu backend's
-//! Vulkan HAL**. brain's own native Vulkan backend (`crates/backend-vulkan`,
-//! whose `with_staging` reuses one shared, bounded staging buffer — see
-//! `crates/vulkan/src/context.rs`) measures a clean **1.00x**. The fix is
-//! `--device vulkan` (or `BRAIN_DEVICE=vulkan`), not a wgpu-level change.
+//! **Result** (P40 ×2, measured 2026-08-07): the doubling was real, exactly
+//! 2.00x, upload-triggered (allocation alone is 1.00x), independent of
+//! `COPY_SRC`/`COPY_DST` usage flags and independent of upload chunk size -
+//! and **specific to the default wgpu backend's Vulkan HAL**. brain's own
+//! native Vulkan backend (`crates/backend-vulkan`, whose `with_staging`
+//! reuses one shared, bounded staging buffer - see
+//! `crates/vulkan/src/context.rs`) measured a clean **1.00x**.
+//!
+//! **Fixed** (2026-08-21, same box): `wgpu-hal`'s Vulkan backend asked
+//! `gpu-allocator` for `MemoryLocation::CpuToGpu` for every `MAP_WRITE`
+//! buffer, whose preferred property bits include `DEVICE_LOCAL`; this card
+//! exposes a `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` memory type drawn
+//! from the whole 24 GiB VRAM heap, so every staged byte was allocated in
+//! video memory - and the staging copy stays resident alongside the
+//! destination it is copied into until the submission consuming it retires,
+//! which is why peak resident was 2N for an N-byte upload and why chunking
+//! could not bound it (the chunks are all live at once). A pure upload
+//! staging buffer
+//! (`MAP_WRITE` and nothing beyond `COPY_SRC` - exactly what `wgpu_core`
+//! allocates for `Queue::write_buffer`) is now steered at host-visible,
+//! non-device-local memory. **wgpu measures 1.00x on every probe here**,
+//! equal to native Vulkan. The fix lives in the dependency, not in brain:
+//! see the workspace root `Cargo.toml`'s `[patch]` notes for how it is
+//! consumed and for the full root-cause write-up it points at.
+//! `--device vulkan` is no longer needed to avoid the doubling.
+//!
+//! **It is not free, and this file is why we know.** The upload-throughput
+//! probes below (added with the fix, precisely so the cost side could not be
+//! assumed) measure host-staged uploads on this card at roughly HALF the
+//! throughput of the old VRAM-staged ones - 0.43 vs 1.16 GB/s for 1 GiB at
+//! the 4 MiB chunk size real weight upload uses, on an idle box, and stable
+//! at 0.4-0.55 GB/s across five runs and every granularity tried.
+//!
+//! The cause is NOT settled. The obvious candidate was volume of live
+//! staging: `wgpu_core` allocates a fresh staging buffer per `write_buffer`
+//! and holds every one of them until the next submission, so uploading 1 GiB
+//! means 1 GiB of staging live at once, which in host memory is 1 GiB the
+//! driver must page-pin per upload where the same thing in VRAM was nearly
+//! free. The `ChunkedFlushed` probe tests that directly by submitting after
+//! every chunk, bounding live staging to one chunk - and it does NOT recover
+//! the throughput. (That probe pays 256 submit+fence round trips of its own,
+//! so it is inconclusive rather than a clean refutation.) Meanwhile the
+//! native Vulkan backend asks for the same memory properties and gets the
+//! same memory type, yet uploads several times faster, which points at how
+//! the upload is issued - one reused, once-mapped staging buffer versus a
+//! fresh allocate/map/unmap per write - rather than at where the memory
+//! lives. Read all four throughput rows together before drawing a
+//! conclusion; the roadmap ledger has the full table.
 //!
 //! Six probes, each isolating one candidate cause:
 //!   1. `storage_init` (the exact path model weight import takes) at two sizes
@@ -138,6 +178,74 @@ fn probe_storage(gpu: &Gpu, label: &'static str, mib: u64, upload: Upload) -> Pr
     Probe { label, logical_mib: mib, landed_on: dominant_delta(&before, &after) }
 }
 
+/// How an upload is issued, for [`probe_upload_gbs`].
+#[derive(Clone, Copy)]
+enum How {
+    /// One `write_f32` for the whole buffer.
+    OneShot,
+    /// `write_f32_chunked` in N-MiB pieces, no submit until the end.
+    Chunked(u64),
+    /// N-MiB pieces with a submit after each, bounding live staging to one piece.
+    ChunkedFlushed(u64),
+}
+
+/// Host-to-device upload throughput for the same path the probes above
+/// measure the RESIDENT cost of, in GB/s - the other half of the same trade.
+///
+/// Where a staging buffer lives decides both numbers at once: host memory
+/// costs no VRAM but adds a DMA hop, device-local host-visible memory costs
+/// VRAM but lets the CPU write straight into it. A change that wins on the
+/// resident side and quietly loses here would be no win at all, so the two
+/// are measured together rather than one being assumed.
+///
+/// Allocation of the DESTINATION is excluded (the buffer is created before the
+/// clock starts); whatever the backend has to allocate for staging is not, and
+/// should not be - that cost is part of the upload. The best of `reps` is
+/// reported, so a concurrent job on the same card can only make this number
+/// pessimistic, never optimistic.
+///
+/// `how` picks the granularity, and the three are not variations on one path -
+/// they price three different staging behaviours:
+///
+/// * [`How::OneShot`] stages the whole buffer at once.
+/// * [`How::Chunked`] splits the write into `c`-MiB pieces, which is what
+///   `write_at`'s own doc tells a caller streaming a large tensor to do and
+///   therefore what the real weight-import path looks like. It bounds the
+///   largest single staging allocation but NOT the total live at once:
+///   `wgpu_core` allocates a fresh staging buffer per write and holds every
+///   one of them until the next submission, so N chunks still means N chunks'
+///   worth of staging resident and, in host memory, page-pinned.
+/// * [`How::ChunkedFlushed`] submits after each chunk, so at most one chunk of
+///   staging is ever live. This is what a hand-written backend does with one
+///   reused staging buffer, and it is the probe that says whether the cost of
+///   host-memory staging is the placement itself or merely the volume of it.
+fn probe_upload_gbs(gpu: &Gpu, mib: u64, reps: usize, how: How) -> f64 {
+    let n = (mib * 1024 * 1024 / 4) as usize;
+    let data = vec![0.5f32; n];
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let b = gpu.storage(n as u64);
+        let t0 = std::time::Instant::now();
+        match how {
+            How::OneShot => gpu.write_f32(&b, &data),
+            How::Chunked(c) => gpu.write_f32_chunked(&b, &data, (c * 1024 * 1024 / 4) as usize),
+            How::ChunkedFlushed(c) => {
+                let cw = (c * 1024 * 1024 / 4) as usize;
+                for (i, part) in data.chunks(cw).enumerate() {
+                    gpu.write_f32_at(&b, (i * cw) as u64, part);
+                    gpu.flush();
+                }
+            }
+        }
+        gpu.flush();
+        gpu.poll_wait();
+        best = best.min(t0.elapsed().as_secs_f64());
+        drop(b);
+        gpu.flush();
+    }
+    (n as f64 * 4.0) / best / 1e9
+}
+
 /// Allocate a buffer, drop it, and report the VRAM still held afterwards, in
 /// MiB - the question "does dropping a device buffer actually give the memory
 /// back?", which is separate from how much a live buffer costs.
@@ -214,16 +322,29 @@ fn measure_storage_buffer_resident_overhead() {
     ];
     // 4. The chunked-upload fix candidate: same 1024 MiB in 64 MiB pieces.
     const CHUNK_MIB: u64 = 64;
+    /// `paramstore::UPLOAD_CHUNK_WORDS` (1 << 20 words = 4 MiB) - the chunk
+    /// size every real weight upload in this repo actually uses, and the one
+    /// number in this file that describes production rather than a probe.
+    /// Whether staging is sub-allocated from a pooled block or gets its own
+    /// `VkDeviceMemory` turns on how this compares to the allocator's block
+    /// size, so the two chunk sizes measure genuinely different paths.
+    const PROD_CHUNK_MIB: u64 = 4;
     rows.push(probe_storage(&gpu, "wgpu-1024mib-chunked64", 1024, Upload::Chunked((CHUNK_MIB * 1024 * 1024 / 4) as usize)));
+    let wgpu_upload_gbs = probe_upload_gbs(&gpu, 1024, 3, How::OneShot);
+    let wgpu_upload_chunked_gbs = probe_upload_gbs(&gpu, 1024, 3, How::Chunked(CHUNK_MIB));
+    let wgpu_upload_prod_gbs = probe_upload_gbs(&gpu, 1024, 3, How::Chunked(PROD_CHUNK_MIB));
+    let wgpu_upload_bounded_gbs = probe_upload_gbs(&gpu, 1024, 3, How::ChunkedFlushed(PROD_CHUNK_MIB));
 
     // 5. Same probe, on brain's own native Vulkan backend instead of wgpu.
     // Drop the wgpu device fully first (one GPU device per process is the
     // house rule, and a live second device would confound the delta anyway).
     drop(gpu);
     settle();
+    let mut vk_upload_gbs = None;
     match Gpu::try_new_vulkan(KERNELS) {
         Ok(vk_gpu) => {
             rows.push(probe_storage(&vk_gpu, "native-vulkan-1024mib", 1024, Upload::Init));
+            vk_upload_gbs = Some((probe_upload_gbs(&vk_gpu, 1024, 3, How::OneShot), probe_upload_gbs(&vk_gpu, 1024, 3, How::Chunked(PROD_CHUNK_MIB))));
             // 6. Does dropping give it back? Four 1 GiB buffers allocated and
             //    dropped one at a time: ~0 MiB held if Drop frees, ~4096 if
             //    nothing is ever released.
@@ -258,6 +379,13 @@ fn measure_storage_buffer_resident_overhead() {
     }
     if let (Some(a), Some(b)) = (get("wgpu-1024mib"), get("native-vulkan-1024mib")) {
         eprintln!("backend fix:          wgpu={a:.2}x native-vulkan={b:.2}x (delta {:.2}x)  <-- the answer", a - b);
+    }
+    eprintln!("upload 1 GiB one-shot:      wgpu={wgpu_upload_gbs:.2} GB/s");
+    eprintln!("upload 1 GiB, {CHUNK_MIB}MiB chunks: wgpu={wgpu_upload_chunked_gbs:.2} GB/s");
+    eprintln!("upload 1 GiB, {PROD_CHUNK_MIB}MiB chunks:  wgpu={wgpu_upload_prod_gbs:.2} GB/s  <-- the size real weight upload uses");
+    eprintln!("  same, submitting per chunk: wgpu={wgpu_upload_bounded_gbs:.2} GB/s  <-- live staging bounded to one chunk");
+    if let Some((one, prod)) = vk_upload_gbs {
+        eprintln!("  same, native-vulkan:      one-shot={one:.2} GB/s {PROD_CHUNK_MIB}MiB-chunked={prod:.2} GB/s");
     }
     // Unlike the ratios above (a diagnostic a human reads), this one IS a
     // gate: "a dropped buffer frees" is a correctness property, not a

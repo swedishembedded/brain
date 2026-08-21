@@ -486,3 +486,225 @@ half-applied swap to revert (`Cargo.toml` is unmodified).
 reasoning should be updated - the 2x is not a property of non-ReBAR Pascal, it
 is wgpu staging landing in a host-visible VRAM heap that this card happens to
 expose at full size.
+
+## 2026-08-21: the 2.00x is fixed, in wgpu, and it measures 1.00x
+
+Hardware: 2x Tesla P40 (GP102, 24 GB, driver 570.195.03), the same box every
+number above was taken on. Baseline re-confirmed on an idle box before
+touching anything, so the before/after pair is one session's own measurement
+rather than a comparison against a remembered number:
+
+| probe (1024 MiB logical) | before | after |
+|---|---:|---:|
+| `wgpu-256mib` | 2.00x | **1.00x** |
+| `wgpu-1024mib` | 2.00x | **1.00x** |
+| `wgpu-1024mib-nocopysrc` | 2.00x | **1.00x** |
+| `wgpu-1024mib-alloconly` | 1.00x | 1.00x |
+| `wgpu-1024mib-chunked64` | 2.00x | **1.00x** |
+| `native-vulkan-1024mib` | 1.00x | 1.00x |
+
+The wgpu backend now costs exactly what it allocates, matching this repo's own
+native Vulkan backend on the same card. A 22 GB checkpoint uploaded through
+`Queue::write_buffer` no longer needs 44 GB of a 24 GB card to be resident.
+
+### One correction to the section above, from reading the allocator's source
+
+That section attributes the cumulative cost to `gpu-allocator` "pooling freed
+blocks rather than returning `VkDeviceMemory` to the driver". Only half of that
+is true, and the half that matters is different.
+`gpu_allocator::vulkan::MemoryType::free` destroys a block as soon as it is
+empty whenever the block is dedicated, or is a general block that is not the
+last one - and any allocation larger than the configured memblock size (which
+`wgpu-hal` derives from `wgt::MemoryHints`: 8-64 MiB of device / 4-32 MiB of
+host memory under `MemoryUsage`, which is what `crates/backend-wgpu` selects
+unless `BRAIN_GPU_MEM_PERF=1`) gets exactly such a dedicated block. A 1 GiB
+staging buffer is therefore created and destroyed per upload, not pooled.
+
+What the probe actually measures is that the staging copy is **resident at the
+same time as its destination**: `wgpu_core` holds the staging buffer in its
+pending-writes temporaries until the submission consuming it retires, so peak
+resident is 2N for an N-byte upload, and a loader staging tensor after tensor
+pays that peak for the whole load. That also explains the chunked probe, which
+the old framing had to hand-wave: 64 MiB chunks do not help because all of the
+chunks are live at once, not because a pool refuses to release them. The
+practical consequence for placement is identical, so no earlier conclusion
+changes - but the next person reading this should not go looking for a pool
+that is not there.
+
+### The fix, and why it is four lines rather than a staging-buffer rewrite
+
+The previous section had the mechanism right and the conclusion wrong. It
+concluded that correcting the memory-type *policy* needed either a new
+`gpu_allocator::MemoryLocation` variant upstream or wgpu-hal selecting memory
+types itself, because `MemoryLocation` has no "host-preferred staging" variant
+and `CpuToGpu`'s `DEVICE_LOCAL` preference is a third-party crate's policy.
+Both are true. Neither is necessary, because the memory type is not the only
+input to `gpu-allocator`'s choice: the caller also supplies
+`vk::MemoryRequirements::memory_type_bits`, the set of types the allocation is
+*allowed* to use, and `gpu-allocator` intersects its preference with that set
+before falling back (`gpu_allocator::vulkan::Allocator::allocate`, the
+`mem_loc_preferred_bits` / `mem_loc_required_bits` pair). Clearing the
+device-local types out of `memory_type_bits` for exactly the buffers that
+should not be device local makes `CpuToGpu`'s preferred search find nothing and
+fall through to its required `HOST_VISIBLE | HOST_COHERENT`, i.e. system RAM,
+with no new API and no change to `gpu-allocator` at all.
+
+So the whole fix is in `wgpu-hal/src/vulkan`: a second memory-type mask
+computed once at device creation (`adapter.rs`, host-visible types that are not
+device local), stored on `Device` (`mod.rs`), and applied in `create_buffer`
+(`device.rs`) to upload staging buffers only.
+
+Three conditions keep it from changing placement anywhere it should not, which
+is the part that needed thought rather than code:
+
+* **Only pure upload staging.** Usage must be `MAP_WRITE` and nothing beyond
+  `COPY_SRC` - which is exactly and only what `wgpu_core::resource::
+  StagingBuffer::new` allocates for every `Queue::write_buffer`/`write_texture`.
+  Such a buffer is written once by the CPU and read once by the transfer queue;
+  no shader ever touches it, so device-local placement buys it nothing. A
+  mappable uniform/storage/vertex buffer that a shader DOES read directly still
+  gets `CpuToGpu`, which is the right answer on an integrated or
+  resizable-BAR part and is where the ledger's "the current choice is right for
+  some hardware" caution actually applies.
+* **Only when the device has somewhere else to put it.** The mask is applied
+  only if it is non-empty for this allocation. A unified integrated GPU, where
+  every host-visible type is also `DEVICE_LOCAL`, computes an empty mask and is
+  untouched - no behaviour change and, importantly, no allocation failure from
+  masking away every candidate.
+* **Readback is not involved.** `MAP_READ` maps to `GpuToCpu`, which already
+  prefers host memory and wants `HOST_CACHED`.
+
+Note what the fix does NOT rely on: any attempt to tell a "small non-ReBAR BAR
+window" apart from "the whole VRAM heap". That distinction is not visible
+through the Vulkan API on this driver (it reports one 24 GiB
+`DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` type either way), and it is not
+the right question. The right question is what the buffer is FOR, which the
+usage flags answer exactly.
+
+### Where the code is
+
+* **wgpu**: `github.com/swedishembedded/wgpu`, branch
+  `v29-staging-host-memory`, one commit (`bc0a87788`, "vulkan: stage uploads in
+  host memory, not in the VRAM heap"), cut from the upstream **v29.0.4 tag**
+  (`e99f5305d`), +81 lines across `wgpu-hal/src/vulkan/{adapter,device,mod}.rs`
+  and `CHANGELOG.md`. **This branch exists only in the local clone**: this
+  session had no push credentials for the fork, and per standing instruction
+  surfaced that rather than attempting the push. Until it is pushed, the
+  `[patch]` in the workspace root `Cargo.toml` stays commented out.
+* **gpu-allocator**: cloned for verification alongside the other checkouts and
+  read, **not modified**. Confirmed to be Traverse-Research's crate, version
+  0.28.0 from the crates.io registry - the same source `wgpu-hal` 29.0.4 and
+  the fork's own manifest both name. No fork of it is needed: see above for why
+  the fix does not require a new `MemoryLocation`.
+* **brain**: the `[patch.crates-io]` note in the workspace root `Cargo.toml`,
+  `.cargo/config.toml.example` plus a `.gitignore` entry for the real
+  `.cargo/config.toml`, and this file. Nothing in `crates/` changed except the
+  gate below.
+
+### The version gap, resolved by not having one
+
+The fork's `trunk` is wgpu 30.0.0 and this workspace pins `wgpu = "29"`, which
+is what stopped the previous session. But upstream keeps a **`v29` release
+branch**, whose head is the `v29.0.4` tag - byte-identical, verified by diff,
+to the `wgpu-hal` 29.0.4 source this workspace was already building from
+crates.io. Branching the fix from there means the patched dependency resolves
+as 29.0.4 exactly, so `crates/backend-wgpu` needs no API migration, no v29->v30
+diff had to be evaluated, and no risk was taken with a major version bump. The
+v30 line does not enter into it.
+
+### How it is wired, and how both halves were verified
+
+`paths` in `.cargo/config.toml` (gitignored, machine-specific) and
+`[patch.crates-io]` in the workspace root `Cargo.toml` (committed, portable)
+are two different mechanisms for the same override, and both were exercised
+rather than reasoned about:
+
+* The `paths` override resolves the whole wgpu tree from a local checkout and
+  is what every measurement in this section was taken through. Cargo warns on
+  every invocation that the override "has altered the original list of
+  dependencies" (a crate's in-repo manifest never lists exactly what its
+  published form does); the warning is inherent to the mechanism, cargo says it
+  may become a hard error some day, and `.cargo/config.toml.example` documents
+  the fallback if it ever does.
+* The `[patch.crates-io]` git entry was verified to resolve for real - against
+  a `file://` URL on the local clone, since the fork branch is not pushed yet -
+  and pulls `wgpu`, `wgpu-core`, `wgpu-hal`, `wgpu-types` and `naga` from the
+  one entry, all five landing in `Cargo.lock` at 29.0.4. Swapping that URL for
+  the GitHub one changes nothing else.
+* With both present, the `paths` override wins, which is the intended
+  precedence: a developer editing the dependency builds against their working
+  tree while everyone else builds against the pinned rev.
+
+### The gate
+
+`crates/gpu-core/tests/vram_overhead.rs` keeps its shape and gains one probe:
+**host-to-device upload throughput**, best of three 1 GiB uploads with
+allocation excluded. Where staging lives decides the resident cost and the
+upload cost at once - host memory costs no VRAM but adds a DMA hop - and a
+change that won on one side while quietly losing on the other would be no win,
+so the file now measures both instead of asserting one and assuming the other.
+Its stale "the fix is `--device vulkan`, not a wgpu-level change" conclusion is
+replaced by what actually happened.
+
+`cargo test -p brain-gpu-core -p brain-backend-wgpu --lib --tests` against the
+patched dependency: **89 passed, 0 failed**, no regressions.
+
+### The cost side: this is a trade, not a free win
+
+The upload-throughput probes were added to this gate together with the fix,
+precisely so the other half of the trade could not be assumed. They found a
+real regression, and it is large enough that the fix is deliberately left
+OPT-IN (the `[patch]` is commented out) rather than made the default.
+
+Best of three 1 GiB uploads, destination allocation excluded, P40, idle box
+for the unpatched arm:
+
+| upload shape | unpatched (VRAM staging) | patched (host staging) |
+|---|---:|---:|
+| one `write_f32` of 1 GiB | 1.11 GB/s | 0.54 GB/s |
+| `write_f32_chunked`, 64 MiB | 1.18 GB/s | 0.46 GB/s |
+| `write_f32_chunked`, 4 MiB (`paramstore::UPLOAD_CHUNK_WORDS`, the real path) | 1.16 GB/s | 0.43 GB/s |
+| 4 MiB chunks, submitting after each | not measured | 0.40 GB/s |
+
+The patched numbers are stable at 0.4-0.55 GB/s across five separate runs and
+across every granularity, including runs where the box was contended and runs
+where it was not, so this is a deterministic cost and not measurement noise.
+
+**A hypothesis that was tested and is wrong.** The obvious explanation was
+volume of live staging: `wgpu_core` allocates a fresh staging buffer per
+`write_buffer` and holds all of them until the next submission, so 1 GiB of
+upload means 1 GiB of staging live at once - which in host memory is 1 GiB the
+driver must page-pin per upload, where the same thing in VRAM is nearly free.
+If that were the whole story, submitting after every chunk (bounding live
+staging to one 4 MiB chunk, which is what this repo's own native Vulkan
+backend effectively does with its single reused staging buffer) would recover
+the throughput. It does not: 0.40 GB/s, no better than not bounding it. That
+last row is dominated by its own 256 submit+fence round trips, so the
+experiment is inconclusive rather than a clean refutation - but it definitely
+does not support the pinning-volume story, and the cost is at least partly the
+host memory path itself on this driver.
+
+**What is NOT explained.** The native Vulkan backend asks for the same
+`HOST_VISIBLE | HOST_COHERENT` properties, and its `find_memory_type` takes the
+same first match - memory type 8 - yet uploads at 1.84-3.41 GB/s through it.
+Same card, same memory type, 4-8x the throughput. The difference must be in
+how the upload is issued (one persistently reused staging buffer, mapped once,
+versus a fresh allocate + map + unmap per `write_buffer`), not in where the
+memory lives. Nailing that down is the next piece of work, and it is the piece
+that would turn this trade into an unqualified win.
+
+**So the honest summary of the trade, on this hardware:**
+
+* Loading a large model: strongly positive. A 22 GB checkpoint needed 44 GB of
+  peak VRAM through wgpu and therefore could not load on a 24 GB card at all;
+  now it needs 22 GB and fits. The load itself costs roughly 51 s instead of
+  19 s - a one-time cost against a capability that did not exist before.
+* An upload-heavy inner loop: negative. `.agents/roadmap`'s own LTX numbers
+  above put activation/context/adaLN upload at 1393 ms per forward on wgpu;
+  at these rates that becomes several seconds per forward. That is a real
+  per-step regression, not a one-time one.
+
+Which is why the committed default is unchanged and the fix is one uncomment
+away, with this table next to it. The decision of when to turn it on is a
+placement decision per workload, and it should be made with these numbers in
+hand rather than by a patch silently changing under a benchmark.
