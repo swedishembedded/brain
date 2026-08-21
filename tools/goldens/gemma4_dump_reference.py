@@ -104,17 +104,25 @@ reproduce the real LTX-2.5 conditioning path bit-for-bit.
 
 `text_embedding_projection.{video,audio}_aggregate_embed` (real header:
 `Linear(3840*49 -> 4096 or 2048)`) is LTX's OWN addition on top of the
-Gemma4Unified text tower, not part of `transformers` at all - there is no
-reference implementation to import. This dumper builds the simplest structural
-match to the confirmed tensor shape - a single seeded `nn.Linear(hidden*(N+1),
-AGG_OUT, bias=True)` fed the token-wise concatenation of the FULL
-`hidden_states` tuple (embedding + N-1 raw layer outputs + the post-norm final
-state, in the exact order above) - and dumps both its weight/bias and its
-output as a tap. This is a documented judgment call, not a confirmed detail:
-the real module's internal structure (whether it has a bias, an extra norm
-before the linear, etc.) is not derivable from a tensor-name/shape header
-alone; only the SHAPE (`188160 = hidden*49`) and the "consumes all 49 states"
-behavior are pinned by the roadmap.
+Gemma4Unified text tower, not part of `transformers` at all. It is not,
+however, undocumented: the module it lives inside is
+`ltx_core.text_encoders.gemma.feature_extractor.FeatureExtractorV2`
+(`resources/ltxv/source/packages/ltx-core/src/ltx_core/text_encoders/gemma/
+feature_extractor.py`), and `feature_extractor_v2` below transcribes its input
+transform - per-token, per-state RMS normalization over the hidden axis
+followed by a `sqrt(out_dim / hidden_size)` rescale - before the seeded
+`nn.Linear(hidden*(N+1), AGG_OUT, bias=True)` this dumper stands in for the
+real weights with.
+
+An earlier version of this section called the plain concatenate-then-project
+shape "the simplest structural match to the confirmed tensor shape" and a
+"documented judgment call", on the premise that only the SHAPE was derivable.
+That premise was wrong twice over - the reference module exists and was simply
+not read, and the guess it licensed was not scale-neutral: the 49 raw states
+differ in magnitude by orders of magnitude, so an un-normalized concatenation
+projects to a near-constant vector with the caption's own content surviving as
+a few-percent residual, which made two unrelated captions decode to the same
+video.
 
 ## Self-validation (no ground truth beyond the structural invariants below)
 
@@ -136,6 +144,7 @@ Usage:
 
 import argparse
 import hashlib
+import math
 import json
 import os
 import sys
@@ -207,6 +216,25 @@ def build_model(seed):
     model = Gemma4UnifiedTextModel(cfg)
     model.eval().requires_grad_(False)
     return model, cfg
+
+
+def feature_extractor_v2(hidden_states, out_dim, embedding_dim):
+    """`ltx_core.text_encoders.gemma.feature_extractor.FeatureExtractorV2`'s
+    input transform, transcribed from the reference (`resources/ltxv/source/
+    packages/ltx-core/src/ltx_core/text_encoders/gemma/feature_extractor.py`):
+    per-token, per-state RMS normalization over the hidden axis
+    (`norm_and_concat_per_token_rms`, no learned weight, no mean subtraction,
+    `eps=1e-6` inside the rsqrt), then `_rescale_norm` -
+    `* sqrt(out_dim / embedding_dim)`.
+
+    Every prompt here is a single unpadded sequence, so the reference's
+    padded-position zeroing is a no-op and no mask is threaded through.
+    """
+    encoded = torch.stack([h[0] for h in hidden_states], dim=-1)  # [T, D, L]
+    variance = torch.mean(encoded**2, dim=1, keepdim=True)  # [T, 1, L]
+    normed = encoded * torch.rsqrt(variance + 1e-6)
+    normed = normed.reshape(encoded.shape[0], -1)  # [T, D*L]
+    return normed * math.sqrt(out_dim / embedding_dim)
 
 
 def build_aggregate(seed, hidden, n_states, out_dim):
@@ -305,8 +333,8 @@ def main():
 
     # ---- LTX's own aggregate-embed projection over all n+1 hidden states -----
     agg = build_aggregate(args.seed, cfg.hidden_size, n + 1, AGG_OUT)
-    concat = torch.cat([h[0] for h in hs], dim=-1)  # [T, hidden*(n+1)]
-    agg_out = agg(concat)
+    features = feature_extractor_v2(hs, AGG_OUT, cfg.hidden_size)  # [T, hidden*(n+1)]
+    agg_out = agg(features)
     assert not agg_out.isnan().any()
 
     tensors = {

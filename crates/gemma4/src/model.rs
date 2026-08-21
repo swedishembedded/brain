@@ -300,12 +300,13 @@ pub fn forward_streamed(
 /// LTX's own `text_embedding_projection.{video,audio}_aggregate_embed` -
 /// `Linear(hidden*(num_hidden_layers+1) -> out_dim)` over the token-wise
 /// concatenation of the FULL `hidden_states` tuple (see this module's doc for
-/// its exact per-entry semantics). Not an HF class - LTX's own addition on
-/// top of the Gemma4Unified text tower; see `tools/goldens/
-/// gemma4_dump_reference.py`'s module doc for what is confirmed (the tensor
-/// shape) vs. a documented judgment call (plain `Linear` with bias, no extra
-/// norm - the real module's internals beyond the shape are not derivable
-/// from a checkpoint header alone).
+/// its exact per-entry semantics), with the reference's per-token, per-layer
+/// RMS normalization and rescale applied to that concatenation FIRST - see
+/// [`AggregateEmbed::forward`]. Not an HF class: LTX's own addition on top of
+/// the Gemma4Unified text tower, implemented in
+/// `ltx_core.text_encoders.gemma.feature_extractor.FeatureExtractorV2`
+/// (`resources/ltxv/source/packages/ltx-core/src/ltx_core/text_encoders/
+/// gemma/feature_extractor.py`).
 pub struct AggregateEmbed {
     weight: Vec<f32>,
     bias: Vec<f32>,
@@ -372,14 +373,61 @@ impl AggregateEmbed {
     /// workspace's shared parallel matrix-vector product (the same one
     /// `ltxv::dit`'s host GEMMs use) and is called directly rather than
     /// wrapped, so the row-splitting exists once.
+    ///
+    /// # The normalization and the column order are part of the projection
+    ///
+    /// The linear is fed `norm_and_concat_per_token_rms` followed by
+    /// `_rescale_norm` - `ltx_core.text_encoders.gemma.feature_extractor.
+    /// FeatureExtractorV2.forward`, the module the real 22B checkpoint's
+    /// `text_embedding_projection` lives inside:
+    ///
+    /// 1. every `(token, state)` slice of the `[t, hidden, n_states]` stack
+    ///    is scaled to unit RMS over the `hidden` axis,
+    ///    `x * rsqrt(mean(x^2) + 1e-6)` - no learned weight, no mean
+    ///    subtraction, and INDEPENDENTLY per state, which is the whole point;
+    /// 2. that `[t, hidden, n_states]` stack is flattened as-is
+    ///    (`torch.stack(hidden_states, dim=-1)` then `.reshape(B, T, D*L)`),
+    ///    so input column `d*n_states + k` is state `k`'s coordinate `d` -
+    ///    the states are INTERLEAVED per hidden dimension, NOT laid out as
+    ///    `n_states` contiguous `hidden`-wide blocks;
+    /// 3. the result is multiplied by `sqrt(out_dim / hidden)`
+    ///    (`_rescale_norm(x, out_features, embedding_dim)`, where
+    ///    `embedding_dim` is the text tower's own `hidden_size` - the
+    ///    `hidden` argument here).
+    ///
+    /// All three were wrong for as long as this function existed, on the
+    /// documented (and wrong) premise that a checkpoint header's tensor
+    /// shape was all there was to derive the module from. Neither error is
+    /// one a downstream norm absorbs. The wrong column order permutes the
+    /// weight matrix outright, and the 49 raw Gemma states differ in
+    /// magnitude by orders of magnitude, so an un-normalized flatten - and
+    /// therefore every row of the DiT's text context - was dominated by the
+    /// largest states' near-constant component, leaving the caption's own
+    /// content as a ~5% residual. Two entirely different prompts produced
+    /// context matrices whose mean rows sat at cosine 0.9998 of each other,
+    /// and a text-to-video generation reproduced the same scene whatever it
+    /// was asked for.
+    ///
+    /// The reference additionally zeroes padded positions here; this function
+    /// is only ever handed a prompt's REAL tokens (`crate::pipeline` in
+    /// `ltxv` pads afterwards, and the embeddings connector overwrites the
+    /// padded tail with its learnable registers anyway), so there is no mask
+    /// argument to honor.
     pub fn forward(&self, hidden_states: &[Vec<f32>], t: usize, hidden: usize) -> Vec<f32> {
         let n_states = hidden_states.len();
         assert_eq!(self.in_dim, hidden * n_states, "AggregateEmbed: in_dim {} != hidden*n_states {}", self.in_dim, hidden * n_states);
+        // `_rescale_norm(x, target_dim=out_features, source_dim=embedding_dim)`.
+        let rescale = (self.out_dim as f32 / hidden as f32).sqrt();
         let mut concat_row = vec![0f32; self.in_dim];
         let mut out = vec![0f32; t * self.out_dim];
         for ti in 0..t {
             for (k, hs) in hidden_states.iter().enumerate() {
-                concat_row[k * hidden..(k + 1) * hidden].copy_from_slice(&hs[ti * hidden..ti * hidden + hidden]);
+                let slice = &hs[ti * hidden..ti * hidden + hidden];
+                let ms = slice.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / hidden as f64;
+                let inv = (1.0 / (ms + 1e-6).sqrt()) as f32 * rescale;
+                for (d, &v) in slice.iter().enumerate() {
+                    concat_row[d * n_states + k] = v * inv;
+                }
             }
             let row = model::hostmath::matvec_par(&self.weight, &concat_row, self.out_dim, self.in_dim);
             for (o, v) in row.iter().enumerate() {
@@ -422,9 +470,83 @@ mod tests {
 
         let hidden_states: Vec<Vec<f32>> = (0..n_states).map(|_| vec![1.0f32; hidden]).collect();
         let audio_out_vals = audio.forward(&hidden_states, 1, hidden);
-        // weight=2.0 everywhere, in_dim=12 ones summed -> 24.0, + bias 7.0.
-        assert_eq!(audio_out_vals, vec![31.0; audio_out]);
+        // An all-ones slice is already unit-RMS, so the normalization is the
+        // identity here and only the reference's `_rescale_norm` factor
+        // `sqrt(out_dim/hidden)` remains: weight=2.0 everywhere, in_dim=12
+        // ones summed -> 24.0, scaled by sqrt(2/4), + bias 7.0.
+        let want = 24.0 * (audio_out as f32 / hidden as f32).sqrt() + 7.0;
+        for v in &audio_out_vals {
+            assert!((v - want).abs() < 1e-4, "audio head: {v} != {want}");
+        }
         let video_out_vals = video.forward(&hidden_states, 1, hidden);
         assert_ne!(video_out_vals.len(), audio_out_vals.len());
+    }
+
+    /// The projection's INPUT is per-token, per-layer RMS-normalized and then
+    /// rescaled - `ltx_core.text_encoders.gemma.feature_extractor.
+    /// FeatureExtractorV2.forward`'s `norm_and_concat_per_token_rms` followed
+    /// by `_rescale_norm(x, out_features, embedding_dim)`. Skipping it is not
+    /// a scale detail: raw Gemma hidden states differ in magnitude by orders
+    /// of magnitude across the 49 states, so a plain concatenate-then-project
+    /// is dominated by whichever state happens to be largest and the
+    /// per-token caption content survives only as a few-percent residual on a
+    /// near-constant vector - which is what a text-to-video prompt then fails
+    /// to steer: two unrelated prompts decoded to the same picture.
+    ///
+    /// Two properties pin the whole formula:
+    ///
+    /// * scaling ONE token's ONE layer slice by any positive factor must not
+    ///   change that token's output at all (this is what the norm buys, and
+    ///   exactly what a plain `Linear` over the raw concatenation lacks);
+    /// * the surviving scale is the reference's `sqrt(out_dim/hidden)`, not 1.
+    #[test]
+    fn the_projection_rms_normalizes_every_layer_slice_and_rescales() {
+        let (hidden, n_states, out_dim) = (4usize, 3usize, 2usize);
+        let in_dim = hidden * n_states;
+        // Row `o` reads exactly one input coordinate: row 0 -> state 0's dim
+        // 0, row 1 -> state 1's dim 0. That makes the expected value a closed
+        // form rather than a re-implementation of the function under test -
+        // and it pins the reference's INTERLEAVED column order at the same
+        // time (state `k`, dim `d` lives at `d*n_states + k`, so state 1's
+        // dim 0 is column 1, not column `hidden`).
+        let mut weight = vec![0f32; out_dim * in_dim];
+        weight[0] = 1.0;
+        weight[in_dim + 1] = 1.0;
+        let agg = AggregateEmbed::new(weight, vec![0.0; out_dim], in_dim, out_dim);
+
+        // Token 0 and token 1 carry the SAME directions; token 1's slices are
+        // scaled by 10x (layer 0) and 7x (layer 1) - the spread across states
+        // that the real 49-state stack has and that the norm exists to remove.
+        let hidden_states = vec![
+            vec![3.0, 1.0, 1.0, 1.0, /* token 1 */ 30.0, 10.0, 10.0, 10.0],
+            vec![1.0, 1.0, 1.0, 1.0, /* token 1 */ 7.0, 7.0, 7.0, 7.0],
+            vec![0.0, 0.0, 0.0, 0.0, /* token 1 */ 0.0, 0.0, 0.0, 0.0],
+        ];
+        let out = agg.forward(&hidden_states, 2, hidden);
+
+        let rescale = (out_dim as f32 / hidden as f32).sqrt();
+        // layer 0, token 0: mean square = (9+1+1+1)/4 = 3, so dim 0 normalizes
+        // to 3/sqrt(3) = sqrt(3).
+        let want0 = 3.0f32 / 3.0f32.sqrt() * rescale;
+        // layer 1, token 0: an all-ones slice is already unit RMS.
+        let want1 = 1.0f32 * rescale;
+        assert!((out[0] - want0).abs() < 1e-5, "token 0 row 0: {} != {want0}", out[0]);
+        assert!((out[1] - want1).abs() < 1e-5, "token 0 row 1: {} != {want1}", out[1]);
+        assert!((out[out_dim] - want0).abs() < 1e-5, "a 10x-larger layer slice changed the output: {} != {want0}", out[out_dim]);
+        assert!((out[out_dim + 1] - want1).abs() < 1e-5, "a 7x-larger layer slice changed the output: {} != {want1}", out[out_dim + 1]);
+    }
+
+    /// An all-zero layer slice has no direction to normalize, and the
+    /// reference's `+1e-6` inside the `rsqrt` is what keeps it finite rather
+    /// than producing NaNs that would poison the whole 49-state
+    /// concatenation.
+    #[test]
+    fn an_all_zero_layer_slice_stays_finite() {
+        let (hidden, n_states, out_dim) = (4usize, 2usize, 2usize);
+        let in_dim = hidden * n_states;
+        let agg = AggregateEmbed::new(vec![1.0; out_dim * in_dim], vec![0.0; out_dim], in_dim, out_dim);
+        let hidden_states = vec![vec![0.0f32; hidden], vec![1.0f32; hidden]];
+        let out = agg.forward(&hidden_states, 1, hidden);
+        assert!(out.iter().all(|v| v.is_finite()), "an all-zero slice produced non-finite output: {out:?}");
     }
 }
