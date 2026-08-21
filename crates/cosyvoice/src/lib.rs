@@ -68,8 +68,23 @@
 //! an unoptimized debug build (minutes in release, much longer in debug) - a
 //! recorded performance follow-up, not a correctness gap.
 //!
-//! The HiFT vocoder and pipeline assembly do not exist yet, so the pipeline
-//! as a whole is **still not servable end-to-end**.
+//! The HiFT vocoder (`HiFTGenerator`, CosyVoice 2 non-causal only - see
+//! [`hift`]/[`hift_config`]/[`hift_import`]) is implemented and
+//! forward-parity-proven against the real `hift.pt`: the conv trunk, NSF
+//! harmonic source excitation, and ISTFT head match the reference's
+//! magnitude/phase/waveform exactly given the same excitation noise.
+//! Production inference draws its own noise from `data::rng::Rng` - an
+//! honest, documented RNG-crossing gap matching [`sampling`]'s. One
+//! empirical finding narrows that gap further than it first looks: the
+//! reference's OTHER random draw (`rand_ini`, the NSF source's initial
+//! phase noise) is provably inert at HiFT's real upsample scale - verified
+//! directly against the reference, not assumed - so it never has to be
+//! modeled at all. `CausalHiFTGenerator` (CosyVoice 3, causal convs, no
+//! `cache_source` state) is a deliberate follow-up, not implemented.
+//!
+//! Pipeline assembly (streaming `token2wav`, chunking, cross-fade) does not
+//! exist yet, so the pipeline as a whole is **still not servable
+//! end-to-end**.
 //!
 //! Swedish Embedded AB implements solutions for from-scratch, dependency-light
 //! neural network inference on constrained and embedded targets for its
@@ -81,6 +96,9 @@ pub mod config;
 pub mod flow;
 pub mod flow_config;
 pub mod flow_import;
+pub mod hift;
+pub mod hift_config;
+pub mod hift_import;
 pub mod llm;
 pub mod llm_import;
 pub mod sampling;

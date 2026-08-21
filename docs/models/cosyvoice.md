@@ -10,9 +10,9 @@ generations (`FunAudioLLM/CosyVoice2-0.5B`,
 `FunAudioLLM/Fun-CosyVoice3-0.5B-2512`) as a config, not two ids - see
 `crates/arch`'s own naming rule.
 
-**Still not servable end-to-end** - the flow decoder and HiFT vocoder do not
-exist yet. The speech-token LM (below) is implemented and forward-parity
-proven.
+**Still not servable end-to-end** - pipeline assembly (streaming `token2wav`,
+chunking) does not exist yet. The speech-token LM, flow decoder, and HiFT
+vocoder (below) are each implemented and forward-parity proven individually.
 
 ## Status
 
@@ -81,12 +81,85 @@ Raw-text prompt assembly (tokenizer + CosyVoice's text-normalization front
 end) is not wired up yet - the parity test drives the LM from the golden's
 own pre-tokenized ids, not from raw text.
 
+**Flow decoder (`CausalMaskedDiffWithXvec`, CosyVoice 2 only) done through
+forward parity.** `crates/cosyvoice/src/{flow,flow_config,flow_import,
+torch_rng}.rs`: `UpsampleConformerEncoder` (ESPnet Transformer-XL-style
+relative-position attention) feeding `CausalConditionalDecoder`, a
+56-transformer + 14-resnet-block UNet driven by a 10-step
+classifier-free-guided Euler ODE solver. Host CPU throughout. Real finding,
+verified by reading the reference line-for-line: the UNet never actually
+changes resolution (`channels=[256]` makes every down/up stage `is_last`, so
+the "downsample"/"upsample" convs are both stride-1 causal `Conv1d(256,256,3)`).
+
+The fixed CFM noise buffer (`torch.manual_seed(0); torch.randn([1,80,15000])`,
+a plain attribute never stored in the checkpoint) is reproduced by
+`flow::torch_rng`, a bit-exact Rust port of PyTorch's CPU RNG - MT19937
+seeding/tempering plus the AVX2 `normal_fill_16` Box-Muller kernel,
+including replicating the compiler's own FMA instruction-fusion effects
+(found by comparing GIMPLE dumps of a standalone-compiled `avx_mathfun.h`
+against a first naive port that was off by 1 ULP on about 1% of values) -
+not a checked-in data asset, which this repo's large-file gate bans outright
+for a regenerable buffer of this kind.
+
+**Parity vs the real `flow.pt`** (`crates/cosyvoice/tests/flow_parity.rs`,
+gated on `BRAIN_COSYVOICE_FLOW`, real fixture inputs throughout - no
+hand-assembled data): condition assembly (`conds`/`mu`/`embedding`) cosine
+**1.0000000000**; the 10-step Euler loop replayed from the golden's own
+captured entry state matches all 10 steps; a full independent from-scratch
+forward (this port's own encoder feeding this port's own Euler loop) matches
+the reference mel output. Streaming/chunked attention is a documented,
+not-yet-implemented gap.
+
+**Recorded performance gap, not a correctness gap**: the flow decoder's
+host-CPU forward is impractically slow in an unoptimized debug build
+(self-attention is a raw scalar loop, not yet dispatched through the fast
+matmul path) - real-weight tests against it need `cargo test --release`
+(confirmed ~5 minutes there vs. tens of minutes and climbing in debug).
+
+**HiFT vocoder (`HiFTGenerator`, CosyVoice 2 non-causal only) done through
+forward parity.** `crates/cosyvoice/src/{hift,hift_config,hift_import}.rs`:
+`ConvRNNF0Predictor` (despite the name, no RNN) -> NSF harmonic source
+excitation (`SourceModuleHnNSF`/`SineGen2`) -> BigVGAN-style conv trunk
+(Snake `ResBlock`s, source-fused per upsample stage) -> ISTFT head -> 24 kHz
+waveform. No new kernels - every conv reuses `audio::conv`'s reference
+kernels, `audio::snake`/`audio::act` for activations, `audio::istft` for the
+STFT/ISTFT pair.
+
+Real, load-bearing gotcha, verified directly against the reference:
+`SineGen2` draws fresh `torch.rand`/`torch.randn` from PyTorch's global RNG
+on every call, so real HiFT output is not reproducible run-to-run without
+reseeding. One empirical finding narrows this further: the `rand_ini` draw
+(initial phase noise) is provably inert at HiFT's real `upsample_scale=480`
+- the downsample-interpolation step's first sampled input index is 239/240,
+never index 0, the one `rand_ini` perturbs (verified by running the real
+reference twice with different seeds and confirming bit-identical output).
+The only draw that genuinely reaches the output is
+`torch.randn_like(sine_waves)`; production inference
+(`hift::forward_seeded`) draws its own noise from `data::rng::Rng` - the
+same honest RNG-crossing gap the LM's `sampling` module documents.
+
+**Parity vs the real `hift.pt`** (`crates/cosyvoice/tests/hift_parity.rs`,
+gated on `BRAIN_COSYVOICE_HIFT`): magnitude/phase/waveform match the
+reference exactly given the same NSF excitation noise (injected from an
+ad-hoc, uncommitted capture against the real checkpoint, not a `tools/goldens/`
+fixture - the magnitude/phase/waveform rung skips cleanly on a box without
+it, while import-coverage and tiny-smoke tests still run); production
+`forward_seeded` is verified deterministic and bounded given its own seed.
+`CausalHiFTGenerator` (CosyVoice 3, causal convs, no `cache_source` state)
+is a deliberate follow-up, not implemented.
+
+Raw-text prompt assembly (tokenizer + CosyVoice's text-normalization front
+end) is not wired up yet - parity tests drive each component from the
+golden's own pre-tokenized/pre-extracted fixtures, not from raw text or
+audio. Pipeline assembly (streaming `token2wav`, chunking, cross-fade)
+does not exist yet.
+
 Weights env vars:
 
 | Variable | Role |
 |---|---|
 | `BRAIN_COSYVOICE_LLM` | speech-token LM (`llm.pt`) - read by `crates/cosyvoice/tests/llm_parity.rs` |
-| `BRAIN_COSYVOICE_FLOW` | flow decoder (`flow.pt`) - reserved, not yet read |
-| `BRAIN_COSYVOICE_HIFT` | HiFT vocoder (`hift.pt`) - reserved, not yet read |
+| `BRAIN_COSYVOICE_FLOW` | flow decoder (`flow.pt`) - read by `crates/cosyvoice/tests/flow_parity.rs` |
+| `BRAIN_COSYVOICE_HIFT` | HiFT vocoder (`hift.pt`) - read by `crates/cosyvoice/tests/hift_parity.rs` |
 
 Package: `brain-cosyvoice`.
