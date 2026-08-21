@@ -86,6 +86,23 @@ Weights (flag wins over the environment variable):
                                                    encoder (optional; the
                                                    deterministic prompt
                                                    stub runs without it)
+                            $BRAIN_LTXV_UPSAMPLER_SPATIAL  spatial x2 latent
+                                                   upscaler - REQUIRED above
+                                                   6144 video tokens, unused
+                                                   below (see Stages)
+
+Stages:
+  The distilled checkpoint's fixed 8-sigma schedule is only distilled to
+  build a clip from noise at a modest token count - upstream never runs it
+  at the requested resolution, only at half of it, and then refines. Past
+  6144 video tokens (a 25-frame clip above ~1600x896) one stage measurably
+  disintegrates the END of the clip while the start stays correct, so a
+  request past that ceiling runs the reference's own two stages: the full
+  schedule at half resolution, a real x2 latent upscale, then three
+  deterministic refinement steps at the requested size. That needs
+  $BRAIN_LTXV_UPSAMPLER_SPATIAL, and both --width and --height must be
+  multiples of 64 (not just 32) so halving lands on the VAE's own stride.
+  BRAIN_LTXV_TWO_STAGE=1/0 forces the choice either way.
 
 Devices:
   --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)
@@ -250,6 +267,16 @@ fn t2v(args: &[String]) -> Result<(), String> {
     } else {
         format!("{}", o.steps)
     };
+    // Above `SINGLE_STAGE_MAX_TOKENS` the schedule above is stage 1 of two
+    // and runs at HALF this resolution, with a short refinement pass at the
+    // requested one - say so, since otherwise this line reports a token
+    // count no forward in the run actually has (see the Stages section of
+    // `--help`).
+    let stage_desc = if ltxv::pipeline::should_two_stage(tokens, o.width, o.height, o.dit_config == "ltx25_22b") {
+        format!(" [two-stage: {} tokens at {}x{}, then {} refinement steps at {tokens} tokens]", tokens / 4, o.width / 2, o.height / 2, ltxv::pipeline::LTX2_STAGE2_STEPS)
+    } else {
+        String::new()
+    };
     let img_desc = match (o.start_frame.as_deref(), o.end_frame.as_deref()) {
         (Some(s), Some(e)) if s == e => format!(", looped ({s})"),
         (Some(s), Some(e)) => format!(", start-frame ({s}) -> end-frame ({e})"),
@@ -258,7 +285,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         (None, None) => String::new(),
     };
     eprintln!(
-        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}",
+        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}{stage_desc}",
         o.frames, o.width, o.height, o.eta, o.guidance, o.seed
     );
 

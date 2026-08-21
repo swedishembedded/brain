@@ -271,6 +271,47 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
         println!("  substituted latent frame {d} <- {s}");
     }
 
+    // `BRAIN_LTXV_DECODE_UPSAMPLE=<spatial upscaler path>` runs the real x2
+    // latent upscaler over the latent before decoding, with NO refinement
+    // pass. That isolates the upscaler: whatever the decoded result looks
+    // like is what the two-stage path hands its stage 2 as a seed, before
+    // any denoising has had a chance to help or hurt it.
+    let (mut shape, mut data) = (shape, data);
+    if let Ok(up) = std::env::var("BRAIN_LTXV_DECODE_UPSAMPLE") {
+        let raw = checkpoint::safetensors::read(&up).unwrap_or_else(|e| panic!("reading {up}: {e}"));
+        let ucfg = ltxv::upsampler::LatentUpsamplerConfig::spatial_x2();
+        let uw = ltxv::import::import_upsampler(raw, &ucfg).unwrap_or_else(|e| panic!("importing {up}: {e}"));
+        let ups = ltxv::upsampler::LatentUpsampler::build(&ucfg, &uw, shape.t, shape.h, shape.w, Some("gpu"));
+        // The same `upsample_video` sandwich production takes; set
+        // `BRAIN_LTXV_DECODE_UPSAMPLE_RAW=1` to skip it, which is how the
+        // "no un-normalize" row of that function's own table was measured.
+        data = if std::env::var("BRAIN_LTXV_DECODE_UPSAMPLE_RAW").is_ok() {
+            ups.upsample(&data)
+        } else {
+            let vraw2 = checkpoint::safetensors::read(&vae).unwrap_or_else(|e| panic!("reading {vae}: {e}"));
+            let vw = ltxv::import::import_vae(vraw2, &cfg).unwrap_or_else(|e| panic!("importing {vae}: {e}"));
+            let (m, sd) = ltxv::vae3d::per_channel_statistics(&vw);
+            ltxv::upsampler::upsample_video(&ups, &m, &sd, &data)
+        };
+        let (_, _, nh, nw) = ups.out_shape();
+        shape = ltxv::latentdump::LatentShape { c: shape.c, t: shape.t, h: nh, w: nw };
+        println!("  upsampled x2 -> [{}, {}, {}, {}]", shape.c, shape.t, shape.h, shape.w);
+        for ti in 0..shape.t as usize {
+            let plane2 = (shape.h * shape.w) as usize;
+            let (mut n, mut sum, mut sq) = (0usize, 0f64, 0f64);
+            for ci in 0..shape.c as usize {
+                for &v in &data[(ci * shape.t as usize + ti) * plane2..(ci * shape.t as usize + ti + 1) * plane2] {
+                    n += 1;
+                    sum += v as f64;
+                    sq += (v as f64) * (v as f64);
+                }
+            }
+            let mean = sum / n as f64;
+            println!("    upsampled latent frame {ti}: mean {mean:+.5} std {:.5}", (sq / n as f64 - mean * mean).max(0.0).sqrt());
+        }
+    }
+    let plane = (shape.h * shape.w) as usize;
+
     // The crop, in latent cells. A crop keeps every latent frame (the axis the
     // defect under investigation lives on) and narrows the spatial extent
     // until a whole-clip decode fits on one card.

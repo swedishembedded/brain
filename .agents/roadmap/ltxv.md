@@ -3911,3 +3911,282 @@ Nothing here may abort where it could degrade:
   than trade a bit-identity guarantee for 6%.
 * **Fixing `backend-vulkan`.** See item 4: real, pre-existing, out of scope.
 
+
+### Phase 19 - the clip stops falling apart before it ends
+
+A real 1080p generation - real Q8_0 22B DiT, real Gemma-4 encoder, real conv
+VAE, `--start-frame` a real photo, guidance 3.0, seed 42 - produced a clip
+that is correct for its first ~0.7 s and whose last several frames are
+visibly warped and smeared. Reported directly, at 1080p only: the identical
+prompt, image, seed and pipeline at 720p and 512x512 are clean. Two bugs, one
+of them pre-existing and silently passing its own parity gate.
+
+#### 0 - the observable, because none of the existing ones could see this
+
+Every gate in this crate was green through it. `vae_tiling`'s were green
+because the decoder is innocent. `motion_real` was green because the clip DID
+move - `peak_excursion` is a FLOOR, and a clip that runs away from frame 0
+scores BETTER on it the worse it disintegrates. `dit_parity`,
+`host_forward_parity`, `streamed_vs_eager_real` were green because a single
+forward against a golden is correct at any token count. The output statistics
+(min/max/std/nonfinite) were all normal.
+
+What separates the two cases is purely TEMPORAL, and it is one number:
+**`clipmetric::blowup_ratio`**, the largest frame-to-frame difference over the
+MEDIAN one, on a fixed 128x128 box downsample (so a 720p run and a 1080p run
+are comparable). A clip with steady motion holds it near 1 *whatever its own
+pace is*, because the median tracks that pace; a clip that comes apart at one
+point pushes it into double digits. Scored across every real clip this
+session had on disk, it separates cleanly - everything healthy 1.02-1.06,
+one outlier at 14.66 - and it costs nothing to compute.
+
+#### 1 - isolating the decoder from the latent
+
+The first question was whether Phase 16's tiled decode was at fault (1080p is
+the only shape that needs it) or the DiT's own latent. Four independent
+answers, all pointing the same way:
+
+1. **Geometry.** At 25 frames/1920x1088 the auto plan is 3x3 SPATIAL with the
+   temporal axis untiled - `AUTO_FRAMES = (80, 24)` is a 10-latent temporal
+   tile over 4 latent frames, so `split_temporal_causal` returns one interval
+   mapping to all 25 output frames with an all-ones mask (already gated by
+   `a_25_frame_clip_needs_no_temporal_split`; the production log says
+   `tiles=9`). A spatial-only blend is time-invariant. It cannot produce a
+   defect confined to the last 7 of 25 frames.
+2. **Measured, on real content.** The same real 720p latent decoded whole and
+   tiled: blowup 1.04 vs 1.03, agreeing to <= 0.06 in 0-255 units on every
+   frame. The tiled path introduces no temporal instability.
+3. **Spatial signature.** Comparing the worst frame against the last clean
+   one, per 64-px column band, the tile seam bands (px 704-767, 1408-1471)
+   measure 38.2 and 32.8 against a band median of 33.2; the row seams
+   (384-447, 768-831) measure 36.7/37.3 against a row median of 34.5. The
+   LARGEST band, 47.3, is at columns 448-511 - the interior of tile 0. The
+   damage tracks the content, not the geometry.
+4. **The decisive one.** Dump the real final latent
+   (`BRAIN_LTXV_LATENT_DUMP`), take a centre crop small enough to fit, and
+   decode it through the WHOLE path - the tiled decoder never runs. The
+   blowup reproduces at **17.43** (higher than the full clip's 14.66, because
+   the crop is centred where the damage is worst). Then decode the same crop
+   with latent frame 3 replaced by latent frame 2: **1.31**. The defect
+   survives deleting the decoder and vanishes when one latent frame's content
+   is swapped out.
+
+So: the latent. And its statistics name the failure exactly. Per-latent-frame
+standard deviation and adjacent-frame distance, same prompt/seed/image
+throughout:
+
+| request | tokens | LF0 | LF1 | LF2 | LF3 | adjacent \|delta\| |
+|---|---:|---:|---:|---:|---:|---|
+| 960x544 | 2040 | 1.070 | 0.960 | 1.013 | **1.069** | 0.535, 0.451, 0.423 |
+| 1280x704 | 3520 | 1.074 | 0.987 | 1.032 | **1.077** | 0.467, 0.419, 0.405 |
+| 1920x1088 | 8160 | 1.067 | 0.977 | 1.006 | **0.911** | 0.404, 0.386, **0.630** |
+
+A healthy latent's last frame recovers to ~1.07 and its adjacent distances
+DECREASE monotonically. The 1080p latent inverts both: the last frame's
+variance collapses while it sits 1.63x further from its neighbour than the
+pair before it. In pixels that is a discontinuity plus progressive smearing -
+high-frequency energy (mean |Laplacian|, 512x512 gray) is flat at 14.8-15.4
+for frames 0-17 and then falls 11.5, 11.8, 10.9, 11.3, 10.3, 10.8, **8.7**.
+Detail LOSS, not residual noise, which is what ruled out "under-denoised".
+
+Two things this ruled out that were worth ruling out. **The device-residency
+window is not involved**: the run's own log says `device residency planned
+slots=0` at this token count, so Phase 18's `BlockWindow`/`CyclicScan` never
+engages here. **There is no phantom end-frame conditioning**:
+`conditioning_block_count(start=true, end=false)` is 0, the only two uses of
+`frames - 1` sit inside `end_frame.is_some()` branches, and the run logs
+`appended_blocks=0`, `tokens == base_tokens == 8160`, `frozen_tokens=2040` -
+exactly one latent frame, the FIRST. The end of the clip is not conditioned,
+handled specially, or indexed anywhere; only its generated content is wrong.
+
+#### 2 - root cause A: one stage where the reference runs two
+
+`ltx_pipelines.distilled.DistilledPipeline.__call__` never runs
+`DISTILLED_SIGMAS` at the requested resolution. It runs it at
+`width // 2, height // 2`, carries that latent up with the spatial x2
+upscaler, and spends three more DETERMINISTIC steps
+(`STAGE_2_DISTILLED_SIGMAS`, from sigma 0.909375) refining at full size -
+unconditionally, for every shape, with the same weights and the same LoRAs in
+both stages. So the distilled table is only ever asked to build structure
+from noise at a QUARTER of the output's tokens, and upstream's largest
+shipped preset (`LTX_2_3_HQ_PARAMS`, 1088x1920 out) puts that at 544x960 =
+2040 tokens.
+
+This port ran ONE stage at the full requested resolution. That is fine while
+the token count stays near what the table was distilled for and is not fine
+past it. The bracket, everything but the resolution held fixed:
+
+| request | video tokens | blowup ratio |
+|---|---:|---:|
+| 512x512 | 1024 | 1.06 |
+| 960x544 | 2040 | 1.03 |
+| 1280x704 | 3520 | 1.04 |
+| 1600x896 | 5600 | 1.04 |
+| **1920x1088** | **8160** | **14.66** |
+
+`SINGLE_STAGE_MAX_TOKENS = 6144` is set BETWEEN the largest measured-good
+count and the measured-broken one - the same discipline
+`vae3d::WHOLE_DECODE_MAX_PIXELS` uses - so **every shape this port already
+ran keeps its exact behaviour** and only the one that disintegrates changes
+path. Where in `(5600, 8160)` the real cliff sits is not measured and the
+constant does not pretend to know; it only has to separate them.
+`should_two_stage` additionally requires both axes on a multiple of 64 (so
+halving lands on the VAE's 32-px stride - upstream asserts the same in
+`assert_resolution(..., is_two_stage=True)`) and a real distilled config.
+`BRAIN_LTXV_TWO_STAGE=1`/`0` overrides.
+
+`generate`'s denoise body became `denoise_stage`, resolution-parametric with
+an optional re-noised seed, so one body serves a single-stage run and both
+stages of a two-stage one. **A single-stage run is bit-identical to before
+this phase**: the stage seed salt is 0, so `seeded_noise(o.seed ^ 0)` and
+`o.seed ^ 0x4e_4f_49_53_45 ^ 0` are the original expressions.
+
+#### 3 - root cause B: the latent upscalers were never un-normalized around
+
+Two-stage alone did not fix it. It removed the disintegration - frames 17-24
+went flat - and replaced it with a clip blurred to **2.9** mean
+high-frequency energy against ~13.7 for a healthy one, whose final latent had
+LF0 at std 1.067 (the pinned still) and LF1-3 at 0.71/0.64/0.62.
+
+`ltx_core.model.upsampler.model.upsample_video`:
+
+```python
+latent = video_encoder.per_channel_statistics.un_normalize(latent)
+latent = upsampler(latent)
+latent = video_encoder.per_channel_statistics.normalize(latent)
+```
+
+Both latent upscalers run in **raw VAE latent space**, not the normalized
+diffusion space, and upstream's `VideoUpsampler` builds a whole video ENCODER
+alongside the upscaler for no other purpose than to reach those statistics.
+This port called `LatentUpsampler::upsample` directly. Measured on a real
+stage-1 latent through the real x2 spatial upscaler:
+
+| per-latent-frame std | LF0 | LF1 | LF2 | LF3 |
+|---|---:|---:|---:|---:|
+| input (normalized) | 1.070 | 0.960 | 1.013 | 1.069 |
+| bare call (WRONG) | 0.504 | 0.524 | 0.530 | 0.465 |
+| un-normalized around | **1.014** | **0.919** | **0.994** | **1.074** |
+
+**Why the existing gate could not see it, which is the transferable lesson.**
+`upsampler_parity.rs`'s `report` computed `max_abs`, PRINTED it, and asserted
+on **cosine alone** - and cosine is scale-invariant, so a port returning
+exactly `k * golden` passes at cosine 1.000000000 for any `k`. The port
+itself is exact (max_abs 6.7e-6..3.4e-5 on every tap, re-confirmed); what was
+wrong was the space it was called in, and the one observable that would have
+caught it was the one being printed instead of asserted. `report` now asserts
+`max_abs <= 1e-3` as well.
+
+This bug was **pre-existing and not confined to the new path**: all three
+upscaler call sites had it, two of them in `generate_dfr` (the spatial video
+and keyframe-slot upscales) plus its temporal rounds. All three now go
+through one `upsampler::upsample_video` helper, and
+`vae3d::per_channel_statistics` is exposed for it. `generate_dfr`'s VAE
+import moved ahead of its first upscale so the statistics are available
+there; the decode reuses it, so the file is still read once.
+
+#### 4 - measured, end to end, on the real bug shape
+
+Same command both ways - real Q8_0 22B DiT, real Gemma-4 encoder, real conv
+VAE, `--start-frame` the same real photo, `--frames 25 --width 1920 --height
+1088 --fps 24 --guidance 3.0 --seed 42`, two Tesla P40s, wgpu:
+
+| | before (one stage) | two stage, upscaler not un-normalized | **after (both fixes)** |
+|---|---:|---:|---:|
+| **blowup ratio** | **14.66** | 8.64 | **1.02** |
+| frame-to-frame, first half | 1.4-1.6 | 3.0-7.0 | 9.5-11.3 |
+| frame-to-frame, last 7 | **15.9 -> 23.2** | 3.1-4.5 | 11.0-11.4 |
+| median frame-to-frame | 1.58 | 3.59 | **11.11** |
+| high-frequency energy, mean f1-24 | 13.81 | 2.91 | **12.20** |
+| high-frequency energy at f24 | **8.7** | 2.5 | **11.9** |
+| peak VRAM | 16651 MiB | - | ~9.6 GiB |
+| wall | 1263 s | - | 953 s |
+
+The reproduction is exact: re-running the reported recipe on this session's
+own binary reproduced `median 1.580, max 23.171, blowup 14.66` - the same
+numbers to three decimals as the clip that was reported.
+
+Three things in the "after" column beyond the disintegration being gone.
+The clip MOVES - median frame-to-frame went 1.58 -> 11.11, i.e. the
+near-frozen first 17 frames were part of the same defect, not a separate
+one. Sharpness is flat across the clip (13.4 / 12.0 / 11.9 at frames 1 / 12 /
+24) rather than collapsing at the end. And it is 1.3x FASTER, because eight
+steps at 8160 tokens costs more than eight at 2040 plus three at 8160.
+
+The middle column is worth keeping: two-stage ALONE traded the
+disintegration for a clip blurred to a fifth of the reference's detail, and
+that is what pointed at the second bug. Shipping after the first fix would
+have replaced a visible defect with a subtler one.
+
+Confirmed by eye as well as by metric, which is the standard this defect
+earned: the last frame's "P40" lettering is crisp and legible, the wings are
+intact, the dog is anatomically coherent with readable collar and fur, and
+the road markings are sharp - against garbled lettering, smeared wings and a
+disintegrated animal before.
+
+#### 5 - gates
+
+Weight-free, always run:
+
+* `pipeline::tests::the_stage_policy_matches_the_shapes_that_were_measured` -
+  the four measured-good shapes must keep taking one stage, the measured-bad
+  one must take two. Guarded against a stray `BRAIN_LTXV_TWO_STAGE` export.
+* `pipeline::tests::the_stage_policy_refuses_a_shape_it_cannot_halve_and_a_
+  config_it_does_not_apply_to` - the non-token conditions.
+* `clipmetric`'s three unit tests - the metric itself, against a steady pan,
+  a late blowup, two resolutions of the same content, and a static clip
+  (where the ratio is undefined and must read 1.0, not "unstable").
+* `latentdump`'s two - the dump round-trips bit-for-bit and rejects a file
+  that is not one.
+
+Real weights, seconds:
+
+* `upsampler_parity::the_upscaler_is_un_normalized_around_exactly_as_the_
+  reference_does_it` - `upsample_video` is exactly
+  `normalize . upsample . un_normalize`, compared on BIT PATTERNS, AND
+  differs measurably from the bare call (the half that stops the gate passing
+  if the helper ever quietly becomes `upsample` again). Written as the exact
+  composition rather than as a variance claim on purpose: the variance
+  invariant only holds for a latent that really lives in the diffusion
+  distribution, and an i.i.d. draw is not one - asserting it on synthetic
+  input fails for a reason that has nothing to do with the bug.
+* The `max_abs` bound added to `report`, above.
+
+Real weights, minutes, `#[ignore]`d:
+
+* `clip_stability_real::a_real_1080p_clip_does_not_disintegrate_before_it_
+  ends` - one real 1080p generation, `blowup_ratio < 4.0`, plus a floor on
+  the median so a frozen clip cannot pass vacuously. `#[ignore]`d for cost,
+  not confidence: the defect only exists above the token ceiling and a token
+  count that large IS a full generation - there is no small shape that
+  reproduces it, because the token count is the variable.
+
+#### 6 - tooling this needed, kept
+
+`BRAIN_LTXV_LATENT_DUMP=<path>` writes the final latent from `decode_video`
+before any decoder touches it, and `ltxv_bench decode <latent>
+<whole|tiled> [h0 h1 w0 w1]` re-decodes a dump through an explicitly chosen
+path over an optional latent-cell crop, printing the per-latent-frame
+statistics and the frame-to-frame curve.
+`BRAIN_LTXV_DECODE_LF_SUBST=dst=src` overwrites one latent frame with
+another and `BRAIN_LTXV_DECODE_UPSAMPLE=<path>` runs the real upscaler first.
+Together those turned every question in item 1 from a 22-minute regeneration
+into a one-minute decode, and they are why the crop-whole-decode experiment
+was possible at all at a shape whose whole-clip decode does not fit.
+
+#### 7 - what a benchmark pass should know
+
+* **1080p is a two-stage shape now.** It needs
+  `BRAIN_LTXV_UPSAMPLER_SPATIAL`; without it `generate` errors and names the
+  variable rather than producing a broken clip.
+* **It is also cheaper.** Stage 1 at 2040 tokens plus three refinement steps
+  at 8160 beats eight steps at 8160.
+* **The 25-frame 1080p single-stage shape was marginal on VRAM** and this
+  removes that too: peak fell from 16651 MiB to ~9.6 GiB. Three of six
+  attempts at the old shape died with `wgpu error: Out of Memory` at up to
+  23121 MiB of 24576 while steps 2-7 sat at 11-12.3 GiB - wgpu's greedy pool,
+  which Phase 18 already recorded as elastic and non-backing-off at this
+  token count. A run that OOMs at this shape is not necessarily a leak.
+* **Score clips with `blowup_ratio`, not by eye.** It is one number, it is
+  resolution-independent, and it is the only thing in this crate that sees
+  this class of defect.

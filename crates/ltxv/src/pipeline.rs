@@ -42,6 +42,23 @@
 //! VAE decode (real weights, the same `vae3d`/`import` this port's own
 //! parity tests gate).
 //!
+//! ## One stage or two, and why that is not a free choice
+//!
+//! [`generate`] denoises in ONE stage at the requested resolution up to
+//! [`SINGLE_STAGE_MAX_TOKENS`] video tokens and in the reference's TWO above
+//! it ([`should_two_stage`]). That is not an optimization: the distilled
+//! checkpoint's fixed sigma table is only ever asked, upstream, to build a
+//! clip from noise at HALF the requested resolution, and past ~6k tokens
+//! asking it for the whole thing in one stage measurably disintegrates the
+//! END of the clip while the beginning stays correct.
+//! [`SINGLE_STAGE_MAX_TOKENS`]'s doc carries the measurement, the failure's
+//! exact shape in latent space, and the experiment that told the latent's
+//! defect apart from the decoder's.
+//!
+//! Two-stage runs need [`Paths::spatial_upsampler`] and both axes on a
+//! multiple of 64; below the ceiling neither is read and nothing this port
+//! shipped before changes.
+//!
 //! ## One simplification inside the guidance fold
 //!
 //! Real LTX-2.5 sampling (`ltx_pipelines.utils.samplers`) can layer STG
@@ -77,13 +94,19 @@ use crate::config::LtxDitConfig;
 use crate::dit::{random_tiny_weights, LtxDit};
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
 use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};
-use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS};
+use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS, LTX2_STAGE2_DISTILLED_SIGMAS};
 
 /// The real distilled schedule's own step count (`LTX2_DISTILLED_SIGMAS.len() -
 /// 1`), exposed so a caller (e.g. `crates/cli/src/ltxv_cli.rs`'s own
 /// progress line) can report it without hardcoding a number that would drift
 /// from the table itself.
 pub const LTX2_DISTILLED_STEPS: usize = LTX2_DISTILLED_SIGMAS.len() - 1;
+
+/// The refinement stage's own step count - `STAGE_2_DISTILLED_SIGMAS`'s
+/// table length minus its terminal zero, the same relation
+/// [`LTX2_DISTILLED_STEPS`] has to its own table. Three, for the real
+/// checkpoint.
+pub const LTX2_STAGE2_STEPS: usize = LTX2_STAGE2_DISTILLED_SIGMAS.len() - 1;
 
 /// Read a checkpoint from a directory of safetensors shards or one
 /// safetensors file - the real VAE ships as a single file, so this is a
@@ -121,6 +144,13 @@ pub struct Paths {
     /// tensor - see `gemma4::tokenizer`'s doc) - when absent, [`generate`]
     /// keeps using [`context_stub`].
     pub text_encoder: Option<String>,
+    /// The real spatial x2 latent upscaler
+    /// (`ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors`), needed
+    /// only for requests above [`SINGLE_STAGE_MAX_TOKENS`], where
+    /// [`generate`] runs the reference's own two-stage shape and this is what
+    /// carries stage 1's latent up to the requested resolution. Below that
+    /// threshold nothing reads it.
+    pub spatial_upsampler: Option<String>,
 }
 
 /// `(variable, human name)` - kept as a table (one row today) for the same
@@ -136,7 +166,11 @@ pub const PATH_VARS: [(&str, &str); 1] = [("BRAIN_LTXV_VAE", "VAE")];
 /// REQUIRED weight) since missing either of these is not an error, only a
 /// fallback to this module's tiny-DiT/stub-context path. Spellings match
 /// `crates/arch`'s own `ltxv` row's `weights_env` (`"dit"`/`"text_encoder"`).
-pub const OPTIONAL_PATH_VARS: [(&str, &str); 2] = [("BRAIN_LTXV_DIT", "real DiT checkpoint"), ("BRAIN_LTXV_TEXT_ENCODER", "real text encoder checkpoint")];
+pub const OPTIONAL_PATH_VARS: [(&str, &str); 3] = [
+    ("BRAIN_LTXV_DIT", "real DiT checkpoint"),
+    ("BRAIN_LTXV_TEXT_ENCODER", "real text encoder checkpoint"),
+    ("BRAIN_LTXV_UPSAMPLER_SPATIAL", "spatial x2 latent upscaler (required above SINGLE_STAGE_MAX_TOKENS)"),
+];
 
 impl Paths {
     pub fn from_env() -> Result<Paths, String> {
@@ -160,7 +194,93 @@ impl Paths {
         };
         let dit = optional(dit, OPTIONAL_PATH_VARS[0].0);
         let text_encoder = optional(text_encoder, OPTIONAL_PATH_VARS[1].0);
-        Ok(Paths { vae, dit, text_encoder })
+        // Env only: there is no `--spatial-upsampler` flag on `brain ltxv
+        // t2v` because the upscaler is not a choice a caller makes - it is a
+        // fixed member of the LTX-2.5 checkpoint set that the two-stage path
+        // requires and the single-stage path never touches. `brain ltxv dfr`
+        // resolves the same variable through its own `DfrPaths`.
+        let spatial_upsampler = optional(None, OPTIONAL_PATH_VARS[2].0);
+        Ok(Paths { vae, dit, text_encoder, spatial_upsampler })
+    }
+}
+
+/// The largest video-token count the distilled checkpoint's own fixed
+/// 8-sigma schedule still produces a coherent clip at **in one stage**, from
+/// pure noise, measured on this hardware against the real 22B Q8_0 DiT.
+///
+/// # Why there is a ceiling at all
+///
+/// `ltx_pipelines.distilled.DistilledPipeline.__call__` never runs its
+/// `DISTILLED_SIGMAS` table at the requested resolution. It runs it at
+/// `width // 2, height // 2`, then carries that latent up with the spatial
+/// x2 upscaler and spends three more steps (`STAGE_2_DISTILLED_SIGMAS`,
+/// starting at sigma 0.909375) refining at full resolution. So the table is
+/// only ever asked to build structure from noise at a QUARTER of the tokens
+/// the output has, and upstream's largest shipped preset
+/// (`LTX_2_3_HQ_PARAMS`, 1088x1920 out) puts that at 544x960 = 2040 video
+/// tokens.
+///
+/// This port ran one stage at the full requested resolution, which is fine
+/// while the token count stays near what the table was distilled for and is
+/// not fine past it. Measured end to end - real Q8_0 22B DiT, real Gemma-4
+/// encoder, real conv VAE, one prompt, one seed, one conditioning still,
+/// everything but the resolution held fixed, scored with
+/// [`crate::clipmetric::blowup_ratio`] (max over median frame-to-frame
+/// difference; ~1 for a clip with steady motion however fast):
+///
+/// | request | video tokens | blowup ratio |
+/// |---|---:|---:|
+/// | 512x512 | 1024 | 1.06 |
+/// | 960x544 | 2040 | 1.03 |
+/// | 1280x704 | 3520 | 1.04 |
+/// | 1600x896 | 5600 | 1.04 |
+/// | 1920x1088 | **8160** | **14.66** |
+///
+/// The ceiling is set BETWEEN the largest measured-good count and the
+/// measured-broken one - the same discipline
+/// [`crate::vae3d::WHOLE_DECODE_MAX_PIXELS`] uses - so every shape this port
+/// already ran keeps its exact behaviour and only the one that disintegrates
+/// changes path. Where in `(5600, 8160)` the real cliff sits is not measured
+/// and this constant does not pretend to know; it only has to separate them.
+///
+/// The failure is not a gradual softening - it is the LAST latent frame's
+/// content collapsing while the rest of the clip stays correct. In the
+/// 8160-token latent, latent frame 3's standard deviation falls to 0.911
+/// (the other three sit at 1.07/0.98/1.01) while its distance from latent
+/// frame 2 rises to 0.630 against 0.386 for the pair before it; in every
+/// good latent above, the last frame's deviation returns to ~1.07 and the
+/// adjacent distances DECREASE monotonically. Decoding the bad latent with
+/// latent frame 3 replaced by latent frame 2 takes the clip's blowup ratio
+/// from 17.43 to 1.31, which is what makes this the latent's defect rather
+/// than the decoder's.
+///
+/// `BRAIN_LTXV_TWO_STAGE=1`/`0` forces the choice either way, which is also
+/// how the two paths get compared at a shape that does not need it.
+pub const SINGLE_STAGE_MAX_TOKENS: usize = 6144;
+
+/// Whether a request of `tokens` video tokens at `width`x`height` should be
+/// generated as the reference's TWO stages rather than one.
+///
+/// Three conditions, all necessary:
+///
+/// * the token count exceeds [`SINGLE_STAGE_MAX_TOKENS`] (below it the
+///   single-stage path is measured-good and is left exactly as it was);
+/// * both axes are multiples of 64, so halving them lands on the VAE's own
+///   32-pixel spatial stride - upstream asserts the same thing for exactly
+///   the same reason (`assert_resolution(..., is_two_stage=True)`);
+/// * a real distilled checkpoint is in play at all, since the schedule this
+///   is about is that checkpoint's.
+///
+/// `BRAIN_LTXV_TWO_STAGE=1`/`0` overrides the token test (never the
+/// divisibility one, which is a hard geometric requirement).
+pub fn should_two_stage(tokens: usize, width: usize, height: usize, real_distilled: bool) -> bool {
+    if !real_distilled || !width.is_multiple_of(64) || !height.is_multiple_of(64) {
+        return false;
+    }
+    match std::env::var("BRAIN_LTXV_TWO_STAGE").ok().as_deref() {
+        Some("1") | Some("on") | Some("true") => true,
+        Some("0") | Some("off") | Some("false") => false,
+        _ => tokens > SINGLE_STAGE_MAX_TOKENS,
     }
 }
 
@@ -1802,6 +1922,182 @@ fn denoise(
     Ok(latent)
 }
 
+/// Encode one still through the real video VAE at `width`x`height`, as the
+/// `[lh*lw, channels]` token block a conditioning item takes.
+///
+/// A free function rather than [`generate`]'s old inline closure because a
+/// two-stage generation encodes the SAME still twice, once per stage, at that
+/// stage's own resolution - which is what
+/// `ltx_pipelines.distilled.DistilledPipeline.__call__` does (it calls
+/// `combined_image_conditionings` separately for stage 1 and stage 2, with
+/// `stage_1_h/stage_1_w` and then `height/width`).
+#[allow(clippy::too_many_arguments)]
+fn encode_still(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, path: &str, width: usize, height: usize, channels: usize, device: Option<&str>) -> Result<Vec<f32>, String> {
+    let (lh, lw) = (height / 32, width / 32);
+    let img_t = Instant::now();
+    let img = image::open(path).map_err(|e| format!("{path}: {e}"))?.resize_exact(width as u32, height as u32, image::imageops::FilterType::Lanczos3).to_rgb8();
+    let mut img_chw = vec![0f32; 3 * height * width];
+    for y in 0..height {
+        for x in 0..width {
+            let p = img.get_pixel(x as u32, y as u32).0;
+            let idx = y * width + x;
+            for c in 0..3 {
+                // `[0,255] -> [-1,1]`, the VAE's own input range (see
+                // `LtxVaeEncoder::encode`'s doc).
+                img_chw[c * height * width + idx] = (p[c] as f32 / 127.5) - 1.0;
+            }
+        }
+    }
+    let enc = LtxVaeEncoder::build(vcfg, vweights, 1, height as u32, width as u32, device);
+    let cond_latent_chw = enc.encode(&img_chw);
+    let cond_tokens = chw_to_tc(&cond_latent_chw, channels, 1, lh, lw);
+    tracing::info!(path, width, height, secs = img_t.elapsed().as_secs_f32(), cond_tokens = cond_tokens.len() / channels, "conditioning image encoded");
+    Ok(cond_tokens)
+}
+
+/// Everything one denoising stage needs that does NOT vary between the two
+/// stages of a two-stage generation: the model, the VAE weights the
+/// conditioning encode needs, the text context, and the clip's frame count.
+struct StageCtx<'a> {
+    dit: &'a dyn Denoiser,
+    vcfg: &'a LtxVaeConfig,
+    vweights: &'a vae::blocks::Tensors,
+    o: &'a GenOpts,
+    lat_t: usize,
+    in_channels: usize,
+    ctx_cond: &'a [f32],
+    ctx_uncond: &'a [f32],
+    context_valid: &'a [f32],
+    context_len: usize,
+    cancel: &'a capability::CancelToken,
+}
+
+/// One stage's own inputs: the resolution it runs at, its schedule, its
+/// sampler, and - for a refinement stage - the latent it starts from.
+struct Stage<'a> {
+    width: usize,
+    height: usize,
+    sigmas: &'a [f64],
+    /// [`euler_ancestral_step`]'s eta for THIS stage. The reference's stage 2
+    /// is deterministic whatever stage 1 used: "Stage 2 is always
+    /// deterministic -- its 3-step refinement schedule is too short to remove
+    /// freshly injected noise" (`ltx_pipelines.distilled`).
+    eta: f64,
+    /// `[C, lat_t, lh, lw]` content this stage starts from, partially
+    /// re-noised to `sigmas[0]`; `None` draws pure noise, which is what a
+    /// first stage does.
+    seed_chw: Option<&'a [f32]>,
+    /// Folded into the noise seed so two stages of one generation never draw
+    /// the same numbers.
+    seed_salt: u64,
+    /// Steps already reported to `progress` before this stage.
+    done_before: u32,
+    label: &'static str,
+}
+
+/// Run one denoising stage at one latent resolution and return its final
+/// latent as `[C, lat_t, lh, lw]`.
+///
+/// This is [`generate`]'s original denoise body, made resolution-parametric
+/// and given a seed input, so the same code serves a single-stage run and
+/// both stages of a two-stage one. Nothing about WHAT it does changed.
+fn denoise_stage(sc: &StageCtx<'_>, st: &Stage<'_>, total: u32, progress: &mut impl FnMut(u32, u32, &str)) -> Result<Vec<f32>, String> {
+    let o = sc.o;
+    let (lh, lw) = (st.height / 32, st.width / 32);
+    let t = sc.lat_t * lh * lw;
+    let c = sc.in_channels;
+    // `real_pixel_positions`, not `grid_positions` - the real production
+    // pipeline's own `VideoLatentTools.create_initial_state` builds RoPE
+    // positions in pixel-scale units (`get_pixel_coords`, causal-fixed,
+    // divided by fps), not raw latent-grid integers. See that function's
+    // own doc for why this was never caught by an earlier cosine-similarity
+    // check on either side. They are rebuilt per stage because the SPATIAL
+    // axes are pixel-scaled, so a half-resolution stage has its own grid;
+    // the frame axis is identical in both.
+    let positions = real_pixel_positions(sc.lat_t, lh, lw, o.fps as f64);
+    // The causal VAE's first latent frame covers exactly ONE pixel frame
+    // (every later one covers `VAE_TEMPORAL_SCALE`), making it "the same
+    // token class as a generated keyframe slot" - `ltx_core.tools.
+    // VideoLatentTools._first_frame_keyframes_mask`'s own doc: marked
+    // UNCONDITIONALLY, independent of whether any real image conditioning
+    // is present. The mask marks a TOKEN CLASS
+    // (first-latent-frame-is-narrower), not "this token is externally
+    // conditioned", and `dit_cfg.use_keyframes_abs_pos_embedding` is `true`
+    // for the real checkpoint, so leaving it all-zero would silently omit a
+    // real positional-embedding addition on every generation.
+    let mut keyframes_mask = vec![0f32; t];
+    keyframes_mask[..lh * lw].fill(1.0);
+
+    // One draw over the WHOLE post-conditioning sequence, matching
+    // `GaussianNoiser._sample_noise`, which runs after every conditioning
+    // item has appended its tokens.
+    let blocks = conditioning_block_count(o.start_frame.is_some(), o.end_frame.is_some());
+    let mut latent0 = seeded_noise((t + blocks * lh * lw) * c, o.seed ^ st.seed_salt);
+    if let Some(seed_chw) = st.seed_chw {
+        // `GaussianNoiser.__call__`'s partial re-noise, `lerp(seed, noise,
+        // sigma0)` - upstream's `ModalitySpec::noise_scale`, set to
+        // `stage_2_sigmas[0]`. Only the BASE video range is seeded; any
+        // appended conditioning block stays pure noise here and is
+        // overwritten by its own clean content below, exactly as upstream's
+        // conditioning items are applied after the noiser.
+        let seed_tc = chw_to_tc(seed_chw, c, sc.lat_t, lh, lw);
+        assert_eq!(seed_tc.len(), t * c, "stage seed is {} values, expected {}", seed_tc.len(), t * c);
+        let s0 = st.sigmas[0] as f32;
+        for (dst, &s) in latent0[..t * c].iter_mut().zip(&seed_tc) {
+            *dst = (1.0 - s0) * s + s0 * *dst;
+        }
+    }
+
+    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if o.start_frame.is_some() || o.end_frame.is_some() {
+        // WHICH mechanism runs is [`conditioned_latent`]'s decision - the
+        // reference has two conditioning builders for these two cases
+        // (image-to-video's in-place overwrite of latent frame 0, keyframe
+        // interpolation's appended guiding blocks). See that function's doc
+        // for the reference citations and for where
+        // `conditioning_strength` lands.
+        //
+        // The same path passed for both ends is encoded ONCE: a real VAE
+        // encode is not free, and the loop case (one still at both ends) is
+        // the common one.
+        let enc = |p: &str| encode_still(sc.vcfg, sc.vweights, p, st.width, st.height, c, o.device.as_deref());
+        let start_tokens = o.start_frame.as_deref().map(&enc).transpose()?;
+        let end_tokens = match (&o.end_frame, &o.start_frame) {
+            (Some(e), Some(s)) if e == s => start_tokens.clone(),
+            (Some(e), _) => Some(enc(e.as_str())?),
+            (None, _) => None,
+        };
+        let cl = conditioned_latent(latent0, &positions, &keyframes_mask, t, lh, lw, c, o.frames, o.fps as f64, start_tokens.as_deref(), end_tokens.as_deref(), o.conditioning_strength);
+        tracing::info!(stage = st.label, strength = o.conditioning_strength, tokens = cl.t, base_tokens = t, appended_blocks = blocks, "image conditioning applied");
+        (cl.latent, cl.positions, cl.keyframes_mask, cl.t, Some((cl.denoise_mask, cl.clean)))
+    } else {
+        (latent0, positions, keyframes_mask, t, None)
+    };
+    let frozen_ref = frozen.as_ref().map(|(mask, clean)| Frozen { mask, clean, channels: c });
+    tracing::info!(stage = st.label, width = st.width, height = st.height, tokens = denoise_t_count, base_tokens = t, steps = st.sigmas.len() - 1, eta = st.eta, seeded = st.seed_chw.is_some(), "stage denoising");
+    let done_before = st.done_before;
+    let final_latent = denoise(
+        sc.dit,
+        st.sigmas,
+        latent0,
+        &positions_d,
+        &keyframes_mask_d,
+        sc.ctx_cond,
+        sc.ctx_uncond,
+        sc.context_len,
+        sc.context_valid,
+        denoise_t_count,
+        o.guidance,
+        st.eta,
+        o.s_noise,
+        o.seed ^ 0x4e_4f_49_53_45 ^ st.seed_salt,
+        total,
+        frozen_ref.as_ref(),
+        sc.cancel,
+        &mut |done, tot, phase| progress(done_before + done, tot, phase),
+    )?;
+    Ok(tc_to_chw(&final_latent[..t * c], c, sc.lat_t, lh, lw))
+}
+
 /// Text to video. `progress(done, total, phase)` mirrors `wan::pipeline::
 /// generate`'s contract; `cancel` is polled once per denoise step. `prompt`
 /// only ever reaches [`context_stub`] (see this module's doc - there is no
@@ -1861,7 +2157,15 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     } else {
         ltx2_sigmas(t, o.steps, o.base_shift, o.max_shift, o.stretch, o.terminal)
     };
-    let total = sigmas.len() as u32 - 1 + 2;
+    // Whether this request takes the reference's two-stage shape, decided
+    // here rather than at the denoise call site because the progress total
+    // has to know: a two-stage run reports stage 1's steps, one upscale, then
+    // stage 2's.
+    let two_stage = should_two_stage(t, o.width, o.height, is_real_distilled);
+    // Phases: build, every stage-1 step, (two-stage only) one upscale and
+    // every stage-2 step, decode.
+    let stage2_phases = if two_stage { LTX2_STAGE2_STEPS as u32 + 1 } else { 0 };
+    let total = sigmas.len() as u32 - 1 + stage2_phases + 2;
     // `--steps` is IGNORED for the distilled checkpoint (see above). That is
     // a silent override of something the user typed, so say so.
     if is_real_distilled && o.steps != sigmas.len() - 1 {
@@ -1921,28 +2225,6 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     }
 
     // ---- denoise ----------------------------------------------------------
-    // `real_pixel_positions`, not `grid_positions` - the real production
-    // pipeline's own `VideoLatentTools.create_initial_state` builds RoPE
-    // positions in pixel-scale units (`get_pixel_coords`, causal-fixed,
-    // divided by fps), not raw latent-grid integers. See that function's
-    // own doc for why this was never caught by an earlier cosine-similarity
-    // check on either side.
-    let positions = real_pixel_positions(lat_t, lh, lw, o.fps as f64);
-    // The causal VAE's first latent frame covers exactly ONE pixel frame
-    // (every later one covers `VAE_TEMPORAL_SCALE`), making it "the same
-    // token class as a generated keyframe slot" - `ltx_core.tools.
-    // VideoLatentTools._first_frame_keyframes_mask`'s own doc: marked
-    // UNCONDITIONALLY, independent of whether any real image conditioning
-    // is present. An earlier version of this code left `keyframes_mask`
-    // all-zero for plain text-to-video, reasoning that "every token is
-    // genuinely noise, not a held-fixed real frame" - true, but irrelevant:
-    // the mask marks a TOKEN CLASS (first-latent-frame-is-narrower), not
-    // "this token is externally conditioned". `dit_cfg.use_keyframes_abs_pos_
-    // embedding` is `true` for the real checkpoint, so this was silently
-    // omitting a real positional-embedding addition on every real
-    // generation until fixed.
-    let mut keyframes_mask = vec![0f32; t];
-    keyframes_mask[..lh * lw].fill(1.0);
     // Real Gemma-4 conditioning when `Paths::text_encoder` is set
     // ([`real_text_context`]); otherwise the same deterministic-but-
     // meaningless stub every earlier milestone used (see this module's doc
@@ -1997,76 +2279,101 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         }
     };
 
-    // ---- optional image conditioning: encode a real still (or two) and
-    // condition the clip on it/them at frame 0 and/or the clip's last pixel
-    // frame - see `GenOpts::start_frame`/`end_frame`'s doc, and
-    // [`conditioned_latent`]'s for WHICH of the reference's two conditioning
-    // mechanisms each combination uses and why that choice decides whether
-    // the clip moves. `vraw`/`vweights` are loaded here (not at decode time
-    // below, which now reuses them) since this needs them before the
-    // denoise loop, not after it.
+    // ---- the stage plan ---------------------------------------------------
+    // `vraw`/`vweights` are loaded here (not at decode time below, which
+    // reuses them) because image conditioning needs a real VAE ENCODE before
+    // any denoising, once per stage at that stage's own resolution.
     let vraw = read_any(&paths.vae)?;
     let vweights = crate::import::import_vae(vraw, &vcfg)?;
-    // One draw over the WHOLE post-conditioning sequence, matching
-    // `GaussianNoiser._sample_noise`, which runs after every conditioning
-    // item has appended its tokens. `seeded_noise` is prefix-stable, so a
-    // clip's first `t*in_channels` values - the entire unconditioned path -
-    // are byte-identical whether or not anything is appended here.
-    let latent0 = seeded_noise((t + conditioning_block_count(o.start_frame.is_some(), o.end_frame.is_some()) * lh * lw) * in_channels, o.seed);
-    let encode_still = |path: &str| -> Result<Vec<f32>, String> {
-        let img_t = Instant::now();
-        let img = image::open(path).map_err(|e| format!("{path}: {e}"))?.resize_exact(o.width as u32, o.height as u32, image::imageops::FilterType::Lanczos3).to_rgb8();
-        let mut img_chw = vec![0f32; 3 * o.height * o.width];
-        for y in 0..o.height {
-            for x in 0..o.width {
-                let p = img.get_pixel(x as u32, y as u32).0;
-                let idx = y * o.width + x;
-                for c in 0..3 {
-                    // `[0,255] -> [-1,1]`, the VAE's own input range (see
-                    // `LtxVaeEncoder::encode`'s doc).
-                    img_chw[c * o.height * o.width + idx] = (p[c] as f32 / 127.5) - 1.0;
-                }
-            }
-        }
-        let enc = LtxVaeEncoder::build(&vcfg, &vweights, 1, o.height as u32, o.width as u32, o.device.as_deref());
-        let cond_latent_chw = enc.encode(&img_chw);
-        let cond_tokens = chw_to_tc(&cond_latent_chw, in_channels, 1, lh, lw);
-        tracing::info!(path, secs = img_t.elapsed().as_secs_f32(), cond_tokens = cond_tokens.len() / in_channels, "conditioning image encoded");
-        Ok(cond_tokens)
+    let stage_ctx = StageCtx {
+        dit: dit.as_ref(),
+        vcfg: &vcfg,
+        vweights: &vweights,
+        o,
+        lat_t,
+        in_channels,
+        ctx_cond: &ctx_cond,
+        ctx_uncond: &ctx_uncond,
+        context_valid: &context_valid,
+        context_len,
+        cancel,
     };
-    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if o.start_frame.is_some() || o.end_frame.is_some() {
-        // WHICH mechanism runs is [`conditioned_latent`]'s decision - the
-        // reference has two conditioning builders for these two cases
-        // (image-to-video's in-place overwrite of latent frame 0, keyframe
-        // interpolation's appended guiding blocks). See that function's doc
-        // for the reference citations and for where
-        // `conditioning_strength` lands.
-        //
-        // Whichever mechanism runs, the resulting `denoise_mask` is what the
-        // denoise loop turns into PER-TOKEN timesteps (`timesteps_from_mask`,
-        // see [`denoise`]) - a frozen token is announced to the model as
-        // noise-free, which is the whole reason the model treats it as
-        // guidance rather than as sequence noise.
-        //
-        // The same path passed for both ends is encoded ONCE: a real VAE
-        // encode is not free, and the loop case (one still at both ends) is
-        // the common one.
-        let start_tokens = o.start_frame.as_deref().map(&encode_still).transpose()?;
-        let end_tokens = match (&o.end_frame, &o.start_frame) {
-            (Some(e), Some(s)) if e == s => start_tokens.clone(),
-            (Some(e), _) => Some(encode_still(e.as_str())?),
-            (None, _) => None,
-        };
-        let c = conditioned_latent(latent0, &positions, &keyframes_mask, t, lh, lw, in_channels, o.frames, o.fps as f64, start_tokens.as_deref(), end_tokens.as_deref(), o.conditioning_strength);
-        tracing::info!(strength = o.conditioning_strength, tokens = c.t, base_tokens = t, appended_blocks = conditioning_block_count(o.start_frame.is_some(), o.end_frame.is_some()), "image conditioning applied");
-        (c.latent, c.positions, c.keyframes_mask, c.t, Some((c.denoise_mask, c.clean)))
-    } else {
-        (latent0, positions.clone(), keyframes_mask.clone(), t, None)
-    };
-    let frozen_ref = frozen.as_ref().map(|(mask, clean)| Frozen { mask, clean, channels: in_channels });
     let denoise_t = Instant::now();
-    tracing::info!(tokens = denoise_t_count, base_tokens = t, context_len, image_conditioned = o.start_frame.is_some() || o.end_frame.is_some(), "denoising");
-    let final_latent = denoise(dit.as_ref(), &sigmas, latent0, &positions_d, &keyframes_mask_d, &ctx_cond, &ctx_uncond, context_len, &context_valid, denoise_t_count, o.guidance, o.eta, o.s_noise, o.seed ^ 0x4e_4f_49_53_45, total, frozen_ref.as_ref(), cancel, &mut progress)?;
+    let final_chw = if two_stage {
+        // The reference's own shape for the distilled checkpoint
+        // (`ltx_pipelines.distilled.DistilledPipeline.__call__`): build the
+        // clip at HALF resolution on the full distilled schedule, carry it up
+        // with the real spatial x2 latent upscaler, then spend three more
+        // deterministic steps detailing at the requested resolution. See
+        // [`SINGLE_STAGE_MAX_TOKENS`] for the measurement that says a single
+        // stage stops working past 4096 video tokens and what it looks like
+        // when it does.
+        let upsampler_path = paths.spatial_upsampler.as_deref().ok_or_else(|| {
+            let (var, role) = OPTIONAL_PATH_VARS[2];
+            tracing::error!(tokens = t, width = o.width, height = o.height, "a two-stage request needs the spatial latent upscaler");
+            format!(
+                "{}x{} is {t} video tokens, past the {SINGLE_STAGE_MAX_TOKENS}-token ceiling the distilled schedule holds in ONE stage, so it needs the reference's two-stage path - set {var} to the {role} (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors). Forcing BRAIN_LTXV_TWO_STAGE=0 runs one stage instead and is known to disintegrate the end of the clip at this size.",
+                o.width, o.height
+            )
+        })?;
+        let (w1, h1) = (o.width / 2, o.height / 2);
+        let (lh1, lw1) = (h1 / 32, w1 / 32);
+        let stage1 = denoise_stage(
+            &stage_ctx,
+            &Stage { width: w1, height: h1, sigmas: &sigmas, eta: o.eta, seed_chw: None, seed_salt: 0, done_before: 0, label: "stage1" },
+            total,
+            &mut progress,
+        )?;
+
+        progress(sigmas.len() as u32 - 1, total, "spatial upscale");
+        tracing::info!(path = %upsampler_path, latent_h = lh1, latent_w = lw1, "real x2 latent upscale");
+        let sraw = read_any(upsampler_path)?;
+        let scfg = LatentUpsamplerConfig::spatial_x2();
+        let sweights = crate::import::import_upsampler(sraw, &scfg)?;
+        let ups = LatentUpsampler::build(&scfg, &sweights, lat_t as u32, lh1 as u32, lw1 as u32, o.device.as_deref());
+        // Through `upsample_video`, NOT `upsample` directly: the upscaler was
+        // trained on raw VAE latents and needs the per-channel un-normalize/
+        // re-normalize sandwich around it. Skipping it costs half the
+        // latent's variance and decodes to a blurred clip - see that
+        // function's own doc for the measurement.
+        let (pc_mean, pc_std) = crate::vae3d::per_channel_statistics(&vweights);
+        let upscaled = crate::upsampler::upsample_video(&ups, &pc_mean, &pc_std, &stage1);
+        let (_, _, up_lh, up_lw) = ups.out_shape();
+        drop(ups);
+        drop(sweights);
+        if (up_lh as usize, up_lw as usize) != (lh, lw) {
+            tracing::error!(got_h = up_lh, got_w = up_lw, want_h = lh, want_w = lw, "spatial upscaler produced the wrong latent grid");
+            return Err(format!("spatial upscaler produced a {up_lh}x{up_lw} latent grid, expected {lh}x{lw} for {}x{}", o.width, o.height));
+        }
+
+        // `STAGE_2_DISTILLED_SIGMAS`, and `eta = 0`: upstream's stage 2 is
+        // always the DETERMINISTIC sampler, "its 3-step refinement schedule
+        // is too short to remove freshly injected noise".
+        let sigmas2: Vec<f64> = LTX2_STAGE2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect();
+        denoise_stage(
+            &stage_ctx,
+            &Stage {
+                width: o.width,
+                height: o.height,
+                sigmas: &sigmas2,
+                eta: 0.0,
+                seed_chw: Some(&upscaled),
+                // "S2" - the two stages must not draw the same noise.
+                seed_salt: 0x5332,
+                done_before: sigmas.len() as u32 - 1,
+                label: "stage2",
+            },
+            total,
+            &mut progress,
+        )?
+    } else {
+        denoise_stage(
+            &stage_ctx,
+            &Stage { width: o.width, height: o.height, sigmas: &sigmas, eta: o.eta, seed_chw: None, seed_salt: 0, done_before: 0, label: "single" },
+            total,
+            &mut progress,
+        )?
+    };
     // Release the DiT's own device context (for `RealDit`, its resident
     // `Gpu`) before the VAE decode below opens its own - real device memory
     // is not this pipeline's to hold onto once the denoise loop is done
@@ -2074,8 +2381,10 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     drop(dit);
     timings.denoise = denoise_t.elapsed().as_secs_f32();
     // `sigmas.len() - 1`, not `o.steps`: the real distilled schedule ignores
-    // `--steps` entirely (see where `sigmas` is built, above).
-    timings.steps = sigmas.len() - 1;
+    // `--steps` entirely (see where `sigmas` is built, above). A two-stage
+    // run adds its own refinement steps on top, and reporting only stage 1's
+    // would make `secs_per_forward` a fiction.
+    timings.steps = sigmas.len() - 1 + if two_stage { LTX2_STAGE2_DISTILLED_SIGMAS.len() - 1 } else { 0 };
     timings.tokens = t;
     timings.forwards_per_step = if o.guidance > 1.0 { 2 } else { 1 };
     tracing::info!(secs = timings.denoise, steps = timings.steps, secs_per_forward = timings.secs_per_forward(), "denoise done");
@@ -2089,12 +2398,10 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     progress(total - 1, total, "vae decode");
     tracing::info!(path = %paths.vae, latent_frames = lat_t, "VAE decode starting");
     let decode_t = Instant::now();
-    // Strip any appended image-conditioning tokens (see the `--image` branch
-    // above) - only the original `t` video tokens get decoded; the
-    // conditioning frame is the source image itself, not a new frame to
-    // render.
-    let chw = tc_to_chw(&final_latent[..t * in_channels], in_channels, lat_t, lh, lw);
-    let (pixels, frames) = decode_video(&vcfg, vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref(), &chw);
+    // `denoise_stage` already stripped any appended image-conditioning tokens
+    // and returned the `[C, lat_t, lh, lw]` video latent - the conditioning
+    // frame is the source image itself, not a new frame to render.
+    let (pixels, frames) = decode_video(&vcfg, vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref(), &final_chw);
     let (w, h) = (o.width, o.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
@@ -2362,14 +2669,25 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // ---- real spatial x2 upscale of BOTH the video and its slots ----
     progress(1, total_phases, "spatial upscale");
     tracing::info!(stage = "spatial_upscale", path = %paths.spatial_upsampler, "real x2 latent upscale");
+    // The VAE is imported HERE rather than at decode time because the latent
+    // upscalers need its `per_channel_statistics` (see
+    // `crate::upsampler::upsample_video`); the decode below reuses it, so the
+    // file is still read exactly once.
+    let vraw = read_any(&paths.vae)?;
+    let vweights = crate::import::import_vae(vraw, &vcfg)?;
     let sraw = read_any(&paths.spatial_upsampler)?;
     let scfg = LatentUpsamplerConfig::spatial_x2();
     let sweights = crate::import::import_upsampler(sraw, &scfg)?;
     let video_upsampler = LatentUpsampler::build(&scfg, &sweights, lat_t as u32, lh1 as u32, lw1 as u32, base.device.as_deref());
-    let upscaled_video_chw = video_upsampler.upsample(&reserved_half_res_video);
+    // `upsample_video`, not `upsample`: the per-channel un-normalize/
+    // re-normalize sandwich the upscaler was trained inside. This call site
+    // predates that helper and was missing it, which cost half the latent's
+    // variance here too.
+    let (pc_mean, pc_std) = crate::vae3d::per_channel_statistics(&vweights);
+    let upscaled_video_chw = crate::upsampler::upsample_video(&video_upsampler, &pc_mean, &pc_std, &reserved_half_res_video);
     let (_, _, lh2u, lw2u) = video_upsampler.out_shape();
     let slots_upsampler = LatentUpsampler::build(&scfg, &sweights, k as u32, lh1 as u32, lw1 as u32, base.device.as_deref());
-    let upscaled_slots_chw = slots_upsampler.upsample(&slot1_chw);
+    let upscaled_slots_chw = crate::upsampler::upsample_video(&slots_upsampler, &pc_mean, &pc_std, &slot1_chw);
     drop(sweights);
 
     let (lh2, lw2) = (lh2u as usize, lw2u as usize);
@@ -2417,7 +2735,9 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
             progress(2 + round_idx as u32, total_phases, &format!("temporal round {round_idx}"));
 
             let tup = LatentUpsampler::build(&tcfg, &tweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref());
-            let upsampled_video = tup.upsample(&video_chw);
+            // Same contract as the spatial upscaler above: raw VAE latent
+            // space in and out (`crate::upsampler::upsample_video`).
+            let upsampled_video = crate::upsampler::upsample_video(&tup, &pc_mean, &pc_std, &video_chw);
             let (_, ut, _, _) = tup.out_shape();
             let new_lat_t = ut as usize;
 
@@ -2518,8 +2838,6 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // ---- decode -------------------------------------------------------------
     progress(total_phases - 1, total_phases, "vae decode");
     let decode_t = Instant::now();
-    let vraw = read_any(&paths.vae)?;
-    let vweights = crate::import::import_vae(vraw, &vcfg)?;
     let (pixels, frames) = decode_video(&vcfg, vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref(), &video_chw);
     let (w, h) = (base.width, base.height);
     if pixels.len() != 3 * frames * h * w {
@@ -2561,6 +2879,49 @@ mod tests {
     fn distilled_steps_matches_the_real_sigma_table() {
         assert_eq!(LTX2_DISTILLED_STEPS, LTX2_DISTILLED_SIGMAS.len() - 1);
         assert_eq!(LTX2_DISTILLED_STEPS, 8, "the real LTX2_DISTILLED_SIGMAS table has 9 entries (8 steps) - update this pin if that table is deliberately changed");
+    }
+
+    /// The shapes this port actually runs, against the measurement in
+    /// [`SINGLE_STAGE_MAX_TOKENS`]'s doc. The three that were measured GOOD
+    /// on one stage must keep taking one stage (so nothing this port already
+    /// shipped changes), and the one that was measured BROKEN must take two.
+    ///
+    /// Guarded against the environment: `BRAIN_LTXV_TWO_STAGE` would
+    /// otherwise let a stray export make this pass or fail for the wrong
+    /// reason.
+    #[test]
+    fn the_stage_policy_matches_the_shapes_that_were_measured() {
+        if std::env::var("BRAIN_LTXV_TWO_STAGE").is_ok() {
+            return;
+        }
+        let toks = |w: usize, h: usize| 4 * (h / 32) * (w / 32);
+        for (w, h) in [(512, 512), (960, 544), (1280, 704), (1600, 896)] {
+            let t = toks(w, h);
+            assert!(t <= SINGLE_STAGE_MAX_TOKENS, "{w}x{h} is {t} tokens, which the measurement says is a single-stage shape");
+            assert!(!should_two_stage(t, w, h, true), "{w}x{h} ({t} tokens) was measured good on ONE stage and must not change path");
+        }
+        let (w, h) = (1920, 1088);
+        let t = toks(w, h);
+        assert_eq!(t, 8160);
+        assert!(should_two_stage(t, w, h, true), "1920x1088 is {t} tokens and was measured to disintegrate on one stage");
+    }
+
+    /// The two conditions that are NOT about the token count: a
+    /// non-distilled config has no distilled schedule to outgrow, and an
+    /// axis that is not a multiple of 64 cannot be halved onto the VAE's
+    /// 32-pixel stride (upstream asserts the same thing).
+    #[test]
+    fn the_stage_policy_refuses_a_shape_it_cannot_halve_and_a_config_it_does_not_apply_to() {
+        if std::env::var("BRAIN_LTXV_TWO_STAGE").is_ok() {
+            return;
+        }
+        let big = SINGLE_STAGE_MAX_TOKENS + 1;
+        assert!(!should_two_stage(big, 1920, 1088, false), "the tiny random-weight config runs the generic shifted schedule, not the distilled table");
+        // 1088 is a multiple of 64; 1056 is a multiple of 32 but not 64, so
+        // halving it lands off the VAE's spatial stride.
+        assert!(!1056usize.is_multiple_of(64) && 1056usize.is_multiple_of(32));
+        assert!(!should_two_stage(big, 1920, 1056, true), "an axis that cannot be halved onto the 32-pixel stride must stay single-stage");
+        assert!(!should_two_stage(big, 1888, 1088, true), "the width axis has the same requirement as the height axis");
     }
 
     #[test]
@@ -2613,7 +2974,7 @@ mod tests {
 
     #[test]
     fn a_bad_frame_count_is_rejected_before_any_weight_is_read() {
-        let paths = Paths { vae: "/nope".into(), dit: None, text_encoder: None };
+        let paths = Paths { vae: "/nope".into(), dit: None, text_encoder: None, spatial_upsampler: None };
         let o = GenOpts { frames: 8, ..GenOpts::default() };
         let e = generate(&paths, "x", &o, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("1 + 8k"), "{e}");

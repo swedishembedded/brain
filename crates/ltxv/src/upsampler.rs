@@ -429,6 +429,61 @@ impl LatentUpsampler {
     }
 }
 
+/// `ltx_core.model.upsampler.model.upsample_video`: run `ups` over a
+/// DIFFUSION-space latent, un-normalizing into the VAE's own latent space on
+/// the way in and re-normalizing on the way out.
+///
+/// # Why this wrapper is not optional
+///
+/// Both upscalers were trained on RAW VAE latents, not on the per-channel-
+/// normalized ones the diffusion loop works in, and upstream never calls one
+/// without this sandwich - `VideoUpsampler.__call__` builds a video ENCODER
+/// alongside the upscaler for no other purpose than to reach its
+/// `per_channel_statistics`. Handing the normalized latent straight in
+/// "works" in the sense that it returns a plausible tensor of the right
+/// shape and a cosine of ~1 against a correctly-normalized run, which is
+/// exactly why it is easy to miss: the error is a per-channel SCALE, and
+/// cosine is scale-invariant. What it costs is variance. Measured on a real
+/// 25-frame 960x544 stage-1 latent through the real x2 spatial upscaler:
+///
+/// | per-latent-frame std | frame 0 | 1 | 2 | 3 |
+/// |---|---:|---:|---:|---:|
+/// | input (normalized) | 1.070 | 0.960 | 1.013 | 1.069 |
+/// | out, no un-normalize (WRONG) | 0.504 | 0.524 | 0.530 | 0.465 |
+///
+/// A latent at half the variance the model expects decodes to a washed-out,
+/// blurred clip, and a refinement pass that only has three steps does not
+/// get it back.
+///
+/// `mean`/`std` are the VAE's `per_channel_statistics.mean-of-means` /
+/// `std-of-means`, one entry per latent channel; `latent` is `[C, T, H, W]`
+/// row-major, the same layout [`LatentUpsampler::upsample`] takes.
+pub fn upsample_video(ups: &LatentUpsampler, mean: &[f32], std: &[f32], latent: &[f32]) -> Vec<f32> {
+    let c = mean.len();
+    assert_eq!(std.len(), c, "per-channel mean/std disagree: {} vs {}", mean.len(), std.len());
+    assert!(c > 0 && latent.len() % c == 0, "latent of {} values does not divide into {c} channels", latent.len());
+    let plane = latent.len() / c;
+    // `un_normalize`: `x * std + mean`, per channel.
+    let mut raw = latent.to_vec();
+    for (ci, chunk) in raw.chunks_exact_mut(plane).enumerate() {
+        for v in chunk {
+            *v = *v * std[ci] + mean[ci];
+        }
+    }
+    let mut out = ups.upsample(&raw);
+    let (_, _, oh, ow) = ups.out_shape();
+    let out_plane = out.len() / c;
+    assert_eq!(out_plane * c, out.len(), "upsampler returned {} values, not a whole multiple of {c} channels", out.len());
+    debug_assert_eq!(out_plane % (oh as usize * ow as usize), 0);
+    // `normalize`: `(x - mean) / std`, per channel.
+    for (ci, chunk) in out.chunks_exact_mut(out_plane).enumerate() {
+        for v in chunk {
+            *v = (*v - mean[ci]) / std[ci];
+        }
+    }
+    out
+}
+
 /// Build+run the SPATIAL x2 upscaler on `latent` (`[128, t, h, w]`), one call.
 pub fn upsample_spatial(tensors: &Tensors, t: u32, h: u32, w: u32, device: Option<&str>) -> LatentUpsampler {
     LatentUpsampler::build(&LatentUpsamplerConfig::spatial_x2(), tensors, t, h, w, device)

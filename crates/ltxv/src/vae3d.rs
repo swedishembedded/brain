@@ -421,6 +421,19 @@ fn per_channel(tensors: &Tensors, name: &str) -> Vec<f32> {
     tensors.get(name).unwrap_or_else(|| panic!("ltxv vae: missing tensor {name}")).1.clone()
 }
 
+/// The VAE's own `per_channel_statistics` as `(mean-of-means, std-of-means)`,
+/// one entry per latent channel.
+///
+/// These are what map between the DIFFUSION latent space (what the DiT and
+/// the samplers work in) and the VAE's own (what the decoder's `z*std + mean`
+/// preamble consumes, and what both latent upscalers were trained on - see
+/// [`crate::upsampler::upsample_video`]). Exposed because the upscalers need
+/// them outside this module; the encode/decode graphs read the same two
+/// tensors directly.
+pub fn per_channel_statistics(tensors: &Tensors) -> (Vec<f32>, Vec<f32>) {
+    (per_channel(tensors, "per_channel_statistics.mean-of-means"), per_channel(tensors, "per_channel_statistics.std-of-means"))
+}
+
 /// The encode graph for a fixed clip size, with weights resident. Whole-clip,
 /// unchunked (see this module's header) - `frames` must be `1 + 8k`.
 pub struct LtxVaeEncoder {
