@@ -124,18 +124,40 @@ fn unconditional_variant(ids: &[u32]) -> Vec<u32> {
 /// HEADERS up front; `qwen3::import::hf_source` then resolves brain
 /// parameter names against those headers with zero tensor bytes read;
 /// `Qwen::new_shard_i8` pulls one tensor at a time straight to the
-/// device (CPU-JIT-backend host buffers on this machine, since there is
-/// no discrete GPU), quantizing to int8 (DP4A) as it goes and dropping
-/// each tensor's transient f32 expansion before the next - peak host RAM
-/// stays at "one tensor", never the whole ~18 GB bf16 checkpoint (which
-/// would expand past this machine's ~21 GB usable RAM at fp32). Int8 is
-/// not merely smaller-and-nice-to-have here: it is what makes an 8B
-/// model resident on this machine's CPU backend possible at all - the
-/// same load-bearing role this crate's plan recorded for it going in.
-/// Inference-only (matches [`qwen3::Qwen::new_shard_i8`]'s own scope);
-/// the audio-code training objective below runs at
-/// [`qwen3::QwenConfig::tiny`] scale instead, where fp32 + a real
-/// backward pass both fit comfortably.
+/// device, quantizing to int8 as it goes and dropping each tensor's
+/// transient f32 expansion before the next - peak host RAM during THIS
+/// streamed import stays at "one tensor", never the whole ~18 GB bf16
+/// checkpoint at once.
+///
+/// **Measured, not assumed: whole-model residency of the real checkpoint
+/// does not fit on this development machine today, on either backend it
+/// has**, a gap recorded in this crate's own roadmap ledger rather than
+/// silently glossed over:
+/// - On the CPU-JIT backend (`BRAIN_DEVICE=cpu`), `int8` is requested
+///   but does NOT actually shrink anything: `backend_api::DType::
+///   promote` (workspace-wide, not specific to this crate) demotes
+///   `I8`/`Q4` to `F32` whenever `NumericSupport::int8_dot` is `false`,
+///   which `crates/backend-cpu`'s own `caps()` reports unconditionally
+///   (`int8_dot: false` - no backend in this workspace executes real
+///   int8 compute yet, per that field's own doc). So `new_shard_i8` on
+///   this backend allocates the full ~32 GB fp32 model, not the ~13 GB
+///   int8 one the name promises - measured directly (a single instance's
+///   RSS climbs from near-zero past 30 GB and is OOM-killed on this
+///   machine's ~26 GB available RAM).
+/// - On this machine's actual GPU (an Intel integrated Vulkan device,
+///   not a discrete card), `tok.weight`/`lm_head.weight`
+///   (`[200000, 4096]` fp32, ~3.28 GB each - excluded from the int8 tier
+///   since embeddings aren't a `Q8::LINEARS` projection) exceed that
+///   device's own `max_buffer_size` (2047 MiB) - a hardware limit,
+///   independent of the int8-promotion issue above.
+///
+/// Neither is a defect in this port; both are pre-existing `qwen3`/
+/// `gpu_core`/`backend-cpu` limits this port's own real-checkpoint
+/// testing was the first thing in this workspace to exercise at
+/// whole-8B-model scale. Inference-only (matches
+/// [`qwen3::Qwen::new_shard_i8`]'s own scope); the audio-code training
+/// objective below runs at [`qwen3::QwenConfig::tiny`] scale instead,
+/// where fp32 + a real backward pass both fit comfortably.
 pub fn import(dir: &str, b: u32, t: u32) -> Result<(QwenConfig, Qwen), String> {
     let config_path = std::path::Path::new(dir).join("config.json");
     let config_json = std::fs::read_to_string(&config_path).map_err(|e| format!("global_llm::import: reading {}: {e}", config_path.display()))?;

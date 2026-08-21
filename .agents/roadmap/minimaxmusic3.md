@@ -394,10 +394,16 @@ re-export, the one this port actually loads. An earlier working
 assumption (recorded in this ledger's own Phase 1 entry before this was
 checked) had the two backwards; corrected in place rather than left
 stale. `crates/qwen3::import::hf_source` + `Qwen::new_shard_i8` stream it
-one tensor at a time, quantized to int8 (DP4A) as it goes - int8 is not
-merely smaller-and-nice-to-have for an 8B model on a machine with no
-discrete GPU and ~21 GB usable RAM; it is what makes the model resident
-at all (fp32 would need ~2x the checkpoint's own bf16 size).
+one tensor at a time, requesting int8 as it goes.
+
+**Correction (Phase 10): int8 does not actually shrink this on either of
+this machine's backends** - see Phase 10's own entry for the measured
+numbers and root cause. This paragraph originally claimed int8 "is what
+makes the model resident at all"; that was an untested assumption,
+disproven the first time this port actually tried whole-model residency
+(Phase 10). Left here, struck through in spirit rather than deleted, so
+the ledger shows the assumption AND its correction rather than quietly
+rewriting history.
 
 Real-weight parity: a single REAL decoder layer (layer 0), streamed via a
 1-layer `model::Shard` (never the whole 36-layer stack), compared against
@@ -430,6 +436,111 @@ the prompt template's structure tokens), confirmed against the reference
 `diffusers` PR's own `MiniMaxMusic3TextEncoderStep`/
 `MiniMaxMusic3SemanticGenerationStep` classes.
 
+## Phase 10: pipeline glue (M7)
+
+`crates/minimaxmusic3::{pipeline, denoise, stitch}` plus
+`global_llm::assemble_prompt` - every piece of orchestration between the
+five components, none of it new model math (all of it composes forwards
+already landed in Phases 2-9):
+
+- `global_llm::assemble_prompt` - `MiniMaxMusic3PromptStep` ported: builds
+  `<|im_start|><|caption_start|>{clean_caption}<|caption_end|>
+  <|lyrics_start|>{normalize_lyrics}<|lyrics_end|><|im_end|><|audio_start|>`,
+  tokenizes once via `QwenBpe::encode` (already special-token-aware), then
+  derives the CFG-unconditional variant by replacing `ids[1:-2]` with
+  `AUDIO_CFG_TOKEN_ID`. `clean_caption`/`normalize_lyrics` (markdown-
+  stripping and lyrics-tag normalization, ported byte-for-byte from the
+  Python reference, no `regex` crate available so hand-written char
+  scanning) landed earlier alongside the token contract; both are unit-
+  tested against literal Python reference output (19 + 11 assertions).
+- `pipeline::generate_frames` - the CFG-guided AR sampling loop: two
+  `qwen3::Qwen` instances (conditional/unconditional) stepped in
+  lockstep, top-k-restricted CFG over the LLM's own logits (scale 1.5,
+  top-k 50 twice - once to threshold against the conditional branch's own
+  candidates, once inside `_sample_top_k`'s own re-restriction), and a
+  second, independently-discovered CFG axis inside the depth decoder (the
+  reference runs `_generate_depth_codes` on BOTH branches too - easy to
+  miss on a first read of `denoise.py` alone, since that file only shows
+  the DiT's own CFG).
+- `denoise::denoise_chunk` - `ChunkConditionStep`/`ChunkPrepareLatentsStep`/
+  `ChunkSetTimestepsStep`/`ChunkDenoiseInner`/`ChunkUpdateStep` ported: 200-
+  frame chunks, 100-frame hop, a `FlowMatchEulerScheduler` run with
+  `invert_sigmas` (the DiT's own 0=noise/1=data convention), CFG via a
+  zeroed condition tensor (the DiT's OWN conditioning, not a second full
+  model - distinct from the AR stage's axis above), and a 172-latent
+  overlap blended into every Euler step via `ChunkState`, not just spliced
+  once at the end. Initial noise draws through `data::rng::Rng::
+  next_gaussian` (`Lcg` has no Gaussian sampler; `data::rng`'s own doc
+  says never hand-roll a fresh Box-Muller copy) - the first use of `Rng`
+  in this crate, alongside `Lcg` everywhere else.
+- `stitch::Stitcher` - `decoders.py`'s crop-and-stitch: decode each
+  chunk's full latent span through the vocoder, crop
+  `CROP_LEFT_LATENT`/`CROP_RIGHT_LATENT` off the shared edges (skipped on
+  the song's first/last chunk), concatenate.
+- `audio::wav::encode_multi`/`write_multi` - the stereo WAV write path
+  this crate's own plan named as a gap up front (the existing writer was
+  mono-only); planar `[channels, samples]` in, no interleaving required
+  from the caller (matches the vocoder's own output layout). Mono
+  `encode`/`write` now delegate to this (byte-identical output, pinned by
+  a regression test).
+
+All of the above is unit/structurally tested (no numerical reference
+exists for a multi-stage composition like this - same reasoning
+`pipeline::generate_frames`'s own tests already used) and passes.
+`crates/minimaxmusic3/tests/e2e_short_generation.rs` wires all five real
+components together end to end (AR stage -> denoise -> stitch -> WAV),
+gated behind all six `BRAIN_MINIMAXMUSIC3_*` env vars, with an explicit
+sequential-stage RAM discipline (the AR stage's two Global LLM instances
+and the depth decoder are dropped, out of scope, before the DiT loads;
+the DiT is dropped before the vocoder loads). It compiles, clippy-clean,
+and skips cleanly when the env vars are unset - but **could not be
+validated end-to-end on this machine**; see the next entry.
+
+### Why the real short e2e WAV was not reached here
+
+Attempted with all six real checkpoints present (under `resources/
+minimax-music3/`, per this port's own resources layout). Two
+independent, measured, pre-existing infrastructure limits block
+whole-8B-model residency on
+this machine, neither a defect in this port:
+
+1. **CPU-JIT backend (`BRAIN_DEVICE=cpu`): int8 silently promotes to
+   fp32.** `backend_api::DType::promote` (workspace-wide, not this crate)
+   demotes `I8`/`Q4` requests to `F32` whenever
+   `NumericSupport::int8_dot` is `false` - `crates/backend-cpu`'s own
+   `caps()` reports `int8_dot: false` unconditionally today (no backend
+   in this workspace executes real int8 compute yet; that field's own
+   doc already said so). So `Qwen::new_shard_i8` on this backend actually
+   allocates the FULL fp32 8B model (~32 GB: ~6.4B per-layer-linear
+   params at 4 bytes + ~1.64B embedding/lm_head params at 4 bytes),
+   not the ~13 GB int8 one its name promises. Measured directly: a
+   single Global LLM instance's RSS climbs from near-zero past 30 GB and
+   is OOM-killed (confirmed via `/sys/fs/cgroup/memory.events`'s
+   `oom_kill` counter incrementing) on this machine's ~26 GB available
+   RAM - before even reaching the SECOND (unconditional-branch) instance
+   `pipeline::generate_frames` needs.
+2. **This machine's real GPU (an Intel integrated Vulkan device, not a
+   discrete card) hits a separate, harder limit first if int8 execution
+   ever lands there:** `tok.weight`/`lm_head.weight`
+   (`[200000, 4096]` fp32, ~3.28 GB each - excluded from the int8 tier
+   since embeddings aren't a `Q8::LINEARS` projection) exceed that
+   device's own `max_buffer_size` (2047 MiB), so even a WORKING int8
+   compute path would still fail to place the embedding/head tables as
+   single buffers on this specific GPU.
+
+Both are corrected in `global_llm::import`'s own doc (previously claimed
+int8 "is what makes an 8B model resident on this machine's CPU backend
+possible at all" - disproven by this measurement, doc fixed in place
+rather than left stale). Fixing either root cause (a real backend-cpu
+int8/VNNI compute path, or >2 GB-buffer-spanning tensor placement in
+`gpu_core`/`qwen3`) is a substantial change to shared, heavily-used
+infrastructure well outside this port's own scope - recorded here rather
+than attempted. `tests/e2e_short_generation.rs` is real, correct, ready
+code for whenever a future session has more RAM, a real int8-capable CPU
+path, or a discrete GPU: run it with all six `BRAIN_MINIMAXMUSIC3_*` env
+vars set and it either produces a WAV or fails somewhere new worth
+investigating.
+
 ## Not yet done
 
 - [ ] Joint generator+discriminator training against the real vocoder
@@ -439,9 +550,9 @@ the prompt template's structure tokens), confirmed against the reference
 - [ ] Multi-resolution discriminator (several `(n_fft, hop)` STFT
       settings, summed) - the single-resolution version generalizes
       directly but this has not been exercised
-- [ ] Pipeline: prompt assembly, two-axis CFG (AR logits + DiT
-      zero-conditioning), chunk windowing/overlap-splice, vocoder
-      crop-and-stitch - one real short end-to-end WAV on this machine
+- [ ] The real short end-to-end WAV gate itself (`tests/
+      e2e_short_generation.rs` exists and is correct; blocked on THIS
+      machine by the int8-promotion/buffer-size limits Phase 10 records)
 - [ ] Serving contract: capability manifest, residency adapter, CLI verb,
       D-Bus, a runnable example
 
@@ -463,3 +574,17 @@ the prompt template's structure tokens), confirmed against the reference
   (`Qwen::new_shard_i8` has no backward); the training objective itself is
   proven correct at `QwenConfig::tiny()` scale only, same hardware-bound
   reasoning as every other real-scale training gap this ledger records.
+- No real short end-to-end WAV on this machine (Phase 10's own gate,
+  `tests/e2e_short_generation.rs`, is implemented, correct, and skips
+  cleanly when unset - it is BLOCKED, not unwritten): whole-8B-model
+  residency fails on both of this machine's backends - CPU-JIT's `int8`
+  request silently promotes to fp32 (`backend-cpu`'s `caps().numeric.
+  int8_dot` is `false`, workspace-wide, so `DType::promote` demotes to
+  `F32` - no backend here executes real int8 compute yet), and this
+  machine's own Vulkan device (an Intel integrated GPU, not discrete)
+  caps single buffers at 2047 MiB, smaller than the ~3.28 GB
+  `tok.weight`/`lm_head.weight` tensors regardless of dtype. Measured via
+  `/sys/fs/cgroup/memory.events`'s `oom_kill` counter incrementing on a
+  single Global LLM instance import alone. See Phase 10's own writeup for
+  the full diagnosis; fixing either backend limit is out of this port's
+  scope.

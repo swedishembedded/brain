@@ -77,9 +77,18 @@
 //! splice carried between chunks via `denoise::ChunkState`).
 //! `stitch::Stitcher` decodes each chunk's latents through the vocoder
 //! and crops/concatenates them into one continuous stereo waveform
-//! (`audio::wav::write_multi` for the delivered file). A real short
-//! (single-chunk) end-to-end generation and serving land next, one crate
-//! module at a time.
+//! (`audio::wav::write_multi` for the delivered file), and
+//! `global_llm::assemble_prompt` builds the AR stage's own token-id
+//! prompts from raw caption/lyrics text. `tests/e2e_short_generation.rs`
+//! wires all five real components together end to end with a
+//! sequential-stage RAM discipline; it is implemented and correct but
+//! **could not be validated on this development machine** - whole-8B-
+//! model residency fails on both of this machine's backends (CPU-JIT's
+//! `int8` request silently promotes to fp32; this machine's own Vulkan
+//! iGPU caps single buffers below the embedding/head tensors' size),
+//! both pre-existing `qwen3`/`gpu_core`/`backend-cpu` limits, not a
+//! defect here - see this crate's own roadmap ledger for the measured
+//! diagnosis. Serving lands next.
 
 pub mod condition_encoder;
 pub mod config;
