@@ -194,6 +194,8 @@ load of it must already be bare-identifier-indexed.
 | [`dwconv3d_dx`](../../crates/kernels/wgsl/dwconv3d_dx.wgsl) | Depthwise 3D convolution, INPUT gradient (adjoint of dwconv3d) | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`edm_mix`](../../crates/kernels/wgsl/edm_mix.wgsl) | EDM output mix D = c_skip*x + c_out*F - spec | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`edm_wrap`](../../crates/kernels/wgsl/edm_wrap.wgsl) | EDM output wrap for the DIAMOND sampler (denoiser.py::wrap_model_output) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`elu`](../../crates/kernels/wgsl/elu.wgsl) | ELU (Exponential Linear Unit) forward:  y = x  if x > 0, y = alpha*(exp(x)-1) otherwise | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`elu_bwd`](../../crates/kernels/wgsl/elu_bwd.wgsl) | ELU backward - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`emb_bwd`](../../crates/kernels/wgsl/emb_bwd.wgsl) | Embedding backward (also the tied lm_head's weight) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`embed`](../../crates/kernels/wgsl/embed.wgsl) | Embedding gather: x[t, c] = emb[token[t], c] | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`embed_tile`](../../crates/kernels/wgsl/embed_tile.wgsl) | Embedding gather over a VOCAB TILE | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
