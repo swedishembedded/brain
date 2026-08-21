@@ -3053,6 +3053,208 @@ Every pre-existing gate re-run and green: `cargo test --release -p brain-ltxv
 * **`BRAIN_LTXV_VAE_TILE=1`** forces the tiled path at shapes that fit, which
   is the supported way to measure the two against each other.
 
+### Phase 17 - the x0 conversion runs at the token's OWN timestep
+
+Every real `--start-frame` clip this port has ever produced had a visible
+colour defect: frame 0 came out over-saturated, the frames right after it
+washed out to roughly the model's unconditioned level, and the colour then
+climbed back to a HIGHER plateau for the second half of the clip and stayed
+there. The shape was reported as an anomaly because nothing about
+"conditioning influence decays with distance from the anchor" predicts a
+clip whose LAST frames look more conditioned than its middle ones.
+
+The whole shape is one line, and the line is not in the conditioning code.
+
+#### What the numbers actually said
+
+Mean HSV saturation per decoded frame (64x64 downsample, `colorsys.rgb_to_hsv`
+averaged over the frame), real 22B Q8_0 DiT + real Gemma-4 encoder + real conv
+VAE, one Tesla P40, `--start-frame [path/to/malinois.png]` (a real photo of a
+Belgian Malinois, at the clip's own resolution):
+
+| run | f0 | trough | late plateau |
+|---|---:|---:|---:|
+| 512x512, g=3.0, seed 42 | 0.555 | 0.311 @ f5 | 0.50 |
+| 1280x704, g=3.0, seed 42 | 0.554 | 0.294 @ f6 | 0.46 |
+| 1280x704, g=1.0, seeds 100/101 | 0.556 | 0.31 | 0.47 |
+| plain t2v, no stills, 512x512 | 0.330 | (flat) | 0.31 |
+
+Two measurements that had not been taken re-framed the whole thing:
+
+* **the conditioning still's OWN mean saturation is 0.461**, and
+* a `--start-frame X --end-frame X` run (the APPENDED-keyframe mechanism,
+  which never overwrites latent frame 0) is **flat at 0.463 for all 25
+  frames**.
+
+So the "elevated late plateau" is not elevated - 0.46-0.50 is the correct
+level, the one the source image and the appended-keyframe path both sit at.
+The defect is at the other end: **frame 0, the one frame that is supposed to
+BE the still, was 20% over-saturated** (0.555 vs 0.461), and the trough was
+the causal VAE decoder's temporal receptive field smearing that over-driven
+latent frame across its neighbours. A 25-frame clip is 4 latent frames, so
+`f0 / f1-8 / f9-16 / f17-24`; the V bottoms out in the middle of latent frame
+1 and is gone by latent frame 3, exactly the reach of a corrupted latent
+frame 0.
+
+#### Root cause
+
+`crates/ltxv/src/pipeline.rs`, the denoise loop:
+
+    let mut denoised = to_denoised(&latent, &velocity, sigma);   // scalar
+
+The reference does this conversion **inside the model wrapper**, not in the
+sampler - `ltx_core/model/transformer/model.py`, `X0Model.forward`:
+
+    denoised_video = to_denoised(video.latent, vx, video.timesteps)
+
+and `Modality.timesteps` is `timesteps_from_mask(denoise_mask, sigma)` =
+`denoise_mask * sigma`, shape `(B, T, 1)`, broadcast over the `(B, T, C)`
+latent's channel axis (`ltx_pipelines/utils/helpers.py`). It is **per token**.
+
+For plain text-to-video the two are the same number on every token, because
+`denoise_mask` is all ones - which is why `dit_parity`, `av_dit_parity`,
+`host_forward_parity`, `streamed_vs_eager_real`, `motion_real` and the t2v
+control were all green through this. The moment anything is frozen they are
+not: a `--start-frame` anchor is announced at timestep **0**, where the
+reference's conversion is the IDENTITY, and brain instead subtracted a
+full-strength `velocity * sigma` from an already-clean token.
+
+Within the loop that error is invisible - `post_process_latent` re-pins the
+frozen tokens after every step. It survives in exactly one place: the
+**terminal step**. `samplers._ancestral_euler_denoising_loop` short-circuits
+`sigma_next == 0` to the x0 estimate with no re-pin (brain matches this, and
+matched it before this phase). So the very last thing that happens to the
+anchor before it is decoded is the one thing that corrupts it.
+
+**Which means the defect exists only under the ancestral sampler**, and that
+is not a footnote - it cost this phase a real-weight run to learn. The
+deterministic loop (`samplers._step_state`) re-pins the x0 ESTIMATE *before*
+the step formula touches it, so a bad x0 conversion at a frozen token is
+overwritten by `clean` and vanishes. The ancestral loop re-pins the STEPPED
+latent instead and hands the terminal step's raw estimate straight out. The
+first version of this phase's real-weight gate copied `motion_real.rs`'
+`eta = 0.0` for reproducibility, and consequently **passed against the
+defect at bit-identical numbers** (frame-0 delta 5.33 either way). `eta`
+had to become `1.0` - `ANCESTRAL_ETA`, what `ltx_pipelines.distilled` runs
+for every checkpoint at or above 2.5, what `GenOpts::default` sets, and what
+every one of the buggy generations above used. Nothing is given up: the
+renoise draw is `data::rng::Rng` seeded from `GenOpts::seed`, so `eta = 1` is
+as run-to-run deterministic as `eta = 0`.
+
+The size of the corruption is a constant, which is why the curve was
+seed-, guidance- and resolution-independent. A rectified-flow model at t=0
+predicts `v ~= -x0`, so `x0_wrong = clean - (-clean)*sigma_terminal =
+(1 + sigma_terminal)*clean`, and `LTX2_DISTILLED_SIGMAS`' last non-zero entry
+is **0.421875**. The anchor latent was ~1.42x too large on every run.
+
+#### How it was confirmed before anything was changed
+
+A weight-free controlled experiment, no DiT involved at all: encode the
+conditioning still as a 25-frame static clip through the real conv VAE, then
+decode it twice - once unchanged, once with **latent frame 0 alone multiplied
+by 1.421875** - and measure the same saturation curve.
+
+| pixel frame | 0 | 2 | 5 | 7 | 9 | 12 | 14 | 20 | 24 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| VAE probe, correct LF0 | 0.464 | 0.464 | 0.463 | 0.464 | 0.467 | 0.463 | 0.459 | 0.459 | 0.467 |
+| VAE probe, LF0 x 1.421875 | 0.554 | 0.453 | 0.350 | 0.307 | 0.369 | 0.451 | 0.490 | 0.468 | 0.469 |
+| the real buggy 512x512 run | 0.555 | 0.422 | 0.311 | 0.320 | 0.372 | 0.483 | 0.500 | 0.498 | 0.503 |
+
+One scale error on one latent frame reproduces the frame-0 over-saturation,
+the V-trough AND the "unexplained late-clip rise" - on a clip that has no
+generated content in it whatsoever. That is what made this a root cause
+rather than a plausible story.
+
+#### The fix
+
+`to_denoised` now takes the per-token `timesteps` slice and the channel width
+and broadcasts the way `X0Model.forward` does; the denoise loop hands it the
+SAME `timesteps` vector it just handed the model. One file,
+`crates/ltxv/src/pipeline.rs`.
+
+Nothing else moves. The CFG fold stays on the velocity: `to_denoised` is
+affine in `v` with the same per-token coefficient for both branches, so
+folding on `v` then converting is identical to the reference's
+convert-then-fold on x0. `generate_dfr` passes `frozen: None` at every one of
+its four `denoise` call sites, so its timesteps are uniform and its output is
+bit-identical to before.
+
+#### Re-verified on a real clip
+
+The SAME settings that produced the first row of the table above, re-run
+against the fixed sampler - 512x512, 25 frames, seed 42, guidance 3.0, same
+prompt, same `--start-frame`, real 22B Q8_0 + real Gemma-4 + real conv VAE,
+one Tesla P40 pair, 417.9 s (`denoise 397.8 s = 24.862 s/forward`):
+
+| frame | 0 | 3 | 5 | 7 | 9 | 12 | 16 | 20 | 24 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| before | **0.555** | 0.357 | **0.311** | 0.320 | 0.372 | 0.483 | 0.502 | 0.498 | 0.503 |
+| after | **0.469** | 0.453 | 0.454 | 0.455 | 0.462 | 0.469 | 0.488 | 0.492 | 0.500 |
+
+Frame 0 is now within 1.7% of the conditioning still's own 0.461 (it was 20%
+high). The trough is gone - the deepest dip is 0.453, 3% below frame 0,
+against a 33% collapse to the unconditioned baseline before. The
+"unexplained late-clip rise" is gone with it: what is left is a smooth,
+monotone 0.46 -> 0.50 drift across 25 frames as the generated content moves
+away from a real-photo anchor, which is the behaviour the plain-t2v control
+always predicted and which nothing in the reference says should not happen.
+
+#### Gates
+
+* `pipeline::tests::a_frozen_token_survives_the_terminal_step_exactly` - the
+  real gate, weight-free, microseconds. Drives the whole loop on the real
+  schedule's own terminal pair `[1.0, 0.421875, 0.0]` with a denoiser that
+  returns a non-zero velocity (the fix must not depend on the model
+  conveniently predicting zero at a clean token) and asserts the frozen token
+  ends at **exactly** its clean content, under both `eta = 0` and `eta = 1`.
+  Verified RED first: it failed at `4.578125`, i.e. `5.0 - 0.421875`, which is
+  the defect's own arithmetic.
+* `pipeline::tests::to_denoised_is_per_token_and_collapses_to_the_scalar_form_when_nothing_is_frozen`
+  - pins both halves of the contract, including that the unconditioned path
+  is unchanged.
+* `crates/ltxv/tests/anchor_real.rs` (new, `#[ignore]`d, ~6 min) - the
+  perceptual half: two real 22B generations at 384x192 / 9f (one
+  unconditioned to produce the anchor, the same way `motion_real.rs` builds
+  its own, so no image fixture and no resize can be blamed; one conditioned
+  on it), asserting the clip's first decoded frame reproduces the
+  conditioning still. **Calibrated by running it both ways**, same shape,
+  same seed, same sampler, nothing else changed:
+
+  | | frame-0 saturation | ratio vs the still (0.3037) | frame-0 delta |
+  |---|---:|---:|---:|
+  | scalar-sigma x0 conversion | 0.4522 | **1.489** | 12.84 |
+  | per-token x0 conversion | 0.3050 | **1.004** | 2.67 |
+
+  Bounds 1.08 and 7.0. The full saturation curve tells the same story:
+  `0.452 0.369 0.322 0.282 0.261 0.234 0.220 0.201 0.192` defective against
+  `0.305 0.299 0.297 0.293 0.291 0.288 0.288 0.286 0.286` fixed.
+
+`cargo test --release -p brain-ltxv --tests`: **138 unit + every integration
+suite green**, `dit_parity`, `av_dit_parity`, `host_forward_parity`,
+`streamed_vs_eager_real`, `vae_parity`, `vae_tiling`, `na_decoder_parity`,
+`upsampler_parity`, `connector_real_parity`, `block_weight_cache`,
+`cfg_parallel` and the `image_conditioning_tests` /
+`conditioned_latent_tests` modules included. *(Run with `BRAIN_LTXV_DIT`
+UNSET: `an_explicit_vae_path_beats_the_environment_variable` asserts
+`Paths::resolve` finds no DiT, so exporting the real checkpoint paths fails
+it. Pre-existing, unrelated, left alone.)*
+
+#### What was ruled out on the way, and stays ruled out
+
+Recorded so the next investigation does not re-walk it: the conditioning
+builders are correct. `conditioned_latent`'s start-only branch touches
+exactly `[0, lh*lw)` in the denoise mask, in `clean` and in the initial-latent
+mix; `post_process_latent` re-pins exactly that range and skips every
+`mask == 1.0` token; `keyframes_mask` is the unconditional first-latent-frame
+marker `VideoLatentTools._first_frame_keyframes_mask` builds and is not
+aliased anywhere; the mechanism split (`VideoConditionByLatentIndex` for
+`frame_idx == 0`, `VideoConditionByKeyframeIndex` otherwise) matches
+`helpers.combined_image_conditionings` line for line; and the VAE's
+`per_channel_statistics` normalize/un-normalize is applied on both the encode
+and the decode side (`vae3d.rs:487-490` and `:573-576`). The appended-keyframe
+control measuring flat at the source image's own saturation is the empirical
+statement of all of that at once.
+
 ## Convention questions settled from source, not experiment
 
 Recorded here as they're pinned by tests, so this section grows as milestones

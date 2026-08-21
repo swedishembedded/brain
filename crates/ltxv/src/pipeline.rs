@@ -1554,9 +1554,36 @@ fn dispatch_cfg_pair<D: Denoiser + Sync>(dit: &D, place: &crate::devplan::Placem
 
 /// `to_denoised` (`ltx_core.utils.to_denoised`): the model predicts a
 /// velocity; the denoised (x0) estimate the stepper needs is `sample -
-/// velocity * sigma`.
-fn to_denoised(sample: &[f32], velocity: &[f32], sigma: f64) -> Vec<f32> {
-    sample.iter().zip(velocity).map(|(&x, &v)| (x as f64 - v as f64 * sigma) as f32).collect()
+/// velocity * timestep`.
+///
+/// **`timesteps` is PER TOKEN, not the schedule's scalar sigma.** The
+/// reference applies this conversion inside the model wrapper -
+/// `ltx_core.model.transformer.model.X0Model.forward` calls
+/// `to_denoised(video.latent, vx, video.timesteps)`, and `Modality.timesteps`
+/// is `timesteps_from_mask(denoise_mask, sigma)` = `denoise_mask * sigma`,
+/// shape `(B, T, 1)`, broadcast over the channel axis of the `(B, T, C)`
+/// latent. A frozen image-conditioning token therefore converts at timestep
+/// `0`, where the formula is the IDENTITY: its clean content passes through
+/// untouched.
+///
+/// Feeding the scalar sigma here instead is exactly correct for plain
+/// text-to-video (`denoise_mask` is all ones, so every token's timestep IS
+/// the sigma) and silently wrong the moment anything is frozen - see
+/// [`a_frozen_token_survives_the_terminal_step_exactly`](self) for the
+/// mechanism and the ledger entry for the measured damage.
+///
+/// `channels` is the latent width; `timesteps.len() * channels ==
+/// sample.len()`.
+fn to_denoised(sample: &[f32], velocity: &[f32], timesteps: &[f32], channels: usize) -> Vec<f32> {
+    assert!(channels > 0, "to_denoised: channels must be nonzero");
+    debug_assert_eq!(sample.len(), timesteps.len() * channels);
+    debug_assert_eq!(velocity.len(), sample.len());
+    sample
+        .chunks_exact(channels)
+        .zip(velocity.chunks_exact(channels))
+        .zip(timesteps)
+        .flat_map(|((x, v), &ts)| x.iter().zip(v).map(move |(&x, &v)| (x as f64 - v as f64 * ts as f64) as f32))
+        .collect()
 }
 
 /// The rectified-flow ancestral Euler denoise loop, `wan::pipeline::denoise`'s
@@ -1662,6 +1689,9 @@ fn denoise(
     // sigma at all. See [`Frozen`]'s doc for the two orderings.
     let ancestral = eta > 0.0;
     let cfg_on = guidance > 1.0;
+    // The latent's channel width - the axis `Modality.timesteps` `(B, T, 1)`
+    // broadcasts over in [`to_denoised`].
+    let channels = if t == 0 { 1 } else { latent.len() / t };
     let steps = sigmas.len().saturating_sub(1);
     let mut noise_rng = data::rng::Rng::new(noise_seed);
     let t0 = Instant::now();
@@ -1708,7 +1738,12 @@ fn denoise(
             tracing::error!(step = i + 1, sigma, non_finite = bad, of = velocity.len(), "the denoiser produced non-finite values");
             return Err(format!("the denoiser produced non-finite values at step {} (sigma = {sigma:.4})", i + 1));
         }
-        let mut denoised = to_denoised(&latent, &velocity, sigma);
+        // The SAME per-token `timesteps` the model was just told about, not
+        // the schedule's scalar sigma - `X0Model.forward` converts against
+        // `Modality.timesteps` (see [`to_denoised`]), which makes the
+        // conversion the identity on a frozen token instead of scaling it by
+        // `1 + sigma`.
+        let mut denoised = to_denoised(&latent, &velocity, &timesteps, channels);
         // `_step_state`: mask the x0 estimate, then step. The ancestral loop
         // instead steps the estimate as-is and re-applies the mask to the
         // STEPPED latent below (after the renoise term), except on the
@@ -2646,10 +2681,78 @@ mod tests {
         assert_eq!(latents[1][1], 5.0, "step 1 must see it clean AGAIN: the renoise term ran over the whole latent and post_process_latent has to undo it there");
         assert_ne!(latents[1][0], latents[0][0], "the free token really was stepped and renoised");
         // The terminal step short-circuits to the raw x0 estimate with no
-        // re-pin, exactly as `_ancestral_euler_denoising_loop` does - so the
-        // final value of a conditioned token is the model's own estimate.
-        // Asserted so that a future change to that ordering is deliberate.
+        // re-pin, exactly as `_ancestral_euler_denoising_loop` does. That is
+        // safe for a frozen token only because the x0 conversion runs at that
+        // token's OWN timestep (zero), where it is the identity - see
+        // `a_frozen_token_survives_the_terminal_step_exactly`, which pins the
+        // resulting value.
         assert_eq!(out.len(), t);
+        assert_eq!(out[1], 5.0, "the conditioned token ends at its clean content even though the terminal step never re-pinned it");
+    }
+
+    /// A fully frozen conditioning token must come out of the whole sampler
+    /// bit-exactly equal to its clean content - **including on the terminal
+    /// step**, which is the one step that never re-pins.
+    ///
+    /// This is not a property of `post_process_latent`; it is a property of
+    /// the velocity -> x0 conversion. The reference does that conversion
+    /// INSIDE the model wrapper (`ltx_core.model.transformer.model.X0Model.
+    /// forward`: `to_denoised(video.latent, vx, video.timesteps)`) against the
+    /// PER-TOKEN `timesteps` tensor - `denoise_mask * sigma`, so `0` on a
+    /// frozen token - not against the schedule's scalar sigma. At timestep 0
+    /// the conversion is the identity, so the anchor survives the terminal
+    /// step untouched.
+    ///
+    /// Using the scalar sigma instead is invisible in plain text-to-video
+    /// (every token's timestep IS the sigma there) and silently multiplies a
+    /// frozen anchor by roughly `1 + sigma_terminal` - the real distilled
+    /// schedule's last sigma is 0.421875, so a real `--start-frame` clip's
+    /// anchor latent came out ~1.42x too large, which the causal VAE
+    /// decoder's temporal receptive field then smeared across the frames
+    /// after it. See this phase's ledger entry for the measured curves.
+    #[test]
+    fn a_frozen_token_survives_the_terminal_step_exactly() {
+        // Ends on the real distilled schedule's own terminal pair, so the
+        // number this test would be wrong by is the number a real run was
+        // wrong by.
+        let sigmas = vec![1.0, 0.421875, 0.0];
+        let dit = FakeDit::default();
+        let (t, channels) = (2usize, 1usize);
+        let positions = grid_positions(t, 1, 1);
+        let keyframes_mask = vec![0.0f32; t];
+        // A velocity of 1.0 on every token (`FakeDit` echoes `context[0]`) -
+        // the model does NOT conveniently predict zero at a frozen token, and
+        // the fix must not depend on it doing so.
+        let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
+        let context_valid = vec![1.0f32; 1];
+        let mask = vec![1.0f32, 0.0];
+        let clean = vec![0.0f32, 5.0];
+        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let latent0 = vec![0.0f32, 5.0];
+
+        for eta in [0.0f64, 1.0] {
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, eta, 1.0, 7, 4, Some(&frozen), &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            assert_eq!(out[1], 5.0, "eta={eta}: the frozen anchor must end at exactly its clean content, not at clean - velocity*sigma_terminal ({})", 5.0 - 0.421875);
+            assert_ne!(out[0], 0.0, "eta={eta}: the free token really was denoised (guards against a fix that froze everything)");
+        }
+    }
+
+    /// The per-token conversion degenerates to the scalar one when nothing is
+    /// frozen: `timesteps_from_mask(ones, sigma)` IS `sigma` everywhere, so
+    /// the unconditioned trajectory must be bit-identical to what it was
+    /// before the per-token x0 conversion existed.
+    #[test]
+    fn to_denoised_is_per_token_and_collapses_to_the_scalar_form_when_nothing_is_frozen() {
+        let latent = [1.0f32, 2.0, 3.0, 4.0];
+        let velocity = [0.5f32, 0.5, 0.5, 0.5];
+        // channels = 2, so two tokens of two channels each.
+        let uniform = to_denoised(&latent, &velocity, &[0.25, 0.25], 2);
+        assert_eq!(uniform, vec![0.875f32, 1.875, 2.875, 3.875], "one timestep for every token is the plain `sample - velocity*sigma`");
+        // Token 0 frozen (timestep 0), token 1 at sigma - the image-
+        // conditioning case, and the whole point: the frozen token passes
+        // through untouched while its neighbour is still corrected.
+        let mixed = to_denoised(&latent, &velocity, &[0.0, 0.25], 2);
+        assert_eq!(mixed, vec![1.0f32, 2.0, 2.875, 3.875], "a timestep-0 token is returned unchanged, channel by channel");
     }
 
     /// The reference builds `Modality.timesteps` as `timesteps_from_mask(
