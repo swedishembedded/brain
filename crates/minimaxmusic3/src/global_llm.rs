@@ -42,6 +42,8 @@
 //! this milestone's training objective and the next milestone's sampling
 //! loop read them from one place.
 
+use data::qwen_tokenizer::QwenBpe;
+use data::tokenizer::Tokenizer;
 use qwen3::{Qwen, QwenConfig};
 
 pub const IM_START: &str = "<|im_start|>";
@@ -67,6 +69,35 @@ pub const AR_SAMPLING_TOP_K: usize = 50;
 pub fn audio_code_token_id(code: u32) -> u32 {
     assert!(code < SEMANTIC_VOCAB_SIZE, "audio_code_token_id: code {code} out of range [0, {SEMANTIC_VOCAB_SIZE})");
     AUDIO_CODE_OFFSET + code
+}
+
+/// Build the AR stage's two token-id prompts (conditional and CFG-
+/// unconditional) from a raw caption/lyrics pair - `MiniMaxMusic3PromptStep`
+/// in the reference. Assembles `<|im_start|><|caption_start|>
+/// {clean_caption(caption)}<|caption_end|><|lyrics_start|>
+/// {normalize_lyrics(lyrics)}<|lyrics_end|><|im_end|><|audio_start|>`,
+/// tokenizes it once (`QwenBpe::encode` already special-cases the literal
+/// `<|...|>` tokens - see its own `encode_with_specials`), then builds the
+/// unconditional variant by replacing every token except the first and the
+/// two trailing structure tokens with `AUDIO_CFG_TOKEN_ID` (`ids[1:-2]` in
+/// the reference).
+pub fn assemble_prompt(tokenizer: &QwenBpe, caption: &str, lyrics: &str) -> (Vec<u32>, Vec<u32>) {
+    let clean = clean_caption(caption);
+    let lyr = normalize_lyrics(lyrics);
+    let prompt = format!("{IM_START}{CAPTION_START}{clean}{CAPTION_END}{LYRICS_START}{lyr}{LYRICS_END}{IM_END}{AUDIO_START}");
+    let conditional_ids = tokenizer.encode(&prompt);
+    let unconditional_ids = unconditional_variant(&conditional_ids);
+    (conditional_ids, unconditional_ids)
+}
+
+fn unconditional_variant(ids: &[u32]) -> Vec<u32> {
+    let n = ids.len();
+    assert!(n >= 3, "unconditional_variant: prompt has {n} tokens, need at least 3 (im_start + ... + im_end + audio_start)");
+    let mut out = ids.to_vec();
+    for id in &mut out[1..n - 2] {
+        *id = AUDIO_CFG_TOKEN_ID;
+    }
+    out
 }
 
 /// Streamed import of the real Global LLM checkpoint: `dir` is the
@@ -533,6 +564,21 @@ mod tests {
     #[should_panic(expected = "out of range")]
     fn audio_code_token_id_rejects_an_out_of_range_code() {
         audio_code_token_id(SEMANTIC_VOCAB_SIZE);
+    }
+
+    #[test]
+    fn unconditional_variant_keeps_only_the_first_and_last_two_tokens() {
+        let ids = vec![10u32, 11, 12, 13, 14, 15];
+        let uncond = unconditional_variant(&ids);
+        assert_eq!(uncond, vec![10, AUDIO_CFG_TOKEN_ID, AUDIO_CFG_TOKEN_ID, AUDIO_CFG_TOKEN_ID, 14, 15]);
+        // The conditional ids themselves must be untouched.
+        assert_eq!(ids, vec![10, 11, 12, 13, 14, 15]);
+    }
+
+    #[test]
+    #[should_panic(expected = "need at least 3")]
+    fn unconditional_variant_rejects_a_too_short_prompt() {
+        unconditional_variant(&[1, 2]);
     }
 
     #[test]
