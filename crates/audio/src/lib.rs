@@ -20,6 +20,7 @@ pub mod asr_frontend;
 pub mod conv;
 pub mod istft;
 pub mod mel;
+pub mod resample;
 pub mod snake;
 pub mod wav;
 
