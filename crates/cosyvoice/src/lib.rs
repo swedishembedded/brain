@@ -54,8 +54,22 @@
 //! documented, honest gap (the reference sampler draws from torch's own RNG,
 //! which this port does not reproduce bit-for-bit - see [`sampling`]'s module
 //! doc). CosyVoice 3's `CosyVoice3LM` is a deliberate follow-up, not
-//! implemented. The flow decoder and HiFT vocoder do not exist yet, so the
-//! pipeline as a whole is **still not servable end-to-end**.
+//! implemented.
+//!
+//! The flow decoder (`CausalMaskedDiffWithXvec`, CosyVoice 2's UNet CFM
+//! estimator only - see [`flow`]/[`flow_config`]/[`flow_import`]) is
+//! implemented and forward-parity-proven from scratch against the real
+//! `flow.pt`: condition assembly, the 10-step Euler CFM loop replayed from
+//! real captured reference state, and a full independent re-forward all
+//! match the reference mel output. The fixed CFM noise buffer is reproduced
+//! by a bit-exact Rust port of PyTorch's CPU RNG (`flow::torch_rng`) rather
+//! than a checked-in data asset. Streaming/chunked attention is a
+//! documented, not-yet-implemented gap; the host-CPU forward is also slow in
+//! an unoptimized debug build (minutes in release, much longer in debug) - a
+//! recorded performance follow-up, not a correctness gap.
+//!
+//! The HiFT vocoder and pipeline assembly do not exist yet, so the pipeline
+//! as a whole is **still not servable end-to-end**.
 //!
 //! Swedish Embedded AB implements solutions for from-scratch, dependency-light
 //! neural network inference on constrained and embedded targets for its
@@ -64,6 +78,9 @@
 //! email to info@swedishembedded.com.
 
 pub mod config;
+pub mod flow;
+pub mod flow_config;
+pub mod flow_import;
 pub mod llm;
 pub mod llm_import;
 pub mod sampling;

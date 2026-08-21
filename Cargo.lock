@@ -742,6 +742,7 @@ dependencies = [
  "brain-s3tokenizer",
  "brain-testutil",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

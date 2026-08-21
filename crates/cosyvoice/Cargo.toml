@@ -27,3 +27,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+sha2.workspace = true
