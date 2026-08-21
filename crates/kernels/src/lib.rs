@@ -33,6 +33,8 @@
 /// Kernel specialisation: one source, tunable constants (S3).
 pub mod template;
 
+/// `wgsl/adaln_row.wgsl`
+pub const ADALN_ROW: &str = include_str!("../wgsl/adaln_row.wgsl");
 /// `wgsl/adamw.wgsl`
 pub const ADAMW: &str = include_str!("../wgsl/adamw.wgsl");
 /// `wgsl/adaptive_avgpool2d.wgsl`
@@ -868,6 +870,7 @@ pub const WEIGHTED_GAP_DX: &str = include_str!("../wgsl/weighted_gap_dx.wgsl");
 
 /// Every kernel as `(name, source)`, name = file stem.
 pub const ALL: &[(&str, &str)] = &[
+    ("adaln_row", ADALN_ROW),
     ("adamw", ADAMW),
     ("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D),
     ("adaptive_avgpool2d_dx", ADAPTIVE_AVGPOOL2D_DX),
