@@ -7,10 +7,16 @@ coherent structure (intro/verse/chorus/bridge/outro). Reach for it when you
 need a first-draft song from a text brief, not for editing or remixing
 existing audio (there is no audio-conditioned path).
 
-**Status: under construction, component by component.** The condition
-encoder (one of five components) has import + forward, verified at real
-weights (cosine 1.0 vs the reference). Nothing else is wired yet - no CLI
-verb, no end-to-end generation. See
+**Status: under construction, component by component.** Four of five
+components - condition encoder, vocoder, RVQ depth decoder, and the
+flow-matching DiT - have import + device forward, each verified at real
+weights (cosine 1.0 vs the reference). The vocoder, depth decoder, and DiT
+are also fully trainable (full fine-tune with gradcheck, LoRA); the DiT
+additionally has an INT8 storage tier and `model::Shardable` pipeline
+sharding (single-device validated only - no discrete GPU on the machine
+this was built on). The Global LLM (the fifth component, a real Qwen3-8B)
+is not yet wired; nothing end-to-end exists yet - no CLI verb, no actual
+song generation. See
 [`.agents/roadmap/minimaxmusic3.md`](../../.agents/roadmap/minimaxmusic3.md)
 for the live milestone ledger.
 

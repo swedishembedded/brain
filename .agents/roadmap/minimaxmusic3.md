@@ -280,6 +280,94 @@ directional FD check on every one of the 14 adapters' `(A, B)`, and
 `lora_only_overfits_with_base_frozen` (1500 steps, base weights provably
 untouched, loss reduced 40%+).
 
+## Phase 8: flow-matching DiT
+
+`crates/minimaxmusic3::dit` - a real device (WGSL) forward, unlike the
+condition encoder/depth decoder: 36 layers at `inner_dim=2048` is genuinely
+compute-heavy, and unlike the vocoder's hand-rolled conv stack this IS a
+standard transformer block shape with existing reusable device primitives -
+`model::block`'s `Bidir`/`rope2d_partial`/`LayerNorm`/`swiglu`/`kv_expand`
+Step-builders cover the whole block (bidirectional partial-RoPE attention +
+fused gated FFN) with zero new WGSL kernels. Per block: `norm1 -> QKV
+(3 matmuls) -> pack into a fused qkv buffer (kv_expand, group=1, the same
+non-GQA packing `crates/lfm2` already uses) -> partial RoPE (rotary_dim=32
+of head_dim=64, theta=10000 - the reference's own `RotaryEmbedding`
+default, distinct from the Global LLM's `1e6`) -> bidirectional attention
+(no causal mask - a diffusion denoiser sees the whole chunk at once) -> out
+proj -> residual -> norm2 -> ff_in (ONE fused `Linear(dim, 2*ff_inner)`,
+split into `[gate_states, gate]`) -> `gate_states * silu(gate)` -> ff_out ->
+residual`. The top-level glue (`cat([latent, zeros, condition^T]) ->
+preprocess_conv residual -> proj_in`, a prepended Fourier-timestep token,
+`proj_out -> postprocess_conv residual`) stays host math - infrequent,
+tiny relative to the 36-layer stack. Scope: batch=1 only, matching every
+real caller in the reference pipeline (the chunked-denoise loop is a Python
+`for` loop over windows, never a batched tensor).
+
+Cosine 1.000000000 at both `::tiny()` and the real checkpoint's dims (a
+36-layer, 9.7 GB, 2-shard `transformer/` download) - the single largest
+component parity-checked in this port so far, first try.
+
+Backward + gradcheck (`crates/minimaxmusic3::dit_train::Trainer`) reuses
+the SAME `model::block` builders' backward halves
+(`bidir_bwd`/`rope2d_partial_bwd`/`layernorm_dx_bwd`/`swiglu_bwd`/
+`kv_expand_bwd`) rather than hand-deriving attention's softmax-jacobian
+backward a second time - the real payoff of having chosen device
+Step-builders for the forward in the first place. The top-level glue's
+backward is hand-derived host math (`model::hostmath::linear_rows_bwd`,
+hoisted from `depth_decoder.rs`'s own private copy of the identical
+pattern - the "one implementation" rule this workspace holds itself to).
+Every one of `::tiny()`'s ~30 named parameters passes a directional FD
+check to within `(4e-3, 8e-2)`; `forward_matches_serving_forward` confirms
+the trainer's own forward is bit-identical (within float tolerance) to
+`dit::forward`'s served path; 1500 steps of plain SGD collapse a fixed
+batch's loss to under 5% of its start.
+
+LoRA (`dit_lora`) is fold-then-run against a FRESH `dit_train::Trainer`
+per step - unlike the depth decoder's host-pure LoRA, the DiT's own
+Trainer is device-resident, so this follows the vocoder's own `lora.rs`
+shape instead. Targets the 6 per-block linear projections
+(`attn.{to_q,to_k,to_v,to_out}`, `ff_in.weight`, `ff_out.weight` - `12`
+adapters at `::tiny()`'s 2 layers); LayerNorm gains/biases and the
+top-level glue are out of scope (not linear projections). The same three
+gates as every other LoRA integration here, all passing, plus
+`lora_only_overfits_with_base_frozen` (1500 steps, `lr=0.3` - a higher
+learning rate than the other two LoRA integrations needed to clear the
+same `40%+` reduction bar, tried before loosening the bar itself, per this
+workspace's own "tighter fixture before looser assertion" convention).
+
+INT8 storage tier (`dit_int8`, following `ltxv::int8`'s own precedent
+closely) - a smaller checkpoint in host RAM/on disk, no compute-path
+change, no new kernel. Never-quantized: `proj_in`/`proj_out` (the model's
+first/last projections) and both `time_embed` linears (the
+timestep-conditioning MLP); every other 2D weight left eligible is the
+same 6-per-block-linear set LoRA targets. 12 of 33 tensors int8-eligible
+at `::tiny()`'s dims; full-model forward cosine 0.999999+ after a round
+trip through int8 storage.
+
+`model::Shardable` pipeline-parallel sharding (`dit_shard::DitStage`),
+following `crates/ltxv::LtxDit`'s own precedent closely (the one existing
+diffusion-transformer `Shardable` impl in this repo, discovered mid-
+implementation to require the FULL `model::Model` trait too, not a thin
+adapter - the user's explicit direction on discovering this was "we don't
+retrofit things in brain, we implement them properly", so this is the
+real trait, done the way the one legitimate precedent for this model
+class already does it, not a shortcut): every stage loads only its own
+contiguous block range plus its replicated `time_proj`/`time_embed`
+weights; embed/head stages additionally own the boundary projections; the
+residual stream is the only thing that crosses a stage boundary; `Model::
+backward`/`Shardable::run_backward_stage` are honest `unimplemented!()`
+gaps, not silently-wrong stubs - this crate's real, single-device DiT
+training story stays `dit_train::Trainer`, which `Shardable` does not
+build on (the same split `ltxv::LtxDit`'s own module doc documents for the
+identical reason: pipeline sharding exists to let a too-big-for-one-card
+model run split for INFERENCE, not to add a second training path).
+Validated the only way possible on this machine (no discrete GPU at all):
+`new_shard` genuinely loads only its block range's weight subset; the
+single-shard degenerate case and a real two-stage split with a
+host-staged residual handoff both match `dit::forward` bit-for-bit;
+`shard_cost`-driven `plan_balanced` produces a well-formed partition at
+both `::tiny()` and the real 36-layer config's shape.
+
 ## Not yet done
 
 - [ ] Joint generator+discriminator training against the real vocoder
@@ -289,8 +377,6 @@ untouched, loss reduced 40%+).
 - [ ] Multi-resolution discriminator (several `(n_fft, hop)` STFT
       settings, summed) - the single-resolution version generalizes
       directly but this has not been exercised
-- [ ] Flow-matching DiT: import + forward/backward + gradcheck + LoRA +
-      int8 storage tier + pipeline sharding
 - [ ] Global LLM: streamed import via `crates/qwen3` + an audio-code
       cross-entropy training objective
 - [ ] Pipeline: prompt assembly, two-axis CFG (AR logits + DiT
@@ -304,5 +390,11 @@ untouched, loss reduced 40%+).
 - No full 5-minute generation on this machine (no discrete GPU, ~21 GB
   usable RAM) - only a short single-chunk generation is exercised here.
 - No NPU export path planned in the initial port.
-- No multi-GPU shard parity unless a second GPU is available when that
-  milestone lands.
+- No real multi-device execution for the DiT's `model::Shardable` slice
+  (this machine has no discrete GPU at all) - only single-device
+  structural validation (weight-subset loading, single/two-stage
+  parity) is possible here; genuine multi-card agreement is unverified.
+- No backward pass through the DiT's pipeline-sharded slice
+  (`dit_shard::DitStage`) - an explicit, documented scope decision
+  (matching `ltxv::LtxDit`'s own precedent), not an oversight: this
+  crate's real DiT training path is the single-device `dit_train::Trainer`.
