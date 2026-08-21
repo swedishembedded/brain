@@ -58,9 +58,13 @@
 //! step). The vocoder also has a from-scratch STFT-magnitude adversarial
 //! discriminator (gradchecked end to end, including through the STFT, and
 //! shown to learn). The DiT also has an INT8 STORAGE tier (`dit_int8`,
-//! smaller checkpoint only - no compute-path change). The DiT's shard, the
-//! Global LLM's own wiring, joint generator+discriminator training, and
-//! serving land component-by-component, one crate module at a time.
+//! smaller checkpoint only - no compute-path change) and `model::Shardable`
+//! pipeline-parallel sharding (`dit_shard::DitStage` - inference-time
+//! layer-range splitting across devices, no backward through the pipeline;
+//! `dit_train::Trainer` remains this crate's real, single-device DiT
+//! training path). The Global LLM's own wiring, joint
+//! generator+discriminator training, and serving land
+//! component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
 pub mod config;
@@ -70,6 +74,7 @@ pub mod discriminator;
 pub mod dit;
 pub mod dit_int8;
 pub mod dit_lora;
+pub mod dit_shard;
 pub mod dit_train;
 pub mod lora;
 pub mod train;

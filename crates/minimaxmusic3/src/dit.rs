@@ -219,19 +219,27 @@ impl DitConfig {
 /// forward call on a `fourier_embedding_dim`-wide vector, not per token):
 /// `angles = 2*pi*t*weight`, `embed = cat(cos(angles), sin(angles))`, then
 /// a 2-layer SiLU MLP to `inner_dim`.
-fn timestep_embed(w: &DitWeights, cfg: &DitConfig, timestep: f32) -> Vec<f32> {
+///
+/// `pub(crate)`, and deliberately takes individual weight slices rather
+/// than a whole `&DitWeights`: `dit_shard`'s per-stage forward calls this
+/// too, and every stage owns this weight quartet as a REPLICATED parameter
+/// (every stage recomputes its own timestep token rather than shipping it
+/// over the wire, same reasoning as `ltxv`'s adaLN table) resolved from its
+/// own flat per-stage weight map, never a full `DitWeights`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn timestep_embed(time_proj_weight: &[f32], time_embed_l1_w: &[f32], time_embed_l1_b: &[f32], time_embed_l2_w: &[f32], time_embed_l2_b: &[f32], cfg: &DitConfig, timestep: f32) -> Vec<f32> {
     use model::hostmath::{matvec, silu};
     let half = cfg.fourier_embedding_dim as usize / 2;
     let mut embed = vec![0.0f32; 2 * half];
     for i in 0..half {
-        let angle = 2.0 * std::f32::consts::PI * timestep * w.time_proj_weight[i];
+        let angle = 2.0 * std::f32::consts::PI * timestep * time_proj_weight[i];
         embed[i] = angle.cos();
         embed[half + i] = angle.sin();
     }
-    let h1 = matvec(&w.time_embed_l1_w, &embed, cfg.inner_dim() as usize, cfg.fourier_embedding_dim as usize);
-    let h1: Vec<f32> = h1.iter().zip(&w.time_embed_l1_b).map(|(&v, &b)| silu(v + b)).collect();
-    let h2 = matvec(&w.time_embed_l2_w, &h1, cfg.inner_dim() as usize, cfg.inner_dim() as usize);
-    h2.iter().zip(&w.time_embed_l2_b).map(|(&v, &b)| v + b).collect()
+    let h1 = matvec(time_embed_l1_w, &embed, cfg.inner_dim() as usize, cfg.fourier_embedding_dim as usize);
+    let h1: Vec<f32> = h1.iter().zip(time_embed_l1_b).map(|(&v, &b)| silu(v + b)).collect();
+    let h2 = matvec(time_embed_l2_w, &h1, cfg.inner_dim() as usize, cfg.inner_dim() as usize);
+    h2.iter().zip(time_embed_l2_b).map(|(&v, &b)| v + b).collect()
 }
 
 /// Precompute `cos`/`sin` RoPE tables, `[rows, rotary_dim/2]`, `theta=10000`
@@ -252,7 +260,7 @@ pub(crate) fn rope_tables(rows: usize, rotary_dim: usize, theta: f32) -> (Vec<f3
     (cos, sin)
 }
 
-struct DeviceBlock {
+pub(crate) struct DeviceBlock {
     norm1_w: DeviceBuffer,
     norm1_b: DeviceBuffer,
     wq: DeviceBuffer,
@@ -267,7 +275,7 @@ struct DeviceBlock {
     ff_out_b: DeviceBuffer,
 }
 
-fn upload_blocks(gpu: &Gpu, blocks: &[BlockW]) -> Vec<DeviceBlock> {
+pub(crate) fn upload_blocks(gpu: &Gpu, blocks: &[BlockW]) -> Vec<DeviceBlock> {
     blocks
         .iter()
         .map(|b| DeviceBlock {
@@ -291,7 +299,7 @@ fn upload_blocks(gpu: &Gpu, blocks: &[BlockW]) -> Vec<DeviceBlock> {
 /// -> out proj -> residual -> norm2 -> ff_in -> split -> swiglu -> ff_out
 /// -> residual`. `x` is `[rows, inner]`; returns the updated `x`.
 #[allow(clippy::too_many_arguments)]
-fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &DeviceBuffer, cos_b: &DeviceBuffer, sin_b: &DeviceBuffer, rows: usize) -> DeviceBuffer {
+pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &DeviceBuffer, cos_b: &DeviceBuffer, sin_b: &DeviceBuffer, rows: usize) -> DeviceBuffer {
     let inner = cfg.inner_dim() as usize;
     let heads = cfg.num_attention_heads;
     let hd = cfg.attention_head_dim;
@@ -389,18 +397,18 @@ fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &DeviceBuffer, cos
     x_next
 }
 
-/// The device forward. `latents` is `[in_channels, length]` row-major
-/// (batch folded away - see the module doc); `condition` is `[length,
-/// condition_dim]` row-major (already frame-aligned by the condition
-/// encoder). Returns the predicted velocity, `[in_channels, length]`.
-pub fn forward(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, latents: &[f32], condition: &[f32], timestep: f32, length: usize) -> Vec<f32> {
-    use model::hostmath::matvec;
+/// The embed-stage preamble: `cat([latent, zeros, condition^T], dim=channel)
+/// -> preprocess_conv residual -> transpose to feature-last`. `pub(crate)`:
+/// `dit_shard`'s embed stage calls this too - the ONLY stage that ever
+/// touches `latents`/`condition` (a non-embed stage's input is the previous
+/// stage's residual instead, see `dit_shard`'s module doc). Returns
+/// `hidden_lc`, `[length, concat_channels]`.
+pub(crate) fn preprocess_hidden_lc(gpu: &Gpu, cfg: &DitConfig, preprocess_conv_w: &[f32], latents: &[f32], condition: &[f32], length: usize) -> Vec<f32> {
     let (cin, cdim, concat) = (cfg.in_channels as usize, cfg.condition_dim as usize, cfg.concat_channels() as usize);
-    let inner = cfg.inner_dim() as usize;
-    assert_eq!(latents.len(), cin * length, "dit::forward: latents length mismatch");
-    assert_eq!(condition.len(), length * cdim, "dit::forward: condition length mismatch");
+    assert_eq!(latents.len(), cin * length, "dit::preprocess_hidden_lc: latents length mismatch");
+    assert_eq!(condition.len(), length * cdim, "dit::preprocess_hidden_lc: condition length mismatch");
 
-    // preprocess: cat([latent, zeros, condition^T], dim=channel) -> [concat, L].
+    // cat([latent, zeros, condition^T], dim=channel) -> [concat, L].
     let mut concat_in = vec![0.0f32; concat * length];
     concat_in[..cin * length].copy_from_slice(latents);
     // zeros region [cin*length .. 2*cin*length) is already 0.
@@ -411,7 +419,7 @@ pub fn forward(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, latents: &[f32], cond
     }
 
     let x_in = gpu.storage_init("preprocess_in", &concat_in);
-    let pre_w = gpu.storage_init("preprocess_conv.weight", &w.preprocess_conv_w);
+    let pre_w = gpu.storage_init("preprocess_conv.weight", preprocess_conv_w);
     let pre_out = gpu.storage((concat * length) as u64);
     let conv = Conv1d { n: 1, cin: concat as u32, l: length as u32, cout: concat as u32, k: 1, stride: 1, pad: 0, dilation: 1, groups: 1, lo: length as u32 };
     let hidden_ncl = gpu.storage((concat * length) as u64);
@@ -428,16 +436,76 @@ pub fn forward(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, latents: &[f32], cond
             hidden_lc[t * concat + c] = hidden_ncl_host[c * length + t];
         }
     }
+    hidden_lc
+}
 
-    let temb = timestep_embed(w, cfg, timestep);
+/// `proj_in` over `hidden_lc`'s `length` rows (row 0, the prepended
+/// timestep token, is assembled separately by the caller from
+/// [`timestep_embed`]). `pub(crate)`: embed-stage-only, like
+/// [`preprocess_hidden_lc`]. Returns `[length, inner_dim]`.
+pub(crate) fn proj_in_rows(cfg: &DitConfig, proj_in_w: &[f32], hidden_lc: &[f32], length: usize) -> Vec<f32> {
+    use model::hostmath::matvec;
+    let concat = cfg.concat_channels() as usize;
+    let inner = cfg.inner_dim() as usize;
+    let mut rows = vec![0.0f32; length * inner];
+    for t in 0..length {
+        let row = matvec(proj_in_w, &hidden_lc[t * concat..(t + 1) * concat], inner, concat);
+        rows[t * inner..(t + 1) * inner].copy_from_slice(&row);
+    }
+    rows
+}
+
+/// The head-stage epilogue: drop row 0 (the timestep token), `proj_out`,
+/// transpose to NCL, `postprocess_conv` residual. `pub(crate)`: `dit_shard`'s
+/// head stage calls this too - the ONLY stage that ever produces the
+/// model's actual output (a non-head stage's output is just its residual,
+/// handed to the next stage instead). `x_final_rows` is `[length, inner_dim]`
+/// (row 0 of the block stack's own `[rows, inner_dim]` output already
+/// dropped by the caller). Returns `[in_channels, length]` NCL.
+pub(crate) fn proj_out_postprocess(gpu: &Gpu, cfg: &DitConfig, proj_out_w: &[f32], postprocess_conv_w: &[f32], x_final_rows: &[f32], length: usize) -> Vec<f32> {
+    use model::hostmath::matvec;
+    let cin = cfg.in_channels as usize;
+    let inner = cfg.inner_dim() as usize;
+    let mut y_lc = vec![0.0f32; length * cin];
+    for t in 0..length {
+        let row = matvec(proj_out_w, &x_final_rows[t * inner..(t + 1) * inner], cin, inner);
+        y_lc[t * cin..(t + 1) * cin].copy_from_slice(&row);
+    }
+    let mut y_ncl = vec![0.0f32; cin * length];
+    for t in 0..length {
+        for c in 0..cin {
+            y_ncl[c * length + t] = y_lc[t * cin + c];
+        }
+    }
+    let y_in = gpu.storage_init("postprocess_in", &y_ncl);
+    let post_w = gpu.storage_init("postprocess_conv.weight", postprocess_conv_w);
+    let post_out = gpu.storage((cin * length) as u64);
+    let post_conv = Conv1d { n: 1, cin: cin as u32, l: length as u32, cout: cin as u32, k: 1, stride: 1, pad: 0, dilation: 1, groups: 1, lo: length as u32 };
+    let out = gpu.storage((cin * length) as u64);
+    gpu.submit(&[], &[conv1d_fwd(gpu, &conv_kernels(), &post_conv, &y_in, &post_w, &post_out)]);
+    gpu.submit(&[], &[gpu.step(ADD2, &[&post_out, &y_in, &out], &[(cin * length) as u32], (cin * length) as u32)]);
+    gpu.read(&out, cin * length)
+}
+
+/// The device forward. `latents` is `[in_channels, length]` row-major
+/// (batch folded away - see the module doc); `condition` is `[length,
+/// condition_dim]` row-major (already frame-aligned by the condition
+/// encoder). Returns the predicted velocity, `[in_channels, length]`.
+///
+/// Composed from the same embed-preamble / block-stack / head-epilogue
+/// pieces `dit_shard`'s per-stage forward calls, run here over the WHOLE
+/// stack (`Shard::whole`, in `dit_shard`'s terms) - one implementation of
+/// each piece, never two copies that could drift apart.
+pub fn forward(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, latents: &[f32], condition: &[f32], timestep: f32, length: usize) -> Vec<f32> {
+    let inner = cfg.inner_dim() as usize;
+    let hidden_lc = preprocess_hidden_lc(gpu, cfg, &w.preprocess_conv_w, latents, condition, length);
+
+    let temb = timestep_embed(&w.time_proj_weight, &w.time_embed_l1_w, &w.time_embed_l1_b, &w.time_embed_l2_w, &w.time_embed_l2_b, cfg, timestep);
+    let proj_rows = proj_in_rows(cfg, &w.proj_in_w, &hidden_lc, length);
     let rows = length + 1;
     let mut x_host = vec![0.0f32; rows * inner];
     x_host[..inner].copy_from_slice(&temb);
-    // proj_in on the L real rows; row 0 is the prepended timestep token.
-    for t in 0..length {
-        let row = matvec(&w.proj_in_w, &hidden_lc[t * concat..(t + 1) * concat], inner, concat);
-        x_host[(t + 1) * inner..(t + 2) * inner].copy_from_slice(&row);
-    }
+    x_host[inner..].copy_from_slice(&proj_rows);
 
     let (cos_t, sin_t) = rope_tables(rows, cfg.rotary_dim as usize, 10000.0);
     let cos_b = gpu.storage_init("rope.cos", &cos_t);
@@ -450,26 +518,5 @@ pub fn forward(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, latents: &[f32], cond
     }
 
     let x_final = gpu.read(&x, rows * inner);
-    // Drop row 0 (the timestep token), proj_out, transpose back to NCL,
-    // postprocess conv + residual - all host/device-mixed the same way
-    // preprocess was (tiny relative to the transformer stack above).
-    let mut y_lc = vec![0.0f32; length * cin];
-    for t in 0..length {
-        let row = matvec(&w.proj_out_w, &x_final[(t + 1) * inner..(t + 2) * inner], cin, inner);
-        y_lc[t * cin..(t + 1) * cin].copy_from_slice(&row);
-    }
-    let mut y_ncl = vec![0.0f32; cin * length];
-    for t in 0..length {
-        for c in 0..cin {
-            y_ncl[c * length + t] = y_lc[t * cin + c];
-        }
-    }
-    let y_in = gpu.storage_init("postprocess_in", &y_ncl);
-    let post_w = gpu.storage_init("postprocess_conv.weight", &w.postprocess_conv_w);
-    let post_out = gpu.storage((cin * length) as u64);
-    let post_conv = Conv1d { n: 1, cin: cin as u32, l: length as u32, cout: cin as u32, k: 1, stride: 1, pad: 0, dilation: 1, groups: 1, lo: length as u32 };
-    let out = gpu.storage((cin * length) as u64);
-    gpu.submit(&[], &[conv1d_fwd(gpu, &conv_kernels(), &post_conv, &y_in, &post_w, &post_out)]);
-    gpu.submit(&[], &[gpu.step(ADD2, &[&post_out, &y_in, &out], &[(cin * length) as u32], (cin * length) as u32)]);
-    gpu.read(&out, cin * length)
+    proj_out_postprocess(gpu, cfg, &w.proj_out_w, &w.postprocess_conv_w, &x_final[inner..], length)
 }

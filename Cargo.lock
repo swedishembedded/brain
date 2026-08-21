@@ -1210,6 +1210,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-testutil",
+ "serde_json",
 ]
 
 [[package]]
