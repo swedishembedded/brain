@@ -71,12 +71,16 @@
 //! at `QwenConfig::tiny()` scale). `pipeline::generate_frames` wires it
 //! together with the depth decoder into the full CFG-guided AR
 //! generation loop (two `qwen3::Qwen` instances, one per CFG branch,
-//! stepped in lockstep). Chunk denoising through the DiT, vocoder
+//! stepped in lockstep), and `denoise::denoise_chunk` turns that AR
+//! output into Flow-VAE latents chunk by chunk (the 200-frame/100-hop
+//! window, the DiT's own zero-condition CFG, and the 172-latent overlap
+//! splice carried between chunks via `denoise::ChunkState`). Vocoder
 //! stitching, joint generator+discriminator training, and serving land
 //! component-by-component, one crate module at a time.
 
 pub mod condition_encoder;
 pub mod config;
+pub mod denoise;
 pub mod depth_decoder;
 pub mod depth_lora;
 pub mod discriminator;
