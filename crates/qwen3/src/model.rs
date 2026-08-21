@@ -1941,6 +1941,23 @@ impl Qwen {
         hidden
     }
 
+    /// The raw `tok.weight` embedding row for `token_id` - the SAME gather
+    /// [`Self::step`]'s own `EMBED` dispatch uses internally, exposed
+    /// standalone (no transformer layers run, the KV-cache position is NOT
+    /// advanced) for a caller that needs a token's embedding for something
+    /// OTHER than this model's own decode state (e.g. a downstream head
+    /// that embeds one of THIS model's vocab ids without asking this
+    /// instance to "see" that token itself). Writes into a fresh buffer,
+    /// never `self.res[0]`/`self.tokens`' own decode-path role, so this has
+    /// no effect on a subsequent [`Self::step`]/[`Self::step_embed`] call.
+    pub fn embed_row(&self, token_id: u32) -> Vec<f32> {
+        let d = self.cfg.d_model;
+        self.gpu.write(&self.tokens, &[token_id]);
+        let out = self.gpu.storage(d as u64);
+        self.gpu.submit(&[], &[self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &out], &[d, 1], d)]);
+        self.gpu.read(&out, d as usize)
+    }
+
     /// [`Self::step_embed`] with M-RoPE -- see [`Self::step_mrope`]'s doc for
     /// the `cos`/`sin` convention. `deepstack_row`: see [`Self::decode_steps`]'s
     /// doc -- `Some(local_row)` when this embedding is image row `local_row`
@@ -2384,6 +2401,36 @@ mod tests {
             assert_eq!(&streamed.read_weight(name), &init[name], "streamed {name} vs source");
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    /// [`Qwen::embed_row`] returns exactly `tok.weight`'s row `token_id` -
+    /// checked directly against the whole embedding table (cheap at
+    /// `QwenConfig::tiny()`'s vocab) - and does not disturb a subsequent
+    /// [`Qwen::step`]'s own decode state (same hidden state whether or not
+    /// `embed_row` was called first).
+    #[test]
+    fn embed_row_matches_the_embedding_table_and_does_not_disturb_decode_state() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 9);
+        let d = cfg.d_model as usize;
+        let table = init.get("tok.weight").expect("tiny config has an embedding table");
+
+        let m = Qwen::new(cfg.clone(), 1, 4, &init);
+        for token_id in [0u32, 1, cfg.vocab - 1] {
+            let got = m.embed_row(token_id);
+            let want = &table[token_id as usize * d..(token_id as usize + 1) * d];
+            assert_eq!(got, want, "embed_row({token_id}) != tok.weight row {token_id}");
+        }
+
+        let a = Qwen::new(cfg.clone(), 1, 4, &init);
+        let b = Qwen::new(cfg, 1, 4, &init);
+        let _ = a.embed_row(0); // read-only probe; must not perturb decode state
+        let hidden_a = a.step(2);
+        let hidden_b = b.step(2);
+        assert_eq!(hidden_a, hidden_b, "embed_row must not affect a subsequent step()'s result");
     }
 
     /// Writes `cfg`'s `init` to a temp `.st` file and opens a [`checkpoint::weightio::WeightReader`]
