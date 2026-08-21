@@ -43,6 +43,7 @@ brain-fastvlm.workspace = true
 brain-glmdsa.workspace = true
 brain-lfm2.workspace = true
 brain-qwen3tts.workspace = true
+brain-minimaxmusic3.workspace = true
 brain-mimi.workspace = true
 brain-ecapatdnn.workspace = true
 brain-audio.workspace = true

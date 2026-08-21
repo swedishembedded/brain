@@ -364,6 +364,11 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(qwen3tts::caps::TtsProvider::new()),
             resident: resident!(crate::resident_tts::TtsResident::from_env),
         },
+        ModelEntry {
+            manifest: minimaxmusic3::caps::manifest,
+            provider: always!(minimaxmusic3::caps::MinimaxMusic3Provider::new()),
+            resident: resident!(crate::resident_minimaxmusic3::MinimaxMusic3Resident::from_env),
+        },
         // Speech-to-text. Discovery is weight-free (the caps manifests); the
         // direct `brain do` path wraps the model crates' eager providers in
         // [`LazyProvider`] so construction stays cheap; the residency adapters

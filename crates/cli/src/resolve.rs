@@ -113,6 +113,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("chronos2", "brain/chronos2"),
     ("fincast", "brain/fincast"),
     ("kronos", "brain/kronos"),
+    ("minimaxmusic3", "brain/minimaxmusic3"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
     // listed-but-unreachable gap `catalog.rs`'s own module docs warn about

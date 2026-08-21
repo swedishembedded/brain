@@ -602,6 +602,7 @@ dependencies = [
  "brain-ltxv",
  "brain-memauth",
  "brain-mimi",
+ "brain-minimaxmusic3",
  "brain-model",
  "brain-modelref",
  "brain-modelstore",
@@ -1204,6 +1205,7 @@ name = "brain-minimaxmusic3"
 version = "1.0.0"
 dependencies = [
  "brain-audio",
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-diffusion",
