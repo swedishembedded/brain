@@ -90,6 +90,7 @@
 //! defect here - see this crate's own roadmap ledger for the measured
 //! diagnosis. Serving lands next.
 
+pub mod caps;
 pub mod condition_encoder;
 pub mod config;
 pub mod denoise;
@@ -101,6 +102,7 @@ pub mod dit_int8;
 pub mod dit_lora;
 pub mod dit_shard;
 pub mod dit_train;
+pub mod generate;
 pub mod global_llm;
 pub mod lora;
 pub mod pipeline;
