@@ -515,6 +515,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-campplus"
+version = "1.0.0"
+dependencies = [
+ "brain-audio",
+ "brain-backend-cpu",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-onnx",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-capability"
 version = "1.0.0"
 dependencies = [
@@ -705,6 +720,27 @@ dependencies = [
  "brain-sdxlunet",
  "brain-testutil",
  "brain-vae",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-cosyvoice"
+version = "1.0.0"
+dependencies = [
+ "brain-audio",
+ "brain-backend-cpu",
+ "brain-campplus",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-diffusion",
+ "brain-dit",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-qwen3",
+ "brain-s3tokenizer",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -1610,6 +1646,22 @@ dependencies = [
  "brain-testutil",
  "brain-vae",
  "brain-weightset",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-s3tokenizer"
+version = "1.0.0"
+dependencies = [
+ "brain-audio",
+ "brain-backend-cpu",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-onnx",
+ "brain-testutil",
  "serde_json",
 ]
 

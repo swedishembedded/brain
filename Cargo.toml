@@ -62,6 +62,9 @@ default-members = [
     "crates/ecapatdnn",
     "crates/qwen3tts",
     "crates/minimaxmusic3",
+    "crates/campplus",
+    "crates/s3tokenizer",
+    "crates/cosyvoice",
     "crates/toypid",
     "crates/federated",
     "crates/eval",
@@ -169,6 +172,9 @@ brain-mimi = { path = "crates/mimi" }
 brain-ecapatdnn = { path = "crates/ecapatdnn" }
 brain-qwen3tts = { path = "crates/qwen3tts" }
 brain-minimaxmusic3 = { path = "crates/minimaxmusic3" }
+brain-campplus = { path = "crates/campplus" }
+brain-s3tokenizer = { path = "crates/s3tokenizer" }
+brain-cosyvoice = { path = "crates/cosyvoice" }
 brain-toypid = { path = "crates/toypid" }
 brain-federated = { path = "crates/federated" }
 brain-eval = { path = "crates/eval" }

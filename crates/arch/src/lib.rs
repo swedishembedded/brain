@@ -234,6 +234,40 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), weights_env: &[("BRAIN_QWEN3TTS_WEIGHTS", "weights_dir"), ("BRAIN_QWEN3TTS_CKPT", "ckpt")]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
+    arch!("campplus", "CAM++ D-TDNN speaker encoder (192-d x-vector)", Audio, Brain, "brain-campplus"),
+    // No official llama.cpp/GGUF architecture entry exists for either
+    // component; upstream ships the ONNX-only `speech_tokenizer_v2.onnx`
+    // (CosyVoice 2) / `speech_tokenizer_v3.onnx` (CosyVoice 3). No single
+    // `default_ref` names a whole repo carrying just this one file, so
+    // `weights_env` is the only resolution path for now, one role per
+    // codebook version - both variants share one 6561-entry FSQ codebook.
+    arch!("s3tokenizer", "S3Tokenizer FSQ supervised-semantic speech tokenizer", Audio, Brain, "brain-s3tokenizer",
+          weights_env: &[("BRAIN_S3TOKENIZER_V2", "v2"), ("BRAIN_S3TOKENIZER_V3", "v3")]),
+    // The id names the FAMILY, not the release - CosyVoice 2 and CosyVoice 3
+    // share one upstream product name and one LM backbone (a stock
+    // Qwen2.5-0.5B), differing only in the flow decoder's estimator (UNet vs
+    // DiT) and small vocoder causality deltas; the release is a config
+    // (`Variant::CosyVoice2`/`CosyVoice3`), exactly as `wan` spans 2.1/2.2.
+    // No official llama.cpp/GGUF architecture entry exists upstream, hence
+    // `gguf: None`. `weights_env` names one role per component since
+    // upstream ships `llm.pt`/`flow.pt`/`hift.pt` as three independent files
+    // under one repo, not one combined checkpoint; `s3tokenizer` and
+    // `campplus` are separate rows above, not roles here, because they are
+    // independently useful architectures, not CosyVoice internals (the same
+    // split `qwen3tts`/`mimi`/`ecapatdnn` already use).
+    //
+    // `default_ref` names ONLY the CosyVoice 2 repo, deliberately - not
+    // `extra_refs`: CosyVoice 3's repo carries the SAME three role names
+    // (`llm`/`flow`/`hift`), not additional ones, so it is a second variant
+    // of one role set, not a compound checkpoint `extra_refs` merges roles
+    // from (see `kronos`'s row for that shape). Fetching CosyVoice 3 means
+    // pointing the `weights_env` vars at it explicitly, same as any other
+    // non-default `wan`/`flux2` variant.
+    arch!("cosyvoice", "CosyVoice 2/3 (LLM-based streaming zero-shot TTS)", Audio, Brain, "brain-cosyvoice",
+          default_ref: Some("FunAudioLLM/CosyVoice2-0.5B"),
+          weights_env: &[("BRAIN_COSYVOICE_LLM", "llm"),
+                         ("BRAIN_COSYVOICE_FLOW", "flow"),
+                         ("BRAIN_COSYVOICE_HIFT", "hift")]),
     // Five chained components, no single upstream checkpoint file: a real
     // Qwen3-8B "Global LLM" (`qwen_7B/qwen_7B/`, llama.cpp's own `qwen3`
     // architecture - reused via `crates/qwen3`, not reimplemented here), a

@@ -1,0 +1,23 @@
+[package]
+name = "brain-campplus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CAM++ (D-TDNN + context-aware masking) speaker encoder: 80-dim fbank in, 192-d x-vector out. Used by CosyVoice for zero-shot voice cloning."
+
+[lib]
+name = "campplus"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-backend-cpu.workspace = true
+brain-kernels.workspace = true
+brain-audio.workspace = true
+brain-checkpoint.workspace = true
+brain-onnx.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

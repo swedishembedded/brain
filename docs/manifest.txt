@@ -51,6 +51,9 @@ models/qwen3tts.md
 models/mimi.md
 models/ecapatdnn.md
 models/minimaxmusic3.md
+models/cosyvoice.md
+models/s3tokenizer.md
+models/campplus.md
 models/yolov8/readme.md
 models/yolov8/npu.md
 models/zipdepth.md

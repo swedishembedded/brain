@@ -1,0 +1,24 @@
+[package]
+name = "brain-s3tokenizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "S3Tokenizer: the FSQ (finite scalar quantization) supervised-semantic speech tokenizer CosyVoice conditions on (v2: SenseVoice-Large encoder, v3: MinMo encoder, both 6561-entry codebooks)."
+
+[lib]
+name = "s3tokenizer"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-backend-cpu.workspace = true
+brain-kernels.workspace = true
+brain-audio.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-onnx.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
