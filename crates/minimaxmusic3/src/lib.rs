@@ -79,16 +79,20 @@
 //! and crops/concatenates them into one continuous stereo waveform
 //! (`audio::wav::write_multi` for the delivered file), and
 //! `global_llm::assemble_prompt` builds the AR stage's own token-id
-//! prompts from raw caption/lyrics text. `tests/e2e_short_generation.rs`
-//! wires all five real components together end to end with a
-//! sequential-stage RAM discipline; it is implemented and correct but
-//! **could not be validated on this development machine** - whole-8B-
-//! model residency fails on both of this machine's backends (CPU-JIT's
-//! `int8` request silently promotes to fp32; this machine's own Vulkan
-//! iGPU caps single buffers below the embedding/head tensors' size),
-//! both pre-existing `qwen3`/`gpu_core`/`backend-cpu` limits, not a
-//! defect here - see this crate's own roadmap ledger for the measured
-//! diagnosis. Serving lands next.
+//! prompts from raw caption/lyrics text. `generate::generate` is the ONE
+//! implementation of the full pipeline (prompt assembly through
+//! multi-chunk denoise and stitch), shared by `tests/
+//! e2e_short_generation.rs`, `caps::MinimaxMusic3Provider` (the direct/
+//! `brain do` path), and `crates/cli::resident_minimaxmusic3` (the
+//! D-Bus/scheduler path) - `brain minimaxmusic3 generate` and the
+//! `brain/minimaxmusic3` D-Bus model are both live and reachable. What
+//! **could not be validated on this development machine** is a real run
+//! all the way through: whole-8B-model residency fails on both of this
+//! machine's backends (CPU-JIT's `int8` request silently promotes to
+//! fp32; this machine's own Vulkan iGPU caps single buffers below the
+//! embedding/head tensors' size), both pre-existing `qwen3`/`gpu_core`/
+//! `backend-cpu` limits, not a defect here - see this crate's own
+//! roadmap ledger for the measured diagnosis.
 
 pub mod caps;
 pub mod condition_encoder;
