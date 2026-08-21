@@ -119,6 +119,7 @@ pub mod block;
 pub mod caps;
 pub mod config;
 pub mod devplan;
+pub mod devres;
 pub mod dfr;
 pub mod dit;
 pub mod duration_head;

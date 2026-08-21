@@ -66,6 +66,15 @@ brain-gemma4.workspace = true
 # this cache. `residency` depends only on capability/memauth, so this is not
 # a cycle: nothing in `residency` knows this crate exists.
 brain-residency.workspace = true
+# `weightset::{WeightSet, Schedule, CyclicScan}` - the fixed-size window of
+# DEVICE slots over the 48 transformer blocks `crate::devres` keeps resident
+# across a generation's denoise steps. A denoise loop's visitation order is
+# known exactly in advance (`Schedule::cyclic(48, passes)`), which is the
+# problem that crate was built for and the reason there is no second bespoke
+# window here. NOT the same question `crate::weightcache` answers - that one
+# is HOST bytes under a shared byte budget, governed by `residency`'s
+# cost-aware eviction over an unbounded set of checkpoints.
+brain-weightset.workspace = true
 # `memauth::limits().ram_total` - the process-wide host ceiling
 # `--limit-ram-total` publishes, which is what bounds the block-weight
 # cache's size (`crate::weightcache::budget_from_limits`).

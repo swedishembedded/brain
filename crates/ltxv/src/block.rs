@@ -187,11 +187,21 @@ const K_FLASH: usize = 21;
 const K_FLASH_SPLIT: usize = 22;
 const K_FLASH_REG: usize = 23;
 const K_FLASH_REG2: usize = 24;
+/// The ONE kernel this crate contributes rather than reuses (§F.3: the tree
+/// was grepped first - `bias_add` broadcasts a row but only IN PLACE,
+/// `region_copy` preserves the source layout rather than compacting a strided
+/// row out of it, and `add_chan_bcast`/`broadcast_add_hw` are NCHW spatial
+/// ops; none can produce a dense `[t, dim]` plane out of a `[t, 9, dim]`
+/// table). It replaces the per-block HOST `add_table` + `slice_mod` +
+/// nine-vector upload that a real 48-layer 720p forward spent 36.0 s of 103.3 s
+/// on, plus ~25 GB of PCIe traffic per forward, for a table whose only
+/// per-block input is a 147 KB `scale_shift_table`. Appended, so every index
+/// above is unchanged.
+const K_ADALN_ROW: usize = 25;
 
-/// Every kernel this block dispatches - all pre-existing, all at their
-/// documented general contract (see this module's doc for why no new kernel
-/// was needed anywhere in the block).
-pub const KERNELS: [(&str, &str); 25] = [
+/// Every kernel this block dispatches - all pre-existing except
+/// [`K_ADALN_ROW`], all at their documented general contract.
+pub const KERNELS: [(&str, &str); 26] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
@@ -220,6 +230,7 @@ pub const KERNELS: [(&str, &str); 25] = [
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
+    ("adaln_row", kernels::ADALN_ROW),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -694,6 +705,88 @@ fn slice_mod(combined: &[f32], t: usize, dim: usize) -> Mod {
         shift_q: row(6),
         one_plus_scale_q: one_plus(row(7)),
         gate_q: row(8),
+    }
+}
+
+/// [`Mod`]'s device-side form: the same nine `[t, dim]` modulation vectors,
+/// as device buffers.
+///
+/// Two ways to fill one, and which one a caller picks is where the biggest
+/// single cost of a real forward used to live:
+///
+/// * [`ModBufs::upload`] takes a host [`Mod`] (i.e. `add_table` + [`slice_mod`]
+///   already ran) and writes the nine vectors to the card. That is what every
+///   tap-producing/parity path does, and it is the reference definition of the
+///   arithmetic.
+/// * [`ModBufs::derive`] computes them ON the card from the model-level adaLN
+///   table (uploaded ONCE per forward) and this block's own 147 KB
+///   `scale_shift_table`, via `adaln_row`. Same numbers, no host combine and no
+///   per-block upload - measured at 36.0 s of host time plus ~25 GB of PCIe
+///   traffic removed from one real 48-layer 720p forward.
+struct ModBufs {
+    shift_msa: DeviceBuffer,
+    one_plus_scale_msa: DeviceBuffer,
+    gate_msa: DeviceBuffer,
+    shift_mlp: DeviceBuffer,
+    one_plus_scale_mlp: DeviceBuffer,
+    gate_mlp: DeviceBuffer,
+    shift_q: DeviceBuffer,
+    one_plus_scale_q: DeviceBuffer,
+    gate_q: DeviceBuffer,
+}
+
+/// The nine `[9, dim]` table rows, in the order `slice_mod` reads them, and
+/// whether each is a `1 + scale` row. ONE list, read by both
+/// [`ModBufs::upload`] (indirectly, through [`slice_mod`]) and
+/// [`ModBufs::derive`], so the two cannot disagree about which row is which.
+const MOD_ROWS: [(u32, bool); 9] = [(0, false), (1, true), (2, false), (3, false), (4, true), (5, false), (6, false), (7, true), (8, false)];
+
+impl ModBufs {
+    /// Upload an already-computed host [`Mod`].
+    fn upload(gpu: &Gpu, m: &Mod) -> ModBufs {
+        let up = |v: &[f32]| -> DeviceBuffer {
+            let b = gpu.storage(v.len() as u64);
+            wf(gpu, &b, v);
+            b
+        };
+        ModBufs {
+            shift_msa: up(&m.shift_msa),
+            one_plus_scale_msa: up(&m.one_plus_scale_msa),
+            gate_msa: up(&m.gate_msa),
+            shift_mlp: up(&m.shift_mlp),
+            one_plus_scale_mlp: up(&m.one_plus_scale_mlp),
+            gate_mlp: up(&m.gate_mlp),
+            shift_q: up(&m.shift_q),
+            one_plus_scale_q: up(&m.one_plus_scale_q),
+            gate_q: up(&m.gate_q),
+        }
+    }
+
+    /// Derive the nine vectors on the device from `tab` (the model-level
+    /// `[t, 9*dim]` adaLN table, uploaded once per forward) and `tbl` (this
+    /// block's own `[9, dim]` `scale_shift_table`, uploaded once per
+    /// generation). Records nine `adaln_row` dispatches into `s`; nothing runs
+    /// until the caller submits.
+    fn derive(gpu: &Gpu, s: &mut Vec<Step>, tab: &DeviceBuffer, tbl: &DeviceBuffer, t: u32, dim: u32) -> ModBufs {
+        let td = (t * dim) as u64;
+        let mut out: Vec<DeviceBuffer> = Vec::with_capacity(9);
+        for (row, plus_one) in MOD_ROWS {
+            let b = gpu.storage(td);
+            s.push(gpu.step(K_ADALN_ROW, &[tab, tbl, &b], &[t, dim, 9, row, u32::from(plus_one)], t * dim));
+            out.push(b);
+        }
+        let mut it = out.into_iter();
+        ModBufs {
+            shift_msa: it.next().unwrap(),
+            one_plus_scale_msa: it.next().unwrap(),
+            gate_msa: it.next().unwrap(),
+            shift_mlp: it.next().unwrap(),
+            one_plus_scale_mlp: it.next().unwrap(),
+            gate_mlp: it.next().unwrap(),
+            shift_q: it.next().unwrap(),
+            one_plus_scale_q: it.next().unwrap(),
+            gate_q: it.next().unwrap(),
+        }
     }
 }
 
@@ -1743,7 +1836,7 @@ fn self_attn_and_text_ca_q(
     w: &QBlockWeights,
     ones: &DeviceBuffer,
     x_buf: &DeviceBuffer,
-    m: &Mod,
+    m: &ModBufs,
     ctx_buf: &DeviceBuffer,
     ctx_len: u32,
     cos_bufs: &[DeviceBuffer],
@@ -1760,12 +1853,8 @@ fn self_attn_and_text_ca_q(
         wf(gpu, &b, v);
         b
     };
-    let shift_msa = up(&m.shift_msa);
-    let one_plus_scale_msa = up(&m.one_plus_scale_msa);
-    let gate_msa = up(&m.gate_msa);
-    let shift_q = up(&m.shift_q);
-    let one_plus_scale_q = up(&m.one_plus_scale_q);
-    let gate_q = up(&m.gate_q);
+    let (shift_msa, one_plus_scale_msa, gate_msa) = (&m.shift_msa, &m.one_plus_scale_msa, &m.gate_msa);
+    let (shift_q, one_plus_scale_q, gate_q) = (&m.shift_q, &m.one_plus_scale_q, &m.gate_q);
 
     let pst = &w.prompt_scale_shift_table;
     let (shift_kv_row, scale_kv_row) = (&pst[0..dim as usize], &pst[dim as usize..2 * dim as usize]);
@@ -1783,18 +1872,18 @@ fn self_attn_and_text_ca_q(
     let tmp1 = gpu.storage(td as u64);
     let tmp2 = gpu.storage(td as u64);
     let norm_x = gpu.storage(td as u64);
-    ada_zero(gpu, s, ones, x_buf, &one_plus_scale_msa, &shift_msa, &tmp1, &tmp2, &norm_x, dim, t, eps);
+    ada_zero(gpu, s, ones, x_buf, one_plus_scale_msa, shift_msa, &tmp1, &tmp2, &norm_x, dim, t, eps);
     let attn1_out = attention_q(gpu, s, tier, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((cos_bufs, sin_bufs)), Some((cos_bufs, sin_bufs)), K_ROPE2D, eps, true);
     let x_fma = gpu.storage(td as u64);
-    gate_row(gpu, s, x_buf, &gate_msa, &attn1_out, &x_fma, t, dim, 1);
+    gate_row(gpu, s, x_buf, gate_msa, &attn1_out, &x_fma, t, dim, 1);
 
     let x_normed = gpu.storage(td as u64);
     rmsnorm(gpu, s, &x_fma, ones, &x_normed, dim, t, eps);
 
     let attn_input_tmp1 = gpu.storage(td as u64);
     let attn_input = gpu.storage(td as u64);
-    mul(gpu, s, &x_normed, &one_plus_scale_q, &attn_input_tmp1, td);
-    add2(gpu, s, &attn_input_tmp1, &shift_q, &attn_input, td);
+    mul(gpu, s, &x_normed, one_plus_scale_q, &attn_input_tmp1, td);
+    add2(gpu, s, &attn_input_tmp1, shift_q, &attn_input, td);
 
     let ctxd = ctx_len * dim;
     let enc_tmp1 = gpu.storage(ctxd as u64);
@@ -1804,7 +1893,7 @@ fn self_attn_and_text_ca_q(
 
     let ca_raw = attention_q(gpu, s, tier, &w.attn2, dim, dim, dim, heads, head_dim, &attn_input, &enc_hidden, t, ctx_len, None, None, K_ROPE2D, eps, false);
     let ca_gated = gpu.storage(td as u64);
-    mul(gpu, s, &ca_raw, &gate_q, &ca_gated, td);
+    mul(gpu, s, &ca_raw, gate_q, &ca_gated, td);
     let x2 = gpu.storage(td as u64);
     add2(gpu, s, &x_fma, &ca_gated, &x2, td);
 
@@ -1814,21 +1903,12 @@ fn self_attn_and_text_ca_q(
 /// [`mlp_sublayer`]'s quantized-compute twin - identical structure,
 /// [`qquant_linear`] instead of [`linear`] for both FFN projections.
 #[allow(clippy::too_many_arguments)]
-fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, ones: &DeviceBuffer, x2: &DeviceBuffer, shift_mlp: &[f32], one_plus_scale_mlp: &[f32], gate_mlp: &[f32], dim: u32, t: u32, eps: f32) -> (DeviceBuffer, DeviceBuffer) {
+fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, ones: &DeviceBuffer, x2: &DeviceBuffer, shift_mlp_buf: &DeviceBuffer, one_plus_scale_mlp_buf: &DeviceBuffer, gate_mlp_buf: &DeviceBuffer, dim: u32, t: u32, eps: f32) -> (DeviceBuffer, DeviceBuffer) {
     let td = t * dim;
-    let up = |v: &[f32]| -> DeviceBuffer {
-        let b = gpu.storage(v.len() as u64);
-        wf(gpu, &b, v);
-        b
-    };
-    let shift_mlp_buf = up(shift_mlp);
-    let one_plus_scale_mlp_buf = up(one_plus_scale_mlp);
-    let gate_mlp_buf = up(gate_mlp);
-
     let mlp_tmp1 = gpu.storage(td as u64);
     let mlp_tmp2 = gpu.storage(td as u64);
     let x_scaled = gpu.storage(td as u64);
-    ada_zero(gpu, s, ones, x2, &one_plus_scale_mlp_buf, &shift_mlp_buf, &mlp_tmp1, &mlp_tmp2, &x_scaled, dim, t, eps);
+    ada_zero(gpu, s, ones, x2, one_plus_scale_mlp_buf, shift_mlp_buf, &mlp_tmp1, &mlp_tmp2, &x_scaled, dim, t, eps);
     let ff_dim = dim * 4;
     let h_pre = gpu.storage((t * ff_dim) as u64);
     qquant_linear(gpu, s, tier, &x_scaled, &w.w1, &h_pre, t, dim, ff_dim);
@@ -1837,8 +1917,51 @@ fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, one
     let ff_out = gpu.storage(td as u64);
     qquant_linear(gpu, s, tier, &h_act, &w.w2, &ff_out, t, ff_dim, dim);
     let x3 = gpu.storage(td as u64);
-    gate_row(gpu, s, x2, &gate_mlp_buf, &ff_out, &x3, t, dim, 1);
+    gate_row(gpu, s, x2, gate_mlp_buf, &ff_out, &x3, t, dim, 1);
     (x3, ff_out)
+}
+
+/// Where one block forward's wall-clock really goes.
+///
+/// Four buckets, because a real 48-layer forward at the production token count
+/// splits between them in a way that is not guessable and was in fact guessed
+/// WRONG once (device residency was built on the belief that the ~270 MB
+/// per-block WEIGHT upload dominated; it turned out to be ~9 s of a ~99 s
+/// bucket). Each boundary is chosen so the split is exact rather than
+/// plausible - see [`LtxBlockQ::forward_timed`]'s body for why the recording
+/// span really is the upload span.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockTimings {
+    /// `add_table` + `slice_mod`: building this block's own `[t, 9*dim]`
+    /// combined modulation table and slicing it into nine `[t, dim]` vectors,
+    /// on the host, single-threaded.
+    pub modulation_host: std::time::Duration,
+    /// Host->device writes (the activations, the text context, the nine
+    /// modulation vectors, the two prompt scale/shift broadcasts) plus graph
+    /// recording. No kernel has run yet when this span closes.
+    pub record_upload: std::time::Duration,
+    /// `submit` + the readback of the block's output - the span that contains
+    /// the GPU's actual work.
+    pub compute: std::time::Duration,
+    /// Device->host readback. For a chained stack
+    /// ([`LtxBlockQ::forward_chained`]) that is ONE `[t, dim]` read for the
+    /// whole forward; for the tap-producing path
+    /// ([`LtxBlockQ::forward_timed`]) it is the three parity TAP readbacks
+    /// (`attn1_out`/`attn2_out`/`ff_out`), each a full `[t, dim]`, per block -
+    /// all three of which a production forward discards, and which were 11.7 s
+    /// of a 103.3 s real 48-layer 720p forward before the chained path existed.
+    pub readback: std::time::Duration,
+}
+
+impl BlockTimings {
+    /// Fold `other` into `self` - how a whole block stack's totals are
+    /// accumulated.
+    pub fn add(&mut self, other: &BlockTimings) {
+        self.modulation_host += other.modulation_host;
+        self.record_upload += other.record_upload;
+        self.compute += other.compute;
+        self.readback += other.readback;
+    }
 }
 
 /// [`LtxBlock`]'s quantized-compute twin: one video-only block, weights
@@ -1851,6 +1974,12 @@ pub struct LtxBlockQ {
     w: QBlockWeights,
     context_len: u32,
     ones_t: DeviceBuffer,
+    /// This block's own `[9, dim]` `scale_shift_table` ON the device - 147 KB,
+    /// uploaded with the rest of the block's weights and resident for exactly
+    /// as long as they are. It is what [`ModBufs::derive`] adds to the
+    /// model-level adaLN table, and the reason a resident block needs nothing
+    /// from the host on a warm step.
+    sst_buf: DeviceBuffer,
 }
 
 impl LtxBlockQ {
@@ -1882,14 +2011,53 @@ impl LtxBlockQ {
         let w = QBlockWeights::from_cached(&gpu, cached);
         let ones_t = gpu.storage(dim as u64);
         wf(&gpu, &ones_t, &vec![1.0f32; dim]);
+        let sst_buf = gpu.storage(w.scale_shift_table.len() as u64);
+        wf(&gpu, &sst_buf, &w.scale_shift_table);
         let _ = tokens;
-        LtxBlockQ { gpu, cfg: *cfg, tier, w, context_len, ones_t }
+        LtxBlockQ { gpu, cfg: *cfg, tier, w, context_len, ones_t, sst_buf }
     }
 
     /// One block forward - same inputs/outputs as [`LtxBlock::forward`].
+    ///
+    /// Runs on this block's OWN handle, which is also the handle its weights
+    /// were uploaded through. Correct for the throwaway shape (build a block,
+    /// run it once, drop it); see [`Self::forward_on`] for the resident shape.
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, x: &[f32], adaln_table: &[f32], context: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
-        let gpu = &self.gpu;
+        self.forward_on(&self.gpu, x, adaln_table, context, cos_bufs, sin_bufs, t)
+    }
+
+    /// [`Self::forward`] with the per-call SCRATCH allocations placed on a
+    /// caller-supplied handle instead of this block's own.
+    ///
+    /// Same device, different `gpu_core::Gpu` handle (`Gpu::share`), and that
+    /// separation is the whole point when a block is RESIDENT across a
+    /// generation's forward calls (`crate::devres`). A `Gpu`'s `memauth`
+    /// grants are released when the HANDLE drops, not when an individual
+    /// buffer does (see `gpu_core`'s own `grants` doc), so running a resident
+    /// block's transients through its long-lived weight handle would charge
+    /// every step's activations against the process-wide `--limit-vram-total`
+    /// ceiling forever and refuse a run that actually fits. A fresh scratch
+    /// handle per forward keeps the accounting honest: the weights are charged
+    /// for exactly as long as they are resident, the activations for exactly
+    /// as long as the call runs.
+    ///
+    /// Bit-identity is not a claim about tolerance: `scratch` binds the SAME
+    /// weight buffers into the SAME kernels in the SAME order, and a
+    /// `Gpu::share` handle is the same adapter, queue and compiled pipelines.
+    /// Only which handle recorded the dispatch changes, which no kernel can
+    /// observe.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_on(&self, scratch: &Gpu, x: &[f32], adaln_table: &[f32], context: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
+        self.forward_timed(scratch, x, adaln_table, context, cos_bufs, sin_bufs, t, &mut BlockTimings::default())
+    }
+
+    /// [`Self::forward_on`] with the four costs a block forward really has,
+    /// split apart - see [`BlockTimings`] for why they are worth separating
+    /// and what each boundary is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_timed(&self, scratch: &Gpu, x: &[f32], adaln_table: &[f32], context: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32, timings: &mut BlockTimings) -> (Vec<f32>, BlockTaps) {
+        let gpu = scratch;
         let cfg = &self.cfg;
         let dim = cfg.inner_dim;
         let heads = cfg.num_heads;
@@ -1900,24 +2068,93 @@ impl LtxBlockQ {
         assert_eq!(adaln_table.len(), (t * 9 * dim) as usize);
         assert_eq!(context.len(), (ctx_len * dim) as usize);
 
+        let s_mod = std::time::Instant::now();
         let combined = dit::adaln::add_table(adaln_table, &self.w.scale_shift_table, t as usize, 9 * dim as usize);
         let m = slice_mod(&combined, t as usize, dim as usize);
+        timings.modulation_host += s_mod.elapsed();
 
+        let s_rec = std::time::Instant::now();
         let x_buf = gpu.storage((t * dim) as u64);
         wf(gpu, &x_buf, x);
         let ctx_buf = gpu.storage((ctx_len * dim) as u64);
         wf(gpu, &ctx_buf, context);
+        let mb = ModBufs::upload(gpu, &m);
 
         let mut s: Vec<Step> = Vec::new();
         let td = t * dim;
 
-        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &m, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
-        let (x3, ff_out) = mlp_sublayer_q(gpu, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &m.shift_mlp, &m.one_plus_scale_mlp, &m.gate_mlp, dim, t, eps);
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x3, ff_out) = mlp_sublayer_q(gpu, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
+        // Every `wf` above is a synchronous `queue.write_buffer` and NOTHING
+        // computes until `submit`, so the span this closes is exactly the
+        // host->device upload + graph recording cost, cleanly separated from
+        // the GPU's own work below.
+        timings.record_upload += s_rec.elapsed();
 
+        let s_sub = std::time::Instant::now();
         gpu.submit(&[], &s);
         let out = gpu.read(&x3, td as usize);
+        timings.compute += s_sub.elapsed();
+        let s_taps = std::time::Instant::now();
         let taps = BlockTaps { attn1_out: gpu.read(&attn1_out, td as usize), attn2_out: gpu.read(&ca_raw, td as usize), ff_out: gpu.read(&ff_out, td as usize) };
+        timings.readback += s_taps.elapsed();
         (out, taps)
+    }
+
+    /// The PRODUCTION form: modulation derived on the device, no parity taps,
+    /// and only the activations crossing PCIe.
+    ///
+    /// Three things it does NOT do, and the reasons are measured:
+    ///
+    /// * it does not build this block's modulation on the host and upload it -
+    ///   [`ModBufs::derive`] computes the same nine `[t, dim]` vectors on the
+    ///   card from `adaln_buf` (uploaded once per FORWARD) and this block's
+    ///   resident `scale_shift_table`. At the real 22B/720p shape the host
+    ///   combine+slice alone was 36.0 s of a 103.3 s forward, on top of ~25 GB
+    ///   of PCIe traffic;
+    /// * it does not upload the text context, which is uploaded once per
+    ///   forward instead of once per block (~0.8 GB saved);
+    /// * it does not read back the three parity TAPS, which a production
+    ///   forward discards - 11.7 s and 8.3 GB of readback per forward.
+    ///
+    /// What it DOES still do is read `x` back to the host and take it back as
+    /// host floats, and that is deliberate and was measured both ways. Leaving
+    /// `x` on the card across all 48 blocks removes ~5.6 GB of round trip per
+    /// forward and saves about 3 s - but it also removes the one BLOCKING
+    /// READBACK per block that makes wgpu's allocator pool shrink, and the pool
+    /// then grows from 5.7 GiB to 16.5 GiB. That extra ~10 GiB is worth ~38
+    /// resident blocks, i.e. far more than the 3 s it buys. See this crate's
+    /// roadmap ledger, Phase 18, for the numbers on both arms.
+    ///
+    /// Bit-identical to [`Self::forward_timed`] by construction - same kernels,
+    /// same operands, same order; only the ROUTE the modulation bytes take to
+    /// the card changes. Gated by `crates/ltxv/tests/device_residency.rs`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_prod(&self, scratch: &Gpu, x: &[f32], adaln_buf: &DeviceBuffer, ctx_buf: &DeviceBuffer, cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32, timings: &mut BlockTimings) -> Vec<f32> {
+        let cfg = &self.cfg;
+        let (dim, heads, head_dim, eps, ctx_len) = (cfg.inner_dim, cfg.num_heads, cfg.head_dim(), cfg.norm_eps, self.context_len);
+        assert_eq!(x.len(), (t * dim) as usize);
+        let s_rec = std::time::Instant::now();
+        let x_buf = scratch.storage((t * dim) as u64);
+        wf(scratch, &x_buf, x);
+        let mut s: Vec<Step> = Vec::new();
+        let mb = ModBufs::derive(scratch, &mut s, adaln_buf, &self.sst_buf, t, dim);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x3, _ff_out) = mlp_sublayer_q(scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
+        timings.record_upload += s_rec.elapsed();
+        let s_sub = std::time::Instant::now();
+        scratch.submit(&[], &s);
+        // A full, BLOCKING readback, and on this class of hardware that is load
+        // bearing rather than incidental: on a non-ReBAR Pascal card under the
+        // default wgpu backend, `write_buffer` staging and dropped buffers are
+        // only retired by a blocking readback, and an uploaded storage buffer
+        // otherwise costs 2.00x its size resident (measured directly by
+        // `crates/gpu-core/tests/vram_overhead.rs`). One readback per block is
+        // what keeps the allocator's pool at 5.7 GiB instead of letting it
+        // grow to 16.5 GiB.
+        let out = scratch.read(&x3, (t * dim) as usize);
+        timings.compute += s_sub.elapsed();
+        out
     }
 
     pub fn gpu(&self) -> &Gpu {

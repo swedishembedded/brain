@@ -1112,14 +1112,14 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// [`load_head_tensors_from_source`] output. Returns only the final
 /// `[t, out_channels]` prediction: a real generation run only needs this,
 /// not the full parity-test tap set [`LtxDit::forward_q`] returns.
-/// `device`: opens a FRESH [`Gpu`] every call, the same convention
-/// [`LtxDit::forward`]/[`LtxDit::forward_q`] already use - measured at the
-/// real 22B checkpoint's own scale (a real multi-step generation run, not
-/// just the tiny-config case) to reliably release each call's device VRAM
-/// before the next call's own block-by-block allocations begin; reusing
-/// ONE [`Gpu`] handle across calls instead was tried and measured worse
-/// (a second real forward then ran out of device memory that a fresh
-/// device open does not).
+/// `device`: opens a FRESH [`Gpu`] every call and uploads every block to it,
+/// which is the pre-residency shape. Production does NOT take this entry
+/// point any more - [`crate::pipeline::RealDit`] calls
+/// [`forward_q_streamed_in`] with a [`crate::devres::DitSession`] that holds
+/// its device open and its blocks resident across a whole generation. This
+/// wrapper is the same function with a session that keeps nothing, kept
+/// because it is what every bench and parity test already calls and because
+/// it is the arm the residency bit-identity gate compares against.
 ///
 /// `cache`: a per-CHECKPOINT (not per-call, and no longer per-generation)
 /// HOST-side [`GenerationCache`] - `crate::pipeline::RealDit` obtains one from
@@ -1175,12 +1175,50 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// totals - the totals stay, since the perf gates read them; the trace is
 /// what makes a single anomalous layer visible rather than averaged away.
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(level = "info", name = "dit_forward_streamed", skip_all, fields(t = t, context_len = context_len, layers = cfg.num_layers, tier = ?tier))]
 pub fn forward_q_streamed(
     cfg: &LtxDitConfig,
     src: &dyn TensorSource,
     head: &Tensors,
     device: Option<&str>,
+    tier: QTier,
+    latent: &[f32],
+    timesteps: &[f32],
+    positions: &[f32],
+    keyframes_mask: &[f32],
+    context: &[f32],
+    context_len: usize,
+    t: usize,
+    context_valid: &[f32],
+    cache: &GenerationCache,
+) -> Vec<f32> {
+    let session = crate::devres::DitSession::transient(device);
+    forward_q_streamed_in(&session, cfg, src, head, tier, latent, timesteps, positions, keyframes_mask, context, context_len, t, context_valid, cache)
+}
+
+/// [`forward_q_streamed`] against a caller-owned [`crate::devres::DitSession`]
+/// - the entry point production takes.
+///
+/// The session is what makes a generation's second and later forwards cheap:
+/// it holds the device open (so no adapter enumeration and no shader-pipeline
+/// compile per step) and holds as many already-uploaded blocks resident on it
+/// as its VRAM budget allows (so no ~270 MB per-block upload per step for
+/// bytes the card already has). `crate::devres`'s module doc has the whole
+/// lifecycle, the budget it is charged against, and the graceful-degrade path
+/// when it does not fit.
+///
+/// Bit-identity is structural. Everything this function computes - the host
+/// patchify/adaLN/RoPE stages, the connector routing, the block stack, the
+/// output stage - reads the same bytes in the same order and dispatches the
+/// same kernels with the same operands whether a block's weights arrived on
+/// the card one microsecond ago or eight denoise steps ago. Residency changes
+/// WHEN bytes move, never what any kernel reads.
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "info", name = "dit_forward_streamed", skip_all, fields(t = t, context_len = context_len, layers = cfg.num_layers, tier = ?tier))]
+pub fn forward_q_streamed_in(
+    session: &crate::devres::DitSession,
+    cfg: &LtxDitConfig,
+    src: &dyn TensorSource,
+    head: &Tensors,
     tier: QTier,
     latent: &[f32],
     timesteps: &[f32],
@@ -1226,14 +1264,51 @@ pub fn forward_q_streamed(
     gpu_core::profile::stage_time("forward_q_streamed: RoPE table build (host, f64)", s_rope);
     tracing::debug!(stage = "rope_tables", ms = s_rope.elapsed().as_secs_f32() * 1e3, theta = cfg.positional_embedding_theta, "host stage done");
 
+    let mut t_load = std::time::Duration::ZERO;
+    let mut t_quant = std::time::Duration::ZERO;
+    let mut t_upload = std::time::Duration::ZERO;
+    let mut t_gpu = std::time::Duration::ZERO;
+    let mut misses = 0u32;
+    let mut uploads = 0u32;
+
+    // The HOST-cache half: `crate::devres` asks for a layer's already-quantized
+    // bytes only when the DEVICE does not already hold them, so on a warm,
+    // fully-resident generation this closure runs `num_layers` times per
+    // GENERATION rather than per forward. The cache hands back an `Arc` and
+    // holds no lock while the upload runs, which is what lets two CFG branches
+    // read one checkpoint's cache concurrently (see `crate::weightcache`).
+    let mut weights = |l: usize| -> std::sync::Arc<crate::block::CachedQBlockWeights> {
+        if let Some(c) = cache.block(l, tier) {
+            return c;
+        }
+        misses += 1;
+        let prefix = format!("transformer_blocks.{l}");
+        let s0 = std::time::Instant::now();
+        let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
+        t_load += s0.elapsed();
+        let s1 = std::time::Instant::now();
+        let quantized = QBlockWeights::quantize_host(&block_tensors, &prefix, dim, cfg.apply_gated_attention, tier);
+        t_quant += s1.elapsed();
+        cache.store_block(l, tier, quantized)
+    };
+
     let s_open = std::time::Instant::now();
-    let gpu = open_device(device);
+    // A resident session hands back a `Gpu::share` of the device it already
+    // holds - the same adapter, queue and compiled pipelines, so no adapter
+    // enumeration and no shader compile. A transient one opens a fresh device
+    // here and drops it when this call returns, which is what this function
+    // always did; that is the event a device-lifecycle investigation wants
+    // correlated against `--trace-gpu`.
+    let gpu = session.device_for_call();
     gpu_core::profile::stage_time("forward_q_streamed: open_device (fresh Gpu + shader pipeline compile)", s_open);
-    // A FRESH `Gpu` per call is this function's deliberate design (see its
-    // doc), which also makes every call a fresh adapter enumeration + shader
-    // pipeline compile - so this is the one event a device-lifecycle
-    // investigation wants correlated against `--trace-gpu`.
-    tracing::debug!(stage = "open_device", ms = s_open.elapsed().as_secs_f32() * 1e3, device = device.unwrap_or("(ambient)"), "opened a fresh device for this forward");
+    tracing::debug!(stage = "open_device", ms = s_open.elapsed().as_secs_f32() * 1e3, resident = session.is_resident(), "device handle for this forward");
+    // The resident weight window is filled HERE, before the RoPE tables, the
+    // connector and the block stack have allocated anything - see
+    // `crate::devres::DitSession::prefill` for the measurement that says the
+    // order matters (wgpu's allocator pool grows greedily and never shrinks,
+    // so long-lived weights taken late lose a race against it).
+    session.prefill(&gpu, cfg, tier, t, context_len, &mut weights);
+
     let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
     let s_conn = std::time::Instant::now();
@@ -1276,78 +1351,60 @@ pub fn forward_q_streamed(
     // convention: a coarse timeline, not a per-iteration log) - this is what
     // tells apart hypothesis (a) GPU dispatch/compute, (b) GGUF
     // read+dequantize-to-fp32 I/O, and (c) host-side int8 quantize+upload.
-    let mut t_load = std::time::Duration::ZERO;
-    let mut t_quant = std::time::Duration::ZERO;
-    let mut t_gpu = std::time::Duration::ZERO;
-    let mut misses = 0u32;
-    for l in 0..cfg.num_layers {
-        let prefix = format!("transformer_blocks.{l}");
-        let mut layer_load = std::time::Duration::ZERO;
-        let mut layer_quant = std::time::Duration::ZERO;
-        // The cache hands back an `Arc` and holds no lock while this call
-        // uploads, which is what lets two CFG branches read one checkpoint's
-        // cache concurrently (see `crate::weightcache`'s doc). Every step
-        // past this block's first cache-populating one skips BOTH stages in
-        // the miss arm entirely - `t_load`/`t_quant` and their real GGUF-read
-        // and CPU-quantize work are simply not incurred, so this loop does
-        // LESS work on a hit rather than merely faster work.
-        let hit = cache.block(l as usize, tier);
-        let cached = match hit.clone() {
-            Some(c) => c,
-            None => {
-                misses += 1;
-                let s0 = std::time::Instant::now();
-                let block_tensors = load_block_tensors_from_source(src, cfg, &prefix);
-                layer_load = s0.elapsed();
-                t_load += layer_load;
-                let s1 = std::time::Instant::now();
-                let quantized = QBlockWeights::quantize_host(&block_tensors, &prefix, dim, cfg.apply_gated_attention, tier);
-                layer_quant = s1.elapsed();
-                t_quant += layer_quant;
-                cache.store_block(l as usize, tier, quantized)
-            }
-        };
-        let hit = hit.is_some();
-        // Device upload (`on_cached`) + GPU forward + wait, timed together as
-        // one bucket: `on_cached` never does CPU quantization (that is
-        // entirely inside the cache-miss branch above), only device writes of
-        // already-quantized bytes, so this bucket is what remains on EVERY
-        // step regardless of cache hit/miss - the honest lower bound the
-        // "fresh Gpu every call" design (this function's own doc) still pays.
-        let s2 = std::time::Instant::now();
-        let blk = LtxBlockQ::on_cached(gpu.share(), cfg, &cached, t as u32, context_len as u32, tier);
-        let (out, _tp) = blk.forward(&x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32);
-        let layer_gpu = s2.elapsed();
-        t_gpu += layer_gpu;
-        // Level 5, per layer: which layer, cache hit or miss, and how long
-        // each of the three real costs took. `hit` is the difference between
-        // "this step re-read 270 MB off the GGUF and re-quantized it" and
-        // "this step only re-uploaded bytes it already had" - the single most
-        // load-bearing fact about a streamed step's cost.
+
+    // Level 5, per layer: which layer, whether it had to move ~270 MB onto the
+    // card, and how long the upload and the dispatch each took. `uploaded` is
+    // the single most load-bearing fact about a streamed step's cost, and with
+    // device residency it is FALSE for every layer of every forward past the
+    // first - which is the whole point of this phase.
+    let mut t_block = crate::block::BlockTimings::default();
+    let mut after_block = |l: usize, uploaded: bool, up: std::time::Duration, bt: &crate::block::BlockTimings| {
+        if uploaded {
+            uploads += 1;
+        }
+        t_upload += up;
+        t_gpu += bt.compute;
+        t_block.add(bt);
         tracing::trace!(
             layer = l,
-            cache = if hit { "hit" } else { "miss" },
-            load_ms = layer_load.as_secs_f32() * 1e3,
-            quant_ms = layer_quant.as_secs_f32() * 1e3,
-            gpu_ms = layer_gpu.as_secs_f32() * 1e3,
+            device = if uploaded { "upload" } else { "resident" },
+            upload_ms = up.as_secs_f32() * 1e3,
+            modulation_ms = bt.modulation_host.as_secs_f32() * 1e3,
+            record_upload_ms = bt.record_upload.as_secs_f32() * 1e3,
+            compute_ms = bt.compute.as_secs_f32() * 1e3,
+            readback_ms = bt.readback.as_secs_f32() * 1e3,
             "block done"
         );
-        x = out;
-    }
+    };
+    #[rustfmt::skip]
+    let (x, forward_timings) = session.run_blocks(
+        &gpu, cfg, tier, t, context_len, x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, &mut weights, &mut after_block,
+    );
+    t_block.add(&forward_timings);
     gpu_core::profile::stage_time("forward_q_streamed: block GGUF read+dequant (sum over all layers, cache misses only)", std::time::Instant::now() - t_load);
     gpu_core::profile::stage_time("forward_q_streamed: block int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
-    gpu_core::profile::stage_time("forward_q_streamed: block GPU upload+forward+wait (sum over all layers, every step)", std::time::Instant::now() - t_gpu);
-    // The same three sums `BRAIN_PROFILE` already prints, restated as trace
-    // fields so a run can be analysed from ONE stream instead of correlating
-    // two mechanisms by hand. `BRAIN_PROFILE` is untouched: perf gates
-    // elsewhere in the repo parse its output, and consolidating the two is a
-    // later decision, not a side effect of adding tracing.
+    gpu_core::profile::stage_time("forward_q_streamed: block weight upload to device (sum over all layers, non-resident blocks only)", std::time::Instant::now() - t_upload);
+    gpu_core::profile::stage_time("forward_q_streamed: block adaLN combine+slice (host, sum over all layers)", std::time::Instant::now() - t_block.modulation_host);
+    gpu_core::profile::stage_time("forward_q_streamed: activation/context/adaLN upload to device (per forward)", std::time::Instant::now() - t_block.record_upload);
+    gpu_core::profile::stage_time("forward_q_streamed: block submit+wait (sum over all layers)", std::time::Instant::now() - t_block.compute);
+    gpu_core::profile::stage_time("forward_q_streamed: device->host readback (per forward)", std::time::Instant::now() - t_block.readback);
+    // The same sums `BRAIN_PROFILE` already prints, restated as trace fields so
+    // a run can be analysed from ONE stream instead of correlating two
+    // mechanisms by hand. `BRAIN_PROFILE` is untouched apart from the upload
+    // bucket being split out of what used to be one "upload+forward+wait"
+    // total - the split is the whole measurement this phase turns on.
     tracing::debug!(
         cache_misses = misses,
         cache_hits = cfg.num_layers - misses,
+        device_uploads = uploads,
+        device_resident = cfg.num_layers - uploads,
         load_ms = t_load.as_secs_f32() * 1e3,
         quant_ms = t_quant.as_secs_f32() * 1e3,
-        gpu_ms = t_gpu.as_secs_f32() * 1e3,
+        upload_ms = t_upload.as_secs_f32() * 1e3,
+        modulation_ms = t_block.modulation_host.as_secs_f32() * 1e3,
+        record_upload_ms = t_block.record_upload.as_secs_f32() * 1e3,
+        compute_ms = t_gpu.as_secs_f32() * 1e3,
+        readback_ms = t_block.readback.as_secs_f32() * 1e3,
         "block stack done"
     );
 

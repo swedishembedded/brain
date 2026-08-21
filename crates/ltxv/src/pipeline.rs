@@ -1397,11 +1397,10 @@ trait Denoiser {
     ///
     /// Default: sequentially, on whatever device this denoiser already runs
     /// on - byte-for-byte the old behaviour, and the only correct answer for
-    /// a denoiser (like [`LtxDit`]) that holds ONE `Gpu` handle built at
-    /// construction, since dispatching its forward from a differently-scoped
-    /// thread would not move a single byte onto the other card. [`RealDit`]
-    /// overrides it: `forward_q_streamed` opens a fresh `Gpu` inside every
-    /// call, so scoping the call is enough to move the whole forward.
+    /// a denoiser (like [`LtxDit`]) that is `!Sync` and cannot be shared
+    /// across the two threads at all. [`RealDit`] overrides it: it resolves
+    /// its open device from the card the call is SCOPED to, so scoping the
+    /// call is enough to move the whole forward onto the other card.
     fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
         Ok((self.forward(i, cond), self.forward(i, uncond)))
     }
@@ -1473,15 +1472,45 @@ struct RealDit {
     /// once, in [`generate`], so every step of one generation makes the same
     /// placement decision.
     place: crate::devplan::Placement,
+    /// One open device plus its resident weight window PER CARD, created on
+    /// that card's first forward and held for the whole generation - see
+    /// [`crate::devres`]. Keyed on the card this thread is currently scoped to
+    /// (`devices::current_gpu()`, which `crate::devplan::on_gpu` sets), so the
+    /// concurrent CFG pair gets two sessions on two cards rather than
+    /// contending for one, and a `Single` plan gets exactly one.
+    ///
+    /// `Mutex<HashMap<_, Arc<_>>>` rather than a plain map: the lock is held
+    /// only long enough to clone the `Arc`, never across a forward, so the two
+    /// branches never wait on each other. Dropping this whole `RealDit` -
+    /// which [`generate`] already does before the VAE decode opens its own
+    /// device - releases every card's resident weights.
+    sessions: std::sync::Mutex<std::collections::HashMap<Option<u32>, std::sync::Arc<crate::devres::DitSession>>>,
+}
+
+impl RealDit {
+    /// This thread's card's session, built on first use.
+    ///
+    /// Sized from the token count the FIRST forward on that card runs at,
+    /// which is the token count every later step of the same generation runs
+    /// at too. A caller that changes the shape mid-session gets the window
+    /// rebuilt rather than a mismatch (see `crate::devres`).
+    fn session(&self, t: usize) -> std::sync::Arc<crate::devres::DitSession> {
+        let key = gpu_core::devices::current_gpu();
+        let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(key)
+            .or_insert_with(|| std::sync::Arc::new(crate::devres::DitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), t)))
+            .clone()
+    }
 }
 
 impl Denoiser for RealDit {
     fn forward(&self, i: &StepInputs, context: &[f32]) -> Vec<f32> {
-        crate::dit::forward_q_streamed(
+        let session = self.session(i.t);
+        crate::dit::forward_q_streamed_in(
+            &session,
             &self.cfg,
             &self.src,
             &self.head,
-            self.device.as_deref(),
             crate::block::QTier::Int8,
             i.latent,
             i.timesteps,
@@ -1515,9 +1544,14 @@ impl Denoiser for RealDit {
     /// connector slots) - it is `MAX_CONNECTOR_ENTRIES = 4` precisely so one
     /// generation's pair fits without either branch evicting the other's.
     ///
-    /// Each branch opens its own `Gpu` inside `forward_q_streamed`, so no
-    /// device handle crosses a thread boundary and each card's VRAM is
-    /// released when its own call returns.
+    /// * `sessions` is a `Mutex` map keyed on the card each branch is scoped
+    ///   to, so each branch builds and then reuses ITS OWN open device and its
+    ///   own resident weight window. The lock is held only long enough to
+    ///   clone an `Arc`, never across a forward.
+    ///
+    /// No device handle crosses a thread boundary: each branch resolves its
+    /// session from the card `crate::devplan::on_gpu` scoped it to, and both
+    /// cards' VRAM is released together when this `RealDit` drops.
     fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
         dispatch_cfg_pair(self, &self.place, i, cond, uncond)
     }
@@ -1876,7 +1910,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
         let cs = cache.stats();
         tracing::info!(cached_blocks = cs.blocks, cached_bytes = cs.bytes, "checkpoint weight cache attached");
-        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache, place })
+        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default() })
     };
     timings.build_dit = build_t.elapsed().as_secs_f32();
     tracing::info!(secs = timings.build_dit, "transformer built");

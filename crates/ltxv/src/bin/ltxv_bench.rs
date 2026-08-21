@@ -62,7 +62,7 @@
 //! Usage:
 //!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]     video DiT block stack (fp32, synthetic weights)
 //!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode
-//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape)
+//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres)
 //!
 //! `vae` needs `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
 
@@ -227,7 +227,7 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
 /// a cheap sanity check this bench had none of before: a degenerate
 /// (all-zero, saturated, or NaN) DiT output is visible here without needing
 /// a full generation + VAE decode to notice.
-fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
+fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool) {
     let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
     // stage_time (gpu_core::profile) only prints under BRAIN_PROFILE; this
     // bench's whole purpose is that breakdown, so turn it on unconditionally
@@ -236,7 +236,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
 
     let cfg = LtxDitConfig { num_layers: layers, ..LtxDitConfig::ltx25_22b() };
     cfg.assert_supported();
-    println!("\n=== ltxv real-checkpoint streamed forward (int8): {layers} of 48 real layers, {t} tokens, {ctx_len} context (reuse_cache={reuse_cache}) ===");
+    println!("\n=== ltxv real-checkpoint streamed forward (int8): {layers} of 48 real layers, {t} tokens, {ctx_len} context (reuse_cache={reuse_cache}, device_resident={resident}) ===");
 
     let t0 = Instant::now();
     let src = ltxv::gguf_src::LtxvGgufSource::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
@@ -251,13 +251,29 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
     let context = vec![0f32; ctx_len as usize * cfg.cross_attention_dim as usize];
     let context_valid = vec![1f32; ctx_len as usize];
 
+    // ONE session for both calls when `resident` - which is exactly what a real
+    // generation does (`crate::pipeline::RealDit` holds one per card for the
+    // whole denoise loop). A transient session is byte-for-byte the
+    // pre-residency path: a fresh device per call, every block re-uploaded.
+    // `None`, not `Some("gpu")`: `open_device(None)` goes through `Gpu::new`,
+    // which honours `BRAIN_DEVICE` - so this bench can be pointed at brain's
+    // native Vulkan backend (`BRAIN_DEVICE=vulkan`), which does NOT have
+    // wgpu's 2.00x resident-buffer cost and therefore has a completely
+    // different residency budget. wgpu is still the default, so an unset
+    // environment measures exactly what it measured before.
+    let dev: Option<&str> = None;
+    let session = if resident {
+        ltxv::devres::DitSession::resident(&cfg, ltxv::block::QTier::Int8, dev, t as usize)
+    } else {
+        ltxv::devres::DitSession::transient(dev)
+    };
     let call = |label: &str, cache: &ltxv::block::GenerationCache| {
         let t1 = Instant::now();
-        let out = ltxv::dit::forward_q_streamed(
+        let out = ltxv::dit::forward_q_streamed_in(
+            &session,
             &cfg,
             &src,
             &head,
-            Some("gpu"),
             ltxv::block::QTier::Int8,
             &latent,
             &timesteps,
@@ -277,6 +293,8 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool) {
         let (min, max) = out.iter().fold((f32::MAX, f32::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
         let nan_count = out.iter().filter(|v| !v.is_finite()).count();
         println!("[{label}] OUTPUT STATS: len={} mean={mean:.6} std={:.6} min={min:.6} max={max:.6} nonfinite={nan_count}", out.len(), var.sqrt());
+        let rs = session.stats();
+        println!("[{label}] DEVICE RESIDENCY: slots={} device_hits={} device_uploads={}", rs.slots, rs.hits, rs.uploads);
     };
     // `reuse_cache` is exactly "do both calls share one cache?" - a second,
     // default-constructed `GenerationCache` is the honest way to express "no",
@@ -299,7 +317,7 @@ fn main() {
     match mode {
         "dit" => bench_dit(arg(2, 2) as usize, arg(3, 8), arg(4, 1024), arg(5, 256)),
         "vae" => bench_vae(arg(2, 2) as usize, arg(3, 17), arg(4, 384), arg(5, 384)),
-        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false)),
+        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false)),
         other => {
             eprintln!("unknown mode {other} (dit|vae|streamed)");
             std::process::exit(1);

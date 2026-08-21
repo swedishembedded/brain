@@ -1169,6 +1169,7 @@ dependencies = [
  "brain-residency",
  "brain-testutil",
  "brain-vae",
+ "brain-weightset",
  "half",
  "image",
  "serde_json",
