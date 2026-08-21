@@ -118,6 +118,30 @@ pub fn convtr1d_bwd(
     s
 }
 
+/// `weight[i,...] = weight_g[i] * weight_v[i,...] / ||weight_v[i,...]||_2` -
+/// PyTorch `nn.utils.weight_norm(dim=0)`. `d0` is `weight_v`'s leading dim
+/// (for `Conv1d` that is `Cout`; for `ConvTranspose1d`'s native `[Cin,
+/// Cout/G, K]` weight layout it is `Cin` - `weight_norm`'s `dim=0` always
+/// means dim 0 of the STORED tensor, whichever axis that happens to be for
+/// the layer type; confirmed against a real checkpoint, where
+/// `conv_t1.weight_g` has one scalar per `Cin` row, not per `Cout`). A
+/// one-time host op at import time, not a hot-path kernel.
+pub fn fold_weight_norm(g: &[f32], v: &[f32], d0: usize) -> Vec<f32> {
+    assert_eq!(g.len(), d0, "weight_norm: weight_g has {} elements, expected d0={d0}", g.len());
+    assert_eq!(v.len() % d0, 0, "weight_norm: weight_v length {} not divisible by d0={d0}", v.len());
+    let rest = v.len() / d0;
+    let mut out = vec![0.0f32; v.len()];
+    for i in 0..d0 {
+        let row = &v[i * rest..(i + 1) * rest];
+        let norm = row.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+        let scale = (g[i] as f64 / norm.max(1e-12)) as f32;
+        for (o, &x) in out[i * rest..(i + 1) * rest].iter_mut().zip(row) {
+            *o = x * scale;
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // CPU reference oracles (kept tiny, used by tests; not on any hot path).
 // ---------------------------------------------------------------------------

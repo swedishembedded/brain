@@ -17,7 +17,7 @@
 //! so it belongs on the same tape-based device engine every other serving
 //! path uses.
 
-use audio::conv::{conv1d_fwd, convtr1d_fwd, Conv1d, ConvKernels};
+use audio::conv::{conv1d_fwd, convtr1d_fwd, fold_weight_norm, Conv1d, ConvKernels};
 use audio::snake::{snake1d_fwd, Snake1d, SnakeKernels};
 use checkpoint::safetensors::{self, StTensor};
 use gpu_core::{DeviceBuffer, Gpu, Step};
@@ -114,29 +114,6 @@ impl VocoderWeights {
             _ => None,
         }
     }
-}
-
-/// `weight[i,...] = weight_g[i] * weight_v[i,...] / ||weight_v[i,...]||_2` -
-/// PyTorch `nn.utils.weight_norm(dim=0)`. `d0` is `weight_v`'s leading dim
-/// (for `Conv1d` that is `Cout`; for `ConvTranspose1d`'s native `[Cin,
-/// Cout/G, K]` weight layout it is `Cin` - `weight_norm`'s `dim=0` always
-/// means dim 0 of the STORED tensor, whichever axis that happens to be for
-/// the layer type, confirmed against the real checkpoint: `conv_t1.weight_g`
-/// has one scalar per `Cin` row, not per `Cout`).
-fn fold_weight_norm(g: &[f32], v: &[f32], d0: usize) -> Vec<f32> {
-    assert_eq!(g.len(), d0, "weight_norm: weight_g has {} elements, expected d0={d0}", g.len());
-    assert_eq!(v.len() % d0, 0, "weight_norm: weight_v length {} not divisible by d0={d0}", v.len());
-    let rest = v.len() / d0;
-    let mut out = vec![0.0f32; v.len()];
-    for i in 0..d0 {
-        let row = &v[i * rest..(i + 1) * rest];
-        let norm = row.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-        let scale = (g[i] as f64 / norm.max(1e-12)) as f32;
-        for (o, &x) in out[i * rest..(i + 1) * rest].iter_mut().zip(row) {
-            *o = x * scale;
-        }
-    }
-    out
 }
 
 struct TensorMap(HashMap<String, StTensor>);
@@ -300,19 +277,8 @@ fn residual_unit_step(gpu: &Gpu, steps: &mut Vec<Step>, ru: &ResidualUnitW, n: u
 mod tests {
     use super::*;
 
-    #[test]
-    fn fold_weight_norm_matches_pytorch_dim0_formula() {
-        // d0=2 rows, rest=3: v = [[3,4,0],[0,0,5]] -> ||v[0]||=5, ||v[1]||=5.
-        let v = [3.0f32, 4.0, 0.0, 0.0, 0.0, 5.0];
-        let g = [2.0f32, 10.0];
-        let out = fold_weight_norm(&g, &v, 2);
-        // row0: g/||v0|| * v0 = (2/5)*[3,4,0] = [1.2, 1.6, 0.0]
-        // row1: g/||v1|| * v1 = (10/5)*[0,0,5] = [0,0,10]
-        assert!((out[0] - 1.2).abs() < 1e-6);
-        assert!((out[1] - 1.6).abs() < 1e-6);
-        assert!((out[2] - 0.0).abs() < 1e-6);
-        assert!((out[5] - 10.0).abs() < 1e-6);
-    }
+    // `fold_weight_norm`'s own correctness gate now lives with the hoisted
+    // implementation: `crates/audio/tests/weight_norm.rs`.
 
     #[test]
     fn even_stride_transposed_conv_output_length_is_exactly_l_times_stride() {
