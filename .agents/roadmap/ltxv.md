@@ -3862,6 +3862,21 @@ Nothing here may abort where it could degrade:
   ~270 MB weight upload and degrades that block to streaming (traced at `warn`,
   counted in `ResidencyStats::refusals`) rather than letting `Gpu::storage`'s
   infallible facade panic. Free when no ceiling is published.
+* **The window never takes more than a quarter of the card**, whatever the
+  token count says, and that cap was found the hard way rather than reasoned.
+  A generation is not just its denoise loop: `pipeline::generate` runs the
+  Gemma-4 text encode before it and the VAE decode after it, each on its OWN
+  `Gpu`, and a fresh wgpu device cannot reuse the pool a dropped one left
+  behind - so weights this loop released are not usefully free to the next
+  stage. At a SMALL token count the reserve above is tiny, so the policy
+  granted all 48 blocks (~13 GB), the denoise loop finished normally, and then
+  the VAE decode's own device aborted with `wgpu error: Out of Memory` at
+  **24211 MiB of a 24576 MiB card** on a 9-frame 64x64 clip - a shape with no
+  memory problem of its own whatsoever. Caught by re-running Phase 15's
+  `cfg_parallel.rs` real-weight gate, which is the only thing in this crate
+  that drives a whole generation end to end; the isolated forward benchmarks
+  every other number here comes from cannot see it, because they stop before
+  the decode.
 * Fewer slots than layers is not a failure mode, it is the design: `CyclicScan`
   pins the prefix and streams the tail, still bit-identical. Zero slots is
   exactly the pre-residency behaviour.

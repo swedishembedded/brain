@@ -216,12 +216,12 @@ fn on_device_modulation_is_bit_identical_to_the_host_combine_and_slice() {
 fn the_slot_policy_never_over_promises() {
     let cfg = LtxDitConfig::ltx25_22b();
     let per_block = ltxv::block::cached_block_bytes(&cfg, QTier::Int8);
-    let fit = |cap: u64, t: usize| ((cap.saturating_sub(ltxv::devres::activation_reserve_bytes(t, "wgpu")) / per_block) as u32).min(cfg.num_layers);
+    let fit = |cap: u64, t: usize| (((cap.saturating_sub(ltxv::devres::activation_reserve_bytes(t, "wgpu")) / per_block).min(cap / 4 / per_block)) as u32).min(cfg.num_layers);
     // 512x512-scale shapes fit the whole model; the real 720p/1080p token
     // counts do NOT on a 24 GiB card under the wgpu backend, and the policy
     // must say so rather than plan a window that aborts - see this crate's
     // roadmap ledger, Phase 18, for the measured plateau this reserve encodes.
-    assert_eq!(fit(24 << 30, 1000), cfg.num_layers, "a 512x512-scale token count must fit every block on a 24 GiB card");
+    assert!(fit(24 << 30, 1000) < cfg.num_layers && fit(24 << 30, 1000) >= 20, "a small token count gets a large window but never the whole card - the VAE decode needs the rest");
     assert!(fit(24 << 30, 3520) > 0 && fit(24 << 30, 3520) < cfg.num_layers, "720p must get a PARTIAL window on a 24 GiB card, neither zero nor all 48");
     assert_eq!(fit(24 << 30, 8160), 0, "1080p leaves no room for a resident block on a 24 GiB card, and the policy must ask for none");
     assert!(fit(24 << 30, 8160) <= cfg.num_layers);

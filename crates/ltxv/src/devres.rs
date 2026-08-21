@@ -222,8 +222,29 @@ pub fn planned_slots(cfg: &LtxDitConfig, tier: QTier, t: usize, device: memauth:
     if per_block == 0 {
         return 0;
     }
-    let usable = usable_vram(device).saturating_sub(activation_reserve_bytes(t, backend));
-    ((usable / per_block) as u32).min(cfg.num_layers)
+    let card = usable_vram(device);
+    let by_reserve = card.saturating_sub(activation_reserve_bytes(t, backend)) / per_block;
+    // A generation is not just its denoise loop, and the denoise loop's own
+    // activation reserve does not see the rest of it. `pipeline::generate`
+    // runs the Gemma-4 text encode BEFORE and the VAE decode AFTER, each on
+    // its own `Gpu`, and a fresh wgpu device cannot reuse the pool a dropped
+    // one left behind - so weights this loop held are not usefully free to the
+    // next stage even though they have been released.
+    //
+    // Found the hard way rather than reasoned: at a small token count the
+    // reserve above is tiny, the policy granted all 48 blocks (~13 GB), the
+    // denoise loop finished, and the VAE decode's own device then aborted with
+    // `wgpu error: Out of Memory` at 24211 MiB of a 24576 MiB card
+    // (`crates/ltxv/tests/cfg_parallel.rs`, 9 frames at 64x64 - a shape with
+    // no memory problem of its own at all). The VAE decode alone needs up to
+    // ~16.5 GiB at the shapes this pipeline supports.
+    //
+    // So the window never takes more than this fraction of the card, whatever
+    // the token count says. It costs resident blocks at small shapes, where
+    // the forward is cheap anyway; it buys a generation that finishes.
+    const MAX_CARD_FRACTION_DENOM: u64 = 4;
+    let by_cap = card / MAX_CARD_FRACTION_DENOM / per_block;
+    (by_reserve.min(by_cap) as u32).min(cfg.num_layers)
 }
 
 /// The shape a [`BlockWindow`]'s uploaded blocks are valid for. A generation
@@ -589,18 +610,21 @@ mod tests {
         // policy itself uses - no GPU needed to check the shape of the answer.
         let per_block = cached_block_bytes(&cfg, QTier::Int8);
         assert!(per_block > 0, "a real config must have a nonzero per-block footprint");
-        let slots_at = |cap: u64, t: usize| ((cap.saturating_sub(activation_reserve_bytes(t, "wgpu")) / per_block) as u32).min(cfg.num_layers);
+        let slots_at = |cap: u64, t: usize| (((cap.saturating_sub(activation_reserve_bytes(t, "wgpu")) / per_block).min(cap / 4 / per_block)) as u32).min(cfg.num_layers);
         let card = 24u64 << 30;
-        assert_eq!(slots_at(card, 1000), cfg.num_layers, "a 512x512-scale token count must fit every block on a 24 GiB card");
+        // Never the whole model, whatever the token count says: the VAE decode
+        // that follows the denoise loop needs the rest of the card, and it does
+        // not get to reuse this window's freed pool.
+        assert!(slots_at(card, 1000) < cfg.num_layers, "the window must never claim the whole card, even at a token count whose own reserve is tiny");
+        assert!(slots_at(card, 1000) >= 20, "a small token count must still get a large window");
         assert!(slots_at(card, 3520) < cfg.num_layers, "720p must NOT plan a full window on a 24 GiB card - the measured plateau does not leave room");
         assert!(slots_at(card, 8160) <= slots_at(card, 3520), "a larger token count must never buy MORE resident blocks");
         assert_eq!(slots_at(1 << 30, 3520), 0, "a card smaller than the reserve must ask for zero slots, not a negative count");
         // The native Vulkan backend reclaims transients explicitly and has no
         // 2.00x resident cost, so the SAME card affords strictly more resident
         // blocks there - the budget must not hardcode wgpu's pathology.
-        let vk = |cap: u64, t: usize| ((cap.saturating_sub(activation_reserve_bytes(t, "vulkan")) / per_block) as u32).min(cfg.num_layers);
+        let vk = |cap: u64, t: usize| (((cap.saturating_sub(activation_reserve_bytes(t, "vulkan")) / per_block).min(cap / 4 / per_block)) as u32).min(cfg.num_layers);
         assert!(vk(card, 3520) > slots_at(card, 3520), "the Vulkan backend must be budgeted more resident blocks than wgpu at the same shape");
-        assert_eq!(vk(card, 3520), cfg.num_layers, "720p must fit the whole model on the Vulkan backend");
     }
 
     /// Zero slots is not an error, it is the fallback: no window is built and
