@@ -5004,3 +5004,291 @@ The floor dropping from ~5.9 GB to ~0.1 GB is the release really happening.
   ambient selection, "including an inherited BRAIN_GPU_INDEX", by its own
   comment. `BRAIN_DEVICE=gpu1` is the pin that holds, and the seam gate's doc
   now says so.
+
+### Phase 24 - a clip stops being one scene long
+
+Phases 22 and 23 made a clip longer than one denoising window into one
+continuous SHOT: every continuation window is hard-conditioned on the previous
+window's own last 8 latent frames, frozen at sigma 0, so motion survives the
+seam. That is the right answer to the question it answers, and it is the wrong
+answer to a different one. A single `--frames`/`--prompt` call has no way to
+become a different scene: the prompt is shared by every window, and every
+window after the first is pinned to real content it must continue. "Generate
+two minutes that starts in a harbour and ends at sea" was not expressible; the
+workflow was N separate commands and `ffmpeg concat` by hand, which is exactly
+the last-frame chaining Phase 22 removed, one level up.
+
+`brain ltxv t2v` now takes a repeated `--scene <frames>:<prompt>`. Inside a
+scene nothing changes at all. **At a scene boundary the rolling context
+resets** - the next scene's first window carries `context == 0`, exactly like
+the first window of any plan - so the new scene is driven by its own prompt and
+by nothing of the old one.
+
+```text
+brain ltxv t2v --dit-config ltx25_22b --width 768 --height 448 --fps 24 \
+  --output-path story.mp4 \
+  --scene 121:"a fishing boat leaves a harbour at dawn, camera tracking" \
+  --scene 121:"the open sea under heavy rain, waves breaking over the bow" \
+  --scene  57:"a close-up of a gull on a wet railing"
+```
+
+#### 0 - a multi-scene call is the existing machinery run N times
+
+`generate_scenes` is `generate_long` in a loop over scenes, and deliberately
+contains no second window loop, no second sampler, and no second stage
+decision. The reset is not a feature that had to be built: a fresh
+`generate_long` call's window 0 already carries nothing, which IS the reset.
+What the new function adds is three things and they are all bookkeeping - the
+plan over all scenes before the first weight is read, a per-scene seed, and the
+concatenation.
+
+That shape also means Phase 23's VRAM release still does the work: each scene's
+`generate_long` builds its own denoiser and drops it at the end, so the card is
+fully released between scenes as well as between windows. The rebuild is not a
+re-read - `block::GenerationCache::for_checkpoint` is keyed on the checkpoint
+file, not on the call, so scene 2 attaches the warm host weight cache scene 1
+filled. The text encode genuinely does run again per scene, and has to: the
+prompt changed, which is the entire point.
+
+`longform::scene_plan` is `window_plan` once per scene with each window's
+`first_frame` offset into the whole clip. Validating every scene up front
+matters at this scale: a five-scene request whose fourth scene is unplannable
+should fail in milliseconds, not after three scenes of device time, and the
+refusal names which scene.
+
+Seeds are `seed ^ SCENE_SEED_SALT * scene_index`, so two scenes never draw the
+same initial noise. Multiplied rather than XORed so that scene 0 keeps the
+caller's seed exactly - a one-scene request stays bit-for-bit the run it
+already was, and `generate_scenes` hands a one-scene call straight to
+`generate_long` for the same reason `generate_long` hands a one-window request
+straight to `generate`.
+
+#### 1 - the CLI shape, and the two things it refuses
+
+`--scene <frames>:<prompt>`, repeatable - the house spelling for both halves
+(`flux2_cli`'s `--ref` is the repeatable-push precedent, `split_once` on `:`
+the compound-value one). The separator is the FIRST colon and only the first,
+because "then: the camera pans" is a sentence.
+
+`--scene` cannot be combined with `--prompt`/`--frames`. Those two ARE the
+single-scene spelling; a command carrying both would have two ways to say where
+the clip starts and no obvious answer for what `--frames` means next to three
+scenes that each have their own. `--frames` has a default, so the parser tracks
+whether it was actually given rather than inferring it from the value.
+
+`--end-frame` is refused for a multi-scene clip, for the reason Phase 22
+refused it for a multi-window one: the last window of a multi-scene plan
+belongs to the last scene, which is not what "the clip ends on this still"
+means. `--start-frame` conditions the first scene's opening and nowhere else.
+
+#### 2 - hard cut only, and why a per-boundary soft anchor was NOT added
+
+The obvious extension is an optional per-boundary `--start-frame`-style anchor:
+carry ONE re-encoded pixel frame across a scene cut, for a softer transition.
+It is not implemented, and the reason is not effort.
+
+A single re-encoded pixel frame is precisely the conditioning Phase 22 measured
+and rejected - continuous in position, discontinuous in velocity, seam ratio
+0.85 against the rolling context's 0.99 - and its characteristic artefact is
+that the model starts a clip from a still and re-invents the motion. Applying
+it at a scene boundary would reintroduce that artefact at the one place where
+the content is supposed to change anyway, and would half-pin a new scene to the
+old scene's last composition, which is the constraint the boundary exists to
+remove. A caller who wants the content to continue is asking for ONE scene, and
+says so by writing one. The genuinely different feature - one continuous shot
+whose PROMPT evolves while the latent context keeps rolling - is not this one,
+has its own literature (see below), and has not been designed.
+
+#### 3 - what the lineage actually documents about long-video degradation
+
+The second motivation for this feature was the worry that a long single-scene
+generation drifts into a repeating loop. Checked against the papers rather than
+asserted, and the honest answer is more specific than the worry.
+
+**Attested, strongly: drift.** FramePack (arXiv 2504.12626 v1/v2, section 1)
+defines it - "'drifting' refers to the iterative degradation of visual quality
+due to error accumulation over time (also called exposure bias)". That paper
+was rewritten in v3 (October 2025, different title, different author list,
+re-run numbers), so every FramePack quote in this phase is pinned to v1/v2 -
+v3 says "the degradation", drops "iterative", and renumbers its tables. Self
+Forcing (arXiv 2506.08009) states its own limit outright: "quality degradation
+remains observable when generating videos substantially longer than those seen
+during training". CausVid (arXiv 2412.07772) is the same failure attacked by
+distillation.
+
+**Attested, and directly about THIS conditioning: stagnation, not looping.**
+DFoT / History Guidance (arXiv 2502.06764, section 5) is the closest thing in
+the literature to an analysis of a clean-history-conditioned model: "a major
+failure mode of HG-v under high guidance scales is the generation of overly
+static videos with minimal motion. This occurs because HG-v encourages
+consistency with history, leading to a trivial solution of simply copying the
+most recent history frame." Its Figure 5 caption is the trade-off in one line:
+"Vanilla history guidance trades off dynamics · diversity for quality ·
+consistency." StreamingT2V (arXiv 2403.14773) reports the same mode from the
+other side, in its introduction: "all assessed image-to-video methods produce
+video stagnation or strong quality degradation when applied autoregressively by
+conditioning on the last frame of the preceding chunk". Its CAM/APM modules
+exist to fix stagnation and appearance forgetting respectively - the abstract
+splits them as a "short-term memory block ... leading to consistent chunk
+transitions" and a "long-term memory block ... to prevent the model from
+forgetting the initial scene". StreamingT2V drives its whole long video from
+ONE prompt; it has no per-chunk prompt mechanism.
+
+**Barely attested: literal content repetition.** No paper in the core lineage -
+StreamingT2V, Diffusion Forcing, Rolling Diffusion, CausVid, Self Forcing,
+FramePack - says the content loops or repeats. Where it IS named as a mechanism
+is the streaming-with-attention-sink line, and it has a name there:
+"sink-collapse", where "the generated content repeatedly reverts to the sink
+frame, resulting in abrupt scene resets and cyclic motion patterns" (LoL,
+arXiv 2601.16914, abstract), attributed to a conflict between RoPE's periodic
+structure and multi-head attention; DySink (arXiv 2605.21028) states the same
+mechanism as "RoPE-induced phase re-alignment can homogenize inter-head
+attention and cause sink collapse, where content regresses toward sink frames".
+VideoSSM (arXiv 2512.04519) corroborates the symptom without the term - sink
+frames "reduce drift but cause content repetition and a lack of dynamism".
+**That mechanism needs two things this port does not have**: a persistent
+early-frame KV sink retained across the whole rollout, and monotonically
+growing RoPE frame indices. Phase 23 section 2 established that
+`real_pixel_positions` is rebuilt per window from zero, and the carry here is
+the immediately preceding window's tail, not a pinned anchor. So the one
+citable prediction of literal looping does not describe this architecture, and
+"the scenery will repeat" should not be asserted as a known failure of it.
+"Attractor state" is not this literature's vocabulary at all and is not used
+here.
+
+**What the lineage's own fix is, and that this phase does not adopt it.** Every
+method that stabilises long rollouts adds noise BACK into the history rather
+than freezing it: Diffusion Forcing rolls out "using the previous latent
+associated with slightly 'noisy tokens' for some small noise level 0 < k << K"
+(section 3.3), DFoT's fractional history guidance partially masks - which that
+paper's appendix A.2 defines as partially noising - the history and reports
+that "guiding with lower frequencies [...] consistently increases dynamics
+while maintaining quality" (section 6.3), and FramePack's own related-work
+section groups both as "noise scheduling and augmentation in history frames
+modify noise levels at specific timesteps, video times, or image frequencies to
+create causal computation or anti-drifting effects. These methods generally
+reduce dependency on past frames." Phase 23 already settled why this port does
+not do that unilaterally - LTX-2's own extension recipe trains the prefix at
+exactly zero and nothing else - and that is unchanged here. It is recorded
+because it is the lever this phase deliberately did not pull.
+
+**Per-scene prompting itself is attested prior art, and a hard switch is a
+known baseline.** FIFO-Diffusion and MTVG "propose switching directly from one
+prompt to the next during video generation, resulting in noticeable
+inconsistencies between scenes" (as characterised by arXiv 2412.17254,
+"Enhancing Long Video Generation Consistency without Tuning") - which is a
+defect when the cut is unintended and is the intended output here. Everything
+else in that survey keeps the visual history and varies how the TEXT binds:
+Gen-L-Video (Wang et al. 2023) interpolates between prompts over transitional
+frames, FreeNoise (2310.15169) does the same through its Motion Injection, MinT
+(2412.05263) binds each event to a time span with ReRoPE, Mask2DiT (2503.19881)
+masks text-to-segment attention while keeping cross-segment vision, MEVG
+(2312.04086) anchors the next event on the previous clip's last frame. Dropping
+the visual history at a prompt change is not something any of them describes;
+it is the correct thing for a genuine scene CUT and is not a substitute for the
+"one shot, evolving prompt" feature those papers build.
+
+**The reference has nothing.** Every LTX-2 inference pipeline takes a single
+`prompt: str` - no `nargs`, no append, no prompt schedule; the only sequence of
+prompts anywhere is `PromptEncoder`'s positive/negative CFG pair. The only
+scene-detection code in the tree, `packages/ltx-trainer/scripts/
+split_scenes.py`, chops TRAINING footage into clips. There is no documented
+statement about inference-time extension, chunking, per-scene prompting, or a
+maximum practical duration.
+
+So the claim this phase makes about problem 2 is the narrow one: multi-scene
+does not prevent drift or stagnation within a scene, and nothing here measures
+how long one scene survives. What it does is put the length of any single
+autoregressive chain under the caller's control, and give them a reason to end
+one that is not "hope".
+
+#### gates
+
+Weight-free, always run (`crates/ltxv/tests/longform.rs`):
+
+* `a_multi_scene_plan_resets_the_carried_context_at_every_scene_boundary` -
+  three scenes at 1280x704 (481 + 241 + 113 frames, the last deliberately short
+  enough to be ONE window): every scene's first window carries 0, every later
+  window in a scene carries the full 8, each scene emits exactly its own
+  length, a context reset happens once per scene and nowhere else, and the
+  flattened plan reassembles to one continuous 835-frame clip with no
+  duplicate and no gap.
+* `a_scene_spec_is_a_frame_count_a_colon_and_the_whole_rest_of_the_prompt` -
+  the separator is the first colon only, a prompt keeps its own colons, and a
+  scene with no prompt / no count / no separator is refused.
+* `an_impossible_scene_is_refused_and_named` - the refusal says which scene.
+* `ltxv_cli::tests::every_flag_the_parser_accepts_is_documented` - `--scene`
+  joins the existing help/parser self-check.
+
+Real weights, seconds (real conv VAE, tiny random-weight DiT, CPU):
+
+* `a_two_scene_request_is_one_clip_whose_second_scene_owes_nothing_to_its_first` -
+  the direct observable for a reset, rather than an assertion about the plan.
+  A two-scene call (41 + 25 frames at 64x64 under a forced 20-token ceiling, so
+  scene 1 really spans two windows) comes back as one 66-frame clip whose
+  first 41 frames are byte-identical to scene 1 generated ALONE at its own
+  seed, and whose last 25 are byte-identical to scene 2 generated alone at
+  its. Anything crossing the boundary - a carried latent, a leaked sampler
+  state, a shared noise draw - breaks that equality. One VAE decode per window
+  across both scenes, and the aggregated timings account for both scenes' steps.
+
+#### 4 - the first real multi-scene run
+
+178 frames at 384x192, real 22B distilled checkpoint, real Gemma-4 encoder, one
+P40, the token ceiling forced to 1008 so scene 1 really splits. 543.4 s
+(build 13.8, text encode 124.1, denoise 374.9 at 15.620 s/forward, vae 29.5),
+one 178-frame mp4.
+
+The plan ran as written - `scenes=2 windows=3 frames=178`, then scene 1 as two
+windows (`carried=0 new=14`, then `carried=8 new=2`) and scene 2 as its own
+single window. Both halves are visible in one run: the intra-scene carry
+happening inside scene 1, and the reset at the boundary.
+
+The cut is where it was planned, measured rather than watched. Per-frame mean
+luma difference across the assembled clip (`blend=difference` + `signalstats`):
+
+| | value |
+|---|---|
+| median frame-to-frame difference | 4.99 |
+| largest difference that is not the boundary | 6.90 (frame 53) |
+| difference at frame 120 -> 121 | **116.95** |
+
+One spike, 23x the clip's own median and 17x the next largest, at exactly the
+frame the plan puts the boundary at. Scene 1 is a tracking shot across an open
+field; scene 2 is a dark rain-covered window with blurred city lights behind
+it. Nothing of the first scene survives into the second, which is the whole
+request.
+
+#### what this phase does NOT claim
+
+* **No quality claim about a cut.** The gates prove the boundary is a reset and
+  the clip is one file of the right length. Whether a hard cut between two
+  prompts is what a viewer wants to see is a directorial question, and no
+  metric here measures it. Phase 23's `clipmetric` seam ratio is the wrong
+  instrument on purpose: at a scene boundary a spike is the intended output,
+  so the boundary measurement in section 4 is reported as a spike against the
+  clip's own median rather than as a ratio to be minimised.
+* **No prompt-adherence claim.** Section 4's first scene asked for a Belgian
+  Malinois and the checkpoint produced a human runner, correctly tracked across
+  an open field. That is the model answering the prompt its own way and it says
+  nothing about this phase either direction - what the run demonstrates is that
+  each scene denoises against its OWN text context and that the second scene
+  owes nothing to the first.
+* **Nothing is measured about how long one scene survives.** The drift and
+  stagnation literature above is cited, not reproduced. This phase adds the
+  lever, not a number for where to set it.
+* **A multi-scene run costs a text encode and a denoiser build per scene.** The
+  weight cache makes the rebuild cheap and the encode is unavoidable, but a
+  many-short-scene clip pays a fixed per-scene overhead a single long clip does
+  not.
+* **Not on the capability surface.** `ltxv::caps`'s `t2v` action still takes one
+  prompt; `--scene` is a CLI flag only. Putting a scene list into an
+  `ActionSpec` is a separate design (a repeated typed parameter, and a progress
+  contract across scenes) and was not attempted.
+* **Host memory still grows with duration**, and now with the whole multi-scene
+  clip rather than one scene's: `generate_scenes` concatenates every scene's
+  decoded frames before returning. Phase 22 recorded this for one clip and it
+  is unchanged in kind; a multi-scene request just makes it easier to reach.
+* **No per-boundary soft anchor**, and no "one shot, evolving prompt" mode. See
+  section 2 and the last paragraph of section 3 for what each would be and why
+  neither is this.

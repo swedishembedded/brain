@@ -169,6 +169,52 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
 The same routing applies to the `t2v` capability action (`brain do brain/ltxv
 t2v`), with the default context and no new action parameter.
 
+### Several scenes in one clip
+
+Everything above keeps **one shot** continuous, which is the wrong answer if the
+clip is supposed to become something else part way through: every window shares
+the prompt, and every continuation window is hard-conditioned on the real
+content before it. Repeat `--scene <frames>:<prompt>` to write a clip that
+changes.
+
+```bash
+brain --device gpu0 ltxv t2v --dit-config ltx25_22b \
+  --width 768 --height 448 --fps 24 --output-path story.mp4 \
+  --scene 121:"a fishing boat leaves a harbour at dawn, camera tracking" \
+  --scene 121:"the open sea under heavy rain, waves breaking over the bow" \
+  --scene 57:"a close-up of a gull on a wet railing"
+```
+
+One command, one file, 299 frames.
+
+* **Inside a scene, nothing changes.** The rolling latent context above still
+  carries across every window boundary, so a scene longer than one window is
+  the same continuous shot it would be on its own.
+* **At a scene boundary the context resets.** The next scene's first window
+  carries `context = 0`, exactly like the first window of any clip, so it is
+  free to be a different subject, setting or action instead of a forced
+  continuation. A multi-scene run is the single-scene machinery run once per
+  scene with nothing carried between the runs, and the decoded frames
+  concatenated - so scene *n*'s pixels do not depend on scene *n-1* at all
+  (gated:
+  `crates/ltxv/tests/longform.rs::a_two_scene_request_is_one_clip_whose_second_scene_owes_nothing_to_its_first`).
+* **It is also how a scene ends deliberately.** Long single-prompt
+  autoregressive generation is documented to degrade - drift and error
+  accumulation, and a strong clean history makes "copy the last frame" a cheap
+  solution, so motion can go static. Cutting to a new scene on the caller's
+  schedule is a way to not depend on how long one shot survives.
+* **The separator is the first colon only**, so a prompt may contain colons.
+  Each scene's frame count is its own `1 + 8k`; the clip's length is their sum.
+* **`--scene` cannot be combined with `--prompt`/`--frames`** - those two *are*
+  the single-scene spelling, and a run that mixed them would have two ways to
+  say where the clip starts. Every seed is derived per scene, so two scenes
+  never draw the same initial noise.
+* **`--start-frame` conditions the first scene's opening only**, and
+  `--end-frame` is refused for a multi-scene clip for the same reason it is
+  refused for a multi-window one.
+* **Not exposed on the `t2v` capability action** - `--scene` is a CLI flag; the
+  action still takes one prompt.
+
 ### Upscaling a clip that already exists
 
 `brain ltxv upscale` takes a rendered video file and re-renders it at twice the
