@@ -3315,6 +3315,19 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 ## Recorded gaps (kept current)
 
+- **`brain ltxv upscale` has no real-weight end-to-end run, and no capability
+  action.** Phase 21 added post-hoc 2x upscaling of a finished clip, sharing
+  `upscale_and_refine` with the internal two-stage path so the Phase 19
+  un-normalize defect cannot recur in a second copy. Gated weight-free
+  (segment plan) and on the real VAE + real spatial upscaler with the tiny DiT
+  (wiring, CPU). Both cards were saturated by unrelated work throughout, so no
+  `ltx25_22b` run has happened: the code path is exercised, the QUALITY of its
+  output is unmeasured and unclaimed, and the multi-segment seam is argued
+  from construction rather than measured with `clipmetric::blowup_ratio`.
+  Separately, `upscale` is CLI-only - it would be the first action here to
+  take an input BLOB rather than parameters alone, and that shape is
+  undesigned. See Phase 21 item 3.
+
 - **Single-stage generation past the distilled schedule's token count**:
   **closed in Phase 19**. `generate` ran `LTX2_DISTILLED_SIGMAS` at the
   requested resolution; `ltx_pipelines.distilled` only ever runs it at
@@ -4393,3 +4406,135 @@ see a semantic-level defect, and "the module's internals are not derivable
 from the header" is a claim to go and check in the reference, not a licence to
 guess. The reference was already vendored in `resources/ltxv/source/` the
 whole time.
+
+### Phase 21 - the upscaler stops being reachable only from inside a generation
+
+The spatial x2 latent upscaler has been in this crate since the DFR milestone
+and load-bearing since Phase 19, where it became the middle of the reference's
+two-stage generation. But it was reachable only from inside `generate`: there
+was no way to point it at a clip that had already finished rendering. Real
+usage wants exactly that - a batch of segments rendered overnight at 1280x704,
+and a decision the next morning about which ones are worth 2560x1408.
+
+`brain ltxv upscale --input clip.mp4 --output-path clip_2x.mp4 --prompt "..."`
+is that entry point. What it does is not new work: VAE-encode, official x2
+latent upscale, refine on `STAGE_2_DISTILLED_SIGMAS`, VAE-decode. The point of
+the phase is that it is not a SECOND copy of that.
+
+#### 0 - the shared unit, chosen so the Phase 19 defect cannot come back twice
+
+Phase 19 closed two bugs, and the second one - the latent upscalers called in
+the wrong latent space, costing half the latent's variance - is the kind that
+survives a green parity suite. It had three call sites when it was found, and
+all three were wrong. A fourth call site written from scratch here would have
+been a fourth chance to get the sandwich wrong, in the one place with no
+golden to check it against.
+
+So `generate`'s two-stage tail was extracted whole. `upscale_and_refine(sc,
+&Refine { .. })` is the un-normalize/upsample/re-normalize sandwich plus the
+refinement `denoise_stage`, and BOTH the two-stage generation path and the new
+standalone command call it - the two-stage branch of `generate` is now that one
+call. The same extraction pulled out `build_denoiser` and `build_context`
+verbatim, since the standalone path needs the same DiT and the same text
+context and neither is upscale-specific. Nothing about WHAT any of them does
+changed; `denoise_stage`'s own seed salt (`0x5332`), eta (0) and schedule are
+the expressions Phase 19 left.
+
+Two supporting changes fell out of it, both narrowing rather than widening:
+
+* `LtxVaeTiledDecoder` borrows its weights instead of owning them, and so does
+  `decode_video`. A standalone upscale decodes one clip per segment against one
+  set of VAE weights; owning them would have cost a ~3 GB host copy per
+  segment. The tiled path already held them for its whole lifetime, so this is
+  strictly less copying, not more.
+* `Paths::resolve` takes the spatial upscaler as a fourth optional argument.
+  On `t2v` it stays environment-only (there it is a fixed member of the
+  checkpoint set, not a choice); `upscale`, whose whole subject is that
+  network, takes `--upsampler-spatial`.
+
+#### 1 - the length ceiling, and why it is segmentation rather than an error
+
+An upscaled clip has FOUR times the video tokens per frame of its input. A
+105-frame 1280x704 clip refines at 12320 tokens today; the same clip upscaled
+is 49280. That is not a quality question (`SINGLE_STAGE_MAX_TOKENS` is about
+building structure from noise, and refinement starts from content) - it is a
+per-forward allocation question. The adaLN table alone is `[t, 9*4096]` fp32 =
+147456 bytes per token, against a `max_storage_buffer_binding_size` this box's
+Tesla P40 reports as **2047 MiB**, which one table crosses at t ~= 14556. That
+figure is the adapter's own, logged by `backend-wgpu` on every run, not a
+constant anyone wrote down.
+
+`REFINE_MAX_TOKENS = 12288` sits below the crossover with room for the other
+per-forward slabs and above 8160, the largest refinement token count this
+crate has a recorded real run at (Phase 19's two-stage 1080p). It is DERIVED,
+not measured, and its doc says so. It bounds only the new command; `generate`'s
+stage 2 is untouched and still runs whatever the requested resolution implies.
+
+Past it, `refine_segments` splits the clip rather than refusing it. The
+overlap is not a tuning choice: every clip the causal VAE can represent has
+`1 + 8k` frames, so `n` DISJOINT segments of that shape sum to `n + 8*sum(k_i)`,
+which is a legal `1 + 8K` clip only for `n == 1`. Sharing exactly one frame at
+each boundary closes it for any `n` - `sum(1 + 8k_i) - (n-1) = 1 + 8*sum(k_i)` -
+and the shared frame is re-rendered by the later segment, whose refinement pass
+is the one it shares with the frames that follow it. Segments are split as
+evenly as the arithmetic allows, so a clip never ends on a 9-frame stub refined
+with less temporal context than everything before it.
+
+**The seam is real, is not blended, and is reported.** Each segment refines
+independently, so fine detail can step where two meet. That is a bounded,
+visible artefact announced on stderr and in the tracing log, which is a
+different class of thing from the silent end-of-clip disintegration Phase 19
+documents - and it is the honest trade for refining a clip longer than one
+pass can hold. A clip that fits is never split, and a shape that cannot be
+split into anything runnable is refused before a single weight is read.
+
+#### 2 - what is gated, and what deliberately is not
+
+Two claims, in `crates/ltxv/tests/upscale.rs`:
+
+1. **The segment plan**, weight-free and always running: a clip that fits is
+   exactly one segment; a clip that does not splits into segments that are
+   each `1 + 8k`, each under the ceiling, and which reassemble to exactly the
+   input frames in order; an unrepresentable frame count or an ungrowable grid
+   is an error, not a plan. This is the gate that stands between a long clip
+   and an hour of wasted device time.
+2. **The wiring, end to end** on the real conv VAE and the real x2 spatial
+   upscaler (tiny random-weight DiT, CPU): a 9-frame 64x64 clip comes back
+   9-frame 128x128, not flat, having passed through the `spatial upscale`
+   phase and `LTX2_STAGE2_STEPS` refinement steps. 112 s on CPU.
+
+What is NOT re-gated: the un-normalize sandwich. `upscale` reaches it through
+the same `upscale_and_refine` the two-stage path uses, and it already has an
+exact gate in `upsampler_parity.rs`. Asserting it again here would be gating a
+second copy - and the whole point of the phase is that there is no second copy.
+
+The CLI's own `--help`/parser self-check gained an `upscale` arm and one extra
+assertion the existing ones do not have: the token ceiling quoted in the help
+text must equal `REFINE_MAX_TOKENS`. A help text that promises a number the
+code no longer enforces is worse than one that promises nothing.
+
+#### 3 - what this phase does NOT claim
+
+* **No real-weight end-to-end run.** Both cards were saturated by unrelated
+  in-flight generations for the whole of this work, so every validation above
+  is CPU or weight-free. `upsampler_parity`'s
+  `the_upscaler_is_un_normalized_around_exactly_as_the_reference_does_it`
+  could not be re-run either - it hardcodes `Some("gpu")` and aborts with
+  `wgpu error: Out of Memory` under contention, which is where the 2047 MiB
+  binding figure above came from. The remaining item is one real run against
+  `ltx25_22b`; nothing about the code path is unexercised, but the quality of
+  what comes out of it is unmeasured and is not claimed.
+* **No seam measurement.** The multi-segment path's boundary artefact is
+  argued from construction, not measured - measuring it needs a real clip long
+  enough to segment, which needs a card. `clipmetric::blowup_ratio` is the
+  metric that would see it, since a detail step at a known frame index is
+  exactly the temporal discontinuity it was built for in Phase 19.
+* **No capability action.** `upscale` is CLI-only. It would be the first
+  action in this model to take an input BLOB (a whole video file) rather than
+  parameters alone, and that action shape has not been designed. Recorded
+  here and in `docs/models/ltxv.md`'s support table rather than quietly
+  skipped, because "a bespoke CLI subcommand is never the only entry point" is
+  this repo's own serving contract.
+* **`--factor` accepts only 2.** The official checkpoint is an x2 network and
+  this command runs that network; there is no resampler behind the flag and it
+  says so rather than silently rounding.

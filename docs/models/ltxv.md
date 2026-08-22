@@ -40,13 +40,14 @@ Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
 |---|---|
 | Inference (text to video) | [~] smoke test - tiny random-weight DiT, stub text context (`brain ltxv t2v`), see above |
 | Inference (DFR, higher-res multi-stage) | [~] smoke test - real spatial/temporal upscalers and VAE decode, still the tiny DiT (`brain ltxv dfr`) |
+| Post-hoc upscale of a finished clip | [x] `brain ltxv upscale` - VAE-encode an existing video file, run the official x2 latent spatial upscaler, refine on the distilled refinement schedule, VAE-decode. Shares the upscale+refine implementation with the internal two-stage generation path. CLI only so far, no capability action (see below) |
 | Inference (text to video+audio) | [ ] the audio-extended DiT (`LtxAvDit`) and A<->V cross-attention exist at tiny-config parity as a library, but nothing wires them into a pipeline/CLI action yet |
 | Inference (image to video) | [ ] |
 | LoRA fine-tune | [~] video-only DiT, host-math/gradcheck-proven (FD < 1e-4), single- and whole-batch overfit drives loss to ~0 at tiny-config scale - the audio-extended DiT has no training support |
 | Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
 | INT8 | [~] storage format only for the video-only DiT's weights (`crate::int8`) - not wired into any checkpoint loader, no compute-time kernel |
-| CLI (`brain ltxv {t2v,dfr}`) | [x] |
-| D-Bus | [x] (via the generalized `capability::Provider`/residency surface, same as every other model - both `t2v` and `dfr` are reachable as actions, not just CLI subcommands) |
+| CLI (`brain ltxv {t2v,upscale,dfr}`) | [x] |
+| D-Bus | [~] `t2v` and `dfr` are reachable as actions, not just CLI subcommands, via the generalized `capability::Provider`/residency surface - `upscale` is **not**: it takes a whole video file as INPUT, which is the first action in this model that would need an input blob rather than parameters alone, and that action shape has not been designed. Recorded rather than quietly skipped, because "a bespoke CLI subcommand is never the only entry point" is this repo's serving contract |
 | Batched serving | [ ] nothing resident to batch yet - see `crates/cli/src/resident_ltxv.rs`'s module doc |
 | Multi-device sharding | [~] `model::Shardable` plumbing for the video-only DiT is implemented and tested (partition planning, weight-subset loading, the single-shard and sequential-two-stage cases) - no real multi-device execution has been run against two physical accelerators yet |
 | NPU | [ ] deliberate scope exclusion, not a gap expected to close later: no existing `NpuModel` implementation pattern fits a model this large, and this model's realistic deployment target is GPU/CPU |
@@ -121,6 +122,52 @@ This proves the pipeline WIRING - real scheduler, real VAE decode, a real mp4
 out the other end - not generation quality; see `crates/ltxv/src/pipeline.rs`'s
 module doc.
 
+### Upscaling a clip that already exists
+
+`brain ltxv upscale` takes a rendered video file and re-renders it at twice the
+spatial resolution. It is not a pixel-space resampler: the clip is VAE-encoded,
+carried up by the **official LTX-2.5 x2 latent spatial upscaler**, refined by a
+short diffusion pass at the new size, and VAE-decoded - the exact tail a
+two-stage generation already runs (see the Stages section of
+`brain ltxv t2v --help`), reached through the same code.
+
+```bash
+export BRAIN_LTXV_VAE=[path/to/ltx-2.5-video-vae-conv-bf16.safetensors]
+export BRAIN_LTXV_UPSAMPLER_SPATIAL=[path/to/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors]
+export BRAIN_LTXV_DIT=[path/to/ltx-2.5-22b-distilled-transformer-Q8_0.gguf]
+export BRAIN_LTXV_TEXT_ENCODER=[path/to/gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf]
+brain -v --device gpu0 ltxv upscale --dit-config ltx25_22b \
+  --input clip.mp4 --output-path clip_2x.mp4 \
+  --prompt "the prompt the clip was generated from"
+```
+
+Three things worth knowing before running it:
+
+* **`--prompt` is not optional in practice.** The refinement step is a
+  diffusion pass conditioned on text, so the model is answering "what should
+  this look like with more detail" against whatever context it is given.
+  Omitting the flag refines against an empty prompt and costs detail; the
+  command says so on stderr when you do. A video file carries no record of
+  the prompt it was generated from, so it has to be supplied.
+* **The input's shape has to be VAE-representable**: width and height a
+  multiple of 32, frame count of the form `1 + 8k`. Anything `brain ltxv t2v`
+  wrote already satisfies both.
+* **Length has a ceiling per refinement pass.** An upscaled clip carries four
+  times the video tokens per frame that its input did, so a length that was
+  fine at the source resolution need not fit at the target one. Past
+  `ltxv::pipeline::REFINE_MAX_TOKENS` in one pass the clip is refined in
+  several consecutive segments that share one frame at each boundary, and
+  fine detail can step where two segments meet - a bounded, visible artefact,
+  reported on stderr, not a silent corruption. A clip that fits is never
+  split, and a request that cannot be split into anything runnable is refused
+  before any weight is read.
+
+`--refine-steps` picks a SUFFIX of the distilled refinement table (default: all
+3 steps), not a resampling of it - the distilled checkpoint only denoises
+correctly at the sigma values distillation baked in, so fewer steps means
+starting further down the same table rather than taking the same span in
+bigger hops.
+
 `brain ltxv dfr` runs the same smoke-test DiT through DFR (Diffusion Fidelity
 Rendering): a half-res base generation with generated keyframe slots, a REAL
 spatial x2 latent upscale, a full-res re-noised detailing pass (no IC-LoRA -
@@ -157,10 +204,11 @@ random-weight DiT, a stub text context, a `--steps` the distilled schedule
 ignores).
 
 `ltxv` has a dedicated CLI module, so the resolver gives it precedence over
-generic capability dispatch (`brain ltxv {t2v,dfr}` runs that module, not a
+generic capability dispatch (`brain ltxv {t2v,upscale,dfr}` runs that module, not a
 generic action call) - the same routing `wan` uses. Both actions are still
 reachable the same way every model in this repo is over other transports:
-discovery (`brain caps brain/ltxv`), `brain do brain/ltxv {t2v,dfr}`, and a
+discovery (`brain caps brain/ltxv`), `brain do brain/ltxv {t2v,dfr}` (not
+`upscale` - see the Support table), and a
 cancellable streaming job over D-Bus (`brain serve --dbus`) - a bespoke CLI
 subcommand is never the only entry point, per this repo's serving contract. A
 real 22B DiT and the Gemma-4 text encoder are tracked gaps (see the roadmap) -
