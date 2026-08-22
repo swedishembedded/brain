@@ -282,6 +282,45 @@ no `brain caps`/CLI-verb/D-Bus surface yet (M11).
   structurally-correct speech - "statistically equivalent, not bit-identical"
   is the honest, intended bar here.
 
+## Training
+
+**The speech-token LM has a gradient-checked host trainer; the flow decoder
+and HiFT vocoder do not yet.**
+
+`crates/cosyvoice/src/lmgrad.rs` is a fresh, `Fp`-generic (`f64` FD oracle /
+`f32` trainer, one implementation) host reference for `CosyVoiceLm`'s
+trainable graph - the same Qwen2-style decoder math `qwen3::Qwen::
+forward_steps` dispatches as WGSL kernels, plus CosyVoice's own bolted-on
+embedding tables and untied `llm_decoder` head, checked by architecture, not
+shared code. It is a fresh reference rather than a call into `qwen3::Qwen`'s
+own training graph because `CosyVoiceLm` drives a decode-only `qwen3::Qwen`
+build one row at a time (no backward buffers allocated at all) and its three
+bolted-on tables live outside `qwen3::Qwen`'s own parameter set with a
+different row count than the backbone's tied embedding/head - see
+`crates/cosyvoice/src/lmgrad.rs`'s own module doc for the full reasoning.
+Gradient-checked at tiny, non-degenerate dims for both `SpecialTokenSource`
+branches (`gradcheck::check_cosyvoice_lm_block`/`check_cosyvoice_lm`: worst
+`rel_err` 1.09e-9 block-level, 1.92e-6 model-level, both far inside the 1e-4/
+1e-3 gates). LoRA (`crates/cosyvoice/src/lmlora.rs`) targets `wq`/`wk`/`wv`/
+`wo` per layer via `model::lora::Pair`'s host adapter (`B = 0` at init, the
+same convention `qwen3::lora` uses, wired through the shape this crate's
+training graph actually has) - exact no-op at init and measured descent, both
+tested. Single-example and batch overfit both collapse loss to ~5e-4
+(`crates/cosyvoice/tests/lm_overfit.rs`).
+
+**Not yet trainable: the flow decoder (CV2's UNet CFM estimator, CV3's DiT CFM
+estimator) and the HiFT vocoder (both generations).** All four are pure host
+`f32` scalar-loop forward code today, with zero float-type genericity and no
+backward of any kind. Hand-deriving a correct analytic backward for the
+conformer's relative-position attention, the UNet's resnet/transformer mix,
+the partial-rotary DiT blocks, the NSF harmonic source generator and the
+ISTFT head is real, substantial engineering with no precedent backward
+elsewhere in this workspace to check conventions against - deliberately
+scoped out of the same pass as the LM so the LM's own gates could be fully
+closed rather than three components left half-done. HiFT additionally has no
+discriminator (MPD/MSD/MRD) ported at all, so GAN-style adversarial
+fine-tuning would be new architecture, not just a missing backward.
+
 Weights env vars:
 
 | Variable | Role |

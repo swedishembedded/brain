@@ -395,6 +395,87 @@ consumed the available time, and a streaming implementation is exactly the
 kind of "gate that lies" risk this repo's culture warns about if rushed -
 better a clearly-scoped follow-up than a half-verified streaming path.
 
+## Phase 10 (partial): LM training - gradcheck + LoRA + overfit
+
+Scoped to the speech-token LM only; the flow decoder (both CV2's UNet CFM
+estimator and CV3's DiT CFM estimator) and the HiFT vocoder (both
+generations) remain forward-only - see "Not yet done" below for why and what
+a follow-up needs.
+
+**Real finding: `crate::llm::CosyVoiceLm` cannot be trained through
+`qwen3::Qwen`'s own training graph at all.** The plan going in was to reuse
+`qwen3::Qwen`'s batched `set_batch`/`forward`/`backward` (as `qwen3tts`'s
+Talker does) and wire `qwen3::lora` onto it directly. Reading both crates
+line by line found this does not fit: `CosyVoiceLm` drives a **decode-only**
+`qwen3::Qwen` build (`Qwen::from_tensors_decode`) one row at a time through
+`step_embed`, which allocates no backward buffers at all
+(`Qwen::run_backward` asserts `!self.decode_only`); and its three bolted-on
+tables (`llm_embedding`/`speech_embedding`/`llm_decoder`) live entirely
+outside `qwen3::Qwen`'s own parameter set with a different row count than the
+backbone's tied `tok.weight`/`lm_head` (151936 real BPE ids vs. a separate
+~6564/6761-row speech vocabulary) - `qwen3::Qwen`'s training path assumes ONE
+table shared by embedding and head. The nearest seam,
+`Qwen::enable_mm_splice`, replaces one CONTIGUOUS row range with externally
+supplied embeddings while every other row still comes from the backbone's own
+tied table; CosyVoice's `sos ++ text ++ task_id ++ speech` layout needs three
+genuinely disjoint row sources feeding one sequence, which does not fit that
+seam without changing its contract. `qwen3tts`'s Talker works around none of
+this because it does not need to: its own trainable stream is literally a
+private `qwen3::Qwen` instance with `vocab` sized to its own codec vocabulary
+and `tie_embeddings = false` - no bolted-on tables outside `qwen3::Qwen`'s
+own parameter set at all.
+
+**Judgment call**: rather than retrofit `qwen3::Qwen` with new "drive the
+transformer body from an externally-assembled embedding, read back a raw
+hidden state" surface (invasive on a crate every other decoder-LM
+architecture in this workspace depends on), `crates/cosyvoice/src/lmgrad.rs`
+is a **fresh, self-contained, `Fp`-generic host reference** of the same
+Qwen2-style decoder math (RMSNorm -> biased QKV -> half-split RoPE -> causal
+GQA attention -> output projection -> residual -> RMSNorm -> SwiGLU MLP ->
+residual, matched op-for-op against `qwen3::Qwen::forward_steps`) plus
+CosyVoice's own embedding/head tables and its masked next-speech-token
+cross-entropy objective - the same pattern `wan::grad`/`wan::modelgrad`,
+`flux2::grad` and `ltxv::grad` already use for a model whose trainable graph
+does not fit an existing device-model seam: `f64` is the finite-difference
+gradcheck oracle, `f32` is the host trainer, one implementation for both.
+LoRA (`crates/cosyvoice/src/lmlora.rs`) follows the same substitution:
+`model::lora::Pair`'s host `W_eff = W + (α/r)·B·A` adapter (the SAME
+machinery `wan::lora`/`flux2::lora`/`s3dit::lora` build on) targeting
+`wq`/`wk`/`wv`/`wo` per layer - the same four projections
+`qwen3::LoraCfg::attn` targets by default, `B = 0` at init, so a rank/alpha
+choice means the same thing here as it does for any `qwen3`-hosted model in
+this workspace, without `qwen3::lora`'s device-adapter machinery being
+reachable from this crate's training path.
+
+Gates (`crates/gradcheck/src/lib.rs`'s `check_cosyvoice_lm_block`/
+`check_cosyvoice_lm`, `crates/cosyvoice/src/lmlora.rs`'s and
+`crates/cosyvoice/tests/lm_overfit.rs`'s own tests), at tiny, deliberately
+non-degenerate dims (`n_heads=6 ≠ head_dim=4`, `d_model=20 ≠
+n_heads·head_dim=24`), covering BOTH `SpecialTokenSource` branches (CosyVoice
+2's dedicated `llm_embedding` table and CosyVoice 3's
+`sos`/`task_id`-as-speech_embedding-rows):
+
+- Block-level FD (one decoder layer, every weight tensor plus the input
+  adjoint `dx_in`): worst `rel_err` **1.09e-9** against the porting
+  playbook's 1e-4 gate.
+- Model-level FD (embedding assembly + N layers + final norm + `llm_decoder`
+  head + masked cross-entropy): worst `rel_err` **1.92e-6** (CV2) /
+  **7.61e-10** (CV3) against the 1e-3 gate.
+- Confirmed the gate has teeth: a deliberately-flipped sign in the RoPE
+  backward's adjoint failed both checks loudly (`rel_err` up to 1.74) before
+  being reverted - the RED half of the TDD cycle, not assumed.
+- LoRA exact no-op at init (`applied == base`, bit-for-bit) and measured
+  descent (rank 4, 120 Adam steps, loss falls to <90% of its initial value
+  with the base provably unmoved) - `crates/cosyvoice/src/lmlora.rs`'s tests.
+- Single-example overfit: loss 2.196 -> 0.00054 over 400 Adam steps.
+  Batch-of-4 overfit: mean loss 2.224 -> 0.00034 over 500 Adam steps
+  (`crates/cosyvoice/tests/lm_overfit.rs`).
+- **Both backends**: this module dispatches no `gpu_core` step, no WGSL, no
+  `Backend` at all (confirmed by grep) - there is no kernel here for the
+  documented `backend-cpu` workgroup-reduction bug class to hide in, so
+  `BRAIN_DEVICE=cpu cargo test -p brain-gradcheck --lib cosyvoice` was run and
+  produces the identical report, by construction, rather than being skipped.
+
 ## Not yet done
 
 - [x] Phase 7b: CosyVoice 3 model code (`CausalMaskedDiffWithDiT`'s DiT
@@ -402,7 +483,9 @@ better a clearly-scoped follow-up than a half-verified streaming path.
 - [ ] Phase 9 (CosyVoice 3): pipeline reuse now that Phase 7 has landed
 - [ ] Phase 9 (streaming): chunked token2wav, growing-prefix flow re-run, cross-fade
 - [ ] Phase 9 (kaldi fbank parity): a real, captured `torchaudio.compliance.kaldi.fbank` golden and a bit-exact gate for `audio::kaldi_fbank`
-- [ ] Phase 10: training (LM LoRA, flow + vocoder full/LoRA finetune, gradcheck)
+- [x] Phase 10 (LM): `lmgrad`/`lmlora` host reference, gradcheck (block + model, both `SpecialTokenSource` branches), LoRA no-op-at-init + descent, single/batch overfit
+- [ ] Phase 10 (flow decoder, both generations): full fine-tune + LoRA gradcheck for CV2's `CausalConditionalDecoder` UNet CFM estimator and CV3's adaLN-zero DiT CFM estimator. Both are pure host scalar-loop `f32` forward code today (conformer relative-position attention, resnet+transformer UNet stages, partial-rotary DiT blocks) with zero float-type genericity and no backward of any kind - hand-deriving and gradient-checking a correct analytic backward for both (particularly the conformer's relative-position attention and the UNet's resnet/transformer mix) is real, substantial engineering distinct from the LM's, deliberately not attempted in the same pass as the LM so that the LM's own gates could be fully closed rather than three components left half-done.
+- [ ] Phase 10 (HiFT vocoder, both generations): full fine-tune baseline (no LoRA precedent applies - it is a conv/ISTFT/NSF-source stack, not an attention model) - same blocker as the flow decoder: pure host `f32` forward only, no genericity, no backward. The NSF harmonic source generator and the ISTFT head are the two hardest pieces to differentiate correctly (neither has a precedent backward anywhere else in this workspace to check conventions against) and were the reason this component was scoped out rather than rushed. No discriminator (MPD/MSD/MRD) exists in this crate at all - GAN-style adversarial fine-tuning would be new architecture, not just a missing backward.
 - [ ] Phase 11: serving contract (caps, residency, CLI, D-Bus/HTTP)
 - [ ] Phase 12: docs + README (not the quickstart, per instruction)
 - [ ] Phase 13: NPU export + INT8 PTQ + optimization pass
