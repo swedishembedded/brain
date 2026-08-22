@@ -1562,6 +1562,20 @@ trait Denoiser {
     fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
         Ok((self.forward(i, cond), self.forward(i, uncond)))
     }
+
+    /// Give back every device resource held BETWEEN forwards, leaving the
+    /// denoiser usable - the next forward rebuilds whatever it needs.
+    ///
+    /// [`generate`] does not need this: it drops the whole denoiser before its
+    /// VAE decode, because a resident weight window and a decode that needs up
+    /// to ~16.5 GiB do not both fit on one card (see `crate::devres::
+    /// planned_slots`, which caps the window at a quarter of the card for the
+    /// same reason). A window loop CANNOT drop it - the next window denoises
+    /// with it - so it releases the same thing instead.
+    ///
+    /// Default: nothing held, nothing to give back, which is right for every
+    /// denoiser that opens its device per forward.
+    fn release_devices(&self) {}
 }
 
 /// Everything one denoise-step forward needs that is IDENTICAL across the
@@ -1712,6 +1726,21 @@ impl Denoiser for RealDit {
     /// cards' VRAM is released together when this `RealDit` drops.
     fn forward_cfg_pair(&self, i: &StepInputs, cond: &[f32], uncond: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
         dispatch_cfg_pair(self, &self.place, i, cond, uncond)
+    }
+
+    /// Drop every card's session: the open `Gpu` and, with it, the resident
+    /// weight window that session was holding. [`Self::session`] rebuilds one
+    /// on the next forward, sized from THAT forward's token count.
+    ///
+    /// The weights themselves are not re-read - they come back from the
+    /// checkpoint-scoped host cache this `RealDit` still holds - so what a
+    /// release costs is a device open plus the window's uploads, and what it
+    /// buys is a card with nothing of this denoiser's on it.
+    fn release_devices(&self) {
+        let dropped: Vec<_> = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).drain().collect();
+        if !dropped.is_empty() {
+            tracing::info!(cards = dropped.len(), "releasing the DiT's device sessions");
+        }
     }
 }
 
@@ -2875,6 +2904,11 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
             &mut progress,
         )?;
 
+        // Same reason [`generate_long`]'s window loop does it, and the same
+        // reason [`generate`] drops the denoiser outright before its decode:
+        // a segment loop holds the DiT across N decodes, and a resident weight
+        // window does not fit alongside one.
+        dit.release_devices();
         progress(done_before + per_segment - 1, total, "vae decode");
         let dec_t = Instant::now();
         let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &refined);
@@ -3115,6 +3149,15 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                 &mut progress,
             )?;
             carried_half = Some((crate::longform::carry_tail(&stage1, in_channels, lat_t, lh1, lw1, context.min(lat_t)), context.min(lat_t)));
+            // Stage 2 is a different token count, so the resident window has
+            // to be rebuilt for it either way (`crate::devres::DitSession::
+            // prefill`). Releasing the whole session instead of rebuilding
+            // inside it costs one more device open and buys two things: the x2
+            // upscaler about to be built gets a card with none of the DiT's
+            // weights on it, and the new session's slot count is planned from
+            // stage 2's OWN token count rather than inherited from stage 1's
+            // much smaller one.
+            dit.release_devices();
             upscale_and_refine(
                 &sc,
                 &Refine {
@@ -3155,6 +3198,13 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         carried_full = Some((crate::longform::carry_tail(&final_chw, in_channels, lat_t, lh, lw, context.min(lat_t)), context.min(lat_t)));
 
         done_before += per_window - 1;
+        // What [`generate`] achieves with `drop(dit)` before its own decode,
+        // and the reason it does: a VAE decode opens its own device and needs
+        // up to ~16.5 GiB at the shapes this pipeline supports, which does not
+        // fit alongside a resident weight window. A window loop cannot drop
+        // the denoiser - the next window needs it - so it hands the card back
+        // and lets the next window's first forward re-open it.
+        dit.release_devices();
         progress(done_before, total, "vae decode");
         let dec_t = Instant::now();
         let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &final_chw);
