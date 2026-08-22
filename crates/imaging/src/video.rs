@@ -68,6 +68,16 @@ impl Default for VideoDecodeOpts {
 /// convention). Returns a clear error (not a panic) when `ffmpeg` is absent,
 /// the path doesn't exist, ffmpeg fails, or it produces zero frames.
 pub fn decode_frames(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<(Vec<f32>, u32, u32)>, String> {
+    Ok(decode_frames_rgb8(path, opts)?.into_iter().map(|img| (img.to_hwc_unit(), img.w, img.h)).collect())
+}
+
+/// The same decode, kept as [`Rgb8`].
+///
+/// [`decode_frames`]' `f32` unit form is what a model PREPROCESSOR wants; a
+/// caller that will hand the frames straight back to a codec (`brain ltxv
+/// upscale` re-encoding what it decoded) wants the bytes ffmpeg actually
+/// produced, without a `u8 -> f32 -> u8` round trip in the middle.
+pub fn decode_frames_rgb8(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<Rgb8>, String> {
     if !ffmpeg_available() {
         return Err("imaging::video: ffmpeg not found on PATH -- video file decoding needs the ffmpeg CLI (install it, or supply already-decoded frames directly)".to_string());
     }
@@ -106,7 +116,30 @@ pub fn decode_frames(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<(Vec<f32
         return Err(format!("imaging::video: ffmpeg produced no frames for {}", path.display()));
     }
 
-    entries.iter().map(|p| crate::codec::load(p).map(|img| (img.to_hwc_unit(), img.w, img.h))).collect()
+    entries.iter().map(|p| crate::codec::load(p)).collect()
+}
+
+/// The video's own average frame rate, via `ffprobe`.
+///
+/// `None` when `ffprobe` is absent (it ships with `ffmpeg` but is a separate
+/// binary and can be packaged apart from it), when the stream reports no
+/// rate, or when the rate is not a positive number - every one of which is a
+/// "ask the caller instead" case, not an error worth failing a run over.
+/// Returned as the exact `num/den` rational ffmpeg carries, evaluated, so
+/// 24000/1001 comes back as 23.976 rather than 24.
+pub fn probe_fps(path: &Path) -> Option<f64> {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "default=nw=1:nk=1"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (num, den) = text.trim().split_once('/')?;
+    let (num, den) = (num.parse::<f64>().ok()?, den.parse::<f64>().ok()?);
+    (den > 0.0 && num > 0.0).then_some(num / den)
 }
 
 // ---------------------------------------------------------------- encoding
