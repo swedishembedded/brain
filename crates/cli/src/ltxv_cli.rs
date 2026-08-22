@@ -28,9 +28,13 @@ const HELP: &str = r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: rea
 
   brain ltxv t2v --prompt <text> --output-path <out.mp4> [options]
 
-Required:
-  --prompt <text>          folded into a deterministic noise/context seed
-                           only - there is no real text encoder yet
+Required (one of):
+  --prompt <text>          what the whole clip shows, with --frames for its
+                           length - a single-scene clip
+  --scene <frames>:<text>  ...or one repeat of this per scene, for a clip
+                           that changes scene part way through (see Scenes).
+                           --scene carries its own length and prompt, so it
+                           cannot be combined with --prompt/--frames
   --output-path <file>     .mp4 / .mkv / .webm / .gif; without ffmpeg the
                            frames are written to <file>.frames/ and the
                            command that finishes the job is printed
@@ -131,6 +135,30 @@ Long-form clips:
   (default 13200, the largest single-window generation this crate has a
   recorded real run at). --end-frame is not supported for a multi-window
   clip; --start-frame conditions the first window as usual.
+
+Scenes:
+  One --frames/--prompt run is one continuous SHOT: every window shares the
+  prompt and is hard-conditioned on the real content before it, which is
+  what keeps the motion continuous and is exactly what stops the clip from
+  becoming something else. Repeat --scene instead to write a clip that does
+  change:
+
+    brain ltxv t2v --output-path story.mp4 --width 768 --height 448 \
+      --scene 121:"a fishing boat leaves a harbour at dawn, camera tracking" \
+      --scene 121:"the open sea under heavy rain, waves breaking" \
+      --scene 57:"a close-up of a gull on a wet railing"
+
+  One command, one file, 299 frames. Inside a scene nothing changes - the
+  rolling latent context above still carries across every window boundary.
+  AT a scene boundary the context RESETS: the next scene's first window
+  carries no forced content from the previous one, exactly like the first
+  window of any clip, so it is free to actually be a different subject,
+  setting or action rather than a continuation. That is also the way to end
+  a scene deliberately rather than letting one long shot run until it
+  degrades. Each scene's frame count is its own 1 + 8k; the clip is their
+  sum. --start-frame conditions the FIRST scene's opening only, and
+  --end-frame is refused (there is no design for pinning the last frame of
+  a multi-scene clip).
 
 Devices:
   --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)
@@ -291,6 +319,10 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let mut o = GenOpts::default();
     let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
     let mut prompt: Option<String> = None;
+    let mut scene_specs: Vec<String> = Vec::new();
+    // `--frames` has a default, so "was it given" cannot be read back off the
+    // value - and refusing `--scene` alongside it depends on knowing.
+    let mut frames_given = false;
     let mut out: Option<String> = None;
     let mut vae: Option<String> = None;
     let mut dit: Option<String> = None;
@@ -308,7 +340,11 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--output-path" | "--out" => {
                 out = Some(need(i)?.clone());
             }
-            "--frames" => o.frames = num(i, "--frames")?,
+            "--scene" => scene_specs.push(need(i)?.clone()),
+            "--frames" => {
+                o.frames = num(i, "--frames")?;
+                frames_given = true;
+            }
             "--width" => o.width = num(i, "--width")?,
             "--height" => o.height = num(i, "--height")?,
             "--steps" => o.steps = num(i, "--steps")?,
@@ -356,7 +392,17 @@ fn t2v(args: &[String]) -> Result<(), String> {
         }
         i += 2;
     }
-    let prompt = prompt.ok_or("--prompt is required")?;
+    // One scene is what a `--prompt`/`--frames` run always was, so the whole
+    // command below has exactly one shape to handle.
+    let scenes: Vec<ltxv::longform::Scene> = if scene_specs.is_empty() {
+        vec![ltxv::longform::Scene { frames: o.frames, prompt: prompt.ok_or("--prompt is required (or one --scene <frames>:<prompt> per scene)")? }]
+    } else {
+        if prompt.is_some() || frames_given {
+            return Err("--scene already carries its own frame count and prompt, so it cannot be combined with --prompt/--frames - write every scene as its own --scene <frames>:<prompt>".into());
+        }
+        scene_specs.iter().map(|s| ltxv::longform::Scene::parse(s)).collect::<Result<_, _>>()?
+    };
+    o.frames = scenes.iter().map(|s| s.frames).sum();
     let out = out.ok_or("--output-path is required")?;
     let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), None)?;
 
@@ -370,10 +416,13 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // the preview line rather than after: a multi-window clip's per-forward
     // token count is one WINDOW's, and reporting the whole clip's would name
     // a number no forward in the run has.
-    let plan = ltxv::longform::window_plan(o.frames, lh, lw, context_latents, long.max_window_tokens)?;
-    let tokens = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
-    let window_desc = if plan.len() > 1 {
-        format!(" [{} windows, {context_frames}-frame rolling latent context]", plan.len())
+    let plan = ltxv::longform::scene_plan(&scenes, lh, lw, context_latents, long.max_window_tokens)?;
+    let windows: Vec<&ltxv::longform::Window> = plan.iter().flatten().collect();
+    let tokens = windows.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
+    let window_desc = if scenes.len() > 1 {
+        format!(" [{} scenes, {} windows, {context_frames}-frame rolling latent context within a scene and a reset at each scene boundary]", scenes.len(), windows.len())
+    } else if windows.len() > 1 {
+        format!(" [{} windows, {context_frames}-frame rolling latent context]", windows.len())
     } else {
         String::new()
     };
@@ -410,12 +459,17 @@ fn t2v(args: &[String]) -> Result<(), String> {
         "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}{stage_desc}{window_desc}",
         o.frames, o.width, o.height, o.eta, o.guidance, o.seed
     );
+    if scenes.len() > 1 {
+        for (si, (s, windows)) in scenes.iter().zip(&plan).enumerate() {
+            eprintln!("  scene {}/{}: {} frames, {} window(s), frames {}..{} - {:?}", si + 1, scenes.len(), s.frames, windows.len(), windows[0].first_frame, windows[0].first_frame + s.frames, s.prompt);
+        }
+    }
 
     let t0 = std::time::Instant::now();
     // A one-shot CLI run has no second party to cancel it: Ctrl-C already
     // ends the process - see `wan_cli::t2v`'s identical reasoning.
     let cancel = capability::CancelToken::default();
-    let (video, timings) = ltxv::pipeline::generate_long(&paths, &prompt, &long, &cancel, |done, total, phase| {
+    let (video, timings) = ltxv::pipeline::generate_scenes(&paths, &scenes, &long, &cancel, |done, total, phase| {
         eprint!("\rltxv [{done}/{total}] {phase}                    ");
     })?;
     eprintln!();
@@ -696,6 +750,7 @@ mod tests {
             "--vae",
             "--dit",
             "--text-encoder",
+            "--scene",
         ] {
             assert!(super::HELP.contains(flag), "{flag} is parsed but not in --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in --help but not parsed");
