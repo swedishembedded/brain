@@ -4786,3 +4786,221 @@ Real weights, seconds (real conv VAE, tiny random-weight DiT, CPU):
   was not explicitly distilled for. It is strictly more information than one
   re-encoded pixel frame; it is not a claim that the model was trained to
   consume it.
+
+### Phase 23 - long-form, re-derived from the reference, and its first real run
+
+Phase 22 shipped rolling-window long-form generation and closed with a list of
+what it did NOT claim, headed by "No real-weight long generation". This phase
+is that run - and an independent re-derivation of Phase 22's conditioning
+decisions from the vendored reference rather than from Phase 22's reading of
+it, because a decision only ever checked against the argument that produced it
+has not been checked.
+
+Both of Phase 22's load-bearing conditioning claims survive, and are now
+sourced to the reference's own call chain rather than to one config file. One
+claim elsewhere in `denoise` - older than Phase 22 - was wrong about the
+reference and is fixed. And the real run found a defect Phase 22 could not
+have seen.
+
+#### 0 - freezing at exactly sigma 0 is what the reference does, checked call by call
+
+The vendored tree is the official LTX-2 repository, so the inference side of
+prefix conditioning can be READ instead of inferred. End to end:
+
+* the trainer's own validation sampler builds a prefix as
+  `VideoConditionByLatentIndex(latent=..., strength=1.0, latent_idx=0)`;
+* that item writes `clean_latent[:, start:stop]` and sets
+  `denoise_mask[:, start:stop] = 1.0 - strength`, i.e. exactly `0`;
+* `GaussianNoiser.__call__` is `lerp(latent, noise, noise_scale)` then
+  `lerp(clean_latent, that, denoise_mask)`. **At mask 0 the initial latent is
+  the clean content exactly** - no forward noise, no augmentation term, no
+  sigma floor;
+* `timesteps_from_mask` is `denoise_mask * sigma`, so a prefix token's
+  per-token timestep is `0`;
+* both denoising loops re-pin it every step.
+
+Training agrees and is NARROWER than the literature: the flexible strategy's
+intrinsic-condition mask is BINARY, the update is `noisy = m*clean +
+(1-m)*noisy` with `timesteps = (1-mask)*timesteps` and the region excluded from
+the loss, and the video-extension recipe sets `probability: 1.0`. That recipe
+has never seen a prefix at any noise level except zero.
+
+So "should the carried context get a little forward noise" is answered no, and
+not as a matter of taste.
+
+#### 1 - where the noise-on-context idea comes from, and why it does not apply
+
+The instinct is real and has a literature, but it is two literatures and only
+one of them is this one.
+
+**Family A - per-frame independent noise levels.** Diffusion Forcing samples an
+independent noise level per token and FEEDS that level to the network, so a
+context at level zero is in distribution by construction; its transformer
+descendant states the same thing as "noise as masking", with history frames at
+level 0 and therefore unmasked. Rolling Diffusion is the same family with the
+level a fixed function of position in the window, and its already-committed
+frames sit at exactly zero. LTX-2's per-token-timestep conditioning is this
+family, and the prescription is: match training, and training put the context
+at zero. The family does use non-zero context noise, but in GUIDANCE - an
+unconditional branch built by masking history with complete noise, and a
+fractional variant at an intermediate level - both terms in an expression whose
+base is still the clean-history conditional.
+
+**Family B - noise as a distrust knob.** Cascaded diffusion's conditioning
+augmentation, and the autoregressive video work that inherited it, noise the
+conditioning because it is a previous stage's IMPERFECT output; the level is
+sampled during training, fed to the model, and pinned at inference. The benefit
+only exists if the model was trained that way.
+
+The carried context here IS a model's own previous output, so family B's drift
+argument applies - but this checkpoint's extension recipe is family A, and
+bolting a family-B augmentation onto it at inference is a train/test mismatch in
+the other direction. It has also been measured and lost: FramePack ablates
+"noisy history" against its own method and reports 1146 Elo against 1221, with
+the mechanism named exactly - reducing reliance on the history interrupts error
+accumulation "at the cost of aggravating forgetting". The supported ways to
+attack drift, if it shows up, are to train for it (sample a prefix noise level
+and feed it, which would also unlock fractional history guidance) or to change
+the sampling structure. Not to noise the prefix unilaterally.
+
+#### 2 - window-local positions are the correct answer, not a shortcut
+
+Phase 22 recorded this as a rejected alternative. The reference and the
+literature both make it stronger than that.
+
+The reference's own tiled temporal pipeline remaps every tile's keyframe
+positions into tile-local coordinates before denoising it, and caps its
+conditioning frame rate independently of playback so RoPE time never leaves the
+trained distribution. Prefix training likewise builds positions for the whole
+clip starting at zero, with the prefix occupying frames `0..N-1` - so the
+extension recipe has only ever seen a prefix at positions `0..N-1`. The
+streaming-video literature agrees from the failure side: the papers that chain
+windows with a globally growing frame index report indices leaving the range
+RoPE was trained over, and both published fixes are forms of window-relative
+re-indexing. `real_pixel_positions` being rebuilt per window, from zero, is the
+behaviour that matches training; the cost is on the other branch.
+
+What remains a deviation is the one Phase 22 already recorded and it is
+unchanged: the carried frame in local latent slot 0 is read as a
+single-pixel-frame latent while it really covers eight. One of K frames, the
+oldest, and the seven against the seam are consistent. The reference does the
+same wherever it slices mid-stream latents into a tile, and handles it by
+discarding the affected output - which is what a continuation window's dropped
+context frames already do here.
+
+#### 3 - a correction to `Frozen`'s doc: the ancestral loop masks the x0 estimate too
+
+`Frozen`'s doc claimed the reference's two loops differ in WHERE the mask is
+applied - deterministic Euler on the x0 estimate, ancestral Euler on the
+stepped latent only, "the x0 estimate is left alone". The second half is wrong.
+`samplers._ModalityStep.from_modality_result` runs `post_process_latent` on the
+x0 estimate for every ancestral step, terminal one included, and the loop THEN
+masks the stepped latent again after the renoise term. Two applications, not
+one moved. `denoise` implemented only the second.
+
+Invisible at `denoise_mask == 0` (the x0 conversion runs at that token's own
+zero timestep, where it is the identity, so the estimate already IS the clean
+content) and at `denoise_mask == 1` (the blend is the identity) - which is why
+every gate passed either way and why nothing that ships changes by one bit:
+`--start-frame` at full strength and the long-form latent context are both
+exactly 0 or 1. `--conditioning-strength` below 1 under the default `eta = 1.0`
+is where it was a different trajectory from the reference's. Fixed, gated at a
+strength in between by
+`a_partially_conditioned_token_is_pulled_to_its_clean_content_under_both_samplers`
+- one terminal step, so what comes out IS the masked x0 estimate with no
+further arithmetic to hide a missing blend. Red at `eta = 1.0` (9.75 against
+9.875) and green at `eta = 0.0` before the fix, which is the shape a gate for
+this has to have.
+
+#### 4 - the seam, measured
+
+Phase 22's own list opened with "that the resulting clip's MOTION looks
+continuous to a viewer is argued, not measured", and named the measurement.
+It has run: 121 frames at 384x192 split into exactly two windows with the real
+8-latent-frame context, four real 22B window generations, 577 s on one P40.
+
+| arm | seam ratio | distance from 1.0 |
+|---|---|---|
+| rolling latent context | **0.99** | 0.01 |
+| last-frame chaining | 0.85 | 0.15 |
+
+The gate had to be corrected first, and the correction matters more than the
+numbers. It compared raw magnitude (`rolling < chained`), but 1.0 is the
+target, not 0: at 1.0 the seam transitions exactly like a typical frame, BELOW
+1.0 is a freeze - the artefact naive chaining produces - and above is a jump.
+On these very numbers the old assertion would have FAILED a near-perfect 0.99
+against a chain arm that stalled to 0.85, i.e. rewarded the defect it exists to
+detect. It now compares distance from 1.0.
+
+#### 5 - the first real-weight long-form run, and the defect it found
+
+337 frames at 1280x704, real 22B distilled checkpoint, one `--start-frame`.
+The planner did exactly what it should: five windows (one of 15 new latent
+frames, then four of 8 carried plus 7 new), the two-stage shape chosen once for
+the plan, 66 progress phases which is `1 + 5 * (8 + 4 + 1)`. Windows 1 and 2
+completed. Window 3 aborted in its refinement stage with `wgpu error: Out of
+Memory`, 3100 s in.
+
+**It is not a leak, and that was worth measuring rather than assuming.** A
+controlled reproduction - 249 frames at 384x192 with the token ceiling forced to
+1008 and two-stage forced on, so the plan is four two-stage windows and the run
+is ~10 minutes - sampled nvidia-smi every 5 s and segmented per window:
+
+| | window 1 | window 2 | window 3 | window 4 |
+|---|---|---|---|---|
+| peak, before | 13911 | 13911 | 13911 | 13911 |
+| floor, before | 2507 | 5961 | 5769 | - |
+| peak, after | 8145 | 8145 | 8145 | 8145 |
+| floor, after | 79 | 95 | 10 | 95 |
+
+Flat, and the peak bit-identical every window. Nothing accumulates on the
+device across the rolling loop.
+
+**What it is** is the height of that steady-state peak. Peak VRAM during a
+window is dominated by the DiT's RESIDENT WEIGHT WINDOW being alive while
+something else opens its own device. `generate` never has that problem and its
+own comment says why - it drops the whole denoiser before the VAE decode - and
+`devres::planned_slots` already caps the resident window at a quarter of the
+card for exactly this collision, recording the measurement that put the cap
+there: a decode's own device aborting at 24211 MiB of a 24576 MiB card, on a
+shape with no memory problem of its own. A window loop cannot drop the
+denoiser, so before this phase it held it, across every window's x2 upscaler
+build and every window's decode.
+
+`Denoiser` gained `release_devices` - a no-op by default, on `RealDit` a drain
+of its per-card session map that drops each card's open `Gpu` and the resident
+window with it. `generate_long` calls it twice per window: before the upscaler
+build (nearly free - stage 2 is a different token count, so the window had to
+be rebuilt for it anyway, and the new session's slot count is now planned from
+stage 2's OWN token count instead of inheriting stage 1's much smaller one) and
+before the decode. `upscale`'s segment loop had the identical hazard and got
+the identical call. The weights are not re-read; they come back from the
+checkpoint-scoped host cache the `RealDit` still holds. The run got FASTER
+(539.6 s against 637.1 s, 11.008 against 11.787 s per forward).
+
+The floor dropping from ~5.9 GB to ~0.1 GB is the release really happening.
+
+#### what this phase does NOT claim
+
+* **The 1280x704 failure is not reproduced.** The controlled shape reproduces
+  the collision and its fix, not the abort. The recurring peak there is 5766
+  MiB lower than it was, which is the headroom the aborting allocation did not
+  have - but whether that is sufficient is what a re-run answers, not this.
+  A slow fragmentation ratchet inside the long-lived DiT device would be
+  invisible to nvidia-smi (which reports reserved, not used-within-pool) and is
+  consistent with an abort at the third window rather than the first; releasing
+  the session twice per window resets that allocator either way, so the change
+  addresses it without proving it was there.
+* **Host memory still grows with duration.** Phase 22 recorded it and it is
+  untouched: `Video::frames` accumulates every decoded frame before the caller
+  encodes anything. That is ~950 MB for this clip and cannot produce a wgpu
+  device OOM, but it is the thing that actually scales with length.
+* **No always-run gate on the release.** `generate_long` builds its own
+  denoiser, so the wiring is not injectable and the claim is a resource one.
+  It is gated the way this crate already gates VRAM findings - a recorded
+  measurement - not by a test.
+* **`BRAIN_GPU_INDEX` does not pin on a multi-GPU box.** A schedulable set of
+  more than one card makes `ComputeSet::apply_backend` clear the registry's
+  ambient selection, "including an inherited BRAIN_GPU_INDEX", by its own
+  comment. `BRAIN_DEVICE=gpu1` is the pin that holds, and the seam gate's doc
+  now says so.
