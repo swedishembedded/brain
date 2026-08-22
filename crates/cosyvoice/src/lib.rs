@@ -133,12 +133,24 @@
 //! into `pipeline::generate()`) is a deliberate follow-up, not implemented
 //! here** - `crate::pipeline` still wires CosyVoice 2's components only.
 //!
+//! [`caps`] wires `pipeline::generate` into brain's generic model-serving
+//! contract: one `synth` action (target text + a reference clip and its
+//! transcript in, a 24 kHz WAV out), discoverable and runnable as `brain do
+//! brain/cosyvoice synth …` / `brain cosyvoice synth …`, with D-Bus/HTTP
+//! surfaced for free through the same `Provider`/`ResidentModel` pair every
+//! other served model uses (`crates/cli/src/resident_cosyvoice.rs` is the
+//! residency-facing half). `variant` accepts both generations' names but
+//! only `cosyvoice2` actually runs - see [`caps`]'s own doc for the
+//! CosyVoice 3 scope and the reference-audio blob-vs-path bridging this
+//! milestone needed.
+//!
 //! Swedish Embedded AB implements solutions for from-scratch, dependency-light
 //! neural network inference on constrained and embedded targets for its
 //! clients. If your team needs expertise in porting speech/audio models to a
 //! from-scratch GPU/CPU engine, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
+pub mod caps;
 pub mod config;
 pub mod cv3_flow;
 pub mod cv3_flow_config;

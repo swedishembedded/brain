@@ -369,6 +369,17 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(minimaxmusic3::caps::MinimaxMusic3Provider::new()),
             resident: resident!(crate::resident_minimaxmusic3::MinimaxMusic3Resident::from_env),
         },
+        // CosyVoice 2/3 zero-shot voice cloning TTS. Stateless like
+        // MiniMax Music 3 above (`cosyvoice::pipeline::generate` loads and
+        // drops all five checkpoints per call, see its own module doc) -
+        // `SynthAction::run` reads `BRAIN_COSYVOICE_*`/`BRAIN_S3TOKENIZER_V2`/
+        // `BRAIN_CAMPPLUS_DIR` from the environment itself, so `always!` is
+        // correct here too.
+        ModelEntry {
+            manifest: cosyvoice::caps::manifest,
+            provider: always!(cosyvoice::caps::CosyVoiceProvider::new()),
+            resident: resident!(crate::resident_cosyvoice::CosyVoiceResident::from_env),
+        },
         // Speech-to-text. Discovery is weight-free (the caps manifests); the
         // direct `brain do` path wraps the model crates' eager providers in
         // [`LazyProvider`] so construction stays cheap; the residency adapters

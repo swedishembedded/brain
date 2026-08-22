@@ -592,6 +592,7 @@ dependencies = [
  "brain-clip",
  "brain-codeformer",
  "brain-controlnet",
+ "brain-cosyvoice",
  "brain-data",
  "brain-dbus",
  "brain-deepseek2ocr",
