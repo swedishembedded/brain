@@ -210,6 +210,69 @@ recompute self-validation), and `CausalHiFTGenerator` magnitude/phase/
 waveform. Every planned component dumped, every self-validation check
 passing on a real run - no gaps.
 
+## Phase 7b: CosyVoice 3 model port (LM, DiT flow, causal HiFT)
+
+Three self-contained commits, each buildable and tested independently, using
+Phase 7a's goldens as the parity oracle:
+
+**`CosyVoice3LM`**: `CosyVoiceLm` (`crate::llm`) now hosts both generations
+behind `CosyVoiceLmConfig::special_token_source` - `LlmEmbedding` (CosyVoice
+2's dedicated `llm_embedding` table) or `SpeechEmbedding` (CosyVoice 3's
+`sos`/`task_id` rows inside `speech_embedding` itself, no `llm_embedding`
+table, bias-free `llm_decoder`). `stop_token_ids` widened from a fixed 3-id
+array to a `Range<u32>` to cover CosyVoice 3's 200-entry special-token block.
+Parity vs the real `llm.pt`: prefill hidden state and logits both cosine
+**1.0000000000**.
+
+**`CausalMaskedDiffWithDiT`**: no encoder at all - condition assembly is a
+bare `PreLookaheadLayer(80->1024)` + `repeat_interleave` feeding a 22-layer
+adaLN-zero `DiT` (`dim=1024, heads=16, dim_head=64, ff_mult=2`).
+`crate::flow`'s condition assembly, cosine `t_scheduler`, causal
+conv/mish/leaky_relu primitives, and the CFM noise buffer (`flow::torch_rng`)
+are widened to `pub(crate)` and reused verbatim - the Euler loop and noise
+are identical regardless of which estimator sits inside. **Real, non-obvious
+finding**: `x_transformers`'s `RotaryEmbedding` rotates the query/key row
+BEFORE the per-head reshape, so only the first `dim_head` channels ever get
+rotated - heads 1-15 pass through unrotated. Caught by a full-forward
+divergence (cosine ~0.993 with textbook per-head RoPE) despite every other
+sub-stage tap matching exactly; reproducing the quirk verbatim closes it to
+cosine 0.9999999997. Parity vs the real `flow.pt`: conds/mu/embedding and
+DiT-internal taps at cosine **1.0000000000**; the full 10-step Euler loop and
+an independent re-forward to mel at cosine **>= 0.9999999997**.
+
+**`CausalHiFTGenerator`**: reuses `HiFTGenerator`'s exact topology, but every
+conv is one-sided causal - `conv_pre` right-looking (kernel
+`conv_pre_look_right+1=5`), `ups[i]` nearest-upsample + left-causal `Conv1d`
+(`CausalConv1dUpsample`) rather than `ConvTranspose1d`, confirmed against the
+real `hift.pt`'s own tensor shapes (`ups.0`'s weight is `(256,512,16)` =
+`[Cout,Cin,K]`, a plain `Conv1d`'s layout, not `ConvTranspose1d`'s
+`[Cin,Cout,K]`) - so `weight_norm`'s `dim=0` convention is `Cout` here for
+every conv including `ups[i]`, the one case CosyVoice 2 needs `Cin` for.
+**Real, empirically-caught finding**: `SineGen2`'s phase-upsample
+interpolation mode is `"nearest"` under `causal=True`, not `"linear"` - a
+first port assumed CosyVoice 2's linear mode for both generations, matching
+CosyVoice 2's own tests while breaking CosyVoice 3 sharply (cosine ~0.28)
+partway through the signal; `nsf_source_forward` is now a shared generic
+selected by `nsf_source_forward`/`nsf_source_forward_causal`. CosyVoice 3's
+RNG story is simpler than CosyVoice 2's: `SineGen2(causal=True)` reads a
+buffer fixed once at construction rather than per call, modeled by
+`Cv3HiftInstance` drawing its noise once and reusing it across every
+`forward()`. Parity vs the real `hift.pt`: magnitude/phase/waveform at
+cosine **>= 0.9999998**, the residual attributed to a known cause (the
+reference upcasts `f0_predictor` to `float64` for causal inference; this
+port stays `f32` throughout, reported rather than hidden by
+`cv3_hift_parity.rs`).
+
+All three commits' real-weight tests re-verified together in one run
+alongside the unmodified CosyVoice 2 `flow_parity`/`hift_parity` suites
+(confirming the shared-code widening introduced no regression): 13/13 tests
+passed.
+
+**Not done in this phase**: CosyVoice 3 pipeline reuse - `crate::pipeline`
+still wires CosyVoice 2's five components only; composing the DiT flow
+decoder, causal HiFT, and `CosyVoice3LM` into a CosyVoice-3
+`pipeline::generate()` path is a recorded follow-up, not attempted here.
+
 ## Phase 8: HiFT vocoder (`HiFTGenerator`, CosyVoice 2 non-causal only)
 
 `ConvRNNF0Predictor` (despite the name, no RNN) -> NSF harmonic source
@@ -239,8 +302,9 @@ documents for the LM.
 Parity vs the real `hift.pt`: magnitude/phase/waveform match the reference
 exactly given the same NSF noise; production `forward_seeded` is verified
 deterministic and bounded given its own seed. `CausalHiFTGenerator`
-(CosyVoice 3, causal convs, no `cache_source` state) is a deliberate
-follow-up, not implemented.
+(CosyVoice 3, causal convs, no `cache_source` state) was a deliberate
+follow-up at the time this phase was written - see Phase 7b, where it was
+implemented.
 
 ## Phase 9: pipeline (non-streaming), CosyVoice 2
 
@@ -333,10 +397,9 @@ better a clearly-scoped follow-up than a half-verified streaming path.
 
 ## Not yet done
 
-- [ ] Phase 7b: CosyVoice 3 model code (`CausalMaskedDiffWithDiT`'s DiT
-      estimator, `CosyVoice3LM`, `CausalHiFTGenerator`) - Phase 7a's goldens
-      are ready
-- [ ] Phase 9 (CosyVoice 3): pipeline reuse once Phase 7 lands
+- [x] Phase 7b: CosyVoice 3 model code (`CausalMaskedDiffWithDiT`'s DiT
+      estimator, `CosyVoice3LM`, `CausalHiFTGenerator`)
+- [ ] Phase 9 (CosyVoice 3): pipeline reuse now that Phase 7 has landed
 - [ ] Phase 9 (streaming): chunked token2wav, growing-prefix flow re-run, cross-fade
 - [ ] Phase 9 (kaldi fbank parity): a real, captured `torchaudio.compliance.kaldi.fbank` golden and a bit-exact gate for `audio::kaldi_fbank`
 - [ ] Phase 10: training (LM LoRA, flow + vocoder full/LoRA finetune, gradcheck)
@@ -356,17 +419,27 @@ better a clearly-scoped follow-up than a half-verified streaming path.
   PyTorch RNG (the LM's `ras_sampling` multinomial draws, HiFT's
   `randn_like(sine_waves)` NSF noise) is a deliberate, honestly-documented
   gap in both `crate::llm`/`crate::sampling` and `crate::hift`'s own module
-  docs: production inference draws from `data::rng::Rng`, not a bit-exact
-  port of torch's generator. The flow decoder's fixed CFM noise buffer is
-  the one exception - THAT draw is bit-exactly reproduced (`flow::torch_rng`,
-  see Phase 6), because it is a single fixed constant computed once, not a
-  per-request stream.
+  docs, for BOTH generations: production inference draws from
+  `data::rng::Rng`, not a bit-exact port of torch's generator. The flow
+  decoder's fixed CFM noise buffer is the one exception - THAT draw is
+  bit-exactly reproduced (`flow::torch_rng`, see Phase 6), shared unchanged
+  by CosyVoice 3's DiT estimator, because it is a single fixed constant
+  computed once, not a per-request stream. CosyVoice 3's `Cv3HiftInstance`
+  noise (fixed at construction, per Phase 7b) is likewise not a bit-exact
+  torch-RNG port, only a faithful "drawn once, reused" structural match.
 - HiFT's magnitude/phase/waveform parity rung depends on an ad-hoc,
-  uncommitted noise capture (`testdata/golden/cosyvoice/hift_real_nsf_noise.f32`,
-  not provisioned by `make fetch/testdata`) - a box with only the official
-  goldens still runs `hift`'s own import-coverage and tiny-smoke tests, but
-  not this specific rung. A proper capture script belongs in
+  uncommitted noise capture for BOTH generations
+  (`testdata/golden/cosyvoice/hift_real_nsf_noise.f32`,
+  `testdata/golden/cosyvoice3/hift_real_nsf_noise.f32`, neither provisioned
+  by `make fetch/testdata`) - a box with only the official goldens still
+  runs each `hift`/`cv3_hift`'s own import-coverage and tiny-smoke tests,
+  but not this specific rung. A proper capture script belongs in
   `tools/goldens/` as a follow-up if this needs to be routinely
   re-verifiable rather than a one-time proof.
+- CosyVoice 3's `cv3_hift` runs `f0_predictor` in `f32`; the reference
+  upcasts it to `float64` for causal inference specifically. The resulting
+  residual (cosine still >= 0.9999998) is reported, not hidden, but closing
+  it to CosyVoice 2's exact-match bar would need an `f64` compute path this
+  crate does not have.
 - The flow decoder's host-CPU forward is slow in a debug build (see Phase 6)
   - a real-weight test against it should use `cargo test --release`.

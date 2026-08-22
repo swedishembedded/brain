@@ -18,7 +18,8 @@ streaming (chunked `token2wav`, cross-fade) is a deliberate follow-up.
 
 ## Status
 
-**LM (`Qwen2LM`, CosyVoice 2 only) done through forward parity.**
+**LM (`Qwen2LM` for CosyVoice 2, `CosyVoice3LM` for CosyVoice 3) done through
+forward parity for BOTH generations, sharing one `CosyVoiceLm`.**
 `crates/cosyvoice/src/{config,llm_import,llm,sampling}.rs`:
 
 - `config::CosyVoiceLmConfig::cosyvoice2()` hosts the backbone on
@@ -74,18 +75,26 @@ streaming (chunked `token2wav`, cross-fade) is a deliberate follow-up.
 | Prefill logits (`[1,119,6564]`, CosyVoice's own `llm_decoder`, not the Qwen backbone's discarded 151936-wide head) | cosine **1.0000000000**, `max_abs` 4.578e-5, `rel_l2` 9.477e-7 |
 | Autoregressive tokens (32, real `ras_sampling`) | **honest, documented gap, not silently skipped**: the reference draws from torch's global RNG; this port draws from `data::rng::Rng` - two unrelated streams, so only 5/32 tokens incidentally match the golden's sequence (informational only, not a gate). What IS verified: all 32 requested tokens generated, every id a valid speech-token id, no stop id in the output, and same-seed determinism (re-`prefill()` + `generate()` twice, identical sequence both times). |
 
-CosyVoice 3's `CosyVoice3LM` (`sos`/`task_id` drawn from `speech_embedding`
-instead of a separate `llm_embedding` table, a wider `speech_token_size + 200`
-untied head, mandatory `<|endofprompt|>`) is a deliberate follow-up, not
-implemented.
+**CosyVoice 3's `CosyVoice3LM`** draws `sos`/`task_id` from rows of
+`speech_embedding` itself instead of a separate `llm_embedding` table (real,
+verified absent from the checkpoint's own tensor names, not assumed), has a
+wider `speech_token_size + 200` untied, bias-free `llm_decoder`, and a
+`stop_token_ids` range instead of CosyVoice 2's fixed 3-id set -
+`config::SpecialTokenSource` is the one branch point `CosyVoiceLm` needs to
+host both. Parity vs the real `llm.pt` (`crates/cosyvoice/tests/
+llm3_parity.rs`, gated on `BRAIN_COSYVOICE3_LLM`): prefill hidden state and
+logits both cosine **1.0000000000**; autoregressive tokens have the same
+honest, documented torch-RNG-vs-`data::rng::Rng` gap CosyVoice 2's own AR
+rung documents.
 
 Raw-text prompt assembly (tokenizer + CosyVoice's text-normalization front
 end) is not wired up yet - the parity test drives the LM from the golden's
 own pre-tokenized ids, not from raw text.
 
-**Flow decoder (`CausalMaskedDiffWithXvec`, CosyVoice 2 only) done through
-forward parity.** `crates/cosyvoice/src/{flow,flow_config,flow_import,
-torch_rng}.rs`: `UpsampleConformerEncoder` (ESPnet Transformer-XL-style
+**Flow decoder done through forward parity for BOTH generations**:
+`CausalMaskedDiffWithXvec` (CosyVoice 2's UNet CFM estimator) and
+`CausalMaskedDiffWithDiT` (CosyVoice 3's 22-layer adaLN-zero DiT estimator).
+`crates/cosyvoice/src/{flow,flow_config,flow_import,torch_rng}.rs`: `UpsampleConformerEncoder` (ESPnet Transformer-XL-style
 relative-position attention) feeding `CausalConditionalDecoder`, a
 56-transformer + 14-resnet-block UNet driven by a 10-step
 classifier-free-guided Euler ODE solver. Host CPU throughout. Real finding,
@@ -112,14 +121,34 @@ forward (this port's own encoder feeding this port's own Euler loop) matches
 the reference mel output. Streaming/chunked attention is a documented,
 not-yet-implemented gap.
 
+**CosyVoice 3's `CausalMaskedDiffWithDiT`** has no encoder at all - condition
+assembly is a bare `PreLookaheadLayer(80->1024)` + `repeat_interleave` feeding
+a 22-layer adaLN-zero `DiT` (`dim=1024, heads=16, dim_head=64, ff_mult=2`)
+instead of CosyVoice 2's `UpsampleConformerEncoder` + UNet. Condition
+assembly, the cosine `t_scheduler`, and the causal conv/mish/leaky_relu
+primitives are shared verbatim from `crate::flow` (`pub(crate)`) - the CFM
+Euler loop and fixed noise buffer are identical regardless of which estimator
+sits inside. **One real, non-obvious finding**: `x_transformers`'s
+`RotaryEmbedding` rotates the query/key row BEFORE the per-head reshape, so
+only the first `dim_head` channels (head 0's eventual slice) ever get
+rotated - heads 1-15 pass through unrotated. A textbook per-head RoPE port
+gives a full-forward cosine of only ~0.993; reproducing the quirk verbatim
+closes it to 0.9999999997. Parity vs the real `flow.pt`
+(`crates/cosyvoice/tests/cv3_flow_parity.rs`, gated on `BRAIN_COSYVOICE3_FLOW`):
+conds/mu/embedding and the DiT's own `InputEmbedding`/`TimestepEmbedding`
+internal taps at cosine **1.0000000000**; the full 10-step Euler loop and an
+independent re-forward to mel at cosine **>= 0.9999999997**.
+
 **Recorded performance gap, not a correctness gap**: the flow decoder's
 host-CPU forward is impractically slow in an unoptimized debug build
 (self-attention is a raw scalar loop, not yet dispatched through the fast
 matmul path) - real-weight tests against it need `cargo test --release`
 (confirmed ~5 minutes there vs. tens of minutes and climbing in debug).
 
-**HiFT vocoder (`HiFTGenerator`, CosyVoice 2 non-causal only) done through
-forward parity.** `crates/cosyvoice/src/{hift,hift_config,hift_import}.rs`:
+**HiFT vocoder done through forward parity for BOTH generations**:
+`HiFTGenerator` (CosyVoice 2, non-causal) and `CausalHiFTGenerator`
+(CosyVoice 3, causal convs throughout). `crates/cosyvoice/src/{hift,
+hift_config,hift_import}.rs`:
 `ConvRNNF0Predictor` (despite the name, no RNN) -> NSF harmonic source
 excitation (`SourceModuleHnNSF`/`SineGen2`) -> BigVGAN-style conv trunk
 (Snake `ResBlock`s, source-fused per upsample stage) -> ISTFT head -> 24 kHz
@@ -147,8 +176,34 @@ ad-hoc, uncommitted capture against the real checkpoint, not a `tools/goldens/`
 fixture - the magnitude/phase/waveform rung skips cleanly on a box without
 it, while import-coverage and tiny-smoke tests still run); production
 `forward_seeded` is verified deterministic and bounded given its own seed.
-`CausalHiFTGenerator` (CosyVoice 3, causal convs, no `cache_source` state)
-is a deliberate follow-up, not implemented.
+
+**CosyVoice 3's `CausalHiFTGenerator`** reuses the same `ConvRNNF0Predictor
+-> NSF -> conv-trunk -> ISTFT` topology, but every conv is one-sided causal:
+`conv_pre` is right-looking (kernel `conv_pre_look_right+1=5`, not CosyVoice
+2's symmetric `k=7`), and `ups[i]` are nearest-upsample + left-causal
+`Conv1d` (`CausalConv1dUpsample`) rather than `ConvTranspose1d` - confirmed
+against the real `hift.pt`'s own tensor shapes, not assumed, so the
+weight-norm `dim=0` convention is `Cout` here for every conv (including
+`ups[i]`, the one case CosyVoice 2 needs `Cin` for). **One real,
+empirically-caught divergence**: `SineGen2`'s phase-upsample interpolation is
+`"nearest"` under `causal=True`, not `"linear"` - a first port assumed
+CosyVoice 2's linear mode for both and matched CosyVoice 2's own tests while
+breaking CosyVoice 3 sharply (cosine ~0.28) partway through the signal;
+`nsf_source_forward` is now split into a shared generic selected by
+`nsf_source_forward`/`nsf_source_forward_causal`. CosyVoice 3's RNG story is
+simpler: `SineGen2(causal=True)` reads a buffer fixed once at construction
+rather than per call, modeled by `Cv3HiftInstance` drawing its noise once and
+reusing it across every `forward()`. `CausalHiFTGenerator.inference()` has no
+`cache_source` parameter at all (a real signature difference, not an
+oversight). Parity vs the real `hift.pt` (`crates/cosyvoice/tests/
+cv3_hift_parity.rs`, gated on `BRAIN_COSYVOICE3_HIFT`): magnitude/phase/
+waveform at cosine **>= 0.9999998**, the small residual attributed to a known
+cause (the reference upcasts `f0_predictor` to `float64` for causal
+inference; this port stays `f32` throughout).
+
+CosyVoice 3 pipeline reuse (composing the DiT flow decoder, causal HiFT, and
+`CosyVoice3LM` into `pipeline::generate()`) is a deliberate follow-up -
+`crate::pipeline` still wires CosyVoice 2's components only.
 
 ## Pipeline (non-streaming, zero-shot cloning)
 
@@ -235,6 +290,9 @@ Weights env vars:
 | `BRAIN_COSYVOICE_FLOW` | flow decoder (`flow.pt`) |
 | `BRAIN_COSYVOICE_HIFT` | HiFT vocoder (`hift.pt`) |
 | `BRAIN_COSYVOICE_TOKENIZER` | `CosyVoice-BlankEN`'s Qwen BPE identity (`vocab.json`/`merges.txt`) - tokenizer + config identity only, never weights (see `crate::llm_import`) |
+| `BRAIN_COSYVOICE3_LLM` | CosyVoice 3 speech-token LM (`llm.pt`) |
+| `BRAIN_COSYVOICE3_FLOW` | CosyVoice 3 DiT flow decoder (`flow.pt`) |
+| `BRAIN_COSYVOICE3_HIFT` | CosyVoice 3 causal HiFT vocoder (`hift.pt`) |
 | `BRAIN_S3TOKENIZER_V2` | S3Tokenizer (`speech_tokenizer_v2.onnx`), read by [S3Tokenizer](s3tokenizer.md) |
 | `BRAIN_CAMPPLUS_DIR` | CAM++ (`campplus.onnx`), read by [CAM++](campplus.md) |
 
