@@ -2009,12 +2009,38 @@ struct StageCtx<'a> {
     cancel: &'a capability::CancelToken,
 }
 
+/// Clean latent frames carried in from the PREVIOUS long-form window,
+/// occupying the first [`Self::frames`] latent frames of a stage's own token
+/// sequence and held at sigma 0 for the whole trajectory.
+///
+/// This is `--start-frame`'s `VideoConditionByLatentIndex(latent_idx=0)`
+/// mechanism with the frame count unpinned - the reference's own class
+/// asserts only `(B, C, H, W)` on its latent and writes `clean_latent[:,
+/// start:stop]` / `denoise_mask[:, start:stop]` over whatever range it
+/// covers, and its trainer spells the multi-frame case out as prefix
+/// conditioning (`crate::longform`'s module doc carries the citation). What
+/// makes it a CONTINUATION rather than an image conditioning is only where
+/// the content comes from: [`crate::longform::carry_tail`]'s slice of the
+/// previous window's own final latent, never a decoded-and-re-encoded frame.
+struct LatentContext<'a> {
+    /// `[C, frames, lh, lw]` at THIS stage's own resolution - a two-stage
+    /// window's half-resolution stage 1 and its full-resolution stage 2 each
+    /// get the previous window's latent at the matching size, not one
+    /// rescaled copy.
+    chw: &'a [f32],
+    frames: usize,
+}
+
 /// One stage's own inputs: the resolution it runs at, its schedule, its
 /// sampler, and - for a refinement stage - the latent it starts from.
 struct Stage<'a> {
     width: usize,
     height: usize,
     sigmas: &'a [f64],
+    /// A long-form continuation window's carried latent prefix; `None` for
+    /// every window that starts from nothing, which is every stage this
+    /// pipeline ran before long-form generation existed.
+    context: Option<LatentContext<'a>>,
     /// [`euler_ancestral_step`]'s eta for THIS stage. The reference's stage 2
     /// is deterministic whatever stage 1 used: "Stage 2 is always
     /// deterministic -- its 3-step refinement schedule is too short to remove
@@ -2085,7 +2111,31 @@ fn denoise_stage(sc: &StageCtx<'_>, st: &Stage<'_>, total: u32, progress: &mut i
         }
     }
 
-    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if o.start_frame.is_some() || o.end_frame.is_some() {
+    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if let Some(ctx) = &st.context {
+        // Pinned exactly as `--start-frame` pins latent frame 0, over
+        // `ctx.frames` latent frames instead of one: mask 0 (so the per-token
+        // timestep is 0 and `to_denoised` is the identity there), content
+        // written straight into the initial latent rather than noised
+        // (`GaussianNoiser`'s `lerp(clean, noised, denoise_mask)` at mask 0
+        // is exactly `clean`), and re-pinned every step by
+        // `post_process_latent`.
+        if o.start_frame.is_some() || o.end_frame.is_some() {
+            return Err("a long-form continuation window carries a latent context AND was given a conditioning still: the two both claim latent frame 0 and cannot be applied together".into());
+        }
+        let ctx_tokens = ctx.frames * lh * lw;
+        if ctx.frames > sc.lat_t {
+            return Err(format!("a {}-latent-frame context does not fit a {}-latent-frame window", ctx.frames, sc.lat_t));
+        }
+        let ctx_tc = chw_to_tc(ctx.chw, c, ctx.frames, lh, lw);
+        let mut latent = latent0;
+        latent[..ctx_tokens * c].copy_from_slice(&ctx_tc);
+        let mut clean = vec![0f32; t * c];
+        clean[..ctx_tokens * c].copy_from_slice(&ctx_tc);
+        let mut denoise_mask = vec![1f32; t];
+        denoise_mask[..ctx_tokens].fill(0.0);
+        tracing::info!(stage = st.label, context_latent_frames = ctx.frames, context_tokens = ctx_tokens, tokens = t, "latent context frozen");
+        (latent, positions, keyframes_mask, t, Some((denoise_mask, clean)))
+    } else if o.start_frame.is_some() || o.end_frame.is_some() {
         // WHICH mechanism runs is [`conditioned_latent`]'s decision - the
         // reference has two conditioning builders for these two cases
         // (image-to-video's in-place overwrite of latent frame 0, keyframe
@@ -2160,6 +2210,16 @@ struct Refine<'a> {
     /// [`stage2_sigmas`]'s output - a suffix of the distilled refinement
     /// table, never an interpolated schedule (see that function's doc).
     sigmas: &'a [f64],
+    /// A long-form continuation window's carried latent prefix, at THIS
+    /// stage's (full) resolution - it overwrites the upscaled stage-1 copy of
+    /// the same frames, so what the refinement holds fixed is the previous
+    /// window's own final latent rather than a round trip through the x2
+    /// upscaler.
+    context: Option<LatentContext<'a>>,
+    /// Folded into this refinement's noise seed on top of its own `0x5332`,
+    /// so two windows of one long-form generation never draw the same
+    /// refinement noise.
+    seed_salt: u64,
     done_before: u32,
     label: &'static str,
 }
@@ -2198,9 +2258,10 @@ fn upscale_and_refine(sc: &StageCtx<'_>, r: &Refine<'_>, total: u32, progress: &
             sigmas: r.sigmas,
             eta: 0.0,
             seed_chw: Some(&upscaled),
+            context: r.context.as_ref().map(|c| LatentContext { chw: c.chw, frames: c.frames }),
             // "S2" - the refinement must not draw the same noise as whatever
             // produced the latent it starts from.
-            seed_salt: 0x5332,
+            seed_salt: 0x5332 ^ r.seed_salt,
             done_before: r.done_before,
             label: r.label,
         },
@@ -2458,7 +2519,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         let (lh1, lw1) = (h1 / 32, w1 / 32);
         let stage1 = denoise_stage(
             &stage_ctx,
-            &Stage { width: w1, height: h1, sigmas: &sigmas, eta: o.eta, seed_chw: None, seed_salt: 0, done_before: 0, label: "stage1" },
+            &Stage { width: w1, height: h1, sigmas: &sigmas, eta: o.eta, seed_chw: None, context: None, seed_salt: 0, done_before: 0, label: "stage1" },
             total,
             &mut progress,
         )?;
@@ -2474,6 +2535,8 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
                 width: o.width,
                 height: o.height,
                 sigmas: &stage2_sigmas(LTX2_STAGE2_STEPS)?,
+                context: None,
+                seed_salt: 0,
                 done_before: sigmas.len() as u32 - 1,
                 label: "stage2",
             },
@@ -2483,7 +2546,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     } else {
         denoise_stage(
             &stage_ctx,
-            &Stage { width: o.width, height: o.height, sigmas: &sigmas, eta: o.eta, seed_chw: None, seed_salt: 0, done_before: 0, label: "single" },
+            &Stage { width: o.width, height: o.height, sigmas: &sigmas, eta: o.eta, seed_chw: None, context: None, seed_salt: 0, done_before: 0, label: "single" },
             total,
             &mut progress,
         )?
@@ -2801,7 +2864,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         };
         let refined = upscale_and_refine(
             &sc,
-            &Refine { upsampler_path, latent_chw: &latent, lat_t, lh1: h / 32, lw1: w / 32, width: out_w, height: out_h, sigmas: &sigmas, done_before: done_before + 1, label: "refine" },
+            &Refine { upsampler_path, latent_chw: &latent, lat_t, lh1: h / 32, lw1: w / 32, width: out_w, height: out_h, sigmas: &sigmas, context: None, seed_salt: 0, done_before: done_before + 1, label: "refine" },
             total,
             &mut progress,
         )?;
@@ -2833,6 +2896,287 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
     progress(total, total, "done");
     tracing::info!(frames, width = out_w, height = out_h, segments = plan.len(), total_secs = timings.total(), "upscale done");
     Ok((Video { width: out_w as u32, height: out_h as u32, fps: clip.fps, frames: out_frames }, timings))
+}
+
+// ============================================================================
+// Long-form generation: several denoising windows, one rolling latent context
+// ============================================================================
+
+/// Everything [`generate_long`] varies beyond what a generation already
+/// varies.
+#[derive(Clone, Debug)]
+pub struct LongOpts {
+    /// Clean latent frames carried across each window boundary - see
+    /// [`crate::longform::CONTEXT_LATENT_FRAMES`] for where the default comes
+    /// from and for the hypothesis (the VAE's temporal receptive field) that
+    /// cannot set it.
+    pub context_latent_frames: usize,
+    /// Per-window video-token ceiling, [`crate::longform::LONGFORM_MAX_TOKENS`]
+    /// by default.
+    pub max_window_tokens: usize,
+    /// `frames` is the WHOLE clip's length, not one window's.
+    pub base: GenOpts,
+}
+
+impl Default for LongOpts {
+    fn default() -> LongOpts {
+        LongOpts { context_latent_frames: crate::longform::CONTEXT_LATENT_FRAMES, max_window_tokens: crate::longform::LONGFORM_MAX_TOKENS, base: GenOpts::default() }
+    }
+}
+
+/// Text to video of arbitrary length: one clip built out of several
+/// consecutive denoising windows, each conditioned on the previous window's
+/// own last latent frames.
+///
+/// **A request that fits one window is handed straight to [`generate`]**, so
+/// every shape this crate already generated keeps its exact behaviour, bit
+/// for bit, and this entry point costs nothing below the ceiling.
+///
+/// Above it ([`crate::longform::window_plan`]), the loop is: generate window
+/// 0 normally; slice its last `context_latent_frames` latent frames out of
+/// the final latent with [`crate::longform::carry_tail`] BEFORE anything is
+/// decoded; freeze them at the head of window 1's sequence
+/// ([`LatentContext`]) so only the new frames get a denoising schedule;
+/// repeat. The rolling state is two latent slabs of at most
+/// `context_latent_frames` frames each (one per stage of a two-stage window),
+/// so a ten-minute clip costs the same host memory as a ten-second one.
+///
+/// **What crosses a seam never becomes a picture on the way.** Chaining by
+/// decoding a window, taking its last RGB frame and re-encoding it as the
+/// next window's `--start-frame` is continuous in position and discontinuous
+/// in velocity: one frame cannot say what was moving or how fast, so motion
+/// is re-invented at every boundary. Here the carried tensor is the denoised
+/// latent itself.
+///
+/// **Scope.** `--start-frame` conditions window 0, as it would a single
+/// clip. `--end-frame` is refused: a continuation window's latent context and
+/// an appended keyframe block both want to be the thing the window is pinned
+/// to, and "the clip ends on this still" over a multi-window plan has not
+/// been designed. Long-form generation is otherwise the ordinary generation
+/// path - same schedule, same CFG fold, same two-stage decision per window,
+/// same VAE.
+#[tracing::instrument(level = "info", name = "generate_long", skip_all, fields(frames = o.base.frames, width = o.base.width, height = o.base.height, seed = o.base.seed, context = o.context_latent_frames))]
+pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    let vcfg = LtxVaeConfig::conv25();
+    if vcfg.latent_frames(o.base.frames as u32).is_none() {
+        return Err(format!("{} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)", o.base.frames));
+    }
+    if !o.base.width.is_multiple_of(32) || !o.base.height.is_multiple_of(32) {
+        return Err(format!("{}x{} is not a multiple of 32 (the VAE's spatial stride)", o.base.width, o.base.height));
+    }
+    let (lh, lw) = (o.base.height / 32, o.base.width / 32);
+    let plan = crate::longform::window_plan(o.base.frames, lh, lw, o.context_latent_frames, o.max_window_tokens)?;
+    if plan.len() == 1 {
+        // Byte-for-byte the path this request already took: one window is a
+        // generation, and this entry point must not become a second way of
+        // spelling it.
+        return generate(paths, prompt, &o.base, cancel, progress);
+    }
+    if o.base.end_frame.is_some() {
+        return Err("--end-frame is not supported for a multi-window clip: it pins the last frame of ONE window, and pinning the end of a rolling plan has not been designed".into());
+    }
+    if o.base.steps == 0 {
+        return Err("--steps must be at least 1".into());
+    }
+
+    let dit_cfg = dit_config_from_name(&o.base.dit_config)?;
+    if dit_cfg.in_channels != vcfg.latent_channels {
+        return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", o.base.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
+    }
+    let in_channels = dit_cfg.in_channels as usize;
+    let is_real_distilled = o.base.dit_config == "ltx25_22b";
+    let context = o.context_latent_frames;
+
+    // Whether this plan runs the reference's two-stage shape is decided ONCE,
+    // from its largest window, and then applies to every window.
+    //
+    // Not per window, deliberately. Two windows of one clip built different
+    // ways would change the clip's construction half way through; and a
+    // two-stage window's stage 1 carries the previous window's HALF-resolution
+    // latent, which a single-stage window never produces - so a mixed plan
+    // would silently hand a stage 1 either nothing or a stale tail from two
+    // windows back. Resolved before the first forward so a plan that needs
+    // the upscaler and cannot reach it fails now rather than in an hour.
+    let widest = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
+    let two_stage = should_two_stage(widest, o.base.width, o.base.height, is_real_distilled);
+    if two_stage && paths.spatial_upsampler.is_none() {
+        let (var, role) = OPTIONAL_PATH_VARS[2];
+        return Err(format!(
+            "the widest window of this {}x{} plan is {widest} video tokens, past the {SINGLE_STAGE_MAX_TOKENS}-token ceiling the distilled schedule holds in ONE stage, so it needs the reference's two-stage path - set {var} to the {role}",
+            o.base.width, o.base.height
+        ));
+    }
+    if two_stage && (!o.base.width.is_multiple_of(64) || !o.base.height.is_multiple_of(64)) {
+        return Err(format!("{}x{} cannot take the two-stage path (both axes must be a multiple of 64), and this plan needs it", o.base.width, o.base.height));
+    }
+
+    let sigmas: Vec<f64> = if is_real_distilled {
+        LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect()
+    } else {
+        // One schedule for every window: the shift is a function of the token
+        // count, and windows of one plan differ in length, so deriving it per
+        // window would denoise the clip's own halves on different schedules.
+        ltx2_sigmas(plan[0].tokens(lh, lw), o.base.steps, o.base.base_shift, o.base.max_shift, o.base.stretch, o.base.terminal)
+    };
+    let steps = sigmas.len() - 1;
+
+    // Phases: build, then per window its stage-1 steps, (two-stage only) one
+    // upscale plus the refinement steps, and one decode.
+    let per_window = steps as u32 + if two_stage { LTX2_STAGE2_STEPS as u32 + 1 } else { 0 } + 1;
+    let total = 1 + plan.len() as u32 * per_window;
+    tracing::info!(windows = plan.len(), context_latent_frames = context, max_window_tokens = o.max_window_tokens, widest_tokens = widest, two_stage, frames = o.base.frames, "long-form generation planned");
+
+    let mut timings = Timings::default();
+    let place = o.base.devices.resolve(o.base.device.as_deref());
+    progress(0, total, "build transformer");
+    let build_t = Instant::now();
+    let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    timings.build_dit = build_t.elapsed().as_secs_f32();
+    let (ctx_cond, ctx_uncond, context_valid, context_len) = build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
+    let vweights = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
+
+    let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(o.base.frames);
+    // The rolling state, and the whole of it: at most `context` latent frames
+    // per stage. It does not grow with the clip's length.
+    let mut carried_full: Option<(Vec<f32>, usize)> = None;
+    let mut carried_half: Option<(Vec<f32>, usize)> = None;
+    let mut vae_secs = 0.0f32;
+    let work_t = Instant::now();
+    let mut done_before = 1u32;
+
+    for (wi, w) in plan.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
+        let lat_t = w.latent_frames();
+        let win_opts = GenOpts {
+            frames: w.decoded_frames(),
+            // The still conditions the clip's own opening, which is window 0
+            // and nowhere else.
+            start_frame: if wi == 0 { o.base.start_frame.clone() } else { None },
+            end_frame: None,
+            ..o.base.clone()
+        };
+        let sc = StageCtx {
+            dit: dit.as_ref(),
+            vcfg: &vcfg,
+            vweights: &vweights,
+            o: &win_opts,
+            lat_t,
+            in_channels,
+            ctx_cond: &ctx_cond,
+            ctx_uncond: &ctx_uncond,
+            context_valid: &context_valid,
+            context_len,
+            cancel,
+        };
+        // The plan's own context count and what the previous window could
+        // actually supply have to be the same number - the emitted-frame
+        // arithmetic is derived from the former and the freeze from the
+        // latter, so a disagreement would silently shift the clip.
+        if carried_full.as_ref().map(|(_, n)| *n).unwrap_or(0) != w.context {
+            return Err(format!("window {wi} plans a {}-latent-frame context but the previous window carried {:?}", w.context, carried_full.as_ref().map(|(_, n)| *n)));
+        }
+        // Distinct per window, so two windows of one clip never draw the same
+        // noise and repeat each other's content.
+        let seed_salt = 0x57_49_4e_44_00_00_00_00u64 ^ wi as u64;
+        tracing::info!(window = wi, of = plan.len(), latent_frames = lat_t, carried = w.context, new = w.new, tokens = w.tokens(lh, lw), "window starting");
+
+        let final_chw = if two_stage {
+            let (w1, h1) = (o.base.width / 2, o.base.height / 2);
+            let (lh1, lw1) = (h1 / 32, w1 / 32);
+            let stage1 = denoise_stage(
+                &sc,
+                &Stage {
+                    width: w1,
+                    height: h1,
+                    sigmas: &sigmas,
+                    eta: o.base.eta,
+                    seed_chw: None,
+                    // Stage 1 builds this window's structure, so this is
+                    // where the motion history has to be - at stage 1's own
+                    // half resolution, taken from the previous window's own
+                    // stage-1 latent rather than a downsampled full-res one
+                    // (there is no x0.5 latent downsampler, and inventing one
+                    // would put content into stage 1 that no LTX-2.5
+                    // component produced).
+                    context: carried_half.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
+                    seed_salt,
+                    done_before,
+                    label: "stage1",
+                },
+                total,
+                &mut progress,
+            )?;
+            carried_half = Some((crate::longform::carry_tail(&stage1, in_channels, lat_t, lh1, lw1, context.min(lat_t)), context.min(lat_t)));
+            upscale_and_refine(
+                &sc,
+                &Refine {
+                    upsampler_path: paths.spatial_upsampler.as_deref().expect("checked before the first forward"),
+                    latent_chw: &stage1,
+                    lat_t,
+                    lh1,
+                    lw1,
+                    width: o.base.width,
+                    height: o.base.height,
+                    sigmas: &stage2_sigmas(LTX2_STAGE2_STEPS)?,
+                    context: carried_full.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
+                    seed_salt,
+                    done_before: done_before + steps as u32,
+                    label: "stage2",
+                },
+                total,
+                &mut progress,
+            )?
+        } else {
+            denoise_stage(
+                &sc,
+                &Stage {
+                    width: o.base.width,
+                    height: o.base.height,
+                    sigmas: &sigmas,
+                    eta: o.base.eta,
+                    seed_chw: None,
+                    context: carried_full.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
+                    seed_salt,
+                    done_before,
+                    label: "single",
+                },
+                total,
+                &mut progress,
+            )?
+        };
+        carried_full = Some((crate::longform::carry_tail(&final_chw, in_channels, lat_t, lh, lw, context.min(lat_t)), context.min(lat_t)));
+
+        done_before += per_window - 1;
+        progress(done_before, total, "vae decode");
+        let dec_t = Instant::now();
+        let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &final_chw);
+        vae_secs += dec_t.elapsed().as_secs_f32();
+        if got != w.decoded_frames() || pixels.len() != 3 * got * o.base.height * o.base.width {
+            return Err(format!("window {wi} decoded to {got} frames / {} values, expected {} / {}", pixels.len(), w.decoded_frames(), 3 * w.decoded_frames() * o.base.height * o.base.width));
+        }
+        // The carried frames are decoded because a latent frame cannot be
+        // decoded without its neighbours - that is what makes the pixel seam
+        // continuous - and then dropped. They are emitted exactly once, by
+        // the window that generated them, and never re-encoded.
+        let rgb = chw_to_rgb8(&pixels, got, o.base.height, o.base.width);
+        out_frames.extend(rgb.into_iter().skip(w.dropped_frames()));
+        done_before += 1;
+    }
+    drop(dit);
+
+    if out_frames.len() != o.base.frames {
+        return Err(format!("reassembled {} frames from {} windows, expected {}", out_frames.len(), plan.len(), o.base.frames));
+    }
+    timings.decode = vae_secs;
+    timings.denoise = (work_t.elapsed().as_secs_f32() - vae_secs).max(0.0);
+    timings.steps = plan.len() * (steps + if two_stage { LTX2_STAGE2_STEPS } else { 0 });
+    timings.tokens = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
+    timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+    progress(total, total, "done");
+    tracing::info!(frames = out_frames.len(), windows = plan.len(), total_secs = timings.total(), "long-form generation done");
+    Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames }, timings))
 }
 
 // ============================================================================
@@ -3537,6 +3881,66 @@ mod tests {
             let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, eta, 1.0, 7, 4, Some(&frozen), &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
             assert_eq!(out[1], 5.0, "eta={eta}: the frozen anchor must end at exactly its clean content, not at clean - velocity*sigma_terminal ({})", 5.0 - 0.421875);
             assert_ne!(out[0], 0.0, "eta={eta}: the free token really was denoised (guards against a fix that froze everything)");
+        }
+    }
+
+    /// The long-form seam, stated as the property that makes it one: a whole
+    /// PREFIX of latent frames frozen at sigma 0 comes out of the sampler
+    /// bit-identical to what went in, on every token and every channel.
+    ///
+    /// This is the half of the continuity chain that lives in the sampler.
+    /// The other half - that what goes in is a verbatim slice of the previous
+    /// window's own final latent - is
+    /// `crates/ltxv/tests/longform.rs`'s
+    /// `the_carried_tail_is_the_previous_windows_own_last_latent_frames`.
+    /// Together: window `n`'s last K latent frames ARE window `n + 1`'s first
+    /// K, with no decode, no re-encode and no drift, which is what
+    /// [`generate_long`] means by carrying latent context rather than a
+    /// re-encoded picture.
+    ///
+    /// Deliberately wider than
+    /// [`a_frozen_token_survives_the_terminal_step_exactly`](self): several
+    /// frames, several tokens per frame and several channels, so a fix that
+    /// happened to hold for one scalar token - or that transposed the
+    /// prefix - cannot pass.
+    #[test]
+    fn a_frozen_prefix_of_latent_frames_survives_the_whole_trajectory() {
+        let sigmas = vec![1.0, 0.421875, 0.0];
+        let dit = FakeDit::default();
+        // 2 latent frames of context in a 4-latent-frame window, on a 1x2
+        // grid: 2 tokens per frame, 3 channels.
+        let (lh, lw, channels) = (1usize, 2usize, 3usize);
+        let (ctx_frames, lat_t) = (2usize, 4usize);
+        let (ctx_tokens, t) = (ctx_frames * lh * lw, lat_t * lh * lw);
+        let positions = real_pixel_positions(lat_t, lh, lw, 8.0);
+        let mut keyframes_mask = vec![0.0f32; t];
+        keyframes_mask[..lh * lw].fill(1.0);
+        let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
+        let context_valid = vec![1.0f32; 1];
+
+        let mut mask = vec![1.0f32; t];
+        mask[..ctx_tokens].fill(0.0);
+        let mut clean = vec![0.0f32; t * channels];
+        // Every carried value distinct, so an off-by-one or a transpose in
+        // the prefix cannot come back equal.
+        for (i, v) in clean[..ctx_tokens * channels].iter_mut().enumerate() {
+            *v = 100.0 + i as f32;
+        }
+        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let mut latent0 = seeded_noise(t * channels, 11);
+        latent0[..ctx_tokens * channels].copy_from_slice(&clean[..ctx_tokens * channels]);
+
+        for eta in [0.0f64, 1.0] {
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, eta, 1.0, 7, 4, Some(&frozen), &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            assert_eq!(&out[..ctx_tokens * channels], &clean[..ctx_tokens * channels], "eta={eta}: the carried latent prefix must come out exactly as it went in");
+            assert!(out[ctx_tokens * channels..].iter().zip(&latent0[ctx_tokens * channels..]).any(|(a, b)| a != b), "eta={eta}: the new frames really were denoised");
+        }
+        // Every step announced the prefix at timestep 0 and everything else
+        // at the schedule's sigma - the AdaLN modulation the frames beyond
+        // the context are generated under depends on it.
+        for ts in dit.timesteps_seen.borrow().iter() {
+            assert!(ts[..ctx_tokens].iter().all(|&v| v == 0.0), "a carried frame was announced as noisy");
+            assert!(ts[ctx_tokens..].iter().all(|&v| v > 0.0), "a generated frame was announced as clean");
         }
     }
 

@@ -174,7 +174,14 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
 /// per step.
 pub fn generate_on(paths: &Paths, inv: &Invocation, p: &GenParams, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
-    let (video, timings) = crate::pipeline::generate(paths, &prompt, &p.opts, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
+    // Through `generate_long`, which IS `generate` for every request that
+    // fits one denoising window and rolls a latent context across several
+    // when it does not. No new action parameter: the context size is the
+    // reference's own default (`crate::longform::CONTEXT_LATENT_FRAMES`) and
+    // the per-window ceiling comes from the environment, so a long `frames`
+    // simply works instead of failing at buffer creation.
+    let o = crate::pipeline::LongOpts { max_window_tokens: crate::longform::max_window_tokens_from_env(), base: p.opts.clone(), ..Default::default() };
+    let (video, timings) = crate::pipeline::generate_long(paths, &prompt, &o, &inv.cancel, |done, total, phase| progress(Progress::step(done, total, phase.to_string())))?;
     Ok(video_outcome(&video, &timings))
 }
 

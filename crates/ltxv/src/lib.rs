@@ -130,6 +130,7 @@ pub mod gguf_src;
 pub mod import;
 pub mod int8;
 pub mod latentdump;
+pub mod longform;
 pub mod lora;
 pub mod modelgrad;
 pub mod na_decoder;
