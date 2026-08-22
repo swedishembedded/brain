@@ -1797,22 +1797,28 @@ fn to_denoised(sample: &[f32], velocity: &[f32], timesteps: &[f32], channels: us
 /// channels`; every token not covered here denoises normally (`mask[tok] ==
 /// 1.0`).
 ///
-/// **WHERE in the step it is applied depends on the sampler**, and the
+/// **HOW MANY TIMES per step it is applied depends on the sampler**, and the
 /// reference's two loops genuinely differ:
 ///
 /// * Deterministic Euler (`samplers.euler_denoising_loop` -> `_step_state`):
-///   applied to the model's x0 ESTIMATE, before the step formula runs on it.
+///   ONCE, on the model's x0 ESTIMATE, before the step formula runs on it.
 /// * Ancestral Euler (`samplers._ancestral_euler_denoising_loop`, which is
 ///   what `euler_ancestral_denoising_loop` and therefore LTX-2.5's own
-///   distilled stage 1 run): applied to the STEPPED latent `x_next`, after
-///   the renoise term has been added - `if draw_noise: x_next =
-///   post_process_latent(x_next, ...)`. The x0 estimate is left alone, and
-///   the terminal (`sigma_next == 0`) step returns it unmodified.
+///   distilled stage 1 run): TWICE. Once on the x0 estimate
+///   (`_ModalityStep.from_modality_result`, for every step including the
+///   terminal one it short-circuits to), and again on the STEPPED latent
+///   `x_next` after the renoise term has been added (`if draw_noise: x_next =
+///   post_process_latent(x_next, ...)`, skipped on the terminal step because
+///   there is no stepped latent there).
 ///
-/// [`denoise`] implements both, selected by `eta`, because getting this
-/// backwards would either leave freshly injected noise sitting on a token
-/// that is supposed to be clean, or pin a token the sampler was never given
-/// a chance to move.
+/// [`denoise`] implements both, selected by `eta`. Dropping the ancestral
+/// loop's second application would leave freshly injected noise sitting on a
+/// token that is supposed to be clean; dropping either loop's first one lets
+/// a PARTIALLY conditioned token (`mask` strictly between 0 and 1) step from
+/// an unblended estimate. Neither is visible at `mask == 0` or `mask == 1`,
+/// which is why the gate that pins it
+/// ([`tests::a_partially_conditioned_token_is_pulled_to_its_clean_content_under_both_samplers`])
+/// had to be built at a strength in between.
 struct Frozen<'a> {
     mask: &'a [f32],
     clean: &'a [f32],
@@ -1936,12 +1942,12 @@ fn denoise(
         // conversion the identity on a frozen token instead of scaling it by
         // `1 + sigma`.
         let mut denoised = to_denoised(&latent, &velocity, &timesteps, channels);
-        // `_step_state`: mask the x0 estimate, then step. The ancestral loop
-        // instead steps the estimate as-is and re-applies the mask to the
-        // STEPPED latent below (after the renoise term), except on the
-        // terminal step, which it short-circuits to the raw estimate
-        // (`replace(state, latent=step.denoised)`, no `post_process_latent`).
-        if let (Some(f), false) = (frozen, ancestral) {
+        // Mask the x0 estimate before it is stepped - `_step_state` for the
+        // deterministic loop, `_ModalityStep.from_modality_result` for the
+        // ancestral one, which does it for every step including the terminal
+        // one it then short-circuits to. The ancestral loop masks a SECOND
+        // time below, on the stepped latent, after the renoise term.
+        if let Some(f) = frozen {
             post_process_latent(&mut denoised, f);
         }
         let noise = if ancestral { Some((0..latent.len()).map(|_| noise_rng.next_gaussian() as f32).collect::<Vec<f32>>()) } else { None };
@@ -3835,6 +3841,47 @@ mod tests {
         // resulting value.
         assert_eq!(out.len(), t);
         assert_eq!(out[1], 5.0, "the conditioned token ends at its clean content even though the terminal step never re-pinned it");
+    }
+
+    /// A PARTIALLY conditioned token (`--conditioning-strength` below 1, so
+    /// `denoise_mask` is strictly between 0 and 1) has to be pulled toward its
+    /// clean content by exactly the reference's amount under BOTH samplers.
+    ///
+    /// `samplers._ModalityStep.from_modality_result` runs `post_process_latent`
+    /// on the model's x0 ESTIMATE for every ancestral step, terminal one
+    /// included - the same masking `_step_state` does for the deterministic
+    /// loop - and the ancestral loop THEN masks the stepped latent again after
+    /// the renoise term. Both, not one or the other. The distinction is
+    /// invisible at `mask == 0` (the x0 conversion runs at that token's own
+    /// zero timestep, so the estimate already IS the clean content) and at
+    /// `mask == 1` (the blend is the identity), which is why every earlier
+    /// gate here passes either way; it is a real difference for every strength
+    /// in between, and `eta = 1.0` is this pipeline's default.
+    #[test]
+    fn a_partially_conditioned_token_is_pulled_to_its_clean_content_under_both_samplers() {
+        // One terminal step, so what comes out IS the masked x0 estimate with
+        // no further arithmetic to hide a missing blend.
+        let sigmas = vec![0.5, 0.0];
+        let (t, channels) = (2usize, 1usize);
+        let positions = grid_positions(t, 1, 1);
+        let keyframes_mask = vec![0.0f32; t];
+        let (cond, uncond) = (vec![1.0f32; 1], vec![0.0f32; 1]);
+        let context_valid = vec![1.0f32; 1];
+        // Token 0 denoises freely; token 1 is conditioned at strength 0.5.
+        let mask = vec![1.0f32, 0.5];
+        let clean = vec![0.0f32, 10.0];
+        let frozen = Frozen { mask: &mask, clean: &clean, channels };
+        let latent0 = vec![0.0f32, 10.0];
+        // `FakeDit` predicts velocity 1.0 everywhere, and token 1's own
+        // timestep is `0.5 * 0.5`, so its x0 estimate is `10 - 0.25`; the
+        // reference's blend then lands it half way back to `clean`.
+        let want = 0.5 * (10.0 - 0.25) + 0.5 * 10.0;
+
+        for eta in [0.0f64, 1.0] {
+            let dit = FakeDit::default();
+            let out = denoise(&dit, &sigmas, latent0.clone(), &positions, &keyframes_mask, &cond, &uncond, 1, &context_valid, t, 1.0, eta, 1.0, 7, 4, Some(&frozen), &Default::default(), &mut |_, _, _: &str| {}).expect("fake denoiser is finite");
+            assert_eq!(out[1], want, "eta={eta}: a half-conditioned token must end half way between its x0 estimate and its clean content");
+        }
     }
 
     /// A fully frozen conditioning token must come out of the whole sampler
