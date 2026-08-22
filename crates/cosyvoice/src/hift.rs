@@ -214,6 +214,35 @@ fn linear_interp(x: &[f32], lin: usize, lout: usize) -> Vec<f32> {
 /// T_mel * cfg.nsf_upsample_scale()`) - see this module's doc for why
 /// `rand_ini` needs no parameter at all. Returns the excitation `s`, `[T_full]`.
 pub fn nsf_source_forward(f0_mel: &[f32], cfg: &HiftConfig, w: &HiftWeights, randn_noise: &[f32]) -> Vec<f32> {
+    nsf_source_forward_generic(f0_mel, cfg, w, randn_noise, false)
+}
+
+/// [`nsf_source_forward`], but for `SineGen2(causal=True)` (CosyVoice 3's
+/// `CausalHiFTGenerator`) - see [`nsf_source_forward_generic`]'s doc for the
+/// one real formula difference this selects.
+pub fn nsf_source_forward_causal(f0_mel: &[f32], cfg: &HiftConfig, w: &HiftWeights, randn_noise: &[f32]) -> Vec<f32> {
+    nsf_source_forward_generic(f0_mel, cfg, w, randn_noise, true)
+}
+
+/// Real, empirically-verified finding: `SineGen2._f02sine`'s phase-upsample
+/// step (`T_mel` back to `T_full`, AFTER the cumulative-sum phase
+/// integration) uses `mode="nearest" if self.causal is True else "linear"` -
+/// the DOWNSAMPLE step just before it is unconditionally `mode="linear"`
+/// regardless of `causal`, but this second, later interpolation is NOT. A
+/// first port of this function (shared, at the time, unconditionally between
+/// both generations) used `linear_interp` for both legs - correct for
+/// CosyVoice 2 (`causal=False`) but wrong for CosyVoice 3, caught by a
+/// composed CosyVoice 3 HiFT forward diverging sharply from
+/// `hift_real_waveform.f32` (cosine ~0.28) starting partway through the
+/// signal despite the f0 predictor, `conv_pre`, and first upsample stage all
+/// matching the reference exactly in isolation - the divergence traced to
+/// this exact interpolation-mode mismatch by comparing against a real,
+/// hook-captured `m_source` output. Since `T_full = T_mel *
+/// cfg.nsf_upsample_scale()` is an exact integer multiple, nearest-neighbor
+/// upsampling by that scale is exactly "repeat each element `scale` times" -
+/// [`nearest_upsample`], already used for `f0_full` above, needs no new
+/// helper.
+fn nsf_source_forward_generic(f0_mel: &[f32], cfg: &HiftConfig, w: &HiftWeights, randn_noise: &[f32], causal: bool) -> Vec<f32> {
     let scale = cfg.nsf_upsample_scale() as usize;
     let harm = cfg.harmonics() as usize;
     let t_mel = f0_mel.len();
@@ -238,7 +267,7 @@ pub fn nsf_source_forward(f0_mel: &[f32], cfg: &HiftConfig, w: &HiftWeights, ran
             phase_mel[t] = acc * std::f32::consts::TAU;
         }
         let scaled: Vec<f32> = phase_mel.iter().map(|&p| p * scale as f32).collect();
-        let phase_full = linear_interp(&scaled, t_mel, t_full);
+        let phase_full = if causal { nearest_upsample(&scaled, scale) } else { linear_interp(&scaled, t_mel, t_full) };
         for (t, p) in phase_full.iter().enumerate() {
             sines[t * harm + h] = p.sin();
         }
