@@ -169,4 +169,5 @@ pub mod llm_import;
 pub mod lmgrad;
 pub mod lmlora;
 pub mod pipeline;
+pub mod profile;
 pub mod sampling;

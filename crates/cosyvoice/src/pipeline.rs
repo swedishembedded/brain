@@ -93,6 +93,7 @@ use crate::hift;
 use crate::hift_config::HiftConfig;
 use crate::hift_import::import_hift_pt;
 use crate::llm::CosyVoiceLm;
+use crate::profile;
 
 /// One role per checkpoint/resource directory, resolved from the SAME six
 /// env vars `crates/arch`'s `cosyvoice`/`s3tokenizer`/`campplus` registry
@@ -235,6 +236,14 @@ fn token_budget(target_text_len: usize, opts: &GenOpts) -> (usize, usize) {
 /// flow decoder -> HiFT vocoder. See this module's own doc for the RAM
 /// discipline and the honest RNG-crossing/kaldi-fbank gaps.
 pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path: &str, ref_text: &str) -> Result<GeneratedSpeech, String> {
+    // Opt-in per-stage wall-clock profiling: a per-kernel-kind table should
+    // exist before any NPU-export optimization work touches code, so this
+    // is the seam that produces it. Off by default so a normal call pays
+    // only the cost of one env lookup
+    // and a handful of `Instant::now()` calls it never reads.
+    let profile = std::env::var("BRAIN_COSYVOICE_PROFILE").map(|v| v != "0" && !v.is_empty()).unwrap_or(false);
+    let mut stage_times: Vec<(&'static str, std::time::Duration)> = Vec::new();
+
     let wav = audio::wav::read(ref_wav_path).map_err(|e| format!("cosyvoice::generate: read {ref_wav_path}: {e}"))?;
     let samples_16k = resample_to(&wav, 16000);
     let samples_24k = resample_to(&wav, 24000);
@@ -246,6 +255,7 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
     text_ids.extend(target_text_ids.iter().copied());
 
     // ---- Reference-audio analysis stage: CAM++ + S3Tokenizer, own scope. ----
+    let t_ref_audio = std::time::Instant::now();
     let (xvec, prompt_tokens_full) = {
         let (fbank, t) = campplus_fbank(&samples_16k);
         let campplus_weights = campplus::import::import_dir(Path::new(&paths.campplus))
@@ -266,6 +276,11 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
         let tokens: Vec<u32> = s3tokenizer::model::forward(&s3_cfg, &s3_w, &mel, n_frames).into_iter().map(|t| t as u32).collect();
         (xvec, tokens)
     };
+    if profile {
+        let d = t_ref_audio.elapsed();
+        eprintln!("[profile] ref_audio_analysis (campplus+s3tokenizer): {:.3} ms", d.as_secs_f64() * 1000.0);
+        stage_times.push(("ref_audio_analysis (campplus+s3tokenizer)", d));
+    }
 
     // ---- Prompt mel (host-only math, no weights) + the reference's own truncation. ----
     let (prompt_feat_full_tc, feat_frames) = extract_prompt_mel(&samples_24k);
@@ -280,37 +295,109 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
 
     // ---- LM stage: text -> generated speech tokens, own scope. ----
     let (max_tokens, min_len) = token_budget(target_text_ids.len(), opts);
-    let gen_tokens: Vec<u32> = {
-        let ctx = (1 + text_ids.len() + 1 + prompt_tokens.len() + max_tokens + 8) as u32;
-        let lm = CosyVoiceLm::load(&format!("{}/llm.pt", paths.llm), ctx)?;
-        let d = lm.cfg.llm_input_size as usize;
-        let hidden = lm.prefill(&text_ids, &prompt_tokens);
-        let last_hidden = &hidden[hidden.len() - d..];
-        lm.generate(last_hidden, max_tokens, min_len, opts.seed)
-    };
+    let t_lm_load = std::time::Instant::now();
+    let ctx = (1 + text_ids.len() + 1 + prompt_tokens.len() + max_tokens + 8) as u32;
+    let lm = CosyVoiceLm::load(&format!("{}/llm.pt", paths.llm), ctx)?;
+    if profile {
+        let d = t_lm_load.elapsed();
+        eprintln!("[profile] lm_load_import: {:.3} ms", d.as_secs_f64() * 1000.0);
+        stage_times.push(("lm_load_import", d));
+    }
+    let t_lm_prefill = std::time::Instant::now();
+    let d = lm.cfg.llm_input_size as usize;
+    let hidden = lm.prefill(&text_ids, &prompt_tokens);
+    if profile {
+        let dt = t_lm_prefill.elapsed();
+        eprintln!("[profile] lm_prefill ({} prefix rows): {:.3} ms", 1 + text_ids.len() + 1 + prompt_tokens.len(), dt.as_secs_f64() * 1000.0);
+        stage_times.push(("lm_prefill", dt));
+    }
+    let last_hidden = &hidden[hidden.len() - d..];
+    let t_lm_generate = std::time::Instant::now();
+    let gen_tokens = lm.generate(last_hidden, max_tokens, min_len, opts.seed);
+    if profile {
+        let dt = t_lm_generate.elapsed();
+        eprintln!("[profile] lm_generate (autoregressive decode, {} tokens): {:.3} ms", gen_tokens.len(), dt.as_secs_f64() * 1000.0);
+        stage_times.push(("lm_generate (autoregressive decode)", dt));
+    }
+    drop(lm);
     if gen_tokens.is_empty() {
         return Err("cosyvoice::generate: the LM sampled an immediate stop token (zero speech tokens) - try a different seed or prompt".to_string());
     }
 
     // ---- Flow decoder stage: tokens + x-vector + prompt mel -> target mel, own scope. ----
+    profile::reset_flow_self_attn();
+    let t_flow = std::time::Instant::now();
     let mel_out = {
         let flow_cfg = FlowConfig::cosyvoice2();
         let flow_w = import_flow_pt(&format!("{}/flow.pt", paths.flow), &flow_cfg)?;
         let noise = flow::rand_noise();
         flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise, opts.n_timesteps).mel
     };
+    if profile {
+        let total = t_flow.elapsed();
+        let attn = std::time::Duration::from_nanos(profile::flow_self_attn_ns());
+        let rest = total.saturating_sub(attn);
+        eprintln!(
+            "[profile] flow_forward_total (t={} frames): {:.3} ms  [self_attn: {:.3} ms ({:.1}%), rest: {:.3} ms]",
+            mel_len1 + 2 * gen_tokens.len(),
+            total.as_secs_f64() * 1000.0,
+            attn.as_secs_f64() * 1000.0,
+            100.0 * attn.as_secs_f64() / total.as_secs_f64().max(1e-9),
+            rest.as_secs_f64() * 1000.0
+        );
+        stage_times.push(("flow_forward_total (encoder + 10-step Euler CFM loop)", total));
+        stage_times.push(("  of which: self_attn scalar loops (conformer + UNet transformer)", attn));
+        stage_times.push(("  of which: everything else (convs, resnets, linears, ISTFT-free)", rest));
+    }
     let mel_len2 = mel_out.len() / mel_dim;
     if mel_len2 == 0 {
         return Err("cosyvoice::generate: the flow decoder produced an empty target mel".to_string());
     }
 
-    // ---- HiFT vocoder stage: target mel -> waveform, own scope. ----
-    let (waveform, sample_rate) = {
-        let hift_cfg = HiftConfig::cosyvoice2();
-        let hift_w = import_hift_pt(&format!("{}/hift.pt", paths.hift), &hift_cfg)?;
-        let out = hift::forward_seeded(&mel_out, mel_len2, &hift_cfg, &hift_w, opts.seed);
-        (out.waveform, hift_cfg.sampling_rate)
-    };
+    // ---- HiFT vocoder stage: target mel -> waveform, own scope. Broken into
+    // its three named sub-stages (mirroring `hift::forward_seeded`'s own call
+    // order) only when profiling; behaviorally identical to calling
+    // `hift::forward_seeded` directly. ----
+    let t_hift = std::time::Instant::now();
+    let hift_cfg = HiftConfig::cosyvoice2();
+    let hift_w = import_hift_pt(&format!("{}/hift.pt", paths.hift), &hift_cfg)?;
+    let t_f0 = std::time::Instant::now();
+    let f0 = hift::f0_predictor_forward(&hift_w.f0_predictor, &mel_out, hift_cfg.in_channels as usize, hift_cfg.f0_cond_channels as usize, mel_len2);
+    if profile {
+        let d = t_f0.elapsed();
+        eprintln!("[profile] hift_f0_predictor: {:.3} ms", d.as_secs_f64() * 1000.0);
+        stage_times.push(("hift_f0_predictor", d));
+    }
+    let n_noise = mel_len2 * hift_cfg.nsf_upsample_scale() as usize * hift_cfg.harmonics() as usize;
+    let mut rng = data::rng::Rng::new(opts.seed);
+    let randn: Vec<f32> = (0..n_noise).map(|_| rng.next_gaussian() as f32).collect();
+    let t_nsf = std::time::Instant::now();
+    let excitation = hift::nsf_source_forward(&f0, &hift_cfg, &hift_w, &randn);
+    if profile {
+        let d = t_nsf.elapsed();
+        eprintln!("[profile] hift_nsf_source: {:.3} ms", d.as_secs_f64() * 1000.0);
+        stage_times.push(("hift_nsf_source", d));
+    }
+    let t_conv = std::time::Instant::now();
+    let out = hift::decode(&mel_out, mel_len2, &excitation, &hift_cfg, &hift_w);
+    if profile {
+        let d = t_conv.elapsed();
+        let total = t_hift.elapsed();
+        eprintln!("[profile] hift_conv_trunk_and_istft (decode): {:.3} ms", d.as_secs_f64() * 1000.0);
+        eprintln!("[profile] hift_total: {:.3} ms", total.as_secs_f64() * 1000.0);
+        stage_times.push(("hift_conv_trunk_and_istft (decode)", d));
+        stage_times.push(("hift_total", total));
+    }
+    let (waveform, sample_rate) = (out.waveform, hift_cfg.sampling_rate);
+
+    if profile {
+        eprintln!("=== cosyvoice::pipeline::generate per-stage profile ===");
+        let total: std::time::Duration = stage_times.iter().filter(|(n, _)| !n.starts_with("  of which")).map(|(_, d)| *d).sum();
+        for (name, d) in &stage_times {
+            eprintln!("  {name:<70} {:>10.3} ms", d.as_secs_f64() * 1000.0);
+        }
+        eprintln!("  {:<70} {:>10.3} ms", "TOTAL (sum of top-level stages)", total.as_secs_f64() * 1000.0);
+    }
 
     Ok(GeneratedSpeech { samples: waveform, sample_rate })
 }

@@ -257,44 +257,47 @@ fn conformer_layer(x_tc: &[f32], pos_emb: &[f32], t: usize, cfg: &FlowConfig, w:
 
     let mut ctx = vec![0.0f32; t * d];
     let scale = (hd as f32).sqrt();
-    for h in 0..heads {
-        let mut q_u = vec![0.0f32; t * hd];
-        let mut q_v = vec![0.0f32; t * hd];
-        for ti in 0..t {
-            for j in 0..hd {
-                let qv = q[ti * d + h * hd + j];
-                q_u[ti * hd + j] = qv + w.pos_bias_u[h * hd + j];
-                q_v[ti * hd + j] = qv + w.pos_bias_v[h * hd + j];
-            }
-        }
-        let mut matrix_bd_raw = vec![0.0f32; t * plen];
-        for ti in 0..t {
-            for m in 0..plen {
-                let mut acc = 0.0f32;
+    {
+        let _attn_timer = crate::profile::FlowAttnTimer::start();
+        for h in 0..heads {
+            let mut q_u = vec![0.0f32; t * hd];
+            let mut q_v = vec![0.0f32; t * hd];
+            for ti in 0..t {
                 for j in 0..hd {
-                    acc += q_v[ti * hd + j] * p[m * d + h * hd + j];
+                    let qv = q[ti * d + h * hd + j];
+                    q_u[ti * hd + j] = qv + w.pos_bias_u[h * hd + j];
+                    q_v[ti * hd + j] = qv + w.pos_bias_v[h * hd + j];
                 }
-                matrix_bd_raw[ti * plen + m] = acc;
             }
-        }
-        let matrix_bd = rel_shift(&matrix_bd_raw, t);
+            let mut matrix_bd_raw = vec![0.0f32; t * plen];
+            for ti in 0..t {
+                for m in 0..plen {
+                    let mut acc = 0.0f32;
+                    for j in 0..hd {
+                        acc += q_v[ti * hd + j] * p[m * d + h * hd + j];
+                    }
+                    matrix_bd_raw[ti * plen + m] = acc;
+                }
+            }
+            let matrix_bd = rel_shift(&matrix_bd_raw, t);
 
-        for ti in 0..t {
-            let mut scores = vec![0.0f32; t];
-            for tj in 0..t {
-                let mut ac = 0.0f32;
-                for j in 0..hd {
-                    ac += q_u[ti * hd + j] * k[tj * d + h * hd + j];
-                }
-                scores[tj] = (ac + matrix_bd[ti * t + tj]) / scale;
-            }
-            softmax(&mut scores);
-            for j in 0..hd {
-                let mut acc = 0.0f32;
+            for ti in 0..t {
+                let mut scores = vec![0.0f32; t];
                 for tj in 0..t {
-                    acc += scores[tj] * v[tj * d + h * hd + j];
+                    let mut ac = 0.0f32;
+                    for j in 0..hd {
+                        ac += q_u[ti * hd + j] * k[tj * d + h * hd + j];
+                    }
+                    scores[tj] = (ac + matrix_bd[ti * t + tj]) / scale;
                 }
-                ctx[ti * d + h * hd + j] = acc;
+                softmax(&mut scores);
+                for j in 0..hd {
+                    let mut acc = 0.0f32;
+                    for tj in 0..t {
+                        acc += scores[tj] * v[tj * d + h * hd + j];
+                    }
+                    ctx[ti * d + h * hd + j] = acc;
+                }
             }
         }
     }
@@ -422,23 +425,26 @@ fn basic_transformer_block(x_tc: &[f32], w: &CfmBlockW, cfg: &FlowConfig, t: usi
 
     let mut ctx = vec![0.0f32; t * inner];
     let scale = (hd as f32).sqrt();
-    for h in 0..heads {
-        for ti in 0..t {
-            let mut scores = vec![0.0f32; t];
-            for tj in 0..t {
-                let mut acc = 0.0f32;
-                for j in 0..hd {
-                    acc += q[ti * inner + h * hd + j] * k[tj * inner + h * hd + j];
-                }
-                scores[tj] = acc / scale;
-            }
-            softmax(&mut scores);
-            for j in 0..hd {
-                let mut acc = 0.0f32;
+    {
+        let _attn_timer = crate::profile::FlowAttnTimer::start();
+        for h in 0..heads {
+            for ti in 0..t {
+                let mut scores = vec![0.0f32; t];
                 for tj in 0..t {
-                    acc += scores[tj] * v[tj * inner + h * hd + j];
+                    let mut acc = 0.0f32;
+                    for j in 0..hd {
+                        acc += q[ti * inner + h * hd + j] * k[tj * inner + h * hd + j];
+                    }
+                    scores[tj] = acc / scale;
                 }
-                ctx[ti * inner + h * hd + j] = acc;
+                softmax(&mut scores);
+                for j in 0..hd {
+                    let mut acc = 0.0f32;
+                    for tj in 0..t {
+                        acc += scores[tj] * v[tj * inner + h * hd + j];
+                    }
+                    ctx[ti * inner + h * hd + j] = acc;
+                }
             }
         }
     }
