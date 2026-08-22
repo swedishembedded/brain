@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(w.ups[2].weight.len(), 128 * 64 * 7);
         assert_eq!(w.source_downs[0].weight.len(), 256 * 18 * 30);
         assert_eq!(w.source_downs[1].weight.len(), 128 * 18 * 6);
-        assert_eq!(w.source_downs[2].weight.len(), 64 * 18 * 1);
+        assert_eq!(w.source_downs[2].weight.len(), (64 * 18));
         assert_eq!(w.conv_post.weight.len(), 18 * 64 * 7);
         assert_eq!(w.f0_predictor.classifier_w.len(), 512);
         assert_eq!(w.m_source_linear_w.len(), 9);

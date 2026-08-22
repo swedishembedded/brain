@@ -14,9 +14,9 @@
 //! dumper does (`torch.manual_seed(SEED)`, self-validated bit-exact by
 //! calling twice). `crate::hift`'s own module doc records a second, narrower
 //! finding: `SineGen2`'s OTHER random draw (`rand_ini`, the initial-phase
-//! noise) is empirically provably inert at HiFT's real `upsample_scale=480`
-//! - the reference's own downsample interpolation discards it before it can
-//! reach the output - so the ONLY draw that matters is that one
+//! noise) is empirically provably inert at HiFT's real `upsample_scale=480`,
+//! because the reference's own downsample interpolation discards it before
+//! it can reach the output. So the ONLY draw that matters is that one
 //! `randn_like(sine_waves)` call.
 //!
 //! Reimplementing PyTorch's Mersenne-Twister transform in Rust to reproduce
