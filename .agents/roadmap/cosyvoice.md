@@ -560,6 +560,169 @@ reference clip's raw WAV file bytes as the `ref_audio` input blob rather
 than decoded PCM, deliberately demonstrating the full-fidelity path this
 phase's own `decode_ref_audio` finding describes.
 
+## Phase 13: NPU export + INT8 PTQ - profiling first, per porting.md §10
+
+Per `.agents/rules/porting.md` §10's explicit instruction ("profile per
+kernel-kind and publish the table before touching code"), `pipeline::generate`
+gained opt-in wall-clock instrumentation (`BRAIN_COSYVOICE_PROFILE=1`,
+`crates/cosyvoice/src/profile.rs` + timers in `pipeline.rs`/`flow.rs`) and was
+run once, real weights, real reference clip, `--release`, target text `"Hi."`
+(short deliberately - the flow decoder's cost scales with total frame count,
+so a longer text would only have made the run take proportionally longer
+without changing which stage dominates):
+
+| Stage | Wall time | % of total |
+|---|---:|---:|
+| ref_audio_analysis (CAM++ + S3Tokenizer) | 3.9 s | 0.8% |
+| lm_load_import | 7.0 s | 1.5% |
+| lm_prefill (105 rows) | 37.6 s | 7.9% |
+| lm_generate (40 AR tokens) | 14.9 s | 3.1% |
+| **flow_forward_total (t=254 frames)** | **307.1 s** | **64.2%** |
+| &nbsp;&nbsp;of which: self-attention scalar loops | 108.7 s | 22.7% (35.4% of flow) |
+| &nbsp;&nbsp;of which: everything else (convs/resnets/linears) | 198.4 s | 41.5% (64.6% of flow) |
+| hift_f0_predictor | 0.9 s | 0.2% |
+| hift_nsf_source | 0.01 s | 0.0% |
+| hift_conv_trunk_and_istft | 52.7 s | 11.0% |
+| **TOTAL** | **478.1 s** | 100% |
+
+**Confirms** the existing note's headline claim: the flow decoder dominates
+wall-clock (64.2% of the whole pipeline), by a wide margin over every other
+stage.
+
+**Corrects** the existing note's more specific claim. "Self-attention... is a
+raw scalar loop, not yet dispatched through the fast matmul path" is true, but
+the roadmap's phrasing implied self-attention IS the dominant cost within the
+flow decoder - measured, it is 35.4% of flow's own wall-clock (108.7 s), while
+"everything else" is a larger 64.6% (198.4 s). Reading `audio::conv::
+conv1d_ref`/`convtr1d_ref` (`crates/audio/src/conv.rs`) - the primitive
+`flow::conv1d`/`causal_conv1d` calls for every one of the UNet's 14 resnet
+blocks' convs plus the encoder's pre/up convs - shows they are ALSO a naive
+scalar quadruple-nested loop, exactly like the self-attention loops, and NOT
+dispatched through `model::hostmath`'s AVX2+FMA rayon-parallel matmul path the
+way `linear_rows`/`matvec` already are. So the flow decoder has TWO scalar-loop
+bottlenecks, not one - self-attention is the larger SINGLE dispatchable unit
+(a matmul-shaped op with an existing fast path to redirect to, `model::
+hostmath::linear_rows`-style), but the convs are the larger AGGREGATE cost. A
+future optimization pass should attack both, not assume fixing attention alone
+closes the gap.
+
+**A new, previously-undocumented finding**: the LM (`lm_load_import` +
+`lm_prefill` + `lm_generate` = 59.5 s, 12.5% of total) and HiFT's conv trunk
+(52.7 s, 11.0%) are comparable in magnitude to each other and are NOT
+negligible next to the flow decoder - a future optimization pass has three
+real targets, not one, even though flow dominates.
+
+### ONNX export
+
+Following `crates/npu`'s existing per-model `<name>_topology.rs`/
+`<name>_export.rs` pattern (`NpuModel`, `onnx::GraphBuilder`, the shared
+`crate::topo::TopoBase` DSL) exactly as `codec_topology.rs`/`codec_export.rs`
+(the closest architectural precedent - a conv/resblock/upsample vocoder
+trunk) and `qwen_topology.rs`/`qwen_export.rs` (the closest precedent for a
+bolted-on-vocabulary decoder LM) already do:
+
+- **HiFT vocoder conv trunk** (`crates/npu/src/hift_topology.rs` +
+  `hift_export.rs`): `HiFTGenerator.decode` (CosyVoice 2, non-causal) -
+  `conv_pre` through `conv_post`, all 3 upsample stages, all 12 resblocks
+  (9 trunk + 3 source), plain (non-Beta) Snake activations. Takes the
+  already-imported, already-weight-norm-folded `hift_import::HiftWeights`
+  directly (no `WeightSource` remapping needed - see the BN/weight-norm-fold
+  finding below). **Deliberate scope**: the excitation STFT (`s_stft`) is a
+  graph INPUT and the ISTFT that turns `magnitude`/`phase` back into a
+  waveform stays host-side, matching this crate's own established convention
+  of keeping non-NPU-friendly, weight-free DSP off the graph (`crate::
+  topology`'s own doc: "DFL decode + NMS stay on the host"); `f0_predictor`
+  and the NSF sine generation (cheap, RNG-dependent) stay host too.
+- **Speech-token LM backbone** (`crates/npu/src/cosyvoice_llm_topology.rs` +
+  `cosyvoice_llm_export.rs`): an input-embedding-driven `inputs_embeds:
+  [1,T,d] -> hidden:[1,T,d]` graph (the prefill/full-causal-attention shape,
+  no KV cache) for the Qwen2.5-0.5B backbone both CosyVoice 2 and CosyVoice 3
+  share. **Judgment call, recorded rather than silently worked around**:
+  `qwen_topology::build_stack` (the existing shared decoder-block emitter)
+  hardcodes Qwen3's attention shape (QK-norm always applied, q/k/v/o always
+  bias-free) because every existing caller (the Qwen3-TTS Talker/MTP, the
+  Qwen3 decoder) is genuinely Qwen3-shaped. CosyVoice's backbone is Qwen2.5
+  (`qk_norm=false`, `attn_bias=true`, confirmed from the real checkpoint and
+  asserted in `cosyvoice::config`'s own tests) - reusing `build_stack`
+  unmodified would silently build a WRONG graph (an unwanted QK-norm applied,
+  the q/k/v bias terms dropped) that would still compile and run. Rather than
+  retrofit the shared, widely-depended-on `build_stack` to be generic over
+  `qk_norm`/`attn_bias` under this milestone's time budget - real, separate
+  work needing re-verification of every existing Qwen3-family NPU export
+  unchanged - `cosyvoice_llm_topology.rs` duplicates the block shape with the
+  correct Qwen2 wiring. Hoisting the two into one generic implementation is a
+  recorded, honest follow-up. CosyVoice's own bolted-on embedding assembly
+  (`sos ++ text_emb ++ task_id ++ prompt_speech_emb`, three disjoint tables)
+  and `llm_decoder` head stay host-side, mirroring
+  `qwen_topology::build_talker_hidden_graph`'s identical reason for the
+  Qwen3-TTS Talker's own bolted-on codec vocabulary.
+- **Flow decoder (UNet CFM + conformer encoder) - NOT attempted this pass.**
+  The single most valuable target per the profile above (64.2% of wall-clock),
+  and the largest, most novel piece of topology work by far: a 56-transformer
+  + 14-resnet-block UNet plus an ESPnet-style relative-position-attention
+  conformer encoder, neither with any existing ONNX-topology precedent in this
+  crate to build from (unlike HiFT's conv/resblock shape, which
+  `codec_topology.rs` already had, and the LM's decoder shape, which
+  `qwen_topology.rs` already had). Attempting it at the same depth of care
+  the HiFT/LM exports got - a fresh topology file, real op-count tests, a
+  documented host/device split for the Euler loop's `mu`/`spks`/`cond`
+  assembly - is realistically its own milestone. Recorded here as the
+  prioritized next step, not silently skipped.
+
+### BN / weight-norm fold - investigated, not assumed
+
+**Finding: no extra ONNX-export-time fold is needed for HiFT.**
+`crates/cosyvoice/src/hift_import.rs`'s `wn_conv` already calls
+`audio::conv::fold_weight_norm` at IMPORT time (reading `llm.pt`'s
+`parametrizations.weight.{original0,original1}` pair, folding to a plain
+`[Cout,Cin,K]`/`[Cin,Cout,K]` weight), so by the time `HiftWeights` reaches the
+export code, every conv weight is already a plain folded `Vec<f32>` in
+exactly the layout ONNX `Conv`/`ConvTranspose` initializers need - unlike
+`crates/npu/src/topology.rs`'s YOLO/`fold.rs`'s `fold_bn`, which folds
+BatchNorm AT EXPORT TIME because the YOLO checkpoint format stores separate
+BN running stats the Rust model itself folds only in its eval-mode forward,
+not at import. The two crates' conventions differ (fold-at-import vs.
+fold-at-export) because their checkpoint formats differ, not because one is
+more correct - CosyVoice's HiFT export needed zero new fold code as a direct
+consequence.
+
+### INT8 PTQ
+
+**LM backbone**: weight-only INT8 (`crate::topo::Quant::Int8`, per-output-
+channel symmetric, `DequantizeLinear -> MatMul`), matching the SAME
+established convention every other decoder-LM NPU export in this crate uses
+(the Qwen3-TTS Talker/MTP, LFM2.5) rather than YOLO's activation-calibrated
+per-tensor Q/DQ convention - decoder LMs in this workspace are weight-
+bandwidth-bound, not activation-bound, so calibration buys nothing and this
+crate's own `fold.rs` doc already says why weight quantization is
+"data-independent, so it lives here (no calibration needed for weights)".
+`cosyvoice_llm_export::export_cosyvoice2_lm_int8` is the entry point;
+gated by `int8_quant_builds_and_shrinks_the_weight_bytes` (serialized bytes
+strictly smaller than the fp32 graph, tiny non-degenerate dims).
+
+**HiFT conv trunk and the (unattempted) flow decoder: not quantized this
+pass.** Both are conv/attention stacks where INT8 PTQ would need real
+calibration data (activation ranges) that this milestone did not collect -
+YOLO's `calib.rs`/`RangeCollector` is the precedent for what that would look
+like, deliberately not attempted here alongside a from-scratch topology port
+in the same pass.
+
+### Hardware/runtime validation - honestly scoped
+
+**No OpenVINO runtime is installed on this box at all** (`libopenvino_c.so`
+absent, the `openvino` Python wheel absent) - a step further back than the
+previously-recorded NPU-firmware gap for other models on this same machine
+(NPU hardware present, firmware missing; here OpenVINO itself is missing, so
+neither NPU nor its CPU/GPU fallback devices are reachable). Every test added
+this phase is therefore **structural only** (the graph builds, declares the
+right I/O, has the expected op-mix by architecture, round-trips through
+`GraphBuilder::finish`/`finish_external`, real-checkpoint smoke tests write
+real files) - the SAME two-tier pattern `tests/wm_onnx.rs` (DIAMOND) already
+established for exactly this situation (`BRAIN_OV_PROBE`-gated numerical
+parity vs OpenVINO-CPU, skipping cleanly without it). No numerical
+parity-against-OpenVINO and no real-NPU run are claimed for either export in
+this phase - a real gap, not a faked pass.
+
 ## Not yet done
 
 - [x] Phase 7b: CosyVoice 3 model code (`CausalMaskedDiffWithDiT`'s DiT

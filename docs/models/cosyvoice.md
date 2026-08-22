@@ -352,6 +352,34 @@ closed rather than three components left half-done. HiFT additionally has no
 discriminator (MPD/MSD/MRD) ported at all, so GAN-style adversarial
 fine-tuning would be new architecture, not just a missing backward.
 
+## NPU export
+
+A per-stage wall-clock profile of `pipeline::generate` (`BRAIN_COSYVOICE_PROFILE=1`,
+`crate::profile`) confirms the flow decoder dominates end-to-end cost by a
+wide margin over the LM and HiFT combined, and refines the flow decoder's own
+internal breakdown: its self-attention loops and its causal convolutions
+(both still plain scalar host loops, neither dispatched through the fast
+matmul path) are comparable in cost to each other, not one clearly dominant
+over the other. The full per-stage table lives in this crate's own roadmap
+ledger.
+
+Following `crates/npu`'s existing per-model ONNX-export pattern, two of
+CosyVoice 2's three components now export to ONNX: the HiFT vocoder's
+conv/resblock/upsample trunk (`npu::hift_topology`/`hift_export`, non-causal,
+the excitation STFT/ISTFT and NSF source deliberately left host-side as
+weight-free DSP) and the speech-token LM's Qwen2.5-0.5B backbone
+(`npu::cosyvoice_llm_topology`/`cosyvoice_llm_export`, an input-embedding-driven
+hidden-state graph, fp32 and weight-only INT8) - both real-checkpoint-tested
+(structural + real-file export smoke, gated by real-checkpoint presence).
+`HiftWeights`' weight-norm is already folded at import time, so the export
+needed no separate fold step. The flow decoder (the largest single cost and
+the largest topology-engineering effort - a conformer encoder plus a
+56-transformer/14-resnet UNet, neither with prior ONNX-topology precedent in
+this crate) is not yet exported - recorded as the prioritized next step, not
+silently skipped. No OpenVINO runtime is installed on this box, so every
+export is validated structurally, not against a running NPU or its CPU/GPU
+OpenVINO fallback.
+
 Weights env vars:
 
 | Variable | Role |
