@@ -154,5 +154,7 @@ pub mod hift_config;
 pub mod hift_import;
 pub mod llm;
 pub mod llm_import;
+pub mod lmgrad;
+pub mod lmlora;
 pub mod pipeline;
 pub mod sampling;

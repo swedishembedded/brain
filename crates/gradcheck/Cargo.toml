@@ -49,6 +49,9 @@ brain-data.workspace = true
 brain-kernels.workspace = true
 # `check_vocoder` (src/minimaxmusic3.rs) - MiniMax Music 3's DAC-style vocoder.
 brain-minimaxmusic3.workspace = true
+# `check_cosyvoice_lm_block` / `check_cosyvoice_lm` (src/lib.rs) - CosyVoice's
+# Qwen2-style speech-token LM host training reference.
+brain-cosyvoice.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

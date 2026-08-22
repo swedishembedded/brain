@@ -1076,6 +1076,7 @@ dependencies = [
  "brain-arcface",
  "brain-clip",
  "brain-codeformer",
+ "brain-cosyvoice",
  "brain-data",
  "brain-flux2",
  "brain-glmdsa",

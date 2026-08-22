@@ -1459,6 +1459,161 @@ pub fn check_autoencoder(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Fixture for ONE layer of `cosyvoice::lmgrad`'s host Qwen2-style LM
+/// reference - a fixed random input row set and a fixed downstream gradient,
+/// so the checked scalar loss is `Σ layer_forward(w, x_in)·dout` and its
+/// analytic derivative is exactly what `layer_backward(w, x_in, dout)`
+/// computes. Shared by [`check_cosyvoice_lm_block`] alone (unlike the Wan
+/// fixture there is only one caller today, kept as a named struct anyway so
+/// a second block-level check added later cannot drift from this one).
+struct CosyVoiceLmBlockFixture {
+    dims: cosyvoice::lmgrad::LmDims,
+    w0: cosyvoice::lmgrad::LayerW<f64>,
+    x_in: Vec<f64>,
+    dout: Vec<f64>,
+    n: usize,
+}
+
+impl CosyVoiceLmBlockFixture {
+    fn new(seed: u64) -> CosyVoiceLmBlockFixture {
+        let dims = cosyvoice::lmgrad::LmDims::tiny();
+        let mut full = cosyvoice::lmgrad::init_weights::<f64>(&dims, seed);
+        let w0 = full.layers.remove(0);
+        let n = 5usize;
+        let mut rng = Rng::new(seed ^ 0xB10C_1234u64);
+        let x_in: Vec<f64> = (0..n * dims.d_model).map(|_| rng.next_f64() - 0.5).collect();
+        let dout: Vec<f64> = (0..n * dims.d_model).map(|_| rng.next_f64() - 0.5).collect();
+        CosyVoiceLmBlockFixture { dims, w0, x_in, dout, n }
+    }
+
+    fn loss_of(&self, w: &cosyvoice::lmgrad::LayerW<f64>) -> f64 {
+        let (out, _c) = cosyvoice::lmgrad::layer_forward(&self.dims, w, &self.x_in, self.n);
+        out.iter().zip(&self.dout).map(|(a, b)| a * b).sum()
+    }
+}
+
+/// Gradient-check ONE `cosyvoice::lmgrad` decoder layer (RMSNorm -> biased
+/// QKV -> half-split RoPE -> causal GQA attention -> output projection ->
+/// residual -> RMSNorm -> SwiGLU MLP -> residual) against a fixed downstream
+/// gradient, covering every weight tensor of the block AND its input adjoint
+/// `dx_in` (not decoration: the whole-model backward chains it across
+/// layers, so an unchecked input adjoint is a hole exactly where the
+/// multi-layer gradient is built - the same reasoning `wan::grad`'s own
+/// block-level check documents for its `dx`/`dctx`). The porting playbook's
+/// block-level gate is 1e-4.
+pub fn check_cosyvoice_lm_block(seed: u64) -> Report {
+    let f = CosyVoiceLmBlockFixture::new(seed);
+    let (_out, cache) = cosyvoice::lmgrad::layer_forward(&f.dims, &f.w0, &f.x_in, f.n);
+    let mut g = cosyvoice::lmgrad::LayerW::<f64>::zeros(&f.dims);
+    let dx_in = cosyvoice::lmgrad::layer_backward(&f.dims, &f.w0, &cache, &f.dout, f.n, &mut g);
+
+    let mut analytic: Vec<(String, Vec<f64>)> =
+        cosyvoice::lmgrad::layer_grad_views(&g).into_iter().map(|(n, v)| (n.to_string(), v.clone())).collect();
+    analytic.push(("x_in".to_string(), dx_in));
+
+    let mut rng = Rng::new(seed ^ 0xB10C_5A5Au64);
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for (name, ga) in &analytic {
+        let v: Vec<f64> = (0..ga.len()).map(|_| if rng.next_f64() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let an: f64 = ga.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
+        let numeric = if name == "x_in" {
+            let xp: Vec<f64> = f.x_in.iter().zip(&v).map(|(&x, &vi)| x + eps * vi).collect();
+            let xm: Vec<f64> = f.x_in.iter().zip(&v).map(|(&x, &vi)| x - eps * vi).collect();
+            let lp = cosyvoice::lmgrad::layer_forward(&f.dims, &f.w0, &xp, f.n).0.iter().zip(&f.dout).map(|(a, b)| a * b).sum::<f64>();
+            let lm = cosyvoice::lmgrad::layer_forward(&f.dims, &f.w0, &xm, f.n).0.iter().zip(&f.dout).map(|(a, b)| a * b).sum::<f64>();
+            (lp - lm) / (2.0 * eps)
+        } else {
+            let mut wp = f.w0.clone();
+            for (p, &vi) in cosyvoice::lmgrad::layer_params_mut(&mut wp).into_iter().find(|(n, _)| n == name).unwrap().1.iter_mut().zip(&v) {
+                *p += eps * vi;
+            }
+            let mut wm = f.w0.clone();
+            for (p, &vi) in cosyvoice::lmgrad::layer_params_mut(&mut wm).into_iter().find(|(n, _)| n == name).unwrap().1.iter_mut().zip(&v) {
+                *p -= eps * vi;
+            }
+            (f.loss_of(&wp) - f.loss_of(&wm)) / (2.0 * eps)
+        };
+        let abs_err = (an - numeric).abs();
+        let denom = an.abs().max(numeric.abs()).max(1e-3);
+        checks.push(Check { param: name.clone(), analytic: an as f32, numeric: numeric as f32, abs_err: abs_err as f32, rel_err: (abs_err / denom) as f32 });
+    }
+    Report { checks }
+}
+
+/// Fixture for the WHOLE `cosyvoice::lmgrad` speech-token LM - embedding
+/// assembly (`sos ++ text ++ task_id ++ speech[..-1]`), every decoder layer,
+/// the final RMSNorm, the `llm_decoder` head, and the masked cross-entropy -
+/// at tiny, non-degenerate dims (`n_heads ≠ head_dim`, `d_model ≠
+/// n_heads·head_dim`). `cv3` selects `LmDims::tiny_cv3()`, the
+/// `SpecialTokenSource::SpeechEmbedding` branch (no dedicated `llm_embedding`
+/// table, no `llm_decoder` bias) - both branches are checked
+/// ([`check_cosyvoice_lm`]'s own test), not just CosyVoice 2's.
+struct CosyVoiceLmFixture {
+    dims: cosyvoice::lmgrad::LmDims,
+    w0: cosyvoice::lmgrad::LmWeights<f64>,
+    ex: cosyvoice::lmgrad::Example,
+}
+
+impl CosyVoiceLmFixture {
+    fn new(seed: u64, cv3: bool) -> CosyVoiceLmFixture {
+        let dims = if cv3 { cosyvoice::lmgrad::LmDims::tiny_cv3() } else { cosyvoice::lmgrad::LmDims::tiny() };
+        let w0 = cosyvoice::lmgrad::init_weights::<f64>(&dims, seed);
+        let ex = cosyvoice::lmgrad::Example {
+            text_ids: vec![3, 5, 1, 7, 2],
+            special_sos: 0,
+            special_task: if dims.special_vocab > 0 { 1 } else { dims.speech_vocab - 2 },
+            speech_tokens: vec![2, 4, 6, 1, 3, 5],
+        };
+        CosyVoiceLmFixture { dims, w0, ex }
+    }
+
+    fn loss_of(&self, w: &cosyvoice::lmgrad::LmWeights<f64>) -> f64 {
+        let cache = cosyvoice::lmgrad::forward(&self.dims, w, &self.ex);
+        cosyvoice::lmgrad::loss(&self.dims, &cache, &self.ex.speech_tokens).0
+    }
+
+    /// Analytic grads, in `cosyvoice::lmgrad::params_mut` order.
+    fn analytic(&self) -> Vec<(String, Vec<f64>)> {
+        let (_l, g) = cosyvoice::lmgrad::grads(&self.dims, &self.w0, &self.ex);
+        cosyvoice::lmgrad::grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect()
+    }
+}
+
+/// Gradient-check the whole CosyVoice speech-token LM host reference at tiny
+/// dims. The porting playbook's model-level gate is 1e-3; f64 central
+/// differences on this pure-host reference land far inside it (see
+/// `check_cosyvoice_lm`'s test for the measured numbers). A tensor with zero
+/// rows (`special_embed` when `cv3`, `decoder_b` when the head is bias-free)
+/// is skipped - there is genuinely nothing to perturb, not a gap in coverage.
+pub fn check_cosyvoice_lm(seed: u64, cv3: bool) -> Report {
+    let f = CosyVoiceLmFixture::new(seed, cv3);
+    let analytic = f.analytic();
+    let mut rng = Rng::new(seed ^ 0xC05E_7EA5u64);
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for (pi, (name, ga)) in analytic.iter().enumerate() {
+        if ga.is_empty() {
+            continue;
+        }
+        let v: Vec<f64> = (0..ga.len()).map(|_| if rng.next_f64() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let an: f64 = ga.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
+        let mut wp = f.w0.clone();
+        for (p, &vi) in cosyvoice::lmgrad::params_mut(&mut wp)[pi].1.iter_mut().zip(&v) {
+            *p += eps * vi;
+        }
+        let mut wm = f.w0.clone();
+        for (p, &vi) in cosyvoice::lmgrad::params_mut(&mut wm)[pi].1.iter_mut().zip(&v) {
+            *p -= eps * vi;
+        }
+        let numeric = (f.loss_of(&wp) - f.loss_of(&wm)) / (2.0 * eps);
+        let abs_err = (an - numeric).abs();
+        let denom = an.abs().max(numeric.abs()).max(1e-3);
+        checks.push(Check { param: name.clone(), analytic: an as f32, numeric: numeric as f32, abs_err: abs_err as f32, rel_err: (abs_err / denom) as f32 });
+    }
+    Report { checks }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1672,6 +1827,48 @@ mod tests {
             "Wan conditioning elementwise check failed for {:?}",
             fails.iter().take(8).map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn cosyvoice_lm_block_grads_match_finite_differences() {
+        // Pure host f64 - no GPU, so no MOE_SKIP_GPU_TESTS gate; the same
+        // report is expected under BRAIN_DEVICE=cpu too (see
+        // `cosyvoice::lmgrad`'s module doc: no kernel dispatch exists here for
+        // a backend to diverge on).
+        let report = check_cosyvoice_lm_block(3);
+        report.print();
+        // The porting playbook's block-level gate is 1e-4. f64 central
+        // differences on this pure-host reference land far inside it (see the
+        // printed numbers above), so 1e-6/1e-4 - the same pair `check_wan`/
+        // `check_flux2` use on the same recipe - is not a tolerance tuned
+        // until it passed.
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "CosyVoice LM block gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+        assert!(report.max_rel() < 1e-4, "block-level gate is 1e-4, got {}", report.max_rel());
+        assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
+    }
+
+    #[test]
+    fn cosyvoice_lm_grads_match_finite_differences() {
+        for cv3 in [false, true] {
+            let report = check_cosyvoice_lm(5, cv3);
+            report.print();
+            let (atol, rtol) = (1e-6, 1e-4);
+            let fails = report.failures(atol, rtol);
+            assert!(
+                fails.is_empty(),
+                "CosyVoice LM model gradient check failed (cv3={cv3}) for {:?}",
+                fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+            );
+            // The porting playbook's model-level gate is 1e-3.
+            assert!(report.max_rel() < 1e-3, "model-level gate is 1e-3, got {} (cv3={cv3})", report.max_rel());
+            assert!(report.dead_gradients().is_empty(), "dead gradients (cv3={cv3}): {:?}", report.dead_gradients());
+        }
     }
 
     #[test]
