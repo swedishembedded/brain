@@ -58,17 +58,30 @@
 //! both (the reference sampler draws from torch's own RNG, which this port
 //! does not reproduce bit-for-bit - see [`sampling`]'s module doc).
 //!
-//! The flow decoder (`CausalMaskedDiffWithXvec`, CosyVoice 2's UNet CFM
-//! estimator only - see [`flow`]/[`flow_config`]/[`flow_import`]) is
-//! implemented and forward-parity-proven from scratch against the real
-//! `flow.pt`: condition assembly, the 10-step Euler CFM loop replayed from
-//! real captured reference state, and a full independent re-forward all
-//! match the reference mel output. The fixed CFM noise buffer is reproduced
-//! by a bit-exact Rust port of PyTorch's CPU RNG (`flow::torch_rng`) rather
-//! than a checked-in data asset. Streaming/chunked attention is a
-//! documented, not-yet-implemented gap; the host-CPU forward is also slow in
-//! an unoptimized debug build (minutes in release, much longer in debug) - a
-//! recorded performance follow-up, not a correctness gap.
+//! The flow decoder is implemented for BOTH generations:
+//! `CausalMaskedDiffWithXvec` (CosyVoice 2's UNet CFM estimator - see
+//! [`flow`]/[`flow_config`]/[`flow_import`]) and `CausalMaskedDiffWithDiT`
+//! (CosyVoice 3's 22-layer adaLN-zero DiT estimator, no encoder at all - see
+//! [`cv3_flow`]/[`cv3_flow_config`]/[`cv3_flow_import`]). Both are
+//! forward-parity-proven from scratch against their real `flow.pt`: condition
+//! assembly, the 10-step Euler CFM loop replayed from real captured reference
+//! state, and a full independent re-forward all match the reference mel
+//! output (CosyVoice 3: cosine >= 0.9999999997 at every rung, including the
+//! DiT's own `InputEmbedding`/`TimestepEmbedding` internal taps at cosine
+//! 1.0000000000). The fixed CFM noise buffer is reproduced by a bit-exact
+//! Rust port of PyTorch's CPU RNG (`flow::torch_rng`) rather than a
+//! checked-in data asset, shared unchanged by both generations. One
+//! real, non-obvious finding from porting the DiT: `x_transformers`'s
+//! `RotaryEmbedding`/`apply_rotary_pos_emb` is applied to the FULL
+//! `heads*dim_head`-wide query/key row BEFORE the per-head reshape, and only
+//! rotates the first `dim_head` channels (a "partial rotary" quirk, not a
+//! per-head design) - see `cv3_flow::apply_rope`'s doc for how this was
+//! caught (a full-forward divergence despite both sub-stage taps matching
+//! exactly) and confirmed against the reference source. Streaming/chunked
+//! attention is a documented, not-yet-implemented gap for both generations;
+//! the host-CPU forward is also slow in an unoptimized debug build (minutes
+//! in release, much longer in debug) - a recorded performance follow-up, not
+//! a correctness gap.
 //!
 //! The HiFT vocoder (`HiFTGenerator`, CosyVoice 2 non-causal only - see
 //! [`hift`]/[`hift_config`]/[`hift_import`]) is implemented and
@@ -108,6 +121,9 @@
 //! email to info@swedishembedded.com.
 
 pub mod config;
+pub mod cv3_flow;
+pub mod cv3_flow_config;
+pub mod cv3_flow_import;
 pub mod flow;
 pub mod flow_config;
 pub mod flow_import;

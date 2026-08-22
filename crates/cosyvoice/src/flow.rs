@@ -92,14 +92,17 @@ fn add_bias_rows(x: &mut [f32], b: &[f32], rows: usize, c: usize) {
     }
 }
 
-fn linear_rows_biased(x: &[f32], w: &LinearW, rows: usize, inn: usize, out: usize) -> Vec<f32> {
+/// `pub(crate)` - shared with `crate::cv3_flow`'s DiT estimator (same
+/// `Linear(x) + bias` broadcast every per-row projection in this port needs).
+pub(crate) fn linear_rows_biased(x: &[f32], w: &LinearW, rows: usize, inn: usize, out: usize) -> Vec<f32> {
     let mut y = linear_rows(x, &w.w, rows, inn, out);
     add_bias_rows(&mut y, &w.b, rows, out);
     y
 }
 
-/// `[t, c]` row-major -> `[c, t]` row-major.
-fn transpose_tc_to_cl(x: &[f32], t: usize, c: usize) -> Vec<f32> {
+/// `[t, c]` row-major -> `[c, t]` row-major. `pub(crate)` - shared with
+/// `crate::cv3_flow`.
+pub(crate) fn transpose_tc_to_cl(x: &[f32], t: usize, c: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; t * c];
     for ti in 0..t {
         for ci in 0..c {
@@ -109,8 +112,9 @@ fn transpose_tc_to_cl(x: &[f32], t: usize, c: usize) -> Vec<f32> {
     y
 }
 
-/// `[c, t]` row-major -> `[t, c]` row-major.
-fn transpose_cl_to_tc(x: &[f32], c: usize, t: usize) -> Vec<f32> {
+/// `[c, t]` row-major -> `[t, c]` row-major. `pub(crate)` - shared with
+/// `crate::cv3_flow`.
+pub(crate) fn transpose_cl_to_tc(x: &[f32], c: usize, t: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; t * c];
     for ci in 0..c {
         for ti in 0..t {
@@ -120,20 +124,22 @@ fn transpose_cl_to_tc(x: &[f32], c: usize, t: usize) -> Vec<f32> {
     y
 }
 
+/// `pub(crate)` - shared with `crate::cv3_flow`'s `CausalConvPositionEmbedding`.
 #[inline]
-fn mish(x: f32) -> f32 {
+pub(crate) fn mish(x: f32) -> f32 {
     let softplus = if x > 20.0 { x } else { (1.0 + x.exp()).ln() };
     x * softplus.tanh()
 }
 
-fn mish_slice(x: &mut [f32]) {
+pub(crate) fn mish_slice(x: &mut [f32]) {
     for v in x.iter_mut() {
         *v = mish(*v);
     }
 }
 
+/// `pub(crate)` - shared with `crate::cv3_flow`'s `PreLookaheadLayer`.
 #[inline]
-fn leaky_relu(x: f32) -> f32 {
+pub(crate) fn leaky_relu(x: f32) -> f32 {
     if x >= 0.0 {
         x
     } else {
@@ -147,9 +153,21 @@ fn leaky_relu(x: f32) -> f32 {
 /// l - pad`, so this one call covers both the causal case (`pad = k-1, lo =
 /// l`) and `PreLookaheadLayer.conv1`'s right-pad-only case (`pad = 0, lo =
 /// l`) - verified against the reference's `F.pad` calls directly, not
-/// assumed.
-fn conv1d(x_cl: &[f32], w: &LinearW, cin: usize, cout: usize, l: usize, lo: usize, k: usize, pad: usize) -> Vec<f32> {
-    let c = Conv1d { n: 1, cin: cin as u32, l: l as u32, cout: cout as u32, k: k as u32, stride: 1, pad: pad as u32, dilation: 1, groups: 1, lo: lo as u32 };
+/// assumed. `pub(crate)` - shared with `crate::cv3_flow`, which also needs
+/// this exact left/right-pad-via-`lo` trick for its `PreLookaheadLayer` (same
+/// module, same weight shapes) and its grouped causal `conv_pos_embed`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn conv1d(x_cl: &[f32], w: &LinearW, cin: usize, cout: usize, l: usize, lo: usize, k: usize, pad: usize) -> Vec<f32> {
+    conv1d_grouped(x_cl, w, cin, cout, l, lo, k, pad, 1)
+}
+
+/// [`conv1d`] generalized with a `groups` parameter, for
+/// `crate::cv3_flow::CausalConvPositionEmbedding`'s grouped conv (`groups =
+/// 16`) - CV2's own convs are all `groups = 1`, so [`conv1d`] stays the
+/// ungrouped entry point every existing call site uses.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn conv1d_grouped(x_cl: &[f32], w: &LinearW, cin: usize, cout: usize, l: usize, lo: usize, k: usize, pad: usize, groups: usize) -> Vec<f32> {
+    let c = Conv1d { n: 1, cin: cin as u32, l: l as u32, cout: cout as u32, k: k as u32, stride: 1, pad: pad as u32, dilation: 1, groups: groups as u32, lo: lo as u32 };
     let mut y = conv1d_ref(&c, x_cl, &w.w);
     for co in 0..cout {
         for t in 0..lo {
@@ -159,8 +177,9 @@ fn conv1d(x_cl: &[f32], w: &LinearW, cin: usize, cout: usize, l: usize, lo: usiz
     y
 }
 
-/// Causal `Conv1d(cin, cout, k)`: left-pad `k-1`, output length == input length.
-fn causal_conv1d(x_cl: &[f32], w: &LinearW, cin: usize, cout: usize, t: usize, k: usize) -> Vec<f32> {
+/// Causal `Conv1d(cin, cout, k)`: left-pad `k-1`, output length == input
+/// length. `pub(crate)` - shared with `crate::cv3_flow`.
+pub(crate) fn causal_conv1d(x_cl: &[f32], w: &LinearW, cin: usize, cout: usize, t: usize, k: usize) -> Vec<f32> {
     conv1d(x_cl, w, cin, cout, t, t, k, k - 1)
 }
 
@@ -559,16 +578,31 @@ pub fn assemble_conditions(
     let mu_cl = transpose_tc_to_cl(&mu_tc, n2, mel);
 
     let mel_len2 = n2 - mel_len1;
-    assert_eq!(prompt_feat_tc.len(), mel_len1 * mel, "assemble_conditions: prompt_feat_tc length mismatch");
-    let mut conds_tc = vec![0.0f32; n2 * mel];
-    conds_tc[..mel_len1 * mel].copy_from_slice(prompt_feat_tc);
-    let conds_cl = transpose_tc_to_cl(&conds_tc, n2, mel);
+    let conds_cl = conds_from_prompt_feat(prompt_feat_tc, mel, mel_len1, mel_len2);
 
     (mu_cl, conds_cl, mel_len1, mel_len2)
 }
 
+/// `conds[:, :mel_len1] = prompt_feat; conds[:, mel_len1:] = 0`, transposed to
+/// channel-major `[mel, mel_len1+mel_len2]` - the CFM `cond` tensor assembly,
+/// identical in `CausalMaskedDiffWithXvec.inference` (CosyVoice 2) and
+/// `CausalMaskedDiffWithDiT.inference` (CosyVoice 3, `crate::cv3_flow`):
+/// both just write the prompt mel into the first `mel_len1` frames of an
+/// otherwise-zero `[mel_len1+mel_len2, mel]` buffer and transpose. `pub(crate)`
+/// so `crate::cv3_flow` reuses this instead of duplicating it.
+pub(crate) fn conds_from_prompt_feat(prompt_feat_tc: &[f32], mel: usize, mel_len1: usize, mel_len2: usize) -> Vec<f32> {
+    assert_eq!(prompt_feat_tc.len(), mel_len1 * mel, "conds_from_prompt_feat: prompt_feat_tc length mismatch");
+    let n2 = mel_len1 + mel_len2;
+    let mut conds_tc = vec![0.0f32; n2 * mel];
+    conds_tc[..mel_len1 * mel].copy_from_slice(prompt_feat_tc);
+    transpose_tc_to_cl(&conds_tc, n2, mel)
+}
+
 /// The cosine `t_scheduler`: `linspace(0,1,n+1)` then `t = 1 - cos(t*pi/2)`.
-fn cosine_t_span(n_timesteps: usize) -> Vec<f32> {
+/// `pub(crate)` - shared with `crate::cv3_flow`'s Euler loop (the SAME
+/// `CausalConditionalCFM`/`ConditionalCFM` schedule regardless of which
+/// estimator module is inside it).
+pub(crate) fn cosine_t_span(n_timesteps: usize) -> Vec<f32> {
     (0..=n_timesteps)
         .map(|i| {
             let lin = i as f32 / n_timesteps as f32;
