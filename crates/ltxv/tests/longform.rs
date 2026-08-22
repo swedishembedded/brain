@@ -335,9 +335,16 @@ mod seam_real {
         eprintln!("seam at frame {seam}: rolling context {r_ratio:.2} (diff {r_at:.2}, median {r_med:.2}) vs last-frame chain {c_ratio:.2} (diff {c_at:.2}, median {c_med:.2})");
 
         assert!(r_med > 0.5 && c_med > 0.5, "one of the clips barely moves (medians {r_med:.2} / {c_med:.2}), so a seam ratio says nothing about motion continuity");
+        // 1.0 is the target, not 0: it means the seam transitions exactly like
+        // a typical frame in the clip. Below 1.0 is a freeze (the seam moves
+        // LESS than usual, the "still octopus" artifact naive chaining makes),
+        // above 1.0 is a jump - so distance from 1.0 is the defect, not
+        // magnitude, and a naive `r_ratio < c_ratio` would falsely reward a
+        // chain arm that stalls hard enough to undercut a barely-imperfect one.
+        let (r_dist, c_dist) = ((r_ratio - 1.0).abs(), (c_ratio - 1.0).abs());
         assert!(
-            r_ratio < c_ratio,
-            "the rolling latent context did not improve the seam: {r_ratio:.2} against the last-frame chain's {c_ratio:.2} at frame {seam}"
+            r_dist < c_dist,
+            "the rolling latent context did not land closer to a natural (ratio 1.0) seam: {r_ratio:.2} (|{r_dist:.2}|) against the last-frame chain's {c_ratio:.2} (|{c_dist:.2}|) at frame {seam}"
         );
     }
 }
