@@ -1,4 +1,4 @@
-# CosyVoice (pipeline assembled, not yet servable via `brain caps`)
+# CosyVoice (LLM-based streaming zero-shot TTS, served via `brain caps`)
 
 FunAudioLLM's LLM-based streaming zero-shot TTS: a Qwen2.5-0.5B speech-token
 LM (hosted on [Qwen3](qwen3.md)'s decoder), a causal flow-matching mel decoder
@@ -12,9 +12,12 @@ generations (`FunAudioLLM/CosyVoice2-0.5B`,
 
 **The non-streaming pipeline is real and runnable end to end**: text + a
 reference audio clip in, a real playable 24 kHz WAV out
-(`cosyvoice::pipeline::generate`, see "Pipeline" below) - but there is still
-no `brain caps`/CLI-verb/D-Bus surface (that is milestone M11's job), and
-streaming (chunked `token2wav`, cross-fade) is a deliberate follow-up.
+(`cosyvoice::pipeline::generate`, see "Pipeline" below), now served as
+`brain cosyvoice synth` / `brain do brain/cosyvoice synth` with D-Bus/HTTP
+for free (see "Serving" below) - CosyVoice 3 is accepted as a `variant`
+value but not implemented as a servable pipeline yet, and streaming
+(chunked `token2wav`, cross-fade) is a deliberate follow-up for both
+generations.
 
 ## Status
 
@@ -258,8 +261,8 @@ port's OWN sampling, gated structurally (finite, bounded, non-silent, a
 plausible duration, deterministic given the same seed) rather than against a
 golden waveform - see the crate's own "RNG-crossing gaps" note below for why.
 A runnable example exists at `crates/cosyvoice/examples/synth.rs`
-(`cargo run -p brain-cosyvoice --release --example synth -- ...`); there is
-no `brain caps`/CLI-verb/D-Bus surface yet (M11).
+(`cargo run -p brain-cosyvoice --release --example synth -- ...`); see
+"Serving" below for the served `synth` action this pipeline now backs.
 
 **Honest, deliberately-scoped gaps in this milestone**:
 
@@ -281,6 +284,34 @@ no `brain caps`/CLI-verb/D-Bus surface yet (M11).
   is deterministic given a fixed seed and produces real, playable,
   structurally-correct speech - "statistically equivalent, not bit-identical"
   is the honest, intended bar here.
+
+## Serving
+
+`crates/cosyvoice/src/caps.rs` wires `pipeline::generate` into brain's
+generic capability contract: one `synth` action (target text + a
+`ref_audio` input blob + its transcript in, a complete 24 kHz mono WAV
+out), reachable as `brain cosyvoice synth`, `brain do brain/cosyvoice
+synth`, and - with no extra code - D-Bus/HTTP, through the same
+`Provider`/`ResidentModel` pair every other served model uses
+(`crates/cli/src/resident_cosyvoice.rs` is the residency-facing half,
+following `resident_minimaxmusic3.rs`'s "load per call, nothing kept warm"
+shape).
+
+`variant` accepts `"cosyvoice2"` (the default, the only one that runs) or
+`"cosyvoice3"` (accepted for discovery, always rejected with a named,
+typed error - CosyVoice 3's own pipeline composition is a recorded
+follow-up, not attempted). The reference clip travels as a blob, not a
+server-side path: a WAV container's own sample rate is honoured when a
+caller builds the `Blob` directly (D-Bus/HTTP), while the CLI's shared
+`--in audio=file` helper downsamples to 16 kHz first (the same convention
+every ASR-style audio input in this workspace already follows) - a real
+fidelity ceiling on that one path, not a correctness bug.
+
+Validated end to end against real weights on this machine, through the
+served CLI verb itself (not just the underlying `pipeline::generate`
+function) - `brain cosyvoice synth --text ... --ref_text ... --in
+ref_audio=resources/cosyvoice/source/asset/zero_shot_prompt.wav --out
+audio=out.wav` produced a real, playable WAV.
 
 ## Training
 

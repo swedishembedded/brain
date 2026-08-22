@@ -476,6 +476,90 @@ n_heads·head_dim=24`), covering BOTH `SpecialTokenSource` branches (CosyVoice
   `BRAIN_DEVICE=cpu cargo test -p brain-gradcheck --lib cosyvoice` was run and
   produces the identical report, by construction, rather than being skipped.
 
+## Phase 11: serving contract (caps, residency, CLI, D-Bus/HTTP)
+
+Wired the already-working `pipeline::generate` into this repo's generic
+model-serving layer: `crates/cosyvoice/src/caps.rs` (`MODEL`, `manifest`,
+`resident_manifest`, one `synth` action), `crates/cli/src/
+resident_cosyvoice.rs` (`from_env`, `InstanceKey`, `MemCost`, `activate`,
+following `resident_minimaxmusic3.rs`'s literal shape), one `catalog.rs`
+`ModelEntry` and one `ARCH_TO_MODEL` row in `crates/cli/src/resolve.rs`.
+D-Bus/HTTP came for free through the existing `Provider`/`ResidentModel`
+dispatch, confirmed by reading it rather than assumed - no D-Bus/HTTP code
+needed touching.
+
+**`variant` accepts both generation names, only one runs.** `synth`'s
+schema takes `variant="cosyvoice2"` (the default, the only one
+`pipeline::generate` actually wires) or `"cosyvoice3"` (accepted so a
+client can discover the option, but rejected with a named, typed error
+before any weight touches disk - CosyVoice 3 pipeline reuse is still Phase
+9's own recorded follow-up, not attempted here).
+
+**Reference audio is a blob, not a server-side path - a real design point,
+not a mechanical wrapper.** `pipeline::generate` takes a filesystem path
+(`ref_wav_path`) because its only caller until now was a local example
+binary; a D-Bus/HTTP caller's reference clip lives on THEIR disk. `synth`
+takes it as a `Media::Audio` input blob (matching `qwen3omnimoe`'s
+speech-input convention) and bridges to the path-based signature with a
+short-lived scratch WAV file, removed on drop whether `generate` succeeds
+or fails. **Real, honestly-recorded finding**: this workspace's shared CLI
+blob loader (`caps_cli.rs`'s `--in audio=file`, used by every model with an
+audio input) downsamples any WAV to a fixed 16 kHz before an action ever
+sees it - fine for ASR, but CosyVoice separately resamples its reference
+clip to BOTH 16 kHz (CAM++/S3Tokenizer) AND 24 kHz (the prompt mel), so a
+clip fed through the plain CLI path has its 24 kHz mel built from
+already-band-limited audio (no content above 8 kHz) - a real fidelity
+ceiling on `brain cosyvoice synth --in ref_audio=...`, not a correctness
+bug. `decode_ref_audio` does not introduce this cap and is not limited by
+it: given a raw `Blob` built directly (D-Bus/HTTP, not through that CLI
+helper), it honours a WAV container's own sample rate or a raw-PCM blob's
+own `meta.sample_rate` - full fidelity is available to any caller that
+does not round-trip through the CLI's ASR-shaped blob loader.
+
+**The `MemCost`/sequential-stage-drop tension, investigated and resolved
+the same way `minimaxmusic3` already did, not with a new mechanism.**
+`residency::ResidentModel::estimate` is meant to describe bytes reserved
+for an instance's whole Hot lifetime; `pipeline::generate` holds no
+checkpoint open across a whole call at all - each of its four stages
+imports, uses, and drops its own weights in its own scope, and the
+resident `Instance` itself holds nothing between calls but path strings.
+Reporting the sum of all five checkpoints would over-reserve against a
+peak that never occurs; reporting near-zero (the real idle footprint)
+would under-reserve against the real, if brief, per-stage peak. `estimate`
+reports the LARGEST single stage (`llm.pt`, ~2 GB, dwarfing `flow.pt`'s 451
+MB and `hift.pt`'s 83 MB) - the same "budget the larger one, not the sum"
+call `resident_minimaxmusic3.rs` already made for its own AR/denoise
+stages, applied here for the identical reason, documented in
+`resident_cosyvoice.rs`'s own module doc rather than re-litigated. One
+related, real bug caught while writing the estimator: `CosyVoicePaths`'
+six roles may all alias ONE directory (the released "one folder holds
+everything" layout `pipeline.rs`'s own doc and `examples/synth.rs`'s
+fallback both support) - summing whole-directory sizes per role would have
+counted `llm.pt`/`flow.pt`/`hift.pt` five times over in that layout, so the
+estimator stats one NAMED file per role instead
+(`CosyVoiceResident::file_bytes`), pinned by a test that aliases every role
+onto one directory and checks the result is still the single largest file,
+not a multiple of it. No known fp32-promotion factor applies here (unlike
+`minimaxmusic3`'s measured int8-to-fp32 doubling): `llm_import`/
+`flow_import`/`hift_import` decode straight into `Vec<f32>` and
+`CosyVoiceLm` builds a decode-only `qwen3::Qwen` over that same `f32`
+backbone, so a checkpoint's own file size is the honest number.
+
+**Validated end to end against real weights on this box, via the new CLI
+verb** (`brain cosyvoice synth --text ... --ref_text ... --in
+ref_audio=resources/cosyvoice/source/asset/zero_shot_prompt.wav --out
+audio=out.wav`, release build): a real, playable WAV came out the other
+end through the full served path (`resolve` -> `caps_cli::run_do` ->
+`cosyvoice::caps::CosyVoiceProvider` -> `pipeline::generate`) - not just
+structurally exercised, an actual run.
+
+`examples/tts/cosyvoice_synth.py` follows `examples/musicgen/
+generate_song.py`'s exact shape (a streaming `subscribe`, `meta.format ==
+"wav"` written straight to disk) with one addition: it sends the
+reference clip's raw WAV file bytes as the `ref_audio` input blob rather
+than decoded PCM, deliberately demonstrating the full-fidelity path this
+phase's own `decode_ref_audio` finding describes.
+
 ## Not yet done
 
 - [x] Phase 7b: CosyVoice 3 model code (`CausalMaskedDiffWithDiT`'s DiT
@@ -486,7 +570,7 @@ n_heads·head_dim=24`), covering BOTH `SpecialTokenSource` branches (CosyVoice
 - [x] Phase 10 (LM): `lmgrad`/`lmlora` host reference, gradcheck (block + model, both `SpecialTokenSource` branches), LoRA no-op-at-init + descent, single/batch overfit
 - [ ] Phase 10 (flow decoder, both generations): full fine-tune + LoRA gradcheck for CV2's `CausalConditionalDecoder` UNet CFM estimator and CV3's adaLN-zero DiT CFM estimator. Both are pure host scalar-loop `f32` forward code today (conformer relative-position attention, resnet+transformer UNet stages, partial-rotary DiT blocks) with zero float-type genericity and no backward of any kind - hand-deriving and gradient-checking a correct analytic backward for both (particularly the conformer's relative-position attention and the UNet's resnet/transformer mix) is real, substantial engineering distinct from the LM's, deliberately not attempted in the same pass as the LM so that the LM's own gates could be fully closed rather than three components left half-done.
 - [ ] Phase 10 (HiFT vocoder, both generations): full fine-tune baseline (no LoRA precedent applies - it is a conv/ISTFT/NSF-source stack, not an attention model) - same blocker as the flow decoder: pure host `f32` forward only, no genericity, no backward. The NSF harmonic source generator and the ISTFT head are the two hardest pieces to differentiate correctly (neither has a precedent backward anywhere else in this workspace to check conventions against) and were the reason this component was scoped out rather than rushed. No discriminator (MPD/MSD/MRD) exists in this crate at all - GAN-style adversarial fine-tuning would be new architecture, not just a missing backward.
-- [ ] Phase 11: serving contract (caps, residency, CLI, D-Bus/HTTP)
+- [x] Phase 11: serving contract (caps, residency, CLI, D-Bus/HTTP)
 - [ ] Phase 12: docs + README (not the quickstart, per instruction)
 - [ ] Phase 13: NPU export + INT8 PTQ + optimization pass
 
