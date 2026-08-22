@@ -234,7 +234,13 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), weights_env: &[("BRAIN_QWEN3TTS_WEIGHTS", "weights_dir"), ("BRAIN_QWEN3TTS_CKPT", "ckpt")]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
-    arch!("campplus", "CAM++ D-TDNN speaker encoder (192-d x-vector)", Audio, Brain, "brain-campplus"),
+    // `weights_env` names the directory containing the released
+    // `campplus.onnx` - `crates/campplus/tests/parity.rs` and
+    // `crates/cosyvoice`'s pipeline glue both already treat
+    // `BRAIN_CAMPPLUS_DIR` as this row's canonical variable; registering it
+    // here keeps that convention in one place instead of two ad-hoc copies.
+    arch!("campplus", "CAM++ D-TDNN speaker encoder (192-d x-vector)", Audio, Brain, "brain-campplus",
+          weights_env: &[("BRAIN_CAMPPLUS_DIR", "dir")]),
     // No official llama.cpp/GGUF architecture entry exists for either
     // component; upstream ships the ONNX-only `speech_tokenizer_v2.onnx`
     // (CosyVoice 2) / `speech_tokenizer_v3.onnx` (CosyVoice 3). No single
@@ -267,7 +273,13 @@ pub const ARCHS: &[Arch] = &[
           default_ref: Some("FunAudioLLM/CosyVoice2-0.5B"),
           weights_env: &[("BRAIN_COSYVOICE_LLM", "llm"),
                          ("BRAIN_COSYVOICE_FLOW", "flow"),
-                         ("BRAIN_COSYVOICE_HIFT", "hift")]),
+                         ("BRAIN_COSYVOICE_HIFT", "hift"),
+                         // The stock Qwen BPE identity (`vocab.json`/
+                         // `merges.txt`) the LM's text side needs -
+                         // `CosyVoice-BlankEN` supplies no weights this
+                         // crate loads (see `crate::llm_import`'s module
+                         // doc), only the tokenizer.
+                         ("BRAIN_COSYVOICE_TOKENIZER", "tokenizer")]),
     // Five chained components, no single upstream checkpoint file: a real
     // Qwen3-8B "Global LLM" (`qwen_7B/qwen_7B/`, llama.cpp's own `qwen3`
     // architecture - reused via `crates/qwen3`, not reimplemented here), a

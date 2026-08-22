@@ -192,10 +192,101 @@ deterministic and bounded given its own seed. `CausalHiFTGenerator`
 (CosyVoice 3, causal convs, no `cache_source` state) is a deliberate
 follow-up, not implemented.
 
+## Phase 9: pipeline (non-streaming), CosyVoice 2
+
+`crates/cosyvoice/src/pipeline.rs` composes all five components - CAM++,
+S3Tokenizer, the LM, the flow decoder, HiFT - into one
+`pipeline::generate(paths, opts, text, ref_wav_path, ref_text)` call:
+zero-shot voice cloning, text + a reference clip in, a real 24 kHz waveform
+out, mirroring `CosyVoiceFrontEnd.frontend_zero_shot` +
+`CosyVoiceModel.tts(finalize=True)` step for step (resample to 16/24 kHz,
+CAM++ x-vector, S3Tokenizer prompt tokens, the 24 kHz prompt mel, the
+reference's own `token_len = min(mel_frames/2, num_tokens)` truncation shared
+by the LM and the flow decoder, `max_token_text_ratio`/`min_token_text_ratio`
+sized off the target text only). Each stage's checkpoint is imported, used,
+and dropped in its own scope before the next stage's import runs
+(`minimaxmusic3::generate`'s own sequential-stage RAM discipline - `llm.pt`
+alone is 2 GB on a 30 GB, no-discrete-GPU box).
+
+Two genuine gaps closed to make this possible, both host-only math, no new
+kernel: `audio::kaldi_fbank` (`torchaudio.compliance.kaldi.fbank`-compatible
+mel features CAM++'s reference front end needs - ported line-for-line from
+that library's own source; a GENUINELY different triangular-filter shape
+from `audio::mel`'s existing Hz-domain-linear filters, since Kaldi's own
+filter is linear in the MEL domain) and `pipeline::extract_prompt_mel` (the
+24 kHz `matcha.utils.audio.mel_spectrogram`-equivalent glue: magnitude
+spectrogram -> Slaney mel filter -> log-clamp, composed from
+`audio::mel::power_spectrogram`/`mel_filterbank`, which already existed but
+had never been driven end to end from raw audio before this milestone).
+S3Tokenizer's own Whisper-style mel front end (`audio::asr_frontend::
+qwen_logmel`) needed no new code at all - it already matches
+`s3tokenizer.log_mel_spectrogram` exactly when called unpadded.
+
+Verification, `crates/cosyvoice/tests/pipeline_e2e.rs`:
+
+- `mel_frontend_matches_the_reference_mel`: `pipeline::extract_prompt_mel`
+  against the real `mel_real_*` golden - cosine **0.9999999999**, `rel_l2`
+  1.747e-5. This closes the one piece of new glue math that had no prior
+  parity check (`audio::mel::power_spectrogram`/`mel_filterbank` were proven
+  components; driving them end to end from raw 24 kHz audio into this exact
+  magnitude/log-clamp formula had not been).
+- `spliced_flow_and_hift_reproduce_the_reference_given_golden_tokens_and_xvec`:
+  the composed-pipeline regression check porting.md's parity ladder calls
+  "rung 4 with real weights" - the golden's own captured prompt/generated
+  speech tokens, x-vector, and prompt mel through THIS crate's `flow::forward`,
+  then flow's own mel output straight into `hift::forward` (the ad-hoc
+  NSF-noise capture `hift_parity.rs` already documents) - proving the seam
+  between two independently-proven components (flow's channel-major mel
+  output needs no reshaping to become HiFT's input) still reproduces the
+  reference end to end.
+- `full_pipeline_produces_a_real_playable_wav_from_real_weights`: the actual
+  milestone deliverable - `pipeline::generate()`, this port's OWN sampling,
+  against the real reference clip
+  (`resources/cosyvoice/source/asset/zero_shot_prompt.wav`), gated
+  structurally (finite, bounded to `audio_limit`, non-silent RMS, a plausible
+  duration, deterministic given the same seed, and the written WAV round-trips
+  through `audio::wav::write`/`read`) rather than against a golden waveform -
+  the LM/HiFT RNG-crossing gap (already documented before this milestone)
+  makes byte-exact end-to-end parity the wrong gate, not a gap this milestone
+  introduces.
+
+A runnable example, `crates/cosyvoice/examples/synth.rs`
+(`cargo run -p brain-cosyvoice --release --example synth -- <text> <ref.wav>
+<ref transcript> [out.wav] [seed]`) - no `brain caps`/CLI-verb/D-Bus surface
+yet, that is Phase 11's job.
+
+`crates/arch/src/lib.rs` gained two new registrations this phase needed:
+`campplus`'s row had NO `weights_env` at all despite its own parity test
+already treating `BRAIN_CAMPPLUS_DIR` as canonical - now registered, not a
+second ad-hoc convention; `cosyvoice`'s row gained a fourth `weights_env` role,
+`BRAIN_COSYVOICE_TOKENIZER`, for the `CosyVoice-BlankEN` Qwen BPE identity the
+LM's text side needs (tokenizer + config identity only, never weights - see
+`crate::llm_import`'s module doc).
+
+**Recorded gap, not silently skipped**: `audio::kaldi_fbank` has no bit-exact
+golden to check against in this workspace - CAM++'s own real-weight parity
+test reads its fbank input from a captured golden rather than computing it
+in Rust, so nothing in this repo has ever run a real
+`torchaudio.compliance.kaldi.fbank` and compared it against this port's
+output. The pipeline's x-vector is therefore structurally, not numerically,
+verified against the reference. A from-scratch capture + parity test
+(mirroring `hift_parity.rs`'s own ad-hoc NSF-noise capture) is a recorded
+follow-up, not attempted here.
+
+Streaming (chunked `token2wav`, growing-prefix flow re-run, Hamming
+cross-fade, `token_hop_len`/`token_overlap_len`/`mel_cache_len`/
+`source_cache_len`) was evaluated as a stretch goal for this phase and
+deliberately NOT attempted: the non-streaming path's own verification (above)
+consumed the available time, and a streaming implementation is exactly the
+kind of "gate that lies" risk this repo's culture warns about if rushed -
+better a clearly-scoped follow-up than a half-verified streaming path.
+
 ## Not yet done
 
 - [ ] Phase 7: flow decoder, CosyVoice 3 (DiT CFM)
-- [ ] Phase 9: pipeline + streaming (chunked token2wav, cross-fade)
+- [ ] Phase 9 (CosyVoice 3): pipeline reuse once Phase 7 lands
+- [ ] Phase 9 (streaming): chunked token2wav, growing-prefix flow re-run, cross-fade
+- [ ] Phase 9 (kaldi fbank parity): a real, captured `torchaudio.compliance.kaldi.fbank` golden and a bit-exact gate for `audio::kaldi_fbank`
 - [ ] Phase 10: training (LM LoRA, flow + vocoder full/LoRA finetune, gradcheck)
 - [ ] Phase 11: serving contract (caps, residency, CLI, D-Bus/HTTP)
 - [ ] Phase 12: docs + README (not the quickstart, per instruction)

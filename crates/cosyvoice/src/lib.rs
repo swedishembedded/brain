@@ -82,9 +82,22 @@
 //! modeled at all. `CausalHiFTGenerator` (CosyVoice 3, causal convs, no
 //! `cache_source` state) is a deliberate follow-up, not implemented.
 //!
-//! Pipeline assembly (streaming `token2wav`, chunking, cross-fade) does not
-//! exist yet, so the pipeline as a whole is **still not servable
-//! end-to-end**.
+//! Pipeline assembly (`crate::pipeline`) composes all five components -
+//! CAM++ + S3Tokenizer speaker/token analysis of a reference clip, the LM,
+//! the flow decoder, HiFT - into ONE `pipeline::generate()` call that turns
+//! text + a reference audio clip into a real, playable 24 kHz waveform
+//! (non-streaming, zero-shot voice cloning). Real weights on this box
+//! produce a real WAV file end to end (`crates/cosyvoice/tests/
+//! pipeline_e2e.rs`, `crates/cosyvoice/examples/synth.rs`); a composed
+//! regression check splices the golden's own captured prompt/generated
+//! tokens and x-vector through this crate's flow+HiFT glue and still hits
+//! their already-proven real-weight parity numbers. Streaming (chunked
+//! `token2wav`, growing-prefix re-run, Hamming cross-fade) is a deliberate,
+//! documented follow-up - see [`pipeline`]'s own module doc for the exact
+//! scope of what is and is not covered, including the RNG-crossing gaps this
+//! pipeline inherits (not introduces) from `crate::llm`/`crate::hift`, and
+//! the kaldi-fbank front end's own honest gap (no bit-exact golden exists in
+//! this workspace to check `audio::kaldi_fbank` against).
 //!
 //! Swedish Embedded AB implements solutions for from-scratch, dependency-light
 //! neural network inference on constrained and embedded targets for its
@@ -101,4 +114,5 @@ pub mod hift_config;
 pub mod hift_import;
 pub mod llm;
 pub mod llm_import;
+pub mod pipeline;
 pub mod sampling;

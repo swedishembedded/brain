@@ -13,6 +13,12 @@
 //!   * [`act`] - elementwise activation `Step`-builders (currently ELU).
 //!   * [`mel`] - STFT + mel-spectrogram features (forward), with a
 //!     mixed-radix FFT for non-power-of-two `n_fft`.
+//!   * [`kaldi_fbank`] - `torchaudio.compliance.kaldi.fbank`-compatible
+//!     mel features (a genuinely different filter shape from [`mel`]'s -
+//!     Kaldi's own triangular filters are linear in the MEL domain, not the
+//!     Hz domain), for models (CosyVoice's CAM++ speaker encoder) whose
+//!     reference front end is that Kaldi convention rather than
+//!     librosa/HTK-style.
 //!   * [`istft`] - the inverse: overlap-add ISTFT with window-sum-square
 //!     normalization, for models (like a HiFT-style vocoder) that predict a
 //!     spectrum and need it turned back into a waveform.
@@ -25,6 +31,7 @@ pub mod asr_caps;
 pub mod asr_frontend;
 pub mod conv;
 pub mod istft;
+pub mod kaldi_fbank;
 pub mod mel;
 pub mod resample;
 pub mod snake;

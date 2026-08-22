@@ -1,4 +1,4 @@
-# CosyVoice (not yet servable)
+# CosyVoice (pipeline assembled, not yet servable via `brain caps`)
 
 FunAudioLLM's LLM-based streaming zero-shot TTS: a Qwen2.5-0.5B speech-token
 LM (hosted on [Qwen3](qwen3.md)'s decoder), a causal flow-matching mel decoder
@@ -10,9 +10,11 @@ generations (`FunAudioLLM/CosyVoice2-0.5B`,
 `FunAudioLLM/Fun-CosyVoice3-0.5B-2512`) as a config, not two ids - see
 `crates/arch`'s own naming rule.
 
-**Still not servable end-to-end** - pipeline assembly (streaming `token2wav`,
-chunking) does not exist yet. The speech-token LM, flow decoder, and HiFT
-vocoder (below) are each implemented and forward-parity proven individually.
+**The non-streaming pipeline is real and runnable end to end**: text + a
+reference audio clip in, a real playable 24 kHz WAV out
+(`cosyvoice::pipeline::generate`, see "Pipeline" below) - but there is still
+no `brain caps`/CLI-verb/D-Bus surface (that is milestone M11's job), and
+streaming (chunked `token2wav`, cross-fade) is a deliberate follow-up.
 
 ## Status
 
@@ -148,18 +150,92 @@ it, while import-coverage and tiny-smoke tests still run); production
 `CausalHiFTGenerator` (CosyVoice 3, causal convs, no `cache_source` state)
 is a deliberate follow-up, not implemented.
 
-Raw-text prompt assembly (tokenizer + CosyVoice's text-normalization front
-end) is not wired up yet - parity tests drive each component from the
-golden's own pre-tokenized/pre-extracted fixtures, not from raw text or
-audio. Pipeline assembly (streaming `token2wav`, chunking, cross-fade)
-does not exist yet.
+## Pipeline (non-streaming, zero-shot cloning)
+
+`crates/cosyvoice/src/pipeline.rs` composes all five components - CAM++ +
+S3Tokenizer analysis of a reference clip, the LM, the flow decoder, HiFT -
+into one `pipeline::generate(paths, opts, text, ref_wav_path, ref_text)` call
+that turns text + a reference audio clip into a real 24 kHz waveform, exactly
+mirroring the reference's own `CosyVoiceFrontEnd.frontend_zero_shot` +
+`CosyVoiceModel.tts` (`finalize=True`, non-streaming) composition:
+
+1. Resample the reference clip to 16 kHz (CAM++ + S3Tokenizer) and 24 kHz
+   (the prompt mel) via `audio::resample::rational`.
+2. CAM++'s x-vector, from a new `torchaudio.compliance.kaldi.fbank`-compatible
+   front end (`audio::kaldi_fbank`, `num_mel_bins=80, dither=0,
+   sample_frequency=16000`) plus the reference's own per-bin time-mean
+   subtraction.
+3. S3Tokenizer's prompt speech tokens, from the existing Whisper-style
+   128-mel front end (`audio::asr_frontend::qwen_logmel`) - reused as-is, no
+   new front end needed there.
+4. The prompt mel (`pipeline::extract_prompt_mel`: magnitude spectrogram via
+   `audio::mel::power_spectrogram(MelConfig::cosyvoice_24k())` -> Slaney mel
+   filter -> `log(clamp(x, 1e-5))`, matching `matcha.utils.audio.
+   mel_spectrogram`), then the reference's own truncation rule
+   (`token_len = min(mel_frames / 2, num_speech_tokens)`) applied to BOTH the
+   prompt tokens and the prompt mel - one truncated token sequence feeds both
+   the LM's `prompt_speech_tokens` and the flow decoder's `prompt_tokens`.
+5. `CosyVoiceLm::{prefill,generate}` over `concat([prompt_text_ids,
+   target_text_ids])`, `max_tokens`/`min_len` sized off the TARGET text's own
+   token count via the reference's `max_token_text_ratio=20` /
+   `min_token_text_ratio=2`.
+6. `flow::forward` (the truncated prompt tokens ++ the LM's generated tokens,
+   the x-vector, the truncated prompt mel) -> the target mel.
+7. `hift::forward_seeded` (this pipeline's own seed) -> the final waveform.
+
+Each stage's checkpoint is imported, used, and dropped in its own block scope
+before the next stage's import runs (`minimaxmusic3::generate`'s own
+"sequential-stage RAM discipline", followed here for the same reason: `llm.pt`
+alone is 2 GB, and this box has 30 GB RAM and no discrete GPU).
+
+**Verification**: `crates/cosyvoice/tests/pipeline_e2e.rs`, three rungs -
+(1) `extract_prompt_mel` against the real `mel_real_*` golden (cosine
+**0.9999999999**, `rel_l2` 1.75e-5 - a piece of glue this milestone adds,
+never independently checked before); (2) a composed regression that splices
+the golden's own captured prompt/generated speech tokens, x-vector, and
+prompt mel through this crate's `flow::forward` and then straight into
+`hift::forward` (using the ad-hoc NSF-noise capture `hift_parity.rs` already
+documents), proving the FLOW-TO-HIFT SEAM still reproduces the reference
+without solving the LM/NSF RNG-crossing problem; (3) the actual milestone
+deliverable, `pipeline::generate()` end to end against the real reference
+clip (`resources/cosyvoice/source/asset/zero_shot_prompt.wav`) with this
+port's OWN sampling, gated structurally (finite, bounded, non-silent, a
+plausible duration, deterministic given the same seed) rather than against a
+golden waveform - see the crate's own "RNG-crossing gaps" note below for why.
+A runnable example exists at `crates/cosyvoice/examples/synth.rs`
+(`cargo run -p brain-cosyvoice --release --example synth -- ...`); there is
+no `brain caps`/CLI-verb/D-Bus surface yet (M11).
+
+**Honest, deliberately-scoped gaps in this milestone**:
+
+- **Streaming is not implemented.** `pipeline::generate` always runs the
+  non-streaming path (one Euler solve over the whole generated span, one HiFT
+  forward with no `cache_source`) - chunked `token2wav` (growing-prefix flow
+  re-run, Hamming cross-fade, `token_hop_len`/`token_overlap_len`/
+  `mel_cache_len`/`source_cache_len`) is a scoped follow-up, not attempted.
+- **The kaldi fbank front end (`audio::kaldi_fbank`) has no bit-exact golden
+  to check against in this workspace** - CAM++'s own real-weight parity test
+  reads its fbank input from a captured golden rather than computing it in
+  Rust, so this is a genuinely new, only-structurally-verified piece (ported
+  line-for-line from `torchaudio/compliance/kaldi.py`, not guessed). A
+  from-scratch capture + parity test is a recorded follow-up.
+- **End-to-end byte-exact reproduction of a reference run is not claimed and
+  is not the gate** - the LM's `ras_sampling` and HiFT's NSF noise both draw
+  from `data::rng::Rng`, not torch's Mersenne-Twister stream (documented in
+  `crate::sampling`/`crate::hift` before this milestone). `pipeline::generate`
+  is deterministic given a fixed seed and produces real, playable,
+  structurally-correct speech - "statistically equivalent, not bit-identical"
+  is the honest, intended bar here.
 
 Weights env vars:
 
 | Variable | Role |
 |---|---|
-| `BRAIN_COSYVOICE_LLM` | speech-token LM (`llm.pt`) - read by `crates/cosyvoice/tests/llm_parity.rs` |
-| `BRAIN_COSYVOICE_FLOW` | flow decoder (`flow.pt`) - read by `crates/cosyvoice/tests/flow_parity.rs` |
-| `BRAIN_COSYVOICE_HIFT` | HiFT vocoder (`hift.pt`) - read by `crates/cosyvoice/tests/hift_parity.rs` |
+| `BRAIN_COSYVOICE_LLM` | speech-token LM (`llm.pt`) |
+| `BRAIN_COSYVOICE_FLOW` | flow decoder (`flow.pt`) |
+| `BRAIN_COSYVOICE_HIFT` | HiFT vocoder (`hift.pt`) |
+| `BRAIN_COSYVOICE_TOKENIZER` | `CosyVoice-BlankEN`'s Qwen BPE identity (`vocab.json`/`merges.txt`) - tokenizer + config identity only, never weights (see `crate::llm_import`) |
+| `BRAIN_S3TOKENIZER_V2` | S3Tokenizer (`speech_tokenizer_v2.onnx`), read by [S3Tokenizer](s3tokenizer.md) |
+| `BRAIN_CAMPPLUS_DIR` | CAM++ (`campplus.onnx`), read by [CAM++](campplus.md) |
 
 Package: `brain-cosyvoice`.
