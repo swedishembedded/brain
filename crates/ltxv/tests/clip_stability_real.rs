@@ -98,7 +98,7 @@ const BOUND: f32 = 4.0;
 const MIN_MEDIAN_MOTION: f32 = 0.5;
 
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None).ok()?;
+    let p = Paths::resolve(None, None, None, None).ok()?;
     p.dit.as_ref()?;
     Some(p)
 }

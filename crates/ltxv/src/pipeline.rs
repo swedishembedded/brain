@@ -174,13 +174,13 @@ pub const OPTIONAL_PATH_VARS: [(&str, &str); 3] = [
 
 impl Paths {
     pub fn from_env() -> Result<Paths, String> {
-        Paths::resolve(None, None, None)
+        Paths::resolve(None, None, None, None)
     }
 
     /// The explicit flag wins over the environment variable, same precedence
     /// as every other weight path in this workspace. `dit`/`text_encoder`
     /// are optional in both forms (flag and env) - see this struct's doc.
-    pub fn resolve(vae: Option<&str>, dit: Option<&str>, text_encoder: Option<&str>) -> Result<Paths, String> {
+    pub fn resolve(vae: Option<&str>, dit: Option<&str>, text_encoder: Option<&str>, spatial_upsampler: Option<&str>) -> Result<Paths, String> {
         let (var, role) = PATH_VARS[0];
         let vae = match vae.filter(|s| !s.is_empty()) {
             Some(v) => v.to_string(),
@@ -194,12 +194,13 @@ impl Paths {
         };
         let dit = optional(dit, OPTIONAL_PATH_VARS[0].0);
         let text_encoder = optional(text_encoder, OPTIONAL_PATH_VARS[1].0);
-        // Env only: there is no `--spatial-upsampler` flag on `brain ltxv
-        // t2v` because the upscaler is not a choice a caller makes - it is a
-        // fixed member of the LTX-2.5 checkpoint set that the two-stage path
-        // requires and the single-stage path never touches. `brain ltxv dfr`
-        // resolves the same variable through its own `DfrPaths`.
-        let spatial_upsampler = optional(None, OPTIONAL_PATH_VARS[2].0);
+        // `brain ltxv t2v` passes `None` here and reaches the upscaler by
+        // environment only: on that command it is not a choice a caller
+        // makes, only a fixed member of the LTX-2.5 checkpoint set that the
+        // two-stage path requires and the single-stage path never touches.
+        // `brain ltxv upscale`, whose whole subject IS the upscaler, and
+        // `brain ltxv dfr` (through its own `DfrPaths`) take it as a flag.
+        let spatial_upsampler = optional(spatial_upsampler, OPTIONAL_PATH_VARS[2].0);
         Ok(Paths { vae, dit, text_encoder, spatial_upsampler })
     }
 }
@@ -1032,11 +1033,11 @@ pub fn tc_to_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize) -> Vec<f32> 
 /// out-of-memory - 25 frames at 1080p above all, which is 52.2 Mpx against a
 /// measured ~35 Mpx ceiling on a 24 GiB card.
 ///
-/// Takes `vweights` BY VALUE because the tiled path needs them across
-/// several graph builds (one per distinct tile shape), where the whole path
-/// needed them only until its single graph was recorded. They are dropped as
-/// early as each path allows.
-fn decode_video(vcfg: &LtxVaeConfig, vweights: vae::blocks::Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, latent: &[f32]) -> (Vec<f32>, usize) {
+/// Borrows `vweights`: the tiled path needs them across several graph builds
+/// (one per distinct tile shape), and [`upscale`] decodes several segments of
+/// one clip against the same weights, so neither can be handed ownership
+/// without a ~3 GB host copy.
+fn decode_video(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, latent: &[f32]) -> (Vec<f32>, usize) {
     let frames = 1 + 8 * (lat_t - 1);
     let (h, w) = (lh * 32, lw * 32);
     crate::latentdump::dump_if_requested(crate::latentdump::LatentShape { c: (latent.len() / (lat_t * lh * lw) as usize) as u32, t: lat_t, h: lh, w: lw }, latent);
@@ -1047,8 +1048,7 @@ fn decode_video(vcfg: &LtxVaeConfig, vweights: vae::blocks::Tensors, lat_t: u32,
         let px = dec.decode_with(latent, |done, total| tracing::debug!(done, total, "vae tile"));
         (px, dec.frames() as usize)
     } else {
-        let dec = LtxVaeDecoder::build(vcfg, &vweights, lat_t, lh, lw, device);
-        drop(vweights);
+        let dec = LtxVaeDecoder::build(vcfg, vweights, lat_t, lh, lw, device);
         (dec.decode(latent), dec.frames() as usize)
     }
 }
@@ -2135,6 +2135,189 @@ fn denoise_stage(sc: &StageCtx<'_>, st: &Stage<'_>, total: u32, progress: &mut i
     Ok(tc_to_chw(&final_latent[..t * c], c, sc.lat_t, lh, lw))
 }
 
+/// One refinement pass: carry `latent_chw` up with the real spatial x2 latent
+/// upscaler, then denoise it at the doubled resolution.
+///
+/// This is the tail of the reference's distilled two-stage generation
+/// (`ltx_pipelines.distilled.DistilledPipeline.__call__`) and, because it is
+/// the same operation whether the input latent came from a stage-1 denoise or
+/// from VAE-encoding a clip that finished rendering an hour ago, it is also
+/// the whole of [`upscale`]. Both reach it here rather than each carrying
+/// their own copy - the un-normalize sandwich below is a defect this crate
+/// has already shipped once (see [`crate::upsampler::upsample_video`]), and
+/// one call site is one place for it to be right.
+struct Refine<'a> {
+    upsampler_path: &'a str,
+    /// `[C, lat_t, lh1, lw1]` - the latent to carry up.
+    latent_chw: &'a [f32],
+    lat_t: usize,
+    lh1: usize,
+    lw1: usize,
+    /// The PIXEL resolution this refinement runs at, i.e. twice the latent
+    /// grid `lh1`/`lw1` describes.
+    width: usize,
+    height: usize,
+    /// [`stage2_sigmas`]'s output - a suffix of the distilled refinement
+    /// table, never an interpolated schedule (see that function's doc).
+    sigmas: &'a [f64],
+    done_before: u32,
+    label: &'static str,
+}
+
+fn upscale_and_refine(sc: &StageCtx<'_>, r: &Refine<'_>, total: u32, progress: &mut impl FnMut(u32, u32, &str)) -> Result<Vec<f32>, String> {
+    let (lh, lw) = (r.height / 32, r.width / 32);
+    progress(r.done_before, total, "spatial upscale");
+    tracing::info!(path = %r.upsampler_path, latent_h = r.lh1, latent_w = r.lw1, "real x2 latent upscale");
+    let sraw = read_any(r.upsampler_path)?;
+    let scfg = LatentUpsamplerConfig::spatial_x2();
+    let sweights = crate::import::import_upsampler(sraw, &scfg)?;
+    let ups = LatentUpsampler::build(&scfg, &sweights, r.lat_t as u32, r.lh1 as u32, r.lw1 as u32, sc.o.device.as_deref());
+    // Through `upsample_video`, NOT `upsample` directly: the upscaler was
+    // trained on raw VAE latents and needs the per-channel un-normalize/
+    // re-normalize sandwich around it. Skipping it costs half the latent's
+    // variance and decodes to a blurred clip - see that function's own doc
+    // for the measurement.
+    let (pc_mean, pc_std) = crate::vae3d::per_channel_statistics(sc.vweights);
+    let upscaled = crate::upsampler::upsample_video(&ups, &pc_mean, &pc_std, r.latent_chw);
+    let (_, _, up_lh, up_lw) = ups.out_shape();
+    drop(ups);
+    drop(sweights);
+    if (up_lh as usize, up_lw as usize) != (lh, lw) {
+        tracing::error!(got_h = up_lh, got_w = up_lw, want_h = lh, want_w = lw, "spatial upscaler produced the wrong latent grid");
+        return Err(format!("spatial upscaler produced a {up_lh}x{up_lw} latent grid, expected {lh}x{lw} for {}x{}", r.width, r.height));
+    }
+
+    // `eta = 0`: upstream's refinement stage is always the DETERMINISTIC
+    // sampler, "its 3-step refinement schedule is too short to remove freshly
+    // injected noise".
+    denoise_stage(
+        sc,
+        &Stage {
+            width: r.width,
+            height: r.height,
+            sigmas: r.sigmas,
+            eta: 0.0,
+            seed_chw: Some(&upscaled),
+            // "S2" - the refinement must not draw the same noise as whatever
+            // produced the latent it starts from.
+            seed_salt: 0x5332,
+            done_before: r.done_before,
+            label: r.label,
+        },
+        total,
+        progress,
+    )
+}
+
+/// The refinement schedule for `steps` steps: the LAST `steps + 1` entries of
+/// `STAGE_2_DISTILLED_SIGMAS`.
+///
+/// A SUFFIX, not a resampling. The distilled checkpoint denoises correctly
+/// only at the specific sigma values distillation baked in (see [`generate`]'s
+/// own `sigmas` construction for the measurement that says so), so "fewer
+/// refinement steps" can only mean "start further down the same table", never
+/// "the same span in fewer, larger hops". Asking for the full
+/// [`LTX2_STAGE2_STEPS`] reproduces upstream's own stage 2 exactly.
+fn stage2_sigmas(steps: usize) -> Result<Vec<f64>, String> {
+    if steps == 0 || steps > LTX2_STAGE2_STEPS {
+        return Err(format!(
+            "{steps} refinement steps is outside 1..={LTX2_STAGE2_STEPS} (the distilled refinement table has {} entries and this can only take a suffix of it)",
+            LTX2_STAGE2_DISTILLED_SIGMAS.len()
+        ));
+    }
+    Ok(LTX2_STAGE2_DISTILLED_SIGMAS[LTX2_STAGE2_DISTILLED_SIGMAS.len() - steps - 1..].iter().map(|&s| s as f64).collect())
+}
+
+/// Build the denoiser [`generate`] and [`upscale`] both run: the tiny
+/// random-weight config, or the real 22B checkpoint streamed int8-compute
+/// when `GenOpts::dit_config` names it (needs [`Paths::dit`]).
+fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, place: crate::devplan::Placement) -> Result<Box<dyn Denoiser>, String> {
+    if o.dit_config == "tiny" {
+        // Not a real model: random weights, so any output is a wiring proof
+        // and nothing else. Worth a warning rather than an info line - a run
+        // that silently produced noise because a checkpoint path was unset is
+        // the most expensive way to discover this.
+        tracing::warn!("--dit-config tiny: building a RANDOM-weight DiT, output is a smoke test and carries no semantics");
+        let weight_seed = o.seed ^ 0x4c_54_58_76_44_49_54; // "LTXvDIT" folded into the seed, so the same --seed reproduces the same weights
+        let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
+        return Ok(Box::new(LtxDit::new(dit_cfg, weights, o.device.as_deref())));
+    }
+    let dit_path = paths.dit.as_ref().ok_or_else(|| {
+        tracing::error!(dit_config = %o.dit_config, "no real DiT checkpoint configured for a real dit-config");
+        format!("ltxv dit-config {:?} needs a real checkpoint: pass --dit <path> or set BRAIN_LTXV_DIT", o.dit_config)
+    })?;
+    tracing::info!(path = %dit_path, "opening the real DiT GGUF");
+    let src = crate::gguf_src::LtxvGgufSource::open(dit_path).inspect_err(|e| tracing::error!(path = %dit_path, error = %e, "opening the DiT GGUF failed"))?;
+    let real_cfg = src.config().video;
+    if real_cfg != dit_cfg {
+        tracing::error!(path = %dit_path, dit_config = %o.dit_config, "the checkpoint's embedded config does not match the named build config");
+        return Err(format!("ltxv: {dit_path}'s own embedded config does not match LtxDitConfig::{:?}() - checkpoint/build mismatch", o.dit_config));
+    }
+    let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
+    tracing::info!(layers = real_cfg.num_layers, inner_dim = real_cfg.inner_dim, head_tensors = head.len(), "real DiT ready (blocks stream per forward)");
+    // Keyed on the checkpoint, not on this call: the same store is handed to
+    // the next generation against the same file (see `RealDit`'s doc and
+    // `crate::weightcache`).
+    let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
+    let cs = cache.stats();
+    tracing::info!(cached_blocks = cs.blocks, cached_bytes = cs.bytes, "checkpoint weight cache attached");
+    Ok(Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default() }))
+}
+
+/// The text conditioning both [`generate`] and [`upscale`] denoise against:
+/// real Gemma-4 when [`Paths::text_encoder`] is set ([`real_text_context`]),
+/// otherwise the deterministic-but-meaningless stub every earlier milestone
+/// used (see this module's doc on [`context_stub`]). `context_len` therefore
+/// comes from the real tokenizer's own output length in the former case, not
+/// [`GenOpts::context_len`] (which only ever sized the stub).
+///
+/// `text_encode_secs` is written rather than returned so a caller's
+/// [`Timings`] field is filled in exactly when the real encoder ran.
+fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts, place: crate::devplan::Placement, text_encode_secs: &mut f32) -> Result<TextContext, String> {
+    let Some(te_path) = &paths.text_encoder else {
+        // Same class of silent-nonsense as the tiny DiT: the prompt reaches
+        // the model only as a hash-derived stub.
+        tracing::warn!("no text encoder configured: the prompt is being replaced by a deterministic STUB context and carries no meaning");
+        let prompt_mix = o.seed ^ fnv1a(prompt);
+        let dim = dit_cfg.cross_attention_dim as usize;
+        let n = o.context_len;
+        // Padded exactly like [`real_text_context`]'s own real context (see
+        // [`padded_context_len`]'s doc) - a no-op (`context_len == n`) for
+        // every config whose connector is disabled, e.g. `LtxDitConfig::tiny`,
+        // so this stays byte-identical to the pre-real-DiT behavior there.
+        let context_len = padded_context_len(&dit_cfg, n);
+        let stub = context_stub(n, dim, prompt_mix);
+        let mut ctx_cond = vec![0f32; context_len * dim];
+        ctx_cond[..stub.len()].copy_from_slice(&stub);
+        // The "unconditional" branch has no real empty-prompt encoding
+        // either; an all-zero context is the closest honest stand-in (most
+        // text encoders map an empty string close to zero after their own
+        // normalization) and, crucially, is DIFFERENT from `ctx_cond` - so
+        // the CFG fold in `denoise` is exercised for real rather than folding
+        // two identical branches.
+        let ctx_uncond = vec![0f32; context_len * dim];
+        // Real for the first `n` positions, invalid (register-substituted by
+        // the connector when enabled) for the padded tail - all-valid when
+        // `context_len == n` (connector disabled), unchanged from the
+        // pre-padding behavior.
+        let mut context_valid = vec![0f32; context_len];
+        context_valid[..n].fill(1.0);
+        return Ok((ctx_cond, ctx_uncond, context_valid, context_len));
+    };
+    tracing::info!(path = %te_path, "encoding the prompt with the real text encoder");
+    let te_t = std::time::Instant::now();
+    // On the card the conditional DiT forward will NOT use, when the plan has
+    // one to spare: the 12B encoder's own device footprint is then released
+    // from a card that is not about to hold the denoise loop's activations.
+    // See `crate::devplan`.
+    let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref()))?
+        .inspect(|(_, _, _, n)| tracing::info!(context_len = n, "prompt encoded"))
+        .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?;
+    *text_encode_secs = te_t.elapsed().as_secs_f32();
+    tracing::info!(secs = *text_encode_secs, "text encode done");
+    Ok(r)
+}
+
 /// Text to video. `progress(done, total, phase)` mirrors `wan::pipeline::
 /// generate`'s contract; `cancel` is polled once per denoise step. `prompt`
 /// only ever reaches [`context_stub`] (see this module's doc - there is no
@@ -2223,37 +2406,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     tracing::info!(cond_gpu = ?place.cond, uncond_gpu = ?place.uncond, text_gpu = ?place.text, cfg_parallel = place.cfg_is_parallel() && o.guidance > 1.0, "device placement resolved");
     progress(0, total, "build transformer");
     let build_t = Instant::now();
-    let dit: Box<dyn Denoiser> = if o.dit_config == "tiny" {
-        // Not a real model: random weights, so any output is a wiring proof
-        // and nothing else. Worth a warning rather than an info line - a run
-        // that silently produced noise because a checkpoint path was unset is
-        // the most expensive way to discover this.
-        tracing::warn!("--dit-config tiny: building a RANDOM-weight DiT, output is a smoke test and carries no semantics");
-        let weight_seed = o.seed ^ 0x4c_54_58_76_44_49_54; // "LTXvDIT" folded into the seed, so the same --seed reproduces the same weights
-        let weights: Tensors = random_tiny_weights(&dit_cfg, weight_seed);
-        Box::new(LtxDit::new(dit_cfg, weights, o.device.as_deref()))
-    } else {
-        let dit_path = paths.dit.as_ref().ok_or_else(|| {
-            tracing::error!(dit_config = %o.dit_config, "no real DiT checkpoint configured for a real dit-config");
-            format!("ltxv dit-config {:?} needs a real checkpoint: pass --dit <path> or set BRAIN_LTXV_DIT", o.dit_config)
-        })?;
-        tracing::info!(path = %dit_path, "opening the real DiT GGUF");
-        let src = crate::gguf_src::LtxvGgufSource::open(dit_path).inspect_err(|e| tracing::error!(path = %dit_path, error = %e, "opening the DiT GGUF failed"))?;
-        let real_cfg = src.config().video;
-        if real_cfg != dit_cfg {
-            tracing::error!(path = %dit_path, dit_config = %o.dit_config, "the checkpoint's embedded config does not match the named build config");
-            return Err(format!("ltxv: {dit_path}'s own embedded config does not match LtxDitConfig::{:?}() - checkpoint/build mismatch", o.dit_config));
-        }
-        let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
-        tracing::info!(layers = real_cfg.num_layers, inner_dim = real_cfg.inner_dim, head_tensors = head.len(), "real DiT ready (blocks stream per forward)");
-        // Keyed on the checkpoint, not on this call: the same store is
-        // handed to the next generation against the same file (see
-        // `RealDit`'s doc and `crate::weightcache`).
-        let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
-        let cs = cache.stats();
-        tracing::info!(cached_blocks = cs.blocks, cached_bytes = cs.bytes, "checkpoint weight cache attached");
-        Box::new(RealDit { cfg: real_cfg, src, head, device: o.device.clone(), cache, place, sessions: Default::default() })
-    };
+    let dit = build_denoiser(paths, dit_cfg, o, place)?;
     timings.build_dit = build_t.elapsed().as_secs_f32();
     tracing::info!(secs = timings.build_dit, "transformer built");
     if cancel.is_cancelled() {
@@ -2262,59 +2415,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     }
 
     // ---- denoise ----------------------------------------------------------
-    // Real Gemma-4 conditioning when `Paths::text_encoder` is set
-    // ([`real_text_context`]); otherwise the same deterministic-but-
-    // meaningless stub every earlier milestone used (see this module's doc
-    // on [`context_stub`]). `context_len` therefore comes from the real
-    // tokenizer's own output length in the former case, not
-    // `GenOpts::context_len` (which only ever sized the stub).
-    let (ctx_cond, ctx_uncond, context_valid, context_len) = match &paths.text_encoder {
-        Some(te_path) => {
-            tracing::info!(path = %te_path, "encoding the prompt with the real text encoder");
-            let te_t = std::time::Instant::now();
-            // On the card the conditional DiT forward will NOT use, when the
-            // plan has one to spare: the 12B encoder's own device footprint
-            // is then released from a card that is not about to hold the
-            // denoise loop's activations. See `crate::devplan`.
-            let r = crate::devplan::on_gpu(place.text, || real_text_context(te_path, prompt, &dit_cfg, o.guidance, o.device.as_deref()))?
-                .inspect(|(_, _, _, n)| tracing::info!(context_len = n, "prompt encoded"))
-                .inspect_err(|e| tracing::error!(path = %te_path, error = %e, "text encoding failed"))?;
-            timings.text_encode = te_t.elapsed().as_secs_f32();
-            tracing::info!(secs = timings.text_encode, "text encode done");
-            r
-        }
-        None => {
-            // Same class of silent-nonsense as the tiny DiT above: the prompt
-            // reaches the model only as a hash-derived stub.
-            tracing::warn!("no text encoder configured: the prompt is being replaced by a deterministic STUB context and carries no meaning");
-            let prompt_mix = o.seed ^ fnv1a(prompt);
-            let dim = dit_cfg.cross_attention_dim as usize;
-            let n = o.context_len;
-            // Padded exactly like [`real_text_context`]'s own real context
-            // (see [`padded_context_len`]'s doc) - a no-op (`context_len ==
-            // n`) for every config whose connector is disabled, e.g.
-            // `LtxDitConfig::tiny`, so this stays byte-identical to the
-            // pre-real-DiT behavior there.
-            let context_len = padded_context_len(&dit_cfg, n);
-            let stub = context_stub(n, dim, prompt_mix);
-            let mut ctx_cond = vec![0f32; context_len * dim];
-            ctx_cond[..stub.len()].copy_from_slice(&stub);
-            // The "unconditional" branch has no real empty-prompt encoding
-            // either; an all-zero context is the closest honest stand-in
-            // (most text encoders map an empty string close to zero after
-            // their own normalization) and, crucially, is DIFFERENT from
-            // `ctx_cond` - so the CFG fold in `denoise` is exercised for
-            // real rather than folding two identical branches.
-            let ctx_uncond = vec![0f32; context_len * dim];
-            // Real for the first `n` positions, invalid (register-
-            // substituted by the connector when enabled) for the padded
-            // tail - all-valid when `context_len == n` (connector
-            // disabled), unchanged from the pre-padding behavior.
-            let mut context_valid = vec![0f32; context_len];
-            context_valid[..n].fill(1.0);
-            (ctx_cond, ctx_uncond, context_valid, context_len)
-        }
-    };
+    let (ctx_cond, ctx_uncond, context_valid, context_len) = build_context(paths, prompt, dit_cfg, o, place, &mut timings.text_encode)?;
 
     // ---- the stage plan ---------------------------------------------------
     // `vraw`/`vweights` are loaded here (not at decode time below, which
@@ -2362,41 +2463,17 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
             &mut progress,
         )?;
 
-        progress(sigmas.len() as u32 - 1, total, "spatial upscale");
-        tracing::info!(path = %upsampler_path, latent_h = lh1, latent_w = lw1, "real x2 latent upscale");
-        let sraw = read_any(upsampler_path)?;
-        let scfg = LatentUpsamplerConfig::spatial_x2();
-        let sweights = crate::import::import_upsampler(sraw, &scfg)?;
-        let ups = LatentUpsampler::build(&scfg, &sweights, lat_t as u32, lh1 as u32, lw1 as u32, o.device.as_deref());
-        // Through `upsample_video`, NOT `upsample` directly: the upscaler was
-        // trained on raw VAE latents and needs the per-channel un-normalize/
-        // re-normalize sandwich around it. Skipping it costs half the
-        // latent's variance and decodes to a blurred clip - see that
-        // function's own doc for the measurement.
-        let (pc_mean, pc_std) = crate::vae3d::per_channel_statistics(&vweights);
-        let upscaled = crate::upsampler::upsample_video(&ups, &pc_mean, &pc_std, &stage1);
-        let (_, _, up_lh, up_lw) = ups.out_shape();
-        drop(ups);
-        drop(sweights);
-        if (up_lh as usize, up_lw as usize) != (lh, lw) {
-            tracing::error!(got_h = up_lh, got_w = up_lw, want_h = lh, want_w = lw, "spatial upscaler produced the wrong latent grid");
-            return Err(format!("spatial upscaler produced a {up_lh}x{up_lw} latent grid, expected {lh}x{lw} for {}x{}", o.width, o.height));
-        }
-
-        // `STAGE_2_DISTILLED_SIGMAS`, and `eta = 0`: upstream's stage 2 is
-        // always the DETERMINISTIC sampler, "its 3-step refinement schedule
-        // is too short to remove freshly injected noise".
-        let sigmas2: Vec<f64> = LTX2_STAGE2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect();
-        denoise_stage(
+        upscale_and_refine(
             &stage_ctx,
-            &Stage {
+            &Refine {
+                upsampler_path,
+                latent_chw: &stage1,
+                lat_t,
+                lh1,
+                lw1,
                 width: o.width,
                 height: o.height,
-                sigmas: &sigmas2,
-                eta: 0.0,
-                seed_chw: Some(&upscaled),
-                // "S2" - the two stages must not draw the same noise.
-                seed_salt: 0x5332,
+                sigmas: &stage2_sigmas(LTX2_STAGE2_STEPS)?,
                 done_before: sigmas.len() as u32 - 1,
                 label: "stage2",
             },
@@ -2438,15 +2515,31 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // `denoise_stage` already stripped any appended image-conditioning tokens
     // and returned the `[C, lat_t, lh, lw]` video latent - the conditioning
     // frame is the source image itself, not a new frame to render.
-    let (pixels, frames) = decode_video(&vcfg, vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref(), &final_chw);
+    let (pixels, frames) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref(), &final_chw);
     let (w, h) = (o.width, o.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
     }
-    // No clamp is applied by the model itself - upstream clamps to [-1,1]
-    // outside it, same convention `wan::pipeline` follows for its own VAE.
+    let out = chw_to_rgb8(&pixels, frames, h, w);
+    timings.decode = decode_t.elapsed().as_secs_f32();
+    tracing::info!(secs = timings.decode, frames, "VAE decode done");
+    progress(total, total, "done");
+    tracing::info!(frames, width = w, height = h, fps = o.fps, total_secs = timings.total(), "generation done");
+    Ok((Video { width: w as u32, height: h as u32, fps: o.fps, frames: out }, timings))
+}
+
+// ============================================================================
+// Post-hoc upscaling of an already-rendered clip
+// ============================================================================
+
+/// `[3, frames, h, w]` VAE output in `[-1,1]` to [`Video::frames`]'
+/// interleaved RGB8.
+///
+/// No clamp is applied by the model itself - upstream clamps to `[-1,1]`
+/// outside it, same convention `wan::pipeline` follows for its own VAE.
+fn chw_to_rgb8(pixels: &[f32], frames: usize, h: usize, w: usize) -> Vec<Vec<u8>> {
     let plane = frames * h * w;
-    let out: Vec<Vec<u8>> = (0..frames)
+    (0..frames)
         .map(|f| {
             let mut px = vec![0u8; h * w * 3];
             for c in 0..3 {
@@ -2457,12 +2550,287 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
             }
             px
         })
-        .collect();
-    timings.decode = decode_t.elapsed().as_secs_f32();
-    tracing::info!(secs = timings.decode, frames, "VAE decode done");
+        .collect()
+}
+
+/// The inverse of [`chw_to_rgb8`] over a slice of a clip's frames: interleaved
+/// RGB8 to the `[3, frames, h, w]` `[-1,1]` volume [`LtxVaeEncoder::encode`]
+/// takes. Same `[0,255] -> [-1,1]` map [`encode_still`] uses for a single
+/// conditioning image.
+fn rgb8_to_chw(frames: &[Vec<u8>], h: usize, w: usize) -> Vec<f32> {
+    let plane = frames.len() * h * w;
+    let mut out = vec![0f32; 3 * plane];
+    for (f, px) in frames.iter().enumerate() {
+        for i in 0..h * w {
+            for c in 0..3 {
+                out[c * plane + f * h * w + i] = (px[i * 3 + c] as f32 / 127.5) - 1.0;
+            }
+        }
+    }
+    out
+}
+
+/// The largest video-token count [`upscale`] will put through ONE refinement
+/// pass before it splits the clip instead.
+///
+/// **Derived, not measured, and deliberately conservative.** The DiT's
+/// per-forward adaLN table is `[t, 9 * inner_dim]` fp32 - 147456 bytes per
+/// token at the real checkpoint's `inner_dim = 4096` - against a
+/// `max_storage_buffer_binding_size` this box's Tesla P40 reports as 2047
+/// MiB, which that ONE table crosses at t ~= 14556. This constant sits below
+/// that with room for the other per-forward slabs, and above 8160, the
+/// largest refinement token count this crate has a recorded real run at (the
+/// two-stage 1080p path). Where between those the real limit sits is not
+/// measured and this number does not pretend to know; the binding size is
+/// also a per-adapter figure, so a card that reports less would move the
+/// crossover down.
+///
+/// Two things it is NOT. It is not [`SINGLE_STAGE_MAX_TOKENS`], which is a
+/// QUALITY ceiling on building structure from noise; refinement starts from
+/// content and is not subject to it. And it does not bound [`generate`],
+/// whose stage 2 runs whatever the requested resolution implies - exceeding
+/// the binding limit there fails LOUDLY at buffer creation
+/// (`Buffer size N is greater than the maximum buffer size`), so this is
+/// about not spending an hour to reach that abort, not about avoiding silent
+/// corruption.
+pub const REFINE_MAX_TOKENS: usize = 12288;
+
+/// How [`upscale`] splits a clip whose refinement will not fit in one pass:
+/// `(first_frame, frame_count)` per segment, in order.
+///
+/// Segments overlap their predecessor by exactly ONE pixel frame, and that is
+/// forced by the causal VAE rather than chosen. Every clip it can represent
+/// has `1 + 8k` frames - the first frame gets a latent frame to itself and
+/// every later latent frame covers 8 - so `n` disjoint segments of that shape
+/// can only ever sum to `n + 8 * sum(k_i)`, which equals a `1 + 8K` clip only
+/// for `n == 1`. Sharing one frame at each boundary makes the arithmetic
+/// close for any `n`: the covered length is `sum(1 + 8k_i) - (n - 1) =
+/// 1 + 8 * sum(k_i)`. The shared frame is re-rendered by the later segment
+/// and its earlier copy discarded.
+///
+/// Segments are as equal in length as the split allows rather than "fill,
+/// fill, remainder", so no clip ends on a 9-frame stub refined with a
+/// different amount of temporal context than everything before it.
+///
+/// **The seam is real and is not blended.** Each segment is refined
+/// independently, so fine detail can step at a boundary. That is the price of
+/// refining a clip longer than one pass can hold, and it is a visible,
+/// bounded artefact rather than the silent end-of-clip disintegration
+/// [`SINGLE_STAGE_MAX_TOKENS`] documents. A clip that fits is never split.
+pub fn refine_segments(frames: usize, out_lh: usize, out_lw: usize) -> Result<Vec<(usize, usize)>, String> {
+    if frames == 0 || (frames - 1) % 8 != 0 {
+        return Err(format!("{frames} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)"));
+    }
+    let per_frame = out_lh.checked_mul(out_lw).filter(|&n| n > 0).ok_or_else(|| format!("a {out_lh}x{out_lw} latent grid is not a grid"))?;
+    // Two latent frames is the shortest segment worth running (9 pixel
+    // frames); a grid where even that does not fit cannot be rescued by
+    // splitting, so say so instead of returning a plan that cannot run.
+    let max_lat = REFINE_MAX_TOKENS / per_frame;
+    if max_lat < 2 {
+        return Err(format!(
+            "a {}x{} output ({per_frame} tokens per latent frame) leaves no room for even a 9-frame refinement segment under the {REFINE_MAX_TOKENS}-token ceiling - upscale a smaller clip",
+            out_lw * 32,
+            out_lh * 32
+        ));
+    }
+    let k_total = (frames - 1) / 8;
+    let k_max = max_lat - 1;
+    if k_total <= k_max {
+        return Ok(vec![(0, frames)]);
+    }
+    let n = k_total.div_ceil(k_max);
+    let (base, rem) = (k_total / n, k_total % n);
+    let mut plan = Vec::with_capacity(n);
+    let mut start = 0usize;
+    for i in 0..n {
+        let k = base + usize::from(i < rem);
+        plan.push((start, 1 + 8 * k));
+        start += 8 * k;
+    }
+    Ok(plan)
+}
+
+/// Everything [`upscale`] varies beyond what a generation already varies.
+#[derive(Clone, Debug)]
+pub struct UpscaleOpts {
+    /// Spatial factor. Only `2` - that is the factor the official checkpoint
+    /// (`ltx-2.5-latent-spatial-upscaler-x2-*`) implements, and there is no
+    /// second one to select.
+    pub factor: usize,
+    /// Refinement steps, `1..=`[`LTX2_STAGE2_STEPS`]. See [`stage2_sigmas`]
+    /// for why this can only pick a suffix of the distilled table.
+    pub refine_steps: usize,
+    /// Seed, guidance, device placement, `dit_config`. `frames`, `width` and
+    /// `height` are IGNORED - they come from the input clip, which is the
+    /// whole point of this entry point.
+    pub base: GenOpts,
+}
+
+impl Default for UpscaleOpts {
+    fn default() -> UpscaleOpts {
+        UpscaleOpts { factor: 2, refine_steps: LTX2_STAGE2_STEPS, base: GenOpts::default() }
+    }
+}
+
+/// Re-render an already-finished clip at twice its spatial resolution:
+/// VAE-encode it, carry the latent up with the official x2 latent spatial
+/// upscaler, refine at the new size, VAE-decode.
+///
+/// This is [`generate`]'s two-stage tail with the generation removed - the
+/// same [`upscale_and_refine`], the same upscaler, the same un-normalize
+/// sandwich, the same distilled refinement schedule - applied to a latent
+/// that came from pixels on disk instead of from stage 1. Nothing about the
+/// mechanics is re-derived here; what this function adds is the encode, the
+/// segmentation ([`refine_segments`]) and the reassembly.
+///
+/// **`prompt` matters.** The refinement is a diffusion pass, not a
+/// deterministic filter: the DiT is asked what this content should look like
+/// with more detail, and it answers against the text context. Passing the
+/// clip's original generation prompt is worth doing; passing an empty string
+/// is legal and refines against an empty context, which costs detail. There
+/// is no way to recover a prompt from a video file, so the caller has to
+/// supply it.
+#[tracing::instrument(level = "info", name = "upscale", skip_all, fields(frames = clip.frames.len(), width = clip.width, height = clip.height, factor = o.factor, seed = o.base.seed))]
+pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    if o.factor != 2 {
+        return Err(format!(
+            "factor {} is not implemented: the official LTX-2.5 latent spatial upscaler is an x2 network and this pipeline runs that network, not a resampler",
+            o.factor
+        ));
+    }
+    let (w, h) = (clip.width as usize, clip.height as usize);
+    let frames = clip.frames.len();
+    if w == 0 || h == 0 || frames == 0 {
+        return Err("the input clip is empty".into());
+    }
+    if !w.is_multiple_of(32) || !h.is_multiple_of(32) {
+        return Err(format!("{w}x{h} is not a multiple of 32 (the VAE's spatial stride) - the input clip has to be VAE-representable before it can be upscaled"));
+    }
+    if let Some(bad) = clip.frames.iter().position(|f| f.len() != w * h * 3) {
+        return Err(format!("frame {bad} is {} bytes, expected {} for {w}x{h} RGB8", clip.frames[bad].len(), w * h * 3));
+    }
+    let (out_w, out_h) = (w * o.factor, h * o.factor);
+    let (lh, lw) = (out_h / 32, out_w / 32);
+    let plan = refine_segments(frames, lh, lw)?;
+    let sigmas = stage2_sigmas(o.refine_steps)?;
+
+    let vcfg = LtxVaeConfig::conv25();
+    let dit_cfg = dit_config_from_name(&o.base.dit_config).inspect_err(|e| tracing::error!(dit_config = %o.base.dit_config, error = %e, "unknown DiT config"))?;
+    if dit_cfg.in_channels != vcfg.latent_channels {
+        return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", o.base.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
+    }
+    let upsampler_path = paths.spatial_upsampler.as_deref().ok_or_else(|| {
+        let (var, role) = OPTIONAL_PATH_VARS[2];
+        tracing::error!("upscaling needs the spatial latent upscaler");
+        format!("upscaling IS the spatial latent upscaler: pass --upsampler-spatial <path> or set {var} to the {role} (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors)")
+    })?;
+    tracing::info!(segments = plan.len(), out_width = out_w, out_height = out_h, refine_steps = o.refine_steps, "upscale planned");
+    if plan.len() > 1 {
+        // Not a defect and not silent: say it once, with the number, so a
+        // seam in the output is expected rather than investigated.
+        tracing::warn!(
+            segments = plan.len(),
+            tokens_per_pass = REFINE_MAX_TOKENS,
+            "the clip is longer than one refinement pass can hold and is refined in independent segments; fine detail may step at each boundary"
+        );
+    }
+
+    // Phases: build, then per segment one encode, one upscale, its refinement
+    // steps and one decode.
+    let per_segment = 3 + o.refine_steps as u32;
+    let total = 1 + plan.len() as u32 * per_segment;
+    let mut timings = Timings::default();
+    let place = o.base.devices.resolve(o.base.device.as_deref());
+    tracing::info!(cond_gpu = ?place.cond, uncond_gpu = ?place.uncond, text_gpu = ?place.text, "device placement resolved");
+
+    progress(0, total, "build transformer");
+    let build_t = Instant::now();
+    let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    timings.build_dit = build_t.elapsed().as_secs_f32();
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+    if prompt.trim().is_empty() {
+        // The one quality lever a caller can accidentally leave at zero, and
+        // the output looks plausible either way - see this function's doc.
+        tracing::warn!("no prompt: the refinement pass will denoise against an empty text context, which costs detail it would otherwise recover");
+    }
+    let (ctx_cond, ctx_uncond, context_valid, context_len) = build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
+
+    let vweights = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
+    let in_channels = dit_cfg.in_channels as usize;
+    let work_t = Instant::now();
+    let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(frames);
+    // VAE encode and VAE decode both land in `Timings::decode` - it is the
+    // VAE's share of the run, and this entry point runs the encoder too.
+    let mut vae_secs = 0.0f32;
+
+    for (si, &(start, len)) in plan.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
+        let done_before = 1 + si as u32 * per_segment;
+        let lat_t = vcfg.latent_frames(len as u32).expect("refine_segments only emits 1 + 8k segments") as usize;
+        progress(done_before, total, "vae encode");
+        tracing::info!(segment = si, first_frame = start, frames = len, latent_frames = lat_t, "encoding a segment");
+        let enc_t = Instant::now();
+        let encoder = LtxVaeEncoder::build(&vcfg, &vweights, len as u32, h as u32, w as u32, o.base.device.as_deref());
+        let latent = encoder.encode(&rgb8_to_chw(&clip.frames[start..start + len], h, w));
+        drop(encoder);
+        vae_secs += enc_t.elapsed().as_secs_f32();
+
+        // `frames`/`width`/`height` here describe THIS segment at the INPUT
+        // resolution; the refinement itself runs at the doubled size, which
+        // `Refine` carries separately. Image conditioning is cleared: this
+        // entry point's content comes from the clip, not from a still.
+        let seg_opts = GenOpts { frames: len, width: w, height: h, start_frame: None, end_frame: None, ..o.base.clone() };
+        let sc = StageCtx {
+            dit: dit.as_ref(),
+            vcfg: &vcfg,
+            vweights: &vweights,
+            o: &seg_opts,
+            lat_t,
+            in_channels,
+            ctx_cond: &ctx_cond,
+            ctx_uncond: &ctx_uncond,
+            context_valid: &context_valid,
+            context_len,
+            cancel,
+        };
+        let refined = upscale_and_refine(
+            &sc,
+            &Refine { upsampler_path, latent_chw: &latent, lat_t, lh1: h / 32, lw1: w / 32, width: out_w, height: out_h, sigmas: &sigmas, done_before: done_before + 1, label: "refine" },
+            total,
+            &mut progress,
+        )?;
+
+        progress(done_before + per_segment - 1, total, "vae decode");
+        let dec_t = Instant::now();
+        let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &refined);
+        vae_secs += dec_t.elapsed().as_secs_f32();
+        if got != len || pixels.len() != 3 * got * out_h * out_w {
+            return Err(format!("segment {si} decoded to {got} frames / {} values, expected {len} / {}", pixels.len(), 3 * len * out_h * out_w));
+        }
+        // Every segment after the first re-renders its predecessor's last
+        // frame (see `refine_segments`); the later rendering is the one that
+        // shares a refinement pass with the frames that follow it, so it is
+        // the one kept.
+        let rgb = chw_to_rgb8(&pixels, got, out_h, out_w);
+        out_frames.extend(rgb.into_iter().skip(usize::from(si > 0)));
+    }
+    drop(dit);
+    timings.decode = vae_secs;
+    timings.denoise = (work_t.elapsed().as_secs_f32() - vae_secs).max(0.0);
+    timings.steps = o.refine_steps * plan.len();
+    timings.tokens = plan.iter().map(|&(_, len)| (1 + (len - 1) / 8) * lh * lw).max().unwrap_or(0);
+    timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+
+    if out_frames.len() != frames {
+        return Err(format!("reassembled {} frames from {} segments, expected {frames}", out_frames.len(), plan.len()));
+    }
     progress(total, total, "done");
-    tracing::info!(frames, width = w, height = h, fps = o.fps, total_secs = timings.total(), "generation done");
-    Ok((Video { width: w as u32, height: h as u32, fps: o.fps, frames: out }, timings))
+    tracing::info!(frames, width = out_w, height = out_h, segments = plan.len(), total_secs = timings.total(), "upscale done");
+    Ok((Video { width: out_w as u32, height: out_h as u32, fps: clip.fps, frames: out_frames }, timings))
 }
 
 // ============================================================================
@@ -2875,7 +3243,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // ---- decode -------------------------------------------------------------
     progress(total_phases - 1, total_phases, "vae decode");
     let decode_t = Instant::now();
-    let (pixels, frames) = decode_video(&vcfg, vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref(), &video_chw);
+    let (pixels, frames) = decode_video(&vcfg, &vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref(), &video_chw);
     let (w, h) = (base.width, base.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
@@ -2973,16 +3341,16 @@ mod tests {
     #[test]
     fn an_explicit_vae_path_beats_the_environment_variable() {
         std::env::set_var("BRAIN_LTXV_VAE", "env-vae");
-        let p = Paths::resolve(None, None, None).expect("from env");
+        let p = Paths::resolve(None, None, None, None).expect("from env");
         assert_eq!(p.vae, "env-vae");
         assert_eq!(p.dit, None);
         assert_eq!(p.text_encoder, None);
-        let p = Paths::resolve(Some("/flag/vae"), None, None).expect("flag wins");
+        let p = Paths::resolve(Some("/flag/vae"), None, None, None).expect("flag wins");
         assert_eq!(p.vae, "/flag/vae");
-        let p = Paths::resolve(Some(""), None, None).expect("empty flag falls through");
+        let p = Paths::resolve(Some(""), None, None, None).expect("empty flag falls through");
         assert_eq!(p.vae, "env-vae");
         std::env::remove_var("BRAIN_LTXV_VAE");
-        let e = Paths::resolve(None, None, None).unwrap_err();
+        let e = Paths::resolve(None, None, None, None).unwrap_err();
         assert!(e.contains("--vae") && e.contains("BRAIN_LTXV_VAE"), "{e}");
     }
 
@@ -2993,16 +3361,16 @@ mod tests {
     fn the_optional_real_checkpoint_paths_resolve_flag_over_env_and_are_none_when_absent() {
         std::env::remove_var("BRAIN_LTXV_DIT");
         std::env::remove_var("BRAIN_LTXV_TEXT_ENCODER");
-        let p = Paths::resolve(Some("/vae"), None, None).expect("vae only");
+        let p = Paths::resolve(Some("/vae"), None, None, None).expect("vae only");
         assert_eq!(p.dit, None);
         assert_eq!(p.text_encoder, None);
 
         std::env::set_var("BRAIN_LTXV_DIT", "env-dit");
         std::env::set_var("BRAIN_LTXV_TEXT_ENCODER", "env-te");
-        let p = Paths::resolve(Some("/vae"), None, None).expect("from env");
+        let p = Paths::resolve(Some("/vae"), None, None, None).expect("from env");
         assert_eq!(p.dit, Some("env-dit".to_string()));
         assert_eq!(p.text_encoder, Some("env-te".to_string()));
-        let p = Paths::resolve(Some("/vae"), Some("/flag-dit"), Some("/flag-te")).expect("flag wins");
+        let p = Paths::resolve(Some("/vae"), Some("/flag-dit"), Some("/flag-te"), None).expect("flag wins");
         assert_eq!(p.dit, Some("/flag-dit".to_string()));
         assert_eq!(p.text_encoder, Some("/flag-te".to_string()));
         std::env::remove_var("BRAIN_LTXV_DIT");

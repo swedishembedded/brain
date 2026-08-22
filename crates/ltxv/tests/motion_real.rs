@@ -131,7 +131,7 @@ fn base_opts() -> GenOpts {
 /// The real checkpoints, or `None` (SKIP) - same resolution order the CLI
 /// uses.
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None).ok()?;
+    let p = Paths::resolve(None, None, None, None).ok()?;
     p.dit.as_ref()?;
     Some(p)
 }

@@ -17,7 +17,7 @@
 //! deterministic noise/context seed). See `ltxv::pipeline`'s module doc for
 //! the full account of what is real here and what is not.
 
-use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, Paths};
+use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, Paths, UpscaleOpts};
 
 const HELP: &str = r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: real VAE + tiny random-weight DiT, no real text encoder yet)
 
@@ -109,7 +109,81 @@ Devices:
 
 Subcommands:
   brain ltxv t2v --help       text to video (this command)
+  brain ltxv upscale --help   re-render a finished clip at 2x
   brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test"#;
+
+const UPSCALE_HELP: &str = r#"brain ltxv upscale - re-render a finished clip at twice its resolution
+
+  brain ltxv upscale --input <clip.mp4> --output-path <out.mp4> [options]
+
+Reads a video file that already exists, VAE-encodes it, carries the latent up
+with the OFFICIAL LTX-2.5 x2 latent spatial upscaler, refines at the new size
+on the distilled refinement schedule, and VAE-decodes back to a container.
+This is exactly the tail of a two-stage generation (see the Stages section of
+`brain ltxv t2v --help`), applied to pixels that finished rendering rather
+than to a stage-1 latent - the same upscaler network and the same code.
+
+It is NOT a pixel-space resampler: the refinement is a diffusion pass, so it
+adds detail the source frames do not contain, and it answers to --prompt.
+
+Required:
+  --input <file>             the clip to upscale (anything ffmpeg reads). Its
+                             width and height must be multiples of 32 and its
+                             frame count of the form 1 + 8k, which is what
+                             this pipeline's own output always is
+  --output-path <file>       .mp4 / .mkv / .webm / .gif; without ffmpeg the
+                             frames are written to <file>.frames/ and the
+                             command that finishes the job is printed
+
+Refinement:
+  --prompt <text>            what the clip shows. STRONGLY recommended: the
+                             refinement denoises against this text context,
+                             so omitting it refines against an empty prompt
+                             and costs the detail it exists to recover. Use
+                             the clip's original generation prompt when you
+                             still have it.
+  --factor <N>               spatial factor; only 2 (the official checkpoint
+                             is an x2 network)
+  --refine-steps <N>         1..=3 (default 3). Fewer steps means starting
+                             further down the distilled refinement table, not
+                             the same span in bigger hops - the schedule's
+                             sigma values are baked in by distillation and
+                             are not interpolable.
+  --guidance <G>             classifier-free guidance (default 1.0)
+  --seed <S>                 refinement noise seed (default 0)
+  --fps <N>                  frame rate for the output. Default: whatever
+                             ffprobe reports for --input, and only if that
+                             fails does this fall back to the pipeline
+                             default.
+  --dit-config <name>        "tiny" (default, fresh random weights - a wiring
+                             smoke test) or "ltx25_22b" (the real checkpoint,
+                             needs --dit/$BRAIN_LTXV_DIT)
+
+Length:
+  An upscaled clip has FOUR times the video tokens per frame of its input, so
+  a length that refined fine at the source resolution need not fit at the
+  target one. Past 12288 tokens in one pass the clip is refined in several
+  independent segments that share one frame at each boundary; fine detail can
+  step where two segments meet. A clip that fits is never split. A request
+  that cannot be split into anything runnable is refused before any weight is
+  read, rather than after an hour of work.
+
+Weights (flag wins over the environment variable):
+  --vae <path>               $BRAIN_LTXV_VAE       the causal 3D video VAE
+  --upsampler-spatial <path> $BRAIN_LTXV_UPSAMPLER_SPATIAL  spatial x2 latent
+                                                   upscaler - REQUIRED, it is
+                                                   what this command runs
+  --dit <path>               $BRAIN_LTXV_DIT       real 22B DiT GGUF (only
+                                                   read when --dit-config
+                                                   ltx25_22b)
+  --text-encoder <path>      $BRAIN_LTXV_TEXT_ENCODER  real Gemma-4 text
+                                                   encoder (without it
+                                                   --prompt reaches the model
+                                                   only as a stub and cannot
+                                                   guide anything)
+
+Devices:
+  --device <cpu|gpu>         DiT + VAE + upscaler (default: BRAIN_DEVICE)"#;
 
 const DFR_HELP: &str = r#"brain ltxv dfr - LTX-2.5 DFR (Diffusion Fidelity Rendering) smoke test
 
@@ -163,6 +237,12 @@ pub fn run_ltxv(args: &[String]) {
         "t2v" | "text2video" => {
             if let Err(e) = t2v(&args[1..]) {
                 eprintln!("ltxv t2v: {e}");
+                std::process::exit(1);
+            }
+        }
+        "upscale" => {
+            if let Err(e) = upscale(&args[1..]) {
+                eprintln!("ltxv upscale: {e}");
                 std::process::exit(1);
             }
         }
@@ -248,7 +328,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     }
     let prompt = prompt.ok_or("--prompt is required")?;
     let out = out.ok_or("--output-path is required")?;
-    let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref())?;
+    let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), None)?;
 
     let tokens = {
         let vcfg = ltxv::LtxVaeConfig::conv25();
@@ -320,6 +400,127 @@ fn t2v(args: &[String]) -> Result<(), String> {
         imaging::video::Encoded::Frames { dir, command } => {
             eprintln!("ltxv: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
             eprintln!("ltxv: finish the job with:\n  {command}");
+        }
+    }
+    Ok(())
+}
+
+fn upscale(args: &[String]) -> Result<(), String> {
+    let mut o = UpscaleOpts::default();
+    let mut prompt: Option<String> = None;
+    let mut input: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut vae: Option<String> = None;
+    let mut dit: Option<String> = None;
+    let mut text_encoder: Option<String> = None;
+    let mut upsampler_spatial: Option<String> = None;
+    let mut fps: Option<usize> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
+        let num = |i: usize, what: &str| -> Result<usize, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        let flt = |i: usize, what: &str| -> Result<f32, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        match args[i].as_str() {
+            "--prompt" => {
+                prompt = Some(need(i)?.clone());
+            }
+            "--input" | "--in" => {
+                input = Some(need(i)?.clone());
+            }
+            "--output-path" | "--out" => {
+                out = Some(need(i)?.clone());
+            }
+            "--factor" => o.factor = num(i, "--factor")?,
+            "--refine-steps" => o.refine_steps = num(i, "--refine-steps")?,
+            "--guidance" => o.base.guidance = flt(i, "--guidance")?,
+            "--seed" => o.base.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
+            "--fps" => fps = Some(num(i, "--fps")?),
+            "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--device" => {
+                o.base.device = Some(need(i)?.clone());
+            }
+            "--vae" => {
+                vae = Some(need(i)?.clone());
+            }
+            "--dit" => {
+                dit = Some(need(i)?.clone());
+            }
+            "--text-encoder" => {
+                text_encoder = Some(need(i)?.clone());
+            }
+            "--upsampler-spatial" => {
+                upsampler_spatial = Some(need(i)?.clone());
+            }
+            "--help" | "-h" => {
+                println!("{UPSCALE_HELP}");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown flag {other}\n\n{UPSCALE_HELP}")),
+        }
+        i += 2;
+    }
+    let input = input.ok_or("--input is required")?;
+    let out = out.ok_or("--output-path is required")?;
+    let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), upsampler_spatial.as_deref())?;
+    let prompt = prompt.unwrap_or_default();
+
+    let in_path = std::path::Path::new(&input);
+    let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0 })?;
+    let (w, h) = (decoded[0].w, decoded[0].h);
+    if let Some(bad) = decoded.iter().position(|f| (f.w, f.h) != (w, h)) {
+        return Err(format!("{input} changes size at frame {bad} ({}x{} after {w}x{h}) - a clip has one resolution", decoded[bad].w, decoded[bad].h));
+    }
+    // The source's own rate, so an upscale never silently changes playback
+    // speed. `--fps` overrides; a missing `ffprobe` is not fatal (see
+    // `imaging::video::probe_fps`), it just means the caller has to say.
+    let fps = fps.unwrap_or_else(|| imaging::video::probe_fps(in_path).map(|f| f.round() as usize).filter(|&f| f > 0).unwrap_or(o.base.fps));
+    o.base.fps = fps;
+    let clip = ltxv::pipeline::Video { width: w, height: h, fps, frames: decoded.into_iter().map(|f| f.px).collect() };
+
+    let segments = ltxv::pipeline::refine_segments(clip.frames.len(), (h as usize * o.factor) / 32, (w as usize * o.factor) / 32)?;
+    let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
+    let dit_desc = if o.base.dit_config == "tiny" { "tiny random-weight DiT" } else { "REAL checkpoint DiT (int8 compute)" };
+    let seg_desc = if segments.len() > 1 { format!(", {} refinement segments (seams possible where they meet)", segments.len()) } else { String::new() };
+    if prompt.is_empty() {
+        eprintln!("ltxv upscale: no --prompt, so the refinement pass denoises against an empty context - pass the clip's original prompt for better detail");
+    }
+    eprintln!(
+        "ltxv upscale ({dit_desc}, real VAE + real x2 latent spatial upscaler, {ctx_desc}): {} frames, {w}x{h} -> {}x{} at {fps} fps, {} refinement steps, guidance {}, seed {}{seg_desc}",
+        clip.frames.len(),
+        w as usize * o.factor,
+        h as usize * o.factor,
+        o.refine_steps,
+        o.base.guidance,
+        o.base.seed
+    );
+
+    let t0 = std::time::Instant::now();
+    // A one-shot CLI run has no second party to cancel it - see `t2v`'s
+    // identical reasoning.
+    let cancel = capability::CancelToken::default();
+    let (video, timings) = ltxv::pipeline::upscale(&paths, &prompt, &clip, &o, &cancel, |done, total, phase| {
+        eprint!("\rltxv upscale [{done}/{total}] {phase}                    ");
+    })?;
+    eprintln!();
+    let wall = t0.elapsed().as_secs_f32();
+    eprintln!(
+        "ltxv upscale: {wall:.1}s total  (build {:.2}s, text encode {:.1}s, refine {:.1}s = {:.3}s/forward, vae {:.1}s, other {:.1}s)",
+        timings.build_dit,
+        timings.text_encode,
+        timings.denoise,
+        timings.secs_per_forward(),
+        timings.decode,
+        timings.unattributed(wall)
+    );
+
+    let frames: Vec<imaging::Rgb8> = video.frames.iter().map(|px| imaging::Rgb8::new(video.width, video.height, px.clone())).collect::<Result<_, _>>()?;
+    match imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &Default::default())? {
+        imaging::video::Encoded::Video(p) => {
+            eprintln!("ltxv upscale: wrote {} ({}x{}, {} frames at {} fps)", p.display(), video.width, video.height, frames.len(), video.fps);
+        }
+        imaging::video::Encoded::Frames { dir, command } => {
+            eprintln!("ltxv upscale: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
+            eprintln!("ltxv upscale: finish the job with:\n  {command}");
         }
     }
     Ok(())
@@ -462,6 +663,41 @@ mod tests {
         }
         for (var, _) in ltxv::pipeline::OPTIONAL_PATH_VARS {
             assert!(super::HELP.contains(var), "{var} is read but not in --help");
+        }
+    }
+
+    /// Same self-check as [`every_flag_the_parser_accepts_is_documented`],
+    /// scoped to `upscale`'s own flags and help text. `--upsampler-spatial`
+    /// is a flag here rather than environment-only (as it is on `t2v`),
+    /// because running that network is what this command is for.
+    #[test]
+    fn every_upscale_flag_the_parser_accepts_is_documented() {
+        let src = include_str!("ltxv_cli.rs");
+        for flag in ["--prompt", "--input", "--output-path", "--factor", "--refine-steps", "--guidance", "--seed", "--fps", "--dit-config", "--device", "--vae", "--dit", "--text-encoder", "--upsampler-spatial"] {
+            assert!(super::UPSCALE_HELP.contains(flag), "{flag} is parsed but not in upscale --help");
+            assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in upscale --help but not parsed");
+        }
+        for (var, _) in ltxv::pipeline::PATH_VARS {
+            assert!(super::UPSCALE_HELP.contains(var), "{var} is read but not in upscale --help");
+        }
+        for (var, _) in ltxv::pipeline::OPTIONAL_PATH_VARS {
+            assert!(super::UPSCALE_HELP.contains(var), "{var} is read but not in upscale --help");
+        }
+        // The one number in the help text that is a real constant rather than
+        // prose: a ceiling the help promises and the pipeline enforces must
+        // not drift apart.
+        assert!(super::UPSCALE_HELP.contains(&ltxv::pipeline::REFINE_MAX_TOKENS.to_string()), "the refinement token ceiling in upscale --help is not REFINE_MAX_TOKENS");
+    }
+
+    /// Every subcommand `run_ltxv` dispatches has to be listed in the help a
+    /// bare `brain ltxv` prints, or it is reachable only by reading the
+    /// source.
+    #[test]
+    fn every_subcommand_is_listed() {
+        let src = include_str!("ltxv_cli.rs");
+        for sub in ["t2v", "upscale", "dfr"] {
+            assert!(src.contains(&format!("\"{sub}\"")), "{sub} is listed but not dispatched");
+            assert!(super::HELP.contains(&format!("brain ltxv {sub}")), "{sub} is dispatched but not in --help");
         }
     }
 

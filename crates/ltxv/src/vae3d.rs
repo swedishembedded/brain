@@ -863,9 +863,14 @@ pub fn should_tile(frames: u32, h: u32, w: u32) -> bool {
 /// rebuilt per tile because a `split_by_size` cover has at most four distinct
 /// spatial shapes (interior, short last row, short last column, and their
 /// corner) however many tiles it has.
-pub struct LtxVaeTiledDecoder {
+pub struct LtxVaeTiledDecoder<'a> {
     cfg: LtxVaeConfig,
-    tensors: Tensors,
+    /// BORROWED, not owned: the whole-clip decode above needs the weights
+    /// only until its single graph is recorded, but this path needs them
+    /// across one graph build per distinct tile shape - and a caller that
+    /// decodes several clips against the same weights (`pipeline::upscale`'s
+    /// per-segment decode) must not pay a ~3 GB host copy per clip to do it.
+    tensors: &'a Tensors,
     lat_t: u32,
     lh: u32,
     lw: u32,
@@ -873,12 +878,12 @@ pub struct LtxVaeTiledDecoder {
     plan: vae::tiling3d::TilePlan3d,
 }
 
-impl LtxVaeTiledDecoder {
+impl<'a> LtxVaeTiledDecoder<'a> {
     /// Build a tiled decoder for a `[128, lat_t, lh, lw]` latent under
     /// `tiling`. Weights are retained on the HOST (no device graph exists
     /// until [`LtxVaeTiledDecoder::decode`] runs), so constructing this costs
     /// no VRAM at all.
-    pub fn new(cfg: &LtxVaeConfig, tensors: Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, tiling: LtxVaeTiling) -> LtxVaeTiledDecoder {
+    pub fn new(cfg: &LtxVaeConfig, tensors: &'a Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, tiling: LtxVaeTiling) -> LtxVaeTiledDecoder<'a> {
         assert!(lat_t >= 1, "a latent needs at least one frame");
         let plan = tiling.plan(lat_t, lh, lw);
         LtxVaeTiledDecoder { cfg: *cfg, tensors, lat_t, lh, lw, device: device.map(str::to_string), plan }
@@ -886,7 +891,7 @@ impl LtxVaeTiledDecoder {
 
     /// The same, with upstream's aspect-coupled auto layout for the OUTPUT
     /// pixel size this latent decodes to.
-    pub fn auto(cfg: &LtxVaeConfig, tensors: Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>) -> LtxVaeTiledDecoder {
+    pub fn auto(cfg: &LtxVaeConfig, tensors: &'a Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>) -> LtxVaeTiledDecoder<'a> {
         let tiling = LtxVaeTiling::auto(lh * VIDEO_SCALE.1 as u32, lw * VIDEO_SCALE.2 as u32);
         Self::new(cfg, tensors, lat_t, lh, lw, device, tiling)
     }
@@ -927,7 +932,7 @@ impl LtxVaeTiledDecoder {
 
         let mut done = 0usize;
         for ((st, sh, sw), idxs) in by_shape {
-            let dec = LtxVaeDecoder::build(&self.cfg, &self.tensors, st as u32, sh as u32, sw as u32, self.device.as_deref());
+            let dec = LtxVaeDecoder::build(&self.cfg, self.tensors, st as u32, sh as u32, sw as u32, self.device.as_deref());
             for i in idxs {
                 let tile = tiles[i];
                 let sub = self.slice_latent(latent, tile);

@@ -342,7 +342,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
             dec.decode(&cropped)
         }
         "tiled" => {
-            let dec = ltxv::vae3d::LtxVaeTiledDecoder::auto(&cfg, weights, shape.t, lh, lw, Some("gpu"));
+            let dec = ltxv::vae3d::LtxVaeTiledDecoder::auto(&cfg, &weights, shape.t, lh, lw, Some("gpu"));
             println!("  {} tiles, overlap waste {:.3}x", dec.plan().tiles().len(), dec.plan().overlap_waste());
             dec.decode_with(&cropped, |_, _| {})
         }

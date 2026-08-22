@@ -37,7 +37,7 @@
 //!
 //! # Deliberately NOT using the real text encoder
 //!
-//! `Paths::resolve(None, dit, None)` forces the deterministic stub context,
+//! `Paths::resolve(None, dit, None, None)` forces the deterministic stub context,
 //! so this test needs the 23.6 GB DiT and the VAE but not the 14 GB Gemma-4
 //! encoder. CFG is still genuinely exercised: the stub's conditional and
 //! unconditional contexts differ (the latter is all-zero), so the two
@@ -95,7 +95,7 @@ fn base_opts() -> GenOpts {
 fn real_paths() -> Option<Paths> {
     let vae = std::env::var("BRAIN_LTXV_VAE").ok().filter(|s| !s.is_empty())?;
     let dit = std::env::var("BRAIN_LTXV_DIT").ok().filter(|s| !s.is_empty())?;
-    Paths::resolve(Some(&vae), Some(&dit), None).ok()
+    Paths::resolve(Some(&vae), Some(&dit), None, None).ok()
 }
 
 fn run(plan: DevicePlan, paths: &Paths, label: &str) -> (Vec<Vec<u8>>, f32) {
@@ -173,7 +173,7 @@ fn the_two_cfg_branches_produce_different_velocities() {
         eprintln!("SKIP: BRAIN_LTXV_VAE is required even for the tiny DiT path (the VAE decode is real)");
         return;
     };
-    let paths = Paths::resolve(Some(&vae), None, None).expect("a VAE path resolves");
+    let paths = Paths::resolve(Some(&vae), None, None, None).expect("a VAE path resolves");
     let one = GenOpts { guidance: 1.0, seed: SEED, ..GenOpts::default() };
     let five = GenOpts { guidance: GUIDANCE, ..one.clone() };
     let a = generate(&paths, "harbour", &one, &Default::default(), |_, _, _| {}).expect("tiny generation runs").0;

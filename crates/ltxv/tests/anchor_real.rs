@@ -89,7 +89,7 @@ fn mean_abs_delta(a: &[u8], b: &[u8]) -> f64 {
 }
 
 fn real_paths() -> Option<Paths> {
-    let p = Paths::resolve(None, None, None).ok()?;
+    let p = Paths::resolve(None, None, None, None).ok()?;
     p.dit.as_ref()?;
     Some(p)
 }
