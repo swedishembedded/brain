@@ -122,6 +122,53 @@ This proves the pipeline WIRING - real scheduler, real VAE decode, a real mp4
 out the other end - not generation quality; see `crates/ltxv/src/pipeline.rs`'s
 module doc.
 
+### Clips longer than one denoising window
+
+`--frames` takes any legal `1 + 8k` length. Past what a single denoising window
+holds, `brain ltxv t2v` generates the clip as several consecutive windows and
+carries **the previous window's own last latent frames** across each boundary:
+they are sliced out of the denoised latent before anything is decoded, and
+frozen at sigma 0 (`denoise_mask = 0`, per-token timestep 0, re-pinned every
+step) at the head of the next window while only the new frames get a denoising
+schedule. It is the same freezing mechanism `--start-frame` uses for latent
+frame 0, over N latent frames instead of one.
+
+```bash
+brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
+  --prompt "..." --frames 481 --width 1280 --height 704 --fps 24 \
+  --output-path long.mp4
+```
+
+* **Why not just chain clips on their last frame.** Decoding a clip, taking its
+  last RGB frame and re-encoding it as the next clip's `--start-frame` is
+  continuous in *position* and discontinuous in *velocity*: a single frame
+  carries no information about what was moving, in which direction, or how
+  fast, so the model re-invents the motion at every seam - visibly as stutters,
+  changes of direction, or motion running backwards. The rolling latent context
+  carries 57 pixel frames of real motion history instead.
+* **`--context-frames`** (default `57`) sets how much is carried, in pixel
+  frames, and must be `1 + 8k`. 57 frames is 8 latent frames, which is the
+  reference's own prefix size for temporal extension
+  (`packages/ltx-trainer/configs/video_extend_lora.yaml`'s
+  `temporal_boundary: 8`, whose validation samples spell the same number as
+  `num_frames: 57`). It is *not* derived from the VAE's temporal receptive
+  field, which is ±14 latent frames and includes lookahead a rolling window
+  cannot have - see `crates/ltxv/src/longform.rs`'s module doc.
+* **The context costs tokens.** A continuation window spends
+  `context_latent_frames × lh × lw` of its budget before it generates anything,
+  so a longer context means fewer new frames per window and more windows. The
+  per-window ceiling is `ltxv::longform::LONGFORM_MAX_TOKENS` (13200, the
+  largest single-window generation this crate has a recorded real run at),
+  overridable with `BRAIN_LTXV_LONGFORM_MAX_TOKENS`.
+* **A request that fits one window is unchanged.** It is handed straight to the
+  single-window path, bit for bit, and none of this runs.
+* **`--end-frame` is refused for a multi-window clip** - it pins the last frame
+  of one window, and pinning the end of a rolling plan has not been designed.
+  `--start-frame` conditions the first window as usual.
+
+The same routing applies to the `t2v` capability action (`brain do brain/ltxv
+t2v`), with the default context and no new action parameter.
+
 ### Upscaling a clip that already exists
 
 `brain ltxv upscale` takes a rendered video file and re-renders it at twice the

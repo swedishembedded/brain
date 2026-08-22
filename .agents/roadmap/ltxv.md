@@ -4538,3 +4538,251 @@ code no longer enforces is worse than one that promises nothing.
 * **`--factor` accepts only 2.** The official checkpoint is an x2 network and
   this command runs that network; there is no resampler behind the flag and it
   says so rather than silently rounding.
+
+### Phase 22 - a clip stops being one window long
+
+Every generation this crate has ever run was one denoising window. The ceiling
+is real hardware: the embeddings-connector and adaLN slabs of one forward cross
+this box's `max_storage_buffer_binding_size` somewhere above 14000 video
+tokens, which at 1280x704 is about 15 latent frames - 113 pixel frames, 4.7
+seconds at 24 fps. Anything longer was produced by hand, by chaining: decode
+window N, take its literal last RGB frame, VAE-encode that one frame as window
+N+1's `--start-frame`, generate, concatenate the mp4s.
+
+That chain is continuous in POSITION and discontinuous in VELOCITY, and the
+difference is the whole phase. A single pixel frame says where everything is
+and nothing about what was moving, in which direction, or how fast. The model
+is handed a still and asked to start a clip from it, so it starts a clip from
+it - picking whatever motion the prompt and the seed suggest, which is not
+necessarily the motion that was already happening. Watched on real chained
+output this session: motion changing at the seam, stuttering at the seam, and
+one continuation that ran visibly BACKWARDS.
+
+`brain ltxv t2v --frames 481` now generates the clip as several windows and
+carries the previous window's own last LATENT frames across each boundary -
+sliced out of the denoised latent before anything was ever decoded, frozen at
+sigma 0 while only the new frames denoise around them. No pixel round trip at
+any internal seam.
+
+#### 0 - the mechanism was already here, pinned to one frame
+
+`--start-frame` freezes exactly one latent frame: `denoise_mask = 0` over its
+`lh*lw` tokens, the initial latent there set to the encoded still rather than
+noise (`GaussianNoiser`'s `lerp(clean, noised, denoise_mask)` at mask 0 IS
+`clean`), the per-token timestep therefore 0 (Phase 17's fix - the conversion
+`to_denoised` performs at timestep 0 is the identity), and `post_process_latent`
+re-pinning it after every step. That is `VideoConditionByLatentIndex(latent_idx
+= 0, strength = 1.0)`.
+
+The reference's own class asserts only `(B, C, H, W)` on that latent - **the
+frame count is free** - and writes `clean_latent[:, start:stop]` /
+`denoise_mask[:, start:stop]` over whatever range it covers. So the
+generalization from "freeze 1 latent frame" to "freeze K" is not a new
+mechanism; it is the same one with the count unpinned. `Stage` gained an
+optional `LatentContext { chw, frames }` and `denoise_stage` one branch that
+builds the mask, the clean buffer and the initial latent over `frames *
+lh * lw` tokens instead of `lh*lw`. Nothing in `denoise`, `to_denoised`,
+`post_process_latent` or `euler_ancestral_step` changed at all.
+
+#### 1 - K = 8 latent frames, and the derivation that does NOT set it
+
+The first hypothesis was that K falls out of the causal VAE: pick the decoder's
+temporal receptive field, so a window's new frames decode as they would have in
+one long clip. **That hypothesis is dead, and it is worth recording why.**
+
+This checkpoint's decoder is `causal_decoder: false`. Every one of its 42
+kernel-3 temporal convolutions pads SYMMETRICALLY, so decoding one latent frame
+depends on frames on both sides of it. Summing the convolutions at the temporal
+resolution each runs at - 6 at the latent grid, 5 at 2x, 9 at 4x, 22 at 8x -
+gives `6 + 5/2 + 9/4 + 22/8 = 13.5` latent frames of radius; an exact integer
+index walk gives `i-14 … i+14`. (The same summation reproduces this crate's
+already-published spatial figure of ~15 cells exactly, which is what says the
+method is right.) A rolling window cannot supply 14 latent frames of LOOKAHEAD
+at any price, because those frames do not exist yet. No K makes a seam decode
+exactly, and `LtxVaeTiling`'s own temporal overlap - 3 latent frames, upstream's
+`_CONV_AUTO_FRAMES = (80, 24)` - already carries the same admission for the
+same reason, with the tiling docs saying outright that covering the receptive
+field is unreachable and blending is the accepted lossy trade.
+
+What K actually decides is how much MOTION HISTORY the diffusion model is
+conditioned on, which is a conditioning question, not a convolution one - and
+there the reference has an answer. `packages/ltx-trainer/configs/
+video_extend_lora.yaml` is the official LTX-2 video-extension recipe, and its
+one video condition is:
+
+```yaml
+conditions:
+  - type: prefix
+    # For prefix conditioning, N latent frames correspond to (N - 1) * 8 + 1
+    # pixel frames. temporal_boundary=8 means 57 pixel frames are used as prefix.
+    temporal_boundary: 8
+```
+
+with validation samples that spell the same number the other way round
+(`num_frames: 57`). `ltx_trainer.training_strategies.flexible.
+PrefixConditionConfig` documents `temporal_boundary` as "Number of temporal
+units for prefix region. For video: number of latent frames", and
+`_compute_temporal_mask` places those units at the FRONT of the token sequence
+(`mask[:, :num_tokens] = 1.0`). That is exactly the layout this phase builds.
+
+So `CONTEXT_LATENT_FRAMES = 8`, `CONTEXT_FRAMES = 57`. Not 9 - "9" is the
+shortest legal CLIP (`1 + 8k`, 2 latent frames), a different number that
+pattern-matches. The DiT imposes no additional minimum: its attention is global
+over the whole window, so a frozen prefix is visible to every generated token
+however far away it sits.
+
+#### 2 - the window arithmetic, and why it is not `refine_segments`
+
+`refine_segments` (Phase 21) splits an existing clip into `1 + 8k` segments
+that overlap by exactly ONE PIXEL frame, because `n` disjoint `1 + 8k` segments
+sum to `n + 8*sum(k_i)`, legal only for `n == 1`. `window_plan` closes the same
+arithmetic differently and does not need the overlap: a continuation window's
+decode produces `1 + 8*(context + new - 1)` frames, of which the leading
+`1 + 8*(context - 1)` belong to the carried context and are dropped, so the
+window contributes exactly `8 * new`. Window 0 contributes `1 + 8*(new - 1)`.
+The sum is `1 + 8*(new_0 - 1 + sum_{i>0} new_i)` for any number of windows.
+The two functions share the one line that turns a token ceiling into a latent
+frame count and nothing else, and they are deliberately two functions.
+
+| | `refine_segments` | `window_plan` |
+|---|---|---|
+| subject | a clip that already exists | a clip being generated |
+| seam carries | one re-rendered PIXEL frame | K clean LATENT frames |
+| seam artefact | detail can step | motion is continuous by construction |
+| sizing | segments equal | **window 0 largest**, rest equal |
+
+That last row is the one non-obvious choice. Window 0 is the only window that
+builds structure from noise with no history at all, and the only one whose
+budget is not already spent on a context - and making it the largest is what
+GUARANTEES it can hand its successor a full K frames. An even split cannot: at
+a 15-latent-frame budget with an 8-frame context, an even three-way split gives
+window 0 six latent frames and window 1 would silently carry a truncated
+context. The continuation windows are then equal to each other, so a clip never
+ends on a stub.
+
+`LONGFORM_MAX_TOKENS = 13200` is the per-window ceiling. Derived the same way
+`REFINE_MAX_TOKENS` is - the adaLN table is `[t, 9*4096]` fp32 = 147456 bytes
+per token against 2047 MiB, crossing at t ~= 14556 - and then pinned to a
+MEASURED point rather than left at the derivation: 13200 is 113 frames at
+1280x704 (15 x 22 x 40), the largest window this crate has a recorded real
+generation at. Every shape already known to run keeps running unsplit, and no
+window is ever planned at a token count nothing has ever run at.
+`BRAIN_LTXV_LONGFORM_MAX_TOKENS` overrides it, which is also how a card with a
+different binding size gets a usable plan.
+
+The context is not free and the docs say the number: a continuation window
+spends `K * lh * lw` before it generates anything. At 1280x704 that is 7040 of
+13200 tokens, so a window generates 5-7 new latent frames instead of 15. Long
+form costs roughly twice the device time per output second. That is the price
+of the history, and it is the thing being bought.
+
+#### 3 - two-stage windows carry TWO contexts
+
+A plan past `SINGLE_STAGE_MAX_TOKENS` takes the reference's two-stage shape,
+exactly as a single-window request of the same size already does. Stage 1 runs
+at half resolution, and that is where the window's structure - and therefore
+its motion - is decided; a context applied only to stage 2's three refinement
+steps would not carry motion at all.
+
+The decision is made ONCE, from the plan's widest window, and applies to every
+window. Deciding it per window would let one clip be built two different ways
+half way through, and - worse - a single-stage window produces no
+half-resolution latent at all, so a two-stage window following one would hand
+its stage 1 either nothing or a stale tail from two windows back. One bool for
+the plan removes the whole class.
+
+So a continuation window freezes the previous window's stage-1 latent tail at
+half resolution during stage 1, and its final full-resolution latent tail
+during stage 2. Both are genuine latents that the previous window really
+produced at that exact resolution. The alternative - spatially downsampling the
+full-res tail for stage 1 - was rejected: there is no x0.5 latent downsampler
+in the LTX-2.5 checkpoint set, and inventing one would put content into stage 1
+that no LTX-2.5 component ever produced. The rolling state is therefore two
+latent slabs of at most K frames each, and it does not grow with the clip's
+length.
+
+`Refine` gained a `seed_salt` alongside its existing `0x5332`, because two
+windows of one clip refining with the same noise would repeat each other.
+
+#### gates
+
+Weight-free, always run:
+
+* `crates/ltxv/tests/longform.rs` - `the_carried_context_is_the_references_own_eight_latent_frames`
+  (K and its pixel spelling are the reference's, not drift);
+  `a_clip_that_fits_one_window_carries_no_context` (13200 tokens is one
+  window, nothing carried, no seam);
+  `a_request_longer_than_one_window_rolls_a_latent_context_across_every_seam`
+  (481 frames at 1280x704: every window under the ceiling, every window a
+  legal `1 + 8k` decode, every continuation window carrying a FULL context its
+  predecessor could actually supply, and the windows reassembling to exactly
+  481 frames in order);
+  `an_impossible_request_is_refused_up_front`;
+  `the_carried_tail_is_the_previous_windows_own_last_latent_frames` (the carry
+  is a slice, per channel, per frame, per cell - a transpose or an off-by-one
+  cannot pass).
+* `ltxv::pipeline::tests::a_frozen_prefix_of_latent_frames_survives_the_whole_trajectory` -
+  the other half of the continuity chain, and the one that lives in the
+  sampler: several frames, several tokens per frame, several channels, all
+  frozen, all coming out of the whole trajectory bit-identical at eta 0 AND
+  eta 1, with every step announcing the prefix at timestep 0 and everything
+  else at the schedule's sigma. Together with the carry test this closes
+  "window n's last K latent frames ARE window n+1's first K".
+* `ltxv::longform::tests` - the window's own frame accounting is
+  self-consistent (`decoded == emitted + dropped`, and a continuation window
+  drops exactly a K-latent-frame clip's own length).
+
+Real weights, seconds (real conv VAE, tiny random-weight DiT, CPU):
+
+* `longform.rs::real_weights::a_multi_window_request_comes_back_as_one_clip_of_the_requested_length` -
+  41 frames at 64x64 under a forced 20-token ceiling, so the plan really
+  splits: one clip of exactly 41 frames comes back, not flat, with one VAE
+  decode per window and every window's steps in the timing. A WIRING claim.
+
+#### 4 - what this phase does NOT claim
+
+* **No real-weight long generation.** Both Tesla P40s were saturated by
+  unrelated in-flight generations for the whole of this work, so nothing here
+  ran against `ltx25_22b`. The code path is exercised end to end on CPU with
+  the real VAE, and the seam's LATENT continuity is exact by construction and
+  gated as such - but that the resulting clip's MOTION looks continuous to a
+  viewer is argued, not measured. The measurement to run is
+  `clipmetric::frame_to_frame_diffs` across a known seam index: the naive
+  last-frame chain should show a spike there and the rolling-context path
+  should not.
+* **The first carried latent frame is presented as one pixel frame wide, and
+  really covers eight.** A window is handed to the model as an ordinary clip
+  with its own time origin, so `real_pixel_positions`' causal fix gives its
+  latent frame 0 the `[0, 1/fps)` bound the causal VAE's genuine first frame
+  has, and `keyframes_mask` marks it. The carried frame sitting in that slot
+  came from the middle of the previous window and covers 8 pixel frames of real
+  time. One of K frames is affected and it is the oldest; every later context
+  frame is consistent. The alternative - global-timeline positions across the
+  whole clip - would put continuation windows at frame-axis positions no clip
+  the model was trained on ever starts at, and was not attempted.
+* **No blending, no overlap-add, at the seam.** The context frames are decoded
+  (they have to be - a latent frame cannot be decoded without its neighbours,
+  and feeding them is what makes the PIXEL seam continuous) and then dropped.
+  Nothing is averaged. Given the ±14-latent-frame receptive field above, the
+  frames just after a seam are decoded with 8 latent frames of real history
+  where a single-window decode would have had more; that residual is not
+  measured.
+* **The output clip is assembled in host RAM.** The rolling LATENT state does
+  not grow with duration - that was the design requirement and it holds - but
+  `Video::frames` still accumulates every decoded frame before the caller
+  encodes anything, which is ~1.3 GB for 20 seconds at 1280x704 and scales
+  linearly. Streaming windows straight into the encoder is the obvious next
+  step and was not taken here; it changes `generate`'s return type, which is
+  the serving contract's shape as well as the CLI's.
+* **`--end-frame` is refused for a multi-window clip**, rather than silently
+  applying to the last window. The latent context and an appended keyframe
+  block both want to be what a window is pinned to, and "the clip ends on this
+  still" over a rolling plan has not been designed.
+* **Not a distilled long-form model.** The reference ships prefix conditioning
+  as a LoRA FINE-TUNING recipe for video extension, not as a base-model
+  inference path. The mechanism is the base model's own (it is `--start-frame`'s
+  freezing, widened) and 8 latent frames is the prefix size that recipe uses,
+  but a base checkpoint with no extension LoRA is being asked for something it
+  was not explicitly distilled for. It is strictly more information than one
+  re-encoded pixel frame; it is not a claim that the model was trained to
+  consume it.
