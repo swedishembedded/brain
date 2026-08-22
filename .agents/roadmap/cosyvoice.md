@@ -160,6 +160,56 @@ performance milestone once the forward is parity-proven, which it now is;
 until then, real-weight tests against this component should be run with
 `cargo test --release`, not the debug default.
 
+## Phase 7a: CosyVoice 3 golden dumper
+
+`tools/goldens/cosyvoice3_dump_reference.py`, the CosyVoice 3 sibling of
+Phase 1's dumper: same self-validation discipline, extended to CV3's real
+topology (`FunAudioLLM/Fun-CosyVoice3-0.5B-2512`), read line-by-line against
+the live reference source rather than assumed from how this milestone was
+originally scoped. `campplus.onnx` and `CosyVoice-BlankEN/` are hardlinked
+from the CosyVoice 2 fetch rather than re-downloaded, verified byte-identical
+by sha256 against the CV3 repo's own reported hashes first.
+
+Real findings, several of which corrected the original scoping brief rather
+than just confirming it:
+
+- **CV3's mel front end is NOT unchanged from CV2**: `fmax` is `null`
+  (librosa's `sr/2` default), not `8000` - caught by the dumper's own
+  independent-mel self-validation failing at cosine 0.9734 with the CV2
+  config copied over verbatim, fixed to 0.9999999 once corrected. Any Rust
+  mel config for CV3 needs its own `fmax`, not `MelConfig::cosyvoice_24k()`
+  as-is.
+- `CosyVoice3LM`'s `sos`/`task_id`/`eos`/`fill` all read from
+  `speech_embedding` (a `speech_token_size + 200`-wide table), never a
+  separate `llm_embedding` table; `llm_decoder` projects to that same +200
+  width (6761, not CosyVoice 2's 6564).
+- `<|endofprompt|>` (151646) is empirically stable: `CosyVoice-BlankEN`'s
+  base tokenizer has exactly 3 added tokens (151643-5), so
+  `add_special_tokens` deterministically assigns 151646 next - matching the
+  reference's own hardcoded assert on that id being present in the prompt.
+- `CausalMaskedDiffWithDiT` has no encoder at all (not a config toggle) -
+  condition assembly is bare `pre_lookahead_layer` + `repeat_interleave`
+  (25 Hz tokens to 50 Hz, "the simple interpolation operation" the CosyVoice
+  3 paper describes replacing the conformer encoder with).
+- `CausalHiFTGenerator.inference()` has no `cache_source` parameter, a real
+  signature difference from CosyVoice 2's `HiFTGenerator.inference`.
+- **The HiFT RNG story genuinely differs from CosyVoice 2**: `SineGen2
+  (causal=True)` in eval mode reads FIXED buffers drawn once at `__init__`
+  (never checkpointed), not fresh per call - so two `inference()` calls on
+  the same model instance are bit-exact without reseeding between them,
+  proven by this dumper's own self-validation. Reproducibility hinges on the
+  global RNG state at model-construction time, not at each inference call
+  the way CosyVoice 2's HiFT needs.
+
+34 files, 8.4 MB under `testdata/golden/cosyvoice3/` (gitignored): mel front
+end, CAM++ x-vector, S3Tokenizer v3 FSQ tokens (87 tokens, exact-match
+reseed check), CosyVoice3LM prefill hidden/logits + 32 reseeded AR tokens,
+the DiT flow decoder (conds/mu/embedding/all 10 Euler steps/mel output, plus
+DiT-internal `InputEmbedding`/`TimestepEmbedding` taps with independent-
+recompute self-validation), and `CausalHiFTGenerator` magnitude/phase/
+waveform. Every planned component dumped, every self-validation check
+passing on a real run - no gaps.
+
 ## Phase 8: HiFT vocoder (`HiFTGenerator`, CosyVoice 2 non-causal only)
 
 `ConvRNNF0Predictor` (despite the name, no RNN) -> NSF harmonic source
@@ -283,7 +333,9 @@ better a clearly-scoped follow-up than a half-verified streaming path.
 
 ## Not yet done
 
-- [ ] Phase 7: flow decoder, CosyVoice 3 (DiT CFM)
+- [ ] Phase 7b: CosyVoice 3 model code (`CausalMaskedDiffWithDiT`'s DiT
+      estimator, `CosyVoice3LM`, `CausalHiFTGenerator`) - Phase 7a's goldens
+      are ready
 - [ ] Phase 9 (CosyVoice 3): pipeline reuse once Phase 7 lands
 - [ ] Phase 9 (streaming): chunked token2wav, growing-prefix flow re-run, cross-fade
 - [ ] Phase 9 (kaldi fbank parity): a real, captured `torchaudio.compliance.kaldi.fbank` golden and a bit-exact gate for `audio::kaldi_fbank`
