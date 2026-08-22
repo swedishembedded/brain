@@ -25,26 +25,36 @@
 //! imported - the same "tied -> drop" convention
 //! `qwen3::import::hf_to_brain` uses for a released Qwen checkpoint. CosyVoice
 //! itself never reads this backbone `lm_head` at all: `Qwen2Encoder.
-//! forward_one_step` returns `hidden_states`, and `Qwen2LM` projects those
-//! through its OWN `llm_decoder` (896 -> 6564), never through the Qwen
+//! forward_one_step` returns `hidden_states`, and `Qwen2LM`/`CosyVoice3LM`
+//! project those through their OWN `llm_decoder`, never through the Qwen
 //! backbone's 151936-wide text head.
+//!
+//! **CosyVoice 3's `llm.pt` has no `llm_embedding.weight` and no
+//! `llm_decoder.bias`** - both real, verified-not-assumed absences (see
+//! `crate::config`'s module doc for why): `CosyVoice3LM` has no
+//! `llm_embedding` table at all, and its `llm_decoder = Linear(896, 6761,
+//! bias=False)`. [`import_llm_pt`] branches on
+//! `cfg.special_token_source`/`cfg.llm_decoder_has_bias` to require or
+//! forbid each accordingly, rather than silently defaulting either to zero.
 
 use std::collections::HashMap;
 
-use crate::config::CosyVoiceLmConfig;
+use crate::config::{CosyVoiceLmConfig, SpecialTokenSource};
 
 /// Backbone weights (`qwen3::QwenConfig::param_list()`-keyed, ready for
 /// `qwen3::Qwen::from_tensors_decode`) plus CosyVoice's own bolted-on tables.
 pub struct LmWeights {
     pub backbone: HashMap<String, Vec<f32>>,
-    /// `[2, d]`: row 0 = `sos`, row 1 = `task_id`.
-    pub llm_embedding: Vec<f32>,
+    /// `[2, d]`: row 0 = `sos`, row 1 = `task_id`. `None` for `CosyVoice3LM`
+    /// (`SpecialTokenSource::SpeechEmbedding`), which has no such table.
+    pub llm_embedding: Option<Vec<f32>>,
     /// `[speech_vocab, d]`.
     pub speech_embedding: Vec<f32>,
     /// `[speech_vocab, d]`.
     pub llm_decoder_w: Vec<f32>,
-    /// `[speech_vocab]`.
-    pub llm_decoder_b: Vec<f32>,
+    /// `[speech_vocab]`. `None` when `cfg.llm_decoder_has_bias` is `false`
+    /// (`CosyVoice3LM`'s `llm_decoder` carries no bias).
+    pub llm_decoder_b: Option<Vec<f32>>,
 }
 
 /// Map one `llm.pt` tensor name to its `qwen3` backbone parameter name, or
@@ -140,13 +150,31 @@ pub fn import_llm_pt(path: &str, cfg: &CosyVoiceLmConfig) -> Result<LmWeights, S
         return Err(format!("import_llm_pt: {} backbone tensors unused: {extra:?}", backbone_src.len()));
     }
 
-    let llm_embedding = llm_embedding.ok_or("import_llm_pt: missing llm_embedding.weight")?;
+    let llm_embedding = match cfg.special_token_source {
+        SpecialTokenSource::LlmEmbedding => {
+            let e = llm_embedding.ok_or("import_llm_pt: missing llm_embedding.weight")?;
+            if e.len() != 2 * d {
+                return Err(format!("import_llm_pt: llm_embedding.weight has {} elements, want {}", e.len(), 2 * d));
+            }
+            Some(e)
+        }
+        SpecialTokenSource::SpeechEmbedding => {
+            if llm_embedding.is_some() {
+                return Err("import_llm_pt: unexpected llm_embedding.weight for a SpeechEmbedding-sourced config".to_string());
+            }
+            None
+        }
+    };
     let speech_embedding = speech_embedding.ok_or("import_llm_pt: missing speech_embedding.weight")?;
     let llm_decoder_w = llm_decoder_w.ok_or("import_llm_pt: missing llm_decoder.weight")?;
-    let llm_decoder_b = llm_decoder_b.ok_or("import_llm_pt: missing llm_decoder.bias")?;
-    if llm_embedding.len() != 2 * d {
-        return Err(format!("import_llm_pt: llm_embedding.weight has {} elements, want {}", llm_embedding.len(), 2 * d));
-    }
+    let llm_decoder_b = if cfg.llm_decoder_has_bias {
+        Some(llm_decoder_b.ok_or("import_llm_pt: missing llm_decoder.bias")?)
+    } else {
+        if llm_decoder_b.is_some() {
+            return Err("import_llm_pt: unexpected llm_decoder.bias for a bias-free config".to_string());
+        }
+        None
+    };
     if speech_embedding.len() != v * d {
         return Err(format!(
             "import_llm_pt: speech_embedding.weight has {} elements, want {}",
@@ -157,8 +185,10 @@ pub fn import_llm_pt(path: &str, cfg: &CosyVoiceLmConfig) -> Result<LmWeights, S
     if llm_decoder_w.len() != v * d {
         return Err(format!("import_llm_pt: llm_decoder.weight has {} elements, want {}", llm_decoder_w.len(), v * d));
     }
-    if llm_decoder_b.len() != v {
-        return Err(format!("import_llm_pt: llm_decoder.bias has {} elements, want {v}", llm_decoder_b.len()));
+    if let Some(b) = &llm_decoder_b {
+        if b.len() != v {
+            return Err(format!("import_llm_pt: llm_decoder.bias has {} elements, want {v}", b.len()));
+        }
     }
 
     Ok(LmWeights {

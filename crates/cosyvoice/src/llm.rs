@@ -1,24 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `Qwen2LM` (CosyVoice 2) speech-token LM: prompt assembly + autoregressive
-//! generation, hosted on `qwen3::Qwen`'s Qwen2.5-0.5B decoder.
+//! `Qwen2LM` (CosyVoice 2) / `CosyVoice3LM` (CosyVoice 3) speech-token LM:
+//! prompt assembly + autoregressive generation, hosted on `qwen3::Qwen`'s
+//! Qwen2.5-0.5B decoder. One [`CosyVoiceLm`] serves both generations,
+//! parameterized by [`CosyVoiceLmConfig`]'s [`SpecialTokenSource`] rather than
+//! duplicating this file - see `crate::config`'s module doc for the one real
+//! branch point.
 //!
-//! ## Prompt assembly (`Qwen2LM.inference`, reproduced verbatim)
+//! ## Prompt assembly (`{Qwen2LM,CosyVoice3LM}.inference`, reproduced verbatim)
 //! ```text
 //! text          = concat([prompt_text, text])                  // Qwen BPE token ids
 //! text_emb      = qwen_backbone.embed_tokens(text)              // via the SAME tok.weight the backbone forward uses
-//! sos_emb       = llm_embedding.weight[0]                       // [1, d]
-//! task_id_emb   = llm_embedding.weight[1]                       // [1, d]
+//! sos_emb       = special_token_source.weight[sos]              // [1, d] - llm_embedding (CV2) or speech_embedding (CV3)
+//! task_id_emb   = special_token_source.weight[task_id]          // [1, d]
 //! prompt_speech_emb = speech_embedding(prompt_speech_token)     // [m, d], or empty
 //! lm_input      = concat([sos_emb, text_emb, task_id_emb, prompt_speech_emb], dim=1)
 //! ```
-//! Note the reference's `Qwen2LM.inference` accepts a speaker `embedding`
-//! parameter but never references it in the concat above (unlike the base
+//! Note the reference's `inference()` accepts a speaker `embedding` parameter
+//! but never references it in the concat above (unlike the base
 //! `TransformerLM.inference`, which does) - verified by reading
 //! `resources/cosyvoice/source/cosyvoice/llm/llm.py` line-for-line, not
 //! assumed from the docstring plan. [`CosyVoiceLm::prefill`] therefore takes
-//! no speaker embedding either.
+//! no speaker embedding either. `CosyVoice3LM.inference` additionally
+//! hard-asserts token id `151646` (`<|endofprompt|>`) is present in `text` -
+//! a caller-side precondition on the pre-tokenized `text_ids` this crate does
+//! not re-check (the golden's own prompt already satisfies it).
 //!
 //! ## Hidden-state readout
 //! The reference runs the WHOLE prefix through one batched
@@ -40,7 +47,7 @@
 //! [`crate::sampling::ras_sampling`], feed `speech_embedding.weight[token_id]`
 //! as the next row. Stops on `cfg.stop_token_ids` or a step cap.
 
-use crate::config::CosyVoiceLmConfig;
+use crate::config::{CosyVoiceLmConfig, SpecialTokenSource};
 use crate::llm_import::LmWeights;
 use crate::sampling::{log_softmax, ras_sampling, RasParams};
 use data::rng::Rng;
@@ -56,10 +63,12 @@ fn row(table: &[f32], d: usize, i: u32) -> &[f32] {
 pub struct CosyVoiceLm {
     pub cfg: CosyVoiceLmConfig,
     qwen: qwen3::Qwen,
-    llm_embedding: Vec<f32>,
+    /// `None` for `CosyVoice3LM` (`SpecialTokenSource::SpeechEmbedding`).
+    llm_embedding: Option<Vec<f32>>,
     speech_embedding: Vec<f32>,
     llm_decoder_w: Vec<f32>,
-    llm_decoder_b: Vec<f32>,
+    /// `None` when `cfg.llm_decoder_has_bias` is `false`.
+    llm_decoder_b: Option<Vec<f32>>,
 }
 
 impl CosyVoiceLm {
@@ -79,9 +88,16 @@ impl CosyVoiceLm {
         }
     }
 
-    /// Import `llm.pt` and build in one step.
+    /// Import `llm.pt` (CosyVoice 2's `Qwen2LM`) and build in one step.
     pub fn load(llm_pt_path: &str, ctx: u32) -> Result<CosyVoiceLm, String> {
         let cfg = CosyVoiceLmConfig::cosyvoice2();
+        let w = crate::llm_import::import_llm_pt(llm_pt_path, &cfg)?;
+        Ok(CosyVoiceLm::from_weights(cfg, w, ctx))
+    }
+
+    /// Import `llm.pt` (CosyVoice 3's `CosyVoice3LM`) and build in one step.
+    pub fn load_cosyvoice3(llm_pt_path: &str, ctx: u32) -> Result<CosyVoiceLm, String> {
+        let cfg = CosyVoiceLmConfig::cosyvoice3();
         let w = crate::llm_import::import_llm_pt(llm_pt_path, &cfg)?;
         Ok(CosyVoiceLm::from_weights(cfg, w, ctx))
     }
@@ -90,7 +106,7 @@ impl CosyVoiceLm {
         self.cfg.llm_input_size as usize
     }
 
-    /// `speech_token_size + 3` (6564 for the real model).
+    /// `speech_token_size + speech_vocab_extra` (6564 for CV2, 6761 for CV3).
     pub fn speech_vocab(&self) -> usize {
         self.cfg.speech_vocab() as usize
     }
@@ -102,8 +118,16 @@ impl CosyVoiceLm {
         self.qwen.embed_row(id)
     }
 
-    fn llm_embed(&self, i: u32) -> &[f32] {
-        row(&self.llm_embedding, self.d(), i)
+    /// `sos`/`task_id` embedding row, read from whichever table
+    /// `cfg.special_token_source` names - see `crate::config`'s module doc.
+    fn special_embed(&self, i: u32) -> &[f32] {
+        match self.cfg.special_token_source {
+            SpecialTokenSource::LlmEmbedding => {
+                let table = self.llm_embedding.as_deref().expect("LlmEmbedding source requires llm_embedding");
+                row(table, self.d(), i)
+            }
+            SpecialTokenSource::SpeechEmbedding => self.speech_embed(i),
+        }
     }
 
     fn speech_embed(&self, id: u32) -> &[f32] {
@@ -111,7 +135,8 @@ impl CosyVoiceLm {
     }
 
     /// `llm_decoder(hidden)` - CosyVoice's own `Linear(896, speech_vocab)`
-    /// head, applied to one hidden row.
+    /// head, applied to one hidden row (bias added only when
+    /// `cfg.llm_decoder_has_bias` - CosyVoice 3's head has none).
     pub fn decoder_logits(&self, hidden_row: &[f32]) -> Vec<f32> {
         let d = self.d();
         let v = self.speech_vocab();
@@ -119,7 +144,7 @@ impl CosyVoiceLm {
         let mut out = vec![0.0f32; v];
         for (o, dst) in out.iter_mut().enumerate() {
             let wrow = &self.llm_decoder_w[o * d..(o + 1) * d];
-            let mut acc = self.llm_decoder_b[o];
+            let mut acc = self.llm_decoder_b.as_ref().map_or(0.0, |b| b[o]);
             for k in 0..d {
                 acc += wrow[k] * hidden_row[k];
             }
@@ -152,12 +177,14 @@ impl CosyVoiceLm {
         let n = 1 + text_ids.len() + 1 + prompt_speech_tokens.len();
         let mut hidden = Vec::with_capacity(n * self.d());
 
-        hidden.extend(self.qwen.step_embed(self.llm_embed(self.cfg.sos)));
+        let sos = self.special_embed(self.cfg.sos).to_vec();
+        hidden.extend(self.qwen.step_embed(&sos));
         for &id in text_ids {
             let e = self.text_embed(id);
             hidden.extend(self.qwen.step_embed(&e));
         }
-        hidden.extend(self.qwen.step_embed(self.llm_embed(self.cfg.task_id)));
+        let task_id = self.special_embed(self.cfg.task_id).to_vec();
+        hidden.extend(self.qwen.step_embed(&task_id));
         for &tok in prompt_speech_tokens {
             let e = self.speech_embed(tok).to_vec();
             hidden.extend(self.qwen.step_embed(&e));
@@ -216,10 +243,11 @@ mod tests {
         let v = cfg.speech_vocab() as usize;
         LmWeights {
             backbone,
-            llm_embedding: (0..2 * d).map(|i| (i % 5) as f32 * 0.01).collect(),
+            llm_embedding: matches!(cfg.special_token_source, SpecialTokenSource::LlmEmbedding)
+                .then(|| (0..2 * d).map(|i| (i % 5) as f32 * 0.01).collect()),
             speech_embedding: (0..v * d).map(|i| (i % 11) as f32 * 0.01 - 0.05).collect(),
             llm_decoder_w: (0..v * d).map(|i| (i % 13) as f32 * 0.01 - 0.06).collect(),
-            llm_decoder_b: vec![0.0f32; v],
+            llm_decoder_b: cfg.llm_decoder_has_bias.then(|| vec![0.0f32; v]),
         }
     }
 
@@ -231,8 +259,47 @@ mod tests {
         cfg.speech_token_size = 20;
         cfg.eos_token = 20;
         cfg.fill_token = 22;
-        cfg.stop_token_ids = [20, 21, 22];
+        cfg.stop_token_ids = 20..23;
         cfg
+    }
+
+    fn tiny_cfg_cv3() -> CosyVoiceLmConfig {
+        let mut cfg = CosyVoiceLmConfig::cosyvoice3();
+        cfg.qwen = qwen3::QwenConfig::qwen2(29, 2, 16, 4, 2, 32, true);
+        cfg.llm_input_size = 16;
+        cfg.llm_output_size = 16;
+        cfg.speech_token_size = 20;
+        cfg.sos = 20;
+        cfg.eos_token = 21;
+        cfg.task_id = 22;
+        cfg.fill_token = 23;
+        cfg.speech_vocab_extra = 6;
+        cfg.stop_token_ids = 20..26;
+        cfg
+    }
+
+    #[test]
+    fn prefill_and_generate_work_with_a_speech_embedding_sourced_config() {
+        // Exercises the CosyVoice3LM branch (no llm_embedding table, sos/task_id
+        // read from speech_embedding, bias-free llm_decoder) end to end at tiny
+        // dims - the real-weight rungs live in tests/llm3_parity.rs.
+        let cfg = tiny_cfg_cv3();
+        let w = tiny_weights(&cfg);
+        assert!(w.llm_embedding.is_none());
+        assert!(w.llm_decoder_b.is_none());
+        let d = cfg.llm_input_size as usize;
+        let lm = CosyVoiceLm::from_weights(cfg.clone(), w, 64);
+
+        let hidden = lm.prefill(&[3, 5, 7], &[1, 4]);
+        let n = 1 + 3 + 1 + 2;
+        assert_eq!(hidden.len(), n * d);
+        assert!(hidden.iter().all(|v| v.is_finite()));
+
+        let tokens = lm.generate(&hidden[hidden.len() - d..], 16, 0, 1234);
+        for &t in &tokens {
+            assert!(!cfg.stop_token_ids.contains(&t), "generate() must not push a stop id into its own output");
+            assert!((t as usize) < lm.speech_vocab());
+        }
     }
 
     #[test]

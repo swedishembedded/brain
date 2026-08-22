@@ -45,16 +45,18 @@
 //! config change with no code change, recorded here as an unreachable gap,
 //! not claimed as support.
 //!
-//! Status: the speech-token LM (`Qwen2LM`, CosyVoice 2 only - see
-//! [`llm`]/[`config`]/[`llm_import`]) is implemented: import from the real
-//! `llm.pt`, prompt assembly, and autoregressive generation with
-//! `ras_sampling` ([`sampling`]). Forward parity against real-weight goldens
-//! (`testdata/golden/cosyvoice/llm_real_*`) is proven at the prefill
-//! hidden-state and logits rungs; exact AR-token reproduction is a
-//! documented, honest gap (the reference sampler draws from torch's own RNG,
-//! which this port does not reproduce bit-for-bit - see [`sampling`]'s module
-//! doc). CosyVoice 3's `CosyVoice3LM` is a deliberate follow-up, not
-//! implemented.
+//! Status: the speech-token LM (`Qwen2LM` for CosyVoice 2, `CosyVoice3LM` for
+//! CosyVoice 3 - see [`llm`]/[`config`]/[`llm_import`]) is implemented for
+//! BOTH generations, sharing one `CosyVoiceLm` parameterized by
+//! `CosyVoiceLmConfig`'s `SpecialTokenSource` (the one real branch point - see
+//! [`config`]'s module doc): import from the real `llm.pt`, prompt assembly,
+//! and autoregressive generation with `ras_sampling` ([`sampling`]). Forward
+//! parity against real-weight goldens is proven at the prefill hidden-state
+//! and logits rungs for both generations (cosine 1.0000000000 against
+//! `testdata/golden/cosyvoice/llm_real_*` and `testdata/golden/cosyvoice3/
+//! llm_real_*`); exact AR-token reproduction is a documented, honest gap for
+//! both (the reference sampler draws from torch's own RNG, which this port
+//! does not reproduce bit-for-bit - see [`sampling`]'s module doc).
 //!
 //! The flow decoder (`CausalMaskedDiffWithXvec`, CosyVoice 2's UNet CFM
 //! estimator only - see [`flow`]/[`flow_config`]/[`flow_import`]) is
