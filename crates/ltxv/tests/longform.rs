@@ -226,10 +226,16 @@ mod real_weights {
 ///
 /// ## Cost
 ///
-/// Four real 22B generations (two per arm, ~6 minutes each on a Tesla P40,
-/// weight-streaming bound). Run explicitly:
+/// Four real 22B window generations, measured at 577 s in total on one Tesla
+/// P40 - the whole cost is weight streaming, and this shape's 1008 tokens per
+/// forward are small enough that the four share one warm checkpoint cache.
+/// `BRAIN_DEVICE` is what picks the card: it is the only pin that survives on
+/// a multi-GPU box, because a schedulable set of more than one card clears the
+/// registry's ambient selection (`ComputeSet::apply_backend`) and with it any
+/// inherited `BRAIN_GPU_INDEX`. Run explicitly:
 ///
 /// ```text
+/// BRAIN_DEVICE=gpu1 \
 /// BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
 /// BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
 /// BRAIN_LTXV_TEXT_ENCODER=<...gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
