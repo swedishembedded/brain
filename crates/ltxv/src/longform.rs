@@ -62,6 +62,16 @@
 //! The DiT imposes no additional minimum: its attention is global over the
 //! whole window (`crate::block`), so a frozen prefix is visible to every
 //! generated token regardless of how far away it sits.
+//!
+//! # Where a seam is deliberately NOT crossed
+//!
+//! Everything above keeps one SHOT continuous. A request can also be a
+//! sequence of [`Scene`]s ([`scene_plan`]), and there the carry is what has to
+//! stop: a scene conditioned on the previous scene's real content is not free
+//! to become a different subject, setting or action. So a scene boundary
+//! resets the context to nothing - the new scene's first window is an ordinary
+//! `context == 0` window, exactly like the first window of a whole plan - and
+//! the caller drives what happens next with that scene's own prompt.
 
 /// The clean latent-frame prefix each continuation window carries from its
 /// predecessor - the reference's `temporal_boundary` for video extension.
@@ -239,6 +249,79 @@ pub fn window_plan(frames: usize, lh: usize, lw: usize, context: usize, max_toke
         plan.push(w);
     }
     Ok(plan)
+}
+
+/// One scene of a multi-scene request: how long it runs, and what it shows.
+///
+/// A scene is the unit a rolling latent context is carried WITHIN. Windows
+/// inside one scene chain exactly as [`window_plan`] describes; at a scene
+/// boundary the context resets to nothing, so the next scene is free to be a
+/// different subject, setting or action rather than a forced continuation of
+/// the one before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scene {
+    /// Pixel frames this scene contributes, `1 + 8k` like any clip.
+    pub frames: usize,
+    /// What this scene shows. Each scene denoises against its own text
+    /// context; nothing else about a scene differs.
+    pub prompt: String,
+}
+
+impl Scene {
+    /// `<frames>:<prompt>` - the shell-writable spelling.
+    ///
+    /// The separator is the FIRST colon and only the first: a prompt is
+    /// ordinary English and "then: the camera pans" is a sentence, not a
+    /// syntax error.
+    pub fn parse(spec: &str) -> Result<Scene, String> {
+        let (count, prompt) = spec.split_once(':').ok_or_else(|| format!("a scene is <frames>:<prompt>, and {spec:?} has no ':' to separate them"))?;
+        let frames = count.trim().parse::<usize>().map_err(|e| format!("a scene's frame count comes first: {:?} in {spec:?} is not a number ({e})", count.trim()))?;
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Err(format!("scene {spec:?} has no prompt - the prompt is the only thing that makes a scene a DIFFERENT scene"));
+        }
+        Ok(Scene { frames, prompt: prompt.to_string() })
+    }
+}
+
+/// What a scene's index is folded into its seed with, so two scenes of one
+/// clip never draw the same initial noise.
+///
+/// Multiplied by the scene index rather than XORed with it, so scene 0 - the
+/// only scene a single-scene request has - keeps the caller's seed EXACTLY and
+/// a one-scene call stays the run it already was. Public because the gate that
+/// reproduces a scene on its own has to spell the same seed the multi-scene
+/// run gave it.
+pub const SCENE_SEED_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Cut a sequence of scenes into per-scene window plans, one list per scene,
+/// with every window's [`Window::first_frame`] an offset into the WHOLE clip.
+///
+/// This is [`window_plan`] run once per scene and nothing else: inside a scene
+/// the rolling context is exactly what that function plans, and the boundary
+/// between two scenes is a reset by construction, because a fresh plan's first
+/// window carries `context == 0`. That reset is the point - a new scene
+/// conditioned on the old scene's real content cannot become a different
+/// scene, which is the failure this plan shape exists to remove.
+///
+/// Resolved before any weight is read, over ALL scenes, so a five-scene
+/// request whose fourth scene is unplannable fails now rather than three
+/// scenes of device time later.
+pub fn scene_plan(scenes: &[Scene], lh: usize, lw: usize, context: usize, max_tokens: usize) -> Result<Vec<Vec<Window>>, String> {
+    if scenes.is_empty() {
+        return Err("a generation needs at least one scene".into());
+    }
+    let mut out = Vec::with_capacity(scenes.len());
+    let mut origin = 0usize;
+    for (si, s) in scenes.iter().enumerate() {
+        let mut plan = window_plan(s.frames, lh, lw, context, max_tokens).map_err(|e| format!("scene {} ({:?}): {e}", si + 1, s.prompt))?;
+        for w in &mut plan {
+            w.first_frame += origin;
+        }
+        origin += s.frames;
+        out.push(plan);
+    }
+    Ok(out)
 }
 
 /// The last `k` latent frames of a `[C, lat_t, lh, lw]` channel-major latent,

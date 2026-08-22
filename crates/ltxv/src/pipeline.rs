@@ -92,6 +92,7 @@ use vae::blocks::Tensors;
 
 use crate::config::LtxDitConfig;
 use crate::dit::{random_tiny_weights, LtxDit};
+use crate::longform::Scene;
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
 use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};
 use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS, LTX2_STAGE2_DISTILLED_SIGMAS};
@@ -3232,6 +3233,107 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
     progress(total, total, "done");
     tracing::info!(frames = out_frames.len(), windows = plan.len(), total_secs = timings.total(), "long-form generation done");
+    Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames }, timings))
+}
+
+/// Progress units one scene of a [`generate_scenes`] run is worth.
+///
+/// A scene's own phase count is not known until [`generate_long`] has planned
+/// it, and planning every scene twice just to total them up would duplicate
+/// the stage decision. Each scene's `(done, total)` is rescaled into its own
+/// slice of this instead, so the reported fraction is monotonic and correct
+/// without a second planner.
+const SCENE_PROGRESS_UNITS: u32 = 100;
+
+/// Text to video across SEVERAL scenes: one clip, one file, a different prompt
+/// per scene, and a genuine cut between them.
+///
+/// **This is [`generate_long`] run once per scene.** Inside a scene everything
+/// is exactly what that function does - the rolling latent context, the window
+/// plan, the two-stage decision, the per-window device release - and a scene
+/// boundary is a reset because a fresh `generate_long` call's first window
+/// carries nothing. There is no second window loop and no second sampler here;
+/// what this function adds is the up-front plan over all scenes, the per-scene
+/// seed, and the concatenation.
+///
+/// **Why the reset is the default and not an option.** A continuation window
+/// is HARD-conditioned on real content at sigma 0 (see [`crate::longform`]),
+/// which is what keeps one shot's motion continuous and is exactly what would
+/// stop a new scene from becoming a different scene. A caller who wants the
+/// content to continue is asking for one scene, and says so by writing one.
+///
+/// **A single-scene call is handed straight to [`generate_long`]**, so a
+/// request that names one scene is bit-for-bit the run it already was.
+///
+/// [`LongOpts::base`]'s own `frames` is NOT read - each [`Scene`] brings its
+/// own length, and the clip's length is their sum. `start_frame` conditions
+/// the first scene's opening and nowhere else; `end_frame` is refused for the
+/// same reason [`generate_long`] refuses it.
+#[tracing::instrument(level = "info", name = "generate_scenes", skip_all, fields(scenes = scenes.len(), width = o.base.width, height = o.base.height, seed = o.base.seed))]
+pub fn generate_scenes(paths: &Paths, scenes: &[Scene], o: &LongOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    let Some(first) = scenes.first() else {
+        return Err("a generation needs at least one scene".into());
+    };
+    let scene_opts = |s: &Scene, si: usize| LongOpts {
+        base: GenOpts {
+            frames: s.frames,
+            // The still conditions the clip's own opening, which is the first
+            // scene's first window and nowhere else.
+            start_frame: if si == 0 { o.base.start_frame.clone() } else { None },
+            end_frame: None,
+            seed: o.base.seed ^ crate::longform::SCENE_SEED_SALT.wrapping_mul(si as u64),
+            ..o.base.clone()
+        },
+        ..o.clone()
+    };
+    if scenes.len() == 1 {
+        return generate_long(paths, &first.prompt, &scene_opts(first, 0), cancel, progress);
+    }
+    if !o.base.width.is_multiple_of(32) || !o.base.height.is_multiple_of(32) {
+        return Err(format!("{}x{} is not a multiple of 32 (the VAE's spatial stride)", o.base.width, o.base.height));
+    }
+    if o.base.end_frame.is_some() {
+        return Err("--end-frame is not supported for a multi-scene clip: it pins the last frame of ONE window, and the last window of a multi-scene plan is the last scene's, which is not what a caller asking for a final still means".into());
+    }
+    let (lh, lw) = (o.base.height / 32, o.base.width / 32);
+    // Every scene, before the first weight is read: a five-scene request whose
+    // fourth scene cannot be planned fails now, not three scenes of device
+    // time later.
+    let plan = crate::longform::scene_plan(scenes, lh, lw, o.context_latent_frames, o.max_window_tokens)?;
+    let total_frames: usize = scenes.iter().map(|s| s.frames).sum();
+    tracing::info!(scenes = scenes.len(), windows = plan.iter().map(Vec::len).sum::<usize>(), frames = total_frames, "multi-scene generation planned");
+
+    let n = scenes.len();
+    let total = n as u32 * SCENE_PROGRESS_UNITS;
+    let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(total_frames);
+    let mut timings = Timings::default();
+    for (si, s) in scenes.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
+        tracing::info!(scene = si + 1, of = n, frames = s.frames, windows = plan[si].len(), prompt = %s.prompt, "scene starting");
+        let done_before = si as u32 * SCENE_PROGRESS_UNITS;
+        let (clip, t) = generate_long(paths, &s.prompt, &scene_opts(s, si), cancel, |done, scene_total, phase| {
+            progress(done_before + (done * SCENE_PROGRESS_UNITS) / scene_total.max(1), total, &format!("scene {}/{n}: {phase}", si + 1));
+        })?;
+        if clip.frames.len() != s.frames {
+            return Err(format!("scene {} came back as {} frames, expected {}", si + 1, clip.frames.len(), s.frames));
+        }
+        out_frames.extend(clip.frames);
+        timings.build_dit += t.build_dit;
+        timings.text_encode += t.text_encode;
+        timings.denoise += t.denoise;
+        timings.decode += t.decode;
+        timings.steps += t.steps;
+        timings.tokens = timings.tokens.max(t.tokens);
+        timings.forwards_per_step = t.forwards_per_step;
+    }
+
+    if out_frames.len() != total_frames {
+        return Err(format!("reassembled {} frames from {n} scenes, expected {total_frames}", out_frames.len()));
+    }
+    progress(total, total, "done");
+    tracing::info!(frames = out_frames.len(), scenes = n, total_secs = timings.total(), "multi-scene generation done");
     Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames }, timings))
 }
 

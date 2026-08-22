@@ -11,7 +11,7 @@
 //! survives a window boundary, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 //!
-//! Three always-run claims, and they are deliberately the only three:
+//! Four always-run claims, and they are deliberately the only four:
 //!
 //! 1. The WINDOW PLAN ([`a_clip_that_fits_one_window_carries_no_context`] and
 //!    its siblings) - pure arithmetic, no weights, always runs. This is what
@@ -24,7 +24,11 @@
 //!    (`a_frozen_prefix_of_latent_frames_survives_the_whole_trajectory`),
 //!    because that is where the sampler lives. Together the two close the
 //!    chain "window `n`'s last K latent frames == window `n+1`'s first K".
-//! 3. The WIRING end to end ([`real_weights`]) on the real VAE with a tiny
+//! 3. The SCENE BOUNDARY is the opposite claim
+//!    ([`a_multi_scene_plan_resets_the_carried_context_at_every_scene_boundary`]):
+//!    a new scene's first window carries nothing, so no content is forced
+//!    across a cut the caller asked for.
+//! 4. The WIRING end to end ([`real_weights`]) on the real VAE with a tiny
 //!    random-weight DiT - so it says nothing about quality, the same
 //!    disclaimer `ltxv::pipeline`'s own module doc carries for every
 //!    tiny-config path.
@@ -34,7 +38,7 @@
 //! construct - that MOTION really is more continuous across a seam than the
 //! last-frame chaining this path replaces.
 
-use ltxv::longform::{carry_tail, window_plan, Window, CONTEXT_FRAMES, CONTEXT_LATENT_FRAMES, LONGFORM_MAX_TOKENS};
+use ltxv::longform::{carry_tail, scene_plan, window_plan, Scene, Window, CONTEXT_FRAMES, CONTEXT_LATENT_FRAMES, LONGFORM_MAX_TOKENS};
 
 /// Reassemble a window plan the way `ltxv::pipeline::generate_long` does -
 /// every window emits only the pixel frames its NEW latent frames cover - and
@@ -137,11 +141,74 @@ fn the_carried_tail_is_the_previous_windows_own_last_latent_frames() {
     }
 }
 
+/// **The scene boundary is a reset, and that is the whole feature.** Inside a
+/// scene the plan is the rolling one every test above gates; at a cut it
+/// starts over - the new scene's first window carries `context == 0`, exactly
+/// like the first window of a whole plan, so nothing of the old scene is
+/// forced into the new one. The frames still have to reassemble to the
+/// requested clip with no duplicate and no gap, across scene boundaries as
+/// well as window ones.
+#[test]
+fn a_multi_scene_plan_resets_the_carried_context_at_every_scene_boundary() {
+    let (lh, lw) = (22usize, 40usize); // 1280x704
+    let scenes = [
+        Scene { frames: 481, prompt: "a Belgian Malinois running across an open field".into() },
+        Scene { frames: 241, prompt: "a fishing boat leaving a harbour at dawn".into() },
+        // Short enough to be ONE window, so a scene that never rolls a
+        // context at all is in the plan too.
+        Scene { frames: 113, prompt: "a close-up of rain on a window".into() },
+    ];
+    let plan = scene_plan(&scenes, lh, lw, CONTEXT_LATENT_FRAMES, LONGFORM_MAX_TOKENS).expect("a legal multi-scene request plans");
+
+    assert_eq!(plan.len(), scenes.len(), "one window list per scene");
+    let mut origin = 0usize;
+    for (si, (windows, scene)) in plan.iter().zip(&scenes).enumerate() {
+        assert_eq!(windows[0].context, 0, "scene {si} opens on the previous scene's content: {windows:?}");
+        assert_eq!(windows[0].first_frame, origin, "scene {si} does not start where the previous scene ended");
+        for (i, w) in windows.iter().enumerate().skip(1) {
+            assert_eq!(w.context, CONTEXT_LATENT_FRAMES, "scene {si} window {i} lost the intra-scene rolling context: {w:?}");
+        }
+        assert_eq!(windows.iter().map(|w| w.emitted_frames()).sum::<usize>(), scene.frames, "scene {si} does not emit its own length");
+        origin += scene.frames;
+    }
+    assert_eq!(plan[2].len(), 1, "113 frames is one window, so this scene has no seam of its own: {:?}", plan[2]);
+
+    let flat: Vec<Window> = plan.into_iter().flatten().collect();
+    assert_eq!(flat.iter().filter(|w| w.context == 0).count(), scenes.len(), "a context reset must happen once per scene and nowhere else");
+    assert_eq!(reassembled(&flat), (0..origin).collect::<Vec<_>>(), "the scenes do not reassemble to one continuous clip");
+}
+
+/// A scene arrives from a shell as `<frames>:<prompt>`, so the parse has to
+/// take the frame count off the FRONT and keep every remaining colon - a
+/// prompt with a colon in it is ordinary English, not a syntax error.
+#[test]
+fn a_scene_spec_is_a_frame_count_a_colon_and_the_whole_rest_of_the_prompt() {
+    let s = Scene::parse("121:a dog runs, then: the camera pans to the sky").expect("a well-formed scene parses");
+    assert_eq!(s.frames, 121);
+    assert_eq!(s.prompt, "a dog runs, then: the camera pans to the sky", "the prompt keeps every colon after the separator");
+    assert_eq!(Scene::parse("121: a dog").expect("parses").prompt, "a dog", "the space a shell writer leaves after the separator is not part of the prompt");
+
+    assert!(Scene::parse("a dog runs").is_err(), "no separator at all");
+    assert!(Scene::parse("many:a dog runs").is_err(), "the frame count is not a number");
+    assert!(Scene::parse("121:   ").is_err(), "a scene with no prompt is not a scene - the prompt is what makes it a different one");
+}
+
+/// A scene that cannot be planned is refused before any weight is read, and
+/// the message says WHICH scene - a caller who wrote five scenes needs to know
+/// which one to fix, not that "a" scene is impossible.
+#[test]
+fn an_impossible_scene_is_refused_and_named() {
+    assert!(scene_plan(&[], 22, 40, CONTEXT_LATENT_FRAMES, LONGFORM_MAX_TOKENS).is_err(), "no scenes is not a clip");
+    let scenes = [Scene { frames: 113, prompt: "fine".into() }, Scene { frames: 24, prompt: "not 1 + 8k".into() }];
+    let e = scene_plan(&scenes, 22, 40, CONTEXT_LATENT_FRAMES, LONGFORM_MAX_TOKENS).expect_err("24 frames is not 1 + 8k");
+    assert!(e.contains("scene 2"), "the refusal does not name the offending scene: {e}");
+}
+
 mod real_weights {
     use std::path::Path;
 
-    use ltxv::longform::{window_plan, CONTEXT_LATENT_FRAMES};
-    use ltxv::pipeline::{generate_long, GenOpts, LongOpts, Paths};
+    use ltxv::longform::{scene_plan, window_plan, Scene, CONTEXT_LATENT_FRAMES, SCENE_SEED_SALT};
+    use ltxv::pipeline::{generate_long, generate_scenes, GenOpts, LongOpts, Paths};
 
     /// The named environment variable, else the repo-relative
     /// `resources/ltxv/weights/` the real files ship under - never a literal
@@ -190,6 +257,58 @@ mod real_weights {
         assert!(video.frames.iter().any(|f: &Vec<u8>| f.iter().any(|&v| v != f[0])), "every frame is a flat colour - nothing was decoded");
         assert_eq!(timings.steps, o.base.steps * plan.len(), "not every window denoised");
         assert!(phases.iter().filter(|p| p.as_str() == "vae decode").count() == plan.len(), "one decode per window: {phases:?}");
+    }
+
+    /// **A scene boundary really is a reset, measured rather than asserted
+    /// about the plan.** The direct observable for "nothing of the old scene
+    /// is forced into the new one" is that the new scene's pixels do not
+    /// depend on the old scene AT ALL: scene 2's frames out of a two-scene
+    /// call must be exactly the frames the same scene produces on its own, and
+    /// scene 1's must be exactly the frames IT produces on its own. Anything
+    /// crossing the boundary - a carried latent, a leaked sampler state, a
+    /// shared noise draw - breaks that equality.
+    ///
+    /// Scene 1 is deliberately a MULTI-window scene (two windows under a
+    /// forced token ceiling), so the same run also shows the intra-scene
+    /// rolling context still happening either side of the reset. Real conv
+    /// VAE, tiny random-weight DiT, CPU - a wiring claim, not a quality one,
+    /// same as its sibling above.
+    #[test]
+    fn a_two_scene_request_is_one_clip_whose_second_scene_owes_nothing_to_its_first() {
+        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        };
+        let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
+        // Same 64x64 / forced-ceiling shape the sibling test uses: 4 tokens
+        // per latent frame, so 20 tokens is a 5-latent-frame window.
+        let (context, max_tokens) = (2usize, 20usize);
+        let scenes = [Scene { frames: 41, prompt: "a moving bar".into() }, Scene { frames: 25, prompt: "a spinning square".into() }];
+        let total: usize = scenes.iter().map(|s| s.frames).sum();
+        let base = GenOpts { width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), seed: 5, ..GenOpts::default() };
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, base: base.clone() };
+
+        let plan = scene_plan(&scenes, 2, 2, context, max_tokens).expect("the plan is legal");
+        assert_eq!(plan[0].len(), 2, "scene 1 has to span several windows for this test to say anything about the intra-scene context: {:?}", plan[0]);
+        assert_eq!(plan[1][0].context, 0, "the boundary window carries context, which is the defect this test exists to catch: {:?}", plan[1][0]);
+
+        let cancel = capability::CancelToken::default();
+        let mut phases: Vec<String> = Vec::new();
+        let (clip, timings) = generate_scenes(&paths, &scenes, &o, &cancel, |_, _, phase| phases.push(phase.to_string())).expect("generate_scenes");
+        assert_eq!(clip.frames.len(), total, "the clip is not the two scenes' combined length");
+        assert_eq!((clip.width, clip.height), (64, 64));
+        assert_eq!(phases.iter().filter(|p| p.ends_with("vae decode")).count(), plan[0].len() + plan[1].len(), "one decode per window across both scenes: {phases:?}");
+
+        // Each scene, alone, at the seed the multi-scene run gives it.
+        let alone = |s: &Scene, si: usize| {
+            let so = LongOpts { base: GenOpts { frames: s.frames, seed: base.seed ^ SCENE_SEED_SALT.wrapping_mul(si as u64), ..base.clone() }, ..o.clone() };
+            generate_long(&paths, &s.prompt, &so, &cancel, |_, _, _| {}).expect("a lone scene generates")
+        };
+        let (first, t0) = alone(&scenes[0], 0);
+        let (second, t1) = alone(&scenes[1], 1);
+
+        assert_eq!(&clip.frames[..scenes[0].frames], &first.frames[..], "scene 1 out of the two-scene call is not the clip it is on its own");
+        assert_eq!(&clip.frames[scenes[0].frames..], &second.frames[..], "scene 2 inherited something from scene 1 - the boundary is not a reset");
+        assert_eq!(timings.steps, t0.steps + t1.steps, "the aggregated timings lost a scene's work");
     }
 
     /// The default context is the one this crate ships, and a default-shaped
