@@ -2779,11 +2779,13 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         drop(encoder);
         vae_secs += enc_t.elapsed().as_secs_f32();
 
-        // `frames`/`width`/`height` here describe THIS segment at the INPUT
-        // resolution; the refinement itself runs at the doubled size, which
-        // `Refine` carries separately. Image conditioning is cleared: this
-        // entry point's content comes from the clip, not from a still.
-        let seg_opts = GenOpts { frames: len, width: w, height: h, start_frame: None, end_frame: None, ..o.base.clone() };
+        // `frames` is THIS segment's length, which is what a stage reads it
+        // for. `width`/`height` are the resolution the refinement runs at -
+        // `denoise_stage` takes those from its own `Stage`, not from here, but
+        // a `GenOpts` that disagreed with the stage it accompanies would be a
+        // trap for the next reader. Image conditioning is cleared: this entry
+        // point's content comes from the clip, not from a still.
+        let seg_opts = GenOpts { frames: len, width: out_w, height: out_h, start_frame: None, end_frame: None, ..o.base.clone() };
         let sc = StageCtx {
             dit: dit.as_ref(),
             vcfg: &vcfg,
