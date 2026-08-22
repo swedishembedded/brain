@@ -507,6 +507,29 @@ fast and scalable kernel - not a naive one.
     token-for-token agreement with the reference is NOT claimed. Full ledger:
     `.agents/roadmap/deepseek2ocr.md`.)*
 
+13f. **CosyVoice 2/3** (`crates/cosyvoice` + `crates/s3tokenizer` +
+    `crates/campplus`) - LLM-based streaming zero-shot voice cloning: a
+    Qwen2.5-0.5B speech-token LM (hosted on `crates/qwen3`) + a causal
+    flow-matching mel decoder (CosyVoice 2's UNet CFM estimator, CosyVoice
+    3's 22-layer adaLN-zero DiT estimator) + an ISTFT/NSF HiFT vocoder,
+    conditioned on a reference clip via S3Tokenizer (FSQ speech tokens) and
+    CAM++ (a 192-d x-vector). One crate, one architecture id, both
+    generations as a `variant` config, not two ids. Real-weight parity
+    proven for every component of BOTH generations (cosine >= 0.9999998
+    everywhere, most rungs at 1.0000000000); the speech-token LM is
+    additionally gradient-checked (block FD 1.09e-9, model FD < 2e-6) and
+    LoRA-capable. **Serving contract met for CosyVoice 2**: `cosyvoice::caps`
+    (one `synth` action, streaming), `crates/cli/src/resident_cosyvoice.rs`
+    (load-per-call, following `resident_minimaxmusic3.rs`), `brain
+    caps`/`brain cosyvoice synth`/D-Bus/HTTP, `examples/tts/
+    cosyvoice_synth.py`. **CosyVoice 3 is not yet composable**: its LM/flow/
+    vocoder are individually forward-parity-proven against real checkpoints,
+    but `crate::pipeline::generate` only wires CosyVoice 2's components -
+    `variant="cosyvoice3"` is accepted for discovery and rejected with a
+    named error, never a silent fallback. Flow decoder and HiFT vocoder
+    training (both generations) remain forward-only. Full ledger:
+    `.agents/roadmap/cosyvoice.md`.
+
 ### Forecasting
 
 14. **Chronos-2** (`crates/chronos2`) - encoder-only T5-style patch transformer,

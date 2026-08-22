@@ -44,6 +44,7 @@ named on the model's own page (see
 | [`nemotronasr`](nemotronasr.md) ⤓ | streaming speech-to-text | [x] | [ ] |
 | [`qwen3asr`](qwen3asr.md) ⤓ | offline speech-to-text | [x] | [ ] |
 | [`qwen3tts`](qwen3tts.md) ⤓ | voice cloning / speech synthesis | [x] | [x] |
+| [`cosyvoice`](cosyvoice.md) | zero-shot voice cloning TTS (LM + flow-matching mel decoder + HiFT vocoder) | [x] (CosyVoice 2 only - CosyVoice 3 forward-parity-proven, not yet composed into a pipeline) | [x] (LM only) |
 
 ## Music generation
 
@@ -112,7 +113,9 @@ today. Each has its own page with the full status:
 
 Not independently servable - reached only as part of another architecture's
 composed pipeline: [`deepseek2`](deepseek2.md), [`sam1`](sam1.md),
-[`mimi`](mimi.md), [`ecapatdnn`](ecapatdnn.md), [`autoencoderkl`](autoencoderkl.md).
+[`mimi`](mimi.md), [`ecapatdnn`](ecapatdnn.md), [`autoencoderkl`](autoencoderkl.md),
+[`s3tokenizer`](s3tokenizer.md) (`cosyvoice`'s FSQ speech tokenizer),
+[`campplus`](campplus.md) (`cosyvoice`'s 192-d speaker encoder).
 
 Notes on the columns:
 
