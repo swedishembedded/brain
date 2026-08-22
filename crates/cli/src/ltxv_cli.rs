@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain ltxv t2v …` - LTX-2.5 text-to-video.
+//! `brain ltxv {t2v,upscale,dfr}` - LTX-2.5 video generation, post-hoc
+//! upscaling of a clip that already exists, and the DFR smoke test.
 //!
 //! One command, one playable file:
 //!
 //! ```text
 //! brain ltxv t2v --prompt "a cat walking on a beach" --seed 42 --output-path out.mp4
+//! brain ltxv upscale --input out.mp4 --output-path out_2x.mp4 --prompt "a cat walking on a beach"
 //! ```
 //!
-//! **This milestone is a WIRING smoke test, not a quality claim.** The VAE
-//! decode is real (real weights, `--vae`/`$BRAIN_LTXV_VAE`); the DiT is
-//! always tiny-config with FRESH RANDOM WEIGHTS (`--dit-config tiny`, the
-//! only value implemented - there is no real 22B checkpoint to load), and
-//! there is no real text encoder (`--prompt` only ever folds into a
-//! deterministic noise/context seed). See `ltxv::pipeline`'s module doc for
-//! the full account of what is real here and what is not.
+//! **`--dit-config` decides whether any of this is a quality claim.** The VAE
+//! and the latent upscalers are always real (real weights,
+//! `--vae`/`$BRAIN_LTXV_VAE`, `$BRAIN_LTXV_UPSAMPLER_SPATIAL`). The DiT is
+//! the tiny config with FRESH RANDOM WEIGHTS by default, which makes every
+//! output a wiring proof and nothing else; `--dit-config ltx25_22b` with
+//! `--dit`/`$BRAIN_LTXV_DIT` loads the real checkpoint. The prompt likewise
+//! only folds into a deterministic context stub unless
+//! `--text-encoder`/`$BRAIN_LTXV_TEXT_ENCODER` names the real Gemma-4
+//! encoder. See `ltxv::pipeline`'s module doc for the full account of what
+//! is real and what is not.
 
 use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, Paths, UpscaleOpts};
 
