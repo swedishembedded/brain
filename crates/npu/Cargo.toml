@@ -22,6 +22,7 @@ brain-lfm2.workspace = true
 brain-kronos.workspace = true
 brain-fincast.workspace = true
 brain-mimi.workspace = true
+brain-cosyvoice.workspace = true
 brain-vision.workspace = true
 brain-zipdepth.workspace = true
 brain-yolov8.workspace = true
