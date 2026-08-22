@@ -22,7 +22,7 @@
 //! encoder. See `ltxv::pipeline`'s module doc for the full account of what
 //! is real and what is not.
 
-use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, Paths, UpscaleOpts};
+use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, LongOpts, Paths, UpscaleOpts};
 
 const HELP: &str = r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: real VAE + tiny random-weight DiT, no real text encoder yet)
 
@@ -36,7 +36,11 @@ Required:
                            command that finishes the job is printed
 
 Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
-  --frames <N>              video frames, must be 1 + 8k (default 9)
+  --frames <N>              video frames, must be 1 + 8k (default 9). Any
+                            length is accepted: past what one denoising
+                            window holds the clip is generated as several
+                            windows with a rolling latent context (see
+                            Long-form clips)
   --width <W> --height <H>  pixels, multiples of 32 (default 64x64)
   --steps <N>                denoise steps (default 4)
   --guidance <G>             classifier-free guidance (default 1.0; <= 1.0
@@ -62,6 +66,11 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                              connects the still to itself); a different
                              path for a clip that morphs between two
                              stills. Either flag works alone.
+  --context-frames <N>         how much of the previous window a long-form
+                             continuation carries, in pixel frames, must be
+                             1 + 8k (default 57 = 8 latent frames, the
+                             reference's own video-extension prefix). Only
+                             read when the clip needs more than one window.
   --conditioning-strength <S>  how hard --start-frame/--end-frame pin their
                              frames, 0..1 (default 1.0 = pinned exactly;
                              the reference's own CLI example is 0.8). Note
@@ -108,6 +117,20 @@ Stages:
   $BRAIN_LTXV_UPSAMPLER_SPATIAL, and both --width and --height must be
   multiples of 64 (not just 32) so halving lands on the VAE's own stride.
   BRAIN_LTXV_TWO_STAGE=1/0 forces the choice either way.
+
+Long-form clips:
+  A request longer than one denoising window fits is generated as several
+  consecutive windows. What crosses each boundary is the previous window's
+  own last --context-frames LATENT frames, sliced out before anything was
+  decoded and frozen at sigma 0 while the new frames denoise around them -
+  NOT a decoded frame re-encoded as a conditioning still, which carries a
+  position but no velocity and is why naively chained clips change or
+  reverse their motion at every seam. A request that fits one window is
+  generated exactly as it always was, and none of this runs.
+  BRAIN_LTXV_LONGFORM_MAX_TOKENS overrides the per-window token ceiling
+  (default 13200, the largest single-window generation this crate has a
+  recorded real run at). --end-frame is not supported for a multi-window
+  clip; --start-frame conditions the first window as usual.
 
 Devices:
   --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)
@@ -266,6 +289,7 @@ pub fn run_ltxv(args: &[String]) {
 
 fn t2v(args: &[String]) -> Result<(), String> {
     let mut o = GenOpts::default();
+    let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
     let mut prompt: Option<String> = None;
     let mut out: Option<String> = None;
     let mut vae: Option<String> = None;
@@ -309,6 +333,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
                 text_encoder = Some(need(i)?.clone());
             }
             "--conditioning-strength" => o.conditioning_strength = flt(i, "--conditioning-strength")?,
+            "--context-frames" => context_frames = num(i, "--context-frames")?,
             "--start-frame" => {
                 o.start_frame = Some(need(i)?.clone());
             }
@@ -335,10 +360,22 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let out = out.ok_or("--output-path is required")?;
     let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), None)?;
 
-    let tokens = {
+    let (lh, lw) = (o.height / 32, o.width / 32);
+    let context_latents = {
         let vcfg = ltxv::LtxVaeConfig::conv25();
-        let lat_t = vcfg.latent_frames(o.frames as u32).ok_or_else(|| format!("{} frames is not of the form 1 + 8k", o.frames))?;
-        (lat_t as usize) * (o.height / 32) * (o.width / 32)
+        vcfg.latent_frames(context_frames as u32).ok_or_else(|| format!("--context-frames {context_frames} is not of the form 1 + 8k"))? as usize
+    };
+    let long = LongOpts { context_latent_frames: context_latents, max_window_tokens: ltxv::longform::max_window_tokens_from_env(), base: o.clone() };
+    // The plan decides what this run actually is, so it is resolved before
+    // the preview line rather than after: a multi-window clip's per-forward
+    // token count is one WINDOW's, and reporting the whole clip's would name
+    // a number no forward in the run has.
+    let plan = ltxv::longform::window_plan(o.frames, lh, lw, context_latents, long.max_window_tokens)?;
+    let tokens = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
+    let window_desc = if plan.len() > 1 {
+        format!(" [{} windows, {context_frames}-frame rolling latent context]", plan.len())
+    } else {
+        String::new()
     };
     let forwards = if o.guidance > 1.0 { 2 } else { 1 };
     let dit_desc = if o.dit_config == "tiny" { "tiny random-weight DiT" } else { "REAL checkpoint DiT (int8 compute)" };
@@ -370,7 +407,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         (None, None) => String::new(),
     };
     eprintln!(
-        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}{stage_desc}",
+        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}{stage_desc}{window_desc}",
         o.frames, o.width, o.height, o.eta, o.guidance, o.seed
     );
 
@@ -378,7 +415,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // A one-shot CLI run has no second party to cancel it: Ctrl-C already
     // ends the process - see `wan_cli::t2v`'s identical reasoning.
     let cancel = capability::CancelToken::default();
-    let (video, timings) = ltxv::pipeline::generate(&paths, &prompt, &o, &cancel, |done, total, phase| {
+    let (video, timings) = ltxv::pipeline::generate_long(&paths, &prompt, &long, &cancel, |done, total, phase| {
         eprint!("\rltxv [{done}/{total}] {phase}                    ");
     })?;
     eprintln!();
