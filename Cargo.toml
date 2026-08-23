@@ -127,7 +127,11 @@ default-members = [
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
-license = "MIT"
+# Apache-2.0, matching the SPDX identifier in every source file, the LICENSE
+# file's own text, and README.md. This said `MIT` while all 1914 of those
+# disagreed - all 110 member crates inherit it, so the wrong value was the
+# license every crate published.
+license = "Apache-2.0"
 repository = "https://github.com/swedishembedded/brain"
 
 [workspace.dependencies]
