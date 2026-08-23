@@ -9,6 +9,15 @@
 //! survives a window boundary, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 //!
+//! Two callers, one plan. [`crate::pipeline::generate_long`] windows a clip it
+//! is INVENTING; [`crate::pipeline::upscale`] windows a clip that already
+//! exists, whose refinement will not fit one pass. The token ceiling, the
+//! carried prefix and the emitted-frame arithmetic are the same question in
+//! both, so they are the same code - the only thing refinement adds is
+//! [`Window::source_first_frame`], which says where in the input clip a window
+//! reads from, and [`fitted_context`], which says what a four-times-denser
+//! grid can afford to carry.
+//!
 //! # What crosses a seam, and why it is not a picture
 //!
 //! Chaining windows by decoding window `n`, taking its last RGB frame and
@@ -187,6 +196,60 @@ impl Window {
     pub fn dropped_frames(&self) -> usize {
         self.decoded_frames() - self.emitted_frames()
     }
+
+    /// The first frame of the SOURCE clip this window's whole decode covers,
+    /// for a plan applied to a clip that already exists
+    /// ([`crate::pipeline::upscale`]) rather than to frames being generated.
+    ///
+    /// A generating window has no source: it invents [`Self::new`] latent
+    /// frames and drops the leading pixels its carried context decoded to. A
+    /// window refining an existing clip has to READ those leading pixels from
+    /// somewhere, and the somewhere is exactly [`Self::dropped_frames`] before
+    /// its own first emitted frame - which makes the range it reads end where
+    /// its own output ends.
+    pub fn source_first_frame(&self) -> usize {
+        self.first_frame - self.dropped_frames()
+    }
+}
+
+/// Latent frames one `max_tokens` forward holds on an `lh` x `lw` grid.
+///
+/// The one line [`window_plan`] and [`fitted_context`] share, and the only
+/// thing either of them knows about a token ceiling.
+pub fn max_latent_frames(lh: usize, lw: usize, max_tokens: usize) -> Result<usize, String> {
+    let per_frame = lh.checked_mul(lw).filter(|&n| n > 0).ok_or_else(|| format!("a {lh}x{lw} latent grid is not a grid"))?;
+    Ok(max_tokens / per_frame)
+}
+
+/// The largest context an `lh` x `lw` plan can actually carry under
+/// `max_tokens`, capped at `want`.
+///
+/// [`window_plan`] REFUSES a grid with no room for `want + 1` latent frames,
+/// and for generation that is right: the caller picked the resolution, so a
+/// smaller one is available and a truncated motion history is not what
+/// [`CONTEXT_LATENT_FRAMES`] cites the reference for.
+///
+/// Refinement has neither escape. Its grid is the input clip's grid times the
+/// upscale factor squared - four times the tokens per latent frame - and its
+/// resolution is the whole request, so "generate at a smaller size" is not
+/// advice, it is a refusal. At 2560x1408 a 12288-token pass holds three latent
+/// frames total and eight carried ones is arithmetically impossible. So a
+/// refinement plan takes the most history the ceiling leaves room for and
+/// keeps one frame to refine. That is a quality COMPROMISE and the caller is
+/// told; carrying nothing is not a compromise, it is the defect - a refinement
+/// starting at sigma 0.909 with no history re-imagines the clip from almost
+/// nothing, once per pass.
+pub fn fitted_context(lh: usize, lw: usize, want: usize, max_tokens: usize) -> Result<usize, String> {
+    let max_lat = max_latent_frames(lh, lw, max_tokens)?;
+    if max_lat < 2 {
+        return Err(format!(
+            "a {}x{} grid ({} tokens per latent frame) leaves room for {max_lat} latent frames under the {max_tokens}-token ceiling, and a continued pass needs at least one carried frame plus one new one - work at a smaller size",
+            lw * 32,
+            lh * 32,
+            lh * lw
+        ));
+    }
+    Ok(want.min(max_lat - 1))
 }
 
 /// Cut a `frames`-frame request into windows that each fit `max_tokens`,
@@ -196,11 +259,9 @@ impl Window {
 /// the request's own `k` (`frames == 1 + 8k`) and every later window
 /// contributes its whole `new`, because the leading pixel frame of a
 /// continuation window's decode belongs to the context. So the windows sum to
-/// the request exactly, for any number of windows - unlike
-/// [`crate::pipeline::refine_segments`]'s disjoint `1 + 8k` segments, which
-/// only close by sharing one PIXEL frame per boundary. The two are deliberately
-/// separate functions: they share the one line that turns a token ceiling into
-/// a latent-frame count, and nothing else.
+/// the request exactly, for any number of windows - which disjoint `1 + 8k`
+/// segments cannot do, since `n` of them sum to `n + 8 * sum(k_i)` and that is
+/// a legal clip length only for `n == 1`.
 ///
 /// **Window 0 takes the whole budget; the continuation windows are equal to
 /// each other.** Two reasons, and neither is aesthetic. It is the only window
@@ -219,13 +280,13 @@ pub fn window_plan(frames: usize, lh: usize, lw: usize, context: usize, max_toke
     if context == 0 {
         return Err("a long-form window plan needs at least one carried latent frame: a zero-frame context is independent windows, which is the discontinuity this path exists to remove".into());
     }
-    let per_frame = lh.checked_mul(lw).filter(|&n| n > 0).ok_or_else(|| format!("a {lh}x{lw} latent grid is not a grid"))?;
-    let max_lat = max_tokens / per_frame;
+    let max_lat = max_latent_frames(lh, lw, max_tokens)?;
     if max_lat < context + 1 {
         return Err(format!(
-            "a {}x{} request ({per_frame} tokens per latent frame) leaves room for {max_lat} latent frames under the {max_tokens}-token ceiling, and a continuation window needs {context} carried frames plus at least one new one - generate at a smaller size, or lower the context",
+            "a {}x{} request ({} tokens per latent frame) leaves room for {max_lat} latent frames under the {max_tokens}-token ceiling, and a continuation window needs {context} carried frames plus at least one new one - generate at a smaller size, or lower the context",
             lw * 32,
-            lh * 32
+            lh * 32,
+            lh * lw
         ));
     }
     let k_total = (frames - 1) / 8;

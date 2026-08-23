@@ -207,6 +207,14 @@ Refinement:
                              are not interpolable.
   --guidance <G>             classifier-free guidance (default 1.0)
   --seed <S>                 refinement noise seed (default 0)
+  --context-frames <N>       how much of the previous refinement pass the
+                             next one carries, in pixel frames, must be
+                             1 + 8k (default 57 = 8 latent frames, the
+                             reference's own video-extension prefix).
+                             Reduced automatically when the OUTPUT grid
+                             cannot hold that many latent frames plus one to
+                             refine - see Length. Only read when the clip
+                             needs more than one pass.
   --fps <N>                  frame rate for the output. Default: whatever
                              ffprobe reports for --input, and only if that
                              fails does this fall back to the pipeline
@@ -219,10 +227,19 @@ Length:
   An upscaled clip has FOUR times the video tokens per frame of its input, so
   a length that refined fine at the source resolution need not fit at the
   target one. Past 12288 tokens in one pass the clip is refined in several
-  independent segments that share one frame at each boundary; fine detail can
-  step where two segments meet. A clip that fits is never split. A request
-  that cannot be split into anything runnable is refused before any weight is
-  read, rather than after an hour of work.
+  passes, and each one FREEZES the previous pass's own last --context-frames
+  of refined latent at the head of its sequence - the same rolling latent
+  context `brain ltxv t2v` uses across a window boundary - so the passes are
+  one continuous clip rather than several separately re-imagined ones.
+
+  That context costs budget. A pass holds 12288/(tokens per latent frame)
+  latent frames and spends the carried ones before it refines anything, so at
+  2560x1408 (3520 tokens per latent frame, 3 latent frames a pass) the full
+  57-frame context does not fit: the plan carries the most it can and says so
+  on stderr. Lower --context-frames to buy back passes at the cost of
+  continuity. A clip that fits one pass is never split and carries nothing. A
+  grid with no room for one carried frame plus one new one is refused before
+  any weight is read, rather than after an hour of work.
 
 Weights (flag wins over the environment variable):
   --vae <path>               $BRAIN_LTXV_VAE       the causal 3D video VAE
@@ -511,6 +528,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
     let mut text_encoder: Option<String> = None;
     let mut upsampler_spatial: Option<String> = None;
     let mut fps: Option<usize> = None;
+    let mut context_frames = ltxv::longform::CONTEXT_FRAMES;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
@@ -528,6 +546,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
             }
             "--factor" => o.factor = num(i, "--factor")?,
             "--refine-steps" => o.refine_steps = num(i, "--refine-steps")?,
+            "--context-frames" => context_frames = num(i, "--context-frames")?,
             "--guidance" => o.base.guidance = flt(i, "--guidance")?,
             "--seed" => o.base.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--fps" => fps = Some(num(i, "--fps")?),
@@ -559,6 +578,10 @@ fn upscale(args: &[String]) -> Result<(), String> {
     let out = out.ok_or("--output-path is required")?;
     let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), upsampler_spatial.as_deref())?;
     let prompt = prompt.unwrap_or_default();
+    o.context_latent_frames = {
+        let vcfg = ltxv::LtxVaeConfig::conv25();
+        vcfg.latent_frames(context_frames as u32).ok_or_else(|| format!("--context-frames {context_frames} is not of the form 1 + 8k"))? as usize
+    };
 
     let in_path = std::path::Path::new(&input);
     let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0 })?;
@@ -573,15 +596,20 @@ fn upscale(args: &[String]) -> Result<(), String> {
     o.base.fps = fps;
     let clip = ltxv::pipeline::Video { width: w, height: h, fps, frames: decoded.into_iter().map(|f| f.px).collect() };
 
-    let segments = ltxv::pipeline::refine_segments(clip.frames.len(), (h as usize * o.factor) / 32, (w as usize * o.factor) / 32)?;
+    let plan = ltxv::pipeline::refine_plan(clip.frames.len(), (h as usize * o.factor) / 32, (w as usize * o.factor) / 32, o.context_latent_frames, o.max_refine_tokens)?;
     let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
     let dit_desc = if o.base.dit_config == "tiny" { "tiny random-weight DiT" } else { "REAL checkpoint DiT (int8 compute)" };
-    let seg_desc = if segments.len() > 1 { format!(", {} refinement segments (seams possible where they meet)", segments.len()) } else { String::new() };
+    let plan_desc = match plan.get(1).map(|s| s.context) {
+        // The carried count is the whole story of a multi-pass upscale, so it
+        // is in the one line the caller reads before committing an hour.
+        Some(c) => format!(", {} refinement passes each carrying {c} latent frame(s) of the previous one", plan.len()),
+        None => String::new(),
+    };
     if prompt.is_empty() {
         eprintln!("ltxv upscale: no --prompt, so the refinement pass denoises against an empty context - pass the clip's original prompt for better detail");
     }
     eprintln!(
-        "ltxv upscale ({dit_desc}, real VAE + real x2 latent spatial upscaler, {ctx_desc}): {} frames, {w}x{h} -> {}x{} at {fps} fps, {} refinement steps, guidance {}, seed {}{seg_desc}",
+        "ltxv upscale ({dit_desc}, real VAE + real x2 latent spatial upscaler, {ctx_desc}): {} frames, {w}x{h} -> {}x{} at {fps} fps, {} refinement steps, guidance {}, seed {}{plan_desc}",
         clip.frames.len(),
         w as usize * o.factor,
         h as usize * o.factor,

@@ -2695,58 +2695,33 @@ fn rgb8_to_chw(frames: &[Vec<u8>], h: usize, w: usize) -> Vec<f32> {
 pub const REFINE_MAX_TOKENS: usize = 12288;
 
 /// How [`upscale`] splits a clip whose refinement will not fit in one pass:
-/// `(first_frame, frame_count)` per segment, in order.
+/// one [`crate::longform::Window`] per refinement pass, in order.
 ///
-/// Segments overlap their predecessor by exactly ONE pixel frame, and that is
-/// forced by the causal VAE rather than chosen. Every clip it can represent
-/// has `1 + 8k` frames - the first frame gets a latent frame to itself and
-/// every later latent frame covers 8 - so `n` disjoint segments of that shape
-/// can only ever sum to `n + 8 * sum(k_i)`, which equals a `1 + 8K` clip only
-/// for `n == 1`. Sharing one frame at each boundary makes the arithmetic
-/// close for any `n`: the covered length is `sum(1 + 8k_i) - (n - 1) =
-/// 1 + 8 * sum(k_i)`. The shared frame is re-rendered by the later segment
-/// and its earlier copy discarded.
+/// **This is [`crate::longform::window_plan`] and nothing else.** A clip too
+/// long to refine in one pass and a clip too long to GENERATE in one window
+/// pose the same question - how much of the previous pass does the next one
+/// have to see - and it already has a measured answer: the previous pass's own
+/// last latent frames, frozen at sigma 0, which held a seam at ratio 0.99
+/// against naive chaining's 0.85. So refinement plans with the same function,
+/// carries with the same [`crate::longform::carry_tail`], and freezes with the
+/// same [`LatentContext`]. Each pass VAE-encodes the source range
+/// [`crate::longform::Window::source_first_frame`] names, carries it up with
+/// the x2 upscaler, overwrites the leading `context` latent frames with the
+/// previous pass's own refined output, and refines - so what the model sees at
+/// a boundary is real refined content, not the same source frames re-imagined
+/// from scratch.
 ///
-/// Segments are as equal in length as the split allows rather than "fill,
-/// fill, remainder", so no clip ends on a 9-frame stub refined with a
-/// different amount of temporal context than everything before it.
+/// The one thing refinement adds is [`crate::longform::fitted_context`]: an
+/// upscaled grid is four times as dense per latent frame as the grid it came
+/// from, so `context + 1` latent frames do not always fit and the context is
+/// reduced to what does rather than the clip being refused. See that function
+/// for why refinement compromises where generation refuses.
 ///
-/// **The seam is real and is not blended.** Each segment is refined
-/// independently, so fine detail can step at a boundary. That is the price of
-/// refining a clip longer than one pass can hold, and it is a visible,
-/// bounded artefact rather than the silent end-of-clip disintegration
-/// [`SINGLE_STAGE_MAX_TOKENS`] documents. A clip that fits is never split.
-pub fn refine_segments(frames: usize, out_lh: usize, out_lw: usize) -> Result<Vec<(usize, usize)>, String> {
-    if frames == 0 || !(frames - 1).is_multiple_of(8) {
-        return Err(format!("{frames} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)"));
-    }
-    let per_frame = out_lh.checked_mul(out_lw).filter(|&n| n > 0).ok_or_else(|| format!("a {out_lh}x{out_lw} latent grid is not a grid"))?;
-    // Two latent frames is the shortest segment worth running (9 pixel
-    // frames); a grid where even that does not fit cannot be rescued by
-    // splitting, so say so instead of returning a plan that cannot run.
-    let max_lat = REFINE_MAX_TOKENS / per_frame;
-    if max_lat < 2 {
-        return Err(format!(
-            "a {}x{} output ({per_frame} tokens per latent frame) leaves no room for even a 9-frame refinement segment under the {REFINE_MAX_TOKENS}-token ceiling - upscale a smaller clip",
-            out_lw * 32,
-            out_lh * 32
-        ));
-    }
-    let k_total = (frames - 1) / 8;
-    let k_max = max_lat - 1;
-    if k_total <= k_max {
-        return Ok(vec![(0, frames)]);
-    }
-    let n = k_total.div_ceil(k_max);
-    let (base, rem) = (k_total / n, k_total % n);
-    let mut plan = Vec::with_capacity(n);
-    let mut start = 0usize;
-    for i in 0..n {
-        let k = base + usize::from(i < rem);
-        plan.push((start, 1 + 8 * k));
-        start += 8 * k;
-    }
-    Ok(plan)
+/// A clip that fits one pass is one pass, carrying nothing - byte for byte the
+/// refinement a single-pass upscale already ran.
+pub fn refine_plan(frames: usize, out_lh: usize, out_lw: usize, context: usize, max_tokens: usize) -> Result<Vec<crate::longform::Window>, String> {
+    let fitted = crate::longform::fitted_context(out_lh, out_lw, context, max_tokens)?;
+    crate::longform::window_plan(frames, out_lh, out_lw, fitted, max_tokens)
 }
 
 /// Everything [`upscale`] varies beyond what a generation already varies.
@@ -2759,6 +2734,18 @@ pub struct UpscaleOpts {
     /// Refinement steps, `1..=`[`LTX2_STAGE2_STEPS`]. See [`stage2_sigmas`]
     /// for why this can only pick a suffix of the distilled table.
     pub refine_steps: usize,
+    /// Clean latent frames carried from each refinement pass into the next,
+    /// [`crate::longform::CONTEXT_LATENT_FRAMES`] by default and reduced by
+    /// [`crate::longform::fitted_context`] when the output grid cannot hold
+    /// that many plus a frame to refine.
+    ///
+    /// Lowering it is a real lever and costs continuity to buy passes: a pass
+    /// spends `context` of its latent-frame budget before it refines anything,
+    /// so at a tight grid `context + 1 == max_lat` and every frame carried is
+    /// a frame not refined this pass.
+    pub context_latent_frames: usize,
+    /// Per-pass video-token ceiling, [`REFINE_MAX_TOKENS`] by default.
+    pub max_refine_tokens: usize,
     /// Seed, guidance, device placement, `dit_config`. `frames`, `width` and
     /// `height` are IGNORED - they come from the input clip, which is the
     /// whole point of this entry point.
@@ -2767,9 +2754,24 @@ pub struct UpscaleOpts {
 
 impl Default for UpscaleOpts {
     fn default() -> UpscaleOpts {
-        UpscaleOpts { factor: 2, refine_steps: LTX2_STAGE2_STEPS, base: GenOpts::default() }
+        UpscaleOpts {
+            factor: 2,
+            refine_steps: LTX2_STAGE2_STEPS,
+            context_latent_frames: crate::longform::CONTEXT_LATENT_FRAMES,
+            max_refine_tokens: REFINE_MAX_TOKENS,
+            base: GenOpts::default(),
+        }
     }
 }
+
+/// What a refinement pass's index is folded into its noise seed with, so two
+/// passes of one clip never draw the same refinement noise.
+///
+/// Multiplied by the index rather than XORed, for
+/// [`crate::longform::SCENE_SEED_SALT`]'s reason: pass 0 - the only pass a
+/// clip that fits has - keeps the caller's seed EXACTLY, so a single-pass
+/// upscale stays bit for bit the run it already was.
+const REFINE_SEED_SALT: u64 = 0x5245_4649_4e45_0001;
 
 /// Re-render an already-finished clip at twice its spatial resolution:
 /// VAE-encode it, carry the latent up with the official x2 latent spatial
@@ -2780,7 +2782,14 @@ impl Default for UpscaleOpts {
 /// sandwich, the same distilled refinement schedule - applied to a latent
 /// that came from pixels on disk instead of from stage 1. Nothing about the
 /// mechanics is re-derived here; what this function adds is the encode, the
-/// segmentation ([`refine_segments`]) and the reassembly.
+/// plan ([`refine_plan`]) and the reassembly.
+///
+/// **A clip too long for one refinement pass is refined in several, and they
+/// are one clip rather than several.** Each pass after the first freezes the
+/// previous pass's own last latent frames at the head of its sequence, exactly
+/// as [`generate_long`]'s continuation windows do - see [`refine_plan`]. The
+/// rolling state is one latent slab of at most `context_latent_frames` frames,
+/// so a ten-minute clip costs the same host memory as a ten-second one.
 ///
 /// **`prompt` matters.** The refinement is a diffusion pass, not a
 /// deterministic filter: the DiT is asked what this content should look like
@@ -2810,7 +2819,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
     }
     let (out_w, out_h) = (w * o.factor, h * o.factor);
     let (lh, lw) = (out_h / 32, out_w / 32);
-    let plan = refine_segments(frames, lh, lw)?;
+    let plan = refine_plan(frames, lh, lw, o.context_latent_frames, o.max_refine_tokens)?;
     let sigmas = stage2_sigmas(o.refine_steps)?;
 
     let vcfg = LtxVaeConfig::conv25();
@@ -2823,21 +2832,25 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         tracing::error!("upscaling needs the spatial latent upscaler");
         format!("upscaling IS the spatial latent upscaler: pass --upsampler-spatial <path> or set {var} to the {role} (ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors)")
     })?;
-    tracing::info!(segments = plan.len(), out_width = out_w, out_height = out_h, refine_steps = o.refine_steps, "upscale planned");
-    if plan.len() > 1 {
-        // Not a defect and not silent: say it once, with the number, so a
-        // seam in the output is expected rather than investigated.
+    let carried = plan.get(1).map(|w| w.context).unwrap_or(0);
+    tracing::info!(passes = plan.len(), carried_latent_frames = carried, out_width = out_w, out_height = out_h, refine_steps = o.refine_steps, "upscale planned");
+    if carried < o.context_latent_frames && plan.len() > 1 {
+        // The one quality compromise this path makes silently otherwise, and
+        // it is forced by the output grid rather than chosen - see
+        // `longform::fitted_context`.
         tracing::warn!(
-            segments = plan.len(),
-            tokens_per_pass = REFINE_MAX_TOKENS,
-            "the clip is longer than one refinement pass can hold and is refined in independent segments; fine detail may step at each boundary"
+            requested = o.context_latent_frames,
+            carried,
+            tokens_per_pass = o.max_refine_tokens,
+            tokens_per_latent_frame = lh * lw,
+            "a {out_w}x{out_h} refinement pass cannot hold the requested latent context; each pass carries what fits of the previous one instead"
         );
     }
 
-    // Phases: build, then per segment one encode, one upscale, its refinement
+    // Phases: build, then per pass one encode, one upscale, its refinement
     // steps and one decode.
-    let per_segment = 3 + o.refine_steps as u32;
-    let total = 1 + plan.len() as u32 * per_segment;
+    let per_pass = 3 + o.refine_steps as u32;
+    let total = 1 + plan.len() as u32 * per_pass;
     let mut timings = Timings::default();
     let place = o.base.devices.resolve(o.base.device.as_deref());
     tracing::info!(cond_gpu = ?place.cond, uncond_gpu = ?place.uncond, text_gpu = ?place.text, "device placement resolved");
@@ -2864,32 +2877,41 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
     // VAE's share of the run, and this entry point runs the encoder too.
     let mut vae_secs = 0.0f32;
 
-    for (si, &(start, len)) in plan.iter().enumerate() {
+    // The rolling state, and the whole of it: at most `carried` latent frames
+    // at the OUTPUT resolution. It does not grow with the clip's length.
+    let mut carried_latent: Option<(Vec<f32>, usize)> = None;
+
+    for (si, pass) in plan.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err("cancelled".into());
         }
-        let done_before = 1 + si as u32 * per_segment;
-        let lat_t = vcfg.latent_frames(len as u32).expect("refine_segments only emits 1 + 8k segments") as usize;
+        let done_before = 1 + si as u32 * per_pass;
+        let lat_t = pass.latent_frames();
+        // The pass's WHOLE decode, carried context included: a latent frame
+        // cannot be decoded without the frames around it, so the frames the
+        // context covers are read, refined and thrown away rather than
+        // stitched in from the source.
+        let (start, len) = (pass.source_first_frame(), pass.decoded_frames());
         progress(done_before, total, "vae encode");
-        tracing::info!(segment = si, first_frame = start, frames = len, latent_frames = lat_t, "encoding a segment");
+        tracing::info!(pass = si, of = plan.len(), first_frame = start, frames = len, latent_frames = lat_t, carried = pass.context, new = pass.new, "encoding a refinement pass");
         let enc_t = Instant::now();
         let encoder = LtxVaeEncoder::build(&vcfg, &vweights, len as u32, h as u32, w as u32, o.base.device.as_deref());
         let latent = encoder.encode(&rgb8_to_chw(&clip.frames[start..start + len], h, w));
         drop(encoder);
         vae_secs += enc_t.elapsed().as_secs_f32();
 
-        // `frames` is THIS segment's length, which is what a stage reads it
-        // for. `width`/`height` are the resolution the refinement runs at -
+        // `frames` is THIS pass's length, which is what a stage reads it for.
+        // `width`/`height` are the resolution the refinement runs at -
         // `denoise_stage` takes those from its own `Stage`, not from here, but
         // a `GenOpts` that disagreed with the stage it accompanies would be a
         // trap for the next reader. Image conditioning is cleared: this entry
         // point's content comes from the clip, not from a still.
-        let seg_opts = GenOpts { frames: len, width: out_w, height: out_h, start_frame: None, end_frame: None, ..o.base.clone() };
+        let pass_opts = GenOpts { frames: len, width: out_w, height: out_h, start_frame: None, end_frame: None, ..o.base.clone() };
         let sc = StageCtx {
             dit: dit.as_ref(),
             vcfg: &vcfg,
             vweights: &vweights,
-            o: &seg_opts,
+            o: &pass_opts,
             lat_t,
             in_channels,
             ctx_cond: &ctx_cond,
@@ -2898,44 +2920,65 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
             context_len,
             cancel,
         };
+        // The plan's own context count and what the previous pass could
+        // actually supply have to be the same number - the emitted-frame
+        // arithmetic is derived from the former and the freeze from the
+        // latter, so a disagreement would silently shift the clip.
+        if carried_latent.as_ref().map(|(_, n)| *n).unwrap_or(0) != pass.context {
+            return Err(format!("pass {si} plans a {}-latent-frame context but the previous pass carried {:?}", pass.context, carried_latent.as_ref().map(|(_, n)| *n)));
+        }
         let refined = upscale_and_refine(
             &sc,
-            &Refine { upsampler_path, latent_chw: &latent, lat_t, lh1: h / 32, lw1: w / 32, width: out_w, height: out_h, sigmas: &sigmas, context: None, seed_salt: 0, done_before: done_before + 1, label: "refine" },
+            &Refine {
+                upsampler_path,
+                latent_chw: &latent,
+                lat_t,
+                lh1: h / 32,
+                lw1: w / 32,
+                width: out_w,
+                height: out_h,
+                sigmas: &sigmas,
+                // The upscaled copy of these frames is overwritten by the
+                // previous pass's own refined latent, so what the pass holds
+                // fixed is real refined content rather than the same source
+                // frames about to be refined a second, different way.
+                context: carried_latent.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
+                seed_salt: REFINE_SEED_SALT.wrapping_mul(si as u64),
+                done_before: done_before + 1,
+                label: "refine",
+            },
             total,
             &mut progress,
         )?;
+        carried_latent = Some((crate::longform::carry_tail(&refined, in_channels, lat_t, lh, lw, carried.min(lat_t)), carried.min(lat_t)));
 
         // Same reason [`generate_long`]'s window loop does it, and the same
         // reason [`generate`] drops the denoiser outright before its decode:
-        // a segment loop holds the DiT across N decodes, and a resident weight
+        // a pass loop holds the DiT across N decodes, and a resident weight
         // window does not fit alongside one.
         dit.release_devices();
-        progress(done_before + per_segment - 1, total, "vae decode");
+        progress(done_before + per_pass - 1, total, "vae decode");
         let dec_t = Instant::now();
         let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &refined);
         vae_secs += dec_t.elapsed().as_secs_f32();
         if got != len || pixels.len() != 3 * got * out_h * out_w {
-            return Err(format!("segment {si} decoded to {got} frames / {} values, expected {len} / {}", pixels.len(), 3 * len * out_h * out_w));
+            return Err(format!("pass {si} decoded to {got} frames / {} values, expected {len} / {}", pixels.len(), 3 * len * out_h * out_w));
         }
-        // Every segment after the first re-renders its predecessor's last
-        // frame (see `refine_segments`); the later rendering is the one that
-        // shares a refinement pass with the frames that follow it, so it is
-        // the one kept.
         let rgb = chw_to_rgb8(&pixels, got, out_h, out_w);
-        out_frames.extend(rgb.into_iter().skip(usize::from(si > 0)));
+        out_frames.extend(rgb.into_iter().skip(pass.dropped_frames()));
     }
     drop(dit);
     timings.decode = vae_secs;
     timings.denoise = (work_t.elapsed().as_secs_f32() - vae_secs).max(0.0);
     timings.steps = o.refine_steps * plan.len();
-    timings.tokens = plan.iter().map(|&(_, len)| (1 + (len - 1) / 8) * lh * lw).max().unwrap_or(0);
+    timings.tokens = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
     timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
 
     if out_frames.len() != frames {
-        return Err(format!("reassembled {} frames from {} segments, expected {frames}", out_frames.len(), plan.len()));
+        return Err(format!("reassembled {} frames from {} passes, expected {frames}", out_frames.len(), plan.len()));
     }
     progress(total, total, "done");
-    tracing::info!(frames, width = out_w, height = out_h, segments = plan.len(), total_secs = timings.total(), "upscale done");
+    tracing::info!(frames, width = out_w, height = out_h, passes = plan.len(), total_secs = timings.total(), "upscale done");
     Ok((Video { width: out_w as u32, height: out_h as u32, fps: clip.fps, frames: out_frames }, timings))
 }
 
