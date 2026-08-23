@@ -133,6 +133,12 @@ edition = "2021"
 # license every crate published.
 license = "Apache-2.0"
 repository = "https://github.com/swedishembedded/brain"
+# brain is built by Swedish Embedded AB. Every member crate inherits these,
+# so the authorship and the homepage travel with the package metadata into
+# `cargo doc`, docs.rs, and anything else that reads a manifest - rather than
+# living only in a copyright header nobody's tooling looks at.
+authors = ["Martin Schröder <info@swedishembedded.com>"]
+homepage = "https://swedishembedded.com"
 
 [workspace.dependencies]
 # Internal crates (path deps; short lib names used in `use` statements).
