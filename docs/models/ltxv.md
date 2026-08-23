@@ -42,7 +42,7 @@ Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
 | Inference (DFR, higher-res multi-stage) | [~] smoke test - real spatial/temporal upscalers and VAE decode, still the tiny DiT (`brain ltxv dfr`) |
 | Post-hoc upscale of a finished clip | [x] `brain ltxv upscale` - VAE-encode an existing video file, run the official x2 latent spatial upscaler, refine on the distilled refinement schedule, VAE-decode. Shares the upscale+refine implementation with the internal two-stage generation path. CLI only so far, no capability action (see below) |
 | Inference (text to video+audio) | [ ] the audio-extended DiT (`LtxAvDit`) and A<->V cross-attention exist at tiny-config parity as a library, but nothing wires them into a pipeline/CLI action yet |
-| Inference (image to video) | [ ] |
+| Inference (image to video / keyframe conditioning) | [x] `--start-frame`, `--mid-frame` (+ `--mid-frame-at`) and `--end-frame` - up to three real stills VAE-encoded and held at sigma 0 in ONE generation pass, with `--conditioning-strength` for how hard. Refused for a multi-window or multi-scene clip; see "Anchoring a clip on real images" below |
 | LoRA fine-tune | [~] video-only DiT, host-math/gradcheck-proven (FD < 1e-4), single- and whole-batch overfit drives loss to ~0 at tiny-config scale - the audio-extended DiT has no training support |
 | Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
 | INT8 | [~] storage format only for the video-only DiT's weights (`crate::int8`) - not wired into any checkpoint loader, no compute-time kernel |
@@ -123,6 +123,49 @@ This proves the pipeline WIRING - real scheduler, real VAE decode, a real mp4
 out the other end - not generation quality; see `crates/ltxv/src/pipeline.rs`'s
 module doc.
 
+### Anchoring a clip on real images
+
+A generation can be pinned to stills you supply, at up to three instants at
+once: `--start-frame`, `--mid-frame` and `--end-frame`. Each is VAE-encoded and
+held at sigma 0 (`denoise_mask = 0`, per-token timestep 0, re-pinned every step)
+while the rest of the clip denoises around it.
+
+```bash
+brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
+  --prompt "a fishing boat crosses the harbour mouth, camera tracking left" \
+  --frames 121 --width 768 --height 448 --fps 24 --output-path boat.mp4 \
+  --start-frame dawn.png --mid-frame midway.png --end-frame open-sea.png
+```
+
+* **`--mid-frame-at <N>`** picks the pixel frame the middle still anchors,
+  strictly between `0` and `--frames - 1`. Left off, it is the clip's own
+  midpoint, `(frames - 1) / 2` - the reference's own position for a single
+  interior keyframe (`ltx_pipelines.utils.helpers.
+  evenly_spaced_keyframe_positions(1, 121) == [60]`). The resolved frame is
+  printed in the run's first line.
+* **Any frame is a legal position; nothing is snapped to the `1 + 8k` grid.**
+  A middle still is an *appended guiding block* carrying its own RoPE position
+  (`VideoConditionByKeyframeIndex.apply_to` adds `frame_idx` straight onto the
+  time coordinate and divides by fps), not a slot on the generated video's
+  latent grid, so there is no grid for it to land on. The `1 + 8k` rule
+  constrains the clip's *length*, not where a guide may point inside it.
+* **One still at frame 0 and nothing else is still image-to-video**, which
+  overwrites latent frame 0 in place. The moment a second still is given -
+  middle, end, or both - every still becomes an appended guide instead,
+  including the one at frame 0, and no token of the generated video is frozen.
+  That is the reference's own split between `combined_image_conditionings` and
+  `image_conditionings_by_adding_guiding_latent`.
+* **`--conditioning-strength`** (default `1.0`) applies to every still given.
+* **Two identical anchors make a static clip.** Passing the same image to
+  `--start-frame` and `--end-frame` asks for "start here, end here", which has
+  a correct trivial answer; see `crates/ltxv/tests/motion_real.rs` for the
+  measured table. A middle anchor is subject to the same logic - anchor
+  *different* instants.
+* **Not supported for a multi-window or multi-scene clip.** `--mid-frame` names
+  a pixel frame of the whole clip, and routing it means finding the window
+  whose emitted range covers it and re-expressing it in that window's own
+  frame numbering. That is refused rather than silently dropped.
+
 ### Clips longer than one denoising window
 
 `--frames` takes any legal `1 + 8k` length. Past what a single denoising window
@@ -163,8 +206,10 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
   overridable with `BRAIN_LTXV_LONGFORM_MAX_TOKENS`.
 * **A request that fits one window is unchanged.** It is handed straight to the
   single-window path, bit for bit, and none of this runs.
-* **`--end-frame` is refused for a multi-window clip** - it pins the last frame
-  of one window, and pinning the end of a rolling plan has not been designed.
+* **`--end-frame` and `--mid-frame` are refused for a multi-window clip** - the
+  first pins the last frame of one window, and pinning the end of a rolling
+  plan has not been designed; the second names a pixel frame of the whole clip,
+  which would have to be routed to whichever window covers it.
   `--start-frame` conditions the first window as usual.
 
 The same routing applies to the `t2v` capability action (`brain do brain/ltxv
@@ -211,8 +256,8 @@ One command, one file, 299 frames.
   say where the clip starts. Every seed is derived per scene, so two scenes
   never draw the same initial noise.
 * **`--start-frame` conditions the first scene's opening only**, and
-  `--end-frame` is refused for a multi-scene clip for the same reason it is
-  refused for a multi-window one.
+  `--end-frame`/`--mid-frame` are refused for a multi-scene clip for the same
+  reasons they are refused for a multi-window one.
 * **Not exposed on the `t2v` capability action** - `--scene` is a CLI flag; the
   action still takes one prompt.
 

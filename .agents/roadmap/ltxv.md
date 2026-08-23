@@ -3333,6 +3333,21 @@ land. Known traps already identified from reading (not yet test-pinned):
   take an input BLOB rather than parameters alone, and that shape is
   undesigned. See Phase 21 item 3 and Phase 25.
 
+- **An anchor position is not routed to a long-form window.** Phase 26 added
+  `--mid-frame`/`--mid-frame-at`, a third conditioning still at an arbitrary
+  interior pixel frame, composable with `--start-frame`/`--end-frame` and
+  correct across both stages of a two-stage run. It is **refused** for a
+  multi-window or multi-scene clip, alongside the `--end-frame` refusals Phases
+  22 and 24 wrote. What is missing is one piece of routing: find the window
+  whose emitted frame range contains the requested pixel frame, re-express the
+  position in that window's own frame numbering, and decide what an anchor
+  landing inside a carried latent context means - `denoise_stage` refuses a
+  still and a context together outright today, and an appended guide does not
+  actually collide with a context the way an overwrite does, so that refusal is
+  broader than it needs to be. No real-weight run exists for any three-anchor
+  generation either; the gates are arithmetic plus a tiny-DiT CPU wiring test.
+  See Phase 26.
+
 - **Single-stage generation past the distilled schedule's token count**:
   **closed in Phase 19**. `generate` ran `LTX2_DISTILLED_SIGMAS` at the
   requested resolution; `ltx_pipelines.distilled` only ever runs it at
@@ -5465,3 +5480,235 @@ exist.
 * **Nothing changed about a clip that fits one pass** - one window, no context,
   seed unsalted, identical output.
 * **Still CLI-only, still no capability action.** Unchanged from Phase 21.
+### Phase 26 - a clip stops being anchored only at its ends
+
+`--start-frame` pins where a clip begins and `--end-frame` pins where it ends,
+and between them the model is on its own. Over 9 frames that is fine. Over 121
+frames with a moving camera it is the whole problem: the two anchors are 120
+frames apart, everything in between is unconstrained, and there was no way to
+say "and it should look like THIS half way through". The request was a third
+anchor - first, middle and last in ONE generation pass.
+
+```text
+brain ltxv t2v --dit-config ltx25_22b --frames 121 --width 768 --height 448 \
+  --fps 24 --output-path boat.mp4 \
+  --prompt "a fishing boat crosses the harbour mouth, camera tracking left" \
+  --start-frame dawn.png --mid-frame midway.png --end-frame open-sea.png
+```
+
+#### 0 - the reference was already generic, and so was the port
+
+The feature was described as something official LTX-2.5 supports natively.
+Checked before building - the vendored reference (`resources/ltxv/source`)
+first, then what ships around it - and the finding is more useful than "yes":
+**there is no first/middle/last feature anywhere in the lineage. There is a
+conditioning item whose position is arbitrary, and three of them is what a
+"three-keyframe workflow" is.**
+
+`ltx_core.conditioning.types.keyframe_cond.VideoConditionByKeyframeIndex` -
+which this port has used for `--end-frame` since Phase 19 - does exactly this
+with its `frame_idx`:
+
+```python
+positions[:, 0, ...] += self.frame_idx
+if self.num_pixel_frames == 1:
+    positions[:, 0, ..., 1:] = positions[:, 0, ..., :1] + 1
+positions = positions.to(dtype=torch.float32)
+positions[:, 0, ...] /= latent_tools.fps
+```
+
+A raw pixel-frame offset added to the RoPE time coordinate of an APPENDED token
+block. No `// 8`, no snapping, no rounding, and no bounds check - the class
+validates nothing about `frame_idx` at all. Its sibling
+`VideoConditionByLatentIndex` (`--start-frame`'s in-place overwrite) is equally
+unpinned: `start_token = get_token_count(target_shape._replace(frames=self.
+latent_idx))`, an arbitrary `latent_idx`, again unchecked. The "first/last" in
+`ltx_pipelines.utils.helpers.combined_image_conditionings` is a CALLER's `if
+img.frame_idx == 0`, not a property of either item. Conditionings reach the
+sampler as a plain `list[ConditioningItem]` applied in order by
+`state_with_conditionings`, with no cap, and the reference's own CLI spells the
+generic form directly: `--image PATH FRAME_IDX STRENGTH`, repeatable
+(`ltx_pipelines.utils.args.ImageAction`).
+
+Grepping the vendored tree for `middle frame`, `mid frame`, `MiddleFrame`,
+`three keyframe`, `first, middle` returns nothing, and it contains no ComfyUI
+workflow JSONs at all. What "First/Middle/Last Frame" names in the community
+workflows is three chained `LTXVAddGuide` nodes, and that node's schema is the
+same generic thing: `frame_idx` `min=-9999, max=9999`, "Negative values are
+counted from the end of the video", and its `execute` calls `append_keyframe`
+for every guide including `frame_idx == 0` (ComfyUI
+`comfy_extras/nodes_lt.py`). Its one snapping rule is explicitly gated on
+MULTI-frame guides - `if guide_length > 1 and frame_idx != 0` - so a single
+still is never snapped.
+
+So the hypothesis this phase started from was right, and it is stronger than
+"probably": `--start-frame` and `--end-frame` were not two features, they were
+two hardcoded call sites (`0` and `frames - 1`) of one mechanism that never
+cared. The denoising side needed nothing - `Frozen`, `timesteps_from_mask`, the
+per-token x0 conversion Phase 17 fixed and `post_process_latent` are all per
+token and index-agnostic already.
+
+#### 1 - what actually changed, which is less than it sounds
+
+`conditioned_latent` stops branching on WHICH stills were given and branches on
+HOW MANY. One still at frame 0 and nothing else is still image-to-video and
+still overwrites latent frame 0 in place; every other request collects its
+stills into a `Vec<(pixel_frame, tokens)>` in timeline order and hands the whole
+list to `append_image_conditioning`, which already took a `blocks` slice of any
+length and already wrote one appended block per entry. Two of the three old
+branches were that loop with the loop written out, and they are gone.
+`conditioning_block_count` gains its third bool and keeps returning `0` for the
+one request that appends nothing.
+
+That rule - a lone start still overwrites, anything else appends - is not a
+convenience. `image_conditionings_by_adding_guiding_latent` wraps EVERY image
+including `frame_idx == 0`, and `KeyframeInterpolationPipeline` is the pipeline
+built for this shape. Adding a middle anchor to a `--start-frame` run therefore
+RELEASES latent frame 0, which is gated
+(`a_mid_anchor_moves_the_start_still_from_an_overwrite_to_a_guide`): pinning one
+instant twice, once in place and once as a guide, is what that shape avoids.
+Every combination that already worked - start-only, end-only, both - is
+byte-for-byte the run it was.
+
+**The two-stage path needed no work, and that is worth stating rather than
+assuming.** Image conditioning is applied inside `denoise_stage`, which is the
+body BOTH stages run (`upscale_and_refine` calls it), and each stage encodes the
+stills at its own `st.width`/`st.height`. `o.frames` is the clip's, not the
+stage's, so the anchor resolves to the same pixel frame at half resolution and
+at full. A mid anchor survives stage 1, the x2 latent upscale and the refinement
+for the same reason `--end-frame` already did.
+
+#### 2 - where the middle is, and why nothing is snapped to the x8 grid
+
+`--mid-frame-at <N>` takes a pixel frame. Left off, the position is
+`(frames - 1) / 2` - and that is the reference's own number rather than the
+obvious one: `ltx_pipelines.utils.helpers.evenly_spaced_keyframe_positions(1,
+num_frames)` is `torch.linspace(0, num_frames - 1, 3).round()[1:-1]`, `[60]`
+for a 121-frame clip. Every legal clip length is `1 + 8k`, so `frames - 1` is
+even and the division is exact; nothing here depends on which way a tie rounds.
+
+**The middle index does NOT have to land on a latent-frame boundary**, which is
+the first thing this phase expected to have to solve. The constraint does not
+exist. An appended guide is not a slot on the generated video's latent grid -
+it is extra tokens carrying their own RoPE position - so there is no grid for
+it to land on. The `1 + 8k` rule constrains the clip's LENGTH, which `generate`
+already enforces. The reference agrees twice over: the keyframe item snaps
+nothing (section 0), and the only pixel-to-latent mapping in the whole tree,
+`ltx_pipelines.dfr_layout.pixel_to_latent_index`, *raises* on a position that is
+not already on the x8 border rather than rounding to it - and is used only for
+DFR's own generated-keyframe grid. So `--mid-frame-at 37` on a 121-frame clip is
+legal and is taken verbatim.
+
+`latent_frame_containing` exists anyway, reported in one `tracing::info!` line
+and never enforced: it says which latent frame's own pixel span the anchor's
+instant falls in (frame 8 of 16, for pixel frame 60), which is what a reader of
+the log and a future window plan both want to know.
+
+Refused: `at == 0` and `at >= frames - 1`. Those two instants are what the other
+flags already name, and a clip needs three frames to have an interior at all -
+the same condition the reference raises on (`num_frames < num_keyframes + 2`).
+
+#### 3 - the CLI, and what it will not do
+
+`--mid-frame <path>` and `--mid-frame-at <N>`, composable with both existing
+anchors, and `mid_frame`/`mid_frame_at` on the `t2v` capability action next to
+the two that were already there. The first line of a run reports the RESOLVED
+frame rather than the flag, so a caller who left the position off is told which
+frame it landed on before the run rather than after.
+
+`--mid-frame` is **refused for a multi-window clip and for a multi-scene one**,
+next to the `--end-frame` refusals Phases 22 and 24 wrote, and for a reason of
+its own on top of theirs: its position is a pixel frame of the WHOLE clip.
+Routing it means finding the window whose emitted range covers it,
+re-expressing the position in that window's own frame numbering, and deciding
+what an anchor landing inside a carried context means - that context is content
+the previous window already generated, and `denoise_stage` refuses a still and a
+context together outright today. That is a design, not a wiring change, and it
+is named in "what this phase does NOT claim" rather than left as a silent gap.
+
+While the anchor flags were being extended, `ltxv_cli::tests::
+every_flag_the_parser_accepts_is_documented` turned out never to have listed
+`--start-frame`, `--end-frame`, `--conditioning-strength` or `--context-frames`
+- four flags that could have drifted out of `--help` with no test noticing.
+They are in the list now, with the two new ones.
+
+#### gates
+
+Weight-free, always run:
+
+* `pipeline::mid_anchor_frame_tests::the_default_position_is_the_references_own_single_interior_keyframe`
+  - the default lands on `evenly_spaced_keyframe_positions`' own answer at four
+  clip lengths, and the latent frame it falls in is cross-checked against
+  `real_pixel_positions`' own bounds so the two formulas cannot drift apart.
+* `pipeline::mid_anchor_frame_tests::an_explicit_position_is_taken_verbatim_and_only_the_ends_are_refused`
+  - 37 on a 121-frame clip is NOT on the x8 border and is accepted, which is
+  section 2's finding stated as a test; frame 0, the last frame and anything
+  past the clip are refused.
+* `pipeline::conditioned_latent_tests::three_anchors_append_three_guiding_blocks_at_their_own_instants`
+  - three blocks, each holding its own image, at instants 0, 4 and 8, with every
+  token of the generated video still denoising freely.
+* `...::a_lone_mid_anchor_appends_one_guiding_block_at_its_own_instant` and
+  `...::a_mid_anchor_moves_the_start_still_from_an_overwrite_to_a_guide` - the
+  mechanism does not need company, and adding it to a `--start-frame` run
+  releases latent frame 0.
+* `pipeline::tests::a_frozen_range_survives_the_whole_trajectory_wherever_it_sits`
+  - Phase 22's `a_frozen_prefix_of_latent_frames_survives_the_whole_trajectory`,
+  generalised and renamed. It froze a PREFIX, which is the one layout that
+  cannot fail if a step only ever re-pins from the start of the sequence. It now
+  freezes three ranges at once - a carried head, one latent frame in the
+  INTERIOR of the generated video, and an appended guiding block past its end -
+  and asserts all three come out bit-identical at eta 0 and eta 1, with the
+  timestep announcement checked per token rather than per side. Verified to
+  bite: truncating `post_process_latent`'s loop to the first half of the
+  sequence leaves the old prefix assertion green and fails this one.
+
+Real weights, minutes (real conv VAE, tiny random-weight DiT, CPU -
+`crates/ltxv/tests/anchors.rs`):
+
+* `three_simultaneous_anchors_each_reach_the_denoiser` - 17 frames at 64x64,
+  four generations off one seed. Changing the middle still's PIXELS changes the
+  clip; moving it from frame 8 to frame 12 changes the clip; dropping it changes
+  the clip. Each of those is a way for an anchor to be silently dropped -
+  unencoded, appended at the wrong position, overwritten by the next block - and
+  each is a run that must not come back equal.
+* `the_default_mid_position_is_the_one_the_reference_would_pick` - leaving
+  `--mid-frame-at` off is bit-for-bit the same clip as naming frame 8 of a
+  17-frame request, through the whole pipeline rather than at the arithmetic.
+* `longform.rs`'s
+  `an_anchor_a_multi_window_plan_cannot_honour_is_refused_rather_than_ignored`
+  - both `--mid-frame` and `--end-frame` on a multi-window plan come back as
+  errors naming the flag. Costs no generation (the refusal is raised before any
+  weight is read) and exists because a caller who supplied a still and got a
+  clip that ignored it would have no way to tell. It is the first gate this
+  crate has on the `--end-frame` refusal Phase 22 wrote.
+
+#### what this phase does NOT claim
+
+* **No real-weight run, and no quality claim.** Nothing here was generated with
+  `ltx25_22b`. The gates prove three anchors are real inputs to the denoiser at
+  the instants they were pointed at; whether a middle anchor makes a long clip
+  hold together better is exactly the question they cannot answer, and no number
+  in this entry is a measurement of output quality. `anchor_real.rs`'s
+  perceptual gate still covers `--start-frame` only and was not extended.
+* **Multi-window and multi-scene are unsupported, not untested.** The refusals
+  are explicit and name why. The named follow-up: **route a clip-wide anchor
+  position to the window that covers it** - find the window whose emitted range
+  contains the pixel frame, re-express the position in that window's own frame
+  numbering, and decide what an anchor landing inside a carried context means.
+  Until that exists, a caller who wants a middle anchor on a long clip generates
+  the piece they want to anchor as its own request.
+* **The strength knob is still global.** `--conditioning-strength` applies to
+  every still given. The reference's `--image PATH FRAME_IDX STRENGTH` is
+  per-image, and a middle anchor is the first case where per-anchor strength has
+  an obvious use (pin the ends hard, guide the middle softly). Not built.
+* **One mid anchor, not N.** The internals are a list and the reference caps
+  nothing, so N is now a CLI shape question rather than a mechanism one - but
+  `--mid-frame` takes one path, and a repeated `<frame>:<path>` spelling was not
+  designed.
+* **The same-image warning applies here too.** Phase 19 measured that the same
+  still at both ends produces a static clip, because that request has a correct
+  trivial answer. A middle anchor identical to either end is the same trap over
+  a shorter span, and nothing refuses it.
+* **Nothing refuses two anchors at the same instant.** `--mid-frame-at` can name
+  a frame another anchor already covers; the reference validates nothing there
+  either, and neither does this.
