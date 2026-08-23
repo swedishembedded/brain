@@ -108,3 +108,18 @@ BRAIN_T5ENCODER_DIR=/path/to/FLUX.1-dev dbus-run-session -- bash -c '
   python3 examples/embedding/t5_embed.py \
     --text "a red cube on a wooden table" --variant flux_xxl --concurrent 4'
 ```
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements on-premise embedding and retrieval systems for
+teams whose documents are not allowed to leave the building. If your team
+needs expertise in long-context embedding models, semantic search, or private
+RAG, you can procure our services by sending an email to
+**info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

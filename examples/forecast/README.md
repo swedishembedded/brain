@@ -123,3 +123,18 @@ to unpack it. Concurrent forecasts from many clients share the one `Executor` an
 are scheduled across devices — see `crates/residency`.
 Nothing here is forecasting-specific in the transport: it is the same path
 `examples/embedding` uses for LFM embeddings.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements probabilistic forecasting systems for teams
+making decisions from time-series data. If your team needs expertise in
+forecasting models, backtesting methodology, or evaluating a forecaster
+honestly before it reaches production, you can procure our services by sending
+an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

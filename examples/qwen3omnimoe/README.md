@@ -138,3 +138,18 @@ shape each protocol expects, translated by `brain_py.openai`/
 only) into the same `messages`/`prompt`/`max_new` params `crate::
 resident_mock::MockResident` and now `qwen3omnimoe::caps::generate_spec()` both
 declare.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements multimodal assistants that run locally: text,
+speech, images and video into one model, on hardware you control. If your team
+needs expertise in multimodal models, or serving a large mixture-of-experts
+model across several accelerators, you can procure our services by sending an
+email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

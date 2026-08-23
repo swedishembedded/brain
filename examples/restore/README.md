@@ -103,3 +103,18 @@ Neither model batches. Both are **recorded step lists over fixed buffers**
 so there is no N axis to widen at call time - the default serial `run_batch`
 stands, with the reason stated in `crates/cli/src/resident_restore.rs`. What does
 amortise is residency: a `w` sweep, or an encode/decode pair, costs one build.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements image restoration and enhancement pipelines for
+teams processing real, imperfect photographs at scale. If your team needs
+expertise in restoration models, VQ autoencoders, or building an imaging
+pipeline that leaves untouched pixels bit-identical, you can procure our
+services by sending an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

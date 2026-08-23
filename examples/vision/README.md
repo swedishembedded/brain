@@ -111,3 +111,18 @@ reference one bit for bit (cosine 1.000000 against the insightface goldens).
 * **A mask prompt for SAM 2.** The reference downsamples one with
   `interpolate(antialias=True)` and brain has no antialiased resize kernel, so
   the wire surface does not offer what it cannot compute exactly.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements computer-vision systems end to end: capture,
+detection, segmentation and identity, on the device rather than in a
+datacenter. If your team needs expertise in on-device vision, face
+recognition, or segmentation pipelines, you can procure our services by
+sending an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

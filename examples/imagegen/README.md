@@ -185,3 +185,18 @@ Only `dev` is validated against a PuLID reference (the reference is built on
 FLUX.1-dev, not Kontext or schnell). Same scope/verification caveats as
 plain FLUX.1, doubled: this also has no end-to-end fixture for the
 ID-conditioning wiring itself.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements image-generation pipelines that run on hardware
+you own, for teams that need generation to be private, unmetered, or offline.
+If your team needs expertise in diffusion models, LoRA fine-tuning, or fitting
+a generative model onto the card you actually have, you can procure our
+services by sending an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

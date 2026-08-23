@@ -62,3 +62,18 @@ reuse the resident instance.
 own page in the documentation tree (the model catalog's DeepSeek-OCR entry)
 carries the honest limits - single global view, greedy only, batch 1, no early
 stop at EOS.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements document-understanding systems for teams that
+cannot upload their documents to a third party. If your team needs expertise
+in OCR, document layout analysis, or vision-language models running
+on-premise, you can procure our services by sending an email to
+**info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

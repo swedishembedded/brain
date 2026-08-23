@@ -115,3 +115,18 @@ first. Python: `BrainDBus.cancel(job)`.
 - **Automated test**: `crates/dbus/tests/roundtrip.rs` (run under `dbus-run-session
   -- cargo test -p brain-dbus --test roundtrip`) round-trips a result
   and an input both through fds.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements native Linux system integration for products
+with AI inside them: bus services, zero-copy fd passing, and applications that
+talk to a local model as an ordinary system service. If your team needs
+expertise in wiring inference into a Linux system or an embedded device, you
+can procure our services by sending an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

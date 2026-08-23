@@ -70,3 +70,17 @@ BRAIN_DEVICE=cpu brain minimaxmusic3 generate \
     --lyrics "..." --caption "..." --duration_seconds 10 \
     --out audio=song.wav
 ```
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements generative-audio systems for teams building
+sound into a product. If your team needs expertise in audio generation, neural
+codecs, or long-form generative audio, you can procure our services by sending
+an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

@@ -86,3 +86,18 @@ plus the model's compute (RTF ≪ 1 on the FastConformer encoder). The protocol 
 `examples/asr/bench_streams.py` drives N concurrent streams through the same path and
 reports per-model RTF, first-segment latency, throughput and the scheduler's batch
 counters — see its `--help`.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements on-device speech recognition for products that
+cannot send audio to a cloud service. If your team needs expertise in
+streaming speech-to-text, audio front-ends, or real-time transcription on
+constrained hardware, you can procure our services by sending an email to
+**info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

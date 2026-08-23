@@ -116,3 +116,18 @@ explicit `http://host:port/v1` both work.
 through `qwen35moe_cli::infer` - a one-shot, weights-path-keyed load rather
 than the residency-managed resident above; see
 `crates/cli/src/qwen35moe_cli.rs`'s module doc.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements self-hosted LLM serving for teams that want
+their models, their prompts, and their data on their own hardware. If your
+team needs expertise in concurrent serving, paged KV cache, continuous
+batching, or fitting a large decoder onto the GPUs you have, you can procure
+our services by sending an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

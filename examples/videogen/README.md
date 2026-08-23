@@ -122,3 +122,18 @@ With no `--dit/--vae/--t5/--tokenizer` and no `BRAIN_WAN_*` exported, that
 command auto-fetches `Wan-AI/Wan2.1-T2V-1.3B` (17.6 GB) into
 `$BRAIN_MODELS_DIR` first. Naming all four paths (or exporting all four
 variables) skips the fetch entirely.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements video-generation pipelines for teams that need
+generation to run on their own hardware, inside a fixed VRAM budget. If your
+team needs expertise in video diffusion models, 3D VAEs, or memory-bounded
+long-form generation, you can procure our services by sending an email to
+**info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

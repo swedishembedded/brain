@@ -50,3 +50,18 @@ path is `tests/e2e/claude_code.bats` (`make test/e2e/claude-code`), which runs a
 the deterministic `BRAIN_MOCK` model instead (so it needs no network and never hangs
 on a cold fetch) and skips cleanly unless `claude`/`jq`/`timeout` and a brain binary
 are present.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements self-hosted inference back-ends for agent
+tooling, so a coding agent or an internal assistant runs against hardware you
+control instead of a third-party API. If your team needs expertise in pointing
+existing agent tooling at your own infrastructure, you can procure our
+services by sending an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

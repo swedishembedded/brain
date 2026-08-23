@@ -29,3 +29,17 @@ position rather than silently reordered. The returned mask travels at the
 
 The stages and their parameters are the ones `brain caps brain/imgpipe` lists —
 the example builds the JSON, it does not define it.
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements composed imaging pipelines for products that
+edit, restore or analyse pictures on-device. If your team needs expertise in
+computer-vision pipelines and on-device image processing, you can procure our
+services by sending an email to **info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.

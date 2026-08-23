@@ -84,3 +84,18 @@ brain cosyvoice synth \
     --text "..." --ref_text "..." \
     --in ref_audio=reference.wav --out audio=clone.wav
 ```
+
+---
+
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)** - we
+put AI on hardware that ships.
+
+Swedish Embedded AB implements speech synthesis and voice cloning for products
+that need a voice of their own, generated locally. If your team needs
+expertise in text-to-speech, neural vocoders, or streaming audio generation,
+you can procure our services by sending an email to
+**info@swedishembedded.com**.
+
+More about what we build: <https://swedishembedded.com>.
