@@ -62,7 +62,9 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("prompt", ParamType::Str, "text description; folded into a deterministic noise/context seed only - there is no real text encoder yet (see crate::pipeline::context_stub)").required())
     .param(ParamSpec::new("start_frame", ParamType::Str, "optional path to a PNG/JPEG still: encoded through the real video VAE and used as frame-0 conditioning while the rest of the clip denoises around it (VideoConditionByLatentIndex on its own, VideoConditionByKeyframeIndex when end_frame is also given - see crate::pipeline::conditioned_latent). Needs dit_config=ltx25_22b (the real VAE). Runs under either sampler: eta>0 follows the reference's ancestral loop (LTX-2.5 distilled's own stage-1 sampler), eta=0 the deterministic one."))
     .param(ParamSpec::new("end_frame", ParamType::Str, "optional path to a PNG/JPEG still, held fixed as the clip's LAST pixel frame the same way start_frame holds frame 0. Same image as start_frame for a clip that loops seamlessly (the generated content in between connects the still to itself); a different image for a clip that morphs from one still to another. Same eta/dit_config requirements as start_frame."))
-    .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when start_frame/end_frame is set.").default(json!(d.conditioning_strength)))
+    .param(ParamSpec::new("mid_frame", ParamType::Str, "optional path to a PNG/JPEG still, held fixed at ONE INTERIOR instant of the clip, so a single generation can be pinned at its start, its middle and its end at once. The same appended VideoConditionByKeyframeIndex guide end_frame uses, at an arbitrary pixel frame. Same eta/dit_config requirements as start_frame."))
+    .param(ParamSpec::new("mid_frame_at", ParamType::Int, "which pixel frame mid_frame anchors, strictly between 0 and frames-1. Unset takes the reference's own position for a single interior keyframe (evenly_spaced_keyframe_positions), (frames-1)/2. Only read when mid_frame is set."))
+    .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/end_frame is set.").default(json!(d.conditioning_strength)))
     .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)").default(json!(d.frames)))
     .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32)").default(json!(d.width)))
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32)").default(json!(d.height)))
@@ -150,6 +152,8 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         device: None,
         start_frame: inv.get_str("start_frame"),
         end_frame: inv.get_str("end_frame"),
+        mid_frame: inv.get_str("mid_frame"),
+        mid_frame_at: inv.get_i64("mid_frame_at").filter(|&n| n >= 0).map(|n| n as usize),
         conditioning_strength: inv.get_f64("conditioning_strength").unwrap_or(d.conditioning_strength as f64).clamp(0.0, 1.0) as f32,
         // Not an invocation parameter: placement is the SERVER's decision,
         // not the caller's. A resident instance overrides it (see
@@ -165,6 +169,9 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     }
     if !opts.width.is_multiple_of(32) || !opts.height.is_multiple_of(32) {
         return Err(format!("{}x{} is not a multiple of 32 (the VAE's spatial stride)", opts.width, opts.height));
+    }
+    if opts.mid_frame.is_some() {
+        crate::pipeline::mid_anchor_frame(opts.frames, opts.mid_frame_at)?;
     }
     Ok(GenParams { opts })
 }
@@ -221,6 +228,8 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         // is `t2v`-only this pass.
         start_frame: None,
         end_frame: None,
+        mid_frame: None,
+        mid_frame_at: None,
         conditioning_strength: d.conditioning_strength,
         devices: d.devices,
     };

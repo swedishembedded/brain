@@ -21,7 +21,7 @@
 //!    what feeds window `n+1` is bit-identical to what window `n` produced.
 //!    Its other half - that a frozen prefix survives the whole sampler
 //!    trajectory unchanged - is gated inside `ltxv::pipeline` itself
-//!    (`a_frozen_prefix_of_latent_frames_survives_the_whole_trajectory`),
+//!    (`a_frozen_range_survives_the_whole_trajectory_wherever_it_sits`),
 //!    because that is where the sampler lives. Together the two close the
 //!    chain "window `n`'s last K latent frames == window `n+1`'s first K".
 //! 3. The SCENE BOUNDARY is the opposite claim
@@ -309,6 +309,36 @@ mod real_weights {
         assert_eq!(&clip.frames[..scenes[0].frames], &first.frames[..], "scene 1 out of the two-scene call is not the clip it is on its own");
         assert_eq!(&clip.frames[scenes[0].frames..], &second.frames[..], "scene 2 inherited something from scene 1 - the boundary is not a reset");
         assert_eq!(timings.steps, t0.steps + t1.steps, "the aggregated timings lost a scene's work");
+    }
+
+    /// **An anchor a multi-window plan cannot honour is refused, not
+    /// dropped.** `--end-frame` pins the last frame of ONE window and
+    /// `--mid-frame` names a pixel frame of the whole clip that would have to
+    /// be routed to whichever window covers it; neither is designed. A caller
+    /// who supplied a still and got a clip that ignored it would have no way
+    /// to tell, so both are errors - raised before any weight is read, which
+    /// is why this costs no generation despite living beside the ones that do.
+    #[test]
+    fn an_anchor_a_multi_window_plan_cannot_honour_is_refused_rather_than_ignored() {
+        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        };
+        let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
+        let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
+        let base = GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() };
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, base };
+        assert!(window_plan(frames, 2, 2, context, max_tokens).expect("legal").len() > 1, "this shape has to need several windows");
+        let cancel = capability::CancelToken::default();
+
+        for (label, opts) in [
+            ("--mid-frame", GenOpts { mid_frame: Some("unread.png".into()), ..o.base.clone() }),
+            ("--end-frame", GenOpts { end_frame: Some("unread.png".into()), ..o.base.clone() }),
+        ] {
+            let Err(e) = generate_long(&paths, "a moving bar", &LongOpts { base: opts, ..o.clone() }, &cancel, |_, _, _| {}) else {
+                panic!("a multi-window plan generated a clip instead of refusing {label}");
+            };
+            assert!(e.contains(label), "the refusal does not name {label}: {e}");
+        }
     }
 
     /// The default context is the one this crate ships, and a default-shaped
