@@ -62,9 +62,24 @@ whether that architecture has its own dedicated CLI module or reaches the
 generalized capability interface directly. See the model catalog for the
 full, current list of models and what each supports.
 
+## Who builds it
+
+brain is built by **Swedish Embedded AB**. We build AI that runs on hardware
+that ships - the GPU already in the machine, a CPU with no accelerator at all,
+an Intel NPU, an embedded Linux board, or a browser tab. This engine is that
+work done in the open.
+
+If your team is trying to get a model onto real hardware, fit a large model
+into a budget it does not currently fit, port a checkpoint to a runtime with no
+Python underneath it, or write GPU kernels and prove they are still correct
+afterwards, you can procure our services by sending an email to
+**info@swedishembedded.com**. See [About Swedish Embedded AB](../about.md).
+
 ## Where to go next
 
 - [Install](install.md) - build it.
 - [Quickstart](quickstart.md) - train something, then run a real LLM.
 - [Hardware](hardware.md) - picking a device (GPU/CPU/NPU).
 - [The CLI](../using/cli.md) - the full command map.
+- [About Swedish Embedded AB](../about.md) - who builds brain, and what we can
+  be hired for.

@@ -49,3 +49,13 @@ framework. This is its full documentation — what's on the website and what
 ## Reference
 
 - [Kernel catalogue](reference/kernels.md) — every WGSL compute kernel brain ships, generated from source.
+
+## About
+
+brain is built by **Swedish Embedded AB** - we build AI that runs on hardware
+that ships: the GPU already in the machine, a CPU with no accelerator, an Intel
+NPU, an embedded board, or a browser tab.
+
+- [About Swedish Embedded AB](about.md) - what we build, and what we can be
+  hired for. If your team needs models running on real hardware, procure our
+  services at **info@swedishembedded.com**.
