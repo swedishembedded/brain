@@ -35,3 +35,26 @@
 % A little breathing room.
 \usepackage{setspace}
 \setlength{\parskip}{0.5em}
+
+% ---- Publisher attribution --------------------------------------------------
+% brain is built by Swedish Embedded AB, and this bundle is our engineering
+% manual. Name the publisher in the footer of every page, as any other
+% published technical manual does: a reader who opens the PDF at page 200 can
+% still see whose document it is and where to reach us. The title page carries
+% the same name via the `author` field in build-docs.py.
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[L]{\footnotesize Swedish Embedded AB \textperiodcentered\ info@swedishembedded.com}
+\fancyfoot[R]{\footnotesize\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0.4pt}
+% `report` starts each chapter with \thispagestyle{plain}; redefine plain so
+% chapter-opening pages carry the same footer instead of a bare page number.
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyfoot[L]{\footnotesize Swedish Embedded AB \textperiodcentered\ info@swedishembedded.com}%
+  \fancyfoot[R]{\footnotesize\thepage}%
+  \renewcommand{\headrulewidth}{0pt}%
+  \renewcommand{\footrulewidth}{0.4pt}%
+}

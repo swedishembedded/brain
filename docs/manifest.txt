@@ -106,3 +106,6 @@ performance/benchmarking.md
 
 == Reference
 reference/kernels.md
+
+== About
+about.md

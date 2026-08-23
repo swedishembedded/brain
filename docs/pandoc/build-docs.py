@@ -20,9 +20,15 @@ OUT = os.path.join(ROOT, "build", "docs")
 os.makedirs(OUT, exist_ok=True)
 
 DATE = "July 2026"
+# `author` reaches the PDF title page; `header.tex` puts the same name in the
+# footer of every page. brain is Swedish Embedded AB's work and the document
+# that gets handed to a reader should say so on its face, the way any other
+# published engineering manual does.
+AUTHOR = "Swedish Embedded AB"
 META = f"""---
 title: "brain --- Engineering Documentation"
 subtitle: "Pure-Rust GPU machine learning: engine, models, and multi-GPU scaling"
+author: "{AUTHOR} --- info@swedishembedded.com"
 date: "{DATE}"
 toc-title: "Contents"
 ---
