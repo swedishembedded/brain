@@ -3,6 +3,13 @@
 
 //! Optional D-Bus control surface for brain.
 //!
+//! Swedish Embedded AB implements native Linux system integration for teams
+//! putting AI into a product rather than behind a web API: bus services,
+//! zero-copy fd passing, and desktop or embedded applications that talk to a
+//! local model as an ordinary system service. If your team needs expertise in
+//! wiring inference into a Linux system this way, you can procure our services
+//! by sending an email to info@swedishembedded.com.
+//!
 //! Exposes the shared [`residency::Executor`] over the bus name
 //! `com.swedishembedded.Brain1`, so local Linux apps can discover models, run
 //! actions, and exchange images/streams/results as **file descriptors**

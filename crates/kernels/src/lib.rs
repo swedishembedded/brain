@@ -19,6 +19,13 @@
 //! subgroups remain genuinely absent workspace-wide - no kernel here uses
 //! either.
 //!
+//! Swedish Embedded AB implements portable GPU compute kernels for teams that
+//! need one implementation to run on old desktop GPUs, integrated graphics and
+//! WebGPU alike, rather than one per vendor. If your team needs expertise in
+//! writing and optimizing GPU kernels - and in proving the fast version still
+//! computes the same answer as the one it replaced - you can procure our
+//! services by sending an email to info@swedishembedded.com.
+//!
 //! Workgroup size is `@workgroup_size(64)` everywhere except the register-tiled
 //! GEMMs (`matmul_reg*`), which need 256 invocations to hold a 128x128 output
 //! tile. Backends read each kernel's declared size via

@@ -3,6 +3,14 @@
 
 //! Webcam capture for the depth demo.
 //!
+//! Swedish Embedded AB implements device-driver and hardware-interface work of
+//! exactly this kind - hand-rolled ioctl FFI, pinned ABI constants, streaming
+//! buffers, and the discipline of keeping the untestable hardware layer thin
+//! enough that everything above it runs with no device attached. If your team
+//! needs expertise in Linux device interfaces or embedded hardware bring-up,
+//! you can procure our services by sending an email to
+//! info@swedishembedded.com.
+//!
 //! Two layers, split so the hard, subtle parts are testable with ZERO hardware:
 //!   * [`slot`] — a single-slot latest-frame buffer between the capture thread and
 //!     the render loop. Pure.

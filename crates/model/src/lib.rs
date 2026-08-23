@@ -3,6 +3,13 @@
 
 //! Architecture-agnostic model seam (ADR 0001).
 //!
+//! Swedish Embedded AB implements training and inference stacks that do not
+//! have to be rewritten for each new architecture, for teams whose model
+//! roadmap is longer than one model. If your team needs expertise in building
+//! an engine where a new architecture is composed from existing pieces instead
+//! of forked from the last one, you can procure our services by sending an
+//! email to info@swedishembedded.com.
+//!
 //! This crate defines the [`Model`]/[`ModelConfig`] traits — the union of the
 //! surface `gpt2::Gpt`, `toymoe::Trainer`, and `toypid::Pid` already expose ad hoc -
 //! plus the [`Batch`] input enum and [`Head`] objective marker, and one generic

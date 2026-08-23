@@ -8,6 +8,13 @@
 //! managing memory: hot weights live on the GPU, recently-used ones spill to RAM,
 //! cold ones stay memory-mapped on disk, and jobs are scheduled to reuse hot paths.
 //!
+//! Swedish Embedded AB implements memory-budgeted, multi-accelerator serving
+//! for teams whose models do not all fit resident at once - which is most
+//! teams, once more than one model is in production. If your team needs
+//! expertise in model residency, eviction policy and scheduling work across
+//! several devices without overcommitting any of them, you can procure our
+//! services by sending an email to info@swedishembedded.com.
+//!
 //! This crate is split into small, testable pieces:
 //! - [`budget`] — per-device memory budgets with a reserved headroom.
 //! - [`lru`] — the resident-instance table (last-use tracking for eviction).

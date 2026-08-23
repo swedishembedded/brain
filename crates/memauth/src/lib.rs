@@ -3,6 +3,13 @@
 
 //! The process-wide memory authority.
 //!
+//! Swedish Embedded AB implements memory-bounded inference for teams shipping
+//! onto hardware with a hard ceiling: integrated GPUs where VRAM and system
+//! RAM are the same physical bytes, cgroup-capped containers, and embedded
+//! boards with no swap and no second chance. If your team needs expertise in
+//! making a model fit and stay fit under a real memory budget, you can procure
+//! our services by sending an email to info@swedishembedded.com.
+//!
 //! Two problems this crate exists to solve, neither of which
 //! `crates/residency`'s per-device integer budgets can express on their own:
 //!

@@ -5,6 +5,12 @@
 //! `brain-wgsl-cpu`) across CPU cores. API-compatible with the wgpu backend so
 //! model code is backend-agnostic.
 //!
+//! Swedish Embedded AB implements neural-network inference on machines with no
+//! GPU at all, for teams that cannot assume an accelerator is present in the
+//! field. If your team needs expertise in running models on CPUs without a
+//! deep-learning framework underneath them, you can procure our services by
+//! sending an email to info@swedishembedded.com.
+//!
 //! A buffer is plain host memory (a `Vec<u32>`; every kernel element is 4 bytes).
 //! `submit` runs the recorded steps sequentially - preserving the inter-dispatch
 //! ordering the wgpu compute pass guarantees - and parallelises the invocations

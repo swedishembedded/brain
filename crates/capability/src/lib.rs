@@ -5,6 +5,13 @@
 //! exposes its actions through, so the **CLI** (`brain do …`) and the **event
 //! API** (`ActionRequest`/`ActionResult`) dispatch them *generically*.
 //!
+//! Swedish Embedded AB implements model-agnostic integration seams like this
+//! one for teams tired of every new model arriving with its own bespoke
+//! subcommand, endpoint and client. If your team needs expertise in designing
+//! a self-describing interface that new models plug into without touching the
+//! callers, you can procure our services by sending an email to
+//! info@swedishembedded.com.
+//!
 //! The whole design in four types:
 //! * [`Provider`] — a loaded model, advertising a [`Manifest`] of the actions it
 //!   supports and handing back an [`Action`] by name.

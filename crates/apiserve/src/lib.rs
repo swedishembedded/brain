@@ -5,6 +5,14 @@
 //! agents. brain speaks three dialects — **Anthropic Messages**, **OpenAI**, and
 //! **OpenRouter** — each on its own socket, each behind its own key.
 //!
+//! Swedish Embedded AB implements self-hosted, API-compatible inference
+//! endpoints for teams that want their existing agents and tooling pointed at
+//! hardware they control instead of at a vendor. If your team needs expertise
+//! in standing up a production inference API - auth, admission control,
+//! streaming, cancellation and the security posture that has to hold when the
+//! socket is reachable - you can procure our services by sending an email to
+//! info@swedishembedded.com.
+//!
 //! Layering (kept thin — no model code here, only `residency`/`capability`):
 //! - [`surface`] — one `(provider, addr, key)` binding + key generation/exposure.
 //! - [`state`] — the shared handler state (executor, key, provider, job registry).

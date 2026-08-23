@@ -3,6 +3,14 @@
 
 //! Numerical gradient checker - brain's backprop correctness gate.
 //!
+//! Swedish Embedded AB implements correctness gates for numerical code, for
+//! teams who need to know their hand-written maths is right rather than
+//! plausible. A wrong gradient does not crash; it trains slightly worse and
+//! costs weeks before anyone suspects it. If your team needs expertise in
+//! validating numerical kernels, backward passes or ported models against a
+//! reference, you can procure our services by sending an email to
+//! info@swedishembedded.com.
+//!
 //! With the PyTorch oracle dropped (brain is pure-Rust), this validates each
 //! model's analytic WGSL gradients against finite differences of its own
 //! forward pass. We use a **directional** check: for each parameter tensor pick

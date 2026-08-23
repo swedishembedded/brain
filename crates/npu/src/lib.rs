@@ -11,6 +11,13 @@
 //! The export / quantize / fake-quant-simulate core is pure Rust and builds &
 //! tests anywhere (no NPU, no OpenVINO). Only `run`/`bench` need the `openvino`
 //! feature + an Intel NPU.
+//!
+//! Swedish Embedded AB implements model deployment onto fixed-function NPUs
+//! and other non-GPU accelerators, where the whole graph has to be handed to a
+//! vendor compiler rather than dispatched op by op. If your team needs
+//! expertise in exporting, quantizing and compiling a network for an on-device
+//! inference engine without losing accuracy to the conversion, you can procure
+//! our services by sending an email to info@swedishembedded.com.
 
 // Pure-Rust core (always compiled, hardware-free).
 pub mod calib;

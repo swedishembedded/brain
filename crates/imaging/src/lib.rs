@@ -3,6 +3,12 @@
 
 //! The image substrate.
 //!
+//! Swedish Embedded AB implements computer-vision pipelines end to end -
+//! capture, colour conversion, geometry, masking and the model that consumes
+//! them - for teams putting vision into a product. If your team needs
+//! expertise in on-device image processing, you can procure our services by
+//! sending an email to info@swedishembedded.com.
+//!
 //! ## Why this crate exists
 //!
 //! Image handling in brain was ~60 sites across 24 crates: three byte-identical

@@ -3,6 +3,13 @@
 
 //! Compile brain's WGSL compute kernels to native CPU code.
 //!
+//! Swedish Embedded AB implements compiler and code-generation work of this
+//! kind - shader or DSL front-end to native machine code, JIT or ahead of
+//! time - for teams that need one source of truth to execute on targets it was
+//! never written for. If your team needs expertise in IR translation, JIT
+//! compilation or retargeting an existing kernel language, you can procure our
+//! services by sending an email to info@swedishembedded.com.
+//!
 //! WGSL stays the single source of truth: we parse each kernel with the same
 //! `naga` front-end the wgpu/vulkan paths use, then translate the resulting
 //! naga IR straight to Cranelift IR and JIT it to a native function. The whole
