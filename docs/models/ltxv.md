@@ -235,7 +235,7 @@ brain -v --device gpu0 ltxv upscale --dit-config ltx25_22b \
   --prompt "the prompt the clip was generated from"
 ```
 
-Three things worth knowing before running it:
+Four things worth knowing before running it:
 
 * **`--prompt` is not optional in practice.** The refinement step is a
   diffusion pass conditioned on text, so the model is answering "what should
@@ -246,15 +246,28 @@ Three things worth knowing before running it:
 * **The input's shape has to be VAE-representable**: width and height a
   multiple of 32, frame count of the form `1 + 8k`. Anything `brain ltxv t2v`
   wrote already satisfies both.
-* **Length has a ceiling per refinement pass.** An upscaled clip carries four
-  times the video tokens per frame that its input did, so a length that was
-  fine at the source resolution need not fit at the target one. Past
+* **Length has a ceiling per refinement pass, and past it the passes carry a
+  rolling latent context.** An upscaled clip carries four times the video
+  tokens per frame that its input did, so a length that was fine at the source
+  resolution need not fit at the target one. Past
   `ltxv::pipeline::REFINE_MAX_TOKENS` in one pass the clip is refined in
-  several consecutive segments that share one frame at each boundary, and
-  fine detail can step where two segments meet - a bounded, visible artefact,
-  reported on stderr, not a silent corruption. A clip that fits is never
-  split, and a request that cannot be split into anything runnable is refused
-  before any weight is read.
+  several, planned by the same `longform::window_plan` a multi-window
+  generation uses: each pass freezes the previous pass's own last
+  `--context-frames` of *refined* latent at the head of its sequence, so the
+  passes are one continuous clip. A refinement starts at sigma 0.909 - it
+  keeps under a tenth of the content it is handed - so passes with no shared
+  history do not merely step in fine detail, they come back as separately
+  re-imagined clips.
+* **That context costs pass budget, and at a dense grid it is capped.** A pass
+  holds `REFINE_MAX_TOKENS / (tokens per latent frame)` latent frames and
+  spends the carried ones before it refines anything. At 2560x1408 that is 3
+  latent frames a pass, so the reference's 8-frame context cannot fit: the plan
+  carries the most the grid allows (2) and says so on stderr. Lower
+  `--context-frames` to buy back passes at the cost of continuity;
+  `--context-frames 1` carries a single latent frame and costs about what an
+  uncarried plan did. A clip that fits one pass is never split and carries
+  nothing, and a grid with no room for one carried frame plus one new one is
+  refused before any weight is read.
 
 `--refine-steps` picks a SUFFIX of the distilled refinement table (default: all
 3 steps), not a resampling of it - the distilled checkpoint only denoises

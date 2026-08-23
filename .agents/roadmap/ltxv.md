@@ -3315,18 +3315,23 @@ land. Known traps already identified from reading (not yet test-pinned):
 
 ## Recorded gaps (kept current)
 
-- **`brain ltxv upscale` has no real-weight end-to-end run, and no capability
-  action.** Phase 21 added post-hoc 2x upscaling of a finished clip, sharing
-  `upscale_and_refine` with the internal two-stage path so the Phase 19
-  un-normalize defect cannot recur in a second copy. Gated weight-free
-  (segment plan) and on the real VAE + real spatial upscaler with the tiny DiT
-  (wiring, CPU). Both cards were saturated by unrelated work throughout, so no
-  `ltx25_22b` run has happened: the code path is exercised, the QUALITY of its
-  output is unmeasured and unclaimed, and the multi-segment seam is argued
-  from construction rather than measured with `clipmetric::blowup_ratio`.
+- **`brain ltxv upscale`'s multi-pass continuity has no real-weight
+  measurement, and the command has no capability action.** Phase 21 added
+  post-hoc 2x upscaling of a finished clip, sharing `upscale_and_refine` with
+  the internal two-stage path so the Phase 19 un-normalize defect cannot recur
+  in a second copy. Its independent-segment plan turned out to be a real defect
+  and Phase 25 replaced it with `longform::window_plan`'s rolling latent
+  context. Gated weight-free (the plan) and on the real VAE + real spatial
+  upscaler with the tiny DiT (wiring across a real seam, CPU). No `ltx25_22b`
+  run of the fixed path has happened: the code path is exercised, the QUALITY
+  of its output is unmeasured and unclaimed, and the multi-pass seam is argued
+  from Phase 22's own measurement of the same mechanism rather than measured
+  again here with `clipmetric::blowup_ratio`. The reduced context a dense
+  output grid forces (2 latent frames at 2560x1408, against the reference's 8)
+  is a compromise no number in this repo justifies - only the full 8 is cited.
   Separately, `upscale` is CLI-only - it would be the first action here to
   take an input BLOB rather than parameters alone, and that shape is
-  undesigned. See Phase 21 item 3.
+  undesigned. See Phase 21 item 3 and Phase 25.
 
 - **Single-stage generation past the distilled schedule's token count**:
   **closed in Phase 19**. `generate` ran `LTX2_DISTILLED_SIGMAS` at the
@@ -5292,3 +5297,171 @@ request.
 * **No per-boundary soft anchor**, and no "one shot, evolving prompt" mode. See
   section 2 and the last paragraph of section 3 for what each would be and why
   neither is this.
+
+### Phase 25 - an upscaled clip stops being several clips
+
+A real 217-frame 1280x704 clip went through `brain ltxv upscale --factor 2`
+and came back 217 frames at 2560x1408, correct in every dimension and wrong in
+the only way that matters: it plays as five or six different clips cut
+together, not as one clip with more detail. The frame count check passed
+because the arithmetic was right. The output was unusable because nothing
+crossed a boundary.
+
+#### 0 - the count, and why it is not a "seam"
+
+Phase 21's `refine_segments` split a too-long refinement into consecutive
+`1 + 8k` segments sharing ONE pixel frame at each boundary, and its own ledger
+entry called that "forced, not tuned" with a seam that is "real, unblended".
+Both halves of that are true and neither is what went wrong. What went wrong is
+that the shared frame carried nothing: segment `n + 1` VAE-encoded its own
+range **of the ORIGINAL clip**, upscaled it, and refined it with
+`context: None` and `seed_salt: 0`. Segment `n`'s refined output was never an
+input to anything. The overlap existed only so `n` segments of `1 + 8k` frames
+could sum to a `1 + 8K` clip; the earlier copy of the shared frame was
+discarded. Zero bits crossed a boundary - not a re-encoded picture, which is
+Phase 22's naive baseline, but nothing at all.
+
+That is worse than a detail step, and the sigma table says why. A refinement
+pass starts at `LTX2_STAGE2_DISTILLED_SIGMAS[0] = 0.909375`, and
+`denoise_stage`'s partial re-noise is `lerp(seed, noise, sigma0)` - so a pass
+keeps **9%** of the content it was handed and re-derives the rest. Two passes
+over adjacent content, with independent noise and no shared history, do not
+produce the same clip twice. They produce two clips.
+
+And there were not two. At 2560x1408 the latent grid is 44 x 80 = **3520
+tokens per latent frame**, so `REFINE_MAX_TOKENS = 12288` holds
+`12288 / 3520 = 3` latent frames per pass. 217 frames is `k = 27`, `k_max = 2`,
+so `ceil(27 / 2) = ` **14** segments (thirteen of 17 frames, one of 9). Fourteen
+independent renderings of one clip, boundaries every ~0.7 s at 24 fps. "Five or
+six" was a generous count.
+
+#### 1 - the fix is a function this crate already had
+
+Phases 22 and 23 answered exactly this question for generation and measured the
+answer: carrying the previous window's own last `CONTEXT_LATENT_FRAMES = 8`
+real latent frames, frozen at sigma 0, lands a seam at ratio **0.99** against
+an ideal 1.0, where re-encoding one decoded pixel frame lands at **0.85**
+(`longform.rs::seam_real`). `upscale` was written before that existed and was
+never migrated.
+
+So `refine_segments` is deleted and `refine_plan` is `longform::window_plan`
+with one line in front of it. The upscale loop is now `generate_long`'s window
+loop with the generation replaced by an encode: per pass, VAE-encode the source
+range `Window::source_first_frame()` names, carry it up with the x2 upscaler,
+overwrite the leading `context` latent frames with the previous pass's own
+refined latent (`Refine::context`, the `LatentContext` field Phase 22 added and
+this call site passed `None` to), refine, `carry_tail` the result, decode, drop
+`Window::dropped_frames()` leading pixels. Same planner, same carry, same
+freeze, same Phase 23 `release_devices` before each decode. Nothing about
+windowed continuity is implemented twice.
+
+`Window::source_first_frame` is the one thing refinement needs that generation
+does not: `first_frame - dropped_frames()`, the input frame a pass starts
+READING at, since a pass has to fetch the pixels its carried context decodes
+back to rather than inventing them. Its own arithmetic makes the range a pass
+reads end exactly where that pass's output ends, which the gate asserts
+directly.
+
+Two smaller things came with it. `UpscaleOpts` gained
+`max_refine_tokens` - `LongOpts::max_window_tokens`'s counterpart, and what
+lets the CPU wiring gate below run a real multi-pass plan at 64x64. And the
+per-pass seed salt stopped being `0`: every pass drew identical refinement
+noise, which was not the cause of anything but was not intended either. It is
+now `REFINE_SEED_SALT * pass_index`, multiplied rather than XORed for
+`SCENE_SEED_SALT`'s reason - pass 0 keeps the caller's seed exactly, so a clip
+that fits one pass is bit for bit the run it already was.
+
+#### 2 - where full reuse stops: the context does not always fit
+
+`window_plan` REFUSES a grid with no room for `context + 1` latent frames, and
+for generation that is the right answer - the caller picked the resolution and
+a smaller one is available. Refinement has neither escape. Its grid is the
+input's grid times the factor squared, and at 2560x1408 a pass holds three
+latent frames total, so eight carried ones is not tight, it is impossible.
+Refusing would refuse the case the feature exists for.
+
+`longform::fitted_context` is that one line: `want.min(max_lat - 1)`, an error
+only when even `max_lat < 2`. The plan carries the most history the ceiling
+leaves room for and keeps one frame to refine, and `upscale` warns with both
+numbers when it had to shrink. This is a compromise nothing in this repo
+measures - `CONTEXT_LATENT_FRAMES = 8` is the reference's own
+`temporal_boundary` and no smaller value is cited anywhere - and it is recorded
+as a compromise rather than presented as a tuning.
+
+**It costs passes, and the number is not small.** A pass spends `context` of
+its budget before it refines anything, so the DiT work per emitted frame scales
+as `max_lat / (max_lat - context)`. For the 217-frame clip above:
+
+| output | tokens/latent frame | latent frames a pass | passes | carried | latent frames of DiT work |
+|---|---|---|---|---|---|
+| 1280x704 | 880 | 13 | 4 | 8 (full) | 52 |
+| 1920x1088 | 2040 | 6 | 23 | 5 | 138 |
+| 2560x1408 | 3520 | 3 | **26** | **2** | **78** |
+| 2560x1408, Phase 21 | 3520 | 3 | 14 | 0 | 41 |
+
+The user's own case is 26 passes against 14, **1.90x** the refinement forwards,
+for a clip that was previously not worth keeping. The denser the output grid
+the worse that ratio gets, which is why `--context-frames` is on the command:
+`--context-frames 1` carries a single latent frame and costs roughly what the
+uncarried plan did, and the default is the largest the grid allows.
+`REFINE_MAX_TOKENS` was NOT raised to buy budget back - it is derived from the
+2047 MiB binding size, explicitly conservative, and moving it needs a card and
+a measurement, neither of which this phase had.
+
+#### gates
+
+Weight-free, always run (`crates/ltxv/tests/upscale.rs`):
+
+* `a_clip_too_long_to_refine_in_one_pass_carries_real_latent_context_across_every_seam` -
+  the exact shape that produced the defect (217 frames, 44 x 80 out). Every
+  pass after the first carries a non-zero context, every pass carries the same
+  amount, every predecessor can actually supply it, every pass is under the
+  ceiling and decodes `1 + 8k` frames, every pass's source range is inside the
+  clip and ends where that pass's own output ends, and the passes reassemble to
+  exactly 0..217 with no duplicate and no gap. A plan whose continuation passes
+  carry nothing fails this test, which is what Phase 21's plan did.
+* `the_carried_context_shrinks_to_the_grid_rather_than_vanishing_or_refusing` -
+  1280x704 out takes the full 8; 2560x1408 out takes exactly `max_lat - 1 = 2`
+  rather than erroring or silently carrying none.
+* `a_clip_that_fits_is_one_pass_and_no_seam` / `an_impossible_request_is_refused_up_front` -
+  Phase 21's own two claims, kept.
+
+Real weights, 52 s (real conv VAE, real x2 spatial upscaler, tiny
+random-weight DiT, CPU):
+
+* `a_multi_pass_upscale_is_one_clip_that_carries_its_own_latent_context` -
+  25 frames 64x64 -> 128x128 with the token ceiling forced to 48 so the plan is
+  really two passes carrying two latent frames, the way `longform.rs`'s own
+  wiring gate forces one. Comes back 25 frames at 128x128, not flat, fps
+  intact, with the upscaler and a decode run once per pass and
+  `LTX2_STAGE2_STEPS` steps per pass. The carry is load-bearing rather than
+  incidental here: `upscale` refuses to run a pass whose planned context and
+  whose predecessor's carried tail disagree, so a run in which nothing was
+  carried fails with that error instead of passing.
+
+Not re-gated, deliberately: that `carry_tail` is a bit-exact slice (gated in
+`longform.rs`), that a frozen prefix survives the sampler
+(`pipeline::tests::a_frozen_prefix_of_latent_frames_survives_the_whole_trajectory`),
+and that the upscaler is un-normalized around correctly
+(`upsampler_parity.rs`). `upscale` reaches all three through the same code
+`generate_long` does; asserting them again would gate second copies that do not
+exist.
+
+#### what this phase does NOT claim
+
+* **No real-weight run.** Per the constraint this work was done under, nothing
+  here touched a card. The mechanism is the one Phases 22/23 measured at 0.99
+  on the same seam question, applied to the same freeze through the same
+  functions - but the specific claim "an upscaled 217-frame clip now looks like
+  one clip" is unverified and belongs to the follow-up run.
+* **No seam metric for refinement.** `clipmetric::blowup_ratio` /
+  `frame_to_frame_diffs` are the instruments, and a before/after on a real clip
+  is what would turn "argued from Phase 22's measurement" into a number of this
+  path's own. Two real 2560x1408 upscales is what it costs.
+* **The shrunken context is unjustified by any number.** See section 2. Eight
+  latent frames is the only cited figure; two is what fits.
+* **The pass count rises**, by 1.90x on the case that motivated the phase and
+  more on denser grids. That is stated in section 2's table, not hidden.
+* **Nothing changed about a clip that fits one pass** - one window, no context,
+  seed unsalted, identical output.
+* **Still CLI-only, still no capability action.** Unchanged from Phase 21.
