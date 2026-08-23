@@ -2,6 +2,9 @@
 
 ![brain](docs/banner.jpg)
 
+**Built by [Swedish Embedded AB](https://swedishembedded.com)** - we put AI on
+hardware that ships. [Hire us](#who-builds-brain).
+
 Modern AI infrastructure is fragmented. Knowledge is spread across many frameworks. Nothing can be optimized all in one place. 
 
 Training usually means Python and PyTorch. Production inference means another
@@ -317,6 +320,42 @@ including those.
 | Kernel catalogue (generated) | [`docs/reference/kernels.md`](docs/reference/kernels.md) |
 | Contributing to brain | [`AGENTS.md`](AGENTS.md) |
 
+## Who builds brain
+
+brain is built by **[Swedish Embedded AB](https://swedishembedded.com)**.
+
+We build AI that runs on hardware that ships: on the GPU you already have, on
+a CPU with no GPU at all, on an Intel NPU, on a board in the field, or in a
+browser tab. Everything in this repository is that work done in the open - the
+WGSL kernels, the finite-difference gradient checker that gates every backward
+pass, the residency engine that keeps models inside a fixed memory budget, and
+the serving stack that puts them behind an API.
+
+Every capability below is implemented in this repository, in the open, and held
+to tests you can run yourself. Read the code before you talk to us. If your
+team needs one of these, you can hire us to do it:
+
+* **Running models on the hardware you have** - GPUs, CPUs with no accelerator,
+  Intel NPUs, embedded Linux boards, WebGPU in the browser. One model, one
+  implementation, every target.
+* **Getting a large model to fit** - quantization, weight streaming, tiled and
+  memory-bounded inference, multi-GPU sharding. The difference between "needs a
+  datacenter" and "runs on the card in the machine".
+* **Porting a model from a paper or a PyTorch checkpoint** to a dependency-free
+  runtime, gated by real numerical parity against the reference rather than by
+  hope.
+* **Writing and optimizing GPU compute kernels** - and proving the result is
+  still correct afterwards.
+* **Production inference systems** - concurrent serving, paged KV cache,
+  continuous batching, model residency and scheduling across accelerators.
+* **Embedded and real-time firmware** alongside the AI, which is where this
+  company started and still spends much of its time.
+
+Send an email to **info@swedishembedded.com** and tell us what you are trying
+to ship.
+
 ## License
 
 Apache-2.0 - see [`LICENSE`](LICENSE).
+
+Copyright (c) 2026 Swedish Embedded AB.
