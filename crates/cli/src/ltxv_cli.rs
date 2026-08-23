@@ -70,12 +70,27 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
                              connects the still to itself); a different
                              path for a clip that morphs between two
                              stills. Either flag works alone.
+  --mid-frame <path>           same again, held fixed at ONE INTERIOR
+                             instant, so a single pass can be anchored at
+                             its start, its middle and its end at once -
+                             the way to keep a long or moving-camera clip
+                             on course rather than only pinning where it
+                             begins and ends. Works alone or with either
+                             of the two above.
+  --mid-frame-at <N>           which pixel frame --mid-frame anchors,
+                             strictly between 0 and --frames minus one.
+                             The default is the clip's own midpoint,
+                             (frames - 1) / 2. Any frame is legal: the
+                             still is an appended guide carrying its own
+                             position, not a slot on the latent grid, so
+                             it does not have to sit on the 1 + 8k
+                             boundary the clip's LENGTH does.
   --context-frames <N>         how much of the previous window a long-form
                              continuation carries, in pixel frames, must be
                              1 + 8k (default 57 = 8 latent frames, the
                              reference's own video-extension prefix). Only
                              read when the clip needs more than one window.
-  --conditioning-strength <S>  how hard --start-frame/--end-frame pin their
+  --conditioning-strength <S>  how hard the conditioning stills pin their
                              frames, 0..1 (default 1.0 = pinned exactly;
                              the reference's own CLI example is 0.8). Note
                              that passing the SAME image to --start-frame
@@ -133,8 +148,11 @@ Long-form clips:
   generated exactly as it always was, and none of this runs.
   BRAIN_LTXV_LONGFORM_MAX_TOKENS overrides the per-window token ceiling
   (default 13200, the largest single-window generation this crate has a
-  recorded real run at). --end-frame is not supported for a multi-window
-  clip; --start-frame conditions the first window as usual.
+  recorded real run at). --end-frame and --mid-frame are not supported for
+  a multi-window clip (the first pins one window's last frame, the second
+  names a pixel frame of the whole clip and would have to be routed to
+  whichever window covers it); --start-frame conditions the first window as
+  usual.
 
 Scenes:
   One --frames/--prompt run is one continuous SHOT: every window shares the
@@ -157,8 +175,9 @@ Scenes:
   a scene deliberately rather than letting one long shot run until it
   degrades. Each scene's frame count is its own 1 + 8k; the clip is their
   sum. --start-frame conditions the FIRST scene's opening only, and
-  --end-frame is refused (there is no design for pinning the last frame of
-  a multi-scene clip).
+  --end-frame/--mid-frame are refused (there is no design for pinning the
+  last frame, or an interior frame, of a clip whose timeline is a sequence
+  of scenes).
 
 Devices:
   --device <cpu|gpu>         DiT + VAE (default: the ambient BRAIN_DEVICE)
@@ -393,6 +412,10 @@ fn t2v(args: &[String]) -> Result<(), String> {
             "--end-frame" => {
                 o.end_frame = Some(need(i)?.clone());
             }
+            "--mid-frame" => {
+                o.mid_frame = Some(need(i)?.clone());
+            }
+            "--mid-frame-at" => o.mid_frame_at = Some(num(i, "--mid-frame-at")?),
             // `--no-stretch` is a bare flag (no value), unlike every other
             // option above - handled separately so the `i += 2` stride
             // below stays uniform for everything else.
@@ -472,8 +495,15 @@ fn t2v(args: &[String]) -> Result<(), String> {
         (None, Some(e)) => format!(", end-frame ({e})"),
         (None, None) => String::new(),
     };
+    // The resolved pixel frame, not the flag: an unset --mid-frame-at is the
+    // clip's own midpoint, and a caller should be told which frame that is
+    // before the run rather than have to derive it.
+    let mid_desc = match o.mid_frame.as_deref() {
+        Some(m) => format!(", mid-frame ({m}) at frame {}", ltxv::pipeline::mid_anchor_frame(o.frames, o.mid_frame_at)?),
+        None => String::new(),
+    };
     eprintln!(
-        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}{stage_desc}{window_desc}",
+        "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {}, seed {}{img_desc}{mid_desc}{stage_desc}{window_desc}",
         o.frames, o.width, o.height, o.eta, o.guidance, o.seed
     );
     if scenes.len() > 1 {
@@ -779,6 +809,12 @@ mod tests {
             "--dit",
             "--text-encoder",
             "--scene",
+            "--start-frame",
+            "--end-frame",
+            "--mid-frame",
+            "--mid-frame-at",
+            "--conditioning-strength",
+            "--context-frames",
         ] {
             assert!(super::HELP.contains(flag), "{flag} is parsed but not in --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in --help but not parsed");
