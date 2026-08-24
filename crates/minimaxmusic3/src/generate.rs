@@ -150,6 +150,32 @@ fn ar_branch_devices() -> (Option<u32>, Option<u32>) {
     }
 }
 
+/// `--device`-shaped tokens for the denoise and vocoder stages.
+///
+/// These two stages are sequential and never logically overlap, but each
+/// opens its own `Gpu` and wgpu does NOT return a device's VRAM to the
+/// driver when the handle drops. Measured on a P40 at a real chunk length:
+/// the vocoder alone peaks at 12.26 GB decoding one 689-latent chunk, and
+/// the DiT stage holds ~9.3 GB - together past a 24 GB card, which is what
+/// killed a two-chunk generation in the vocoder after both chunks had
+/// denoised cleanly.
+///
+/// With two or more schedulable GPUs they go on different cards (the
+/// second one is idle for the whole of both stages anyway - the AR stage
+/// released it). With one, or when the caller pinned a device explicitly,
+/// that choice stands: an explicit `--device` is an instruction, not a
+/// hint.
+fn stage_devices(explicit: Option<&str>) -> (Option<String>, Option<String>) {
+    if let Some(dev) = explicit {
+        return (Some(dev.to_string()), Some(dev.to_string()));
+    }
+    let gpus = &gpu_core::devices::ambient_compute_set().gpus;
+    match gpus.len() {
+        0 | 1 => (None, None),
+        _ => (Some(format!("gpu{}", gpus[0])), Some(format!("gpu{}", gpus[1]))),
+    }
+}
+
 /// [`global_llm::import`] on a specific card, or on the ambient selection
 /// when `device` is `None`.
 fn load_global_llm(dir: &str, cap: u32, device: Option<u32>) -> Result<(qwen3::QwenConfig, qwen3::Qwen), String> {
@@ -182,6 +208,8 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         pipeline::generate_frames(&lm_cond, &lm_uncond, &dd_w, &dd_cfg, &head, cfg.vocab as usize, cfg.d_model as usize, &conditional_ids, &unconditional_ids, max_frames, opts.seed, progress)
     };
 
+    let (denoise_dev, vocoder_dev) = stage_devices(opts.device.as_deref());
+
     let cond_cfg = ConditionEncoderConfig::real();
     let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
     if frame_hiddens.is_empty() {
@@ -197,7 +225,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         let cond_w = condition_encoder::import(&paths.condition)?;
         let dit_cfg = DitConfig::real();
         let dit_w = dit::import(&paths.dit, &dit_cfg)?;
-        let gpu = Gpu::open(opts.device.as_deref(), dit::PIPELINES);
+        let gpu = Gpu::open(denoise_dev.as_deref(), dit::PIPELINES);
         let starts = denoise::chunk_starts(num_frames);
         let mut state = denoise::ChunkState::default();
         starts
@@ -216,7 +244,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
     let (left, right) = {
         let vocoder_cfg = VocoderConfig::real();
         let vocoder_w = vocoder::import(&paths.vocoder, &vocoder_cfg)?;
-        let gpu = Gpu::open(opts.device.as_deref(), vocoder::PIPELINES);
+        let gpu = Gpu::open(vocoder_dev.as_deref(), vocoder::PIPELINES);
         let mut stitcher = stitch::Stitcher::new();
         let n = chunks.len();
         for (i, (latents, length)) in chunks.iter().enumerate() {

@@ -3155,6 +3155,12 @@ mod tests {
     /// never to the raw token count within one chunk — model-agnostic in spirit
     /// (any future `PagedDecoder` gets this same shape), asserted here on the one
     /// concrete implementation that exists.
+    /// The asserted shape is `submits == chunks * per_chunk` exactly - strictly
+    /// PROPORTIONAL, with no fixed term. Anything one-off (a device the engine's
+    /// construction left with staged-but-unsubmitted uploads, say) is baselined
+    /// out of the measurement below rather than folded into `per_chunk`, because
+    /// a constant that only the first chunk pays is not a per-chunk cost and
+    /// multiplying it by the chunk count is simply wrong arithmetic.
     /// G4: at BOTH KV dtypes — submit counts are integers, unaffected by any
     /// floating-point noise, so this stays `assert_eq!` at both dtypes with no
     /// caveat.
@@ -3162,20 +3168,44 @@ mod tests {
     fn prefill_submits_scale_with_chunks_not_with_token_count() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
+        // A device of this test's OWN, never `testgpu::dev`'s pooled one. Submit
+        // counting is a property of a wgpu device and its handles, not of one
+        // engine: the pool hands every test in this binary a handle on ONE
+        // device, whose submit counter and whose "a host write is staged but
+        // unsubmitted" flag (`backend-wgpu`'s `writes_pending`, claimed by
+        // whichever handle flushes next) are then SHARED with whatever else the
+        // harness is running in parallel. Measured against the pool, this gate's
+        // counts drifted by +1 at random, in a different measurement each run.
+        // The device is dropped with the test, which is the orderly teardown
+        // `testgpu`'s own doc calls for.
+        let own = Gpu::new(PIPELINES);
         // `device_stats()` is `None` on backends that don't count (only
         // backend-wgpu does; `backend_api::Backend::stats`'s own doc comment:
         // "a consumer must report null, never zero") -- this claim is
         // structurally unverifiable there, so skip loudly rather than let
         // `unwrap_or(0)` silently turn "not counted" into a false failure.
-        let probe = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
+        let probe = Engine::from_map_with_gpu(own.share_or_new(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
         if probe.device_stats().is_none() {
             brain_testutil::skip_unavailable("this backend does not count device submits");
             return;
         }
+        drop(probe);
         for kv_int8 in [false, true] {
             let submits_for = |prompt: &[u32], max_prefill: u32| -> u64 {
-                let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, max_prefill, kv_int8, false);
+                let mut e = Engine::from_map_with_gpu(own.share_or_new(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, max_prefill, kv_int8, false);
                 let mut t = BlockTable::new();
+                // Baseline the counter on a QUIESCED device, so what is measured
+                // is prefill's own work and nothing else. Engine construction can
+                // leave host uploads recorded but unsubmitted (`kv_int8` writes
+                // the per-layer clip-ceiling buffers - `from_map_with_gpu`'s
+                // `max_row` - and `backend-wgpu`'s `write` only stages them);
+                // without this flush the FIRST host write inside the first chunk
+                // is what submits them, so the engine's construction cost lands
+                // on chunk 1 and on no other chunk. That is a fixed per-RUN
+                // cost, not a per-chunk one - it made the two-chunk run measure
+                // `2 * per_chunk + 1` against a `2 * (per_chunk + 1)` expectation
+                // and fail by exactly the one-off, at `kv_int8` only.
+                e.gpu.flush();
                 let before = e.device_stats().map(|s| s.submits).unwrap_or(0);
                 e.prefill(&mut t, prompt);
                 let after = e.device_stats().map(|s| s.submits).unwrap_or(0);
@@ -3191,10 +3221,16 @@ mod tests {
             assert_eq!(submits_short, submits_long, "kv_int8={kv_int8}: prefill submits must not scale with in-chunk token count: {submits_short} (4 tok) vs {submits_long} (16 tok)");
             assert!(submits_short > 0, "kv_int8={kv_int8}: prefill must dispatch SOMETHING");
 
-            // The SAME 16-token prompt split into 2 chunks of 8 must cost exactly 2x the
-            // one-chunk submit count — proportional to CHUNKS, not tokens (which would be 16x).
+            // The SAME 16-token prompt split into 2 then 4 chunks must cost exactly
+            // 2x and 4x the one-chunk submit count - proportional to CHUNKS, not
+            // tokens (which would be 16x, and identical at every split here). The
+            // 4-chunk point is what separates "proportional to chunks" from "affine
+            // in chunks": a per-run one-off would show up as a CONSTANT gap that the
+            // 2x check alone could be mistaken for a per-chunk cost.
             let submits_2chunks = submits_for(&long, 8);
-            assert_eq!(submits_2chunks, 2 * submits_long, "kv_int8={kv_int8}: 2 chunks must cost exactly 2x 1 chunk's submits, not scale with the (unchanged) token count: {submits_2chunks} vs 2x{submits_long}");
+            let submits_4chunks = submits_for(&long, 4);
+            assert_eq!(submits_2chunks, 2 * submits_long, "kv_int8={kv_int8}: 2 chunks must cost exactly 2x 1 chunk's submits, not scale with the (unchanged) token count: {submits_2chunks} vs 2x{submits_long}. A CONSTANT excess (2x+c) is a fixed per-run cost baselined into the measurement, not a prefill regression - see the flush above.");
+            assert_eq!(submits_4chunks, 4 * submits_long, "kv_int8={kv_int8}: 4 chunks must cost exactly 4x 1 chunk's submits - prefill cost must be proportional to chunks, with no fixed term: {submits_4chunks} vs 4x{submits_long}");
         }
     }
 
