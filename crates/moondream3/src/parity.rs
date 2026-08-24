@@ -74,7 +74,7 @@ use brain_testutil::read_f32;
             })
             .collect();
         let dec = MoondreamDecoder::new(&gpu, &w, blocks, t, d, v, 0);
-        let logits = dec.logits_all(&tokens, &[]);
+        let logits = dec.logits_all(&gpu, &tokens, &[]);
         assert_eq!(logits.len(), ref_logits.len(), "logit shape mismatch");
 
         let (mut max_abs, mut sum_abs) = (0.0f32, 0.0f64);

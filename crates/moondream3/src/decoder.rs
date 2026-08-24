@@ -95,9 +95,8 @@ fn sigmoid(x: f32) -> f32 {
 /// into the prefix rows → a stack of [`MoondreamBlock`]s (dense 0..3, MoE 4..23) →
 /// post-LN → lm_head → masked cross-entropy. Image tokens occupy rows
 /// `[1, 1+n_img)` (after the bos), a positional prefix (no placeholder token).
-pub struct MoondreamDecoder<'g> {
-    gpu: &'g Gpu,
-    blocks: Vec<MoondreamBlock<'g>>,
+pub struct MoondreamDecoder {
+    blocks: Vec<MoondreamBlock>,
     w: HashMap<String, DeviceBuffer>,
     d: u32,
     vocab: u32,
@@ -111,20 +110,19 @@ pub struct MoondreamDecoder<'g> {
     n_img: u32,
 }
 
-impl<'g> MoondreamDecoder<'g> {
+impl MoondreamDecoder {
     /// Build from per-layer prefixed weights (`blocks.{l}.…`) plus `tok.weight`
     /// `[vocab,d]`, `post_ln.weight`/`.bias`, `lm_head.weight` `[vocab,d]`/`.bias`.
     /// `moe_layers` marks which layers use the MoE FFN (their MoE weights are under
     /// `blocks.{l}.moe.…`).
     #[allow(clippy::too_many_arguments)]
-    pub fn new(gpu: &'g Gpu, weights: &HashMap<String, Vec<f32>>, blocks: Vec<MoondreamBlock<'g>>, t: u32, d: u32, vocab: u32, n_img: u32) -> MoondreamDecoder<'g> {
+    pub fn new(gpu: &Gpu, weights: &HashMap<String, Vec<f32>>, blocks: Vec<MoondreamBlock>, t: u32, d: u32, vocab: u32, n_img: u32) -> MoondreamDecoder {
         let w = weights
             .iter()
             .filter(|(k, _)| !k.starts_with("blocks."))
             .map(|(k, v)| (k.clone(), gpu.storage_init(k, v)))
             .collect();
         MoondreamDecoder {
-            gpu,
             blocks,
             w,
             d,
@@ -145,8 +143,7 @@ impl<'g> MoondreamDecoder<'g> {
     /// Forward → mean masked cross-entropy. `tokens`/`targets` length `t`
     /// (targets IGNORE at the image + non-supervised rows); `image_embeds` is the
     /// `[n_img, d]` connector output spliced at rows `[1, 1+n_img)`.
-    pub fn forward(&self, tokens: &[u32], targets: &[u32], image_embeds: &[f32]) -> f32 {
-        let g = self.gpu;
+    pub fn forward(&self, g: &Gpu, tokens: &[u32], targets: &[u32], image_embeds: &[f32]) -> f32 {
         let (t, d, v) = (self.t, self.d, self.vocab);
         g.write(&self.tokens, tokens);
         g.write(&self.targets, targets);
@@ -162,7 +159,7 @@ impl<'g> MoondreamDecoder<'g> {
         // Block stack (each returns its own output buffer).
         let mut cur: &DeviceBuffer = &self.res;
         for b in &self.blocks {
-            cur = b.forward(cur);
+            cur = b.forward(g, cur);
         }
         // post-LN → lm_head → CE.
         g.submit(
@@ -182,8 +179,7 @@ impl<'g> MoondreamDecoder<'g> {
     /// Run the forward through the LM head and return the `[t, vocab]` logits
     /// (embed → splice image tokens → blocks → post-LN → lm_head), skipping the CE.
     /// Used for real-weight reference parity.
-    pub fn logits_all(&self, tokens: &[u32], image_embeds: &[f32]) -> Vec<f32> {
-        let g = self.gpu;
+    pub fn logits_all(&self, g: &Gpu, tokens: &[u32], image_embeds: &[f32]) -> Vec<f32> {
         let (t, d, v) = (self.t, self.d, self.vocab);
         g.write(&self.tokens, tokens);
         let img = g.storage_init("md.img", image_embeds);
@@ -194,7 +190,7 @@ impl<'g> MoondreamDecoder<'g> {
         g.submit(&[], &steps);
         let mut cur: &DeviceBuffer = &self.res;
         for b in &self.blocks {
-            cur = b.forward(cur);
+            cur = b.forward(g, cur);
         }
         g.submit(
             &[],
@@ -212,8 +208,7 @@ impl<'g> MoondreamDecoder<'g> {
     /// reverse (each `MoondreamBlock::backward`, threading the residual-stream grad)
     /// → splice (image rows → `d_image_embeds`, zeroed in the residual grad) →
     /// embedding (text rows → `tok.weight`). Requires all blocks dense/no-tau.
-    pub fn backward(&self, targets: &[u32], gr: &MoondreamDecoderGrads) {
-        let g = self.gpu;
+    pub fn backward(&self, g: &Gpu, targets: &[u32], gr: &MoondreamDecoderGrads) {
         let (t, d, v) = (self.t, self.d, self.vocab);
         let count = targets.iter().filter(|&&x| x != IGNORE).count().max(1) as f32;
         let d_logits = g.storage((t * v) as u64);
@@ -244,7 +239,7 @@ impl<'g> MoondreamDecoder<'g> {
         for i in (0..n).rev() {
             let x_in = if i == 0 { &self.res } else { self.blocks[i - 1].output() };
             let d_in = g.storage((t * d) as u64);
-            self.blocks[i].backward(x_in, &d_cur, &gr.blocks[i], &d_in);
+            self.blocks[i].backward(g, x_in, &d_cur, &gr.blocks[i], &d_in);
             d_cur = d_in;
         }
         // d_cur is now the grad of `res`. Route image rows → d_image_embeds (and zero
@@ -305,8 +300,7 @@ const LN_EPS: f32 = 1e-5;
 /// Weight keys: `ln.weight`/`ln.bias`, `attn.qkv.weight` `[3d, d]`,
 /// `attn.proj.weight` `[d,d]`/`attn.proj.bias`, `mlp.fc1.weight` `[ff,d]`/`.bias`,
 /// `mlp.fc2.weight` `[d,ff]`/`.bias`.
-pub struct MoondreamBlock<'g> {
-    gpu: &'g Gpu,
+pub struct MoondreamBlock {
     w: HashMap<String, DeviceBuffer>,
     d: u32,
     n_heads: u32,
@@ -339,18 +333,17 @@ pub struct MoondreamBlock<'g> {
     mid: DeviceBuffer,
     out: DeviceBuffer,
     /// `Some` for the MoE layers (4..23); `None` uses the dense FFN.
-    moe: Option<MoeFfn<'g>>,
+    moe: Option<MoeFfn>,
 }
 
-impl<'g> MoondreamBlock<'g> {
+impl MoondreamBlock {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(gpu: &'g Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, n_heads: u32, head_dim: u32, ff: u32, prefix: u32, rot_dim: u32, theta: f32) -> MoondreamBlock<'g> {
+    pub fn new(gpu: &Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, n_heads: u32, head_dim: u32, ff: u32, prefix: u32, rot_dim: u32, theta: f32) -> MoondreamBlock {
         let w: HashMap<String, DeviceBuffer> = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
         let slab = (n_heads * t * t) as u64;
         let tau = w.contains_key("attn.tau.wq");
         let qkv_bias = w.contains_key("attn.qkv.bias");
         MoondreamBlock {
-            gpu,
             w,
             d,
             n_heads,
@@ -382,15 +375,14 @@ impl<'g> MoondreamBlock<'g> {
         }
     }
     /// Attach an MoE FFN (replaces the dense FFN branch) for a deep layer.
-    pub fn with_moe(mut self, moe: MoeFfn<'g>) -> Self {
+    pub fn with_moe(mut self, moe: MoeFfn) -> Self {
         self.moe = Some(moe);
         self
     }
     fn wb(&self, n: &str) -> &DeviceBuffer {
         self.w.get(n).unwrap_or_else(|| panic!("block weight missing: {n}"))
     }
-    pub fn forward(&self, x: &DeviceBuffer) -> &DeviceBuffer {
-        let g = self.gpu;
+    pub fn forward(&self, g: &Gpu, x: &DeviceBuffer) -> &DeviceBuffer {
         let (t, d, nh, hd, ff) = (self.t, self.d, self.n_heads, self.head_dim, self.ff);
         let stride3 = 3 * d;
         let mut s: Vec<Step> = Vec::new();
@@ -453,7 +445,7 @@ impl<'g> MoondreamBlock<'g> {
 
         // --- FFN branch on the SAME l_in: MoE (layers 4..23) or dense. ---
         let l_mlp: &DeviceBuffer = if let Some(moe) = &self.moe {
-            moe.forward(&self.l_in)
+            moe.forward(g, &self.l_in)
         } else {
             g.submit(
                 &[],
@@ -496,8 +488,7 @@ impl<'g> MoondreamBlock<'g> {
     /// backward reuses the ViT `_cross` kernels: the cached `probs` already carry the
     /// prefix mask (masked positions have prob≈0 → contribute 0). d_x_in = d_out
     /// (the 3-way residual's identity path) + the LayerNorm input grad.
-    pub fn backward(&self, x: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoondreamBlockGrads, d_x_in: &DeviceBuffer) {
-        let g = self.gpu;
+    pub fn backward(&self, g: &Gpu, x: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoondreamBlockGrads, d_x_in: &DeviceBuffer) {
         let (t, d, nh, hd, ff) = (self.t, self.d, self.n_heads, self.head_dim, self.ff);
         let stride3 = 3 * d;
         let half = self.rot_dim / 2;
@@ -516,7 +507,7 @@ impl<'g> MoondreamBlock<'g> {
 
         // --- FFN branch → d_ln (overwrite): dense MLP or MoE experts. ---
         if let Some(moe) = &self.moe {
-            moe.backward(&self.l_in, d_out, gr.moe.as_ref().expect("moe grads required for a MoE block"), &d_ln);
+            moe.backward(g, &self.l_in, d_out, gr.moe.as_ref().expect("moe grads required for a MoE block"), &d_ln);
         } else {
             s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("mlp.fc2.weight"), &d_h2], &[t, ff, d, 0], t * ff));
             s.push(g.step(K_MATMUL_DW, &[d_out, &self.h2, &gr.fc2_w], &[t, ff, d], d * ff));
@@ -679,8 +670,7 @@ impl MoondreamBlockGrads {
 /// parallel block owns the 3-way residual). Weight keys: `router.weight` `[e, d]`,
 /// and per expert `experts.{e}.{w_h,w_g}.weight` `[inner, d]`, `w_down.weight`
 /// `[d, inner]`.
-pub struct MoeFfn<'g> {
-    gpu: &'g Gpu,
+pub struct MoeFfn {
     w: HashMap<String, DeviceBuffer>,
     e: u32,
     top_k: u32,
@@ -697,11 +687,10 @@ pub struct MoeFfn<'g> {
     t: u32,
 }
 
-impl<'g> MoeFfn<'g> {
-    pub fn new(gpu: &'g Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, inner: u32, e: u32, top_k: u32) -> MoeFfn<'g> {
+impl MoeFfn {
+    pub fn new(gpu: &Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, inner: u32, e: u32, top_k: u32) -> MoeFfn {
         let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
         MoeFfn {
-            gpu,
             w,
             e,
             top_k,
@@ -720,24 +709,24 @@ impl<'g> MoeFfn<'g> {
     fn wb(&self, n: &str) -> &DeviceBuffer {
         self.w.get(n).unwrap_or_else(|| panic!("moe weight missing: {n}"))
     }
-    pub fn forward(&self, xn: &DeviceBuffer) -> &DeviceBuffer {
+    pub fn forward(&self, g: &Gpu, xn: &DeviceBuffer) -> &DeviceBuffer {
         let (t, d, inner, e) = (self.t, self.d, self.inner, self.e);
         let mut s: Vec<Step> = Vec::new();
         // Router: logits = xn·router.weight^T, then top-k softmax gate.
-        s.push(self.gpu.step(0, &[xn, self.wb("router.weight"), &self.logits], &[t, d, e], t * e));
+        s.push(g.step(0, &[xn, self.wb("router.weight"), &self.logits], &[t, d, e], t * e));
         // norm=1, scale=1.0: `router_gate.wgsl`'s renormalised top-k gate
         // (Moondream 3's router), spelled rather than implied.
-        s.push(self.gpu.step(1, &[&self.logits, &self.gate], &[t, e, self.top_k, 1, f(1.0)], t));
+        s.push(g.step(1, &[&self.logits, &self.gate], &[t, e, self.top_k, 1, f(1.0)], t));
         for ei in 0..e {
             let ep = |leaf: &str| self.wb(&format!("experts.{ei}.{leaf}"));
-            s.push(self.gpu.step(0, &[xn, ep("w_h.weight"), &self.h], &[t, d, inner], t * inner));
-            s.push(self.gpu.step(0, &[xn, ep("w_g.weight"), &self.g], &[t, d, inner], t * inner));
-            s.push(self.gpu.step(2, &[&self.h, &self.g, &self.act], &[t * inner], t * inner)); // gelu(h)·(g+1)
-            s.push(self.gpu.step(0, &[&self.act, ep("w_down.weight"), &self.eout], &[t, inner, d], t * d));
+            s.push(g.step(0, &[xn, ep("w_h.weight"), &self.h], &[t, d, inner], t * inner));
+            s.push(g.step(0, &[xn, ep("w_g.weight"), &self.g], &[t, d, inner], t * inner));
+            s.push(g.step(2, &[&self.h, &self.g, &self.act], &[t * inner], t * inner)); // gelu(h)·(g+1)
+            s.push(g.step(0, &[&self.act, ep("w_down.weight"), &self.eout], &[t, inner, d], t * d));
             let acc = if ei == 0 { 0u32 } else { 1u32 };
-            s.push(self.gpu.step(3, &[&self.gate, &self.eout, &self.acc], &[t, d, e, ei, acc], t * d));
+            s.push(g.step(3, &[&self.gate, &self.eout, &self.acc], &[t, d, e, ei, acc], t * d));
         }
-        self.gpu.submit(&[], &s);
+        g.submit(&[], &s);
         &self.acc
     }
     /// Number of output elements (`t·d`).
@@ -752,9 +741,8 @@ impl<'g> MoeFfn<'g> {
     /// cached per-expert), then: combine bwd (`scale_add_dexp/dgate`) → `w_down` →
     /// `geglu_shift_da/db` → `w_h`/`w_g`. Finally the router (`router_bwd`, no aux/z
     /// loss) → `router.weight`. Assumes `forward` ran (for `logits`/`gate`).
-    pub fn backward(&self, xn: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoeGrads, d_xn: &DeviceBuffer) {
+    pub fn backward(&self, g: &Gpu, xn: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoeGrads, d_xn: &DeviceBuffer) {
         let (t, d, inner, e) = (self.t, self.d, self.inner, self.e);
-        let g = self.gpu;
         let d_gate = g.storage((t * e) as u64);
         for ei in 0..e {
             let ep = |leaf: &str| self.wb(&format!("experts.{ei}.{leaf}"));
@@ -849,7 +837,7 @@ mod tests {
         w.insert("mlp.fc2.bias".into(), r(d as usize));
         let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, 1.5e6);
         let x = gpu.storage_init("x", &(0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>());
-        let out = gpu.read(blk.forward(&x), blk.numel());
+        let out = gpu.read(blk.forward(&gpu, &x), blk.numel());
         assert_eq!(out.len(), (t * d) as usize);
         assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-6));
     }
@@ -867,7 +855,7 @@ mod tests {
         let blk = MoondreamBlock::new(&gpu, &base, t, d, nh, hd, ff, prefix, rot, 1.5e6);
         let xb = gpu.storage_init("x", &x);
         assert!(!blk.tau);
-        let plain = gpu.read(blk.forward(&xb), blk.numel());
+        let plain = gpu.read(blk.forward(&gpu, &xb), blk.numel());
 
         let mut tw = base.clone();
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
@@ -877,7 +865,7 @@ mod tests {
         let tblk = MoondreamBlock::new(&gpu, &tw, t, d, nh, hd, ff, prefix, rot, 1.5e6);
         let xb2 = gpu.storage_init("x2", &x);
         assert!(tblk.tau);
-        let tau = gpu.read(tblk.forward(&xb2), tblk.numel());
+        let tau = gpu.read(tblk.forward(&gpu, &xb2), tblk.numel());
 
         assert!(tau.iter().all(|v| v.is_finite()));
         let diff: f32 = plain.iter().zip(&tau).map(|(a, b)| (a - b).abs()).sum();
@@ -899,16 +887,16 @@ mod tests {
         let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, theta);
         assert!(blk.qkv_bias);
         let xb = gpu.storage_init("x", &x_host);
-        let _ = blk.forward(&xb);
+        let _ = blk.forward(&gpu, &xb);
         let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
         let gr = MoondreamBlockGrads::new(&gpu, d, ff).with_qkv_bias(&gpu, d);
         let d_x = gpu.storage((t * d) as u64);
-        blk.backward(&xb, &d_out, &gr, &d_x);
+        blk.backward(&gpu, &xb, &d_out, &gr, &d_x);
         let g_qb = gpu.read(gr.qkv_b.as_ref().unwrap(), (3 * d) as usize);
 
         let loss = |wm: &HashMap<String, Vec<f32>>| -> f32 {
             let b = MoondreamBlock::new(&gpu, wm, t, d, nh, hd, ff, prefix, rot, theta);
-            gpu.read(b.forward(&gpu.storage_init("x", &x_host)), n).iter().sum::<f32>()
+            gpu.read(b.forward(&gpu, &gpu.storage_init("x", &x_host)), n).iter().sum::<f32>()
         };
         let eps = 1e-3f32;
         for &j in &[0usize, 17, 40] {
@@ -935,11 +923,11 @@ mod tests {
         // Analytic grads (forward populates the SSA cache, then backward).
         let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, theta);
         let xb = gpu.storage_init("x", &x_host);
-        let _ = blk.forward(&xb);
+        let _ = blk.forward(&gpu, &xb);
         let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
         let gr = MoondreamBlockGrads::new(&gpu, d, ff);
         let d_x = gpu.storage((t * d) as u64);
-        blk.backward(&xb, &d_out, &gr, &d_x);
+        blk.backward(&gpu, &xb, &d_out, &gr, &d_x);
         let dx = gpu.read(&d_x, n);
         let g_ln_w = gpu.read(&gr.ln_w, d as usize);
 
@@ -947,7 +935,7 @@ mod tests {
         let loss = |wm: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
             let b = MoondreamBlock::new(&gpu, wm, t, d, nh, hd, ff, prefix, rot, theta);
             let xbb = gpu.storage_init("x", xh);
-            gpu.read(b.forward(&xbb), n).iter().sum::<f32>()
+            gpu.read(b.forward(&gpu, &xbb), n).iter().sum::<f32>()
         };
         let eps = 1e-3f32;
         let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
@@ -990,11 +978,11 @@ mod tests {
         let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, theta);
         assert!(blk.tau);
         let xb = gpu.storage_init("x", &x_host);
-        let _ = blk.forward(&xb);
+        let _ = blk.forward(&gpu, &xb);
         let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
         let gr = MoondreamBlockGrads::new(&gpu, d, ff).with_tau(&gpu, nh, d);
         let d_x = gpu.storage((t * d) as u64);
-        blk.backward(&xb, &d_out, &gr, &d_x);
+        blk.backward(&gpu, &xb, &d_out, &gr, &d_x);
         let dx = gpu.read(&d_x, n);
         let tg = gr.tau.as_ref().unwrap();
         let g_alpha = gpu.read(&tg.alpha, nh as usize);
@@ -1003,7 +991,7 @@ mod tests {
         let loss = |wm: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
             let b = MoondreamBlock::new(&gpu, wm, t, d, nh, hd, ff, prefix, rot, theta);
             let xbb = gpu.storage_init("x", xh);
-            gpu.read(b.forward(&xbb), n).iter().sum::<f32>()
+            gpu.read(b.forward(&gpu, &xbb), n).iter().sum::<f32>()
         };
         let eps = 1e-3f32;
         let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
@@ -1060,11 +1048,11 @@ mod tests {
         };
         let blk = build(&bw, &mw);
         let xb = gpu.storage_init("x", &x_host);
-        let _ = blk.forward(&xb);
+        let _ = blk.forward(&gpu, &xb);
         let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
         let gr = MoondreamBlockGrads::new(&gpu, d, ff).with_moe(&gpu, d, inner, e);
         let d_x = gpu.storage((t * d) as u64);
-        blk.backward(&xb, &d_out, &gr, &d_x);
+        blk.backward(&gpu, &xb, &d_out, &gr, &d_x);
         let dx = gpu.read(&d_x, n);
         let mg = gr.moe.as_ref().unwrap();
         let g_wh0 = gpu.read(&mg.experts[0].w_h, (inner * d) as usize);
@@ -1073,7 +1061,7 @@ mod tests {
         let loss = |mwm: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
             let b = build(&bw, mwm);
             let xbb = gpu.storage_init("x", xh);
-            gpu.read(b.forward(&xbb), n).iter().sum::<f32>()
+            gpu.read(b.forward(&gpu, &xbb), n).iter().sum::<f32>()
         };
         let eps = 1e-3f32;
         let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
@@ -1140,14 +1128,14 @@ mod tests {
 
         // Analytic grads.
         let dec = build(&w);
-        let _ = dec.forward(&tokens, &targets, &img);
+        let _ = dec.forward(&gpu, &tokens, &targets, &img);
         let gr = MoondreamDecoderGrads::new(&gpu, nl, d, ff, vocab, n_img);
-        dec.backward(&targets, &gr);
+        dec.backward(&gpu, &targets, &gr);
         let d_img = gpu.read(&gr.d_image_embeds, (n_img * d) as usize);
         let g_lmb = gpu.read(&gr.lm_head_b, vocab as usize);
         let g_tok = gpu.read(&gr.tok_w, (vocab * d) as usize);
 
-        let loss = |wm: &HashMap<String, Vec<f32>>, im: &[f32]| -> f32 { build(wm).forward(&tokens, &targets, im) };
+        let loss = |wm: &HashMap<String, Vec<f32>>, im: &[f32]| -> f32 { build(wm).forward(&gpu, &tokens, &targets, im) };
         let eps = 1e-3f32;
         let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
 
@@ -1235,7 +1223,7 @@ mod tests {
         };
 
         let dec = build(&w);
-        let _ = dec.forward(&tokens, &targets, &img);
+        let _ = dec.forward(&gpu, &tokens, &targets, &img);
         let grads = MoondreamDecoderGrads::from_blocks(
             &gpu,
             vec![
@@ -1246,12 +1234,12 @@ mod tests {
             vocab,
             n_img,
         );
-        dec.backward(&targets, &grads);
+        dec.backward(&gpu, &targets, &grads);
         let d_img = gpu.read(&grads.d_image_embeds, (n_img * d) as usize);
         let g_alpha0 = gpu.read(&grads.blocks[0].tau.as_ref().unwrap().alpha, nh as usize);
         let g_wh1 = gpu.read(&grads.blocks[1].moe.as_ref().unwrap().experts[0].w_h, (inner * d) as usize);
 
-        let loss = |wm: &HashMap<String, Vec<f32>>, im: &[f32]| -> f32 { build(wm).forward(&tokens, &targets, im) };
+        let loss = |wm: &HashMap<String, Vec<f32>>, im: &[f32]| -> f32 { build(wm).forward(&gpu, &tokens, &targets, im) };
         let eps = 1e-3f32;
         let ok = |a: f32, num: f32| (a - num).abs() <= 5e-3 + 8e-2 * num.abs();
 
@@ -1320,7 +1308,7 @@ mod tests {
             *tg = IGNORE;
         }
         let img: Vec<f32> = r((n_img * d) as usize);
-        let loss = dec.forward(&tokens, &targets, &img);
+        let loss = dec.forward(&gpu, &tokens, &targets, &img);
         assert!(loss.is_finite() && loss > 0.0, "moondream decoder loss must be finite+positive, got {loss}");
     }
 
@@ -1352,7 +1340,7 @@ mod tests {
         let moe = MoeFfn::new(&gpu, &mw, t, d, inner, e, top_k);
         let blk = MoondreamBlock::new(&gpu, &bw, t, d, nh, hd, ff, prefix, rot, 1.5e6).with_moe(moe);
         let x = gpu.storage_init("x", &(0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>());
-        let out = gpu.read(blk.forward(&x), blk.numel());
+        let out = gpu.read(blk.forward(&gpu, &x), blk.numel());
         assert_eq!(out.len(), (t * d) as usize);
         assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-6));
     }
@@ -1372,7 +1360,7 @@ mod tests {
         }
         let ffn = MoeFfn::new(&gpu, &w, t, d, inner, e, top_k);
         let xn = gpu.storage_init("xn", &(0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>());
-        let out = gpu.read(ffn.forward(&xn), ffn.numel());
+        let out = gpu.read(ffn.forward(&gpu, &xn), ffn.numel());
         assert_eq!(out.len(), (t * d) as usize);
         assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-9));
     }

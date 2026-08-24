@@ -104,19 +104,18 @@ fn vit_ids() -> VitKernelIds {
 }
 
 /// Moondream SigLIP ViT encoder over a `Gpu` preloaded with [`vision_pipelines`].
-pub struct SiglipEncoder<'g> {
-    gpu: &'g Gpu,
+pub struct SiglipEncoder {
     cfg: VisionConfig,
     w: HashMap<String, DeviceBuffer>,
 }
 
-impl<'g> SiglipEncoder<'g> {
+impl SiglipEncoder {
     /// Required keys: `patch_emb.weight` `[dim, patch_vec]`, `patch_emb.bias`
     /// `[dim]`, `pos_emb` `[patches, dim]`, `post_ln.weight`/`post_ln.bias`
     /// `[dim]`, and per block `blocks.{b}.<leaf>`.
-    pub fn new(gpu: &'g Gpu, cfg: VisionConfig, weights: &HashMap<String, Vec<f32>>) -> SiglipEncoder<'g> {
+    pub fn new(gpu: &Gpu, cfg: VisionConfig, weights: &HashMap<String, Vec<f32>>) -> SiglipEncoder {
         let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
-        SiglipEncoder { gpu, cfg, w }
+        SiglipEncoder { cfg, w }
     }
 
     fn wb(&self, name: &str) -> &DeviceBuffer {
@@ -126,8 +125,7 @@ impl<'g> SiglipEncoder<'g> {
     /// Encode `n_crops` crops of host-packed patches `[n_crops·patches, patch_vec]`
     /// (patch-major), returning `[n_crops·patches, dim]` post-LN features. Each
     /// crop attends within itself (a span).
-    pub fn encode(&self, n_crops: u32, packed: &[f32]) -> Vec<f32> {
-        let g = self.gpu;
+    pub fn encode(&self, g: &Gpu, n_crops: u32, packed: &[f32]) -> Vec<f32> {
         let ids = vit_ids();
         let c = self.cfg.dim;
         let ppc = self.cfg.patches_per_crop();
@@ -141,7 +139,7 @@ impl<'g> SiglipEncoder<'g> {
         let x = g.storage((rows * c) as u64);
         // Per-crop learned pos-embed, tiled over crops.
         let pos_tiled: Vec<f32> = {
-            let base = &self.wb_host();
+            let base = &self.wb_host(g);
             (0..n_crops).flat_map(|_| base.iter().copied()).collect()
         };
         let pos = g.storage_init("md.pos", &pos_tiled);
@@ -184,8 +182,8 @@ impl<'g> SiglipEncoder<'g> {
     }
 
     // The learned pos-embed host copy (one crop's worth) for tiling.
-    fn wb_host(&self) -> Vec<f32> {
-        self.gpu.read(self.wb("pos_emb"), (self.cfg.patches_per_crop() * self.cfg.dim) as usize)
+    fn wb_host(&self, g: &Gpu) -> Vec<f32> {
+        g.read(self.wb("pos_emb"), (self.cfg.patches_per_crop() * self.cfg.dim) as usize)
     }
 
     fn shape(&self) -> VitShape {
@@ -218,8 +216,7 @@ impl<'g> SiglipEncoder<'g> {
     /// `vit_block_fwd_cached` into its own [`VitBlockCache`] so the backward has the
     /// SSA activations. Returns the caches + the pre-post-LN output + the post-LN
     /// output. `n_crops` spans (each attends within itself).
-    pub fn forward_train(&self, n_crops: u32, packed: &[f32]) -> SiglipTrain {
-        let g = self.gpu;
+    pub fn forward_train(&self, g: &Gpu, n_crops: u32, packed: &[f32]) -> SiglipTrain {
         let ids = vit_ids();
         let kb = vit_bwd_ids();
         let (c, ppc, pv) = (self.cfg.dim, self.cfg.patches_per_crop(), self.cfg.patch_vec());
@@ -229,7 +226,7 @@ impl<'g> SiglipEncoder<'g> {
 
         let pix = g.storage_init("md.pix", packed);
         let pe = g.storage((rows * c) as u64);
-        let pos_tiled: Vec<f32> = { let base = self.wb_host(); (0..n_crops).flat_map(|_| base.iter().copied()).collect() };
+        let pos_tiled: Vec<f32> = { let base = self.wb_host(g); (0..n_crops).flat_map(|_| base.iter().copied()).collect() };
         let pos = g.storage_init("md.pos", &pos_tiled);
         let caches: Vec<VitBlockCache> = (0..self.cfg.n_layers).map(|_| VitBlockCache::new(g, &sh, rows, ppc)).collect();
         let x_last = g.storage((rows * c) as u64);
@@ -255,8 +252,7 @@ impl<'g> SiglipEncoder<'g> {
     /// ViT backward from the post-LN output grad `d_out` (`[rows, dim]`): fill `gr`
     /// and return the input-patch grad `[rows, patch_vec]`. Chain: post-LN → blocks
     /// in reverse (`vit_block_bwd`) → patch-embed (matmul/bias) + pos-embed scatter.
-    pub fn backward(&self, tr: &SiglipTrain, d_out: &DeviceBuffer, gr: &SiglipGrads) -> Vec<f32> {
-        let g = self.gpu;
+    pub fn backward(&self, g: &Gpu, tr: &SiglipTrain, d_out: &DeviceBuffer, gr: &SiglipGrads) -> Vec<f32> {
         let ids = vit_ids();
         let kb = vit_bwd_ids();
         let (c, ppc, pv) = (self.cfg.dim, self.cfg.patches_per_crop(), self.cfg.patch_vec());
@@ -402,25 +398,23 @@ impl SiglipGrads {
 /// `Linear(inner→out)` mapping the `[729, 2·dim]` global‖local concat to `[729,
 /// dim_text]` image tokens. Reuses matmul/bias/gelu (no new kernels). Weight keys:
 /// `fc1.weight` `[inner,in]`/`fc1.bias`, `fc2.weight` `[out,inner]`/`fc2.bias`.
-pub struct Connector<'g> {
-    gpu: &'g Gpu,
+pub struct Connector {
     w: HashMap<String, DeviceBuffer>,
     in_dim: u32,
     inner: u32,
     out_dim: u32,
 }
 
-impl<'g> Connector<'g> {
-    pub fn new(gpu: &'g Gpu, weights: &HashMap<String, Vec<f32>>, in_dim: u32, inner: u32, out_dim: u32) -> Connector<'g> {
+impl Connector {
+    pub fn new(gpu: &Gpu, weights: &HashMap<String, Vec<f32>>, in_dim: u32, inner: u32, out_dim: u32) -> Connector {
         let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
-        Connector { gpu, w, in_dim, inner, out_dim }
+        Connector { w, in_dim, inner, out_dim }
     }
     fn wb(&self, n: &str) -> &DeviceBuffer {
         self.w.get(n).unwrap_or_else(|| panic!("connector weight missing: {n}"))
     }
     /// Project `rows × in_dim` → `rows × out_dim`.
-    pub fn forward(&self, rows: u32, x: &[f32]) -> Vec<f32> {
-        let g = self.gpu;
+    pub fn forward(&self, g: &Gpu, rows: u32, x: &[f32]) -> Vec<f32> {
         assert_eq!(x.len(), (rows * self.in_dim) as usize);
         let xb = g.storage_init("cin", x);
         let h = g.storage((rows * self.inner) as u64);
@@ -492,17 +486,17 @@ mod tests {
         let n = rows * c;
 
         let enc = SiglipEncoder::new(&gpu, cfg.clone(), &w);
-        let tr = enc.forward_train(n_crops, &packed);
+        let tr = enc.forward_train(&gpu, n_crops, &packed);
         let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
         let gr = SiglipGrads::new(&gpu, &cfg);
-        let d_pix = enc.backward(&tr, &d_out, &gr);
+        let d_pix = enc.backward(&gpu, &tr, &d_out, &gr);
         let g_pe = gpu.read(&gr.patch_emb_w, c * pv);
         let g_fc1 = gpu.read(&gr.blocks[0].fc1_w, (cfg.ff_dim * cfg.dim) as usize);
         let g_pos = gpu.read(&gr.pos_emb, ppc * c);
 
         let loss = |wm: &HashMap<String, Vec<f32>>, pk: &[f32]| -> f32 {
             let e = SiglipEncoder::new(&gpu, cfg.clone(), wm);
-            gpu.read(&e.forward_train(n_crops, pk).out, n).iter().sum::<f32>()
+            gpu.read(&e.forward_train(&gpu, n_crops, pk).out, n).iter().sum::<f32>()
         };
         let eps = 1e-3f32;
         let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
@@ -561,7 +555,7 @@ mod tests {
         let enc = SiglipEncoder::new(&gpu, cfg.clone(), &w);
         let n_crops = 2u32;
         let packed: Vec<f32> = (0..(n_crops as usize * ppc * pv)).map(|_| rng.next_f32() - 0.5).collect();
-        let out = enc.encode(n_crops, &packed);
+        let out = enc.encode(&gpu, n_crops, &packed);
         assert_eq!(out.len(), n_crops as usize * ppc * c);
         assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-6));
     }
@@ -579,7 +573,7 @@ mod tests {
         w.insert("fc2.bias".into(), r(out_dim as usize));
         let conn = Connector::new(&gpu, &w, in_dim, inner, out_dim);
         let x: Vec<f32> = (0..(rows * in_dim) as usize).map(|_| rng.next_f32() - 0.5).collect();
-        let out = conn.forward(rows, &x);
+        let out = conn.forward(&gpu, rows, &x);
         assert_eq!(out.len(), (rows * out_dim) as usize);
         assert!(out.iter().all(|v| v.is_finite()));
     }
