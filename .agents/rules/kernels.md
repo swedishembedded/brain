@@ -48,7 +48,15 @@ Before adding a kernel:
    in the explicit seams, where a trajectory gate is visible at the call site.
    **Keep the recorded `StepMeta` in the caller's index space**: profilers map
    `meta.kernel` through their own kernel list, and an early version of this
-   seam crashed a bench tool by handing it an appended slot.
+   seam crashed a bench tool by handing it an appended slot. A row may also be
+   **shape-specialised** - a `kernels::template` knob plus a bucket ladder, one
+   appended pipeline per bucket, the dispatch picking from the caller's own
+   uniform params - which is how a variant needing a compile-time constant
+   (register accumulators) still reaches every model with zero edits. The four
+   bars are unchanged, and "wins at every shape" is precisely what forces a
+   ladder instead of one worst-case build (§C6). Six extra pipeline compiles
+   measured as noise against device init, so the cost is not a reason to skimp
+   on buckets.
 
 ## B. Before you DISPATCH an existing kernel: read its contract
 
@@ -114,10 +122,63 @@ existing caller. Assume nothing about units.
    tile on a kernel with much higher amplification gave a solid win.
    *Estimate the amplification before reaching for shared memory.*
 
+5. **A `var<workgroup>` array sized for the WORST case is an occupancy bug at
+   every other case.** Workgroup memory is allocated statically per workgroup,
+   so an accumulator array sized for the largest supported parameter costs that
+   much whatever the caller actually asked for. A decode GEMV declaring
+   `array<f32, 2048>` (its `m <= 32` worst case) reserved **8 KB per workgroup
+   at every `m`**, capping residency at 12 of a possible 32 workgroups per SM -
+   ~37.5% occupancy - and running at **36% of the card's measured memory roof**
+   while it did. *Size a workgroup array by a `kernels::template` constant the
+   selector sets from the shape, not by the contract's upper bound.*
+
+   **Diagnostic, and it does not require trusting anyone's arithmetic about the
+   hardware:** sweep the declared array size (halving) and time it. If shared
+   memory is the limiter the curve *rises* at each halving and then goes
+   **flat** - flat exactly where the per-SM block cap starts binding instead.
+   Measured on a GP102: 8 KB → 4 KB → 2 KB rose (79.5 → 141.5 → 166.8 GB/s),
+   then 1 KB and 512 B were unchanged. That shape is what proves the 96 KB/SM
+   and 32-blocks/SM numbers on the actual device.
+
+6. **A shared-memory read-modify-write in an inner loop is a dependency chain,
+   not just extra stores.** `partial[i] = partial[i] + a*b` per `(k, m)` makes
+   every accumulator wait a shared-memory round trip per k-step. Moving the same
+   accumulators into registers on the same kernel was worth **2.7x** where
+   shrinking the array alone was worth 2.1x - and the register version at
+   *37.5%* occupancy beat the shrunk shared version at *100%*, i.e. the
+   occupancy fix mattered mainly because it bought latency-hiding for a chain
+   that should not have existed. *If a kernel accumulates into workgroup memory
+   inside its hot loop, the array should hold only what must cross threads (the
+   final fold), never the running sums.*
+
+   **Registers need a COMPILE-TIME trip count, and the runtime-parameter dodge
+   is measurably worse.** Named scalar accumulators guarded by uniform
+   `if (p.m > 1u)` branches - runtime `m`, no array, no template - measured
+   *slower than the plain shrink*, at every shape tried. Uniform,
+   perfectly-predicted branches in the innermost loop still cost more than they
+   save. So the register form is a `kernels::template` knob plus a **bucket
+   ladder**, and the ladder is a measurement (§F.6): a single worst-case
+   specialisation is a REGRESSION at small parameters - one compiled for 32 rows
+   ran **0.44x** (2.3x slower) than the kernel it replaced at 1 row, because its
+   cost tracks the compile-time bound and not the caller's actual shape.
+   A power-of-two ladder won by ≥1.7x at every row count instead.
+
 ## D. Constraints that will bite you
 
 - **No atomics, no subgroups, no f16** — a tree reduction is
   shared-memory + a second pass, never an atomic accumulate.
+- **The CPU JIT rejects a FUNCTION-scope array inside a work-group kernel**
+  (`array local in a work-group kernel is unsupported` - its per-invocation
+  locals are SSA scalars). This is the *second* structural reason a kernel
+  cannot be `@cpu yes`, alongside the barrier count below, and it is what makes
+  a register-accumulator kernel a GPU-only SIBLING rather than a template
+  variant of a portable one (`matmul_gemv` / `matmul_gemv_reg`). Both reasons
+  are derived from the code by `scripts/build/kernelmeta.py::cpu`, so the
+  declared `@cpu` cell cannot drift from what the JIT will actually do - and
+  `wgsl_cpu::Jit` *skips* only these two, failing hard on anything else, so a
+  real port bug can never hide as a skipped kernel. Re-verify such a claim
+  before building on it; this one was still true, but the header asserting it
+  had never been rechecked.
 - **The CPU backend's Cranelift JIT supports ONE top-level barrier per kernel.**
   A textbook two-pass mean/variance will not JIT. The LayerNorm kernels use the
   *shifted* one-pass form (`K = x[row,0]`; `mean = K + S1/d`,

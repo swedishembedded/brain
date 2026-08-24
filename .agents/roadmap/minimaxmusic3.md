@@ -1401,6 +1401,222 @@ without erroring. (3) `global_llm::import` asserts `b == 1` because
 `qwen3`'s KV decode path sizes `kcache`/`vcache` as `t * kv_dim` with no
 batch axis. What a batch does get is one instance against a warm cache.
 
+## Phase 18: `matmul_gemv` was 97% of a depth-decoder step at 36% of the memory roof
+
+Phase 17's table ended with one row and one sentence: *"the one row that matters
+is `matmul_gemv` at 36.5% of this card's measured memory roof, holding 97.2% of
+the step... a fix there lands in the shared decode-regime GEMM every model in
+this workspace dispatches at small `m`."* This is that fix.
+
+Hardware: one idle Tesla P40 (GP102, cc 6.1), `gpu_core::roof` measured
+**10517 GFLOP/s / 287.5 GB/s**. Harness: `mm3_bench depth 8 3`, real
+`DepthDecoderConfig::real()` dims (`hidden 4096`, `inter 6144`, 4 layers →
+7 GEMVs/layer × 4 = the 28 calls), `b = 2` (the two CFG branches), device
+timestamps inside the production pass.
+
+### The two limiters, each measured, not argued
+
+`matmul_gemv` accumulates in `var<workgroup> partial: array<f32, 2048>` and
+does a read-modify-**write** into it per `(k, m)`.
+
+**1. The array is sized for the worst case (`m = 32`) - 8 KB per workgroup at
+every `m`.** Sweeping ONLY that literal (`partial` resized, body untouched,
+bit-identical) at the depth decoder's own shapes, `m = 2`, `k = n = 4096`:
+
+```
+partial     bytes/wg    ms      GB/s    predicted resident wgs/SM
+2048 f32      8192    0.844      79.5    12  (96 KB / 8 KB)     -> 768/2048 thr, 37.5%
+1024 f32      4096    0.474     141.5    24                     -> 1536/2048 thr, 75%
+ 512 f32      2048    0.402     166.8    32 (block cap binds)   -> 2048/2048 thr, 100%
+ 256 f32      1024    0.406     165.4    32 (capped)            -> 100%
+ 128 f32       512    0.410     163.8    32 (capped)            -> 100%
+```
+
+The measurement **confirms the GP102 numbers rather than assuming them**: the
+curve rises at 8 KB→4 KB, rises again at 4 KB→2 KB, and then goes *flat* - which
+is only explicable if 96 KB of shared memory per SM and a 32-block-per-SM cap
+are both real, since below 2 KB/block the block cap binds and further shrinking
+buys nothing. 2.10x from one literal.
+
+**2. `partial[i] = partial[i] + x*wv` is a serial dependency chain through
+shared-memory latency**, one link per k-step per row. Register accumulators
+remove it - and, at `m = 2`, they matter MORE than the occupancy:
+
+```
+m = 2, k = n = 4096       ms      GB/s   %roof
+matmul_gemv (8 KB)      0.844      79.5   27.6%
+  partial shrunk to m*64 only
+                        0.410     163.8   57.0%
+register acc, 8 KB partial (37.5% occupancy!)
+                        0.318     210.7   73.3%
+register acc + m*64 partial
+                        0.314     213.9   74.4%
+```
+
+Registers at **37.5% occupancy beat shared-memory accumulators at 100%**. So
+limiter 1 is real but SUBORDINATE: shrinking the array only helps because it
+buys enough occupancy to hide the chain; removing the chain makes occupancy
+nearly irrelevant. Both fixes fall out of one constant anyway (see below), so
+this is a finding about the mechanism, not a choice that had to be made.
+
+(`%roof` in these micro-A/B tables counts weight bytes only, `4*n*k`; the
+`mm3_bench` table counts `x` and `out` too, so its baseline reads 35.9%, not
+27.6%. Same kernel, two byte conventions - compare within a table.)
+
+### Killed: a runtime-`m` register kernel
+
+The obvious way to avoid per-`m` specialisation is named scalar accumulators
+with uniform `if (p.m > 1u) { ... }` guards inside the k-loop - runtime `m`, no
+array, no template. **Measured, and it is worse than doing nothing structural:**
+
+```
+m = 2, k = n = 4096                            ms      GB/s
+matmul_gemv, 8 KB partial                    0.844      79.5
+4 named scalars + uniform guards, 8 KB       0.774      86.7
+4 named scalars + uniform guards, 1 KB       0.460     145.8
+partial shrunk to m*64, NO register change   0.410     163.8   <- plain shrink beats it
+```
+
+Uniform, perfectly-predicted branches in the innermost loop still cost more than
+they save. That is why the register variant needs a **compile-time** row count,
+and therefore a `kernels::template` knob and a bucket ladder.
+
+### What shipped
+
+**ONE new kernel file**, `crates/kernels/wgsl/matmul_gemv_reg.wgsl`, plus one
+row in `gpu_core::upgrade`. No model crate changed at all.
+
+* The body is `matmul_gemv`'s with the accumulators moved to a function-local
+  `array<f32, MREG>` whose every index is a compile-time-bounded loop
+  (checklist §C1), and `partial` sized `MREG * 64` - **both limiters from the
+  one `MREG` constant**, which is exactly the `kernels::template` shape
+  (`interned(stem, src, &[("MREG", b)])`), so there is no hand-written per-`m`
+  file.
+* It is a genuine second FILE, not a template variant of `matmul_gemv`, because
+  a function-local accumulator array is a different body - and because the CPU
+  JIT rejects one outright. That claim was **re-verified, not inherited**:
+  `wgsl_cpu::Jit::new` returns `array local in a work-group kernel is
+  unsupported`. So `matmul_gemv` keeps its workgroup accumulators and stays
+  `@cpu yes`; `matmul_gemv_reg` is `@cpu no`. Each header points at the other
+  and says "edit the two together".
+* Selection is `gpu_core::upgrade` - the seam `.agents/rules/kernels.md` §A.4
+  prescribes for a *drop-in*: same `Params{m,k,n}`, same bindings, same
+  `n * 64` thread count, bit-identical results. It meets all four bars, so
+  every crate that registers `matmul_gemv` (qwen3 incl. `serve` and the
+  `decode_logits` head, qwen35, qwen35moe, flux1, wan, ltxv, pulid, instantid,
+  minimaxmusic3's DiT **and** depth decoder, and anything routed through
+  `model::rowemit`/`model::dispatch`) inherits it with **zero** edits. The
+  capability gate is still `backend_api::select`: the row activates only where
+  `select::candidates(MatMul, m = 1, ...)` heads with `WorkgroupPerOutput`.
+
+**New in `upgrade`: a shape-specialised row.** The register kernel needs `m` at
+compile time, so the row carries a knob + a bucket ladder and `apply` picks the
+smallest bucket covering the caller's own `params[0]`. Six pipelines are
+appended (`MREG ∈ {1,2,4,8,16,32}`); their compile cost is **unmeasurable**
+against device init (301 ms vs 308 ms with the table disabled, 5 runs each).
+
+**The ladder is a measurement (§F.6), not a guess.** A single worst-case
+`MREG = 32` specialisation would have been a REGRESSION at the most common
+shape of all - `m = 1`, plain single-sequence decode:
+
+```
+actual m -> variant       1      2      3      5      9     13     17     25
+matmul_gemv (ms)       0.580  0.741  0.952  1.005  1.556  2.022  2.504  3.580
+MREG=32 for everything 1.322  1.405  1.439  1.428  1.399  1.443  1.456  1.551
+  -> 0.44x   0.53x  0.66x  0.70x  1.11x  1.40x  1.72x  2.31x
+power-of-two bucket    0.311  0.316  0.408  0.535  0.890  1.046  1.456  1.551
+  -> 1.87x   2.34x  2.33x  1.88x  1.75x  1.93x  1.72x  2.31x
+```
+
+Cost is a function of `MREG`, essentially not of `m`, so "wins at every shape"
+(bar 3) forces the ladder. Every `m` in 1..=32 wins by >= 1.7x.
+
+### Bit-identity: claimed, and gated on the BITS
+
+Same k-stride (`k = t; k += 64`), one accumulator per output, the same 64
+partials folded in the same ascending order. Nothing reassociates, so
+`crates/gpu-core/tests/gemv_reg_upgrade.rs` asserts `to_bits()` equality - not
+cosine, not rel_l2 - for **every `m` in 1..=32 across four shapes**
+(`k,n` = 512,384 / 384,512 / 517,129 (ragged `k`) / 64,71), against
+`kernels::MATMUL_GEMV` registered under a second name so one handle runs both
+forms in one submit. Both are also checked against an independent f64 host
+oracle, because a bit-identical pair can still be identically wrong (§F.5).
+
+Mutation-verified - four mutations, each caught by the right assertion:
+
+| mutation | bit-identity | f64 oracle | ladder |
+|---|---|---|---|
+| fold order reversed (pure reassociation, same maths) | **FAIL** | pass | pass |
+| `xoff` clamp broken (every row reads row 0) | **FAIL** | **FAIL** | pass |
+| off-by-one on the k axis | **FAIL** | **FAIL** | pass |
+| `MREG=1` removed from the ladder (a SELECTION bug) | pass | pass | **FAIL** |
+
+The first row is the point: a reassociated reduction is invisible to the oracle
+and to any tolerance-based comparison, and is exactly the change these two
+kernels must never make independently.
+
+### Measured, before and after (`mm3_bench depth 8 3`, same binary, one idle P40)
+
+The A/B is `BRAIN_NO_KERNEL_UPGRADE=1` versus not, so it is the same build.
+
+```
+ONE `Resident::step` (b = 2, position 0), 69 dispatches
+
+                          before                        after
+kernel                 ms    n   ms/call  GB/s %roof |    ms  ms/call  GB/s %roof
+matmul_gemv         22.06   28    0.788  103.5 36.0% |  8.23   0.294  277.6 96.6%
+rmsnorm_rows         0.31    9    0.034    2.4  0.8% |  0.31   0.034    2.4  0.8%
+paged_decode_scores  0.11    4    0.027   20.6  7.2% |  0.11   0.027   20.6  7.2%
+paged_kv_append      0.06    8    0.007    9.3  3.2% |  0.06   0.007    9.3  3.2%
+add2                 0.06    8    0.007   14.2  4.9% |  0.06   0.007   14.0  4.9%
+paged_decode_apply   0.04    4    0.009   62.4 21.7% |  0.04   0.009   62.4 21.7%
+decode_softmax       0.03    4    0.008    0.5  0.2% |  0.03   0.009    0.5  0.2%
+silu_mul             0.03    4    0.007   22.2  7.7% |  0.03   0.007   21.3  7.4%
+WHOLE PASS          24.29   69                       | 11.03
+sum of kernel time  22.75                            |  8.86
+```
+
+Run-to-run spread over repeated `best-of-3` runs on the idle card:
+`matmul_gemv` 8.2-8.4 ms, whole pass 10.6-11.0 ms, whole frame 106.1-106.5 ms.
+The numbers above are one such run, not a best pick across them.
+
+* **`matmul_gemv`: 22.06 -> 8.23 ms, 2.68x. 0.788 -> 0.294 ms/call. 103.5 ->
+  277.6 GB/s. 36.0% -> 96.6% of this card's measured memory roof.**
+* One `Resident::step`: 24.29 -> 11.03 ms (2.20x).
+* Block stack (8 steps): 195.4 -> 85.8 ms/frame.
+* **Whole frame: 216.96 -> 106.07 ms, 2.05x** (against a predicted 1.67x).
+* Device vs the host b=2 path: 2.14x -> 4.09x (8.94x vs the b=1 host baseline).
+* Extrapolated: a 200-frame denoise chunk's depth decoding 43.1 s -> 21.3 s; a
+  4-minute track 0.36 h -> 0.18 h.
+* `BRAIN_PROFILE`'s physical-pipeline line names `matmul_gemv_reg#MREG=2`, so
+  the right bucket is visible in a profile, not inferred.
+
+**The top row is now at 96.6% of the memory roof, so §F.2 says stop**: no
+further kernel change can help this shape. The only lever left is moving fewer
+bytes - the weights are the traffic (2.28 GB per frame at fp32), so the next
+real step for this component is a narrower weight tier (bf16/int8), not a
+kernel.
+
+### What this did NOT cover
+
+* **The `#w=bf16` / `#w=f16` storage tiers of `matmul_gemv`**
+  (`kernels::template::dtype_variant`) register under their own names, so the
+  upgrade table does not reach them and they still carry the 8 KB `partial` and
+  the shared-memory chain. `qwen3` registers both. Adding their register
+  siblings is additive - a second knob on the same file - and is the obvious
+  follow-up.
+* **`Gpu::step_buf`** cannot be upgraded by a shape-specialised row at all: its
+  shape lives in a caller-owned uniform buffer the seam cannot read, so such a
+  call keeps the registered kernel. No fp32 GEMV site in this tree uses it
+  today (every one passes `&[m, k, n]` to `step`/`step_sliced`), but a future
+  one would silently stay on the slow path.
+* **`matmul_gemv` itself was left at `array<f32, 2048>` on purpose.** Shrinking
+  it via a template knob was measured (2.10x, table above) and deliberately not
+  shipped: after this change that kernel only runs on the CPU JIT, on the
+  `@npu` path, and under `BRAIN_NO_KERNEL_UPGRADE=1` - none of which pays a
+  shared-memory occupancy cost - so the knob would have been machinery with no
+  live caller.
+
 ## Not yet done
 
 - [ ] Charge the SECOND card. Needs `residency::multi` to grow a
