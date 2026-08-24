@@ -609,6 +609,111 @@ the new entries in place (`catalog_ids_are_unique`,
 `clippy-gate.sh`, `check-arch-names.sh`, and `check-linear-history.sh`
 gates are all green with this milestone's changes in place.
 
+## Phase 12: validation on real hardware - what Phases 10/11 could not reach
+
+Every blocker Phases 10 and 11 record belongs to the machine this port was
+BUILT on, not to this port. The validation machine is a different box: **two
+Tesla P40s** (GP102, 24 GB each, native DP4A), a 48-thread dual E5-2690 v3,
+and **184 GB RAM**. Read every "on this machine" claim above as historical.
+
+Corrections, each measured or read from source rather than assumed:
+
+1. **"No backend in this workspace executes real int8 compute yet"
+   (Phase 10, and copied into `global_llm::import`'s own doc) is FALSE, and
+   was false when written.** It holds only for `backend-cpu`.
+   `backend-wgpu` reports `int8_dot: true` unconditionally
+   (`crates/backend-wgpu/src/lib.rs`), and `backend-vulkan` queries the real
+   `VK_KHR_shader_integer_dot_product`
+   `4x8BitPackedSignedAccelerated` property, which GP102 reports as
+   accelerated. `backend-api`'s own test asserts
+   `DType::I8.promote(&wgpu_like) == DType::I8`. So `Qwen::new_shard_i8`
+   genuinely runs int8 on a P40, and the 8B LM is ~9 GB there, not 32 GB.
+   The same false claim also sits in `backend-api`'s `promote` doc comment
+   and in `ltxv::int8`'s module doc - all three want retiring together.
+2. **The 2047 MiB single-buffer limit is REAL and survives the hardware
+   change.** It is not an Intel-iGPU quirk: wgpu clamps
+   `max_storage_buffer_binding_size` to `i32::MAX` on every card, so the
+   `[200000, 4096]` fp32 `tok.weight`/`lm_head.weight` (3.28 GB) still
+   cannot be bound as one buffer on a P40. `model::block::vocab_tiles_on` +
+   `Gpu::step_sliced` is the existing answer and `qwen3`'s own embed path
+   already uses it; the gap is a decode-path head that does.
+3. **There IS now an official upstream implementation**, contradicting this
+   ledger's own opening paragraph and `requirements.txt`'s "NOT
+   pip-installable" block. MiniMax-Music3 shipped in **released diffusers
+   0.40.0** - the four `MiniMaxMusic3*` model classes AND a
+   `diffusers.modular_pipelines.minimax_music3` modular pipeline - so the
+   reference is a stable pip install, not a git commit. There is also an
+   official repo (`MiniMax-AI/MiniMax-Music3`) carrying an official
+   SGLang-Omni serving path, a documented structured-caption format, and a
+   reference output WAV generated with this checkpoint (`assets/
+   minimax_ttm.wav`) - the end-to-end oracle this port never had.
+   The official README's "32 kHz" is loose: `vocoder/config.json` says
+   `sampling_rate: 44100`, which is what this port implements.
+
+### Hardware facts that bound every optimisation here
+
+Measured or read from vendor documentation, not extrapolated:
+
+- **AVX2 int8 on this CPU is worth nothing.** `VPMADDUBSW` and `VPMADDWD`
+  are both port-0-only on Haswell: 16 int8 MAC/cycle against fp32 FMA's 16.
+  Benchmarked on this box at a **1.01x** int8/fp32 ratio. The widely-quoted
+  1.3-2x is a cache effect from 4x smaller weights, not arithmetic, and the
+  real 4x needs VNNI, which this Xeon does not have (nor AVX-512 at all).
+  With the CPU at 7.7% of the machine's fp32 and 2.1% of its int8, an AVX2
+  int8 GEMM path is not worth building - the CPU's role is to overlap GPU
+  work, not to do GEMMs. `backend-cpu`'s `int8_dot: false` is therefore
+  HONEST on this hardware, not a gap.
+- **DP4A on a P40 is ~1.5-1.8x over fp32, not 4x.** NVIDIA's own Pascal
+  tuning guide says DP4A has "throughput equal to that of FP32
+  arithmetic"; the 4x is op-accounting (8 ops per DP4A vs 2 per FMA).
+  Real DP4A kernels measure 29-34% of the nominal 47 TOPS. Worth doing,
+  but a kernel below ~25% of peak merely ties a good fp32 SGEMM.
+- **fp16 is not merely slow on Pascal - `SHADER_F16` is not exposed at
+  all** under Vulkan on GP102. f16 can be a storage tier here, never a
+  compute tier. Same for q4: there is no q4 dot instruction anywhere in
+  this workspace (`matmul_q4_*` unpack nibbles by hand), so q4 rides
+  int8's activations. Both are recorded as PLANNED tiers rather than
+  optimised ones.
+
+### Where the time actually goes (budget, not a hypothesis)
+
+For a 180 s song (4500 AR frames, 45 denoise windows) the **flow DiT is
+65-80% of wall-clock**: 45 windows x 30 Euler steps x 2 CFG branches, and
+its GEMMs sit at ~85 FLOP/byte, well past a P40's ~34 ridge point, so it is
+compute-bound. The 8B Global LM is bandwidth-bound and roughly a fifth of
+the budget; the 123M vocoder is negligible. **Optimise the DiT first** - an
+earlier working assumption in this session that the AR stage's host LM head
+dominated was wrong, and is recorded here because `.agents/rules/kernels.md`
+§F exists precisely for this failure mode.
+
+Two structural facts, read from this crate's own code, that bound what is
+possible:
+
+- **The Global LM consumes all 8 codebooks of a frame**
+  (`pipeline::embed_audio_frame` sums every codebook's embedding before
+  `Qwen::step_embed`), so the AR stage is strictly serial and the depth
+  decoder is NOT batchable across frames.
+- **The denoise windows are sequentially dependent**
+  (`denoise::ChunkState::previous_latent` chains each chunk to the last),
+  so the two cards can PIPELINE stages but cannot data-parallelise windows.
+
+### Landed in this phase
+
+- `gpu_core::Gpu::open` - one device-token to handle mapping, replacing 17
+  private copies that all mangled an indexed card into the ambient
+  selection.
+- `dit::Resident` - DiT weights and RoPE tables upload once per chunk, not
+  once per forward. The denoise loop evaluated the DiT `2 * steps` times
+  per chunk and each call re-sent the whole 36-block stack (~9.7 GB at real
+  dims) for byte-identical weights. Gated bit-for-bit.
+- The DiT and vocoder honour `--device` instead of `Gpu::new_cpu`. They
+  were pinned to the one device that cannot use a GPU, silently making
+  `--device gpu` a no-op for most of this pipeline's cost.
+- `crate::ProgressSink` - `generate` actually emits progress. It had
+  declared `.streaming()` since it landed while every layer dropped the
+  callback, which also made the model unbenchmarkable, since `brain perf`
+  builds its whole timeline from those callbacks.
+
 ## Not yet done
 
 - [ ] Joint generator+discriminator training against the real vocoder
