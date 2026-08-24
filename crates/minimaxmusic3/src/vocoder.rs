@@ -236,7 +236,7 @@ fn conv1d_bias_step(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvW, n: u32, cin: u3
     let lo = Conv1d::out_len(l, k, 1, pad, pad, dilation);
     let c = Conv1d { n, cin, l, cout, k, stride: 1, pad, dilation, groups: 1, lo };
     let wb = gpu.storage_init("w", &w.weight);
-    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo) * 4);
+    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo));
     steps.push(conv1d_fwd(gpu, &conv_kernels(), &c, x, &wb, &y));
     let bb = gpu.storage_init("b", &w.bias);
     steps.push(gpu.step(BIAS_ADD, &[&y, &bb], &[n * cout * lo, cout, lo], n * cout * lo));
@@ -247,7 +247,7 @@ fn conv1d_bias_step(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvW, n: u32, cin: u3
 fn convtr1d_bias_step(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvW, n: u32, cin: u32, l: u32, cout: u32, k: u32, stride: u32, pad: u32, lo: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let c = Conv1d { n, cin, l, cout, k, stride, pad, dilation: 1, groups: 1, lo };
     let wb = gpu.storage_init("w", &w.weight);
-    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo) * 4);
+    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo));
     steps.push(convtr1d_fwd(gpu, &convtr_kernels(), &c, x, &wb, &y));
     let bb = gpu.storage_init("b", &w.bias);
     steps.push(gpu.step(BIAS_ADD, &[&y, &bb], &[n * cout * lo, cout, lo], n * cout * lo));
@@ -257,7 +257,7 @@ fn convtr1d_bias_step(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvW, n: u32, cin: 
 fn snake_step(gpu: &Gpu, steps: &mut Vec<Step>, alpha: &[f32], rows: u32, c: u32, inner: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let sc = Snake1d { rows, c, inner, eps: SNAKE_EPS };
     let ab = gpu.storage_init("alpha", alpha);
-    let y = gpu.storage(u64::from(sc.total()) * 4);
+    let y = gpu.storage(u64::from(sc.total()));
     steps.push(snake1d_fwd(gpu, &snake_kernels(), &sc, x, &ab, &y));
     y
 }
@@ -268,7 +268,7 @@ fn residual_unit_step(gpu: &Gpu, steps: &mut Vec<Step>, ru: &ResidualUnitW, n: u
     let c1 = conv1d_bias_step(gpu, steps, &ru.conv1, n, dim, l, dim, 7, pad, dilation, &s1);
     let s2 = snake_step(gpu, steps, &ru.snake2_alpha, n, dim, l, &c1);
     let c2 = conv1d_bias_step(gpu, steps, &ru.conv2, n, dim, l, dim, 1, 0, 1, &s2);
-    let out = gpu.storage(u64::from(n) * u64::from(dim) * u64::from(l) * 4);
+    let out = gpu.storage(u64::from(n) * u64::from(dim) * u64::from(l));
     steps.push(gpu.step(ADD2, &[x, &c2, &out], &[n * dim * l], n * dim * l));
     out
 }
