@@ -1253,8 +1253,10 @@ dependencies = [
  "brain-diffusion",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-memauth",
  "brain-model",
  "brain-qwen3",
+ "brain-residency",
  "brain-testutil",
  "serde_json",
 ]

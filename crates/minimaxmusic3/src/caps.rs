@@ -15,13 +15,20 @@
 //! outcome shaping, not two that could drift (the `wan::caps`/`flux2::
 //! caps` pattern).
 //!
-//! Unlike `wan::caps::WanProvider` (which holds a **hot** resident DiT
-//! across calls), nothing here is held warm: every real generation
-//! reloads all five components fresh (see `crate::generate`'s own doc for
-//! why - this model's whole checkpoint does not fit in RAM even once on
-//! the machine this port was built on, so a "keep it loaded" cache would
-//! be actively wrong, not just unhelpful). This matches `qwen3tts::caps::
-//! TtsProvider`'s stateless shape, not `wan`'s.
+//! This type itself is **stateless** - it holds no built model, unlike
+//! `wan::caps::WanProvider`'s hot resident DiT. That is not the same
+//! statement as "nothing is warm", which is what this doc used to say and
+//! is no longer true: four of the five components' host weights live in
+//! `crate::weightcache`, a process-wide store keyed on the checkpoint
+//! directory rather than on any provider or request, so both this path and
+//! the resident one get them warm without either owning them. The reason
+//! the old claim is retired is recorded in that module: it rested on a
+//! machine with ~26 GB of RAM, and the validation machine has 184 GB.
+//!
+//! What is genuinely NOT held is device state - every `generate` call
+//! builds and drops its own `Gpu` handles and device-resident objects,
+//! stage by stage (`crate::generate`'s sequential-stage device
+//! discipline).
 
 use std::sync::Arc;
 
@@ -122,7 +129,9 @@ pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut
 }
 
 /// The executable MiniMax Music 3 model behind the manifest. Stateless -
-/// see this module's own doc for why nothing is held warm across calls.
+/// it owns nothing across calls; what IS warm across calls belongs to
+/// `crate::weightcache`, not to any instance of this type (see this
+/// module's own doc).
 #[derive(Default)]
 pub struct MinimaxMusic3Provider;
 

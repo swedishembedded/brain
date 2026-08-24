@@ -19,6 +19,17 @@ brain-gpu-core.workspace = true
 brain-data.workspace = true
 brain-diffusion.workspace = true
 brain-qwen3.workspace = true
+# `src/weightcache.rs` scores its own entries with `residency::place::
+# CostAware` (the GDSF eviction policy the residency manager already uses for
+# whole model instances) over a `residency::lru::Entry`, rather than growing a
+# second, separately-tuned rule. `residency` depends only on capability and
+# memauth, so this is not a cycle: nothing in `residency` knows this crate
+# exists.
+brain-residency.workspace = true
+# The same cache's local byte ceiling comes from `memauth::limits().ram_total`
+# - the process-wide host ceiling `--limit-ram-total` publishes - so an
+# in-process caller with no residency manager still has a governor.
+brain-memauth.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
