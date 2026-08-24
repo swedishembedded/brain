@@ -548,12 +548,17 @@ pub fn backward(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, cache: &Forwa
 }
 
 /// Random weights at `cfg`'s dims, deterministic from `seed` - shared by
-/// this crate's own tests (`depth_decoder`, `depth_lora`, `pipeline`); a
-/// gradcheck/wiring fixture always needs a small, random-weight instance,
-/// never the real checkpoint, so this lives once here rather than as
-/// three near-identical private copies.
-#[cfg(test)]
-pub(crate) fn random_weights(cfg: &DepthDecoderConfig, seed: u64) -> DepthDecoderWeights {
+/// this crate's own tests (`depth_decoder`, `depth_lora`, `pipeline`) and by
+/// `mm3_bench`; a gradcheck/wiring fixture always needs a small,
+/// random-weight instance, never the real checkpoint, so this lives once here
+/// rather than as three near-identical private copies.
+///
+/// `pub`, and not `#[cfg(test)]`, for the same reason
+/// [`crate::dit_train::random_weights`] and [`crate::train::random_weights`]
+/// are: a timing harness needs shape-correct weights without a multi-GB
+/// checkpoint, and a dispatch's cost is a function of its shape, not of the
+/// values in its buffers.
+pub fn random_weights(cfg: &DepthDecoderConfig, seed: u64) -> DepthDecoderWeights {
     use data::rng::Lcg;
     let mut r = Lcg::new(seed);
     let d = cfg.hidden_size as usize;

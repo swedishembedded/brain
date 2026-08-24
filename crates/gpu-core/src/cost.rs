@@ -707,6 +707,16 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (total, ch) = (p(0)?, p(1)?);
             f(9 * total, 4 * (2 * total + 2 * ch))
         }
+        // Snake, the SINGLE-parameter DAC form: params [total, c, inner, eps].
+        // y = x + (alpha+eps)^-1 * sin(alpha*x)^2, alpha per channel and used
+        // un-exponentiated. 7 ops/element: 1 add(eps) + 1 mul(x*a) + 1 sin
+        // (SFU) + 1 mul(s*s) + 1 div + 1 mul + 1 add - two fewer than
+        // `snake_beta`, which pays two `exp` this form does not have. Bytes:
+        // x/out are [total], alpha is [c].
+        "snake1d" => {
+            let (total, ch) = (p(0)?, p(1)?);
+            f(7 * total, 4 * (2 * total + ch))
+        }
         // `silu`/`silu_bwd` were uncovered, which is why a VQGAN forward could
         // not report a whole-pass rate at all: one kind without a formula makes
         // the pass numerator partial, and a partial numerator over the full
@@ -935,6 +945,21 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let cin_g = cin / g.max(1);
             f(2 * n * cout * lo * cin_g * k, 4 * (n * cin * l + cout * cin_g * k + n * cout * lo))
         }
+        // ConvTranspose1d forward. One thread per OUTPUT element gathers the
+        // inputs that land on it, so the exact MAC count is the FORWARD conv's
+        // seen from the other side: every (input element, output channel in its
+        // group, tap) triple contributes one MAC, i.e. `N*Cin*L*(Cout/G)*K`,
+        // independent of stride/pad. Counting `N*Cout*Lo*(Cin/G)*K` instead -
+        // the naive "output elements times the loop bound" - overstates it by
+        // the stride, since the `(lo+pad-kw*d) % stride != 0` branch discards
+        // most taps at an upsampling stride. The vocoder's stages run at
+        // stride 8/8/4/2, so that error would have been up to 8x on the single
+        // most expensive kernel in the decoder.
+        "convtr1d" => {
+            let (n, cin, l, cout, k, g, lo) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(8)?, p(9)?);
+            let cout_g = cout / g.max(1);
+            f(2 * n * cin * l * cout_g * k, 4 * (n * cin * l + cin * cout_g * k + n * cout * lo))
+        }
         "conv1d_dx" => {
             let (n, cin, l, cout, k, g, lo) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(8)?, p(9)?);
             let (cin_g, cout_g) = (cin / g.max(1), cout / g.max(1));
@@ -1063,6 +1088,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "add_chan_bcast" => {
             let (n, ch, hw) = (p(0)?, p(1)?, p(2)?);
             f(n * ch * hw, 4 * (2 * n * ch * hw + n * ch))
+        }
+        // In-place per-CHANNEL bias, NCHW: params [total = N*C*HW, C, HW].
+        // One add per element; `out` is read AND written through the single
+        // read_write binding, and the bias vector is `C` long.
+        "add_chan_inplace" => {
+            let (total, ch) = (p(0)?, p(1)?);
+            f(total, 4 * (2 * total + ch))
         }
 
         // ---- bmm/bmm_acc: batched matmul, both operands vary per batch.
@@ -1429,10 +1461,44 @@ mod tests {
             "nlc_bias_nchw", "add_chan_bcast", "rope", "rope_neox", "rope_train",
             "rope_train_bwd", "rope_partial", "rope_partial_bwd", "rope_sub",
             "rope_interleave_table", "gelu_erf", "geglu_shift", "snake_beta",
-            "attn_scores_cross_kt", "kv_k_headt",
+            "attn_scores_cross_kt", "kv_k_headt", "convtr1d", "snake1d", "add_chan_inplace",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
+    }
+
+    /// The DAC-vocoder trio: `convtr1d`, `snake1d`, `add_chan_inplace`.
+    ///
+    /// These three were the ONLY uncovered kinds in `minimaxmusic3`'s vocoder -
+    /// and they are its upsample path, its activation and its conv bias, i.e.
+    /// most of the decoder. One uncovered kind makes the whole pass unable to
+    /// report a rate at all ([`super::super::profile::PassProfile::gflops`] is
+    /// `None` the moment a single row is uncovered), so the vocoder could not
+    /// be profiled against a roofline until these landed.
+    #[test]
+    fn the_dac_vocoder_upsample_trio_is_covered() {
+        // convtr1d [N=1,Cin=2,L=4,Cout=3,K=4,stride=2,pad=1,dil=1,G=1,Lo=8].
+        // Every (input element, output channel, tap) is exactly one MAC:
+        // 2 * 1*2*4*3*4 = 192 flops.
+        assert_eq!(cost("convtr1d", &[1, 2, 4, 3, 4, 2, 1, 1, 1, 8], 24).flops, 192);
+        // The trap this formula exists to avoid: the MAC count does NOT scale
+        // with the upsampling stride. Doubling stride doubles `Lo` and doubles
+        // the thread count, but every extra thread's taps land on the
+        // `(lo+pad-kw*d) % stride != 0` branch and do no work.
+        assert_eq!(cost("convtr1d", &[1, 2, 4, 3, 4, 4, 1, 1, 1, 16], 48).flops, 192);
+        // bytes: x [1*2*4] + w [2*3*4] + y [1*3*8] = 56 floats.
+        assert_eq!(cost("convtr1d", &[1, 2, 4, 3, 4, 2, 1, 1, 1, 8], 24).bytes, 4 * 56);
+
+        // snake1d [total=8, c=2, inner=4, eps]: 7 ops/element - two fewer than
+        // `snake_beta`, which pays two `exp` this single-parameter form has
+        // not got - and ONE alpha vector, not two.
+        assert_eq!(cost("snake1d", &[8, 2, 4, 0], 8).flops, 56);
+        assert_eq!(cost("snake1d", &[8, 2, 4, 0], 8).bytes, 4 * (2 * 8 + 2));
+
+        // add_chan_inplace [total=24, c=3, hw=4]: one add per element, with
+        // `out` read AND written through its single read_write binding.
+        assert_eq!(cost("add_chan_inplace", &[24, 3, 4], 24).flops, 24);
+        assert_eq!(cost("add_chan_inplace", &[24, 3, 4], 24).bytes, 4 * (2 * 24 + 3));
     }
 
     /// A RATCHET over the whole kernel tree, not another hand-maintained list.
@@ -1454,7 +1520,11 @@ mod tests {
         // `kv_k_headt` once ltxv's Phase 8 optimization pass adopted them).
         // Deliberately a floor and not an equality - adding a formula must
         // not require editing a test.
-        const FLOOR: usize = 225;
+        //
+        // 225 -> 228: `convtr1d`/`snake1d`/`add_chan_inplace`, the DAC-style
+        // vocoder's upsample, activation and conv-bias kernels. Without them
+        // `minimaxmusic3`'s vocoder pass could not report a rate at all.
+        const FLOOR: usize = 228;
         let total = kernels::ALL.len();
         let covered = kernels::ALL.iter().filter(|(n, _)| covers(n)).count();
         let uncovered: Vec<&str> =

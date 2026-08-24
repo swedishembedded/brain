@@ -474,6 +474,126 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
     }
 }
 
+/// Profile a pass that SUBMITS ITSELF - the case [`profile`] cannot take.
+///
+/// [`profile`] needs one flat `&[Step]` it can re-submit. Several models never
+/// hand one out: `minimaxmusic3::dit::forward_resident` submits per sub-layer
+/// and reads a buffer back to the host in the middle of every block,
+/// `minimaxmusic3::vocoder::forward` records its tape privately, and
+/// `sam1::SamEncoder::forward` submits per stage. Both halves of a
+/// [`PassProfile`] still exist for those passes - they are just not in a step
+/// list, so they come off the `Gpu` handle instead:
+///
+/// * per-kernel DEVICE time from [`Gpu::kernel_times`] - the same accumulator
+///   [`profile`]'s device-timed path reads, but summed over EVERY submit the
+///   closure makes rather than over one;
+/// * per-kernel FLOP/byte volume from [`Gpu::ops_counters`], which folds
+///   [`crate::cost::kernel_cost`] over every submitted step online.
+///
+/// Same table, same two modules, no third copy of either.
+///
+/// `run` is called `reps + 2` times: **once un-timed to warm up** (a warm-up
+/// must never enter the statistics - the first call pays shader specialisation,
+/// allocator growth and first-touch page faults no later call repeats), `reps`
+/// times for the best-of-N whole-pass wall clock, and once more with both
+/// ledgers armed. Best-of-N, not mean: the minimum is the least contaminated
+/// sample.
+///
+/// [`PassProfile::total_secs`] here is WALL CLOCK around the whole closure, so
+/// unlike [`profile`]'s it also contains any host math and any readback the
+/// pass does between submits. That is deliberate - it is what the caller
+/// actually waits for - but it means `total_secs - summed_secs` is *not* just
+/// launch and sync for a pass with host work in it. Read the two numbers as
+/// "what it costs" and "what the device did".
+///
+/// `device_timed` is false on a backend with no timestamp path (the CPU JIT):
+/// the rows still carry dispatch counts and FLOP/byte volume, but every `secs`
+/// is 0.0 and the shares are meaningless. Check it before printing.
+pub fn profile_live(gpu: &Gpu, label: &str, reps: usize, mut run: impl FnMut()) -> PassProfile {
+    // Warm-up - never counted (`crates/perf` states the rule and why).
+    run();
+    gpu.poll_wait();
+
+    let mut total = f64::INFINITY;
+    for _ in 0..reps.max(1) {
+        let t0 = Instant::now();
+        run();
+        gpu.poll_wait();
+        total = total.min(t0.elapsed().as_secs_f64());
+    }
+
+    // One more pass with both ledgers armed. Arming AFTER the timed reps keeps
+    // the online tally's per-dispatch lock out of the number a change is
+    // judged by.
+    let timed = gpu.set_kernel_timing(true);
+    if timed {
+        gpu.reset_kernel_times();
+    }
+    gpu.reset_ops_counters();
+    run();
+    gpu.poll_wait();
+    let report = gpu.ops_counters();
+    let times: HashMap<String, f64> = if timed {
+        gpu.kernel_times()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(n, ms, _calls)| (n, ms / 1e3))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    gpu.set_kernel_timing(false);
+
+    // Rows carry the CALLER's kernel name; the backend's timing map is keyed by
+    // the PHYSICAL pipeline that ran, which differs for an upgrade-redirected
+    // kernel. Translate, exactly as `profile` does. (Two caller slots redirected
+    // onto one physical kernel would each show the combined time - a visible
+    // over-attribution rather than an invisible zero.)
+    let secs_of = |name: &str| -> f64 {
+        let physical =
+            gpu.kernel_index(name).and_then(|k| gpu.physical_kernel_name(k)).unwrap_or(name);
+        times.get(physical).copied().unwrap_or(0.0)
+    };
+
+    let covered = report.by_kernel.iter().map(|(name, kc)| KernelRow {
+        name: name.clone(),
+        secs: secs_of(name),
+        calls: kc.calls as usize,
+        flops: kc.cost.flops,
+        int_ops: kc.cost.int_ops,
+        bytes: kc.cost.bytes,
+        covered: true,
+    });
+    // An uncovered kind keeps its time and its call count but reports NO rates -
+    // unmeasured is null, never zero-pretending-complete.
+    let uncovered = report.uncovered.iter().map(|(name, calls)| KernelRow {
+        name: name.clone(),
+        secs: secs_of(name),
+        calls: *calls as usize,
+        flops: 0,
+        int_ops: 0,
+        bytes: 0,
+        covered: false,
+    });
+    let mut rows: Vec<KernelRow> = covered.chain(uncovered).collect();
+    rows.sort_by(|a, b| b.secs.partial_cmp(&a.secs).unwrap());
+
+    let summed: f64 = rows.iter().map(|r| r.secs).sum();
+    let fully_covered = rows.iter().all(|r| r.covered);
+    PassProfile {
+        label: label.to_string(),
+        total_secs: total,
+        dispatches: report.steps as usize,
+        rows,
+        // Every dispatch went through ONE accumulated device-time ledger, so
+        // there is no per-group drain to declare and no group count to give.
+        groups: 0,
+        summed_secs: summed,
+        fully_covered,
+        device_timed: timed && summed > 0.0,
+    }
+}
+
 /// Fold one group's `cost` volume (and `t` seconds) into the per-kernel map.
 fn accumulate(
     gpu: &Gpu,
