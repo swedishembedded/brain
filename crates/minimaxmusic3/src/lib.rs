@@ -3,8 +3,14 @@
 
 //! MiniMax Music 3: lyrics + a structured music-description caption in,
 //! a full song (up to 5 minutes, 44.1 kHz stereo) out.
-//! (`MiniMaxAI/MiniMax-Music3`, no official upstream inference code - ported
-//! from an unmerged `diffusers` PR, commit `dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d`).
+//! (`MiniMaxAI/MiniMax-Music3`.) The parity reference is **released
+//! `diffusers` 0.40.0**, which carries the four `MiniMaxMusic3*` model
+//! classes and the `diffusers.modular_pipelines.minimax_music3` pipeline.
+//! This port predates that release and was written against the unmerged PR
+//! those classes landed from; upstream has since published its own repo
+//! (`MiniMax-AI/MiniMax-Music3`) with an SGLang-Omni serving path and a
+//! reference output WAV, so "no official inference code exists" no longer
+//! holds and is not claimed here.
 //!
 //! Five chained components:
 //!

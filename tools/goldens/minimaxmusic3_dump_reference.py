@@ -4,15 +4,19 @@
 
 """Dump MiniMax Music 3 reference tensors for brain's parity ladder.
 
-MiniMax Music 3 (`MiniMaxAI/MiniMax-Music3`) has no official inference code -
-this dumper's reference is an unmerged `diffusers` PR, which the venv this
-script runs from must have installed instead of a stable pip release:
+MiniMax Music 3 (`MiniMaxAI/MiniMax-Music3`) shipped in **released diffusers
+0.40.0**, so this dumper needs nothing but this repo's ordinary
+`requirements.txt` set (`diffusers>=0.40`, `torch`, `transformers`,
+`safetensors`, `numpy`, plus `huggingface_hub` if you need to fetch a
+checkpoint subfolder).
 
-    pip install "git+https://github.com/huggingface/diffusers@dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d"
-
-alongside plain `torch`/`transformers`/`safetensors`/`numpy` (this repo's
-`requirements.txt` set, minus its own pinned `diffusers`) and
-`huggingface_hub` if you need to fetch a checkpoint subfolder. Only the four
+It used to require an unmerged PR branch installed into its own venv, which
+is why this file and `requirements.txt` both used to carry a "no official
+inference code" note. That is retired: 0.40.0 carries both the four
+`MiniMaxMusic3*` model classes and the
+`diffusers.modular_pipelines.minimax_music3` modular pipeline, and there is
+now an official upstream repo (`MiniMax-AI/MiniMax-Music3`) with a
+SGLang-Omni serving path and a reference output WAV. Only the four
 `MiniMaxMusic3*`-prefixed classes are needed here (`ConditionEncoder`,
 `RVQDepthDecoder`, `Transformer1DModel`, `Vocoder`) - the fifth component,
 the Global LLM, is a real `Qwen3ForCausalLM` covered by the standard
