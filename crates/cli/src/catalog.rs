@@ -121,9 +121,35 @@ fn env_path(var: &str, what: &str) -> Result<String, String> {
 
 /// One served model. `provider` and `manifest` describe the SAME model by
 /// construction — that is the whole point of the type.
-/// A residency-adapter constructor: `None` when the model's weights are not
-/// configured, so the scheduler simply does not serve it.
-pub type ResidentCtor = fn() -> Option<Arc<dyn ResidentModel>>;
+/// A residency-adapter constructor: `None` from the inner `fn` when the model's
+/// weights are not configured, so the scheduler simply does not serve it.
+///
+/// Two shapes, because the scheduler has two genuinely different claim paths and
+/// a model must be registered through exactly one of them (see
+/// `residency::Executor::register_multi`'s doc for why registering a
+/// multi-device model through the single-device path silently leaves one of its
+/// devices unbudgeted). Keeping BOTH shapes in this one field is what stops a
+/// multi-device model needing a second, parallel list - the drift this whole
+/// file exists to kill.
+pub enum ResidentCtor {
+    /// An ordinary adapter: one instance, one device. Registered into
+    /// `Executor::start`'s model list via [`residents`].
+    Single(SingleCtor),
+    /// An adapter whose instance occupies real bytes on SEVERAL devices at once.
+    /// Registered after `Executor::start` via `register_multi`, from
+    /// [`multi_residents`].
+    Multi(MultiCtor),
+}
+
+/// Builds a single-device adapter, or `None` when its weights are not configured.
+pub type SingleCtor = fn() -> Option<Arc<dyn ResidentModel>>;
+
+/// Builds a multi-device adapter from `build_executor`'s budgeted `(index,
+/// TOTAL bytes)` GPU list and its per-card reserve - such a model has to choose
+/// its own device set against genuinely usable capacity, because
+/// `residency::multi::pick_devices` checks the set it names but never
+/// substitutes a different one.
+pub type MultiCtor = fn(&[(u32, u64)], u64) -> Option<Arc<dyn residency::multi::MultiDeviceResidentModel>>;
 
 pub struct ModelEntry {
     /// The static manifest: safe to build with no weights loaded.
@@ -151,10 +177,22 @@ macro_rules! from_env {
     };
 }
 
-/// Shorthand: a residency adapter built from env.
+/// Shorthand: a single-device residency adapter built from env.
 macro_rules! resident {
     ($ctor:path) => {
-        Some((|| $ctor().map(|r| Arc::new(r) as Arc<dyn ResidentModel>)) as fn() -> Option<Arc<dyn ResidentModel>>)
+        Some(ResidentCtor::Single((|| $ctor().map(|r| Arc::new(r) as Arc<dyn ResidentModel>)) as SingleCtor))
+    };
+}
+
+/// Shorthand: a MULTI-device residency adapter built from env, given
+/// `build_executor`'s budgeted GPU list and per-card reserve.
+macro_rules! resident_multi {
+    ($ctor:path) => {
+        Some(ResidentCtor::Multi(
+            (|gpus: &[(u32, u64)], reserved: u64| {
+                $ctor(gpus, reserved).map(|r| Arc::new(r) as Arc<dyn residency::multi::MultiDeviceResidentModel>)
+            }) as MultiCtor,
+        ))
     };
 }
 
@@ -356,7 +394,10 @@ pub fn models() -> Vec<ModelEntry> {
         },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
         // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
-        // the face stack's and clip's. CPU-resident by declaration - see
+        // the face stack's and clip's. The only MULTI-device entry in this
+        // catalog: its vision tower runs on wgpu while its decoder runs on the
+        // CPU backend, so it holds real bytes on two devices at once and must
+        // be claimed through `claim_multi` for both to be budgeted - see
         // `crate::resident_deepseekocr`'s header.
         ModelEntry {
             manifest: deepseek2ocr::caps::manifest,
@@ -364,7 +405,7 @@ pub fn models() -> Vec<ModelEntry> {
                 deepseek2ocr::caps::DeepseekOcrProvider::from_env,
                 "set BRAIN_DEEPSEEK_OCR_DIR to a directory holding mmproj-DeepSeek-OCR-Q8_0.gguf + DeepSeek-OCR-Q8_0.gguf"
             ),
-            resident: resident!(crate::resident_deepseekocr::DeepseekOcrResident::from_env),
+            resident: resident_multi!(crate::resident_deepseekocr::DeepseekOcrResident::from_env),
         },
         ModelEntry {
             manifest: imgpipe::caps::manifest,
@@ -504,10 +545,37 @@ pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     Err(format!("unknown model '{model}' (see `brain caps`)"))
 }
 
-/// The residency adapters this catalog owns, for models whose weights are
-/// configured.
+/// The SINGLE-device residency adapters this catalog owns, for models whose
+/// weights are configured - what `build_executor` folds into `Executor::start`.
+///
+/// Multi-device models are deliberately absent: they come from
+/// [`multi_residents`] instead, and registering one here as well is precisely
+/// the double-registration `Executor::register_multi`'s doc forbids.
 pub fn residents() -> Vec<Arc<dyn ResidentModel>> {
-    models().into_iter().filter_map(|e| e.resident.and_then(|f| f())).collect()
+    models()
+        .into_iter()
+        .filter_map(|e| match e.resident {
+            Some(ResidentCtor::Single(f)) => f(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The MULTI-device residency adapters this catalog owns - registered after
+/// `Executor::start` via `register_multi`, because the scheduler's multi-device
+/// claim path is what reserves on every device such an instance occupies.
+///
+/// `gpus` is `build_executor`'s budgeted `(index, TOTAL bytes)` list and
+/// `reserved` its per-card headroom, forwarded verbatim so each adapter picks
+/// its device set against the same usable capacity the scheduler budgets.
+pub fn multi_residents(gpus: &[(u32, u64)], reserved: u64) -> Vec<Arc<dyn residency::multi::MultiDeviceResidentModel>> {
+    models()
+        .into_iter()
+        .filter_map(|e| match e.resident {
+            Some(ResidentCtor::Multi(f)) => f(gpus, reserved),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -559,9 +627,26 @@ mod tests {
     fn every_residency_adapter_here_is_also_listed_here() {
         let catalog: std::collections::HashSet<String> =
             manifests().into_iter().map(|m| m.model).collect();
-        for r in residents() {
-            let id = r.manifest().model;
+        // Both claim paths, or the multi-device half is exactly as unguarded as
+        // the single-device half was before this test existed.
+        let single = residents().into_iter().map(|r| r.manifest().model);
+        let multi = multi_residents(&[(0, 24u64 << 30)], 2u64 << 30).into_iter().map(|r| r.manifest().model);
+        for id in single.chain(multi) {
             assert!(catalog.contains(&id), "residency adapter '{id}' is not in the catalog");
+        }
+    }
+
+    /// A model registered through BOTH claim paths would have its budget
+    /// charged twice and its `activate` reachable through a path it correctly
+    /// refuses - see `residency::Executor::register_multi`'s own doc. The two
+    /// lists are derived from one field precisely so this cannot happen, and
+    /// this test is what says so out loud.
+    #[test]
+    fn no_model_is_registered_through_both_claim_paths() {
+        let single: std::collections::HashSet<String> = residents().into_iter().map(|r| r.manifest().model).collect();
+        for r in multi_residents(&[(0, 24u64 << 30)], 2u64 << 30) {
+            let id = r.manifest().model;
+            assert!(!single.contains(&id), "'{id}' is registered as BOTH a single- and a multi-device resident");
         }
     }
 

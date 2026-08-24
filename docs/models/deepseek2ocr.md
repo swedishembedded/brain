@@ -141,19 +141,24 @@ under induced heavy contention reproducing the original failure conditions),
 so `caps::Session::load` builds the vision encoder (SAM+CLIP+glue) on
 `gpu_core::Gpu::new_wgpu` and the decoder on `gpu_core::Gpu::new_cpu` (the
 decoder has no wgpu-corruption history and no measured wgpu benefit, so it
-stays put). This model still declares a RAM-only `MemCost` (`vram == 0`),
-which is the residency scheduler's own vocabulary for "never place me on a
-GPU" - that has NOT been updated to account for the vision tower's real wgpu
-VRAM usage, a known, deliberately deferred gap (a residency/budget-accounting
-fix, not a `crates/deepseekocr` change). It does not mutate `BRAIN_DEVICE`; a
-server-lifetime resident must not change the backend other models build on.
+stays put). Because it holds real bytes on two devices at once, it is the one
+served model the scheduler claims through its **multi-device** path: it names
+`(GPU, ~6 GiB)` for the vision tower and `(CPU, ~16 GiB)` for everything
+host-side, so each device is checked against its own budget instead of one of
+them being invisible. On a host whose GPU shares physical RAM with the CPU,
+both names draw from the one shared memory pool, so nothing is double-counted.
+It does not mutate `BRAIN_DEVICE`; a server-lifetime resident must not change
+the backend other models build on, so the card is chosen by scoped registry
+selection instead.
 
 <!-- perf-number: hardware requirement, not a throughput claim -->
 **~22 GiB resident.** Measured, not estimated: the real-weight composite gate
 reports peak RSS for this exact build, read off `/proc/self/status`. The
 served instance is sized for a 512-token context (the 273-row image block,
 BOS, the instruction, and room to generate). A box with less than ~24 GiB
-free will not activate it.
+free will not activate it. That figure was measured with every stage on the
+CPU; it is what the scheduler splits into the GPU/CPU pair above, so the two
+halves sum to it rather than each claiming it.
 
 **KV-cached decode.** Decode used to be `O(T²)` recompute with no KV cache -
 every generated token re-ran the whole sequence through all 12 MoE layers.

@@ -105,14 +105,13 @@
 //! re-validate after any future change to `backend-wgpu`'s flush path or
 //! `crates/model/src/block.rs`'s sliced dispatches.
 //!
-//! **The CPU pin in `crates/cli/src/resident_deepseekocr.rs` is UNCHANGED**
-//! despite this confirmation -- not because doubt remains about `sam1`'s wgpu
-//! correctness, but because the actual device selection for the vision
-//! encoder is hardcoded in `crates/deepseek2ocr::caps::Session::load` (a
-//! crate this pass's scope explicitly excludes, to avoid colliding with a
-//! concurrent sibling pass on Phase 8 performance in that same crate
-//! family). See that file's header comment for the precise, narrowly-scoped
-//! change a follow-up pass needs to make.
+//! **The CPU pin this confirmation was chasing is now LIFTED.**
+//! `crates/deepseek2ocr::caps::Session::load` builds the vision encoder
+//! (SAM + CLIP + glue) on `gpu_core::Gpu::new_wgpu` and only the decoder on
+//! `gpu_core::Gpu::new_cpu`, and `crates/cli/src/resident_deepseekocr.rs`
+//! declares the resulting two-device footprint to the scheduler
+//! (`residency::multi::MultiDeviceCost`) instead of the RAM-only cost it used
+//! to report. This test remains the record of WHY that was safe to do.
 
 use gpu_core::Gpu;
 use sam1::{init_dense, SamEncoder, SamViTConfig};

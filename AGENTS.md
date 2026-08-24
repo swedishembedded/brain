@@ -516,11 +516,16 @@ fast and scalable kernel - not a naive one.
     *(**Split backend**: `caps::Session::load` builds the vision encoder
     (SAM+CLIP+glue) on `Gpu::new_wgpu` and the decoder on `Gpu::new_cpu` -
     `crates/sam1`'s wgpu corruption at 1024x1024/3+ blocks that used to force
-    an all-CPU build is fixed and confirmed at real-weight scale. `estimate`
-    still reports a RAM-only `MemCost` (`vram == 0`, ~22 GiB measured), so
-    `place::pick_device` never offers a GPU for THIS model's own placement -
-    a known, deliberately deferred gap versus the vision tower's real wgpu
-    VRAM use, not yet reconciled. Never an env mutation from inside a
+    an all-CPU build is fixed and confirmed at real-weight scale. Because it
+    then holds real bytes on TWO devices, it is the repo's second
+    `MultiDeviceResidentModel` (after the int8 Omni Thinker) and the first one
+    in `catalog.rs`: `estimate_multi` names `(Gpu(i), 6 GiB)` for the vision
+    tower and `(Cpu, 16 GiB)` for the host side - a decomposition of the one
+    measured 21.32 GiB all-CPU peak, so the halves sum to it rather than each
+    claiming it - and `activate_multi` builds the tower on exactly the
+    reserved card via scoped registry selection. It used to report a RAM-only
+    `MemCost` (`vram == 0`), which left the tower's device bytes invisible to
+    the budget. Never an env mutation from inside a
     server-lifetime resident. `run_batch` is the serial default and says why
     (per-image encoder pass, no decoder batch axis). Decode IS KV-cached
     (`DeepseekV2::generate_greedy_kv`, `O(1)` per token past the prompt).

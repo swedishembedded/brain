@@ -207,6 +207,17 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     }
 
     let exec = Executor::start(models, budgets, policy);
+    // Multi-device models the catalog owns (today: DeepSeek-OCR, whose vision
+    // tower is on wgpu while its decoder is on the CPU backend). They are
+    // registered HERE rather than folded into `models` above because only
+    // `register_multi`/`claim_multi` reserve on every device such an instance
+    // occupies -- the single-device path's one `budgets.alloc(device, ...)`
+    // can charge only one of them, leaving the other silently unbudgeted.
+    // `catalog::residents()` deliberately excludes them, so nothing is
+    // registered twice.
+    for m in crate::catalog::multi_residents(gpus, reserved) {
+        exec.register_multi(m);
+    }
     // Qwen3-Omni (BRAIN_QWEN3OMNIMOE_HF_DIR): the full chat/multimodal surface, placed
     // across as many budgeted cards as its real per-layer bytes need. Like the
     // int8 Thinker below it is multi-device and therefore registered AFTER

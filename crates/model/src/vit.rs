@@ -1875,9 +1875,8 @@ impl RelPos<'_> {
     /// checkpoint-free reproduction clean 32/32 under induced heavy
     /// contention matching the original bisection) - see
     /// `crates/sam1/tests/wgpu_block_count_corruption.rs`'s doc comment for
-    /// the record. `crates/cli/src/resident_deepseekocr.rs` still pins the
-    /// CPU backend, but for a scope reason unrelated to this correctness
-    /// question - see that file's header comment.
+    /// the record. DeepSeek-OCR's vision tower runs on wgpu as a result;
+    /// only its decoder stays on the CPU backend.
     pub fn add_step(&self, g: &Gpu, heads: u32, qn: u32, kn: u32, q0: u32, scores: &DeviceBuffer) -> Step {
         let p = [heads, qn, kn, q0, self.span_qn(), self.kh, self.kw];
         let kn_blocks = kn.div_ceil(Self::ADD_JB);

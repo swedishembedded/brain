@@ -2174,3 +2174,87 @@ token fails loudly.
 Full plan: `woolly-beaming-avalanche.md` under the agent plans directory
 (that session's approved plan; not repo-relative, kept here only as a
 pointer for whoever picks this up in the same environment).
+
+## Phase 9: the placement gap the split backend left behind
+
+- [x] **`estimate` was reporting a device set the model no longer had.**
+      Phase 8 Step 2 moved the vision encoder onto wgpu (`caps::Session::load`
+      builds SAM+CLIP+glue with `Gpu::new_wgpu`, the decoder with
+      `Gpu::new_cpu`) but did NOT update
+      `crates/cli/src/resident_deepseekocr.rs`, which kept declaring a
+      **RAM-only `MemCost`** (`vram == 0`, 22 GiB) and an `activate` that
+      refused any non-CPU assignment as "CPU-only". Both statements were false
+      from the moment that split landed, and the module header still described
+      the closure it would take to lift a pin that was already lifted.
+
+      The consequence was not cosmetic. `vram == 0` is `place::pick_device`'s
+      vocabulary for "skip the GPU class entirely", so the vision tower's real
+      device bytes were **invisible to the budget**: on a host with a discrete
+      card the scheduler would place another model on top of memory this one
+      had already spoken for. That is exactly the "lies to whichever budget
+      doesn't see the real bytes" pattern `residency::multi`'s own module doc
+      was written about.
+
+      **The fix: declare both devices.** `DeepseekOcrResident` now implements
+      `residency::multi::MultiDeviceResidentModel` -- the repo's second real
+      one after the int8 Omni Thinker, and the first *heterogeneous* pair (a
+      GPU and the CPU, rather than two cards):
+
+      | named device | bytes | what |
+      |---|---|---|
+      | `Device::Gpu(i)` | 6 GiB | SAM ViT-B @1024² + 16x compressor + CLIP-L + projector |
+      | `Device::Cpu` | 16 GiB | the MoE decoder, the splice, the logit slab, host scratch |
+
+      **The two figures are a decomposition of ONE measurement, not two.**
+      21.32 GiB is the composite gate's measured all-CPU VmHWM (22 GiB rounded
+      up for the 512-row served context). The encoder-only run in Phase 6c
+      measured 1.59 GiB after the mmproj import, 3.44 GiB built and 7.17 GiB
+      after a forward -- i.e. ~1.85 GiB of weights and ~3.7 GiB of activations
+      above the import baseline, ~5.6 GiB rounded to 6. The CPU figure is the
+      remainder, so the halves **sum** to the measured peak rather than each
+      claiming it (reporting 22 GiB of RAM *and* 6 GiB of VRAM would
+      over-reserve by the whole vision tower on every host). Pinned by
+      `the_two_halves_sum_to_the_measured_composite_peak`.
+
+      *Still open, and stated rather than papered over*: a direct measurement
+      of the SPLIT build on a discrete card would be better than a
+      decomposition of the all-CPU one. Neither figure is wrong, but the
+      6/16 boundary between them is derived. This box has one integrated Arc
+      GPU and no copy of the real checkpoint, so it cannot produce that number;
+      whoever next runs the real weights on a P40 box should replace both
+      constants with measurements and delete this paragraph.
+
+      **Placement is a scoped registry selection, never an env write.**
+      `Session::load`'s `Gpu::new_wgpu` resolves the *ambient* selection, so
+      `activate_multi` runs it inside `gpu_core::devices::with_gpu(i, ...)`
+      (via `resident_llm::on_device`) and the tower lands on exactly the card
+      `estimate_multi` reserved. `crates/deepseek2ocr` needed **no change at
+      all** for this -- the device plumbing it already had was sufficient.
+
+      **Which card**: the budgeted GPU with the most *usable* capacity that can
+      hold the tower at all, chosen once at construction from
+      `build_executor`'s own `(index, total)` list minus its per-card reserve.
+      `residency::multi::pick_devices` deliberately never substitutes a
+      different device than the cost named, so picking the largest rather than
+      index 0 is what stops a small carve-out iGPU at index 0 shadowing a big
+      discrete card at index 1 and making the model permanently unplaceable.
+      With no card big enough, it names `Device::Cpu` alone at the full 22 GiB
+      -- which is the honest figure for the software-rasteriser fallback,
+      whose buffers *are* host RAM, and it is the one that was measured.
+
+      **`catalog.rs` grew the seam rather than a second list.**
+      `ResidentCtor` became an enum (`Single` / `Multi`); the `resident` field
+      keeps holding exactly one constructor per model, so DeepSeek-OCR still
+      has ONE catalog entry and cannot drift between `brain caps`, `brain do`
+      and the executor -- the drift that whole file exists to kill. A second
+      parallel list would have reintroduced it. `catalog::residents()` yields
+      only the `Single`s and `catalog::multi_residents(gpus, reserved)` only
+      the `Multi`s, so the double-registration `Executor::register_multi`'s doc
+      forbids is structurally impossible; pinned by
+      `no_model_is_registered_through_both_claim_paths`.
+
+      **Stale claims elsewhere, corrected in the same change**: the header of
+      `crates/sam1/tests/wgpu_block_count_corruption.rs`, the `add_step` doc in
+      `crates/model/src/vit.rs`, the Hardware-and-limits section of
+      `docs/models/deepseek2ocr.md`, and `residency::multi`'s "first and so far
+      only" note all still described the CPU pin as current.
