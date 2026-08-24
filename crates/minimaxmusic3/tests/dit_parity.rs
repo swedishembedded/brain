@@ -10,12 +10,27 @@
 
 use std::path::Path;
 
-use brain_testutil::{golden::Source, parity::compare, testdata_path};
+use brain_testutil::{
+    golden::Source,
+    parity::{compare, rel_l2},
+    testdata_path,
+};
 use minimaxmusic3::config::DitConfig;
 use minimaxmusic3::dit::{forward, from_tensors, PIPELINES};
 
 const DUMPER: &str = "tools/goldens/minimaxmusic3_dump_reference.py";
 const COS_FLOOR: f64 = 0.999;
+/// Cosine is scale-invariant, so a uniformly mis-scaled output scores
+/// 1.000000000 and passes [`COS_FLOOR`] - and this gate is what every change
+/// to `dit::block_fwd` is certified against, so it may not have that blind
+/// spot. Relative L2 is the scale-free number that also sees every element
+/// (max_abs is dominated by whichever single one is worst), so it is the
+/// second assertion rather than a second printed column.
+///
+/// The ceiling is a broken-port detector, not a record of a measurement: both
+/// rungs run several orders of magnitude under it, and printing the real
+/// number every run is what keeps the actual figure visible.
+const REL_L2_CEIL: f64 = 1e-4;
 
 fn read_f32(p: &Path) -> Vec<f32> {
     std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
@@ -70,8 +85,10 @@ fn check(tag: &str, cfg: &DitConfig, weights_dir: &Path) {
     assert_eq!(got.len(), want.len(), "dit[{tag}]: output length mismatch");
 
     let (cos, max_abs) = compare(&got, &want);
-    println!("dit[{tag}]: cosine={cos:.9} max_abs={max_abs:.6}");
+    let rel = rel_l2(&got, &want);
+    println!("dit[{tag}]: cosine={cos:.9} max_abs={max_abs:.3e} rel_l2={rel:.3e}");
     assert!(cos >= COS_FLOOR, "dit[{tag}]: cosine {cos} below floor {COS_FLOOR}");
+    assert!(rel <= REL_L2_CEIL, "dit[{tag}]: rel_l2 {rel} above ceiling {REL_L2_CEIL}");
 }
 
 #[test]

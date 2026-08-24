@@ -454,8 +454,15 @@ impl Model for DitStage {
         // No-op: with no working `backward`, there is never a real gradient to apply here.
     }
     fn poll_wait(&self) {
-        // Nothing to wait for: `dit::block_fwd` reads its result back to
-        // the host synchronously before returning.
+        // Nothing to wait for: `run_stage_forward` ends in a blocking
+        // `gpu.read` of the stage residual (and, on the head shard, several
+        // more inside `dit::proj_out_postprocess`), so every stage this
+        // trait can observe has already drained its queue by the time it
+        // returns. If a stage ever stops reading its own result back to the
+        // host, this becomes a real wait and must call `Gpu::poll_wait`.
+        // (`dit::block_fwd` used to be the thing that guaranteed this, per
+        // block; it no longer reads anything back - it only `flush`es, which
+        // does not wait.)
     }
 
     fn param_names(&self) -> Vec<String> {

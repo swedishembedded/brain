@@ -59,6 +59,22 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // fast kernel a later model never learned about").
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("matmul_gemv", kernels::MATMUL_GEMV),
+    // The fused bidirectional flash-attention family, all four rungs, so
+    // `model::block::flash_bidir_variant` walks the whole ladder from this
+    // device's queried caps (§F.7) and this crate inherits any rung the
+    // shared selector learns about later without a change here.
+    //
+    // Same defect class as the GEMM note above, and the same size: with only
+    // the materialized `attn_scores/softmax/apply_bidir` trio registered, the
+    // three of them measured 75.5% of this DiT's device time at
+    // `DitConfig::real()` / 689 latents on a P40, at 0.5% / 2.2% / 4.9% of
+    // that card's own measured memory roof - all three flagged DEFECT by
+    // `mm3_bench dit` against its 35% floor, while the GEMMs beside them ran
+    // at 42% of fp32 peak. The kernels that fix it already existed.
+    ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
 const CONV1D: usize = 0;
 const CONV1D_DX: usize = 1;
@@ -87,12 +103,25 @@ const SILU_BWD_DA: usize = 20;
 const SILU_BWD_DB: usize = 21;
 const MATMUL_REG3: usize = 22;
 const MATMUL_GEMV: usize = 23;
+const FLASH_ATTN_BIDIR: usize = 24;
+const FLASH_ATTN_BIDIR_SPLIT: usize = 25;
+const FLASH_ATTN_BIDIR_REG: usize = 26;
+const FLASH_ATTN_BIDIR_REG2: usize = 27;
 
 const LN_EPS: f32 = 1e-5;
 
 fn conv_kernels() -> ConvKernels {
     ConvKernels { fwd: CONV1D, dx: CONV1D_DX, dw: CONV1D_DW }
 }
+/// This crate's rung set for [`block::flash_bidir_variant`] - all four
+/// registered, so the shared selector picks on queried `DeviceCaps` alone
+/// and never on a backend name or a shape.
+const FLASH_IDS: block::FlashIds = block::FlashIds {
+    bidir: FLASH_ATTN_BIDIR,
+    split: Some(FLASH_ATTN_BIDIR_SPLIT),
+    reg: Some(FLASH_ATTN_BIDIR_REG),
+    reg2: Some(FLASH_ATTN_BIDIR_REG2),
+};
 fn bidir_ids() -> BidirIds {
     BidirIds { scores: ATTN_SCORES_BIDIR, softmax: ATTN_SOFTMAX_BIDIR, apply: ATTN_APPLY_BIDIR, dscores: ATTN_BWD_DSCORES_BIDIR, dv: ATTN_BWD_DV_BIDIR, dq: ATTN_BWD_DQ_BIDIR, dk: ATTN_BWD_DK_BIDIR }
 }
@@ -124,6 +153,30 @@ fn linear_step(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer
     };
     let (kind, threads) = block::gemm_variant(variant, m, n);
     gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+}
+
+/// Whether this block's self-attention takes the fused flash path.
+///
+/// Two conditions, neither of them a backend name:
+///
+/// * `DeviceCaps::workgroup_reductions` - the QUERIED capability
+///   [`linear_step`] already gates the tiled GEMMs on. Every kernel in the
+///   flash family is workgroup-cooperative and needs two or three top-level
+///   barriers where the Cranelift CPU JIT supports one, so on that backend
+///   this is false and the materialized `attn_scores/softmax/apply_bidir`
+///   trio stays the reference definition of the math - the branch
+///   `BRAIN_DEVICE=cpu` and `make gradcheck` take.
+/// * `head_dim <= 128` - the family's hard limit
+///   (`block::flash_bidir_step` asserts it), checked here so an out-of-range
+///   config is a fallback rather than a panic. `DitConfig::real()` runs at 64
+///   and `::tiny()` lower still.
+///
+/// Everything below the gate is unconditional: the backward pass
+/// (`bidir_bwd`, `crate::dit_train`) is untouched and keeps the materialized
+/// trio, because the flash kernels are forward-only and the block's backward
+/// reads the `probs` slab this path does not write.
+fn flash_attn(gpu: &Gpu, head_dim: u32) -> bool {
+    gpu.caps().workgroup_reductions && head_dim <= 128
 }
 
 fn ln_ids() -> LayerNormIds {
@@ -302,8 +355,21 @@ pub(crate) struct DeviceBlock {
     wo: DeviceBuffer,
     norm2_w: DeviceBuffer,
     norm2_b: DeviceBuffer,
-    ff_in_w: DeviceBuffer,
-    ff_in_b: DeviceBuffer,
+    /// `ff_in` is ONE `[2*ff_inner, inner]` weight in the checkpoint and in
+    /// [`BlockW`], but the two halves it fuses are contiguous ROW ranges of
+    /// it, so on the device it is two independent `[ff_inner, inner]`
+    /// linears. That is what lets `block_fwd` project straight into
+    /// separate `up`/`gate` buffers instead of producing one fused
+    /// `[rows, 2*ff_inner]` activation that then has to be cut apart -
+    /// see `block_fwd`'s own comment for what the cut used to cost.
+    ///
+    /// Only the DEVICE layout changes: `BlockW`, `DitWeights::linear_mut`,
+    /// `dit_shard`'s flat map and `dit_lora`'s shape table all still name
+    /// one fused `ff_in.weight`, which is what the checkpoint holds.
+    ff_in_up_w: DeviceBuffer,
+    ff_in_gate_w: DeviceBuffer,
+    ff_in_up_b: DeviceBuffer,
+    ff_in_gate_b: DeviceBuffer,
     ff_out_w: DeviceBuffer,
     ff_out_b: DeviceBuffer,
 }
@@ -311,26 +377,41 @@ pub(crate) struct DeviceBlock {
 pub(crate) fn upload_blocks(gpu: &Gpu, blocks: &[BlockW]) -> Vec<DeviceBlock> {
     blocks
         .iter()
-        .map(|b| DeviceBlock {
-            norm1_w: gpu.storage_init("norm1.weight", &b.norm1_w),
-            norm1_b: gpu.storage_init("norm1.bias", &b.norm1_b),
-            wq: gpu.storage_init("to_q.weight", &b.attn.wq),
-            wk: gpu.storage_init("to_k.weight", &b.attn.wk),
-            wv: gpu.storage_init("to_v.weight", &b.attn.wv),
-            wo: gpu.storage_init("to_out.weight", &b.attn.wo),
-            norm2_w: gpu.storage_init("norm2.weight", &b.norm2_w),
-            norm2_b: gpu.storage_init("norm2.bias", &b.norm2_b),
-            ff_in_w: gpu.storage_init("ff_in.weight", &b.ff_in_w),
-            ff_in_b: gpu.storage_init("ff_in.bias", &b.ff_in_b),
-            ff_out_w: gpu.storage_init("ff_out.weight", &b.ff_out_w),
-            ff_out_b: gpu.storage_init("ff_out.bias", &b.ff_out_b),
+        .map(|b| {
+            // `[2*ff_inner, inner]` row-major, so rows `[0, ff_inner)` are
+            // the `gate_states` ("up") half and `[ff_inner, 2*ff_inner)` the
+            // `gate` half - both contiguous slices, never a gather. The bias
+            // is `[2*ff_inner]`, which is where `ff_inner` comes from here
+            // without threading a `DitConfig` into this function.
+            assert_eq!(b.ff_in_b.len() % 2, 0, "ff_in.bias must be [2*ff_inner]");
+            let ff_inner = b.ff_in_b.len() / 2;
+            let half = b.ff_in_w.len() / 2;
+            assert_eq!(b.ff_in_w.len() % b.ff_in_b.len(), 0, "ff_in.weight must be [2*ff_inner, inner]");
+            DeviceBlock {
+                norm1_w: gpu.storage_init("norm1.weight", &b.norm1_w),
+                norm1_b: gpu.storage_init("norm1.bias", &b.norm1_b),
+                wq: gpu.storage_init("to_q.weight", &b.attn.wq),
+                wk: gpu.storage_init("to_k.weight", &b.attn.wk),
+                wv: gpu.storage_init("to_v.weight", &b.attn.wv),
+                wo: gpu.storage_init("to_out.weight", &b.attn.wo),
+                norm2_w: gpu.storage_init("norm2.weight", &b.norm2_w),
+                norm2_b: gpu.storage_init("norm2.bias", &b.norm2_b),
+                ff_in_up_w: gpu.storage_init("ff_in.weight.up", &b.ff_in_w[..half]),
+                ff_in_gate_w: gpu.storage_init("ff_in.weight.gate", &b.ff_in_w[half..]),
+                ff_in_up_b: gpu.storage_init("ff_in.bias.up", &b.ff_in_b[..ff_inner]),
+                ff_in_gate_b: gpu.storage_init("ff_in.bias.gate", &b.ff_in_b[ff_inner..]),
+                ff_out_w: gpu.storage_init("ff_out.weight", &b.ff_out_w),
+                ff_out_b: gpu.storage_init("ff_out.bias", &b.ff_out_b),
+            }
         })
         .collect()
 }
 
 /// One transformer block: `norm1 -> qkv proj -> partial RoPE -> bidir attn
-/// -> out proj -> residual -> norm2 -> ff_in -> split -> swiglu -> ff_out
-/// -> residual`. `x` is `[rows, inner]`; returns the updated `x`.
+/// -> out proj -> residual -> norm2 -> ff_in(up) + ff_in(gate) -> swiglu ->
+/// ff_out -> residual`. `x` is `[rows, inner]`; returns the updated `x`.
+///
+/// Stays on the device end to end - no host round trip anywhere in here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &DeviceBuffer, cos_b: &DeviceBuffer, sin_b: &DeviceBuffer, rows: usize) -> DeviceBuffer {
     let inner = cfg.inner_dim() as usize;
@@ -376,11 +457,24 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
         ],
     );
 
-    let bidir_cfg = Bidir { b: 1, t: rows as u32, n_heads: heads, head_dim: hd, stride: stride3, q_off: 0, k_off: inner as u32, v_off: 2 * inner as u32 };
-    let scores = gpu.storage((heads * rows as u32 * rows as u32) as u64);
-    let probs = gpu.storage((heads * rows as u32 * rows as u32) as u64);
     let ctx = gpu.storage((rows * inner) as u64);
-    gpu.submit(&[], &bidir_fwd(gpu, &bidir_ids(), &bidir_cfg, &qkv, &scores, &probs, &ctx));
+    if flash_attn(gpu, hd) {
+        // One fused dispatch replaces the whole scores/softmax/apply chain.
+        // The shape contract `flash_bidir_step` documents is met exactly by
+        // the `qkv` slab built above: `[rows, 3*inner]` with
+        // `stride = 3*inner`, `q_off/k_off/v_off = 0/inner/2*inner`,
+        // `d_model = inner = heads*head_dim`, `bsz = 1`, and `head_dim` 64 at
+        // `DitConfig::real()` (asserted <= 128 by the callee). Both arms
+        // apply the same `1/sqrt(head_dim)` scale and write the same
+        // `[rows, inner]` row-major context, so `to_out` and the residual
+        // below cannot tell them apart.
+        gpu.submit(&[], &[block::flash_bidir_step(gpu, FLASH_IDS, 1, heads, rows as u32, hd, inner as u32, &qkv, &ctx)]);
+    } else {
+        let bidir_cfg = Bidir { b: 1, t: rows as u32, n_heads: heads, head_dim: hd, stride: stride3, q_off: 0, k_off: inner as u32, v_off: 2 * inner as u32 };
+        let scores = gpu.storage((heads * rows as u32 * rows as u32) as u64);
+        let probs = gpu.storage((heads * rows as u32 * rows as u32) as u64);
+        gpu.submit(&[], &bidir_fwd(gpu, &bidir_ids(), &bidir_cfg, &qkv, &scores, &probs, &ctx));
+    }
 
     let proj = gpu.storage((rows * inner) as u64);
     let xmid = gpu.storage((rows * inner) as u64);
@@ -390,29 +484,40 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
     let xn2 = gpu.storage((rows * inner) as u64);
     gpu.submit(&[], &[layernorm_fwd(gpu, &ln_ids(), &xmid, &db.norm2_w, &db.norm2_b, &xn2, inner as u32, rows as u32, LN_EPS)]);
 
-    let ff_raw = gpu.storage((rows * 2 * ff_inner) as u64);
+    // `ff_in` projects to `[gate_states | gate]` (the reference's own chunk
+    // order) and the MLP output is `gate_states * silu(gate)` -
+    // `swiglu_fwd`'s (gate, up) args are (silu'd, passthrough), so
+    // `gate_states` plays "up" and `gate` plays "gate".
+    //
+    // The two halves come out of two SEPARATE `[ff_inner, inner]` linears
+    // (see [`DeviceBlock::ff_in_up_w`]), so they land already contiguous and
+    // already separated and nothing is ever cut apart. This used to be ONE
+    // `n = 2*ff_inner` linear whose `[rows, 2*ff_inner]` output was read
+    // back to the host, sliced into two `Vec`s and re-uploaded: at
+    // `DitConfig::real()` (rows=690, ff_inner=8192) that is 45.2 MB down +
+    // 2 x 22.6 MB up PER BLOCK, x36 blocks x 2 forwards per sampler step -
+    // and because `Gpu::read` drains the queue it also forced a full
+    // pipeline sync per block, serialising the whole forward.
+    //
+    // Splitting the WEIGHT instead cannot move a bit: `out[m, c] =
+    // sum_k xn2[m, k] * w[c, k]` reduces over `k` only, so row `c` of the
+    // up half and row `c` of the gate half produce the identical f32 in the
+    // identical order that rows `c` and `ff_inner + c` of the fused weight
+    // did. The dispatch geometry is unchanged too - `block::gemm_variant`
+    // asks for `m.div_ceil(128) * n.div_ceil(128) * 256` threads, and
+    // 2 x (n = ff_inner) is exactly 1 x (n = 2*ff_inner).
+    let up_b = gpu.storage((rows * ff_inner) as u64);
+    let gate_b = gpu.storage((rows * ff_inner) as u64);
     gpu.submit(
         &[],
         &[
-            linear_step(gpu, &xn2, &db.ff_in_w, &ff_raw, rows as u32, inner as u32, (2 * ff_inner) as u32),
-            gpu.step(BIAS_ADD, &[&ff_raw, &db.ff_in_b], &[rows as u32, (2 * ff_inner) as u32], (rows * 2 * ff_inner) as u32),
+            linear_step(gpu, &xn2, &db.ff_in_up_w, &up_b, rows as u32, inner as u32, ff_inner as u32),
+            linear_step(gpu, &xn2, &db.ff_in_gate_w, &gate_b, rows as u32, inner as u32, ff_inner as u32),
+            gpu.step(BIAS_ADD, &[&up_b, &db.ff_in_up_b], &[rows as u32, ff_inner as u32], (rows * ff_inner) as u32),
+            gpu.step(BIAS_ADD, &[&gate_b, &db.ff_in_gate_b], &[rows as u32, ff_inner as u32], (rows * ff_inner) as u32),
         ],
     );
 
-    // ff_raw = [gate_states | gate] (the reference's own chunk order); the
-    // MLP output is gate_states * silu(gate) - swiglu_fwd's (gate, up) args
-    // are (silu'd, passthrough), so gate_states plays "up" and gate plays
-    // "gate" here. Splitting on the host is cheap relative to the matmuls
-    // either side of it and avoids a strided-view kernel just for this cut.
-    let ff_host = gpu.read(&ff_raw, rows * 2 * ff_inner);
-    let mut up = vec![0.0f32; rows * ff_inner];
-    let mut gate = vec![0.0f32; rows * ff_inner];
-    for r in 0..rows {
-        up[r * ff_inner..(r + 1) * ff_inner].copy_from_slice(&ff_host[r * 2 * ff_inner..r * 2 * ff_inner + ff_inner]);
-        gate[r * ff_inner..(r + 1) * ff_inner].copy_from_slice(&ff_host[r * 2 * ff_inner + ff_inner..(r + 1) * 2 * ff_inner]);
-    }
-    let gate_b = gpu.storage_init("ff_gate", &gate);
-    let up_b = gpu.storage_init("ff_up", &up);
     let act = gpu.storage((rows * ff_inner) as u64);
     gpu.submit(&[], &[swiglu_fwd(gpu, &kernel_ids(), &gate_b, &up_b, &act, (rows * ff_inner) as u32)]);
 
@@ -427,6 +532,27 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
 
     let x_next = gpu.storage((rows * inner) as u64);
     gpu.submit(&[], &[gpu.step(ADD2, &[&xmid, &ff_out, &x_next], &[(rows * inner) as u32], (rows * inner) as u32)]);
+
+    // Bound the forward's device footprint to ONE block's scratch.
+    //
+    // The FFN split's readback used to be this block's only queue drain, so
+    // deleting it deleted the drain too - and this is not optional
+    // bookkeeping: `Gpu::submit` merely appends to the backend's pending
+    // list, a pending `Step` holds its buffers alive, and wgpu cannot
+    // reclaim a submitted buffer's memory until a poll observes the work
+    // complete. Without a drain here all 36 blocks' intermediates stay
+    // resident at once - ~257 MB per block at `DitConfig::real()` (rows=690)
+    // on top of 9.66 GB of weights, which is a hard `wgpu error: Out of
+    // Memory` on a 24 GB P40, measured, not predicted.
+    //
+    // `Gpu::flush` is NOT enough and was tried: it submits without waiting,
+    // so nothing has completed and nothing is reclaimable. It OOMs at
+    // exactly the same place. This has to be the blocking form.
+    //
+    // What the block no longer pays is the TRANSFER: the drain stays, the
+    // 45.2 MB down + 2 x 22.6 MB up per block, the host slicing and the two
+    // re-uploads are gone.
+    gpu.poll_wait();
     x_next
 }
 
@@ -652,6 +778,116 @@ mod tests {
                 assert_eq!(fresh, reused, "resident forward drifted from a fresh upload at t={t}");
             }
         }
+    }
+
+    /// Splitting the fused `ff_in` weight at upload must be a bit-for-bit
+    /// no-op against the fused linear the block used to run.
+    ///
+    /// `block_fwd` no longer produces a `[rows, 2*ff_inner]` activation at
+    /// all - it runs two `[ff_inner, inner]` linears whose outputs already
+    /// ARE `up` and `gate`, so the host round trip that used to cut them
+    /// apart is gone. That rests on exactly one claim: `out[m, c] = sum_k
+    /// x[m, k] * w[c, k]` reduces over `k` only, so a weight row's output
+    /// cannot depend on how many OTHER rows share the dispatch. This is the
+    /// gate on it, and equality has to be exact - anything else means the
+    /// GEMM's reduction order moves with `n`, and the model's output moved
+    /// with it.
+    ///
+    /// Both shapes matter and neither is redundant. `(640, 256)` is the
+    /// production case: `n` a multiple of `matmul_reg3`'s 128-wide tile
+    /// either way, so the two half dispatches tile exactly as the fused one
+    /// did. `(130, 100)` is deliberately ragged - `m` past one tile, and
+    /// neither `2*ff_inner` nor `ff_inner` a multiple of 128 - so the split
+    /// changes the partial-tile geometry (`2 * 100.div_ceil(128)` tiles
+    /// where the fused form had `200.div_ceil(128)`) and the masking of the
+    /// out-of-range lanes has to stay exact too.
+    ///
+    /// Runs on the pooled test device, not `Gpu::new_cpu`: on the CPU
+    /// backend `linear_step` picks the reference `matmul` (the JIT reports
+    /// `workgroup_reductions: false`), so pinning this test to the CPU
+    /// would never touch `matmul_reg3` - the kernel the real forward runs.
+    #[test]
+    fn splitting_the_ff_in_weight_matches_the_fused_linear_bit_for_bit() {
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        for (rows, inner, ff_inner) in [(640usize, 256usize, 256usize), (130, 100, 100)] {
+            let mut r = Lcg::new(0xF17 ^ rows as u64);
+            let x = r.vec_scaled(rows * inner, 0.7);
+            let w = r.vec_scaled(2 * ff_inner * inner, 0.5);
+            let b = r.vec_scaled(2 * ff_inner, 0.3);
+            let xb = gpu.storage_init("x", &x);
+            let tag = format!("rows={rows} inner={inner} ff_inner={ff_inner}");
+
+            // The fused form, plus the host slice that used to follow it.
+            let wb = gpu.storage_init("ff_in.weight", &w);
+            let bb = gpu.storage_init("ff_in.bias", &b);
+            let fused = gpu.storage((rows * 2 * ff_inner) as u64);
+            gpu.submit(
+                &[],
+                &[
+                    linear_step(&gpu, &xb, &wb, &fused, rows as u32, inner as u32, (2 * ff_inner) as u32),
+                    gpu.step(BIAS_ADD, &[&fused, &bb], &[rows as u32, (2 * ff_inner) as u32], (rows * 2 * ff_inner) as u32),
+                ],
+            );
+            let fused_host = gpu.read(&fused, rows * 2 * ff_inner);
+            let mut want_up = vec![0.0f32; rows * ff_inner];
+            let mut want_gate = vec![0.0f32; rows * ff_inner];
+            for i in 0..rows {
+                let row = &fused_host[i * 2 * ff_inner..(i + 1) * 2 * ff_inner];
+                want_up[i * ff_inner..(i + 1) * ff_inner].copy_from_slice(&row[..ff_inner]);
+                want_gate[i * ff_inner..(i + 1) * ff_inner].copy_from_slice(&row[ff_inner..]);
+            }
+
+            // The split form, exactly as `upload_blocks` + `block_fwd` build it.
+            let half = w.len() / 2;
+            let up_w = gpu.storage_init("ff_in.weight.up", &w[..half]);
+            let gate_w = gpu.storage_init("ff_in.weight.gate", &w[half..]);
+            let up_bias = gpu.storage_init("ff_in.bias.up", &b[..ff_inner]);
+            let gate_bias = gpu.storage_init("ff_in.bias.gate", &b[ff_inner..]);
+            let up = gpu.storage((rows * ff_inner) as u64);
+            let gate = gpu.storage((rows * ff_inner) as u64);
+            gpu.submit(
+                &[],
+                &[
+                    linear_step(&gpu, &xb, &up_w, &up, rows as u32, inner as u32, ff_inner as u32),
+                    linear_step(&gpu, &xb, &gate_w, &gate, rows as u32, inner as u32, ff_inner as u32),
+                    gpu.step(BIAS_ADD, &[&up, &up_bias], &[rows as u32, ff_inner as u32], (rows * ff_inner) as u32),
+                    gpu.step(BIAS_ADD, &[&gate, &gate_bias], &[rows as u32, ff_inner as u32], (rows * ff_inner) as u32),
+                ],
+            );
+
+            assert_eq!(gpu.read(&up, rows * ff_inner), want_up, "ff_in up half moved at {tag}");
+            assert_eq!(gpu.read(&gate, rows * ff_inner), want_gate, "ff_in gate half moved at {tag}");
+        }
+    }
+
+    /// The block stack must not read anything back to the host.
+    ///
+    /// A forward's device->host readbacks are fixed by its structure, not by
+    /// its depth: the embed preamble's transpose, the block stack's final
+    /// residual, and the head epilogue's output. THREE, whatever
+    /// `num_layers` is. Before the `ff_in` weight split, `block_fwd` also
+    /// read its fused FFN activation back per block, so the count was
+    /// `3 + num_layers` and each of those reads drained the queue.
+    ///
+    /// This asserts the structure, which the numbers cannot: a timing that
+    /// improved would not distinguish "the round trip is gone" from "the
+    /// round trip is still there and the machine was quiet".
+    #[test]
+    fn a_forward_reads_back_three_times_whatever_the_depth() {
+        let cfg = DitConfig::tiny();
+        assert!(cfg.num_layers >= 2, "a depth-independent count needs depth to vary");
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let w = dit_train::random_weights(&cfg, 0xD19);
+        let length = 3usize;
+        let mut r = Lcg::new(0xD19 ^ 0xBEEF);
+        let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+        let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
+        let res = Resident::new(&gpu, &cfg, &w, length);
+
+        let before = gpu.stats().expect("the CPU backend counts device ops").readbacks;
+        let _ = forward_resident(&gpu, &cfg, &w, &res, &latents, &condition, 0.5, length);
+        let after = gpu.stats().expect("the CPU backend counts device ops").readbacks;
+        assert_eq!(after - before, 3, "forward_resident readbacks (num_layers={})", cfg.num_layers);
     }
 
     /// A `Resident` built for one chunk length must refuse a call at a
