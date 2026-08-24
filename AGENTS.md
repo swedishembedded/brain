@@ -267,9 +267,10 @@ fast and scalable kernel - not a naive one.
     gated at **exact id equality** vs HF `CLIPTokenizer` on both SDXL tokenizers.
     **Serving contract met**: `clip::caps` (`embed_text` batched per-tower,
     `embed_image`), `resident_clip::ClipResident` (`BRAIN_CLIP_DIR`), D-Bus
-    `Run` - still missing a runnable `examples/` entry. *(Forward only:
-    backward/gradcheck is deferred - see the Limits section of
-    `docs/models/clip.md`.)*
+    `Run`, `examples/embedding/clip_embed.py`. **Backward is gated**
+    (`gradcheck::check_clip`, wired in
+    `crates/gradcheck/tests/imaging_models.rs`; `check_clip_bigg` and
+    `check_clip_tiled` cover the bigG tower and the tiled path).
 
 12e. **SDXL UNet2DConditionModel** (`crates/sdxlunet`) - the first UNet *diffusion
     backbone* in the imaging stack (`crates/diamond` has a UNet-shaped world
@@ -376,6 +377,32 @@ fast and scalable kernel - not a naive one.
     *(**No image-to-video**, no INT8, no `lora_train` action, no batched forward,
     and NOT optimized - see `.agents/roadmap/wan.md` for the published per-kernel
     profile that a later optimization pass is measured against.)*
+
+12i. **LTX-2.5** (`crates/ltxv`, + `crates/gemma4` as its text encoder) - a
+    **two-stream (video + audio)** diffusion transformer, and the widest port
+    in the repo. Implemented and parity-gated: the causal 3D video VAE
+    (`vae3d`), the 2D causal-conv **audio VAE** (`audio_vae`) and the
+    BigVGAN/snakebeta **vocoder** (`vocoder`) all on real weights; the
+    video-only DiT stream and the **audio DiT stream + bidirectional
+    audio<->video cross-attention** (`block::LtxAvBlock`, per-block `[5,dim]`
+    adaLN tables, a cross-modality-sigma gate, a shared time-only cross-modal
+    RoPE space) at **tiny-config op-sequence parity only**
+    (`tests/dit_parity.rs`); the convolution-free `DiffusionVideoDecoder` /
+    3D neighborhood attention (`na_decoder`), not yet wired into the
+    pipeline. Also int8, LoRA/finetune (video and A/V), sharding, and a
+    long-form path. **Serving contract met**: `ltxv::caps`,
+    `resident_ltxv::LtxvResident`, a `catalog.rs` entry.
+    *(**The `t2v` pipeline is a SMOKE TEST**, and says so: real scheduler
+    math, real CFG denoise loop and real VAE decode, but a **tiny
+    random-weight DiT** and a **stub text context** - the real 22B checkpoint
+    import and the real Gemma-4 text encoder are both open. Do not read
+    "serving contract met" here as "LTX-2.5 generates video". See
+    `pipeline.rs`'s module doc and `.agents/roadmap/ltxv.md`.)*
+    **`crates/gemma4`** is LTX-2.5's text tower (the text-only forward path
+    through a 12B unified text/vision/audio model - no vision or audio
+    tower): tiny-dim op-sequence parity against goldens, plus a real
+    686-tensor shape-level import. Real-weight per-stage parity at full
+    scale is a tracked gap.
 
 ### Audio / speech
 
@@ -530,6 +557,28 @@ fast and scalable kernel - not a naive one.
     training (both generations) remain forward-only. Full ledger:
     `.agents/roadmap/cosyvoice.md`.
 
+13g. **MiniMax Music 3** (`crates/minimaxmusic3`) - the repo's music-generation
+    model: lyrics + a structured caption in, a full song (up to 5 minutes,
+    44.1 kHz stereo) out. Five chained components, only three of them new
+    here: a **Global LLM** (a real Qwen3-8B, reused verbatim from
+    `crates/qwen3` - `vocab=200000`, from the checkpoint's own
+    `language_model/config.json`, NOT the smaller published Qwen3-8B preset)
+    emitting one semantic RVQ code per 25 Hz frame under CFG → an **RVQ depth
+    decoder** (4-layer causal transformer predicting the 7 residual codebooks
+    per frame) → a **condition encoder** (softmax layer-mix, conv proj,
+    resample to latent rate) → a **36-layer flow-matching DiT** denoising
+    Flow-VAE latents in 200-frame chunks (100-frame hop, 172-latent overlap
+    splice) → a **DAC-style SnakeBeta vocoder**. Ported from an unmerged
+    `diffusers` PR - there is no official upstream inference code. INT8,
+    LoRA and sharding on the DiT; a discriminator and training loops exist
+    per component. **Serving contract met**: `minimaxmusic3::caps`
+    (`generate`), `resident_minimaxmusic3::MinimaxMusic3Resident`, a
+    `catalog.rs` entry, D-Bus, `examples/musicgen/`.
+    *(Load-per-call, like `cosyvoice`. The real short end-to-end WAV gate is
+    written but blocked on this box; joint generator+discriminator training
+    and a multi-resolution discriminator are open. See
+    `.agents/roadmap/minimaxmusic3.md`.)*
+
 ### Forecasting
 
 14. **Chronos-2** (`crates/chronos2`) - encoder-only T5-style patch transformer,
@@ -634,6 +683,10 @@ front-end to depend on.
 | `wgsl-cpu` | the CPU backend's compiler: WGSL → naga IR → Cranelift JIT |
 | `vulkan` | **optional, non-default** `VK_KHR_cooperative_matrix` matmul path (excluded from `default-members`; build with `-p brain-vulkan` / cli feature `vulkan-coopmat`) |
 | `paramstore` / `optim` | param/grad/Adam buffers; AdamW + global grad-norm clip |
+| `arch` | **the canonical model-architecture registry** (`ARCHS`). brain used to have four drifting answers to "which architecture is this" (the CLI's subcommand names, `modelstore::plan`'s HF-class substring scan, the GGUF importer table, `ModelCard::family`); all four read this table now. The `[a-z0-9]+` naming rule - llama.cpp's `LLM_ARCH_*` vocabulary where one exists, the upstream paper/repo name otherwise - lives here. **Adding a model means adding its row here**, not inventing a name at a call site |
+| `memauth` | **the process-wide memory authority.** `residency`'s per-device integer budgets cannot express two things: (1) on an integrated GPU/NPU, "device VRAM" and "system RAM" are the SAME physical bytes, so two independent pools double-count; (2) `MemAvailable`/cgroup `memory.max` move while the process runs, so a budget probed once at startup is blind. `Topology` declares which devices share a `PoolId`, `PoolProbe` is the injectable live view (real one reads `/proc/meminfo` + cgroup v2; every test uses `FixedProbe` and never touches the machine), `MemoryAuthority` answers "may I allocate N bytes on device D right now" as an RAII `Grant` |
+| `weightset` | **within-instance** weight residency: a fixed-size window of device slots over a model's weight *groups* (a transformer block, not a tensor). Distinct from `residency::EvictionPolicy`, which scores the *past* for an unpredictable request stream - a denoise or decode loop visits its groups in an order known exactly in advance, so `ResidencyPlan` plans over the known future instead. Pure host-side bookkeeping, no device memory, fully unit-testable without a GPU |
+| `shutdown` | process lifecycle for every serving surface: one shutdown source (`Shutdown`) and one readiness latch (`ready::Gate`). SIGINT/SIGTERM disposition is **process-wide** - if each surface calls `tokio::signal::ctrl_c()` independently, only the first registration receives it and which one is unspecified. `install_signals` owns the single registration on a dedicated thread, so it does not matter which surface's runtime is built first |
 | `checkpoint` | `.safetensors` container + manifest/SHA-256 + expert-shard I/O (no fs on wasm) |
 | `model` | architecture-agnostic `Model` abstraction, generic trainer, shared block builders (`block.rs`, `vit.rs`), paged KV, and the multi-GPU parallelism layer |
 | `autodiff` | shared SSA forward-cache / reverse-mode scaffolding - **placeholder** |
@@ -662,9 +715,13 @@ front-end to depend on.
 | `diffusion` / `dit` / `vae` / `s3dit` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
 | `flux1` / `flux2` / `t5encoder` | FLUX.1/Kontext 12B MMDiT + edit path; FLUX.2 Klein 4B/9B MMDiT; T5-XXL and umT5-XXL text-conditioning encoders |
 | `wan` | Wan2.1/2.2 text-to-video: the 3D-latent DiT, the causal 3D VAE, the sampling pipeline, both importers, and the host trainer/LoRA |
+| `ltxv` / `gemma4` | LTX-2.5 two-stream (video+audio) DiT, both VAEs, the vocoder, the NA diffusion decoder, int8/LoRA/shard/long-form - pipeline is a smoke test, see Models 12i; Gemma-4 text-only tower that conditions it |
 | `sdxlunet` / `controlnet` / `pulid` / `instantid` | SDXL UNet backbone; the backbone-agnostic control seam + its SDXL producer; PuLID identity conditioning on FLUX.1; InstantID's IP-Adapter-FaceID shapes (**forward not implemented** - see `crates/instantid/src/lib.rs`) |
 | `vqgan` / `codeformer` / `rrdbnet` | VQGAN/CodeFormer VQ autoencoder; CodeFormer face restoration; Real-ESRGAN super-resolution - the imaging pipeline's code/restore/upscale tail |
 | `audio` / `mimi` / `ecapatdnn` / `qwen3tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
+| `minimaxmusic3` | MiniMax Music 3 lyrics+caption → song: RVQ depth decoder, condition encoder, 36-layer flow-matching DiT, DAC-style vocoder (Global LLM is `crates/qwen3` verbatim) |
+| `cosyvoice` / `s3tokenizer` / `campplus` | CosyVoice 2/3 zero-shot voice cloning; FSQ speech tokenizer; CAM++ x-vector |
+| `atif` / `rl` | the training-from-trajectories pair: `atif` is a manual byte-for-byte mirror of sven's Agent Trajectory Interchange Format crate (re-sync by diffing against sven's `crates/atif`; brain adds no behaviour of its own), `rl` is `model::train::fit` lifted to reward-weighted batches over any `Model` that implements `enable_weighted_loss` (today only `qwen3`) |
 | `qwen3asr` | Whisper-style + Nemotron 3.5 FastConformer streaming ASR |
 | `qwen3omnimoe` / `qwen3vl` / `fastvlm` / `moondream3` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 - see `docs/models/vlm.md` for the latter three |
 | `deepseek2ocr` / `deepseek2` / `sam1` | DeepSeek-OCR: the composite (DeepEncoder + splice + decoder, `import`/`caps` incl. the served `generate`); its DeepSeek-V2-family MoE decoder; the SAM-1 ViT-B tower the DeepEncoder is built on |
@@ -1276,10 +1333,17 @@ a metric that isn't there was simply forgotten.
   `check_qwen35_lora`, `check_qwen35_mtp`, `check_moe`,
   `check_glm`, `check_glm_mtp`, `check_pid`,
   `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`,
-  `check_wan` (+ `_conditioning`), plus the
-  imaging workstream's `check_sam2`, `check_arcface`, `check_vqgan`,
-  `check_clip`, `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
-  and `check_codeformer` (+ `_one_layer`). SSA-style forward (each stage
+  `check_wan` (+ `_conditioning`), `check_ltxv` (+ `_av`, `_conditioning`,
+  `_av_conditioning`), `check_cosyvoice_lm` (+ `_block`), `check_qwen2`,
+  `check_qwen_mrope`, `check_qwen3_weighted`, `check_vlm_splice`,
+  `check_dit`, `check_vocoder`, `check_deepseekocr_relpos`
+  (+ `_elementwise`), `check_matmul_bf16_weight`, plus the
+  imaging workstream's `check_sam2` (+ `_on`), `check_arcface`, `check_vqgan`
+  (+ `_lowered`), `check_clip` (+ `_bigg`, `_tiled`),
+  `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
+  and `check_codeformer` (+ `_one_layer`). The authoritative list is
+  `grep 'pub fn check_' crates/gradcheck/src/` - an entry point that is not
+  wired into `crates/gradcheck/tests/` is not a gate. SSA-style forward (each stage
   writes a fresh buffer that doubles as the backprop activation cache) -
   preserve it when adding stages.
 
@@ -1287,11 +1351,16 @@ a metric that isn't there was simply forgotten.
   every new model, not an opt-out.** Forward-only is the exception, and it
   requires the same explicit justification the models that already ship that
   way recorded when they did: `check_flux1`, `check_unet`,
-  `check_controlnet`, `check_pulid`, `check_instantid` are genuinely absent
+  `check_controlnet`, `check_pulid`, `check_instantid`, `check_chronos2`
+  and `check_rrdbnet` are genuinely absent
   because those ports prioritized reaching a working forward pass on
   hardware-constrained checkpoints first, each documented in its own
   `.agents/roadmap/<model>.md` - that list is a record of what shipped
-  under real constraints, not a template to reach for on a new port. Do not
+  under real constraints, not a template to reach for on a new port.
+  `check_unet` is the cheapest of them to close (SDXL's forward is built
+  entirely from existing conv/transformer blocks, so its backward composes
+  existing adjoints), and closing it unblocks `check_controlnet`, whose
+  trainable copy is those same blocks. Do not
   cite "some models ship forward-only" as a reason to skip backward on a new
   model; if a genuine constraint forces that tradeoff, name it and record it
   the same way, in the same change.
@@ -1347,9 +1416,9 @@ a metric that isn't there was simply forgotten.
   and `t5encoder`'s batch rows into one forward at a shared context length;
   the rest - including `sdxlunet`, `controlnet`, `flux1` and `pulid`, each a
   full multi-step sample per call with no batch axis to fill - are the
-  serial default and each says why in-file. `clip` has no `examples/` entry
-  yet (every other one of the eleven does, under
-  `examples/{vision,restore,embedding,imagegen}/`). `controlnet`'s `caps` is
+  serial default and each says why in-file. All eleven now have a runnable
+  `examples/` entry, under
+  `examples/{vision,restore,embedding,imagegen}/`. `controlnet`'s `caps` is
   its own sampler loop (`sdxlunet::pipeline::Sdxl` has no seam for a per-step
   residual), built on `Unet::new_controlled` + `Unet::run_with_control`
   rather than composed on top of `pipeline::Sdxl` - see
