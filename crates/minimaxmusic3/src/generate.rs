@@ -28,6 +28,14 @@
 //! ("do not override") by default and otherwise takes a `--device`-shaped
 //! token straight to [`Gpu::open`].
 //!
+//! Both of the stages that have two independent halves use two cards when
+//! the machine has two: the AR stage loads its conditional and
+//! unconditional Global LLM instances on separate cards
+//! ([`ar_branch_devices`]), and the denoise stage runs the DiT's two CFG
+//! branches concurrently, one per card ([`denoise::CfgDevices`],
+//! [`crate::devplan`]) - bit-identically, and only when nothing pinned the
+//! run to one device.
+//!
 //! These two stages used to call `Gpu::new_cpu` unconditionally, which
 //! pinned the 36-layer DiT and the 512x-upsample vocoder to the CPU
 //! backend no matter what the caller asked for - the two most
@@ -165,11 +173,18 @@ fn ar_branch_devices() -> (Option<u32>, Option<u32>) {
 /// works, not as evidence about wgpu; see the roadmap ledger's Phase 13
 /// correction for the probe that would settle it.
 ///
-/// With two or more schedulable GPUs they go on different cards (the
-/// second one is idle for the whole of both stages anyway - the AR stage
-/// released it). With one, or when the caller pinned a device explicitly,
-/// that choice stands: an explicit `--device` is an instruction, not a
-/// hint.
+/// With two or more schedulable GPUs they go on different cards. With one,
+/// or when the caller pinned a device explicitly, that choice stands: an
+/// explicit `--device` is an instruction, not a hint.
+///
+/// The denoise stage no longer LEAVES the second card idle, though: its two
+/// CFG branches run one per card ([`denoise::CfgDevices`],
+/// [`crate::devplan`]), so what this function still decides for that stage
+/// is only where the branch that is not borrowing the other card lives -
+/// the same `gpus[0]`, from the same schedulable set the placement reads.
+/// The vocoder stage runs after the DiT and its `CfgDevices` have both
+/// dropped, so it still gets a card with nothing of the denoise stage on
+/// it.
 fn stage_devices(explicit: Option<&str>) -> (Option<String>, Option<String>) {
     if let Some(dev) = explicit {
         return (Some(dev.to_string()), Some(dev.to_string()));
@@ -230,14 +245,20 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         let cond_w = condition_encoder::import(&paths.condition)?;
         let dit_cfg = DitConfig::real();
         let dit_w = dit::import(&paths.dit, &dit_cfg)?;
-        let gpu = Gpu::open(denoise_dev.as_deref(), dit::PIPELINES);
+        // One handle per card the CFG placement names, opened ONCE for the
+        // whole stage and reused across every chunk. On a two-card box that
+        // is both cards: the DiT's conditional and zero-condition forwards
+        // run concurrently, one per card (`denoise::CfgDevices`,
+        // `crate::devplan`), which is the only place in this pipeline where
+        // the second card is not simply idle for the whole denoise stage.
+        let devices = denoise::CfgDevices::open(denoise_dev.as_deref(), opts.device.as_deref());
         let starts = denoise::chunk_starts(num_frames);
         let mut state = denoise::ChunkState::default();
         starts
             .iter()
             .enumerate()
             .map(|(i, &start)| {
-                let latents = denoise::denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, opts.num_inference_steps, opts.seed.wrapping_add(i as u64 + 1), progress);
+                let latents = denoise::denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, opts.num_inference_steps, opts.seed.wrapping_add(i as u64 + 1), progress);
                 let chunk_frames = (start + denoise::CHUNK_FRAMES).min(num_frames) - start;
                 let length = condition_encoder::latent_length(&cond_cfg, chunk_frames);
                 (latents, length)

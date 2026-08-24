@@ -25,9 +25,21 @@
 //! blends two full model branches. Two independent CFG axes, ported
 //! independently, matching the reference's own two independent `Guider`
 //! components.
+//!
+//! Those two forwards share `latents`, the timestep and `length` and differ
+//! only in the condition, so on a two-card box they run **concurrently, one
+//! per card** ([`CfgDevices`], placed by [`crate::devplan`]) - which is the
+//! whole point, because this stage is ~all of a generation's wall clock and
+//! the second card was otherwise idle for every minute of it. They exchange
+//! only host-side `Vec<f32>`, so there is no cross-device transfer to
+//! arrange, and the fold below still runs on the orchestrating thread in
+//! the same order either way: the concurrent path is **bit-identical**, and
+//! [`tests::the_concurrent_cfg_pair_is_bit_identical_to_the_sequential_one`]
+//! gates that rather than assuming it.
 
 use crate::condition_encoder::{self, ConditionEncoderWeights};
 use crate::config::{ConditionEncoderConfig, DitConfig};
+use crate::devplan::{self, DevicePlan, Placement};
 use crate::dit::{self, DitWeights};
 use data::rng::Rng;
 use diffusion::scheduler::{default_z_image_sigmas, FlowMatchConfig, FlowMatchEulerScheduler};
@@ -76,6 +88,147 @@ fn gaussian_vec(seed: u64, n: usize) -> Vec<f32> {
     (0..n).map(|_| r.next_gaussian() as f32).collect()
 }
 
+/// The device handle(s) one generation's CFG branches run on, opened once
+/// for the whole denoise stage.
+///
+/// `uncond` is `Some` only for a genuinely split [`Placement`] - one card
+/// per branch. On every other machine (one schedulable card, the CPU
+/// backend, an explicitly pinned device, `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0`)
+/// it is `None` and both forwards run on `cond`, one after the other, which
+/// is byte-for-byte what this stage did before.
+///
+/// A `Gpu` is expensive to build (device init plus one shader compile per
+/// kernel) and hostile to the driver when several exist per card, so this
+/// is built ONCE per generation and reused across every chunk - never per
+/// chunk and never per step.
+pub struct CfgDevices {
+    cond: Gpu,
+    cond_card: Option<u32>,
+    /// `(card, handle)` for the unconditional branch's own card.
+    uncond: Option<(u32, Gpu)>,
+}
+
+impl CfgDevices {
+    /// Both branches on `gpu`, sequentially.
+    pub fn single(gpu: Gpu) -> CfgDevices {
+        CfgDevices { cond: gpu, cond_card: None, uncond: None }
+    }
+
+    /// Resolve [`DevicePlan::Auto`] against this machine and open one handle
+    /// per card it names.
+    ///
+    /// `stage_device` is the `--device`-shaped token
+    /// `crate::generate::stage_devices` picked for the denoise stage, used
+    /// only when the plan declines to split; `explicit` is the caller's own
+    /// `GenOpts::device`, which forces that decline (see
+    /// [`DevicePlan::resolve`]). When the plan DOES split it names both
+    /// cards itself, from the same schedulable set `stage_devices` reads.
+    pub fn open(stage_device: Option<&str>, explicit: Option<&str>) -> CfgDevices {
+        let place = DevicePlan::Auto.resolve(explicit);
+        Self::open_placed(place, stage_device)
+    }
+
+    /// [`CfgDevices::open`] against an already-resolved placement - the seam
+    /// the bit-identity gate drives so it can build both shapes on one box.
+    pub fn open_placed(place: Placement, stage_device: Option<&str>) -> CfgDevices {
+        if !place.cfg_is_parallel() {
+            return CfgDevices::single(Gpu::open(stage_device, dit::PIPELINES));
+        }
+        let (cond, uncond) = (place.cond.expect("a parallel placement names both cards"), place.uncond.expect("a parallel placement names both cards"));
+        // By canonical index, not through a formatted `gpu<i>` token: the
+        // index came from `ambient_compute_set()` already, and an
+        // out-of-range one is an error here rather than a silent fall-through
+        // to the ambient card (AGENTS.md: never a silent clamp).
+        let on = |i: u32| Gpu::new_on_index(i, dit::PIPELINES).unwrap_or_else(|e| panic!("minimaxmusic3: the CFG placement named gpu{i}, which this machine refused: {e}"));
+        CfgDevices { cond: on(cond), cond_card: Some(cond), uncond: Some((uncond, on(uncond))) }
+    }
+
+    /// True when the two branches really do have a card each.
+    pub fn is_parallel(&self) -> bool {
+        self.uncond.is_some()
+    }
+}
+
+/// One chunk's uploaded DiT weights and RoPE tables, **one set per card**.
+///
+/// Built once per chunk and reused across all `2 * num_inference_steps`
+/// evaluations - see [`dit::Resident`] for why rebuilding per step is the
+/// regression this type exists to prevent (~9.7 GB of host->device traffic
+/// per evaluation at `DitConfig::real()` dims). A split placement therefore
+/// costs ~9.7 GB on EACH card, not 19.4 GB on one.
+struct ChunkResidents<'a> {
+    devices: &'a CfgDevices,
+    cond: dit::Resident,
+    uncond: Option<dit::Resident>,
+}
+
+impl<'a> ChunkResidents<'a> {
+    /// Upload this chunk's weights to every card the placement named.
+    ///
+    /// The two uploads are the same ~9.7 GB of host bytes going to two
+    /// different cards over two different PCIe paths, so they run
+    /// concurrently for the same reason the forwards do. Serialising them
+    /// would put a second full weight upload on every chunk's critical path
+    /// and hand back a slice of what the concurrent forwards just won.
+    fn new(devices: &'a CfgDevices, cfg: &DitConfig, w: &DitWeights, length: usize) -> ChunkResidents<'a> {
+        let Some((card_u, gpu_u)) = devices.uncond.as_ref() else {
+            return ChunkResidents { devices, cond: dit::Resident::new(&devices.cond, cfg, w, length), uncond: None };
+        };
+        std::thread::scope(|s| {
+            let u = s.spawn(move || devplan::on_gpu(Some(*card_u), || dit::Resident::new(gpu_u, cfg, w, length)));
+            let c = devplan::on_gpu(devices.cond_card, || dit::Resident::new(&devices.cond, cfg, w, length));
+            let u = u.join().unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+            ChunkResidents {
+                devices,
+                cond: c.expect("the conditional card is in the schedulable set"),
+                uncond: Some(u.expect("the unconditional card is in the schedulable set")),
+            }
+        })
+    }
+
+    /// One Euler step's two forwards: sequentially when both branches share
+    /// a card, and concurrently - one thread per card, each scoped with
+    /// `devplan::on_gpu` - when they do not.
+    ///
+    /// Sharing `&self` across the two threads is safe for reasons that are
+    /// properties of the fields rather than assumptions about them, and the
+    /// argument is checked by the compiler at this call site rather than
+    /// asserted in prose (`std::thread::scope` requires every captured
+    /// reference's target to be `Sync`):
+    ///
+    /// * each branch touches only ITS OWN `Gpu` and its own `Resident`, so
+    ///   no device handle is used from two threads at once;
+    /// * `cfg` and `w` are read-only host data shared by both;
+    /// * `latents` is the same immutable slice for both - they read it, they
+    ///   do not step it; the step happens on the orchestrating thread after
+    ///   both have returned.
+    ///
+    /// The progress callback is deliberately NOT reachable from here: it is
+    /// a `&mut dyn FnMut` (`crate::ProgressSink`), it is not `Sync`, and
+    /// calling it from inside either worker would reorder the per-step
+    /// reports. It stays on the orchestrating thread, called after the join.
+    fn cfg_pair(&self, cfg: &DitConfig, w: &DitWeights, latents: &[f32], condition: &[f32], zero_condition: &[f32], t: f32, length: usize) -> (Vec<f32>, Vec<f32>) {
+        let (Some(res_u), Some((card_u, gpu_u))) = (self.uncond.as_ref(), self.devices.uncond.as_ref()) else {
+            let cond = dit::forward_resident(&self.devices.cond, cfg, w, &self.cond, latents, condition, t, length);
+            let uncond = dit::forward_resident(&self.devices.cond, cfg, w, &self.cond, latents, zero_condition, t, length);
+            return (cond, uncond);
+        };
+        std::thread::scope(|s| {
+            let u = s.spawn(move || devplan::on_gpu(Some(*card_u), || dit::forward_resident(gpu_u, cfg, w, res_u, latents, zero_condition, t, length)));
+            let c = devplan::on_gpu(self.devices.cond_card, || dit::forward_resident(&self.devices.cond, cfg, w, &self.cond, latents, condition, t, length));
+            // Join before touching either result: an early return would drop
+            // the scope's guard and block on the same join anyway, and
+            // reporting the conditional branch's failure while the
+            // unconditional one is still running reads as a hang. A worker
+            // panic is re-raised with its ORIGINAL payload - the kernel-level
+            // message is what a debugger needs, and wrapping it in a
+            // placement-flavoured string would hide it.
+            let u = u.join().unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+            (c.expect("the conditional card is in the schedulable set"), u.expect("the unconditional card is in the schedulable set"))
+        })
+    }
+}
+
 /// Denoise one chunk: `frame_hiddens` is the WHOLE song's per-frame hidden
 /// states (`[num_frames_total, num_condition_layers*condition_hidden_dim]`
 /// row-major, `pipeline::generate_frames`'s own output layout), sliced here
@@ -84,7 +237,7 @@ fn gaussian_vec(seed: u64, n: usize) -> Vec<f32> {
 /// length]` NCL, and advances `state` for the next call.
 #[allow(clippy::too_many_arguments)]
 pub fn denoise_chunk(
-    gpu: &Gpu,
+    devices: &CfgDevices,
     dit_cfg: &DitConfig,
     dit_w: &DitWeights,
     cond_cfg: &ConditionEncoderConfig,
@@ -139,8 +292,9 @@ pub fn denoise_chunk(
     let prev_span = state.previous_latent.as_ref().map(|p| span_of(p, cin));
     // The DiT's weights and RoPE tables are identical for every one of the
     // `2 * num_inference_steps` evaluations below, so they are uploaded
-    // ONCE here rather than per `dit::forward` call - see `dit::Resident`.
-    let resident = dit::Resident::new(gpu, dit_cfg, dit_w, length);
+    // ONCE here - per card - rather than per `dit::forward` call; see
+    // `dit::Resident` and `ChunkResidents`.
+    let residents = ChunkResidents::new(devices, dit_cfg, dit_w, length);
     let total_steps = timesteps.len() as u32;
     for (step_index, &t) in timesteps.iter().enumerate() {
         if overlap > 0 {
@@ -152,10 +306,11 @@ pub fn denoise_chunk(
                 }
             }
         }
-        let v_cond = dit::forward_resident(gpu, dit_cfg, dit_w, &resident, &latents, &condition, t, length);
-        let v_uncond = dit::forward_resident(gpu, dit_cfg, dit_w, &resident, &latents, &zero_condition, t, length);
+        let (v_cond, v_uncond) = residents.cfg_pair(dit_cfg, dit_w, &latents, &condition, &zero_condition, t, length);
         let velocity: Vec<f32> = v_cond.iter().zip(&v_uncond).map(|(c, u)| u + (c - u) * GUIDANCE_SCALE).collect();
         latents = scheduler.step(&velocity, &latents);
+        // On the orchestrating thread, after both branches have joined - see
+        // `ChunkResidents::cfg_pair` for why this may never move inside one.
         progress(step_index as u32 + 1, total_steps, "denoise");
     }
 
@@ -198,6 +353,59 @@ mod tests {
         }
     }
 
+    /// **The two cards must agree, bit for bit.** The gate on concurrent CFG
+    /// dispatch: running the conditional and zero-condition forwards at the
+    /// same time on two cards must produce results identical to running them
+    /// one after the other on one.
+    ///
+    /// Not a tolerance and not an epsilon: a bit-pattern comparison, because
+    /// the claim is exactness. It should hold trivially - the two forwards
+    /// are independent computations over the same latents, not two halves of
+    /// one reduction, so moving one of them reassociates no sum - and if it
+    /// ever does not, that is a real defect (a nondeterministic kernel, an
+    /// uninitialised read, a `Resident` shared across cards) worth failing on
+    /// rather than papering over with a wider bound.
+    ///
+    /// Runs on whatever this box has: with two schedulable cards it really
+    /// does dispatch across both, at `DitConfig::tiny()` dims so it costs
+    /// milliseconds and needs no checkpoint; with one (or none)
+    /// `DevicePlan::Auto` resolves `Single` and it degenerates to "the same
+    /// thing twice", which still gates the fold and the plumbing.
+    #[test]
+    fn the_concurrent_cfg_pair_is_bit_identical_to_the_sequential_one() {
+        let cfg = DitConfig::tiny();
+        let w = dit_train::random_weights(&cfg, 0xC0FFEE);
+        let (length, cin) = (6usize, cfg.in_channels as usize);
+        let cond_dim = cfg.condition_dim as usize;
+        let mut r = Lcg::new(0xBEEF);
+        let latents = r.vec_scaled(cin * length, 0.7);
+        let condition = r.vec_scaled(length * cond_dim, 0.4);
+        let zero = vec![0.0f32; condition.len()];
+        let t = 0.63f32;
+
+        // The pooled test device for the sequential arm (AGENTS.md: test
+        // binaries share one device rather than building a fixture each);
+        // the concurrent arm must open the two cards its placement names.
+        let seq = CfgDevices::single(gpu_core::testgpu::dev(dit::PIPELINES));
+        let (c0, u0) = ChunkResidents::new(&seq, &cfg, &w, length).cfg_pair(&cfg, &w, &latents, &condition, &zero, t, length);
+
+        let place = DevicePlan::Auto.resolve(None);
+        // Printed, not asserted: this gate is meaningful on a one-card box
+        // too, and the reader of a passing run needs to know WHICH claim it
+        // just checked - two cards, or the same card twice.
+        eprintln!("cfg placement: cond={:?} uncond={:?} genuinely concurrent={}", place.cond, place.uncond, place.cfg_is_parallel());
+        let par = CfgDevices::open_placed(place, None);
+        assert_eq!(par.is_parallel(), place.cfg_is_parallel(), "the opened handles must match the placement they came from");
+        let (c1, u1) = ChunkResidents::new(&par, &cfg, &w, length).cfg_pair(&cfg, &w, &latents, &condition, &zero, t, length);
+
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+        assert_eq!(bits(&c0), bits(&c1), "the conditional branch changed value by being placed on {:?} (parallel={})", place.cond, place.cfg_is_parallel());
+        assert_eq!(bits(&u0), bits(&u1), "the zero-condition branch changed value by being placed on {:?}", place.uncond);
+        // The two branches must genuinely differ, or a dispatch that ran the
+        // conditional forward twice would pass the assertions above.
+        assert_ne!(bits(&c0), bits(&u0), "the real and zeroed conditions must produce different velocities, or this gate proves nothing");
+    }
+
     #[test]
     fn chunk_starts_matches_the_reference_windowing() {
         assert_eq!(chunk_starts(50), vec![0]);
@@ -212,7 +420,7 @@ mod tests {
         let cond_cfg = ConditionEncoderConfig::tiny();
         let dit_w = dit_train::random_weights(&dit_cfg, 1);
         let cond_w = random_condition_weights(&cond_cfg, 2);
-        let gpu = Gpu::new_cpu(dit::PIPELINES);
+        let devices = CfgDevices::single(Gpu::new_cpu(dit::PIPELINES));
 
         let num_frames = 5usize;
         let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
@@ -220,7 +428,7 @@ mod tests {
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
         let mut state = ChunkState::default();
-        let latents = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 7, &mut crate::ignore_progress());
+        let latents = denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 7, &mut crate::ignore_progress());
 
         let expected_length = condition_encoder::latent_length(&cond_cfg, num_frames);
         assert_eq!(latents.len(), dit_cfg.in_channels as usize * expected_length);
@@ -242,7 +450,7 @@ mod tests {
         let cond_cfg = ConditionEncoderConfig::tiny();
         let dit_w = dit_train::random_weights(&dit_cfg, 11);
         let cond_w = random_condition_weights(&cond_cfg, 12);
-        let gpu = Gpu::new_cpu(dit::PIPELINES);
+        let devices = CfgDevices::single(Gpu::new_cpu(dit::PIPELINES));
 
         let num_frames = 5usize;
         let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
@@ -252,7 +460,7 @@ mod tests {
         let steps = 4usize;
         let mut seen: Vec<(u32, u32, String)> = Vec::new();
         let mut state = ChunkState::default();
-        let _ = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, steps, 7, &mut |done, total, stage| {
+        let _ = denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, steps, 7, &mut |done, total, stage| {
             seen.push((done, total, stage.to_string()));
         });
 
@@ -271,7 +479,7 @@ mod tests {
         let cond_cfg = ConditionEncoderConfig::tiny();
         let dit_w = dit_train::random_weights(&dit_cfg, 11);
         let cond_w = random_condition_weights(&cond_cfg, 12);
-        let gpu = Gpu::new_cpu(dit::PIPELINES);
+        let devices = CfgDevices::single(Gpu::new_cpu(dit::PIPELINES));
 
         // Small enough that `chunk_starts` still only emits [0], but we
         // drive `denoise_chunk` twice by hand (at real scale `chunk_starts`
@@ -283,7 +491,7 @@ mod tests {
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
         let mut state = ChunkState::default();
-        let first = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 21, &mut crate::ignore_progress());
+        let first = denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 21, &mut crate::ignore_progress());
         let first_length = condition_encoder::latent_length(&cond_cfg, num_frames);
         assert_eq!(first.len(), dit_cfg.in_channels as usize * first_length);
 
@@ -293,7 +501,7 @@ mod tests {
         assert_eq!(prev_condition.len(), span * cond_cfg.out_dim as usize);
         assert!(span <= first_length.min(OVERLAP_LATENT_LENGTH));
 
-        let second = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 2, &mut state, 4, 22, &mut crate::ignore_progress());
+        let second = denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 2, &mut state, 4, 22, &mut crate::ignore_progress());
         let second_length = condition_encoder::latent_length(&cond_cfg, num_frames - 2);
         assert_eq!(second.len(), dit_cfg.in_channels as usize * second_length);
     }

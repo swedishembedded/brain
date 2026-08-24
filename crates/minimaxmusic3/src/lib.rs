@@ -106,6 +106,7 @@ pub mod config;
 pub mod denoise;
 pub mod depth_decoder;
 pub mod depth_lora;
+pub mod devplan;
 pub mod discriminator;
 pub mod dit;
 pub mod dit_int8;
