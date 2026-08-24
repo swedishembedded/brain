@@ -852,8 +852,576 @@ is the same fix as defect 4 and is the next lever, followed by the
 front-loaded sigma schedule the literature reports taking flow-matching
 models from 30 steps to 7-16 without measured quality loss.
 
+## Phase 15: the DiT's attention was 75% of its device time at 0.5% of roof
+
+`mm3_bench dit 689` - the instrument Phase 14 added - put three quarters of
+this DiT's device time in three kernels that were all flagged DEFECT against
+its 35%-of-roof floor. Measured on a free Tesla P40 at `DitConfig::real()`,
+689 latents / 690 rows, against that card's own measured roofline (10517
+GFLOP/s, 287.5 GB/s DRAM, ridge 36.6 FLOP/byte):
+
+```
+attn_scores_bidir     1817.80 ms   36 calls   50.9%   50.494 ms/call    0.5% of its memory roof
+matmul_reg3            753.65 ms  252 calls   21.1%    2.991 ms/call   42.1% of fp32 peak
+attn_softmax_bidir     686.35 ms   36 calls   19.2%   19.065 ms/call    2.2% of its memory roof
+attn_apply_bidir       186.44 ms   36 calls    5.2%    5.179 ms/call    4.9% of its memory roof
+WHOLE PASS            4383.49 ms  832 dispatches      device-time sum 3583.6 ms
+```
+
+The GEMMs beside them were already at 42% of this card's fp32 peak, i.e. at
+the ceiling `matmul_reg3` reaches anywhere in this workspace - §F.2's test says
+that is structural and attention is not.
+
+The fix was not a kernel. `model::block` has carried the four-rung
+`flash_attn_bidir{,_split,_reg,_reg2}` family and its `flash_bidir_variant`
+selector for some time; `dit::PIPELINES` registered NONE of them. This is
+verbatim the defect class §A opens with and §F.3 asks about first - "a fast
+kernel nobody knew about" - and it is the SECOND instance of it in this one
+file, after the `matmul_reg3` registration recorded in `PIPELINES`' own
+comment.
+
+The shape contract was already met, and was verified rather than assumed
+before the switch: `block_fwd` already packs q/k/v into one `[rows, 3*inner]`
+slab through three `kv_expand` copies, so `stride = 3*inner` and
+`q_off/k_off/v_off = 0/inner/2*inner` are exactly what `flash_bidir_step`
+documents; `d_model = inner = heads*head_dim = 2048`; `head_dim = 64`, inside
+the family's 128 limit; `bsz = 1`; and both arms apply the same
+`inverseSqrt(head_dim)` scale and write the same `[rows, inner]` row-major
+context, so `to_out` and the residual cannot tell them apart. Nothing about
+the dispatch sequence above the attention changed.
+
+After, same binary, same card, same shape:
+
+```
+matmul_reg3            752.26 ms  252 calls   77.5%    2.985 ms/call   42.1% of fp32 peak
+flash_attn_bidir_reg2   93.66 ms   36 calls    9.6%    2.602 ms/call   14.6% of fp32 peak
+layernorm               49.00 ms   72 calls    5.0%    0.681 ms/call    5.8% of its memory roof
+conv1d                  35.42 ms    2 calls    3.6%
+bias_add                17.97 ms  108 calls    1.9%
+WHOLE PASS            1537.21 ms  760 dispatches      device-time sum 970.8 ms
+```
+
+* The attention itself: **2690.6 ms -> 93.7 ms, 28.7x**, and the three
+  dispatches per block became one.
+* Whole forward: **4383 -> 1537 ms wall clock, 2.85x**; device-time sum
+  **3583.6 -> 970.8 ms, 3.69x**. A 30-step chunk of DiT alone drops from
+  ~263 s to ~92 s per CFG branch pair.
+* The selector picked `reg2` on this card (`max_workgroup_size >= 256`,
+  `workgroup_mem_bytes >= 49152`), with no shape term in the decision.
+* The pass is now GEMM-dominated at 77.5%, and those GEMMs are at the card's
+  ceiling - §F.9's "the bottleneck moves" has moved it somewhere there is no
+  obvious next lever inside this kernel set.
+
+`flash_attn_bidir_reg2` at 14.6% of fp32 peak still trips the bench's own 30%
+compute floor, and that is worth stating rather than hiding: `block.rs`'s own
+measured ladder reaches 38.0% at Wan's T=14040, and this model runs at T=690
+with `head_dim` 64 against that kernel's 128-wide compile-time tile, so half
+of every tile is zero-fill. A `head_dim`-specialised template is the honest
+next step for it - but it can return at most 93.7 ms of a 1537 ms pass, which
+is §E's "check what fraction of the PASS it can possibly return" saying not
+yet.
+
+**Not bit-identical, unlike everything else landed on this model so far.**
+Flash attention's online softmax reassociates the sum, so the output moves in
+the last bits by construction. What is gated is `dit_parity` against the
+real-weight diffusers golden, on BOTH backends (§F.4):
+
+| rung | backend | cosine | max_abs | rel_l2 |
+|---|---|---|---|---|
+| real | P40 (flash) | 1.000000000 | 9.537e-6 | 2.550e-6 (was 2.558e-6) |
+| tiny | P40 (flash) | 1.000000000 | 1.565e-7 | 2.533e-7 (was 2.553e-7) |
+| real | `BRAIN_DEVICE=cpu` (trio) | 1.000000000 | 9.537e-6 | 2.514e-6 |
+| tiny | `BRAIN_DEVICE=cpu` (trio) | 1.000000000 | 1.453e-7 | 2.254e-7 |
+
+Both moved rungs moved TOWARDS the reference, which is the expected direction
+for an online-softmax reassociation and not something cosine alone would have
+shown - the `rel_l2` assertion beside it is what makes the table readable as
+evidence.
+
+The fallback is the branch the CPU JIT takes, gated on the same QUERIED
+`workgroup_reductions` capability `linear_step` already reads, so
+`BRAIN_DEVICE=cpu`, `make gradcheck` and the whole backward (`bidir_bwd`,
+`dit_train`) keep the materialized trio unchanged - the flash family is
+forward-only and the backward reads the `probs` slab the flash path never
+writes.
+
+VRAM, measured with `nvidia-smi` sampled once a second across a whole run on
+an otherwise idle card: peak **9759 MiB -> 9553 MiB**. Block weights are 9430
+MiB of that in both, so the per-forward transient scratch is **329 MiB -> 123
+MiB, a 206 MiB / 63% cut** - the `[32, 690, 690]` `scores` and `probs` slabs
+(60.9 MB each) are never materialised.
+
+## Phase 16: the second card stops being idle during the denoise stage
+
+`denoise::denoise_chunk` evaluated the DiT twice per Euler step - once
+against this chunk's condition, once against a zeroed copy of it
+(`denoise.py`'s `zeros_like(condition)`) - one after the other on ONE card,
+while `generate::stage_devices` handed the vocoder stage the other card and
+the two stages never overlap. The second card was therefore at 0% for the
+whole denoise stage, which Phase 13 measures as ~1.2 h of a four-minute
+track. The two forwards share `latents`, the timestep and `length`, share no
+intermediate value, and are read only by the host-side fold
+`u + (c - u) * GUIDANCE_SCALE` after both return - which is exactly the shape
+two cards want.
+
+Ported from `crates/ltxv`'s own solution rather than invented.
+`minimaxmusic3::devplan` is `ltxv::devplan` minus the text-encoder placement:
+`DevicePlan::{Single,Split,Auto}`, `Placement::cfg_is_parallel`, `on_gpu`,
+the base card read from `current_gpu()` so a run scoped by the residency
+executor keeps its assigned card as `cond` and borrows only the other one,
+and a `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0` opt-out matching
+`BRAIN_LTXV_CFG_PARALLEL`'s spelling.
+
+### Landed in this phase
+
+- `denoise::CfgDevices` - one `Gpu` per card the placement names, opened
+  ONCE per generation (not per chunk, never per step) and dropped before the
+  vocoder stage loads, so the vocoder still gets a card with nothing of the
+  denoise stage on it.
+- `denoise::ChunkResidents` - one `dit::Resident` PER CARD, built once per
+  chunk and reused across all `2 * steps` evaluations. The two ~9.7 GB
+  uploads run concurrently for the same reason the forwards do; serialising
+  them would put a second full weight upload on every chunk's critical path
+  and hand back a slice of what the concurrent forwards just won.
+- The progress callback stays on the orchestrating thread, called after the
+  join. `crate::ProgressSink` is a `&mut dyn FnMut`, is not `Sync`, and the
+  tempting fix (cloning or locking it) would reorder the per-step reports -
+  which `every_euler_step_reports_progress` asserts the order of.
+- Falls back to the previous single-card path, byte for byte, on fewer than
+  two schedulable cards, on the CPU backend, when the caller pinned an
+  explicit `GenOpts::device`, and under the env opt-out.
+
+### Bit-identity is the prediction, not a hope
+
+Nothing is split across the cards and recombined, so no sum is reassociated
+and no accumulator partitioned; each card runs the identical dispatch
+sequence over identical bytes it would have run alone. Both gates are
+therefore bit-pattern comparisons rather than tolerances - a disagreement
+would be a real defect (a nondeterministic kernel, an uninitialised read, one
+`Resident` shared across cards, or the two cards' autotuners selecting
+different kernel variants) and is worth failing on.
+
+- `denoise::tests::the_concurrent_cfg_pair_is_bit_identical_to_the_
+  sequential_one` - `DitConfig::tiny()`, milliseconds, no checkpoint, real
+  kernels on real devices. On a two-card box it really does dispatch across
+  both (it prints the placement it resolved); on one card or none it
+  degenerates to the same thing twice and still gates the fold and the
+  plumbing.
+- `crates/minimaxmusic3/tests/cfg_parallel.rs` (`#[ignore]`d - it is the only
+  test here that wants BOTH cards to itself) - the real-weight half: a full
+  200-frame (689-latent) chunk of the real 2.4B DiT, same seed and weights,
+  differing only in the placement, compared bit for bit, plus an assertion
+  that the chunk is not constant (any two runs of a frozen loop agree). It is
+  also where the per-Euler-step wall clock of each arm is reported.
+- 4 new gates in `minimaxmusic3::devplan` pin the placement rules themselves:
+  an explicit device never splits, two branches on one card do not read as
+  parallel, and `Auto` never names a card outside
+  `ambient_compute_set()`.
+
+### Measured
+
+Real `transformer/` checkpoint, one full 200-AR-frame chunk (689 latents x
+128 channels), 5 Euler steps with the first discarded (it carries both
+cards' `Resident` upload and every first-touch cost), two Tesla P40s. The
+per-step numbers come from the progress callback, which is the one point per
+step that runs on the orchestrating thread after both branches have joined.
+The absolute times are against Phase 15's attention; the RATIO is what this
+phase claims, and it does not depend on which kernels a forward dispatches -
+both arms run the identical ones.
+
+| run | box | sequential, one card (s/step) | concurrent, two cards (s/step) | best-of ratio |
+|---|---|---|---|---|
+| A | shared | 2.96 3.12 3.04 3.07 | 1.88 1.76 (then 11.44 11.24) | 1.68x |
+| B | shared | (9.83) 2.88 3.13 3.03 | 2.93 2.26 2.15 2.12 | 1.36x |
+| **C** | **idle** | **3.09 3.10 3.07 3.11** | **1.81 1.88 1.82 2.00** | **1.69x** |
+
+**1.69x per Euler step, and bit-identical over all 88192 latents** in every
+one of the three runs. C is the number to quote: both cards otherwise idle,
+and both arms steady to within 1% and 10% respectively rather than drifting.
+`nvidia-smi` during C's concurrent arm reads 9.55 GiB and ~80% busy on BOTH
+cards at the same time, against gpu1 at 1 MiB and 0% through the whole
+sequential arm - the idle card this phase exists to remove.
+
+A and B are kept because they show which way contention biases the
+measurement: every contaminated sample lands on the CONCURRENT arm, because
+that is the arm needing both cards (A's last two steps jumped to 11 s when a
+neighbouring process took gpu1 mid-run; B's whole concurrent arm ran against
+a neighbour holding ~4 GB there). The sequential arm needs only gpu0 and is
+steady at ~3.1 s/step in all three. A shared box therefore UNDER-reports this
+change, never over-reports it.
+
+2x is the ceiling and this does not reach it, for a reason visible in the
+profile rather than guessed at: `dit::forward_resident` reads a buffer back
+to the HOST in the middle of every one of the 36 blocks, so a real fraction
+of each forward is host work and host<->device sync that two threads on this
+Xeon do not scale perfectly through. Closing that gap is a different piece
+of work (it is the same readback `mm3_bench`'s "total minus summed kernel
+time" gap already reports) and is not attempted here.
+
+For a 4-minute track at the reference's 30 steps, 1.69x turns Phase 13's
+~1.2 h denoise stage into ~43 min, and the AR stage - already the
+bottleneck - stays untouched.
+
+The per-chunk `Resident` upload is the one cost the split ADDS, and it is
+paid concurrently: C's concurrent arm spent 58.2 s on "two 9.7 GB uploads
+plus the first Euler step" against 47.6 s for one upload plus one step, i.e.
+the second card's upload costs ~10 s per chunk rather than the ~40 s a
+serialised second upload would have. At 30 steps per chunk that is ~1% of
+the chunk; at the 8-step schedule it is ~5%, and worth revisiting only if
+the step count drops further.
+
+### The honest gap
+
+`Auto` borrows the second card without asking `crates/residency` whether
+another model is resident on it; there is no seam to ask through today. This
+is not a new claim on the box - `generate::ar_branch_devices` already puts
+the AR stage's two Global LLM instances on both cards unconditionally - but
+it is the same gap, and `devplan`'s module doc states it rather than taking
+the card quietly. What bounds it is `memauth`'s `--limit-vram-total`, which
+is a process-wide TOTAL across all cards rather than a per-card ceiling, so a
+concurrent pair charges it twice: a value sized for one card should be raised
+or paired with `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0`.
+
+## Phase 17: the depth decoder was 77% of a generation, on the host, at 0.5 FLOP/byte
+
+After Phase 15 (flash attention, 28.7x on the DiT's attention trio) and Phase
+16 (the two CFG branches on two cards, 1.69x), the denoise stage was ~10% of a
+generation and the AR stage ~77%. Roughly 90% of that AR stage was
+`depth_decoder`, which ran as pure host math and issued no dispatch at all -
+both P40s read 0% utilisation for the entire AR phase while holding 15 GB of
+Global LLM weights.
+
+`mm3_bench depth` (real checkpoint, 48-core Xeon, two Tesla P40s) at
+`DepthDecoderConfig::real()` - hidden 4096, inter 6144, 4 layers, 16 heads, 8
+codebooks:
+
+```
+call class                           ms/frame        % calls/frame
+projection (seed x2)                     3.16     0.3%          2
+step (transformer block stack)         915.20    98.1%         16
+audio_head                               5.15     0.6%         14
+embedding lookup + projection            9.27     1.0%          6
+WHOLE FRAME                            932.78   (18.38 GFLOP, 36.74 GB streamed
+                                                 -> 19.7 GFLOP/s, 39.4 GB/s)
+```
+
+Every number in this phase comes from one paired `mm3_bench depth 4 3
+--device gpu0` run on the real checkpoint, so the three arms saw the same
+machine. This box is shared, and the HOST arms are the ones contention moves:
+across runs the b=1 arm landed between 933 and 1055 ms/frame and the b=2 arm
+between 489 and 534, while the DEVICE arm sat at 216-220 ms in every run. The
+run quoted here is the least contaminated one (§F: the minimum is the least
+contaminated sample), and a contended box always UNDER-reports the device
+speedup, never over-reports it.
+
+**0.50 FLOP/byte.** That single number decided everything below. The host code
+was not slow - `hostmath::matvec` is already AVX2+FMA over rayon and was
+running at this box's DRAM speed. There was nothing to make faster; there were
+only bytes to stop moving.
+
+### Step 1: batch the two CFG branches on the HOST - 1.91x, bit-identical
+
+`pipeline::generate_depth_codes` drove two independent `KvCache`s with the
+SAME `row` at every position past 0, meeting only at `cfg_blend` after both
+`audio_head` calls. Two `m=1` GEMVs against one weight matrix stream that
+matrix from DRAM twice for arithmetic that could share one pass.
+
+The fix went into the shared primitive, not into this model:
+`hostmath::linear_rows` became ONE `backend_cpu::fast_ops::matmul_abt` call at
+`n = rows` instead of `rows` calls at `n = 1`. `depth_decoder::step_batch` is
+the new b-row step; `step` is a one-line wrapper on it, so there is no second
+copy of the block stack.
+
+It is **bit-identical**, and that was verified rather than reasoned about:
+`row_abt_avx2` gives every output its own 8-wide accumulator and reduces `k`
+in the same order whatever its 4-column register blocking does, so `c[o,r]`
+does not depend on `rows`. `hostmath::tests::linear_rows_is_bit_identical_to_
+a_per_row_matvec_loop` `assert_eq!`s that at rows 1,2,3,4,5,8 (straddling the
+4-column block) and at an `inn` that is not a multiple of 8 (exercising the
+scalar k-tail).
+
+```
+WHOLE FRAME  489.43 ms  (18.38 GFLOP, 18.49 GB streamed -> 37.6 GFLOP/s, 37.8 GB/s)
+b=1 vs b=2 over every hidden state of one frame: max|delta| = 0e0
+```
+
+**932.78 -> 489.43 ms/frame, 1.91x, and the achieved bandwidth did not move
+(39.4 -> 37.8 GB/s).** That is the whole proof of the diagnosis: the win came
+entirely from halving the bytes, not from going faster. It also helps machines
+with no card at all, which is the other half of why this step went in first.
+
+Nothing else in this loop is batchable, and both alternatives are blocked
+rather than unimplemented: the 8 depth steps within a frame are strictly
+dependent (step `i+1`'s input is the embedding of the code sampled from step
+`i`'s logits), and consecutive frames are too (`embed_audio_frame` sums all 8
+codebooks before the Global LLM advances).
+
+### Step 2: the device port - 4.28x total, and ZERO new WGSL
+
+`depth_decoder::Resident` runs the same graph on one card at the same b=2.
+Every op mapped to a kernel that already existed:
+
+| op | kernel | via |
+|---|---|---|
+| RMSNorm | `rmsnorm_eps` / `rmsnorm_rows` | `block::rms_variant` |
+| q/k/v/o, gate/up/down | `matmul_gemv` (m=2) / `matmul` | `block::gemm_variant` |
+| KV append + attention | `paged_kv_append_batched`, `paged_decode_scores_batched`, `decode_softmax_batched`, `paged_decode_apply_batched` | direct, `group = 1` |
+| `silu(gate)*up` | `silu_mul` | `block::swiglu_fwd` |
+| both residual adds | `add2` | direct |
+
+Paging is not a complication here, it is the mechanism that makes attention
+BATCHED over the two branches with no per-row slicing at all: one page per
+branch, `block_size = cap = max_position_embeddings`, `max_bt = 1`, so branch
+`b`'s position `j` is pool row `b*cap + j`. `block::gqa_attn_sublayer_decode_
+step` was deliberately NOT used - it dispatches RoPE unconditionally (this
+architecture has none) and is b=1.
+
+`pos_embedding` is added host-side into the buffer being uploaded rather than
+through a `bias_add` dispatch: the input row comes from the host anyway (it is
+a projection of a freshly sampled code), so the add is free there and costs a
+dispatch on the device.
+
+Measured on one Tesla P40 (measured roof 10517 GFLOP/s, 287.5 GB/s DRAM),
+real checkpoint:
+
+```
+WHOLE FRAME  218.07 ms  (18.38 GFLOP, 18.49 GB streamed -> 84.3 GFLOP/s, 84.8 GB/s)
+Decoder::device upload (ONCE per generation): 6.28 s for 2.28 GB
+host b=2 vs device b=2 over every hidden state of one frame:
+    cosine = 1.000000000, max|delta| = 1.335144e-5
+```
+
+**489.43 -> 218.07 ms/frame, 2.24x on top of the host batching, 4.28x against
+the b=1 baseline** (2.24-2.47x and 4.28-4.88x across runs). A 200-frame
+denoise chunk's worth of depth decoding drops from 187 s to 44 s; a 4-minute
+track's AR depth stage from ~1.6 h to ~0.36 h.
+
+The weights upload ONCE per generation. Re-uploading 2.28 GB per frame at the
+measured 0.36 GB/s would cost 6.3 s per frame against 0.22 s of compute -
+nearly thirty times the computation. This is `dit::Resident`'s lesson at a
+much higher call rate.
+
+### The per-kernel table, and the hypothesis it kills
+
+`mm3_bench depth` now also profiles ONE `Resident::step` from device
+timestamps (§F.1), b=2, 69 dispatches:
+
+```
+kernel                            ms      n      %   ms/call     GB/s   %roof
+matmul_gemv                    21.78     28  97.2%     0.778    104.8   36.5%
+rmsnorm_rows                    0.31      9   1.4%     0.034      2.4    0.8%
+paged_decode_scores_batched     0.11      4   0.5%     0.026     21.2    7.4%
+paged_kv_append_batched         0.06      8   0.2%     0.007      9.5    3.3%
+add2                            0.05      8   0.2%     0.007     15.1    5.2%
+decode_softmax_batched          0.03      4   0.2%     0.009      0.5    0.2%
+paged_decode_apply_batched      0.03      4   0.2%     0.009     64.2   22.3%
+silu_mul                        0.03      4   0.1%     0.007     21.3    7.4%
+WHOLE PASS                     24.21     69          (sum of kernel time 22.41)
+```
+
+The plan for this port assumed ~320 genuinely tiny dispatches per frame would
+be "pure launch overhead (3-10 ms)" and prescribed fusing `wq|wk|wv` into one
+`[3d, d]` buffer and `gate|up` into `[2*inter, d]` to cut the dispatch count.
+**The profile kills that.** Whole pass minus summed kernel time is 0.8-1.8 ms
+of 23-24 (3-7%), and that gap is host math, the readback and launch gaps
+TOGETHER, not launch alone. Fusing would have removed 2 of 17 dispatches per
+layer and could not have returned more than a fraction of it.
+
+It would also have cost something real. Slicing a fused `[b, 3d]` output back
+into q/k/v needs `step_sliced` offsets of `r*3d + {0,d,2d}` floats, and
+`step_sliced` offsets must clear `min_storage_buffer_offset_alignment` (256 B
+= 64 floats on this card). At `real()` dims 4096 and 6144 both clear it; at
+`tiny()` dims 8 and 16 do not - so the fused form would have been unable to
+run the tiny parity gate on a real GPU at all, which is where the port was
+actually debugged. Not fusing was free; fusing would have bought ~0 and cost
+the small-shape gate. §E, again.
+
+**The one row that matters is `matmul_gemv` at 36.5% of this card's measured
+memory roof**, holding 97.2% of the step. That is where the next lever is, and
+it is not a depth-decoder question: it is the shared decode-regime GEMM every
+model in this workspace dispatches at small `m`, so a fix there lands in
+`block::gemm_variant`'s tier and reaches all of them (§F.7). Not attempted
+here.
+
+### Parity, and what does NOT survive
+
+The host `forward`/`backward` pair is untouched and stays host math on
+purpose - it is the training path, `gradcheck`'s reference, `depth_lora`'s
+substrate, and the oracle everything else is gated against, including
+`tests/depth_decoder_parity.rs` at cosine 0.9999 vs diffusers. The module doc
+says so, because "finish the job by porting `forward` too" would delete the
+reference that proves the device path right.
+
+Gates added:
+
+* `hostmath::tests::linear_rows_is_bit_identical_to_a_per_row_matvec_loop` -
+  `assert_eq!`, the batching's exactness.
+* `depth_decoder::tests::the_device_step_matches_the_host_forward_on_the_{cpu_
+  backend,default_device}` - walks every position a frame can reach with
+  INDEPENDENT random inputs in the two batch rows (so a batch-row mix-up or a
+  KV page bleeding into its neighbour is visible), comparing each row against
+  that row's own sequence through `forward`. Floors: **cosine >= 0.999999 AND
+  rel_l2 <= 1e-4**, both, because cosine alone is scale-invariant. Measured
+  worst at `tiny()`: cosine 1.000000000, rel_l2 1.52e-7 (CPU backend) and
+  1.25e-7 (P40).
+* `..._at_real_dims`, the same walk at `real()` dims with the REAL checkpoint,
+  behind `BRAIN_MINIMAXMUSIC3_DEPTH` (it uploads 2.28 GB and runs the host
+  `forward` over every prefix). Measured worst: cosine 1.000000000, rel_l2
+  **2.84e-6** on the P40 and **9.50e-7** under `BRAIN_DEVICE=cpu`. Real dims
+  are not a formality here - `tiny()` is 8 wide, which is where neither the
+  cooperative `rmsnorm_rows` nor the workgroup-per-column `matmul_gemv` has
+  anything to split, and real weights are the value distribution the
+  tolerance has to hold at.
+* `pipeline::tests::the_device_depth_decoder_matches_the_host_one_at_the_cfg_
+  blended_logits` - worst cosine 1.000000000.
+* `depth_decoder::tests::a_reset_decoder_reproduces_its_own_first_frame` - the
+  per-frame `reset` lifecycle, both implementations.
+
+The gate was mutation-verified (§F.8) - four mutations, each run on BOTH
+backends, cosine floor / rel_l2 ceiling:
+
+| mutation | cosine | rel_l2 | caught by |
+|---|---|---|---|
+| `pos_embedding` add dropped | 0.9027 | 0.441 | both |
+| `wk`/`wv` swapped | 0.7414 | 0.719 | both |
+| the two batch rows swapped on the way out | -0.0803 | 1.470 | both |
+| the final RMSNorm's eps 1e-6 -> 1e-2 | **1.000000** | **0.0467** | **rel_l2 only** |
+
+The last row is why the gate asserts both. A wrong epsilon scales the whole
+output vector uniformly; cosine is scale-invariant and reports a perfect 1,
+and only relative L2 sees it. A cosine-only gate would have shipped it.
+
+**End-to-end bit-identity does not survive the device port, and is not
+claimed.** The host b=2 step is bit-identical (max|delta| exactly 0), but the
+device step is not - a different GEMM reduction order and a different `rsqrt`
+put it 1.34e-5 away at real dims. `sample_top_k` turns those logits into a
+discrete draw, so a wobble that small is enough to reorder two near-tied
+candidates or move a cumulative-probability boundary across the RNG's draw,
+and one different code changes every later frame. The gate is therefore at the
+CFG-blended LOGITS per frame, never at the waveform: a device run produces a
+different, equally valid sample of the same distribution, not the host run's
+audio.
+
+### Placement, and why the depth decoder does NOT get its own card
+
+It goes on the SAME card as the conditional Global LLM branch. The entire
+point of b=2 is that both branches share one pass over the weights, which
+requires them in one dispatch and therefore on one device; a second card would
+buy back the 2x that batching already took, at 2.28 GB more VRAM.
+`generate::ar_branch_devices` puts the two LM instances on gpu0/gpu1 and the
+`Resident` sits beside the first of them (~2.28 GB fp32 next to the ~7 GB int8
+LM).
+
+`BRAIN_DEVICE=cpu` keeps `Decoder::Host`. That is a selection, not a missing
+port, and it is measured rather than assumed - §F.4 says to profile the branch
+your hardware does not take, so `mm3_bench depth --device cpu` runs the device
+row anyway and labels it as not-what-ships:
+
+```
+DEVICE b=2 on the Cranelift JIT   2358.87 ms/frame   (7.8 GB/s)
+    -> 0.23x the host b=2 path, 0.51x even the b=1 host baseline
+```
+
+**Four times slower than the host implementation it would replace.** Two
+reasons, both structural: the JIT reports `workgroup_reductions: false`, so
+`block::gemm_variant` and `block::rms_variant` fall back to the reference
+`matmul` (one thread per output element, serial inner reduction) and the
+per-element `rmsnorm_eps` rather than `matmul_gemv`/`rmsnorm_rows`; and even
+the fast kernels would be competing with `matmul_abt`'s AVX2+FMA over the same
+48 cores. A branch nobody measures is how a slow path survives, so this one is
+in the harness permanently.
+
+## Phase 17: residency, caching and batching stop being placeholders
+
+`crates/cli/src/resident_minimaxmusic3.rs` was a load-per-call adapter whose
+`estimate()` reported `MemCost::new(0, ram)` - and `vram == 0` is not a
+conservative choice, it is a disabling one: `residency::place::pick_device`
+`continue`s past every GPU when `cost.vram == 0`, so on this 2x24 GB box the
+scheduler could never place this model on a card at all. Its RAM figure was
+the on-disk checkpoint size times four, a multiplier justified by an
+int8-promotes-to-fp32 claim Phase 12 already disproved for GPU backends.
+
+### Honest per-stage VRAM (`crates/minimaxmusic3/src/memory.rs`)
+
+Derived from this model's own `::real()` configs where a closed form exists,
+measured where one does not, and every figure pinned by a test in that
+module - a number nothing checks is a number that goes stale.
+
+| stage | charged | where it comes from |
+|---|---|---|
+| AR | **16.09 GB** | one Global LLM instance (6.95 GB of int8 linears, MEASURED Phase 14, + `tok.weight` and `lm_head` at 3.28 GB each, fp32 and vocab-tiled) + the depth decoder's 2.58 GB, which `depth_decoder_device` puts on the SAME card |
+| denoise | **10.05 GB** | 9.664 GB closed form over `DitConfig::real()` (36 x 64 Mi params) + a 384 MiB margin covering the 9553 MiB whole-device peak Phase 15 measured |
+| vocode | **12.86 GB** | MEASURED, 12264 MiB on one 689-latent chunk (Phase 13); `CHUNK_FRAMES` caps every chunk at that, however long the song |
+
+The three are never co-resident, so the charge is their MAX, not their sum.
+Two closed forms reproduce a measurement exactly rather than restating it:
+the DiT's 9.664 GB and the depth decoder's 2.584 GB - the latter is also
+what pins its MLP as a SwiGLU triple (a plain up/down pair gives 2.18 GB).
+
+**The second card is still charged to no budget.** A generation occupies
+both (`ar_branch_devices`, `devplan`), and `estimate` is single-device. The
+seam is `residency::MultiDeviceResidentModel`; it is not taken because
+`multi::pick_devices` is all-or-nothing over a fixed device set (naming two
+cards makes this model unplaceable on a one-card box, where it degrades
+correctly today), multi-device residents are not auto-evicted, and
+`crates/stats`' `ModelStat` schema is single-device so such a resident
+vanishes from `braintop`. Same gap `resident_ltxv.rs` has.
+
+### Warm weights (`crates/minimaxmusic3/src/weightcache.rs`)
+
+Four components import into a plain tree of host `Vec<f32>` (DiT, depth
+decoder, vocoder, condition encoder) and are now held in a process-wide
+store keyed on the checkpoint directory's recursive `(summed length, newest
+mtime)` - `ltxv::weightcache`'s shape. That removes a ~10.7 GB re-read per
+`generate` call. Safe to drop at any moment: an entry is a pure function of
+immutable checkpoint bytes, so an eviction costs time and never a number.
+
+Governed by residency first (`estimate_at`/`demote`/`promote` on the
+adapter, with `metrics` reporting hits/misses/evictions/bytes) and by a
+local `memauth::limits().ram_total` share second, evicted with
+`residency::place::CostAware` - the same GDSF policy the manager scores whole
+instances with, reused rather than transcribed.
+
+The Global LLM is deliberately NOT warm: it owns its own `Gpu`, is `Send`
+but not `Sync`, and its KV capacity `t = prompt_len + max_frames + 8` is a
+function of the request, not the checkpoint.
+
+### `run_batch` is serial, and the reason is in the file
+
+Not the default fallthrough - an explicit override carrying three
+independently sufficient reasons. (1) One request already occupies every
+card here: two AR-stage Global LLM instances do not fit one 24 GB card
+(`memory.rs` asserts exactly that), so `residency::DevicePool`'s
+one-generation-per-card trick has no spare card to offer. (2) The DiT is
+`batch=1` by construction with five silent-corruption sites at `b > 1` (the
+RoPE `tmod`, the row-0 timestep slice, the `preprocess_hidden_lc`
+transpose, the timestep row assembly, the `Bidir { b: 1, .. }` slabs) and
+unmasked bidirectional attention, so a batched slab leaks across requests
+without erroring. (3) `global_llm::import` asserts `b == 1` because
+`qwen3`'s KV decode path sizes `kcache`/`vcache` as `t * kv_dim` with no
+batch axis. What a batch does get is one instance against a warm cache.
+
 ## Not yet done
 
+- [ ] Charge the SECOND card. Needs `residency::multi` to grow a
+      degrade-to-fewer-devices placement and auto-eviction, and
+      `crates/stats`' `ModelStat` to grow a `devices: Vec<(Device, u64)>`
+      shape, before `MultiDeviceResidentModel` is the right answer here.
+- [ ] A card-PAIR device pool, so a 4+-card box runs `floor(N/2)`
+      generations concurrently. `generate` takes no pair argument today;
+      `ar_branch_devices` and `devplan::auto` both read the whole ambient
+      set unconditionally.
+- [ ] Cross-request AR batching through `model::serve::PagedDecoder` - the
+      seam `qwen3::serve::Engine` implements for continuous batching.
+      Assessed, deliberately not started: it is a `crates/qwen3` change,
+      not an adapter change.
+- [ ] A warm Global LLM (a capacity-max policy plus a KV-reset seam
+      `qwen3` does not expose), which is the last per-call load left.
+- [ ] Per-stage achieved-vs-roof in `StatsSnapshot` (design in the Phase 17
+      handover): `gpu_core::roof` already measures the ceiling and
+      `mm3_bench` already computes % of roof per kernel; what is missing is
+      a live counter on the serving path, emitted through `Instance::
+      metrics` into the executor's `extra` map, never a hardcoded count.
 - [ ] Joint generator+discriminator training against the real vocoder
       weights (composing `train::Trainer` and `discriminator::` into one
       loop) - the mechanism exists in both directions, the composition

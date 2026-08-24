@@ -81,6 +81,40 @@ README for the full `dbus-run-session` invocation.
 LLM's ~3.28 GB embedding/`lm_head` tensors as single buffers (an Intel
 integrated GPU, for instance).
 
+### Two GPUs
+
+With two or more schedulable cards, both of the stages that have two
+independent halves use both of them: the autoregressive stage loads its
+guided and unguided Global LLM instances on separate cards, and the denoise
+stage runs the DiT's two classifier-free-guidance forwards concurrently, one
+per card. The output is unchanged - bit for bit - because the two forwards
+share no intermediate value and are combined on the host exactly as before.
+
+Each card holds its own copy of the DiT's weights (~9.7 GB) while denoising.
+Two things turn the concurrent dispatch off, and the run falls back to the
+single-card path unchanged: restricting the schedulable set to one card
+(`--device gpu0`), and `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0`. Note that
+`--limit-vram-total` is a process-wide total across all cards rather than a
+per-card ceiling, so a concurrent pair charges it twice; a value sized for
+one card should either be raised or paired with that opt-out.
+
+The RVQ depth decoder is placed differently, and deliberately: it goes on the
+SAME card as the guided Global LLM branch rather than getting one of its own.
+It runs its two guidance branches as a two-row batch in a single dispatch,
+which is worth far more than a second card would be - the block stack is
+memory-bound, so both branches read one pass over the weights instead of two -
+and a single dispatch has to be on a single device. Its weights are uploaded
+once per generation, not once per frame, and add a fp32 copy of the decoder to
+that card beside the language model.
+
+### Depth decoder on the CPU
+
+`BRAIN_DEVICE=cpu` keeps the depth decoder on a hand-written AVX2+FMA+rayon
+host path rather than routing its dispatch graph through the CPU backend's
+JIT. That is a measured choice, not a missing port: at this component's shapes
+the host path is the faster of the two on the same cores. Both compute the
+same thing and both are gated against the same full-sequence reference.
+
 ## Options
 
 | Flag | Default | Meaning |
