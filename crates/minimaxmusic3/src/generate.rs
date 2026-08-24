@@ -126,7 +126,7 @@ pub struct GeneratedSong {
 /// chunked DiT denoising -> vocoder crop-and-stitch. See this module's own
 /// doc for the sequential-stage RAM discipline and the `BRAIN_DEVICE=cpu`
 /// operational note.
-pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str) -> Result<GeneratedSong, String> {
+pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, progress: crate::ProgressSink<'_>) -> Result<GeneratedSong, String> {
     let max_frames = max_frames_for_duration(opts.duration_seconds);
 
     // ---- AR stage: two int8 Global LLM instances + the depth decoder. ----
@@ -141,7 +141,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str) -> R
         let dd_cfg = DepthDecoderConfig::real();
         let dd_w = depth_decoder::import(&paths.depth, &dd_cfg)?;
 
-        pipeline::generate_frames(&lm_cond, &lm_uncond, &dd_w, &dd_cfg, &head, cfg.vocab as usize, cfg.d_model as usize, &conditional_ids, &unconditional_ids, max_frames, opts.seed)
+        pipeline::generate_frames(&lm_cond, &lm_uncond, &dd_w, &dd_cfg, &head, cfg.vocab as usize, cfg.d_model as usize, &conditional_ids, &unconditional_ids, max_frames, opts.seed, progress)
     };
 
     let cond_cfg = ConditionEncoderConfig::real();
@@ -166,7 +166,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str) -> R
             .iter()
             .enumerate()
             .map(|(i, &start)| {
-                let latents = denoise::denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, opts.num_inference_steps, opts.seed.wrapping_add(i as u64 + 1));
+                let latents = denoise::denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, opts.num_inference_steps, opts.seed.wrapping_add(i as u64 + 1), progress);
                 let chunk_frames = (start + denoise::CHUNK_FRAMES).min(num_frames) - start;
                 let length = condition_encoder::latent_length(&cond_cfg, chunk_frames);
                 (latents, length)
@@ -183,6 +183,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str) -> R
         let n = chunks.len();
         for (i, (latents, length)) in chunks.iter().enumerate() {
             stitcher.push_chunk(&gpu, &vocoder_cfg, &vocoder_w, latents, *length, i == 0, i + 1 == n);
+            progress(i as u32 + 1, n as u32, "vocode");
         }
         stitcher.finish()
     };

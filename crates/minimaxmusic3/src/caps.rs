@@ -90,14 +90,23 @@ fn opts_from(inv: &Invocation) -> GenOpts {
 /// and the residency adapter. `paths` is resolved by the caller (direct
 /// vs. resident differ only in error framing, not in how paths resolve -
 /// both ultimately read [`Paths::from_env`]).
-pub fn generate_action(paths: &Paths, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let lyrics = inv.get_str("lyrics").ok_or("minimaxmusic3 generate: missing required param 'lyrics'")?;
     let caption = inv.get_str("caption").ok_or("minimaxmusic3 generate: missing required param 'caption'")?;
     if caption.trim().is_empty() {
         return Err("minimaxmusic3 generate: 'caption' must be non-empty".to_string());
     }
     let opts = opts_from(inv);
-    let song = generate(paths, &opts, &lyrics, &caption)?;
+    // The ONE place the library's stage-progress shape becomes the serving
+    // surface's `Progress` (see `crate::ProgressSink`). Every stage keeps
+    // its own `(done, total)` rather than being folded into a single
+    // pipeline-wide percentage: the three stages are sequential and wildly
+    // different in unit (AR frames, Euler steps per chunk, vocoded
+    // chunks), so one blended number would be less informative, not more,
+    // and `brain perf`'s timeline wants the stage labels anyway.
+    let song = generate(paths, &opts, &lyrics, &caption, &mut |done, total, stage| {
+        progress(Progress::step(done, total, format!("{stage} {done}/{total}")));
+    })?;
 
     // Pack a COMPLETE WAV byte stream (stereo, via audio::wav::encode_multi)
     // rather than headerless PCM: `caps_cli::save_blob`'s audio arm only

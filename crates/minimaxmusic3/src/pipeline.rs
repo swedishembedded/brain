@@ -227,6 +227,7 @@ pub fn generate_frames(
     unconditional_ids: &[u32],
     max_frames: usize,
     seed: u64,
+    progress: crate::ProgressSink<'_>,
 ) -> Vec<f32> {
     assert_eq!(conditional_ids.len(), unconditional_ids.len(), "generate_frames: conditional/unconditional prompt length mismatch");
     let mut rng = Lcg::new(seed);
@@ -266,6 +267,7 @@ pub fn generate_frames(
             frame_hiddens.extend_from_slice(&hidden_cond);
             frame_hiddens.extend_from_slice(&depth_hidden);
             frames += 1;
+            progress(frames as u32, max_frames as u32, "ar");
             if frames >= max_frames {
                 break;
             }
@@ -417,6 +419,7 @@ mod tests {
             &unconditional_ids,
             max_frames,
             99,
+            &mut crate::ignore_progress(),
         );
 
         let frame_width = dd_cfg.num_codebooks as usize * dd_cfg.hidden_size as usize;

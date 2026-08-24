@@ -115,3 +115,28 @@ pub mod train;
 pub mod vocoder;
 
 pub use config::{ConditionEncoderConfig, DepthDecoderConfig, DitConfig, VocoderConfig};
+
+/// Where a long generation reports how far along it is: `(done, total,
+/// stage)`, with `stage` one of `"ar"`, `"denoise"` or `"vocode"`.
+///
+/// Deliberately NOT `capability::Progress`. `pipeline`/`denoise`/`stitch`
+/// are library math and have no business depending on the serving
+/// surface's types; `caps::generate_action` is the one place that adapts
+/// this into a `Progress`. It also means an in-process caller (a bench, a
+/// test) can observe stage progress without constructing a serving
+/// invocation.
+///
+/// This exists because `generate` is a multi-MINUTE call. The `generate`
+/// action has always declared `.streaming()` - and `caps`'s own test says
+/// why, that "a multi-minute generation with no progress reporting is a
+/// hang, not a feature" - but every layer bound the callback as `_progress`
+/// and dropped it, so the declaration was a promise nothing kept. It is
+/// also what `brain perf` derives its entire `submit -> first -> done`
+/// timeline from, so without it this model cannot be benchmarked at all.
+pub type ProgressSink<'a> = &'a mut dyn FnMut(u32, u32, &str);
+
+/// A [`ProgressSink`] that discards everything - for callers that do not
+/// care (tests, one-shot library use).
+pub fn ignore_progress() -> impl FnMut(u32, u32, &str) {
+    |_, _, _| {}
+}

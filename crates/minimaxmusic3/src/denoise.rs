@@ -95,6 +95,7 @@ pub fn denoise_chunk(
     state: &mut ChunkState,
     num_inference_steps: usize,
     seed: u64,
+    progress: crate::ProgressSink<'_>,
 ) -> Vec<f32> {
     let chunk_end = (chunk_start + CHUNK_FRAMES).min(num_frames_total);
     let chunk_frames = chunk_end - chunk_start;
@@ -140,7 +141,8 @@ pub fn denoise_chunk(
     // `2 * num_inference_steps` evaluations below, so they are uploaded
     // ONCE here rather than per `dit::forward` call - see `dit::Resident`.
     let resident = dit::Resident::new(gpu, dit_cfg, dit_w, length);
-    for &t in &timesteps {
+    let total_steps = timesteps.len() as u32;
+    for (step_index, &t) in timesteps.iter().enumerate() {
         if overlap > 0 {
             let prev_latent = state.previous_latent.as_ref().unwrap();
             let span = prev_span.unwrap();
@@ -154,6 +156,7 @@ pub fn denoise_chunk(
         let v_uncond = dit::forward_resident(gpu, dit_cfg, dit_w, &resident, &latents, &zero_condition, t, length);
         let velocity: Vec<f32> = v_cond.iter().zip(&v_uncond).map(|(c, u)| u + (c - u) * GUIDANCE_SCALE).collect();
         latents = scheduler.step(&velocity, &latents);
+        progress(step_index as u32 + 1, total_steps, "denoise");
     }
 
     if overlap > 0 {
@@ -217,12 +220,49 @@ mod tests {
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
         let mut state = ChunkState::default();
-        let latents = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 7);
+        let latents = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 7, &mut crate::ignore_progress());
 
         let expected_length = condition_encoder::latent_length(&cond_cfg, num_frames);
         assert_eq!(latents.len(), dit_cfg.in_channels as usize * expected_length);
         assert!(state.previous_latent.is_some());
         assert!(state.previous_condition.is_some());
+    }
+
+    /// A chunk must report one `denoise` step per Euler step.
+    ///
+    /// The `generate` action has always declared `.streaming()`, but every
+    /// layer bound its progress callback as `_progress` and dropped it, so
+    /// a multi-minute call reported nothing to the CLI, to D-Bus, or to
+    /// `brain perf` - which derives its whole timeline from exactly these
+    /// callbacks. An advertised capability that nothing exercises is how
+    /// that regressed unnoticed, so it is exercised here.
+    #[test]
+    fn every_euler_step_reports_progress() {
+        let dit_cfg = DitConfig::tiny();
+        let cond_cfg = ConditionEncoderConfig::tiny();
+        let dit_w = dit_train::random_weights(&dit_cfg, 11);
+        let cond_w = random_condition_weights(&cond_cfg, 12);
+        let gpu = Gpu::new_cpu(dit::PIPELINES);
+
+        let num_frames = 5usize;
+        let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
+        let mut r = Lcg::new(13);
+        let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
+
+        let steps = 4usize;
+        let mut seen: Vec<(u32, u32, String)> = Vec::new();
+        let mut state = ChunkState::default();
+        let _ = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, steps, 7, &mut |done, total, stage| {
+            seen.push((done, total, stage.to_string()));
+        });
+
+        assert_eq!(seen.len(), steps, "expected one progress report per Euler step, got {seen:?}");
+        assert!(seen.iter().all(|(_, _, stage)| stage == "denoise"), "every report must name the denoise stage: {seen:?}");
+        // Monotonic and terminating at the total - a progress stream that
+        // never reaches its own total reads as a stall to any client.
+        let done: Vec<u32> = seen.iter().map(|(d, _, _)| *d).collect();
+        assert_eq!(done, (1..=steps as u32).collect::<Vec<_>>());
+        assert!(seen.iter().all(|(_, total, _)| *total == steps as u32));
     }
 
     #[test]
@@ -243,7 +283,7 @@ mod tests {
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
         let mut state = ChunkState::default();
-        let first = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 21);
+        let first = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 21, &mut crate::ignore_progress());
         let first_length = condition_encoder::latent_length(&cond_cfg, num_frames);
         assert_eq!(first.len(), dit_cfg.in_channels as usize * first_length);
 
@@ -253,7 +293,7 @@ mod tests {
         assert_eq!(prev_condition.len(), span * cond_cfg.out_dim as usize);
         assert!(span <= first_length.min(OVERLAP_LATENT_LENGTH));
 
-        let second = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 2, &mut state, 4, 22);
+        let second = denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 2, &mut state, 4, 22, &mut crate::ignore_progress());
         let second_length = condition_encoder::latent_length(&cond_cfg, num_frames - 2);
         assert_eq!(second.len(), dit_cfg.in_channels as usize * second_length);
     }
