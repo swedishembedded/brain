@@ -43,8 +43,27 @@ struct Params {
 
 // Accumulators live in workgroup memory (indexed [m*64 + t]) rather than a
 // function-local array: the CPU JIT's work-group execution model does not
-// support local arrays, and workgroup memory is fast enough that the extra
-// stores are negligible next to the M-fold cut in W traffic.
+// support local arrays (`wgsl_cpu::Jit` returns "array local in a work-group
+// kernel is unsupported" - re-verified, not inherited), and workgroup memory
+// is fast enough that the extra stores are negligible next to the M-fold cut
+// in W traffic.
+//
+// **On a GPU that is no longer true, and this kernel is no longer the one that
+// runs.** Sizing `partial` for the worst case costs 8 KB of shared memory per
+// workgroup at every `m` (on a GP102: 12 resident workgroups of a possible 32,
+// ~37.5% occupancy), and the read-modify-write below is a shared-memory
+// dependency chain per `(k, m)`. `matmul_gemv_reg.wgsl` is the register-
+// accumulator sibling that fixes both - bit-identical, same `Params`, same
+// bindings, same `n * 64` thread count - and `gpu_core::upgrade` substitutes
+// it at dispatch wherever `backend_api::select` heads the decode regime with
+// `WorkgroupPerOutput`. **Edit the two together**; `BRAIN_NO_KERNEL_UPGRADE=1`
+// is what pins a GPU back onto this one.
+//
+// So THIS kernel keeps the 2048-float array on purpose: it is what the CPU JIT
+// and the `@npu` path can execute, and neither pays a shared-memory occupancy
+// cost. Shrinking it here (`kernels::template`) was measured and is NOT what
+// ships - it recovers ~2.1x of the ~2.7x the register sibling gets, and only
+// on the backend that cannot use it.
 var<workgroup> partial: array<f32, 2048>; // up to 32 rows x 64 threads
 
 @compute @workgroup_size(64)

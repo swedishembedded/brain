@@ -424,12 +424,16 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         // kernel their combined time lands on each row — a visible
         // over-attribution rather than an invisible zero.)
         for r in rows.iter_mut() {
-            let physical = gpu.kernel_index(&r.name).and_then(|k| gpu.physical_kernel_name(k)).unwrap_or(r.name.as_str());
-            if let Some((secs, calls)) = d.get(physical) {
-                r.secs = *secs;
-                r.calls = *calls as usize;
-            } else {
+            let physical = match gpu.kernel_index(&r.name) {
+                Some(k) => gpu.physical_kernel_names(k),
+                None => vec![r.name.as_str()],
+            };
+            let hits: Vec<_> = physical.iter().filter_map(|n| d.get(*n)).collect();
+            if hits.is_empty() {
                 r.secs = 0.0;
+            } else {
+                r.secs = hits.iter().map(|(s, _)| *s).sum();
+                r.calls = hits.iter().map(|(_, c)| *c as usize).sum();
             }
         }
         rows.sort_by(|a, b| b.secs.partial_cmp(&a.secs).unwrap());
@@ -550,9 +554,11 @@ pub fn profile_live(gpu: &Gpu, label: &str, reps: usize, mut run: impl FnMut()) 
     // onto one physical kernel would each show the combined time - a visible
     // over-attribution rather than an invisible zero.)
     let secs_of = |name: &str| -> f64 {
-        let physical =
-            gpu.kernel_index(name).and_then(|k| gpu.physical_kernel_name(k)).unwrap_or(name);
-        times.get(physical).copied().unwrap_or(0.0)
+        let physical = match gpu.kernel_index(name) {
+            Some(k) => gpu.physical_kernel_names(k),
+            None => vec![name],
+        };
+        physical.iter().filter_map(|n| times.get(*n)).sum()
     };
 
     let covered = report.by_kernel.iter().map(|(name, kc)| KernelRow {

@@ -71,6 +71,11 @@ def structure(name, text):
         "shared": "var<workgroup>" in code,
         "dp4a": "dot4I8Packed" in code,
         "regblock": bool(re.search(r"_reg\d?$|_reg_", name)) or "rA[" in code,
+        # A FUNCTION-scope array (`var name: array<...>`, i.e. no address
+        # space, unlike `var<workgroup>`/`var<storage>`/`var<private>`). The
+        # CPU JIT rejects one outright inside a work-group kernel - see
+        # `cpu()` below.
+        "localarray": bool(re.search(r"\bvar\s+\w+\s*:\s*array<", code)),
         "loops": len(re.findall(r"for\s*\(\s*var\s+\w+[^;]*;\s*\w+\s*<\s*(?:%s)\b" % bound, code)),
     }
 
@@ -111,12 +116,26 @@ def opt(name, st):
 def cpu(name, st, native):
     """`yes` / `no` / `native` / `native-only`.
 
-    The CPU JIT splits a kernel body at ONE top-level barrier and no more; with
-    two or more it does not fail cleanly, it corrupts memory (#26).
+    TWO independent reasons the CPU JIT cannot execute a work-group kernel,
+    both read from the code:
+
+    * more than ONE top-level barrier - the JIT splits a body at one and no
+      more; with two or more it does not fail cleanly, it corrupts memory (#26);
+    * a FUNCTION-scope array inside a work-group kernel - `wgsl_cpu::Jit`
+      rejects it by name ("array local in a work-group kernel is unsupported",
+      `crates/wgsl-cpu/src/lib.rs`), because its per-invocation locals are SSA
+      scalars. `matmul_gemv_reg` is the kernel this reason exists for: its
+      register accumulators are exactly such an array, which is why it is the
+      GPU-only sibling of `matmul_gemv` rather than a variant of it.
+
+    Only a WORK-GROUP kernel is affected by the second reason; the JIT's
+    plain per-invocation path handles function-local arrays fine.
     """
+    workgroup = st["shared"] or st["barriers"]
+    jitable = st["barriers"] <= 1 and not (workgroup and st["localarray"])
     if name in native:
-        return "native" if st["barriers"] <= 1 else "native-only"
-    return "yes" if st["barriers"] <= 1 else "no"
+        return "native" if jitable else "native-only"
+    return "yes" if jitable else "no"
 
 
 def gpu(st):

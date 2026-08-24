@@ -1064,6 +1064,7 @@ dependencies = [
  "brain-backend-cpu",
  "brain-backend-vulkan",
  "brain-backend-wgpu",
+ "brain-data",
  "brain-kernels",
  "brain-memauth",
  "brain-testutil",

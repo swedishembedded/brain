@@ -327,9 +327,9 @@ mod native_facade {
         /// before its measured run, so measurement flows are unchanged.
         cost_enabled: std::sync::atomic::AtomicBool,
         /// Active transparent kernel upgrades for THIS device:
-        /// `(registered slot, faster slot, thread multiplier)`. Usually empty;
+        /// which registered slot redirects to which faster slot. Usually empty;
         /// see [`crate::upgrade`] for what qualifies and why the seam exists.
-        upgrades: Vec<(usize, usize, u32)>,
+        upgrades: Vec<crate::upgrade::Active>,
         /// Which pool this handle's allocations are charged to under
         /// `--limit-vram-total`/`--limit-ram-total` - the physical card this
         /// device was built on, or `Cpu` for the CPU backend. Resolved once at
@@ -400,8 +400,13 @@ mod native_facade {
         /// which is what `crates/vae` did not get when `gn_stats` was fixed
         /// for DIAMOND.
         /// Returns a borrowed view when there is nothing to add.
-        fn expanded<'a>(kernels: &'a [(&'a str, &'a str)]) -> std::borrow::Cow<'a, [(&'a str, &'a str)]> {
-            match crate::upgrade::expand(kernels) {
+        /// `cpu_jit` says whether the handle being built will run on
+        /// `backend-cpu`'s WGSL JIT, so GPU-only fast variants are not appended
+        /// to a kernel set that backend would only have to skip (and warn
+        /// about) - it can never dispatch them, since it reports
+        /// `workgroup_reductions: false`.
+        fn expanded<'a>(kernels: &'a [(&'a str, &'a str)], cpu_jit: bool) -> std::borrow::Cow<'a, [(&'a str, &'a str)]> {
+            match crate::upgrade::expand(kernels, cpu_jit) {
                 Some(v) => std::borrow::Cow::Owned(v),
                 None => std::borrow::Cow::Borrowed(kernels),
             }
@@ -415,9 +420,9 @@ mod native_facade {
         /// `--device gpu<i>` pin, else `BRAIN_GPU_INDEX` (user input, parsed
         /// once), else canonical card 0. Explicit placement uses [`Gpu::new_on`].
         pub fn new(kernels: &[(&str, &str)]) -> Gpu {
-            let kernels = &Self::expanded(kernels);
             register_builtins();
             let name = resolve_backend_name();
+            let kernels = &Self::expanded(kernels, name == "cpu");
             let inner: Box<dyn backend_api::Backend> = match name {
                 "wgpu" => Self::build_wgpu(kernels, crate::devices::selected_device()),
                 "vulkan" => {
@@ -461,9 +466,10 @@ mod native_facade {
         /// backend (there is one CPU; the card is moot), so device-plumbing
         /// call sites work unchanged on CPU-only runs.
         pub fn new_on(dev: &crate::devices::DeviceId, kernels: &[(&str, &str)]) -> Gpu {
-            let kernels = &Self::expanded(kernels);
             register_builtins();
-            let inner: Box<dyn backend_api::Backend> = match resolve_backend_name() {
+            let backend = resolve_backend_name();
+            let kernels = &Self::expanded(kernels, backend == "cpu");
+            let inner: Box<dyn backend_api::Backend> = match backend {
                 "cpu" => Box::new(backend_cpu::CpuBackend::new(kernels)),
                 "vulkan" => match backend_vulkan::VulkanBackend::try_new_on(kernels, &dev.identity) {
                     Ok(b) => Box::new(b),
@@ -571,7 +577,7 @@ mod native_facade {
         /// device (the CPU JIT compiles per kernel set anyway) just build fresh,
         /// which is correct and cheap there.
         pub fn new_like(&self, kernels: &[(&str, &str)]) -> Gpu {
-            let kernels = &Self::expanded(kernels);
+            let kernels = &Self::expanded(kernels, self.kind() == "cpu");
             match self.inner.new_like(kernels) {
                 Some(inner) => Gpu::wrap_on(inner, Self::kernel_names(kernels), self.mem_device),
                 None => Gpu::new(kernels),
@@ -644,7 +650,7 @@ mod native_facade {
 
         /// Build on the native CPU backend regardless of the default selection.
         pub fn new_cpu(kernels: &[(&str, &str)]) -> Gpu {
-            let kernels = &Self::expanded(kernels);
+            let kernels = &Self::expanded(kernels, true);
             let inner: Box<dyn backend_api::Backend> =
                 Box::new(backend_cpu::CpuBackend::new(kernels));
             record_caps(inner.as_ref());
@@ -654,7 +660,7 @@ mod native_facade {
         /// Build on the wgpu backend regardless of the default selection.
         /// Placement is ambient (registry-resolved), like [`Gpu::new`].
         pub fn new_wgpu(kernels: &[(&str, &str)]) -> Gpu {
-            let kernels = &Self::expanded(kernels);
+            let kernels = &Self::expanded(kernels, false);
             let inner = Self::build_wgpu(kernels, crate::devices::selected_device());
             record_caps(inner.as_ref());
             Gpu::wrap(inner, Self::kernel_names(kernels))
@@ -668,7 +674,7 @@ mod native_facade {
         /// its "need N GPUs" assertion still reports honestly.
         #[cfg(not(target_arch = "wasm32"))]
         pub fn new_wgpu_multi(kernels: &[(&str, &str)], count: usize) -> Vec<Gpu> {
-            let kernels = &Self::expanded(kernels);
+            let kernels = &Self::expanded(kernels, false);
             let names = Self::kernel_names(kernels);
             let devs = crate::devices::gpus();
             if devs.len() >= count {
@@ -690,7 +696,7 @@ mod native_facade {
 
         /// Build on the native Vulkan backend, or `Err` if no Vulkan device is present.
         pub fn try_new_vulkan(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
-            let kernels = &Self::expanded(kernels);
+            let kernels = &Self::expanded(kernels, false);
             backend_vulkan::VulkanBackend::try_new(kernels)
                 .map(|g| Gpu::wrap(Box::new(g), Self::kernel_names(kernels)))
         }
@@ -899,7 +905,7 @@ mod native_facade {
         /// `BRAIN_PROFILE=1` names the real pipeline.
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
-            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
             self.inner
                 .step(k, bufs, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
@@ -907,7 +913,7 @@ mod native_facade {
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             // NB: sliced views of ONE buffer at disjoint offsets are legal and common
             // here, so no alias check - wgpu validates the concrete ranges.
-            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
             self.inner
                 .step_sliced(k, bufs, offsets, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
@@ -915,7 +921,7 @@ mod native_facade {
         pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
             // The uniform lives in a caller-owned buffer: shape params unknown
             // here, so the cost side gets only kernel + threads.
-            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, None, threads);
             self.inner
                 .step_buf(k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
@@ -965,15 +971,26 @@ mod native_facade {
             self.names.get(kind).map(|s| s.as_str())
         }
 
-        /// The name of the pipeline a dispatch of slot `kind` PHYSICALLY runs
-        /// on this device - the redirected slot's name when a transparent
-        /// [`crate::upgrade`] applies, otherwise `kind`'s own name. Backend
-        /// device-timing maps ([`Gpu::kernel_times`]) are keyed by physical
-        /// names, so profile attribution translates through this; everything
-        /// else keeps seeing the caller's own index space (see `step`'s doc).
-        pub fn physical_kernel_name(&self, kind: usize) -> Option<&str> {
-            let (k, _) = crate::upgrade::apply(&self.upgrades, kind, 1);
-            self.names.get(k).map(|s| s.as_str())
+        /// Every pipeline a dispatch of slot `kind` can PHYSICALLY run on this
+        /// device: the redirected slot(s) when a transparent [`crate::upgrade`]
+        /// applies, otherwise just `kind`'s own name.
+        ///
+        /// A SET, not one name, because a shape-specialised upgrade row has one
+        /// pipeline per bucket and a single pass can dispatch several of them
+        /// through the same caller slot (`matmul_gemv` at two different row
+        /// counts). Backend device-timing maps ([`Gpu::kernel_times`]) are keyed
+        /// by physical names, so a profiler must SUM over this set - taking only
+        /// the first would drop every other bucket's time into an invisible
+        /// zero, which is the exact defect the single-name version of this
+        /// method was added to fix. Everything else keeps seeing the caller's
+        /// own index space (see `step`'s doc).
+        pub fn physical_kernel_names(&self, kind: usize) -> Vec<&str> {
+            for a in &self.upgrades {
+                if a.slow == kind {
+                    return a.slots.iter().filter_map(|&(_, i)| self.names.get(i).map(|s| s.as_str())).collect();
+                }
+            }
+            self.names.get(kind).map(|s| vec![s.as_str()]).unwrap_or_default()
         }
 
         /// The pipeline slot a kernel name occupies on this handle, or `None`
@@ -1025,14 +1042,14 @@ mod wasm_facade {
         /// `reset_ops_counters` arms it.
         cost_enabled: std::sync::atomic::AtomicBool,
         /// See the native facade / [`crate::upgrade`].
-        upgrades: Vec<(usize, usize, u32)>,
+        upgrades: Vec<crate::upgrade::Active>,
     }
 
     impl Gpu {
         /// Async device init + pipeline compile (the browser has no blocking
         /// executor, so there is no synchronous `new`).
         pub async fn new_async(kernels: &[(&str, &str)]) -> Gpu {
-            let expanded = crate::upgrade::expand(kernels);
+            let expanded = crate::upgrade::expand(kernels, false);
             let kernels: &[(&str, &str)] = expanded.as_deref().unwrap_or(kernels);
             let inner = WgpuBackend::new_async(kernels).await;
             let names: Vec<String> = kernels.iter().map(|(n, _)| n.to_string()).collect();
@@ -1062,17 +1079,17 @@ mod wasm_facade {
         }
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
-            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
             Backend::step(&self.inner, k, bufs, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
-            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
             Backend::step_sliced(&self.inner, k, bufs, offsets, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
-            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, None, threads);
             Backend::step_buf(&self.inner, k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
         }

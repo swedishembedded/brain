@@ -71,6 +71,23 @@ pub struct Jit {
     wg_size: Vec<Option<u32>>,
 }
 
+/// The compile errors that mean "this backend's work-group execution model
+/// cannot express this kernel", as opposed to "this kernel or this compiler is
+/// broken". Only these two are skippable; everything else is a hard error, so a
+/// genuine port bug can never masquerade as a skipped kernel.
+///
+/// Both are structural facts a kernel DECLARES in its header (`@cpu no` /
+/// `native-only`) and that `scripts/build/kernelmeta.py::cpu` derives from the
+/// same code the compiler reads, so the two can never disagree silently.
+fn is_unsupported_workgroup_structure(e: &str) -> bool {
+    let e = e.to_lowercase();
+    // > 1 top-level barrier (`compile_one`'s split-at-barrier model).
+    e.contains("barrier")
+        // A function-scope array in a work-group kernel (per-invocation locals
+        // are SSA scalars on that path).
+        || e.contains("array local in a work-group kernel")
+}
+
 // The JIT-compiled code is immutable after `new` returns; only `&Jit` is shared.
 unsafe impl Send for Jit {}
 unsafe impl Sync for Jit {}
@@ -127,11 +144,19 @@ impl Jit {
                     module.clear_context(&mut ctx);
                     ids.push(Some(id));
                 }
-                // A work-group kernel the CPU model can't express (e.g. a tiled
-                // GEMM with a barrier inside the K-loop). Skip it — it runs via a
-                // native fast path on CPU or on the GPU backend. Genuine compile
-                // errors (anything not barrier-structural) still fail hard.
-                Err(e) if e.to_lowercase().contains("barrier") => {
+                // A work-group kernel the CPU model can't express: a tiled GEMM
+                // with a barrier inside the K-loop, or a FUNCTION-scope array
+                // in a work-group kernel (`matmul_gemv_reg`'s register
+                // accumulators - this path's per-invocation locals are SSA
+                // scalars, see `Err("array local in a work-group kernel ...")`
+                // below). Skip it - such a kernel runs via a native fast path
+                // on CPU or on the GPU backend, and every one of them declares
+                // `@cpu no`/`native-only` (cross-checked by
+                // `scripts/build/kernelmeta.py::cpu`, which derives that cell
+                // from these same two structural facts). Genuine compile errors
+                // - anything that is not one of the two - still fail hard, so a
+                // real port bug cannot hide as a skip.
+                Err(e) if is_unsupported_workgroup_structure(&e) => {
                     eprintln!("wgsl-cpu: kernel {name:?} not JIT-compiled ({e}); must use a native fast path or the GPU");
                     wg_size.push(None);
                     ids.push(None);

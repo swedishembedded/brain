@@ -49,3 +49,7 @@ libc.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# The shared deterministic test PRNG (AGENTS.md: never a hand-rolled one).
+# `brain-data` does not depend on `brain-gpu-core`, so this is dev-only and
+# acyclic.
+brain-data.workspace = true
