@@ -144,6 +144,61 @@ impl MoondreamModel {
         self.dec.forward(&self.dgpu, tokens, targets, &img_embeds)
     }
 
+    /// Greedy autoregressive decode: `prompt` (already including the bos and the
+    /// `n_img` image-placeholder rows) in, generated ids out.
+    ///
+    /// Stops at `eos` or after `max_new` tokens, whichever comes first.
+    ///
+    /// # Why padding the sequence is exact here, not an approximation
+    ///
+    /// [`Self::logits`] runs a graph built for a FIXED `seq_len`, so each step
+    /// pads `tokens` out to that length and reads row `pos - 1`. That is not a
+    /// shortcut: this decoder's mask is
+    /// `allow(i, j) = (i < P && j < P) || (j <= i)` (`attn_prefix_mask`), i.e.
+    /// the `P = prefix_attn` bos+image rows attend to each other bidirectionally
+    /// and EVERYTHING ELSE IS CAUSAL. Row `pos - 1` therefore reads no position
+    /// past itself, so whatever sits in the padding slots cannot reach it. A
+    /// model with a bidirectional tail would need real masking instead, and this
+    /// loop would be wrong for it.
+    ///
+    /// # This is `O(T²)` per token, and that is the honest cost
+    ///
+    /// There is no KV cache: every step re-runs the whole grown sequence through
+    /// all `n_layers`. `crates/gpt2`, `crates/qwen3` and `crates/deepseek2` each
+    /// keep an `O(1)`-per-token incremental twin alongside their recompute tier;
+    /// this decoder does not have one yet. At the preview config that is 24
+    /// layers over a 730-row image prefix per generated token, so a long caption
+    /// is minutes, not milliseconds.
+    pub fn generate(&self, prompt: &[u32], img_embeds: &[f32], max_new: usize, eos: Option<u32>) -> Result<Vec<u32>, String> {
+        let t = self.seq_len as usize;
+        if prompt.len() >= t {
+            return Err(format!("moondream3: prompt is {} tokens but the graph was built for seq_len {t}", prompt.len()));
+        }
+        let pad = prompt.last().copied().unwrap_or(0);
+        let mut ids = prompt.to_vec();
+        let mut out = Vec::new();
+        let vocab = self.cfg.vocab as usize;
+        while out.len() < max_new && ids.len() < t {
+            let pos = ids.len();
+            let mut padded = ids.clone();
+            padded.resize(t, pad);
+            let logits = self.logits(&padded, img_embeds);
+            let row = &logits[(pos - 1) * vocab..pos * vocab];
+            let next = row
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i as u32)
+                .ok_or("moondream3: empty logits row")?;
+            if Some(next) == eos {
+                break;
+            }
+            out.push(next);
+            ids.push(next);
+        }
+        Ok(out)
+    }
+
     /// The `[seq_len, vocab]` logits for `tokens` with `img_embeds` spliced at rows
     /// `[1, 1+n_img)`. `tokens` must be exactly `seq_len` long (pad past the real
     /// content; see [`Self::generate`] for why the padding cannot affect the row
@@ -324,6 +379,71 @@ mod tests {
         let (tokens, targets) = seq(ppc);
         let loss = model.forward_multicrop(&tokens, &targets, &global, &locals, ht, wt);
         assert!(loss.is_finite() && loss > 0.0, "multi-crop loss must be finite+positive, got {loss}");
+    }
+
+    /// Greedy decode runs, is deterministic, and stops at `eos`.
+    ///
+    /// The padding argument this loop rests on is checked here too: the same
+    /// prompt decoded twice must give the same ids (nothing in the padding
+    /// slots leaks into the read row), and a `max_new` cap must be honoured.
+    #[test]
+    fn generate_is_deterministic_and_honours_max_new() {
+        let (cfg, vw, cw, dw) = tiny(32, 32, false, 13);
+        let vision = cfg.vision.clone();
+        let ppc = vision.patches_per_crop();
+        let vocab = cfg.vocab;
+        // Room for the bos + image block + a few prompt tokens + generation.
+        let seq_len = 1 + ppc + 8;
+        let mut rng = Rng::new(130);
+        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+
+        let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
+        let embeds = model.image_embeds(&packed);
+        let mut prompt = vec![0u32];
+        prompt.extend(std::iter::repeat_n(5u32, ppc as usize));
+        prompt.push(7);
+
+        let a = model.generate(&prompt, &embeds, 4, None).expect("generate runs");
+        let b = model.generate(&prompt, &embeds, 4, None).expect("generate runs");
+        assert_eq!(a, b, "greedy decode must be deterministic");
+        assert_eq!(a.len(), 4, "max_new must cap the run");
+        assert!(a.iter().all(|&id| id < vocab), "every id must be in vocab: {a:?}");
+    }
+
+    /// `eos` ends the run. Fed its own first output as the stop id, the loop
+    /// must return nothing at all rather than one token then stopping.
+    #[test]
+    fn generate_stops_at_eos() {
+        let (cfg, vw, cw, dw) = tiny(32, 32, false, 17);
+        let vision = cfg.vision.clone();
+        let ppc = vision.patches_per_crop();
+        let seq_len = 1 + ppc + 8;
+        let mut rng = Rng::new(170);
+        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+
+        let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
+        let embeds = model.image_embeds(&packed);
+        let mut prompt = vec![0u32];
+        prompt.extend(std::iter::repeat_n(5u32, ppc as usize));
+        prompt.push(7);
+
+        let free = model.generate(&prompt, &embeds, 3, None).expect("generate runs");
+        let stopped = model.generate(&prompt, &embeds, 3, Some(free[0])).expect("generate runs");
+        assert!(stopped.is_empty(), "eos on the first sampled id must yield no output, got {stopped:?}");
+    }
+
+    /// A prompt that does not fit the built graph is a named error, not a panic
+    /// deep in a buffer write.
+    #[test]
+    fn generate_refuses_a_prompt_longer_than_the_built_context() {
+        let (cfg, vw, cw, dw) = tiny(32, 32, false, 19);
+        let vision = cfg.vision.clone();
+        let ppc = vision.patches_per_crop();
+        let seq_len = 1 + ppc + 2;
+        let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
+        let too_long = vec![1u32; seq_len as usize + 1];
+        let err = model.generate(&too_long, &[], 1, None).unwrap_err();
+        assert!(err.contains("seq_len"), "{err}");
     }
 
     /// THE POINT OF OWNING THE STACK: two forwards on ONE model, with no rebuild
