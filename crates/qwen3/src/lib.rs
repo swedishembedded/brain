@@ -23,6 +23,9 @@ pub mod toolcall_eval;
 pub use config::{LoraCfg, QwenConfig};
 pub use init::init_weights;
 pub use model::{Qwen, Shard, IGNORE};
+/// The weight **storage tier** [`Qwen::new_shard_dt`] takes, re-exported so a
+/// caller naming one does not have to depend on `gpu-core` directly.
+pub use gpu_core::select::Dtype;
 /// Generic multi-GPU training (see [`::model`]); use as `Pipeline::<Qwen>::new(..)`
 /// / `DataParallel::<Qwen>::new(..)`.
 pub use ::model::{DataParallel, Pipeline};

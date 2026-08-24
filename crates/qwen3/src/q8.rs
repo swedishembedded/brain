@@ -76,6 +76,17 @@ impl Q8 {
     ];
 
     /// Is `name` (e.g. `blocks.5.attn.wq.weight`) one of the int8 linears?
+    ///
+    /// The set is tier-NEUTRAL despite the int8-flavoured name: it is "the
+    /// per-layer projections a reduced-precision build re-tiers", and
+    /// `Qwen::new_shard_dt` uses it for **every** non-fp32 tier (int8, f16,
+    /// bf16, q4). What keeps the set the same across tiers is structural, not
+    /// numeric - these 7 are exactly the linears that dispatch through
+    /// `model::ops::Ops::matmul`, the one dispatch seam that knows how to read
+    /// a packed weight. The token embedding and the LM head are excluded
+    /// because this crate gathers/GEMMs them with `embed_tile`/`linear_kernel`
+    /// straight off the fp32 `ParamStore` buffer, and the norm gains because
+    /// they are `[d]` vectors consumed by norm kernels, not GEMMs.
     pub fn is_i8_linear(name: &str) -> bool {
         name.strip_prefix("blocks.").is_some_and(|rest| {
             rest.split_once('.').is_some_and(|(_, leaf)| Self::LINEARS.contains(&leaf))

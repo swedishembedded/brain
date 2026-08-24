@@ -516,9 +516,12 @@ pub struct Qwen {
     ops: Ops,
     /// Every one of the 7 per-layer linears (`attn.{wq,wk,wv,wo}`/
     /// `mlp.{gate,up,down}`, keyed `blocks.<l>.<leaf>`) this shard owns, as a
-    /// `model::ops::Weight` - uniformly `F32` or (when this model was built
-    /// int8 AND the device's `int8_dot` capability allows it - `Weight::
-    /// upload`'s own `want.promote(caps.numeric)` gate) `I8`. Replaces the
+    /// `model::ops::Weight` - uniformly at whichever tier the constructor
+    /// asked for AND the device's caps allow (`Weight::upload`'s own
+    /// `want.promote(caps.numeric)` gate): `F32`, `I8` (needs
+    /// `numeric.int8_dot`) or `F16` (needs `numeric.f16 || f16_storage`;
+    /// the packed-f16 decode is plain integer/bitcast WGSL, so no device
+    /// FEATURE is involved). Replaces the
     /// old per-model `q8` field (an `Option` wrapping `crate::q8::Q8`): the
     /// forward dispatches whatever tier a `Weight` value itself carries,
     /// never a separate on/off flag inspected at dispatch time. The `F32` tier costs no extra
@@ -546,14 +549,14 @@ impl Qwen {
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
         let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &reader, true, shard, false, false)
+        Qwen::new_impl(cfg, b, t, &reader, true, shard, Dtype::F32, false)
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
     /// grad/AdamW buffers), cutting device memory ~4× - essential for loading a
     /// real 0.6B checkpoint for generation. Builds only the forward graph.
     pub fn load_inference(path: &str, b: u32, t: u32) -> Qwen {
-        Self::load_inference_with(path, b, t, false)
+        Self::load_inference_with(path, b, t, Dtype::F32)
     }
 
     /// Streaming inference load: build from a mmap-backed [`WeightReader`],
@@ -563,7 +566,7 @@ impl Qwen {
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
         let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, reader, false, shard, false, false)
+        Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false)
     }
 
     /// Streaming **decode-only** load: like [`Self::from_reader_inference`]
@@ -580,7 +583,7 @@ impl Qwen {
     pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
         let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, false, true)
+        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true)
     }
 
     /// [`Self::from_reader_decode`], but from an in-memory tensor map instead of
@@ -591,14 +594,14 @@ impl Qwen {
     /// (rare, one-off-per-activation) adapter-serving path.
     pub fn from_tensors_decode(cfg: QwenConfig, tensors: &HashMap<String, Vec<f32>>, ctx: u32) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, false, true)
+        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true)
     }
 
     /// [`Self::load_inference`] with the int8 numeric tier: per-channel weight
     /// quantisation + dynamic activation quant, for both batched forwards and
     /// KV-cache decode (the m=1 packed GEMV).
     pub fn load_inference_i8(path: &str, b: u32, t: u32) -> Qwen {
-        Self::load_inference_with(path, b, t, true)
+        Self::load_inference_with(path, b, t, Dtype::I8)
     }
 
     /// Streaming inference load shared by [`Self::load_inference`] and
@@ -606,20 +609,21 @@ impl Qwen {
     /// [`WeightReader`](checkpoint::weightio::WeightReader), uploading one tensor
     /// at a time - peak host ≈ one tensor of f32, never the whole-model
     /// `checkpoint::load` + `by_role("")` host copy on top of the device copy.
-    /// The int8 tier reads + quantizes one linear at a time (`src.with_tensor`,
-    /// the reader as a [`TensorSource`](checkpoint::TensorSource), feeding
-    /// `Weight::upload` per leaf - see `new_impl`'s `weights` construction).
-    fn load_inference_with(path: &str, b: u32, t: u32, i8: bool) -> Qwen {
+    /// Every non-fp32 tier reads + packs one linear at a time
+    /// (`src.with_tensor`, the reader as a
+    /// [`TensorSource`](checkpoint::TensorSource), feeding `Weight::upload`
+    /// per leaf - see `new_impl`'s `weights` construction).
+    fn load_inference_with(path: &str, b: u32, t: u32, dt: Dtype) -> Qwen {
         let reader = checkpoint::weightio::WeightReader::open(path)
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
         let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &reader, false, shard, i8, false)
+        Qwen::new_impl(cfg, b, t, &reader, false, shard, dt, false)
     }
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, false, false)
+        Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false)
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint weights)
@@ -632,7 +636,7 @@ impl Qwen {
     /// streaming mmap'd `WeightReader`/`RemapSource` pair, which never
     /// materializes the whole checkpoint on the host.
     pub fn new_shard(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, train: bool, shard: Shard) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, train, shard, false, false)
+        Qwen::new_impl(cfg, b, t, init, train, shard, Dtype::F32, false)
     }
 
     /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
@@ -640,8 +644,48 @@ impl Qwen {
     /// weights → ~9.5 GB resident) fits a single 24 GB card - where the fp32
     /// encoder (~30 GB resident on non-ReBAR Pascal) does not. Frozen, no LoRA.
     /// See [`Self::new_shard`]'s doc: `init` may be any `TensorSource`.
+    ///
+    /// A thin alias for [`Self::new_shard_dt`] at [`Dtype::I8`] - there is ONE
+    /// implementation of the reduced-precision build, not one per tier.
     pub fn new_shard_i8(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, false, shard, true, false)
+        Qwen::new_shard_dt(cfg, b, t, init, shard, Dtype::I8)
+    }
+
+    /// Inference-only shard at an explicit **weight storage tier** for the 7
+    /// per-layer linears (`crate::q8::Q8::LINEARS`) - the dtype-parameterised
+    /// constructor [`Self::new_shard_i8`] is an alias of.
+    ///
+    /// * [`Dtype::F32`] - identical to `new_shard(.., train = false, ..)`: the
+    ///   `Weight`s alias the `ParamStore`'s own buffers, no second upload.
+    /// * [`Dtype::I8`] - per-channel symmetric DP4A weights + dynamic
+    ///   per-token activation quant (~4× smaller). Needs
+    ///   `caps.numeric.int8_dot`.
+    /// * [`Dtype::F16`] / [`Dtype::BF16`] - the **storage** tiers: the weight
+    ///   is packed two-per-`u32` (`model::half::pack_f16`/`pack_bf16`, exactly
+    ///   2× smaller) and decoded back to f32 *inside* the `#w=f16`/`#w=bf16`
+    ///   kernel variant with plain integer/bitcast WGSL. The arithmetic stays
+    ///   fp32, so **no device feature** (`wgpu::Features::SHADER_F16` and
+    ///   friends) is required and the tier is available identically on the CPU
+    ///   JIT, wgpu and in the browser.
+    /// * [`Dtype::Q4`] - W4A8, same shape as `I8`.
+    ///
+    /// The tier is a REQUEST, not a guarantee: `Weight::upload` runs it
+    /// through `want.promote(caps.numeric)`, so a device that cannot execute
+    /// it lands back on fp32 rather than dispatching a kernel it has no path
+    /// for. Ask [`Self::linear_dtype`] what actually happened.
+    ///
+    /// **Only the 7 per-layer linears change tier.** The token embedding
+    /// (`tok.weight`) and the LM head stay fp32 for the same reason they do on
+    /// the int8 path, and the reason is structural, not a policy choice: this
+    /// crate's embedding gather is `embed_tile.wgsl` and its head GEMM is
+    /// `linear_kernel`'s plain `matmul`/`matmul_reg3`, neither of which is
+    /// registered here in a packed-storage variant - they read the
+    /// `ParamStore` buffer as raw f32, so handing them packed words would
+    /// reinterpret bit patterns as garbage floats. The per-layer RMSNorm/
+    /// QK-norm gains stay fp32 too: they are `[d]`/`[head_dim]` vectors (a
+    /// rounding error away from free) consumed by norm kernels, not GEMMs.
+    pub fn new_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
+        Qwen::new_impl(cfg, b, t, init, false, shard, dt, false)
     }
 
     /// The shared builder behind every constructor. `decode_only` (set only by
@@ -649,8 +693,14 @@ impl Qwen {
     /// decode instead of the batched forward: activations at `n = 1`,
     /// `scores`/`probs` at `n_heads·ctx` (not `n_heads·ctx²`), no backward
     /// scratch, no `logits`/`d_logits`/CE buffers.
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, i8: bool, decode_only: bool) -> Qwen {
-        assert!(!(i8 && train), "int8 path is inference-only");
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, dt: Dtype, decode_only: bool) -> Qwen {
+        // ONE reduced-precision build, parameterised by `dt` - the int8 tier
+        // is not a second code path, it is this one at `Dtype::I8`. Every
+        // non-fp32 tier is inference-only for the same reason int8 always
+        // was: the trainable master copy lives in the fp32 `ParamStore`, and
+        // a packed/quantized `Weight` is built ONCE at construction from the
+        // source tensor, never re-derived after an optimiser step.
+        assert!(!(dt != Dtype::F32 && train), "the {dt:?} weight tier is inference-only");
         assert!(!(decode_only && train), "decode-only build is inference-only");
         // An explicitly-placed shard binds its canonical card through the
         // device registry; `Shard::ANY_GPU` (the `Shard::whole` default) keeps
@@ -669,12 +719,15 @@ impl Qwen {
         let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen: Ops::new: {e}"));
         // The parameter set this stage actually holds: the whole list for a whole
         // shard (byte-identical to before), or just this stage's slice otherwise.
-        // In int8 mode the 7 per-layer linears live in `weights` (packed int8
-        // `Weight`s), NOT the fp32 store - filter them out so no fp32 copy is
-        // ever uploaded.
+        // At any non-fp32 tier the 7 per-layer linears live in `weights`
+        // (packed int8/f16/bf16/q4 `Weight`s), NOT the fp32 store - filter
+        // them out so no fp32 copy is ever uploaded alongside the packed one.
+        // Without this filter an f16 build would be BIGGER than fp32 (1.0x
+        // master copy + 0.5x packed), not half the size.
+        let quantized = dt != Dtype::F32;
         let plist: Vec<(String, usize)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(name, _)| !(i8 && crate::q8::Q8::is_i8_linear(name)))
+            .filter(|(name, _)| !(quantized && crate::q8::Q8::is_i8_linear(name)))
             .collect();
         // Role assignment:
         //  - inference (`!train`): every parameter Frozen (weights only).
@@ -796,11 +849,12 @@ impl Qwen {
         let bwd = |x: u64| if decode_only { st(1) } else { st(x) };
 
         // Per-layer linear weights (B7): every layer this shard owns gets its 7
-        // projections as a `model::ops::Weight`, built ONCE here. `i8` asks
-        // `Weight::upload` for `Dtype::I8` - its own `want.promote(ops.caps().
-        // numeric)` is the ONE capability gate (never blindly sending int8
-        // dispatch work to a device that can't execute it, unlike the old
-        // `q8.rs` path, which quantized unconditionally regardless of
+        // projections as a `model::ops::Weight`, built ONCE here. A non-fp32
+        // `dt` is handed straight to `Weight::upload` - its own
+        // `want.promote(ops.caps().numeric)` is the ONE capability gate
+        // (never blindly sending int8/f16 dispatch work to a device that
+        // can't execute it, unlike the old `q8.rs` path, which quantized
+        // unconditionally regardless of
         // backend). The `else` (fp32) arm does NOT go through `Weight::
         // upload` - it wraps a `.clone()` of the buffer `ps` already holds
         // (a cheap `Arc` bump, `backend_api::DeviceBuffer`'s own doc comment),
@@ -823,10 +877,10 @@ impl Qwen {
             for leaf in crate::q8::Q8::LINEARS {
                 let name = format!("blocks.{l}.{leaf}");
                 let (wn, wk) = dims(leaf);
-                let w = if i8 {
+                let w = if quantized {
                     let mut built: Option<Weight> = None;
                     let found = src.with_tensor(&name, &mut |raw| {
-                        built = Some(Weight::upload(&ops, raw, wn, wk, Dtype::I8));
+                        built = Some(Weight::upload(&ops, raw, wn, wk, dt));
                     });
                     if !found {
                         panic!("qwen: missing init weight {name}");
@@ -2194,6 +2248,40 @@ impl Qwen {
         &self.gpu
     }
 
+    /// The storage tier the 7 per-layer linears ACTUALLY landed on - read off
+    /// the resident `Weight` values themselves, never off a remembered
+    /// request. `new_shard_dt(.., Dtype::F16)` on a device whose
+    /// `caps.numeric` cannot serve f16 reports `F32` here, because
+    /// `Weight::upload`'s `want.promote(caps.numeric)` demoted it; that is the
+    /// distinction a caller (or a test) needs to tell "the tier ran" from "the
+    /// tier silently fell back". `None` when this shard owns no layer at all
+    /// (an embed-only or head-only pipeline stage), since there is then no
+    /// linear whose tier could be reported.
+    pub fn linear_dtype(&self) -> Option<Dtype> {
+        self.weights.values().next().map(|w| w.dtype())
+    }
+
+    /// Bytes the resident per-layer linears occupy on the device, at whatever
+    /// tier [`Self::linear_dtype`] reports - the packed size `Weight::upload`
+    /// actually allocated (`Dtype::per_word()` values to a `u32` word, plus
+    /// the `[n]` f32 per-channel scale the `I8`/`Q4` tiers carry), not a
+    /// driver VRAM reading and not the fp32 size of the source tensor.
+    pub fn linear_weight_bytes(&self) -> u64 {
+        self.weights
+            .values()
+            .map(|w| {
+                let elems = w.n() as u64 * w.k() as u64;
+                let per_word = w.dtype().per_word() as u64;
+                let packed = elems.div_ceil(per_word) * 4;
+                let scale = match w {
+                    Weight::I8 { .. } | Weight::Q4 { .. } => w.n() as u64 * 4,
+                    _ => 0,
+                };
+                packed + scale
+            })
+            .sum()
+    }
+
     /// OFFLINE FLOP/OPS cost of the recorded batch forward - walks the step
     /// list, executes nothing. Per this device/stage: a sharded instance
     /// reports only its own layers. The int8 path shows up as `int_ops`
@@ -2705,6 +2793,263 @@ mod tests {
         let norm: f32 = hf.iter().map(|v| v * v).sum::<f32>().sqrt();
         let rel = err / norm.max(1e-12);
         assert!(rel < 0.10, "int8 KV decode diverged from fp32: rel L2 {rel:.4}");
+        // `linear_weight_bytes` must account for the tier it actually got: a
+        // quarter of fp32 for the packed weights, plus the `[n]` f32
+        // per-channel scale int8 (unlike f16) also has to keep resident.
+        if q.linear_dtype() == Some(Dtype::I8) {
+            let rows: u64 = crate::q8::Q8::LINEARS.iter().map(|leaf| dims_of(&cfg, leaf).0 as u64).sum::<u64>() * cfg.n_layers as u64;
+            assert_eq!(q.linear_weight_bytes(), f.linear_weight_bytes() / 4 + rows * 4, "int8 resident linear bytes");
+        }
+    }
+
+    /// `(n_out, k_in)` of one per-layer linear leaf - the test-side mirror of
+    /// `new_impl`'s own `dims` closure, for sizing assertions.
+    fn dims_of(cfg: &QwenConfig, leaf: &str) -> (u32, u32) {
+        let (d, hq, hkv, ff) = (cfg.d_model, cfg.q_dim(), cfg.kv_dim(), cfg.d_ff);
+        match leaf {
+            "attn.wq.weight" => (hq, d),
+            "attn.wk.weight" | "attn.wv.weight" => (hkv, d),
+            "attn.wo.weight" => (d, hq),
+            "mlp.gate.weight" | "mlp.up.weight" => (ff, d),
+            "mlp.down.weight" => (d, ff),
+            other => panic!("unexpected linear leaf {other}"),
+        }
+    }
+
+    /// Cosine similarity and relative L2 of `a` against the reference `b`.
+    /// Both, never cosine alone: cosine is scale-invariant, so a uniformly
+    /// mis-scaled output still scores 1.0 - the house rule this repo's other
+    /// parity gates (`sdxlunet`, `controlnet`, ...) follow.
+    fn cos_rel(a: &[f32], b: &[f32]) -> (f64, f64) {
+        assert_eq!(a.len(), b.len(), "cos_rel: length mismatch");
+        let (mut dot, mut na, mut nb, mut de) = (0f64, 0f64, 0f64, 0f64);
+        for (x, y) in a.iter().zip(b) {
+            let (x, y) = (*x as f64, *y as f64);
+            dot += x * y;
+            na += x * x;
+            nb += y * y;
+            de += (x - y) * (x - y);
+        }
+        (dot / (na.sqrt() * nb.sqrt()).max(1e-30), de.sqrt() / nb.sqrt().max(1e-30))
+    }
+
+    /// Every kernel NAME the recorded step list `steps` dispatches on `m`'s
+    /// device, in order.
+    fn kernel_names(m: &Qwen, steps: &[Step]) -> Vec<String> {
+        steps
+            .iter()
+            .filter_map(|s| s.meta())
+            .filter_map(|meta| m.gpu().kernel_name(meta.kernel))
+            .map(|n| n.to_string())
+            .collect()
+    }
+
+    /// A **half-precision STORAGE tier** (`new_shard_dt(.., Dtype::F16 |
+    /// Dtype::BF16)`) against the fp32 build, at one model shape. Returns the
+    /// distinct `#w=<tag>` kernel names the batched forward dispatched, or
+    /// `None` when the device has no such storage path at all (a skip,
+    /// already reported), paired with this
+    /// device's `workgroup_reductions` capability (which is what decides
+    /// WHICH f16 kernel the selector can reach - see the caller).
+    ///
+    /// Three things are asserted, and the FIRST is what makes the other two
+    /// mean anything:
+    ///
+    /// 1. **The tier really dispatched.** `linear_dtype()` must report `F16`
+    ///    AND the recorded batched forward must contain real `#w=f16` kernel
+    ///    dispatches - one per per-layer linear - while the fp32 build
+    ///    contains none. A silent demotion to fp32 would make a closeness
+    ///    check pass while proving nothing; it is accepted ONLY when the
+    ///    device genuinely reports no f16 storage path (the same "a fallback
+    ///    must imply a missing capability" shape
+    ///    `serve::tests::int8_weights_track_fp32` uses for int8).
+    /// 2. **Numerics.** f16 storage is LOSSY: binary16 has a 10-bit explicit
+    ///    mantissa, so round-to-nearest costs each weight a relative error of
+    ///    up to 2^-11 = 4.9e-4. Sign-random accumulation over K keeps a dot
+    ///    product at that same relative order rather than growing it, and the
+    ///    RMSNorm in front of every projection re-normalizes the stream each
+    ///    layer, so the end-to-end error stays within a small multiple of the
+    ///    per-weight bound. The gate is **cosine >= 0.9999 and rel_l2 <=
+    ///    5e-3** - ~10x headroom over that 4.9e-4 bound (enough to absorb the
+    ///    depth factor and a different GEMM reduction order between the two
+    ///    kernels), while any REAL defect in this tier - a mis-decoded
+    ///    exponent bias, a swapped hi/lo half, packed words read as raw f32 -
+    ///    is an O(1) error, orders of magnitude clear of it. bf16 keeps only
+    ///    7 mantissa bits, so its bound scales to 4e-2 by the same rule (see
+    ///    `rel_max`). Checked on both
+    ///    the batched forward and the KV-cache decode (m = 1), which dispatch
+    ///    DIFFERENT f16 kernel variants.
+    /// 3. **The tier pays for itself**: the resident linear bytes must halve.
+    fn half_tier_gate(cfg: QwenConfig, t: u32, toks: &[u32], dt: Dtype) -> Option<(Vec<String>, bool)> {
+        type Supported = fn(&gpu_core::NumericSupport) -> bool;
+        // `rel_max` is 10x the tier's own worst-case per-weight relative
+        // rounding error (2^-(mantissa_bits+1)): f16 keeps 10 explicit
+        // mantissa bits -> 4.9e-4 -> 5e-3, bf16 only 7 -> 3.9e-3 -> 4e-2.
+        // See this function's doc comment for why 10x is the right headroom.
+        let (tag, rel_max, supported): (&str, f64, Supported) = match dt {
+            Dtype::F16 => ("#w=f16", 5e-3, |n| n.f16 || n.f16_storage),
+            Dtype::BF16 => ("#w=bf16", 4e-2, |n| n.bf16 || n.bf16_storage),
+            other => panic!("half_tier_gate: {other:?} is not a half-precision storage tier"),
+        };
+        let w = crate::init::init_weights(&cfg, 7);
+        let whole = model::shard::Shard::whole(cfg.n_layers as usize);
+        let f32m = Qwen::new_shard(cfg.clone(), 1, t, &w, false, whole.clone());
+        let tierm = Qwen::new_shard_dt(cfg.clone(), 1, t, &w, whole, dt);
+
+        // (1) The requested tier must be what is actually resident.
+        let got = tierm.linear_dtype().expect("a whole-model build owns every layer's linears");
+        if got != dt {
+            let n = &tierm.gpu().caps().numeric;
+            assert!(
+                !supported(n),
+                "device reports {dt:?} storage support ({n:?}) but the build demoted the \
+                 weights to {got:?} - a silent fp32 fallback on capable hardware is exactly what this \
+                 test exists to catch"
+            );
+            brain_testutil::skip_unavailable(&format!("{dt:?} storage comparison: device has no {dt:?} weight path"));
+            return None;
+        }
+
+        // ... and the recorded forward must really run the packed-f16 kernels.
+        let want = 7 * cfg.n_layers as usize;
+        let fwd_names = kernel_names(&tierm, tierm.fwd_steps());
+        let dispatched: Vec<String> = fwd_names.iter().filter(|n| n.ends_with(tag)).cloned().collect();
+        assert_eq!(
+            dispatched.len(),
+            want,
+            "expected one `{tag}` dispatch per per-layer linear ({want}), got {} in {fwd_names:?}",
+            dispatched.len()
+        );
+        let f32_names = kernel_names(&f32m, f32m.fwd_steps());
+        assert!(
+            !f32_names.iter().any(|n| n.contains("#w=")),
+            "the fp32 build must dispatch no packed-storage kernel at all: {f32_names:?}"
+        );
+        // The m=1 KV-cache decode is a SEPARATE step list and a different
+        // kernel variant - cover it too, or half the tier stays unproven.
+        let dec_names = kernel_names(&tierm, &tierm.decode_steps(Some(1), 0, None, None));
+        assert_eq!(
+            dec_names.iter().filter(|n| n.ends_with(tag)).count(),
+            want,
+            "the KV-cache decode path must dispatch {dt:?} too: {dec_names:?}"
+        );
+        tierm.reset_cache();
+
+        // (2) Numerics: batched forward (logits) and KV-cache decode (hidden).
+        let (cos_l, rel_l) = cos_rel(&tierm.logits_all(toks), &f32m.logits_all(toks));
+        f32m.reset_cache();
+        tierm.reset_cache();
+        let (mut hf, mut h16) = (Vec::new(), Vec::new());
+        for &tok in &toks[..toks.len() / 2] {
+            hf = f32m.step(tok);
+            h16 = tierm.step(tok);
+        }
+        let (cos_h, rel_h) = cos_rel(&h16, &hf);
+        let d = cfg.d_model;
+        println!(
+            "{dt:?} vs f32 (d_model {d}, m {t}): logits cos {cos_l:.10} rel_l2 {rel_l:.3e} | decode hidden cos {cos_h:.10} rel_l2 {rel_h:.3e}"
+        );
+        for (what, cos, rel) in [("logits", cos_l, rel_l), ("decode hidden", cos_h, rel_h)] {
+            assert!(cos >= 0.9999, "{dt:?} {what} cosine {cos:.10} below the 0.9999 floor");
+            assert!(rel <= rel_max, "{dt:?} {what} rel_l2 {rel:.3e} above the {rel_max:.0e} bound");
+        }
+
+        // (3) Half the bytes - the whole point of the tier.
+        let (b32, b16) = (f32m.linear_weight_bytes(), tierm.linear_weight_bytes());
+        println!("linear weight bytes: fp32 {b32} -> {dt:?} {b16}");
+        assert_eq!(b16 * 2, b32, "{dt:?} linears must be exactly half of fp32 ({b16} vs {b32})");
+
+        let mut distinct: Vec<String> = dispatched;
+        distinct.sort();
+        distinct.dedup();
+        Some((distinct, tierm.gpu.caps().workgroup_reductions))
+    }
+
+    /// A deliberately WIDE tiny config: `n >= select::GEMM_TILE_MIN_COLS`
+    /// (128) on 5 of the 7 projections and a row count above
+    /// `DECODE_REGIME_MAX_ROWS` (32), which is what makes the selector reach
+    /// for `KernelVariant::RegisterTiled` - a physically DIFFERENT f16 kernel
+    /// (`matmul_reg3#w=f16`) from the one `QwenConfig::tiny()`'s narrow
+    /// projections take. `wk`/`wv` stay at n = 64 on purpose, so one run
+    /// covers both the tiled and the narrow kernel.
+    fn tile_shaped_cfg() -> QwenConfig {
+        QwenConfig {
+            vocab: 32,
+            block_size: 64,
+            n_layers: 2,
+            d_model: 128,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 32,
+            d_ff: 256,
+            max_position_embeddings: 64,
+            ..QwenConfig::tiny()
+        }
+    }
+
+    /// See [`f16_tier_gate`] for what is asserted. Run at TWO shapes, because
+    /// the tier is not one kernel: a narrow/decode-shaped GEMM and a
+    /// tile-shaped one bind to different physical `#w=f16` kernels, and the
+    /// packed-word decode has to be right in every one of them.
+    #[test]
+    fn f16_storage_tier_tracks_fp32_and_really_dispatches_f16_kernels() {
+        if gpu_disabled() {
+            return;
+        }
+        let narrow: Vec<u32> = vec![1, 5, 3, 9, 2, 7, 11, 4, 0, 13, 6, 8];
+        let Some((narrow_kernels, coop)) = half_tier_gate(QwenConfig::tiny(), 16, &narrow, Dtype::F16) else {
+            return; // no f16 storage path on this device (already reported)
+        };
+        let cfg = tile_shaped_cfg();
+        let wide: Vec<u32> = (0..cfg.block_size).map(|i| (i * 7 % cfg.vocab) as u32).collect();
+        let (wide_kernels, _) = half_tier_gate(cfg, 64, &wide, Dtype::F16).expect("f16 availability cannot change mid-test");
+        println!("f16 kernels dispatched: narrow {narrow_kernels:?}, wide {wide_kernels:?}");
+
+        // Which variant each shape lands on is the SELECTOR's business, but
+        // the split is a device-capability fact, and asserting it is what
+        // keeps this from silently degenerating into "one kernel, tested
+        // twice". `matmul_gemv`/`matmul_reg3` both stage their tile behind a
+        // `workgroupBarrier()`, so a backend without `workgroup_reductions`
+        // (the CPU JIT) legitimately runs everything on the reference kernel.
+        let all: Vec<&String> = narrow_kernels.iter().chain(&wide_kernels).collect();
+        assert!(
+            all.iter().all(|n| ["matmul#w=f16", "matmul_gemv#w=f16", "matmul_reg3#w=f16"].contains(&n.as_str())),
+            "unexpected f16 kernel name among {all:?}"
+        );
+        if coop {
+            assert!(
+                wide_kernels.iter().any(|n| n == "matmul_reg3#w=f16"),
+                "a device with workgroup reductions must reach the register-tiled f16 kernel at these \
+                 shapes, got {wide_kernels:?}"
+            );
+        } else {
+            assert!(
+                all.iter().all(|n| n.as_str() == "matmul#w=f16"),
+                "without workgroup reductions every f16 dispatch must be the reference kernel: {all:?}"
+            );
+        }
+    }
+
+    /// The SAME gate at [`Dtype::BF16`] - not because bf16 is this phase's
+    /// deliverable, but because `new_shard_dt` claims to be genuinely
+    /// dtype-parameterised rather than an f16 special case, and a claim that
+    /// nothing exercises rots. One shape is enough: what differs between the
+    /// two tiers is only which packed decode expression
+    /// `kernels::template::dtype_variant` substituted, not the model-side
+    /// plumbing this test covers.
+    #[test]
+    fn bf16_storage_tier_is_the_same_one_implementation() {
+        if gpu_disabled() {
+            return;
+        }
+        let toks: Vec<u32> = vec![1, 5, 3, 9, 2, 7, 11, 4, 0, 13, 6, 8];
+        let Some((kernels, _)) = half_tier_gate(QwenConfig::tiny(), 16, &toks, Dtype::BF16) else {
+            return; // no bf16 storage path on this device (already reported)
+        };
+        assert!(
+            kernels.iter().all(|n| n.ends_with("#w=bf16")),
+            "every dispatched tier kernel must be a bf16 variant: {kernels:?}"
+        );
     }
 
     #[test]
