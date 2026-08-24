@@ -47,6 +47,7 @@ Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
 | Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
 | INT8 | [~] storage format only for the video-only DiT's weights (`crate::int8`) - not wired into any checkpoint loader, no compute-time kernel |
 | CLI (`brain ltxv {t2v,upscale,dfr}`) | [x] |
+| HTTP API | [ ] the OpenAI/Anthropic routes cover chat, embeddings and text-to-IMAGE; there is no video route, and `api_caps` derives exposure from action shape, so a video action is simply not advertised |
 | D-Bus | [~] `t2v` and `dfr` are reachable as actions, not just CLI subcommands, via the generalized `capability::Provider`/residency surface - `upscale` is **not**: it takes a whole video file as INPUT, which is the first action in this model that would need an input blob rather than parameters alone, and that action shape has not been designed. Recorded rather than quietly skipped, because "a bespoke CLI subcommand is never the only entry point" is this repo's serving contract |
 | Batched serving | [ ] nothing resident to batch yet - see `crates/cli/src/resident_ltxv.rs`'s module doc |
 | Multi-device sharding | [~] `model::Shardable` plumbing for the video-only DiT is implemented and tested (partition planning, weight-subset loading, the single-shard and sequential-two-stage cases) - no real multi-device execution has been run against two physical accelerators yet |

@@ -13,6 +13,7 @@ see what the model's prior reconstructs from a code grid.
 |---|---|
 | Inference             | [x] |
 | CLI (`brain <arch> <action>`)       | [x] |
+| HTTP API               | [ ] `encode`/`decode` both take a REQUIRED input blob, so neither is a text-to-image action |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
 

@@ -10,6 +10,7 @@ OpenCLIP-bigG (two text towers) with an EVA-CLIP image tower.
 |---|---|
 | Inference             | [x] |
 | CLI (`brain <arch> <action>`)       | [x] |
+| HTTP API               | [ ] `/v1/embeddings` dispatches the literal action `embed`; these are `embed_text`/`embed_image` (per-tower), so the route would 404 the model rather than mis-dispatch it |
 | D-Bus                  | [x] |
 | Batched serving        | [x] |
 

@@ -13,6 +13,7 @@ detail from its own learned prior.
 | Inference             | [x] |
 | LoRA fine-tune         | [ ] |
 | CLI (`brain <arch> <action>`)       | [x] |
+| HTTP API               | [ ] `/v1/images/generations` is text-to-image only; `restore_face` takes a REQUIRED input image, which `api_caps` excludes by design |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
 

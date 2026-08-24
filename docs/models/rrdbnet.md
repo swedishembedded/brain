@@ -10,6 +10,7 @@ resolution. Feed it any RGB image and get back a larger, sharper version.
 |---|---|
 | Inference             | [x] |
 | CLI (`brain <arch> <action>`)       | [x] |
+| HTTP API               | [ ] `upscale` takes a REQUIRED input image, so it is not a text-to-image action and has no HTTP route |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
 

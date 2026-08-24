@@ -14,6 +14,7 @@ stages relate.
 |---|---|
 | Inference             | [x] |
 | CLI (`brain <arch> <action>`)       | [x] |
+| HTTP API               | [ ] the pipeline takes a REQUIRED input image, so it is not a text-to-image action |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
 
