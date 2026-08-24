@@ -20,8 +20,12 @@ brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 serde_json.workspace = true
 
+# `import::load` - the production checkpoint loader (streams the safetensors
+# shards through `checkpoint::WeightReader`). Was a dev-dependency while the
+# only loader lived in a `#[cfg(test)]` module.
+brain-checkpoint.workspace = true
+
 [dev-dependencies]
 brain-testutil.workspace = true
 brain-data.workspace = true
 brain-federated.workspace = true
-brain-checkpoint.workspace = true

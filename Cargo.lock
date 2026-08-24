@@ -1093,6 +1093,7 @@ dependencies = [
  "brain-qwen35",
  "brain-qwen35moe",
  "brain-sam2",
+ "brain-sdxlunet",
  "brain-t5encoder",
  "brain-testutil",
  "brain-toyautoencoder",

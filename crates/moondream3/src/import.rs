@@ -12,6 +12,11 @@
 //! erf-GELU'd) and `w_g` (next `inner`, the `+1` shift) — matching `layers.py`'s
 //! `x1, g = x1_full.chunk(2); F.gelu(x1) * (g + 1)` — and `fc2` is `w_down` as-is.
 
+use std::collections::HashMap;
+
+use checkpoint::weightio::WeightReader;
+use checkpoint::TensorSource;
+
 use crate::config::MoondreamConfig;
 
 /// A stacked MoE tensor that splits per-expert at load time.
@@ -116,6 +121,253 @@ pub fn moe_layer_keys(layer: u32, num_experts: u32) -> Vec<String> {
         }
     }
     keys
+}
+
+/// The three weight maps [`crate::model::MoondreamModel::new`] takes, plus the
+/// coverage report proving every checkpoint tensor was accounted for.
+#[derive(Debug, Default)]
+pub struct Weights {
+    /// SigLIP ViT tensors, prefix stripped.
+    pub vision: HashMap<String, Vec<f32>>,
+    /// `proj_mlp` connector tensors.
+    pub connector: HashMap<String, Vec<f32>>,
+    /// Decoder tensors, with the stacked MoE experts already split.
+    pub decoder: HashMap<String, Vec<f32>>,
+}
+
+/// What [`load`] did with every tensor in the checkpoint.
+///
+/// **Two-way coverage, per the porting rules.** A one-way check ("every tensor
+/// I wanted was present") silently tolerates a checkpoint carrying tensors this
+/// port ignores - which is exactly how a missing fused-qkv bias hid in this
+/// model once already. So `unmapped` is reported, and `load` refuses rather
+/// than continuing when it is non-empty for anything but the deliberately
+/// deferred region heads.
+#[derive(Debug, Default)]
+pub struct Coverage {
+    /// Tensors that landed in one of the three maps.
+    pub mapped: usize,
+    /// `model.region.*` - recognized and deliberately skipped (the
+    /// region/point/detect heads are not built).
+    pub region_skipped: usize,
+    /// Anything else: a tensor the checkpoint has and this port does not know.
+    pub unmapped: Vec<String>,
+}
+
+/// Load a `moondream/moondream3-preview` checkpoint directory into the three
+/// weight maps, splitting the stacked MoE experts on the way through.
+///
+/// **This is the production loader, and the crate's real-weight tests are thin
+/// wrappers over it** - the arrangement `crates/deepseek2ocr` uses, and for the
+/// same reason: a served run and its own parity test must not be able to
+/// disagree about which tensors they loaded. Before this existed the only code
+/// that turned a real checkpoint into weights lived inside a `#[cfg(test)]`
+/// module, so nothing user-facing could load the model at all.
+///
+/// Streams through [`checkpoint::WeightReader`], which mmaps and parses only the
+/// headers, so the peak host cost is the maps being built rather than the maps
+/// plus a full copy of the file.
+///
+/// **The fp32 footprint is the real constraint here, not the I/O.** At
+/// [`MoondreamConfig::preview`] the decoder alone is 8.8 B parameters (20 MoE
+/// layers x 64 experts x three `[1024, 2048]`-ish matrices), which is ~33 GB of
+/// `f32` in `Weights::decoder` before a single device buffer is allocated. That
+/// is a property of the model at this precision, not of this function; see this
+/// crate's own docs for the quantized path.
+pub fn load(dir: &std::path::Path, cfg: &MoondreamConfig) -> Result<(Weights, Coverage), String> {
+    let rd = WeightReader::open_hf_dir(dir).map_err(|e| format!("moondream3: cannot open '{}': {e}", dir.display()))?;
+    let mut w = Weights { vision: HashMap::new(), connector: HashMap::new(), decoder: HashMap::new() };
+    let mut cov = Coverage { mapped: 0, region_skipped: 0, unmapped: Vec::new() };
+
+    let names: Vec<String> = rd.names().map(str::to_string).collect();
+    for name in &names {
+        if is_region(name) {
+            cov.region_skipped += 1;
+            continue;
+        }
+        let shape: Vec<usize> = rd.shape(name).map(|s: &[u64]| s.iter().map(|&d| d as usize).collect()).unwrap_or_default();
+        let mut taken = false;
+        // `with_tensor` lends the decoded values for the call only, so each arm
+        // copies exactly what it keeps - the MoE arms copy per-expert slices
+        // rather than the whole stacked tensor.
+        rd.with_tensor(name, &mut |data: &[f32]| {
+            taken = true;
+            if let Some(k) = map_vision(name) {
+                w.vision.insert(k, data.to_vec());
+            } else if let Some(k) = map_connector(name) {
+                w.connector.insert(k, data.to_vec());
+            } else if let Some(t) = map_text(name, cfg) {
+                match t {
+                    TextTarget::Key(k) => {
+                        w.decoder.insert(k, data.to_vec());
+                    }
+                    TextTarget::Moe { layer, part } => split_moe(&mut w.decoder, layer, part, data, &shape, cfg),
+                }
+            } else {
+                taken = false;
+            }
+        });
+        if taken {
+            cov.mapped += 1;
+        } else {
+            cov.unmapped.push(name.clone());
+        }
+    }
+
+    if !cov.unmapped.is_empty() {
+        return Err(format!(
+            "moondream3: {} checkpoint tensor(s) this port does not recognize, e.g. {:?} - refusing rather than loading a partial model",
+            cov.unmapped.len(),
+            &cov.unmapped[..cov.unmapped.len().min(5)]
+        ));
+    }
+    // The other direction: every key the graph will ask for must be present.
+    for k in required_keys(cfg) {
+        let present = w.vision.contains_key(&k) || w.connector.contains_key(&k) || w.decoder.contains_key(&k);
+        if !present {
+            return Err(format!("moondream3: checkpoint is missing '{k}'"));
+        }
+    }
+    Ok((w, cov))
+}
+
+/// Split one stacked MoE tensor into the per-expert keys the decoder reads.
+///
+/// `fc1` is `[E, 2*inner, d]` and splits along its `2*inner` rows into `w_h`
+/// (first `inner`, erf-GELU'd) and `w_g` (next `inner`, the `+1` shift) -
+/// matching the reference's `x1, g = x1_full.chunk(2)`. `fc2` is `[E, d, inner]`
+/// and is `w_down` as-is. The router is `[E, d]`, unstacked.
+fn split_moe(out: &mut HashMap<String, Vec<f32>>, layer: u32, part: MoePart, data: &[f32], shape: &[usize], cfg: &MoondreamConfig) {
+    let (e, inner, d) = (cfg.moe.num_experts, cfg.moe.inner_dim, cfg.dim);
+    match part {
+        MoePart::Router => {
+            out.insert(format!("blocks.{layer}.moe.router.weight"), data.to_vec());
+        }
+        // Recognized so coverage is exhaustive; the router has no bias term in
+        // the graph this port builds.
+        MoePart::RouterBias => {}
+        MoePart::Fc1 => {
+            let per = (2 * inner * d) as usize;
+            debug_assert_eq!(data.len(), e as usize * per, "fc1 stacked shape {shape:?}");
+            for ei in 0..e as usize {
+                let (w_h, w_g) = split_fc1_expert(&data[ei * per..(ei + 1) * per], inner, d);
+                out.insert(format!("blocks.{layer}.moe.experts.{ei}.w_h.weight"), w_h);
+                out.insert(format!("blocks.{layer}.moe.experts.{ei}.w_g.weight"), w_g);
+            }
+        }
+        MoePart::Fc2 => {
+            let per = (d * inner) as usize;
+            debug_assert_eq!(data.len(), e as usize * per, "fc2 stacked shape {shape:?}");
+            for ei in 0..e as usize {
+                out.insert(format!("blocks.{layer}.moe.experts.{ei}.w_down.weight"), data[ei * per..(ei + 1) * per].to_vec());
+            }
+        }
+    }
+}
+
+/// Every key the composed graph reads, for the "nothing missing" half of the
+/// coverage check. Derived from the config, so a config change cannot leave the
+/// check describing a different model than the one being built.
+pub fn required_keys(cfg: &MoondreamConfig) -> Vec<String> {
+    let mut k: Vec<String> = vec![
+        "tok.weight".into(),
+        "lm_head.weight".into(),
+        "lm_head.bias".into(),
+        "post_ln.weight".into(),
+        "post_ln.bias".into(),
+        "patch_emb.weight".into(),
+        "patch_emb.bias".into(),
+        "pos_emb".into(),
+        "fc1.weight".into(),
+        "fc1.bias".into(),
+        "fc2.weight".into(),
+        "fc2.bias".into(),
+    ];
+    for l in 0..cfg.n_layers {
+        for leaf in ["ln.weight", "ln.bias", "attn.qkv.weight", "attn.proj.weight", "attn.proj.bias"] {
+            k.push(format!("blocks.{l}.{leaf}"));
+        }
+        if cfg.is_moe_layer(l) {
+            k.extend(moe_layer_keys(l, cfg.moe.num_experts));
+        } else {
+            for leaf in ["mlp.fc1.weight", "mlp.fc1.bias", "mlp.fc2.weight", "mlp.fc2.bias"] {
+                k.push(format!("blocks.{l}.{leaf}"));
+            }
+        }
+    }
+    k
+}
+
+#[cfg(test)]
+mod loader_tests {
+    use super::*;
+
+    /// The graph asks for exactly the keys the loader promises to check for.
+    /// If these two lists drift, a checkpoint passes coverage and then the
+    /// builder panics naming a tensor - which is the failure the two-way check
+    /// exists to turn into a clean error at the boundary.
+    #[test]
+    fn required_keys_covers_every_layer_and_both_ffn_kinds() {
+        let cfg = MoondreamConfig::preview();
+        let k = required_keys(&cfg);
+        let set: std::collections::HashSet<&str> = k.iter().map(String::as_str).collect();
+        assert!(set.contains("tok.weight") && set.contains("lm_head.weight") && set.contains("pos_emb"));
+        // Layer 0 is dense (below `moe.start_layer`), layer 23 is MoE.
+        assert!(set.contains("blocks.0.mlp.fc1.weight"), "a dense layer must want its own FFN");
+        assert!(!set.contains("blocks.23.mlp.fc1.weight"), "an MoE layer must NOT want a dense FFN");
+        assert!(set.contains("blocks.23.moe.router.weight"));
+        let last = cfg.moe.num_experts - 1;
+        assert!(set.contains(format!("blocks.23.moe.experts.{last}.w_down.weight").as_str()));
+        assert_eq!(k.len(), set.len(), "required_keys must not repeat a key");
+    }
+
+    /// The stacked-expert split is where a wrong stride would silently give
+    /// every expert the same weights (or interleave two of them) - shapes still
+    /// line up either way, so it is checked by construction.
+    #[test]
+    fn split_moe_gives_each_expert_its_own_distinct_slice() {
+        let mut cfg = MoondreamConfig::preview();
+        cfg.moe.num_experts = 3;
+        cfg.moe.inner_dim = 2;
+        cfg.dim = 4;
+        let (e, inner, d) = (3usize, 2usize, 4usize);
+        // fc1 stacked as [E, 2*inner, d], each expert filled with its own index.
+        let data: Vec<f32> = (0..e).flat_map(|ei| std::iter::repeat_n(ei as f32, 2 * inner * d)).collect();
+        let mut out = HashMap::new();
+        split_moe(&mut out, 7, MoePart::Fc1, &data, &[e, 2 * inner, d], &cfg);
+        for ei in 0..e {
+            let h = &out[&format!("blocks.7.moe.experts.{ei}.w_h.weight")];
+            let g = &out[&format!("blocks.7.moe.experts.{ei}.w_g.weight")];
+            assert_eq!(h.len(), inner * d);
+            assert_eq!(g.len(), inner * d);
+            assert!(h.iter().all(|&v| v == ei as f32), "expert {ei}'s w_h took another expert's slice: {h:?}");
+            assert!(g.iter().all(|&v| v == ei as f32), "expert {ei}'s w_g took another expert's slice: {g:?}");
+        }
+    }
+
+    /// `w_h` is the FIRST half of the `2*inner` rows and `w_g` the second - the
+    /// reference's `x1, g = x1_full.chunk(2)`. Swapping them runs, and produces
+    /// a different function.
+    #[test]
+    fn split_moe_puts_the_gelu_half_first() {
+        let mut cfg = MoondreamConfig::preview();
+        cfg.moe.num_experts = 1;
+        cfg.moe.inner_dim = 1;
+        cfg.dim = 2;
+        // One expert, [2*inner=2, d=2]: first row 10s (w_h), second row 20s (w_g).
+        let data = vec![10.0, 10.0, 20.0, 20.0];
+        let mut out = HashMap::new();
+        split_moe(&mut out, 0, MoePart::Fc1, &data, &[1, 2, 2], &cfg);
+        assert_eq!(out["blocks.0.moe.experts.0.w_h.weight"], vec![10.0, 10.0]);
+        assert_eq!(out["blocks.0.moe.experts.0.w_g.weight"], vec![20.0, 20.0]);
+    }
+
+    /// A missing checkpoint is a clean error naming the directory, not a panic.
+    #[test]
+    fn a_missing_checkpoint_directory_is_a_named_error() {
+        let err = load(std::path::Path::new("/definitely/not/a/moondream/dir"), &MoondreamConfig::preview()).unwrap_err();
+        assert!(err.contains("cannot open"), "{err}");
+    }
 }
 
 #[cfg(test)]
