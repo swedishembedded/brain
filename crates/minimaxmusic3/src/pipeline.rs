@@ -52,6 +52,16 @@
 //! worth making for a single caller - see `qwen3::Qwen::embed_row`'s own
 //! doc for the one addition that WAS worth making, a genuinely reusable
 //! single-row lookup).
+//!
+//! Those two instances are loaded onto two DIFFERENT physical cards
+//! (`crate::generate::ar_branch_devices`), and they step **concurrently,
+//! one per card** ([`ArBranches`]) for the same reason the DiT's own CFG
+//! pair does (`crate::denoise::ChunkResidents::cfg_pair`,
+//! `crate::devplan`): each branch's forward is an independent computation
+//! over its own KV cache, nothing is split and recombined, and the only
+//! thing that reads both is the host-side fold below. Stepping them one
+//! after the other left each card idle for the other's half of every
+//! frame.
 
 use data::rng::Lcg;
 use model::hostmath::matvec_par;
@@ -60,6 +70,7 @@ use qwen3::Qwen;
 
 use crate::config::DepthDecoderConfig;
 use crate::depth_decoder::{self, DepthDecoderWeights};
+use crate::devplan::{self, Placement};
 use crate::global_llm::{self, AR_CFG_SCALE, AR_CFG_TOP_K, AR_SAMPLING_TOP_K, AUDIO_CODE_OFFSET, AUDIO_END_TOKEN_ID, SEMANTIC_VOCAB_SIZE};
 
 /// `true` for a Global-LLM vocab id the AR sampling loop may ever emit: a
@@ -227,6 +238,101 @@ fn embed_audio_frame(dd_w: &DepthDecoderWeights, dd_cfg: &DepthDecoderConfig, co
     embeds
 }
 
+/// The AR stage's two CFG-branch Global LLM instances and the cards they
+/// were loaded onto - the seam that runs one frame's two forwards
+/// concurrently, one per card, instead of one after the other.
+///
+/// # `Qwen` is `Send` but **not** `Sync`, so this holds `&mut`, not `&`
+///
+/// The DiT's own concurrent CFG pair (`crate::denoise::ChunkResidents::
+/// cfg_pair`) shares `&self` across a `std::thread::scope` and lets the
+/// compiler check the safety argument through the `Sync` bound `scope`
+/// imposes on captured references. That shape is not available here:
+/// `qwen3::Qwen` carries `Cell`/`RefCell` decode state (`dec_pos`, the
+/// optimiser's `RefCell<Option<optim::Graph>>`, the M-RoPE/splice flags),
+/// so it is `!Sync` and a `&Qwen` may not cross a thread boundary at all -
+/// `crate::weightcache`'s own doc already records that finding as the
+/// reason the Global LLM is not cached there.
+///
+/// It IS `Send`, though, and therefore so is `&mut Qwen`. That is the
+/// shape used: the unconditional branch is held by unique borrow and
+/// **reborrowed into** the spawned thread for the duration of one step,
+/// which gives exactly the same compiler-checked guarantee by a different
+/// route - a `&mut` cannot alias, so the branch that moved cannot also be
+/// touched by the orchestrating thread while the scope is open. The
+/// conditional branch stays a shared `&Qwen` and never leaves the
+/// orchestrating thread, so its `!Sync`-ness is never in question.
+///
+/// The two branches touch nothing in common: separate `Qwen` instances,
+/// separate KV caches, separate cards, separate device handles. They read
+/// the same host-side `feedback` embedding (immutably, and it is sampled
+/// once on the orchestrating thread before either starts) and hand back
+/// two `Vec<f32>`s that the caller folds - in the same order either way.
+pub struct ArBranches<'a> {
+    cond: &'a Qwen,
+    uncond: &'a mut Qwen,
+    place: Placement,
+    parallel: bool,
+}
+
+impl<'a> ArBranches<'a> {
+    /// The two branches as `crate::generate::ar_branch_devices` placed them.
+    ///
+    /// Concurrent only when the placement really does name two different
+    /// cards AND `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL` has not been used to opt
+    /// out (`crate::devplan::cfg_parallel_enabled`, the same knob the DiT's
+    /// pair honours). One card, the CPU backend, or an explicitly pinned
+    /// device all keep the sequential path - byte-for-byte what this loop
+    /// did before, with no thread spawned.
+    pub fn new(cond: &'a Qwen, uncond: &'a mut Qwen, place: Placement) -> ArBranches<'a> {
+        let parallel = place.cfg_is_parallel() && devplan::cfg_parallel_enabled();
+        ArBranches { cond, uncond, place, parallel }
+    }
+
+    /// True when a step really does dispatch across two cards.
+    pub fn is_parallel(&self) -> bool {
+        self.parallel
+    }
+
+    /// Run `on_cond` against the conditional branch and `on_uncond` against
+    /// the unconditional one - concurrently on a split placement, one after
+    /// the other otherwise - and return both results in that order.
+    ///
+    /// The conditional branch runs on the orchestrating thread and the
+    /// unconditional one on the spawned thread, scoped to its own card with
+    /// `devplan::on_gpu`: a spawned thread inherits no `with_gpu` selection,
+    /// and while a `Qwen` dispatches through the `Gpu` handle it was built
+    /// with (so the scope decides nothing about WHERE the kernels run),
+    /// leaving the thread's ambient selection pointing at the other card
+    /// would mislead anything that consults `devices::current_gpu()`
+    /// underneath - the same reason `denoise::ChunkResidents::cfg_pair`
+    /// scopes its own spawned lane.
+    ///
+    /// Joined before either result is touched, and a worker panic is
+    /// re-raised with its ORIGINAL payload: the kernel-level message is what
+    /// a debugger needs, and reporting the conditional branch's failure
+    /// while the unconditional one is still running reads as a hang.
+    ///
+    /// `crate::ProgressSink` is deliberately not reachable from here - it is
+    /// a `&mut dyn FnMut`, it is not `Sync`, and calling it from a worker
+    /// would reorder the per-frame reports. It stays with the caller.
+    fn pair<R: Send>(&mut self, on_cond: impl FnOnce(&Qwen) -> R, on_uncond: impl FnOnce(&Qwen) -> R + Send) -> (R, R) {
+        if !self.parallel {
+            let cond = on_cond(self.cond);
+            let uncond = on_uncond(self.uncond);
+            return (cond, uncond);
+        }
+        let (cond_lm, card) = (self.cond, self.place.uncond);
+        let uncond_lm: &mut Qwen = &mut *self.uncond;
+        std::thread::scope(|s| {
+            let u = s.spawn(move || devplan::on_gpu(card, || on_uncond(uncond_lm)));
+            let c = on_cond(cond_lm);
+            let u = u.join().unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+            (c, u.expect("the unconditional branch's card is in the schedulable set"))
+        })
+    }
+}
+
 /// The full AR generation loop: frame by frame, sample a CFG-guided
 /// semantic code from the Global LLM, then the depth decoder's residual
 /// codes, until `AUDIO_END_TOKEN_ID` or `max_frames` frames have been
@@ -242,16 +348,15 @@ fn embed_audio_frame(dd_w: &DepthDecoderWeights, dd_cfg: &DepthDecoderConfig, co
 /// `depth_decoder::Resident` for why a per-frame rebuild would cost more than
 /// the computation on the device path.
 ///
-/// `lm_cond`/`lm_uncond` must already be constructed at the SAME
-/// `t` (decode capacity) covering `conditional_ids.len() + max_frames + 1`
-/// positions, with a fresh (never-stepped) KV cache. `head` is
+/// [`ArBranches`]'s two `Qwen` instances must already be constructed at the
+/// SAME `t` (decode capacity), covering `conditional_ids.len() +
+/// max_frames + 1` positions, with a fresh (never-stepped) KV cache. `head` is
 /// `lm_cond.read_weight(lm_cond.cfg.head_weight())` (read ONCE by the
 /// caller and reused across every frame - a `[vocab, d_model]` table,
 /// multiple GB at real dims, far too large to re-read per frame).
 #[allow(clippy::too_many_arguments)]
 pub fn generate_frames(
-    lm_cond: &Qwen,
-    lm_uncond: &Qwen,
+    mut branches: ArBranches<'_>,
     dec: &mut depth_decoder::Decoder<'_>,
     dd_w: &DepthDecoderWeights,
     dd_cfg: &DepthDecoderConfig,
@@ -267,10 +372,19 @@ pub fn generate_frames(
     assert_eq!(conditional_ids.len(), unconditional_ids.len(), "generate_frames: conditional/unconditional prompt length mismatch");
     let mut rng = Lcg::new(seed);
 
+    // The one `Qwen` both the embedding lookups below and the conditional
+    // branch's own forwards go through, copied out of `branches` up front so
+    // `embed_code_row` never has to borrow the pair while a step holds it
+    // mutably. Both instances carry identical embedding weights, so ONE
+    // lookup serves both branches - see `generate_depth_codes`'s own doc.
+    let lm_cond: &Qwen = branches.cond;
+    let embed_code_row = |id: u32| lm_cond.embed_row(id);
+
     let prefill_cond: Vec<PrefillInput> = conditional_ids.iter().map(|&t| PrefillInput::Token(t)).collect();
     let prefill_uncond: Vec<PrefillInput> = unconditional_ids.iter().map(|&t| PrefillInput::Token(t)).collect();
-    let mut hidden_cond = lm_cond.prefill(&prefill_cond);
-    let mut hidden_uncond = lm_uncond.prefill(&prefill_uncond);
+    // The prompt prefill is the same two independent forwards the per-frame
+    // step is, one per branch, so it is dispatched the same way.
+    let (mut hidden_cond, mut hidden_uncond) = branches.pair(|lm| lm.prefill(&prefill_cond), |lm| lm.prefill(&prefill_uncond));
 
     let mut frame_hiddens: Vec<f32> = Vec::new();
     let mut frames = 0usize;
@@ -295,7 +409,6 @@ pub fn generate_frames(
         }
         let semantic_code = sampled - AUDIO_CODE_OFFSET;
 
-        let embed_code_row = |id: u32| lm_cond.embed_row(id);
         let (codes, depth_hidden) = generate_depth_codes(dec, dd_w, dd_cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut rng);
 
         if frame_index > 0 {
@@ -308,9 +421,12 @@ pub fn generate_frames(
             }
         }
 
+        // ONE feedback embedding, sampled and built here on the
+        // orchestrating thread, then read (never written) by both branches:
+        // they stay in lockstep because they consume the same bytes, whether
+        // the two forwards overlap or not.
         let feedback = embed_audio_frame(dd_w, dd_cfg, &codes, embed_code_row);
-        hidden_cond = lm_cond.step_embed(&feedback);
-        hidden_uncond = lm_uncond.step_embed(&feedback);
+        (hidden_cond, hidden_uncond) = branches.pair(|lm| lm.step_embed(&feedback), |lm| lm.step_embed(&feedback));
     }
     frame_hiddens
 }
@@ -567,7 +683,7 @@ mod tests {
         let qcfg = tiny_real_vocab_qwen_config((prompt_len + max_frames + 2) as u32);
         let qinit = qwen3::init_weights(&qcfg, 7);
         let lm_cond = Qwen::new(qcfg.clone(), 1, qcfg.block_size, &qinit);
-        let lm_uncond = Qwen::new(qcfg.clone(), 1, qcfg.block_size, &qinit);
+        let mut lm_uncond = Qwen::new(qcfg.clone(), 1, qcfg.block_size, &qinit);
         let head = lm_cond.read_weight(qcfg.head_weight());
 
         let dd_cfg = DepthDecoderConfig::tiny();
@@ -578,8 +694,7 @@ mod tests {
         let unconditional_ids = conditional_ids.clone();
 
         let frame_hiddens = generate_frames(
-            &lm_cond,
-            &lm_uncond,
+            ArBranches::new(&lm_cond, &mut lm_uncond, Placement::single()),
             &mut depth_decoder::Decoder::host(&dd_cfg, 2),
             &dd_w,
             &dd_cfg,
@@ -598,5 +713,101 @@ mod tests {
         let frames = frame_hiddens.len() / frame_width;
         assert!(frames <= max_frames, "generated {frames} frames, expected at most {max_frames}");
         assert!(frame_hiddens.iter().all(|v| v.is_finite()), "every frame hidden value must be finite");
+    }
+
+    /// The placement the bit-identity gate below drives its concurrent arm
+    /// with: the real one this machine resolves, or - on a CPU-backend run,
+    /// where `Auto` has no card to split across - a synthetic split so the
+    /// thread, the join and the branch lockstep are still exercised.
+    ///
+    /// The synthetic indices are inert there: `devices::with_gpu` records a
+    /// scope whose placement is moot when the backend is the CPU, and both
+    /// `Qwen`s are built on that same backend either way. It is chosen only
+    /// when the machine really has two cards to NAME and the run is not
+    /// using either, so it can never pull a GPU run onto a card its operator
+    /// excluded with `--device`.
+    fn concurrent_placement() -> Placement {
+        let auto = crate::devplan::DevicePlan::Auto.resolve(None);
+        let set = gpu_core::devices::ambient_compute_set();
+        if !auto.cfg_is_parallel() && set.backend == gpu_core::devices::Backend::Cpu && gpu_core::devices::gpus().len() >= 2 {
+            return Placement { cond: Some(0), uncond: Some(1) };
+        }
+        auto
+    }
+
+    /// **The two cards must agree, bit for bit.** The gate on [`ArBranches`]:
+    /// stepping the conditional and unconditional Global LLM branches at the
+    /// same time on two cards must produce exactly what stepping them one
+    /// after the other on one card produces - over the whole AR loop, not one
+    /// isolated step, so a divergence of a single ulp anywhere would have
+    /// several frames of sampling to turn into a different code and a visibly
+    /// different result.
+    ///
+    /// Not a tolerance and not an epsilon: a bit-pattern comparison, because
+    /// the claim is exactness. It should hold trivially - the branches are
+    /// independent single-sequence decodes over their own KV caches, not two
+    /// halves of one reduction, so overlapping them reassociates no sum - and
+    /// if it ever does not, that is a real defect (a nondeterministic kernel,
+    /// a `Qwen` touched from two threads, a reordered host-side fold) worth
+    /// failing on rather than papering over.
+    ///
+    /// The two prompts deliberately DIFFER, so the branches compute different
+    /// values and a dispatch that ran the conditional branch twice, or fed
+    /// one branch's hidden state into the other's slot, could not pass.
+    ///
+    /// Runs on whatever this box has: with two schedulable cards it really
+    /// does dispatch across both (each `Qwen` built on its own card, as
+    /// `generate::generate` builds them), at `QwenConfig::tiny()` dims so it
+    /// costs milliseconds and needs no checkpoint; with one (or none) it
+    /// degenerates to "the same thing twice", which still gates the lockstep
+    /// and the plumbing.
+    #[test]
+    fn the_concurrent_ar_branches_are_bit_identical_to_the_sequential_ones() {
+        let max_frames = 4usize;
+        let prompt_len = 5usize;
+        let qcfg = tiny_real_vocab_qwen_config((prompt_len + max_frames + 2) as u32);
+        let qinit = qwen3::init_weights(&qcfg, 0xA11);
+        let dd_cfg = DepthDecoderConfig::tiny();
+        let dd_w = random_dd_weights(&dd_cfg, 0xA12);
+
+        let mut r = Lcg::new(0xA13);
+        let conditional_ids: Vec<u32> = (0..prompt_len).map(|_| r.next_u32() % qcfg.vocab).collect();
+        let unconditional_ids: Vec<u32> = (0..prompt_len).map(|_| r.next_u32() % qcfg.vocab).collect();
+        assert_ne!(conditional_ids, unconditional_ids, "the two prompts must differ or this gate proves nothing");
+
+        let run = |place: Placement| -> Vec<f32> {
+            let build = || Qwen::new(qcfg.clone(), 1, qcfg.block_size, &qinit);
+            let lm_cond = devplan::on_gpu(place.cond, build).expect("the conditional card is in the schedulable set");
+            let mut lm_uncond = devplan::on_gpu(place.uncond, build).expect("the unconditional card is in the schedulable set");
+            let head = lm_cond.read_weight(qcfg.head_weight());
+            let branches = ArBranches::new(&lm_cond, &mut lm_uncond, place);
+            assert_eq!(branches.is_parallel(), place.cfg_is_parallel() && devplan::cfg_parallel_enabled(), "the branches must be concurrent exactly when the placement says so");
+            generate_frames(
+                branches,
+                &mut depth_decoder::Decoder::host(&dd_cfg, 2),
+                &dd_w,
+                &dd_cfg,
+                &head,
+                qcfg.vocab as usize,
+                qcfg.d_model as usize,
+                &conditional_ids,
+                &unconditional_ids,
+                max_frames,
+                0xA14,
+                &mut crate::ignore_progress(),
+            )
+        };
+
+        let sequential = run(Placement::single());
+        let place = concurrent_placement();
+        // Printed, not asserted: this gate is meaningful on a one-card box
+        // too, and the reader of a passing run needs to know WHICH claim it
+        // just checked - two cards, or the same card twice.
+        eprintln!("AR branch placement: cond={:?} uncond={:?} genuinely concurrent={}", place.cond, place.uncond, place.cfg_is_parallel());
+        let concurrent = run(place);
+
+        let frame_width = dd_cfg.num_codebooks as usize * dd_cfg.hidden_size as usize;
+        assert!(sequential.len() >= 2 * frame_width, "the loop must emit several frames or one step's divergence would have nowhere to show: got {} floats", sequential.len());
+        assert_eq!(sequential, concurrent, "the AR loop changed value by running its two branches concurrently on {:?}/{:?}", place.cond, place.uncond);
     }
 }

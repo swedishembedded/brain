@@ -116,10 +116,12 @@ pub mod dit_train;
 pub mod generate;
 pub mod global_llm;
 pub mod lora;
+pub mod memory;
 pub mod pipeline;
 pub mod stitch;
 pub mod train;
 pub mod vocoder;
+pub mod weightcache;
 
 pub use config::{ConditionEncoderConfig, DepthDecoderConfig, DitConfig, VocoderConfig};
 

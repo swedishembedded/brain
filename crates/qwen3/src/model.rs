@@ -338,6 +338,42 @@ fn offload_adam() -> bool {
     std::env::var("BRAIN_OFFLOAD_ADAM").map(|v| v != "0").unwrap_or(false)
 }
 
+/// Storage-binding offset alignment, in f32 words. WebGPU's
+/// `min_storage_buffer_offset_alignment` is 256 B (the downlevel default every
+/// adapter brain has met reports), and 256 B / 4 B = 64 f32.
+const HEAD_TILE_ALIGN: u32 = 64;
+
+/// `block::vocab_tiles*`'s tiling, re-split so every tile BOUNDARY is a
+/// multiple of [`HEAD_TILE_ALIGN`] rows.
+///
+/// The embedding gather does not need this: `embed_tile` slices only the
+/// WEIGHT (offset `v0 * d_model`, already a large multiple of 64 for any real
+/// `d_model`) and writes its output through a whole binding. The decode head
+/// slices the `[vocab]` OUTPUT too, at word offset `v0`, so `v0` itself has to
+/// clear the alignment - and the budget-derived row count generally does not
+/// (a P40's 2047 MiB binding limit over `d_model = 4096` yields 65503 rows,
+/// which is odd).
+///
+/// Rounding the stride DOWN keeps every tile inside the budget it was sized
+/// for. A single tile needs no alignment at all (its offset is 0), so a small
+/// vocab is returned untouched; a stride under one alignment unit (only
+/// reachable via an artificially tiny `BRAIN_TILE_BUDGET_WORDS`) is raised to
+/// one, since a correct binding beats a budget that no real device imposes.
+fn align_head_tiles(base: &[(u32, u32)], vocab: u32) -> Vec<(u32, u32)> {
+    if base.len() <= 1 {
+        return base.to_vec();
+    }
+    let stride = (base[0].1 / HEAD_TILE_ALIGN * HEAD_TILE_ALIGN).max(HEAD_TILE_ALIGN);
+    let mut out = Vec::new();
+    let mut v0 = 0u32;
+    while v0 < vocab {
+        let cnt = stride.min(vocab - v0);
+        out.push((v0, cnt));
+        v0 += cnt;
+    }
+    out
+}
+
 fn dx_kernel_bw(m: u32, k: u32) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, naive)
@@ -472,6 +508,13 @@ pub struct Qwen {
     coop: bool,
     xn_final: DeviceBuffer,
     logits: DeviceBuffer,
+    /// `[vocab]` output for the DEVICE decode head ([`Qwen::decode_logits`]),
+    /// allocated on first use. Deliberately NOT the batched `logits` slab
+    /// above: that one is `n · vocab` and is a size-1 dummy on a decode-only
+    /// build, which is exactly the allocation a decode build must not
+    /// resurrect (~311 MB at vocab 152k, block 512). One decode row is 800 kB
+    /// at vocab 200k.
+    dec_logits: std::cell::RefCell<Option<DeviceBuffer>>,
     ce_buf: DeviceBuffer,
 
     // backward temporaries
@@ -968,6 +1011,7 @@ impl Qwen {
             coop: gpu.caps().workgroup_reductions,
             xn_final: hd_v(n * d),
             logits: hd_or_dummy(n * v),
+            dec_logits: std::cell::RefCell::new(None),
             ce_buf: hd_or_dummy(n),
             dres,
             d_logits: hd_or_dummy(n * v),
@@ -1267,6 +1311,116 @@ impl Qwen {
                 )
             })
             .collect()
+    }
+
+    /// The vocab tiles the DECODE lm_head uses: [`Self::vocab_tiles`], re-split
+    /// so every tile boundary is [`HEAD_TILE_ALIGN`]-row aligned. See
+    /// [`align_head_tiles`] for why the head needs that and the embedding does
+    /// not.
+    fn head_tiles(&self) -> Vec<(u32, u32)> {
+        align_head_tiles(&self.vocab_tiles(), self.cfg.vocab)
+    }
+
+    /// The lm_head dispatches for the ONE decode row sitting in `xn_final`:
+    /// `out[v] = head[v] · xn_final[0]` over the whole vocab, one dispatch per
+    /// entry of `tiles`.
+    ///
+    /// All three bindings are sub-ranges (`step_sliced`):
+    ///
+    /// * the head weight, because `max_storage_buffer_binding_size` is clamped
+    ///   to `i32::MAX` (2047 MiB) on every backend and a `[200000, 4096]` fp32
+    ///   table is 3.28 GB - the same reason [`Self::embed_tiled`] slices;
+    /// * the OUTPUT, because the kernels selected here (`matmul_gemv` /
+    ///   `matmul_reg3`) write `out[row * n + col]` with `col` local to the
+    ///   dispatch, so a tile lands at the right absolute vocab id only if the
+    ///   binding itself starts at `v0`. That is what forces [`head_tiles`]'s
+    ///   alignment, and it is why this does NOT reuse `matmul_tile` (whose
+    ///   `n_off`/`n_full` params exist precisely to avoid an offset output
+    ///   binding): `matmul_tile` is one thread per output element with a
+    ///   `k`-long serial reduction, so adjacent threads read weight rows
+    ///   `d_model` floats apart - uncoalesced, on a dispatch that is pure
+    ///   memory traffic over multiple GB.
+    ///
+    /// The kernel comes from the shared [`block::gemm_variant`] selector, not a
+    /// hand-rolled branch. `gemv` is offered only on a device that runs
+    /// workgroup reductions: on the CPU JIT the register-tiled kernel is what
+    /// `backend-cpu` recognises and routes to its native AVX2 GEMM
+    /// (`matmul_gemv` has no such fast path), so offering it there would be a
+    /// GPU win paid for on CPU.
+    ///
+    /// The head stays **fp32** here. It is not dispatched through
+    /// `Ops::matmul`, so an f16/int8-packed weight would be read as garbage by
+    /// these kernels; `self.weights` (the packed tier) only ever holds the 7
+    /// per-layer linears, and `tok.weight`/`lm_head.weight` live in `ps` as
+    /// plain f32 - see `linear_kernel`'s own note on why the head was
+    /// deliberately left off `Ops`.
+    fn head_steps(&self, out: &DeviceBuffer, tiles: &[(u32, u32)]) -> Vec<Step> {
+        let d = self.cfg.d_model;
+        let dw = d as u64;
+        let head = self.cfg.head_weight();
+        let gemv = if self.coop { self.gpu.kernel_index("matmul_gemv") } else { None };
+        tiles
+            .iter()
+            .map(|&(v0, cnt)| {
+                let (mk, mt) = block::gemm_variant(block::GemmVariants::Fast { gemv, tiled: MATMUL_REG3 }, 1, cnt);
+                self.gpu.step_sliced(
+                    mk,
+                    &[&self.xn_final, self.w(head), out],
+                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (v0 as u64, cnt as u64)],
+                    &[1, d, cnt],
+                    mt,
+                )
+            })
+            .collect()
+    }
+
+    /// The `[vocab]` decode-logits buffer, allocated on first use.
+    ///
+    /// A decode-only build deliberately sizes `logits` as a size-1 dummy (the
+    /// batched `[n, vocab]` slab is what pipeline sharding saves the most on),
+    /// so the device head needs an output of its own. One row is 800 kB at
+    /// `vocab = 200000` - trivial - but it is still only paid by a caller that
+    /// asks for logits on device.
+    fn decode_logits_buf(&self) -> DeviceBuffer {
+        let mut slot = self.dec_logits.borrow_mut();
+        slot.get_or_insert_with(|| self.gpu.storage(self.cfg.vocab as u64)).clone()
+    }
+
+    /// [`Self::decode_logits`] against a caller-supplied tiling - the seam the
+    /// tests drive to exercise the multi-tile sliced-binding path at a size
+    /// that does not need a multi-GB weight.
+    fn decode_logits_tiled(&self, tiles: &[(u32, u32)]) -> Vec<f32> {
+        assert!(self.shard.head, "Qwen::decode_logits: this shard does not own the lm_head");
+        let buf = self.decode_logits_buf();
+        self.gpu.submit(&[], &self.head_steps(&buf, tiles));
+        self.gpu.read(&buf, self.cfg.vocab as usize)
+    }
+
+    /// **The lm_head, on device**, applied to the final-norm hidden state the
+    /// last [`Self::step`] / [`Self::step_embed`] / [`Self::prefill`] left in
+    /// `xn_final`. Returns `[vocab]` logits.
+    ///
+    /// The decode entry points return the hidden state and leave the head to
+    /// the caller, which is right for a caller that wants the hidden state -
+    /// but every caller that wants LOGITS then applied a `[vocab, d_model]`
+    /// table on the HOST (`model::hostmath::matvec_par` over a `read_weight`
+    /// copy). At `minimaxmusic3`'s dims that table is 3.28 GB, applied twice
+    /// per 25 Hz frame: ~6.6 GB of host memory streamed per frame, plus a
+    /// full duplicate of the table held in RAM. This is the same GEMV where it
+    /// belongs - on the device the weights are already resident on, vocab-tiled
+    /// so the binding limit is respected (see [`Self::head_steps`]).
+    ///
+    /// **Stateful by design**: it reads whatever the last decode submission
+    /// wrote, so call it directly after the step whose logits you want. It does
+    /// NOT advance the KV-cache position and does not disturb it, so
+    /// `let h = lm.step(id); let l = lm.decode_logits();` is exactly
+    /// `h`'s logits. [`Self::embed_row`] is likewise safe to interleave (it
+    /// never touches `xn_final`).
+    ///
+    /// The host path is unchanged and still supported - this is an addition,
+    /// not a replacement.
+    pub fn decode_logits(&self) -> Vec<f32> {
+        self.decode_logits_tiled(&self.head_tiles())
     }
 
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
@@ -2671,6 +2825,145 @@ mod tests {
         assert_eq!(hidden.len(), cfg.d_model as usize);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    // ---- device LM head on the decode path ----
+
+    /// A device GEMV reassociates the `d_model`-long reduction, so the gate is
+    /// numeric, never bit-identical - and never cosine alone. Cosine is blind
+    /// to a uniform scale (an RMSNorm epsilon mutation once scored a clean
+    /// 1.000000 and was caught only by the magnitude term), so both must hold.
+    const HEAD_COS_FLOOR: f64 = 0.999999;
+    const HEAD_REL_L2_CEIL: f64 = 1e-5;
+
+    fn gate_head(got: &[f32], want: &[f32], label: &str) {
+        assert_eq!(got.len(), want.len(), "{label}: length mismatch");
+        let (cos, max_abs) = brain_testutil::parity::compare(got, want);
+        let rel = brain_testutil::parity::rel_l2(got, want);
+        println!("{label}: cosine={cos:.9} rel_l2={rel:.3e} max_abs={max_abs:.3e}");
+        assert!(cos >= HEAD_COS_FLOOR, "{label}: cosine {cos:.9} below floor {HEAD_COS_FLOOR}");
+        assert!(rel <= HEAD_REL_L2_CEIL, "{label}: rel_l2 {rel:.3e} above ceiling {HEAD_REL_L2_CEIL:.0e}");
+    }
+
+    /// The host reference this whole change replaces: `logits[v] =
+    /// head[v] · hidden`, exactly what every caller does today.
+    fn host_head(dec: &Qwen, head: &[f32], hidden: &[f32]) -> Vec<f32> {
+        model::hostmath::matvec_par(head, hidden, dec.cfg.vocab as usize, dec.cfg.d_model as usize)
+    }
+
+    /// [`Qwen::decode_logits`] must reproduce the host head every decode caller
+    /// applies today, at every decode entry point (`prefill`, `step`,
+    /// `step_embed`) and after an interleaved [`Qwen::embed_row`] - which must
+    /// not disturb `xn_final`.
+    #[test]
+    fn decode_logits_matches_the_host_lm_head() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 11);
+        let path = write_reader_fixture(&cfg, &init, "decode-logits");
+        let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
+        let dec = Qwen::from_reader_decode(&reader, 12);
+        let head = dec.read_weight(cfg.head_weight());
+
+        let hidden = dec.prefill(&[PrefillInput::Token(1), PrefillInput::Token(4), PrefillInput::Token(9)]);
+        gate_head(&dec.decode_logits(), &host_head(&dec, &head, &hidden), "prefill");
+
+        for tok in [2u32, 7, 3] {
+            let hidden = dec.step(tok);
+            // An embedding lookup between the step and the head must be a
+            // no-op for `xn_final` (the depth-decoder feedback loop in
+            // `minimaxmusic3` interleaves exactly this).
+            let _ = dec.embed_row(5);
+            gate_head(&dec.decode_logits(), &host_head(&dec, &head, &hidden), &format!("step({tok})"));
+        }
+
+        let embed: Vec<f32> = (0..cfg.d_model).map(|i| ((i as f32) * 0.037).sin()).collect();
+        let hidden = dec.step_embed(&embed);
+        gate_head(&dec.decode_logits(), &host_head(&dec, &head, &hidden), "step_embed");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The tiled path is the one that matters (a real head cannot be bound
+    /// whole), so it must be exercised, must be PROVEN to have dispatched, and
+    /// must agree with the host to the same gate as the single-tile path.
+    ///
+    /// A vocab of 200 over four 64-aligned tiles puts three non-zero sliced
+    /// OUTPUT bindings (word offsets 64/128/192 -> 256/512/768 bytes) through
+    /// `create_bind_group`, which is exactly the validation an unaligned tiling
+    /// would fail.
+    #[test]
+    fn the_tiled_decode_head_dispatches_per_tile_and_still_matches_the_host() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig { vocab: 200, ..QwenConfig::tiny() };
+        let init = crate::init::init_weights(&cfg, 12);
+        let path = write_reader_fixture(&cfg, &init, "decode-logits-tiled");
+        let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
+        let dec = Qwen::from_reader_decode(&reader, 12);
+        let head = dec.read_weight(cfg.head_weight());
+        let tiles = [(0u32, 64u32), (64, 64), (128, 64), (192, 8)];
+
+        let hidden = dec.step(17);
+        let want = host_head(&dec, &head, &hidden);
+
+        // The dispatch itself: one step per tile, each a real GEMM/GEMV kernel
+        // - never a silent host fallback, and never the uncoalesced
+        // `matmul_tile` this path deliberately does not use.
+        let out = dec.decode_logits_buf();
+        let steps = dec.head_steps(&out, &tiles);
+        assert_eq!(steps.len(), tiles.len(), "one dispatch per vocab tile");
+        let names: Vec<&str> = steps.iter().map(|s| dec.gpu.kernel_name(s.meta().expect("step meta").kernel).expect("kernel name")).collect();
+        let expect = if dec.coop { "matmul_gemv" } else { "matmul_reg3" };
+        assert!(names.iter().all(|n| *n == expect), "decode head dispatched {names:?}, expected all {expect:?} (coop={})", dec.coop);
+
+        gate_head(&dec.decode_logits_tiled(&tiles), &want, "tiled head");
+        // ...and the tiling the model picks for itself agrees with it.
+        gate_head(&dec.decode_logits(), &want, "auto-tiled head");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Every tile boundary a sliced OUTPUT binding can land on must clear the
+    /// 256-byte `min_storage_buffer_offset_alignment`, at the real
+    /// `minimaxmusic3` head shape as well as at a toy budget - and the tiles
+    /// must still cover the vocab exactly and stay inside the budget they were
+    /// sized from.
+    /// The unaligned tiling `model::block::tiles_with_budget` produces, built
+    /// here rather than reached for: that function is private, and widening
+    /// `model::block`'s public API to let one test see it would be the tail
+    /// wagging the dog. `align_head_tiles` is a pure function of a base
+    /// tiling, so feeding it one built to the same rule tests exactly what
+    /// production feeds it.
+    fn base_tiling(vocab: u64, d_model: u64, budget: u64) -> Vec<(u32, u32)> {
+        let rows = (budget / d_model.max(1)).max(1);
+        let mut out = Vec::new();
+        let mut v0 = 0u64;
+        while v0 < vocab {
+            let cnt = rows.min(vocab - v0);
+            out.push((v0 as u32, cnt as u32));
+            v0 += cnt;
+        }
+        out
+    }
+
+    #[test]
+    fn head_tiles_are_offset_aligned_and_cover_the_vocab() {
+        for (vocab, d_model, budget) in [(200_000u64, 4096u64, 268_304_384u64), (151_936, 1024, 24 * 1024 * 1024), (200, 16, 1024), (23, 16, 24 * 1024 * 1024)] {
+            let base = base_tiling(vocab, d_model, budget);
+            let tiles = align_head_tiles(&base, vocab as u32);
+            let mut next = 0u32;
+            for &(v0, cnt) in &tiles {
+                assert_eq!(v0, next, "vocab={vocab}: tiles must be contiguous");
+                assert!(v0 % HEAD_TILE_ALIGN == 0, "vocab={vocab}: tile offset {v0} is not {HEAD_TILE_ALIGN}-row aligned");
+                assert!(cnt as u64 * d_model <= budget.max(HEAD_TILE_ALIGN as u64 * d_model), "vocab={vocab}: tile of {cnt} rows exceeds the budget");
+                next += cnt;
+            }
+            assert_eq!(next as u64, vocab, "vocab={vocab}: tiles must cover the vocab exactly");
+        }
     }
 
     /// REGRESSION (CPU-backend JIT dispatch segfault): a
