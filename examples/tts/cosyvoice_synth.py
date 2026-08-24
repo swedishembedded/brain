@@ -62,7 +62,7 @@ def main() -> int:
     ap.add_argument("--text", required=True, help="the target text to synthesize")
     ap.add_argument("--ref-audio", required=True, metavar="WAV", help="reference clip for zero-shot cloning (any sample rate)")
     ap.add_argument("--ref-text", required=True, help="the reference clip's own transcript")
-    ap.add_argument("--variant", default="cosyvoice2", choices=["cosyvoice2", "cosyvoice3"], help="cosyvoice2 (implemented) or cosyvoice3 (not yet)")
+    ap.add_argument("--variant", default="cosyvoice2", choices=["cosyvoice2", "cosyvoice3"], help="cosyvoice2 or cosyvoice3 (BRAIN_COSYVOICE_* must hold that generation's checkpoint)")
     ap.add_argument("--model", default=MODEL, help="a streaming synth model")
     ap.add_argument("--out", default="cosyvoice_synth.wav", help="output WAV path")
     ap.add_argument("--n-timesteps", type=int, default=-1, help="Euler steps the flow decoder's CFM solver takes (-1 = the model's own default)")

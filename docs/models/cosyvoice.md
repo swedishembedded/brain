@@ -297,10 +297,16 @@ synth`, and - with no extra code - D-Bus/HTTP, through the same
 following `resident_minimaxmusic3.rs`'s "load per call, nothing kept warm"
 shape).
 
-`variant` accepts `"cosyvoice2"` (the default, the only one that runs) or
-`"cosyvoice3"` (accepted for discovery, always rejected with a named,
-typed error - CosyVoice 3's own pipeline composition is a recorded
-follow-up, not attempted). The reference clip travels as a blob, not a
+`variant` accepts `"cosyvoice2"` (the default) or `"cosyvoice3"`, and both
+run the full pipeline. The two differ in exactly three stages - which LM
+config is loaded (CosyVoice 3 reads its `sos`/`task_id` rows from the speech
+embedding table), which flow decoder runs (UNet CFM vs a 22-layer adaLN-zero
+DiT), and which vocoder (non-causal HiFT vs the causal generator with a fixed
+per-instance NSF noise buffer) - so everything else is shared code. A
+CosyVoice 3 request needs `BRAIN_COSYVOICE_LLM`/`_FLOW`/`_HIFT` pointing at a
+CosyVoice 3 checkpoint: the two generations ship different files under the
+same names, and a mismatched one fails in the importer rather than producing
+noise. The reference clip travels as a blob, not a
 server-side path: a WAV container's own sample rate is honoured when a
 caller builds the `Blob` directly (D-Bus/HTTP), while the CLI's shared
 `--in audio=file` helper downsamples to 16 kHz first (the same convention

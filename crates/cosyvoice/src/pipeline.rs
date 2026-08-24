@@ -86,6 +86,12 @@ use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use gpu_core::Gpu;
 
+use crate::cv3_flow;
+use crate::cv3_flow_config::Cv3FlowConfig;
+use crate::cv3_flow_import::import_cv3_flow_pt;
+use crate::cv3_hift;
+use crate::cv3_hift_config::Cv3HiftConfig;
+use crate::cv3_hift_import::import_cv3_hift_pt;
 use crate::flow;
 use crate::flow_config::FlowConfig;
 use crate::flow_import::import_flow_pt;
@@ -146,6 +152,67 @@ impl CosyVoicePaths {
 /// token count (excluding the prompt text), matching
 /// `min_len = int((text_len - prompt_text_len) * min_token_text_ratio)` read
 /// directly from `cosyvoice/llm/llm.py`.
+/// Which generation of the model to run.
+///
+/// The two share this pipeline's SHAPE exactly - the same five stages in the
+/// same order, the same reference-audio analysis, the same truncation rule -
+/// and differ only in which config/import/forward triple each of the LM, flow
+/// decoder and vocoder stages uses. That is why they are one `generate` with a
+/// three-way branch rather than two copies of a 200-line function: the stages
+/// that are genuinely identical (CAM++, S3Tokenizer, the prompt mel, the
+/// tokenizer, the truncation, the token budget) are written once.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Variant {
+    /// UNet CFM flow decoder, non-causal HiFT vocoder, `LlmEmbedding` special
+    /// tokens.
+    #[default]
+    CosyVoice2,
+    /// 22-layer adaLN-zero DiT flow estimator, CAUSAL HiFT vocoder with a fixed
+    /// per-instance NSF noise buffer, `SpeechEmbedding` special tokens.
+    CosyVoice3,
+}
+
+impl Variant {
+    /// The `variant` action-parameter spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Variant::CosyVoice2 => "cosyvoice2",
+            Variant::CosyVoice3 => "cosyvoice3",
+        }
+    }
+
+    /// Parse the `variant` param. `Err` names the accepted values rather than
+    /// falling back to a default - silently running the other generation's
+    /// weights is the failure this returns an error to avoid.
+    pub fn parse(s: &str) -> Result<Variant, String> {
+        match s {
+            "cosyvoice2" => Ok(Variant::CosyVoice2),
+            "cosyvoice3" => Ok(Variant::CosyVoice3),
+            other => Err(format!("cosyvoice: unknown variant '{other}' (expected 'cosyvoice2' or 'cosyvoice3')")),
+        }
+    }
+
+    /// The mel-channel count this generation's flow decoder emits, which is
+    /// also the vocoder's input width. Read from the configs rather than
+    /// hardcoded: they agree at 80 today, and a future variant that does not
+    /// would otherwise slice the prompt mel wrong and produce noise, not an
+    /// error.
+    pub fn mel_dim(self) -> usize {
+        match self {
+            Variant::CosyVoice2 => FlowConfig::cosyvoice2().output_size as usize,
+            Variant::CosyVoice3 => Cv3FlowConfig::cosyvoice3().output_size as usize,
+        }
+    }
+
+    /// This generation's default Euler-step count.
+    pub fn default_timesteps(self) -> usize {
+        match self {
+            Variant::CosyVoice2 => FlowConfig::cosyvoice2().n_timesteps as usize,
+            Variant::CosyVoice3 => Cv3FlowConfig::cosyvoice3().n_timesteps as usize,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GenOpts {
     pub seed: u64,
@@ -154,11 +221,27 @@ pub struct GenOpts {
     /// Euler steps the flow decoder's CFM solver takes (`n_timesteps`, `10`
     /// in the reference).
     pub n_timesteps: usize,
+    /// Which generation to run - see [`Variant`].
+    pub variant: Variant,
 }
 
 impl Default for GenOpts {
     fn default() -> GenOpts {
-        GenOpts { seed: 0, max_token_text_ratio: 20.0, min_token_text_ratio: 2.0, n_timesteps: FlowConfig::cosyvoice2().n_timesteps as usize }
+        GenOpts {
+            seed: 0,
+            max_token_text_ratio: 20.0,
+            min_token_text_ratio: 2.0,
+            n_timesteps: Variant::CosyVoice2.default_timesteps(),
+            variant: Variant::CosyVoice2,
+        }
+    }
+}
+
+impl GenOpts {
+    /// [`GenOpts::default`] for `variant`, with that generation's own default
+    /// Euler-step count rather than CosyVoice 2's.
+    pub fn for_variant(variant: Variant) -> GenOpts {
+        GenOpts { n_timesteps: variant.default_timesteps(), variant, ..GenOpts::default() }
     }
 }
 
@@ -284,7 +367,7 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
 
     // ---- Prompt mel (host-only math, no weights) + the reference's own truncation. ----
     let (prompt_feat_full_tc, feat_frames) = extract_prompt_mel(&samples_24k);
-    let mel_dim = FlowConfig::cosyvoice2().output_size as usize;
+    let mel_dim = opts.variant.mel_dim();
     let token_len = (feat_frames / 2).min(prompt_tokens_full.len());
     if token_len == 0 {
         return Err("cosyvoice::generate: the reference clip produced zero usable prompt tokens/frames".to_string());
@@ -297,7 +380,15 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
     let (max_tokens, min_len) = token_budget(target_text_ids.len(), opts);
     let t_lm_load = std::time::Instant::now();
     let ctx = (1 + text_ids.len() + 1 + prompt_tokens.len() + max_tokens + 8) as u32;
-    let lm = CosyVoiceLm::load(&format!("{}/llm.pt", paths.llm), ctx)?;
+    // The two generations differ only in config (vocab sizes, and which table
+    // the sos/task_id special tokens are read from - `LlmEmbedding` for CV2,
+    // `SpeechEmbedding` for CV3). `CosyVoiceLm` already branches on that
+    // internally, so the prefill/generate below are shared verbatim.
+    let llm_pt = format!("{}/llm.pt", paths.llm);
+    let lm = match opts.variant {
+        Variant::CosyVoice2 => CosyVoiceLm::load(&llm_pt, ctx)?,
+        Variant::CosyVoice3 => CosyVoiceLm::load_cosyvoice3(&llm_pt, ctx)?,
+    };
     if profile {
         let d = t_lm_load.elapsed();
         eprintln!("[profile] lm_load_import: {:.3} ms", d.as_secs_f64() * 1000.0);
@@ -328,10 +419,23 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
     profile::reset_flow_self_attn();
     let t_flow = std::time::Instant::now();
     let mel_out = {
-        let flow_cfg = FlowConfig::cosyvoice2();
-        let flow_w = import_flow_pt(&format!("{}/flow.pt", paths.flow), &flow_cfg)?;
-        let noise = flow::rand_noise();
-        flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise, opts.n_timesteps).mel
+        let flow_pt = format!("{}/flow.pt", paths.flow);
+        match opts.variant {
+            Variant::CosyVoice2 => {
+                let flow_cfg = FlowConfig::cosyvoice2();
+                let flow_w = import_flow_pt(&flow_pt, &flow_cfg)?;
+                let noise = flow::rand_noise();
+                flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise, opts.n_timesteps).mel
+            }
+            // Same signature, same `[output_size, mel_len2]` result - a
+            // 22-layer adaLN-zero DiT estimator instead of the UNet CFM one.
+            Variant::CosyVoice3 => {
+                let flow_cfg = Cv3FlowConfig::cosyvoice3();
+                let flow_w = import_cv3_flow_pt(&flow_pt, &flow_cfg)?;
+                let noise = cv3_flow::rand_noise();
+                cv3_flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise, opts.n_timesteps).mel
+            }
+        }
     };
     if profile {
         let total = t_flow.elapsed();
@@ -359,6 +463,31 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
     // order) only when profiling; behaviorally identical to calling
     // `hift::forward_seeded` directly. ----
     let t_hift = std::time::Instant::now();
+    // CosyVoice 3's vocoder is the CAUSAL HiFT generator, whose NSF noise is
+    // drawn ONCE per instance and reused across calls (the reference's
+    // `SineGen2(causal=True)` keeps a fixed `sine_waves` attribute) rather than
+    // redrawn per utterance. `Cv3HiftInstance` is that object, so this branch
+    // builds one sized to this utterance and calls it - it does NOT re-derive
+    // the f0/nsf/decode split below, which is CosyVoice 2's own call order and
+    // exists there only so the profile can name its three sub-stages.
+    if opts.variant == Variant::CosyVoice3 {
+        let hift_cfg = Cv3HiftConfig::cosyvoice3();
+        let hift_w = import_cv3_hift_pt(&format!("{}/hift.pt", paths.hift), &hift_cfg)?;
+        let inst = cv3_hift::Cv3HiftInstance::new_seeded(hift_w, &hift_cfg, mel_len2, opts.seed);
+        let out = inst.forward(&mel_out, mel_len2, &hift_cfg);
+        if profile {
+            let d = t_hift.elapsed();
+            eprintln!("[profile] hift_total (cosyvoice3 causal generator): {:.3} ms", d.as_secs_f64() * 1000.0);
+            stage_times.push(("hift_total (cosyvoice3 causal generator)", d));
+            eprintln!("=== cosyvoice::pipeline::generate per-stage profile ===");
+            let total: std::time::Duration = stage_times.iter().filter(|(n, _)| !n.starts_with("  of which")).map(|(_, d)| *d).sum();
+            for (name, d) in &stage_times {
+                eprintln!("  {name:<70} {:>10.3} ms", d.as_secs_f64() * 1000.0);
+            }
+            eprintln!("  {:<70} {:>10.3} ms", "TOTAL (sum of top-level stages)", total.as_secs_f64() * 1000.0);
+        }
+        return Ok(GeneratedSpeech { samples: out.waveform, sample_rate: hift_cfg.sampling_rate });
+    }
     let hift_cfg = HiftConfig::cosyvoice2();
     let hift_w = import_hift_pt(&format!("{}/hift.pt", paths.hift), &hift_cfg)?;
     let t_f0 = std::time::Instant::now();
@@ -457,6 +586,42 @@ mod tests {
             let mean: f32 = (0..t as usize).map(|ti| feat[ti * d + c]).sum::<f32>() / t as f32;
             assert!(mean.abs() < 1e-3, "bin {c} time-mean {mean} should be ~0 after subtraction");
         }
+    }
+
+    /// Every advertised variant round-trips its own spelling, and an unknown
+    /// one is named rather than defaulted. A silent fallback here would run the
+    /// other generation's checkpoint under this one's name.
+    #[test]
+    fn variant_round_trips_and_refuses_an_unknown_spelling() {
+        for v in [Variant::CosyVoice2, Variant::CosyVoice3] {
+            assert_eq!(Variant::parse(v.as_str()).unwrap(), v);
+        }
+        assert!(Variant::parse("cosyvoice4").is_err());
+    }
+
+    /// `GenOpts::for_variant` must take the SELECTED generation's Euler-step
+    /// default, not CosyVoice 2's. They happen to agree at 10 today, which is
+    /// exactly why this asserts against the configs rather than the literal:
+    /// a future divergence would otherwise silently run CV3 at CV2's step
+    /// count, which is a quality regression with no error attached.
+    #[test]
+    fn gen_opts_defaults_come_from_the_selected_variant() {
+        for v in [Variant::CosyVoice2, Variant::CosyVoice3] {
+            let o = GenOpts::for_variant(v);
+            assert_eq!(o.variant, v);
+            assert_eq!(o.n_timesteps, v.default_timesteps());
+        }
+        assert_eq!(Variant::CosyVoice2.default_timesteps(), FlowConfig::cosyvoice2().n_timesteps as usize);
+        assert_eq!(Variant::CosyVoice3.default_timesteps(), Cv3FlowConfig::cosyvoice3().n_timesteps as usize);
+    }
+
+    /// The prompt mel is sliced by `mel_dim`, so a variant reporting the wrong
+    /// width would hand the flow decoder a misaligned tensor - noise, not an
+    /// error. Both read it from their own config.
+    #[test]
+    fn mel_dim_comes_from_each_variants_own_flow_config() {
+        assert_eq!(Variant::CosyVoice2.mel_dim(), FlowConfig::cosyvoice2().output_size as usize);
+        assert_eq!(Variant::CosyVoice3.mel_dim(), Cv3FlowConfig::cosyvoice3().output_size as usize);
     }
 
     #[test]

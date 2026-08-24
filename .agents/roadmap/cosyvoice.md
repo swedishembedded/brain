@@ -269,9 +269,8 @@ alongside the unmodified CosyVoice 2 `flow_parity`/`hift_parity` suites
 passed.
 
 **Not done in this phase**: CosyVoice 3 pipeline reuse - `crate::pipeline`
-still wires CosyVoice 2's five components only; composing the DiT flow
-decoder, causal HiFT, and `CosyVoice3LM` into a CosyVoice-3
-`pipeline::generate()` path is a recorded follow-up, not attempted here.
+still wired CosyVoice 2's five components only. *(Closed in Phase 9 below:
+`pipeline::Variant` now selects the three stages that differ.)*
 
 ## Phase 8: HiFT vocoder (`HiFTGenerator`, CosyVoice 2 non-causal only)
 
@@ -727,7 +726,48 @@ this phase - a real gap, not a faked pass.
 
 - [x] Phase 7b: CosyVoice 3 model code (`CausalMaskedDiffWithDiT`'s DiT
       estimator, `CosyVoice3LM`, `CausalHiFTGenerator`)
-- [ ] Phase 9 (CosyVoice 3): pipeline reuse now that Phase 7 has landed
+- [x] Phase 9 (CosyVoice 3): pipeline reuse. `pipeline::Variant`
+      (`CosyVoice2`/`CosyVoice3`) selects the three stages that differ and
+      nothing else: the LM config (`CosyVoiceLm::load` vs `load_cosyvoice3` -
+      the `SpecialTokenSource` branch was already inside `CosyVoiceLm`, so
+      prefill/generate are shared verbatim), the flow decoder
+      (`flow`+`FlowConfig` vs `cv3_flow`+`Cv3FlowConfig`, identical
+      `forward` signatures), and the vocoder (`hift`'s f0/nsf/decode split vs
+      `cv3_hift::Cv3HiftInstance`, whose NSF noise is drawn ONCE per instance
+      rather than per utterance - the reference's `SineGen2(causal=True)`
+      behaviour). Everything the two share - CAM++, S3Tokenizer, the prompt
+      mel, the `min(mel_frames/2, num_tokens)` truncation, the token budget,
+      the tokenizer - is written once, which is why this is a branch inside
+      `generate` and not a second 200-line function.
+
+      `GenOpts::for_variant` takes the SELECTED generation's `n_timesteps`
+      default, and `Variant::mel_dim` reads each generation's own
+      `output_size` rather than hardcoding 80. Both happen to agree today,
+      which is exactly why they are read from the configs: a future
+      divergence would otherwise slice the prompt mel wrong (noise, not an
+      error) or silently run CV3 at CV2's step count.
+
+      `caps::check_variant` now delegates to `Variant::parse`, so the action's
+      accepted spellings and the pipeline's cannot drift. The two tests that
+      pinned the old rejection were REWRITTEN rather than deleted:
+      `cosyvoice3_reaches_the_pipeline_and_fails_only_for_want_of_weights`
+      asserts a CV3 request now fails identically to a CV2 request with the
+      same empty paths (i.e. in weight loading, not at a variant gate), which
+      pins "wired" without needing a 3 GB checkpoint;
+      `an_unknown_variant_is_refused_before_touching_any_weights` keeps the
+      fast-typo-rejection property.
+
+      **Not claimed: a real-weight CosyVoice 3 end-to-end run.** No CosyVoice 3
+      checkpoint is present on this box, so the composed path is gated by the
+      wiring tests above plus each component's own already-passing real-weight
+      parity - not by a produced WAV. The `BRAIN_COSYVOICE_*` dirs must point
+      at a CosyVoice 3 checkpoint for `variant="cosyvoice3"`; the two
+      generations ship different `llm.pt`/`flow.pt`/`hift.pt` under the same
+      names, and a mismatched one fails in the importer.
+
+      **Streaming is still open** (the next item): this composes the
+      non-streaming path for both generations, exactly as CosyVoice 2's
+      already did.
 - [ ] Phase 9 (streaming): chunked token2wav, growing-prefix flow re-run, cross-fade
 - [ ] Phase 9 (kaldi fbank parity): a real, captured `torchaudio.compliance.kaldi.fbank` golden and a bit-exact gate for `audio::kaldi_fbank`
 - [x] Phase 10 (LM): `lmgrad`/`lmlora` host reference, gradcheck (block + model, both `SpecialTokenSource` branches), LoRA no-op-at-init + descent, single/batch overfit

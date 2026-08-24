@@ -44,7 +44,7 @@ named on the model's own page (see
 | [`nemotronasr`](nemotronasr.md) ⤓ | streaming speech-to-text | [x] | [ ] |
 | [`qwen3asr`](qwen3asr.md) ⤓ | offline speech-to-text | [x] | [ ] |
 | [`qwen3tts`](qwen3tts.md) ⤓ | voice cloning / speech synthesis | [x] | [x] |
-| [`cosyvoice`](cosyvoice.md) | zero-shot voice cloning TTS (LM + flow-matching mel decoder + HiFT vocoder) | [x] (CosyVoice 2 only - CosyVoice 3 forward-parity-proven, not yet composed into a pipeline) | [x] (LM only) |
+| [`cosyvoice`](cosyvoice.md) | zero-shot voice cloning TTS (LM + flow-matching mel decoder + HiFT vocoder) | [x] (both generations; CosyVoice 3 has no real-weight end-to-end run recorded) | [x] (LM only) |
 
 ## Music generation
 

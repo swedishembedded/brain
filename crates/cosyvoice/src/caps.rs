@@ -22,19 +22,28 @@
 //! for the resulting tension with the residency scheduler's own "reserved
 //! while Hot" cost model, and the judgment call made about it.
 //!
-//! # `variant`: `cosyvoice2` (implemented) vs `cosyvoice3` (not yet)
+//! # `variant`: both generations run
 //!
-//! `crate::pipeline::generate` only wires CosyVoice 2's flow decoder (UNet
-//! CFM), vocoder (non-causal HiFT) and LM branch. CosyVoice 3's own flow
-//! decoder (`crate::cv3_flow`), vocoder (`crate::cv3_hift`) and
-//! `SpecialTokenSource::SpeechEmbedding` LM branch are individually
-//! forward-parity-proven against their real checkpoints, but composing them
-//! into a second, streaming-aware `generate()` is a deliberate, separately
-//! tracked follow-up, not attempted here. `variant="cosyvoice3"` is accepted
-//! by this action's schema (so a client can discover the option and get a
-//! clear, typed rejection instead of an "unknown param") but always fails
-//! with an explicit error naming the gap - it never silently falls back to
-//! CosyVoice 2's weights, and never panics.
+//! `crate::pipeline::generate` composes EITHER generation. The two share this
+//! pipeline's shape exactly - same five stages, same reference-audio analysis,
+//! same truncation rule - and differ only in which config/import/forward triple
+//! the LM, flow decoder and vocoder stages use, so `crate::pipeline::Variant`
+//! selects those three and everything else is written once.
+//!
+//! What CosyVoice 3 changes, stage by stage: the LM reads its `sos`/`task_id`
+//! rows from the SPEECH embedding table rather than a separate `llm_embedding`
+//! one (`SpecialTokenSource::SpeechEmbedding`, already handled inside
+//! `CosyVoiceLm`); the flow decoder is a 22-layer adaLN-zero DiT estimator
+//! rather than the UNet CFM one; and the vocoder is the CAUSAL HiFT generator,
+//! whose NSF noise is drawn once per instance and reused across calls rather
+//! than redrawn per utterance.
+//!
+//! **The weights are the caller's to point at.** `BRAIN_COSYVOICE_LLM`/`_FLOW`/
+//! `_HIFT` name directories, and a CosyVoice 3 request needs them pointing at a
+//! CosyVoice 3 checkpoint - the two generations' `llm.pt`/`flow.pt`/`hift.pt`
+//! are different files with the same names. A CosyVoice 2 checkpoint under a
+//! `variant="cosyvoice3"` request fails in the importer with a shape or
+//! missing-tensor error; it does not silently produce noise.
 //!
 //! # Reference audio: a blob, not a server-side path
 //!
@@ -70,40 +79,33 @@ use std::sync::Arc;
 use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use serde_json::json;
 
-use crate::pipeline::{generate, CosyVoicePaths, GenOpts};
+use crate::pipeline::{generate, CosyVoicePaths, GenOpts, Variant};
 
 /// The model id used on the CLI (`brain do brain/cosyvoice …`, `brain
 /// cosyvoice synth …`), over D-Bus/HTTP, and in the residency manifest.
 pub const MODEL: &str = "brain/cosyvoice";
 
-/// The two generations `synth`'s `variant` param accepts. See this module's
-/// own doc for why only the first is actually runnable today.
+/// The two generations `synth`'s `variant` param accepts. Both run; see this
+/// module's own doc for what differs between them.
 pub const VARIANTS: [&str; 2] = ["cosyvoice2", "cosyvoice3"];
 
-/// `Ok(())` for a runnable variant, else the exact, honest reason it cannot
-/// run yet (never a panic, never a silent fallback to the other variant's
-/// weights) - see this module's own doc for the CosyVoice 3 scope.
-fn check_variant(variant: &str) -> Result<(), String> {
-    match variant {
-        "cosyvoice2" => Ok(()),
-        "cosyvoice3" => Err(
-            "cosyvoice synth: variant 'cosyvoice3' is not implemented yet - crate::pipeline only composes CosyVoice 2's flow decoder/vocoder/LM branch today; use variant='cosyvoice2'"
-                .to_string(),
-        ),
-        other => Err(format!("cosyvoice synth: unknown variant '{other}' (expected one of {VARIANTS:?})")),
-    }
+/// Parse the `variant` param, or say what was expected. Delegates to
+/// `pipeline::Variant::parse` so the action's vocabulary and the pipeline's
+/// cannot drift - there is one place that knows which spellings exist.
+fn check_variant(variant: &str) -> Result<Variant, String> {
+    Variant::parse(variant).map_err(|e| format!("cosyvoice synth: {e} (expected one of {VARIANTS:?})"))
 }
 
 fn synth_spec() -> ActionSpec {
     let d = GenOpts::default();
     ActionSpec::new(
         "synth",
-        "zero-shot voice cloning: target text + a reference audio clip and its transcript -> a real 24 kHz WAV (CosyVoice 2's non-streaming pipeline; cosyvoice3 is accepted as a value but not implemented yet)",
+        "zero-shot voice cloning: target text + a reference audio clip and its transcript -> a real 24 kHz WAV (non-streaming, either generation)",
     )
     .streaming()
     .param(ParamSpec::new("text", ParamType::Str, "the target text to synthesize").required())
     .param(ParamSpec::new("ref_text", ParamType::Str, "the reference clip's own transcript").required())
-    .param(ParamSpec::new("variant", ParamType::Str, "cosyvoice2 (implemented) or cosyvoice3 (accepted, not yet implemented)").default(json!("cosyvoice2")))
+    .param(ParamSpec::new("variant", ParamType::Str, "cosyvoice2 or cosyvoice3 (the BRAIN_COSYVOICE_* dirs must hold that generation's checkpoint)").default(json!("cosyvoice2")))
     .param(ParamSpec::new("seed", ParamType::Int, "RNG seed for the LM sampler and HiFT NSF noise (reproducible on this port, not bit-exact vs the python reference)").default(json!(0)))
     .param(
         ParamSpec::new("n_timesteps", ParamType::Int, "Euler steps the flow decoder's CFM solver takes")
@@ -187,13 +189,15 @@ fn decode_ref_audio(blob: &Blob) -> Result<(Vec<f32>, u32), String> {
 pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let text = inv.get_str("text").ok_or("cosyvoice synth: missing required param 'text'")?;
     let ref_text = inv.get_str("ref_text").ok_or("cosyvoice synth: missing required param 'ref_text'")?;
-    let variant = inv.get_str("variant").unwrap_or_else(|| "cosyvoice2".to_string());
-    check_variant(&variant)?;
+    let variant_str = inv.get_str("variant").unwrap_or_else(|| "cosyvoice2".to_string());
+    let variant = check_variant(&variant_str)?;
 
     let blob = inv.get_blob("ref_audio").ok_or("cosyvoice synth: missing required input 'ref_audio'")?;
     let (samples, sample_rate) = decode_ref_audio(blob)?;
 
-    let d = GenOpts::default();
+    // Defaults come from the SELECTED generation, so an unspecified
+    // `n_timesteps` gets that generation's own value rather than CosyVoice 2's.
+    let d = GenOpts::for_variant(variant);
     let opts = GenOpts {
         seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
         n_timesteps: inv.get_i64("n_timesteps").unwrap_or(d.n_timesteps as i64).max(1) as usize,
@@ -209,7 +213,7 @@ pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dy
         .set("samples", json!(out.samples.len()))
         .set("sample_rate", json!(out.sample_rate))
         .set("seconds", json!(out.samples.len() as f32 / out.sample_rate as f32))
-        .set("variant", json!(variant))
+        .set("variant", json!(variant.as_str()))
         .blob("audio", Blob::new(Media::Audio, bytes).with_meta(json!({"format": "wav", "sample_rate": out.sample_rate, "channels": 1}))))
 }
 
@@ -277,13 +281,18 @@ mod tests {
         assert!(p.action("nonexistent").is_none());
     }
 
+    /// Both generations parse, and an unknown one is named rather than
+    /// defaulted - silently running the OTHER generation's weights is the
+    /// failure this returns an error to avoid.
     #[test]
-    fn check_variant_accepts_cosyvoice2_and_names_cosyvoice3s_gap_without_panicking() {
-        assert!(check_variant("cosyvoice2").is_ok());
-        let err = check_variant("cosyvoice3").unwrap_err();
-        assert!(err.contains("not implemented"), "unexpected error: {err}");
+    fn check_variant_accepts_both_generations_and_names_an_unknown_one() {
+        assert_eq!(check_variant("cosyvoice2").unwrap(), Variant::CosyVoice2);
+        assert_eq!(check_variant("cosyvoice3").unwrap(), Variant::CosyVoice3);
         let err = check_variant("bogus").unwrap_err();
         assert!(err.contains("unknown variant"), "unexpected error: {err}");
+        for v in VARIANTS {
+            assert!(check_variant(v).is_ok(), "the advertised variant '{v}' must parse");
+        }
     }
 
     #[test]
@@ -304,19 +313,45 @@ mod tests {
         assert!(err.contains("ref_audio"), "unexpected error: {err}");
     }
 
+    /// THE POINT OF THIS CHANGE: a `cosyvoice3` request now reaches the
+    /// pipeline instead of being turned away at the door. With no checkpoint
+    /// configured it must fail where a `cosyvoice2` request with the same empty
+    /// paths fails - in the weight loading - and NOT with a
+    /// variant-not-supported message. Asserting the two errors agree is what
+    /// pins "this variant is wired", without needing a 3 GB checkpoint.
     #[test]
-    fn synth_action_rejects_cosyvoice3_before_touching_any_weights() {
+    fn cosyvoice3_reaches_the_pipeline_and_fails_only_for_want_of_weights() {
         let paths = CosyVoicePaths { llm: String::new(), flow: String::new(), hift: String::new(), s3tokenizer: String::new(), campplus: String::new(), tokenizer: String::new() };
-        let samples = vec![0.0f32; 1600];
-        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let bytes: Vec<u8> = vec![0.0f32; 1600].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let inv = |variant: &str| {
+            Invocation::new()
+                .set("text", json!("hi"))
+                .set("ref_text", json!("hello"))
+                .set("variant", json!(variant))
+                .blob("ref_audio", Blob::new(Media::Audio, bytes.clone()).with_meta(json!({"sample_rate": 16000})))
+        };
+        let mut progress = |_: Progress| {};
+        let e3 = synth_action(&paths, &inv("cosyvoice3"), &mut progress).unwrap_err();
+        let e2 = synth_action(&paths, &inv("cosyvoice2"), &mut progress).unwrap_err();
+        assert!(!e3.contains("not implemented"), "cosyvoice3 is wired now: {e3}");
+        assert_eq!(e3, e2, "both generations must fail identically when no checkpoint is configured");
+    }
+
+    /// An unknown variant is still refused BEFORE any weight is touched, so a
+    /// typo is a fast, clear error rather than a checkpoint load followed by a
+    /// shape mismatch.
+    #[test]
+    fn an_unknown_variant_is_refused_before_touching_any_weights() {
+        let paths = CosyVoicePaths { llm: String::new(), flow: String::new(), hift: String::new(), s3tokenizer: String::new(), campplus: String::new(), tokenizer: String::new() };
+        let bytes: Vec<u8> = vec![0.0f32; 1600].iter().flat_map(|s| s.to_le_bytes()).collect();
         let inv = Invocation::new()
             .set("text", json!("hi"))
             .set("ref_text", json!("hello"))
-            .set("variant", json!("cosyvoice3"))
+            .set("variant", json!("cosyvoice9"))
             .blob("ref_audio", Blob::new(Media::Audio, bytes).with_meta(json!({"sample_rate": 16000})));
         let mut progress = |_: Progress| {};
         let err = synth_action(&paths, &inv, &mut progress).unwrap_err();
-        assert!(err.contains("not implemented"), "unexpected error: {err}");
+        assert!(err.contains("unknown variant"), "unexpected error: {err}");
     }
 
     #[test]

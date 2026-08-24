@@ -554,12 +554,15 @@ fast and scalable kernel - not a naive one.
     (one `synth` action, streaming), `crates/cli/src/resident_cosyvoice.rs`
     (load-per-call, following `resident_minimaxmusic3.rs`), `brain
     caps`/`brain cosyvoice synth`/D-Bus/HTTP, `examples/tts/
-    cosyvoice_synth.py`. **CosyVoice 3 is not yet composable**: its LM/flow/
-    vocoder are individually forward-parity-proven against real checkpoints,
-    but `crate::pipeline::generate` only wires CosyVoice 2's components -
-    `variant="cosyvoice3"` is accepted for discovery and rejected with a
-    named error, never a silent fallback. Flow decoder and HiFT vocoder
-    training (both generations) remain forward-only. Full ledger:
+    cosyvoice_synth.py`. **Both generations run**: `pipeline::Variant` selects
+    the LM config, the flow decoder (UNet CFM vs the 22-layer adaLN-zero DiT)
+    and the vocoder (non-causal vs causal HiFT), and everything the two share -
+    CAM++, S3Tokenizer, the prompt mel, the truncation rule, the token budget -
+    is written once. `variant="cosyvoice3"` needs the `BRAIN_COSYVOICE_*` dirs
+    pointing at a CosyVoice 3 checkpoint; a wrong-generation checkpoint fails in
+    the importer, never silently. Flow decoder and HiFT vocoder training (both
+    generations) remain forward-only, and the CosyVoice 3 path has no
+    real-weight end-to-end run recorded on this box. Full ledger:
     `.agents/roadmap/cosyvoice.md`.
 
 13g. **MiniMax Music 3** (`crates/minimaxmusic3`) - the repo's music-generation
