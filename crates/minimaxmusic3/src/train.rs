@@ -128,8 +128,8 @@ impl ConvD {
         ConvD {
             w: gpu.storage_init("w", &c.weight),
             b: gpu.storage_init("b", &c.bias),
-            dw: gpu.storage(c.weight.len() as u64 * 4),
-            db: gpu.storage(c.bias.len() as u64 * 4),
+            dw: gpu.storage(c.weight.len() as u64),
+            db: gpu.storage(c.bias.len() as u64),
             w_name: wn,
             b_name: bn,
         }
@@ -166,7 +166,7 @@ struct VocoderDeviceWeights {
 
 impl VocoderDeviceWeights {
     fn upload(gpu: &Gpu, w: &VocoderWeights) -> VocoderDeviceWeights {
-        let alpha = |v: &[f32]| (gpu.storage_init("a", v), gpu.storage(v.len() as u64 * 4));
+        let alpha = |v: &[f32]| (gpu.storage_init("a", v), gpu.storage(v.len() as u64));
         let blocks = w
             .blocks
             .iter()
@@ -362,7 +362,7 @@ impl Trainer {
                 let rc1 = conv1d_bias_fwd(gpu, &mut steps, &ru.conv1, rows, cur_dim, cur_len, cur_dim, 7, ru_pad, dilation, &rs1);
                 let rs2 = snake_fwd(gpu, &mut steps, &ru.snake2_alpha, rows, cur_dim, cur_len, &rc1);
                 let rc2 = conv1d_bias_fwd(gpu, &mut steps, &ru.conv2, rows, cur_dim, cur_len, cur_dim, 1, 0, 1, &rs2);
-                let out = gpu.storage(u64::from(rows) * u64::from(cur_dim) * u64::from(cur_len) * 4);
+                let out = gpu.storage(u64::from(rows) * u64::from(cur_dim) * u64::from(cur_len));
                 steps.push(gpu.step(ADD2, &[&ru_x, &rc2, &out], &[rows * cur_dim * cur_len], rows * cur_dim * cur_len));
                 res_caches.push(ResidualUnitCache { x: ru_x, s1: rs1, c1: rc1, s2: rs2, dim: cur_dim, l: cur_len, dilation });
                 cur = out;
@@ -373,7 +373,7 @@ impl Trainer {
         let pre_snake_out = cur.clone();
         let sn = snake_fwd(gpu, &mut steps, &self.w.snake_out_alpha, rows, cur_dim, cur_len, &cur);
         let pre_tanh = conv1d_bias_fwd(gpu, &mut steps, &self.w.conv_out, rows, cur_dim, cur_len, 1, 7, 3, 1, &sn);
-        let output = gpu.storage(u64::from(rows) * u64::from(cur_len) * 4);
+        let output = gpu.storage(u64::from(rows) * u64::from(cur_len));
         steps.push(gpu.step(TANH_ACT, &[&pre_tanh, &output], &[rows * cur_len], rows * cur_len));
 
         gpu.submit(&[], &steps);
@@ -402,7 +402,7 @@ impl Trainer {
         let d_output = gpu.storage_init("d_output", &d_loss);
 
         let mut steps: Vec<Step> = Vec::new();
-        let d_pre_tanh = gpu.storage(n as u64 * 4);
+        let d_pre_tanh = gpu.storage(n as u64);
         steps.push(gpu.step(TANH_ACT_BWD, &[&d_output, &cache.pre_tanh, &d_pre_tanh], &[rows * cache.out_len], rows * cache.out_len));
 
         let mut cur_dim = self.cfg.decoder_hidden_dim / 2u32.pow(cfg.upsampling_ratios.len() as u32);
@@ -421,7 +421,7 @@ impl Trainer {
                 let ru_pad = 3 * ru_c.dilation;
                 let d_x_branch = conv1d_bias_bwd(gpu, &mut steps, &ru_w.conv1, rows, ru_c.dim, ru_c.l, ru_c.dim, 7, ru_pad, ru_c.dilation, &ru_c.s1, &d_s1_out);
                 let d_x_from_branch = snake_bwd(gpu, &mut steps, &ru_w.snake1_alpha, rows, ru_c.dim, ru_c.l, &ru_c.x, &d_x_branch, &ru_w.d_snake1_alpha);
-                let dx = gpu.storage(u64::from(rows) * u64::from(ru_c.dim) * u64::from(ru_c.l) * 4);
+                let dx = gpu.storage(u64::from(rows) * u64::from(ru_c.dim) * u64::from(ru_c.l));
                 steps.push(gpu.step(ADD2, &[&dy_out, &d_x_from_branch, &dx], &[rows * ru_c.dim * ru_c.l], rows * ru_c.dim * ru_c.l));
                 d_cur = dx;
             }
@@ -484,7 +484,7 @@ impl Trainer {
 fn conv1d_bias_fwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvD, n: u32, cin: u32, l: u32, cout: u32, k: u32, pad: u32, dilation: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let lo = Conv1d::out_len(l, k, 1, pad, pad, dilation);
     let c = Conv1d { n, cin, l, cout, k, stride: 1, pad, dilation, groups: 1, lo };
-    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo) * 4);
+    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo));
     steps.push(conv1d_fwd(gpu, &conv_kernels(), &c, x, &w.w, &y));
     steps.push(gpu.step(BIAS_ADD, &[&y, &w.b], &[n * cout * lo, cout, lo], n * cout * lo));
     y
@@ -493,7 +493,7 @@ fn conv1d_bias_fwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvD, n: u32, cin: u32
 #[allow(clippy::too_many_arguments)]
 fn convtr1d_bias_fwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvD, n: u32, cin: u32, l: u32, cout: u32, k: u32, stride: u32, pad: u32, lo: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let c = Conv1d { n, cin, l, cout, k, stride, pad, dilation: 1, groups: 1, lo };
-    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo) * 4);
+    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo));
     steps.push(convtr1d_fwd(gpu, &convtr_kernels(), &c, x, &w.w, &y));
     steps.push(gpu.step(BIAS_ADD, &[&y, &w.b], &[n * cout * lo, cout, lo], n * cout * lo));
     y
@@ -501,7 +501,7 @@ fn convtr1d_bias_fwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvD, n: u32, cin: u
 
 fn snake_fwd(gpu: &Gpu, steps: &mut Vec<Step>, alpha: &DeviceBuffer, rows: u32, c: u32, inner: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let sc = Snake1d { rows, c, inner, eps: SNAKE_EPS };
-    let y = gpu.storage(u64::from(sc.total()) * 4);
+    let y = gpu.storage(u64::from(sc.total()));
     steps.push(snake1d_fwd(gpu, &snake_kernels(), &sc, x, alpha, &y));
     y
 }
@@ -512,7 +512,7 @@ fn snake_fwd(gpu: &Gpu, steps: &mut Vec<Step>, alpha: &DeviceBuffer, rows: u32, 
 fn conv1d_bias_bwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvD, n: u32, cin: u32, l: u32, cout: u32, k: u32, pad: u32, dilation: u32, x: &DeviceBuffer, dy: &DeviceBuffer) -> DeviceBuffer {
     let lo = Conv1d::out_len(l, k, 1, pad, pad, dilation);
     let c = Conv1d { n, cin, l, cout, k, stride: 1, pad, dilation, groups: 1, lo };
-    let dx = gpu.storage(u64::from(n) * u64::from(cin) * u64::from(l) * 4);
+    let dx = gpu.storage(u64::from(n) * u64::from(cin) * u64::from(l));
     steps.extend(conv1d_bwd(gpu, &conv_kernels(), &c, dy, x, &w.w, Some(&dx), Some(&w.dw)));
     steps.push(gpu.step(BIAS_GRAD_NCL, &[dy, &w.db], &[n, cout, lo], cout));
     dx
@@ -521,7 +521,7 @@ fn conv1d_bias_bwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvD, n: u32, cin: u32
 #[allow(clippy::too_many_arguments)]
 fn convtr1d_bias_bwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvD, n: u32, cin: u32, l: u32, cout: u32, k: u32, stride: u32, pad: u32, lo: u32, x: &DeviceBuffer, dy: &DeviceBuffer) -> DeviceBuffer {
     let c = Conv1d { n, cin, l, cout, k, stride, pad, dilation: 1, groups: 1, lo };
-    let dx = gpu.storage(u64::from(n) * u64::from(cin) * u64::from(l) * 4);
+    let dx = gpu.storage(u64::from(n) * u64::from(cin) * u64::from(l));
     steps.extend(convtr1d_bwd(gpu, &convtr_kernels(), &c, dy, x, &w.w, Some(&dx), Some(&w.dw)));
     steps.push(gpu.step(BIAS_GRAD_NCL, &[dy, &w.db], &[n, cout, lo], cout));
     dx
@@ -531,7 +531,7 @@ fn convtr1d_bias_bwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvD, n: u32, cin: u
 #[allow(clippy::too_many_arguments)]
 fn snake_bwd(gpu: &Gpu, steps: &mut Vec<Step>, alpha: &DeviceBuffer, rows: u32, c: u32, inner: u32, x: &DeviceBuffer, dy: &DeviceBuffer, dalpha_out: &DeviceBuffer) -> DeviceBuffer {
     let sc = Snake1d { rows, c, inner, eps: SNAKE_EPS };
-    let dx = gpu.storage(u64::from(sc.total()) * 4);
+    let dx = gpu.storage(u64::from(sc.total()));
     steps.push(snake1d_bwd_dx(gpu, &snake_kernels(), &sc, dy, x, alpha, &dx));
     steps.push(snake1d_bwd_dalpha(gpu, &snake_kernels(), &sc, dy, x, alpha, dalpha_out));
     dx

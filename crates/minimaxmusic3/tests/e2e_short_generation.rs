@@ -63,7 +63,7 @@ fn real_short_generation_produces_a_playable_wav() {
     let mut progress = |done: u32, total: u32, stage: &str| {
         // One line per stage transition plus every 10th step, so a long run
         // stays legible without one line per Euler step.
-        if stage != last_stage || done % 10 == 0 || done == total {
+        if stage != last_stage || done.is_multiple_of(10) || done == total {
             eprintln!("[{:>7.1}s] {stage} {done}/{total}", start.elapsed().as_secs_f32());
             last_stage = stage.to_string();
         }

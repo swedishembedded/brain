@@ -227,18 +227,18 @@ fn backward(gpu: &Gpu, w: &DiscWeights, cfg: &DiscConfig, cache: &Cache, d_logit
     let mut steps: Vec<Step> = Vec::new();
     let d_logits_b = gpu.storage_init("d_logits", d_logits);
 
-    let dw_out = gpu.storage(w.conv_out.weight.len() as u64 * 4);
-    let db_out = gpu.storage(w.conv_out.bias.len() as u64 * 4);
+    let dw_out = gpu.storage(w.conv_out.weight.len() as u64);
+    let db_out = gpu.storage(w.conv_out.bias.len() as u64);
     let d_a2 = conv2d_bias_bwd(gpu, &mut steps, &w.conv_out, cfg.c2, h2o, w2o, 1, cfg.k, 1, h3o, w3o, &cache.a2, &d_logits_b, &dw_out, &db_out);
 
     let d_h2 = leaky_relu_bwd(gpu, &mut steps, &cache.h2, &d_a2, cfg.c2 * h2o * w2o);
-    let dw2 = gpu.storage(w.conv2.weight.len() as u64 * 4);
-    let db2 = gpu.storage(w.conv2.bias.len() as u64 * 4);
+    let dw2 = gpu.storage(w.conv2.weight.len() as u64);
+    let db2 = gpu.storage(w.conv2.bias.len() as u64);
     let d_a1 = conv2d_bias_bwd(gpu, &mut steps, &w.conv2, cfg.c1, h1o, w1o, cfg.c2, cfg.k, 1, h2o, w2o, &cache.a1, &d_h2, &dw2, &db2);
 
     let d_h1 = leaky_relu_bwd(gpu, &mut steps, &cache.h1, &d_a1, cfg.c1 * h1o * w1o);
-    let dw1 = gpu.storage(w.conv1.weight.len() as u64 * 4);
-    let db1 = gpu.storage(w.conv1.bias.len() as u64 * 4);
+    let dw1 = gpu.storage(w.conv1.weight.len() as u64);
+    let db1 = gpu.storage(w.conv1.bias.len() as u64);
     let d_mag = conv2d_bias_bwd(gpu, &mut steps, &w.conv1, 1, f_bins, frames, cfg.c1, cfg.k, 1, h1o, w1o, &cache.mag_in, &d_h1, &dw1, &db1);
 
     gpu.submit(&[], &steps);
@@ -255,7 +255,7 @@ fn backward(gpu: &Gpu, w: &DiscWeights, cfg: &DiscConfig, cache: &Cache, d_logit
 fn conv2d_bias(gpu: &Gpu, steps: &mut Vec<Step>, w: &Conv2dW, cin: usize, h: usize, wid: usize, cout: usize, k: usize, pad: usize, ho: usize, wo: usize, x: &DeviceBuffer) -> DeviceBuffer {
     let params = [1u32, cin as u32, h as u32, wid as u32, cout as u32, k as u32, 1, pad as u32, ho as u32, wo as u32];
     let wb = gpu.storage_init("dw", &w.weight);
-    let y = gpu.storage((cout * ho * wo) as u64 * 4);
+    let y = gpu.storage((cout * ho * wo) as u64);
     steps.push(gpu.step(CONV2D, &[x, &wb, &y], &params, (cout * ho * wo) as u32));
     let bb = gpu.storage_init("db", &w.bias);
     steps.push(gpu.step(BIAS_ADD, &[&y, &bb], &[(cout * ho * wo) as u32, cout as u32, (ho * wo) as u32], (cout * ho * wo) as u32));
@@ -265,7 +265,7 @@ fn conv2d_bias(gpu: &Gpu, steps: &mut Vec<Step>, w: &Conv2dW, cin: usize, h: usi
 #[allow(clippy::too_many_arguments)]
 fn conv2d_bias_bwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &Conv2dW, cin: usize, h: usize, wid: usize, cout: usize, k: usize, pad: usize, ho: usize, wo: usize, x: &DeviceBuffer, dy: &DeviceBuffer, dw: &DeviceBuffer, db: &DeviceBuffer) -> DeviceBuffer {
     let params = [1u32, cin as u32, h as u32, wid as u32, cout as u32, k as u32, 1, pad as u32, ho as u32, wo as u32];
-    let dx = gpu.storage((cin * h * wid) as u64 * 4);
+    let dx = gpu.storage((cin * h * wid) as u64);
     steps.push(gpu.step(CONV2D_DX, &[dy, &gpu.storage_init("w", &w.weight), &dx], &params, (cin * h * wid) as u32));
     steps.push(gpu.step(CONV2D_DW, &[dy, x, dw], &params, (cout * cin * k * k) as u32));
     steps.push(gpu.step(BIAS_GRAD, &[dy, db], &[1, cout as u32, (ho * wo) as u32], cout as u32));
@@ -273,12 +273,12 @@ fn conv2d_bias_bwd(gpu: &Gpu, steps: &mut Vec<Step>, w: &Conv2dW, cin: usize, h:
 }
 
 fn leaky_relu(gpu: &Gpu, steps: &mut Vec<Step>, x: &DeviceBuffer, n: usize) -> DeviceBuffer {
-    let y = gpu.storage(n as u64 * 4);
+    let y = gpu.storage(n as u64);
     steps.push(gpu.step(LEAKY_RELU, &[x, &y], &[n as u32, SLOPE.to_bits()], n as u32));
     y
 }
 fn leaky_relu_bwd(gpu: &Gpu, steps: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, n: usize) -> DeviceBuffer {
-    let dx = gpu.storage(n as u64 * 4);
+    let dx = gpu.storage(n as u64);
     steps.push(gpu.step(LEAKY_RELU_BWD, &[x, dy, &dx], &[n as u32, SLOPE.to_bits()], n as u32));
     dx
 }
