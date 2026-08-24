@@ -842,7 +842,9 @@ budget arithmetic predicted and the profile confirmed.
 ### Where the time goes now, and what is left
 
 For a 4-minute track (6000 AR frames, ~59 chunks): AR ~1.9 h, denoise
-~1.3 h at 8 steps. **The AR stage is now the bottleneck, and ~90% of it is
+~1.2 h at the reference's 30 steps (59 x 30 x 2 forwards x 1.21 s), or
+~19 min at 8. An earlier revision of this line said "~1.3 h at 8 steps",
+which was the 30-step number mislabelled. **The AR stage is now the bottleneck, and ~90% of it is
 the depth decoder running as HOST math** - its "nothing to parallelize"
 justification reasons about sequence length (<=8 positions), not work; at
 real dims it is 4096x6144 GEMMs 16 times per frame. Moving it to the device
