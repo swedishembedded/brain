@@ -10,12 +10,29 @@
 
 use std::path::Path;
 
-use brain_testutil::{golden::Source, parity::compare, testdata_path};
+use brain_testutil::{golden::Source, parity::{compare, rel_l2}, testdata_path};
 use minimaxmusic3::config::VocoderConfig;
 use minimaxmusic3::vocoder::{forward, from_tensors, PIPELINES};
 
 const DUMPER: &str = "tools/goldens/minimaxmusic3_dump_reference.py";
 const COS_FLOOR: f64 = 0.999;
+/// Cosine alone cannot gate this stage. It is SCALE INVARIANT, so a uniformly
+/// mis-scaled waveform - the exact shape a wrong gain, a dropped bias or a
+/// mis-normalised weight produces - scores a perfect cosine and passes. That
+/// is not hypothetical here: an RMSNorm-epsilon mutation elsewhere in this
+/// model scored cosine 1.000000 and was caught only by relative L2.
+///
+/// The ceiling matters most for the GEMM-lowered conv path, whose whole
+/// premise is that it REASSOCIATES the reduction: it is the metric that can
+/// see an accumulation drifting, and a gate that cannot see the failure mode
+/// of the change it guards is decoration.
+///
+/// 1e-4, not the 1e-3 first written here: both stages measure ~1e-6 clean, so
+/// 1e-4 still leaves ~60x of headroom for a reassociated accumulation while
+/// catching a mis-scale an order of magnitude smaller. At 1e-3 a uniform 0.1%
+/// gain lands exactly ON the ceiling - verified by mutation, and too close to
+/// call a gate.
+const REL_L2_CEILING: f64 = 1e-4;
 
 fn read_f32(p: &Path) -> Vec<f32> {
     std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
@@ -55,8 +72,10 @@ fn check(tag: &str, cfg: &VocoderConfig, ident: &[(&str, i64)], weights_dir: &Pa
     assert_eq!(got.len(), want.len(), "vocoder[{tag}]: output length mismatch");
 
     let (cos, max_abs) = compare(&got, &want);
-    println!("vocoder[{tag}]: cosine={cos:.9} max_abs={max_abs:.6}");
+    let rel = rel_l2(&got, &want);
+    println!("vocoder[{tag}]: cosine={cos:.9} rel_l2={rel:.3e} max_abs={max_abs:.6}");
     assert!(cos >= COS_FLOOR, "vocoder[{tag}]: cosine {cos} below floor {COS_FLOOR}");
+    assert!(rel <= REL_L2_CEILING, "vocoder[{tag}]: rel_l2 {rel:.3e} above ceiling {REL_L2_CEILING:.0e} (cosine was {cos:.9} - scale invariant, so it cannot see this)");
 }
 
 fn ident(cfg: &VocoderConfig) -> Vec<(&'static str, i64)> {
