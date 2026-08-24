@@ -203,8 +203,15 @@ impl GlmResident {
 }
 
 impl ResidentModel for GlmResident {
+    /// One definition, shared with the direct `brain glmdsa generate` path:
+    /// `glmdsa::caps::manifest_resident` is `manifest()` minus the `weights`
+    /// param this adapter supplies from `BRAIN_GLMDSA_WEIGHTS`. Building an
+    /// `ActionSpec` here instead is how the served and direct surfaces drift
+    /// into advertising different parameters for the same action.
     fn manifest(&self) -> Manifest {
-        Manifest::new(&self.id, "text generation (GLM MLA + MoE decoder)", vec![generate_spec("generate text continuing a prompt (GLM decoder)", false)])
+        let mut m = glmdsa::caps::manifest_resident();
+        m.model = self.id.clone();
+        m
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         InstanceKey::new(self.id.as_str(), "default")

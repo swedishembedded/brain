@@ -16,6 +16,7 @@
 //! `model.rs` holds the forward/backprop dispatch graph, `config.rs` the
 //! architecture + parameter layout, `import.rs` the HuggingFace weight import.
 
+pub mod caps;
 pub mod config;
 pub mod distill;
 pub mod import;

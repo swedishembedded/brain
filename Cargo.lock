@@ -1025,6 +1025,7 @@ dependencies = [
 name = "brain-glmdsa"
 version = "1.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",

@@ -196,6 +196,18 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(qwen3::caps::QwenProvider::new()),
             resident: None,
         },
+        // GLM-5.2. Same shape as qwen3 above: `weights` is a per-invocation
+        // action param, so the manifest is weights-free and `brain caps` lists
+        // GLM on a box with no checkpoint. The always-hot HTTP/D-Bus path is
+        // `crate::resident_llm::GlmResident`, registered directly in
+        // `resident.rs::build_executor` and advertising
+        // `glmdsa::caps::manifest_resident` - the same definition as this one,
+        // minus the `weights` param the service supplies itself.
+        ModelEntry {
+            manifest: glmdsa::caps::manifest,
+            provider: always!(glmdsa::caps::GlmProvider::new()),
+            resident: None,
+        },
         // Qwen3.5-35B-A3B: like qwen3, `weights` is a per-invocation action
         // param (not baked into the Provider at construction), so this
         // manifest is genuinely weights-free -- the same reason qwen3's own
@@ -532,11 +544,19 @@ mod tests {
         }
     }
 
-    /// A model that is in neither half is unreachable; one in both would be
-    /// registered twice. The residency half is still an explicit list in
-    /// `resident.rs` (see the module docs), so pin that they are disjoint.
+    /// Every residency adapter reachable from this file advertises an id this
+    /// file also lists, so a model cannot be schedulable but undiscoverable.
+    ///
+    /// The name and doc used to say these two sets are *disjoint*, which is the
+    /// opposite of what the assertion below has always checked - and disjoint
+    /// is not even true: `residents()` is derived from `models()`, so every id
+    /// it yields is a catalog id by construction. Read literally, the old name
+    /// described a property that, if it held, would mean no catalog entry could
+    /// carry a `resident` at all. The env-gated adapters registered directly in
+    /// `resident.rs::build_executor` (gpt2, qwen, lfm2, flux2, wan, ltxv, ...)
+    /// are a genuinely separate list that this test does not reach.
     #[test]
-    fn catalog_and_residency_do_not_overlap() {
+    fn every_residency_adapter_here_is_also_listed_here() {
         let catalog: std::collections::HashSet<String> =
             manifests().into_iter().map(|m| m.model).collect();
         for r in residents() {

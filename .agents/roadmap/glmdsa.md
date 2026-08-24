@@ -8,8 +8,33 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
 
 ## Not yet done
 
-- [ ] GLM serving contract - not yet discoverable/scheduled/batched/driven
-      over D-Bus or the HTTP APIs like the other models
+- [x] GLM discovery and the direct action path. `glmdsa::caps` now carries a
+      **weight-free** manifest plus a `GlmProvider`, wired into
+      `cli::catalog::models()`, so `brain caps` lists `brain/glm` and
+      `brain glmdsa generate` runs it with no checkpoint on the box.
+
+      Scheduling and D-Bus/HTTP serving were never actually missing -
+      `cli::resident_llm::GlmResident` has always implemented `ResidentModel`
+      and been registered in `resident.rs::build_executor`, which the serving
+      contract accepts. What was missing is that its manifest is only built
+      when `BRAIN_GLMDSA_WEIGHTS` is set, so on a box with no GLM checkpoint
+      the model did not appear in `brain caps` **at all**, while every other
+      model advertises itself weight-free and takes `weights` as a request
+      parameter. Discovery that depends on deployment state is discovery a
+      client cannot rely on.
+
+      `GlmResident::manifest` now returns `glmdsa::caps::manifest_resident()`
+      (the same definition minus the `weights` param the service supplies
+      itself) rather than building its own `ActionSpec`, so the served and
+      direct surfaces cannot advertise different parameters for one action.
+      The model ref stays `brain/glm`, which is what `modelref::alias::ROWS`,
+      `perf_cli` and the checkpoint `ModelCard` already use - `glmdsa` is the
+      *architecture* id, a different namespace.
+- [ ] `Instance::run_batch` for GLM is the serial default and does not yet say
+      why - the decoder is autoregressive, so the honest options are batching
+      the prefill or adopting `model::serve::PagedDecoder` (see
+      `.agents/rules/serving-contract.md`), not a comment
+- [ ] A runnable `examples/` client for GLM, like the other served models have
 - [ ] `brain glmdsa infer --device npu` - the exported ONNX graph isn't wired
       into an inference command yet; today `export` hands you a graph to run
       through OpenVINO yourself
