@@ -3,7 +3,7 @@
 brain's own from-scratch 3D Gaussian Splatting renderer and optimizer: load
 a `.ply` scene, render still images or fly through it interactively, or fit
 a new scene against a set of posed photos. Reach for it to view or inspect
-any Gaussian-splat scene - including ones produced by [mirror](mirror.md) -
+any Gaussian-splat scene - including ones produced by [mirror](worldmirror2.md) -
 or to optimize a scene of your own from a set of camera-posed images. The
 same rendering kernels run on any GPU and on the CPU, so it works without
 a discrete graphics card.

@@ -12,7 +12,7 @@ Turns text into a 24 kHz speech waveform. Give it a few seconds of reference
 audio and it clones that voice for the sentence you ask it to speak;
 without one it falls back to a default voice. Reach for it for narration, a
 cloned voice for a demo, or a spoken-output leg for an assistant pipeline,
-all running locally. See [the TTS page](../models/tts.md).
+all running locally. See [the TTS page](../models/qwen3tts.md).
 
 ### Speech-to-text - `brain/nemotronasr` and `brain/qwen3asr`
 
@@ -29,7 +29,7 @@ in text, and - when asked to speak - replies with an actual synthesized
 waveform instead of just text. Reach for it when you want one model handling
 mixed-modality input and a spoken reply, rather than wiring separate
 ASR/vision/TTS models together yourself. See
-[the Qwen3-Omni page](../models/omni/readme.md).
+[the Qwen3-Omni page](../models/qwen3omnimoe/readme.md).
 
 ### Understanding images and video as text - `brain/fastvlm` and `brain/qwen3vl`
 

@@ -16,9 +16,9 @@ GLM-family MoE decoder, or import official GLM-5.2 HuggingFace weights.
 | Inference             | [x] |
 | Training from scratch | [x] |
 | INT8                   | [ ] |
-| CLI (`brain <arch> <action>`)       | [ ] |
-| HTTP API               | [ ] |
-| D-Bus                  | [ ] |
+| CLI (`brain <arch> <action>`)       | [x] |
+| HTTP API               | [x] |
+| D-Bus                  | [x] |
 | Batched serving        | [ ] |
 
 ## Getting the weights
@@ -76,7 +76,19 @@ hardware. NPU INT8 weight-only quantization for GLM isn't implemented yet,
 and the attention indexer and multi-token-prediction head aren't part of the
 exported graph - the NPU path runs dense attention, and multi-token
 prediction there would need a separate host-side draft loop. See
-[glm/npu.md](glm/npu.md) for the export design.
+[glm/npu.md](glmdsa/npu.md) for the export design.
 
-Serving GLM over HTTP or D-Bus alongside brain's other decoders isn't wired
-up yet - use the CLI directly for train/finetune/infer/eval.
+To serve it over HTTP or D-Bus:
+
+```bash
+BRAIN_GLMDSA_WEIGHTS=glm.safetensors brain serve --dbus --openai
+```
+
+Once serving, it's reachable like any other resident model over `brain do`,
+D-Bus, or the HTTP APIs - one request decodes at a time (no concurrent
+continuous-batching engine, unlike Qwen3).
+
+`brain caps` lists `brain/glm` whether or not a checkpoint is present, and
+`brain glmdsa generate --weights glm.safetensors --prompt "..."` runs it
+directly, without a server. Use the CLI verbs above for
+train/finetune/infer/eval.

@@ -379,6 +379,7 @@ check/scripts:
 	bash scripts/gates/check-arch-names.sh
 	bash scripts/gates/check-linear-history.sh
 	bash scripts/gates/check-golden-source.sh
+	bash scripts/gates/check-doc-links.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"

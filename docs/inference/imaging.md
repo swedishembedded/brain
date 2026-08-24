@@ -30,13 +30,13 @@ Takes a degraded (ideally aligned) face and produces a restored version, with
 a continuous identity-fidelity dial: one end favors visual quality, the other
 favors staying close to the input. Use it after detection/alignment to clean
 up compression artifacts, blur, or low resolution on a face crop. See
-the [face restoration page](../models/restore.md).
+the [face restoration page](../models/codeformer.md).
 
 ### Image upscaling - `brain/rrdbnet`
 
 Super-resolves an image (4x on the released checkpoint). Use it as a final
 step after generation, editing, or restoration to raise output resolution.
-See the [upscaling page](../models/upscale.md).
+See the [upscaling page](../models/rrdbnet.md).
 
 ### Image / codebook encode-decode - `brain/vqgan`
 

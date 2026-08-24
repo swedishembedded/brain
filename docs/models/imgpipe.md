@@ -47,8 +47,8 @@ Stage ops, applied in order:
 - `segment` - `points` and/or `boxes` to select a region
 - `dilate` / `erode` / `feather` - `radius`, mask post-processing
 - `invert` - no params
-- `restore` - `w`, the [restore](restore.md) fidelity dial
-- `upscale` - `tile`, see [upscale](upscale.md); since it changes the image
+- `restore` - `w`, the [restore](codeformer.md) fidelity dial
+- `upscale` - `tile`, see [upscale](rrdbnet.md); since it changes the image
   size, `upscale` must be the last stage in the list
 
 ## Hardware and limits

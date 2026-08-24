@@ -15,7 +15,7 @@ prompt in a handful of steps, trading a little quality headroom for much
 lower latency. It also does image-to-image, inpainting, and outpainting
 against an existing image, and can be LoRA-finetuned on your own images. A
 slower, non-distilled base variant (`Tongyi-MAI/Z-Image`) is available for
-more quality headroom. See [the Z-Image page](../models/zimage.md).
+more quality headroom. See [the Z-Image page](../models/s3dit.md).
 
 ### Text-to-image and reference-image editing — `brain/flux2-klein`
 

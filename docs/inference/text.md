@@ -23,7 +23,7 @@ A from-scratch GLM-5.2 decoder: compressed low-rank attention plus a
 mixture-of-experts routing layer (a sparse set of expert MLPs selected per
 token, with one always-on shared expert). Reach for it to train, finetune,
 evaluate, or run inference against a from-scratch MoE decoder, or to import
-official GLM-5.2 weights. See [the GLM page](../models/glm.md).
+official GLM-5.2 weights. See [the GLM page](../models/glmdsa.md).
 
 ### A simple baseline decoder - `brain/gpt`
 
@@ -32,7 +32,7 @@ reference decoder, with no grouped-query attention, MoE, quantization, or
 paged serving to get in the way. Reach for it when you want a straightforward
 train/evaluate/generate loop on your own dataset, for learning or
 experimenting with training from scratch. See
-[the GPT page](../models/gpt.md).
+[the GPT page](../models/gpt2.md).
 
 ### Text embeddings
 
@@ -40,7 +40,7 @@ For turning text into vectors for search or similarity: `brain/lfm2` is a
 dedicated bidirectional text encoder (also does cloze-style mask-filling),
 and `brain/clip` produces text embeddings from the same encoder its image
 tower shares, for text-image comparison. See
-[the LFM2.5 page](../models/lfm.md) and
+[the LFM2.5 page](../models/lfm2.md) and
 [the CLIP page](../models/clip.md).
 
 ### Studying routing and generalization - the toy Sparse MoE
@@ -48,10 +48,10 @@ tower shares, for text-image comparison. See
 A small sparse Mixture-of-Experts decoder trained from scratch on a
 synthetic task with a known ground truth, purpose-built to study
 memorization vs. generalization rather than to serve as a production model.
-See [the Sparse MoE page](../models/moe.md).
+See [the Sparse MoE page](../models/toymoe.md).
 
 ### Sequence-to-sequence - the encoder-decoder architecture
 
 A general encoder-decoder Transformer for tasks shaped like translation -
 mapping one token sequence to another, rather than continuing a single
-stream. See [the seq2seq page](../models/seq2seq.md).
+stream. See [the seq2seq page](../models/toyseq2seq.md).

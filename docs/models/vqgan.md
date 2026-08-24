@@ -2,7 +2,7 @@
 
 A VQ autoencoder that converts an image into a grid of discrete codebook
 indices (`encode`) and back into an image (`decode`). It's mainly a building
-block other imaging models are built on - [restore](restore.md)'s face
+block other imaging models are built on - [restore](codeformer.md)'s face
 restoration uses this same codec - but it's also usable standalone, for
 example to compress an image down to a compact set of integer codes, or to
 see what the model's prior reconstructs from a code grid.

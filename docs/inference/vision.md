@@ -15,14 +15,14 @@ the official Ultralytics YOLOv8n graph - pretrained weights import and run
 unchanged, and it can also be trained or fine-tuned on your own data. Reach
 for it for bounding-box detection, whether as a one-shot call or wired into
 a live event-driven pipeline. See
-[the YOLOv8 page](../models/yolo/readme.md).
+[the YOLOv8 page](../models/yolov8/readme.md).
 
 ### Monocular depth - `brain/zipdepth`
 
 Point it at a single image or a live camera feed and it produces a
 per-pixel depth map, no stereo rig needed. It's small and fast enough for
 realtime use - live webcam preview, depth-of-field effects, or
-autostereograms. See [the ZipDepth page](../models/depth.md).
+autostereograms. See [the ZipDepth page](../models/zipdepth.md).
 
 ### Promptable segmentation - `brain/sam2`
 

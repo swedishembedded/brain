@@ -12,7 +12,7 @@ Feed it several photos of a scene or object from different angles and it
 reconstructs a 3D scene as a Gaussian Splatting point cloud, with per-frame
 depth, normal, and confidence maps and recovered camera poses — no manual
 structure-from-motion pipeline needed. See
-[the WorldMirror-2 page](../models/mirror.md).
+[the WorldMirror-2 page](../models/worldmirror2.md).
 
 ### Rendering and fitting — `splat`
 
