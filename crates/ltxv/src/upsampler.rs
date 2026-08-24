@@ -461,7 +461,7 @@ impl LatentUpsampler {
 pub fn upsample_video(ups: &LatentUpsampler, mean: &[f32], std: &[f32], latent: &[f32]) -> Vec<f32> {
     let c = mean.len();
     assert_eq!(std.len(), c, "per-channel mean/std disagree: {} vs {}", mean.len(), std.len());
-    assert!(c > 0 && latent.len() % c == 0, "latent of {} values does not divide into {c} channels", latent.len());
+    assert!(c > 0 && latent.len().is_multiple_of(c), "latent of {} values does not divide into {c} channels", latent.len());
     let plane = latent.len() / c;
     // `un_normalize`: `x * std + mean`, per channel.
     let mut raw = latent.to_vec();

@@ -111,7 +111,7 @@ fn a_caller_held_step_pins_only_the_buffers_it_names() {
     let scratch = be.storage_init("scratch", &vec![1.0f32; N]);
     let step = be.step_buf(0, &ubuf, &[&out, &scratch], N as u32);
 
-    be.submit(&[], &[step.clone()]);
+    be.submit(&[], std::slice::from_ref(&step));
     be.poll_wait();
     assert_axpy_result(&be.read(&out, N), 1.0);
 

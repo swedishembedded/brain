@@ -11,8 +11,8 @@
 //!
 //! # The idle card this exists to remove
 //!
-//! A generation is three sequential stages - text encode, denoise, VAE decode
-//! - and every one of them is single-device today. On a two-card box that
+//! A generation is three sequential stages - text encode, denoise, VAE decode -
+//! and every one of them is single-device today. On a two-card box that
 //! leaves one card at 0% for the entire run. The denoise loop is ~all of the
 //! wall clock, and when classifier-free guidance is on (`guidance > 1.0`) it
 //! runs **two independent forwards per step** at the same latent: one against
@@ -142,8 +142,8 @@ impl DevicePlan {
     /// Resolve against this machine's schedulable set and this thread's
     /// current selection.
     ///
-    /// `device` is `GenOpts::device` (`Some("cpu")` / `Some("gpu")` / `None`)
-    /// - a CPU-backend run has no cards to split across and resolves to
+    /// `device` is `GenOpts::device` (`Some("cpu")` / `Some("gpu")` / `None`) -
+    /// a CPU-backend run has no cards to split across and resolves to
     /// [`Placement::single`] regardless of what the plan asked for, rather
     /// than scoping onto a GPU index the run will never open.
     pub fn resolve(&self, device: Option<&str>) -> Placement {

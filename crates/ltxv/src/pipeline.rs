@@ -2717,7 +2717,7 @@ pub const REFINE_MAX_TOKENS: usize = 12288;
 /// bounded artefact rather than the silent end-of-clip disintegration
 /// [`SINGLE_STAGE_MAX_TOKENS`] documents. A clip that fits is never split.
 pub fn refine_segments(frames: usize, out_lh: usize, out_lw: usize) -> Result<Vec<(usize, usize)>, String> {
-    if frames == 0 || (frames - 1) % 8 != 0 {
+    if frames == 0 || !(frames - 1).is_multiple_of(8) {
         return Err(format!("{frames} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)"));
     }
     let per_frame = out_lh.checked_mul(out_lw).filter(|&n| n > 0).ok_or_else(|| format!("a {out_lh}x{out_lw} latent grid is not a grid"))?;

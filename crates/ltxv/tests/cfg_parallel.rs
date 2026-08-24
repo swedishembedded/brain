@@ -25,8 +25,8 @@
 //! So bit-identity is the *prediction*, not a hope, and the gate is a
 //! bit-pattern comparison rather than a tolerance. A failure here would mean
 //! something real - a kernel reading uninitialised memory, a
-//! nondeterministic reduction, a cache entry mutated by a concurrent reader
-//! - and is worth failing on. Widening the bound would hide exactly the
+//! nondeterministic reduction, a cache entry mutated by a concurrent reader -
+//! and is worth failing on. Widening the bound would hide exactly the
 //! class of defect this gate exists to catch.
 //!
 //! The checkpoint-scoped block-weight cache (`ltxv::weightcache`) is shared

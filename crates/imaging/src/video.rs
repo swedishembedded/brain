@@ -116,7 +116,7 @@ pub fn decode_frames_rgb8(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<Rgb
         return Err(format!("imaging::video: ffmpeg produced no frames for {}", path.display()));
     }
 
-    entries.iter().map(|p| crate::codec::load(p)).collect()
+    entries.iter().map(crate::codec::load).collect()
 }
 
 /// The video's own average frame rate, via `ffprobe`.

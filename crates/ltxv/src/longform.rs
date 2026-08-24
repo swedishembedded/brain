@@ -213,7 +213,7 @@ impl Window {
 /// and window 1 would carry a silently truncated context). Splitting the
 /// remainder equally then keeps the clip from ending on a stub window.
 pub fn window_plan(frames: usize, lh: usize, lw: usize, context: usize, max_tokens: usize) -> Result<Vec<Window>, String> {
-    if frames == 0 || (frames - 1) % 8 != 0 {
+    if frames == 0 || !(frames - 1).is_multiple_of(8) {
         return Err(format!("{frames} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)"));
     }
     if context == 0 {

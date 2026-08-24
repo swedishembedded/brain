@@ -336,7 +336,7 @@ impl Instance for LtxvInstance {
         pool.run_all(
             invs.len(),
             |i, dev, emit| LtxvInstance::run_on(paths, dev, ltxv::devplan::DevicePlan::Single, action, &invs[i], &mut |p| emit(p)),
-            |i, p| progress(i, p),
+            progress,
         )
     }
 

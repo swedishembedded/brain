@@ -179,7 +179,7 @@ fn a_single_tile_plan_is_bit_identical_to_the_whole_decode() {
 
     // Tiles far larger than the axes -> one tile, no ramps.
     let tiling = LtxVaeTiling { frames: (80, 24), height: (2048, 64), width: (2048, 64) };
-    let tiled = LtxVaeTiledDecoder::new(&cfg, &w, lt, lh, lw, None, tiling);
+    let tiled = LtxVaeTiledDecoder::new(&cfg, w, lt, lh, lw, None, tiling);
     assert_eq!(tiled.plan().tiles().len(), 1, "this gate needs a degenerate one-tile plan");
     let got = tiled.decode(&latent);
 
@@ -207,7 +207,7 @@ fn split_vs_whole(tiling: LtxVaeTiling, lt: u32, lh: u32, lw: u32) -> Option<(f6
     let cfg = LtxVaeConfig::conv25();
     let latent = structured_latent(cfg.latent_channels as usize, lt as usize, lh as usize, lw as usize);
     let whole = LtxVaeDecoder::build(&cfg, w, lt, lh, lw, None).decode(&latent);
-    let tiled = LtxVaeTiledDecoder::new(&cfg, &w, lt, lh, lw, None, tiling);
+    let tiled = LtxVaeTiledDecoder::new(&cfg, w, lt, lh, lw, None, tiling);
     let n = tiled.plan().tiles().len();
     assert!(n > 1, "this gate needs a genuinely split plan, got {n} tile(s)");
     eprintln!("plan: {n} tiles, overlap waste {:.3}x", tiled.plan().overlap_waste());
@@ -275,7 +275,7 @@ fn the_blend_beats_a_hard_cut_at_the_same_tile_geometry() {
     let whole = LtxVaeDecoder::build(&cfg, w, lt, lh, lw, None).decode(&latent);
 
     let tiling = LtxVaeTiling { frames: (80, 24), height: (128, 64), width: (128, 64) };
-    let tiled = LtxVaeTiledDecoder::new(&cfg, &w, lt, lh, lw, None, tiling);
+    let tiled = LtxVaeTiledDecoder::new(&cfg, w, lt, lh, lw, None, tiling);
     let blended = tiled.decode(&latent);
 
     // Hard cut: replay the same tiles, but write each tile's pixels straight
@@ -354,7 +354,7 @@ mod real_1080p {
         let whole = LtxVaeDecoder::build(&cfg, w, lt, lh, lw, Some("gpu")).decode(&latent);
         let whole_s = t0.elapsed().as_secs_f64();
 
-        let tiled_dec = LtxVaeTiledDecoder::auto(&cfg, &w, lt, lh, lw, Some("gpu"));
+        let tiled_dec = LtxVaeTiledDecoder::auto(&cfg, w, lt, lh, lw, Some("gpu"));
         assert_eq!(tiled_dec.plan().tiles().len(), 9, "expected the production 3x3 cover");
         let t1 = std::time::Instant::now();
         let tiled = tiled_dec.decode(&latent);
@@ -440,7 +440,7 @@ mod real_1080p {
         assert!(ltxv::vae3d::should_tile(f as u32, h as u32, wd as u32) || std::env::var("BRAIN_LTXV_VAE_TILE").is_ok(), "{f}f at {wd}x{h} is not a shape that needs tiling - this gate would prove nothing");
         let latent = structured_latent(cfg.latent_channels as usize, lt as usize, lh as usize, lw as usize);
 
-        let tiled = LtxVaeTiledDecoder::auto(&cfg, &w, lt, lh, lw, Some("gpu"));
+        let tiled = LtxVaeTiledDecoder::auto(&cfg, w, lt, lh, lw, Some("gpu"));
         eprintln!("{f}f {wd}x{h} plan: {} tiles, overlap waste {:.3}x", tiled.plan().tiles().len(), tiled.plan().overlap_waste());
         let t0 = std::time::Instant::now();
         let px = tiled.decode_with(&latent, |d, n| eprintln!("  tile {d}/{n} ({:.1}s)", t0.elapsed().as_secs_f64()));

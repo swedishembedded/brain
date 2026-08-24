@@ -41,8 +41,8 @@
 //! the hardware permits; admitting more would trade a correct, slower answer
 //! for a crash.
 //!
-//! Models whose per-request footprint is genuinely small should not use this
-//! - they should batch, which is what [`crate::scheduler`] already picks for
+//! Models whose per-request footprint is genuinely small should not use this -
+//! they should batch, which is what [`crate::scheduler`] already picks for
 //! them.
 //!
 //! # No device code here, deliberately
