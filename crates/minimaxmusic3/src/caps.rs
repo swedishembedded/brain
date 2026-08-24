@@ -77,6 +77,11 @@ fn opts_from(inv: &Invocation) -> GenOpts {
         duration_seconds: inv.get_f64("duration_seconds").map(|v| v as f32).unwrap_or(d.duration_seconds).max(0.1),
         num_inference_steps: inv.get_i64("num_inference_steps").unwrap_or(d.num_inference_steps as i64).max(1) as usize,
         seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        // Deliberately not a param: `--device` is a GLOBAL flag in this
+        // workspace, not a per-action knob, so the served path inherits
+        // the ambient selection. `GenOpts::device` exists for in-process
+        // callers that place stages explicitly (a two-card split).
+        device: None,
     }
 }
 

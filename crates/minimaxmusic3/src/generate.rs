@@ -21,15 +21,20 @@
 //! stage - not interleaved per chunk, which would need both resident at
 //! once.
 //!
-//! Operational note: `qwen3::Qwen`'s device selection is ambient (`Gpu::
-//! new`, ombient `--device`/`BRAIN_DEVICE`), used by [`global_llm::import`]
-//! for the AR stage's two Global LLM instances. On a machine whose GPU
-//! caps single buffers below the ~3.28 GB embedding/`lm_head` tensors (an
-//! Intel integrated GPU, for instance - see the roadmap's own measured
-//! gap), set `BRAIN_DEVICE=cpu` before calling [`generate`]. Every OTHER
-//! stage in this module explicitly uses `Gpu::new_cpu`, matching this
-//! crate's own convention throughout (`dit_train`, `dit_shard`,
-//! `discriminator`, `train`).
+//! Device selection is ambient for EVERY stage - `--device` /
+//! `BRAIN_DEVICE`, the same knob every other model in this workspace
+//! honours. The AR stage inherits it through `qwen3::Qwen`; the denoise
+//! and vocoder stages get it from [`GenOpts::device`], which is `None`
+//! ("do not override") by default and otherwise takes a `--device`-shaped
+//! token straight to [`Gpu::open`].
+//!
+//! These two stages used to call `Gpu::new_cpu` unconditionally, which
+//! pinned the 36-layer DiT and the 512x-upsample vocoder to the CPU
+//! backend no matter what the caller asked for - the two most
+//! compute-heavy components in the model, on the one device that cannot
+//! use a GPU. That was written for a machine with no discrete card; it is
+//! a bug anywhere else, and it silently made `--device gpu` a no-op for
+//! most of this pipeline's cost.
 
 use crate::config::{ConditionEncoderConfig, DepthDecoderConfig, DitConfig, VocoderConfig};
 use crate::{condition_encoder, denoise, depth_decoder, dit, global_llm, pipeline, stitch, vocoder};
@@ -89,11 +94,16 @@ pub struct GenOpts {
     pub duration_seconds: f32,
     pub num_inference_steps: usize,
     pub seed: u64,
+    /// A `--device`-shaped token (`cpu`, `gpu`, `gpu0`, `gpu1`, ...) for
+    /// the denoise and vocoder stages, or `None` to inherit the ambient
+    /// `--device`/`BRAIN_DEVICE` selection like every other stage. Passed
+    /// verbatim to [`Gpu::open`].
+    pub device: Option<String>,
 }
 
 impl Default for GenOpts {
     fn default() -> GenOpts {
-        GenOpts { duration_seconds: 10.0, num_inference_steps: denoise::DEFAULT_NUM_INFERENCE_STEPS, seed: 0 }
+        GenOpts { duration_seconds: 10.0, num_inference_steps: denoise::DEFAULT_NUM_INFERENCE_STEPS, seed: 0, device: None }
     }
 }
 
@@ -149,7 +159,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str) -> R
         let cond_w = condition_encoder::import(&paths.condition)?;
         let dit_cfg = DitConfig::real();
         let dit_w = dit::import(&paths.dit, &dit_cfg)?;
-        let gpu = Gpu::new_cpu(dit::PIPELINES);
+        let gpu = Gpu::open(opts.device.as_deref(), dit::PIPELINES);
         let starts = denoise::chunk_starts(num_frames);
         let mut state = denoise::ChunkState::default();
         starts
@@ -168,7 +178,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str) -> R
     let (left, right) = {
         let vocoder_cfg = VocoderConfig::real();
         let vocoder_w = vocoder::import(&paths.vocoder, &vocoder_cfg)?;
-        let gpu = Gpu::new_cpu(vocoder::PIPELINES);
+        let gpu = Gpu::open(opts.device.as_deref(), vocoder::PIPELINES);
         let mut stitcher = stitch::Stitcher::new();
         let n = chunks.len();
         for (i, (latents, length)) in chunks.iter().enumerate() {
