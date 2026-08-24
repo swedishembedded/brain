@@ -56,6 +56,15 @@ fn real_short_generation_produces_a_playable_wav() {
     let max_frames = 12usize;
     let num_inference_steps = 8usize;
 
+    // Echo stage progress. This is the one gate that runs the real 19B
+    // checkpoint end to end, and it is slow enough that silence is
+    // indistinguishable from a hang - which is exactly the failure mode
+    // `crate::ProgressSink` exists to remove. Visible under `--nocapture`.
+    let start = std::time::Instant::now();
+    let mut progress = |done: u32, total: u32, stage: &str| {
+        eprintln!("[{:>7.1}s] {stage} {done}/{total}", start.elapsed().as_secs_f32());
+    };
+
     // ---- AR stage: two int8 Global LLM instances + the depth decoder. ----
     // Everything this block allocates is dropped at its closing brace,
     // before the DiT (the next stage's own multi-GB weights) loads.
@@ -86,6 +95,7 @@ fn real_short_generation_produces_a_playable_wav() {
             &unconditional_ids,
             max_frames,
             1234,
+            &mut progress,
         )
     };
 
@@ -103,7 +113,7 @@ fn real_short_generation_produces_a_playable_wav() {
         let dit_w = dit::import(&dit_dir, &dit_cfg).expect("import DiT");
         let gpu = Gpu::new_cpu(dit::PIPELINES);
         let mut state = denoise::ChunkState::default();
-        denoise::denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, num_inference_steps, 5678)
+        denoise::denoise_chunk(&gpu, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, num_inference_steps, 5678, &mut progress)
     };
     let latent_length = condition_encoder::latent_length(&cond_cfg, num_frames);
     assert_eq!(latents.len(), DitConfig::real().in_channels as usize * latent_length);
