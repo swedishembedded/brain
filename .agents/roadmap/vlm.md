@@ -77,12 +77,81 @@ the output file is actually non-empty) rather than blocking the quickstart
 on it - the real bug is open, tracked, and (per the investigation above)
 outside this codebase's ability to fix without a driver update.
 
-## Moondream 3 - not yet done
+## Moondream 3 - port completion
 
-- [ ] A capability manifest / `brain moondream3 <verb>` action surface
-- [ ] A CLI reference path
-- [ ] A servable end-to-end pipeline (vision encoder → decoder, wired together)
+The earlier note here ("a capability manifest, a CLI path, a servable
+pipeline") described the symptom, not the work. `caps.rs` was never the
+blocker; the pieces a `caps.rs` would have to call did not exist.
 
-Moondream 3's decoder is gradient-checked and its weights import correctly,
-but it isn't reachable from any user-facing surface yet - it exists only in
-tests.
+### Done
+
+- [x] **The composite can be resident at all.** `SiglipEncoder`, `Connector`,
+      `MoondreamBlock`, `MoeFfn` and `MoondreamDecoder` each held a `&'g Gpu`,
+      and a struct cannot own both a device and something borrowing it - so
+      `MoondreamModel` stored host `Vec<f32>` weights and REBUILT the ViT, the
+      connector and all 24 blocks inside every `forward`. At the preview config
+      that re-uploads ~33 GB per request. All five now own their
+      `DeviceBuffer`s and take `&Gpu` as an argument, the shape
+      `sam1::SamEncoder`/`sam2::Sam2` already use and the reason THEY can be
+      resident. Pinned by `a_second_forward_reuses_the_built_stack_and_agrees`.
+- [x] **A production checkpoint loader.** `import::load` streams the shards
+      through `checkpoint::WeightReader`, applies the name maps, splits the
+      stacked MoE experts, and reports TWO-WAY coverage (refuses on an unmapped
+      tensor AND on a missing required key). The only loader before this lived
+      in a `#[cfg(test)]` module, so nothing user-facing could load the model.
+      `brain-checkpoint` moved from a dev-dependency to a real one.
+- [x] **Config from the checkpoint's own `config.json`**
+      (`MoondreamConfig::from_json`/`from_dir`), which then REFUSES anything
+      that is not the preview architecture, naming the field that differs.
+- [x] **Greedy `generate`.** Exact despite the fixed-`seq_len` graph, because
+      the mask is `(i<P && j<P) || (j<=i)` - causal past the image prefix, so
+      padding cannot reach the row being read. `O(T²)` per token; no KV cache.
+
+### Remaining, and what it is actually blocked on
+
+**Memory. The model does not fit anything today**, and that is the reason the
+serving surface is not worth writing yet rather than an independent task:
+
+| | fp32, per-block scratch (today) | int8 + shared scratch |
+|---|---|---|
+| weights | 32.8 GiB | 8.2 GiB |
+| activation scratch | 10.3 GiB | 0.6 GiB |
+| **total** | **43.1 GiB** | **8.8 GiB** |
+
+- [ ] **int8 expert weights** (32.8 -> 8.2 GiB). Every piece exists: pack with
+      `model::int8::quantize_weight`, dispatch `moe_linear_gated_i8`, quantize
+      the shared activation once per layer with `model::int8::quant_rows_steps`,
+      and accumulate with `scale_add`. `model::moe::expert_fwd_i8` is the worked
+      example and is ALMOST reusable - it composes gate/up -> `silu_mul` ->
+      down, where Moondream needs w_h/w_g -> `geglu_shift` (`gelu(h)·(g+1)`) ->
+      w_down. So this is an `MoeFfn8` beside the existing `MoeFfn`, not a
+      change to it, plus an int8 branch in `MoondreamBlock::new` and
+      quantization in `import::load`.
+- [ ] **Share the inference scratch across blocks** (10.3 -> 0.6 GiB, 16.7x).
+      Each block currently owns its full scratch set because the forward IS the
+      backprop cache. 58% of it is `scores`+`probs` (`n_heads·t²` twice = 256
+      MiB per block at t=1024). For inference nothing reads them again, so one
+      shared set plus a per-block `out` suffices. Must be an inference-only
+      path - sharing it under the existing backward would have every block
+      differentiate against the last block's activations.
+- [ ] **Pixel-space overlap multi-crop.** `preprocess.rs` implements the
+      feature-space half (reconstruct -> adaptive-pool -> global‖local concat)
+      and its own doc says the pixel-space `overlap_crop_image` is deferred
+      because "brain still lacks a JPEG/PNG decoder" - that comment is STALE,
+      `crates/imaging` has codecs now and `capability::blob::decode_image`
+      hands over raw HWC f32 anyway. `imaging::tiling::moondream_select_tiling`
+      already holds this model's tile-count policy.
+- [ ] **The serving contract**, once the above make it runnable: `caps.rs`
+      (one `caption` action, streaming, real `prompt_tokens`/
+      `completion_tokens`/`finish_reason`), `crates/cli/src/
+      resident_moondream3.rs`, a `catalog.rs` entry, D-Bus, and
+      `examples/vision/moondream3_caption.py`. The `crates/arch` row also still
+      lacks `default_ref` (`moondream/moondream3-preview`) and `weights_env`.
+- [ ] A KV-cached decode path, to make `generate` `O(1)` per token rather than
+      re-running 24 layers over a 730-row image prefix per token.
+
+**None of this is verifiable at real scale on this box** (30 GiB RAM, one
+integrated GPU, no checkpoint present). Gate it with tiny-config end-to-end
+tests through the PRODUCTION path - `import::load`, not a test-local loader -
+and leave the real-weight tests skip-if-absent, the arrangement
+`crates/deepseek2ocr` uses.

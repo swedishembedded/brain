@@ -458,11 +458,16 @@ fast and scalable kernel - not a naive one.
     decoder; one `caption` action (per-token Progress) over `brain fastvlm caption` and
     D-Bus (stateless resident). fp32/int8 decoder precision; training loop
     exists (`train_smoke.rs`) but has no CLI verb. **Moondream 3**
-    (`crates/moondream3`) - SigLIP ViT + MoE decoder, gradient-checked and
-    import-covered but **forward-only and unserved** (no caps surface, no CLI
-    reference; reachable only from tests - parked). Both documented on
-    `docs/models/vlm.md`; Moondream 3's remaining work is tracked in
-    `.agents/roadmap/vlm.md`.
+    (`crates/moondream3`) - SigLIP ViT + MoE decoder, gradient-checked,
+    import-covered, and now with a resident-capable composite (all five types
+    own their device buffers rather than borrowing a `Gpu`), a production
+    `import::load` with two-way coverage, config-from-`config.json`, and greedy
+    `generate`. Still **unserved**, and the blocker is MEMORY, not a missing
+    `caps.rs`: at the preview config it is 32.8 GiB of fp32 weights plus 10.3
+    GiB of per-block activation scratch. int8 experts + a shared inference
+    scratch set take that to ~8.8 GiB and are what the serving surface is
+    waiting on. Both documented on `docs/models/vlm.md`; the full plan, with
+    the specific APIs each step needs, is `.agents/roadmap/vlm.md`.
 
 13c-bis. **FastVLM-0.5B and Moondream 3** (`crates/fastvlm`, `crates/moondream3`) -
     the other two vision-language architectures alongside Qwen3-VL above; all
