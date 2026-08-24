@@ -125,34 +125,76 @@ const FLASH_IDS: block::FlashIds = block::FlashIds {
 fn bidir_ids() -> BidirIds {
     BidirIds { scores: ATTN_SCORES_BIDIR, softmax: ATTN_SOFTMAX_BIDIR, apply: ATTN_APPLY_BIDIR, dscores: ATTN_BWD_DSCORES_BIDIR, dv: ATTN_BWD_DV_BIDIR, dq: ATTN_BWD_DQ_BIDIR, dk: ATTN_BWD_DK_BIDIR }
 }
-/// Every field but `silu_mul`/`silu_da`/`silu_db` is unread here -
-/// `swiglu_fwd` only ever touches `k.silu_mul` - so the rest are dummy
-/// indices, never dispatched by this module.
+/// `swiglu_fwd` only ever touches `k.silu_mul`, so every RMSNorm/RoPE/GQA slot
+/// is [`block::UNREGISTERED`] - the sentinel, never `0`. Index `0` here is
+/// `conv1d`, a kernel this module really does dispatch, so a slot holding it
+/// would misroute rather than fail (see `block::UNREGISTERED`'s own doc for
+/// why that is silent on `backend-cpu`).
 fn kernel_ids() -> KernelIds {
-    KernelIds { rmsnorm: 0, rms_inv: 0, rmsnorm_dx: 0, rmsnorm_dw: 0, rope: 0, rope_bwd: 0, gqa_scores: 0, gqa_apply: 0, attn_softmax: 0, gqa_dscores: 0, gqa_dv: 0, gqa_dq: 0, gqa_dk: 0, silu_mul: SILU_MUL, silu_da: SILU_BWD_DA, silu_db: SILU_BWD_DB }
+    KernelIds {
+        rmsnorm: block::UNREGISTERED,
+        rms_inv: block::UNREGISTERED,
+        rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dw: block::UNREGISTERED,
+        rope: block::UNREGISTERED,
+        rope_bwd: block::UNREGISTERED,
+        gqa_scores: block::UNREGISTERED,
+        gqa_apply: block::UNREGISTERED,
+        attn_softmax: block::UNREGISTERED,
+        gqa_dscores: block::UNREGISTERED,
+        gqa_dv: block::UNREGISTERED,
+        gqa_dq: block::UNREGISTERED,
+        gqa_dk: block::UNREGISTERED,
+        silu_mul: SILU_MUL,
+        silu_da: SILU_BWD_DA,
+        silu_db: SILU_BWD_DB,
+    }
 }
+/// The forward-GEMM pipeline indices one module of this crate registered.
+///
+/// A struct rather than three arguments because [`linear_step`] is shared with
+/// [`crate::dit_train`], whose PIPELINES list is its own and numbers these
+/// kernels differently: the SELECTION RULE has one home, the indices stay with
+/// whoever registered them.
+#[derive(Clone, Copy)]
+pub(crate) struct GemmIds {
+    /// `matmul.wgsl` - the portable reference (`@opt 2`, one thread per output
+    /// element, serial inner reduction). The only tier a device without
+    /// workgroup reductions can run.
+    pub reference: usize,
+    /// `matmul_reg3.wgsl` - 128x128 register-tiled, `@workgroup_size(256)`.
+    pub tiled: usize,
+    /// `matmul_gemv.wgsl` where registered; `None` where it is not. Requires
+    /// `m <= 32`, which [`model::block::gemm_variant`] enforces.
+    pub gemv: Option<usize>,
+}
+
 /// `out = x @ W^T` for `x: [m,k]`, `w: [n,k]` - through
 /// `model::block::gemm_variant`, the SAME shared GEMM selection rule
 /// `ltxv::block::linear` and `wan::block::linear` use.
 ///
-/// This module previously hardcoded the naive `MATMUL` at all six of its
-/// dispatch sites. That is the reference kernel (`@opt 2`, "one thread per
-/// output element, serial inner reduction"); the register-tiled
-/// `matmul_reg3` (`@opt 5`) is what every other transformer in this
-/// workspace dispatches. On a real P40 the naive kernel put the DiT at a
-/// fraction of a percent of the card's fp32 peak.
+/// Both this module and [`crate::dit_train`] used to hardcode the naive
+/// `matmul` at every one of their dispatch sites. That is the reference kernel
+/// (`@opt 2`); the register-tiled `matmul_reg3` (`@opt 5`) is what every other
+/// transformer in this workspace dispatches. On a real P40 the naive kernel put
+/// the DiT at a fraction of a percent of the card's fp32 peak.
 ///
 /// The 256-thread tiled/GEMV kernels are gated on the device's QUERIED
 /// `workgroup_reductions` capability, so the CPU JIT (which reports it
 /// false) keeps the reference kernel and stays correct.
-fn linear_step(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> gpu_core::Step {
+pub(crate) fn linear_step(gpu: &Gpu, ids: GemmIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> gpu_core::Step {
     let variant = if gpu.caps().workgroup_reductions {
-        block::GemmVariants::Fast { gemv: Some(MATMUL_GEMV), tiled: MATMUL_REG3 }
+        block::GemmVariants::Fast { gemv: ids.gemv, tiled: ids.tiled }
     } else {
-        block::GemmVariants::Reference(MATMUL)
+        block::GemmVariants::Reference(ids.reference)
     };
     let (kind, threads) = block::gemm_variant(variant, m, n);
     gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+}
+
+/// This module's own indices for [`linear_step`].
+fn gemm_ids() -> GemmIds {
+    GemmIds { reference: MATMUL, tiled: MATMUL_REG3, gemv: Some(MATMUL_GEMV) }
 }
 
 /// Whether this block's self-attention takes the fused flash path.
@@ -430,9 +472,9 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
     gpu.submit(
         &[],
         &[
-            linear_step(gpu, &xn1, &db.wq, &q_tmp, rows as u32, inner as u32, inner as u32),
-            linear_step(gpu, &xn1, &db.wk, &k_tmp, rows as u32, inner as u32, inner as u32),
-            linear_step(gpu, &xn1, &db.wv, &v_tmp, rows as u32, inner as u32, inner as u32),
+            linear_step(gpu, gemm_ids(), &xn1, &db.wq, &q_tmp, rows as u32, inner as u32, inner as u32),
+            linear_step(gpu, gemm_ids(), &xn1, &db.wk, &k_tmp, rows as u32, inner as u32, inner as u32),
+            linear_step(gpu, gemm_ids(), &xn1, &db.wv, &v_tmp, rows as u32, inner as u32, inner as u32),
         ],
     );
 
@@ -478,7 +520,7 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
 
     let proj = gpu.storage((rows * inner) as u64);
     let xmid = gpu.storage((rows * inner) as u64);
-    gpu.submit(&[], &[linear_step(gpu, &ctx, &db.wo, &proj, rows as u32, inner as u32, inner as u32)]);
+    gpu.submit(&[], &[linear_step(gpu, gemm_ids(), &ctx, &db.wo, &proj, rows as u32, inner as u32, inner as u32)]);
     gpu.submit(&[], &[gpu.step(ADD2, &[x, &proj, &xmid], &[(rows * inner) as u32], (rows * inner) as u32)]);
 
     let xn2 = gpu.storage((rows * inner) as u64);
@@ -511,8 +553,8 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
     gpu.submit(
         &[],
         &[
-            linear_step(gpu, &xn2, &db.ff_in_up_w, &up_b, rows as u32, inner as u32, ff_inner as u32),
-            linear_step(gpu, &xn2, &db.ff_in_gate_w, &gate_b, rows as u32, inner as u32, ff_inner as u32),
+            linear_step(gpu, gemm_ids(), &xn2, &db.ff_in_up_w, &up_b, rows as u32, inner as u32, ff_inner as u32),
+            linear_step(gpu, gemm_ids(), &xn2, &db.ff_in_gate_w, &gate_b, rows as u32, inner as u32, ff_inner as u32),
             gpu.step(BIAS_ADD, &[&up_b, &db.ff_in_up_b], &[rows as u32, ff_inner as u32], (rows * ff_inner) as u32),
             gpu.step(BIAS_ADD, &[&gate_b, &db.ff_in_gate_b], &[rows as u32, ff_inner as u32], (rows * ff_inner) as u32),
         ],
@@ -525,7 +567,7 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
     gpu.submit(
         &[],
         &[
-            linear_step(gpu, &act, &db.ff_out_w, &ff_out, rows as u32, ff_inner as u32, inner as u32),
+            linear_step(gpu, gemm_ids(), &act, &db.ff_out_w, &ff_out, rows as u32, ff_inner as u32, inner as u32),
             gpu.step(BIAS_ADD, &[&ff_out, &db.ff_out_b], &[rows as u32, inner as u32], (rows * inner) as u32),
         ],
     );
@@ -776,12 +818,97 @@ pub fn forward(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, latents: &[f32], cond
     forward_resident(gpu, cfg, w, &res, latents, condition, timestep, length)
 }
 
+/// The shared gate on `model::block::UNREGISTERED`: an unused [`KernelIds`]
+/// slot must not be able to reach a kernel this crate really dispatches.
+///
+/// Lives here rather than in either test module because BOTH `dit` (the served
+/// forward) and [`crate::dit_train`] (the trainer) fill the same struct from
+/// two different pipeline lists, and a gate that exists in only one of them is
+/// a gate the other file's next editor will not know about.
+///
+/// The check is dispatch-linked on purpose. A purely static "every unused slot
+/// equals the sentinel" assertion cannot say whether getting it wrong would
+/// have mattered; this one names the kernel a wrong slot would actually have
+/// run, because it runs the real pass and reads the device's own per-kernel
+/// dispatch counters back.
+#[cfg(test)]
+pub(crate) mod slot_gate {
+    use gpu_core::Gpu;
+    use model::block::KernelIds;
+    use std::collections::BTreeSet;
+
+    /// The kernel NAMES `pass` dispatched on `gpu`.
+    pub(crate) fn dispatched(gpu: &Gpu, pass: impl FnOnce()) -> BTreeSet<String> {
+        // Arms the tally as well as clearing it - it is off by default.
+        gpu.reset_ops_counters();
+        pass();
+        let r = gpu.ops_counters();
+        r.by_kernel.keys().chain(r.uncovered.keys()).cloned().collect()
+    }
+
+    /// Assert that no slot outside `used` names a kernel in `dispatched`.
+    pub(crate) fn assert_unused_slots_unreachable(ids: &KernelIds, used: &[&str], pipelines: &[(&str, &str)], dispatched: &BTreeSet<String>) {
+        assert!(
+            pipelines.get(model::block::UNREGISTERED).is_none(),
+            "the UNREGISTERED sentinel names a kernel in a {}-entry pipeline list, so a slot \
+             holding it would dispatch a real kernel instead of failing",
+            pipelines.len()
+        );
+        assert!(!dispatched.is_empty(), "the pass under test dispatched nothing, so this gate would pass vacuously");
+        for (slot, idx) in ids.slots() {
+            if used.contains(&slot) {
+                continue;
+            }
+            // Out of range (the sentinel) is the pass condition: such a slot
+            // cannot name any kernel at all, so `Gpu::step` panics on it
+            // rather than running one.
+            let Some((name, _)) = pipelines.get(idx) else { continue };
+            assert!(
+                !dispatched.contains(*name),
+                "unused KernelIds slot `{slot}` holds pipeline index {idx} = `{name}`, which this \
+                 pass really dispatches. A builder reading that slot would run `{name}` against \
+                 another kernel\'s bindings and uniform - on `backend-cpu` an out-of-bounds read, \
+                 not a panic. Unused slots must be `model::block::UNREGISTERED`."
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::DitConfig;
     use crate::dit_train;
     use data::rng::Lcg;
+
+    /// No `KernelIds` slot this module leaves unused can reach a kernel the
+    /// served forward really dispatches (`model::block::UNREGISTERED`).
+    ///
+    /// This is the gate on defect class "index 0 as an unregistered marker".
+    /// `PIPELINES[0]` here is `conv1d`, which `forward` dispatches twice per
+    /// call, so filling the thirteen RMSNorm/RoPE/GQA slots with `0` - as this
+    /// file did - put a live kernel index in every one of them. Mutation-check
+    /// it by putting any of them back to `0`: this test goes red naming
+    /// `conv1d`.
+    #[test]
+    fn no_unused_kernel_slot_can_reach_a_dispatched_kernel() {
+        let cfg = DitConfig::tiny();
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let w = dit_train::random_weights(&cfg, 0xD17);
+        let length = 3usize;
+        let mut r = Lcg::new(0xD17 ^ 0x5107);
+        let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+        let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
+
+        let seen = slot_gate::dispatched(&gpu, || {
+            forward(&gpu, &cfg, &w, &latents, &condition, 0.5, length);
+        });
+        // `swiglu_fwd` is the ONLY `model::block` builder this module hands a
+        // `KernelIds` to, and it reads `silu_mul` alone. The two `silu_bwd_*`
+        // slots hold their own kernels\' indices (registered, never dispatched
+        // here), which the gate covers rather than exempts.
+        slot_gate::assert_unused_slots_unreachable(&kernel_ids(), &["silu_mul"], PIPELINES, &seen);
+    }
 
     /// A [`Resident`] REUSED across several timesteps and both CFG branches
     /// must produce exactly what a fresh per-call upload produces.
@@ -859,7 +986,7 @@ mod tests {
             gpu.submit(
                 &[],
                 &[
-                    linear_step(&gpu, &xb, &wb, &fused, rows as u32, inner as u32, (2 * ff_inner) as u32),
+                    linear_step(&gpu, gemm_ids(), &xb, &wb, &fused, rows as u32, inner as u32, (2 * ff_inner) as u32),
                     gpu.step(BIAS_ADD, &[&fused, &bb], &[rows as u32, (2 * ff_inner) as u32], (rows * 2 * ff_inner) as u32),
                 ],
             );
@@ -883,8 +1010,8 @@ mod tests {
             gpu.submit(
                 &[],
                 &[
-                    linear_step(&gpu, &xb, &up_w, &up, rows as u32, inner as u32, ff_inner as u32),
-                    linear_step(&gpu, &xb, &gate_w, &gate, rows as u32, inner as u32, ff_inner as u32),
+                    linear_step(&gpu, gemm_ids(), &xb, &up_w, &up, rows as u32, inner as u32, ff_inner as u32),
+                    linear_step(&gpu, gemm_ids(), &xb, &gate_w, &gate, rows as u32, inner as u32, ff_inner as u32),
                     gpu.step(BIAS_ADD, &[&up, &up_bias], &[rows as u32, ff_inner as u32], (rows * ff_inner) as u32),
                     gpu.step(BIAS_ADD, &[&gate, &gate_bias], &[rows as u32, ff_inner as u32], (rows * ff_inner) as u32),
                 ],

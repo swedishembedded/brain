@@ -36,6 +36,11 @@ check!(vqgan_backward, gradcheck::check_vqgan, "check_vqgan");
 check!(clip_backward, gradcheck::check_clip, "check_clip");
 check!(vocoder_backward, gradcheck::check_vocoder, "check_vocoder");
 check!(dit_backward, gradcheck::check_dit, "check_dit");
+// `check_dit` builds its trainer on `backend-cpu` unconditionally, so it can
+// never reach the capability-gated fast GEMM tier or a real card. The `_tiled`
+// sibling runs the same backward on the pooled test device at dims past
+// `block::pick_gemm`'s crossover - see its own doc.
+check!(dit_tiled_backward, gradcheck::minimaxmusic3::check_dit_tiled, "check_dit_tiled");
 
 // ---- phase 4c: the four newer models ----
 //

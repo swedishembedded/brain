@@ -236,26 +236,30 @@ fn ids() -> KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: RMS_INV,
         silu_mul: SILU_MUL,
-        // unused on the forward decode path:
-        rmsnorm_dx: RMSNORM,
-        rmsnorm_dw: RMSNORM,
-        rope: ROPE_PAGED,
-        rope_bwd: ROPE_PAGED,
-        // This engine never calls `block::gqa_fwd`: prefill and decode share
-        // the PAGED attention kernels (`paged_decode_*`), so the batched causal
-        // trio was registered — three pipelines compiled at every Engine
-        // build — and never dispatched. Placeholders, same convention as the
-        // backward ids below, so nothing reads a live index for a path that
-        // does not exist.
-        gqa_scores: 0,
-        gqa_apply: 0,
-        attn_softmax: 0,
-        gqa_dscores: 0,
-        gqa_dv: 0,
-        gqa_dq: 0,
-        gqa_dk: 0,
-        silu_da: SILU_MUL,
-        silu_db: SILU_MUL,
+        // Every slot below is UNREGISTERED, not a stand-in index. This engine
+        // never calls `block::gqa_fwd` (prefill and decode share the PAGED
+        // attention kernels, `paged_decode_*`), never runs a backward, and
+        // rotates through `rope_paged` rather than `block::rope_fwd`.
+        //
+        // These used to hold live indices for OTHER kernels - `RMSNORM` in the
+        // RMSNorm-backward slots, `ROPE_PAGED` in the RoPE slots, `0` in the
+        // GQA ones - which reads as "harmless placeholder" and is not: a
+        // builder reaching one dispatches a real kernel against another
+        // kernel's bindings and uniform. `UNREGISTERED` is out of range of
+        // PIPELINES, so the same mistake is a panic instead.
+        rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dw: block::UNREGISTERED,
+        rope: block::UNREGISTERED,
+        rope_bwd: block::UNREGISTERED,
+        gqa_scores: block::UNREGISTERED,
+        gqa_apply: block::UNREGISTERED,
+        attn_softmax: block::UNREGISTERED,
+        gqa_dscores: block::UNREGISTERED,
+        gqa_dv: block::UNREGISTERED,
+        gqa_dq: block::UNREGISTERED,
+        gqa_dk: block::UNREGISTERED,
+        silu_da: block::UNREGISTERED,
+        silu_db: block::UNREGISTERED,
     }
 }
 

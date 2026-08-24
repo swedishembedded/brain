@@ -912,24 +912,29 @@ fn clone_buf(c: &Codec, x: &DeviceBuffer, n: u32) -> DeviceBuffer {
 }
 
 /// Kernel-id map for the shared `model::block` builders (only forward ids used).
+///
+/// Every backward slot - and the RMSNorm
+/// gain-grad trio - is [`block::UNREGISTERED`], never `0`: index 0 here is
+/// `embed`, a kernel this model really does dispatch, so a `0` placeholder is a
+/// misroute rather than a fail-fast (see `model::block::UNREGISTERED`).
 fn ids() -> KernelIds {
     KernelIds {
         rmsnorm: RMSNORM,
-        rms_inv: 0,
-        rmsnorm_dx: 0,
-        rmsnorm_dw: 0,
+        rms_inv: block::UNREGISTERED,
+        rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dw: block::UNREGISTERED,
         rope: ROPE,
-        rope_bwd: 0,
+        rope_bwd: block::UNREGISTERED,
         gqa_scores: GQA_SCORES,
         gqa_apply: GQA_APPLY,
         attn_softmax: ATTN_SOFTMAX,
-        gqa_dscores: 0,
-        gqa_dv: 0,
-        gqa_dq: 0,
-        gqa_dk: 0,
+        gqa_dscores: block::UNREGISTERED,
+        gqa_dv: block::UNREGISTERED,
+        gqa_dq: block::UNREGISTERED,
+        gqa_dk: block::UNREGISTERED,
         silu_mul: SILU_MUL,
-        silu_da: 0,
-        silu_db: 0,
+        silu_da: block::UNREGISTERED,
+        silu_db: block::UNREGISTERED,
     }
 }
 

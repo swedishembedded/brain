@@ -82,6 +82,8 @@
 //!   mm3_bench vocoder [length] [reps]   one `vocoder::forward`, VocoderConfig::real()
 //!   mm3_bench depth   [frames] [reps]   the RVQ depth decoder's per-frame AR loop (host b=1/b=2 + device)
 //!   mm3_bench gemm    [reps]            A/B the GEMM kernels at the DiT's shapes, correctness AND speed
+//!   mm3_bench gemm-bwd [reps]           A/B the BACKWARD GEMM kernels at `dit_train`'s shapes, same
+//!   mm3_bench dit-train [layers] [length] [reps]  one `dit_train` training step (fwd+bwd), real dims
 //!   mm3_bench all     [reps]            all three at real chunk dims
 //!
 //! `length` is in LATENT frames. A full denoise chunk is `CHUNK_FRAMES = 200`
@@ -437,6 +439,275 @@ fn gemm_candidates(m: u32, n: u32) -> Vec<(&'static str, u32)> {
 }
 
 // ---------------------------------------------------------------------------
+// dit training step (forward + backward)
+// ---------------------------------------------------------------------------
+
+/// One `dit_train::Trainer` forward + backward at `DitConfig::real()` dims, on
+/// `layers` blocks - the WHOLE-PASS number the per-kernel table in
+/// [`gemm_bwd_mode`] can only rank against.
+///
+/// Fewer than 36 layers by default and that is the point: at real dims one
+/// block costs ~0.5 GB of weights plus its gradient buffers plus ~0.2 GB of
+/// cached activations, so the full stack does not fit one 24 GB card and no
+/// honest 36-layer number can be produced on this hardware. The per-block cost
+/// is what extrapolates; the layer count only has to be big enough to be a real
+/// block stack rather than a single dispatch chain. `length` is in LATENT
+/// frames, same as every other mode here.
+///
+/// Wall clock, best-of-`reps`, warm-up excluded - `loss()`/`backward()` both
+/// read buffers back to the host, so they are already synchronous and the
+/// bracket needs no extra `poll_wait`.
+fn dit_train_mode(device: Option<&str>, layers: u32, length: usize, reps: usize) {
+    let mut cfg = DitConfig::real();
+    cfg.num_layers = layers;
+    let w = dit_train::random_weights(&cfg, 0xD17);
+    let mut r = data::rng::Lcg::new(0xD17 ^ 0x7A11);
+    let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+    let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
+    let target = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+
+    let gpu = Gpu::open(device, dit_train::PIPELINES);
+    let _ = device_header(&gpu);
+    println!(
+        "dit_train: {} layers of DitConfig::real() ({} inner, {} ff_inner), {length} latents -> {} rows, {}",
+        layers,
+        cfg.inner_dim(),
+        cfg.ff_inner_dim,
+        length + 1,
+        Source::Random.describe()
+    );
+
+    let t = dit_train::Trainer::new_on(gpu, cfg, &w, latents, condition, 0.5, length, target);
+    let step = || {
+        t.zero_grads();
+        let _ = t.loss();
+        t.backward();
+    };
+    step(); // warm-up: never enters the statistics
+    let mut best = f64::INFINITY;
+    for _ in 0..reps.max(1) {
+        let t0 = Instant::now();
+        step();
+        best = best.min(t0.elapsed().as_secs_f64());
+    }
+    println!("\ntraining step (forward + backward), best of {reps}: {:.1} ms   ({:.1} ms per layer)", best * 1e3, best * 1e3 / f64::from(layers.max(1)));
+}
+
+// ---------------------------------------------------------------------------
+// backward GEMM A/B
+// ---------------------------------------------------------------------------
+
+/// The kernel set `gemm_bwd_mode` opens a device with.
+const BWD_KERNELS: &[(&str, &str)] = &[
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw", kernels::MATMUL_DW),
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+    ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
+    ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("matmul_reg3_splitk", kernels::MATMUL_REG3_SPLITK),
+];
+
+/// A/B the BACKWARD GEMM kernels at `dit_train::block_bwd`'s own shapes, for
+/// correctness AND speed - the backward twin of [`gemm_mode`], which covers
+/// only the forward.
+///
+/// Two families, each with a naive `@opt 2` reference and a register-tiled
+/// `@opt 5` sibling, plus the split-K dW pair. The split-K row is swept over
+/// slice counts rather than assumed: whether splitting the contraction pays is
+/// a function of how many tiles the un-split grid already launches, and at this
+/// model's dW shapes (`n`, `k` both in the thousands) that grid is large, which
+/// is the opposite of the wide-shallow conv shape `matmul_dw_reg_splitk` was
+/// written for. Sweeping is how the threshold gets read off instead of guessed.
+///
+/// Every timed row is a `best_of` (min of `reps`) with its own warm-up submit,
+/// and `max|delta|` against an f64 host oracle is printed first, at a shape
+/// small enough to compute one: a faster kernel that disagrees is not a faster
+/// kernel.
+fn gemm_bwd_mode(device: Option<&str>, reps: usize) {
+    let gpu = Gpu::open(device, BWD_KERNELS);
+    let roofs = device_header(&gpu);
+    if !gpu.caps().workgroup_reductions {
+        println!(
+            "(this device reports workgroup_reductions=false; on backend-cpu every *_reg kernel \
+             routes to the same native AVX2 backward GEMM as its naive sibling, so the rows below \
+             measure ONE implementation twice)"
+        );
+    }
+
+    oracle_bwd(&gpu);
+
+    let cfg = DitConfig::real();
+    let (inner, ff) = (cfg.inner_dim(), cfg.ff_inner_dim);
+    let rows = REAL_CHUNK_LATENTS as u32 + 1;
+
+    // (m, k, n, site) in matmul_dx/matmul_dw Params order: the forward was
+    // `[m,k] x [n,k]^T`, so dX is `[m,k]` and dW is `[n,k]`.
+    let sites = [
+        (rows, inner, inner, "attn to_q/k/v/out  (x4/block)"),
+        (rows, inner, 2 * ff, "ff_in              (x1/block)"),
+        (rows, ff, inner, "ff_out             (x1/block)"),
+    ];
+
+    println!("\n--- dX: dX[m,k] = dY[m,n] . W[n,k] ---");
+    println!("{:<48} {:>10} {:>12} {:>9}  kernel", "shape [m, k, n]  (site)", "ms", "GFLOP/s", "%roof");
+    for (m, k, n, site) in sites {
+        let dy = gpu.storage(u64::from(m) * u64::from(n));
+        let w = gpu.storage(u64::from(n) * u64::from(k));
+        let dx = gpu.storage(u64::from(m) * u64::from(k));
+        let flops = 2.0 * f64::from(m) * f64::from(k) * f64::from(n);
+        for (name, threads) in [("matmul_dx", m * k), ("matmul_dx_reg", m.div_ceil(128) * k.div_ceil(128) * 256)] {
+            let Some(ki) = gpu.kernel_index(name) else { continue };
+            let st = [gpu.step(ki, &[&dy, &w, &dx], &[m, k, n, 0], threads)];
+            row(&gpu, roofs, m, k, n, site, name, &st, flops, reps);
+        }
+    }
+
+    println!("\n--- dW: dW[n,k] += dY[m,n] . X[m,k]   (contraction over m = {rows}) ---");
+    println!("{:<48} {:>10} {:>12} {:>9}  kernel", "shape [m, k, n]  (site)", "ms", "GFLOP/s", "%roof");
+    for (m, k, n, site) in sites {
+        let dy = gpu.storage(u64::from(m) * u64::from(n));
+        let x = gpu.storage(u64::from(m) * u64::from(k));
+        let dw = gpu.storage(u64::from(n) * u64::from(k));
+        let flops = 2.0 * f64::from(m) * f64::from(k) * f64::from(n);
+        let tiles = n.div_ceil(128) * k.div_ceil(128);
+        println!("  (un-split tile grid: {tiles} workgroups)");
+        for (name, threads) in [("matmul_dw", n * k), ("matmul_dw_reg", tiles * 256)] {
+            let Some(ki) = gpu.kernel_index(name) else { continue };
+            let st = [gpu.step(ki, &[&dy, &x, &dw], &[m, k, n], threads)];
+            row(&gpu, roofs, m, k, n, site, name, &st, flops, reps);
+        }
+        // Split-K: `s` disjoint [n,k] partials, then one elementwise fold.
+        let (Some(ks), Some(kr)) = (gpu.kernel_index("matmul_dw_reg_splitk"), gpu.kernel_index("dw_splitk_reduce")) else {
+            continue;
+        };
+        for slices in [2u32, 4, 8] {
+            if slices > m.div_ceil(8) {
+                continue;
+            }
+            let rc = u64::from(n) * u64::from(k);
+            let part = gpu.storage(rc * u64::from(slices));
+            let st = [
+                gpu.step(ks, &[&dy, &x, &part], &[m, k, n, slices], slices * tiles * 256),
+                gpu.step(kr, &[&part, &dw], &[n * k, slices, 1], (n * k).div_ceil(64) * 64),
+            ];
+            row(&gpu, roofs, m, k, n, site, &format!("matmul_dw_reg_splitk s={slices}"), &st, flops, reps);
+        }
+    }
+
+    // The training step's own FORWARD GEMMs, against the split-K sibling.
+    // `matmul_reg3_splitk` is a FORWARD kernel (`out = x . W^T`), so it is not
+    // a candidate for either family above - it is measured here, where it could
+    // actually be dispatched, rather than left as an untested "maybe".
+    println!("\n--- forward (training step's own): out[m,n] = x[m,k] . W[n,k]^T ---");
+    println!("{:<48} {:>10} {:>12} {:>9}  kernel", "shape [m, k, n]  (site)", "ms", "GFLOP/s", "%roof");
+    for (m, k, n, site) in [
+        (rows, inner, inner, "attn to_q/k/v/out  (x4/block)"),
+        (rows, inner, 2 * ff, "ff_in              (x1/block)"),
+        (rows, ff, inner, "ff_out             (x1/block)"),
+    ] {
+        let x = gpu.storage(u64::from(m) * u64::from(k));
+        let w = gpu.storage(u64::from(n) * u64::from(k));
+        let out = gpu.storage(u64::from(m) * u64::from(n));
+        let flops = 2.0 * f64::from(m) * f64::from(k) * f64::from(n);
+        let tiles = m.div_ceil(128) * n.div_ceil(128);
+        println!("  (un-split tile grid: {tiles} workgroups)");
+        if let Some(ki) = gpu.kernel_index("matmul_reg3") {
+            let st = [gpu.step(ki, &[&x, &w, &out], &[m, k, n], tiles * 256)];
+            row(&gpu, roofs, m, k, n, site, "matmul_reg3", &st, flops, reps);
+        }
+        let (Some(ks), Some(kr)) = (gpu.kernel_index("matmul_reg3_splitk"), gpu.kernel_index("dw_splitk_reduce")) else {
+            continue;
+        };
+        for slices in [2u32, 4, 8] {
+            if slices > k.div_ceil(8) {
+                continue;
+            }
+            let part = gpu.storage(u64::from(m) * u64::from(n) * u64::from(slices));
+            let st = [
+                gpu.step(ks, &[&x, &w, &part], &[m, k, n, slices], slices * tiles * 256),
+                // acc = 0: a forward GEMM owns its output and ASSIGNS.
+                gpu.step(kr, &[&part, &out], &[m * n, slices, 0], (m * n).div_ceil(64) * 64),
+            ];
+            row(&gpu, roofs, m, k, n, site, &format!("matmul_reg3_splitk s={slices}"), &st, flops, reps);
+        }
+    }
+}
+
+/// One timed A/B row.
+#[allow(clippy::too_many_arguments)]
+fn row(gpu: &Gpu, roofs: Option<Roofs>, m: u32, k: u32, n: u32, site: &str, name: &str, st: &[gpu_core::Step], flops: f64, reps: usize) {
+    let t = gpu_core::profile::best_of(gpu, st, reps);
+    let pct = roofs.map(|r| format!("{:.1}%", 100.0 * (flops / t) as f32 / (r.gflops * 1e9))).unwrap_or_else(|| "-".into());
+    println!("[{m:>4},{k:>6},{n:>6}]  {site:<28} {:>10.3} {:>12.1} {:>9}  {name}", t * 1e3, flops / t / 1e9, pct);
+}
+
+/// f64 host oracle for both backward families, at a shape small enough to
+/// compute one exactly. Asserts rather than prints - benchmarking a kernel that
+/// computes the wrong thing is worse than not benchmarking it.
+fn oracle_bwd(gpu: &Gpu) {
+    let (m, k, n) = (19u32, 67u32, 29u32);
+    let (mu, ku, nu) = (m as usize, k as usize, n as usize);
+    let mut r = data::rng::Lcg::new(11);
+    let dy = r.vec_scaled(mu * nu, 1.0);
+    let a = r.vec_scaled(nu * ku, 1.0); // W for dX
+    let b = r.vec_scaled(mu * ku, 1.0); // X for dW
+
+    let mut want_dx = vec![0.0f64; mu * ku];
+    for i in 0..mu {
+        for j in 0..ku {
+            want_dx[i * ku + j] = (0..nu).map(|t| f64::from(dy[i * nu + t]) * f64::from(a[t * ku + j])).sum();
+        }
+    }
+    let mut want_dw = vec![0.0f64; nu * ku];
+    for i in 0..nu {
+        for j in 0..ku {
+            want_dw[i * ku + j] = (0..mu).map(|t| f64::from(dy[t * nu + i]) * f64::from(b[t * ku + j])).sum();
+        }
+    }
+
+    let dyb = gpu.storage_init("dy", &dy);
+    let ab = gpu.storage_init("a", &a);
+    let bb = gpu.storage_init("b", &b);
+    let check = |name: &str, got: Vec<f32>, want: &[f64]| {
+        let err = got.iter().zip(want).map(|(g, w)| (f64::from(*g) - w).abs()).fold(0.0f64, f64::max);
+        println!("  oracle [{m},{k},{n}]  {name:<28} max|delta| {err:.3e}");
+        assert!(err < 1e-3, "{name} diverges from the f64 host oracle: {err:.3e}");
+    };
+
+    for (name, threads) in [("matmul_dx", m * k), ("matmul_dx_reg", m.div_ceil(128) * k.div_ceil(128) * 256)] {
+        let Some(ki) = gpu.kernel_index(name) else { continue };
+        let out = gpu.storage(u64::from(m) * u64::from(k));
+        gpu.submit(&[], &[gpu.step(ki, &[&dyb, &ab, &out], &[m, k, n, 0], threads)]);
+        gpu.poll_wait();
+        check(name, gpu.read(&out, mu * ku), &want_dx);
+    }
+    let tiles = n.div_ceil(128) * k.div_ceil(128);
+    for (name, threads) in [("matmul_dw", n * k), ("matmul_dw_reg", tiles * 256)] {
+        let Some(ki) = gpu.kernel_index(name) else { continue };
+        let out = gpu.storage(u64::from(n) * u64::from(k));
+        gpu.submit(&[], &[gpu.step(ki, &[&dyb, &bb, &out], &[m, k, n], threads)]);
+        gpu.poll_wait();
+        check(name, gpu.read(&out, nu * ku), &want_dw);
+    }
+    if let (Some(ks), Some(kr)) = (gpu.kernel_index("matmul_dw_reg_splitk"), gpu.kernel_index("dw_splitk_reduce")) {
+        let slices = 3u32;
+        let part = gpu.storage(u64::from(n) * u64::from(k) * u64::from(slices));
+        let out = gpu.storage(u64::from(n) * u64::from(k));
+        gpu.submit(
+            &[],
+            &[
+                gpu.step(ks, &[&dyb, &bb, &part], &[m, k, n, slices], slices * tiles * 256),
+                gpu.step(kr, &[&part, &out], &[n * k, slices, 1], (n * k).div_ceil(64) * 64),
+            ],
+        );
+        gpu.poll_wait();
+        check("matmul_dw_reg_splitk+fold", gpu.read(&out, nu * ku), &want_dw);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // depth decoder - HOST math
 // ---------------------------------------------------------------------------
 
@@ -780,6 +1051,8 @@ fn main() {
         // has to be big enough to average.
         Some("depth") => depth_mode(dev, num(1, 4), num(2, 3)),
         Some("gemm") => gemm_mode(dev, num(1, 5)),
+        Some("gemm-bwd") => gemm_bwd_mode(dev, num(1, 5)),
+        Some("dit-train") => dit_train_mode(dev, num(1, 2) as u32, num(2, REAL_CHUNK_LATENTS), num(3, 3)),
         Some("all") => {
             let reps = num(1, 3);
             dit_mode(dev, REAL_CHUNK_LATENTS, reps);
@@ -790,11 +1063,13 @@ fn main() {
             if let Some(o) = other {
                 eprintln!("unknown mode {o:?}");
             }
-            eprintln!("usage: mm3_bench [--device <cpu|gpu|gpu0|gpu1>] <dit|vocoder|depth|gemm|all> [args]");
+            eprintln!("usage: mm3_bench [--device <cpu|gpu|gpu0|gpu1>] <dit|vocoder|depth|gemm|gemm-bwd|dit-train|all> [args]");
             eprintln!("  dit     [length={REAL_CHUNK_LATENTS}] [reps=3]   one dit::forward_resident at DitConfig::real()");
             eprintln!("  vocoder [length={REAL_CHUNK_LATENTS}] [reps=3]   one vocoder::forward at VocoderConfig::real()");
             eprintln!("  depth   [frames=4] [reps=3]     the RVQ depth decoder's per-frame AR loop (HOST math)");
             eprintln!("  gemm    [reps=5]                A/B the GEMM kernels at the DiT's own shapes, correctness AND speed");
+            eprintln!("  gemm-bwd [reps=5]               A/B the BACKWARD GEMM kernels at dit_train's shapes, correctness AND speed");
+            eprintln!("  dit-train [layers=2] [length={REAL_CHUNK_LATENTS}] [reps=3]  one dit_train training step (fwd+bwd) at real dims");
             eprintln!("  all     [reps=3]");
             std::process::exit(2);
         }

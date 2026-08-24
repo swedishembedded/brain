@@ -56,6 +56,7 @@ fn decodes_a_full_denoise_chunk_without_exhausting_the_device() {
     // additive - which on a 24 GB card is the difference between working and
     // an out-of-memory, and is exactly how a two-chunk generation died while
     // every single-chunk test passed.
+    let mut first: Option<Vec<f32>> = None;
     for chunk in 0..2 {
         let t0 = std::time::Instant::now();
         let out = forward(&gpu, &cfg, &w, &latents, 1, REAL_CHUNK_LATENTS);
@@ -63,5 +64,17 @@ fn decodes_a_full_denoise_chunk_without_exhausting_the_device() {
         eprintln!("vocoder real chunk {}: {REAL_CHUNK_LATENTS} latents -> {} samples in {secs:.2}s", chunk + 1, out.len());
         assert_eq!(out.len(), expect, "expected {expect} samples (2 channels x {REAL_CHUNK_LATENTS} x {upsample})");
         assert!(out.iter().all(|v| v.is_finite()), "vocoder produced a non-finite sample at real chunk length");
+        // The same latents twice must give the same samples twice, to the bit.
+        // The forward is deterministic, so anything else means state survived
+        // between calls - which is a live risk now that the lowered
+        // convolutions share ONE reusable scratch buffer across the whole
+        // recorded tape (`audio::conv::ConvScratch`). A stale-scratch bug
+        // would show up here and nowhere else in this crate's suite, because
+        // every other vocoder test decodes 6 frames, well under one GEMM
+        // chunk.
+        match &first {
+            None => first = Some(out),
+            Some(prev) => assert_eq!(&out, prev, "the vocoder is not deterministic across two chunks on one device"),
+        }
     }
 }

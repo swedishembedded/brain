@@ -97,6 +97,45 @@ pub fn check_dit(seed: u64) -> crate::Report {
     crate::directional_check(&model, 5e-3, 4, seed)
 }
 
+/// [`check_dit`] on the shared POOLED TEST DEVICE, at dims chosen to clear
+/// `model::block::pick_gemm`'s tile-fill crossover (`m >= 8` output rows,
+/// `n >= 128` output cols) - so the backward really dispatches
+/// `matmul_dx_reg`/`matmul_dw_reg`, and the forward `matmul_reg3`/
+/// `matmul_gemv`, instead of the naive `@opt 2` trio.
+///
+/// The same reason `check_t5_tiled` exists beside `check_t5`, and it is doing
+/// two jobs at once. `check_dit` runs on `Gpu::new_cpu` by construction, so it
+/// covers neither the register-tiled kernels nor a real card; this one covers
+/// both, and on `backend-cpu` (`BRAIN_DEVICE=cpu`) it covers a THIRD
+/// implementation - that backend intercepts those kernel names and routes them
+/// to its AVX2 GEMMs rather than JIT-compiling them, which is a different code
+/// path again from the WGSL the GPU runs.
+///
+/// `num_layers = 1`: this gate is about which GEMM kernel runs, and the block
+/// stack's depth is already covered by `check_dit`.
+pub fn check_dit_tiled(seed: u64) -> crate::Report {
+    let cfg = DitConfig {
+        in_channels: 4,
+        condition_dim: 6,
+        num_layers: 1,
+        num_attention_heads: 2,
+        attention_head_dim: 64, // inner_dim = 128
+        ff_inner_dim: 128,
+        rotary_dim: 32,
+        fourier_embedding_dim: 8,
+    };
+    let w = minimaxmusic3::dit_train::random_weights(&cfg, seed);
+    let length = 8usize; // rows = length + 1 = 9
+    let mut r = data::rng::Lcg::new(seed ^ 0x71_1ED0);
+    let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+    let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
+    let target = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+
+    let gpu = gpu_core::testgpu::dev(minimaxmusic3::dit_train::PIPELINES);
+    let trainer = minimaxmusic3::dit_train::Trainer::new_on(gpu, cfg, &w, latents, condition, 0.4, length, target);
+    crate::directional_check(&DitCheck(trainer), 5e-3, 4, seed)
+}
+
 /// A tiny vocoder: `latent_channels=4` (2 folded stereo streams of 2),
 /// `decoder_hidden_dim=16` halving across 2 upsample stages to `4`,
 /// matching `crates/minimaxmusic3::config::VocoderConfig::tiny`. Every

@@ -26,7 +26,7 @@
 //! `qwen3tts::mtp`) are a caller's job, layered on top of [`decode`].
 
 use gpu_core::{DeviceBuffer, Gpu};
-use model::block::{gqa_attn_sublayer_decode_step, gqa_attn_sublayer_fwd, rmsnorm_fwd, GqaAttnDims, GqaAttnIds, GqaAttnWeights, GqaDecodeIds, KernelIds};
+use model::block::{self, gqa_attn_sublayer_decode_step, gqa_attn_sublayer_fwd, rmsnorm_fwd, GqaAttnDims, GqaAttnIds, GqaAttnWeights, GqaDecodeIds, KernelIds};
 use model::int8::{quant_rows_steps, QuantRows};
 use model::moe::{
     expert_fwd, expert_fwd_i8, router_fwd, shared_expert_fwd, shared_expert_fwd_i8, ExpertScratch, ExpertScratch8, MoeIds, MoeIds8, SharedExpertIds, SharedExpertIds8, SharedExpertScratch,
@@ -73,21 +73,25 @@ pub fn talker_pipelines() -> &'static [(&'static str, &'static str)] {
 fn kernel_ids() -> KernelIds {
     KernelIds {
         rmsnorm: 0,
-        rms_inv: 0,
-        rmsnorm_dx: 0,
-        rmsnorm_dw: 0,
-        rope: 0,
-        rope_bwd: 0,
+        rms_inv: block::UNREGISTERED,
+        rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dw: block::UNREGISTERED,
+        // This model rotates through `rope2d` (`GqaAttnIds::rope2d`), not
+        // `block::rope_fwd`, and has no backward here. `0` is `rmsnorm` - a
+        // live kernel - so these were misroutes waiting to happen, not
+        // placeholders; `UNREGISTERED` is out of range and fails loudly.
+        rope: block::UNREGISTERED,
+        rope_bwd: block::UNREGISTERED,
         gqa_scores: 2,
         gqa_apply: 4,
         attn_softmax: 3,
-        gqa_dscores: 0,
-        gqa_dv: 0,
-        gqa_dq: 0,
-        gqa_dk: 0,
+        gqa_dscores: block::UNREGISTERED,
+        gqa_dv: block::UNREGISTERED,
+        gqa_dq: block::UNREGISTERED,
+        gqa_dk: block::UNREGISTERED,
         silu_mul: 9,
-        silu_da: 0,
-        silu_db: 0,
+        silu_da: block::UNREGISTERED,
+        silu_db: block::UNREGISTERED,
     }
 }
 

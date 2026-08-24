@@ -28,12 +28,11 @@
 //! `torch`/`transformers` installed, so bit-exact parity against the real
 //! HF reference is **not achievable or
 //! claimed here**. Every op below was checked line-for-line against the real
-//! `/data/workspace/resources/qwen3.5/modeling_qwen3_5_moe.py` (not a
-//! secondhand description), but the achievable and required bar for this
-//! pass is *structural* correctness: compiles, runs, produces finite output,
-//! deterministic across repeated runs at the same seed. See this module's
-//! final report (delivered alongside this change) for the specific spots
-//! that are least certain.
+//! `modeling_qwen3_5_moe.py` from the released checkpoint (not a secondhand
+//! description), resolved under the model store root - see
+//! `BRAIN_QWEN35_DIR`. The achievable and required bar for this pass is
+//! *structural* correctness: compiles, runs, produces finite output,
+//! deterministic across repeated runs at the same seed.
 //!
 //! One assumption worth flagging up front: `Qwen3_5MoeRMSNorm.forward`
 //! (attention/MLP layer norms) computes `output * (1.0 + weight)`, not a
@@ -128,7 +127,7 @@ use model::Shard;
 use paramstore::{ParamStore, Role};
 
 use audio::conv::ConvKernels;
-use model::block::{gqa_decode_step, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_fwd, swiglu_bwd, GqaDecodeIds, KernelIds};
+use model::block::{self, gqa_decode_step, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_fwd, swiglu_bwd, GqaDecodeIds, KernelIds};
 use model::gdn::{gdn_causal_conv1d_step, gdn_recurrent_step, GdnBwdIds, GdnConvIds, GdnConvShape, GdnIds, GdnRecurrentScratch, GdnShape};
 // Re-exported (not just imported): `qwen35moe::model::gdn_chunk_size` is part
 // of this crate's own public API (`crates/npu`'s topology export and several
@@ -437,8 +436,12 @@ fn kernel_ids() -> KernelIds {
         rms_inv: RMS_INV,
         rmsnorm_dx: RMSNORM_DX,
         rmsnorm_dw: RMSNORM_DW,
-        rope: RMSNORM,
-        rope_bwd: RMSNORM,
+        // Rotation here is table-driven M-RoPE (`rope2d`, via the mixer id
+        // sets), never `block::rope_fwd`/`rope_bwd` - so these two slots are
+        // UNREGISTERED rather than standing in for `rmsnorm`, which is a live
+        // kernel and would misroute instead of failing.
+        rope: block::UNREGISTERED,
+        rope_bwd: block::UNREGISTERED,
         gqa_scores: GQA_SCORES,
         gqa_apply: GQA_APPLY,
         attn_softmax: ATTN_SOFTMAX,

@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::config::DitConfig;
-use crate::dit::{AttnW, BlockW, DitWeights};
+use crate::dit::{linear_step, AttnW, BlockW, DitWeights};
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -61,6 +61,24 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
+    // The fast GEMM family, forward and backward. Registering only the naive
+    // `matmul`/`matmul_dx`/`matmul_dw` above meant every projection in all 36
+    // blocks - and both of its adjoints - ran the one-thread-per-output
+    // reference kernel, the same defect `dit::PIPELINES` records for the served
+    // forward. Appended at the END so no index above moves.
+    //
+    // Split-K (`matmul_reg3_splitk` / `matmul_dw_reg_splitk` + a fold) was
+    // measured against these at `DitConfig::real()` and REJECTED: it exists for
+    // a tile grid too small to fill the card, and this model's grids are not -
+    // 256 to 2048 workgroups on a 30-SM P40 - so every split slice count tried
+    // was slower. `mm3_bench gemm-bwd` is the harness that measured it, so the
+    // decision is re-measurable rather than remembered. Split-K is also GPU-only
+    // with no `backend-cpu` native path, which is what makes leaving it out the
+    // safe default rather than merely the fast one.
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
 ];
 const MATMUL: usize = 0;
 const MATMUL_DX: usize = 1;
@@ -86,16 +104,73 @@ const ATTN_BWD_DK_BIDIR: usize = 20;
 const SILU_MUL: usize = 21;
 const SILU_BWD_DA: usize = 22;
 const SILU_BWD_DB: usize = 23;
+const MATMUL_REG3: usize = 24;
+const MATMUL_GEMV: usize = 25;
+const MATMUL_DX_REG: usize = 26;
+const MATMUL_DW_REG: usize = 27;
 
 const LN_EPS: f32 = 1e-5;
 
 fn bidir_ids() -> BidirIds {
     BidirIds { scores: ATTN_SCORES_BIDIR, softmax: ATTN_SOFTMAX_BIDIR, apply: ATTN_APPLY_BIDIR, dscores: ATTN_BWD_DSCORES_BIDIR, dv: ATTN_BWD_DV_BIDIR, dq: ATTN_BWD_DQ_BIDIR, dk: ATTN_BWD_DK_BIDIR }
 }
-/// Every field but `silu_mul`/`silu_da`/`silu_db` is unread here.
+/// `swiglu_fwd`/`swiglu_bwd` only ever touch `silu_mul`/`silu_da`/`silu_db`, so
+/// every RMSNorm/RoPE/GQA slot is [`block::UNREGISTERED`] - the sentinel, never
+/// `0`. Index `0` here is `matmul`, a kernel this module dispatches on every
+/// linear, so a slot holding it would misroute rather than fail (see
+/// `model::block::UNREGISTERED`'s own doc for why that is silent on
+/// `backend-cpu`, which is the backend every test in this crate uses).
 fn kernel_ids() -> KernelIds {
-    KernelIds { rmsnorm: 0, rms_inv: 0, rmsnorm_dx: 0, rmsnorm_dw: 0, rope: 0, rope_bwd: 0, gqa_scores: 0, gqa_apply: 0, attn_softmax: 0, gqa_dscores: 0, gqa_dv: 0, gqa_dq: 0, gqa_dk: 0, silu_mul: SILU_MUL, silu_da: SILU_BWD_DA, silu_db: SILU_BWD_DB }
+    KernelIds {
+        rmsnorm: block::UNREGISTERED,
+        rms_inv: block::UNREGISTERED,
+        rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dw: block::UNREGISTERED,
+        rope: block::UNREGISTERED,
+        rope_bwd: block::UNREGISTERED,
+        gqa_scores: block::UNREGISTERED,
+        gqa_apply: block::UNREGISTERED,
+        attn_softmax: block::UNREGISTERED,
+        gqa_dscores: block::UNREGISTERED,
+        gqa_dv: block::UNREGISTERED,
+        gqa_dq: block::UNREGISTERED,
+        gqa_dk: block::UNREGISTERED,
+        silu_mul: SILU_MUL,
+        silu_da: SILU_BWD_DA,
+        silu_db: SILU_BWD_DB,
+    }
 }
+
+/// This module's own indices for [`crate::dit::linear_step`] - the SAME
+/// selection rule `dit::forward` uses for the served forward, over this
+/// module's own PIPELINES numbering.
+fn gemm_ids() -> crate::dit::GemmIds {
+    crate::dit::GemmIds { reference: MATMUL, tiled: MATMUL_REG3, gemv: Some(MATMUL_GEMV) }
+}
+
+/// `dX[m,k] = dY[m,n] . W[n,k]`, `accumulate` selecting overwrite (0) or add
+/// (1) exactly as `matmul_dx.wgsl`'s own Params field does.
+///
+/// Kernel choice is [`model::block::pick_gemm`] on the OUTPUT dims `[m, k]` -
+/// the same shared rule `t5encoder::train`, `clip::model` and
+/// `codeformer::train` use for their backward GEMMs, so this crate inherits any
+/// later fix to it. Both variants compute the same math; on `backend-cpu` both
+/// indices route to the one native AVX2 backward GEMM, so the choice is
+/// bit-identical there by construction.
+fn dx_step(gpu: &Gpu, dy: &DeviceBuffer, w: &DeviceBuffer, dx: &DeviceBuffer, m: u32, k: u32, n: u32, accumulate: u32) -> gpu_core::Step {
+    let (kind, threads) = block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, false);
+    gpu.step(kind, &[dy, w, dx], &[m, k, n, accumulate], threads)
+}
+
+/// `dW[n,k] += dY[m,n] . X[m,k]`. ACCUMULATES - both variants do, which is the
+/// parameter-gradient contract `Trainer::zero_grads` clears once per step.
+/// Kernel choice is [`model::block::pick_gemm`] on the output dims `[n, k]`;
+/// see [`dx_step`].
+fn dw_step(gpu: &Gpu, dy: &DeviceBuffer, x: &DeviceBuffer, dw: &DeviceBuffer, m: u32, k: u32, n: u32) -> gpu_core::Step {
+    let (kind, threads) = block::pick_gemm(n as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, false);
+    gpu.step(kind, &[dy, x, dw], &[m, k, n], threads)
+}
+
 fn ln_ids() -> LayerNormIds {
     LayerNormIds { layernorm: LAYERNORM, layernorm_rows: None, ln_stats: LN_STATS, ln_stats_rows: None, layernorm_dx: LAYERNORM_DX, layernorm_dx_rows: None }
 }
@@ -266,9 +341,9 @@ fn block_fwd(gpu: &Gpu, cfg: &DitConfig, bd: &BlockD, cos_b: &DeviceBuffer, sin_
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL, &[&xn1, &bd.wq.w, &q_tmp], &[rows as u32, inner as u32, inner as u32], (rows * inner) as u32),
-            gpu.step(MATMUL, &[&xn1, &bd.wk.w, &k_tmp], &[rows as u32, inner as u32, inner as u32], (rows * inner) as u32),
-            gpu.step(MATMUL, &[&xn1, &bd.wv.w, &v_tmp], &[rows as u32, inner as u32, inner as u32], (rows * inner) as u32),
+            linear_step(gpu, gemm_ids(), &xn1, &bd.wq.w, &q_tmp, rows as u32, inner as u32, inner as u32),
+            linear_step(gpu, gemm_ids(), &xn1, &bd.wk.w, &k_tmp, rows as u32, inner as u32, inner as u32),
+            linear_step(gpu, gemm_ids(), &xn1, &bd.wv.w, &v_tmp, rows as u32, inner as u32, inner as u32),
         ],
     );
 
@@ -297,7 +372,7 @@ fn block_fwd(gpu: &Gpu, cfg: &DitConfig, bd: &BlockD, cos_b: &DeviceBuffer, sin_
 
     let proj = gpu.storage((rows * inner) as u64);
     let xmid = gpu.storage((rows * inner) as u64);
-    gpu.submit(&[], &[gpu.step(MATMUL, &[&ctx, &bd.wo.w, &proj], &[rows as u32, inner as u32, inner as u32], (rows * inner) as u32)]);
+    gpu.submit(&[], &[linear_step(gpu, gemm_ids(), &ctx, &bd.wo.w, &proj, rows as u32, inner as u32, inner as u32)]);
     gpu.submit(&[], &[gpu.step(ADD2, &[x, &proj, &xmid], &[(rows * inner) as u32], (rows * inner) as u32)]);
 
     let mean2 = gpu.storage(rows as u64);
@@ -315,7 +390,7 @@ fn block_fwd(gpu: &Gpu, cfg: &DitConfig, bd: &BlockD, cos_b: &DeviceBuffer, sin_
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL, &[&xn2, &bd.ff_in_w.w, &ff_raw], &[rows as u32, inner as u32, (2 * ff_inner) as u32], (rows * 2 * ff_inner) as u32),
+            linear_step(gpu, gemm_ids(), &xn2, &bd.ff_in_w.w, &ff_raw, rows as u32, inner as u32, (2 * ff_inner) as u32),
             gpu.step(BIAS_ADD, &[&ff_raw, &bd.ff_in_b.w], &[rows as u32, (2 * ff_inner) as u32], (rows * 2 * ff_inner) as u32),
         ],
     );
@@ -336,7 +411,7 @@ fn block_fwd(gpu: &Gpu, cfg: &DitConfig, bd: &BlockD, cos_b: &DeviceBuffer, sin_
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL, &[&act, &bd.ff_out_w.w, &ff_out], &[rows as u32, ff_inner as u32, inner as u32], (rows * inner) as u32),
+            linear_step(gpu, gemm_ids(), &act, &bd.ff_out_w.w, &ff_out, rows as u32, ff_inner as u32, inner as u32),
             gpu.step(BIAS_ADD, &[&ff_out, &bd.ff_out_b.w], &[rows as u32, inner as u32], (rows * inner) as u32),
         ],
     );
@@ -365,8 +440,8 @@ fn block_bwd(gpu: &Gpu, cfg: &DitConfig, bd: &BlockD, cache: &BlockCache, cos_b:
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL_DX, &[&d_ff_out, &bd.ff_out_w.w, &d_act], &[rows as u32, ff_inner as u32, inner as u32, 0], (rows * ff_inner) as u32),
-            gpu.step(MATMUL_DW, &[&d_ff_out, &cache.act, &bd.ff_out_w.dw], &[rows as u32, ff_inner as u32, inner as u32], (inner * ff_inner) as u32),
+            dx_step(gpu, &d_ff_out, &bd.ff_out_w.w, &d_act, rows as u32, ff_inner as u32, inner as u32, 0),
+            dw_step(gpu, &d_ff_out, &cache.act, &bd.ff_out_w.dw, rows as u32, ff_inner as u32, inner as u32),
             gpu.step(BIAS_GRAD, &[&d_ff_out, &bd.ff_out_b.dw], &[rows as u32, inner as u32], inner as u32),
         ],
     );
@@ -391,8 +466,8 @@ fn block_bwd(gpu: &Gpu, cfg: &DitConfig, bd: &BlockD, cache: &BlockCache, cos_b:
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL_DX, &[&d_ff_raw_b, &bd.ff_in_w.w, &d_xn2], &[rows as u32, inner as u32, (2 * ff_inner) as u32, 0], (rows * inner) as u32),
-            gpu.step(MATMUL_DW, &[&d_ff_raw_b, &cache.xn2, &bd.ff_in_w.dw], &[rows as u32, inner as u32, (2 * ff_inner) as u32], (inner * 2 * ff_inner) as u32),
+            dx_step(gpu, &d_ff_raw_b, &bd.ff_in_w.w, &d_xn2, rows as u32, inner as u32, (2 * ff_inner) as u32, 0),
+            dw_step(gpu, &d_ff_raw_b, &cache.xn2, &bd.ff_in_w.dw, rows as u32, inner as u32, (2 * ff_inner) as u32),
             gpu.step(BIAS_GRAD, &[&d_ff_raw_b, &bd.ff_in_b.dw], &[rows as u32, (2 * ff_inner) as u32], (2 * ff_inner) as u32),
         ],
     );
@@ -418,8 +493,8 @@ fn block_bwd(gpu: &Gpu, cfg: &DitConfig, bd: &BlockD, cache: &BlockCache, cos_b:
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL_DX, &[&d_proj, &bd.wo.w, &d_ctx], &[rows as u32, inner as u32, inner as u32, 0], (rows * inner) as u32),
-            gpu.step(MATMUL_DW, &[&d_proj, &cache.ctx, &bd.wo.dw], &[rows as u32, inner as u32, inner as u32], (inner * inner) as u32),
+            dx_step(gpu, &d_proj, &bd.wo.w, &d_ctx, rows as u32, inner as u32, inner as u32, 0),
+            dw_step(gpu, &d_proj, &cache.ctx, &bd.wo.dw, rows as u32, inner as u32, inner as u32),
         ],
     );
 
@@ -458,12 +533,12 @@ fn block_bwd(gpu: &Gpu, cfg: &DitConfig, bd: &BlockD, cache: &BlockCache, cos_b:
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL_DX, &[&d_q_tmp, &bd.wq.w, &d_xn1], &[rows as u32, inner as u32, inner as u32, 1], (rows * inner) as u32),
-            gpu.step(MATMUL_DW, &[&d_q_tmp, &cache.xn1, &bd.wq.dw], &[rows as u32, inner as u32, inner as u32], (inner * inner) as u32),
-            gpu.step(MATMUL_DX, &[&d_k_tmp, &bd.wk.w, &d_xn1], &[rows as u32, inner as u32, inner as u32, 1], (rows * inner) as u32),
-            gpu.step(MATMUL_DW, &[&d_k_tmp, &cache.xn1, &bd.wk.dw], &[rows as u32, inner as u32, inner as u32], (inner * inner) as u32),
-            gpu.step(MATMUL_DX, &[&d_v_tmp, &bd.wv.w, &d_xn1], &[rows as u32, inner as u32, inner as u32, 1], (rows * inner) as u32),
-            gpu.step(MATMUL_DW, &[&d_v_tmp, &cache.xn1, &bd.wv.dw], &[rows as u32, inner as u32, inner as u32], (inner * inner) as u32),
+            dx_step(gpu, &d_q_tmp, &bd.wq.w, &d_xn1, rows as u32, inner as u32, inner as u32, 1),
+            dw_step(gpu, &d_q_tmp, &cache.xn1, &bd.wq.dw, rows as u32, inner as u32, inner as u32),
+            dx_step(gpu, &d_k_tmp, &bd.wk.w, &d_xn1, rows as u32, inner as u32, inner as u32, 1),
+            dw_step(gpu, &d_k_tmp, &cache.xn1, &bd.wk.dw, rows as u32, inner as u32, inner as u32),
+            dx_step(gpu, &d_v_tmp, &bd.wv.w, &d_xn1, rows as u32, inner as u32, inner as u32, 1),
+            dw_step(gpu, &d_v_tmp, &cache.xn1, &bd.wv.dw, rows as u32, inner as u32, inner as u32),
         ],
     );
 
@@ -520,12 +595,29 @@ pub struct Trainer {
 }
 
 impl Trainer {
+    /// Build on `backend-cpu`. The default because this trainer's gate is a
+    /// finite-difference check (`gradcheck::check_dit`), which wants the
+    /// deterministic host-precision backend, and because every caller in this
+    /// crate is a test at `DitConfig::tiny` dims where a device round trip
+    /// costs more than it saves.
+    ///
+    /// Use [`Trainer::new_on`] to run the SAME graph on a real card - the fast
+    /// GEMM tier this module registers is capability-gated, so it is only
+    /// reachable that way.
     pub fn new(cfg: DitConfig, w: &DitWeights, latents: Vec<f32>, condition: Vec<f32>, timestep: f32, length: usize, target: Vec<f32>) -> Trainer {
-        let gpu = Gpu::new_cpu(PIPELINES);
+        Trainer::new_on(Gpu::new_cpu(PIPELINES), cfg, w, latents, condition, timestep, length, target)
+    }
+
+    /// Build on a caller-supplied device (tests pass `gpu_core::testgpu::dev`,
+    /// benches an explicit card). The device must have been opened with
+    /// [`PIPELINES`] - the kernel indices this module dispatches are that
+    /// list's own.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_on(gpu: Gpu, cfg: DitConfig, w: &DitWeights, latents: Vec<f32>, condition: Vec<f32>, timestep: f32, length: usize, target: Vec<f32>) -> Trainer {
         let cin = cfg.in_channels as usize;
-        assert_eq!(latents.len(), cin * length, "Trainer::new: latents length mismatch");
-        assert_eq!(condition.len(), length * cfg.condition_dim as usize, "Trainer::new: condition length mismatch");
-        assert_eq!(target.len(), cin * length, "Trainer::new: target length mismatch");
+        assert_eq!(latents.len(), cin * length, "Trainer: latents length mismatch");
+        assert_eq!(condition.len(), length * cfg.condition_dim as usize, "Trainer: condition length mismatch");
+        assert_eq!(target.len(), cin * length, "Trainer: target length mismatch");
 
         let blocks: Vec<BlockD> = w.blocks.iter().enumerate().map(|(i, b)| BlockD::upload(&gpu, i, b)).collect();
         let host = HostGlue::from_weights(w);
@@ -784,6 +876,13 @@ impl Trainer {
         self.run_backward();
     }
 
+    /// The device this trainer dispatches on - test-only, for the gate that
+    /// reads its per-kernel dispatch counters back.
+    #[cfg(test)]
+    pub(crate) fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
     /// The last forward's output - test-only, to check this module's own
     /// forward against `dit::forward`'s served path.
     pub fn output(&self) -> Vec<f32> {
@@ -846,6 +945,125 @@ mod tests {
         let timestep = 0.4f32;
         let target = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
         (w, latents, condition, timestep, length, target)
+    }
+
+    /// No `KernelIds` slot this module leaves unused can reach a kernel a real
+    /// forward + backward really dispatches (`model::block::UNREGISTERED`).
+    ///
+    /// The trainer\'s twin of `dit::tests::no_unused_kernel_slot_can_reach_a_dispatched_kernel`,
+    /// and the one that matters most: `PIPELINES[0]` here is `matmul`, which
+    /// every linear in every block dispatches, so the thirteen `0`s this file
+    /// used to carry were thirteen live indices for the wrong kernel. On
+    /// `backend-cpu` - the backend every test in this crate uses - a dispatch
+    /// through one is an out-of-bounds read with no buffer-count or
+    /// uniform-size check to catch it. Mutation-check it by putting any of the
+    /// thirteen back to `0`: this test goes red naming `matmul`.
+    #[test]
+    fn no_unused_kernel_slot_can_reach_a_dispatched_kernel() {
+        let cfg = DitConfig::tiny();
+        let (w, latents, condition, timestep, length, target) = fixture(&cfg, 61);
+        let trainer = Trainer::new(cfg, &w, latents, condition, timestep, length, target);
+
+        let seen = dit::slot_gate::dispatched(trainer.gpu(), || {
+            trainer.zero_grads();
+            let _ = trainer.loss();
+            trainer.backward();
+        });
+        // `swiglu_fwd`/`swiglu_bwd` are the only `model::block` builders this
+        // module hands a `KernelIds` to, and between them they read exactly
+        // these three slots.
+        dit::slot_gate::assert_unused_slots_unreachable(&kernel_ids(), &["silu_mul", "silu_da", "silu_db"], PIPELINES, &seen);
+    }
+
+    /// A config whose GEMM output dims clear `block::pick_gemm`'s measured
+    /// tile-fill crossover (`m >= 8` rows, `n >= 128` cols), so the backward
+    /// really dispatches `matmul_dx_reg`/`matmul_dw_reg` instead of the naive
+    /// pair. `DitConfig::tiny` is far below it and exercises only the naive
+    /// arm - which is why the cross-backend gate below runs both.
+    fn tiled_config() -> (DitConfig, usize) {
+        (
+            DitConfig {
+                in_channels: 4,
+                condition_dim: 6,
+                num_layers: 1,
+                num_attention_heads: 2,
+                attention_head_dim: 64, // inner_dim = 128
+                ff_inner_dim: 128,
+                rotary_dim: 32,
+                fourier_embedding_dim: 8,
+            },
+            8, // rows = length + 1 = 9 >= GEMM_TILE_MIN_ROWS
+        )
+    }
+
+    /// The GEMM tier this module registers is gated on the device's queried
+    /// capabilities, so `backend-cpu` never reaches the register-tiled forward
+    /// kernel and the split of `pick_gemm`'s two arms is invisible there. Run
+    /// the SAME graph on the pooled test device and require every gradient to
+    /// agree with the CPU trainer's, at BOTH a shape below the tile-fill
+    /// crossover and one above it.
+    ///
+    /// This is what keeps the fast tier honest. `matmul_reg3`/`matmul_gemv`/
+    /// `matmul_dx_reg`/`matmul_dw_reg` all carry workgroup barriers the CPU JIT
+    /// refuses (it says so out loud: "not JIT-compiled ... must use a native
+    /// fast path or the GPU"), so on `backend-cpu` they are correct only
+    /// because that backend intercepts them by kernel identity and routes them
+    /// to its AVX2 GEMMs. A kernel that fell out of BOTH - the JIT and the
+    /// intercept - would return an untouched, all-zero gradient buffer and
+    /// every finite-difference check on the naive arm would still pass. The
+    /// dispatch-counter assertions below are what stop this test from quietly
+    /// covering the naive arm twice.
+    #[test]
+    fn gradients_match_between_the_cpu_and_the_pooled_test_device() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            brain_testutil::skip_unavailable("dit_train cross-backend gradients: MOE_SKIP_GPU_TESTS set");
+            return;
+        }
+        for (label, cfg, length) in [("below the tile crossover", DitConfig::tiny(), 3usize), ("above it", tiled_config().0, tiled_config().1)] {
+            let w = random_weights(&cfg, 71);
+            let mut r = Lcg::new(72);
+            let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+            let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
+            let target = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+
+            let run = |t: &Trainer| -> (Vec<(String, Vec<f32>)>, std::collections::BTreeSet<String>) {
+                let seen = dit::slot_gate::dispatched(t.gpu(), || {
+                    t.zero_grads();
+                    let _ = t.loss();
+                    t.backward();
+                });
+                (t.param_names().into_iter().map(|n| (n.clone(), t.read_grad(&n))).collect(), seen)
+            };
+
+            let host = Trainer::new(cfg, &w, latents.clone(), condition.clone(), 0.4, length, target.clone());
+            let dev = Trainer::new_on(gpu_core::testgpu::dev(PIPELINES), cfg, &w, latents, condition, 0.4, length, target);
+            let (ga, seen_cpu) = run(&host);
+            let (gb, seen_dev) = run(&dev);
+
+            if label == "above it" {
+                // `pick_gemm` is device-blind, so BOTH backends take the
+                // register-tiled backward here - the CPU one through its native
+                // intercept. If either stops, this shape has silently become a
+                // second copy of the naive one.
+                for seen in [&seen_cpu, &seen_dev] {
+                    assert!(seen.contains("matmul_dx_reg"), "{label}: the register-tiled dX kernel was never dispatched");
+                    assert!(seen.contains("matmul_dw_reg"), "{label}: the register-tiled dW kernel was never dispatched");
+                }
+                assert!(
+                    seen_dev.contains("matmul_reg3") || seen_dev.contains("matmul_gemv"),
+                    "{label}: the device forward stayed on the naive `matmul` - the fast tier is unreachable"
+                );
+            }
+
+            assert_eq!(ga.len(), gb.len());
+            for ((na, a), (nb, b)) in ga.iter().zip(&gb) {
+                assert_eq!(na, nb);
+                assert!(a.iter().any(|v| v.abs() > 0.0), "{label}: gradient for {na} is all-zero on the host - the comparison would be vacuous");
+                let scale = a.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+                let worst = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+                assert!(worst <= 1e-3 * scale, "{label}: gradient for {na} diverged across backends: max|delta|={worst}, scale={scale}");
+            }
+        }
     }
 
     #[test]

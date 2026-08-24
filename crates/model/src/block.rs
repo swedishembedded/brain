@@ -25,8 +25,27 @@
 use gpu_core::select::{self, KernelVariant};
 use gpu_core::{f, DeviceBuffer, DeviceCaps, DeviceClass, Gpu, Step};
 
+/// The "this model registered no kernel for this slot" sentinel, for every
+/// index set in this module - the `model::block` twin of
+/// [`crate::vit::UNREGISTERED`], and the same value.
+///
+/// A slot holding it must never be dispatched. The builders that can do
+/// without a slot check for it; the ones that cannot fail loudly on an
+/// out-of-range pipeline index instead of silently running whatever kernel
+/// happens to sit at the index that was written there.
+///
+/// **Filling an unused slot with `0` instead is a silent-corruption defect,
+/// not a harmless placeholder.** Index 0 is a real, registered kernel in every
+/// PIPELINES list in this workspace, so a misroute through such a slot runs
+/// that kernel with another kernel's bindings and uniform. On a GPU backend the
+/// binding check turns it into a panic; on `backend-cpu` there is no
+/// buffer-count or uniform-size check at dispatch, so it is an out-of-bounds
+/// read that no unit test on that backend can see.
+pub const UNREGISTERED: usize = usize::MAX;
+
 /// Kernel-pipeline indices a model supplies from its own PIPELINES list. Only
-/// the kernels a given helper uses need valid indices.
+/// the kernels a given helper uses need valid indices; every other slot is
+/// [`UNREGISTERED`].
 #[derive(Clone, Copy)]
 pub struct KernelIds {
     pub rmsnorm: usize,
@@ -45,6 +64,33 @@ pub struct KernelIds {
     pub silu_mul: usize,
     pub silu_da: usize,
     pub silu_db: usize,
+}
+
+impl KernelIds {
+    /// Every slot, paired with its field name - the enumeration a model's own
+    /// "no unused slot is dispatchable" gate walks. It lives here, next to the
+    /// struct, so adding a field cannot leave a gate silently checking 16 of 17
+    /// slots.
+    pub fn slots(&self) -> [(&'static str, usize); 16] {
+        [
+            ("rmsnorm", self.rmsnorm),
+            ("rms_inv", self.rms_inv),
+            ("rmsnorm_dx", self.rmsnorm_dx),
+            ("rmsnorm_dw", self.rmsnorm_dw),
+            ("rope", self.rope),
+            ("rope_bwd", self.rope_bwd),
+            ("gqa_scores", self.gqa_scores),
+            ("gqa_apply", self.gqa_apply),
+            ("attn_softmax", self.attn_softmax),
+            ("gqa_dscores", self.gqa_dscores),
+            ("gqa_dv", self.gqa_dv),
+            ("gqa_dq", self.gqa_dq),
+            ("gqa_dk", self.gqa_dk),
+            ("silu_mul", self.silu_mul),
+            ("silu_da", self.silu_da),
+            ("silu_db", self.silu_db),
+        ]
+    }
 }
 
 /// Grouped-query attention shape (MHA is the special case `n_kv_heads == n_heads`).

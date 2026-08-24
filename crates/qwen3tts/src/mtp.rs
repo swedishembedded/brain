@@ -89,25 +89,26 @@ pub struct MtpModel {
 impl MtpModel {
     fn only_fwd_ids() -> KernelIds {
         // Forward needs rmsnorm/rms_inv, rope, gqa scores/apply/softmax, silu_mul.
-        // The backward indices are unused (no backward graph is built); point them
-        // at a valid pipeline so the struct is well-formed.
+        // No backward graph is built, so every backward slot is UNREGISTERED -
+        // out of range of PIPELINES, so reaching one is a panic rather than a
+        // silent dispatch of whichever kernel the stand-in index named.
         KernelIds {
             rmsnorm: RMSNORM,
             rms_inv: RMS_INV,
-            rmsnorm_dx: RMSNORM,
-            rmsnorm_dw: RMSNORM,
+            rmsnorm_dx: block::UNREGISTERED,
+            rmsnorm_dw: block::UNREGISTERED,
             rope: ROPE,
-            rope_bwd: ROPE,
+            rope_bwd: block::UNREGISTERED,
             gqa_scores: GQA_SCORES,
             gqa_apply: GQA_APPLY,
             attn_softmax: ATTN_SOFTMAX,
-            gqa_dscores: GQA_SCORES,
-            gqa_dv: GQA_APPLY,
-            gqa_dq: GQA_APPLY,
-            gqa_dk: GQA_APPLY,
+            gqa_dscores: block::UNREGISTERED,
+            gqa_dv: block::UNREGISTERED,
+            gqa_dq: block::UNREGISTERED,
+            gqa_dk: block::UNREGISTERED,
             silu_mul: SILU_MUL,
-            silu_da: SILU_MUL,
-            silu_db: SILU_MUL,
+            silu_da: block::UNREGISTERED,
+            silu_db: block::UNREGISTERED,
         }
     }
 

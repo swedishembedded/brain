@@ -55,7 +55,7 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use paramstore::{ParamStore, Role};
 
 use audio::conv::ConvKernels;
-use model::block::{gqa_decode_step, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_fwd, swiglu_bwd, GqaDecodeIds, KernelIds};
+use model::block::{self, gqa_decode_step, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_fwd, swiglu_bwd, GqaDecodeIds, KernelIds};
 use model::gdn::{gdn_causal_conv1d_step, gdn_recurrent_step, GdnBwdIds, GdnConvIds, GdnConvShape, GdnIds, GdnRecurrentScratch, GdnShape};
 pub use model::gdn::gdn_chunk_size;
 use model::ops::{Act, Ops, Weight};
@@ -319,8 +319,12 @@ fn kernel_ids() -> KernelIds {
         rms_inv: RMS_INV,
         rmsnorm_dx: RMSNORM_DX,
         rmsnorm_dw: RMSNORM_DW,
-        rope: RMSNORM,
-        rope_bwd: RMSNORM,
+        // Rotation here is table-driven M-RoPE (`rope2d`, via the mixer id
+        // sets), never `block::rope_fwd`/`rope_bwd` - so these two slots are
+        // UNREGISTERED rather than standing in for `rmsnorm`, which is a live
+        // kernel and would misroute instead of failing.
+        rope: block::UNREGISTERED,
+        rope_bwd: block::UNREGISTERED,
         gqa_scores: GQA_SCORES,
         gqa_apply: GQA_APPLY,
         attn_softmax: ATTN_SOFTMAX,
