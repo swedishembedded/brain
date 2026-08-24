@@ -794,6 +794,16 @@ impl WgpuBackend {
             let mut rows: Vec<(usize, f64, u64)> =
                 acc.iter().enumerate().filter(|(_, (_, c))| *c > 0).map(|(i, (ms, c))| (i, *ms, *c)).collect();
             rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            // Nothing accumulated means timing was never armed on this device:
+            // the timestamp buffers are allocated whenever the ADAPTER supports
+            // them, so profiling can be switched on at runtime, but accumulating
+            // is gated separately. Printing the header anyway put a
+            // "BRAIN_PROFILE" banner with a `-0.0 ms` total into the stderr of
+            // every ordinary run, once per device dropped - output that names an
+            // env var the run did not set and reports a total of nothing.
+            if rows.is_empty() {
+                return;
+            }
             let total: f64 = rows.iter().map(|r| r.1).sum();
             eprintln!("=== GPU kernel time (BRAIN_PROFILE, timestamp queries, total {total:.1} ms) ===");
             for (i, ms, c) in rows {
