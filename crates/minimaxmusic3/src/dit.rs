@@ -487,36 +487,151 @@ pub(crate) fn proj_out_postprocess(gpu: &Gpu, cfg: &DitConfig, proj_out_w: &[f32
     gpu.read(&out, cin * length)
 }
 
-/// The device forward. `latents` is `[in_channels, length]` row-major
-/// (batch folded away - see the module doc); `condition` is `[length,
-/// condition_dim]` row-major (already frame-aligned by the condition
-/// encoder). Returns the predicted velocity, `[in_channels, length]`.
+/// Everything about a denoise chunk that does NOT change from one
+/// [`forward_resident`] call to the next: every block's weights uploaded
+/// to the device once, and the RoPE tables for this chunk's row count.
+///
+/// This exists because the denoise loop is the DiT's whole cost centre.
+/// `denoise::denoise_chunk` runs `num_inference_steps` Euler steps and
+/// evaluates the DiT **twice** per step (the conditional and the
+/// zero-condition CFG branch), so a per-call upload re-sends the entire
+/// 36-block stack `2 * steps` times per chunk - at `DitConfig::real()`
+/// dims that is ~9.7 GB of host->device traffic per evaluation, for
+/// weights that are byte-identical every time. The weights depend only on
+/// the checkpoint and the RoPE tables only on `rows`, which is fixed
+/// within a chunk; neither depends on the timestep, the latents or the
+/// condition.
+///
+/// Lifetime: one chunk. Build it after `length` is known, drop it when the
+/// chunk is done - the buffers are the chunk's peak device footprint.
+pub struct Resident {
+    blocks: Vec<DeviceBlock>,
+    cos_b: DeviceBuffer,
+    sin_b: DeviceBuffer,
+    rows: usize,
+}
+
+impl Resident {
+    /// Upload `w`'s blocks and build the RoPE tables for a chunk of
+    /// `length` latent frames (`rows = length + 1`, the prepended
+    /// Fourier-timestep token).
+    pub fn new(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, length: usize) -> Resident {
+        let rows = length + 1;
+        let (cos_t, sin_t) = rope_tables(rows, cfg.rotary_dim as usize, 10000.0);
+        Resident {
+            blocks: upload_blocks(gpu, &w.blocks),
+            cos_b: gpu.storage_init("rope.cos", &cos_t),
+            sin_b: gpu.storage_init("rope.sin", &sin_t),
+            rows,
+        }
+    }
+
+    /// The row count these tables were built for (`length + 1`).
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+}
+
+/// The device forward against an already-uploaded [`Resident`] - the
+/// production path, called once per CFG branch per Euler step.
+///
+/// `latents` is `[in_channels, length]` row-major (batch folded away - see
+/// the module doc); `condition` is `[length, condition_dim]` row-major
+/// (already frame-aligned by the condition encoder). Returns the predicted
+/// velocity, `[in_channels, length]`.
 ///
 /// Composed from the same embed-preamble / block-stack / head-epilogue
 /// pieces `dit_shard`'s per-stage forward calls, run here over the WHOLE
 /// stack (`Shard::whole`, in `dit_shard`'s terms) - one implementation of
 /// each piece, never two copies that could drift apart.
-pub fn forward(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, latents: &[f32], condition: &[f32], timestep: f32, length: usize) -> Vec<f32> {
+pub fn forward_resident(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, res: &Resident, latents: &[f32], condition: &[f32], timestep: f32, length: usize) -> Vec<f32> {
     let inner = cfg.inner_dim() as usize;
+    let rows = length + 1;
+    assert_eq!(
+        rows, res.rows,
+        "dit::forward_resident: Resident was built for {} rows but this call has {rows} - build one Resident per chunk length",
+        res.rows
+    );
     let hidden_lc = preprocess_hidden_lc(gpu, cfg, &w.preprocess_conv_w, latents, condition, length);
 
     let temb = timestep_embed(&w.time_proj_weight, &w.time_embed_l1_w, &w.time_embed_l1_b, &w.time_embed_l2_w, &w.time_embed_l2_b, cfg, timestep);
     let proj_rows = proj_in_rows(cfg, &w.proj_in_w, &hidden_lc, length);
-    let rows = length + 1;
     let mut x_host = vec![0.0f32; rows * inner];
     x_host[..inner].copy_from_slice(&temb);
     x_host[inner..].copy_from_slice(&proj_rows);
 
-    let (cos_t, sin_t) = rope_tables(rows, cfg.rotary_dim as usize, 10000.0);
-    let cos_b = gpu.storage_init("rope.cos", &cos_t);
-    let sin_b = gpu.storage_init("rope.sin", &sin_t);
-
-    let device_blocks = upload_blocks(gpu, &w.blocks);
     let mut x = gpu.storage_init("x0", &x_host);
-    for db in &device_blocks {
-        x = block_fwd(gpu, cfg, db, &x, &cos_b, &sin_b, rows);
+    for db in &res.blocks {
+        x = block_fwd(gpu, cfg, db, &x, &res.cos_b, &res.sin_b, rows);
     }
 
     let x_final = gpu.read(&x, rows * inner);
     proj_out_postprocess(gpu, cfg, &w.proj_out_w, &w.postprocess_conv_w, &x_final[inner..], length)
+}
+
+/// One-shot [`forward_resident`]: uploads the weights, runs one forward,
+/// drops them again.
+///
+/// This is the convenience form for callers that genuinely evaluate the
+/// DiT once - the parity tests and `dit_shard`'s single-stage reference.
+/// Anything that evaluates the same weights more than once (every real
+/// denoise loop) must build a [`Resident`] and call [`forward_resident`],
+/// or it pays the full weight upload per evaluation.
+pub fn forward(gpu: &Gpu, cfg: &DitConfig, w: &DitWeights, latents: &[f32], condition: &[f32], timestep: f32, length: usize) -> Vec<f32> {
+    let res = Resident::new(gpu, cfg, w, length);
+    forward_resident(gpu, cfg, w, &res, latents, condition, timestep, length)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DitConfig;
+    use crate::dit_train;
+    use data::rng::Lcg;
+
+    /// A [`Resident`] REUSED across several timesteps and both CFG branches
+    /// must produce exactly what a fresh per-call upload produces.
+    ///
+    /// This is the gate on hoisting the weight upload out of the denoise
+    /// loop: the whole point is that nothing observable changes, so an
+    /// approximate comparison would not prove it. Bit-for-bit is the right
+    /// bar here because the two paths dispatch the identical kernels over
+    /// identical bytes in the identical order - only the upload moved.
+    #[test]
+    fn a_reused_resident_matches_a_fresh_upload_bit_for_bit() {
+        let cfg = DitConfig::tiny();
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let w = dit_train::random_weights(&cfg, 0xD17);
+        let length = 3usize;
+        let mut r = Lcg::new(0xD17 ^ 0xBEEF);
+        let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+        let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
+        let zero_condition = vec![0.0f32; condition.len()];
+
+        let res = Resident::new(&gpu, &cfg, &w, length);
+        assert_eq!(res.rows(), length + 1);
+
+        // Several timesteps, both branches - the real denoise loop's shape.
+        for &t in &[0.9f32, 0.5, 0.1] {
+            for cond in [&condition, &zero_condition] {
+                let fresh = forward(&gpu, &cfg, &w, &latents, cond, t, length);
+                let reused = forward_resident(&gpu, &cfg, &w, &res, &latents, cond, t, length);
+                assert_eq!(fresh, reused, "resident forward drifted from a fresh upload at t={t}");
+            }
+        }
+    }
+
+    /// A `Resident` built for one chunk length must refuse a call at a
+    /// different length rather than silently indexing stale RoPE tables.
+    #[test]
+    #[should_panic(expected = "build one Resident per chunk length")]
+    fn a_resident_refuses_a_different_chunk_length() {
+        let cfg = DitConfig::tiny();
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let w = dit_train::random_weights(&cfg, 0xD18);
+        let res = Resident::new(&gpu, &cfg, &w, 3);
+        let latents = vec![0.1f32; cfg.in_channels as usize * 4];
+        let condition = vec![0.1f32; 4 * cfg.condition_dim as usize];
+        let _ = forward_resident(&gpu, &cfg, &w, &res, &latents, &condition, 0.5, 4);
+    }
 }

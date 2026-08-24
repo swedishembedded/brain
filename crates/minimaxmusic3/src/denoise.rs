@@ -136,6 +136,10 @@ pub fn denoise_chunk(
 
     let zero_condition = vec![0.0f32; condition.len()];
     let prev_span = state.previous_latent.as_ref().map(|p| span_of(p, cin));
+    // The DiT's weights and RoPE tables are identical for every one of the
+    // `2 * num_inference_steps` evaluations below, so they are uploaded
+    // ONCE here rather than per `dit::forward` call - see `dit::Resident`.
+    let resident = dit::Resident::new(gpu, dit_cfg, dit_w, length);
     for &t in &timesteps {
         if overlap > 0 {
             let prev_latent = state.previous_latent.as_ref().unwrap();
@@ -146,8 +150,8 @@ pub fn denoise_chunk(
                 }
             }
         }
-        let v_cond = dit::forward(gpu, dit_cfg, dit_w, &latents, &condition, t, length);
-        let v_uncond = dit::forward(gpu, dit_cfg, dit_w, &latents, &zero_condition, t, length);
+        let v_cond = dit::forward_resident(gpu, dit_cfg, dit_w, &resident, &latents, &condition, t, length);
+        let v_uncond = dit::forward_resident(gpu, dit_cfg, dit_w, &resident, &latents, &zero_condition, t, length);
         let velocity: Vec<f32> = v_cond.iter().zip(&v_uncond).map(|(c, u)| u + (c - u) * GUIDANCE_SCALE).collect();
         latents = scheduler.step(&velocity, &latents);
     }
