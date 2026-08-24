@@ -714,6 +714,104 @@ possible:
   callback, which also made the model unbenchmarkable, since `brain perf`
   builds its whole timeline from those callbacks.
 
+## Phase 13: the first real song, and the five defects between here and it
+
+The port produced audio for the first time: 44.1 kHz stereo, all five real
+components, two P40s. The parity ladder closed first - every component at
+cosine 1.000000000 against **released diffusers 0.40.0** (and
+`transformers` for the Global LLM), with the DiT and vocoder additionally
+checked on a real GPU rather than only the CPU JIT:
+
+| component | params | backend | cosine | max_abs |
+|---|---|---|---|---|
+| condition encoder | 25M | CPU JIT | 1.000000000 | 3e-6 |
+| RVQ depth decoder | 0.65B | CPU JIT | 1.000000000 | 1.6e-5 |
+| vocoder (DAV) | 123M | CPU JIT + P40 | 1.000000000 | 1e-6 |
+| flow-matching DiT | 2.4B | P40 | 1.000000000 | 1.3e-5 |
+| Global LLM (Qwen3-8B) | 8B | P40 | 1.000000000 | 1e-6 |
+
+**None of those tests had ever run in this checkout.** `testdata/golden/
+minimaxmusic3/` did not exist, so all nine parity tests skipped - and cargo
+reports a skipped test as a pass, so the suite was green while proving
+nothing. Every "cosine 1.0" claim in this ledger was, locally,
+unreproducible. That is the single most important lesson here and it
+generalizes: a gate whose fixture is absent is indistinguishable from a
+gate that passed.
+
+### The five defects, and why the existing tests could not see any of them
+
+1. **The e2e gate tested a path no caller uses.** It re-composed the five
+   stages inline instead of calling `generate::generate`, with its own LM
+   instances and its own `Gpu::new_cpu` handles - so it exercised neither
+   the cross-card placement nor the device selection, and could neither
+   reproduce a failure the shipped path avoids nor catch one it hits.
+   `generate`'s own module doc had claimed the test called it directly.
+2. **The AR stage was built in the wrong SHAPE.** `new_shard_dt` passed
+   `decode_only: false`, so an inference-only build allocated the batched
+   forward: activations at `n = b*t`, `n_heads*ctx^2` scores/probs, an
+   `n*vocab` logits buffer, and backward scratch (the `bwd` closure is
+   dummied by `decode_only`, not by `train`). The AR loop only ever calls
+   `prefill`/`step_embed`. int8 got the linears to a MEASURED 6.95 GB and
+   the unused scratch spent the saving straight back, taking one instance
+   past 24 GB. `Qwen::new_shard_dt_decode` now gives the two axes - weight
+   tier and activation shape - together.
+3. **The decode path bound a 3.28 GB buffer whole.** The batched forward
+   vocab-tiles `tok.weight` via `step_sliced`; the decode path dispatched
+   untiled `EMBED` against the entire `[200000, 4096]` table
+   (`range 3276800000 exceeds limit 2147483644`). That limit is wgpu's
+   `i32::MAX` clamp, present on EVERY card - **not** the integrated-GPU
+   quirk Phase 10 assumed.
+4. **The DiT ran every projection through the REFERENCE matmul.** It
+   registered only `("matmul", kernels::MATMUL)` - `@opt 2`, one thread per
+   output element - while `ltxv`/`wan` dispatch the register-tiled `@opt 5`
+   `matmul_reg3` through `model::block::gemm_variant`. Thirty-six blocks,
+   six projections each, at a fraction of a percent of the card's fp32
+   peak. Exactly the class `.agents/rules/kernels.md` names as this repo's
+   most expensive.
+5. **Four `Gpu::storage` calls asked for 4x the memory they needed**
+   (`elements * 4` where the API takes WORDS), plus 23 more in the training
+   paths. Invisible at `::tiny()` dims, fatal at a real 689-latent chunk.
+
+### Measured
+
+    denoise, per Euler step   37.4 s  ->  1.21 s   (~31x, defect 4)
+    end to end, 1 s of audio  447.6 s ->  153.5 s
+    depth decoder, per frame  3.77 s  ->  1.01 s   (~3.75x, Phase 12 KV cache)
+
+Correctness held throughout: `dit_parity` stayed at cosine 1.000000000 and
+the rendered audio is **bit-identical** between the naive and fast GEMM
+paths (waveform cosine 1.000000000, max abs diff 0.000000).
+
+### Two hypotheses tested and rejected
+
+Recorded because the rejections cost as much as the fixes, and because
+`.agents/rules/kernels.md` §E exists for exactly this:
+
+- **Submitting the vocoder's tape per upsample stage** to release
+  intermediates earlier: 12264 MiB vs 12261 MiB. No improvement - wgpu does
+  not return the memory on submit either. Reverted rather than kept.
+- **A waveform crossfade at the chunk seam** (CosyVoice 2 and F5-TTS both
+  use 150-160 ms). Not needed: at the 4.0 s boundary the max
+  sample-to-sample step is 0.0031 against a 99.9th percentile of 0.0635
+  elsewhere - the seam is SMOOTHER than ordinary audio, because the
+  172-latent overlap is replaced in the LATENT domain before the vocoder
+  sees it.
+
+An earlier assumption in this session that the AR stage's host LM head
+dominated wall-clock was also wrong: the DiT is 65-80% of it, as the
+budget arithmetic predicted and the profile confirmed.
+
+### Where the time goes now, and what is left
+
+For a 4-minute track (6000 AR frames, ~59 chunks): AR ~1.9 h, denoise
+~1.3 h at 8 steps. **The AR stage is now the bottleneck, and ~90% of it is
+the depth decoder running as HOST math** - its "nothing to parallelize"
+justification reasons about sequence length (<=8 positions), not work; at
+real dims it is 4096x6144 GEMMs 16 times per frame. Moving it to the device
+is the same fix as defect 4 and is the next lever, followed by the
+front-loaded sigma schedule the literature reports taking flow-matching
+models from 30 steps to 7-16 without measured quality loss.
+
 ## Not yet done
 
 - [ ] Joint generator+discriminator training against the real vocoder
