@@ -159,6 +159,9 @@ from transformers.models.gemma4_unified.modeling_gemma4_unified import (
     Gemma4UnifiedTextModel,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 # Toy dims (every step kind runs in well under a second); every FLAG that
 # changes the op sequence is the real LTX-2.5 value (see module docstring).
 TINY_CONFIG = dict(
@@ -366,6 +369,29 @@ def main():
     sd["text_embedding_projection.video_aggregate_embed.weight"] = agg.weight
     sd["text_embedding_projection.video_aggregate_embed.bias"] = agg.bias
     save(args.out, "gemma4_tiny_weights.safetensors", sd, manifest)
+
+    # Tiny random weights, so no upstream artifact to name - but the identity
+    # is what stops this golden being compared against the real 12B tower.
+    # `global_head_dim` and `num_global_key_value_heads` are in because the
+    # full/global layers size differently from the sliding ones, which is the
+    # whole point of this config; `sliding_window` is in because it is chosen
+    # below T so the window genuinely excludes keys, and a checkpoint with a
+    # wider window would silently make the dumped attention a different
+    # computation rather than a different shape.
+    manifest["source"] = source_block(
+        identity={
+            "vocab_size": TINY_CONFIG["vocab_size"],
+            "hidden_size": TINY_CONFIG["hidden_size"],
+            "intermediate_size": TINY_CONFIG["intermediate_size"],
+            "num_hidden_layers": TINY_CONFIG["num_hidden_layers"],
+            "num_attention_heads": TINY_CONFIG["num_attention_heads"],
+            "num_key_value_heads": TINY_CONFIG["num_key_value_heads"],
+            "head_dim": TINY_CONFIG["head_dim"],
+            "global_head_dim": TINY_CONFIG["global_head_dim"],
+            "num_global_key_value_heads": TINY_CONFIG["num_global_key_value_heads"],
+            "sliding_window": TINY_CONFIG["sliding_window"],
+        },
+    )
 
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)

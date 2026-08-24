@@ -109,6 +109,9 @@ import ltx_core.model.transformer.transformer_args as transformer_args_mod  # no
 from ltx_core.model.transformer.model import LTXModel, LTXModelType  # noqa: E402
 from ltx_core.model.transformer.modality import Modality  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # A minimal, from-spec GGUF v2/v3 header reader (independent of brain's own
 # Rust parser AND of any `gguf`/`llama-cpp-python`-style package - this repo's
@@ -494,6 +497,26 @@ def main():
         "versions": {"torch": torch.__version__, "einops": einops.__version__, "python": sys.version.split()[0]},
     }
     save(args.out, "dit_real_tiny.safetensors", tensors, manifest)
+
+    # Real 22B weights at REDUCED depth, so `num_layers` here is `args.layers`
+    # (this dump's own truncation), not the checkpoint's - and recording it is
+    # the point: a reader pairing this golden with a full-depth run is exactly
+    # the mismatch to catch. This manifest already carries a `source_checkpoint`
+    # block of GGUF forensics; `source` is the ENFORCED half that
+    # brain_testutil::golden::Source compares, which that block is not.
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        files=[args.gguf],
+        hash_files=False,
+        identity={
+            "num_attention_heads": REAL_CONFIG["num_attention_heads"],
+            "attention_head_dim": REAL_CONFIG["attention_head_dim"],
+            "in_channels": REAL_CONFIG["in_channels"],
+            "out_channels": REAL_CONFIG["out_channels"],
+            "cross_attention_dim": REAL_CONFIG["cross_attention_dim"],
+            "num_layers": int(args.layers),
+        },
+    )
 
     with open(os.path.join(args.out, "manifest_real.json"), "w") as f_:
         json.dump(manifest, f_, indent=2, sort_keys=True)

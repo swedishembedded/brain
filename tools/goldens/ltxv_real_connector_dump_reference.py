@@ -68,6 +68,9 @@ _ec_path = _REFERENCE_ROOT / "packages" / "ltx-core" / "src" / "ltx_core" / "tex
 Embeddings1DConnector = _load_module_direct("ltx_core.text_encoders.gemma.embeddings_connector", str(_ec_path)).Embeddings1DConnector
 from ltx_core.model.transformer.rope import LTXRopeType  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 DIM = 32 * 128  # connector_num_attention_heads * connector_attention_head_dim = 4096
 NUM_LAYERS = 8
 NUM_REGISTERS = 128
@@ -162,6 +165,10 @@ def main():
               os.path.join(args.out, "connector_real.safetensors"))
     manifest = {"run": {"seed": args.seed, "s": S, "n_valid": N_VALID, "dim": DIM,
                         "num_layers": NUM_LAYERS, "num_registers": NUM_REGISTERS}}
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        identity={"dim": DIM, "num_layers": NUM_LAYERS, "num_registers": NUM_REGISTERS},
+    )
     with open(os.path.join(args.out, "manifest_connector.json"), "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"wrote {args.out}/connector_real.safetensors", flush=True)

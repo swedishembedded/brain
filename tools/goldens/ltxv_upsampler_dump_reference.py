@@ -85,6 +85,9 @@ from ltx_core.model.upsampler.model import LatentUpsampler  # noqa: E402
 from ltx_core.model.upsampler.model_configurator import LatentUpsamplerConfigurator  # noqa: E402
 from ltx_core.model.upsampler.spatial_rational_resampler import SpatialRationalResampler  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 _CLASS_NAME = "LatentUpsampler"
 
 
@@ -221,6 +224,9 @@ def dump_one(label, weights_path, out_dir, frames, size, seed, manifest):
         "num_blocks_per_stage": model.num_blocks_per_stage,
         "spatial_upsample": model.spatial_upsample, "temporal_upsample": model.temporal_upsample,
     }
+    # Returned so `main` can put both towers' channel counts in one `source`
+    # identity - the model object itself is local to this function.
+    return int(model.in_channels)
 
 
 def main():
@@ -240,8 +246,19 @@ def main():
                         "temporal_weights": os.path.abspath(args.temporal_weights)},
                 "versions": {"torch": torch.__version__, "python": sys.version.split()[0]}}
 
-    dump_one("spatial", args.spatial_weights, args.out, args.frames, args.size, args.seed, manifest)
-    dump_one("temporal", args.temporal_weights, args.out, args.frames, args.size, args.seed, manifest)
+    spatial_in = dump_one("spatial", args.spatial_weights, args.out, args.frames, args.size, args.seed, manifest)
+    temporal_in = dump_one("temporal", args.temporal_weights, args.out, args.frames, args.size, args.seed, manifest)
+
+    # Two checkpoints in one manifest, so the identity names BOTH towers'
+    # channel counts - a dump that paired the spatial upscaler with the
+    # temporal one's golden would otherwise look well-formed.
+    # `hash_files=False`: both are large and this dump is a couple of forwards.
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        files=[args.spatial_weights, args.temporal_weights],
+        hash_files=False,
+        identity={"spatial_in_channels": spatial_in, "temporal_in_channels": temporal_in},
+    )
 
     with open(os.path.join(args.out, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)

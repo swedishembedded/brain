@@ -91,6 +91,9 @@ from ltx_core.model.transformer.model import LTXModel, LTXModelType  # noqa: E40
 from ltx_core.model.transformer.modality import Modality  # noqa: E402
 from ltx_core.text_encoders.gemma.embeddings_connector import Embeddings1DConnector  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 # Toy dims (every step kind runs in well under a second); every FLAG is the
 # real LTX-2.5 value (see module docstring). Video half matches the
 # video-only dumper's TINY_CONFIG exactly (so both goldens describe the same
@@ -606,6 +609,27 @@ def dump_gated(args):
     sd.update({f"audio_embeddings_connector.{k}": v for k, v in audio_connector.state_dict().items()})
     save(args.out, "av_dit_tiny_gated_weights.safetensors", sd, manifest)
 
+    # Tiny random weights, so no upstream artifact to name. `apply_gated_
+    # attention` is folded into the identity as 0/1 (source_block enforces
+    # ints) because it changes the OP SEQUENCE, not just a shape - it is the
+    # entire reason the gated variant is dumped separately, so leaving it out
+    # would let the two goldens be swapped without anything noticing.
+    # `audio_in_channels` is in because this is the AudioVideo model type and
+    # the audio stream is a second, independently-sized tensor axis.
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        identity={
+            "num_attention_heads": TINY_GATED_CONFIG["num_attention_heads"],
+            "attention_head_dim": TINY_GATED_CONFIG["attention_head_dim"],
+            "in_channels": TINY_GATED_CONFIG["in_channels"],
+            "out_channels": TINY_GATED_CONFIG["out_channels"],
+            "num_layers": TINY_GATED_CONFIG["num_layers"],
+            "cross_attention_dim": TINY_GATED_CONFIG["cross_attention_dim"],
+            "audio_in_channels": TINY_GATED_CONFIG["audio_in_channels"],
+            "apply_gated_attention": int(TINY_GATED_CONFIG["apply_gated_attention"]),
+        },
+    )
+
     with open(os.path.join(args.out, "manifest_gated.json"), "w") as mf:
         json.dump(manifest, mf, indent=2, sort_keys=True)
     print(f"\nwrote {args.out}/manifest_gated.json", flush=True)
@@ -729,6 +753,27 @@ def main():
     # The tiny model's OWN weights, so the Rust smoke test needs no checkpoint.
     sd = dict(model.state_dict())
     save(args.out, "av_dit_tiny_weights.safetensors", sd, manifest)
+
+    # Tiny random weights, so no upstream artifact to name. `apply_gated_
+    # attention` is folded into the identity as 0/1 (source_block enforces
+    # ints) because it changes the OP SEQUENCE, not just a shape - it is the
+    # entire reason the gated variant is dumped separately, so leaving it out
+    # would let the two goldens be swapped without anything noticing.
+    # `audio_in_channels` is in because this is the AudioVideo model type and
+    # the audio stream is a second, independently-sized tensor axis.
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        identity={
+            "num_attention_heads": TINY_CONFIG["num_attention_heads"],
+            "attention_head_dim": TINY_CONFIG["attention_head_dim"],
+            "in_channels": TINY_CONFIG["in_channels"],
+            "out_channels": TINY_CONFIG["out_channels"],
+            "num_layers": TINY_CONFIG["num_layers"],
+            "cross_attention_dim": TINY_CONFIG["cross_attention_dim"],
+            "audio_in_channels": TINY_CONFIG["audio_in_channels"],
+            "apply_gated_attention": int(TINY_CONFIG["apply_gated_attention"]),
+        },
+    )
 
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)

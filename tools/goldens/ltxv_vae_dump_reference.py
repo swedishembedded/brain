@@ -81,6 +81,9 @@ from ltx_core.model.video_vae.model_configurator import (  # noqa: E402
     VideoEncoderConfigurator,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 _CONV_CLASS_NAME = "CausalVideoAutoencoder"
 
 
@@ -241,6 +244,23 @@ def main():
                 "decoder_timestep_conditioning": decoder.timestep_conditioning},
         "versions": {"torch": torch.__version__, "python": sys.version.split()[0]},
     }
+    # `hash_files=False`: the VAE checkpoint is large and hashing it would
+    # dominate a dump that is otherwise a few round trips. The scale factors go
+    # in one per axis rather than as a list, because `source_block` enforces
+    # ints (a list cannot be compared field-by-field on the Rust side) and it
+    # is the (t, h, w) stride that fixes every latent shape here.
+    tsf, hsf, wsf = (int(v) for v in encoder.video_scale_factors)
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        files=[args.weights],
+        hash_files=False,
+        identity={
+            "latent_channels": int(encoder.latent_channels),
+            "video_scale_factor_t": tsf,
+            "video_scale_factor_h": hsf,
+            "video_scale_factor_w": wsf,
+        },
+    )
 
     for t in [int(v) for v in args.frames.split(",")]:
         assert (t - 1) % 8 == 0, f"{t} frames is not 1+8k"

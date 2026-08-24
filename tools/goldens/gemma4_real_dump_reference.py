@@ -30,6 +30,9 @@ from transformers.models.gemma4_unified.modeling_gemma4_unified import (  # noqa
     Gemma4UnifiedTextModel,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 LAYERS = 6  # 5 sliding + 1 full, the real 5:1 pattern's minimal instance
 T = 12      # a plausible short real-prompt token count
 
@@ -216,6 +219,28 @@ def main():
     manifest = {"run": {"seed": args.seed, "tokens": T, "layers": LAYERS,
                         "layer_types": cfg.layer_types, "real_config": REAL_CONFIG}}
     save(args.out, "gemma4_real_reduced.safetensors", tensors, manifest)
+    # Real weights at REDUCED depth: `num_hidden_layers` here is LAYERS, this
+    # dump's own truncation, not the checkpoint's 48 - and that is exactly what
+    # must be recorded, since a reader pairing this golden with a full-depth
+    # run is the mismatch to catch. `hash_files=False`: the checkpoint is 26 GB
+    # of bf16 and hashing it would dwarf the dump.
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        files=[args.weights],
+        hash_files=False,
+        identity={
+            "vocab_size": REAL_CONFIG["vocab_size"],
+            "hidden_size": REAL_CONFIG["hidden_size"],
+            "intermediate_size": REAL_CONFIG["intermediate_size"],
+            "num_hidden_layers": REAL_CONFIG["num_hidden_layers"],
+            "num_attention_heads": REAL_CONFIG["num_attention_heads"],
+            "num_key_value_heads": REAL_CONFIG["num_key_value_heads"],
+            "head_dim": REAL_CONFIG["head_dim"],
+            "global_head_dim": REAL_CONFIG["global_head_dim"],
+            "num_global_key_value_heads": REAL_CONFIG["num_global_key_value_heads"],
+            "sliding_window": REAL_CONFIG["sliding_window"],
+        },
+    )
     with open(os.path.join(args.out, "manifest_real.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True, default=str)
     print(f"\nwrote {args.out}/manifest_real.json", flush=True)

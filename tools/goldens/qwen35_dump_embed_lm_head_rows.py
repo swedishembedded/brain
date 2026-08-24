@@ -24,10 +24,14 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
 
 
 def save(out_dir, name, tensors, manifest):
@@ -51,12 +55,26 @@ def main():
     with safe_open(shard, framework="pt") as f:
         embed = f.get_slice("model.language_model.embed_tokens.weight")
         head = f.get_slice("lm_head.weight")
+        # Read inside the handle's scope - the slice cannot be queried once
+        # `safe_open` has closed the file.
+        vocab_size, hidden_size = (int(d) for d in embed.get_shape())
         embed_rows = torch.stack([embed[i : i + 1, :][0].to(torch.float32) for i in token_ids])
         head_rows = torch.stack([head[i : i + 1, :][0].to(torch.float32) for i in token_ids])
 
     tensors = {"token_ids": torch.tensor(token_ids, dtype=torch.int32), "embed_rows": embed_rows, "lm_head_rows": head_rows}
     save(args.out, "rows.safetensors", tensors, manifest := {})
     manifest["_meta"] = {"token_ids": token_ids, "torch_version": torch.__version__, "checkpoint_dir_basename": os.path.basename(os.path.normpath(args.dir))}
+    # `vocab_size` is the identity that matters here: these are ROWS of the
+    # embedding and LM head, so a checkpoint with a different vocabulary makes
+    # every dumped row a different token's. `hidden_size` fixes their width.
+    # `hash_files=False` - `outside.safetensors` holds the full embedding and
+    # head, which is GBs for a handful of rows.
+    manifest["source"] = source_block(
+        checkpoint="Qwen/Qwen3.8-27B-FP8",
+        files=[shard],
+        hash_files=False,
+        identity={"vocab_size": vocab_size, "hidden_size": hidden_size},
+    )
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"wrote rows.safetensors + manifest.json -> {args.out}")

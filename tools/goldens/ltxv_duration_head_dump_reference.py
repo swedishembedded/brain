@@ -73,6 +73,9 @@ from ltx_core.duration_head.duration_head import DurationHead  # noqa: E402
 from ltx_core.duration_head.model_configurator import DurationHeadConfigurator  # noqa: E402
 from ltx_core.loader.sft_loader import SafetensorsModelStateDictLoader  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 
 def det_tokens(t, dim, seed):
     g = torch.Generator().manual_seed(seed)
@@ -217,6 +220,23 @@ def main():
         "versions": {"torch": torch.__version__, "python": sys.version.split()[0]},
     }
     save(args.out, "duration_head.safetensors", tensors, manifest)
+
+    # The two input projections' widths and the pooler geometry are what fix
+    # every dumped tensor here; `num_heads` is in because the pooler's
+    # cross-attention reshapes by it, so a checkpoint with the same dims but a
+    # different head count produces same-shaped tensors with different values -
+    # the failure that reads as a parity bug rather than a wrong pairing.
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        files=[args.weights],
+        hash_files=False,
+        identity={
+            "video_dim": int(model.video_input_proj.in_features),
+            "audio_dim": int(model.audio_input_proj.in_features),
+            "pooler_hidden_dim": int(model.pooler_hidden_dim),
+            "num_heads": int(model.attention_pooler.cross_attn.num_heads),
+        },
+    )
 
     with open(os.path.join(args.out, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)

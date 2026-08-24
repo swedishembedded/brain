@@ -63,6 +63,9 @@ from ltx_core.components.schedulers import (  # noqa: E402
     LTX2Scheduler,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 
 def _load_constants_by_path(path):
     """Import `ltx_pipelines/utils/constants.py` BY FILE PATH, never
@@ -211,6 +214,20 @@ def main():
         "versions": {"torch": torch.__version__, "numpy": np.__version__,
                      "python": sys.version.split()[0]},
     }
+    # This dump is scheduler math over constants read out of the reference
+    # source, not model tensors, so `identity` is the step counts - the one
+    # thing that fixes every dumped sigma vector's length and the one thing two
+    # LTX-2.5 schedules cannot both have. (Distinct from `params.source` above,
+    # which records WHICH source file the constants were read from.)
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        identity={
+            "distilled_8step_len": len(distilled_sigma_values),
+            "distilled_stage2_len": len(stage_2_distilled_sigma_values),
+            "distilled_tdp_len": int(tdp_distilled_sigmas.numel()),
+            "cases": len(manifest_cases),
+        },
+    )
     save(out, "schedule.safetensors", store, manifest)
     with open(os.path.join(out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)

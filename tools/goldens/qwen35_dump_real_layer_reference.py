@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -38,6 +39,9 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
 
 
 def dequant_block128(raw: torch.Tensor, scale_inv: torch.Tensor, block: int = 128) -> torch.Tensor:
@@ -147,6 +151,26 @@ def main():
         "transformers_version": transformers.__version__,
         "checkpoint_dir_basename": os.path.basename(os.path.normpath(args.dir)),
     }
+    # `hash_files=False`: one 27B layer shard is GBs, and hashing it would
+    # dominate a dump whose whole point is one layer. The identity carries the
+    # enforced half regardless.
+    manifest["source"] = source_block(
+        checkpoint="Qwen/Qwen3.8-27B-FP8",
+        files=[shard],
+        hash_files=False,
+        identity={
+            "hidden_size": cfg.hidden_size,
+            "intermediate_size": cfg.intermediate_size,
+            "num_attention_heads": cfg.num_attention_heads,
+            "num_key_value_heads": cfg.num_key_value_heads,
+            "head_dim": cfg.head_dim,
+            "num_hidden_layers": cfg.num_hidden_layers,
+            # The dumped tensors are ONE layer's, and which layer only fixes a
+            # shape via its block type (GDN and GQA layers differ), so the
+            # index is part of the identity, not just of `_meta`.
+            "layer": args.layer,
+        },
+    )
     with open(os.path.join(out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"wrote manifest.json -> {out}")

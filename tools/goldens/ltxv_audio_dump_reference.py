@@ -94,6 +94,9 @@ from ltx_core.model.audio_vae.model_configurator import (  # noqa: E402
 from ltx_core.model.audio_vae.ops import AudioProcessor  # noqa: E402
 from ltx_core.types import Audio  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 # Strips the doubled `vocoder.vocoder.` checkpoint prefix down to the bare
 # names `Vocoder.state_dict()` expects (`conv_pre.*`, `ups.*`, `resblocks.*`,
 # `act_post.*`, `conv_post.*`). Deliberately narrower than the library's
@@ -329,6 +332,25 @@ def main():
         "versions": {"torch": torch.__version__, "torchaudio": torchaudio.__version__,
                      "python": sys.version.split()[0]},
     }
+    # The audio VAE's mel front-end is what fixes every dumped tensor's shape,
+    # so `sample_rate`/`mel_bins`/`n_fft`/`mel_hop_length` are the identity -
+    # two audio checkpoints at different mel settings produce same-rank,
+    # different-length tensors, which is the mismatch that reads as a parity
+    # failure rather than as the wrong pairing it is. The vocoder's own output
+    # rate is in because this dump runs it too. `hash_files=False`: large
+    # checkpoint, short dump.
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        files=[args.weights],
+        hash_files=False,
+        identity={
+            "sample_rate": int(encoder.sample_rate),
+            "mel_bins": int(encoder.mel_bins),
+            "mel_hop_length": int(encoder.mel_hop_length),
+            "n_fft": int(encoder.n_fft),
+            "vocoder_output_sampling_rate": int(vocoder.output_sampling_rate),
+        },
+    )
     save(args.out, "audio.safetensors", tensors, manifest)
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)

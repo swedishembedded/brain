@@ -101,6 +101,9 @@ from ltx_core.model.video_vae.transformer.blocks import DiffusionNABlock  # noqa
 from ltx_core.model.video_vae.transformer.fallback_na import EagerSdpaAttention  # noqa: E402
 from ltx_core.model.video_vae.transformer.fallback_na.eager import na3d as eager_na3d  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 _DIFF_CLASS_NAME = "CausalDiffusionVAE"
 
 
@@ -270,6 +273,26 @@ def main():
           f"modulation source, no separate gate_msa/gate_mlp/gate_ctx to fold)", flush=True)
     assert len(gates) == 0, f"unexpected gate tensors in this checkpoint: {sorted(gates)}"
     manifest["run"]["gate_tensors_found"] = len(gates)
+    # The NA decoder's stage geometry is what fixes every dumped tensor. The
+    # per-stage channel/depth lists cannot go in as lists (source_block enforces
+    # ints, so the Rust side can compare field by field), so they go in as a
+    # count plus their first and last entries - enough that a decoder with a
+    # different stage ladder cannot match, without inventing a list comparison
+    # the enforcing side does not have.
+    manifest["source"] = source_block(
+        checkpoint="Lightricks/LTX-2.5",
+        files=[args.weights],
+        hash_files=False,
+        identity={
+            "num_stages": len(decoder.stage_channels),
+            "stage_channels_first": int(decoder.stage_channels[0]),
+            "stage_channels_last": int(decoder.stage_channels[-1]),
+            "stage_depths_first": int(decoder.stage_depths[0]),
+            "stage_depths_last": int(decoder.stage_depths[-1]),
+            "context_channels": int(decoder.context_channels),
+            "default_num_inference_steps": int(decoder.default_inference_timesteps.numel()),
+        },
+    )
 
     # ---- self-validation 2: eager_na3d vs an independent brute-force loop,
     # small synthetic volume, nothing to do with the real weights. ----------

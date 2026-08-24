@@ -40,6 +40,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -49,6 +50,9 @@ import transformers
 from safetensors.torch import save_file
 
 from transformers.models.qwen3_5 import Qwen3_5VisionConfig, Qwen3_5VisionModel
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
 
 OUT_HIDDEN_SIZE = 5120  # this model's own decoder d_model, not the HF default
 
@@ -191,6 +195,27 @@ def main():
         "torch_version": torch.__version__,
         "transformers_version": transformers.__version__,
     }
+    # Real dims, random weights - so no `checkpoint`/`files` to name, but the
+    # identity is exactly what a reader must check: these tensors are shaped by
+    # Qwen3.8-27B's REAL vision config, and pairing them with any other tier's
+    # tower is the mismatch this block exists to catch. `patch_size` and
+    # `temporal_patch_size` are in because they size `patch_embed.weight`
+    # (`in_channels * temporal_patch_size * patch_size^2`), not just the
+    # sampling schedule.
+    manifest["source"] = source_block(
+        identity={
+            "depth": cfg.depth,
+            "hidden_size": cfg.hidden_size,
+            "num_heads": cfg.num_heads,
+            "intermediate_size": cfg.intermediate_size,
+            "patch_size": cfg.patch_size,
+            "temporal_patch_size": cfg.temporal_patch_size,
+            "spatial_merge_size": cfg.spatial_merge_size,
+            "num_position_embeddings": cfg.num_position_embeddings,
+            "in_channels": cfg.in_channels,
+            "out_hidden_size": cfg.out_hidden_size,
+        },
+    )
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"wrote manifest.json -> {args.out}")

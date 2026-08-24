@@ -101,6 +101,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -110,6 +111,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import transformers
 from safetensors.torch import save_file
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5RMSNorm,
@@ -458,6 +462,29 @@ def main():
         "torch_version": torch.__version__,
         "transformers_version": transformers.__version__,
     }
+    # No `checkpoint`/`files`: this dumper builds its OWN tiny weights, so
+    # there is no upstream artifact to name. The identity still matters, and
+    # arguably matters more here - the failure this guards is a tiny golden
+    # being compared against the REAL Qwen3.8-27B config, which is exactly the
+    # tier mismatch the block exists to catch. Every field below is a tensor
+    # axis; the schedule/kernel-width knobs (`full_attention_interval`,
+    # `linear_conv_kernel_dim`) are deliberately left out because they size
+    # nothing.
+    manifest["source"] = source_block(
+        identity={
+            "vocab_size": TINY_TEXT["vocab_size"],
+            "hidden_size": TINY_TEXT["hidden_size"],
+            "intermediate_size": TINY_TEXT["intermediate_size"],
+            "num_hidden_layers": TINY_TEXT["num_hidden_layers"],
+            "num_attention_heads": TINY_TEXT["num_attention_heads"],
+            "num_key_value_heads": TINY_TEXT["num_key_value_heads"],
+            "head_dim": TINY_TEXT["head_dim"],
+            "linear_key_head_dim": TINY_TEXT["linear_key_head_dim"],
+            "linear_value_head_dim": TINY_TEXT["linear_value_head_dim"],
+            "linear_num_key_heads": TINY_TEXT["linear_num_key_heads"],
+            "linear_num_value_heads": TINY_TEXT["linear_num_value_heads"],
+        },
+    )
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"wrote manifest.json -> {args.out}")
