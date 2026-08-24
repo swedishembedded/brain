@@ -688,6 +688,32 @@ impl Qwen {
         Qwen::new_impl(cfg, b, t, init, false, shard, dt, false)
     }
 
+    /// [`Self::new_shard_dt`] shaped for **KV-cache decode**, the way
+    /// [`Self::from_reader_decode`] is to [`Self::new_shard`] - the two axes
+    /// (weight tier, activation shape) were previously only available one at
+    /// a time.
+    ///
+    /// `new_shard_dt` builds the BATCHED forward shape: per-layer activations
+    /// at `n = b·t`, `scores`/`probs` at `n_heads·ctx²`, a `logits` buffer at
+    /// `n·vocab`, and - because the `bwd` scratch is dummied out by
+    /// `decode_only` rather than by `train` - backward buffers, even on an
+    /// inference build. A caller that only ever drives `prefill`/`step`/
+    /// `step_embed` pays for every one of those and touches none of them.
+    ///
+    /// That is not a rounding error at real scale. An 8B model with
+    /// `vocab = 200000` reaching for int8 to fit a 24 GB card gets its
+    /// linears down to ~7 GB and then spends the saving back on batched
+    /// scratch it never reads. This constructor is what makes "int8 so it
+    /// fits" actually fit.
+    ///
+    /// Same tier semantics as [`Self::new_shard_dt`]: the request goes
+    /// through `Weight::upload`'s own `promote`, so ask [`Self::linear_dtype`]
+    /// what landed. Calling a batched forward/backward entry point on the
+    /// result panics loudly rather than running past the smaller buffers.
+    pub fn new_shard_dt_decode(cfg: QwenConfig, ctx: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
+        Qwen::new_impl(cfg, 1, ctx, init, false, shard, dt, true)
+    }
+
     /// The shared builder behind every constructor. `decode_only` (set only by
     /// [`Self::from_reader_decode`]) shapes the model for single-token KV-cache
     /// decode instead of the batched forward: activations at `n = 1`,
@@ -1208,6 +1234,41 @@ impl Qwen {
         block::vocab_tiles_on(&self.gpu, self.cfg.vocab as u64, self.cfg.d_model as u64)
     }
 
+    /// The token-embedding gather for `n` token rows, as tiled steps.
+    ///
+    /// `tok.weight` is bound as SUB-RANGES (`step_sliced`), one per vocab
+    /// tile, because a single storage binding is capped at
+    /// `max_storage_buffer_binding_size` - which wgpu clamps to `i32::MAX`
+    /// (2047 MiB) on EVERY backend, not just small ones. A `[200000, 4096]`
+    /// fp32 table is 3.28 GB, so it cannot be bound whole on any card,
+    /// including a 24 GB P40 whose `max_buffer_size` is twice the binding
+    /// limit. `EMBED_TILE` writes an output element only when its token
+    /// falls in the bound tile, and every token belongs to exactly one, so
+    /// across the tiles each element is written exactly once.
+    ///
+    /// This is the ONE embedding gather. The batched forward already
+    /// tiled; the decode path did not, and dispatched the untiled `EMBED`
+    /// against the whole table - which is fine for a small vocab and a hard
+    /// validation error for a large one. That split is why an 8B model with
+    /// `vocab = 200000` failed in `create_bind_group` on real hardware
+    /// while its own batched forward was perfectly happy.
+    fn embed_tiled(&self, g: &Gpu, out: &DeviceBuffer, n: u32) -> Vec<Step> {
+        let d = self.cfg.d_model;
+        let dw = d as u64;
+        self.vocab_tiles()
+            .into_iter()
+            .map(|(v0, cnt)| {
+                g.step_sliced(
+                    EMBED_TILE,
+                    &[&self.tokens, self.w("tok.weight"), out],
+                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
+                    &[d, n, v0, cnt],
+                    n * d,
+                )
+            })
+            .collect()
+    }
+
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
         assert!(
             !self.decode_only,
@@ -1235,15 +1296,7 @@ impl Qwen {
         // under the backend's max-binding size (GL: 128MB). Only the embed stage
         // runs it; other stages receive `res[start]` from the previous stage.
         if self.shard.embed {
-            for &(v0, cnt) in &tiles {
-                s.push(self.gpu.step_sliced(
-                    EMBED_TILE,
-                    &[&self.tokens, self.w("tok.weight"), &self.res[0]],
-                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
-                    &[d, n, v0, cnt],
-                    n * d,
-                ));
-            }
+            s.extend(self.embed_tiled(&self.gpu, &self.res[0], n));
             // Vision-language splice: overwrite the image-placeholder rows of the
             // freshly-gathered residual stream with the projected image tokens.
             if let Some((row0, n_rows)) = self.mm_splice.get() {
@@ -2008,7 +2061,7 @@ impl Qwen {
         let d = self.cfg.d_model;
         self.gpu.write(&self.tokens, &[token_id]);
         let out = self.gpu.storage(d as u64);
-        self.gpu.submit(&[], &[self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &out], &[d, 1], d)]);
+        self.gpu.submit(&[], &self.embed_tiled(&self.gpu, &out, 1));
         self.gpu.read(&out, d as usize)
     }
 
@@ -2139,7 +2192,7 @@ impl Qwen {
         let mut s: Vec<Step> = Vec::new();
         if let Some(token_id) = token_id {
             g.write(&self.tokens, &[token_id]);
-            s.push(g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, 1], d));
+            s.extend(self.embed_tiled(g, &self.res[0], 1));
         }
 
         for l in 0..c.n_layers as usize {

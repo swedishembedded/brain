@@ -164,7 +164,19 @@ pub fn import(dir: &str, b: u32, t: u32) -> Result<(QwenConfig, Qwen), String> {
     let cfg = qwen3::import::config_from_hf(&config_json)?;
     let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir)).map_err(|e| format!("global_llm::import: {e}"))?;
     let src = qwen3::import::hf_source(&reader, &cfg)?;
-    let qwen = Qwen::new_shard_i8(cfg.clone(), b, t, &src, model::Shard::whole(cfg.n_layers as usize));
+    // Decode-only, not the batched-forward shape. The AR stage drives this
+    // model exclusively through `prefill`/`step_embed` (see
+    // `crate::pipeline::generate_frames`), so the batched build's per-layer
+    // `n = b*t` activations, `n_heads*ctx^2` scores/probs, `n*vocab` logits
+    // buffer and backward scratch are all allocated and never touched.
+    //
+    // At this model's scale that is what decides whether it runs at all:
+    // the int8 tier gets 36 layers of linears down to ~7 GB, and the unused
+    // batched scratch spent the saving straight back, taking a single
+    // instance past a 24 GB card - measured, as an out-of-memory inside
+    // `Weight::upload`, before this was decode-shaped.
+    assert_eq!(b, 1, "global_llm::import: the AR stage is single-sequence (qwen3's KV-cache decode path has no batch axis), got b={b}");
+    let qwen = Qwen::new_shard_dt_decode(cfg.clone(), t, &src, model::Shard::whole(cfg.n_layers as usize), qwen3::Dtype::I8);
     Ok((cfg, qwen))
 }
 

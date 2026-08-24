@@ -122,6 +122,43 @@ pub struct GeneratedSong {
     pub sample_rate: u32,
 }
 
+/// Which physical card each of the AR stage's two CFG branches loads onto.
+///
+/// The conditional and unconditional branches are the SAME 8B checkpoint
+/// loaded twice, and at int8 each instance is roughly 13 GB: ~6.4 GB of
+/// packed int8 per-layer linears, plus the `tok.weight` and `lm_head`
+/// tables which stay fp32 at ~3.28 GB each (they are gathered by
+/// `embed_tile`/vocab-tiled rather than run through a packed-weight GEMM,
+/// so no int8 tier applies to them). The pair therefore does not fit one
+/// 24 GB card, which is exactly why the upstream implementation documents
+/// two CUDA GPUs as a hard requirement.
+///
+/// With two or more schedulable GPUs the branches go on different cards.
+/// With one - including when the caller pinned `--device gpu0` - both land
+/// on it and a real checkpoint will exhaust it; that is the caller's
+/// explicit choice, so it is left to fail with the backend's own
+/// out-of-memory error rather than silently overridden.
+///
+/// The two branches only ever exchange host-side vectors (each `Qwen`
+/// keeps its own KV cache and hidden states come back to the host anyway
+/// for the CFG blend), so there is no cross-device transfer to arrange.
+fn ar_branch_devices() -> (Option<u32>, Option<u32>) {
+    let gpus = &gpu_core::devices::ambient_compute_set().gpus;
+    match gpus.len() {
+        0 | 1 => (None, None),
+        _ => (Some(gpus[0]), Some(gpus[1])),
+    }
+}
+
+/// [`global_llm::import`] on a specific card, or on the ambient selection
+/// when `device` is `None`.
+fn load_global_llm(dir: &str, cap: u32, device: Option<u32>) -> Result<(qwen3::QwenConfig, qwen3::Qwen), String> {
+    match device {
+        Some(i) => gpu_core::devices::with_gpu(i, || global_llm::import(dir, 1, cap))?,
+        None => global_llm::import(dir, 1, cap),
+    }
+}
+
 /// Run the full pipeline: prompt assembly -> CFG-guided AR sampling ->
 /// chunked DiT denoising -> vocoder crop-and-stitch. See this module's own
 /// doc for the sequential-stage RAM discipline and the `BRAIN_DEVICE=cpu`
@@ -134,8 +171,9 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         let tokenizer = QwenBpe::from_dir(&paths.tokenizer)?;
         let (conditional_ids, unconditional_ids) = global_llm::assemble_prompt(&tokenizer, caption, lyrics);
         let cap = (conditional_ids.len() + max_frames + 8) as u32;
-        let (cfg, lm_cond) = global_llm::import(&paths.lm, 1, cap)?;
-        let (_, lm_uncond) = global_llm::import(&paths.lm, 1, cap)?;
+        let (cond_dev, uncond_dev) = ar_branch_devices();
+        let (cfg, lm_cond) = load_global_llm(&paths.lm, cap, cond_dev)?;
+        let (_, lm_uncond) = load_global_llm(&paths.lm, cap, uncond_dev)?;
         let head = lm_cond.read_weight(cfg.head_weight());
 
         let dd_cfg = DepthDecoderConfig::real();

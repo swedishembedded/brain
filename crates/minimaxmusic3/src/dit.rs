@@ -52,6 +52,13 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
+    // The fast GEMM family. Registering ONLY the naive `matmul` above meant
+    // every projection in all 36 blocks ran the one-thread-per-output
+    // reference kernel - measured at 37 s per denoise step on a P40, which
+    // is the defect class AGENTS.md calls this repo's most expensive ("a
+    // fast kernel a later model never learned about").
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
 ];
 const CONV1D: usize = 0;
 const CONV1D_DX: usize = 1;
@@ -78,6 +85,8 @@ const SILU_MUL: usize = 19;
 const SILU_BWD_DA: usize = 20;
 #[allow(dead_code)]
 const SILU_BWD_DB: usize = 21;
+const MATMUL_REG3: usize = 22;
+const MATMUL_GEMV: usize = 23;
 
 const LN_EPS: f32 = 1e-5;
 
@@ -93,6 +102,30 @@ fn bidir_ids() -> BidirIds {
 fn kernel_ids() -> KernelIds {
     KernelIds { rmsnorm: 0, rms_inv: 0, rmsnorm_dx: 0, rmsnorm_dw: 0, rope: 0, rope_bwd: 0, gqa_scores: 0, gqa_apply: 0, attn_softmax: 0, gqa_dscores: 0, gqa_dv: 0, gqa_dq: 0, gqa_dk: 0, silu_mul: SILU_MUL, silu_da: SILU_BWD_DA, silu_db: SILU_BWD_DB }
 }
+/// `out = x @ W^T` for `x: [m,k]`, `w: [n,k]` - through
+/// `model::block::gemm_variant`, the SAME shared GEMM selection rule
+/// `ltxv::block::linear` and `wan::block::linear` use.
+///
+/// This module previously hardcoded the naive `MATMUL` at all six of its
+/// dispatch sites. That is the reference kernel (`@opt 2`, "one thread per
+/// output element, serial inner reduction"); the register-tiled
+/// `matmul_reg3` (`@opt 5`) is what every other transformer in this
+/// workspace dispatches. On a real P40 the naive kernel put the DiT at a
+/// fraction of a percent of the card's fp32 peak.
+///
+/// The 256-thread tiled/GEMV kernels are gated on the device's QUERIED
+/// `workgroup_reductions` capability, so the CPU JIT (which reports it
+/// false) keeps the reference kernel and stays correct.
+fn linear_step(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> gpu_core::Step {
+    let variant = if gpu.caps().workgroup_reductions {
+        block::GemmVariants::Fast { gemv: Some(MATMUL_GEMV), tiled: MATMUL_REG3 }
+    } else {
+        block::GemmVariants::Reference(MATMUL)
+    };
+    let (kind, threads) = block::gemm_variant(variant, m, n);
+    gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+}
+
 fn ln_ids() -> LayerNormIds {
     LayerNormIds { layernorm: LAYERNORM, layernorm_rows: None, ln_stats: LN_STATS, ln_stats_rows: None, layernorm_dx: LAYERNORM_DX, layernorm_dx_rows: None }
 }
@@ -316,9 +349,9 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL, &[&xn1, &db.wq, &q_tmp], &[rows as u32, inner as u32, inner as u32], (rows * inner) as u32),
-            gpu.step(MATMUL, &[&xn1, &db.wk, &k_tmp], &[rows as u32, inner as u32, inner as u32], (rows * inner) as u32),
-            gpu.step(MATMUL, &[&xn1, &db.wv, &v_tmp], &[rows as u32, inner as u32, inner as u32], (rows * inner) as u32),
+            linear_step(gpu, &xn1, &db.wq, &q_tmp, rows as u32, inner as u32, inner as u32),
+            linear_step(gpu, &xn1, &db.wk, &k_tmp, rows as u32, inner as u32, inner as u32),
+            linear_step(gpu, &xn1, &db.wv, &v_tmp, rows as u32, inner as u32, inner as u32),
         ],
     );
 
@@ -351,7 +384,7 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
 
     let proj = gpu.storage((rows * inner) as u64);
     let xmid = gpu.storage((rows * inner) as u64);
-    gpu.submit(&[], &[gpu.step(MATMUL, &[&ctx, &db.wo, &proj], &[rows as u32, inner as u32, inner as u32], (rows * inner) as u32)]);
+    gpu.submit(&[], &[linear_step(gpu, &ctx, &db.wo, &proj, rows as u32, inner as u32, inner as u32)]);
     gpu.submit(&[], &[gpu.step(ADD2, &[x, &proj, &xmid], &[(rows * inner) as u32], (rows * inner) as u32)]);
 
     let xn2 = gpu.storage((rows * inner) as u64);
@@ -361,7 +394,7 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL, &[&xn2, &db.ff_in_w, &ff_raw], &[rows as u32, inner as u32, (2 * ff_inner) as u32], (rows * 2 * ff_inner) as u32),
+            linear_step(gpu, &xn2, &db.ff_in_w, &ff_raw, rows as u32, inner as u32, (2 * ff_inner) as u32),
             gpu.step(BIAS_ADD, &[&ff_raw, &db.ff_in_b], &[rows as u32, (2 * ff_inner) as u32], (rows * 2 * ff_inner) as u32),
         ],
     );
@@ -387,7 +420,7 @@ pub(crate) fn block_fwd(gpu: &Gpu, cfg: &DitConfig, db: &DeviceBlock, x: &Device
     gpu.submit(
         &[],
         &[
-            gpu.step(MATMUL, &[&act, &db.ff_out_w, &ff_out], &[rows as u32, ff_inner as u32, inner as u32], (rows * inner) as u32),
+            linear_step(gpu, &act, &db.ff_out_w, &ff_out, rows as u32, ff_inner as u32, inner as u32),
             gpu.step(BIAS_ADD, &[&ff_out, &db.ff_out_b], &[rows as u32, inner as u32], (rows * inner) as u32),
         ],
     );
