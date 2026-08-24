@@ -208,7 +208,11 @@ that needs a real checkpoint; unset means the test skips):
 `BRAIN_FLUX2_BATCH_PRECISION`, `BRAIN_FLUX2_BATCH_REPS`, `BRAIN_S3DIT_I8`,
 `BRAIN_LFM25_230M`, `BRAIN_LFM25_350M`, `BRAIN_QWEN3_4B`,
 `BRAIN_QWEN35_SMOKE_GPUS`, `BRAIN_QWEN35_SMOKE_LAYERS`, `BRAIN_QWEN35_SMOKE_LR`,
-`BRAIN_QWEN35_SMOKE_STEPS`, `BRAIN_QWEN35_SMOKE_T`, `BRAIN_QWEN3OMNIMOE_IMPORT_OUT`,
+`BRAIN_QWEN35_SMOKE_STEPS`, `BRAIN_QWEN35_SMOKE_T`, `BRAIN_QWEN35_DIR` (a downloaded
+`Qwen/Qwen3.8-27B-FP8` directory, raw HF FP8 shards such as `layers-N.safetensors`;
+read by `crates/qwen35`'s `streaming_forward` real-weight test, which self-skips
+when unset, and by the `import_profile` dev-benchmark binary, which panics if
+neither this variable nor an explicit shard path is given), `BRAIN_QWEN3OMNIMOE_IMPORT_OUT`,
 `BRAIN_MOONDREAM3_CKPT`, `BRAIN_QWEN3VL_CKPT`, `BRAIN_FASTVLM_CKPT`,
 `BRAIN_FASTVLM_TEST_IMG`, `BRAIN_VL_PARITY_OUT`, `BRAIN_REF_RECT`,
 `BRAIN_WAN_VAE`, `BRAIN_WAN_T5`, `BRAIN_WAN_TOKENIZER`, `BRAIN_WAN_GGUF` (a
@@ -318,7 +322,18 @@ Wan-VAE block output for parity debugging), `BRAIN_LTXV_VAE_TAPS` (the same tap
 recording for the LTX-Video VAE), `BRAIN_VAE3D_NOPOOL` (disable the
 3D VAE builder's buffer pooling, which a tap would otherwise read after reuse),
 `BRAIN_WAN_T5_FORCE_GPU` (run the umT5-XXL parity test on a GPU anyway - it
-skips by default because 22.72 GB of fp32 weights exceed a 24 GB card).
+skips by default because 22.72 GB of fp32 weights exceed a 24 GB card),
+`BRAIN_LTXV_LATENT_DUMP` (write the final denoised latent to the given path
+before decode, on the real `brain ltxv` generation path; a write failure is
+traced, never fatal), and, read only by the `ltxv_bench` profiling binary
+(`crates/ltxv/src/bin/ltxv_bench.rs`, not the production pipeline):
+`BRAIN_LTXV_DECODE_LF_SUBST` (`dst=src` overwrites latent frame `dst` with
+latent frame `src` before decoding, to isolate a latent frame's temporal
+receptive field), `BRAIN_LTXV_DECODE_UPSAMPLE` (path to a spatial-upscaler
+checkpoint; runs the real x2 latent upscaler over the latent before decoding,
+with no refinement pass), `BRAIN_LTXV_DECODE_UPSAMPLE_RAW` (skips the
+upsampled output's un-normalize/statistics step), and `BRAIN_LTXV_PIXEL_DUMP`
+(write the decoded pixel frames to the given path).
 
 **LTX-2.5 dev/debug knobs.** Internal rather than user-facing because
 `ltxv::pipeline` is still a smoke test (real VAE + tiny random-weight DiT, no

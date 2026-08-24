@@ -276,7 +276,7 @@ export BRAIN_LTXV_UPSAMPLER_SPATIAL=[path/to/ltx-2.5-latent-spatial-upscaler-x2-
 export BRAIN_LTXV_DIT=[path/to/ltx-2.5-22b-distilled-transformer-Q8_0.gguf]
 export BRAIN_LTXV_TEXT_ENCODER=[path/to/gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf]
 brain -v --device gpu0 ltxv upscale --dit-config ltx25_22b \
-  --input clip.mp4 --output-path clip_2x.mp4 \
+  --input clip.mp4 --output-path clip_upscaled.mp4 \
   --prompt "the prompt the clip was generated from"
 ```
 
