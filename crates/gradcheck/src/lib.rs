@@ -31,6 +31,10 @@ pub mod arcface;
 pub use arcface::check_arcface;
 
 pub mod vqgan;
+
+/// `check_unet` - the SDXL UNet2DConditionModel backward, the first diffusion
+/// BACKBONE (rather than autoencoder) gated here.
+pub mod unet;
 pub use vqgan::check_vqgan;
 
 pub mod clip;

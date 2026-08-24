@@ -147,9 +147,7 @@ impl ControlNet {
         let aug_in = gpu.storage(bb.projection_class_embeddings_input_dim as u64);
         let scale_in = gpu.storage(1);
 
-        // No up path, so the up term must not even be indexed.
-        let s_words = sdxlunet::model::attn_slab_words(&bb, h, w, false);
-        let mut r = Rec::new(&gpu, &bb, tensors, t_enc, s_words, taps);
+        let mut r = Rec::new(&gpu, &bb, tensors, t_enc, taps);
 
         r.conditioning(&bb, &temb_in, &aug_in);
 

@@ -17,16 +17,47 @@ ControlNet integration is wired via `Unet::new_controlled` /
 
 ## Not yet done
 
-- [ ] Backward pass / gradient check for the UNet graph (`check_unet`).
-      **The cheapest unmet backward in the repo** - the forward is built
-      entirely from existing conv/transformer blocks, so this composes
-      existing adjoints rather than needing new kernel work. It also
-      unblocks `check_controlnet`.
-      Use `gradcheck::elementwise_check`, not `directional_check` alone, for
-      the timestep embedding: it is added into every resnet, so it is a
-      shared parameter accumulated over many contributors - exactly the
-      folded-parameter class where best-of-n directional checks pass while
-      the gradient is partially wrong (see `.agents/rules/lessons.md`).
+- [x] Backward pass / gradient check for the UNet graph (`check_unet`).
+      `crates/sdxlunet/src/train.rs` (`UnetTrainer`) + `gradcheck::check_unet`
+      and `check_unet_conditioning_elementwise`.
+
+      **The "cheapest unmet backward" framing was half right and dangerously
+      half wrong.** Right that no kernel was needed - `matmul_dx`/`matmul_dw`,
+      `bias_grad`, `gelu_erf_bwd`, `layernorm_dx`/`_dgamma`/`_dbeta`,
+      `add_chan_bcast_dv`, `concat_split` and the `attn_bwd_*_cross` quartet all
+      already existed for the decoder LMs. Wrong that the transformer half was
+      merely un-checked: `Rec` emitted ALL of it with
+      `vae::blocks::Builder::push_step`, which records nothing on the reverse
+      tape, and a pushed step mid-chain gives every parameter upstream of it a
+      silent ZERO gradient (that method's own doc says so). So this was latent
+      breakage waiting for the first `.backward()`, not a missing test.
+
+      The fix is in the SHARED builder, not this crate: `vae::blocks` grew real
+      recorders (`linear`, `layernorm`, `gelu_erf`, `mul`, `add_chan`,
+      `self_attn`, `cross_attn`, plus a tape entry on the existing `concat`),
+      seven new `Op` variants and their adjoints, and an `XformerIds` seam for
+      the caller's own forward slots (`vae::blocks` cannot register LayerNorm/
+      GEMM/cross-attention itself - the caller already does, and a second
+      registration of one kernel name is what the CPU JIT rejects). `Rec` now
+      routes through them. Purely additive: `vqgan`, `codeformer`, `rrdbnet`
+      and `AutoencoderKL` record none of the new variants and are unchanged.
+
+      Two forward changes train mode requires, both of which run fine and are
+      wrong (see `.agents/rules/lessons.md` #55): flash attention never
+      materialises the softmax its adjoint binds, so a recording builder takes
+      the materialised path regardless of device; and each attention SITE needs
+      its own `probs` slab, where the eval graph shared one.
+
+      The elementwise half runs at a NARROWED conditioning chain
+      (`time_embed_dim = 16`). At the full tiny config `elementwise_check`'s
+      `2*numel` forwards is ~100k full UNet passes - a gate nobody would run,
+      which this repo counts as no gate. 16 catches the same defect class: all
+      17 resnets still consume `silu(emb)`.
+
+- [ ] `check_controlnet` - now unblocked. ControlNet's trainable copy IS the
+      UNet's blocks (recorded by `sdxlunet::model::Rec`), so its backward
+      composes the same tape; what it additionally needs is an adjoint for the
+      residual injection points and the conditioning-image embedder.
 - [ ] Batch > 1 support - needed for classifier-free guidance as a single
       batched forward instead of two passes. Today every request is its own
       multi-step sample, so `run_batch` is the serial default (documented in

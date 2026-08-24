@@ -298,9 +298,13 @@ fast and scalable kernel - not a naive one.
     discrete Euler step, CFG, VAE decode - "SDXL works" end to end).
     **Serving contract met**: `sdxlunet::caps` (`text2image`),
     `resident_sdxl::SdxlResident` (`BRAIN_SDXL_DIR`), D-Bus `Run`,
-    `examples/imagegen/sdxl_generate.py`. *(No batching - every request is its
-    own multi-step sample, see `resident_sdxl.rs`'s module docs for why;
-    backward/`check_unet` deferred.)*
+    `examples/imagegen/sdxl_generate.py`. **Backward + gradcheck done**
+    (`crates/sdxlunet/src/train.rs`, gated by `gradcheck::check_unet` and
+    `check_unet_conditioning_elementwise`) - which required teaching the shared
+    `vae::blocks` tape to RECORD the transformer half rather than
+    `push_step` past it; see `.agents/rules/lessons.md` #55. *(No batching -
+    every request is its own multi-step sample, see `resident_sdxl.rs`'s module
+    docs for why.)*
 
 12f. **ControlNet** (`crates/controlnet`) - phase 4c: a **backbone-agnostic
     control seam** plus the SDXL `ControlNetModel` that is its first producer.
@@ -1345,7 +1349,8 @@ a metric that isn't there was simply forgotten.
   `_av_conditioning`), `check_cosyvoice_lm` (+ `_block`), `check_qwen2`,
   `check_qwen_mrope`, `check_qwen3_weighted`, `check_vlm_splice`,
   `check_dit`, `check_vocoder`, `check_deepseekocr_relpos`
-  (+ `_elementwise`), `check_matmul_bf16_weight`, plus the
+  (+ `_elementwise`), `check_matmul_bf16_weight`, `check_unet`
+  (+ `_conditioning_elementwise`), plus the
   imaging workstream's `check_sam2` (+ `_on`), `check_arcface`, `check_vqgan`
   (+ `_lowered`), `check_clip` (+ `_bigg`, `_tiled`),
   `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
@@ -1358,17 +1363,20 @@ a metric that isn't there was simply forgotten.
   **Full backward + a `gradcheck` entry point is the default expectation for
   every new model, not an opt-out.** Forward-only is the exception, and it
   requires the same explicit justification the models that already ship that
-  way recorded when they did: `check_flux1`, `check_unet`,
+  way recorded when they did: `check_flux1`,
   `check_controlnet`, `check_pulid`, `check_instantid`, `check_chronos2`
   and `check_rrdbnet` are genuinely absent
   because those ports prioritized reaching a working forward pass on
   hardware-constrained checkpoints first, each documented in its own
   `.agents/roadmap/<model>.md` - that list is a record of what shipped
   under real constraints, not a template to reach for on a new port.
-  `check_unet` is the cheapest of them to close (SDXL's forward is built
-  entirely from existing conv/transformer blocks, so its backward composes
-  existing adjoints), and closing it unblocks `check_controlnet`, whose
-  trainable copy is those same blocks. Do not
+  `check_unet` used to head that list and is now CLOSED; the note that it
+  would be "cheap because the forward composes existing adjoints" was half
+  right (no kernel was needed) and half wrong in the dangerous direction - the
+  transformer half was emitted with `Builder::push_step`, i.e. it was not
+  differentiable at all rather than merely un-gated. `check_controlnet` is
+  unblocked by it, since ControlNet's trainable copy IS those same recorded
+  blocks. Do not
   cite "some models ship forward-only" as a reason to skip backward on a new
   model; if a genuine constraint forces that tradeoff, name it and record it
   the same way, in the same change.

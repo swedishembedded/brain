@@ -16,9 +16,16 @@ comparisons / 0 failed, worst 1−cos 1.914e-11, on both a P40 and
 ## Not yet done
 
 - [ ] Backward / gradient check (`check_controlnet`) - no training path
-      exists at all. Should follow directly from `check_unet`
-      (`.agents/roadmap/sdxlunet.md`), since the trainable copy is the same
-      blocks; do that one first
+      exists at all. **`check_unet` is now closed, so the prerequisite is
+      met**: the trainable copy is the same `sdxlunet::model::Rec`-recorded
+      blocks, and those now record onto `vae::blocks`' reverse tape rather
+      than being `push_step`ed past it, so `Trace::backward` already
+      differentiates them. What is left is specific to this crate: an adjoint
+      for the residual injection points (each is an `Op::Add2` on the UNet
+      side, so the gradient reaching a residual is just `d` of that buffer -
+      `Reverse::d()` exposes it) and for the conditioning-image embedder's
+      own conv stack (already `vae::blocks`, so also already on the tape).
+      Model it on `crates/sdxlunet/src/train.rs`.
 - [ ] A fused on-device path - today residuals round-trip through the host
       between the ControlNet and UNet graphs even though both already run on
       one device with one kernel set

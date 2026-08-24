@@ -39,6 +39,7 @@ pub mod import;
 pub mod init;
 pub mod model;
 pub mod pipeline;
+pub mod train;
 
 pub use config::{BlockKind, UNetConfig};
 pub use model::Unet;

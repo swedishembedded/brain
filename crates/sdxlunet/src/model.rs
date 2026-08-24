@@ -157,13 +157,9 @@ pub fn attn_slab_words(cfg: &UNetConfig, h: u32, w: u32, with_up: bool) -> u64 {
 /// SDXL-specific beyond `UNetConfig` itself.
 pub struct Rec<'a> {
     b: Builder<'a>,
-    ln: block::LayerNormIds,
     flash: block::FlashIds,
     /// The device runs workgroup-cooperative kernels (flash attention).
     coop: bool,
-    /// Materialised self-attention slabs, allocated ONLY on the non-cooperative
-    /// path (see the module header).
-    slab: Option<(DeviceBuffer, DeviceBuffer)>,
     t_enc: u32,
     /// An optional extra term added into every cross-attention context, before
     /// the block's shared `to_out` — the consumer half of
@@ -188,29 +184,52 @@ pub struct Rec<'a> {
 impl<'a> Rec<'a> {
     /// A recorder over `tensors` for a graph with `t_enc` text tokens.
     ///
-    /// `slab_words` sizes the materialised self-attention slabs and is only
-    /// consulted on a device without workgroup reductions — see
-    /// [`attn_slab_words`].
-    pub fn new(
-        gpu: &'a Gpu,
-        cfg: &UNetConfig,
-        tensors: &'a Tensors,
-        t_enc: u32,
-        slab_words: u64,
-        taps: bool,
-    ) -> Rec<'a> {
+    /// The materialised self-attention slabs are no longer sized here: they are
+    /// allocated per site by [`vae::blocks::Builder::self_attn`], out of the
+    /// activation pool, so they are recycled between same-shaped sites in eval
+    /// mode and kept distinct per site in train mode (where the adjoint binds
+    /// each site's own softmax). [`attn_slab_words`] survives for callers that
+    /// budget VRAM ahead of a build.
+    pub fn new(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool) -> Rec<'a> {
+        Rec::new_maybe_train(gpu, cfg, tensors, t_enc, taps, false)
+    }
+
+    /// [`Rec::new`] recording the reverse-mode tape - what
+    /// [`crate::train::UnetTrainer`] builds on. Train mode also pins the
+    /// differentiable lowerings (direct conv, materialised attention) and
+    /// disables the activation pool, so the forward is SSA and doubles as the
+    /// backprop cache.
+    pub fn new_train(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool) -> Rec<'a> {
+        Rec::new_maybe_train(gpu, cfg, tensors, t_enc, taps, true)
+    }
+
+    fn new_maybe_train(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool, train: bool) -> Rec<'a> {
         let coop = gpu.caps().workgroup_reductions;
-        let slab =
-            if coop { None } else { Some((gpu.storage(slab_words.max(1)), gpu.storage(slab_words.max(1)))) };
-        let b = Builder::new(gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps);
+        let mut b = Builder::new(gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps);
+        // Must precede the first recorded block.
+        b.set_train(train);
         let ln = block::LayerNormIds::resolve_fwd(gpu, K_LAYERNORM);
+        // The transformer half's FORWARD slots, which this crate registers and
+        // `vae::blocks` does not - see `vae::blocks::XformerIds`. Handing them
+        // over is what lets those stages be RECORDED on the tape rather than
+        // pushed past it, which is the whole reason `check_unet` can exist.
+        b.set_xformer_ids(vae::blocks::XformerIds {
+            layernorm: vae::blocks::LayerNormFwd { ids: ln },
+            matmul: K_MATMUL,
+            matmul_reg: K_MATMUL_REG,
+            bias_add: K_BIAS_ADD,
+            gelu_erf: K_GELU_ERF,
+            mul: K_MUL,
+            cross: block::CrossIds { scores: K_XSCORES, softmax: K_XSOFTMAX, apply: K_XAPPLY },
+            add_chan: K_ADD_CHAN,
+        });
         let flash = block::FlashIds {
             bidir: K_FLASH,
             split: Some(K_FLASH_SPLIT),
             reg: Some(K_FLASH_REG),
             reg2: Some(K_FLASH_REG2),
         };
-        Rec { b, ln, flash, coop, slab, t_enc, inject: None, site: 0, temb_act: None }
+        Rec { b, flash, coop, t_enc, inject: None, site: 0, temb_act: None }
     }
 
     /// The underlying block builder — conv / GroupNorm / SiLU / add / upsample.
@@ -227,29 +246,13 @@ impl<'a> Rec<'a> {
     /// `nn.Linear` has. `bias = false` covers `to_q/to_k/to_v`, which SDXL
     /// ships bias-free.
     pub fn linear(&mut self, prefix: &str, m: u32, k: u32, n: u32, bias: bool, x: &DeviceBuffer) -> DeviceBuffer {
-        let w = self.b.dev(&format!("{prefix}.weight"));
-        let y = self.b.act((m as u64) * (n as u64));
-        let (kind, threads) = block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG, false);
-        let g = self.b.gpu();
-        self.b.push_step(g.step(kind, &[x, &w, &y], &[m, k, n], threads));
-        if bias {
-            let bb = self.b.dev(&format!("{prefix}.bias"));
-            let g = self.b.gpu();
-            self.b.push_step(g.step(K_BIAS_ADD, &[&y, &bb], &[m, n], m * n));
-        }
-        y
+        self.b.linear(prefix, m, k, n, bias, x)
     }
 
     pub fn layernorm(&mut self, prefix: &str, rows: u32, d: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let (gamma, beta) =
-            (self.b.dev(&format!("{prefix}.weight")), self.b.dev(&format!("{prefix}.bias")));
-        let y = self.b.act((rows as u64) * (d as u64));
-        let g = self.b.gpu();
         // LayerNorm eps is `norm_eps` on the BasicTransformerBlock, which
         // diffusers defaults to 1e-5 and SDXL does not override.
-        let step = block::layernorm_fwd(g, &self.ln, x, &gamma, &beta, &y, d, rows, 1e-5);
-        self.b.push_step(step);
-        y
+        self.b.layernorm(prefix, rows, d, 1e-5, x)
     }
 
     /// SDXL's conditioning chain: `time_embedding(sinusoid(t)) +
@@ -425,10 +428,7 @@ impl<'a> Rec<'a> {
             self.temb_act.clone().expect("Rec::conditioning must be recorded before any resnet");
         let tp = self.linear(&format!("{prefix}.time_emb_proj"), 1, temb_dim, cout, true, &temb_act);
         self.b.tap(format!("{tap}.time_emb_proj"), &tp, cout);
-        let c1t = self.b.act(nout);
-        let g = self.b.gpu();
-        // `add_chan_bcast` Params: [N, C, HW]; bufs [x, v[N*C], y].
-        self.b.push_step(g.step(K_ADD_CHAN, &[&c1, &tp, &c1t], &[1, cout, h * w], cout * h * w));
+        let c1t = self.b.add_chan(cout, h * w, &c1, &tp);
         self.b.tap(format!("{tap}.temb_add"), &c1t, cout * h * w);
         self.b.free(nout, c1);
         self.b.free(cout as u64, tp);
@@ -531,13 +531,9 @@ impl<'a> Rec<'a> {
         let hidden = self.linear(&format!("{prefix}.ff.hidden"), t, c, inner, true, &n3);
         let gate = self.linear(&format!("{prefix}.ff.gate"), t, c, inner, true, &n3);
         self.b.free(n, n3);
-        let act = self.b.act(ni);
-        let g = self.b.gpu();
-        self.b.push_step(g.step(K_GELU_ERF, &[&gate, &act], &[t * inner], t * inner));
+        let act = self.b.gelu_erf(t * inner, &gate);
         self.b.free(ni, gate);
-        let gated = self.b.act(ni);
-        let g = self.b.gpu();
-        self.b.push_step(g.step(K_MUL, &[&hidden, &act, &gated], &[t * inner], t * inner));
+        let gated = self.b.mul(t * inner, &hidden, &act);
         self.b.tap(format!("{tap}.ff_geglu"), &gated, t * inner);
         self.b.free(ni, hidden);
         self.b.free(ni, act);
@@ -553,53 +549,20 @@ impl<'a> Rec<'a> {
 
     /// Multi-head self-attention over a fused `[T, 3c]` buffer.
     pub fn self_attention(&mut self, heads: u32, hd: u32, c: u32, t: u32, qkv: &DeviceBuffer, ctx: &DeviceBuffer) {
-        let g = self.b.gpu();
-        let mut steps: Vec<Step> = Vec::new();
-        if self.coop {
-            block::flash_bidir_fwd(
-                g,
-                self.flash,
-                heads,
-                hd,
-                c,
-                qkv,
-                3 * c,
-                0,
-                c,
-                2 * c,
-                ctx,
-                &[(0, t)],
-                &mut steps,
-            );
+        // Flash attention never materialises the softmax, and the adjoint binds
+        // exactly that - so a recording (train-mode) builder must take the
+        // materialised path however cooperative the device is. Outside train
+        // mode the choice is the old one: flash where the device supports it,
+        // because the score slab is `heads·T²` (671 MB at SDXL's native 1024²).
+        if self.coop && !self.b.is_train() {
+            let g = self.b.gpu();
+            let mut steps: Vec<Step> = Vec::new();
+            block::flash_bidir_fwd(g, self.flash, heads, hd, c, qkv, 3 * c, 0, c, 2 * c, ctx, &[(0, t)], &mut steps);
+            for s in steps {
+                self.b.push_step(s);
+            }
         } else {
-            let (scores, probs) = self.slab.clone().expect("non-cooperative device allocates the slabs");
-            let a = block::Bidir {
-                b: 1,
-                t,
-                n_heads: heads,
-                head_dim: hd,
-                stride: 3 * c,
-                q_off: 0,
-                k_off: c,
-                v_off: 2 * c,
-            };
-            // Forward only: the backward slots are `usize::MAX` sentinels so a
-            // future reverse pass panics loudly instead of dispatching a
-            // silently-wrong pipeline (the `clip::EvaVision` convention).
-            let (k_scores, k_softmax, k_apply) = vae::blocks::ATTN_BIDIR_SLOTS;
-            let ids = block::BidirIds {
-                scores: k_scores,
-                softmax: k_softmax,
-                apply: k_apply,
-                dscores: usize::MAX,
-                dv: usize::MAX,
-                dq: usize::MAX,
-                dk: usize::MAX,
-            };
-            steps.extend(block::bidir_fwd(g, &ids, &a, qkv, &scores, &probs, ctx));
-        }
-        for s in steps {
-            self.b.push_step(s);
+            self.b.self_attn(heads, hd, c, t, qkv, ctx);
         }
     }
 
@@ -615,29 +578,7 @@ impl<'a> Rec<'a> {
         kv: &DeviceBuffer,
         ctx: &DeviceBuffer,
     ) {
-        let te = self.t_enc;
-        let slab = (heads as u64) * (t as u64) * (te as u64);
-        let scores = self.b.act(slab);
-        let probs = self.b.act(slab);
-        let g = self.b.gpu();
-        // `attn_scores_cross`  Params: [bsz, heads, t_dec, t_enc, head_dim, q_stride, kv_stride, q_off, k_off]
-        self.b.push_step(g.step(
-            K_XSCORES,
-            &[q, kv, &scores],
-            &[1, heads, t, te, hd, c, 2 * c, 0, 0],
-            heads * t * te,
-        ));
-        // `attn_softmax_cross` Params: [bsz, heads, t_dec, t_enc]
-        self.b.push_step(g.step(K_XSOFTMAX, &[&scores, &probs], &[1, heads, t, te], heads * t));
-        // `attn_apply_cross`   Params: [bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model]
-        self.b.push_step(g.step(
-            K_XAPPLY,
-            &[&probs, kv, ctx],
-            &[1, heads, t, te, hd, 2 * c, c, c],
-            heads * t * hd,
-        ));
-        self.b.free(slab, scores);
-        self.b.free(slab, probs);
+        self.b.cross_attn(heads, hd, c, t, self.t_enc, q, kv, ctx);
     }
 
     /// `Transformer2DModel` (`use_linear_projection = true`).
@@ -732,6 +673,8 @@ pub struct Unet {
     /// adapter must serve. Counted from the graph, never from a formula.
     sites: usize,
     out: DeviceBuffer,
+    /// The reverse-mode tape, present only on a `Unet::new_train` build.
+    trace: Option<vae::blocks::grad::Trace>,
     steps: Vec<Step>,
     taps: Vec<(String, DeviceBuffer, usize)>,
 }
@@ -749,6 +692,29 @@ impl Unet {
     /// and therefore disables the activation pool, so a production build passes
     /// `false` (and `crates/unet/tests/parity.rs` gates the two against each
     /// other bit-for-bit).
+    /// [`Unet::new`] recording the reverse-mode tape, for
+    /// [`crate::train::UnetTrainer`]. No control residuals and no injection:
+    /// the backward is gated against the plain graph.
+    pub fn new_train(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32) -> Unet {
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, false, false, None, true)
+    }
+
+    /// The recorded tape, on a [`Unet::new_train`] build.
+    pub fn trace(&self) -> &vae::blocks::grad::Trace {
+        self.trace.as_ref().expect("unet: no tape recorded - build with Unet::new_train")
+    }
+
+    /// The graph's four input buffers, in the order `run` writes them:
+    /// `(sample, encoder_hidden_states, timestep embedding, added conditioning)`.
+    pub fn inputs(&self) -> (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer) {
+        (&self.sample_in, &self.enc_in, &self.temb_in, &self.aug_in)
+    }
+
+    /// The graph's output buffer (`conv_out`).
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+
     pub fn new(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, taps: bool) -> Unet {
         Unet::new_controlled(gpu, cfg, tensors, h, w, t_enc, taps, false)
     }
@@ -803,7 +769,7 @@ impl Unet {
                  construct it from the union of sdxlunet::KERNELS and the adapter's (see model::attninject)"
             );
         }
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, Some(inject))
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, Some(inject), false)
     }
 
     pub fn new_controlled(
@@ -816,7 +782,7 @@ impl Unet {
         taps: bool,
         control: bool,
     ) -> Unet {
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, None)
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, None, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -830,6 +796,7 @@ impl Unet {
         taps: bool,
         control: bool,
         inject: Option<&dyn model::attninject::CrossAttnInject>,
+        train: bool,
     ) -> Unet {
         let levels = cfg.levels();
         let scale = 1u32 << (levels - 1);
@@ -845,9 +812,7 @@ impl Unet {
         let temb_in = gpu.storage(c0 as u64);
         let aug_in = gpu.storage(cfg.projection_class_embeddings_input_dim as u64);
 
-        // Slabs, sized for the worst level that actually records a transformer.
-        let s_words = attn_slab_words(&cfg, h, w, true);
-        let mut r = Rec::new(&gpu, &cfg, tensors, t_enc, s_words, taps);
+        let mut r = if train { Rec::new_train(&gpu, &cfg, tensors, t_enc, taps) } else { Rec::new(&gpu, &cfg, tensors, t_enc, taps) };
         r.inject = inject;
 
         r.conditioning(&cfg, &temb_in, &aug_in);
@@ -946,9 +911,12 @@ impl Unet {
             );
         }
         let sites = r.site;
-        let (steps, taps) = r.into_blocks().finish();
+        let blocks = r.into_blocks();
+        let trace = train.then(|| blocks.trace());
+        let (steps, taps) = blocks.finish();
         Unet {
             sites,
+            trace,
             gpu,
             cfg,
             hw: (h, w),
@@ -1022,6 +990,30 @@ impl Unet {
         &self.steps
     }
 
+    /// Write the graph's four inputs, deriving the timestep embedding and the
+    /// added conditioning on the HOST exactly as `UNet2DConditionModel` does.
+    ///
+    /// Shared by [`Unet::run`] and [`crate::train::UnetTrainer`] so the training
+    /// graph and the inference graph cannot disagree about the two host-side
+    /// embeddings - which is the kind of divergence a finite-difference check
+    /// cannot see, because it gates the backward against whatever forward was
+    /// emitted.
+    pub fn write_inputs(&self, sample: &[f32], timestep: f32, enc: &[f32], pooled: &[f32], time_ids: &[f32]) {
+        let c = &self.cfg;
+        let temb = model::hostmath::timestep_embedding(
+            timestep,
+            c.block_out_channels[0] as usize,
+            c.flip_sin_to_cos,
+            c.freq_shift as f64,
+            10_000.0,
+        );
+        let aug = hostemb::added_cond(pooled, time_ids, c.addition_time_embed_dim, c.flip_sin_to_cos, c.freq_shift);
+        self.gpu.write_f32(&self.sample_in, sample);
+        self.gpu.write_f32(&self.enc_in, enc);
+        self.gpu.write_f32(&self.temb_in, &temb);
+        self.gpu.write_f32(&self.aug_in, &aug);
+    }
+
     /// One denoising evaluation.
     ///
     /// * `sample` — `[in_channels · H · W]`, NCHW, batch 1.
@@ -1039,24 +1031,7 @@ impl Unet {
         assert_eq!(pooled.len(), c.pooled_dim() as usize, "unet: pooled text size");
         assert_eq!(time_ids.len(), N_TIME_IDS as usize, "unet: time_ids must be {N_TIME_IDS} values");
 
-        let temb = model::hostmath::timestep_embedding(
-            timestep,
-            c.block_out_channels[0] as usize,
-            c.flip_sin_to_cos,
-            c.freq_shift as f64,
-            10_000.0,
-        );
-        let aug = hostemb::added_cond(
-            pooled,
-            time_ids,
-            c.addition_time_embed_dim,
-            c.flip_sin_to_cos,
-            c.freq_shift,
-        );
-        self.gpu.write_f32(&self.sample_in, sample);
-        self.gpu.write_f32(&self.enc_in, enc);
-        self.gpu.write_f32(&self.temb_in, &temb);
-        self.gpu.write_f32(&self.aug_in, &aug);
+        self.write_inputs(sample, timestep, enc, pooled, time_ids);
         self.gpu.submit(&[], &self.steps);
         self.gpu.read(&self.out, (c.out_channels * h * w) as usize)
     }

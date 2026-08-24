@@ -59,6 +59,21 @@ const B_GN_DSUM_PART: usize = 17;
 const B_GN_DSUM2: usize = 18;
 const B_MATMUL_DW_SPLITK: usize = 19;
 const B_DW_SPLITK_REDUCE: usize = 20;
+// The transformer half's adjoints (see `super::BWD_KERNELS`'s own note on why
+// `mul` is not among them).
+const B_MATMUL_DX: usize = 21;
+const B_MATMUL_DW: usize = 22;
+const B_GELU_ERF_BWD: usize = 23;
+const B_ADD_CHAN_DV: usize = 24;
+const B_LAYERNORM_DX: usize = 25;
+const B_LAYERNORM_DGAMMA: usize = 26;
+const B_LAYERNORM_DBETA: usize = 27;
+const B_CONCAT_SPLIT: usize = 28;
+const B_XDSCORES: usize = 29;
+const B_XDQ: usize = 30;
+const B_XDK_ACC: usize = 31;
+const B_XDV_ACC: usize = 32;
+const B_LN_STATS: usize = 33;
 
 /// Where the caller placed [`super::BWD_KERNELS`] in its kernel set.
 #[derive(Clone, Copy)]
@@ -100,8 +115,14 @@ impl BwdIds {
 }
 
 /// A recorded forward tape plus the weight buffers it uploaded.
+#[derive(Clone)]
 pub struct Trace {
     ops: Vec<Op>,
+    /// The caller's forward `mul` slot, carried from `Builder`'s
+    /// [`super::XformerIds`]. `Op::Mul`'s adjoint is two more products, and
+    /// re-registering `mul` in the BACKWARD set would give the CPU JIT two
+    /// definitions of one kernel name - see `super::BWD_KERNELS`'s note.
+    xf_mul: Option<usize>,
     /// Tensor name -> length, in first-use order (the parameter list).
     order: Vec<(String, u64)>,
     w: HashMap<String, DeviceBuffer>,
@@ -112,8 +133,9 @@ impl Trace {
         ops: Vec<Op>,
         order: Vec<(String, u64)>,
         w: &HashMap<String, DeviceBuffer>,
+        xf_mul: Option<usize>,
     ) -> Trace {
-        Trace { ops, order, w: w.clone() }
+        Trace { ops, order, w: w.clone(), xf_mul }
     }
 
     /// Every trainable tensor this graph reads, `(name, length in floats)`, in
@@ -394,6 +416,144 @@ impl Trace {
                 r.acc(qkv, (3 * c * t) as u64, &d_qkv, 1.0);
                 r.give((3 * c * t) as u64, d_qkv);
                 r.give((heads * t * t) as u64, dscores);
+            }
+            // ---- the transformer half -------------------------------------
+            // `y = x·Wᵀ (+ b)`. `d_W` and `d_b` ACCUMULATE (one weight, many
+            // call sites in a shared block); `d_x` is assigned into a temp and
+            // folded in with `axpy`, the uniform shape fan-out needs.
+            Op::Linear { w, b, m, k, n, x, y } => {
+                let Some(dy) = r.get(y) else { return };
+                // `matmul_dw` Params: [m, k, n]; bufs [dy, x, dw] - ACCUMULATES.
+                r.push(r.gpu.step(r.ids.k(B_MATMUL_DW), &[&dy, x, grads.g(w)], &[*m, *k, *n], n * k));
+                if let Some(bn) = b {
+                    // `bias_grad` Params: [rows, n]; bufs [dy, db] - ACCUMULATES.
+                    r.push(r.gpu.step(r.ids.k(B_BIAS_GRAD), &[&dy, grads.g(bn)], &[*m, *n], *n));
+                }
+                let dx = r.tmp((*m as u64) * (*k as u64));
+                // `matmul_dx` Params: [m, k, n, accumulate]; bufs [dy, w, dx].
+                // `accumulate = 0`: this ASSIGNS into the temp, and the fold
+                // onto `d[x]` is the `axpy` below.
+                r.push(r.gpu.step(r.ids.k(B_MATMUL_DX), &[&dy, self.weight(w), &dx], &[*m, *k, *n, 0], m * k));
+                r.acc(x, (*m as u64) * (*k as u64), &dx, 1.0);
+                r.give((*m as u64) * (*k as u64), dx);
+            }
+            Op::LayerNorm { gamma, beta, rows, d, eps, x, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let n = (*rows as u64) * (*d as u64);
+                // `dgamma` needs the row mean/inv-std the forward had. The
+                // forward does not retain them (`layernorm` writes only `y`), so
+                // recompute them here rather than widening the forward - the
+                // stats are two floats per row and the recompute is one pass.
+                let (mean, inv) = (r.tmp(*rows as u64), r.tmp(*rows as u64));
+                r.push(r.gpu.step(r.ids.k(B_LN_STATS), &[x, &mean, &inv], &[*d, *rows, f(*eps)], *rows));
+                // Both affine grads ACCUMULATE.
+                r.push(r.gpu.step(r.ids.k(B_LAYERNORM_DGAMMA), &[&dy, x, &mean, &inv, grads.g(gamma)], &[*d, *rows], *d));
+                r.push(r.gpu.step(r.ids.k(B_LAYERNORM_DBETA), &[&dy, grads.g(beta)], &[*d, *rows], *d));
+                let dx = r.tmp(n);
+                r.push(r.gpu.step(r.ids.k(B_LAYERNORM_DX), &[x, self.weight(gamma), &dy, &dx], &[*d, *rows, f(*eps)], *rows));
+                r.acc(x, n, &dx, 1.0);
+                r.give(n, dx);
+                r.give(*rows as u64, mean);
+                r.give(*rows as u64, inv);
+            }
+            // `gelu_erf_bwd` binds the PRE-activation, like every other
+            // activation adjoint here. The tanh approximation's backward is a
+            // DIFFERENT kernel and is not interchangeable.
+            Op::GeluErf { n, x, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let dx = r.tmp(*n as u64);
+                r.push(r.gpu.step(r.ids.k(B_GELU_ERF_BWD), &[x, &dy, &dx], &[*n], *n));
+                r.acc(x, *n as u64, &dx, 1.0);
+                r.give(*n as u64, dx);
+            }
+            // `y = a·b` -> `da = dy·b`, `db = dy·a`. The adjoint of a product is
+            // two products, so this needs no backward kernel - it dispatches the
+            // caller's own forward `mul` slot.
+            Op::Mul { n, a, b, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let mul = self.xf_mul.expect("vae::blocks::grad: Op::Mul recorded with no XformerIds::mul slot");
+                let da = r.tmp(*n as u64);
+                r.push(r.gpu.step(mul, &[&dy, b, &da], &[*n], *n));
+                r.acc(a, *n as u64, &da, 1.0);
+                let db = r.tmp(*n as u64);
+                r.push(r.gpu.step(mul, &[&dy, a, &db], &[*n], *n));
+                r.acc(b, *n as u64, &db, 1.0);
+                r.give(*n as u64, da);
+                r.give(*n as u64, db);
+            }
+            // The adjoint of a broadcast is a sum over the broadcast axes; the
+            // adjoint wrt `x` is `dy` itself (no kernel, just the same buffer).
+            Op::AddChan { c, hw, x, v, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let n = (*c as u64) * (*hw as u64);
+                r.acc(x, n, &dy, 1.0);
+                let dv = r.tmp(*c as u64);
+                // `add_chan_bcast_dv` Params: [N, C, HW]; bufs [dy, dv] - one
+                // invocation per (n, c), serial over HW. ASSIGNS.
+                r.push(r.gpu.step(r.ids.k(B_ADD_CHAN_DV), &[&dy, &dv], &[1, *c, *hw], *c));
+                r.acc(v, *c as u64, &dv, 1.0);
+                r.give(*c as u64, dv);
+            }
+            // Cross-attention: two lengths, two buffers. `d_q` lands in its own
+            // `[tq, c]` grad; `d_k` and `d_v` land in DISJOINT halves of one
+            // `[tkv, 2c]` grad, which is why both use the `_acc` forms with
+            // `acc_flag = 0` (assign) - there is exactly one query chunk here,
+            // so nothing to accumulate across.
+            Op::Cross { c, tq, tkv, heads, head_dim, q, kv, probs, y } => {
+                let Some(d_ctx) = r.get(y) else { return };
+                let (nq, nkv) = ((*tq as u64) * (*c as u64), (*tkv as u64) * 2 * (*c as u64));
+                let d_scores = r.tmp((heads * tq * tkv) as u64);
+                let d_q = r.tmp(nq);
+                let d_kv = r.tmp(nkv);
+                let (h, hd) = (*heads, *head_dim);
+                // Params mirror the forward trio's, which is the point: a
+                // mismatched cross-attention param list is silently wrong.
+                r.push(r.gpu.step(
+                    r.ids.k(B_XDSCORES),
+                    &[&d_ctx, kv, probs, &d_scores],
+                    &[1, h, *tq, *tkv, hd, 2 * c, *c, *c],
+                    h * tq * tkv,
+                ));
+                r.push(r.gpu.step(
+                    r.ids.k(B_XDQ),
+                    &[&d_scores, kv, &d_q],
+                    &[1, h, *tq, *tkv, hd, *c, 2 * c, 0, 0],
+                    h * tq * hd,
+                ));
+                r.push(r.gpu.step(
+                    r.ids.k(B_XDK_ACC),
+                    &[&d_scores, q, &d_kv],
+                    &[1, h, *tq, *tkv, hd, *c, 2 * c, 0, 0, 0],
+                    h * tkv * hd,
+                ));
+                r.push(r.gpu.step(
+                    r.ids.k(B_XDV_ACC),
+                    &[probs, &d_ctx, &d_kv],
+                    &[1, h, *tq, *tkv, hd, 2 * c, *c, *c, 0],
+                    h * tkv * hd,
+                ));
+                r.acc(q, nq, &d_q, 1.0);
+                r.acc(kv, nkv, &d_kv, 1.0);
+                r.give((h * tq * tkv) as u64, d_scores);
+                r.give(nq, d_q);
+                r.give(nkv, d_kv);
+            }
+            // A concat's adjoint is two slices of `dy` - a gather per output
+            // element, no scatter.
+            Op::Concat { ca, cb, hw, a, b, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let ctot = ca + cb;
+                let (na, nb) = ((*ca as u64) * (*hw as u64), (*cb as u64) * (*hw as u64));
+                // `concat_split` Params: [N, Ctot, Csrc, c_off, H, W]; `W = 1`
+                // and `H = hw` is the flat form (the kernel only ever uses H*W).
+                let da = r.tmp(na);
+                r.push(r.gpu.step(r.ids.k(B_CONCAT_SPLIT), &[&dy, &da], &[1, ctot, *ca, 0, *hw, 1], ca * hw));
+                r.acc(a, na, &da, 1.0);
+                let db = r.tmp(nb);
+                r.push(r.gpu.step(r.ids.k(B_CONCAT_SPLIT), &[&dy, &db], &[1, ctot, *cb, *ca, *hw, 1], cb * hw));
+                r.acc(b, nb, &db, 1.0);
+                r.give(na, da);
+                r.give(nb, db);
             }
         }
     }

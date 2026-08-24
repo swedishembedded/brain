@@ -129,7 +129,7 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// cooperative twin anywhere in the tree — that is a documented perf gap,
 /// NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
-pub const BWD_KERNELS: [(&str, &str); 21] = [
+pub const BWD_KERNELS: [(&str, &str); 34] = [
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("bias_grad", kernels::BIAS_GRAD),
@@ -163,6 +163,33 @@ pub const BWD_KERNELS: [(&str, &str); 21] = [
     // contraction instead. See `matmul_dw_reg_splitk.wgsl`.
     ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
     ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
+    // ---- the transformer half's adjoints (SDXL's `Transformer2DModel`) ----
+    // APPENDED, so every existing `BwdIds::at(base)` offset stays valid. None of
+    // these is a new kernel: each already existed for a decoder LM's backward
+    // (`t5encoder`, `clip`, `gpt2`), and the SDXL UNet reaches them by recording
+    // its transformer stages on this tape instead of `push_step`ing them past it.
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dw", kernels::MATMUL_DW),
+    ("gelu_erf_bwd", kernels::GELU_ERF_BWD),
+    ("add_chan_bcast_dv", kernels::ADD_CHAN_BCAST_DV),
+    ("layernorm_dx", kernels::LAYERNORM_DX),
+    ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA),
+    ("layernorm_dbeta", kernels::LAYERNORM_DBETA),
+    ("concat_split", kernels::CONCAT_SPLIT),
+    ("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS),
+    ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
+    ("attn_bwd_dk_cross_acc", kernels::ATTN_BWD_DK_CROSS_ACC),
+    ("attn_bwd_dv_cross_acc", kernels::ATTN_BWD_DV_CROSS_ACC),
+    // `layernorm_dgamma` needs the row mean/inv-std the FORWARD had; the
+    // forward LayerNorm does not retain them, so the reverse recomputes them.
+    // Backward-only, hence safe to register here.
+    ("ln_stats", kernels::LN_STATS),
+    // NOTE `mul` is deliberately ABSENT: [`Op::Mul`]'s adjoint is two more
+    // `mul`s, and the caller that records a `Mul` already registers that kernel
+    // in its own FORWARD set. Registering a second definition under the same
+    // name is what the CPU JIT rejects outright (`DuplicateDefinition`), so the
+    // reverse reaches it through the caller-supplied [`XformerIds::mul`] slot -
+    // the same arrangement `im2col_at` already uses via `super::K_IM2COL_AT`.
 ];
 
 /// Workgroups the split-K weight gradient aims to launch.
@@ -299,6 +326,48 @@ impl BlockNames {
     }
 }
 
+/// The caller's FORWARD kernel slots for the transformer stages this builder can
+/// record but does not itself register.
+///
+/// [`KERNELS`] is the conv-autoencoder set: conv, GroupNorm, SiLU, add, upsample,
+/// the NCHW/NLC permutations, the bidirectional self-attention trio, and
+/// `concat2`. A diffusion backbone's `Transformer2DModel` needs LayerNorm, a
+/// GEMM, a bias add, erf-GELU, a product and the CROSS-attention trio on top -
+/// and the caller already registers all of those in its own set past
+/// [`NEXT_SLOT`]. Re-registering them here would give the CPU JIT two
+/// definitions of one kernel name, which it rejects outright, so the caller
+/// hands its slots over instead. Same arrangement the reverse already uses for
+/// `im2col_at`.
+///
+/// Supply this with [`Builder::set_xformer_ids`] BEFORE recording any
+/// transformer stage; the recorders panic by name rather than dispatching slot
+/// zero if it is missing.
+#[derive(Clone, Copy)]
+pub struct XformerIds {
+    /// LayerNorm forward (its `_dx`/`_dgamma`/`_dbeta` adjoints ARE in
+    /// [`BWD_KERNELS`] - only the forward collides).
+    pub layernorm: LayerNormFwd,
+    /// The naive and register-tiled GEMMs, as `model::block::pick_gemm` selects
+    /// between them.
+    pub matmul: usize,
+    pub matmul_reg: usize,
+    pub bias_add: usize,
+    pub gelu_erf: usize,
+    /// Elementwise product - reused by [`Op::Mul`]'s own adjoint, which is two
+    /// more products.
+    pub mul: usize,
+    /// The `attn_*_cross` trio.
+    pub cross: model::block::CrossIds,
+    /// `add_chan_bcast`, the per-(image, channel) broadcast add.
+    pub add_chan: usize,
+}
+
+/// The three slots `model::block::LayerNormIds` resolves a forward from.
+#[derive(Clone, Copy)]
+pub struct LayerNormFwd {
+    pub ids: model::block::LayerNormIds,
+}
+
 /// One recorded forward stage, with exactly the buffers its adjoint reads.
 ///
 /// Recorded only in **train mode** ([`Builder::set_train`]); the tape is what
@@ -357,6 +426,46 @@ pub(crate) enum Op {
         probs: DeviceBuffer,
         y: DeviceBuffer,
     },
+    /// `y[m,n] = x[m,k] · W[n,k]ᵀ (+ b[n])` - the shape every diffusers
+    /// `nn.Linear` has. `b` is `None` for the bias-free projections
+    /// (`to_q`/`to_k`/`to_v`).
+    Linear { w: String, b: Option<String>, m: u32, k: u32, n: u32, x: DeviceBuffer, y: DeviceBuffer },
+    /// LayerNorm over `rows` rows of width `d`, with SEPARATE `gamma`/`beta`
+    /// tensors - unlike [`Op::Gn`], whose affine pair is fused into one `gb[2C]`
+    /// because `gn_apply` reads that layout. Nothing is fused here, so the two
+    /// adjoints write two buffers.
+    LayerNorm { gamma: String, beta: String, rows: u32, d: u32, eps: f32, x: DeviceBuffer, y: DeviceBuffer },
+    /// Exact (erf) GELU. The tanh approximation has its OWN backward kernel and
+    /// the two are not interchangeable, so which one the forward used is
+    /// recorded rather than assumed.
+    GeluErf { n: u32, x: DeviceBuffer, y: DeviceBuffer },
+    /// Elementwise product - GEGLU's `hidden · gelu(gate)`. Its own adjoint is
+    /// two more products, so no backward kernel is needed.
+    Mul { n: u32, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
+    /// Per-(image, channel) broadcast add: `y[c,hw] = x[c,hw] + v[c]`. SDXL's
+    /// resnets inject the timestep embedding this way (`resnet_time_scale_shift:
+    /// "default"`), so `v`'s adjoint is a sum over the broadcast axis and `x`'s
+    /// is `dy` itself.
+    AddChan { c: u32, hw: u32, x: DeviceBuffer, v: DeviceBuffer, y: DeviceBuffer },
+    /// Cross-attention: `tq` query rows against `tkv` key/value rows, with the
+    /// queries in their own `[tq, c]` buffer and k/v fused as `[tkv, 2c]`.
+    /// Distinct from [`Op::Attn`], which is self-attention over ONE fused
+    /// `[t, 3c]` buffer - the two lengths and the two buffers are exactly what
+    /// differ, and they are what the adjoint needs.
+    Cross {
+        c: u32,
+        tq: u32,
+        tkv: u32,
+        heads: u32,
+        head_dim: u32,
+        q: DeviceBuffer,
+        kv: DeviceBuffer,
+        probs: DeviceBuffer,
+        y: DeviceBuffer,
+    },
+    /// Channel concat of two NCHW maps - the up path's skip join. Its adjoint is
+    /// two slices of `dy`, which `concat_split` performs without a scatter.
+    Concat { ca: u32, cb: u32, hw: u32, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
 }
 
 /// Graph-construction state (borrows the device + host tensors).
@@ -377,6 +486,8 @@ pub struct Builder<'a> {
     /// folds `1/sqrt(C)` into the q weights, which changes what `qkv.w`'s
     /// gradient means. Selection, not a second block implementation.
     train: bool,
+    /// The caller's transformer-stage forward slots - see [`XformerIds`].
+    xf: Option<XformerIds>,
     tape: Vec<Op>,
     /// Every weight buffer this builder uploaded, by tensor name, in first-use
     /// order. Memoized so one tensor is one device buffer (and therefore one
@@ -479,6 +590,7 @@ impl<'a> Builder<'a> {
             steps: Vec::new(),
             taps: Vec::new(),
             train: false,
+            xf: None,
             tape: Vec::new(),
             wmemo: HashMap::new(),
             worder: Vec::new(),
@@ -550,10 +662,19 @@ impl<'a> Builder<'a> {
         self.train = on;
     }
 
+    /// Whether this builder is recording the reverse-mode tape.
+    ///
+    /// A caller whose stage has two lowerings - one differentiable, one not
+    /// (flash attention never materialises the softmax its adjoint binds) - asks
+    /// here rather than tracking train mode a second time.
+    pub fn is_train(&self) -> bool {
+        self.train
+    }
+
     /// The recorded forward tape + weight buffers, for [`grad::Trace::backward`].
     /// Empty unless [`Builder::set_train`] was called.
     pub fn trace(&self) -> grad::Trace {
-        grad::Trace::new(self.tape.clone(), self.worder.clone(), &self.wmemo)
+        grad::Trace::new(self.tape.clone(), self.worder.clone(), &self.wmemo, self.xf.map(|x| x.mul))
     }
 
     /// The device the graph is being recorded on.
@@ -996,7 +1117,182 @@ impl<'a> Builder<'a> {
         let y = self.act(n);
         // `concat2` Params: [N, Ca, Cb, H, W]; one invocation per OUTPUT element.
         self.steps.push(self.gpu.step(K_CONCAT2, &[a, b, &y], &[1, ca, cb, h, w], n as u32));
+        if self.train {
+            self.tape.push(Op::Concat { ca, cb, hw: h * w, a: a.clone(), b: b.clone(), y: y.clone() });
+        }
         y
+    }
+
+    /// Supply the caller's transformer-stage forward slots. Must precede any
+    /// [`Builder::linear`] / [`Builder::layernorm`] / [`Builder::gelu_erf`] /
+    /// [`Builder::mul`] / [`Builder::add_chan`] / [`Builder::cross_attn`].
+    pub fn set_xformer_ids(&mut self, ids: XformerIds) {
+        self.xf = Some(ids);
+    }
+
+    fn xf(&self) -> &XformerIds {
+        self.xf.as_ref().expect("vae::blocks: set_xformer_ids must precede any transformer stage")
+    }
+
+    /// `y[m,n] = x[m,k] · W[n,k]ᵀ (+ b[n])` - the diffusers `nn.Linear` shape.
+    ///
+    /// `bias = false` covers the bias-free attention projections. Recorded on the
+    /// tape, so a train-mode builder differentiates through it; the old
+    /// caller-side `push_step` did not, which is why every parameter upstream of
+    /// a transformer stage used to get a silent ZERO gradient.
+    pub fn linear(&mut self, prefix: &str, m: u32, k: u32, n: u32, bias: bool, x: &DeviceBuffer) -> DeviceBuffer {
+        let w_name = format!("{prefix}.weight");
+        let w = self.dev(&w_name);
+        let y = self.act((m as u64) * (n as u64));
+        let (kind, threads) = model::block::pick_gemm(m as usize, n as usize, self.xf().matmul, self.xf().matmul_reg, false);
+        self.steps.push(self.gpu.step(kind, &[x, &w, &y], &[m, k, n], threads));
+        let b_name = bias.then(|| format!("{prefix}.bias"));
+        if let Some(bn) = &b_name {
+            let bb = self.dev(bn);
+            let slot = self.xf().bias_add;
+            self.steps.push(self.gpu.step(slot, &[&y, &bb], &[m, n], m * n));
+        }
+        if self.train {
+            self.tape.push(Op::Linear { w: w_name, b: b_name, m, k, n, x: x.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// LayerNorm with separate `{prefix}.weight` / `{prefix}.bias`.
+    pub fn layernorm(&mut self, prefix: &str, rows: u32, d: u32, eps: f32, x: &DeviceBuffer) -> DeviceBuffer {
+        let (gn, bn) = (format!("{prefix}.weight"), format!("{prefix}.bias"));
+        let (gamma, beta) = (self.dev(&gn), self.dev(&bn));
+        let y = self.act((rows as u64) * (d as u64));
+        let ids = self.xf().layernorm.ids;
+        let step = model::block::layernorm_fwd(self.gpu, &ids, x, &gamma, &beta, &y, d, rows, eps);
+        self.steps.push(step);
+        if self.train {
+            self.tape.push(Op::LayerNorm { gamma: gn, beta: bn, rows, d, eps, x: x.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// Exact (erf) GELU over `n` values.
+    pub fn gelu_erf(&mut self, n: u32, x: &DeviceBuffer) -> DeviceBuffer {
+        let y = self.act(n as u64);
+        let slot = self.xf().gelu_erf;
+        self.steps.push(self.gpu.step(slot, &[x, &y], &[n], n));
+        if self.train {
+            self.tape.push(Op::GeluErf { n, x: x.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// Elementwise product over `n` values - GEGLU's `hidden · gelu(gate)`.
+    pub fn mul(&mut self, n: u32, a: &DeviceBuffer, b: &DeviceBuffer) -> DeviceBuffer {
+        let y = self.act(n as u64);
+        let slot = self.xf().mul;
+        self.steps.push(self.gpu.step(slot, &[a, b, &y], &[n], n));
+        if self.train {
+            self.tape.push(Op::Mul { n, a: a.clone(), b: b.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// `y[c,hw] = x[c,hw] + v[c]` - the per-channel broadcast add SDXL's resnets
+    /// inject the timestep embedding with.
+    pub fn add_chan(&mut self, c: u32, hw: u32, x: &DeviceBuffer, v: &DeviceBuffer) -> DeviceBuffer {
+        let y = self.act((c as u64) * (hw as u64));
+        let slot = self.xf().add_chan;
+        // `add_chan_bcast` Params: [N, C, HW]; bufs [x, v[N*C], y].
+        self.steps.push(self.gpu.step(slot, &[x, v, &y], &[1, c, hw], c * hw));
+        if self.train {
+            self.tape.push(Op::AddChan { c, hw, x: x.clone(), v: v.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// Multi-head self-attention over an already-projected fused `[t, 3c]`
+    /// buffer, writing the context into `ctx[t, c]`.
+    ///
+    /// Distinct from [`Builder::attn`], which is the VAE's own attention BLOCK
+    /// (GroupNorm + a fused qkv conv + an output projection); this is just the
+    /// attention itself, for a caller whose projections are `nn.Linear`s.
+    ///
+    /// The score/softmax slabs are allocated PER CALL. That matters in train
+    /// mode: the adjoint binds the softmax the forward took, so two attention
+    /// sites sharing one `probs` buffer would each differentiate against the
+    /// other's - a silently wrong gradient, not a shape error. Outside train
+    /// mode the activation pool hands the same pair back each time, so this
+    /// costs nothing there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn self_attn(&mut self, heads: u32, head_dim: u32, c: u32, t: u32, qkv: &DeviceBuffer, ctx: &DeviceBuffer) {
+        let slab = (heads as u64) * (t as u64) * (t as u64);
+        let scores = self.act(slab);
+        let probs = self.act(slab);
+        let a = model::block::Bidir { b: 1, t, n_heads: heads, head_dim, stride: 3 * c, q_off: 0, k_off: c, v_off: 2 * c };
+        let ids = model::block::BidirIds {
+            scores: K_ATTN_SCORES,
+            softmax: K_ATTN_SOFTMAX,
+            apply: K_ATTN_APPLY,
+            // Forward-only slots: the reverse reaches the quartet through
+            // `BwdIds`, never through this struct.
+            dscores: usize::MAX,
+            dv: usize::MAX,
+            dq: usize::MAX,
+            dk: usize::MAX,
+        };
+        for st in model::block::bidir_fwd(self.gpu, &ids, &a, qkv, &scores, &probs, ctx) {
+            self.steps.push(st);
+        }
+        if self.train {
+            self.tape.push(Op::Attn { c, t, heads, head_dim, qkv: qkv.clone(), probs: probs.clone(), y: ctx.clone() });
+        }
+        self.free(slab, scores);
+        self.free(slab, probs);
+    }
+
+    /// Cross-attention: `tq` query rows in `q[tq, c]` against `tkv` key/value
+    /// rows fused as `kv[tkv, 2c]`, writing the context into `ctx[tq, c]`.
+    ///
+    /// The score/softmax slabs are allocated here and RETAINED on a train-mode
+    /// builder (where `free` is a no-op because the pool is disabled), because
+    /// the adjoint needs the softmax the forward actually took. The three
+    /// dispatches are copied verbatim from the working SDXL call site rather
+    /// than re-derived - a mismatched cross-attention param list is silently
+    /// wrong, not a crash.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cross_attn(
+        &mut self,
+        heads: u32,
+        head_dim: u32,
+        c: u32,
+        tq: u32,
+        tkv: u32,
+        q: &DeviceBuffer,
+        kv: &DeviceBuffer,
+        ctx: &DeviceBuffer,
+    ) {
+        let ids = self.xf().cross;
+        let slab = (heads as u64) * (tq as u64) * (tkv as u64);
+        let scores = self.act(slab);
+        let probs = self.act(slab);
+        // `attn_scores_cross`  Params: [bsz, heads, t_dec, t_enc, head_dim, q_stride, kv_stride, q_off, k_off]
+        self.steps.push(self.gpu.step(ids.scores, &[q, kv, &scores], &[1, heads, tq, tkv, head_dim, c, 2 * c, 0, 0], heads * tq * tkv));
+        // `attn_softmax_cross` Params: [bsz, heads, t_dec, t_enc]
+        self.steps.push(self.gpu.step(ids.softmax, &[&scores, &probs], &[1, heads, tq, tkv], heads * tq));
+        // `attn_apply_cross`   Params: [bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model]
+        self.steps.push(self.gpu.step(ids.apply, &[&probs, kv, ctx], &[1, heads, tq, tkv, head_dim, 2 * c, c, c], heads * tq * head_dim));
+        if self.train {
+            self.tape.push(Op::Cross {
+                c,
+                tq,
+                tkv,
+                heads,
+                head_dim,
+                q: q.clone(),
+                kv: kv.clone(),
+                probs: probs.clone(),
+                y: ctx.clone(),
+            });
+        }
+        self.free(slab, scores);
+        self.free(slab, probs);
     }
 
     /// SiLU/swish (`x·sigmoid(x)`), elementwise over `n` values.
