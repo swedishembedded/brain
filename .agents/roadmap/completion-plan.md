@@ -48,6 +48,11 @@ dependency order - each phase is a prerequisite for trusting the next.
 
 ## Phase 0 - Reconcile the ledger with reality
 
+**DONE.** All four sub-items below are closed; §0.1-0.3 in commit "docs: the
+ledgers stop claiming work that is already done", §0.4 measured below. The
+descriptions are kept because they record *what was wrong*, which is the part
+worth not relearning.
+
 **Blocking. Nothing else in this plan can be scheduled honestly until it's done.
 Size: S (hours).**
 
@@ -110,8 +115,16 @@ encoder.
 finishing campaign that builds tests and examples will not survive at this
 margin.
 
-**Action:** `cargo clean`-equivalent through the Makefile, or prune stale
-profile dirs, before Phase 1. Record the working headroom in this file.
+**Done, and the surgical fix was the right one.** `make clean` runs
+`cargo clean`, which would have discarded all 203 GB including the 119 GB
+`debug/deps` dependency graph and forced a cold rebuild. Deleting only
+`target/debug/incremental` freed **69 GB** and cost nothing measurable: the
+`make build` immediately afterwards finished in **0.75 s** having recompiled
+nothing, because `incremental/` is rebuild-state, not artifacts. Filesystem
+went 88% -> 80%.
+
+Prefer this over `make clean` whenever space is the problem and the dependency
+graph is not.
 
 ---
 
@@ -119,10 +132,62 @@ profile dirs, before Phase 1. Record the working headroom in this file.
 
 **Size: M (2-4 days). Everything after this is unverifiable without it.**
 
+**PARTLY DONE, and the first finding changed the shape of the rest.**
+
+### 1.0 `make check/scripts` was red, and had nothing to do with the hangs
+
+`test/full` could not pass regardless of the GPU/NPU hangs below, because
+`check/scripts` was failing - and it fails one sub-gate at a time, so each fix
+uncovered the next:
+
+1. **check-env-docs** - 19 undocumented `BRAIN_*` variables, every one
+   belonging to a model added since the gate last passed (the imaging stack's
+   weight roots, Qwen3.8-27B's dir/ctx/batch, Wan and FLUX.1 placement, nine
+   LTX-2.5 dump/bench knobs). An undocumented variable is an unreachable
+   feature; the face/rrdbnet perf targets already shipped dead from exactly
+   this.
+2. **check-no-perf-numbers** - one real claim (a duration cited only as
+   evidence a run completed; rephrased away) and two false positives inside
+   fenced code blocks, where the escape hatch cannot reach because an HTML
+   comment renders as page content. Fixed by the gate refinement its own
+   header offers: a match preceded by a word character, `_`, `.`, `/` or `%`
+   is identifier-internal. Verified to remove exactly 3 of 44 raw hits.
+3. **check-golden-source** - 16 dumpers writing a manifest with no `source`
+   block, all from the two newest workstreams (ltxv/gemma4, qwen35), i.e. the
+   same two that skipped AGENTS.md. Now 22 on the convention, 45 grandfathered.
+
+`make check/scripts` passes end to end as of this writing. **Lesson worth
+keeping: a chained gate reports only its first failure, so "the gate is red"
+is never one fact.** Re-run it after every fix until it passes rather than
+assuming the first fix was the fix.
+
+### 1.1 The hangs
+
 The stated symptom (`npu.md`): `make test` is not reliably green in a single
 attempt on this box.
 
-### 1.1 The two hangs are probably one bug
+### 1.1a The better gate already existed and had never been installed
+
+`make test/nextest` runs the same tests as `make test` but process-per-test
+with a per-test `slow-timeout` (`.config/nextest.toml`: 60 s period,
+terminate-after 3). Its Makefile comment already describes exactly the failure
+below - "a single wedged GPU test blocks every other test behind it for up to
+TEST_TIMEOUT with no attribution" - and says the target is not the default
+because it "has not been run against the full workspace end to end, only
+smoke-tested".
+
+**`cargo-nextest` was not installed on this box**, which is why that validation
+never happened. Installed (`cargo install cargo-nextest --locked`), and a full
+`make test/nextest` run is what should produce the attribution the
+investigation below has been missing: a wedged test is killed and NAMED after
+~190 s instead of hanging the suite.
+
+Note it builds `--release` while `make test` builds debug, so a first run pays
+a full release compile of every test binary (~1 h on this box). That difference
+is itself worth resolving before it becomes the default gate: the hang was
+observed in the debug lane.
+
+### 1.1b The two hangs are probably one bug
 
 `crates/cli/tests/npu_model_parity.rs` hung for 26+ minutes under a full
 `make test`, with **exactly one thread pinned at 100 %** and the rest idle -
@@ -181,7 +246,7 @@ are not standalone models.
 | `splat` | no `caps.rs`; `brain splat` CLI only | caps (`render`/`fit`) + resident + D-Bus + example |
 | `worldmirror2` | no `caps.rs`; `brain worldmirror2` CLI only | caps (`reconstruct`) + resident + example |
 | `diamond` / `genieredux` | no `caps.rs`; AGENTS.md calls `diamond` "the one served world-model architecture", which the tree does not support | decide: either serve it properly or correct the claim. An interactive-play model may genuinely not fit `Run`/`Subscribe` - if so, **extend the D-Bus surface**, per the invariant, and say so |
-| `glmdsa` | `GlmResident::manifest` exists (`resident_llm.rs:206`) so it is discoverable and scheduled - but no `caps.rs`, so `brain glmdsa <verb>` and the direct provider path are missing | add `glmdsa::caps` mirroring `qwen3::caps`; then its ledger's "GLM serving contract" line is genuinely closed |
+| `glmdsa` | **DONE.** `glmdsa::caps` + a `catalog.rs` entry; `brain caps` went 36 -> 37 models on a box with no GLM checkpoint | the real gap was narrower than "no serving contract": `GlmResident` was always registered and scheduled, but its manifest only exists when `BRAIN_GLMDSA_WEIGHTS` is set, so GLM was the one model whose *discoverability* depended on deployment state. `GlmResident::manifest` now returns `glmdsa::caps::manifest_resident()`, so the served and direct surfaces are one definition. Remaining: `run_batch`, an `examples/` client |
 | `qwen3vl` | catalog entry, `resident: None`, explicitly "no residency adapter yet" | residency adapter, matching `fastvlm`'s stateless `ProviderResident` registration (`resident.rs:179`) |
 | `gpt2`, `toymoe`, `toypid`, `toyseq2seq`, `toyautoencoder` | manifest via resident only (`GptResident`), no `caps.rs` | low priority - these are the toy/baseline models; decide explicitly whether the contract applies to them and record the answer rather than leaving it ambiguous |
 
@@ -275,13 +340,15 @@ unblocks.**
 
 ### 4.1 Unblocks other work
 
-1. **`modelstore` resumable fetch** - `plan_base` always returns the full
-   artifact list and `Step::Download` never checks whether `dest` already
-   exists; a killed multi-GB fetch re-downloads completed shards (confirmed
-   live: a 4.97 GB qwen3vl shard re-fetched from scratch). Fix shape is small -
-   stat `dest`, compare against a known size, skip. **This makes every other
-   phase's weight fetching survivable**, which is why it is first despite being
-   a convenience bug.
+1. **`modelstore` resumable fetch - DONE.** `execute` now skips a
+   `Step::Download` whose `dest` exists. The fix turned out simpler than this
+   plan proposed (stat + `Content-Length` from a HEAD): `fetch::stream_to_file`
+   writes to a `.part` sibling and renames only on full success, so a file at
+   `dest` is by construction complete and bare existence is the *correct* test -
+   no new `Hub` method, no network round-trip, and no edit to the
+   redirect/host-allowlist path, which is the SSRF boundary and has been wrong
+   once already. Gated by two tests, the second asserting the skip is per-FILE
+   so a partially-fetched repo still completes.
 2. **Shared DiT hoist** (`ltxv.md`) - `crates/dit` owns only RoPE despite its
    doc claiming adaLN/patchify/QK-norm, so `wan`/`s3dit`/`flux2` each
    re-implement PixArt timestep embedding and patchify/unpatchify. This is the
