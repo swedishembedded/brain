@@ -129,7 +129,7 @@ over the `Model` trait so every model gets it:
 Tensor parallelism's mechanic (col/row-parallel MLP + attention, fwd+bwd) is
 validated in `crates/model/tests/tensor_parallel.rs`. See
 [overview](../../docs/scaling/overview.md), [data parallel](../../docs/scaling/data-parallel.md),
-[pipeline sharding](../../docs/scaling/pipeline-sharding.md),
+[pipeline sharding](../../docs/scaling/pipeline.md),
 [tensor parallel](../../docs/scaling/tensor-parallel.md).
 
 ## Conventions

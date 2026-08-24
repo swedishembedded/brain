@@ -18,6 +18,12 @@
 # the old names. Renaming a page is exactly the moment this breaks, and exactly
 # the moment nobody re-reads every other page.
 #
+# `.agents/` is covered too, for the same reason at a different audience: those
+# are the routing guides every contributor (and every agent) navigates by, and
+# a rule that points at a page which no longer exists sends the reader looking
+# for guidance that appears to be missing. The first sweep found one there as
+# well (`docs/scaling/pipeline-sharding.md`, renamed to `pipeline.md`).
+#
 # Scope, deliberately narrow so it stays trustworthy rather than noisy:
 #   - relative links to `*.md` only. An anchor (`#section`) is stripped and NOT
 #     verified - checking anchors needs a heading parser, and a wrong anchor is
@@ -43,11 +49,15 @@ LINK = re.compile(r'\]\(([^)#\s]+\.md)(#[^)]*)?\)')
 
 broken = []
 scanned = 0
-for root, _, files in os.walk("docs"):
-    for name in sorted(files):
-        if not name.endswith(".md"):
-            continue
-        path = os.path.join(root, name)
+def pages(tree):
+    for root, _, files in os.walk(tree):
+        for name in sorted(files):
+            if name.endswith(".md"):
+                yield root, os.path.join(root, name)
+
+
+for tree in ("docs", ".agents"):
+    for root, path in pages(tree):
         scanned += 1
         with open(path, encoding="utf-8") as fh:
             for lineno, line in enumerate(fh, 1):
@@ -64,11 +74,11 @@ for item in broken:
 
 if broken:
     print()
-    print(f"{len(broken)} broken relative link(s) in docs/**/*.md.")
+    print(f"{len(broken)} broken relative link(s) in docs/ or .agents/.")
     print("Each points at a file that does not exist. The usual cause is a page")
     print("being renamed without its inbound links being updated - check for a")
     print("current page with a different name before assuming the target is gone.")
     sys.exit(1)
 
-print(f"check-doc-links: every relative .md link in docs/ resolves ({scanned} pages)")
+print(f"check-doc-links: every relative .md link in docs/ and .agents/ resolves ({scanned} pages)")
 PY
