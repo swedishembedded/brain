@@ -515,7 +515,7 @@ pub struct Builder<'a> {
     /// [`Builder::upload`].
     uploaded: u64,
     /// The single im2col scratch (`length, buffer`) shared by every lowered
-    /// conv, grown on demand. Bounded by [`col_budget_floats`] — a whole-image
+    /// conv, grown on demand. Bounded by [`COL_BUDGET_MIB`] - a whole-image
     /// im2col operand exceeds the P40's 2047 MiB binding limit, so the GEMM is
     /// chunked over spatial positions instead (see `im2col_at.wgsl`).
     col: Option<(u64, DeviceBuffer)>,
@@ -528,11 +528,10 @@ pub struct Builder<'a> {
 /// processes `floor(budget / CinKK)` output positions per GEMM, so this trades
 /// scratch for the number of chunks; at 512² the largest operand would be
 /// 2.4 GB unchunked, which is both unbindable and hostile to a card shared with
-/// a resident DiT. Override with `BRAIN_VAE_COL_MIB`.
-fn col_budget_floats() -> u64 {
-    let mib: u64 = std::env::var("BRAIN_VAE_COL_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(512);
-    mib * 1024 * 1024 / 4
-}
+/// a resident DiT. Override with `BRAIN_CONV_COL_MIB` (or its original name
+/// `BRAIN_VAE_COL_MIB`) - the knob is shared with every other lowering in the
+/// tree, see [`gpu_core::lower`].
+const COL_BUDGET_MIB: u64 = 512;
 
 /// Minimum output channels for the lowered conv: `matmul_reg3` computes a
 /// 128-wide column tile, so a conv with fewer output channels pays for a full
@@ -904,8 +903,8 @@ impl<'a> Builder<'a> {
         {
             // Positions per GEMM: a multiple of the 128-row tile, inside the
             // scratch budget, at least one tile.
-            let budget = col_budget_floats();
-            let chunk = (((budget / cinkk as u64) / 128) * 128).clamp(128, hw as u64) as u32;
+            let budget = gpu_core::lower::col_budget_floats(COL_BUDGET_MIB);
+            let chunk = gpu_core::lower::col_chunk_rows(budget, u64::from(cinkk), 128, hw);
             let col = self.col_buf(chunk as u64 * cinkk as u64);
             let nhwc = self.act((hw * cout) as u64);
             let mut pos = 0u32;

@@ -51,6 +51,10 @@ pub mod profile;
 /// Drop-in fast kernels a model inherits without editing its dispatch sites.
 mod upgrade;
 
+/// Conv-as-GEMM lowering: the scratch budget and chunk arithmetic the 1D, 2D
+/// and 3D lowerings share.
+pub mod lower;
+
 /// `--device` parsing and resolution: which compute is *schedulable*.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod devices;

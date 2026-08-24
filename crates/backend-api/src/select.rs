@@ -46,6 +46,16 @@ pub enum Op {
     /// `max_abs_rows`). `m` rows of `n = k` — see [`candidates`] for why
     /// neither gates it.
     MaxAbsRow,
+    /// Forward 1D convolution, NCL (`conv1d` direct vs the GEMM lowering).
+    /// Shape is the LOWERED GEMM's, not the conv's: `m` = output positions
+    /// (`N*Lo`), `n` = `Cout`, `k` = the contraction (`Cin*K`). See
+    /// [`candidates`] and [`GEMM_CONV1D_MIN_COUT`].
+    Conv1d,
+    /// Forward transposed 1D convolution, NCL (`convtr1d` direct vs the GEMM
+    /// lowering). Shape is again the lowered GEMM's: `m` = INPUT positions
+    /// (`N*L` - the transposed lowering does `L` rows, not `Lo`), `n` =
+    /// `Cout`, `k` = `Cin`.
+    ConvTranspose1d,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -234,6 +244,68 @@ pub const GEMM_TILE_MIN_ROWS: u32 = 8;
 /// Also migrated from `model::block::pick_gemm`'s old `m < 8 || n < 128` rule.
 pub const GEMM_TILE_MIN_COLS: u32 = 128;
 
+/// Minimum output channels for the GEMM-lowered 1D convolution
+/// ([`Op::Conv1d`]). `matmul_reg3` computes a 128-wide column tile, so a conv
+/// with too few output channels pays for a full tile and loses.
+///
+/// # 16, swept - NOT the 2D lowering's 32, and the difference is the baseline
+///
+/// `vae::blocks`'s `GEMM_CONV_MIN_COUT` measured 32 for the same GEMM, but its
+/// "direct" side is `conv_bias_reg`, an `@opt 5` register-tiled conv running at
+/// ~700 GFLOP/s. The 1D direct side is `conv1d`, one thread per output element
+/// with a serial reduction, measured at 2.2% of a P40's compute roof. A much
+/// weaker baseline crosses over much earlier, so copying the 2D number would
+/// have left a 1.9x-6.0x win unclaimed across the 16..32 band - a selection
+/// rule is as much a bottleneck as a kernel, so each pair earns its own
+/// measured crossover rather than inheriting another pair's.
+///
+/// Swept by `crates/audio/tests/bench_conv1d_lowering.rs` (`--ignored`) on a
+/// P40, best of 5, warm-up excluded, box otherwise idle. `lowered` is the WHOLE
+/// lowering including its im2col and epilogue passes. The sub-threshold half
+/// needs `BRAIN_CONV1D_GEMM=force`: without it the selector answers "direct"
+/// for both columns and the ratio reads a meaningless 1.0x, which is how a
+/// threshold gets "confirmed" by a measurement that never tested it.
+///
+/// Speedup (direct / lowered), N = 2, Cin = Cout, L = 44096:
+///
+/// | Cout | 4 | 8 | 12 | **16** | 24 | 32 | 64 | 128 | 256 |
+/// |---|---|---|---|---|---|---|---|---|---|
+/// | k=7 pad=3 (im2col + `matmul_reg3`) | 0.27x | 0.54x | 0.85x | **1.06x** | 1.88x | 2.52x | 5.68x | 10.3x | 15.4x |
+/// | k=1 (`matmul_dx_reg`, no im2col) | 0.71x | 0.74x | 0.89x | **1.53x** | 2.66x | 3.36x | 5.13x | 14.2x | 20.6x |
+///
+/// Both forms cross between 12 and 16, so one number serves both.
+///
+/// The lowered `conv1d` was also **bit-identical** to the direct kernel at
+/// every shape in that sweep (`max|delta|` exactly 0.0, against a f32 host
+/// reference that differs from both by ~1e-6). That is not luck and not a
+/// guarantee: the `matmul_reg*` family accumulates strictly in increasing `k`,
+/// one FMA at a time, and the col operand is laid out `ci*K + kw` - the same
+/// order `conv1d.wgsl`'s nested loops sum in. Treat it as a measured property
+/// of this driver, not a contract; the transposed lowering below genuinely
+/// does reassociate.
+pub const GEMM_CONV1D_MIN_COUT: u32 = 16;
+
+/// Minimum output channels for the GEMM-lowered TRANSPOSED 1D convolution
+/// ([`Op::ConvTranspose1d`]) - a SEPARATE threshold from
+/// [`GEMM_CONV1D_MIN_COUT`], because it is a different GEMM against a
+/// different baseline and the measurement says they part company.
+///
+/// `convtr1d` is worse than `conv1d` at the same width: every thread walks all
+/// `K` taps and the `(lo + pad - kw·d) % stride != 0` test discards all but
+/// `K/stride` of them, so at an upsampling stride most of its work is thrown
+/// away (0.4% of a P40's compute roof, measured). The lowering does not pay
+/// that - its GEMM does `L` rows rather than `Lo` - so it wins at every width
+/// swept, including the narrowest:
+///
+/// | Cout | **4** | 8 | 12 | 16 | 24 | 32 | 64 | 128 | 256 |
+/// |---|---|---|---|---|---|---|---|---|---|
+/// | stride=4 K=8, L=11024, Cin=2·Cout | **1.35x** | 2.47x | 3.18x | 3.69x | 6.01x | 8.15x | 20.1x | 35.3x | 64.7x |
+///
+/// So this is 4 rather than 16 - and 4 rather than 1 because 4 is the
+/// narrowest width actually measured, not because anything is known to break
+/// below it.
+pub const GEMM_CONVTR1D_MIN_COUT: u32 = 4;
+
 /// `BRAIN_NO_COOP_LN=1` pins LayerNorm to the per-element kernels — the A/B
 /// switch the end-to-end speedup was measured with, and the fallback if a
 /// driver ever mishandles the cooperative variant. Read once (the policy must
@@ -241,6 +313,25 @@ pub const GEMM_TILE_MIN_COLS: u32 = 128;
 fn no_coop_layernorm() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("BRAIN_NO_COOP_LN").map(|v| v != "0").unwrap_or(false))
+}
+
+/// `BRAIN_CONV1D_GEMM` pins [`Op::Conv1d`]/[`Op::ConvTranspose1d`] to one
+/// side: `0` to the direct kernels, `force` to the GEMM lowering even below
+/// [`GEMM_CONV1D_MIN_COUT`].
+///
+/// This is the A/B switch that threshold was measured with - without it a
+/// sweep cannot see below the threshold at all, because the selector answers
+/// "direct" on both sides and the ratio reads a meaningless 1.0x. It is also
+/// the fallback if a driver ever mishandles the register-tiled GEMMs. Read
+/// once (the policy must stay a pure function of its inputs for a given
+/// process).
+fn conv1d_gemm_override() -> Option<bool> {
+    static V: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("BRAIN_CONV1D_GEMM").ok()?.as_str() {
+        "0" | "off" => Some(false),
+        "1" | "force" => Some(true),
+        _ => None,
+    })
 }
 
 /// `BRAIN_NO_COOP_GRADNORM=1` pins the optimiser's grad-norm to the
@@ -386,6 +477,40 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // trade either. `workgroup_reductions` is the correctness gate: the CPU
         // JIT mis-executes the barrier.
         Op::MaxAbsRow => vec![WorkgroupPerOutput, Reference],
+        // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
+        // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
+        // kernel, not a slow one": measured on a P40 in the MiniMax-Music-3
+        // vocoder they ran at **2.2%** and **0.4%** of the card's compute roof
+        // and were 99.4% of that stage. `RegisterTiled` here means the whole
+        // lowering (`im2col1d_at` + `matmul_reg3` + `nlc_bias_nchw` for
+        // `conv1d`; `matmul_dw_reg_splitk` + `col2im1d_bias` for `convtr1d`),
+        // so it inherits `workgroup_reductions` from
+        // [`KernelVariant::requires`] - which is exactly the correctness gate
+        // the register-tiled GEMMs need, and what keeps the CPU JIT on the
+        // direct kernels.
+        //
+        // Only `n` (Cout) gates it, for the same reason
+        // [`GEMM_TILE_MIN_COLS`] gates a plain GEMM: the GEMM's column tile is
+        // 128 wide and a conv with too few output channels pays for a full
+        // tile. `m` does NOT gate it - a 1D conv's position count is `Lo`,
+        // which is in the thousands even for a short signal, so there is no
+        // decode-shaped regime here to protect.
+        //
+        // The two ops get their OWN thresholds
+        // ([`GEMM_CONV1D_MIN_COUT`] / [`GEMM_CONVTR1D_MIN_COUT`]) because the
+        // sweep says they differ: the transposed direct kernel is so much
+        // worse that the lowering wins at every width measured, while the
+        // plain one loses below 16. Sharing one number would have picked the
+        // wrong side of that for one of them.
+        Op::Conv1d | Op::ConvTranspose1d => {
+            let min_cout = if op == Op::Conv1d { GEMM_CONV1D_MIN_COUT } else { GEMM_CONVTR1D_MIN_COUT };
+            match conv1d_gemm_override() {
+                Some(false) => vec![Reference],
+                Some(true) => vec![RegisterTiled, Reference],
+                None if shape.n >= min_cout => vec![RegisterTiled, Reference],
+                None => vec![Reference],
+            }
+        }
         // Device-independent: the split kernels have no barrier, so the
         // boundary is purely the row length.
         Op::ArgMaxRow => {
@@ -579,6 +704,30 @@ mod tests {
 
     fn shape(m: u32, n: u32, k: u32, dtype: Dtype) -> OpShape {
         OpShape { m, n, k, dtype }
+    }
+
+    /// The 1D convolutions: lowered above the `Cout` threshold on a GPU,
+    /// direct below it, and direct on ANY device without workgroup
+    /// reductions - the register-tiled GEMMs the lowering is built from are
+    /// mis-executed by the CPU JIT's split-at-barrier model, so that is a
+    /// correctness gate rather than a preference.
+    ///
+    /// `m` (the position count) must NOT gate it: a 1D conv's `Lo` is in the
+    /// thousands even for a short signal, and a row threshold copied from the
+    /// GEMM's decode regime would exclude nothing while looking careful.
+    #[test]
+    fn the_1d_convolutions_are_gated_on_cout_and_on_workgroup_reductions() {
+        let s = DefaultSelector;
+        for op in [Op::Conv1d, Op::ConvTranspose1d] {
+            let min_cout = if op == Op::Conv1d { GEMM_CONV1D_MIN_COUT } else { GEMM_CONVTR1D_MIN_COUT };
+            let wide = shape(4096, min_cout, 512, Dtype::F32);
+            let narrow = shape(4096, min_cout - 1, 512, Dtype::F32);
+            assert_eq!(s.select(op, wide, &gpu_caps()), KernelVariant::RegisterTiled, "{op:?}");
+            assert_eq!(s.select(op, narrow, &gpu_caps()), KernelVariant::Reference, "{op:?}");
+            assert_eq!(s.select(op, wide, &cpu_caps()), KernelVariant::Reference, "{op:?}");
+            // Few positions, wide output: still lowered. `m` is not a gate.
+            assert_eq!(s.select(op, shape(8, 256, 512, Dtype::F32), &gpu_caps()), KernelVariant::RegisterTiled, "{op:?}");
+        }
     }
 
     /// The decode regime picks the cooperative kernels on a GPU and must NOT

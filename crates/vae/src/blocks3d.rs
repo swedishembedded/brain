@@ -308,7 +308,7 @@ pub struct Builder3d<'a> {
     uploaded: u64,
     /// The single im2col scratch (`length, buffer`) shared by every lowered
     /// conv, grown on demand - the 3D twin of the 2D builder's. Bounded by
-    /// [`col_budget_floats`]: a whole-volume 3D im2col operand is multiple GB
+    /// [`COL_BUDGET_MIB`]: a whole-volume 3D im2col operand is multiple GB
     /// and unbindable, so the GEMM is chunked over output positions instead.
     col: Option<(u64, DeviceBuffer)>,
 }
@@ -317,12 +317,10 @@ pub struct Builder3d<'a> {
 /// processes `floor(budget / CinKKK)` output positions per GEMM, trading scratch
 /// for chunk count. The 3D operand is `KT` times the 2D one for the same image,
 /// which is exactly why it is chunked rather than materialised whole. Override
-/// with `BRAIN_VAE_COL_MIB`, the same variable the 2D lowering reads - one
-/// decode uses both and a caller tuning device memory means both.
-fn col_budget_floats() -> u64 {
-    let mib: u64 = std::env::var("BRAIN_VAE_COL_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(512);
-    mib * 1024 * 1024 / 4
-}
+/// with `BRAIN_CONV_COL_MIB` (or its original name `BRAIN_VAE_COL_MIB`), the
+/// same variable every other lowering reads - one decode uses several and a
+/// caller tuning device memory means all of them. See [`gpu_core::lower`].
+const COL_BUDGET_MIB: u64 = 512;
 
 /// Minimum output channels for the lowered conv3d.
 ///
@@ -494,8 +492,8 @@ impl<'a> Builder3d<'a> {
         }
         // Positions per GEMM: a multiple of the 128-row tile, inside the scratch
         // budget, at least one tile.
-        let budget = col_budget_floats();
-        let chunk = (((budget / cinkkk as u64) / 128) * 128).clamp(128, pos_n as u64) as u32;
+        let budget = gpu_core::lower::col_budget_floats(COL_BUDGET_MIB);
+        let chunk = gpu_core::lower::col_chunk_rows(budget, u64::from(cinkkk), 128, pos_n);
         let col = self.col_buf(chunk as u64 * cinkkk as u64);
         // The GEMM's output is position-major `[pos, Cout]`; `nlc_bias_nchw`
         // adds the bias and transposes it into the `[Cout, To, Ho, Wo]` the

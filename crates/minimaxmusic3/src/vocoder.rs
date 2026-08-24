@@ -17,7 +17,7 @@
 //! so it belongs on the same tape-based device engine every other serving
 //! path uses.
 
-use audio::conv::{conv1d_fwd, convtr1d_fwd, fold_weight_norm, Conv1d, ConvKernels};
+use audio::conv::{conv1d_bias_fwd, convtr1d_bias_fwd, fold_weight_norm, Conv1d, ConvGemmKernels, ConvKernels, ConvScratch};
 use audio::snake::{snake1d_fwd, Snake1d, SnakeKernels};
 use checkpoint::safetensors::{self, StTensor};
 use gpu_core::{DeviceBuffer, Gpu, Step};
@@ -27,28 +27,68 @@ use std::path::Path;
 use crate::config::VocoderConfig;
 
 /// This crate's own kernel list for the vocoder's device forward. Index
-/// order fixes [`CONV1D`]/[`CONVTR1D`]/[`SNAKE1D`]/[`BIAS_ADD`]/[`ADD2`]
-/// below - keep them in lockstep with any edit here.
+/// order fixes the constants below - keep them in lockstep with any edit here.
+///
+/// Slots 5..10 are `audio::conv`'s GEMM lowering (`im2col1d_at`,
+/// `matmul_reg3`, `matmul_dx_reg`, `matmul_dw_reg_splitk`, `nlc_bias_nchw`,
+/// `col2im1d_bias`). They are APPENDED, so nothing that indexes this list by
+/// the first five moves, and `conv1d`/`convtr1d` stay registered because the
+/// selector still routes narrow convs (this decoder's `Cout = 1` output conv)
+/// to them - and because they are the only path on a backend without
+/// workgroup reductions.
 pub const PIPELINES: &[(&str, &str)] = &[
     ("conv1d", kernels::CONV1D),
     ("convtr1d", kernels::CONVTR1D),
     ("snake1d", kernels::SNAKE1D),
     ("add_chan_inplace", kernels::ADD_CHAN_INPLACE),
     ("add2", kernels::ADD2),
+    ("im2col1d_at", kernels::IM2COL1D_AT),
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
+    ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
+    ("col2im1d_bias", kernels::COL2IM1D_BIAS),
 ];
 const CONV1D: usize = 0;
 const CONVTR1D: usize = 1;
 const SNAKE1D: usize = 2;
 const BIAS_ADD: usize = 3;
 const ADD2: usize = 4;
+const IM2COL1D_AT: usize = 5;
+const MATMUL_REG3: usize = 6;
+const MATMUL_DX_REG: usize = 7;
+const MATMUL_DW_REG_SPLITK: usize = 8;
+const NLC_BIAS_NCHW: usize = 9;
+const COL2IM1D_BIAS: usize = 10;
 
 const SNAKE_EPS: f32 = 1e-9;
 
-fn conv_kernels() -> ConvKernels {
-    ConvKernels { fwd: CONV1D, dx: 0, dw: 0 }
+/// The recorded forward: the dispatch list plus the ONE conv scratch every
+/// lowered convolution in it shares.
+///
+/// The scratch has to live at this scope rather than inside a conv builder:
+/// the whole decoder is recorded and submitted as a single pass, so a
+/// per-conv scratch would keep all 28 of them resident at once (~4 GB here)
+/// instead of one buffer sized for the largest. Reuse is safe because
+/// dispatches execute in submit order with the backend's inter-dispatch
+/// barriers - see `audio::conv::ConvScratch`.
+#[derive(Default)]
+struct Tape {
+    steps: Vec<Step>,
+    scratch: ConvScratch,
 }
-fn convtr_kernels() -> ConvKernels {
-    ConvKernels { fwd: CONVTR1D, dx: 0, dw: 0 }
+
+fn conv_gemm_kernels(fwd: usize) -> ConvGemmKernels {
+    ConvGemmKernels {
+        direct: ConvKernels { fwd, dx: 0, dw: 0 },
+        bias: BIAS_ADD,
+        im2col: IM2COL1D_AT,
+        matmul: MATMUL_REG3,
+        matmul_nn: MATMUL_DX_REG,
+        matmul_tn: MATMUL_DW_REG_SPLITK,
+        nlc_bias: NLC_BIAS_NCHW,
+        col2im: COL2IM1D_BIAS,
+    }
 }
 fn snake_kernels() -> SnakeKernels {
     SnakeKernels { fwd: SNAKE1D, bwd_dx: 0, bwd_dalpha: 0 }
@@ -191,37 +231,36 @@ pub fn forward(gpu: &Gpu, cfg: &VocoderConfig, w: &VocoderWeights, latents: &[f3
     // fold the stereo split into the batch axis. The row-major NCL layout
     // makes this a pure reinterpretation, no data movement.
     let rows = batch * 2;
-    let mut steps: Vec<Step> = Vec::new();
+    let mut t = Tape::default();
     let x = gpu.storage_init("vocoder.in", latents);
 
-    let cur = conv1d_bias_step(gpu, &mut steps, &w.dec_in_proj, rows as u32, half as u32, length as u32, cfg.decoder_input_dim, 1, 0, 1, &x);
+    let cur = conv1d_bias_step(gpu, &mut t, &w.dec_in_proj, rows as u32, half as u32, length as u32, cfg.decoder_input_dim, 1, 0, 1, &x);
     let mut cur_dim = cfg.decoder_input_dim as usize;
     let mut cur_len = length;
-    let mut cur = conv1d_bias_step(gpu, &mut steps, &w.conv_in, rows as u32, cur_dim as u32, cur_len as u32, cfg.decoder_hidden_dim, 7, 3, 1, &cur);
+    let mut cur = conv1d_bias_step(gpu, &mut t, &w.conv_in, rows as u32, cur_dim as u32, cur_len as u32, cfg.decoder_hidden_dim, 7, 3, 1, &cur);
     cur_dim = cfg.decoder_hidden_dim as usize;
 
     for (i, block) in w.blocks.iter().enumerate() {
         let stride = cfg.upsampling_ratios[i] as usize;
         let out_dim = cur_dim / 2;
-        let a1 = snake_step(gpu, &mut steps, &block.snake1_alpha, rows as u32, cur_dim as u32, cur_len as u32, &cur);
+        let a1 = snake_step(gpu, &mut t, &block.snake1_alpha, rows as u32, cur_dim as u32, cur_len as u32, &cur);
         let out_len = cur_len * stride; // exact for the even strides this checkpoint uses (see module test).
         let pad = stride.div_ceil(2);
-        let t = convtr1d_bias_step(gpu, &mut steps, &block.conv_t1, rows as u32, cur_dim as u32, cur_len as u32, out_dim as u32, 2 * stride as u32, stride as u32, pad as u32, out_len as u32, &a1);
-        cur = t;
+        cur = convtr1d_bias_step(gpu, &mut t, &block.conv_t1, rows as u32, cur_dim as u32, cur_len as u32, out_dim as u32, 2 * stride as u32, stride as u32, pad as u32, out_len as u32, &a1);
         cur_dim = out_dim;
         cur_len = out_len;
         for (dilation, ru) in [1u32, 3, 9].into_iter().zip(&block.res_units) {
-            cur = residual_unit_step(gpu, &mut steps, ru, rows as u32, cur_dim as u32, cur_len as u32, dilation, &cur);
+            cur = residual_unit_step(gpu, &mut t, ru, rows as u32, cur_dim as u32, cur_len as u32, dilation, &cur);
         }
     }
 
-    let sn = snake_step(gpu, &mut steps, &w.snake_out_alpha, rows as u32, cur_dim as u32, cur_len as u32, &cur);
-    let out = conv1d_bias_step(gpu, &mut steps, &w.conv_out, rows as u32, cur_dim as u32, cur_len as u32, 1, 7, 3, 1, &sn);
+    let sn = snake_step(gpu, &mut t, &w.snake_out_alpha, rows as u32, cur_dim as u32, cur_len as u32, &cur);
+    let out = conv1d_bias_step(gpu, &mut t, &w.conv_out, rows as u32, cur_dim as u32, cur_len as u32, 1, 7, 3, 1, &sn);
     // tanh has its own elementwise kernel elsewhere in the workspace, but at
     // one 1-channel row this is a single host pass over the final samples -
     // cheaper than a device round trip for a buffer this small relative to
     // everything already computed.
-    gpu.submit(&[], &steps);
+    gpu.submit(&[], &t.steps);
     let raw = gpu.read(&out, rows * cur_len);
     let waveform: Vec<f32> = raw.iter().map(|&v| v.tanh()).collect();
 
@@ -232,44 +271,42 @@ pub fn forward(gpu: &Gpu, cfg: &VocoderConfig, w: &VocoderWeights, latents: &[f3
 }
 
 #[allow(clippy::too_many_arguments)]
-fn conv1d_bias_step(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvW, n: u32, cin: u32, l: u32, cout: u32, k: u32, pad: u32, dilation: u32, x: &DeviceBuffer) -> DeviceBuffer {
+fn conv1d_bias_step(gpu: &Gpu, t: &mut Tape, w: &ConvW, n: u32, cin: u32, l: u32, cout: u32, k: u32, pad: u32, dilation: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let lo = Conv1d::out_len(l, k, 1, pad, pad, dilation);
     let c = Conv1d { n, cin, l, cout, k, stride: 1, pad, dilation, groups: 1, lo };
     let wb = gpu.storage_init("w", &w.weight);
-    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo));
-    steps.push(conv1d_fwd(gpu, &conv_kernels(), &c, x, &wb, &y));
     let bb = gpu.storage_init("b", &w.bias);
-    steps.push(gpu.step(BIAS_ADD, &[&y, &bb], &[n * cout * lo, cout, lo], n * cout * lo));
+    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo));
+    t.steps.extend(conv1d_bias_fwd(gpu, &conv_gemm_kernels(CONV1D), &c, x, &wb, &bb, &y, &mut t.scratch));
     y
 }
 
 #[allow(clippy::too_many_arguments)]
-fn convtr1d_bias_step(gpu: &Gpu, steps: &mut Vec<Step>, w: &ConvW, n: u32, cin: u32, l: u32, cout: u32, k: u32, stride: u32, pad: u32, lo: u32, x: &DeviceBuffer) -> DeviceBuffer {
+fn convtr1d_bias_step(gpu: &Gpu, t: &mut Tape, w: &ConvW, n: u32, cin: u32, l: u32, cout: u32, k: u32, stride: u32, pad: u32, lo: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let c = Conv1d { n, cin, l, cout, k, stride, pad, dilation: 1, groups: 1, lo };
     let wb = gpu.storage_init("w", &w.weight);
-    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo));
-    steps.push(convtr1d_fwd(gpu, &convtr_kernels(), &c, x, &wb, &y));
     let bb = gpu.storage_init("b", &w.bias);
-    steps.push(gpu.step(BIAS_ADD, &[&y, &bb], &[n * cout * lo, cout, lo], n * cout * lo));
+    let y = gpu.storage(u64::from(n) * u64::from(cout) * u64::from(lo));
+    t.steps.extend(convtr1d_bias_fwd(gpu, &conv_gemm_kernels(CONVTR1D), &c, x, &wb, &bb, &y, &mut t.scratch));
     y
 }
 
-fn snake_step(gpu: &Gpu, steps: &mut Vec<Step>, alpha: &[f32], rows: u32, c: u32, inner: u32, x: &DeviceBuffer) -> DeviceBuffer {
+fn snake_step(gpu: &Gpu, t: &mut Tape, alpha: &[f32], rows: u32, c: u32, inner: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let sc = Snake1d { rows, c, inner, eps: SNAKE_EPS };
     let ab = gpu.storage_init("alpha", alpha);
     let y = gpu.storage(u64::from(sc.total()));
-    steps.push(snake1d_fwd(gpu, &snake_kernels(), &sc, x, &ab, &y));
+    t.steps.push(snake1d_fwd(gpu, &snake_kernels(), &sc, x, &ab, &y));
     y
 }
 
-fn residual_unit_step(gpu: &Gpu, steps: &mut Vec<Step>, ru: &ResidualUnitW, n: u32, dim: u32, l: u32, dilation: u32, x: &DeviceBuffer) -> DeviceBuffer {
+fn residual_unit_step(gpu: &Gpu, t: &mut Tape, ru: &ResidualUnitW, n: u32, dim: u32, l: u32, dilation: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let pad = 3 * dilation; // (k-1)*dilation/2 at k=7.
-    let s1 = snake_step(gpu, steps, &ru.snake1_alpha, n, dim, l, x);
-    let c1 = conv1d_bias_step(gpu, steps, &ru.conv1, n, dim, l, dim, 7, pad, dilation, &s1);
-    let s2 = snake_step(gpu, steps, &ru.snake2_alpha, n, dim, l, &c1);
-    let c2 = conv1d_bias_step(gpu, steps, &ru.conv2, n, dim, l, dim, 1, 0, 1, &s2);
+    let s1 = snake_step(gpu, t, &ru.snake1_alpha, n, dim, l, x);
+    let c1 = conv1d_bias_step(gpu, t, &ru.conv1, n, dim, l, dim, 7, pad, dilation, &s1);
+    let s2 = snake_step(gpu, t, &ru.snake2_alpha, n, dim, l, &c1);
+    let c2 = conv1d_bias_step(gpu, t, &ru.conv2, n, dim, l, dim, 1, 0, 1, &s2);
     let out = gpu.storage(u64::from(n) * u64::from(dim) * u64::from(l));
-    steps.push(gpu.step(ADD2, &[x, &c2, &out], &[n * dim * l], n * dim * l));
+    t.steps.push(gpu.step(ADD2, &[x, &c2, &out], &[n * dim * l], n * dim * l));
     out
 }
 

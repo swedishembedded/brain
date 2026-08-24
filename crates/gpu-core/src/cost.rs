@@ -853,6 +853,24 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(0, 8 * cnt * cinkk)
         }
         "im2col" => f(0, 8 * n0()),
+        // The 1D lowering's own pair. `im2col1d_at` is the same pure movement
+        // one spatial axis down: params [cin,l,k,stride,pad,dilation,cink,pos0,cnt],
+        // `cnt*cink` floats read and written.
+        "im2col1d_at" => {
+            let (cink, cnt) = (p(6)?, p(8)?);
+            f(0, 8 * cnt * cink)
+        }
+        // `col2im1d_bias` gathers the [Cout*K, L] GEMM output into [Cout, Lo]
+        // and adds the bias: params [l, cout, k, stride, pad, dilation, lo].
+        // One add per tap that actually lands (`K/stride` of the `K` the loop
+        // walks, the same discard `convtr1d`'s own formula accounts for), plus
+        // one for the bias. Reads only the taps it uses - `Lo*(K/stride)` per
+        // channel - and writes `Cout*Lo`.
+        "col2im1d_bias" => {
+            let (cout, k, stride, lo) = (p(1)?, p(2)?, p(3)?.max(1), p(6)?);
+            let taps = cout * lo * (k / stride).max(1);
+            f(taps + cout * lo, 4 * (taps + cout * lo + cout))
+        }
         // params [rc, slices]: fold the split-K weight-gradient partials.
         // Reads `rc*slices` and writes `rc` — the tail the split-K dW GEMM pays
         // to avoid atomics.
@@ -1462,6 +1480,7 @@ mod tests {
             "rope_train_bwd", "rope_partial", "rope_partial_bwd", "rope_sub",
             "rope_interleave_table", "gelu_erf", "geglu_shift", "snake_beta",
             "attn_scores_cross_kt", "kv_k_headt", "convtr1d", "snake1d", "add_chan_inplace",
+            "im2col1d_at", "col2im1d_bias", "matmul_dw_reg_splitk",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
@@ -1499,6 +1518,31 @@ mod tests {
         // `out` read AND written through its single read_write binding.
         assert_eq!(cost("add_chan_inplace", &[24, 3, 4], 24).flops, 24);
         assert_eq!(cost("add_chan_inplace", &[24, 3, 4], 24).bytes, 4 * (2 * 24 + 3));
+    }
+
+    /// The 1D conv-as-GEMM lowering's own pair. Without these the vocoder's
+    /// pass stops reporting a rate the moment the lowered path is selected -
+    /// the same coverage hole [`the_dac_vocoder_upsample_trio_is_covered`]
+    /// closed for the direct kernels.
+    #[test]
+    fn the_1d_conv_lowering_pair_is_covered() {
+        // im2col1d_at [cin=8,l=16,k=3,stride=1,pad=1,dil=1,cink=24,pos0=0,cnt=16]:
+        // pure movement, 8 bytes per moved float (read + write), no arithmetic.
+        assert_eq!(cost("im2col1d_at", &[8, 16, 3, 1, 1, 1, 24, 0, 16], 384).bytes, 8 * 16 * 24);
+        assert_eq!(cost("im2col1d_at", &[8, 16, 3, 1, 1, 1, 24, 0, 16], 384).flops, 0);
+
+        // col2im1d_bias [l=4,cout=3,k=4,stride=2,pad=1,dil=1,lo=8]: K/stride = 2
+        // taps actually land per output element, plus the bias add:
+        // 3*8*2 + 3*8 = 72 adds.
+        assert_eq!(cost("col2im1d_bias", &[4, 3, 4, 2, 1, 1, 8], 24).flops, 72);
+        // bytes: the 48 tap reads, the 24 output writes and the 3-long bias.
+        assert_eq!(cost("col2im1d_bias", &[4, 3, 4, 2, 1, 1, 8], 24).bytes, 4 * (48 + 24 + 3));
+        // The same trap `convtr1d`'s formula documents, from the epilogue's
+        // side: doubling the stride doubles `Lo` and the thread count but NOT
+        // the taps that land, so the per-element tap count must divide by the
+        // stride rather than stay at `K`.
+        // K/stride = 1 tap per output element now, plus the bias: 2*3*16.
+        assert_eq!(cost("col2im1d_bias", &[4, 3, 4, 4, 1, 1, 16], 48).flops, 2 * 3 * 16);
     }
 
     /// A RATCHET over the whole kernel tree, not another hand-maintained list.

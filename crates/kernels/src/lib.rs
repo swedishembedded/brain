@@ -234,6 +234,8 @@ pub const CLIP_COEF: &str = include_str!("../wgsl/clip_coef.wgsl");
 pub const CLIP_COEF_WG: &str = include_str!("../wgsl/clip_coef_wg.wgsl");
 /// `wgsl/col2im.wgsl`
 pub const COL2IM: &str = include_str!("../wgsl/col2im.wgsl");
+/// `wgsl/col2im1d_bias.wgsl`
+pub const COL2IM1D_BIAS: &str = include_str!("../wgsl/col2im1d_bias.wgsl");
 /// `wgsl/concat2.wgsl`
 pub const CONCAT2: &str = include_str!("../wgsl/concat2.wgsl");
 /// `wgsl/concat_split.wgsl`
@@ -494,6 +496,8 @@ pub const HEAD_PACK_T: &str = include_str!("../wgsl/head_pack_t.wgsl");
 pub const HEAD_UNPACK: &str = include_str!("../wgsl/head_unpack.wgsl");
 /// `wgsl/im2col.wgsl`
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
+/// `wgsl/im2col1d_at.wgsl`
+pub const IM2COL1D_AT: &str = include_str!("../wgsl/im2col1d_at.wgsl");
 /// `wgsl/im2col3d_at.wgsl`
 pub const IM2COL3D_AT: &str = include_str!("../wgsl/im2col3d_at.wgsl");
 /// `wgsl/im2col_at.wgsl`
@@ -992,6 +996,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("clip_coef", CLIP_COEF),
     ("clip_coef_wg", CLIP_COEF_WG),
     ("col2im", COL2IM),
+    ("col2im1d_bias", COL2IM1D_BIAS),
     ("concat2", CONCAT2),
     ("concat_split", CONCAT_SPLIT),
     ("conv1d", CONV1D),
@@ -1122,6 +1127,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("head_pack_t", HEAD_PACK_T),
     ("head_unpack", HEAD_UNPACK),
     ("im2col", IM2COL),
+    ("im2col1d_at", IM2COL1D_AT),
     ("im2col3d_at", IM2COL3D_AT),
     ("im2col_at", IM2COL_AT),
     ("kv_append", KV_APPEND),

@@ -10,7 +10,28 @@
 //! are pure dispatch assembly — shapes + buffers in, `Step`s out — and carry no
 //! ParamStore / model concerns. Both NCL convolutions use grouping + dilation;
 //! causal convs are expressed as a LEFT pad of `dilation*(K-1)` with `lo == l`.
+//!
+//! # Two lowerings, one selector
+//!
+//! [`conv1d_fwd`] / [`convtr1d_fwd`] dispatch the DIRECT kernels
+//! (`conv1d.wgsl`, `convtr1d.wgsl`): one thread per output element with a
+//! serial reduction over `Cin*K`. That is the wrong kernel rather than a slow
+//! one - on a P40 the pair measured **2.2%** and **0.4%** of the card's
+//! compute roof and 99.4% of the MiniMax-Music-3 vocoder's stage time.
+//!
+//! [`conv1d_bias_fwd`] / [`convtr1d_bias_fwd`] are the seam that also offers
+//! the GEMM lowering, choosing per shape and per device through
+//! `backend_api::select` ([`Op::Conv1d`] / [`Op::ConvTranspose1d`]). They are
+//! ADDITIVE - the direct entry points, [`ConvKernels`] and both backward
+//! builders are untouched, so no existing caller has to change - and the
+//! choice lives here rather than at a call site, which is what lets the dozen
+//! crates convolving in 1D inherit it by switching one function.
+//!
+//! Both lowerings consume the checkpoint's NATIVE weight layout: `[Cout,
+//! Cin/G, K]` is `[Cout, Cin*K]` row-major, and `[Cin, Cout/G, K]` is `[Cin,
+//! Cout*K]`. No transpose, no permute, on either side.
 
+use gpu_core::select::{DefaultSelector, KernelSelector, KernelVariant, Op, OpShape};
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
 /// Shape + hyperparameters of a 1D convolution (forward and both gradients share
@@ -116,6 +137,369 @@ pub fn convtr1d_bwd(
         s.push(g.step(k.dw, &[dy, x, dw], &c.params(), c.cin * (c.cout / c.groups) * c.k));
     }
     s
+}
+
+// ---------------------------------------------------------------------------
+// The GEMM lowering - an ADDITIVE second seam, `Conv1d` and `ConvKernels`
+// unchanged. See the module doc's "Two lowerings" section.
+// ---------------------------------------------------------------------------
+
+/// Kernel-pipeline indices for the GEMM lowering, on top of the direct
+/// [`ConvKernels`] a model already registers.
+///
+/// Additive on purpose: `ConvKernels` is the contract a dozen crates
+/// (`mimi`, `lfm2`, `ecapatdnn`, `qwen35*`'s GDN, `ltxv`, `campplus`, …) and
+/// every conv backward already pass, so widening *it* would force an edit in
+/// each of them for a forward-only win. A caller opts in by registering the
+/// six extra pipelines and calling [`conv1d_bias_fwd`] /
+/// [`convtr1d_bias_fwd`]; one that does not keeps the direct kernels and
+/// compiles unchanged.
+///
+/// Every slot must name the kernel in the comment beside it - a mismatched
+/// pipeline index here is silently wrong output, not a crash.
+#[derive(Clone, Copy)]
+pub struct ConvGemmKernels {
+    /// The direct kernels, used when the selector says so and as the
+    /// structural fallback on any device or shape the lowering cannot serve.
+    pub direct: ConvKernels,
+    /// `add_chan_inplace` - the per-channel bias for the direct path.
+    pub bias: usize,
+    /// `im2col1d_at`.
+    pub im2col: usize,
+    /// `matmul_reg3` - `out[m,n] = x[m,k] · W[n,k]ᵀ`.
+    pub matmul: usize,
+    /// `matmul_dx_reg` - `out[m,k] = a[m,n] · b[n,k]` (NN, assigns).
+    pub matmul_nn: usize,
+    /// `matmul_dw_reg_splitk` - `out[n,k] = sum_m a[m,n]·b[m,k]` (TN,
+    /// assigns; `matmul_dw_reg` is the same GEMM but ACCUMULATES, which a
+    /// reused scratch buffer cannot use).
+    pub matmul_tn: usize,
+    /// `nlc_bias_nchw` - the transpose + bias epilogue, shared with the 2D
+    /// and 3D lowerings.
+    pub nlc_bias: usize,
+    /// `col2im1d_bias`.
+    pub col2im: usize,
+}
+
+/// Reusable device scratch for the lowered convolutions, owned by the caller
+/// and shared by every conv in one recorded graph.
+///
+/// Two slots, grown on demand and never shrunk:
+///
+/// * `col` - the chunked `im2col1d_at` operand, bounded by
+///   [`gpu_core::lower::col_budget_floats`];
+/// * `out` - the GEMM's output before the epilogue (`[Lo, Cout]` for
+///   `conv1d`, `[Cout*K, L]` for `convtr1d`). The two never overlap in time,
+///   so one buffer serves both and the peak is the larger.
+///
+/// Reuse across convs is safe because every dispatch in a recorded pass runs
+/// in submit order with the backend's inter-dispatch barriers: the epilogue
+/// of conv *i* reads the scratch before the GEMM of conv *i+1* writes it.
+/// This is the same contract `vae::blocks`'s single `col_buf` relies on. What
+/// it does NOT survive is a caller reordering steps, which nothing here does.
+pub struct ConvScratch {
+    col: Option<(u64, DeviceBuffer)>,
+    out: Option<(u64, DeviceBuffer)>,
+    budget_mib: u64,
+}
+
+impl Default for ConvScratch {
+    fn default() -> ConvScratch {
+        ConvScratch { col: None, out: None, budget_mib: COL_BUDGET_MIB }
+    }
+}
+
+impl ConvScratch {
+    pub fn new() -> ConvScratch {
+        ConvScratch::default()
+    }
+
+    /// The same scratch with a different `col` ceiling, in MiB.
+    ///
+    /// Exists for two reasons, both real: a caller sharing a card with a
+    /// resident model has less to spend than the default assumes, and a test
+    /// needs to reach the multi-chunk path without allocating half a gigabyte.
+    /// The second is not cosmetic - a single-chunk test cannot see a chunking
+    /// bug at all (a mutation that ignored `pos0` passed the whole
+    /// shape-coverage suite until a case forced three chunks).
+    ///
+    /// `BRAIN_CONV_COL_MIB` still wins over this, since an operator capping
+    /// device memory means it.
+    pub fn with_budget_mib(mib: u64) -> ConvScratch {
+        ConvScratch { budget_mib: mib.max(1), ..ConvScratch::default() }
+    }
+
+    fn grow(slot: &mut Option<(u64, DeviceBuffer)>, g: &Gpu, need: u64) -> DeviceBuffer {
+        if let Some((len, b)) = slot {
+            if *len >= need {
+                return b.clone();
+            }
+        }
+        let b = g.storage(need);
+        *slot = Some((need, b.clone()));
+        b
+    }
+}
+
+/// Scratch budget for the 1D `col` operand, in MiB. Shared knob - see
+/// [`gpu_core::lower::col_budget_floats`].
+///
+/// # 128, swept - not the VAE lowering's 512
+///
+/// The chunk size trades GEMM efficiency (bigger chunks fill more of the
+/// 128-row tile and amortise the dispatch) against a scratch buffer that is
+/// allocated per recorded graph. Swept on a P40 with `mm3_bench vocoder 689`,
+/// best-of-5, reading the DEVICE-time sum (the whole-pass number on that stage
+/// is dominated by a ~650 ms host allocation gap and is too noisy to read a
+/// 2% effect off):
+///
+/// | MiB | 256 | 128 | 96 | 64 | 48 | 32 |
+/// |---|---|---|---|---|---|---|
+/// | device ms | 780 / 800 | 794 / 797 | 797 / 797 | 854 / 831 | 835 / 835 | 885 / 886 |
+///
+/// Flat from 96 MiB up and climbing below it (+6% at 64, +11% at 32), so 128
+/// is the smallest budget that costs nothing - which matters, because this
+/// scratch is live beside a decoder that already peaks in the tens of
+/// gigabytes. The VAE lowering keeps 512 for its own 2D operands.
+const COL_BUDGET_MIB: u64 = 128;
+
+/// The `matmul_reg*` family's tile edge. Both the GEMM row chunking and the
+/// workgroup count derive from it.
+const GEMM_TILE: u32 = 128;
+
+/// Storage-buffer binding offsets are byte-aligned by the device's
+/// `min_storage_buffer_offset_alignment`. WebGPU's *default* limit is 256
+/// bytes and a device may only report a smaller one, so 64 f32 words is the
+/// safe requirement on any backend without querying a limit `gpu_core` does
+/// not expose. It only bites for `N > 1`, where each batch row is bound as a
+/// sub-range; an unaligned row count keeps that conv on the direct kernel
+/// rather than risking a validation error.
+const SLICE_ALIGN_F32: u64 = 64;
+
+/// Whether the batch axis can be walked as bound sub-ranges of `x` and `y`.
+fn batch_sliceable(n: u32, x_row: u64, y_row: u64) -> bool {
+    n <= 1 || (x_row.is_multiple_of(SLICE_ALIGN_F32) && y_row.is_multiple_of(SLICE_ALIGN_F32))
+}
+
+/// Ask [`gpu_core::select`] whether this conv's lowered GEMM is the one to
+/// run. `RegisterTiled` names the whole lowering (im2col/col2im included), and
+/// carries the `workgroup_reductions` requirement the register-tiled GEMMs
+/// need - which is what keeps the CPU JIT, whose split-at-barrier model
+/// mis-executes them, on the direct kernels without a backend-name test.
+fn lowered(g: &Gpu, op: Op, m: u32, n: u32, k: u32) -> bool {
+    let shape = OpShape { m, n, k, dtype: gpu_core::select::Dtype::F32 };
+    DefaultSelector.select(op, shape, &g.caps()) == KernelVariant::RegisterTiled
+}
+
+impl Conv1d {
+    /// Shapes the 1D lowering cannot express at all, independent of whether it
+    /// would be faster: grouping (the lowering assumes one group - a grouped
+    /// conv is a block-diagonal GEMM, which is a different kernel, not a
+    /// different threshold) and a batch whose per-row binding offsets are not
+    /// alignable.
+    fn lowerable(&self, x_row: u64, y_row: u64) -> bool {
+        self.groups == 1 && batch_sliceable(self.n, x_row, y_row)
+    }
+}
+
+/// `y = conv1d(x, w) + bias` - the SELECTED lowering.
+///
+/// `x:[N,Cin,L]`, `w:[Cout,Cin/G,K]`, `bias:[Cout]`, `y:[N,Cout,Lo]`, all NCL,
+/// identical to [`conv1d_fwd`]'s contract with the bias folded in (the direct
+/// path appends `add_chan_inplace`, the lowered ones fuse it into their
+/// epilogue). Three lowerings, chosen by `gpu_core::select`:
+///
+/// * **direct** - `conv1d` + `add_chan_inplace`. One thread per output element
+///   with a serial `Cin*K` reduction: measured at **2.2% of a P40's compute
+///   roof** across the MiniMax-Music-3 vocoder's shapes, where it was 51.6% of
+///   the stage. It stays for narrow convs (`Cout < GEMM_CONV1D_MIN_COUT`, where
+///   the GEMM's 128-wide column tile is mostly idle), for grouped convs, and
+///   wherever `workgroup_reductions` is false.
+/// * **lowered, `K > 1`** - `im2col1d_at` + `matmul_reg3` + `nlc_bias_nchw`,
+///   i.e. `y[Lo, Cout] = col[Lo, Cin*K] · Wᵀ`. The native `[Cout, Cin/G, K]`
+///   weight IS `[Cout, Cin*K]` row-major at `G = 1`, so `matmul_reg3` consumes
+///   the checkpoint tensor with no permute. Chunked over output positions -
+///   see [`gpu_core::lower`] and `im2col1d_at.wgsl` for why that is mandatory
+///   rather than tidy.
+/// * **lowered, `K == 1`** (stride 1, no pad) - `matmul_dx_reg`'s NN form
+///   straight over the native operands: `y[Cout, Lo] = W[Cout, Cin] · x[Cin,
+///   L]`. No im2col at all (a `K = 1` col operand is just x transposed) and no
+///   epilogue transpose, because the result is already NCL. This covers the
+///   1x1 projections that make up half a DAC-style vocoder's convolutions.
+///
+/// The GEMM reassociates the `Cin*K` reduction, so the lowered paths are NOT
+/// bit-identical to the direct one - they are more accurate (a tree of
+/// register accumulators rather than one serial `f32` chain), but a gate on
+/// this path must be a tolerance, not `assert_eq!`.
+#[allow(clippy::too_many_arguments)]
+pub fn conv1d_bias_fwd(
+    g: &Gpu,
+    k: &ConvGemmKernels,
+    c: &Conv1d,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    bias: &DeviceBuffer,
+    y: &DeviceBuffer,
+    scratch: &mut ConvScratch,
+) -> Vec<Step> {
+    let (x_row, y_row) = (u64::from(c.cin) * u64::from(c.l), u64::from(c.cout) * u64::from(c.lo));
+    let cink = c.cin * c.k;
+    if !c.lowerable(x_row, y_row) || !lowered(g, Op::Conv1d, c.n * c.lo, c.cout, cink) {
+        return conv1d_bias_direct(g, k, c, x, w, bias, y);
+    }
+    let mut steps = Vec::new();
+    if c.k == 1 && c.stride == 1 && c.pad == 0 {
+        // y[Cout, Lo] = W[Cout, Cin] · x[Cin, L]; `Lo == L` at this kernel
+        // width, so the NN GEMM writes the final NCL tensor and the bias is
+        // the one shared `add_chan_inplace` over the whole batch.
+        for nn in 0..u64::from(c.n) {
+            steps.push(g.step_sliced(
+                k.matmul_nn,
+                &[w, x, y],
+                &[(0, 0), (nn * x_row, x_row), (nn * y_row, y_row)],
+                &[c.cout, c.lo, c.cin, 0],
+                reg_tiles(c.cout, c.lo) * 256,
+            ));
+        }
+        steps.push(bias_step(g, k, c, y, bias));
+        return steps;
+    }
+    for nn in 0..u64::from(c.n) {
+        let (xo, yo) = ((nn * x_row, x_row), (nn * y_row, y_row));
+        let budget = gpu_core::lower::col_budget_floats(scratch.budget_mib);
+        let chunk = gpu_core::lower::col_chunk_rows(budget, u64::from(cink), GEMM_TILE, c.lo);
+        let col = ConvScratch::grow(&mut scratch.col, g, u64::from(chunk) * u64::from(cink));
+        let nlc = ConvScratch::grow(&mut scratch.out, g, y_row);
+        let mut pos = 0u32;
+        while pos < c.lo {
+            let cnt = chunk.min(c.lo - pos);
+            steps.push(g.step_sliced(
+                k.im2col,
+                &[x, &col],
+                &[xo, (0, 0)],
+                &[c.cin, c.l, c.k, c.stride, c.pad, c.dilation, cink, pos, cnt],
+                cnt * cink,
+            ));
+            steps.push(g.step_sliced(
+                k.matmul,
+                &[&col, w, &nlc],
+                &[(0, 0), (0, 0), (u64::from(pos) * u64::from(c.cout), u64::from(cnt) * u64::from(c.cout))],
+                &[cnt, cink, c.cout],
+                reg_tiles(cnt, c.cout) * 256,
+            ));
+            pos += cnt;
+        }
+        steps.push(g.step_sliced(
+            k.nlc_bias,
+            &[&nlc, bias, y],
+            &[(0, 0), (0, 0), yo],
+            &[c.lo * c.cout, c.cout, c.lo],
+            c.cout.div_ceil(64) * c.lo.div_ceil(64) * 64,
+        ));
+    }
+    steps
+}
+
+/// `y = conv_transpose1d(x, w) + bias` - the SELECTED lowering.
+///
+/// `x:[N,Cin,L]`, `w:[Cin,Cout/G,K]`, `bias:[Cout]`, `y:[N,Cout,Lo]`, the same
+/// contract as [`convtr1d_fwd`] with the bias folded in. Two lowerings:
+///
+/// * **direct** - `convtr1d` + `add_chan_inplace`. One thread per output
+///   element, and at an upsampling stride most of its `K` taps are discarded
+///   by the divisibility test: measured at **0.4% of a P40's compute roof** in
+///   the MiniMax-Music-3 vocoder, where it was 47.8% of the stage on four
+///   dispatches.
+/// * **lowered** - `matmul_dw_reg_splitk` (`s = 1`) + `col2im1d_bias`:
+///   `col[Cout*K, L] = Wᵀ·x` in the TN form, whose contraction index is the
+///   LEADING axis of both operands - which is exactly how a transposed conv's
+///   native `[Cin, Cout/G, K]` weight and `[Cin, L]` NCL input are already
+///   laid out, so this needs no transpose and no permute either. `col2im1d_bias`
+///   then gathers the taps that land on each output sample.
+///
+/// The work does not grow: with `K = 2·stride` the GEMM does `L` rows rather
+/// than `Lo = L·stride`, and `L·Cin·Cout·K == Lo·Cin·Cout·(K/stride)` - the
+/// taps the direct kernel discards are the ones this form never computes.
+///
+/// Unlike [`conv1d_bias_fwd`] the `col` operand here is NOT chunkable: the TN
+/// GEMM's output rows index `Cout*K`, so a range of `L` is a strided slice of
+/// both `col` and the input, not a sub-range. It is instead BOUNDED -
+/// `Cout*K*L` floats, `K/stride` times the output - and the lowering is used
+/// only where that fits the device's storage-binding limit, falling back to
+/// the direct kernel where it does not.
+#[allow(clippy::too_many_arguments)]
+pub fn convtr1d_bias_fwd(
+    g: &Gpu,
+    k: &ConvGemmKernels,
+    c: &Conv1d,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    bias: &DeviceBuffer,
+    y: &DeviceBuffer,
+    scratch: &mut ConvScratch,
+) -> Vec<Step> {
+    let (x_row, y_row) = (u64::from(c.cin) * u64::from(c.l), u64::from(c.cout) * u64::from(c.lo));
+    let cok = u64::from(c.cout) * u64::from(c.k);
+    let col_len = cok * u64::from(c.l);
+    let binds = col_len * 4 <= g.max_storage_binding_bytes();
+    if !c.lowerable(x_row, y_row) || !binds || !lowered(g, Op::ConvTranspose1d, c.n * c.l, c.cout, c.cin) {
+        return convtr1d_bias_direct(g, k, c, x, w, bias, y);
+    }
+    let col = ConvScratch::grow(&mut scratch.out, g, col_len);
+    let mut steps = Vec::new();
+    for nn in 0..u64::from(c.n) {
+        let (xo, yo) = ((nn * x_row, x_row), (nn * y_row, y_row));
+        steps.push(g.step_sliced(
+            k.matmul_tn,
+            &[w, x, &col],
+            &[(0, 0), xo, (0, 0)],
+            &[c.cin, c.l, c.cout * c.k, 1],
+            reg_tiles(c.cout * c.k, c.l) * 256,
+        ));
+        steps.push(g.step_sliced(
+            k.col2im,
+            &[&col, bias, y],
+            &[(0, 0), (0, 0), yo],
+            &[c.l, c.cout, c.k, c.stride, c.pad, c.dilation, c.lo],
+            c.cout * c.lo,
+        ));
+    }
+    steps
+}
+
+/// Workgroups a `matmul_reg*`-family dispatch needs for an `rows x cols`
+/// output: one per 128x128 tile. Multiply by the 256-thread workgroup.
+fn reg_tiles(rows: u32, cols: u32) -> u32 {
+    rows.div_ceil(GEMM_TILE) * cols.div_ceil(GEMM_TILE)
+}
+
+fn conv1d_bias_direct(
+    g: &Gpu,
+    k: &ConvGemmKernels,
+    c: &Conv1d,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    bias: &DeviceBuffer,
+    y: &DeviceBuffer,
+) -> Vec<Step> {
+    vec![conv1d_fwd(g, &k.direct, c, x, w, y), bias_step(g, k, c, y, bias)]
+}
+
+fn convtr1d_bias_direct(
+    g: &Gpu,
+    k: &ConvGemmKernels,
+    c: &Conv1d,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    bias: &DeviceBuffer,
+    y: &DeviceBuffer,
+) -> Vec<Step> {
+    vec![convtr1d_fwd(g, &k.direct, c, x, w, y), bias_step(g, k, c, y, bias)]
+}
+
+fn bias_step(g: &Gpu, k: &ConvGemmKernels, c: &Conv1d, y: &DeviceBuffer, bias: &DeviceBuffer) -> Step {
+    let total = c.n * c.cout * c.lo;
+    g.step(k.bias, &[y, bias], &[total, c.cout, c.lo], total)
 }
 
 /// `weight[i,...] = weight_g[i] * weight_v[i,...] / ||weight_v[i,...]||_2` -
