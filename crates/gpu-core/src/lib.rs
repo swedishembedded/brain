@@ -496,6 +496,42 @@ mod native_facade {
             Ok(Gpu::new_on(crate::devices::device(index)?, kernels))
         }
 
+        /// Build a handle for an optional, caller-supplied device token - the
+        /// ONE mapping from "the `--device`-shaped string a CLI flag, a
+        /// `Shard`, or a config handed me" to a `Gpu`.
+        ///
+        /// `None` means *do not override*: it is exactly [`Gpu::new`], so the
+        /// ambient `--device`/`BRAIN_DEVICE` selection still decides. A
+        /// `Some(_)` token overrides that selection for this handle only.
+        ///
+        /// | token | handle |
+        /// |---|---|
+        /// | `cpu` | [`Gpu::new_cpu`] |
+        /// | `gpu`, `wgpu` | [`Gpu::new_wgpu`] |
+        /// | `gpu<i>` | [`Gpu::new_on_index`] - that physical card |
+        /// | anything else | [`Gpu::new`] (ambient) |
+        ///
+        /// The `gpu<i>` arm is the reason this is shared rather than
+        /// re-written per crate: seventeen private copies of this match
+        /// existed across `vae`/`diamond`/`s3dit`/`wan`/`gemma4`/`ltxv`, and
+        /// every one of them fell an indexed card through to the ambient arm -
+        /// so a caller asking for the second card silently got the first, and
+        /// no two-card placement was expressible. Out-of-range indices panic
+        /// with the offending token rather than clamping (AGENTS.md: "Out-of-
+        /// range indices are errors, never silent clamps").
+        pub fn open(device: Option<&str>, kernels: &[(&str, &str)]) -> Gpu {
+            match device {
+                Some("cpu") => Gpu::new_cpu(kernels),
+                Some("gpu") | Some("wgpu") => Gpu::new_wgpu(kernels),
+                Some(tok) => match tok.strip_prefix("gpu").and_then(|i| i.parse::<u32>().ok()) {
+                    Some(index) => Gpu::new_on_index(index, kernels)
+                        .unwrap_or_else(|e| panic!("device '{tok}': {e}")),
+                    None => Gpu::new(kernels),
+                },
+                None => Gpu::new(kernels),
+            }
+        }
+
         /// A second handle onto **this** device: same adapter, queue and compiled
         /// pipelines, its own command stream.
         ///
