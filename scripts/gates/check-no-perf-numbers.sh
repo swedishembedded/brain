@@ -49,6 +49,17 @@
 # escape-hatch list (or a gate refinement), never a reason to weaken the
 # pattern itself.
 #
+# One such refinement, IDENT_LB below: a match immediately preceded by a word
+# character, `_`, `.`, `/` or `%` is part of a longer identifier, not a
+# standalone quantity in prose, so it cannot be a performance claim. This
+# catches `mlp2x_gelu` (an architecture name), `clip_2x.mp4` (an output
+# filename in a shell example) and `%.0s` (a printf format specifier) - all
+# three of which sit INSIDE fenced code blocks or inline code, where the
+# escape hatch is unusable: an HTML comment there renders literally as page
+# content instead of disappearing. Verified against every docs/*.md hit with
+# the escape hatch disabled: it removes exactly those three and nothing else,
+# so no measured claim stops being caught.
+#
 # Usage: scripts/gates/check-no-perf-numbers.sh   (exits non-zero, listing
 # every violation as file:line: matched text, not just the first)
 set -u
@@ -58,10 +69,17 @@ fail=0
 tmp_hits=$(mktemp)
 trap 'rm -f "$tmp_hits" "$tmp_hits.sorted"' EXIT
 
+# A number glued to the end of a longer identifier is not a quantity in
+# prose. Applied to every pattern that starts with a bare digit (not to
+# PCTL_RE, which already anchors on its own `\bp50` prefix). See the
+# "One such refinement" note above for what it removes and why the escape
+# hatch cannot cover those cases.
+IDENT_LB='(?<![0-9A-Za-z_./%])'
+
 # "Hard" units: unambiguous performance vocabulary, no English word ever
 # collides with them, so no context-gating needed.
-HARD_RE='[0-9][0-9.,]*[[:space:]]?(ms|min|s\/(page|frame)|fps|tok(en)?s?\/s|[GM]B\/s|[TG]FLOP(S|s)?(\/s)?)\b'
-HARD_RE_BARE_S='[0-9][0-9.,]*[[:space:]]?s\b'
+HARD_RE="$IDENT_LB"'[0-9][0-9.,]*[[:space:]]?(ms|min|s\/(page|frame)|fps|tok(en)?s?\/s|[GM]B\/s|[TG]FLOP(S|s)?(\/s)?)\b'
+HARD_RE_BARE_S="$IDENT_LB"'[0-9][0-9.,]*[[:space:]]?s\b'
 # p50/p95/p99 only counts once an actual value trails it (not just the
 # percentile named in prose, e.g. "latency p50/p99 + throughput").
 PCTL_RE='\bp(50|95|99)\b[^0-9a-zA-Z\n]{0,20}[0-9][0-9.,]*[[:space:]]?(ms|s|%)\b'
@@ -72,8 +90,8 @@ PCTL_RE='\bp(50|95|99)\b[^0-9a-zA-Z\n]{0,20}[0-9][0-9.,]*[[:space:]]?(ms|s|%)\b'
 # perf prose in this repo is written in wrapped paragraphs, so the cue word
 # ("measured", "speedup", ...) is often a line or two away from the number
 # itself, not on the exact same line.
-SOFT_PCT_RE='[0-9][0-9.,]*[[:space:]]?%'
-SOFT_X_RE='[0-9][0-9.,]*[×x](?![0-9a-zA-Z])'
+SOFT_PCT_RE="$IDENT_LB"'[0-9][0-9.,]*[[:space:]]?%'
+SOFT_X_RE="$IDENT_LB"'[0-9][0-9.,]*[×x](?![0-9a-zA-Z])'
 CONTEXT_RE='measur|profil|\bwall\b|laten|throughput|speedup|speed-up|\bfaster\b|\bslower\b|benchmark|median|\bmean\b|\bpeak\b|regress(ed|ion)?|baseline|roofline|\bflop|decode (loop|step)|training step|step time|per-kernel|per-frame|per-page|inference time|resident instance|wall-clock|wall time'
 
 is_escaped() {

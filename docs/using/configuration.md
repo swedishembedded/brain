@@ -89,6 +89,12 @@ served, with no error.
 | `BRAIN_CODEFORMER_WEIGHTS` | CodeFormer face restore | `codeformer.pth` (or its dir) |
 | `BRAIN_VQGAN_WEIGHTS` | CodeFormer VQ encode/decode | checkpoint (or its dir) |
 | `BRAIN_CLIP_DIR` | CLIP text/image embeddings | SDXL-layout root (`tokenizer[_2]/`, `text_encoder[_2]/`, EVA `.pt`) |
+| `BRAIN_T5ENCODER_DIR` | T5-XXL / umT5-XXL text encoding (`encode`) | root holding `text_encoder_2/`+`tokenizer_2/` (the `flux_xxl` variant) and/or `wan/` (the `wan_umt5` variant) |
+| `BRAIN_SDXL_DIR` | SDXL text2image | diffusers-layout root; must hold `unet/`, or the model is not served |
+| `BRAIN_SDXL_DIR` + `BRAIN_CONTROLNET_DIR` | SDXL + ControlNet text2image (both required) | the SDXL root above plus a diffusers ControlNet root |
+| `BRAIN_FLUX1_DIR` | FLUX.1 text2image | diffusers-layout root; must hold `transformer/`, or the model is not served |
+| `BRAIN_FLUX1_DIR` + `BRAIN_PULID_DIR` + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR` | PuLID identity-conditioned FLUX.1 text2image (all four required) | the FLUX.1 root plus the PuLID weights dir, and the face/CLIP dirs above |
+| `BRAIN_QWEN35_DIR` | Qwen3.8-27B dense hybrid decoder | HF checkpoint dir |
 | `BRAIN_FASTVLM_WEIGHTS` | FastVLM vision-language | checkpoint directory |
 | `BRAIN_QWEN3VL_WEIGHTS` | Qwen-VL vision-language (`brain caps`/`brain do` only - not yet residency-scheduled) | checkpoint directory |
 | `BRAIN_DEEPSEEK_OCR_DIR` | DeepSeek-OCR document image → text/markdown (CPU-resident, ~22 GiB) | dir holding `mmproj-DeepSeek-OCR-Q8_0.gguf` + `DeepSeek-OCR-Q8_0.gguf` |
@@ -133,6 +139,8 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_QWEN_KV_CALIB` | per-head KV clip ranges from `brain qwen calib` | unset |
 | `BRAIN_QWEN35MOE_CTX` | Qwen3.5 MoE built context length | model default |
 | `BRAIN_QWEN35MOE_MAX_BATCH` | Qwen3.5 MoE serving batch slots | model default |
+| `BRAIN_QWEN35_CTX` | Qwen3.8-27B dense built context length | 4096 |
+| `BRAIN_QWEN35_MAX_BATCH` | Qwen3.8-27B dense serving batch slots | 4 |
 | `BRAIN_LFM2_BATCH` | LFM batched-forward slots per instance | 2 |
 | `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
 | `BRAIN_FLUX2_TE_DEVICE` | FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated int8 shard on that card) | co-located with the DiT |
@@ -151,6 +159,8 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_S3DIT_FLASH` | `1`/`0` forces flash attention on/off for Z-Image | automatic |
 | `BRAIN_WAN_ATTN` | `flash`/`chunked` forces the Wan DiT's self-attention implementation | `flash` where the device supports it |
 | `BRAIN_WAN_T5_DEVICE` | where the umT5-XXL text encoder runs (`cpu`/`gpu`); it is 22.72 GB in fp32 and does not fit a 24 GB card | `cpu` |
+| `BRAIN_WAN_DIT_DTYPE` | the Wan DiT's weight dtype; `brain wan t2v --dit-dtype` wins over it | checkpoint's own dtype |
+| `BRAIN_FLUX1_VAE_DEVICE` | where the FLUX.1 VAE decode runs (`cpu`/`gpu<i>`) | `cpu` |
 | `BRAIN_QWEN3TTS_LANG` / `BRAIN_QWEN3TTS_REF` / `BRAIN_QWEN3TTS_REF_TEXT` | TTS language / reference voice `.wav` / its transcript | `english` / none / none |
 | `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from `BRAIN_QWEN3TTS_WEIGHTS` |
 | `BRAIN_QWEN3TTS_TALKER` | TTS talker placement (`cpu`, `npu`/`npu-fp32`, or an NPU int4 KV mode) | model-size default |

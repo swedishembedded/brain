@@ -312,6 +312,24 @@ recording for the LTX-Video VAE), `BRAIN_VAE3D_NOPOOL` (disable the
 `BRAIN_WAN_T5_FORCE_GPU` (run the umT5-XXL parity test on a GPU anyway - it
 skips by default because 22.72 GB of fp32 weights exceed a 24 GB card).
 
+**LTX-2.5 dev/debug knobs.** Internal rather than user-facing because
+`ltxv::pipeline` is still a smoke test (real VAE + tiny random-weight DiT, no
+real text encoder), so none of these configure a shippable generation path
+yet; the two LTX-2.5 knobs that DO - `BRAIN_LTXV_TEXT_CACHE` and
+`BRAIN_LTXV_TEXT_PRECISION` - live in `docs/using/configuration.md` instead.
+Promote a knob there when the pipeline it tunes becomes real.
+- `BRAIN_LTXV_VAE_TILE` - tiling mode for the 3D VAE decode.
+- `BRAIN_LTXV_RESIDENT_BLOCKS` - how many DiT blocks stay resident on the
+  device (`crate::devres`), the memory/reupload tradeoff.
+- `BRAIN_LTXV_CFG_PARALLEL` - run the two CFG branches together where the
+  device plan allows; `0`/`false`/`off` opts out.
+- `BRAIN_LTXV_TWO_STAGE` - forces the two-stage denoise schedule on or off.
+- `BRAIN_LTXV_LATENT_DUMP` - path to dump per-step latents for parity work.
+- `BRAIN_LTXV_PIXEL_DUMP`, `BRAIN_LTXV_DECODE_UPSAMPLE`,
+  `BRAIN_LTXV_DECODE_UPSAMPLE_RAW`, `BRAIN_LTXV_DECODE_LF_SUBST` - read only by
+  the `ltxv_bench` binary (decoded-pixel dump, upsampler selection, and
+  low-frequency substitution for isolating decode error).
+
 **Backend internals:** `BRAIN_VK_ALLOC_DEBUG` (verbose Vulkan allocator
 logging), `BRAIN_WGPU_SERIAL` / `BRAIN_WGPU_NO_SERIAL` (force / disable the
 serialised-submit path the wgpu backend otherwise selects per adapter).

@@ -125,8 +125,8 @@ ash + naga, bypassing `wgpu-hal` entirely) was tried as a way around the
 `wgpu` clamp specifically. It is a genuine dead end, not just an unsupported
 path: the 4.74 GiB `lm_head` buffer allocation SUCCEEDS (this backend does
 not enforce the reported 4 GiB `maxBufferSize` either), and a forward-only
-`--phase before` run completes correctly (14.91 min, real-weight output
-matching the CPU backend's own `" Paris."`) - but the heavier backward
+`--phase before` run completes correctly (real-weight output matching the
+CPU backend's own `" Paris."`) - but the heavier backward
 dispatch pattern of `--phase step` crashes the GPU outright with
 `ERROR_DEVICE_LOST` (`crates/vulkan/src/context.rs`'s wait call), not a
 catchable validation error. This is exactly the class of instability
