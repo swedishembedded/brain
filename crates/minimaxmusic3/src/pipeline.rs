@@ -16,11 +16,23 @@
 //! builds two SEPARATE depth-decoder sequences, one per branch - the
 //! residual-code logits are CFG-blended the exact same way the semantic
 //! code's are, and the SAMPLED code (one value, not a per-branch pair) is
-//! fed back into BOTH branches' growing sequences. This crate's
-//! `depth_decoder::forward` already operates on one sequence at a time (no
-//! batch dimension), so "batched over 2 rows" here just means calling it
-//! twice per residual step with two different running sequences - no
-//! change to `depth_decoder` itself.
+//! fed back into BOTH branches' growing sequences. This crate's depth
+//! decoder operates on one sequence at a time (no batch dimension), so
+//! "batched over 2 rows" here just means driving two independent
+//! `depth_decoder::KvCache`s, one per branch, in lockstep - no change to
+//! `depth_decoder` itself.
+//!
+//! # The depth decoder is KV-cached per frame
+//!
+//! The reference's `_generate_depth_codes` calls the whole depth decoder on
+//! the entire growing sequence at every depth step, so a frame costs
+//! sequence lengths 2,3,..,`num_codebooks` per CFG branch. Since the
+//! architecture is a plain causal transformer with no RoPE and no cross-row
+//! state beyond attention, each position's contribution is fixed once it is
+//! computed: `depth_decoder::step` appends one position to a per-frame
+//! `KvCache` and returns the identical hidden state (bit-identical, gated by
+//! `depth_decoder`'s own test), turning 35 position-forwards per branch per
+//! frame into 8.
 //!
 //! # Two `Qwen` instances, not one batched one
 //!
@@ -143,34 +155,37 @@ fn generate_depth_codes(
     let num_codebooks = dd_cfg.num_codebooks as usize;
     let audio_vocab = dd_cfg.audio_vocab_size as usize;
 
-    let mut seq_cond = depth_decoder::projection(dd_w, dd_cfg, hidden_cond);
-    let mut seq_uncond = depth_decoder::projection(dd_w, dd_cfg, hidden_uncond);
+    // One KV cache per CFG branch, fresh for this frame. The two branches
+    // differ only in their FIRST row (the LM hidden state); every later row
+    // is the same sampled code's projection fed to both. See
+    // `depth_decoder::step` for why the cached path is bit-identical to
+    // re-running `depth_decoder::forward` over the whole growing sequence -
+    // which is what the reference recipe does, at ~4.4x the arithmetic.
+    let mut cache_cond = depth_decoder::KvCache::new(dd_cfg);
+    let mut cache_uncond = depth_decoder::KvCache::new(dd_cfg);
+    depth_decoder::step(dd_w, dd_cfg, &mut cache_cond, &depth_decoder::projection(dd_w, dd_cfg, hidden_cond));
+    depth_decoder::step(dd_w, dd_cfg, &mut cache_uncond, &depth_decoder::projection(dd_w, dd_cfg, hidden_uncond));
+
     let code_embed = embed_code_row(global_llm::audio_code_token_id(semantic_code));
-    seq_cond.extend(depth_decoder::projection(dd_w, dd_cfg, &code_embed));
-    seq_uncond.extend(depth_decoder::projection(dd_w, dd_cfg, &code_embed));
+    let mut row = depth_decoder::projection(dd_w, dd_cfg, &code_embed);
 
     let mut codes = vec![semantic_code];
     let mut depth_hidden = Vec::with_capacity((num_codebooks - 1) * d);
 
     for index in 1..num_codebooks {
-        let s = seq_cond.len() / d;
-        let (out_cond, _) = depth_decoder::forward(dd_w, dd_cfg, &seq_cond, s);
-        let (out_uncond, _) = depth_decoder::forward(dd_w, dd_cfg, &seq_uncond, s);
-        let h_cond = &out_cond[(s - 1) * d..s * d];
-        let h_uncond = &out_uncond[(s - 1) * d..s * d];
-        depth_hidden.extend_from_slice(h_cond);
+        let h_cond = depth_decoder::step(dd_w, dd_cfg, &mut cache_cond, &row);
+        let h_uncond = depth_decoder::step(dd_w, dd_cfg, &mut cache_uncond, &row);
+        depth_hidden.extend_from_slice(&h_cond);
 
-        let logits_cond = depth_decoder::audio_head(dd_w, dd_cfg, index - 1, h_cond);
-        let logits_uncond = depth_decoder::audio_head(dd_w, dd_cfg, index - 1, h_uncond);
+        let logits_cond = depth_decoder::audio_head(dd_w, dd_cfg, index - 1, &h_cond);
+        let logits_uncond = depth_decoder::audio_head(dd_w, dd_cfg, index - 1, &h_uncond);
         let guided = cfg_blend(&logits_cond, &logits_uncond, AR_CFG_SCALE);
         let code = sample_top_k(&guided, AR_SAMPLING_TOP_K, rng);
         codes.push(code);
 
         if index < num_codebooks - 1 {
             let embed = depth_decoder::audio_embedding_row(dd_w, dd_cfg, code as usize + (index - 1) * audio_vocab);
-            let proj = depth_decoder::projection(dd_w, dd_cfg, &embed);
-            seq_cond.extend_from_slice(&proj);
-            seq_uncond.extend_from_slice(&proj);
+            row = depth_decoder::projection(dd_w, dd_cfg, &embed);
         }
     }
     (codes, depth_hidden)
@@ -369,6 +384,79 @@ mod tests {
         let feedback = embed_audio_frame(&w, &cfg, &codes, embed_code_row);
         assert_eq!(feedback.len(), d);
         assert!(feedback.iter().all(|v| v.is_finite()), "feedback embedding must be finite");
+    }
+
+    /// The reference recipe [`generate_depth_codes`] replaced: re-run
+    /// `depth_decoder::forward` over the WHOLE growing sequence at every
+    /// depth step, on both CFG branches. Test-only, as the oracle the
+    /// KV-cached production path is gated against.
+    fn generate_depth_codes_uncached(
+        dd_w: &DepthDecoderWeights,
+        dd_cfg: &DepthDecoderConfig,
+        hidden_cond: &[f32],
+        hidden_uncond: &[f32],
+        semantic_code: u32,
+        embed_code_row: impl Fn(u32) -> Vec<f32>,
+        rng: &mut Lcg,
+    ) -> (Vec<u32>, Vec<f32>) {
+        let d = dd_cfg.hidden_size as usize;
+        let num_codebooks = dd_cfg.num_codebooks as usize;
+        let audio_vocab = dd_cfg.audio_vocab_size as usize;
+
+        let mut seq_cond = depth_decoder::projection(dd_w, dd_cfg, hidden_cond);
+        let mut seq_uncond = depth_decoder::projection(dd_w, dd_cfg, hidden_uncond);
+        let code_embed = embed_code_row(global_llm::audio_code_token_id(semantic_code));
+        seq_cond.extend(depth_decoder::projection(dd_w, dd_cfg, &code_embed));
+        seq_uncond.extend(depth_decoder::projection(dd_w, dd_cfg, &code_embed));
+
+        let mut codes = vec![semantic_code];
+        let mut depth_hidden = Vec::with_capacity((num_codebooks - 1) * d);
+        for index in 1..num_codebooks {
+            let s = seq_cond.len() / d;
+            let (out_cond, _) = depth_decoder::forward(dd_w, dd_cfg, &seq_cond, s);
+            let (out_uncond, _) = depth_decoder::forward(dd_w, dd_cfg, &seq_uncond, s);
+            let h_cond = &out_cond[(s - 1) * d..s * d];
+            let h_uncond = &out_uncond[(s - 1) * d..s * d];
+            depth_hidden.extend_from_slice(h_cond);
+
+            let logits_cond = depth_decoder::audio_head(dd_w, dd_cfg, index - 1, h_cond);
+            let logits_uncond = depth_decoder::audio_head(dd_w, dd_cfg, index - 1, h_uncond);
+            let guided = cfg_blend(&logits_cond, &logits_uncond, AR_CFG_SCALE);
+            codes.push(sample_top_k(&guided, AR_SAMPLING_TOP_K, rng));
+
+            if index < num_codebooks - 1 {
+                let embed = depth_decoder::audio_embedding_row(dd_w, dd_cfg, codes[index] as usize + (index - 1) * audio_vocab);
+                let proj = depth_decoder::projection(dd_w, dd_cfg, &embed);
+                seq_cond.extend_from_slice(&proj);
+                seq_uncond.extend_from_slice(&proj);
+            }
+        }
+        (codes, depth_hidden)
+    }
+
+    /// The KV-cached depth loop must sample the SAME codes and return the
+    /// SAME `depth_hidden` as the full-recompute reference recipe, exactly -
+    /// `assert_eq!`, not an epsilon compare. Any drift here would change the
+    /// generated audio.
+    #[test]
+    fn kv_cached_depth_loop_is_bit_identical_to_the_full_recompute_recipe() {
+        let cfg = DepthDecoderConfig::tiny();
+        let w = random_dd_weights(&cfg, 5);
+        let d = cfg.hidden_size as usize;
+        let mut r = Lcg::new(6);
+        let hidden_cond = r.vec_scaled(d, 0.3);
+        let hidden_uncond = r.vec_scaled(d, 0.3);
+        let embed_code_row = |id: u32| {
+            let mut rr = Lcg::new(u64::from(id));
+            rr.vec_scaled(d, 0.1)
+        };
+
+        for semantic_code in 0..cfg.audio_vocab_size {
+            let (codes_a, hidden_a) = generate_depth_codes(&w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(77));
+            let (codes_b, hidden_b) = generate_depth_codes_uncached(&w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(77));
+            assert_eq!(codes_a, codes_b, "semantic_code {semantic_code}: sampled codes diverged");
+            assert_eq!(hidden_a, hidden_b, "semantic_code {semantic_code}: depth_hidden diverged");
+        }
     }
 
     /// A `QwenConfig` with the REAL vocab size (so the audio-code/end-token

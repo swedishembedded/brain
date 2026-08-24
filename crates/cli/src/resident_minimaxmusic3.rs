@@ -42,9 +42,19 @@ impl MinimaxMusic3Resident {
         Paths::from_env().ok().map(|paths| MinimaxMusic3Resident { paths })
     }
 
+    /// Every file under `dir`, RECURSIVELY. The non-recursive form this
+    /// replaced silently returned 0 for any nested checkpoint layout, and a
+    /// 0 here falls through to `estimate`'s 32 GiB default - so a nested
+    /// layout did not under-report a little, it discarded the measurement
+    /// entirely and substituted a constant.
     fn dir_bytes(dir: &str) -> u64 {
         let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
-        rd.filter_map(|e| e.ok()).filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()
+        rd.filter_map(|e| e.ok())
+            .map(|e| match e.file_type() {
+                Ok(t) if t.is_dir() => Self::dir_bytes(&e.path().to_string_lossy()),
+                _ => e.metadata().map(|m| m.len()).unwrap_or(0),
+            })
+            .sum()
     }
 }
 
@@ -63,11 +73,25 @@ impl ResidentModel for MinimaxMusic3Resident {
         // Two sequential stages, never resident together (see
         // `minimaxmusic3::generate`'s own doc) - budget the LARGER one,
         // not their sum. The AR stage loads the Global LLM checkpoint
-        // TWICE (one instance per CFG branch) at fp32 (`Qwen::
-        // new_shard_i8`'s int8 request silently promotes to fp32 on a
-        // backend without real int8 dispatch - measured directly, not
-        // assumed; a bf16-on-disk checkpoint then costs 2x its own file
-        // size per instance), plus the depth decoder once.
+        // TWICE (one instance per CFG branch), plus the depth decoder once.
+        //
+        // The 2x-per-instance factor below came from a claim that
+        // `Qwen::new_shard_i8`'s int8 request "silently promotes to fp32 on
+        // a backend without real int8 dispatch". That is true ONLY of
+        // `backend-cpu`: `backend-wgpu` reports `int8_dot: true`
+        // unconditionally and `backend-vulkan` queries the DP4A property,
+        // which a Pascal card reports as accelerated - so on a GPU the
+        // request is honoured and this factor over-budgets by ~4x. It is
+        // deliberately left in place rather than "corrected" to a smaller
+        // guess, because over-budgeting a scheduler is safe and
+        // under-budgeting OOMs, and the right replacement is a MEASURED
+        // peak, not a second guess. `brain perf` can produce that once this
+        // model has a baseline; until then this stays a file-size-derived
+        // bound and says so.
+        //
+        // `vram` stays 0 for the same reason: this resident does not yet
+        // know its real device-side peak, and claiming one would invite the
+        // scheduler to place a stage on a card that cannot hold it.
         let lm_bytes = Self::dir_bytes(&self.paths.lm);
         let depth_bytes = Self::dir_bytes(&self.paths.depth);
         let ar_stage = 2 * (2 * lm_bytes) + depth_bytes;
@@ -82,7 +106,7 @@ impl ResidentModel for MinimaxMusic3Resident {
         MemCost::new(0, ram)
     }
 
-    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // `minimaxmusic3::generate::generate` loads every component
         // internally per call, so the resident's only job here is to fail
         // fast when the configured directories are missing.
@@ -98,12 +122,17 @@ impl ResidentModel for MinimaxMusic3Resident {
                 return Err(format!("minimaxmusic3: {role} weights not found at {dir} (set the matching BRAIN_MINIMAXMUSIC3_* var)"));
             }
         }
-        Ok(Box::new(MinimaxMusic3Instance { paths: self.paths.clone() }))
+        Ok(Box::new(MinimaxMusic3Instance { paths: self.paths.clone(), device }))
     }
 }
 
 struct MinimaxMusic3Instance {
     paths: Paths,
+    /// The card the scheduler assigned. `activate` used to take this and
+    /// drop it, so every generation ran on whatever the ambient selection
+    /// happened to be and the scheduler's placement decision was silently
+    /// discarded.
+    device: Device,
 }
 
 impl Instance for MinimaxMusic3Instance {
@@ -111,6 +140,13 @@ impl Instance for MinimaxMusic3Instance {
         if action != "generate" {
             return Err(format!("minimaxmusic3: unsupported action '{action}' (this resident declares: generate)"));
         }
-        minimaxmusic3::caps::generate_action(&self.paths, inv, progress)
+        // Scope the WHOLE generation to the assigned card. Every stage
+        // builds its own `Gpu` at call time (the five components are
+        // sequential and never resident together), so a scoped
+        // selection - not a constructor argument - is what makes all of
+        // them land on the same assigned device. `on_device` is the
+        // shared helper for this; never an env mutation, which AGENTS.md
+        // forbids from a server-lifetime resident.
+        crate::resident_llm::on_device(self.device, || minimaxmusic3::caps::generate_action(&self.paths, inv, progress))?
     }
 }
