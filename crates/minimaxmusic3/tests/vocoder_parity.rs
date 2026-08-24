@@ -11,7 +11,6 @@
 use std::path::Path;
 
 use brain_testutil::{golden::Source, parity::compare, testdata_path};
-use gpu_core::Gpu;
 use minimaxmusic3::config::VocoderConfig;
 use minimaxmusic3::vocoder::{forward, from_tensors, PIPELINES};
 
@@ -44,7 +43,14 @@ fn check(tag: &str, cfg: &VocoderConfig, ident: &[(&str, i64)], weights_dir: &Pa
     let want = read_f32(&dir.join(format!("vocoder_{tag}_out.f32")));
     let length = latents.len() / cfg.latent_channels as usize;
 
-    let gpu = Gpu::new_cpu(PIPELINES);
+    // The pooled test device, NOT `Gpu::new_cpu`: this parity gate has to
+    // be runnable on BOTH backends (`make parity` is the cross-backend
+    // gate, and this repo has already paid for a defect that appeared on
+    // one backend only), and hardcoding the CPU JIT made that impossible.
+    // `testgpu::dev` honours the ambient `--device`/`BRAIN_DEVICE`
+    // selection and shares one device per test binary, per the
+    // one-device-per-process rule.
+    let gpu = gpu_core::testgpu::dev(PIPELINES);
     let got = forward(&gpu, cfg, &w, &latents, 1, length);
     assert_eq!(got.len(), want.len(), "vocoder[{tag}]: output length mismatch");
 
