@@ -60,20 +60,27 @@
 //! of every run, because "random weights" is a claim the reader must be able to
 //! check rather than assume.
 //!
-//! ## The depth decoder is HOST math
+//! ## The depth decoder has BOTH a host and a device path
 //!
-//! `depth_decoder` is `model::hostmath` from end to end - no `Step`, no
-//! dispatch, nothing for a GPU timestamp to attach to. Reporting a device table
-//! for it would be a fiction, so the `depth` mode reports wall clock per call
-//! class plus an analytic FLOP/byte model, explicitly labelled as host, and
-//! never divides by the device roofline.
+//! The `depth` mode A/Bs all three shapes of the same loop in one harness -
+//! host `b = 1` (one `step` per CFG branch), host `b = 2`
+//! (`step_batch`), and the device `Resident` at `b = 2` - and prints the
+//! agreement between them beside the timings, because a faster path that
+//! disagrees is not a faster path. The host rows are wall clock plus an
+//! analytic FLOP/byte model and are explicitly NOT divided by the device
+//! roofline (host DRAM is not the card's DRAM); only the device row is graded
+//! against `gpu_core::roof`.
+//!
+//! The byte totals differ between the `b = 1` and `b = 2` rows on purpose. The
+//! arithmetic is identical; the WEIGHT TRAFFIC is not, and traffic is the
+//! whole point - this component runs at ~0.5 FLOP/byte.
 //!
 //! Usage:
 //!   mm3_bench [--device <cpu|gpu|gpu0|gpu1>] <mode> [args]
 //!
 //!   mm3_bench dit     [length] [reps]   one `dit::forward_resident`, DitConfig::real()
 //!   mm3_bench vocoder [length] [reps]   one `vocoder::forward`, VocoderConfig::real()
-//!   mm3_bench depth   [frames] [reps]   the RVQ depth decoder's per-frame AR loop (HOST)
+//!   mm3_bench depth   [frames] [reps]   the RVQ depth decoder's per-frame AR loop (host b=1/b=2 + device)
 //!   mm3_bench gemm    [reps]            A/B the GEMM kernels at the DiT's shapes, correctness AND speed
 //!   mm3_bench all     [reps]            all three at real chunk dims
 //!
@@ -468,7 +475,7 @@ fn depth_step_cost(cfg: &DepthDecoderConfig, pos: usize) -> (u64, u64) {
 /// `num_codebooks - 1` rounds of (step x2, audio_head x2, embedding lookup +
 /// projection). That is 16 `step` calls per frame at `num_codebooks = 8` - the
 /// number the roadmap's budget arithmetic is about, now measured.
-fn depth_mode(frames: usize, reps: usize) {
+fn depth_mode(device: Option<&str>, frames: usize, reps: usize) {
     let cfg = DepthDecoderConfig::real();
     println!(
         "\n########## RVQ depth decoder - hidden {}, inter {}, {} layers, {} heads, {} codebooks ##########",
@@ -502,24 +509,49 @@ fn depth_mode(frames: usize, reps: usize) {
 
     // Wall clock per CALL CLASS - the host analogue of a per-kernel-kind table.
     // Warm-up is a full extra frame and never enters the statistics.
-    let one_frame = |acc: &mut [f64; 4]| {
+    //
+    // `batched` picks between the two shapes of the SAME loop: one `step` per
+    // CFG branch (`b = 1`, two passes over the weights), or one `step_batch`
+    // for both (`b = 2`, one pass). It returns every hidden state it produced
+    // so the A/B is a correctness check as well as a timing one - these two
+    // paths must agree BIT-EXACTLY, not approximately.
+    let one_frame = |dec: &mut Option<depth_decoder::Decoder>, acc: &mut [f64; 4]| -> Vec<f32> {
         let mut cache_c = depth_decoder::KvCache::new(&cfg);
         let mut cache_u = depth_decoder::KvCache::new(&cfg);
+        if let Some(d) = dec.as_mut() {
+            d.reset(&cfg);
+        }
+        let mut out: Vec<f32> = Vec::new();
         let t = Instant::now();
         let pc = depth_decoder::projection(&w, &cfg, &hidden_cond);
         let pu = depth_decoder::projection(&w, &cfg, &hidden_uncond);
         acc[0] += t.elapsed().as_secs_f64();
         let t = Instant::now();
-        depth_decoder::step(&w, &cfg, &mut cache_c, &pc);
-        depth_decoder::step(&w, &cfg, &mut cache_u, &pu);
+        match dec.as_mut() {
+            Some(d) => {
+                d.step(&w, &cfg, &[&pc, &pu]);
+            }
+            None => {
+                depth_decoder::step(&w, &cfg, &mut cache_c, &pc);
+                depth_decoder::step(&w, &cfg, &mut cache_u, &pu);
+            }
+        }
         acc[1] += t.elapsed().as_secs_f64();
 
         let mut row = pc.clone();
         for index in 1..books {
             let t = Instant::now();
-            let h_c = depth_decoder::step(&w, &cfg, &mut cache_c, &row);
-            let h_u = depth_decoder::step(&w, &cfg, &mut cache_u, &row);
+            let (h_c, h_u) = match dec.as_mut() {
+                Some(d) => {
+                    let mut hs = d.step(&w, &cfg, &[&row, &row]);
+                    let u = hs.pop().unwrap();
+                    (hs.pop().unwrap(), u)
+                }
+                None => (depth_decoder::step(&w, &cfg, &mut cache_c, &row), depth_decoder::step(&w, &cfg, &mut cache_u, &row)),
+            };
             acc[1] += t.elapsed().as_secs_f64();
+            out.extend_from_slice(&h_c);
+            out.extend_from_slice(&h_u);
 
             // Both branches' heads run in the real loop (the logits are
             // CFG-blended), so both run here.
@@ -540,80 +572,176 @@ fn depth_mode(frames: usize, reps: usize) {
                 acc[3] += t.elapsed().as_secs_f64();
             }
         }
+        out
     };
 
-    let mut warm = [0.0f64; 4];
-    one_frame(&mut warm); // never counted
-
-    let mut best = f64::INFINITY;
-    let mut best_acc = [0.0f64; 4];
-    for _ in 0..reps.max(1) {
-        let mut acc = [0.0f64; 4];
-        let t0 = Instant::now();
-        for _ in 0..frames {
-            one_frame(&mut acc);
+    let measure = |dec: &mut Option<depth_decoder::Decoder>| -> (f64, [f64; 4], Vec<f32>) {
+        let mut warm = [0.0f64; 4];
+        let reference = one_frame(dec, &mut warm); // never counted
+        let mut best = f64::INFINITY;
+        let mut best_acc = [0.0f64; 4];
+        for _ in 0..reps.max(1) {
+            let mut acc = [0.0f64; 4];
+            let t0 = Instant::now();
+            for _ in 0..frames {
+                one_frame(dec, &mut acc);
+            }
+            let dt = t0.elapsed().as_secs_f64();
+            if dt < best {
+                best = dt;
+                best_acc = acc;
+            }
         }
-        let dt = t0.elapsed().as_secs_f64();
-        if dt < best {
-            best = dt;
-            best_acc = acc;
-        }
-    }
+        (best, best_acc, reference)
+    };
 
-    // Analytic volume for one frame: 2 seed steps at position 0, then
-    // 2*(books-1) steps walking positions 1..books-1.
-    let (mut flops, mut bytes) = (0u64, 0u64);
-    for _ in 0..2 {
+    // Analytic volume for one frame. The ARITHMETIC is identical in both
+    // paths: 2 seed steps at position 0, then 2*(books-1) steps walking
+    // positions 1..books-1. The WEIGHT TRAFFIC is not - a `b = 2` step reads
+    // every weight once for both branches, so the batched path's floor is one
+    // step's bytes per position, not two.
+    let (mut flops, mut bytes_b1, mut bytes_b2) = (0u64, 0u64, 0u64);
+    {
         let (f, b) = depth_step_cost(&cfg, 0);
-        flops += f;
-        bytes += b;
+        flops += 2 * f;
+        bytes_b1 += 2 * b;
+        bytes_b2 += b;
     }
     for index in 1..books {
         let (f, b) = depth_step_cost(&cfg, index);
         flops += 2 * f;
-        bytes += 2 * b;
+        bytes_b1 += 2 * b;
+        bytes_b2 += b;
     }
+    // The audio heads stay two separate `[audio_vocab, hidden]` GEMVs in both
+    // paths (they are ~1% of the frame and take different inputs).
     let head = 2 * (books as u64 - 1) * (2 * u64::from(cfg.audio_vocab_size) * u64::from(cfg.hidden_size));
     let head_bytes = 2 * (books as u64 - 1) * 4 * u64::from(cfg.audio_vocab_size) * u64::from(cfg.hidden_size);
-    let per_frame = best / frames as f64;
 
-    println!("\n=== DEPTH DECODER, one AR frame (HOST, wall clock, best of {reps} over {frames} frames) ===");
-    println!("{:<34} {:>10} {:>8} {:>10}", "host call class", "ms/frame", "%", "calls/frame");
-    println!("{}", "-".repeat(70));
-    let classes: [(&str, usize); 4] = [
-        ("projection (seed x2)", 2),
-        ("step (transformer block stack)", 2 + 2 * (books - 1)),
-        ("audio_head", 2 * (books - 1)),
-        ("embedding lookup + projection", books - 2),
+    let classes: [(&str, usize, usize); 4] = [
+        ("projection (seed x2)", 2, 2),
+        ("step (transformer block stack)", 2 + 2 * (books - 1), books),
+        ("audio_head", 2 * (books - 1), 2 * (books - 1)),
+        ("embedding lookup + projection", books - 2, books - 2),
     ];
-    for ((name, n), secs) in classes.iter().zip(&best_acc) {
+    let report_row = |label: &str, best: f64, best_acc: [f64; 4], bytes: u64, batched: bool| -> f64 {
+        let per_frame = best / frames as f64;
+        println!("\n=== DEPTH DECODER, one AR frame - {label} (wall clock, best of {reps} over {frames} frames) ===");
+        println!("{:<34} {:>10} {:>8} {:>10}", "call class", "ms/frame", "%", "calls/frame");
+        println!("{}", "-".repeat(70));
+        for ((name, n1, n2), secs) in classes.iter().zip(&best_acc) {
+            println!("{:<34} {:>10.2} {:>7.1}% {:>10}", name, 1e3 * secs / frames as f64, 100.0 * secs / best, if batched { n2 } else { n1 });
+        }
+        println!("{}", "-".repeat(70));
         println!(
-            "{:<34} {:>10.2} {:>7.1}% {:>10}",
-            name,
-            1e3 * secs / frames as f64,
-            100.0 * secs / best,
-            n,
+            "{:<34} {:>10.2}   ({:.2} GFLOP, {:.2} GB of weights streamed -> {:.1} GFLOP/s, {:.1} GB/s)",
+            "WHOLE FRAME",
+            1e3 * per_frame,
+            (flops + head) as f64 / 1e9,
+            (bytes + head_bytes) as f64 / 1e9,
+            (flops + head) as f64 / per_frame / 1e9,
+            (bytes + head_bytes) as f64 / per_frame / 1e9,
         );
-    }
-    println!("{}", "-".repeat(70));
-    println!(
-        "{:<34} {:>10.2}   ({:.2} GFLOP, {:.2} GB of weights streamed -> {:.1} GFLOP/s, {:.1} GB/s)",
-        "WHOLE FRAME",
-        1e3 * per_frame,
-        (flops + head) as f64 / 1e9,
-        (bytes + head_bytes) as f64 / 1e9,
-        (flops + head) as f64 / per_frame / 1e9,
-        (bytes + head_bytes) as f64 / per_frame / 1e9,
-    );
+        per_frame
+    };
+
+    let (best1, acc1, ref1) = measure(&mut None);
+    let (best2, acc2, ref2) = measure(&mut Some(depth_decoder::Decoder::host(&cfg, 2)));
+    let per_frame_1 = report_row("HOST, one `step` per CFG branch (b=1)", best1, acc1, bytes_b1, false);
+    let per_frame_2 = report_row("HOST, one `step_batch` for both CFG branches (b=2)", best2, acc2, bytes_b2, true);
+
+    // §F.5: print max|delta| beside the timings. `step_batch` is a pure
+    // traffic reduction, so the only acceptable answer is exactly 0.
+    assert_eq!(ref1.len(), ref2.len(), "the two paths produced different numbers of hidden states");
+    let delta = ref1.iter().zip(&ref2).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    println!("\nb=1 vs b=2 over every hidden state of one frame: max|delta| = {delta:e} (must be exactly 0 - this is a bit-identical work reduction)");
+    println!("b=2 speedup on the whole frame: {:.2}x ({:.1} -> {:.1} ms/frame)", per_frame_1 / per_frame_2, 1e3 * per_frame_1, 1e3 * per_frame_2);
     println!(
         "No device roofline is applied: these are HOST rates against host DRAM, and grading them \
          against a GPU's roof would be meaningless."
     );
+
+    // ---- The DEVICE path, at the same b=2, on the same weights. ----
+    //
+    // Skipped on the CPU backend on purpose, and that is not a gap: the host
+    // path above IS this component's `--device cpu` implementation
+    // (`depth_decoder::Decoder`), and it is faster there than the Cranelift
+    // JIT's rendering of the same graph. Running the dispatch graph through
+    // the JIT at these dims would take minutes per frame and would measure a
+    // configuration nothing ships.
+    let gpu = Gpu::open(device, depth_decoder::PIPELINES);
+    println!();
+    let roofs = device_header(&gpu);
+    if gpu.kind() == "cpu" {
+        println!(
+            "NOTE: on the CPU backend the DEVICE row below is NOT what ships - \n\
+             `depth_decoder::Decoder::host` is (`generate::depth_decoder_device` returns `None` \n\
+             with no GPU). It is measured anyway, because 'the host path is faster here' is a \n\
+             claim, and a capability-gated branch nobody measures is how a slow path survives. \n\
+             This backend reports `workgroup_reductions: false`, so the graph falls back to the \n\
+             reference `matmul`/`rmsnorm_eps` rather than `matmul_gemv`/`rmsnorm_rows`."
+        );
+    }
+
+    let t0 = Instant::now();
+    let mut dev = Some(depth_decoder::Decoder::device(&gpu, &cfg, &w, 2));
+    gpu.poll_wait();
+    let upload = t0.elapsed().as_secs_f64();
+    let weight_bytes: usize = 4 * w.layers.iter().map(|l| l.attn.wq.len() + l.attn.wk.len() + l.attn.wv.len() + l.attn.wo.len() + l.mlp.gate.len() + l.mlp.up.len() + l.mlp.down.len() + l.ln1.len() + l.ln2.len()).sum::<usize>();
     println!(
-        "Extrapolated: one 200-frame denoise chunk = {:.1} s of depth decoding; a 4-minute track \
-         (6000 AR frames) = {:.2} h.",
-        200.0 * per_frame,
-        6000.0 * per_frame / 3600.0,
+        "Decoder::device (ONCE per generation, never per frame): {:.2} s for {:.2} GB ({:.2} GB/s)",
+        upload,
+        weight_bytes as f64 / 1e9,
+        weight_bytes as f64 / upload / 1e9,
+    );
+
+    let (best3, acc3, ref3) = measure(&mut dev);
+    let per_frame_3 = report_row("DEVICE, one `Resident::step` for both CFG branches (b=2)", best3, acc3, bytes_b2, true);
+
+    // §F.1: the per-KERNEL-KIND table for ONE `Resident::step`, from device
+    // timestamps rather than host-bracketed slices. The whole-frame row above
+    // is what a fix is judged by; this is what ranks the next target.
+    if gpu.kind() != "cpu" {
+        let mut probe = depth_decoder::Decoder::device(&gpu, &cfg, &w, 2);
+        let seed = depth_decoder::projection(&w, &cfg, &hidden_cond);
+        let p = gpu_core::profile::profile_live(&gpu, "DEPTH DECODER, ONE `Resident::step` (b=2, position 0)", reps, || {
+            probe.reset(&cfg);
+            let out = probe.step(&w, &cfg, &[&seed, &seed]);
+            debug_assert_eq!(out.len(), 2);
+        });
+        report(&p, roofs);
+    }
+    if let Some(r) = roofs {
+        let gbs = (bytes_b2 + head_bytes) as f64 / per_frame_3 / 1e9;
+        println!(
+            "Against this device's own measured roof: {:.1} GB/s of {:.1} GB/s = {:.1}% (the audio \n\
+             heads and projections in that byte total are still HOST math, so this understates the \n\
+             block stack's own share of the roof).",
+            gbs,
+            r.gbs,
+            100.0 * gbs / f64::from(r.gbs),
+        );
+    }
+
+    // §F.5 again, against the host oracle rather than kernel-to-kernel. The
+    // device answer is NOT bit-identical (different reduction orders, a
+    // different rsqrt), so the number that matters is how far off it is.
+    assert_eq!(ref2.len(), ref3.len(), "the host and device paths produced different numbers of hidden states");
+    let cos = model::hostmath::cosine(&ref2, &ref3);
+    let dmax = ref2.iter().zip(&ref3).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    println!("\nhost b=2 vs device b=2 over every hidden state of one frame: cosine = {cos:.9}, max|delta| = {dmax:e}");
+    println!(
+        "device vs host b=2 on the whole frame: {:.2}x ({:.2}x vs the b=1 host baseline). Below \n\
+         1.00x means the HOST path is the right one on this backend, which is what \n\
+         `depth_decoder::Decoder` selects.",
+        per_frame_2 / per_frame_3,
+        per_frame_1 / per_frame_3,
+    );
+    println!(
+        "Extrapolated on the device: one 200-frame denoise chunk = {:.1} s of depth decoding; a \n\
+         4-minute track (6000 AR frames) = {:.2} h.",
+        200.0 * per_frame_3,
+        6000.0 * per_frame_3 / 3600.0,
     );
 }
 
@@ -650,13 +778,13 @@ fn main() {
         // passes over ~2.3 GB of weights, so a whole chunk is minutes of host
         // math. The per-frame number is what extrapolates; the frame count only
         // has to be big enough to average.
-        Some("depth") => depth_mode(num(1, 4), num(2, 3)),
+        Some("depth") => depth_mode(dev, num(1, 4), num(2, 3)),
         Some("gemm") => gemm_mode(dev, num(1, 5)),
         Some("all") => {
             let reps = num(1, 3);
             dit_mode(dev, REAL_CHUNK_LATENTS, reps);
             vocoder_mode(dev, REAL_CHUNK_LATENTS, reps);
-            depth_mode(4, reps);
+            depth_mode(dev, 4, reps);
         }
         other => {
             if let Some(o) = other {

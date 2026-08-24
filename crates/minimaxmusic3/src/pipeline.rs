@@ -16,11 +16,14 @@
 //! builds two SEPARATE depth-decoder sequences, one per branch - the
 //! residual-code logits are CFG-blended the exact same way the semantic
 //! code's are, and the SAMPLED code (one value, not a per-branch pair) is
-//! fed back into BOTH branches' growing sequences. This crate's depth
-//! decoder operates on one sequence at a time (no batch dimension), so
-//! "batched over 2 rows" here just means driving two independent
-//! `depth_decoder::KvCache`s, one per branch, in lockstep - no change to
-//! `depth_decoder` itself.
+//! fed back into BOTH branches' growing sequences. So "batched over 2 rows"
+//! here is two independent `depth_decoder::KvCache`s, one per branch, driven
+//! in lockstep through `depth_decoder::step_batch` - which really does batch
+//! them into one pass over the weights, because this block stack is
+//! memory-bound and the two branches share every weight it reads. Those two
+//! rows are also the only batching this loop has: see `step_batch`'s own doc
+//! for why the depth steps within a frame and the frames themselves are
+//! strictly dependent.
 //!
 //! # The depth decoder is KV-cached per frame
 //!
@@ -142,7 +145,12 @@ fn sample_top_k(logits: &[f32], top_k: usize, rng: &mut Lcg) -> u32 {
 /// CONDITIONAL branch's own per-step hidden states concatenated,
 /// `[(num_codebooks-1) * hidden_size]` - the reference's own `hidden[:1]`
 /// slice (only the conditional branch's hidden state feeds `frame_hiddens`).
+///
+/// `dec` is the depth decoder's inference engine (host or device), reset to
+/// position 0 here: one frame is one depth sequence, and every frame starts
+/// over.
 fn generate_depth_codes(
+    dec: &mut depth_decoder::Decoder<'_>,
     dd_w: &DepthDecoderWeights,
     dd_cfg: &DepthDecoderConfig,
     hidden_cond: &[f32],
@@ -154,17 +162,18 @@ fn generate_depth_codes(
     let d = dd_cfg.hidden_size as usize;
     let num_codebooks = dd_cfg.num_codebooks as usize;
     let audio_vocab = dd_cfg.audio_vocab_size as usize;
+    assert_eq!(dec.batch(), 2, "generate_depth_codes: the depth decoder must be built for the 2 CFG branches");
 
-    // One KV cache per CFG branch, fresh for this frame. The two branches
-    // differ only in their FIRST row (the LM hidden state); every later row
-    // is the same sampled code's projection fed to both. See
-    // `depth_decoder::step` for why the cached path is bit-identical to
-    // re-running `depth_decoder::forward` over the whole growing sequence -
-    // which is what the reference recipe does, at ~4.4x the arithmetic.
-    let mut cache_cond = depth_decoder::KvCache::new(dd_cfg);
-    let mut cache_uncond = depth_decoder::KvCache::new(dd_cfg);
-    depth_decoder::step(dd_w, dd_cfg, &mut cache_cond, &depth_decoder::projection(dd_w, dd_cfg, hidden_cond));
-    depth_decoder::step(dd_w, dd_cfg, &mut cache_uncond, &depth_decoder::projection(dd_w, dd_cfg, hidden_uncond));
+    // Both CFG branches' sequences, fresh for this frame. They differ only in
+    // their FIRST row (the LM hidden state); every later row is the same
+    // sampled code's projection fed to both. See `depth_decoder::step` for why
+    // the KV-cached path is bit-identical to re-running
+    // `depth_decoder::forward` over the whole growing sequence - which is what
+    // the reference recipe does, at ~4.4x the arithmetic.
+    dec.reset(dd_cfg);
+    let seed_cond = depth_decoder::projection(dd_w, dd_cfg, hidden_cond);
+    let seed_uncond = depth_decoder::projection(dd_w, dd_cfg, hidden_uncond);
+    dec.step(dd_w, dd_cfg, &[&seed_cond, &seed_uncond]);
 
     let code_embed = embed_code_row(global_llm::audio_code_token_id(semantic_code));
     let mut row = depth_decoder::projection(dd_w, dd_cfg, &code_embed);
@@ -173,8 +182,13 @@ fn generate_depth_codes(
     let mut depth_hidden = Vec::with_capacity((num_codebooks - 1) * d);
 
     for index in 1..num_codebooks {
-        let h_cond = depth_decoder::step(dd_w, dd_cfg, &mut cache_cond, &row);
-        let h_uncond = depth_decoder::step(dd_w, dd_cfg, &mut cache_uncond, &row);
+        // ONE step for both CFG branches, not two: the two branches stand at
+        // the same position on the same weights, so batching them streams this
+        // memory-bound block stack's weights once instead of twice - see
+        // `depth_decoder::step_batch`.
+        let mut hs = dec.step(dd_w, dd_cfg, &[&row, &row]);
+        let h_uncond = hs.pop().expect("the decoder returns one row per branch");
+        let h_cond = hs.pop().expect("the decoder returns one row per branch");
         depth_hidden.extend_from_slice(&h_cond);
 
         let logits_cond = depth_decoder::audio_head(dd_w, dd_cfg, index - 1, &h_cond);
@@ -223,6 +237,11 @@ fn embed_audio_frame(dd_w: &DepthDecoderWeights, dd_cfg: &DepthDecoderConfig, co
 /// reference treats that as an error condition; this function leaves that
 /// judgment to its caller).
 ///
+/// `dec` is the depth decoder's inference engine, built for `batch = 2` (the
+/// two CFG branches) and for the whole generation, not per frame - see
+/// `depth_decoder::Resident` for why a per-frame rebuild would cost more than
+/// the computation on the device path.
+///
 /// `lm_cond`/`lm_uncond` must already be constructed at the SAME
 /// `t` (decode capacity) covering `conditional_ids.len() + max_frames + 1`
 /// positions, with a fresh (never-stepped) KV cache. `head` is
@@ -233,6 +252,7 @@ fn embed_audio_frame(dd_w: &DepthDecoderWeights, dd_cfg: &DepthDecoderConfig, co
 pub fn generate_frames(
     lm_cond: &Qwen,
     lm_uncond: &Qwen,
+    dec: &mut depth_decoder::Decoder<'_>,
     dd_w: &DepthDecoderWeights,
     dd_cfg: &DepthDecoderConfig,
     head: &[f32],
@@ -276,7 +296,7 @@ pub fn generate_frames(
         let semantic_code = sampled - AUDIO_CODE_OFFSET;
 
         let embed_code_row = |id: u32| lm_cond.embed_row(id);
-        let (codes, depth_hidden) = generate_depth_codes(dd_w, dd_cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut rng);
+        let (codes, depth_hidden) = generate_depth_codes(dec, dd_w, dd_cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut rng);
 
         if frame_index > 0 {
             frame_hiddens.extend_from_slice(&hidden_cond);
@@ -376,7 +396,8 @@ mod tests {
             rr.vec_scaled(d, 0.1)
         };
 
-        let (codes, depth_hidden) = generate_depth_codes(&w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut r);
+        let mut dec = depth_decoder::Decoder::host(&cfg, 2);
+        let (codes, depth_hidden) = generate_depth_codes(&mut dec, &w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut r);
         assert_eq!(codes.len(), cfg.num_codebooks as usize);
         assert_eq!(codes[0], semantic_code);
         assert_eq!(depth_hidden.len(), (cfg.num_codebooks as usize - 1) * d);
@@ -452,11 +473,72 @@ mod tests {
         };
 
         for semantic_code in 0..cfg.audio_vocab_size {
-            let (codes_a, hidden_a) = generate_depth_codes(&w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(77));
+            let (codes_a, hidden_a) = generate_depth_codes(&mut depth_decoder::Decoder::host(&cfg, 2), &w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(77));
             let (codes_b, hidden_b) = generate_depth_codes_uncached(&w, &cfg, &hidden_cond, &hidden_uncond, semantic_code, embed_code_row, &mut Lcg::new(77));
             assert_eq!(codes_a, codes_b, "semantic_code {semantic_code}: sampled codes diverged");
             assert_eq!(hidden_a, hidden_b, "semantic_code {semantic_code}: depth_hidden diverged");
         }
+    }
+
+    /// The device depth decoder must agree with the host one **at the
+    /// CFG-blended residual-code logits**, which is the last place in this
+    /// loop where agreement is a number rather than a coin flip.
+    ///
+    /// One step further on, `sample_top_k` turns those logits into a discrete
+    /// draw, and the device path is not bit-identical to the host one (a
+    /// different GEMM reduction order and a different `rsqrt` - see
+    /// `depth_decoder::Resident`). A ~1e-6 wobble is enough to reorder two
+    /// near-tied candidates or move the cumulative-probability boundary across
+    /// the RNG's draw, and one different code changes every later frame. So
+    /// **end-to-end bit-identity does not survive the device port and is not
+    /// claimed**: this gate is at the logits, and the audio a device run
+    /// produces is a different (equally valid) sample of the same
+    /// distribution, not the host run's waveform.
+    ///
+    /// Both branches are fed the SAME sampled code (the host's), so the two
+    /// sequences stay aligned and what is measured is the numerical difference
+    /// alone rather than a divergence cascade downstream of one flipped draw.
+    #[test]
+    fn the_device_depth_decoder_matches_the_host_one_at_the_cfg_blended_logits() {
+        let cfg = DepthDecoderConfig::tiny();
+        let w = random_dd_weights(&cfg, 0x5E1);
+        let d = cfg.hidden_size as usize;
+        let audio_vocab = cfg.audio_vocab_size as usize;
+        let mut r = Lcg::new(0x5E2);
+        let hidden_cond = r.vec_scaled(d, 0.3);
+        let hidden_uncond = r.vec_scaled(d, 0.3);
+        let gpu = gpu_core::Gpu::new_cpu(depth_decoder::PIPELINES);
+
+        let mut host = depth_decoder::Decoder::host(&cfg, 2);
+        let mut dev = depth_decoder::Decoder::device(&gpu, &cfg, &w, 2);
+        for dec in [&mut host, &mut dev] {
+            dec.reset(&cfg);
+            let seed_c = depth_decoder::projection(&w, &cfg, &hidden_cond);
+            let seed_u = depth_decoder::projection(&w, &cfg, &hidden_uncond);
+            dec.step(&w, &cfg, &[&seed_c, &seed_u]);
+        }
+
+        let mut row = depth_decoder::projection(&w, &cfg, &r.vec_scaled(d, 0.2));
+        let mut worst = 1.0f32;
+        for index in 1..cfg.num_codebooks as usize {
+            let blended = |dec: &mut depth_decoder::Decoder| -> Vec<f32> {
+                let hs = dec.step(&w, &cfg, &[&row, &row]);
+                let lc = depth_decoder::audio_head(&w, &cfg, index - 1, &hs[0]);
+                let lu = depth_decoder::audio_head(&w, &cfg, index - 1, &hs[1]);
+                cfg_blend(&lc, &lu, AR_CFG_SCALE)
+            };
+            let want = blended(&mut host);
+            let got = blended(&mut dev);
+            let cos = model::hostmath::cosine(&got, &want);
+            worst = worst.min(cos);
+            assert!(cos >= 0.999999, "depth step {index}: CFG-blended logits cosine {cos} below 0.999999");
+
+            // The host's draw drives BOTH sequences from here on.
+            let code = sample_top_k(&want, AR_SAMPLING_TOP_K, &mut r) as usize;
+            let embed = depth_decoder::audio_embedding_row(&w, &cfg, code + (index - 1) * audio_vocab);
+            row = depth_decoder::projection(&w, &cfg, &embed);
+        }
+        println!("depth CFG-blended logits, host vs device: worst cosine={worst:.9}");
     }
 
     /// A `QwenConfig` with the REAL vocab size (so the audio-code/end-token
@@ -498,6 +580,7 @@ mod tests {
         let frame_hiddens = generate_frames(
             &lm_cond,
             &lm_uncond,
+            &mut depth_decoder::Decoder::host(&dd_cfg, 2),
             &dd_w,
             &dd_cfg,
             &head,

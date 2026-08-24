@@ -281,8 +281,44 @@ pub fn matvec_par(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
 
 /// A row-batched [`matvec`]: `out[r] = x[r]·Wᵀ` for every row of `x`
 /// (`[rows, inn] -> [rows, out]`), `W: [out, inn]` row-major.
+///
+/// This is ONE `matmul_abt` call, not `rows` of them, and that is a bandwidth
+/// decision rather than a stylistic one: at these shapes `W` is orders of
+/// magnitude larger than either operand row, so a per-row loop re-streams the
+/// whole matrix from DRAM `rows` times, while the batched call walks each `W`
+/// row once and dots it against every input row while it is still in cache.
+/// Memory-bound decode shapes (`out`/`inn` in the thousands, `rows` a small
+/// batch) get most of a `rows`-fold reduction in DRAM traffic out of it.
+///
+/// It is also **bit-identical** to the per-row loop, which is what makes it a
+/// safe drop-in under `assert_eq!`-grade gates: `matmul_abt` gives each output
+/// its own accumulator and reduces `k` in the same order (8-wide FMA lanes,
+/// `hsum`, then the scalar tail) no matter how many columns it blocks
+/// together, so `c[o, r]` does not depend on `rows`.
 pub fn linear_rows(x: &[f32], w: &[f32], rows: usize, inn: usize, out: usize) -> Vec<f32> {
-    (0..rows).flat_map(|r| matvec(w, &x[r * inn..(r + 1) * inn], out, inn)).collect()
+    assert!(w.len() >= out * inn, "linear_rows: w is {}, need {}", w.len(), out * inn);
+    assert!(x.len() >= rows * inn, "linear_rows: x is {}, need {}", x.len(), rows * inn);
+    if rows == 0 || out == 0 {
+        return Vec::new();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // `matmul_abt` emits `[out, rows]` (one column per input row); the
+        // callers all want `[rows, out]`, so transpose the small result.
+        let mut c = vec![0f32; out * rows];
+        backend_cpu::fast_ops::matmul_abt(w, &x[..rows * inn], &mut c, out, inn, rows);
+        let mut y = vec![0f32; rows * out];
+        for o in 0..out {
+            for r in 0..rows {
+                y[r * out + o] = c[o * rows + r];
+            }
+        }
+        y
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        (0..rows).flat_map(|r| matvec(w, &x[r * inn..(r + 1) * inn], out, inn)).collect()
+    }
 }
 
 /// [`linear_rows`] backward: `dx = dy @ w` (`[rows, inn]`), `dw += dyᵀ @ x`
@@ -419,6 +455,27 @@ mod tests {
         let got = rmsnorm_rows(&x, &g, rows, d, eps);
         for (i, (a, b)) in got.iter().zip(&want).enumerate() {
             assert!((a - b).abs() < 1e-5, "element {i}: host {a} vs wgsl {b}");
+        }
+    }
+
+    /// [`linear_rows`] batches every input row into ONE `matmul_abt` call to
+    /// stream `W` from DRAM once instead of `rows` times. That is only a legal
+    /// swap if it is **bit-identical** to the per-row [`matvec`] loop it
+    /// replaced - callers gate on `assert_eq!`, not on an epsilon - so this
+    /// asserts exact equality, at row counts that straddle `row_abt_avx2`'s
+    /// 4-column register block (1, 2, 3 take the unblocked tail; 4, 5, 8 enter
+    /// the blocked path) and at an `inn` that is not a multiple of the 8-wide
+    /// lane so the scalar `k` tail is exercised too.
+    #[test]
+    fn linear_rows_is_bit_identical_to_a_per_row_matvec_loop() {
+        let mut r = Lcg::new(4242);
+        for (inn, out) in [(37usize, 11usize), (128, 96), (513, 64)] {
+            let w: Vec<f32> = (0..out * inn).map(|_| r.signed()).collect();
+            for rows in [1usize, 2, 3, 4, 5, 8] {
+                let x: Vec<f32> = (0..rows * inn).map(|_| r.signed()).collect();
+                let want: Vec<f32> = (0..rows).flat_map(|i| matvec(&w, &x[i * inn..(i + 1) * inn], out, inn)).collect();
+                assert_eq!(linear_rows(&x, &w, rows, inn, out), want, "inn={inn} out={out} rows={rows}");
+            }
         }
     }
 

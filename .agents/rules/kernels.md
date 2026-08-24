@@ -244,6 +244,36 @@ A percentage of the profile tells you where the time is. A percentage of *peak*
 tells you whether it can be fixed. A GEMM shape running at a few percent of
 peak is not a kernel that needs tuning — it is the wrong kernel.
 
+And if the top row is already at its **memory** roof, no kernel change can
+help. The only lever left is to move fewer bytes, and in the decode regime
+(`m` in the single digits against an `[n, k]` weight matrix) the standard way
+to do that is **batch the independent rows** - because a GEMV's cost is the
+weight matrix, not the vector. Two independent sequences run as two `m = 1`
+calls stream the whole matrix twice; run as one `m = 2` call they stream it
+once, for the same arithmetic. So before reaching for a kernel, ask what else
+in the caller is standing at the same position on the same weights.
+
+Two things make this worth checking every time:
+
+* **The answer is usually sitting right there.** A classifier-free-guidance
+  pair, a speculative-decode candidate set, and any two concurrent serving
+  sequences are all independent rows over one weight set. They look like two
+  calls in the source because that is how the reference implementation wrote
+  them, not because they have to be.
+* **It is bit-identical, on both sides.** A batched GEMV gives every output
+  its own accumulator and reduces `k` in the same order regardless of the row
+  count, so `c[o, r]` does not depend on how many rows accompany it - on the
+  device (`matmul_gemv`, one workgroup per output column) and on the host
+  (`hostmath::linear_rows` → `backend_cpu::fast_ops::matmul_abt`) alike. That
+  is a rare thing to be able to `assert_eq!` on, so gate it that way and get a
+  work reduction with no tolerance attached. Do NOT assume it: `row_abt_avx2`
+  register-blocks its column loop 4-wide, so it is worth a test that straddles
+  that block (rows 1..8) rather than a reading of the source.
+
+Where this lands matters as much as the fix (§F.7): batching belongs in the
+shared row-batched primitive, not in one model's step function, so the next
+caller inherits it.
+
 ### F.3 Before writing anything: is there already a faster sibling?
 
 This is the highest-value question in the list and it costs one `grep`. It has
