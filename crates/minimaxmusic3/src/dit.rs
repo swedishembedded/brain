@@ -661,8 +661,18 @@ pub(crate) fn proj_out_postprocess(gpu: &Gpu, cfg: &DitConfig, proj_out_w: &[f32
 /// within a chunk; neither depends on the timestep, the latents or the
 /// condition.
 ///
-/// Lifetime: one chunk. Build it after `length` is known, drop it when the
-/// chunk is done - the buffers are the chunk's peak device footprint.
+/// Lifetime: one GENERATION, not one chunk. The blocks depend on nothing
+/// but the checkpoint, so re-uploading them per chunk re-sent ~9.7 GB of
+/// identical bytes for every one of a song's chunks (~59 of them for four
+/// minutes of audio, ~22 s each on a P40 at 0.33 GB/s). Only the RoPE
+/// tables depend on `length`, and they are ~90 kB, so the chunk loop calls
+/// [`Resident::rebind`] instead of rebuilding this whole thing - see
+/// `denoise::ChunkResidents`, which owns one per card for the whole denoise
+/// stage.
+///
+/// The buffers are that stage's steady-state device footprint, and the
+/// stage's own block scope in `generate::generate` is what bounds them: the
+/// DiT must be gone before the vocoder loads.
 pub struct Resident {
     blocks: Vec<DeviceBlock>,
     cos_b: DeviceBuffer,
@@ -683,6 +693,31 @@ impl Resident {
             sin_b: gpu.storage_init("rope.sin", &sin_t),
             rows,
         }
+    }
+
+    /// Point this resident at a chunk of `length` latent frames, rebuilding
+    /// ONLY the RoPE tables - the blocks stay exactly where they are.
+    ///
+    /// This is why one `Resident` can serve a whole generation. The tables
+    /// are `[rows, rotary_dim/2]` twice (~90 kB at `DitConfig::real()` dims
+    /// and a full chunk), against ~9.7 GB of blocks; rebuilding them is
+    /// free, rebuilding the blocks is the defect this method exists to
+    /// remove.
+    ///
+    /// `rows` moves in the same statement as the buffers it describes, so a
+    /// table that disagrees with the row count [`forward_resident`] asserts
+    /// on is not merely unlikely, it is unrepresentable. A `length` that
+    /// already matches is a no-op - `denoise::chunk_starts` hands out mostly
+    /// equal-length chunks, so most calls do nothing at all.
+    pub fn rebind(&mut self, gpu: &Gpu, cfg: &DitConfig, length: usize) {
+        let rows = length + 1;
+        if rows == self.rows {
+            return;
+        }
+        let (cos_t, sin_t) = rope_tables(rows, cfg.rotary_dim as usize, 10000.0);
+        self.cos_b = gpu.storage_init("rope.cos", &cos_t);
+        self.sin_b = gpu.storage_init("rope.sin", &sin_t);
+        self.rows = rows;
     }
 
     /// The row count these tables were built for (`length + 1`).
@@ -888,6 +923,53 @@ mod tests {
         let _ = forward_resident(&gpu, &cfg, &w, &res, &latents, &condition, 0.5, length);
         let after = gpu.stats().expect("the CPU backend counts device ops").readbacks;
         assert_eq!(after - before, 3, "forward_resident readbacks (num_layers={})", cfg.num_layers);
+    }
+
+    /// Rebinding a `Resident` to a new chunk length must be
+    /// indistinguishable from having built it at that length in the first
+    /// place - the whole point of keeping the blocks across chunks is that
+    /// only the RoPE tables genuinely depend on `length`.
+    ///
+    /// Bit-for-bit again, and for the same reason as
+    /// [`a_reused_resident_matches_a_fresh_upload_bit_for_bit`]: the two
+    /// paths dispatch identical kernels over identical bytes, so anything
+    /// less than equality would mean the tables (or the blocks) really did
+    /// change.
+    #[test]
+    fn a_rebound_resident_matches_one_built_at_that_length_bit_for_bit() {
+        let cfg = DitConfig::tiny();
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let w = dit_train::random_weights(&cfg, 0xD19);
+        let mut r = Lcg::new(0xD19 ^ 0xBEEF);
+
+        let mut res = Resident::new(&gpu, &cfg, &w, 3);
+        assert_eq!(res.rows(), 4);
+        for length in [5usize, 5, 2] {
+            res.rebind(&gpu, &cfg, length);
+            assert_eq!(res.rows(), length + 1, "rebind must move the row count with the tables");
+            let latents = r.vec_scaled(cfg.in_channels as usize * length, 0.3);
+            let condition = r.vec_scaled(length * cfg.condition_dim as usize, 0.3);
+            let fresh = Resident::new(&gpu, &cfg, &w, length);
+            let a = forward_resident(&gpu, &cfg, &w, &res, &latents, &condition, 0.4, length);
+            let b = forward_resident(&gpu, &cfg, &w, &fresh, &latents, &condition, 0.4, length);
+            assert_eq!(a, b, "a Resident rebound to {length} drifted from one built at {length}");
+        }
+    }
+
+    /// Rebinding must move the refusal with it: a `Resident` rebound to a
+    /// new length must refuse its OLD one, or the tables and the row count
+    /// could disagree and a stale table would go unnoticed.
+    #[test]
+    #[should_panic(expected = "build one Resident per chunk length")]
+    fn a_rebound_resident_refuses_its_previous_chunk_length() {
+        let cfg = DitConfig::tiny();
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let w = dit_train::random_weights(&cfg, 0xD1A);
+        let mut res = Resident::new(&gpu, &cfg, &w, 3);
+        res.rebind(&gpu, &cfg, 5);
+        let latents = vec![0.1f32; cfg.in_channels as usize * 3];
+        let condition = vec![0.1f32; 3 * cfg.condition_dim as usize];
+        let _ = forward_resident(&gpu, &cfg, &w, &res, &latents, &condition, 0.5, 3);
     }
 
     /// A `Resident` built for one chunk length must refuse a call at a

@@ -9,10 +9,9 @@
 //! `tests/e2e_short_generation.rs` (which calls [`generate`] directly
 //! rather than duplicating this composition inline).
 //!
-//! Sequential-stage RAM discipline (this crate's own roadmap ledger
-//! records why this matters on a RAM-constrained machine): each stage's
-//! weights live in their own block scope and are dropped before the next
-//! stage's load - the AR stage (two Global LLM
+//! Sequential-stage DEVICE discipline: each stage's `Gpu` handles and
+//! device-resident objects live in their own block scope and are dropped
+//! before the next stage builds its own - the AR stage (two Global LLM
 //! instances + the depth decoder) never overlaps the denoise stage (the
 //! DiT + condition encoder), which never overlaps the vocoder stage.
 //! Chunked generation (songs longer than [`denoise::CHUNK_FRAMES`] AR
@@ -20,6 +19,16 @@
 //! the DiT is dropped, then EVERY chunk is decoded through the vocoder
 //! stage - not interleaved per chunk, which would need both resident at
 //! once.
+//!
+//! HOST weights are a different question, and the answer changed with the
+//! hardware. Four of the five components import into a plain tree of host
+//! `Vec<f32>` and are read through [`crate::weightcache`], which holds them
+//! across calls keyed on the checkpoint directory - so a second `generate`
+//! on the same weights does not re-read 10.7 GB off disk. The block scopes
+//! above still bound every DEVICE allocation exactly as they did; what a
+//! scope end now releases is one `Arc` clone, not the bytes. `crate::
+//! weightcache`'s own module doc carries why that is safe, what it costs,
+//! and why the Global LLM is deliberately not in it.
 //!
 //! Device selection is ambient for EVERY stage - `--device` /
 //! `BRAIN_DEVICE`, the same knob every other model in this workspace
@@ -45,7 +54,7 @@
 //! most of this pipeline's cost.
 
 use crate::config::{ConditionEncoderConfig, DepthDecoderConfig, DitConfig, VocoderConfig};
-use crate::{condition_encoder, denoise, depth_decoder, dit, global_llm, pipeline, stitch, vocoder};
+use crate::{condition_encoder, denoise, depth_decoder, global_llm, pipeline, stitch, vocoder, weightcache};
 use data::qwen_tokenizer::QwenBpe;
 use gpu_core::Gpu;
 
@@ -149,13 +158,39 @@ pub struct GeneratedSong {
 ///
 /// The two branches only ever exchange host-side vectors (each `Qwen`
 /// keeps its own KV cache and hidden states come back to the host anyway
-/// for the CFG blend), so there is no cross-device transfer to arrange.
-fn ar_branch_devices() -> (Option<u32>, Option<u32>) {
+/// for the CFG blend), so there is no cross-device transfer to arrange -
+/// and because they share nothing else either, they are also STEPPED
+/// concurrently, one per card ([`pipeline::ArBranches`]), rather than one
+/// card idling through the other's half of every frame.
+fn ar_branch_devices() -> crate::devplan::Placement {
     let gpus = &gpu_core::devices::ambient_compute_set().gpus;
     match gpus.len() {
-        0 | 1 => (None, None),
-        _ => (Some(gpus[0]), Some(gpus[1])),
+        0 | 1 => crate::devplan::Placement::single(),
+        _ => crate::devplan::Placement { cond: Some(gpus[0]), uncond: Some(gpus[1]) },
     }
+}
+
+/// The card the depth decoder's [`depth_decoder::Resident`] goes on, or
+/// `None` for the host path.
+///
+/// **`Some` only when there is a real GPU.** The alternative is not a slower
+/// device - it is `hostmath`'s AVX2+FMA+rayon path, which at these shapes
+/// beats the Cranelift JIT's rendering of the same dispatch graph across the
+/// same cores. So `BRAIN_DEVICE=cpu` (an empty `gpus` set) keeps the host
+/// implementation rather than routing the graph through the CPU backend.
+///
+/// **The same card as the conditional Global LLM branch, not a third one.**
+/// The whole point of stepping the two CFG branches together is that they
+/// share one pass over the weights, which needs them in one dispatch and so
+/// on one card. `ar_branch_devices` already puts the two LM instances on
+/// gpu0/gpu1; ~2.3 GB of fp32 depth-decoder weights sit beside the first of
+/// them.
+fn depth_decoder_device(cond_dev: Option<u32>) -> Result<Option<Gpu>, String> {
+    let gpus = &gpu_core::devices::ambient_compute_set().gpus;
+    let Some(&index) = cond_dev.as_ref().or(gpus.first()) else {
+        return Ok(None);
+    };
+    Gpu::new_on_index(index, depth_decoder::PIPELINES).map(Some).map_err(|e| format!("minimaxmusic3: the depth decoder could not open gpu{index}: {e}"))
 }
 
 /// `--device`-shaped tokens for the denoise and vocoder stages.
@@ -217,15 +252,21 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         let tokenizer = QwenBpe::from_dir(&paths.tokenizer)?;
         let (conditional_ids, unconditional_ids) = global_llm::assemble_prompt(&tokenizer, caption, lyrics);
         let cap = (conditional_ids.len() + max_frames + 8) as u32;
-        let (cond_dev, uncond_dev) = ar_branch_devices();
-        let (cfg, lm_cond) = load_global_llm(&paths.lm, cap, cond_dev)?;
-        let (_, lm_uncond) = load_global_llm(&paths.lm, cap, uncond_dev)?;
+        let place = ar_branch_devices();
+        let (cfg, lm_cond) = load_global_llm(&paths.lm, cap, place.cond)?;
+        let (_, mut lm_uncond) = load_global_llm(&paths.lm, cap, place.uncond)?;
         let head = lm_cond.read_weight(cfg.head_weight());
 
         let dd_cfg = DepthDecoderConfig::real();
-        let dd_w = depth_decoder::import(&paths.depth, &dd_cfg)?;
+        let dd_w = weightcache::depth_decoder(&paths.depth, &dd_cfg)?;
+        let dd_gpu = depth_decoder_device(place.cond)?;
+        let mut dec = match &dd_gpu {
+            Some(gpu) => depth_decoder::Decoder::device(gpu, &dd_cfg, &dd_w, 2),
+            None => depth_decoder::Decoder::host(&dd_cfg, 2),
+        };
 
-        pipeline::generate_frames(&lm_cond, &lm_uncond, &dd_w, &dd_cfg, &head, cfg.vocab as usize, cfg.d_model as usize, &conditional_ids, &unconditional_ids, max_frames, opts.seed, progress)
+        let branches = pipeline::ArBranches::new(&lm_cond, &mut lm_uncond, place);
+        pipeline::generate_frames(branches, &mut dec, &dd_w, &dd_cfg, &head, cfg.vocab as usize, cfg.d_model as usize, &conditional_ids, &unconditional_ids, max_frames, opts.seed, progress)
     };
 
     let (denoise_dev, vocoder_dev) = stage_devices(opts.device.as_deref());
@@ -242,9 +283,9 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
     // this block ends and the DiT drops - never interleaved with the
     // vocoder stage below, which would need both resident at once.
     let chunks: Vec<(Vec<f32>, usize)> = {
-        let cond_w = condition_encoder::import(&paths.condition)?;
+        let cond_w = weightcache::condition_encoder(&paths.condition)?;
         let dit_cfg = DitConfig::real();
-        let dit_w = dit::import(&paths.dit, &dit_cfg)?;
+        let dit_w = weightcache::dit(&paths.dit, &dit_cfg)?;
         // One handle per card the CFG placement names, opened ONCE for the
         // whole stage and reused across every chunk. On a two-card box that
         // is both cards: the DiT's conditional and zero-condition forwards
@@ -253,23 +294,39 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         // the second card is not simply idle for the whole denoise stage.
         let devices = denoise::CfgDevices::open(denoise_dev.as_deref(), opts.device.as_deref());
         let starts = denoise::chunk_starts(num_frames);
+        let length_of = |start: usize| condition_encoder::latent_length(&cond_cfg, (start + denoise::CHUNK_FRAMES).min(num_frames) - start);
+        // The DiT's ~9.7 GB of weights per card, uploaded ONCE for the whole
+        // stage - exactly as `devices` above is opened once - because
+        // nothing about them depends on the chunk. Only the RoPE tables do,
+        // via `length`, and `denoise_chunk` rebinds those per chunk for
+        // ~90 kB. Re-uploading the blocks per chunk cost ~22 s of PCIe
+        // traffic each, ~22 minutes across a four-minute song's ~59 chunks,
+        // re-sending byte-identical data every time.
+        //
+        // `starts` is never empty (`chunk_starts` returns at least `[0]`),
+        // so the first chunk's length is the right one to build at and the
+        // first rebind is a no-op.
+        let mut residents = denoise::ChunkResidents::new(&devices, &dit_cfg, &dit_w, length_of(starts[0]));
         let mut state = denoise::ChunkState::default();
         starts
             .iter()
             .enumerate()
             .map(|(i, &start)| {
-                let latents = denoise::denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, opts.num_inference_steps, opts.seed.wrapping_add(i as u64 + 1), progress);
-                let chunk_frames = (start + denoise::CHUNK_FRAMES).min(num_frames) - start;
-                let length = condition_encoder::latent_length(&cond_cfg, chunk_frames);
-                (latents, length)
+                let latents = denoise::denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, opts.num_inference_steps, opts.seed.wrapping_add(i as u64 + 1), progress);
+                (latents, length_of(start))
             })
             .collect()
+        // `residents`, `devices` and `dit_w` all drop here, at the end of
+        // the denoise stage's block scope and before the vocoder stage
+        // loads anything - the sequential-stage RAM discipline this
+        // module's own doc describes. Hoisting the upload out of the chunk
+        // loop changed how LONG the DiT is resident, never how far.
     };
 
     // ---- Vocoder stage: crop-and-stitch every chunk. ----
     let (left, right) = {
         let vocoder_cfg = VocoderConfig::real();
-        let vocoder_w = vocoder::import(&paths.vocoder, &vocoder_cfg)?;
+        let vocoder_w = weightcache::vocoder(&paths.vocoder, &vocoder_cfg)?;
         let gpu = Gpu::open(vocoder_dev.as_deref(), vocoder::PIPELINES);
         let mut stitcher = stitch::Stitcher::new();
         let n = chunks.len();

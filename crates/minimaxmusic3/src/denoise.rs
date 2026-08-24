@@ -149,28 +149,43 @@ impl CfgDevices {
     }
 }
 
-/// One chunk's uploaded DiT weights and RoPE tables, **one set per card**.
+/// The generation's uploaded DiT weights and current RoPE tables, **one set
+/// per card**.
 ///
-/// Built once per chunk and reused across all `2 * num_inference_steps`
-/// evaluations - see [`dit::Resident`] for why rebuilding per step is the
-/// regression this type exists to prevent (~9.7 GB of host->device traffic
-/// per evaluation at `DitConfig::real()` dims). A split placement therefore
-/// costs ~9.7 GB on EACH card, not 19.4 GB on one.
-struct ChunkResidents<'a> {
+/// Built ONCE for the whole denoise stage and reused across every chunk and
+/// all `2 * num_inference_steps` evaluations within each - see
+/// [`dit::Resident`] for what a rebuild costs (~9.7 GB of host->device
+/// traffic at `DitConfig::real()` dims, ~22 s per card on a P40). A split
+/// placement costs ~9.7 GB on EACH card, not 19.4 GB on one.
+///
+/// The only per-chunk input is the chunk's `length`, and the only thing it
+/// feeds is the RoPE tables, so [`ChunkResidents::bind`] rebuilds those and
+/// nothing else. This follows [`CfgDevices`]'s own precedent exactly: the
+/// expensive, invariant thing is built once per generation at the stage's
+/// scope in `crate::generate::generate`, and the chunk loop borrows it.
+///
+/// Lifetime: it is the denoise stage's steady-state VRAM, so it must live
+/// and die inside that stage's block scope - `generate::generate`'s
+/// sequential-stage RAM discipline requires the DiT to be gone before the
+/// vocoder loads. Borrowing `devices` is what makes the compiler enforce
+/// half of that: these residents cannot outlive the handles they were
+/// uploaded through.
+pub struct ChunkResidents<'a> {
     devices: &'a CfgDevices,
     cond: dit::Resident,
     uncond: Option<dit::Resident>,
 }
 
 impl<'a> ChunkResidents<'a> {
-    /// Upload this chunk's weights to every card the placement named.
+    /// Upload the DiT's weights to every card the placement named, with the
+    /// RoPE tables for a first chunk of `length` latent frames.
     ///
     /// The two uploads are the same ~9.7 GB of host bytes going to two
     /// different cards over two different PCIe paths, so they run
     /// concurrently for the same reason the forwards do. Serialising them
-    /// would put a second full weight upload on every chunk's critical path
-    /// and hand back a slice of what the concurrent forwards just won.
-    fn new(devices: &'a CfgDevices, cfg: &DitConfig, w: &DitWeights, length: usize) -> ChunkResidents<'a> {
+    /// would put a second full weight upload on the generation's critical
+    /// path and hand back a slice of what the concurrent forwards just won.
+    pub fn new(devices: &'a CfgDevices, cfg: &DitConfig, w: &DitWeights, length: usize) -> ChunkResidents<'a> {
         let Some((card_u, gpu_u)) = devices.uncond.as_ref() else {
             return ChunkResidents { devices, cond: dit::Resident::new(&devices.cond, cfg, w, length), uncond: None };
         };
@@ -184,6 +199,29 @@ impl<'a> ChunkResidents<'a> {
                 uncond: Some(u.expect("the unconditional card is in the schedulable set")),
             }
         })
+    }
+
+    /// Point every card's resident at a chunk of `length` latent frames.
+    ///
+    /// Only [`dit::Resident::rebind`]'s ~90 kB of RoPE tables move; the
+    /// blocks are untouched. `chunk_starts` hands out mostly full
+    /// `CHUNK_FRAMES` chunks with a possibly shorter tail, so in a real
+    /// generation this is a no-op for every chunk but the last.
+    ///
+    /// Sequential even on a split placement, unlike the upload in
+    /// [`ChunkResidents::new`]: two table builds are microseconds, and a
+    /// thread scope to overlap them would cost more than it saves. That is
+    /// also why there is no `devplan::on_gpu` scope here where `new` and
+    /// `cfg_pair` both have one - those exist because they dispatch from
+    /// SPAWNED threads, which do not inherit the scoped selection. This runs
+    /// on the orchestrating thread and only allocates, and a `Gpu` resolves
+    /// the card its allocations are charged to once at construction
+    /// (`gpu_core::Gpu`'s `mem_device`), not per call.
+    fn bind(&mut self, cfg: &DitConfig, length: usize) {
+        self.cond.rebind(&self.devices.cond, cfg, length);
+        if let (Some(res), Some((_, gpu))) = (self.uncond.as_mut(), self.devices.uncond.as_ref()) {
+            res.rebind(gpu, cfg, length);
+        }
     }
 
     /// One Euler step's two forwards: sequentially when both branches share
@@ -235,9 +273,14 @@ impl<'a> ChunkResidents<'a> {
 /// to `[chunk_start, chunk_start+CHUNK_FRAMES)` (clipped to
 /// `num_frames_total`). Returns this chunk's denoised latents, `[in_channels,
 /// length]` NCL, and advances `state` for the next call.
+///
+/// `residents` is the generation's already-uploaded weights, taken by
+/// `&mut` for one reason: this call re-points their RoPE tables at THIS
+/// chunk's length ([`ChunkResidents::bind`]). Nothing else about them
+/// changes, and in particular nothing is re-uploaded.
 #[allow(clippy::too_many_arguments)]
 pub fn denoise_chunk(
-    devices: &CfgDevices,
+    residents: &mut ChunkResidents<'_>,
     dit_cfg: &DitConfig,
     dit_w: &DitWeights,
     cond_cfg: &ConditionEncoderConfig,
@@ -290,11 +333,12 @@ pub fn denoise_chunk(
 
     let zero_condition = vec![0.0f32; condition.len()];
     let prev_span = state.previous_latent.as_ref().map(|p| span_of(p, cin));
-    // The DiT's weights and RoPE tables are identical for every one of the
-    // `2 * num_inference_steps` evaluations below, so they are uploaded
-    // ONCE here - per card - rather than per `dit::forward` call; see
-    // `dit::Resident` and `ChunkResidents`.
-    let residents = ChunkResidents::new(devices, dit_cfg, dit_w, length);
+    // The DiT's weights are identical for every one of the `2 *
+    // num_inference_steps` evaluations below AND for every other chunk of
+    // this generation, so they were uploaded ONCE - per card - by the
+    // caller. All that is per-chunk is the RoPE tables, which depend only
+    // on `length`; see `dit::Resident::rebind` and `ChunkResidents`.
+    residents.bind(dit_cfg, length);
     let total_steps = timesteps.len() as u32;
     for (step_index, &t) in timesteps.iter().enumerate() {
         if overlap > 0 {
@@ -427,10 +471,11 @@ mod tests {
         let mut r = Lcg::new(3);
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
-        let mut state = ChunkState::default();
-        let latents = denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 7, &mut crate::ignore_progress());
-
         let expected_length = condition_encoder::latent_length(&cond_cfg, num_frames);
+        let mut residents = ChunkResidents::new(&devices, &dit_cfg, &dit_w, expected_length);
+        let mut state = ChunkState::default();
+        let latents = denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 7, &mut crate::ignore_progress());
+
         assert_eq!(latents.len(), dit_cfg.in_channels as usize * expected_length);
         assert!(state.previous_latent.is_some());
         assert!(state.previous_condition.is_some());
@@ -459,8 +504,9 @@ mod tests {
 
         let steps = 4usize;
         let mut seen: Vec<(u32, u32, String)> = Vec::new();
+        let mut residents = ChunkResidents::new(&devices, &dit_cfg, &dit_w, condition_encoder::latent_length(&cond_cfg, num_frames));
         let mut state = ChunkState::default();
-        let _ = denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, steps, 7, &mut |done, total, stage| {
+        let _ = denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, steps, 7, &mut |done, total, stage| {
             seen.push((done, total, stage.to_string()));
         });
 
@@ -471,6 +517,55 @@ mod tests {
         let done: Vec<u32> = seen.iter().map(|(d, _, _)| *d).collect();
         assert_eq!(done, (1..=steps as u32).collect::<Vec<_>>());
         assert!(seen.iter().all(|(_, total, _)| *total == steps as u32));
+    }
+
+    /// **Hoisting the weight upload out of the chunk loop must change
+    /// nothing.** The gate on [`ChunkResidents`] outliving one chunk: a
+    /// multi-chunk denoise driven by ONE set of residents, rebound per
+    /// chunk, must produce byte-identical latents to one that rebuilds the
+    /// residents from scratch for every chunk.
+    ///
+    /// Bit-for-bit, not a tolerance: uploading the same bytes once instead
+    /// of N times reorders no arithmetic, so equality is the prediction. The
+    /// two chunks here deliberately have DIFFERENT lengths, so the arm under
+    /// test really does exercise the RoPE rebind rather than passing because
+    /// nothing ever changed.
+    #[test]
+    fn residents_hoisted_across_chunks_are_bit_identical_to_rebuilding_them_per_chunk() {
+        let dit_cfg = DitConfig::tiny();
+        let cond_cfg = ConditionEncoderConfig::tiny();
+        let dit_w = dit_train::random_weights(&dit_cfg, 31);
+        let cond_w = random_condition_weights(&cond_cfg, 32);
+        let devices = CfgDevices::single(Gpu::new_cpu(dit::PIPELINES));
+
+        let num_frames = 6usize;
+        let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
+        let mut r = Lcg::new(33);
+        let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
+        let starts = [0usize, 2];
+        let length_at = |start: usize| condition_encoder::latent_length(&cond_cfg, num_frames - start);
+        assert_ne!(length_at(starts[0]), length_at(starts[1]), "the two chunks must differ in length or the rebind is never exercised");
+
+        let run = |per_chunk: bool| -> Vec<Vec<f32>> {
+            let mut state = ChunkState::default();
+            let mut residents = ChunkResidents::new(&devices, &dit_cfg, &dit_w, length_at(starts[0]));
+            starts
+                .iter()
+                .map(|&start| {
+                    if per_chunk {
+                        residents = ChunkResidents::new(&devices, &dit_cfg, &dit_w, length_at(start));
+                    }
+                    denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, 4, 41, &mut crate::ignore_progress())
+                })
+                .collect()
+        };
+
+        let fresh = run(true);
+        let hoisted = run(false);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+        for (i, (a, b)) in fresh.iter().zip(&hoisted).enumerate() {
+            assert_eq!(bits(a), bits(b), "chunk {i} changed value by reusing the residents from the previous chunk");
+        }
     }
 
     #[test]
@@ -490,9 +585,10 @@ mod tests {
         let mut r = Lcg::new(13);
         let frame_hiddens = r.vec_scaled(num_frames * per_frame, 0.3);
 
-        let mut state = ChunkState::default();
-        let first = denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 21, &mut crate::ignore_progress());
         let first_length = condition_encoder::latent_length(&cond_cfg, num_frames);
+        let mut residents = ChunkResidents::new(&devices, &dit_cfg, &dit_w, first_length);
+        let mut state = ChunkState::default();
+        let first = denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 4, 21, &mut crate::ignore_progress());
         assert_eq!(first.len(), dit_cfg.in_channels as usize * first_length);
 
         let prev_latent = state.previous_latent.clone().unwrap();
@@ -501,7 +597,7 @@ mod tests {
         assert_eq!(prev_condition.len(), span * cond_cfg.out_dim as usize);
         assert!(span <= first_length.min(OVERLAP_LATENT_LENGTH));
 
-        let second = denoise_chunk(&devices, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 2, &mut state, 4, 22, &mut crate::ignore_progress());
+        let second = denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 2, &mut state, 4, 22, &mut crate::ignore_progress());
         let second_length = condition_encoder::latent_length(&cond_cfg, num_frames - 2);
         assert_eq!(second.len(), dit_cfg.in_channels as usize * second_length);
     }

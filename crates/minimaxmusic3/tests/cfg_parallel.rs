@@ -98,13 +98,15 @@ fn random_condition_weights(cfg: &ConditionEncoderConfig, seed: u64) -> Conditio
 fn run(place: Placement, label: &str, dit_cfg: &DitConfig, dit_w: &dit::DitWeights, cond_cfg: &ConditionEncoderConfig, cond_w: &ConditionEncoderWeights, hiddens: &[f32]) -> (Vec<f32>, Vec<f64>) {
     let devices = CfgDevices::open_placed(place, None);
     assert_eq!(devices.is_parallel(), place.cfg_is_parallel(), "{label}: the opened handles must match the placement");
+    let length = minimaxmusic3::condition_encoder::latent_length(cond_cfg, FRAMES);
+    let mut residents = denoise::ChunkResidents::new(&devices, dit_cfg, dit_w, length);
     let mut state = ChunkState::default();
     let mut marks: Vec<Instant> = Vec::new();
     let t0 = Instant::now();
-    let latents = denoise::denoise_chunk(&devices, dit_cfg, dit_w, cond_cfg, cond_w, hiddens, FRAMES, 0, &mut state, STEPS, SEED, &mut |_, _, _| marks.push(Instant::now()));
+    let latents = denoise::denoise_chunk(&mut residents, dit_cfg, dit_w, cond_cfg, cond_w, hiddens, FRAMES, 0, &mut state, STEPS, SEED, &mut |_, _, _| marks.push(Instant::now()));
     let setup = marks.first().map(|m| m.duration_since(t0).as_secs_f64()).unwrap_or_default();
     let per_step: Vec<f64> = marks.windows(2).map(|w| w[1].duration_since(w[0]).as_secs_f64()).collect();
-    eprintln!("[{label}] first step + per-card Resident upload {setup:.2} s, then per step: {}", per_step.iter().map(|s| format!("{s:.2}")).collect::<Vec<_>>().join(" "));
+    eprintln!("[{label}] per-card Resident upload + first step {setup:.2} s, then per step: {}", per_step.iter().map(|s| format!("{s:.2}")).collect::<Vec<_>>().join(" "));
     (latents, per_step)
 }
 
