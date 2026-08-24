@@ -185,6 +185,23 @@ existing caller. Assume nothing about units.
   `var = S2/d − (S1/d)²`) which avoids `E[x²]−E[x]²` cancellation and fits one
   barrier. A kernel that falls out of the JIT prints
   `wgsl-cpu: kernel "…" not JIT-compiled` — grep your test output for it.
+- **A GEMM chunks only along the axis that is a contiguous ROW RANGE of its
+  operands.** `step_sliced` binds sub-ranges, never strides, so the chunkable
+  axis is whichever one indexes the *rows* of both the operand and the output.
+  For `out = col . Wᵀ` (`matmul_reg3`) that is the position axis - which is
+  exactly why the conv lowerings put positions first, and it is not a
+  stylistic choice. The TN form (`out[n,k] = Σ_m a[m,n]·b[m,k]`, which is what
+  a *transposed* conv wants because its contraction is the leading axis of
+  both native operands) has NO chunkable axis at all: `n` slices `a`'s columns
+  and `k` slices `b`'s columns, both strided. Such a lowering has to be
+  *bounded* and capability-gated on the binding limit instead, or pay for a
+  transpose.
+- **`matmul_dw_reg` ACCUMULATES; `matmul_dw_reg_splitk` with `s = 1` is the
+  same GEMM and ASSIGNS.** If a lowering writes its intermediate into a
+  scratch buffer reused across dispatches, the accumulating one folds in the
+  previous user's bytes. Zeroing the scratch instead costs a full extra pass
+  over the biggest buffer in the pipeline; picking the `_splitk` sibling costs
+  nothing.
 - **`max_storage_buffer_binding_size` is a real, queryable limit** — on some
   in-support hardware it can be well under 2 GiB, not the full device memory.
   A whole-image im2col operand for a large convolution can exceed it easily —
@@ -390,6 +407,24 @@ Two corollaries, both paid for:
   guard sent dozens of dispatches per forward to the naive kernel on a
   threshold that was much too conservative; the real crossover was far lower.
   Profile the selection, not just the kernels.
+
+And two more, from porting the 2D conv-as-GEMM lowering down to 1D:
+
+* **A threshold is a property of the PAIR, not of the fast kernel.** The 1D
+  lowering uses the same `matmul_reg3` as the 2D one, so its `Cout` threshold
+  looked like a free carry-over - 32. Measured, it is **16**, because the two
+  lowerings' *baselines* differ: 2D's direct side is `conv_bias_reg`, an
+  `@opt 5` register-tiled conv at ~700 GFLOP/s, and 1D's is `conv1d`, a naive
+  kernel at 2.2% of roof. A weaker baseline crosses over earlier. Carrying the
+  number over would have left 1.9x-6.0x unclaimed across `16 <= Cout < 32`.
+  The transposed pair diverged further still (it wins at *every* width
+  measured, down to `Cout = 4`) and needed its own constant.
+* **A sweep cannot see below its own threshold, so it will "confirm" whatever
+  you wrote.** Once the selector is wired, both columns of the A/B return the
+  *same* path below the threshold and the ratio reads a meaningless 1.00x -
+  which looks like evidence and is not. Ship the force switch with the
+  threshold (`BRAIN_CONV1D_GEMM=force`, the same shape as `BRAIN_NO_COOP_LN`)
+  and sweep through it.
 
 ### F.7 Put the fix in the SELECTOR, so the next model inherits it
 

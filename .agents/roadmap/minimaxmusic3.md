@@ -1617,6 +1617,290 @@ kernel.
   shared-memory occupancy cost - so the knob would have been machinery with no
   live caller.
 
+## Phase 19: the DiT TRAINER never got the fast GEMM, and every unused kernel slot pointed at kernel 0
+
+Two defects in `crates/minimaxmusic3/src/dit_train.rs`, one file, one commit.
+
+### Defect 1 - `dit_train` dispatched the naive `matmul`/`matmul_dx`/`matmul_dw`
+
+Phase 15 fixed exactly this for `dit.rs` (the served forward) and the trainer
+never inherited it: its `PIPELINES` registered only the `@opt 2` reference trio
+and hardcoded them at all ten of its GEMM sites. The fix routes the forward
+through the SAME `model::block::gemm_variant` call `dit::linear_step` makes
+(the selector is now literally the same function, shared, with each module
+passing its own indices), and the backward through `model::block::pick_gemm`
+over `matmul_dx_reg` / `matmul_dw_reg` - the shared rule `t5encoder::train`,
+`clip::model` and `codeformer::train` already use.
+
+Per-kernel A/B, `mm3_bench gemm-bwd 7` / `gemm gemm 7`, one P40 (measured
+roofline 10517 GFLOP/s, 287.5 GB/s), `DitConfig::real()`, 690 rows, best of 7,
+warm-up excluded:
+
+| site | shape `[m,k,n]` | naive ms | tiled ms | speedup | tiled % of fp32 peak |
+|---|---|---|---|---|---|
+| fwd attn q/k/v/out | 690, 2048, 2048 | 183.5 | 1.65 | 111x | 33.3% |
+| fwd ff_in (fused) | 690, 2048, 16384 | 1214.0 | 9.32 | 130x | 47.3% |
+| fwd ff_out | 690, 8192, 2048 | 1972.0 | 5.77 | **342x** | 38.2% |
+| dX attn q/k/v/out | 690, 2048, 2048 | 25.41 | 1.98 | 12.8x | 27.7% |
+| dX ff_in | 690, 2048, 16384 | 234.6 | 12.48 | 18.8x | 35.3% |
+| dX ff_out | 690, 8192, 2048 | 146.3 | 5.54 | 26.4x | 39.7% |
+| dW attn q/k/v/out | 690, 2048, 2048 | 17.72 | 1.75 | 10.1x | 31.4% |
+| dW ff_in | 690, 2048, 16384 | 173.0 | 10.47 | 16.5x | 42.1% |
+| dW ff_out | 690, 8192, 2048 | 142.2 | 5.47 | 26.0x | 40.3% |
+
+Whole pass, `mm3_bench dit-train <layers> 689 3`, same card, best of 3:
+
+| layers | naive ms | fast ms |
+|---|---|---|
+| 1 | 10583.5 | 5609.7 |
+| 2 | 15660.3 | 5942.7 |
+| 3 | 20795.5 | 6795.2 |
+
+The MARGINAL cost of one block's training step (forward + backward) is
+therefore **5106.0 ms -> 592.8 ms, 8.6x**; the whole 3-layer step is 3.06x.
+The gap between 8.6x and the per-kernel table's 10-342x is the ~5.0 s of
+LAYER-INDEPENDENT host glue every step pays either way (`proj_in`/`proj_out`
+and the two `k=1` convs are host `matvec` loops over 689 positions - 6.5 GFLOP
+single-threaded), which is unchanged by this work and is now the top row.
+Extrapolated to the real 36 layers: ~189 s -> ~26 s.
+
+### Split-K was measured and REJECTED, both families
+
+`matmul_dw_reg_splitk` (+ `dw_splitk_reduce`) and `matmul_reg3_splitk` exist for
+a tile grid too small to fill the card. This model's grids are not small - the
+dW grids are 256 / 1024 / 2048 workgroups on a 30-SM P40 - and every slice count
+tried was slower:
+
+| dW site | unsplit ms | s=2 | s=4 | s=8 |
+|---|---|---|---|---|
+| attn (256 wgs) | 1.753 | 2.061 | 2.432 | 3.180 |
+| ff_in (2048 wgs) | 10.465 | 12.821 | 16.586 | 21.129 |
+| ff_out (1024 wgs) | 5.466 | 6.695 | 8.292 | 10.528 |
+
+The forward sibling is the only place split-K was ever even close, and it is
+shape-dependent rather than a win: at `ff_out` (96 wgs) `matmul_reg3` 5.693 ms
+vs `s=8` 5.039 ms (1.13x), at `attn` (96 wgs) 1.663 vs 1.640 (1.01x), and at
+`ff_in` (768 wgs) 9.269 vs 10.041 - a 1.08x LOSS. Not worth a second selection
+rule that would also diverge from `dit.rs`'s served-path reduction order, and
+both split-K kernels are GPU-only with no `backend-cpu` native path, so shipping
+them would have put a silently-all-zero-gradient failure mode on the backend
+every test in this crate uses. `mm3_bench gemm-bwd` is the harness that produced
+all of the above and is checked in, so the decision is re-measurable rather than
+remembered.
+
+### Defect 2 - `0` as an "unregistered" marker in `model::block::KernelIds`
+
+`dit.rs` and `dit_train.rs` both filled the thirteen RMSNorm/RoPE/GQA slots they
+never dispatch with `0`. Index 0 is `conv1d` in `dit::PIPELINES` and `matmul` in
+`dit_train::PIPELINES` - both live, both dispatched on every pass. A builder
+reaching such a slot runs a real kernel against another kernel's bindings and
+uniform: on a GPU backend the binding check panics, but `backend-cpu` has no
+buffer-count or uniform-size check at dispatch, so it is an out-of-bounds read
+that no unit test on that backend can see.
+
+`model::vit::UNREGISTERED = usize::MAX` was already the idiom; `model::block`
+now has the twin, plus `KernelIds::slots()` so a gate cannot silently check
+15 of 16 fields. **13 sites across the workspace** carried the defect class
+(7 with a literal `0`, 6 with a live index for a DIFFERENT kernel used as a
+"valid placeholder"): `minimaxmusic3::{dit, dit_train, depth_decoder}`,
+`mimi::model`, `qwen3::serve`, `qwen3omnimoe::{talker, thinker}`,
+`qwen3tts::{gen, mtp}`, `qwen35::{model, stream}`,
+`qwen35::bin::qwen35_bench`, `qwen35moe::model`.
+
+The gate is `dit::slot_gate` + one test per module: run the real pass, read the
+device's own per-kernel dispatch counters back, and fail if any unused slot's
+index names a kernel that pass dispatched. Mutation-verified - putting a single
+slot back to `0` fails both tests by name ("unused KernelIds slot `rmsnorm`
+holds pipeline index 0 = `matmul`, which this pass really dispatches").
+
+### What else changed, and why
+
+* `dit_train::Trainer::new_on(gpu, ..)` - the trainer hardcoded
+  `Gpu::new_cpu`, so the capability-gated fast tier it now registers was
+  unreachable from any caller and `check_dit` could never have exercised it.
+  `Trainer::new` still builds on `backend-cpu`, unchanged.
+* `gradcheck::minimaxmusic3::check_dit_tiled` - `check_dit` on the pooled test
+  device at dims past `block::pick_gemm`'s `m >= 8` / `n >= 128` crossover, so
+  the register-tiled backward is finite-difference-checked rather than merely
+  compiled. The `check_t5` / `check_t5_tiled` pair is the precedent. Green on
+  the P40 and under `BRAIN_DEVICE=cpu`.
+* `dit_train::tests::gradients_match_between_the_cpu_and_the_pooled_test_device`
+  compares every gradient across the two backends at both shapes, and asserts
+  from the dispatch counters that the fast kernels really ran - otherwise the
+  "above the crossover" case could quietly become a second copy of the naive one.
+
+### The next row (F.9)
+
+With the GEMMs fixed, one block's marginal 592.8 ms is no longer GEMM-bound
+(the nine GEMMs above sum to ~48 ms of it). The remaining cost is the
+materialized bidirectional attention trio at 690 rows (`probs` alone is
+32x690x690 = 61 MB) and the HOST round trips `block_fwd`/`block_bwd` make per
+block - a 45 MB `gpu.read` of `ff_raw` on the forward and two more on the
+backward, to split and recombine the fused gate/up halves. `dit.rs` already
+removed its own copy of that split (Phase 15's two-half upload); the trainer has
+not. Neither is touched here.
+
+## Phase 20: the vocoder's two 1D convolutions were 99.4% of the stage, at 2.2% and 0.4% of roof
+
+`mm3_bench vocoder 689` measured one 8 s chunk at **16780.6 ms, 0.48x
+realtime** (best of 5, one P40, real checkpoint, box idle). Two kernels were
+essentially all of it:
+
+| kernel | ms | calls | % of pass | % of compute roof |
+|---|---|---|---|---|
+| `conv1d` | 8317.9 | 27 | 51.4% | **2.2%** |
+| `convtr1d` | 7762.2 | 4 | 48.0% | **0.4%** |
+| everything else | 97.4 | 72 | 0.6% | at 93-98% of the MEMORY roof |
+
+Both are `@opt 2` one-thread-per-output kernels with a serial `Cin*K`
+reduction. A kernel at a few percent of peak is not a kernel that needs tuning
+- it is the wrong kernel (§F.2). There is no fast 1D conv sibling anywhere in
+the tree: `conv1d.wgsl`/`convtr1d.wgsl` (+ `_dx`/`_dw`) are the only 1D
+convolutions there are, `im2col.wgsl` is 2D-only, and `audio::conv` had no
+selector at all - so roughly a dozen crates that convolve in 1D were all
+running the naive kernel.
+
+### What was done
+
+The 2D side already had the whole pattern (`vae::blocks::conv_s` = `im2col_at`
++ `matmul_reg3` + `nlc_bias_nchw`, chunked, gated on `Cout`). It was ported one
+spatial axis down, into a NEW additive seam in `audio::conv`
+(`conv1d_bias_fwd` / `convtr1d_bias_fwd` + `ConvGemmKernels` + `ConvScratch`),
+with the choice made by `backend_api::select` (`Op::Conv1d`,
+`Op::ConvTranspose1d`). `ConvKernels`, `conv1d_fwd`/`convtr1d_fwd` and both
+backward builders are untouched, so no existing caller had to change and
+`train.rs` keeps the direct path bit-for-bit.
+
+Two new kernels, both barrier-free and both `@cpu yes`: `im2col1d_at.wgsl` and
+`col2im1d_bias.wgsl`.
+
+**The algebra needs no transposes and no weight permutes.** That is the whole
+reason this is cheap, and it is worth writing down because it is not obvious:
+
+* `conv1d`, `K > 1`: the native `[Cout, Cin/G, K]` weight IS `[Cout, Cin*K]`
+  row-major at `G = 1`, so `matmul_reg3` eats the checkpoint tensor as-is:
+  `y[Lo, Cout] = col[Lo, Cin*K] . W^T`, epilogue `nlc_bias_nchw` (reused, not
+  copied).
+* `conv1d`, `K == 1` (stride 1, no pad): `matmul_dx_reg`'s NN form gives
+  `y[Cout, Lo] = W[Cout, Cin] . x[Cin, L]` straight over the native NCL
+  operands - no im2col at all and no epilogue transpose, since the result is
+  already NCL. This covers `dec_in_proj` and all twelve residual `conv2`s.
+* `convtr1d`: the TN form contracts over the LEADING axis of both operands,
+  which is exactly how `[Cin, Cout/G, K]` and `[Cin, L]` are already laid out.
+  `col[Cout*K, L] = W^T.x`, then `col2im1d_bias` gathers the taps.
+
+`matmul_dw_reg_splitk` with `s = 1`, not `matmul_dw_reg`, because the former
+ASSIGNS and the latter ACCUMULATES - with a scratch buffer reused across all
+eight transposed-conv dispatches an accumulating GEMM would fold the previous
+stage in, and zeroing it instead would cost a full extra pass over the largest
+buffer in the pipeline.
+
+### Result
+
+`mm3_bench vocoder 689`, best of 5, same binary, same box, A/B by
+`BRAIN_CONV1D_GEMM=0`:
+
+| | before (direct) | after (lowered) |
+|---|---|---|
+| whole pass | 16780.6 ms | **1488.9 ms** (11.3x) |
+| sum of kernel device time | 16177.5 ms | **798.9 ms** (20.3x) |
+| realtime factor | 0.48x | **5.37x** |
+| whole pass vs roof | 1.3% | 14.2% |
+
+Per kernel-kind, after:
+
+| kernel | ms | calls | % | % of roof |
+|---|---|---|---|---|
+| `matmul_reg3` | 368.7 | 128 | 46.2% | 43.0% compute |
+| `im2col1d_at` | 142.7 | 128 | 17.9% | 73.0% memory |
+| `matmul_dw_reg_splitk` | 73.4 | 8 | 9.2% | 40.4% compute |
+| `matmul_dx_reg` | 70.3 | 26 | 8.8% | 31.7% compute |
+| `nlc_bias_nchw` | 41.3 | 26 | 5.2% | 36.1% memory |
+| `snake1d` | 37.4 | 29 | 4.7% | 92.9% memory |
+| `add2` | 22.6 | 12 | 2.8% | 98.4% memory |
+| `col2im1d_bias` | 22.5 | 8 | 2.8% | 33.0% memory |
+| `add_chan_inplace` | 16.1 | 14 | 2.0% | 92.7% memory |
+| `conv1d` | 3.8 | 1 | 0.5% | (the `Cout = 1` output conv, correctly still direct) |
+
+So `conv1d`'s 8317.9 ms became 626.8 ms across five kinds (**13.3x**) and
+`convtr1d`'s 7762.2 ms became 95.9 ms across two (**80.9x**). No row is flagged
+as a defect any more: the top one is a GEMM at 43% of the compute roof.
+
+### The threshold was NOT the 2D one, and copying it would have cost a win
+
+`vae::blocks`'s `GEMM_CONV_MIN_COUT` is 32 for the same `matmul_reg3`. Swept
+here (`crates/audio/tests/bench_conv1d_lowering.rs`, `--ignored`, best of 5,
+`BRAIN_CONV1D_GEMM=force` to reach the sub-threshold side - without it the
+selector answers "direct" for both columns and the ratio reads a meaningless
+1.0x):
+
+| Cout | 4 | 8 | 12 | 16 | 24 | 32 | 64 | 128 | 256 |
+|---|---|---|---|---|---|---|---|---|---|
+| `conv1d` k=7 pad=3, L=44096 | 0.27x | 0.54x | 0.85x | **1.06x** | 1.88x | 2.52x | 5.68x | 10.3x | 15.4x |
+| `conv1d` k=1, L=44096 | 0.71x | 0.74x | 0.89x | **1.53x** | 2.66x | 3.36x | 5.13x | 14.2x | 20.6x |
+| `convtr1d` stride=4 K=8, L=11024 | **1.35x** | 2.47x | 3.18x | 3.69x | 6.01x | 8.15x | 20.1x | 35.3x | 64.7x |
+
+The 1D crossover is between 12 and 16, not 32, because the *baseline* is
+different: the 2D sweep's "direct" side is `conv_bias_reg`, an `@opt 5`
+register-tiled conv at ~700 GFLOP/s, while the 1D one is a naive kernel at 2.2%
+of roof. A much weaker baseline crosses over much earlier. And the transposed
+pair needs its OWN number (§F.6): its direct kernel throws away all but
+`K/stride` of the taps every thread walks, so the lowering wins at every width
+measured. Hence `GEMM_CONV1D_MIN_COUT = 16` and `GEMM_CONVTR1D_MIN_COUT = 4`.
+
+### Correctness
+
+`tests/vocoder_parity.rs` (which now asserts cosine >= 0.999 AND rel_l2 <=
+1e-4), both stages actually run:
+
+    vocoder[tiny]: cosine=1.000000000 rel_l2=5.499e-7 max_abs=0.000000
+    vocoder[real]: cosine=1.000000000 rel_l2=1.676e-6 max_abs=0.000001
+
+An unexpected measured property, recorded because the next reader will wonder:
+the lowered `conv1d` came out **bit-identical** to the direct kernel at every
+shape in the sweep (`max|delta|` exactly 0.0). The `matmul_reg*` family
+accumulates strictly in increasing `k`, one FMA at a time, and the col operand
+is laid out `ci*K + kw` - the same order `conv1d.wgsl`'s nested loops sum in.
+`convtr1d` genuinely does reassociate (the GEMM sums over `Cin` and
+`col2im1d_bias` adds the taps afterwards, where the direct kernel nests the
+other way), so the 1.676e-6 above is entirely its doing. This is a measured
+property of this driver, not a contract - do not build a bit-exact gate on it.
+
+### What did NOT work, so it is not re-proposed
+
+* **Chunking the transposed lowering.** Its TN GEMM's output rows index
+  `Cout*K`, so a range of `L` is a strided slice of both `col` and the input,
+  not a sub-range - and `step_sliced` binds ranges, not strides. Every
+  reorientation that makes `L` the row axis needs one of the two operands
+  transposed. So that lowering is BOUNDED instead (`Cout*K*L` floats, 271 MB at
+  this decoder's worst stage) and falls back to the direct kernel where it
+  would not bind. The plain conv IS chunked, because there positions are the
+  row axis of both operands - which is the whole reason `im2col_at`'s
+  orientation was chosen in 2D too.
+* **A bigger im2col budget.** Swept 32/48/64/96/128/256 MiB: device time is
+  flat from 96 MiB up (794-800 ms) and climbs below it (+6% at 64, +11% at 32),
+  so 128 MiB is the smallest budget that costs nothing. 512 MiB (the VAE
+  default) buys nothing and costs a third of a gigabyte of resident scratch.
+* **Reading the whole-pass number to tune the budget.** It moved 1484-1740 ms
+  across every configuration including repeats of the same one - the host gap
+  below swamps a 2% effect. The device-time sum is the only instrument fine
+  enough for that decision.
+
+### Where the time is now
+
+The pass is 1488.9 ms of which only 798.9 ms is device kernel time. The
+remaining **690 ms is host: allocation, weight upload and readback**, and it is
+NOT new (it was 603 ms before this change, on a 16.8 s pass where nobody could
+see it). Measured against length - 183 ms at 64 latents, 260 ms at 172, 641 ms
+at 689 - it is ~155 ms constant plus ~0.78 ms per latent frame. The constant is
+the ~216 MB of conv weights `vocoder::forward` re-uploads on EVERY call
+(`gpu.storage_init` per conv, per forward); the linear part is that the forward
+allocates a fresh `gpu.storage` for every intermediate and holds all of them,
+because it records one tape and submits at the end - several GB of buffer
+creation per chunk. The fix is an activation pool and a weight cache, exactly
+what `vae::blocks::Builder` already has; it is now 46% of this stage and the
+obvious next target.
+
 ## Not yet done
 
 - [ ] Charge the SECOND card. Needs `residency::multi` to grow a

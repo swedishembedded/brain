@@ -291,7 +291,10 @@ the selector's normal choice, for isolating a regression to one variant):
 `BRAIN_CONV_GEMM`, `BRAIN_CONV_GEMM_MIN`, `BRAIN_NAIVE_CONV`, `BRAIN_TILED_CONV`,
 `BRAIN_WINOGRAD`, `BRAIN_GLMDSA_NAIVE_MM`, `BRAIN_GPT2_NAIVE_MM`, `BRAIN_GPT2_REG1`,
 `BRAIN_LFM2_NAIVE_MM`, `BRAIN_QWEN_NAIVE_MM`, `BRAIN_NO_COOP_GRADNORM`,
-`BRAIN_NO_COOP_LN`, `BRAIN_NO_FASTCONV`, `BRAIN_NO_KERNEL_UPGRADE`.
+`BRAIN_NO_COOP_LN`, `BRAIN_NO_FASTCONV`, `BRAIN_NO_KERNEL_UPGRADE`,
+`BRAIN_CONV1D_GEMM` (`0` pins the 1D convolutions to the direct kernels,
+`force` pins them to the GEMM lowering below its `Cout` threshold - the only
+way a sweep can see the sub-threshold side).
 
 **Profiling / roofline internals:**
 `BRAIN_NO_ROOF` (skip the roofline probe), `BRAIN_ROOF_BUDGET_S` (its time
@@ -301,7 +304,12 @@ budget used for kernel selection).
 **Training-memory tradeoff:** `BRAIN_OFFLOAD_ADAM` (keep optimizer state in
 host RAM instead of device memory).
 
-**Per-model dev/debug knobs:** `BRAIN_VAE_COL_MIB`, `BRAIN_VAE_TAPS`,
+**Conv-as-GEMM scratch budget:** `BRAIN_CONV_COL_MIB` caps the im2col scratch
+(MiB) for every conv lowering - 1D (`audio::conv`), 2D and 3D (`vae::blocks`,
+`vae::blocks3d`). `BRAIN_VAE_COL_MIB` is the original name of the same knob and
+is still honoured.
+
+**Per-model dev/debug knobs:** `BRAIN_VAE_TAPS`,
 `BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS`, `BRAIN_OMNI_DEBUG_LOGITS` (top-3 logit dump
 from the Qwen3-Omni int8 resident), `BRAIN_FLUX2_BENCH_BASELINE`,
 `BRAIN_FLUX2_TIME_FORWARD`, `BRAIN_S3DIT_LAYERS` (truncates the Z-Image DiT
