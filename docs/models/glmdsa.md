@@ -17,7 +17,7 @@ GLM-family MoE decoder, or import official GLM-5.2 HuggingFace weights.
 | Training from scratch | [x] |
 | INT8                   | [ ] |
 | CLI (`brain <arch> <action>`)       | [x] |
-| HTTP API               | [x] |
+| HTTP API               | [ ] |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
 
@@ -84,9 +84,15 @@ To serve it over HTTP or D-Bus:
 BRAIN_GLMDSA_WEIGHTS=glm.safetensors brain serve --dbus --openai
 ```
 
-Once serving, it's reachable like any other resident model over `brain do`,
-D-Bus, or the HTTP APIs - one request decodes at a time (no concurrent
-continuous-batching engine, unlike Qwen3).
+Once serving, it's reachable over `brain do` and D-Bus - one request decodes
+at a time (no concurrent continuous-batching engine, unlike Qwen3).
+
+It is **not** on the OpenAI/Anthropic HTTP routes. Those are shape-derived,
+not a per-model list (`crates/apiserve/src/catalog.rs::api_caps`):
+`/v1/chat/completions` and `/v1/messages` require a **streaming** `generate`
+action, and GLM's emits its text in one piece rather than as per-token deltas.
+Qwen3, Qwen3.5-35B-A3B and Qwen3.8-27B declare streaming and are therefore on
+those routes; GLM and the char-level GPT baseline are not.
 
 `brain caps` lists `brain/glm` whether or not a checkpoint is present, and
 `brain glmdsa generate --weights glm.safetensors --prompt "..."` runs it

@@ -14,8 +14,8 @@ PatchMerger as-is.
 | Training from scratch | [ ] |
 | LoRA fine-tune         | [x] (rank-8 on the 9 targetable GDN/GQA projections; never the MoE experts) |
 | CLI                    | [x] |
-| HTTP API               | [ ] |
-| D-Bus                  | [ ] |
+| HTTP API               | [x] |
+| D-Bus                  | [x] |
 | Batched serving        | [ ] |
 
 ## Getting the weights

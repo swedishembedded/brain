@@ -17,7 +17,7 @@ carry.
 | Training from scratch | [x] |
 | INT8                   | [ ] |
 | CLI (`brain <arch> <action>`)       | [x] |
-| HTTP API               | [x] |
+| HTTP API               | [ ] |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
 
@@ -50,9 +50,13 @@ To serve it over HTTP or D-Bus:
 BRAIN_GPT2_WEIGHTS=gpt.safetensors brain serve --dbus --openai
 ```
 
-Once serving, it's reachable like any other resident model over `brain do`,
-D-Bus, or the HTTP APIs - one request decodes at a time (no concurrent
-continuous-batching engine, unlike Qwen3).
+Once serving, it's reachable over `brain do` and D-Bus - one request decodes
+at a time (no concurrent continuous-batching engine, unlike Qwen3).
+
+It is **not** on the OpenAI/Anthropic HTTP routes: those require a
+**streaming** `generate` action (`crates/apiserve/src/catalog.rs::api_caps`
+derives exposure from action shape, not from a per-model list), and this
+baseline's `generate` returns its text in one piece.
 
 ## Options
 

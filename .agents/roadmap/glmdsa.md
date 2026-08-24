@@ -30,6 +30,23 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
       The model ref stays `brain/glm`, which is what `modelref::alias::ROWS`,
       `perf_cli` and the checkpoint `ModelCard` already use - `glmdsa` is the
       *architecture* id, a different namespace.
+- [ ] **A streaming `generate`, which is what puts GLM on the HTTP chat
+      routes.** `crates/apiserve/src/catalog.rs::api_caps` derives HTTP
+      exposure from action SHAPE, not from a per-model list:
+      `/v1/chat/completions` and `/v1/messages` need an action named
+      `generate` that is `.streaming()`, takes `prompt`/`messages`/`text`, and
+      outputs `Media::Text`. `glmdsa::caps` satisfies every clause except
+      `streaming`, so GLM is on `brain do` and D-Bus but not on the HTTP
+      dialects. The char-level GPT baseline is in the same position
+      (`resident_llm::GptResident` passes `generate_spec(..., chat=false)`);
+      qwen3, qwen35moe and qwen35 all pass `true` and are exposed.
+
+      The fix is NOT to add `.streaming()` to the spec - that would make the
+      manifest claim something the action does not do. `sample::generate_kv`
+      produces its tokens and returns; per-token `Progress::delta` emission has
+      to exist first, and then the flag describes it. Doing it in that order is
+      the difference between a served streaming endpoint and a manifest that
+      lies to the router.
 - [ ] `Instance::run_batch` for GLM is the serial default and does not yet say
       why - the decoder is autoregressive, so the honest options are batching
       the prefill or adopting `model::serve::PagedDecoder` (see
