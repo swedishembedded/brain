@@ -248,6 +248,27 @@ pub(crate) fn is_supported_architecture(arch: &str) -> bool {
 /// `store`'s `<vendor>/<repo>` directory for `plan.reference`'s base repo.
 /// Returns the steps this crate could not execute (`Convert`/`Quantize`), in
 /// order, for the caller to run next.
+///
+/// **Idempotent per file.** A [`Step::Download`] whose `dest` already exists is
+/// skipped. This is what makes a killed fetch restartable: [`plan_base`] always
+/// returns the FULL artifact list for a family, and the one early-out
+/// [`plan`] has (`store.local(reference)`) only fires once EVERY role/file is
+/// present -- so without this, a multi-shard repo interrupted partway through
+/// re-downloads every shard it already landed. Confirmed live: a killed
+/// `qwen3vl` fetch re-fetched an already-complete 4.97 GB shard from scratch.
+///
+/// Bare existence is the correct test here, not a size or checksum comparison:
+/// [`crate::fetch::stream_to_file`] writes to a `.part` sibling and renames
+/// into place **only on full success**, so a file at `dest` is by construction
+/// a download that completed. A partial transfer leaves a `.part` file, which
+/// this never mistakes for the real one. That invariant is load-bearing for
+/// the skip -- if `stream_to_file` ever writes `dest` incrementally, this
+/// check must become a size/digest comparison in the same change.
+///
+/// The skip does not re-verify the revision, matching what `store.local` (the
+/// existing early-out) already does: a file under `<vendor>/<repo>/` is taken
+/// as that reference's copy. Removing the file is how a caller forces a
+/// re-fetch.
 pub fn execute(store: &Store, hub: &dyn Hub, plan: &Plan, progress: &mut dyn FnMut(&str, u64, Option<u64>)) -> Result<Vec<Step>, HubError> {
     let dir = store.repo_dir(&plan.reference.base());
     let mut deferred = Vec::new();
@@ -256,6 +277,9 @@ pub fn execute(store: &Store, hub: &dyn Hub, plan: &Plan, progress: &mut dyn FnM
             Step::Serve => {}
             Step::Download { vendor, repo, revision, file, dest_name } => {
                 let dest = dir.join(dest_name);
+                if dest.exists() {
+                    continue;
+                }
                 hub.download(vendor, repo, revision, file, &dest, &mut |got, total| progress(dest_name, got, total))?;
             }
             Step::Convert { .. } | Step::Quantize { .. } => deferred.push(step.clone()),
@@ -533,5 +557,67 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), br#"{"architectures":["Qwen3ForCausalLM"]}"#);
         assert_eq!(std::fs::read(dir.join("model.safetensors")).unwrap(), vec![7u8; 32]);
         assert!(!progressed.is_empty());
+    }
+
+    /// A restarted fetch must not re-download files the previous attempt
+    /// already landed.
+    ///
+    /// `plan_base` always returns the FULL artifact list for a family, and the
+    /// one early-out `plan()` has (`store.local(reference)`) only fires once
+    /// EVERY role/file is present -- so a multi-shard repo killed partway
+    /// through re-plans every shard it already has. This was confirmed live:
+    /// a killed `qwen3vl` fetch re-downloaded an already-complete 4.97 GB
+    /// shard from scratch.
+    ///
+    /// The assertion is behavioural rather than a download counter: the local
+    /// file is overwritten with different bytes between the two `execute`
+    /// calls, so if the second call re-downloads, `stream_to_file`'s rename
+    /// puts the hub's bytes back and the sentinel is gone.
+    #[test]
+    fn execute_does_not_redownload_a_file_already_on_disk() {
+        let st = store("modelstore-plan-test-execute-resume");
+        let mut hub = FakeHub::new();
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", vec![7u8; 32]);
+
+        let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
+        let p = plan(&r, &st, &hub).unwrap();
+        execute(&st, &hub, &p, &mut |_, _, _| {}).unwrap();
+
+        let dir = st.repo_dir(&r.base());
+        let shard = dir.join("model.safetensors");
+        std::fs::write(&shard, b"already-here").unwrap();
+
+        let mut progressed = Vec::new();
+        execute(&st, &hub, &p, &mut |name, got, total| progressed.push((name.to_string(), got, total))).unwrap();
+
+        assert_eq!(std::fs::read(&shard).unwrap(), b"already-here", "an already-present file was re-downloaded");
+        assert!(
+            !progressed.iter().any(|(name, _, _)| name == "model.safetensors"),
+            "a skipped download must not report transfer progress: {progressed:?}"
+        );
+    }
+
+    /// The skip is per-file, not per-plan: a repo missing ONE of its files
+    /// still fetches that one. Without this, "don't redo work already done"
+    /// could be implemented as an all-or-nothing early-out and still pass the
+    /// test above while never completing a partially-fetched repo.
+    #[test]
+    fn execute_still_fetches_the_files_that_are_missing() {
+        let st = store("modelstore-plan-test-execute-partial");
+        let mut hub = FakeHub::new();
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", vec![7u8; 32]);
+
+        let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
+        let p = plan(&r, &st, &hub).unwrap();
+        let dir = st.repo_dir(&r.base());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"already-here").unwrap();
+
+        execute(&st, &hub, &p, &mut |_, _, _| {}).unwrap();
+
+        assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), b"already-here");
+        assert_eq!(std::fs::read(dir.join("model.safetensors")).unwrap(), vec![7u8; 32], "the missing file was not fetched");
     }
 }
