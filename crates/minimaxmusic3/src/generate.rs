@@ -152,13 +152,18 @@ fn ar_branch_devices() -> (Option<u32>, Option<u32>) {
 
 /// `--device`-shaped tokens for the denoise and vocoder stages.
 ///
-/// These two stages are sequential and never logically overlap, but each
-/// opens its own `Gpu` and wgpu does NOT return a device's VRAM to the
-/// driver when the handle drops. Measured on a P40 at a real chunk length:
-/// the vocoder alone peaks at 12.26 GB decoding one 689-latent chunk, and
-/// the DiT stage holds ~9.3 GB - together past a 24 GB card, which is what
-/// killed a two-chunk generation in the vocoder after both chunks had
-/// denoised cleanly.
+/// These two stages are sequential and never logically overlap, but on one
+/// card a two-chunk generation died in the vocoder with an out-of-memory
+/// after both chunks had denoised cleanly. Measured on a P40 at a real
+/// chunk length: the vocoder alone peaks at 12.26 GB decoding one
+/// 689-latent chunk, and the DiT stage holds ~9.3 GB.
+///
+/// **The mechanism is not established.** An earlier version of this comment
+/// blamed wgpu for not returning a dropped device's VRAM; that is wrong -
+/// `Buffer::drop` destroys immediately, and this session measured gpu0
+/// falling to 15 MiB once the DiT stage ended. Treat this as a fix that
+/// works, not as evidence about wgpu; see the roadmap ledger's Phase 13
+/// correction for the probe that would settle it.
 ///
 /// With two or more schedulable GPUs they go on different cards (the
 /// second one is idle for the whole of both stages anyway - the AR stage

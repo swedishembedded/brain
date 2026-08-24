@@ -782,6 +782,44 @@ Correctness held throughout: `dit_parity` stayed at cosine 1.000000000 and
 the rendered audio is **bit-identical** between the naive and fast GEMM
 paths (waveform cosine 1.000000000, max abs diff 0.000000).
 
+### Correction: the stated reason for the vocoder OOM was WRONG
+
+`stage_devices`'s doc comment and commit ee32a5f1 both claim "wgpu does not
+return a device's VRAM to the driver when the handle drops". **That is
+false.** It was an inference reached for to explain an out-of-memory, never
+measured, and it is contradicted by this session's own numbers as well as
+by the source:
+
+- `wgpu-core/src/resource.rs:473` - `Buffer::drop` calls `destroy_buffer`
+  IMMEDIATELY; there is no deferral to a poll.
+- `wgpu-core/src/device/resource.rs:307` - `Device::drop` tears its
+  resources down, and each buffer frees itself as its refcount falls.
+- `wgpu-hal/src/vulkan/device.rs:1045` - allocations are
+  `AllocationScheme::GpuAllocatorManaged`, i.e. SUB-allocated from larger
+  blocks. A freed buffer returns its sub-allocation to the allocator's
+  pool, reusable within that device; the blocks themselves go back when the
+  allocator dies with the Device.
+- Measured here: two vocoder chunks back to back peak at 12.26 GB, not
+  24.5 - so buffers are plainly reclaimed within one device. And in the
+  split-device run **gpu0 falls to 15 MiB** while the vocoder runs on
+  gpu1 - so the DiT's device released its VRAM on drop.
+
+Both measurements were in hand when the wrong explanation was written; they
+simply were not joined up. The FIX (separate cards) is real and the run is
+green, but the mechanism recorded for it is not, and a wrong durable
+finding is worse than none: the next reader would design around a
+constraint that does not exist.
+
+**The actual cause of the same-card OOM is therefore still unknown.** The
+open candidates are allocator-pool fragmentation across the stage boundary,
+or something retaining the DiT `Gpu` past its block scope so the two
+devices genuinely overlap. The probe that settles it: allocate ~9 GB on a
+device, drop it, then immediately build a second device on the SAME card
+and allocate ~12 GB, watching `nvidia-smi` across the boundary. Not yet run
+- both cards are busy with a generation - and until it is, `stage_devices`
+should be read as "a fix whose mechanism is unconfirmed", not as evidence
+about wgpu.
+
 ### Two hypotheses tested and rejected
 
 Recorded because the rejections cost as much as the fixes, and because
