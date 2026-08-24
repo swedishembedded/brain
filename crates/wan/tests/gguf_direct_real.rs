@@ -268,7 +268,7 @@ fn force_vulkan_backend_once() {
 /// The device string a quantized (int8/int4) GPU build must use: `None`
 /// (ambient), NEVER `Some("gpu")`.
 ///
-/// `Some("gpu")` forces `Gpu::new_wgpu` (`wan::block::open_device`), which
+/// `Some("gpu")` forces `Gpu::new_wgpu` (via `Gpu::open`), which
 /// bypasses `BRAIN_DEVICE` entirely. On this repo's own non-ReBAR P40s, the
 /// default wgpu backend leaves a SAME-SIZE staging allocation permanently
 /// resident on every large upload - measured exactly 2.00x in

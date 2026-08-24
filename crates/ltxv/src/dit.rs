@@ -37,7 +37,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use model::Shard;
 use vae::blocks::Tensors;
 
-use crate::block::{load_block_tensors_from_source, open_device, AvBlockTaps, BlockTaps, EmbeddingsConnector, GenerationCache, LtxAvBlock, LtxBlock, LtxBlockQ, QBlockWeights, QTier};
+use crate::block::{load_block_tensors_from_source, AvBlockTaps, BlockTaps, EmbeddingsConnector, GenerationCache, LtxAvBlock, LtxBlock, LtxBlockQ, QBlockWeights, QTier, KERNELS};
 use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
 
@@ -803,7 +803,7 @@ impl LtxDit {
         let ts_scaled: Vec<f32> = batch.timesteps.iter().map(|&x| x * cfg.timestep_scale_multiplier as f32).collect();
         let (adaln_table, embedded_timestep) = ada_layer_norm_single(&self.w, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
         let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, &batch.positions, batch.t);
-        let gpu = open_device(self.device.as_deref());
+        let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
         let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
         let x0 = if self.shard.embed {
@@ -962,7 +962,7 @@ impl LtxDit {
         let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
 
         // ---- block stack ------------------------------------------------------
-        let gpu = open_device(self.device.as_deref());
+        let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
         let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
         #[rustfmt::skip]
@@ -1030,7 +1030,7 @@ impl LtxDit {
 
         let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
 
-        let gpu = open_device(self.device.as_deref());
+        let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
         let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
 
         #[rustfmt::skip]
@@ -1300,8 +1300,8 @@ pub fn forward_q_streamed_in(
     // always did; that is the event a device-lifecycle investigation wants
     // correlated against `--trace-gpu`.
     let gpu = session.device_for_call();
-    gpu_core::profile::stage_time("forward_q_streamed: open_device (fresh Gpu + shader pipeline compile)", s_open);
-    tracing::debug!(stage = "open_device", ms = s_open.elapsed().as_secs_f32() * 1e3, resident = session.is_resident(), "device handle for this forward");
+    gpu_core::profile::stage_time("forward_q_streamed: device open (fresh Gpu + shader pipeline compile)", s_open);
+    tracing::debug!(stage = "device_open", ms = s_open.elapsed().as_secs_f32() * 1e3, resident = session.is_resident(), "device handle for this forward");
     // The resident weight window is filled HERE, before the RoPE tables, the
     // connector and the block stack have allocated anything - see
     // `crate::devres::DitSession::prefill` for the measurement that says the
@@ -1633,7 +1633,7 @@ impl LtxAvDit {
         let v_cross_rope = ltx_rope_tables(acfg.cross_attention_dim, acfg.num_heads, vcfg.positional_embedding_theta, &cross_max_pos, v_axis0_positions, batch.tv);
         let a_cross_rope = ltx_rope_tables(acfg.cross_attention_dim, acfg.num_heads, vcfg.positional_embedding_theta, &cross_max_pos, &batch.a_positions, batch.ta);
 
-        let gpu = open_device(self.device.as_deref());
+        let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
         let (v_cos_bufs, v_sin_bufs) = upload_rope_tables(&gpu, &v_rope);
         let (a_cos_bufs, a_sin_bufs) = upload_rope_tables(&gpu, &a_rope);
         let (v_cross_cos_bufs, v_cross_sin_bufs) = upload_rope_tables(&gpu, &v_cross_rope);
@@ -1867,7 +1867,7 @@ impl LtxAvDit {
         let a_cross_rope = ltx_rope_tables(acfg.cross_attention_dim, acfg.num_heads, vcfg.positional_embedding_theta, &cross_max_pos, a_positions, ta); // audio's own single axis IS its own positions array
 
         // ---- block stack ------------------------------------------------------
-        let gpu = open_device(self.device.as_deref());
+        let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
         let (v_cos_bufs, v_sin_bufs) = upload_rope_tables(&gpu, &v_rope);
         let (a_cos_bufs, a_sin_bufs) = upload_rope_tables(&gpu, &a_rope);
         let (v_cross_cos_bufs, v_cross_sin_bufs) = upload_rope_tables(&gpu, &v_cross_rope);

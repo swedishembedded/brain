@@ -19,7 +19,8 @@
 use std::path::Path;
 
 use checkpoint::gguf::MmapGguf;
-use ltxv::block::{open_device, EmbeddingsConnector};
+use gpu_core::Gpu;
+use ltxv::block::{EmbeddingsConnector, KERNELS};
 use ltxv::config::LtxDitConfig;
 use ltxv::dit::dit_tensor_manifest;
 use vae::blocks::Tensors;
@@ -117,7 +118,7 @@ fn ltxv_real_connector_matches_reference() {
     let s = shape("hidden")[0] as u32;
     let want_out = get("connector_out");
 
-    let gpu = open_device(Some("gpu"));
+    let gpu = Gpu::open(Some("gpu"), &KERNELS);
     let connector = EmbeddingsConnector::on(
         gpu,
         &w,

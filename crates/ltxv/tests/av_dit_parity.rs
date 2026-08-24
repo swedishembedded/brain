@@ -19,7 +19,8 @@
 
 use std::path::Path;
 
-use ltxv::block::{open_device, EmbeddingsConnector};
+use gpu_core::Gpu;
+use ltxv::block::{EmbeddingsConnector, KERNELS};
 use ltxv::{load_tiny_weights, LtxAvDit, LtxAvDitConfig};
 
 // ------------------------------------------------------------------ metrics
@@ -235,7 +236,7 @@ fn ltxv_av_dit_tiny_gated_matches_reference() {
     // ---- 1: each connector alone -----------------------------------------
     #[rustfmt::skip]
     let video_connector = EmbeddingsConnector::on(
-        open_device(None), &w, "video_embeddings_connector",
+        Gpu::open(None, &KERNELS), &w, "video_embeddings_connector",
         cfg.video.connector_inner_dim(), cfg.video.connector_num_attention_heads, cfg.video.connector_attention_head_dim,
         cfg.video.connector_num_layers, cfg.video.connector_num_learnable_registers, cfg.video.connector_apply_gated_attention,
         cfg.video.connector_norm_output, cfg.video.positional_embedding_theta, &cfg.video.connector_positional_embedding_max_pos, cfg.video.norm_eps,
@@ -245,7 +246,7 @@ fn ltxv_av_dit_tiny_gated_matches_reference() {
 
     #[rustfmt::skip]
     let audio_connector = EmbeddingsConnector::on(
-        open_device(None), &w, "audio_embeddings_connector",
+        Gpu::open(None, &KERNELS), &w, "audio_embeddings_connector",
         cfg.audio.connector_inner_dim(), cfg.audio.connector_num_attention_heads, cfg.audio.connector_attention_head_dim,
         cfg.video.connector_num_layers, cfg.video.connector_num_learnable_registers, cfg.video.connector_apply_gated_attention,
         cfg.video.connector_norm_output, cfg.video.positional_embedding_theta, &cfg.video.connector_positional_embedding_max_pos, cfg.video.norm_eps,

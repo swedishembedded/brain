@@ -36,7 +36,8 @@
 //! magnitude has to be checked separately or the check cannot see its own
 //! most likely failure.
 
-use gemma4::block::{open_device, Gemma4Layer, Precision};
+use gemma4::block::{Gemma4Layer, Precision, KERNELS};
+use gpu_core::Gpu;
 use gemma4::config::Gemma4Config;
 use gemma4::rope::{full_table, sliding_table, upload_rope};
 use gemma4::gguf_src::Gemma4GgufSource;
@@ -92,7 +93,7 @@ fn real_q8_0_layer_int8_compute_matches_fp32_on_both_attention_types() {
     let cfg = Gemma4Config::gemma4_12b();
     let src = Gemma4GgufSource::open(&path, &cfg).unwrap_or_else(|e| panic!("opening {path}: {e}"));
 
-    let gpu = open_device(None);
+    let gpu = Gpu::open(None, &KERNELS);
     if !gpu.caps().numeric.int8_dot {
         brain_testutil::skip_unavailable("this device exposes no packed-int8 dot path, so there is no int8 tier to compare");
         return;
@@ -170,7 +171,7 @@ fn real_q8_0_layer_int8_compute_matches_fp32_on_both_attention_types() {
 /// through a quantize/dequantize detour for nothing.
 #[test]
 fn int8_is_requested_and_resolved_against_the_device_never_assumed() {
-    let gpu = open_device(None);
+    let gpu = Gpu::open(None, &KERNELS);
     let resolved = Precision::for_device(&gpu, Precision::Int8);
     if gpu.caps().numeric.int8_dot {
         assert_eq!(resolved, Precision::Int8, "a device with a packed-int8 path must honour the request");

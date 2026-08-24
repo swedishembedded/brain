@@ -12,7 +12,7 @@
 //! ## Mechanism
 //!
 //! `gpu_core::devices::with_gpu(index, f)` pins `f`'s thread-local device
-//! selection to canonical GPU `index` - every `Gpu::new`/`open_device` call
+//! selection to canonical GPU `index` - every `Gpu::new`/`Gpu::open` call
 //! `f` makes (including the one buried inside [`LtxAvDit::run_stage_forward`],
 //! which opens a fresh device per call rather than caching one - see
 //! `crate::dit`'s doc) resolves against that physical card. Wrapping stage

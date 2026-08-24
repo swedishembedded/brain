@@ -191,14 +191,6 @@ impl VocoderConfig {
     }
 }
 
-fn new_gpu(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 fn kernels_id() -> audio::conv::ConvKernels {
     audio::conv::ConvKernels { fwd: K_CONV1D, dx: 0, dw: 0 }
 }
@@ -414,7 +406,7 @@ pub fn synthesize(cfg: &VocoderConfig, tensors: &Tensors, mel: &[f32], channels:
         }
     }
 
-    let gpu = new_gpu(device);
+    let gpu = Gpu::open(device, &KERNELS);
     let x_in = gpu.storage_init("vocoder.mel_in", &nc);
     let mut h = conv1d_k7(&gpu, tensors, "conv_pre", cfg.mel_channels, cfg.upsample_initial_channel, t, true, &x_in);
     let mut l = t;

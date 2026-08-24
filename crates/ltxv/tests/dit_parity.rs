@@ -23,7 +23,8 @@
 
 use std::path::Path;
 
-use ltxv::block::{open_device, EmbeddingsConnector};
+use gpu_core::Gpu;
+use ltxv::block::{EmbeddingsConnector, KERNELS};
 use ltxv::{load_tiny_weights, LtxDit, LtxDitConfig};
 
 // ------------------------------------------------------------------ metrics
@@ -193,7 +194,7 @@ fn ltxv_dit_tiny_gated_matches_reference() {
     let keyframes_mask = fx.get("keyframes_mask");
 
     // ---- 1: the connector alone -----------------------------------------
-    let gpu = open_device(None);
+    let gpu = Gpu::open(None, &KERNELS);
     let connector = EmbeddingsConnector::on(
         gpu,
         &w,

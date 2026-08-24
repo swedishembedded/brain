@@ -796,11 +796,7 @@ pub struct ZImageBlock {
 impl ZImageBlock {
     pub fn new(tensors: &Tensors, prefix: &str, d: BlockDims, t: u32, modulation: bool, device: Option<&str>) -> ZImageBlock {
         let reg_gemm = device != Some("cpu");
-        let gpu = match device {
-            Some("cpu") => Gpu::new_cpu(&KERNELS),
-            Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-            _ => Gpu::new(&KERNELS),
-        };
+        let gpu = Gpu::open(device, &KERNELS);
         let w = BlockWeights::upload(&gpu, tensors, prefix);
         let nb = NormBufs::new(&gpu, tensors, prefix, d.dim, modulation);
         let half = d.head_dim / 2;

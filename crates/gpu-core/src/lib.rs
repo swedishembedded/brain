@@ -348,7 +348,7 @@ mod native_facade {
         /// individual buffer does, so a long-lived handle that churns
         /// temporaries over-counts. That matches how this engine already
         /// scopes VRAM - a fresh `Gpu` per call, released between calls (see
-        /// `ltxv::dit::forward_q_streamed`'s `open_device`) - and erring
+        /// `ltxv::dit::forward_q_streamed`'s `Gpu::open`) - and erring
         /// toward over-counting is the safe direction for a ceiling. Empty,
         /// never locked and never allocated when no ceiling is set.
         grants: Mutex<Vec<memauth::Grant>>,

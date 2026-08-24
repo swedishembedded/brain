@@ -90,7 +90,7 @@ use std::time::Instant;
 use gpu_core::profile::profile;
 use gpu_core::roof;
 use gpu_core::{DeviceBuffer, Gpu};
-use ltxv::block::{open_device, LtxBlock};
+use ltxv::block::{LtxBlock, KERNELS};
 use ltxv::config::LtxDitConfig;
 use ltxv::dit::random_tiny_weights;
 use ltxv::rope::ltx_rope_tables;
@@ -130,7 +130,7 @@ fn bench_dit(reps: usize, layers: u32, t: u32, ctx_len: u32) {
     let one_layer = LtxDitConfig { num_layers: 1, ..cfg };
     let weights = random_tiny_weights(&one_layer, 7);
 
-    let gpu = open_device(Some("gpu"));
+    let gpu = Gpu::open(Some("gpu"), &KERNELS);
     let t0 = Instant::now();
     let blk = LtxBlock::on(gpu.share(), &cfg, &weights, "transformer_blocks.0", t, ctx_len);
     eprintln!("one block built (weights uploaded) in {:.2} s", t0.elapsed().as_secs_f64());
@@ -433,7 +433,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
     // generation does (`crate::pipeline::RealDit` holds one per card for the
     // whole denoise loop). A transient session is byte-for-byte the
     // pre-residency path: a fresh device per call, every block re-uploaded.
-    // `None`, not `Some("gpu")`: `open_device(None)` goes through `Gpu::new`,
+    // `None`, not `Some("gpu")`: `Gpu::open(None, ..)` goes through `Gpu::new`,
     // which honours `BRAIN_DEVICE` - so this bench can be pointed at brain's
     // native Vulkan backend (`BRAIN_DEVICE=vulkan`), which does NOT have
     // wgpu's 2.00x resident-buffer cost and therefore has a completely

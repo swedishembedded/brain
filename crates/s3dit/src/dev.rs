@@ -187,11 +187,7 @@ impl ZImageDit {
     /// ~157 MB for `feed_forward.w1`), not the whole model.
     pub fn build_from_source(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32, device: Option<&str>) -> ZImageDit {
         let reg_gemm = device != Some("cpu");
-        let gpu = match device {
-            Some("cpu") => Gpu::new_cpu(&KERNELS),
-            Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-            _ => Gpu::new(&KERNELS),
-        };
+        let gpu = Gpu::open(device, &KERNELS);
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);
@@ -683,11 +679,7 @@ impl ZImageDitWindowed {
     #[allow(clippy::too_many_arguments)]
     pub fn build_from_source(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, window: u32, f: u32, h: u32, wd: u32, cap_len: u32, device: Option<&str>) -> ZImageDitWindowed {
         let reg_gemm = device != Some("cpu");
-        let gpu = match device {
-            Some("cpu") => Gpu::new_cpu(&KERNELS),
-            Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-            _ => Gpu::new(&KERNELS),
-        };
+        let gpu = Gpu::open(device, &KERNELS);
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);

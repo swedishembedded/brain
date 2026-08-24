@@ -168,15 +168,6 @@ impl Precision {
     }
 }
 
-/// Open a device for this crate's kernel table. `None` takes brain's default.
-pub fn open_device(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
     &w.get(name).unwrap_or_else(|| panic!("gemma4: missing weight {name}")).1
 }

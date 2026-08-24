@@ -900,7 +900,7 @@ pub struct WanBlock {
 
 impl WanBlock {
     pub fn new(cfg: &crate::WanConfig, t: &dyn checkpoint::TensorSource, prefix: &str, tokens: u32, device: Option<&str>) -> WanBlock {
-        let gpu = open_device(device);
+        let gpu = Gpu::open(device, &KERNELS);
         Self::on(gpu, cfg, t, prefix, tokens)
     }
 
@@ -936,15 +936,6 @@ impl WanBlock {
 
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
-    }
-}
-
-/// Open a device for the DiT's kernel table. `None` takes brain's default.
-pub fn open_device(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
     }
 }
 

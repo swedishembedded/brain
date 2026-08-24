@@ -47,11 +47,7 @@ impl VaeDecoder {
     /// Build the decode graph for an input latent `[latent_ch, h, w]` and upload
     /// all decoder weights. `device`: `Some("cpu")` | `Some("gpu")` | `None`.
     pub fn from_diffusers(cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, device: Option<&str>) -> VaeDecoder {
-        let gpu = match device {
-            Some("cpu") => Gpu::new_cpu(&KERNELS),
-            Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-            _ => Gpu::new(&KERNELS),
-        };
+        let gpu = Gpu::open(device, &KERNELS);
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps_enabled());
 
@@ -193,11 +189,7 @@ impl VaeEncoder {
     /// NOT latent size) and upload all encoder weights. `device`: `Some("cpu")` |
     /// `Some("gpu")` | `None`.
     pub fn from_diffusers(cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, device: Option<&str>) -> VaeEncoder {
-        let gpu = match device {
-            Some("cpu") => Gpu::new_cpu(&KERNELS),
-            Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-            _ => Gpu::new(&KERNELS),
-        };
+        let gpu = Gpu::open(device, &KERNELS);
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps_enabled());
 

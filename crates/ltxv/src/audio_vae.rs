@@ -245,14 +245,6 @@ impl AudioVaeConfig {
     }
 }
 
-fn new_gpu(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 fn upload(gpu: &Gpu, t: &Tensors, name: &str) -> DeviceBuffer {
     let (_, data) = t.get(name).unwrap_or_else(|| panic!("ltxv audio_vae: missing tensor {name}"));
     gpu.storage_init(name, data)
@@ -404,7 +396,7 @@ fn affine_cf(x: &mut [f32], c: usize, t: usize, fbins: usize, stat_a: &[f32], st
 /// of 4 (two clean halvings, freq padding is symmetric).
 pub fn encode(cfg: &AudioVaeConfig, tensors: &Tensors, mel: &[f32], t: u32, fbins: u32, device: Option<&str>) -> Vec<f32> {
     assert_eq!(mel.len(), (cfg.in_channels * t * fbins) as usize, "encode: {} values, expected {}", mel.len(), cfg.in_channels * t * fbins);
-    let gpu = new_gpu(device);
+    let gpu = Gpu::open(device, &KERNELS);
     let x_in = gpu.storage_init("audio_vae.mel", mel);
 
     let mut h = causal_conv(&gpu, tensors, "encoder.conv_in", cfg.in_channels, cfg.ch, 3, t, fbins, &x_in);
@@ -452,7 +444,7 @@ pub fn decode(cfg: &AudioVaeConfig, tensors: &Tensors, latent: &[f32], lt: u32, 
     let mut z_host = latent.to_vec();
     affine_cf(&mut z_host, cfg.z_channels as usize, lt as usize, lf as usize, std, mean, false);
 
-    let gpu = new_gpu(device);
+    let gpu = Gpu::open(device, &KERNELS);
     let z_in = gpu.storage_init("audio_vae.latent", &z_host);
 
     let base = cfg.bottleneck();

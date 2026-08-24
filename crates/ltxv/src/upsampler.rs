@@ -349,14 +349,6 @@ fn upsampler_stage(b: &mut Builder3d, cfg: &LatentUpsamplerConfig, x: T3) -> T3 
     }
 }
 
-fn new_gpu(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 fn read_named(gpu: &Gpu, v: &[(String, DeviceBuffer, usize)], name: &str) -> Option<Vec<f32>> {
     v.iter().find(|(n, _, _)| n == name).map(|(_, b, l)| gpu.read(b, *l))
 }
@@ -376,7 +368,7 @@ pub struct LatentUpsampler {
 impl LatentUpsampler {
     /// Build the forward graph for a `[cfg.in_channels, t, h, w]` latent.
     pub fn build(cfg: &LatentUpsamplerConfig, tensors: &Tensors, t: u32, h: u32, w: u32, device: Option<&str>) -> LatentUpsampler {
-        let gpu = new_gpu(device);
+        let gpu = Gpu::open(device, &KERNELS);
         let mut b = Builder3d::new(&gpu, tensors, true);
 
         let x_in = gpu.storage(cfg.in_channels as u64 * t as u64 * h as u64 * w as u64);

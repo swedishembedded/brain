@@ -166,16 +166,6 @@ const ACCUMULATING_GRADS: [&str; 30] = [
     "g_snq", "g_snk", "g_cnq", "g_cnk", "g_n3w", "g_n3b", "g_ln1g", "g_ln1b", "g_ln2g", "g_ln2b",
 ];
 
-/// Open a device for the trainable block's kernel table. `None` takes brain's
-/// default (`BRAIN_DEVICE`, else the best available backend).
-pub fn open_device(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 /// The six `[dim]` vectors of `modulation + e0`, in the checkpoint's chunk
 /// order, folded into the two LayerNorm affines and the two residual gates.
 struct Mods {
@@ -266,12 +256,12 @@ pub struct BlockDev {
 impl BlockDev {
     /// Build on brain's default device.
     pub fn new(d: Dims, max_t: usize) -> BlockDev {
-        BlockDev::from_gpu(open_device(None), d, max_t)
+        BlockDev::from_gpu(Gpu::open(None, &KERNELS), d, max_t)
     }
 
     /// Build on a named device (`"cpu"`, `"gpu"`, or `None` for the default).
     pub fn on_device(d: Dims, max_t: usize, device: Option<&str>) -> BlockDev {
-        BlockDev::from_gpu(open_device(device), d, max_t)
+        BlockDev::from_gpu(Gpu::open(device, &KERNELS), d, max_t)
     }
 
     pub fn from_gpu(gpu: Gpu, d: Dims, max_t: usize) -> BlockDev {

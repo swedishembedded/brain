@@ -198,11 +198,7 @@ impl<'a> Builder<'a> {
 impl DiamondUNet {
     /// Build from host tensors on the given device ("cpu" | "gpu" default).
     pub fn new(cfg: DiamondConfig, tensors: &Tensors, device: Option<&str>) -> DiamondUNet {
-        let gpu = match device {
-            Some("cpu") => Gpu::new_cpu(&KERNELS),
-            Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-            _ => Gpu::new(&KERNELS),
-        };
+        let gpu = Gpu::open(device, &KERNELS);
         let cc = cfg.cond_channels as usize;
 
         // Host conditioning net.

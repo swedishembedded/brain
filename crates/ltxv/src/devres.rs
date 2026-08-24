@@ -67,7 +67,7 @@
 //! residency entirely) - the bisect handle a measurement pass needs, and the
 //! way the bit-identity gate runs both arms of the same generation.
 
-use crate::block::{cached_block_bytes, open_device, BlockTimings, CachedQBlockWeights, LtxBlockQ, QTier};
+use crate::block::{cached_block_bytes, BlockTimings, CachedQBlockWeights, LtxBlockQ, QTier, KERNELS};
 use crate::config::LtxDitConfig;
 use gpu_core::Gpu;
 use std::sync::Mutex;
@@ -351,7 +351,7 @@ impl DitSession {
     /// since the 1080p run's activations are what would otherwise collide with
     /// them.
     pub fn resident(cfg: &LtxDitConfig, tier: QTier, device: Option<&str>, t: usize) -> DitSession {
-        let gpu = open_device(device);
+        let gpu = Gpu::open(device, &KERNELS);
         let slots = planned_slots(cfg, tier, t, gpu.memory_device(), gpu.kind());
         tracing::info!(
             slots,
@@ -374,7 +374,7 @@ impl DitSession {
     /// under test. `slots = 0` is the no-window fallback, which is a legal
     /// answer here rather than an error.
     pub fn resident_with_slots(device: Option<&str>, slots: u32) -> DitSession {
-        DitSession { gpu: Some(open_device(device)), device: device.map(str::to_string), window: Mutex::new(None), slots }
+        DitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots }
     }
 
     /// This session's device handle for one forward call, plus whether it is
@@ -384,7 +384,7 @@ impl DitSession {
     pub fn device_for_call(&self) -> Gpu {
         match &self.gpu {
             Some(g) => g.share(),
-            None => open_device(self.device.as_deref()),
+            None => Gpu::open(self.device.as_deref(), &KERNELS),
         }
     }
 

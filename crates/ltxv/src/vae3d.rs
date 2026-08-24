@@ -404,14 +404,6 @@ fn upsample(b: &mut Builder3d, prefix: &str, c_in: u32, stride: Stride, mult: u3
     }
 }
 
-fn new_gpu(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 /// Read one of a graph's named stage buffers.
 fn read_named(gpu: &Gpu, v: &[(String, DeviceBuffer, usize)], name: &str) -> Option<Vec<f32>> {
     v.iter().find(|(n, _, _)| n == name).map(|(_, b, l)| gpu.read(b, *l))
@@ -458,7 +450,7 @@ impl LtxVaeEncoder {
         assert!(h.is_multiple_of(32) && w.is_multiple_of(32), "{h}x{w} is not a multiple of 32");
         let eps = cfg.pixel_norm_eps;
 
-        let gpu = new_gpu(device);
+        let gpu = Gpu::open(device, &KERNELS);
         let mut b = Builder3d::new(&gpu, tensors, taps_enabled());
 
         let p = cfg.patch_size;
@@ -578,7 +570,7 @@ impl LtxVaeDecoder {
         let (h, w) = (lh * 32, lw * 32);
         let eps = cfg.pixel_norm_eps;
 
-        let gpu = new_gpu(device);
+        let gpu = Gpu::open(device, &KERNELS);
         let mut b = Builder3d::new(&gpu, tensors, taps_enabled());
         let z_in = gpu.storage(cfg.latent_channels as u64 * lat_t as u64 * lh as u64 * lw as u64);
         let z = T3 { buf: z_in.clone(), c: cfg.latent_channels, t: lat_t, h: lh, w: lw };

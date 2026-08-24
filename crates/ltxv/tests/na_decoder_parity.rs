@@ -117,7 +117,7 @@ fn setup(fixture_file: &str) -> Option<(&'static Tensors, Fixture)> {
 fn ltxv_na_context_matches_reference() {
     let Some((w, fx)) = setup("na_context.safetensors") else { return };
     let cfg = NaDecoderConfig::ltx25();
-    let gpu = na_decoder::open_device(None);
+    let gpu = gpu_core::Gpu::open(None, &na_decoder::KERNELS);
 
     let ls = fx.shape("latent").to_vec();
     let (t, h, wd) = (ls[1] as u32, ls[2] as u32, ls[3] as u32);
@@ -135,7 +135,7 @@ fn ltxv_na_context_matches_reference() {
 fn ltxv_na_diff_matches_reference() {
     let Some((w, fx)) = setup("na_diff.safetensors") else { return };
     let cfg = NaDecoderConfig::ltx25();
-    let gpu = na_decoder::open_device(None);
+    let gpu = gpu_core::Gpu::open(None, &na_decoder::KERNELS);
 
     let cs = fx.shape("context").to_vec();
     let (t, h, wd) = (cs[0] as u32, cs[1] as u32, cs[2] as u32);

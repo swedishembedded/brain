@@ -524,14 +524,6 @@ fn decoder_chunk(b: &mut Builder3d, cfg: &WanVaeConfig, x: &T3, cache: &mut Feat
 /// and [`FeatCache::claim`] asserts on overflow.
 const CACHE_SLOTS: usize = 128;
 
-fn new_gpu(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 /// Read one of a graph's named stage buffers.
 fn read_named(gpu: &Gpu, v: &[(String, DeviceBuffer, usize)], name: &str) -> Option<Vec<f32>> {
     v.iter().find(|(n, _, _)| n == name).map(|(_, b, l)| gpu.read(b, *l))
@@ -578,7 +570,7 @@ impl WanVaeEncoder {
         assert!(h.is_multiple_of(ds) && w.is_multiple_of(ds), "{h}x{w} is not a multiple of {ds}");
         let (lh, lw) = (h / ds, w / ds);
 
-        let gpu = new_gpu(device);
+        let gpu = Gpu::open(device, &KERNELS);
         let mut b = Builder3d::new(&gpu, tensors, taps_enabled());
         let x_in = gpu.storage(3u64 * frames as u64 * h as u64 * w as u64);
         let video = T3 { buf: x_in.clone(), c: 3, t: frames, h, w };
@@ -687,7 +679,7 @@ impl WanVaeDecoder {
         let frames = 1 + 4 * (lat_t - 1);
         let up = 1 << (cfg.dim_mult.len() - 1);
 
-        let gpu = new_gpu(device);
+        let gpu = Gpu::open(device, &KERNELS);
         let mut b = Builder3d::new(&gpu, tensors, taps_enabled());
         let z_in = gpu.storage(cfg.z_dim as u64 * lat_t as u64 * lh as u64 * lw as u64);
         let z = T3 { buf: z_in.clone(), c: cfg.z_dim, t: lat_t, h: lh, w: lw };

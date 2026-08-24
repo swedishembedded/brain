@@ -173,15 +173,6 @@ pub const KERNELS: [(&str, &str); 11] = [
     ("pixel_shuffle3d_cl", kernels::PIXEL_SHUFFLE3D_CL),
 ];
 
-/// Open a device for this module's kernel table. `None` takes brain's default.
-pub fn open_device(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 // --------------------------------------------------------------- config
 
 /// The real LTX-2.5 NA decoder's shape configuration - every field

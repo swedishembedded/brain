@@ -32,7 +32,7 @@
 
 use gpu_core::Gpu;
 
-use crate::block::{open_device, Gemma4Layer, Precision, Tensors};
+use crate::block::{Gemma4Layer, Precision, Tensors, KERNELS};
 use crate::config::{Gemma4Config, LayerType};
 use crate::rope::{full_table, sliding_table, upload_rope};
 
@@ -150,7 +150,7 @@ fn forward_core(
     let sliding_tbl = sliding_table(cfg.head_dim, cfg.rope_theta_sliding, t as usize);
     let full_tbl = full_table(cfg.global_head_dim, cfg.rope_theta_full, cfg.partial_rotary_factor, t as usize);
 
-    let gpu: Gpu = open_device(device);
+    let gpu: Gpu = Gpu::open(device, &KERNELS);
     let sliding_rope = upload_rope(&gpu, &sliding_tbl);
     let full_rope = upload_rope(&gpu, &full_tbl);
 

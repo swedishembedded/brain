@@ -27,7 +27,8 @@ use std::collections::HashMap;
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use crate::block::{
-    build_block_steps, build_block_steps_q, open_device, BlockDims, BlockWeights, ModBufs, QBlockWeights, QScratch, QTier, Scratch, Sel,
+    build_block_steps, build_block_steps_q, BlockDims, BlockWeights, ModBufs, QBlockWeights, QScratch, QTier, Scratch, Sel,
+    KERNELS,
 };
 use crate::config::WanConfig;
 use crate::model::{self, Tensors};
@@ -202,7 +203,7 @@ impl WanDitDev {
         if dtype.gpu_only() && device == Some("cpu") {
             panic!("wan: --dit-dtype {} has no CPU-JIT lowering (DP4A) - build on a GPU device", dtype.key());
         }
-        let gpu = open_device(device);
+        let gpu = Gpu::open(device, &KERNELS);
         let d = BlockDims::new(cfg);
         let sel = Sel::new(&gpu);
         let grid = model::patch_grid(cfg, f, h, w);

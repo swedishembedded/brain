@@ -1366,15 +1366,6 @@ impl LtxAvBlock {
     }
 }
 
-/// Open a device for the DiT's kernel table. `None` takes brain's default.
-pub fn open_device(device: Option<&str>) -> Gpu {
-    match device {
-        Some("cpu") => Gpu::new_cpu(&KERNELS),
-        Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-        _ => Gpu::new(&KERNELS),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Quantized-compute (int8/int4) video-only block path (the storage-only
 // tier's compute-time sibling - see `crate::int8`'s module doc, which names
@@ -2508,7 +2499,7 @@ mod tests {
     /// checkpoint's `head_dim = 128`.
     #[test]
     fn flash_self_attention_matches_the_materialized_reference_and_a_host_oracle() {
-        let gpu = open_device(None);
+        let gpu = Gpu::open(None, &KERNELS);
         if !gpu.caps().workgroup_reductions {
             // The CPU-JIT fallback branch: both arms ARE the reference trio,
             // so there is nothing to A/B here - `flash_self_attn` returned
@@ -2573,7 +2564,7 @@ mod tests {
     /// move slightly - the drift being removed is the old path's.
     #[test]
     fn flash_self_attention_beats_the_materialized_trio_on_long_sequence_accuracy() {
-        let gpu = open_device(None);
+        let gpu = Gpu::open(None, &KERNELS);
         if !gpu.caps().workgroup_reductions {
             eprintln!("device has no workgroup reductions - flash path not selected");
             return;

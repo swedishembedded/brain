@@ -456,11 +456,7 @@ impl DiamondTrainer {
     /// Build from full host tensors (imported weights). Conv params become
     /// trainable in the ParamStore; everything else stays frozen host-side.
     pub fn from_tensors(cfg: DiamondConfig, tensors: &Tensors, device: Option<&str>) -> DiamondTrainer {
-        let gpu = match device {
-            Some("cpu") => Gpu::new_cpu(&KERNELS),
-            Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
-            _ => Gpu::new(&KERNELS),
-        };
+        let gpu = Gpu::open(device, &KERNELS);
         let list = trainable_list(&cfg);
         let init: HashMap<String, Vec<f32>> =
             list.iter().map(|(n, _)| (n.clone(), tensors[n].1.clone())).collect();

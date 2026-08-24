@@ -26,9 +26,10 @@
 //! IS the shared channel-innermost ordering (at a temporal patch of 1), so it
 //! is `dit::patchify::unpatchify` directly - see [`postprocess`].
 
+use gpu_core::Gpu;
 use model::hostmath;
 
-use crate::block::{open_device, WanBlock};
+use crate::block::{WanBlock, KERNELS};
 use crate::config::WanConfig;
 use crate::rope::tables;
 
@@ -267,7 +268,7 @@ impl WanDit {
     ) -> (Vec<f32>, Vec<(usize, Vec<f32>)>) {
         let cfg = &self.cfg;
         let pre = preprocess(cfg, &self.w, latent, f, h, w, context, ctx_rows, t);
-        let gpu = open_device(self.device.as_deref());
+        let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
         let mut x = pre.tokens;
         let mut out_taps = Vec::new();
         for l in 0..cfg.num_layers {
