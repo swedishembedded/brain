@@ -169,6 +169,7 @@ brain-qwen3asr = { path = "crates/qwen3asr" }
 brain-qwen3vl = { path = "crates/qwen3vl" }
 brain-qwen3omnimoe = { path = "crates/qwen3omnimoe" }
 brain-fastvlm = { path = "crates/fastvlm" }
+brain-moondream3 = { path = "crates/moondream3" }
 brain-glmdsa = { path = "crates/glmdsa" }
 brain-deepseek2 = { path = "crates/deepseek2" }
 brain-toyseq2seq = { path = "crates/toyseq2seq" }

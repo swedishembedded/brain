@@ -25,7 +25,11 @@ serde_json.workspace = true
 # only loader lived in a `#[cfg(test)]` module.
 brain-checkpoint.workspace = true
 
+# `caps::Session` - the tokenizer (`data::qwen_tokenizer`).
+brain-data.workspace = true
+# `caps` - the capability manifest / action surface.
+brain-capability.workspace = true
+
 [dev-dependencies]
 brain-testutil.workspace = true
-brain-data.workspace = true
 brain-federated.workspace = true

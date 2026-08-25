@@ -622,6 +622,7 @@ dependencies = [
  "brain-model",
  "brain-modelref",
  "brain-modelstore",
+ "brain-moondream3",
  "brain-nemotronasr",
  "brain-npu",
  "brain-onnx",
@@ -1300,6 +1301,7 @@ dependencies = [
 name = "brain-moondream3"
 version = "1.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-federated",

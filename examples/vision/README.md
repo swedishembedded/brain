@@ -11,6 +11,14 @@ marshalled through D-Bus.
 | `sam2` | `segment` — point/box prompts → a mask | `BRAIN_SAM2_WEIGHTS` (+ optional `BRAIN_SAM2_VARIANT=tiny\|large`) |
 | `scrfd` | `detect` → boxes/scores/landmarks | `BRAIN_SCRFD_DIR` (the antelopev2 directory) |
 | `arcface` | `embed` → a 512-d identity vector (detects + aligns first unless `align=false`) | `BRAIN_ARCFACE_DIR` (the antelopev2 directory) |
+| `brain/moondream3` | `caption` → generated text from an image + an instruction, streamed per token ([`moondream3_caption.py`](moondream3_caption.py)) | `BRAIN_MOONDREAM3_WEIGHTS` (the checkpoint directory) |
+
+Moondream 3's example uses `Subscribe` rather than `Run`, for the same reason
+DeepSeek-OCR's does: neither decoder has a KV cache, so every generated token is
+a full recompute and the stream is the only way to see progress. It also
+demonstrates the `precision` parameter - `int8` (the default) versus `fp32`,
+which the scheduler budgets as two separate instances, so an fp32 request on a
+machine without room fails placement instead of evicting a working int8 one.
 
 A third vision model lives in its own directory here, because its example is
 about a streaming decode rather than a one-shot image result:

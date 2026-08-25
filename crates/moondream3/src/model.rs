@@ -192,6 +192,27 @@ impl MoondreamModel {
         self.conn.forward(&self.vgpu, self.cfg.vision.patches_per_crop(), &concat)
     }
 
+    /// Image embeddings straight from RAW HWC PIXELS - the full reference
+    /// front end: overlap multi-crop, ViT, feature-space stitch, connector.
+    ///
+    /// This is the entry point a served request uses, and the one that makes
+    /// the multi-crop path reachable without the caller doing its own
+    /// cropping. Falls back to the single-crop path when the model was built
+    /// with a `conn_in` of one `vision.dim` rather than two, since the
+    /// global‖local concat is what widens the connector input.
+    pub fn image_embeds_from_pixels(&self, hwc: &[f32], w: u32, h: u32) -> Vec<f32> {
+        let v = &self.cfg.vision;
+        if self.conn_in != 2 * v.dim {
+            // Single-crop connector: just the whole image at one crop's size.
+            let side = v.crop_size;
+            let resized = imaging::host::resize_bilinear_hwc(hwc, 3, w, h, side, side);
+            let packed = crate::preprocess::patchify_crop(&resized, side, v.patch);
+            return self.image_embeds(&packed);
+        }
+        let (global, locals, plan) = crate::preprocess::overlap_crop_image(hwc, w, h, v);
+        self.image_embeds_multicrop(&global, &locals, plan.h_tiles, plan.w_tiles)
+    }
+
     /// End-to-end forward: encode one crop, project, splice, decode → loss.
     /// `tokens`/`targets` length `seq_len`; `packed` is `[patches, patch_vec]`.
     pub fn forward(&self, tokens: &[u32], targets: &[u32], packed: &[f32]) -> f32 {

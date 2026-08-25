@@ -407,6 +407,15 @@ pub fn models() -> Vec<ModelEntry> {
             ),
             resident: resident_multi!(crate::resident_deepseekocr::DeepseekOcrResident::from_env),
         },
+        // Moondream 3: an image in, text out. SigLIP ViT with overlap multi-crop
+        // -> connector -> a parallel-block sparse-MoE decoder. int8 experts by
+        // default, because the fp32 build is ~43 GiB and loads nowhere - see
+        // `crate::resident_moondream3`'s header.
+        ModelEntry {
+            manifest: moondream3::caps::manifest,
+            provider: always!(moondream3::caps::Moondream3Provider::new()),
+            resident: resident!(crate::resident_moondream3::Moondream3Resident::from_env),
+        },
         ModelEntry {
             manifest: imgpipe::caps::manifest,
             provider: || Ok(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(stage_registry()))) as Arc<dyn Provider>),

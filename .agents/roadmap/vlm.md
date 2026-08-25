@@ -107,50 +107,74 @@ blocker; the pieces a `caps.rs` would have to call did not exist.
       the mask is `(i<P && j<P) || (j<=i)` - causal past the image prefix, so
       padding cannot reach the row being read. `O(T²)` per token; no KV cache.
 
-### Remaining, and what it is actually blocked on
+### Done: it fits, and it is served
 
-**Memory. The model does not fit anything today**, and that is the reason the
-serving surface is not worth writing yet rather than an independent task:
+**The memory wall was the real blocker**, not the missing `caps.rs`:
 
-| | fp32, per-block scratch (today) | int8 + shared scratch |
+| | fp32, per-block scratch | int8 + shared scratch |
 |---|---|---|
 | weights | 32.8 GiB | 8.2 GiB |
 | activation scratch | 10.3 GiB | 0.6 GiB |
 | **total** | **43.1 GiB** | **8.8 GiB** |
 
-- [ ] **int8 expert weights** (32.8 -> 8.2 GiB). Every piece exists: pack with
-      `model::int8::quantize_weight`, dispatch `moe_linear_gated_i8`, quantize
-      the shared activation once per layer with `model::int8::quant_rows_steps`,
-      and accumulate with `scale_add`. `model::moe::expert_fwd_i8` is the worked
-      example and is ALMOST reusable - it composes gate/up -> `silu_mul` ->
-      down, where Moondream needs w_h/w_g -> `geglu_shift` (`gelu(h)·(g+1)`) ->
-      w_down. So this is an `MoeFfn8` beside the existing `MoeFfn`, not a
-      change to it, plus an int8 branch in `MoondreamBlock::new` and
-      quantization in `import::load`.
-- [ ] **Share the inference scratch across blocks** (10.3 -> 0.6 GiB, 16.7x).
-      Each block currently owns its full scratch set because the forward IS the
-      backprop cache. 58% of it is `scores`+`probs` (`n_heads·t²` twice = 256
-      MiB per block at t=1024). For inference nothing reads them again, so one
-      shared set plus a per-block `out` suffices. Must be an inference-only
-      path - sharing it under the existing backward would have every block
-      differentiate against the last block's activations.
-- [ ] **Pixel-space overlap multi-crop.** `preprocess.rs` implements the
-      feature-space half (reconstruct -> adaptive-pool -> global‖local concat)
-      and its own doc says the pixel-space `overlap_crop_image` is deferred
-      because "brain still lacks a JPEG/PNG decoder" - that comment is STALE,
-      `crates/imaging` has codecs now and `capability::blob::decode_image`
-      hands over raw HWC f32 anyway. `imaging::tiling::moondream_select_tiling`
-      already holds this model's tile-count policy.
-- [ ] **The serving contract**, once the above make it runnable: `caps.rs`
-      (one `caption` action, streaming, real `prompt_tokens`/
-      `completion_tokens`/`finish_reason`), `crates/cli/src/
-      resident_moondream3.rs`, a `catalog.rs` entry, D-Bus, and
-      `examples/vision/moondream3_caption.py`. The `crates/arch` row also still
-      lacks `default_ref` (`moondream/moondream3-preview`) and `weights_env`.
-- [ ] A KV-cached decode path, to make `generate` `O(1)` per token rather than
-      re-running 24 layers over a 730-row image prefix per token.
+- [x] **int8 expert weights** (32.8 -> 8.2 GiB). `MoeFfn8`: weights packed with
+      `model::int8::quantize_weight`, dispatched through `moe_linear_gated_i8`,
+      the layer input quantized ONCE and shared by all 64 experts, and unrouted
+      rows skipped (87.5% of the expert-row work at top_k=8-of-64, which the
+      fp32 tier still does densely before gating). A separate type rather than a
+      flag on `MoeFfn`, because `MoeFfn` is the training path and a quantized
+      weight has no gradient - a precision branch inside differentiated code for
+      a tier that is never differentiated is how that code rots. The router
+      stays fp32.
+- [x] **Shared inference scratch** (10.3 -> 0.6 GiB, 16.7x). `BlockScratch` +
+      `MoondreamBlock::forward_on` + `MoondreamDecoder::share_scratch`.
+      Structurally inference-only: `without_scratch` drops the block's own set
+      and `backward` asserts by name rather than differentiating against
+      whatever the shared buffers hold.
+- [x] **Pixel-space overlap multi-crop** (`preprocess::overlap_crop_image` +
+      `plan_crops` + `patchify_crop`). The geometry is DERIVED from the
+      already-ported feature-space `reconstruct_from_crops` - stride
+      `grid - 2·margin` patches, crop `grid` patches, resized image
+      `stride·tiles + 2·margin` - and a test round-trips the two so they cannot
+      drift. The old "blocked on a JPEG/PNG decoder" note was stale.
+- [x] **The serving contract.** `moondream3::caps` (one streaming `caption`
+      action with real `prompt_tokens`/`completion_tokens`/`finish_reason`),
+      `crates/cli/src/resident_moondream3.rs`, a `catalog.rs` entry (so
+      `brain caps`, `brain moondream3 caption`, D-Bus and the HTTP surfaces all
+      light up at once), and `examples/vision/moondream3_caption.py`. The
+      `crates/arch` row gained `default_ref` and `weights_env`.
 
-**None of this is verifiable at real scale on this box** (30 GiB RAM, one
+      The catalog id is `brain/moondream3`, NOT the upstream repo name.
+      `crates/cli/tests/model_ids.rs` caught the first attempt at
+      `moondream/moondream3-preview` and was right to: a catalog id names an
+      upstream repo only when the weights are exactly that release or nothing
+      (`deepseek-ai/DeepSeek-OCR`, one shipped GGUF pair). `BRAIN_MOONDREAM3_WEIGHTS`
+      points at an arbitrary directory, so the id is a placeholder for
+      "whatever is configured" and the upstream repo lives in the separate
+      `default_ref` field.
+
+      Precision is part of the INSTANCE KEY, so int8 and fp32 are two separately
+      budgeted instances - an fp32 request on a machine without room fails
+      placement instead of evicting a working int8 one.
+
+### Remaining
+
+- [ ] A KV-cached decode path, to make `generate` `O(1)` per token rather than
+      re-running 24 layers over a 730-row image prefix per token. This is the
+      single biggest usability gap now that the model loads.
+- [ ] Real batching. Each request has its own image, so the ViT pass is
+      per-request; the decoder has no batch axis wired. `run_batch` is the
+      serial default and says why.
+- [ ] Region/point/detect heads - recognized on import, not built.
+- [ ] A GPU placement. `Session::load` builds both towers on
+      `Gpu::new_cpu` and `estimate` reports `vram == 0`, which agree by
+      construction. That is a declaration, not a correctness pin: nothing has
+      ever run this model on an accelerator, so claiming a GPU placement would
+      assert something untested. Give `Session::load` a device argument and
+      build under `resident_llm::on_device` once there is a machine and a
+      checkpoint to verify on.
+
+**None of the above is verifiable at real scale on this box** (30 GiB RAM, one
 integrated GPU, no checkpoint present). Gate it with tiny-config end-to-end
 tests through the PRODUCTION path - `import::load`, not a test-local loader -
 and leave the real-weight tests skip-if-absent, the arrangement

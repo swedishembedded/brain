@@ -219,7 +219,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"), weights_env: &[("BRAIN_QWEN3VL_WEIGHTS", "weights")]),
     arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B"), weights_env: &[("BRAIN_FASTVLM_WEIGHTS", "weights")]),
-    arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3"),
+    arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3", hf: &["Moondream3ForConditionalGeneration"], default_ref: Some("moondream/moondream3-preview"), weights_env: &[("BRAIN_MOONDREAM3_WEIGHTS", "dir")]),
     // `default_ref` names the GGUF release repo (`ggml-org/DeepSeek-OCR-GGUF`),
     // not `deepseek-ai/DeepSeek-OCR` -- the latter is a `transformers`-shaped
     // repo with an empty `hf:` list here, so it would fall through to

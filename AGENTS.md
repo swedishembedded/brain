@@ -458,16 +458,24 @@ fast and scalable kernel - not a naive one.
     decoder; one `caption` action (per-token Progress) over `brain fastvlm caption` and
     D-Bus (stateless resident). fp32/int8 decoder precision; training loop
     exists (`train_smoke.rs`) but has no CLI verb. **Moondream 3**
-    (`crates/moondream3`) - SigLIP ViT + MoE decoder, gradient-checked,
-    import-covered, and now with a resident-capable composite (all five types
-    own their device buffers rather than borrowing a `Gpu`), a production
-    `import::load` with two-way coverage, config-from-`config.json`, and greedy
-    `generate`. Still **unserved**, and the blocker is MEMORY, not a missing
-    `caps.rs`: at the preview config it is 32.8 GiB of fp32 weights plus 10.3
-    GiB of per-block activation scratch. int8 experts + a shared inference
-    scratch set take that to ~8.8 GiB and are what the serving surface is
-    waiting on. Both documented on `docs/models/vlm.md`; the full plan, with
-    the specific APIs each step needs, is `.agents/roadmap/vlm.md`.
+    (`crates/moondream3`) - SigLIP ViT with overlap multi-crop + a
+    parallel-block sparse-MoE decoder, gradient-checked and import-covered.
+    **Serving contract met**: `moondream3::caps` (one streaming `caption`
+    action), `crates/cli/src/resident_moondream3.rs`, a `catalog.rs` entry,
+    D-Bus `Subscribe`, `examples/vision/moondream3_caption.py`.
+    **int8 is the default and is what makes it loadable at all**: the fp32
+    build is 32.8 GiB of weights plus 10.3 GiB of per-block activation scratch
+    (~43 GiB); `Precision::Int8` quantizes the 1280 expert tensors
+    (`MoeFfn8` over `moe_linear_gated_i8`) and puts all 24 blocks on ONE shared
+    `BlockScratch`, together ~8.8 GiB. Precision is part of the instance key,
+    so the two are separately budgeted. *(Decode is `O(T²)` - no KV cache, so
+    every token re-runs 24 layers over a 730-row image prefix; `run_batch` is
+    the serial default; region/point/detect heads recognized but not built; CPU
+    placement is a declaration, not a pin - nothing has run this on an
+    accelerator. No real-weight run exists in this workspace, so the composed
+    path is gated by checkpoint-free tests through the production loader.)*
+    Both documented on `docs/models/vlm.md`; full ledger
+    `.agents/roadmap/vlm.md`.
 
 13c-bis. **FastVLM-0.5B and Moondream 3** (`crates/fastvlm`, `crates/moondream3`) -
     the other two vision-language architectures alongside Qwen3-VL above; all

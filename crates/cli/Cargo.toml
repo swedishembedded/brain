@@ -40,6 +40,8 @@ brain-qwen35moe.workspace = true
 brain-qwen35.workspace = true
 brain-qwen3vl.workspace = true
 brain-fastvlm.workspace = true
+# `catalog`/`resident_moondream3` - Moondream 3's caps surface and residency adapter.
+brain-moondream3.workspace = true
 brain-glmdsa.workspace = true
 brain-lfm2.workspace = true
 brain-qwen3tts.workspace = true
