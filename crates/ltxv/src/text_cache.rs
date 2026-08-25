@@ -120,6 +120,11 @@ pub struct Key {
     /// Whether the unconditional branch was really encoded (`guidance > 1.0`)
     /// or is the all-zero stand-in.
     pub uncond_encoded: bool,
+    /// Whether the AUDIO stream's own projection was built. An entry without
+    /// it cannot serve a request that needs it, and an entry with it is a
+    /// strictly larger (more expensive) encode - so the two are separate
+    /// entries rather than one that sometimes carries a `None`.
+    pub audio: bool,
     /// Which revision of the encode's own ARITHMETIC produced the entry -
     /// [`ENCODE_REVISION`].
     ///
@@ -143,7 +148,11 @@ pub struct Key {
 ///   per-token/per-state RMS normalization, interleaved column order and
 ///   `sqrt(out_dim/hidden)` rescale, and the prompt gained the leading
 ///   `<bos>` `LTXGemmaTokenizer` prepends.
-pub const ENCODE_REVISION: u32 = 2;
+/// * `3` - [`Encoded`] gained the audio stream's own projection, so an entry
+///   written by an earlier revision carries no `a_ctx_*` field at all and
+///   would deserialize as "audio was not requested" for a request that did
+///   request it.
+pub const ENCODE_REVISION: u32 = 3;
 
 impl Key {
     /// The key material as JSON - written into the cache file and compared on
@@ -159,6 +168,7 @@ impl Key {
             "connector_registers": self.connector_registers,
             "use_connector": self.use_connector,
             "uncond_encoded": self.uncond_encoded,
+            "audio": self.audio,
             "encode_revision": self.encode_revision,
         })
     }
@@ -184,6 +194,17 @@ pub struct Encoded {
     pub ctx_uncond: Vec<f32>,
     pub context_valid: Vec<f32>,
     pub context_len: usize,
+    /// The AUDIO stream's own conditional/unconditional context, at the audio
+    /// stream's own narrower width - `None` when the encode did not build it.
+    ///
+    /// A separate projection of the SAME text tower output, not a resize of
+    /// the video one: the checkpoint carries
+    /// `text_embedding_projection.audio_aggregate_embed` beside the video
+    /// head, and the audio stream's own embeddings connector reads its
+    /// output. `Key::audio` keeps an entry built without it from being
+    /// served to a request that needs it.
+    pub a_ctx_cond: Option<Vec<f32>>,
+    pub a_ctx_uncond: Option<Vec<f32>>,
 }
 
 /// `false` when `BRAIN_LTXV_TEXT_CACHE` is set to `0`/`off`/`false`.
@@ -249,9 +270,17 @@ pub fn load(key: &Key) -> Option<Encoded> {
         tracing::warn!(path = %path.display(), "text-context cache entry has inconsistent shapes; ignoring it");
         return None;
     }
+    // The audio pair is present exactly when the key says the entry was
+    // written for an audio request; an entry that claims one and has neither
+    // is a MISS, not a silent fall back to a silent generation.
+    let (a_ctx_cond, a_ctx_uncond) = (get("a_ctx_cond"), get("a_ctx_uncond"));
+    if key.audio && (a_ctx_cond.is_none() || a_ctx_uncond.is_none()) {
+        tracing::warn!(path = %path.display(), "text-context cache entry is keyed for audio but carries no audio projection; ignoring it");
+        return None;
+    }
     touch(&path);
-    tracing::info!(path = %path.display(), context_len, "text context served from cache");
-    Some(Encoded { ctx_cond, ctx_uncond, context_valid, context_len })
+    tracing::info!(path = %path.display(), context_len, audio = key.audio, "text context served from cache");
+    Some(Encoded { ctx_cond, ctx_uncond, context_valid, context_len, a_ctx_cond, a_ctx_uncond })
 }
 
 /// Mark `path` as used NOW, by rewriting its mtime - the recency [`prune`]
@@ -334,11 +363,21 @@ pub fn store(key: &Key, enc: &Encoded) {
         }
     }
     let dim = key.cross_attention_dim as u64;
-    let tensors = vec![
+    let mut tensors = vec![
         ("ctx_cond".to_string(), vec![enc.context_len as u64, dim], enc.ctx_cond.clone()),
         ("ctx_uncond".to_string(), vec![enc.context_len as u64, dim], enc.ctx_uncond.clone()),
         ("context_valid".to_string(), vec![enc.context_len as u64], enc.context_valid.clone()),
     ];
+    // The audio stream's own width is whatever its projection produced, read
+    // back from the data rather than assumed - the two streams' widths differ
+    // and only one of them is `key.cross_attention_dim`.
+    let rows = enc.context_len.max(1) as u64;
+    if let Some(a) = &enc.a_ctx_cond {
+        tensors.push(("a_ctx_cond".to_string(), vec![rows, a.len() as u64 / rows], a.clone()));
+    }
+    if let Some(a) = &enc.a_ctx_uncond {
+        tensors.push(("a_ctx_uncond".to_string(), vec![rows, a.len() as u64 / rows], a.clone()));
+    }
     match checkpoint::st::save_safetensors(&path.to_string_lossy(), &tensors, &json!({ "key": key.to_json() }), None) {
         Ok(()) => tracing::info!(path = %path.display(), context_len = enc.context_len, "text context cached"),
         Err(e) => {
@@ -383,6 +422,7 @@ mod tests {
             connector_registers: 2,
             use_connector: true,
             uncond_encoded: false,
+            audio: false,
             encode_revision: ENCODE_REVISION,
         }
     }
@@ -404,6 +444,7 @@ mod tests {
             Key { connector_registers: 4, ..base.clone() },
             Key { use_connector: false, ..base.clone() },
             Key { uncond_encoded: true, ..base.clone() },
+            Key { audio: true, ..base.clone() },
             Key { encode_revision: base.encode_revision + 1, ..base.clone() },
         ];
         for v in variants {
@@ -425,6 +466,8 @@ mod tests {
         unsafe { std::env::set_var("BRAIN_PIPELINE_CACHE_DIR", &tmp) };
         let k = key();
         let enc = Encoded {
+            a_ctx_cond: None,
+            a_ctx_uncond: None,
             ctx_cond: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             ctx_uncond: vec![0.0; 8],
             context_valid: vec![1.0, 0.0],
@@ -513,7 +556,7 @@ mod tests {
         unsafe { std::env::set_var("BRAIN_PIPELINE_CACHE_DIR", &tmp) };
         unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE") };
         unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES") };
-        let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], context_len: 2 };
+        let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], context_len: 2, a_ctx_cond: None, a_ctx_uncond: None };
         let base = Key { cross_attention_dim: 4, ..key() };
         let dir = tmp.join("ltxv-text-context");
         let read_total = || -> (usize, u64) {

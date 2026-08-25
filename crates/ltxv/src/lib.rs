@@ -110,8 +110,10 @@
 //! prompt - not merely that loss goes down (lesson #3) - plus a save/reload
 //! round trip closed in a genuinely separate OS process (lesson #23).
 
+pub mod audio;
 pub mod audio_vae;
 pub mod av_finetune;
+pub mod av_stream;
 pub mod av_grad;
 pub mod av_lora;
 pub mod av_modelgrad;

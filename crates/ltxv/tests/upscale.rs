@@ -169,7 +169,7 @@ mod real_weights {
                 buf
             })
             .collect();
-        Video { width: w as u32, height: h as u32, fps: 8, frames: px }
+        Video { width: w as u32, height: h as u32, fps: 8, frames: px, audio: None }
     }
 
     /// End to end on the real VAE and the real x2 spatial upscaler: a clip

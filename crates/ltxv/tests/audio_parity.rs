@@ -28,7 +28,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use brain_testutil::parity::Report;
+use brain_testutil::parity::{Report, Table};
 use brain_testutil::testdata;
 use ltxv::audio_vae::{self, AudioVaeConfig};
 use ltxv::import::{import_audio_vae, import_vocoder};
@@ -37,6 +37,20 @@ use vae::blocks::Tensors;
 
 /// This port's established bar for real-weight parity.
 const FLOOR: f64 = 0.999999;
+
+/// The magnitude ceiling every audio tap is ALSO gated on.
+///
+/// Cosine alone cannot gate a waveform. It is scale invariant, so a decode
+/// that came out uniformly twice as loud - or half as loud, or inverted and
+/// re-inverted through a mis-set gain somewhere in the vocoder - scores a
+/// perfect 1.0 while being audibly wrong. `rel_l2` is what notices.
+///
+/// Set from this suite's own measured clean values (the worst tap here is the
+/// vocoder's waveform, an order of magnitude below this) with a wide margin,
+/// not fitted to one run: the point of the ceiling is to catch a real
+/// regression, and a bound sitting a few percent above the current number
+/// would fail on driver noise instead.
+const REL_L2_CEILING: f64 = 1e-4;
 
 // ---------------------------------------------------------- real fixtures
 
@@ -149,6 +163,10 @@ fn ltxv_audio_vae_round_trip() {
 
 /// The base vocoder ALONE, fed the golden's own `recon_mel` (stage parity,
 /// not composed with this crate's own VAE decode above).
+///
+/// Gated on cosine AND `rel_l2`, unlike the stages above, because this is the
+/// one that produces a WAVEFORM - see [`REL_L2_CEILING`] for why cosine on its
+/// own cannot gate one.
 #[test]
 fn ltxv_vocoder_matches_reference() {
     let Some(((_, voc_w), fx)) = setup() else { return };
@@ -157,9 +175,159 @@ fn ltxv_vocoder_matches_reference() {
     let (channels, t, mel_bins) = (mshape[0] as u32, mshape[1] as u32, mshape[2] as u32);
     let wave = vocoder::synthesize(&cfg, voc_w, fx.get("recon_mel"), channels, t, mel_bins, None);
 
-    let mut r = Report::new(FLOOR);
-    r.check("recon_wave", &wave, fx.get("recon_wave"));
-    r.finish("vocoder");
+    let mut tab = Table::new(FLOOR, REL_L2_CEILING);
+    tab.check("recon_wave", &wave, fx.get("recon_wave"));
+    tab.print();
+    tab.assert_clean();
+}
+
+/// The whole audio decode chain composed the way a generation composes it -
+/// `latent -> audio VAE decoder -> vocoder -> waveform` through
+/// [`ltxv::audio::decode`], the exact function `ltxv::pipeline::generate`
+/// calls - against the golden's own end-of-chain waveform.
+///
+/// The two stage-parity tests above cannot replace this one: each is fed the
+/// GOLDEN's input, so a mistake in how this crate JOINS them (the
+/// `b t (c f) -> b c t f` unpatchify, the mel channel/bin order the vocoder
+/// expects, the sample count) is invisible to both and lands in exactly the
+/// place a listener would hear as noise.
+///
+/// Also gated on cosine and `rel_l2` together.
+#[test]
+fn ltxv_audio_decode_chain_matches_reference() {
+    let Some(((vae_w, voc_w), fx)) = setup() else { return };
+    let lshape = fx.shape("latent").to_vec();
+    let (lt, lf) = (lshape[1], lshape[2]);
+    assert_eq!(lf, ltxv::audio::LATENT_MEL_BINS as usize, "the golden latent's freq width must be the audio stream's own");
+    assert_eq!(lshape[0], ltxv::audio::LATENT_CHANNELS as usize);
+
+    // The golden latent is CHANNEL-major `[c, t, f]`; a generation's audio
+    // latent arrives TOKEN-major `[t, c*f]` straight off the DiT. Repack it
+    // into the DiT's own layout so this test drives the real entry point
+    // rather than a shortcut around its transpose.
+    let g = fx.get("latent");
+    let (c, f) = (ltxv::audio::LATENT_CHANNELS as usize, lf);
+    let mut tokens = vec![0f32; lt * c * f];
+    for t in 0..lt {
+        for ci in 0..c {
+            for fi in 0..f {
+                tokens[t * c * f + ci * f + fi] = g[ci * lt * f + t * f + fi];
+            }
+        }
+    }
+
+    let clip = ltxv::audio::decode(vae_w, voc_w, &tokens, lt, None);
+    assert_eq!(clip.channels.len(), ltxv::audio::CHANNELS as usize, "the model generates stereo");
+    assert_eq!(clip.sample_rate, ltxv::audio::SAMPLE_RATE);
+
+    // The golden's `recon_wave` is `[channels, samples]` row-major, the same
+    // planar order `AudioClip` holds.
+    let want = fx.get("recon_wave");
+    let got: Vec<f32> = clip.channels.concat();
+    assert_eq!(got.len(), want.len(), "the composed chain produced {} samples, the golden has {}", got.len(), want.len());
+
+    let mut tab = Table::new(FLOOR, REL_L2_CEILING);
+    tab.check("decode chain waveform", &got, want);
+    tab.print();
+    tab.assert_clean();
+}
+
+/// A uniform GAIN change and a TIME SHIFT are the two ways an audio pipeline
+/// fails while still sounding like something, and neither is a crash. This
+/// proves the gate above catches both - so a green run on it means the
+/// waveform is right, not merely present.
+///
+/// Deliberately not a mutation of the code: it perturbs the golden comparison
+/// itself, which is the same arithmetic the gate performs, and therefore says
+/// exactly what the gate can and cannot see.
+#[test]
+fn the_waveform_gate_catches_a_gain_change_and_a_time_shift() {
+    let Some((_, fx)) = setup() else { return };
+    let want = fx.get("recon_wave").to_vec();
+
+    // 1: a uniform 1% gain. Cosine is SCALE INVARIANT and does not move at
+    // all; rel_l2 is what fails, which is the entire reason both are gated.
+    let louder: Vec<f32> = want.iter().map(|&v| v * 1.01).collect();
+    let mut gain = Table::new(FLOOR, REL_L2_CEILING);
+    gain.check("uniform gain", &louder, &want);
+    gain.print();
+    assert!(!gain.failures.is_empty(), "a 1% uniform gain must fail the waveform gate");
+    assert!(gain.failures.iter().all(|f| f.contains("rel_l2")), "the gain must be caught by rel_l2, not cosine: {:?}", gain.failures);
+    assert!(
+        gain.rows[0].1 >= FLOOR,
+        "cosine must be BLIND to a uniform gain ({:.10}) - if it moved, this test is not proving what it claims",
+        gain.rows[0].1
+    );
+
+    // 2: a one-sample time shift - the same waveform, misaligned. Both
+    // metrics see it, and either failing is enough.
+    let mut shifted = vec![0f32; want.len()];
+    shifted[1..].copy_from_slice(&want[..want.len() - 1]);
+    let mut shift = Table::new(FLOOR, REL_L2_CEILING);
+    shift.check("one-sample shift", &shifted, &want);
+    shift.print();
+    assert!(!shift.failures.is_empty(), "a one-sample misalignment must fail the waveform gate");
+}
+
+/// Listen to the result the only way a test can: measure it.
+///
+/// A file of the right length full of near-silence, or full-scale noise, or
+/// two identical channels, all "work" by every structural check in this
+/// suite. These are the properties that separate a real waveform from those,
+/// measured on the golden's own reconstruction so the thresholds are anchored
+/// to something a listener has effectively already approved.
+#[test]
+fn the_reconstructed_waveform_has_the_statistics_of_real_audio() {
+    let Some((_, fx)) = setup() else { return };
+    let shape = fx.shape("recon_wave").to_vec();
+    let (channels, n) = (shape[0], shape[1]);
+    let wave = fx.get("recon_wave");
+    let planes: Vec<&[f32]> = (0..channels).map(|c| &wave[c * n..(c + 1) * n]).collect();
+
+    for (c, p) in planes.iter().enumerate() {
+        let peak = p.iter().fold(0f32, |m, &v| m.max(v.abs()));
+        let clipped = p.iter().filter(|v| v.abs() >= 0.999).count();
+        let rms = (p.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / n as f64).sqrt();
+        let dbfs = 20.0 * rms.max(1e-12).log10();
+        eprintln!("channel {c}: peak {peak:.4}  clipped {clipped}/{n}  rms {dbfs:.2} dBFS");
+        assert!(peak > 0.01, "channel {c} peaks at {peak:.5} - that is silence, not audio");
+        assert!(peak <= 1.0, "channel {c} peaks at {peak:.5}, outside the vocoder's own clamp");
+        assert!(dbfs > -60.0, "channel {c} is {dbfs:.1} dBFS - effectively silent");
+        assert!(dbfs < -3.0, "channel {c} is {dbfs:.1} dBFS - that is full-scale noise, not a signal");
+        assert!(clipped * 100 < n, "channel {c} clips in {clipped} of {n} samples");
+        // No long near-silent stretch: a decode that produced a correct
+        // opening and then collapsed would pass every whole-file statistic
+        // above. A tenth of a second is the shortest gap a listener reliably
+        // notices as a dropout.
+        let win = (ltxv::audio::SAMPLE_RATE as usize / 10).min(n);
+        let mut run = 0usize;
+        let mut worst = 0usize;
+        for &v in p.iter() {
+            run = if v.abs() < 1e-4 { run + 1 } else { 0 };
+            worst = worst.max(run);
+        }
+        assert!(worst < win, "channel {c} has {worst} consecutive near-silent samples (>= {win} is an audible dropout)");
+    }
+
+    if channels == 2 {
+        // A genuine stereo field is neither 1.0 (one channel duplicated - the
+        // shape a broken planar/interleaved split produces) nor 0.0
+        // (uncorrelated, i.e. two unrelated signals rather than one scene).
+        let (a, b) = (planes[0], planes[1]);
+        let mean = |x: &[f32]| x.iter().map(|&v| f64::from(v)).sum::<f64>() / x.len() as f64;
+        let (ma, mb) = (mean(a), mean(b));
+        let mut num = 0f64;
+        let (mut da, mut db) = (0f64, 0f64);
+        for (&x, &y) in a.iter().zip(b) {
+            let (u, v) = (f64::from(x) - ma, f64::from(y) - mb);
+            num += u * v;
+            da += u * u;
+            db += v * v;
+        }
+        let corr = num / (da.sqrt() * db.sqrt()).max(1e-12);
+        eprintln!("L/R correlation: {corr:.6}");
+        assert!(corr.abs() < 0.9999, "L and R correlate at {corr:.6} - the two channels are the same signal, not a stereo field");
+    }
 }
 
 #[test]

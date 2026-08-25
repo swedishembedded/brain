@@ -3,7 +3,7 @@ name = "brain-imaging"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The image substrate: decode/encode, device-dispatched resize/pad/crop/layout, colour normalisation, mask algebra and tiling — one home for what was scattered across depth, yolo, mirror, zimage, capture and cli."
+description = "The image substrate: decode/encode, device-dispatched resize/pad/crop/layout, colour normalisation, mask algebra and tiling - one home for what was scattered across depth, yolo, mirror, zimage, capture and cli."
 
 [lib]
 name = "imaging"
@@ -11,22 +11,26 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-gpu-core.workspace = true
-# `backend_cpu::par` — the workspace's ONLY rayon seam (AGENTS.md). `host.rs`
+# `backend_cpu::par` - the workspace's ONLY rayon seam (AGENTS.md). `host.rs`
 # needs it for the row-parallel resize the NPU paths depend on; no other crate
 # may reach for rayon directly.
 brain-backend-cpu.workspace = true
 # Kernel SOURCES for `imaging::PIPELINES`. Every per-pixel operation this crate
 # offers is a dispatch of one of these; none of them is re-implemented here.
 brain-kernels.workspace = true
-# `vision::Shape` — the workspace's NCHW shape type, with `numel()` and the conv
+# `vision::Shape` - the workspace's NCHW shape type, with `numel()` and the conv
 # output-size helpers. Deliberately NOT re-declared here: a second NCHW shape is
 # exactly the kind of near-duplicate this crate exists to remove.
 brain-vision.workspace = true
-# `events::ppm::{encode_p6, decode_p6}` — the workspace's ONE P6 codec (a full
+# `events::ppm::{encode_p6, decode_p6}` - the workspace's ONE P6 codec (a full
 # header tokenizer that never panics). `imaging::codec` re-exports it rather than
 # writing a third parser; see that module's header for the intended end state,
 # where the code moves here and the dependency edge flips.
 brain-events.workspace = true
+# `audio::wav::write_multi` - the workspace's ONE WAV writer. `video.rs` needs
+# it to hand `ffmpeg` a sound track for a muxed clip; writing a second RIFF
+# header here is exactly the near-duplication this crate exists to remove.
+brain-audio.workspace = true
 # The workspace's only PNG/JPEG decoder, today reachable only from `crates/data`
 # (`data::imageset::decode_rgb`). Hoisting it here is what makes
 # `events::decode_pixels`' "PNG is not supported (no decoder)" fixable.

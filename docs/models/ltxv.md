@@ -41,7 +41,7 @@ Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
 | Inference (text to video) | [~] smoke test - tiny random-weight DiT, stub text context (`brain ltxv t2v`), see above |
 | Inference (DFR, higher-res multi-stage) | [~] smoke test - real spatial/temporal upscalers and VAE decode, still the tiny DiT (`brain ltxv dfr`) |
 | Post-hoc upscale of a finished clip | [x] `brain ltxv upscale` - VAE-encode an existing video file, run the official x2 latent spatial upscaler, refine on the distilled refinement schedule, VAE-decode. Shares the upscale+refine implementation with the internal two-stage generation path. CLI only so far, no capability action (see below) |
-| Inference (text to video+audio) | [ ] the audio-extended DiT (`LtxAvDit`) and A<->V cross-attention exist at tiny-config parity as a library, but nothing wires them into a pipeline/CLI action yet |
+| Inference (text to video+audio) | [~] `brain ltxv t2v --audio` / `audio: true` on the `t2v` action - the real audio+video DiT, both streams denoised jointly, decoded through the real audio VAE + vocoder and muxed into the container. Works; it is `[~]` rather than `[x]` because the audio-extended block has no streamed/quantized/resident path (see "Generating sound" below), so it runs the whole checkpoint as host fp32 and is far more expensive per step than the video-only path. 16 kHz stereo (no bandwidth extension); single-window clips only |
 | Inference (image to video / keyframe conditioning) | [x] `--start-frame`, `--mid-frame` (+ `--mid-frame-at`) and `--end-frame` - up to three real stills VAE-encoded and held at sigma 0 in ONE generation pass, with `--conditioning-strength` for how hard. Refused for a multi-window or multi-scene clip; see "Anchoring a clip on real images" below |
 | LoRA fine-tune | [~] video-only DiT, host-math/gradcheck-proven (FD < 1e-4), single- and whole-batch overfit drives loss to ~0 at tiny-config scale - the audio-extended DiT has no training support |
 | Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
@@ -334,6 +334,65 @@ export BRAIN_LTXV_UPSAMPLER_TEMPORAL=…/ltx-2.5-latent-temporal-upscaler-x2-bf1
 brain ltxv dfr --prompt "a cat walking on a beach" --frames 9 --width 64 \
   --height 64 --steps 4 --output-path out.mp4
 ```
+
+### Generating sound
+
+LTX-2.5 is one model that denoises a video-latent stream and an audio-latent
+stream **together**, coupled every block by cross-attention. `--audio` runs
+both; without it only the model's video half runs and the clip is silent.
+
+```bash
+export BRAIN_LTXV_VAE=[path/to/ltx-2.5-video-vae-conv-bf16.safetensors]
+export BRAIN_LTXV_DIT=[path/to/ltx-2.5-22b-distilled-transformer-Q8_0.gguf]
+export BRAIN_LTXV_TEXT_ENCODER=[path/to/gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf]
+export BRAIN_LTXV_AUDIO_VAE=[path/to/ltx-2.5-audio-vae-bf16.safetensors]
+brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b --audio   --prompt "a blacksmith hammers glowing steel on an anvil, rhythmic clangs"   --frames 57 --width 1280 --height 704 --fps 24 --output-path forge.mp4
+```
+
+* **The distilled checkpoint carries the whole model.** Two thirds of its
+  tensors are the audio stream and the bidirectional A<->V cross-attention
+  (`audio_attn1/2`, `audio_ff`, `audio_to_video_attn`, `video_to_audio_attn`,
+  both `*_adaln_single` families, `audio_embeddings_connector`). Sound was
+  never a missing-weights problem; it was a wiring one.
+* **The text conditioning is per stream.** The encoder checkpoint carries
+  `text_embedding_projection.{video,audio}_aggregate_embed` side by side and
+  each stream's own embeddings connector is built for its own head's width, so
+  one text-tower forward produces two projections. A real
+  `--text-encoder` is therefore required: the stub context has nothing to
+  project.
+* **Alignment is arithmetic, not a later resample.** The audio latent's length
+  is `round(frames / fps * 25)` and every audio token carries a `[start, end)`
+  bound in SECONDS on the same axis the video tokens use, which is the space
+  the cross-attention's shared RoPE is built in. The decode lands exactly
+  three mel frames short of the clip (the causal audio VAE's first latent
+  frame covers one mel frame rather than four); the last sample is held over
+  that gap so the two tracks are the same length.
+* **Off by default because of COST, not correctness.** The audio-extended
+  transformer block has no streamed/quantized/device-resident implementation
+  the way the video-only one does - no `LtxAvBlockQ`, no AV
+  `CachedQBlockWeights`, no AV `DitSession`. So an audio-visual run expands
+  the whole checkpoint to host fp32 and re-uploads every block to the card on
+  every forward, which makes it markedly slower per step than the same clip
+  without sound and needs most of a large machine's RAM. The command refuses
+  up front, with both numbers, on a machine that cannot hold it. Closing that
+  gap is the tracked next step, and it is what would make sound cheap.
+* **16 kHz stereo.** The bandwidth-extension stage that lifts the base
+  vocoder to 48 kHz (`vocoder.bwe_generator.*`) is present in the checkpoint
+  and not implemented - it needs an ISTFT this port does not have.
+* **Muxed, or handed back.** `.mp4`/`.mkv`/`.mov` get an AAC track,
+  `.webm` an Opus one; a `.gif` is written silent with a line on stderr since
+  the container holds no audio stream. Without `ffmpeg` the sound is written
+  as `audio.wav` beside the numbered frames and the printed command muxes
+  both - the same "never throw away a generation for want of an encoder"
+  contract the video path already had.
+* **Single-window clips only.** A multi-window or multi-scene request is
+  refused: what crosses a window seam today is a video latent prefix, and the
+  audio stream's counterpart has not been designed. Generating per window and
+  concatenating would restart the sound at every seam.
+
+The same `audio` switch is a parameter on the `t2v` capability action, and the
+action declares an `audio` output blob (a complete 16 kHz stereo WAV), so the
+D-Bus/served surface returns the sound too rather than only the CLI.
 
 ### Seeing what it did
 

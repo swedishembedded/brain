@@ -396,7 +396,7 @@ mod tests {
     use serde_json::json;
 
     fn resident() -> LtxvResident {
-        LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None } }
+        LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None } }
     }
 
     /// The key must fix exactly the fields that would size a real DiT's
@@ -455,7 +455,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ck = dir.join("dit.gguf");
         std::fs::write(&ck, b"stand-in checkpoint").unwrap();
-        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(ck.to_string_lossy().into_owned()), text_encoder: None, spatial_upsampler: None } };
+        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(ck.to_string_lossy().into_owned()), text_encoder: None, spatial_upsampler: None, audio_vae: None } };
 
         let real = r.estimate(&InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string()));
         let tiny = r.estimate(&InstanceKey::new(ltxv::caps::MODEL, "tiny:9:64x64".to_string()));
@@ -487,7 +487,7 @@ mod tests {
         let ck = dir.join("dit2.gguf");
         std::fs::write(&ck, b"stand-in checkpoint bytes").unwrap();
         let path = ck.to_string_lossy().into_owned();
-        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(path.clone()), text_encoder: None, spatial_upsampler: None } };
+        let r = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: Some(path.clone()), text_encoder: None, spatial_upsampler: None, audio_vae: None } };
         let mut inst = r.activate(&InstanceKey::new(ltxv::caps::MODEL, "ltx25_22b:9:64x64".to_string()), Device::Gpu(0)).expect("activate");
 
         // Populate the store the way a generation does - through the SAME
@@ -504,7 +504,7 @@ mod tests {
         assert!(inst.promote(Device::Gpu(0)).is_ok(), "promote must succeed: refilling is lazy by design");
 
         // No real checkpoint -> nothing resident -> both must refuse.
-        let bare = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None } };
+        let bare = LtxvResident { id: ltxv::caps::MODEL.to_string(), paths: ltxv::pipeline::Paths { vae: "/vae".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None } };
         let mut bare_inst = bare.activate(&InstanceKey::new(ltxv::caps::MODEL, "tiny:9:64x64".to_string()), Device::Cpu).expect("activate");
         assert!(bare_inst.demote(Tier::Warm).is_err(), "a model holding nothing must not report a successful demotion");
         assert!(bare_inst.promote(Device::Cpu).is_err());
@@ -692,7 +692,7 @@ mod tests {
         let m = resident().manifest();
         assert_eq!(m.model, ltxv::caps::MODEL);
         assert_eq!(m.actions.len(), ltxv::caps::manifest().actions.len());
-        let fetched = LtxvResident { id: "Lightricks/LTX-2.5".to_string(), paths: ltxv::pipeline::Paths { vae: "v".into(), dit: None, text_encoder: None, spatial_upsampler: None } };
+        let fetched = LtxvResident { id: "Lightricks/LTX-2.5".to_string(), paths: ltxv::pipeline::Paths { vae: "v".into(), dit: None, text_encoder: None, spatial_upsampler: None, audio_vae: None } };
         assert_eq!(fetched.manifest().model, "Lightricks/LTX-2.5");
         assert_eq!(fetched.instance_key("t2v", &Invocation::new()).model, "Lightricks/LTX-2.5");
     }

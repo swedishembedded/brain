@@ -1115,6 +1115,7 @@ version = "1.0.0"
 name = "brain-imaging"
 version = "1.0.0"
 dependencies = [
+ "brain-audio",
  "brain-backend-cpu",
  "brain-events",
  "brain-gpu-core",

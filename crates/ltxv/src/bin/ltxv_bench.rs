@@ -526,6 +526,109 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
     println!("(the `stage forward_q_streamed: block ...` lines above split GGUF read+dequant / int8 quantize / GPU upload+forward+wait, summed over these {layers} layers - the first two are `cache misses only`: on a cache-hit call they are near-zero by construction, not merely small)");
 }
 
+/// Wall time of the REAL base vocoder over `t` mel frames, best of `reps`.
+///
+/// Real weights, because this stage's cost is dominated by how its boundary
+/// handling and its convolutions are dispatched rather than by any shape the
+/// weights could be faked at - and the file is small enough to read per run.
+/// Reports wall time and the audio seconds it produced, so a run can be read
+/// as a real-time factor without the harness asserting one.
+fn bench_vocoder(reps: usize, t: u32) {
+    let path = std::env::var("BRAIN_LTXV_AUDIO_VAE").unwrap_or_else(|_| {
+        eprintln!("ltxv_bench vocoder: set BRAIN_LTXV_AUDIO_VAE to the audio VAE safetensors");
+        std::process::exit(1);
+    });
+    let cfg = ltxv::vocoder::VocoderConfig::ltx25();
+    let w = ltxv::import::import_vocoder(checkpoint::safetensors::read(&path).expect("read audio vae"), &cfg).expect("import vocoder");
+    let (channels, mel_bins) = (2u32, 64u32);
+    // Shape-correct scratch: the timing is a function of the dispatch shapes,
+    // not of the values (the same argument `random_tiny_weights`'s own doc
+    // makes), and a deterministic ramp keeps two runs comparable.
+    let mel: Vec<f32> = (0..(channels * t * mel_bins) as usize).map(|i| ((i % 97) as f32 / 97.0) - 0.5).collect();
+    let mut best = f64::MAX;
+    for r in 0..reps.max(1) {
+        let t0 = Instant::now();
+        let wave = ltxv::vocoder::synthesize(&cfg, &w, &mel, channels, t, mel_bins, None);
+        let wall = t0.elapsed().as_secs_f64();
+        best = best.min(wall);
+        println!("[rep {r}] {wall:.3} s for {t} mel frames -> {} samples", wave.len());
+    }
+    let seconds_of_audio = f64::from(t) / 100.0; // 16 kHz / hop 160
+    println!("[vocoder] best of {reps}: {best:.3} s wall for {seconds_of_audio:.2} s of 16 kHz stereo audio (RTF {:.2})", best / seconds_of_audio);
+}
+
+/// One JOINT audio+video forward at the real 22B config, off the real GGUF.
+///
+/// The number this exists to produce is what audio COSTS: the same clip's
+/// video tokens run through a model that also carries an audio stream and
+/// bidirectional cross-attention every block, against `streamed`'s
+/// video-only figure at the same `tokens`. Reports the load and the forward
+/// separately, because they are paid at completely different rates - the load
+/// once per process, the forward once per denoise step per CFG branch.
+fn bench_av(tokens: u32, ctx_len: u32, frames: u32, fps: u32) {
+    let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| {
+        eprintln!("ltxv_bench av: set BRAIN_LTXV_DIT to the 22B AV transformer GGUF");
+        std::process::exit(1);
+    });
+    let cfg = ltxv::LtxAvDitConfig::ltx25();
+    println!("[av] host fp32 expansion: {} GiB", ltxv::av_stream::host_floats(&cfg) * 4 / (1 << 30));
+    let src = ltxv::gguf_src::LtxvGgufSource::open(&path).expect("open the AV GGUF");
+    let t0 = Instant::now();
+    let w = ltxv::av_stream::AvWeights::load(&src, cfg).expect("load the AV weights");
+    println!("[av] weight load + dequant: {:.1} s", t0.elapsed().as_secs_f64());
+
+    let ta = ltxv::audio::latent_frames(frames as usize, fps as usize);
+    let vdim = cfg.video.in_channels as usize;
+    let adim = ltxv::audio::TOKEN_DIM as usize;
+    let tv = tokens as usize;
+    // Shape-correct scratch. A forward's cost is a function of its shapes, not
+    // of the values in its buffers.
+    let v_latent: Vec<f32> = (0..tv * vdim).map(|i| ((i % 71) as f32 / 71.0) - 0.5).collect();
+    let a_latent: Vec<f32> = (0..ta * adim).map(|i| ((i % 53) as f32 / 53.0) - 0.5).collect();
+    // The frame/height/width factorisation only has to MULTIPLY to `tokens`;
+    // the positions it yields are real ones either way.
+    let (lh, lw) = (22usize, 40usize);
+    let lat_t = tv / (lh * lw);
+    let v_positions = ltxv::pipeline::real_pixel_positions(lat_t, lh, lw, f64::from(fps));
+    let a_positions = ltxv::audio::positions(ta);
+    let context: Vec<f32> = (0..(ctx_len as usize * cfg.video.cross_attention_dim as usize)).map(|i| ((i % 37) as f32 / 37.0) - 0.5).collect();
+    // The audio stream's own connector is built for the AUDIO aggregate
+    // head's narrower output, so its context is a different width - see
+    // `ltxv::pipeline::TextContext`.
+    let a_context: Vec<f32> = (0..(ctx_len as usize * cfg.audio.connector_inner_dim() as usize)).map(|i| ((i % 29) as f32 / 29.0) - 0.5).collect();
+
+    let d = ltxv::av_stream::AvDenoiser::new(w, None);
+    for r in 0..2 {
+        let t1 = Instant::now();
+        let (v, a) = d.forward(
+            &ltxv::av_stream::AvStepInputs {
+                v_latent: &v_latent,
+                v_timesteps: &vec![1.0f32; lat_t * lh * lw],
+                v_positions: &v_positions,
+                v_keyframes_mask: &vec![0f32; lat_t * lh * lw],
+                tv: lat_t * lh * lw,
+                a_latent: &a_latent,
+                a_timesteps: &vec![1.0f32; ta],
+                a_positions: &a_positions,
+                ta,
+                sigma: 1.0,
+                context_len: ctx_len as usize,
+                context_valid: &vec![1.0f32; ctx_len as usize],
+            },
+            &context,
+            &a_context,
+        );
+        let nonfinite = v.iter().chain(&a).filter(|x| !x.is_finite()).count();
+        println!(
+            "[av rep {r}] {:.1} s for {} video tokens + {ta} audio tokens (video out {}, audio out {}, nonfinite {nonfinite})",
+            t1.elapsed().as_secs_f64(),
+            lat_t * lh * lw,
+            v.len(),
+            a.len()
+        );
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mode = a.get(1).map(|s| s.as_str()).unwrap_or("dit");
@@ -533,6 +636,8 @@ fn main() {
     match mode {
         "dit" => bench_dit(arg(2, 2) as usize, arg(3, 8), arg(4, 1024), arg(5, 256)),
         "vae" => bench_vae(arg(2, 2) as usize, arg(3, 17), arg(4, 384), arg(5, 384)),
+        "vocoder" => bench_vocoder(arg(2, 3) as usize, arg(3, 100)),
+        "av" => bench_av(arg(2, 880), arg(3, 256), arg(4, 25), arg(5, 24)),
         "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false), arg(7, 1)),
         "decode" => {
             let path = a.get(2).map(|s| s.as_str()).unwrap_or_else(|| panic!("usage: ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]"));
@@ -540,7 +645,7 @@ fn main() {
             bench_decode(path, a.get(3).map(|s| s.as_str()).unwrap_or("tiled"), crop);
         }
         other => {
-            eprintln!("unknown mode {other} (dit|vae|streamed|decode)");
+            eprintln!("unknown mode {other} (dit|vae|vocoder|av|streamed|decode)");
             std::process::exit(1);
         }
     }

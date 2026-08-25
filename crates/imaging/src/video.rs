@@ -144,6 +144,29 @@ pub fn probe_fps(path: &Path) -> Option<f64> {
 
 // ---------------------------------------------------------------- encoding
 
+/// A sound track to mux alongside the picture, one plane per channel.
+///
+/// Planar rather than interleaved because that is how every generator in this
+/// workspace produces multi-channel audio, and [`audio::wav::write_multi`]
+/// takes it in exactly that shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioTrack {
+    /// One `Vec<f32>` per channel, samples in `[-1, 1]`, all the same length.
+    pub channels: Vec<Vec<f32>>,
+    pub sample_rate: u32,
+}
+
+impl AudioTrack {
+    pub fn samples_per_channel(&self) -> usize {
+        self.channels.first().map(Vec::len).unwrap_or(0)
+    }
+
+    /// Nothing to mux: no channels, or channels with no samples.
+    fn is_empty(&self) -> bool {
+        self.channels.is_empty() || self.samples_per_channel() == 0
+    }
+}
+
 /// Container/codec knobs for [`encode_frames`].
 pub struct VideoEncodeOpts {
     /// x264 constant-rate factor: 0 lossless, 18 visually near-lossless, 51
@@ -153,11 +176,23 @@ pub struct VideoEncodeOpts {
     /// `<output>.frames/` so the frames land beside the file the caller asked
     /// for, not in a temp directory that the next reboot deletes.
     pub frames_dir: Option<PathBuf>,
+    /// A sound track to carry in the same container.
+    ///
+    /// `None` writes a silent file, which is what every caller that has no
+    /// audio wants. `Some` adds a second input and an AAC stream - except for
+    /// `.gif`, which cannot hold sound at all and is left silent with a line
+    /// on stderr rather than failing a generation over a container choice.
+    ///
+    /// On the no-ffmpeg path the samples are NOT thrown away: they are
+    /// written as a WAV beside the numbered frames, and the printed command
+    /// muxes both. A generation that took an hour must not lose its audio
+    /// because the machine had no encoder.
+    pub audio: Option<AudioTrack>,
 }
 
 impl Default for VideoEncodeOpts {
     fn default() -> VideoEncodeOpts {
-        VideoEncodeOpts { crf: 18, frames_dir: None }
+        VideoEncodeOpts { crf: 18, frames_dir: None, audio: None }
     }
 }
 
@@ -185,16 +220,35 @@ pub enum Encoded {
 /// drives `encode_frames` would leave the fallback unexercised exactly where it
 /// matters.
 pub fn write_frame_dir(frames: &[Rgb8], dir: &Path, out: &Path, fps: f64, crf: u32) -> Result<String, String> {
+    write_frame_dir_with_audio(frames, dir, out, fps, crf, None)
+}
+
+/// [`write_frame_dir`] plus the sound track, written as `audio.wav` in the
+/// same directory and referenced by the returned command.
+///
+/// Separate from [`write_frame_dir`] so the long-standing no-audio signature
+/// keeps working unchanged for every caller that has no audio to write.
+pub fn write_frame_dir_with_audio(frames: &[Rgb8], dir: &Path, out: &Path, fps: f64, crf: u32, audio: Option<&AudioTrack>) -> Result<String, String> {
     let (w, h) = check_frames(frames)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("imaging::video: creating {}: {e}", dir.display()))?;
     for (i, f) in frames.iter().enumerate() {
         crate::codec::save_ppm(dir.join(format!("frame_{:05}.ppm", i + 1)), f)?;
     }
-    let args = ffmpeg_args(dir, out, fps, crf, w, h);
+    let wav = audio.map(|_| dir.join("audio.wav"));
+    if let (Some(a), Some(p)) = (audio, wav.as_ref()) {
+        write_wav(a, p)?;
+    }
+    let args = ffmpeg_args(dir, out, fps, crf, w, h, wav.as_deref());
     Ok(std::iter::once("ffmpeg".to_string())
         .chain(args.into_iter().map(|a| shell_quote(&a)))
         .collect::<Vec<_>>()
         .join(" "))
+}
+
+/// Write an [`AudioTrack`] as a WAV through the workspace's own writer.
+fn write_wav(a: &AudioTrack, path: &Path) -> Result<(), String> {
+    let planes: Vec<&[f32]> = a.channels.iter().map(Vec::as_slice).collect();
+    audio::wav::write_multi(path, &planes, a.sample_rate).map_err(|e| format!("imaging::video: writing {}: {e}", path.display()))
 }
 
 /// Encode RGB frames into a video file at `fps`.
@@ -217,9 +271,23 @@ pub fn encode_frames(frames: &[Rgb8], path: &Path, fps: f64, opts: &VideoEncodeO
         std::fs::create_dir_all(dir).map_err(|e| format!("imaging::video: creating {}: {e}", dir.display()))?;
     }
 
+    // A container that cannot hold sound gets none, loudly - a `.gif` request
+    // is a container choice, not a reason to fail a generation that produced
+    // good audio.
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let audio = opts.audio.as_ref().filter(|a| !a.is_empty());
+    let audio = match (audio, audio_codec_for(&ext)) {
+        (Some(a), Some(_)) => Some(a),
+        (Some(_), None) => {
+            eprintln!("imaging::video: .{ext} carries no audio stream; the clip is written silent (use .mp4/.mkv/.mov/.webm to keep the sound)");
+            None
+        }
+        (None, _) => None,
+    };
+
     if !ffmpeg_available() {
         let dir = opts.frames_dir.clone().unwrap_or_else(|| frames_dir_for(path));
-        let command = write_frame_dir(frames, &dir, path, fps, opts.crf)?;
+        let command = write_frame_dir_with_audio(frames, &dir, path, fps, opts.crf, audio)?;
         return Ok(Encoded::Frames { dir, command });
     }
 
@@ -231,12 +299,16 @@ pub fn encode_frames(frames: &[Rgb8], path: &Path, fps: f64, opts: &VideoEncodeO
     for (i, f) in frames.iter().enumerate() {
         crate::codec::save_ppm(dir.join(format!("frame_{:05}.ppm", i + 1)), f)?;
     }
+    let wav = audio.map(|_| dir.join("audio.wav"));
+    if let (Some(a), Some(p)) = (audio, wav.as_ref()) {
+        write_wav(a, p)?;
+    }
     if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
         eprintln!("imaging::video: {w}x{h} has an odd dimension; padding to {}x{} so 4:2:0 chroma is representable", w.next_multiple_of(2), h.next_multiple_of(2));
     }
 
     let out = Command::new("ffmpeg")
-        .args(ffmpeg_args(&dir, path, fps, opts.crf, w, h))
+        .args(ffmpeg_args(&dir, path, fps, opts.crf, w, h, wav.as_deref()))
         .output()
         .map_err(|e| format!("imaging::video: spawning ffmpeg: {e}"))?;
     if !out.status.success() {
@@ -271,10 +343,31 @@ fn frames_dir_for(path: &Path) -> PathBuf {
     path.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(name))
 }
 
+/// The audio codec a container takes, or `None` for one that holds no sound.
+///
+/// Kept as an explicit table rather than letting `ffmpeg` pick a default,
+/// because its defaults differ by build: a WebM asked for AAC fails outright
+/// on some builds and silently drops the track on others, and "the clip came
+/// out silent on that machine" is exactly the failure this whole path exists
+/// to prevent.
+fn audio_codec_for(ext: &str) -> Option<&'static str> {
+    match ext {
+        "mp4" | "mov" | "m4v" | "mkv" => Some("aac"),
+        "webm" => Some("libopus"),
+        _ => None,
+    }
+}
+
 /// The one place the command line is built, so the fallback's printed command
 /// and the command this module runs itself cannot drift.
-fn ffmpeg_args(dir: &Path, out: &Path, fps: f64, crf: u32, w: u32, h: u32) -> Vec<String> {
+///
+/// `audio_wav` is the sound track's file, already written. It becomes a
+/// SECOND `-i` input, which is why the video filter and codec flags below are
+/// all stream-qualified: an unqualified `-vf` with two inputs present is
+/// ambiguous.
+fn ffmpeg_args(dir: &Path, out: &Path, fps: f64, crf: u32, w: u32, h: u32, audio_wav: Option<&Path>) -> Vec<String> {
     let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let acodec = audio_wav.and_then(|_| audio_codec_for(&ext));
     let mut v: Vec<String> = vec![
         "-y".into(),
         "-framerate".into(),
@@ -282,6 +375,10 @@ fn ffmpeg_args(dir: &Path, out: &Path, fps: f64, crf: u32, w: u32, h: u32) -> Ve
         "-i".into(),
         dir.join("frame_%05d.ppm").to_string_lossy().into_owned(),
     ];
+    if let (Some(wav), Some(_)) = (audio_wav, acodec) {
+        v.push("-i".into());
+        v.push(wav.to_string_lossy().into_owned());
+    }
     if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
         // `pad` keeps the pixels the model produced and adds at most one black
         // row/column; `scale` would resample every frame instead.
@@ -297,6 +394,18 @@ fn ffmpeg_args(dir: &Path, out: &Path, fps: f64, crf: u32, w: u32, h: u32) -> Ve
         }
         v.push("-pix_fmt".into());
         v.push("yuv420p".into());
+    }
+    if let Some(codec) = acodec {
+        v.push("-c:a".into());
+        v.push(codec.into());
+        // Deliberately no `-shortest`: the caller has already made the two
+        // tracks the same length, and `-shortest` would let a sound track
+        // that came out a few samples short silently drop a video FRAME -
+        // trading an inaudible tail for a visible one.
+        v.push("-map".into());
+        v.push("0:v:0".into());
+        v.push("-map".into());
+        v.push("1:a:0".into());
     }
     v.push(out.to_string_lossy().into_owned());
     v
@@ -401,6 +510,81 @@ mod tests {
         assert_eq!((back[0].1, back[0].2), (32, 16));
         let d: f32 = back[0].0.iter().zip(&back[7].0).map(|(a, b)| (a - b).abs()).sum();
         assert!(d > 1.0, "first and last decoded frames are identical - the clip is static");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 440 Hz sine on the left channel and a 660 Hz one on the right, so
+    /// the two channels are genuinely different signals. A mux test fed the
+    /// SAME samples to both channels could not tell a working stereo path
+    /// from one that copied channel 0 twice.
+    fn stereo_tone(seconds: f32, rate: u32) -> AudioTrack {
+        let n = (seconds * rate as f32) as usize;
+        let tone = |hz: f32| -> Vec<f32> { (0..n).map(|i| (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin() * 0.5).collect() };
+        AudioTrack { channels: vec![tone(440.0), tone(660.0)], sample_rate: rate }
+    }
+
+    /// The real mux path, verified by asking `ffprobe` what streams the file
+    /// actually ended up with - not by trusting `ffmpeg`'s exit code.
+    ///
+    /// The whole defect this guards against is a clip that encodes fine and
+    /// plays silent, which every "did the command succeed" check passes.
+    #[test]
+    fn a_muxed_clip_really_carries_an_audio_stream() {
+        if !ffmpeg_available() {
+            brain_testutil::skip_unavailable("ffmpeg not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join("brain-imaging-video-audio-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = dir.join("clip.mp4");
+        let frames = moving_block(16, 32, 16);
+        let opts = VideoEncodeOpts { audio: Some(stereo_tone(2.0, 16_000)), ..Default::default() };
+        let got = encode_frames(&frames, &out, 8.0, &opts).expect("encode with audio");
+        assert_eq!(got, Encoded::Video(out.clone()));
+
+        let probe = Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type,channels,sample_rate", "-of", "default=nw=1"])
+            .arg(&out)
+            .output()
+            .expect("spawning ffprobe");
+        let text = String::from_utf8_lossy(&probe.stdout);
+        assert!(text.contains("codec_type=audio"), "the muxed clip has no audio stream at all (ffprobe said: {text:?})");
+        assert!(text.contains("channels=2"), "the muxed clip is not stereo (ffprobe said: {text:?})");
+
+        // The picture must survive the second input: an unqualified filter or
+        // a missing `-map` can drop the video stream instead of the audio.
+        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(8.0), max_frames: 16 }).expect("decode the muxed clip back");
+        assert_eq!(back.len(), 16, "muxing audio must not change the frame count");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without `ffmpeg` the samples must still reach the disk, and the printed
+    /// command must reference the WAV that holds them - the "never throw away
+    /// a generation for want of an encoder" contract, extended to sound.
+    #[test]
+    fn the_no_ffmpeg_fallback_writes_the_audio_and_names_it_in_the_command() {
+        let dir = std::env::temp_dir().join("brain-imaging-video-audio-fallback");
+        let _ = std::fs::remove_dir_all(&dir);
+        let frames = moving_block(4, 8, 8);
+        let track = stereo_tone(0.5, 16_000);
+        let cmd = write_frame_dir_with_audio(&frames, &dir, Path::new("out.mp4"), 8.0, 18, Some(&track)).expect("fallback write");
+
+        let wav = dir.join("audio.wav");
+        assert!(wav.exists(), "the fallback must write the sound track, not discard it");
+        assert!(cmd.contains("audio.wav"), "the printed command must mux the WAV it just wrote: {cmd}");
+        assert!(cmd.contains("-c:a"), "the printed command must select an audio codec: {cmd}");
+
+        // Round trip the WAV through the workspace reader: a file of the right
+        // NAME holding the wrong samples would pass every check above.
+        // `wav::read` downmixes to mono, so the CHANNEL COUNT is read from the
+        // fmt chunk (a fixed offset in this writer's own canonical header) and
+        // the sample count from the mono frames it returns, which is the
+        // per-channel length either way.
+        let raw = std::fs::read(&wav).expect("read the wav bytes");
+        assert_eq!(u16::from_le_bytes([raw[22], raw[23]]), 2, "the written wav must be stereo");
+        let back = audio::wav::read(&wav).expect("parse the written wav");
+        assert_eq!(back.sample_rate, 16_000);
+        assert_eq!(back.samples.len(), track.samples_per_channel(), "every sample must reach the file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -59,11 +59,59 @@
 //!   identical mean-of-groups accumulation) at `s = 1/3`, zeroing the
 //!   accumulator first.
 //!
-//! Zero new kernels: `conv1d`/`convtr1d` (`crates/audio/src/conv.rs`),
+//! ## Where the convolutions are dispatched, and why it is not one answer
+//!
+//! Every `groups == 1` convolution here goes through the SELECTED lowering
+//! (`audio::conv::conv1d_bias_fwd` / `convtr1d_bias_fwd`), which asks
+//! `gpu_core::select` per shape whether the im2col+GEMM form or the direct
+//! kernel wins and folds the per-channel bias into whichever it picks. Every
+//! width in this vocoder's `groups == 1` sites clears that selector's
+//! measured crossovers except `conv_post`, whose two output channels put it
+//! below the `conv1d` threshold - and the selector, not this file, is what
+//! decides that.
+//!
+//! The antialiasing convolutions stay on the direct kernels, and NOT because
+//! of a threshold: they are depthwise (`groups == channels`), and a grouped
+//! convolution is a block-diagonal GEMM - a different kernel, not a different
+//! shape. `Conv1d::lowerable` refuses them structurally. They also carry no
+//! bias at all, so the bias-folding entry point would only add a zero-add
+//! dispatch to each of them.
+//!
+//! ## The boundary handling is on the device, and that is the whole cost
+//!
+//! `Activation1d` runs twice per resblock branch and once per `act_post`, so
+//! it is by far the most-executed thing in this file. Both of its resamplers
+//! need REPLICATE-padded edges, which is not what `conv1d`'s implicit zero
+//! padding gives: the pad is done with [`kernels::PAD1D_EDGE`] as an ordinary
+//! recorded step, and the upsampler's post-crop is expressed as
+//! `convtr1d`'s own `pad` parameter (the kernel indexes its output as
+//! `lo + pad`, so a symmetric crop IS that parameter) rather than as a host
+//! slice. The `ratio` scale folds into the filter, exactly - multiplying
+//! every tap by a power of two rounds nothing, so each product and therefore
+//! each partial sum is exactly doubled.
+//!
+//! That matters because the alternative is a blocking `Gpu::read` per stage:
+//! host padding and host cropping mean the pipeline drains to the host and
+//! back three times per activation call, which on a card with no resizable
+//! BAR is the dominant cost of the whole audio stage. Nothing in
+//! [`synthesize`] reads back until the final waveform.
+//!
+//! The two Kaiser-sinc filters are also **cached per channel width** rather
+//! than re-broadcast and re-uploaded per call site ([`FilterCache`]): the
+//! checkpoint stores one shared `[1,1,12]` buffer per site, every site's copy
+//! holds the same taps, and the depthwise weight this file needs from it is a
+//! pure function of `(taps, channels)`. The cache is keyed on both, so two
+//! sites that genuinely differed would still get their own weight.
+//!
+//! One new kernel ([`kernels::PAD1D_EDGE`]); everything else is
+//! `conv1d`/`convtr1d` (`crates/audio/src/conv.rs`, direct and lowered),
 //! `snake_beta` (already wired up in `crates/mimi/src/model.rs`), `axpy`,
 //! `add2`. Eager dispatch, same style as [`crate::audio_vae`] and
 //! `crates/mimi/src/model.rs`.
 
+use std::collections::HashMap;
+
+use audio::conv::{ConvGemmKernels, ConvKernels, ConvScratch};
 use gpu_core::{DeviceBuffer, Gpu};
 use vae::blocks::Tensors;
 
@@ -72,13 +120,29 @@ const K_CONVTR1D: usize = 1;
 const K_SNAKE_BETA: usize = 2;
 const K_AXPY: usize = 3;
 const K_ADD2: usize = 4;
+const K_PAD1D_EDGE: usize = 5;
+const K_ADD_CHAN_INPLACE: usize = 6;
+const K_IM2COL1D_AT: usize = 7;
+const K_MATMUL_REG3: usize = 8;
+const K_MATMUL_DX_REG: usize = 9;
+const K_MATMUL_DW_REG_SPLITK: usize = 10;
+const K_NLC_BIAS_NCHW: usize = 11;
+const K_COL2IM1D_BIAS: usize = 12;
 
-const KERNELS: [(&str, &str); 5] = [
+const KERNELS: [(&str, &str); 13] = [
     ("conv1d", kernels::CONV1D),
     ("convtr1d", kernels::CONVTR1D),
     ("snake_beta", kernels::SNAKE_BETA),
     ("axpy", kernels::AXPY),
     ("add2", kernels::ADD2),
+    ("pad1d_edge", kernels::PAD1D_EDGE),
+    ("add_chan_inplace", kernels::ADD_CHAN_INPLACE),
+    ("im2col1d_at", kernels::IM2COL1D_AT),
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
+    ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
+    ("col2im1d_bias", kernels::COL2IM1D_BIAS),
 ];
 
 /// `SnakeBeta`'s fixed `eps` (`no_div_by_zero`, never a config field).
@@ -191,66 +255,147 @@ impl VocoderConfig {
     }
 }
 
-fn kernels_id() -> audio::conv::ConvKernels {
-    audio::conv::ConvKernels { fwd: K_CONV1D, dx: 0, dw: 0 }
+/// The direct kernels, used for the depthwise antialias convolutions and as
+/// the selector's own structural fallback inside [`gemm_kernels`].
+fn kernels_id() -> ConvKernels {
+    ConvKernels { fwd: K_CONV1D, dx: 0, dw: 0 }
 }
-fn kernels_id_tr() -> audio::conv::ConvKernels {
-    audio::conv::ConvKernels { fwd: K_CONVTR1D, dx: 0, dw: 0 }
+fn kernels_id_tr() -> ConvKernels {
+    ConvKernels { fwd: K_CONVTR1D, dx: 0, dw: 0 }
+}
+
+/// The selected-lowering pipeline set for the `groups == 1` convolutions.
+/// `direct` names whichever of the two forward kernels this call site is,
+/// since `audio::conv` reaches for it whenever the lowering does not apply.
+fn gemm_kernels(direct: ConvKernels) -> ConvGemmKernels {
+    ConvGemmKernels {
+        direct,
+        bias: K_ADD_CHAN_INPLACE,
+        im2col: K_IM2COL1D_AT,
+        matmul: K_MATMUL_REG3,
+        matmul_nn: K_MATMUL_DX_REG,
+        matmul_tn: K_MATMUL_DW_REG_SPLITK,
+        nlc_bias: K_NLC_BIAS_NCHW,
+        col2im: K_COL2IM1D_BIAS,
+    }
 }
 
 fn weight<'a>(t: &'a Tensors, name: &str) -> &'a [f32] {
     &t.get(name).unwrap_or_else(|| panic!("ltxv vocoder: missing tensor {name}")).1
 }
 
-/// Per-channel bias broadcast over an NCL `[c,l]` buffer, then `add2` - the
-/// same host-broadcast-then-device-add shape `crates/mimi::model::
-/// add_ncl_bias` uses.
-fn add_ncl_bias(gpu: &Gpu, t: &Tensors, x: &DeviceBuffer, bias_name: &str, c: u32, l: u32) -> DeviceBuffer {
-    let bias = weight(t, bias_name);
-    let mut bcast = vec![0.0f32; (c * l) as usize];
-    for (ch, row) in bcast.chunks_mut(l as usize).enumerate() {
-        row.fill(bias[ch]);
+/// One synthesis run's device context: the handle, the weights, the shared
+/// GEMM scratch and the antialias-filter cache.
+///
+/// The scratch is the one `audio::conv::ConvScratch` every lowered conv in
+/// this pass shares - safe because a recorded pass runs its steps in submit
+/// order, which is exactly the contract that type documents.
+struct Ctx<'a> {
+    gpu: Gpu,
+    t: &'a Tensors,
+    scratch: ConvScratch,
+    /// `(channels, the filter's 12 taps as bits) -> the depthwise weight`.
+    /// Keyed on the taps themselves, not the tensor name, because the
+    /// checkpoint stores one physically separate `[1,1,12]` buffer per site
+    /// holding the same values - so two sites at the same width share a
+    /// buffer, and a site that genuinely differed would still get its own.
+    filters: HashMap<(u32, Vec<u32>), DeviceBuffer>,
+    /// A zeroed `[cout]` bias for the one convolution the checkpoint gives no
+    /// bias tensor at all (`conv_post`, `use_bias_at_final: false`), so it can
+    /// take the same bias-folding entry point as every other conv here.
+    zero_bias: HashMap<u32, DeviceBuffer>,
+}
+
+impl<'a> Ctx<'a> {
+    fn new(device: Option<&str>, t: &'a Tensors) -> Ctx<'a> {
+        Ctx { gpu: Gpu::open(device, &KERNELS), t, scratch: ConvScratch::new(), filters: HashMap::new(), zero_bias: HashMap::new() }
     }
-    let bbuf = gpu.storage_init(bias_name, &bcast);
-    let y = gpu.storage((c * l) as u64);
-    gpu.submit(&[], &[gpu.step(K_ADD2, &[x, &bbuf, &y], &[c * l], c * l)]);
-    y
+
+    fn w(&self, name: &str) -> &'a [f32] {
+        weight(self.t, name)
+    }
+
+    fn upload(&self, name: &str) -> DeviceBuffer {
+        self.gpu.storage_init(name, self.w(name))
+    }
+
+    fn zero_bias_for(&mut self, cout: u32) -> DeviceBuffer {
+        let gpu = &self.gpu;
+        self.zero_bias.entry(cout).or_insert_with(|| gpu.storage_init("vocoder.zero_bias", &vec![0.0f32; cout as usize])).clone()
+    }
+
+    /// The checkpoint's shared `[1,1,12]` filter as a depthwise `[c,1,12]`
+    /// weight (`nn.Module.expand` is a broadcast VIEW of the same 12 values,
+    /// not per-channel data), with `scale` folded into every tap.
+    ///
+    /// Folding `ratio` into the weight rather than scaling the output is
+    /// EXACT for the power-of-two ratio this vocoder uses: doubling an f32
+    /// rounds nothing, so every product and hence every partial sum of the
+    /// convolution is exactly doubled.
+    fn filter(&mut self, name: &str, c: u32, scale: f32) -> DeviceBuffer {
+        let f = self.w(name);
+        assert_eq!(f.len(), AA_K as usize, "{name}: {} values, expected {AA_K}", f.len());
+        let key: Vec<u32> = f.iter().map(|v| (v * scale).to_bits()).collect();
+        if let Some(b) = self.filters.get(&(c, key.clone())) {
+            return b.clone();
+        }
+        let mut data = Vec::with_capacity((c * AA_K) as usize);
+        for _ in 0..c {
+            data.extend(f.iter().map(|v| v * scale));
+        }
+        let b = self.gpu.storage_init(name, &data);
+        self.filters.insert((c, key), b.clone());
+        b
+    }
+
+    /// Replicate-pad an NCL `[c,l]` DEVICE buffer by `(left,right)` samples per
+    /// channel. Returns the padded buffer and its length.
+    fn pad_edge(&self, x: &DeviceBuffer, c: u32, l: u32, left: u32, right: u32) -> (DeviceBuffer, u32) {
+        let lp = l + left + right;
+        let total = c * lp;
+        let y = self.gpu.storage(total as u64);
+        self.gpu.submit(&[], &[self.gpu.step(K_PAD1D_EDGE, &[x, &y], &[total, l, left, right], total)]);
+        (y, lp)
+    }
 }
 
 /// Symmetric "same" `conv1d` (stride 1, `Lo == L`): `pad = dilation*(k-1)/2`.
-fn conv1d_same(gpu: &Gpu, t: &Tensors, prefix: &str, c: u32, k: u32, dilation: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
+fn conv1d_same(cx: &mut Ctx, prefix: &str, c: u32, k: u32, dilation: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let pad = dilation * (k - 1) / 2;
     let cfg = audio::conv::Conv1d { n: 1, cin: c, l, cout: c, k, stride: 1, pad, dilation, groups: 1, lo: l };
-    let wgt = gpu.storage_init(&format!("{prefix}.weight"), weight(t, &format!("{prefix}.weight")));
-    let y = gpu.storage((c * l) as u64);
-    gpu.submit(&[], &[audio::conv::conv1d_fwd(gpu, &kernels_id(), &cfg, x, &wgt, &y)]);
-    add_ncl_bias(gpu, t, &y, &format!("{prefix}.bias"), c, l)
+    let wgt = cx.upload(&format!("{prefix}.weight"));
+    let bias = cx.upload(&format!("{prefix}.bias"));
+    let y = cx.gpu.storage((c * l) as u64);
+    let steps = audio::conv::conv1d_bias_fwd(&cx.gpu, &gemm_kernels(kernels_id()), &cfg, x, &wgt, &bias, &y, &mut cx.scratch);
+    cx.gpu.submit(&[], &steps);
+    y
 }
 
 /// `conv_pre`/`conv_post`: `128 -> upsample_initial_channel` / `final_channels
 /// -> 2`, kernel 7, native `padding=3` (also a symmetric "same" conv at
-/// stride 1). `has_bias=false` skips [`add_ncl_bias`] (`conv_post`'s
-/// `use_bias_at_final: false`).
-fn conv1d_k7(gpu: &Gpu, t: &Tensors, prefix: &str, cin: u32, cout: u32, l: u32, has_bias: bool, x: &DeviceBuffer) -> DeviceBuffer {
+/// stride 1). `has_bias=false` is `conv_post`'s `use_bias_at_final: false` -
+/// it takes the same entry point against a zeroed bias rather than a second
+/// code path, so the selector's decision is shared.
+fn conv1d_k7(cx: &mut Ctx, prefix: &str, cin: u32, cout: u32, l: u32, has_bias: bool, x: &DeviceBuffer) -> DeviceBuffer {
     let cfg = audio::conv::Conv1d { n: 1, cin, l, cout, k: 7, stride: 1, pad: 3, dilation: 1, groups: 1, lo: l };
-    let wgt = gpu.storage_init(&format!("{prefix}.weight"), weight(t, &format!("{prefix}.weight")));
-    let y = gpu.storage((cout * l) as u64);
-    gpu.submit(&[], &[audio::conv::conv1d_fwd(gpu, &kernels_id(), &cfg, x, &wgt, &y)]);
-    if has_bias {
-        add_ncl_bias(gpu, t, &y, &format!("{prefix}.bias"), cout, l)
-    } else {
-        y
-    }
+    let wgt = cx.upload(&format!("{prefix}.weight"));
+    let bias = if has_bias { cx.upload(&format!("{prefix}.bias")) } else { cx.zero_bias_for(cout) };
+    let y = cx.gpu.storage((cout * l) as u64);
+    let steps = audio::conv::conv1d_bias_fwd(&cx.gpu, &gemm_kernels(kernels_id()), &cfg, x, &wgt, &bias, &y, &mut cx.scratch);
+    cx.gpu.submit(&[], &steps);
+    y
 }
 
-fn convtr1d(gpu: &Gpu, t: &Tensors, prefix: &str, cin: u32, cout: u32, k: u32, stride: u32, l: u32, x: &DeviceBuffer) -> (DeviceBuffer, u32) {
+fn convtr1d(cx: &mut Ctx, prefix: &str, cin: u32, cout: u32, k: u32, stride: u32, l: u32, x: &DeviceBuffer) -> (DeviceBuffer, u32) {
     let pad = (k - stride) / 2;
     let lo = audio::conv::Conv1d::out_len_transposed(l, k, stride, pad, 0, 1);
     let cfg = audio::conv::Conv1d { n: 1, cin, l, cout, k, stride, pad, dilation: 1, groups: 1, lo };
-    let wgt = gpu.storage_init(&format!("{prefix}.weight"), weight(t, &format!("{prefix}.weight")));
-    let y = gpu.storage((cout * lo) as u64);
-    gpu.submit(&[], &[audio::conv::convtr1d_fwd(gpu, &kernels_id_tr(), &cfg, x, &wgt, &y)]);
-    (add_ncl_bias(gpu, t, &y, &format!("{prefix}.bias"), cout, lo), lo)
+    let wgt = cx.upload(&format!("{prefix}.weight"));
+    let bias = cx.upload(&format!("{prefix}.bias"));
+    let y = cx.gpu.storage((cout * lo) as u64);
+    let steps = audio::conv::convtr1d_bias_fwd(&cx.gpu, &gemm_kernels(kernels_id_tr()), &cfg, x, &wgt, &bias, &y, &mut cx.scratch);
+    cx.gpu.submit(&[], &steps);
+    (y, lo)
 }
 
 fn add(gpu: &Gpu, n: u32, a: &DeviceBuffer, b: &DeviceBuffer) -> DeviceBuffer {
@@ -260,116 +405,75 @@ fn add(gpu: &Gpu, n: u32, a: &DeviceBuffer, b: &DeviceBuffer) -> DeviceBuffer {
 }
 
 /// `SnakeBeta` over NCL `[c,l]`.
-fn snake_beta(gpu: &Gpu, t: &Tensors, prefix: &str, c: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
-    let a = gpu.storage_init(&format!("{prefix}.alpha"), weight(t, &format!("{prefix}.alpha")));
-    let b = gpu.storage_init(&format!("{prefix}.beta"), weight(t, &format!("{prefix}.beta")));
+fn snake_beta(cx: &Ctx, prefix: &str, c: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
+    let a = cx.upload(&format!("{prefix}.alpha"));
+    let b = cx.upload(&format!("{prefix}.beta"));
     let total = c * l;
-    let y = gpu.storage(total as u64);
-    gpu.submit(&[], &[gpu.step(K_SNAKE_BETA, &[x, &a, &b, &y], &[total, c, l, SNAKE_EPS.to_bits()], total)]);
+    let y = cx.gpu.storage(total as u64);
+    cx.gpu.submit(&[], &[cx.gpu.step(K_SNAKE_BETA, &[x, &a, &b, &y], &[total, c, l, SNAKE_EPS.to_bits()], total)]);
     y
-}
-
-/// Replicate-pad an NCL `[c,l]` HOST array by `(left,right)` samples per
-/// channel (edge value repeated) - the one op in this vocoder with no device
-/// kernel (see this module's header).
-fn replicate_pad_host(x: &[f32], c: usize, l: usize, left: usize, right: usize) -> Vec<f32> {
-    let lp = left + l + right;
-    let mut out = vec![0.0f32; c * lp];
-    for ch in 0..c {
-        let src = &x[ch * l..(ch + 1) * l];
-        let dst = &mut out[ch * lp..(ch + 1) * lp];
-        dst[..left].fill(src[0]);
-        dst[left..left + l].copy_from_slice(src);
-        dst[left + l..].fill(src[l - 1]);
-    }
-    out
-}
-
-/// The checkpoint's shared `[1,1,12]` filter, replicated to `[c,1,12]` (one
-/// depthwise-group weight per channel, all identical - `nn.Module.expand` is
-/// a broadcast view of the SAME 12 values, not per-channel data).
-fn replicate_filter(t: &Tensors, name: &str, c: u32) -> Vec<f32> {
-    let f = weight(t, name);
-    assert_eq!(f.len(), AA_K as usize, "{name}: {} values, expected {AA_K}", f.len());
-    let mut out = Vec::with_capacity((c * AA_K) as usize);
-    for _ in 0..c {
-        out.extend_from_slice(f);
-    }
-    out
 }
 
 /// `UpSample1d(ratio=2, kernel_size=12, window_type="kaiser")`: replicate-pad
 /// `pad=kernel_size/ratio-1=5` each side, depthwise `ConvTranspose1d(k=12,
-/// stride=2,pad=0)` against the checkpoint filter, scale by `ratio=2`, crop
+/// stride=2)` against the checkpoint filter scaled by `ratio=2`, cropping
 /// `pad_left=pad_right=15` off each side. Output length `2*l`.
-fn antialias_upsample(gpu: &Gpu, t: &Tensors, filter_name: &str, c: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
+///
+/// The crop IS the transposed convolution's own `pad` parameter:
+/// `convtr1d.wgsl` indexes its input as `lo + pad`, so a `pad` of 15 skips
+/// the first 15 native outputs, and the shortened `Lo` drops the last 15.
+/// `UpSample1d.__init__` computes `pad_left = pad*stride + (k-stride)//2` and
+/// `pad_right = pad*stride + (k-stride+1)//2`, equal at `(pad=5,stride=2,
+/// k=12)` because `k-stride` is even - which is what lets one symmetric
+/// parameter express both sides.
+fn antialias_upsample(cx: &mut Ctx, filter_name: &str, c: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let pad = AA_K / AA_RATIO - 1; // 5
-    let host = gpu.read(x, (c * l) as usize);
-    let padded = replicate_pad_host(&host, c as usize, l as usize, pad as usize, pad as usize);
-    let lp = l + 2 * pad;
-    let pbuf = gpu.storage_init("aa_up.padded", &padded);
-    let filt = replicate_filter(t, filter_name, c);
-    let fbuf = gpu.storage_init(filter_name, &filt);
-    let lo_native = audio::conv::Conv1d::out_len_transposed(lp, AA_K, AA_RATIO, 0, 0, 1);
-    let cfg = audio::conv::Conv1d { n: 1, cin: c, l: lp, cout: c, k: AA_K, stride: AA_RATIO, pad: 0, dilation: 1, groups: c, lo: lo_native };
-    let y = gpu.storage((c * lo_native) as u64);
-    gpu.submit(&[], &[audio::conv::convtr1d_fwd(gpu, &kernels_id_tr(), &cfg, &pbuf, &fbuf, &y)]);
-    let native = gpu.read(&y, (c * lo_native) as usize);
-    // `UpSample1d.__init__`: pad_left = pad*stride + (k-stride)//2, pad_right =
-    // pad*stride + (k-stride+1)//2 - both equal 15 at (pad=5,stride=2,k=12)
-    // since (k-stride) is even, so ONE `crop` covers both sides.
-    let crop = (pad * AA_RATIO + (AA_K - AA_RATIO) / 2) as usize;
-    let out_l = (lo_native as usize) - 2 * crop;
-    let mut cropped = vec![0.0f32; c as usize * out_l];
-    for ch in 0..c as usize {
-        let src = &native[ch * lo_native as usize + crop..ch * lo_native as usize + crop + out_l];
-        cropped[ch * out_l..(ch + 1) * out_l].copy_from_slice(src);
-        for v in &mut cropped[ch * out_l..(ch + 1) * out_l] {
-            *v *= 2.0; // `x = self.ratio * conv_transpose1d(...)` - the *ratio* scale
-        }
-    }
-    debug_assert_eq!(out_l as u32, 2 * l, "antialias_upsample: {out_l}, expected {}", 2 * l);
-    gpu.storage_init("aa_up.out", &cropped)
+    let (pbuf, lp) = cx.pad_edge(x, c, l, pad, pad);
+    let fbuf = cx.filter(filter_name, c, AA_RATIO as f32);
+    let crop = pad * AA_RATIO + (AA_K - AA_RATIO) / 2; // 15
+    let lo = audio::conv::Conv1d::out_len_transposed(lp, AA_K, AA_RATIO, crop, 0, 1);
+    debug_assert_eq!(lo, 2 * l, "antialias_upsample: {lo}, expected {}", 2 * l);
+    let cfg = audio::conv::Conv1d { n: 1, cin: c, l: lp, cout: c, k: AA_K, stride: AA_RATIO, pad: crop, dilation: 1, groups: c, lo };
+    let y = cx.gpu.storage((c * lo) as u64);
+    cx.gpu.submit(&[], &[audio::conv::convtr1d_fwd(&cx.gpu, &kernels_id_tr(), &cfg, &pbuf, &fbuf, &y)]);
+    y
 }
 
 /// `DownSample1d(ratio=2)` == `LowPassFilter1d(cutoff=0.25,kernel_size=12)`:
 /// replicate-pad `(left=5,right=6)`, depthwise `Conv1d(k=12,stride=2,pad=0)`
 /// against the checkpoint's lowpass filter. Output length `l/2` (`l` is the
 /// ALREADY-upsampled length, `2x` the block's nominal width).
-fn antialias_downsample(gpu: &Gpu, t: &Tensors, filter_name: &str, c: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
+fn antialias_downsample(cx: &mut Ctx, filter_name: &str, c: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
     let (pl, pr) = (5u32, 6u32); // LowPassFilter1d: pad_left = k/2 - 1, pad_right = k/2 (k=12, even)
-    let host = gpu.read(x, (c * l) as usize);
-    let padded = replicate_pad_host(&host, c as usize, l as usize, pl as usize, pr as usize);
-    let lp = l + pl + pr;
-    let pbuf = gpu.storage_init("aa_down.padded", &padded);
-    let filt = replicate_filter(t, filter_name, c);
-    let fbuf = gpu.storage_init(filter_name, &filt);
+    let (pbuf, lp) = cx.pad_edge(x, c, l, pl, pr);
+    let fbuf = cx.filter(filter_name, c, 1.0);
     let lo = (lp - AA_K) / AA_RATIO + 1;
-    let cfg = audio::conv::Conv1d { n: 1, cin: c, l: lp, cout: c, k: AA_K, stride: AA_RATIO, pad: 0, dilation: 1, groups: c, lo };
-    let y = gpu.storage((c * lo) as u64);
-    gpu.submit(&[], &[audio::conv::conv1d_fwd(gpu, &kernels_id(), &cfg, &pbuf, &fbuf, &y)]);
     debug_assert_eq!(lo, l / 2, "antialias_downsample: {lo}, expected {}", l / 2);
+    let cfg = audio::conv::Conv1d { n: 1, cin: c, l: lp, cout: c, k: AA_K, stride: AA_RATIO, pad: 0, dilation: 1, groups: c, lo };
+    let y = cx.gpu.storage((c * lo) as u64);
+    cx.gpu.submit(&[], &[audio::conv::conv1d_fwd(&cx.gpu, &kernels_id(), &cfg, &pbuf, &fbuf, &y)]);
     y
 }
 
 /// `Activation1d(SnakeBeta(c))`: antialiased upsample -> SnakeBeta ->
-/// antialiased downsample. Length-preserving (`l` in, `l` out).
-fn activation1d(gpu: &Gpu, t: &Tensors, prefix: &str, c: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
-    let up = antialias_upsample(gpu, t, &format!("{prefix}.upsample.filter"), c, l, x);
-    let sn = snake_beta(gpu, t, &format!("{prefix}.act"), c, 2 * l, &up);
-    antialias_downsample(gpu, t, &format!("{prefix}.downsample.lowpass.filter"), c, 2 * l, &sn)
+/// antialiased downsample. Length-preserving (`l` in, `l` out), and nothing
+/// in it touches the host.
+fn activation1d(cx: &mut Ctx, prefix: &str, c: u32, l: u32, x: &DeviceBuffer) -> DeviceBuffer {
+    let up = antialias_upsample(cx, &format!("{prefix}.upsample.filter"), c, l, x);
+    let sn = snake_beta(cx, &format!("{prefix}.act"), c, 2 * l, &up);
+    antialias_downsample(cx, &format!("{prefix}.downsample.lowpass.filter"), c, 2 * l, &sn)
 }
 
 /// One `AMPBlock1`: 3 (act1 -> conv1 -> act2 -> conv2 -> residual-add) steps
 /// at dilations `(1,3,5)` (`convs2` always dilation 1), kernel `k`.
-fn amp_block(gpu: &Gpu, t: &Tensors, prefix: &str, c: u32, l: u32, k: u32, dilations: [u32; 3], x: &DeviceBuffer) -> DeviceBuffer {
+fn amp_block(cx: &mut Ctx, prefix: &str, c: u32, l: u32, k: u32, dilations: [u32; 3], x: &DeviceBuffer) -> DeviceBuffer {
     let mut cur = x.clone();
     for (d, &dilation) in dilations.iter().enumerate() {
-        let a1 = activation1d(gpu, t, &format!("{prefix}.acts1.{d}"), c, l, &cur);
-        let c1 = conv1d_same(gpu, t, &format!("{prefix}.convs1.{d}"), c, k, dilation, l, &a1);
-        let a2 = activation1d(gpu, t, &format!("{prefix}.acts2.{d}"), c, l, &c1);
-        let c2 = conv1d_same(gpu, t, &format!("{prefix}.convs2.{d}"), c, k, 1, l, &a2);
-        cur = add(gpu, c * l, &cur, &c2);
+        let a1 = activation1d(cx, &format!("{prefix}.acts1.{d}"), c, l, &cur);
+        let c1 = conv1d_same(cx, &format!("{prefix}.convs1.{d}"), c, k, dilation, l, &a1);
+        let a2 = activation1d(cx, &format!("{prefix}.acts2.{d}"), c, l, &c1);
+        let c2 = conv1d_same(cx, &format!("{prefix}.convs2.{d}"), c, k, 1, l, &a2);
+        cur = add(&cx.gpu, c * l, &cur, &c2);
     }
     cur
 }
@@ -406,30 +510,30 @@ pub fn synthesize(cfg: &VocoderConfig, tensors: &Tensors, mel: &[f32], channels:
         }
     }
 
-    let gpu = Gpu::open(device, &KERNELS);
-    let x_in = gpu.storage_init("vocoder.mel_in", &nc);
-    let mut h = conv1d_k7(&gpu, tensors, "conv_pre", cfg.mel_channels, cfg.upsample_initial_channel, t, true, &x_in);
+    let mut cx = Ctx::new(device, tensors);
+    let x_in = cx.gpu.storage_init("vocoder.mel_in", &nc);
+    let mut h = conv1d_k7(&mut cx, "conv_pre", cfg.mel_channels, cfg.upsample_initial_channel, t, true, &x_in);
     let mut l = t;
 
     for i in 0..cfg.num_upsamples() {
         let (cin, cout) = (cfg.stage_cin(i), cfg.stage_cout(i));
-        let (up, lo) = convtr1d(&gpu, tensors, &format!("ups.{i}"), cin, cout, cfg.upsample_kernel_sizes[i], cfg.upsample_rates[i], l, &h);
+        let (up, lo) = convtr1d(&mut cx, &format!("ups.{i}"), cin, cout, cfg.upsample_kernel_sizes[i], cfg.upsample_rates[i], l, &h);
         l = lo;
-        let acc = gpu.storage((cout * l) as u64);
-        gpu.write_f32(&acc, &vec![0.0f32; (cout * l) as usize]);
+        let acc = cx.gpu.storage((cout * l) as u64);
+        cx.gpu.write_f32(&acc, &vec![0.0f32; (cout * l) as usize]);
         for r in 0..cfg.resblock_kernel_sizes.len() {
             let idx = i * cfg.resblock_kernel_sizes.len() + r;
-            let y = amp_block(&gpu, tensors, &format!("resblocks.{idx}"), cout, l, cfg.resblock_kernel_sizes[r], cfg.resblock_dilations[r], &up);
-            axpy_into(&gpu, &acc, 1.0 / 3.0, &y, cout * l);
+            let y = amp_block(&mut cx, &format!("resblocks.{idx}"), cout, l, cfg.resblock_kernel_sizes[r], cfg.resblock_dilations[r], &up);
+            axpy_into(&cx.gpu, &acc, 1.0 / 3.0, &y, cout * l);
         }
         h = acc;
     }
 
     let fin = cfg.final_channels();
-    h = activation1d(&gpu, tensors, "act_post", fin, l, &h);
-    h = conv1d_k7(&gpu, tensors, "conv_post", fin, cfg.out_channels, l, false, &h);
+    h = activation1d(&mut cx, "act_post", fin, l, &h);
+    h = conv1d_k7(&mut cx, "conv_post", fin, cfg.out_channels, l, false, &h);
 
-    let mut wave = gpu.read(&h, (cfg.out_channels * l) as usize);
+    let mut wave = cx.gpu.read(&h, (cfg.out_channels * l) as usize);
     // `apply_final_activation=True, use_tanh_at_final=False` -> clamp, not tanh.
     for v in &mut wave {
         *v = v.clamp(-1.0, 1.0);

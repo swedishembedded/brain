@@ -650,6 +650,8 @@ pub const NLC_BIAS_NCHW: &str = include_str!("../wgsl/nlc_bias_nchw.wgsl");
 pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
 /// `wgsl/pack_qkv.wgsl`
 pub const PACK_QKV: &str = include_str!("../wgsl/pack_qkv.wgsl");
+/// `wgsl/pad1d_edge.wgsl`
+pub const PAD1D_EDGE: &str = include_str!("../wgsl/pad1d_edge.wgsl");
 /// `wgsl/pad2d.wgsl`
 pub const PAD2D: &str = include_str!("../wgsl/pad2d.wgsl");
 /// `wgsl/paged_decode_apply.wgsl`
@@ -1206,6 +1208,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("nlc_bias_nchw", NLC_BIAS_NCHW),
     ("nlc_nchw", NLC_NCHW),
     ("pack_qkv", PACK_QKV),
+    ("pad1d_edge", PAD1D_EDGE),
     ("pad2d", PAD2D),
     ("paged_decode_apply", PAGED_DECODE_APPLY),
     ("paged_decode_apply_batched", PAGED_DECODE_APPLY_BATCHED),
