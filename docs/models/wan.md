@@ -188,25 +188,28 @@ see the support table.
 
 ## Hardware and limits
 
-Measured on one Tesla P40 (24 GB, Vulkan) with the umT5-XXL text encoder on the
-CPU, at fp32 throughout:
+Reproduce these on your own hardware with `wan_bench` and `BRAIN_PROFILE=1`;
+figures are deliberately not quoted here, because a number written into a doc
+outlives the hardware, driver and code that produced it and the reader has no
+way to tell when it stopped being true. What follows is the SHAPE of the cost,
+which is a property of the architecture and does not rot.
 
-| Request | Text encode | Transformer load | Denoise | VAE decode | Total |
-|---|---|---|---|---|---|
-| 33 frames, 832x480, 25 steps | 237 s | 12 s | 1764 s | 102 s | 35.3 min | <!-- perf-number: a real end-to-end run of the shipped CLI on one named card, which is what this section exists to report -->
+Ordered by share of a short 480p run on one 24 GB card, text encoder on the CPU,
+fp32 throughout: denoise dominates, then the text encode, then the VAE decode,
+then the transformer load.
 
-The same request measured 57.5 min before the VAE convolution was lowered to a  <!-- perf-number: the before figure for the same named run in the table above; the whole point of the sentence is the delta -->
-GEMM, the cross-attention scores were made coalescing and the host stages were
-parallelised - 1.63x, at unchanged output (cosine 1.000000000 against the  <!-- perf-number: the measured ratio of the two runs above, stated so the parity claim beside it is anchored to a specific change -->
-reference transformer at every block, 1.000000 against the reference VAE at
-every stage). The two smaller rows this table used to carry were measured
-before those changes and have not been re-taken.
+The VAE convolution has since been lowered to a GEMM, the cross-attention scores
+made coalescing and the host stages parallelised. Those changes moved the run
+substantially at unchanged output - cosine 1.000000000 against the reference
+transformer at every block, and against the reference VAE at every stage. The
+parity claim is the durable half of that sentence; measure the speed yourself.
 
-Note the card throttles: under sustained load a P40 drops from 1531 MHz to
-about 999 MHz at 90 C, so a long request costs perceptibly more per step at the
+Note the card throttles: a P40 under sustained load drops well below its boost
+clock once it heats, so a long request costs perceptibly more per step at the
 end than at the start, and short benchmarks overstate what a full run achieves.
+Measure a full-length request, not a warm-up.
 
-Three things that table is saying:
+Three things that shape is saying:
 
 - **The text encode is a fixed tax on every generation**, and at small sizes it
   is most of the run. umT5-XXL is 22.72 GB in fp32 and provably does not fit a
@@ -215,10 +218,10 @@ Three things that table is saying:
   flag that makes that cheap today. INT8 is the crate's own stated answer and
   is not implemented.
 - **The VAE decode is pure 3D convolution at every layer**, lowered to
-  `im2col` + a tiled GEMM rather than run as a direct convolution. That is worth
-  8.6x on this phase and is why the decode is no longer a large minority of a  <!-- perf-number: measured phase speedup from the im2col lowering, cited as the reason the decode stopped dominating a short clip -->
-  short clip; a handful of low-channel convolutions still take the direct
-  kernel, which is faster for them.
+  `im2col` + a tiled GEMM rather than run as a direct convolution. That lowering
+  is why the decode is no longer a large minority of a short clip; a handful of
+  low-channel convolutions still take the direct kernel, which is faster for
+  them below the measured crossover.
 - **Cost in the transformer is superlinear in size.** 81 frames at 480p is
   32,760 tokens per forward and 720p is 75,600; attention is quadratic in that
   count and the count is linear in frames. Halving the frame count more than
