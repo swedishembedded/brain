@@ -160,6 +160,43 @@ impl MoondreamModel {
         self.precision
     }
 
+    /// [`MoondreamModel::new_with`] on a chosen physical card, or on the CPU
+    /// backend.
+    ///
+    /// `gpu` is a canonical device index (`gpu_core::devices`, the same index
+    /// `residency::Device::Gpu(i)` and `--device gpu<i>` name), or `None` for
+    /// the CPU backend. Placement is a SCOPED registry selection, never an env
+    /// mutation: a model built inside a server process must not change the
+    /// backend every other model builds on afterwards.
+    ///
+    /// Both towers land on the same device. They have disjoint kernel sets, so
+    /// they are two handles either way; splitting them across devices (as
+    /// `deepseek2ocr` does) would need a reason, and this model has none
+    /// measured.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_on(
+        gpu: Option<u32>,
+        cfg: MoondreamConfig,
+        vweights: HashMap<String, Vec<f32>>,
+        conn_weights: HashMap<String, Vec<f32>>,
+        dweights: HashMap<String, Vec<f32>>,
+        conn_in: u32,
+        seq_len: u32,
+        precision: Precision,
+    ) -> Result<MoondreamModel, String> {
+        let build = || {
+            (
+                Gpu::new(crate::vision::vision_pipelines()),
+                Gpu::new(crate::decoder::pipelines()),
+            )
+        };
+        let (vgpu, dgpu) = match gpu {
+            None => (Gpu::new_cpu(crate::vision::vision_pipelines()), Gpu::new_cpu(crate::decoder::pipelines())),
+            Some(i) => gpu_core::devices::with_gpu(i, build)?,
+        };
+        Ok(Self::new_with(vgpu, dgpu, cfg, vweights, conn_weights, dweights, conn_in, seq_len, precision))
+    }
+
     pub fn config(&self) -> &MoondreamConfig {
         &self.cfg
     }
@@ -705,6 +742,50 @@ mod tests {
         assert_eq!(batch[0], model.image_embeds_from_pixels(&a, 13, 9), "request 0 differs when batched");
         assert_eq!(batch[1], model.image_embeds_from_pixels(&b, 9, 21), "request 1 differs when batched");
         assert_ne!(batch[0], batch[1], "two different images must not produce the same embedding");
+    }
+
+    /// THE GATE FOR THE GPU PATH: the device plumbing produces the same model.
+    ///
+    /// This does NOT validate the model on real weights - no checkpoint exists
+    /// on this machine. What it validates is the thing the plumbing could get
+    /// wrong: that `new_on(Some(0), ..)` really builds both towers on that card
+    /// and computes the same function as the CPU build. A scoped selection that
+    /// silently fell through to the ambient device, or a tower built on one
+    /// backend while its buffers live on another, both run.
+    ///
+    /// Skipped where there is no discrete/integrated GPU to select, since there
+    /// the two builds would be the same backend and the comparison vacuous.
+    #[test]
+    fn a_gpu_build_computes_the_same_function_as_the_cpu_build() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() || gpu_core::devices::gpus().is_empty() {
+            brain_testutil::skip_unavailable("no GPU to place a moondream build on");
+            return;
+        }
+        let (cfg, vw, cw, dw) = tiny(32, 32, false, 53);
+        let vision = cfg.vision.clone();
+        let ppc = vision.patches_per_crop();
+        let seq_len = 1 + ppc + 3;
+        let mut rng = Rng::new(530);
+        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let (tokens, _) = seq(ppc);
+
+        let logits_on = |gpu: Option<u32>| {
+            let m = MoondreamModel::new_on(gpu, cfg.clone(), vw.clone(), cw.clone(), dw.clone(), vision.dim, seq_len, Precision::Fp32)
+                .expect("build");
+            let e = m.image_embeds(&packed);
+            m.logits(&tokens, &e)
+        };
+        let cpu = logits_on(None);
+        let gpu = logits_on(Some(0));
+        assert_eq!(cpu.len(), gpu.len());
+        assert!(gpu.iter().all(|v| v.is_finite()), "the GPU build produced a non-finite logit");
+        // fp32 across two backends agrees closely but not bit-exactly (different
+        // reduction orders), so this is a cosine floor, not equality.
+        let dot: f64 = cpu.iter().zip(&gpu).map(|(&a, &b)| a as f64 * b as f64).sum();
+        let na: f64 = cpu.iter().map(|&a| (a as f64).powi(2)).sum::<f64>().sqrt();
+        let nb: f64 = gpu.iter().map(|&b| (b as f64).powi(2)).sum::<f64>().sqrt();
+        let cos = dot / (na * nb).max(1e-30);
+        assert!(cos > 0.9999, "the GPU build diverges from the CPU build: cosine {cos:.8}");
     }
 
     /// A prompt that does not fit the built graph is a named error, not a panic

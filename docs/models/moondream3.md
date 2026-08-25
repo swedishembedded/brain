@@ -42,5 +42,6 @@ Region/point/detect heads are recognized on import but not built.
 | weights | `BRAIN_MOONDREAM3_WEIGHTS` - the checkpoint directory |
 | action | `caption` (streaming) |
 | example | `examples/vision/moondream3_caption.py` |
+| placement | GPU when one is budgeted, else the CPU pool |
 
 Package: `brain-moondream3`.

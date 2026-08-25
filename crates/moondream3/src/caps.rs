@@ -145,6 +145,16 @@ impl Session {
     /// Build from a checkpoint directory. Minutes, and (at int8) a ~9 GiB peak -
     /// this is the call `ResidentModel::activate` makes once.
     pub fn load(dir: &str, precision: Precision) -> Result<Session, String> {
+        Session::load_on(dir, precision, None)
+    }
+
+    /// [`Session::load`] on a chosen physical card (`gpu_core::devices`'
+    /// canonical index), or `None` for the CPU backend.
+    ///
+    /// Placement is a scoped registry selection, never an env write - a
+    /// server-lifetime resident must not change the backend every other model
+    /// builds on afterwards.
+    pub fn load_on(dir: &str, precision: Precision, gpu: Option<u32>) -> Result<Session, String> {
         let path = std::path::Path::new(dir);
         let cfg = MoondreamConfig::from_dir(path)?;
         let (w, _cov) = crate::import::load(path, &cfg)?;
@@ -152,7 +162,7 @@ impl Session {
         // The multi-crop path is what the reference runs, and it is what widens
         // the connector input to 2·dim.
         let conn_in = cfg.connector_in();
-        let model = MoondreamModel::new_cpu_with(cfg, w.vision, w.connector, w.decoder, conn_in, SEQ_LEN, precision);
+        let model = MoondreamModel::new_on(gpu, cfg, w.vision, w.connector, w.decoder, conn_in, SEQ_LEN, precision)?;
         let eos = tok.special_id("<|endoftext|>");
         Ok(Session { dir: dir.to_string(), precision, model, tok, eos })
     }

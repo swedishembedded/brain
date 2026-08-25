@@ -10,20 +10,26 @@
 //! come from `moondream3::caps`, so this file holds no second copy of the
 //! preprocessing, the prompt assembly or the token accounting.
 //!
-//! # Why this model is CPU-placed, and why that is a declaration
+//! # Placement
 //!
-//! `moondream3::caps::Session::load` builds both towers on
-//! `gpu_core::Gpu::new_cpu`. That is not a correctness pin like
-//! `crates/deepseek2ocr`'s was - there is no known wgpu defect here - it is that
-//! nothing has ever run this model on an accelerator, so claiming a GPU
-//! placement would be asserting something untested. `estimate` reports a
-//! RAM-only [`MemCost`], which is `residency::place::pick_device`'s own
-//! vocabulary for "not GPU-placeable", and the two agree by construction.
+//! This model is GPU-placeable. `estimate` reports its footprint as `vram`, so
+//! `residency::place::pick_device` prefers a card and falls back to the CPU
+//! pool on a machine with no GPU (that fallback is `place`'s own rule for a
+//! weight-holding model, not a special case here). `activate` builds on
+//! whichever device it was handed, through a SCOPED registry selection
+//! (`Session::load_on` -> `gpu_core::devices::with_gpu`) rather than an env
+//! write, because a server-lifetime resident must not change the backend every
+//! other model builds on afterwards.
 //!
-//! Moving it is a small, well-scoped change once someone has a machine and a
-//! checkpoint to verify on: give `Session::load` a device argument, report
-//! `vram` here, and build under `crate::resident_llm::on_device`. Do not do it
-//! blind.
+//! **What that claim rests on, precisely.** No real Moondream checkpoint has
+//! been run on an accelerator anywhere, and none exists on the machine this was
+//! written on - so this is NOT a statement that the released weights produce
+//! good captions on a GPU. It is a statement that the device PLUMBING is
+//! correct, which is checked: `a_gpu_build_computes_the_same_function_as_the_cpu_build`
+//! builds a tiny-config model on a real card and on the CPU backend and
+//! requires the logits to agree. A scoped selection that silently fell through
+//! to the ambient device, or one tower built on a different backend from its
+//! own buffers, both run and both fail that test.
 //!
 //! # The footprint, and why int8 is the default
 //!
@@ -120,25 +126,28 @@ impl ResidentModel for Moondream3Resident {
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        // RAM, not VRAM -- see this module's header on why the CPU placement is
-        // a declaration rather than a pin.
+        // Reported as VRAM: both towers go wherever this instance is placed, so
+        // on a GPU box the whole footprint is device memory. `place::pick_device`
+        // falls a weight-holding model back to the CPU pool at the same figure
+        // on a machine with no GPU, which is its own rule and the behaviour this
+        // model wants.
         let bytes = if key.config.ends_with("|fp32") { FP32_BYTES } else { INT8_BYTES };
-        MemCost::new(0, bytes)
+        MemCost::new(bytes, 0)
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if device != Device::Cpu {
-            // Unreachable while `estimate` reports vram == 0, but a silent
-            // wrong-backend build is exactly the failure a sibling model in this
-            // directory already paid for once.
-            return Err(format!(
-                "moondream3: assigned {device:?}, but this model builds on the CPU backend \
-                 (Session::load uses Gpu::new_cpu) -- its MemCost declares vram == 0"
-            ));
-        }
         let (dir, p) = key.config.rsplit_once('|').ok_or("moondream3: malformed instance key")?;
         let precision = moondream3::caps::parse_precision(p)?;
-        Ok(Box::new(Moondream3Instance { session: Session::load(dir, precision)? }))
+        let gpu = match device {
+            Device::Cpu => None,
+            Device::Gpu(i) => Some(i),
+            Device::Npu(i) => {
+                // This model advertises no NPU footprint, so the placer never
+                // offers one; refuse by name rather than silently building wgpu.
+                return Err(format!("moondream3: assigned Npu({i}), but this model has no NPU export path"));
+            }
+        };
+        Ok(Box::new(Moondream3Instance { session: Session::load_on(dir, precision, gpu)? }))
     }
 }
 
@@ -209,15 +218,18 @@ mod tests {
         let r = Moondream3Resident { dir: "/tmp".into() };
         let c8 = r.estimate(&r.instance_key("caption", &Invocation::new()));
         let c32 = r.estimate(&r.instance_key("caption", &Invocation::new().set("precision", serde_json::json!("fp32"))));
-        assert_eq!(c8.vram, 0, "a GPU placement would build a backend nothing has verified");
-        assert!(c32.ram > c8.ram * 3, "fp32 should be ~4x int8, got {} vs {}", c32.ram, c8.ram);
+        assert!(c8.vram > 0, "this model is GPU-placeable; a zero vram would hide it from the GPU class");
+        assert_eq!(c8.npu, 0, "no NPU export path exists");
+        assert!(c32.vram > c8.vram * 3, "fp32 should be ~4x int8, got {} vs {}", c32.vram, c8.vram);
     }
 
-    /// A GPU assignment is refused loudly rather than built wrong.
+    /// An NPU assignment is refused by name. The placer never offers one (npu
+    /// == 0), but a silent wgpu build under an NPU label is the kind of
+    /// wrong-backend failure a sibling model in this directory already paid for.
     #[test]
-    fn a_gpu_assignment_is_refused() {
+    fn an_npu_assignment_is_refused() {
         let r = Moondream3Resident { dir: "/tmp".into() };
-        let e = r.activate(&r.instance_key("caption", &Invocation::new()), Device::Gpu(0)).err().unwrap_or_default();
-        assert!(e.contains("CPU backend"), "{e}");
+        let e = r.activate(&r.instance_key("caption", &Invocation::new()), Device::Npu(0)).err().unwrap_or_default();
+        assert!(e.contains("no NPU export path"), "{e}");
     }
 }

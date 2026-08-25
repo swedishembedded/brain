@@ -471,9 +471,11 @@ fast and scalable kernel - not a naive one.
     so the two are separately budgeted. *(Decode IS KV-cached
     (`generate_kv`: one masked batched prefill seeds every layer's cache, then
     `O(pos)` steps), gated token-for-token against the `O(T²)` recompute path;
-    `run_batch` is the serial default; region/point/detect heads recognized but not built; CPU
-    placement is a declaration, not a pin - nothing has run this on an
-    accelerator. No real-weight run exists in this workspace, so the composed
+    `run_batch` does REAL batching on the
+    vision half (N requests' crops through one `SiglipEncoder::encode`; the
+    decoder half is per-request and says why); region/point/detect heads recognized but not built; GPU-placeable,
+    with the device plumbing gated by a tiny-config CPU-vs-card agreement test
+    rather than by a real-weight run. No real-weight run exists in this workspace, so the composed
     path is gated by checkpoint-free tests through the production loader.)*
     Both documented on `docs/models/vlm.md`; full ledger
     `.agents/roadmap/vlm.md`.

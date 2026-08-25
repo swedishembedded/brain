@@ -193,13 +193,22 @@ blocker; the pieces a `caps.rs` would have to call did not exist.
       per-request; the decoder has no batch axis wired. `run_batch` is the
       serial default and says why.
 - [ ] Region/point/detect heads - recognized on import, not built.
-- [ ] A GPU placement. `Session::load` builds both towers on
-      `Gpu::new_cpu` and `estimate` reports `vram == 0`, which agree by
-      construction. That is a declaration, not a correctness pin: nothing has
-      ever run this model on an accelerator, so claiming a GPU placement would
-      assert something untested. Give `Session::load` a device argument and
-      build under `resident_llm::on_device` once there is a machine and a
-      checkpoint to verify on.
+- [x] A GPU placement. `MoondreamModel::new_on` / `Session::load_on` take a
+      canonical device index and build under a SCOPED registry selection
+      (`gpu_core::devices::with_gpu`), never an env write; `estimate` reports
+      the footprint as `vram`, so `place::pick_device` prefers a card and falls
+      back to the CPU pool on a GPU-less machine by its own rule for a
+      weight-holding model.
+
+      **What that rests on**: not a real-weight run - none exists anywhere for
+      this model on an accelerator, and no checkpoint is on this box. It rests
+      on the device PLUMBING being checked:
+      `a_gpu_build_computes_the_same_function_as_the_cpu_build` builds a
+      tiny-config model on a real card and on the CPU backend and requires the
+      logits to agree (cosine > 0.9999; two backends, so not bit-equality). A
+      scoped selection that fell through to the ambient device, or one tower on
+      a different backend from its own buffers, both run and both fail it. An
+      NPU assignment is refused by name.
 
 **None of the above is verifiable at real scale on this box** (30 GiB RAM, one
 integrated GPU, no checkpoint present). Gate it with tiny-config end-to-end
