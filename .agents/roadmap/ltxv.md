@@ -5995,3 +5995,253 @@ now a visible row rather than an arithmetic exercise. NOT fixed in this phase:
 it wants its own crossover sweep and its own gate, and the share it can return
 has to be re-measured at the real 3520-token width (this reading is at 512).
 Recorded as the next target.
+
+### Phase 28 - text cross-attention stops materializing a score slab
+
+Phase 12 fused `attn1` and left `attn2` on the materialized
+`attn_scores_cross_kt` -> `softmax_rows` -> `attn_apply_cross` trio, on the
+stated grounds that the flash family "cannot express" a different key row set.
+That was true of the kernels that existed; it was never a statement about the
+algorithm. This phase writes the one kernel that can.
+
+It also closes Phase 27's own recorded next target (`rmsnorm_eps` vs
+`rmsnorm_rows`), which turned out to be one line once measured at the real
+width.
+
+#### 0 - re-measure first, because the previous ranking was taken at the wrong width
+
+Phase 12 and Phase 27 both profiled at `T = 3520`. A real generation at this
+crate's own standard test shape - 25 frames at 1280x704 - is `T = 13200`, and
+the ranking there is not the ranking at 3520: self-attention is O(T²) and
+everything else is O(T), so every share moves. Optimizing a shape nobody
+generates at is wasted work (§F.1's "the group table is an UPPER BOUND" has a
+sibling: a table taken at the wrong SHAPE is not an upper bound of anything).
+
+**Method**: `BRAIN_PROFILE=1 BRAIN_LTXV_DIT=<real 22B distilled Q8_0 GGUF>
+./target/release/ltxv_bench streamed 8 13200 1024 1 1 1`, one Tesla P40,
+`nvidia-smi` confirming both cards idle BEFORE each run and never sampled
+during one. The numbers below are the **cache-hit** arm (call 2 - the shape
+every forward of a generation past the first has), taken as the DIFFERENCE
+between the cumulative kernel table printed at the end of call 2 and the one
+printed at the end of call 1, since `BRAIN_PROFILE`'s tables are cumulative
+over the process.
+
+**Before** - 14471.6 ms of GPU kernel time per 8-layer cache-hit forward:
+
+    flash_attn_bidir_reg2   5761.9 ms    8 calls  (39.8%)
+    matmul_i8_dyn           3223.8 ms   80 calls  (22.3%)
+    attn_apply_cross        1815.4 ms    8 calls  (12.5%)
+    attn_scores_cross_kt    1640.3 ms    8 calls  (11.3%)
+    rmsnorm_eps             1060.2 ms   56 calls  ( 7.3%)
+    softmax_rows             230.2 ms    8 calls  ( 1.6%)
+    matmul_reg3               60.9 ms   32 calls  ( 0.4%)
+
+Against this card's measured 10517 GFLOP/s / 287.5 GB/s roofline, the
+cross-attention trio is a DEFECT by this repo's own 5%-of-both-roofs rule:
+`attn_scores_cross_kt` does 110.8 GFLOP in 205.0 ms per layer (540 GFLOP/s,
+5.1% of the compute roof) and `attn_apply_cross` the same 110.8 GFLOP in
+226.9 ms (488 GFLOP/s, 4.6%), while writing and re-reading a
+`[32, 13200, 1024]` fp32 score slab and its probabilities twin - 1.73 GB each.
+`flash_attn_bidir_reg2` in the SAME block does 2855 GFLOP per layer at 37.7%
+of the same roof, doing 13x the arithmetic in 1.6x the time.
+
+#### 1 - the recorded diagnosis for `flash_attn_bidir_reg2` is WRONG, and it was checked before it was believed
+
+A note carried into this session blamed that kernel's 37.7% on
+`head_dim = 64` against a 128-wide compile-time tile, i.e. half of every tile
+zero-filled. That is not what this model dispatches. `LtxDitConfig::
+ltx25_22b()` is `inner_dim 4096` / `num_heads 32`, so `head_dim()` is 128 -
+exactly `HD`, no zero fill at all - and `ltxv_bench dit`'s own banner prints
+`head_dim 128` at the real config. A `head_dim`-specialised variant would
+therefore be a `kernels::template` knob that compiles to the same kernel.
+
+What the kernel is actually near is a shared-memory ISSUE ceiling, not a
+padding waste: its two inner loops each retire 8 fused multiply-adds per
+`vec4` shared load, and a Pascal SM issues four times as many FFMA lanes per
+clock as LSU lanes, so the shared traffic is the same order of magnitude as
+the arithmetic. Raising the ratio means more query rows per thread, and the
+48 KiB of workgroup memory it already declares is the Vulkan/NVIDIA limit
+exactly - a third row needs the tile geometry rebuilt AND lands `q0..q2` /
+`o0..o2` at ~192 registers before anything else, which is the spill this whole
+family exists to avoid. NOT attempted here, and recorded as "near its
+structural ceiling for this tiling" rather than as a target.
+
+#### 2 - `flash_attn_cross_reg2`, the kernel that did not exist
+
+§F.3 first, and the grep came back genuinely empty: `flash_attn_bidir_*` all
+derive both tile counts from one `tcols` and read one fused `[t, 3*d_model]`
+slab; `flash_attn_causal_gqa` has separate q/k/v but still one `tcols` and a
+`j > i` mask. Neither can express two independent lengths.
+
+The new kernel is `flash_attn_bidir_reg2` with exactly two changes - three
+separate buffers with their own strides/offsets, and `t_dec`/`t_enc` split -
+and nothing else: same BR=128 two-query-row register block, same vec4 shared
+tiles, same software-pipelined K/V staging, same two barriers per tile, same
+lane/bank ownership. It needs no `pack_qkv`: `attention()` already produces
+q, k and v as three plain `[rows, inner_dim]` buffers, which is the operand
+shape.
+
+The seam is shared, not local (§F.7): `model::block::{flash_cross_supported,
+flash_cross_step, FlashCrossLayout}` alongside the existing
+`flash_bidir_fwd`, gated on queried `DeviceCaps` (workgroup reductions,
+`max_workgroup_size >= 256`, `workgroup_mem_bytes >= 49152`) and never on a
+backend name, with `BRAIN_NO_FLASH_CROSS=1` as the A/B switch the measurement
+below was taken with (§F.6: without it a sweep on a capable device compares
+the fused path against itself and reports a meaningless 1.00x). Any model with
+a cross-attention trio can adopt it in one call; `ltxv` is the first.
+
+**After** - 11273.0 ms per 8-layer cache-hit forward:
+
+    flash_attn_bidir_reg2   5750.9 ms    8 calls  (51.0%)
+    matmul_i8_dyn           3213.9 ms   80 calls  (28.5%)
+    rmsnorm_eps             1088.6 ms   56 calls  ( 9.7%)
+    flash_attn_cross_reg2    486.8 ms    8 calls  ( 4.3%)
+
+Text cross-attention, all four kernels of it (`kv_k_headt` +
+`attn_scores_cross_kt` + `softmax_rows` + `attn_apply_cross`, 3688.5 ms) is
+now one 486.8 ms dispatch - **7.58x** - and it runs at 3642 GFLOP/s, 34.6% of
+the compute roof, against 4.6-5.1% for the two kernels it replaces. It also
+stops allocating 3.46 GB of score+probability slab per layer plus the 16.8 MB
+key-minor transpose scratch.
+
+#### 3 - `rmsnorm_rows`, which had been sitting in the tree the whole time
+
+Phase 27 ended by recording `rmsnorm_eps` as a §F.3 case and declining to fix
+it without a real-width measurement. At 13200 tokens it is 1060.2 ms per
+8-layer forward, 7.3% of GPU kernel time, and it is the one-thread-per-row
+form: thread `t` owns row `t` and walks all 4096 floats of it, so a warp's 32
+loads are 16 KB apart and each fetched sector serves one useful float.
+
+`rmsnorm_rows` is the coalesced workgroup-per-row twin. It takes the SAME
+three buffers and the SAME `[d, rows, eps]` Params, `model::block::
+rms_variant` already implements the selection rule (`backend_api::select`'s
+`Op::RmsNorm`, keyed on `DeviceCaps`), and `wan` and `flux2` both already
+register it. Adopting it in `ltxv` is one registration and one call site.
+
+**After** - 10308.8 ms per 8-layer cache-hit forward:
+
+    flash_attn_bidir_reg2   5754.0 ms    8 calls  (55.8%)
+    matmul_i8_dyn           3225.0 ms   80 calls  (31.3%)
+    flash_attn_cross_reg2    486.7 ms    8 calls  ( 4.7%)
+    rmsnorm_rows             108.6 ms   56 calls  ( 1.1%)
+
+**9.76x** on that row, for a one-line selection change - which is the whole
+point of the meta-rule: the expensive defect in this repo is not a slow
+kernel, it is a fast kernel a later model never learned about.
+
+#### 4 - the whole-pass numbers, and why they are believable
+
+| | before | after cross | after cross + rmsnorm |
+|---|---|---|---|
+| text cross-attention, 8 layers | 3688.5 ms | 486.8 ms (**7.58x**) | 486.7 ms |
+| RMSNorm, 8 layers | 1060.2 ms | 1088.6 ms | 108.6 ms (**9.76x**) |
+| GPU kernel time, 8 layers | 14471.6 ms | 11273.0 ms | 10308.8 ms (**1.404x**) |
+| wall, 8 layers (cache hit) | 27.88 s | 23.61 s | 23.20 s (**1.202x**) |
+
+The three runs are separate processes minutes apart, so the rows that did NOT
+change are the control: `flash_attn_bidir_reg2` measured 5761.9 / 5750.9 /
+5754.0 ms and `matmul_i8_dyn` 3223.8 / 3213.9 / 3225.0 ms across them, a
+spread under 0.4% in both cases. A contended card would have moved those
+first, so the deltas on the rows that did change are the change.
+
+Wall moves less than device time because a cache-hit forward at this width
+also spends ~3.2 s uploading activations/context/adaLN and ~1.4 s building
+RoPE tables on the host, neither of which this phase touches. Those are now
+the next targets, ahead of any kernel: `rope2d`'s table build is host f64 and
+the upload is per-forward.
+
+#### 5 - gates, and what each mutation proved
+
+New, in `crates/ltxv/src/block.rs`'s own `tests` module:
+
+- `flash_cross_attention_matches_the_materialized_reference_and_a_host_oracle`
+  - six shapes x three implementations (the fused kernel, the materialized
+  trio, a host f64 oracle). The shapes are chosen so no single index confusion
+  survives: `nq > nk` AND `nq < nk` both appear (a length swap cannot pass by
+  symmetry), `nq` both a multiple and not a multiple of the 128-row query
+  tile, `nk` both a multiple and not a multiple of the 16-row key tile and
+  once smaller than one whole tile, `head_dim` at the real 128 and at widths
+  that leave the tile zero-filled. `max_abs` AND `rel_l2` are asserted
+  alongside cosine, never cosine alone (lesson #2 - cosine is scale-invariant).
+- `fused_cross_attention_averages_the_right_v_rows_under_a_uniform_softmax`
+  - the V-INDEX gate the random test cannot give. `q` is zero, so every score
+  is exactly 0, the softmax is exactly uniform, and the answer is ANALYTIC:
+  the per-channel mean of `v`. `v`'s rows are deliberately unequal, so reading
+  `v` at the wrong stride or by the query row lands elsewhere entirely.
+
+The reference arm is now reached by calling `attn_context_materialized`
+directly rather than by passing `self_attn = false`. That steering was safe
+only while cross-attention had no fused kernel; keeping it would have compared
+one fused kernel against another and never touched the reference - the exact
+"a sweep cannot see below its own threshold, so it will confirm whatever you
+wrote" failure of §F.6, in gate form.
+
+**Mutation-verified, six mutations, each RED then restored GREEN** (measured
+at heads=32 / head_dim=128 / nq=300 / nk=128 against a 1e-5 bar):
+
+| mutation | max_abs | cosine | rel_l2 | caught by |
+|---|---|---|---|---|
+| K read transposed (row/channel swapped) | 1.259e-1 | 0.8998 | 4.477e-1 | the oracle test |
+| K and V operands swapped | 3.678e-1 | 0.00542 | 1.397e0 | BOTH; the v-mean test at 4.802e1 vs a 1e-3 bar |
+| online-softmax `corr` rescale dropped | 1.846e-1 | 0.9858 | 2.163e-1 | the oracle test |
+| score scale multiplied by 1.02 | 1.936e-3 | 0.999979 | 6.864e-3 | the oracle test |
+| `nq`/`nk` swapped at the dispatch site | 2.633e-1 | 0.6527 | 8.411e-1 | BOTH; v-mean at 4.801e1 |
+| `rmsnorm_rows` dispatched at `rows` threads | - | - | - | `dit_parity`, all three cases |
+
+Two things that table says and a single mutation would not. First, the v-mean
+test is genuinely orthogonal, not a duplicate: it passed unchanged under the
+transposed-K, dropped-rescale and wrong-scale mutations (with `q = 0` the
+scores are irrelevant) and caught the two that touch V. Second, the SCALE
+mutation is the one that comes closest to slipping through: it moves cosine
+only to 0.999979, which is four orders of magnitude less alarming than the
+transposed-K mutation's 0.8998 while being a far more plausible bug, and
+`rel_l2` at 6.864e-3 is what states its size honestly. A gate on cosine with a
+looser floor would have shipped it.
+
+Pre-existing gates re-run and confirmed from PRINTED output (a skipped test
+reports as a pass in this repo, so "it passed" is not evidence):
+`dit_parity` (all three, including `real_weight::ltxv_real_dit_tiny_layers_
+matches_reference` against the real Q8_0 GGUF - `b0_attn2_out`, which is
+exactly the kernel this phase replaced, at cosine 1.000000000 / max_abs
+3.278e-7), `host_forward_parity` (cosine 1.0000000000, max_abs 1.550e-6),
+`shard_parity` (both cases bit-identical, max_abs 0.000e0),
+`streamed_vs_eager_real` (cosine 1.000000000, max_abs 0.000e0),
+`connector_real_parity` (cosine 0.999999973) and `int8_compute` (final output
+cosine 0.999999989, and the real Q8_0 block-0 case at 0.996303608).
+
+#### 6 - recorded, not done
+
+* **`devres::activation_reserve_bytes` is now over-fitted, and it was ALREADY
+  saturated at the standard test shape.** Its wgpu slope was fitted to a
+  measured VRAM plateau at T=3520 and its Vulkan slope derived analytically
+  from "`attn2`'s `[heads, t, context_len]` score+probability pair plus ~20
+  activation buffers" - and that pair no longer exists. 3.46 GB per in-flight
+  layer has come free. But the bigger finding is what the same profiling run
+  prints without being asked:
+
+      [call 2] DEVICE RESIDENCY: slots=0 device_hits=0 device_uploads=0
+
+  Zero resident blocks, at `resident=1`, at the width a real generation runs.
+  The wgpu slope extrapolates to tens of gigabytes at 13200 tokens, so
+  `card - reserve` underflows to nothing and the policy declines residency
+  entirely - meaning every block's weights cross to the device on every
+  forward, at exactly the shape the residency machinery was built for. A
+  linear fit taken at one token count is not a model of a pool whose growth is
+  not linear in that count.
+
+  Deliberately NOT re-fitted here, and not guessed at: under-reserving costs a
+  driver-level abort, so a re-fit needs a plateau sweep ACROSS token counts
+  (and a re-measured plateau now that the slab is gone), not one point and an
+  argument. Recorded as the next target, ahead of any kernel - it is worth
+  more than the remaining kernel headroom and it is not a kernel problem.
+* **The A<->V cross-attentions now take the fused path too** (they are
+  `!self_attn`), at the audio stream's `head_dim = 64`, which leaves half of
+  every 128-wide tile zero-filled. Correct - the gate covers head_dim 8, 16
+  and 64 - but not measured at AV scale, because nothing wires the AV DiT into
+  a pipeline yet. If that lands, measure before assuming the fused path wins
+  there too (§C5: a tile sized for the worst case is a cost at every other
+  case).
+* **The cross ladder has ONE rung.** `flash_cross_supported` is a bool, not a
+  `flash_bidir_variant`-style walk, because there is no 16 KiB sibling. A
+  device under 48 KiB of workgroup memory keeps the trio. If a second rung is
+  ever written, that bool becomes a ladder and every caller inherits it.

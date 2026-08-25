@@ -238,6 +238,7 @@ sample, with the number that killed each one:
 | a batch of small grad-norm dispatches needs fusing over an offset table | once each dispatch is internally parallel, the whole group is a couple of percent of a training step and fusing buys well under half a percent more |
 | "small but free" kernel registrations are free just because the kernel itself is faster | **KILLED** on one such change: a clear per-kernel win, ZERO on the whole pass, because the affected dispatches could not move a pass dominated elsewhere. It also changed the output slightly (a reassociated sum) and added a barrier kernel to a model that must also run on `backend-cpu`, for no wall-clock benefit — reverted. **Before optimizing a kernel, check what fraction of the PASS it can possibly return** |
 | composing several coalesced stages beats a fused kernel | **KILLED** on one such comparison — fusing won at every shape tested, because the composed form paid the same sector-amplification cost twice (once per permute) that fusing pays once. The margin grew with the operand's spatial extent, exactly as the underlying bandwidth model predicted |
+| a flash kernel is at a third of its roof because `head_dim` is half the 128-wide compile-time tile, so half of every tile is zero-fill | **KILLED in one grep at the config.** The model dispatches `head_dim = 128` - exactly the tile width, no padding at all. A `kernels::template` specialisation would have compiled to the identical kernel. *A recorded root cause is a hypothesis with a citation, not a measurement; re-derive it from the config the model actually dispatches before building a fix on it* |
 
 ### E.0 Bracket every timed region with `poll_wait()` — or you are timing the host
 
@@ -315,6 +316,26 @@ grouped sum inflated the true whole-pass time by roughly 50%. Use the
 table to RANK, and the whole-pass number to decide whether a fix worked. One
 change looked like a big win in the table and moved the whole pass by nothing;
 it was reverted (see `.agents/rules/lessons.md` #21).
+
+**And profile at the width the model is actually RUN at.** A table taken at a
+convenient smaller shape is not a conservative version of the real one - it is
+a different ranking, and acting on it optimizes something nobody runs. On one
+video DiT the token count per forward at a real generation resolution was
+nearly 4x the count an earlier pass had profiled at; self-attention is O(T²)
+where every other kernel in the block is O(T), so every share moved and the
+top row changed identity. A pass aimed at the small table found the dominant
+*host* stage, fixed it for a large local win, and returned a fraction of that
+end to end. Frame count multiplies the NUMBER of forwards; RESOLUTION sets
+tokens per forward, and tokens per forward is what decides kernel behaviour -
+so the cheapest honest profile is the smallest frame count at the real
+resolution, never the other way round.
+
+A corollary for reading a cumulative profiler: when the harness prints running
+totals rather than per-call ones, the number you want is the DIFFERENCE between
+two tables, and which two is a decision. A warm/cache-hit arm and a cold/first
+call are different shapes of work; quoting the wrong one, or a raw cumulative
+total, silently folds one-off setup (head projections, connector routing) into
+a per-layer figure.
 
 ### F.2 Ask what the top row is running at, against the roof
 
@@ -405,8 +426,30 @@ been the answer repeatedly across workstreams:
 | a cross-attention projection is slow | the tiled GEMM existed; a *selection rule* excluded it — over an order of magnitude on that shape |
 | a model needs a faster GEMM | it already carried the register-tiled variant but dispatched the older one |
 | the CPU GroupNorm fallback is slow | another crate had written a barrier-free two-stage reduction privately — several-times win |
+| a video DiT's every RMSNorm is a top-five row | `rmsnorm_rows` existed, `model::block::rms_variant` already implemented the selection rule, and two other crates already registered it - that crate had simply never been wired up. ~10x on the row, for one registration and one call site |
 
 Only when this comes back empty do you write WGSL.
+
+**"A kernel family cannot express this shape" is a claim about the KERNELS,
+not about the algorithm - recheck which it is.** One model's cross-attention
+kept a materialized scores/softmax/apply trio behind a documented reason: the
+flash family "computes bidirectional self-attention over one span of rows that
+are simultaneously the queries, the keys and the values", so a different key
+row set "is not expressible in this kernel family at all". Every word of that
+was true of the kernels that existed - all of them derive both tile counts
+from one `tcols`, and the one member with separate q/k/v buffers is also
+causal. None of it was true of the online-softmax algorithm, which never cared
+whether the two lengths were equal. The fused cross kernel turned out to be
+the best bidirectional rung with two changes (three operand buffers instead of
+one fused slab, two lengths instead of one) and nothing else changed at all -
+same tiling, same register block, same barriers - for **7.6x** on that
+model's whole cross-attention and a `[heads, nq, nk]` slab pair, 3.46 GB at
+its real width, that stopped being allocated.
+
+So when a note says a shape is inexpressible, check whether it names a
+*structural* obstacle (a mask that must not exist, an operand layout no caller
+can produce) or merely the current Params list. The second is a diff, not a
+research problem.
 
 ### F.4 Profile the branch your hardware does NOT take
 
