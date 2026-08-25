@@ -55,8 +55,18 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         ("scale_add_dexp", kernels::SCALE_ADD_DEXP),     // 38 (MoE combine → d_expert)
         ("scale_add_dgate", kernels::SCALE_ADD_DGATE),   // 39 (MoE combine → d_gate)
         ("router_bwd", kernels::ROUTER_BWD),             // 40 (top-k softmax gate bwd)
+        // --- int8 expert tier (inference only; see `MoeFfn8`) ---
+        ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8), // 41
+        ("max_abs_row", kernels::MAX_ABS_ROW),           // 42 (activation scale)
+        ("quant_pack", kernels::QUANT_PACK),             // 43 (activation pack)
     ]
 }
+
+/// `moe_linear_gated_i8`: one expert linear over int8 weights and dynamically
+/// quantized activations, skipping rows this expert is not routed to.
+const K_MOE_LIN_I8: usize = 41;
+/// `model::int8::quant_rows_steps`'s `[max_abs_row, quant_pack]` pair.
+const K_QUANT: [usize; 2] = [42, 43];
 
 // Backward kernel pipeline indices.
 const K_MATMUL_DX: usize = 18;
@@ -108,6 +118,10 @@ pub struct MoondreamDecoder {
     logits: DeviceBuffer,
     ce: DeviceBuffer,
     n_img: u32,
+    /// One activation set shared by every block, when this decoder was built
+    /// for inference. `None` on a training decoder, where each block owns its
+    /// own (its forward IS the backprop cache). See [`BlockScratch`].
+    shared: Option<BlockScratch>,
 }
 
 impl MoondreamDecoder {
@@ -135,7 +149,30 @@ impl MoondreamDecoder {
             logits: gpu.storage((t * vocab) as u64),
             ce: gpu.storage(t as u64),
             n_img,
+            shared: None,
         }
+    }
+
+    /// Move this decoder's blocks onto ONE shared activation set.
+    ///
+    /// Inference only: every block drops its own set, so `backward` on any of
+    /// them refuses by name. At the released config this is the difference
+    /// between ~10.3 GiB of block scratch and ~0.6 GiB - see [`BlockScratch`].
+    pub fn share_scratch(mut self, gpu: &Gpu, n_heads: u32, ff: u32) -> MoondreamDecoder {
+        self.shared = Some(BlockScratch::new(gpu, self.t, self.d, n_heads, ff));
+        self.blocks = self.blocks.into_iter().map(|b| b.without_scratch()).collect();
+        self
+    }
+
+    /// Run the block stack over `cur`, on the shared scratch when there is one.
+    fn run_blocks<'a>(&'a self, g: &Gpu, mut cur: &'a DeviceBuffer) -> &'a DeviceBuffer {
+        for b in &self.blocks {
+            cur = match &self.shared {
+                Some(sc) => b.forward_on(g, sc, cur),
+                None => b.forward(g, cur),
+            };
+        }
+        cur
     }
     fn wb(&self, n: &str) -> &DeviceBuffer {
         self.w.get(n).unwrap_or_else(|| panic!("decoder weight missing: {n}"))
@@ -157,10 +194,7 @@ impl MoondreamDecoder {
             ],
         );
         // Block stack (each returns its own output buffer).
-        let mut cur: &DeviceBuffer = &self.res;
-        for b in &self.blocks {
-            cur = b.forward(g, cur);
-        }
+        let cur: &DeviceBuffer = self.run_blocks(g, &self.res);
         // post-LN → lm_head → CE.
         g.submit(
             &[],
@@ -188,10 +222,7 @@ impl MoondreamDecoder {
             steps.push(g.step(14, &[&img, &self.res], &[self.n_img * d, d], self.n_img * d));
         }
         g.submit(&[], &steps);
-        let mut cur: &DeviceBuffer = &self.res;
-        for b in &self.blocks {
-            cur = b.forward(g, cur);
-        }
+        let cur: &DeviceBuffer = self.run_blocks(g, &self.res);
         g.submit(
             &[],
             &[
@@ -297,6 +328,70 @@ const LN_EPS: f32 = 1e-5;
 /// **prefix-LM mask** (image prefix bidirectional, else causal); the FFN is the
 /// dense variant (layers 0..3) or the MoE variant (layers 4..23, via `with_moe`).
 /// The optional tau temperature and the MoE FFN both have gradient-checked backwards.
+/// Every activation buffer one [`MoondreamBlock`] forward needs, except its
+/// output.
+///
+/// # Why this is a separate object
+///
+/// A block used to own its whole scratch set, which is correct for TRAINING -
+/// the forward IS the backprop cache, so each block's activations must survive
+/// until its own `backward` reads them. For INFERENCE nothing reads them again
+/// once the block has produced its output, and at the released config that
+/// distinction is the difference between running and not: the set is ~441 MiB
+/// per block (58% of it the two `n_heads·t²` attention slabs), so 24 blocks
+/// hold ~10.3 GiB of buffers that are live one at a time.
+///
+/// One shared set plus a per-block `out` is ~0.6 GiB - a 16.7x reduction, and
+/// the largest single saving available to this model after int8 weights.
+///
+/// **Inference only, and structurally so.** Sharing this under the existing
+/// backward would have every block differentiate against the LAST block's
+/// activations - a plausible, finite, entirely wrong gradient. That is why
+/// [`MoondreamBlock::backward`] reads the block's OWN set and a block built
+/// without one refuses to run backward at all.
+pub struct BlockScratch {
+    l_in: DeviceBuffer,
+    qkv: DeviceBuffer,
+    qkv2: DeviceBuffer,
+    tok_feat: DeviceBuffer,
+    tqr: DeviceBuffer,
+    tvr: DeviceBuffer,
+    s3: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    l_attn: DeviceBuffer,
+    h: DeviceBuffer,
+    h2: DeviceBuffer,
+    l_mlp: DeviceBuffer,
+    mid: DeviceBuffer,
+}
+
+impl BlockScratch {
+    /// Sized for one block at `(t, d, n_heads, ff)`. Every block in a stack
+    /// shares these dims, which is what makes one set reusable.
+    pub fn new(gpu: &Gpu, t: u32, d: u32, n_heads: u32, ff: u32) -> BlockScratch {
+        let slab = (n_heads * t * t) as u64;
+        BlockScratch {
+            l_in: gpu.storage((t * d) as u64),
+            qkv: gpu.storage((t * 3 * d) as u64),
+            qkv2: gpu.storage((t * 3 * d) as u64),
+            tok_feat: gpu.storage((t * 3 * d) as u64),
+            tqr: gpu.storage((t * n_heads) as u64),
+            tvr: gpu.storage((t * n_heads) as u64),
+            s3: gpu.storage((3 * n_heads * t) as u64),
+            scores: gpu.storage(slab),
+            probs: gpu.storage(slab),
+            ctx: gpu.storage((t * d) as u64),
+            l_attn: gpu.storage((t * d) as u64),
+            h: gpu.storage((t * ff) as u64),
+            h2: gpu.storage((t * ff) as u64),
+            l_mlp: gpu.storage((t * d) as u64),
+            mid: gpu.storage((t * d) as u64),
+        }
+    }
+}
+
 /// Weight keys: `ln.weight`/`ln.bias`, `attn.qkv.weight` `[3d, d]`,
 /// `attn.proj.weight` `[d,d]`/`attn.proj.bias`, `mlp.fc1.weight` `[ff,d]`/`.bias`,
 /// `mlp.fc2.weight` `[d,ff]`/`.bias`.
@@ -315,32 +410,25 @@ pub struct MoondreamBlock {
     /// True when `attn.qkv.bias` is present (the real checkpoint's fused-qkv Linear
     /// has a bias; the synthetic gradcheck weights do not).
     qkv_bias: bool,
-    // scratch
-    l_in: DeviceBuffer,
-    qkv: DeviceBuffer,
-    qkv2: DeviceBuffer,   // tau-scaled qkv (q,v scaled; k passthrough)
-    tok_feat: DeviceBuffer, // gelu_erf(qkv) [t, 3d]
-    tqr: DeviceBuffer,    // tok_feat·wqᵀ [t, nh]
-    tvr: DeviceBuffer,    // tok_feat·wvᵀ [t, nh]
-    s3: DeviceBuffer,     // [3·nh, t] per-(head,token) scale (q | k=1 | v)
-    scores: DeviceBuffer,
-    probs: DeviceBuffer,
-    ctx: DeviceBuffer,
-    l_attn: DeviceBuffer,
-    h: DeviceBuffer,
-    h2: DeviceBuffer,
-    l_mlp: DeviceBuffer,
-    mid: DeviceBuffer,
+    /// This block's OWN activation set. `Some` for a block that will be
+    /// differentiated or run standalone; `None` for one in a stack that shares
+    /// a single [`BlockScratch`] (see that type's doc for the 16.7x reason).
+    own: Option<BlockScratch>,
     out: DeviceBuffer,
     /// `Some` for the MoE layers (4..23); `None` uses the dense FFN.
     moe: Option<MoeFfn>,
+    /// The int8 expert tier, when this block was built for INFERENCE at int8
+    /// precision. Mutually exclusive with `moe` (a block has one FFN), kept as
+    /// a separate field rather than an enum because only `moe` participates in
+    /// `backward` - the differentiated code path stays free of a precision
+    /// branch it can never take.
+    moe8: Option<MoeFfn8>,
 }
 
 impl MoondreamBlock {
     #[allow(clippy::too_many_arguments)]
     pub fn new(gpu: &Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, n_heads: u32, head_dim: u32, ff: u32, prefix: u32, rot_dim: u32, theta: f32) -> MoondreamBlock {
         let w: HashMap<String, DeviceBuffer> = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
-        let slab = (n_heads * t * t) as u64;
         let tau = w.contains_key("attn.tau.wq");
         let qkv_bias = w.contains_key("attn.qkv.bias");
         MoondreamBlock {
@@ -355,46 +443,67 @@ impl MoondreamBlock {
             theta,
             tau,
             qkv_bias,
-            l_in: gpu.storage((t * d) as u64),
-            qkv: gpu.storage((t * 3 * d) as u64),
-            qkv2: gpu.storage((t * 3 * d) as u64),
-            tok_feat: gpu.storage((t * 3 * d) as u64),
-            tqr: gpu.storage((t * n_heads) as u64),
-            tvr: gpu.storage((t * n_heads) as u64),
-            s3: gpu.storage((3 * n_heads * t) as u64),
-            scores: gpu.storage(slab),
-            probs: gpu.storage(slab),
-            ctx: gpu.storage((t * d) as u64),
-            l_attn: gpu.storage((t * d) as u64),
-            h: gpu.storage((t * ff) as u64),
-            h2: gpu.storage((t * ff) as u64),
-            l_mlp: gpu.storage((t * d) as u64),
-            mid: gpu.storage((t * d) as u64),
+            own: Some(BlockScratch::new(gpu, t, d, n_heads, ff)),
             out: gpu.storage((t * d) as u64),
             moe: None,
+            moe8: None,
         }
     }
+    /// Drop this block's own activation set, so it runs on a shared
+    /// [`BlockScratch`] via [`MoondreamBlock::forward_on`].
+    ///
+    /// Inference only, and enforced: [`MoondreamBlock::backward`] refuses a
+    /// block with no own set rather than differentiating against whatever the
+    /// shared buffers happen to hold.
+    pub fn without_scratch(mut self) -> Self {
+        self.own = None;
+        self
+    }
+
     /// Attach an MoE FFN (replaces the dense FFN branch) for a deep layer.
     pub fn with_moe(mut self, moe: MoeFfn) -> Self {
+        assert!(self.moe8.is_none(), "a block has one FFN: with_moe after with_moe8");
         self.moe = Some(moe);
+        self
+    }
+
+    /// Attach the INT8 expert FFN. Inference only - a block built this way has
+    /// no `backward` (it would need fp32 expert weights to recompute from), and
+    /// [`MoondreamBlock::backward`] says so by name rather than silently
+    /// producing a dense-FFN gradient.
+    pub fn with_moe8(mut self, moe: MoeFfn8) -> Self {
+        assert!(self.moe.is_none(), "a block has one FFN: with_moe8 after with_moe");
+        self.moe8 = Some(moe);
         self
     }
     fn wb(&self, n: &str) -> &DeviceBuffer {
         self.w.get(n).unwrap_or_else(|| panic!("block weight missing: {n}"))
     }
+    /// Forward using this block's OWN scratch. Requires a block built by
+    /// [`MoondreamBlock::new`] (which allocates one); a stack-shared block
+    /// built with [`MoondreamBlock::without_scratch`] must use
+    /// [`MoondreamBlock::forward_on`] instead.
     pub fn forward(&self, g: &Gpu, x: &DeviceBuffer) -> &DeviceBuffer {
+        let sc = self.own.as_ref().expect("MoondreamBlock::forward: this block shares a BlockScratch - call forward_on");
+        self.forward_on(g, sc, x)
+    }
+
+    /// Forward using a CALLER-OWNED scratch set, so a stack of blocks can share
+    /// one. See [`BlockScratch`] for why that is worth doing and why it is
+    /// inference-only.
+    pub fn forward_on(&self, g: &Gpu, sc: &BlockScratch, x: &DeviceBuffer) -> &DeviceBuffer {
         let (t, d, nh, hd, ff) = (self.t, self.d, self.n_heads, self.head_dim, self.ff);
         let stride3 = 3 * d;
         let mut s: Vec<Step> = Vec::new();
 
         // Shared LayerNorm (with bias).
-        s.push(g.step(4, &[x, self.wb("ln.weight"), self.wb("ln.bias"), &self.l_in], &[d, t, f(LN_EPS)], t));
+        s.push(g.step(4, &[x, self.wb("ln.weight"), self.wb("ln.bias"), &sc.l_in], &[d, t, f(LN_EPS)], t));
         // --- attention branch ---
         // fused qkv = l_in · wqkv^T  ([t, 3d]) (+ bias on the real checkpoint). The
         // bias must land before tau (whose tok_feat = gelu(qkv)) and RoPE/attention.
-        s.push(g.step(0, &[&self.l_in, self.wb("attn.qkv.weight"), &self.qkv], &[t, d, stride3], t * stride3));
+        s.push(g.step(0, &[&sc.l_in, self.wb("attn.qkv.weight"), &sc.qkv], &[t, d, stride3], t * stride3));
         if self.qkv_bias {
-            s.push(g.step(6, &[&self.qkv, self.wb("attn.qkv.bias")], &[t, stride3], t * stride3));
+            s.push(g.step(6, &[&sc.qkv, self.wb("attn.qkv.bias")], &[t, stride3], t * stride3));
         }
         // Per-head attention temperature (tau): scale q and v (NOT k) by a per-
         // (head,token) scalar computed from the raw qkv, BEFORE RoPE. tok_feat is
@@ -404,13 +513,13 @@ impl MoondreamBlock {
         // RoPE, matching the reference) is equivalent up to that rotation. The tiny
         // tanh+tau_pos assembly into the [3·nh, t] scale (q | k=1 | v) folds on host.
         let qkv = if self.tau {
-            s.push(g.step(16, &[&self.qkv, &self.tok_feat], &[t * stride3], t * stride3));
-            s.push(g.step(0, &[&self.tok_feat, self.wb("attn.tau.wq"), &self.tqr], &[t, stride3, nh], t * nh));
-            s.push(g.step(0, &[&self.tok_feat, self.wb("attn.tau.wv"), &self.tvr], &[t, stride3, nh], t * nh));
+            s.push(g.step(16, &[&sc.qkv, &sc.tok_feat], &[t * stride3], t * stride3));
+            s.push(g.step(0, &[&sc.tok_feat, self.wb("attn.tau.wq"), &sc.tqr], &[t, stride3, nh], t * nh));
+            s.push(g.step(0, &[&sc.tok_feat, self.wb("attn.tau.wv"), &sc.tvr], &[t, stride3, nh], t * nh));
             g.submit(&[], &s);
             s = Vec::new();
-            let tqr = g.read(&self.tqr, (t * nh) as usize);
-            let tvr = g.read(&self.tvr, (t * nh) as usize);
+            let tqr = g.read(&sc.tqr, (t * nh) as usize);
+            let tvr = g.read(&sc.tvr, (t * nh) as usize);
             let alpha = g.read(self.wb("attn.tau.alpha"), nh as usize);
             let mut s3 = vec![1.0f32; (3 * nh * t) as usize];
             for h in 0..nh as usize {
@@ -421,50 +530,52 @@ impl MoondreamBlock {
                 }
             }
             let packed: Vec<u32> = s3.iter().map(|&x| f(x)).collect();
-            g.write(&self.s3, &packed);
+            g.write(&sc.s3, &packed);
             // Treat qkv as [t, 3·nh, hd]: scale q-heads by s_q, k-heads by 1, v by s_v.
-            s.push(g.step(17, &[&self.qkv, &self.s3, &self.qkv2], &[t, 3 * nh, hd], t * stride3));
-            &self.qkv2
+            s.push(g.step(17, &[&sc.qkv, &sc.s3, &sc.qkv2], &[t, 3 * nh, hd], t * stride3));
+            &sc.qkv2
         } else {
-            &self.qkv
+            &sc.qkv
         };
         // partial RoPE on q (off 0) and k (off d)
         let half = self.rot_dim / 2;
         s.push(g.step(8, &[qkv], &[t, nh, hd, stride3, 0, t, f(self.theta), self.rot_dim], t * nh * half));
         s.push(g.step(8, &[qkv], &[t, nh, hd, stride3, d, t, f(self.theta), self.rot_dim], t * nh * half));
         // bidir scores → prefix-LM mask → bidir softmax → bidir apply
-        s.push(g.step(9, &[qkv, &self.scores], &[1, nh, t, hd, stride3, 0, d], nh * t * t));
-        s.push(g.step(10, &[&self.scores], &[1, nh, t, self.prefix], nh * t * t));
-        s.push(g.step(11, &[&self.scores, &self.probs], &[1, nh, t], nh * t));
-        s.push(g.step(12, &[&self.probs, qkv, &self.ctx], &[1, nh, t, hd, stride3, 2 * d, d], nh * t * hd));
+        s.push(g.step(9, &[qkv, &sc.scores], &[1, nh, t, hd, stride3, 0, d], nh * t * t));
+        s.push(g.step(10, &[&sc.scores], &[1, nh, t, self.prefix], nh * t * t));
+        s.push(g.step(11, &[&sc.scores, &sc.probs], &[1, nh, t], nh * t));
+        s.push(g.step(12, &[&sc.probs, qkv, &sc.ctx], &[1, nh, t, hd, stride3, 2 * d, d], nh * t * hd));
         // proj + bias → l_attn. Submit phase 1 (LN + attention) so l_in/l_attn are
         // ready before the FFN (MoE submits internally).
-        s.push(g.step(0, &[&self.ctx, self.wb("attn.proj.weight"), &self.l_attn], &[t, d, d], t * d));
-        s.push(g.step(6, &[&self.l_attn, self.wb("attn.proj.bias")], &[t, d], t * d));
+        s.push(g.step(0, &[&sc.ctx, self.wb("attn.proj.weight"), &sc.l_attn], &[t, d, d], t * d));
+        s.push(g.step(6, &[&sc.l_attn, self.wb("attn.proj.bias")], &[t, d], t * d));
         g.submit(&[], &s);
 
         // --- FFN branch on the SAME l_in: MoE (layers 4..23) or dense. ---
         let l_mlp: &DeviceBuffer = if let Some(moe) = &self.moe {
-            moe.forward(g, &self.l_in)
+            moe.forward(g, &sc.l_in)
+        } else if let Some(moe) = &self.moe8 {
+            moe.forward(g, &sc.l_in)
         } else {
             g.submit(
                 &[],
                 &[
-                    g.step(0, &[&self.l_in, self.wb("mlp.fc1.weight"), &self.h], &[t, d, ff], t * ff),
-                    g.step(6, &[&self.h, self.wb("mlp.fc1.bias")], &[t, ff], t * ff),
-                    g.step(5, &[&self.h, &self.h2], &[t * ff], t * ff), // tanh GELU
-                    g.step(0, &[&self.h2, self.wb("mlp.fc2.weight"), &self.l_mlp], &[t, ff, d], t * d),
-                    g.step(6, &[&self.l_mlp, self.wb("mlp.fc2.bias")], &[t, d], t * d),
+                    g.step(0, &[&sc.l_in, self.wb("mlp.fc1.weight"), &sc.h], &[t, d, ff], t * ff),
+                    g.step(6, &[&sc.h, self.wb("mlp.fc1.bias")], &[t, ff], t * ff),
+                    g.step(5, &[&sc.h, &sc.h2], &[t * ff], t * ff), // tanh GELU
+                    g.step(0, &[&sc.h2, self.wb("mlp.fc2.weight"), &sc.l_mlp], &[t, ff, d], t * d),
+                    g.step(6, &[&sc.l_mlp, self.wb("mlp.fc2.bias")], &[t, d], t * d),
                 ],
             );
-            &self.l_mlp
+            &sc.l_mlp
         };
         // --- 3-way residual: out = x + l_attn + l_mlp ---
         g.submit(
             &[],
             &[
-                g.step(7, &[x, &self.l_attn, &self.mid], &[t * d], t * d),
-                g.step(7, &[&self.mid, l_mlp, &self.out], &[t * d], t * d),
+                g.step(7, &[x, &sc.l_attn, &sc.mid], &[t * d], t * d),
+                g.step(7, &[&sc.mid, l_mlp, &self.out], &[t * d], t * d),
             ],
         );
         &self.out
@@ -489,11 +600,19 @@ impl MoondreamBlock {
     /// prefix mask (masked positions have prob≈0 → contribute 0). d_x_in = d_out
     /// (the 3-way residual's identity path) + the LayerNorm input grad.
     pub fn backward(&self, g: &Gpu, x: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoondreamBlockGrads, d_x_in: &DeviceBuffer) {
+        // An int8 block has no fp32 expert weights to recompute from, and the
+        // dense-FFN arm below would happily run and produce a gradient for an
+        // FFN this block does not have. Refuse by name instead.
+        assert!(self.moe8.is_none(), "MoondreamBlock::backward: this block was built with the int8 expert tier, which is inference-only");
+        // The block's OWN activations are the backprop cache - a shared
+        // `BlockScratch` would by now hold the LAST block's values, so this
+        // path deliberately cannot reach one (see `BlockScratch`'s doc).
+        let sc = self.own.as_ref().expect("MoondreamBlock::backward: this block shares a BlockScratch, so its forward activations are gone");
         let (t, d, nh, hd, ff) = (self.t, self.d, self.n_heads, self.head_dim, self.ff);
         let stride3 = 3 * d;
         let half = self.rot_dim / 2;
         // The attention ran on qkv2 (post-tau) when tau is on, else the raw qkv.
-        let attn_qkv = if self.tau { &self.qkv2 } else { &self.qkv };
+        let attn_qkv = if self.tau { &sc.qkv2 } else { &sc.qkv };
         let d_ln = g.storage((t * d) as u64);
         let d_h = g.storage((t * ff) as u64);
         let d_h2 = g.storage((t * ff) as u64);
@@ -507,23 +626,23 @@ impl MoondreamBlock {
 
         // --- FFN branch → d_ln (overwrite): dense MLP or MoE experts. ---
         if let Some(moe) = &self.moe {
-            moe.backward(g, &self.l_in, d_out, gr.moe.as_ref().expect("moe grads required for a MoE block"), &d_ln);
+            moe.backward(g, &sc.l_in, d_out, gr.moe.as_ref().expect("moe grads required for a MoE block"), &d_ln);
         } else {
             s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("mlp.fc2.weight"), &d_h2], &[t, ff, d, 0], t * ff));
-            s.push(g.step(K_MATMUL_DW, &[d_out, &self.h2, &gr.fc2_w], &[t, ff, d], d * ff));
+            s.push(g.step(K_MATMUL_DW, &[d_out, &sc.h2, &gr.fc2_w], &[t, ff, d], d * ff));
             s.push(g.step(K_BIAS_GRAD, &[d_out, &gr.fc2_b], &[t, d], d));
-            s.push(g.step(K_GELU_BWD, &[&self.h, &d_h2, &d_h], &[t * ff], t * ff)); // tanh gelu
+            s.push(g.step(K_GELU_BWD, &[&sc.h, &d_h2, &d_h], &[t * ff], t * ff)); // tanh gelu
             s.push(g.step(K_MATMUL_DX, &[&d_h, self.wb("mlp.fc1.weight"), &d_ln], &[t, d, ff, 0], t * d));
-            s.push(g.step(K_MATMUL_DW, &[&d_h, &self.l_in, &gr.fc1_w], &[t, d, ff], ff * d));
+            s.push(g.step(K_MATMUL_DW, &[&d_h, &sc.l_in, &gr.fc1_w], &[t, d, ff], ff * d));
             s.push(g.step(K_BIAS_GRAD, &[&d_h, &gr.fc1_b], &[t, ff], ff));
         }
 
         // --- attention branch → d_qkv (grad of attn_qkv, pre-RoPE) ---
         s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("attn.proj.weight"), &d_ctx], &[t, d, d, 0], t * d));
-        s.push(g.step(K_MATMUL_DW, &[d_out, &self.ctx, &gr.proj_w], &[t, d, d], d * d));
+        s.push(g.step(K_MATMUL_DW, &[d_out, &sc.ctx, &gr.proj_w], &[t, d, d], d * d));
         s.push(g.step(K_BIAS_GRAD, &[d_out, &gr.proj_b], &[t, d], d));
-        s.push(g.step(K_ATTN_DSCORES, &[&d_ctx, attn_qkv, &self.probs, &dscores], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * t));
-        s.push(g.step(K_ATTN_DV, &[&self.probs, &d_ctx, &d_qkv], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * hd));
+        s.push(g.step(K_ATTN_DSCORES, &[&d_ctx, attn_qkv, &sc.probs, &dscores], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * t));
+        s.push(g.step(K_ATTN_DV, &[&sc.probs, &d_ctx, &d_qkv], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * hd));
         s.push(g.step(K_ATTN_DQ, &[&dscores, attn_qkv, &d_qkv], &[1, nh, t, t, hd, stride3, stride3, 0, d], nh * t * hd));
         s.push(g.step(K_ATTN_DK, &[&dscores, attn_qkv, &d_qkv], &[1, nh, t, t, hd, stride3, stride3, 0, d], nh * t * hd));
         // Rotate d_q (off 0) and d_k (off d) back through the partial RoPE (−angle).
@@ -537,13 +656,13 @@ impl MoondreamBlock {
             let tg = gr.tau.as_ref().expect("tau grads required for a tau block");
             let d_s3 = g.storage((3 * nh * t) as u64);
             // ds[h,row] = Σ_d d_qkv[row,h,d]·qkv_raw[row,h,d] over the 3·nh heads.
-            s.push(g.step(K_TAU_SCALE_DS, &[&d_qkv, &self.qkv, &d_s3], &[t, 3 * nh, hd], 3 * nh * t));
+            s.push(g.step(K_TAU_SCALE_DS, &[&d_qkv, &sc.qkv, &d_s3], &[t, 3 * nh, hd], 3 * nh * t));
             g.submit(&[], &s);
             s = Vec::new();
             // Host: tanh′ and the alpha (tau_pos) grad; positions = row index.
             let ds = g.read(&d_s3, (3 * nh * t) as usize);
-            let tqr = g.read(&self.tqr, (t * nh) as usize);
-            let tvr = g.read(&self.tvr, (t * nh) as usize);
+            let tqr = g.read(&sc.tqr, (t * nh) as usize);
+            let tvr = g.read(&sc.tvr, (t * nh) as usize);
             let alpha = g.read(self.wb("attn.tau.alpha"), nh as usize);
             let (mut d_tqr, mut d_tvr) = (vec![0.0f32; (t * nh) as usize], vec![0.0f32; (t * nh) as usize]);
             let mut d_alpha = vec![0.0f32; nh as usize];
@@ -566,14 +685,14 @@ impl MoondreamBlock {
             let d_qraw2 = g.storage((t * stride3) as u64);
             let d_qkv_raw = g.storage((t * stride3) as u64);
             // in-grad: d_qkv_in = d_qkv · s3 (same tau_scale kernel).
-            s.push(g.step(17, &[&d_qkv, &self.s3, &d_qkv_in], &[t, 3 * nh, hd], t * stride3));
+            s.push(g.step(17, &[&d_qkv, &sc.s3, &d_qkv_in], &[t, 3 * nh, hd], t * stride3));
             // wq/wv weight grads + d_tok_feat = d_tqr·wq + d_tvr·wv.
-            s.push(g.step(K_MATMUL_DW, &[&dtqr_b, &self.tok_feat, &tg.wq], &[t, stride3, nh], nh * stride3));
+            s.push(g.step(K_MATMUL_DW, &[&dtqr_b, &sc.tok_feat, &tg.wq], &[t, stride3, nh], nh * stride3));
             s.push(g.step(K_MATMUL_DX, &[&dtqr_b, self.wb("attn.tau.wq"), &d_tok_feat], &[t, stride3, nh, 0], t * stride3));
-            s.push(g.step(K_MATMUL_DW, &[&dtvr_b, &self.tok_feat, &tg.wv], &[t, stride3, nh], nh * stride3));
+            s.push(g.step(K_MATMUL_DW, &[&dtvr_b, &sc.tok_feat, &tg.wv], &[t, stride3, nh], nh * stride3));
             s.push(g.step(K_MATMUL_DX, &[&dtvr_b, self.wb("attn.tau.wv"), &d_tok_feat], &[t, stride3, nh, 1], t * stride3)); // accumulate
             // tok_feat = gelu_erf(qkv_raw): d_qraw2 = d_tok_feat · gelu_erf′(qkv_raw).
-            s.push(g.step(K_GELU_ERF_BWD, &[&self.qkv, &d_tok_feat, &d_qraw2], &[t * stride3], t * stride3));
+            s.push(g.step(K_GELU_ERF_BWD, &[&sc.qkv, &d_tok_feat, &d_qraw2], &[t * stride3], t * stride3));
             // Total raw-qkv grad = tau_scale in-grad + tok_feat path.
             s.push(g.step(7, &[&d_qkv_in, &d_qraw2, &d_qkv_raw], &[t * stride3], t * stride3));
             d_qkv_raw
@@ -581,7 +700,7 @@ impl MoondreamBlock {
             d_qkv
         };
         s.push(g.step(K_MATMUL_DX, &[&d_qkv_raw, self.wb("attn.qkv.weight"), &d_ln], &[t, d, stride3, 1], t * d)); // accumulate
-        s.push(g.step(K_MATMUL_DW, &[&d_qkv_raw, &self.l_in, &gr.qkv_w], &[t, d, stride3], stride3 * d));
+        s.push(g.step(K_MATMUL_DW, &[&d_qkv_raw, &sc.l_in, &gr.qkv_w], &[t, d, stride3], stride3 * d));
         // Fused-qkv bias grad = Σ_rows d_qkv_raw (bias is additive on the raw qkv).
         if let Some(qb) = &gr.qkv_b {
             s.push(g.step(K_BIAS_GRAD, &[&d_qkv_raw, qb], &[t, stride3], stride3));
@@ -662,6 +781,171 @@ impl MoondreamBlockGrads {
     pub fn with_moe(mut self, g: &Gpu, d: u32, inner: u32, e: u32) -> MoondreamBlockGrads {
         self.moe = Some(MoeGrads::new(g, d, inner, e));
         self
+    }
+}
+
+/// One expert's three linears, int8-packed: `[n, k/4]` u32 words plus the
+/// `[n]` per-output-channel f32 scale [`model::int8::quantize_weight`] wrote.
+struct Expert8 {
+    w_h: (DeviceBuffer, DeviceBuffer),
+    w_g: (DeviceBuffer, DeviceBuffer),
+    w_down: (DeviceBuffer, DeviceBuffer),
+}
+
+/// [`MoeFfn`]'s int8 twin: the same graph, with the EXPERT weights stored
+/// per-channel-quantized and dispatched through `moe_linear_gated_i8`.
+///
+/// # Why this model needed one
+///
+/// At the released config the decoder is 20 MoE layers of 64 experts, each
+/// expert three `[1024, 2048]`-ish matrices - 8.05 B parameters, ~32 GiB of
+/// fp32, on top of ~10 GiB of activation scratch. There is no machine that
+/// runs. int8 weights take the parameter half to ~8.2 GiB, which is what makes
+/// the rest of the serving surface worth having.
+///
+/// # Why it is a separate type rather than a mode on [`MoeFfn`]
+///
+/// `MoeFfn` is the TRAINING path: its `backward` recomputes each expert's
+/// forward from the same fp32 weights the forward read, and a quantized weight
+/// has no gradient of its own. Bolting a precision flag onto it would put a
+/// branch inside the differentiated code for a tier that is never
+/// differentiated. So this is inference-only, and says so.
+///
+/// # Two things it does that the fp32 tier does not
+///
+/// * **The input is quantized ONCE per layer**, not once per expert - every
+///   expert reads the same `xq`/`sx`. `model::moe::expert_fwd_i8` makes the
+///   same point for the SwiGLU shape.
+/// * **Rows this expert is not routed to are skipped**, because
+///   `moe_linear_gated_i8` takes the gate and returns early on a zero row.
+///   With `top_k = 8` of 64 that is 87.5% of the expert-row work the fp32 tier
+///   (which evaluates every expert densely and gates afterwards) still does.
+///   The kernel is the naive one-thread-per-output tier deliberately - a tiled
+///   kernel stages rows across a `workgroupBarrier()`, which a per-row early
+///   return would make undefined; see its own header.
+///
+/// The router stays fp32: it is one `[e, d]` matrix, and quantizing the thing
+/// that DECIDES the routing to save 6 MB would be a poor trade.
+pub struct MoeFfn8 {
+    router: DeviceBuffer,
+    experts: Vec<Expert8>,
+    e: u32,
+    top_k: u32,
+    d: u32,
+    inner: u32,
+    t: u32,
+    // scratch
+    logits: DeviceBuffer,
+    gate: DeviceBuffer,
+    /// The layer input, quantized once and shared by every expert.
+    xq: DeviceBuffer,
+    sx: DeviceBuffer,
+    h: DeviceBuffer,
+    g: DeviceBuffer,
+    act: DeviceBuffer,
+    /// `act` quantized - a different tensor per expert, so re-quantized each time.
+    aq: DeviceBuffer,
+    sa: DeviceBuffer,
+    eout: DeviceBuffer,
+    acc: DeviceBuffer,
+}
+
+impl MoeFfn8 {
+    /// Quantize `weights` (the same fp32 map [`MoeFfn::new`] takes) and upload
+    /// the packed form. `d` and `inner` must both be multiples of 4 - the
+    /// packing is 4 int8 lanes per `u32`, which `quantize_weight` asserts.
+    pub fn new(gpu: &Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, inner: u32, e: u32, top_k: u32) -> MoeFfn8 {
+        let get = |n: &str| weights.get(n).unwrap_or_else(|| panic!("moe weight missing: {n}"));
+        let pack = |name: &str, n: u32, k: u32| -> (DeviceBuffer, DeviceBuffer) {
+            let (packed, sw) = model::int8::quantize_weight(get(name), n as usize, k as usize);
+            let pb = gpu.storage(packed.len() as u64);
+            gpu.write(&pb, &packed);
+            // Reclaim staging between weights: a 64-expert layer packs 192
+            // tensors, and `qwen3::q8` learned the same lesson (see paramstore).
+            gpu.poll_wait();
+            let sb = gpu.storage(sw.len() as u64);
+            gpu.write_f32(&sb, &sw);
+            gpu.poll_wait();
+            (pb, sb)
+        };
+        let experts = (0..e)
+            .map(|ei| Expert8 {
+                w_h: pack(&format!("experts.{ei}.w_h.weight"), inner, d),
+                w_g: pack(&format!("experts.{ei}.w_g.weight"), inner, d),
+                w_down: pack(&format!("experts.{ei}.w_down.weight"), d, inner),
+            })
+            .collect();
+        MoeFfn8 {
+            router: gpu.storage_init("router.weight", get("router.weight")),
+            experts,
+            e,
+            top_k,
+            d,
+            inner,
+            t,
+            logits: gpu.storage((t * e) as u64),
+            gate: gpu.storage((t * e) as u64),
+            xq: gpu.storage((t * d / 4) as u64),
+            sx: gpu.storage(t as u64),
+            h: gpu.storage((t * inner) as u64),
+            g: gpu.storage((t * inner) as u64),
+            act: gpu.storage((t * inner) as u64),
+            aq: gpu.storage((t * inner / 4) as u64),
+            sa: gpu.storage(t as u64),
+            eout: gpu.storage((t * d) as u64),
+            acc: gpu.storage((t * d) as u64),
+        }
+    }
+
+    /// The mixed expert output `[t, d]`. Same contract as [`MoeFfn::forward`].
+    pub fn forward(&self, g: &Gpu, xn: &DeviceBuffer) -> &DeviceBuffer {
+        let (t, d, inner, e) = (self.t, self.d, self.inner, self.e);
+        let mut s: Vec<Step> = Vec::new();
+        // Router in fp32, exactly as the fp32 tier does it.
+        s.push(g.step(0, &[xn, &self.router, &self.logits], &[t, d, e], t * e));
+        s.push(g.step(1, &[&self.logits, &self.gate], &[t, e, self.top_k, 1, f(1.0)], t));
+        // ONE activation quantization for the whole layer - every expert reads
+        // the same `xq`/`sx`, so quantizing per expert would be 64x waste.
+        for st in model::int8::quant_rows_steps(
+            g,
+            model::int8::QuantRows { kernels: K_QUANT, x: xn, sx: &self.sx, xq: &self.xq },
+            0,
+            t,
+            d,
+        ) {
+            s.push(st);
+        }
+        // `moe_linear_gated_i8` Params: [m, kg, n, n_experts, e_idx];
+        // bufs [xq, wq, sx, sw, gate, out].
+        let lin = |s: &mut Vec<Step>, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &(DeviceBuffer, DeviceBuffer), out: &DeviceBuffer, kg: u32, n: u32, ei: u32| {
+            s.push(g.step(K_MOE_LIN_I8, &[xq, &w.0, sx, &w.1, &self.gate, out], &[t, kg, n, e, ei], t * n));
+        };
+        for ei in 0..e {
+            let ex = &self.experts[ei as usize];
+            lin(&mut s, &self.xq, &self.sx, &ex.w_h, &self.h, d / 4, inner, ei);
+            lin(&mut s, &self.xq, &self.sx, &ex.w_g, &self.g, d / 4, inner, ei);
+            s.push(g.step(2, &[&self.h, &self.g, &self.act], &[t * inner], t * inner)); // gelu(h)·(g+1)
+            // `act` is this expert's own tensor, so it needs its own scale.
+            for st in model::int8::quant_rows_steps(
+                g,
+                model::int8::QuantRows { kernels: K_QUANT, x: &self.act, sx: &self.sa, xq: &self.aq },
+                0,
+                t,
+                inner,
+            ) {
+                s.push(st);
+            }
+            lin(&mut s, &self.aq, &self.sa, &ex.w_down, &self.eout, inner / 4, d, ei);
+            let acc = if ei == 0 { 0u32 } else { 1u32 };
+            s.push(g.step(3, &[&self.gate, &self.eout, &self.acc], &[t, d, e, ei, acc], t * d));
+        }
+        g.submit(&[], &s);
+        &self.acc
+    }
+
+    /// Number of output elements (`t·d`).
+    pub fn numel(&self) -> usize {
+        (self.t * self.d) as usize
     }
 }
 
@@ -1363,5 +1647,80 @@ mod tests {
         let out = gpu.read(ffn.forward(&gpu, &xn), ffn.numel());
         assert_eq!(out.len(), (t * d) as usize);
         assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-9));
+    }
+
+    /// `(weights, input)` for a small MoE at `(t, d, inner, e)`, deterministic
+    /// for a fixed seed. `d` and `inner` are multiples of 4 - the int8 packing
+    /// is 4 lanes per u32 and `quantize_weight` asserts it.
+    fn moe_fixture(t: u32, d: u32, inner: u32, e: u32, seed: u64) -> (HashMap<String, Vec<f32>>, Vec<f32>) {
+        let mut rng = Rng::new(seed);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        let mut w = HashMap::new();
+        w.insert("router.weight".into(), r((e * d) as usize));
+        for ei in 0..e {
+            w.insert(format!("experts.{ei}.w_h.weight"), r((inner * d) as usize));
+            w.insert(format!("experts.{ei}.w_g.weight"), r((inner * d) as usize));
+            w.insert(format!("experts.{ei}.w_down.weight"), r((d * inner) as usize));
+        }
+        let x = (0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect();
+        (w, x)
+    }
+
+    /// THE GATE FOR THE int8 TIER: it must compute the SAME function as the
+    /// fp32 tier, to within quantization error.
+    ///
+    /// This is what a shape-only smoke test cannot see. `MoeFfn8` differs from
+    /// `MoeFfn` in three ways that all still produce finite, plausible numbers
+    /// when wrong: the weights are per-output-channel quantized (a transposed
+    /// `(n, k)` would rescale whole rows), the activations are dynamically
+    /// quantized once per layer (quantizing per expert, or forgetting to
+    /// re-quantize `act`, changes the scale silently), and
+    /// `moe_linear_gated_i8` SKIPS unrouted rows (an off-by-one in `e_idx`
+    /// would mix the wrong expert's output into the wrong rows). Cosine against
+    /// the fp32 tier catches all three; `is_finite` catches none of them.
+    #[test]
+    fn int8_experts_agree_with_the_fp32_tier() {
+        let gpu = gpu_core::testgpu::dev(pipelines());
+        let (t, d, inner, e, top_k) = (4u32, 8u32, 4u32, 3u32, 2u32);
+        let (w, x) = moe_fixture(t, d, inner, e, 5);
+        let xn = gpu.storage_init("xn", &x);
+
+        let f32_out = {
+            let ffn = MoeFfn::new(&gpu, &w, t, d, inner, e, top_k);
+            gpu.read(ffn.forward(&gpu, &xn), ffn.numel())
+        };
+        let i8_out = {
+            let ffn = MoeFfn8::new(&gpu, &w, t, d, inner, e, top_k);
+            gpu.read(ffn.forward(&gpu, &xn), ffn.numel())
+        };
+        assert_eq!(i8_out.len(), f32_out.len());
+        assert!(i8_out.iter().all(|v| v.is_finite()), "int8 tier produced a non-finite value");
+        assert!(f32_out.iter().any(|&v| v.abs() > 1e-9), "the fp32 reference is all-zero - the comparison would be vacuous");
+
+        let dot: f64 = f32_out.iter().zip(&i8_out).map(|(&a, &b)| a as f64 * b as f64).sum();
+        let na: f64 = f32_out.iter().map(|&a| (a as f64).powi(2)).sum::<f64>().sqrt();
+        let nb: f64 = i8_out.iter().map(|&b| (b as f64).powi(2)).sum::<f64>().sqrt();
+        let cos = dot / (na * nb).max(1e-30);
+        // int8 is a lossy tier: this floor only has to catch a BROKEN port (a
+        // transposed pack, a wrong expert index, a missing re-quantization),
+        // all of which land far below it. It is not a claim about accuracy on
+        // real weights.
+        assert!(cos > 0.99, "int8 MoE diverges from fp32: cosine {cos:.6}");
+    }
+
+    /// The int8 tier is deterministic - two calls on one instance agree
+    /// bit-for-bit. Quantization happens once at construction; only the
+    /// activation scales are per-call, and those are a pure function of the
+    /// input.
+    #[test]
+    fn int8_experts_are_deterministic() {
+        let gpu = gpu_core::testgpu::dev(pipelines());
+        let (t, d, inner, e, top_k) = (4u32, 8u32, 4u32, 3u32, 2u32);
+        let (w, x) = moe_fixture(t, d, inner, e, 9);
+        let xn = gpu.storage_init("xn", &x);
+        let ffn = MoeFfn8::new(&gpu, &w, t, d, inner, e, top_k);
+        let a = gpu.read(ffn.forward(&gpu, &xn), ffn.numel());
+        let b = gpu.read(ffn.forward(&gpu, &xn), ffn.numel());
+        assert_eq!(a, b, "two forwards on one int8 instance must be bit-identical");
     }
 }

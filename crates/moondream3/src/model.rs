@@ -31,8 +31,25 @@ use std::collections::HashMap;
 use gpu_core::Gpu;
 
 use crate::config::MoondreamConfig;
-use crate::decoder::{MoeFfn, MoondreamBlock, MoondreamDecoder};
+use crate::decoder::{MoeFfn, MoeFfn8, MoondreamBlock, MoondreamDecoder};
 use crate::vision::{Connector, SiglipEncoder};
+
+/// How the decoder's expert weights are stored, and therefore whether the built
+/// model can be differentiated.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Precision {
+    /// fp32 experts, per-block activation scratch. Differentiable; this is what
+    /// every gradcheck builds.
+    #[default]
+    Fp32,
+    /// int8 experts ([`MoeFfn8`]) and ONE activation set shared by all blocks.
+    /// Inference only - `backward` on such a block refuses by name.
+    ///
+    /// This is not a tuning knob, it is what makes the released config
+    /// loadable: fp32 experts plus per-block scratch is ~43 GiB, int8 plus
+    /// shared scratch is ~9 GiB.
+    Int8,
+}
 
 /// An assembled Moondream 3 (forward path). Image tokens occupy rows `[1, 1+n_img)`.
 ///
@@ -47,6 +64,7 @@ pub struct MoondreamModel {
     dec: MoondreamDecoder,
     conn_in: u32,
     seq_len: u32,
+    precision: Precision,
 }
 
 impl MoondreamModel {
@@ -67,12 +85,36 @@ impl MoondreamModel {
         conn_in: u32,
         seq_len: u32,
     ) -> MoondreamModel {
+        Self::new_with(vgpu, dgpu, cfg, vweights, conn_weights, dweights, conn_in, seq_len, Precision::Fp32)
+    }
+
+    /// [`MoondreamModel::new`] at a chosen [`Precision`].
+    ///
+    /// `Precision::Int8` quantizes the MoE experts on the way in and puts every
+    /// block on one shared activation set - together the difference between
+    /// ~43 GiB and ~9 GiB at the released config, and therefore between "does
+    /// not load" and "loads". The resulting model cannot be differentiated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with(
+        vgpu: Gpu,
+        dgpu: Gpu,
+        cfg: MoondreamConfig,
+        vweights: HashMap<String, Vec<f32>>,
+        conn_weights: HashMap<String, Vec<f32>>,
+        dweights: HashMap<String, Vec<f32>>,
+        conn_in: u32,
+        seq_len: u32,
+        precision: Precision,
+    ) -> MoondreamModel {
         let enc = SiglipEncoder::new(&vgpu, cfg.vision.clone(), &vweights);
         let conn = Connector::new(&vgpu, &conn_weights, conn_in, cfg.proj_inner, cfg.proj_out);
-        let blocks = build_blocks(&dgpu, &cfg, &dweights, seq_len);
+        let blocks = build_blocks(&dgpu, &cfg, &dweights, seq_len, precision);
         let ppc = cfg.vision.patches_per_crop();
-        let dec = MoondreamDecoder::new(&dgpu, &dweights, blocks, seq_len, cfg.dim, cfg.vocab, ppc);
-        MoondreamModel { vgpu, dgpu, cfg, enc, conn, dec, conn_in, seq_len }
+        let mut dec = MoondreamDecoder::new(&dgpu, &dweights, blocks, seq_len, cfg.dim, cfg.vocab, ppc);
+        if precision == Precision::Int8 {
+            dec = dec.share_scratch(&dgpu, cfg.n_heads, cfg.ff_dim);
+        }
+        MoondreamModel { vgpu, dgpu, cfg, enc, conn, dec, conn_in, seq_len, precision }
     }
 
     /// Build on the CPU backend for both towers - the shape every checkpoint-free
@@ -86,7 +128,21 @@ impl MoondreamModel {
         conn_in: u32,
         seq_len: u32,
     ) -> MoondreamModel {
-        Self::new(
+        Self::new_cpu_with(cfg, vweights, conn_weights, dweights, conn_in, seq_len, Precision::Fp32)
+    }
+
+    /// [`MoondreamModel::new_cpu`] at a chosen [`Precision`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_cpu_with(
+        cfg: MoondreamConfig,
+        vweights: HashMap<String, Vec<f32>>,
+        conn_weights: HashMap<String, Vec<f32>>,
+        dweights: HashMap<String, Vec<f32>>,
+        conn_in: u32,
+        seq_len: u32,
+        precision: Precision,
+    ) -> MoondreamModel {
+        Self::new_with(
             Gpu::new_cpu(crate::vision::vision_pipelines()),
             Gpu::new_cpu(crate::decoder::pipelines()),
             cfg,
@@ -95,7 +151,13 @@ impl MoondreamModel {
             dweights,
             conn_in,
             seq_len,
+            precision,
         )
+    }
+
+    /// Which precision this model was built at.
+    pub fn precision(&self) -> Precision {
+        self.precision
     }
 
     pub fn config(&self) -> &MoondreamConfig {
@@ -210,16 +272,19 @@ impl MoondreamModel {
 
 /// Build the decoder block stack (dense below `moe.start_layer`, MoE at and above)
 /// from the prefixed decoder weights.
-fn build_blocks(gpu: &Gpu, cfg: &MoondreamConfig, dweights: &HashMap<String, Vec<f32>>, t: u32) -> Vec<MoondreamBlock> {
+fn build_blocks(gpu: &Gpu, cfg: &MoondreamConfig, dweights: &HashMap<String, Vec<f32>>, t: u32, precision: Precision) -> Vec<MoondreamBlock> {
     (0..cfg.n_layers)
         .map(|l| {
             let bw = strip_prefix(dweights, &format!("blocks.{l}."));
             let blk = MoondreamBlock::new(gpu, &bw, t, cfg.dim, cfg.n_heads, cfg.head_dim, cfg.ff_dim, cfg.prefix_attn, cfg.rot_dim, cfg.rope_theta);
-            if cfg.is_moe_layer(l) {
-                let mw = strip_prefix(dweights, &format!("blocks.{l}.moe."));
-                blk.with_moe(MoeFfn::new(gpu, &mw, t, cfg.dim, cfg.moe.inner_dim, cfg.moe.num_experts, cfg.moe.top_k))
-            } else {
-                blk
+            if !cfg.is_moe_layer(l) {
+                return blk;
+            }
+            let mw = strip_prefix(dweights, &format!("blocks.{l}.moe."));
+            let (d, inner, e, k) = (cfg.dim, cfg.moe.inner_dim, cfg.moe.num_experts, cfg.moe.top_k);
+            match precision {
+                Precision::Fp32 => blk.with_moe(MoeFfn::new(gpu, &mw, t, d, inner, e, k)),
+                Precision::Int8 => blk.with_moe8(MoeFfn8::new(gpu, &mw, t, d, inner, e, k)),
             }
         })
         .collect()
@@ -444,6 +509,76 @@ mod tests {
         let too_long = vec![1u32; seq_len as usize + 1];
         let err = model.generate(&too_long, &[], 1, None).unwrap_err();
         assert!(err.contains("seq_len"), "{err}");
+    }
+
+    /// THE POINT OF `Precision::Int8`: the whole composite still computes the
+    /// same function, end to end, with quantized experts AND one activation set
+    /// shared by every block.
+    ///
+    /// Two independent things could break here and both would still produce
+    /// finite, plausible logits. The int8 experts could mis-scale (checked more
+    /// tightly in `decoder`'s own `int8_experts_agree_with_the_fp32_tier`), and
+    /// the shared scratch could let one block read the previous block's
+    /// activations - which is a real risk precisely because the buffers are the
+    /// right SHAPE, so nothing errors. Comparing full logits against the fp32,
+    /// per-block-scratch build is what catches the second.
+    #[test]
+    fn int8_with_shared_scratch_matches_the_fp32_build_end_to_end() {
+        let (cfg, vw, cw, dw) = tiny(32, 32, false, 23);
+        let vision = cfg.vision.clone();
+        let ppc = vision.patches_per_crop();
+        let seq_len = 1 + ppc + 3;
+        let vocab = cfg.vocab as usize;
+        let mut rng = Rng::new(230);
+        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let (tokens, _) = seq(ppc);
+
+        let logits_at = |p: Precision| {
+            let m = MoondreamModel::new_cpu_with(cfg.clone(), vw.clone(), cw.clone(), dw.clone(), vision.dim, seq_len, p);
+            assert_eq!(m.precision(), p);
+            let embeds = m.image_embeds(&packed);
+            m.logits(&tokens, &embeds)
+        };
+        let a = logits_at(Precision::Fp32);
+        let b = logits_at(Precision::Int8);
+        assert_eq!(a.len(), seq_len as usize * vocab);
+        assert_eq!(a.len(), b.len());
+        assert!(b.iter().all(|v| v.is_finite()), "the int8 build produced a non-finite logit");
+
+        let dot: f64 = a.iter().zip(&b).map(|(&x, &y)| x as f64 * y as f64).sum();
+        let na: f64 = a.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+        let nb: f64 = b.iter().map(|&y| (y as f64).powi(2)).sum::<f64>().sqrt();
+        let cos = dot / (na * nb).max(1e-30);
+        // A lossy tier, so this floor catches a BROKEN build (cross-block
+        // scratch bleed, a mis-scaled expert), not a claim about accuracy.
+        assert!(cos > 0.99, "int8 + shared scratch diverges from fp32 end to end: cosine {cos:.6}");
+    }
+
+    /// A block on shared scratch cannot be differentiated, and says so rather
+    /// than quietly producing a gradient against another block's activations.
+    #[test]
+    fn a_shared_scratch_build_refuses_to_run_backward() {
+        use crate::decoder::{pipelines, MoondreamBlock};
+        let gpu = gpu_core::Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff) = (4u32, 8u32, 2u32, 4u32, 16u32);
+        let mut rng = Rng::new(31);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        let mut w = HashMap::new();
+        for (leaf, sz) in [
+            ("ln.weight", d as usize), ("ln.bias", d as usize), ("attn.qkv.weight", (3 * d * d) as usize),
+            ("attn.proj.weight", (d * d) as usize), ("attn.proj.bias", d as usize),
+            ("mlp.fc1.weight", (ff * d) as usize), ("mlp.fc1.bias", ff as usize),
+            ("mlp.fc2.weight", (d * ff) as usize), ("mlp.fc2.bias", d as usize),
+        ] {
+            w.insert(leaf.to_string(), if leaf.ends_with("ln.weight") { vec![1.0; sz] } else { r(sz) });
+        }
+        let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, 1, 4, 1.5e6).without_scratch();
+        let x = gpu.storage_init("x", &r((t * d) as usize));
+        let gr = crate::decoder::MoondreamBlockGrads::new(&gpu, d, ff);
+        let d_out = gpu.storage((t * d) as u64);
+        let d_x = gpu.storage((t * d) as u64);
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| blk.backward(&gpu, &x, &d_out, &gr, &d_x)));
+        assert!(err.is_err(), "backward on a shared-scratch block must refuse");
     }
 
     /// THE POINT OF OWNING THE STACK: two forwards on ONE model, with no rebuild
