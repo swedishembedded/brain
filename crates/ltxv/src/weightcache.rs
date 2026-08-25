@@ -62,7 +62,7 @@ use residency::lru::Entry;
 use residency::place::{CostAware, EvictionPolicy};
 use residency::{Device, MemCost, Tier};
 
-use crate::block::{CachedQBlockWeights, QTier};
+use crate::block::{CachedQAvBlockWeights, CachedQBlockWeights, QTier};
 
 /// A checkpoint's identity, without reading its contents: path plus the two
 /// stat fields that change when the file does. Deliberately the SAME identity
@@ -94,8 +94,17 @@ impl CheckpointId {
 }
 
 /// One block's cache slot, plus the two counters `CostAware` scores against.
-struct Slot {
-    weights: Arc<CachedQBlockWeights>,
+///
+/// Generic in the cached form, so the audio+video block
+/// ([`CachedQAvBlockWeights`]) shares the slot table's accounting, the GDSF
+/// policy and the byte budget with the video-only one rather than getting a
+/// second, separately-tuned cache. The two live in different maps because
+/// they are different types, NOT under one key space: a checkpoint is
+/// legitimately read both ways in one process (a video-only generation and an
+/// audio+video one against the same GGUF), and handing a video-only entry to
+/// the AV path would be a silent half-model.
+struct Slot<W> {
+    weights: Arc<W>,
     bytes: u64,
     uses: u64,
     last_use: u64,
@@ -104,6 +113,15 @@ struct Slot {
 /// One remembered embeddings-connector routing: the exact inputs it was
 /// computed from, and what it produced.
 struct ConnectorSlot {
+    /// WHICH connector produced this - `"video_embeddings_connector"` or
+    /// `"audio_embeddings_connector"`. Part of the key, not decoration: the
+    /// audio+video forward routes two different contexts through two
+    /// different connectors on every call, and a cache keyed on the context
+    /// bytes alone would hand one stream the other's conditioning the moment
+    /// their inputs happened to coincide. On the real config the two contexts
+    /// are different WIDTHS so they cannot collide, but that is a property of
+    /// one configuration, not of this cache.
+    who: String,
     context: Vec<f32>,
     valid: Vec<f32>,
     context_len: usize,
@@ -127,7 +145,11 @@ pub struct CacheStats {
 
 #[derive(Default)]
 struct Inner {
-    blocks: HashMap<(u32, QTier), Slot>,
+    blocks: HashMap<(u32, QTier), Slot<CachedQBlockWeights>>,
+    /// The audio+video blocks, under their own key space - see [`Slot`]'s doc
+    /// for why they are not merged with `blocks`. Their bytes DO count
+    /// against the same `bytes` total and the same budget.
+    av_blocks: HashMap<(u32, QTier), Slot<CachedQAvBlockWeights>>,
     connector: Vec<ConnectorSlot>,
     bytes: u64,
     tick: u64,
@@ -138,13 +160,15 @@ struct Inner {
 
 /// At most this many distinct connector routings are remembered.
 ///
-/// Two is the working set of one generation with CFG on (the conditional and
-/// unconditional branches); four lets the previous generation's pair survive
-/// long enough to be reused by a re-run of the same prompt. Unbounded - which
-/// is what the per-generation cache could afford, since it died with the
-/// generation - would now be a genuine leak: every new prompt in a
-/// long-running server adds a few megabytes that nothing ever removes.
-const MAX_CONNECTOR_ENTRIES: usize = 4;
+/// Two is the working set of one VIDEO-ONLY generation with CFG on (the
+/// conditional and unconditional branches). An audio+video generation routes
+/// TWO connectors per branch, so its working set is four; eight lets the
+/// previous generation's set survive long enough to be reused by a re-run of
+/// the same prompt. Unbounded - which is what the per-generation cache could
+/// afford, since it died with the generation - would now be a genuine leak:
+/// every new prompt in a long-running server adds a few megabytes that
+/// nothing ever removes.
+const MAX_CONNECTOR_ENTRIES: usize = 8;
 
 /// The shared, budgeted slot table behind a [`GenerationCache`] handle.
 struct WeightStore {
@@ -169,7 +193,7 @@ impl WeightStore {
 /// `CostAware::score` (GDSF: `uses * bytes / age`) consumes. Reusing the
 /// policy object rather than transcribing its formula is the point: when the
 /// residency benchmark re-tunes it, this cache inherits the new rule.
-fn score(slot: &Slot, now: u64) -> f64 {
+fn score<W>(slot: &Slot<W>, now: u64) -> f64 {
     let e = Entry { cost: MemCost::new(0, slot.bytes), device: Device::Cpu, last_use: slot.last_use, uses: slot.uses, pinned: false, tier: Tier::Warm };
     CostAware.score(&e, now)
 }
@@ -320,10 +344,54 @@ impl GenerationCache {
         self.store.inner.read().unwrap().blocks.contains_key(&(layer as u32, tier))
     }
 
+    /// [`Self::block`] for an AUDIO+VIDEO block. Same contract, same
+    /// counters, its own key space (see [`Slot`]'s doc).
+    pub fn av_block(&self, layer: usize, tier: QTier) -> Option<Arc<CachedQAvBlockWeights>> {
+        let mut inner = self.store.inner.write().unwrap();
+        inner.tick += 1;
+        let now = inner.tick;
+        let Some(slot) = inner.av_blocks.get_mut(&(layer as u32, tier)) else {
+            inner.misses += 1;
+            return None;
+        };
+        slot.uses += 1;
+        slot.last_use = now;
+        let w = slot.weights.clone();
+        inner.hits += 1;
+        Some(w)
+    }
+
+    /// [`Self::store_block`] for an AUDIO+VIDEO block - same "always returns
+    /// usable weights" contract: an entry the budget cannot keep is simply
+    /// not retained, never refused.
+    pub fn store_av_block(&self, layer: usize, tier: QTier, weights: CachedQAvBlockWeights) -> Arc<CachedQAvBlockWeights> {
+        let bytes = weights.byte_len() as u64;
+        let w = Arc::new(weights);
+        let mut inner = self.store.inner.write().unwrap();
+        inner.tick += 1;
+        let now = inner.tick;
+        if let Some(budget) = self.store.budget {
+            if bytes > budget {
+                return w;
+            }
+            evict_until_fits(&mut inner, budget, bytes, now);
+        }
+        if let Some(old) = inner.av_blocks.insert((layer as u32, tier), Slot { weights: w.clone(), bytes, uses: 1, last_use: now }) {
+            inner.bytes -= old.bytes;
+        }
+        inner.bytes += bytes;
+        w
+    }
+
+    /// True when the AV `layer` is held at `tier`.
+    pub fn is_av_cached(&self, layer: usize, tier: QTier) -> bool {
+        self.store.inner.read().unwrap().av_blocks.contains_key(&(layer as u32, tier))
+    }
+
     /// Hits/misses/evictions/blocks/bytes so far.
     pub fn stats(&self) -> CacheStats {
         let inner = self.store.inner.read().unwrap();
-        CacheStats { hits: inner.hits, misses: inner.misses, evictions: inner.evictions, blocks: inner.blocks.len(), bytes: inner.bytes }
+        CacheStats { hits: inner.hits, misses: inner.misses, evictions: inner.evictions, blocks: inner.blocks.len() + inner.av_blocks.len(), bytes: inner.bytes }
     }
 
     /// Real host bytes the block half currently holds.
@@ -335,7 +403,8 @@ impl GenerationCache {
     /// footprint at the production width rather than assert it from a
     /// derivation nobody checks.
     pub fn block_byte_lens(&self) -> Vec<usize> {
-        self.store.inner.read().unwrap().blocks.values().map(|s| s.bytes as usize).collect()
+        let inner = self.store.inner.read().unwrap();
+        inner.blocks.values().map(|s| s.bytes as usize).chain(inner.av_blocks.values().map(|s| s.bytes as usize)).collect()
     }
 
     /// Drop everything this store holds. What `residency::Instance::demote`
@@ -343,8 +412,9 @@ impl GenerationCache {
     /// later access simply misses and recomputes the identical bytes.
     pub fn clear(&self) {
         let mut inner = self.store.inner.write().unwrap();
-        inner.evictions += inner.blocks.len() as u64;
+        inner.evictions += (inner.blocks.len() + inner.av_blocks.len()) as u64;
         inner.blocks.clear();
+        inner.av_blocks.clear();
         inner.connector.clear();
         inner.bytes = 0;
     }
@@ -354,16 +424,16 @@ impl GenerationCache {
     /// collision would silently substitute one prompt's conditioning for
     /// another's, and the comparison is a few megabytes against a routing
     /// that costs seconds.
-    pub(crate) fn connector_hit(&self, context: &[f32], valid: &[f32], context_len: usize) -> Option<Vec<f32>> {
+    pub(crate) fn connector_hit(&self, who: &str, context: &[f32], valid: &[f32], context_len: usize) -> Option<Vec<f32>> {
         let mut inner = self.store.inner.write().unwrap();
         inner.tick += 1;
         let now = inner.tick;
-        let hit = inner.connector.iter_mut().find(|e| e.context_len == context_len && e.context == context && e.valid == valid)?;
+        let hit = inner.connector.iter_mut().find(|e| e.who == who && e.context_len == context_len && e.context == context && e.valid == valid)?;
         hit.last_use = now;
         Some(hit.out.clone())
     }
 
-    pub(crate) fn connector_store(&self, context: &[f32], valid: &[f32], context_len: usize, out: &[f32]) {
+    pub(crate) fn connector_store(&self, who: &str, context: &[f32], valid: &[f32], context_len: usize, out: &[f32]) {
         let mut inner = self.store.inner.write().unwrap();
         inner.tick += 1;
         let now = inner.tick;
@@ -372,7 +442,7 @@ impl GenerationCache {
             inner.connector.remove(victim);
             inner.evictions += 1;
         }
-        inner.connector.push(ConnectorSlot { context: context.to_vec(), valid: valid.to_vec(), context_len, out: out.to_vec(), last_use: now });
+        inner.connector.push(ConnectorSlot { who: who.to_string(), context: context.to_vec(), valid: valid.to_vec(), context_len, out: out.to_vec(), last_use: now });
     }
 
     /// Real host bytes the connector half holds - the counterpart of
@@ -389,11 +459,32 @@ impl GenerationCache {
 /// table is finite, and an empty table always "fits" because
 /// `store_block` already rejected an entry larger than the whole budget.
 fn evict_until_fits(inner: &mut Inner, budget: u64, incoming: u64, now: u64) {
-    while inner.bytes + incoming > budget && !inner.blocks.is_empty() {
-        let victim = inner.blocks.iter().min_by(|a, b| score(a.1, now).partial_cmp(&score(b.1, now)).unwrap_or(std::cmp::Ordering::Equal)).map(|(k, _)| *k).expect("non-empty");
-        if let Some(s) = inner.blocks.remove(&victim) {
-            inner.bytes -= s.bytes;
-            inner.evictions += 1;
+    let worst = |a: Option<f64>, b: Option<f64>| -> bool {
+        // "the video map holds the worse entry" - `None` (an empty map) never
+        // wins, so a budget pass drains whichever map still has anything.
+        match (a, b) {
+            (Some(x), Some(y)) => x <= y,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    };
+    fn cheapest<W>(m: &HashMap<(u32, QTier), Slot<W>>, now: u64) -> Option<((u32, QTier), f64)> {
+        m.iter().map(|(k, s)| (*k, score(s, now))).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    }
+    while inner.bytes + incoming > budget && !(inner.blocks.is_empty() && inner.av_blocks.is_empty()) {
+        let v = cheapest(&inner.blocks, now);
+        let a = cheapest(&inner.av_blocks, now);
+        let bytes = if worst(v.map(|x| x.1), a.map(|x| x.1)) {
+            inner.blocks.remove(&v.expect("a score implies an entry").0).map(|s| s.bytes)
+        } else {
+            inner.av_blocks.remove(&a.expect("a score implies an entry").0).map(|s| s.bytes)
+        };
+        match bytes {
+            Some(b) => {
+                inner.bytes -= b;
+                inner.evictions += 1;
+            }
+            None => break,
         }
     }
 }
@@ -477,8 +568,8 @@ mod tests {
                             // charged and released.
                             c.block(l, QTier::Int4);
                         }
-                        c.connector_store(&[l as f32], &[1.0], 1, &[l as f32; 4]);
-                        let _ = c.connector_hit(&[l as f32], &[1.0], 1);
+                        c.connector_store("video_embeddings_connector", &[l as f32], &[1.0], 1, &[l as f32; 4]);
+                        let _ = c.connector_hit("video_embeddings_connector", &[l as f32], &[1.0], 1);
                     }
                 });
             }

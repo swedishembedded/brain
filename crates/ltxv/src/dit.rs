@@ -853,8 +853,7 @@ impl LtxDit {
         let (adaln_table, embedded_timestep) = ada_layer_norm_single(&self.w, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
         let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, &batch.positions, batch.t);
         let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
-        let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
-
+    let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
         let x0 = if self.shard.embed {
             let pw = tget(&self.w, "patchify_proj.weight");
             let pb = tget(&self.w, "patchify_proj.bias");
@@ -1012,8 +1011,7 @@ impl LtxDit {
 
         // ---- block stack ------------------------------------------------------
         let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
-        let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
-
+    let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
         #[rustfmt::skip]
         let (connector_context, connector_out) = route_context_through_connector(
             &gpu, &self.w, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
@@ -1080,8 +1078,7 @@ impl LtxDit {
         let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
 
         let gpu = Gpu::open(self.device.as_deref(), &KERNELS);
-        let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
-
+    let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
         #[rustfmt::skip]
         let (connector_context, connector_out) = route_context_through_connector(
             &gpu, &self.w, "video_embeddings_connector", cfg.use_embeddings_connector, context, context_valid, context_len as u32,
@@ -1326,10 +1323,12 @@ pub fn forward_q_streamed_in(
         "host stage done"
     );
 
-    let s_rope = std::time::Instant::now();
-    let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
-    gpu_core::profile::stage_time("forward_q_streamed: RoPE table build (host, f64)", s_rope);
-    tracing::debug!(stage = "rope_tables", ms = s_rope.elapsed().as_secs_f32() * 1e3, theta = cfg.positional_embedding_theta, "host stage done");
+    // The RoPE table's key, computed HERE rather than inside the cache: it is a
+    // function of this forward's own inputs, and the build below only runs on
+    // a miss - a generation holds `positions`/`t`/the config fixed across
+    // every denoise step, so past the first step this stage is a hash and a
+    // pair of `Arc` bumps. See `crate::devres::RopeCache`.
+    let rope_id = crate::devres::rope_key("video", cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
 
     let mut t_load = std::time::Duration::ZERO;
     let mut t_quant = std::time::Duration::ZERO;
@@ -1376,13 +1375,19 @@ pub fn forward_q_streamed_in(
     // so long-lived weights taken late lose a race against it).
     session.prefill(&gpu, cfg, tier, t, context_len, &mut weights);
 
-    let (cos_bufs, sin_bufs) = upload_rope_tables(&gpu, &rope);
+    let s_rope = std::time::Instant::now();
+    let (cos_bufs, sin_bufs) = session.rope_tables(rope_id, &mut || {
+        let r = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
+        upload_rope_tables(&gpu, &r)
+    });
+    gpu_core::profile::stage_time("forward_q_streamed: RoPE tables (host f64 build + upload, cached per generation)", s_rope);
+    tracing::debug!(stage = "rope_tables", ms = s_rope.elapsed().as_secs_f32() * 1e3, theta = cfg.positional_embedding_theta, "host stage done");
 
     let s_conn = std::time::Instant::now();
     // The connector's inputs (`context`, `context_valid`, `context_len`) are
     // fixed for a whole generation, so its answer is too - see this function's
     // `cache` doc. Ask the cache first; only a genuinely new context pays.
-    let conn_hit = cache.connector_hit(context, context_valid, context_len);
+    let conn_hit = cache.connector_hit("video_embeddings_connector", context, context_valid, context_len);
     let conn_was_hit = conn_hit.is_some();
     let connector_context = match conn_hit {
         Some(out) => out,
@@ -1394,7 +1399,7 @@ pub fn forward_q_streamed_in(
                 cfg.connector_num_layers, cfg.connector_num_learnable_registers, cfg.connector_apply_gated_attention,
                 cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
             );
-            cache.connector_store(context, context_valid, context_len, &out);
+            cache.connector_store("video_embeddings_connector", context, context_valid, context_len, &out);
             out
         }
     };
@@ -1476,6 +1481,290 @@ pub fn forward_q_streamed_in(
     );
 
     output_stage(head, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps)
+}
+
+/// [`load_head_tensors_from_source`]'s AV twin: every non-block tensor of the
+/// audio+video manifest - both streams' patchify/proj_out/scale_shift pairs,
+/// all EIGHT model-level adaLN groups (including the four A<->V ones) and both
+/// embeddings connectors. Bounded the same way: one tensor decoded into a
+/// temporary at a time, never the whole source.
+pub fn load_av_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxAvDitConfig) -> Tensors {
+    let mut out = Tensors::new();
+    for (name, shape) in av_dit_tensor_manifest(cfg) {
+        if name.starts_with("transformer_blocks.") {
+            continue;
+        }
+        let mut data = Vec::new();
+        let found = src.with_tensor(&name, &mut |d| data = d.to_vec());
+        assert!(found, "load_av_head_tensors_from_source: missing {name}");
+        let want: usize = shape.iter().product();
+        assert_eq!(data.len(), want, "load_av_head_tensors_from_source: {name} wrong length ({} vs {want})", data.len());
+        out.insert(name, (shape, data));
+    }
+    out
+}
+
+/// One joint audio+video denoise step's inputs - the AV counterpart of
+/// [`forward_q_streamed_in`]'s flat parameter list, as a struct because
+/// two streams' worth of them is past the point where positional arguments
+/// are checkable by eye.
+pub struct AvStreamedStep<'a> {
+    pub v_latent: &'a [f32],
+    pub v_timesteps: &'a [f32],
+    pub v_positions: &'a [f32],
+    pub v_keyframes_mask: &'a [f32],
+    pub v_context: &'a [f32],
+    pub v_context_len: usize,
+    pub tv: usize,
+    /// This step's scalar sigma for the VIDEO stream - what drives the
+    /// AUDIO stream's cross-modal gate (`crate::block`'s doc: each direction's
+    /// gate is keyed on the OTHER modality's sigma).
+    pub v_sigma: f32,
+    pub v_context_valid: &'a [f32],
+    pub a_latent: &'a [f32],
+    pub a_timesteps: &'a [f32],
+    pub a_positions: &'a [f32],
+    pub a_context: &'a [f32],
+    pub a_context_len: usize,
+    pub ta: usize,
+    pub a_sigma: f32,
+    pub a_context_valid: &'a [f32],
+}
+
+/// [`forward_q_streamed`]'s audio+video twin: one joint forward at the real
+/// 22B AV config, streaming each block off the checkpoint, quantized to
+/// `tier`, cached per checkpoint in host RAM and left resident on the card
+/// between steps.
+///
+/// This is the path that did not exist - the reason
+/// `crate::av_stream`'s own module doc had to say an audio-visual run
+/// "expands the whole checkpoint to host fp32 and re-uploads every block to
+/// the card on every forward". The two arms differ by the two things that
+/// actually cost: the host footprint is the checkpoint's QUANTIZED size
+/// rather than its fp32 expansion, and a warm step re-uploads nothing that
+/// the card already holds.
+///
+/// Same three exactness arguments the video-only path makes, unchanged:
+/// `model::int8::quantize_weight` is a pure function of the checkpoint's own
+/// immutable bytes, so a cached block and a freshly recomputed one are
+/// bit-identical; the connector routing is a pure function of a generation's
+/// fixed context, so a cached routing IS the recomputed one; and residency
+/// changes WHEN bytes move, never what any kernel reads. What is NOT exact
+/// against the fp32 arm is the quantization itself - int8 is a lossy tier,
+/// gated by `crates/ltxv/tests/av_dit_parity.rs` on cosine AND relative L2
+/// against the fp32 AV block on real weights.
+#[allow(clippy::too_many_arguments)]
+pub fn av_forward_q_streamed(
+    cfg: &LtxAvDitConfig,
+    src: &dyn TensorSource,
+    head: &Tensors,
+    device: Option<&str>,
+    tier: QTier,
+    step: &AvStreamedStep,
+    cache: &GenerationCache,
+) -> (Vec<f32>, Vec<f32>) {
+    let session = crate::devres::AvDitSession::transient(device);
+    av_forward_q_streamed_in(&session, cfg, src, head, tier, step, cache)
+}
+
+/// [`av_forward_q_streamed`] against a caller-owned
+/// [`crate::devres::AvDitSession`] - the entry point a generation loop takes,
+/// holding one device open and as many blocks resident on it as the budget
+/// allows across every one of its denoise steps.
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "info", name = "av_dit_forward_streamed", skip_all, fields(tv = step.tv, ta = step.ta, layers = cfg.video.num_layers, tier = ?tier))]
+pub fn av_forward_q_streamed_in(
+    session: &crate::devres::AvDitSession,
+    cfg: &LtxAvDitConfig,
+    src: &dyn TensorSource,
+    head: &Tensors,
+    tier: QTier,
+    step: &AvStreamedStep,
+    cache: &GenerationCache,
+) -> (Vec<f32>, Vec<f32>) {
+    let vcfg = &cfg.video;
+    let acfg = &cfg.audio;
+    let (vdim, adim) = (vcfg.inner_dim as usize, acfg.inner_dim as usize);
+    let (tv, ta) = (step.tv, step.ta);
+    assert_eq!(step.v_latent.len(), tv * vcfg.in_channels as usize);
+    assert_eq!(step.a_latent.len(), ta * acfg.in_channels as usize);
+    assert_eq!(step.v_timesteps.len(), tv);
+    assert_eq!(step.a_timesteps.len(), ta);
+    assert_eq!(step.v_keyframes_mask.len(), tv);
+
+    // ---- host: patchify both streams -------------------------------------
+    let s_patch = std::time::Instant::now();
+    let mut vx = linear(step.v_latent, tv, vcfg.in_channels as usize, tget(head, "patchify_proj.weight"), Some(tget(head, "patchify_proj.bias")), vdim);
+    if vcfg.use_keyframes_abs_pos_embedding {
+        let kf = tget(head, "keyframes_abs_pos_embedding");
+        for ti in 0..tv {
+            if step.v_keyframes_mask[ti] > 0.0 {
+                for d in 0..vdim {
+                    vx[ti * vdim + d] += kf[d];
+                }
+            }
+        }
+    }
+    let ax = linear(step.a_latent, ta, acfg.in_channels as usize, tget(head, "audio_patchify_proj.weight"), Some(tget(head, "audio_patchify_proj.bias")), adim);
+    gpu_core::profile::stage_time("av_forward_q_streamed: patchify both streams (host)", s_patch);
+
+    // ---- host: the six per-token adaLN tables + the two single-row gates ---
+    // Every one of them is a `RowTable`: one row per DISTINCT timestep, which
+    // for a denoise step is 1 (plain) or 2 (anchored/long-form) however many
+    // thousand tokens there are. The two gate tables are single-row by
+    // construction - each is keyed on the OTHER modality's SCALAR sigma.
+    let s_adaln = std::time::Instant::now();
+    let v_ts: Vec<f32> = step.v_timesteps.iter().map(|&x| x * vcfg.timestep_scale_multiplier as f32).collect();
+    let a_ts: Vec<f32> = step.a_timesteps.iter().map(|&x| x * vcfg.timestep_scale_multiplier as f32).collect();
+    let (v_adaln, v_embedded) = ada_layer_norm_single(head, "adaln_single", &v_ts, vdim, vcfg.adaln_rows() as usize);
+    let (a_adaln, a_embedded) = ada_layer_norm_single(head, "audio_adaln_single", &a_ts, adim, vcfg.adaln_rows() as usize);
+    let (av_v_ss, _) = ada_layer_norm_single(head, "av_ca_video_scale_shift_adaln_single", &v_ts, vdim, 4);
+    let (av_a_ss, _) = ada_layer_norm_single(head, "av_ca_audio_scale_shift_adaln_single", &a_ts, adim, 4);
+    let (a2v_gate, _) = ada_layer_norm_single(head, "av_ca_a2v_gate_adaln_single", &[step.a_sigma * cfg.av_ca_timestep_scale_multiplier], vdim, 1);
+    let (v2a_gate, _) = ada_layer_norm_single(head, "av_ca_v2a_gate_adaln_single", &[step.v_sigma * cfg.av_ca_timestep_scale_multiplier], adim, 1);
+    let a2v_gate_row = a2v_gate.expand();
+    let v2a_gate_row = v2a_gate.expand();
+    gpu_core::profile::stage_time("av_forward_q_streamed: six adaLN tables (host, TOTAL - nests the ada_layer_norm_single stages above)", s_adaln);
+    tracing::debug!(
+        stage = "av_adaln",
+        ms = s_adaln.elapsed().as_secs_f32() * 1e3,
+        v_distinct = v_adaln.distinct_len(),
+        a_distinct = a_adaln.distinct_len(),
+        tv,
+        ta,
+        "host stage done"
+    );
+
+    // Axis 0 is the frame axis - video's own time axis, the space the shared
+    // cross-modal RoPE lives in.
+    let cross_max_pos = [cfg.cross_pe_max_pos()];
+
+    let mut t_load = std::time::Duration::ZERO;
+    let mut t_quant = std::time::Duration::ZERO;
+    let mut t_upload = std::time::Duration::ZERO;
+    let mut misses = 0u32;
+    let mut uploads = 0u32;
+    let mut weights = |l: usize| -> std::sync::Arc<crate::block::CachedQAvBlockWeights> {
+        if let Some(c) = cache.av_block(l, tier) {
+            return c;
+        }
+        misses += 1;
+        let prefix = format!("transformer_blocks.{l}");
+        let s0 = std::time::Instant::now();
+        let block_tensors = crate::block::load_av_block_tensors_from_source(src, cfg, &prefix);
+        t_load += s0.elapsed();
+        let s1 = std::time::Instant::now();
+        let quantized = crate::block::CachedQAvBlockWeights::quantize(&block_tensors, &prefix, vcfg, acfg, tier);
+        t_quant += s1.elapsed();
+        cache.store_av_block(l, tier, quantized)
+    };
+
+    let s_open = std::time::Instant::now();
+    let gpu = session.device_for_call();
+    gpu_core::profile::stage_time("av_forward_q_streamed: device open", s_open);
+    // The resident window is filled BEFORE the RoPE tables, the connectors and
+    // the block stack have allocated anything - see
+    // `crate::devres::DitSession::prefill` for the measurement that says the
+    // order matters.
+    session.prefill(&gpu, cfg, tier, tv, step.v_context_len, step.a_context_len, &mut weights);
+
+    // Four table sets, each cached for the whole generation - see
+    // `crate::devres::RopeCache`. This path has four where the video-only one
+    // has one, so it is four times the reason to build them once.
+    let s_rope = std::time::Instant::now();
+    let table = |tag: &str, inner: u32, heads: u32, max_pos: &[u32], pos: &[f32], t: usize| {
+        let key = crate::devres::rope_key(tag, inner, heads, vcfg.positional_embedding_theta, max_pos, pos, t);
+        session.rope_tables(key, &mut || upload_rope_tables(&gpu, &ltx_rope_tables(inner, heads, vcfg.positional_embedding_theta, max_pos, pos, t)))
+    };
+    let (v_cos, v_sin) = table("video", vcfg.inner_dim, vcfg.num_heads, &vcfg.positional_embedding_max_pos, step.v_positions, tv);
+    let (a_cos, a_sin) = table("audio", acfg.inner_dim, acfg.num_heads, &acfg.positional_embedding_max_pos, step.a_positions, ta);
+    let (v_cross_cos, v_cross_sin) = table("video_cross", acfg.cross_attention_dim, acfg.num_heads, &cross_max_pos, &step.v_positions[0..tv * 2], tv);
+    let (a_cross_cos, a_cross_sin) = table("audio_cross", acfg.cross_attention_dim, acfg.num_heads, &cross_max_pos, step.a_positions, ta);
+    gpu_core::profile::stage_time("av_forward_q_streamed: four RoPE table sets (host f64 build + upload, cached per generation)", s_rope);
+
+    // ---- both embeddings connectors, cached per context -------------------
+    let s_conn = std::time::Instant::now();
+    let connector = |prefix: &str, ctx: &[f32], valid: &[f32], ctx_len: usize, inner: u32, heads: u32, head_dim: u32| -> Vec<f32> {
+        if let Some(out) = cache.connector_hit(prefix, ctx, valid, ctx_len) {
+            return out;
+        }
+        #[rustfmt::skip]
+        let (out, _) = route_context_through_connector(
+            &gpu, head, prefix, vcfg.use_embeddings_connector, ctx, valid, ctx_len as u32,
+            inner, heads, head_dim,
+            vcfg.connector_num_layers, vcfg.connector_num_learnable_registers, vcfg.connector_apply_gated_attention,
+            vcfg.connector_norm_output, vcfg.positional_embedding_theta, &vcfg.connector_positional_embedding_max_pos, vcfg.norm_eps,
+        );
+        cache.connector_store(prefix, ctx, valid, ctx_len, &out);
+        out
+    };
+    #[rustfmt::skip]
+    let v_ctx = connector("video_embeddings_connector", step.v_context, step.v_context_valid, step.v_context_len,
+        vcfg.connector_inner_dim(), vcfg.connector_num_attention_heads, vcfg.connector_attention_head_dim);
+    #[rustfmt::skip]
+    let a_ctx = connector("audio_embeddings_connector", step.a_context, step.a_context_valid, step.a_context_len,
+        acfg.connector_inner_dim(), acfg.connector_num_attention_heads, acfg.connector_attention_head_dim);
+    gpu_core::profile::stage_time("av_forward_q_streamed: both embeddings connectors", s_conn);
+
+    let mut t_block = crate::block::BlockTimings::default();
+    let mut after_block = |l: usize, uploaded: bool, up: std::time::Duration, bt: &crate::block::BlockTimings| {
+        if uploaded {
+            uploads += 1;
+        }
+        t_upload += up;
+        t_block.add(bt);
+        tracing::trace!(layer = l, device = if uploaded { "upload" } else { "resident" }, upload_ms = up.as_secs_f32() * 1e3, record_upload_ms = bt.record_upload.as_secs_f32() * 1e3, compute_ms = bt.compute.as_secs_f32() * 1e3, "av block done");
+    };
+    let rope = crate::block::AvRope {
+        v_cos: &v_cos,
+        v_sin: &v_sin,
+        a_cos: &a_cos,
+        a_sin: &a_sin,
+        v_cross_cos: &v_cross_cos,
+        v_cross_sin: &v_cross_sin,
+        a_cross_cos: &a_cross_cos,
+        a_cross_sin: &a_cross_sin,
+    };
+    let inp = crate::devres::AvForwardInputs {
+        v_adaln: &v_adaln,
+        a_adaln: &a_adaln,
+        av_v_ss: &av_v_ss,
+        av_a_ss: &av_a_ss,
+        av_a2v_gate: &a2v_gate_row,
+        av_v2a_gate: &v2a_gate_row,
+        v_context: &v_ctx,
+        a_context: &a_ctx,
+        rope,
+        tv,
+        ta,
+        v_context_len: step.v_context_len,
+        a_context_len: step.a_context_len,
+    };
+    let (vx, ax, forward_timings) = session.run_blocks(&gpu, cfg, tier, vx, ax, &inp, &mut weights, &mut after_block);
+    t_block.add(&forward_timings);
+    gpu_core::profile::stage_time("av_forward_q_streamed: block GGUF read+dequant (sum over all layers, cache misses only)", std::time::Instant::now() - t_load);
+    gpu_core::profile::stage_time("av_forward_q_streamed: block int8 quantize (sum over all layers, cache misses only)", std::time::Instant::now() - t_quant);
+    gpu_core::profile::stage_time("av_forward_q_streamed: block weight upload to device (sum over all layers, non-resident blocks only)", std::time::Instant::now() - t_upload);
+    gpu_core::profile::stage_time("av_forward_q_streamed: activation/context/adaLN upload to device (per forward)", std::time::Instant::now() - t_block.record_upload);
+    gpu_core::profile::stage_time("av_forward_q_streamed: block submit+wait (sum over all layers)", std::time::Instant::now() - t_block.compute);
+    gpu_core::profile::stage_time("av_forward_q_streamed: device->host readback (per forward)", std::time::Instant::now() - t_block.readback);
+    tracing::debug!(
+        cache_misses = misses,
+        cache_hits = cfg.video.num_layers - misses,
+        readback_ms = t_block.readback.as_secs_f32() * 1e3,
+        device_uploads = uploads,
+        device_resident = cfg.video.num_layers - uploads,
+        load_ms = t_load.as_secs_f32() * 1e3,
+        quant_ms = t_quant.as_secs_f32() * 1e3,
+        upload_ms = t_upload.as_secs_f32() * 1e3,
+        record_upload_ms = t_block.record_upload.as_secs_f32() * 1e3,
+        compute_ms = t_block.compute.as_secs_f32() * 1e3,
+        "av block stack done"
+    );
+
+    let v_out = output_stage(head, "scale_shift_table", "proj_out", &vx, &v_embedded, tv, vdim, vcfg.out_channels as usize, vcfg.norm_eps);
+    let a_out = output_stage(head, "audio_scale_shift_table", "audio_proj_out", &ax, &a_embedded, ta, adim, acfg.out_channels as usize, vcfg.norm_eps);
+    (v_out, a_out)
 }
 
 /// Every AV tap a parity test bisects with, beyond one [`DitTaps`] per
@@ -1752,7 +2041,7 @@ impl LtxAvDit {
             &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
             &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
             &av_video_ss_table.expand(), &av_audio_ss_table.expand(), &av_a2v_gate_table.expand(), &av_v2a_gate_table.expand(),
-            batch.tv as u32, batch.ta as u32, self.shard.start as u32, self.shard.end as u32,
+            batch.tv as u32, batch.ta as u32, self.shard.start as u32, self.shard.end as u32, false,
         );
         *self.res_out_v.borrow_mut() = Some(vx_final.clone());
         *self.res_out_a.borrow_mut() = Some(ax_final.clone());
@@ -1793,12 +2082,23 @@ impl LtxAvDit {
     /// forward`]-style connector validity mask - ignored when `cfg.video.
     /// use_embeddings_connector` is `false`.
     /// Run transformer blocks `[lo, hi)` over both streams, returning the
-    /// resulting `(vx, ax)` plus each block's own output copy (one stream
-    /// each) and full [`AvBlockTaps`] (one entry per block in range, index 0
-    /// = block `lo`) - the AV counterpart of [`LtxDit::forward_blocks`], the
-    /// SAME "one function, different bounds" single source of truth shared
-    /// by [`Self::forward`]'s own `[0, num_layers)` range and
-    /// [`Self::run_stage_forward`]'s `[shard.start, shard.end)`.
+    /// resulting `(vx, ax)` plus - only when `taps` is set - each block's own
+    /// output copy (one stream each) and full [`AvBlockTaps`] (one entry per
+    /// block in range, index 0 = block `lo`). The AV counterpart of
+    /// [`LtxDit::forward_blocks`], the SAME "one function, different bounds"
+    /// single source of truth shared by [`Self::forward`]'s own
+    /// `[0, num_layers)` range and [`Self::run_stage_forward`]'s
+    /// `[shard.start, shard.end)`.
+    ///
+    /// `taps` is a real cost, not a formality, which is why it is a parameter
+    /// rather than always on. The tap set is eight `[t, dim]`-scale host
+    /// vectors plus a full copy of each stream's state, PER BLOCK: at a real
+    /// generation's token count that is gigabytes of host allocation per
+    /// forward for numbers only a parity test ever reads.
+    /// [`Self::run_stage_forward`] passes `false`; [`Self::forward`], whose
+    /// entire reason to exist is bisecting against a golden, passes `true`.
+    /// Setting it changes no number either stream computes - the taps are
+    /// READ from the same buffers the forward already wrote.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn forward_blocks_av(
         &self,
@@ -1825,14 +2125,16 @@ impl LtxAvDit {
         ta: u32,
         lo: u32,
         hi: u32,
+        taps: bool,
     ) -> (Vec<f32>, Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<AvBlockTaps>) {
         let vcfg = &self.cfg.video;
         let acfg = &self.cfg.audio;
         let mut vxx = vx.to_vec();
         let mut axx = ax.to_vec();
-        let mut v_block_out = Vec::with_capacity((hi - lo) as usize);
-        let mut a_block_out = Vec::with_capacity((hi - lo) as usize);
-        let mut taps = Vec::with_capacity((hi - lo) as usize);
+        let cap = if taps { (hi - lo) as usize } else { 0 };
+        let mut v_block_out = Vec::with_capacity(cap);
+        let mut a_block_out = Vec::with_capacity(cap);
+        let mut tap_out = Vec::with_capacity(cap);
         for l in lo..hi {
             let blk = LtxAvBlock::on(gpu.share(), vcfg, acfg, &self.w, &format!("transformer_blocks.{l}"), (v_context.len() / vcfg.inner_dim as usize) as u32, (a_context.len() / acfg.inner_dim as usize) as u32);
             #[rustfmt::skip]
@@ -1841,15 +2143,17 @@ impl LtxAvDit {
                 v_cos_bufs, v_sin_bufs, a_cos_bufs, a_sin_bufs,
                 v_cross_cos_bufs, v_cross_sin_bufs, a_cross_cos_bufs, a_cross_sin_bufs,
                 av_video_ss_table, av_audio_ss_table, av_a2v_gate_table, av_v2a_gate_table,
-                tv, ta,
+                tv, ta, taps,
             );
             vxx = vout;
             axx = aout;
-            v_block_out.push(vxx.clone());
-            a_block_out.push(axx.clone());
-            taps.push(tp);
+            if taps {
+                v_block_out.push(vxx.clone());
+                a_block_out.push(axx.clone());
+                tap_out.push(tp);
+            }
         }
-        (vxx, axx, v_block_out, a_block_out, taps)
+        (vxx, axx, v_block_out, a_block_out, tap_out)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1968,7 +2272,7 @@ impl LtxAvDit {
             &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
             &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
             &av_video_ss_table.expand(), &av_audio_ss_table.expand(), &av_a2v_gate_table.expand(), &av_v2a_gate_table.expand(),
-            tv as u32, ta as u32, 0, vcfg.num_layers,
+            tv as u32, ta as u32, 0, vcfg.num_layers, true,
         );
         vx = vx_final;
         ax = ax_final;

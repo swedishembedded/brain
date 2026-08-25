@@ -41,7 +41,7 @@ Gemma-4 are only tiny-config-parity-proven, not real-weight-proven (see
 | Inference (text to video) | [~] smoke test - tiny random-weight DiT, stub text context (`brain ltxv t2v`), see above |
 | Inference (DFR, higher-res multi-stage) | [~] smoke test - real spatial/temporal upscalers and VAE decode, still the tiny DiT (`brain ltxv dfr`) |
 | Post-hoc upscale of a finished clip | [x] `brain ltxv upscale` - VAE-encode an existing video file, run the official x2 latent spatial upscaler, refine on the distilled refinement schedule, VAE-decode. Shares the upscale+refine implementation with the internal two-stage generation path. CLI only so far, no capability action (see below) |
-| Inference (text to video+audio) | [~] `brain ltxv t2v --audio` / `audio: true` on the `t2v` action - the real audio+video DiT, both streams denoised jointly, decoded through the real audio VAE + vocoder and muxed into the container. Works; it is `[~]` rather than `[x]` because the audio-extended block has no streamed/quantized/resident path (see "Generating sound" below), so it runs the whole checkpoint as host fp32 and is far more expensive per step than the video-only path. 16 kHz stereo (no bandwidth extension); single-window clips only |
+| Inference (text to video+audio) | [~] `brain ltxv t2v --audio` / `audio: true` on the `t2v` action - the real audio+video DiT, both streams denoised jointly, decoded through the real audio VAE + vocoder and muxed into the container. Works, on the same streamed/quantized/device-resident path the video-only stream uses, so a step costs modestly more than the same clip without sound rather than several times more (see "Generating sound" below). It is `[~]` rather than `[x]` because the audio-visual DiT has no training support and no real end-to-end generation is recorded on this box. 16 kHz stereo (no bandwidth extension). Any `1 + 8k` length: past one denoising window the audio latent crosses each seam beside the video one (see "Generating sound" below). Not for a multi-scene clip |
 | Inference (image to video / keyframe conditioning) | [x] `--start-frame`, `--mid-frame` (+ `--mid-frame-at`) and `--end-frame` - up to three real stills VAE-encoded and held at sigma 0 in ONE generation pass, with `--conditioning-strength` for how hard. Refused for a multi-window or multi-scene clip; see "Anchoring a clip on real images" below |
 | LoRA fine-tune | [~] video-only DiT, host-math/gradcheck-proven (FD < 1e-4), single- and whole-batch overfit drives loss to ~0 at tiny-config scale - the audio-extended DiT has no training support |
 | Full fine-tune | [~] same scope/caveat as LoRA fine-tune above |
@@ -206,6 +206,8 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
   overridable with `BRAIN_LTXV_LONGFORM_MAX_TOKENS`.
 * **A request that fits one window is unchanged.** It is handed straight to the
   single-window path, bit for bit, and none of this runs.
+* **`--audio` crosses the same seams**, on its own time grid and with its own
+  constraint on where a seam may fall - see "Generating sound" below.
 * **`--end-frame` and `--mid-frame` are refused for a multi-window clip** - the
   first pins the last frame of one window, and pinning the end of a rolling
   plan has not been designed; the second names a pixel frame of the whole clip,
@@ -367,15 +369,20 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b --audio   --prompt "a bla
   three mel frames short of the clip (the causal audio VAE's first latent
   frame covers one mel frame rather than four); the last sample is held over
   that gap so the two tracks are the same length.
-* **Off by default because of COST, not correctness.** The audio-extended
-  transformer block has no streamed/quantized/device-resident implementation
-  the way the video-only one does - no `LtxAvBlockQ`, no AV
-  `CachedQBlockWeights`, no AV `DitSession`. So an audio-visual run expands
-  the whole checkpoint to host fp32 and re-uploads every block to the card on
-  every forward, which makes it markedly slower per step than the same clip
-  without sound and needs most of a large machine's RAM. The command refuses
-  up front, with both numbers, on a machine that cannot hold it. Closing that
-  gap is the tracked next step, and it is what would make sound cheap.
+* **Off by default because of COST, not correctness - but the cost is now a
+  fraction of what it was.** The audio-extended transformer block has the same
+  streamed/quantized/device-resident implementation the video-only one does
+  (`LtxAvBlockQ`, `CachedQAvBlockWeights`, `AvDitSession`), so an audio-visual
+  step runs the checkpoint as int8 with as many blocks resident on the card as
+  its VRAM budget allows, instead of expanding the whole thing to host fp32
+  and re-uploading every block on every forward. Measured at the real
+  single-window width on one Tesla P40, a warm audio-visual forward is now
+  roughly a fifth more expensive than the same clip's video-only forward
+  rather than several times, and holds a little over half the host RAM - the
+  exact figures, the harness and the residency policy behind them are in
+  `.agents/roadmap/ltxv.md`. It stays `[~]` and off by default because the
+  audio-visual path still has no training support, no bandwidth extension, and
+  no real end-to-end generation recorded on this box.
 * **16 kHz stereo.** The bandwidth-extension stage that lifts the base
   vocoder to 48 kHz (`vocoder.bwe_generator.*`) is present in the checkpoint
   and not implemented - it needs an ISTFT this port does not have.
@@ -385,10 +392,38 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b --audio   --prompt "a bla
   as `audio.wav` beside the numbered frames and the printed command muxes
   both - the same "never throw away a generation for want of an encoder"
   contract the video path already had.
-* **Single-window clips only.** A multi-window or multi-scene request is
-  refused: what crosses a window seam today is a video latent prefix, and the
-  audio stream's counterpart has not been designed. Generating per window and
-  concatenating would restart the sound at every seam.
+* **A clip longer than one denoising window keeps its sound.** Past the
+  window ceiling the audio latent crosses each seam exactly as the video
+  latent does: the previous window's own last audio tokens are sliced out of
+  the denoised latent and frozen at sigma 0 at the head of the next window's
+  audio sequence, while only the new tokens get a denoising schedule. The
+  windows contribute tokens to ONE audio latent, decoded once at the end, so
+  there is no vocoder boundary at a seam to hear.
+* **The seams have to land on whole audio tokens, and a window plan with
+  `--audio` is built so they do.** The two streams do not share a time
+  resolution: one video latent frame is 8 pixel frames, so it is `8 * 25 /
+  fps` audio tokens - 25/3 of one at 24 frames a second. A seam placed at an
+  arbitrary latent frame would fall part way into a token, and two thirds of a
+  token cannot be frozen. So an audio-visual plan advances in multiples of the
+  smallest number of latent frames worth a whole number of tokens (3 at 24 and
+  30 frames a second, 1 at 25), which is a different window split from the
+  same clip without `--audio` - one more window at some lengths. Every seam is
+  then
+  exact, and the clip's total token count is the same
+  `round(frames / fps * 25)` a single-window clip of that length would have,
+  so the container's two stream durations do not move. A shape whose seams
+  cannot be placed is refused with the frame counts that would work, never
+  approximated: audio that drifts against the picture does not announce
+  itself.
+* **`--context-frames` is what to lower if a plan is refused.** The carried
+  context costs both streams' budget, and it is the one knob that changes
+  where a seam can fall.
+* **Not for a multi-scene clip.** A scene boundary deliberately carries
+  nothing across, which is what frees the next scene to be a different
+  subject - so the sound would restart at every cut, and the per-scene token
+  counts do not sum to the clip's own. What sound should do at a deliberate
+  visual cut is a design question rather than an arithmetic one, and it is
+  refused rather than guessed. A long SINGLE-scene clip has no such limit.
 
 The same `audio` switch is a parameter on the `t2v` capability action, and the
 action declares an `audio` output blob (a complete 16 kHz stereo WAV), so the

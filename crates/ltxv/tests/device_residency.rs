@@ -275,15 +275,28 @@ fn the_slot_policy_never_over_promises() {
     let cfg = LtxDitConfig::ltx25_22b();
     let per_block = ltxv::block::cached_block_bytes(&cfg, QTier::Int8);
     let fit = |cap: u64, t: usize| (((cap.saturating_sub(ltxv::devres::activation_reserve_bytes(t, "wgpu")) / per_block).min(cap / 4 / per_block)) as u32).min(cfg.num_layers);
-    // 512x512-scale shapes fit the whole model; the real 720p/1080p token
-    // counts do NOT on a 24 GiB card under the wgpu backend, and the policy
-    // must say so rather than plan a window that aborts - see this crate's
-    // roadmap ledger, Phase 18, for the measured plateau this reserve encodes.
+    // A 24 GiB card affords a PARTIAL window at every shape a real generation
+    // runs at, and never the whole model at any of them - the VAE decode that
+    // follows the denoise loop needs the rest of the card and does not get to
+    // reuse this window's freed pool.
     assert!(fit(24 << 30, 1000) < cfg.num_layers && fit(24 << 30, 1000) >= 20, "a small token count gets a large window but never the whole card - the VAE decode needs the rest");
     assert!(fit(24 << 30, 3520) > 0 && fit(24 << 30, 3520) < cfg.num_layers, "720p must get a PARTIAL window on a 24 GiB card, neither zero nor all 48");
-    assert_eq!(fit(24 << 30, 8160), 0, "1080p leaves no room for a resident block on a 24 GiB card, and the policy must ask for none");
-    assert!(fit(24 << 30, 8160) <= cfg.num_layers);
+    // A window that is merely SMALLER at a bigger shape is correct; a window
+    // that is ZERO at the shape the mechanism exists for is the bug. A reserve
+    // fitted at one token count and extrapolated used to make `card - reserve`
+    // underflow here, so the policy declined residency entirely at every width
+    // past 720p and every block crossed the bus on every forward. Same claim
+    // `ltxv::devres`'s own unit test makes; asserted here too because this
+    // file is where a real card's arithmetic is checked.
+    for t in [8160usize, 8800, 12320, 13200] {
+        assert!(fit(24 << 30, t) > 0, "the policy must plan a NONEMPTY window at {t} tokens, a width a real generation runs at");
+        assert!(fit(24 << 30, t) < cfg.num_layers, "{t} tokens must not claim the whole card either");
+    }
     assert!(fit(24 << 30, 8160) <= fit(24 << 30, 3520), "more tokens must never buy more resident blocks");
+    // Far enough past any real shape that the RESERVE, not the card-fraction
+    // cap, is what binds - the arm that proves the reserve still shrinks the
+    // window smoothly instead of falling off a cliff.
+    assert!(fit(24 << 30, 40000) < fit(24 << 30, 13200), "past the real widths the reserve must keep shrinking the window");
     assert_eq!(fit(2 << 30, 3520), 0, "a card that cannot hold one forward's activations must ask for zero slots");
 }
 

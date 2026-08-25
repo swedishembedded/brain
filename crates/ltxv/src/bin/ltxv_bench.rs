@@ -62,7 +62,8 @@
 //! Usage:
 //!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]     video DiT block stack (fp32, synthetic weights)
 //!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode
-//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident] [distinct_timesteps]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres); distinct_timesteps sizes the host adaLN stage (1 = plain t2v, 2 = anchored or long-form, tokens = no dedup at all, i.e. what this stage cost before the dedup existed)
+//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident] [distinct_timesteps] [warm_reps]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres); distinct_timesteps sizes the host adaLN stage (1 = plain t2v, 2 = anchored or long-form, tokens = no dedup at all, i.e. what this stage cost before the dedup existed); warm_reps repeats the cache-hit call so a headline is a best-of-N and not one sample (the first warm call is the warm-up and is excluded)
+//!   ltxv_bench streamed-av [layers] [video_tokens] [ctx_len] [audio_tokens] [reuse_cache] [resident] [distinct_timesteps] [warm_reps]  the same, for the JOINT audio+video forward - read against `streamed` at the same video token count to get what audio costs
 //!   ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]   decode a DUMPED latent (see ltxv::latentdump), optionally a latent-cell crop
 //!
 //! `vae` and `decode` need `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
@@ -390,6 +391,36 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
 
 // -------------------------------------------------------------- streamed ---
 
+/// Cumulative DEVICE kernel time on `gpu` since it was opened, in ms - the sum
+/// of the same per-kernel table `BRAIN_PROFILE` prints.
+///
+/// A resident session holds ONE device for its whole life, so this counter is
+/// cumulative across every forward that ran on it and a single call's device
+/// time is the DIFFERENCE between two readings. That difference is what
+/// separates "the card is the bottleneck" from "the host is", and it is not
+/// derivable from wall clock: wall clock around a forward includes the host
+/// patchify/adaLN/connector stages, the weight streaming and the readback,
+/// none of which is a kernel. `None` on a backend that cannot timestamp
+/// kernels - reported as unavailable rather than as zero.
+fn device_kernel_ms(gpu: &Gpu) -> Option<f64> {
+    Some(gpu.kernel_times()?.iter().map(|(_, ms, _)| ms).sum())
+}
+
+/// One call's wall/device split, printed the same way by both streamed
+/// benches: `prev` carries the previous reading of [`device_kernel_ms`] so the
+/// per-call figure is a difference and not a total.
+fn report_call(label: &str, layers: u32, wall: f64, device_ms: Option<f64>, prev: &std::cell::Cell<f64>) {
+    print!("[{label}] wall time for {layers} layers: {wall:.2} s ({:.2} s/layer)", wall / f64::from(layers.max(1)));
+    match device_ms {
+        Some(total) => {
+            let this = total - prev.get();
+            prev.set(total);
+            println!(" | device {:.2} s ({:.1}% of wall), host {:.2} s", this / 1e3, 100.0 * this / 1e3 / wall.max(1e-9), wall - this / 1e3);
+        }
+        None => println!(" | device time unavailable on this backend"),
+    }
+}
+
 /// The REAL production forward path (`ltxv::dit::forward_q_streamed`,
 /// int8 compute, streaming each of `layers` blocks fresh off the real GGUF
 /// on every call - `RealDit::forward` in `crate::pipeline` dispatches
@@ -430,7 +461,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
 /// a cheap sanity check this bench had none of before: a degenerate
 /// (all-zero, saturated, or NaN) DiT output is visible here without needing
 /// a full generation + VAE decode to notice.
-fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32) {
+fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32, warm_reps: u32) {
     let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
     // stage_time (gpu_core::profile) only prints under BRAIN_PROFILE; this
     // bench's whole purpose is that breakdown, so turn it on unconditionally
@@ -483,7 +514,8 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
     } else {
         ltxv::devres::DitSession::transient(dev)
     };
-    let call = |label: &str, cache: &ltxv::block::GenerationCache| {
+    let prev_device = std::cell::Cell::new(0f64);
+    let call = |label: &str, cache: &ltxv::block::GenerationCache| -> f64 {
         let t1 = Instant::now();
         let out = ltxv::dit::forward_q_streamed_in(
             &session,
@@ -502,7 +534,11 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
             cache,
         );
         let wall = t1.elapsed().as_secs_f64();
-        println!("[{label}] wall time for {layers} layers: {wall:.2} s ({:.2} s/layer)", wall / layers.max(1) as f64);
+        // Only a RESIDENT session can be asked: a transient one's
+        // `device_for_call` OPENS a device, which would both cost seconds and
+        // report a counter no forward ever ran on.
+        let device_ms = session.is_resident().then(|| device_kernel_ms(&session.device_for_call())).flatten();
+        report_call(label, layers, wall, device_ms, &prev_device);
         let n = out.len() as f64;
         let mean = out.iter().map(|&v| v as f64).sum::<f64>() / n;
         let var = out.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / n;
@@ -511,6 +547,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
         println!("[{label}] OUTPUT STATS: len={} mean={mean:.6} std={:.6} min={min:.6} max={max:.6} nonfinite={nan_count}", out.len(), var.sqrt());
         let rs = session.stats();
         println!("[{label}] DEVICE RESIDENCY: slots={} device_hits={} device_uploads={}", rs.slots, rs.hits, rs.uploads);
+        wall
     };
     // `reuse_cache` is exactly "do both calls share one cache?" - a second,
     // default-constructed `GenerationCache` is the honest way to express "no",
@@ -519,7 +556,20 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
     let cache = ltxv::block::GenerationCache::default();
     call("call 1 (always a cache miss - the first forward of a generation)", &cache);
     if reuse_cache {
-        call("call 2 (cache hit on every layer - every OTHER forward of a generation)", &cache);
+        // Every warm call is a repetition of the same measurement, and the
+        // FIRST of them is a warm-up: it is the call that pays for whatever the
+        // cold call left cold (the device residency window's own last uploads,
+        // the allocator pool settling). Best-of-N over the rest is what gets
+        // reported; the run prints them all so a reader can see the spread
+        // rather than trust a single sample.
+        let mut warm = Vec::new();
+        for r in 0..warm_reps.max(1) {
+            warm.push(call(&format!("call {} (cache hit on every layer - every OTHER forward of a generation)", r + 2), &cache));
+        }
+        let best = warm.iter().skip(1).fold(f64::INFINITY, |a, &b| a.min(b));
+        if best.is_finite() {
+            println!("[warm] best of {} (first warm call excluded as warm-up): {best:.2} s", warm.len() - 1);
+        }
     } else {
         call("call 2 (its OWN fresh cache - the pre-cache per-call cost)", &ltxv::block::GenerationCache::default());
     }
@@ -629,6 +679,143 @@ fn bench_av(tokens: u32, ctx_len: u32, frames: u32, fps: u32) {
     }
 }
 
+/// The STREAMED, int8, device-resident joint audio+video forward
+/// (`ltxv::dit::av_forward_q_streamed_in`) - the AV counterpart of
+/// [`bench_streamed`], and the number the audio-visual path is supposed to be
+/// read against.
+///
+/// Deliberately the same harness shape as `streamed`, argument for argument,
+/// because the whole claim being measured is a RATIO: what an AV forward costs
+/// against a video-only forward at the SAME video token count. Two calls, the
+/// first a guaranteed cache miss (a generation's first forward) and the second
+/// a hit on every layer (every other forward), with one shared
+/// `GenerationCache` and - at `resident=1` - one shared `AvDitSession`, which
+/// is exactly what a real denoise loop holds.
+///
+/// `audio_tokens` is the audio stream's own length. A real clip's is
+/// `round(frames / fps * 25)` (`ltxv::audio::latent_frames`); passing it
+/// explicitly keeps this harness from having to reconstruct a clip geometry it
+/// does not otherwise need.
+fn bench_streamed_av(layers: u32, tv: u32, ctx_len: u32, ta: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32, warm_reps: u32) {
+    let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
+    std::env::set_var("BRAIN_PROFILE", "1");
+
+    let mut cfg = ltxv::LtxAvDitConfig::ltx25();
+    cfg.video.num_layers = layers;
+    cfg.assert_supported();
+    let per_block = ltxv::block::cached_av_block_bytes(&cfg.video, &cfg.audio, ltxv::block::QTier::Int8);
+    println!("\n=== ltxv real-checkpoint STREAMED audio+video forward (int8): {layers} of 48 real layers, {tv} video + {ta} audio tokens, {ctx_len} context, {distinct_timesteps} distinct timesteps (reuse_cache={reuse_cache}, device_resident={resident}) ===");
+    println!("[av] cached int8 bytes per AV block: {} MiB (all {} layers: {} MiB)", per_block / (1 << 20), layers, per_block * u64::from(layers) / (1 << 20));
+
+    let t0 = Instant::now();
+    let src = ltxv::gguf_src::LtxvGgufSource::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
+    let head = ltxv::dit::load_av_head_tensors_from_source(&src, &cfg);
+    eprintln!("GGUF opened + AV head tensors loaded in {:.2} s", t0.elapsed().as_secs_f64());
+
+    // Shape-correct scratch: a dispatch's cost is a function of its shape.
+    let v_latent: Vec<f32> = (0..tv as usize * cfg.video.in_channels as usize).map(|i| ((i % 71) as f32 / 71.0) - 0.5).collect();
+    let a_latent: Vec<f32> = (0..ta as usize * cfg.audio.in_channels as usize).map(|i| ((i % 53) as f32 / 53.0) - 0.5).collect();
+    let distinct = distinct_timesteps.clamp(1, tv.max(1));
+    let v_timesteps: Vec<f32> = (0..tv).map(|i| 500.0 + (i % distinct) as f32).collect();
+    let a_timesteps: Vec<f32> = (0..ta).map(|i| 500.0 + (i % distinct.min(ta.max(1))) as f32).collect();
+    let (lh, lw) = (22usize, 40usize);
+    let lat_t = (tv as usize).div_ceil(lh * lw).max(1);
+    let mut v_positions = ltxv::pipeline::real_pixel_positions(lat_t, lh, lw, 24.0);
+    // `real_pixel_positions` fills a whole `lat_t * lh * lw` grid; the bench's
+    // token count need not be a multiple of one, so keep the leading `tv`
+    // positions of each of the three axes.
+    let grid = lat_t * lh * lw;
+    let mut trimmed = Vec::with_capacity(3 * tv as usize * 2);
+    for axis in 0..3 {
+        trimmed.extend_from_slice(&v_positions[axis * grid * 2..axis * grid * 2 + tv as usize * 2]);
+    }
+    v_positions = trimmed;
+    let a_positions = ltxv::audio::positions(ta as usize);
+    let v_context = vec![0f32; ctx_len as usize * cfg.video.cross_attention_dim as usize];
+    let a_context = vec![0f32; ctx_len as usize * cfg.audio.connector_inner_dim() as usize];
+    let context_valid = vec![1f32; ctx_len as usize];
+
+    let dev: Option<&str> = None;
+    let session = if resident {
+        ltxv::devres::AvDitSession::resident(&cfg, ltxv::block::QTier::Int8, dev, tv as usize)
+    } else {
+        ltxv::devres::AvDitSession::transient(dev)
+    };
+    let step = ltxv::dit::AvStreamedStep {
+        v_latent: &v_latent,
+        v_timesteps: &v_timesteps,
+        v_positions: &v_positions,
+        v_keyframes_mask: &vec![0f32; tv as usize],
+        v_context: &v_context,
+        v_context_len: ctx_len as usize,
+        tv: tv as usize,
+        v_sigma: 1.0,
+        v_context_valid: &context_valid,
+        a_latent: &a_latent,
+        a_timesteps: &a_timesteps,
+        a_positions: &a_positions,
+        a_context: &a_context,
+        a_context_len: ctx_len as usize,
+        ta: ta as usize,
+        a_sigma: 1.0,
+        a_context_valid: &context_valid,
+    };
+    let prev_device = std::cell::Cell::new(0f64);
+    let call = |label: &str, cache: &ltxv::block::GenerationCache| -> f64 {
+        let t1 = Instant::now();
+        let (v, a) = ltxv::dit::av_forward_q_streamed_in(&session, &cfg, &src, &head, ltxv::block::QTier::Int8, &step, cache);
+        let wall = t1.elapsed().as_secs_f64();
+        let device_ms = session.is_resident().then(|| device_kernel_ms(&session.device_for_call())).flatten();
+        report_call(label, layers, wall, device_ms, &prev_device);
+        for (name, out) in [("video", &v), ("audio", &a)] {
+            let n = out.len() as f64;
+            let mean = out.iter().map(|&x| x as f64).sum::<f64>() / n;
+            let var = out.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n;
+            let (min, max) = out.iter().fold((f32::MAX, f32::MIN), |(mn, mx), &x| (mn.min(x), mx.max(x)));
+            let nonfinite = out.iter().filter(|x| !x.is_finite()).count();
+            println!("[{label}] {name} OUTPUT STATS: len={} mean={mean:.6} std={:.6} min={min:.6} max={max:.6} nonfinite={nonfinite}", out.len(), var.sqrt());
+        }
+        let rs = session.stats();
+        println!("[{label}] DEVICE RESIDENCY: slots={} device_hits={} device_uploads={}", rs.slots, rs.hits, rs.uploads);
+        wall
+    };
+    let cache = ltxv::block::GenerationCache::default();
+    call("call 1 (cache miss on every layer - a generation's first forward)", &cache);
+    if reuse_cache {
+        // See `bench_streamed`: the first warm call is the warm-up and is
+        // excluded from the reported best-of-N.
+        let mut warm = Vec::new();
+        for r in 0..warm_reps.max(1) {
+            warm.push(call(&format!("call {} (cache hit on every layer - every OTHER forward)", r + 2), &cache));
+        }
+        let best = warm.iter().skip(1).fold(f64::INFINITY, |a, &b| a.min(b));
+        if best.is_finite() {
+            println!("[warm] best of {} (first warm call excluded as warm-up): {best:.2} s", warm.len() - 1);
+        }
+    } else {
+        call("call 2 (its OWN fresh cache)", &ltxv::block::GenerationCache::default());
+    }
+    println!("[av] host cache after both calls: {} MiB over {} blocks", cache.block_byte_len() / (1 << 20), cache.stats().blocks);
+}
+
+/// Peak resident set size of this process, from the kernel's own high-water
+/// mark (`/proc/self/status`'s `VmHWM`), in MiB.
+///
+/// Host RSS is a first-class result for every mode below, not a footnote: what
+/// separates the streamed int8 tiers from expanding a checkpoint to host fp32
+/// is mostly a memory claim, and a run that got the timing it wanted while
+/// quadrupling the host footprint has not made the path cheaper. Sampling it
+/// externally needs a wrapper the caller has to remember (and a `wait4` that
+/// this box has no `time(1)` for), so the harness reports its own high-water
+/// mark and a run cannot forget to. `None` off Linux, where the file does not
+/// exist - reported as unavailable rather than as zero.
+fn peak_rss_mib() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = s.lines().find(|l| l.starts_with("VmHWM:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mode = a.get(1).map(|s| s.as_str()).unwrap_or("dit");
@@ -638,15 +825,20 @@ fn main() {
         "vae" => bench_vae(arg(2, 2) as usize, arg(3, 17), arg(4, 384), arg(5, 384)),
         "vocoder" => bench_vocoder(arg(2, 3) as usize, arg(3, 100)),
         "av" => bench_av(arg(2, 880), arg(3, 256), arg(4, 25), arg(5, 24)),
-        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false), arg(7, 1)),
+        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false), arg(7, 1), arg(8, 1)),
+        "streamed-av" => bench_streamed_av(arg(2, 4), arg(3, 512), arg(4, 256), arg(5, 128), a.get(6).map(|s| s == "1").unwrap_or(false), a.get(7).map(|s| s == "1").unwrap_or(false), arg(8, 1), arg(9, 1)),
         "decode" => {
             let path = a.get(2).map(|s| s.as_str()).unwrap_or_else(|| panic!("usage: ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]"));
             let crop = (a.len() >= 8).then(|| (arg(4, 0), arg(5, 0), arg(6, 0), arg(7, 0)));
             bench_decode(path, a.get(3).map(|s| s.as_str()).unwrap_or("tiled"), crop);
         }
         other => {
-            eprintln!("unknown mode {other} (dit|vae|vocoder|av|streamed|decode)");
+            eprintln!("unknown mode {other} (dit|vae|vocoder|av|streamed|streamed-av|decode)");
             std::process::exit(1);
         }
+    }
+    match peak_rss_mib() {
+        Some(mib) => println!("[{mode}] host peak RSS: {mib} MiB"),
+        None => println!("[{mode}] host peak RSS: unavailable on this platform"),
     }
 }

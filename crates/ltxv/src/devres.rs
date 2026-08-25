@@ -67,8 +67,8 @@
 //! residency entirely) - the bisect handle a measurement pass needs, and the
 //! way the bit-identity gate runs both arms of the same generation.
 
-use crate::block::{cached_block_bytes, BlockTimings, CachedQBlockWeights, LtxBlockQ, QTier, KERNELS};
-use crate::config::LtxDitConfig;
+use crate::block::{cached_av_block_bytes, cached_block_bytes, BlockTimings, CachedQAvBlockWeights, CachedQBlockWeights, LtxAvBlockQ, LtxBlockQ, QTier, KERNELS};
+use crate::config::{LtxAvDitConfig, LtxDitConfig};
 use gpu_core::Gpu;
 use std::sync::Mutex;
 use weightset::{CyclicScan, GroupId, Schedule, WeightSet};
@@ -87,60 +87,84 @@ const PLAN_PASSES: u32 = 2;
 /// Bytes of device memory a streamed forward needs for everything that is NOT
 /// resident block weights, at `t` video tokens.
 ///
-/// Measured, not derived, on a 24 GiB Tesla P40 (wgpu/Vulkan) with the real
-/// `ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, all 48 layers, int8:
+/// Measured on a 24 GiB Tesla P40 (wgpu/Vulkan) with the real
+/// `ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, all 48 layers, int8. Peak
+/// VRAM, sampled outside any timed region, at the token count a real
+/// generation actually runs at (T=12320, ctx 1024) - reproduce with
+/// `ltxv_bench streamed 48 12320 1024 1 1 1` under
+/// `BRAIN_LTXV_RESIDENT_BLOCKS=<n>`:
 ///
-/// | arm | resident weights | peak VRAM | churn |
-/// |---|---:|---:|---:|
-/// | chained, 0 resident blocks, T=3520 | 0 | 16522 MiB | 16522 MiB |
-/// | 48 resident blocks, T=3520 | 12360 MiB | 18062 MiB | 5702 MiB |
+/// | resident blocks | resident weights | peak VRAM |
+/// |---:|---:|---:|
+/// | 0 | 0 | 16833 MiB |
+/// | 16 | 4096 MiB | 22318 MiB |
+/// | 24 | 6144 MiB | 17766 MiB |
 ///
-/// Those two numbers are not in conflict, and the difference between them is
-/// the single most important fact about this budget: wgpu's allocator pool is
-/// **elastic and greedy**. Left alone it grows to fill the card (16.5 GiB);
-/// under pressure from long-lived allocations it works in a third of that
-/// (5.7 GiB). So the plateau is NOT the requirement - the requirement is what
-/// the pool shrinks to, and the constant below is that number plus margin.
+/// Read that table twice. It is **not monotone**, and that is the single most
+/// important fact about this budget: wgpu's allocator pool is elastic and
+/// greedy. Left alone it grows to fill whatever is free; under pressure from
+/// long-lived allocations it works in far less. Holding MORE weights resident
+/// made the peak go DOWN. So the plateau is never the requirement - the
+/// requirement is what the pool shrinks to when the weights are already there,
+/// and that number at the real width is a little over 11 GiB of non-weight
+/// working set.
 ///
-/// Two consequences, both real:
+/// Three consequences, all paid for:
 ///
 /// * The resident window must be filled BEFORE the pool has grown (see
-///   `DitSession::run_blocks`'s pre-fill). Filling it lazily, block by block,
-///   loses a race against the pool and aborts - measured, at 24009 MiB of a
-///   24576 MiB card.
-/// * The slope is per-token because the churn is: the largest single transient
-///   is `attn2`'s materialized `[heads, t, context_len]` score slab (461 MB at
-///   T=3520/ctx 1024, 1.07 GB at T=8160), and every activation buffer in the
-///   block is `[t, dim]` or `[t, 4*dim]`.
+///   `DitSession::prefill`). Filling it lazily, block by block, loses a race
+///   against the pool and aborts - measured, at 24009 MiB of a 24576 MiB card.
+/// * **A slope fitted at one token count is not a model.** The slope this
+///   constant used to carry was fitted at T=3520 and extrapolated to tens of
+///   gigabytes at the real width, so `card - reserve` underflowed and the
+///   policy declined residency ENTIRELY (`slots=0`) at exactly the shape the
+///   whole mechanism exists for - every block's weights crossing the bus on
+///   every forward, on the video path as well as the audio+video one. The fit
+///   below is taken across a sweep instead, and the sweep is what the table
+///   above is.
+/// * The largest single transient the old fit was sized around - `attn2`'s
+///   materialized `[heads, t, context_len]` score+probability pair - **no
+///   longer exists**: text cross-attention is a fused online-softmax kernel
+///   now and allocates no slab at all. What remains is `[t, dim]` and
+///   `[t, 4*dim]` activation buffers, plus the generation-lifetime RoPE
+///   tables ([`RopeCache`]).
 ///
-/// Deliberately generous: under-reserving costs a driver-level abort,
+/// Still deliberately generous: under-reserving costs a driver-level abort,
 /// over-reserving costs a few resident blocks and the graceful partial-window
 /// path picks up the difference.
 pub fn activation_reserve_bytes(t: usize, backend: &str) -> u64 {
     /// Everything that does not follow the token count: the head tensors, the
-    /// connector's working set, the RoPE tables, the allocator's own floor.
+    /// connector's working set, the allocator's own floor.
     const BASE: u64 = 3 << 29; // 1.5 GiB
-    /// Measured slope for the DEFAULT wgpu backend, bytes per video token,
-    /// fitted to the GREEDY plateau plus real headroom: at T=3520 it reserves
-    /// 19.0 GiB against a plateau measured at 16.2-16.5 GiB, leaving 20
-    /// resident blocks and a measured 2.4 GiB of the 24576 MiB card still
-    /// free. Fitting it to the plateau alone allows 25 blocks and lands the
-    /// peak at 23623 MiB, which works on an otherwise-idle card and is too
-    /// thin to ship as a default.
-    const PER_TOKEN_WGPU: u64 = 5200 * 1024;
+    /// Measured slope for the DEFAULT wgpu backend, bytes per video token.
+    ///
+    /// Fitted to the UNDER-PRESSURE working set in the table above (about
+    /// 11.6 GiB of non-weight peak at T=12320 with the window full), plus
+    /// roughly half again as margin, spread over the token count: at T=12320
+    /// it reserves ~17.0 GiB of a 24576 MiB card, which leaves more than the
+    /// [`MAX_CARD_FRACTION_DENOM`] cap allows and so lets that cap - the
+    /// VAE-decode headroom rule, which is the constraint that actually
+    /// matters on this card - be the binding one at every width a real
+    /// generation uses. Past roughly 13000 tokens the reserve takes over again
+    /// and the window shrinks smoothly rather than falling off a cliff to
+    /// zero, which is what the old fit did.
+    const PER_TOKEN_WGPU: u64 = 1321 * 1024;
     /// brain's own native Vulkan backend recycles transient buffers, uniforms
     /// and descriptor sets explicitly at every flush (`crates/vulkan`'s
     /// `VkContext` reclaim path) instead of growing an opportunistic pool, and
     /// it does not carry the doubled per-uploaded-buffer resident cost wgpu
     /// measured (`crates/gpu-core/tests/vram_overhead.rs`). Its churn is
-    /// therefore close to the working set rather than to the card, so the same
-    /// card affords far more resident blocks. Sized from the analytic working
-    /// set (`attn2`'s `[heads, t, context_len]` score+probability pair plus
-    /// ~20 `[t, dim]`/`[t, 4*dim]` activation buffers, double-buffered across
-    /// the flush) rather than from a plateau, because there is no plateau to
-    /// fit - and left deliberately generous, since the partial-window path
-    /// costs a few uploads where an under-reserve costs an abort.
-    const PER_TOKEN_VULKAN: u64 = 2000 * 1024;
+    /// therefore close to the working set rather than to the card.
+    ///
+    /// DERIVED, not measured - there is no Vulkan plateau to fit, and this
+    /// crate has no real-weight Vulkan run on this box. The derivation is the
+    /// analytic per-block working set (about twenty `[t, dim]` buffers plus
+    /// the FFN's `[t, 4*dim]` pair, double-buffered across a flush, with no
+    /// wgpu doubling and no `attn2` slab any more), rounded generously up.
+    /// Kept strictly below the wgpu slope, which is the one thing about it
+    /// that IS certain: a backend that reclaims explicitly cannot need more
+    /// headroom than one that does not.
+    const PER_TOKEN_VULKAN: u64 = 800 * 1024;
     let per_token = match backend {
         "vulkan" => PER_TOKEN_VULKAN,
         _ => PER_TOKEN_WGPU,
@@ -215,10 +239,18 @@ fn slots_override() -> Option<u32> {
 /// [`activation_reserve_bytes`]) or read from the machine (the heap size, the
 /// published ceiling's headroom).
 pub fn planned_slots(cfg: &LtxDitConfig, tier: QTier, t: usize, device: memauth::Device, backend: &str) -> u32 {
+    slots_for(cached_block_bytes(cfg, tier), cfg.num_layers, t, device, backend)
+}
+
+/// [`planned_slots`] over an already-known per-block footprint and layer
+/// count - the whole policy, shared verbatim by the video-only and the
+/// audio+video sessions. The AV block is a different SIZE, never a different
+/// rule, so it gets this function rather than a second copy of the
+/// arithmetic.
+pub fn slots_for(per_block: u64, num_layers: u32, t: usize, device: memauth::Device, backend: &str) -> u32 {
     if let Some(n) = slots_override() {
-        return n.min(cfg.num_layers);
+        return n.min(num_layers);
     }
-    let per_block = cached_block_bytes(cfg, tier);
     if per_block == 0 {
         return 0;
     }
@@ -244,7 +276,86 @@ pub fn planned_slots(cfg: &LtxDitConfig, tier: QTier, t: usize, device: memauth:
     // the forward is cheap anyway; it buys a generation that finishes.
     const MAX_CARD_FRACTION_DENOM: u64 = 4;
     let by_cap = card / MAX_CARD_FRACTION_DENOM / per_block;
-    (by_reserve.min(by_cap) as u32).min(cfg.num_layers)
+    (by_reserve.min(by_cap) as u32).min(num_layers)
+}
+
+/// Device-resident RoPE tables, kept for as long as the session that built
+/// them.
+///
+/// A generation's RoPE tables are a pure function of `(config, positions, t)`,
+/// and a denoise loop holds all three fixed across every one of its steps -
+/// yet both streamed forwards rebuilt them on the HOST in f64 and re-uploaded
+/// them on EVERY call. At a real generation's token count that build is a
+/// visible share of a warm forward's wall clock (it is its own
+/// `BRAIN_PROFILE` stage, `RoPE table build (host, f64)`), and the upload is
+/// `heads * t * head_dim/2` floats twice over, per table, per forward - the
+/// audio+video path has FOUR such tables.
+///
+/// Keyed on a hash of everything the tables are a function of, never on "the
+/// caller says it is the same": a long-form window, a refinement pass or a
+/// second scene changes `positions` while leaving every dimension alone, and
+/// silently reusing another shape's rotation is the kind of defect that
+/// produces plausible video. `f32::to_bits` rather than `==`, for the reason
+/// `dit::adaln`'s own dedup uses bits: `0.0 == -0.0` is true for two different
+/// inputs.
+///
+/// Only a RESIDENT session caches. A transient one opens a fresh device per
+/// forward, so buffers from the previous call belong to a device that no
+/// longer exists.
+/// One cached RoPE table set: the shape key it was built for, then the cos
+/// and sin tables. Named rather than inline because the tuple is the same
+/// three things every call site destructures.
+type RopeSlot = (u64, Vec<gpu_core::DeviceBuffer>, Vec<gpu_core::DeviceBuffer>);
+
+#[derive(Default)]
+struct RopeCache {
+    slots: Mutex<Vec<RopeSlot>>,
+}
+
+/// How many distinct RoPE table sets one session remembers. The audio+video
+/// forward uses four (each stream's self-attention table plus each stream's
+/// cross-modal one); the video-only forward uses one. Eight leaves room for a
+/// second shape - the boundary between two long-form windows - without letting
+/// a long-running process accumulate a table per window forever.
+const MAX_ROPE_SLOTS: usize = 8;
+
+impl RopeCache {
+    /// This key's tables, built and uploaded on first use. `resident` is the
+    /// session's own `gpu.is_some()`: `false` builds every time and stores
+    /// nothing.
+    fn get(&self, resident: bool, key: u64, build: &mut dyn FnMut() -> (Vec<gpu_core::DeviceBuffer>, Vec<gpu_core::DeviceBuffer>)) -> (Vec<gpu_core::DeviceBuffer>, Vec<gpu_core::DeviceBuffer>) {
+        if !resident {
+            return build();
+        }
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, c, s)) = slots.iter().find(|(k, _, _)| *k == key) {
+            // A `DeviceBuffer` clone is an `Arc` bump onto the SAME
+            // allocation, so this hands back the identical device bytes, not
+            // a copy of them.
+            return (c.clone(), s.clone());
+        }
+        let (c, s) = build();
+        if slots.len() >= MAX_ROPE_SLOTS {
+            slots.remove(0);
+        }
+        slots.push((key, c.clone(), s.clone()));
+        (c, s)
+    }
+}
+
+/// A [`RopeCache`] key over everything a table is a function of - the geometry
+/// AND the positions, by BITS.
+pub fn rope_key(tag: &str, inner_dim: u32, heads: u32, theta: f64, max_pos: &[u32], positions: &[f32], t: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    tag.hash(&mut h);
+    (inner_dim, heads, t).hash(&mut h);
+    theta.to_bits().hash(&mut h);
+    max_pos.hash(&mut h);
+    for p in positions {
+        p.to_bits().hash(&mut h);
+    }
+    h.finish()
 }
 
 /// The shape a [`BlockWindow`]'s uploaded blocks are valid for. A generation
@@ -280,12 +391,19 @@ pub struct ResidencyStats {
 
 /// A fixed window of device slots over one model's blocks, scheduled by
 /// [`weightset`].
-struct BlockWindow {
+///
+/// Generic in the BLOCK type: the video-only stack keeps
+/// [`crate::block::LtxBlockQ`]s and the audio+video stack keeps
+/// [`crate::block::LtxAvBlockQ`]s, but the slot table, the Bélády plan, the
+/// upload/hit bookkeeping and the budget backstop are the same mechanism and
+/// are written once. Everything below this line that is NOT generic is the
+/// per-stack forward loop, which genuinely differs (one stream vs two).
+struct BlockWindow<B> {
     shape: WindowShape,
     /// Slot `i`'s current occupant: which layer it holds and the uploaded
     /// block. Each entry owns its own `Gpu` handle, so `None`-ing an entry
     /// releases that slot's VRAM and its `memauth` grants together.
-    slots: Vec<Option<(u32, LtxBlockQ)>>,
+    slots: Vec<Option<(u32, B)>>,
     ws: WeightSet,
     hits: u64,
     uploads: u64,
@@ -295,8 +413,8 @@ struct BlockWindow {
     refusals: u64,
 }
 
-impl BlockWindow {
-    fn build(shape: WindowShape, slots: u32) -> Option<BlockWindow> {
+impl<B> BlockWindow<B> {
+    fn build(shape: WindowShape, slots: u32) -> Option<BlockWindow<B>> {
         if slots == 0 {
             return None;
         }
@@ -314,6 +432,47 @@ impl BlockWindow {
     fn stats(&self) -> ResidencyStats {
         ResidencyStats { slots: self.slots.len() as u32, hits: self.hits, uploads: self.uploads, refusals: self.refusals }
     }
+
+    /// The slots this window has planned but not yet filled - what a pre-fill
+    /// loads, in plan order. See [`DitSession::prefill`] for why the ORDER
+    /// (before anything else in the forward touches the device) is the whole
+    /// finding.
+    fn pending_pins(&self) -> Vec<(usize, u32)> {
+        self.ws.slot_contents().iter().enumerate().filter_map(|(i, g)| g.map(|g| (i, g.0))).filter(|(i, _)| self.slots[*i].is_none()).collect()
+    }
+
+    /// Make layer `l`'s weights resident and say which slot (if any) holds
+    /// them, WITHOUT keeping a borrow alive across the forward that follows.
+    ///
+    /// Returns `(slot, uploaded, upload_time)`; `None` means "run this block
+    /// streamed" - either there is no window at all or a published ceiling
+    /// refused one more resident block right now. One implementation, shared
+    /// by both stacks, because every subtlety in it was paid for once:
+    /// `plan_miss` alone is not enough (a pinned prefix reports resident
+    /// before anything has been uploaded into it), and the outgoing occupant
+    /// must drop BEFORE the incoming one allocates or a full window's peak is
+    /// `slots + 1` blocks.
+    fn acquire(&mut self, l: usize, per_block: u64, device: memauth::Device, upload: impl FnOnce() -> B) -> (Option<usize>, bool, std::time::Duration) {
+        let (slot, plan_miss) = self.ws.advance(l);
+        debug_assert_eq!(self.ws.schedule().order[l], GroupId(l as u32), "the window's schedule must visit blocks in the forward's own order");
+        let idx = slot.0 as usize;
+        let occupied_by_this_layer = self.slots[idx].as_ref().map(|(g, _)| *g == l as u32).unwrap_or(false);
+        if occupied_by_this_layer && !plan_miss {
+            self.hits += 1;
+            return (Some(idx), false, std::time::Duration::ZERO);
+        }
+        if !can_charge_a_block(device, per_block) {
+            self.slots[idx] = None;
+            self.refusals += 1;
+            tracing::warn!(layer = l, per_block, "no VRAM budget headroom for a resident block; streaming this one instead");
+            return (None, true, std::time::Duration::ZERO);
+        }
+        let s = std::time::Instant::now();
+        self.slots[idx] = None;
+        self.slots[idx] = Some((l as u32, upload()));
+        self.uploads += 1;
+        (Some(idx), true, s.elapsed())
+    }
 }
 
 /// One card, for one generation: an open device plus whatever weights are
@@ -328,10 +487,13 @@ pub struct DitSession {
     /// concurrent two-card CFG dispatch. One card's session is used by exactly
     /// one thread at a time (the other branch has its OWN session on the other
     /// card), so this is never contended.
-    window: Mutex<Option<BlockWindow>>,
+    window: Mutex<Option<BlockWindow<LtxBlockQ>>>,
     /// Slots this session was asked to plan for - `0` means residency is off
     /// and every forward opens its own device, exactly as before.
     slots: u32,
+    /// This generation's RoPE tables, built and uploaded once - see
+    /// [`RopeCache`].
+    rope: RopeCache,
 }
 
 impl DitSession {
@@ -340,7 +502,7 @@ impl DitSession {
     /// residency existed, kept as the fallback and as the arm a bit-identity
     /// gate compares against.
     pub fn transient(device: Option<&str>) -> DitSession {
-        DitSession { gpu: None, device: device.map(str::to_string), window: Mutex::new(None), slots: 0 }
+        DitSession { gpu: None, device: device.map(str::to_string), window: Mutex::new(None), slots: 0, rope: RopeCache::default() }
     }
 
     /// A session that holds its device open and keeps up to
@@ -362,7 +524,7 @@ impl DitSession {
             device = ?gpu.memory_device(),
             "device residency planned"
         );
-        DitSession { gpu: Some(gpu), device: device.map(str::to_string), window: Mutex::new(None), slots }
+        DitSession { gpu: Some(gpu), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default() }
     }
 
     /// [`Self::resident`] at an EXPLICIT slot count, bypassing the VRAM
@@ -374,7 +536,7 @@ impl DitSession {
     /// under test. `slots = 0` is the no-window fallback, which is a legal
     /// answer here rather than an error.
     pub fn resident_with_slots(device: Option<&str>, slots: u32) -> DitSession {
-        DitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots }
+        DitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default() }
     }
 
     /// This session's device handle for one forward call, plus whether it is
@@ -391,6 +553,13 @@ impl DitSession {
     /// True when this session holds its device open across calls.
     pub fn is_resident(&self) -> bool {
         self.gpu.is_some()
+    }
+
+    /// This session's device-resident RoPE tables for `key`, built and
+    /// uploaded on first use and reused by every later forward of the same
+    /// generation. See [`RopeCache`] for the key's contract.
+    pub fn rope_tables(&self, key: u64, build: &mut dyn FnMut() -> (Vec<gpu_core::DeviceBuffer>, Vec<gpu_core::DeviceBuffer>)) -> (Vec<gpu_core::DeviceBuffer>, Vec<gpu_core::DeviceBuffer>) {
+        self.rope.get(self.gpu.is_some(), key, build)
     }
 
     pub fn stats(&self) -> ResidencyStats {
@@ -432,13 +601,13 @@ impl DitSession {
             *guard = BlockWindow::build(shape, self.slots);
         }
         let Some(w) = guard.as_mut() else { return };
-        let pins: Vec<(usize, u32)> = w.ws.slot_contents().iter().enumerate().filter_map(|(i, g)| g.map(|g| (i, g.0))).filter(|(i, _)| w.slots[*i].is_none()).collect();
+        let pins = w.pending_pins();
         if pins.is_empty() {
             return;
         }
         let s = std::time::Instant::now();
         // A one-word probe to drain wgpu's `write_buffer` staging after every
-        // block - see `LtxBlockQ::forward_chained` for the measured doubling
+        // block - see `LtxBlockQ::forward_prod_dev` for the measured doubling
         // this exists to stop accruing. Without it, uploading 48 blocks of
         // 270 MB reaches 24392 MiB of a 24576 MiB card and aborts.
         let probe = scratch.storage(1);
@@ -466,7 +635,7 @@ impl DitSession {
     /// * the text context is uploaded once, not once per block;
     /// * the model-level adaLN table is uploaded once, and each block's own
     ///   nine `[t, dim]` modulation vectors are derived FROM it on the card
-    ///   (`crate::block::LtxBlockQ::forward_chained`) instead of being combined
+    ///   (`crate::block::LtxBlockQ::forward_prod_dev`) instead of being combined
     ///   and sliced on the host and uploaded per block;
     /// * the three parity taps every block used to read back, and which a
     ///   production forward discards, are never read at all.
@@ -521,7 +690,14 @@ impl DitSession {
         assert_eq!(adaln_table.len(), t, "DitSession::run_blocks: the adaLN row map covers {} tokens, the forward has {t}", adaln_table.len());
         assert_eq!(adaln_table.width(), cfg.adaln_rows() as usize * cfg.inner_dim as usize, "DitSession::run_blocks: the adaLN table is the wrong width for this config");
         let s_up = std::time::Instant::now();
-        let mut x = x;
+        // `x` onto the card ONCE, for the whole stack. Every block hands the
+        // next one a device buffer (`LtxBlockQ::forward_prod_dev`), so the
+        // activation crosses PCIe twice per FORWARD instead of twice per
+        // BLOCK - see that method's doc for why the per-block round trip was
+        // there and what replaced the one thing it bought.
+        let x_len = x.len();
+        let mut x_dev = scratch.storage(x_len as u64);
+        scratch.write_f32_chunked(&x_dev, &x, 1 << 20);
         let adaln_buf = scratch.storage(adaln_table.distinct().len() as u64);
         // CHUNKED, not one `write_f32`: a table with as many distinct rows as
         // tokens is back to the dense size, and on a non-ReBAR card one giant
@@ -540,74 +716,304 @@ impl DitSession {
             // Ensure this layer's weights are on the card, and learn which slot
             // (if any) holds them, WITHOUT keeping a borrow of the window alive
             // across the forward below.
-            let (slot_idx, uploaded, up_ms) = match guard.as_mut() {
-                Some(w) => {
-                    // The schedule is cyclic with period `num_layers`, so the
-                    // layer index IS the plan cursor: from position `l` the
-                    // remaining `[l, 2n)` range holds every group exactly once
-                    // more, which is the whole lookahead Bélády needs. Deriving
-                    // it from `l` rather than from a running counter also means
-                    // an aborted forward cannot leave the window's cursor out
-                    // of step with the block stack.
-                    let (slot, plan_miss) = w.ws.advance(l);
-                    debug_assert_eq!(w.ws.schedule().order[l], GroupId(l as u32), "the window's schedule must visit blocks in the forward's own order");
-                    let idx = slot.0 as usize;
-                    let occupied_by_this_layer = w.slots[idx].as_ref().map(|(g, _)| *g == l as u32).unwrap_or(false);
-                    // `plan_miss` alone is not enough: `CyclicScan` PINS a
-                    // prefix at build time, which the plan reports as already
-                    // resident even though nothing has been uploaded into
-                    // those slots yet (weightset owns slot assignment, never
-                    // device bytes - its own `slot_contents` doc says the
-                    // caller must load on that transition too).
-                    if occupied_by_this_layer && !plan_miss {
-                        w.hits += 1;
-                        (Some(idx), false, std::time::Duration::ZERO)
-                    } else if !can_charge_a_block(scratch.memory_device(), per_block) {
-                        // A published ceiling says there is no room for one
-                        // more resident block RIGHT NOW - degrade this block to
-                        // per-call streaming rather than let the allocation
-                        // facade panic. Loud, because a run that silently lost
-                        // its residency would just look mysteriously slow.
-                        w.slots[idx] = None;
-                        w.refusals += 1;
-                        tracing::warn!(layer = l, per_block, "no VRAM budget headroom for a resident block; streaming this one instead");
-                        (None, true, std::time::Duration::ZERO)
-                    } else {
-                        let s = std::time::Instant::now();
-                        let cached = weights(l);
-                        // Drop the outgoing occupant BEFORE allocating the
-                        // incoming one, so a full window's peak is `slots`
-                        // blocks and not `slots + 1`.
-                        w.slots[idx] = None;
-                        let blk = LtxBlockQ::on_cached(scratch.share(), cfg, &cached, t as u32, context_len as u32, tier);
-                        w.slots[idx] = Some((l as u32, blk));
-                        w.uploads += 1;
-                        (Some(idx), true, s.elapsed())
-                    }
-                }
+            // The schedule is cyclic with period `num_layers`, so the layer
+            // index IS the plan cursor: from position `l` the remaining
+            // `[l, 2n)` range holds every group exactly once more, which is
+            // the whole lookahead Bélády needs. Deriving it from `l` rather
+            // than from a running counter also means an aborted forward
+            // cannot leave the window's cursor out of step with the stack.
+            let (slot_idx, uploaded, mut up_ms) = match guard.as_mut() {
+                Some(w) => w.acquire(l, per_block, scratch.memory_device(), || LtxBlockQ::on_cached(scratch.share(), cfg, &weights(l), t as u32, context_len as u32, tier)),
                 None => (None, true, std::time::Duration::ZERO),
             };
 
             let mut bt = BlockTimings::default();
-            x = match slot_idx {
+            x_dev = match slot_idx {
                 Some(idx) => {
                     let w = guard.as_ref().expect("a slot index implies a window");
                     let blk = &w.slots[idx].as_ref().expect("the slot was just filled").1;
-                    blk.forward_prod(scratch, &x, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
+                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
                 }
                 None => {
                     // No window (or a slot the budget refused): upload, run,
                     // drop - the pre-residency shape, on the same production
                     // block forward, so there is one implementation and not
                     // one per residency mode.
+                    //
+                    // TIMED, and that is not cosmetic: this upload used to be
+                    // the one cost the profile could not see. `up_ms` was
+                    // hardcoded to zero on this arm, so a run that had been
+                    // DENIED residency - which, at the token count a real
+                    // generation uses, was every run - reported its
+                    // `block weight upload` stage as exactly zero while doing
+                    // nothing but block weight uploads. A stage that reads
+                    // zero exactly when it is the bottleneck is worse than no
+                    // stage at all.
+                    let s = std::time::Instant::now();
                     let cached = weights(l);
                     let blk = LtxBlockQ::on_cached(scratch.share(), cfg, &cached, t as u32, context_len as u32, tier);
-                    blk.forward_prod(scratch, &x, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
+                    up_ms += s.elapsed();
+                    blk.forward_prod_dev(scratch, &x_dev, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
                 }
             };
             after_block(l, uploaded, up_ms, &bt);
         }
-        (x, BlockTimings { record_upload: forward_upload, ..Default::default() })
+        let s_back = std::time::Instant::now();
+        let x = scratch.read(&x_dev, x_len);
+        (x, BlockTimings { record_upload: forward_upload, readback: s_back.elapsed(), ..Default::default() })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The audio+video session - the same lifecycle, the same [`BlockWindow`], the
+// same Bélády plan and the same budget, over [`LtxAvBlockQ`] instead of
+// [`LtxBlockQ`].
+//
+// Only two things genuinely differ, and both are consequences of there being
+// two streams rather than one: an AV block is bigger (28 quantized linears
+// instead of 10 - `crate::block::cached_av_block_bytes`), so the same card
+// affords fewer slots; and one forward uploads four model-level modulation
+// tables and two text contexts instead of two and one. Everything else is
+// literally the code above.
+// ---------------------------------------------------------------------------
+
+/// Everything one AV forward's block stack needs that is not a block weight -
+/// the per-FORWARD inputs, uploaded once by [`AvDitSession::run_blocks`] and
+/// then read by every block off the card.
+///
+/// The four tables are [`dit::adaln::RowTable`]s, i.e. one row per DISTINCT
+/// per-token timestep rather than one per token, which is the whole reason
+/// they are cheap to upload: a plain step has one distinct timestep and an
+/// anchored or long-form one has two, however many thousand tokens there are.
+/// The two gate rows are single rows by construction (each is driven by the
+/// OTHER modality's SCALAR sigma).
+pub struct AvForwardInputs<'a> {
+    pub v_adaln: &'a dit::adaln::RowTable,
+    pub a_adaln: &'a dit::adaln::RowTable,
+    pub av_v_ss: &'a dit::adaln::RowTable,
+    pub av_a_ss: &'a dit::adaln::RowTable,
+    pub av_a2v_gate: &'a [f32],
+    pub av_v2a_gate: &'a [f32],
+    pub v_context: &'a [f32],
+    pub a_context: &'a [f32],
+    pub rope: crate::block::AvRope<'a>,
+    pub tv: usize,
+    pub ta: usize,
+    pub v_context_len: usize,
+    pub a_context_len: usize,
+}
+
+/// One card, for one audio+video generation - [`DitSession`]'s AV twin. See
+/// this module's doc for the lifecycle, which is identical.
+pub struct AvDitSession {
+    gpu: Option<Gpu>,
+    device: Option<String>,
+    window: Mutex<Option<BlockWindow<LtxAvBlockQ>>>,
+    slots: u32,
+    rope: RopeCache,
+}
+
+impl AvDitSession {
+    /// A session that keeps nothing: a fresh `Gpu` per forward and every
+    /// block re-uploaded. The fallback, and the arm a bit-identity gate
+    /// compares a resident run against.
+    pub fn transient(device: Option<&str>) -> AvDitSession {
+        AvDitSession { gpu: None, device: device.map(str::to_string), window: Mutex::new(None), slots: 0, rope: RopeCache::default() }
+    }
+
+    /// A session that holds its device open and keeps up to
+    /// [`slots_for`]-many AV blocks resident on it.
+    pub fn resident(cfg: &LtxAvDitConfig, tier: QTier, device: Option<&str>, t: usize) -> AvDitSession {
+        let gpu = Gpu::open(device, &KERNELS);
+        let per_block = cached_av_block_bytes(&cfg.video, &cfg.audio, tier);
+        let slots = slots_for(per_block, cfg.video.num_layers, t, gpu.memory_device(), gpu.kind());
+        tracing::info!(
+            slots,
+            layers = cfg.video.num_layers,
+            backend = gpu.kind(),
+            block_mb = per_block / (1 << 20),
+            reserve_mb = activation_reserve_bytes(t, gpu.kind()) / (1 << 20),
+            device = ?gpu.memory_device(),
+            "audio+video device residency planned"
+        );
+        AvDitSession { gpu: Some(gpu), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default() }
+    }
+
+    /// [`Self::resident`] at an EXPLICIT slot count, bypassing the VRAM
+    /// policy - what a gate uses to drive the partial-residency path
+    /// deliberately at a config small enough to run in milliseconds.
+    pub fn resident_with_slots(device: Option<&str>, slots: u32) -> AvDitSession {
+        AvDitSession { gpu: Some(Gpu::open(device, &KERNELS)), device: device.map(str::to_string), window: Mutex::new(None), slots, rope: RopeCache::default() }
+    }
+
+    pub fn device_for_call(&self) -> Gpu {
+        match &self.gpu {
+            Some(g) => g.share(),
+            None => Gpu::open(self.device.as_deref(), &KERNELS),
+        }
+    }
+
+    pub fn is_resident(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    /// This session's device-resident RoPE tables for `key`, built and
+    /// uploaded on first use and reused by every later forward of the same
+    /// generation. See [`RopeCache`] for the key's contract.
+    pub fn rope_tables(&self, key: u64, build: &mut dyn FnMut() -> (Vec<gpu_core::DeviceBuffer>, Vec<gpu_core::DeviceBuffer>)) -> (Vec<gpu_core::DeviceBuffer>, Vec<gpu_core::DeviceBuffer>) {
+        self.rope.get(self.gpu.is_some(), key, build)
+    }
+
+    pub fn stats(&self) -> ResidencyStats {
+        self.window.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|w| w.stats()).unwrap_or_default()
+    }
+
+    /// Build (or rebuild) this session's resident window and fill its pinned
+    /// slots BEFORE anything else in the forward touches the device - see
+    /// [`DitSession::prefill`] for the measurement that says the order
+    /// matters, which is a property of wgpu's allocator and not of the stream
+    /// count.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill(&self, scratch: &Gpu, cfg: &LtxAvDitConfig, tier: QTier, tv: usize, v_context_len: usize, a_context_len: usize, weights: &mut dyn FnMut(usize) -> std::sync::Arc<CachedQAvBlockWeights>) {
+        if self.slots == 0 {
+            return;
+        }
+        // `context_len` in the shape key is the VIDEO stream's, plus audio's
+        // folded in: a window is only valid for the widths its blocks were
+        // built at, and an AV block carries two.
+        let shape = WindowShape { t: tv as u32, context_len: (v_context_len as u32) << 16 | a_context_len as u32, tier, num_layers: cfg.video.num_layers };
+        let per_block = cached_av_block_bytes(&cfg.video, &cfg.audio, tier);
+        let mut guard = self.window.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().map(|w| w.shape != shape).unwrap_or(true) {
+            if guard.is_some() {
+                tracing::debug!(?shape, "audio+video residency window rebuilt for a new forward shape");
+            }
+            *guard = None;
+            *guard = BlockWindow::build(shape, self.slots);
+        }
+        let Some(w) = guard.as_mut() else { return };
+        let pins = w.pending_pins();
+        if pins.is_empty() {
+            return;
+        }
+        let s = std::time::Instant::now();
+        // A one-word probe read after every block, to drain wgpu's
+        // `write_buffer` staging - see `DitSession::prefill`.
+        let probe = scratch.storage(1);
+        for (idx, g) in pins {
+            if !can_charge_a_block(scratch.memory_device(), per_block) {
+                tracing::warn!(slot = idx, "no VRAM budget headroom while pre-filling the AV resident window; the rest will stream");
+                w.refusals += 1;
+                break;
+            }
+            let cached = weights(g as usize);
+            w.slots[idx] = Some((g, LtxAvBlockQ::on_cached(scratch.share(), &cfg.video, &cfg.audio, &cached, v_context_len as u32, a_context_len as u32, tier)));
+            w.uploads += 1;
+            let _ = scratch.read(&probe, 1);
+        }
+        tracing::info!(resident = w.slots.iter().filter(|s| s.is_some()).count(), slots = w.slots.len(), ms = s.elapsed().as_secs_f32() * 1e3, "AV resident weight window pre-filled");
+    }
+
+    /// Run one AV forward's whole block stack. Both streams in as host floats,
+    /// both out as host floats, and nothing in between crosses PCIe that does
+    /// not have to - see [`DitSession::run_blocks`], which this mirrors
+    /// exactly at two streams instead of one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_blocks(
+        &self,
+        scratch: &Gpu,
+        cfg: &LtxAvDitConfig,
+        tier: QTier,
+        vx: Vec<f32>,
+        ax: Vec<f32>,
+        inp: &AvForwardInputs,
+        weights: &mut dyn FnMut(usize) -> std::sync::Arc<CachedQAvBlockWeights>,
+        after_block: &mut dyn FnMut(usize, bool, std::time::Duration, &BlockTimings),
+    ) -> (Vec<f32>, Vec<f32>, BlockTimings) {
+        let per_block = cached_av_block_bytes(&cfg.video, &cfg.audio, tier);
+        let mut guard = self.window.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Checked, not assumed - `adaln_row` indexes `map[r]` for every one of
+        // the token rows it writes, and `backend-cpu` does not bounds-check a
+        // dispatch, so a short map returns plausible numbers rather than
+        // failing.
+        assert_eq!(inp.v_adaln.len(), inp.tv, "AvDitSession::run_blocks: the video adaLN row map covers {} tokens, the forward has {}", inp.v_adaln.len(), inp.tv);
+        assert_eq!(inp.a_adaln.len(), inp.ta, "AvDitSession::run_blocks: the audio adaLN row map covers {} tokens, the forward has {}", inp.a_adaln.len(), inp.ta);
+        assert_eq!(inp.av_v_ss.len(), inp.tv, "AvDitSession::run_blocks: the A<->V video scale/shift map covers {} tokens, the forward has {}", inp.av_v_ss.len(), inp.tv);
+        assert_eq!(inp.av_a_ss.len(), inp.ta, "AvDitSession::run_blocks: the A<->V audio scale/shift map covers {} tokens, the forward has {}", inp.av_a_ss.len(), inp.ta);
+        assert_eq!(inp.av_a2v_gate.len(), cfg.video.inner_dim as usize, "AvDitSession::run_blocks: the A2V gate row must be [video.dim]");
+        assert_eq!(inp.av_v2a_gate.len(), cfg.audio.inner_dim as usize, "AvDitSession::run_blocks: the V2A gate row must be [audio.dim]");
+
+        let s_up = std::time::Instant::now();
+        // Both streams onto the card ONCE, for the whole stack - see
+        // `DitSession::run_blocks` and `LtxAvBlockQ::forward_prod_dev`.
+        let (vx_len, ax_len) = (vx.len(), ax.len());
+        let mut vx_dev = scratch.storage(vx_len as u64);
+        scratch.write_f32_chunked(&vx_dev, &vx, 1 << 20);
+        let mut ax_dev = scratch.storage(ax_len as u64);
+        scratch.write_f32_chunked(&ax_dev, &ax, 1 << 20);
+        // CHUNKED, for the same reason `DitSession::run_blocks` chunks: a
+        // table with as many distinct rows as tokens is back to the dense
+        // size, and one giant `write_buffer` on a non-ReBAR card needs a
+        // staging allocation the size of the payload.
+        let table = |t: &dit::adaln::RowTable| -> (gpu_core::DeviceBuffer, gpu_core::DeviceBuffer) {
+            let b = scratch.storage(t.distinct().len() as u64);
+            scratch.write_f32_chunked(&b, t.distinct(), 1 << 20);
+            let m = scratch.storage(t.row_of().len() as u64);
+            scratch.write_at(&m, 0, t.row_of());
+            (b, m)
+        };
+        let (v_adaln_buf, v_adaln_map) = table(inp.v_adaln);
+        let (a_adaln_buf, a_adaln_map) = table(inp.a_adaln);
+        let (v_ss_buf, v_ss_map) = table(inp.av_v_ss);
+        let (a_ss_buf, a_ss_map) = table(inp.av_a_ss);
+        let row = |v: &[f32]| -> gpu_core::DeviceBuffer {
+            let b = scratch.storage(v.len() as u64);
+            scratch.write_f32(&b, v);
+            b
+        };
+        let a2v_gate = row(inp.av_a2v_gate);
+        let v2a_gate = row(inp.av_v2a_gate);
+        let v_ctx = row(inp.v_context);
+        let a_ctx = row(inp.a_context);
+        let forward_upload = s_up.elapsed();
+        let av = crate::block::AvModelTables { v_ss: &v_ss_buf, v_ss_map: &v_ss_map, a_ss: &a_ss_buf, a_ss_map: &a_ss_map, a2v_gate: &a2v_gate, v2a_gate: &v2a_gate };
+
+        let (tv, ta) = (inp.tv as u32, inp.ta as u32);
+        let build = |scratch: &Gpu, c: &CachedQAvBlockWeights| LtxAvBlockQ::on_cached(scratch.share(), &cfg.video, &cfg.audio, c, inp.v_context_len as u32, inp.a_context_len as u32, tier);
+        for l in 0..cfg.video.num_layers as usize {
+            let (slot_idx, uploaded, mut up_ms) = match guard.as_mut() {
+                Some(w) => w.acquire(l, per_block, scratch.memory_device(), || build(scratch, &weights(l))),
+                None => (None, true, std::time::Duration::ZERO),
+            };
+            let mut bt = BlockTimings::default();
+            let (v, a) = match slot_idx {
+                Some(idx) => {
+                    let w = guard.as_ref().expect("a slot index implies a window");
+                    let blk = &w.slots[idx].as_ref().expect("the slot was just filled").1;
+                    blk.forward_prod_dev(scratch, &vx_dev, &ax_dev, &v_adaln_buf, &v_adaln_map, &a_adaln_buf, &a_adaln_map, &av, &v_ctx, &a_ctx, inp.rope, tv, ta, &mut bt)
+                }
+                None => {
+                    // No window (or a slot the budget refused): upload, run,
+                    // drop - on the SAME production block forward, so there is
+                    // one implementation and not one per residency mode.
+                    // Timed for the reason `DitSession::run_blocks`'s own arm
+                    // states: an untimed upload on the arm that does nothing
+                    // BUT upload reads as zero exactly when it dominates.
+                    let s = std::time::Instant::now();
+                    let blk = build(scratch, &weights(l));
+                    up_ms += s.elapsed();
+                    blk.forward_prod_dev(scratch, &vx_dev, &ax_dev, &v_adaln_buf, &v_adaln_map, &a_adaln_buf, &a_adaln_map, &av, &v_ctx, &a_ctx, inp.rope, tv, ta, &mut bt)
+                }
+            };
+            vx_dev = v;
+            ax_dev = a;
+            after_block(l, uploaded, up_ms, &bt);
+        }
+        let s_back = std::time::Instant::now();
+        let vx = scratch.read(&vx_dev, vx_len);
+        let ax = scratch.read(&ax_dev, ax_len);
+        (vx, ax, BlockTimings { record_upload: forward_upload, readback: s_back.elapsed(), ..Default::default() })
     }
 }
 
@@ -636,11 +1042,31 @@ mod tests {
         assert!(slots_at(card, 3520) < cfg.num_layers, "720p must NOT plan a full window on a 24 GiB card - the measured plateau does not leave room");
         assert!(slots_at(card, 8160) <= slots_at(card, 3520), "a larger token count must never buy MORE resident blocks");
         assert_eq!(slots_at(1 << 30, 3520), 0, "a card smaller than the reserve must ask for zero slots, not a negative count");
+
+        // THE REGRESSION THIS FILE EXISTS TO PREVENT. The previous fit was
+        // taken at one token count and extrapolated; at the width a real
+        // generation runs at it reserved more than the whole card, `card -
+        // reserve` underflowed, and the policy declined residency ENTIRELY -
+        // so every block crossed the bus on every forward at exactly the shape
+        // the mechanism was built for. A window that is merely "smaller at a
+        // bigger shape" is correct; a window that is ZERO at the production
+        // shape is the bug.
+        for t in [8800usize, 12320, crate::longform::LONGFORM_MAX_TOKENS] {
+            assert!(slots_at(card, t) > 0, "the residency policy must plan a nonempty window at {t} tokens, the width a real generation runs at");
+        }
+
         // The native Vulkan backend reclaims transients explicitly and does not
         // double resident bytes, so the SAME card affords strictly more resident
         // blocks there - the budget must not hardcode wgpu's pathology.
+        //
+        // Compared where the RESERVE binds, not where the card-fraction cap
+        // does: on a 24 GiB card at a production width both backends are held
+        // by the cap, so a comparison there would read "equal" and prove
+        // nothing about the slopes.
         let vk = |cap: u64, t: usize| (((cap.saturating_sub(activation_reserve_bytes(t, "vulkan")) / per_block).min(cap / 4 / per_block)) as u32).min(cfg.num_layers);
-        assert!(vk(card, 3520) > slots_at(card, 3520), "the Vulkan backend must be budgeted more resident blocks than wgpu at the same shape");
+        let wide = 20000usize;
+        assert!(slots_at(card, wide) < cfg.num_layers / 4, "pick a width where the reserve, not the card-fraction cap, is what binds");
+        assert!(vk(card, wide) > slots_at(card, wide), "the Vulkan backend must be budgeted more resident blocks than wgpu at the same shape");
     }
 
     /// Zero slots is not an error, it is the fallback: no window is built and
@@ -648,8 +1074,8 @@ mod tests {
     #[test]
     fn a_zero_slot_window_is_declined_rather_than_built() {
         let shape = WindowShape { t: 16, context_len: 128, tier: QTier::Int8, num_layers: 4 };
-        assert!(BlockWindow::build(shape, 0).is_none());
-        assert!(BlockWindow::build(shape, 2).is_some());
+        assert!(BlockWindow::<LtxBlockQ>::build(shape, 0).is_none());
+        assert!(BlockWindow::<LtxBlockQ>::build(shape, 2).is_some());
     }
 
     /// The window's own bookkeeping, driven the way `run_blocks` drives it:
@@ -660,7 +1086,7 @@ mod tests {
     fn a_full_window_uploads_each_block_once_and_never_again() {
         let n = 6u32;
         let shape = WindowShape { t: 16, context_len: 128, tier: QTier::Int8, num_layers: n };
-        let mut w = BlockWindow::build(shape, n).expect("a full window must build");
+        let mut w = BlockWindow::<LtxBlockQ>::build(shape, n).expect("a full window must build");
         let mut occupied = vec![None::<u32>; n as usize];
         for pass in 0..4 {
             for l in 0..n {
@@ -691,7 +1117,7 @@ mod tests {
         let slots = 4u32;
         let passes = 3u32;
         let shape = WindowShape { t: 16, context_len: 128, tier: QTier::Int8, num_layers: n };
-        let mut w = BlockWindow::build(shape, slots).expect("a narrow window must still build");
+        let mut w = BlockWindow::<LtxBlockQ>::build(shape, slots).expect("a narrow window must still build");
         let mut occupied = vec![None::<u32>; slots as usize];
         for _ in 0..passes {
             for l in 0..n {

@@ -6245,3 +6245,507 @@ cosine 0.999999989, and the real Q8_0 block-0 case at 0.996303608).
   `flash_bidir_variant`-style walk, because there is no 16 KiB sibling. A
   device under 48 KiB of workgroup memory keeps the trio. If a second rung is
   ever written, that bool becomes a ladder and every caller inherits it.
+
+### Phase 29 - the sound stops ending at the first window seam
+
+Phase 22 made a clip longer than one denoising window into one continuous
+shot; the audio wiring that landed after it worked, and worked only for a clip
+that fits ONE window. At 1280x704 that is a hard ceiling of 15 latent frames =
+113 frames = 4.71 s at 24 frames a second, because `LONGFORM_MAX_TOKENS` is
+13200 and a latent frame there is 22 x 40 = 880 video tokens. A ten-second
+request with `--audio` was refused outright, in the CLI, with a message saying
+the seam had not been designed. It has now.
+
+The mechanism is the video half's, unchanged: the previous window's own last
+audio tokens, sliced out of the denoised latent before anything is decoded
+(`audio::carry_tail`), written over the head of the next window's audio
+sequence and frozen at sigma 0 - `denoise_mask == 0`, per-token timestep 0,
+re-pinned by `post_process_latent` on both the x0 estimate and the stepped
+latent, exactly the two applications the video's carried prefix gets. The
+windows contribute tokens to ONE audio latent, decoded once when the loop
+ends. Two rolling slabs of `context_tokens x 128` floats are the whole of the
+new state; at the default context that is 59 tokens = 30 KB, and it does not
+grow with the clip.
+
+#### 1 - the alignment rule, and why it constrains the WINDOW PLAN
+
+The two streams do not share a time resolution and cannot be made to. One
+video latent frame is `VAE_TEMPORAL_SCALE = 8` pixel frames, so it is
+`8 * LATENT_RATE / fps = 200 / fps` audio tokens - `25/3` at 24 frames a
+second. A window seam is a re-basing of both streams onto the new window's own
+time origin, and it is exact only when both streams shift by the SAME amount
+of time:
+
+    video shift = (origin(w+1) - origin(w)) / fps   seconds
+    audio shift = (tokens(w) - carried)  / LATENT_RATE   seconds
+
+Setting them equal and clearing denominators gives the whole rule as an
+integer identity, `pixels_advanced * LATENT_RATE == tokens_advanced * fps`,
+which has an integer solution for `tokens_advanced` iff `200 * advance` is
+divisible by `fps`. So an audio-visual plan may only advance by multiples of
+`audio::window_latent_frame_quantum(fps)` - 3 at 24 and 30 frames a second, 1
+at 25, 1 at anything that divides 200. `longform::window_plan_aligned` places
+seams accordingly and `audio::audio_plan` re-derives the layout from the
+finished plan and REFUSES rather than rounding.
+
+Three things fall out of it, and the third is the one that took a wrong turn
+first:
+
+* **The carried count is then forced, and it is the SAME at every seam**:
+  `ac = ta_prev - 200*advance/fps`. Because window 0's advance is also a whole
+  quantum, `ta_prev` and the context's own span have the same fractional part,
+  so the difference of their `round`s is exactly the difference of their
+  arguments - which makes `ac` equal to `latent_frames(dropped_frames, fps)`,
+  i.e. the audio token count of the carried prefix considered as a clip in its
+  own right. The rule and the obvious guess coincide, but only *given* the
+  quantum; without it they differ by up to a token and nothing says so.
+* **The totals then close exactly**: window 0 contributes `ta_0`, every later
+  window `200*new/fps`, and those sum to `round(frames/fps*LATENT_RATE)` - the
+  clip's own token count, the same number a single-window clip of that length
+  would carry. The decode is therefore the same `(4*ta - 3) * HOP_LENGTH`
+  samples it always was and the container's two stream durations do not move.
+* **The LAST window must NOT be constrained.** Constraining every window makes
+  `k_total` congruent to `context - 1` modulo the quantum, which refuses most
+  legal `1 + 8k` lengths outright - 241 frames at the default 8-frame context
+  is one of them. The last window has no successor and hands nothing across,
+  so leaving it free costs nothing and is what makes any length plannable.
+  This was the first design and it was wrong; the arithmetic above is what
+  said so.
+
+The refusal path is real and is reachable: at a frame rate whose quantum does
+not fit the grid (23 frames a second at 1280x704 needs 8 carried + 23 new
+latent frames against a 15-frame budget) the plan is refused before any weight
+is read, with `audio::quantum_note` naming the ratio, the quantum, and the
+three things that would work. Frame rates that divide 200 need no quantum at
+all.
+
+#### 2 - what the gates are, and what each mutation proved
+
+`crates/ltxv/tests/audio_seam.rs`, 8 tests, all arithmetic on the SAME
+functions the pipeline calls - `audio::positions`, `pipeline::
+real_pixel_positions`, `audio::audio_plan`, `longform::window_plan_aligned` -
+over a sweep of 4 frame rates x 8 multi-window lengths at the real 22 x 40
+latent grid, plus a 120-frame-rate backstop.
+
+| mutation | what it models | caught by |
+|---|---|---|
+| `context_tokens() + 1` | the carried span computed one token long | the TOTAL check in `audio_plan` (125 tokens where a 121-frame clip is 126), which fails 4 of the 8 tests |
+| `AudioPlan.context + 1`, total left correct | **the audio context shifted by one token at a seam** - this change's real failure mode, and the one the total cannot see | the POSITION gate: "carried audio token 0 ends at 0.01 in its new window and 1.97 in its old one, a shift of 2 - the sound is -0.04 s away from the picture it belongs to"; also the integer shift identity (1200 vs 1176) and the `a.context` equality |
+| `window_latent_frame_quantum() -> 1` | the alignment rule removed | 5 of 8, including the refusal test and the quantum's own definition |
+| `carry_tail` returns the FIRST k tokens | the tail taken from the wrong end | only the carry-tail identity test - which is why that test exists separately from the arithmetic |
+| `latent_frames(w.emitted_frames())` for a window's own token count | a plausible confusion of the two frame counts a window has | 4 of 8 |
+
+The second row is the one to read. A one-token context shift keeps every token
+count self-consistent, so a gate on counts alone passes it; what fails is
+comparing POSITION VALUES between the two windows' real RoPE tables, which is
+what turns "the numbers add up" into "the sound is where the picture is".
+
+#### 3 - the per-window cost of the seam, and what actually costs
+
+Carrying the audio adds no per-window weight traffic at all: the rolling state
+is two `59 x 128` slabs, the per-window work is one `seeded_noise` of
+`ta_w * 128` values and two `copy_from_slice`s, and the audio VAE + vocoder
+are read and run ONCE for the whole clip rather than per window. The audio
+stream's share of a forward's tokens is 109 against 3080 at stage 1 and 76
+against 12320 at stage 2 - the cost of `--audio` is the AV BLOCK, not the
+audio tokens, and that block is a separate workstream.
+
+Four per-window costs that were in the long-form path and are now not, all of
+them the same class (work at a seam that could have been carried or cached):
+
+* the **spatial x2 latent upscaler was re-read and re-imported off disk once
+  per window** (and once per pass in `upscale`) - a ~1 GB checkpoint plus its
+  bf16 expansion, every seam. It is now a `SpatialUpsampler` cache filled at
+  most once per run, and filled LAZILY, so an audio-visual generation does not
+  hold its expansion beside the host-fp32 transformer through a stage that
+  never touches it. Only `LatentUpsampler::build` is genuinely per window.
+* the **audio VAE checkpoint was read twice** (once for the VAE, once for the
+  vocoder, because `StTensor` is not `Clone`). One read and a `partition` on
+  the prefix each importer already selects by hands both their half.
+* the **audio stream's text projection was copied per stage** into
+  `AudioState`; it is borrowed now.
+* the **projected caption was cloned** out of `TextContext` in `generate`, and
+  **every decoded frame was cloned** in `ltxv_cli` to hand it to the encoder -
+  both are moves now. The frame clone is the clip's whole pixel buffer.
+* `stage2_sigmas` was rebuilt per window and is now resolved once, before the
+  first forward, so a refinement schedule the run cannot spell costs
+  milliseconds rather than a window of device time.
+
+#### 4 - recorded, NOT done
+
+* **No real multi-window audio-visual generation has completed on this box,
+  and the waveform verification is DEFERRED rather than dropped.** Seam
+  continuity in the samples (max sample-to-sample step at each seam against
+  the 99.9th percentile elsewhere) and the plain audio statistics (peak,
+  clipped count, RMS dBFS, longest near-silent run, L/R correlation) are NOT
+  measured and are not claimed. They are owed on a real multi-window clip once
+  the AV block has a quantized path: a seam figure taken on the host-fp32 path
+  would have to be retaken anyway, because int8 changes the samples it is
+  measured on.
+
+  The measurement HARNESS is ready and was validated before it was trusted, on
+  a synthetic clip with a click planted at the exact seam sample: 9.72x the
+  99.9th-percentile step on the clicked channel against 0.57x on the clean
+  one. The seam's sample index is not estimated - audio token `i` covers mel
+  frames `[4i-3, 4i+1)` and each is `HOP_LENGTH` samples, so the first sample
+  window `k+1` contributed is `(4*T - 3) * HOP_LENGTH` for the cumulative
+  token count `T` before it.
+
+* **Two attempts, and they did NOT fail the same way - the first diagnosis was
+  wrong and is recorded here so it is not repeated.** Attempt one died with
+  `wgpu error: Out of Memory` on the third forward of window 0 stage 1, which
+  looked like a per-forward leak in the AV path. It was not. A single-window
+  control at the same resolution ran that same third forward clean, and
+  sampling `nvidia-smi` through it shows the AV forward oscillating between
+  roughly 0.7 and 5.9 GiB of a 24 GiB card with no growth across forwards. The
+  OOM was a co-tenant on the same card, not a requirement of this path - which
+  also says the host-fp32 AV path has no headroom against anything else
+  sharing its GPU. Attempt two was killed deliberately, not by a fault: it
+  held ~90 GB of RSS on a box with no swap, and the fp32 baseline the
+  quantized-AV workstream needs costs ~84 GB, so the two could not be resident
+  at once.
+
+* The end-to-end claims this phase makes are therefore the arithmetic ones,
+  which are exhaustively gated, plus the plan resolution - `--frames 241
+  --width 1280 --height 704 --fps 24 --audio` now reports "4 windows, +251
+  audio tokens (10.04s of 16 kHz stereo)" where it used to refuse.
+* **A multi-scene clip still refuses `--audio`**, now from the library rather
+  than only the CLI. A scene boundary deliberately carries nothing, so the
+  sound would restart at every cut AND the per-scene token counts do not sum
+  to the clip's own. That is a design question about what sound should do at a
+  visual cut, not an arithmetic one.
+
+### Phase 30 - the audio-visual forward stops being a host-fp32 upload benchmark
+
+The audio-visual DiT block had no quantized, streamed or device-resident path
+at all: no `LtxAvBlockQ`, no AV cached-weight type, no AV session. An
+`--audio` run therefore expanded the whole 21.0 B-parameter checkpoint to host
+fp32 and re-uploaded every block on every forward. What that cost, recorded
+before this phase: 96.7 GB of RSS, nine minutes before the first forward, the
+card at 0% while the host churned, and a joint forward 5.4x a video-only one
+at 19-24% GPU utilisation. It was upload-bound, not compute-bound - audio and
+the two cross-modal attentions are only 29% of the parameters.
+
+`LtxAvBlockQ`, `CachedQAvBlockWeights` and `AvDitSession` close that: the same
+28-linear int8 tier the video block uses applied to both streams and both
+cross-modal directions, the same host-RAM `GenerationCache`, and the same
+Belady-planned device residency window over a shared generic `BlockWindow<B>`.
+
+#### 1 - what a forward costs now, at the width a real generation runs at
+
+One Tesla P40 (24576 MiB, wgpu/Vulkan), real
+`ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, all 48 layers, int8, ctx 1024,
+one distinct timestep, device-resident session, T = 13200 video tokens
+(`longform::LONGFORM_MAX_TOKENS`: 15 latent frames of a 1280x704 clip, 113
+frames at 24 fps) and its own 118 audio tokens. Harness:
+`ltxv_bench streamed 48 13200 1024 1 1 1 3` and
+`ltxv_bench streamed-av 48 13200 1024 118 1 1 1 3`, four calls each, the first
+warm call discarded as warm-up, best of the remaining two. Both cards idle
+before each run, nothing sampled during one, no build running.
+
+| | video-only | audio+video | AV / video |
+|---|---:|---:|---:|
+| first forward (cold: GGUF read+dequant+quantize of all 48 blocks, plus the prefill) | 163.59 s | 197.80 s | 1.21x |
+| warm forward, best of 2 | **93.59 s** | **111.15 s** | **1.19x** |
+| of which DEVICE (kernel timestamp queries) | 61.88 s | 68.24 s | 1.10x |
+| of which HOST | 31.70 s | 42.91 s | 1.35x |
+| device share of wall (kernel time / wall - MEASURED, from timestamp queries) | 66.1% | 61.4% | |
+| `nvidia-smi utilization.gpu`, mean over a warm forward (a separate UNTIMED observation run) | 85.7% | 83.5% | |
+| peak VRAM over a whole run (same observation run) | 18092 MiB | 21082 MiB | |
+| resident blocks the policy granted | 23 of 48 | 16 of 48 | |
+| int8 bytes per block (`cached_block_bytes` / `cached_av_block_bytes`) | 257.6 MiB | 371 MiB | 1.44x |
+| host peak RSS (`/proc/self/status` `VmHWM`) | 36884 MiB | 52591 MiB | 1.43x |
+
+**The BEFORE arm, reproduced at the same width rather than cited.** The
+host-fp32 audio-visual path still exists (`ltxv_bench av 13200 1024 113 24`,
+`av_stream::AvDenoiser`) and was run on the same card on the same day, as an
+untimed observation (nvidia-smi polled throughout):
+
+| | host fp32 (before) | int8 streamed + resident (now) | |
+|---|---:|---:|---:|
+| weight load + dequant, before any forward | 88.9 s | (none - folded into forward 1) | |
+| forward, best of 2 | 478.9 s | 111.15 s | **4.31x faster** |
+| host peak RSS | 113071 MiB | 52591 MiB | **2.15x smaller** |
+| `nvidia-smi utilization.gpu`, mean over one forward | 38.4% | 83.5% | |
+| peak VRAM | 15814 MiB | 21082 MiB | |
+| AV forward / video-only int8 forward | 5.12x | **1.19x** | |
+
+The 5.4x this workstream started from reproduces (5.12x against today's
+video-only forward). The 96.7 GB of RSS recorded for it turns out to have been
+an under-count: measured here it is 110.4 GiB, and the load is 88.9 s rather
+than nine minutes only because the 23.6 GB GGUF was already warm in page
+cache. Two of the four before-numbers therefore move, both in the direction
+that makes the fp32 path look worse, not better.
+
+**The ratio is 1.19x, not 5.4x.** A correction to the previous pass's own
+last measurement, which reported 1.15x: the video-only half reproduced exactly
+(it reported 108.0 s, this pass measured 108.60 s on the same code), the
+audio-visual half did not - three warm calls measured 127.70 / 130.49 / 129.94
+s against its 123.7 s. Trust the reproduced pair, not the single sample.
+
+RSS is the other half of the claim and it moved as intended: 51.4 GiB peak for
+the whole audio-visual run against the 96.7 GB the host-fp32 path needed. The
+weights themselves are 17828 MiB of int8 across 48 AV blocks where the fp32
+expansion was ~84 GB; most of the remaining RSS is the mmapped 23.6 GB GGUF,
+which is reclaimable page cache rather than anonymous memory.
+
+The two utilisation figures are different measurements of different things and
+both are reported because neither substitutes for the other: the device share
+is `Gpu::kernel_times`' accumulated DEVICE time over the call's wall clock -
+the fraction of the forward in which a kernel of this process was executing -
+while `nvidia-smi utilization.gpu` is the fraction of 1-second sampling
+windows in which ANY kernel was running, which is necessarily the larger of
+the two and says nothing about how full the card was while it ran. The gap
+between them (66% against 86%) is the small-dispatch tail this port has a lot
+of: 2176 `rope2d` dispatches a forward, none of them long.
+
+There is no separate load phase to time any more. The GGUF read+dequant
+(68.5 s), the int8 quantize (9.5 s) and the resident prefill are all inside
+the FIRST forward, which is why the first forward is 197.80 s and every later
+one is 111.15 s.
+
+#### 2 - the debt this phase removed, and what it was worth
+
+**The activation crossed PCIe twice per BLOCK.** `DitSession::run_blocks` and
+its AV twin chained `x` between blocks as a HOST `Vec<f32>`: every block
+uploaded a `[t, dim]` activation, ran, and read the whole thing back. At
+T=13200 that is 216 MB up and 216 MB down per block, 48 blocks, ~20.8 GB of
+round trip per forward whose only purpose was to arrive back where it started.
+`run_blocks`'s own doc claimed the opposite ("`x` is uploaded ONCE, chained
+block to block as a device buffer, and read back once") - the doc was aspirational,
+the code was not.
+
+An earlier pass had measured chaining and REJECTED it: leaving `x` on the card
+removes the one blocking readback per block that makes wgpu's allocator pool
+shrink, and the pool then grew several-fold, costing more resident blocks than
+the traffic was worth. That measurement was right and its conclusion was too
+strong. The drain needs the readback to be BLOCKING, not to be BIG:
+`backend_wgpu`'s `read` is `flush` + `map_async` + a bounded `poll_wait`
+whatever `n` is, and only the copy scales. So `forward_prod_dev` chains the
+device buffer and drains with a ONE-WORD read off the block's own output -
+exactly the probe `DitSession::prefill` already used between weight uploads.
+
+Measured on the same harness, same day, same card:
+
+| | video-only warm | audio+video warm |
+|---|---:|---:|
+| before | 108.60 s | 129.94 s |
+| after | 93.59 s | 111.15 s |
+| | **-13.8%** | **-14.5%** |
+
+and the split says exactly where it went (video, warm, per forward):
+
+| stage | before | after |
+|---|---:|---:|
+| block submit+wait (contains the per-block readback) | 80.02 s | 63.71 s |
+| activation/context/adaLN record+upload | 15.51 s | 14.30 s |
+| device->host readback (per forward) | 0.00 s | 0.37 s |
+
+Device kernel time did not move (61.84 s -> 61.88 s), which is the whole
+signature of a host/PCIe change; the DiT output's mean/std/min/max are
+identical to six decimals on both streams, and the numeric gates below cover
+the rest. The readback was the expensive half by an order of magnitude: 10.4 GB
+down cost ~16 s (~0.65 GB/s) where 10.4 GB up cost ~1.2 s.
+
+**Two smaller items on the same path**, both in `self_attn_and_text_ca_q`'s
+prompt scale/shift broadcast: `1.0 + scale` was recomputed per ELEMENT of a
+`[context_len, dim]` buffer rather than once per row, and both broadcasts were
+handed to `write_buffer` as one whole-payload call, which on a non-ReBAR card
+needs a staging allocation the size of the payload - the same reason
+`devres`'s own table uploads are chunked.
+
+**Three stale references to a `LtxBlockQ::forward_chained` that does not
+exist** (in `block.rs` and `devres.rs`) now name `forward_prod_dev`.
+
+**A red test.** `device_residency.rs::the_slot_policy_never_over_promises`
+still asserted `slots == 0` at 1080p - the exact behaviour the reserve re-fit
+had just removed - so `cargo test -p brain-ltxv` was failing before this pass
+touched anything. It now asserts the property that matters (a NONEMPTY,
+partial window at every width a real generation uses, and a window that keeps
+shrinking past them), mirroring `devres`'s own unit test.
+
+#### 2b - where the DEVICE half goes, and why it is not the next target
+
+The per-kernel table at the real width (video, T=13200, `BRAIN_PROFILE`,
+cumulative over four calls) is dominated by two rows and nothing else is close:
+
+| kernel | share of device time |
+|---|---:|
+| `flash_attn_bidir_reg2` (self-attention) | 55.7% |
+| `matmul_i8_dyn` (the ten int8 linears) | 31.1% |
+| `flash_attn_cross_reg2` (text cross-attention) | 4.7% |
+| everything else, largest row `rmsnorm_rows` | <= 1.1% each |
+
+Graded against this box's measured roofline (10517 GFLOP/s fp32, 43560 GOP/s
+int8 DP4A), per warm forward: the self-attention does 1.37e14 FLOP in ~34.5 s,
+i.e. about 38% of the fp32 roof, and the int8 linears do 3.0e14 OP in ~19.3 s,
+about 36% of the DP4A roof. Neither is anywhere near a defect floor and
+neither has an obvious algorithmic change left, so at this width the device
+half is close to structural and the HOST half - 31.7 s of a 93.6 s video
+forward, 42.9 s of a 111.2 s audio-visual one - is where the remaining wins
+are. That is what section 6 lists.
+
+Note this ranking is only true at the real width. The same profile at 880
+tokens puts `matmul_reg3` (an fp32 helper) at 71% of device time and
+`flash_attn_bidir_reg2` at 5.5% - the exact inversion that makes a
+small-token-count profile useless for deciding what to optimise.
+
+#### 3 - the residency arm: what the reserve actually is at real width
+
+`devres::activation_reserve_bytes`'s wgpu per-token slope was fitted at
+T=3520 and extrapolated, so at production width `card - reserve` underflowed
+and the policy declined residency ENTIRELY (`slots = 0`) - on the video path
+as well as the audio-visual one. The re-fit is confirmed working at real
+width: the policy grants 23 of 48 blocks on the video path and 16 of 48 on the
+audio-visual one at T=13200, and both run to completion with no driver-level
+abort.
+
+The plateau sweep, run as UNTIMED OBSERVATION (nvidia-smi polled at 1 Hz
+throughout, so its wall figures are not headline numbers), 48 layers, int8,
+policy-chosen slot count, peak VRAM the maximum sample on card 0:
+
+| video tokens | slots granted | peak VRAM | resident weights | non-weight peak | warm forward |
+|---:|---:|---:|---:|---:|---:|
+| 3520 | 23 | 16728 MiB | 5925 MiB | 10803 MiB | 23.34 s |
+| 6160 | 23 | 15192 MiB | 5925 MiB | 9267 MiB | 41.40 s |
+| 8800 | 23 | 16728 MiB | 5925 MiB | 10803 MiB | 59.87 s |
+| 11440 | 23 | 16728 MiB | 5925 MiB | 10803 MiB | 79.43 s |
+| 13200 | 23 | 18092 MiB | 5925 MiB | 12167 MiB | 94.22 s |
+| 16720 | 5 | 15658 MiB | 1288 MiB | 14370 MiB | 129.29 s |
+
+**Read the peak column, not the token column.** Peak VRAM is FLAT across a
+3.25x range of token counts and then goes DOWN at the widest one, where the
+policy holds the FEWEST weights. It is not a function of the token count -
+wgpu's allocator pool sizes itself to what is free rather than to what is
+needed, so most of the per-token slope the reserve encodes is absorbed by the
+pool rather than paid for. That is the same non-monotonicity the constant's
+own doc already records from one point; this is it measured across the axis
+the fit is taken over.
+
+Two things the sweep DOES pin down, and both say the fit is sound:
+
+* **Where each constraint binds.** The slot count is 23 at every token count
+  up to and including 13200, which is exactly `card / MAX_CARD_FRACTION_DENOM
+  / cached_block_bytes` - the quarter-of-the-card cap that exists so the VAE
+  decode after the denoise loop has room. The RESERVE only takes over past
+  that: at 16720 tokens it grants 5. So over the whole supported single-window
+  range the reserve's job is to be large enough not to bind and small enough
+  not to underflow, and it is both. The failure this replaced - `slots = 0` at
+  every width past 720p - cannot recur without the reserve exceeding a whole
+  card.
+* **How much margin the reserve carries near and past the crossover.**
+  `activation_reserve_bytes` against the observed non-weight peak: 16294 MiB
+  vs 10803 at 11440 (1.51x), 18565 vs 12167 at 13200 (1.53x), 23106 vs 14370
+  at 16720 (1.61x). That is the "roughly half again as margin" the constant's
+  doc claims, confirmed rather than asserted, and it is the right side to err
+  on - under-reserving is a driver-level abort, over-reserving costs resident
+  blocks the graceful partial-window path picks up.
+
+**So the reserve is NOT re-fitted in this pass, deliberately.** A re-fit would
+be fitting a slope to a peak that does not vary with the variable being
+fitted, over a range where the fitted quantity is not the binding constraint,
+and the one place it does bind it already carries the intended margin. What
+WOULD justify revisiting it: a card whose quarter is bigger than what the
+reserve leaves, which moves the crossover inside the supported range instead
+of at its top edge. That is a different card, not a different fit.
+
+One thing the sweep does NOT cover, and it is a real gap rather than a
+footnote: `activation_reserve_bytes` takes the VIDEO token count and models
+the video-only working set. An audio-visual forward carries a second stream
+and two cross-modal attentions, and its non-weight peak at T=13200 measures
+15146 MiB against the video path's 12167 - so the same reserve carries 1.23x
+margin there where it carries 1.53x on the video path. It still fits (21082
+MiB peak of a 24576 MiB card) and it fits for a reason that is not the
+reserve's doing: an AV block is 1.44x a video block, so the same budget
+arithmetic grants 16 slots instead of 23 and the smaller window happens to
+leave the extra room. That is a coincidence of this card and this block-size
+ratio, not a property of the policy.
+
+One hazard the sweep found and did not have to fix: below roughly 7000 tokens
+the reserve is SMALLER than the observed non-weight peak (5.93 GiB of reserve
+at 3520 against a 10.5 GiB observed pool), and only the card-fraction cap
+keeps the window from being planned on that basis. It is not a live defect -
+the pool is elastic and shrinks under exactly the pressure a full window
+applies, which is why 3520 runs clean at 23 slots - but the cap is doing
+load-bearing work there, not just VAE-decode work.
+
+#### 4 - the int8 audio-visual tier's parity, and what each gate is worth
+
+Every comparison asserts cosine AND relative L2. Cosine alone is scale
+invariant, and this phase measured that directly rather than asserting it (see
+the mutation table).
+
+| comparison | cosine | rel_l2 | floors |
+|---|---:|---:|---|
+| tiny gated config, int8 vs fp32 AV block, video out | 0.9999999996 | 3.03e-5 | 0.9995 / 3e-2 |
+| the same, audio out | 0.9999999996 | 2.80e-5 | 0.9995 / 3e-2 |
+| the same, raw A2V output (pre-gate) | 0.9999676182 | 8.43e-3 | 0.999 / 5e-2 |
+| the same, raw V2A output (pre-gate) | 0.9999742007 | 7.39e-3 | 0.999 / 5e-2 |
+| the same, video attn1 out | 0.9998416057 | 1.80e-2 | 0.999 / 5e-2 |
+| REAL Q8_0 block 0, int8 vs fp32, video out | 0.9985762873 | 5.63e-2 | 0.99 / 1.5e-1 |
+| the same, audio out | 0.9988666645 | 4.83e-2 | 0.99 / 1.5e-1 |
+| the same, raw A2V output | 0.9995120969 | 3.13e-2 | 0.98 / 2e-1 |
+| the same, raw V2A output | 0.9997432730 | 2.31e-2 | 0.98 / 2e-1 |
+| REAL Q8_0, WHOLE streamed int8 forward vs eager fp32, video out | 0.9975000074 | 7.78e-2 | 0.99 / 1.5e-1 |
+| the same, audio out | 0.9981436150 | 6.15e-2 | 0.99 / 1.5e-1 |
+
+The real-weight block-0 figure (0.9986) sits where the video-only int8 tier's
+own does (0.9963) - an int8 tier is not expected to reach 1.0, and the floors
+are set below what a clean run measures rather than at it.
+
+The last two rows are a gate that did not exist: `av_forward_q_streamed_in` -
+the function a real audio-visual generation dispatches - was called by ONE
+bench binary and by nothing else in the workspace. Everything between the
+blocks (both patchifies, the six model-level adaLN row tables and their row
+maps, the four RoPE table sets, both embeddings connectors, the resident
+window's rotation, both output stages) had no coverage at all. It now runs
+against the eager fp32 `LtxAvDit::forward` on real weights, with a deliberately
+narrow resident window so the rotation is on the tested path, plus a
+bit-identity check that a warm forward reproduces the cold one exactly.
+
+#### 5 - the mutations, and which metric caught which
+
+Every gate relied on above was mutation-verified: mutation applied, RED
+confirmed, mutation removed, GREEN confirmed.
+
+| mutation | modelled fault | RED in | caught by |
+|---|---|---|---|
+| A2V `gate_row` replaced by a plain add | the A<->V CROSS-ATTENTION gate always OPEN | `a_closed_cross_modal_gate_...`; real-weight block 0 | the CLOSED arm's bit equality (two different audio latents moved the video output by max_abs 1.9e-3 where the answer must be exactly 0); and cosine 0.595 on real weights |
+| `to_gate_logits` gate skipped in `attention_q` | every per-head attention gate always OPEN | tiny block gate; real-weight block 0; whole streamed forward | COSINE on the tiny config's `video attn1_out` tap (0.99812), 0.709 on real block 0, -0.014 on the whole forward |
+| int8 block outputs scaled by 1.05 | a systematic gain (a wrong global dequant scale) | tiny block gate | **rel_l2 ALONE** (5.0e-2 > 3.0e-2) with cosine unchanged in all ten printed digits - the direct demonstration that a cosine-only gate passes a systematically wrong result |
+| A2V video scale row derived without its `1.0 +` | a device-side modulation ROUTING slip | `device_derived_av_modulation_...` | BIT equality. The change is max_abs 5.7e-5; the whole-forward tolerance gate moved from 0.9975000 to 0.9974601 and passed. No tolerance gate can see it |
+| the block-to-block activation chain not advanced | this phase's own change, mis-wired | `streamed_vs_eager_real` (video, cosine 0.709); the new AV streamed gate (cosine 0.697) | cross-implementation comparison ONLY. `a_device_resident_forward_is_bit_identical_to_the_streaming_one` PASSED - both its arms carry the same fault |
+
+Two of those rows are the reason this suite keeps an exact gate and an
+analytic gate beside its tolerance gates. An always-open cross-modal gate does
+NOT move the tiny-config tolerance gate past a floor sized for a lossy tier
+(it moves `video out` rel_l2 from 3.0e-5 to 6.0e-3), and a modulation routing
+slip does not move any tolerance gate at all.
+
+#### 6 - recorded, NOT done
+
+* **The next host item is measured and located: device buffer ALLOCATION
+  churn.** After the chaining fix, `activation/context/adaLN record+upload`
+  is still 14.3 s of a 93.6 s warm video forward. It is not the prompt
+  broadcast and it is not the activation: it scales with the TOKEN count
+  (4.73 s at 3520, 7.67 at 6160, 10.02 at 8800, 11.77 at 11440), i.e. ~1.5 s
+  fixed plus ~0.9 ms per token. That is the ~60 `Gpu::storage` calls each
+  block makes for `[t, dim]` and `[t, 4*dim]` scratch, 48 blocks per forward,
+  every one a fresh (zero-initialised) wgpu buffer. The fix is a size-keyed
+  scratch pool reused across blocks; it needs an aliasing-safe design and its
+  own gate (two live buffers must never share a slot), so it is a workstream
+  and not a tail-end edit.
+* **The prompt scale/shift broadcast is still per block per forward.** Both
+  `[context_len, dim]` buffers are a pure function of the block's own
+  `prompt_scale_shift_table` and the context width, so they are constant for a
+  whole generation; at ctx 1024 they are 32 MiB per block, ~1.5 GiB per
+  forward. Caching them on a resident block costs that much VRAM (worth
+  several resident blocks); expanding them on the DEVICE from the `[2, dim]`
+  row costs nothing but needs a broadcast dispatch this crate does not have a
+  clean seam for yet. Deliberately left, with the arithmetic, rather than
+  guessed at.
+* **The audio-visual path has no training support**, no bandwidth extension,
+  and no real end-to-end generation recorded on this box - unchanged by this
+  phase.
+* The AV forward has no CFG-parallel two-card measurement; every figure above
+  is one card, one branch.

@@ -331,6 +331,20 @@ struct FfWeights {
     b2: Option<DeviceBuffer>,
 }
 
+/// Whether the FFN at `prefix` is BIASED, read off the tensor map rather than
+/// off `cfg.ff_bias`.
+///
+/// The two disagree, and the map is right. `crate::dit::push_ff`'s own doc
+/// records the fact this derives from: the real checkpoint's video `ff` has no
+/// bias, but its `audio_ff` and both embeddings connectors' FFNs carry one
+/// regardless of the single shared `ff_bias` config key, which is `false` for
+/// both streams. The tiny AV golden's own `audio_ff` is bias-free, so a config
+/// flag cannot describe both fixtures either. Presence in the map is the one
+/// statement that is true of every checkpoint and every fixture at once.
+fn ff_has_bias(w: &Tensors, prefix: &str) -> bool {
+    w.contains_key(&format!("{prefix}.net.0.proj.bias"))
+}
+
 impl FfWeights {
     fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, has_bias: bool) -> FfWeights {
         FfWeights {
@@ -373,13 +387,15 @@ impl BlockWeights {
         BlockWeights {
             attn1: AttnWeights::upload(gpu, w, &format!("{prefix}.{stream}attn1"), gated),
             attn2: AttnWeights::upload(gpu, w, &format!("{prefix}.{stream}attn2"), gated),
-            // Both streams' tiny-golden FFN is bias-free (`ff_bias`/
-            // `audio_ff_bias=False` in `tools/goldens/ltxv_av_dit_dump_
-            // reference.py`'s `TINY_CONFIG` - unlike the REAL checkpoint's
-            // `audio_ff`, which `dit.rs::push_ff`'s doc notes carries bias
-            // regardless of config; real-weight audio FFN bias import is
-            // untouched by this milestone, same as before).
-            ff: FfWeights::upload(gpu, w, &format!("{prefix}.{stream}ff"), false),
+            // Biased iff the map carries the tensor - see [`ff_has_bias`].
+            // The tiny AV golden's `audio_ff` is bias-free; the real
+            // checkpoint's is not, and reading the flag off the map rather
+            // than off `cfg.ff_bias` is what lets one code path serve both.
+            ff: {
+                let ffp = format!("{prefix}.{stream}ff");
+                let biased = ff_has_bias(w, &ffp);
+                FfWeights::upload(gpu, w, &ffp, biased)
+            },
             scale_shift_table: sst,
             prompt_scale_shift_table: pst,
         }
@@ -1219,6 +1235,7 @@ impl AvCrossWeights {
 /// counterpart of [`BlockTaps`], one set per stream plus the two raw
 /// cross-attention outputs (`a2v_out`/`v2a_out`, BEFORE their `*gate`
 /// multiply, same convention as `BlockTaps::attn2_out`).
+#[derive(Default)]
 pub struct AvBlockTaps {
     pub v_attn1_out: Vec<f32>,
     pub v_attn2_out: Vec<f32>,
@@ -1346,6 +1363,7 @@ impl LtxAvBlock {
         av_v2a_gate_table: &[f32],
         tv: u32,
         ta: u32,
+        taps: bool,
     ) -> (Vec<f32>, Vec<f32>, AvBlockTaps) {
         let gpu = &self.gpu;
         let vdim = self.vcfg.inner_dim;
@@ -1450,17 +1468,24 @@ impl LtxAvBlock {
         gpu.submit(&[], &s);
         let vx_out = gpu.read(&vx3, vtd as usize);
         let ax_out = gpu.read(&ax3, atd as usize);
-        let taps = AvBlockTaps {
-            v_attn1_out: gpu.read(&v_attn1_out, vtd as usize),
-            v_attn2_out: gpu.read(&v_ca_raw, vtd as usize),
-            v_ff_out: gpu.read(&v_ff_out, vtd as usize),
-            a_attn1_out: gpu.read(&a_attn1_out, atd as usize),
-            a_attn2_out: gpu.read(&a_ca_raw, atd as usize),
-            a_ff_out: gpu.read(&a_ff_out, atd as usize),
-            a2v_out: gpu.read(&a2v_out, vtd as usize),
-            v2a_out: gpu.read(&v2a_out, atd as usize),
+        // Eight `[t, dim]`-scale readbacks a production forward discards -
+        // see [`crate::dit::LtxAvDit::forward_blocks_av`]'s `taps` doc for
+        // what they cost at a real token count.
+        let tp = if taps {
+            AvBlockTaps {
+                v_attn1_out: gpu.read(&v_attn1_out, vtd as usize),
+                v_attn2_out: gpu.read(&v_ca_raw, vtd as usize),
+                v_ff_out: gpu.read(&v_ff_out, vtd as usize),
+                a_attn1_out: gpu.read(&a_attn1_out, atd as usize),
+                a_attn2_out: gpu.read(&a_ca_raw, atd as usize),
+                a_ff_out: gpu.read(&a_ff_out, atd as usize),
+                a2v_out: gpu.read(&a2v_out, vtd as usize),
+                v2a_out: gpu.read(&v2a_out, atd as usize),
+            }
+        } else {
+            AvBlockTaps::default()
         };
-        (vx_out, ax_out, taps)
+        (vx_out, ax_out, tp)
     }
 
     pub fn gpu(&self) -> &Gpu {
@@ -1786,14 +1811,25 @@ pub fn cached_block_bytes(cfg: &LtxDitConfig, tier: QTier) -> u64 {
 
 impl QBlockWeights {
     pub(crate) fn quantize_host(w: &Tensors, prefix: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
-        let sst = tget(w, &format!("{prefix}.scale_shift_table")).to_vec();
-        assert_eq!(sst.len(), 9 * dim, "{prefix}.scale_shift_table must be [9, dim]");
-        let pst = tget(w, &format!("{prefix}.prompt_scale_shift_table")).to_vec();
-        assert_eq!(pst.len(), 2 * dim, "{prefix}.prompt_scale_shift_table must be [2, dim]");
+        QBlockWeights::quantize_host_stream(w, prefix, "", dim, gated, tier)
+    }
+
+    /// [`Self::quantize_host`] for ONE stream of a block - `stream` is `""`
+    /// for video's own weights and `"audio_"` for audio's, exactly
+    /// [`BlockWeights::upload`]'s convention and for the same reason (both
+    /// streams' per-block state is structurally identical; only the tensor
+    /// name prefix, the dims and the FFN's bias differ).
+    pub(crate) fn quantize_host_stream(w: &Tensors, prefix: &str, stream: &str, dim: usize, gated: bool, tier: QTier) -> CachedQBlockWeights {
+        let sst = tget(w, &format!("{prefix}.{stream}scale_shift_table")).to_vec();
+        assert_eq!(sst.len(), 9 * dim, "{prefix}.{stream}scale_shift_table must be [9, dim]");
+        let pst = tget(w, &format!("{prefix}.{stream}prompt_scale_shift_table")).to_vec();
+        assert_eq!(pst.len(), 2 * dim, "{prefix}.{stream}prompt_scale_shift_table must be [2, dim]");
+        let ffp = format!("{prefix}.{stream}ff");
+        let ff_bias = ff_has_bias(w, &ffp);
         CachedQBlockWeights {
-            attn1: QAttnWeights::quantize_host(w, &format!("{prefix}.attn1"), gated, tier, dim, dim, dim),
-            attn2: QAttnWeights::quantize_host(w, &format!("{prefix}.attn2"), gated, tier, dim, dim, dim),
-            ff: QFfWeights::quantize_host(w, &format!("{prefix}.ff"), tier, dim, false),
+            attn1: QAttnWeights::quantize_host(w, &format!("{prefix}.{stream}attn1"), gated, tier, dim, dim, dim),
+            attn2: QAttnWeights::quantize_host(w, &format!("{prefix}.{stream}attn2"), gated, tier, dim, dim, dim),
+            ff: QFfWeights::quantize_host(w, &ffp, tier, dim, ff_bias),
             scale_shift_table: sst,
             prompt_scale_shift_table: pst,
         }
@@ -1941,26 +1977,37 @@ fn self_attn_and_text_ca_q(
     eps: f32,
 ) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
     let td = t * dim;
-    let up = |v: &[f32]| -> DeviceBuffer {
-        let b = gpu.storage(v.len() as u64);
-        wf(gpu, &b, v);
-        b
-    };
     let (shift_msa, one_plus_scale_msa, gate_msa) = (&m.shift_msa, &m.one_plus_scale_msa, &m.gate_msa);
     let (shift_q, one_plus_scale_q, gate_q) = (&m.shift_q, &m.one_plus_scale_q, &m.gate_q);
 
+    // The text context's own scale/shift, broadcast to every context row.
+    // Both `[dim]` rows come from this block's `prompt_scale_shift_table`, so
+    // the whole `[ctx_len, dim]` pair is constant for a generation and is
+    // nevertheless rebuilt per block per forward - see this crate's roadmap
+    // ledger for what that costs and why removing it needs a device-side
+    // broadcast rather than a bigger resident block. Two things it does NOT
+    // do any more: recompute `1.0 + scale` per ELEMENT (once per row now,
+    // then a `copy_from_slice` like its sibling), and hand `write_buffer` a
+    // whole `[ctx_len, dim]` payload in one call - on a non-ReBAR card the
+    // staging allocation that needs is the size of the payload, which is the
+    // same reason `crate::devres` chunks its own table uploads.
     let pst = &w.prompt_scale_shift_table;
     let (shift_kv_row, scale_kv_row) = (&pst[0..dim as usize], &pst[dim as usize..2 * dim as usize]);
+    let one_plus_scale_row: Vec<f32> = scale_kv_row.iter().map(|v| 1.0 + v).collect();
     let mut shift_kv = vec![0f32; (ctx_len * dim) as usize];
     let mut one_plus_scale_kv = vec![0f32; (ctx_len * dim) as usize];
     for r in 0..ctx_len as usize {
-        shift_kv[r * dim as usize..r * dim as usize + dim as usize].copy_from_slice(shift_kv_row);
-        for (d, v) in scale_kv_row.iter().enumerate() {
-            one_plus_scale_kv[r * dim as usize + d] = 1.0 + v;
-        }
+        let (lo, hi) = (r * dim as usize, r * dim as usize + dim as usize);
+        shift_kv[lo..hi].copy_from_slice(shift_kv_row);
+        one_plus_scale_kv[lo..hi].copy_from_slice(&one_plus_scale_row);
     }
-    let shift_kv_buf = up(&shift_kv);
-    let one_plus_scale_kv_buf = up(&one_plus_scale_kv);
+    let bcast = |v: &[f32]| -> DeviceBuffer {
+        let b = gpu.storage(v.len() as u64);
+        gpu.write_f32_chunked(&b, v, 1 << 20);
+        b
+    };
+    let shift_kv_buf = bcast(&shift_kv);
+    let one_plus_scale_kv_buf = bcast(&one_plus_scale_kv);
 
     let tmp1 = gpu.storage(td as u64);
     let tmp2 = gpu.storage(td as u64);
@@ -2037,7 +2084,7 @@ pub struct BlockTimings {
     /// the GPU's actual work.
     pub compute: std::time::Duration,
     /// Device->host readback. For a chained stack
-    /// ([`LtxBlockQ::forward_chained`]) that is ONE `[t, dim]` read for the
+    /// ([`LtxBlockQ::forward_prod_dev`]) that is ONE `[t, dim]` read for the
     /// whole forward; for the tap-producing path
     /// ([`LtxBlockQ::forward_timed`]) it is the three parity TAP readbacks
     /// (`attn1_out`/`attn2_out`/`ff_out`), each a full `[t, dim]`, per block -
@@ -2212,18 +2259,14 @@ impl LtxBlockQ {
     ///   forward discards - better than a tenth of a forward, and 8.3 GB of
     ///   readback, per forward.
     ///
-    /// What it DOES still do is read `x` back to the host and take it back as
-    /// host floats, and that is deliberate and was measured both ways. Leaving
-    /// `x` on the card across all 48 blocks removes ~5.6 GB of round trip per
-    /// forward and does save time - but it also removes the one BLOCKING
-    /// READBACK per block that makes wgpu's allocator pool shrink, and the pool
-    /// then grows from 5.7 GiB to 16.5 GiB. That extra ~10 GiB is worth ~38
-    /// resident blocks, i.e. far more than the time it buys. See this crate's
-    /// roadmap ledger, Phase 18, for the numbers on both arms.
-    ///
     /// Bit-identical to [`Self::forward_timed`] by construction - same kernels,
     /// same operands, same order; only the ROUTE the modulation bytes take to
     /// the card changes. Gated by `crates/ltxv/tests/device_residency.rs`.
+    ///
+    /// Takes and returns HOST floats. A stack of blocks should use
+    /// [`Self::forward_prod_dev`] instead and keep the activation on the card;
+    /// this form stays because a single-block gate wants to compare host
+    /// floats and should not have to manage device buffers to do it.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_prod(
         &self,
@@ -2237,35 +2280,719 @@ impl LtxBlockQ {
         t: u32,
         timings: &mut BlockTimings,
     ) -> Vec<f32> {
-        let cfg = &self.cfg;
-        let (dim, heads, head_dim, eps, ctx_len) = (cfg.inner_dim, cfg.num_heads, cfg.head_dim(), cfg.norm_eps, self.context_len);
+        let dim = self.cfg.inner_dim;
         assert_eq!(x.len(), (t * dim) as usize);
         let s_rec = std::time::Instant::now();
         let x_buf = scratch.storage((t * dim) as u64);
         wf(scratch, &x_buf, x);
+        timings.record_upload += s_rec.elapsed();
+        let x3 = self.forward_prod_dev(scratch, &x_buf, adaln_buf, adaln_map_buf, ctx_buf, cos_bufs, sin_bufs, t, timings);
+        let s_back = std::time::Instant::now();
+        let out = scratch.read(&x3, (t * dim) as usize);
+        timings.readback += s_back.elapsed();
+        out
+    }
+
+    /// [`Self::forward_prod`] with the activation already on the card and
+    /// STAYING there: reads `x_buf`, returns this block's own output buffer.
+    ///
+    /// A block stack chains device buffer to device buffer, so `x` crosses
+    /// PCIe once per FORWARD instead of twice per BLOCK. At the token count a
+    /// real generation runs at, a `[t, dim]` activation is hundreds of MB and
+    /// there are 48 blocks, so the host round trip was tens of GB per forward
+    /// of traffic whose only purpose was to arrive back where it started.
+    ///
+    /// What the host round trip DID buy, and what this keeps buying a much
+    /// cheaper way: on a non-ReBAR Pascal card under the default wgpu backend,
+    /// `write_buffer` staging and dropped buffers are only retired by a
+    /// BLOCKING readback, and an uploaded storage buffer otherwise costs twice
+    /// its size resident (measured directly by
+    /// `crates/gpu-core/tests/vram_overhead.rs`). Left unretired the
+    /// allocator's pool grows several-fold and the resident weight window
+    /// loses more blocks than the saved traffic is worth - which is why an
+    /// earlier pass measured chaining as a NET LOSS and kept the round trip.
+    /// What that pass missed is that the drain needs the readback to be
+    /// BLOCKING, not to be big: one word is a full `map_async` + wait and
+    /// retires exactly the same staging a whole `[t, dim]` read does
+    /// (`backend_wgpu`'s `read` is `flush` + `map_async` + a bounded
+    /// `poll_wait` whatever `n` is; only the copy scales). That is the same
+    /// one-word probe `crate::devres::DitSession::prefill` already uses
+    /// between weight uploads, for the same reason - and it is taken off `x3`
+    /// itself, so it needs no buffer of its own.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_prod_dev(
+        &self,
+        scratch: &Gpu,
+        x_buf: &DeviceBuffer,
+        adaln_buf: &DeviceBuffer,
+        adaln_map_buf: &DeviceBuffer,
+        ctx_buf: &DeviceBuffer,
+        cos_bufs: &[DeviceBuffer],
+        sin_bufs: &[DeviceBuffer],
+        t: u32,
+        timings: &mut BlockTimings,
+    ) -> DeviceBuffer {
+        let cfg = &self.cfg;
+        let (dim, heads, head_dim, eps, ctx_len) = (cfg.inner_dim, cfg.num_heads, cfg.head_dim(), cfg.norm_eps, self.context_len);
+        let s_rec = std::time::Instant::now();
         let mut s: Vec<Step> = Vec::new();
         let mb = ModBufs::derive(scratch, &mut s, adaln_buf, adaln_map_buf, &self.sst_buf, t, dim);
-        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
         let (x3, _ff_out) = mlp_sublayer_q(scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
         scratch.submit(&[], &s);
-        // A full, BLOCKING readback, and on this class of hardware that is load
-        // bearing rather than incidental: on a non-ReBAR Pascal card under the
-        // default wgpu backend, `write_buffer` staging and dropped buffers are
-        // only retired by a blocking readback, and an uploaded storage buffer
-        // otherwise costs twice its size resident (measured directly by
-        // `crates/gpu-core/tests/vram_overhead.rs`). One readback per block is
-        // what keeps the allocator's pool at 5.7 GiB instead of letting it
-        // grow to 16.5 GiB.
-        let out = scratch.read(&x3, (t * dim) as usize);
+        let _ = scratch.read(&x3, 1);
         timings.compute += s_sub.elapsed();
-        out
+        x3
     }
 
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
     }
+}
+
+// ---------------------------------------------------------------------------
+// Quantized-compute AUDIO+VIDEO block - the audio-extended twin of everything
+// above.
+//
+// It quantizes exactly what the video-only tier quantizes, applied to every
+// stream this block has: the four projections (`to_q`/`to_k`/`to_v`/
+// `to_out.0`) of all SIX attention modules (`attn1`/`attn2`, `audio_attn1`/
+// `audio_attn2`, `audio_to_video_attn`/`video_to_audio_attn`) plus both FFNs'
+// two linears each - 28 quantized linears per block against the video-only
+// block's 10.
+//
+// What stays fp32 is `crate::int8::is_never_quantized`'s set, unchanged and
+// not extended: `q_norm`/`k_norm` (1-D gains), every `to_gate_logits`
+// (`[32, q_dim]` - small, and it is what fixes each gate's own numeric scale),
+// and every modulation table (`{audio_,}scale_shift_table`,
+// `{audio_,}prompt_scale_shift_table`, `scale_shift_table_a2v_ca_{video,
+// audio}`). The AV extension adds no new KIND of tensor to that decision - the
+// two `[5, dim]` A<->V tables are modulation tables and are excluded by the
+// same `scale_shift_table` substring the video tables are, and the two
+// cross-attention modules are ordinary `Attention` modules whose gates are
+// therefore excluded by the same `to_gate_logits` substring. So there is one
+// keep-fp32 rule in this crate, not a second one for audio.
+//
+// EVERY attention here is gated, in both streams and in both cross-modal
+// directions, and the A<->V directions additionally carry their own `[5, dim]`
+// row-4 gate driven by the OTHER modality's scalar sigma. Both survive the
+// quantization untouched: the per-head `to_gate_logits` -> `sigmoid` ->
+// broadcast -> multiply chain is shared verbatim with [`attention`] (see
+// [`attention_q`]'s own doc), and the cross-modal gate is [`gate_row`] against
+// a fp32 `[dim]` row, exactly as in [`LtxAvBlock::forward`].
+// ---------------------------------------------------------------------------
+
+/// [`AvCrossWeights`]'s quantized twin - both cross-modal `Attention` modules
+/// packed, both `[5, dim]` adaLN tables left fp32.
+struct QAvCrossWeights {
+    a2v: QAttnWeights,
+    v2a: QAttnWeights,
+    /// `[5, video.dim]`/`[5, audio.dim]` host copies, kept for the same
+    /// reason [`QBlockWeights::scale_shift_table`] is: the parity path
+    /// combines them with the model-level table on the HOST, the production
+    /// path adds them on the CARD, and one copy of the numbers is what stops
+    /// the two paths modulating against different tables.
+    table_video: Vec<f32>,
+    table_audio: Vec<f32>,
+}
+
+/// [`QAvCrossWeights`]'s host-only form - see [`CachedQLinear`]'s doc for why
+/// the host/device split exists at all.
+struct CachedQAvCrossWeights {
+    a2v: CachedQAttnWeights,
+    v2a: CachedQAttnWeights,
+    /// `[5, video.dim]` - rows 0-1 A2V scale/shift, 2-3 V2A scale/shift, 4
+    /// this stream's own cross-modal gate (`crate::config`'s doc).
+    table_video: Vec<f32>,
+    /// `[5, audio.dim]`.
+    table_audio: Vec<f32>,
+}
+
+impl CachedQAvCrossWeights {
+    fn byte_len(&self) -> usize {
+        self.a2v.byte_len() + self.v2a.byte_len() + std::mem::size_of_val(self.table_video.as_slice()) + std::mem::size_of_val(self.table_audio.as_slice())
+    }
+}
+
+/// Resident quantized weights of one AV block.
+struct QAvBlockWeights {
+    vw: QBlockWeights,
+    aw: QBlockWeights,
+    avw: QAvCrossWeights,
+}
+
+/// [`CachedQBlockWeights`]'s audio+video twin - what an AV
+/// [`crate::weightcache::GenerationCache`] slot holds, and the unit
+/// [`crate::devres::AvDitSession`] uploads. Composed of the two streams'
+/// own already-existing per-stream cached form plus the cross-modal pair, so
+/// the audio stream reuses the video stream's quantization code verbatim
+/// rather than a transcription of it.
+pub struct CachedQAvBlockWeights {
+    vw: CachedQBlockWeights,
+    aw: CachedQBlockWeights,
+    avw: CachedQAvCrossWeights,
+}
+
+impl CachedQAvBlockWeights {
+    /// Real host bytes this one AV block's cache slot holds - the same
+    /// measured (not derived) number [`CachedQBlockWeights::byte_len`]
+    /// reports, and what [`cached_av_block_bytes`] is pinned against.
+    pub fn byte_len(&self) -> usize {
+        self.vw.byte_len() + self.aw.byte_len() + self.avw.byte_len()
+    }
+
+    /// Quantize one AV block's weights into the cache's host form.
+    pub fn quantize(w: &Tensors, prefix: &str, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, tier: QTier) -> CachedQAvBlockWeights {
+        let (vdim, adim) = (vcfg.inner_dim as usize, acfg.inner_dim as usize);
+        let gated = vcfg.apply_gated_attention;
+        let table_video = tget(w, &format!("{prefix}.scale_shift_table_a2v_ca_video")).to_vec();
+        assert_eq!(table_video.len(), 5 * vdim, "{prefix}.scale_shift_table_a2v_ca_video must be [5, video.dim]");
+        let table_audio = tget(w, &format!("{prefix}.scale_shift_table_a2v_ca_audio")).to_vec();
+        assert_eq!(table_audio.len(), 5 * adim, "{prefix}.scale_shift_table_a2v_ca_audio must be [5, audio.dim]");
+        CachedQAvBlockWeights {
+            vw: QBlockWeights::quantize_host_stream(w, prefix, "", vdim, gated, tier),
+            aw: QBlockWeights::quantize_host_stream(w, prefix, "audio_", adim, gated, tier),
+            avw: CachedQAvCrossWeights {
+                // A2V's query is VIDEO (`q_dim = vdim`), its keys/values are
+                // AUDIO (`kv_dim = adim`), and it runs at AUDIO's head
+                // geometry (`inner_dim = adim`) - see [`LtxAvBlock`]'s doc.
+                // V2A is the mirror image, and `inner_dim` stays audio's in
+                // BOTH directions.
+                a2v: QAttnWeights::quantize_host(w, &format!("{prefix}.audio_to_video_attn"), gated, tier, vdim, adim, adim),
+                v2a: QAttnWeights::quantize_host(w, &format!("{prefix}.video_to_audio_attn"), gated, tier, adim, vdim, adim),
+                table_video,
+                table_audio,
+            },
+        }
+    }
+}
+
+impl QAvBlockWeights {
+    fn from_cached(gpu: &Gpu, c: &CachedQAvBlockWeights) -> QAvBlockWeights {
+        QAvBlockWeights {
+            vw: QBlockWeights::from_cached(gpu, &c.vw),
+            aw: QBlockWeights::from_cached(gpu, &c.aw),
+            avw: QAvCrossWeights {
+                a2v: QAttnWeights::from_cached(gpu, &c.avw.a2v),
+                v2a: QAttnWeights::from_cached(gpu, &c.avw.v2a),
+                table_video: c.avw.table_video.clone(),
+                table_audio: c.avw.table_audio.clone(),
+            },
+        }
+    }
+}
+
+/// [`cached_block_bytes`]'s AV twin: host bytes ONE cached AV block occupies
+/// at `tier`, in closed form, for a residency estimate that has to exist
+/// BEFORE anything has been loaded.
+///
+/// Pinned against a really-quantized block by
+/// `cached_av_block_bytes_matches_a_real_measured_block`, exactly as the
+/// video-only one is - a derivation nobody checks drifts.
+pub fn cached_av_block_bytes(vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, tier: QTier) -> u64 {
+    /// `to_gate_logits`'s fixed row count - the same literal
+    /// `crate::dit::push_attn` writes into the tensor manifest.
+    const GATE_LOGIT_ROWS: u64 = 32;
+    let f32s = |n: u64| n * 4;
+    let packed = |out: u64, inp: u64| -> u64 {
+        let words = match tier {
+            QTier::Int8 => out * inp / 4,
+            QTier::Int4 => out * inp / 8,
+        };
+        words * 4 + f32s(out)
+    };
+    let gated = vcfg.apply_gated_attention;
+    // One `Attention` at `(q_dim, kv_dim, inner_dim)`: to_q [inner,q]+bias,
+    // to_k/to_v [inner,kv]+bias, to_out.0 [q,inner]+bias, two [inner] norms,
+    // an optional [32, q_dim] gate + [32] bias.
+    let attn = |q: u64, kv: u64, inner: u64| -> u64 {
+        packed(inner, q)
+            + f32s(inner)
+            + 2 * (packed(inner, kv) + f32s(inner))
+            + packed(q, inner)
+            + f32s(q)
+            + 2 * f32s(inner)
+            + if gated { f32s(GATE_LOGIT_ROWS * q) + f32s(GATE_LOGIT_ROWS) } else { 0 }
+    };
+    let vdim = vcfg.inner_dim as u64;
+    let adim = acfg.inner_dim as u64;
+    let rows9 = vcfg.adaln_rows() as u64;
+    // Video stream: two same-width attentions, a bias-FREE FFN, its two
+    // tables. Audio stream: the same, with a BIASED FFN (`ff_has_bias` - the
+    // real checkpoint carries `audio_ff`'s bias whatever `ff_bias` says).
+    let video = 2 * attn(vdim, vdim, vdim) + packed(4 * vdim, vdim) + packed(vdim, 4 * vdim) + f32s(rows9 * vdim) + f32s(2 * vdim);
+    let audio = 2 * attn(adim, adim, adim) + packed(4 * adim, adim) + f32s(4 * adim) + packed(adim, 4 * adim) + f32s(adim) + f32s(rows9 * adim) + f32s(2 * adim);
+    let cross = attn(vdim, adim, adim) + attn(adim, vdim, adim) + f32s(5 * vdim) + f32s(5 * adim);
+    video + audio + cross
+}
+
+/// One AV block's CROSS-modal modulation, as device buffers: both directions'
+/// `(1+scale, shift)` pair for each operand stream, plus the two single-row
+/// gates.
+///
+/// Same two ways to fill one as [`ModBufs`], and for the same reason:
+/// [`Self::upload`] takes the host arithmetic ([`av_scale_shift`]/[`av_gate`])
+/// and writes ten vectors to the card; [`Self::derive`] computes them ON the
+/// card from the model-level per-token tables (uploaded once per forward) and
+/// this block's own resident `[5, dim]` tables. Bit-identical by
+/// construction: `adaln_row` reproduces `add_table`'s operand order and
+/// `slice_mod`'s `1.0 + x` exactly (that kernel's own header states it), and
+/// the gate is one
+/// `add2` over the same two `[dim]` rows `av_gate` adds on the host.
+struct AvModBufs {
+    scale_a2v_v: DeviceBuffer,
+    shift_a2v_v: DeviceBuffer,
+    scale_a2v_a: DeviceBuffer,
+    shift_a2v_a: DeviceBuffer,
+    scale_v2a_v: DeviceBuffer,
+    shift_v2a_v: DeviceBuffer,
+    scale_v2a_a: DeviceBuffer,
+    shift_v2a_a: DeviceBuffer,
+    gate_a2v: DeviceBuffer,
+    gate_v2a: DeviceBuffer,
+}
+
+/// This block's own resident AV tables, as device buffers - what
+/// [`AvModBufs::derive`] adds the model-level per-token tables to.
+struct AvTableBufs {
+    /// `[5, video.dim]` whole; `adaln_row` reads rows 0-3 at `NR = 4`, which
+    /// is why the row-4 gate needs its own buffer below (a kernel binding is a
+    /// whole buffer, never an offset view).
+    table_video: DeviceBuffer,
+    /// `[5, audio.dim]`.
+    table_audio: DeviceBuffer,
+    /// `table_video`'s row 4, `[video.dim]`.
+    gate_row_video: DeviceBuffer,
+    /// `table_audio`'s row 4, `[audio.dim]`.
+    gate_row_audio: DeviceBuffer,
+}
+
+/// The four model-level AV tables one forward shares across every block, on
+/// the device: each stream's `[U, 4*dim]` per-token scale/shift table plus its
+/// `[t]` row map (`dit::adaln::RowTable`, one row per DISTINCT timestep), and
+/// each direction's SINGLE `[dim]` raw gate row (driven by the CROSS
+/// modality's scalar sigma, so there is exactly one row however many tokens
+/// there are).
+pub struct AvModelTables<'a> {
+    pub v_ss: &'a DeviceBuffer,
+    pub v_ss_map: &'a DeviceBuffer,
+    pub a_ss: &'a DeviceBuffer,
+    pub a_ss_map: &'a DeviceBuffer,
+    pub a2v_gate: &'a DeviceBuffer,
+    pub v2a_gate: &'a DeviceBuffer,
+}
+
+impl AvModBufs {
+    /// Upload an already-computed host set - the reference definition of the
+    /// arithmetic, and what the parity path uses.
+    #[allow(clippy::too_many_arguments)]
+    fn upload(gpu: &Gpu, av_video_ss_table: &[f32], av_audio_ss_table: &[f32], av_a2v_gate_table: &[f32], av_v2a_gate_table: &[f32], tv: usize, ta: usize, vdim: usize, adim: usize, table_video: &[f32], table_audio: &[f32]) -> AvModBufs {
+        let up = |v: &[f32]| -> DeviceBuffer {
+            let b = gpu.storage(v.len() as u64);
+            wf(gpu, &b, v);
+            b
+        };
+        let (scale_a2v_v, shift_a2v_v) = av_scale_shift(av_video_ss_table, table_video, tv, vdim, 0);
+        let (scale_a2v_a, shift_a2v_a) = av_scale_shift(av_audio_ss_table, table_audio, ta, adim, 0);
+        let (scale_v2a_v, shift_v2a_v) = av_scale_shift(av_video_ss_table, table_video, tv, vdim, 2);
+        let (scale_v2a_a, shift_v2a_a) = av_scale_shift(av_audio_ss_table, table_audio, ta, adim, 2);
+        AvModBufs {
+            scale_a2v_v: up(&scale_a2v_v),
+            shift_a2v_v: up(&shift_a2v_v),
+            scale_a2v_a: up(&scale_a2v_a),
+            shift_a2v_a: up(&shift_a2v_a),
+            scale_v2a_v: up(&scale_v2a_v),
+            shift_v2a_v: up(&shift_v2a_v),
+            scale_v2a_a: up(&scale_v2a_a),
+            shift_v2a_a: up(&shift_v2a_a),
+            gate_a2v: up(&av_gate(av_a2v_gate_table, table_video, vdim)),
+            gate_v2a: up(&av_gate(av_v2a_gate_table, table_audio, adim)),
+        }
+    }
+
+    /// Derive the same ten vectors on the device. Records eight `adaln_row`
+    /// dispatches (`NR = 4`, rows 0-3, the scale rows carrying `plus_one`) and
+    /// two `add2`s into `s`; nothing runs until the caller submits.
+    #[allow(clippy::too_many_arguments)]
+    fn derive(gpu: &Gpu, s: &mut Vec<Step>, m: &AvModelTables, tbl: &AvTableBufs, tv: u32, vdim: u32, ta: u32, adim: u32) -> AvModBufs {
+        // `row0` is the direction's first row: 0 for A2V, 2 for V2A - and the
+        // pair is (scale, shift), REVERSED against the base 9-row table (see
+        // [`av_scale_shift`]'s doc), which is why `plus_one` sits on the FIRST
+        // of the two here and on the SECOND there.
+        let mut row = |tab: &DeviceBuffer, map: &DeviceBuffer, table: &DeviceBuffer, t: u32, dim: u32, r: u32, plus_one: bool| -> DeviceBuffer {
+            let b = gpu.storage((t * dim) as u64);
+            s.push(gpu.step(K_ADALN_ROW, &[tab, table, map, &b], &[t, dim, 4, r, u32::from(plus_one)], t * dim));
+            b
+        };
+        let scale_a2v_v = row(m.v_ss, m.v_ss_map, &tbl.table_video, tv, vdim, 0, true);
+        let shift_a2v_v = row(m.v_ss, m.v_ss_map, &tbl.table_video, tv, vdim, 1, false);
+        let scale_a2v_a = row(m.a_ss, m.a_ss_map, &tbl.table_audio, ta, adim, 0, true);
+        let shift_a2v_a = row(m.a_ss, m.a_ss_map, &tbl.table_audio, ta, adim, 1, false);
+        let scale_v2a_v = row(m.v_ss, m.v_ss_map, &tbl.table_video, tv, vdim, 2, true);
+        let shift_v2a_v = row(m.v_ss, m.v_ss_map, &tbl.table_video, tv, vdim, 3, false);
+        let scale_v2a_a = row(m.a_ss, m.a_ss_map, &tbl.table_audio, ta, adim, 2, true);
+        let shift_v2a_a = row(m.a_ss, m.a_ss_map, &tbl.table_audio, ta, adim, 3, false);
+        // `av_gate` is `add_table(gate_mlp_out, table5_row4, 1, dim)`, i.e.
+        // `table[i] + v[i]` over one row - one elementwise add, with the block
+        // table as the first operand exactly as on the host.
+        let gate_a2v = gpu.storage(vdim as u64);
+        add2(gpu, s, &tbl.gate_row_video, m.a2v_gate, &gate_a2v, vdim);
+        let gate_v2a = gpu.storage(adim as u64);
+        add2(gpu, s, &tbl.gate_row_audio, m.v2a_gate, &gate_v2a, adim);
+        AvModBufs { scale_a2v_v, shift_a2v_v, scale_a2v_a, shift_a2v_a, scale_v2a_v, shift_v2a_v, scale_v2a_a, shift_v2a_a, gate_a2v, gate_v2a }
+    }
+}
+
+/// Every buffer one AV block forward produces that a caller might read -
+/// the two stream outputs plus the eight [`AvBlockTaps`] taps, still on the
+/// device. A production forward reads the first two and drops the rest.
+struct AvQBody {
+    vx3: DeviceBuffer,
+    ax3: DeviceBuffer,
+    v_attn1: DeviceBuffer,
+    v_ca: DeviceBuffer,
+    v_ff: DeviceBuffer,
+    a_attn1: DeviceBuffer,
+    a_ca: DeviceBuffer,
+    a_ff: DeviceBuffer,
+    a2v: DeviceBuffer,
+    v2a: DeviceBuffer,
+}
+
+/// Every stream RoPE table set one AV block reads: each stream's own
+/// self-attention tables plus each stream's cross-modal (time-only) tables.
+#[derive(Clone, Copy)]
+pub struct AvRope<'a> {
+    pub v_cos: &'a [DeviceBuffer],
+    pub v_sin: &'a [DeviceBuffer],
+    pub a_cos: &'a [DeviceBuffer],
+    pub a_sin: &'a [DeviceBuffer],
+    pub v_cross_cos: &'a [DeviceBuffer],
+    pub v_cross_sin: &'a [DeviceBuffer],
+    pub a_cross_cos: &'a [DeviceBuffer],
+    pub a_cross_sin: &'a [DeviceBuffer],
+}
+
+/// One AV block's whole op sequence, recorded (not submitted) - the single
+/// implementation both [`LtxAvBlockQ::forward`] and
+/// [`LtxAvBlockQ::forward_prod`] record, so the parity-tap path and the
+/// production path cannot drift apart. Step numbering follows
+/// [`LtxAvBlock`]'s doc exactly.
+#[allow(clippy::too_many_arguments)]
+fn av_block_body_q(
+    gpu: &Gpu,
+    s: &mut Vec<Step>,
+    tier: QTier,
+    w: &QAvBlockWeights,
+    ones_v: &DeviceBuffer,
+    ones_a: &DeviceBuffer,
+    vx_buf: &DeviceBuffer,
+    ax_buf: &DeviceBuffer,
+    vm: &ModBufs,
+    am: &ModBufs,
+    avm: &AvModBufs,
+    v_ctx: &DeviceBuffer,
+    v_ctx_len: u32,
+    a_ctx: &DeviceBuffer,
+    a_ctx_len: u32,
+    rope: AvRope,
+    vcfg: &LtxDitConfig,
+    acfg: &LtxAudioDitConfig,
+    tv: u32,
+    ta: u32,
+) -> AvQBody {
+    let (vdim, vheads, vhd) = (vcfg.inner_dim, vcfg.num_heads, vcfg.head_dim());
+    let (adim, aheads, ahd) = (acfg.inner_dim, acfg.num_heads, acfg.head_dim());
+    // ONE model-level `norm_eps` is shared by every norm in BOTH streams -
+    // `BasicAVTransformerBlock`'s single constructor argument, not a
+    // per-stream value ([`LtxAvBlock::forward`] makes the same call).
+    let eps = vcfg.norm_eps;
+    let (vtd, atd) = (tv * vdim, ta * adim);
+
+    // ---- 1-2: each stream's self-attention + text cross-attention, run to
+    // completion before the AV step touches either.
+    #[rustfmt::skip]
+    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, rope.v_cos, rope.v_sin, vdim, vheads, vhd, tv, eps);
+    #[rustfmt::skip]
+    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, rope.a_cos, rope.a_sin, adim, aheads, ahd, ta, eps);
+
+    // ---- 3: audio<->video cross-attention. `vx1`/`ax1` are the pre-AV
+    // snapshot BOTH directions read.
+    let v_tmp1 = gpu.storage(vtd as u64);
+    let v_tmp2 = gpu.storage(vtd as u64);
+    let a2v_vx_scaled = gpu.storage(vtd as u64);
+    ada_zero(gpu, s, ones_v, &vx1, &avm.scale_a2v_v, &avm.shift_a2v_v, &v_tmp1, &v_tmp2, &a2v_vx_scaled, vdim, tv, eps);
+    let a_tmp1 = gpu.storage(atd as u64);
+    let a_tmp2 = gpu.storage(atd as u64);
+    let a2v_ax_scaled = gpu.storage(atd as u64);
+    ada_zero(gpu, s, ones_a, &ax1, &avm.scale_a2v_a, &avm.shift_a2v_a, &a_tmp1, &a_tmp2, &a2v_ax_scaled, adim, ta, eps);
+    #[rustfmt::skip]
+    let a2v = attention_q(gpu, s, tier, &w.avw.a2v, vdim, adim, adim, aheads, ahd, &a2v_vx_scaled, &a2v_ax_scaled, tv, ta, Some((rope.v_cross_cos, rope.v_cross_sin)), Some((rope.a_cross_cos, rope.a_cross_sin)), K_ROPE2D, eps, false);
+    let vx2 = gpu.storage(vtd as u64);
+    // `rows_per_cond = rows`: ONE gate row, broadcast across every token.
+    gate_row(gpu, s, &vx1, &avm.gate_a2v, &a2v, &vx2, tv, vdim, tv);
+
+    let v_tmp3 = gpu.storage(vtd as u64);
+    let v_tmp4 = gpu.storage(vtd as u64);
+    let v2a_vx_scaled = gpu.storage(vtd as u64);
+    ada_zero(gpu, s, ones_v, &vx1, &avm.scale_v2a_v, &avm.shift_v2a_v, &v_tmp3, &v_tmp4, &v2a_vx_scaled, vdim, tv, eps);
+    let a_tmp3 = gpu.storage(atd as u64);
+    let a_tmp4 = gpu.storage(atd as u64);
+    let v2a_ax_scaled = gpu.storage(atd as u64);
+    ada_zero(gpu, s, ones_a, &ax1, &avm.scale_v2a_a, &avm.shift_v2a_a, &a_tmp3, &a_tmp4, &v2a_ax_scaled, adim, ta, eps);
+    #[rustfmt::skip]
+    let v2a = attention_q(gpu, s, tier, &w.avw.v2a, adim, vdim, adim, aheads, ahd, &v2a_ax_scaled, &v2a_vx_scaled, ta, tv, Some((rope.a_cross_cos, rope.a_cross_sin)), Some((rope.v_cross_cos, rope.v_cross_sin)), K_ROPE2D, eps, false);
+    let ax2 = gpu.storage(atd as u64);
+    gate_row(gpu, s, &ax1, &avm.gate_v2a, &v2a, &ax2, ta, adim, ta);
+
+    // ---- 4: video MLP (on the post-A2V state), then audio MLP.
+    let (vx3, v_ff) = mlp_sublayer_q(gpu, s, &w.vw.ff, tier, ones_v, &vx2, &vm.shift_mlp, &vm.one_plus_scale_mlp, &vm.gate_mlp, vdim, tv, eps);
+    let (ax3, a_ff) = mlp_sublayer_q(gpu, s, &w.aw.ff, tier, ones_a, &ax2, &am.shift_mlp, &am.one_plus_scale_mlp, &am.gate_mlp, adim, ta, eps);
+    AvQBody { vx3, ax3, v_attn1, v_ca, v_ff, a_attn1, a_ca, a_ff, a2v, v2a }
+}
+
+/// [`LtxAvBlock`]'s quantized-compute twin: one audio+video block, weights
+/// resident in packed int8/int4 form. See this section's module doc for the
+/// tier's exact scope (28 quantized linears per block; the keep-fp32 set is
+/// `crate::int8::is_never_quantized`'s, unchanged).
+pub struct LtxAvBlockQ {
+    gpu: Gpu,
+    vcfg: LtxDitConfig,
+    acfg: LtxAudioDitConfig,
+    tier: QTier,
+    w: QAvBlockWeights,
+    v_ctx_len: u32,
+    a_ctx_len: u32,
+    ones_v: DeviceBuffer,
+    ones_a: DeviceBuffer,
+    /// Each stream's own `[9, dim]` `scale_shift_table` on the device - what
+    /// [`ModBufs::derive`] adds the model-level adaLN table to, and the reason
+    /// a resident AV block needs nothing from the host on a warm step.
+    v_sst_buf: DeviceBuffer,
+    a_sst_buf: DeviceBuffer,
+    /// The two `[5, dim]` A<->V tables (plus their row-4 gate rows split out),
+    /// the cross-modal counterpart of the two `sst_buf`s above.
+    av: AvTableBufs,
+}
+
+impl LtxAvBlockQ {
+    /// `weights`/`prefix`: same convention as [`LtxAvBlock::on`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn on(gpu: Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, weights: &Tensors, prefix: &str, v_ctx_len: u32, a_ctx_len: u32, tier: QTier) -> LtxAvBlockQ {
+        let cached = CachedQAvBlockWeights::quantize(weights, prefix, vcfg, acfg, tier);
+        LtxAvBlockQ::on_cached(gpu, vcfg, acfg, &cached, v_ctx_len, a_ctx_len, tier)
+    }
+
+    /// [`Self::on`]'s cached twin - no GGUF read and no CPU quantization, only
+    /// device uploads of already-quantized host bytes. The constructor
+    /// [`crate::devres::AvDitSession`] uses on every (re-)upload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_cached(gpu: Gpu, vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, cached: &CachedQAvBlockWeights, v_ctx_len: u32, a_ctx_len: u32, tier: QTier) -> LtxAvBlockQ {
+        vcfg.assert_supported();
+        let w = QAvBlockWeights::from_cached(&gpu, cached);
+        let up = |v: &[f32]| -> DeviceBuffer {
+            let b = gpu.storage(v.len() as u64);
+            wf(&gpu, &b, v);
+            b
+        };
+        let (vdim, adim) = (vcfg.inner_dim as usize, acfg.inner_dim as usize);
+        let ones_v = up(&vec![1.0f32; vdim]);
+        let ones_a = up(&vec![1.0f32; adim]);
+        let v_sst_buf = up(&w.vw.scale_shift_table);
+        let a_sst_buf = up(&w.aw.scale_shift_table);
+        let av = AvTableBufs {
+            table_video: up(&w.avw.table_video),
+            table_audio: up(&w.avw.table_audio),
+            gate_row_video: up(&w.avw.table_video[4 * vdim..5 * vdim]),
+            gate_row_audio: up(&w.avw.table_audio[4 * adim..5 * adim]),
+        };
+        LtxAvBlockQ { gpu, vcfg: *vcfg, acfg: *acfg, tier, w, v_ctx_len, a_ctx_len, ones_v, ones_a, v_sst_buf, a_sst_buf, av }
+    }
+
+    /// One AV block forward with the full parity tap set - same inputs and
+    /// outputs as [`LtxAvBlock::forward`], so a parity test can run the two
+    /// against each other with one shared harness.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(
+        &self,
+        vx: &[f32],
+        ax: &[f32],
+        v_adaln_table: &[f32],
+        a_adaln_table: &[f32],
+        v_context: &[f32],
+        a_context: &[f32],
+        rope: AvRope,
+        av_video_ss_table: &[f32],
+        av_audio_ss_table: &[f32],
+        av_a2v_gate_table: &[f32],
+        av_v2a_gate_table: &[f32],
+        tv: u32,
+        ta: u32,
+    ) -> (Vec<f32>, Vec<f32>, AvBlockTaps) {
+        let gpu = &self.gpu;
+        let (vdim, adim) = (self.vcfg.inner_dim, self.acfg.inner_dim);
+        assert_eq!(vx.len(), (tv * vdim) as usize);
+        assert_eq!(ax.len(), (ta * adim) as usize);
+        assert_eq!(v_adaln_table.len(), (tv * 9 * vdim) as usize);
+        assert_eq!(a_adaln_table.len(), (ta * 9 * adim) as usize);
+
+        let v_combined = dit::adaln::add_table(v_adaln_table, &self.w.vw.scale_shift_table, tv as usize, 9 * vdim as usize);
+        let vm = ModBufs::upload(gpu, &slice_mod(&v_combined, tv as usize, vdim as usize));
+        let a_combined = dit::adaln::add_table(a_adaln_table, &self.w.aw.scale_shift_table, ta as usize, 9 * adim as usize);
+        let am = ModBufs::upload(gpu, &slice_mod(&a_combined, ta as usize, adim as usize));
+        #[rustfmt::skip]
+        let avm = AvModBufs::upload(
+            gpu, av_video_ss_table, av_audio_ss_table, av_a2v_gate_table, av_v2a_gate_table,
+            tv as usize, ta as usize, vdim as usize, adim as usize, &self.w.avw.table_video, &self.w.avw.table_audio,
+        );
+
+        let up = |v: &[f32]| -> DeviceBuffer {
+            let b = gpu.storage(v.len() as u64);
+            wf(gpu, &b, v);
+            b
+        };
+        let (vx_buf, ax_buf) = (up(vx), up(ax));
+        let (v_ctx, a_ctx) = (up(v_context), up(a_context));
+
+        let mut s: Vec<Step> = Vec::new();
+        #[rustfmt::skip]
+        let b = av_block_body_q(gpu, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, &vx_buf, &ax_buf, &vm, &am, &avm,
+            &v_ctx, self.v_ctx_len, &a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta);
+        gpu.submit(&[], &s);
+        let (vtd, atd) = ((tv * vdim) as usize, (ta * adim) as usize);
+        let taps = AvBlockTaps {
+            v_attn1_out: gpu.read(&b.v_attn1, vtd),
+            v_attn2_out: gpu.read(&b.v_ca, vtd),
+            v_ff_out: gpu.read(&b.v_ff, vtd),
+            a_attn1_out: gpu.read(&b.a_attn1, atd),
+            a_attn2_out: gpu.read(&b.a_ca, atd),
+            a_ff_out: gpu.read(&b.a_ff, atd),
+            a2v_out: gpu.read(&b.a2v, vtd),
+            v2a_out: gpu.read(&b.v2a, atd),
+        };
+        (gpu.read(&b.vx3, vtd), gpu.read(&b.ax3, atd), taps)
+    }
+
+    /// The PRODUCTION form: every modulation vector derived ON the card from
+    /// tables uploaded once per FORWARD, no parity taps, and only the two
+    /// streams' activations crossing PCIe.
+    ///
+    /// The same three savings [`LtxBlockQ::forward_prod`]'s doc lists, at the
+    /// AV path's own scale: at the real 22B AV config a block's host-combined
+    /// modulation would be `[tv, 9*4096] + [ta, 9*2048] + [tv, 4*4096] +
+    /// [ta, 4*2048]`, per block, per forward. Deriving them instead leaves
+    /// only the model-level tables (one row per DISTINCT timestep) crossing
+    /// the bus, once per forward.
+    ///
+    /// Takes and returns HOST floats. A stack of blocks should use
+    /// [`Self::forward_prod_dev`] instead and keep both streams on the card;
+    /// this form stays because a single-block gate wants to compare host
+    /// floats and should not have to manage device buffers to do it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_prod(
+        &self,
+        scratch: &Gpu,
+        vx: &[f32],
+        ax: &[f32],
+        v_adaln_buf: &DeviceBuffer,
+        v_adaln_map: &DeviceBuffer,
+        a_adaln_buf: &DeviceBuffer,
+        a_adaln_map: &DeviceBuffer,
+        av: &AvModelTables,
+        v_ctx: &DeviceBuffer,
+        a_ctx: &DeviceBuffer,
+        rope: AvRope,
+        tv: u32,
+        ta: u32,
+        timings: &mut BlockTimings,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let (vdim, adim) = (self.vcfg.inner_dim, self.acfg.inner_dim);
+        assert_eq!(vx.len(), (tv * vdim) as usize);
+        assert_eq!(ax.len(), (ta * adim) as usize);
+        let s_rec = std::time::Instant::now();
+        let vx_buf = scratch.storage((tv * vdim) as u64);
+        wf(scratch, &vx_buf, vx);
+        let ax_buf = scratch.storage((ta * adim) as u64);
+        wf(scratch, &ax_buf, ax);
+        timings.record_upload += s_rec.elapsed();
+        #[rustfmt::skip]
+        let (vx3, ax3) = self.forward_prod_dev(scratch, &vx_buf, &ax_buf, v_adaln_buf, v_adaln_map, a_adaln_buf, a_adaln_map, av, v_ctx, a_ctx, rope, tv, ta, timings);
+        let s_back = std::time::Instant::now();
+        let vout = scratch.read(&vx3, (tv * vdim) as usize);
+        let aout = scratch.read(&ax3, (ta * adim) as usize);
+        timings.readback += s_back.elapsed();
+        (vout, aout)
+    }
+
+    /// [`Self::forward_prod`] with both streams already on the card and
+    /// STAYING there - the AV twin of [`LtxBlockQ::forward_prod_dev`], whose
+    /// doc has the measurement and the wgpu staging-drain rule this also
+    /// obeys. The drain is one blocking one-word read, taken off the VIDEO
+    /// output because it is the larger of the two and the wait it forces is
+    /// the same wait either way.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_prod_dev(
+        &self,
+        scratch: &Gpu,
+        vx_buf: &DeviceBuffer,
+        ax_buf: &DeviceBuffer,
+        v_adaln_buf: &DeviceBuffer,
+        v_adaln_map: &DeviceBuffer,
+        a_adaln_buf: &DeviceBuffer,
+        a_adaln_map: &DeviceBuffer,
+        av: &AvModelTables,
+        v_ctx: &DeviceBuffer,
+        a_ctx: &DeviceBuffer,
+        rope: AvRope,
+        tv: u32,
+        ta: u32,
+        timings: &mut BlockTimings,
+    ) -> (DeviceBuffer, DeviceBuffer) {
+        let (vdim, adim) = (self.vcfg.inner_dim, self.acfg.inner_dim);
+        let s_rec = std::time::Instant::now();
+        let mut s: Vec<Step> = Vec::new();
+        let vm = ModBufs::derive(scratch, &mut s, v_adaln_buf, v_adaln_map, &self.v_sst_buf, tv, vdim);
+        let am = ModBufs::derive(scratch, &mut s, a_adaln_buf, a_adaln_map, &self.a_sst_buf, ta, adim);
+        let avm = AvModBufs::derive(scratch, &mut s, av, &self.av, tv, vdim, ta, adim);
+        #[rustfmt::skip]
+        let b = av_block_body_q(scratch, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, vx_buf, ax_buf, &vm, &am, &avm,
+            v_ctx, self.v_ctx_len, a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta);
+        timings.record_upload += s_rec.elapsed();
+        let s_sub = std::time::Instant::now();
+        scratch.submit(&[], &s);
+        let _ = scratch.read(&b.vx3, 1);
+        timings.compute += s_sub.elapsed();
+        (b.vx3, b.ax3)
+    }
+
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+}
+
+/// [`load_block_tensors_from_source`]'s AV twin - exactly one AV block's own
+/// tensors off a real GGUF `checkpoint::TensorSource`, never the whole 22B
+/// checkpoint's fp32 expansion. Same bound, same reason; only the manifest
+/// differs (`crate::dit::av_dit_tensor_manifest`, which carries both streams
+/// and the two cross-modal modules).
+pub fn load_av_block_tensors_from_source(src: &dyn checkpoint::TensorSource, cfg: &crate::config::LtxAvDitConfig, prefix: &str) -> Tensors {
+    let manifest = crate::dit::av_dit_tensor_manifest(cfg);
+    let want_prefix = format!("{prefix}.");
+    let mut out = Tensors::new();
+    for (name, shape) in manifest {
+        if !name.starts_with(&want_prefix) {
+            continue;
+        }
+        let mut data = Vec::new();
+        let found = src.with_tensor(&name, &mut |d| data = d.to_vec());
+        assert!(found, "load_av_block_tensors_from_source: missing {name}");
+        let want: usize = shape.iter().product();
+        assert_eq!(data.len(), want, "load_av_block_tensors_from_source: {name} wrong length ({} vs {want})", data.len());
+        out.insert(name, (shape, data));
+    }
+    out
 }
 
 /// Read exactly one block's real tensors from `src` into a [`Tensors`] map -
