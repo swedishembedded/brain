@@ -544,6 +544,12 @@ fn fnv1a(s: &str) -> u64 {
     h
 }
 
+/// What the AUDIO stream's noise seeds are derived from, so one `--seed`
+/// reproduces a whole audio-visual run while the two streams never draw the
+/// same numbers. `"AUDIO"`, which is also what makes it recognisable in a
+/// trace.
+const AUDIO_SEED_SALT: u64 = 0x41_55_44_49_4f;
+
 /// Standard-normal noise from a seeded SplitMix64 stream - the same
 /// generator `wan::pipeline::seeded_noise` uses, deliberately not torch's
 /// Philox (see that function's doc for why bit-for-bit reproduction was
@@ -1905,13 +1911,25 @@ struct AudioInputs<'a> {
 /// carries beside the video latent when the denoiser generates sound.
 ///
 /// The two contexts are the AUDIO stream's own text projection, not the
-/// video one: see [`TextContext`]'s doc.
-struct AudioState {
+/// video one: see [`TextContext`]'s doc. They are BORROWED rather than
+/// copied: a stage is handed the same projection every window of a long-form
+/// clip, and re-copying it per stage is work a seam does not need to do.
+struct AudioState<'a> {
     latent: Vec<f32>,
     positions: Vec<f32>,
     ta: usize,
-    ctx_cond: Vec<f32>,
-    ctx_uncond: Vec<f32>,
+    ctx_cond: &'a [f32],
+    ctx_uncond: &'a [f32],
+    /// `(denoise_mask, clean)` over the tokens carried in from the previous
+    /// long-form WINDOW, `None` when this stage carries nothing.
+    ///
+    /// The audio counterpart of the video half's own [`Frozen`]: mask `0` on
+    /// the carried prefix (so its per-token timestep is `0` and
+    /// [`to_denoised`] is the identity there) and `1` on everything this
+    /// stage generates, with the carried content re-pinned every step. The
+    /// same three things the video's carried prefix gets, on the stream whose
+    /// tokens are a different length of time.
+    frozen: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl Denoiser for LtxDit {
@@ -2248,7 +2266,7 @@ fn denoise(
     total: u32,
     frozen: Option<&Frozen>,
     cancel: &capability::CancelToken,
-    audio: Option<&mut AudioState>,
+    audio: Option<&mut AudioState<'_>>,
     progress: &mut impl FnMut(u32, u32, &str),
 ) -> Result<Vec<f32>, String> {
     // Which of the reference's two loops this step follows. `ltx_pipelines.
@@ -2322,9 +2340,21 @@ fn denoise(
             None => vec![sigma as f32; t],
         };
         let inputs = StepInputs { latent: &latent, timesteps: &timesteps, positions, keyframes_mask, context_len, context_valid, t, sigma: sigma as f32 };
-        // The audio stream has no conditioning items and nothing frozen, so
-        // every one of its tokens carries the schedule's own sigma.
-        let a_timesteps: Vec<f32> = audio.as_ref().map(|a| vec![sigma as f32; a.ta]).unwrap_or_default();
+        // A single-window clip's audio stream has no conditioning items and
+        // nothing frozen, so every one of its tokens carries the schedule's
+        // own sigma. A long-form continuation window's carried prefix is
+        // frozen exactly as the video's is, and gets timestep 0 for the same
+        // reason: the DiT's adaLN modulation is built from this per-token
+        // timestep, so a clean token labelled as noisy as the rest is
+        // modulated as pure noise and drags every generated token with it
+        // through self-attention.
+        let a_timesteps: Vec<f32> = match audio.as_deref() {
+            Some(a) => match &a.frozen {
+                Some((mask, _)) => mask.iter().map(|&m| m * sigma as f32).collect(),
+                None => vec![sigma as f32; a.ta],
+            },
+            None => Vec::new(),
+        };
         let (velocity, a_velocity) = match audio.as_deref() {
             Some(a) => {
                 let ai = AudioInputs { latent: &a.latent, timesteps: &a_timesteps, positions: &a.positions, ta: a.ta };
@@ -2333,14 +2363,14 @@ fn denoise(
                     // Sequentially, never the parallel-card pair: a joint AV
                     // forward holds the model as host fp32 and both branches
                     // would want it at once (see `crate::av_stream`).
-                    let (vc, ac) = dit.forward_av(&inputs, &ai, ctx_cond, &a.ctx_cond);
-                    let (vu, au) = dit.forward_av(&inputs, &ai, ctx_uncond, &a.ctx_uncond);
+                    let (vc, ac) = dit.forward_av(&inputs, &ai, ctx_cond, a.ctx_cond);
+                    let (vu, au) = dit.forward_av(&inputs, &ai, ctx_uncond, a.ctx_uncond);
                     let v: Vec<f32> = vc.iter().zip(&vu).map(|(&c, &u)| u + guidance * (c - u)).collect();
                     let aa: Vec<f32> = ac.iter().zip(&au).map(|(&c, &u)| u + guidance * (c - u)).collect();
                     (v, Some(aa))
                 } else {
                     tracing::trace!(step = i + 1, branch = "cond", sigma, "joint audio+video forward starting");
-                    let (v, aa) = dit.forward_av(&inputs, &ai, ctx_cond, &a.ctx_cond);
+                    let (v, aa) = dit.forward_av(&inputs, &ai, ctx_cond, a.ctx_cond);
                     (v, Some(aa))
                 }
             }
@@ -2385,9 +2415,23 @@ fn denoise(
                 return Err(format!("the denoiser produced non-finite audio values at step {} (sigma = {sigma:.4})", i + 1));
             }
             let a_channels = if a.ta == 0 { 1 } else { a.latent.len() / a.ta };
-            let a_denoised = to_denoised(&a.latent, &av, &a_timesteps, a_channels);
+            let mut a_denoised = to_denoised(&a.latent, &av, &a_timesteps, a_channels);
+            // Both applications the video half takes, for the same reasons -
+            // once on the x0 estimate before the step, and again on the
+            // stepped latent after the ancestral renoise term, which would
+            // otherwise leave fresh noise sitting on a token that is supposed
+            // to be the previous window's own clean content. See [`Frozen`].
+            if let Some((mask, clean)) = &a.frozen {
+                post_process_latent(&mut a_denoised, &Frozen { mask, clean, channels: a_channels });
+            }
             let a_noise = if ancestral { Some((0..a.latent.len()).map(|_| noise_rng.next_gaussian() as f32).collect::<Vec<f32>>()) } else { None };
-            a.latent = euler_ancestral_step(&a.latent, &a_denoised, sigma, sigma_next, eta, s_noise, a_noise.as_deref());
+            let mut a_next = euler_ancestral_step(&a.latent, &a_denoised, sigma, sigma_next, eta, s_noise, a_noise.as_deref());
+            if ancestral && sigma_next != 0.0 {
+                if let Some((mask, clean)) = &a.frozen {
+                    post_process_latent(&mut a_next, &Frozen { mask, clean, channels: a_channels });
+                }
+            }
+            a.latent = a_next;
         }
         if let (Some(f), true) = (frozen, ancestral) {
             if sigma_next != 0.0 {
@@ -2504,17 +2548,38 @@ struct Stage<'a> {
     /// Steps already reported to `progress` before this stage.
     done_before: u32,
     label: &'static str,
-    /// The audio latent this stage starts from, `[ta, TOKEN_DIM]`.
+    /// The audio stream's half of this stage; `None` on a video-only
+    /// generation.
+    audio: Option<AudioStage>,
+}
+
+/// The audio stream's own half of one stage's inputs - the counterpart of
+/// [`Stage::seed_chw`] plus [`Stage::context`], which the audio stream needs
+/// in exactly the same two roles and at only one resolution.
+struct AudioStage {
+    /// `[ta, crate::audio::TOKEN_DIM]` the stage starts from.
     ///
-    /// `None` on a video-only generation. On an audio-visual one, the FIRST
-    /// stage passes freshly drawn noise and a refinement stage passes the
-    /// previous stage's own denoised audio latent, re-noised to its own
-    /// starting sigma - which is what `ltx_pipelines.distilled` does
-    /// (`ModalitySpec(context=audio_context, noise_scale=stage_2_sigmas[0],
-    /// initial_latent=audio_state.latent)`). Audio is NOT spatially
-    /// upscaled between stages: it has no spatial axes, so a refinement
-    /// stage refines the same token count it was handed.
-    audio_latent: Option<Vec<f32>>,
+    /// The FIRST stage of a window passes freshly drawn noise and a
+    /// refinement stage passes the previous stage's own denoised audio
+    /// latent, re-noised to this stage's starting sigma - which is what
+    /// `ltx_pipelines.distilled` does (`ModalitySpec(context=audio_context,
+    /// noise_scale=stage_2_sigmas[0], initial_latent=audio_state.latent)`).
+    /// Audio is NOT spatially upscaled between stages: it has no spatial
+    /// axes, so a refinement stage refines the same token count it was
+    /// handed.
+    latent: Vec<f32>,
+    /// The previous WINDOW's own final audio tokens, written over the head of
+    /// [`Self::latent`] and held at sigma 0 for the whole trajectory - the
+    /// audio counterpart of [`LatentContext`], on the stream whose tokens are
+    /// a different length of time (see `crate::audio`'s module doc).
+    ///
+    /// Empty for every stage of a window that carries nothing, which is every
+    /// stage this pipeline ran before a clip could be longer than one window.
+    /// It is applied AFTER the re-noise above, exactly as the video half
+    /// writes its own carried prefix over the upscaled stage-1 copy of the
+    /// same frames: what a continuation window holds fixed is the previous
+    /// window's own output, never a re-noised or round-tripped copy of it.
+    context: Vec<f32>,
 }
 
 /// Run one denoising stage at one latent resolution and return its final
@@ -2523,7 +2588,7 @@ struct Stage<'a> {
 /// This is [`generate`]'s original denoise body, made resolution-parametric
 /// and given a seed input, so the same code serves a single-stage run and
 /// both stages of a two-stage one. Nothing about WHAT it does changed.
-fn denoise_stage(sc: &StageCtx<'_>, st: &Stage<'_>, total: u32, progress: &mut impl FnMut(u32, u32, &str)) -> Result<StageOut, String> {
+fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mut impl FnMut(u32, u32, &str)) -> Result<StageOut, String> {
     let o = sc.o;
     let (lh, lw) = (st.height / 32, st.width / 32);
     let t = sc.lat_t * lh * lw;
@@ -2630,9 +2695,10 @@ fn denoise_stage(sc: &StageCtx<'_>, st: &Stage<'_>, total: u32, progress: &mut i
     let frozen_ref = frozen.as_ref().map(|(mask, clean)| Frozen { mask, clean, channels: c });
     tracing::info!(stage = st.label, width = st.width, height = st.height, tokens = denoise_t_count, base_tokens = t, steps = st.sigmas.len() - 1, eta = st.eta, seeded = st.seed_chw.is_some(), "stage denoising");
     let done_before = st.done_before;
-    let mut audio_state = st.audio_latent.as_ref().map(|latent| {
-        let ta = latent.len() / crate::audio::TOKEN_DIM as usize;
-        let mut latent = latent.clone();
+    let dim = crate::audio::TOKEN_DIM as usize;
+    let mut audio_state = st.audio.take().map(|a| {
+        let AudioStage { mut latent, context } = a;
+        let ta = latent.len() / dim;
         // A REFINEMENT stage is handed the previous stage's own DENOISED
         // audio latent and has to re-noise it to this stage's starting sigma
         // - the same `lerp(clean, noise, sigma0)` the video half two blocks
@@ -2646,17 +2712,29 @@ fn denoise_stage(sc: &StageCtx<'_>, st: &Stage<'_>, total: u32, progress: &mut i
         // there, so this does not run.
         if st.seed_chw.is_some() {
             let s0 = st.sigmas[0] as f32;
-            let mut rng = data::rng::Rng::new(o.seed ^ 0x41_55_44_49_4f ^ st.seed_salt);
+            let mut rng = data::rng::Rng::new(o.seed ^ AUDIO_SEED_SALT ^ st.seed_salt);
             for v in &mut latent {
                 let n = rng.next_gaussian() as f32;
                 *v = (1.0 - s0) * *v + s0 * n;
             }
             tracing::info!(stage = st.label, sigma0 = s0, audio_tokens = ta, "audio latent re-noised for a refinement stage");
         }
-        AudioState { latent, positions: crate::audio::positions(ta), ta, ctx_cond: sc.a_ctx_cond.to_vec(), ctx_uncond: sc.a_ctx_uncond.to_vec() }
+        // The carried prefix goes on LAST, over whatever the re-noise above
+        // left there: a continuation window is pinned to the previous
+        // window's own output, and a re-noised copy of it is a different
+        // tensor.
+        latent[..context.len()].copy_from_slice(&context);
+        let frozen = (!context.is_empty()).then(|| {
+            let mut mask = vec![1f32; ta];
+            mask[..context.len() / dim].fill(0.0);
+            let mut clean = vec![0f32; ta * dim];
+            clean[..context.len()].copy_from_slice(&context);
+            (mask, clean)
+        });
+        AudioState { latent, positions: crate::audio::positions(ta), ta, ctx_cond: sc.a_ctx_cond, ctx_uncond: sc.a_ctx_uncond, frozen }
     });
     if let Some(a) = &audio_state {
-        tracing::info!(stage = st.label, audio_tokens = a.ta, "audio stream denoising jointly with the video stream");
+        tracing::info!(stage = st.label, audio_tokens = a.ta, carried_tokens = a.frozen.as_ref().map_or(0, |(m, _)| m.iter().filter(|&&m| m == 0.0).count()), "audio stream denoising jointly with the video stream");
     }
     let final_latent = denoise(
         sc.dit,
@@ -2703,10 +2781,15 @@ struct StageOut {
 /// has already shipped once (see [`crate::upsampler::upsample_video`]), and
 /// one call site is one place for it to be right.
 struct Refine<'a> {
+    /// The run's shared spatial x2 upscaler cache, plus the path to fill it
+    /// from - see [`SpatialUpsampler`] for why it is a cache and not either a
+    /// bare path or already-imported weights.
+    upsampler: &'a SpatialUpsampler,
     upsampler_path: &'a str,
-    /// The previous stage's audio latent, carried into the refinement -
-    /// `None` on a video-only generation. See [`Stage::audio_latent`].
-    audio_latent: Option<Vec<f32>>,
+    /// The previous stage's audio latent plus whatever this window carries
+    /// from the one before it - `None` on a video-only generation. See
+    /// [`AudioStage`].
+    audio: Option<AudioStage>,
     /// `[C, lat_t, lh1, lw1]` - the latent to carry up.
     latent_chw: &'a [f32],
     lat_t: usize,
@@ -2733,14 +2816,12 @@ struct Refine<'a> {
     label: &'static str,
 }
 
-fn upscale_and_refine(sc: &StageCtx<'_>, r: &Refine<'_>, total: u32, progress: &mut impl FnMut(u32, u32, &str)) -> Result<StageOut, String> {
+fn upscale_and_refine(sc: &StageCtx<'_>, mut r: Refine<'_>, total: u32, progress: &mut impl FnMut(u32, u32, &str)) -> Result<StageOut, String> {
     let (lh, lw) = (r.height / 32, r.width / 32);
     progress(r.done_before, total, "spatial upscale");
-    tracing::info!(path = %r.upsampler_path, latent_h = r.lh1, latent_w = r.lw1, "real x2 latent upscale");
-    let sraw = read_any(r.upsampler_path)?;
+    tracing::info!(latent_h = r.lh1, latent_w = r.lw1, "real x2 latent upscale");
     let scfg = LatentUpsamplerConfig::spatial_x2();
-    let sweights = crate::import::import_upsampler(sraw, &scfg)?;
-    let ups = LatentUpsampler::build(&scfg, &sweights, r.lat_t as u32, r.lh1 as u32, r.lw1 as u32, sc.o.device.as_deref());
+    let ups = LatentUpsampler::build(&scfg, r.upsampler.get(r.upsampler_path)?, r.lat_t as u32, r.lh1 as u32, r.lw1 as u32, sc.o.device.as_deref());
     // Through `upsample_video`, NOT `upsample` directly: the upscaler was
     // trained on raw VAE latents and needs the per-channel un-normalize/
     // re-normalize sandwich around it. Skipping it costs half the latent's
@@ -2750,7 +2831,6 @@ fn upscale_and_refine(sc: &StageCtx<'_>, r: &Refine<'_>, total: u32, progress: &
     let upscaled = crate::upsampler::upsample_video(&ups, &pc_mean, &pc_std, r.latent_chw);
     let (_, _, up_lh, up_lw) = ups.out_shape();
     drop(ups);
-    drop(sweights);
     if (up_lh as usize, up_lw as usize) != (lh, lw) {
         tracing::error!(got_h = up_lh, got_w = up_lw, want_h = lh, want_w = lw, "spatial upscaler produced the wrong latent grid");
         return Err(format!("spatial upscaler produced a {up_lh}x{up_lw} latent grid, expected {lh}x{lw} for {}x{}", r.width, r.height));
@@ -2761,7 +2841,7 @@ fn upscale_and_refine(sc: &StageCtx<'_>, r: &Refine<'_>, total: u32, progress: &
     // injected noise".
     denoise_stage(
         sc,
-        &Stage {
+        Stage {
             width: r.width,
             height: r.height,
             sigmas: r.sigmas,
@@ -2776,12 +2856,45 @@ fn upscale_and_refine(sc: &StageCtx<'_>, r: &Refine<'_>, total: u32, progress: &
             // The audio latent is carried across the stage boundary as-is and
             // re-noised inside the loop by the schedule's own first sigma -
             // never spatially upscaled, because it has no spatial axes. This
-            // mirrors the reference's own stage-2 audio spec.
-            audio_latent: r.audio_latent.clone(),
+            // mirrors the reference's own stage-2 audio spec. A long-form
+            // window's carried prefix then goes over the head of it, exactly
+            // as the video half's `context` does.
+            audio: r.audio.take(),
         },
         total,
         progress,
     )
+}
+
+/// The spatial x2 latent upscaler's weights, read at most ONCE per run and
+/// not until a refinement actually needs them.
+///
+/// Both halves matter and they pull in opposite directions. **Once**: every
+/// refinement in a run uses the same weights - only
+/// [`LatentUpsampler::build`] is sized by the window it runs on - so
+/// re-reading and re-dequantizing a gigabyte of checkpoint at each seam is
+/// pure per-window cost, and a long-form clip pays it per window while an
+/// [`upscale`] pays it per pass. **Not until needed**: an audio-visual
+/// generation holds the whole transformer as host fp32 while it denoises, so
+/// the upscaler's own expansion must not sit beside it through a stage that
+/// does not use it.
+#[derive(Default)]
+struct SpatialUpsampler {
+    weights: std::cell::OnceCell<vae::blocks::Tensors>,
+}
+
+impl SpatialUpsampler {
+    /// The imported weights, reading them on the first call and returning the
+    /// same map on every later one.
+    fn get(&self, path: &str) -> Result<&vae::blocks::Tensors, String> {
+        if self.weights.get().is_none() {
+            let t0 = Instant::now();
+            let w = crate::import::import_upsampler(read_any(path)?, &LatentUpsamplerConfig::spatial_x2())?;
+            tracing::info!(secs = t0.elapsed().as_secs_f32(), tensors = w.len(), "spatial x2 latent upscaler loaded");
+            let _ = self.weights.set(w);
+        }
+        Ok(self.weights.get().expect("just set"))
+    }
 }
 
 /// The refinement schedule for `steps` steps: the LAST `steps + 1` entries of
@@ -2914,6 +3027,39 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
 /// only ever reaches [`context_stub`] (see this module's doc - there is no
 /// real text encoder).
 #[tracing::instrument(level = "info", name = "generate", skip_all, fields(frames = o.frames, width = o.width, height = o.height, steps = o.steps, seed = o.seed, guidance = o.guidance, dit_config = %o.dit_config))]
+/// Everything an audio request needs, checked before any weight is read.
+///
+/// One function because [`generate`] and [`generate_long`] are two entry
+/// points into the same requirement, and a check that lived in only one of
+/// them would let the other produce an audio latent nothing can decode - or
+/// spend a whole-checkpoint host expansion first and fail after it.
+fn check_audio_request(paths: &Paths, o: &GenOpts) -> Result<(), String> {
+    if !o.audio {
+        return Ok(());
+    }
+    if o.dit_config != "ltx25_22b" {
+        return Err(format!(
+            "audio generation needs the real audio-visual checkpoint: dit_config is {:?}, and the tiny smoke-test DiT has random weights whose audio stream would be noise, not sound",
+            o.dit_config
+        ));
+    }
+    if paths.dit.is_none() {
+        let (var, _) = OPTIONAL_PATH_VARS[0];
+        return Err(format!("audio generation needs the real DiT checkpoint: pass --dit <path> or set {var}"));
+    }
+    if paths.audio_vae.is_none() {
+        let (var, role) = OPTIONAL_PATH_VARS[3];
+        return Err(format!("audio generation needs the {role}: set {var} to ltx-2.5-audio-vae-bf16.safetensors"));
+    }
+    if paths.text_encoder.is_none() {
+        let (var, _) = OPTIONAL_PATH_VARS[1];
+        return Err(format!(
+            "audio generation needs the real text encoder: the audio stream is conditioned through its OWN text projection (text_embedding_projection.audio_aggregate_embed), which the stub context cannot stand in for - set {var}"
+        ));
+    }
+    crate::av_stream::AvWeights::fits_in_host_memory(&crate::config::LtxAvDitConfig::ltx25())
+}
+
 pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
     tracing::info!(
         prompt_chars = prompt.chars().count(),
@@ -2940,33 +3086,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     if o.mid_frame.is_some() {
         mid_anchor_frame(o.frames, o.mid_frame_at)?;
     }
-    // Everything an audio request needs, checked here so a request that
-    // cannot possibly produce sound is refused in milliseconds instead of
-    // after a 78 GiB weight expansion - or, worse, after producing an audio
-    // latent nothing can decode.
-    if o.audio {
-        if o.dit_config != "ltx25_22b" {
-            return Err(format!(
-                "audio generation needs the real audio-visual checkpoint: dit_config is {:?}, and the tiny smoke-test DiT has random weights whose audio stream would be noise, not sound",
-                o.dit_config
-            ));
-        }
-        if paths.dit.is_none() {
-            let (var, _) = OPTIONAL_PATH_VARS[0];
-            return Err(format!("audio generation needs the real DiT checkpoint: pass --dit <path> or set {var}"));
-        }
-        if paths.audio_vae.is_none() {
-            let (var, role) = OPTIONAL_PATH_VARS[3];
-            return Err(format!("audio generation needs the {role}: set {var} to ltx-2.5-audio-vae-bf16.safetensors"));
-        }
-        if paths.text_encoder.is_none() {
-            let (var, _) = OPTIONAL_PATH_VARS[1];
-            return Err(format!(
-                "audio generation needs the real text encoder: the audio stream is conditioned through its OWN text projection (text_embedding_projection.audio_aggregate_embed), which the stub context cannot stand in for - set {var}"
-            ));
-        }
-        crate::av_stream::AvWeights::fits_in_host_memory(&crate::config::LtxAvDitConfig::ltx25())?;
-    }
+    check_audio_request(paths, o)?;
     let (lh, lw) = (o.height / 32, o.width / 32);
     let (lat_t, lh, lw) = (lat_t as usize, lh, lw);
     let t = lat_t * lh * lw;
@@ -3041,8 +3161,10 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     }
 
     // ---- denoise ----------------------------------------------------------
-    let text = build_context(paths, prompt, dit_cfg, o, place, &mut timings.text_encode)?;
-    let (ctx_cond, ctx_uncond, context_valid, context_len) = (text.cond.clone(), text.uncond.clone(), text.valid.clone(), text.len);
+    // Moved, never cloned: the projected caption is the widest host buffer
+    // this function holds besides the latents themselves.
+    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, a_cond: text_a_cond, a_uncond: text_a_uncond } =
+        build_context(paths, prompt, dit_cfg, o, place, &mut timings.text_encode)?;
 
     // ---- the stage plan ---------------------------------------------------
     // `vraw`/`vweights` are loaded here (not at decode time below, which
@@ -3056,12 +3178,10 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // numbers.
     let ta = crate::audio::latent_frames(o.frames, o.fps);
     let audio_latent0 = o.audio.then(|| {
-        let mut rng = data::rng::Rng::new(o.seed ^ 0x41_55_44_49_4f);
-        let n = ta * crate::audio::TOKEN_DIM as usize;
         tracing::info!(audio_tokens = ta, token_dim = crate::audio::TOKEN_DIM, seconds = o.frames as f32 / o.fps as f32, "audio latent shape resolved from the clip's own duration");
-        (0..n).map(|_| rng.next_gaussian() as f32).collect::<Vec<f32>>()
+        seeded_noise(ta * crate::audio::TOKEN_DIM as usize, o.seed ^ AUDIO_SEED_SALT)
     });
-    let (a_ctx_cond, a_ctx_uncond) = (text.a_cond.clone().unwrap_or_default(), text.a_uncond.clone().unwrap_or_default());
+    let (a_ctx_cond, a_ctx_uncond) = (text_a_cond.unwrap_or_default(), text_a_uncond.unwrap_or_default());
     let stage_ctx = StageCtx {
         dit: dit.as_ref(),
         vcfg: &vcfg,
@@ -3095,20 +3215,37 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
                 o.width, o.height
             )
         })?;
+        // One refinement in this path, so the cache below is filled exactly
+        // once - it exists so `Refine` has one shape for all three callers,
+        // and so this generation does not hold the upscaler's expansion
+        // beside the transformer through a stage that never touches it.
+        let upsampler = SpatialUpsampler::default();
         let (w1, h1) = (o.width / 2, o.height / 2);
         let (lh1, lw1) = (h1 / 32, w1 / 32);
         let stage1 = denoise_stage(
             &stage_ctx,
-            &Stage { width: w1, height: h1, sigmas: &sigmas, eta: o.eta, seed_chw: None, context: None, seed_salt: 0, done_before: 0, label: "stage1", audio_latent: audio_latent0.clone() },
+            Stage {
+                width: w1,
+                height: h1,
+                sigmas: &sigmas,
+                eta: o.eta,
+                seed_chw: None,
+                context: None,
+                seed_salt: 0,
+                done_before: 0,
+                label: "stage1",
+                audio: audio_latent0.map(|latent| AudioStage { latent, context: Vec::new() }),
+            },
             total,
             &mut progress,
         )?;
 
         upscale_and_refine(
             &stage_ctx,
-            &Refine {
+            Refine {
+                upsampler: &upsampler,
                 upsampler_path,
-                audio_latent: stage1.audio.clone(),
+                audio: stage1.audio.map(|latent| AudioStage { latent, context: Vec::new() }),
                 latent_chw: &stage1.video_chw,
                 lat_t,
                 lh1,
@@ -3127,7 +3264,18 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     } else {
         denoise_stage(
             &stage_ctx,
-            &Stage { width: o.width, height: o.height, sigmas: &sigmas, eta: o.eta, seed_chw: None, context: None, seed_salt: 0, done_before: 0, label: "single", audio_latent: audio_latent0.clone() },
+            Stage {
+                width: o.width,
+                height: o.height,
+                sigmas: &sigmas,
+                eta: o.eta,
+                seed_chw: None,
+                context: None,
+                seed_salt: 0,
+                done_before: 0,
+                label: "single",
+                audio: audio_latent0.map(|latent| AudioStage { latent, context: Vec::new() }),
+            },
             total,
             &mut progress,
         )?
@@ -3206,11 +3354,15 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
 fn decode_audio_latent(path: &str, latent: &[f32], ta: usize, device: Option<&str>) -> Result<crate::audio::AudioClip, String> {
     let acfg = crate::audio_vae::AudioVaeConfig::ltx25();
     let vcfg = crate::vocoder::VocoderConfig::ltx25();
-    // Two reads of one file rather than one read plus a whole-file clone -
-    // `StTensor` is not `Clone` and each importer needs a disjoint subset
-    // (the same shape `crates/ltxv/tests/audio_parity.rs` uses).
-    let vae_w = crate::import::import_audio_vae(checkpoint::safetensors::read(path)?, &acfg)?;
-    let voc_w = crate::import::import_vocoder(checkpoint::safetensors::read(path)?, &vcfg)?;
+    // ONE read, split by prefix. The two importers want disjoint subsets of
+    // one file and `StTensor` is not `Clone`, which is why the parity suite
+    // reads it twice - but a `partition` on the prefix each importer already
+    // selects by hands each of them its own half with no clone and no second
+    // pass over the checkpoint. `vocoder.bwe_generator.*`/`vocoder.mel_stft.*`
+    // land on the vocoder side and are skipped there exactly as before.
+    let (voc_raw, vae_raw): (Vec<_>, Vec<_>) = checkpoint::safetensors::read(path)?.into_iter().partition(|t| t.name.starts_with("vocoder."));
+    let vae_w = crate::import::import_audio_vae(vae_raw, &acfg)?;
+    let voc_w = crate::import::import_vocoder(voc_raw, &vcfg)?;
     Ok(crate::audio::decode(&vae_w, &voc_w, latent, ta, device))
 }
 
@@ -3414,6 +3566,10 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
     if dit_cfg.in_channels != vcfg.latent_channels {
         return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", o.base.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
     }
+    // One cache for the whole run: every pass refines with the same weights,
+    // read on the first pass and reused by the rest (see
+    // [`SpatialUpsampler`]).
+    let upsampler = SpatialUpsampler::default();
     let upsampler_path = paths.spatial_upsampler.as_deref().ok_or_else(|| {
         let (var, role) = OPTIONAL_PATH_VARS[2];
         tracing::error!("upscaling needs the spatial latent upscaler");
@@ -3496,9 +3652,9 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         // point's content comes from the clip, not from a still.
         let pass_opts = GenOpts { frames: len, width: out_w, height: out_h, start_frame: None, mid_frame: None, end_frame: None, ..o.base.clone() };
         let sc = StageCtx {
-            // Multi-window and refinement-only paths refuse audio before they
-            // get here (see `generate_long`/`upscale`), so these are never
-            // read - empty rather than a fabricated projection.
+            // A refinement pass never denoises an audio stream (its content
+            // comes from a rendered file), so these are never read - empty
+            // rather than a fabricated projection.
             a_ctx_cond: &[],
             a_ctx_uncond: &[],
             dit: dit.as_ref(),
@@ -3522,8 +3678,12 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         }
         let refined = upscale_and_refine(
             &sc,
-            &Refine {
-                audio_latent: None,
+            Refine {
+                // A refinement reads its content from a video FILE, which
+                // carries no audio latent to refine and whose own sound stays
+                // in the input file (see `ltxv_cli::upscale`).
+                audio: None,
+                upsampler: &upsampler,
                 upsampler_path,
                 latent_chw: &latent,
                 lat_t,
@@ -3627,6 +3787,21 @@ impl Default for LongOpts {
 /// is re-invented at every boundary. Here the carried tensor is the denoised
 /// latent itself.
 ///
+/// **On an audio-visual request the AUDIO latent crosses every seam too**, by
+/// the same mechanism and in the same place: the previous window's own last
+/// audio tokens ([`crate::audio::carry_tail`]) frozen at sigma 0 at the head
+/// of the next window's audio sequence, with only the new tokens on a
+/// denoising schedule. The windows contribute tokens to ONE latent, decoded
+/// once when the loop ends - never per window and butted together, which
+/// would put a causal-VAE boundary and a waveform join at every seam.
+///
+/// What the two streams cannot share is a time resolution, so an audio-visual
+/// plan is a DIFFERENT window split: [`crate::longform::window_plan_aligned`]
+/// places seams only where both grids have a boundary, and
+/// [`crate::audio::audio_plan`] re-derives the token layout from the finished
+/// plan and refuses rather than rounding. `crate::audio`'s module doc carries
+/// the rule and why a rounded seam is the failure mode that matters.
+///
 /// **Scope.** `--start-frame` conditions window 0, as it would a single
 /// clip. `--end-frame` is refused: a continuation window's latent context and
 /// an appended keyframe block both want to be the thing the window is pinned
@@ -3647,13 +3822,20 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         return Err(format!("{}x{} is not a multiple of 32 (the VAE's spatial stride)", o.base.width, o.base.height));
     }
     let (lh, lw) = (o.base.height / 32, o.base.width / 32);
-    let plan = crate::longform::window_plan(o.base.frames, lh, lw, o.context_latent_frames, o.max_window_tokens)?;
+    // An audio-visual clip's seams have to land on whole audio tokens, which
+    // constrains how far a window may advance - see `crate::audio`'s module
+    // doc. A silent clip has one stream and no such constraint, and plans
+    // exactly as it always did.
+    let align = if o.base.audio { crate::audio::window_latent_frame_quantum(o.base.fps) } else { 1 };
+    let plan = crate::longform::window_plan_aligned(o.base.frames, lh, lw, o.context_latent_frames, o.max_window_tokens, align)
+        .map_err(|e| if o.base.audio { format!("{e}. {}", crate::audio::quantum_note(o.base.fps)) } else { e })?;
     if plan.len() == 1 {
         // Byte-for-byte the path this request already took: one window is a
         // generation, and this entry point must not become a second way of
         // spelling it.
         return generate(paths, prompt, &o.base, cancel, progress);
     }
+    check_audio_request(paths, &o.base)?;
     if o.base.end_frame.is_some() {
         return Err("--end-frame is not supported for a multi-window clip: it pins the last frame of ONE window, and pinning the end of a rolling plan has not been designed".into());
     }
@@ -3715,21 +3897,58 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     let total = 1 + plan.len() as u32 * per_window;
     tracing::info!(windows = plan.len(), context_latent_frames = context, max_window_tokens = o.max_window_tokens, widest_tokens = widest, two_stage, frames = o.base.frames, "long-form generation planned");
 
+    // The audio stream's own layout over the same plan, derived and CHECKED
+    // before any weight is read: a seam that does not land on a whole audio
+    // token is refused here rather than approximated later (see
+    // `crate::audio::audio_plan`).
+    let aplan = o.base.audio.then(|| crate::audio::audio_plan(&plan, context, o.base.frames, o.base.fps)).transpose()?;
+    if let Some(a) = &aplan {
+        tracing::info!(
+            audio_tokens = a.total,
+            carried_tokens = a.context,
+            per_window = ?a.per_window,
+            latent_frame_quantum = align,
+            "audio stream planned across the window seams"
+        );
+    }
+
+    // Resolved once, before the first forward rather than per window: it is
+    // the same table every time, and a refinement schedule this run cannot
+    // spell should cost milliseconds rather than a window of device time.
+    let refine_sigmas = if two_stage { stage2_sigmas(LTX2_STAGE2_STEPS)? } else { Vec::new() };
+
     let mut timings = Timings::default();
     let place = o.base.devices.resolve(o.base.device.as_deref());
     progress(0, total, "build transformer");
     let build_t = Instant::now();
     let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    if o.base.audio && !dit.has_audio() {
+        return Err("ltxv: audio was requested but the built denoiser carries no audio stream".into());
+    }
     timings.build_dit = build_t.elapsed().as_secs_f32();
-    let text = build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
-    let (ctx_cond, ctx_uncond, context_valid, context_len) = (text.cond, text.uncond, text.valid, text.len);
+    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, a_cond, a_uncond } =
+        build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
+    let (a_ctx_cond, a_ctx_uncond) = (a_cond.unwrap_or_default(), a_uncond.unwrap_or_default());
     let vweights = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
+    // One cache for the whole clip, filled by the first window that refines
+    // and reused by every later one (see [`SpatialUpsampler`]).
+    let upsampler = SpatialUpsampler::default();
 
     let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(o.base.frames);
     // The rolling state, and the whole of it: at most `context` latent frames
-    // per stage. It does not grow with the clip's length.
+    // per stage, plus - on an audio-visual clip - the same seam's worth of
+    // audio tokens. It does not grow with the clip's length.
     let mut carried_full: Option<(Vec<f32>, usize)> = None;
     let mut carried_half: Option<(Vec<f32>, usize)> = None;
+    let mut carried_audio_full: Vec<f32> = Vec::new();
+    let mut carried_audio_half: Vec<f32> = Vec::new();
+    // The clip's whole audio latent, assembled window by window and decoded
+    // ONCE at the end. Decoding per window instead would put a causal-VAE
+    // boundary at every seam - the audio VAE's first latent frame covers one
+    // mel frame rather than four - and then need those pieces butted together
+    // in the waveform, which is exactly the click this design avoids by never
+    // creating it.
+    let mut audio_latent: Vec<f32> = Vec::new();
     let mut vae_secs = 0.0f32;
     let work_t = Instant::now();
     let mut done_before = 1u32;
@@ -3748,11 +3967,8 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
             ..o.base.clone()
         };
         let sc = StageCtx {
-            // Multi-window and refinement-only paths refuse audio before they
-            // get here (see `generate_long`/`upscale`), so these are never
-            // read - empty rather than a fabricated projection.
-            a_ctx_cond: &[],
-            a_ctx_uncond: &[],
+            a_ctx_cond: &a_ctx_cond,
+            a_ctx_uncond: &a_ctx_uncond,
             dit: dit.as_ref(),
             vcfg: &vcfg,
             vweights: &vweights,
@@ -3777,12 +3993,34 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         let seed_salt = 0x57_49_4e_44_00_00_00_00u64 ^ wi as u64;
         tracing::info!(window = wi, of = plan.len(), latent_frames = lat_t, carried = w.context, new = w.new, tokens = w.tokens(lh, lw), "window starting");
 
-        let final_chw = if two_stage {
+        // This window's fresh audio noise, sized by the plan. The carried
+        // tokens go at the head of it inside the stage, exactly as the video
+        // half's carried latent frames do.
+        let audio_noise = aplan.as_ref().map(|a| seeded_noise(a.per_window[wi] * crate::audio::TOKEN_DIM as usize, o.base.seed ^ AUDIO_SEED_SALT ^ seed_salt));
+        // The same agreement the video context is held to, on the other
+        // stream: what the plan says this window carries and what the previous
+        // window actually handed over have to be the same number, or the two
+        // streams slide against each other by exactly the difference - which
+        // is not a failure, it is audible drift.
+        if let Some(a) = &aplan {
+            let dim = crate::audio::TOKEN_DIM as usize;
+            let want = if wi == 0 { 0 } else { a.context * dim };
+            if carried_audio_full.len() != want || (two_stage && carried_audio_half.len() != want) {
+                return Err(format!(
+                    "window {wi} plans a {}-token audio context but the previous window carried {} (its first stage carried {})",
+                    want / dim,
+                    carried_audio_full.len() / dim,
+                    carried_audio_half.len() / dim
+                ));
+            }
+        }
+
+        let stage_out = if two_stage {
             let (w1, h1) = (o.base.width / 2, o.base.height / 2);
             let (lh1, lw1) = (h1 / 32, w1 / 32);
             let stage1 = denoise_stage(
                 &sc,
-                &Stage {
+                Stage {
                     width: w1,
                     height: h1,
                     sigmas: &sigmas,
@@ -3799,16 +4037,19 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     seed_salt,
                     done_before,
                     label: "stage1",
-                    // Long-form, multi-scene and refinement-only paths are refused
-                    // for audio before they reach here (see `generate_long` and
-                    // `upscale`), so no audio latent ever crosses these seams.
-                    audio_latent: None,
+                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_half) }),
                 },
                 total,
                 &mut progress,
-            )?
-            .video_chw;
-            carried_half = Some((crate::longform::carry_tail(&stage1, in_channels, lat_t, lh1, lw1, context.min(lat_t)), context.min(lat_t)));
+            )?;
+            let stage1_chw = stage1.video_chw;
+            carried_half = Some((crate::longform::carry_tail(&stage1_chw, in_channels, lat_t, lh1, lw1, context.min(lat_t)), context.min(lat_t)));
+            // The audio stream has no half-resolution copy of itself - it has
+            // no spatial axes at all - so stage 1's tail is carried on exactly
+            // the same terms the video's is, into the NEXT window's stage 1.
+            if let (Some(latent), Some(a)) = (&stage1.audio, &aplan) {
+                carried_audio_half = crate::audio::carry_tail(latent, a.context);
+            }
             // Stage 2 is a different token count, so the resident window has
             // to be rebuilt for it either way (`crate::devres::DitSession::
             // prefill`). Releasing the whole session instead of rebuilding
@@ -3820,32 +4061,37 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
             dit.release_devices();
             upscale_and_refine(
                 &sc,
-                &Refine {
+                Refine {
+                    upsampler: &upsampler,
                     upsampler_path: paths.spatial_upsampler.as_deref().expect("checked before the first forward"),
-                    latent_chw: &stage1,
+                    latent_chw: &stage1_chw,
                     lat_t,
                     lh1,
                     lw1,
                     width: o.base.width,
                     height: o.base.height,
-                    sigmas: &stage2_sigmas(LTX2_STAGE2_STEPS)?,
+                    sigmas: &refine_sigmas,
                     context: carried_full.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
                     seed_salt,
                     done_before: done_before + steps as u32,
                     label: "stage2",
-                    // Long-form, multi-scene and refinement-only paths are refused
-                    // for audio before they reach here (see `generate_long` and
-                    // `upscale`), so no audio latent ever crosses these seams.
-                    audio_latent: None,
+                    // Stage 1's own audio latent, re-noised inside the stage,
+                    // with the previous WINDOW's final audio tokens written
+                    // over its head - the audio counterpart of `context`
+                    // above, and for the same reason: what a continuation
+                    // window is pinned to is the previous window's own final
+                    // output, at this stage's own place in the schedule.
+                    audio: stage1.audio.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full) }),
                 },
                 total,
                 &mut progress,
             )?
-            .video_chw
         } else {
+            // One stage, so this window's only audio sequence is the one
+            // built above - carried prefix and all.
             denoise_stage(
                 &sc,
-                &Stage {
+                Stage {
                     width: o.base.width,
                     height: o.base.height,
                     sigmas: &sigmas,
@@ -3855,17 +4101,23 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
                     seed_salt,
                     done_before,
                     label: "single",
-                    // Long-form, multi-scene and refinement-only paths are refused
-                    // for audio before they reach here (see `generate_long` and
-                    // `upscale`), so no audio latent ever crosses these seams.
-                    audio_latent: None,
+                    audio: audio_noise.map(|latent| AudioStage { latent, context: std::mem::take(&mut carried_audio_full) }),
                 },
                 total,
                 &mut progress,
             )?
-            .video_chw
         };
+        let final_chw = stage_out.video_chw;
         carried_full = Some((crate::longform::carry_tail(&final_chw, in_channels, lat_t, lh, lw, context.min(lat_t)), context.min(lat_t)));
+        // Everything past the carried prefix is this window's own contribution
+        // to the clip's single audio latent, and the prefix itself was already
+        // contributed by the window that generated it - the exact counterpart
+        // of dropping this window's leading decoded pixel frames below.
+        if let (Some(latent), Some(a)) = (&stage_out.audio, &aplan) {
+            let carried_vals = if wi == 0 { 0 } else { a.context * crate::audio::TOKEN_DIM as usize };
+            audio_latent.extend_from_slice(&latent[carried_vals..]);
+            carried_audio_full = crate::audio::carry_tail(latent, a.context);
+        }
 
         done_before += per_window - 1;
         // What [`generate`] achieves with `drop(dit)` before its own decode,
@@ -3900,9 +4152,34 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     timings.steps = plan.len() * (steps + if two_stage { LTX2_STAGE2_STEPS } else { 0 });
     timings.tokens = plan.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
     timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+
+    // ---- decode the sound, ONCE over the whole clip ------------------------
+    // The windows contributed tokens to one latent, not waveforms to be butted
+    // together, so the audio VAE and the vocoder see a single continuous
+    // sequence and there is no decode boundary at a seam to smooth over. The
+    // token count is the clip's own, so this is the same arithmetic - and the
+    // same sample count - a single-window clip of this length produces.
+    let audio = match &aplan {
+        Some(a) => {
+            let dim = crate::audio::TOKEN_DIM as usize;
+            if audio_latent.len() != a.total * dim {
+                return Err(format!("reassembled {} audio tokens from {} windows, expected {}", audio_latent.len() / dim, plan.len(), a.total));
+            }
+            let path = paths.audio_vae.as_deref().expect("an audio request is refused earlier without an audio VAE path");
+            let audio_t = Instant::now();
+            let mut clip = decode_audio_latent(path, &audio_latent, a.total, o.base.device.as_deref())?;
+            let video_seconds = out_frames.len() as f32 / o.base.fps as f32;
+            let before = clip.seconds();
+            clip.pad_to_seconds(video_seconds);
+            timings.audio_decode = audio_t.elapsed().as_secs_f32();
+            tracing::info!(secs = timings.audio_decode, samples = clip.samples_per_channel(), rate = clip.sample_rate, decoded_seconds = before, video_seconds, "audio decode done");
+            Some(clip)
+        }
+        None => None,
+    };
     progress(total, total, "done");
-    tracing::info!(frames = out_frames.len(), windows = plan.len(), total_secs = timings.total(), "long-form generation done");
-    Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames, audio: None }, timings))
+    tracing::info!(frames = out_frames.len(), windows = plan.len(), audio = audio.is_some(), total_secs = timings.total(), "long-form generation done");
+    Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames, audio }, timings))
 }
 
 /// Progress units one scene of a [`generate_scenes`] run is worth.
@@ -3966,6 +4243,20 @@ pub fn generate_scenes(paths: &Paths, scenes: &[Scene], o: &LongOpts, cancel: &c
     }
     if o.base.mid_frame.is_some() {
         return Err("--mid-frame is not supported for a multi-scene clip: \"the middle of the clip\" is a position in a timeline that is now a sequence of scenes, and which scene should own it has not been designed - anchor the scene you mean by generating it on its own".into());
+    }
+    // A window seam inside a scene carries both streams; a SCENE boundary
+    // deliberately carries neither, which is what makes the next scene free to
+    // be a different subject. For the picture that is a cut and it is the
+    // point; for the sound it is a restart, and a scene's token count is
+    // `round(scene_frames / fps * rate)`, so the scenes' counts do not sum to
+    // the clip's own and the two tracks would not even be the same length.
+    // What sound should do at a deliberate visual cut is a design question,
+    // not an arithmetic one, and it is refused rather than guessed.
+    if o.base.audio {
+        return Err(
+            "--audio is not supported for a multi-scene clip: a scene boundary deliberately carries nothing across, so the sound would restart at every cut, and the per-scene token counts do not sum to the clip's own. Ask for one scene (any length - a long single-scene clip carries its sound across every window seam), or drop --audio."
+                .into(),
+        );
     }
     let (lh, lw) = (o.base.height / 32, o.base.width / 32);
     // Every scene, before the first weight is read: a five-scene request whose
@@ -4520,8 +4811,11 @@ mod tests {
         std::env::set_var("BRAIN_LTXV_VAE", "env-vae");
         let p = Paths::resolve(None, None, None, None).expect("from env");
         assert_eq!(p.vae, "env-vae");
-        assert_eq!(p.dit, None);
-        assert_eq!(p.text_encoder, None);
+        // Deliberately no assertion about `dit`/`text_encoder` here: this test
+        // sets only `BRAIN_LTXV_VAE`, so asserting those were `None` would be
+        // asserting about variables it never controlled - it failed for anyone
+        // who happened to have a real checkpoint exported. Their resolution is
+        // owned by the sibling test below, which does clear them first.
         let p = Paths::resolve(Some("/flag/vae"), None, None, None).expect("flag wins");
         assert_eq!(p.vae, "/flag/vae");
         let p = Paths::resolve(Some(""), None, None, None).expect("empty flag falls through");

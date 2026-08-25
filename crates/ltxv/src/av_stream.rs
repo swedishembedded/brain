@@ -15,10 +15,12 @@
 //! The video-only production path ([`crate::dit::forward_q_streamed_in`])
 //! keeps only the non-block "head" tensors resident and streams each
 //! transformer block from the GGUF, quantized to int8, cached per checkpoint
-//! and left resident on the card between steps. **No such path exists for the
-//! audio-extended block.** `LtxAvBlockQ`, an AV `CachedQBlockWeights`, and an
-//! AV `DitSession` are all absent, and every one of them lives in
-//! `crate::block`/`crate::dit`.
+//! and left resident on the card between steps. That path now exists for the
+//! audio-extended block too - [`crate::block::LtxAvBlockQ`], its cached
+//! quantized weights and an AV residency window all live in
+//! `crate::block`/`crate::devres` - so a caller that wants the quantized,
+//! device-resident AV forward should reach for those rather than for this
+//! module.
 //!
 //! So this module takes the only route the current code offers: the eager,
 //! host-fp32 [`LtxAvDit`] that the tiny-config parity suite already proves

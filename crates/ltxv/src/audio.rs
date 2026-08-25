@@ -47,6 +47,51 @@
 //! (`AudioDecoder._denormalize_latents`' `frames * 4 - 3`), not a rounding
 //! bug here, and [`AudioClip::pad_to_seconds`] is what makes the two tracks
 //! exactly equal length for a container that wants them to be.
+//!
+//! ## Carrying the stream across a window seam
+//!
+//! A clip too long for one denoising window is generated as several
+//! ([`crate::longform`]), and the audio stream has to cross every seam the
+//! video latent crosses. It does it the same way and by the same mechanism -
+//! the previous window's own last tokens, sliced out of the denoised latent
+//! ([`carry_tail`]), frozen at sigma 0 at the head of the next window's
+//! sequence - but the two streams do NOT share a time resolution, and that is
+//! where a seam can go quietly wrong.
+//!
+//! One video latent frame is [`crate::pipeline::VAE_TEMPORAL_SCALE`] pixel
+//! frames, so it is `VAE_TEMPORAL_SCALE * LATENT_RATE / fps` audio tokens -
+//! [`TOKENS_PER_VIDEO_LATENT_FRAME_NUM`] over `fps`, a RATIO that is not an
+//! integer in general. At a 24-frame-a-second clip it is `200/24 = 25/3`,
+//! so a seam placed at
+//! an arbitrary video latent frame lands a third or two thirds of the way
+//! into an audio token, and there is no honest way to freeze two thirds of a
+//! token.
+//!
+//! **The rule this module implements: a window boundary must fall on a whole
+//! number of audio tokens, and a plan that cannot place one there is
+//! refused.** [`window_latent_frame_quantum`] is the smallest number of video
+//! latent frames a window may advance by for that to hold (3 at 24 and 30
+//! and 30 frames a second, 1 at 25), [`crate::longform::window_plan_aligned`]
+//! plans in
+//! multiples of it, and [`audio_plan`] re-derives the whole token layout from
+//! the finished plan and REFUSES rather than rounding if any seam missed.
+//!
+//! Two consequences fall out of that rule, and both are what make the result
+//! exact rather than merely close:
+//!
+//! * every seam shifts BOTH streams' local time axes by the same amount, so
+//!   a carried audio token sits at exactly the moment of the picture it sat
+//!   at in the window that generated it;
+//! * the windows' token counts sum to the clip's own
+//!   `round(frames / fps * LATENT_RATE)` exactly, so a multi-window clip
+//!   decodes to the same number of samples a single-window clip of the same
+//!   length would - the container's two stream durations are the same
+//!   numbers they already were.
+//!
+//! The LAST window needs no quantum: it has no successor, so nothing is
+//! carried out of it. Leaving it free is also what lets any legal `1 + 8k`
+//! length be planned - constraining it too would restrict the clip's total
+//! length to one residue class.
 
 use crate::audio_vae::{self, AudioVaeConfig};
 use crate::vocoder::{self, VocoderConfig};
@@ -76,6 +121,25 @@ pub const LATENT_MEL_BINS: u32 = 16;
 /// Audio channels the model generates (`stereo: true`).
 pub const CHANNELS: u32 = 2;
 
+/// [`LATENTS_PER_SECOND`] as an exact integer.
+///
+/// The seam arithmetic below must never be decided by a float: a boundary
+/// that lands half a token off does not fail, it drifts, and a rounded
+/// division is exactly how that happens. This constant divides exactly at
+/// LTX-2.5's own constants and the assertion under it is what says so at
+/// compile time rather than in a comment.
+pub const LATENT_RATE: u32 = SAMPLE_RATE / (HOP_LENGTH * LATENT_DOWNSAMPLE);
+const _: () = assert!(SAMPLE_RATE.is_multiple_of(HOP_LENGTH * LATENT_DOWNSAMPLE), "the audio latent rate is not a whole number of latents per second at these constants");
+
+/// The numerator of "audio tokens per VIDEO latent frame": one video latent
+/// frame is [`crate::pipeline::VAE_TEMPORAL_SCALE`] pixel frames, hence
+/// `VAE_TEMPORAL_SCALE / fps` seconds, hence this many tokens over `fps`.
+///
+/// Kept as a numerator rather than evaluated, because the whole point is
+/// that the ratio is not an integer at every frame rate - see this module's
+/// doc on carrying the stream across a seam.
+pub const TOKENS_PER_VIDEO_LATENT_FRAME_NUM: usize = crate::pipeline::VAE_TEMPORAL_SCALE * LATENT_RATE as usize;
+
 /// The DiT token width for the audio stream, `LATENT_CHANNELS *
 /// LATENT_MEL_BINS`. Equals the video stream's `in_channels` in the real
 /// checkpoint, which is why one `in_channels` field serves both.
@@ -91,6 +155,155 @@ pub const TOKEN_DIM: u32 = LATENT_CHANNELS * LATENT_MEL_BINS;
 pub fn latent_frames(frames: usize, fps: usize) -> usize {
     let duration = frames as f64 / fps.max(1) as f64;
     ((duration * LATENTS_PER_SECOND).round() as usize).max(1)
+}
+
+/// The audio tokens `n` video latent frames of clip time are worth at `fps`,
+/// or `None` when that is not a WHOLE number of tokens.
+///
+/// `None` is the whole safety property of the seam arithmetic: the caller
+/// either gets an exact token count or is told there isn't one, and never a
+/// rounded stand-in.
+pub fn tokens_for_video_latent_frames(n: usize, fps: usize) -> Option<usize> {
+    let fps = fps.max(1);
+    let num = TOKENS_PER_VIDEO_LATENT_FRAME_NUM * n;
+    num.is_multiple_of(fps).then(|| num / fps)
+}
+
+/// The smallest number of video latent frames a window may advance by for a
+/// seam to land on a whole audio token at `fps`.
+///
+/// Written as a search for the property rather than as `fps / gcd(200, fps)`
+/// so the definition IS the requirement: the answer is the first `n` whose
+/// clip time is a whole number of audio tokens. `n = fps` always satisfies it
+/// (`TOKENS_PER_VIDEO_LATENT_FRAME_NUM * fps` is trivially divisible by
+/// `fps`), so the search never comes back empty.
+pub fn window_latent_frame_quantum(fps: usize) -> usize {
+    let fps = fps.max(1);
+    (1..=fps).find(|&n| tokens_for_video_latent_frames(n, fps).is_some()).unwrap_or(fps)
+}
+
+/// Why an audio-visual plan at `fps` has to advance in whole quanta, in the
+/// terms the caller can act on.
+///
+/// Appended to a [`crate::longform::window_plan_aligned`] refusal by every
+/// caller that passed a quantum, because that function is deliberately
+/// frame-rate-blind - it takes a number, and only the audio stream knows
+/// where the number came from. Without this the refusal names a constraint
+/// with no visible cause, which is the kind of error message that gets worked
+/// around instead of understood.
+pub fn quantum_note(fps: usize) -> String {
+    let q = window_latent_frame_quantum(fps);
+    format!(
+        "With --audio a window seam has to land on a whole audio token: at this frame rate one video latent frame is {}/{fps} audio tokens, so a plan may only advance by multiples of {q} latent frames. Generate at a smaller size, lower --context-frames, or pick a frame rate whose quantum is 1 (any rate that divides {}) - a fraction of a token cannot be carried, and carrying a rounded one is sound that drifts against the picture.",
+        TOKENS_PER_VIDEO_LATENT_FRAME_NUM, TOKENS_PER_VIDEO_LATENT_FRAME_NUM
+    )
+}
+
+/// Audio tokens a carried context of `context_latent_frames` video latent
+/// frames covers at the HEAD of a window's own sequence.
+///
+/// The carried prefix is re-based to the new window's own time origin exactly
+/// as the video's is - its first latent frame covers one pixel frame there
+/// rather than eight - so the pixel span it occupies is
+/// `(N - 1) * VAE_TEMPORAL_SCALE + 1`, which is
+/// [`crate::longform::Window::dropped_frames`]. This is therefore the audio
+/// token count of that prefix considered as a clip in its own right, which is
+/// what makes it the same rule [`latent_frames`] applies to everything else.
+pub fn context_tokens(context_latent_frames: usize, fps: usize) -> usize {
+    latent_frames(1 + crate::pipeline::VAE_TEMPORAL_SCALE * context_latent_frames.saturating_sub(1), fps)
+}
+
+/// The audio token layout of a whole multi-window plan.
+///
+/// One place, so the generation loop, the gate and the CLI preview cannot
+/// disagree about where a window's sound begins and ends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioPlan {
+    /// Tokens every continuation window carries in from its predecessor and
+    /// holds at sigma 0 - [`context_tokens`], the same at every seam.
+    pub context: usize,
+    /// Tokens in each window's OWN sequence, `context` of them carried.
+    pub per_window: Vec<usize>,
+    /// Tokens the finished clip holds, which must be exactly the clip's own
+    /// [`latent_frames`].
+    pub total: usize,
+}
+
+impl AudioPlan {
+    /// Tokens window `i` contributes to the finished clip - everything past
+    /// the carried prefix.
+    pub fn new_tokens(&self, i: usize) -> usize {
+        self.per_window[i] - if i == 0 { 0 } else { self.context }
+    }
+}
+
+/// Derive the audio token layout of `plan`, refusing any plan whose seams do
+/// not land on whole audio tokens at `fps`.
+///
+/// **This is the alignment rule, and it is a check rather than a
+/// construction on purpose.** [`crate::longform::window_plan_aligned`] builds
+/// a plan that satisfies it; this re-derives the answer from the finished
+/// plan and refuses if it does not, so a planner change that quietly breaks
+/// the correspondence cannot reach a generation. Both halves of the rule are
+/// enforced:
+///
+/// * every window with a SUCCESSOR must advance the clip's time by a whole
+///   number of audio tokens (`w.latent_frames() - context`), or the carried
+///   prefix would land a fraction of a token away from the picture it belongs
+///   to - inaudible as a fault, audible as sound that drifts;
+/// * the windows' contributions must sum to the clip's own token count, so a
+///   multi-window clip's two container streams carry the same durations a
+///   single-window clip's do.
+pub fn audio_plan(plan: &[crate::longform::Window], context: usize, frames: usize, fps: usize) -> Result<AudioPlan, String> {
+    if plan.is_empty() {
+        return Err("an audio plan needs at least one window".into());
+    }
+    let ctx_tokens = context_tokens(context, fps);
+    let quantum = window_latent_frame_quantum(fps);
+    let mut per_window = Vec::with_capacity(plan.len());
+    for (i, w) in plan.iter().enumerate() {
+        let ta = latent_frames(w.decoded_frames(), fps);
+        if i > 0 && ta <= ctx_tokens {
+            return Err(format!(
+                "window {i} of this plan holds {ta} audio tokens and carries {ctx_tokens} of them, so it would generate no sound at all - lower the context, or ask for longer windows"
+            ));
+        }
+        // Only a window with a successor shifts the time base, so only that
+        // window's advance has to be a whole number of tokens. The last one
+        // is free, which is also what lets any legal clip length be planned.
+        if i + 1 < plan.len() {
+            let advance = w.latent_frames().saturating_sub(context);
+            if tokens_for_video_latent_frames(advance, fps).is_none() {
+                return Err(format!(
+                    "window {i} of this plan advances the clip by {advance} latent frames, which is {}/{fps} audio tokens and not a whole number of them, so the next window's carried sound would sit a fraction of a token away from the picture it belongs to - a plan at {fps} fps has to advance in multiples of {quantum} latent frames",
+                    TOKENS_PER_VIDEO_LATENT_FRAME_NUM * advance
+                ));
+            }
+        }
+        per_window.push(ta);
+    }
+    let total: usize = per_window.iter().enumerate().map(|(i, &ta)| ta - if i == 0 { 0 } else { ctx_tokens }).sum();
+    let want = latent_frames(frames, fps);
+    if total != want {
+        return Err(format!(
+            "this plan's windows carry {total} audio tokens between them but a {frames}-frame clip at {fps} fps is {want} - the sound would not be the same length as the picture"
+        ));
+    }
+    Ok(AudioPlan { context: ctx_tokens, per_window, total })
+}
+
+/// The last `k` tokens of a `[ta, TOKEN_DIM]` token-major audio latent - the
+/// audio counterpart of [`crate::longform::carry_tail`].
+///
+/// A slice and a copy, nothing else: no decode, no re-encode, no resample.
+/// What the next window freezes is bit-identical to what this one produced,
+/// which is the same promise the video half makes.
+pub fn carry_tail(latent: &[f32], k: usize) -> Vec<f32> {
+    let dim = TOKEN_DIM as usize;
+    assert!(latent.len().is_multiple_of(dim), "audio carry_tail: {} values is not a whole number of {dim}-wide tokens", latent.len());
+    let ta = latent.len() / dim;
+    assert!(k <= ta, "audio carry_tail: cannot carry {k} of {ta} tokens");
+    latent[(ta - k) * dim..].to_vec()
 }
 
 /// The seconds one audio latent frame's own `[start, end)` window covers -

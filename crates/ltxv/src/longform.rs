@@ -72,6 +72,18 @@
 //! whole window (`crate::block`), so a frozen prefix is visible to every
 //! generated token regardless of how far away it sits.
 //!
+//! # The second stream crosses the same seam, on a different grid
+//!
+//! An audio-visual generation carries an AUDIO latent prefix across every
+//! seam beside the video one, by the same freeze-at-sigma-0 mechanism. What
+//! it cannot share is the time resolution: the audio stream runs at
+//! `crate::audio::LATENT_RATE` tokens per second and the video latent at
+//! `fps / 8`, whose ratio is not an integer at every frame rate. So a seam
+//! placed at an arbitrary latent frame is a seam that falls part way into an
+//! audio token. [`window_plan_aligned`] is what places seams where both
+//! grids have a boundary; `crate::audio`'s module doc carries the rule and
+//! the arithmetic behind it.
+//!
 //! # Where a seam is deliberately NOT crossed
 //!
 //! Everything above keeps one SHOT continuous. A request can also be a
@@ -276,12 +288,37 @@ pub fn fitted_context(lh: usize, lw: usize, want: usize, max_tokens: usize) -> R
 /// and window 1 would carry a silently truncated context). Splitting the
 /// remainder equally then keeps the clip from ending on a stub window.
 pub fn window_plan(frames: usize, lh: usize, lw: usize, context: usize, max_tokens: usize) -> Result<Vec<Window>, String> {
+    window_plan_aligned(frames, lh, lw, context, max_tokens, 1)
+}
+
+/// [`window_plan`], with every window that has a SUCCESSOR required to
+/// advance the clip by a multiple of `align` latent frames.
+///
+/// `align == 1` is [`window_plan`] itself and constrains nothing. A larger
+/// quantum exists for one reason: a second stream whose time resolution is
+/// not the video latent grid's. LTX-2.5's audio stream carries
+/// `crate::audio::TOKENS_PER_VIDEO_LATENT_FRAME_NUM / fps` tokens per video
+/// latent frame, which is `25/3` at a 24-frame-a-second clip - so a seam
+/// placed at an arbitrary
+/// latent frame falls a fraction of an audio token away from the picture, and
+/// a fraction of a token cannot be carried. `crate::audio::
+/// window_latent_frame_quantum` is what an audio-visual caller passes here,
+/// and `crate::audio::audio_plan` re-checks the finished plan rather than
+/// trusting this function to have got it right.
+///
+/// **Only windows with a successor are constrained**, because only they hand
+/// anything across a seam. Leaving the last window free is not a relaxation
+/// of the rule, it is what makes the rule usable: constraining every window
+/// would force the clip's own `k` into one residue class and refuse most
+/// legal lengths outright.
+pub fn window_plan_aligned(frames: usize, lh: usize, lw: usize, context: usize, max_tokens: usize, align: usize) -> Result<Vec<Window>, String> {
     if frames == 0 || !(frames - 1).is_multiple_of(8) {
         return Err(format!("{frames} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)"));
     }
     if context == 0 {
         return Err("a long-form window plan needs at least one carried latent frame: a zero-frame context is independent windows, which is the discontinuity this path exists to remove".into());
     }
+    let align = align.max(1);
     let max_lat = max_latent_frames(lh, lw, max_tokens)?;
     let k_total = (frames - 1) / 8;
     // A clip that fits is one window carrying NOTHING, so `context` is not a
@@ -289,33 +326,68 @@ pub fn window_plan(frames: usize, lh: usize, lw: usize, context: usize, max_toke
     // its `k_total + 1` latent frames fit the ceiling on their own. The
     // context-fits check below therefore has to come after this, not before:
     // it is a statement about a CONTINUATION window, and this clip has none.
+    // A single window has no seam either, so `align` cannot constrain it.
     if k_total < max_lat {
         return Ok(vec![Window { context: 0, new: k_total + 1, first_frame: 0 }]);
     }
-    if max_lat < context + 1 {
+    if max_lat < context + align {
         return Err(format!(
-            "a {}x{} request ({} tokens per latent frame) leaves room for {max_lat} latent frames under the {max_tokens}-token ceiling, and a continuation window needs {context} carried frames plus at least one new one - generate at a smaller size, or lower the context",
+            "a {}x{} request ({} tokens per latent frame) leaves room for {max_lat} latent frames under the {max_tokens}-token ceiling, and a continuation window needs {context} carried frames plus at least {align} new one(s) - generate at a smaller size, or lower the context",
             lw * 32,
             lh * 32,
             lh * lw
         ));
     }
+    // Window 0 takes the whole budget, less whatever the quantum cannot use:
+    // its own advance across the first seam is `new - context`, so that is
+    // what has to be a multiple of `align`, not `new` itself.
+    let head_new = max_lat - (max_lat - context) % align;
     // Every window after the first spends `context` of its budget before it
     // generates anything, so that - not `max_lat` - is what sets their count.
     let cap_new = max_lat - context;
-    let remaining = k_total - (max_lat - 1);
-    let n_cont = remaining.div_ceil(cap_new);
-    let (base, rem) = (remaining / n_cont, remaining % n_cont);
+    // A constrained window's own cap: the largest multiple of the quantum
+    // that still fits. The LAST window is unconstrained and keeps `cap_new`.
+    let cap_aligned = align * (cap_new / align);
+    let remaining = k_total - (head_new - 1);
+    // The fewest continuation windows that can hold `remaining`: all but the
+    // last are capped at `cap_aligned`, the last at `cap_new`.
+    let mut n_cont = 1usize;
+    while (n_cont - 1) * cap_aligned + cap_new < remaining {
+        n_cont += 1;
+    }
+    // How much of `remaining` the CONSTRAINED windows take. Bounded below by
+    // what will not fit in the free last window (and by one quantum each),
+    // above by their own caps and by leaving the last window something to do,
+    // and aimed at the even split that keeps a clip from ending on a stub.
+    let lo = align * (remaining.saturating_sub(cap_new)).div_ceil(align).max(n_cont - 1);
+    let hi = align * (((n_cont - 1) * cap_aligned).min(remaining.saturating_sub(1)) / align);
+    let want = align * ((remaining - remaining / n_cont) / align);
+    let constrained = want.clamp(lo, hi.max(lo));
     let mut plan = Vec::with_capacity(n_cont + 1);
     let mut first_frame = 0usize;
-    let head = Window { context: 0, new: max_lat, first_frame };
+    let head = Window { context: 0, new: head_new, first_frame };
     first_frame += head.emitted_frames();
     plan.push(head);
-    for i in 0..n_cont {
-        let w = Window { context, new: base + usize::from(i < rem), first_frame };
+    // The constrained windows split their share as evenly as the quantum
+    // allows; the last one takes what is left.
+    let (units, spread) = (constrained / align, n_cont - 1);
+    let (base, rem) = if spread == 0 { (0, 0) } else { (units / spread, units % spread) };
+    for i in 0..spread {
+        let w = Window { context, new: align * (base + usize::from(i < rem)), first_frame };
         first_frame += w.emitted_frames();
         plan.push(w);
     }
+    // `saturating_sub`, because the clamp above can be forced past `remaining`
+    // when the quantum does not divide what is left: that is a plan this grid
+    // cannot express, and it has to come back as the refusal below rather than
+    // as an underflow that panics in debug and wraps in release.
+    let last = Window { context, new: remaining.saturating_sub(constrained), first_frame };
+    if last.new == 0 || last.new > cap_new {
+        return Err(format!(
+            "a {frames}-frame request at a {max_lat}-latent-frame budget cannot be cut into windows that each advance by a multiple of {align} latent frames - lower --context-frames, or ask for a length this frame rate can tile"
+        ));
+    }
+    plan.push(last);
     Ok(plan)
 }
 
@@ -376,13 +448,20 @@ pub const SCENE_SEED_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
 /// request whose fourth scene is unplannable fails now rather than three
 /// scenes of device time later.
 pub fn scene_plan(scenes: &[Scene], lh: usize, lw: usize, context: usize, max_tokens: usize) -> Result<Vec<Vec<Window>>, String> {
+    scene_plan_aligned(scenes, lh, lw, context, max_tokens, 1)
+}
+
+/// [`scene_plan`] over [`window_plan_aligned`] - the same per-scene plan with
+/// every seam INSIDE a scene required to advance by a multiple of `align`
+/// latent frames. See [`window_plan_aligned`] for what a quantum is for.
+pub fn scene_plan_aligned(scenes: &[Scene], lh: usize, lw: usize, context: usize, max_tokens: usize, align: usize) -> Result<Vec<Vec<Window>>, String> {
     if scenes.is_empty() {
         return Err("a generation needs at least one scene".into());
     }
     let mut out = Vec::with_capacity(scenes.len());
     let mut origin = 0usize;
     for (si, s) in scenes.iter().enumerate() {
-        let mut plan = window_plan(s.frames, lh, lw, context, max_tokens).map_err(|e| format!("scene {} ({:?}): {e}", si + 1, s.prompt))?;
+        let mut plan = window_plan_aligned(s.frames, lh, lw, context, max_tokens, align).map_err(|e| format!("scene {} ({:?}): {e}", si + 1, s.prompt))?;
         for w in &mut plan {
             w.first_frame += origin;
         }
