@@ -489,13 +489,52 @@ fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -> Vec<f32> 
 /// `av_ca_{video,audio}_scale_shift_adaln_single` at `coeff=4`;
 /// `av_ca_{a2v,v2a}_gate_adaln_single` at `coeff=1`, `rows=1` - a single
 /// scalar sigma in) - factored out here instead of four near-identical
-/// inline copies. Returns `(raw_linear_table, embedded_timestep)`.
-fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], dim: usize, coeff: usize) -> (Vec<f32>, Vec<f32>) {
+/// inline copies. Returns `(raw_linear_table, embedded_timestep)`, both as
+/// [`dit::adaln::RowTable`]s over the same row map.
+///
+/// # It computes one row per DISTINCT timestep, not one per token
+///
+/// Every row here is a function of that token's scalar timestep and nothing
+/// else, and `timesteps_scaled` is `denoise_mask * sigma * multiplier`: one
+/// value for a plain text-to-video step, two once any token is frozen (an
+/// image anchor at sigma 0, a long-form window's carried context, a
+/// `--conditioning-strength` below 1). At the real 720p token count that is
+/// 3520 rows of which 1-2 are distinct and the rest are recomputed copies.
+///
+/// The lever is fewer rows because every other lever on the table GEMM is
+/// exhausted: at T=3520 it runs `[3520,4096]x[36864,4096]ᵀ` at ~120 GFLOP/s,
+/// which is already this host's non-reassociating scalar-MAC ceiling
+/// (`backend_cpu::host_gemm`'s own tile sweep measures 127.8 GFLOP/s as the
+/// best any tiling reaches). A kernel at its ceiling is not tuned further; it
+/// is given less to do. `ltxv_bench streamed <layers> <t> <ctx> 1 1
+/// <distinct_timesteps>` is the harness that measures both ends of that -
+/// `1` is a real step, `<t>` is what this stage cost before the dedup.
+///
+/// Deduplication is generic rather than a "uniform" special case, so the
+/// anchored and long-form shapes - the ones a fallback would have to serve -
+/// win essentially the same reduction (2 rows instead of 3520) instead of
+/// dropping back to full cost. See [`dit::adaln::distinct_rows`] for why
+/// keying on raw bits makes the result BIT-IDENTICAL to the per-token form
+/// rather than merely equal to a tolerance.
+///
+/// **Only the production streamed path consumes the compact form.** Every
+/// eager/parity entry point ([`LtxDit::forward`], [`LtxDit::forward_q`],
+/// [`LtxAvDit::forward`], the pipeline-stage forwards) calls
+/// `RowTable::expand` and keeps running against a dense `[t, width]` table.
+/// That is deliberate and is not laziness about a path that is never hot: the
+/// dense arm is the INDEPENDENT statement of which row belongs to which
+/// token, and it is what
+/// `tests/device_residency.rs::on_device_modulation_is_bit_identical_to_the_
+/// host_combine_and_slice` compares the gathering arm against. Converting it
+/// too would leave both arms sharing one row map and no gate on the scatter
+/// at all.
+fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], dim: usize, coeff: usize) -> (dit::adaln::RowTable, dit::adaln::RowTable) {
     let w1 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_1.weight"));
     let b1 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_1.bias"));
     let w2 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_2.weight"));
     let b2 = tget(w, &format!("{prefix}.emb.timestep_embedder.linear_2.bias"));
-    let rows = timesteps_scaled.len();
+    let (distinct_ts, row_of) = dit::adaln::distinct_rows(timesteps_scaled);
+    let rows = distinct_ts.len();
 
     // BATCHED, not one `dit::timestep::pixart_timestep_embed` call per row.
     //
@@ -503,11 +542,19 @@ fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], di
     // (`dit::timestep::linear1`), and this loop ran `rows` of them back to
     // back. At the real 720p token count that is 3520 x (256x4096 +
     // 4096x4096) = 6.3e10 multiply-adds on a single core of 48 - and it, not
-    // the adaLN table GEMM below, was the bulk of the ~76 s this stage cost
-    // per forward call (measured: the table GEMM alone is ~14 s of it).
-    // Every row is independent and they all read the SAME two weight
-    // matrices, so the whole loop is two ordinary `[rows, in] x [out, in]^T`
-    // GEMMs with an elementwise SiLU between them.
+    // the adaLN table GEMM below, was the bulk of what this stage cost in the
+    // tree that had it. Every row is independent and they all read the SAME
+    // two weight matrices, so the whole loop is two ordinary
+    // `[rows, in] x [out, in]^T` GEMMs with an elementwise SiLU between them.
+    //
+    // The ~76 s / ~14 s split this comment used to quote is a number about a
+    // tree that no longer exists, and reading it as current is a 7.5x error:
+    // it predates BOTH this batching and `backend_cpu::host_gemm`'s blocked
+    // GEMM. What each state of this code actually costs per forward at
+    // T=3520 (ONE call site - `adaln_single`, once per forward - and nothing
+    // else) is a measurement the roadmap's Phase 14 and Phase 27 entries own,
+    // stage by stage, rather than a figure restated here where nothing checks
+    // it.
     //
     // Bit-identical, not merely equivalent: `dit::timestep::linear1`
     // accumulates `bias` then `+= x*w` over ascending `k`, one f32 add at a
@@ -519,7 +566,7 @@ fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], di
     const MAX_PERIOD: f64 = 10000.0;
     let mut te = vec![0f32; rows * FREQ_DIM];
     backend_cpu::par::rows_mut(&mut te, FREQ_DIM, |r, row| {
-        row.copy_from_slice(&model::hostmath::timestep_embedding(timesteps_scaled[r], FREQ_DIM, true, 0.0, MAX_PERIOD));
+        row.copy_from_slice(&model::hostmath::timestep_embedding(distinct_ts[r], FREQ_DIM, true, 0.0, MAX_PERIOD));
     });
     let h0 = model::hostmath::silu_slice(&linear(&te, rows, FREQ_DIM, w1, Some(b1), dim));
     let embedded = linear(&h0, rows, dim, w2, Some(b2), dim);
@@ -530,7 +577,7 @@ fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], di
     let bl = tget(w, &format!("{prefix}.linear.bias"));
     let table = linear(&silu_slice(&embedded), rows, dim, wl, Some(bl), coeff * dim);
     gpu_core::profile::stage_time("ada_layer_norm_single: table GEMM (host)", s_table);
-    (table, embedded)
+    (dit::adaln::RowTable::new(table, row_of.clone(), coeff * dim), dit::adaln::RowTable::new(embedded, row_of, dim))
 }
 
 /// The model's output stage - `LayerNorm(no affine)` -> per-token modulate
@@ -539,14 +586,15 @@ fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], di
 /// video-only and AV paths (each stream has its own weight names, passed
 /// in) - `LTXModel._process_output`.
 #[allow(clippy::too_many_arguments)]
-fn output_stage(w: &Tensors, sst_name: &str, proj_name: &str, x: &[f32], embedded_timestep: &[f32], t: usize, dim: usize, out_channels: usize, norm_eps: f32) -> Vec<f32> {
+fn output_stage(w: &Tensors, sst_name: &str, proj_name: &str, x: &[f32], embedded_timestep: &dit::adaln::RowTable, t: usize, dim: usize, out_channels: usize, norm_eps: f32) -> Vec<f32> {
     let sst = tget(w, sst_name); // [2, dim]: [shift, scale]
     let mut shift = vec![0f32; t * dim];
     let mut one_plus_scale = vec![0f32; t * dim];
     for ti in 0..t {
+        let emb = embedded_timestep.row(ti);
         for d in 0..dim {
-            shift[ti * dim + d] = sst[d] + embedded_timestep[ti * dim + d];
-            one_plus_scale[ti * dim + d] = 1.0 + sst[dim + d] + embedded_timestep[ti * dim + d];
+            shift[ti * dim + d] = sst[d] + emb[d];
+            one_plus_scale[ti * dim + d] = 1.0 + sst[dim + d] + emb[d];
         }
     }
     let normed = layernorm_noaffine(x, t, dim, norm_eps);
@@ -826,7 +874,7 @@ impl LtxDit {
         };
 
         let (x_final, _block_out, _taps) =
-            self.forward_blocks(&gpu, &x0, &adaln_table, &batch.context, &cos_bufs, &sin_bufs, batch.t as u32, batch.context_len as u32, self.shard.start as u32, self.shard.end as u32);
+            self.forward_blocks(&gpu, &x0, &adaln_table.expand(), &batch.context, &cos_bufs, &sin_bufs, batch.t as u32, batch.context_len as u32, self.shard.start as u32, self.shard.end as u32);
         *self.res_out.borrow_mut() = Some(x_final.clone());
 
         if self.shard.head {
@@ -973,7 +1021,7 @@ impl LtxDit {
             cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
         );
 
-        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers);
+        let (x_final, block_out, mut taps) = self.forward_blocks(&gpu, &x, &adaln_table.expand(), &connector_context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers);
         x = x_final;
         assert!(!taps.is_empty(), "num_layers must be >= 1");
         let b0 = taps.remove(0);
@@ -984,8 +1032,8 @@ impl LtxDit {
         DitTaps {
             rope_cos: rope.cos,
             rope_sin: rope.sin,
-            adaln_table,
-            embedded_timestep,
+            adaln_table: adaln_table.expand(),
+            embedded_timestep: embedded_timestep.expand(),
             connector_out,
             b0_attn1_out: b0.attn1_out,
             b0_attn2_out: b0.attn2_out,
@@ -1041,7 +1089,7 @@ impl LtxDit {
             cfg.connector_norm_output, cfg.positional_embedding_theta, &cfg.connector_positional_embedding_max_pos, cfg.norm_eps,
         );
 
-        let (x_final, block_out, mut taps) = self.forward_blocks_q(&gpu, &x, &adaln_table, &connector_context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers, tier);
+        let (x_final, block_out, mut taps) = self.forward_blocks_q(&gpu, &x, &adaln_table.expand(), &connector_context, &cos_bufs, &sin_bufs, t as u32, context_len as u32, 0, cfg.num_layers, tier);
         x = x_final;
         assert!(!taps.is_empty(), "num_layers must be >= 1");
         let b0 = taps.remove(0);
@@ -1051,8 +1099,8 @@ impl LtxDit {
         DitTaps {
             rope_cos: rope.cos,
             rope_sin: rope.sin,
-            adaln_table,
-            embedded_timestep,
+            adaln_table: adaln_table.expand(),
+            embedded_timestep: embedded_timestep.expand(),
             connector_out,
             b0_attn1_out: b0.attn1_out,
             b0_attn2_out: b0.attn2_out,
@@ -1256,8 +1304,26 @@ pub fn forward_q_streamed_in(
     let s_adaln = std::time::Instant::now();
     let ts_scaled: Vec<f32> = timesteps.iter().map(|&x| x * cfg.timestep_scale_multiplier as f32).collect();
     let (adaln_table, embedded_timestep) = ada_layer_norm_single(head, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
-    gpu_core::profile::stage_time("forward_q_streamed: adaLN-single table (host)", s_adaln);
-    tracing::debug!(stage = "adaln_single", ms = s_adaln.elapsed().as_secs_f32() * 1e3, rows = cfg.adaln_rows(), "host stage done");
+    // NESTS the two `ada_layer_norm_single: ...` stages printed just above:
+    // this bracket is the whole stage, they are its two halves. Adding all
+    // three double-counts, which is the reading that turns a 10.3 s stage into
+    // a 20.6 s one. `gpu_core::profile::stage_time` prints one line per call
+    // with no nesting structure of its own, so the label is where the
+    // relationship has to be stated.
+    gpu_core::profile::stage_time("forward_q_streamed: adaLN-single table (host, TOTAL - nests the two ada_layer_norm_single stages above)", s_adaln);
+    // `distinct_timesteps` is the single number that says whether this stage
+    // is cheap: it is what the host GEMM and the per-forward upload are both
+    // proportional to. 1 is plain text-to-video, 2 is anything anchored or
+    // carrying a long-form context; anything near `t` means the dedup found
+    // nothing and this stage is back at its old cost.
+    tracing::debug!(
+        stage = "adaln_single",
+        ms = s_adaln.elapsed().as_secs_f32() * 1e3,
+        rows = cfg.adaln_rows(),
+        distinct_timesteps = adaln_table.distinct_len(),
+        tokens = t,
+        "host stage done"
+    );
 
     let s_rope = std::time::Instant::now();
     let rope = ltx_rope_tables(cfg.inner_dim, cfg.num_heads, cfg.positional_embedding_theta, &cfg.positional_embedding_max_pos, positions, t);
@@ -1681,10 +1747,10 @@ impl LtxAvDit {
 
         #[rustfmt::skip]
         let (vx_final, ax_final, _v_block_out, _a_block_out, _taps) = self.forward_blocks_av(
-            &gpu, &vx0, &ax0, &v_adaln_table, &a_adaln_table, &v_connector_context, &a_connector_context,
+            &gpu, &vx0, &ax0, &v_adaln_table.expand(), &a_adaln_table.expand(), &v_connector_context, &a_connector_context,
             &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
             &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
-            &av_video_ss_table, &av_audio_ss_table, &av_a2v_gate_table, &av_v2a_gate_table,
+            &av_video_ss_table.expand(), &av_audio_ss_table.expand(), &av_a2v_gate_table.expand(), &av_v2a_gate_table.expand(),
             batch.tv as u32, batch.ta as u32, self.shard.start as u32, self.shard.end as u32,
         );
         *self.res_out_v.borrow_mut() = Some(vx_final.clone());
@@ -1897,10 +1963,10 @@ impl LtxAvDit {
 
         #[rustfmt::skip]
         let (vx_final, ax_final, v_block_out, a_block_out, mut av_taps) = self.forward_blocks_av(
-            &gpu, &vx, &ax, &v_adaln_table, &a_adaln_table, &v_connector_context, &a_connector_context,
+            &gpu, &vx, &ax, &v_adaln_table.expand(), &a_adaln_table.expand(), &v_connector_context, &a_connector_context,
             &v_cos_bufs, &v_sin_bufs, &a_cos_bufs, &a_sin_bufs,
             &v_cross_cos_bufs, &v_cross_sin_bufs, &a_cross_cos_bufs, &a_cross_sin_bufs,
-            &av_video_ss_table, &av_audio_ss_table, &av_a2v_gate_table, &av_v2a_gate_table,
+            &av_video_ss_table.expand(), &av_audio_ss_table.expand(), &av_a2v_gate_table.expand(), &av_v2a_gate_table.expand(),
             tv as u32, ta as u32, 0, vcfg.num_layers,
         );
         vx = vx_final;
@@ -1921,8 +1987,8 @@ impl LtxAvDit {
             video: DitTaps {
                 rope_cos: v_rope.cos,
                 rope_sin: v_rope.sin,
-                adaln_table: v_adaln_table,
-                embedded_timestep: v_embedded_timestep,
+                adaln_table: v_adaln_table.expand(),
+                embedded_timestep: v_embedded_timestep.expand(),
                 connector_out: v_connector_out,
                 b0_attn1_out: b0v.attn1_out,
                 b0_attn2_out: b0v.attn2_out,
@@ -1933,8 +1999,8 @@ impl LtxAvDit {
             audio: DitTaps {
                 rope_cos: a_rope.cos,
                 rope_sin: a_rope.sin,
-                adaln_table: a_adaln_table,
-                embedded_timestep: a_embedded_timestep,
+                adaln_table: a_adaln_table.expand(),
+                embedded_timestep: a_embedded_timestep.expand(),
                 connector_out: a_connector_out,
                 b0_attn1_out: b0a.attn1_out,
                 b0_attn2_out: b0a.attn2_out,
@@ -1946,10 +2012,10 @@ impl LtxAvDit {
             v_cross_rope_sin: v_cross_rope.sin,
             a_cross_rope_cos: a_cross_rope.cos,
             a_cross_rope_sin: a_cross_rope.sin,
-            av_video_ss_table,
-            av_audio_ss_table,
-            av_a2v_gate_table,
-            av_v2a_gate_table,
+            av_video_ss_table: av_video_ss_table.expand(),
+            av_audio_ss_table: av_audio_ss_table.expand(),
+            av_a2v_gate_table: av_a2v_gate_table.expand(),
+            av_v2a_gate_table: av_v2a_gate_table.expand(),
             b0_a2v_out: b0_a2v,
             b0_v2a_out: b0_v2a,
         }
@@ -1972,6 +2038,16 @@ mod tests {
     ///
     /// Compared on BIT PATTERNS: `assert_eq!` on f32 would call two NaNs
     /// unequal, which is the wrong verdict for a byte-identical result.
+    ///
+    /// The same gate also covers the ROW DEDUPLICATION this function does -
+    /// it computes one row per distinct timestep and scatters, so the
+    /// per-row reference below is exactly what a wrong scatter would fail
+    /// against. Three regimes are exercised on purpose: every timestep
+    /// distinct (no dedup at all), one repeated timestep (plain
+    /// text-to-video), and two INTERLEAVED timesteps (the anchored/long-form
+    /// shape). A suite where every case were uniform could not see a broken
+    /// scatter, and one where every case were contiguous could not see a
+    /// scatter that assumed a contiguous split.
     #[test]
     fn batched_adaln_timestep_embedding_is_bit_identical_to_the_per_row_form() {
         // Deliberately awkward row counts, including ones smaller than the
@@ -1979,20 +2055,32 @@ mod tests {
         // AV gate tables use.
         for (rows, dim, coeff) in [(1usize, 64usize, 1usize), (7, 64, 4), (33, 128, 9), (64, 32, 2)] {
             let w = timestep_weights(dim, coeff, 0xADA1_0000 ^ rows as u64);
-            let ts: Vec<f32> = (0..rows).map(|i| 40.0 + 13.7 * i as f32).collect();
+            for (kind, ts) in [
+                ("all distinct", (0..rows).map(|i| 40.0 + 13.7 * i as f32).collect::<Vec<f32>>()),
+                ("uniform", vec![91.5f32; rows]),
+                ("two interleaved", (0..rows).map(|i| if i % 3 == 1 { 0.0 } else { 91.5 }).collect::<Vec<f32>>()),
+            ] {
+                // The exact loop this function used to run.
+                let (w1, b1) = (tget(&w, "t.emb.timestep_embedder.linear_1.weight"), tget(&w, "t.emb.timestep_embedder.linear_1.bias"));
+                let (w2, b2) = (tget(&w, "t.emb.timestep_embedder.linear_2.weight"), tget(&w, "t.emb.timestep_embedder.linear_2.bias"));
+                let mut reference = vec![0f32; rows * dim];
+                for (ti, &t) in ts.iter().enumerate() {
+                    let e = dit::timestep::pixart_timestep_embed(t, 256, w1, b1, dim, w2, b2, dim, 10000.0);
+                    reference[ti * dim..ti * dim + dim].copy_from_slice(&e);
+                }
 
-            // The exact loop this function used to run.
-            let (w1, b1) = (tget(&w, "t.emb.timestep_embedder.linear_1.weight"), tget(&w, "t.emb.timestep_embedder.linear_1.bias"));
-            let (w2, b2) = (tget(&w, "t.emb.timestep_embedder.linear_2.weight"), tget(&w, "t.emb.timestep_embedder.linear_2.bias"));
-            let mut reference = vec![0f32; rows * dim];
-            for (ti, &t) in ts.iter().enumerate() {
-                let e = dit::timestep::pixart_timestep_embed(t, 256, w1, b1, dim, w2, b2, dim, 10000.0);
-                reference[ti * dim..ti * dim + dim].copy_from_slice(&e);
+                let (table, embedded) = ada_layer_norm_single(&w, "t", &ts, dim, coeff);
+                assert_eq!(embedded.len(), rows, "{kind}: the compact form must still stand for {rows} tokens");
+                assert_eq!(table.len(), rows);
+                assert_eq!(table.width(), coeff * dim);
+                let want_distinct = { ts.iter().map(|v| v.to_bits()).collect::<HashSet<u32>>().len() };
+                assert_eq!(embedded.distinct_len(), want_distinct, "{kind}: rows={rows} dedup found the wrong number of distinct rows");
+                assert_eq!(table.distinct_len(), want_distinct);
+
+                let expanded = embedded.expand();
+                let differing = expanded.iter().zip(&reference).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+                assert_eq!(differing, 0, "{kind}: rows={rows} dim={dim}: {differing}/{} embedded_timestep elements differ in bit pattern from the per-row reference", reference.len());
             }
-
-            let (_table, embedded) = ada_layer_norm_single(&w, "t", &ts, dim, coeff);
-            let differing = embedded.iter().zip(&reference).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
-            assert_eq!(differing, 0, "rows={rows} dim={dim}: {differing}/{} embedded_timestep elements differ in bit pattern from the per-row reference", reference.len());
         }
     }
 

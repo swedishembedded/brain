@@ -39,15 +39,42 @@ struct Inputs {
 }
 
 fn synthetic_inputs(cfg: &LtxDitConfig, t: usize, context_len: usize, salt: f32) -> Inputs {
+    synthetic_inputs_at(cfg, t, context_len, salt, &(0..t).map(|i| 0.2 + 0.05 * (i % 5) as f32).collect::<Vec<f32>>())
+}
+
+/// [`synthetic_inputs`] with the per-token timesteps chosen by the caller.
+///
+/// The timestep vector is the one input that decides how many DISTINCT adaLN
+/// rows a forward computes (`dit::adaln::RowTable`), and the three shapes a
+/// real run produces are all different: one value (plain text-to-video), two
+/// (any frozen token - an image anchor at sigma 0, a long-form window's
+/// carried context, a `--conditioning-strength` below 1), or many. Nothing
+/// else about a forward changes with it, so it is the only axis worth
+/// parametrising here.
+fn synthetic_inputs_at(cfg: &LtxDitConfig, t: usize, context_len: usize, salt: f32, timesteps: &[f32]) -> Inputs {
+    assert_eq!(timesteps.len(), t);
     let mcfg = Cfg::from_ltx(cfg, t, context_len);
     let positions = mcfg.simple_positions();
     let latent: Vec<f32> = (0..t * cfg.in_channels as usize).map(|i| ((i % 23) as f32 / 23.0 - 0.5) * 1.1 + salt).collect();
     let context: Vec<f32> = (0..context_len * cfg.cross_attention_dim as usize).map(|i| ((i % 7) as f32 / 7.0 - 0.5) * 1.4 - salt).collect();
-    let timesteps: Vec<f32> = (0..t).map(|i| 0.2 + 0.05 * (i % 5) as f32).collect();
     let mut keyframes_mask = vec![0f32; t];
     keyframes_mask[0] = 1.0;
     let context_valid = vec![1.0f32; context_len];
-    Inputs { latent, timesteps, positions, keyframes_mask, context, context_valid, context_len, t }
+    Inputs { latent, timesteps: timesteps.to_vec(), positions, keyframes_mask, context, context_valid, context_len, t }
+}
+
+/// Every distinct-row count a real denoise step can hand the adaLN stage, at
+/// `t` tokens - see [`synthetic_inputs_at`]. Deliberately INTERLEAVED rather
+/// than split into contiguous blocks: `denoise_mask` is per token, and a
+/// scatter that happens to be right for a contiguous prefix would pass a
+/// block-shaped case and fail this one.
+fn timestep_patterns(t: usize) -> Vec<(&'static str, Vec<f32>)> {
+    vec![
+        ("uniform (plain text-to-video: 1 distinct row)", vec![0.37f32; t]),
+        ("two interleaved (anchored / long-form context: 2 distinct rows)", (0..t).map(|i| if i % 3 == 1 { 0.0 } else { 0.37 }).collect()),
+        ("many (5 distinct rows, reused)", (0..t).map(|i| 0.2 + 0.05 * (i % 5) as f32).collect()),
+        ("all distinct (no dedup at all)", (0..t).map(|i| 0.2 + 0.05 * i as f32).collect()),
+    ]
 }
 
 /// Bit patterns, not values: `assert_eq!` on `f32` would call two NaNs
@@ -184,28 +211,59 @@ fn a_zero_slot_session_falls_back_to_streaming_and_is_still_exact() {
 /// (`tbl[i] + tab[..]`, then `1.0 + x` for the three `1 + scale` rows) rather
 /// than approximately.
 ///
-/// Mutation-verified: swapping any two of `MOD_ROWS`' nine row indices, or
-/// dropping the `plus_one` add, moves this to a gross disagreement.
+/// It is ALSO the gate on the per-token adaLN table being computed one row per
+/// DISTINCT timestep and SCATTERED back (`dit::adaln::RowTable`), because the
+/// eager arm is the only one that still materialises a dense `[t, 9*dim]`
+/// table and indexes it by token. A wrong scatter - rows mapped to the wrong
+/// tokens - is this change's real failure mode, and it is invisible to any
+/// comparison whose two arms share the map.
+///
+/// Run over EVERY distinct-row count a real step can produce
+/// ([`timestep_patterns`]): a suite where every case were uniform could not
+/// see a broken scatter at all, since with one distinct row every scatter is
+/// the same scatter.
+///
+/// Mutation-verified: swapping any two of `MOD_ROWS`' nine row indices,
+/// dropping the `plus_one` add, or rotating the row map by one all move this
+/// to a gross disagreement.
 #[test]
 fn on_device_modulation_is_bit_identical_to_the_host_combine_and_slice() {
     let cfg = LtxDitConfig { num_layers: 3, ..LtxDitConfig::tiny() };
     let w = random_tiny_weights(&cfg, 0x00DE_1CE4);
     let head = load_head_tensors_from_source(&w, &cfg);
-    let i = synthetic_inputs(&cfg, 9, 5, 0.0);
+    let t = 9;
 
-    // Eager: host `add_table` + `slice_mod` + nine uploads, per block.
-    let eager = ltxv::dit::LtxDit::new(cfg, w.clone(), None);
-    let want = eager.forward_q(&i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, QTier::Int8).out;
+    for (kind, ts) in timestep_patterns(t) {
+        let i = synthetic_inputs_at(&cfg, t, 5, 0.0, &ts);
 
-    // Chained: `adaln_row` on the card, from one per-forward table upload.
-    let session = DitSession::resident_with_slots(None, cfg.num_layers);
-    let cache = GenerationCache::default();
-    let got = run(&session, &cfg, &w, &head, &i, &cache);
+        // Eager: host `add_table` + `slice_mod` + nine uploads, per block, off
+        // a DENSE per-token table.
+        let eager = ltxv::dit::LtxDit::new(cfg, w.clone(), None);
+        let want = eager.forward_q(&i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, QTier::Int8).out;
 
-    if let Some((idx, x, y)) = bits_differ(&want, &got) {
-        panic!("element {idx}: on-device adaLN modulation changed the answer ({x:e} host vs {y:e} device, bits {:#x} vs {:#x})", x.to_bits(), y.to_bits());
+        // Chained: `adaln_row` on the card, gathering each token's row out of
+        // one per-forward upload of the DISTINCT rows.
+        let session = DitSession::resident_with_slots(None, cfg.num_layers);
+        let cache = GenerationCache::default();
+        let got = run(&session, &cfg, &w, &head, &i, &cache);
+
+        if let Some((idx, x, y)) = bits_differ(&want, &got) {
+            panic!("{kind}: element {idx}: on-device adaLN modulation changed the answer ({x:e} host vs {y:e} device, bits {:#x} vs {:#x})", x.to_bits(), y.to_bits());
+        }
+        assert!(want.iter().any(|v| *v != 0.0), "{kind}: test setup: an all-zero reference would make any comparison vacuous");
     }
-    assert!(want.iter().any(|v| *v != 0.0), "test setup: an all-zero reference would make any comparison vacuous");
+
+    // The patterns really do produce different answers, so the agreement above
+    // is not the trivial "the timestep does not reach the output" statement -
+    // which is precisely what a scatter that always picked row 0 would look
+    // like on the uniform case alone.
+    let pats = timestep_patterns(t);
+    let eager = ltxv::dit::LtxDit::new(cfg, w.clone(), None);
+    let out_of = |ts: &[f32]| {
+        let i = synthetic_inputs_at(&cfg, t, 5, 0.0, ts);
+        eager.forward_q(&i.latent, &i.timesteps, &i.positions, &i.keyframes_mask, &i.context, i.context_len, i.t, &i.context_valid, QTier::Int8).out
+    };
+    assert!(bits_differ(&out_of(&pats[0].1), &out_of(&pats[1].1)).is_some(), "test setup: a uniform and a two-valued timestep vector must not produce the same forward");
 }
 
 /// The VRAM policy must never promise more blocks than the model has, must

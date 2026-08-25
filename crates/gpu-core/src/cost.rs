@@ -757,6 +757,18 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let g_rows = rows.div_ceil(rpc);
             f(2 * rows * dim, 4 * (3 * rows * dim + g_rows * dim))
         }
+        // params [R, D, NR, row, plus_one]: one PixArt/adaLN-single modulation
+        // vector, `out[r,d] = tbl[row,d] + tab[map[r],row,d]` and one more add
+        // when `plus_one`. Bytes are the streaming form: `D` gathered floats
+        // and `D` written per token, plus the block's own `[NR,D]` row and the
+        // `R`-entry u32 row map read once each. The gather is counted at what
+        // the dispatch issues (`R*D`), not at the distinct rows behind it -
+        // this file's `bytes` is a roofline denominator, not a cache model,
+        // and `U` is not in the uniform params anyway.
+        "adaln_row" => {
+            let (rows, dim, plus_one) = (p(0)?, p(1)?, p(4).unwrap_or(0).min(1));
+            f(rows * dim * (1 + plus_one), 4 * (2 * rows * dim + dim + rows))
+        }
         // params [b, t, d_model]: dpos[i,c] += Σ_b dx.
         "pos_bwd" => {
             let (b, t, d) = (p(0)?, p(1)?, p(2)?);

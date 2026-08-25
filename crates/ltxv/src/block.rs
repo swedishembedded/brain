@@ -763,16 +763,17 @@ impl ModBufs {
     }
 
     /// Derive the nine vectors on the device from `tab` (the model-level
-    /// `[t, 9*dim]` adaLN table, uploaded once per forward) and `tbl` (this
-    /// block's own `[9, dim]` `scale_shift_table`, uploaded once per
-    /// generation). Records nine `adaln_row` dispatches into `s`; nothing runs
-    /// until the caller submits.
-    fn derive(gpu: &Gpu, s: &mut Vec<Step>, tab: &DeviceBuffer, tbl: &DeviceBuffer, t: u32, dim: u32) -> ModBufs {
+    /// adaLN table, one row per DISTINCT token timestep, uploaded once per
+    /// forward), `map` (`[t]` u32, which of `tab`'s rows each token uses -
+    /// `dit::adaln::RowTable::row_of`) and `tbl` (this block's own `[9, dim]`
+    /// `scale_shift_table`, uploaded once per generation). Records nine
+    /// `adaln_row` dispatches into `s`; nothing runs until the caller submits.
+    fn derive(gpu: &Gpu, s: &mut Vec<Step>, tab: &DeviceBuffer, map: &DeviceBuffer, tbl: &DeviceBuffer, t: u32, dim: u32) -> ModBufs {
         let td = (t * dim) as u64;
         let mut out: Vec<DeviceBuffer> = Vec::with_capacity(9);
         for (row, plus_one) in MOD_ROWS {
             let b = gpu.storage(td);
-            s.push(gpu.step(K_ADALN_ROW, &[tab, tbl, &b], &[t, dim, 9, row, u32::from(plus_one)], t * dim));
+            s.push(gpu.step(K_ADALN_ROW, &[tab, tbl, map, &b], &[t, dim, 9, row, u32::from(plus_one)], t * dim));
             out.push(b);
         }
         let mut it = out.into_iter();
@@ -2121,7 +2122,18 @@ impl LtxBlockQ {
     /// same operands, same order; only the ROUTE the modulation bytes take to
     /// the card changes. Gated by `crates/ltxv/tests/device_residency.rs`.
     #[allow(clippy::too_many_arguments)]
-    pub fn forward_prod(&self, scratch: &Gpu, x: &[f32], adaln_buf: &DeviceBuffer, ctx_buf: &DeviceBuffer, cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32, timings: &mut BlockTimings) -> Vec<f32> {
+    pub fn forward_prod(
+        &self,
+        scratch: &Gpu,
+        x: &[f32],
+        adaln_buf: &DeviceBuffer,
+        adaln_map_buf: &DeviceBuffer,
+        ctx_buf: &DeviceBuffer,
+        cos_bufs: &[DeviceBuffer],
+        sin_bufs: &[DeviceBuffer],
+        t: u32,
+        timings: &mut BlockTimings,
+    ) -> Vec<f32> {
         let cfg = &self.cfg;
         let (dim, heads, head_dim, eps, ctx_len) = (cfg.inner_dim, cfg.num_heads, cfg.head_dim(), cfg.norm_eps, self.context_len);
         assert_eq!(x.len(), (t * dim) as usize);
@@ -2129,7 +2141,7 @@ impl LtxBlockQ {
         let x_buf = scratch.storage((t * dim) as u64);
         wf(scratch, &x_buf, x);
         let mut s: Vec<Step> = Vec::new();
-        let mb = ModBufs::derive(scratch, &mut s, adaln_buf, &self.sst_buf, t, dim);
+        let mb = ModBufs::derive(scratch, &mut s, adaln_buf, adaln_map_buf, &self.sst_buf, t, dim);
         let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, ctx_buf, ctx_len, cos_bufs, sin_bufs, dim, heads, head_dim, t, eps);
         let (x3, _ff_out) = mlp_sublayer_q(scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         timings.record_upload += s_rec.elapsed();

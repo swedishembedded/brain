@@ -62,7 +62,7 @@
 //! Usage:
 //!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]     video DiT block stack (fp32, synthetic weights)
 //!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode
-//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres)
+//!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident] [distinct_timesteps]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres); distinct_timesteps sizes the host adaLN stage (1 = plain t2v, 2 = anchored or long-form, tokens = no dedup at all, i.e. what this stage cost before the dedup existed)
 //!   ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]   decode a DUMPED latent (see ltxv::latentdump), optionally a latent-cell crop
 //!
 //! `vae` and `decode` need `BRAIN_LTXV_VAE=<path to ltx-2.5-video-vae-conv-bf16.safetensors>`.
@@ -89,7 +89,7 @@ use std::time::Instant;
 
 use gpu_core::profile::profile;
 use gpu_core::roof;
-use gpu_core::{DeviceBuffer, Gpu};
+use gpu_core::{DeviceBuffer, Gpu, Step};
 use ltxv::block::{LtxBlock, KERNELS};
 use ltxv::config::LtxDitConfig;
 use ltxv::dit::random_tiny_weights;
@@ -174,8 +174,34 @@ fn bench_dit(reps: usize, layers: u32, t: u32, ctx_len: u32) {
         Some(r) => println!("measured roofline: {:.0} GFLOP/s, {:.1} GB/s DRAM, {:.1} GB/s cache, ridge {:.1} FLOP/byte", r.gflops, r.gbs, r.cache_gbs, r.ridge()),
         None => println!("roofline unmeasured - utilisation columns print '-' rather than a guess"),
     }
-    let p = profile(&gpu, "ltxv DiT block stack (real width)", &steps, reps);
+    report(&gpu, "ltxv DiT block stack (real width)", &steps, reps, roofs);
+}
+
+/// One profile pass, printed against the device's MEASURED roofline, followed
+/// by the DEFECT rows - every kernel running under its own roof's defect floor.
+///
+/// The same shape `wan_bench`, `qwen_bench`, `unet_bench`, `vqgan_bench` and
+/// `mm3_bench` all use, and the reason this exists: this was the only `*_bench`
+/// in the tree printing `print_top` alone, so this model's roof-floor defects
+/// were invisible to its own harness while every other model's were not. A
+/// profile that ranks kernels but never says which are BELOW their roof leaves
+/// the reader to do the roofline arithmetic by hand, which is exactly what
+/// nobody does.
+fn report(gpu: &Gpu, label: &str, steps: &[Step], reps: usize, roofs: Option<roof::Roofs>) {
+    let p = profile(gpu, label, steps, reps);
     p.print_top(roofs, 20);
+    if let Some(r) = roofs {
+        for (row, bound, pct) in p.defects(r, 5.0) {
+            println!(
+                "  DEFECT  {:<24} {:>5.1}% of its {} roof (floor {:.0}%) - {:.1}% of this pass",
+                row.name,
+                pct,
+                bound.as_str(),
+                bound.defect_pct(),
+                100.0 * row.secs / p.summed_secs,
+            );
+        }
+    }
 }
 
 // ------------------------------------------------------------------ vae ---
@@ -200,8 +226,7 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
         Some(r) => println!("measured roofline: {:.0} GFLOP/s, {:.1} GB/s DRAM, {:.1} GB/s cache, ridge {:.1} FLOP/byte", r.gflops, r.gbs, r.cache_gbs, r.ridge()),
         None => println!("roofline unmeasured - utilisation columns print '-' rather than a guess"),
     }
-    let p = profile(dec.gpu(), "ltxv video VAE decode (real weights)", dec.steps(), reps);
-    p.print_top(roofs, 20);
+    report(dec.gpu(), "ltxv video VAE decode (real weights)", dec.steps(), reps, roofs);
 }
 
 // ---------------------------------------------------------------- decode ---
@@ -405,7 +430,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
 /// a cheap sanity check this bench had none of before: a degenerate
 /// (all-zero, saturated, or NaN) DiT output is visible here without needing
 /// a full generation + VAE decode to notice.
-fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool) {
+fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32) {
     let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
     // stage_time (gpu_core::profile) only prints under BRAIN_PROFILE; this
     // bench's whole purpose is that breakdown, so turn it on unconditionally
@@ -414,7 +439,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
 
     let cfg = LtxDitConfig { num_layers: layers, ..LtxDitConfig::ltx25_22b() };
     cfg.assert_supported();
-    println!("\n=== ltxv real-checkpoint streamed forward (int8): {layers} of 48 real layers, {t} tokens, {ctx_len} context (reuse_cache={reuse_cache}, device_resident={resident}) ===");
+    println!("\n=== ltxv real-checkpoint streamed forward (int8): {layers} of 48 real layers, {t} tokens, {ctx_len} context, {distinct_timesteps} distinct timesteps (reuse_cache={reuse_cache}, device_resident={resident}) ===");
 
     let t0 = Instant::now();
     let src = ltxv::gguf_src::LtxvGgufSource::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
@@ -423,7 +448,20 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
 
     let dim = cfg.in_channels as usize;
     let latent = vec![0f32; t as usize * dim];
-    let timesteps = vec![500.0f32; t as usize];
+    // `distinct_timesteps` is the ONE input that decides how much work the
+    // host adaLN-single stage does: it computes one row per DISTINCT per-token
+    // timestep (`dit::adaln::RowTable`) and uploads that many rows, so the
+    // stage's cost is proportional to this number, not to `t`.
+    //
+    // 1 is a plain text-to-video step (`denoise_mask` all ones - every token
+    // gets the schedule's sigma); 2 is anything anchored or carrying a
+    // long-form context (the frozen tokens sit at `0 * sigma`); `t` is the
+    // degenerate case where no two tokens agree, which is what this stage cost
+    // BEFORE the dedup existed and is therefore the honest measurement of what
+    // the fallback costs. Interleaved rather than blocked, so a run cannot
+    // accidentally measure a contiguous-split special case.
+    let distinct = distinct_timesteps.clamp(1, t.max(1));
+    let timesteps: Vec<f32> = (0..t).map(|i| 500.0 + (i % distinct) as f32).collect();
     let positions = vec![0f32; 3 * t as usize * 2];
     let keyframes_mask = vec![0f32; t as usize];
     let context = vec![0f32; ctx_len as usize * cfg.cross_attention_dim as usize];
@@ -495,7 +533,7 @@ fn main() {
     match mode {
         "dit" => bench_dit(arg(2, 2) as usize, arg(3, 8), arg(4, 1024), arg(5, 256)),
         "vae" => bench_vae(arg(2, 2) as usize, arg(3, 17), arg(4, 384), arg(5, 384)),
-        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false)),
+        "streamed" => bench_streamed(arg(2, 4), arg(3, 512), arg(4, 256), a.get(5).map(|s| s == "1").unwrap_or(false), a.get(6).map(|s| s == "1").unwrap_or(false), arg(7, 1)),
         "decode" => {
             let path = a.get(2).map(|s| s.as_str()).unwrap_or_else(|| panic!("usage: ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]"));
             let crop = (a.len() >= 8).then(|| (arg(4, 0), arg(5, 0), arg(6, 0), arg(7, 0)));

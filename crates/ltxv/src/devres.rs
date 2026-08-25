@@ -493,7 +493,7 @@ impl DitSession {
         t: usize,
         context_len: usize,
         x: Vec<f32>,
-        adaln_table: &[f32],
+        adaln_table: &dit::adaln::RowTable,
         connector_context: &[f32],
         cos_bufs: &[gpu_core::DeviceBuffer],
         sin_bufs: &[gpu_core::DeviceBuffer],
@@ -503,19 +503,35 @@ impl DitSession {
         let per_block = cached_block_bytes(cfg, tier);
         let mut guard = self.window.lock().unwrap_or_else(|e| e.into_inner());
 
-        // The two per-forward uploads, in place of ~26 GB of per-block ones:
-        // the model-level adaLN table (each block derives its own nine
-        // modulation vectors FROM it on the card) and the text context.
+        // The three per-forward uploads, in place of ~26 GB of per-block ones:
+        // the model-level adaLN table and the row map that says which of its
+        // rows each token uses (each block derives its own nine modulation
+        // vectors FROM the pair on the card), and the text context.
+        //
+        // The table is one row per DISTINCT token timestep, not one per token
+        // (`dit::adaln::RowTable`), so at a real step it is 1-2 rows - 147 KB
+        // where the dense `[t, 9*dim]` form was 519 MB at T=3520 and 1.2 GB at
+        // T=8160. The map is `t` u32s (14 KB at T=3520).
+        //
+        // Checked, not assumed: `adaln_row` indexes `map[r]` for every one of
+        // the `t` token rows it writes, so a map shorter than `t` is an
+        // out-of-bounds device read - which `backend-cpu` does not bounds-check
+        // at dispatch at all, so it would return plausible numbers rather than
+        // fail.
+        assert_eq!(adaln_table.len(), t, "DitSession::run_blocks: the adaLN row map covers {} tokens, the forward has {t}", adaln_table.len());
+        assert_eq!(adaln_table.width(), cfg.adaln_rows() as usize * cfg.inner_dim as usize, "DitSession::run_blocks: the adaLN table is the wrong width for this config");
         let s_up = std::time::Instant::now();
         let mut x = x;
-        let adaln_buf = scratch.storage(adaln_table.len() as u64);
-        // CHUNKED, not one 519 MB `write_f32`: this is the largest single
-        // upload in a forward (`[t, 9*dim]` - 519 MB at T=3520, 1.2 GB at
-        // T=8160) and on a non-ReBAR card one giant `write_buffer` measured
-        // 7.6 s against 0.5 s chunked, because the staging allocation it needs
-        // is the same size as the payload. Same chunk size `paramstore`'s own
-        // weight-upload loop uses, for the same reason.
-        scratch.write_f32_chunked(&adaln_buf, adaln_table, 1 << 20);
+        let adaln_buf = scratch.storage(adaln_table.distinct().len() as u64);
+        // CHUNKED, not one `write_f32`: a table with as many distinct rows as
+        // tokens is back to the dense size, and on a non-ReBAR card one giant
+        // `write_buffer` measured 7.6 s against 0.5 s chunked at 519 MB,
+        // because the staging allocation it needs is the same size as the
+        // payload. Same chunk size `paramstore`'s own weight-upload loop uses,
+        // for the same reason.
+        scratch.write_f32_chunked(&adaln_buf, adaln_table.distinct(), 1 << 20);
+        let adaln_map_buf = scratch.storage(adaln_table.row_of().len() as u64);
+        scratch.write_at(&adaln_map_buf, 0, adaln_table.row_of());
         let ctx_buf = scratch.storage(connector_context.len() as u64);
         scratch.write_f32(&ctx_buf, connector_context);
         let forward_upload = s_up.elapsed();
@@ -577,7 +593,7 @@ impl DitSession {
                 Some(idx) => {
                     let w = guard.as_ref().expect("a slot index implies a window");
                     let blk = &w.slots[idx].as_ref().expect("the slot was just filled").1;
-                    blk.forward_prod(scratch, &x, &adaln_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
+                    blk.forward_prod(scratch, &x, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
                 }
                 None => {
                     // No window (or a slot the budget refused): upload, run,
@@ -586,7 +602,7 @@ impl DitSession {
                     // one per residency mode.
                     let cached = weights(l);
                     let blk = LtxBlockQ::on_cached(scratch.share(), cfg, &cached, t as u32, context_len as u32, tier);
-                    blk.forward_prod(scratch, &x, &adaln_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
+                    blk.forward_prod(scratch, &x, &adaln_buf, &adaln_map_buf, &ctx_buf, cos_bufs, sin_bufs, t as u32, &mut bt)
                 }
             };
             after_block(l, uploaded, up_ms, &bt);
