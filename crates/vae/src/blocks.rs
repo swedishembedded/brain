@@ -111,8 +111,8 @@ pub const ATTN_BIDIR_SLOTS: (usize, usize, usize) = (K_ATTN_SCORES, K_ATTN_SOFTM
 /// kernel and its own `matmul_reg2`, and every `nn.Linear` in the model went to
 /// the slower of the two. `matmul_reg3` is `matmul_reg2` with the shared-memory
 /// bank conflicts removed — same `Params`, same `@workgroup_size(256)`, same
-/// dispatch arithmetic, bit-identical output — and it measured faster at all
-/// twelve shapes swept from `[1,4096,4096]` to `[8192,320,320]` (1.08x-1.30x).
+/// dispatch arithmetic, bit-identical output - and it measured faster at all
+/// twelve shapes swept from `[1,4096,4096]` to `[8192,320,320]`.
 /// There is no shape where preferring `matmul_reg2` is correct.
 pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 
@@ -158,9 +158,10 @@ pub const BWD_KERNELS: [(&str, &str); 34] = [
     ("gn_dsum2", kernels::GN_DSUM2),
     // Split-K weight gradient. `matmul_dw_reg`'s tile grid is
     // ceil(Cout/128)*ceil(CinKK/128) workgroups REGARDLESS of how long the
-    // contraction is, so a wide-shallow conv leaves most of the card idle —
-    // measured at 9 workgroups and 9.4% of peak on a 30-SM P40. These split the
-    // contraction instead. See `matmul_dw_reg_splitk.wgsl`.
+    // contraction is, so a wide-shallow conv leaves most of the card idle:
+    // measured at 9 workgroups on a 30-SM P40, i.e. most SMs with nothing to
+    // do. These split the contraction instead. See
+    // `matmul_dw_reg_splitk.wgsl`.
     ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
     ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
     // ---- the transformer half's adjoints (SDXL's `Transformer2DModel`) ----
@@ -204,22 +205,16 @@ pub const DW_SPLITK_TARGET_WGS: u32 = 288;
 ///
 /// The lowering materialises `dcol[HW, Cin*K*K]`, whose cost does not shrink
 /// with `Cout`, while `conv2d_dx` costs `Cout*K*K` per input pixel — so there is
-/// a `Cout` below which direct wins. Measured (`vqgan_bench convbwd`, Cin 128,
-/// 256x256, 3x3):
-///
-/// | Cout | direct | lowered | |
-/// |---|---|---|---|
-/// | 3   |   4.25 |  24.25 | 0.18x |
-/// | 8   |   9.82 |  24.09 | 0.41x |
-/// | 16  |  18.03 |  24.28 | 0.74x |
-/// | 32  |  35.01 |  23.99 | **1.46x** |
-/// | 64  |  69.63 |  25.27 | 2.76x |
-/// | 128 | 138.88 |  26.79 | 5.18x |
+/// a `Cout` below which direct wins. Swept by `vqgan_bench convbwd` (Cin 128,
+/// 256x256, 3x3), which is what to re-run on another card. The shape of the
+/// answer is what the threshold rests on: the direct kernel's time grows in
+/// proportion to `Cout` while the lowering's is nearly flat, so direct wins
+/// through `Cout = 16` and the lowering's lead widens from 32 upward.
 ///
 /// The crossover sits between 16 and 32, so 32 is the threshold. This is NOT
-/// the forward's `GEMM_CONV_MIN_COUT` (128) — different kernels, separately
-/// measured, and assuming they share a threshold would leave 4x on the table
-/// for every 32..128-channel conv.
+/// the forward's `GEMM_CONV_MIN_COUT` (128) - different kernels, separately
+/// measured, and assuming they share a threshold would leave a growing win
+/// unclaimed for every 32..128-channel conv.
 pub const GEMM_CONV_BWD_MIN_COUT: u32 = 32;
 
 /// Copy [`KERNELS`] into the front of a fixed-size kernel set whose remaining
@@ -543,22 +538,15 @@ const COL_BUDGET_MIB: u64 = 512;
 /// The 128 came from the ORIGINAL lowering and was never re-derived after
 /// `matmul_reg3` replaced `matmul_reg2` in it. Re-swept with `vqgan_bench
 /// convfwd` (P40, best of 5, 3x3 stride-1; direct = `conv_bias_reg`, lowered =
-/// `im2col_at` + `matmul_reg3` + `nlc_bias_nchw`), ms:
+/// `im2col_at` + `matmul_reg3` + `nlc_bias_nchw`). Re-run it for this box's
+/// own figures. Across the (128, Cout) 256² sweep and the (256, 32) 128² /
+/// (512, 64) 64² shapes alike, the direct kernel's time climbs with `Cout`
+/// while the lowering's barely moves.
 ///
-/// | conv | direct | lowered | speedup |
-/// |---|---|---|---|
-/// | (128,   8) 256² |  2.685 |  7.444 | 0.36x |
-/// | (128,  16) 256² |  5.104 |  7.537 | 0.68x |
-/// | (128,  32) 256² |  7.973 |  7.253 | **1.10x** |
-/// | (128,  64) 256² | 14.804 |  7.187 | **2.06x** |
-/// | (128,  96) 256² | 21.224 |  7.461 | **2.84x** |
-/// | (256,  32) 128² |  4.397 |  4.252 | **1.03x** |
-/// | (512,  64)  64² |  8.073 |  2.507 | **3.22x** |
-///
-/// The crossover is between 16 and 32 — the SAME place the backward's
+/// The crossover is between 16 and 32 - the SAME place the backward's
 /// re-derivation landed ([`GEMM_CONV_BWD_MIN_COUT`]), because it is the same
 /// GEMM. At 128 every conv with `32 <= Cout < 128` took the direct kernel and
-/// gave up 1.03x-3.22x.
+/// gave up anything from a slim win to a multiple.
 ///
 /// Who this actually moves: **inference only**, and only for architectures in
 /// that channel band. `conv_s` pins train mode to the direct lowering (its
@@ -863,14 +851,15 @@ impl<'a> Builder<'a> {
 
     /// Conv with an explicit stride and output size. Two lowerings:
     ///
-    /// * **direct** — `conv_bias_reg`, the 8x4 register-tiled kernel. Measured
-    ///   on a P40 across every FLUX.2 VAE decode shape: a flat **~700 GFLOP/s,
-    ///   6% of the card's fp32 peak**, and it was 3535 ms of a 3600 ms decode.
-    ///   Its ceiling is structural — 12 global loads per 32 FMAs is
-    ///   0.75 byte/FLOP, a 461 GFLOP/s roofline that caching stretches to ~700.
+    /// * **direct** - `conv_bias_reg`, the 8x4 register-tiled kernel. Measured
+    ///   across every FLUX.2 VAE decode shape it holds a flat, low single-digit
+    ///   fraction of the card's fp32 peak, and it was nearly the whole decode.
+    ///   Its ceiling is structural rather than a tuning miss: 12 global loads
+    ///   per 32 FMAs is 0.75 byte/FLOP, so the arithmetic-intensity roofline
+    ///   already sits about where it measures, with caching worth a little more.
     /// * **lowered** (`self.coop`, `cout >= GEMM_CONV_MIN_COUT`) — `im2col_at` +
     ///   `matmul_reg3` + `nlc_bias_nchw`, i.e. `y[HW, Cout] = col[HW, CinKK] ·
-    ///   Wᵀ`, which runs at the GEMM's ~34% of peak. This is the same trade
+    ///   Wᵀ`, which runs at the GEMM's far higher share of peak. This is the same trade
     ///   already scoped to "a compute-bound discrete GPU" and taken for
     ///   YOLO's convs; the P40 is that GPU. The transposed orientation (positions as GEMM ROWS)
     ///   is what makes it chunkable: a spatial chunk is a contiguous row range
@@ -1028,7 +1017,7 @@ impl<'a> Builder<'a> {
         // Statistics: one WORKGROUP per group where the device can run a
         // workgroup reduction (`gn_stats_wg`), else the per-group reference
         // kernel. `gn_stats` dispatches `g` = 32 *invocations* for up to 33 M
-        // elements — measured at 35% of a 512² FLUX.2 VAE decode; the
+        // elements, measured as a large share of a 512² FLUX.2 VAE decode; the
         // cooperative kernel is the same two-pass math, coalesced and 32-way
         // parallel (see `gn_stats_wg.wgsl`).
         if self.coop {
@@ -1041,18 +1030,12 @@ impl<'a> Builder<'a> {
         } else {
             // No workgroup reductions (backend-cpu): the SERIAL `gn_stats`
             // dispatches `g` invocations for up to 33 M elements. The
-            // barrier-free two-stage reduction is the right fallback and was
-            // measured at ~3x it on the CPU JIT, at every VAE decoder shape:
-            //
-            //   [C,H,W]          serial   2-stage
-            //   [512, 64, 64]     1.465     0.443
-            //   [512,128,128]     6.274     2.108
-            //   [256,256,256]    12.223     4.599
-            //   [128,512,512]    23.882     7.898
-            //
-            // `crates/wm-diamond` built this pair after measuring the serial
-            // kernel at 77% of its frame time, and the shared builder never
-            // learned about it.
+            // barrier-free two-stage reduction is the right fallback and
+            // measured several times faster on the CPU JIT at every VAE
+            // decoder shape from [512,64,64] to [128,512,512], the margin
+            // holding as the shape grows. `crates/wm-diamond` built this pair
+            // after profiling put the serial kernel at the bulk of its frame
+            // time, and the shared builder never learned about it.
             let part = self.act(2 * g as u64 * GN_P as u64);
             self.steps.push(self.gpu.step(
                 K_GN_PART,
@@ -1475,10 +1458,11 @@ impl<'a> Builder<'a> {
             // The per-element trio gives one thread per (i,j) score, each
             // looping head_dim with its `k` reads a whole row apart: at the
             // FLUX.2 mid block (T = 4096, C = 512) `attn_scores_bidir`
-            // measured **562 ms = 13% of a 512² decode** for 17 GFLOP =
-            // 30 GFLOP/s, 0.26% of the P40's peak. Both contractions are plain
-            // matmuls at shapes `matmul_reg3` runs at ~34% of peak, so express
-            // them as such. The qkv conv already emits **channel-major**
+            // measured a double-digit share of a 512² decode while achieving a
+            // fraction of one percent of the card's peak for the FLOPs it
+            // actually does. Both contractions are plain matmuls at shapes
+            // `matmul_reg3` runs far closer to peak on, so express them as
+            // such. The qkv conv already emits **channel-major**
             // [3C, T], which is qᵀ/kᵀ/vᵀ — so `v` needs no transpose at all
             // (it is directly the `[n, k]` operand of the apply GEMM), and
             // q/k need one cheap `nchw_nlc` each.

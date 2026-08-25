@@ -15,8 +15,8 @@
 //
 // matmul_reg does `stage global -> shared; barrier; compute; barrier` — so the
 // global-load latency sits fully exposed in front of the barrier, and at the
-// 25% occupancy a register-heavy tile forces on a P40 there are too few warps to
-// cover it. That kernel measures 5-9% of the card.
+// low occupancy a register-heavy tile forces on a P40 there are too few warps
+// to cover it. That kernel measures a single-digit percentage of the card.
 //
 // This kernel prefetches: the NEXT K-chunk's global loads are issued into
 // registers (rA/rB) *before* the current chunk's 64 fused multiply-adds, so the

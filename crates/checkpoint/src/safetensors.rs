@@ -85,10 +85,10 @@ pub fn e4m3fn_to_f32(b: u8) -> f32 {
 ///
 /// Real per-layer profiling of `qwen35::stream::generate`'s streaming decode
 /// path (`crates/qwen35/tests/stream_profile.rs`) found this exact loop -
-/// even with the O(1) LUT above, which already cut the PER-ELEMENT cost by
-/// ~90% over the branches+`powi` scalar path - to still be the single
-/// largest real stage of a decode step: ~11-23s of a ~15-28s real per-layer
-/// total on this box (a real 372-383 MB layer, one FP8 byte per element),
+/// even with the O(1) LUT above, which already cut the PER-ELEMENT cost by an
+/// order of magnitude over the branches+`powi` scalar path - to still be the
+/// single largest real stage of a decode step, most of the per-layer total on
+/// this box (a real 372-383 MB layer, one FP8 byte per element),
 /// dwarfing the already-parallel `model::fp8::dequant_block128` block-scale
 /// multiply downstream of it and the GPU forward compute after that (both
 /// well under a second). The LUT made each element's OWN cost O(1); it never

@@ -40,8 +40,8 @@ impl Comparison {
     }
 
     /// Names of models that materially beat the `naive` baseline on a
-    /// negative-control scenario (by more than `margin`, e.g. 0.10 = 10% lower
-    /// MASE). On a true control the optimal forecast *is* naive, so a non-empty
+    /// negative-control scenario (by more than `margin`, e.g. `0.10` means a MASE
+    /// a tenth lower). On a true control the optimal forecast *is* naive, so a non-empty
     /// result signals false skill / a bug — the suite must fail on it.
     pub fn negative_control_violations(
         &self,

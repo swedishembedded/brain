@@ -25,9 +25,10 @@
 // and transposes to the `[Cout, To, Ho, Wo]` that `conv3d` would have written.
 //
 // Why direct `conv3d` is not enough: it is one thread per output with four
-// nested serial reductions and no operand reuse, which measured a FLAT ~137
-// GFLOP/s (1.2% of a P40's fp32 peak) across every shape of the Wan-VAE decode
-// while `matmul_reg3` runs the same arithmetic at ~4300 GFLOP/s. A rate that
+// nested serial reductions and no operand reuse, which measured a FLAT low
+// single-digit percent of a P40's fp32 peak across every shape of the Wan-VAE
+// decode, while `matmul_reg3` runs the same arithmetic orders of magnitude
+// closer to peak. A rate that
 // does not move with shape is structural, so the fix is the lowering, not
 // tuning.
 //

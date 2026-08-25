@@ -240,8 +240,8 @@ impl Encoder {
     }
 
     /// Device matmul `[m,k]·Wᵀ → [m,n]` using the pre-uploaded weight `wname [n,k]`.
-    /// Uses the 8-row-blocked kernel (bit-identical to `matmul`, 8× less weight
-    /// memory traffic — the FF/projection linears are weight-bandwidth-bound).
+    /// Uses the 8-row-blocked kernel (bit-identical to `matmul`, an eighth of the
+    /// weight memory traffic - the FF/projection linears are weight-bandwidth-bound).
     pub(crate) fn mm(&self, x: &[f32], wname: &str, m: usize, k: usize, n: usize) -> Vec<f32> {
         let xb = self.g.storage_init("nem.mm.x", x);
         let ob = self.g.storage((m * n) as u64);

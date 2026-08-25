@@ -5,7 +5,7 @@
 //!
 //! Trains the real `mad_memorize` benchmark end-to-end on `BRAIN_DEVICE` and
 //! asserts recall of the fixed weight-stored key->value map clears its calibrated
-//! threshold, far above chance. Skipped under `MOE_SKIP_GPU_TESTS`. ~20-40 s on
+//! threshold, far above chance. Skipped under `MOE_SKIP_GPU_TESTS`. Seconds on
 //! the CPU backend.
 
 use bench::mad_memorize::MadMemorize;

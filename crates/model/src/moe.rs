@@ -8,10 +8,10 @@
 //! expert over the **whole** row batch and discards non-selected rows by
 //! multiplying by a zero gate weight afterward (`Mlp::Moe` in
 //! `crates/glm/src/model.rs`, combining with `scale_add.wgsl`) - numerically
-//! exact (`router_gate.wgsl`'s own doc comment proves it), but `n_experts`x
-//! the FLOPs of an actual top-k dispatch. At 128 experts / top-8
-//! (Qwen3-Omni's Thinker) that is 16x wasted work, which motivated this
-//! module.
+//! exact (`router_gate.wgsl`'s own doc comment proves it), but `n_experts`
+//! times the FLOPs of an actual top-k dispatch. At 128 experts / top-8
+//! (Qwen3-Omni's Thinker) that is sixteen times the necessary work, which
+//! motivated this module.
 //!
 //! The fix here is deliberately the smallest one that removes the FLOPs
 //! without adding new failure modes: [`moe_linear_gated`] is `matmul.wgsl`
@@ -472,8 +472,8 @@ pub fn expert_bwd(
 /// three phases' primitives directly, so the ordering cannot silently drift
 /// per call site - the exact failure class `gradcheck`'s own doc warns
 /// about: a partial gradient that a scalar check alone can pass by
-/// coincidence (the T5 `rel_bias` case: a 33% error `directional_check`
-/// alone reported as `rel_err = 6.2e-4`).
+/// coincidence (the T5 `rel_bias` case: an error of a third of the value,
+/// which `directional_check` alone reported as `rel_err = 6.2e-4`).
 ///
 /// `router_weight_bwd`'s steps must reference the SAME `d_router_logits`
 /// buffer [`router_bwd`] writes - `Step`s are plain dispatch descriptors
@@ -951,10 +951,10 @@ pub fn shared_expert_fwd_i8(
 //
 // `expert_fwd` above removes the redundant FLOPs of evaluating every expert
 // densely, but stays naive-tier (one thread per output element, no tiling) --
-// measured 6.51x SLOWER than GLM's existing dense TILED path at GLM-5.2's
-// real shape (`crates/glm/examples/moe_migration_bench.rs`), because the
-// naive kernel's per-FLOP inefficiency
-// at ~64 rows/expert swamps the 32x FLOP-count win sparsity promises. This
+// measured several times SLOWER than GLM's existing dense TILED path at
+// GLM-5.2's real shape (`crates/glm/examples/moe_migration_bench.rs`), because
+// the naive kernel's per-FLOP inefficiency at ~64 rows/expert swamps the
+// FLOP-count win sparsity promises. This
 // section is the real fix: gather each expert's routed rows into a dense
 // sub-batch, run the SAME
 // `model::block::pick_gemm`-selected tiled GEMM the dense path already uses

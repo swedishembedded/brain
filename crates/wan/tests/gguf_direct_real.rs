@@ -271,15 +271,15 @@ fn force_vulkan_backend_once() {
 /// `Some("gpu")` forces `Gpu::new_wgpu` (via `Gpu::open`), which
 /// bypasses `BRAIN_DEVICE` entirely. On this repo's own non-ReBAR P40s, the
 /// default wgpu backend leaves a SAME-SIZE staging allocation permanently
-/// resident on every large upload - measured exactly 2.00x in
+/// resident on every large upload - measured as an exact doubling in
 /// `crates/gpu-core/tests/vram_overhead.rs`, independent of upload chunk
 /// size. At 14B, int8's real packed weight bytes are ~14.4 GiB (see
-/// `crates/cli/src/resident_wan.rs::dit_weight_bytes`) - under wgpu's 2.00x
+/// `crates/cli/src/resident_wan.rs::dit_weight_bytes`) - doubled by wgpu
 /// that is ~28.8 GiB, which does NOT fit a 24 GiB card even though the real
 /// payload comfortably would. `crate::devices::ambient_compute_set` (`Gpu::
 /// new`, i.e. `device: None`) with `BRAIN_DEVICE=vulkan` resolves to brain's
 /// own native Vulkan backend instead, whose bounded shared staging buffer
-/// measures a clean 1.00x - the fix `vram_overhead.rs` documents, not a
+/// measures no overhead at all - the fix `vram_overhead.rs` documents, not a
 /// wgpu-level change.
 fn gpu_device() -> Option<&'static str> {
     force_vulkan_backend_once();
@@ -383,9 +383,9 @@ fn wan_gguf_int8_memory_probe() {
     assert!(delta_mib < 24 * 1024, "int8 14B build used {delta_mib} MiB - does not fit a 24 GiB card");
 }
 
-/// Root-cause probe for the int4 "GPU submit did not complete within 30.0s"
-/// failure: build int4 alone, with `BRAIN_GPU_WAIT_S` raised well past the
-/// backend's 30s deadlock guard (the same fix `wan_cli.rs`'s `t2v` applies
+/// Root-cause probe for the int4 "GPU submit did not complete" failure: build
+/// int4 alone, with `BRAIN_GPU_WAIT_S` raised well past the backend's default
+/// deadlock guard (the same fix `wan_cli.rs`'s `t2v` applies
 /// for the SAME reason - "one forward is the whole block stack in ONE
 /// submit"), and time the build and forward phases separately.
 ///
@@ -396,8 +396,8 @@ fn wan_gguf_int8_memory_probe() {
 /// need it - not attempted here"). This DiT's whole 40-block stack in one
 /// submit, at real 14B widths (`ffn_dim=13824`), is exactly that "dispatches
 /// it enough" case for the first time. If raising the wait bound is enough
-/// for this to complete, that confirms the 30s failure was the naive
-/// kernel's real (if slow) cost, not a hung/wedged device - a genuine,
+/// for this to complete, that confirms the timeout was the naive kernel's
+/// real (if slow) cost, not a hung/wedged device - a genuine,
 /// documented performance gap (int4 here is "correctness-only", per
 /// `WanDtype::Int4`'s own doc), not a dispatch/binding bug.
 ///

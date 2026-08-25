@@ -27,10 +27,11 @@
 // bindings are plain sub-ranges.
 //
 // Threads are indexed by the col element (write-coalesced, gathering the input
-// in 12-byte runs). A workgroup-staged 64x64 (position x tap) tile — the same
-// shape that took `nlc_bias_nchw` from 158 ms to 36 ms — was tried here and
-// measured **273 -> 311 ms**: unlike the transpose, this kernel's uncoalesced
-// side is only ~2.7x amplified (3 consecutive taps land in one sector), so the
+// in 12-byte runs). A workgroup-staged 64x64 (position x tap) tile - the same
+// shape that made `nlc_bias_nchw` several times faster - was tried here and
+// measured **SLOWER, not faster**: unlike the transpose, this kernel's
+// uncoalesced side is barely amplified (3 consecutive taps land in one
+// sector), so the
 // 16.6 KB of workgroup memory bought less than the occupancy it cost (5 blocks
 // per SM instead of the shared-memory-free maximum). Kept element-indexed.
 //

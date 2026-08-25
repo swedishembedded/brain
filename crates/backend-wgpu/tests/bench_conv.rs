@@ -8,8 +8,9 @@
 //!
 //! Purpose: a tight iterate loop for kernel tuning — editing a .wgsl and
 //! re-running this rebuilds two crates, not the whole release binary. The
-//! numbers are also the calibration for "how far from roofline are we":
-//! MTL Arc peak fp32 is ~4.6 TFLOP/s; LPDDR5 shared bandwidth ~90 GB/s.
+//! numbers are also the calibration for "how far from roofline are we": compare
+//! them against the running box's own datasheet fp32 peak and memory bandwidth
+//! (an MTL Arc iGPU shares LPDDR5 with the host, so both are modest).
 
 use backend_wgpu::WgpuBackend;
 

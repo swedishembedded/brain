@@ -20,13 +20,13 @@
 // That is the whole point. The thread index runs `j` fastest, because `j` is
 // the axis the output is contiguous in. Against the natural `[T_enc, d_model]`
 // layout that means every lane of a warp reads an address `kv_stride` floats
-// from its neighbour, so each load is its own memory transaction; measured on a
-// P40 at 91 GFLOP/s, 0.77% of fp32 peak and 3.5% of the bandwidth roofline -
-// under a tenth of BOTH, which is the definition of a defect rather than a
+// from its neighbour, so each load is its own memory transaction; measured at
+// well under a hundredth of fp32 peak and a small fraction of the bandwidth
+// roofline - far under BOTH, which is the definition of a defect rather than a
 // ceiling. With K transposed, `kt[(h*hd + d)*T_enc + j]` is contiguous in `j`,
 // the warp's loads coalesce, and the whole 3 MB of K stays L2-resident across
 // the T_dec sweep - which is why `attn_apply_cross`, moving the SAME bytes with
-// a contiguous thread index, already ran 5.4x faster.
+// a contiguous thread index, already ran several times faster.
 //
 // Q still comes from the DECODER buffer in fused-QKV layout (stride q_stride,
 // region at q_off), indexed by query position i; it is broadcast across the

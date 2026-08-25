@@ -28,7 +28,7 @@
 //!   growing smoothly to a worst 5.2e-6 by step 50 of the worst of the 16
 //!   (solver, shift, steps) combinations - pure accumulated rounding, with no
 //!   jump at step 2 where the second-order path and the corrector first
-//!   engage. The bar is 1e-5, roughly 2x the measured worst, which is far
+//!   engage. The bar is 1e-5, comfortably above the measured worst, which is far
 //!   below what any real defect costs: a wrong order, a missed corrector or an
 //!   off-by-one in the multistep history all move the trajectory by 1e-2 or
 //!   more (mutation-checked).

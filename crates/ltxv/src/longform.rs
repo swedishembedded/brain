@@ -56,8 +56,8 @@
 //! be.** That was the first hypothesis and it is dead: this checkpoint's
 //! decoder is `causal_decoder: false`, so every one of its 42 kernel-3
 //! temporal convolutions pads symmetrically. Summing them at the temporal
-//! resolution each runs at (6 convs at the latent grid, 5 at 2x, 9 at 4x, 22
-//! at 8x) puts decoding one latent frame in a window of roughly `6 + 5/2 +
+//! resolution each runs at (6 convs at the latent grid, 5 at the 2:1 grid, 9
+//! at 4:1, 22 at 8:1) puts decoding one latent frame in a window of roughly `6 + 5/2 +
 //! 9/4 + 22/8 = 13.5` latent frames on EACH side - an exact index walk gives
 //! +/-14. A rolling window cannot supply 14 latent frames of lookahead at
 //! all, at any cost, because those frames do not exist yet. Nothing this

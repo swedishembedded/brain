@@ -151,7 +151,7 @@ fn predict(args: &[String]) {
     // `samples == 1` means the deterministic modal rollout: one stable path,
     // reproducible run to run, and N times cheaper than drawing a cloud. More
     // than one draws real trajectories, the point path becomes the median, and
-    // the chart gains a 10-90% band.
+    // the chart gains a p10-p90 band.
     let spec = forecast::ForecastSpec {
         horizon,
         representations: vec![forecast::Representation::Quantiles, forecast::Representation::Point],
@@ -248,9 +248,9 @@ fn predict(args: &[String]) {
     let cov = calib.iter().map(|c| c.0).sum::<f32>() / calib.len() as f32;
     let dir = calib.iter().map(|c| c.1).sum::<f32>() / calib.len() as f32;
     // A one-sample run is the deterministic modal rollout: there is no band, so
-    // a coverage line would read 0% and mean nothing.
+    // a coverage line would read zero and mean nothing.
     if cov.is_finite() && spec.num_samples > 1 {
-        println!("  10-90% band covers {:.0}% of held-out bars (nominal 80%); direction hit rate {:.0}%", cov * 100.0, dir * 100.0);
+        println!("  p10-p90 band covers {:.0}% of held-out bars (nominal coverage is 80 percent); direction hit rate {:.0}%", cov * 100.0, dir * 100.0);
     }
     if let (Some(k), Some(p)) = (acc.first(), acc.get(1)) {
         // CRPS, not MAE, is the headline: it is the proper score for the

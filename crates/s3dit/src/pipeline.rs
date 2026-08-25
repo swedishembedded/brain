@@ -339,13 +339,16 @@ fn default_bulk_gpu(explicit: Option<u32>, dit_gpu: u32, gpu_count: usize) -> Op
 
 /// Where/how the Qwen-4B text encoder runs.
 enum Encoder {
-    /// Whole model on the CPU (default) — no VRAM cost, ~38 s/encode.
+    /// Whole model on the CPU (default) - no VRAM cost, but the slowest
+    /// encode of the three.
     Cpu(Box<Qwen>),
     /// Whole int8 encoder on one card. The 7 per-layer linears are DP4A int8
-    /// (~4× smaller than fp32), so the whole Qwen3-4B encoder is ~9.5 GB resident
-    /// and fits a single 24 GB card alongside nothing else — leaving the DiT its
-    /// own card. Encode runs on-GPU (~1-2 s). The robust "superfast" path; the
-    /// fp32 [`Encoder::Split`] does not fit two P40s (2× non-ReBAR overhead).
+    /// (a quarter of fp32's bytes), so the whole Qwen3-4B encoder is ~9.5 GB
+    /// resident and fits a single 24 GB card alongside nothing else - leaving
+    /// the DiT its own card. Encode runs on-GPU, in a small fraction of what
+    /// the CPU path takes. The robust "superfast" path; the fp32
+    /// [`Encoder::Split`] does not fit two P40s (non-ReBAR doubles the
+    /// resident cost of every uploaded byte).
     Gpu8(Box<Qwen>),
     /// Split across two cards: `s0` (embedding + the first `cut` layers) on the
     /// mostly-empty card, `s1` (the remaining layers up to the penultimate) on the
@@ -361,8 +364,8 @@ enum Encoder {
     /// it fresh from `qreader_path`, runs the one forward it needs, and drops it
     /// before returning, exactly mirroring the SDXL fix: build, use once,
     /// drop, THEN run the part that stays resident (here, the
-    /// DiT sampling loop). Costs a rebuild (~1-2 s: open + int8 quantize +
-    /// upload) every `generate()` call instead of once at `build()` time — the
+    /// DiT sampling loop). Costs a rebuild (open + int8 quantize + upload)
+    /// every `generate()` call instead of once at `build()` time - the
     /// deliberate trade for never holding both models on the card together.
     /// `BRAIN_S3DIT_ENCODER_RESIDENT=1` opts back into [`Encoder::Gpu8`] on a
     /// box with enough VRAM to hold both (a 24 GB+ discrete card).
@@ -582,8 +585,8 @@ impl HotPipeline {
         // that card is the 2-GPU fp32 `Shard` engine's: measured on a real 24 GB
         // P40 (`nvidia-smi` during the real Z-Image-Turbo checkpoint's `Shard`
         // build) each card lands within half a GB of its 24 GB ceiling from the
-        // DiT shard's weights ALONE - the default wgpu backend's ~2.00x real-VRAM-
-        // per-uploaded-BYTE cost on this non-ReBAR card (a property of wgpu's
+        // DiT shard's weights ALONE - the default wgpu backend's doubling of
+        // real VRAM per uploaded BYTE on this non-ReBAR card (a property of wgpu's
         // Vulkan HAL, not the hardware; the fix is a different device backend,
         // which this code path does not take) applied to "half the ~33 GB fp32
         // checkpoint" already consumes essentially the whole 24 GB, independent of
@@ -825,7 +828,7 @@ pub struct Init<'a> {
     /// regenerate, `0` = keep). When present, kept regions are re-anchored to the
     /// (noised) input at every step so only the masked area changes.
     pub mask: Option<&'a [f32]>,
-    /// Feather radius in **latent cells** (VAE 8× downscale). `0` = a hard mask
+    /// Feather radius in **latent cells** (the VAE downscales by 8). `0` = a hard mask
     /// edge; larger blurs the mask boundary so the regenerated region blends
     /// smoothly into the kept pixels instead of showing a seam.
     pub feather: u32,
@@ -879,7 +882,7 @@ const VAE_SCALE: f32 = 0.3611;
 const VAE_SHIFT: f32 = 0.1159;
 
 /// Area-average-pool a full-res mask `[h·w]` down to latent resolution `[lh·lw]`
-/// (VAE 8× downscale), keeping soft values in `[0,1]`.
+/// (the VAE downscales by 8), keeping soft values in `[0,1]`.
 fn downsample_mask(mask: &[f32], w: usize, h: usize, lw: usize, lh: usize) -> Vec<f32> {
     let (sx, sy) = (w / lw, h / lh);
     let mut out = vec![0f32; lw * lh];
@@ -1039,8 +1042,8 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
             // The masked (`mask=1`, "regenerate") region starts from PURE noise,
             // not the strength-blended `(1-sigma)*lat0 + sigma*noise` used for
             // image2image: that blend leaves a `(1-sigma)` sliver of the ORIGINAL
-            // latent under the mask - small in magnitude (e.g. 8% at the default
-            // strength 0.85) but STRUCTURED rather than random, which a
+            // latent under the mask - small in magnitude at the default
+            // strength 0.85, but STRUCTURED rather than random, which a
             // diffusion model latches onto far more readily than noise of the
             // same magnitude, pulling the "regenerated" region back toward the
             // original content instead of the prompt. `mask=1` means "ignore the

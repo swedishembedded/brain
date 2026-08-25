@@ -30,7 +30,7 @@ use wan::WanConfig;
 // ONE held-out prompt / seed: each `generate_one` call reloads BOTH the
 // umT5-XXL encoder and the DiT from disk (no cross-call cache here - see the
 // module doc), and a umT5-XXL CPU forward alone measures in minutes
-// (`tests/lora_train.rs`'s G1 gate: ~7.3 min for 4 short captions).
+// (`tests/lora_train.rs`'s G1 gate covers 4 short captions, and takes minutes).
 // This report's own wall-clock is `2 * len(HELD_OUT_PROMPTS) * len(SEEDS)`
 // full generations, so it stays at the minimum that still shows a real base
 // vs. adapted pair; the statistically powered comparison across many

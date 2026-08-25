@@ -25,7 +25,7 @@
 // the output accumulator o[] live in REGISTERS (q loaded once, reused from
 // registers across every tile — minimal q traffic), and shared holds ONLY the
 // K/V tiles (BC*HD*2*4 = 16 KiB). At 16 KiB a P40 SM runs ~3 workgroups (≈6 warps)
-// instead of 1 — 3× the warps to hide global-load latency. head_dim must be <=128
+// instead of 1, i.e. three times the warps to hide global-load latency. head_dim must be <=128
 // (Z-Image = 128; q[]+o[] = 256 regs, one small spill on Pascal). Output layout
 // matches attn_apply_bidir, so this drops in for the scores/softmax/apply trio.
 

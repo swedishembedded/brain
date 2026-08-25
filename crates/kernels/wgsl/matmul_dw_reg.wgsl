@@ -14,9 +14,9 @@
 //
 // Tiled + software-pipelined (matmul_reg2 structure: 128x128 output tile, 256
 // threads, 8x8 register micro-tile, prefetch the next contraction chunk to hide
-// global-load latency). The forward `matmul_reg2` runs ~34% of the P40's peak;
-// this brings the backward GEMMs — every training step's dominant cost — to the
-// same regime instead of the naive 0.5%. CPU routes to the AVX2 gemm.
+// global-load latency). The forward `matmul_reg2` runs at a large fraction of
+// the P40's peak; this brings the backward GEMMs, every training step's dominant
+// cost, into the same regime instead of the naive kernels' sliver of it. CPU routes to the AVX2 gemm.
 //
 // @workgroup_size(256).
 

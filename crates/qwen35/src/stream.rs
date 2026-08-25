@@ -109,16 +109,16 @@ use crate::sample::{argmax, sample_logits};
 /// scenario drives this exact `CyclicScan`/`Lru`/`AllResident` code against
 /// this model's real 64-layer int8 byte-cost profile
 /// (`Qwen35Config::layer_i8_bytes`, ~372-383 MB depending on GDN vs GQA layer
-/// type - a real but small, ~3%, heterogeneity). At every budget tested (2,
+/// type - a real but small heterogeneity). At every budget tested (2,
 /// 4, 8, 16, 32 slots, 8 passes), `CyclicScan`'s `churn_overhead` is exactly
 /// `1.0` on BOTH the plain reload-count metric and a byte-weighted one - the
 /// real per-layer size spread does not change which policy wins, because
 /// `CyclicScan`'s pinned/tail split is fixed by the schedule and identical
 /// every pass regardless of what each pinned or evicted group actually
 /// costs. `Lru` measures strictly worse at every budget, and the gap widens
-/// with budget (relative to `Lru`'s own fixed 64-reloads/pass, which never
-/// improves): +4.9%/+5.0% (count/bytes) at budget 4, +12.3% at 8, +30.6% at
-/// 16, +93.9%/+94.1% at 32.
+/// monotonically with budget (relative to `Lru`'s own fixed 64 reloads per
+/// pass, which never improves), on the reload-count and byte-weighted metrics
+/// alike.
 ///
 /// **The honest caveat those numbers need**: that whole comparison is a
 /// MULTI-pass benefit (`CyclicScan`'s persistent pin only pays off when the

@@ -52,7 +52,7 @@
 //! **Chance** for a full correct call is `(1/n_tools) * (1/arg_values)^p` (guess
 //! the tool *and* both arg values) `= (1/4)*(1/12)^2 ≈ 0.0017`. **Measured
 //! exact-match = 1.00 across seeds {1337, 7, 42}** (train_ce ≈ 0.29), saturating
-//! the metric far above chance and clear of the **0.85** threshold, in ~1.5-2 min
+//! the metric far above chance and clear of the **0.85** threshold, in minutes
 //! on CPU (see `tests/toolcall.rs`). The small GPT learns the routing cleanly:
 //! the verb→tool map is trivial, and with each tool's argument fields *named by a
 //! fixed signature*, filling the slots is two reliable induction-head copies past

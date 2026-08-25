@@ -433,7 +433,7 @@ fn qwen3_dataparallel_speedup() {
     let inv_k = 1.0 / k as f32;
 
     // --- single-GPU baseline (offload AdamW = host grad-norm, the fast optimiser
-    // here; on-GPU clip's single-threaded gradnorm_sq is ~30 s over 152k vocab) ---
+    // here; on-GPU clip's single-threaded gradnorm_sq is far slower over 152k vocab) ---
     std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
     let single = Qwen::load(ps, b, t);
     let mut single_fb = 0f64;
@@ -491,7 +491,7 @@ fn qwen3_dataparallel_speedup() {
     );
 
     let dp_fb = t_fb * 1e3 / steps as f64;
-    println!("\n=== Qwen3-0.6B data-parallel training speedup (2x P40) ===");
+    println!("\n=== Qwen3-0.6B data-parallel training speedup (two P40s) ===");
     println!("  {k} micro-batches/step, block {t}");
     println!("  single-GPU: {single_ms:.0} ms/step  (fwd+bwd {single_fb:.0} ms)");
     println!("  2-GPU DP:   {dp_ms:.0} ms/step  (fwd+bwd {dp_fb:.0} ms)  end-to-end {:.2}x", single_ms / dp_ms);

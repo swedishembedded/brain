@@ -79,7 +79,7 @@ impl ResidentModel for UpscaleResident {
     fn estimate(&self, key: &InstanceKey) -> MemCost {
         // x4plus is ~67 MB of fp32 params. The activations dominate: the trunk
         // holds `num_feat` channels at input resolution across a dense block's
-        // running concat, and the upsample stages hold 16x the pixels.
+        // running concat, and the upsample stages hold 16 times the pixels.
         let file = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         let cfg = key.config.as_str();
         let px: u64 = match cfg.strip_prefix("tile") {

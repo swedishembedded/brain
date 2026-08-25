@@ -38,7 +38,7 @@ pub enum Role {
 pub const GRADNORM_ELEMS_PER_WG: usize = 8192;
 /// Cap on workgroups per tensor. Past this the reduction is already at memory
 /// bandwidth and every extra workgroup is one more f32 for the second pass to
-/// fold; 512 workgroups = 32 768 threads, ~8.5× a P40's core count.
+/// fold; 512 workgroups = 32 768 threads, several times a P40's core count.
 pub const GRADNORM_MAX_WG: usize = 512;
 
 /// Per-tensor upload chunk size, in elements (4 MiB as f32/u32 words). Bounds
@@ -162,14 +162,14 @@ impl ParamStore {
                     // `gpu.storage(numel)` - NOT `storage_init`, and no write
                     // at all - for the zero-initialized grad/Adam moment
                     // buffers. Measured precisely on this backend: a buffer
-                    // that is allocated and never written costs its real
-                    // 1.00x on this non-ReBAR card; ANY upload into it -
+                    // that is allocated and never written costs exactly its
+                    // own bytes on this non-ReBAR card; ANY upload into it -
                     // `storage_init` or a plain `storage()` + `write_f32`,
-                    // chunked or not - costs 2.00x, because the resident
+                    // chunked or not - costs double that, because the resident
                     // cost tracks cumulative bytes ever WRITTEN, not the
                     // call shape. wgpu already guarantees a freshly-created
                     // buffer reads as zero, so the old `let z = vec![0.0;
-                    // numel]; storage_init(name, &z)` was paying that 2x for
+                    // numel]; storage_init(name, &z)` was paying that penalty for
                     // a write whose only content was the zero the buffer
                     // already had - three such buffers per trainable tensor
                     // (grad, adam_m, adam_v) made this the dominant real

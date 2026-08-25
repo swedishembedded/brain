@@ -22,14 +22,15 @@
 //! every gradient off the cards, so it **sums** the replicas there, runs **one**
 //! AdamW update (shared state — all replicas are identical), and broadcasts the
 //! new weights back. Reading grads once and updating once, with both cards'
-//! transfers overlapped, is what turns a slowdown into a speedup (0.75× → 1.34-1.58×,
-//! `qwen3::tests::integration_qwen3::qwen3_dataparallel_speedup`).
+//! transfers overlapped, is what turns a slowdown into a speedup at all
+//! (`qwen3::tests::integration_qwen3::qwen3_dataparallel_speedup` is the gate,
+//! and the place to read this box's own ratio).
 //!
 //! ## Why the grad-norm is on the host too — and why the on-GPU one cannot replace it
 //!
-//! It is **not** a workaround for the old serial `gradnorm_sq` (87.2% of GPT's
-//! training GPU time until `gradnorm_part` + `clip_coef_wg` made it 2122×
-//! faster). That kernel was one reason
+//! It is **not** a workaround for the old serial `gradnorm_sq` (the dominant
+//! share of GPT's training GPU time until `gradnorm_part` + `clip_coef_wg`
+//! made it orders of magnitude faster). That kernel was one reason
 //! *this design was reachable*, but it is not what keeps the norm here:
 //!
 //! * The clip is over the **summed** gradient, and the sum exists only in host
@@ -42,7 +43,7 @@
 //!   is no per-rank local norm here to swap out.
 //! * Running the device kernels would therefore mean **uploading the summed
 //!   gradient back** (2.4 GB for the 0.6B Qwen) onto the PCIe leg that is
-//!   already the whole cost of a step (~5.3 s/step, fixed) — to save a host
+//!   already the whole cost of a step, and a fixed one - to save a host
 //!   reduction over buffers that are already in cache from Phase 2.
 //!
 //! `model::shard`'s fused optimiser and `model::distributed`'s `Adam` clip on a

@@ -20,7 +20,7 @@
 // invocations reduces over `Cout * K * K` — the whole output-channel axis — so a
 // 512-channel conv makes every input pixel walk 4608 terms on one lane. Lowering
 // the conv backward to a GEMM moves that Cout reduction into `matmul_dx_reg`
-// (register-tiled, ~4 TFLOP/s on a P40) and leaves this kernel summing only the
+// (register-tiled, the card's fastest fp32 path) and leaves this kernel summing only the
 // `K*K` taps that touched the pixel — 9 terms for a 3x3, independent of Cout.
 //
 // GATHER, not scatter. The forward reads input (hi,wi) into output (ho,wo) when

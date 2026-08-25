@@ -51,7 +51,7 @@ pub struct CampplusConfig {
     /// throughout; `pad = dilation`, since `(k-1)/2 * dilation == dilation`
     /// at `k=3`).
     pub block_dilation: [u32; 3],
-    /// `seg_pooling`'s fixed window (100 frames, ~1s at CAM++'s 50Hz internal
+    /// `seg_pooling`'s fixed window (100 frames, about one second at CAM++'s 50Hz internal
     /// rate after the TDNN's stride-2 downsample).
     pub seg_len: u32,
     /// `bn_eval`'s hardcoded epsilon; also what every BatchNorm in the release

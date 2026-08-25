@@ -29,8 +29,8 @@ use ash::vk;
 ///
 /// This is not a micro-optimisation. Leaving naga's defaults on cost this
 /// backend HALF its arithmetic throughput on a Tesla P40: the fp32 FMA roofline
-/// probe measured 5.05 TFLOP/s against the wgpu backend's 10.6 TFLOP/s from the
-/// identical WGSL, and the packed-int8 probe 20.4 vs 43.2 TOP/s, with DRAM
+/// probe measured about half the wgpu backend's figure from the identical WGSL,
+/// and the packed-int8 probe likewise, with DRAM
 /// bandwidth identical on both - the gap was entirely the per-iteration guard
 /// counter and the per-access clamp that this backend alone was emitting.
 fn runtime_checked() -> bool {

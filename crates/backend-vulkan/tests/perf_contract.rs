@@ -5,9 +5,10 @@
 //!
 //! Inference issues hundreds of dispatches per frame. If building a dispatch
 //! touches the GPU queue (a submit + fence wait), the frame serializes into
-//! hundreds of host<->GPU round trips and an integrated GPU runs ~100x slower
-//! than the same kernels batched — measured 9.3 s/frame for ZipDepth on Intel
-//! Arc (MTL) against ~0.1 s of actual GPU work. These tests pin the contract
+//! hundreds of host<->GPU round trips and an integrated GPU runs orders of
+//! magnitude slower than the same kernels batched - measured for ZipDepth on
+//! Intel Arc (MTL), where nearly all of a frame was round trips rather than
+//! GPU work. These tests pin the contract
 //! that makes batching real:
 //!
 //!   1. `step()` / `step_sliced()` are HOST-side work only — no queue submits.
@@ -99,8 +100,9 @@ fn transient_uniforms_are_recycled_across_flushes() {
     let out = be.storage(4);
 
     // Three frames of 16 transient-uniform dispatches each. Without recycling
-    // the live transient-uniform count grows by 16 per frame (a 30 fps camera
-    // leaks ~7k buffers + descriptor sets per second); with it, the pool peaks
+    // the live transient-uniform count grows by 16 per frame (at camera frame
+    // rates that is thousands of leaked buffers + descriptor sets per second);
+    // with it, the pool peaks
     // at one frame's worth.
     for _ in 0..3 {
         let steps: Vec<_> = (0..16).map(|_| be.step(0, &[&a, &b, &out], &[4], 4)).collect();

@@ -110,7 +110,7 @@ fn numeric_f16_never_entangles_across_backends() {
 }
 
 /// Pure decision-logic gate (B11's TDD item 2, the synthetic half): no GPU
-/// needed. Confirms the threshold is real (a >1.0x ratio alone is not
+/// needed. Confirms the threshold is real (a ratio merely above parity is not
 /// enough) and that malformed/aborted measurements fail closed.
 #[test]
 fn f16_worth_enabling_gate_logic() {

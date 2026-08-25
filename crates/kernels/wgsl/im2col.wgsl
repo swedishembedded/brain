@@ -17,7 +17,8 @@
 //
 // With this, a conv is a plain matmul:  y[Cout, Ho*Wo] = W[Cout, Cin*K*K] ·
 // colᵀ, i.e. `matmul_reg2(x=W, w=col)` → y[Cout, HW]. On a compute-bound GPU
-// (P40: 34 FLOP/byte) the register GEMM's ~34% of peak dwarfs the collapse the
+// (a P40's ridge point is in the tens of FLOP per byte) the register GEMM's
+// far higher share of peak dwarfs the collapse the
 // direct register-tiled conv (`conv_act_reg`) suffers on deep small-spatial
 // layers — a trade found to be "worth it on a compute-bound discrete GPU".
 // im2col's extra [HW, Cin*K*K] write+read is the

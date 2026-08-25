@@ -262,8 +262,8 @@ fn tiny_dataset_overfit_high_recall() {
     model.set_image(&images);
     model.set_targets(&gts);
 
-    // 200 steps is enough for full recall here (measured ~98% loss drop, 12/12
-    // recovered at 300); 200 keeps the b=8 batch under a few minutes on CPU JIT.
+    // 200 steps is enough for full recall here (the loss all but vanishes, 12/12
+    // recovered at 300); 200 keeps the b=8 batch to a few minutes on CPU JIT.
     let steps = 200u32;
     let lr = 1e-3f32;
     let t0 = std::time::Instant::now();

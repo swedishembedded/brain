@@ -324,14 +324,15 @@ fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     // `matmul_reg3` = `matmul_reg2` with the shared-memory bank conflicts
     // removed: identical tiling and identical K accumulation order, therefore
-    // BIT-IDENTICAL output (measured max_abs 0.0), and 1.11x on the FLUX.2 text
-    // encoder's prefill shapes (772 -> 695 ms for 196 GEMMs at 512 tokens).
+    // BIT-IDENTICAL output (measured max_abs 0.0), and measurably faster on the
+    // FLUX.2 text encoder's prefill shapes (196 GEMMs at 512 tokens).
     // Same dispatch geometry, and the CPU backend routes both to one AVX2 GEMM.
     block::pick_gemm(m, n, MATMUL, MATMUL_REG3, naive)
 }
 
 /// Backward GEMM pickers: tiled `matmul_{dx,dw}_reg` (bit-identical to naive,
-/// ~34% of P40 peak) once both output dims fill a 128-tile, else naive. Small
+/// and a large fraction of the card's fp32 peak) once both output dims fill a
+/// 128-tile, else naive. Small
 /// LoRA-rank matmuls fall back automatically. `BRAIN_QWEN_NAIVE_MM=1` forces naive.
 /// Full fine-tuning with AdamW moments offloaded to system RAM (`BRAIN_OFFLOAD_ADAM=1`).
 fn offload_adam() -> bool {
@@ -1123,7 +1124,8 @@ impl Qwen {
     /// serves ONE useful float; `rmsnorm_rows` walks a row with 64 threads and
     /// is coalesced by construction. That penalty is per-access, not per-thread,
     /// so it does not go away at prefill row counts - measured on the FLUX.2
-    /// text encoder (512 tokens, 28 layers, 112 dispatches): **72.0 -> 6.3 ms**.
+    /// text encoder (512 tokens, 28 layers, 112 dispatches) as **an order of
+    /// magnitude**.
     /// The reference kernel's epsilon is a hard-coded 1e-6, which is what the
     /// runtime-eps twin is handed here.
     fn rms_step(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
@@ -1145,7 +1147,7 @@ impl Qwen {
     /// 0 and cannot move the max or the sum. (No row is ever fully masked: a
     /// query at position `i` always sees the content keys at `j <= i`, pad
     /// queries included.) One thread per row vs 64 cooperating on one row, at
-    /// [B*H*T = 16384, T = 512]: **33.6 -> 8.6 ms** over the encoder's 28
+    /// [B*H*T = 16384, T = 512]: **several times faster** over the encoder's 28
     /// layers.
     fn gqa_kmask_steps(
         &self,
@@ -2313,7 +2315,7 @@ impl Qwen {
         // workgroup-cooperative kernels (A1/A2: rmsnorm_rows, matmul_gemv)
         // wherever the device executes workgroup reductions; the per-element
         // reference kernels run ONE thread per row here (measured: rmsnorm was
-        // 19% of prefill GPU time across 13k single-thread calls). Same policy
+        // a large share of prefill GPU time across 13k single-thread calls). Same policy
         // the serving engine's selector applies, at the always-m=1 call site.
         let fast = g.caps().workgroup_reductions;
         let rms = |s: &mut Vec<Step>, x: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32| {

@@ -97,7 +97,8 @@ impl DeepseekOcr {
     /// `train` is threaded, unchanged, into `DeepEncoder::new` and
     /// `DeepseekV2::new_on`. It decides two things at once, and at real scale
     /// both are measured in gigabytes: whether every parameter is
-    /// `Role::Trainable` (weight + gradient + two AdamW moments, ~4x) or
+    /// `Role::Trainable` (weight + gradient + two AdamW moments, so four times
+    /// the bytes) or
     /// `Role::Frozen` (weight only), and whether the backward scratch and the
     /// reverse tape are built at all. A `train = false` composite cannot run
     /// [`Self::backward`]; that is the point of it.
@@ -206,8 +207,8 @@ impl DeepseekOcr {
         assert!(row0 + n_rows <= seq, "image rows [{row0}, {}) do not fit a {seq}-token sequence", row0 + n_rows);
 
         // Finer brackets inside `caps::Session::load`'s single "weight upload +
-        // tape build" bracket -- that bracket alone was 20-25s of the load's
-        // 20-28s total and had never been profiled below the crate boundary.
+        // tape build" bracket -- that bracket alone was nearly the whole load
+        // and had never been profiled below the crate boundary.
         // Split into the two candidate costs: JIT/pipeline compilation (one
         // `Gpu` per sub-model, each compiling its whole `PIPELINES` list up
         // front) vs the actual weight stream/upload (`ParamStore::

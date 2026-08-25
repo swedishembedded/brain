@@ -179,8 +179,8 @@ pub struct NumericSupport {
     /// other tier is parity-gated against.
     pub f32: bool,
     /// The packed-int8 dot kernels (`matmul_i8*`, WGSL `dot4I8Packed`)
-    /// execute. Hardware DP4A where the driver has it; the 4× weight-byte
-    /// saving holds regardless.
+    /// execute. Hardware DP4A where the driver has it; the four-fold
+    /// weight-byte saving holds regardless.
     pub int8_dot: bool,
     /// *Fast* f16 arithmetic. Deliberately not "f16 is exposed": Pascal
     /// exposes f16 at 1/64 rate, so availability without a measured rate is
@@ -289,7 +289,7 @@ impl DType {
     /// this still returns `F32` for every input in practice - honestly
     /// reflecting that no execution path can compute anything else yet.
     /// The value here is the *placement budgeting* this makes correct now
-    /// (a bf16 checkpoint promoted to fp32 costs 2x, not 1x); the value
+    /// (a bf16 checkpoint promoted to fp32 costs twice its on-disk bytes); the value
     /// later is that a real f16/bf16/int8/q4 compute path landing cannot
     /// silently mis-budget or mis-execute on a card that lacks it.
     pub fn promote(self, numeric: &NumericSupport) -> DType {
@@ -712,7 +712,7 @@ pub trait Backend: Send + Sync {
     /// wgpu's internal write-staging allocation is kept (not freed) for reuse
     /// and sized to the largest single write ever issued, so one giant `write`
     /// per tensor leaves a same-size staging buffer permanently resident
-    /// (measured: exactly 2.00x the logical size, see
+    /// (measured: exactly double the logical size, see
     /// `crates/gpu-core/tests/vram_overhead.rs`).
     /// Chunking through this method instead caps that resident staging cost at
     /// the chunk size, regardless of tensor count or size.
@@ -742,8 +742,9 @@ pub trait Backend: Send + Sync {
     ///
     /// Exists because `poll_wait` has no way to bound a stall: a device that
     /// stops responding mid-dispatch (observed on an Intel Arc iGPU under
-    /// severe, unpredictable thermal/power throttling — the same code
-    /// produced a clean 2.6s pass and a 120s+ stall back to back) hangs the
+    /// severe, unpredictable thermal/power throttling - the same code produced
+    /// a clean pass and a stall two orders of magnitude longer back to back)
+    /// hangs the
     /// calling thread indefinitely with no recourse. A self-calibrating loop like
     /// `gpu_core::roof`'s can use this to abandon a stalled measurement and
     /// report "unmeasurable" instead of hanging the whole process.
@@ -883,7 +884,7 @@ pub trait Backend: Send + Sync {
     /// This exists because host wall-clock around a drained slice is not a
     /// measurement of a kernel — it measures launch + execute + fence, whose
     /// floor is roughly constant and therefore inflates small kernels in inverse
-    /// proportion to their size (up to 29x measured).
+    /// proportion to their size (by more than an order of magnitude, measured).
     /// A profiler that attributes time between kernels must use device time.
     fn set_kernel_timing(&self, _on: bool) -> bool {
         false

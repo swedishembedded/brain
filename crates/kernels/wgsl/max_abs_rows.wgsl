@@ -19,12 +19,12 @@
 // `max_abs_row` gives thread `t` row `t` and walks the whole row from that one
 // invocation: a warp's 32 loads are `k` floats apart, so each 32-byte sector
 // fetched serves ONE useful float, and the row itself is a serial chain of
-// `k` dependent loads. That is a known trap, the same
-// shape as `gn_stats` (159x), `rmsnorm` (19.4x) and the `layernorm` family
-// (2.8-10x) — and it sits on the int8 dynamic-activation-quant path, so EVERY
-// int8 linear in `qwen::q8`, `zimage`, and the FLUX.2 DiT pays it once per
-// quantized activation (measured 43.6 ms of a 668 ms FLUX.2 int8 text-encoder
-// forward, 6.5%).
+// `k` dependent loads. That is a known trap, the same shape `gn_stats`,
+// `rmsnorm` and the `layernorm` family were all caught in (each worth a
+// multiple, in one case two orders of magnitude, once fixed) - and it sits on
+// the int8 dynamic-activation-quant path, so EVERY int8 linear in
+// `qwen::q8`, `zimage`, and the FLUX.2 DiT pays it once per quantized
+// activation, measurably so in a FLUX.2 int8 text-encoder forward.
 //
 // Here 64 threads cooperate on one row: each takes a stride-64 slice (so the
 // 64 lanes read 64 consecutive words every step — every fetched sector is
@@ -32,8 +32,8 @@
 // lane 0 folds the 64 partials (64 `max`es — cheaper than a second barrier,
 // which the CPU JIT could not compile anyway; see checklist D).
 //
-// Dispatch: m * 64 invocations (one workgroup per row) — 64x the reference
-// kernel's `m`. Callers do not compute that themselves: `gpu_core::Gpu` swaps
+// Dispatch: m * 64 invocations (one workgroup per row), i.e. 64 threads where
+// the reference kernel dispatches one. Callers do not compute that themselves: `gpu_core::Gpu` swaps
 // this kernel in for `max_abs_row` and scales the thread count (see
 // `gpu_core`'s kernel-upgrade table + `backend_api::select::Op::MaxAbsRow`),
 // so a model inherits it without touching its dispatch sites.

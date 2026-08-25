@@ -8,11 +8,11 @@
 //! # What is resident, and where it actually lives
 //!
 //! `wan`'s resident model holds its built DiT in a field, because a Wan DiT
-//! is one 5.7 GB object that costs ~20 s to build. LTX's real DiT is 23.6 GB
+//! is one 5.7 GB object that is slow to build. LTX's real DiT is 23.6 GB
 //! of Q8_0 GGUF that is never materialized as one object at all: it is
 //! streamed block by block, and what is expensive is the per-block GGUF read
-//! plus int8 quantize (~86% of a real denoise step; ~250 s of cold disk on
-//! this box's ~58-70 MB/s rotational storage for one 48-block pass).
+//! plus int8 quantize (the dominant share of a real denoise step, and minutes
+//! of cold disk on this box's rotational storage for one 48-block pass).
 //!
 //! So the thing worth holding resident is the already-quantized BLOCK BYTES,
 //! and they live in `ltxv::weightcache`'s process-wide, checkpoint-keyed
@@ -607,8 +607,8 @@ mod tests {
     ///
     /// The comparison is against a MEASURED serial baseline in the same
     /// process, warm cache on both sides, not against an estimate: the first
-    /// generation pays a ~250 s cold read that would otherwise be counted as
-    /// "concurrency" and inflate the ratio.
+    /// generation pays a cold read of minutes that would otherwise be counted
+    /// as "concurrency" and inflate the ratio.
     ///
     /// The ratio floor is deliberately loose. Two cards cannot do better than
     /// 2x, and a real run gives back some of that to the host-side stages a

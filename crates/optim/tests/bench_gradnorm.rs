@@ -7,10 +7,11 @@
 //!
 //! `gradnorm_sq.wgsl` dispatches **one invocation** per parameter tensor and
 //! loops `numel` times inside it. That is not a coalescing bug like `rmsnorm` /
-//! `layernorm` (thread `t` gets row `t`, 8× amplification) — it is a *parallelism*
-//! bug one level worse: a 38.6 M-element embedding gradient becomes 38.6 M
-//! dependent scalar loads on one lane of a 3840-core card. Measured in situ it
-//! was 87 % of all GPU time in `brain gpt train`.
+//! `layernorm` (thread `t` gets row `t`, eight-way amplification) - it is a
+//! *parallelism* bug one level worse: a 38.6 M-element embedding gradient
+//! becomes 38.6 M dependent scalar loads on one lane of a 3840-core card.
+//! Measured in situ it was the overwhelming majority of all GPU time in
+//! `brain gpt train`.
 //!
 //! Both param COUNT and size SKEW matter, so the sizes below are the real ones:
 //! dozens of 768-element LayerNorm/bias tensors alongside a couple of ~39 M
@@ -22,8 +23,8 @@
 //!     --test bench_gradnorm -- --ignored --nocapture
 //! ```
 //!
-//! `PEAK_GBPS` is the Tesla P40's 346 GB/s; on another card read the achieved
-//! column, not the percentage.
+//! `PEAK_GBPS` is the Tesla P40's datasheet bandwidth; on another card set it
+//! to that card's own figure and read the achieved column, not the percentage.
 
 use gpu_core::Gpu;
 
@@ -198,8 +199,8 @@ fn bench_gradnorm() {
 /// once the running sum is large the individual squares round away. Measured on
 /// a P40: at 4.19 M elements the serial walk is 2.3e-3 relative off the exact
 /// value while the tree (64 partials per workgroup, then a second pass) is
-/// 2.4e-7 — four orders of magnitude. The clip coefficient is therefore not
-/// only ~470x cheaper to compute, it is also the more correct one.
+/// 2.4e-7 - four orders of magnitude. The clip coefficient is therefore not
+/// only far cheaper to compute, it is also the more correct one.
 #[test]
 #[ignore]
 fn gradnorm_part_matches_gradnorm_sq() {

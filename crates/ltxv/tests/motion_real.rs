@@ -86,7 +86,7 @@ fn frame_delta(a: &[u8], b: &[u8]) -> f64 {
 /// investigation gated on and which is close to useless here. A visually
 /// FROZEN clip - every frame the same dog in the same fully-extended pose -
 /// scores 2.2 on that metric, because VAE decode dither on static content
-/// is not zero; a real one scores 5.4. A 2.4x gap invites the reading
+/// is not zero; a real one scores 5.4. A gap that narrow invites the reading
 /// "lower, but a nonzero delta, so it is moving". Peak excursion separates
 /// those same two runs 26.6 vs 5.1, because a static clip cannot
 /// accumulate: its per-frame wobble is uncorrelated noise around one image,

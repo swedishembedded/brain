@@ -543,10 +543,10 @@ pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &
 /// [`gqa_attn_sublayer_fwd`] with no upstream layout change.
 ///
 /// Lane-split across `head_dim` (`flash_attn_bidir_split`'s own fix for the
-/// same real Pascal register-spill bug, measured 29x at head_dim=128 - see
-/// that kernel's header and this one's own doc for the account of the
-/// register-per-thread design that was tried first and measured ~300x too
-/// slow). The workgroup still owns `BR = 64` query rows, same as
+/// same real Pascal register-spill bug, worth well over an order of magnitude
+/// at head_dim=128 - see that kernel's header and this one's own doc for the
+/// account of the register-per-thread design that was tried first and measured
+/// unusably slow). The workgroup still owns `BR = 64` query rows, same as
 /// [`flash_bidir_step`]'s convention, but each row is now split across 4
 /// lanes, so the workgroup's real thread count is `256`, not `BR`.
 ///
@@ -896,12 +896,13 @@ pub fn chunked_bidir_fwd(
 /// software-pipelined tile for ~1:7, which also halves the kernel's global K/V
 /// traffic because a workgroup owns twice the query rows.
 ///
-/// Measured on a Tesla P40 at Wan 1.3B's self-attention (T=14040, 12 heads,
-/// head_dim 128), against that device's own measured 10542 GFLOP/s fp32 roof:
-/// `bidir` 16494 ms, `split` 599 ms (19.2% of roof), `reg` 483 ms (23.8%),
-/// `reg2` 302 ms (38.0%) - for reference the register-tiled GEMM `matmul_reg3`
-/// reaches 41% on the same card. `reg2` wins at every T measured from 256 to
-/// 14040, so the ladder is walked on device caps alone and never on shape.
+/// Measured at Wan 1.3B's self-attention (T=14040, 12 heads, head_dim 128)
+/// against the device's own measured fp32 roof (`brain flops`): `bidir` is off
+/// the scale, `split` reaches a fifth of the roof, `reg` a little more, and
+/// `reg2` close to what the register-tiled GEMM `matmul_reg3` itself reaches
+/// on the same card - which is the point, since these ARE GEMMs. `reg2` wins
+/// at every T measured from 256 to 14040, so the ladder is walked on device
+/// caps alone and never on shape.
 ///
 /// Both new kernels need `@workgroup_size(256)` and `reg2` additionally needs
 /// 48 KiB of workgroup memory - four times the 16 KiB a Vulkan implementation
@@ -1031,8 +1032,9 @@ pub struct GemmAttnIds {
 /// operands drive the register-tiled matmul instead of the naive
 /// one-thread-per-score kernels. Measured motivation: at t=8192 the naive
 /// trio (and the fused flash kernel - a memory escape hatch, not a fast
-/// path) left a P40 at ~2% of peak; the same insight already made the CPU
-/// fast paths 7× (they route these kernels to the native GEMM).
+/// path) left the card at a low single-digit percent of peak; the same insight
+/// already bought the CPU fast paths a large multiple (they route these
+/// kernels to the native GEMM).
 ///
 /// Layout: `packs` holds the three per-head-contiguous operands per span -
 /// q (scaled by 1/√hd) at 0, k at `len·d_out`, vᵀ at `2·len·d_out` - with
@@ -1309,8 +1311,8 @@ pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, 
 
 /// `(kernel index, dispatch threads)` for one RMSNorm - the RMSNorm twin of
 /// `ln_variant`: the cooperative workgroup-per-row kernel (`rmsnorm_rows`,
-/// measured 19.4x on a P40 and a win at *every* row width because the
-/// per-element kernel's one-thread-per-row layout is uncoalesced) where the
+/// measured a win at *every* row width, widest where rows are narrow, because
+/// the per-element kernel's one-thread-per-row layout is uncoalesced) where the
 /// model registered it and the device can run a workgroup reduction, else the
 /// per-element reference (`rmsnorm` / `rmsnorm_eps`).
 ///
@@ -1372,9 +1374,10 @@ pub fn rmsnorm_eps_bwd(
 /// thread *t* row *t*: a warp's 32 loads are `d_model` floats apart, so each
 /// 32-byte sector fetched serves one useful float. `layernorm_dx` walks its row
 /// four times that way. The `*_rows` kernels give a whole 64-thread workgroup
-/// to one row and are coalesced by construction - measured 2.3-9.1x on a P40
-/// across d_model 768-3072 x 512-2048 rows (`brain-gpu-core`'s
-/// `bench_layernorm`), winning at every shape including the 1-row decode case.
+/// to one row and are coalesced by construction - measured faster across
+/// d_model 768-3072 x 512-2048 rows (`brain-gpu-core`'s `bench_layernorm`,
+/// which is what to re-run on another card), winning at every shape including
+/// the 1-row decode case.
 #[derive(Clone, Copy)]
 pub struct LayerNormIds {
     pub layernorm: usize,
@@ -1525,9 +1528,9 @@ pub fn tile_budget_words() -> u64 {
 /// more finely than necessary. On Qwen3-0.6B that split the tied 151936×1024
 /// head into **7 tiles**, and the caller only routes to the register-tiled GEMM
 /// when the vocab collapses to ONE (a tiled head has to use `matmul_tile`, the
-/// naive kernel). Measured: that head was **90.8% of a T=512 prefill at 0.4% of
-/// the compute roof**, and letting it collapse took the whole pass
-/// **4375.51 → 361.36 ms (12.1×)**, 117 → 1417 tok/s.
+/// naive kernel). Measured: that head was nearly the entire T=512 prefill and
+/// ran at a fraction of one percent of the compute roof, and letting it
+/// collapse cut the whole pass by an order of magnitude.
 ///
 /// An explicit `BRAIN_TILE_BUDGET_WORDS` still wins, so tests can force tiling.
 pub fn tile_budget_words_for(gpu: &Gpu) -> u64 {
@@ -1964,17 +1967,18 @@ mod tests {
     /// The tiling rule, against the budget rather than against a device - the
     /// device half is one `max_storage_binding_bytes()` call.
     ///
-    /// This exists because the fixed ~96 MiB budget was 21x smaller than what a
+    /// This exists because the fixed ~96 MiB budget is far smaller than what a
     /// P40 reports, which split Qwen3-0.6B's tied 151936x1024 head into 7 tiles;
     /// the caller only routes to the register-tiled GEMM when the vocab
-    /// collapses to ONE tile, so the head ran the naive kernel at 0.4% of the
-    /// compute roof and was 90.8% of a T=512 prefill (4375.51 -> 361.36 ms once
-    /// it collapsed).
+    /// collapses to ONE tile, so the head ran the naive kernel at a fraction of
+    /// one percent of the compute roof and was nearly the entire T=512 prefill
+    /// (which collapsing it cut by an order of magnitude).
     #[test]
     fn a_real_lm_head_collapses_to_one_tile_on_a_device_that_reports_its_limit() {
         let (vocab, d) = (151936u64, 1024u64);
 
-        // The portable floor still tiles it 7 ways - the behaviour that cost 12x.
+        // The portable floor still tiles it 7 ways - the behaviour that cost an
+        // order of magnitude on the prefill.
         assert_eq!(tiles_with_budget(vocab, d, TILE_BUDGET_WORDS).len(), 7);
 
         // Half of a P40's reported 2047 MiB, in f32 words.

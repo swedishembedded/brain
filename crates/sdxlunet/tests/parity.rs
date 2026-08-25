@@ -38,9 +38,9 @@ const GATE: f64 = 0.9999;
 /// tensor scale mistake this graph can make — a dropped `output_scale_factor`,
 /// an attention `1/sqrt(head_dim)` applied twice, a GroupNorm gain read from
 /// the wrong buffer — is exactly of that shape, and a cosine-only ladder passes
-/// all of them. The worst stage measured on a P40 is 1.54e-5, so 1e-3 leaves
-/// ~65x of headroom over reduction-order noise while still catching a 0.1%
-/// systematic rescale.
+/// all of them. The worst stage measured is 1.54e-5, so 1e-3 leaves ample
+/// headroom over reduction-order noise while still catching a systematic
+/// rescale of one part in a thousand.
 const REL_GATE: f64 = 1e-3;
 
 fn testdata(rel: &str) -> PathBuf {

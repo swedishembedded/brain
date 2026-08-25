@@ -14,12 +14,13 @@
 //!
 //! Phase 9 introduced this cache scoped to ONE `generate()` call: the
 //! `RealDit` owned it and dropped it when the generation finished. That
-//! removed ~86% of every denoise step past the first, but it left the whole
-//! cost standing on the FIRST step of every generation - and a real profiling
-//! pass measured that first step at 365 s of a 964 s run, because this box's
-//! rotational storage reads the checkpoint at ~58-70 MB/s cold. Two
-//! back-to-back generations against the same checkpoint therefore paid the
-//! same ~250 s of disk twice, seconds apart, for bytes that had not changed.
+//! removed the dominant share of every denoise step past the first, but it
+//! left the whole cost standing on the FIRST step of every generation - and a
+//! real profiling pass measured that first step at better than a third of the
+//! whole run, because this box's rotational storage reads the checkpoint cold
+//! at a rate far below what the GPU path needs. Two back-to-back generations
+//! against the same checkpoint therefore paid that same disk cost twice,
+//! seconds apart, for bytes that had not changed.
 //!
 //! The cache's contents were never a property of a generation. They are a
 //! pure function of immutable checkpoint bytes, so their correct scope is the

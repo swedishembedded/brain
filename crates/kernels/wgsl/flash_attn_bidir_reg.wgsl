@@ -33,12 +33,12 @@
 // distinct banks, so the shared memory itself is nowhere near saturated.
 //
 // The measured evidence for the ceiling: at Wan's shape (T=14040, 12 heads,
-// head_dim 128) `flash_attn_bidir_split` runs at 19.2% of the card's own
+// head_dim 128) `flash_attn_bidir_split` runs at a fifth of the card's own
 // MEASURED fp32 roof and does not move when the load is made sustained, while
 // `matmul_reg3` - the same 256-thread workgroup, but a 1:4 mix from its 8x8
-// register block - reaches 41% on the same card. This kernel takes the same
-// shape from 599 ms to 483 ms; `flash_attn_bidir_reg2`, which adds a second
-// query row per thread on top, takes it to 302 ms.
+// register block - reaches twice that share on the same card. This kernel
+// closes part of that gap at the same shape, and `flash_attn_bidir_reg2`,
+// which adds a second query row per thread on top, closes most of the rest.
 //
 // THE FIX. Make each shared load feed FOUR multiply-adds instead of one, by
 // holding the K/V tiles as `vec4<f32>` and giving each lane whole 4-channel

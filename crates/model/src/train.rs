@@ -46,7 +46,7 @@ pub struct FitOpts {
     /// the last save, the NEXT completed step writes a checkpoint (then the timer
     /// restarts). Decoupled from `eval_interval` so a slow big-model step never
     /// pays a 2.4 GB write every eval. `0` disables periodic saves (only the
-    /// final one runs). Default 600 (10 min).
+    /// final one runs). Default 600 seconds.
     pub checkpoint_secs: u64,
     /// Mask loss up to & including this char (e.g. `'='` for calculator).
     pub mask_before: Option<char>,

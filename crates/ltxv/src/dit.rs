@@ -434,16 +434,16 @@ pub(crate) fn av_shard_owns_weight(shard: &Shard, name: &str) -> bool {
 /// the second is the one that explains why the first was not enough:
 ///
 /// * A naive single-core scalar loop: `ada_layer_norm_single`'s call into it
-///   (the `[t,4096]x[36864,4096]^T` 9-row adaLN table) cost ~21 s per forward
-///   at T=128.
+///   (the `[t,4096]x[36864,4096]^T` 9-row adaLN table) was already a dominant
+///   host cost at a token count as small as T=128.
 /// * Row-parallel through `backend_cpu::par::rows_mut` (`wan::model::linear`'s
-///   precedent, reused verbatim): ~3.5x, and recorded at the time as
-///   bandwidth-bound rather than fixed, because parallelizing over output
-///   rows hides the naive nest's real defect - re-reading the whole 604 MB
-///   weight matrix once per OUTPUT ROW - behind aggregate DRAM bandwidth
-///   instead of removing it. At the real 720p token count (T=3520) that
-///   defect dominated everything else: 76.3 s per forward call, flat in layer
-///   count, ~81% of a real denoise step's wall clock.
+///   precedent, reused verbatim): several times faster, and recorded at the
+///   time as bandwidth-bound rather than fixed, because parallelizing over
+///   output rows hides the naive nest's real defect - re-reading the whole
+///   604 MB weight matrix once per OUTPUT ROW - behind aggregate DRAM
+///   bandwidth instead of removing it. At the real 720p token count (T=3520)
+///   that defect dominated everything else: flat in layer count, and the
+///   overwhelming majority of a real denoise step's wall clock.
 ///
 /// The blocking removes the re-reads themselves, which is why this is a fix
 /// rather than a third round of hiding them.
@@ -502,10 +502,10 @@ fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -> Vec<f32> 
 /// 3520 rows of which 1-2 are distinct and the rest are recomputed copies.
 ///
 /// The lever is fewer rows because every other lever on the table GEMM is
-/// exhausted: at T=3520 it runs `[3520,4096]x[36864,4096]ᵀ` at ~120 GFLOP/s,
-/// which is already this host's non-reassociating scalar-MAC ceiling
-/// (`backend_cpu::host_gemm`'s own tile sweep measures 127.8 GFLOP/s as the
-/// best any tiling reaches). A kernel at its ceiling is not tuned further; it
+/// exhausted: at T=3520 it runs `[3520,4096]x[36864,4096]ᵀ` at this host's own
+/// non-reassociating scalar-MAC ceiling (`backend_cpu::host_gemm`'s own tile
+/// sweep finds no tiling that beats it, and that sweep is what to re-run
+/// here). A kernel at its ceiling is not tuned further; it
 /// is given less to do. `ltxv_bench streamed <layers> <t> <ctx> 1 1
 /// <distinct_timesteps>` is the harness that measures both ends of that -
 /// `1` is a real step, `<t>` is what this stage cost before the dedup.
@@ -547,8 +547,9 @@ fn ada_layer_norm_single(w: &Tensors, prefix: &str, timesteps_scaled: &[f32], di
     // two weight matrices, so the whole loop is two ordinary
     // `[rows, in] x [out, in]^T` GEMMs with an elementwise SiLU between them.
     //
-    // The ~76 s / ~14 s split this comment used to quote is a number about a
-    // tree that no longer exists, and reading it as current is a 7.5x error:
+    // The wall-clock split this comment used to quote was a number about a
+    // tree that no longer exists, and reading it as current is off by most of
+    // an order of magnitude:
     // it predates BOTH this batching and `backend_cpu::host_gemm`'s blocked
     // GEMM. What each state of this code actually costs per forward at
     // T=3520 (ONE call site - `adaln_single`, once per forward - and nothing
@@ -1177,7 +1178,7 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// `RealDit`, a SECOND generation against the same checkpoint - a different
 /// prompt, a different size, seconds or hours later - starts warm on its very
 /// first forward instead of re-paying the cold-disk cost a real profiling pass
-/// measured at 365 s of a 964 s run. It holds two things this function would
+/// measured at better than a third of a whole run. It holds two things this function would
 /// otherwise recompute identically on every call.
 ///
 /// The first is every block's already-quantized weight bytes, keyed by layer
@@ -1200,9 +1201,9 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// been visited once, rather than one block's fp32 expansion - measured at
 /// the real 22B/Q8_0 width via [`crate::block::CachedQBlockWeights::
 /// byte_len`] at ~270 MB/block, ~13 GB for all 48 - a deliberate trade of
-/// host RAM for skipping the dominant real cost Phase 8 measured
-/// (~86% of one real denoise step was GGUF re-read + re-quantize of the SAME
-/// immutable weights, over and over, every single step). That trade is now
+/// host RAM for skipping the dominant real cost Phase 8 measured (most of one
+/// real denoise step was GGUF re-read + re-quantize of the SAME immutable
+/// weights, over and over, every single step). That trade is now
 /// GOVERNED rather than merely affordable: the cache runs under the byte
 /// budget `--limit-ram-total` publishes and evicts by the residency layer's
 /// own cost-aware policy when it is tight - see [`crate::weightcache`].
@@ -1306,8 +1307,8 @@ pub fn forward_q_streamed_in(
     let (adaln_table, embedded_timestep) = ada_layer_norm_single(head, "adaln_single", &ts_scaled, dim, cfg.adaln_rows() as usize);
     // NESTS the two `ada_layer_norm_single: ...` stages printed just above:
     // this bracket is the whole stage, they are its two halves. Adding all
-    // three double-counts, which is the reading that turns a 10.3 s stage into
-    // a 20.6 s one. `gpu_core::profile::stage_time` prints one line per call
+    // three double-counts, which is the reading that reports this stage at
+    // twice its real cost. `gpu_core::profile::stage_time` prints one line per call
     // with no nesting structure of its own, so the label is where the
     // relationship has to be stated.
     gpu_core::profile::stage_time("forward_q_streamed: adaLN-single table (host, TOTAL - nests the two ada_layer_norm_single stages above)", s_adaln);
@@ -1408,7 +1409,7 @@ pub fn forward_q_streamed_in(
     );
 
     // Phase 8 attribution: `forward_q_streamed` was never profiled against a
-    // real checkpoint before this pass, so the ~200s/step number this design
+    // real checkpoint before this pass, so the per-step cost this design
     // implies (re-reading and re-quantizing every one of `cfg.num_layers`
     // blocks from `src` on EVERY forward call) had never been split into its
     // three real components. Accumulate each block's own three stage

@@ -27,9 +27,9 @@
 //!   (`F.normalize(x, dim=1) * sqrt(dim) * gamma`), not GroupNorm and not
 //!   RMSNorm - see [`Builder3d::rms_norm`].
 //! * **Spatial upsampling is a per-frame `nearest-exact` at scale 2**, which for
-//!   an exact integer 2x is provably identical to plain nearest
+//!   an exact integer doubling is provably identical to plain nearest
 //!   (`floor(d/2 + 0.25) == floor(d/2)` for integer `d`), so `upsample2` is
-//!   bit-correct. [`Builder3d::upsample2`] is the only 2x in this module; a
+//!   bit-correct. [`Builder3d::upsample2`] is the only doubling in this module; a
 //!   non-integer scale would break that equivalence and has no path here.
 //!
 //! # The time axis is the channel axis of a reshaped view
@@ -461,11 +461,12 @@ impl<'a> Builder3d<'a> {
     /// this module funnels through here so the choice is made in one place.
     ///
     /// * **direct** - `conv3d`, one thread per output with four nested serial
-    ///   reductions and no operand reuse. Measured on a P40 at a flat ~137
-    ///   GFLOP/s (1.2% of fp32 peak) across every Wan-VAE decode shape, and it
-    ///   was 98% of the decode's device time.
+    ///   reductions and no operand reuse. Measured at a FLAT low-single-digit
+    ///   percent of fp32 peak across every Wan-VAE decode shape, and it was
+    ///   essentially all of the decode's device time.
     /// * **lowered** - `im2col3d_at` + `matmul_reg3` + `nlc_bias_nchw`, i.e.
-    ///   `y[To·Ho·Wo, Cout] = col · Wᵀ` at the GEMM's ~35-41% of peak. A rate
+    ///   `y[To·Ho·Wo, Cout] = col · Wᵀ` at the GEMM's own far higher share of
+    ///   peak. A rate
     ///   that does not move with shape is structural, so this is the
     ///   algorithmic change that ceiling calls for, not a tuning knob.
     ///
@@ -815,13 +816,13 @@ impl<'a> Builder3d<'a> {
         y
     }
 
-    /// Per-frame nearest-neighbour 2x spatial upsample.
+    /// Per-frame nearest-neighbour spatial upsample, doubling each axis.
     ///
     /// The reference uses `mode='nearest-exact'`, which differs from `nearest`
     /// only in index rounding (`floor((d+0.5)*in/out)` vs `floor(d*in/out)`).
-    /// At an exact integer 2x the two agree for every integer `d`
+    /// At an exact integer doubling the two agree for every integer `d`
     /// (`floor(d/2 + 0.25) == floor(d/2)`), so `upsample2` is bit-correct - and
-    /// ONLY at an exact 2x, which is why this method has no scale parameter.
+    /// ONLY there, which is why this method has no scale parameter.
     pub fn upsample2(&mut self, x: &T3) -> T3 {
         let y = self.act3(x.c, x.t, x.h * 2, x.w * 2);
         // [C,T,H,W] is C*T planes of (H,W): the kernel's own N is unused here.

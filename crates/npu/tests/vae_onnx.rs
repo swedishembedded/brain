@@ -157,7 +157,7 @@ fn the_conv_count_matches_the_schedule() {
     want += nb - 1;
     assert_eq!(counts["Conv"], want, "Conv count");
 
-    // One nearest-2x per block except the last.
+    // One nearest-neighbour doubling per block except the last.
     assert_eq!(counts["Resize"], nb - 1);
     // One attention -> 4 projections + 2 matmuls, 1 softmax.
     assert_eq!(counts["Softmax"], 1);
@@ -202,7 +202,7 @@ fn the_export_round_trips_with_the_declared_shapes() {
     let g = m.graph.expect("graph");
     assert!(g.input.iter().any(|v| v.name == "latent"));
     assert!(g.output.iter().any(|v| v.name == "image"));
-    // 4 blocks -> 8x upscale.
+    // 4 blocks -> an eightfold upscale.
     assert_eq!(t.upscale(), 8);
 }
 

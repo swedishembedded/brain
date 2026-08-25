@@ -5,8 +5,8 @@
 //! loop. Capacity ONE, the producer always wins.
 //!
 //! NOT a channel, and the reasoning is load-bearing (plan R-notes):
-//!   * `mpsc` is unbounded — a 3s render stall rebuilds a backlog (921KB/frame) and
-//!     3s of unrepayable latency.
+//!   * `mpsc` is unbounded - a multi-second render stall rebuilds a backlog
+//!     (921KB/frame) and just as much unrepayable latency.
 //!   * `sync_channel(1)` blocks the PRODUCER, so a slow consumer pushes the capture
 //!     thread late back into DQBUF, the driver's ring fills, and V4L2 drops frames
 //!     for us with no counter and no control.

@@ -55,7 +55,7 @@ check!(t5_backward, gradcheck::check_t5, "check_t5");
 check!(t5_one_block_backward, gradcheck::t5::check_t5_one_block, "check_t5_one_block");
 check!(t5_tiled_backward, gradcheck::t5::check_t5_tiled, "check_t5_tiled");
 // `check_t5` does NOT cover the cross-block fold of the shared relative-position
-// bias — measured: deleting the `axpy` leaves a 33 % error in that tensor's
+// bias - measured: deleting the `axpy` leaves an error of a third in that tensor's
 // gradient and `check_t5` still passes on both backends and both seeds. The
 // per-ENTRY check below is what covers it.
 check!(

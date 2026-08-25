@@ -286,7 +286,7 @@ if ! need "$IMG_DIR/kronos-forecast.png" || ! need "$IMG_DIR/kronos-forecast.txt
   if ! command -v gnuplot >/dev/null 2>&1; then
     echo "   skipped: the forecast chart needs the gnuplot CLI (apt-get install gnuplot)"
   else
-    # ~4.5 min on CPU, the longest compute-bound step on this page: a 506-bar
+    # Minutes on CPU, the longest compute-bound step on this page: a 506-bar
     # prefill per origin is the cost, and 16 origins is 16 disjoint held-out
     # windows rather than one draw. Worth the minutes - the same measurement
     # over 8 origins moves by 14 points, so a cheaper run would be reporting

@@ -130,7 +130,7 @@ fn uneven_capacity_puts_more_layers_on_the_bigger_card() {
     let ck = checkpoint("uneven", &cfg, 31337);
     let total = Int8ThinkerResident::new(ck.path.clone(), qwen3omnimoe::config::ThinkerConfig::defaults().with_text(cfg.clone()), Vec::new()).total_device_bytes().expect("measurable");
 
-    // Card 0 is ~3x card 1, and neither alone can hold the model.
+    // Card 0 is three times card 1, and neither alone can hold the model.
     let big = total * 3 / 4;
     let small = total / 2;
     let resident = Int8ThinkerResident::new(ck.path.clone(), qwen3omnimoe::config::ThinkerConfig::defaults().with_text(cfg.clone()), vec![(Device::Gpu(0), big), (Device::Gpu(1), small)]);

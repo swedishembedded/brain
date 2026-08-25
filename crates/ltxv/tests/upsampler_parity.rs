@@ -55,7 +55,7 @@ fn max_abs(got: &[f32], want: &[f32]) -> f32 {
 /// `LatentUpsampler` (see `ltxv::upsampler::upsample_video`) was a scale
 /// error of very nearly that shape, it cost half the latent's variance in a
 /// real generation, and nothing in this file could see it. Every tap
-/// measures 6.7e-6..3.4e-5 against the golden, so this bound is ~30x the
+/// measures 6.7e-6..3.4e-5 against the golden, so this bound sits far above the
 /// worst real deviation and orders of magnitude below any scale error.
 const MAX_ABS_BOUND: f32 = 1e-3;
 

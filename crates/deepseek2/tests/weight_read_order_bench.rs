@@ -2,15 +2,16 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Throwaway diagnostic, not a correctness gate: which of two candidate costs
-//! explains `ParamStore::new_with_roles_src`'s ~35 s "read+write" bracket when
+//! explains `ParamStore::new_with_roles_src`'s "read+write" bracket when
 //! streaming the real DeepSeek-OCR decoder's cached fp32 expansion (~11.7 GB,
 //! 2234 tensors) -- the dominant share of `deepseek2ocr::caps::Session::load`'s
-//! 20-28 s model-construction cost, isolated by real per-stage timers this
+//! model-construction cost, isolated by real per-stage timers this
 //! same investigation added to
 //! `crates/paramstore`/`crates/deepseekv2`/`crates/wgsl-cpu`.
 //!
 //! `dd if=<file> of=/dev/null` on the exact same file read the whole 11.7 GB
-//! in ~8 s (1.5 GB/s), so a pure sequential scan is not the bottleneck. Two
+//! in a fraction of that bracket, so a pure sequential scan is not the
+//! bottleneck. Two
 //! candidates remained: (a) the upload loop visits tensors in
 //! `DeepseekV2Config::param_list()`'s construction order (layer 0..11, each
 //! layer's attention then MoE experts 0..63), which need not match the

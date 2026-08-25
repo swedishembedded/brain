@@ -5,7 +5,7 @@
 //!
 //! Trains the real `mad_noisy_recall` benchmark end-to-end on `BRAIN_DEVICE` and
 //! asserts recall amid distractor tokens clears its calibrated threshold, well
-//! above chance. Skipped under `MOE_SKIP_GPU_TESTS`. ~1-2 min on the CPU backend.
+//! above chance. Skipped under `MOE_SKIP_GPU_TESTS`. Minutes on the CPU backend.
 
 use bench::mad_noisy_recall::MadNoisyRecall;
 use bench::Benchmark;

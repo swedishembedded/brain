@@ -26,10 +26,10 @@
 //! single compute pass production runs — no group slicing, no per-group drain,
 //! no launch+fence floor folded into a kernel's number) yields per-kernel device
 //! totals directly via `kernel_times()`. `PassProfile::device_timed` records
-//! which path a given profile actually took. Validated: kernel device time
-//! against the whole-pass number agree to within 0.7% (80.28 ms vs 80.85 ms),
-//! where the old host-bracketed-slice method was off by up to 29x on small
-//! kernels and inverted the ranking.
+//! which path a given profile actually took. Validated: summed kernel device
+//! time and the whole-pass number agree to within a fraction of a percent,
+//! where the old host-bracketed-slice method was off by more than an order of
+//! magnitude on small kernels and inverted the ranking outright.
 //!
 //! Only backends without a device-timestamp path fall back to the OLD
 //! host-wall-clock-per-group method below, which still carries the launch+fence
@@ -40,8 +40,8 @@
 //! [`PassProfile::total_secs`] is ONE submit of the whole list — the number that
 //! decides whether a change worked. [`PassProfile::summed_secs`] is the sum of
 //! the per-group timings, each of which pays its own queue drain; on a VQGAN
-//! backward that inflates the total by ~44%. **Rank with the table, decide with
-//! the pass.**
+//! backward that inflates the total by a large fraction. **Rank with the
+//! table, decide with the pass.**
 
 use crate::roof::{Bound, Roofs};
 
@@ -131,7 +131,8 @@ pub struct PassProfile {
     pub fully_covered: bool,
     /// True when per-kernel times are DEVICE times from timestamp queries
     /// written inside the production single compute pass. False means they are
-    /// host-bracketed group times, which inflate small kernels up to ~30x and
+    /// host-bracketed group times, which inflate small kernels by more than an
+    /// order of magnitude and
     /// must not be used to attribute time between kernels (`lessons.md` #31).
     pub device_timed: bool,
 }
@@ -186,8 +187,9 @@ impl PassProfile {
                     // overstates the work (a data-dependent kernel costed by an
                     // upper bound, a synthetic harness whose buffers alias so
                     // the "streaming" byte estimate is fiction) or the timed
-                    // region was the host (a bare-submit loop once reported
-                    // 377 GB/s on a ~346 GB/s card). Printing it as a percentage
+                    // region was the host (a bare-submit loop once reported a
+                    // bandwidth above what the card can physically deliver).
+                    // Printing it as a percentage
                     // launders a broken number into a flattering one.
                     r.utilisation(rf)
                         .map(|u| {
@@ -346,8 +348,8 @@ pub fn stage_time(name: &str, since: Instant) {
 /// Every timed region is `poll_wait`-bracketed. This is not defensive style: on
 /// the wgpu backend `submit` with an empty clear list only appends to the
 /// pending list, so an unbracketed loop times host-side recording and reports a
-/// rate above the physical roof — it once produced 377 GB/s on a ~346 GB/s
-/// card.
+/// rate above the physical roof - it once produced a bandwidth figure larger
+/// than the card's datasheet peak.
 pub fn best_of(gpu: &Gpu, steps: &[Step], reps: usize) -> f64 {
     gpu.submit(&[], steps);
     gpu.poll_wait();
@@ -418,7 +420,7 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         // Rows carry the CALLER's kernel name, but the backend's timing map is
         // keyed by the PHYSICAL pipeline that ran — for an upgrade-redirected
         // kernel (e.g. max_abs_row -> max_abs_rows) those differ, and the
-        // caller-name lookup silently reported 0 ms for the redirected kernel
+        // caller-name lookup silently reported zero time for the redirected kernel
         // while inflating every other row's share. Translate through the
         // upgrade map first. (If two caller slots redirect to one physical
         // kernel their combined time lands on each row — a visible
@@ -683,7 +685,8 @@ mod tests {
 
     #[test]
     fn the_group_sum_is_reported_as_an_upper_bound_on_the_pass() {
-        // The measured VQGAN backward: 658.09 ms of groups over a 456.07 ms pass.
+        // A real VQGAN backward, as measured: the group times below sum to
+        // markedly more than the whole-pass time they came from.
         let p = pass(vec![row("a", 0.65809, 0, 1, true)], 0.45607);
         assert!((p.drain_overhead_pct() - 44.3).abs() < 0.5, "{}", p.drain_overhead_pct());
     }
@@ -691,9 +694,10 @@ mod tests {
     #[test]
     fn defects_are_rows_under_their_own_classs_floor() {
         let roofs = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
-        // col2im-shaped: 142.75 ms moving ~3.3 GB => ~23 GB/s, 6.7% of the roof.
+        // col2im-shaped: a long row moving ~3.3 GB, i.e. a small fraction of
+        // the bandwidth roof.
         let col2im = row("col2im", 0.14275, 0, 3_312_000_000, true);
-        // A GEMM at 2 TFLOP/s: 17% of peak — under the 30% compute floor too.
+        // A GEMM fast in absolute terms but still under the compute floor.
         let gemm = row("matmul_dx_reg", 0.07322, 144_600_000_000, 1_000_000, true);
         let p = pass(vec![col2im, gemm], 0.456);
 

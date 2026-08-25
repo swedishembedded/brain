@@ -5,7 +5,7 @@
 
 /// The subset of the diffusers `AutoencoderKL` config that determines the
 /// decoder graph. Z-Image / FLUX-dev VAE: 16 latent channels, `[128,256,512,
-/// 512]` block channels (→ 8× spatial), 2 layers/block, 32 groups, `silu`.
+/// 512]` block channels (an eightfold spatial downscale), 2 layers/block, 32 groups, `silu`.
 /// FLUX.2 (`AutoencoderKLFlux2`) keeps the conv net and adds: 32 latent
 /// channels, 1×1 `quant_conv`/`post_quant_conv` at the latent boundary, and a
 /// 2×2 latent pixel-unshuffle normalized by frozen BatchNorm stats

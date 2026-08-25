@@ -20,7 +20,7 @@ use gpu_core::Gpu;
 const DUMPER: &str = "tools/goldens/cosyvoice_dump_reference.py";
 const COS_FLOOR: f64 = 0.9999;
 // Measured on the real checkpoint: cosine 1.0000000000, rel_l2 2.3e-6,
-// max_abs 5.3e-6 (CPU backend, `brain-wgsl-cpu`). 1e-4 leaves ~40x headroom
+// max_abs 5.3e-6 (CPU backend, `brain-wgsl-cpu`). 1e-4 leaves ample headroom
 // for backend/precision variance without being a floor that would wave
 // through a real regression.
 const REL_CEIL: f64 = 1e-4;

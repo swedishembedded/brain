@@ -81,8 +81,8 @@ impl Action for DescribeAction {
 }
 
 /// `slow` — a long-running action that polls the invocation's cancel token each
-/// step, so `Cancel(job)` can be verified end-to-end: uncancelled it takes ~10 s,
-/// cancelled it aborts within one 20 ms step.
+/// step, so `Cancel(job)` can be verified end-to-end: uncancelled it runs for
+/// its whole 500-step budget, cancelled it aborts within one step.
 struct SlowAction;
 impl Action for SlowAction {
     fn spec(&self) -> ActionSpec {
@@ -321,7 +321,7 @@ fn admit_deadline_sheds_a_saturated_lane() {
         let client = zbus::Connection::session().await.unwrap();
         let proxy = zbus::Proxy::new(&client, name.clone(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap();
 
-        // Pin the lane: a `slow` Run takes ~10s (500 steps x 20ms) unless cancelled.
+        // Pin the lane: a `slow` Run runs its whole 500-step budget unless cancelled.
         let pin_proxy = proxy.clone();
         tokio::spawn(async move {
             let empty: HashMap<String, ZOwnedFd> = HashMap::new();
@@ -338,7 +338,7 @@ fn admit_deadline_sheds_a_saturated_lane() {
         let res: zbus::Result<(String, HashMap<String, ZOwnedFd>, String)> = proxy.call("Run", &("rev", "slow", "{}", empty2, "", "memfd")).await;
         let elapsed = t0.elapsed();
         assert!(res.is_err(), "a Run that cannot be admitted within the deadline must be shed, not queued silently");
-        assert!(elapsed < std::time::Duration::from_secs(2), "shedding must happen close to the 300ms deadline, not hang: took {elapsed:?}");
+        assert!(elapsed < std::time::Duration::from_secs(2), "shedding must happen close to the admit deadline, not hang: took {elapsed:?}");
         eprintln!("admit-deadline ok: second Run shed in {elapsed:?}");
     });
 }

@@ -84,9 +84,10 @@ const SCORES_B_WG: usize = 27;
 const SCORES_WG_PER_GROUP: u32 = 16;
 // Split-K forward GEMM + its fold, for the skinny-M shapes a served step is made
 // of. `matmul_reg3`'s tile grid is ceil(m/128)*ceil(n/128) and does not grow
-// with k, so at m=128 it launches 16 workgroups on a 30-SM card (11% of peak,
-// and 47% of a served step). See `matmul_reg3_splitk.wgsl` for the measured
-// occupancy curve and the arithmetic that says splitting pays at THIS shape.
+// with k, so at m=128 it launches 16 workgroups on a 30-SM card: barely half
+// the SMs get any work, and that one dispatch is a large share of a served
+// step. See `matmul_reg3_splitk.wgsl` for the measured occupancy curve and the
+// arithmetic that says splitting pays at THIS shape.
 const MATMUL_REG3_SPLITK: usize = 28;
 const SPLITK_REDUCE: usize = 29;
 
@@ -363,9 +364,10 @@ fn kv_pool_words(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bo
 /// int8 4/`u32` + a fp32 scale per `(token slot, kv-head)`, or plain fp32) for
 /// every layer.
 ///
-/// The exact ratio `fp32 / int8` is `4·head_dim / (head_dim + 4)` — 3.8788x
-/// at Qwen3's `head_dim=128`, but a DIFFERENT number at any other `head_dim`
-/// (2.6667x at `QwenConfig::tiny()`'s `head_dim=8`) — see
+/// The exact ratio `fp32 / int8` is `4·head_dim / (head_dim + 4)`: close to
+/// the 4-to-1 limit at Qwen3's `head_dim=128`, but a DIFFERENT number at any
+/// other `head_dim` (well short of 3-to-1 at `QwenConfig::tiny()`'s
+/// `head_dim=8`) - see
 /// `kv_pool_bytes_identity_holds_at_the_real_shape`, which pins both.
 pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bool) -> u64 {
     let (pool_words, scale_words) = kv_pool_words(cfg, block_size, num_blocks, kv_int8);
@@ -492,7 +494,7 @@ pub struct Engine {
     /// Int8 WEIGHT path (A0): every linear this engine dispatches - the 7
     /// per-layer projections (`blocks.<l>.<leaf>`) plus the LM head
     /// (`cfg.head_weight()`) - as a `model::ops::Weight` (B7), packed 4/u32
-    /// (~4x fewer weight bytes in the bandwidth-bound decode regime) when
+    /// (a quarter of the weight bytes in the bandwidth-bound decode regime) when
     /// `weights_int8` was requested AND the device's `int8_dot` capability
     /// allows it (`Weight::upload`'s own `want.promote(caps.numeric)` gate -
     /// never the case on a device whose caps report no packed-int8 path),
@@ -1182,8 +1184,8 @@ impl Engine {
     }
 
     /// RMSNorm, choosing the workgroup-per-row kernel at decode row counts
-    /// (the per-element kernel runs `rows` threads — 8 threads on a 3840-core
-    /// card at batch 8, measured at 16.6% of decode time).
+    /// (the per-element kernel runs `rows` threads - 8 threads on a 3840-core
+    /// card at batch 8, and measured as a sizeable share of decode time).
     fn rms(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32) -> Step {
         let g = &self.gpu;
         let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
@@ -1250,15 +1252,11 @@ impl Engine {
             self.linear(&mut s, &self.lin_weights[&p("attn.wk.weight")], &sc.xn1, &sc.k_pre, b);
             self.linear(&mut s, &self.lin_weights[&p("attn.wv.weight")], &sc.xn1, &sc.v, b);
             // QK-norm goes through `self.rms` like every other norm in this
-            // tape. It used to call `block::rmsnorm_fwd` directly — the
-            // per-element kernel, one thread per row — which is the coalescing
-            // bug measured at 19.4x for exactly
-            // this op, and it was the only norm here bypassing the selector.
-            // QK-norm goes through `self.rms` like every other norm in this
-            // tape. It used to call `block::rmsnorm_fwd` directly — the
-            // per-element kernel, one thread per row — which is the coalescing
-            // bug measured at 19.4x for exactly
-            // this op, and it was the only norm here bypassing the selector.
+            // tape. It used to call `block::rmsnorm_fwd` directly - the
+            // per-element kernel, one thread per row - which is the coalescing
+            // bug the cooperative kernel exists to fix, and this op's narrow
+            // rows are where that bug measured worst. It was also the only
+            // norm here bypassing the selector.
             s.push(self.rms(&sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, b * nh));
             s.push(self.rms(&sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, b * nkv));
             s.push(g.step(ROPE_PAGED, &[&sc.q, &sc.pos_buf], &[b, nh, hd, hq, fb(theta)], b * nh * half));
@@ -1278,9 +1276,9 @@ impl Engine {
                 s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[b, hkv, bs], b * hkv));
                 // One workgroup per score where the device runs workgroup
                 // reductions: the per-element kernel's lanes are `kv_stride`
-                // floats apart (4 KB at 0.6B), 8x read amplification, measured
-                // at 12.2% of the bandwidth roof while taking 52.2% of a
-                // served step.
+                // floats apart (4 KB at 0.6B), so a fetched sector serves one
+                // useful float in eight: measured at a small fraction of the
+                // bandwidth roof while taking about half of a served step.
                 let (sk, st) = if self.caps.workgroup_reductions {
                     (SCORES_B_WG, b.saturating_mul(nh).saturating_mul(cap).div_ceil(SCORES_WG_PER_GROUP) * 64)
                 } else {
@@ -1324,9 +1322,9 @@ impl Engine {
     /// The head is the largest single matmul in a small model (`vocab x d_model`
     /// = 16.4M MACs per row at vocab 32k). Applying it on the host, once per
     /// sequence per token, made decode host-bound: cost grew linearly with batch
-    /// size while the GPU idled, so continuous batching stopped paying — measured
-    /// at ~85% of each decode step, and throughput that gained only 1.4x from
-    /// concurrency 1->16 before regressing.
+    /// size while the GPU idled, so continuous batching stopped paying: it
+    /// measured as the dominant share of each decode step, and throughput
+    /// barely moved from concurrency 1 to 16 before regressing outright.
     ///
     /// Here the hidden state never leaves the device: `matmul` produces
     /// `[bsz, vocab]` logits (parallel over every output element) and
@@ -1741,9 +1739,10 @@ impl Engine {
         // paged metadata on the device. Using it from a profiler leaves
         // `seq_lens` at whatever was in the buffer — zero — so every attention
         // thread early-returns and the kernels appear to do almost no work.
-        // That is exactly how `paged_decode_scores_batched` came to report
-        // 7060 GB/s: the timing was right and the kernel really was that fast,
-        // because it was not attending to anything.
+        // That is exactly how `paged_decode_scores_batched` came to report a
+        // bandwidth well above what the card can physically deliver: the timing
+        // was right and the kernel really was that fast, because it was not
+        // attending to anything.
         self.run_batched_steps(bsz, Input::Tokens(tokens), positions, seqlens, blocks, offsets, bt).0
     }
 
@@ -2409,8 +2408,9 @@ mod tests {
     /// Int8 weights (A0) must stay numerically faithful to the fp32 engine:
     /// same weights, same prompt, and the final-norm hidden state after a
     /// quantized prefill must sit within a few percent of the fp32 one. A
-    /// scale-handling bug (the realistic failure mode) produces ~100% error,
-    /// so the 10% gate separates cleanly while tolerating honest quant noise.
+    /// scale-handling bug (the realistic failure mode) produces error of the
+    /// same order as the signal, so the gate below separates cleanly while
+    /// tolerating honest quant noise.
     /// The stream-level greedy-agreement threshold lives in `brain perf`'s
     /// fidelity gate, which measures it on real checkpoints.
     #[test]
@@ -2535,8 +2535,8 @@ mod tests {
         };
         let r = Request { prompt: vec![1], max_new: 1, eos: None };
         assert!(p.admit(&r, &mk(50, None)), "no measurement -> cannot prove lateness");
-        assert!(p.admit(&r, &mk(4, Some(20.0))), "4 x 20ms fits a 100ms deadline");
-        assert!(!p.admit(&r, &mk(6, Some(20.0))), "6 x 20ms provably misses it");
+        assert!(p.admit(&r, &mk(4, Some(20.0))), "4 queued at the mocked service time fits the deadline");
+        assert!(!p.admit(&r, &mk(6, Some(20.0))), "6 queued at the mocked service time provably misses it");
     }
 
     /// Cancelling must free the sequence's KV blocks immediately and stop its
@@ -3014,8 +3014,8 @@ mod tests {
     /// (lesson 18: a toy config's error magnitude cannot predict the real
     /// one). What it CAN catch is a wiring break that makes int8 decode wildly
     /// diverge from fp32 (a dropped scale propagating through several steps,
-    /// a slot/head index swap) — hence a bound with real headroom above the
-    /// measured baseline, not the old hand-fit 20%. Runs on [`kv_probe_cfg`],
+    /// a slot/head index swap) - hence a bound with real headroom above the
+    /// measured baseline, not the old hand-fit constant. Runs on [`kv_probe_cfg`],
     /// not `tiny()` (lesson 4: `tiny()`'s degenerate dims don't exercise real
     /// GQA). Two independently-built engines (fp32, int8) also carry their
     /// own small autotuner-driven kernel-variant noise, independent of
@@ -3042,10 +3042,10 @@ mod tests {
         let err = h32.iter().zip(&h8).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
         let mag = h32.iter().fold(0f32, |m, &x| m.max(x.abs()));
         println!("int8 KV vs fp32 (prefill + 6 decode) maxabs={err:e} (mag {mag:e})");
-        // Measured on this probe config: maxabs ~8.9e-4 at mag ~2.28 (~0.039%
-        // relative) -- 1% is ~25x headroom for run-to-run autotuner noise and
-        // a different random weight draw, and still 20x tighter than the old
-        // hand-fit 20%.
+        // Measured on this probe config, the relative error sits orders of
+        // magnitude below the bound asserted here. That headroom is deliberate
+        // (run-to-run autotuner noise, a different random weight draw), and
+        // the bound is still far tighter than the hand-fit one it replaced.
         assert!(err < 0.01 * mag + 1e-3, "int8 diverges too far: {err} vs mag {mag}");
     }
 
@@ -3217,7 +3217,7 @@ mod tests {
             };
             // One chunk large enough to hold either prompt whole: a 4-token prompt and a
             // 16-token prompt must cost the SAME number of submits — proof the dispatch
-            // is per-CALL, not per-TOKEN (a per-token dispatcher would cost 4x more here).
+            // is per-CALL, not per-TOKEN (a per-token dispatcher would cost four times more here).
             let short = vec![1u32, 5, 3, 9];
             let long: Vec<u32> = (0..16).map(|i| (i % 20) as u32 + 1).collect();
             let submits_short = submits_for(&short, 16);
@@ -3226,15 +3226,16 @@ mod tests {
             assert!(submits_short > 0, "kv_int8={kv_int8}: prefill must dispatch SOMETHING");
 
             // The SAME 16-token prompt split into 2 then 4 chunks must cost exactly
-            // 2x and 4x the one-chunk submit count - proportional to CHUNKS, not
-            // tokens (which would be 16x, and identical at every split here). The
-            // 4-chunk point is what separates "proportional to chunks" from "affine
-            // in chunks": a per-run one-off would show up as a CONSTANT gap that the
-            // 2x check alone could be mistaken for a per-chunk cost.
+            // twice and four times the one-chunk submit count - proportional to
+            // CHUNKS, not tokens (scaling with tokens would be sixteenfold, and
+            // identical at every split here). The 4-chunk point is what separates
+            // "proportional to chunks" from "affine in chunks": a per-run one-off
+            // would show up as a CONSTANT gap that the doubling check alone could
+            // be mistaken for a per-chunk cost.
             let submits_2chunks = submits_for(&long, 8);
             let submits_4chunks = submits_for(&long, 4);
-            assert_eq!(submits_2chunks, 2 * submits_long, "kv_int8={kv_int8}: 2 chunks must cost exactly 2x 1 chunk's submits, not scale with the (unchanged) token count: {submits_2chunks} vs 2x{submits_long}. A CONSTANT excess (2x+c) is a fixed per-run cost baselined into the measurement, not a prefill regression - see the flush above.");
-            assert_eq!(submits_4chunks, 4 * submits_long, "kv_int8={kv_int8}: 4 chunks must cost exactly 4x 1 chunk's submits - prefill cost must be proportional to chunks, with no fixed term: {submits_4chunks} vs 4x{submits_long}");
+            assert_eq!(submits_2chunks, 2 * submits_long, "kv_int8={kv_int8}: 2 chunks must cost exactly 2 x 1 chunk's submits, not scale with the (unchanged) token count: {submits_2chunks} vs 2 x {submits_long}. A CONSTANT excess (2 x n + c) is a fixed per-run cost baselined into the measurement, not a prefill regression - see the flush above.");
+            assert_eq!(submits_4chunks, 4 * submits_long, "kv_int8={kv_int8}: 4 chunks must cost exactly 4 x 1 chunk's submits - prefill cost must be proportional to chunks, with no fixed term: {submits_4chunks} vs 4 x {submits_long}");
         }
     }
 

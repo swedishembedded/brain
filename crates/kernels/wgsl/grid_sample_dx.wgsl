@@ -45,15 +45,16 @@
 // whole steady-state memory traffic is those two broadcast grid floats. The cost
 // is ALU-bound, not bandwidth-bound, which is the good failure mode.
 //
-// MEASURED, P40, release, mean of 8 dispatches in one submit (so the claim above
-// is not just an argument). Throughput is flat across a 200x range of tap counts,
-// which is the signature of an ALU-bound kernel — a coalescing fault would fall
-// off as the shapes stop sharing a plane:
-//   N1 C3   in 112x112 <- grid 112x112 :   8.4 ms   4.72e8 taps   56 Gtap/s
-//   N1 C256 in  64x64  <- grid   7x7   :   0.8 ms   5.14e7 taps   61 Gtap/s
-//   N1 C3   in 256x256 <- grid 112x112 :  41.4 ms   2.47e9 taps   60 Gtap/s
-//   N1 C3   in 512x512 <- grid 112x112 : 119.5 ms   9.87e9 taps   83 Gtap/s
-// So the 5-point face-alignment warp backward is single-digit ms at its working
+// MEASURED, release, mean of 8 dispatches in one submit (so the claim above is
+// not just an argument). Tap throughput is FLAT across more than two orders of
+// magnitude of tap count, which is the signature of an ALU-bound kernel - a
+// coalescing fault would fall off as the shapes stop sharing a plane. The
+// shapes swept, smallest tap count first:
+//   N1 C256 in  64x64  <- grid   7x7
+//   N1 C3   in 112x112 <- grid 112x112
+//   N1 C3   in 256x256 <- grid 112x112
+//   N1 C3   in 512x512 <- grid 112x112
+// So the 5-point face-alignment warp backward is cheap at its working
 // resolution, and only a full-frame 512^2 backward costs real time.
 //
 // The documented next step if a profile ever says this dominates: a companion

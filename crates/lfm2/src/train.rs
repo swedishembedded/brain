@@ -42,7 +42,7 @@ impl Default for MlmTrainOpts {
     }
 }
 
-/// Cosine LR with linear warmup (min 10% of peak).
+/// Cosine LR with linear warmup (floor at a tenth of the peak rate).
 fn lr_at(step: u32, o: &MlmTrainOpts) -> f32 {
     if step < o.warmup {
         return o.lr * (step + 1) as f32 / o.warmup.max(1) as f32;

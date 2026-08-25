@@ -54,7 +54,7 @@
 //! (`# commitment cost used in loss term, beta * ||z_e(x)-sg[e]||^2`) — the
 //! comment and the code disagree, and `basicsr`'s executed code is what trained
 //! `codeformer.pth` / `vqgan_code1024.pth`, so the code wins. Getting this
-//! backwards changes the codebook/encoder pull ratio by `1/beta^2` = 16x and is
+//! backwards changes the codebook/encoder pull ratio by `1/beta^2`, i.e. sixteenfold, and is
 //! invisible to a finite-difference check, which only gates the backward against
 //! whatever forward is emitted.
 //!

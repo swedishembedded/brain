@@ -158,7 +158,7 @@ fn base_opts() -> GenOpts {
 ///
 /// The saturation ratio is the discriminating measurement (1.004 vs 1.489
 /// against a 1.08 bound); the pixel delta is the corroborating one, and its
-/// bound sits 2.6x above what a correct run produced and 1.8x below what the
+/// bound sits well above what a correct run produced and well below what the
 /// defect produced. A ratio near 1.42 is the defect's own signature - see
 /// this file's module doc.
 const MAX_SATURATION_RATIO: f64 = 1.08;

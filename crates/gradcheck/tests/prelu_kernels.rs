@@ -98,8 +98,9 @@ fn skip() -> bool {
 /// load-bearing here and nowhere more so: with a one-sided (negative-only)
 /// stream the `x > 0` branch is never taken, and a kernel that computed
 /// `a[c] * x` unconditionally would pass every forward and backward test in
-/// this file. Measured over every seed and shape used below: 50.9% positive,
-/// and no exact zeros, so the `x == 0` tie-break never decides an assertion.
+/// this file. Measured over every seed and shape used below: about half the
+/// inputs are positive and none is an exact zero, so the `x == 0` tie-break
+/// never decides an assertion.
 fn dot(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| x as f64 * y as f64).sum()
 }

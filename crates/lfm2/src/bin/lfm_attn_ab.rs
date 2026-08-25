@@ -7,8 +7,8 @@
 //! Why this exists: `crates/lfm/src/model.rs` registered `flash_attn_bidir` and
 //! never dispatched it, and the roadmap recorded "flash measured
 //! ≈ naive here". That measurement predates `flash_attn_bidir_split`, which is
-//! numerically identical (cosine 1.00000000) but 14.4× the baseline at
-//! `head_dim = 64` — and 64 is exactly lfm's `head_dim`. So the recorded
+//! numerically identical (cosine 1.00000000) but an order of magnitude ahead of
+//! the baseline at `head_dim = 64` - and 64 is exactly lfm's `head_dim`. So the recorded
 //! conclusion does not transfer, and the choice has to be re-measured.
 //!
 //! The comparison is **like for like**: the GEMM path packs straight from the

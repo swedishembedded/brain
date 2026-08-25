@@ -137,7 +137,7 @@ fn qwen35_layer_bytes() -> Vec<u64> {
 /// [`Run`]'s pure reload-COUNT sibling, extended with the real bytes moved.
 /// `churn_overhead` (count-based) and `bytes_churn_overhead` (byte-weighted)
 /// are reported side by side so a reader can see directly whether qwen35's
-/// real ~372-383 MB per-layer spread (a real, but small - ~3% - heterogeneity)
+/// real ~372-383 MB per-layer spread (a real, but small, heterogeneity)
 /// changes which policy wins, rather than a doc merely asserting it doesn't.
 #[derive(Clone, Debug)]
 pub struct ByteRun {
@@ -311,10 +311,10 @@ mod tests {
         }
     }
 
-    /// The real, measured answer to "does qwen35's real ~3% per-layer byte
-    /// spread change the picture a uniform-cost model would give": no - at
-    /// every budget tested, the byte-weighted and count-weighted overhead
-    /// ratios agree to within 1%, because Lru's real reload set (every group,
+    /// The real, measured answer to "does qwen35's small per-layer byte spread
+    /// change the picture a uniform-cost model would give": no - at every
+    /// budget tested, the byte-weighted and count-weighted overhead ratios
+    /// agree closely, because Lru's real reload set (every group,
     /// every pass, at any budget < n_groups - `weightset`'s own doc) touches
     /// a near-average mix of GDN/GQA layers regardless of budget.
     #[test]

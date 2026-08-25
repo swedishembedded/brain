@@ -50,8 +50,8 @@
 //! interpolation has negative lobes and therefore **rings past the source range
 //! at a hard edge** - which is what a document scan is made of. Measured here on
 //! a synthetic page at `1600x1131 -> 1024²`: the normalized output spanned
-//! `[-1.176, 1.191]` where the checkpoint's range is `[-1, 1]` - a ~9.6 %
-//! overshoot of the source range, entirely at the text edges. [`clamp01`] is
+//! `[-1.176, 1.191]` where the checkpoint's range is `[-1, 1]`, an overshoot
+//! of the source range entirely at the text edges. [`clamp01`] is
 //! what makes the range match the reference's; it is a fidelity step, not
 //! defensive tidiness.
 //!
@@ -62,7 +62,7 @@
 //! whole trick: **normalize first, then pad**, and zero *is* the mean-grey
 //! border, exactly. (The reference quantises its border to `127/255 = 0.498039`
 //! before normalizing, so its padded pixels land at `-0.00392` rather than at
-//! `0.0`. A ~0.4 % offset confined to the letterbox bars; ours is the exact
+//! `0.0`. A tiny offset confined to the letterbox bars; ours is the exact
 //! value upstream's `int(mean * 255)` is an 8-bit approximation of.)
 //!
 //! ## Scope
@@ -189,7 +189,7 @@ pub fn preprocess_to(gpu: &Gpu, hwc: &[f32], w: u32, h: u32, out_w: u32, out_h: 
     // Cubic interpolation has negative lobes, so at a hard edge -- exactly what
     // a document scan is made of -- it RINGS past the source range. Measured on
     // a synthetic page: the normalized output spanned [-1.176, 1.191] against a
-    // checkpoint range of [-1, 1], a ~9.6% overshoot of the source range. The
+    // checkpoint range of [-1, 1], overshooting the source range. The
     // reference cannot ring, because its resampler's output is a `clip_image_u8`
     // and 8-bit saturation clamps it before `from_u8` ever runs. So this clamp
     // is not defensive tidiness, it is the step that makes the value range match

@@ -39,7 +39,7 @@ fn real_paths() -> Option<wan::Paths> {
 /// Paraphrases of the concept, deliberately distinct from
 /// `data::gen_clips::CONCEPT_CAPTIONS` - a held-out prompt has to exercise
 /// generalisation, not recite a memorised training string.
-// Only PROMPTS cost a umT5 forward each (~1 min); SEEDS are free extra
+// Only PROMPTS cost a umT5 forward each, and that forward is slow; SEEDS are free extra
 // (prompt, seed) pairs for the paired test - they reuse the same prompt
 // embedding through a cheap GPU denoise, so more seeds is how this gate buys
 // power without buying more umT5 time.

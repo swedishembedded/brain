@@ -5,7 +5,7 @@
 //!
 //! Isolated startup time is not the same as steady-state throughput, and it is
 //! what decides whether autoscaling is economically useful: a replica that takes
-//! 40 s to become useful cannot absorb a traffic spike, however fast it runs
+//! a long time to become useful cannot absorb a traffic spike, however fast it runs
 //! afterwards. It is also where `precompile` and pipeline caching pay off.
 //!
 //! Four phases are timed separately, because they have different fixes:

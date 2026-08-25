@@ -8,7 +8,7 @@
 //! GPT engine on `BRAIN_DEVICE` → score exact-match of the full tool call on
 //! held-out sequences) and asserts accuracy clears a calibrated threshold far
 //! above chance. Skipped when `MOE_SKIP_GPU_TESTS` is set, so the suite stays
-//! runnable with no accelerator. Sized to finish in ~1-2 min on the CPU backend.
+//! runnable with no accelerator. Sized to finish in minutes on the CPU backend.
 
 use bench::toolcall::Toolcall;
 use bench::Benchmark;

@@ -58,7 +58,7 @@ pub fn catalogue(n: usize, budget: u64, over: f64, alpha: f64) -> Vec<CatalogEnt
             CatalogEntry {
                 name: format!("model{i:02}"),
                 bytes,
-                // ~1 GB/s activation, floored so tiny models still cost something.
+                // A nominal activation rate, floored so tiny models still cost something.
                 load_ms: (bytes as f64 / 1e6).max(5.0),
                 weight: 1.0 / ((i + 1) as f64).powf(alpha),
             }

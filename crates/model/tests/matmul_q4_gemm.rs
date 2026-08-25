@@ -11,7 +11,7 @@
 //! here -- the right one is a whole-tensor similarity, the same choice
 //! `crates/zimage/tests/int8_matmul.rs` makes for int8. Measured on these
 //! tiny synthetic shapes: cosine consistently >= 0.999 and relative-L2 well
-//! under 10% (both printed below) -- LOWER than "4-bit is famously lossy"
+//! under a tenth (both printed below) -- LOWER than "4-bit is famously lossy"
 //! might suggest, because per-CHANNEL scaling (not per-tensor) keeps a single
 //! outlier row from crushing the rest of that row's resolution, exactly as
 //! `model::int8::quantize_weight`'s own doc explains for int8. A test that

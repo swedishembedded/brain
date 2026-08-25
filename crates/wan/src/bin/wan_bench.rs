@@ -385,7 +385,7 @@ fn bench_flash(reps: usize, t: u32, nh: u32, hd: u32) {
     println!("\n=== bidirectional flash attention: T={t} heads={nh} head_dim={hd} ===");
     match roof {
         Some(r) => println!("measured roof: {:.0} GFLOP/s fp32, {:.0} GB/s DRAM", r.gflops, r.gbs),
-        None => println!("measured roof unavailable - grading against a 11.76 TFLOP/s P40 fallback"),
+        None => println!("measured roof unavailable - grading against the P40 datasheet fallback"),
     }
 
     let d = nh * hd;

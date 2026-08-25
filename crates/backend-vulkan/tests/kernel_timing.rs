@@ -7,7 +7,8 @@
 //! defaults (`false`/`None`), so `gpu_core::profile` fell back to host-
 //! bracketed group times on this backend — which the wgpu-side lesson
 //! already measured inflating small
-//! kernels up to 29x, meaning the *ranking*, not just the precision, was
+//! kernels by more than an order of magnitude, meaning the *ranking*, not just
+//! the precision, was
 //! wrong. These tests pin the real `vkCmdWriteTimestamp`-based
 //! implementation across both `flush()` paths (batched, and the
 //! Intel-ANV-workaround serialized path).

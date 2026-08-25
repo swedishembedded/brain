@@ -1335,10 +1335,9 @@ impl DeepseekV2 {
                 // non-selected experts' dispatches by reading `gate` back to
                 // the host per layer (mirroring `crates/glm`'s
                 // `forward_compact`/`model::moe::expert_fwd_compact` trade).
-                // `moe_linear_gated` call count dropped 67584 -> 8250
-                // (~8.2x), but its OWN total time was unchanged (23.3s ->
-                // 23.5s) and the whole decode's profiled total went UP
-                // (34.9s -> 39.3s): the per-row gate check inside
+                // `moe_linear_gated` call count dropped 67584 -> 8250, but
+                // its OWN total time was unchanged and the whole decode's
+                // profiled total went UP: the per-row gate check inside
                 // `moe_linear_gated.wgsl` already makes a non-selected
                 // expert's dispatch cheap, so the real cost was the
                 // SELECTED experts' compute all along, and the 352 extra

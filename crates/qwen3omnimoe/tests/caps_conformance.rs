@@ -28,7 +28,8 @@ fn omni_manifest_is_chat_exposed() {
 /// Spec: the GPU-resident int8 Thinker is reachable over the SAME chat
 /// surfaces as `brain/qwen3omnimoe`. It used to declare raw blob actions only, so
 /// `/v1/chat/completions` 404'd the one model on this box fast enough to be
-/// worth calling (~25x the streaming path's tokens/second on two P40s) - the
+/// worth calling (more than an order of magnitude on the streaming path's
+/// tokens per second, on two P40s) - the
 /// speed was unreachable through the interface anyone actually uses.
 #[test]
 fn int8_thinker_manifest_is_chat_exposed() {

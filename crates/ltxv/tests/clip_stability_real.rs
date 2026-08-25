@@ -16,8 +16,8 @@
 //! # What this catches that nothing else did
 //!
 //! The defect this file exists for was a real, user-reported 1080p
-//! regression: the first ~0.7 s of a 1-second clip was correct and the last
-//! several frames were visibly warped and smeared. It passed everything.
+//! regression: most of a one-second clip was correct and the last several
+//! frames were visibly warped and smeared. It passed everything.
 //! `vae_tiling`'s gates passed because the decoder was innocent.
 //! `motion_real` passed because the clip DID move - peak excursion is a
 //! floor, and a clip that runs away from frame 0 scores BETTER on it the
@@ -87,9 +87,9 @@ const SEED: u64 = 42;
 const PROMPT: &str = "a Belgian Malinois running at super speed alongside a flying NVIDIA P40 GPU with wings, camera tracking at the dog's speed, motion-blurred background";
 
 /// Calibrated by running this exact shape BOTH ways (see this file's doc):
-/// every healthy real clip measured on this port scores 1.02-1.06, the
-/// single-stage 1080p defect scores 14.66. `4.0` is ~4x above anything
-/// healthy and ~3.7x below the defect.
+/// every healthy real clip measured on this port scores just above 1, and the
+/// single-stage 1080p defect scores an order of magnitude higher. `4.0` sits
+/// far above anything healthy and far below the defect.
 const BOUND: f32 = 4.0;
 
 /// A clip has to have motion for the ratio to mean anything - a frozen clip

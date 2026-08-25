@@ -658,8 +658,8 @@ fn run_bench_eval(args: &[String]) {
 /// `brain bench scale --arch <name> [--seed S] [--out <path>]` - the
 /// per-capability predictive-scaling sweep: train+score one representative
 /// benchmark per capability axis across a small SIZE grid, fit how each axis's
-/// score scales with params N, extrapolate the predicted score at 2×/4× the
-/// largest N, print the per-axis curves, and write
+/// score scales with params N, extrapolate the predicted score at twice and
+/// four times the largest N, print the per-axis curves, and write
 /// `results/scale-<arch>-<seed>.json`.
 fn run_bench_scale(args: &[String]) {
     let mut arch = "gpt2".to_string();

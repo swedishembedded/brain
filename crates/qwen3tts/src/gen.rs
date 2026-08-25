@@ -460,7 +460,7 @@ impl TalkerGen {
     /// Build the decode tape ONCE: constant-shape steps bake their uniforms; the
     /// seven position-dependent steps per layer bind reusable uniform buffers that
     /// [`Self::decode_cached`] refreshes each token. Reused across all tokens, this
-    /// removes the ~34ms/token host tape-rebuild the profiler flagged.
+    /// removes the per-token host tape-rebuild the profiler flagged.
     fn build_dec_cache(&self) -> (Vec<Step>, Vec<(DeviceBuffer, PosUniform)>) {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);

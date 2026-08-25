@@ -63,7 +63,7 @@ def check_trunk(path, device):
         worst = max(abs(float(flat[j]) - v) for j, v in zip(s["indices"], s["values"]))
         # NPU is fp16-only; drift grows with depth (measured median relative
         # error 5e-4 at tap0 rising to 2.5e-2 at tap3 after 48 attention
-        # blocks, per-row cosine >= 0.9990, rms within 0.55%).
+        # blocks, per-row cosine >= 0.9990, rms within a percent).
         rms_tol, tol = (0.02, 2e-1) if device == "NPU" else (0.002, 3e-3)
         print(f"tap{i}: rms {rms:.6f} (golden {s['rms']:.6f}), worst sampled abs diff {worst:.2e}")
         if abs(rms - s["rms"]) > rms_tol * abs(s["rms"]) or worst > tol:
@@ -149,8 +149,8 @@ def main():
     for i, v in zip(s["indices"], s["values"]):
         worst = max(worst, abs(float(flat[i]) - v))
     # The Intel NPU executes fp16 only (it rejects INFERENCE_PRECISION_HINT
-    # f32), so a 24-block residual stream accumulates ~2-3x fp16 eps of
-    # relative error — measured median 1.3e-3 on significant values, with
+    # f32), so a 24-block residual stream accumulates a small multiple of fp16
+    # eps of relative error - measured median 1.3e-3 on significant values, with
     # per-token cosine similarity >= 0.99985 vs the fp32 CPU run. Gate the
     # NPU on that reality instead of the fp32 tolerance.
     tol = 5e-2 if device == "NPU" else 5e-4

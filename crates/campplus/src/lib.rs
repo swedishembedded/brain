@@ -5,7 +5,7 @@
 //! x-vector out. D-TDNN backbone (dense TDNN blocks with growth-rate
 //! concatenation) fed by a 2-D conv stem (`FCM`), with **context-aware
 //! masking** (`CAMLayer`) - a per-position gate computed from the global mean
-//! plus a 2 s segment-pooled mean - gating each depthwise TDNN branch instead
+//! plus a two-second segment-pooled mean - gating each depthwise TDNN branch instead
 //! of the plain per-channel SE gate the name might suggest.
 //!
 //! Ported for [`crate::cosyvoice`](../cosyvoice/index.html) (CosyVoice 2 and

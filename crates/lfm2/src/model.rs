@@ -101,23 +101,26 @@ const ROW_SCATTER: usize = 50;
 // `block::flash_bidir_variant` picks between them from the device's queried
 // `max_workgroup_size`, and only the split one is worth taking here:
 //
-//   T=8192, d_model 1024, 16 heads, head_dim 64, chunk 1024, Tesla P40, fp32
-//   (`cargo run --release -p brain-lfm --bin lfm_attn_ab -- 8192 5`)
-//     gemm_bidir_fwd (was)               1185.10 ms    232 GFLOP/s   1.97% peak
-//     kv_expand + flash_bidir_split       274.17 ms   1003 GFLOP/s   8.53% peak  4.32x
-//     kv_expand + flash_bidir (baseline) 3722.48 ms     74 GFLOP/s   0.63% peak  0.32x
-//     kv_expand alone                       1.07 ms   (included in both flash rows)
+//   T=8192, d_model 1024, 16 heads, head_dim 64, chunk 1024, fp32, A/B'd by
+//   `cargo run --release -p brain-lfm --bin lfm_attn_ab -- 8192 5` - re-run
+//   that rather than trusting a figure written down here. What the selection
+//   below rests on is the RANKING, which held across every repeat run:
+//     kv_expand + flash_bidir_split       fastest by a wide margin
+//     gemm_bidir_fwd (was)                the previous choice
+//     kv_expand + flash_bidir (baseline)  slower than either, because its
+//                                         per-thread `q[128]`/`o[128]` arrays
+//                                         fall out of Pascal's registers
+//     kv_expand alone                     negligible beside either flash row
 //   agreement gemm vs split: cosine 1.0000000000, max_abs 1.9e-6.
 //
-//   Re-measured twice since on the same box: the split row reproduces to 0.2%
-//   (274.73 / 274.68 ms) but the GEMM row swings 9% (1194.77 / 1090.09 ms), so
-//   the ratio is 3.97-4.35x and the honest claim is "about 4x". The direction
-//   never moves; the direction held across a three-run table.
+//   Repeat runs on the same box: the split row reproduces tightly, the GEMM
+//   row is the noisy one, so quote the direction and not a ratio. The
+//   direction never moves.
 //
 // The ledger's old "flash measured ~= naive here" was measured against the
 // BASELINE kernel, whose per-thread `q[128]`/`o[128]` arrays fall out of
-// registers - the bottom row above, and 3.1x SLOWER than the GEMM path. It does
-// not transfer to the split kernel, which is ~4x FASTER. So the gate below is
+// registers - the bottom row above, well behind the GEMM path. It does not
+// transfer to the split kernel, which is the fastest of the three. So the gate below is
 // "the split kernel is actually selectable", not "the device is cooperative":
 // on a device that can only run the baseline, GEMM still wins and is kept.
 const FLASH_BIDIR: usize = 51;
@@ -781,7 +784,7 @@ impl Lfm {
 
     /// Whether the fused flash path is worth taking on THIS device: only when
     /// `block::flash_bidir_variant` resolves to something better than the
-    /// BASELINE kernel. That kernel is 3.1x SLOWER than `gemm_bidir_fwd` at
+    /// BASELINE kernel. That kernel measured SLOWER than `gemm_bidir_fwd` at
     /// lfm's shape (see the `FLASH_BIDIR` comment), so "cooperative device" is
     /// not the gate - "the selector found a lane-split variant" is, and the
     /// test is written against `FLASH_BIDIR` rather than against whichever

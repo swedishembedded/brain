@@ -12,7 +12,7 @@
 //! mod_add is the grokking task and is the slowest of the formal-language
 //! benchmarks: generalizing on a held-out fact partition needs the full
 //! d_model-128 model and a few thousand steps. The test uses a smaller modulus
-//! (`p=17`) and fewer steps than the registered default to keep it ~4-5 min on
+//! (`p=17`) and fewer steps than the registered default to keep it to minutes on
 //! the CPU backend while still generalizing to ~0.79 test accuracy.
 
 use bench::mod_add::ModAdd;

@@ -83,9 +83,9 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f64 {
 /// builder's pool is off), and a 512² graph with all 50 block outputs live is
 /// **6.9 GB measured on a P40**. The default `--test-threads` is the core count
 /// (48 on this box), so all three ran at once and the suite peaked at
-/// **22.2 GB of the card's 24.5 GB** — 90% occupancy, with a full-suite run
-/// observed failing once under concurrent GPU load and not reproducing in 11
-/// retries. Serialized, the suite peaks at ~7 GB and leaves the card usable.
+/// **22.2 GB of the card's 24.5 GB** - nearly the whole card, with a full-suite
+/// run observed failing once under concurrent GPU load and not reproducing in
+/// 11 retries. Serialized, the suite peaks at ~7 GB and leaves the card usable.
 fn heavy() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -350,10 +350,11 @@ fn e2e_512(variant: &str, fixture: &str) {
     // barriers), so every GroupNorm falls back to `gn_stats`, which sums a
     // group's up-to-16 M elements as ONE serial ascending run instead of a
     // 256-way tree. Measured worst relative L2 at 512²: **1.8e-5 on the GPU,
-    // 4.3e-4 on the CPU JIT** — a 24x accuracy gap that is pure summation
-    // order, not a port defect (indices still match 0/256, cosine still
-    // 0.9999999). 3e-3 keeps ~7x headroom over the worst backend while staying
-    // ~300x tighter than any magnitude error worth the name.
+    // 4.3e-4 on the CPU JIT** - an accuracy gap of more than an order of
+    // magnitude that is pure summation order, not a port defect (indices still
+    // match 0/256, cosine still 0.9999999). The 3e-3 bound below keeps real
+    // headroom over the worst backend while staying far tighter than any
+    // magnitude error worth the name.
     rep.finish(&format!("{variant} {fixture}"), 0.9999, 3e-3);
 }
 

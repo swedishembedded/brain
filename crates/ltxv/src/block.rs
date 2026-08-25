@@ -127,8 +127,8 @@ const K_MATMUL_Q4_DYN: usize = 14;
 /// The fp32 fast-tier GEMM pair `linear()` now selects between via
 /// `model::block::gemm_variant` (Phase 8 finding: `linear()` used to
 /// hardcode `K_MATMUL`, the one-thread-per-output reference kernel,
-/// unconditionally - measured ~14 GFLOP/s, 0.1% of this device's roofline,
-/// on every fp32 projection in the block. `matmul_reg3`/`matmul_gemv` are
+/// unconditionally - measured at roughly a thousandth of this device's
+/// roofline on every fp32 projection in the block. `matmul_reg3`/`matmul_gemv` are
 /// the same pipelines `crates/wan/src/block.rs::Sel::new` registers for the
 /// identical 10-linear block shape - see that module's `Sel`/`GemmVariants`
 /// precedent, which this mirrors). Only the fp32 reference path
@@ -140,10 +140,10 @@ const K_MATMUL_REG3: usize = 15;
 const K_MATMUL_GEMV: usize = 16;
 /// Phase 8 finding #2: `attn_scores_cross` parallelises over the KEY index
 /// and reduces over `head_dim`, so at THIS crate's real width (heads=32,
-/// head_dim=128, 1024-token self-attention) it measured 45 GFLOP/s - 0.4% of
-/// this device's roofline - and was the single largest kernel in a whole-pass
-/// profile (54.4% of `ltxv_bench dit`'s real-width total), ahead of even the
-/// pre-fix naive `matmul`. `attn_scores_cross.wgsl`'s OWN doc already names
+/// head_dim=128, 1024-token self-attention) it measured a fraction of one
+/// percent of this device's roofline and was the single largest kernel in a
+/// whole-pass profile (more than half of `ltxv_bench dit`'s real-width
+/// total), ahead of even the pre-fix naive `matmul`. `attn_scores_cross.wgsl`'s OWN doc already names
 /// the fix: transpose K to key-minor once (`kv_k_headt`) so the score sweep's
 /// reads coalesce (`attn_scores_cross_kt`) - the same defect and the same fix
 /// `crates/wan/src/block.rs` already carries (`K_XSCORES_KT`/`kv_k_headt`).
@@ -155,7 +155,8 @@ const K_KV_K_HEADT: usize = 17;
 const K_ATTN_SCORES_CROSS_KT: usize = 18;
 /// Phase 8 finding #3: with #2 fixed, `attn_softmax_cross` (one THREAD per
 /// row, 3 serial `t_enc`-wide passes) became the new #2 kernel by share
-/// (25.3% of a real-width whole pass) at only 2.1% of the measured roof.
+/// (about a quarter of a real-width whole pass) at only a couple of percent
+/// of the measured roof.
 /// `softmax_rows.wgsl`'s own doc names `attn_softmax_cross` as exactly the
 /// kernel it exists to replace (one WORKGROUP per row instead of one
 /// thread), gated behind `DeviceCaps::workgroup_reductions` the same way
@@ -163,10 +164,10 @@ const K_ATTN_SCORES_CROSS_KT: usize = 18;
 /// here rather than re-derived.
 const K_SOFTMAX_ROWS: usize = 19;
 /// Phase 9 finding: with #2 and #3 fixed, `attn_apply_cross` +
-/// `attn_scores_cross_kt` + `softmax_rows` were **78.7% of GPU kernel time**
-/// at the real 720p token count (T=3520, heads=32, head_dim=128, measured on
-/// a Tesla P40 by `ltxv_bench streamed 8 3520 1024 1` against the real Q8_0
-/// 22B checkpoint) - because SELF-attention is O(T²) in the video token count
+/// `attn_scores_cross_kt` + `softmax_rows` were **the overwhelming majority
+/// of GPU kernel time** at the real 720p token count (T=3520, heads=32,
+/// head_dim=128, measured by `ltxv_bench streamed 8 3520 1024 1` against the
+/// real Q8_0 22B checkpoint) - because SELF-attention is O(T²) in the video token count
 /// where every other kernel in the block is O(T), so it overtakes the whole
 /// block once T passes a few thousand. The materialized `[32, 3520, 3520]`
 /// score AND probability slabs are 1.59 GiB *each*.
@@ -193,8 +194,8 @@ const K_FLASH_REG2: usize = 24;
 /// row out of it, and `add_chan_bcast`/`broadcast_add_hw` are NCHW spatial
 /// ops; none can produce a dense `[t, dim]` plane out of a `[t, 9, dim]`
 /// table). It replaces the per-block HOST `add_table` + `slice_mod` +
-/// nine-vector upload that a real 48-layer 720p forward spent 36.0 s of 103.3 s
-/// on, plus ~25 GB of PCIe traffic per forward, for a table whose only
+/// nine-vector upload that a real 48-layer 720p forward spent about a third of
+/// its wall clock on, plus ~25 GB of PCIe traffic per forward, for a table whose only
 /// per-block input is a 147 KB `scale_shift_table`. Appended, so every index
 /// above is unchanged.
 const K_ADALN_ROW: usize = 25;
@@ -721,8 +722,8 @@ fn slice_mod(combined: &[f32], t: usize, dim: usize) -> Mod {
 /// * [`ModBufs::derive`] computes them ON the card from the model-level adaLN
 ///   table (uploaded ONCE per forward) and this block's own 147 KB
 ///   `scale_shift_table`, via `adaln_row`. Same numbers, no host combine and no
-///   per-block upload - measured at 36.0 s of host time plus ~25 GB of PCIe
-///   traffic removed from one real 48-layer 720p forward.
+///   per-block upload - measured as roughly a third of one real 48-layer 720p
+///   forward's wall clock, plus ~25 GB of PCIe traffic, removed.
 struct ModBufs {
     shift_msa: DeviceBuffer,
     one_plus_scale_msa: DeviceBuffer,
@@ -1918,8 +1919,8 @@ fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, one
 /// Four buckets, because a real 48-layer forward at the production token count
 /// splits between them in a way that is not guessable and was in fact guessed
 /// WRONG once (device residency was built on the belief that the ~270 MB
-/// per-block WEIGHT upload dominated; it turned out to be ~9 s of a ~99 s
-/// bucket). Each boundary is chosen so the split is exact rather than
+/// per-block WEIGHT upload dominated; it turned out to be under a tenth of
+/// the forward it was blamed for). Each boundary is chosen so the split is exact rather than
 /// plausible - see [`LtxBlockQ::forward_timed`]'s body for why the recording
 /// span really is the upload span.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1940,8 +1941,9 @@ pub struct BlockTimings {
     /// whole forward; for the tap-producing path
     /// ([`LtxBlockQ::forward_timed`]) it is the three parity TAP readbacks
     /// (`attn1_out`/`attn2_out`/`ff_out`), each a full `[t, dim]`, per block -
-    /// all three of which a production forward discards, and which were 11.7 s
-    /// of a 103.3 s real 48-layer 720p forward before the chained path existed.
+    /// all three of which a production forward discards, and which were better
+    /// than a tenth of a real 48-layer 720p forward before the chained path
+    /// existed.
     pub readback: std::time::Duration,
 }
 
@@ -1993,8 +1995,8 @@ impl LtxBlockQ {
     /// carried over from a PREVIOUS denoise step by
     /// [`crate::dit::forward_q_streamed`]'s per-generation cache). No GGUF
     /// read, no CPU quantization - only device uploads of already-quantized
-    /// host bytes, which is what turns the ~86% of a real denoise step that
-    /// Phase 8 attributed to GGUF read+dequant+quantize into a one-time cost
+    /// host bytes, which is what turns the dominant share of a real denoise
+    /// step that Phase 8 attributed to GGUF read+dequant+quantize into a one-time cost
     /// paid on a generation's first forward call instead of on every one of
     /// its ~20-50 steps.
     pub fn on_cached(gpu: Gpu, cfg: &LtxDitConfig, cached: &CachedQBlockWeights, tokens: u32, context_len: u32, tier: QTier) -> LtxBlockQ {
@@ -2102,20 +2104,21 @@ impl LtxBlockQ {
     ///   [`ModBufs::derive`] computes the same nine `[t, dim]` vectors on the
     ///   card from `adaln_buf` (uploaded once per FORWARD) and this block's
     ///   resident `scale_shift_table`. At the real 22B/720p shape the host
-    ///   combine+slice alone was 36.0 s of a 103.3 s forward, on top of ~25 GB
+    ///   combine+slice alone was about a third of a forward, on top of ~25 GB
     ///   of PCIe traffic;
     /// * it does not upload the text context, which is uploaded once per
     ///   forward instead of once per block (~0.8 GB saved);
     /// * it does not read back the three parity TAPS, which a production
-    ///   forward discards - 11.7 s and 8.3 GB of readback per forward.
+    ///   forward discards - better than a tenth of a forward, and 8.3 GB of
+    ///   readback, per forward.
     ///
     /// What it DOES still do is read `x` back to the host and take it back as
     /// host floats, and that is deliberate and was measured both ways. Leaving
     /// `x` on the card across all 48 blocks removes ~5.6 GB of round trip per
-    /// forward and saves about 3 s - but it also removes the one BLOCKING
+    /// forward and does save time - but it also removes the one BLOCKING
     /// READBACK per block that makes wgpu's allocator pool shrink, and the pool
     /// then grows from 5.7 GiB to 16.5 GiB. That extra ~10 GiB is worth ~38
-    /// resident blocks, i.e. far more than the 3 s it buys. See this crate's
+    /// resident blocks, i.e. far more than the time it buys. See this crate's
     /// roadmap ledger, Phase 18, for the numbers on both arms.
     ///
     /// Bit-identical to [`Self::forward_timed`] by construction - same kernels,
@@ -2151,7 +2154,7 @@ impl LtxBlockQ {
         // bearing rather than incidental: on a non-ReBAR Pascal card under the
         // default wgpu backend, `write_buffer` staging and dropped buffers are
         // only retired by a blocking readback, and an uploaded storage buffer
-        // otherwise costs 2.00x its size resident (measured directly by
+        // otherwise costs twice its size resident (measured directly by
         // `crates/gpu-core/tests/vram_overhead.rs`). One readback per block is
         // what keeps the allocator's pool at 5.7 GiB instead of letting it
         // grow to 16.5 GiB.

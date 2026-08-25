@@ -61,8 +61,8 @@ pub struct Options {
     /// Override the workload's output length.
     ///
     /// Run time is dominated by output length × per-artifact cost, not by
-    /// request count: 256 output tokens at 90 ms/token is 23 s *per request*
-    /// however few requests you run. Shortening the output is what makes an
+    /// request count: at a decoder's real per-token cost, a few hundred output
+    /// tokens is a long wait *per request* however few requests you run. Shortening the output is what makes an
     /// iteration loop fast, and it leaves the *rates* (out/s, IAL) comparable
     /// while making TTFA-relative-to-E2E incomparable — so the override is
     /// recorded in the artifact.
@@ -108,10 +108,10 @@ impl Options {
         // run time, prompt length (prefill) and output length (decode) do.
         // A prior version of this capped only output_override -- on a real
         // checkpoint through the CPU JIT backend, `chat`'s uncapped 1024-token
-        // prompt meant a "smoke" latency run's TTFA (prefill) alone measured
-        // ~204s p50 (~284s e2e for 4 requests + 1 warmup), because prefill
-        // cost scales with input length regardless of how few output tokens
-        // follow it -- smoke shrinking output alone did nothing for it.
+        // prompt meant a "smoke" latency run's TTFA (prefill) alone dominated
+        // the whole run, minutes at a time, because prefill cost scales with
+        // input length regardless of how few output tokens follow it -- smoke
+        // shrinking output alone did nothing for it.
         self.input_override = Some(self.input_override.unwrap_or(8).min(8));
         self.output_override = Some(self.output_override.unwrap_or(8).min(8));
         self.soak_seconds = self.soak_seconds.min(2.0);
@@ -562,10 +562,9 @@ mod tests {
 
     /// REGRESSION: `smoke()` used to cap only `output_override`. `chat`'s real
     /// prompt length is 1024 tokens -- on a real checkpoint through the CPU
-    /// JIT backend that made a "smoke" latency run's TTFA (prefill) alone
-    /// measure ~204s p50 (~284s e2e for 4 requests + 1 warmup), because
-    /// prefill cost scales with input length regardless of how few output
-    /// tokens follow it. Smoke's whole point is CI-runnable in seconds, so
+    /// JIT backend that made a "smoke" latency run's TTFA (prefill) alone run
+    /// into minutes and dominate the whole run, because prefill cost scales
+    /// with input length regardless of how few output tokens follow it. Smoke's whole point is CI-runnable in seconds, so
     /// input must be capped exactly like output already was.
     #[test]
     fn smoke_caps_input_length_not_just_output() {

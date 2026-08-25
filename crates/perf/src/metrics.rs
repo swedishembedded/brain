@@ -365,7 +365,8 @@ mod tests {
         let base = Instant::now();
         let mut r = ReqRecord::new(0, 0, 1, false, base);
         r.first = Some(at(base, 10));
-        // Nine 1ms gaps and one 500ms stall: mean gap ~50ms, one gap catastrophic.
+        // Nine short gaps and one long stall: the mean gap looks unremarkable,
+        // one gap is catastrophic.
         let mut t = 10u64;
         r.artifacts.push(at(base, t));
         for i in 0..10 {

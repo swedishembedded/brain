@@ -22,8 +22,7 @@
 //! derivative — not because the gradient is wrong, but because the instrument is.
 //!
 //! Measured directly: SINGLE-element central FD at eps=1e-4 matches the analytic
-//! per element to ~2-6% (stem[2] 1.6%, stem[4] 0.9%), the only outliers on ReLU
-//! kinks. So this checks each tensor element-wise on a sample and requires a strong
+//! per element to within a few percent, the only outliers on ReLU kinks. So this checks each tensor element-wise on a sample and requires a strong
 //! majority within tolerance plus a tight MEDIAN — the same kink-tolerant criterion
 //! the block tests (`p2_strip`, `p2_fusion`'s SPPF) already use, for the same reason.
 //!
@@ -35,7 +34,7 @@
 //!
 //! Sabotage-verified: dropping a DOMINANT gradient path (the down4 -> stage3 main
 //! route) spikes every upstream tensor's median rel-err to >1.0 and fails the test
-//! in seconds. What a 15%-tolerant FD CANNOT independently detect is the omission
+//! in seconds. What an FD check at this tolerance CANNOT independently detect is the omission
 //! of a MINOR path — dropping the decoder's skip contribution to `s_half`'s
 //! gradient shifts stem_half by less than tolerance and passes. That skip is
 //! nonetheless present and correct: it is verified structurally (the forward
@@ -77,8 +76,8 @@ fn tiny() -> ZipConfig {
 /// cross-scale projection) needs a LARGE eps or round-off does — measured directly.
 /// So each element is checked against the rung that best resolves ITS magnitude.
 /// This does not launder a wrong gradient: an incorrect analytic is off by a
-/// roughly constant factor at EVERY eps (the directional check saw ~3x across the
-/// whole ladder), while a correct one lands on some rung. The block-level p2 tests
+/// roughly constant factor at EVERY eps (the directional check saw the same
+/// multiple across the whole ladder), while a correct one lands on some rung. The block-level p2 tests
 /// carry the rigorous per-unit proof; this is the full-model WIRING check.
 fn best_fd(gpu: &Gpu, ps: &ParamStore, w: &str, w0: &[f32], i: usize, analytic: f32, loss: &dyn Fn(&Gpu, &ParamStore) -> f32) -> f32 {
     let mut best = f32::INFINITY;
@@ -107,8 +106,9 @@ fn best_fd(gpu: &Gpu, ps: &ParamStore, w: &str, w0: &[f32], i: usize, analytic: 
 /// Focuses on the SIGNAL-carrying elements — those whose |gradient| is a meaningful
 /// fraction of the tensor's largest. Tiny-gradient elements (deep behind a saturated
 /// gate) are unresolvable by FD at any eps and carry almost no signal; a wiring bug
-/// corrupts the DOMINANT gradient (the directional check was off 3x on the
-/// aggregate), so the dominant cohort is exactly what catches it. Returns the
+/// corrupts the DOMINANT gradient (the directional check was off by a large
+/// constant factor on the aggregate), so the dominant cohort is exactly what
+/// catches it. Returns the
 /// agreement fraction over that cohort and its median relative error.
 fn agree_fraction(gpu: &Gpu, ps: &ParamStore, w: &str, loss: &dyn Fn(&Gpu, &ParamStore) -> f32) -> (f64, f32, usize) {
     let g = gpu.read(ps.g(w), ps.numel(w));
@@ -184,7 +184,8 @@ fn run(cfg: ZipConfig, seed: u64, tensors: &[&str]) {
         let (frac, median, n) = agree_fraction(&gpu, &ps, w, &loss);
         println!("{w:52} agree {:>3.0}% / {n}   median rel-err {median:.4}", frac * 100.0);
         // The MEDIAN is the robust signal: a wrong gradient shifts the whole
-        // distribution (the directional check was 3x off in the aggregate), not
+        // distribution (the directional check was off by a large constant
+        // factor in the aggregate), not
         // just the kink tail. 0.15 tolerates the hardest blocks — StripPoolingAtt's
         // per-channel gate is mostly saturated, so only ~1 channel carries signal
         // and its FD is noisy — while still catching any real wiring break.

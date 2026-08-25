@@ -17,11 +17,11 @@
 //! every call and re-upload all 48 already-quantized blocks - ~13 GB of int8
 //! bytes that a generation never changes - from the host-RAM
 //! [`crate::weightcache`] store to that fresh device, from scratch, on every
-//! one of a generation's 8-16 forwards. Measured on this box (2x Tesla P40,
+//! one of a generation's 8-16 forwards. Measured on this box (two Tesla P40s,
 //! PCIe, no NVLink), real `ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, all
 //! 48 layers, T=3520 (720p), cache-warm: the `block GPU upload+forward+wait`
-//! bucket was **104.0 s** of a 183 s call, against **~15.7 s** of real GPU
-//! kernel time in the same call. Nearly all of the difference is buffer
+//! bucket was **the majority of the call**, and real GPU kernel time in the
+//! same call was a small fraction of it. Nearly all of the difference is buffer
 //! creation + `queue.write_buffer` staging for weights that were already
 //! correct on the card one step earlier.
 //!
@@ -131,8 +131,8 @@ pub fn activation_reserve_bytes(t: usize, backend: &str) -> u64 {
     /// brain's own native Vulkan backend recycles transient buffers, uniforms
     /// and descriptor sets explicitly at every flush (`crates/vulkan`'s
     /// `VkContext` reclaim path) instead of growing an opportunistic pool, and
-    /// it does not carry wgpu's measured 2.00x per-uploaded-buffer resident
-    /// cost (`crates/gpu-core/tests/vram_overhead.rs`: 1.00x). Its churn is
+    /// it does not carry the doubled per-uploaded-buffer resident cost wgpu
+    /// measured (`crates/gpu-core/tests/vram_overhead.rs`). Its churn is
     /// therefore close to the working set rather than to the card, so the same
     /// card affords far more resident blocks. Sized from the analytic working
     /// set (`attn2`'s `[heads, t, context_len]` score+probability pair plus
@@ -438,9 +438,9 @@ impl DitSession {
         }
         let s = std::time::Instant::now();
         // A one-word probe to drain wgpu's `write_buffer` staging after every
-        // block - see `LtxBlockQ::forward_chained` for the measured 2.00x this
-        // exists to stop accruing. Without it, uploading 48 blocks of 270 MB
-        // reaches 24392 MiB of a 24576 MiB card and aborts.
+        // block - see `LtxBlockQ::forward_chained` for the measured doubling
+        // this exists to stop accruing. Without it, uploading 48 blocks of
+        // 270 MB reaches 24392 MiB of a 24576 MiB card and aborts.
         let probe = scratch.storage(1);
         for (idx, g) in pins {
             if !can_charge_a_block(scratch.memory_device(), per_block) {
@@ -525,9 +525,9 @@ impl DitSession {
         let adaln_buf = scratch.storage(adaln_table.distinct().len() as u64);
         // CHUNKED, not one `write_f32`: a table with as many distinct rows as
         // tokens is back to the dense size, and on a non-ReBAR card one giant
-        // `write_buffer` measured 7.6 s against 0.5 s chunked at 519 MB,
-        // because the staging allocation it needs is the same size as the
-        // payload. Same chunk size `paramstore`'s own weight-upload loop uses,
+        // `write_buffer` measured more than an order of magnitude slower than
+        // the chunked form at 519 MB, because the staging allocation it needs
+        // is the same size as the payload. Same chunk size `paramstore`'s own weight-upload loop uses,
         // for the same reason.
         scratch.write_f32_chunked(&adaln_buf, adaln_table.distinct(), 1 << 20);
         let adaln_map_buf = scratch.storage(adaln_table.row_of().len() as u64);
@@ -636,8 +636,8 @@ mod tests {
         assert!(slots_at(card, 3520) < cfg.num_layers, "720p must NOT plan a full window on a 24 GiB card - the measured plateau does not leave room");
         assert!(slots_at(card, 8160) <= slots_at(card, 3520), "a larger token count must never buy MORE resident blocks");
         assert_eq!(slots_at(1 << 30, 3520), 0, "a card smaller than the reserve must ask for zero slots, not a negative count");
-        // The native Vulkan backend reclaims transients explicitly and has no
-        // 2.00x resident cost, so the SAME card affords strictly more resident
+        // The native Vulkan backend reclaims transients explicitly and does not
+        // double resident bytes, so the SAME card affords strictly more resident
         // blocks there - the budget must not hardcode wgpu's pathology.
         let vk = |cap: u64, t: usize| (((cap.saturating_sub(activation_reserve_bytes(t, "vulkan")) / per_block).min(cap / 4 / per_block)) as u32).min(cfg.num_layers);
         assert!(vk(card, 3520) > slots_at(card, 3520), "the Vulkan backend must be budgeted more resident blocks than wgpu at the same shape");

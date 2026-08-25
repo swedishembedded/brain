@@ -43,7 +43,7 @@
 //
 // Threads are indexed by the col element, so the WRITE is fully coalesced and
 // the read gathers x in `K`-float runs - the same trade `im2col_at` measured
-// (its workgroup-staged tile was 273 -> 311 ms, i.e. slower, because the
+// (its workgroup-staged tile measured slower, not faster, because the
 // uncoalesced side is only ~K-fold amplified and the shared memory costs more
 // occupancy than it buys). Kept element-indexed for the same reason.
 //

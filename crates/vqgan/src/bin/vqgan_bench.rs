@@ -96,8 +96,8 @@ fn init_weights(cfg: &VqganConfig, seed: u64) -> vae::blocks::Tensors {
 /// `vae::blocks` selects `gn_stats` (serial, one lane per group) or
 /// `gn_stats_wg` (workgroup-cooperative) on `DeviceCaps::workgroup_reductions`.
 /// `crates/wm-diamond` independently built a THIRD path — `gn_part` +
-/// `gn_stats2`, a barrier-free two-stage reduction — after measuring the serial
-/// one at 77% of its frame time. Nobody has compared them, and the answer
+/// `gn_stats2`, a barrier-free two-stage reduction - after profiling put the
+/// serial one at the bulk of its frame time. Nobody has compared them, and the answer
 /// decides whether wm-diamond can drop its private Builder (task #25) or
 /// whether the shared one has to learn the two-stage path first.
 ///
@@ -215,8 +215,9 @@ fn gn_ab(reps: usize) {
 /// A/B the conv INPUT gradient: the direct `conv2d_dx` against the GEMM
 /// lowering (`nchw_nlc` -> `matmul_dx_reg` -> `col2im`).
 ///
-/// The backward profile says `conv2d_dx` is 41% of a VQGAN training step at
-/// 12.9 ms/call, against the forward conv's 4.8. The direct kernel reduces over
+/// The backward profile says `conv2d_dx` is a large share of a VQGAN training
+/// step, several times the per-call cost of the forward conv it mirrors. The
+/// direct kernel reduces over
 /// `Cout*K*K` per input pixel; the lowering moves the `Cout` axis into a
 /// register-tiled GEMM and leaves `col2im` summing only `K*K`.
 fn convbwd_ab(reps: usize) {
@@ -313,8 +314,9 @@ fn convbwd_ab(reps: usize) {
 ///
 /// The dw GEMM is a TN contraction: `dW[n,k] += sum_m dY[m,n]*X[m,k]` sums over
 /// the ROW index of both operands, so consecutive lanes read a row apart. The
-/// profile shows it at 3.8x the per-call cost of `matmul_dx_reg` at IDENTICAL
-/// m/k/n and a third of its bandwidth, with the same FLOP count — a coalescing
+/// profile shows it at several times the per-call cost of `matmul_dx_reg` at
+/// IDENTICAL m/k/n and a fraction of its bandwidth, with the same FLOP count: a
+/// coalescing
 /// gap, not an arithmetic one. `_tn` takes dY already transposed (which for conv
 /// backward is just the raw NCHW dY) so the A-side load coalesces.
 ///
@@ -443,8 +445,8 @@ fn dwtn_ab(reps: usize) {
 ///
 /// The forward threshold (128) was measured for the ORIGINAL kernel pair and
 /// never re-derived after `matmul_reg3` replaced `matmul_reg2` in the lowering.
-/// The backward's equivalent re-derivation moved 128 -> 32 and was worth 4x at
-/// the shapes in between, and every kernel
+/// The backward's equivalent re-derivation moved 128 -> 32 and was worth a
+/// multiple at the shapes in between, and every kernel
 /// pair gets its own swept threshold — so this must be measured, not inherited.
 ///
 /// direct  = conv_bias_reg

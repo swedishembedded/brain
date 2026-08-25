@@ -6,12 +6,12 @@
 //! Short benchmarks hide everything that accumulates: allocator fragmentation,
 //! host memory creep, cache degradation, descriptor and thread leaks, scheduler
 //! overhead that grows with the number of sequences ever seen. A server that is
-//! 5% faster for ten minutes and degrades after twelve hours is not the better
-//! server, and no amount of re-running a 60-second benchmark will show it.
+//! marginally faster for ten minutes and degrades after twelve hours is not the
+//! better server, and no amount of re-running a minute-long benchmark will show it.
 //!
 //! So this samples the same handful of numbers once per interval over hours and
 //! reports **drift**: the trend, not the mean. The deliverable is
-//! "throughput fell 18% and P99 doubled over 6 hours, host RSS grew 2.3 GB",
+//! "throughput fell and P99 doubled over six hours while host RSS grew",
 //! which is a different kind of statement from any single-point measurement.
 
 use serde_json::{json, Value};

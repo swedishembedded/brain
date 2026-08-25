@@ -19,10 +19,11 @@ use crate::{Device, InstanceKey, MemCost};
 /// The eviction-ordering policy: lower score = evict first.
 ///
 /// A trait rather than a hardcoded rule because the benchmark that motivated it
-/// (`brain perf residency`) measured strict LRU at **64% eviction regret** under
-/// a shifting Zipf load — two thirds of evictions were of models wanted again
-/// almost immediately. LRU has no notion of *reload cost* (a 4 GB model costs
-/// ~20x a 200 MB one to bring back) or *popularity* (the head of a Zipf
+/// (`brain perf residency`) measured strict LRU at an eviction-regret rate of
+/// nearly two thirds under a shifting Zipf load: most evictions were of models
+/// wanted again almost immediately. LRU has no notion of *reload cost* (a 4 GB
+/// model costs an order of magnitude more than a 200 MB one to bring back) or
+/// *popularity* (the head of a Zipf
 /// distribution returns within seconds). Keeping [`Lru`] alongside
 /// [`CostAware`] is the point: the benchmark compares them on identical seeds.
 pub trait EvictionPolicy: Send + Sync {
@@ -52,10 +53,10 @@ impl EvictionPolicy for CostAware {
         // Recency decays with age in ticks; +1 keeps just-used entries finite.
         let age = now.saturating_sub(e.last_use) as f64 + 1.0;
         let bytes = e.cost.vram.max(e.cost.ram).max(e.cost.npu).max(1) as f64;
-        // Measured on `perf residency` (24 models, 4x overcommit, shifting
-        // Zipf): this GDSF shape beats LRU on hit rate (54.3% vs 50.0%) and —
-        // by construction, pinned in policy_tests — spends evictions on cheap
-        // models instead of expensive ones. Event-counted regret is metric-
+        // Measured on `perf residency` (24 models, memory overcommitted four
+        // times over, shifting Zipf): this GDSF shape beats LRU on hit rate
+        // and - by construction, pinned in policy_tests - spends evictions on
+        // cheap models instead of expensive ones. Event-counted regret is metric-
         // limited at this overcommit (the working set simply exceeds capacity,
         // so SOMETHING soon-wanted must go); the improvement shows up in what
         // each eviction COSTS, not how often one is regretted.
@@ -263,7 +264,7 @@ mod policy_tests {
 
     const GB: u64 = 1 << 30;
 
-    /// The scenario the benchmark measured at 64% regret: a large HOT model and
+    /// The scenario behind the benchmark's regret finding: a large HOT model and
     /// a small COLD one; LRU evicts whichever was touched longer ago — the hot
     /// one, if the cold straggler was touched last — while CostAware weighs
     /// popularity and reload cost and evicts the cheap cold one.

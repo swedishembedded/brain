@@ -157,7 +157,7 @@ fn tile_sweep_at_the_real_adaln_shape() {
     let naive_s = t.elapsed().as_secs_f64();
     eprintln!("| tile | secs | GFLOP/s | vs naive |");
     eprintln!("|---|---:|---:|---:|");
-    eprintln!("| naive (row-parallel) | {naive_s:.2} | {:.1} | 1.00x |", flop / naive_s / 1e9);
+    eprintln!("| naive (row-parallel) | {naive_s:.2} | {:.1} | 1.00 |", flop / naive_s / 1e9);
 
     for m_tile in [MR, 16, 32, 64, 128, 256] {
         let t = std::time::Instant::now();

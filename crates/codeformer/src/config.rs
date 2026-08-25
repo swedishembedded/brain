@@ -71,7 +71,7 @@ pub struct CodeFormerConfig {
     /// `TransformerSALayer`'s own default is 2048 and is **overridden**.
     pub dim_mlp: u32,
     /// Number of latent positions the `position_emb` parameter covers. The
-    /// reference's 256 = 16×16, i.e. a 512×512 input at the 32× downscale, and
+    /// reference's 256 = 16×16, i.e. a 512×512 input downscaled 32-fold, and
     /// the parameter is not interpolated — the model is fixed to that size.
     pub latent_size: u32,
     /// Spatial sizes the CFT connects, coarsest first.

@@ -14,8 +14,8 @@
 //!
 //!  * **model** — a full T-frame forward (the prefill cost, and what a cache-free
 //!    decode step recomputes), on the CPU backend (AVX2) vs the P40 (Vulkan fp32),
-//!    reported as latency and codec-frames/second (the TTS frame rate is ~12.5 Hz,
-//!    so > ~12.5 fps is faster-than-realtime), and
+//!    reported as latency and codec-frames/second (the TTS frame rate is
+//!    ~12.5 Hz, so anything above that is faster-than-realtime), and
 //!  * **precision** — the Talker's dominant linear shapes run at fp32 (naive),
 //!    fp32 (reg2), and INT8 (DP4A `matmul_i8`), so the per-precision speedup is
 //!    measured on the exact GEMMs TTS issues.
@@ -42,10 +42,10 @@ fn talker_0_6b() -> TalkerConfig {
     c
 }
 
-const T: usize = 256; // codec frames in the forward (≈20 s of audio at 12.5 Hz)
+const T: usize = 256; // codec frames in the forward (about twenty seconds of audio at 12.5 Hz)
 
 /// Total forward FLOPs of the 0.6B Talker at T=256 (28 layers: qkv/o + gate/up/
-/// down GEMMs + O(T²) attention + lm_head). 94% is GEMM.
+/// down GEMMs + O(T²) attention + lm_head). Almost all of it is GEMM.
 const TALKER_GFLOP: f64 = 242.1;
 const P40_PEAK_GFLOPS: f64 = 11_760.0;
 
@@ -86,7 +86,7 @@ fn talker_inference_speed() {
     let gfs = |ms: f64| TALKER_GFLOP / (ms / 1e3);
     let pk = |ms: f64| 100.0 * gfs(ms) / P40_PEAK_GFLOPS;
     println!("  {:<20} {:>8} {:>10} {:>10} {:>8} {:>8}", "backend", "ms/fwd", "frames/s", "GFLOP/s", "%peak", "vs cpu");
-    println!("  {:<20} {:>8.1} {:>10.1} {:>10.0} {:>7.1}% {:>7}", "cpu  fp32 (AVX2)", cpu, fps(cpu), gfs(cpu), pk(cpu), "1.0x");
+    println!("  {:<20} {:>8.1} {:>10.1} {:>10.0} {:>7.1}% {:>7}", "cpu  fp32 (AVX2)", cpu, fps(cpu), gfs(cpu), pk(cpu), "1.0");
     println!("  {:<20} {:>8.1} {:>10.1} {:>10.0} {:>7.1}% {:>6.1}x", "P40  fp32 vulkan", vk, fps(vk), gfs(vk), pk(vk), cpu / vk);
     println!("  {:<20} {:>8.1} {:>10.1} {:>10.0} {:>7.1}% {:>6.1}x", "P40  fp32 wgpu", wg, fps(wg), gfs(wg), pk(wg), cpu / wg);
 

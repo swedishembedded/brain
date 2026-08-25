@@ -699,14 +699,13 @@ impl Glm {
 
     fn mm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         // Size-adaptive GEMM: software-pipelined `matmul_reg3` (128x128 tile,
-        // ~4 TFLOP/s on a P40) once both output dims fill a tile, else the naive
+        // and this card's fastest fp32 kernel) once both output dims fill a tile, else the naive
         // per-output `matmul`. Same math (parity gated by gradcheck::check_glm),
         // so this only changes speed. `BRAIN_GLMDSA_NAIVE_MM=1` forces naive.
         // The threshold is `block::pick_gemm`'s MEASURED `m < 8`, not the
-        // `m < 128` this used to carry - a guard that cost 22x on an
-        // SDXL UNet. A/B'd on a P40 at `k=768, n=3072`,
-        // naive vs tiled is 1.5x at m=8 rising to 34.1x at m=127, bit-identical
-        // throughout. `pick_gemm` owns the rule so this cannot drift again.
+        // `m < 128` this used to carry - a guard that cost an order of magnitude
+        // on an SDXL UNet. A/B'd at `k=768, n=3072`, the tiled kernel leads from
+        // m=8 and its lead grows all the way to m=127, bit-identical throughout. `pick_gemm` owns the rule so this cannot drift again.
         let naive = std::env::var("BRAIN_GLMDSA_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
         let (mk, mt) = model::block::pick_gemm(m as usize, nout as usize, MATMUL, MATMUL_REG3, naive);
         s.push(self.gpu.step(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
@@ -1132,7 +1131,7 @@ impl Glm {
     /// `sample::generate`'s O(T²) recompute loop. Forward-only: duplicates
     /// `build_forward`'s non-MoE plumbing (attention, norms) per layer but
     /// replaces the dense per-expert loop with `model::moe::expert_fwd_compact`
-    /// (~7x faster at GLM's real MoE shape). Skips the MTP head
+    /// (measured several times faster at GLM's real MoE shape). Skips the MTP head
     /// entirely (`generate` never reads it). Never touches `build_backward` /
     /// `gradcheck::check_glm` - this is a parallel path, not a training-graph
     /// change, so it cannot regress gradient correctness.

@@ -19,7 +19,7 @@
 // and reduce over `d`. In the natural `[T_enc, d_model]` layout that makes
 // consecutive threads read addresses `kv_stride` floats apart - one memory
 // transaction per lane. `attn_apply_cross` reads the SAME number of bytes of
-// the same slab and runs 5.4x faster purely because its thread index is `d`,
+// the same slab and runs several times faster purely because its thread index is `d`,
 // which is contiguous. Transposing K once per block (a 512x1536 shuffle, ~3 MB)
 // buys that same coalescing for the scores, whose traffic is ~44 GB per block.
 //

@@ -91,5 +91,5 @@ fn zimage_vae_encode_matches_diffusers() {
 
     assert!(cos >= 0.9990, "moments cosine {cos:.6} < 0.999");
     assert!(cos_mean >= 0.9990, "mean cosine {cos_mean:.6} < 0.999");
-    assert!(max_abs <= 0.05 * want_max, "max_abs {max_abs:.5} > 5% of golden range");
+    assert!(max_abs <= 0.05 * want_max, "max_abs {max_abs:.5} exceeds the allowed fraction of the golden range");
 }

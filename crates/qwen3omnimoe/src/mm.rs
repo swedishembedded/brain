@@ -29,7 +29,7 @@
 //! **Real embedding placement (real hardware finding, NOT byte-faithful to
 //! HF)**: [`build_multimodal_prompt`] does NOT expand that inline placeholder
 //! in place with real embeddings. A true per-content-part inline expansion
-//! was implemented and measured on real hardware (2x Tesla P40, the real
+//! was implemented and measured on real hardware (two Tesla P40s, the real
 //! W8A16 checkpoint, sven's real request) to be WORSE than a single
 //! whole-block splice of every attached medium at one point
 //! ([`media_splice_point`]): the identical request that produced a real,
@@ -359,7 +359,7 @@ struct MediaBlock {
 /// with a long system prompt (e.g. an agent's own operating instructions),
 /// prepending shoves the system/user role tags hundreds or thousands of
 /// tokens further from their trained relative position than the model
-/// expects. Confirmed on real hardware (2x Tesla P40, the real
+/// expects. Confirmed on real hardware (two Tesla P40s, the real
 /// Qwen3-Omni-30B-A3B-Instruct W8A16 checkpoint): with a long system prompt +
 /// image + audio, the model's own top logit at the very first decode step was
 /// a confident `<|im_start|>` (not a corrupted/NaN logit - a real, decisive
@@ -651,7 +651,7 @@ fn strip_inline_placeholder_runs(text_ids: &[u32], blocks: &[MediaBlock], splice
 /// real `Qwen3-Omni-30B-A3B-Instruct` HF checkpoint, the audio tower is
 /// ~1.2 GiB on disk (bf16) / ~2.4 GiB uploaded as f32, the vision tower
 /// ~1.0 GiB / ~2.0 GiB -- individually well inside a resident int8 shard's
-/// spare headroom (~7-8 GiB/card measured on 2x Tesla P40 after the real
+/// spare headroom (~7-8 GiB/card measured on two Tesla P40s after the real
 /// W8A16 checkpoint's placement), but their unreclaimed SUM plus activation
 /// scratch narrows that margin -- exactly the class of failure a real
 /// `ERROR_OUT_OF_DEVICE_MEMORY` from `crates/vulkan/src/context.rs`'s

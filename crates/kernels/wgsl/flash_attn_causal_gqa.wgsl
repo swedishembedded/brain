@@ -15,15 +15,16 @@
 // online-softmax fusion (`gqa_scores.wgsl`/`attn_softmax.wgsl`/
 // `gqa_apply.wgsl`'s scores -> softmax -> apply chain, but never materializing
 // the dense `[H,T,T]` slab), same lane-split fix for the SAME real bug
-// `flash_attn_bidir_split.wgsl`'s header documents and MEASURES (29x at
-// head_dim=128 on a Tesla P40): a naive one-thread-per-query-row kernel with
+// `flash_attn_bidir_split.wgsl`'s header documents and MEASURES (worth more
+// than an order of magnitude at head_dim=128): a naive one-thread-per-query-row kernel with
 // `q[128]`/`o[128]` in `var<function>` arrays cannot keep those in Pascal's
 // 255-register budget, so they spill to local (global-memory-backed) memory
 // and the whole kernel runs at ~6 bytes/FLOP local-memory bandwidth instead of
-// compute. A first cut of THIS kernel repeated that exact mistake (measured
-// 6.5 s for one Thinker decoder layer's attention at t=7484, head_dim=128,
-// ~300x the compute-bound estimate; moving the same oversized arrays into
-// workgroup shared memory instead of splitting the work made it WORSE, 13.2 s
+// compute. A first cut of THIS kernel repeated that exact mistake (measured,
+// for one Thinker decoder layer's attention at t=7484, head_dim=128, at
+// hundreds of times the compute-bound estimate; moving the same oversized
+// arrays into workgroup shared memory instead of splitting the work made it
+// WORSE still, by a further factor of two
 // -- shared memory is faster than local memory but still far slower than a
 // register for an access this hot, and halving the tile size to make room
 // only added barrier overhead). `flash_attn_bidir_split` had already solved

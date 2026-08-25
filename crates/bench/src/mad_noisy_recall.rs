@@ -34,7 +34,7 @@
 //! `n_pairs=2`, `noise_per_pair=2` (≈4-6 distractor tokens per sequence), 8000
 //! sequences, 1200 steps, 2-layer / d_model-64 / 4-head GPT. **Measured recall
 //! ≈ 0.51** (train_ce ≈ 1.0), far above chance and clear of the **0.40**
-//! threshold, in ~1-2 min on CPU (see `tests/mad_noisy_recall.rs`). Like the
+//! threshold, in minutes on CPU (see `tests/mad_noisy_recall.rs`). Like the
 //! plain single-query recall, only one answer token per sequence is supervised,
 //! so accuracy plateaus around 0.5 — the distractor padding adds difficulty on
 //! top.
@@ -226,7 +226,7 @@ impl Benchmark for MadNoisyRecall {
 
 
     fn threshold(&self) -> f32 {
-        // Far above chance (0.125) — and above 3x chance (0.375) — below the
+        // Far above chance (0.125), and above three times chance (0.375), yet below the
         // measured ~0.51 floor, with margin for the single answer-token gradient's
         // run-to-run variance amid the distractor padding.
         0.40

@@ -23,11 +23,12 @@
 //   matmul_tiled.wgsl  32x32 tile, 64 invocations, 4x4    8    FLOP/byte
 //   this kernel        128x128 tile, 256 invocations, 8x8  32  FLOP/byte
 //
-// A card is arithmetic-limited only above `peak_flops / bandwidth` — ~34 on a
-// Tesla P40 (11.76 TFLOP/s over 346 GB/s), ~50 on an A100. Below that ratio the
-// arithmetic units idle waiting on memory no matter how many there are, which
-// is why the naive kernel cannot exceed ~86 GFLOP/s on a P40 (0.7% of it) and
-// why the 32x32 tile stalls around a tenth of the card.
+// A card is arithmetic-limited only above `peak_flops / bandwidth` - a ratio in
+// the tens for a Tesla P40 (its datasheet fp32 peak over its datasheet
+// bandwidth), higher still on an A100. Below that ratio the arithmetic units
+// idle waiting on memory no matter how many there are, which is why the naive
+// kernel cannot get within a hundredth of peak on a P40, and why the 32x32 tile
+// stalls around a tenth of the card.
 //
 // Structure: each workgroup owns a BM x BN output tile; its 256 invocations form
 // a 16x16 grid, each holding a TM x TN (8x8) micro-tile. Per K-chunk the

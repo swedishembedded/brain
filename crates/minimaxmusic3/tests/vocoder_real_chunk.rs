@@ -5,11 +5,11 @@
 //!
 //! `vocoder_parity.rs` decodes 6 latent frames. A real denoise chunk is
 //! `CHUNK_FRAMES = 200` AR frames, which the condition encoder resamples to
-//! ~689 latent frames and the vocoder upsamples 512x to ~352 k samples per
+//! ~689 latent frames and the vocoder upsamples 512-fold to ~352 k samples per
 //! channel - four orders of magnitude more, and the point at which this
 //! stage's device footprint actually matters.
 //!
-//! That gap is not academic: a 10 s two-chunk generation denoised both
+//! That gap is not academic: a two-chunk generation of a few seconds denoised both
 //! chunks and then died with `wgpu error: Out of Memory` inside the
 //! vocoder, while every existing vocoder test passed. `vocoder::forward`
 //! records ONE deferred tape and submits at the end, so every intermediate

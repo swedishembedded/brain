@@ -281,7 +281,7 @@ pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::
 
 /// The executable LTX-2.5 model behind the manifest. Unlike `WanProvider`
 /// there is no hot-DiT cache: this milestone's DiT is tiny/random and cheap
-/// to rebuild per call (microseconds, not the 20s+5.7GB upload a real 22B
+/// to rebuild per call (microseconds, not the seconds and 5.7 GB of upload a real 22B
 /// checkpoint would cost) - caching it would add state for no benefit. Only
 /// the VAE path comes from the environment (`BRAIN_LTXV_VAE`).
 pub struct LtxvProvider;

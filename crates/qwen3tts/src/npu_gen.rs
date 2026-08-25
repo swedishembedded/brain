@@ -152,8 +152,9 @@ impl TalkerTables {
         let d = self.d();
         let v = self.cfg.vocab as usize;
         assert_eq!(hidden_row.len(), d);
-        // `y = x·Wᵀ`, W=codec_head[v,d] row-major — the shared AVX2+rayon matvec
-        // (was a scalar single-thread loop, ~15ms/frame; parallel ~2ms).
+        // `y = x·Wᵀ`, W=codec_head[v,d] row-major - the shared AVX2+rayon matvec
+        // (was a scalar single-thread loop, measured an order of magnitude
+        // slower per frame than the parallel one).
         model::hostmath::matvec(&self.codec_head, hidden_row, v, d)
     }
 }
@@ -736,7 +737,8 @@ impl MtpEngine for KvMtp {
 /// **Correctness vs precision (measured):** the topology is EXACT — on the OV-CPU
 /// device (fp32) it is bit-identical to [`crate::gen_kv_mtp::CpuMtp`] (codes match,
 /// res_sum max-abs 0.0; see `examples/fused_parity.rs`). It is also faster on the NPU
-/// (~203ms/frame hot vs KvMtp's ~232-267ms — one big infer beats 15 tiny ones). BUT
+/// (measurably faster per frame hot than KvMtp - one big infer beats 15 tiny
+/// ones). BUT
 /// the Intel NPU is **fp16-only** (`OPTIMIZATION_CAPABILITIES=[FP16,INT8]`), and doing
 /// the greedy **argmax in-graph in fp16** flips near-ties in the 2048-entry codebook,
 /// which then **cascades** through the autoregressive residual feedback → degraded

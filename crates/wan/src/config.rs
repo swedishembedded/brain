@@ -61,7 +61,7 @@ pub struct WanConfig {
     pub cross_attn_norm: bool,
 
     // -- VAE ---------------------------------------------------------------
-    /// `(t, h, w)` compression. 4x temporal and 8x spatial, with the `1 + 4k`
+    /// `(t, h, w)` compression: fourfold temporal and eightfold spatial, with the `1 + 4k`
     /// frame rule: 81 frames encode to 21 latent frames, not 20.
     pub vae_stride: (usize, usize, usize),
 

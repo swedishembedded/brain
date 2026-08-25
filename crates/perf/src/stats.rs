@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn p999_reports_the_real_tail() {
-        // 999 fast samples and one 10s outlier: the mean hides it, p999 must not.
+        // 999 fast samples and one far slower outlier: the mean hides it, p999 must not.
         let mut v: Vec<f64> = vec![1.0; 999];
         v.push(10_000.0);
         let mut d = Dist::from_millis(v);

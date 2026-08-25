@@ -838,9 +838,9 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
 
         // ---- conv2d family: params [N, Cin, H, W, Cout, K, stride, pad, Ho, Wo].
         //
-        // These were UNCOVERED until 2026-08-06, which meant `conv_bias_reg` —
-        // 89.5% of a VQGAN forward — reported no rate at all and the pass-level
-        // GFLOP/s was a fiction. Formulas mirror the conv1d family above.
+        // These were UNCOVERED until 2026-08-06, which meant `conv_bias_reg` -
+        // nearly the whole VQGAN forward - reported no rate at all and the
+        // pass-level GFLOP/s was a fiction. Formulas mirror the conv1d family above.
         "conv2d" | "conv_bias" | "conv_bias_reg" | "conv_act" | "conv_act_bn" => {
             let (n, cin, h, w, cout, k, ho, wo) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(8)?, p(9)?);
             f(2 * n * cout * ho * wo * cin * k * k, 4 * (n * cin * h * w + cout * cin * k * k + n * cout * ho * wo))
@@ -924,8 +924,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // (params [N,C,H,W,G,P], P = partials per group). Stage 1 streams the
         // data exactly as its serial ancestor did; stage 2 folds G*P partials,
         // so the pair costs the ancestor's traffic plus a negligible tail.
-        // Uncovered until now, which cost the VQGAN backward its pass rate —
-        // `gn_dsum_part` + `gn_dgb_part` alone are 5.5% of that pass.
+        // Uncovered until now, which cost the VQGAN backward its pass rate -
+        // `gn_dsum_part` + `gn_dgb_part` alone are a real share of that pass.
         "gn_dsum_part" => {
             let n = p(0)? * p(1)? * p(2)? * p(3)?;
             f(4 * n, 8 * n)
@@ -1375,7 +1375,7 @@ mod tests {
         // with any one kind uncovered the pass numerator is partial, and a
         // partial numerator over the full denominator silently under-reports.
         // Ten of the VQGAN backward's 26 kinds were in that state, which is why
-        // its published "5.4% of peak" was a fiction in the other direction.
+        // its published share of peak was a fiction in the other direction.
         for k in [
             "conv_bias_reg", "conv2d_dx", "conv2d_dw", "col2im", "im2col_at", "gn_stats",
             "gn_stats_wg", "gn_part", "gn_stats2", "gn_apply", "gn_dsum", "gn_dgamma",

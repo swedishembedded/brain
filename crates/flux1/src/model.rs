@@ -358,7 +358,7 @@ impl Flux1Model {
         // fp32 exemptions: only the three BOUNDARY linears (~51 MiB), whose
         // inputs are raw conditioning or the model's output. FLUX.2 also keeps
         // its double-block `mlp.2` fp32, but FLUX.1 has 19 double blocks with a
-        // 4x MLP: those 38 tensors are 5.7 GiB at fp32 and OOM'd a 24 GiB P40
+        // four-times-wide MLP: those 38 tensors are 5.7 GiB at fp32 and OOM'd a 24 GiB P40
         // (measured). They are quantized here; `BRAIN_FLUX1_I8_KEEP_F32=_mlp.2`
         // restores the FLUX.2 policy on a card that has the room.
         let always_f32 = ["img_in", "txt_in", "final_layer.linear"];
@@ -697,7 +697,7 @@ impl Flux1Model {
     }
 
     /// QK-RMSNorm over rows `r0..r1` (per-head rows of `head_dim`), coalesced
-    /// where the device supports it (measured 19× at exactly this shape).
+    /// where the device supports it (measured an order of magnitude at exactly this shape).
     fn qknorm_rows(&self, x: &DeviceBuffer, scale: &DeviceBuffer, o: &DeviceBuffer, r0: u32, r1: u32) -> Step {
         let d = self.cfg.hidden as u32;
         let hd = self.cfg.head_dim() as u32;

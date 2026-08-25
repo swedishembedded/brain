@@ -304,8 +304,9 @@ impl ChatTemplate {
     /// conversation).
     ///
     /// COST (deliberate): O(n²) in rendered bytes per sample — message `i`'s
-    /// boundary re-renders `messages[..=i]`, so a 40-turn trajectory costs
-    /// ~20× the single-render work, per sample, over the whole training set.
+    /// boundary re-renders `messages[..=i]`, so a 40-turn trajectory costs an
+    /// order of magnitude more than the single-render work, per sample, over the
+    /// whole training set.
     /// The correctness reasoning below is why; cache/incrementalise only if
     /// multi-turn packing becomes the norm and this shows up in a profile.
     ///

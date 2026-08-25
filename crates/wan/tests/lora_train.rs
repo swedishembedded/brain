@@ -208,8 +208,8 @@ fn a_concept_only_lora_lowers_held_out_concept_loss_more_than_distractor_loss() 
     let Some(paths) = real_paths() else { return };
     let cfg = WanConfig::t2v_1_3b();
     let (frames, size) = (5usize, 64u32);
-    // Minimised hard against the umT5-XXL CPU floor: one import (~3 min,
-    // fixed, dominated by converting the 11GB bf16 checkpoint to fp32) plus
+    // Minimised hard against the umT5-XXL CPU floor: one import (fixed cost,
+    // dominated by converting the 11GB bf16 checkpoint to fp32) plus
     // roughly a minute per UNIQUE caption forward. Every extra sample here is
     // a real extra minute, so this stays as small as a before/after
     // comparison can be: 2 training windows, 1 held-out-concept eval window,

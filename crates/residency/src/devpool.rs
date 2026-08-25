@@ -229,7 +229,7 @@ mod tests {
 
     /// The whole reason this exists: N requests over W devices must take
     /// materially less than N x the per-request time. Deliberately a LOOSE
-    /// bound (under 70% of serial) rather than a tight one - a timing
+    /// bound (a set fraction of serial, see the assertion) rather than a tight one - a timing
     /// assertion tight enough to be impressive is tight enough to be flaky on
     /// a loaded box, and the real speedup numbers belong in a measured
     /// benchmark, not in a correctness gate.

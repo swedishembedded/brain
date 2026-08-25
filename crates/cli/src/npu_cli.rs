@@ -354,7 +354,7 @@ fn chronos2(args: &[String]) {
         context.len(),
         core_ms.borrow()
     );
-    // print the median quantile path (and the 10%/90% band if present).
+    // print the median quantile path (and the p10/p90 band if present).
     let row = |qi: usize| &out[qi * horizon..qi * horizon + horizon];
     println!("  median : {:?}", row(q / 2).iter().map(|v| (v * 100.0).round() / 100.0).collect::<Vec<_>>());
     if q >= 3 {

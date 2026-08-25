@@ -5,7 +5,7 @@
 //!
 //! Mirrors the diffusers `Decoder`: [1×1 `post_quant_conv` when the config
 //! enables it — FLUX.2] → `conv_in` → mid block (resnet, self-attn, resnet) →
-//! up blocks (`layers_per_block+1` resnets each, nearest-2× upsample + conv on
+//! up blocks (`layers_per_block+1` resnets each, nearest-neighbour doubling + conv on
 //! all but the last block) → `conv_norm_out` → SiLU → `conv_out`.
 //! The graph is built once for a fixed input `[latent_ch, h, w]`; `decode`
 //! uploads the latent, submits, and reads the image `[out_ch, H, W]`.

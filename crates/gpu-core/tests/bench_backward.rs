@@ -3,7 +3,7 @@
 
 //! Tiled backward GEMMs (matmul_dx_reg / matmul_dw_reg) vs the naive versions:
 //! parity + throughput on the P40. Training's dominant cost is the backward
-//! GEMMs; the naive ones run at ~0.5% of peak like the old forward did.
+//! GEMMs; the naive ones run at a tiny fraction of peak, like the old forward did.
 //!
 //! ```text
 //! DISPLAY= cargo test --release -p brain-gpu-core --test bench_backward -- --ignored --nocapture

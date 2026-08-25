@@ -29,13 +29,13 @@
 //!
 //! * **no `1/√d_kv` attention scale** — the backward `attn_bwd_d{q,k}_bias`
 //!   takes `scale` as a Param and must be given the forward's `1.0`. At
-//!   `d_kv = 6` a wrongly-scaled `d_q`/`d_k` is off by 2.45×, which shows up in
+//!   `d_kv = 6` a wrongly-scaled `d_q`/`d_k` is off by `sqrt(d_kv)`, which shows up in
 //!   `qkv.weight` and nowhere else;
 //! * **the relative-position bias is a learned embedding shared by every
 //!   block** — `attn_bwd_dbias` *assigns*, so an implementation that dispatched
 //!   it straight into one accumulator would keep only one block's contribution.
 //!   **[`check_t5`] does not catch that**, and that is measured, not assumed:
-//!   with the `axpy` fold deleted the tensor's gradient is 33 % wrong and this
+//!   with the `axpy` fold deleted the tensor's gradient is off by a third and this
 //!   check still reports `rel = 6.2e-4` at seed 1 / `5.3e-2` at seed 7, both
 //!   inside `(4e-3, 8e-2)`. `directional_check` contracts the tensor onto one
 //!   ±1 direction and keeps the *best* of four, which is the wrong selection
@@ -212,7 +212,7 @@ pub fn check_t5_tiled(seed: u64) -> Report {
 /// [`check_t5`] does NOT cover that fold, and this is measured, not assumed:
 /// deleting the `axpy` in `t5encoder::train::build_bwd_steps` - so `attn_bwd_dbias`
 /// assigns straight into the accumulator and only the last-written block
-/// survives — leaves a **33 %** error in this tensor's gradient (L2 of the
+/// survives - leaves an error of **a third** in this tensor's gradient (L2 of the
 /// difference 0.672 against a gradient norm of 2.044 at seed 7) and
 /// [`check_t5`] still passes: `rel = 6.2e-4` at seed 1 and `5.3e-2` at seed 7,
 /// both inside `(4e-3, 8e-2)`. `directional_check` contracts the tensor onto one

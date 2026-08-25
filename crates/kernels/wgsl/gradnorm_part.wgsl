@@ -18,8 +18,8 @@
 //
 // The kernel this replaces (`gradnorm_sq.wgsl`) runs the ENTIRE tensor on ONE
 // thread — `if (gidx != 0u) { return; }` and a dispatch of 1 invocation. On a
-// GPT-2-small-ish 120 M-param model that is 82-87 % of all GPU training time
-// (measured: 30 133 ms of 34 545 ms over 5 `brain gpt train` steps), because a
+// GPT-2-small-ish 120 M-param model that is the overwhelming majority of all
+// GPU training time (measured over 5 `brain gpt train` steps), because a
 // 38.6 M-element embedding gradient is 38.6 M dependent scalar loads on one
 // lane of a 3840-core card. Same bug class as `gn_stats` and `rmsnorm`, one
 // level up in the optimiser.

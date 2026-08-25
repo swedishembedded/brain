@@ -39,8 +39,8 @@
 //! 6000 words, 1000 steps, 2-layer / d_model-96 / 4-head GPT. **Measured
 //! close-bracket accuracy ≈ 0.99 across seeds** (seeds 1337 → 0.9942, 42 →
 //! 0.9992, train_ce ≈ 0.95-0.97), far above the 1/k chance and clear of the
-//! **0.70** threshold, in ~6-7 min on CPU (the `tests/dyck.rs` guard drops to 600
-//! steps / 4000 words / d_model-64 for ~1-2 min, still ~0.99). Difficulty grows
+//! **0.70** threshold, in minutes on CPU (the `tests/dyck.rs` guard drops to 600
+//! steps / 4000 words / d_model-64 to run in a fraction of that, still ~0.99). Difficulty grows
 //! with `k` (more bracket types to disambiguate) and `max_depth` (deeper stacks):
 //! the calibrated `k=3`, `max_depth=4` is the fast, clearly-learnable sweet spot;
 //! raising both is the intended hierarchical-state stress knob.

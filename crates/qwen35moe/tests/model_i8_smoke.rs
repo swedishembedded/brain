@@ -248,8 +248,8 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
     // shape (this task's suggested model) rather than the measured value
     // directly, for real headroom against seed/shape/backend drift; a
     // mutation check (scaling one quantized weight's per-channel scale by
-    // 1.3x) moved rel_l2 from 6.6e-6 to 6.9e-4 and by 50x moved cosine to
-    // 0.40 -- confirming this comparison is sensitive to a real int8-path
+    // a third) moved rel_l2 from 6.6e-6 to 6.9e-4, and a far larger scaling
+    // moved cosine to 0.40 -- confirming this comparison is sensitive to a real int8-path
     // regression, not vacuously passing.
     assert!(cos > 0.99, "qwen35 int8 path diverged too far from fp32: cosine={cos:.6} (want > 0.99)");
     assert!(rel < 0.1, "qwen35 int8 path diverged too far from fp32: rel_l2={rel:.4} (want < 0.1)");

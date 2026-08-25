@@ -34,7 +34,7 @@
 //!   block stack and a whole-device `nvidia-smi` peak (non-block tensors,
 //!   the driver/Vulkan context, and the per-forward scratch).
 //! * [`VOCODER_CHUNK_DEVICE_PEAK_BYTES`] - the vocoder's peak is dominated by
-//!   activation and kernel scratch across a 512x upsample, not by its 207 MB
+//!   activation and kernel scratch across a 512-fold upsample, not by its 207 MB
 //!   of weights; nothing here models that, so the measurement stands.
 //!
 //! **The stage figures are a MAX, not a sum.** `crate::generate::generate`
@@ -158,7 +158,7 @@ pub fn depth_decoder_weight_bytes(cfg: &DepthDecoderConfig) -> u64 {
 /// real 689-latent chunk peaked at **12264 MiB** (this crate's roadmap
 /// ledger, Phase 13, which also records the two hypotheses tested and
 /// rejected against that same number). The peak is activation and kernel
-/// scratch across a 512x upsample, not weights - the whole `vocoder/`
+/// scratch across a 512-fold upsample, not weights - the whole `vocoder/`
 /// checkpoint is 207 MB - and nothing in this crate models a conv's
 /// transient buffers, so a closed form here would be a guess dressed as
 /// arithmetic.

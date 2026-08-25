@@ -10,7 +10,7 @@ Per model (+ a shuffled-prediction NEGATIVE CONTROL and a naive last-value basel
     (Newey-West stderr when step < horizon makes weekly labels overlap)
   - directional accuracy (50% = coin flip)
   - market-neutral top-K/bottom-K long/short basket (fixed --k or --k-frac of the
-    week's cross-section), net of cost at --cost-bps AND a 2x stress cost,
+    week's cross-section), net of cost at --cost-bps AND a doubled stress cost,
     compounded, vs ^gspc buy-hold over the SAME weeks
   - point MASE vs naive (read from the Rust dump, which has the context)
   - with --split-manifest: RankIC per subset (ft-names vs holdout-names) so a

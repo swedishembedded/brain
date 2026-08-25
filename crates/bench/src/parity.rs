@@ -39,8 +39,8 @@
 //! `n_bits=8` (**chance = 0.5**), 6000 sequences, 800 steps, 2-layer / d_model-64
 //! / 4-head GPT. **Measured accuracy ≈ 1.00 across seeds** (seeds 1337 & 42 both
 //! 1.0000, train_ce ≈ 0.07), far above the 0.5 coin flip and clear of the
-//! **0.80** threshold, in ~3 min on CPU (the `tests/parity.rs` guard drops to 500
-//! steps / 4000 sequences for ~1 min, still 1.0). Difficulty grows with `n_bits`
+//! **0.80** threshold, in minutes on CPU (the `tests/parity.rs` guard drops to
+//! 500 steps / 4000 sequences to run in a fraction of that, still 1.0). Difficulty grows with `n_bits`
 //! (longer state chains): the calibrated `n_bits=8` is the fast, clearly-learnable
 //! sweet spot; `n_bits=20+` is where a small transformer starts to fall back to
 //! chance, the intended state-tracking stress knob.

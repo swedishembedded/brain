@@ -8,8 +8,8 @@
 //! engine on `BRAIN_DEVICE` → score running-parity next-token accuracy on
 //! held-out sequences) and asserts accuracy clears its threshold far above the
 //! 0.5 coin flip. Skipped when `MOE_SKIP_GPU_TESTS` is set. A reduced config
-//! (fewer steps / sequences than the registered default) keeps it ~1-1.5 min on
-//! the CPU backend while still landing at ~1.0.
+//! (fewer steps / sequences than the registered default) keeps it to about a
+//! minute on the CPU backend while still landing at ~1.0.
 
 use bench::parity::Parity;
 use bench::Benchmark;

@@ -974,7 +974,7 @@ mod keyframe_conditioning_positions_tests {
         let p = keyframe_conditioning_positions(64, lh, lw, fps);
         // frame axis: [64/8, 65/8) = [8.0, 8.125)
         assert_eq!((p[0], p[1]), (8.0, 8.125));
-        // height/width axes: still a plain 32x latent-to-pixel scale for the one token.
+        // height/width axes: still a plain 32-to-1 latent-to-pixel scale for the one token.
         assert_eq!((p[2], p[3]), (0.0, 32.0));
         assert_eq!((p[4], p[5]), (0.0, 32.0));
     }
@@ -1674,7 +1674,7 @@ mod conditioned_latent_tests {
         assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &s[..]);
         assert_eq!(&c.clean[(base_t + block_t) * CH..(base_t + 2 * block_t) * CH], &m[..]);
         assert_eq!(&c.clean[(base_t + 2 * block_t) * CH..], &e[..]);
-        // And each at its own instant: 0, 4 and 8 pixel frames at 8 fps.
+        // And each at its own instant: 0, 4 and 8 pixel frames at 8 frames/second.
         for (bi, want) in [(0usize, 0.0f32), (1, 0.5), (2, 1.0)] {
             let off = base_t + bi * block_t;
             assert_eq!(c.positions[off * 2], want, "guiding block {bi} sits at the wrong instant");
@@ -1694,7 +1694,7 @@ mod conditioned_latent_tests {
         assert_eq!(c.t, base_t + block_t);
         assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..]);
         assert_eq!(&c.clean[base_t * CH..], &m[..]);
-        assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[0.5, 0.625], "pixel frame 4 at 8 fps is a one-frame-wide [4/8, 5/8) span");
+        assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[0.5, 0.625], "pixel frame 4 at 8 frames/second is a one-frame-wide [4/8, 5/8) span");
     }
 
     /// Adding a middle anchor to a `--start-frame` run moves the start still
@@ -1808,14 +1808,14 @@ impl Denoiser for LtxDit {
 /// on, and every one of the run's denoise steps). It holds the two things
 /// `forward_q_streamed` would otherwise recompute identically every call:
 /// each block's already-quantized weight bytes (the GGUF read + CPU quantize
-/// Phase 8 measured at ~86% of one real denoise step) and the
+/// Phase 8 measured as the dominant share of one real denoise step) and the
 /// embeddings-connector routing.
 ///
 /// The scope is the point. A `RealDit` is still per-generation, but the store
 /// behind this handle is not: it outlives the `RealDit`, the `generate()`
 /// call and the resident instance, so a SECOND generation against the same
 /// checkpoint starts warm on its first forward instead of re-reading ~22 GB
-/// off a rotational disk at ~58-70 MB/s. What bounds it is the process-wide
+/// off a rotational disk at whatever that disk's sequential rate happens to be. What bounds it is the process-wide
 /// host ceiling `--limit-ram-total` publishes, evicted by the residency
 /// layer's own cost-aware policy - not the lifetime of any one call. Sharing
 /// entries across generations is safe for the same reason sharing them across
@@ -4314,7 +4314,7 @@ mod tests {
     /// (every token's timestep IS the sigma there) and silently multiplies a
     /// frozen anchor by roughly `1 + sigma_terminal` - the real distilled
     /// schedule's last sigma is 0.421875, so a real `--start-frame` clip's
-    /// anchor latent came out ~1.42x too large, which the causal VAE
+    /// anchor latent came out too large by exactly that factor, which the causal VAE
     /// decoder's temporal receptive field then smeared across the frames
     /// after it. See this phase's ledger entry for the measured curves.
     #[test]

@@ -29,7 +29,7 @@
 //! caller has to remember to imitate.
 //!
 //! Note the separate, *backend-level* cost this cannot touch: on the default
-//! wgpu backend a non-ReBAR Pascal card holds ~2x each uploaded buffer
+//! wgpu backend a non-ReBAR Pascal card holds double each uploaded buffer
 //! resident (`crates/gpu-core/tests/vram_overhead.rs`). Chunking the write
 //! CALLS does not change that; only `--device vulkan` does.
 

@@ -185,9 +185,9 @@ pub fn check_vqgan(seed: u64) -> Report {
 /// re-runs the naive path, which the caller should skip (see the test).
 ///
 /// `eps = 1.25e-4`, a quarter of [`check_vqgan`]'s: the same `eps·sqrt(numel)`
-/// argument the module doc makes — `lowered_config`'s 32×32×3×3 convs have
-/// 16× `tiny_config`'s elements, so the ±1 direction's L2 step is 4× longer
-/// at equal eps. Measured on a P40: at 5e-4 one conv sat at rel 8.8e-2
+/// argument the module doc makes: `lowered_config`'s 32×32×3×3 convs have
+/// sixteen times `tiny_config`'s elements, so the ±1 direction's L2 step is four
+/// times longer at equal eps. Measured: at 5e-4 one conv sat at rel 8.8e-2
 /// (right at the 8e-2 gate, curvature not a wrong gradient); at 1.25e-4 the
 /// report's max_rel is 1.24e-2 — the roughly-quadratic shrink
 /// central-difference truncation predicts, which a genuinely wrong gradient

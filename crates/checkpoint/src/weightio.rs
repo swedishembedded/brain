@@ -7,7 +7,7 @@
 //! tensor at a time — decode/dequant a single tensor into a small buffer, hand
 //! it to the caller, drop it. Peak host memory ≈ one tensor's fp32 expansion,
 //! never the whole model (a 4B model is ~16 GB as f32; a quantized GGUF blows
-//! up ~8× when dequantized in bulk).
+//! up manyfold when dequantized in bulk).
 //!
 //! [`WeightReader`] is a lazy reader over **both** safetensors and GGUF, chosen
 //! by file content (GGUF magic) then extension. [`open`](WeightReader::open)

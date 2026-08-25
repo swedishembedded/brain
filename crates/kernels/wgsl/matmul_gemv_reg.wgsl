@@ -29,7 +29,7 @@
 //  1. its `partial` array is sized for the worst case (`m = 32`), so every
 //     workgroup reserves 8 KB of shared memory whatever `m` is. On a GP102
 //     (96 KB shared/SM, 32 blocks/SM, 2048 threads/SM) that caps residency at
-//     12 workgroups = 768 of 2048 threads, ~37.5% occupancy;
+//     12 workgroups = 768 of 2048 threads, i.e. barely a third of them;
 //  2. its inner loop is a read-modify-WRITE per `(k, m)` into that array, so
 //     each accumulator carries a serial dependency chain through shared-memory
 //     latency, once per k-step.

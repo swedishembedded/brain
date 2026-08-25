@@ -39,17 +39,18 @@
 //!
 //! `halo` must cover the model's receptive-field radius; anything less shows as
 //! a visible grid. An **interior** tile costs `((tile + 2*halo)/tile)²` in
-//! compute, so `tile = 512, halo = 32` is `(576/512)² = 1.27x` while
-//! `tile = 128, halo = 32` is `(192/128)² = 2.25x` - the halo is a *fixed* ring,
+//! compute, so `tile = 512, halo = 32` costs `(576/512)²` while
+//! `tile = 128, halo = 32` costs `(192/128)²` - the halo is a *fixed* ring,
 //! so its relative cost grows as the square of `1 + 2*halo/tile`, not as its
 //! area.
 //!
 //! That formula is the ceiling, not the answer: border tiles have their halo
 //! clipped, so a whole plan always costs less. Do not quote it for a specific
 //! image - ask [`TilePlan::overhead`], which sums the plan's actual `src` areas.
-//! For 1024x1024 at `tile = 512, halo = 32` the ceiling is 1.27x and the real
-//! figure is **1.129x**, because every one of the four tiles is clipped on two
-//! sides (pinned in `overhead_is_the_measured_read_amplification`).
+//! For 1024x1024 at `tile = 512, halo = 32` the real figure is well under the
+//! `(576/512)²` ceiling, because every one of the four tiles is clipped on two
+//! sides (both are pinned in
+//! `overhead_is_the_measured_read_amplification`).
 
 use crate::pixels::Rect;
 

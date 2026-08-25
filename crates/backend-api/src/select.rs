@@ -213,9 +213,10 @@ pub const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 /// The int8 GEMV/tile crossover sits LOWER than fp32's: the packed GEMV
 /// accumulates through workgroup memory (one read-modify-write per row per
 /// K-group), so its per-row cost grows faster than the register-tiled GEMM's.
-/// Measured on a P40 (qwen-synth 8x512x8, decode_heavy): GEMV 299 vs tile 225
-/// tok/s at m=4, tile 753 vs GEMV 592 at m=16. A per-device autotuner (S5)
-/// owns refining this boundary.
+/// Swept with `brain perf run` (qwen-synth 8x512x8, `decode_heavy`) rather
+/// than assumed: the packed GEMV still leads at `m = 4`, and by `m = 16` the
+/// register-tiled GEMM has taken the lead. A per-device autotuner (S5) owns
+/// refining this boundary.
 pub const I8_GEMV_MAX_ROWS: u32 = 8;
 
 /// The fp32/storage-tier register-tiled GEMM ([`KernelVariant::RegisterTiled`])
@@ -224,17 +225,12 @@ pub const I8_GEMV_MAX_ROWS: u32 = 8;
 ///
 /// Migrated from `model::block::pick_gemm`'s doc comment (B2), which measured
 /// it directly rather than assuming the tile's own 128-row dimension is the
-/// threshold - requiring a full tile cost 22x. Measured on a P40, `k = 2048`,
-/// `n = 2560`:
-///
-/// | m | naive | tiled |
-/// |---|---|---|
-/// | 1 | **0.19 ms** | 0.48 ms |
-/// | 2 | **0.37** | 0.73 |
-/// | 4 | **0.43** | 0.77 |
-/// | 8 | 0.89 | **0.77** |
-/// | 12 | 1.08 | **0.78** |
-/// | 77 | 18.67 | **0.84**  (22x) |
+/// threshold: requiring a full tile was far more expensive than the sweep
+/// supports. Swept at `k = 2048`, `n = 2560` by `crates/gpu-core/tests/
+/// bench_matmul.rs`, which is what to re-run on another card. The shape of
+/// the result is what matters: the naive kernel's time grows with `m` while
+/// the tile's is nearly flat, so the naive kernel wins at `m = 1..4`, they
+/// are level at `m = 8`, and the tile's lead then widens without bound.
 ///
 /// So the crossover is `m = 8`, not 128.
 pub const GEMM_TILE_MIN_ROWS: u32 = 8;
@@ -251,29 +247,28 @@ pub const GEMM_TILE_MIN_COLS: u32 = 128;
 /// # 16, swept - NOT the 2D lowering's 32, and the difference is the baseline
 ///
 /// `vae::blocks`'s `GEMM_CONV_MIN_COUT` measured 32 for the same GEMM, but its
-/// "direct" side is `conv_bias_reg`, an `@opt 5` register-tiled conv running at
-/// ~700 GFLOP/s. The 1D direct side is `conv1d`, one thread per output element
-/// with a serial reduction, measured at 2.2% of a P40's compute roof. A much
-/// weaker baseline crosses over much earlier, so copying the 2D number would
-/// have left a 1.9x-6.0x win unclaimed across the 16..32 band - a selection
-/// rule is as much a bottleneck as a kernel, so each pair earns its own
-/// measured crossover rather than inheriting another pair's.
+/// "direct" side is `conv_bias_reg`, an `@opt 5` register-tiled conv that
+/// reaches a large fraction of the card's compute roof. The 1D direct side is
+/// `conv1d`, one thread per output element with a serial reduction, which the
+/// same sweep puts at a low single-digit percent of that roof. A much weaker
+/// baseline crosses over much earlier, so copying the 2D number would have
+/// left the whole 16..32 band unclaimed - a selection rule is as much a
+/// bottleneck as a kernel, so each pair earns its own measured crossover
+/// rather than inheriting another pair's.
 ///
-/// Swept by `crates/audio/tests/bench_conv1d_lowering.rs` (`--ignored`) on a
-/// P40, best of 5, warm-up excluded, box otherwise idle. `lowered` is the WHOLE
-/// lowering including its im2col and epilogue passes. The sub-threshold half
-/// needs `BRAIN_CONV1D_GEMM=force`: without it the selector answers "direct"
-/// for both columns and the ratio reads a meaningless 1.0x, which is how a
-/// threshold gets "confirmed" by a measurement that never tested it.
+/// Swept by `crates/audio/tests/bench_conv1d_lowering.rs` (`--ignored`), best
+/// of 5, warm-up excluded, box otherwise idle; that test is what to re-run on
+/// another card. `lowered` is the WHOLE lowering including its im2col and
+/// epilogue passes. The sub-threshold half needs `BRAIN_CONV1D_GEMM=force`:
+/// without it the selector answers "direct" for both columns and the ratio
+/// reads a meaningless dead heat, which is how a threshold gets "confirmed"
+/// by a measurement that never tested it.
 ///
-/// Speedup (direct / lowered), N = 2, Cin = Cout, L = 44096:
-///
-/// | Cout | 4 | 8 | 12 | **16** | 24 | 32 | 64 | 128 | 256 |
-/// |---|---|---|---|---|---|---|---|---|---|
-/// | k=7 pad=3 (im2col + `matmul_reg3`) | 0.27x | 0.54x | 0.85x | **1.06x** | 1.88x | 2.52x | 5.68x | 10.3x | 15.4x |
-/// | k=1 (`matmul_dx_reg`, no im2col) | 0.71x | 0.74x | 0.89x | **1.53x** | 2.66x | 3.36x | 5.13x | 14.2x | 20.6x |
-///
-/// Both forms cross between 12 and 16, so one number serves both.
+/// The sweep walks `Cout` at N = 2, Cin = Cout, L = 44096 for both forms
+/// (`k=7 pad=3`, im2col + `matmul_reg3`; and `k=1`, `matmul_dx_reg` with no
+/// im2col). Direct wins at the narrow end, the lowering takes over between 12
+/// and 16 in BOTH forms - so one number serves both - and its lead then grows
+/// monotonically with width.
 ///
 /// The lowered `conv1d` was also **bit-identical** to the direct kernel at
 /// every shape in that sweep (`max|delta|` exactly 0.0, against a f32 host
@@ -293,13 +288,11 @@ pub const GEMM_CONV1D_MIN_COUT: u32 = 16;
 /// `convtr1d` is worse than `conv1d` at the same width: every thread walks all
 /// `K` taps and the `(lo + pad - kw·d) % stride != 0` test discards all but
 /// `K/stride` of them, so at an upsampling stride most of its work is thrown
-/// away (0.4% of a P40's compute roof, measured). The lowering does not pay
-/// that - its GEMM does `L` rows rather than `Lo` - so it wins at every width
-/// swept, including the narrowest:
-///
-/// | Cout | **4** | 8 | 12 | 16 | 24 | 32 | 64 | 128 | 256 |
-/// |---|---|---|---|---|---|---|---|---|---|
-/// | stride=4 K=8, L=11024, Cin=2·Cout | **1.35x** | 2.47x | 3.18x | 3.69x | 6.01x | 8.15x | 20.1x | 35.3x | 64.7x |
+/// away (a fraction of one percent of the card's compute roof, measured by
+/// the same sweep). The lowering does not pay that - its GEMM does `L` rows
+/// rather than `Lo` - so at stride=4, K=8, L=11024, Cin=2·Cout it wins at
+/// every width the sweep tried, including the narrowest, and its lead grows
+/// with width from there.
 ///
 /// So this is 4 rather than 16 - and 4 rather than 1 because 4 is the
 /// narrowest width actually measured, not because anything is known to break
@@ -321,7 +314,8 @@ fn no_coop_layernorm() -> bool {
 ///
 /// This is the A/B switch that threshold was measured with - without it a
 /// sweep cannot see below the threshold at all, because the selector answers
-/// "direct" on both sides and the ratio reads a meaningless 1.0x. It is also
+/// "direct" on both sides and the ratio reads a meaningless dead heat. It is
+/// also
 /// the fallback if a driver ever mishandles the register-tiled GEMMs. Read
 /// once (the policy must stay a pure function of its inputs for a given
 /// process).
@@ -425,11 +419,14 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // thread t row t, so a warp's loads are `n` floats apart and each
         // 32-byte sector fetched serves one useful float; the cooperative
         // kernel walks a row with 64 threads and is coalesced by construction.
-        // That penalty does not go away as rows grow — measured on a P40 at a
-        // fixed 4.7M elements, the cooperative variant wins at EVERY width
-        // (19.4x at n=128/m=36864, 2.5x at n=1024, 11.2x at n=9216; see
-        // `rmsnorm_rows.wgsl`). The old `m <= DECODE_REGIME_MAX_ROWS` gate was
-        // therefore leaving 2-20x on the table for every prefill/encoder shape.
+        // That penalty does not go away as rows grow: swept at a fixed total
+        // element count, the cooperative variant wins at EVERY width, by the
+        // widest margin at the narrow-row end where the per-element kernel's
+        // reads are most scattered and by the least where a row is long
+        // enough to amortise them (`crates/gpu-core/tests/bench_layernorm.rs`
+        // runs the same comparison for the LayerNorm half). The old
+        // `m <= DECODE_REGIME_MAX_ROWS` gate was therefore leaving that win
+        // on the table for every prefill/encoder shape.
         // Reference stays in the list (and first without workgroup barriers,
         // via the uniform filter below) because the CPU JIT cannot run the
         // barrier.
@@ -479,9 +476,11 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::MaxAbsRow => vec![WorkgroupPerOutput, Reference],
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
         // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
-        // kernel, not a slow one": measured on a P40 in the MiniMax-Music-3
-        // vocoder they ran at **2.2%** and **0.4%** of the card's compute roof
-        // and were 99.4% of that stage. `RegisterTiled` here means the whole
+        // kernel, not a slow one": profiled in the MiniMax-Music-3 vocoder,
+        // `conv1d` ran at a low single-digit percent of the card's compute
+        // roof and `convtr1d` at a fraction of one percent, and between them
+        // they accounted for essentially all of that stage's time.
+        // `RegisterTiled` here means the whole
         // lowering (`im2col1d_at` + `matmul_reg3` + `nlc_bias_nchw` for
         // `conv1d`; `matmul_dw_reg_splitk` + `col2im1d_bias` for `convtr1d`),
         // so it inherits `workgroup_reductions` from
@@ -761,10 +760,10 @@ mod tests {
     }
 
     /// …but RmsNorm does NOT: the per-element kernel's loss is uncoalesced
-    /// global reads, which large M does not fix. Measured 2.5-22x for the
-    /// cooperative kernel at every width on a P40 (see `rmsnorm_rows.wgsl`),
-    /// so it is the choice at prefill/encoder row counts too — the regression
-    /// this test exists to prevent is silently reverting to `m <= 32`.
+    /// global reads, which large M does not fix. The cooperative kernel
+    /// measured faster at every width, so it is the choice at prefill/encoder
+    /// row counts too; the regression this test exists to prevent is silently
+    /// reverting to `m <= 32`.
     #[test]
     fn rmsnorm_prefers_cooperative_at_every_row_count() {
         let s = DefaultSelector;

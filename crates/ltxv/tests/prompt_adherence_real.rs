@@ -32,7 +32,7 @@
 //! absolute pixel delta **6.36** of 255 between the two mid-clip frames. The
 //! two prompts' encoded contexts had mean rows at cosine **0.9998** of each
 //! other and every row within one context sat at cosine 0.996 of every other:
-//! the caption survived only as a ~5% residual on a near-constant vector, so
+//! the caption survived only as a tiny residual on a near-constant vector, so
 //! the DiT was sampling its unconditional prior whatever it was asked for.
 //!
 //! The fast, weight-free gates on the same defect are
@@ -130,7 +130,7 @@ fn base_opts() -> GenOpts {
 /// because that is the shape it was reported and investigated at, and it is
 /// not a resolution-dependent defect: the two prompts' encoded contexts sat
 /// at cosine 0.9998 of each other, so the clips were near-identical at any
-/// size. The floor sits 4x below what a correct run produces here and 3x
+/// size. The floor sits well below what a correct run produces here and well
 /// above what the defect produced - deliberately loose, because this gate is
 /// a liveness check on the conditioning path, not a similarity metric, and a
 /// tight bound would only make it fragile against sampler or schedule changes

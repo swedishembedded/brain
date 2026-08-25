@@ -5,7 +5,7 @@
 //!
 //! Trains the real `mad_selective_copy` benchmark end-to-end on `BRAIN_DEVICE`
 //! and asserts whole-group copy exact-match clears its calibrated threshold, far
-//! above chance. Skipped under `MOE_SKIP_GPU_TESTS`. ~1.5-2 min on CPU.
+//! above chance. Skipped under `MOE_SKIP_GPU_TESTS`. Minutes on CPU.
 
 use bench::mad_selective_copy::MadSelectiveCopy;
 use bench::Benchmark;

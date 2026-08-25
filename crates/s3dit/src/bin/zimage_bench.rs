@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Z-Image DiT profiler: ms per full forward + effective GFLOP/s, on CPU or a
-//! single GPU. Reports vs the Tesla P40 fp32 peak (11.76 TFLOP/s/card).
+//! single GPU. Reports against the card's own datasheet fp32 peak.
 //!
 //! Usage:
 //!   BRAIN_S3DIT_DIT=<z_image_turbo_bf16.safetensors> \
@@ -72,8 +72,8 @@ fn main() {
     // register-tiled kernels (matmul_reg3 fwd, matmul_dx_reg + matmul_dw_reg
     // bwd). No 6B load needed: GEMM time depends only on shapes, so we drive
     // correctly-shaped scratch. Backward = dx (dY@W) + dW (dY^T@X) per linear =
-    // 2× the forward FLOP; this measures whether the bwd kernels hold the same
-    // ~34%-of-peak regime as the forward. Args: train [h w cap_len reps].
+    // twice the forward FLOP; this measures whether the bwd kernels hold the
+    // same share-of-peak regime as the forward. Args: train [h w cap_len reps].
     if device == "train" {
         use gpu_core::Gpu;
         let h: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(32);

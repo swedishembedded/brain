@@ -11,8 +11,9 @@
 //! measured on `qwen-synth:8x512x8` (47 M params, vocab 32 k). That target
 //! **structurally cannot express Qwen3-0.6B**: it forces `head_dim = d/h` and
 //! `d_ff = 4d`, while the real model has `head_dim` 128 (so `q_dim` 2048 ≠
-//! `d_model` 1024) and `d_ff` 3072. Its vocab is 151936, not 32000 — 4.75× —
-//! and the head is tied, so the LM head alone is 155.6 M params = 622 MB fp32,
+//! `d_model` 1024) and `d_ff` 3072. Its vocab is 151936, not 32000, nearly
+//! five times over - and the head is tied, so the LM head alone is 155.6 M
+//! params = 622 MB fp32,
 //! about a quarter of every decode step's bytes. None of that was ever profiled.
 //!
 //! Random weights throughout: cost depends on shape, not values. Every number
@@ -185,8 +186,8 @@ fn main() {
             // deciding which.
             let rows: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(128);
             // `i8w` quantizes the 7 per-layer linears + the head at load
-            // (A0). The ledger records +32% at c=16 on `qwen-synth`; it has
-            // never been measured at the real 0.6B shape, where the tied
+            // (A0). The ledger records a real gain at c=16 on `qwen-synth`; it
+            // has never been measured at the real 0.6B shape, where the tied
             // 622 MB head is a quarter of the weight bytes.
             let i8w = a.iter().any(|x| x == "i8w");
             let kv8 = a.iter().any(|x| x == "kv8");
@@ -243,8 +244,8 @@ fn main() {
             // Each row gets its OWN physical blocks. Sharing one block table
             // across every row (the obvious way to build this) makes all 128
             // sequences read the same few megabytes, so they hit cache and the
-            // profile's streaming byte estimate becomes fiction — it reported
-            // `paged_decode_scores_batched` at 2120% of the bandwidth roof,
+            // profile's streaming byte estimate becomes fiction - it reported
+            // `paged_decode_scores_batched` at many times the bandwidth roof,
             // which is the profiler catching the harness, not the kernel.
             let blocks: Vec<u32> = (0..rows).map(|i| i * mbs).collect();
             let offsets: Vec<u32> = (0..rows).map(|i| i % bs).collect();
@@ -314,8 +315,8 @@ fn host_i8_gemm(x_i8: &[i8], w_i8: &[i8], sx: &[f32], sw: &[f32], m: usize, k: u
 /// A/B `matmul_i8_dyn` at one shape: exact correctness vs the host i32
 /// reference above, plus GOP/s against the measured DP4A roof (never the
 /// fp32 roof — `Roofs::compute_roof`/`utilisation_of` pick the DP4A one
-/// automatically when `int_ops > flops`, the fix for the 4.15x-flattering
-/// bug recorded when profiling int8 weights on the served path).
+/// automatically when `int_ops > flops`, the fix for the flattering-by-the-
+/// DP4A-ratio bug recorded when profiling int8 weights on the served path).
 ///
 /// `qwen_bench gemm8 [m k n] [reps]` — defaults to the qkv-projection shape
 /// at Qwen3-0.6B's 128-row served prefill (`d_model=1024, q_dim=2048`).

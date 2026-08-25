@@ -46,7 +46,7 @@
 //!   That strictly generalises `s3dit::pipeline::downsample_mask`, whose
 //!   integer `w/lw` silently drops the remainder and is only correct for exact
 //!   ratios (survey §6.9). Migrating that call site is safe and fixes a latent
-//!   bug; the VAE-8x sizes it uses today divide exactly, so the numbers do not
+//!   bug; the VAE's downscale-by-8 sizes it uses today divide exactly, so the numbers do not
 //!   move.
 
 use gpu_core::{f, DeviceBuffer};

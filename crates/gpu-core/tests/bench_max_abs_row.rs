@@ -18,13 +18,13 @@
 //!     --test bench_max_abs_row -- --ignored --nocapture
 //! ```
 //!
-//! `PEAK_GBPS` is the Tesla P40's 346 GB/s; on another card read the achieved
-//! column, not the percentage.
+//! `PEAK_GBPS` is the Tesla P40's datasheet bandwidth; on another card set it to
+//! that card's own figure and read the achieved column, not the percentage.
 //!
 //! Both kernels are registered and dispatched **by index** here, with
 //! `BRAIN_NO_KERNEL_UPGRADE=1` pinning `Gpu::step` to the index it was given.
 //! Without that, `gpu_core::upgrade` would redirect slot 0 to slot 1 and the
-//! benchmark would measure the same kernel twice and report a confident 1.00x.
+//! benchmark would measure the same kernel twice and report a confident dead heat.
 //! The end-to-end check that the redirect *does* fire lives in
 //! `tests/kernel_upgrade.rs` (a separate binary, because the switch is
 //! process-wide).

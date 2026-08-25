@@ -364,9 +364,8 @@ impl Flux2Model {
         let mlpu = mlp as u64;
         // Attention stays flash under `fast` at BOTH tiers: the materialised
         // scores→softmax→apply trio was measured SLOWER here (int8 @1536
-        // joint tokens: 14.8 s vs flash 11.6 s on the P40 — the untiled
-        // scores/apply kernels are bandwidth-bound at hd=128), unlike
-        // zimage's dims where the trio wins.
+        // joint tokens: the untiled scores/apply kernels are bandwidth-bound at
+        // hd=128), unlike zimage's dims where the trio wins.
         // [B, H, T, T] — per SAMPLE T, not the whole slab (samples never mix).
         let attn_mat = if fast { 1 } else { b_max as u64 * nh as u64 * n_max as u64 * n_max as u64 };
         let a = |len: u64| gpu.storage(len);
@@ -525,9 +524,11 @@ impl Flux2Model {
     /// The register-tiled GEMM this model dispatches. `matmul_reg3` is
     /// `matmul_reg2` with the shared-memory bank conflicts removed: same tiling,
     /// same K accumulation order, therefore BIT-IDENTICAL output (verified
-    /// max_abs 0.0 across all 12 of this graph's shapes), and 1.05x on the
-    /// klein-4B mix — up to 1.49x on the narrow-K boundary linears, never more
-    /// than 1% slower. `matmul_reg2` stays the default everywhere else in the
+    /// max_abs 0.0 across all 12 of this graph's shapes), and measured faster
+    /// on the klein-4B mix - by the widest margin on the narrow-K boundary
+    /// linears, and never meaningfully slower on any shape in it (re-measure
+    /// with `crates/flux2/src/bin/flux2_bench.rs`). `matmul_reg2` stays the
+    /// default everywhere else in the
     /// workspace until each model measures its own shapes.
     fn mm_kernel(&self) -> usize {
         K_MATMUL_REG3
@@ -676,8 +677,8 @@ impl Flux2Model {
     /// `head_dim` is 128, so the per-element kernel's one-thread-per-row layout
     /// makes every warp read 32 rows that are 128 floats apart — one useful
     /// float per 32-byte sector. The workgroup-per-row kernel is coalesced and
-    /// measured 19x faster at exactly this shape (36864 rows x 128:
-    /// 3.85 ms -> 0.20 ms on a P40); the selection rule lives in
+    /// measured an order of magnitude faster at exactly this shape (36864 rows
+    /// x 128); the selection rule lives in
     /// `backend_api::select` (`Op::RmsNorm`), which now prefers it at EVERY
     /// row count on a device with workgroup barriers.
     fn qknorm_rows(&self, x: &DeviceBuffer, scale: &DeviceBuffer, o: &DeviceBuffer, r0: u32, r1: u32) -> Step {
@@ -703,8 +704,8 @@ impl Flux2Model {
         let scr = &self.scr;
         if self.fast {
             // The lane-split flash kernel where the device's workgroup limit
-            // allows it (29x the baseline at hd=128 on a P40 — see
-            // `model::block::FlashIds`), else the baseline.
+            // allows it (well over an order of magnitude on the baseline at
+            // hd=128 - see `model::block::FlashIds`), else the baseline.
             s.push(model::block::flash_bidir_step(
                 &self.gpu,
                 model::block::FlashIds {

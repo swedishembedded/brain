@@ -40,7 +40,7 @@
 //! Reported `chance` is the most generous (shortest, 1-token group) per-group
 //! value, `1/vocab_values = 0.125`; true mixed-length full-group chance is lower.
 //! **Measured group exact-match ≈ 0.575** (train_ce ≈ 0.68), clear of the
-//! **0.40** threshold, in ~2-3 min on CPU (see `tests/mad_fuzzy_recall.rs`).
+//! **0.40** threshold, in minutes on CPU (see `tests/mad_fuzzy_recall.rs`).
 
 use std::path::Path;
 

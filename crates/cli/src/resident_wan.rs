@@ -259,8 +259,9 @@ impl Instance for WanInstance {
     /// (`wan::pipeline::denoise`'s bracketing note) - so two jobs with
     /// different prompts cannot be in flight against it at once, and a real
     /// batched forward means a batch axis through the engine, the RoPE tables
-    /// and the flash-attention slabs. At 32,760 tokens and ~46 s per forward
-    /// that is a measurement-led change, not a wiring one.
+    /// and the flash-attention slabs. At 32,760 tokens, with a forward already
+    /// slow enough to dominate a run, that is a measurement-led change, not a
+    /// wiring one.
     ///
     /// Per-request cancellation still works: each job's own `inv.cancel` is
     /// polled inside its own denoise loop, so cancelling job 2 does not

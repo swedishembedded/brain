@@ -254,7 +254,7 @@ fn wgpu_backend_block0_is_unaffected_at_full_twelve_layers() {
 
 /// Repeats [`wgpu_backend_block0_is_unaffected_by_a_third_block`]'s check
 /// `N` times in a row. A single clean run proves nothing here -- the
-/// measured flake rate on the un-mitigated race was roughly 40-60%, so only
+/// measured flake rate on the un-mitigated race was around a coin flip, so only
 /// many CONSECUTIVE clean runs distinguish "fixed" from "got lucky". The
 /// root cause: `backend-wgpu::WgpuBackend::flush_serialized` now
 /// auto-serializes any flush batch that both runs on an Intel adapter and

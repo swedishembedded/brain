@@ -5,7 +5,7 @@
 //! composed `nchw_nlc → layernorm_rows → nlc_nchw`?
 //!
 //! The composition shipped as the correct first cut, but the measurement did
-//! **not** rule fusing out: the two permutes were 67–86% of the whole, and
+//! **not** rule fusing out: the two permutes were most of the whole, and
 //! both pay the sector amplification that was the stated reason to avoid
 //! fusing. This test answers it — correctness first, then the numbers,
 //! printed so the answer lands in the record rather than in someone's terminal.

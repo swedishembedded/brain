@@ -626,7 +626,7 @@ mod import_as_tests {
         let scale_view = sts.tensor("thinker.embed_tokens.weight.scale").unwrap();
         // The tensor-level byte claim (not a whole-file comparison, which at
         // this toy 8x8 scale is swamped by per-tensor JSON header overhead --
-        // real savings come from the WEIGHT bytes shrinking 4x, which only
+        // real savings come from the WEIGHT bytes shrinking to a quarter, which only
         // dominates the header at real model row widths): packed u32 +
         // per-row f32 scale must still be fewer bytes than the f32-equivalent
         // for this same tensor (8*8*4 = 256 B) even at this tiny size, since

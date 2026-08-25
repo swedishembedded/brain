@@ -4,8 +4,8 @@
 //! GGUF import for Qwen3.5-35B-A3B.
 //!
 //! We fetch this model as **GGUF** (`bartowski/Qwen_Qwen3.5-35B-A3B-GGUF`),
-//! not HF safetensors - at the measured download throughput available when
-//! this was built (~3.2 MB/s regardless of connection count), fetching the
+//! not HF safetensors - at the download throughput available when this was
+//! built (a few MB/s regardless of connection count), fetching the
 //! ~72 GB bf16 safetensors checkpoint just to re-quantize it ourselves would
 //! cost hours more than fetching an already-quantized GGUF directly. That
 //! means the import source is **llama.cpp's own tensor-naming convention**,
@@ -21,8 +21,9 @@
 //! partially-downloaded `Qwen3.5-35B-A3B-Q4_K_M.gguf`, decoding it by hand
 //! against the GGUF spec, and cross-checking every mapped tensor's SHAPE
 //! against the corresponding HF tensor's shape from the real
-//! `model.safetensors.index.json` (saved under
-//! `/data/workspace/resources/qwen3.5/`) - not just its name. Every mapping
+//! `model.safetensors.index.json` from the released checkpoint (resolved
+//! under the model store root, see `BRAIN_QWEN35_DIR`) - not just its name.
+//! Every mapping
 //! below has a shape-equality proof in this file's own doc comments; nothing
 //! here is guessed.
 //!
@@ -565,9 +566,8 @@ mod tests {
         let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
         let cfg = config_from_gguf(&mg).expect("config_from_gguf on the real checkpoint");
 
-        // Cross-checked against the real config.json fetched separately
-        // (/data/workspace/resources/qwen3.5/config.json) and the checkpoint
-        // header parsed by hand (this file's own module doc).
+        // Cross-checked against the released checkpoint's own config.json and
+        // the checkpoint header parsed by hand (this file's own module doc).
         assert_eq!(cfg.n_layers, 40);
         assert_eq!(cfg.d_model, 2048);
         assert_eq!(cfg.n_heads, 16);

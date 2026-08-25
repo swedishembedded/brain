@@ -670,7 +670,7 @@ fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
 /// that hot path. Routing them through the generic kernel would silently cost that.
 ///
 /// So the duplication is earned — but it has to stay HONEST, i.e. the two must not
-/// drift apart. This pins that they agree exactly at 2x. (Contrast `strip_pool` and
+/// drift apart. This pins that they agree exactly at a scale factor of 2. (Contrast `strip_pool` and
 /// `softmax_hw`, which were written for this feature and then deleted once they were
 /// shown to be `avgpool2d` and `softmax_k` with degenerate arguments — no fast path,
 /// no reason to exist.)

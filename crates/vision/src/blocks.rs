@@ -65,8 +65,10 @@ fn use_tiled_conv() -> bool {
 
 /// Minimum output channels for the conv-as-GEMM eval path (`BRAIN_CONV_GEMM_MIN`,
 /// default 32). Below this the direct register-tiled conv wins (large spatial /
-/// few channels under-fills the GEMM tile); at/above it, im2col + matmul_reg3 is
-/// 2-5x faster on the P40. Whole YOLOv8n@640 forward: 2.36x at 32.
+/// few channels under-fills the GEMM tile); at/above it, im2col + matmul_reg3
+/// wins by a wide margin per layer, and enough of a YOLOv8n@640 forward sits
+/// above the threshold that the whole-network time moves with it. Re-sweep on
+/// another card with `crates/backend-wgpu/tests/bench_conv.rs` (`--ignored`).
 fn gemm_conv_min_cout() -> u32 {
     use std::sync::OnceLock;
     static V: OnceLock<u32> = OnceLock::new();
@@ -787,9 +789,9 @@ impl Conv {
     /// `conv -> bn_eval -> act`, whose eps matches `pack_sb`'s (`1e-5`), so the
     /// two paths agree numerically by construction.
     ///
-    /// `pub` so tests can pin that a given spec actually takes the fused path —
-    /// a silent fall-back to unfused is a 3x-dispatch perf regression that no
-    /// output comparison would ever catch.
+    /// `pub` so tests can pin that a given spec actually takes the fused path:
+    /// a silent fall-back to unfused turns one dispatch into three, a perf
+    /// regression no output comparison would ever catch.
     pub fn can_fuse(&self, ctx: &Ctx) -> bool {
         self.spec.norm == Norm::Bn
             && !self.spec.bias
@@ -889,8 +891,8 @@ impl Conv {
             // Conv-as-GEMM fast path (P40 / compute-bound GPUs): a dense conv
             // with many output channels is far faster as im2col + matmul_reg3 +
             // per-channel-affine+SiLU epilogue than the direct register-tiled
-            // conv, which collapses on deep small-spatial layers (measured 2-5x
-            // on YOLOv8n's stage2-4). Same math — parity-gated by the detection
+            // conv, which collapses on deep small-spatial layers (measured a
+            // large multiple on YOLOv8n's stage2-4). Same math, parity-gated by the detection
             // test. Gated on: the three kernels registered, a dense single-batch
             // SiLU conv past the tile threshold, and no calibration tap (the tap
             // path stays on the direct conv). `BRAIN_CONV_GEMM=0` disables it.
@@ -2332,42 +2334,35 @@ impl Ln2dNames {
 /// sector fetched serves ONE useful float, and the kernel runs at ~1/8 of memory
 /// bandwidth no matter how many positions there are. `layernorm_rows` is the
 /// kernel that already fixed exactly this (a 64-thread workgroup walks one row;
-/// measured 2.3-9.1x over the per-element form on a P40), and it wants its rows
-/// contiguous.
+/// measured several times faster than the per-element form at every width), and
+/// it wants its rows contiguous.
 ///
 /// So: permute NCHW -> NLC (`nchw_nlc`), which makes each position's C channels
 /// a contiguous row, run the row-oriented LayerNorm family, permute back
 /// (`nlc_nchw`). The two permutations are each other's inverse AND adjoint, so
 /// the backward is the same pair swapped — no extra kernel in either direction.
 ///
-/// **Measured** (Tesla P40, wgpu/Vulkan, release,
-/// `crates/vision/tests/imaging_blocks.rs::layernorm2d_composition_cost`, SAM 2
-/// Hiera-B+ @1024 feature-map shapes; every timed region bracketed by
-/// `Gpu::poll_wait` — `Gpu::submit` alone only appends to a pending list and
-/// times the HOST):
+/// **Measured** by
+/// `crates/vision/tests/imaging_blocks.rs::layernorm2d_composition_cost`
+/// (wgpu/Vulkan, release, SAM 2 Hiera-B+ @1024 feature-map shapes; every timed
+/// region bracketed by `Gpu::poll_wait`, because `Gpu::submit` alone only
+/// appends to a pending list and times the HOST). Run that test for this box's
+/// own figures; what is recorded here is the SHAPE of the result, which is
+/// what the design turns on, and the run-to-run spread is wide enough that
+/// nothing below should turn on a tight figure anyway.
 ///
-/// | shape | bytes | total | 2 permutes | permute GB/s | norm |
-/// |---|---|---|---|---|---|
-/// | 1x112x256x256 | 28.0 MiB | 2.789 ms | 2.442 ms (88%) |  48 | 0.348 ms |
-/// | 1x224x128x128 | 14.0 MiB | 0.793 ms | 0.687 ms (87%) |  86 | 0.107 ms |
-/// | 1x448x64x64   |  7.0 MiB | 0.333 ms | 0.240 ms (72%) | 122 | 0.093 ms |
-/// | 1x896x32x32   |  3.5 MiB | 0.179 ms | 0.110 ms (61%) | 133 | 0.069 ms |
-/// | 1x96x64x64    |  1.5 MiB | 0.124 ms | 0.079 ms (63%) |  80 | 0.046 ms |
-///
-/// (Run-to-run spread is ~10-20 %; a second run gave 56-84 % and 46-113 GB/s.
-/// Nothing below turns on a figure that tight.)
-///
-/// **Read this table the way it actually reads.** The permutes are ~60-88 % of
-/// the composed cost and they run at 46-133 GB/s on a ~346 GB/s card — they are
-/// NOT at the memory roof. That is not a surprise once the kernels are read:
-/// `nchw_nlc` writes coalesced but *gathers* `x[(n*C+ch)*HW + l]` with `ch`
-/// varying fastest, so a warp's 32 loads land `H*W` floats apart; `nlc_nchw` is
-/// the mirror image. Both permutes already pay the sector amplification that a
+/// **Read the measurement the way it actually reads.** The two permutes, not
+/// the norm, are the bulk of the composed cost at every shape tried, and they
+/// achieve well under the card's datasheet bandwidth: they are NOT at the
+/// memory roof. That is not a surprise once the kernels are read: `nchw_nlc`
+/// writes coalesced but *gathers* `x[(n*C+ch)*HW + l]` with `ch` varying
+/// fastest, so a warp's 32 loads land `H*W` floats apart; `nlc_nchw` is the
+/// mirror image. Both permutes already pay the sector amplification that a
 /// fused channels-first kernel is usually rejected for, and the amplification
-/// gets *worse* as `H*W` grows (48 GB/s at `HW = 65536`, 133 GB/s at
-/// `HW = 1024`). The row-oriented LayerNorm in the middle, by contrast, moves
-/// 2n floats at ~169 GB/s at the largest shape — it is the only coalesced stage
-/// here.
+/// gets *worse* as `H*W` grows: achieved bandwidth falls monotonically from
+/// the smallest `HW` in that sweep to the largest. The row-oriented LayerNorm
+/// in the middle, by contrast, moves 2n floats coalesced and is the only stage
+/// here that reaches a respectable fraction of the roof.
 ///
 /// So this composition is the right FIRST implementation — it is correct, it
 /// reuses the one selection site for the coalesced `*_rows` family, and it adds
@@ -2375,10 +2370,10 @@ impl Ln2dNames {
 /// `layernorm2d` would be slower. It points the other way: a fused kernel would
 /// do ~2 strided passes where the composition does ~6 (of which 4 are strided),
 /// so it is the leading candidate for the next optimisation, not a rejected one.
-/// The earlier version of this comment claimed the permutes ran at "377 GB/s,
-/// at the memory roof" — that number came from a timing loop of bare `submit`s
-/// that never reached the device, and 377 GB/s on a 346 GB/s card is
-/// self-refuting.
+/// The earlier version of this comment claimed the permutes ran "at the memory
+/// roof": that came from a timing loop of bare `submit`s that never reached the
+/// device, and the bandwidth it reported was above the card's datasheet peak,
+/// which is self-refuting.
 ///
 /// ## RESOLVED — the fused kernel was written, and it wins
 ///
@@ -2386,9 +2381,9 @@ impl Ln2dNames {
 /// per spatial position, walking `C` at stride `H*W`, barrier-free so
 /// `backend-cpu` JITs it. Gated against a host oracle in
 /// `crates/gradcheck/tests/layernorm2d_kernels.rs`. Measured against this same
-/// composition: **4.38x at `[1,32,65536]`**, 2.72x at `[1,64,16384]`, 1.34x at
-/// `[1,256,4096]`, 1.09x at `[1,96,1024]` — the margin growing with `H*W`
-/// exactly as the bandwidth column above predicts.
+/// composition it wins at every shape tried, by a margin that grows with `H*W`
+/// (widest at `[1,32,65536]`, down to roughly break-even at `[1,96,1024]`),
+/// exactly as the bandwidth reasoning above predicts.
 ///
 /// It is opt-in through [`LayerNorm2d::infer_only`] and NOT the default,
 /// because the composed forward's `xt` is the backward's activation cache and
@@ -2450,9 +2445,9 @@ impl LayerNorm2d {
     /// Take the fused `layernorm2d` kernel: ONE dispatch, NCHW in and out, no
     /// permute either side.
     ///
-    /// Measured 4.38x over the composed path at `[1,32,65536]`, 2.72x at
-    /// `[1,64,16384]`, 1.34x at `[1,256,4096]`, 1.09x at `[1,96,1024]` — the
-    /// margin growing with `H*W`.
+    /// Measured faster than the composed path at every shape tried, by a
+    /// margin that grows with `H*W` (widest at `[1,32,65536]`, roughly
+    /// break-even at `[1,96,1024]`).
     ///
     /// Inference ONLY, and the name says so because the reason is structural,
     /// not a tuning choice: the composed forward's `xt` (the NLC image of the

@@ -777,7 +777,7 @@ fn round_half_to_even(v: f64) -> u32 {
 /// close to independent of how that volume splits between the temporal and
 /// spatial axes. Measured on one Tesla P40 (24576 MiB), real
 /// `ltx-2.5-video-vae-conv-bf16.safetensors`, whole (un-tiled) path, peak
-/// sampled at 200 ms:
+/// sampled at 5 Hz:
 ///
 /// | shape | Mpx | peak MiB |
 /// |---|---:|---:|
@@ -829,7 +829,8 @@ pub fn should_tile(frames: u32, h: u32, w: u32) -> bool {
 /// It is **not** an exact factorisation of [`LtxVaeDecoder`]. This decoder's
 /// spatial receptive field is roughly 15 latent cells wide (summing every
 /// kernel-3 conv at the resolution it runs at: ~6 cells at the latent grid,
-/// ~2.5 at 2x, ~5.5 at 4x, ~1.1 at 8x), while a 1080p latent is only 34 cells
+/// ~2.5 at the 2:1 grid, ~5.5 at 4:1, ~1.1 at 8:1), while a 1080p latent is
+/// only 34 cells
 /// tall - so no overlap that still saves memory can cover it, and a
 /// halo-and-crop scheme like `imaging::tiling`'s cannot be exact either.
 /// Blending is what upstream ships for precisely this reason. A tile's

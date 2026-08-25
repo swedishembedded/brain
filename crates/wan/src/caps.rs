@@ -27,8 +27,8 @@
 //!   loop, which is shared by every caller.
 //! * **It holds the DiT resident across calls** ([`crate::pipeline::HotDit`]),
 //!   keyed on the only things that fix the built graphs: the variant, the
-//!   latent extent and the device. A cold call pays ~20 s of load plus 5.7 GB
-//!   of upload at 1.3B; a second request at the same size pays neither.
+//!   latent extent and the device. A cold call pays a slow load plus 5.7 GB of
+//!   upload at 1.3B; a second request at the same size pays neither.
 //!
 //! The execution helpers below are `pub fn`s shared by BOTH [`WanProvider`]
 //! and the residency adapter (`crates/cli/src/resident_wan.rs`) - one

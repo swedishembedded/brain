@@ -16,8 +16,8 @@
 //   params: d, rows, eps (f32 bits — the runtime epsilon `rmsnorm_eps` takes)
 //
 // The per-element kernel (rmsnorm.wgsl) assigns one THREAD per row: at decode
-// batch sizes that is 8 threads on a 3840-core card (measured at 16.6% of
-// decode time). Here 64 threads cooperate on one row: each accumulates a
+// batch sizes that is 8 threads on a 3840-core card, and it measured as a
+// sizeable share of a decode step. Here 64 threads cooperate on one row: each accumulates a
 // strided partial sum of squares into workgroup memory, ONE barrier, then
 // every thread redundantly folds the 64 partials (64 adds — cheaper than a
 // second barrier, and the CPU JIT supports exactly one top-level barrier) and
@@ -29,18 +29,15 @@
 // kernel gives thread t row t, so a warp's 32 loads are `d` floats apart: each
 // 32-byte sector fetched serves ONE useful float. Here the 64 threads of a
 // workgroup walk one row with stride 64, so every fetch is fully used.
-// Measured on a Tesla P40 (fp32, this kernel vs rmsnorm_eps, same total
-// elements) — the cooperative variant wins at EVERY row width, not only at
-// decode row counts:
+// Swept this kernel against rmsnorm_eps at a fixed total element count over
+// (rows, d) from (36864, 128) to (512, 9216). The cooperative variant wins at
+// EVERY row width, not only at decode row counts, and by the widest margin
+// where rows are narrow and numerous - which is where the per-element
+// kernel's uncoalesced reads hurt most. This kernel's own time barely moves
+// across the whole sweep; the per-element kernel's is what swings. Re-run the
+// comparison rather than trusting a figure written down here.
 //
-//     rows      d    per-element   this kernel   speedup
-//    36864    128       3.85 ms       0.20 ms      19.4x
-//    18432    256       4.64 ms       0.21 ms      22.6x
-//     4608   1024       0.73 ms       0.29 ms       2.5x
-//     1536   3072       1.27 ms       0.30 ms       4.2x
-//      512   9216       3.02 ms       0.27 ms      11.2x
-//
-// (agreement: max_abs 3.3e-6 — the reduction order differs, the math does not.)
+// (agreement: max_abs 3.3e-6 - the reduction order differs, the math does not.)
 
 struct Params {
     d: u32,

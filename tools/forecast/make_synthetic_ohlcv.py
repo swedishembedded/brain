@@ -194,8 +194,8 @@ def report(dev, high, low, close, volume, drift, kappa, p0, horizon):
         f"  autocorrelation:    r lag1 {acf(r_c, 1):+.3f} (a random walk has ~0)  "
         f"|r| lag1 {acf(a, 1):+.3f}  lag24 {acf(a, 24):+.3f}\n"
         f"  volatility clustering: Ljung-Box(|r|, 10) = {lb:.1f}  "
-        f"(chi2 5% critical value 18.3 -> clustered)\n"
-        f"  bar shape: mean (high-low)/close {rng.mean() * 100:.3f}% = {rng.mean() / r.std():.2f}x the return sd "
+        f"(chi2 critical value at the 0.05 level is 18.3 -> clustered)\n"
+        f"  bar shape: mean (high-low)/close {rng.mean() * 100:.3f}% = {rng.mean() / r.std():.2f} times the return sd "
         f"(1.4-1.5 on real intraday bars)\n"
         f"  volume/|return| correlation {np.corrcoef(volume[1:], np.abs(r))[0, 1]:+.3f}"
     )

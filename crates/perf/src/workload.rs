@@ -417,9 +417,9 @@ mod tests {
         w.num_requests = 20_000;
         let d = w.arrival_delays();
         let mean = d.iter().sum::<f64>() / d.len() as f64;
-        // Mean inter-arrival should be ~1/10 s. Loose bound: this is a sampled
+        // Mean inter-arrival should be near the configured rate. Loose bound: this is a sampled
         // process, the assertion is that the rate is honoured, not exact.
-        assert!((mean - 0.1).abs() < 0.02, "mean inter-arrival {mean} should be near 0.1s");
+        assert!((mean - 0.1).abs() < 0.02, "mean inter-arrival {mean} should be near the configured 0.1");
     }
 
     #[test]

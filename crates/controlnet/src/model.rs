@@ -50,7 +50,7 @@
 //! Not a GEMM over `[HW, C]` rows, which is the other obvious lowering: that
 //! would need a permute in and a permute out for a kernel whose entire work is
 //! `C` MACs per position, and a measured pass found those
-//! permutes running at 14–33 % of the roofline.
+//! permutes running at a fraction of the roofline.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use sdxlunet::model::Rec;
@@ -112,7 +112,7 @@ pub struct ControlNet {
 impl ControlNet {
     /// Record the graph for a `h × w` latent and `t_enc` text tokens.
     ///
-    /// The conditioning image is at `cond_downscale() ×` that, i.e. 8× for
+    /// The conditioning image is at `cond_downscale()` times that, i.e. eightfold for
     /// every released SDXL ControlNet — the same factor as the VAE, which is
     /// what makes the embedding land on the latent grid.
     ///

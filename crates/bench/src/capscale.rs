@@ -23,7 +23,7 @@
 //! 3. per axis, fit a **saturating trend** `score(N) ≈ ceil − A·N^(−β)` (scores
 //!    rise toward a ceiling, so we fit the *gap to a ceiling* as a power law),
 //! 4. record the slope/exponent **β**, the fit **R²**, an extrapolated predicted
-//!    score at **2×** and **4×** the largest `N`, and a coarse **verdict**
+//!    score at **twice** and **four times** the largest `N`, and a coarse **verdict**
 //!    (improving / saturating / flat).
 //!
 //! The output [`CapScaleReport`] is serialized to
@@ -239,9 +239,9 @@ pub struct AxisScaling {
     pub labels: Vec<String>,
     /// Fitted saturating trend.
     pub fit: SaturatingFit,
-    /// Predicted score at 2× the largest `N`.
+    /// Predicted score at twice the largest `N`.
     pub pred_2x: f64,
-    /// Predicted score at 4× the largest `N`.
+    /// Predicted score at four times the largest `N`.
     pub pred_4x: f64,
     /// Local slope: score gain per doubling of `N` over the measured grid
     /// (Δscore / Δlog2 N). This is the "how much does this axis respond to the

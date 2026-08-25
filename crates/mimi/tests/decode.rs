@@ -192,7 +192,8 @@ fn parity_against_golden_dump() {
     // host-exact ConvNeXt LayerNorm/GELU.
     //
     // The ceilings keep real headroom over those measurements on purpose
-    // (max-abs ~100x, log-mel L1 ~13x): a bound fitted to one run goes red on
+    // (orders of magnitude on max-abs, and a wide margin on log-mel L1): a bound
+    // fitted to one run goes red on
     // the next backend or driver for no defect, while this much margin still
     // catches a reassociation that changes the arithmetic (the GEMM conv
     // lowering being the live example) rather than just reorders it.

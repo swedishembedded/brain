@@ -239,7 +239,7 @@ fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<(
     // Winograd F(2,3) for 3×3 s1 p1 exists and is validated, but as implemented
     // (scalar transforms, 16 coord-parallel GEMMs) it is SLOWER than the tuned
     // AVX2 GEMM below - the transform + materialization overhead and weaker
-    // parallelization eat the 2.25× multiply saving. So it is OPT-IN
+    // parallelization eat Winograd's multiply saving. So it is OPT-IN
     // (BRAIN_WINOGRAD=1) scaffolding for the Phase-7 work (vectorized fused
     // transforms, column-parallel transform-domain GEMM) rather than the default.
     if winograd_applicable(p)

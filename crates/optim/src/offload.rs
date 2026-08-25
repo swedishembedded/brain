@@ -14,7 +14,7 @@
 //! Per step: read each grad off the GPU, run the exact AdamW update (same math as
 //! `adamw.wgsl`) over host-resident `m`/`v`/master-weights with rayon across the
 //! 48 cores, and write the updated weight back. The 0.6B round-trip is ~4.8 GB
-//! over PCIe (~0.3 s) + a memory-bound CPU pass — cheap next to a training step,
+//! over PCIe plus a memory-bound CPU pass - cheap next to a training step,
 //! and it removes the VRAM pressure that was throttling full fine-tuning.
 
 use gpu_core::Gpu;

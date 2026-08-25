@@ -403,7 +403,7 @@ impl AggregateEmbed {
     /// magnitude by orders of magnitude, so an un-normalized flatten - and
     /// therefore every row of the DiT's text context - was dominated by the
     /// largest states' near-constant component, leaving the caption's own
-    /// content as a ~5% residual. Two entirely different prompts produced
+    /// content as a tiny residual. Two entirely different prompts produced
     /// context matrices whose mean rows sat at cosine 0.9998 of each other,
     /// and a text-to-video generation reproduced the same scene whatever it
     /// was asked for.

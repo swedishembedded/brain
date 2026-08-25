@@ -48,8 +48,8 @@
 //!
 //! # Why this is memory-bound, and what that implies
 //!
-//! One position at the released dims is ~1.1 GFLOP against ~2.3 GB of
-//! weights - an arithmetic intensity of about 0.5 FLOP/byte, three orders of
+//! One position at the released dims is about a GFLOP of arithmetic against
+//! gigabytes of weights - an arithmetic intensity around 0.5 FLOP/byte, three orders of
 //! magnitude below any modern accelerator's balance point. Every decision
 //! below follows from that single number: batch the CFG branches so the
 //! weights are read once for both, upload the weights ONCE per generation
@@ -484,7 +484,8 @@ pub fn step(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, cache: &mut KvCac
 /// one's normalized hidden state.
 ///
 /// **Why this exists.** This module is memory-bound, not compute-bound: one
-/// `step` at the released dims streams ~2.3 GB of weights to do ~1.1 GFLOP.
+/// `step` at the released dims streams gigabytes of weights to do about a
+/// GFLOP of arithmetic.
 /// Every GEMV here is `[out, inn] × [inn]`, so the weight matrix is thousands
 /// of times larger than the vector it multiplies - running `b` sequences as
 /// `b` separate `step` calls re-reads all of it `b` times from DRAM for

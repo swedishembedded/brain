@@ -12,9 +12,9 @@
 //
 // Peak `dot4I8Packed` rate — the int8 sibling of `roof_fma`.
 //
-// WHY THIS IS NEEDED, and it is not a nicety. `matmul_i8_dyn` measured 3726
-// GOP/s on a served Qwen3-0.6B step and the profile graded it "36.1% of roof"
-// — against the **fp32** roof, because that was the only one measured. Pascal's
+// WHY THIS IS NEEDED, and it is not a nicety. On a served Qwen3-0.6B step the
+// profile graded `matmul_i8_dyn` at about a third of roof - against the **fp32**
+// roof, because that was the only one measured. Pascal's
 // DP4A path is several times the fp32 rate, so grading an int8 kernel against
 // fp32 flatters it by exactly that factor, and a kernel that looks like it is
 // at a third of the machine may be at a tenth. The whole method here is "rank

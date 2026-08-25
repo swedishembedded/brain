@@ -19,11 +19,11 @@
 // variance); only the thread mapping changes.
 //
 // WHY: the per-element kernel gives thread t row t, so a warp's 32 loads are
-// `d` floats apart and each 32-byte sector fetched serves ONE useful float —
-// 8x read and write amplification, and the kernel runs at a small fraction of
+// `d` floats apart and each 32-byte sector fetched serves ONE useful float:
+// eight-way read and write amplification, and the kernel runs at a small fraction of
 // memory bandwidth no matter how many rows there are. That is the same
-// coalescing bug `rmsnorm_rows.wgsl` fixes (measured 19.4x for QK-norm on a
-// P40); here the 64 threads of a workgroup walk one row with stride 64, so
+// coalescing bug `rmsnorm_rows.wgsl` fixes (measured an order of magnitude for
+// QK-norm); here the 64 threads of a workgroup walk one row with stride 64, so
 // every fetch is fully used.
 //
 // ONE barrier, deliberately: the CPU JIT (`wgsl-cpu`) splits a kernel body at

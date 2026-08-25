@@ -21,7 +21,8 @@
 //! moved to `imaging::color::yuyv_to_rgb`, the workspace's one home for colour
 //! conversion; this crate is V4L2 and nothing else.
 //!
-//! The capture thread blocks in `DQBUF` ~33ms and always overwrites the slot
+//! The capture thread blocks in `DQBUF` for about a frame interval and always
+//! overwrites the slot
 //! (producer wins), so the render loop takes the latest frame and never rebuilds a
 //! backlog — the same latest-state discipline the SDL keystroke path uses.
 

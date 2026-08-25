@@ -26,7 +26,7 @@
 //! numbers) and insensitive to the high-frequency detail that legitimately
 //! differs between resolutions. [`blowup_ratio`] reduces the curve to the one
 //! number a gate wants: the largest single value over the MEDIAN, which is
-//! ~1-3x for a clip with normal motion however fast that motion is, and an
+//! near 1 for a clip with normal motion however fast that motion is, and an
 //! order of magnitude for a clip that disintegrates.
 //!
 //! Both are deliberately blind to *content*: a clip can score perfectly and

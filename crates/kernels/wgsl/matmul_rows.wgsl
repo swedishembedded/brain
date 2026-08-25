@@ -16,7 +16,7 @@
 // One thread computes out[r0 .. r0+8, col] — the weight row `col` is loaded
 // ONCE per 8 output rows instead of once per row. The naive kernel streams
 // the whole [N, K] weight for every row of x (e.g. 16 MB × 1376 rows ≈ 22 GB
-// per ViT MLP layer); this cuts that memory traffic 8×, which is what
+// per ViT MLP layer); this cuts that memory traffic eightfold, which is what
 // dominates large-transformer forwards on the CPU backend. Per-output
 // accumulation order (sequential k) is unchanged → bit-identical to matmul.
 //

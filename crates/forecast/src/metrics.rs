@@ -11,8 +11,8 @@
 //!
 //! Definitions:
 //! - **pinball / quantile loss** — the proper scoring rule for a single
-//!   quantile: `max(tau*(y-q), (tau-1)*(y-q))`. Asymmetric — at `tau=0.9` an
-//!   under-forecast costs 9x an over-forecast.
+//!   quantile: `max(tau*(y-q), (tau-1)*(y-q))`. Asymmetric: at `tau=0.9` an
+//!   under-forecast costs nine times an over-forecast.
 //! - **weighted quantile loss (wQL)** — `2 * sum(pinball)` over the `[H, Q]`
 //!   grid, normalised by `sum|actual|`; the GIFT-Eval / Chronos scale-free
 //!   probabilistic headline. The factor of 2 is the gluonts convention (median
@@ -32,7 +32,8 @@
 //! - **skill score** — `clamp(1 - error/baseline_error, 0, 1)`; converts a
 //!   lower-is-better error into a 0..1 higher-is-better headline.
 //!
-//! sMAPE is deliberately absent — N-BEATS ships two definitions differing by 2x;
+//! sMAPE is deliberately absent - N-BEATS ships two definitions that differ by
+//! a factor of two;
 //! MASE is our scale-free point metric of record to avoid that ambiguity.
 
 /// Pinball (quantile) loss for one predicted quantile `q` at level `tau`

@@ -335,7 +335,7 @@ impl Sigmas {
     /// So `Leading` — which is what SDXL ships — is the branch that takes the
     /// `sqrt(σ²+1)` lift, and `Linspace`/`Trailing` return the bare σ_max. The
     /// two are easy to swap because both are "the big one" and they differ by
-    /// only ~0.4 % (11.0736 vs 11.0283 on the SDXL 20-step schedule), which no
+    /// only a fraction of a percent (11.0736 vs 11.0283 on the SDXL 20-step schedule), which no
     /// image inspection would ever reveal — so it is gated by
     /// `discrete_parity` against the dumped reference value rather than left to
     /// a reading of the source.

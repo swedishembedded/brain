@@ -14,13 +14,11 @@
 // Same math as flash_attn_bidir.wgsl (online softmax, K/V streamed through
 // shared memory, scores never materialised), same Params, same output layout:
 // a drop-in replacement wherever `flash_attn_bidir` runs, and MEASURABLY
-// faster at every head_dim (Tesla P40, T=1536, d_model=3072, ms/dispatch):
-//
-//   head_dim   flash_attn_bidir   this kernel   speedup
-//        128        411.7 ms          14.2 ms     29.0x
-//         96        406.6 ms          18.6 ms     21.9x
-//         64        400.7 ms          27.8 ms     14.4x
-//         32        235.1 ms          54.0 ms      4.4x
+// faster at every head_dim swept (128 / 96 / 64 / 32 at T=1536,
+// d_model=3072). The margin is widest at head_dim 128 and narrows as head_dim
+// falls, which is exactly the register-pressure story below: the wider the
+// head, the more of it spills in the kernel this one replaces. A/B it with
+// `crates/lfm2/src/bin/lfm_attn_ab.rs` rather than trusting a figure here.
 //
 // (agreement with flash_attn_bidir: cosine 1.00000000, max_abs 1.3e-6.)
 //
@@ -31,8 +29,9 @@
 // either — both arrays land in LOCAL memory, which is global-memory backed.
 // The inner loop then does ~3 local-memory accesses (q[d], o[d] read, o[d]
 // write) per 2 FLOP = 6 bytes/FLOP, pinning the kernel to memory bandwidth:
-// measured 70 GFLOP/s = 0.6% of a Tesla P40's fp32 peak at head_dim 128,
-// T 1536, 24 heads (FLUX.2 klein-4B — 81% of that model's whole DiT forward).
+// measured at well under one percent of a Pascal card's fp32 peak at head_dim
+// 128, T 1536, 24 heads - which on FLUX.2 klein-4B made this one kernel the
+// bulk of the model's whole DiT forward.
 //
 // THE FIX. Split the head_dim across LANES=4 threads, so each thread owns only
 // CH=32 channels: `q[32]` + `o[32]` = 64 values, indexed by a COMPILE-TIME

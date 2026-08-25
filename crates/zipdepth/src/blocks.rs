@@ -723,7 +723,7 @@ impl StripPoolingAttention {
 /// `gcb_two_biases_are_provably_dead` pins the invariance (measured: the loss moves
 /// by EXACTLY 0.0f32 when either is shifted by +-0.5, and by 2 ULP at +-5.0, where
 /// a live parameter would move it by ~850). That is also why neither can be
-/// finite-difference-checked: their FD is 100% round-off noise.
+/// finite-difference-checked: their FD is entirely round-off noise.
 ///
 /// NOTE: upstream's ONNX export monkey-patches this block into a uniform
 /// `avg_pool2d`, DROPPING the learned softmax (`export.py:68-74`). brain implements

@@ -44,7 +44,7 @@
 //! Real and tested (`crates/ltxv/tests/shard_parity.rs`):
 //! * [`shard_cost`](Shardable::shard_cost) - a FLOP-shaped per-block cost
 //!   (self-attention QKVO + its O(T²) score/weighted-sum term, text
-//!   cross-attention's own QKVO, the 4x-width FFN), fed to `plan_balanced`
+//!   cross-attention's own QKVO, the four-times-width FFN), fed to `plan_balanced`
 //!   for both the tiny test config and the real 22B config's shape (48
 //!   layers, `inner_dim` 4096) - a plan can be COMPUTED for the real model
 //!   even though it cannot be built or run on hardware this port has access

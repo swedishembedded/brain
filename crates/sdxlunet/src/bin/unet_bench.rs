@@ -15,7 +15,7 @@
 //! * **Every timed region is bracketed by `poll_wait()`.** `submit` with an
 //!   empty clear list only appends to `pending`; a loop of bare submits measures
 //!   host-side bind-group construction and reports it as device bandwidth. That
-//!   mistake produced 377 GB/s on a ~346 GB/s card.
+//!   mistake produced a reported bandwidth above the card's physical peak.
 //! * **Best-of-N**, not mean: the minimum is the least contaminated sample.
 //! * **Groups are contiguous runs of one kernel**, submitted in graph order, so
 //!   the sum of the parts is comparable to the whole. Per-group drains add one

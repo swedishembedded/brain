@@ -51,7 +51,7 @@ pub(crate) fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
 /// merely close, which is what lets a parity-gated path use it unconditionally.
 ///
 /// It matters because the two calls bracketing every device forward -
-/// `embed_tokens` and the head inside `postprocess` - are ~2.8 GFLOP each at
+/// `embed_tokens` and the head inside `postprocess` - are GFLOPs of arithmetic each at
 /// 1.3B/14k-token shapes, which is minutes a generation when only one of the
 /// machine's cores is doing it while the GPU idles.
 pub fn linear(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b: Option<&[f32]>, out_dim: usize) -> Vec<f32> {

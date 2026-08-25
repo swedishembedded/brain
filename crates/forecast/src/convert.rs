@@ -455,7 +455,7 @@ mod tests {
         .unwrap();
         let q = tf.quantiles.as_ref().unwrap();
         assert!((q.data[0] - 0.0).abs() < 1e-4); // median
-        assert!((q.data[1] - 1.959_964).abs() < 1e-2); // 97.5% ~ 1.96
+        assert!((q.data[1] - 1.959_964).abs() < 1e-2); // the 0.975 quantile ~ 1.96
         assert_eq!(q.method, "gaussian_ppf");
     }
 

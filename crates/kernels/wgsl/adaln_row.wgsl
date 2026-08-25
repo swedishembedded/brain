@@ -25,8 +25,8 @@
 // the HOST, once per block: at the real 22B/720p shape that is a [3520, 36864]
 // f32 combine (519 MB written) plus nine [3520, 4096] slices, then nine 57.7 MB
 // uploads - per block, times 48 blocks, times every denoise step, for a table
-// whose only per-block input is the 147 KB `tbl`. Measured at 36.0 s of a
-// 103.3 s real forward before this kernel existed.
+// whose only per-block input is the 147 KB `tbl`. Measured at about a third of
+// a real forward before this kernel existed.
 //
 // WHY THE GATHER, rather than `U == R` and a straight index. A token's adaLN
 // row is a function of that token's timestep alone, and a denoise step's

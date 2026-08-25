@@ -50,9 +50,9 @@ impl Policy {
     }
 
     /// [`Self::default`] re-tuned for a device whose own service time is
-    /// measured in **seconds**, not milliseconds — a laptop-class iGPU: a
-    /// real single-request TTFA of ~13.2s was measured on the box this was
-    /// written against. Two defaults break down at that scale, and both are
+    /// measured in **seconds**, not milliseconds - a laptop-class iGPU, where a
+    /// real single-request TTFA of many seconds was measured on the box this
+    /// was written against. Two defaults break down at that scale, and both are
     /// fixed here:
     ///
     /// * `max_wait_ms: 2000` force-picks *every* group almost immediately —
@@ -175,8 +175,8 @@ mod tests {
         assert_eq!(choose_next(&[], &Policy::default()), None);
     }
 
-    /// The regression this box's measured serving pathology (TTFA 13.2s at
-    /// concurrency 1) reduces to: at real second-scale ages, `Policy::default()`
+    /// The regression this box's measured serving pathology (a TTFA of many
+    /// seconds at concurrency 1) reduces to: at real second-scale ages, `Policy::default()`
     /// picks a lone stale job over a fresh full batch, and `serving_default()`
     /// fixes it. This is the acceptance test for the fix, not just a policy tweak.
     #[test]

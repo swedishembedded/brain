@@ -3,9 +3,9 @@
 
 //! The measured roofline: does the probe produce a number that can be believed?
 //!
-//! These assertions are deliberately device-INDEPENDENT. A test that pins
-//! "11.76 TFLOP/s" would pass on exactly one card and would be the very defect
-//! this module exists to remove. What is checked instead is that the
+//! These assertions are deliberately device-INDEPENDENT. A test that pinned
+//! one card's datasheet peak would pass on exactly that card and would be the
+//! very defect this module exists to remove. What is checked instead is that the
 //! measurement cannot be one of the two ways this probe can lie:
 //!
 //! 1. **A folded loop.** If a compiler proves the FMA chain away, the reported
@@ -177,7 +177,8 @@ fn measure_is_bounded_by_the_roof_budget_even_if_a_rung_stalls() {
     let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
     let t0 = std::time::Instant::now();
     let _ = roof::measure(&gpu); // Some() or None both fine -- only the bound matters
-    // Default budget is 10s per loop, up to 4 loops (compute/bandwidth/cache/int8),
+    // Default budget is `roof_budget()` per loop, up to 4 loops
+    // (compute/bandwidth/cache/int8),
     // and `best_of` itself now stops repping once its loop's deadline passes (it
     // used to be checked only BETWEEN calls, so one call started just under the
     // wire could legally run 4 more 15s-bounded dispatches past it). A generous
@@ -197,7 +198,7 @@ fn a_streaming_kernel_is_graded_against_bandwidth_not_flops() {
     let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
     // `axpy`: 2 FLOP per 12 bytes moved.
     assert_eq!(r.classify(2, 12), Bound::Memory);
-    // `col2im` measured 23.2 GB/s on a P40 — 6.7% of that roof, far under the
+    // `col2im` measured a small fraction of that roof, far under the
     // memory-bound defect line, which is what makes it a defect and not merely
     // an untuned kernel.
     let u = r.utilisation(0, 23_200_000_000, 1.0).unwrap();

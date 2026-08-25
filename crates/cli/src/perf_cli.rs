@@ -725,7 +725,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
 /// the REAL served path: a real `residency::Executor` holding a real
 /// `QwenResident`, behind the real `apiserve::router()`, driven over HTTP
 /// in-process (`perf::targets::HttpTarget`). This is the target the serving-
-/// performance audit's 600s regression would have shown up in; the
+/// performance audit's headline regression would have shown up in; the
 /// `qwen-synth:`/`qwen:` targets above measure the
 /// paged engine directly and skip the whole HTTP/bridge/residency layer the
 /// bug actually lived in. The tokenizer suffix is required (unlike the
@@ -1031,7 +1031,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     let resident = crate::resident_flux2::Flux2Resident::from_env()
         .ok_or("flux2: BRAIN_FLUX2_* env incomplete")?;
     // Budget ONLY the schedulable devices - same guard as `build_lfm` (its
-    // ledger records a silent 6× llvmpipe regression from budgeting a GPU the
+    // ledger records a silent, order-of-magnitude llvmpipe regression from budgeting a GPU the
     // process could not see; the lane fell back to a software adapter and the
     // run masqueraded as a GPU number).
     let set = crate::compute_set();
@@ -1198,7 +1198,7 @@ fn build_wan(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 ///
 /// Defaulting to `tiny` rather than the real config is a deliberate choice,
 /// not an oversight: Phase 8's own `ltxv_bench streamed` profiling measured
-/// the real 22B checkpoint's `forward_q_streamed` at ~186 s for a SINGLE
+/// the real 22B checkpoint's `forward_q_streamed` at MINUTES for a SINGLE
 /// denoise step (extrapolated from a 2/4-layer real-GGUF probe to the real
 /// 48 - see this crate's roadmap ledger for the full attribution), because
 /// every block's weights are re-read and re-quantized from the GGUF on

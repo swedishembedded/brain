@@ -164,7 +164,8 @@ mod tests {
 
     #[test]
     fn pacing_holds_target_when_work_is_cheap() {
-        // 15 fps => 66ms budget; 10ms work must not overrun and fps ~15.
+        // At the target below, work far inside the frame budget must not
+        // overrun, and the reported rate must hold the target.
         let ticks = pace(10, 60, 15, false);
         assert!(ticks.iter().all(|t| !t.overrun));
         let fps = ticks.last().unwrap().fps;
@@ -173,7 +174,8 @@ mod tests {
 
     #[test]
     fn pacing_reports_overrun_and_honest_fps() {
-        // 15 fps budget 66ms; 200ms work => overrun, fps ~5.
+        // Work several times the frame budget must overrun, and the reported
+        // rate must fall to what the work actually allows, not the target.
         let ticks = pace(200, 60, 15, false);
         assert!(ticks.iter().all(|t| t.overrun));
         let fps = ticks.last().unwrap().fps;

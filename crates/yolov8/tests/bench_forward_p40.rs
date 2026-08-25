@@ -8,9 +8,9 @@
 //! DISPLAY= cargo test --release -p brain-yolo --test bench_forward_p40 -- --ignored --nocapture
 //! ```
 //!
-//! Conv is ~95% of YOLOv8n's cost. `conv_act_reg` collapses on the deep
+//! Conv is nearly all of YOLOv8n's cost. `conv_act_reg` collapses on the deep
 //! small-spatial stages (measured below naive there); on a compute-bound GPU the
-//! im2col+GEMM path runs those 2-5× faster (`backend-wgpu` `bench_conv_gemm`).
+//! im2col+GEMM path runs those markedly faster (`backend-wgpu` `bench_conv_gemm`).
 //! This measures the whole-network effect. `BRAIN_CONV_GEMM=0` forces the direct
 //! conv; the default (unset) uses the GEMM path where eligible.
 

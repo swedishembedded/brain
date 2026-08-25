@@ -14,24 +14,23 @@
 // writing its own `[m, n]` partial; `dw_splitk_reduce` folds them.
 //
 // WHY. `matmul_reg3`'s tile grid is `ceil(m/128) * ceil(n/128)` and does NOT
-// grow with `k`, so a skinny-M shape starves the card. Measured on a P40 at
-// `k=1024, n=2048` — the Qwen3-0.6B qkv projection — the same kernel walks its
-// whole occupancy curve on `m` alone:
+// grow with `k`, so a skinny-M shape starves the card. Measured at
+// `k=1024, n=2048` (the Qwen3-0.6B qkv projection) the same kernel walks its
+// whole occupancy curve on `m` alone: the achieved rate rises with `m` in
+// step with the workgroup count (16 workgroups at m=128, doubling with each
+// doubling of m), which is the signature of an occupancy limit and not of a
+// memory or ALU one.
 //
-//     m        128     256     512    1024
-//     wgs       16      32      64     128
-//     GFLOP/s 1171    1758    2562    3811
-//
-// At `m=128` that is 16 workgroups on a 30-SM card and 11% of peak, and it was
-// 47% of a served Qwen3-0.6B step. This is the same diagnosis, and the same
-// fix, that took `matmul_dw_reg` from 4.4% to 17.1% of peak — see
-// `matmul_dw_reg_splitk`.
+// At `m=128` those 16 workgroups leave half a 30-SM card idle, and that one
+// dispatch was about half of a served Qwen3-0.6B step. This is the same
+// diagnosis, and the same fix, that lifted `matmul_dw_reg` several-fold at its
+// starved shape - see `matmul_dw_reg_splitk`.
 //
 // The arithmetic that says split-K is right HERE (it is not always — check
 // before copying this): splitting only pays when the reduce is cheap against
 // the GEMM. At m=128, n=2048, k=1024 with 8 slices the partials are 8.4 MB and
-// the fold moves 9.4 MB — **0.03 ms against the GEMM's 0.46 ms**, 7% overhead
-// to roughly triple the occupancy. A fat-output shape would invert that.
+// the fold moves 9.4 MB - measured at a few percent of the GEMM it feeds, to
+// roughly triple the occupancy. A fat-output shape would invert that.
 //
 // Slice `s` covers `[s*kper, min((s+1)*kper, k))` with `kper` a multiple of BK,
 // so the chunk loop is unchanged and every `k` is visited exactly once. A slice

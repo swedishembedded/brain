@@ -330,7 +330,7 @@ impl WanDitDev {
     ///
     /// Classifier-free guidance alternates between two contexts on every step,
     /// and `text_embedding` is a `[512, 4096] x [4096, dim]` plus a
-    /// `[512, dim] x [dim, dim]` on the HOST - ~9 GFLOP a call at 1.3B widths,
+    /// `[512, dim] x [dim, dim]` on the HOST - a few GFLOP a call at 1.3B widths,
     /// which is real time next to a device forward and is the same answer every
     /// step. Embedding each prompt once and re-uploading is what keeps it out
     /// of the loop.

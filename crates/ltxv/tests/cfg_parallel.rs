@@ -111,17 +111,18 @@ fn run(plan: DevicePlan, paths: &Paths, label: &str) -> (Vec<Vec<u8>>, f32) {
 /// device plan differs, and every decoded byte must match.
 ///
 /// **Both timed arms run against an already-warm block cache**, because the
-/// first generation against a checkpoint pays a ~250 s cold read that has
+/// first generation against a checkpoint pays a cold read of minutes that has
 /// nothing to do with placement. Timing the first arm against the second
-/// without a warm-up measures the cache, not the cards - it reported a 4.0x
-/// "speedup" on this box where the honest concurrency figure is roughly
-/// half that. The warm-up run is discarded, and the two arms it precedes are
+/// without a warm-up measures the cache, not the cards - it reported a
+/// "speedup" roughly double the honest concurrency figure on this box. The
+/// warm-up run is discarded, and the two arms it precedes are
 /// then comparable.
 ///
 /// The wall times are reported, never asserted on: a correctness gate that
-/// fails when the box is loaded is a flaky gate. Two Tesla P40s measured
-/// 1.94x wall / 2.12x on the denoise loop at this shape; that figure belongs
-/// in the roadmap ledger, not in an assertion here.
+/// fails when the box is loaded is a flaky gate. Two Tesla P40s measure a
+/// real but sub-linear wall-clock win at this shape, larger on the denoise
+/// loop alone than end to end; those figures belong in the roadmap ledger,
+/// not in an assertion here.
 #[test]
 #[ignore = "needs the real 22B LTX-2.5 checkpoint (BRAIN_LTXV_DIT) and VAE (BRAIN_LTXV_VAE)"]
 fn concurrent_two_card_cfg_is_bit_identical_to_sequential_one_card() {

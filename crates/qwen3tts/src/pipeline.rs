@@ -595,8 +595,9 @@ fn run_npu(
         Some("npu-kv") | Some("kv") | Some("npu-kv-int8") => Mode::NpuKvI8,
         Some("npu-kv-int4") | Some("int4") => Mode::NpuKvI4,
         Some("npu-kv-fp32") => Mode::NpuKvF32,
-        // Default: the resident KV-cache decode graph (talker ~7-19x faster/frame
-        // than cache-free). INT8 for the large 1.7B Talker, fp32 for the 0.6B.
+        // Default: the resident KV-cache decode graph (talker measured an order
+        // of magnitude faster per frame than cache-free). INT8 for the large
+        // 1.7B Talker, fp32 for the 0.6B.
         _ if tables.cfg.d_model >= 2048 => Mode::NpuKvI8,
         _ => Mode::NpuKvF32,
     };
@@ -607,12 +608,12 @@ fn run_npu(
         eprintln!("{}", crate::npu_gen::describe_talker_path(device, allow_fallback, q, i4));
     }
 
-    // MTP placement: the residual code-predictor re-runs its 5-layer decoder 16x
-    // per frame. On the host that re-streams the MTP's ~300MB fp32 weights every
-    // substep and is memory-bandwidth bound — measured ~580ms/frame on the 1.7B
-    // (vs an earlier ~225ms when the decoder was smaller). The resident INT8 NPU
-    // decode graph (`KvMtp`) streams 4x-smaller weights from device memory and
-    // measures ~257ms/frame — a 2.25x win — so it is now the DEFAULT for the large
+    // MTP placement: the residual code-predictor re-runs its 5-layer decoder 16
+    // times per frame. On the host that re-streams the MTP's ~300MB fp32 weights every
+    // substep and is memory-bandwidth bound, and it got worse as the decoder
+    // grew. The resident INT8 NPU decode graph (`KvMtp`) streams a quarter of
+    // the weight bytes from device memory and measured more than twice as fast
+    // per frame on the 1.7B - so it is now the DEFAULT for the large
     // (d_model>=2048) model. `BRAIN_QWEN3TTS_MTP=cpu` forces the host path (still the
     // default on the small 0.6B, whose CPU MTP is cheap); `=npu` forces it on.
     // Not used for the CPU-Talker mode (which already uses the host MTP).

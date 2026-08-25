@@ -6,7 +6,7 @@
 //! benchmark through the architecture-agnostic `DecoderLm` seam, and asserts
 //! held-out tool-call exact-match clears the calibrated threshold - objective
 //! proof the engine both trains and infers the Qwen architecture correctly on
-//! concrete tasks. Skipped when `MOE_SKIP_GPU_TESTS` is set. ~1-2 min on the
+//! concrete tasks. Skipped when `MOE_SKIP_GPU_TESTS` is set. Minutes on the
 //! CPU backend.
 
 use bench::toolcall::Toolcall;

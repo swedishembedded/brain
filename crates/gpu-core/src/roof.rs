@@ -21,9 +21,9 @@
 //!   (two reads and a write), already in the kernel tree.
 //!
 //! Both probes self-calibrate their trip count until the timed region is long
-//! enough to dominate launch and drain, and both are `poll_wait`-bracketed —
-//! a bare-submit loop once reported 377 GB/s on a ~346 GB/s card by timing
-//! the host.
+//! enough to dominate launch and drain, and both are `poll_wait`-bracketed:
+//! a bare-submit loop once reported a bandwidth above the card's physical
+//! peak, by timing the host.
 //!
 //! Results are cached per adapter, with the same key discipline
 //! [`crate::tune`] uses (adapter slug + a fingerprint of the probe sources), so
@@ -47,8 +47,8 @@ pub struct Roofs {
     /// The roofline is HIERARCHICAL: a kernel whose data fits in L2 is bounded
     /// by L2 bandwidth, not by DRAM, and can legitimately exceed the DRAM roof
     /// several times over. Grading such a kernel against `gbs` produces a
-    /// number above 100% that looks like a broken measurement and is not one —
-    /// which is exactly what `paged_decode_scores_batched` did at 292%.
+    /// utilisation above the roof that looks like a broken measurement and is
+    /// not one - which is exactly what `paged_decode_scores_batched` did.
     ///
     /// Measured with the same triad over a working set small enough to stay
     /// resident. On a device whose cache is smaller than the probe this simply
@@ -58,9 +58,9 @@ pub struct Roofs {
     /// has no int8 dot path.
     ///
     /// Without it an int8 kernel is graded against the *fp32* roof, which
-    /// flatters it by whatever factor the device's DP4A path exceeds fp32 —
-    /// `matmul_i8_dyn` read "36.1% of roof" that way, and a kernel that looks
-    /// like a third of the machine may be a tenth of it.
+    /// flatters it by whatever factor the device's DP4A path exceeds fp32:
+    /// `matmul_i8_dyn` read about a third of the roof that way, and a kernel
+    /// that looks like a third of the machine may be a tenth of it.
     pub int8_gops: Option<f32>,
 }
 
@@ -150,10 +150,10 @@ pub enum Bound {
 }
 
 impl Bound {
-    /// The band this workstream holds each class to. A well-tuned fp32 GEMM
-    /// on old silicon lands 60-80% of peak, so 99% is not the target for
-    /// either class and stating one per class is what makes the goal
-    /// falsifiable.
+    /// The band this workstream holds each class to. A well-tuned fp32 GEMM on
+    /// old silicon lands well short of peak, so parity with peak is not the
+    /// target for either class, and stating a band per class (the values
+    /// returned below) is what makes the goal falsifiable.
     pub fn target_pct(self) -> f32 {
         match self {
             Bound::Compute => 60.0,
@@ -256,7 +256,8 @@ static MEASURE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 ///
 /// Returns `None` when the device cannot be probed — callers must then print
 /// `-`, never a guess. Set `BRAIN_NO_ROOF=1` to skip probing entirely (useful
-/// when a run must not spend the ~0.2 s, or to reproduce pre-roofline output).
+/// when a run must not spend the probe's fraction of a second, or to reproduce
+/// pre-roofline output).
 ///
 /// Defaults to skipped (as if `BRAIN_NO_ROOF=1`) on the CPU backend, where the
 /// probe's calibration loop has a known-bad interaction with `backend-cpu`'s
@@ -473,8 +474,8 @@ fn measure_bandwidth(gpu: &Gpu, elems: u64) -> Option<f32> {
     // on bytes moved, not on values, and writing 512 MiB from the host would
     // cost far more than the measurement.
 
-    // One pass over 512 MiB is already ~2 ms on a fast card; repeat the same
-    // dispatch until the timed region clears the launch floor.
+    // One pass over 512 MiB is already only milliseconds on a fast card;
+    // repeat the same dispatch until the timed region clears the launch floor.
     let deadline = Instant::now() + roof_budget();
     let mut passes = 1usize;
     loop {
@@ -528,8 +529,8 @@ mod persist {
 
     /// `backend` keys the record alongside the adapter, because a roof is a
     /// property of the (device, backend) PAIR, not of the silicon alone: the
-    /// same P40 measured 5.05 TFLOP/s through `backend-vulkan` and 10.6
-    /// TFLOP/s through `backend-wgpu` while the two compiled kernels under
+    /// same P40 measured roughly HALF the fp32 roof through `backend-vulkan`
+    /// that it did through `backend-wgpu`, while the two compiled kernels under
     /// different naga runtime-check settings. Without this, whichever backend
     /// measured first silently published its number as the other's roof, and
     /// every "% of roof" on that backend was wrong by that ratio. Note the
@@ -629,8 +630,9 @@ mod tests {
     #[test]
     fn utilisation_is_measured_against_the_kernels_own_roof() {
         let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
-        // A streaming kernel at exactly the bandwidth roof reads 100%, even
-        // though its FLOP rate is negligible — the whole point of classifying.
+        // A streaming kernel at exactly the bandwidth roof reads as fully
+        // utilised, even though its FLOP rate is negligible - the whole point
+        // of classifying.
         let bytes = 346_000_000_000u64;
         let u = r.utilisation(bytes / 6, bytes, 1.0).unwrap();
         assert!((u - 100.0).abs() < 0.5, "{u}");

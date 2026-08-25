@@ -56,7 +56,7 @@ impl Outcome {
 }
 
 /// Gate `candidate` against `baseline` with hard floors at `floor_frac`
-/// (e.g. 0.85 = tolerate a 15% regression before failing).
+/// (e.g. `0.85` fails a candidate below 0.85 x the baseline's throughput).
 pub fn gate(candidate: &Row, baseline: &Row, floor_frac: f64) -> Outcome {
     let mut out = Outcome::default();
     // Strictly positive: the old inclusive-of-0 range let `--floor 0` produce
@@ -193,14 +193,15 @@ mod tests {
     #[test]
     fn floors_and_ceilings_bound_in_opposite_directions() {
         let base = row(100.0, 200.0);
-        // 14% slower throughput, 10% worse latency: inside the 85% floor.
+        // Throughput at 0.86 of baseline, latency at 1.10: inside the floor.
         let ok = row(86.0, 220.0);
         let o = gate(&ok, &base, 0.85);
         assert!(o.passed(), "{o:?}");
-        // 20% slower throughput: through the floor.
+        // Throughput at 0.80 of baseline: through the floor.
         let slow = row(80.0, 200.0);
         assert!(!gate(&slow, &base, 0.85).passed());
-        // Latency ceiling: 30% worse TTFA fails even with fine throughput.
+        // Latency ceiling: TTFA at 1.30 of baseline fails even with fine
+        // throughput.
         let laggy = row(100.0, 260.0);
         assert!(!gate(&laggy, &base, 0.85).passed());
     }

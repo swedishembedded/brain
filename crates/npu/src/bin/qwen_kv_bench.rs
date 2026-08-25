@@ -23,7 +23,7 @@
 //! device other than the one requested).
 //!
 //! Exports live under `--out` and are deleted immediately after each `cap`'s
-//! measurements to bound peak disk (this box runs at 99% / ~13G free) -- INT8
+//! measurements to bound peak disk (this box runs nearly full, with ~13G free) -- INT8
 //! decode/prefill graphs are ~0.6 GB each at 0.6B, the fp32 O(T²) baseline
 //! ~2.4 GB; never all four `cap` values' worth on disk at once.
 //!

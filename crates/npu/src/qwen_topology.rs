@@ -515,8 +515,8 @@ fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &dyn WeightSource, t: usize, 
 
 /// Weight quantization for the linear layers. `Int8`/`Int4` store weights as
 /// per-output-channel symmetric integers dequantised in-graph (`DequantizeLinear`
-/// -> MatMul): ~4x / ~8x smaller than fp32, so the 1.7B Talker fits the NPU and —
-/// being weight-bandwidth bound — decodes faster. Norms/RoPE/mask stay fp32.
+/// -> MatMul): a quarter / an eighth of fp32's bytes, so the 1.7B Talker fits
+/// the NPU and - being weight-bandwidth bound - decodes faster. Norms/RoPE/mask stay fp32.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Quant {
     F32,

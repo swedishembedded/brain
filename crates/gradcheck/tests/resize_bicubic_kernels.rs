@@ -204,7 +204,7 @@ fn resize_bicubic_matches_the_cpu_reference() {
             // 3e-5: the oracle accumulates in f64 and the kernel in f32, and the
             // cubic stencil's negative lobes cancel, so the gap is larger than
             // bilinear's. Measured worst relative error over these shapes is
-            // 1.3e-6 — 20x of headroom, while every bug this test exists to catch
+            // 1.3e-6, well inside the bound below, while every bug this test exists to catch
             // (wrong `a`, wrong coordinate convention, wrong border rule) moves
             // the result by 1e-2 or more.
             for i in 0..yn {

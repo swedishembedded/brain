@@ -254,8 +254,8 @@ pub struct QueueState {
 
 /// Decide what to do with work that arrives beyond capacity.
 ///
-/// `perf overload` measured the default (queue without bound) collapsing at 2x
-/// offered load: goodput fell below half its peak because compute was spent on
+/// `perf overload` measured the default (queue without bound) collapsing once
+/// offered load ran past capacity: goodput fell away because compute was spent on
 /// answers past their deadline. An engine is rewarded for refusing work it
 /// provably cannot finish in time; policies are pure functions of
 /// [`QueueState`], unit-testable with no engine at all.
@@ -388,9 +388,9 @@ pub struct Scheduler<D: PagedDecoder> {
     ///
     /// Admission runs a FULL prefill per accepted request, so without a budget
     /// a burst of N arrivals performs N whole prompt forwards back-to-back
-    /// while every running sequence stalls — measured as TTFA p99 growing
-    /// 230 ms → 3413 ms (15×) and inter-token p99 10× from concurrency 1→32,
-    /// with the interactive SLO met at no concurrency level. Bounding the
+    /// while every running sequence stalls - measured as TTFA and inter-token
+    /// tail latency each growing by an order of magnitude from concurrency 1 to
+    /// 32, with the interactive SLO met at no concurrency level. Bounding the
     /// prefill work per iteration lets decode run every iteration and spreads
     /// a burst across several; the budget always admits at least one waiting
     /// request per iteration, so nothing can starve.

@@ -121,9 +121,9 @@ pub type Skip = (DeviceBuffer, u32, u32, u32);
 /// Sized over the levels that actually RECORD a transformer, not all of them.
 /// Taking the max over all levels is quadratically wrong at the finest one:
 /// SDXL's level 0 is `DownBlock2D`/`UpBlock2D` (no attention at all), yet its
-/// `T = H·W` is 16x the next level's, so including it sizes the pair at
-/// 5·(H·W)² instead of 10·(H·W/4)² — 8x too big, i.e. 10.7 GB of never-bound
-/// slab at a 128×128 latent.
+/// `T = H·W` is 16 times the next level's, so including it sizes the pair at
+/// 5·(H·W)² instead of 10·(H·W/4)², an eightfold over-allocation: 10.7 GB of
+/// never-bound slab at a 128×128 latent.
 ///
 /// `with_up = false` is the **ControlNet** shape: a trainable copy of the
 /// down + mid blocks has no up path at all, and `cfg.up_block_types` may be
@@ -1092,9 +1092,9 @@ mod tests {
     }
 
     /// The self-attention slab is sized over the levels that actually record a
-    /// transformer, not all of them. SDXL's level 0 has no attention and 16x
-    /// the token count of level 1, so including it is an 8x over-allocation —
-    /// 10.7 GB of never-bound buffer at a 128x128 latent.
+    /// transformer, not all of them. SDXL's level 0 has no attention and 16
+    /// times the token count of level 1, so including it over-allocates
+    /// eightfold: 10.7 GB of never-bound buffer at a 128x128 latent.
     #[test]
     fn slab_is_sized_over_attention_levels_only() {
         let cfg = UNetConfig::sdxl_base();

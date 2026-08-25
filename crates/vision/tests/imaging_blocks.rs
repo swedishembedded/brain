@@ -743,15 +743,15 @@ fn blocks_agree_across_backends() {
 /// This is the measurement to make BEFORE adding a fused `layernorm2d`
 /// kernel. A fused channels-first kernel replaces the
 /// permutes but must then walk each position's channels with ONE thread — the
-/// documented coalescing trap — so it only wins if the permutes dominate by more
-/// than the ~8x sector amplification it would take on. Run with `--nocapture`.
+/// documented coalescing trap - so it only wins if the permutes dominate by
+/// more than the eight-way sector amplification it would take on. Run with `--nocapture`.
 ///
 /// **`Gpu::submit` is not a synchronisation point.** On the wgpu backend it
 /// appends the dispatches to a pending list; nothing reaches the queue until a
 /// `read`/`write`/`flush`/`poll_wait`. A timing loop of bare `submit`s therefore
-/// measures bind-group construction on the HOST and reports it as device time —
-/// which is how an earlier version of this test produced "377 GB/s" on a card
-/// whose peak is ~346 GB/s, a self-refuting number. Every timed region below is
+/// measures bind-group construction on the HOST and reports it as device time -
+/// which is how an earlier version of this test reported a bandwidth above the
+/// card's datasheet peak, a self-refuting number. Every timed region below is
 /// bracketed by [`Gpu::poll_wait`], which flushes the pending pass and blocks
 /// until the device has finished it.
 #[test]
@@ -765,7 +765,7 @@ fn layernorm2d_composition_cost() {
     // The card's advertised peak, so the table can be read against the roof
     // rather than against intuition. A measured figure ABOVE this is a broken
     // measurement, never a fast kernel.
-    println!("(a Tesla P40's peak is ~346 GB/s; anything above the roof means the timing is wrong)");
+    println!("(anything above this card's datasheet bandwidth means the timing is wrong, not that the kernel is fast)");
     // SAM 2 Hiera-B+ at 1024x1024 (stage 1-4) plus one tiny shape, so the table
     // spans the dispatch-latency-bound and the bandwidth-bound regimes.
     for s in [

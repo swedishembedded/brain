@@ -21,9 +21,10 @@
 //!
 //! At LTX-2.5's real 720p adaLN-single shape (`M=3520`, `K=4096`,
 //! `N=36864` - a 604 MB weight matrix) that is ~2.1 TB of DRAM traffic for
-//! 5.3e11 multiply-adds, and it measured 76.3 s per forward call on a
-//! 48-thread Xeon E5-2690 v3 - ~81% of a real denoise step's wall clock,
-//! at ~14 GB/s, i.e. squarely memory-bound rather than compute-bound.
+//! 5.3e11 multiply-adds, and on a 48-thread Xeon E5-2690 v3 it measured as the
+//! overwhelming majority of a real denoise step's wall clock, at a bandwidth
+//! far below what that host can sustain: squarely memory-bound rather than
+//! compute-bound.
 //!
 //! # What the blocking changes, and what it deliberately does not
 //!
@@ -78,25 +79,17 @@ pub const MR: usize = 8;
 /// `[3520,4096]x[36864,4096]ᵀ` shape on a 48-thread Xeon E5-2690 v3 - measured,
 /// not guessed, and the measurement pointed the opposite way from the obvious
 /// intuition. Bigger tiles do stream the weight matrix fewer times in total,
-/// but they lose more than they gain here:
+/// but they lose more than they gain here: the sweep over tiles 8, 16, 32, 64,
+/// 128 and 256 is MONOTONE DOWNWARD from 8, and by tile 256 the blocked kernel
+/// is slower than the naive row-parallel loop it replaces. Re-run
+/// `tests/host_gemm.rs` for this host's own figures.
 ///
-/// | tile | secs | GFLOP/s | vs the naive loop |
-/// |---|---:|---:|---:|
-/// | naive (row-parallel) | 14.39 | 73.9 | 1.00x |
-/// | **8** | **8.32** | **127.8** | **1.73x** |
-/// | 16 | 8.83 | 120.4 | 1.63x |
-/// | 32 | 9.32 | 114.1 | 1.54x |
-/// | 64 | 11.44 | 92.9 | 1.26x |
-/// | 128 | 11.79 | 90.2 | 1.22x |
-/// | 256 | 16.22 | 65.5 | 0.89x |
-///
-/// The reason the curve is monotone rather than U-shaped: at tile 8 the
-/// kernel is already ARITHMETIC-bound, not bandwidth-bound (127.8 GFLOP/s is
-/// ~1 scalar MAC per core-cycle, which is the ceiling for a non-reassociating
-/// f32 multiply-then-add), so buying more weight reuse buys nothing, while
-/// the tile's slice of `x` (`tile · K · 4` bytes - 512 KB already at tile 8
-/// with K=4096) grows past this core's 256 KB L2 and starts costing. Tile 256
-/// is slower than the loop it replaces.
+/// The reason the curve is monotone rather than U-shaped: at tile 8 the kernel
+/// is already ARITHMETIC-bound, not bandwidth-bound (it is doing about one
+/// scalar MAC per core-cycle, which is the ceiling for a non-reassociating f32
+/// multiply-then-add), so buying more weight reuse buys nothing, while the
+/// tile's slice of `x` (`tile · K · 4` bytes - 512 KB already at tile 8 with
+/// K=4096) grows past this core's 256 KB L2 and starts costing.
 pub fn default_m_tile() -> usize {
     MR
 }

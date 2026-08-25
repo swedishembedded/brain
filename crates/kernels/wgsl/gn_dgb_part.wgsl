@@ -14,9 +14,8 @@
 // dbeta in one pass over `dy`.
 //
 // `gn_dgamma` and `gn_dbeta` are each ONE invocation per channel, walking
-// `N*H*W` elements serially: measured at 97.63 ms / 5.4 GB/s and 72.54 ms /
-// 7.2 GB/s on a P40 — 1.5% and 2.1% of the ~346 GB/s roof, 24% of the backward
-// between them. Two separate pathologies of the same shape, and each reads the
+// `N*H*W` elements serially: each measured at a couple of percent of the
+// card's bandwidth roof, and between them a quarter of the whole backward. Two separate pathologies of the same shape, and each reads the
 // whole of `dy` independently.
 //
 // This computes both from ONE traversal:

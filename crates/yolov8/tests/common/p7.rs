@@ -92,9 +92,10 @@ pub fn targets_for_split(split: &[Sample], relabel: impl Fn(u32) -> u32) -> Vec<
 
 /// A TEST-ONLY shrunk config: `YoloConfig::tiny(nc)` but at a smaller square input
 /// resolution. The conv stack dominates CPU-JIT cost and scales ~quadratically
-/// with the input side, so dropping 128->64 makes every forward/backward ~4x
-/// cheaper — turning a multi-minute training into a ~minute one — while the
-/// synthetic shapes (>=12% of the side, so >=~8px at 64) stay clearly resolvable.
+/// with the input side, so dropping 128->64 makes every forward/backward
+/// roughly four times cheaper, turning a multi-minute training into a much
+/// shorter one, while the synthetic shapes stay clearly resolvable (they are at
+/// least an eighth of the side, i.e. 8px or more at 64).
 /// This changes ONLY the test's config object, never the library default.
 pub fn tiny_cfg(nc: u32, input: u32) -> YoloConfig {
     let mut cfg = YoloConfig::tiny(nc);

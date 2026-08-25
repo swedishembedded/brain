@@ -1568,8 +1568,9 @@ async fn n_concurrent_chat_requests_batch_through_the_real_router_not_serialize(
     // Batched: ~1x BATCH_MS regardless of N (fully grouped) or a small multiple of it
     // (grouped across a couple of dispatcher rounds, if the requests didn't all land
     // in the queue before the first claim). Serialized (the pre-fix behavior): N x
-    // BATCH_MS. The bound (75% of fully-serial) is deliberately generous — this test
-    // asserts "batching saves real wall time", not a specific batch-count-per-round —
+    // BATCH_MS. The bound below is a fraction of fully-serial and deliberately
+    // generous - this test asserts "batching saves real wall time", not a
+    // specific batch-count-per-round -
     // so it stays non-flaky under scheduler jitter while still failing hard against a
     // regression back to one-invocation-at-a-time admission.
     let serial = BATCH_MS * N as u64;

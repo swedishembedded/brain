@@ -26,7 +26,7 @@
 //! freshly allocated scratch buffer) that scale with layer count on their
 //! own and would swamp the signal (measured: with the periodic flush
 //! disabled, a 4-layer forward already issues ~100 queue submits and a
-//! 32-layer one ~770 - an ~8x split matching the ~8x layer-count ratio even
+//! 32-layer one ~770 - a ratio matching the layer-count ratio even
 //! with NO periodic reclaim at all, purely from per-buffer zero-init
 //! submits). `reclaim_dead` is called ONLY from `flush`'s two branches, never
 //! from those one-off submits, so it isolates deferred-reclaim activity

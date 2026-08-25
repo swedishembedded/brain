@@ -150,7 +150,7 @@ impl<T: Upscaler + 'static> Provider for UpscaleProvider<T> {
 /// | 48 | -       | 5.9e-2 |
 ///
 /// The first draft of this constant was 16, justified on the 2-block toy where
-/// it is 4x below an 8-bit step. On the model anyone actually runs it is off by
+/// it sits comfortably below an 8-bit step. On the model anyone actually runs it is off by
 /// nearly three orders of magnitude. 32 is the current
 /// cost/quality point, and `tile` defaults to 0 so callers who can afford the
 /// memory never meet the trade-off at all.

@@ -11,7 +11,7 @@
 //!
 //! # Batching: group by IMAGE, not by request
 //!
-//! SAM 2 is encode-once / prompt-many. The Hiera trunk is ~99 % of the cost and
+//! SAM 2 is encode-once / prompt-many. The Hiera trunk is nearly all of the cost and
 //! depends only on the pixels; the two-way mask decoder is small and depends
 //! only on the prompt. The trunk graph is also built for **one** image
 //! (`Sam2::encode` asserts a single `[1, 3, S, S]` map and every window/`q_pool`

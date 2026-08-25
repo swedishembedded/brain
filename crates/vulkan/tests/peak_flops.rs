@@ -8,17 +8,20 @@
 //! DISPLAY= cargo test --release -p brain-vulkan --test peak_flops -- --ignored --nocapture
 //! ```
 //!
-//! These are the P40 (GP102) datasheet peaks, and why they are what they are:
+//! These are the P40 (GP102) datasheet peaks. The values themselves live in
+//! the `PEAK_*` constants below, because the test computes against them; what
+//! belongs here is where each one comes from:
 //!
-//! | precision | peak | derivation |
-//! |---|---|---|
-//! | FP32 | 11.76 TFLOP/s | 30 SM × 128 FP32 cores × 2 (FMA) × 1.531 GHz |
-//! | FP64 | 367.5 GFLOP/s | FP32 ÷ 32 (Pascal consumer double-rate) |
-//! | FP16 | 183.7 GFLOP/s | FP32 ÷ 64 (GP102 has no fast-fp16 unit) |
-//! | INT8 | 47.0 TOPS | DP4A: 4× FP32 lanes, 8 int-ops per dot |
+//! | precision | derivation |
+//! |---|---|
+//! | FP32 | 30 SM x 128 FP32 cores x 2 (FMA) x 1.531 GHz |
+//! | FP64 | FP32 / 32 (Pascal consumer double-rate) |
+//! | FP16 | FP32 / 64 (GP102 has no fast-fp16 unit) |
+//! | INT8 | DP4A: 4 int8 lanes per FP32 lane, 8 int-ops per dot |
 //!
-//! A GEMM cannot reach these — it is bounded by memory and by the fraction of
-//! peak a real dependency graph sustains (even cuBLAS tops out ~80% of FP32).
+//! A GEMM cannot reach these - it is bounded by memory and by the fraction of
+//! peak a real dependency graph sustains (even cuBLAS tops out well short of
+//! the rated figure).
 //! The rated numbers are a *pure-ALU* property: a kernel that does nothing but
 //! back-to-back fused-multiply-adds out of registers, with enough independent
 //! accumulator chains to cover FMA latency and enough threads to fill every SM.
@@ -40,7 +43,8 @@ use vulkan::shader;
 // of independent FMA/DP4A chains from registers — no memory traffic in the hot
 // loop — then writes once (so nothing is dead-code-eliminated). ----
 
-/// 8 independent vec4 chains = 32-way ILP, 8×(4 mul+4 add)=64 FLOP/thread/iter.
+/// 8 independent vec4 chains = 32-way ILP, so 64 FLOP/thread/iter (4 mul + 4
+/// add per chain).
 const FP32: &str = r#"
 struct P { iters: u32, n: u32, m: f32, c: f32 };
 @group(0) @binding(0) var<uniform> p: P;
@@ -55,8 +59,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var a2 = vec4<f32>(s + 0.3); var a3 = vec4<f32>(s + 0.4);
     var a4 = vec4<f32>(s + 0.5); var a5 = vec4<f32>(s + 0.6);
     var a6 = vec4<f32>(s + 0.7); var a7 = vec4<f32>(s + 0.8);
-    // 8 independent chains x 4-way inner unroll: 32 vec4 fma / iter, loop
-    // control amortized 4x. fma() forces the fused op (1 issue slot, 2 FLOP).
+    // 8 independent chains x 4-way inner unroll: 32 vec4 fma / iter, so the
+    // loop control is amortized four ways. fma() forces the fused op (1 issue
+    // slot, 2 FLOP).
     for (var i = 0u; i < p.iters; i = i + 1u) {
         a0 = fma(a0, m, c); a1 = fma(a1, m, c); a2 = fma(a2, m, c); a3 = fma(a3, m, c);
         a4 = fma(a4, m, c); a5 = fma(a5, m, c); a6 = fma(a6, m, c); a7 = fma(a7, m, c);

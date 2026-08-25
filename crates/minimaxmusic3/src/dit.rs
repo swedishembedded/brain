@@ -54,7 +54,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_bwd_db", kernels::SILU_BWD_DB),
     // The fast GEMM family. Registering ONLY the naive `matmul` above meant
     // every projection in all 36 blocks ran the one-thread-per-output
-    // reference kernel - measured at 37 s per denoise step on a P40, which
+    // reference kernel - measured at tens of seconds per denoise step, which
     // is the defect class AGENTS.md calls this repo's most expensive ("a
     // fast kernel a later model never learned about").
     ("matmul_reg3", kernels::MATMUL_REG3),
@@ -66,11 +66,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     //
     // Same defect class as the GEMM note above, and the same size: with only
     // the materialized `attn_scores/softmax/apply_bidir` trio registered, the
-    // three of them measured 75.5% of this DiT's device time at
-    // `DitConfig::real()` / 689 latents on a P40, at 0.5% / 2.2% / 4.9% of
-    // that card's own measured memory roof - all three flagged DEFECT by
-    // `mm3_bench dit` against its 35% floor, while the GEMMs beside them ran
-    // at 42% of fp32 peak. The kernels that fix it already existed.
+    // three of them measured as three quarters of this DiT's device time at
+    // `DitConfig::real()` / 689 latents, each at a low single-digit percent or
+    // less of that card's own measured memory roof - all three flagged DEFECT
+    // by `mm3_bench dit` against its own floor, while the GEMMs beside them
+    // ran an order of magnitude closer to fp32 peak. The kernels that fix it already existed.
     ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
@@ -706,7 +706,7 @@ pub(crate) fn proj_out_postprocess(gpu: &Gpu, cfg: &DitConfig, proj_out_w: &[f32
 /// Lifetime: one GENERATION, not one chunk. The blocks depend on nothing
 /// but the checkpoint, so re-uploading them per chunk re-sent ~9.7 GB of
 /// identical bytes for every one of a song's chunks (~59 of them for four
-/// minutes of audio, ~22 s each on a P40 at 0.33 GB/s). Only the RoPE
+/// minutes of audio, and the re-upload dominated each one). Only the RoPE
 /// tables depend on `length`, and they are ~90 kB, so the chunk loop calls
 /// [`Resident::rebind`] instead of rebuilding this whole thing - see
 /// `denoise::ChunkResidents`, which owns one per card for the whole denoise

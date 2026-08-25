@@ -196,8 +196,9 @@ impl Trace {
                 // dW (accumulates) then db, both from the conv's own input.
                 //
                 // `conv2d_dw` reduces over EVERY output position (Ho*Wo) per
-                // weight element on one lane — 53% of a VQGAN training step
-                // once `conv2d_dx` was lowered. The same lowering applies:
+                // weight element on one lane, which profiling put at the
+                // largest single stage of a VQGAN training step once
+                // `conv2d_dx` was lowered. The same lowering applies:
                 //
                 //   col[HW, CinKK] = im2col(x)                     (im2col_at)
                 //   dW[Cout,CinKK] += dY[HW,Cout]^T . col[HW,CinKK] (matmul_dw_reg)
@@ -268,8 +269,9 @@ impl Trace {
                 //    (`matmul_dx_reg`, register-tiled) then `col2im`, which sums
                 //    only the K*K taps per input pixel. `conv2d_dx` instead
                 //    reduces over Cout*K*K on ONE lane, and the backward profile
-                //    put it at 41% of a VQGAN training step, 12.9 ms/call
-                //    against the forward conv's 4.8. Measured 4.8x-22x here.
+                //    put it at a large share of a VQGAN training step, several
+                //    times the cost of the forward conv it mirrors. The lowering
+                //    measured faster at every shape in `vqgan_bench convbwd`.
                 //  * DIRECT — below `GEMM_CONV_BWD_MIN_COUT`, and on any device
                 //    without workgroup reductions: `matmul_dx_reg` carries
                 //    barriers the CPU JIT cannot compile, so this branches on the
@@ -311,10 +313,11 @@ impl Trace {
                 r.push(r.gpu.step(r.ids.k(B_SCALE_CHAN), &[&dy, gbuf, &dyg], &[n, *c, h * w], n));
                 let sums = r.tmp(4 * *g as u64);
                 // Two-stage, barrier-free. `gn_dsum` is ONE invocation per
-                // group — 32 lanes walking (C/G)*H*W elements each — measured at
-                // 229 ms / 2.3 GB/s, 0.7% of the ~346 GB/s roof and 27% of the
-                // backward. Stage 1 splits each group across `GN_P` partials
-                // (coalesced, strided), stage 2 folds them. No workgroupBarrier,
+                // group (32 lanes walking (C/G)*H*W elements each), measured at
+                // well under one percent of the card's bandwidth roof and a
+                // quarter of the whole backward. Stage 1 splits each group
+                // across `GN_P` partials (coalesced, strided), stage 2 folds
+                // them. No workgroupBarrier,
                 // so this needs no capability branch and `backend-cpu` gets it
                 // too — the same shape as the forward's `gn_part`/`gn_stats2`.
                 let part = r.tmp(2 * *g as u64 * super::GN_P as u64);
@@ -326,8 +329,8 @@ impl Trace {
                 // the same fused buffer, both accumulating.
                 // Two-stage, and ONE pass over `dy` for both affine gradients.
                 // `gn_dgamma`/`gn_dbeta` were a lane per channel walking N*H*W
-                // each — 97.63 + 72.54 ms at 5.4 / 7.2 GB/s, ~2% of the roof —
-                // and each read the whole of `dy` separately.
+                // each, together a couple of percent of the bandwidth roof, and
+                // each read the whole of `dy` separately.
                 let dgb_part = r.tmp(2 * *c as u64 * super::GN_P as u64);
                 let pg = [1, *c, *h, *w, *g, super::GN_P];
                 r.push(r.gpu.step(

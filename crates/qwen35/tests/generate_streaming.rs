@@ -10,8 +10,8 @@
 //!
 //! **This is extremely slow and that is expected, not a bug.** Every decode
 //! step re-streams every one of `cfg.n_layers` (64) real decoder layers from
-//! disk - the same ~75-minutes-class pass `streaming_forward.rs`'s own full
-//! chain gate measured (4488 s / 64 layers on this shared box, no
+//! disk - the same hour-plus-class pass `streaming_forward.rs`'s own full
+//! chain gate measured (64 layers on this shared box, no
 //! throughput tuning attempted - that is reserved for a later milestone that
 //! gates the residency policy by real `brain-perf` measurement). There is no
 //! persistent incremental KV/GDN state carried between decode steps (see

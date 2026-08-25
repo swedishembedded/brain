@@ -20,7 +20,7 @@
 //! 2. **Real pass-count reduction** - the actual number of full 64-layer
 //!    streaming passes (`stream_all_layers` calls, `generate_with_stats`'s
 //!    own return value) each path issues for the SAME number of new tokens.
-//!    Reported as a real measured ratio, not assumed to hit exactly 2x (how
+//!    Reported as a real measured ratio, not assumed to hit the ideal (how
 //!    often the real MTP head's own guess is right on real text is an
 //!    empirical fact about this checkpoint, not a guarantee).
 //!
@@ -121,7 +121,7 @@ fn mtp_accelerated_greedy_decode_matches_the_plain_path_byte_for_byte_and_report
     // Gate 1: exact-match determinism - the whole point of this file.
     assert_eq!(mtp_text, plain_text, "MTP-accelerated greedy output diverged from the plain serial path - this is a CORRECTNESS bug, not a speed regression");
 
-    // Gate 2: real forward progress and a real (not necessarily 2x) pass
+    // Gate 2: real forward progress and a real (not necessarily doubled) pass
     // reduction - report the true number, never assume it.
     assert!(!plain_text.is_empty(), "plain generation produced empty text");
     assert!(mtp_passes <= plain_passes, "MTP-accelerated path must never issue MORE passes than the plain path for the same max_new");

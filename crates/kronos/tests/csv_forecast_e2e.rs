@@ -43,8 +43,8 @@ const CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/forecast/
 /// The scored configuration. Eight disjoint held-out windows rather than four:
 /// coverage is strongly correlated WITHIN a window (a forecast either brackets
 /// its window or does not), so the effective sample size is the origin count,
-/// not the bar count - four origins put the measured coverage anywhere between
-/// 38% and 56% run to run, which is too loose to gate on. Eight costs about
+/// not the bar count - four origins put the measured coverage anywhere in a
+/// range too wide to gate on, run to run. Eight costs about
 /// four minutes of CPU and is the smallest count that holds still.
 /// `CONTEXT + HORIZON` is exactly the checkpoint's 512-bar attention window, so
 /// the KV-cached rollout under test is the regime that is EXACT against the
@@ -126,7 +126,7 @@ fn a_malformed_csv_is_rejected_at_the_boundary_not_inside_the_model() {
 /// 1. **anchored** - the median's first step sits within a few typical bars of
 ///    the last close. A rollout that has come loose from its context (the
 ///    detokenization-window class of defect) fails here first.
-/// 2. **the ensemble is not degenerate, and it accumulates** - the 10-90% band
+/// 2. **the ensemble is not degenerate, and it accumulates** - the p10-p90 band
 ///    has non-zero width at every step and is wider late in the horizon than
 ///    early. A shared prefill that handed every sample the same RNG stream, or
 ///    a sampler stuck on the mode, collapses the band to nothing.
@@ -134,8 +134,9 @@ fn a_malformed_csv_is_rejected_at_the_boundary_not_inside_the_model() {
 ///    OWN median path. CRPS collapses to MAE for a point forecast, so this says
 ///    the distribution is worth more than the single number drawn from it.
 /// 4. **the band brackets reality at a measurable rate** - empirical coverage
-///    of the 10-90% band over every held-out bar sits in a wide but non-trivial
-///    range. It is deliberately NOT asserted at the nominal 80%: this
+///    of the p10-p90 band over every held-out bar sits in a wide but
+///    non-trivial range. It is deliberately NOT asserted at that band's
+///    nominal coverage level: this
 ///    checkpoint measurably under-covers as the horizon grows (see the
 ///    per-origin log this prints), and pinning the gate to the nominal number
 ///    would be asserting a claim the model does not support.
@@ -188,7 +189,8 @@ fn forecasting_the_example_csv_yields_a_calibrated_widening_band() {
         // (1) anchored. A rollout that lost its context window does not land
         // near the last close, and every error metric below would still be "a
         // number". 8 typical bars is many times the model's own first-step
-        // spread and still far tighter than the old +-50% price-scale check.
+        // spread and still far tighter than the old price-scale check it
+        // replaced, which was a fraction of the price itself.
         assert!((pred[0] - last).abs() < 8.0 * bar, "origin {o}: first step {} is {:.1} typical bars from the last close {last} -- the rollout is not anchored to its context", pred[0], (pred[0] - last).abs() / bar);
         // The quantile levels must be ordered at every step, or "the median"
         // is not the median.
@@ -220,17 +222,17 @@ fn forecasting_the_example_csv_yields_a_calibrated_widening_band() {
     let coverage = covered as f32 / scored as f32;
     // Persistence is REPORTED, not gated: on a random walk the honest edge is
     // small and seed-dependent, and a gate on it would be a gate on luck.
-    eprintln!("mean over {ORIGINS} origins: CRPS {crps:.4} (persistence {naive:.4}, {:+.1}%)  own-median MAE {mae:.4}  10-90% coverage {:.0}% of {scored} bars", (1.0 - crps / naive) * 100.0, coverage * 100.0);
+    eprintln!("mean over {ORIGINS} origins: CRPS {crps:.4} (persistence {naive:.4}, {:+.1}%)  own-median MAE {mae:.4}  p10-p90 coverage {:.0}% of {scored} bars", (1.0 - crps / naive) * 100.0, coverage * 100.0);
 
     // (3) the distribution is worth more than the point path drawn from it.
     assert!(crps < mae, "mean CRPS {crps:.4} is not better than the MAE {mae:.4} of the model's own median -- the sampled spread carries no information");
     // (4) the band brackets reality at a measurable rate. The window is wide on
-    // purpose: 80% is the NOMINAL level and this checkpoint does not reach it
-    // (the band narrows relative to truth as the horizon grows), so the gate
+    // purpose: the p10-p90 band's NOMINAL coverage is not what this checkpoint
+    // reaches (the band narrows relative to truth as the horizon grows), so the gate
     // pins the regime that was actually measured. Below the floor means a
     // collapsed or misplaced band; at the ceiling the band is so wide it has
     // stopped being a forecast.
-    assert!((0.20..0.98).contains(&coverage), "10-90% band coverage {coverage:.2} is outside the measured regime [0.20, 0.98)");
+    assert!((0.20..0.98).contains(&coverage), "p10-p90 band coverage {coverage:.2} is outside the measured regime [0.20, 0.98)");
 }
 
 /// Mean CRPS over the horizon of a `[n_samples, horizon]` sample block.

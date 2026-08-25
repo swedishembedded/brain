@@ -299,8 +299,9 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         // stage - exactly as `devices` above is opened once - because
         // nothing about them depends on the chunk. Only the RoPE tables do,
         // via `length`, and `denoise_chunk` rebinds those per chunk for
-        // ~90 kB. Re-uploading the blocks per chunk cost ~22 s of PCIe
-        // traffic each, ~22 minutes across a four-minute song's ~59 chunks,
+        // ~90 kB. Re-uploading the blocks per chunk cost tens of seconds of PCIe
+        // traffic each, which across a four-minute song's ~59 chunks dwarfed the
+        // generation itself,
         // re-sending byte-identical data every time.
         //
         // `starts` is never empty (`chunk_starts` returns at least `[0]`),

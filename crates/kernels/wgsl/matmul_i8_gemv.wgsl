@@ -20,8 +20,10 @@
 //   params: m, kg (=K/4), n. REQUIRES m <= 32.
 //
 // Why this exists: the tiled `matmul_i8_dyn` owns the large-M regime (prefill),
-// but at decode M is 1–32 and a 128x128 tile is mostly idle — measured 78 tok/s
-// at c=1 against the fp32 GEMV's 127. This kernel gives int8 the same shape the
+// but at decode M is 1-32 and a 128x128 tile is mostly idle. Run there,
+// `matmul_i8_dyn` measured SLOWER than the plain fp32 `matmul_gemv` it was
+// meant to beat - int8's smaller weights bought nothing because the tile was
+// starved. This kernel gives int8 the same shape the
 // fp32 decode path has (`matmul_gemv`): 64 threads split the packed K axis,
 // each reads its slice of W row `col` ONCE and applies it to all M rows via
 // dot4I8Packed, one barrier, threads 0..m fold the partials. W traffic drops

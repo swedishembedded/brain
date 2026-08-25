@@ -35,8 +35,8 @@
 //! **Found running this on the CPU backend**: `banner()`'s
 //! `gpu_core::roof::ensure` roofline probe (calibrated for GPU throughput)
 //! takes so long on CPU/Cranelift JIT that it reads as a hang, not a slow
-//! measurement — a real-scale `thinker-layer` run sat at 12 MB RSS / 0.3%
-//! CPU for hours of wall-clock before being killed, entirely inside the
+//! measurement - a real-scale `thinker-layer` run sat at 12 MB RSS and next to
+//! no CPU for hours of wall-clock before being killed, entirely inside the
 //! probe (confirmed by bisecting: the process never got past `banner()`'s
 //! first print). `gpu_core::roof` already ships the fix as an env var —
 //! `BRAIN_NO_ROOF=1` skips the probe and `banner()` reports "roofline

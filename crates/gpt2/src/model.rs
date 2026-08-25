@@ -186,13 +186,10 @@ fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
         MATMUL_REG3
     };
     // The threshold is `block::pick_gemm`'s MEASURED one (`m < 8`), not the
-    // `m < 128` this used to carry. That guard is the one that
-    // costs 22x on an SDXL UNet, and it is worth more here than
-    // there: A/B'd on a P40 at `k=768, n=3072`, naive vs tiled is
-    //
-    //     m       8      16      32      64      96     127
-    //     x     1.5x    4.0x    8.2x   19.7x   19.8x   34.1x
-    //
+    // `m < 128` this used to carry. That guard is the one that costs an order
+    // of magnitude on an SDXL UNet, and it is worth more here than there:
+    // A/B'd at `k=768, n=3072` over m = 8, 16, 32, 64, 96, 127, the tiled
+    // kernel already leads at m=8 and its lead grows with m all the way up,
     // bit-identical at every point (max|delta| 0.0). Every GPT shape with
     // 8 <= m < 128 — short prompts, small eval batches, the m = T generate
     // path — was paying that. `pick_gemm` owns the rule so the next model
@@ -201,8 +198,9 @@ fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
 }
 
 
-/// Backward GEMM pickers — the tiled `matmul_{dx,dw}_reg` (matmul_reg3 structure,
-/// ~34% of P40 peak, bit-identical to the naive kernels) once both output dims
+/// Backward GEMM pickers - the tiled `matmul_{dx,dw}_reg` (matmul_reg3
+/// structure, a large fraction of the card's fp32 peak, bit-identical to the
+/// naive kernels) once both output dims
 /// fill a 128-tile, else the naive per-output kernel. `BRAIN_GPT2_NAIVE_MM=1`
 /// forces naive (shares the forward's flag). Same math — gradcheck-gated.
 fn dx_kernel(m: usize, k: usize) -> (usize, u32) {

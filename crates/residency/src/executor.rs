@@ -1191,9 +1191,10 @@ mod tests {
             Arc::new(Slow { name: "b".into(), vram: 10 * GB, ms: 120, builds: builds.clone() }),
         ];
         let exec = Executor::start(models, budgets, Policy::default());
-        // a and b live on different GPUs → they run concurrently: wall ~120ms, not 240.
+        // a and b live on different GPUs, so they run concurrently: one request's
+        // wall time, not two.
         let elapsed = submit_wait(&exec, &["a", "b"]);
-        assert!(elapsed < Duration::from_millis(210), "expected parallel (<210ms), took {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(210), "expected the two to overlap, took {elapsed:?}");
         assert!(exec.stats().max_parallel >= 2, "expected 2 lanes at once, stats={:?}", exec.stats());
     }
 

@@ -501,7 +501,7 @@ fn run_camera(args: &[String]) {
     let mut cfg = cfg_for_checkpoint(&weights);
     if input > 0 {
         // Fully convolutional: a smaller input trades depth sharpness for
-        // frame rate quadratically (--input 256 ≈ 2.3x faster than 384).
+        // frame rate quadratically (`--input 256` runs markedly faster than 384).
         cfg.input = input;
     }
 

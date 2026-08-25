@@ -64,7 +64,7 @@ pub fn manifest() -> Manifest {
 /// decoder) behind ITS OWN lock, held only while that stage runs, and the
 /// image embeddings hand off between them BY VALUE — the "event". Request
 /// N+1's vision therefore overlaps request N's decode; the old single
-/// whole-request mutex serialised them (measured: 3-way load = 3x serial).
+/// whole-request mutex serialised them (measured: a 3-way load ran fully serial).
 /// Each stage lazy-loads its own slice of the checkpoint independently, so
 /// there is no lock ordering between stages to get wrong (a cold start reads
 /// the safetensors twice; steady state never does).
@@ -193,7 +193,7 @@ impl Action for CaptionAction {
         let hot = dguard.as_ref().unwrap();
 
         // 3) KV-cached decode (O(T) per token, not the O(T^2) full recompute
-        //    the first profile caught at 96.5% of GPU time): text tokens step
+        //    the first profile caught as nearly all of GPU time): text tokens step
         //    through the cache, image rows enter via step_embed — no residual
         //    splice needed on this path.
         let pre = hot.tok.encode("<|im_start|>user\n");

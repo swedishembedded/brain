@@ -441,7 +441,7 @@ fn real_checkpoint_cached_forward_is_bit_identical_to_an_uncached_one() {
     // Sanity band, not a tight bound: the real 22B config's own device-bytes
     // test (`device_bytes_real.rs`) measured a real (3.5, 4.0)x int8
     // compression ratio against the fp32 block size, never the flat
-    // theoretical 4x - this cache stores the identical packed bytes host-side,
+    // theoretical four-to-one - this cache stores the identical packed bytes host-side,
     // so its total footprint should land well under the ~42 GB bf16 model
     // size and comfortably within this class of hardware's RAM (184 GiB).
     assert!(extrapolated_48_gb > 5.0 && extrapolated_48_gb < 40.0, "extrapolated 48-layer cache footprint {extrapolated_48_gb:.2} GB is outside the sane band for an int8-quantized 22B model's block weights");

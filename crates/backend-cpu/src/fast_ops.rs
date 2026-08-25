@@ -58,7 +58,8 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
 /// `qwen35moe`, `deepseekv2`, `lfm`, ...). Unlike [`silu`] above this reads
 /// TWO operands, so it needed its own microkernel rather than reuse. A real
 /// DeepSeek-OCR resident-server run (`BRAIN_PROFILE`, quiet machine) found
-/// this at 15-16% of the decoder's own profiled CPU time - tens of thousands
+/// this among the largest single entries in the decoder's own profiled CPU
+/// time, behind only the matmul family - tens of thousands
 /// of decode-step calls, each a single row (`moe_ff` or `d_model` wide, a few
 /// hundred to ~1300 elements), previously falling through to the generic
 /// dispatch's rayon-chunked JIT path with no native fast path at all.
@@ -939,9 +940,9 @@ pub fn scale_add(
 
 // ---------------------------------------------------------------------------
 // Sparse-MoE gated linear family (moe_linear_gated{,_dx,_dw}.wgsl) - the
-// decode loop's dominant cost (measured at 66.9% of DeepSeek-OCR's profiled
-// decode time), previously running as the scalar one-invocation-per-element
-// JIT loop with zero vectorisation.
+// decode loop's dominant cost (measured as the majority of DeepSeek-OCR's
+// profiled decode time), previously running as the scalar
+// one-invocation-per-element JIT loop with zero vectorisation.
 // Same contract as `matmul_abt`/`matmul_dx`/`matmul_dw` PLUS a per-row gate
 // early-exit: a row whose `gate[row*n_experts+e_idx] <= 0` is genuinely never
 // reduced (not computed-then-discarded), exactly mirroring each kernel's own
@@ -1405,7 +1406,8 @@ pub fn gqa_bwd_dk(
 // substrate of query-chunked bidirectional attention (`model::block::
 // chunked_bidir_fwd`). Per (batch, head) these are small GEMMs over strided
 // head slices of fused buffers; the JIT's one-invocation-per-element loops ran
-// them at ~1-2 GFLOPS (75% of an encoder forward). Packing each head's slice
+// them at a small fraction of what this host's own GEMM reaches, which made
+// them the bulk of an encoder forward. Packing each head's slice
 // contiguous and reusing [`matmul_abt`] (AVX2+FMA, rayon over rows) is the
 // one-implementation route to the tuned GEMM.
 // ---------------------------------------------------------------------------
@@ -1533,10 +1535,10 @@ pub fn attn_softmax_cross(scores: &[f32], probs: &mut [f32], rows: usize, tk: us
 /// `hd` separate cache lines touched per `j`, `tk` times, so the write side
 /// streams through the whole `hd*tk` destination in a scatter pattern with no
 /// reuse. Measured the dominant cost of [`attn_apply_cross`] at SAM-1
-/// DeepSeek-OCR's real T=4096 global-attention shape: 70.9% of the whole
-/// tower's CPU forward, 264 calls averaging 192 ms each, vs
-/// `attn_scores_cross`'s 5.9 ms/call at the SAME total FLOPs -- the only
-/// structural difference is this transpose.
+/// DeepSeek-OCR's real T=4096 global-attention shape: the majority of the
+/// whole tower's CPU forward, at an order of magnitude the per-call cost of
+/// `attn_scores_cross` doing the SAME total FLOPs -- the only structural
+/// difference is this transpose.
 ///
 /// Tiling by `JT` source rows, buffered THEN written `d`-major, bounds each
 /// tile's destination footprint to `hd*JT` floats (4 KiB at `hd=64, JT=16`,
@@ -1768,12 +1770,12 @@ mod tests {
     // Perf microbench at DeepSeek-OCR's real decoder shape (12-layer MoE,
     // d_model=1280, moe_ff=896, 64 experts top_k=6 - see
     // `deepseek2::config::DeepseekV2Config::real`) - the kernel this repo's own
-    // `BRAIN_PROFILE` run measured at 66.9% of the whole decode loop. `m=283`
-    // is the real prompt-prefill row count that run used.
+    // `BRAIN_PROFILE` run measured as the majority of the whole decode loop.
+    // `m=283` is the real prompt-prefill row count that run used.
     //
     // A single-decode-row (`m=1`) variant of this bench was tried and DROPPED:
     // at that shape the whole call is a handful of KFLOPs, small enough that
-    // repeated measurements read an impossible ~10-30 TFLOP/s (this
+    // repeated measurements read a physically impossible rate (this
     // workspace's LTO build proving the repeated, near-identical-input call
     // loop-invariant and eliding/hoisting the real work despite `black_box`
     // on both the arguments and a per-iteration input perturbation - neither
@@ -1787,8 +1789,9 @@ mod tests {
         let mut s = 5u32;
         let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
         let w: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
-        // top_k=6 of 64 experts routed per row -> ~9.4% of rows live for a
-        // given expert, matching the real router's own selection rate.
+        // top_k=6 of 64 experts routed per row, so only a small fraction of
+        // rows is live for a given expert, matching the real router's own
+        // selection rate.
         let gate: Vec<f32> = (0..m * ne).map(|_| if lcg(&mut s).abs() < 6.0 / 64.0 { 0.3 } else { 0.0 }).collect();
         let mut out = vec![0f32; m * n];
         let iters = 50;
@@ -2468,9 +2471,9 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // silu_mul / scale_add: a real DeepSeek-OCR resident-server run
-    // (BRAIN_PROFILE, quiet machine) found these two elementwise kernels at
-    // 15-16% EACH of the decoder's own profiled CPU time (matmul_reg3-sized,
-    // bigger than everything but matmul/moe_linear_gated) -- neither had a
+    // (BRAIN_PROFILE, quiet machine) found these two elementwise kernels among
+    // the largest single entries EACH in the decoder's own profiled CPU time
+    // (bigger than everything but matmul/moe_linear_gated) -- neither had a
     // FastIdx entry, so every decode-step call (single row, d_model=1280 or
     // moe_ff=896 elements) paid the generic dispatch's rayon-chunked-JIT path
     // in full: `total.div_ceil(threads*8)` rounded up to a whole workgroup

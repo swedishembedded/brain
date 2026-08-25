@@ -74,7 +74,7 @@
 //!   merely untested: `target_frames = latent.frames * 4 - 3` (the
 //!   `LATENT_DOWNSAMPLE_FACTOR=4`, causal `-3` from `AudioDecoder.
 //!   _denormalize_latents`) exactly equals the two upsample stages' own
-//!   `2x-1` composition (`T0 -> 2*T0-1 -> 2*(2*T0-1)-1 = 4*T0-3`), and the
+//!   `2n-1` composition (`T0 -> 2*T0-1 -> 2*(2*T0-1)-1 = 4*T0-3`), and the
 //!   freq axis has no causal crop at all on either side (both halvings and
 //!   both doublings are exact powers of two for any `mel_bins` a multiple of
 //!   4). [`decode`] asserts this rather than reimplementing the general

@@ -23,9 +23,9 @@
 // `(physical*block_size + j%block_size)*kv_stride + kvh*head_dim`, so two
 // adjacent lanes are `kv_stride` floats apart — **4 KB** at Qwen3-0.6B's
 // `kv_stride = 1024`. At every step of the dot product a warp's 32 lanes touch
-// 32 different 32-byte sectors and use 4 bytes of each: 8x read amplification,
-// which is why it measured **35.1 GB/s, 12.2% of a P40's bandwidth roof, while
-// taking 52.2% of a served step**. This is the same defect a measured pass
+// 32 different 32-byte sectors and use 4 bytes of each: eight-way read
+// amplification, which is why it measured **a small fraction of the card's
+// bandwidth roof while taking about half of a served step**. This is the same defect a measured pass
 // records as "one thread per row is a COALESCING bug", and the same fix: let
 // a workgroup own one output and split the
 // REDUCTION across its lanes, so consecutive lanes read consecutive addresses.
@@ -37,9 +37,9 @@
 //
 // WHY NOT 64 LANES PER SCORE, which is what this kernel did first. With
 // `head_dim = 128` that gives each lane **2 MACs** and then a **64-add serial
-// fold on lane 0 while 63 lanes idle** — a serial tail far longer than the
-// useful work, and it left the kernel at 23.7% of the bandwidth roof even after
-// the coalescing fix. At `LPS = 8` each lane does 16 MACs and the fold is 8
+// fold on lane 0 while 63 lanes idle** - a serial tail far longer than the
+// useful work, and it left the kernel at well under half the bandwidth roof
+// even after the coalescing fix. At `LPS = 8` each lane does 16 MACs and the fold is 8
 // adds done by 8 lanes in parallel. Coalescing is unchanged: a 32-lane warp
 // covers 4 scores, each reading a contiguous 32-byte run.
 //
@@ -68,18 +68,14 @@ struct Params {
 @group(0) @binding(4) var<storage, read>       seq_lens:     array<u32>;
 @group(0) @binding(5) var<storage, read_write> scores:       array<f32>;
 
-// Lanes cooperating on one score. SWEPT on a P40 at Qwen3-0.6B (head_dim 128),
-// never guessed:
-//
-//     LPS      64      16       8       4       2
-//     ms    56.37   19.31   17.73   17.24   28.65
-//     %roof  23.7%   69.2%   75.4%   77.5%   46.7%
-//
-// Unimodal, and both ends are explained. High LPS starves each lane (at 64 it is
-// 2 MACs then a 64-add serial fold on lane 0 while 63 idle). Low LPS breaks
-// coalescing: at LPS=2 a lane group covers 8 bytes, so a 32-byte sector is only
-// a quarter used and the kernel falls back to 46.7%. 4 is the crossover where a
-// lane group still covers a whole 16-byte run and each lane does 32 MACs.
+// Lanes cooperating on one score. SWEPT at Qwen3-0.6B (head_dim 128) over
+// LPS = 64 / 16 / 8 / 4 / 2, never guessed. The curve is UNIMODAL, flat-topped
+// across 8 and 4, and both ends are explained. High LPS starves each lane (at
+// 64 it is 2 MACs then a 64-add serial fold on lane 0 while 63 idle). Low LPS
+// breaks coalescing: at LPS=2 a lane group covers 8 bytes, so a 32-byte sector
+// is only a quarter used and the achieved bandwidth falls back by nearly half.
+// 4 is the crossover where a lane group still covers a whole 16-byte run and
+// each lane does 32 MACs.
 const LPS: u32 = 4u;
 /// Scores one workgroup owns.
 const SPW: u32 = 64u / LPS;

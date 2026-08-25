@@ -17,8 +17,8 @@
 //
 // Why it exists: gn_stats dispatches N*G *invocations* — for a VAE decode that
 // is 32 threads, each serially walking up to 1M elements, on a 3840-core card.
-// Measured on a Tesla P40, FLUX.2 VAE decode of a 64x64 latent to 512x512:
-// gn_stats was **2262 ms of a 6466 ms decode (35%)** across 30 dispatches.
+// Measured on a FLUX.2 VAE decode of a 64x64 latent to 512x512, gn_stats was
+// **a third of the whole decode** across 30 dispatches.
 // The two faults are the same ones `rmsnorm_rows` fixed for RMSNorm:
 //   * no parallelism — 32 threads is 1/120th of the card, and
 //   * no coalescing — each thread walks a contiguous run alone, so a warp's

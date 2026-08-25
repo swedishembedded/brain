@@ -16,19 +16,16 @@
 // WHY THIS EXISTS — `matmul_dw_reg` is occupancy-starved, not uncoalesced.
 // Its output is [n, k] while its contraction is over m, and for a conv backward
 // m = H*W is enormous while n = Cout is small. The tile grid is
-// ceil(n/128)*ceil(k/128) workgroups TOTAL, independent of m. Measured on a P40
-// (30 SMs), VQGAN 256^2 conv backward:
+// ceil(n/128)*ceil(k/128) workgroups TOTAL, independent of m. Measured on a
+// 30-SM card over VQGAN 256^2 conv-backward shapes, the achieved rate tracks
+// the workgroup count and nothing else: 144 workgroups at (512,512) 64x64 and
+// 128x128, 36 at (256,256) 256x256, and 9 at (128,128) 512x512 - and the wider
+// the conv gets, the fewer workgroups it has, however much work `m` carries.
 //
-//   conv              n     k        m   wgs      ms   GFLOP/s  %peak
-//   (512,512) 64x64   512  4608    4096   144    5.59     3457   29.4%
-//   (512,512)128x128  512  4608   16384   144   19.82     3901   33.2%
-//   (256,256)256x256  256  2304   65536    36   24.55     3149   26.8%
-//   (128,128)512x512  128  1152  262144     9   70.06     1103    9.4%
-//
-// At 144 workgroups it already runs in `matmul_reg3`'s regime; at 9 it leaves 21
-// of 30 SMs idle and collapses to 9.4%. Transposing either operand does nothing
-// (both were tried and measured: 0.99-1.01x for dY^T, and 0.50x for col^T at the
-// widest shape) because the load pattern was never the limit.
+// At 144 workgroups it already runs in `matmul_reg3`'s regime; at 9 it leaves
+// 21 of 30 SMs idle and collapses. Transposing either operand does nothing (both
+// were tried and measured: dY^T a wash, col^T markedly worse at the widest
+// shape) because the load pattern was never the limit.
 //
 // So: split the contraction across `s` workgroup slices, each writing its own
 // partial [n,k]. `dw_splitk_reduce` then sums the slices into dW. No atomics

@@ -733,7 +733,7 @@ impl VulkanBackend {
     /// zero (pad bytes) and the params write go through a direct map — building
     /// a dispatch performs NO queue submits. (The old DEVICE_LOCAL version cost
     /// a fill submit + a staged-copy submit — two blocking GPU round trips — per
-    /// dispatch per frame, which serialized inference ~100x.)
+    /// dispatch per frame, which serialized inference by orders of magnitude.)
     fn make_uniform(&self, params: &[u32]) -> VkBuffer {
         self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
         let size = ((params.len() * 4).div_ceil(16) * 16).max(16) as u64;
@@ -880,7 +880,8 @@ impl VulkanBackend {
         // is an Intel driver bug — on other vendors the standard memory barrier is
         // correct, and serializing there is pure waste (a per-frame model with a
         // vocab-tiled embedding does ~one submit+fence per *dispatch* instead of
-        // one per *frame*: on an NVIDIA P40 the TTS Talker forward was 2× slower).
+        // one per *frame*: on an NVIDIA P40 the TTS Talker forward measured slower,
+        // not faster).
         // Gate the workaround to Intel (vendor 0x8086). `BRAIN_VK_SERIAL` forces
         // it everywhere (diagnostic); `BRAIN_VK_NO_SERIAL` disables it (to confirm
         // the Intel bug on that hardware).

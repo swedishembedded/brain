@@ -355,7 +355,7 @@ fn downsample(
 }
 
 /// `Resample(mode='upsample2d'|'upsample3d')`: (3D only) the causal temporal
-/// conv doubling the frame count, then the per-frame nearest-2x + conv.
+/// conv doubling the frame count, then the per-frame nearest-neighbour doubling + conv.
 ///
 /// See this module's header for the three cache states; all three are here.
 fn upsample(

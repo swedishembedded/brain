@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! FLUX.2 DiT profiler: where the forward's time actually goes, per matmul
-//! shape and per step kind, against the Tesla P40 fp32 peak (11.76 TFLOP/s).
+//! shape and per step kind, against the card's own datasheet fp32 peak.
 //!
 //! The DiT forward is a fixed sequence of dispatches whose *cost depends only
 //! on shape*, so this drives correctly-shaped scratch instead of the 15.5 GiB
 //! checkpoint (same idea as `zimage_bench train`). That makes the profile
 //! runnable in seconds, with no weights, and lets each shape class be timed in
-//! isolation. Total analytic FLOP is asserted against the real graph's
-//! 10.17 TFLOP so the replay cannot silently drift from `model.rs`.
+//! isolation. Total analytic FLOP is asserted against the real graph's own
+//! FLOP count so the replay cannot silently drift from `model.rs`.
 //!
 //! Usage:
 //!   flux2_bench mm      [reps]        standalone matmul at the DiT's shapes

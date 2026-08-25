@@ -478,7 +478,7 @@ mod tests {
     /// cosine 0.994 vs fp32's 1.000000 for the same driver -- see AGENTS.md's
     /// NPU weight-quantization rule). `out=1`,
     /// `inp=64` (two 32-wide groups): group 0 is uniformly small (0.01),
-    /// group 1 hides one 100x outlier among otherwise-small values. Against
+    /// group 1 hides one far larger outlier among otherwise-small values. Against
     /// the OLD whole-channel scheme this reconstructs to a single scale ≈
     /// 100/127 ≈ 0.79, which rounds every 0.01 value to 0 -- total loss of the
     /// smaller group. This test would FAIL against that implementation.

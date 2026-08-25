@@ -566,8 +566,8 @@ impl Int8ThinkerInstance {
             // through). Flushing every single layer fixes that but forces a
             // full fence-wait per layer, serializing what was previously
             // pipelined GPU work across the whole shard -- reproduced as a
-            // >5x prefill slowdown (a 300s SSE idle timeout that never fired
-            // before). Flushing every FLUSH_EVERY layers instead bounds the
+            // prefill slowdown of several times (an SSE idle timeout that never
+            // fired before). Flushing every FLUSH_EVERY layers instead bounds the
             // worst case to that many layers' worth of buried scratch while
             // still letting layers within a window pipeline together.
             const FLUSH_EVERY: usize = 4;

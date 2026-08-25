@@ -374,7 +374,7 @@ fn z_image_gguf_splits_the_fused_qkv_at_the_right_row_block() {
 ///
 /// Measured on the Q2_K file, this test alone in its process (`--test-threads=1`
 /// matters - the streaming-dequant test above reaches a higher peak of its own
-/// and would be credited here): **peak RSS 3.55 GiB, 175 s**, of which 3.4 GiB
+/// and would be credited here): **peak RSS 3.55 GiB**, of which 3.4 GiB
 /// is the GGUF's own file-backed mapping walked end to end. Run it with:
 ///
 /// ```text

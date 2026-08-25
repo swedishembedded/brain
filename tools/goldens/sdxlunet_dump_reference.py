@@ -312,7 +312,7 @@ def dump_schedulers(sdxl, out, manifest):
                 # The scale of the INITIAL latent. It is not derivable from the
                 # sigma table alone: which of `sigma_max` and `sqrt(sigma_max^2+1)`
                 # you get is a function of `timestep_spacing`, and the two differ
-                # by ~0.4% — invisible in an image, wrong in every image.
+                # by a fraction of a percent - invisible in an image, wrong in every image.
                 if hasattr(s, "init_noise_sigma"):
                     store[f"{pfx}.init_noise_sigma"] = torch.tensor(
                         [float(s.init_noise_sigma)], dtype=torch.float32

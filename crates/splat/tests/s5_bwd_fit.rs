@@ -7,7 +7,7 @@
 //!      scene/loss). Finite differences are NOT used: the 1/255 truncation
 //!      boundaries make them biased for scale/mean grads (the classic 3DGS
 //!      finite-diff pitfall — verified: autograd matches our analytic grads
-//!      where central differences are 2x off);
+//!      where central differences are off by a factor of two);
 //!   2. fit convergence: a perturbed scene optimized against renders of the
 //!      ground truth must reduce MSE substantially.
 

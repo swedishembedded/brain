@@ -133,7 +133,7 @@ fn tokenize_pad(tok: &QwenBpe, prompt: &str, cap_len: usize) -> Vec<u32> {
 /// Encode every dataset sample once: caption → Qwen features, image → DiT-space
 /// latent. Both encoders are built, used, and **dropped** before the caller builds
 /// the trainer, so their VRAM is reclaimed (sequential residency). `enc_gpu` is the
-/// card for the int8 Qwen encoder (fast, ~2 s/caption); `size` is the square image
+/// card for the int8 Qwen encoder (fast per caption); `size` is the square image
 /// size (latent = size/8). `progress(done, total, stage)` streams per-item progress.
 /// `cancel` is polled per item so a cancelled job aborts during this phase too.
 #[allow(clippy::too_many_arguments)]

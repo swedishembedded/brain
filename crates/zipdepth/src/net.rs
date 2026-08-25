@@ -56,7 +56,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // SELECTOR in the kernels' uniform (0 none, 1 relu, 2 silu, 3 sigmoid) is
     // what lets a ReLU model fuse — every dense+BN unit takes conv_act_reg
     // instead of conv2d + bn_eval + leaky_relu (3 full-tensor passes -> 1,
-    // ~8x less input traffic on the GPU). Grouped/dilated units still run
+    // an eighth of the input traffic on the GPU). Grouped/dilated units still run
     // unfused. conv_act/conv_act_tiled are the BRAIN_NAIVE_CONV/
     // BRAIN_TILED_CONV comparison variants of the same fusion.
     ("conv_act", kernels::CONV_ACT),

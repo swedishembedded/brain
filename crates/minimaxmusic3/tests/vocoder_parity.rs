@@ -28,9 +28,9 @@ const COS_FLOOR: f64 = 0.999;
 /// of the change it guards is decoration.
 ///
 /// 1e-4, not the 1e-3 first written here: both stages measure ~1e-6 clean, so
-/// 1e-4 still leaves ~60x of headroom for a reassociated accumulation while
-/// catching a mis-scale an order of magnitude smaller. At 1e-3 a uniform 0.1%
-/// gain lands exactly ON the ceiling - verified by mutation, and too close to
+/// 1e-4 still leaves ample headroom for a reassociated accumulation while
+/// catching a mis-scale an order of magnitude smaller. At 1e-3 a uniform
+/// one-per-mille gain lands exactly ON the ceiling - verified by mutation, and too close to
 /// call a gate.
 const REL_L2_CEILING: f64 = 1e-4;
 

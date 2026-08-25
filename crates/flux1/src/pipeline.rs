@@ -224,7 +224,7 @@ impl Flux1 {
     /// different size needs a different `Flux1`.
     pub fn load(root: &str, variant: &str, h: u32, w: u32) -> Result<Flux1, String> {
         let cfg = Flux1Config::from_name(variant)?;
-        let scale = 16u32; // VAE 8x * DiT 2x2 patchify
+        let scale = 16u32; // VAE downscale 8 * DiT 2x2 patchify
         if !h.is_multiple_of(scale) || !w.is_multiple_of(scale) {
             return Err(format!("flux1: {w}x{h} is not a multiple of {scale}"));
         }

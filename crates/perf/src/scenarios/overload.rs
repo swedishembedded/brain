@@ -132,7 +132,7 @@ pub fn to_json(points: &[Point], policy: Admission, recovery_ms: Option<f64>) ->
         Some(a) if a.goodput_per_s >= p.goodput_per_s => Some(a),
         _ => Some(p),
     });
-    // Collapse = the first rung past 1x whose goodput falls below half the peak.
+    // Collapse = the first rung past saturation whose goodput falls below half the peak.
     let collapse = peak.and_then(|pk| {
         points
             .iter()

@@ -114,11 +114,11 @@ const DECODE_SHAPE: select::OpShape =
     select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::F32 };
 
 /// The `MREG` ladder for `matmul_gemv_reg`. Powers of two, so "the smallest
-/// bucket covering `m`" carries at most 2x the rows actually needed, and the
+/// bucket covering `m`" carries at most twice the rows actually needed, and the
 /// ladder is complete by construction for `matmul_gemv`'s own `m <= 32`
-/// contract. Measured on a P40 at the depth decoder's shapes: every `m` in
-/// 1..=32 beats `matmul_gemv` by >= 1.7x through its bucket, where a single
-/// `MREG = 32` specialisation would LOSE (2.3x slower) at `m = 1`.
+/// contract. Measured at the depth decoder's shapes: every `m` in 1..=32 beats
+/// `matmul_gemv` through its own bucket, where a single `MREG = 32`
+/// specialisation would LOSE outright at `m = 1`.
 const GEMV_MREG_BUCKETS: &[u32] = &[1, 2, 4, 8, 16, 32];
 
 /// The table. Keep it short; see the bar above.

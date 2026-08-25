@@ -86,7 +86,8 @@ use brain_testutil::{read_f32, read_i32};
         let mean_abs = sum_abs / logits.len() as f64;
         eprintln!("FastVLM decoder parity: mean|Δ|={mean_abs:.4e} max|Δ|={max_abs:.4e} over {} logits", logits.len());
         // Observed on the real weights: mean ~7e-6, max ~7e-5 — pure fp32
-        // reassociation noise vs the bf16→fp32 reference. Thresholds keep ~50× headroom.
+        // reassociation noise vs the bf16 to fp32 reference. The thresholds below keep
+        // ample headroom over that.
         assert!(max_abs < 5e-3, "decoder logits diverge from HF reference: max|Δ|={max_abs}");
         assert!(mean_abs < 1e-4, "decoder logits mean drift too high: {mean_abs}");
 

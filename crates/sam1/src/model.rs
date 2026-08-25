@@ -915,7 +915,7 @@ impl SamEncoder {
         // `attn_rows`, NOT `rows`: for a windowed block the padded positions are
         // real keys/values whose input is zero, so they contribute the qkv BIAS
         // to every window's softmax and their gradient belongs in this sum.
-        // Summing over `rows` instead is a ~6% error that the DIRECTIONAL
+        // Summing over `rows` instead is a several-percent error that the DIRECTIONAL
         // gradient check does not catch (measured: rel 6.28e-2, a pass) -- see
         // this crate's `windowed_pad_rows_contribute_to_the_qkv_bias_gradient`.
         steps.push(g.step(self.ids.bias_grad, &[&bb.d_qkv, gr("attn.qkv.bias")], &[ar, 3 * c], 3 * c));

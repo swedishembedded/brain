@@ -17,15 +17,17 @@
 //   out : [M, N]  f32   — dequantized:  out[m,n] = acc_i32 * sx * sw
 //
 // This is the P40's fastest inference path. DP4A (`dot4I8Packed`) does four
-// int8 multiply-accumulates in one instruction — 4x the MACs of an fp32 FMA —
-// which is the 47-TOPS hardware the peak bench demonstrated. int8 weights also
+// int8 multiply-accumulates in one instruction, four times the MACs of an fp32
+// FMA, which is the hardware `crates/vulkan/tests/peak_flops.rs` demonstrates.
+// int8 weights also
 // move 1/4 the bytes of fp32, so the memory side wins too.
 //
 // Layout mirrors matmul_reg3, NOT matmul_reg2 (this kernel used to be a reg2
 // clone — see git history — carrying the same two shared-memory bank-conflict
 // patterns matmul_reg3.wgsl's own header diagnoses and fixes for fp32, at
-// higher cost here: DP4A packs 4x the math behind the same shared word, so a
-// conflict here taxes 4x the throughput it would in the fp32 kernel):
+// higher cost here: DP4A packs four times the math behind the same shared word,
+// so a conflict here taxes four times the throughput it would in the fp32
+// kernel):
 //
 //  1. INTERLEAVED register tiling: thread ty/tx owns rows/cols
 //     {ty, ty+16, ty+32, …} instead of {8*ty … 8*ty+7}, so the 16 threads of a

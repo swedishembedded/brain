@@ -50,8 +50,8 @@ pub struct EngineCfg {
     pub quant: bool,
     /// Use the INT4 weight-compressed Talker decode graph (opt-in). On a device
     /// whose native max is INT8 (the Intel NPU) this is weight-compression, not
-    /// native 4-bit — still ~20% faster on the bandwidth-bound Talker, half the
-    /// graph RAM. Forces the prefill graph off (compiling both i4 graphs OOMs), so
+    /// native 4-bit - still measurably faster on the bandwidth-bound Talker,
+    /// and half the graph RAM. Forces the prefill graph off (compiling both i4 graphs OOMs), so
     /// a long clone prefix seeds token-by-token (one-time cost).
     pub int4: bool,
     /// Clone only: the reference voice and its transcript (encoded once at load).
@@ -76,9 +76,9 @@ pub struct TtsEngine {
     tables: TalkerTables,
     mtp: CpuMtp,
     // Resident NPU MTP (INT8 KV-cache decode graph). When present it replaces the
-    // host `CpuMtp` in the generation loop — ~87ms/frame vs ~580ms on the large
-    // 1.7B (the host MTP re-streams its ~300MB fp32 weights 16x/frame and is
-    // memory-bandwidth bound). Loaded for d_model>=2048 unless `BRAIN_QWEN3TTS_MTP=cpu`.
+    // host `CpuMtp` in the generation loop, measured several times faster per
+    // frame on the large 1.7B (the host MTP re-streams its ~300MB fp32 weights
+    // 16 times per frame and is memory-bandwidth bound). Loaded for d_model>=2048 unless `BRAIN_QWEN3TTS_MTP=cpu`.
     mtp_npu: Option<crate::npu_gen::KvMtp>,
     kv: KvTalker,
     codec_sessions: HashMap<usize, CodecSession>,
@@ -109,8 +109,9 @@ impl TtsEngine {
         // design/cv/synth have short prefixes, so skip its ~1.4 GB compile. Unlike the
         // one-shot CLI (which skips INT4 prefill to bound peak RAM in a process that also
         // holds the other models), the SERVER compiles graphs ONCE at load, so it CAN
-        // afford the INT4 prefill graph — essential so a clone's long prefix seeds in one
-        // inference (~1s) instead of token-by-token (~20s) on every request.
+        // afford the INT4 prefill graph - essential so a clone's long prefix seeds in one
+        // inference instead of token-by-token, which measured an order of
+        // magnitude slower, on every request.
         let with_prefill = cfg.kind == Kind::Clone;
         let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, cfg.int4, with_prefill)?;
 

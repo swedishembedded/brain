@@ -28,7 +28,7 @@
 //! - **ImageGen**: a pure text-to-image action — see [`text2image_action`]. Not just
 //!   "emits an `Image`", because `/images/generations` only ever dispatches that one
 //!   action; image-*editing* models (restore/upscale/vqgan) emit `Image` too but have
-//!   no such action and would otherwise be advertised on a route that 404s them.
+//!   no such action and would otherwise be advertised on a route that answers 404 for them.
 //!
 //! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen; Anthropic exposes Chat.
 

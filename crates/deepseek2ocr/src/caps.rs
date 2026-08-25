@@ -97,8 +97,9 @@ pub const DEFAULT_INSTRUCTION: &str = "<|grounding|>Convert the document to mark
 pub const SEQ_LEN: u32 = 512;
 
 /// Default generated-token budget. Deliberately small: each token is one FULL
-/// recompute of the sequence through 12 MoE layers - **~22 s measured** on 22
-/// CPU cores at the served context, so this default is already ~12 minutes.
+/// recompute of the sequence through 12 MoE layers - **tens of seconds
+/// measured** on 22 CPU cores at the served context, so even this small default
+/// is minutes of generation.
 pub const DEFAULT_MAX_NEW: i64 = 32;
 
 /// `$BRAIN_DEEPSEEK_OCR_DIR`, or empty.
@@ -167,7 +168,7 @@ impl Session {
     /// blocks (what pinned this whole model to the CPU backend originally) is
     /// fixed and confirmed at real-weight scale (`crates/sam1/tests/
     /// wgpu_real_weight_parity.rs`, `wgpu_block_count_corruption.rs`) - a prior
-    /// pass measured the isolated CPU-vs-wgpu gap on this tower at ~3.6x, so
+    /// pass measured a several-fold CPU-vs-wgpu gap on this tower, so
     /// moving it is a real per-page win, not a defensive no-op. The vision
     /// tower and the decoder are already separate `Gpu` handles - the splice
     /// crosses them as a host `Vec<f32>` (`DeepseekOcr::encode_block`), never a

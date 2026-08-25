@@ -17,10 +17,11 @@
 //!
 //! `out = x·Wᵀ` with `x:[M,K]` and `W:[N,K]`, matching `nn.Linear`.
 //!
-//! Roofline for the box this was written on (Tesla P40 / GP102): 11.76 TFLOP/s
-//! fp32 against 346 GB/s, i.e. a ridge point of ~34 FLOP/byte. `matmul.wgsl`
-//! moves 8 bytes per 2 FLOP, so it cannot exceed ~86 GFLOP/s no matter how
-//! wide the card is — the reason this benchmark exists.
+//! Roofline for the box this was written on (Tesla P40 / GP102): its datasheet
+//! fp32 peak over its datasheet bandwidth puts the ridge point in the tens of
+//! FLOP per byte. `matmul.wgsl` moves 8 bytes per 2 FLOP, i.e. an arithmetic
+//! intensity two orders of magnitude below that ridge, so it cannot come near
+//! peak no matter how wide the card is - the reason this benchmark exists.
 
 use gpu_core::Gpu;
 
@@ -64,7 +65,7 @@ fn kernels() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// GFLOP/s as a percent of the P40's 11.76 TFLOP/s fp32 peak.
+/// GFLOP/s as a percent of the P40's datasheet fp32 peak, below.
 const PEAK_GFLOPS: f64 = 11760.0;
 
 /// Deterministic, bounded inputs — small magnitudes keep the fp32 accumulation

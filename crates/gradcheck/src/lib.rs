@@ -224,7 +224,7 @@ pub fn zero_grad_params<M: CheckModel>(m: &M, name_filter: impl Fn(&str) -> bool
 /// is a different matter: the contraction onto `v` can be numerically small even
 /// when the error vector is not, and best-of-`n_dirs` picks the direction where
 /// it is smallest. Measured on this repo: with T5's cross-block `rel_bias` fold
-/// deleted (33 % gradient error) this function reported `rel = 6.2e-4` at seed 1
+/// deleted (a gradient error of a third) this function reported `rel = 6.2e-4` at seed 1
 /// and 5.3e-2 at seed 7 - both inside the workspace `(4e-3, 8e-2)` gate. Every
 /// parameter a reverse pass *folds across stages* therefore needs
 /// [`elementwise_check`] next to its directional check, not instead of it.

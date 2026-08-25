@@ -53,8 +53,9 @@ struct Job {
 pub fn run_serve(args: &[String]) {
     let mut socket = std::env::temp_dir().join("brain-tts.sock").to_string_lossy().into_owned();
     let mut cap_override: Option<usize> = None;
-    // Talker weight precision: int8 (default), int4 (weight-compression — ~20%
-    // faster on the bandwidth-bound Talker + half the graph RAM; not native on the
+    // Talker weight precision: int8 (default), int4 (weight-compression -
+    // measurably faster on the bandwidth-bound Talker, and half the graph RAM;
+    // not native on the
     // NPU, see startup log), or fp32.
     let mut talker_quant = "int8".to_string();
     let mut engines: HashMap<String, EngineCfg> = HashMap::new();

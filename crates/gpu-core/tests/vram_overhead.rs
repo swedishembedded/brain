@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Measures the non-ReBAR Pascal "2x resident per storage buffer" cost, also
+//! Measures the non-ReBAR Pascal "resident bytes doubled per storage buffer" cost, also
 //! noted in `crates/qwen3/src/q8.rs` — directly, via `nvidia-smi` memory
 //! deltas around known allocations, rather than by inference from a model's
 //! total footprint.
@@ -16,13 +16,13 @@
 //! shape as `bench_matmul.rs`. Needs `nvidia-smi` on `$PATH` (skips cleanly
 //! otherwise).
 //!
-//! **Result** (P40 ×2, measured 2026-08-07): the doubling was real, exactly
-//! 2.00x, upload-triggered (allocation alone is 1.00x), independent of
-//! `COPY_SRC`/`COPY_DST` usage flags and independent of upload chunk size -
-//! and **specific to the default wgpu backend's Vulkan HAL**. brain's own
-//! native Vulkan backend (`crates/backend-vulkan`, whose `with_staging`
-//! reuses one shared, bounded staging buffer - see
-//! `crates/vulkan/src/context.rs`) measured a clean **1.00x**.
+//! **Result** (P40 ×2, measured 2026-08-07): the doubling was real and exact,
+//! upload-triggered (allocation alone costs no extra resident bytes),
+//! independent of `COPY_SRC`/`COPY_DST` usage flags and independent of upload
+//! chunk size - and **specific to the default wgpu backend's Vulkan HAL**.
+//! brain's own native Vulkan backend (`crates/backend-vulkan`, whose
+//! `with_staging` reuses one shared, bounded staging buffer - see
+//! `crates/vulkan/src/context.rs`) measured **no overhead at all**.
 //!
 //! **Fixed** (2026-08-21, same box): `wgpu-hal`'s Vulkan backend asked
 //! `gpu-allocator` for `MemoryLocation::CpuToGpu` for every `MAP_WRITE`
@@ -36,8 +36,8 @@
 //! staging buffer
 //! (`MAP_WRITE` and nothing beyond `COPY_SRC` - exactly what `wgpu_core`
 //! allocates for `Queue::write_buffer`) is now steered at host-visible,
-//! non-device-local memory. **wgpu measures 1.00x on every probe here**,
-//! equal to native Vulkan. The fix lives in the dependency, not in brain:
+//! non-device-local memory. **wgpu now measures no overhead on any probe
+//! here**, equal to native Vulkan. The fix lives in the dependency, not in brain:
 //! see the workspace root `Cargo.toml`'s `[patch]` notes for how it is
 //! consumed and for the full root-cause write-up it points at.
 //! `--device vulkan` is no longer needed to avoid the doubling.
@@ -45,16 +45,15 @@
 //! **It was not free, and this file is why we know.** The upload-throughput
 //! probes below were added with the placement fix, precisely so the cost side
 //! could not be assumed - and they immediately found that host-staged uploads
-//! ran at roughly HALF the old VRAM-staged ones (0.43 vs 1.16 GB/s for 1 GiB
-//! at the 4 MiB chunk size real weight upload uses). Two causes, both since
-//! fixed, and both found by measuring rather than reasoning:
+//! ran at roughly HALF the throughput of the old VRAM-staged ones, for a 1 GiB
+//! buffer at the 4 MiB chunk size real weight upload uses. Two causes, both
+//! since fixed, and both found by measuring rather than reasoning:
 //!
 //! 1. **Host memory is expensive to ALLOCATE, and device memory is not.**
 //!    `vkAllocateMemory` from a device-local heap hands back an address range
-//!    the driver already owns - ~4.8 ms for 256 MiB on this card, and flat in
-//!    the size. From a host heap it has to commit and pin the pages, at ~127
-//!    ms for 64 MiB and ~545 ms for 256 MiB: linear, and about 0.5 GB/s,
-//!    which is slower than the upload those pages exist to carry. With a
+//!    the driver already owns, in a time flat in the size. From a host heap it
+//!    has to commit and pin the pages, at a cost linear in the size and at a
+//!    rate slower than the upload those pages exist to carry. With a
 //!    fresh allocation behind every `write_buffer`, pinning rather than
 //!    copying became the whole cost. `wgpu-hal` now recycles upload staging
 //!    buffers instead of allocating one per write.
@@ -68,11 +67,11 @@
 //!    one unbroken run of frees at teardown. See
 //!    `crates/backend-wgpu/tests/upload_flush.rs`, which pins the contract.
 //!
-//! With both fixed, on the same card: 4.84 GB/s in 4 MiB chunks, 5.71 GB/s in
-//! 64 MiB chunks, 3.59 GB/s in one write - against 1.11-1.18 GB/s for the
-//! original VRAM-staged path. So the placement fix is no longer a trade: it
-//! costs half the VRAM AND uploads several times faster. The roadmap ledger
-//! has the full before/during/after table.
+//! With both fixed, on the same card, the host-staged path uploads several
+//! times faster than the original VRAM-staged one at every chunk size probed
+//! (4 MiB, 64 MiB, and one single write), with the mid chunk size fastest. So
+//! the placement fix is no longer a trade: it costs half the VRAM AND uploads
+//! faster. The roadmap ledger has the full before/during/after table.
 //!
 //! Six probes, each isolating one candidate cause:
 //!   1. `storage_init` (the exact path model weight import takes) at two sizes

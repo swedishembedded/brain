@@ -13,8 +13,8 @@
 // GroupNorm backward per-group reductions, STAGE 1 of 2 — partial sums.
 //
 // `gn_dsum` computes S1/S2 with ONE invocation per (n,g) group: 32 lanes for a
-// 32-group norm, each walking `(C/G)*H*W` elements serially. Measured at
-// 229 ms / 2.3 GB/s on a P40 — 0.7% of the ~346 GB/s roof, and 27% of a VQGAN
+// 32-group norm, each walking `(C/G)*H*W` elements serially. Measured at well
+// under one percent of the card's bandwidth roof, and a quarter of a VQGAN
 // training step's backward. This is the same pathology the FORWARD statistics
 // had before `gn_part`/`gn_stats2`, and this pair is its adjoint.
 //
@@ -23,8 +23,9 @@
 //
 // BARRIER-FREE by construction, so `backend-cpu` can JIT it. The cooperative
 // alternative would need `workgroupBarrier` and a capability branch; this needs
-// neither, and the forward's equivalent pair measured within 2x of cooperative
-// on the GPU while being ~3x the serial kernel on the CPU.
+// neither, and the forward's equivalent pair measured close to the
+// cooperative form on the GPU while being several times the serial kernel on
+// the CPU.
 //
 // Determinism: each partial sums a FIXED strided subset in ascending index
 // order, and stage 2 folds them in ascending partial order — so the result is

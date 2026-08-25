@@ -339,7 +339,7 @@ mod real_1080p {
     /// of 24576) and there is something to compare against.
     ///
     /// The routine gate above uses a deliberately harsher split (128 px tiles
-    /// on a 256 px image, 2.25x overlap waste) because it has to run in
+    /// on a 256 px image, with correspondingly wasteful overlap) because it has to run in
     /// seconds; this is the number that describes production. `#[ignore]`d
     /// for cost, not for confidence.
     #[test]

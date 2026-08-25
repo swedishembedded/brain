@@ -101,7 +101,7 @@ impl ResidentModel for Flux2Resident {
         let nine_b = key.config.starts_with("klein-9b") || key.config.starts_with("base-9b");
         let int8 = key.config.contains(":int8:");
         let vram = match (nine_b, int8) {
-            // 9B fp32 DiT + Qwen3-8B encoder — roughly 2× the 4B build.
+            // 9B fp32 DiT + Qwen3-8B encoder - roughly twice the 4B build.
             (true, false) => 36u64 << 30,
             // int8 9B DiT ≈ 8.8 GiB + encoder — unmeasured, scaled from 4B.
             (true, true) => 16u64 << 30,

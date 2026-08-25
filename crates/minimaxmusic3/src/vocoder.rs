@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The Flow-VAE vocoder: a DAC-style (Descript Audio Codec) decoder.
-//! `dec_in_proj (1x1 conv) -> conv_in (k=7) -> 4x VocoderBlock (Snake ->
+//! `dec_in_proj (1x1 conv) -> conv_in (k=7) -> 4 VocoderBlocks (Snake ->
 //! ConvTranspose1d upsample -> 3 parallel-dilation VocoderResidualUnit) ->
 //! snake_out -> conv_out (k=7) -> tanh`. Folds `latent_channels` into 2
 //! (stereo) by treating each channel as its own `latent_channels/2`-wide
@@ -13,7 +13,7 @@
 //! `audio::snake` (this port's own single-parameter form - the checkpoint's
 //! `Snake1d`, not `kernels::SNAKE_BETA`'s two-parameter log-space BigVGAN
 //! form). Device forward (not host math like `condition_encoder`): this
-//! component upsamples up to 512x per call and is genuinely compute-heavy,
+//! component upsamples up to 512-fold per call and is genuinely compute-heavy,
 //! so it belongs on the same tape-based device engine every other serving
 //! path uses.
 

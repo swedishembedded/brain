@@ -36,8 +36,8 @@
 // dense result into a pre-zeroed accumulator, possibly at an offset" pattern.
 // This keeps `row_dot` itself trivial (no output offset, no accumulate flag)
 // at the cost of one extra dispatch per accumulating use — irrelevant at the
-// dispatch counts GDN's chunk recurrence runs at (a measured dispatch
-// overhead of ~0.03%).
+// dispatch counts GDN's chunk recurrence runs at (a measured dispatch overhead
+// too small to matter).
 
 struct Params { rows: u32, d: u32, a_off: u32, b_off: u32, alpha: f32 };
 

@@ -106,7 +106,7 @@ fn cached_matches_uncached_and_is_faster() {
 
     assert!(cos > 0.999, "cached vs uncached cosine {cos:.6} must exceed 0.999");
     // Speed: the cached path is host scalar f32, so it only wins in an optimized
-    // build (debug host code is ~100x slower than the GPU-kernel uncached path).
+    // build (debug host code is orders of magnitude slower than the GPU-kernel uncached path).
     if !cfg!(debug_assertions) {
         assert!(dt_c < dt_u, "release: cached ({dt_c:.2}s) should beat uncached ({dt_u:.2}s)");
     }

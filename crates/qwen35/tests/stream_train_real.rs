@@ -23,10 +23,10 @@
 //! This milestone's own reported real numbers were gathered via `src/bin/
 //! stream_train_step.rs` instead of a single run of this test binary: the
 //! interactive development environment this landed in kills a background
-//! process after roughly 45-50 minutes of wall-clock regardless of the
-//! `cargo test` timeout requested - shorter than BEFORE-gen (~18 min) plus
-//! one real step (~36 min) combined (~54 min), which this single-process
-//! test performs twice in the middle of the whole ~106-minute run. The
+//! process after roughly three quarters of an hour of wall-clock regardless of
+//! the `cargo test` timeout requested - shorter than the BEFORE generation plus
+//! one real training step combined, which this single-process test performs
+//! twice in the middle of a run that is longer still. The
 //! standalone binary splits the SAME `StreamTrainer` calls this test makes
 //! into separate short-lived processes, checkpointing the tiny `.lora_a`/
 //! `.lora_b` adapter state to a small safetensors file between them

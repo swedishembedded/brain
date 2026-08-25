@@ -38,7 +38,7 @@
 //! distractors), 6000 sequences, 800 steps, 2-layer / d_model-96 / 4-head GPT.
 //! Per-token chance 0.125; full-sequence chance `0.125^3 ≈ 0.002`. **Measured
 //! exact-match ≈ 0.87** (train_ce ≈ 0.42), far clear of the **0.40** threshold,
-//! in ~1.5-2 min on CPU (see `tests/mad_selective_copy.rs`).
+//! in minutes on CPU (see `tests/mad_selective_copy.rs`).
 
 use std::path::Path;
 

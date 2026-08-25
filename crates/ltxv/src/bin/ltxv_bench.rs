@@ -420,7 +420,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
 /// `use_embeddings_connector: false`, the same "profiles a reduced op
 /// sequence, not the real one" bug this module's own doc already records
 /// once for `apply_gated_attention` - the connector routing this was
-/// silently skipping is a real, non-cached ~2.7s of every real forward call,
+/// silently skipping is a real, non-cached part of every real forward call,
 /// found while diagnosing a real-generation quality issue). `ctx_len` must
 /// therefore be a multiple of 128 (the connector's own `num_registers`
 /// requirement, `crate::block::EmbeddingsConnector`'s assertion) - the
@@ -474,7 +474,7 @@ fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident
     // `None`, not `Some("gpu")`: `Gpu::open(None, ..)` goes through `Gpu::new`,
     // which honours `BRAIN_DEVICE` - so this bench can be pointed at brain's
     // native Vulkan backend (`BRAIN_DEVICE=vulkan`), which does NOT have
-    // wgpu's 2.00x resident-buffer cost and therefore has a completely
+    // wgpu's doubled resident-buffer cost and therefore has a completely
     // different residency budget. wgpu is still the default, so an unset
     // environment measures exactly what it measured before.
     let dev: Option<&str> = None;

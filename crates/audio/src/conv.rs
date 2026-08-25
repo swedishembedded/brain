@@ -16,8 +16,9 @@
 //! [`conv1d_fwd`] / [`convtr1d_fwd`] dispatch the DIRECT kernels
 //! (`conv1d.wgsl`, `convtr1d.wgsl`): one thread per output element with a
 //! serial reduction over `Cin*K`. That is the wrong kernel rather than a slow
-//! one - on a P40 the pair measured **2.2%** and **0.4%** of the card's
-//! compute roof and 99.4% of the MiniMax-Music-3 vocoder's stage time.
+//! one - the pair measured at a low single-digit percent and a fraction of one
+//! percent of the card's compute roof respectively, and between them they were
+//! essentially all of the MiniMax-Music-3 vocoder's stage time.
 //!
 //! [`conv1d_bias_fwd`] / [`convtr1d_bias_fwd`] are the seam that also offers
 //! the GEMM lowering, choosing per shape and per device through
@@ -248,16 +249,12 @@ impl ConvScratch {
 ///
 /// The chunk size trades GEMM efficiency (bigger chunks fill more of the
 /// 128-row tile and amortise the dispatch) against a scratch buffer that is
-/// allocated per recorded graph. Swept on a P40 with `mm3_bench vocoder 689`,
+/// allocated per recorded graph. Swept with `mm3_bench vocoder 689`,
 /// best-of-5, reading the DEVICE-time sum (the whole-pass number on that stage
-/// is dominated by a ~650 ms host allocation gap and is too noisy to read a
-/// 2% effect off):
-///
-/// | MiB | 256 | 128 | 96 | 64 | 48 | 32 |
-/// |---|---|---|---|---|---|---|
-/// | device ms | 780 / 800 | 794 / 797 | 797 / 797 | 854 / 831 | 835 / 835 | 885 / 886 |
-///
-/// Flat from 96 MiB up and climbing below it (+6% at 64, +11% at 32), so 128
+/// is dominated by a host allocation gap and is far too noisy to read an
+/// effect this small off). Re-run that bench rather than trusting a figure
+/// here; what it showed is that device time is flat from 96 MiB upward and
+/// climbs steadily below it (worst at 32 MiB), so 128
 /// is the smallest budget that costs nothing - which matters, because this
 /// scratch is live beside a decoder that already peaks in the tens of
 /// gigabytes. The VAE lowering keeps 512 for its own 2D operands.
@@ -310,9 +307,9 @@ impl Conv1d {
 /// epilogue). Three lowerings, chosen by `gpu_core::select`:
 ///
 /// * **direct** - `conv1d` + `add_chan_inplace`. One thread per output element
-///   with a serial `Cin*K` reduction: measured at **2.2% of a P40's compute
-///   roof** across the MiniMax-Music-3 vocoder's shapes, where it was 51.6% of
-///   the stage. It stays for narrow convs (`Cout < GEMM_CONV1D_MIN_COUT`, where
+///   with a serial `Cin*K` reduction: measured at **a low single-digit percent
+///   of the card's compute roof** across the MiniMax-Music-3 vocoder's shapes,
+///   where it was about half of the stage. It stays for narrow convs (`Cout < GEMM_CONV1D_MIN_COUT`, where
 ///   the GEMM's 128-wide column tile is mostly idle), for grouped convs, and
 ///   wherever `workgroup_reductions` is false.
 /// * **lowered, `K > 1`** - `im2col1d_at` + `matmul_reg3` + `nlc_bias_nchw`,
@@ -407,9 +404,9 @@ pub fn conv1d_bias_fwd(
 ///
 /// * **direct** - `convtr1d` + `add_chan_inplace`. One thread per output
 ///   element, and at an upsampling stride most of its `K` taps are discarded
-///   by the divisibility test: measured at **0.4% of a P40's compute roof** in
-///   the MiniMax-Music-3 vocoder, where it was 47.8% of the stage on four
-///   dispatches.
+///   by the divisibility test: measured at **a fraction of one percent of the
+///   card's compute roof** in the MiniMax-Music-3 vocoder, where four
+///   dispatches of it were about half of the stage.
 /// * **lowered** - `matmul_dw_reg_splitk` (`s = 1`) + `col2im1d_bias`:
 ///   `col[Cout*K, L] = Wᵀ·x` in the TN form, whose contraction index is the
 ///   LEADING axis of both operands - which is exactly how a transposed conv's

@@ -392,8 +392,8 @@ pub fn build_trunk_graph(
             // The Concat must NOT write straight into a graph output: the
             // Intel NPU plugin then fills the second half wrongly (measured:
             // the last level's global half came back at the frame half's
-            // magnitudes, 13.8% rms error, while the identical tensor routed
-            // through an Identity was correct to 0.18%). Landing the concat
+            // magnitudes, with an rms error two orders of magnitude worse than
+            // the identical tensor routed through an Identity). Landing the concat
             // in an internal tensor and copying it out fixes it, and costs
             // nothing on CPU/GPU.
             // Emit the frame and global halves as SEPARATE outputs instead of

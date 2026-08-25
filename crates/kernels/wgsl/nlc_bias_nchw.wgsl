@@ -24,9 +24,10 @@
 // over spatial positions (see `im2col_at.wgsl`).
 //
 // A transpose has no coalesced element-wise indexing: whichever side the thread
-// index follows, the other is strided, and on a P40 that costs the classic 8x
-// sector amplification (measured: 158 ms for the FLUX.2 VAE decode's 35
-// lowered-conv outputs, ~90 GB/s of 346). So stage a **64 x 64 tile in
+// index follows, the other is strided, and on a P40 that costs the classic
+// eight-way sector amplification (measured over the FLUX.2 VAE decode's 35
+// lowered-conv outputs at a small fraction of the card's bandwidth roof). So
+// stage a **64 x 64 tile in
 // workgroup memory**: the load walks x along C (coalesced) and the store walks
 // y along L (coalesced). The tile row stride is 65, not 64, so the store's
 // column read `tile[t*65 + r]` lands on 32 distinct banks instead of one —

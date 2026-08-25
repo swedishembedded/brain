@@ -214,8 +214,8 @@ fn background_suppression_few_false_positives() {
     );
     // Positive recall must merely STAY NON-ZERO — i.e. the suppression (conf 0.45,
     // chosen high to kill background activations) did not silence the foreground
-    // entirely. The Background preset's objects are SMALL (10-28% of a 64px side,
-    // so ~6-18px) and the smoke-budget training is short, so recall at this strict
+    // entirely. The Background preset's objects are SMALL (a fraction of a 64px
+    // side, so ~6-18px) and the smoke-budget training is short, so recall at this strict
     // conf is naturally modest (measured ~0.25); the contrast that matters is
     // "0 false positives on empties WHILE still finding real objects", not a high
     // recall number. We bar it at >0.10 to guard against total signal collapse.

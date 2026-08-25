@@ -5,7 +5,7 @@
 //!
 //! Trains the real `mad_fuzzy_recall` benchmark end-to-end on `BRAIN_DEVICE` and
 //! asserts whole-group (multi-token) exact-match clears its calibrated threshold,
-//! well above chance. Skipped under `MOE_SKIP_GPU_TESTS`. ~2-3 min on CPU.
+//! well above chance. Skipped under `MOE_SKIP_GPU_TESTS`. Minutes on CPU.
 
 use bench::mad_fuzzy_recall::MadFuzzyRecall;
 use bench::Benchmark;

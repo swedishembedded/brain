@@ -280,7 +280,7 @@ fn load_blob(spec: &ActionSpec, name: &str, path: &str) -> Result<Blob, String> 
         // A `video` input is a CLIP, not a file: the wire format is decoded
         // frames, so the container has to be demuxed here (the model crates
         // deliberately have no ffmpeg dependency). Defaults are
-        // `VideoDecodeOpts`'s -- 1 fps, at most 32 frames, the scale a
+        // `VideoDecodeOpts`'s -- one frame per second, at most 32 frames, the scale a
         // multimodal prompt is validated at.
         Media::Video => {
             let frames = imaging::video::decode_frames(std::path::Path::new(path), &Default::default())?;

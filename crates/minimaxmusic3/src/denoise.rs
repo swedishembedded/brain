@@ -155,7 +155,7 @@ impl CfgDevices {
 /// Built ONCE for the whole denoise stage and reused across every chunk and
 /// all `2 * num_inference_steps` evaluations within each - see
 /// [`dit::Resident`] for what a rebuild costs (~9.7 GB of host->device
-/// traffic at `DitConfig::real()` dims, ~22 s per card on a P40). A split
+/// traffic at `DitConfig::real()` dims, and tens of seconds per card). A split
 /// placement costs ~9.7 GB on EACH card, not 19.4 GB on one.
 ///
 /// The only per-chunk input is the chunk's `length`, and the only thing it

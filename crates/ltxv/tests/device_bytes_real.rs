@@ -5,7 +5,7 @@
 //! port's own roadmap ledger's lesson #34: "a memory saving is not measured
 //! by anything unless someone measures it". `crate::int8::is_never_
 //! quantized`'s exclusion list means the real ratio is NOT the theoretical
-//! flat 4x an all-eligible-tensor model would get - this file computes the
+//! flat four-to-one an all-eligible-tensor model would get - this file computes the
 //! real number from the real config's own tensor-size breakdown
 //! ([`ltxv::dit::av_dit_tensor_manifest`] at [`LtxAvDitConfig::ltx25`]) and
 //! asserts against it, rather than assuming a round number.
@@ -73,8 +73,8 @@ fn real_22b_int8_storage_ratio_is_measured_not_assumed() {
     // to_gate_logits tables, plus the connectors' own small tensors) is a
     // small fraction of total parameters, so the ratio should land close to
     // (but strictly below, per `is_never_quantized`'s doc) the theoretical
-    // 4x a fully-eligible model would get - asserted as a real measured
-    // range, not a round number.
+    // four-to-one a fully-eligible model would get - asserted as a real
+    // measured range, not a round number.
     assert!(eligible_frac > 0.9, "expected the vast majority of real 22B parameters to be int8-eligible, got {eligible_frac:.4}");
-    assert!(ratio > 3.5 && ratio < 4.0, "real 22B int8 storage ratio {ratio:.4}x outside the expected (3.5, 4.0) band - is_never_quantized's exclusions should keep it close to but below 4x");
+    assert!(ratio > 3.5 && ratio < 4.0, "real 22B int8 storage ratio {ratio:.4} outside the expected (3.5, 4.0) band - is_never_quantized's exclusions should keep it close to but below four-to-one");
 }

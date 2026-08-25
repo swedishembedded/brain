@@ -166,7 +166,7 @@ impl Report {
 /// until the caller asks.
 ///
 /// Two floors rather than one because they fail on different things: a stage
-/// uniformly `2x` the reference is cosine 1.0 and fails only the relative-L2
+/// uniformly double the reference is cosine 1.0 and fails only the relative-L2
 /// ceiling, while a permuted stage keeps its magnitude and fails only the
 /// cosine floor. Both are recorded per row, and every violation of either is
 /// collected so one run names every bad stage instead of stopping at the first.

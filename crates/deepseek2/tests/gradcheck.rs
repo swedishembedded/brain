@@ -70,7 +70,7 @@ fn cfg_of(n_experts: u32, top_k: u32, norm_topk_prob: bool, routed_scaling: f32)
 ///
 /// *The MoE branch was invisible.* At `std = 0.02` and `d_model = 12` the
 /// routed-expert branch contributes ~2.6e-5 to a residual stream of ~2e-2 -
-/// about 0.1 % - because three cascaded small-scale stages compound (`gate`/`up`
+/// a thousandth of it - because three cascaded small-scale stages compound (`gate`/`up`
 /// matmuls, SiLU's near-identity attenuation for small inputs, then a
 /// `moe_ff = 7`-wide `down` matmul) and the top-k gate multiplies what survives
 /// by another ~0.2. Two consequences, both observed:
@@ -88,8 +88,8 @@ fn cfg_of(n_experts: u32, top_k: u32, norm_topk_prob: bool, routed_scaling: f32)
 /// summed over `tok.weight`'s 228 entries, a step of norm 0.076 against a weight
 /// of norm 0.30). The embedding's central difference was correspondingly
 /// dominated by curvature, not by the derivative: `tok.weight` came back at
-/// `analytic = -8.77e-1` vs `numeric = -7.82e-1`. At `0.15` the same `eps` is
-/// 3.3 % of scale and that tensor lands inside the workspace gate.
+/// `analytic = -8.77e-1` vs `numeric = -7.82e-1`. At `0.15` the same `eps` is a
+/// far smaller fraction of scale and that tensor lands inside the workspace gate.
 ///
 /// The production init is not wrong for the real model's 1280-wide `d_model`;
 /// this is a harness conditioning fix, the same resolution (and the same

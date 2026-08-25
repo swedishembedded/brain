@@ -20,8 +20,9 @@
 //
 // At decode, M is the number of concurrent sequences (1-32). The naive kernel
 // (one thread per output element) then re-streams weight row `n` once per m —
-// M-fold redundant traffic on a kernel that is memory-bound on W (measured:
-// 67.5% of decode time at ~7 GB/s of a 346 GB/s card). Here the 64 threads of
+// M-fold redundant traffic on a kernel that is memory-bound on W (measured as
+// two thirds of decode time, at a low single-digit percent of the card's
+// bandwidth roof). Here the 64 threads of
 // a workgroup split K, each reading its slice of W row `n` ONCE and applying
 // it to all M rows of x from registers; one barrier; then threads 0..m fold
 // the 64 partials for their row. W traffic drops M-fold and the reads are
@@ -50,8 +51,8 @@ struct Params {
 //
 // **On a GPU that is no longer true, and this kernel is no longer the one that
 // runs.** Sizing `partial` for the worst case costs 8 KB of shared memory per
-// workgroup at every `m` (on a GP102: 12 resident workgroups of a possible 32,
-// ~37.5% occupancy), and the read-modify-write below is a shared-memory
+// workgroup at every `m` (on a GP102: 12 resident workgroups of a possible 32),
+// and the read-modify-write below is a shared-memory
 // dependency chain per `(k, m)`. `matmul_gemv_reg.wgsl` is the register-
 // accumulator sibling that fixes both - bit-identical, same `Params`, same
 // bindings, same `n * 64` thread count - and `gpu_core::upgrade` substitutes
@@ -62,8 +63,8 @@ struct Params {
 // So THIS kernel keeps the 2048-float array on purpose: it is what the CPU JIT
 // and the `@npu` path can execute, and neither pays a shared-memory occupancy
 // cost. Shrinking it here (`kernels::template`) was measured and is NOT what
-// ships - it recovers ~2.1x of the ~2.7x the register sibling gets, and only
-// on the backend that cannot use it.
+// ships - it recovers most, but not all, of what the register sibling gets,
+// and only on the backend that cannot use it.
 var<workgroup> partial: array<f32, 2048>; // up to 32 rows x 64 threads
 
 @compute @workgroup_size(64)

@@ -8,7 +8,7 @@
 //! the GPT engine on `BRAIN_DEVICE` → score close-bracket next-token accuracy on
 //! held-out words) and asserts accuracy clears its threshold far above the `1/k`
 //! chance. Skipped when `MOE_SKIP_GPU_TESTS` is set. A reduced config (fewer
-//! steps / sequences / width than the registered default) keeps it ~1-2 min on
+//! steps / sequences / width than the registered default) keeps it to minutes on
 //! the CPU backend while still landing at ~0.99.
 
 use bench::dyck::Dyck;

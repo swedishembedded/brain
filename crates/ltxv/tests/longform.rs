@@ -85,7 +85,7 @@ fn a_clip_that_fits_one_window_carries_no_context() {
 /// requested frame count in order with no duplicated and no missing frame.
 #[test]
 fn a_request_longer_than_one_window_rolls_a_latent_context_across_every_seam() {
-    let (frames, lh, lw) = (481usize, 22usize, 40usize); // 20 seconds at 24 fps, 1280x704
+    let (frames, lh, lw) = (481usize, 22usize, 40usize); // 20 seconds at 24 frames/second, 1280x704
     let plan = window_plan(frames, lh, lw, CONTEXT_LATENT_FRAMES, LONGFORM_MAX_TOKENS).expect("a long request plans, it does not fail");
     assert!(plan.len() > 1, "481 frames cannot be one window, got {plan:?}");
 
@@ -402,7 +402,7 @@ mod real_weights {
 ///
 /// ## Cost
 ///
-/// Four real 22B window generations, measured at 577 s in total on one Tesla
+/// Four real 22B window generations, measured in minutes in total on one Tesla
 /// P40 - the whole cost is weight streaming, and this shape's 1008 tokens per
 /// forward are small enough that the four share one warm checkpoint cache.
 /// `BRAIN_DEVICE` is what picks the card: it is the only pin that survives on

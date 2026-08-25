@@ -28,7 +28,7 @@
 //! This is easy to get wrong in exactly one direction, because brain's own
 //! `arcface` **`embed` action normalises** (its output is meant to be
 //! cosine-ready). Feeding that into `id_cond` would leave the first 512
-//! components ~20x too small and let the EVA half dominate the conditioning —
+//! components far too small and let the EVA half dominate the conditioning -
 //! with nothing to catch it, since the shape and the dtype would both be right.
 //! The dumped reference says so numerically: `‖id_cond[:512]‖ = 20.11` against
 //! `‖id_cond[512:]‖ = 1.0000`. [`arcface::caps::ArcFaceSession::embed_raw_chw`] exists

@@ -334,8 +334,8 @@ pub type DitKey = (&'static str, usize, usize, usize, Option<String>, Option<Str
 const TEXT_MLP_TENSORS: [&str; 4] = ["text_embedding.0.weight", "text_embedding.0.bias", "text_embedding.2.weight", "text_embedding.2.bias"];
 
 /// A DiT kept resident across generations, for a server that answers more than
-/// one request (`wan::caps`, `resident_wan`). Holding it is worth roughly 20 s
-/// of load plus 5.7 GB of upload per call at 1.3B.
+/// one request (`wan::caps`, `resident_wan`). Holding it saves a slow load plus
+/// 5.7 GB of upload per call at 1.3B.
 ///
 /// The VAE is deliberately NOT cached alongside it: it is 508 MB and its
 /// decoder graph is sized from the same latent extent, so caching it would
@@ -630,9 +630,9 @@ fn denoise(
     for (i, &t) in timesteps.iter().enumerate() {
         // Once per step, not once per forward: a forward is a single submit of
         // the whole block stack and is not interruptible from here, so the
-        // step boundary is the finest granularity that means anything. At 46
-        // s/forward that is a worst case of ~1.5 min to abort a run whose
-        // total is an hour.
+        // step boundary is the finest granularity that means anything: the
+        // worst case for aborting is one forward, which is a small fraction of
+        // a whole run.
         if cancel.is_cancelled() {
             return Err("cancelled".into());
         }

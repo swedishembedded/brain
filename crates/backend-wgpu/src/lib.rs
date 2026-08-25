@@ -368,7 +368,7 @@ impl PlCache {
 /// The **expensive, shareable** half of a wgpu backend: the instance/adapter/
 /// device/queue and every compiled pipeline.
 ///
-/// Split out from [`WgpuBackend`] because building it is what costs ~2-3 s (device
+/// Split out from [`WgpuBackend`] because building it is what costs seconds (device
 /// init plus one shader compile per kernel), and because creating many of them on
 /// one physical GPU is actively harmful: several concurrent Vulkan devices on a
 /// single card deadlocked the test suite roughly half the time (all threads in
@@ -798,7 +798,7 @@ impl WgpuBackend {
             // the timestamp buffers are allocated whenever the ADAPTER supports
             // them, so profiling can be switched on at runtime, but accumulating
             // is gated separately. Printing the header anyway put a
-            // "BRAIN_PROFILE" banner with a `-0.0 ms` total into the stderr of
+            // "BRAIN_PROFILE" banner with a negative-zero total into the stderr of
             // every ordinary run, once per device dropped - output that names an
             // env var the run did not set and reports a total of nothing.
             if rows.is_empty() {
@@ -1127,9 +1127,9 @@ impl WgpuBackend {
     /// noise, and once `true` it silently becomes THE default every future
     /// caller inherits (per this program's own repeated finding: a
     /// capability flag is trusted, never re-verified, at every call site
-    /// downstream). `1.2` (20%) is comfortably outside that noise band on
-    /// this repo's own probes (`gpu_core::roof`'s `best_of` sees run-to-run
-    /// variance well under 10% on a warmed, idle device) while still being a
+    /// downstream). `1.2` is comfortably outside that noise band on this
+    /// repo's own probes (`gpu_core::roof`'s `best_of` sees run-to-run variance
+    /// far smaller than that on a warmed, idle device) while still being a
     /// modest bar - a genuinely-fast native path should clear it easily; a
     /// device where f16 is merely "not worse" (decode-bound, or throttled to
     /// near fp32 rate) correctly stays on the fp32 default.
@@ -1249,8 +1249,8 @@ impl WgpuBackend {
                 // query, expensive to measure, so query the cache and
                 // measure lazily" split. On this sandbox's real adapter
                 // (Intel Arc iGPU, MTL) that measurement showed native f16
-                // beating fp32 by roughly 1.4x-3.8x across repeated runs -
-                // comfortably clearing the gate - so this flag is a safe
+                // beating fp32 across every repeated run, comfortably clearing
+                // the gate - so this flag is a safe
                 // structural default here, not a claim that f16 loses on
                 // this hardware.
                 ..NumericSupport::BASELINE
@@ -1436,7 +1436,8 @@ impl WgpuBackend {
     /// begin/end timestamps, which changes the execution being measured — wgpu
     /// inserts barriers between passes, so a dispatch that would have overlapped
     /// its neighbour no longer does, and the totals are not the production
-    /// pass's totals (measured: 330.7 ms of "GPU time" against a 114.9 ms pass).
+    /// pass's totals (measured: a "GPU time" total several times the wall time
+    /// of the pass it claimed to describe).
     ///
     /// Here the pass structure is untouched. `n + 1` timestamps bracket `n`
     /// dispatches, so dispatch `i` costs `t[i+1] - t[i]`. Query sets cap out

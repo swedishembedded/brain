@@ -7,8 +7,8 @@
 //! ```text
 //! DISPLAY= cargo test --release -p brain-gpt --test bench_train_p40 -- --ignored --nocapture
 //! ```
-//! The backward is ~2/3 of a training step and ran entirely on the naive GEMMs
-//! (~0.5% of peak). This measures the whole-step effect and checks the tiled
+//! The backward is ~2/3 of a training step and ran entirely on the naive GEMMs,
+//! at a tiny fraction of peak. This measures the whole-step effect and checks the tiled
 //! backward produces the same gradients.
 
 use std::time::Instant;

@@ -22,10 +22,10 @@
 //! FD-gradchecked reference math — correct, deterministic, and CPU-parallel
 //! only through `model::hostmath::matvec_par`. That makes it practical for
 //! small latent grids and short adapter runs, but a full klein-4B step is
-//! minutes of host time: measured on a 48-core box at 256×256 (512 text + 256
-//! image tokens), one LoRA step = 10.5 s adapter apply + 896.9 s fwd/bwd +
-//! 57.8 s Adam ≈ **16 min/step**, ~40 GB resident (`tests/step_time.rs`, run
-//! `--ignored --release` to re-measure). A device (WGSL-kernel) trainer that
+//! MINUTES of host time: measured on a 48-core box at 256×256 (512 text + 256
+//! image tokens), one LoRA step is overwhelmingly forward/backward, with the
+//! adapter apply and the Adam update small beside it, at ~40 GB resident
+//! (`tests/step_time.rs`, run `--ignored --release` to re-measure). A device (WGSL-kernel) trainer that
 //! replays this exact op sequence on the GPU is the planned follow-up and is
 //! explicitly OUT of scope for this change.
 

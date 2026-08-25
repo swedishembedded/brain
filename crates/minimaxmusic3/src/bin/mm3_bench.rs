@@ -16,7 +16,8 @@
 //! * **Per-kernel DEVICE time, not host-bracketed slices.** Host wall clock
 //!   around a drained slice measures launch + execute + fence, whose floor is
 //!   roughly constant and therefore inflates small kernels in inverse
-//!   proportion to their size - up to 29x measured elsewhere in this tree,
+//!   proportion to their size - by more than an order of magnitude, measured
+//!   elsewhere in this tree,
 //!   enough to invert a ranking. `gpu_core::profile::profile_live` reads
 //!   `Gpu::kernel_times()` instead: real timestamps written inside the
 //!   production passes.

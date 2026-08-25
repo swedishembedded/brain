@@ -315,7 +315,7 @@ impl QwenResident {
         *self.adapter.write().unwrap() = adapter.filter(|a| !a.is_empty());
     }
 
-    /// Default 24576 (12x the old 2048), sized to what int8 KV actually
+    /// Default 24576 (twelve times the old 2048), sized to what int8 KV actually
     /// buys: at real Qwen3-0.6B (`head_dim=128`), the pool + scores/probs
     /// scratch at this `ctx` is ~7.0 GiB measured
     /// (`kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget`) against
@@ -337,10 +337,10 @@ impl QwenResident {
     }
 
     /// Whether the paged engine's KV pool is packed int8 (online per-token
-    /// absmax, ~3.9x smaller pool at Qwen3's head_dim) rather than fp32.
-    /// Default ON: measured on the real Qwen3-0.6B checkpoint (`brain qwen
-    /// eval --kv fp32,int8`) at +0.0154
-    /// loss vs fp32 (token-acc actually slightly HIGHER) -- close enough to
+    /// absmax, close to four times smaller a pool at Qwen3's head_dim) rather
+    /// than fp32. Default ON: measured on the real Qwen3-0.6B checkpoint
+    /// (`brain qwen eval --kv fp32,int8`) at a loss increase in the third
+    /// decimal (token-acc actually slightly HIGHER) -- close enough to
     /// free that the memory win is a clear default. `BRAIN_QWEN_KV_INT8=0`
     /// (also `false`/`off`, case-insensitive, matching `BRAIN_AUTO_FETCH`'s
     /// convention) opts back out to fp32 KV.
@@ -399,8 +399,8 @@ impl QwenResident {
     /// request (or several smaller concurrent ones); `max_batch` simultaneous
     /// near-`ctx`-length requests now correctly queues/rejects via the
     /// scheduler's existing admission control (`RejectReason::
-    /// ExceedsCapacity`) instead of being pre-reserved for at ~17x the memory
-    /// cost for the common case where that never happens.
+    /// ExceedsCapacity`) instead of being pre-reserved for at an order of
+    /// magnitude more memory in the common case where that never happens.
     ///
     /// `max_prefill`: lower than the old fixed 2048 -- `Engine::
     /// from_map_with_gpu`'s scores/probs scratch buffers are sized

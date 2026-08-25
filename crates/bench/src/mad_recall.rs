@@ -36,7 +36,7 @@
 //! `vocab_content=16` (8 keys + 8 values, **chance = 0.125**), `n_pairs=2`,
 //! single query, 8000 sequences, 900 steps, 2-layer / d_model-64 / 4-head GPT.
 //! **Measured recall ≈ 0.51-0.58 across seeds** (train_ce ≈ 0.87), far above
-//! chance and clear of the **0.40** threshold, in ~1 min on CPU (see
+//! chance and clear of the **0.40** threshold, in about a minute on CPU (see
 //! `tests/mad_recall.rs`). Unlike MQAR (which supervises *two* answer tokens per
 //! sequence and reaches ~0.77), this single-query variant trains on only one
 //! answer token per sequence, so the gradient is sparser and accuracy plateaus
@@ -186,7 +186,7 @@ impl Benchmark for MadRecall {
 
 
     fn threshold(&self) -> f32 {
-        // Far above chance (0.125) — and above 3x chance (0.375) — yet below the
+        // Far above chance (0.125), and above three times chance (0.375), yet below the
         // measured ~0.51-0.58 floor across seeds, with margin for the single
         // answer-token-per-sequence gradient's run-to-run variance.
         0.40

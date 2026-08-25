@@ -80,8 +80,8 @@ pub fn set_process_exiting() {
 /// libtest runs tests concurrently in one process, and each GPU test that
 /// builds its own `Gpu` puts another live device on the card. On the NVIDIA
 /// driver this box runs, that shape fails two ways, both measured:
-/// many concurrent devices deadlock (~50% of runs, every thread in futex
-/// wait), and a device *leaked in a static* at process exit segfaults the
+/// many concurrent devices deadlock, in a large fraction of runs, with every
+/// thread in futex wait; and a device *leaked in a static* at process exit segfaults the
 /// driver's worker thread during teardown - after every test has passed.
 ///
 /// So: one parent device per test binary, one handle per kernel set via
@@ -622,8 +622,8 @@ mod native_facade {
         /// This is the ONLY honest source for attributing time BETWEEN kernels.
         /// Host wall-clock around a drained slice measures launch + execute +
         /// fence, whose floor is roughly constant and therefore inflates small
-        /// kernels in inverse proportion to their size - up to 29x measured,
-        /// enough to invert a ranking.
+        /// kernels in inverse proportion to their size - by more than an order
+        /// of magnitude, measured, enough to invert a ranking.
         pub fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
             self.inner.kernel_times()
         }
@@ -818,8 +818,8 @@ mod native_facade {
         /// rather than always the start. See `backend_api::Backend::write_at`
         /// for why this exists: on this engine's non-ReBAR discrete GPUs, one
         /// `write`/`write_f32` call sized to a whole multi-GB tensor leaves a
-        /// same-size wgpu staging allocation permanently resident (measured
-        /// 2.00x, `crates/gpu-core/tests/vram_overhead.rs`). A caller streaming
+        /// same-size wgpu staging allocation permanently resident (measured as
+        /// an exact doubling, `crates/gpu-core/tests/vram_overhead.rs`). A caller streaming
         /// a large upload should chunk through this (or [`Self::write_f32_chunked`])
         /// instead of one `write_f32` for the whole tensor.
         pub fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {

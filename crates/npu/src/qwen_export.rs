@@ -45,7 +45,7 @@ pub fn build_talker_hidden_fp32_bytes(weights_path: &str, seq_len: usize) -> std
 }
 
 /// As [`build_talker_hidden_fp32_bytes`] but weight-only **INT8** (per-output-
-/// channel symmetric, `DequantizeLinear` -> MatMul): ~4x smaller, so the 1.7B
+/// channel symmetric, `DequantizeLinear` -> MatMul): a quarter the bytes, so the 1.7B
 /// Talker fits the NPU and compiles faster.
 pub fn build_talker_hidden_int8_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
     talker_hidden_bytes(weights_path, seq_len, true)
@@ -89,7 +89,7 @@ pub fn export_talker_decode_int8(weights_path: &str, out_path: &str, cap: usize)
     export_talker_decode(weights_path, out_path, cap, crate::qwen_topology::Quant::Int8)
 }
 
-/// INT4 weight-only variant (~8x smaller than fp32; weight-bandwidth-bound decode
+/// INT4 weight-only variant (an eighth of fp32's bytes; weight-bandwidth-bound decode
 /// runs faster and RAM roughly halves vs INT8). Lossier than INT8 — validate quality.
 pub fn export_talker_decode_int4(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
     export_talker_decode(weights_path, out_path, cap, crate::qwen_topology::Quant::Int4)

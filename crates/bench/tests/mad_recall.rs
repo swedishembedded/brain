@@ -5,7 +5,7 @@
 //!
 //! Trains the real `mad_recall` benchmark end-to-end on `BRAIN_DEVICE` and
 //! asserts single-query recall clears its calibrated threshold, well above
-//! chance. Skipped under `MOE_SKIP_GPU_TESTS`. ~1 min on the CPU backend.
+//! chance. Skipped under `MOE_SKIP_GPU_TESTS`. About a minute on the CPU backend.
 
 use bench::mad_recall::MadRecall;
 use bench::Benchmark;

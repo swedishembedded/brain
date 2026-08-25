@@ -38,7 +38,7 @@
 //! `n_keys=32` fixed facts, `vocab_values=16` (**chance = 1/16 = 0.0625**), 6000
 //! sequences, 400 steps, 2-layer / d_model-64 / 4-head GPT. **Measured recall
 //! ≈ 1.00** (the 32-fact table is small and fully memorizable), far clear of the
-//! **0.60** threshold, in ~20 s on CPU (see `tests/mad_memorize.rs`).
+//! **0.60** threshold, in seconds on CPU (see `tests/mad_memorize.rs`).
 
 use std::path::Path;
 

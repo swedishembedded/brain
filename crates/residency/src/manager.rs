@@ -227,7 +227,7 @@ pub struct ResidencyManager {
     /// [`CostAware`] (GDSF: `uses * reload_cost / age`) rather than strict LRU
     /// -- swapping a large model back in costs far more than a small one, and
     /// `brain perf residency` measured `CostAware` beating strict LRU on hit
-    /// rate (54.3% vs 50.0%) under a shifting Zipf load. See `place.rs`'s
+    /// rate under a shifting Zipf load. See `place.rs`'s
     /// module doc for the measurement this generalizes from.
     eviction: Box<dyn EvictionPolicy>,
 }
