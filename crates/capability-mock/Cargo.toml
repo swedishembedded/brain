@@ -1,0 +1,14 @@
+[package]
+name = "brain-capability-mock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A deterministic, weight-free synthetic-content Provider for brain-capability: mirrors any real model's Manifest 1:1 (or builds one from scratch) and generates seeded gradient images/masks, moving-gradient video, sine-tone PCM audio, deterministic text and byte payloads - no GPU, no weights, no external process - so an in-process consumer can exercise the whole capability contract before any real model is linked in."
+
+[lib]
+name = "capability_mock"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+serde_json.workspace = true

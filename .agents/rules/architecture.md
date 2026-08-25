@@ -89,6 +89,16 @@ Six layers. Each may depend only on layers above it.
  ─── 6. serving & front-ends ───────────────────────────────────────────────
    capability     typed ActionSpec manifests - the ONE dispatch shape for CLI
                   (`brain <arch> <verb>`) and the event API alike
+   capability-mock a deterministic, weight-free Provider (gradient images,
+                  moving-gradient video, sine-tone PCM, derived text/bytes) -
+                  mirrors any real Manifest 1:1 or builds one by hand, so an
+                  in-process capability consumer never has to load real
+                  weights to exercise the contract
+   catalog        the served-model catalog: manifest + weight-free provider
+                  ctor for every registered model (~70 crates), in ONE list,
+                  depending on nothing CLI-local; `cli` layers its ~20
+                  CLI-local residency adapters on top (see its own
+                  `catalog.rs` module doc for why that split exists)
    residency      weight tiering GPU/RAM/disk (LRU + budget) + job scheduling
    events/hfsm ──> runtime      JSONL event protocol + event-driven HSM controller
    server         one protocol, three transports: stdio, TCP, unix socket

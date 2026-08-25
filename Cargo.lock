@@ -537,10 +537,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-capability-mock"
+version = "1.0.0"
+dependencies = [
+ "brain-capability",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-capture"
 version = "1.0.0"
 dependencies = [
  "brain-testutil",
+]
+
+[[package]]
+name = "brain-catalog"
+version = "1.0.0"
+dependencies = [
+ "brain-arcface",
+ "brain-capability",
+ "brain-clip",
+ "brain-codeformer",
+ "brain-controlnet",
+ "brain-cosyvoice",
+ "brain-deepseek2ocr",
+ "brain-fastvlm",
+ "brain-flux1",
+ "brain-flux2",
+ "brain-glmdsa",
+ "brain-imgpipe",
+ "brain-lfm2",
+ "brain-ltxv",
+ "brain-minimaxmusic3",
+ "brain-moondream3",
+ "brain-nemotronasr",
+ "brain-pulid",
+ "brain-qwen3",
+ "brain-qwen35",
+ "brain-qwen35moe",
+ "brain-qwen3asr",
+ "brain-qwen3tts",
+ "brain-qwen3vl",
+ "brain-residency",
+ "brain-rrdbnet",
+ "brain-s3dit",
+ "brain-sam2",
+ "brain-scrfd",
+ "brain-sdxlunet",
+ "brain-t5encoder",
+ "brain-vqgan",
+ "brain-wan",
+ "brain-yolov8",
+ "brain-zipdepth",
 ]
 
 [[package]]
@@ -587,6 +636,7 @@ dependencies = [
  "brain-bench",
  "brain-capability",
  "brain-capture",
+ "brain-catalog",
  "brain-checkpoint",
  "brain-chronos2",
  "brain-clip",
@@ -635,7 +685,6 @@ dependencies = [
  "brain-qwen3asr",
  "brain-qwen3omnimoe",
  "brain-qwen3tts",
- "brain-qwen3vl",
  "brain-residency",
  "brain-rl",
  "brain-rrdbnet",

@@ -804,6 +804,8 @@ front-end to depend on.
 | Qwen3.8-27B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35/src/{caps,serve}.rs`, `crates/cli/src/{qwen35_cli,resident_qwen35}.rs` |
 | Model residency / job scheduling | `crates/residency/src/{manager,scheduler,executor,budget,lru,place}.rs` |
 | Capability manifests + generic dispatch (`brain caps` / `brain <arch> <verb>`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
+| Deterministic weight-free mock `Provider` (synthetic image/mask/video/audio/text/bytes, for a `capability::Provider` consumer that must not load real weights) | `crates/capability-mock/src/lib.rs` |
+| Served-model catalog (manifest + weight-free provider ctor per model, ~70 crates, in ONE list, no CLI dependency) | `crates/catalog/src/lib.rs`; the CLI-local residency-adapter extension over it lives in `crates/cli/src/catalog.rs` |
 | JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
 | D-Bus control surface | `crates/dbus`, `examples/dbus` |
 | **Stats snapshot / braintop contract** (add a metric, data-driven sections) | `crates/stats/src/{snapshot,source,build}.rs`; D-Bus `StatsSnapshot`/`StatsStream` in `crates/dbus/src/service.rs`; `Executor::residency` in `crates/residency/src/{executor,manager}.rs` |

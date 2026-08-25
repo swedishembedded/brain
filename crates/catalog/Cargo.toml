@@ -1,0 +1,47 @@
+[package]
+name = "brain-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The served-model catalog: one entry per model (manifest + provider constructor) in one place, so `brain caps`/`brain do`, the D-Bus/HTTP surfaces and any other in-process consumer discover and construct the ~70 registered model crates from a SINGLE list instead of drifting hand-maintained copies."
+
+[lib]
+name = "catalog"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-residency.workspace = true
+brain-s3dit.workspace = true
+brain-flux2.workspace = true
+brain-wan.workspace = true
+brain-ltxv.workspace = true
+brain-qwen3.workspace = true
+brain-glmdsa.workspace = true
+brain-qwen35moe.workspace = true
+brain-qwen35.workspace = true
+brain-lfm2.workspace = true
+brain-fastvlm.workspace = true
+brain-qwen3vl.workspace = true
+brain-yolov8.workspace = true
+brain-zipdepth.workspace = true
+brain-sam2.workspace = true
+brain-scrfd.workspace = true
+brain-arcface.workspace = true
+brain-vqgan.workspace = true
+brain-codeformer.workspace = true
+brain-rrdbnet.workspace = true
+brain-clip.workspace = true
+brain-t5encoder.workspace = true
+brain-sdxlunet.workspace = true
+brain-controlnet.workspace = true
+brain-flux1.workspace = true
+brain-pulid.workspace = true
+brain-deepseek2ocr.workspace = true
+brain-moondream3.workspace = true
+brain-imgpipe.workspace = true
+brain-qwen3tts.workspace = true
+brain-minimaxmusic3.workspace = true
+brain-cosyvoice.workspace = true
+brain-nemotronasr.workspace = true
+brain-qwen3asr.workspace = true

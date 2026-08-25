@@ -38,7 +38,6 @@ brain-qwen3.workspace = true
 brain-rl.workspace = true
 brain-qwen35moe.workspace = true
 brain-qwen35.workspace = true
-brain-qwen3vl.workspace = true
 brain-fastvlm.workspace = true
 # `catalog`/`resident_moondream3` - Moondream 3's caps surface and residency adapter.
 brain-moondream3.workspace = true
@@ -77,6 +76,10 @@ brain-bench.workspace = true
 brain-perf.workspace = true
 brain-checkpoint.workspace = true
 brain-capability.workspace = true
+# The served-model catalog (manifest + provider ctor per model, ~70 crates) -
+# `catalog.rs` is a thin CLI-local extension over this (patches back the
+# residency adapters that must stay CLI-local, see that file's module doc).
+brain-catalog.workspace = true
 # `--trace-<family>`/`--trace-format`/`--trace-output`: the family registry and
 # the ONE global `tracing_subscriber` install. Only this binary installs one;
 # every library crate emits through the plain `tracing` facade.

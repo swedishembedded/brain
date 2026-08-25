@@ -75,6 +75,8 @@ default-members = [
     "crates/modelref",
     "crates/modelstore",
     "crates/capability",
+    "crates/capability-mock",
+    "crates/catalog",
     "crates/events",
     "crates/hfsm",
     "crates/wm-core",
@@ -196,6 +198,8 @@ brain-testutil = { path = "crates/testutil" }
 brain-modelref = { path = "crates/modelref" }
 brain-modelstore = { path = "crates/modelstore" }
 brain-capability = { path = "crates/capability" }
+brain-capability-mock = { path = "crates/capability-mock" }
+brain-catalog = { path = "crates/catalog" }
 brain-memauth = { path = "crates/memauth" }
 brain-weightset = { path = "crates/weightset" }
 brain-residency = { path = "crates/residency" }
