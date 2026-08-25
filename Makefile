@@ -1088,7 +1088,9 @@ PARITY_STRICT_SUITES ?= \
         brain-rrdbnet:parity \
         brain-wan:dit_parity,vae_parity \
         brain-ltxv:vae_parity,audio_parity,upsampler_parity,duration_head_parity,na_decoder_parity \
-        brain-gemma4:parity
+        brain-gemma4:parity \
+        brain-mimi:decode,encode \
+        brain-ecapatdnn:encoder
 
 parity/strict:
 	@fail=0; \
