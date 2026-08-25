@@ -748,6 +748,8 @@ pub const ROPE_NEOX: &str = include_str!("../wgsl/rope_neox.wgsl");
 pub const ROPE_PAGED: &str = include_str!("../wgsl/rope_paged.wgsl");
 /// `wgsl/rope_partial.wgsl`
 pub const ROPE_PARTIAL: &str = include_str!("../wgsl/rope_partial.wgsl");
+/// `wgsl/rope_partial_at.wgsl`
+pub const ROPE_PARTIAL_AT: &str = include_str!("../wgsl/rope_partial_at.wgsl");
 /// `wgsl/rope_partial_bwd.wgsl`
 pub const ROPE_PARTIAL_BWD: &str = include_str!("../wgsl/rope_partial_bwd.wgsl");
 /// `wgsl/rope_sub.wgsl`
@@ -1245,6 +1247,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rope_neox", ROPE_NEOX),
     ("rope_paged", ROPE_PAGED),
     ("rope_partial", ROPE_PARTIAL),
+    ("rope_partial_at", ROPE_PARTIAL_AT),
     ("rope_partial_bwd", ROPE_PARTIAL_BWD),
     ("rope_sub", ROPE_SUB),
     ("rope_train", ROPE_TRAIN),

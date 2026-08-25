@@ -282,6 +282,51 @@ impl MoondreamModel {
         Ok(out)
     }
 
+    /// [`Self::generate`] with a KV CACHE: one batched prefill over the prompt,
+    /// then `O(pos)` incremental steps instead of a full `O(T²)` recompute per
+    /// token.
+    ///
+    /// Produces the SAME ids as [`Self::generate`] - pinned by
+    /// `kv_decode_matches_the_recompute_path_token_for_token`, which is the only
+    /// thing that makes an incremental path safe to prefer: the two share no
+    /// code, so agreement is evidence rather than tautology.
+    ///
+    /// The prefill is what keeps the image prefix BIDIRECTIONAL. Decode steps
+    /// are causal-only by construction (they read cache rows `0..=pos`), which
+    /// is correct for generated tokens and would be wrong for the prefix - so
+    /// the prefix's K/V come from the masked batched pass, once.
+    pub fn generate_kv(&self, prompt: &[u32], img_embeds: &[f32], max_new: usize, eos: Option<u32>) -> Result<Vec<u32>, String> {
+        let t = self.seq_len as usize;
+        if prompt.len() >= t {
+            return Err(format!("moondream3: prompt is {} tokens but the graph was built for seq_len {t}", prompt.len()));
+        }
+        let c = &self.cfg;
+        let caches = self.dec.new_kv_caches(&self.dgpu, c.n_heads, c.head_dim, c.ff_dim);
+        let mut padded = prompt.to_vec();
+        let pad = prompt.last().copied().unwrap_or(0);
+        padded.resize(t, pad);
+
+        let mut hidden = self.dec.prefill(&self.dgpu, &padded, img_embeds, &caches, prompt.len() as u32);
+        let mut out = Vec::new();
+        let mut pos = prompt.len() as u32;
+        while out.len() < max_new && (pos as usize) < t {
+            let logits = self.dec.head(&self.dgpu, &hidden);
+            let next = logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i as u32)
+                .ok_or("moondream3: empty logits row")?;
+            if Some(next) == eos {
+                break;
+            }
+            out.push(next);
+            hidden = self.dec.decode_step(&self.dgpu, &caches, next, pos);
+            pos += 1;
+        }
+        Ok(out)
+    }
+
     /// The `[seq_len, vocab]` logits for `tokens` with `img_embeds` spliced at rows
     /// `[1, 1+n_img)`. `tokens` must be exactly `seq_len` long (pad past the real
     /// content; see [`Self::generate`] for why the padding cannot affect the row
@@ -516,6 +561,60 @@ mod tests {
         let free = model.generate(&prompt, &embeds, 3, None).expect("generate runs");
         let stopped = model.generate(&prompt, &embeds, 3, Some(free[0])).expect("generate runs");
         assert!(stopped.is_empty(), "eos on the first sampled id must yield no output, got {stopped:?}");
+    }
+
+    /// THE GATE FOR THE KV PATH: incremental decode must produce exactly what
+    /// the `O(T²)` recompute produces.
+    ///
+    /// This is the only check that makes preferring the fast path safe. The two
+    /// share no code below `generate`: the recompute path re-runs the whole
+    /// masked batched graph per token, while the KV path prefills once and then
+    /// takes a single-row step with `rope_partial_at`, a cache-attending
+    /// `gqa_decode_step` and NO mask kernel. Every one of those substitutions
+    /// runs and returns plausible ids when wrong - rotating the new row at
+    /// position 0 instead of `pos`, folding `tau_pos` at the wrong index,
+    /// seeding the cache from the pre-RoPE `qkv` instead of the post-RoPE one.
+    /// Token-for-token agreement catches all of them; nothing weaker does.
+    #[test]
+    fn kv_decode_matches_the_recompute_path_token_for_token() {
+        let (cfg, vw, cw, dw) = tiny(32, 32, true, 41);
+        let vision = cfg.vision.clone();
+        let ppc = vision.patches_per_crop();
+        let seq_len = 1 + ppc + 10;
+        let mut rng = Rng::new(410);
+        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+
+        let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
+        let embeds = model.image_embeds(&packed);
+        let mut prompt = vec![0u32];
+        prompt.extend(std::iter::repeat_n(5u32, ppc as usize));
+        prompt.extend([7u32, 9]);
+
+        let slow = model.generate(&prompt, &embeds, 5, None).expect("recompute path");
+        let fast = model.generate_kv(&prompt, &embeds, 5, None).expect("kv path");
+        assert_eq!(slow, fast, "the KV path must reproduce the recompute path exactly");
+        assert_eq!(slow.len(), 5, "the comparison would be vacuous on an empty run");
+    }
+
+    /// The same agreement with tau OFF, so a defect in the tau fold cannot be
+    /// what makes the two paths agree.
+    #[test]
+    fn kv_decode_matches_the_recompute_path_without_tau() {
+        let (cfg, vw, cw, dw) = tiny(32, 32, false, 43);
+        let vision = cfg.vision.clone();
+        let ppc = vision.patches_per_crop();
+        let seq_len = 1 + ppc + 8;
+        let mut rng = Rng::new(430);
+        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
+        let embeds = model.image_embeds(&packed);
+        let mut prompt = vec![0u32];
+        prompt.extend(std::iter::repeat_n(5u32, ppc as usize));
+        prompt.push(7);
+        assert_eq!(
+            model.generate(&prompt, &embeds, 4, None).unwrap(),
+            model.generate_kv(&prompt, &embeds, 4, None).unwrap()
+        );
     }
 
     /// A prompt that does not fit the built graph is a named error, not a panic

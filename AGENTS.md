@@ -468,9 +468,10 @@ fast and scalable kernel - not a naive one.
     (~43 GiB); `Precision::Int8` quantizes the 1280 expert tensors
     (`MoeFfn8` over `moe_linear_gated_i8`) and puts all 24 blocks on ONE shared
     `BlockScratch`, together ~8.8 GiB. Precision is part of the instance key,
-    so the two are separately budgeted. *(Decode is `O(T²)` - no KV cache, so
-    every token re-runs 24 layers over a 730-row image prefix; `run_batch` is
-    the serial default; region/point/detect heads recognized but not built; CPU
+    so the two are separately budgeted. *(Decode IS KV-cached
+    (`generate_kv`: one masked batched prefill seeds every layer's cache, then
+    `O(pos)` steps), gated token-for-token against the `O(T²)` recompute path;
+    `run_batch` is the serial default; region/point/detect heads recognized but not built; CPU
     placement is a declaration, not a pin - nothing has run this on an
     accelerator. No real-weight run exists in this workspace, so the composed
     path is gated by checkpoint-free tests through the production loader.)*

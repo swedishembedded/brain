@@ -59,7 +59,25 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8), // 41
         ("max_abs_row", kernels::MAX_ABS_ROW),           // 42 (activation scale)
         ("quant_pack", kernels::QUANT_PACK),             // 43 (activation pack)
+        // --- incremental decode tier (inference only; see `KvCache`) ---
+        ("kv_append", kernels::KV_APPEND),               // 44
+        ("attn_decode_scores", kernels::ATTN_DECODE_SCORES), // 45
+        ("decode_softmax", kernels::DECODE_SOFTMAX),     // 46
+        ("attn_decode_apply", kernels::ATTN_DECODE_APPLY), // 47
+        ("rope_partial_at", kernels::ROPE_PARTIAL_AT),   // 48 (partial RoPE at an explicit pos)
     ]
+}
+
+/// `model::block::GqaDecodeIds` over this crate's slots. Moondream's attention
+/// is full MHA, so `n_kv_heads == n_heads` and the shared GQA decode primitive
+/// runs at `group = 1` - which is plain MHA, not an approximation of it.
+/// `rope_partial_at`: partial RoPE at an EXPLICIT position - what a single
+/// decode row needs, since `rope_partial` derives its position from the row
+/// index and a one-row call is therefore always position 0.
+const K_ROPE_PARTIAL_AT: usize = 48;
+
+fn decode_ids() -> model::block::GqaDecodeIds {
+    model::block::GqaDecodeIds { kv_append: 44, attn_decode_scores: 45, decode_softmax: 46, attn_decode_apply: 47 }
 }
 
 /// `moe_linear_gated_i8`: one expert linear over int8 weights and dynamically
@@ -234,6 +252,91 @@ impl MoondreamDecoder {
         g.read(&self.logits, (t * v) as usize)
     }
 
+    /// Allocate one [`KvCache`] per layer, sized for the built context.
+    pub fn new_kv_caches(&self, g: &Gpu, n_heads: u32, head_dim: u32, ff: u32) -> Vec<KvCache> {
+        (0..self.blocks.len()).map(|_| KvCache::new(g, self.t, self.d, n_heads, head_dim, ff)).collect()
+    }
+
+    /// Prefill: one batched masked forward over `tokens[..n]`, seeding every
+    /// layer's cache, and returning the hidden state of row `n - 1`.
+    ///
+    /// The batched pass is what makes the image prefix BIDIRECTIONAL - the
+    /// decode steps that follow are causal-only and could not produce it. The
+    /// cost is one `O(n²)` forward, paid once, instead of one per token.
+    pub fn prefill(&self, g: &Gpu, tokens: &[u32], image_embeds: &[f32], caches: &[KvCache], n: u32) -> Vec<f32> {
+        let (t, d) = (self.t, self.d);
+        assert_eq!(caches.len(), self.blocks.len(), "one cache per layer");
+        assert!(n <= t, "prefill: {n} rows exceeds the built context {t}");
+        g.write(&self.tokens, tokens);
+        let img = g.storage_init("md.img", image_embeds);
+        let mut steps = vec![g.step(13, &[&self.tokens, self.wb("tok.weight"), &self.res], &[d, t], t * d)];
+        if self.n_img > 0 {
+            steps.push(g.step(14, &[&img, &self.res], &[self.n_img * d, d], self.n_img * d));
+        }
+        g.submit(&[], &steps);
+
+        let mut cur: &DeviceBuffer = &self.res;
+        for (i, b) in self.blocks.iter().enumerate() {
+            cur = match &self.shared {
+                Some(sc) => {
+                    let out = b.forward_on(g, sc, cur);
+                    b.fill_kv(g, sc, &caches[i], n);
+                    out
+                }
+                None => {
+                    let out = b.forward(g, cur);
+                    b.fill_kv(g, b.own.as_ref().expect("owned scratch"), &caches[i], n);
+                    out
+                }
+            };
+        }
+        // The last prompt row's hidden state is what the first decode step
+        // continues from.
+        let all = g.read(cur, (t * d) as usize);
+        all[((n - 1) * d) as usize..(n * d) as usize].to_vec()
+    }
+
+    /// Project one hidden row through post-LN and the LM head.
+    pub fn head(&self, g: &Gpu, hidden: &[f32]) -> Vec<f32> {
+        let (d, v) = (self.d, self.vocab);
+        let x = g.storage_init("md.head_in", hidden);
+        let normed = g.storage(d as u64);
+        let logits = g.storage(v as u64);
+        g.submit(
+            &[],
+            &[
+                g.step(4, &[&x, self.wb("post_ln.weight"), self.wb("post_ln.bias"), &normed], &[d, 1, f(LN_EPS)], 1),
+                g.step(0, &[&normed, self.wb("lm_head.weight"), &logits], &[1, d, v], v),
+                g.step(6, &[&logits, self.wb("lm_head.bias")], &[1, v], v),
+            ],
+        );
+        g.read(&logits, v as usize)
+    }
+
+    /// One incremental decode step across every layer: a token embedding in, the
+    /// next hidden row out. `pos` is the new token's absolute position.
+    pub fn decode_step(&self, g: &Gpu, caches: &[KvCache], token: u32, pos: u32) -> Vec<f32> {
+        let d = self.d;
+        let row = g.storage(d as u64);
+        // `embed`'s token buffer is `array<u32>` - RAW ids, not f32 bits. Writing
+        // it with `storage_init` (which stores f32) makes the gather index
+        // garbage and reads off the end of the embedding table.
+        let tok = g.storage(1);
+        g.write(&tok, &[token]);
+        g.submit(&[], &[g.step(13, &[&tok, self.wb("tok.weight"), &row], &[d, 1], d)]);
+        let mut cur = row;
+        for (i, b) in self.blocks.iter().enumerate() {
+            let out = b.decode_step(g, &caches[i], &cur, pos);
+            // `out` belongs to the layer's own cache scratch and the next layer
+            // overwrites its own, so copying between layers is not needed - but
+            // the buffer IS reused by this layer on the next token, so the value
+            // must be carried forward now.
+            let host = g.read(out, d as usize);
+            cur = g.storage_init("md.step", &host);
+        }
+        g.read(&cur, d as usize)
+    }
+
     /// Decoder backward (dense blocks): from the cached forward (call `forward`
     /// first), fill every grad in `gr`. Chain: CE → lm_head → post-LN → blocks in
     /// reverse (each `MoondreamBlock::backward`, threading the residual-stream grad)
@@ -389,6 +492,91 @@ impl BlockScratch {
             l_mlp: gpu.storage((t * d) as u64),
             mid: gpu.storage((t * d) as u64),
         }
+    }
+}
+
+/// One decoder layer's persistent K/V cache, plus the single-row scratch an
+/// incremental step needs.
+///
+/// # Why the prefix-LM mask does not appear here
+///
+/// The batched forward masks with `allow(i, j) = (i < P && j < P) || (j <= i)`:
+/// the `P` bos+image rows are bidirectional, everything after is causal. A
+/// DECODE row is always at `pos >= P`, so its own mask row is purely causal -
+/// and `model::block::gqa_decode_step` reads cache rows `0..=pos` and no
+/// others, because no later rows exist yet. The causality is structural rather
+/// than applied, which is why no mask kernel is dispatched on this path.
+///
+/// The bidirectional prefix is still honoured: it is baked into the cached
+/// K/V, which the PROMPT's batched forward produced under the full mask.
+pub struct KvCache {
+    /// `[cap, n_heads·head_dim]` each.
+    k: DeviceBuffer,
+    v: DeviceBuffer,
+    /// `[n_heads, cap]` decode scores/probs.
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    /// Single-row working buffers: `[1, d]`, `[1, 3d]`, `[1, n_heads]`.
+    x1: DeviceBuffer,
+    l_in: DeviceBuffer,
+    qkv: DeviceBuffer,
+    qkv2: DeviceBuffer,
+    tok_feat: DeviceBuffer,
+    tqr: DeviceBuffer,
+    tvr: DeviceBuffer,
+    s3: DeviceBuffer,
+    q: DeviceBuffer,
+    k_new: DeviceBuffer,
+    v_new: DeviceBuffer,
+    ctx: DeviceBuffer,
+    l_attn: DeviceBuffer,
+    h: DeviceBuffer,
+    h2: DeviceBuffer,
+    l_mlp: DeviceBuffer,
+    out: DeviceBuffer,
+    cap: u32,
+}
+
+impl KvCache {
+    /// Sized for a whole generation: `cap` is the maximum sequence length
+    /// (prompt + generated), which is the built context.
+    pub fn new(gpu: &Gpu, cap: u32, d: u32, n_heads: u32, head_dim: u32, ff: u32) -> KvCache {
+        let hk = n_heads * head_dim;
+        KvCache {
+            k: gpu.storage((cap * hk) as u64),
+            v: gpu.storage((cap * hk) as u64),
+            scores: gpu.storage((n_heads * cap) as u64),
+            probs: gpu.storage((n_heads * cap) as u64),
+            x1: gpu.storage(d as u64),
+            l_in: gpu.storage(d as u64),
+            qkv: gpu.storage((3 * d) as u64),
+            qkv2: gpu.storage((3 * d) as u64),
+            tok_feat: gpu.storage((3 * d) as u64),
+            tqr: gpu.storage(n_heads as u64),
+            tvr: gpu.storage(n_heads as u64),
+            s3: gpu.storage((3 * n_heads) as u64),
+            q: gpu.storage(hk as u64),
+            k_new: gpu.storage(hk as u64),
+            v_new: gpu.storage(hk as u64),
+            ctx: gpu.storage(hk as u64),
+            l_attn: gpu.storage(d as u64),
+            h: gpu.storage(ff as u64),
+            h2: gpu.storage(ff as u64),
+            l_mlp: gpu.storage(d as u64),
+            out: gpu.storage(d as u64),
+            cap,
+        }
+    }
+
+    /// This layer's cached-K buffer, for the prompt-time bulk fill.
+    pub fn k(&self) -> &DeviceBuffer {
+        &self.k
+    }
+    pub fn v(&self) -> &DeviceBuffer {
+        &self.v
+    }
+    pub fn cap(&self) -> u32 {
+        self.cap
     }
 }
 
@@ -599,6 +787,148 @@ impl MoondreamBlock {
     /// backward reuses the ViT `_cross` kernels: the cached `probs` already carry the
     /// prefix mask (masked positions have prob≈0 → contribute 0). d_x_in = d_out
     /// (the 3-way residual's identity path) + the LayerNorm input grad.
+    /// Copy this block's post-tau, post-RoPE K and V for the first `n` prompt
+    /// rows out of the batched forward's scratch and into `kv`.
+    ///
+    /// Must be called immediately after this block's `forward_on`, and BEFORE
+    /// the next block runs: on the shared-scratch path every block writes the
+    /// same `qkv` buffer, so afterwards only the last block's survives. That is
+    /// the whole reason prefill interleaves the copy with the forward instead
+    /// of doing one pass at the end.
+    ///
+    /// The copy goes through the host because the source is STRIDED - the
+    /// batched buffer is `[t, 3d]` rows and the cache wants a contiguous
+    /// `[cap, d]` - so `kv_cache_fill`'s flat prefix copy does not apply. It is
+    /// once per request, not per token, against a forward that just ran 24 MoE
+    /// layers over the same rows.
+    pub fn fill_kv(&self, g: &Gpu, sc: &BlockScratch, kv: &KvCache, n: u32) {
+        let d = self.d as usize;
+        let src = if self.tau { &sc.qkv2 } else { &sc.qkv };
+        let rows = g.read(src, (n as usize) * 3 * d);
+        let mut kbuf = Vec::with_capacity(n as usize * d);
+        let mut vbuf = Vec::with_capacity(n as usize * d);
+        for r in 0..n as usize {
+            kbuf.extend_from_slice(&rows[r * 3 * d + d..r * 3 * d + 2 * d]);
+            vbuf.extend_from_slice(&rows[r * 3 * d + 2 * d..(r + 1) * 3 * d]);
+        }
+        g.write_f32(&kv.k, &kbuf);
+        g.write_f32(&kv.v, &vbuf);
+    }
+
+    /// ONE incremental decode step: a single row `x_row` at absolute position
+    /// `pos`, attending over this layer's KV cache.
+    ///
+    /// `O(pos)` per token instead of the batched forward's `O(pos²)` over the
+    /// whole grown sequence - the same recompute/incremental pair `crates/gpt2`,
+    /// `crates/qwen3` and `crates/deepseek2` each keep.
+    ///
+    /// The three things that differ from the batched path, and why:
+    ///
+    /// * **No mask.** A decode row is at `pos >= prefix_attn`, so its mask row
+    ///   is purely causal, and `gqa_decode_step` reads cache rows `0..=pos` and
+    ///   no others. The bidirectional image prefix is still honoured - it is
+    ///   baked into the K/V the PROMPT's masked forward produced.
+    /// * **`rope_partial_at`, not `rope_partial`.** The latter takes its
+    ///   position from the row index, so a one-row call is always position 0.
+    /// * **The tau scale is computed for this row alone**, from this row's own
+    ///   `tok_feat`, with `tau_pos` folded on the host at `pos` - the batched
+    ///   path does the same per row, just `t` of them at once.
+    pub fn decode_step<'a>(&self, g: &Gpu, kv: &'a KvCache, x_row: &DeviceBuffer, pos: u32) -> &'a DeviceBuffer {
+        let (d, nh, hd, ff) = (self.d, self.n_heads, self.head_dim, self.ff);
+        let stride3 = 3 * d;
+        let mut s: Vec<Step> = Vec::new();
+
+        s.push(g.step(4, &[x_row, self.wb("ln.weight"), self.wb("ln.bias"), &kv.l_in], &[d, 1, f(LN_EPS)], 1));
+        s.push(g.step(0, &[&kv.l_in, self.wb("attn.qkv.weight"), &kv.qkv], &[1, d, stride3], stride3));
+        if self.qkv_bias {
+            s.push(g.step(6, &[&kv.qkv, self.wb("attn.qkv.bias")], &[1, stride3], stride3));
+        }
+        let qkv = if self.tau {
+            s.push(g.step(16, &[&kv.qkv, &kv.tok_feat], &[stride3], stride3));
+            s.push(g.step(0, &[&kv.tok_feat, self.wb("attn.tau.wq"), &kv.tqr], &[1, stride3, nh], nh));
+            s.push(g.step(0, &[&kv.tok_feat, self.wb("attn.tau.wv"), &kv.tvr], &[1, stride3, nh], nh));
+            g.submit(&[], &s);
+            s = Vec::new();
+            let tqr = g.read(&kv.tqr, nh as usize);
+            let tvr = g.read(&kv.tvr, nh as usize);
+            let alpha = g.read(self.wb("attn.tau.alpha"), nh as usize);
+            // `tau_pos` uses the ABSOLUTE position, matching the batched path's
+            // `row + 1` at row = pos.
+            let mut s3 = vec![1.0f32; (3 * nh) as usize];
+            for h in 0..nh as usize {
+                let tau_pos = 0.5 + sigmoid(alpha[h] * ((pos + 1) as f32).ln());
+                s3[h] = tqr[h].tanh() + tau_pos;
+                s3[2 * nh as usize + h] = tvr[h].tanh() + tau_pos;
+            }
+            g.write(&kv.s3, &s3.iter().map(|&x| f(x)).collect::<Vec<u32>>());
+            s.push(g.step(17, &[&kv.qkv, &kv.s3, &kv.qkv2], &[1, 3 * nh, hd], stride3));
+            &kv.qkv2
+        } else {
+            &kv.qkv
+        };
+        // Partial RoPE at the ABSOLUTE position, on q (offset 0) and k (offset d).
+        let half = self.rot_dim / 2;
+        s.push(g.step(K_ROPE_PARTIAL_AT, &[qkv], &[1, nh, hd, stride3, 0, pos, f(self.theta), self.rot_dim], nh * half));
+        s.push(g.step(K_ROPE_PARTIAL_AT, &[qkv], &[1, nh, hd, stride3, d, pos, f(self.theta), self.rot_dim], nh * half));
+        g.submit(&[], &s);
+
+        // Split the fused row into the three contiguous buffers the shared
+        // decode primitive binds. `slice_copy`'s job, done with `splice`-free
+        // reads because these are one-row copies.
+        let row = g.read(qkv, stride3 as usize);
+        g.write_f32(&kv.q, &row[..d as usize]);
+        g.write_f32(&kv.k_new, &row[d as usize..2 * d as usize]);
+        g.write_f32(&kv.v_new, &row[2 * d as usize..]);
+
+        let steps = model::block::gqa_decode_step(
+            g,
+            &decode_ids(),
+            nh,
+            nh, // full MHA: n_kv_heads == n_heads, so the shared GQA primitive runs at group = 1
+            hd,
+            pos,
+            kv.cap,
+            &kv.q,
+            &kv.k_new,
+            &kv.v_new,
+            &kv.k,
+            &kv.v,
+            &kv.scores,
+            &kv.probs,
+            &kv.ctx,
+        );
+        g.submit(&[], &steps);
+
+        let mut s: Vec<Step> = vec![
+            g.step(0, &[&kv.ctx, self.wb("attn.proj.weight"), &kv.l_attn], &[1, d, d], d),
+            g.step(6, &[&kv.l_attn, self.wb("attn.proj.bias")], &[1, d], d),
+        ];
+        g.submit(&[], &s);
+
+        // FFN on the SAME l_in, one row.
+        let l_mlp: &DeviceBuffer = if let Some(moe) = &self.moe {
+            moe.forward_rows(g, &kv.l_in, 1)
+        } else if let Some(moe) = &self.moe8 {
+            moe.forward_rows(g, &kv.l_in, 1)
+        } else {
+            s = vec![
+                g.step(0, &[&kv.l_in, self.wb("mlp.fc1.weight"), &kv.h], &[1, d, ff], ff),
+                g.step(6, &[&kv.h, self.wb("mlp.fc1.bias")], &[1, ff], ff),
+                g.step(5, &[&kv.h, &kv.h2], &[ff], ff),
+                g.step(0, &[&kv.h2, self.wb("mlp.fc2.weight"), &kv.l_mlp], &[1, ff, d], d),
+                g.step(6, &[&kv.l_mlp, self.wb("mlp.fc2.bias")], &[1, d], d),
+            ];
+            g.submit(&[], &s);
+            &kv.l_mlp
+        };
+        // 3-way residual, as the batched path.
+        g.submit(
+            &[],
+            &[g.step(7, &[x_row, &kv.l_attn, &kv.x1], &[d], d), g.step(7, &[&kv.x1, l_mlp, &kv.out], &[d], d)],
+        );
+        &kv.out
+    }
+
     pub fn backward(&self, g: &Gpu, x: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoondreamBlockGrads, d_x_in: &DeviceBuffer) {
         // An int8 block has no fp32 expert weights to recompute from, and the
         // dense-FFN arm below would happily run and produce a gradient for an
@@ -899,7 +1229,20 @@ impl MoeFfn8 {
 
     /// The mixed expert output `[t, d]`. Same contract as [`MoeFfn::forward`].
     pub fn forward(&self, g: &Gpu, xn: &DeviceBuffer) -> &DeviceBuffer {
-        let (t, d, inner, e) = (self.t, self.d, self.inner, self.e);
+        self.forward_rows(g, xn, self.t)
+    }
+
+    /// [`Self::forward`] over the FIRST `rows` rows only - what an incremental
+    /// decode step needs (`rows = 1`).
+    ///
+    /// The scratch stays sized for the built `t`; every kernel here takes the
+    /// row count as its `m` parameter, so a short run simply touches the first
+    /// `rows` rows of buffers that are larger than it needs. Sizing a second
+    /// set for decode would mean a second copy of the expert weights, which is
+    /// the one thing this tier exists to avoid.
+    pub fn forward_rows(&self, g: &Gpu, xn: &DeviceBuffer, rows: u32) -> &DeviceBuffer {
+        let (t, d, inner, e) = (rows, self.d, self.inner, self.e);
+        assert!(rows <= self.t, "MoeFfn8: {rows} rows exceeds the built context {}", self.t);
         let mut s: Vec<Step> = Vec::new();
         // Router in fp32, exactly as the fp32 tier does it.
         s.push(g.step(0, &[xn, &self.router, &self.logits], &[t, d, e], t * e));
@@ -994,7 +1337,14 @@ impl MoeFfn {
         self.w.get(n).unwrap_or_else(|| panic!("moe weight missing: {n}"))
     }
     pub fn forward(&self, g: &Gpu, xn: &DeviceBuffer) -> &DeviceBuffer {
-        let (t, d, inner, e) = (self.t, self.d, self.inner, self.e);
+        self.forward_rows(g, xn, self.t)
+    }
+
+    /// [`Self::forward`] over the FIRST `rows` rows only - see
+    /// [`MoeFfn8::forward_rows`] for why the scratch stays full-sized.
+    pub fn forward_rows(&self, g: &Gpu, xn: &DeviceBuffer, rows: u32) -> &DeviceBuffer {
+        let (t, d, inner, e) = (rows, self.d, self.inner, self.e);
+        assert!(rows <= self.t, "MoeFfn: {rows} rows exceeds the built context {}", self.t);
         let mut s: Vec<Step> = Vec::new();
         // Router: logits = xn·router.weight^T, then top-k softmax gate.
         s.push(g.step(0, &[xn, self.wb("router.weight"), &self.logits], &[t, d, e], t * e));

@@ -159,9 +159,36 @@ blocker; the pieces a `caps.rs` would have to call did not exist.
 
 ### Remaining
 
-- [ ] A KV-cached decode path, to make `generate` `O(1)` per token rather than
-      re-running 24 layers over a 730-row image prefix per token. This is the
-      single biggest usability gap now that the model loads.
+- [x] A KV-cached decode path (`MoondreamModel::generate_kv`). The prompt pays
+      ONE batched masked forward that also seeds every layer's `KvCache`; each
+      token after that is `MoondreamDecoder::decode_step`, `O(pos)` rather than
+      a full `O(T²)` recompute.
+
+      Three things it had to get right, each of which runs and returns
+      plausible ids when wrong:
+      * **The prefill must stay masked.** Decode steps are causal by
+        construction (`gqa_decode_step` reads cache rows `0..=pos` and no
+        others), which is correct for generated rows and would silently drop
+        the image prefix's BIDIRECTIONAL attention. So the prefix's K/V come
+        from the batched pass under the full prefix-LM mask, once.
+      * **A new kernel, `rope_partial_at`.** `rope_partial` takes its position
+        from the ROW INDEX, so a one-row call is always position 0 - it cannot
+        express a new token at position 137. `rope_at` is the existing
+        explicit-position twin but rotates the FULL head_dim, where Moondream
+        rotates 32 of 64. This is `rope_partial_at` standing to `rope_partial`
+        exactly as `rope_at` stands to `rope_base`, and its header says so.
+      * **The cache is seeded from the POST-RoPE, POST-tau `qkv`**, extracted
+        per block DURING the forward - on the shared-scratch path every block
+        writes the same buffer, so a single pass at the end would cache the
+        last block's values for all 24 layers.
+
+      Gated by `kv_decode_matches_the_recompute_path_token_for_token` (and a
+      tau-off twin). The two paths share no code below `generate`, so agreement
+      is evidence rather than tautology. A SIGSEGV during bring-up was the
+      `embed` kernel's token buffer being written as f32 bits when it is
+      `array<u32>` - a garbage gather index, not a logic error.
+
+      `caps` now uses it.
 - [ ] Real batching. Each request has its own image, so the ViT pass is
       per-request; the decoder has no batch axis wired. `run_batch` is the
       serial default and says why.

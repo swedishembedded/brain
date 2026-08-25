@@ -26,10 +26,12 @@
 //!
 //! ## What is not
 //!
-//! * **Decode is `O(T²)` per token.** No KV cache: every generated token
-//!   re-runs the whole grown sequence through all 24 layers, over a 730-row
-//!   image prefix. `max_new` defaults low for that reason. This is the same
-//!   tier `crates/deepseek2ocr` shipped before its own KV cache landed.
+//! * **Decode IS KV-cached** (`MoondreamModel::generate_kv`): the prompt pays
+//!   one batched masked forward that also seeds every layer's cache, and each
+//!   token after that is one `O(pos)` incremental step rather than a full
+//!   `O(T²)` recompute. Gated against the recompute path token-for-token.
+//!   `max_new` still defaults low: the steps are cheap but not free, and the
+//!   prefill over a 730-row image prefix is not.
 //! * **No batching.** `run_batch` is the serial default and the resident says
 //!   why: each request has its own image, so the ViT pass is per-request, and
 //!   the decoder has no batch axis wired.
@@ -194,7 +196,10 @@ impl Session {
         let prompt_tokens = prompt.len();
 
         let budget = max_new.min(self.model.seq_len() as usize - prompt_tokens);
-        let ids = self.model.generate(&prompt, &embeds, budget, self.eos)?;
+        // The KV path: one batched (masked, so the image prefix stays
+        // bidirectional) prefill, then O(pos) steps. Gated against the O(T²)
+        // recompute path token-for-token, which is what makes preferring it safe.
+        let ids = self.model.generate_kv(&prompt, &embeds, budget, self.eos)?;
         for (i, _) in ids.iter().enumerate() {
             progress(Progress::step(i as u32 + 1, budget as u32, ""));
         }
