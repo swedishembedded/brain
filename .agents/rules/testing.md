@@ -298,7 +298,10 @@ the selector's normal choice, for isolating a regression to one variant):
 `BRAIN_NO_COOP_LN`, `BRAIN_NO_FASTCONV`, `BRAIN_NO_KERNEL_UPGRADE`,
 `BRAIN_CONV1D_GEMM` (`0` pins the 1D convolutions to the direct kernels,
 `force` pins them to the GEMM lowering below its `Cout` threshold - the only
-way a sweep can see the sub-threshold side).
+way a sweep can see the sub-threshold side),
+`BRAIN_NO_FLASH_CROSS` (any value but `0` pins text cross-attention to the
+materialized scores/softmax/apply trio instead of the fused flash kernel;
+without it an A/B on a capable device compares the fused path against itself).
 
 **Profiling / roofline internals:**
 `BRAIN_NO_ROOF` (skip the roofline probe), `BRAIN_ROOF_BUDGET_S` (its time

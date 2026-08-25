@@ -47,18 +47,25 @@
 //! ## Attention: which kernels, and why
 //!
 //! Both `attn1` (self, `t_dec == t_enc == T`) and `attn2` (cross, `t_dec ==
-//! T`, `t_enc == context_len`) dispatch the SAME generic trio
-//! (`attn_scores_cross` / `attn_softmax_cross` / `attn_apply_cross`,
-//! `crates/model/src/block.rs`'s `push_cross`/Wan's non-flash path uses the
-//! same trio for cross-attention) rather than a self-attention-specific
-//! kernel: the trio's `q_stride`/`kv_stride`/`q_off`/`k_off`/`v_off` are
-//! plain parameters, not hardcoded to a fused-QKV layout, so passing
-//! separate `[T, dim]` Q/K/V buffers at `stride=dim, off=0` for BOTH
-//! self- and cross-attention is exactly what the kernel already supports -
-//! no new kernel, no fused-QKV packing needed at this token count. Query-
-//! chunking (`model::block::chunked_bidir_fwd`'s reason to exist at Wan's
-//! 30k-token scale) is not needed here: the whole `[heads, T, T]` (or
-//! `[heads, T, context_len]`) score slab is at most `4*8*8*4 = 1024` bytes.
+//! T`, `t_enc == context_len`) are expressed against the SAME generic
+//! scores/softmax/apply trio (`attn_scores_cross_kt` / `softmax_rows` /
+//! `attn_apply_cross`, `crates/model/src/block.rs`'s `push_cross`/Wan's
+//! non-flash path uses the same trio for cross-attention) rather than a
+//! self-attention-specific kernel: the trio's `q_stride`/`kv_stride`/
+//! `q_off`/`k_off`/`v_off` are plain parameters, not hardcoded to a
+//! fused-QKV layout, so passing separate `[T, dim]` Q/K/V buffers at
+//! `stride=dim, off=0` for BOTH self- and cross-attention is exactly what
+//! the kernel already supports. That trio is the reference definition of the
+//! math and the branch every device without workgroup reductions takes;
+//! [`attn_context`] is the one place a capable device swaps it for a FUSED
+//! online-softmax dispatch instead - `flash_attn_bidir_reg2` for `attn1`,
+//! `flash_attn_cross_reg2` for `attn2` - because the materialized
+//! `[heads, T, T]` and `[heads, T, context_len]` slabs are what dominate the
+//! pass once T is a real generation's token count, not a test config's.
+//! Query-chunking (`model::block::chunked_bidir_fwd`'s reason to exist at
+//! Wan's 30k-token scale) has no call site here, because the arm that would
+//! need it - the trio - is only ever taken by devices this crate does not run
+//! a real generation on, and the fused arm has no slab to chunk.
 //!
 //! ## Which kernel for RoPE, and why
 //!
@@ -173,9 +180,9 @@ const K_SOFTMAX_ROWS: usize = 19;
 /// score AND probability slabs are 1.59 GiB *each*.
 ///
 /// [`K_PACK_QKV`] + the flash ladder replace that whole scores/softmax/apply
-/// chain with ONE fused online-softmax dispatch for `attn1` only (see
-/// [`attn_context`] for the exact gate and why cross-attention keeps the
-/// materialized trio). Appended so every index above is unchanged.
+/// chain with ONE fused online-softmax dispatch for `attn1`; `attn2` gets the
+/// same treatment from [`K_FLASH_CROSS_REG2`] (see [`attn_context`] for both
+/// gates). Appended so every index above is unchanged.
 ///
 /// All four flash kernels are pre-existing, already gated and already
 /// measured on this hardware (`model::block::flash_bidir_variant`'s own
@@ -200,9 +207,28 @@ const K_FLASH_REG2: usize = 24;
 /// above is unchanged.
 const K_ADALN_ROW: usize = 25;
 
+/// The fused CROSS-attention kernel, `model::block::flash_cross_step`'s only
+/// rung (§F.3: the tree was grepped first and had none - `flash_attn_bidir_*`
+/// take one fused qkv slab at a single `tcols`, and `flash_attn_causal_gqa`
+/// masks `j > i`; neither can express `nq != nk` over three separate buffers).
+/// It replaces this crate's `attn_scores_cross_kt` -> `softmax_rows` ->
+/// `attn_apply_cross` trio for text cross-attention, whose real cost is the
+/// `[heads, nq, nk]` score slab written, read, rewritten and read again.
+/// Appended, so every index above is unchanged.
+const K_FLASH_CROSS_REG2: usize = 26;
+
+/// The coalesced workgroup-per-row RMSNorm - the recurring defect class where
+/// a fast sibling already existed (`crates/wan/src/block.rs` and
+/// `crates/flux2/src/model.rs` both register it) and that this crate had not
+/// learned about, so every norm in every block ran the one-thread-per-row
+/// reference. Selected by `model::block::rms_variant`, never dispatched
+/// directly - see [`rmsnorm`]. Appended, so every index above is unchanged.
+const K_RMSNORM_ROWS: usize = 27;
+
 /// Every kernel this block dispatches - all pre-existing except
-/// [`K_ADALN_ROW`], all at their documented general contract.
-pub const KERNELS: [(&str, &str); 26] = [
+/// [`K_ADALN_ROW`] and [`K_FLASH_CROSS_REG2`], all at their documented general
+/// contract.
+pub const KERNELS: [(&str, &str); 28] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
@@ -232,6 +258,8 @@ pub const KERNELS: [(&str, &str); 26] = [
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
     ("adaln_row", kernels::ADALN_ROW),
+    ("flash_attn_cross_reg2", kernels::FLASH_ATTN_CROSS_REG2),
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
 ];
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
@@ -425,8 +453,9 @@ const FLASH_IDS: model::block::FlashIds =
 ///   the values. That is `attn1` and nothing else in this crate: text
 ///   cross-attention (`nq = T`, `nk = context_len`) and the audio<->video
 ///   cross-attention (`nq = T_v`, `nk = T_a`) attend a DIFFERENT row set, so
-///   they are not expressible in this kernel family at all and keep the
-///   materialized trio. It is a caller-declared flag rather than an inferred
+///   they are not expressible in this kernel family at all and go to
+///   [`flash_cross_attn`]'s own kernel (or, where that is unsupported, the
+///   materialized trio). It is a caller-declared flag rather than an inferred
 ///   `nq == nk`, because `nq == nk` is a coincidence a tiny test config can
 ///   satisfy for cross-attention and would then silently compute the wrong
 ///   thing.
@@ -443,29 +472,54 @@ fn flash_self_attn(gpu: &Gpu, self_attn: bool, head_dim: u32) -> bool {
     self_attn && head_dim <= 128 && gpu.caps().workgroup_reductions
 }
 
+/// Whether THIS attention call takes the fused CROSS path
+/// (`model::block::flash_cross_step`). The mirror of [`flash_self_attn`], with
+/// the same two non-device conditions and the shared selector's own device
+/// gate - which is stricter than `workgroup_reductions` alone, because the one
+/// registered rung also needs 48 KiB of workgroup memory and a 256-thread
+/// workgroup. Anything it refuses keeps the materialized
+/// scores/softmax/apply trio, which stays the reference definition of the math
+/// (it is the branch `make gradcheck` and every `BRAIN_DEVICE=cpu` test take).
+///
+/// `!self_attn` rather than `nq != nk`: `nq == nk` is a coincidence a tiny test
+/// config can satisfy for cross-attention, and routing a genuine
+/// SELF-attention call here would cost the `pack_qkv`-free layout the flash
+/// self path is built around for nothing.
+fn flash_cross_attn(gpu: &Gpu, self_attn: bool, head_dim: u32) -> bool {
+    !self_attn && head_dim <= 128 && model::block::flash_cross_supported(&gpu.caps())
+}
+
 /// The attention context `[nq, inner_dim]` for already-projected, already-
 /// QK-normed, already-RoPE'd `q`/`k`/`v` - the ONE place this crate decides
-/// between the fused flash kernel and the materialized
-/// scores/softmax/apply trio.
+/// between a fused flash kernel and the materialized scores/softmax/apply
+/// trio - for self- and cross-attention alike, through two independent gates
+/// ([`flash_self_attn`], [`flash_cross_attn`]).
 ///
-/// Both arms compute the same softmax attention with the same `1/sqrt(hd)`
-/// scale (`flash_attn_bidir*.wgsl` and `attn_scores_cross_kt.wgsl` both apply
-/// `inverseSqrt(f32(head_dim))`) and write the same `[nq, heads*head_dim]`
-/// row-major layout, so everything downstream - gating, `to_out`, the block's
-/// residual - is untouched by the choice.
+/// Every arm computes the same softmax attention with the same `1/sqrt(hd)`
+/// scale (`flash_attn_bidir*.wgsl`, `flash_attn_cross_reg2.wgsl` and
+/// `attn_scores_cross_kt.wgsl` all apply `inverseSqrt(f32(head_dim))`) and
+/// writes the same `[nq, heads*head_dim]` row-major layout, so everything
+/// downstream - gating, `to_out`, the block's residual - is untouched by the
+/// choice. They are NOT bit-identical to each other: an online softmax
+/// reassociates both the score sum and the value accumulation, which is why
+/// the gate below asserts a tolerance against a host f64 oracle rather than
+/// equality.
 ///
-/// The flash arm needs its operands in ONE slab, `[t, 3*inner_dim]` per-token
+/// The SELF arm needs its operands in ONE slab, `[t, 3*inner_dim]` per-token
 /// interleaved as `[q | k | v]`, which is exactly `pack_qkv`'s output and
 /// exactly the `stride`/`q_off`/`k_off`/`v_off` convention `flash_bidir_fwd`
-/// documents. RoPE is applied BEFORE this call, into the same `q`/`k` buffers
-/// the trio would have read (see [`attention`]), so the rotation is
-/// bit-identical between the two arms and this function only ever sees
+/// documents. The CROSS arm needs no pack at all: `flash_attn_cross_reg2`
+/// takes three separate buffers with their own strides, which is already the
+/// shape [`attention`] produced them in. RoPE is applied BEFORE this call,
+/// into the same `q`/`k` buffers the trio would have read, so the rotation is
+/// bit-identical between the arms and this function only ever sees
 /// already-rotated tensors - LTX's per-head `rope2d` chunking of one shared
 /// table is completely unaffected by the packing.
 ///
-/// Cost of the pack: one read+write of `3·t·inner_dim` floats, 173 MB at the
-/// real 720p shape - against the 1.59 GiB score slab AND the 1.59 GiB
-/// probability slab the other arm allocates and streams twice each.
+/// Cost of the self arm's pack: one read+write of `3·t·inner_dim` floats -
+/// against the `[heads, t, t]` score slab AND its probability twin the trio
+/// allocates and streams twice each. The cross arm pays nothing at all and
+/// drops a `[heads, nq, nk]` pair of the same kind.
 #[allow(clippy::too_many_arguments)]
 fn attn_context(
     gpu: &Gpu,
@@ -486,20 +540,66 @@ fn attn_context(
         let qkv = gpu.storage(nq as u64 * 3 * inner_dim as u64);
         s.push(gpu.step(K_PACK_QKV, &[q, k, v, &qkv], &[nq, inner_dim], nq * 3 * inner_dim));
         model::block::flash_bidir_fwd(gpu, FLASH_IDS, heads, head_dim, inner_dim, &qkv, 3 * inner_dim, 0, inner_dim, 2 * inner_dim, &ctx, &[(0, nq)], s);
+    } else if flash_cross_attn(gpu, self_attn, head_dim) {
+        // No pack: q, k and v are already three plain `[rows, inner_dim]`
+        // buffers, which is exactly this kernel's operand shape.
+        let lay = model::block::FlashCrossLayout { q_stride: inner_dim, q_off: 0, k_stride: inner_dim, k_off: 0, v_stride: inner_dim, v_off: 0, d_out: inner_dim };
+        s.push(model::block::flash_cross_step(gpu, K_FLASH_CROSS_REG2, 1, heads, head_dim, nq, nk, lay, q, k, v, &ctx));
     } else {
-        let scores = attn_scores_kt(gpu, s, q, k, heads, head_dim, inner_dim, nq, nk);
-        let probs = gpu.storage((heads * nq * nk) as u64);
-        attn_softmax(gpu, s, &scores, &probs, heads, nq, nk);
-        s.push(gpu.step(K_ATTN_APPLY, &[&probs, v, &ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim], heads * nq * head_dim));
+        attn_context_materialized(gpu, s, q, k, v, &ctx, heads, head_dim, inner_dim, nq, nk);
     }
     ctx
+}
+
+/// The materialized scores/softmax/apply arm of [`attn_context`], as its own
+/// function: it is the REFERENCE definition of the math (the branch every
+/// device without workgroup reductions takes, hence the one `make gradcheck`
+/// and `BRAIN_DEVICE=cpu` exercise), so the A/B gate has to be able to reach
+/// it on a device that would otherwise always pick a fused kernel. Calling it
+/// rather than re-spelling the three dispatches in the test is what keeps the
+/// reference from silently drifting away from the thing it is the reference
+/// for.
+#[allow(clippy::too_many_arguments)]
+fn attn_context_materialized(
+    gpu: &Gpu,
+    s: &mut Vec<Step>,
+    q: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+    heads: u32,
+    head_dim: u32,
+    inner_dim: u32,
+    nq: u32,
+    nk: u32,
+) {
+    let scores = attn_scores_kt(gpu, s, q, k, heads, head_dim, inner_dim, nq, nk);
+    let probs = gpu.storage((heads * nq * nk) as u64);
+    attn_softmax(gpu, s, &scores, &probs, heads, nq, nk);
+    s.push(gpu.step(K_ATTN_APPLY, &[&probs, v, ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim], heads * nq * head_dim));
 }
 
 /// RMSNorm over the full row width (`dim`, never per-head) - `w` is either a
 /// learnable gain (QK-norm) or an all-ones buffer (the "no learnable gain"
 /// `ada_zero_function`/`post_sa_function` norms - see this module's doc).
+///
+/// The kernel is picked by the SHARED rule (`model::block::rms_variant` ->
+/// `backend_api::select`'s `Op::RmsNorm`, keyed on `DeviceCaps`, never on a
+/// backend name), not by this crate: `rmsnorm_eps` gives thread `t` row `t`
+/// and walks the whole row from that one lane, so a warp's loads are `dim`
+/// floats apart and each memory sector fetched serves one useful float.
+/// `rmsnorm_rows` is the coalesced workgroup-per-row twin, takes the SAME
+/// buffers and the SAME Params, and differs only in index and thread count -
+/// which is why adopting it is this one call, and why every future rung the
+/// shared selector learns about arrives here for free (§F.7).
+///
+/// Not bit-identical: the cooperative form reduces the row in a different
+/// order, so it moves the last bits (usually toward the f64 answer, never for
+/// free). That is why it is a gated seam rather than a `gpu_core::upgrade`
+/// row.
 fn rmsnorm(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) {
-    s.push(gpu.step(K_RMSNORM_EPS, &[x, w, out], &[dim, rows, f(eps)], rows));
+    let (kind, threads) = model::block::rms_variant(gpu, K_RMSNORM_EPS, Some(K_RMSNORM_ROWS), rows, dim);
+    s.push(gpu.step(kind, &[x, w, out], &[dim, rows, f(eps)], threads));
 }
 
 fn mul(gpu: &Gpu, s: &mut Vec<Step>, a: &DeviceBuffer, b: &DeviceBuffer, y: &DeviceBuffer, n: u32) {
@@ -2427,17 +2527,20 @@ impl EmbeddingsConnector {
 mod tests {
     use super::*;
 
-    /// Softmax attention on the host in f64, from the SAME `[n, inner_dim]`
-    /// q/k/v the device sees - the third opinion neither device arm can
-    /// influence. Deliberately the textbook max-subtract form, not either
-    /// device kernel's schedule.
-    fn host_attention(q: &[f32], k: &[f32], v: &[f32], heads: usize, head_dim: usize, n: usize) -> Vec<f32> {
+    /// Softmax attention on the host in f64, from the SAME `[nq, inner_dim]`
+    /// q and `[nk, inner_dim]` k/v the device sees - the third opinion neither
+    /// device arm can influence. Deliberately the textbook max-subtract form,
+    /// not any device kernel's schedule. `nq == nk` is self-attention; the two
+    /// differing is cross-attention, and the SAME expression covers both,
+    /// which is exactly why a wrong `nq`/`nk` swap in a kernel cannot hide
+    /// here.
+    fn host_attention(q: &[f32], k: &[f32], v: &[f32], heads: usize, head_dim: usize, nq: usize, nk: usize) -> Vec<f32> {
         let inner = heads * head_dim;
         let scale = 1.0 / (head_dim as f64).sqrt();
-        let mut out = vec![0f32; n * inner];
-        let mut row = vec![0f64; n];
+        let mut out = vec![0f32; nq * inner];
+        let mut row = vec![0f64; nk];
         for h in 0..heads {
-            for i in 0..n {
+            for i in 0..nq {
                 let mut m = f64::NEG_INFINITY;
                 for (j, r) in row.iter_mut().enumerate() {
                     let mut d = 0f64;
@@ -2484,8 +2587,34 @@ mod tests {
         }
     }
 
-    /// Run ONE `attn_context` in its own submit and read the context back.
-    fn run_ctx(gpu: &Gpu, q: &[f32], k: &[f32], v: &[f32], heads: u32, head_dim: u32, n: u32, self_attn: bool) -> Vec<f32> {
+    /// `‖a - b‖₂ / ‖b‖₂`. The metric cosine cannot give: cosine measures only
+    /// direction, so a result that is uniformly a few percent too large is
+    /// invisible to it and obvious here.
+    fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for (&x, &y) in a.iter().zip(b) {
+            num += (x as f64 - y as f64).powi(2);
+            den += (y as f64).powi(2);
+        }
+        if den <= 0.0 {
+            0.0
+        } else {
+            (num / den).sqrt()
+        }
+    }
+
+    /// Run ONE attention in its own submit and read the context back.
+    /// `fused` picks the arm DIRECTLY rather than by an input that happens to
+    /// route there: `true` is whatever [`attn_context`] selects for this call
+    /// (the fused kernel on a capable device), `false` is
+    /// [`attn_context_materialized`], the reference trio, unconditionally.
+    /// Steering the reference arm by passing `self_attn = false` was safe only
+    /// while cross-attention had no fused kernel of its own; now that it does,
+    /// that would compare one fused kernel against another and never touch the
+    /// reference at all.
+    #[allow(clippy::too_many_arguments)]
+    fn run_ctx(gpu: &Gpu, q: &[f32], k: &[f32], v: &[f32], heads: u32, head_dim: u32, nq: u32, nk: u32, self_attn: bool, fused: bool) -> Vec<f32> {
         let inner = heads * head_dim;
         let up = |data: &[f32]| {
             let b = gpu.storage(data.len() as u64);
@@ -2494,9 +2623,15 @@ mod tests {
         };
         let (qb, kb, vb) = (up(q), up(k), up(v));
         let mut s: Vec<Step> = Vec::new();
-        let ctx = attn_context(gpu, &mut s, &qb, &kb, &vb, heads, head_dim, inner, n, n, self_attn);
+        let ctx = if fused {
+            attn_context(gpu, &mut s, &qb, &kb, &vb, heads, head_dim, inner, nq, nk, self_attn)
+        } else {
+            let c = gpu.storage((nq * inner) as u64);
+            attn_context_materialized(gpu, &mut s, &qb, &kb, &vb, &c, heads, head_dim, inner, nq, nk);
+            c
+        };
         gpu.submit(&[], &s);
-        gpu.read(&ctx, (n * inner) as usize)
+        gpu.read(&ctx, (nq * inner) as usize)
     }
 
     /// The gate. For each shape: the flash arm, the exact materialized
@@ -2536,9 +2671,9 @@ mod tests {
             let len = n as usize * inner;
             let (q, k, v) = (randn(len), randn(len), randn(len));
 
-            let flash = run_ctx(&gpu, &q, &k, &v, heads, head_dim, n, true);
-            let refr = run_ctx(&gpu, &q, &k, &v, heads, head_dim, n, false);
-            let host = host_attention(&q, &k, &v, heads as usize, head_dim as usize, n as usize);
+            let flash = run_ctx(&gpu, &q, &k, &v, heads, head_dim, n, n, true, true);
+            let refr = run_ctx(&gpu, &q, &k, &v, heads, head_dim, n, n, true, false);
+            let host = host_attention(&q, &k, &v, heads as usize, head_dim as usize, n as usize, n as usize);
 
             let (fr, fh, rh) = (max_abs(&flash, &refr), max_abs(&flash, &host), max_abs(&refr, &host));
             let cos = cosine(&flash, &host);
@@ -2593,11 +2728,125 @@ mod tests {
         let row: Vec<f32> = (0..inner).map(|_| rng.unit() * 2.0 - 1.0).collect();
         let rep: Vec<f32> = row.iter().cycle().take(n as usize * inner).copied().collect();
 
-        let flash = run_ctx(&gpu, &rep, &rep, &rep, heads, head_dim, n, true);
-        let refr = run_ctx(&gpu, &rep, &rep, &rep, heads, head_dim, n, false);
+        let flash = run_ctx(&gpu, &rep, &rep, &rep, heads, head_dim, n, n, true, true);
+        let refr = run_ctx(&gpu, &rep, &rep, &rep, heads, head_dim, n, n, true, false);
         let (fe, re) = (max_abs(&flash, &rep), max_abs(&refr, &rep));
         eprintln!("identical rows, t={n}: max|flash-exact|={fe:.3e} max|materialized-exact|={re:.3e}");
         assert!(fe <= re, "the fused path must not be LESS accurate than the trio it replaces (flash {fe:.3e} vs materialized {re:.3e})");
         assert!(fe < 1e-5, "flash vs exact uniform-attention answer max_abs {fe:.3e} at t={n}");
+    }
+
+    /// The CROSS-attention gate, the sibling of the self-attention one above:
+    /// the fused `flash_attn_cross_reg2` arm, the materialized trio, and the
+    /// host f64 oracle must all agree, over shapes where `nq` and `nk` are
+    /// genuinely unequal.
+    ///
+    /// Both `max_abs` AND relative L2 are asserted, never cosine alone: cosine
+    /// is scale-invariant, so a result uniformly a few percent large scores
+    /// 1.000000000 against the truth - which is exactly what a wrong
+    /// `head_dim` (hence a wrong `1/sqrt(hd)`) or a dropped online-softmax
+    /// renormalisation produces.
+    ///
+    /// The shape ladder is chosen so that no single index confusion survives
+    /// it:
+    ///
+    /// * `nq > nk` AND `nq < nk` both appear, so a kernel that swapped the two
+    ///   lengths cannot pass by symmetry (it would read out of range or
+    ///   average the wrong number of keys).
+    /// * `nq` both a multiple and NOT a multiple of the 128-row query tile,
+    ///   and `nk` both a multiple and not a multiple of the 16-row key tile,
+    ///   so the two independent tail paths are each exercised.
+    /// * `head_dim` at the real checkpoint's 128 (a full tile) and well under
+    ///   it (a zero-filled tile), so the padding guard is exercised too.
+    /// * `nk` smaller than one key tile, where every tile is a tail.
+    #[test]
+    fn flash_cross_attention_matches_the_materialized_reference_and_a_host_oracle() {
+        let gpu = Gpu::open(None, &KERNELS);
+        if !model::block::flash_cross_supported(&gpu.caps()) {
+            // The fallback branch: `attn_context` routes cross-attention to
+            // the trio, so both arms below WOULD be the reference and the
+            // comparison would be vacuous. Asserting the routing is what makes
+            // this skip honest rather than silent.
+            assert!(!flash_cross_attn(&gpu, false, 128), "device cannot run the fused cross kernel, yet it was selected");
+            eprintln!("device cannot run flash_attn_cross_reg2 - cross-attention is reference-only here (this IS the fallback branch)");
+            return;
+        }
+        assert!(flash_cross_attn(&gpu, false, 128), "device supports the fused cross kernel but it was not selected");
+        assert!(!flash_cross_attn(&gpu, true, 128), "self-attention must never take the CROSS path");
+        assert!(!flash_cross_attn(&gpu, false, 129), "head_dim > 128 must never take the flash path");
+
+        let mut rng = data::rng::Lcg::new(0x3b91_c40d);
+        let mut randn = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.unit() * 2.0 - 1.0).collect() };
+
+        for &(heads, head_dim, nq, nk) in
+            &[(32u32, 128u32, 300u32, 128u32), (2, 128, 256, 64), (3, 64, 129, 200), (4, 16, 37, 5), (1, 128, 128, 1024), (3, 8, 200, 17)]
+        {
+            let inner = (heads * head_dim) as usize;
+            let (q, k, v) = (randn(nq as usize * inner), randn(nk as usize * inner), randn(nk as usize * inner));
+
+            let flash = run_ctx(&gpu, &q, &k, &v, heads, head_dim, nq, nk, false, true);
+            let refr = run_ctx(&gpu, &q, &k, &v, heads, head_dim, nq, nk, false, false);
+            let host = host_attention(&q, &k, &v, heads as usize, head_dim as usize, nq as usize, nk as usize);
+
+            let (fr, fh, rh) = (max_abs(&flash, &refr), max_abs(&flash, &host), max_abs(&refr, &host));
+            let (cos, l2) = (cosine(&flash, &host), rel_l2(&flash, &host));
+            eprintln!(
+                "heads={heads} head_dim={head_dim} nq={nq} nk={nk}: max|flash-ref|={fr:.3e} max|flash-host|={fh:.3e} max|ref-host|={rh:.3e} cos(flash,host)={cos:.12} rel_l2(flash,host)={l2:.3e}"
+            );
+            assert!(flash.iter().all(|x| x.is_finite()), "fused cross output has non-finite values at heads={heads} head_dim={head_dim} nq={nq} nk={nk}");
+            // 1e-5 absolute on values whose magnitude is O(1): ~2 ulp of f32
+            // headroom over the largest disagreement any of these shapes has
+            // actually produced, and orders of magnitude tighter than a single
+            // wrong offset/stride/length moves the result.
+            assert!(fr < 1e-5, "fused cross vs materialized reference max_abs {fr:.3e} at heads={heads} head_dim={head_dim} nq={nq} nk={nk}");
+            assert!(fh < 1e-5, "fused cross vs host oracle max_abs {fh:.3e} at heads={heads} head_dim={head_dim} nq={nq} nk={nk}");
+            assert!(rh < 1e-5, "reference vs host oracle max_abs {rh:.3e} at heads={heads} head_dim={head_dim} nq={nq} nk={nk}");
+            assert!(cos > 0.999999999, "fused cross vs host oracle cosine {cos:.12} at heads={heads} head_dim={head_dim} nq={nq} nk={nk}");
+            assert!(l2 < 1e-5, "fused cross vs host oracle rel_l2 {l2:.3e} at heads={heads} head_dim={head_dim} nq={nq} nk={nk}");
+        }
+    }
+
+    /// The V-INDEX gate, which the random test above cannot give on its own.
+    ///
+    /// With random q/k/v every wrong index produces a wrong number, but the
+    /// magnitude of "wrong" is data-dependent and a reader cannot tell a
+    /// transposed key axis from a mis-scaled one. Here the answer is
+    /// ANALYTIC: `q` is zero, so every score in every head is exactly 0, the
+    /// softmax is exactly uniform over all `nk` keys, and the context is
+    /// therefore exactly the per-channel MEAN of `v` - the same vector for
+    /// every query row. `v`'s rows are made deliberately unequal (a per-row
+    /// ramp), so a kernel that read `v[j]` at the wrong stride, folded the
+    /// wrong number of keys in, or indexed `v` by the query row instead of the
+    /// key row lands somewhere else entirely.
+    #[test]
+    fn fused_cross_attention_averages_the_right_v_rows_under_a_uniform_softmax() {
+        let gpu = Gpu::open(None, &KERNELS);
+        if !model::block::flash_cross_supported(&gpu.caps()) {
+            eprintln!("device cannot run flash_attn_cross_reg2 - nothing to check here");
+            return;
+        }
+        let (heads, head_dim, nq, nk) = (4u32, 128u32, 300u32, 96u32);
+        let inner = (heads * head_dim) as usize;
+        let q = vec![0f32; nq as usize * inner];
+        let k: Vec<f32> = (0..nk as usize * inner).map(|i| ((i % 13) as f32 - 6.0) * 0.25).collect();
+        let v: Vec<f32> = (0..nk as usize * inner).map(|i| (i / inner) as f32 + (i % inner) as f32 * 0.001).collect();
+
+        let got = run_ctx(&gpu, &q, &k, &v, heads, head_dim, nq, nk, false, true);
+        let mut want = vec![0f32; inner];
+        for c in 0..inner {
+            let mut acc = 0f64;
+            for j in 0..nk as usize {
+                acc += v[j * inner + c] as f64;
+            }
+            want[c] = (acc / nk as f64) as f32;
+        }
+        let mut worst = 0f32;
+        for i in 0..nq as usize {
+            worst = worst.max(max_abs(&got[i * inner..(i + 1) * inner], &want));
+        }
+        eprintln!("uniform-softmax v-mean: max|got-exact| = {worst:.3e} over {nq} query rows");
+        // v's entries run to ~nk here, so the tolerance is relative to that
+        // magnitude rather than to O(1) values.
+        assert!(worst < 1e-3, "fused cross attention did not average v's rows: max_abs {worst:.3e}");
     }
 }

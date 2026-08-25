@@ -366,6 +366,8 @@ pub const FLASH_ATTN_BIDIR_REG2: &str = include_str!("../wgsl/flash_attn_bidir_r
 pub const FLASH_ATTN_BIDIR_SPLIT: &str = include_str!("../wgsl/flash_attn_bidir_split.wgsl");
 /// `wgsl/flash_attn_causal_gqa.wgsl`
 pub const FLASH_ATTN_CAUSAL_GQA: &str = include_str!("../wgsl/flash_attn_causal_gqa.wgsl");
+/// `wgsl/flash_attn_cross_reg2.wgsl`
+pub const FLASH_ATTN_CROSS_REG2: &str = include_str!("../wgsl/flash_attn_cross_reg2.wgsl");
 /// `wgsl/focal_dice_grad.wgsl`
 pub const FOCAL_DICE_GRAD: &str = include_str!("../wgsl/focal_dice_grad.wgsl");
 /// `wgsl/focal_dice_stats.wgsl`
@@ -1062,6 +1064,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("flash_attn_bidir_reg2", FLASH_ATTN_BIDIR_REG2),
     ("flash_attn_bidir_split", FLASH_ATTN_BIDIR_SPLIT),
     ("flash_attn_causal_gqa", FLASH_ATTN_CAUSAL_GQA),
+    ("flash_attn_cross_reg2", FLASH_ATTN_CROSS_REG2),
     ("focal_dice_grad", FOCAL_DICE_GRAD),
     ("focal_dice_stats", FOCAL_DICE_STATS),
     ("gate_row", GATE_ROW),

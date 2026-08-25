@@ -1007,6 +1007,114 @@ pub fn flash_bidir_fwd(
     }
 }
 
+/// Workgroup memory `flash_attn_cross_reg2` needs - the same tiles, hence the
+/// same figure, as [`FLASH_REG2_SHARED`]; named separately so a future rung of
+/// the cross ladder with different tiles cannot silently inherit this one.
+const FLASH_CROSS_REG2_SHARED: u32 = 49152;
+
+/// Query rows one `flash_attn_cross_reg2` workgroup owns (its `BR`), and its
+/// thread count. A caller must size its grid from these and never from a `BR`
+/// of its own - the same contract [`flash_bidir_variant`] states by returning
+/// them.
+const FLASH_CROSS_REG2_BR: u32 = 128;
+const FLASH_CROSS_REG2_WS: u32 = 256;
+
+/// Whether this device can run [`flash_cross_step`] at all.
+///
+/// Unlike the bidirectional family there is no ladder yet: `flash_attn_cross_
+/// reg2` is the only cross rung in the tree, so the answer is a bool, not a
+/// choice. A device that says no keeps whatever materialized
+/// scores/softmax/apply trio the caller already had - which is the branch the
+/// Cranelift CPU JIT takes (`workgroup_reductions == false`; the kernel needs
+/// two top-level barriers where that JIT supports one) and therefore stays the
+/// reference definition of the math.
+///
+/// Pure in its inputs: `caps` comes from `DeviceCaps`, so no backend name is
+/// consulted.
+pub fn flash_cross_supported(caps: &gpu_core::DeviceCaps) -> bool {
+    !no_flash_cross() && caps.workgroup_reductions && caps.max_workgroup_size >= FLASH_CROSS_REG2_WS && caps.workgroup_mem_bytes >= FLASH_CROSS_REG2_SHARED
+}
+
+/// `BRAIN_NO_FLASH_CROSS=1` pins cross-attention to the caller's materialized
+/// scores/softmax/apply trio - the A/B switch this kernel's speedup was
+/// measured with, the way a correctness gate reaches the reference arm on a
+/// device that would otherwise always take the fused one, and the fallback if
+/// a driver ever mishandles a 48 KiB workgroup allocation. Same shape as
+/// `backend_api::select`'s `BRAIN_NO_COOP_LN`, and read once for the same
+/// reason: the policy must stay a pure function of its inputs for a given
+/// process.
+///
+/// Without a switch here an A/B on a capable device compares the fused path
+/// against itself and reports a meaningless parity - which looks like evidence
+/// and is not.
+fn no_flash_cross() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("BRAIN_NO_FLASH_CROSS").map(|v| v != "0").unwrap_or(false))
+}
+
+/// The seven layout numbers [`flash_cross_step`] needs beyond the buffers -
+/// grouped because q, k and v are three independent operands here, each with
+/// its own row width and region offset, and seven more positional `u32`s at
+/// the call site is how a stride ends up in an offset slot.
+#[derive(Clone, Copy)]
+pub struct FlashCrossLayout {
+    pub q_stride: u32,
+    pub q_off: u32,
+    pub k_stride: u32,
+    pub k_off: u32,
+    pub v_stride: u32,
+    pub v_off: u32,
+    /// Row width of the output context (`heads*head_dim` for an unsliced
+    /// caller).
+    pub d_out: u32,
+}
+
+/// One fused cross-attention dispatch: `nq` query rows attend `nk` key/value
+/// rows out of three SEPARATE buffers, through an online softmax that never
+/// materializes the `[heads, nq, nk]` score slab or its probabilities twin.
+///
+/// This is the cross-attention counterpart of [`flash_bidir_fwd`], and it
+/// exists because neither of that family's members can express the shape:
+/// they take one fused `[t, 3*d_model]` slab at a single `tcols`, and
+/// `flash_attn_causal_gqa` additionally masks `j > i`. A caller with a decoder
+/// stream and an encoder memory has two row counts and three buffers.
+///
+/// Callers MUST gate on [`flash_cross_supported`] and keep their materialized
+/// trio as the fallback; `head_dim` ≤ 128. `bsz > 1` is sample-major in all
+/// four buffers (q/out at `nq` rows per sample, k/v at `nk`).
+///
+/// The output is the same `[bsz*nq, d_out]` row-major context the trio's
+/// `attn_apply_cross` writes, with the same `1/√head_dim` score scale, so
+/// everything downstream is untouched by the choice. It is NOT bit-identical:
+/// an online softmax reassociates both the score sum and the value
+/// accumulation, so a caller's gate needs a tolerance (and, since the change
+/// is a reassociation rather than a rescale, it needs relative L2 as well as
+/// cosine - cosine is scale-invariant).
+#[allow(clippy::too_many_arguments)]
+pub fn flash_cross_step(
+    g: &Gpu,
+    kind: usize,
+    bsz: u32,
+    heads: u32,
+    head_dim: u32,
+    nq: u32,
+    nk: u32,
+    lay: FlashCrossLayout,
+    q: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Step {
+    assert!(head_dim <= 128, "flash_attn_cross: head_dim {head_dim} > 128");
+    let nwg = bsz * heads * nq.div_ceil(FLASH_CROSS_REG2_BR);
+    g.step(
+        kind,
+        &[q, k, v, ctx],
+        &[bsz, heads, nq, nk, head_dim, lay.q_stride, lay.q_off, lay.k_stride, lay.k_off, lay.v_stride, lay.v_off, lay.d_out],
+        nwg * FLASH_CROSS_REG2_WS,
+    )
+}
+
 /// Round up to a 64-word (256B) boundary - `step_sliced`'s storage-buffer
 /// `BufferBinding` offsets must satisfy `min_storage_buffer_offset_alignment`
 /// (256B on the near-universal case), so every per-head/per-segment stride

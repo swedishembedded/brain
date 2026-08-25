@@ -409,6 +409,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // params [total, c, hw] (layout permutations).
         "nlc_nchw" | "nchw_nlc" => f(0, 8 * p(0)?),
+        // Replicate pad on NCL, params [total, l, left, right]. Pure movement,
+        // no arithmetic: every output element is written once and reads one
+        // source element, so the streaming traffic is 4 B in + 4 B out per
+        // OUTPUT element - the pad regions re-read the same edge sample, which
+        // this best-effort model counts as read traffic rather than modelling
+        // the cache that would serve it.
+        "pad1d_edge" => f(0, 8 * p(0)?),
 
         // ---- norms ----------------------------------------------------------
         // params [d_model, rows(, eps)].
@@ -625,6 +632,21 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(
                 b * h * t * t * (2 * hd + 1) + b * h * t * (6 * t + 1) + 2 * b * h * hd * t * t,
                 4 * (3 * b * t * h * hd + b * t * h * hd),
+            )
+        }
+
+        // Fused flash CROSS-attention; params [bsz, n_heads, t_dec, t_enc,
+        // head_dim, ...]. Same fused trio as the bidirectional family above,
+        // with the two lengths independent: the scores/apply MACs run over
+        // td*te pairs and the softmax over td rows of te entries. Bytes are the
+        // ideal-tiling traffic the kernel exists to achieve - q and out once
+        // over td rows, k and v once over te rows, and NO materialised
+        // [h, td, te] scores/probs (that absence is the whole point).
+        "flash_attn_cross_reg2" => {
+            let (b, h, td, te, hd) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?);
+            f(
+                b * h * td * te * (2 * hd + 1) + b * h * td * (6 * te + 1) + 2 * b * h * hd * td * te,
+                4 * (2 * b * te * h * hd + 2 * b * td * h * hd),
             )
         }
 
