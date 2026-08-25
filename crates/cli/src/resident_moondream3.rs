@@ -36,13 +36,18 @@
 //! fp32 on a machine without room fails placement cleanly instead of evicting
 //! the working instance to build one that cannot fit.
 //!
-//! # Batching: the serial default, and why
+//! # Batching: real, on the vision half
 //!
-//! Every request carries its own image, so the ViT pass (overlap multi-crop,
-//! `h·w + 1` encoder passes) is per-request with nothing to share. The decoder
-//! has no batch axis wired and no KV cache, so two concurrent requests share no
-//! work at all. A real batched forward here is a performance phase of its own,
-//! not a wrapper this file could write.
+//! `run_batch` is overridden with a genuine batched forward, not a serial loop.
+//! The axis is the VISION tower: `SiglipEncoder::encode` attends within each
+//! crop as its own span, so N concurrent requests' crops go through ONE encode
+//! call rather than N - and at the released config that is the dominant
+//! per-request cost (1 global + up to 12 local crops of 729 patches).
+//!
+//! The decoder half stays per-request, and that is architectural rather than
+//! unfinished: each request has its own prompt, its own image embeddings and
+//! its own KV cache, and the block forward has no batch dimension. Adding one
+//! is a separate piece of work from this seam.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use moondream3::caps::{Session, DIR_VAR, MODEL};
@@ -150,9 +155,26 @@ impl Instance for Moondream3Instance {
         self.session.caption(inv, progress)
     }
 
-    // `run_batch` is the serial default: a per-request ViT pass and a decoder
-    // with no batch axis share no work between requests -- see this module's
-    // header.
+    /// Real batching, on the axis this architecture actually has.
+    ///
+    /// The DECODER cannot batch: each request has its own prompt, its own image
+    /// embeddings and its own KV cache, and the block forward has no batch
+    /// dimension. The VISION tower can, and it is the dominant per-request cost:
+    /// 1 global plus up to 12 local crops of 729 patches each. `SiglipEncoder`
+    /// already attends within each crop as its own span, so N requests' crops
+    /// concatenate into ONE encode call instead of N.
+    ///
+    /// Crops-per-request varies with each image's aspect ratio, so the batched
+    /// path slices results back by each request's own tile count rather than a
+    /// uniform stride - pinned by `batched_vision_matches_one_image_at_a_time`,
+    /// because getting that wrong hands one request another's crops with no
+    /// shape error to notice.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        if action != "caption" {
+            return invs.iter().map(|_| Err(format!("moondream3: unknown action '{action}'"))).collect();
+        }
+        self.session.caption_batch(invs, progress)
+    }
 }
 
 #[cfg(test)]

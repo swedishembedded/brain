@@ -123,6 +123,11 @@ pub fn parse_precision(s: &str) -> Result<Precision, String> {
     }
 }
 
+/// One request's decoded pixels: `(hwc, width, height)`, or why they could not
+/// be decoded. A per-request `Result` so one malformed blob fails on its own
+/// rather than poisoning a shared vision pass.
+type DecodedImage = Result<(Vec<f32>, u32, u32), String>;
+
 /// A built model plus everything one request needs around it.
 ///
 /// Public so `crates/cli/src/resident_moondream3.rs` can own one directly: the
@@ -162,6 +167,45 @@ impl Session {
 
     /// Run one `caption` invocation.
     pub fn caption(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
+        // Vision: the full overlap multi-crop front end.
+        let embeds = self.model.image_embeds_from_pixels(&hwc, w, h);
+        self.caption_with_embeds(inv, &embeds, progress)
+    }
+
+    /// Decode a batch of requests, sharing ONE vision pass.
+    ///
+    /// The decoder half stays per-request - each has its own prompt, its own
+    /// image embeddings and its own KV cache, and the block forward has no batch
+    /// dimension - but the ViT does not, and at the released config it is the
+    /// dominant per-request cost (1 global + up to 12 local crops of 729
+    /// patches). One `SiglipEncoder::encode` over every request's crops replaces
+    /// N of them.
+    pub fn caption_batch(&self, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        // Decode every image first; a request whose blob is malformed fails on
+        // its own rather than poisoning the shared pass.
+        let decoded: Vec<DecodedImage> = invs.iter().map(|inv| capability::blob::decode_image(inv, "image")).collect();
+        let good: Vec<(&[f32], u32, u32)> =
+            decoded.iter().filter_map(|d| d.as_ref().ok()).map(|(px, w, h)| (px.as_slice(), *w, *h)).collect();
+        let mut embeds = self.model.image_embeds_from_pixels_batch(&good).into_iter();
+
+        decoded
+            .iter()
+            .enumerate()
+            .map(|(i, d)| match d {
+                Err(e) => Err(e.clone()),
+                Ok(_) => {
+                    let e: Vec<f32> = embeds.next().expect("one embedding per successfully decoded image");
+                    self.caption_with_embeds(&invs[i], &e, &mut |p| progress(i, p))
+                }
+            })
+            .collect()
+    }
+
+    /// The decoder half of [`Self::caption`], given image embeddings that may
+    /// have come from a batched vision pass. ONE implementation, so the single
+    /// and batched paths cannot drift about prompt assembly or token accounting.
+    fn caption_with_embeds(&self, inv: &Invocation, embeds: &[f32], progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let instruction = {
             let t = last_user_text(inv);
             if t.trim().is_empty() {
@@ -171,10 +215,6 @@ impl Session {
             }
         };
         let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).clamp(1, SEQ_LEN as i64) as usize;
-        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
-
-        // Vision: the full overlap multi-crop front end.
-        let embeds = self.model.image_embeds_from_pixels(&hwc, w, h);
 
         // Prompt: bos, then the image rows, then the instruction. The image rows
         // are POSITIONAL - the splice writes the connector output over them - so
@@ -199,7 +239,7 @@ impl Session {
         // The KV path: one batched (masked, so the image prefix stays
         // bidirectional) prefill, then O(pos) steps. Gated against the O(T²)
         // recompute path token-for-token, which is what makes preferring it safe.
-        let ids = self.model.generate_kv(&prompt, &embeds, budget, self.eos)?;
+        let ids = self.model.generate_kv(&prompt, embeds, budget, self.eos)?;
         for (i, _) in ids.iter().enumerate() {
             progress(Progress::step(i as u32 + 1, budget as u32, ""));
         }

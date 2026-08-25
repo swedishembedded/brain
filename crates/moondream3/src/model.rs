@@ -213,6 +213,68 @@ impl MoondreamModel {
         self.image_embeds_multicrop(&global, &locals, plan.h_tiles, plan.w_tiles)
     }
 
+    /// [`Self::image_embeds_from_pixels`] for SEVERAL images in ONE ViT pass.
+    ///
+    /// # This is the model's real batch axis
+    ///
+    /// The decoder has none worth using: each request has its own prompt, its
+    /// own image embeddings and its own KV cache, and the block forward has no
+    /// batch dimension. The VISION tower does. `SiglipEncoder::encode` already
+    /// takes a crop count and attends within each crop as its own span, so N
+    /// requests' crops concatenate into one call - and at the released config
+    /// each request is 1 global + up to 12 local crops of 729 patches, which is
+    /// the dominant per-request cost.
+    ///
+    /// Crops-per-request VARIES (the tiling follows each image's aspect ratio),
+    /// so this returns per-request embeddings sliced back out by each request's
+    /// own tile count rather than assuming a uniform stride.
+    pub fn image_embeds_from_pixels_batch(&self, images: &[(&[f32], u32, u32)]) -> Vec<Vec<f32>> {
+        let v = &self.cfg.vision;
+        let ppc = v.patches_per_crop() as usize;
+        let pv = v.patch_vec() as usize;
+        if self.conn_in != 2 * v.dim {
+            // Single-crop connector: one crop per request, still one ViT pass.
+            let mut packed = Vec::with_capacity(images.len() * ppc * pv);
+            for &(hwc, w, h) in images {
+                let r = imaging::host::resize_bilinear_hwc(hwc, 3, w, h, v.crop_size, v.crop_size);
+                packed.extend(crate::preprocess::patchify_crop(&r, v.crop_size, v.patch));
+            }
+            let feats = self.enc.encode(&self.vgpu, images.len() as u32, &packed);
+            let dim = v.dim as usize;
+            return (0..images.len())
+                .map(|i| self.conn.forward(&self.vgpu, v.patches_per_crop(), &feats[i * ppc * dim..(i + 1) * ppc * dim]))
+                .collect();
+        }
+
+        // Multi-crop: lay every request's global crop and local crops end to
+        // end, encode once, then stitch each request back separately.
+        let mut packed: Vec<f32> = Vec::new();
+        let mut plans = Vec::with_capacity(images.len());
+        for &(hwc, w, h) in images {
+            let (global, locals, plan) = crate::preprocess::overlap_crop_image(hwc, w, h, v);
+            packed.extend_from_slice(&global);
+            packed.extend_from_slice(&locals);
+            plans.push(plan);
+        }
+        let total_crops: u32 = plans.iter().map(|p| 1 + p.h_tiles * p.w_tiles).sum();
+        let feats = self.enc.encode(&self.vgpu, total_crops, &packed);
+
+        let dim = v.dim as usize;
+        let (grid, margin) = (v.grid(), v.overlap_margin);
+        let mut out = Vec::with_capacity(images.len());
+        let mut crop0 = 0usize;
+        for plan in &plans {
+            let n_local = (plan.h_tiles * plan.w_tiles) as usize;
+            let g0 = crop0 * ppc * dim;
+            let global = &feats[g0..g0 + ppc * dim];
+            let locals = &feats[g0 + ppc * dim..g0 + (1 + n_local) * ppc * dim];
+            let concat = crate::preprocess::build_connector_input(&self.vgpu, global, locals, plan.h_tiles, plan.w_tiles, grid, v.dim, margin);
+            out.push(self.conn.forward(&self.vgpu, v.patches_per_crop(), &concat));
+            crop0 += 1 + n_local;
+        }
+        out
+    }
+
     /// End-to-end forward: encode one crop, project, splice, decode → loss.
     /// `tokens`/`targets` length `seq_len`; `packed` is `[patches, patch_vec]`.
     pub fn forward(&self, tokens: &[u32], targets: &[u32], packed: &[f32]) -> f32 {
@@ -615,6 +677,34 @@ mod tests {
             model.generate(&prompt, &embeds, 4, None).unwrap(),
             model.generate_kv(&prompt, &embeds, 4, None).unwrap()
         );
+    }
+
+    /// THE GATE FOR BATCHING: N images through one ViT pass must give exactly
+    /// what N separate passes give.
+    ///
+    /// The failure this catches is a slicing bug, and it is invisible to a
+    /// shape check: crops-per-request VARIES with each image's aspect ratio, so
+    /// an offset that assumes a uniform stride hands request 2 some of request
+    /// 1's crops. Same length, finite values, plausible embeddings, wrong
+    /// picture. Two DELIBERATELY different aspect ratios here for that reason.
+    #[test]
+    fn batched_vision_matches_one_image_at_a_time() {
+        let (cfg, vw, cw, dw) = tiny(16, 32, false, 47);
+        let vision = cfg.vision.clone();
+        let ppc = vision.patches_per_crop();
+        let seq_len = 1 + ppc + 3;
+        let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, 2 * vision.dim, seq_len);
+
+        let mut rng = Rng::new(470);
+        let mut img = |w: u32, h: u32| -> Vec<f32> { (0..(w * h * 3) as usize).map(|_| rng.next_f32()).collect() };
+        // Different aspect ratios -> different tile counts -> different crop
+        // counts, which is exactly what a uniform-stride slice gets wrong.
+        let (a, b) = (img(13, 9), img(9, 21));
+        let batch = model.image_embeds_from_pixels_batch(&[(&a, 13, 9), (&b, 9, 21)]);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0], model.image_embeds_from_pixels(&a, 13, 9), "request 0 differs when batched");
+        assert_eq!(batch[1], model.image_embeds_from_pixels(&b, 9, 21), "request 1 differs when batched");
+        assert_ne!(batch[0], batch[1], "two different images must not produce the same embedding");
     }
 
     /// A prompt that does not fit the built graph is a named error, not a panic
