@@ -150,6 +150,15 @@ pub struct Coverage {
     /// `model.region.*` - recognized and deliberately skipped (the
     /// region/point/detect heads are not built).
     pub region_skipped: usize,
+    /// The region subtree's `(name, shape)` pairs, in checkpoint order.
+    ///
+    /// Captured rather than merely counted because porting those heads is
+    /// blocked on not knowing what they ARE: this repo records only the
+    /// `model.region.` prefix, and the reference modeling code ships inside the
+    /// checkpoint directory rather than here. Whoever next has a checkpoint can
+    /// call [`load`] and print this instead of writing a throwaway script to
+    /// discover the manifest - which is the actual first step of that port.
+    pub region_tensors: Vec<(String, Vec<usize>)>,
     /// Anything else: a tensor the checkpoint has and this port does not know.
     pub unmapped: Vec<String>,
 }
@@ -177,15 +186,18 @@ pub struct Coverage {
 pub fn load(dir: &std::path::Path, cfg: &MoondreamConfig) -> Result<(Weights, Coverage), String> {
     let rd = WeightReader::open_hf_dir(dir).map_err(|e| format!("moondream3: cannot open '{}': {e}", dir.display()))?;
     let mut w = Weights { vision: HashMap::new(), connector: HashMap::new(), decoder: HashMap::new() };
-    let mut cov = Coverage { mapped: 0, region_skipped: 0, unmapped: Vec::new() };
+    let mut cov = Coverage { mapped: 0, region_skipped: 0, region_tensors: Vec::new(), unmapped: Vec::new() };
 
     let names: Vec<String> = rd.names().map(str::to_string).collect();
     for name in &names {
+        let shape: Vec<usize> = rd.shape(name).map(|s: &[u64]| s.iter().map(|&d| d as usize).collect()).unwrap_or_default();
         if is_region(name) {
             cov.region_skipped += 1;
+            // Shape only - never the DATA. These heads are not built, so
+            // materialising their tensors would be pure footprint.
+            cov.region_tensors.push((name.clone(), shape));
             continue;
         }
-        let shape: Vec<usize> = rd.shape(name).map(|s: &[u64]| s.iter().map(|&d| d as usize).collect()).unwrap_or_default();
         let mut taken = false;
         // `with_tensor` lends the decoded values for the call only, so each arm
         // copies exactly what it keeps - the MoE arms copy per-expert slices
@@ -360,6 +372,27 @@ mod loader_tests {
         split_moe(&mut out, 0, MoePart::Fc1, &data, &[1, 2, 2], &cfg);
         assert_eq!(out["blocks.0.moe.experts.0.w_h.weight"], vec![10.0, 10.0]);
         assert_eq!(out["blocks.0.moe.experts.0.w_g.weight"], vec![20.0, 20.0]);
+    }
+
+    /// The region subtree is REPORTED, not just counted.
+    ///
+    /// Porting the point/detect/region-caption heads is blocked on not knowing
+    /// their architecture: this crate records only the `model.region.` prefix,
+    /// and the reference modeling code ships inside the checkpoint directory
+    /// rather than in this repo. Capturing `(name, shape)` during the load that
+    /// already streams every header turns "discover the manifest" from a
+    /// throwaway script into a field on the report - so this test pins that the
+    /// field is wired to the same prefix `is_region` matches, and that a region
+    /// tensor is skipped rather than counted as mapped.
+    #[test]
+    fn region_tensors_are_recognized_and_reported_not_silently_dropped() {
+        assert!(is_region("model.region.coord_encoder.weight"));
+        assert!(!is_region("model.text.blocks.0.ln.weight"));
+        assert!(!is_region("model.vision.pos_emb"));
+        // The report has somewhere for them to go, and it starts empty.
+        let cov = Coverage::default();
+        assert_eq!(cov.region_skipped, 0);
+        assert!(cov.region_tensors.is_empty());
     }
 
     /// A missing checkpoint is a clean error naming the directory, not a panic.

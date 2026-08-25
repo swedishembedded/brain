@@ -192,7 +192,28 @@ blocker; the pieces a `caps.rs` would have to call did not exist.
 - [ ] Real batching. Each request has its own image, so the ViT pass is
       per-request; the decoder has no batch axis wired. `run_batch` is the
       serial default and says why.
-- [ ] Region/point/detect heads - recognized on import, not built.
+- [ ] **Region/point/detect heads - BLOCKED on material that is not here, not
+      on effort.** Everything this repo knows about them is the string
+      `"model.region."`. There is no tensor manifest, no shape, no reference
+      `region.py` (the golden dumper copies the modeling code out of the
+      CHECKPOINT directory at runtime), no checkpoint on this machine, and no
+      torch to run a dumper with. Writing the heads from memory would be an
+      architecture invented against no golden, no reference and no weights -
+      and the failure mode is a head that returns plausible coordinates that
+      are wrong, which nothing here could detect.
+
+      The first step is therefore discovery, and it is now free:
+      `import::load`'s `Coverage::region_tensors` captures every
+      `model.region.*` name and shape during the load that already streams
+      every header (shape only, never the data - the heads are not built, so
+      materialising them would be pure footprint). Whoever next has a checkpoint
+      prints that instead of writing a throwaway script.
+
+      After that, in order: dump per-stage goldens for the heads
+      (`tools/goldens/`), port against them, then expose `point`, `detect` and
+      `region_caption` as additional `capability::Action`s beside `caption` -
+      the manifest already advertises one action, and adding more needs no new
+      transport work.
 - [x] A GPU placement. `MoondreamModel::new_on` / `Session::load_on` take a
       canonical device index and build under a SCOPED registry selection
       (`gpu_core::devices::with_gpu`), never an env write; `estimate` reports

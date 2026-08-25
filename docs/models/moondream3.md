@@ -34,7 +34,8 @@ the dominant cost of a short caption, so `max_new` defaults low.
 Requests are **not batched**: each one carries its own image, so the vision
 pass is per-request and the decoder has no batch axis.
 
-Region/point/detect heads are recognized on import but not built.
+Region/point/detect heads are recognized on import but not built, so pointing,
+detection and region captioning are unavailable - `caption` is the only action.
 
 | | |
 |---|---|
