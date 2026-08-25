@@ -323,7 +323,7 @@ ckpt_tree "Qwen/Qwen3-TTS-12Hz-0.6B-Base" "tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base" \
   '^(brain_tts|speech_tokenizer)/'
 ORIGIN="\`brain fetch Qwen/Qwen3-TTS-12Hz-0.6B-Base\` (its speech_tokenizer/ subdir)"
 ckpt_tree "Qwen/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer" "tts/ckpt/Qwen3-TTS-Tokenizer-12Hz"
-ORIGIN="the upstream Qwen3-TTS reference implementation - not regenerable from this repo"
+ORIGIN="tools/goldens/qwen3tts_{codec,speaker}_dump_reference.py (they fetch the upstream reference themselves)"
 tts_tree "dumps"           "tts/dumps"
 # loose reference files at the mirror root (e.g. the voice-clone example wav)
 if [ -d "$TTS_MIRROR" ]; then

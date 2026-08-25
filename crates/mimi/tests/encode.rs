@@ -6,12 +6,15 @@
 //!
 //! Gated on the real checkpoint being present (a large external artifact, not
 //! committed). Run on the CPU backend:
-//!   BRAIN_DEVICE=cpu cargo test -p brain-codec --test encode
+//!   BRAIN_DEVICE=cpu cargo test -p brain-mimi --test encode
 
 use mimi::Codec;
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
+
+/// Regenerates the golden this suite compares against, quoted in every skip.
+const DUMPER: &str = "tools/goldens/qwen3tts_codec_dump_reference.py";
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -25,13 +28,14 @@ fn ckpt_available() -> bool {
 
 fn import_to_temp() -> String {
         let CKPT_DIR = testdata("tts/ckpt/Qwen3-TTS-Tokenizer-12Hz");
+    // Fixed name, not pid-suffixed: this binary is the only writer of it and
+    // `mimi::import` finalises by rename, so a re-run overwrites the previous
+    // run's 646 MB intermediate instead of leaving one behind per run.
     static SHARED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| {
-            let out = std::env::temp_dir()
-                .join(format!("codec_encode_{}.safetensors", std::process::id()))
-                .to_string_lossy()
-                .into_owned();
+            let out =
+                std::env::temp_dir().join("codec_encode.safetensors").to_string_lossy().into_owned();
             mimi::import(&CKPT_DIR, &out).expect("import failed");
             out
         })
@@ -104,6 +108,21 @@ fn encode_matches_reference_codes() {
     }
     let codec = Codec::load_inference(&import_to_temp());
     let nq = codec.cfg.num_quantizers as usize;
+
+    // Prove the golden and this checkpoint belong together before comparing.
+    let meta = std::path::Path::new(&ENC_DUMP).join("meta.json");
+    let Some(src) = brain_testutil::golden::Source::open_manifest(&meta, DUMPER) else {
+        return;
+    };
+    let c = &codec.cfg;
+    if !src.require(&[
+        ("num_quantizers", c.num_quantizers as i64),
+        ("codebook_size", c.codebook_size as i64),
+        ("encoder_hidden_size", c.enc.hidden_size as i64),
+        ("encoder_num_hidden_layers", c.enc.num_hidden_layers as i64),
+    ]) {
+        return;
+    }
 
     let wav = read_f32(&wav_p);
     let reference = read_u32(&codes_p);

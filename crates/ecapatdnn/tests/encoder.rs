@@ -5,15 +5,28 @@
 //! ECAPA speaker-encoder tests. The import + parity tests are gated on the real
 //! Qwen3-TTS checkpoint / reference dump being present (large external
 //! artifacts). Run on the CPU backend:
-//!   BRAIN_DEVICE=cpu cargo test -p brain-speaker
+//!   BRAIN_DEVICE=cpu cargo test -p brain-ecapatdnn
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use brain_testutil::{golden::Source, parity::Table};
 use ecapatdnn::{SpeakerConfig, SpeakerEncoder};
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
+
+/// Regenerates the golden this suite compares against, quoted in every skip.
+const DUMPER: &str = "tools/goldens/qwen3tts_speaker_dump_reference.py";
+const COS_FLOOR: f64 = 0.999;
+// Measured clean against the reference dump: cosine 1.0000000000, rel_l2
+// 7.0e-7, max_abs 4.8e-6 (identical on the CPU backend and a Vulkan P40).
+// 1e-4 leaves roughly two orders of magnitude of headroom, matching the
+// vocoder gate's own clean-value-to-ceiling ratio. A ceiling fitted tightly
+// to one run goes red on the next backend or driver for no defect; this one
+// still catches a uniformly mis-scaled embedding, which cosine cannot see at
+// any floor.
+const REL_CEIL: f64 = 1e-4;
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -34,11 +47,11 @@ fn shared_weights() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock().unwrap();
+    // Fixed name, not pid-suffixed: this binary is the only writer of it and
+    // `ecapatdnn::import` finalises by rename, so a re-run overwrites the
+    // previous run's intermediate instead of leaving one behind per run.
     PATH.get_or_init(|| {
-        let out = std::env::temp_dir()
-            .join(format!("speaker_{}.safetensors", std::process::id()))
-            .to_string_lossy()
-            .into_owned();
+        let out = std::env::temp_dir().join("speaker.safetensors").to_string_lossy().into_owned();
         ecapatdnn::import(&CKPT_DIR, &out).expect("import failed");
         out
     })
@@ -105,22 +118,42 @@ fn parity_against_reference_dump() {
         brain_testutil::skip("reference dump not present");
         return;
     }
+    let cfg = SpeakerConfig::default();
+    let Some(src) = Source::open(std::path::Path::new(&DUMP_DIR), DUMPER) else {
+        return;
+    };
+    if !src.require(&[
+        ("mel_dim", cfg.mel_dim as i64),
+        ("enc_dim", cfg.enc_dim as i64),
+        ("enc_channels_last", *cfg.enc_channels.last().unwrap() as i64),
+        ("enc_attention_channels", cfg.enc_attention_channels as i64),
+        ("enc_res2net_scale", cfg.enc_res2net_scale as i64),
+        ("enc_se_channels", cfg.enc_se_channels as i64),
+    ]) {
+        return;
+    }
     let mel = read_dump(&mel_path);
     let reference = read_dump(&emb_path);
-    assert_eq!(reference.len(), 1024);
+    assert_eq!(reference.len(), cfg.enc_dim as usize);
 
     let out = shared_weights();
     let enc = SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(ecapatdnn::model::PIPELINES), out);
     let emb = enc.embed(&mel);
     assert_eq!(emb.len(), reference.len());
 
-    let dot: f32 = emb.iter().zip(&reference).map(|(a, b)| a * b).sum();
+    // Cosine ALONE cannot gate this: it is scale invariant, so an embedding
+    // uniformly off by a constant factor scores exactly 1.000000 and passes.
+    // The relative-L2 ceiling is what sees a mis-scaled x-vector, and a
+    // mis-scaled x-vector is not cosmetic here - the talker consumes this
+    // vector as a conditioning embedding, not as a direction.
+    let mut table = Table::new(COS_FLOOR, REL_CEIL);
+    table.check("speaker_xvector", &emb, &reference);
+    table.print();
     let na: f32 = emb.iter().map(|v| v * v).sum::<f32>().sqrt();
     let nb: f32 = reference.iter().map(|v| v * v).sum::<f32>().sqrt();
-    let cos = dot / (na * nb);
     let max_abs = emb.iter().zip(&reference).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-    eprintln!("speaker parity: cosine={cos:.6} max_abs_err={max_abs:.6} |emb|={na:.4} |ref|={nb:.4}");
-    assert!(cos >= 0.999, "cosine similarity {cos} < 0.999");
+    eprintln!("speaker parity: max_abs_err={max_abs:.3e} |emb|={na:.4} |ref|={nb:.4}");
+    table.assert_clean();
 }
 
 #[test]

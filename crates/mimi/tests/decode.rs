@@ -6,7 +6,7 @@
 //!
 //! All gated on the real checkpoint being present (it is a large external
 //! artifact, not committed). Run with the CPU backend:
-//!   BRAIN_DEVICE=cpu cargo test -p brain-codec
+//!   BRAIN_DEVICE=cpu cargo test -p brain-mimi
 
 use std::collections::HashMap;
 
@@ -14,6 +14,9 @@ use mimi::{Codec, CodecConfig};
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
+
+/// Regenerates the golden this suite compares against, quoted in every skip.
+const DUMPER: &str = "tools/goldens/qwen3tts_codec_dump_reference.py";
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -31,13 +34,17 @@ fn import_to_temp() -> String {
     // tests. Without this, parallel tests race on the same temp filename and the
     // checkpoint `rename` finalisation panics (and each test re-dequantizes the
     // whole file). `get_or_init` runs the closure on exactly one thread.
+    //
+    // The name is fixed rather than pid-suffixed so a re-run overwrites the
+    // previous run's 646 MB intermediate instead of leaving one behind per run;
+    // this binary is the only writer of it, and `mimi::import` finalises by
+    // rename. No test deletes it: it is SHARED, so whichever test finished
+    // first used to delete it out from under the others.
     static SHARED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| {
-            let out = std::env::temp_dir()
-                .join(format!("codec_decode_{}.safetensors", std::process::id()))
-                .to_string_lossy()
-                .into_owned();
+            let out =
+                std::env::temp_dir().join("codec_decode.safetensors").to_string_lossy().into_owned();
             mimi::import(&CKPT_DIR, &out).expect("import failed");
             out
         })
@@ -85,8 +92,6 @@ fn import_consumes_every_decoder_tensor() {
     assert_eq!(by_name["decoder.0.conv.weight"], 1536 * 1024 * 7);
     assert_eq!(by_name["decoder.1.block.1.conv.weight"], 1536 * 768 * 16);
     assert_eq!(by_name["decoder.6.conv.weight"], 96 * 7);
-
-    let _ = std::fs::remove_file(&out);
 }
 
 /// Decode random valid codes and assert the waveform is finite, the right length,
@@ -120,8 +125,6 @@ fn decode_random_codes_is_finite_and_bounded() {
     let energy: f32 = wav.iter().map(|x| x * x).sum::<f32>() / wav.len() as f32;
     assert!(energy > 0.0, "waveform is silent");
     eprintln!("decode ok: {} samples, rms {:.4}", wav.len(), energy.sqrt());
-
-    let _ = std::fs::remove_file(&out);
 }
 
 /// Parity vs the PyTorch golden dump, if present. The dump is
@@ -137,6 +140,25 @@ fn parity_against_golden_dump() {
     }
     let out = import_to_temp();
     let codec = Codec::load_inference(&out);
+
+    // The golden is tensors plus a claim; the claim only means anything paired
+    // with the checkpoint that produced it. `identity` is the set of config
+    // fields that fix every dumped shape.
+    let meta = std::path::Path::new(&DUMP_DIR).join("meta.json");
+    let Some(src) = brain_testutil::golden::Source::open_manifest(&meta, DUMPER) else {
+        return;
+    };
+    let c = &codec.cfg;
+    if !src.require(&[
+        ("num_quantizers", c.num_quantizers as i64),
+        ("codebook_size", c.codebook_size as i64),
+        ("decode_upsample_rate", c.decode_upsample_rate as i64),
+        ("latent_dim", c.latent_dim as i64),
+        ("decoder_dim", c.decoder_dim as i64),
+        ("decoder_hidden_size", c.hidden_size as i64),
+    ]) {
+        return;
+    }
 
     // Each .bin starts with a u64 LE element-count prefix (8 bytes), then data.
     let cb = std::fs::read(&codes_p).unwrap();
@@ -162,17 +184,19 @@ fn parity_against_golden_dump() {
         max_abs,
         mel_l1
     );
-    // Achieved on the official checkpoint vs the PyTorch golden dump (T=24):
-    //   max-abs ≈ 3.7e-2, log-mel L1 ≈ 4.6e-3.
-    // The waveform length is exact and the log-mel L1 is tiny (near-perfect
-    // perceptual parity). The residual max-abs is dominated by the reference
-    // forward running in reduced precision (Qwen-TTS bf16) and non-associative
-    // fp accumulation-order differences across this deep conv stack, not a
-    // structural mismatch — every stage is pure fp32 with exact RoPE/conv/GQA and
+    // Measured on the official checkpoint against the fp32 golden written by
+    // DUMPER (T=24, CPU backend): max-abs 5.7e-4, log-mel L1 7.7e-4. The
+    // waveform length is exact; the residual is non-associative fp
+    // accumulation order across this deep conv stack, not a structural
+    // mismatch. Every stage here is pure fp32 with exact RoPE/conv/GQA and
     // host-exact ConvNeXt LayerNorm/GELU.
+    //
+    // The ceilings keep real headroom over those measurements on purpose
+    // (max-abs ~100x, log-mel L1 ~13x): a bound fitted to one run goes red on
+    // the next backend or driver for no defect, while this much margin still
+    // catches a reassociation that changes the arithmetic (the GEMM conv
+    // lowering being the live example) rather than just reorders it.
     assert_eq!(got.len(), reference.len(), "length mismatch");
     assert!(max_abs.is_finite() && max_abs < 6e-2, "max-abs error too large: {max_abs}");
     assert!(mel_l1 < 1e-2, "log-mel L1 too large: {mel_l1}");
-
-    let _ = std::fs::remove_file(&out);
 }
