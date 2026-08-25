@@ -441,10 +441,10 @@ const LN_EPS: f32 = 1e-5;
 /// until its own `backward` reads them. For INFERENCE nothing reads them again
 /// once the block has produced its output, and at the released config that
 /// distinction is the difference between running and not: the set is ~441 MiB
-/// per block (58% of it the two `n_heads·t²` attention slabs), so 24 blocks
+/// per block, dominated by the two `n_heads·t²` attention slabs, so 24 blocks
 /// hold ~10.3 GiB of buffers that are live one at a time.
 ///
-/// One shared set plus a per-block `out` is ~0.6 GiB - a 16.7x reduction, and
+/// One shared set plus a per-block `out` is a small fraction of that, and
 /// the largest single saving available to this model after int8 weights.
 ///
 /// **Inference only, and structurally so.** Sharing this under the existing
@@ -1159,7 +1159,7 @@ struct Expert8 {
 ///   same point for the SwiGLU shape.
 /// * **Rows this expert is not routed to are skipped**, because
 ///   `moe_linear_gated_i8` takes the gate and returns early on a zero row.
-///   With `top_k = 8` of 64 that is 87.5% of the expert-row work the fp32 tier
+///   With `top_k = 8` of 64 that is 56 of every 64 experts' row work the fp32 tier
 ///   (which evaluates every expert densely and gates afterwards) still does.
 ///   The kernel is the naive one-thread-per-output tier deliberately - a tiled
 ///   kernel stages rows across a `workgroupBarrier()`, which a per-row early

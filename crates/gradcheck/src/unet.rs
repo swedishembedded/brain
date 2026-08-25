@@ -49,8 +49,8 @@ use sdxlunet::train::{UnetTrainer, TRAIN_PIPELINES};
 
 use crate::{directional_check, elementwise_check, CheckModel, Report};
 
-/// The latent the checks run at. Small, but still a multiple of the 2x
-/// downscale `UNetConfig::tiny`'s two levels need.
+/// The latent the checks run at. Small, but still a multiple of the
+/// per-level downscale `UNetConfig::tiny`'s two levels need.
 const H: u32 = 8;
 const W: u32 = 8;
 /// Text tokens. Deliberately NOT equal to `H*W` at either level, so a swapped
@@ -148,7 +148,8 @@ pub fn check_unet(seed: u64) -> Report {
 /// accumulates over many contributors. Dropping some of those contributors
 /// leaves a contraction that can be small, and best-of-n actively selects the
 /// direction where it is smallest. That is the measured failure mode T5's
-/// cross-block `axpy` fold showed (33% wrong, every directional check green),
+/// cross-block `axpy` fold showed (badly wrong in magnitude, every
+/// directional check green),
 /// which is why `elementwise_check` exists.
 ///
 /// Scoped to the two `linear_2` weights, not the whole conditioning chain.
