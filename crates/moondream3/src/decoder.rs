@@ -324,17 +324,17 @@ impl MoondreamDecoder {
         let tok = g.storage(1);
         g.write(&tok, &[token]);
         g.submit(&[], &[g.step(13, &[&tok, self.wb("tok.weight"), &row], &[d, 1], d)]);
-        let mut cur = row;
+        // Each layer has its OWN `KvCache`, so layer i's `out` is a distinct
+        // buffer that layer i+1 reads immediately and nothing else touches
+        // until the next token, by which point it has already been consumed.
+        // The hidden state can therefore stay on the device across all 24
+        // layers - an earlier version round-tripped it to the host per layer,
+        // which is 48 transfers per token and 24 forced syncs for nothing.
+        let mut cur: &DeviceBuffer = &row;
         for (i, b) in self.blocks.iter().enumerate() {
-            let out = b.decode_step(g, &caches[i], &cur, pos);
-            // `out` belongs to the layer's own cache scratch and the next layer
-            // overwrites its own, so copying between layers is not needed - but
-            // the buffer IS reused by this layer on the next token, so the value
-            // must be carried forward now.
-            let host = g.read(out, d as usize);
-            cur = g.storage_init("md.step", &host);
+            cur = b.decode_step(g, &caches[i], cur, pos);
         }
-        g.read(&cur, d as usize)
+        g.read(cur, d as usize)
     }
 
     /// Decoder backward (dense blocks): from the cached forward (call `forward`
@@ -872,9 +872,20 @@ impl MoondreamBlock {
         s.push(g.step(K_ROPE_PARTIAL_AT, &[qkv], &[1, nh, hd, stride3, d, pos, f(self.theta), self.rot_dim], nh * half));
         g.submit(&[], &s);
 
-        // Split the fused row into the three contiguous buffers the shared
-        // decode primitive binds. `slice_copy`'s job, done with `splice`-free
-        // reads because these are one-row copies.
+        // Split the fused row into the three contiguous buffers
+        // `gqa_decode_step` binds. This round-trips through the host, and that
+        // is a KNOWN cost rather than an oversight: the shared primitive takes
+        // q/k/v as separate buffers, so binding sub-ranges of the fused row
+        // would mean either duplicating its four dispatches here with
+        // `Gpu::step_sliced` (against the one-implementation rule) or widening
+        // `model::block`'s decode API for one caller.
+        //
+        // Left as-is deliberately. This layer ALREADY syncs once per token when
+        // tau is on (the `tqr`/`tvr` readback above, which the batched path
+        // does too), so the split adds a second sync rather than a first, and
+        // no machine here can run the real weights to say what either costs.
+        // Measure before restructuring - on this engine the profile has been
+        // right and the confident hypothesis has not.
         let row = g.read(qkv, stride3 as usize);
         g.write_f32(&kv.q, &row[..d as usize]);
         g.write_f32(&kv.k_new, &row[d as usize..2 * d as usize]);

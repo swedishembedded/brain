@@ -157,6 +157,26 @@ blocker; the pieces a `caps.rs` would have to call did not exist.
       budgeted instances - an fp32 request on a machine without room fails
       placement instead of evicting a working int8 one.
 
+### Known, unmeasured: two host syncs per layer per decoded token
+
+`MoondreamBlock::decode_step` round-trips to the host twice per layer: once for
+the tau scale (`tqr`/`tvr` -> `s3`, which the BATCHED path does too, so it is
+inherent to how tau is implemented rather than new) and once to split the fused
+`[1, 3d]` qkv row into the three separate buffers `model::block::gqa_decode_step`
+binds. At 24 layers that is up to 48 pipeline syncs per generated token.
+
+The split could be avoided with `Gpu::step_sliced` (sliced views of one buffer
+at disjoint offsets are explicitly legal), but only by duplicating the shared
+primitive's four dispatches locally or widening `model::block`'s decode API for
+one caller. Neither is worth doing against an unmeasured cost on a machine that
+cannot run the real weights. Profile per kernel kind first.
+
+One round-trip in this loop WAS pure waste and is fixed: the hidden state used
+to be read back and re-uploaded between every layer, on the mistaken belief that
+a layer's `out` buffer needed carrying forward. Each layer has its own
+`KvCache`, so layer i's `out` is consumed by layer i+1 immediately and nothing
+else touches it - the state now stays on the device across all 24 layers.
+
 ### Remaining
 
 - [x] A KV-cached decode path (`MoondreamModel::generate_kv`). The prompt pays
