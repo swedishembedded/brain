@@ -352,6 +352,48 @@ Where this lands matters as much as the fix (§F.7): batching belongs in the
 shared row-batched primitive, not in one model's step function, so the next
 caller inherits it.
 
+### F.2b The dual of batching: how many of those rows are the SAME row?
+
+§F.2 asks what else is standing on the same weights so `m` can go UP for free.
+The mirror question, and it has been worth more: **of the `m` rows this call
+already has, how many are distinct?**
+
+A `[t, width]` table whose row `i` is a pure function of one scalar `key[i]`
+has exactly `distinct(key)` different rows, however large `t` is. Compute
+those, keep a `[t]` index, and scatter. It is not an approximation - equal
+input bits produce the identical sequence of roundings, so the compact form is
+BIT-IDENTICAL and gates with `assert_eq!` on bits, no tolerance.
+
+Measured, on ltxv's per-token adaLN-single table (`[3520,4096] x
+[36864,4096]ᵀ` on the host, plus a 519 MB upload of the result, once per
+forward): the timesteps that key it are `denoise_mask * sigma`, so a plain
+text-to-video step has **one** distinct row and an anchored or long-form one
+has **two**. 10.26 s of host time per warm forward became 0.22 s, and the
+upload became 147 KB.
+
+Three rules this pattern comes with, each paid for:
+
+* **Dedup GENERICALLY, do not special-case "they are all equal".** A uniform
+  fast path plus a full-cost fallback gives up the entire win the moment a
+  single token is conditioned - which is every image-anchored and every
+  long-form generation. Deduplicating to the distinct set wins ~1750x in that
+  case instead of 1x, and it removes the fallback branch (and its test debt)
+  altogether: `distinct == t` degrades continuously to exactly the old cost.
+* **Key on RAW BITS, not `==`.** `0.0 == -0.0` is true and they are different
+  inputs; `NaN == NaN` is false and they are the same input. `f32::to_bits` is
+  total and is the only relation that licenses "same key, therefore same
+  answer".
+* **The failure mode is the SCATTER, and a uniform test cannot see it.** With
+  one distinct row every scatter is the same scatter. Mutation-verified here:
+  rotating the gather by one token passes the uniform case and fails the
+  two-value one. So the gate needs a distinct-count LADDER - 1, 2 interleaved,
+  several reused, all distinct - and 2 has to be interleaved, or a scatter that
+  assumed a contiguous split passes too.
+
+Ask it wherever a per-token/per-position quantity is derived from something
+coarser: timestep and noise-level embeddings, per-token conditioning tables,
+per-sample class embeddings in a batch, RoPE tables over repeated positions.
+
 ### F.3 Before writing anything: is there already a faster sibling?
 
 This is the highest-value question in the list and it costs one `grep`. It has

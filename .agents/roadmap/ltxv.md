@@ -5712,3 +5712,286 @@ Real weights, minutes (real conv VAE, tiny random-weight DiT, CPU -
 * **Nothing refuses two anchors at the same instant.** `--mid-frame-at` can name
   a frame another anchor already covers; the reference validates nothing there
   either, and neither does this.
+
+
+### Phase 27 - the per-token adaLN table stops being 3519 copies of one row
+
+The largest remaining non-compute item in a real forward was
+`ada_layer_norm_single`, on the HOST: a `[3520,4096] x [36864,4096]ᵀ` GEMM
+plus a `[3520,256] -> [3520,4096] -> [3520,4096]` timestep embedder, once per
+forward, followed by a 519 MB upload of the result. Phase 14 took it from
+75.8 s to 10.0 s and closed by naming the next step; this is that step.
+
+#### 0 - the premise, checked in the code before anything was built
+
+Every row of that table is a function of ONE scalar - that token's timestep -
+and nothing else. `pipeline::denoise` builds the timestep vector in exactly
+two places (`crates/ltxv/src/pipeline.rs`, the `frozen` match):
+
+* no conditioning: `vec![sigma; t]` - literally one value, `t` times;
+* conditioned: `f.mask.iter().map(|&m| m * sigma)`, where `mask` is
+  `denoise_mask` - `1.0` on a generated token, `0.0` on a frozen one
+  (an image anchor, a long-form window's carried context), or `1 - strength`
+  on a `--conditioning-strength` block.
+
+So the distinct-row count is **1** for plain text-to-video and **2** for
+everything anchored or carried - never 3520, and never input-dependent in a
+way that is hard to characterise. `--conditioning-strength` is global, so even
+three stills at three instants add only the one extra value. That was read off
+the code, not assumed, and it is what makes the rest of this entry a work
+DELETION rather than a trade.
+
+#### 1 - deduplicate generically, do not special-case "uniform"
+
+`dit::adaln::RowTable` (new, in the shared `dit` crate next to `add_table`)
+holds a per-token table as its DISTINCT rows plus a `[t]` u32 row map, with
+`distinct_rows()` keying on `f32::to_bits`.
+
+The alternative - detect "all timesteps equal", take a fast path, otherwise
+run the old one - was rejected before it was written. It gives up the whole
+win on exactly the shapes a fallback exists for: an image-anchored clip and
+every long-form continuation window have TWO distinct rows, and a
+uniform-only fast path sends both back to full cost. Deduplication wins ~1750x
+there instead of 1x, and it removes the fallback branch (and its test debt)
+altogether - `distinct == t` degrades continuously to precisely the old cost,
+which is also how the "before" arm below is measured.
+
+Bit-identity is structural: equal input BITS produce the identical sequence of
+roundings, and `backend_cpu::host_gemm::blocked_linear` gives every output
+element `bias` then `+= x*w` for ascending `k` regardless of how many rows
+accompany it (its own gate, Phase 14). Keying on bits rather than `==` is the
+part that licenses this - `0.0 == -0.0` is true on two different inputs and
+`NaN == NaN` is false on the same one.
+
+`adaln_row.wgsl` grows a fourth storage binding, `map: array<u32>`, and reads
+`tab[map[r] * NR * D + off]`. Everything else about it is unchanged, including
+the operand order that makes it bit-identical to the host
+`add_table` + `slice_mod` form.
+
+#### 2 - measured, both arms, same binary, same box, one idle P40
+
+`ltxv_bench streamed` grew a `distinct_timesteps` argument for exactly this:
+`1` is a real text-to-video step, `<tokens>` is what the stage cost before the
+dedup existed. Both arms are therefore the SAME build, back to back, with no
+tree drift between them.
+
+    BRAIN_LTXV_DIT=<real Q8_0 22B> \
+      ./target/release/ltxv_bench streamed 48 3520 1024 1 1 {3520|1}
+
+48 real layers, 3520 video tokens (25 frames at 1280x704), 1024 context,
+int8 compute, ONE resident session, `call 2` (the cache-hit call - the shape
+every forward of a generation past the first has). Best of 4 runs each; the
+first call of each run is the warm-up and never enters the statistics.
+
+| warm forward, 48 layers | no dedup (3520 distinct) | 1 distinct (a real step) | |
+|---|---:|---:|---:|
+| adaLN timestep embedder (host) | 1268.7 ms | 21.1 ms | **60.1x** |
+| adaLN table GEMM (host) | 8851.8 ms | 177.8 ms | **49.8x** |
+| **adaLN-single stage total** | **10243.4 ms** | **222.0 ms** | **46.1x** |
+| model-level adaLN upload | 519 MB | 147 KB + 14 KB map | **3400x** |
+| **whole warm forward** | **47.91 s** | **36.41 s** | **1.32x** |
+
+At 8 layers, same command with `8` in place of `48`, and with the middle
+column that decides whether the generic dedup was worth choosing over a
+uniform special case:
+
+| warm forward, 8 layers | no dedup (3520) | 2 distinct (anchored, long-form) | 1 distinct (plain t2v) |
+|---|---:|---:|---:|
+| adaLN-single stage total | 10302.0 ms | 608.6 ms | 199.2 ms |
+| whole warm forward | 16.40 s | 6.64 s | 6.15 s |
+
+**That middle column is the whole argument.** A "detect uniform, else fall
+back" design would put every image-anchored clip and every long-form
+continuation window in the LEFT column - 10.3 s and a 519 MB upload per
+forward. Deduplicating puts them within half a second of the best case
+instead. The layer-count independence is the other point: the stage runs once
+per forward however deep the stack is, which is why the 8-layer and 48-layer
+stage numbers agree.
+
+**The parts sum to the whole.** At 8 layers the two arms differ by 10.25 s of
+wall, of which 10.10 s is the adaLN stage and 0.15 s is the per-forward
+upload bucket; residual 0.00 s. At 48 layers the wall difference (11.50 s)
+exceeds the stage difference (10.02 s) by 1.5 s, which is inside the
+run-to-run spread of `block weight upload` at that depth (4.6-6.2 s across
+these runs, a partial window re-uploading its tail).
+
+**Nothing moved in the output.** `ltxv_bench` prints the forward's own output
+statistics, and across all four runs of each arm they reproduce to every digit
+printed. The uniform arm's line is character-for-character the one Phase 14
+and Phase 19 published for this shape:
+
+    len=450560 mean=0.060893 std=0.683607 min=-1.330047 max=1.784977 nonfinite=0
+
+**Confirmed by a real generation, on a second harness.** Same shape through
+the actual CLI - real Q8_0 22B DiT, real Gemma-4 encoder, real conv VAE, one
+P40:
+
+    brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
+      --prompt "a fishing boat crosses the harbour mouth at dawn, camera tracking left" \
+      --frames 25 --width 1280 --height 704 --fps 24 --steps 8 --seed 42 \
+      --output-path clip.mp4
+
+    ltxv: 393.2s total  (build 8.17s, text encode 0.1s, denoise 355.5s
+                         = 44.437s/forward, vae 28.9s, other 0.6s)
+
+Per-step, differenced out of the printed running averages: 104.00 (cold),
+then 37.94, 36.53, 35.21, 34.72, 35.40, 35.82, 34.38 - **best-of-7 warm
+forward 34.38 s**. The profiling pass that opened this phase measured the same
+command at **45.63 s** best-of-7 before it. That delta (11.25 s) matches the
+controlled two-arm bench delta (11.50 s) to a quarter of a second, on two
+independent harnesses, which is the cross-validation that matters here.
+
+#### 3 - a correction to two numbers this crate was carrying
+
+`ada_layer_norm_single` carried, in a comment, "the bulk of the ~76 s this
+stage cost per forward call (measured: the table GEMM alone is ~14 s of it)".
+An independent profile of the same command at the same shape measured 10.2 s
+(GEMM 8.9, embedder 1.4), and the two read as a 7.5x contradiction.
+
+Both are right and they measure different trees: the ~76 s / ~14 s figures
+are the PRE-Phase-14 state, quoted in a comment written by the commit that
+removed it. Re-derived here: 10243.4 ms is the correct pre-Phase-27 figure,
+for ONE call site (`adaln_single` in `forward_q_streamed_in`, once per
+forward - the AV `av_ca_*` families are on no production path), wrapping the
+timestep embedder plus the table GEMM plus the `ts_scaled` map. The comment is
+gone; the general lesson is `.agents/rules/lessons.md` #54.
+
+**And `stage_time` nests.** `forward_q_streamed: adaLN-single table (host)`
+encloses the two `ada_layer_norm_single: ...` lines printed just above it
+(measured residual: 5.1 ms in 10302.0), so summing all three double-counts the
+stage. `gpu_core::profile::stage_time` prints one line per call and has no
+nesting structure of its own, so the enclosing label now says it is a TOTAL
+and names what it nests.
+
+#### 4 - gates, and what each one would have missed alone
+
+* `dit::adaln`'s unit tests: uniform, two interleaved, all distinct, and
+  signed zero as two keys rather than one.
+* `ltxv::dit::tests::batched_adaln_timestep_embedding_is_bit_identical_to_the_
+  per_row_form`, extended from four shapes to four shapes x three timestep
+  patterns, comparing bit patterns against the per-row
+  `dit::timestep::pixart_timestep_embed` loop.
+* `crates/gpu-core/tests/adaln_row_gather.rs` (new): the kernel itself against
+  the host arithmetic, over a distinct-count ladder, on BOTH backends. It
+  lives in `gpu-core` because `ltxv`'s only production caller of this kernel
+  is int8, which the CPU JIT cannot dispatch at all (`matmul_i8_dyn` has more
+  than one top-level barrier) - so `ltxv`'s own tests can never run
+  `adaln_row` on `backend-cpu`, and a kernel declared `@cpu yes` needs a gate
+  that actually runs it there.
+* `device_residency.rs::on_device_modulation_is_bit_identical_to_the_host_
+  combine_and_slice`, extended to the same ladder. This is the end-to-end one:
+  the eager arm still materialises a DENSE `[t, 9*dim]` table and indexes it
+  by token, so it is an independent statement of which row belongs to which
+  token. That is why the eager paths were deliberately NOT converted to the
+  compact form - two arms sharing one row map cannot gate the row map.
+
+**Mutation-verified, on the failure mode this change actually has.** Rotating
+the device gather by one token (`map[(r + 1) % R]`):
+
+| mutation | uniform case | two interleaved | caught by |
+|---|---|---|---|
+| gather rotated by one token | **PASSES** | **FAILS** | bit patterns, GPU and CPU alike |
+| dedup collapses every key to row 0 | passes the bit compare (both arms share the bug) | - | the ladder's own "different patterns must give different answers" guard, and `dit::adaln`'s unit tests |
+
+The first row is the whole argument for the ladder: **with one distinct row
+every scatter is the same scatter**, so a suite whose cases were all uniform
+would have shipped a broken scatter green. The second row is the argument for
+the setup guard - a mutation upstream of BOTH arms is invisible to a
+two-arm comparison and needs a test that the arms disagree when they should.
+
+Restored and re-run green after each.
+
+#### 5 - what this phase does NOT claim
+
+* **The whole-run number is one arm, not two.** 393.2 s is measured, after.
+  The 547.0 s it is set against was measured before, on a tree that has since
+  moved (two other agents were editing `ltxv` and `cli` files during this
+  pass) and on a run whose text encode was not necessarily cache-warm - this
+  one's was, at 0.1 s. Of the 153.8 s difference, **90 s is attributable**
+  (8 warm forwards x the 11.25 s the same run's own per-step curve shows) and
+  the remaining ~64 s is not attributed. The forward-level delta is the number
+  to trust; the whole-run pair is a sanity check, not an A/B. Making a real
+  `t2v` run take the old path requires reverting the change, so a true
+  whole-run A/B was not attempted against a tree being edited underneath it.
+* **The activation reserve was not re-fitted.** `devres::activation_reserve_
+  bytes`'s `PER_TOKEN_WGPU` was fitted to a measured plateau that INCLUDED the
+  519 MB adaLN table (and wgpu's 2.00x resident cost on it). Removing the
+  table should buy roughly a gigabyte of that plateau back, i.e. two or three
+  more resident blocks at 720p - but re-fitting it is Phase 18's measurement
+  procedure, not an edit, and it was not run. Recorded as a real, available
+  win.
+* **The nine `[t, dim]` modulation buffers are untouched.** `ModBufs::derive`
+  still allocates 9 x 57.7 MB of device scratch per block at T=3520 and fills
+  them with `t` copies of one row whenever the table has one distinct row.
+  Making the CONSUMERS broadcast instead would remove ~519 MB of device
+  traffic per block, but it changes `gate_row`/`norm_mod`'s contracts across
+  several kernels rather than one, and this pass stopped at the host and the
+  PCIe bus.
+* **`ada_layer_norm_single`'s AV call sites gain nothing measurable.** They
+  dedup too (the code is shared), but the AV DiT is on no production path and
+  its gate tables already ran at `rows = 1`.
+* **The host GEMM at `u = 1` is single-threaded.** `blocked_linear`
+  parallelises over row TILES, so one distinct row is one tile is one core
+  streaming the 604 MB weight matrix - 178-387 ms, the whole remaining cost of
+  this stage. Column-parallelising it for small `m` would be bit-identical and
+  is worth ~0.3 s of a 36 s forward; measured and left, since it belongs in
+  `backend-cpu`'s own sweep rather than here.
+
+#### 6 - two things audited in the same files, one of which was a false alarm
+
+**`matmul_gemv`'s registration in `crates/ltxv/src/block.rs` is NOT dead, and
+removing it would have been a silent corruption.** The claim under audit was
+that no ltxv shape can reach it, because `model::block::gemm_variant` picks it
+only at `m <= 32` and every ltxv linear passes a token count (3520/1024/128),
+so the six specialised `matmul_gemv_reg#MREG=n` pipelines `gpu_core::upgrade::
+expand` appends at every device open are pure cost. The first half is true of
+PRODUCTION shapes and is why it appears in no profile. The second half is
+false, and the measurement says so directly - `linear()` instrumented to print
+its selected kernel index, over `cargo test -p brain-ltxv --test shard_parity
+-- --nocapture`:
+
+    112 PROBE_LINEAR m=6 kind=16 wg=true
+     28 PROBE_LINEAR m=4 kind=16 wg=true
+
+Kind 16 is `K_MATMUL_GEMV`. 140 dispatches in ONE test binary: the tiny-config
+parity ladder runs text cross-attention at `context_len` 3, 4 and 6, and the
+K/V projections there pass `m = context_len`. Since the registration is what
+maps index 16, removing it would re-point every one of those at
+`kv_k_headt` - a live kernel with different bindings, which panics on a GPU
+backend and, per `.agents/rules/lessons.md` #53, silently reads out of bounds
+on `backend-cpu`.
+
+The same argument fails for the other diffusion crates too, checked rather
+than assumed: `flux1` (`gemv: Some(K_MATMUL_GEMV)`, and `gemm_variant`'s own
+doc records that flux1 is the crate that LEARNED to route skinny-M there),
+`wan` (per-request modulation at `rows = 1`), `pulid` (its registration
+carries a comment naming its own `m = 1` `id_map` chain and `m = 32` `to_kv`
+injections) and `instantid` all register it and all have a skinny-M shape.
+`sdxlunet` mentions it only in its bench's roofline table. **Dead
+registrations found: zero, of five crates checked.** The generalisable form:
+"no PRODUCTION shape dispatches it" and "no shape dispatches it" are different
+claims, and a kernel index is load-bearing for the whole list whether or not
+anything dispatches it.
+
+**`ltxv_bench` now prints the DEFECT block.** It was the only `*_bench` in the
+tree calling `print_top` alone, where `mm3_bench`, `wan_bench`, `qwen_bench`,
+`unet_bench` and `vqgan_bench` all follow it with `p.defects(r, 5.0)` and print
+the rows. That is why this model's roof-floor defects were invisible to its own
+harness: a table that ranks kernels but never says which are BELOW their roof
+leaves the roofline arithmetic to the reader. Both of this bench's profile
+sites (`dit` and `vae`) now go through one `report()` helper with the same
+shape and wording the other five use.
+
+It paid for itself on the first run. `./target/release/ltxv_bench dit 2 2 512
+128`, against this P40's measured 10517 GFLOP/s / 287.5 GB/s roofline:
+
+    DEFECT  rmsnorm_eps    4.7% of its memory roof (floor 35%) - 10.7% of this pass
+
+`rmsnorm_eps` is the one-thread-per-row form; `rmsnorm_rows` is the
+cooperative workgroup-per-row sibling this tree already carries and which
+`model::block::rms_variant` already knows how to select. That is kernels.md
+§F.3's exact shape - a fast sibling a model never learned about - and it is
+now a visible row rather than an arithmetic exercise. NOT fixed in this phase:
+it wants its own crossover sweep and its own gate, and the share it can return
+has to be re-measured at the real 3520-token width (this reading is at 512).
+Recorded as the next target.
