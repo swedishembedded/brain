@@ -24,7 +24,21 @@ use model::{Shard, Shardable};
 
 use crate::args::Args;
 
+/// The one spelling of this command's grammar - printed on `--help` (to
+/// stdout, exit 0) and on a bad invocation (to stderr, exit 2). One string,
+/// so the two can never drift apart.
+const USAGE: &str = "usage: brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T] \
+                     [--train] [--i8] [--stages N] [--run]";
+
 pub fn run_flops(argv: &[String]) {
+    // Before the parser: `--help` is not a flag any of the branches below
+    // consume, so leaving it to `Args::finish` made asking for help look like
+    // a misuse ("ignoring unrecognised args") of a command that then printed
+    // its usage anyway and exited non-zero.
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return;
+    }
     let mut a = Args::new(argv);
     let model = a.str_or("--model", "");
     let weights = a.take_str("--weights");
@@ -40,10 +54,7 @@ pub fn run_flops(argv: &[String]) {
         "gpt" => gpt_flops(weights.as_deref(), b, block, train, stages, run),
         "lfm" => lfm_flops(weights.as_deref(), b, block, train, run),
         _ => {
-            eprintln!(
-                "usage: brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T] \
-                 [--train] [--i8] [--stages N] [--run]"
-            );
+            eprintln!("{USAGE}");
             std::process::exit(2);
         }
     }

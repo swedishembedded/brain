@@ -105,7 +105,15 @@ Placement:
   denoise step run CONCURRENTLY, one per card, and the text encoder runs on
   the card the conditional forward will not use. The result is bit-identical
   to running them one after another (the two forwards are independent, so no
-  reduction is split) - measured 1.94x wall on two Tesla P40s. Set
+  reduction is split), and the two DiT forwards then cost about what one of
+  them does. The WALL-CLOCK win is smaller than that and is a property of
+  your box and of the current code rather than of this flag, so no fixed
+  multiplier is quoted here: whatever a denoise step spends on host-side work
+  shared by both branches does not move to a second card, and two concurrent
+  branches contend for the same cores. Measure your own by running the same
+  request twice, once with BRAIN_LTXV_CFG_PARALLEL=0, or run
+  crates/ltxv/tests/cfg_parallel.rs, which times both placements and proves
+  the two outputs identical. Set
   BRAIN_LTXV_CFG_PARALLEL=0 to force the old single-card behaviour; --device
   gpu0 also confines the run to one card, since placement never leaves the
   schedulable set --device names.

@@ -224,10 +224,12 @@ pub fn max_latent_frames(lh: usize, lw: usize, max_tokens: usize) -> Result<usiz
 /// The largest context an `lh` x `lw` plan can actually carry under
 /// `max_tokens`, capped at `want`.
 ///
-/// [`window_plan`] REFUSES a grid with no room for `want + 1` latent frames,
-/// and for generation that is right: the caller picked the resolution, so a
-/// smaller one is available and a truncated motion history is not what
-/// [`CONTEXT_LATENT_FRAMES`] cites the reference for.
+/// [`window_plan`] REFUSES a grid with no room for `want + 1` latent frames
+/// once a clip needs a second window, and for generation that is right: the
+/// caller picked the resolution, so a smaller one is available and a
+/// truncated motion history is not what [`CONTEXT_LATENT_FRAMES`] cites the
+/// reference for. (A clip that fits ONE window is never refused for it - it
+/// carries no context at all.)
 ///
 /// Refinement has neither escape. Its grid is the input clip's grid times the
 /// upscale factor squared - four times the tokens per latent frame - and its
@@ -281,6 +283,15 @@ pub fn window_plan(frames: usize, lh: usize, lw: usize, context: usize, max_toke
         return Err("a long-form window plan needs at least one carried latent frame: a zero-frame context is independent windows, which is the discontinuity this path exists to remove".into());
     }
     let max_lat = max_latent_frames(lh, lw, max_tokens)?;
+    let k_total = (frames - 1) / 8;
+    // A clip that fits is one window carrying NOTHING, so `context` is not a
+    // cost it pays and not a reason to refuse it - `k_total < max_lat` makes
+    // its `k_total + 1` latent frames fit the ceiling on their own. The
+    // context-fits check below therefore has to come after this, not before:
+    // it is a statement about a CONTINUATION window, and this clip has none.
+    if k_total < max_lat {
+        return Ok(vec![Window { context: 0, new: k_total + 1, first_frame: 0 }]);
+    }
     if max_lat < context + 1 {
         return Err(format!(
             "a {}x{} request ({} tokens per latent frame) leaves room for {max_lat} latent frames under the {max_tokens}-token ceiling, and a continuation window needs {context} carried frames plus at least one new one - generate at a smaller size, or lower the context",
@@ -288,10 +299,6 @@ pub fn window_plan(frames: usize, lh: usize, lw: usize, context: usize, max_toke
             lh * 32,
             lh * lw
         ));
-    }
-    let k_total = (frames - 1) / 8;
-    if k_total < max_lat {
-        return Ok(vec![Window { context: 0, new: k_total + 1, first_frame: 0 }]);
     }
     // Every window after the first spends `context` of its budget before it
     // generates anything, so that - not `max_lat` - is what sets their count.

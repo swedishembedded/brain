@@ -147,6 +147,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_FLUX2_ALLOW_NC` | `1` opts in to the FLUX Non-Commercial-licensed 9B variants | required, not set |
 | `BRAIN_FLUX1_I8_KEEP_F32` / `BRAIN_FLUX2_I8_KEEP_F32` | keeps a specific sub-layer at fp32 under INT8 inference, trading a little memory for accuracy | off |
 | `BRAIN_LTXV_TEXT_CACHE` | reuse of a previously encoded LTX-2.5 text context for the same prompt and text encoder (`0` opts out) | on |
+| `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES` | disk budget for that cache, in bytes; after each write the least-recently-used entries are deleted until the directory fits (a non-positive or unparseable value is ignored with a warning, and the single most recently used entry is never evicted). One entry is tens of MB at the real checkpoint's dimensions, and a distinct prompt is a distinct entry | 2 GiB (`2147483648`) |
 | `BRAIN_LTXV_TEXT_PRECISION` | `fp32` or `int8` for the LTX-2.5 text encoder's projections; a device with no packed-int8 path falls back to `fp32` regardless | `int8` for a quantized encoder, else `fp32` |
 | `BRAIN_YOLOV8_BATCH` | YOLO true-batch forward width | 1 |
 | `BRAIN_SAM2_VARIANT` | SAM 2.1 variant (`tiny`/`large`) | `tiny` |

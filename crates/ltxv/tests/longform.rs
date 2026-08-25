@@ -102,6 +102,33 @@ fn a_request_longer_than_one_window_rolls_a_latent_context_across_every_seam() {
     assert_eq!(reassembled(&plan), (0..frames).collect::<Vec<_>>(), "the windows do not reassemble to the requested clip");
 }
 
+/// A grid too dense to carry a context is only a problem for a clip that
+/// needs a SECOND window. A clip that fits one window carries nothing, so the
+/// context it would have carried is not a cost it ever pays and not a reason
+/// to refuse it.
+///
+/// 25 frames at 1920x1088 is 4 latent frames over a 34 x 60 grid = 8160
+/// tokens, comfortably one window - even though that grid holds only 6 latent
+/// frames in total and so could never host an 8-frame carried context. The
+/// single-window path is the one documented to be "unchanged, bit for bit,
+/// and none of this runs", and a context that never crosses a seam cannot
+/// make it illegal.
+#[test]
+fn a_clip_that_fits_one_window_is_not_refused_for_a_context_it_never_carries() {
+    let (lh, lw) = (34usize, 60usize); // 1088 x 1920
+    assert!(
+        CONTEXT_LATENT_FRAMES + 1 > LONGFORM_MAX_TOKENS / (lh * lw),
+        "this grid must be too dense for a carried context, or the test proves nothing"
+    );
+    let plan = window_plan(25, lh, lw, CONTEXT_LATENT_FRAMES, LONGFORM_MAX_TOKENS)
+        .expect("25 frames at 1920x1088 is 8160 tokens - one window, carrying nothing");
+    assert_eq!(plan.len(), 1, "a request that fits one window must not be split: {plan:?}");
+    assert_eq!(plan[0].context, 0, "a single window has no predecessor to carry from");
+    assert_eq!(plan[0].new, 4);
+    assert_eq!(plan[0].emitted_frames(), 25);
+    assert!(plan[0].tokens(lh, lw) <= LONGFORM_MAX_TOKENS, "the one window must fit the ceiling it was planned under");
+}
+
 /// A request the causal VAE cannot represent, and a geometry where the
 /// context alone already fills the token ceiling, are both refused before any
 /// weight is read - the caller gets told, rather than getting an

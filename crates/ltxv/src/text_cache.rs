@@ -49,8 +49,57 @@
 //! workspace already has (`BRAIN_PIPELINE_CACHE_DIR`, else
 //! `XDG_CACHE_HOME/brain`, else `~/.cache/brain`), not a second copy of that
 //! ladder. Set `BRAIN_LTXV_TEXT_CACHE=0` to disable.
+//!
+//! # How big it is allowed to get, and what goes first
+//!
+//! One entry is `2 * context_len * cross_attention_dim` fp32 values plus a
+//! validity row - tens of megabytes at the real checkpoint's dimensions - and
+//! the key includes the PROMPT, so a distinct prompt is a distinct file
+//! forever. An unbounded content-addressed cache on a shared cache directory
+//! is a disk-exhaustion bug with a slow fuse, not a cache, so writes are
+//! bounded by [`DEFAULT_MAX_BYTES`] (overridable with
+//! `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES`) and [`prune`] runs after every store.
+//!
+//! **Eviction is least-recently-USED, not oldest-written**, and the
+//! difference is the whole reason this cache exists. The workflow it serves
+//! is a change-something-else loop over a prompt that stays put, so the entry
+//! most worth keeping is routinely the oldest one on the disk. Oldest-first
+//! would throw away exactly the prompt being iterated on. Recency is carried
+//! by the entry file's own mtime, which [`load`] rewrites on every hit -
+//! atime cannot be used for this, because a `relatime`-mounted filesystem
+//! (the default) does not update it on a read that happens within the day.
 
 use serde_json::json;
+
+/// Default disk budget for this cache: 2 GiB, the same byte budget
+/// `wm_display::record::DEFAULT_BYTE_BUDGET` caps a recording at - this
+/// workspace's one existing answer to "how much of a shared disk may a
+/// derived-data writer take", reused rather than re-argued.
+///
+/// It is a bound, not a target: nothing pre-allocates it, and a machine that
+/// only ever encodes a handful of prompts never approaches it. At the real
+/// checkpoint's dimensions it holds roughly sixty distinct prompts, which is
+/// far more iteration than one working session does.
+pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// [`DEFAULT_MAX_BYTES`], or `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES` when it names
+/// a usable number. A value that does not parse, or is zero, is ignored with
+/// a warning rather than silently taken as "keep nothing" - the same
+/// convention `crate::longform::max_window_tokens_from_env` uses for the same
+/// class of knob. To turn the cache off, use `BRAIN_LTXV_TEXT_CACHE=0`, which
+/// is the switch that means that.
+pub fn max_bytes() -> u64 {
+    match std::env::var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES").ok().as_deref().map(str::trim) {
+        Some(v) if !v.is_empty() => match v.parse::<u64>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(value = v, "BRAIN_LTXV_TEXT_CACHE_MAX_BYTES is not a positive integer; using the built-in budget");
+                DEFAULT_MAX_BYTES
+            }
+        },
+        _ => DEFAULT_MAX_BYTES,
+    }
+}
 
 /// Every input [`crate::pipeline`]'s real text encode is a function of.
 #[derive(Clone, Debug, PartialEq)]
@@ -200,8 +249,73 @@ pub fn load(key: &Key) -> Option<Encoded> {
         tracing::warn!(path = %path.display(), "text-context cache entry has inconsistent shapes; ignoring it");
         return None;
     }
+    touch(&path);
     tracing::info!(path = %path.display(), context_len, "text context served from cache");
     Some(Encoded { ctx_cond, ctx_uncond, context_valid, context_len })
+}
+
+/// Mark `path` as used NOW, by rewriting its mtime - the recency [`prune`]
+/// evicts against. Best-effort: a cache on a read-only or exotic filesystem
+/// loses eviction ACCURACY (it degrades to oldest-written), never
+/// correctness, so a failure is not worth failing a generation over.
+fn touch(path: &std::path::Path) {
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// Delete least-recently-used entries from `dir` until it holds at most
+/// `budget` bytes.
+///
+/// Takes the directory and the budget explicitly rather than reading the
+/// environment, so the policy is testable without a process-wide cache
+/// directory or a process-wide budget.
+///
+/// The single most recently used entry is never evicted, even when it alone
+/// exceeds `budget`: a budget smaller than one encode cannot be honoured by
+/// deleting the entry the caller is about to read back, only by refusing to
+/// cache at all, and `BRAIN_LTXV_TEXT_CACHE=0` is how a caller says that.
+///
+/// Best-effort throughout. An unreadable directory, an entry that vanished
+/// under a concurrent run, a delete that fails: none of them are a reason to
+/// fail a generation, so each is skipped. Two runs pruning at once may each
+/// count bytes the other is deleting and over-evict slightly; the budget is a
+/// bound on disk use, and over-shooting it downward costs a re-encode, not
+/// correctness.
+pub fn prune(dir: &std::path::Path, budget: u64) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    // (used_at, len, path), where `used_at` is the entry's mtime - rewritten
+    // by `touch` on every hit, so it is a LAST-USE time, not a birth time.
+    let mut entries: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = rd
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "safetensors"))
+        .filter_map(|e| {
+            let md = e.metadata().ok()?;
+            md.is_file().then(|| (md.modified().unwrap_or(std::time::UNIX_EPOCH), md.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = entries.iter().map(|(_, len, _)| len).sum();
+    if total <= budget {
+        return;
+    }
+    // Least recently used first; the path breaks ties so the order is total
+    // and a filesystem with a coarse mtime cannot make eviction arbitrary.
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+    let last = entries.len().saturating_sub(1);
+    for (_, len, path) in entries.drain(..last) {
+        if total <= budget {
+            return;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                total -= len.min(total);
+                tracing::info!(path = %path.display(), bytes = len, "evicted a least-recently-used text-context cache entry");
+            }
+            Err(e) => tracing::debug!(path = %path.display(), error = %e, "could not evict a text-context cache entry"),
+        }
+    }
 }
 
 /// Store `enc` under `key`. Best-effort: a cache that cannot be written is
@@ -227,13 +341,36 @@ pub fn store(key: &Key, enc: &Encoded) {
     ];
     match checkpoint::st::save_safetensors(&path.to_string_lossy(), &tensors, &json!({ "key": key.to_json() }), None) {
         Ok(()) => tracing::info!(path = %path.display(), context_len = enc.context_len, "text context cached"),
-        Err(e) => tracing::warn!(path = %path.display(), error = %e, "could not write the text-context cache entry"),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "could not write the text-context cache entry");
+            return;
+        }
+    }
+    // The only point at which this cache grows, so the only point that has to
+    // bring it back under budget.
+    if let Some(dir) = path.parent() {
+        prune(dir, max_bytes());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Several tests below mutate PROCESS-WIDE environment variables this
+    /// module reads (`BRAIN_PIPELINE_CACHE_DIR`, `BRAIN_LTXV_TEXT_CACHE`,
+    /// `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES`), and `cargo test` runs one
+    /// binary's tests on many threads. Without a guard they race: one test's
+    /// cache directory, budget or off-switch lands in the middle of
+    /// another's run, and the failure is intermittent. Holding this for the
+    /// duration of each such test serializes exactly those and nothing else.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        // Crate-wide poison policy: a panicking test must not turn every
+        // later test into a poisoned-lock panic that hides the real failure.
+        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn key() -> Key {
         Key {
@@ -281,6 +418,7 @@ mod tests {
     /// been forced to the same filename.
     #[test]
     fn a_mismatched_key_is_a_miss_not_a_wrong_hit() {
+        let _env = env_guard();
         let tmp = std::env::temp_dir().join("brain-ltxv-text-cache-test");
         // SAFETY-equivalent note: this test owns the process's cache dir for
         // its duration; it runs single-threaded within its own binary.
@@ -313,8 +451,100 @@ mod tests {
         unsafe { std::env::remove_var("BRAIN_PIPELINE_CACHE_DIR") };
     }
 
+    /// Write `n` byte-sized entries into `dir`, entry `i` last used `n - i`
+    /// hours ago - so entry `0` is the least recently used.
+    fn seeded_entries(dir: &std::path::Path, n: usize, bytes: usize) -> Vec<std::path::PathBuf> {
+        std::fs::create_dir_all(dir).unwrap();
+        (0..n)
+            .map(|i| {
+                let p = dir.join(format!("{i:016x}.safetensors"));
+                std::fs::write(&p, vec![0u8; bytes]).unwrap();
+                let age = std::time::Duration::from_secs(3600 * (n - i) as u64);
+                let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+                f.set_modified(std::time::SystemTime::now() - age).unwrap();
+                p
+            })
+            .collect()
+    }
+
+    /// The property that keeps this cache from filling a shared disk: it has
+    /// a budget, the budget is enforced, and what goes first is the entry
+    /// nothing has read for the longest - never the entry a caller is
+    /// iterating on, which under oldest-written eviction is exactly what
+    /// would go.
+    #[test]
+    fn the_cache_is_bounded_and_evicts_the_least_recently_used_entry_first() {
+        let dir = std::env::temp_dir().join("brain-ltxv-text-cache-prune-test");
+        std::fs::remove_dir_all(&dir).ok();
+        let paths = seeded_entries(&dir, 4, 1000);
+
+        // A budget for two entries: the two least recently used go.
+        prune(&dir, 2000);
+        let live: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+        assert_eq!(live, vec![false, false, true, true], "eviction is not least-recently-used first: {live:?}");
+        let total: u64 = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+        assert!(total <= 2000, "the cache is {total} bytes, over its 2000-byte budget");
+
+        // Reading an entry is USE: the oldest-written entry survives a
+        // further prune once it has been touched, and the untouched younger
+        // one goes instead.
+        touch(&paths[2]);
+        prune(&dir, 1000);
+        assert!(paths[2].exists(), "an entry read since the last prune must not be the first evicted");
+        assert!(!paths[3].exists(), "the entry nothing has read must be the one that goes");
+
+        // A budget smaller than one entry keeps exactly one - refusing to
+        // cache is spelled BRAIN_LTXV_TEXT_CACHE=0, not "delete what was just
+        // written".
+        prune(&dir, 1);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "prune must keep the most recently used entry");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A store has to leave the cache under budget, or the budget is only a
+    /// number in a doc comment. Exercised through the real writer, so the
+    /// entry size is whatever the real file format costs.
+    #[test]
+    fn a_store_leaves_the_cache_under_its_budget() {
+        let _env = env_guard();
+        let tmp = std::env::temp_dir().join("brain-ltxv-text-cache-budget-test");
+        std::fs::remove_dir_all(&tmp).ok();
+        unsafe { std::env::set_var("BRAIN_PIPELINE_CACHE_DIR", &tmp) };
+        unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE") };
+        unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES") };
+        let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], context_len: 2 };
+        let base = Key { cross_attention_dim: 4, ..key() };
+        let dir = tmp.join("ltxv-text-context");
+        let read_total = || -> (usize, u64) {
+            let e: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+            (e.len(), e.iter().map(|e| e.metadata().unwrap().len()).sum())
+        };
+
+        // One entry at the default budget, to learn what the real writer
+        // actually costs; then a budget for exactly two of them.
+        store(&Key { prompt: "prompt 0".into(), ..base.clone() }, &enc);
+        let (n, one) = read_total();
+        assert_eq!(n, 1, "the first store must produce exactly one entry");
+        unsafe { std::env::set_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES", (2 * one).to_string()) };
+        for i in 1..6 {
+            store(&Key { prompt: format!("prompt {i}"), ..base.clone() }, &enc);
+        }
+        let (n, total) = read_total();
+        assert_eq!(n, 2, "six distinct prompts under a two-entry budget must leave two entries, not {n}");
+        assert!(total <= 2 * one, "{n} entries totalling {total} bytes is over the {}-byte budget", 2 * one);
+        // And what survived is what was written last, not what was written first.
+        assert!(load(&Key { prompt: "prompt 5".into(), ..base.clone() }).is_some(), "the most recent entry must survive its own prune");
+        assert!(load(&Key { prompt: "prompt 0".into(), ..base.clone() }).is_none(), "the least recently used entry must have been evicted");
+
+        std::fs::remove_dir_all(&tmp).ok();
+        unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES") };
+        unsafe { std::env::remove_var("BRAIN_PIPELINE_CACHE_DIR") };
+    }
+
     #[test]
     fn the_cache_can_be_turned_off() {
+        let _env = env_guard();
         unsafe { std::env::set_var("BRAIN_LTXV_TEXT_CACHE", "0") };
         assert!(!enabled());
         assert!(load(&key()).is_none());
