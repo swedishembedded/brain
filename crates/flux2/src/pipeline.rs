@@ -43,6 +43,25 @@ impl Paths {
     }
 }
 
+/// How many leading reference images contribute NO conditioning tokens.
+///
+/// Under `strength` the first reference is VAE-encoded into the init latent
+/// instead of being attended to, so it must not be counted when sizing the
+/// joint sequence. Sizing it in anyway allocates attention scratch for tokens
+/// the denoise loop never reads: at 1024x768 that is an extra 3072 tokens, the
+/// difference between a decode fitting a 24 GB card and an out-of-memory abort.
+/// The denoise loop and the position-id builder both apply this same rule, so
+/// it lives here once rather than being restated at every sizing site.
+pub fn ref_skip(opts: &GenOpts) -> usize {
+    usize::from(opts.strength.is_some_and(|s| s < 1.0))
+}
+
+/// Conditioning tokens `refs` actually contribute under `opts` -- what a
+/// pipeline must be sized for, in latent tokens.
+pub fn ref_tokens(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> u32 {
+    refs.iter().skip(ref_skip(opts)).map(|(_, h, w)| (h / 16) * (w / 16)).sum()
+}
+
 /// A LoRA adapter to fold in before the model is built.
 ///
 /// `path` selects the family by extension: a `.safetensors` is a third-party
@@ -429,7 +448,7 @@ impl Pipeline {
         // Keep in step with the token builder: under `strength` the first
         // reference is consumed as the init latent, so it contributes no
         // reference tokens and therefore no reference position ids.
-        let ref_skip = if o.strength.is_some_and(|st| st < 1.0) { 1 } else { 0 };
+        let ref_skip = ref_skip(o);
         let ref_dims: Vec<(usize, usize)> = r
             .refs
             .iter()
@@ -484,7 +503,7 @@ impl Pipeline {
             // greyscale evidence), which is not what img2img means. Standard
             // img2img: the init image is the conditioning. Extra references
             // (2nd onward) still ride along as edit context.
-            let ref_skip = if o.strength.is_some_and(|s| s < 1.0) { 1 } else { 0 };
+            let ref_skip = crate::pipeline::ref_skip(o);
             for (chw, rh, rw) in r.refs.iter().skip(ref_skip) {
                 progress(0, max_steps_hint + 2, "encoding reference");
                 match self.encode_image(chw, *rh, *rw) {
@@ -680,4 +699,42 @@ pub fn ref_from_hwc(hwc: &[f32], w: u32, h: u32) -> Result<(Vec<f32>, u32, u32),
         }
     }
     Ok((chw, ch, cw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn img(h: u32, w: u32) -> (Vec<f32>, u32, u32) {
+        (Vec::new(), h, w)
+    }
+
+    /// A pipeline must be sized for the tokens the denoise loop actually
+    /// attends to. Under `strength` the first reference becomes the init
+    /// latent and contributes none, so counting it allocates attention scratch
+    /// for tokens nothing ever reads -- at 1024x768 an extra 3072 of them,
+    /// which is what pushed a klein-9b decode past a 24 GB card.
+    #[test]
+    fn the_strength_init_reference_contributes_no_conditioning_tokens() {
+        let refs = vec![img(768, 1024), img(768, 1024)];
+        let base = GenOpts { width: 1024, height: 768, ..GenOpts::default() };
+
+        // No strength: every reference conditions, so both are counted.
+        let no_str = GenOpts { strength: None, ..base.clone() };
+        assert_eq!(ref_skip(&no_str), 0);
+        assert_eq!(ref_tokens(&refs, &no_str), 2 * 48 * 64);
+
+        // With strength: the first is the init latent, only the second conditions.
+        let with_str = GenOpts { strength: Some(0.4), ..base.clone() };
+        assert_eq!(ref_skip(&with_str), 1);
+        assert_eq!(ref_tokens(&refs, &with_str), 48 * 64);
+
+        // A lone reference under strength conditions on nothing at all.
+        assert_eq!(ref_tokens(&refs[..1], &with_str), 0);
+
+        // strength == 1.0 starts from pure noise, so nothing is consumed.
+        let full = GenOpts { strength: Some(1.0), ..base };
+        assert_eq!(ref_skip(&full), 0);
+        assert_eq!(ref_tokens(&refs, &full), 2 * 48 * 64);
+    }
 }

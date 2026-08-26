@@ -187,8 +187,8 @@ pub fn refs_from(inv: &Invocation, require_primary: bool) -> Result<Vec<(Vec<f32
 }
 
 /// Total reference latent tokens for a set of pre-cropped refs.
-pub fn ref_tokens(refs: &[(Vec<f32>, u32, u32)]) -> u32 {
-    refs.iter().map(|(_, h, w)| (h / 16) * (w / 16)).sum()
+pub fn ref_tokens(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> u32 {
+    crate::pipeline::ref_tokens(refs, opts)
 }
 
 /// Run one generation on a built pipeline and wrap the result as an
@@ -311,7 +311,7 @@ impl Action for Flux2Action {
                 let paths = Paths::from_env()?;
                 let refs = refs_from(inv, self.name == "edit")?;
                 let n_gen = (p.opts.height / 16) * (p.opts.width / 16);
-                let n_ref = ref_tokens(&refs);
+                let n_ref = ref_tokens(&refs, &p.opts);
                 let key: HotKey = (p.variant.clone(), p.precision.name(), p.opts.width, p.opts.height, n_ref, p.adapter.clone());
 
                 let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;

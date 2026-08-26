@@ -87,7 +87,9 @@ fn generate(args: &[String]) -> Result<(), String> {
 
     let paths = Paths::from_env()?;
     let n_gen = (o.height / 16) * (o.width / 16);
-    let n_ref: u32 = ref_imgs.iter().map(|(_, h, w)| (h / 16) * (w / 16)).sum();
+    // Only the references the denoise loop actually attends to: under
+    // `--strength` the first one becomes the init latent instead.
+    let n_ref = flux2::pipeline::ref_tokens(&ref_imgs, &o);
     eprintln!("flux2: building pipeline ({} + {} tokens) ...", n_gen, n_ref);
     let spec = adapter.map(|path| AdapterSpec { path, scale: lora_scale });
     let pipe = Pipeline::build_with(&variant, &paths, n_gen + n_ref, spec.as_ref(), precision)?;
