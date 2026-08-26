@@ -40,6 +40,28 @@ encoder + VAE + MMDiT), ported to brain's own kernels and serving stack.
 - [ ] Klein-9B's cached-reference-attention variant is out of scope: it needs
       per-token modulation blending, which is incompatible with the current
       approach of folding modulation into the LayerNorm.
+- [ ] The text encoder is imported whole and then truncated, so a large
+      fraction of it is fetched, dequantised and validated only to be
+      discarded. `pipeline.rs` builds `Shard { start: 0, end: deepest tap,
+      embed: true, head: false }`, but that truncation happens at BUILD time,
+      after the import has already insisted on the whole checkpoint:
+      `checkpoint::safetensors::read_model_dir` reads every shard named in
+      the index's `weight_map` unconditionally (it takes no parameter saying
+      what the caller wants), and `qwen3::import::brain_init_from_hf`
+      enforces two-way coverage against the full `param_list()` of a config
+      whose `n_layers` is the untruncated count with `tie_embeddings: false`.
+      For the Qwen3-8B encoder that means the layers past the deepest tap and
+      the LM head - about 4.2 GB of 15.6 GB - are downloaded and checked, and
+      the LM head is never read by any shard the pipeline builds. On a
+      bandwidth-limited box that is most of an hour before the first image.
+      The fix is a shard-aware import: derive the required `param_list()`
+      from the `Shard` the caller will build, and let `read_model_dir` take
+      the resulting name set so it can skip whole shard files. Note
+      `hf_source`'s streaming path is NOT this fix - it lowers the ~32 GB
+      host-RAM import peak but validates against the same full list, so it
+      saves memory and not bytes. Keep the two-way coverage check: it is what
+      catches a wrong checkpoint, and it must stay exact against whatever set
+      is genuinely required.
 
 The core GEMM kernel already runs near a structural throughput ceiling for
 its current shared-memory tiling scheme, and batching the diffusion
