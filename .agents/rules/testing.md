@@ -301,7 +301,12 @@ the selector's normal choice, for isolating a regression to one variant):
 way a sweep can see the sub-threshold side),
 `BRAIN_NO_FLASH_CROSS` (any value but `0` pins text cross-attention to the
 materialized scores/softmax/apply trio instead of the fused flash kernel;
-without it an A/B on a capable device compares the fused path against itself).
+without it an A/B on a capable device compares the fused path against itself),
+`BRAIN_LTXV_NO_SCRATCH_POOL` (`1` makes an LTX-2.5 block forward create and
+destroy its temporaries per block instead of replaying `gpu_core::scratch`'s
+arena - the un-pooled arm, which is what `crates/ltxv/tests/scratch_pool.rs`
+compares the shipped path against bit for bit, and the only way to A/B the two
+in one binary).
 
 **Profiling / roofline internals:**
 `BRAIN_NO_ROOF` (skip the roofline probe), `BRAIN_ROOF_BUDGET_S` (its time

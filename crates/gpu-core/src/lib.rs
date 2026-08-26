@@ -51,6 +51,9 @@ pub mod profile;
 /// Drop-in fast kernels a model inherits without editing its dispatch sites.
 mod upgrade;
 
+/// Replay arena for the per-iteration scratch of a repeated pass.
+pub mod scratch;
+
 /// Conv-as-GEMM lowering: the scratch budget and chunk arithmetic the 1D, 2D
 /// and 3D lowerings share.
 pub mod lower;
@@ -356,6 +359,12 @@ mod native_facade {
         /// toward over-counting is the safe direction for a ceiling. Empty,
         /// never locked and never allocated when no ceiling is set.
         grants: Mutex<Vec<memauth::Grant>>,
+        /// The scratch replay arena for THIS handle, live only between
+        /// [`Gpu::scratch_scope`] and the returned guard's drop. `None` - the
+        /// state every handle is built in and the only one a model that has
+        /// not opted in ever sees - makes [`Gpu::storage`] allocate exactly as
+        /// it always did. See [`crate::scratch`] for the aliasing argument.
+        arena: Mutex<Option<crate::scratch::Arena>>,
     }
 
     impl Gpu {
@@ -379,6 +388,7 @@ mod native_facade {
                 upgrades,
                 mem_device,
                 grants: Mutex::new(Vec::new()),
+                arena: Mutex::new(None),
             }
         }
 
@@ -759,9 +769,70 @@ mod native_facade {
 
         /// Device storage for `n` u32/f32 words.
         pub fn storage(&self, n: u64) -> DeviceBuffer {
+            let mut g = self.arena.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(a) = g.as_mut().filter(|a| a.active()) {
+                match a.take(n) {
+                    crate::scratch::Slot::Hit(b) => return b,
+                    crate::scratch::Slot::Miss(i) => {
+                        let b = self.fresh_storage(n);
+                        a.install(i, n, b.clone());
+                        return b;
+                    }
+                }
+            }
+            drop(g);
+            self.fresh_storage(n)
+        }
+
+        /// [`Self::storage`] bypassing the arena - the allocation itself, and
+        /// the only place the ceiling is charged (a recycled buffer was
+        /// charged when it was created and is still held).
+        fn fresh_storage(&self, n: u64) -> DeviceBuffer {
             self.charge("storage", storage_bytes(n));
             self.inner.storage(n)
         }
+
+        /// Draw this handle's [`Self::storage`] calls from a replay arena
+        /// until the returned guard drops.
+        ///
+        /// The contract the caller has to meet is in [`crate::scratch`]: the
+        /// work recorded inside one scope must be DRAINED before the next
+        /// scope opens, and a buffer that outlives its scope keeps its
+        /// allocation (the arena takes a fresh one for that slot) rather than
+        /// being aliased. Scopes do not nest; entering one while another is
+        /// open panics, because a nested cursor would hand the inner sequence
+        /// the outer sequence's buffers.
+        pub fn scratch_scope(&self) -> ScratchScope<'_> {
+            let mut g = self.arena.lock().unwrap_or_else(|e| e.into_inner());
+            g.get_or_insert_with(crate::scratch::Arena::default).enter();
+            drop(g);
+            ScratchScope { gpu: self }
+        }
+
+        /// Buffers the scratch arena is holding, and the words they total.
+        /// `(0, 0)` when this handle has no arena.
+        pub fn scratch_held(&self) -> (usize, u64) {
+            self.arena
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(crate::scratch::Arena::held)
+                .unwrap_or((0, 0))
+        }
+
+        /// Drop the arena and every buffer it is holding.
+        pub fn scratch_release(&self) {
+            *self.arena.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+
+        /// Close the open scope. The arena and its buffers stay - that is what
+        /// the next scope replays.
+        fn scratch_leave(&self) {
+            if let Some(a) = self.arena.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                a.leave();
+            }
+        }
+
         /// [`Self::storage`], returning the ceiling's refusal instead of
         /// panicking on it.
         pub fn try_storage(&self, n: u64) -> Result<DeviceBuffer, memauth::Denied> {
@@ -1011,12 +1082,26 @@ mod native_facade {
             self.names.iter().position(|n| n == name)
         }
     }
+
+    /// The open scratch scope returned by [`Gpu::scratch_scope`]. While it is
+    /// alive, this handle's `storage` calls replay the arena; dropping it ends
+    /// the scope but KEEPS the buffers, which is what the next scope reuses.
+    pub struct ScratchScope<'a> {
+        gpu: &'a Gpu,
+    }
+
+    impl Drop for ScratchScope<'_> {
+        fn drop(&mut self) {
+            self.gpu.scratch_leave();
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
-    set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, WeakGpu,
+    set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, ScratchScope,
+    WeakGpu,
 };
 
 /// What `Gpu::try_storage` and friends return when the process-wide ceiling

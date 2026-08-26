@@ -467,6 +467,71 @@ Ask it wherever a per-token/per-position quantity is derived from something
 coarser: timestep and noise-level embeddings, per-token conditioning tables,
 per-sample class embeddings in a batch, RoPE tables over repeated positions.
 
+### F.2c If the card is IDLE for a third of the pass, the profile you need is a HOST one - and start at the allocator
+
+Everything above ranks kernels. None of it can see the other number a pass
+has: **wall minus device.** Get it before anything else, from kernel
+timestamps over the call's own wall clock, and never from
+`nvidia-smi utilization.gpu` - that samples whether ANY kernel was running in
+a one-second window, so it reads high (86%) exactly when the honest device
+share is much lower (66%) and the difference is the host stalling the queue.
+
+When that gap is large, the first hypothesis to test is not "the host math is
+slow". It is **device memory allocation**, and it has two halves that are
+usually timed as one or as none:
+
+* a discrete card's `create_buffer` is a driver allocation
+  (`gpu_allocator::vulkan::MemoryBlock::new` -> `ioctl`), measured here at
+  milliseconds each, not microseconds;
+* **the DESTRUCTION costs the same again**, and it is the half nobody
+  instruments, because it happens implicitly when the scope ends - after every
+  span the code has. On one video DiT the allocation half had been measured
+  and written down as the next item; the free half was the same size again and
+  had never appeared in any table.
+
+Together they were **75% of the host time** of a warm forward and 25% of its
+wall clock. The fix is a **replay arena** (`gpu_core::scratch::Arena`,
+`Gpu::scratch_scope`): a repeated pass asks for the same temporaries in the
+same order every iteration, so remember them and hand the same buffers back.
+Nothing is created and nothing is destroyed after the first iteration.
+
+Three things make this a rule rather than one model's fix:
+
+* **"Which buffers escape the iteration?" is a REFCOUNT question, and the
+  answer is already in the type.** `DeviceBuffer` is an `Arc`, so
+  `is_unique()` - the arena being the last holder - answers "does any caller
+  still name this allocation". A slot that fails it is re-allocated instead of
+  reused, which makes the one value a block stack deliberately carries forward
+  (the chained activation) correct with **no special case and no exemption
+  list**: it is still held, so its slot is simply taken over. Do not
+  hand-maintain a list of "buffers that escape"; the next escaping buffer will
+  not be on it. Read the test narrowly, though: a recorded `Step` does *not*
+  hold a `DeviceBuffer` clone, so it says nothing about submitted work.
+* **The device half of the contract is the CALLER's**, so this is an opt-in
+  scope and not a change to `storage`'s meaning. A host handle can die while a
+  submitted pass still reads the buffer, so a scope must not be re-entered
+  until the previous one has been DRAINED. Every caller that chains an
+  activation already drains, because that is what produces the activation.
+* **A recycled buffer is not zero-filled and a fresh one is.** That is the one
+  real semantic difference, and it is why the gate is `assert_eq!` on the
+  output BITS in both arms rather than a tolerance - a kernel that reads a
+  slot it does not fully write is exactly what the gate is for. Ship the arm
+  switch with the fix (`BRAIN_LTXV_NO_SCRATCH_POOL`), for §F.6's reason: a
+  comparison that can only run the shipped path confirms whatever was written.
+
+**Mutation-verify each guard SEPARATELY, because guards mask each other.**
+Deleting the arena's size check left its own test green - the test happened to
+keep the buffer alive, so the *uniqueness* guard refused the slot before the
+size check was ever consulted, and the test was passing for a reason it did
+not name. Same shape in the other direction: deleting the uniqueness check
+alone did not move the model's output bits at all, because that model's
+escaping buffer is dead by the time its slot is rewritten. A gate that only
+goes red when TWO guards are broken at once is a gate that has told you
+something about which guard is load-bearing - record that, do not report it as
+a catch.
+
+Numbers in `.agents/roadmap/ltxv.md` phase 33.
+
 ### F.3 Before writing anything: is there already a faster sibling?
 
 This is the highest-value question in the list and it costs one `grep`. It has

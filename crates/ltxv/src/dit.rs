@@ -1480,7 +1480,10 @@ pub fn forward_q_streamed_in(
         "block stack done"
     );
 
-    output_stage(head, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps)
+    let s_out = std::time::Instant::now();
+    let r = output_stage(head, "scale_shift_table", "proj_out", &x, &embedded_timestep, t, dim, cfg.out_channels as usize, cfg.norm_eps);
+    gpu_core::profile::stage_time("forward_q_streamed: output stage (host LayerNorm + modulate + proj_out)", s_out);
+    r
 }
 
 /// [`load_head_tensors_from_source`]'s AV twin: every non-block tensor of the

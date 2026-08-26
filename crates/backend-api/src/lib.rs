@@ -628,6 +628,21 @@ impl DeviceBuffer {
     pub fn alloc_id(&self) -> *const () {
         Arc::as_ptr(&self.0) as *const ()
     }
+    /// True when this handle is the ONLY one that reaches the allocation.
+    ///
+    /// This is the check a scratch pool needs before it hands a buffer out a
+    /// second time: clones alias (see [`Self::alloc_id`]), so this answers
+    /// "does any caller still name this allocation".
+    ///
+    /// Read it narrowly - it is a statement about `DeviceBuffer` handles and
+    /// nothing else. A recorded [`Step`] does NOT hold one (a backend's step
+    /// keeps the native buffer alive by its own path), so this says nothing
+    /// about whether a submitted dispatch is still reading the buffer; a pool
+    /// still has to establish that by draining its queue. See
+    /// `gpu_core::scratch` for the full argument that combination makes.
+    pub fn is_unique(&self) -> bool {
+        Arc::strong_count(&self.0) == 1
+    }
     /// Recover the native buffer. Panics on a backend mismatch (a buffer from one
     /// backend handed to another) — the same fail-fast the enum dispatch had.
     pub fn downcast_ref<T: Any>(&self) -> &T {

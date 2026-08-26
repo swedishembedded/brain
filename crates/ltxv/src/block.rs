@@ -2062,6 +2062,27 @@ fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, one
     (x3, ff_out)
 }
 
+/// Whether a block forward draws its temporaries from the device handle's
+/// replay arena (`gpu_core::scratch`) instead of creating and destroying them
+/// per block.
+///
+/// On by default. `BRAIN_LTXV_NO_SCRATCH_POOL=1` is the opt-out, and it exists
+/// for the same reason `BRAIN_NO_COOP_LN` does: without a force switch the two
+/// arms cannot be A/B'd in one binary, and a comparison that can only run the
+/// shipped path confirms whatever was written. The arms must agree BIT for
+/// bit - the arena changes when device memory is allocated, never what any
+/// kernel reads - which is what `crates/ltxv/tests/scratch_pool.rs` asserts.
+fn scratch_pool() -> bool {
+    // Read per call, NOT cached in a `OnceLock`: the gate
+    // (`crates/ltxv/tests/scratch_pool.rs`) runs both arms in one process and
+    // compares their outputs bit for bit, which a cached first read would
+    // silently turn into a comparison of one arm against itself - a green
+    // test that can only ever have run one arm. One `var_os` per block
+    // forward is nothing against a forward that dispatches hundreds of
+    // kernels.
+    std::env::var_os("BRAIN_LTXV_NO_SCRATCH_POOL").map(|v| v != "1").unwrap_or(true)
+}
+
 /// Where one block forward's wall-clock really goes.
 ///
 /// Four buckets, because a real 48-layer forward at the production token count
@@ -2335,6 +2356,17 @@ impl LtxBlockQ {
     ) -> DeviceBuffer {
         let cfg = &self.cfg;
         let (dim, heads, head_dim, eps, ctx_len) = (cfg.inner_dim, cfg.num_heads, cfg.head_dim(), cfg.norm_eps, self.context_len);
+        // Every block dispatches the identical shape sequence, so the ~70
+        // temporaries this body asks `scratch` for are the same sizes in the
+        // same order every time. Inside the scope they are drawn from the
+        // handle's replay arena instead of being created and destroyed per
+        // block - see `gpu_core::scratch` for the aliasing argument, and note
+        // that the two things it requires of a caller both hold here: the
+        // submit below is DRAINED by a blocking read before the next scope
+        // opens, and the one buffer that outlives the scope (`x3`, the chained
+        // activation) is still held by the caller, so the arena takes a fresh
+        // allocation for its slot rather than aliasing it.
+        let _scope = scratch_pool().then(|| scratch.scratch_scope());
         let s_rec = std::time::Instant::now();
         let mut s: Vec<Step> = Vec::new();
         let mb = ModBufs::derive(scratch, &mut s, adaln_buf, adaln_map_buf, &self.sst_buf, t, dim);
@@ -2952,6 +2984,13 @@ impl LtxAvBlockQ {
         timings: &mut BlockTimings,
     ) -> (DeviceBuffer, DeviceBuffer) {
         let (vdim, adim) = (self.vcfg.inner_dim, self.acfg.inner_dim);
+        // The video block's argument, unchanged for two streams: the shape
+        // sequence is identical block to block, the submit below is drained by
+        // a blocking read before the next scope opens, and the two values that
+        // outlive the scope (both streams' chained activations) are still held
+        // by the caller, so the arena re-allocates their slots instead of
+        // aliasing them. See `gpu_core::scratch`.
+        let _scope = scratch_pool().then(|| scratch.scratch_scope());
         let s_rec = std::time::Instant::now();
         let mut s: Vec<Step> = Vec::new();
         let vm = ModBufs::derive(scratch, &mut s, v_adaln_buf, v_adaln_map, &self.v_sst_buf, tv, vdim);

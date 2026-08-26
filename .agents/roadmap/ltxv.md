@@ -7338,3 +7338,258 @@ Cross-model parity: every crate that registers `matmul_i8_dyn` was re-run -
   narrowed rather than deleted. It was never a DP4A-availability claim in any
   case: `backend-vulkan` measures 43705.6 GOP/s of `dot4I8Packed`, marginally
   ahead of wgpu's 43559.7.
+
+### Phase 33 - the host stops spending a third of every forward in the Vulkan allocator
+
+Phase 30 ended with the honest split: a warm video forward was 66% device
+time and 34% host, and named `Gpu::storage` churn as the next item at ~14.3 s
+of 93.6 s. The full attribution says the churn is roughly TWICE that, because
+only its allocation half had ever been measured - buffers were also being
+DESTROYED per block, outside every timing span the code had.
+
+#### 0 - where the host time actually goes, with nothing left over
+
+Attribution of one warm video forward at production width (48 layers,
+T = 13200, ctx 1024, int8, device-resident session, one distinct timestep;
+`ltxv_bench streamed 48 13200 1024 1 1 1 3`, best warm call). Wall 88.3 s,
+device 58.1 s (kernel timestamp queries), host 30.2 s. Every row is a span
+that does not overlap any other row, so they sum to the forward:
+
+| host item | s | share of host |
+|---|---:|---:|
+| device buffer **allocation** - the block's ~74 temporaries, 48 blocks | 12.04 | 39.8% |
+| device buffer **destruction** - the same set, dropped at each block's end | 10.53 | 34.8% |
+| `submit` + poll host residual (block submit+wait minus device kernel time) | 1.84 | 6.1% |
+| block weight upload (the 25 blocks residency could not keep) | 1.67 | 5.5% |
+| graph recording (`Gpu::step` bind groups + the per-forward writes) | 1.65 | 5.4% |
+| output stage - host LayerNorm + modulate + `proj_out` over `[t, dim]` | 0.88 | 2.9% |
+| block loop residual (window `acquire`, the `after_block` callback) | 0.71 | 2.4% |
+| adaLN-single table (host) | 0.40 | 1.3% |
+| device -> host readback of the final activation (206 MiB) | 0.34 | 1.1% |
+| patchify (host linear) | 0.13 | 0.4% |
+| per-forward upload of `x` / the adaLN table / the context | 0.08 | 0.3% |
+| embeddings connector (cache hit) | 0.01 | 0.0% |
+| **unaccounted** | **0.00** | **0.0%** |
+
+Two of those rows are measurements the code could not previously make and had
+to be added as temporary probes (since removed): the block loop was timed
+between `record_upload`, `compute` and `readback`, and the DESTRUCTION of a
+block's scratch happened after all three of those spans closed, so it was
+invisible. `output_stage` and `DitSession::prefill` were likewise outside
+every span; `output_stage` is now permanently instrumented, `prefill`
+measured zero on a warm resident call and did not earn a line.
+
+The allocation/recording split is derived rather than directly measured: the
+`activation/context/adaLN record+upload` stage is 13.72 s before and 1.68 s
+after, and the arena is the only difference, so 12.04 s of that stage was
+allocation and 1.68 s is what recording and the writes really cost. A
+process-wide `Gpu::storage` counter agreed independently (12.52 s over 4544
+calls, of which 3552 are block scratch).
+
+**`perf` says the same thing, from outside the process.**
+`kernel.perf_event_paranoid` was lowered to 1 for this pass;
+`perf record -F 199 --call-graph dwarf`, `--delay` set past the cold call so
+only warm forwards are sampled, on a `RUSTFLAGS="-C debuginfo=1"` build (not
+committed - the shipped profile is unchanged):
+
+Sampled at 4 layers, not 48 - the same real token width, a shorter run, and
+the shares are what is being compared rather than the seconds:
+
+| symbol, cumulative | arena off | arena on |
+|---|---:|---:|
+| `gpu_allocator::vulkan::MemoryBlock::new` | 5.60% | below the 2% cut |
+| `gpu_allocator::vulkan::Allocator::free` | 4.66% | below the 2% cut |
+| `__GI___ioctl` | 10.21% | 4.17% |
+| `__GI_munmap` | 3.14% | below the 2% cut |
+| `ltxv::dit::output_stage` | 6.46% | 6.72% |
+| the frame the GPU wait unwinds into | 77.43% | 83.00% |
+
+The last row is not host stall and must not be read as one: it is the process
+blocked in `device.poll(Wait)` while the card computes, which is why its share
+RISES when the host does less work. The wall-minus-device split already counts
+it as device time.
+
+**The per-layer cost is linear, checked rather than assumed.** Same width,
+same everything, 4 vs 8 layers on the un-pooled arm: host 3.70 s -> 5.84 s,
+i.e. 0.535 s per layer plus 1.56 s fixed, which extrapolates to 27.3 s at 48
+against 29.7 s measured. The 2.4 s shortfall is exactly the row that does not
+exist at 4 or 8 layers - at those depths every block is resident, so nothing
+is re-uploaded. Per-BLOCK host cost scales; the fixed part does not.
+
+#### 1 - the fix: a replay arena on the device handle, not a pool in this crate
+
+`gpu_core::scratch::Arena`, entered by `Gpu::scratch_scope`. Every block
+dispatches the identical shape sequence, so the arena simply remembers, in
+call order, what a scope asked for and hands the same buffers back next time.
+Nothing is created and nothing is destroyed once the sequence has run once.
+It lives on the shared device facade rather than in `crates/ltxv`, so a model
+opts in by wrapping its per-iteration body in one line; `crates/ltxv/src/
+block.rs` has exactly two such lines, one per stream pair
+(`LtxBlockQ::forward_prod_dev`, `LtxAvBlockQ::forward_prod_dev`).
+
+**Why it cannot alias a live operand, which is the whole design question.**
+Three parts, and only the middle one is the arena's own:
+
+* **Inside a scope, nothing is issued twice.** The cursor only advances, so
+  two operands of one dispatch cannot collide however the caller behaves.
+* **Across scopes, a handle the caller KEPT blocks reuse.** `DeviceBuffer` is
+  an `Arc`, so `DeviceBuffer::is_unique` - the arena's copy being the last one
+  - answers "does any caller still name this allocation". A slot that fails
+  the test is not reused; the arena allocates a fresh buffer and takes the
+  slot over. That is what makes the one value a block stack deliberately
+  carries forward, the CHAINED ACTIVATION, correct with no special case: it is
+  still held by the caller, so its slot is re-allocated and the previous
+  block's output is never written over. The cost is ~1 allocation per block
+  instead of ~74, and it is self-correcting rather than a hand-maintained
+  exemption list.
+* **The device being finished is the CALLER's half**, and it is why this is an
+  opt-in scope and not a change to `Gpu::storage`'s meaning. The refcount test
+  above cannot see submitted work: a recorded `Step` does not hold a
+  `DeviceBuffer` clone (the wgpu backend's step is a `BindGroup`, which keeps
+  the native buffer alive by a different path), so a scope must not be
+  re-entered until the previous one has been DRAINED. `forward_prod_dev`
+  already ends in a blocking one-word read of its own output, which is
+  `flush` + `map_async` + a bounded `poll_wait`. That distinction was checked
+  in `backend-wgpu`, not assumed - the first version of this module's doc
+  claimed the refcount covered dispatches too, which would have made the
+  argument circular.
+
+A slot whose requested size differs is likewise re-allocated, so a caller
+whose sequence is not in fact identical degrades to plain allocation rather
+than binding a buffer too small for its dispatch.
+
+The arena also removes an accounting bug it did not set out to fix: `Gpu`'s
+`memauth` grants are pushed per allocation and released only when the HANDLE
+drops, so 4544 allocations a forward pushed 4544 grant records. Only a fresh
+allocation is charged now.
+
+#### 2 - measured, both arms, same binary, same box, one idle P40
+
+`BRAIN_LTXV_NO_SCRATCH_POOL=1` selects the un-pooled arm. Four calls per run,
+the first warm call discarded as warm-up, best of the remaining two. Both
+cards idle before each run, nothing sampled during one, no build running.
+
+**Video only** (`ltxv_bench streamed 48 13200 1024 1 1 1 3`):
+
+| | before | after | |
+|---|---:|---:|---|
+| warm forward, best of 2 | 87.72 s | **64.56 s** | **1.36x** |
+| of which DEVICE (kernel timestamps) | 57.99 s | 58.17 s | **+0.3%** |
+| of which HOST | 29.72 s | 6.39 s | -78.5% |
+| device share of wall | 66.1% | 90.1% | |
+| first (cold) forward | 160.24 s | 140.06 s | 1.14x |
+| host peak RSS | 36789 MiB | 36756 MiB | |
+| resident blocks the policy granted | 23 of 48 | 23 of 48 | |
+
+**Audio + video** (`ltxv_bench streamed-av 48 13200 1024 118 1 1 1 3`):
+
+| | before | after | |
+|---|---:|---:|---|
+| warm forward, best of 2 | 101.60 s | **72.98 s** | **1.39x** |
+| of which DEVICE | 63.63 s | 63.87 s | **+0.4%** |
+| of which HOST | 37.97 s | 9.12 s | -76.0% |
+| device share of wall | 62.6% | 87.5% | |
+| first (cold) forward | 197.94 s | 166.73 s | 1.19x |
+| host peak RSS | 52531 MiB | 52597 MiB | |
+| resident blocks the policy granted | 16 of 48 | 16 of 48 | |
+| peak VRAM (separate UNTIMED observation, `nvidia-smi -l 1`) | 21082 (phase 30) | 21079 MiB | |
+
+**The before arm is measured, not cited, and it does not reproduce phase 30's
+absolute numbers.** Phase 30 recorded 93.59 s wall / 61.88 s device / 31.70 s
+host for the same video command; the same code measures 87.72 / 57.99 / 29.72
+here. Both halves are ~6% faster than they were, so this is the box or the
+toolchain and not a change in this workstream - and the number this pass is
+about, the host SHARE, reproduces to the decimal: 33.9% then, 33.9% now. That
+is why the before column above is a run and not a quotation.
+
+Device kernel time not moving is the control, and it did not move on either
+stream. Peak VRAM did not move either, which is the answer to the obvious
+worry about holding a whole block's scratch across the stack: the arena holds
+exactly ONE such set, and one set was already live at once during recording -
+the allocator was destroying and recreating the same footprint 48 times per
+forward rather than keeping it.
+
+The residency grant is unchanged on both streams (23/48 and 16/48), so
+`devres::activation_reserve_bytes` still fits and nothing about the phase-30
+residency arm needs re-deriving.
+
+#### 3 - the remaining host half, ranked
+
+After the arena, the video forward's 6.4 s of host time at 48 layers splits
+(stage timers, warm call):
+
+| | s |
+|---|---:|
+| block weight upload - the 25 blocks residency could not keep, ~6.4 GB | 2.42 |
+| graph recording (`Gpu::step` bind groups) | 1.62 |
+| output stage (host LayerNorm + modulate + `proj_out`) | 1.00 |
+| device -> host readback | 0.35 |
+| adaLN-single table (host) | 0.15 |
+| patchify (host) | 0.11 |
+| everything else, incl. the per-forward arena refill | ~0.7 |
+
+None of these is worth 4% of the forward on its own. The item that IS worth
+more than all of them together is listed in section 5.
+
+#### 4 - the gates, and which mutation caught which
+
+`crates/gpu-core/tests/scratch_arena.rs` gates the arena's five structural
+properties on `DeviceBuffer::alloc_id`; `crates/ltxv/tests/scratch_pool.rs`
+gates the forward's OUTPUT BITS in both arms, at the tiny config and - when
+the checkpoint is present - at the real 22B block's own allocation sequence.
+Bits, not cosine: the arena changes when device memory is allocated and
+nothing else, so `assert_eq!` on `to_bits` is the statement the code actually
+makes, and a tolerance would be a weaker one.
+
+Every guard was mutated separately, because they mask each other:
+
+| mutation | what went red | what stayed green, and why that is the finding |
+|---|---|---|
+| drop the `is_unique` check | `a_buffer_still_held_by_the_caller_is_never_recycled` | BOTH ltxv bit gates. At ltxv's current dispatch order the only buffer that escapes a scope is the chained activation, and it is dead by the time the next block's last dispatch rewrites its slot - so the guard is defending a property this model does not currently depend on. Worth knowing rather than claiming a catch |
+| never advance the cursor | `a_released_buffer_comes_back_in_the_next_scope`, `a_buffer_still_held_...` | the ltxv bit gates: the mutation degrades the arena to plain allocation, which is a performance regression and not a correctness one |
+| hand back the PREVIOUS slot, guard intact | the same two | the ltxv bit gates - the uniqueness guard absorbs it, which is direct evidence the guard is load-bearing |
+| hand back the previous slot AND drop the guard | **both ltxv bit gates**, 2048 of 2048 output words differing | nothing. This is the mutation that proves the bit gate can see aliasing |
+| drop the size check | `a_changed_size_is_re_allocated_not_reused`, but ONLY after that test was rewritten | it first passed with the size check deleted, because it kept the small buffer alive and the UNIQUENESS guard refused the slot before the size check was ever consulted. The test now releases the buffer and asserts on the arena's held words |
+
+`cargo test -p brain-ltxv` is green (284 passed, 0 failed), including the
+real-weight gates that run through the new path:
+`dit_parity::real_weight::ltxv_real_dit_tiny_layers_matches_reference`,
+`int8_compute::real_q8_0_block0_int8_compute_matches_fp32` and
+`streamed_vs_eager_real`. `device_residency::real_weight::a_resident_real_
+checkpoint_forward_is_bit_identical_to_the_streaming_one` is `#[ignore]`d in
+the fast lane and was run explicitly with `BRAIN_LTXV_DIT` set: green.
+
+#### 5 - recorded, NOT done
+
+* **The forward is now 90% device-bound, and the way past that is to stop
+  draining after every block.** The per-block blocking read exists so wgpu's
+  allocator pool shrinks (phase 30) - a reason the arena has just removed,
+  since nothing is being allocated or freed per block any more. Without it the
+  host's remaining 6.4 s would overlap the device's 58 s instead of adding to
+  it, which is worth about another 1.1x. It is NOT a small change: the arena's
+  second condition is that a scope may not be re-entered before the previous
+  one has drained, so removing the drain needs alternating arenas (drain block
+  `l-1` before entering block `l+1`'s scope) and its own gate. Deliberately
+  left with the arithmetic rather than attempted at the end of a pass.
+* **The arena is rebuilt once per forward.** `DitSession::device_for_call`
+  hands out a fresh `Gpu::share` per call, and the arena lives on the handle,
+  so the first block of every forward pays ~74 allocations (~0.7 s of the
+  remaining 6.4 s). Keeping one long-lived scratch handle on the session would
+  recover it, but the session is what two concurrent CFG branches share, and
+  one arena behind two concurrent forwards is exactly the aliasing this design
+  refuses. It needs a per-branch handle, not a cached share.
+* **The output stage is host math at production width** - a LayerNorm, a
+  per-token modulate and a `[t, dim] x [dim, out]` linear over 13200 tokens,
+  1.00 s per forward on the host with the card idle. Every kernel it needs
+  exists; it is the one remaining host stage in this forward that has no
+  reason to be one.
+* **The 25 non-resident blocks are now the largest single host row** (2.42 s,
+  ~6.4 GB per forward). That is a residency-budget question, not an allocator
+  one: peak VRAM was 18.1 GiB (video) of 24 GiB at phase 30 and the arena did
+  not move it on the arm that WAS re-observed here (audio+video, 21082 ->
+  21079 MiB), so the reserve may have room the phase-30 re-fit left on the
+  table. The video arm's peak was not re-observed and is still phase 30's
+  number.
+* **Only `crates/ltxv` opts into the arena.** Every other block-stack model in
+  the workspace has the same shape - an identical dispatch sequence per block,
+  a chained activation, a drain - and none of them has been measured for it.
