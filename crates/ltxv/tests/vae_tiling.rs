@@ -257,6 +257,52 @@ fn a_real_split_agrees_with_the_whole_decode_away_from_a_broken_port() {
     assert!(m.is_finite(), "max_abs {m} is not finite");
 }
 
+// ------------------------------------------------------ gate 2b (sharing)
+
+/// One device and ONE device-resident weight set for the whole tiled decode
+/// produces the SAME bits as a fresh device and a fresh weight upload per tile
+/// shape.
+///
+/// Bits, not a tolerance. Sharing changes only WHERE a weight buffer came
+/// from: the same host tensor, uploaded once instead of once per shape, read
+/// by the identical recorded graph. Nothing about the arithmetic moves, so
+/// `assert_eq!` on `to_bits` is the statement the code actually makes and a
+/// cosine floor would be a weaker one.
+///
+/// The plan below is deliberately a MULTI-SHAPE cover, and the extents are
+/// chosen for it rather than copied from the gate above: `split_by_size`
+/// leaves a SHORT last interval only when the axis does not divide evenly, so
+/// the 8x8 latent gate 2 uses splits into three equal 4-cell tiles and would
+/// exercise nothing at all here - one shape means one graph build, which
+/// uploads either way. A 9-cell axis leaves a 3-cell tail, so 9x9 gives two
+/// distinct extents per spatial axis and four distinct shapes over the cover.
+#[test]
+fn sharing_one_device_and_one_weight_set_across_tile_shapes_changes_no_bit() {
+    let Some(w) = require_weights() else { return };
+    let cfg = LtxVaeConfig::conv25();
+    let (lt, lh, lw) = (2u32, 9u32, 9u32);
+    let latent = structured_latent(cfg.latent_channels as usize, lt as usize, lh as usize, lw as usize);
+    let tiling = LtxVaeTiling { frames: (80, 24), height: (128, 64), width: (128, 64) };
+
+    let dec = LtxVaeTiledDecoder::new(&cfg, w, lt, lh, lw, None, tiling);
+    let shapes: std::collections::BTreeSet<_> =
+        dec.plan().tiles().iter().map(|t| (t.t.src_len(), t.h.src_len(), t.w.src_len())).collect();
+    assert!(shapes.len() > 1, "this gate needs a plan with more than one distinct tile shape, got {shapes:?}");
+
+    std::env::set_var("BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS", "1");
+    let unshared = dec.decode(&latent);
+    std::env::remove_var("BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS");
+    let shared = dec.decode(&latent);
+
+    let differing = unshared.iter().zip(&shared).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    eprintln!("shared vs per-shape weights over {} tile shapes: {differing} of {} words differ", shapes.len(), shared.len());
+    assert!(shared.iter().all(|v| v.is_finite()), "the shared arm produced non-finite output");
+    assert_eq!(
+        differing, 0,
+        "sharing the device and the weight upload across tile shapes changed the decode - it changes only where a weight buffer came from, never what any kernel reads"
+    );
+}
+
 // -------------------------------------------------------------- gate 3
 
 /// The blend has to be earning its place. Stitch the SAME tiles with a hard

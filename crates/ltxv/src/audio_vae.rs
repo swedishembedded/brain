@@ -50,7 +50,7 @@
 //!   `1e-6`** (`normalization.py`) - NOT `vae3d`'s `1e-8` (`PixelNorm()`'s own
 //!   default, a different call site the video VAE uses instead). Both are
 //!   real, in the same checkpoint family; do not unify them. No learnable
-//!   gain either way. Reuses [`kernels::L2NORM_SCALE`] with a synthesized
+//!   gain either way. Reuses [`kernels::L2NORM_SCALE2D`] with a synthesized
 //!   uniform `sqrt(C)` gain and `eps_l2 = C * eps`, the exact recipe
 //!   `vae::blocks3d::Builder3d::pixel_norm`'s own doc comment derives -
 //!   ported here rather than imported because `blocks3d::Builder3d` is a 3D
@@ -103,20 +103,16 @@ const K_CONV: usize = 2;
 const K_SILU: usize = 3;
 const K_ADD2: usize = 4;
 const K_UPSAMPLE2: usize = 5;
-const K_NCHW_NLC: usize = 6;
-const K_NLC_NCHW: usize = 7;
-const K_L2NORM_SCALE: usize = 8;
+const K_L2NORM_SCALE2D: usize = 6;
 
-const KERNELS: [(&str, &str); 9] = [
+const KERNELS: [(&str, &str); 7] = [
     ("pad2d", kernels::PAD2D),
     ("crop2d", kernels::CROP2D),
     ("conv_bias_reg", kernels::CONV_BIAS_REG),
     ("silu", kernels::SILU),
     ("add2", kernels::ADD2),
     ("upsample2", kernels::UPSAMPLE2),
-    ("nchw_nlc", kernels::NCHW_NLC),
-    ("nlc_nchw", kernels::NLC_NCHW),
-    ("l2norm_scale", kernels::L2NORM_SCALE),
+    ("l2norm_scale2d", kernels::L2NORM_SCALE2D),
 ];
 
 /// `build_normalization_layer`'s `PixelNorm` eps - the call site this audio
@@ -315,20 +311,23 @@ fn upsample_block(gpu: &Gpu, t: &Tensors, prefix: &str, c: u32, h: u32, w: u32, 
 }
 
 /// `PixelNorm(dim=1, eps)` (`build_normalization_layer`'s call site): pure
-/// channel-axis RMS-norm, no learnable gain. Reuses [`kernels::L2NORM_SCALE`]
-/// with a synthesized `sqrt(C)` uniform gain and `eps_l2 = C*eps` - see this
-/// module's header for the algebra.
+/// channel-axis RMS-norm, no learnable gain. Reuses
+/// [`kernels::L2NORM_SCALE2D`] with a synthesized `sqrt(C)` uniform gain and
+/// `eps_l2 = C*eps` - see this module's header for the algebra.
+///
+/// Sharing the FUSED kernel with [`vae::blocks3d::Builder3d::chan_l2norm`] is
+/// the point rather than an incidental tidy-up: a private composed copy of a
+/// norm left in one model is exactly how the next model inherits the slow
+/// form, which is the single most expensive defect class this engine has paid
+/// for. The result is bit-identical - the permutes this replaces were exact
+/// and the fold order over the channel axis is unchanged.
 fn pixel_norm(gpu: &Gpu, c: u32, h: u32, w: u32, eps: f32, x: &DeviceBuffer) -> DeviceBuffer {
     let hw = h * w;
     let total = c * hw;
     let gain = vec![(c as f32).sqrt(); c as usize];
     let g = gpu.storage_init("__audio_pixel_norm.gain", &gain);
-    let rows = gpu.storage(total as u64);
-    gpu.submit(&[], &[gpu.step(K_NCHW_NLC, &[x, &rows], &[total, c, hw], total)]);
-    let normed = gpu.storage(total as u64);
-    gpu.submit(&[], &[gpu.step(K_L2NORM_SCALE, &[&rows, &g, &normed], &[hw, c, f(c as f32 * eps)], total)]);
     let y = gpu.storage(total as u64);
-    gpu.submit(&[], &[gpu.step(K_NLC_NCHW, &[&normed, &y], &[total, c, hw], total)]);
+    gpu.submit(&[], &[gpu.step(K_L2NORM_SCALE2D, &[x, &g, &y], &[1, c, hw, f(c as f32 * eps)], hw)]);
     y
 }
 

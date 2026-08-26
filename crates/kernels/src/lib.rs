@@ -514,6 +514,8 @@ pub const KV_EXPAND_BWD: &str = include_str!("../wgsl/kv_expand_bwd.wgsl");
 pub const KV_K_HEADT: &str = include_str!("../wgsl/kv_k_headt.wgsl");
 /// `wgsl/l2norm_scale.wgsl`
 pub const L2NORM_SCALE: &str = include_str!("../wgsl/l2norm_scale.wgsl");
+/// `wgsl/l2norm_scale2d.wgsl`
+pub const L2NORM_SCALE2D: &str = include_str!("../wgsl/l2norm_scale2d.wgsl");
 /// `wgsl/l2norm_scale_dg.wgsl`
 pub const L2NORM_SCALE_DG: &str = include_str!("../wgsl/l2norm_scale_dg.wgsl");
 /// `wgsl/l2norm_scale_dx.wgsl`
@@ -1140,6 +1142,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("kv_expand_bwd", KV_EXPAND_BWD),
     ("kv_k_headt", KV_K_HEADT),
     ("l2norm_scale", L2NORM_SCALE),
+    ("l2norm_scale2d", L2NORM_SCALE2D),
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
     ("l2norm_scale_dx", L2NORM_SCALE_DX),
     ("layernorm", LAYERNORM),

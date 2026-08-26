@@ -21,3 +21,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# `data::rng::Lcg` - the workspace's ONE deterministic test/fixture PRNG. A
+# private helper here would be the copy AGENTS.md's "one implementation" rule
+# names by example.
+brain-data.workspace = true

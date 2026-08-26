@@ -62,7 +62,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use vae::blocks::Tensors;
-use vae::blocks3d::{Builder3d, Conv3d, T3, KERNELS};
+use vae::blocks3d::{Builder3d, Conv3d, DeviceWeights, T3, KERNELS};
 
 use crate::patchify;
 
@@ -563,15 +563,39 @@ pub struct LtxVaeDecoder {
 }
 
 impl LtxVaeDecoder {
-    /// Build the decode graph for a `[128, lat_t, lh, lw]` latent.
+    /// Build the decode graph for a `[128, lat_t, lh, lw]` latent, on a device
+    /// of its own.
     pub fn build(cfg: &LtxVaeConfig, tensors: &Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>) -> LtxVaeDecoder {
+        let gpu = Gpu::open(device, &KERNELS);
+        Self::build_on(cfg, tensors, lat_t, lh, lw, &gpu, DeviceWeights::new()).0
+    }
+
+    /// [`LtxVaeDecoder::build`] on a device the CALLER owns, reusing weights
+    /// already uploaded to it and handing them back for the next graph.
+    ///
+    /// A tiled decode records one graph per distinct tile shape and every one
+    /// of them reads the identical decoder weights. Given a device of its own
+    /// each shape re-opens a device (adapter, queue and one shader compile per
+    /// kernel) and re-uploads the whole decoder, which is host work the card
+    /// waits through. Threading the handle and the memo through makes those a
+    /// per-decode cost rather than a per-shape one. Nothing about the recorded
+    /// graph changes, so the decoded result is bit-identical either way.
+    pub fn build_on(
+        cfg: &LtxVaeConfig,
+        tensors: &Tensors,
+        lat_t: u32,
+        lh: u32,
+        lw: u32,
+        gpu: &Gpu,
+        weights: DeviceWeights,
+    ) -> (LtxVaeDecoder, DeviceWeights) {
         assert!(lat_t >= 1, "a latent needs at least one frame");
         let frames = 1 + 8 * (lat_t - 1);
         let (h, w) = (lh * 32, lw * 32);
         let eps = cfg.pixel_norm_eps;
 
-        let gpu = Gpu::open(device, &KERNELS);
-        let mut b = Builder3d::new(&gpu, tensors, taps_enabled());
+        let gpu = gpu.share();
+        let mut b = Builder3d::with_weights(&gpu, tensors, taps_enabled(), weights);
         let z_in = gpu.storage(cfg.latent_channels as u64 * lat_t as u64 * lh as u64 * lw as u64);
         let z = T3 { buf: z_in.clone(), c: cfg.latent_channels, t: lat_t, h: lh, w: lw };
 
@@ -613,8 +637,8 @@ impl LtxVaeDecoder {
 
         let stages = vec![("z_denorm".to_string(), denorm.buf.clone(), denorm.len() as usize)];
         let out_len = conv_out.len() as usize;
-        let (steps, taps) = b.finish();
-        LtxVaeDecoder {
+        let (steps, taps, weights) = b.finish_keeping_weights();
+        let dec = LtxVaeDecoder {
             gpu,
             steps,
             z_in,
@@ -626,19 +650,42 @@ impl LtxVaeDecoder {
             w,
             stages,
             taps,
-        }
+        };
+        (dec, weights)
     }
 
     /// Decode a NORMALISED latent `[128, lat_t, lh, lw]` into `[3, frames,
     /// lh*32, lw*32]`. No clamp is applied - upstream clamps to `[-1,1]`
     /// outside the model. `unpatchify` runs on the host after readback.
+    ///
+    /// Each host-side stage is timed under `BRAIN_PROFILE`.
+    ///
+    /// The kernel table (`Gpu::kernel_times`) attributes DEVICE time and
+    /// nothing else. A decode's wall clock also carries the latent upload, the
+    /// readback of a pixel volume that is orders of magnitude larger than the
+    /// latent, and a host `unpatchify` over that same volume - none of which is
+    /// a kernel, so a kernel table alone reports a total that silently omits
+    /// them. These spans do not overlap each other, so they sum to the call.
     pub fn decode(&self, latent: &[f32]) -> Vec<f32> {
         assert_eq!(latent.len(), self.in_len, "decode: {} values, expected {}", latent.len(), self.in_len);
+        let t = std::time::Instant::now();
         self.gpu.write_f32(&self.z_in, latent);
+        gpu_core::profile::stage_time("ltxv vae decode: latent upload", t);
+        let t = std::time::Instant::now();
         self.gpu.submit(&[], &self.steps);
+        // `submit` alone only appends to the pending list on this backend, so
+        // the wait has to be explicit or this span times the host recording
+        // and the readback below absorbs the whole device pass.
+        self.gpu.poll_wait();
+        gpu_core::profile::stage_time("ltxv vae decode: submit + device wait", t);
+        let t = std::time::Instant::now();
         let raw = self.gpu.read(&self.out, self.out_len);
+        gpu_core::profile::stage_time("ltxv vae decode: pixel readback", t);
+        let t = std::time::Instant::now();
         let p = 4usize;
-        patchify::unpatchify(&raw, 3, self.frames as usize, (self.h / 4) as usize, (self.w / 4) as usize, p, p)
+        let out = patchify::unpatchify(&raw, 3, self.frames as usize, (self.h / 4) as usize, (self.w / 4) as usize, p, p);
+        gpu_core::profile::stage_time("ltxv vae decode: host unpatchify", t);
+        out
     }
 
     /// A boundary tensor of the last [`LtxVaeDecoder::decode`]: `z_denorm`.
@@ -923,22 +970,68 @@ impl<'a> LtxVaeTiledDecoder<'a> {
             by_shape.entry((t.t.src_len(), t.h.src_len(), t.w.src_len())).or_default().push(i);
         }
 
+        // ONE device and ONE set of device-resident weights for the whole
+        // decode. Every tile shape's graph reads the identical decoder
+        // tensors, so building each shape on its own device re-opened a device
+        // and re-uploaded the whole decoder per shape - host work with the
+        // card idle for all of it, and a `split_by_size` cover has up to
+        // EIGHT distinct shapes once the temporal axis splits as well as the
+        // two spatial ones. Peak VRAM is unchanged: the weights and one tile's
+        // activations were already co-resident, and the activations are still
+        // dropped before the next shape's are allocated.
+        //
+        // `BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS=1` restores the per-shape device.
+        // It changes only WHERE a weight buffer came from, never what any
+        // kernel reads, so the two arms decode to identical bits - which is
+        // what `crates/ltxv/tests/vae_tiling.rs` asserts, and it can only
+        // assert it while the losing arm is still reachable.
+        let shared_gpu = std::env::var("BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS").is_err().then(|| {
+            let t = std::time::Instant::now();
+            let g = Gpu::open(self.device.as_deref(), &KERNELS);
+            gpu_core::profile::stage_time("ltxv vae tiled: device open", t);
+            g
+        });
+        let mut weights = DeviceWeights::new();
+
         let mut done = 0usize;
         for ((st, sh, sw), idxs) in by_shape {
-            let dec = LtxVaeDecoder::build(&self.cfg, self.tensors, st as u32, sh as u32, sw as u32, self.device.as_deref());
+            let t = std::time::Instant::now();
+            let (dec, w) = match &shared_gpu {
+                Some(g) => LtxVaeDecoder::build_on(&self.cfg, self.tensors, st as u32, sh as u32, sw as u32, g, weights),
+                None => (
+                    LtxVaeDecoder::build(&self.cfg, self.tensors, st as u32, sh as u32, sw as u32, self.device.as_deref()),
+                    DeviceWeights::new(),
+                ),
+            };
+            weights = w;
+            gpu_core::profile::stage_time("ltxv vae tiled: graph build (weight upload + recording)", t);
             for i in idxs {
                 let tile = tiles[i];
+                let t = std::time::Instant::now();
                 let sub = self.slice_latent(latent, tile);
+                gpu_core::profile::stage_time("ltxv vae tiled: latent slice (host)", t);
                 let pixels = dec.decode(&sub);
+                let t = std::time::Instant::now();
                 blender.add(tile, &pixels);
+                gpu_core::profile::stage_time("ltxv vae tiled: blend (host)", t);
                 done += 1;
                 on_tile(done, total);
             }
-            // Explicit: the whole point is that this tile shape's device
-            // buffers are gone before the next shape's are allocated.
+            // Explicit: the whole point is that this tile shape's ACTIVATION
+            // buffers are gone before the next shape's are allocated. The
+            // weights deliberately survive - they are the same tensors for
+            // every shape and `weights` still holds them. Timed because a
+            // driver allocation costs about the same again to RELEASE, and
+            // that half happens implicitly at a scope end where, by default,
+            // nothing is measuring it.
+            let t = std::time::Instant::now();
             drop(dec);
+            gpu_core::profile::stage_time("ltxv vae tiled: graph drop (device teardown)", t);
         }
-        blender.finish()
+        let t = std::time::Instant::now();
+        let out = blender.finish();
+        gpu_core::profile::stage_time("ltxv vae tiled: blend divide (host)", t);
+        out
     }
 
     /// [`LtxVaeTiledDecoder::decode_with`] with no progress callback.

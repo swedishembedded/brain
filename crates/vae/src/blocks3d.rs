@@ -82,6 +82,7 @@ const K_MATMUL: usize = 16;
 const K_NLC_BIAS_NCHW: usize = 17;
 const K_SPACE_TO_DEPTH3D: usize = 18;
 const K_DEPTH_TO_SPACE3D: usize = 19;
+const K_L2NORM_SCALE2D: usize = 20;
 
 /// Frames of cross-chunk history every causal conv keeps (upstream `CACHE_T`).
 /// A `(3,1,1)`/`(3,3,3)` kernel with a one-sided pad of 2 needs exactly the
@@ -89,7 +90,7 @@ const K_DEPTH_TO_SPACE3D: usize = 19;
 pub const CACHE_T: u32 = 2;
 
 /// The 3D builder's kernel set, in slot order.
-pub const KERNELS: [(&str, &str); 20] = [
+pub const KERNELS: [(&str, &str); 21] = [
     ("conv3d", kernels::CONV3D),
     ("silu", kernels::SILU),
     ("add2", kernels::ADD2),
@@ -114,6 +115,9 @@ pub const KERNELS: [(&str, &str); 20] = [
     // [`Builder3d::space_to_depth`] / [`Builder3d::depth_to_space`].
     ("space_to_depth3d", kernels::SPACE_TO_DEPTH3D),
     ("depth_to_space3d", kernels::DEPTH_TO_SPACE3D),
+    // The FUSED channel-axis norm - appended, so every index above is
+    // unchanged. See [`Builder3d::chan_l2norm`].
+    ("l2norm_scale2d", kernels::L2NORM_SCALE2D),
 ];
 
 /// Slot index the first caller-supplied kernel gets when a set is built with
@@ -289,6 +293,11 @@ impl FeatCache {
     }
 }
 
+/// Device-resident weight buffers by tensor name - what [`Builder3d`] memoizes
+/// so one host tensor is one device buffer, and what
+/// [`Builder3d::with_weights`] lets a caller carry from one graph to the next.
+pub type DeviceWeights = HashMap<String, DeviceBuffer>;
+
 /// Graph-construction state for a 3D causal autoencoder (borrows the device +
 /// host tensors), mirroring [`crate::blocks::Builder`].
 ///
@@ -302,9 +311,10 @@ pub struct Builder3d<'a> {
     steps: Vec<Step>,
     taps: Vec<(String, DeviceBuffer, usize)>,
     taps_on: bool,
-    wmemo: HashMap<String, DeviceBuffer>,
+    wmemo: DeviceWeights,
     pool: HashMap<u64, Vec<DeviceBuffer>>,
     pooling: bool,
+    fused_norm: bool,
     uploaded: u64,
     /// The single im2col scratch (`length, buffer`) shared by every lowered
     /// conv, grown on demand - the 3D twin of the 2D builder's. Bounded by
@@ -341,13 +351,31 @@ impl<'a> Builder3d<'a> {
     /// [`KERNELS`]`.len()` slots are [`KERNELS`]) and the host `tensors`.
     /// `taps_on` records named intermediates and pins their buffers.
     pub fn new(gpu: &'a Gpu, tensors: &'a Tensors, taps_on: bool) -> Builder3d<'a> {
+        Self::with_weights(gpu, tensors, taps_on, DeviceWeights::new())
+    }
+
+    /// [`Builder3d::new`], starting from weights that are ALREADY on `gpu`.
+    ///
+    /// One model can need several graphs over the same weights - a tiled
+    /// decode records one graph per distinct tile shape, and every one of them
+    /// reads the identical weight tensors. Built through [`Builder3d::new`]
+    /// each of those graphs uploads the whole weight set again, which on a
+    /// multi-gigabyte decoder is the dominant HOST cost of the pass. Handing
+    /// the previous graph's memo (from [`Builder3d::finish_keeping_weights`])
+    /// to the next one makes every upload after the first a hash lookup.
+    ///
+    /// The caller owes exactly one thing: the memo must have been produced on
+    /// the SAME device as `gpu` (the same handle or a [`Gpu::share`] of it).
+    /// A buffer from another device is not merely slow, it is a different
+    /// allocation, so this is a hard requirement and not an optimisation hint.
+    pub fn with_weights(gpu: &'a Gpu, tensors: &'a Tensors, taps_on: bool, wmemo: DeviceWeights) -> Builder3d<'a> {
         Builder3d {
             gpu,
             t: tensors,
             steps: Vec::new(),
             taps: Vec::new(),
             taps_on,
-            wmemo: HashMap::new(),
+            wmemo,
             pool: HashMap::new(),
             // Activation reuse is bit-exact (the graph runs in order with
             // barriers, and a buffer is only freed after its last consumer step
@@ -355,6 +383,14 @@ impl<'a> Builder3d<'a> {
             // looks exactly like a parity bug. `BRAIN_VAE3D_NOPOOL=1` turns
             // reuse off so that hypothesis can be killed in one run.
             pooling: !taps_on && std::env::var("BRAIN_VAE3D_NOPOOL").is_err(),
+            // The fused channel-axis norm is the default and the composed
+            // three-kernel form stays selectable: a comparison that can only
+            // ever run the shipped path confirms whatever was written, so the
+            // losing arm has to remain reachable for the A/B to mean anything.
+            // The two arms are bit-identical by construction (same fold order
+            // over the same values), which is what
+            // `crates/vae/tests/blocks3d_norm.rs` asserts.
+            fused_norm: std::env::var("BRAIN_VAE3D_SPLIT_NORM").is_err(),
             uploaded: 0,
             col: None,
         }
@@ -553,7 +589,15 @@ impl<'a> Builder3d<'a> {
 
     /// Consume the builder, yielding the recorded steps and taps.
     pub fn finish(self) -> (Vec<Step>, Vec<(String, DeviceBuffer, usize)>) {
-        (self.steps, self.taps)
+        let (steps, taps, _) = self.finish_keeping_weights();
+        (steps, taps)
+    }
+
+    /// [`Builder3d::finish`], additionally handing back the device weight memo
+    /// so the next graph over the same weights can be built with
+    /// [`Builder3d::with_weights`] instead of re-uploading them.
+    pub fn finish_keeping_weights(self) -> (Vec<Step>, Vec<(String, DeviceBuffer, usize)>, DeviceWeights) {
+        (self.steps, self.taps, self.wmemo)
     }
 
     // ---------------------------------------------------------------- convs
@@ -704,8 +748,51 @@ impl<'a> Builder3d<'a> {
         );
         let scaled: Vec<f32> = gamma.iter().map(|g| g * (x.c as f32).sqrt()).collect();
         let g = self.dev_owned(&format!("{prefix}.gamma.scaled"), &scaled);
+        self.chan_l2norm(x, &g, 1e-24)
+    }
 
+    /// Channel-axis L2 normalisation with a per-channel gain, in NCHW:
+    /// `y[c,l] = x[c,l] * rsqrt(sum_k x[k,l]^2 + eps_l2) * g[c]`.
+    ///
+    /// The one place [`Builder3d::rms_norm`] and [`Builder3d::pixel_norm`]
+    /// meet: they differ only in the `(gain, eps)` pair they hand this, so the
+    /// dispatch decision is made ONCE, here, and every caller of either norm -
+    /// including models written later - inherits it without knowing it exists.
+    ///
+    /// Two arms, and the default is the FUSED kernel:
+    ///
+    /// * `l2norm_scale2d` - one invocation per spatial position, walking the
+    ///   channel axis at stride `T*H*W`. Consecutive lanes take consecutive
+    ///   positions, so every access is coalesced.
+    /// * `nchw_nlc` -> `l2norm_scale` -> `nlc_nchw` - the composed form, kept
+    ///   selectable through `BRAIN_VAE3D_SPLIT_NORM=1`.
+    ///
+    /// The composed form was the right first implementation - it reuses the
+    /// row-oriented kernel, whose rows have to be contiguous - but it pays the
+    /// strided channel walk TWICE, once in each permute, to spare the middle
+    /// kernel from paying it once, and it makes the middle kernel redo each
+    /// position's whole sum of squares once per channel. `layernorm2d` is the
+    /// same argument already settled for the LayerNorm family
+    /// (`crates/vision/src/blocks.rs`'s `LayerNorm2d` records the measurement);
+    /// this is its L2/RMS twin.
+    ///
+    /// **The two arms are bit-identical, not merely close.** The permutes are
+    /// exact rearrangements and both arms fold the sum of squares over
+    /// ascending `c`, so the arithmetic is the identical sequence of roundings,
+    /// which is why `crates/vae/tests/blocks3d_norm.rs` compares BITS rather
+    /// than a tolerance.
+    fn chan_l2norm(&mut self, x: &T3, g: &DeviceBuffer, eps_l2: f32) -> T3 {
         let thw = x.t * x.h * x.w;
+        if self.fused_norm {
+            let y = self.act3(x.c, x.t, x.h, x.w);
+            self.steps.push(self.gpu.step(
+                K_L2NORM_SCALE2D,
+                &[&x.buf, g, &y.buf],
+                &[1, x.c, thw, f(eps_l2)],
+                thw,
+            ));
+            return y;
+        }
         let rows = self.act(x.len());
         self.steps.push(self.gpu.step(
             K_NCHW_NLC,
@@ -716,8 +803,8 @@ impl<'a> Builder3d<'a> {
         let normed = self.act(x.len());
         self.steps.push(self.gpu.step(
             K_L2NORM_SCALE,
-            &[&rows, &g, &normed],
-            &[thw, x.c, f(1e-24)],
+            &[&rows, g, &normed],
+            &[thw, x.c, f(eps_l2)],
             x.n(),
         ));
         let y = self.act3(x.c, x.t, x.h, x.w);
@@ -747,27 +834,12 @@ impl<'a> Builder3d<'a> {
     /// mean(x^2)`:
     /// `sqrt(C) * rsqrt(sum_sq + C*eps) = sqrt(C) / sqrt(C*(mean_sq + eps)) =
     /// 1/sqrt(mean_sq + eps)`. No new WGSL, just a different (gain, eps) pair
-    /// than [`Builder3d::rms_norm`] passes to the same kernel.
+    /// than [`Builder3d::rms_norm`] passes to [`Builder3d::chan_l2norm`].
     pub fn pixel_norm(&mut self, x: &T3, eps: f32) -> T3 {
         let c = x.c as f32;
         let gain = vec![c.sqrt(); x.c as usize];
         let g = self.dev_owned(&format!("__pixel_norm.gain.{}", x.c), &gain);
-
-        let thw = x.t * x.h * x.w;
-        let rows = self.act(x.len());
-        self.steps.push(self.gpu.step(K_NCHW_NLC, &[&x.buf, &rows], &[x.n(), x.c, thw], x.n()));
-        let normed = self.act(x.len());
-        self.steps.push(self.gpu.step(
-            K_L2NORM_SCALE,
-            &[&rows, &g, &normed],
-            &[thw, x.c, f(c * eps)],
-            x.n(),
-        ));
-        let y = self.act3(x.c, x.t, x.h, x.w);
-        self.steps.push(self.gpu.step(K_NLC_NCHW, &[&normed, &y.buf], &[x.n(), x.c, thw], x.n()));
-        self.free(T3 { buf: rows, ..x.clone() });
-        self.free(T3 { buf: normed, ..x.clone() });
-        y
+        self.chan_l2norm(x, &g, c * eps)
     }
 
     // ------------------------------------------------------------ pointwise

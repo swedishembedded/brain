@@ -247,6 +247,52 @@ fn ltxv_vae_import_covers_the_shipped_checkpoint() {
     assert!(e.contains("unused source tensors"), "{e}");
 }
 
+/// The FUSED channel-axis norm (`l2norm_scale2d`, the default) decodes the
+/// REAL checkpoint to the same bits as the composed `nchw_nlc` ->
+/// `l2norm_scale` -> `nlc_nchw` form it replaces.
+///
+/// The reference-parity tests above already cover whether the decoder is
+/// RIGHT. What they cannot say is whether the fusion changed anything at all,
+/// because they compare against a golden through a cosine floor and a floor
+/// absorbs a small change silently. This decodes the same latent twice in one
+/// process, once per arm (`BRAIN_VAE3D_SPLIT_NORM`), and asserts on the raw
+/// bits: the fused kernel folds the same values in the same order, so any
+/// differing bit is a defect and no tolerance is warranted.
+///
+/// Real weights on purpose. The tiny checkpoint-free gate in
+/// `crates/vae/tests/blocks3d_norm.rs` proves the mechanism at one shape; this
+/// runs it at all four channel widths the real decoder walks (1024 -> 512 ->
+/// 256 -> 128), each at a different spatial extent, which is where an indexing
+/// bug that only bites at some `C`/`H*W` combination would show.
+///
+/// The switch is process-wide and this binary's tests run in parallel, so a
+/// sibling test may build its decoder while the composed arm is selected.
+/// That is harmless HERE and only here: the arms are bit-identical, which is
+/// what this test asserts, so a sibling taking either one meets its own golden
+/// floor unchanged. A switch whose arms genuinely differed would need the
+/// binary-wide arm lock `crates/ltxv/tests/scratch_pool.rs` carries.
+#[test]
+fn the_fused_channel_norm_changes_no_bit_of_a_real_weight_decode() {
+    let Some((w, fx)) = setup(17) else { return };
+    let cfg = LtxVaeConfig::conv25();
+    let ls = fx.shape("latent").to_vec();
+    let (lt, lh, lw) = (ls[1] as u32, ls[2] as u32, ls[3] as u32);
+    let latent = fx.get("latent");
+
+    let decode = || LtxVaeDecoder::build(&cfg, w, lt, lh, lw, None).decode(latent);
+    std::env::set_var("BRAIN_VAE3D_SPLIT_NORM", "1");
+    let split = decode();
+    std::env::remove_var("BRAIN_VAE3D_SPLIT_NORM");
+    let fused = decode();
+
+    let differing = split.iter().zip(&fused).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    eprintln!("fused vs composed channel norm: {differing} of {} decoded words differ", split.len());
+    assert_eq!(
+        differing, 0,
+        "the fused channel-axis norm changed the real decode's output - it permutes nothing and folds the same values in the same order, so any differing bit is an indexing or fold-order bug"
+    );
+}
+
 /// Temporary bisection aid (`BRAIN_LTXV_VAE_TAPS` regenerated with `--taps`):
 /// compares every `dec.*` per-block tap against the golden's `tap_dec.*` to
 /// find the first divergent stage. Not part of the permanent suite - `#[ignore]`d.

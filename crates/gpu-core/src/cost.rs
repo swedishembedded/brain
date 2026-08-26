@@ -471,6 +471,16 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (n, d) = (p(0)?, p(1)?);
             f(n * d * (2 * d + 3), 4 * (2 * n * d + d))
         }
+        // The FUSED channels-first twin: params [N, C, HW, eps_bits]. One
+        // thread per (n, hw) position, so the sum of squares is computed ONCE
+        // per position instead of once per output element. Per thread:
+        // C*(mul+add) for the sum, rsqrt (1), then C*(2 muls) to scale =
+        // 4*C + 1. Bytes are the same idealized streaming total as the
+        // composed form's middle stage (x and y are [N,C,HW], g is [C]).
+        "l2norm_scale2d" => {
+            let (n, c, hw) = (p(0)?, p(1)?, p(2)?);
+            f(n * hw * (4 * c + 1), 4 * (2 * n * c * hw + c))
+        }
 
         // ---- RoPE: rows·heads·hd/2 pairs; angle (pow+mul) + cos + sin + the
         // 6-op rotation = 10 per pair. rope2d reads its angles from tables (7).
@@ -1479,6 +1489,13 @@ mod tests {
         assert_eq!(cost("l2norm_scale", &[2, 4, 0], 8).flops, 88);
         assert_eq!(cost("l2norm_scale", &[2, 4, 0], 8).bytes, 80);
 
+        // l2norm_scale2d [N=1,C=4,HW=2]: the same 8 elements normalized over
+        // the same axis, one thread per POSITION - N*HW*(4*C+1) = 2*17 = 34
+        // flops against the composed form's 88, which is the duplicated work
+        // the fusion removes. Bytes match, because both move each operand once.
+        assert_eq!(cost("l2norm_scale2d", &[1, 4, 2, 0], 2).flops, 34);
+        assert_eq!(cost("l2norm_scale2d", &[1, 4, 2, 0], 2).bytes, 80);
+
         // nlc_bias_nchw [total(unused)=12,c=3,l=4]: c*l = 12 flops.
         assert_eq!(cost("nlc_bias_nchw", &[12, 3, 4], 12).flops, 12);
         assert_eq!(cost("nlc_bias_nchw", &[12, 3, 4], 12).bytes, 108);
@@ -1510,6 +1527,7 @@ mod tests {
         for k in [
             "na3d_scores", "na3d_apply", "conv3d", "conv3d_dx", "conv3d_dw", "im2col3d_at",
             "space_to_depth3d", "depth_to_space3d", "pixel_shuffle3d_cl", "l2norm_scale",
+            "l2norm_scale2d",
             "nlc_bias_nchw", "add_chan_bcast", "rope", "rope_neox", "rope_train",
             "rope_train_bwd", "rope_partial", "rope_partial_bwd", "rope_sub",
             "rope_interleave_table", "gelu_erf", "geglu_shift", "snake_beta",
