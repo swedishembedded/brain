@@ -61,7 +61,7 @@
 //!
 //! Usage:
 //!   ltxv_bench dit [reps] [layers] [tokens] [ctx_len]     video DiT block stack (fp32, synthetic weights)
-//!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode
+//!   ltxv_bench vae [reps] [frames] [height] [width]       real video VAE decode, WHOLE-clip path only (past `ltxv::vae3d::should_tile`'s ceiling a generation tiles instead, which this does not measure - it says so and stops rather than reporting a number for a path production would not take)
 //!   ltxv_bench streamed [layers] [tokens] [ctx_len] [reuse_cache] [resident] [distinct_timesteps] [warm_reps]  real int8 checkpoint, forward_q_streamed's own stage breakdown; reuse_cache=1 shares one block-weight cache across two calls (a generation's cache-miss vs cache-hit shape); resident=1 additionally shares ONE device session, so a warm call re-uploads nothing (a real generation's actual shape - see crate::devres); distinct_timesteps sizes the host adaLN stage (1 = plain t2v, 2 = anchored or long-form, tokens = no dedup at all, i.e. what this stage cost before the dedup existed); warm_reps repeats the cache-hit call so a headline is a best-of-N and not one sample (the first warm call is the warm-up and is excluded)
 //!   ltxv_bench streamed-av [layers] [video_tokens] [ctx_len] [audio_tokens] [reuse_cache] [resident] [distinct_timesteps] [warm_reps]  the same, for the JOINT audio+video forward - read against `streamed` at the same video token count to get what audio costs
 //!   ltxv_bench decode <latent.bin> <whole|tiled> [h0 h1 w0 w1]   decode a DUMPED latent (see ltxv::latentdump), optionally a latent-cell crop
@@ -214,7 +214,26 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
     let (lh, lw) = (height / 32, width / 32);
     assert!(lh > 0 && lw > 0 && height.is_multiple_of(32) && width.is_multiple_of(32), "height/width must be multiples of 32");
 
-    println!("\n=== ltxv video VAE decode (real weights): latent [{}, {lat_t}, {lh}, {lw}] -> {frames} frames at {width}x{height} ===", cfg.latent_channels);
+    println!("\n=== ltxv video VAE decode (real weights, WHOLE-clip path): latent [{}, {lat_t}, {lh}, {lw}] -> {frames} frames at {width}x{height} ===", cfg.latent_channels);
+
+    // This bench measures `LtxVaeDecoder`, the whole-clip path. A generation
+    // picks between that and the overlapping-tile path by `should_tile`
+    // (`ltxv::pipeline::decode_video`), so past the ceiling the two disagree
+    // about what "the VAE decode" even is. Building the whole graph anyway
+    // ends in a wgpu out-of-memory panic that leaks the device - a stack
+    // trace where the honest answer is one line, and worse, a number from a
+    // smaller run that silently reads as production's.
+    if ltxv::vae3d::should_tile(frames, height, width) {
+        let px = frames as u64 * height as u64 * width as u64;
+        println!(
+            "this geometry is {:.1} Mpx, past the {:.1} Mpx whole-decode ceiling, so a real generation TILES here and this bench would not measure it.\n\
+             Bench a geometry under the ceiling, or set BRAIN_LTXV_VAE_TILE=0 to force the whole path and measure it anyway (expect an out-of-memory abort if it does not fit).",
+            px as f64 / 1e6,
+            ltxv::vae3d::WHOLE_DECODE_MAX_PIXELS as f64 / 1e6,
+        );
+        return;
+    }
+
     let t0 = Instant::now();
     let raw = checkpoint::safetensors::read(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
     let weights = ltxv::import::import_vae(raw, &cfg).unwrap_or_else(|e| panic!("importing {path}: {e}"));
