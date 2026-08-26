@@ -36,6 +36,13 @@
 //! a stub context, or vice versa, both run) but only "real DiT + real text
 //! encoder" is an honest end-to-end real-weight generation.
 //!
+//! [`GenOpts::audio`] runs LTX-2.5's AUDIO stream beside its video one, in
+//! the same forwards, on the same int8/streamed/device-resident path
+//! ([`RealAvDit`], [`crate::dit::av_forward_q_streamed_in`]). The eager
+//! host-fp32 arm that one is gated and measured against is still reachable,
+//! behind `BRAIN_LTXV_AV_FP32` - see [`av_fp32_reference`]; which of the two
+//! a run took is named in its own banner ([`av_arm_label`]).
+//!
 //! Everything else is real: [`ltx2_sigmas`]'s token-count-dependent shift,
 //! [`euler_ancestral_step`]'s rectified-flow ancestral formula, the RoPE
 //! position-bounds construction, the classifier-free guidance fold, and the
@@ -90,7 +97,7 @@ use std::time::Instant;
 
 use vae::blocks::Tensors;
 
-use crate::config::LtxDitConfig;
+use crate::config::{LtxAvDitConfig, LtxDitConfig};
 use crate::dit::{random_tiny_weights, LtxDit};
 use crate::longform::Scene;
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
@@ -353,11 +360,12 @@ pub struct GenOpts {
     /// leaving it off runs only its video half and the clip is silent.
     ///
     /// Off by default, and the default is about COST, not about correctness.
-    /// The audio-extended block has no streamed/quantized/device-resident
-    /// implementation the way the video-only one does (see
-    /// `crate::av_stream`'s module doc), so an audio-visual generation holds
-    /// the model as host fp32 and re-uploads it per forward. Until that gap
-    /// closes, turning sound on has to be something a caller asks for.
+    /// The audio-extended block runs on the same streamed/quantized/
+    /// device-resident path the video-only one does ([`RealAvDit`]), so a
+    /// joint step costs modestly more than a video-only step at the same
+    /// shape rather than several times more - but it is still more, and the
+    /// audio-visual path still has no training support and no bandwidth
+    /// extension, so turning sound on stays something a caller asks for.
     ///
     /// Requires `dit_config = "ltx25_22b"` and [`Paths::audio_vae`]; both are
     /// checked before any weight is read.
@@ -1938,6 +1946,45 @@ impl Denoiser for LtxDit {
     }
 }
 
+/// One joint denoise step's inputs, in the one form BOTH audio-visual arms
+/// take.
+///
+/// The mapping from what [`denoise`] holds (a [`StepInputs`], an
+/// [`AudioInputs`] and the two streams' text projections) onto the sixteen
+/// fields [`crate::dit::AvStreamedStep`] wants is written exactly once, here,
+/// because that is the shape of the mistake it prevents: the two streams'
+/// contexts, positions, timesteps and latents are four pairs of same-typed
+/// slices, and handing one arm the audio member where the video one belongs
+/// produces a plausible clip rather than an error. Gated by
+/// `an_av_step_carries_each_streams_own_inputs`.
+///
+/// One scalar sigma serves both `v_sigma` and `a_sigma`: each stream's
+/// cross-modal gate is keyed on the OTHER stream's sigma, and both streams
+/// run one schedule in lockstep
+/// (`ltx_pipelines.utils.samplers.euler_denoising_loop` steps them together
+/// off one `sigmas` tensor), so the two values are equal by construction.
+fn av_step<'a>(i: &StepInputs<'a>, a: &AudioInputs<'a>, v_context: &'a [f32], a_context: &'a [f32]) -> crate::dit::AvStreamedStep<'a> {
+    crate::dit::AvStreamedStep {
+        v_latent: i.latent,
+        v_timesteps: i.timesteps,
+        v_positions: i.positions,
+        v_keyframes_mask: i.keyframes_mask,
+        v_context,
+        v_context_len: i.context_len,
+        tv: i.t,
+        v_sigma: i.sigma,
+        v_context_valid: i.context_valid,
+        a_latent: a.latent,
+        a_timesteps: a.timesteps,
+        a_positions: a.positions,
+        a_context,
+        a_context_len: i.context_len,
+        ta: a.ta,
+        a_sigma: i.sigma,
+        a_context_valid: i.context_valid,
+    }
+}
+
 impl Denoiser for crate::av_stream::AvDenoiser {
     /// A video-only forward against an audio-visual model is not something
     /// this pipeline ever wants: dropping the audio stream would silently
@@ -1953,25 +2000,93 @@ impl Denoiser for crate::av_stream::AvDenoiser {
     }
 
     fn forward_av(&self, i: &StepInputs, a: &AudioInputs, context: &[f32], a_context: &[f32]) -> (Vec<f32>, Vec<f32>) {
-        crate::av_stream::AvDenoiser::forward(
-            self,
-            &crate::av_stream::AvStepInputs {
-                v_latent: i.latent,
-                v_timesteps: i.timesteps,
-                v_positions: i.positions,
-                v_keyframes_mask: i.keyframes_mask,
-                tv: i.t,
-                a_latent: a.latent,
-                a_timesteps: a.timesteps,
-                a_positions: a.positions,
-                ta: a.ta,
-                sigma: i.sigma,
-                context_len: i.context_len,
-                context_valid: i.context_valid,
-            },
-            context,
-            a_context,
-        )
+        crate::av_stream::AvDenoiser::forward(self, &av_step(i, a, context, a_context))
+    }
+}
+
+/// The real 22B checkpoint's audio-visual [`Denoiser`] - [`RealDit`]'s twin,
+/// and what an `--audio` generation denoises through.
+///
+/// Field for field the same design, for the same reasons, over the
+/// audio-extended block: an open GGUF source, the non-block "head" tensors
+/// (both streams' patchify/proj_out pairs, all eight model-level adaLN groups
+/// and both embeddings connectors - [`crate::dit::load_av_head_tensors_from_source`]),
+/// the CHECKPOINT-scoped host weight cache, and one
+/// [`crate::devres::AvDitSession`] per card holding that card's resident
+/// window of already-quantized AV blocks. Every step of the generation then
+/// re-reads nothing and re-uploads only what the card does not already hold.
+///
+/// Two things differ from [`RealDit`], both because there are two streams:
+///
+/// * There is no [`Denoiser::forward_cfg_pair`] override, so a CFG pair runs
+///   sequentially on one card. [`denoise`]'s audio arm calls
+///   [`Denoiser::forward_av`] directly - there is no joint-forward pair seam
+///   on the trait to place a two-card dispatch behind - and the real
+///   distilled checkpoint denoises at guidance 1, where no pair is issued at
+///   all. Giving the AV path a two-card pair is a change to the trait, not to
+///   this type.
+/// * An AV block is bigger than a video one, so the same card affords fewer
+///   resident slots. That is the residency policy's arithmetic
+///   ([`crate::devres::slots_for`]), not a decision made here.
+struct RealAvDit {
+    cfg: LtxAvDitConfig,
+    src: crate::gguf_src::LtxvGgufSource,
+    head: Tensors,
+    device: Option<String>,
+    cache: crate::block::GenerationCache,
+    /// One open device plus its resident AV weight window per card, keyed on
+    /// the card the calling thread is scoped to - see [`RealDit::sessions`],
+    /// whose contract this shares exactly.
+    sessions: std::sync::Mutex<std::collections::HashMap<Option<u32>, std::sync::Arc<crate::devres::AvDitSession>>>,
+}
+
+impl RealAvDit {
+    /// This thread's card's session, built on first use and sized from the
+    /// VIDEO token count of the forward that built it.
+    ///
+    /// A long-form window boundary and the stage-1 -> stage-2 boundary both
+    /// change that count, and both already call [`Denoiser::release_devices`]
+    /// before the next forward - so the next session is planned from the
+    /// shape it will actually run, rather than inheriting the previous
+    /// stage's. A caller that changes shape WITHOUT releasing is still
+    /// correct, because [`crate::devres::AvDitSession::prefill`] keys its
+    /// window on the shape and rebuilds it; it only keeps a slot count
+    /// planned for the older one.
+    fn session(&self, tv: usize) -> std::sync::Arc<crate::devres::AvDitSession> {
+        let key = gpu_core::devices::current_gpu();
+        let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(key)
+            .or_insert_with(|| std::sync::Arc::new(crate::devres::AvDitSession::resident(&self.cfg, crate::block::QTier::Int8, self.device.as_deref(), tv)))
+            .clone()
+    }
+}
+
+impl Denoiser for RealAvDit {
+    /// Same reason [`crate::av_stream::AvDenoiser`]'s is unreachable: the A2V
+    /// cross-attention writes into the video residual every block, so there is
+    /// no video-only forward of this model that means anything.
+    fn forward(&self, _i: &StepInputs, _context: &[f32]) -> Vec<f32> {
+        unreachable!("RealAvDit::forward - denoise takes forward_av for an audio-visual denoiser")
+    }
+
+    fn has_audio(&self) -> bool {
+        true
+    }
+
+    fn forward_av(&self, i: &StepInputs, a: &AudioInputs, context: &[f32], a_context: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let session = self.session(i.t);
+        crate::dit::av_forward_q_streamed_in(&session, &self.cfg, &self.src, &self.head, crate::block::QTier::Int8, &av_step(i, a, context, a_context), &self.cache)
+    }
+
+    /// Drop every card's AV session, and with it the resident weight window.
+    /// [`Self::session`] rebuilds one on the next forward, sized from THAT
+    /// forward's token count. The weights are not re-read - they come back
+    /// from the checkpoint-scoped host cache this denoiser still holds.
+    fn release_devices(&self) {
+        let dropped: Vec<_> = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).drain().collect();
+        if !dropped.is_empty() {
+            tracing::info!(cards = dropped.len(), "releasing the audio-visual DiT's device sessions");
+        }
     }
 }
 
@@ -2360,9 +2475,12 @@ fn denoise(
                 let ai = AudioInputs { latent: &a.latent, timesteps: &a_timesteps, positions: &a.positions, ta: a.ta };
                 if cfg_on {
                     tracing::trace!(step = i + 1, branch = "cond+uncond", sigma, "joint audio+video forward pair starting");
-                    // Sequentially, never the parallel-card pair: a joint AV
-                    // forward holds the model as host fp32 and both branches
-                    // would want it at once (see `crate::av_stream`).
+                    // Sequentially, never the parallel-card pair: the pair
+                    // seam is `Denoiser::forward_cfg_pair`, and a joint
+                    // forward does not go through it - both streams' inputs
+                    // and both outputs would have to cross it. Placing the AV
+                    // pair on two cards is a change to that trait method's
+                    // shape, not to this call site.
                     let (vc, ac) = dit.forward_av(&inputs, &ai, ctx_cond, a.ctx_cond);
                     let (vu, au) = dit.forward_av(&inputs, &ai, ctx_uncond, a.ctx_uncond);
                     let v: Vec<f32> = vc.iter().zip(&vu).map(|(&c, &u)| u + guidance * (c - u)).collect();
@@ -2874,10 +2992,10 @@ fn upscale_and_refine(sc: &StageCtx<'_>, mut r: Refine<'_>, total: u32, progress
 /// [`LatentUpsampler::build`] is sized by the window it runs on - so
 /// re-reading and re-dequantizing a gigabyte of checkpoint at each seam is
 /// pure per-window cost, and a long-form clip pays it per window while an
-/// [`upscale`] pays it per pass. **Not until needed**: an audio-visual
-/// generation holds the whole transformer as host fp32 while it denoises, so
-/// the upscaler's own expansion must not sit beside it through a stage that
-/// does not use it.
+/// [`upscale`] pays it per pass. **Not until needed**: a generation already
+/// holds a host cache of the whole transformer's block weights while it
+/// denoises, so the upscaler's own expansion must not sit beside it through a
+/// stage that does not use it.
 #[derive(Default)]
 struct SpatialUpsampler {
     weights: std::cell::OnceCell<vae::blocks::Tensors>,
@@ -2936,22 +3054,41 @@ fn build_denoiser(paths: &Paths, dit_cfg: LtxDitConfig, o: &GenOpts, place: crat
     })?;
     tracing::info!(path = %dit_path, "opening the real DiT GGUF");
     let src = crate::gguf_src::LtxvGgufSource::open(dit_path).inspect_err(|e| tracing::error!(path = %dit_path, error = %e, "opening the DiT GGUF failed"))?;
-    if o.audio {
-        // The audio-visual denoiser is a DIFFERENT object, not the video one
-        // with a flag: it runs `LtxAvDit`, which computes both streams in one
-        // forward because the A<->V cross-attention couples them every block.
-        // It also expands the whole checkpoint to host fp32 rather than
-        // streaming int8 blocks - see `crate::av_stream`'s module doc for why
-        // that is the only route today and what it costs.
-        let cfg = *src.config();
-        tracing::warn!(gib = crate::av_stream::host_floats(&cfg) * 4 / (1 << 30), "audio-visual generation: expanding the whole checkpoint to host fp32 (the audio stream has no streamed/quantized path yet)");
-        let w = crate::av_stream::AvWeights::load(&src, cfg)?;
-        return Ok(Box::new(crate::av_stream::AvDenoiser::new(w, o.device.as_deref())));
-    }
     let real_cfg = src.config().video;
     if real_cfg != dit_cfg {
         tracing::error!(path = %dit_path, dit_config = %o.dit_config, "the checkpoint's embedded config does not match the named build config");
         return Err(format!("ltxv: {dit_path}'s own embedded config does not match LtxDitConfig::{:?}() - checkpoint/build mismatch", o.dit_config));
+    }
+    if o.audio {
+        // The audio-visual denoiser is a DIFFERENT object, not the video one
+        // with a flag: both streams are computed in ONE forward, because the
+        // A<->V cross-attention couples them every block.
+        let cfg = *src.config();
+        // Keyed on the checkpoint, not on this call - `RealDit`'s own doc has
+        // the reasoning, and it is the same store: an AV block and a video
+        // block of the same checkpoint are different entries, so the two
+        // arms share one cache without either seeing the other's bytes.
+        let cache = crate::block::GenerationCache::for_checkpoint(dit_path);
+        if av_fp32_reference() {
+            tracing::warn!(
+                gib = crate::av_stream::host_floats(&cfg) * 4 / (1 << 30),
+                "BRAIN_LTXV_AV_FP32: denoising on the eager host-fp32 audio-visual REFERENCE arm, expanding the whole checkpoint (unset it for the quantized, device-resident path)"
+            );
+            let w = crate::av_stream::AvWeights::load(&src, cfg)?;
+            return Ok(Box::new(crate::av_stream::AvDenoiser::new(w, o.device.as_deref())));
+        }
+        let head = crate::dit::load_av_head_tensors_from_source(&src, &cfg);
+        let cs = cache.stats();
+        tracing::info!(
+            layers = cfg.video.num_layers,
+            video_dim = cfg.video.inner_dim,
+            audio_dim = cfg.audio.inner_dim,
+            head_tensors = head.len(),
+            cached_blocks = cs.blocks,
+            cached_bytes = cs.bytes,
+            "real audio-visual DiT ready (both streams, int8 blocks stream per forward)"
+        );
+        return Ok(Box::new(RealAvDit { cfg, src, head, device: o.device.clone(), cache, sessions: Default::default() }));
     }
     let head = crate::dit::load_head_tensors_from_source(&src, &real_cfg);
     tracing::info!(layers = real_cfg.num_layers, inner_dim = real_cfg.inner_dim, head_tensors = head.len(), "real DiT ready (blocks stream per forward)");
@@ -3022,17 +3159,12 @@ fn build_context(paths: &Paths, prompt: &str, dit_cfg: LtxDitConfig, o: &GenOpts
     Ok(r)
 }
 
-/// Text to video. `progress(done, total, phase)` mirrors `wan::pipeline::
-/// generate`'s contract; `cancel` is polled once per denoise step. `prompt`
-/// only ever reaches [`context_stub`] (see this module's doc - there is no
-/// real text encoder).
-#[tracing::instrument(level = "info", name = "generate", skip_all, fields(frames = o.frames, width = o.width, height = o.height, steps = o.steps, seed = o.seed, guidance = o.guidance, dit_config = %o.dit_config))]
 /// Everything an audio request needs, checked before any weight is read.
 ///
 /// One function because [`generate`] and [`generate_long`] are two entry
 /// points into the same requirement, and a check that lived in only one of
 /// them would let the other produce an audio latent nothing can decode - or
-/// spend a whole-checkpoint host expansion first and fail after it.
+/// fill a host weight cache first and fail after it.
 fn check_audio_request(paths: &Paths, o: &GenOpts) -> Result<(), String> {
     if !o.audio {
         return Ok(());
@@ -3057,9 +3189,92 @@ fn check_audio_request(paths: &Paths, o: &GenOpts) -> Result<(), String> {
             "audio generation needs the real text encoder: the audio stream is conditioned through its OWN text projection (text_embedding_projection.audio_aggregate_embed), which the stub context cannot stand in for - set {var}"
         ));
     }
-    crate::av_stream::AvWeights::fits_in_host_memory(&crate::config::LtxAvDitConfig::ltx25())
+    check_av_host_memory(&LtxAvDitConfig::ltx25(), av_fp32_reference())
 }
 
+/// `BRAIN_LTXV_AV_FP32=1` routes an audio-visual generation through the eager
+/// host-fp32 reference arm ([`crate::av_stream::AvDenoiser`]) instead of the
+/// quantized, device-resident one ([`RealAvDit`]).
+///
+/// Same shape as `BRAIN_NO_FLASH_CROSS`, and there for the same three reasons:
+/// the A/B a measurement of the quantized arm needs (without a switch, an A/B
+/// on a capable machine compares the quantized path against itself and reports
+/// a meaningless parity), a reference definition of the math that the
+/// tiny-config parity suite proves against, and a fallback if the quantized
+/// arm ever misbehaves. It is NOT a tuning knob: the two arms compute the same
+/// model at different precisions, and the fp32 one costs several times as much
+/// wall clock and twice the host RAM.
+///
+/// Read once per process, for the reason `no_flash_cross` is: the routing must
+/// be a pure function of its inputs for a given run, or a generation could
+/// build one arm and report the other. Which arm a set of inputs selects is
+/// otherwise pure - see [`av_arm_label`], which is what the CLI banner prints.
+pub fn av_fp32_reference() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("BRAIN_LTXV_AV_FP32").map(|v| v != "0").unwrap_or(false))
+}
+
+/// What a run's banner says its denoiser is, as a pure function of the two
+/// things that decide it - so the line a user reads and the object
+/// [`build_denoiser`] returns cannot disagree about which arm ran.
+///
+/// `real` is "this is a real checkpoint config, not the tiny random-weight
+/// one"; `fp32` is [`av_fp32_reference`].
+pub fn av_arm_label(real: bool, audio: bool, fp32: bool) -> &'static str {
+    match (real, audio, fp32) {
+        (false, _, _) => "tiny random-weight DiT",
+        (true, false, _) => "REAL checkpoint DiT (int8 compute, video stream only)",
+        (true, true, false) => "REAL checkpoint audio+video DiT (int8 compute, both streams)",
+        (true, true, true) => "REAL checkpoint audio+video DiT (host fp32 REFERENCE arm, both streams)",
+    }
+}
+
+/// Refuse an audio request this machine cannot hold, against the requirement
+/// of the arm that will actually run.
+///
+/// The two arms differ by an order of magnitude and the guard has to follow
+/// the switch, or it quotes a number the code no longer has: the fp32 arm
+/// needs the whole manifest expanded to f32
+/// ([`crate::av_stream::AvWeights::fits_in_host_memory`]), while the quantized
+/// arm holds one already-quantized copy of each block plus the non-block head
+/// tensors, and streams everything else off the mapped checkpoint.
+///
+/// The quantized figure is derived, not written down: `cached_av_block_bytes`
+/// is the same function the residency policy sizes a slot with, and the head
+/// half is the manifest minus its `transformer_blocks.` prefix - so a config
+/// change that grew the model cannot leave this check reading a stale size.
+fn check_av_host_memory(cfg: &LtxAvDitConfig, fp32: bool) -> Result<(), String> {
+    if fp32 {
+        return crate::av_stream::AvWeights::fits_in_host_memory(cfg);
+    }
+    let want = quantized_av_host_bytes(cfg);
+    let Some(avail) = crate::av_stream::available_host_bytes() else { return Ok(()) };
+    let margin = want / 8;
+    if avail < want + margin {
+        return Err(format!(
+            "ltxv: audio generation holds the audio+video DiT's blocks as int8 in host RAM ({} GiB, plus headroom) but only {} GiB is available",
+            want / (1 << 30),
+            avail / (1 << 30)
+        ));
+    }
+    Ok(())
+}
+
+/// Host bytes the quantized audio-visual arm holds: one cached int8 copy of
+/// every transformer block, plus the non-block head tensors as fp32.
+fn quantized_av_host_bytes(cfg: &LtxAvDitConfig) -> u64 {
+    let blocks = crate::block::cached_av_block_bytes(&cfg.video, &cfg.audio, crate::block::QTier::Int8) * u64::from(cfg.video.num_layers);
+    let head: u64 = crate::dit::av_dit_tensor_manifest(cfg)
+        .iter()
+        .filter(|(name, _)| !name.starts_with("transformer_blocks."))
+        .map(|(_, s)| s.iter().product::<usize>() as u64 * 4)
+        .sum();
+    blocks + head
+}
+
+/// Text to video. `progress(done, total, phase)` mirrors `wan::pipeline::
+/// generate`'s contract; `cancel` is polled once per denoise step.
+#[tracing::instrument(level = "info", name = "generate", skip_all, fields(frames = o.frames, width = o.width, height = o.height, steps = o.steps, seed = o.seed, guidance = o.guidance, dit_config = %o.dit_config))]
 pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
     tracing::info!(
         prompt_chars = prompt.chars().count(),
@@ -4863,9 +5078,9 @@ mod tests {
     /// An audio request that cannot possibly produce sound must be refused in
     /// milliseconds, naming the ONE thing that is missing.
     ///
-    /// Not a nicety: the audio path expands the whole checkpoint to host fp32
-    /// before it can discover any of this, so a check that ran later would
-    /// cost minutes and most of a machine's RAM to say "no text encoder". Each
+    /// Not a nicety: the audio path opens the checkpoint and fills a host
+    /// weight cache before it can discover any of this, so a check that ran
+    /// later would cost minutes to say "no text encoder". Each
     /// prerequisite is asserted separately, because a single "audio needs more
     /// setup" message would send a caller looking in the wrong place.
     #[test]
@@ -4900,6 +5115,84 @@ mod tests {
         let full = Paths { text_encoder: Some("/te".into()), ..with_av };
         let e = generate(&full, "x", &audio, &Default::default(), |_, _, _| {}).err().expect("the fake paths still fail");
         assert!(!e.contains("BRAIN_LTXV_"), "no prerequisite should still be reported missing: {e}");
+    }
+
+    /// [`av_step`] is the ONE place a denoise step's two streams are mapped
+    /// onto the sixteen fields both audio-visual arms read, so a swap between
+    /// them is a swap in every arm at once - and a swap between two same-typed
+    /// slices produces a plausible clip, not an error.
+    ///
+    /// Every field is given a value distinguishable from every other, so the
+    /// assertions below are identity checks rather than shape checks. The
+    /// two contexts and the two position sets are the pairs that matter: the
+    /// audio stream's connector is built for a NARROWER head than the video
+    /// stream's, and the two streams' RoPE spaces have different axis counts.
+    #[test]
+    fn an_av_step_carries_each_streams_own_inputs() {
+        let (v_latent, a_latent) = (vec![1.0f32, 1.5], vec![2.0f32]);
+        let (v_ts, a_ts) = (vec![3.0f32, 3.5], vec![4.0f32]);
+        let (v_pos, a_pos) = (vec![5.0f32; 12], vec![6.0f32; 2]);
+        let kf = vec![7.0f32, 7.5];
+        let valid = vec![8.0f32; 4];
+        let (v_ctx, a_ctx) = (vec![9.0f32; 4], vec![10.0f32; 3]);
+        let i = StepInputs { latent: &v_latent, timesteps: &v_ts, positions: &v_pos, keyframes_mask: &kf, context_len: 4, context_valid: &valid, t: 2, sigma: 0.25 };
+        let a = AudioInputs { latent: &a_latent, timesteps: &a_ts, positions: &a_pos, ta: 1 };
+        let s = av_step(&i, &a, &v_ctx, &a_ctx);
+
+        assert_eq!(s.v_latent, &v_latent[..], "the video stream must carry the VIDEO latent");
+        assert_eq!(s.a_latent, &a_latent[..], "the audio stream must carry the AUDIO latent");
+        assert_eq!(s.v_timesteps, &v_ts[..]);
+        assert_eq!(s.a_timesteps, &a_ts[..]);
+        assert_eq!(s.v_positions, &v_pos[..]);
+        assert_eq!(s.a_positions, &a_pos[..]);
+        assert_eq!(s.v_keyframes_mask, &kf[..]);
+        assert_eq!(s.v_context, &v_ctx[..], "the video stream must carry the VIDEO text projection");
+        assert_eq!(s.a_context, &a_ctx[..], "the audio stream must carry the AUDIO text projection");
+        assert_eq!(s.v_context_valid, &valid[..]);
+        assert_eq!(s.a_context_valid, &valid[..]);
+        assert_eq!((s.tv, s.ta), (2, 1));
+        assert_eq!((s.v_context_len, s.a_context_len), (4, 4));
+        // One schedule steps both streams, so the two sigmas are the same
+        // number by construction - and each stream's cross-modal gate reads
+        // the OTHER one's, which is why both are carried rather than one.
+        assert_eq!((s.v_sigma, s.a_sigma), (0.25, 0.25));
+    }
+
+    /// The banner a run prints and the object `build_denoiser` returns must
+    /// name the same arm. `av_arm_label` is the shared pure function, so this
+    /// pins its four cases; `build_denoiser` routing on the same predicate is
+    /// what makes pinning the label meaningful.
+    #[test]
+    fn the_arm_label_names_the_arm_that_will_run() {
+        assert!(av_arm_label(false, false, false).contains("tiny"));
+        assert!(av_arm_label(false, true, true).contains("tiny"), "the tiny DiT has no audio arm to choose between");
+        let video = av_arm_label(true, false, false);
+        assert!(video.contains("int8") && video.contains("video stream only"), "{video}");
+        let quant = av_arm_label(true, true, false);
+        assert!(quant.contains("int8") && quant.contains("both streams"), "{quant}");
+        let fp32 = av_arm_label(true, true, true);
+        assert!(fp32.contains("fp32") && fp32.contains("both streams"), "{fp32}");
+        assert_ne!(quant, fp32, "the two audio-visual arms must be distinguishable in the banner");
+    }
+
+    /// The host-memory guard has to follow the arm switch. The fp32 reference
+    /// arm needs the whole manifest expanded to f32; the quantized arm holds
+    /// one int8 copy of each block plus the fp32 head tensors, and streams the
+    /// rest off the mapped checkpoint. A guard that quoted the fp32
+    /// requirement on the quantized path would refuse machines that can run it
+    /// comfortably.
+    #[test]
+    fn the_quantized_arm_is_budgeted_against_its_own_footprint() {
+        let cfg = LtxAvDitConfig::ltx25();
+        let fp32 = crate::av_stream::host_floats(&cfg) * 4;
+        let quant = quantized_av_host_bytes(&cfg);
+        assert!(quant < fp32 / 2, "the quantized arm must be budgeted well below the fp32 expansion ({quant} vs {fp32})");
+        assert!(quant > 0);
+        // And a tiny config must never be refused on either arm, on any
+        // machine that can run this test at all.
+        let tiny = LtxAvDitConfig::tiny();
+        check_av_host_memory(&tiny, false).expect("a tiny AV config must fit on the quantized arm anywhere");
+        check_av_host_memory(&tiny, true).expect("a tiny AV config must fit on the fp32 arm anywhere");
     }
 
     #[test]

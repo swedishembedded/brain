@@ -149,6 +149,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_LTXV_TEXT_CACHE` | reuse of a previously encoded LTX-2.5 text context for the same prompt and text encoder (`0` opts out) | on |
 | `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES` | disk budget for that cache, in bytes; after each write the least-recently-used entries are deleted until the directory fits (a non-positive or unparseable value is ignored with a warning, and the single most recently used entry is never evicted). One entry is tens of MB at the real checkpoint's dimensions, and a distinct prompt is a distinct entry | 2 GiB (`2147483648`) |
 | `BRAIN_LTXV_TEXT_PRECISION` | `fp32` or `int8` for the LTX-2.5 text encoder's projections; a device with no packed-int8 path falls back to `fp32` regardless | `int8` for a quantized encoder, else `fp32` |
+| `BRAIN_LTXV_AV_FP32` | `1` denoises an LTX-2.5 `--audio` run on the eager host-fp32 audio-visual reference arm instead of the quantized, device-resident one: the same model at higher precision, needing the whole checkpoint expanded to fp32 in host RAM and several times the wall clock. It is the A/B arm the quantized path is measured and gated against, not a tuning knob; the run's own banner names whichever arm is active | off (quantized) |
 | `BRAIN_YOLOV8_BATCH` | YOLO true-batch forward width | 1 |
 | `BRAIN_SAM2_VARIANT` | SAM 2.1 variant (`tiny`/`large`) | `tiny` |
 | `BRAIN_S3DIT_RETAIN_INT8_CACHE` | `1` retains the int8 DiT cache across demote/promote (trades multi-GB host RAM for faster reactivation) | off |

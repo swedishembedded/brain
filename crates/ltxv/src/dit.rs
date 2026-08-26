@@ -1536,13 +1536,12 @@ pub struct AvStreamedStep<'a> {
 /// `tier`, cached per checkpoint in host RAM and left resident on the card
 /// between steps.
 ///
-/// This is the path that did not exist - the reason
-/// `crate::av_stream`'s own module doc had to say an audio-visual run
-/// "expands the whole checkpoint to host fp32 and re-uploads every block to
-/// the card on every forward". The two arms differ by the two things that
-/// actually cost: the host footprint is the checkpoint's QUANTIZED size
-/// rather than its fp32 expansion, and a warm step re-uploads nothing that
-/// the card already holds.
+/// This is what an `--audio` generation denoises through
+/// (`crate::pipeline`'s `RealAvDit`). Its alternative is the eager host-fp32
+/// reference arm in `crate::av_stream`, which the two arms differ from by the
+/// two things that actually cost: here the host footprint is the checkpoint's
+/// QUANTIZED size rather than its fp32 expansion, and a warm step re-uploads
+/// nothing the card already holds.
 ///
 /// Same three exactness arguments the video-only path makes, unchanged:
 /// `model::int8::quantize_weight` is a pure function of the checkpoint's own

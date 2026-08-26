@@ -648,26 +648,34 @@ fn bench_av(tokens: u32, ctx_len: u32, frames: u32, fps: u32) {
     let a_context: Vec<f32> = (0..(ctx_len as usize * cfg.audio.connector_inner_dim() as usize)).map(|i| ((i % 29) as f32 / 29.0) - 0.5).collect();
 
     let d = ltxv::av_stream::AvDenoiser::new(w, None);
+    let v_timesteps = vec![1.0f32; lat_t * lh * lw];
+    let v_keyframes_mask = vec![0f32; lat_t * lh * lw];
+    let a_timesteps = vec![1.0f32; ta];
+    let context_valid = vec![1.0f32; ctx_len as usize];
+    // The SAME step struct `streamed-av` hands the quantized arm, which is
+    // what makes the two rows of this comparison a comparison.
+    let step = ltxv::dit::AvStreamedStep {
+        v_latent: &v_latent,
+        v_timesteps: &v_timesteps,
+        v_positions: &v_positions,
+        v_keyframes_mask: &v_keyframes_mask,
+        v_context: &context,
+        v_context_len: ctx_len as usize,
+        tv: lat_t * lh * lw,
+        v_sigma: 1.0,
+        v_context_valid: &context_valid,
+        a_latent: &a_latent,
+        a_timesteps: &a_timesteps,
+        a_positions: &a_positions,
+        a_context: &a_context,
+        a_context_len: ctx_len as usize,
+        ta,
+        a_sigma: 1.0,
+        a_context_valid: &context_valid,
+    };
     for r in 0..2 {
         let t1 = Instant::now();
-        let (v, a) = d.forward(
-            &ltxv::av_stream::AvStepInputs {
-                v_latent: &v_latent,
-                v_timesteps: &vec![1.0f32; lat_t * lh * lw],
-                v_positions: &v_positions,
-                v_keyframes_mask: &vec![0f32; lat_t * lh * lw],
-                tv: lat_t * lh * lw,
-                a_latent: &a_latent,
-                a_timesteps: &vec![1.0f32; ta],
-                a_positions: &a_positions,
-                ta,
-                sigma: 1.0,
-                context_len: ctx_len as usize,
-                context_valid: &vec![1.0f32; ctx_len as usize],
-            },
-            &context,
-            &a_context,
-        );
+        let (v, a) = d.forward(&step);
         let nonfinite = v.iter().chain(&a).filter(|x| !x.is_finite()).count();
         println!(
             "[av rep {r}] {:.1} s for {} video tokens + {ta} audio tokens (video out {}, audio out {}, nonfinite {nonfinite})",

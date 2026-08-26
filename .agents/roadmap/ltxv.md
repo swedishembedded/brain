@@ -6744,8 +6744,597 @@ slip does not move any tolerance gate at all.
   row costs nothing but needs a broadcast dispatch this crate does not have a
   clean seam for yet. Deliberately left, with the arithmetic, rather than
   guessed at.
-* **The audio-visual path has no training support**, no bandwidth extension,
-  and no real end-to-end generation recorded on this box - unchanged by this
-  phase.
+* **The audio-visual path has no training support** and no bandwidth
+  extension - unchanged by this phase. It also had no real end-to-end
+  generation recorded on this box, which phase 31 closes: nothing in this
+  phase was reachable from a generation, because `pipeline::build_denoiser`
+  still routed every `--audio` request to the host-fp32 arm.
 * The AV forward has no CFG-parallel two-card measurement; every figure above
   is one card, one branch.
+
+### Phase 31 - `--audio` actually takes the quantized path, and a real multi-window clip has sound
+
+Phase 30 built `LtxAvBlockQ`/`CachedQAvBlockWeights`/`AvDitSession` and phase
+29 made the audio latent cross a window seam. Neither was reachable from a
+generation: `pipeline::build_denoiser` still routed every `--audio` request to
+`av_stream::AvDenoiser` and logged "the audio stream has no streamed/quantized
+path yet", which had stopped being true one commit earlier. A real `--audio`
+run's own banner said `REAL checkpoint audio+video DiT (host fp32, both
+streams)`, which is how the gap was found - not by reading the code.
+
+#### 1 - what was wired
+
+`pipeline::RealAvDit` is `RealDit`'s twin, field for field: the open
+`LtxvGgufSource`, the non-block head tensors
+(`dit::load_av_head_tensors_from_source`), the CHECKPOINT-scoped
+`block::GenerationCache`, and a `Mutex<HashMap<card, Arc<AvDitSession>>>`
+built on that card's first forward. `Denoiser::forward_av` resolves the
+session and calls `dit::av_forward_q_streamed_in`; `Denoiser::release_devices`
+drains the map, which is what a window boundary and the stage-1 -> stage-2
+boundary already call.
+
+Two structural things came with it rather than being left as comments:
+
+* **One step struct, not two.** `av_stream::AvStepInputs` was deleted and
+  `AvDenoiser::forward` now takes the same `dit::AvStreamedStep` the quantized
+  arm takes, built by one private `pipeline::av_step`. The two arms are an A/B
+  over one caller and the fields they read are four pairs of same-typed slices
+  (two latents, two timestep vectors, two position sets, two text
+  projections); a struct per arm is a place where one arm can be handed the
+  audio member where the video one belongs and still produce a plausible clip.
+* **The banner is derived, not guessed.** `ltxv_cli` used to spell the arm out
+  itself from `(dit_config, audio)`. It now calls `pipeline::av_arm_label`,
+  the same pure function `build_denoiser` routes on, so the line a reader
+  checks and the object the run denoises with cannot disagree.
+
+#### 2 - what happened to the host-fp32 arm, and why it was kept
+
+`av_stream::AvDenoiser` is NOT dead and is not deleted. It is a thin driver
+over `LtxAvDit`, which is precisely the eager fp32 model the tiny-config
+parity suite proves against
+(`av_dit_parity.rs::ltxv_av_dit_tiny{,_gated}_matches_reference`) and that
+`real_q8_0_av_streamed_forward_matches_the_eager_fp32_forward` compares the
+quantized forward to; it is also the "before" column of every measurement in
+phase 30 (`ltxv_bench av`). Deleting the driver would leave that model with
+no way to be run at a real config from a generation, which is what a
+measurement and a driver-level fallback both need.
+
+It is now reachable only behind `BRAIN_LTXV_AV_FP32=1`
+(`pipeline::av_fp32_reference`), the same shape as `BRAIN_NO_FLASH_CROSS` and
+kept for the same three reasons that variable's own doc gives: an A/B needs a
+switch or it compares the fast path against itself, a reference definition of
+the math has to stay runnable, and a driver-level surprise needs a fallback.
+
+The reader-cannot-tell problem is solved by making the arm a DERIVED label
+rather than a documented convention: `pipeline::av_arm_label(real, audio,
+fp32)` is a pure function, `build_denoiser` routes on the same predicate, and
+`ltxv_cli`'s banner prints the label instead of spelling the arm out itself.
+The previous banner was hand-written from `(dit_config, audio)` and had gone
+stale the moment the routing changed underneath it - which is exactly the
+failure this replaces.
+
+#### 3 - the memory guard follows the switch
+
+`AvWeights::fits_in_host_memory` refused a machine that could not hold the
+fp32 expansion, and `check_audio_request` called it unconditionally - so an
+`--audio` run on the quantized path was budgeted against a requirement it no
+longer has, and the message named a gap ("the AV stream has no
+streamed/quantized path yet") that had closed.
+
+`pipeline::check_av_host_memory(cfg, fp32)` now picks the requirement of the
+arm that will run. The quantized figure is DERIVED, never written down:
+`block::cached_av_block_bytes` (the same function the residency policy sizes a
+slot with) times the layer count, plus the manifest minus its
+`transformer_blocks.` prefix as fp32. The fp32 arm's own guard is unchanged
+except for its message, which now names the switch that asked for the
+expansion so it can never read as "brain cannot generate audio on this
+machine". `available_host_bytes` is shared rather than copied: two arms of one
+feature must not disagree about how much memory the box has.
+
+#### 4 - the window and two-stage boundaries
+
+A clip holds ONE `RealAvDit` and hands it three kinds of boundary: step to
+step (nothing moves), stage 1 to stage 2 (the video token count roughly
+quadruples), and window k to k+1 (the token count may be unchanged while every
+position moves, because a continuation window re-bases both streams onto its
+own time origin).
+
+The memory side was already in the loop and needed nothing new:
+`generate_long` calls `Denoiser::release_devices` before each VAE decode and
+between the two stages, and `RealAvDit`'s implementation drains its session
+map exactly as `RealDit`'s does, so the next session's slot count is planned
+from the shape it will actually run rather than inherited.
+
+The CORRECTNESS side is not the same question and got its own gate:
+`av_dit_parity.rs::a_reused_av_session_is_exact_across_a_window_or_stage_boundary`
+runs three shapes through ONE narrow (1-slot, so the rotation is on the tested
+path) session and compares each, BIT for bit, against a session built fresh
+for that shape. Releasing is a memory decision; a clip's correctness must not
+depend on when a card happened to be handed back.
+
+The shape LADDER is the point, and one rung of it is not obvious: two of the
+three shapes have the SAME token count and differ only in their positions,
+which is what a window seam produces. Without that rung the gate cannot see a
+`RopeCache` key that hashes geometry without positions - the exact "silently
+reusing another shape's rotation produces plausible video" failure that
+cache's own doc warns about.
+
+#### 5 - the mutations, and which metric caught which
+
+| mutation | modelled fault | RED in | caught by |
+|---|---|---|---|
+| `av_step` builds `v_context` from the AUDIO projection | one arm handed the other stream's text conditioning - four such pairs exist and every one is two same-typed slices | `an_av_step_carries_each_streams_own_inputs` | slice equality, in milliseconds and with no checkpoint |
+| `rope_key` hashes geometry but not `positions` | a window seam re-bases both streams onto a new time origin at an unchanged token count, so the cache serves the PREVIOUS window's rotation | `a_reused_av_session_is_exact_across_a_window_or_stage_boundary`, shape 1 only | BIT equality against a fresh session (max_abs 7.5e-2). Shape 0 and shape 2 both PASS - only the same-token-count/different-positions rung sees it |
+
+Not touched, and therefore not re-verified here: the cross-modal gate path.
+This phase adds no numerics - it routes an existing forward - so
+`a_closed_cross_modal_gate_makes_the_gated_stream_independent_of_the_other`,
+`device_derived_av_modulation_is_bit_identical_to_the_host_uploaded_form` and
+the real-weight block-0 comparison are unchanged and were re-run as-is.
+
+#### 6 - the run: a real multi-window audio-visual clip, end to end
+
+The verification phase 29 deferred, taken on the path phase 30 built. One
+Tesla P40 (`--device gpu0`, both cards idle before the run, nothing sampled
+during it except `/proc/<pid>/status` for RSS, which never touches the
+device), real `ltx-2.5-22b-distilled-transformer-Q8_0.gguf` + real
+`gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf` + real video/audio VAEs + the real
+spatial x2 upscaler, no build running:
+
+```
+brain --device gpu0 ltxv t2v --dit-config ltx25_22b --audio \
+  --prompt "a blacksmith hammers glowing steel on an anvil, rhythmic metallic
+            clangs ringing out, sparks flying in a dark forge" \
+  --frames 121 --width 1280 --height 704 --fps 24 --seed 7
+```
+
+121 frames is the shortest shape that crosses a seam at this resolution: a
+single window caps at 113. **The run's own banner, which is the evidence that
+the quantized arm is what executed:**
+
+```
+ltxv (REAL checkpoint audio+video DiT (int8 compute, both streams), real VAE,
+real Gemma-4 text encoder): 121 frames at 1280x704, 8 distilled-schedule
+(fixed) steps x 1 forward(s) of 12320 tokens, eta 1, guidance 1, seed 7
+[two-stage: 3080 tokens at 640x352, then 3 refinement steps at 12320 tokens]
+[2 windows, 57-frame rolling latent context], +126 audio tokens (5.04s of
+16 kHz stereo, denoised jointly)
+```
+
+It used to read `(host fp32, both streams)`, and that line is how the gap this
+phase closes was found in the first place.
+
+**Wall clock and where it went** (spans between the run's own trace
+timestamps, `--trace-ltxv 4`; they sum to the wall clock rather than to a
+fraction of it):
+
+| span | seconds |
+|---|---:|
+| open the GGUF + load the AV head tensors | 11.8 |
+| text encode (served from the on-disk context cache) | 1.1 |
+| window 0 stage 1, 3080 video + 109 audio tokens, 8 steps | 325.7 |
+| upscaler load + stage-2 setup | 6.4 |
+| window 0 stage 2, 12320 video + 109 audio tokens, 3 steps | 315.3 |
+| window 0 VAE decode, 105 frames, 8 tiles | 164.3 |
+| window 1 stage 1, 2200 video + 76 audio tokens, 8 steps | 196.8 |
+| stage-2 setup | 5.6 |
+| window 1 stage 2, 8800 video + 76 audio tokens, 3 steps | 212.5 |
+| window 1 VAE decode (73 frames, 4 tiles) + audio VAE + vocoder | 95.1 |
+| **end to end** | **1345.0** |
+
+Host peak RSS over the whole run, `VmHWM` sampled from `/proc`: **56.0 GiB**.
+Peak VRAM was NOT sampled continuously; two single `nvidia-smi` reads during
+stage 2 showed 20153 MiB of the 24576 MiB card, which is an observation and
+not a peak.
+
+**Read `secs_per_step` in this pipeline's traces as a RUNNING MEAN, not a
+per-step cost.** It is `elapsed / steps_done`, so a stage's last value times
+its step count is its span, and quoting the first value as "the step time" is
+wrong by the whole warm-up. The marginal times, first step (which pays the
+GGUF read, the int8 quantize and the resident prefill) separated from the
+warm ones:
+
+| stage | first step | warm marginal, mean of the rest |
+|---|---:|---:|
+| w0 stage 1, 3080 + 109 tokens | 119.0 s | **29.5 s** (7 steps) |
+| w0 stage 2, 12320 + 109 tokens | 107.3 s | **104.0 s** (2 steps) |
+| w1 stage 1, 2200 + 76 tokens | 31.9 s | **23.6 s** (7 steps) |
+| w1 stage 2, 8800 + 76 tokens | 73.7 s | **69.4 s** (2 steps) |
+
+**Against the arm it replaced, at one identical shape.** The host-fp32 attempt
+recorded in phase 29 ran the same prompt, seed, resolution and frame count on
+the same card and got six steps into window 0 stage 1 before it was killed, so
+one span is directly comparable and the rest is not measured:
+
+| | host fp32 | quantized | |
+|---|---:|---:|---:|
+| transformer ready (fp32 expansion vs GGUF open + head tensors) | 142.2 s | 11.8 s | **12.1x** |
+| stage 1 warm marginal step, 3080 video + 109 audio tokens | 161.9 s | 29.5 s | **5.49x** |
+| host RSS | killed at ~90 GB, whole-model expansion logged at 78 GiB | 56.0 GiB peak | |
+
+The 5.49x is a whole-pipeline figure at a real shape and it is larger than
+phase 30's 4.31x forward-only ratio, because a real stage-1 forward is 3080
+tokens rather than 13200: the fp32 arm's cost is dominated by re-uploading
+every block's fp32 weights, which does not shrink with the token count, while
+the quantized arm's does.
+
+**The residency policy, at each of the four shapes the clip presented it
+with** - the session is released at every window and stage boundary and
+re-planned from the shape it is about to run, which is exactly what
+`RealAvDit::release_devices` is for:
+
+| stage | video tokens | slots granted | reserve | prefill |
+|---|---:|---:|---:|---:|
+| w0 stage 1 | 3080 | 16 of 48 | 5509 MiB | 27.2 s (cold: GGUF read + quantize) |
+| w0 stage 2 | 12320 | 16 of 48 | 17429 MiB | 3.0 s (warm host cache) |
+| w1 stage 1 | 2200 | 16 of 48 | 4374 MiB | 4.4 s |
+| w1 stage 2 | 8800 | 16 of 48 | 12888 MiB | 3.1 s |
+
+An AV block is 371 MiB of int8, so 16 slots is the quarter-of-the-card cap
+binding at every one of them, exactly as phase 30 predicted. The prefill cost
+after the first is the re-upload only: the weights come back from the host
+cache, never from the checkpoint.
+
+**The waveform, on the model's OWN samples.** The clip was generated a SECOND
+time with `ffmpeg` shimmed off `PATH`, so the CLI takes its
+"never throw away a generation for want of an encoder" branch and writes the
+sound as 16-bit PCM beside numbered frames. Both runs are the same seed,
+prompt and shape and agree to five decimals on every seam figure, so the AAC
+mux is not hiding anything; the numbers below are the lossless ones (the
+second run's wall clock was 1330.9 s against the first's 1345.0 s, the
+difference being the mux the second one does not do).
+
+The harness is the one phase 29 left ready, re-validated before it was
+trusted rather than taken on faith: a synthetic clip at this clip's own token
+layout with a sign flip planted at the exact seam sample reads **6.18x** the
+99.9th-percentile step on the clicked channel against **0.95x** on the clean
+one, and the reported "exact boundary step" equals the maximum in the window,
+i.e. the index lands where the plant is. The seam's sample index is derived,
+not searched: audio token `i` covers mel frames `[4i-3, 4i+1)` and each is
+`HOP_LENGTH = 160` samples, so the first sample window `k+1` contributed is
+`(4*T - 3) * HOP_LENGTH` for the cumulative token count `T` before it. Here
+window 0 contributed 109 tokens and window 1 the remaining 17, so the seam is
+sample **69280** of 80667.
+
+**Seam continuity - the seam is SMOOTHER than ordinary audio, by a factor of
+about 23:**
+
+| | 99.9th pct step elsewhere | max step within +/-16 of the seam | ratio |
+|---|---:|---:|---:|
+| left | 0.658533 | 0.028839 | **0.044x** |
+| right | 0.692439 | 0.028839 | **0.042x** |
+
+That is the direction the comparable stage of another model in this tree
+measured, and the opposite of a click. It is also OFFSET-ROBUST, which
+matters because a codec frame or an off-by-a-few in the derivation would move
+the index: widening the window to +/-160, +/-512 and +/-1024 samples the
+maxima are 0.082x, 0.198x and 0.410x of the ambient 99.9th percentile
+respectively. Nothing anywhere near the seam reaches the ambient distribution,
+let alone exceeds it.
+
+**Plain audio statistics** (16 kHz stereo, 80667 samples per channel):
+
+| | left | right |
+|---|---:|---:|
+| peak | 0.9765 | 1.0000 |
+| clipped samples (`abs >= 0.999`) | 0 | 1 |
+| RMS | -21.96 dBFS | -21.86 dBFS |
+| longest run below -60 dBFS | 0.7 ms | 0.4 ms |
+
+One sample of 80667 on the right channel saturates the f32 to i16 conversion.
+It is reported rather than rounded away; a single-sample full-scale excursion
+is inaudible and is not evidence of a broken vocoder, but a clip that starts
+producing them in quantity would be.
+
+**The stereo field is real and narrow**: L/R correlation **0.9840** - neither
+1.0 (mono) nor 0.0 (unrelated) - with `max|L-R| = 0.2031`,
+`rms(L-R) = -36.83 dBFS`, and only 307 of 80667 sample pairs identical. Two
+channels that were the same buffer would have correlation exactly 1.0 and
+80667 identical pairs.
+
+**The two streams cover the same time window, exactly.** The audio latent's
+length is `round(frames / fps * LATENT_RATE) = round(121/24*25) = 126` tokens,
+which is what the two windows contribute (109 + 17), so nothing drifts at the
+seam. The decode is `(4*126 - 3) * 160 = 80160` samples = 5.0100 s, three mel
+frames short of the clip by construction (the causal audio VAE's first latent
+frame covers one mel frame, not four); the last sample is held over that gap
+to 80667 samples = **5.041667 s**, which is exactly `121 / 24`. The run's own
+line says so (`decoded_seconds=5.010 video_seconds=5.0417`), and the muxed
+container agrees: video `duration=5.041667`, audio `duration=5.042000`, a
+0.33 ms difference that is one AAC frame's granularity and not a drift.
+
+#### 7 - recorded, NOT done
+
+* **The audio-visual path still has no training support and no bandwidth
+  extension.** Unchanged by this phase, which routes an existing forward and
+  adds no numerics.
+* **The AV forward still has no CFG-parallel two-card path.** `RealAvDit`
+  deliberately does not override `Denoiser::forward_cfg_pair`: a joint forward
+  does not go through that seam (both streams' inputs and both outputs would
+  have to cross it), and the real distilled checkpoint denoises at guidance 1,
+  where no pair is issued at all. The host weight cache is now shared and
+  `Sync` the way `RealDit`'s is, so the obstacle is the trait method's shape
+  and not the type - but it IS a trait change, not a tail-end edit.
+* **`activation_reserve_bytes` still models the VIDEO-only working set.**
+  Phase 30 measured what that costs on the AV path and the arithmetic is
+  unchanged here; it fits for a reason that is a coincidence of this card and
+  this block-size ratio rather than a property of the policy.
+* **`--audio` still refuses a multi-scene clip**, for the design reason phase
+  29 recorded, not an arithmetic one.
+
+---
+
+### Phase 32 - the DP4A audit: where the int8 path really issues `dot4I8Packed`, and the shared-load ceiling that capped it
+
+**The question this phase was asked**: does brain's int8 tier genuinely execute
+as W8A8 DP4A, or does it store weights as int8 and dequantize them into slow
+Pascal fp32 GEMMs? The answer for THIS model is the first one, everywhere it
+can - and the audit is recorded here because the profile it produced is what
+identified the real ceiling, which was not where the question assumed.
+
+#### 0 - DP4A is genuinely emitted, on BOTH GPU backends, and that is measured
+
+`naga` lowers WGSL `dot4I8Packed` to SPIR-V `OpSDot` with
+`PackedVectorFormat4x8Bit` only when the writer is given the
+`DotProduct`/`DotProductInput4x8BitPacked` capabilities; otherwise it emits a
+four-way `BitFieldSExtract` polyfill and the kernel silently runs at a small
+fraction of the rate its name implies. Both of this workspace's GPU backends
+supply the capability: `wgpu-hal`'s Vulkan adapter pushes the four
+`DotProduct*KHR` capabilities whenever its `shader_integer_dot_product` private
+cap is set, and `crates/vulkan`'s own context queries
+`shaderIntegerDotProduct` + `integerDotProduct4x8BitPackedSignedAccelerated`,
+enables the feature, and reports it as `DeviceCaps::numeric.int8_dot`.
+
+The decisive evidence is not the source reading, it is the roofline cache on
+this box, which holds a record per (device, backend) PAIR:
+
+| backend | fp32 GFLOP/s | int8 GOP/s | ratio |
+|---|---:|---:|---:|
+| `backend-wgpu` | 10517.5 | 43559.7 | 4.14x |
+| `backend-vulkan` | 10542.0 | 43705.6 | 4.15x |
+
+A polyfilled `dot4I8Packed` cannot produce a 4.14x ratio over fp32 FMA - it is
+roughly a dozen integer instructions per four MACs. So the instruction is real
+on both backends. Note what this does NOT say: the recorded gap "the LTX int8
+tier does not run on `backend-vulkan` at all" is a `wait_for_fences` device-loss
+defect in that backend, NOT a missing DP4A path. DP4A works there; the model
+path hangs for an unrelated reason.
+
+#### 1 - the coverage map, by OPERATION rather than by kernel name
+
+At `ltx25_22b`, the ten quantizable linears per block (`attn1`/`attn2`'s
+`to_q`/`to_k`/`to_v`/`to_out.0` plus `ff.net.0.proj`/`ff.net.2`) all dispatch
+`matmul_i8_dyn` unconditionally - there is no shape below which they fall back
+to `matmul_reg3` or to the naive `matmul`, and `qlinear` has no fp32 arm at
+all. Activations are quantized per token every forward
+(`max_abs_row` -> `quant_pack`), and `max_abs_row` is transparently upgraded
+to the coalesced `max_abs_rows` by `gpu_core::upgrade`, so the prep is not
+paying the one-thread-per-row penalty either.
+
+What stays fp32, and why each one is right or wrong:
+
+| operation | kernel | DP4A | verdict |
+|---|---|---|---|
+| the ten block linears | `matmul_i8_dyn` | yes | correct |
+| self-attention QK/AV | `flash_attn_bidir_reg2` | no | the real gap - see 4 |
+| text cross-attention QK/AV | `flash_attn_cross_reg2` | no | same |
+| `to_gate_logits` + the per-head gate expand | `matmul_reg3` | no | never-quantized by design; measured at 61.2 ms of a 9615.9 ms forward |
+| the embeddings connector's own linears | `matmul_reg3` | no | once per generation, not per step |
+| norms / RoPE / adaLN / GELU / gating | fp32 | no | all memory-bound; DP4A is not the lever |
+
+So the model is NOT "int8 storage with fp32 arithmetic". Every GEMM that can
+be packed is packed and is computed packed.
+
+#### 2 - the arithmetic split, counted from the architecture
+
+Per video block at token count `T`, context `C`, `dim = 4096`:
+int8 MACs are `14*T*dim^2 + 2*C*dim^2`; fp32 attention MACs are
+`2*T^2*dim + 2*T*C*dim`; the fp32 gate pair is `2*T*dim*heads`. At
+`T = 13200`, `C = 1024`, 48 layers:
+
+| tier | ops per forward | share |
+|---|---:|---:|
+| int8 (DP4A) GEMM | 3.010e14 | **67.0%** |
+| fp32 self-attention | 1.370e14 | 30.5% |
+| fp32 cross-attention | 1.063e13 | 2.4% |
+| fp32 gating | 6.64e11 | 0.1% |
+
+Over a whole 10 s 1280x704 24 fps generation (8 stage-1 steps at 6820 tokens +
+3 stage-2 steps at 27280 tokens, video stream only, no CFG pair) the same
+count gives **3.11 POP of int8 GEMM and 2.17 POP of fp32 attention, 5.28 POP
+total** - the DP4A share falls to **59%** because self-attention is O(T^2)
+and stage 2 is four times as wide. An independently-derived estimate of
+5.65 POP split 3.55/2.10 including the audio stream agrees with this to
+within 7% on the total and ~12% on each half, which is the audio stream's
+own contribution.
+
+The ceiling, if every eligible op used DP4A, is ~99.9% - attention is the
+entire remainder.
+
+#### 3 - `matmul_i8_dyn` was at ~36% of the DP4A roof, and the cause was the shared-load instruction ratio
+
+**Measured first, hypotheses second** (`qwen_bench gemm8`, best-of-7, both
+cards idle, `max|Δ| == 0` against a host i32 reference at every shape):
+
+    n sweep  (m=4096, k=4096)   128 -> 6030 GOP/s, 512 -> 9662, 2048 -> 12453, 4096 -> 12847
+    k sweep  (m=4096, n=2048)  1024 -> 11124, 4096 -> 14160, 8192 -> 14151, 16384 -> 13581
+
+Both curves rise to a plateau and stay there. That kills two hypotheses at
+once: a DRAM-bound tile gets WORSE as `n` grows (the A tile is re-read `n/BN`
+times, and the naive traffic count at `4096^3` is ~1.14 GB in 10.7 ms = 107
+GB/s against a 287 GB/s roof, so it was never close), and a prologue/epilogue
+overhead would shrink as `k` grows. Flat in both is an on-chip issue ceiling.
+
+The ceiling is the shared-memory load INSTRUCTION rate, and the reason is
+specific to DP4A. The kernel was a faithful port of `matmul_reg3`'s layout:
+k-major shared tiles, one scalar `u32` shared load per operand per k-step, an
+8x8 register block - 64 MACs per 16 shared loads, i.e. four MACs per load
+instruction. That is the right ratio for FFMA. But `dot4I8Packed` retires four
+times the MACs per instruction from the same shared word, and a Pascal SM
+issues four times as many math lanes per clock as load-store lanes, so at that
+mix the math and load-store ceilings coincide exactly and every inefficiency
+lands on the memory side.
+
+**The fix**: shared tiles become k-group-MINOR and are read as `vec4<u32>` -
+four k-groups per load instruction, sixteen DP4A per load instead of four.
+Same 128x128 tile, same 8x8 register block, same three barriers, same
+`Params`, same bindings, same dispatch geometry, so **no call site in any model
+changes**. The stride is padded in vec4 units (an unpadded one puts a
+tx-group's sixteen lanes on a quarter of the banks); only the A operands are
+hoisted into registers across the inner unroll, because hoisting both sides
+pushes the register block past two workgroups per SM.
+
+Bit-identical, not merely close: the accumulation is INTEGER, so re-associating
+the k axis is exact.
+
+**A/B on ONE idle card (gpu1), same binary shape, best-of-7:**
+
+| m, k, n | before GOP/s (% roof) | after GOP/s (% roof) | speedup |
+|---|---:|---:|---:|
+| 4096, 4096, 1024 | 10769 (24.8%) | 14558 (33.5%) | 1.35x |
+| 4096, 4096, 2048 | 12362 (28.5%) | 15435 (35.5%) | 1.25x |
+| 4096, 4096, 4096 | 12819 (29.5%) | 16052 (37.0%) | 1.25x |
+| 4096, 16384, 2048 | 14158 (32.6%) | 18468 (42.5%) | 1.30x |
+| 4096, 16384, 4096 | 14453 (33.3%) | 17809 (41.0%) | 1.23x |
+| 1024, 4096, 16384 | 12770 (29.4%) | 16043 (36.9%) | 1.26x |
+
+The baseline was also measured on gpu0 while idle and agreed with the gpu1
+baseline to within 0.2% at `4096^3` (12847 vs 12819), so the card is not the
+variable.
+
+#### 4 - the whole-pass number, and the control rows that make it believable
+
+`BRAIN_PROFILE=1 BRAIN_LTXV_DIT=<real 22B Q8_0> BRAIN_DEVICE=gpu1
+./target/release/ltxv_bench streamed 8 13200 1024 1 1 1`, cache-hit arm
+(call 2 cumulative table minus call 1's), both cards idle at start:
+
+| kernel | before (Phase 28) | after | ratio |
+|---|---:|---:|---:|
+| `flash_attn_bidir_reg2` | 5754.0 ms | 5722.3 ms | 1.006 (**control**) |
+| `flash_attn_cross_reg2` | 486.7 ms | 486.0 ms | 1.001 (**control**) |
+| `rmsnorm_rows` | 108.6 ms | 108.8 ms | 0.998 (**control**) |
+| `matmul_i8_dyn` | 3225.0 ms | **2562.7 ms** | **1.258x** |
+| GPU kernel time, 8 layers | 10308.8 ms | **9615.9 ms** | **1.072x** |
+
+Three unchanged rows agreeing to within 0.6% across two sessions is what makes
+the fourth row a measurement of the change rather than of the machine.
+
+Graded against roof at real width, per 8-layer cache-hit forward:
+`matmul_i8_dyn` now does 5.016e13 int8 OP in 2.5627 s = 19573 GOP/s,
+**44.9% of the 43560 GOP/s DP4A roof**, up from 35.7%. `flash_attn_bidir_reg2`
+does 2.2838e13 FLOP in 5.7223 s = 3991 GFLOP/s, 37.9% of the 10517 GFLOP/s
+fp32 roof (unchanged, as it must be).
+
+**Read the last row honestly**: a 1.26x on the int8 GEMM buys 1.07x on the
+device pass, because self-attention is 59.5% of it. That is the finding, not a
+disappointment - the int8 half of this model is now closer to its roof than the
+fp32 half is to its own.
+
+#### 5 - the gates, and which mutation caught which
+
+`qwen_bench gemm8` asserts `max|Δ| == 0` against a host i32 reference, so the
+gate is on the BITS, with no tolerance to tune. Ragged shapes were added to the
+sweep specifically because the vec4 staging has a partial-quad path that full
+shapes never reach: `(m,k,n)` of `(1,4,1)`, `(3,12,5)`, `(100,12,37)`,
+`(130,20,200)`, `(257,260,129)`, `(128,32,128)`, `(129,36,127)`,
+`(7,1024,3072)`, `(1,4096,4096)` - all exact.
+
+**Mutation**: drop the third lane of the ragged-tail staging branch.
+
+| shape | what it exercises | mutated result |
+|---|---|---|
+| `k=12` (kg=3, tail quad has 3 valid lanes) | the dropped lane | **RED**, `max|Δ|` 3.007e2, `max_rel` 1.326e2 |
+| `k=36` (kg=9, tail quad has 1 valid lane) | a tail that never reaches lane 2 | green - correctly blind |
+| `k=4096` (kg=1024, no tail at all) | the main path | green - correctly blind |
+
+So the ragged shapes in the list are load-bearing and the attribution is
+exact; a suite of only full-quad shapes would have shipped the bug.
+
+Cross-model parity: every crate that registers `matmul_i8_dyn` was re-run -
+`ltxv`, `wan`, `flux1`, `flux2`, `s3dit`, `qwen3`, `qwen35`, `qwen35moe`,
+`qwen3omnimoe`, plus `gpu-core`/`model`/`kernels`/`backend-api` - all green.
+
+#### 6 - recorded, NOT done
+
+* **int8 attention is the whole remaining prize and was NOT attempted.**
+  Self-attention is 59.5% of the device pass at real width and 30.5% of the
+  arithmetic. If QK and AV both ran DP4A at the fraction of roof the GEMM now
+  reaches, attention would drop roughly four-fold and the device pass would
+  fall by about 1.7x. The obstacle is quality, not expressibility: this tier's
+  real-weight block-0 parity already sits at cosine 0.9963 (video) / 0.9986
+  (AV) with attention in fp32, and per-token int8 on Q/K without per-channel
+  K smoothing is the documented way that collapses. The usual mitigation -
+  int8 QK with an fp16 PV accumulate - degenerates on Pascal, where f16 is a
+  1/64-rate path, into int8 QK with an fp32 PV, which halves the available
+  win. The honest first step is therefore int8 QK ONLY, scores dequantized for
+  the online softmax, PV left fp32 - worth about 1.26x on the device pass by
+  the same profile - gated on cosine AND rel_l2 against the fp32-attention arm
+  at real width before anything ships. No number here is a measurement of an
+  int8-attention implementation, because none exists.
+
+* **`matmul_i8_gemv` still carries BOTH defects its fp32 sibling had fixed.**
+  It declares `array<i32, 2048>` sized for its `m <= 32` worst case (8 KB of
+  workgroup memory at every `m`) and accumulates with a read-modify-WRITE into
+  that array inside the k loop - checklist C5 and C6 exactly, the two the fp32
+  `matmul_gemv` -> `matmul_gemv_reg` upgrade exists to fix, and no int8 twin of
+  that upgrade exists. It is live on the int8 serving decode path
+  (`qwen3::serve`), `flux1`'s m=1 modulation GEMVs and `qwen35moe`. The recipe
+  is already written: a GPU-only `_reg` sibling with an `MREG` template knob
+  plus one `gpu_core::upgrade` row, and for int8 the rewrite is bit-identical
+  for the same reason this phase's is. Not attempted here.
+
+  Related catalogue integrity note: `scripts/build/kernelmeta.py::opt` returns
+  5 for ANY kernel containing `dp4a`, so `matmul_i8_gemv`'s `@opt 5` is derived
+  from the instruction, not from a register block. The one row that should have
+  flagged this kernel rates it top tier for the wrong reason.
+
+* **`moe_linear_gated_i8` issues DP4A on the NAIVE tier** (`@opt 2`, one thread
+  per output element, serial inner reduction) and says why in its own header:
+  a per-row early exit for an unrouted row cannot coexist with a workgroup
+  barrier, so tiling it needs row compaction. This is the largest remaining
+  RATE gap in the workspace's DP4A story after attention - it is what
+  `moondream3`'s 1280 expert tensors and `qwen3omnimoe`'s Thinker experts run
+  on, and for the Thinker the experts are ~60% of the per-token GEMM
+  arithmetic. Not touched by this phase.
+
+* **`qwen3omnimoe`'s int8 Thinker stores attention/router/`lm_head` weights as
+  int8 and dequantizes them to fp32 on upload** (`model::int8::
+  upload_dequantized`), because those linears have no int8 dispatch path -
+  only the MoE experts do. At the 48-layer, hidden-2048, GQA-32/4 Thinker
+  config that is ~40% of the per-token GEMM arithmetic left in fp32, and about
+  3.6 GB of avoidable device bytes across the two-card split. This is the one
+  place in the workspace that genuinely matches "stores weights as int8 and
+  dequantizes them into fp32 GEMMs".
+
+* **`minimaxmusic3`'s DiT int8 tier (`dit_int8`) is storage-only** and
+  dequantizes to f32 before `dit::from_tensors` - the same shape, in a shipped
+  model. Its Global LLM half does take the real packed path.
+
+* **`ltxv::attention_q` quantizes the SAME activation three times** in
+  self-attention (`to_q`, `to_k`, `to_v` all take `norm_x`) and twice in cross
+  attention (`to_k`/`to_v` both take `enc_hidden`). `qwen3::q8::Q8::quant`
+  already documents the right shape ("call once per distinct input"). Measured
+  before deciding: `max_abs_rows` + `quant_pack` together are 174.4 ms of a
+  9615.9 ms forward, so the redundant share is about 0.3% and hoisting it is
+  not worth a change to a crate mid-workstream. Recorded so it is not
+  re-derived.
+
+* **The int8 paged-KV decode kernels dequantize keys to f32 on read and are
+  RIGHT to.** `paged_decode_scores_i8_batched` has an arithmetic intensity of
+  about 2 ops/byte against an int8 machine balance of ~151 ops/byte
+  (43560 GOP/s over 287 GB/s): it is DRAM-bound by two orders of magnitude, so
+  DP4A cannot help. int8 there is a pool-size tier, and calling it a missing
+  DP4A path would be a misreading.
+
+* **The recorded "LTX int8 tier does not run on `backend-vulkan` at all" no
+  longer reproduces at the scope it names.** `BRAIN_DEVICE=vulkan
+  ./target/release/deps/int8_compute-* --test-threads=1 --nocapture` prints
+  `adapter: Tesla P40 (Vulkan compute, ash + naga WGSL->SPIR-V)` - so it really
+  is the native backend, not a silent wgpu fallback - and both tests pass,
+  including `real_q8_0_block0_int8_compute_matches_fp32`, the REAL-weight
+  block-0 int8-vs-fp32 comparison. The gap's own text lists exactly that test
+  binary as failing. What is NOT retested here is the large end of that claim
+  (48 layers at T=3520, a whole streamed forward), so the bullet should be
+  narrowed rather than deleted. It was never a DP4A-availability claim in any
+  case: `backend-vulkan` measures 43705.6 GOP/s of `dot4I8Packed`, marginally
+  ahead of wgpu's 43559.7.

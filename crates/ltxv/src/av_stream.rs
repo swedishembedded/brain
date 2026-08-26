@@ -1,46 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The real 22B AV checkpoint as something a generation loop can call: load
-//! [`crate::dit::av_dit_tensor_manifest`]'s tensors off a GGUF, hand them to
-//! [`LtxAvDit`], and run ONE joint audio+video forward per denoise step.
+//! The eager, host-fp32 REFERENCE arm of the audio-visual forward: load
+//! [`crate::dit::av_dit_tensor_manifest`]'s tensors off a GGUF into host
+//! fp32, hand them to [`LtxAvDit`], and run ONE joint audio+video forward per
+//! denoise step.
 //!
 //! The whole checkpoint is audio-visual - two thirds of its tensors are the
 //! audio stream and the bidirectional A<->V cross-attention - so producing
 //! sound is not a matter of adding a decoder. It is a matter of running the
 //! model that is already in the file, instead of only its video half.
 //!
-//! ## Why this holds the model as host fp32, and what that costs
+//! ## This is NOT what a generation runs
 //!
-//! The video-only production path ([`crate::dit::forward_q_streamed_in`])
-//! keeps only the non-block "head" tensors resident and streams each
-//! transformer block from the GGUF, quantized to int8, cached per checkpoint
-//! and left resident on the card between steps. That path now exists for the
-//! audio-extended block too - [`crate::block::LtxAvBlockQ`], its cached
-//! quantized weights and an AV residency window all live in
-//! `crate::block`/`crate::devres` - so a caller that wants the quantized,
-//! device-resident AV forward should reach for those rather than for this
-//! module.
+//! An `--audio` generation denoises through
+//! [`crate::dit::av_forward_q_streamed_in`]: the audio-extended block has the
+//! same streamed/quantized/device-resident implementation the video-only one
+//! does ([`crate::block::LtxAvBlockQ`], [`crate::block::CachedQAvBlockWeights`],
+//! [`crate::devres::AvDitSession`]), so the checkpoint is held as int8 in host
+//! RAM and as many blocks as the VRAM budget allows stay on the card between
+//! steps.
 //!
-//! So this module takes the only route the current code offers: the eager,
-//! host-fp32 [`LtxAvDit`] that the tiny-config parity suite already proves
-//! (`crates/ltxv/tests/av_dit_parity.rs`), driven at the real config through
-//! its SHARDING entry points rather than [`LtxAvDit::forward`] - because
-//! [`LtxAvDit::run_stage_forward`] discards the per-block activation taps
-//! that `forward` returns for parity bisection, and at a real token count
-//! those taps are the difference between a forward that fits and one that
-//! does not.
+//! What survives here is the arm the quantized path is *measured and gated
+//! against*, reached by setting `BRAIN_LTXV_AV_FP32=1`
+//! (`crate::pipeline::av_fp32_reference`) and by `ltxv_bench av`. Without a
+//! switch, an A/B compares the quantized path against itself and reports a
+//! meaningless parity - which looks like evidence and is not. It is the same
+//! shape as `BRAIN_NO_FLASH_CROSS`, and it exists for the same three reasons:
+//! a reference definition of the math, a measurement's other column, and a
+//! fallback if the quantized arm ever misbehaves on a driver.
 //!
-//! The consequences are real and are not hidden here: the model occupies
-//! host memory proportional to its full fp32 expansion rather than its
-//! quantized size, and every forward re-uploads every block's fp32 weights to
-//! the device, because `LtxAvBlock` is constructed per layer per call. That
-//! makes an audio-visual generation markedly more expensive per step than the
-//! video-only one at the same shape. It is correct - the same op sequence,
-//! the same weights, at higher precision than the int8 video path - and it is
-//! the honest cost of the AV stream having no streamed/quantized/resident
-//! implementation yet. Closing that gap is what would make audio cheap; it is
-//! not a change this module can make from outside `crate::block`.
+//! It is driven through [`LtxAvDit`]'s SHARDING entry points rather than
+//! [`LtxAvDit::forward`], because [`LtxAvDit::run_stage_forward`] discards the
+//! per-block activation taps that `forward` retains for parity bisection, and
+//! at a real token count those taps are the difference between a forward that
+//! fits and one that does not.
+//!
+//! What this arm costs, and why it is not the default: the model occupies host
+//! memory proportional to its full fp32 expansion rather than its quantized
+//! size, and every forward re-uploads every block's fp32 weights to the
+//! device, because `LtxAvBlock` is constructed per layer per call. The
+//! measured figures for both arms are in this model's own roadmap ledger.
 //!
 //! [`AvWeights::fits_in_host_memory`] checks the machine BEFORE anything is
 //! read, so a box that cannot hold the expansion is told so in one line
@@ -51,7 +51,7 @@ use std::time::Instant;
 use vae::blocks::Tensors;
 
 use crate::config::LtxAvDitConfig;
-use crate::dit::{av_dit_tensor_manifest, AvDitBatch, LtxAvDit};
+use crate::dit::{av_dit_tensor_manifest, AvDitBatch, AvStreamedStep, LtxAvDit};
 
 /// The AV DiT's weights, expanded to host fp32.
 pub struct AvWeights {
@@ -70,6 +70,12 @@ impl AvWeights {
     /// Refuse before reading anything if this machine cannot hold the fp32
     /// expansion, with the two numbers that decide it.
     ///
+    /// Scoped to THIS arm: the quantized path a generation takes by default
+    /// holds the checkpoint at its int8 size instead, and is checked against
+    /// that (`crate::pipeline::check_av_host_memory`). A refusal here always
+    /// names the switch that asked for the expansion, so it can never read as
+    /// "brain cannot generate audio on this machine".
+    ///
     /// A margin is kept over the bare weight bytes because a forward also
     /// needs both streams' activations, each block's own output copy, and
     /// whatever the caller is holding - a load that exactly fits the weights
@@ -80,7 +86,7 @@ impl AvWeights {
         let margin = want / 8;
         if avail < want + margin {
             return Err(format!(
-                "ltxv: audio generation needs the audio+video DiT resident as host fp32 ({} GiB, plus headroom) but only {} GiB is available - the AV stream has no streamed/quantized path yet (see crate::av_stream's module doc)",
+                "ltxv: BRAIN_LTXV_AV_FP32 asked for the host-fp32 audio+video reference arm, which needs the whole DiT expanded to fp32 ({} GiB, plus headroom); only {} GiB is available. Unset it to denoise on the quantized, device-resident path instead",
                 want / (1 << 30),
                 avail / (1 << 30)
             ));
@@ -118,38 +124,19 @@ impl AvWeights {
 /// `MemAvailable` from `/proc/meminfo`, in bytes - what the kernel says can
 /// be had without swapping, which is the number that decides whether a large
 /// allocation survives. `None` on any platform or format that does not
-/// provide it, which makes the check above skip rather than guess.
-fn available_host_bytes() -> Option<u64> {
+/// provide it, which makes a check that reads it skip rather than guess.
+///
+/// Shared with `crate::pipeline::check_av_host_memory`, which asks the same
+/// question of the quantized arm's much smaller requirement: two arms of one
+/// feature must not disagree about how much memory this machine has.
+pub(crate) fn available_host_bytes() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kb * 1024)
 }
 
-/// Both streams' inputs for one joint forward. The two are deliberately one
-/// struct: the A<->V cross-attention means neither stream's answer exists
-/// without the other's input, so there is no such thing as "the audio
-/// forward" to pass separately.
-pub struct AvStepInputs<'a> {
-    pub v_latent: &'a [f32],
-    pub v_timesteps: &'a [f32],
-    pub v_positions: &'a [f32],
-    pub v_keyframes_mask: &'a [f32],
-    pub tv: usize,
-    pub a_latent: &'a [f32],
-    pub a_timesteps: &'a [f32],
-    pub a_positions: &'a [f32],
-    pub ta: usize,
-    /// The schedule's scalar sigma for this step. Each stream's AV gate is
-    /// driven by the OTHER stream's sigma; both streams run one schedule in
-    /// lockstep (`ltx_pipelines.utils.samplers.euler_denoising_loop` steps
-    /// them together off one `sigmas` tensor), so one value serves both.
-    pub sigma: f32,
-    pub context_len: usize,
-    pub context_valid: &'a [f32],
-}
-
-/// The real AV checkpoint's joint denoiser.
+/// The real AV checkpoint's joint denoiser, eager and host-fp32.
 pub struct AvDenoiser {
     dit: LtxAvDit,
 }
@@ -160,6 +147,12 @@ impl AvDenoiser {
     }
 
     /// One joint forward: `(video velocity, audio velocity)`.
+    ///
+    /// Takes the SAME [`AvStreamedStep`] the quantized arm takes, deliberately:
+    /// the two arms are an A/B over one caller, and a step struct per arm is a
+    /// place where a caller can hand one arm the audio context and the other
+    /// the video one and have both look plausible. Sixteen fields is well past
+    /// what a reader checks by eye, so there is one of them.
     ///
     /// Routed through `load_shard_batch` + `run_stage_forward` +
     /// `take_stage_output` rather than [`LtxAvDit::forward`] - a whole-model
@@ -174,25 +167,25 @@ impl AvDenoiser {
     /// side, and each stream's embeddings connector - which
     /// `LtxAvDit::run_stage_forward` runs internally - is built for its own
     /// head's output width.
-    pub fn forward(&self, i: &AvStepInputs, v_context: &[f32], a_context: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    pub fn forward(&self, i: &AvStreamedStep) -> (Vec<f32>, Vec<f32>) {
         self.dit.load_shard_batch(AvDitBatch {
             v_latent: i.v_latent.to_vec(),
             v_timesteps: i.v_timesteps.to_vec(),
             v_positions: i.v_positions.to_vec(),
             v_keyframes_mask: i.v_keyframes_mask.to_vec(),
-            v_context: v_context.to_vec(),
-            v_context_len: i.context_len,
+            v_context: i.v_context.to_vec(),
+            v_context_len: i.v_context_len,
             tv: i.tv,
-            v_sigma: i.sigma,
-            v_context_valid: i.context_valid.to_vec(),
+            v_sigma: i.v_sigma,
+            v_context_valid: i.v_context_valid.to_vec(),
             a_latent: i.a_latent.to_vec(),
             a_timesteps: i.a_timesteps.to_vec(),
             a_positions: i.a_positions.to_vec(),
-            a_context: a_context.to_vec(),
-            a_context_len: i.context_len,
+            a_context: i.a_context.to_vec(),
+            a_context_len: i.a_context_len,
             ta: i.ta,
-            a_sigma: i.sigma,
-            a_context_valid: i.context_valid.to_vec(),
+            a_sigma: i.a_sigma,
+            a_context_valid: i.a_context_valid.to_vec(),
             v_target: None,
             a_target: None,
         });

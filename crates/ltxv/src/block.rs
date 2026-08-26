@@ -1494,11 +1494,12 @@ impl LtxAvBlock {
 }
 
 // ---------------------------------------------------------------------------
-// Quantized-compute (int8/int4) video-only block path (the storage-only
-// tier's compute-time sibling - see `crate::int8`'s module doc, which names
-// exactly this gap: "no compute-time DP4A activation-quantization path").
+// Quantized-compute (int8/int4) video-only block path - the compute-time
+// sibling of `crate::int8`'s storage-only round trip, and the path a real
+// generation actually takes (`crate::dit::forward_q_streamed`). Every linear
+// below issues a packed-int8 GEMM; nothing here is dequantized to f32 first.
 //
-// A CAPACITY tier, not a speed one - a precision change is not a speed
+// A CAPACITY tier first, not a speed one - a precision change is not a speed
 // change; quantization here buys the real 22B checkpoint's residency on a
 // 24 GiB P40, not throughput. Every
 // int8-eligible linear weight (`crate::int8::is_never_quantized`'s excluded

@@ -914,3 +914,148 @@ fn real_q8_0_av_streamed_forward_matches_the_eager_fp32_forward() {
     assert_eq!(bits(&a2), bits(&a_streamed), "a warm AV forward changed the audio output (max_abs {:.3e})", max_abs(&a2, &a_streamed));
     eprintln!("warm AV forward: bit-identical on both streams");
 }
+
+/// [`positions`] displaced along every axis, so two shapes at the SAME token
+/// count still have different RoPE rotations - which is what a long-form
+/// window boundary produces and what the `RopeCache`'s key has to see.
+fn positions_shifted(axes: usize, t: usize, shift: f32) -> Vec<f32> {
+    positions(axes, t).iter().map(|p| p + shift).collect()
+}
+
+/// One shape a reused session is asked to run: both streams' own inputs for a
+/// single joint forward, owned so several of them can be built up front and
+/// replayed in any order.
+struct AvShape {
+    tv: usize,
+    ta: usize,
+    v_latent: Vec<f32>,
+    a_latent: Vec<f32>,
+    v_timesteps: Vec<f32>,
+    a_timesteps: Vec<f32>,
+    v_positions: Vec<f32>,
+    a_positions: Vec<f32>,
+    v_keyframes_mask: Vec<f32>,
+}
+
+impl AvShape {
+    fn step<'a>(&'a self, v_context: &'a [f32], a_context: &'a [f32], context_valid: &'a [f32], ctx_len: usize) -> ltxv::dit::AvStreamedStep<'a> {
+        ltxv::dit::AvStreamedStep {
+            v_latent: &self.v_latent,
+            v_timesteps: &self.v_timesteps,
+            v_positions: &self.v_positions,
+            v_keyframes_mask: &self.v_keyframes_mask,
+            v_context,
+            v_context_len: ctx_len,
+            tv: self.tv,
+            v_sigma: 0.7,
+            v_context_valid: context_valid,
+            a_latent: &self.a_latent,
+            a_timesteps: &self.a_timesteps,
+            a_positions: &self.a_positions,
+            a_context,
+            a_context_len: ctx_len,
+            ta: self.ta,
+            a_sigma: 0.7,
+            a_context_valid: context_valid,
+        }
+    }
+}
+
+/// One audio-visual generation reuses ONE session across shapes it did not
+/// build that session at - and the answer must not depend on that.
+///
+/// The pipeline holds a single `RealAvDit` for a whole clip and hands it three
+/// kinds of boundary: stage 1 -> stage 2 (the token count roughly quadruples),
+/// window k -> window k+1 (the token count may be unchanged while every
+/// position moves, because a continuation window re-bases both streams onto
+/// its own time origin), and step -> step (nothing moves). The session is
+/// released at the first two, but "released" is a memory decision, not a
+/// correctness one: a session that survived a boundary must still be exact, or
+/// the correctness of a clip depends on when a card happened to be handed
+/// back.
+///
+/// The comparison is BIT equality against a session built fresh for each
+/// shape, not a tolerance - residency and caching change WHEN bytes move,
+/// never what any kernel reads, so there is nothing here for a tolerance to
+/// absorb.
+///
+/// Mutation-verified. `rope_key` is the interesting one: the second shape has
+/// the same token count as the first and differs only in its POSITIONS, so a
+/// key that hashed geometry without positions would serve shape B the tables
+/// it built for shape A. That is exactly the "silently reusing another
+/// shape's rotation produces plausible video" failure `RopeCache`'s own doc
+/// names, and only a same-`t` pair can see it.
+#[test]
+fn a_reused_av_session_is_exact_across_a_window_or_stage_boundary() {
+    let Some(path) = real_dit_gguf() else {
+        brain_testutil::skip(&format!("set BRAIN_LTXV_DIT to a real {REPO} distilled Q8_0 GGUF (none in the model store)"));
+        return;
+    };
+    let mut cfg = LtxAvDitConfig::ltx25();
+    cfg.video.num_layers = 2;
+    cfg.assert_supported();
+    let (vcfg, acfg) = (cfg.video, cfg.audio);
+    let ctx_len = 128usize;
+
+    let src = ltxv::gguf_src::LtxvGgufSource::open(&path).unwrap_or_else(|e| panic!("opening {path}: {e}"));
+    let head = ltxv::dit::load_av_head_tensors_from_source(&src, &cfg);
+
+    // Three shapes: a step, the same token count with re-based positions (a
+    // window seam), and a different token count (a stage boundary).
+    let built: Vec<AvShape> = [(8usize, 6usize, 0.0f32), (8, 6, 1.5), (12, 9, 0.0)]
+        .iter()
+        .map(|&(tv, ta, shift)| AvShape {
+            tv,
+            ta,
+            v_latent: ramp(tv * vcfg.in_channels as usize, 23, 1.1),
+            a_latent: ramp(ta * acfg.in_channels as usize, 29, 0.9),
+            v_timesteps: (0..tv).map(|i| if i % 3 == 0 { 0.0 } else { 0.7 }).collect(),
+            a_timesteps: (0..ta).map(|i| if i % 2 == 0 { 0.0 } else { 0.7 }).collect(),
+            v_positions: positions_shifted(3, tv, shift),
+            a_positions: positions_shifted(1, ta, shift),
+            v_keyframes_mask: vec![0f32; tv],
+        })
+        .collect();
+    let v_context = ramp(ctx_len * vcfg.cross_attention_dim as usize, 7, 1.4);
+    let a_context = ramp(ctx_len * acfg.connector_inner_dim() as usize, 11, 1.2);
+    let mut context_valid = vec![0f32; ctx_len];
+    context_valid[..20].fill(1.0);
+
+    // A narrow window, so the slot rotation is on the tested path too.
+    let shared = ltxv::devres::AvDitSession::resident_with_slots(None, 1);
+    let cache = ltxv::block::GenerationCache::default();
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+    for (i, b) in built.iter().enumerate() {
+        let step = b.step(&v_context, &a_context, &context_valid, ctx_len);
+        let (v_shared, a_shared) = ltxv::dit::av_forward_q_streamed_in(&shared, &cfg, &src, &head, QTier::Int8, &step, &cache);
+        let fresh = ltxv::devres::AvDitSession::resident_with_slots(None, 1);
+        let (v_fresh, a_fresh) = ltxv::dit::av_forward_q_streamed_in(&fresh, &cfg, &src, &head, QTier::Int8, &step, &cache);
+        // `assert!` on the comparison, not `assert_eq!` on the vectors: a
+        // failure here is thousands of u32s wide, and the number that
+        // identifies it is the max_abs, not the dump.
+        assert!(
+            bits(&v_shared) == bits(&v_fresh),
+            "shape {i} (tv={}, ta={}) video output depends on whether the session was reused (max_abs {:.3e})",
+            b.tv,
+            b.ta,
+            max_abs(&v_shared, &v_fresh)
+        );
+        assert!(
+            bits(&a_shared) == bits(&a_fresh),
+            "shape {i} (tv={}, ta={}) audio output depends on whether the session was reused (max_abs {:.3e})",
+            b.tv,
+            b.ta,
+            max_abs(&a_shared, &a_fresh)
+        );
+        eprintln!("shape {i}: tv={} ta={} - reused session bit-identical to a fresh one on both streams", b.tv, b.ta);
+    }
+    // Distinct shapes must have produced distinct answers, or the comparison
+    // above would be satisfied by a forward that ignored its inputs.
+    let redo = |i: usize| {
+        let s = ltxv::devres::AvDitSession::resident_with_slots(None, 1);
+        ltxv::dit::av_forward_q_streamed_in(&s, &cfg, &src, &head, QTier::Int8, &built[i].step(&v_context, &a_context, &context_valid, ctx_len), &cache)
+    };
+    let (v0, _) = redo(0);
+    let (v1, _) = redo(1);
+    assert!(bits(&v0) != bits(&v1), "re-basing every position must change the video output, or the RoPE tables are not reaching the forward");
+}

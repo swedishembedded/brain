@@ -168,13 +168,19 @@ Audio:
   ltx-2.5-audio-vae-bf16.safetensors, which carries both the audio VAE decoder
   and the vocoder. All three are checked before any weight is read.
 
-  It is opt-in because of COST, not correctness: the audio-extended
-  transformer block has no streamed/quantized/device-resident implementation
-  the way the video-only one does, so an audio-visual run expands the whole
-  checkpoint to host fp32 and re-uploads it per forward. Expect it to need
-  most of a large machine's RAM and to be substantially slower per step than
-  the same clip without sound. The command refuses up front, with both
-  numbers, if this machine cannot hold it.
+  It is opt-in because of COST, not correctness - but it runs on the same
+  streamed/quantized/device-resident path the video-only stream does: the
+  audio-extended block is quantized to int8, cached per checkpoint in host
+  RAM, and as many blocks as the card's budget allows stay resident on it
+  between steps. A step therefore costs modestly more than the same clip
+  without sound rather than several times more. The command refuses up front,
+  with both numbers, if this machine cannot hold what that arm needs.
+
+  BRAIN_LTXV_AV_FP32=1 denoises on the eager host-fp32 REFERENCE arm instead -
+  the same math at higher precision, and what the quantized arm is measured
+  and gated against. It expands the whole checkpoint to host fp32 and
+  re-uploads it per forward, so expect most of a large machine's RAM and
+  several times the wall clock. The banner names whichever arm is running.
 
   Output is 16 kHz stereo, muxed into .mp4/.mkv/.mov/.webm. A .gif is written
   silent with a line on stderr, since the container holds no audio stream.
@@ -556,15 +562,12 @@ fn t2v(args: &[String]) -> Result<(), String> {
         String::new()
     };
     let forwards = if o.guidance > 1.0 { 2 } else { 1 };
-    // The audio path is a DIFFERENT arithmetic tier, not the same model with
-    // a flag: it runs the audio-extended block, which has no int8
-    // implementation, as host fp32 (see `ltxv::av_stream`). Saying "int8
-    // compute" for it would misreport the run.
-    let dit_desc = match (o.dit_config.as_str(), o.audio) {
-        ("tiny", _) => "tiny random-weight DiT",
-        (_, true) => "REAL checkpoint audio+video DiT (host fp32, both streams)",
-        (_, false) => "REAL checkpoint DiT (int8 compute, video stream only)",
-    };
+    // Not spelled out here: `av_arm_label` is the same pure function
+    // `ltxv::pipeline::build_denoiser` routes on, so this line and the object
+    // the run actually denoises with cannot disagree about which arm ran.
+    // That matters because "it should be faster now" is not evidence and this
+    // banner is what a reader checks instead.
+    let dit_desc = ltxv::pipeline::av_arm_label(o.dit_config != "tiny", o.audio, ltxv::pipeline::av_fp32_reference());
     let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
     let audio_desc = if o.audio {
         format!(", +{} audio tokens ({:.2}s of 16 kHz stereo, denoised jointly)", ltxv::audio::latent_frames(o.frames, o.fps), o.frames as f32 / o.fps as f32)
