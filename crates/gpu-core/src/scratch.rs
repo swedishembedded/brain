@@ -46,11 +46,23 @@
 //!    activation is left to its holder. Do not extend this to mean more than
 //!    it says.
 //! 3. **The device being finished is the CALLER's half.** Because (2) cannot
-//!    see submitted work, a scope must not be re-entered until the work
-//!    recorded in the previous one has been DRAINED - a blocking read or a
-//!    `poll_wait`. Every caller in this workspace already drains per
-//!    iteration, because that is what produces the activation it chains. A
-//!    caller that does not drain must not open a scope.
+//!    see submitted work, the caller has to establish it, with a blocking read
+//!    or a `poll_wait`. State the obligation as narrowly as it really is,
+//!    because the difference is what lets a caller overlap its host work with
+//!    the card at all: what must not happen is a DISPATCH from the new scope
+//!    running against a slot an unfinished dispatch from the old one still
+//!    reads. Recording is not dispatching - a
+//!    bind group names a buffer, it does not write it - so the condition is
+//!
+//!    > the previous scope's work is drained before any dispatch recorded in
+//!    > the new scope is SUBMITTED,
+//!
+//!    not the stronger "before the new scope is entered". A caller that drains
+//!    at the end of each iteration satisfies it trivially; a caller that wants
+//!    its host work to overlap the card records first, drains second and
+//!    submits third, and satisfies it just as completely with one arena
+//!    (`ltxv::block::block_pipeline` is the worked example). A caller that
+//!    never drains at all must not open a scope.
 //!
 //! One more caller obligation, implied by (2): a scope is a property of ONE
 //! `Gpu` handle and its cursor is not re-entrant. Two threads sharing a handle

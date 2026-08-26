@@ -532,6 +532,57 @@ a catch.
 
 Numbers in `.agents/roadmap/ltxv.md` phase 33.
 
+### F.2d Then ask WHERE the per-iteration drain sits, not whether it exists
+
+Once the allocator is out of the way, the remaining host time of a loop like
+that is *serialised against* the device rather than large. The obvious next
+move - stop draining after every iteration - is usually rejected on memory,
+and correctly: an undrained queue means the backend can retire neither its
+upload staging nor its command buffers, and the pool climbs. Measured on
+ltxv's block stack, deleting the drain outright bought about a percent of wall
+and cost several GB of both VRAM and host RSS on a card that did not have it.
+
+But "the drain must happen once per iteration" says nothing about WHERE in the
+iteration. Split the body into RECORD (build bind groups, upload this
+iteration's weights), SUBMIT and WAIT, and notice that recording touches no
+device memory - a bind group *names* a buffer, it does not write it. So:
+
+    serial:     record(l)  submit(l)  wait(l)   record(l+1) submit(l+1) wait(l+1)
+    pipelined:  record(l)  wait(l-1)  submit(l) record(l+1) wait(l)     submit(l+1)
+
+Same number of drains, same submissions in the same order, at most one
+iteration in flight either way - and the host now records iteration `l+1`
+while the card runs `l`. Three consequences worth carrying forward:
+
+* **A replay arena needs ONE lane, not alternating lanes.** The condition an
+  arena actually requires is that the previous scope's work is drained before
+  any dispatch of the new scope is **submitted**, not before the new scope is
+  entered. A design sketch that assumes the stronger condition buys a second
+  arena, and a whole iteration's scratch, for nothing.
+* **Remember to FLUSH.** A backend that batches dispatches until something
+  forces a submit will otherwise keep the iteration's work on the host until
+  the *next* iteration's wait flushes it, which is the exact opposite of
+  overlapping. The wait and the flush are two different calls.
+* **Check what the other backends do with it.** An eager backend executes
+  inside `submit`, and a fence-waiting `flush` drains where this asks it to
+  queue. Both are correct and neither wins anything, which is the right
+  outcome; confirm it rather than assuming it.
+
+**And the instrument gets in the way, twice.** A GPU-timestamp profiler
+resolves its query sets into a buffer and then MAPS that buffer, and mapping
+blocks until the submission completes - so a flush that reads its own ticks
+back *is* a per-flush drain, and the harness that reports "device share of
+wall" measures a pipelined caller as exactly as fast as the serial one it
+replaced. Defer the readback to whenever someone actually reads the table.
+Then watch where else that resolve gets called from: a **destructor** is the
+dangerous one. Handles get dropped on hot paths (a resident weight window
+drops the share an evicted block held, once per streamed block), a destructor
+sits outside every span the caller times, and the cost therefore surfaces as
+"the change did not work" with the stage table blaming an innocent neighbour.
+A temporary probe around the loop's own phases is what separates the two;
+neither correctness gates nor stage timers can. Numbers, and the mutation that
+each gate caught, in `.agents/roadmap/ltxv.md` phase 35.
+
 ### F.3 Before writing anything: is there already a faster sibling?
 
 This is the highest-value question in the list and it costs one `grep`. It has

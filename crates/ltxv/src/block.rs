@@ -2083,6 +2083,67 @@ fn scratch_pool() -> bool {
     std::env::var_os("BRAIN_LTXV_NO_SCRATCH_POOL").map(|v| v != "1").unwrap_or(true)
 }
 
+/// Whether a chained block stack overlaps block `l`'s HOST work with block
+/// `l-1`'s DEVICE work, instead of standing still until each block's own
+/// dispatches have finished.
+///
+/// ## What moves, and why that is the whole change
+///
+/// A block body is three phases: RECORD (build bind groups, upload this
+/// block's weights if residency could not keep them), SUBMIT (hand the batch
+/// to the queue), and WAIT (block until the card is done). Recording touches
+/// no device memory - a bind group names buffers, it does not write them - so
+/// the wait does not have to sit between this block's submit and the next
+/// block's recording. It only has to sit between the previous block's submit
+/// and THIS block's submit.
+///
+/// Moving it there is all this switch does:
+///
+/// ```text
+///   serial:    record(l)  submit(l)  wait(l)          record(l+1) submit(l+1) wait(l+1)
+///   pipelined: record(l)  wait(l-1)  submit(l) flush  record(l+1) wait(l)     submit(l+1) flush
+/// ```
+///
+/// The device sees the identical submissions in the identical order, with at
+/// most one block's dispatches in flight either way, so nothing about what any
+/// kernel reads or when it runs changes. What changes is where the HOST is
+/// while the card works: recording block `l+1` and uploading its weights,
+/// rather than parked in `device.poll`.
+///
+/// ## Why ONE scratch arena is still enough
+///
+/// The recorded-not-yet-submitted phase is what makes this cheap. Block
+/// `l+1`'s temporaries come from the same arena slots block `l` used, and it
+/// takes them BEFORE block `l` has finished - but it only takes the handles.
+/// Every dispatch that writes one of those buffers is submitted after the wait
+/// that block `l` completes, so no arena slot is ever written while an
+/// unfinished dispatch still reads it. A second, alternating arena would buy
+/// nothing here and would cost a whole block's scratch in device memory.
+///
+/// The one obligation this hands the caller is that a stack must still be
+/// drained before its output is used, which the chained stack already does:
+/// `DitSession::run_blocks` reads the final activation back, and that read is
+/// a flush plus a blocking wait.
+///
+/// ## What the other two backends do with it
+///
+/// Nothing, and correctly. `backend-cpu` executes a batch inside `submit` and
+/// its `flush`/`poll_wait` are no-ops, so the ordering below collapses to
+/// exactly what it always did. `backend-vulkan`'s `flush` fence-waits by
+/// design, so it drains where this arm asks it to queue: no overlap, same
+/// answer. Only the default wgpu backend has a queue to run ahead of.
+///
+/// On by default. `BRAIN_LTXV_NO_PIPELINE=1` is the opt-out, for the same
+/// reason [`scratch_pool`] has one: without a switch the two arms cannot be
+/// A/B'd in one binary, and both the timings and the bit-for-bit comparison in
+/// `crates/ltxv/tests/block_pipeline.rs` need two arms in one process.
+fn block_pipeline() -> bool {
+    // Read per call, never cached, for `scratch_pool`'s reason: the gate runs
+    // both arms in one process and a cached first read would silently compare
+    // an arm against itself.
+    std::env::var_os("BRAIN_LTXV_NO_PIPELINE").map(|v| v != "1").unwrap_or(true)
+}
+
 /// Where one block forward's wall-clock really goes.
 ///
 /// Four buckets, because a real 48-layer forward at the production token count
@@ -2102,8 +2163,11 @@ pub struct BlockTimings {
     /// modulation vectors, the two prompt scale/shift broadcasts) plus graph
     /// recording. No kernel has run yet when this span closes.
     pub record_upload: std::time::Duration,
-    /// `submit` + the readback of the block's output - the span that contains
-    /// the GPU's actual work.
+    /// `submit` + the wait for the device - the span that contains the GPU's
+    /// actual work. On the PIPELINED block stack (see [`block_pipeline`]) the
+    /// wait in block `l`'s span is for block `l-1`'s dispatches, because block
+    /// `l`'s own are queued at the end of it and left running; the stack total
+    /// is still every device wait the stack performed, shifted by one block.
     pub compute: std::time::Duration,
     /// Device->host readback. For a chained stack
     /// ([`LtxBlockQ::forward_prod_dev`]) that is ONE `[t, dim]` read for the
@@ -2341,6 +2405,13 @@ impl LtxBlockQ {
     /// one-word probe `crate::devres::DitSession::prefill` already uses
     /// between weight uploads, for the same reason - and it is taken off `x3`
     /// itself, so it needs no buffer of its own.
+    ///
+    /// **Where that drain SITS is a separate question from whether it
+    /// happens**, and it is the one [`block_pipeline`] answers: one blocking
+    /// wait per block is what bounds the staging, but it does not have to be
+    /// the last thing this function does. Placed before the submit instead of
+    /// after it, the same wait bounds the same staging while the host records
+    /// the next block against a card that is still busy with this one.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_prod_dev(
         &self,
@@ -2361,11 +2432,13 @@ impl LtxBlockQ {
         // same order every time. Inside the scope they are drawn from the
         // handle's replay arena instead of being created and destroyed per
         // block - see `gpu_core::scratch` for the aliasing argument, and note
-        // that the two things it requires of a caller both hold here: the
-        // submit below is DRAINED by a blocking read before the next scope
-        // opens, and the one buffer that outlives the scope (`x3`, the chained
-        // activation) is still held by the caller, so the arena takes a fresh
-        // allocation for its slot rather than aliasing it.
+        // that the two things it requires of a caller both hold here: every
+        // dispatch recorded in this scope is SUBMITTED only after the previous
+        // scope's work has been drained (`block_pipeline` explains why that,
+        // and not "drained before the scope opens", is the condition), and the
+        // one buffer that outlives the scope (`x3`, the chained activation) is
+        // still held by the caller, so the arena takes a fresh allocation for
+        // its slot rather than aliasing it.
         let _scope = scratch_pool().then(|| scratch.scratch_scope());
         let s_rec = std::time::Instant::now();
         let mut s: Vec<Step> = Vec::new();
@@ -2374,8 +2447,21 @@ impl LtxBlockQ {
         let (x3, _ff_out) = mlp_sublayer_q(scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
-        scratch.submit(&[], &s);
-        let _ = scratch.read(&x3, 1);
+        if block_pipeline() {
+            // Drain what is ALREADY on the queue - every earlier block, and
+            // the staging behind this block's own weight upload. This block's
+            // dispatches are not on it yet, which is exactly why this wait
+            // does not wait for them.
+            scratch.poll_wait();
+            scratch.submit(&[], &s);
+            // `submit` only appends to the handle's batch; without this the
+            // work would not reach the card until the NEXT block's wait
+            // flushed it, which is the opposite of overlapping.
+            scratch.flush();
+        } else {
+            scratch.submit(&[], &s);
+            let _ = scratch.read(&x3, 1);
+        }
         timings.compute += s_sub.elapsed();
         x3
     }
@@ -2985,11 +3071,11 @@ impl LtxAvBlockQ {
     ) -> (DeviceBuffer, DeviceBuffer) {
         let (vdim, adim) = (self.vcfg.inner_dim, self.acfg.inner_dim);
         // The video block's argument, unchanged for two streams: the shape
-        // sequence is identical block to block, the submit below is drained by
-        // a blocking read before the next scope opens, and the two values that
-        // outlive the scope (both streams' chained activations) are still held
-        // by the caller, so the arena re-allocates their slots instead of
-        // aliasing them. See `gpu_core::scratch`.
+        // sequence is identical block to block, nothing recorded in this scope
+        // is submitted until the previous scope's work has drained, and the two
+        // values that outlive the scope (both streams' chained activations) are
+        // still held by the caller, so the arena re-allocates their slots
+        // instead of aliasing them. See `gpu_core::scratch`.
         let _scope = scratch_pool().then(|| scratch.scratch_scope());
         let s_rec = std::time::Instant::now();
         let mut s: Vec<Step> = Vec::new();
@@ -3001,8 +3087,19 @@ impl LtxAvBlockQ {
             v_ctx, self.v_ctx_len, a_ctx, self.a_ctx_len, rope, &self.vcfg, &self.acfg, tv, ta);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
-        scratch.submit(&[], &s);
-        let _ = scratch.read(&b.vx3, 1);
+        if block_pipeline() {
+            // The video block's argument, for two streams: see
+            // [`block_pipeline`]. Both chained activations are handed to the
+            // caller and both streams' scratch comes from the one arena, and
+            // neither is written before the wait below has completed the
+            // previous block.
+            scratch.poll_wait();
+            scratch.submit(&[], &s);
+            scratch.flush();
+        } else {
+            scratch.submit(&[], &s);
+            let _ = scratch.read(&b.vx3, 1);
+        }
         timings.compute += s_sub.elapsed();
         (b.vx3, b.ax3)
     }

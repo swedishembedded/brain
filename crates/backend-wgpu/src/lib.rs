@@ -524,6 +524,7 @@ impl DeviceShared {
                 names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
                 period_ns: queue.get_timestamp_period(),
                 acc: std::sync::Mutex::new(vec![(0.0, 0); kernels.len()]),
+                pending: std::sync::Mutex::new(Vec::new()),
                 // Read off the DEVICE, not off a flag threaded down from the
                 // adapter: `new_like` compiles a second kernel set onto the same
                 // device and must reach the same conclusion.
@@ -756,6 +757,30 @@ impl WgpuBackend {
     }
 }
 
+/// One timed flush's resolved timestamps, waiting to be read back.
+///
+/// The GPU has already written the ticks into `staging`; nothing here needs
+/// the host until someone asks for a per-kernel table. Holding the query sets
+/// and the resolve target alongside it keeps every resource the submission
+/// touched alive by an owner this file can point at, rather than relying on
+/// the backend's own deferred destruction.
+#[cfg(not(target_arch = "wasm32"))]
+struct PendingTicks {
+    staging: wgpu::Buffer,
+    /// Kept only so nothing the submission still references is dropped early.
+    _sets: Vec<wgpu::QuerySet>,
+    _resolve: wgpu::Buffer,
+    /// Pipeline slot of each dispatch, in the order it was recorded: dispatch
+    /// `i` cost `ticks[i + 1] - ticks[i]`.
+    kinds: Vec<usize>,
+}
+
+/// How many timed flushes may sit unresolved before one is forced. Each batch
+/// is eight bytes per dispatch plus one, so this bounds the deferral at a
+/// trivial amount of device memory while still covering a whole block stack.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_PENDING_TICK_BATCHES: usize = 256;
+
 /// Per-kernel GPU-time accumulator for the `BRAIN_PROFILE` timestamp path.
 #[cfg(not(target_arch = "wasm32"))]
 struct GpuProfile {
@@ -764,6 +789,9 @@ struct GpuProfile {
     period_ns: f32,
     /// Per-pipeline (total_ms, calls).
     acc: std::sync::Mutex<Vec<(f64, u64)>>,
+    /// Timed flushes whose ticks are on the card but not yet in `acc`. See
+    /// [`WgpuBackend::resolve_ticks`] for why the readback is deferred at all.
+    pending: std::sync::Mutex<Vec<PendingTicks>>,
     /// The device can write timestamps between dispatches INSIDE one compute
     /// pass, so the production single-pass flush can be timed as-is.
     inside_passes: bool,
@@ -778,6 +806,17 @@ impl WgpuBackend {
     /// what `Drop` prints, callable while a RESIDENT backend is still alive
     /// (a static never drops, so its profile was otherwise unreadable).
     pub fn dump_profile_now(&self) {
+        // Same reason as `kernel_times`: a table printed without folding the
+        // deferred batches in would be short of the flushes that ran last.
+        // This is an EXPLICIT call, so the wait inside is what the caller
+        // asked for; `Drop` deliberately does not come through here (see it).
+        self.resolve_ticks();
+        self.print_profile();
+    }
+
+    /// [`Self::dump_profile_now`] without folding the deferred timestamp
+    /// batches in first, i.e. without waiting for the device.
+    fn print_profile(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         if self.profile {
             eprintln!(
@@ -822,7 +861,23 @@ impl WgpuBackend {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for WgpuBackend {
     fn drop(&mut self) {
-        self.dump_profile_now();
+        // NOT `dump_profile_now`: folding the deferred timestamp batches in
+        // means blocking until the queue is idle, and a SHARED handle is
+        // dropped on hot paths - `ltxv`'s resident weight window drops the
+        // share an evicted block held, once per streamed block - where that
+        // wait is a full device stall in the middle of a forward. Measured on
+        // the pipelined LTX-2.5 block stack: it put a whole block's device
+        // time into the destructor, and the destructor is outside every span
+        // the caller times, so it read as the pipelining simply not working.
+        //
+        // Only the LAST handle waits, because that IS the device going away
+        // and there is nothing left to overlap. A share's unresolved batches
+        // are not lost: they stay on the shared device for whoever reads the
+        // table next.
+        if std::sync::Arc::strong_count(&self.shared) == 1 {
+            self.resolve_ticks();
+        }
+        self.print_profile();
     }
 }
 
@@ -1447,6 +1502,16 @@ impl WgpuBackend {
     /// repeats its predecessor's final timestamp as its own first, so a chunk
     /// boundary does not lose a dispatch.
     ///
+    /// The readback of those ticks is DEFERRED ([`Self::resolve_ticks`]), and
+    /// that is not a micro-optimisation. Mapping the resolve target means
+    /// blocking until the submission completes, so a flush that read its own
+    /// ticks back was a full device round trip per flush - i.e. this
+    /// instrument imposed the very per-flush drain that a caller overlapping
+    /// host work with device work is trying to remove, and therefore could not
+    /// measure such a caller at all. The ticks are written by the GPU into a
+    /// buffer that nothing else touches, so reading them later reports the
+    /// identical numbers.
+    ///
     /// Requires `TIMESTAMP_QUERY_INSIDE_PASSES`.
     #[cfg(not(target_arch = "wasm32"))]
     fn flush_timed(&self, steps: &[WgpuStep]) {
@@ -1507,35 +1572,91 @@ impl WgpuBackend {
         enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, bytes);
         self.queue().submit(Some(enc.finish()));
 
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            // A dropped receiver (the caller already unwound past `rx.recv_timeout`,
-            // e.g. because `poll_wait_bounded` just panicked with "device lost")
-            // must never itself become a panic HERE: this closure can be invoked
-            // by wgpu-core synchronously out of `Buffer::unmap`/`drop`, i.e. while
-            // the FIRST panic is still unwinding -- a second panic during an
-            // active unwind is an unconditional process abort (no catch_unwind
-            // can save it), which would silently defeat
-            // `crates/residency/src/executor.rs::lane_loop`'s own panic isolation.
-            let _ = tx.send(r);
-        });
-        self.poll_wait_bounded("timestamp readback");
-        rx.recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap_or_else(|_| panic!("timestamp readback: map_async callback did not fire after a completed poll"))
-            .unwrap();
-        let ticks: Vec<u64> = bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range()).to_vec();
-        staging.unmap();
+        let batch = PendingTicks { staging, _sets: sets, _resolve: resolve, kinds: steps.iter().map(|(kind, ..)| *kind).collect() };
+        let full = {
+            let mut pend = p.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pend.push(batch);
+            pend.len() >= MAX_PENDING_TICK_BATCHES
+        };
+        if full {
+            self.resolve_ticks();
+        }
+    }
 
-        // Flatten the per-set resolves back into one timeline. Set `c` occupies
-        // `[c*PER_SET, c*PER_SET + counts[c])` of the flattened buffer, which is
-        // exactly index `i` of the timeline, so no re-mapping is needed.
+    /// Fold every deferred timed flush's ticks into the per-kernel accumulator.
+    ///
+    /// This BLOCKS until the queue is idle - there is no other way to map the
+    /// buffer the ticks live in - so it is called only where that is what the
+    /// caller wants: before a deliberate read of the accumulator
+    /// (`kernel_times`, `dump_profile_now`), when the deferral queue reaches
+    /// its cap, and from `Drop` only for the handle that is taking the device
+    /// down with it. Never from a flush that is meant to return.
+    ///
+    /// One `poll` covers every batch, because the ticks of the OLDEST batch are
+    /// ready no later than those of the newest and a single wait for the most
+    /// recent submission establishes both.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_ticks(&self) {
+        let Some(p) = &self.shared.gpu_profile else { return };
+        let batches: Vec<PendingTicks> = std::mem::take(&mut *p.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        if batches.is_empty() {
+            return;
+        }
+        let waits: Vec<_> = batches
+            .iter()
+            .map(|b| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                b.staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    // A dropped receiver (the caller already unwound past
+                    // `rx.recv_timeout`, e.g. because `poll_wait_bounded` just
+                    // panicked with "device lost") must never itself become a
+                    // panic HERE: this closure can be invoked by wgpu-core
+                    // synchronously out of `Buffer::unmap`/`drop`, i.e. while
+                    // the FIRST panic is still unwinding -- a second panic
+                    // during an active unwind is an unconditional process abort
+                    // (no catch_unwind can save it), which would silently
+                    // defeat `crates/residency/src/executor.rs::lane_loop`'s
+                    // own panic isolation.
+                    let _ = tx.send(r);
+                });
+                rx
+            })
+            .collect();
+        // Deliberately NOT `poll_wait_bounded`: this runs from `Drop`, and a
+        // second panic during an unwind aborts the process outright. A
+        // per-kernel table is never worth that, so a device that will not
+        // complete costs an incomplete profile and says so, rather than the
+        // run.
+        if self
+            .device()
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(gpu_wait_timeout()) })
+            .is_err()
+        {
+            eprintln!("brain: timestamp readback did not complete; the per-kernel profile is missing its last flushes");
+            return;
+        }
         let mut acc = p.acc.lock().unwrap_or_else(|e| e.into_inner());
-        for (i, (kind, ..)) in steps.iter().enumerate() {
-            let dt = ticks[i + 1].saturating_sub(ticks[i]);
-            let e = &mut acc[*kind];
-            e.0 += dt as f64 * p.period_ns as f64 / 1e6;
-            e.1 += 1;
+        for (b, rx) in batches.iter().zip(waits) {
+            if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+                eprintln!("brain: a timestamp map_async callback did not fire after a completed poll; the per-kernel profile is incomplete");
+                return;
+            }
+            // Flatten the per-set resolves back into one timeline. Set `c`
+            // occupies `[c*PER_SET, c*PER_SET + counts[c])` of the flattened
+            // buffer, which is exactly index `i` of the timeline, so no
+            // re-mapping is needed.
+            {
+                let slice = b.staging.slice(..);
+                let view = slice.get_mapped_range();
+                let ticks: &[u64] = bytemuck::cast_slice::<u8, u64>(&view);
+                for (i, kind) in b.kinds.iter().enumerate() {
+                    let dt = ticks[i + 1].saturating_sub(ticks[i]);
+                    let e = &mut acc[*kind];
+                    e.0 += dt as f64 * p.period_ns as f64 / 1e6;
+                    e.1 += 1;
+                }
+            }
+            b.staging.unmap();
         }
     }
 
@@ -1959,6 +2080,12 @@ impl Backend for WgpuBackend {
     }
 
     fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
+        // Deferred batches are part of the answer, so fold them in FIRST (a
+        // no-op when this backend has no profile at all). Without it a caller
+        // polling per forward would read a table missing whatever the last
+        // flushes measured, and the per-call DIFFERENCE such a caller computes
+        // would be attributed to the wrong call.
+        self.resolve_ticks();
         let p = self.shared.gpu_profile.as_ref()?;
         let acc = p.acc.lock().unwrap_or_else(|e| e.into_inner());
         Some(
@@ -1972,6 +2099,10 @@ impl Backend for WgpuBackend {
 
     fn reset_kernel_times(&self) {
         if let Some(p) = &self.shared.gpu_profile {
+            // Unresolved batches measured work that happened BEFORE the reset,
+            // so they are dropped with the totals rather than folded into the
+            // fresh window they do not belong to.
+            p.pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
             p.acc.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().for_each(|e| *e = (0.0, 0));
         }
     }

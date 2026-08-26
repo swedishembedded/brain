@@ -7593,3 +7593,510 @@ the fast lane and was run explicitly with `BRAIN_LTXV_DIT` set: green.
 * **Only `crates/ltxv` opts into the arena.** Every other block-stack model in
   the workspace has the same shape - an identical dispatch sequence per block,
   a chained activation, a drain - and none of them has been measured for it.
+
+### Phase 34 - the VAE decode stops paying for two permutes per norm, and for eight weight uploads per clip
+
+Phase 33 attributed the DiT forward and left the VAE alone. It is the second
+largest item in a real run and the largest that had never been optimised: on a
+10 s clip (241 frames, 1280x704, audio) the measured stage split is
+`build 10.3 | text encode 171.3 | denoise 2328.6 | VAE 645.7 | audio 5.9`,
+i.e. the decode is 20.4% of the run.
+
+#### 0 - the decode-only harness, and where the time actually goes
+
+`ltxv_bench decode <latent.bin> tiled` at the real clip geometry - a
+`[128, 31, 22, 40]` latent, which is 241 frames at 1280x704 - on one idle
+Tesla P40, `BRAIN_PROFILE=1`. The latent is synthetic (a decode's cost is a
+function of its shapes, not of the values), real VAE weights.
+
+That shape takes the TILED path: 16 tiles in **8 distinct latent shapes**
+(the temporal axis splits 4 ways at `1 + 8k`, each spatial axis 2), and the
+plan's **overlap waste is 1.502x** - not the 1.192x phase 16 recorded, which
+was a 25-frame clip whose temporal axis did not split at all.
+
+Baseline, before any change (wall 357.9 s, device 306.7 s summed over the
+eight per-shape devices, host the remainder):
+
+| item | s | share of wall |
+|---|---:|---:|
+| DEVICE (kernel timestamp queries) | 306.7 | 85.7% |
+| host | 51.2 | 14.3% |
+
+and the device half, per kernel kind, summed over all 16 tiles:
+
+| kernel | s | share of device |
+|---|---:|---:|
+| `matmul_reg3` | 170.04 | 55.4% |
+| `im2col3d_at` | 69.25 | 22.6% |
+| `nchw_nlc` | 22.83 | 7.4% |
+| `l2norm_scale` | 21.73 | 7.1% |
+| `nlc_nchw` | 13.09 | 4.3% |
+| `nlc_bias_nchw` | 3.87 | 1.3% |
+| `concat2` | 3.15 | 1.0% |
+| `silu` | 1.44 | 0.5% |
+| `add2` | 0.98 | 0.3% |
+| everything else | 0.37 | 0.1% |
+
+**Three of those rows are one operation.** `nchw_nlc` + `l2norm_scale` +
+`nlc_nchw` is `Builder3d::pixel_norm`, dispatched 37 times per decode, and
+together they are **18.8% of the device time**. Against the card's own
+measured roofline (`ltxv_bench vae 2 81 416 768`, the largest tile shape:
+10450 GFLOP/s, 287.0 GB/s) the same pass reports the repo's roof-floor defect
+rule firing on two of them - `nchw_nlc` at **6.2%** of its memory roof
+(floor 35%) and `l2norm_scale` at **11.7%** of its compute roof (floor 30%) -
+with the whole pass at **26.5%** of roof.
+
+#### 1 - why a norm was three kernels, and why one is enough
+
+`pixel_norm` (and `rms_norm`, the Wan VAE's learned-gain sibling - the same
+three dispatches with a different `(gain, eps)` pair) normalises over the
+CHANNEL axis of an `[C, T, H, W]` volume, which is the SLOWEST-varying axis.
+The row-oriented `l2norm_scale` needs its rows contiguous, so the composed
+form permutes into `[THW, C]`, normalises, and permutes back.
+
+Both permutes are pure strided movement: `nchw_nlc` gathers
+`x[(n*C+ch)*HW + l]` with `ch` varying fastest, so a warp's lanes land `HW`
+floats apart and each fetched sector serves one useful float. The composition
+pays that sector amplification TWICE in order to spare the middle kernel from
+paying it once. And the middle kernel is worse than it looks: `l2norm_scale`
+gives one thread each OUTPUT element, so every one of a row's `C` threads
+redoes that row's whole sum of squares - its op count scales as `C` per
+element, which is why it reads as compute-bound at 11.7% of a compute roof.
+
+This is the same argument `layernorm2d` already settled for the LayerNorm
+family (`crates/vision/src/blocks.rs`'s `LayerNorm2d` records that
+measurement, and `.agents/rules/kernels.md` §E lists "composing several
+coalesced stages beats a fused kernel" as a KILLED hypothesis). The L2/RMS
+twin did not exist, so this phase wrote it: **`l2norm_scale2d`**, one
+invocation per spatial position walking `C` at stride `T*H*W`, barrier-free
+and array-free so `backend-cpu` JITs it.
+
+It is **bit-identical**, not merely close, and that is a property of the
+construction rather than luck: the permutes are exact rearrangements, and both
+arms fold a position's sum of squares over ASCENDING channel index, so the
+fused kernel performs the identical sequence of roundings on the identical
+values. Every gate below therefore asserts on BITS.
+
+The dispatch decision lives in ONE new private `Builder3d::chan_l2norm`, which
+`pixel_norm` and `rms_norm` both call - so `crates/wan`'s causal VAE inherits
+it without a line changing in that crate. `crates/ltxv/src/audio_vae.rs` kept
+its own byte-identical composed copy of the same trio; it now dispatches the
+fused kernel too, because a private composed copy left in one model is exactly
+how the next model inherits the slow form.
+
+`BRAIN_VAE3D_SPLIT_NORM=1` selects the composed arm.
+
+#### 2 - the second finding: eight weight uploads and eight devices per clip
+
+`LtxVaeTiledDecoder::decode_with` builds one graph per distinct tile SHAPE and
+drops it before the next, so peak VRAM is one tile's rather than the clip's
+(phase 16). Each of those builds also called `Gpu::open` - a fresh adapter,
+queue and one shader compile per kernel - and re-uploaded the whole decoder,
+~1.6 GB at fp32, through `Builder3d`'s per-builder weight memo.
+
+At 25 frames that cost was paid up to four times and phase 16 measured it as
+noise against the tiles. At 241 frames the cover has EIGHT shapes, and the
+first build measures 3.68 s against a recording-only build of ~0.30 s: the
+uploads alone are ~24 s of host time with the card idle for all of it.
+
+`Builder3d::with_weights` / `finish_keeping_weights` let a caller carry the
+device weight memo from one graph to the next, and `LtxVaeDecoder::build_on`
+takes a device the caller owns. The tiled decoder now opens ONE device and
+threads one memo through all eight builds. Peak VRAM is unchanged, and the
+reason is structural rather than hopeful: the weights and one tile's
+activations were already co-resident during every build, and the activations
+are still dropped before the next shape's are allocated. Only the weights
+survive, and they are the same buffers that used to be re-uploaded.
+
+`BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS=1` restores the per-shape device, and it is
+what the measurement below is against. Same clip, same binary, the
+`graph build` stage timer:
+
+| 241 frames @1280x704, 16 tiles in 8 shapes | `NO_SHARED_WEIGHTS=1` | shared |
+|---|---:|---:|
+| graph build (8 shapes) | 31.96 s | **5.83 s** |
+| graph drop (8 shapes) | 7.03 s | **1.86 s** |
+| device open | inside the builds | 0.27 s, once |
+| wall | 315.0 s | **283.7 s** |
+| **DEVICE (kernel timestamps)** | **255.75 s** | **257.57 s** |
+
+**Device time not moving is the control**, and it did not: 255.75 vs 257.57 s,
+0.7% apart, on a change that only decides where a weight buffer came from.
+Everything the change is worth - 26.1 s of build plus 5.2 s of teardown - is
+host time the card was idle for, and it is 1.11x on the stage's wall clock.
+
+Per shape, the un-shared builds measure 3.97 / 3.96 / 3.79 / 4.13 / 3.41 s and
+the shared ones 3.68 (the first, which really does upload) then 0.31 / 0.26 /
+0.28 / 0.24 / 0.34 / 0.31 / 0.40 s. The first build being the same in both
+arms is the point: every later one falls to what RECORDING costs.
+
+#### 3 - measured: the norm arms, same binary, same box, one idle P40
+
+`ltxv_bench decode <241f latent> tiled` on gpu1, `BRAIN_PROFILE=1`,
+`BRAIN_GPU_WAIT_S=1800`. Both arms carry the shared device/weights of item 2,
+so the ONLY difference between these two columns is which norm ran:
+
+**Three arms, run back to back in that order**, because a second card in the
+same chassis was under continuous load from an unrelated job all session and
+gpu1 sat at 89 C throttled to 1354-1392 MHz against gpu0's 1531 MHz. A single
+before/after pair on a drifting die is not a measurement, so the fused arm was
+run twice, once at each end:
+
+| 241 frames @1280x704, 16 tiles | fused (1st) | `SPLIT_NORM=1` (2nd) | fused (3rd) |
+|---|---:|---:|---:|
+| wall | 283.7 s | 358.3 s | 300.3 s |
+| of which DEVICE (kernel timestamps) | 257.57 s | 332.49 s | 273.27 s |
+| of which HOST | 26.1 s | 25.8 s | 27.0 s |
+| the channel norm's kernels | **2.21 s** | 61.82 s | **2.28 s** |
+| `matmul_reg3` | 174.03 s | 184.12 s | 183.77 s |
+| `im2col3d_at` | 71.44 s | 76.24 s | 77.00 s |
+
+**The third arm is what makes the second column readable.** Against the arm
+run immediately before it, in the same thermal state, the convolution rows
+agree to 0.2% (`matmul_reg3` 183.77 vs 184.12) and 1% (`im2col3d_at` 77.00 vs
+76.24) - so the convolutions did not move, and the ~5% they appeared to move
+between arms 1 and 2 was the die cooling down between the session's start and
+that point. What DID move is one stage:
+
+| matched-thermal comparison (arm 3 vs arm 2) | | |
+|---|---:|---|
+| the channel norm's kernels | 61.82 s -> 2.28 s | **27.1x**, 59.5 s removed |
+| DEVICE | 332.49 s -> 273.27 s | **1.217x** |
+| wall | 358.3 s -> 300.3 s | **1.193x** |
+| HOST | 25.8 s -> 27.0 s | unchanged, and that is the CONTROL |
+
+**Host time not moving is the control**, and it did not: a device-side kernel
+fusion must leave the host half alone. On a cool die the same change measured
+283.7 s wall against the 358.3 s split arm (1.26x), which is the best observed
+rather than the attributable number.
+
+At one tile shape, where a roofline is available
+(`ltxv_bench vae 2 81 416 768`, latent `[128, 11, 13, 24]`, both arms of the
+same binary, roofline measured identically in both runs at 10450 GFLOP/s /
+287.0 GB/s):
+
+| | composed | fused |
+|---|---:|---:|
+| whole pass | 23922 ms | 20272 ms |
+| whole pass, % of roof | 26.5% | **30.3%** |
+| roof-floor DEFECT rows | `nchw_nlc` 6.2% of memory roof, `l2norm_scale` 11.7% of compute roof | **none** |
+| `l2norm_scale2d` | - | 60.8% of its memory roof |
+
+Both defect rows the repo's own floor rule was flagging are gone, and the
+kernel that replaced them sits at a normal fraction of its bandwidth roof.
+
+#### 4 - the host half, attributed with nothing left over (fused arm 1)
+
+Stage spans added to `LtxVaeDecoder::decode` and
+`LtxVaeTiledDecoder::decode_with` (permanent, `BRAIN_PROFILE`-gated). None of
+them overlaps another, so they sum to the call - the fused arm above:
+
+| host item | s | share of wall |
+|---|---:|---:|
+| `submit` + device wait (this is the DEVICE, listed so the rows sum) | 258.07 | 91.0% |
+| pixel readback, 16 tiles | 6.04 | 2.1% |
+| graph build - weight upload + recording, 8 shapes | 5.83 | 2.1% |
+| host `unpatchify`, 16 tiles | 5.01 | 1.8% |
+| blend accumulate (host), 16 tiles | 4.92 | 1.7% |
+| graph drop (device teardown), 8 shapes | 1.86 | 0.7% |
+| blend divide (host) | 0.89 | 0.3% |
+| device open | 0.27 | 0.1% |
+| latent slice (host), 16 tiles | 0.04 | 0.0% |
+| latent upload, 16 tiles | 0.00 | 0.0% |
+| **unaccounted** | **0.8** | **0.3%** |
+| **wall** | **283.7** | |
+
+`submit + device wait` is 258.07 s against 257.57 s of summed kernel
+timestamps, so the host residual inside that span is 0.5 s: on this path the
+card really is the whole of it.
+
+The first graph build measures 3.68 s and every later one ~0.30 s, which is
+what item 2's fix buys per shape - eight shapes on their own devices would be
+~29 s of upload plus eight device opens, against 6.1 s.
+
+#### 5 - the gates, and which mutation caught which
+
+Both changes are BIT-identical claims, so every gate asserts on `to_bits`, not
+on a cosine floor - and deliberately not on cosine alone, which is scale
+invariant and would score a uniformly mis-scaled image perfect.
+
+New:
+
+* `crates/vae/tests/blocks3d_norm.rs` - checkpoint-free, both norms
+  (`pixel_norm` and `rms_norm`, the two `(gain, eps)` pairs into the one
+  dispatch site) at a shape whose four extents are all different, on the
+  default device AND explicitly on `backend-cpu` (the kernel declares
+  `@cpu yes`, and only a run on the CPU JIT holds that claim up). Prints the
+  differing-word count so a reader can see it ran.
+* `crates/ltxv/tests/vae_parity.rs::the_fused_channel_norm_changes_no_bit_of_
+  a_real_weight_decode` - the REAL 170-tensor checkpoint, 17 frames, both
+  arms in one process: 0 of 208896 decoded words differ.
+* `crates/ltxv/tests/vae_tiling.rs::sharing_one_device_and_one_weight_set_
+  across_tile_shapes_changes_no_bit` - a deliberately MULTI-shape cover (a
+  one-tile plan would prove nothing, since the first build uploads either
+  way), both arms of `BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS`.
+* `gpu_core::cost` gained an `l2norm_scale2d` row with a hand-computed
+  expectation, and the kernel catalogue regenerated.
+
+Every guard was mutated separately:
+
+| mutation | what went red | what it proves |
+|---|---|---|
+| fold the sum of squares over DESCENDING `c` | both `blocks3d_norm` tests, 2709 of 5040 words | the gate sees a pure re-association, not just a gross error - which is the whole reason the claim is "bit-identical" rather than "close" |
+| drop the per-channel gain `g[c]` from the scale pass | both `blocks3d_norm` tests | the gain is really applied and really compared |
+| index the channel axis as if it were contiguous (the NLC assumption) | the CPU-backend test **SIGSEGV**s; the GPU arm would have read out of range | worth recording as a caught mutation of a different KIND: on `backend-cpu` an out-of-range index is a crash, not a wrong number, so a JIT-backed gate can catch an indexing bug the bounds-checked GPU arm would only show as garbage |
+| make a weight-memo HIT hand back some other tensor's buffer | `sharing_one_device_and_one_weight_set_across_tile_shapes_changes_no_bit` | the sharing gate can see a mis-keyed memo, which is the only way this change can be wrong |
+| the sharing gate's own SHAPE-COUNT guard | it fired, on the first geometry tried | recorded because it is the finding: an 8x8 latent under a 4-cell tile splits into three EQUAL tiles, so the obvious geometry to copy from the gate above would have compared the shared arm against itself and passed forever. The guard is why that was caught rather than shipped |
+
+Pre-existing gates re-run and green, with the printed numbers unchanged to
+every digit this crate records:
+
+* `vae_parity` - 8 passed / 0 failed / 1 ignored: encoder, decoder and round
+  trip at 9 and 17 frames against the dumped goldens, all at cosine
+  1.000000000, plus the explicit `backend-cpu` run.
+* `vae_tiling` - 4 passed / 0 failed / 3 ignored, and the approximate gate
+  reproduces phase 16's numbers exactly: `9-tile tiled vs whole: cosine
+  0.999093484, rel_l2 4.2641e-2, max_abs 1.6697e-1`, hard cut 0.992828795 /
+  1.2401e-1 / 5.4389e-1. Nine identical digits on a lossy path is a stronger
+  statement about "nothing moved" than the pass/fail is.
+* `cargo test -p brain-ltxv` - every test binary green.
+* `cargo test -p brain-wan --test vae_parity` - 9 passed / 0 failed. Wan's
+  causal VAE calls `Builder3d::rms_norm` and therefore took the fused kernel
+  with no change in that crate at all; this is the gate that says so.
+* `cargo test -p brain-vae -p brain-gpu-core` - green, including the new
+  `l2norm_scale2d` cost row and the coverage floor.
+* `make clippy` - exit 0, 0 warnings (baseline 0). `make kernels-table/check` -
+  up to date, 431 kernels, all fields declared.
+
+#### 6 - recorded, NOT done - and the largest one is not a kernel
+
+Re-profiled after the fix, the decode's device half is:
+
+| kernel | share of device |
+|---|---:|
+| `matmul_reg3` | 67.6% |
+| `im2col3d_at` | 27.7% |
+| everything else | 4.7% |
+
+with `matmul_reg3` at ~42-46% of the card's measured compute roof and
+`im2col3d_at` at ~51-58% of its memory roof. Neither is a defect; both are
+structural, and the ranked ways past them are:
+
+* **The overlap waste is 1.502x at this clip geometry, and that multiplies
+  BOTH rows above.** Upstream's conv-VAE auto layout
+  (`_CONV_AUTO_LONG_SIDE = (768, 64)`, `_CONV_AUTO_FRAMES = (80, 24)`) tiles a
+  `[31, 22, 40]` latent as 4 temporal x 2 x 2, and the temporal axis is where
+  the waste is: a 3-cell overlap on a 10-cell tile is ~43% extra per interior
+  tile, against ~18% (height) and ~9% (width) for a 2-cell spatial overlap on
+  a 13- and 24-cell tile. One third of every second the card spends in this
+  stage decodes pixels the blend then averages away. A brute-force search over
+  `(t, h, w)` tile sizes at upstream's own overlaps, constrained to a per-tile
+  pixel volume that is known to fit, bottoms out at **1.30-1.32x** - so roughly
+  12% of the whole stage is available from tile SIZING alone, with no kernel
+  written. It is NOT taken here, deliberately: phase 16 recorded "a VRAM-budget
+  search for the tile size" as out of scope because sizing tiles from live free
+  VRAM needs the per-request VRAM estimate `LtxvResident::estimate` still
+  lacks, and inventing a second answer to "how much fits" while that is open
+  would give the workspace two. The arithmetic is here so the next pass does
+  not have to re-derive it.
+* **`im2col3d_at` exists only to feed `matmul_reg3`.** It materialises
+  `27 x Cin` floats per output position, which the GEMM then reads back - so
+  the lowering pays roughly twice the im2col volume in DRAM traffic that an
+  implicit-GEMM conv (staging the im2col patch directly into the GEMM's shared
+  tile) would not pay at all. That is a real new kernel with a register-tiled
+  inner loop, not a selection fix, and it is the largest single kernel-level
+  item left.
+* **The 16 tiles are decoded strictly one after another and the host stages
+  between them do not overlap the card.** Readback + `unpatchify` + blend is
+  ~16 s of the 284, all of it with the queue empty. Double-buffering tile `i`'s
+  host work against tile `i+1`'s submit would recover most of it, and the
+  arena's own precedent applies: the decoder graph is static and re-submitted
+  per tile, so the only thing that has to alternate is the output buffer.
+* **The encoder is untouched.** `LtxVaeEncoder` uses the same `pixel_norm`, so
+  it inherited the fused kernel for free, but nothing in this port encodes a
+  clip large enough to profile.
+
+#### 7 - what this is worth on a real run, and what it is not
+
+The stage this phase touched was 645.7 s of a 3162.6 s clip. Nothing here
+changes the DiT, so the honest projection is the decode's own ratio applied to
+that line and nothing else: at the matched-thermal 1.217x on device time and
+the same host half, the decode lands near 530 s and the run near 3047 s -
+about 3.6% end to end, against 20.4% of the run spent in the stage. The stage
+is now 91% device-bound and the device half is 95% two kernels, so the next
+1.2x on it is item 6's tile geometry, not another fusion.
+
+**A caveat on absolute seconds in this section.** The decode-only harness
+measures 357.9 s for the pre-change path where the real pipeline reported
+645.7 s for the same clip geometry, and that gap is not explained here. The
+harness decodes a synthetic latent through `LtxVaeTiledDecoder` directly, so
+it excludes whatever the pipeline does around the call (the weight import is
+outside the harness's timer) and it ran with the other card idle. Every ratio
+in this phase is a same-binary, same-harness A/B and is unaffected; the
+absolute 645.7 s is the pipeline's own number and re-deriving it needs a run
+this phase deliberately did not do.
+
+### Phase 35 - the block loop stops waiting for the block it just submitted
+
+Phase 33 left the warm video forward 90% device-bound and named the remaining
+item: the per-block BLOCKING one-word read. It exists so wgpu retires its
+staging and its pool does not grow (phase 30 measured chaining without it and
+correctly rejected it), and the arena had just removed the reason it had to be
+the last thing a block does. This phase moves it.
+
+#### 0 - the change is a reordering, and it needs no second arena
+
+A block body is three phases: RECORD (bind groups, plus this block's weight
+upload when residency could not keep it), SUBMIT, WAIT. Recording touches no
+device memory, so the wait does not have to sit between this block's submit
+and the next block's recording. It only has to sit between the previous
+block's submit and THIS block's submit:
+
+```text
+  serial:    record(l)  submit(l)  wait(l)          record(l+1) submit(l+1) wait(l+1)
+  pipelined: record(l)  wait(l-1)  submit(l) flush  record(l+1) wait(l)     submit(l+1) flush
+```
+
+The device sees the identical submissions in the identical order with at most
+one block in flight either way. What changes is where the host is while the
+card works. `ltxv::block::block_pipeline` is the switch
+(`BRAIN_LTXV_NO_PIPELINE=1` opts out), two call sites, one per stream pair.
+
+**The recorded design sketch was alternating arenas, and that turned out to be
+unnecessary.** The sketch assumed the aliasing window is "recording block `l+1`
+while block `l` runs". It is not: block `l+1` only takes the arena's HANDLES
+during recording, and every dispatch that writes one of those buffers is
+submitted after the wait that completes block `l`. One arena is enough, and a
+second would have cost a whole block's scratch in device memory for nothing.
+`gpu_core::scratch`'s contract is restated to the condition that is actually
+required - drained before the new scope's dispatches are SUBMITTED, not before
+the new scope is entered.
+
+#### 1 - the instrument had to be fixed first, and that is the reusable finding
+
+`ltxv_bench` turns `BRAIN_PROFILE` on, which routes every flush through
+`backend_wgpu`'s `flush_timed`. That path resolved its query sets and then
+MAPPED the resolve target to read the ticks - and mapping blocks until the
+submission completes. So the profiler that reports "device share of wall" was
+itself a full device round trip per flush: with it on, the pipelined arm
+measured exactly as fast as the serial one, because the profiler had put the
+drain back. The readback is now deferred (`resolve_ticks`, folded in on any
+deliberate read of the accumulator) and the flush returns while the card works.
+
+A second, worse instance of the same class was created by that fix and found
+by measurement: `Drop for WgpuBackend` reports its profile, so resolving from
+`dump_profile_now` made EVERY handle drop wait for the queue - including the
+`Gpu::share` an evicted resident block holds, dropped once per streamed block
+in the middle of a forward. A destructor is outside every span the caller
+times, so it did not appear in any stage; it read as the pipelining simply not
+working, and the stage table blamed the weight upload. A temporary probe around
+the block loop's own phases is what found it:
+
+| span, warm forward, 8 layers, T = 13200, nothing resident | serial | pipelined, bug present |
+|---|---:|---:|
+| `forward_prod_dev`'s own timed spans | 10306 ms | 545 ms |
+| dropping the block (untimed by any stage) | 96 ms | 9801 ms |
+
+Only the LAST handle on a device resolves from `Drop` now. Both properties are
+gated in `crates/backend-wgpu/tests/kernel_timing.rs`.
+
+#### 2 - measured, both arms, same binary, one idle P40 (gpu0)
+
+`ltxv_bench streamed 48 13200 1024 1 1 1 <reps>`, real distilled Q8_0 weights,
+device-resident session, one distinct timestep. The first warm call is the
+warm-up and is excluded; the headline is the best of the rest.
+
+| | before | after | |
+|---|---:|---:|---|
+| warm forward, best | 65.44 s | **62.49 s** | **1.047x** |
+| of which DEVICE (kernel timestamps) | 58.22 s | 58.24 s | **+0.03%** |
+| of which HOST | 7.22 s | 4.24 s | -41% |
+| device share of wall | 89.0% | **93.2%** | |
+| first (cold) forward, best of the runs taken | 138.87 s | 106.21 s | 1.31x |
+| peak VRAM (separate UNTIMED observation, `nvidia-smi -l 1`) | 18092 MiB | 18555 MiB | +463 MiB |
+| host peak RSS | 36792 MiB | 36863 MiB | +71 MiB |
+| resident blocks the policy granted | 23 of 48 | 23 of 48 | |
+
+Device kernel time not moving is the control and it did not move. Peak VRAM is
++2.6% on a 24576 MiB card and, over six consecutive forwards, it steps to
+18555 MiB during the first warm one and then stays there exactly - the extra is
+one further block's upload staging in flight, not a pool that grows.
+
+Where the wall went, warm call, same run:
+
+| stage | before | after |
+|---|---:|---:|
+| block submit+wait (sum over layers) | 58371 ms | 56288 ms |
+| block weight upload (the 25 non-resident blocks) | 2343 ms | 1685 ms |
+| activation/context/adaLN record+upload | 2627 ms | 1673 ms |
+| device -> host readback | 340 ms | 1478 ms |
+| output stage (host) | 875 ms | 912 ms |
+
+The readback grows because it is now where the LAST block's device tail is
+waited for; `submit+wait` correspondingly holds 47 of the 48 blocks. The two
+in-loop host rows are what the card now runs underneath.
+
+**The two effects, separated** (`BRAIN_LTXV_RESIDENT_BLOCKS` forces the window
+size, 8 layers, same token width, best warm call):
+
+| | before | after |
+|---|---:|---:|
+| every block resident, so nothing streams | 12.18 s | 11.80 s |
+| nothing resident, so every block uploads | 12.99 s | 12.55 s |
+
+Device time was 9.64-9.66 s in all four. Both the graph recording and the
+weight upload overlap; neither is a special case.
+
+#### 3 - how far ahead to run, answered with the memory number
+
+One block, and the evidence is what the next block costs. Deleting the wait
+altogether (the arena and the pipelining otherwise unchanged) runs the whole
+48-block stack ahead of the card:
+
+| | drain kept | drain deleted |
+|---|---:|---:|
+| warm forward, best | 62.49 s | 61.82 s |
+| peak VRAM | 18555 MiB | **23222 MiB** of 24576 |
+| host peak RSS | 36863 MiB | 41472 MiB |
+
+1.1% more wall for 4.7 GB of VRAM and 4.6 GB of host RSS, on a card with
+1354 MiB left over - and the audio+video path already peaks at 21082 MiB with
+the drain, so the same trade does not fit there at all. This is phase 30's
+rejected experiment, now with the number attached. Deeper lookahead is also not
+where anything is left: at one block the card is busy 1.21 s per block against
+0.09 s of host work, so the host is already idle 93% of the loop.
+
+#### 4 - the gates, and which mutation caught which
+
+`crates/ltxv/tests/block_pipeline.rs` gates the forward's OUTPUT BITS across
+the full cross product of the two switches (pipelining x arena), at the tiny
+config and at the real 22B block's own shapes, against the arm with both off.
+Bits, not cosine: this reorders nothing arithmetically.
+
+| mutation | what went red | what stayed green, and why that is the finding |
+|---|---|---|
+| delete the drain from the pipelined arm | **nothing** | both bit gates, at both widths. Not a blind gate: see the row below. wgpu-core prepends a "(wgpu internal) Transit" pass to EVERY submission, inserting barriers from the DEVICE-GLOBAL tracker, and a storage buffer is never in `ordered_uses_mask` - so a recycled buffer's old and new users are ordered by the backend across submissions, and there is no aliasing left for a bit gate to see. The drain is load-bearing for MEMORY (section 3), not for arithmetic |
+| hand back the previous arena slot AND drop the uniqueness guard | **both** `block_pipeline` gates | nothing. This is the control that proves the bit gate can see arena aliasing under the pipelined arm, which is what makes the row above a statement about wgpu rather than about the gate |
+| `flush_timed` resolves its own ticks (the pre-change behaviour) | `a_timed_flush_returns_before_the_device_has_finished` | it also took `dropping_a_shared_handle_does_not_wait_for_the_device` red, by its own precondition assert: the flush had already drained, so there was no outstanding work left for the drop to wait on. That guard exists so the drop test cannot pass vacuously, and it fired |
+| `Drop` resolves on every handle, shares included | `dropping_a_shared_handle_does_not_wait_for_the_device` | the other two. This is the exact bug section 1 describes, and nothing but a wall-clock measurement caught it before the test existed |
+| resolve only the NEWEST deferred batch | `deferring_the_timestamp_readback_loses_no_dispatch` | the other two |
+
+#### 5 - recorded, NOT done
+
+* **The output stage is still host math at production width** - a LayerNorm, a
+  per-token modulate and a `[t, dim] x [dim, out]` linear over 13200 tokens,
+  ~0.9 s per forward with the card idle. It is now the largest single host row
+  that pipelining cannot hide, because it runs after the block loop with
+  nothing left to overlap. Every kernel it needs exists.
+* **The final readback is the second** (~1.5 s), and most of that is the last
+  block's device tail rather than the 206 MiB copy. Only a deeper pipeline
+  across DENOISE STEPS could hide the copy itself.
+* **The arena is still rebuilt once per forward** (phase 33's item, unchanged):
+  `DitSession::device_for_call` hands out a fresh `Gpu::share` per call.
+* **The audio+video path takes the same switch and was not re-measured here.**
+  The code is the same reordering in `LtxAvBlockQ::forward_prod_dev` and the
+  bit gate covers the video stream only; the AV arm's own before/after numbers
+  are open.
+* **Only `crates/ltxv` pipelines.** Every other block-stack model in the
+  workspace has the same shape, and the reordering needs no per-model
+  machinery beyond the three backend calls.
