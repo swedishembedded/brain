@@ -390,6 +390,52 @@ fn gpu_wait_timeout() -> std::time::Duration {
     std::time::Duration::from_secs_f64(secs)
 }
 
+/// Copy `T`s out of a mapped buffer's bytes WITHOUT assuming the mapping is
+/// aligned for `T`.
+///
+/// A mapped pointer's alignment is an allocator artifact, not a guarantee: it
+/// is the suballocation's offset inside a shared `vkDeviceMemory` block, and
+/// `gpu-allocator` picks that from the buffer's own
+/// `memoryRequirements.alignment` (as low as 4 here) and from whatever else is
+/// live at the time. `bytemuck::cast_slice::<u8, T>` therefore held by luck,
+/// and an unrelated change to what a device keeps allocated moved a
+/// timestamp-resolve buffer to a 4-mod-8 offset and turned the whole
+/// per-kernel profile into a panic mid-run.
+///
+/// Widening the DESTINATION removes the precondition entirely: `&mut [T]`
+/// viewed as bytes is always byte-aligned, the copy is the same `memcpy`, and
+/// a ragged tail (`bytes.len()` not a whole number of `T`) is dropped rather
+/// than read out of range.
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_pod_from_bytes<T: bytemuck::Pod + Default>(bytes: &[u8]) -> Vec<T> {
+    let n = bytes.len() / std::mem::size_of::<T>();
+    let mut out = vec![T::default(); n];
+    bytemuck::cast_slice_mut::<T, u8>(&mut out).copy_from_slice(&bytes[..n * std::mem::size_of::<T>()]);
+    out
+}
+
+/// Largest read-staging buffer a device keeps pinned between reads.
+///
+/// The cache exists to amortise page pinning over a LOOP - a denoise step's
+/// per-block drain, a decode's per-tile readback - all of which reread the
+/// same shape. A one-off readback larger than this is not that, and holding
+/// its pages for the process's life would be a host-memory leak in all but
+/// name.
+#[cfg(not(target_arch = "wasm32"))]
+const READ_STAGING_CACHE_MAX: u64 = 512 << 20;
+
+/// Whether [`WgpuBackend::read`] reuses this device's cached staging buffer.
+///
+/// `BRAIN_GPU_NO_READ_STAGING_REUSE=1` turns it off, which is byte for byte
+/// the fresh-allocation path this backend shipped before. Read once: `read` is
+/// called per block on a streamed forward, and an env lookup per call is not
+/// free at that rate.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_staging_reuse() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var("BRAIN_GPU_NO_READ_STAGING_REUSE").map(|v| v != "0").unwrap_or(false))
+}
+
 struct DeviceShared {
     // ManuallyDrop so teardown can control ORDER and LOCKING: everything —
     // pipelines, queue, device — is destroyed inside `drop` under the same lock
@@ -409,6 +455,34 @@ struct DeviceShared {
     /// the GPU from one scheduler thread anyway) and makes multi-threaded use —
     /// the test suite, multi-model hosts — safe on this driver.
     io: std::sync::Mutex<()>,
+    /// The `MAP_READ` staging buffer [`WgpuBackend::read`] copies into, kept
+    /// between calls instead of allocated per call.
+    ///
+    /// Host memory is expensive to ALLOCATE - the driver pins the pages, at a
+    /// rate slower than the transfer those pages exist to carry - which is the
+    /// same finding that made `Queue::write_buffer`'s upload staging a
+    /// recycled buffer rather than a fresh one (see the workspace
+    /// `Cargo.toml`'s dependency-override notes). The READ direction had kept
+    /// allocating, and it is the direction with no recycler underneath it:
+    /// `read` creates the staging buffer itself. Reproduce the before/after
+    /// with `crates/gpu-core/tests/pcie_handoff.rs`, which times one real
+    /// activation in each direction.
+    ///
+    /// Guarded by the same [`Self::io`] lock every read already takes, so the
+    /// buffer is never handed to two readers at once; a read drains before it
+    /// returns, so the previous copy into it has always completed.
+    /// `BRAIN_GPU_NO_READ_STAGING_REUSE=1` opts out - the arm a comparison
+    /// needs, since a benchmark that can only run the shipped path confirms
+    /// whatever was written.
+    #[cfg(not(target_arch = "wasm32"))]
+    read_staging: std::sync::Mutex<Option<wgpu::Buffer>>,
+    /// How many read-staging buffers this device has ALLOCATED, as opposed to
+    /// reused. The observable that keeps the reuse from being silently
+    /// reverted: nothing else about a cached buffer is visible from outside,
+    /// so without it the only gate on the whole mechanism would be a wall
+    /// clock. See [`WgpuBackend::read_staging_allocations`].
+    #[cfg(not(target_arch = "wasm32"))]
+    read_staging_allocs: std::sync::atomic::AtomicU64,
     pipelines: Vec<wgpu::ComputePipeline>,
     /// Each kernel's declared `@workgroup_size` (parallel to `pipelines`). Almost
     /// every kernel is the engine's default 64; the register-tiled GEMMs use 256.
@@ -563,6 +637,10 @@ impl DeviceShared {
             device: std::mem::ManuallyDrop::new(device),
             queue: std::mem::ManuallyDrop::new(queue),
             io: std::sync::Mutex::new(()),
+            #[cfg(not(target_arch = "wasm32"))]
+            read_staging: std::sync::Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            read_staging_allocs: std::sync::atomic::AtomicU64::new(0),
             pipelines,
             wgsizes: backend_api::workgroup_sizes(kernels),
             caps,
@@ -611,11 +689,25 @@ pub fn process_exiting() -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
+impl DeviceShared {
+    /// Drop the cached read-staging buffer, if any. Idempotent.
+    fn release_read_staging(&self) {
+        let mut slot = self.read_staging.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = None;
+    }
+}
+
 impl Drop for DeviceShared {
     fn drop(&mut self) {
         // Once the process is on its way out, devices are not torn down either
         // - see [`set_process_exiting`] for the multi-device driver fault this
         // avoids and why destroying them then buys nothing.
+        // The cached read-staging buffer is a `wgpu::Buffer`, so it holds the
+        // device alive and must go FIRST in every branch below - struct fields
+        // are dropped after `Drop::drop` returns, i.e. after the branches that
+        // forget the device have already run.
+        self.release_read_staging();
         if process_exiting() {
             self.pipelines.clear();
             // SAFETY: drop() runs exactly once; the fields are never used again.
@@ -1648,7 +1740,18 @@ impl WgpuBackend {
             {
                 let slice = b.staging.slice(..);
                 let view = slice.get_mapped_range();
-                let ticks: &[u64] = bytemuck::cast_slice::<u8, u64>(&view);
+                // COPIED out, not cast in place. A mapped pointer's alignment
+                // is an allocator artifact, not a guarantee: it is the
+                // suballocation's offset inside a shared `vkDeviceMemory`
+                // block, and gpu-allocator picks that from the buffer's own
+                // `memoryRequirements.alignment` (4 here) and from whatever
+                // else is live at the time. Casting `&[u8]` to `&[u64]`
+                // therefore held only by luck, and an unrelated change to what
+                // this device keeps allocated moved the offset to 4-mod-8 and
+                // turned the whole per-kernel profile into a panic. Widening
+                // the DESTINATION instead (`&mut [u64]` viewed as bytes) is
+                // alignment-safe by construction and copies the same bytes.
+                let ticks = copy_pod_from_bytes::<u64>(&view);
                 for (i, kind) in b.kinds.iter().enumerate() {
                     let dt = ticks[i + 1].saturating_sub(ticks[i]);
                     let e = &mut acc[*kind];
@@ -1726,7 +1829,12 @@ impl WgpuBackend {
             rx.recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap_or_else(|_| panic!("profile readback: map_async callback did not fire after a completed poll"))
                 .unwrap();
-            let ticks: Vec<u64> = bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range()).to_vec();
+            // Widen the DESTINATION rather than cast the mapped bytes - a
+            // mapped pointer's alignment is an allocator artifact, see
+            // `resolve_ticks`.
+            let view = slice.get_mapped_range();
+            let ticks = copy_pod_from_bytes::<u64>(&view);
+            drop(view);
             staging.unmap();
 
             let mut acc = p.acc.lock().unwrap_or_else(|e| e.into_inner());
@@ -1976,9 +2084,18 @@ impl WgpuBackend {
     pub fn read(&self, buf: &wgpu::Buffer, n: usize) -> Vec<f32> {
         self.stats_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _io = self.shared.io.lock().unwrap_or_else(|e| e.into_inner());
+        // A zero-length read moves nothing, and every step below (a zero-size
+        // copy, a zero-size map) is a validation error rather than a no-op.
+        if n == 0 {
+            return Vec::new();
+        }
         self.flush_inner(); // ensure all recorded compute is queued before the copy
-        let staging = self.read_staging(buf, n);
-        let slice = staging.slice(..);
+        let want = (n * 4) as u64;
+        let staging = self.acquire_read_staging(buf, n);
+        // `0..want`, never `..`: a REUSED buffer is at least as large as this
+        // read needs and usually larger, and mapping bytes the copy did not
+        // write would hand the caller the previous read's tail.
+        let slice = staging.slice(0..want);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             // A dropped receiver (the caller already unwound past `rx.recv_timeout`,
@@ -1995,8 +2112,12 @@ impl WgpuBackend {
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap_or_else(|_| panic!("buffer read: map_async callback did not fire after a completed poll"))
             .unwrap();
-        let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
+        // Copied into an `&mut [f32]` viewed as bytes rather than cast from
+        // `&[u8]`: see `resolve_ticks` for why a mapped pointer's alignment
+        // cannot be assumed. Same bytes, same cost, no alignment precondition.
+        let out = copy_pod_from_bytes::<f32>(&slice.get_mapped_range());
         staging.unmap();
+        self.retain_read_staging(staging);
         out
     }
 
@@ -2018,13 +2139,88 @@ impl WgpuBackend {
         // browser event loop while we await the oneshot.
         let _ = self.device().poll(wgpu::PollType::Poll);
         rx.await.expect("map_async channel dropped").expect("buffer map failed");
-        let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
+        // See `read` / `resolve_ticks`: the destination is widened rather
+        // than the mapped bytes cast, so no alignment is assumed.
+        let view = slice.get_mapped_range();
+        let n_out = view.len() / 4;
+        let mut out = vec![0f32; n_out];
+        bytemuck::cast_slice_mut::<f32, u8>(&mut out).copy_from_slice(&view[..n_out * 4]);
+        drop(view);
         staging.unmap();
         out
     }
 
-    /// Shared staging-buffer copy used by both `read` (native) and `read_async`
-    /// (wasm).
+    /// How many `MAP_READ` staging buffers this device has allocated for
+    /// readbacks so far - the counter that separates "reused" from
+    /// "re-allocated", which is otherwise invisible from outside.
+    ///
+    /// Pinning host pages is the expensive half of a readback (measured:
+    /// `crates/gpu-core/tests/pcie_handoff.rs`), so a loop that reads one
+    /// shape repeatedly must move this counter exactly once.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_staging_allocations(&self) -> u64 {
+        self.shared.read_staging_allocs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// [`Self::read`]'s staging buffer, reusing this device's cached one when
+    /// it is big enough - see [`DeviceShared::read_staging`] for why.
+    ///
+    /// A reused buffer is *at least* `n * 4` bytes and may be much larger; the
+    /// caller maps only the range this read wrote.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn acquire_read_staging(&self, buf: &wgpu::Buffer, n: usize) -> wgpu::Buffer {
+        let want = (n * 4) as u64;
+        let cached = if read_staging_reuse() {
+            let mut slot = self.shared.read_staging.lock().unwrap_or_else(|e| e.into_inner());
+            match slot.take() {
+                Some(b) if b.size() >= want => Some(b),
+                // Too small: dropped, and the fresh one below (sized to this
+                // read) becomes the cache. Growing rather than keeping both is
+                // what makes a loop over one shape pin its pages exactly once.
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let staging = cached.unwrap_or_else(|| {
+            self.shared.read_staging_allocs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.device().create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: want.max(4),
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        let mut enc = self
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(buf, 0, &staging, 0, want);
+        self.queue().submit(Some(enc.finish()));
+        staging
+    }
+
+    /// Hand a just-unmapped staging buffer back to this device's cache.
+    ///
+    /// Bounded: a one-off giant readback must not leave its pages pinned for
+    /// the process's life, so anything past [`READ_STAGING_CACHE_MAX`] is
+    /// dropped instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn retain_read_staging(&self, staging: wgpu::Buffer) {
+        if !read_staging_reuse() || staging.size() > READ_STAGING_CACHE_MAX {
+            return;
+        }
+        let mut slot = self.shared.read_staging.lock().unwrap_or_else(|e| e.into_inner());
+        // Keep the LARGER of the two: a device that alternates a big read with
+        // a small one must not re-pin the big buffer on every big read.
+        if slot.as_ref().map(|b| b.size() < staging.size()).unwrap_or(true) {
+            *slot = Some(staging);
+        }
+    }
+
+    /// Shared staging-buffer copy used by `read_async` (wasm), which has no
+    /// cache: a browser has no page-pinning cost to amortise and no blocking
+    /// `io` lock to serialise readers behind.
+    #[cfg(target_arch = "wasm32")]
     fn read_staging(&self, buf: &wgpu::Buffer, n: usize) -> wgpu::Buffer {
         let staging = self.device().create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -2211,4 +2407,49 @@ impl WgpuBackend {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn register() {
     backend_api::register_backend("wgpu", |kernels| Ok(Box::new(WgpuBackend::new(kernels))));
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod mapped_copy_tests {
+    /// A mapped buffer's bytes must be readable at ANY alignment.
+    ///
+    /// This is the property a real run lost: casting `&[u8]` to `&[u64]`
+    /// requires an 8-aligned source, a mapped pointer is only ever as aligned
+    /// as the allocator happened to place the suballocation, and the whole
+    /// per-kernel profile panicked mid-run the first time an unrelated change
+    /// to the device's live allocations moved that offset. Gated here on a
+    /// deliberately MISALIGNED source, which no device is needed to produce.
+    #[test]
+    fn pods_copy_out_of_bytes_at_every_source_alignment() {
+        let want: Vec<u64> = (0..37u64).map(|i| i.wrapping_mul(0x9e37_79b9_7f4a_7c15)).collect();
+        // One backing buffer with 8 bytes of slack, so the payload can start
+        // at every offset 0..8 - including the 4-mod-8 one that broke the real
+        // run, and the odd ones a cast could never accept.
+        let mut backing = vec![0u8; want.len() * 8 + 8];
+        for off in 0..8usize {
+            let bytes = bytemuck::cast_slice::<u64, u8>(&want);
+            backing[off..off + bytes.len()].copy_from_slice(bytes);
+            let got = super::copy_pod_from_bytes::<u64>(&backing[off..off + bytes.len()]);
+            assert_eq!(got, want, "u64 copy-out failed at source offset {off}");
+        }
+        // ...and the f32 direction the readback path itself takes.
+        let wf: Vec<f32> = (0..29).map(|i| i as f32 * 0.5 - 3.0).collect();
+        let fb = bytemuck::cast_slice::<f32, u8>(&wf);
+        let mut backing = vec![0u8; fb.len() + 4];
+        for off in 0..4usize {
+            backing[off..off + fb.len()].copy_from_slice(fb);
+            assert_eq!(super::copy_pod_from_bytes::<f32>(&backing[off..off + fb.len()]), wf, "f32 copy-out failed at source offset {off}");
+        }
+    }
+
+    /// A ragged tail is dropped, not read past. `resolve_ticks` divides a byte
+    /// length by 8 and a readback divides by 4; a length that is not a whole
+    /// number of elements must truncate rather than panic or over-read.
+    #[test]
+    fn a_ragged_byte_length_truncates_to_whole_elements() {
+        let bytes = vec![0u8; 8 * 3 + 5];
+        assert_eq!(super::copy_pod_from_bytes::<u64>(&bytes).len(), 3);
+        assert_eq!(super::copy_pod_from_bytes::<f32>(&bytes).len(), 7);
+        assert!(super::copy_pod_from_bytes::<u64>(&[]).is_empty());
+    }
 }

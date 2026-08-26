@@ -2172,3 +2172,92 @@ showed `gpu_allocator::vulkan::Allocator::free` and `MemoryBlock::new` at
 comparable shares, and both left the profile entirely once the buffers were
 pooled. When an in-process attribution says something surprising, one
 `perf` run either confirms it from outside or kills it.
+
+## 61. A device-to-host readback can be dominated by the DESTINATION allocation, and a correctness gate cannot see a performance mechanism at all
+
+Two separate findings from one change; they arrived together and each is the
+kind that gets re-discovered.
+
+**The readback is not necessarily bus-bound.** `Gpu::read` on a P40 measured
+0.82 GB/s for a 206 MiB activation against 5.87 GB/s for the same payload in
+the other direction, which reads as a PCIe asymmetry and is not one. Split
+into phases, the bus transfer (`copy_buffer_to_buffer` + submit + poll) was
+35 ms and the host `get_mapped_range() -> to_vec()` was 150 ms - the *same*
+copy into a pre-faulted sink took 22 ms. The cost was the destination `Vec`'s
+first-touch page faults: brand-new anonymous pages, zeroed and faulted as the
+memcpy writes them. Reading the mapped range was never slow.
+
+The general shape, and why it matters beyond one backend:
+
+* **A transfer path has at least three phases and only one of them is the
+  bus.** Allocate/pin, transfer, and copy-out. Quoting an end-to-end GB/s
+  attributes all three to whichever one the reader assumes. Split it before
+  building anything on the number - the split here was four `Instant`s behind
+  a temporary env var and took minutes.
+* **Allocation is the recurring culprit in this workspace, in BOTH
+  directions.** Upload staging on non-ReBAR cards was the same class
+  (`crates/gpu-core/tests/vram_overhead.rs`); this is the read direction, and
+  the destination half of it is still open because `read`'s contract is to
+  return a fresh `Vec`.
+* **A rate that is wildly asymmetric between two directions of the same link
+  is a claim about software, not about hardware.** PCIe is symmetric to within
+  a few percent.
+
+**And a correctness gate cannot see a performance mechanism.** Reusing the
+staging buffer instead of allocating one per call is a pure performance
+change, so every correctness test - the ones that pin "a read returns its own
+bytes and not the previous read's tail" - passes just as well for a `read`
+that allocates every time. Mutating `retain_read_staging` into a no-op, i.e.
+silently reverting the whole mechanism, left all four correctness tests
+green. The mechanism needed its own OBSERVABLE
+(`WgpuBackend::read_staging_allocations`, asserted as "eight reads of one
+shape allocate exactly one buffer") before a gate could exist at all.
+
+So: when a change is "the same answer, computed with less work", ask what in
+the process state proves the work was skipped, and expose that. A wall clock
+is not a gate - nobody watches it, and it is the first thing a noisy machine
+takes away. `crates/backend-wgpu/tests/read_staging_reuse.rs`, and the numbers
+in `.agents/roadmap/ltxv.md` phase 36.
+
+## 62. A mapped buffer's pointer is only as aligned as the allocator happened to place it, and `cast_slice` on one holds by luck
+
+`WgpuBackend`'s per-kernel timestamp readback did
+`bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range())`, and the readback
+path did the same to `f32`. Both had worked for the life of the file. Then an
+unrelated change - keeping ONE staging buffer alive between reads instead of
+allocating a new one per read - moved `gpu-allocator`'s packing, the
+timestamp-resolve buffer landed at a suballocation offset that was 4-mod-8,
+and a real 22B run died mid-forward with
+`cast_slice>TargetAlignmentGreaterAndInputNotAligned` after every stage of the
+first forward had already printed.
+
+The general shape:
+
+* **A mapped pointer's alignment is an allocator artifact.** It is
+  `memory_block.mapped_ptr + suballocation.offset`, and the offset is chosen
+  from the buffer's own `memoryRequirements.alignment` (4 for a plain
+  host-visible transfer buffer here) and from whatever else happens to be live.
+  Nothing promises it is aligned for the type you want to read.
+* **Widen the DESTINATION instead of casting the source.** `&mut [T]` viewed as
+  bytes (`cast_slice_mut::<T, u8>`) is always byte-aligned, so
+  `copy_from_slice` from an arbitrarily aligned `&[u8]` is well defined, the
+  `memcpy` is the same one `to_vec` was doing, and the precondition disappears
+  rather than being documented. One helper
+  (`backend_wgpu::copy_pod_from_bytes`) now covers all three sites.
+* **The bug class is testable even though the trigger is not.** No test can
+  force the allocator to hand back a 4-mod-8 offset, and a gate that has never
+  been seen fail is a hypothesis. What IS deterministic is the property: copy
+  the same payload out of a byte slice at every source offset in `0..8`. That
+  gate is red under `cast_slice` with the exact panic the real run produced,
+  and it needs no GPU.
+* **Watch for this whenever an allocation-lifetime change lands.** Pooling,
+  recycling and arenas all move packing, and anything downstream that assumed
+  an incidental alignment fails far away from the change - here, in a profiler,
+  in a different subsystem, several minutes into a run.
+
+A second, unrelated hazard was confirmed while chasing this and is worth
+recording separately: `crates/backend-wgpu/tests/upload_flush.rs` **hangs at
+100% CPU** when its two tests run concurrently (`--test-threads` > 1), because
+each builds its own `WgpuBackend` and two Vulkan devices in one process is the
+documented deadlock this driver has. Reproduced on unmodified `main`, so it is
+pre-existing, and the default `TEST_THREADS=8` reaches it.

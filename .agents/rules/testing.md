@@ -329,6 +329,16 @@ to N layers in the benchmark binary only), `BRAIN_WAN_VAE_TAPS` (record every
 Wan-VAE block output for parity debugging), `BRAIN_LTXV_VAE_TAPS` (the same tap
 recording for the LTX-Video VAE), `BRAIN_VAE3D_NOPOOL` (disable the
 3D VAE builder's buffer pooling, which a tap would otherwise read after reuse),
+`BRAIN_VAE3D_SPLIT_NORM` (select the composed permute/norm/permute channel-norm
+form instead of the fused kernel - the losing arm of a bit-identical A/B, kept
+reachable so the comparison can still be run),
+`BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS` (build a fresh device and re-upload the VAE
+decoder's weights per tile SHAPE instead of sharing one, the same
+keep-the-losing-arm-reachable rule),
+`BRAIN_LTXV_NO_PIPELINE` (run the LTX-2.5 block loop strictly serially -
+record, submit, wait - instead of recording the next block while the card runs
+this one; identical submissions in identical order either way, so it is the
+losing arm of another bit-identical A/B),
 `BRAIN_WAN_T5_FORCE_GPU` (run the umT5-XXL parity test on a GPU anyway - it
 skips by default because 22.72 GB of fp32 weights exceed a 24 GB card),
 `BRAIN_LTXV_LATENT_DUMP` (write the final denoised latent to the given path

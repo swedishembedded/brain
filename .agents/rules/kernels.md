@@ -583,6 +583,60 @@ A temporary probe around the loop's own phases is what separates the two;
 neither correctness gates nor stage timers can. Numbers, and the mutation that
 each gate caught, in `.agents/roadmap/ltxv.md` phase 35.
 
+### F.2e Before splitting a pass across DEVICES, price the crossing - and check which third of it is actually the bus
+
+A second card looks like a second copy of the device half. It is not, and the
+two questions that decide it are both measurements nobody has usually taken.
+
+**First: how many independent items are in flight?** A pipeline split over a
+block stack (blocks `0..k` here, `k..n` there) needs more than one item to
+overlap anything. A diffusion denoise step has exactly one: the next step
+consumes this step's whole output, a distilled schedule at `guidance = 1.0`
+issues no unconditional twin, and a long-form window conditions on its
+predecessor. With one item in flight the pipeline is a **100% bubble** - each
+card idle precisely while the other works, total device time unchanged, wall
+clock equal to the sum plus the crossing. That is arithmetic, not pessimism,
+and it caps the whole idea before any code is written. What such a split CAN
+win is whatever having two of something removes - here two residency windows,
+so nearly the whole weight stack becomes resident - and that effect is
+measurable **on one card** by forcing the window size, without building the
+split at all. Measure it that way first; on `ltxv` it was 1.46 s of a 62.33 s
+forward and the crossing gave 0.20 s of it straight back.
+
+Splits that DO have parallelism put the second card inside one item: tensor-
+or sequence-parallel, paying a crossing per BLOCK instead of per forward. So
+the crossing's cost stops being noise and becomes the entire question.
+
+**Second: what does the crossing actually cost, per phase?** A host-bus
+transfer has three phases and only one is the bus:
+
+    allocate/pin the staging + the destination | transfer | copy out
+
+Measured on a P40 for one 206 MiB activation: 35 ms of bus (5.9 GB/s, and the
+same in both directions), 150 ms of host memcpy into a FRESHLY allocated
+destination, 22 ms for the identical memcpy into a pre-faulted one. The
+end-to-end rate reads 0.82 GB/s and invites the conclusion that the link is
+slow. It is not: brand-new anonymous pages are being faulted and zeroed as the
+copy writes them.
+
+Two rules fall out, both paid for:
+
+* **A rate that is wildly asymmetric between the two directions of one link is
+  a claim about software.** PCIe is symmetric. Split the phases (four
+  `Instant`s behind a temporary env var) before believing an asymmetry, and
+  before designing around it.
+* **Allocation is the recurring culprit at both ends of the wire in this
+  engine** - upload staging on non-ReBAR cards
+  (`crates/gpu-core/tests/vram_overhead.rs`), read staging and the read's
+  destination (`crates/gpu-core/tests/pcie_handoff.rs`). Reuse beats every
+  transfer-side tuning that has been tried here.
+
+And the baseline any device split must beat is not the single-card run - it is
+**N independent requests, one per card**, which needs no split, no crossing and
+no bit-identity argument, and scales close to N. A split that buys a few
+percent of latency while taking the second card out of that pool is a
+regression in throughput terms. Numbers: `.agents/roadmap/ltxv.md` phase 36.
+
 ### F.3 Before writing anything: is there already a faster sibling?
 
 This is the highest-value question in the list and it costs one `grep`. It has

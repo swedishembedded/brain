@@ -3506,7 +3506,10 @@ land. Known traps already identified from reading (not yet test-pinned):
   needs the DiT's own performance profile to say arithmetic is the
   bottleneck first, per porting.md sec10 point 6.
 - Real multi-device pipeline-parallel execution: **closed for `LtxAvDit`**,
-  still open for `LtxDit` (video-only). The "int8/int4 compute + AV
+  still open for `LtxDit` (video-only) - and phase 36 measured that closing it
+  is not worth doing for LATENCY (1.02x on a warm forward, against 2.11x of
+  throughput the same second card already returns as an independent-request
+  lane). Read that phase before picking this up. The "int8/int4 compute + AV
   sharding" milestone above ran `LtxAvDit`'s two-stage split on two REAL
   physical GPUs for the first time (`crates/ltxv/tests/av_shard_2gpu_real.rs`)
   and it agreed with the single-process reference - but only at a small
@@ -8100,3 +8103,207 @@ Bits, not cosine: this reorders nothing arithmetically.
 * **Only `crates/ltxv` pipelines.** Every other block-stack model in the
   workspace has the same shape, and the reordering needs no per-model
   machinery beyond the three backend calls.
+
+### Phase 36 - the second card, priced: why splitting ONE denoise forward across two P40s cannot pay
+
+Phase 35 left the warm video forward 93.2% device-bound, so the host is no
+longer the constraint and the single card is. Meanwhile gpu1 sits at 0% for a
+whole generation, and phase 15's CFG-parallel path has nothing to split: the
+distilled schedule denoises at `guidance = 1.0`, where no unconditional
+forward is issued at all.
+
+This phase asks whether a two-card split of one forward pays, and the answer
+is no by a wide margin. Nothing was sharded; what was built is the
+measurement that decides it, plus one general fix the measurement found.
+
+#### 0 - the structural fact that caps the whole idea
+
+A pipeline split over the 48-block stack (blocks `0..k` on one card, `k..48`
+on the other) has **exactly one activation in flight**, so it has no
+parallelism at all - it is a 100% bubble, not a small one:
+
+* `guidance = 1.0` on the distilled schedule, so there is no conditional /
+  unconditional pair to place on two cards (`pipeline::generate`'s default,
+  and `cfg_on = guidance > 1.0` never fires);
+* denoise step `n+1` consumes step `n`'s whole output;
+* a long-form window conditions on its predecessor's tail.
+
+So `wall = stage0 + crossing + stage1`, each card idle exactly while the other
+works, total device time unchanged. Splitting can only win what it removes,
+and the only thing it removes is **weight streaming**: two cards hold two
+residency windows, so nearly the whole stack becomes resident. That effect is
+measurable today, on one card, without building anything.
+
+#### 1 - the residency prize, measured on its own
+
+`ltxv_bench streamed 48 13200 1024 1 1 1 <reps>`, real
+`ltx-2.5-22b-distilled-transformer-Q8_0.gguf`, int8, one distinct timestep,
+device-resident session, gpu0, both cards verified idle BEFORE each run and
+`nvidia-smi` never sampled during one. First warm call excluded as warm-up;
+headline is best of the rest.
+
+| arm | warm forward, best | device (kernel timestamps) | host | uploads / forward |
+|---|---:|---:|---:|---:|
+| policy window, 23 of 48 slots | **62.33 s** | 58.08 s (93.2%) | 4.25 s | 26 |
+| `BRAIN_LTXV_RESIDENT_BLOCKS=0` | 63.79 s | 58.18 s (90.7%) | 5.56 s | 48 |
+
+**22 block uploads cost 1.46 s**, and device kernel time did not move (0.17%)
+- the control that says this is a host/PCIe difference and not a different
+amount of compute.
+
+That difference is the same size as the one sharding would buy, and it is the
+whole prize. A 24-block half-stack with the same policy gets 23 slots for 24
+blocks, so `CyclicScan` pins 22 and rotates 2: **4 uploads per forward across
+both cards instead of 26**, i.e. 22 removed - the identical quantity measured
+above.
+
+Note the cold call goes the other way: 105.15 s with the window against
+81.03 s without it, because a prefill of 23 blocks is serialised ahead of the
+block loop. Residency is a warm-path win that costs the first forward.
+
+#### 2 - what a stage boundary costs, on two real cards
+
+`crates/gpu-core/tests/pcie_handoff.rs` (new, `#[ignore]`d hardware probe):
+one real `[13200, 4096]` fp32 activation - 206 MiB, exactly what crosses a
+pipeline cut - through the paths this engine actually uses, best of 3 with a
+warm-up, both cards idle.
+
+| direction | ms | GB/s |
+|---|---:|---:|
+| host -> device (`write_f32_chunked`, 1 MiB chunks) | 36.8 | 5.87 |
+| device -> host (`Gpu::read`), before section 3 | 264.2 | 0.82 |
+| device -> host, after section 3 | 208.5 | 1.04 |
+| card 0 -> card 1, whole handoff, after section 3 | 201.8 | 1.07 effective |
+
+So a two-stage pipeline costs about **0.20 s per forward** for its one
+crossing.
+
+#### 3 - the readback is not bus-bound, and that is the reusable finding
+
+0.82 GB/s against 5.87 GB/s in the other direction is not a PCIe asymmetry.
+A temporary probe splitting `WgpuBackend::read` into its three phases, same
+206 MiB payload:
+
+| phase | ms |
+|---|---:|
+| `copy_buffer_to_buffer` + submit + poll (the actual bus transfer) | 35 |
+| `get_mapped_range()` -> `.to_vec()` (host memcpy into a FRESH allocation) | 150 |
+| the same memcpy into a PRE-FAULTED sink | 22 |
+| `unmap` | 0.01 |
+
+The bus does 5.9 GB/s in both directions. **The cost is the destination
+`Vec`'s first-touch page faults** - 206 MiB of freshly mmapped pages, faulted
+and zeroed as the memcpy writes them, at roughly a seventh of the rate the
+same copy runs at once the pages exist. Reading the mapped range is not slow;
+writing brand-new anonymous pages is.
+
+Two consequences, one fixed here and one recorded:
+
+* **Fixed: the staging buffer is now reused.** `read` allocated a fresh
+  `MAP_READ` buffer per call, and pinning host pages is the expensive half of
+  allocating one - the same finding that turned upload staging into a recycled
+  buffer (workspace `Cargo.toml`'s dependency-override notes) applied to the
+  direction that had never been looked at. `DeviceShared` keeps one, grown on
+  demand and capped at 512 MiB; guarded by the `io` lock every read already
+  takes; `BRAIN_GPU_NO_READ_STAGING_REUSE=1` opts out. Worth 264.2 -> 208.5 ms
+  on the probe. On the LTXV forward it is one readback per forward, i.e. below
+  the wall-clock noise floor - claimed at the probe, not at the model. The
+  full 48-layer control run confirms exactly that: **62.42 s best of 3 against
+  the 62.33 s baseline** (inside the 62.41 / 62.45 / 62.42 / 63.30 spread of
+  the run itself), device kernel time **58.08 s in both**, and output
+  `mean=0.044928 std=0.679524 min=-1.391593 max=1.823861 nonfinite=0`
+  identical to six decimals in both arms.
+* **And it exposed a latent alignment bug that had nothing to do with it.**
+  Three sites cast a mapped buffer's bytes in place
+  (`cast_slice::<u8, u64>` for the timestamp resolve, `<u8, f32>` for the
+  readback). A mapped pointer is `memory_block.mapped_ptr +
+  suballocation.offset`, and keeping one buffer alive moved gpu-allocator's
+  packing enough that the timestamp-resolve buffer landed 4-mod-8: a real 22B
+  run died mid-forward with
+  `cast_slice>TargetAlignmentGreaterAndInputNotAligned`, in the profiler,
+  minutes in, after every stage of the first forward had printed. All three
+  sites now widen the DESTINATION instead
+  (`backend_wgpu::copy_pod_from_bytes`), which has no alignment precondition
+  at all. Gated deterministically without a GPU by copying a payload out of a
+  byte slice at every source offset in `0..8`.
+* **Not fixed: the destination allocation.** `Gpu::read` returns a fresh
+  `Vec<f32>` by contract, so the 150 ms cannot be amortised without a
+  `read_into`-shaped seam and per-call-site adoption. Left undone deliberately
+  - it is worth ~0.2% on the LTXV forward, and it only becomes decisive for a
+  scheme that crosses the boundary per BLOCK (section 4).
+
+#### 4 - the three alternatives, priced against the same numbers
+
+| scheme | latency, one clip | second card | notes |
+|---|---:|---|---|
+| today, one card | 62.33 s | idle | |
+| **pipeline-parallel over blocks** | **~61.1 s (1.02x)** | ~50% busy | `-1.46 s` residency, `+0.20 s` crossing. Bit-identical. |
+| sequence-parallel (split tokens, exchange K/V per block) | ~43 s (1.45x) | ~100% busy | 48 crossings; upper bound, assumes the exchange does not overlap compute |
+| the same, with the section-3 destination fix | ~38 s (1.65x) | ~100% busy | |
+| two independent requests, one per card | 62.33 s each | 100% busy | already shipped, phase 15 item 2, **2.11x throughput** |
+
+**Pipeline-parallel is declined, and this time the reason is a measurement
+rather than a memory ceiling** (phase 15 item 3 declined the same loader
+because the model fit one card; that argument is unchanged and this one is
+additional). 1.02x is not merely marginal - it is *negative* for a server,
+because it spends the second card on one request to save 2%, where the
+existing device pool spends it on a second request and returns 2.11x
+throughput. Any single-request split has to beat that trade, and a 100% bubble
+cannot.
+
+**Sequence-parallel is the only split that can.** Each card owns half the
+tokens and runs every block; per block the two cards exchange their K and V
+halves (`[6600, 4096]` each, 206 MiB per card per block) and each computes
+attention for its own queries against the full key set. It would be
+**bit-identical**, which is worth stating because it is not obvious: every
+per-token operation (norms, modulation, both GEMM halves, the FFN) is
+unchanged by which other tokens accompany it; `matmul_i8_dyn`'s activation
+scales are per ROW; and a query row's flash-attention reduction visits the
+same key tiles in the same order regardless of how the query rows are split.
+Its cost is 48 boundary crossings, which is exactly why section 3's
+destination-allocation number is the gate on it: 9.7 s of transfer today
+against 4.5 s with the fix, on ~29 s of halved device time.
+
+**And even that is second in line.** At this width self-attention is ~60% of
+device time at ~38% of the fp32 roof, against a DP4A roof 4.1x higher. An int8
+attention path is a bigger win than two-card sequence-parallelism, on one
+card, with no transfer to hide and no second device to occupy.
+
+#### 5 - gates, and which mutation caught which
+
+`crates/backend-wgpu/tests/read_staging_reuse.rs` (5 tests) covers the reuse.
+Both arms of `BRAIN_GPU_NO_READ_STAGING_REUSE` are green.
+
+| mutation | what went red | what stayed green |
+|---|---|---|
+| map the whole cached buffer (`slice(..)`) instead of `slice(0..want)` | `a_shorter_read_after_a_longer_one_returns_only_its_own_bytes` | the other four - a stale tail is invisible to a growing or equal-size read, which is why the shrinking ladder exists |
+| never re-copy into a reused buffer | three of the five | `a_zero_length_read_is_empty` |
+| `retain_read_staging` becomes a no-op (reuse silently reverted) | `a_loop_over_one_shape_pins_its_staging_pages_once` | **all four correctness tests** - and that is the finding: every correctness assertion passes just as well for a `read` that allocates every time, so the mechanism needed its own observable (`WgpuBackend::read_staging_allocations`) or a revert would show up only as a wall clock nobody watches |
+| `copy_pod_from_bytes` goes back to `cast_slice` | both `mapped_copy_tests` cases, with the exact panic the real run produced | everything else, on this box - which is the point: the trigger is an allocator packing decision, so the property has to be gated at every source offset rather than waited for |
+
+`pcie_handoff.rs` asserts only what cannot be hardware-dependent: a rate above
+any host bus this engine targets (the §E.0 host-timing failure), a zero-time
+transfer, and - on the two-card probe - that the receiving card holds exactly
+the sending card's bytes, so a handoff cannot measure fast by moving nothing.
+
+#### 6 - recorded, NOT done
+
+* **No sharded real-checkpoint loader was built.** The tracked gap ("a
+  real-checkpoint-weight version needs a GGUF-streaming int8 shard loader")
+  stays open, now with a measured reason not to close it for latency. If it is
+  built, it should be built for sequence-parallelism, which needs replicated
+  weights on both cards rather than a layer split.
+* **The composition in section 4's second row is arithmetic**, not a run: both
+  of its terms are measured (1.46 s residency, 0.20 s crossing) but their sum
+  was not observed on a sharded forward, because no sharded forward exists.
+* **The sequence-parallel row is an upper bound** and assumes the K/V exchange
+  does not overlap compute and that device time halves exactly.
+* **`Gpu::read`'s destination allocation** (section 3) is the single highest
+  leverage item for any future multi-device split, and is untouched.
+* **A pre-existing hang, found while running the suite and reproduced on
+  unmodified `main`**: `crates/backend-wgpu/tests/upload_flush.rs` spins at
+  100% CPU forever when its two tests run concurrently, because each builds
+  its own `WgpuBackend` and two Vulkan devices in one process is the deadlock
+  this driver has. `--test-threads=1` passes in under a second. The default
+  `TEST_THREADS=8` reaches it. Not fixed here - it is unrelated to this
+  phase - but it is a live trap for anyone running the suite.

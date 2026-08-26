@@ -16,6 +16,7 @@ unset simply isn't served (no error, it's just absent from `brain caps`).
 | `BRAIN_GPU_INDEX` | pins a specific GPU card index (parsed once, at first use) | first/best card |
 | `BRAIN_VK_DEVICE` | forces a specific Vulkan physical-device index, overriding brain's discrete-GPU-first ranking | automatic ranking |
 | `BRAIN_GPU_WAIT_S` | seconds to wait for a GPU submit to complete before treating the device as wedged | backend default |
+| `BRAIN_GPU_NO_READ_STAGING_REUSE` | `1` makes every device-to-host readback allocate its own staging buffer instead of reusing the device's, trading throughput for a smaller resident host footprint | off (the buffer is reused) |
 | `BRAIN_NPU_TURBO` | `1`/`yes` requests the Intel NPU's turbo clock during inference | off |
 
 ### Tracing
