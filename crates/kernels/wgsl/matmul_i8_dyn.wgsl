@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  matmul_i8 with a DYNAMIC per-tensor activation scale (sx from a buffer, sw a
-// @how   DP4A packed int8, register block per thread, 256-thread workgroup tile, 3 barriers
+// @what  Tiled int8 (DP4A) GEMM with a DYNAMIC per-token activation scale and a per-channel weight scale, both read from buffers - the prefill/DiT int8 GEMM
+// @how   DP4A packed int8, vec4 shared tiles, register block per thread, 256-thread workgroup tile, 3 barriers
 // @opt   5
 // @cpu   no
 // @gpu   yes-wg256
@@ -10,11 +10,13 @@
 // @quant int8
 // @dtype f32
 //
-// matmul_i8 with a DYNAMIC per-tensor activation scale (sx from a buffer, sw a
+// `matmul_i8`'s dynamic-scale sibling: both scales come from buffers rather
+// than from the uniform, so one build serves every shape and the activation
+// scale can be recomputed per forward.
 //
-//   x_q : [M, K/4] u32  — 4 int8 activations packed along K per u32 (row-major)
-//   w_q : [N, K/4] u32  — 4 int8 weights    packed along K per u32 (row-major)
-//   out : [M, N]  f32   — dequantized:  out[m,n] = acc_i32 * sx * sw
+//   x_q : [M, K/4] u32  - 4 int8 activations packed along K per u32 (row-major)
+//   w_q : [N, K/4] u32  - 4 int8 weights    packed along K per u32 (row-major)
+//   out : [M, N]  f32   - dequantized:  out[m,n] = acc_i32 * sx * sw
 //
 // This is the P40's fastest inference path. DP4A (`dot4I8Packed`) does four
 // int8 multiply-accumulates in one instruction, four times the MACs of an fp32
@@ -22,29 +24,53 @@
 // int8 weights also
 // move 1/4 the bytes of fp32, so the memory side wins too.
 //
-// Layout mirrors matmul_reg3, NOT matmul_reg2 (this kernel used to be a reg2
-// clone — see git history — carrying the same two shared-memory bank-conflict
-// patterns matmul_reg3.wgsl's own header diagnoses and fixes for fp32, at
-// higher cost here: DP4A packs four times the math behind the same shared word,
-// so a conflict here taxes four times the throughput it would in the fp32
-// kernel):
+// 128x128 output tile, 8x8 int32 register block per thread, 256 threads on a
+// 16x16 lane grid, k-chunk of BKG packed groups (= 4*BKG int8 along K),
+// software-pipelined through registers so the next chunk's global loads are in
+// flight while the current one is consumed.
 //
-//  1. INTERLEAVED register tiling: thread ty/tx owns rows/cols
-//     {ty, ty+16, ty+32, …} instead of {8*ty … 8*ty+7}, so the 16 threads of a
-//     tx-group read 16 CONSECUTIVE shared words — one per bank, no conflict —
-//     and the epilogue's global stores become 16 consecutive elements per
-//     instruction instead of a stride-8 scatter.
-//  2. PADDED tile stride 129 instead of 128 (`SP`), so the staging store's
-//     bank index becomes (kk + r) mod 32 rather than r mod 32.
+// ## Why the shared tiles are `vec4<u32>` and k-group-MINOR
 //
-// Both fixes are layout-only — the accumulation ORDER is unchanged, and it is
-// INTEGER, so the result is bit-identical to the pre-fix kernel, not merely
-// close (mutation-verified: `qwen_bench gemm8` gates on `max|Δ| == 0` against
-// a host i32 reference).
+// The staging arrays hold `[row][k-group]` with the k-groups CONTIGUOUS, four
+// to a `vec4<u32>`, rather than the k-major `[k-group][row]` a textbook tile
+// uses. That is a THROUGHPUT decision, not a layout preference: with a k-major
+// scalar tile the inner loop retires four DP4A per shared-memory load
+// instruction, and a Pascal SM issues four times as many integer/FMA lanes per
+// clock as load-store lanes - so the shared traffic and the arithmetic are the
+// same order and the kernel runs against its load-store issue rate rather than
+// against DP4A. Reading four k-groups per load instruction raises that ratio
+// four-fold and moves the limiter onto the arithmetic. The measured effect is
+// in this repo's int8 roadmap ledger, reproduced by `qwen_bench gemm8`.
 //
-// K must be a multiple of 4 (packing). Per-tensor scales here; per-row (x) /
-// per-column (w) scales are the production refinement — same kernel, scales
-// indexed by m / n in the epilogue.
+// Two consequences the layout has to pay for, both handled here:
+//
+//  1. The staging LOAD becomes four consecutive `x`/`w` words per thread -
+//     the same 32-byte-per-eight-threads global pattern the k-major form had,
+//     since the k-group axis is already the fastest-varying axis of both
+//     operands. Nothing is transposed on the way in.
+//  2. The shared STRIDE is padded to `SP4` vec4s per row (one more than the
+//     `BKG/4` actually used), so the 16 lanes of a tx-group read 16 addresses
+//     whose bank indices are distinct. An unpadded stride puts them on a
+//     quarter of the banks and costs a four-way conflict on every B read.
+//
+// The A operands for a whole k-group quad are hoisted into registers once and
+// reused across the eight B columns, so only ONE B vec4 is live at a time;
+// hoisting both sides would push the register block past the point where two
+// workgroups still fit on an SM, which is the occupancy the double-buffered
+// staging depends on.
+//
+// Register-block ownership is INTERLEAVED: thread ty/tx owns rows/cols
+// {ty, ty+16, ty+32, …} instead of {8*ty … 8*ty+7}, so the 16 threads of a
+// tx-group read 16 consecutive shared rows and the epilogue's global stores
+// become 16 consecutive elements per instruction instead of a stride-8 scatter.
+//
+// The accumulation is INTEGER, so re-ordering the k-axis sum is exact: this
+// kernel is bit-identical to the k-major scalar form, not merely close
+// (mutation-verified: `qwen_bench gemm8` gates on `max|Δ| == 0` against a host
+// i32 reference).
+//
+// K must be a multiple of 4 (packing). Per-row (x) and per-column (w) scales
+// are applied in the epilogue.
 //
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the CPU
 // int8 reference lives in the validation test, so parity is still gated.
@@ -54,19 +80,20 @@ struct Params { m: u32, kg: u32, n: u32 };  // dynamic sx + per-channel sw, kg =
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       x:   array<u32>;  // [M, kg]
 @group(0) @binding(2) var<storage, read>       w:   array<u32>;  // [N, kg]
-@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [1] dynamic activation scale
+@group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M] per-token activation scale
 @group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N] per-channel weight scale
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
 const BM: u32 = 128u;
 const BN: u32 = 128u;
-const BKG: u32 = 8u;   // packed K-groups per chunk (= 32 int8 along K)
-const SP: u32 = 129u;  // padded shared stride (BM + 1 / BN + 1)
-const WG: u32 = 256u;
-const LN: u32 = 16u;   // lane grid: 16 x 16 threads, stride-16 interleave
+const BKG: u32 = 8u;    // packed K-groups per chunk (= 32 int8 along K)
+const BKQ: u32 = 2u;    // BKG / 4 - vec4 quads of k-groups per row per chunk
+const SP4: u32 = 3u;    // padded shared stride in vec4s (BKQ + 1), bank-spread
+const LN: u32 = 16u;    // lane grid: 16 x 16 threads, stride-16 interleave
+const RS: u32 = 48u;    // LN * SP4 - vec4 step between a thread's own rows
 
-var<workgroup> As: array<u32, 1032>;  // BKG*SP, k-major: As[kk*SP + r]
-var<workgroup> Bs: array<u32, 1032>;
+var<workgroup> As: array<vec4<u32>, 384>;  // BM * SP4, row-major: As[r*SP4 + q]
+var<workgroup> Bs: array<vec4<u32>, 384>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>,
@@ -80,18 +107,18 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let row0 = (wg / tiles_n) * BM;
     let col0 = (wg % tiles_n) * BN;
 
-    var sr: array<u32, 4>;
-    var skk: array<u32, 4>;
-    var arow_g: array<u32, 4>;
-    var brow_g: array<u32, 4>;
-    for (var e = 0u; e < 4u; e = e + 1u) {
-        let idx = tid + e * WG;
-        let r = idx / BKG;
-        let kk = idx % BKG;
-        sr[e] = r; skk[e] = kk;
-        arow_g[e] = row0 + r;
-        brow_g[e] = col0 + r;
-    }
+    // Staging assignment: one vec4 of A and one of B per thread. Threads
+    // 2r and 2r+1 cover row r's two quads, i.e. eight consecutive words of
+    // that row - the same global access pattern the scalar form produced.
+    let sr = tid / BKQ;      // staged row within the tile
+    let sq = tid % BKQ;      // which k-group quad of it
+    let arow = row0 + sr;
+    let brow = col0 + sr;
+    let a_ok = arow < p.m;
+    let b_ok = brow < p.n;
+    let a_base = arow * p.kg;
+    let b_base = brow * p.kg;
+    let sh_idx = sr * SP4 + sq;
 
     // 64 int32 accumulators.
     var c00 = 0i; var c01 = 0i; var c02 = 0i; var c03 = 0i; var c04 = 0i; var c05 = 0i; var c06 = 0i; var c07 = 0i;
@@ -103,65 +130,163 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     var c60 = 0i; var c61 = 0i; var c62 = 0i; var c63 = 0i; var c64 = 0i; var c65 = 0i; var c66 = 0i; var c67 = 0i;
     var c70 = 0i; var c71 = 0i; var c72 = 0i; var c73 = 0i; var c74 = 0i; var c75 = 0i; var c76 = 0i; var c77 = 0i;
 
-    var rA: array<u32, 4>;
-    var rB: array<u32, 4>;
+    var rA: vec4<u32>;
+    var rB: vec4<u32>;
 
     let nchunks = (p.kg + BKG - 1u) / BKG;
 
-    // Prime chunk 0.
-    for (var e = 0u; e < 4u; e = e + 1u) {
-        let gk = skk[e];
-        if (arow_g[e] < p.m && gk < p.kg) { As[skk[e] * SP + sr[e]] = x[arow_g[e] * p.kg + gk]; }
-        else                              { As[skk[e] * SP + sr[e]] = 0u; }
-        if (brow_g[e] < p.n && gk < p.kg) { Bs[skk[e] * SP + sr[e]] = w[brow_g[e] * p.kg + gk]; }
-        else                              { Bs[skk[e] * SP + sr[e]] = 0u; }
+    // Prime chunk 0. The whole-quad case is one uniform branch and four
+    // consecutive loads; the ragged tail (`kg` not a multiple of BKG, or a
+    // partial row block) falls into the per-lane guards, so no lane ever
+    // forms an out-of-range index.
+    {
+        let g0 = sq * 4u;
+        var av = vec4<u32>(0u, 0u, 0u, 0u);
+        if (a_ok && g0 + 3u < p.kg) {
+            av = vec4<u32>(x[a_base + g0], x[a_base + g0 + 1u], x[a_base + g0 + 2u], x[a_base + g0 + 3u]);
+        } else if (a_ok) {
+            if (g0 + 0u < p.kg) { av.x = x[a_base + g0]; }
+            if (g0 + 1u < p.kg) { av.y = x[a_base + g0 + 1u]; }
+            if (g0 + 2u < p.kg) { av.z = x[a_base + g0 + 2u]; }
+        }
+        var bv = vec4<u32>(0u, 0u, 0u, 0u);
+        if (b_ok && g0 + 3u < p.kg) {
+            bv = vec4<u32>(w[b_base + g0], w[b_base + g0 + 1u], w[b_base + g0 + 2u], w[b_base + g0 + 3u]);
+        } else if (b_ok) {
+            if (g0 + 0u < p.kg) { bv.x = w[b_base + g0]; }
+            if (g0 + 1u < p.kg) { bv.y = w[b_base + g0 + 1u]; }
+            if (g0 + 2u < p.kg) { bv.z = w[b_base + g0 + 2u]; }
+        }
+        As[sh_idx] = av;
+        Bs[sh_idx] = bv;
     }
     workgroupBarrier();
 
     for (var c = 0u; c < nchunks; c = c + 1u) {
         let has_next = c + 1u < nchunks;
         if (has_next) {
-            let k1 = (c + 1u) * BKG;
-            for (var e = 0u; e < 4u; e = e + 1u) {
-                let gk = k1 + skk[e];
-                if (arow_g[e] < p.m && gk < p.kg) { rA[e] = x[arow_g[e] * p.kg + gk]; } else { rA[e] = 0u; }
-                if (brow_g[e] < p.n && gk < p.kg) { rB[e] = w[brow_g[e] * p.kg + gk]; } else { rB[e] = 0u; }
+            let g1 = (c + 1u) * BKG + sq * 4u;
+            rA = vec4<u32>(0u, 0u, 0u, 0u);
+            if (a_ok && g1 + 3u < p.kg) {
+                rA = vec4<u32>(x[a_base + g1], x[a_base + g1 + 1u], x[a_base + g1 + 2u], x[a_base + g1 + 3u]);
+            } else if (a_ok) {
+                if (g1 + 0u < p.kg) { rA.x = x[a_base + g1]; }
+                if (g1 + 1u < p.kg) { rA.y = x[a_base + g1 + 1u]; }
+                if (g1 + 2u < p.kg) { rA.z = x[a_base + g1 + 2u]; }
+            }
+            rB = vec4<u32>(0u, 0u, 0u, 0u);
+            if (b_ok && g1 + 3u < p.kg) {
+                rB = vec4<u32>(w[b_base + g1], w[b_base + g1 + 1u], w[b_base + g1 + 2u], w[b_base + g1 + 3u]);
+            } else if (b_ok) {
+                if (g1 + 0u < p.kg) { rB.x = w[b_base + g1]; }
+                if (g1 + 1u < p.kg) { rB.y = w[b_base + g1 + 1u]; }
+                if (g1 + 2u < p.kg) { rB.z = w[b_base + g1 + 2u]; }
             }
         }
-        for (var kk = 0u; kk < BKG; kk = kk + 1u) {
-            let ao = kk * SP + ty;
-            let bo = kk * SP + tx;
-            let a0 = As[ao + 0u];
-            let a1 = As[ao + 16u];
-            let a2 = As[ao + 32u];
-            let a3 = As[ao + 48u];
-            let a4 = As[ao + 64u];
-            let a5 = As[ao + 80u];
-            let a6 = As[ao + 96u];
-            let a7 = As[ao + 112u];
-            let b0 = Bs[bo + 0u];
-            let b1 = Bs[bo + 16u];
-            let b2 = Bs[bo + 32u];
-            let b3 = Bs[bo + 48u];
-            let b4 = Bs[bo + 64u];
-            let b5 = Bs[bo + 80u];
-            let b6 = Bs[bo + 96u];
-            let b7 = Bs[bo + 112u];
-            c00 += dot4I8Packed(a0, b0); c01 += dot4I8Packed(a0, b1); c02 += dot4I8Packed(a0, b2); c03 += dot4I8Packed(a0, b3); c04 += dot4I8Packed(a0, b4); c05 += dot4I8Packed(a0, b5); c06 += dot4I8Packed(a0, b6); c07 += dot4I8Packed(a0, b7);
-            c10 += dot4I8Packed(a1, b0); c11 += dot4I8Packed(a1, b1); c12 += dot4I8Packed(a1, b2); c13 += dot4I8Packed(a1, b3); c14 += dot4I8Packed(a1, b4); c15 += dot4I8Packed(a1, b5); c16 += dot4I8Packed(a1, b6); c17 += dot4I8Packed(a1, b7);
-            c20 += dot4I8Packed(a2, b0); c21 += dot4I8Packed(a2, b1); c22 += dot4I8Packed(a2, b2); c23 += dot4I8Packed(a2, b3); c24 += dot4I8Packed(a2, b4); c25 += dot4I8Packed(a2, b5); c26 += dot4I8Packed(a2, b6); c27 += dot4I8Packed(a2, b7);
-            c30 += dot4I8Packed(a3, b0); c31 += dot4I8Packed(a3, b1); c32 += dot4I8Packed(a3, b2); c33 += dot4I8Packed(a3, b3); c34 += dot4I8Packed(a3, b4); c35 += dot4I8Packed(a3, b5); c36 += dot4I8Packed(a3, b6); c37 += dot4I8Packed(a3, b7);
-            c40 += dot4I8Packed(a4, b0); c41 += dot4I8Packed(a4, b1); c42 += dot4I8Packed(a4, b2); c43 += dot4I8Packed(a4, b3); c44 += dot4I8Packed(a4, b4); c45 += dot4I8Packed(a4, b5); c46 += dot4I8Packed(a4, b6); c47 += dot4I8Packed(a4, b7);
-            c50 += dot4I8Packed(a5, b0); c51 += dot4I8Packed(a5, b1); c52 += dot4I8Packed(a5, b2); c53 += dot4I8Packed(a5, b3); c54 += dot4I8Packed(a5, b4); c55 += dot4I8Packed(a5, b5); c56 += dot4I8Packed(a5, b6); c57 += dot4I8Packed(a5, b7);
-            c60 += dot4I8Packed(a6, b0); c61 += dot4I8Packed(a6, b1); c62 += dot4I8Packed(a6, b2); c63 += dot4I8Packed(a6, b3); c64 += dot4I8Packed(a6, b4); c65 += dot4I8Packed(a6, b5); c66 += dot4I8Packed(a6, b6); c67 += dot4I8Packed(a6, b7);
-            c70 += dot4I8Packed(a7, b0); c71 += dot4I8Packed(a7, b1); c72 += dot4I8Packed(a7, b2); c73 += dot4I8Packed(a7, b3); c74 += dot4I8Packed(a7, b4); c75 += dot4I8Packed(a7, b5); c76 += dot4I8Packed(a7, b6); c77 += dot4I8Packed(a7, b7);
+        for (var q = 0u; q < BKQ; q = q + 1u) {
+            let ao = ty * SP4 + q;
+            let bo = tx * SP4 + q;
+            let a0 = As[ao];
+            let a1 = As[ao + RS];
+            let a2 = As[ao + 2u * RS];
+            let a3 = As[ao + 3u * RS];
+            let a4 = As[ao + 4u * RS];
+            let a5 = As[ao + 5u * RS];
+            let a6 = As[ao + 6u * RS];
+            let a7 = As[ao + 7u * RS];
+            {
+                let b = Bs[bo];
+                c00 += dot4I8Packed(a0.x, b.x) + dot4I8Packed(a0.y, b.y) + dot4I8Packed(a0.z, b.z) + dot4I8Packed(a0.w, b.w);
+                c10 += dot4I8Packed(a1.x, b.x) + dot4I8Packed(a1.y, b.y) + dot4I8Packed(a1.z, b.z) + dot4I8Packed(a1.w, b.w);
+                c20 += dot4I8Packed(a2.x, b.x) + dot4I8Packed(a2.y, b.y) + dot4I8Packed(a2.z, b.z) + dot4I8Packed(a2.w, b.w);
+                c30 += dot4I8Packed(a3.x, b.x) + dot4I8Packed(a3.y, b.y) + dot4I8Packed(a3.z, b.z) + dot4I8Packed(a3.w, b.w);
+                c40 += dot4I8Packed(a4.x, b.x) + dot4I8Packed(a4.y, b.y) + dot4I8Packed(a4.z, b.z) + dot4I8Packed(a4.w, b.w);
+                c50 += dot4I8Packed(a5.x, b.x) + dot4I8Packed(a5.y, b.y) + dot4I8Packed(a5.z, b.z) + dot4I8Packed(a5.w, b.w);
+                c60 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
+                c70 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
+            }
+            {
+                let b = Bs[bo + RS];
+                c01 += dot4I8Packed(a0.x, b.x) + dot4I8Packed(a0.y, b.y) + dot4I8Packed(a0.z, b.z) + dot4I8Packed(a0.w, b.w);
+                c11 += dot4I8Packed(a1.x, b.x) + dot4I8Packed(a1.y, b.y) + dot4I8Packed(a1.z, b.z) + dot4I8Packed(a1.w, b.w);
+                c21 += dot4I8Packed(a2.x, b.x) + dot4I8Packed(a2.y, b.y) + dot4I8Packed(a2.z, b.z) + dot4I8Packed(a2.w, b.w);
+                c31 += dot4I8Packed(a3.x, b.x) + dot4I8Packed(a3.y, b.y) + dot4I8Packed(a3.z, b.z) + dot4I8Packed(a3.w, b.w);
+                c41 += dot4I8Packed(a4.x, b.x) + dot4I8Packed(a4.y, b.y) + dot4I8Packed(a4.z, b.z) + dot4I8Packed(a4.w, b.w);
+                c51 += dot4I8Packed(a5.x, b.x) + dot4I8Packed(a5.y, b.y) + dot4I8Packed(a5.z, b.z) + dot4I8Packed(a5.w, b.w);
+                c61 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
+                c71 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
+            }
+            {
+                let b = Bs[bo + 2u * RS];
+                c02 += dot4I8Packed(a0.x, b.x) + dot4I8Packed(a0.y, b.y) + dot4I8Packed(a0.z, b.z) + dot4I8Packed(a0.w, b.w);
+                c12 += dot4I8Packed(a1.x, b.x) + dot4I8Packed(a1.y, b.y) + dot4I8Packed(a1.z, b.z) + dot4I8Packed(a1.w, b.w);
+                c22 += dot4I8Packed(a2.x, b.x) + dot4I8Packed(a2.y, b.y) + dot4I8Packed(a2.z, b.z) + dot4I8Packed(a2.w, b.w);
+                c32 += dot4I8Packed(a3.x, b.x) + dot4I8Packed(a3.y, b.y) + dot4I8Packed(a3.z, b.z) + dot4I8Packed(a3.w, b.w);
+                c42 += dot4I8Packed(a4.x, b.x) + dot4I8Packed(a4.y, b.y) + dot4I8Packed(a4.z, b.z) + dot4I8Packed(a4.w, b.w);
+                c52 += dot4I8Packed(a5.x, b.x) + dot4I8Packed(a5.y, b.y) + dot4I8Packed(a5.z, b.z) + dot4I8Packed(a5.w, b.w);
+                c62 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
+                c72 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
+            }
+            {
+                let b = Bs[bo + 3u * RS];
+                c03 += dot4I8Packed(a0.x, b.x) + dot4I8Packed(a0.y, b.y) + dot4I8Packed(a0.z, b.z) + dot4I8Packed(a0.w, b.w);
+                c13 += dot4I8Packed(a1.x, b.x) + dot4I8Packed(a1.y, b.y) + dot4I8Packed(a1.z, b.z) + dot4I8Packed(a1.w, b.w);
+                c23 += dot4I8Packed(a2.x, b.x) + dot4I8Packed(a2.y, b.y) + dot4I8Packed(a2.z, b.z) + dot4I8Packed(a2.w, b.w);
+                c33 += dot4I8Packed(a3.x, b.x) + dot4I8Packed(a3.y, b.y) + dot4I8Packed(a3.z, b.z) + dot4I8Packed(a3.w, b.w);
+                c43 += dot4I8Packed(a4.x, b.x) + dot4I8Packed(a4.y, b.y) + dot4I8Packed(a4.z, b.z) + dot4I8Packed(a4.w, b.w);
+                c53 += dot4I8Packed(a5.x, b.x) + dot4I8Packed(a5.y, b.y) + dot4I8Packed(a5.z, b.z) + dot4I8Packed(a5.w, b.w);
+                c63 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
+                c73 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
+            }
+            {
+                let b = Bs[bo + 4u * RS];
+                c04 += dot4I8Packed(a0.x, b.x) + dot4I8Packed(a0.y, b.y) + dot4I8Packed(a0.z, b.z) + dot4I8Packed(a0.w, b.w);
+                c14 += dot4I8Packed(a1.x, b.x) + dot4I8Packed(a1.y, b.y) + dot4I8Packed(a1.z, b.z) + dot4I8Packed(a1.w, b.w);
+                c24 += dot4I8Packed(a2.x, b.x) + dot4I8Packed(a2.y, b.y) + dot4I8Packed(a2.z, b.z) + dot4I8Packed(a2.w, b.w);
+                c34 += dot4I8Packed(a3.x, b.x) + dot4I8Packed(a3.y, b.y) + dot4I8Packed(a3.z, b.z) + dot4I8Packed(a3.w, b.w);
+                c44 += dot4I8Packed(a4.x, b.x) + dot4I8Packed(a4.y, b.y) + dot4I8Packed(a4.z, b.z) + dot4I8Packed(a4.w, b.w);
+                c54 += dot4I8Packed(a5.x, b.x) + dot4I8Packed(a5.y, b.y) + dot4I8Packed(a5.z, b.z) + dot4I8Packed(a5.w, b.w);
+                c64 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
+                c74 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
+            }
+            {
+                let b = Bs[bo + 5u * RS];
+                c05 += dot4I8Packed(a0.x, b.x) + dot4I8Packed(a0.y, b.y) + dot4I8Packed(a0.z, b.z) + dot4I8Packed(a0.w, b.w);
+                c15 += dot4I8Packed(a1.x, b.x) + dot4I8Packed(a1.y, b.y) + dot4I8Packed(a1.z, b.z) + dot4I8Packed(a1.w, b.w);
+                c25 += dot4I8Packed(a2.x, b.x) + dot4I8Packed(a2.y, b.y) + dot4I8Packed(a2.z, b.z) + dot4I8Packed(a2.w, b.w);
+                c35 += dot4I8Packed(a3.x, b.x) + dot4I8Packed(a3.y, b.y) + dot4I8Packed(a3.z, b.z) + dot4I8Packed(a3.w, b.w);
+                c45 += dot4I8Packed(a4.x, b.x) + dot4I8Packed(a4.y, b.y) + dot4I8Packed(a4.z, b.z) + dot4I8Packed(a4.w, b.w);
+                c55 += dot4I8Packed(a5.x, b.x) + dot4I8Packed(a5.y, b.y) + dot4I8Packed(a5.z, b.z) + dot4I8Packed(a5.w, b.w);
+                c65 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
+                c75 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
+            }
+            {
+                let b = Bs[bo + 6u * RS];
+                c06 += dot4I8Packed(a0.x, b.x) + dot4I8Packed(a0.y, b.y) + dot4I8Packed(a0.z, b.z) + dot4I8Packed(a0.w, b.w);
+                c16 += dot4I8Packed(a1.x, b.x) + dot4I8Packed(a1.y, b.y) + dot4I8Packed(a1.z, b.z) + dot4I8Packed(a1.w, b.w);
+                c26 += dot4I8Packed(a2.x, b.x) + dot4I8Packed(a2.y, b.y) + dot4I8Packed(a2.z, b.z) + dot4I8Packed(a2.w, b.w);
+                c36 += dot4I8Packed(a3.x, b.x) + dot4I8Packed(a3.y, b.y) + dot4I8Packed(a3.z, b.z) + dot4I8Packed(a3.w, b.w);
+                c46 += dot4I8Packed(a4.x, b.x) + dot4I8Packed(a4.y, b.y) + dot4I8Packed(a4.z, b.z) + dot4I8Packed(a4.w, b.w);
+                c56 += dot4I8Packed(a5.x, b.x) + dot4I8Packed(a5.y, b.y) + dot4I8Packed(a5.z, b.z) + dot4I8Packed(a5.w, b.w);
+                c66 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
+                c76 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
+            }
+            {
+                let b = Bs[bo + 7u * RS];
+                c07 += dot4I8Packed(a0.x, b.x) + dot4I8Packed(a0.y, b.y) + dot4I8Packed(a0.z, b.z) + dot4I8Packed(a0.w, b.w);
+                c17 += dot4I8Packed(a1.x, b.x) + dot4I8Packed(a1.y, b.y) + dot4I8Packed(a1.z, b.z) + dot4I8Packed(a1.w, b.w);
+                c27 += dot4I8Packed(a2.x, b.x) + dot4I8Packed(a2.y, b.y) + dot4I8Packed(a2.z, b.z) + dot4I8Packed(a2.w, b.w);
+                c37 += dot4I8Packed(a3.x, b.x) + dot4I8Packed(a3.y, b.y) + dot4I8Packed(a3.z, b.z) + dot4I8Packed(a3.w, b.w);
+                c47 += dot4I8Packed(a4.x, b.x) + dot4I8Packed(a4.y, b.y) + dot4I8Packed(a4.z, b.z) + dot4I8Packed(a4.w, b.w);
+                c57 += dot4I8Packed(a5.x, b.x) + dot4I8Packed(a5.y, b.y) + dot4I8Packed(a5.z, b.z) + dot4I8Packed(a5.w, b.w);
+                c67 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
+                c77 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
+            }
         }
         workgroupBarrier();
         if (has_next) {
-            for (var e = 0u; e < 4u; e = e + 1u) {
-                As[skk[e] * SP + sr[e]] = rA[e];
-                Bs[skk[e] * SP + sr[e]] = rB[e];
-            }
+            As[sh_idx] = rA;
+            Bs[sh_idx] = rB;
         }
         workgroupBarrier();
     }

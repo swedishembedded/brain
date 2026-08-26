@@ -163,6 +163,58 @@ existing caller. Assume nothing about units.
    cost tracks the compile-time bound and not the caller's actual shape.
    A power-of-two ladder won by ≥1.7x at every row count instead.
 
+7. **A DP4A tile needs FOUR TIMES the MAC-per-shared-load ratio an fp32 tile
+   needs, and porting an fp32 tile's layout silently hands it the fp32 ratio.**
+   `matmul_i8_dyn` was a faithful copy of `matmul_reg3`'s layout: k-MAJOR
+   shared tiles (`As[k-group][row]`), one scalar `u32` shared load per operand
+   per k-step, an 8x8 register block. That is four MACs per shared-load
+   *instruction*, which is the right balance for FFMA. But `dot4I8Packed`
+   retires four times the MACs per instruction from the same shared word, so
+   the identical layout leaves the LOAD-STORE pipe as the limiter rather than
+   the DP4A pipe: a Pascal SM issues four times as many math lanes per clock as
+   load-store lanes, so at a 4:1 math:load instruction mix the two ceilings
+   coincide exactly and every inefficiency lands on the memory side.
+
+   **Diagnose it before rewriting anything, and the diagnostic separates it
+   from the DRAM hypothesis for free:** sweep `n` and sweep `k` at a shape that
+   fills the tile grid. A DRAM-bound tile gets *worse* as `n` grows (the A tile
+   is re-read `n/BN` times); an on-chip issue ceiling is FLAT in both. Flat in
+   both also says the epilogue and the dynamic-scale gather are not the cost.
+
+   The fix is to make the shared tile k-group-MINOR and read it as
+   `vec4<u32>`: four k-groups per load instruction, sixteen DP4A per load
+   instead of four. Nothing else changes: same tile, same register block, same
+   barrier count, same dispatch geometry, same `Params`, so no call site in any
+   model moves. Two details it costs, both paid for:
+
+   * the shared row stride must be **padded in vec4 units**, or the sixteen
+     lanes of a tx-group land on a quarter of the banks and every B read takes
+     a four-way conflict - the same reason the scalar form padded its stride,
+     restated in the new unit;
+   * only **one** side's operands may be hoisted into registers for the inner
+     unroll. Hoisting both is eight `vec4` per side, which pushes the register
+     block past the point where two workgroups still fit on an SM, and the
+     software-pipelined staging depends on that occupancy.
+
+   Two properties make this unusually cheap to gate: the accumulation is
+   **integer**, so re-associating the k axis is exact and the rewrite is
+   BIT-IDENTICAL rather than merely close (`max|Δ| == 0`, not a tolerance);
+   and the k-group axis is already the fastest-varying axis of both packed
+   operands, so the staging load keeps the global access pattern it had, with
+   no transpose introduced on the way in. The ragged tail (`kg` not a multiple
+   of the chunk) is the one place a lane can form an out-of-range index, so it
+   needs its own gate: mutation-verified by dropping one tail lane, which is
+   invisible at every full-quad shape and fails immediately at a `kg` whose
+   remainder actually reaches that lane. Measured numbers in
+   `.agents/roadmap/ltxv.md`.
+
+   The general form of the rule: **a tile's MAC:shared-load ratio is a property
+   of the ARITHMETIC WIDTH of the instruction, not of the tile geometry.** Any
+   time a kernel moves to a wider fused primitive (DP4A here; a packed q4 dot,
+   a cooperative-matrix op later) the ratio the old geometry provided is
+   divided by the new instruction's width, and the tile has to widen its loads
+   to match or the win is capped at the load-store rate.
+
 ## D. Constraints that will bite you
 
 - **No atomics, no subgroups, no f16** — a tree reduction is

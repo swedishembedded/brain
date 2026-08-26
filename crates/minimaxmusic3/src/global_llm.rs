@@ -138,8 +138,11 @@ fn unconditional_variant(ids: &[u32]) -> Vec<u32> {
 ///   promote` (workspace-wide, not specific to this crate) demotes
 ///   `I8`/`Q4` to `F32` whenever `NumericSupport::int8_dot` is `false`,
 ///   which `crates/backend-cpu`'s own `caps()` reports unconditionally
-///   (`int8_dot: false` - no backend in this workspace executes real
-///   int8 compute yet, per that field's own doc). So `new_shard_i8` on
+///   (`int8_dot: false` - the CPU JIT cannot express the multi-barrier
+///   work-group shape the packed-int8 GEMMs use, so it has no packed-int8
+///   compute path at all; both GPU backends report `int8_dot: true` and do
+///   execute `dot4I8Packed`, so this promotion is a CPU-backend property,
+///   not a workspace-wide one). So `new_shard_i8` on
 ///   this backend allocates the full ~32 GB fp32 model, not the ~13 GB
 ///   int8 one the name promises - measured directly (a single instance's
 ///   RSS climbs from near-zero past 30 GB and is OOM-killed on this

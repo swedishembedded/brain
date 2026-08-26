@@ -8,12 +8,23 @@
 //! This reuses `model::int8`'s shared per-channel symmetric int8 primitives
 //! (`quantize_weight` / `dequantize_weight`) - the same ones zimage's DiT,
 //! the Qwen encoder/decoder, and FLUX.2's DiT already use for exactly this
-//! purpose. Unlike FLUX.2's own int8 tier, there is no compute-time DP4A
-//! activation-quantization path here, and no new WGSL kernel: neither
-//! `crate::dit::LtxDit::forward` nor `crate::dit::LtxAvDit::forward` dispatch
-//! an int8 kernel of any kind. A quantized checkpoint is meant to be
-//! dequantized back to plain f32 (see [`dequantize_tensors`]) before either
-//! forward runs, unchanged from how it runs today.
+//! purpose.
+//!
+//! **This module is the STORAGE tier only, and it is NOT the path a real
+//! generation takes.** The compute tier - dynamic per-token activation
+//! quantization feeding the DP4A GEMM - exists and is what
+//! `crate::dit::forward_q_streamed` / `av_forward_q_streamed` dispatch, via
+//! `crate::block::LtxBlockQ` (see that section's module doc for its exact
+//! scope). What this module's round trip serves is the eager fp32
+//! constructors `crate::dit::LtxDit::new` / `crate::dit::LtxAvDit::new`,
+//! which take plain f32 tensors: a quantized checkpoint handed to THEM has
+//! to be expanded back with [`dequantize_tensors`] first. Do not read this
+//! file as "ltxv has no DP4A path"; read it as "the fp32 constructors need
+//! f32, and this is how a packed checkpoint reaches them".
+//!
+//! The eligibility rule below is nevertheless shared with the compute tier:
+//! [`is_never_quantized`] is what `crate::block::QBlockWeights` also honours,
+//! so the two tiers cannot disagree about which weights stay fp32.
 //!
 //! The never-quantize list is this port's own roadmap ledger's "upstream
 //! never quantizes" set: `patchify_proj`, every `*adaln_single*` table,
@@ -98,10 +109,12 @@ pub fn quantize_tensors(w: &Tensors) -> QuantizedTensors {
 
 /// The inverse of [`quantize_tensors`]: reconstruct a plain-f32 [`Tensors`]
 /// map with every int8-eligible tensor dequantized back via `model::int8::
-/// dequantize_weight`. This is what a loader hands to `crate::dit::
-/// LtxDit::new` / `crate::dit::LtxAvDit::new` - neither forward dispatches
-/// an int8 kernel of its own yet, so a quantized checkpoint must be expanded
-/// to f32 before either constructor sees it.
+/// dequantize_weight`. This is what a loader hands to the EAGER fp32
+/// constructors `crate::dit::LtxDit::new` / `crate::dit::LtxAvDit::new`,
+/// which hold plain f32 weights, so a packed checkpoint must be expanded
+/// before either sees it. The quantized-compute path
+/// (`crate::block::LtxBlockQ`, driven by `crate::dit::forward_q_streamed`)
+/// does NOT go through here - it consumes the packed words directly.
 pub fn dequantize_tensors(q: &QuantizedTensors) -> Tensors {
     let mut out = q.full.clone();
     for (name, qw) in &q.int8 {
