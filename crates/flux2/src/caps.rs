@@ -45,7 +45,8 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)").default(json!("klein-4b")))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier: fp32 (parity reference) or int8 (DP4A, ~4x smaller weights; GPU only)").default(json!("fp32")))
-        .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a trained LoRA adapter (from lora_train) to apply"))
+        .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply: brain's own lora_train checkpoint, or a third-party ai-toolkit/ComfyUI .safetensors"))
+        .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier (ComfyUI strength_model); 1.0 = the reference default").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
 }
 
 /// The full, static capability manifest — safe to build with no weights loaded.
@@ -104,7 +105,7 @@ pub struct GenParams {
     pub cfg: Flux2Config,
     pub variant: String,
     pub opts: GenOpts,
-    pub adapter: Option<String>,
+    pub adapter: Option<crate::AdapterSpec>,
     /// DiT numeric tier (fp32 default; int8 = DP4A, GPU only).
     pub precision: crate::Precision,
 }
@@ -134,7 +135,14 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         guidance: inv.get_f64("guidance").unwrap_or(4.0) as f32,
         seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
     };
-    Ok(GenParams { cfg, variant, adapter: inv.get_str("adapter").filter(|s| !s.is_empty()), opts, precision })
+    // `lora_scale` is ComfyUI's `strength_model`, not a value read from the
+    // adapter file - third-party LoRAs carry no alpha, so this is the dial.
+    let lora_scale = inv.get_f64("lora_scale").unwrap_or(1.0) as f32;
+    let adapter = inv
+        .get_str("adapter")
+        .filter(|s| !s.is_empty())
+        .map(|path| crate::AdapterSpec { path, scale: lora_scale });
+    Ok(GenParams { cfg, variant, adapter, opts, precision })
 }
 
 /// The 9B weights are released under the FLUX.2 \[Non-Commercial\] License —
@@ -248,7 +256,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
 /// Cache key for a resident pipeline: everything that fixes the built graphs —
 /// (variant, precision, width, height, reference latent tokens) plus the
 /// folded adapter.
-type HotKey = (String, &'static str, u32, u32, u32, Option<String>);
+type HotKey = (String, &'static str, u32, u32, u32, Option<crate::AdapterSpec>);
 
 /// The executable FLUX.2 model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
@@ -310,7 +318,7 @@ impl Action for Flux2Action {
                 if !matches!(&*guard, Some((k, _)) if *k == key) {
                     *guard = None; // free the old resident weights before building new
                     progress(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
-                    let pipe = Pipeline::build_with(&p.cfg, &paths, n_gen + n_ref, p.adapter.as_deref(), p.precision)?;
+                    let pipe = Pipeline::build_with(&p.cfg, &paths, n_gen + n_ref, p.adapter.as_ref(), p.precision)?;
                     *guard = Some((key, pipe));
                 }
                 generate_on(&guard.as_ref().unwrap().1, inv, &refs, &p.opts, progress)

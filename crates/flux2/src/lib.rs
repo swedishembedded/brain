@@ -34,4 +34,4 @@ pub mod pipeline;
 pub use config::Flux2Config;
 pub use import::{import_bfl, import_diffusers, Tensors};
 pub use model::{position_ids, Flux2Model, Precision, Sample, KERNELS};
-pub use pipeline::{BatchRequest, GenOpts, Paths, Pipeline};
+pub use pipeline::{AdapterSpec, BatchRequest, GenOpts, Paths, Pipeline};

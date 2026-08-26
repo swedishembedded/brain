@@ -6,7 +6,7 @@
 //! Weights via env (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`); images in/out are
 //! binary PPM P6 (the CLI-wide convention).
 
-use flux2::{Flux2Config, GenOpts, Paths, Pipeline};
+use flux2::{AdapterSpec, Flux2Config, GenOpts, Paths, Pipeline};
 
 const HELP: &str = "brain flux2 <cmd>
   generate --prompt <text> --out <out.ppm> [--width W] [--height H]
@@ -15,6 +15,9 @@ const HELP: &str = "brain flux2 <cmd>
            [--strength S]           # img2img: 0.2-0.5 keeps the source (colorize),
                                     # omit = generate from noise (reference only conditions)
            [--ref <in.ppm>]...      # reference images => editing mode
+           [--adapter <path>]       # LoRA: brain's own `finetune` checkpoint, or a
+                                    # third-party ai-toolkit/ComfyUI .safetensors
+           [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
 Weights (env): BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
 Text-encoder placement (env): BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] (truncated shard on that card)";
 
@@ -44,6 +47,8 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut variant_name = "klein-4b".to_string();
     let mut precision = flux2::Precision::F32;
     let mut refs: Vec<String> = Vec::new();
+    let mut adapter: Option<String> = None;
+    let mut lora_scale = 1.0f32;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> {
@@ -61,6 +66,8 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--variant" => variant_name = need(i)?.clone(),
             "--precision" => precision = flux2::Precision::from_name(need(i)?)?,
             "--ref" => refs.push(need(i)?.clone()),
+            "--adapter" => adapter = Some(need(i)?.clone()),
+            "--lora-scale" => lora_scale = need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?,
             other => return Err(format!("unknown flag {other}\n{HELP}")),
         }
         i += 2;
@@ -82,7 +89,8 @@ fn generate(args: &[String]) -> Result<(), String> {
     let n_gen = (o.height / 16) * (o.width / 16);
     let n_ref: u32 = ref_imgs.iter().map(|(_, h, w)| (h / 16) * (w / 16)).sum();
     eprintln!("flux2: building pipeline ({} + {} tokens) ...", n_gen, n_ref);
-    let pipe = Pipeline::build_with(&variant, &paths, n_gen + n_ref, None, precision)?;
+    let spec = adapter.map(|path| AdapterSpec { path, scale: lora_scale });
+    let pipe = Pipeline::build_with(&variant, &paths, n_gen + n_ref, spec.as_ref(), precision)?;
     let t0 = std::time::Instant::now();
     // Per-phase wall clock: the callback fires immediately BEFORE each phase,
     // so the gap between two calls is the previous phase's duration. Text

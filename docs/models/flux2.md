@@ -57,6 +57,18 @@ brain/flux2-klein` lists them) over D-Bus and over HTTP at
 - `--precision fp32|int8` - supports INT8 inference for lower VRAM use
 - `--ref <image>` (repeatable) - supplying one or more reference images
   switches generation into editing mode
+- `--adapter <path>` - fold a LoRA adapter into the DiT before generating.
+  Two families are accepted, told apart by extension: brain's own `finetune`
+  checkpoint, or a third-party `.safetensors` adapter in the ai-toolkit /
+  ComfyUI / diffusers convention (`diffusion_model.<module>.lora_A/B.weight`).
+  The adapter must have been trained for the `--variant` you select; a key
+  that does not match a tensor of that variant is a hard error naming the
+  tensor, never a silent skip.
+- `--lora-scale <S>` - LoRA strength, ComfyUI's `strength_model`. Default
+  `1.0`. Third-party adapter files usually carry no alpha, in which case both
+  ai-toolkit and ComfyUI resolve the alpha multiplier to exactly 1.0 and this
+  flag is the only dial; `0.0` reproduces the base model, which is the way to
+  check what the adapter is actually contributing.
 - `--strength` - for image-to-image editing, how much the output may drift
   from the reference: low values (around 0.1) preserve structure/texture
   closely, high values (around 0.9) allow more freedom. It does not add

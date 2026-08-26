@@ -43,6 +43,28 @@ impl Paths {
     }
 }
 
+/// A LoRA adapter to fold in before the model is built.
+///
+/// `path` selects the family by extension: a `.safetensors` is a third-party
+/// (ai-toolkit / ComfyUI / diffusers) adapter over the fused matrices,
+/// anything else is brain's own trained checkpoint container.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterSpec {
+    pub path: String,
+    /// ComfyUI's `strength_model`: multiplies the whole delta. 1.0 is the
+    /// reference default. Meaningful for third-party adapters, whose files
+    /// carry no alpha; brain's own adapters bake their scale into the
+    /// checkpoint header and ignore this.
+    pub scale: f32,
+}
+
+impl AdapterSpec {
+    /// An adapter at the reference default strength.
+    pub fn new(path: impl Into<String>) -> AdapterSpec {
+        AdapterSpec { path: path.into(), scale: 1.0 }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GenOpts {
     pub width: u32,
@@ -127,30 +149,47 @@ impl Pipeline {
     /// ([`crate::finetune`] output) folded into the DiT tensors before the
     /// model is built — a plain generation run then produces
     /// adapter-conditioned images with no model change.
-    pub fn build_adapted(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&str>) -> Result<Pipeline, String> {
+    pub fn build_adapted(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>) -> Result<Pipeline, String> {
         Pipeline::build_with(cfg, paths, n_img_max, adapter, crate::Precision::F32)
     }
 
     /// [`Pipeline::build_adapted`] with a DiT numeric tier: `Precision::Int8`
-    /// builds the DP4A DiT (~3.9 GiB of weights instead of ~15.5 GiB — DiT +
-    /// int8 TE fit ONE 24 GB card). A LoRA adapter (if any) is folded into the
-    /// f32 tensors BEFORE quantization, so adapters work at either tier.
-    pub fn build_with(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&str>, precision: crate::Precision) -> Result<Pipeline, String> {
+    /// builds the DP4A DiT (~4x smaller than f32 - DiT + int8 TE fit ONE
+    /// 24 GB card). A LoRA adapter (if any) is folded into the f32 tensors
+    /// BEFORE quantization, so adapters work at either tier - the same order
+    /// ComfyUI uses (patch the weights, then run).
+    pub fn build_with(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision) -> Result<Pipeline, String> {
         Pipeline::build_batched(cfg, paths, n_img_max, adapter, precision, 1)
     }
 
     /// [`Pipeline::build_with`] sized for up to `max_batch` concurrent
     /// generations sharing one denoise loop ([`Pipeline::generate_batch`]).
-    /// Only the DiT activation scratch grows (~0.5 GiB per extra sample at
-    /// 512² klein-4B); the text encoder and VAE stay single-stream.
-    pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&str>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
+    /// Only the DiT activation scratch grows; the text encoder and VAE stay
+    /// single-stream.
+    pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
         let mut dit_ts = read_dit_tensors(&paths.dit, cfg)?;
         if let Some(ap) = adapter {
-            // The adapter's tensor shapes depend only on the architecture, not
-            // the latent grid — any (lh, lw) loads it.
-            let tcfg = crate::modelgrad::Cfg::from_flux2(cfg, 1, 1);
-            let ad = crate::lora::load_adapter(ap, &tcfg)?;
-            ad.fold_into_tensors(&mut dit_ts)?;
+            // Two adapter families reach this point, told apart by extension:
+            // a `.safetensors` is a THIRD-PARTY (ai-toolkit / ComfyUI) file
+            // over the fused matrices, anything else is brain's own trained
+            // checkpoint container. Both fold into the same f32 tensor map.
+            if ap.path.ends_with(".safetensors") {
+                let info = crate::lora::fold_external_adapter(&ap.path, &mut dit_ts, ap.scale)?;
+                // Loud on success too: a run that claims to be adapted should
+                // say how much of the model it actually moved, so a silent
+                // no-op cannot hide behind a clean exit.
+                eprintln!(
+                    "flux2: folded external LoRA {} - {} linears, rank {}, strength {}",
+                    ap.path, info.pairs, info.rank, info.scale
+                );
+            } else {
+                // The adapter's tensor shapes depend only on the architecture, not
+                // the latent grid - any (lh, lw) loads it.
+                let tcfg = crate::modelgrad::Cfg::from_flux2(cfg, 1, 1);
+                let ad = crate::lora::load_adapter(&ap.path, &tcfg)?;
+                ad.fold_into_tensors(&mut dit_ts)?;
+                eprintln!("flux2: folded brain LoRA {} - rank {}", ap.path, ad.rank());
+            }
         }
         let gpu = gpu_core::Gpu::new(crate::model::KERNELS);
         let model = Flux2Model::new_batched(cfg, &dit_ts, gpu, cfg.txt_len as u32 + n_img_max, max_batch.max(1), precision);

@@ -41,8 +41,10 @@ pub fn max_batch() -> u32 {
 }
 
 /// Image + reference latent tokens from an instance key
-/// (`"{variant}:{precision}:{w}x{h}:{nref}[:{adapter}]"`), for the memory
-/// estimate. 0 if the key does not parse (an unknown key costs nothing extra).
+/// (`"{variant}:{precision}:{w}x{h}:{nref}[:{lora_scale}:{adapter}]"`), for the
+/// memory estimate. Only the size field is read, so the optional adapter tail
+/// does not affect it. 0 if the key does not parse (an unknown key costs
+/// nothing extra).
 fn tokens_from_key(config: &str) -> u64 {
     let mut it = config.splitn(5, ':');
     let (_, _) = (it.next(), it.next());
@@ -81,10 +83,15 @@ impl ResidentModel for Flux2Resident {
         let h = inv.get_i64("height").unwrap_or(512);
         let nref = ref_tokens_from_meta(inv);
         // "{variant}:{precision}:{w}x{h}:{nref}" fixes the built graphs; a
-        // folded LoRA changes the weights, so it is appended when present.
+        // folded LoRA changes the weights, so its path AND strength are
+        // appended when present (a different strength is different weights).
+        // The path goes last because it is the only field that may contain ':'.
         let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
         let config = match adapter {
-            Some(a) => format!("{variant}:{precision}:{w}x{h}:{nref}:{a}"),
+            Some(a) => {
+                let sc = inv.get_f64("lora_scale").unwrap_or(1.0);
+                format!("{variant}:{precision}:{w}x{h}:{nref}:{sc}:{a}")
+            }
             None => format!("{variant}:{precision}:{w}x{h}:{nref}"),
         };
         InstanceKey::new(flux2::caps::MODEL, config)
@@ -133,14 +140,18 @@ impl ResidentModel for Flux2Resident {
             // run — no resident pipeline to hold.
             return Ok(Box::new(Flux2Instance { pipe: None, paths: clone_paths(&self.paths) }));
         }
-        // "{variant}:{precision}:{w}x{h}:{nref}[:{adapter}]" — adapter may
-        // contain ':'.
-        let mut it = key.config.splitn(5, ':');
+        // "{variant}:{precision}:{w}x{h}:{nref}[:{lora_scale}:{adapter}]" -
+        // the adapter path is last because it may contain ':'.
+        let mut it = key.config.splitn(6, ':');
         let variant = it.next().ok_or("flux2: bad instance key")?;
         let precision = flux2::Precision::from_name(it.next().ok_or("flux2: bad instance key")?)?;
         let wh = it.next().ok_or("flux2: bad instance key")?;
         let nref: u32 = it.next().and_then(|s| s.parse().ok()).ok_or("flux2: bad instance key")?;
-        let adapter = it.next().filter(|s| !s.is_empty());
+        let lora_scale: f32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+        let adapter = it
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(|path| flux2::AdapterSpec { path: path.to_string(), scale: lora_scale });
         let (w, h) = wh.split_once('x').ok_or("flux2: bad instance key")?;
         let (w, h): (u32, u32) = (w.parse().map_err(|_| "flux2: bad width")?, h.parse().map_err(|_| "flux2: bad height")?);
         flux2::caps::check_license(variant)?;
@@ -149,7 +160,7 @@ impl ResidentModel for Flux2Resident {
         // Place the pipeline on the assigned card (scoped registry selection;
         // the TE card is flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
         let pipe = crate::resident_llm::on_device(device, || {
-            flux2::Pipeline::build_batched(&cfg, &self.paths, n_gen + nref, adapter, precision, max_batch())
+            flux2::Pipeline::build_batched(&cfg, &self.paths, n_gen + nref, adapter.as_ref(), precision, max_batch())
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths) }))
     }
