@@ -659,10 +659,16 @@ fn t2v(args: &[String]) -> Result<(), String> {
         imaging::video::Encoded::Video(p) => {
             eprintln!("ltxv: wrote {} ({}x{}, {} frames at {} fps{audio_desc})", p.display(), video.width, video.height, frames.len(), video.fps);
         }
-        imaging::video::Encoded::Frames { dir, command } => {
+        imaging::video::Encoded::Frames { dir, command, audio } => {
             eprintln!("ltxv: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
-            if has_audio {
-                eprintln!("ltxv: the generated sound is {}/audio.wav - it is NOT lost, the command below muxes it in", dir.display());
+            // Reported from what the encoder WROTE, never from whether the
+            // pipeline produced sound: a container that carries no audio
+            // stream drops the track, and reassuring the user it is "NOT
+            // lost" is then the one moment they would stop looking for it.
+            match &audio {
+                Some(wav) => eprintln!("ltxv: the generated sound is {} - it is NOT lost, the command below muxes it in", wav.display()),
+                None if has_audio => eprintln!("ltxv: the generated sound was DROPPED - re-run with an --output-path ending in .mp4/.mkv/.mov/.webm to keep it"),
+                None => {}
             }
             eprintln!("ltxv: finish the job with:\n  {command}");
         }
@@ -800,7 +806,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
         imaging::video::Encoded::Video(p) => {
             eprintln!("ltxv upscale: wrote {} ({out_w}x{out_h}, {} frames at {out_fps} fps)", p.display(), frames.len());
         }
-        imaging::video::Encoded::Frames { dir, command } => {
+        imaging::video::Encoded::Frames { dir, command, audio: _ } => {
             eprintln!("ltxv upscale: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
             eprintln!("ltxv upscale: finish the job with:\n  {command}");
         }
@@ -900,7 +906,7 @@ fn dfr(args: &[String]) -> Result<(), String> {
         imaging::video::Encoded::Video(p) => {
             eprintln!("ltxv dfr: wrote {} ({}x{}, {} frames at {} fps)", p.display(), video.width, video.height, frames.len(), video.fps);
         }
-        imaging::video::Encoded::Frames { dir, command } => {
+        imaging::video::Encoded::Frames { dir, command, audio: _ } => {
             eprintln!("ltxv dfr: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
             eprintln!("ltxv dfr: finish the job with:\n  {command}");
         }

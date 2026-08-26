@@ -208,7 +208,13 @@ pub enum Encoded {
     Video(PathBuf),
     /// `ffmpeg` was not on `PATH`. The numbered PPMs are in `dir`; `command`
     /// is the invocation that turns them into the requested file.
-    Frames { dir: PathBuf, command: String },
+    ///
+    /// `audio` is the WAV that was written beside them, or `None` when the
+    /// clip is silent - including when a track was generated but the
+    /// requested container carries no audio stream. It is the encoder's own
+    /// answer, so a caller telling a user where their sound went reports what
+    /// happened rather than what was attempted.
+    Frames { dir: PathBuf, command: String, audio: Option<PathBuf> },
 }
 
 /// Write `frames` as `frame_00001.ppm`, `frame_00002.ppm`, … into `dir`
@@ -220,15 +226,21 @@ pub enum Encoded {
 /// drives `encode_frames` would leave the fallback unexercised exactly where it
 /// matters.
 pub fn write_frame_dir(frames: &[Rgb8], dir: &Path, out: &Path, fps: f64, crf: u32) -> Result<String, String> {
-    write_frame_dir_with_audio(frames, dir, out, fps, crf, None)
+    write_frame_dir_with_audio(frames, dir, out, fps, crf, None).map(|(command, _)| command)
 }
 
 /// [`write_frame_dir`] plus the sound track, written as `audio.wav` in the
 /// same directory and referenced by the returned command.
 ///
+/// Returns `(command, the WAV it wrote)`. The second half is what it actually
+/// put on disk, not an echo of `audio`: a caller reporting to a user cannot
+/// otherwise distinguish "a track was offered" from "a file exists", and the
+/// two differ whenever [`encode_frames`] filtered the track against a
+/// container that carries no audio stream.
+///
 /// Separate from [`write_frame_dir`] so the long-standing no-audio signature
 /// keeps working unchanged for every caller that has no audio to write.
-pub fn write_frame_dir_with_audio(frames: &[Rgb8], dir: &Path, out: &Path, fps: f64, crf: u32, audio: Option<&AudioTrack>) -> Result<String, String> {
+pub fn write_frame_dir_with_audio(frames: &[Rgb8], dir: &Path, out: &Path, fps: f64, crf: u32, audio: Option<&AudioTrack>) -> Result<(String, Option<PathBuf>), String> {
     let (w, h) = check_frames(frames)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("imaging::video: creating {}: {e}", dir.display()))?;
     for (i, f) in frames.iter().enumerate() {
@@ -239,10 +251,11 @@ pub fn write_frame_dir_with_audio(frames: &[Rgb8], dir: &Path, out: &Path, fps: 
         write_wav(a, p)?;
     }
     let args = ffmpeg_args(dir, out, fps, crf, w, h, wav.as_deref());
-    Ok(std::iter::once("ffmpeg".to_string())
+    let command = std::iter::once("ffmpeg".to_string())
         .chain(args.into_iter().map(|a| shell_quote(&a)))
         .collect::<Vec<_>>()
-        .join(" "))
+        .join(" ");
+    Ok((command, wav))
 }
 
 /// Write an [`AudioTrack`] as a WAV through the workspace's own writer.
@@ -279,7 +292,14 @@ pub fn encode_frames(frames: &[Rgb8], path: &Path, fps: f64, opts: &VideoEncodeO
     let audio = match (audio, audio_codec_for(&ext)) {
         (Some(a), Some(_)) => Some(a),
         (Some(_), None) => {
-            eprintln!("imaging::video: .{ext} carries no audio stream; the clip is written silent (use .mp4/.mkv/.mov/.webm to keep the sound)");
+            // An extensionless path renders `.{ext}` as a bare ".", which
+            // reads as a typo rather than as the reason the sound went away.
+            let container = if ext.is_empty() {
+                "an output path with no extension".to_string()
+            } else {
+                format!(".{ext}")
+            };
+            eprintln!("imaging::video: {container} carries no audio stream; the clip is written silent (use .mp4/.mkv/.mov/.webm to keep the sound)");
             None
         }
         (None, _) => None,
@@ -287,8 +307,8 @@ pub fn encode_frames(frames: &[Rgb8], path: &Path, fps: f64, opts: &VideoEncodeO
 
     if !ffmpeg_available() {
         let dir = opts.frames_dir.clone().unwrap_or_else(|| frames_dir_for(path));
-        let command = write_frame_dir_with_audio(frames, &dir, path, fps, opts.crf, audio)?;
-        return Ok(Encoded::Frames { dir, command });
+        let (command, audio) = write_frame_dir_with_audio(frames, &dir, path, fps, opts.crf, audio)?;
+        return Ok(Encoded::Frames { dir, command, audio });
     }
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -567,7 +587,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let frames = moving_block(4, 8, 8);
         let track = stereo_tone(0.5, 16_000);
-        let cmd = write_frame_dir_with_audio(&frames, &dir, Path::new("out.mp4"), 8.0, 18, Some(&track)).expect("fallback write");
+        let (cmd, _) = write_frame_dir_with_audio(&frames, &dir, Path::new("out.mp4"), 8.0, 18, Some(&track)).expect("fallback write");
 
         let wav = dir.join("audio.wav");
         assert!(wav.exists(), "the fallback must write the sound track, not discard it");
@@ -586,6 +606,39 @@ mod tests {
         assert_eq!(back.sample_rate, 16_000);
         assert_eq!(back.samples.len(), track.samples_per_channel(), "every sample must reach the file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fallback must report the WAV it actually wrote, and report nothing
+    /// when there was no sound.
+    ///
+    /// A caller cannot otherwise tell: the track it handed in was already
+    /// filtered against the container by [`encode_frames`], so "I passed
+    /// audio" and "a WAV reached the disk" are different questions. `ltxv`
+    /// prints "the generated sound is <path> - it is NOT lost" off this
+    /// answer, and answering from the first question prints that
+    /// reassurance for a file that does not exist.
+    #[test]
+    fn the_fallback_reports_the_wav_it_wrote_and_nothing_when_silent() {
+        let base = std::env::temp_dir().join("brain-imaging-video-audio-reported");
+        let _ = std::fs::remove_dir_all(&base);
+        let frames = moving_block(4, 8, 8);
+        let track = stereo_tone(0.5, 16_000);
+
+        let loud = base.join("loud");
+        let (cmd, wav) =
+            write_frame_dir_with_audio(&frames, &loud, Path::new("out.mp4"), 8.0, 18, Some(&track)).expect("fallback write");
+        let wav = wav.expect("a sound track that was written must be reported");
+        assert!(wav.exists(), "the reported path must be the file that was written, not a guess: {}", wav.display());
+        assert_eq!(wav, loud.join("audio.wav"));
+        assert!(cmd.contains("audio.wav"), "the printed command must mux the WAV it reported: {cmd}");
+
+        let silent = base.join("silent");
+        let (cmd, wav) =
+            write_frame_dir_with_audio(&frames, &silent, Path::new("out.mp4"), 8.0, 18, None).expect("fallback write");
+        assert!(wav.is_none(), "no sound track means there is nothing to report");
+        assert!(!cmd.contains("audio.wav"), "a silent clip's command must not name a WAV: {cmd}");
+        assert!(!silent.join("audio.wav").exists(), "a silent clip must not leave a stray WAV behind");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// yuv420p cannot represent odd dimensions, so the encoder pads. The

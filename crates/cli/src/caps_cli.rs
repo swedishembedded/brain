@@ -327,7 +327,7 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
                 .collect::<Result<_, _>>()?;
             match imaging::video::encode_frames(&rgb, std::path::Path::new(path), fps, &Default::default())? {
                 imaging::video::Encoded::Video(_) => Ok(()),
-                imaging::video::Encoded::Frames { dir, command } => {
+                imaging::video::Encoded::Frames { dir, command, audio: _ } => {
                     eprintln!("brain: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", rgb.len(), dir.display());
                     eprintln!("brain: finish the job with:\n  {command}");
                     Ok(())

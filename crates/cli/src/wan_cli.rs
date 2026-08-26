@@ -248,7 +248,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         imaging::video::Encoded::Video(p) => {
             eprintln!("wan: wrote {} ({}x{}, {} frames at {} fps)", p.display(), video.width, video.height, frames.len(), video.fps);
         }
-        imaging::video::Encoded::Frames { dir, command } => {
+        imaging::video::Encoded::Frames { dir, command, audio: _ } => {
             eprintln!("wan: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
             eprintln!("wan: finish the job with:\n  {command}");
         }
