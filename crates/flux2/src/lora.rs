@@ -299,6 +299,90 @@ fn single_pairs_mut(s: &mut SingleLora) -> [&mut Pair; 7] {
     [&mut s.wq, &mut s.wk, &mut s.wv, &mut s.w1, &mut s.w3, &mut s.wo_a, &mut s.wo_b]
 }
 
+/// What [`fold_external_adapter`] folded, for the caller to log. A run that
+/// claims to be adapted should be able to say how much of the model it moved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExternalFold {
+    /// Adapted linears (klein-9b's own full-coverage adapters have 112).
+    pub pairs: usize,
+    /// The file's rank, or the largest one if it is not uniform.
+    pub rank: usize,
+    /// The `strength` the delta was scaled by.
+    pub scale: f32,
+}
+
+/// Fold a THIRD-PARTY (ai-toolkit / ComfyUI / diffusers) LoRA `.safetensors`
+/// into the inference tensor map, so an unchanged generation run produces
+/// adapter-conditioned images.
+///
+/// This is the OTHER direction from [`load_adapter`]: that one reloads an
+/// adapter brain itself trained (brain's checkpoint container, per-slice pairs
+/// over `q`/`k`/`v` separately). A third-party file instead adapts the FUSED
+/// matrices - one shared `A` for the whole `qkv`, one for the whole
+/// `linear1` - which is not a shape [`LoraAdapter`] can hold, but is a
+/// strictly simpler fold: every target is a whole tensor at offset 0, so
+/// [`model::lora::Pair::delta`] is the exact operation.
+///
+/// ## Semantics, taken from the reference implementations
+///
+/// `W += strength · (alpha/r) · B·A`, matching ComfyUI's weight adapter
+/// (`comfy/weight_adapter/lora.py`: `weight += (strength * alpha) * mm(mat1,
+/// mat2)` with `mat1` the up/`lora_B` and `mat2` the down/`lora_A`, and
+/// `alpha = v[2]/rank` or `1.0` when no `.alpha` tensor is present) and
+/// ai-toolkit's trainer (`toolkit/network_mixins.py`: `scale = alpha /
+/// lora_dim`, alpha initialised to the rank and stripped from PEFT-format
+/// saves). `B·A` needs no transpose: both store PyTorch `nn.Linear` weights
+/// `[out, in]`, which is already brain's row-major manifest layout.
+///
+/// `scale` is ComfyUI's `strength_model` - a user dial, default 1.0, NOT a
+/// value read from the file.
+///
+/// Every pair is validated against the base map BEFORE anything is written,
+/// so a rejected adapter leaves the weights untouched rather than half folded.
+pub fn fold_external_adapter(
+    path: &str,
+    ts: &mut crate::import::Tensors,
+    scale: f32,
+) -> Result<ExternalFold, String> {
+    let pairs = model::lora::read_external_adapter(path)?;
+    // Validate the WHOLE adapter first. A key that matches nothing is a hard
+    // error naming the tensor: silently skipping it would return base-model
+    // output from a run the user believes is adapted.
+    for p in &pairs {
+        match ts.get(&p.base_key) {
+            None => {
+                return Err(format!(
+                    "lora {path}: adapter targets '{}' (from '{}'), which this FLUX.2 variant \
+                     does not have - wrong base model for this adapter?",
+                    p.base_key, p.stem
+                ))
+            }
+            Some((shape, data)) => {
+                if shape.as_slice() != [p.out, p.inn] {
+                    return Err(format!(
+                        "lora {path}: '{}' is {shape:?}, but the adapter for it is [{}, {}]",
+                        p.base_key, p.out, p.inn
+                    ));
+                }
+                if data.len() != p.out * p.inn {
+                    return Err(format!(
+                        "lora {path}: '{}' holds {} values, expected {}",
+                        p.base_key,
+                        data.len(),
+                        p.out * p.inn
+                    ));
+                }
+            }
+        }
+    }
+    let rank = pairs.iter().map(|p| p.r).max().unwrap_or(0);
+    for p in &pairs {
+        let w = &mut ts.get_mut(&p.base_key).expect("validated above").1;
+        p.as_pair().delta(scale * p.alpha_mult, w);
+    }
+    Ok(ExternalFold { pairs: pairs.len(), rank, scale })
+}
+
 /// Save an adapter to brain's checkpoint format (header
 /// `{"model":"flux2-lora","rank":R,"alpha":A}`), reloadable by
 /// [`load_adapter`].

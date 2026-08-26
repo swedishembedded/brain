@@ -23,6 +23,8 @@
 //! three crates' own `lora.rs` is now a thin wrapper supplying its
 //! architecture's `LoraCfg`/family name.
 
+use std::collections::HashMap;
+
 use backend_cpu::par;
 
 /// LoRA hyper-parameters. `alpha/rank` is the delta scale ([`LoraCfg::scale`]).
@@ -76,6 +78,15 @@ impl Pair {
             mb: vec![0.0; out * r],
             vb: vec![0.0; out * r],
         }
+    }
+
+    /// A pair over ALREADY-TRAINED `A [r×in]` / `B [out×r]` weights - the
+    /// read-only shape a fold needs, with the Adam moments left empty because
+    /// nothing here will ever be stepped. Used by [`ExternalPair::as_pair`] so
+    /// folding a third-party adapter reuses [`Pair::delta`] rather than
+    /// growing a second `B·A`.
+    pub fn from_ab(out: usize, inn: usize, r: usize, a: Vec<f32>, b: Vec<f32>) -> Pair {
+        Pair { out, inn, r, a, b, ma: Vec::new(), va: Vec::new(), mb: Vec::new(), vb: Vec::new() }
     }
 
     /// `w += scale·B·A` in `W`'s `[out×in]` row-major layout.
@@ -150,6 +161,140 @@ impl Pair {
         adam(&mut self.a, &mut self.ma, &mut self.va, da, lr, t);
         adam(&mut self.b, &mut self.mb, &mut self.vb, db, lr, t);
     }
+}
+
+/// One linear's adapter exactly as a THIRD-PARTY file stores it, with the
+/// base tensor key it targets already resolved. See [`read_external_adapter`].
+pub struct ExternalPair {
+    /// The base tensor this adapts, in the model's own naming
+    /// (`<stem>.weight`, the `diffusion_model.` prefix stripped).
+    pub base_key: String,
+    /// The adapter's own stem, for error messages.
+    pub stem: String,
+    pub out: usize,
+    pub inn: usize,
+    pub r: usize,
+    /// `A [r×in]` - the "down" projection.
+    pub a: Vec<f32>,
+    /// `B [out×r]` - the "up" projection.
+    pub b: Vec<f32>,
+    /// `alpha/r`, or 1.0 when the file carries no `.alpha` tensor.
+    pub alpha_mult: f32,
+}
+
+impl ExternalPair {
+    /// A [`Pair`] over the same `A`/`B`, so the fold reuses the ONE `B·A`
+    /// implementation ([`Pair::delta`]) rather than growing a second one.
+    pub fn as_pair(&self) -> Pair {
+        Pair::from_ab(self.out, self.inn, self.r, self.a.clone(), self.b.clone())
+    }
+}
+
+/// The `(A-suffix, B-suffix)` spellings a third-party adapter may use, in the
+/// aliases ComfyUI's own loader accepts. `A`/"down" first, `B`/"up" second.
+const EXTERNAL_SUFFIXES: [(&str, &str); 3] = [
+    (".lora_A.weight", ".lora_B.weight"),
+    (".lora_down.weight", ".lora_up.weight"),
+    (".lora.down.weight", ".lora.up.weight"),
+];
+
+/// Read a third-party (ai-toolkit / ComfyUI / diffusers) LoRA `.safetensors`
+/// into per-linear [`ExternalPair`]s, resolving each to the base tensor key it
+/// targets.
+///
+/// Key matching is ComfyUI's: strip a leading `diffusion_model.`, strip the
+/// `.lora_{A,B}.weight` suffix, and the remaining stem plus `.weight` is the
+/// base tensor. `.alpha`, when present, is read as the scalar it is.
+///
+/// **Every key must be understood.** An unrecognised name, a half pair, or a
+/// mismatched `r` is an error naming the tensor - never a skip. A loader that
+/// quietly drops keys returns base-model output that looks like a successful
+/// adapted run, which is the single worst outcome for this feature.
+pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
+    let tensors = checkpoint::safetensors::read(path)?;
+    let mut a: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+    let mut b: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+    let mut alpha: HashMap<String, f32> = HashMap::new();
+    for t in tensors {
+        let name = t.name.as_str();
+        // `__metadata__` never reaches here (the reader drops it); anything
+        // else that is not an adapter key means we do not understand the file.
+        let mut matched = false;
+        for (sa, sb) in EXTERNAL_SUFFIXES {
+            if let Some(stem) = name.strip_suffix(sa) {
+                a.insert(stem.to_string(), (t.shape.clone(), t.data.clone()));
+                matched = true;
+                break;
+            }
+            if let Some(stem) = name.strip_suffix(sb) {
+                b.insert(stem.to_string(), (t.shape.clone(), t.data.clone()));
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            if let Some(stem) = name.strip_suffix(".alpha") {
+                let v = t.data.first().copied().ok_or_else(|| {
+                    format!("lora {path}: '{name}' is an empty alpha scalar")
+                })?;
+                alpha.insert(stem.to_string(), v);
+                continue;
+            }
+            return Err(format!(
+                "lora {path}: unrecognised tensor '{name}' (expected a \
+                 .lora_A/.lora_B, .lora_down/.lora_up or .alpha key)"
+            ));
+        }
+    }
+    if a.is_empty() {
+        return Err(format!("lora {path}: no LoRA pairs found in this file"));
+    }
+    let mut stems: Vec<String> = a.keys().cloned().collect();
+    stems.sort();
+    for stem in b.keys() {
+        if !a.contains_key(stem) {
+            return Err(format!("lora {path}: '{stem}' has an up/B half but no down/A half"));
+        }
+    }
+    let mut out = Vec::with_capacity(stems.len());
+    for stem in stems {
+        let (ashape, adata) = a.remove(&stem).expect("stem came from a");
+        let (bshape, bdata) = b
+            .remove(&stem)
+            .ok_or_else(|| format!("lora {path}: '{stem}' has a down/A half but no up/B half"))?;
+        if ashape.len() != 2 || bshape.len() != 2 {
+            return Err(format!(
+                "lora {path}: '{stem}' is {ashape:?}/{bshape:?}, expected two 2-D matrices"
+            ));
+        }
+        let (r, inn) = (ashape[0], ashape[1]);
+        let (o, rb) = (bshape[0], bshape[1]);
+        if r != rb {
+            return Err(format!(
+                "lora {path}: '{stem}' rank disagrees - A is {ashape:?} (r={r}), B is {bshape:?} (r={rb})"
+            ));
+        }
+        if adata.len() != r * inn || bdata.len() != o * r {
+            return Err(format!("lora {path}: '{stem}' tensor data does not match its shape"));
+        }
+        let base_key =
+            format!("{}.weight", stem.strip_prefix("diffusion_model.").unwrap_or(&stem));
+        out.push(ExternalPair {
+            base_key,
+            stem: stem.clone(),
+            out: o,
+            inn,
+            r,
+            a: adata,
+            b: bdata,
+            // Both references resolve an absent `.alpha` to a multiplier of
+            // exactly 1.0: ai-toolkit writes alpha == rank (so alpha/r == 1)
+            // and strips the key on PEFT-format saves; ComfyUI's adapter uses
+            // `alpha = 1.0` outright when the tensor is missing.
+            alpha_mult: alpha.get(&stem).map(|al| al / r as f32).unwrap_or(1.0),
+        });
+    }
+    Ok(out)
 }
 
 /// In-place bias-corrected Adam (β 0.9/0.999, eps 1e-8, no weight decay).
