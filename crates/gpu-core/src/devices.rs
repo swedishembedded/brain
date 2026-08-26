@@ -552,6 +552,31 @@ impl ComputeSet {
     }
 }
 
+/// What [`ComputeSet::apply_backend`] records in the ambient pin for a
+/// resolved set: `None` means "record nothing", which is what keeps
+/// `BRAIN_GPU_INDEX` reachable as the ladder's level 3.
+///
+/// `narrowed` is [`ComputeSet::explicit`] - false exactly when the request
+/// was "everything". The distinction matters because recording a pin
+/// unconditionally shadows level 3 whether or not the user asked for
+/// anything, which discards an exported `BRAIN_GPU_INDEX` in silence.
+///
+/// Clearing is still right for a set the user DID narrow: `--device cpu` or
+/// `--device gpu0,gpu1` states where work may go, and an inherited env pin
+/// must not override that. It is not needed to make multi-GPU scheduling
+/// safe - [`current_gpu`] resolves `SCOPED` ahead of the ambient selection,
+/// so a `with_gpu` lane already beats both the pin and the env.
+///
+/// Pure, so the ladder is testable without the `OnceLock`/`Mutex` globals a
+/// real run resolves through.
+fn ambient_pin_for(single: Option<u32>, narrowed: bool) -> Option<Option<u32>> {
+    match (single, narrowed) {
+        (Some(i), _) => Some(Some(i)),
+        (None, true) => Some(None),
+        (None, false) => None,
+    }
+}
+
 impl ComputeSet {
     /// The backend + ambient GPU pin half of [`Self::apply`] - side-effect
     /// light and safe to call from a library/test context (e.g. from
@@ -571,10 +596,15 @@ impl ComputeSet {
             Backend::Vulkan => crate::Backend::Vulkan,
         });
 
-        // One card selected: pin it in the registry's ambient selection. Multi-
-        // GPU scheduling picks cards per job (scoped `with_gpu`) instead, so
-        // the pin is cleared there - including an inherited BRAIN_GPU_INDEX.
-        set_ambient_gpu(self.single_gpu());
+        // One card selected: pin it in the registry's ambient selection, so
+        // every later `Gpu::new` binds that physical card. A set the user
+        // narrowed to something other than one card clears the pin instead,
+        // so an inherited `BRAIN_GPU_INDEX` cannot override the restriction.
+        // A set that narrows nothing records nothing, which leaves that
+        // variable reachable as the ladder's level 3 (see `ambient_pin_for`).
+        if let Some(pin) = ambient_pin_for(self.single_gpu(), self.explicit) {
+            set_ambient_gpu(pin);
+        }
         Ok(())
     }
 
@@ -774,6 +804,41 @@ mod tests {
         assert_eq!(set.npus, vec![0]);
         assert!(!set.explicit);
         assert_eq!(set.backend, Backend::Wgpu);
+    }
+
+    /// The placement ladder this module documents (see the "ambient + scoped
+    /// selection" note) puts `BRAIN_GPU_INDEX` at level 3, below a `--device
+    /// gpu<i>` pin. A run that narrows nothing must therefore leave level 3
+    /// reachable: recording an unconditional "no pin" shadows the variable
+    /// entirely, and a user who exports it is ignored in silence.
+    ///
+    /// Asserted through a pure function so the ladder is checked without
+    /// touching the process-wide `AMBIENT_PIN`/`ENV_AMBIENT` globals - a
+    /// `OnceLock` and a `Mutex` that a test cannot re-resolve per case.
+    #[test]
+    fn narrowing_nothing_leaves_brain_gpu_index_reachable() {
+        // `--device gpu1`: exactly one card, so pin it. Level 2 beats level 3.
+        assert_eq!(ambient_pin_for(Some(1), true), Some(Some(1)));
+        // `--device gpu` / `--device cpu`: narrowed, but not to a single card.
+        // An inherited env pin must not leak into a set the user restricted.
+        assert_eq!(ambient_pin_for(None, true), Some(None));
+        // No `--device` at all: record nothing, so `ambient_gpu` falls through
+        // to `BRAIN_GPU_INDEX` exactly as the ladder promises.
+        assert_eq!(ambient_pin_for(None, false), None);
+    }
+
+    /// Ties the ladder to what `resolve` really produces, so the rule cannot
+    /// drift away from the `explicit` flag it reads.
+    #[test]
+    fn a_bare_run_does_not_shadow_the_env_pin_but_a_single_card_does() {
+        let bare = resolve("", inv(2, 48, 1)).unwrap();
+        assert_eq!(
+            ambient_pin_for(bare.single_gpu(), bare.explicit),
+            None,
+            "a run with no --device must leave BRAIN_GPU_INDEX reachable"
+        );
+        let one = resolve("gpu1", inv(2, 48, 1)).unwrap();
+        assert_eq!(ambient_pin_for(one.single_gpu(), one.explicit), Some(Some(1)));
     }
 
     #[test]
