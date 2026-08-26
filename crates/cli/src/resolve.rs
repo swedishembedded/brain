@@ -306,6 +306,28 @@ fn weights_already_named(arch: &str, rest: &[String]) -> bool {
 /// risk giving some future, unrelated arch's own "embed" verb a training
 /// path this injection was never meant to touch.
 fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
+    // A `Arch::weights_env` architecture whose vars the caller has ALREADY
+    // exported has fully specified its weights, so there is nothing to fetch
+    // and nothing to inject. `supply::ensure_default_weights` below would
+    // download the whole `default_ref` regardless: unlike
+    // `supply::ensure_env_weights`, it consults neither those vars nor
+    // `BRAIN_AUTO_FETCH`. `brain flux2 generate` hit exactly that -- `canon_verb`
+    // maps `generate` to `infer`, so a klein-9b run with all four
+    // `BRAIN_FLUX2_*` paths exported still fetched the 4B `default_ref` it can
+    // never use, then appended a `--weights` flag `flux2_cli` rejects.
+    //
+    // Keyed on "every var is set", NOT on "declares weights_env": those two are
+    // NOT disjoint. `qwen35`, `qwen3vl` and `s3dit` all declare `weights_env`
+    // and still depend on this injection when the vars are unset, so skipping
+    // for every `weights_env` row would break them. This mirrors
+    // `ensure_env_weights`'s own "every var the caller needs is already set"
+    // early return, keeping one rule in both entry points.
+    if brain_arch::by_id(arch).is_some_and(|a| {
+        !a.weights_env.is_empty()
+            && a.weights_env.iter().all(|(var, _)| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
+    }) {
+        return false;
+    }
     let verb = verb.map(crate::args::canon_verb);
     verb.is_some_and(|v| v == "infer")
         || (arch == "lfm2" && verb.is_some_and(|v| v == "fill-mask" || v == "embed"))
@@ -385,6 +407,69 @@ mod tests {
         assert!(wants_default_weights("qwen3vl", Some("generate")));
         assert!(wants_default_weights("s3dit", Some("gen")));
         assert!(!wants_default_weights("qwen3", Some("train")));
+    }
+
+    /// A caller who has exported every `Arch::weights_env` path has fully
+    /// specified its weights, so no `default_ref` may be fetched and no
+    /// `--weights` injected. `brain flux2 generate` downloaded the 4B
+    /// `default_ref` with all four `BRAIN_FLUX2_*` paths set, because
+    /// `canon_verb` maps `generate` to `infer` and `ensure_default_weights`
+    /// (unlike `ensure_env_weights`) consults neither those vars nor
+    /// `BRAIN_AUTO_FETCH`.
+    ///
+    /// The partially-configured and unset cases must still fetch: several rows
+    /// (`s3dit`, `qwen3vl`, `qwen35`, ...) declare `weights_env` AND depend on
+    /// default fetching, which is why the rule keys on "every var set" rather
+    /// than on "declares weights_env".
+    #[test]
+    fn a_fully_configured_weights_env_architecture_skips_the_default_fetch() {
+        let a = brain_arch::by_id("flux2").expect("flux2 row");
+        let vars: Vec<&str> = a.weights_env.iter().map(|(v, _)| *v).collect();
+        assert!(vars.len() >= 2, "flux2 should declare several roles");
+
+        // Nothing exported: the default-fetch path stays available.
+        for v in &vars {
+            std::env::remove_var(v);
+        }
+        assert!(wants_default_weights("flux2", Some("generate")), "unset env must still fetch");
+
+        // Every path exported: nothing to fetch, nothing to inject.
+        for v in &vars {
+            std::env::set_var(v, "/nonexistent/for-test");
+        }
+        assert!(!wants_default_weights("flux2", Some("generate")), "fully configured must not fetch");
+        assert!(!wants_default_weights("flux2", Some("infer")));
+
+        // Partially configured is NOT fully specified, so it still fetches.
+        std::env::remove_var(vars[0]);
+        assert!(wants_default_weights("flux2", Some("generate")), "partial env must still fetch");
+
+        for v in &vars {
+            std::env::remove_var(v);
+        }
+    }
+
+    /// `weights_env` and a `--weights` flag are NOT mutually exclusive, so the
+    /// rule above cannot be simplified to "declares weights_env => never
+    /// fetch": that regresses every row which declares both and relies on
+    /// default fetching. Recorded because assuming disjointness here looked
+    /// obviously right and is simply false.
+    #[test]
+    fn weights_env_and_the_weights_flag_are_not_mutually_exclusive() {
+        // `qwen35_cli.rs` parses `--weights`; the `qwen35` row also declares
+        // `weights_env` (and a `default_ref`).
+        let a = brain_arch::by_id("qwen35").expect("qwen35 row");
+        assert!(
+            !a.weights_env.is_empty(),
+            "qwen35 is the standing counterexample to the disjointness assumption; \
+             if this row changed, re-check wants_default_weights' comment"
+        );
+        // And plenty of rows pair weights_env with a default_ref they still need.
+        for id in ["s3dit", "qwen3vl", "sam2", "rrdbnet"] {
+            let a = brain_arch::by_id(id).expect("row exists");
+            assert!(!a.weights_env.is_empty() && a.default_ref.is_some(), "{id} should declare both");
+            assert!(wants_default_weights(id, Some("infer")), "{id}: default fetch must survive");
+        }
     }
 
     #[test]
