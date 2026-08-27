@@ -73,7 +73,7 @@ for f in "$W"/ref*.png; do [ -e "$f" ] && ARGS+=(--ref "$f"); done
 
 for i in $(seq 1 "$N"); do
   "${BRAIN:-./target/release/brain}" flux2 generate \
-    --variant "${VARIANT:-klein-9b}" --precision "${PRECISION:-int8}" \
+    --variant "${VARIANT:-klein-4b}" --precision "${PRECISION:-int8}" \
     --prompt "A photorealistic portrait photograph of the person in the reference images, keeping their exact facial identity, head shape, eye colour and skin texture. ${POSE:-Soft key light from the left, dark plain background, plain dark crew-neck top, head level and facing camera, calm closed-mouth expression, sharp focus on the eyes, 85mm lens, shallow depth of field.}" \
     --width "$CW" --height "$CH" "${ARGS[@]}" \
     --steps "${STEPS:-12}" --seed "$(( ${SEED:-101} + i - 1 ))" \
