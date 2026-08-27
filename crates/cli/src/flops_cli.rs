@@ -7,6 +7,10 @@
 //!
 //!   brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
 //!               [--train] [--i8] [--stages N] [--run]
+//!   brain flops --model flux2 [--variant V] [--width W] [--height H]
+//!               [--steps N] [--refs "HxW,..."] [--batch B] [--i8] [--run]
+//!   brain flops --model ltxv  [--variant V] [--width W] [--height H]
+//!               [--frames F] [--fps R] [--steps N] [--run]
 //!
 //! Without `--weights` the model's tiny test config is built (synthetic init).
 //! `--train` also records + costs the backward graph; `--i8` (qwen) builds the
@@ -16,10 +20,18 @@
 //! `--train`) on a synthetic batch and prints the online counters beside the
 //! offline calculation — on a fully covered model they agree exactly.
 //!
+//! The image/video models are priced by STAGE - text encode, N denoise
+//! evaluations, VAE decode - because "which stage dominates" is the question
+//! the number exists to answer, and a video is additionally reported per second
+//! of output. None of it runs the model: see the stage-costing section below.
+//!
 //! Coverage is reported honestly: a kernel without a cost formula is listed as
-//! UNCOVERED and excluded from the totals (never counted as zero-cost work).
+//! UNCOVERED and excluded from the totals (never counted as zero-cost work),
+//! and a whole STAGE that is not modelled is listed the same way rather than
+//! folded in as free.
 
-use gpu_core::cost::CostReport;
+use gpu_core::cost::{Cost, CostReport, Recording};
+use gpu_core::roof::Roofs;
 use model::{Shard, Shardable};
 
 use crate::args::Args;
@@ -28,7 +40,11 @@ use crate::args::Args;
 /// stdout, exit 0) and on a bad invocation (to stderr, exit 2). One string,
 /// so the two can never drift apart.
 const USAGE: &str = "usage: brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T] \
-                     [--train] [--i8] [--stages N] [--run]";
+                     [--train] [--i8] [--stages N] [--run]\n\
+       brain flops --model flux2 [--variant klein-4b|klein-9b|base-4b|base-9b|tiny] \
+                     [--width W] [--height H] [--steps N] [--refs HxW,...] [--batch B] [--i8] [--run] [--vae DIR]\n\
+       brain flops --model ltxv [--variant ltx25-22b|tiny] [--width W] [--height H] \
+                     [--frames F] [--fps R] [--steps N] [--run]";
 
 pub fn run_flops(argv: &[String]) {
     // Before the parser: `--help` is not a flag any of the branches below
@@ -48,11 +64,21 @@ pub fn run_flops(argv: &[String]) {
     let i8 = a.take_flag("--i8");
     let stages = a.usize_or("--stages", 1);
     let run = a.take_flag("--run");
+    let variant = a.str_or("--variant", "");
+    let width = a.opt_u32("--width");
+    let height = a.opt_u32("--height");
+    let steps = a.opt_u32("--steps");
+    let frames = a.opt_u32("--frames");
+    let fps = a.opt_u32("--fps");
+    let refs = a.take_str("--refs");
+    let vae = a.take_str("--vae");
     a.finish();
     match model.as_str() {
         "qwen" => qwen_flops(weights.as_deref(), b, block, train, i8, stages, run),
         "gpt" => gpt_flops(weights.as_deref(), b, block, train, stages, run),
         "lfm" => lfm_flops(weights.as_deref(), b, block, train, run),
+        "flux2" => flux2_flops(&variant, width, height, steps, refs.as_deref(), b, i8, run, vae.as_deref()),
+        "ltxv" => ltxv_flops(&variant, width, height, frames, fps, steps, run),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -233,4 +259,706 @@ fn lfm_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, run
         m.gpu.ops_counters()
     });
     report_instance("lfm", fwd, bwd, online);
+}
+
+// ===================== diffusion pipelines: stage costing =====================
+//
+// A generation is not one graph. An image is text-encode, then N denoise
+// evaluations, then a VAE decode; a video adds a temporal axis to all three.
+// "Which stage dominates" is the question the number exists to answer, so the
+// stages are reported separately and then totalled.
+//
+// None of it runs the model. A diffusion transformer builds its dispatches
+// inside `forward()`, so the graph is captured with a DRY `cost::Recording`
+// (gpu-core): every step is folded into a report and then dropped. And because
+// holding a 4B denoiser's weights just to look at its graph defeats the point,
+// the full-depth cost is DERIVED from probe builds of the same config at one
+// and zero blocks:
+//
+//   cost(nd, ns) = cost(0,0) + nd*(cost(1,0) - cost(0,0)) + ns*(cost(0,1) - cost(0,0))
+//
+// which is exact iff the graph is affine in the block counts. That is an
+// assertion about the model, not about the arithmetic, so every run CHECKS it
+// at a point the basis does not contain - the (1,1) build, where the double ->
+// single transition first appears - and refuses to print a total it could not
+// verify. `crates/cli/tests/flops_stage_model.rs` gates the same property, plus
+// the one that decides whether the model can predict at all: attention comes
+// out quadratic in tokens and the projections linear.
+
+/// One stage of a generation pipeline: what it is, how many times it runs in
+/// one generation, and the cost of ONE run.
+struct Stage {
+    name: String,
+    runs: u64,
+    per_run: CostReport,
+    /// Set when the stage is NOT modelled, in which case it contributes
+    /// nothing to the totals and says so. Unmeasured is null, never zero.
+    missing: Option<String>,
+}
+
+impl Stage {
+    fn modelled(name: impl Into<String>, runs: u64, per_run: CostReport) -> Stage {
+        Stage { name: name.into(), runs, per_run, missing: None }
+    }
+
+    fn unmodelled(name: impl Into<String>, runs: u64, why: impl Into<String>) -> Stage {
+        Stage { name: name.into(), runs, per_run: CostReport::default(), missing: Some(why.into()) }
+    }
+
+    fn total(&self) -> CostReport {
+        self.per_run.scaled(self.runs)
+    }
+}
+
+fn eng(x: f64) -> String {
+    for (t, s) in [(1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "k")] {
+        if x >= t {
+            return format!("{:7.3} {s}", x / t);
+        }
+    }
+    format!("{x:7.0}  ")
+}
+
+/// Arithmetic intensity: total work per byte of streamed traffic. Compared
+/// against the device's ridge point this is what makes a stage's number
+/// actionable - it says whether making the arithmetic faster could help at all.
+fn intensity(c: &Cost) -> f64 {
+    if c.bytes == 0 { f64::INFINITY } else { (c.flops + c.int_ops) as f64 / c.bytes as f64 }
+}
+
+/// Seconds this work needs at the device's own measured roofs - the analytic
+/// prediction, against which a real run's wall clock is the check.
+fn roof_seconds(c: &Cost, r: &Roofs) -> Option<f64> {
+    let work = c.flops.max(c.int_ops);
+    if work == 0 && c.bytes == 0 {
+        return None;
+    }
+    let (croof, _) = r.compute_roof(c.flops, c.int_ops);
+    let compute = if croof > 0.0 { work as f64 / (croof as f64 * 1e9) } else { 0.0 };
+    let memory = if r.gbs > 0.0 { c.bytes as f64 / (r.gbs as f64 * 1e9) } else { 0.0 };
+    // The roofline floor: neither unit can go faster than its own roof, so the
+    // stage cannot finish before the slower of the two. This is a LOWER BOUND
+    // on time, not a prediction of it - it assumes perfect overlap and perfect
+    // utilisation, which nothing achieves.
+    Some(compute.max(memory))
+}
+
+/// The stage table: per stage and then totalled, with the arithmetic intensity
+/// and roof classification that say which one is worth attacking.
+fn print_stages(stages: &[Stage], roofs: Option<Roofs>, per_unit: Option<(&str, f64)>) {
+    println!();
+    println!(
+        "{:<40} {:>5} {:>11} {:>11} {:>11} {:>9} {:>8} {:>11}",
+        "stage", "runs", "flops", "int_ops", "bytes", "flop/B", "bound", "roof-secs"
+    );
+    let mut total = CostReport::default();
+    for s in stages {
+        if let Some(why) = &s.missing {
+            println!("{:<40} {:>5} {:>11} {:>11} {:>11} {:>9} {:>8} {:>11}", s.name, s.runs, "?", "?", "?", "?", "?", "?");
+            println!("{:<40}   NOT MODELLED: {why}", "");
+            continue;
+        }
+        let t = s.total();
+        let c = t.total;
+        let bound = roofs.map(|r| r.classify(c.flops.max(c.int_ops), c.bytes).as_str()).unwrap_or("?");
+        let secs = roofs.and_then(|r| roof_seconds(&c, &r)).map(|v| format!("{v:9.4} s")).unwrap_or_else(|| "?".into());
+        println!(
+            "{:<40} {:>5} {:>11} {:>11} {:>11} {:>9.1} {:>8} {:>11}",
+            s.name,
+            s.runs,
+            eng(c.flops as f64),
+            eng(c.int_ops as f64),
+            eng(c.bytes as f64),
+            intensity(&c),
+            bound,
+            secs
+        );
+        total.merge(&t);
+    }
+    let c = total.total;
+    let secs = roofs.and_then(|r| roof_seconds(&c, &r));
+    println!(
+        "{:<40} {:>5} {:>11} {:>11} {:>11} {:>9.1} {:>8} {:>11}",
+        "TOTAL (modelled stages)",
+        "",
+        eng(c.flops as f64),
+        eng(c.int_ops as f64),
+        eng(c.bytes as f64),
+        intensity(&c),
+        roofs.map(|r| r.classify(c.flops.max(c.int_ops), c.bytes).as_str()).unwrap_or("?"),
+        secs.map(|v| format!("{v:9.4} s")).unwrap_or_else(|| "?".into())
+    );
+    if let Some((unit, n)) = per_unit {
+        // The number a user of a video model actually reasons about.
+        println!(
+            "per {unit}: {} flops, {} int_ops, {} bytes{}",
+            eng(c.flops as f64 / n),
+            eng(c.int_ops as f64 / n),
+            eng(c.bytes as f64 / n),
+            secs.map(|v| format!(", {:.4} roof-seconds", v / n)).unwrap_or_default()
+        );
+    }
+    println!("dispatches: {} covered of {} ({:.1}%)", total.covered, total.steps, total.coverage() * 100.0);
+    if !total.uncovered.is_empty() {
+        println!("UNCOVERED (excluded from every number above):");
+        for (k, n) in &total.uncovered {
+            println!("  {k:<40} {n} calls");
+        }
+    }
+    match roofs {
+        Some(r) => println!(
+            "roofs (measured on this device): {:.0} GFLOP/s fp32, {} int8, {:.0} GB/s DRAM, ridge {:.1} flop/B",
+            r.gflops,
+            r.int8_gops.map(|g| format!("{g:.0} GOP/s")).unwrap_or_else(|| "unmeasured".into()),
+            r.gbs,
+            r.ridge()
+        ),
+        None => println!("roofs: unmeasured on this device - flop/B and the totals stand, the seconds do not"),
+    }
+    println!(
+        "roof-secs is a LOWER BOUND: max(work/compute-roof, bytes/DRAM-roof), assuming perfect overlap \
+         and perfect utilisation. Nothing achieves it; the ratio of a measured run to it is the number to track."
+    );
+}
+
+/// Exact per-kernel equality of two reports, or the first difference found.
+/// Totals alone are not enough: two graphs can add up the same while
+/// dispatching different work, and the derivation this checks is precisely a
+/// claim about WHICH dispatches happen.
+fn first_difference(a: &CostReport, b: &CostReport) -> Option<String> {
+    if a.steps != b.steps {
+        return Some(format!("dispatch count {} vs {}", a.steps, b.steps));
+    }
+    if a.total != b.total {
+        return Some(format!("totals {:?} vs {:?}", a.total, b.total));
+    }
+    for name in a.by_kernel.keys().chain(b.by_kernel.keys()) {
+        let x = a.by_kernel.get(name).map(|k| (k.calls, k.cost));
+        let y = b.by_kernel.get(name).map(|k| (k.calls, k.cost));
+        if x != y {
+            return Some(format!("kernel {name}: {x:?} vs {y:?}"));
+        }
+    }
+    if a.uncovered != b.uncovered {
+        return Some(format!("uncovered {:?} vs {:?}", a.uncovered, b.uncovered));
+    }
+    None
+}
+
+/// Derive a whole block stack's cost from probes at one and zero blocks.
+///
+/// `probe(counts)` records the graph of a build with those per-kind block
+/// counts. `full` is the real config's counts. The derivation is affine, and
+/// it is CHECKED at the all-ones point - which the basis does not contain, and
+/// where a per-kind transition first appears - before anything is returned.
+fn affine_block_cost(
+    kinds: &[&str],
+    full: &[usize],
+    floor: &[usize],
+    probe: &mut dyn FnMut(&[usize]) -> CostReport,
+) -> Result<CostReport, String> {
+    // `floor` is the smallest depth the model will build at - zero for FLUX.2,
+    // one for LTX (`LtxDit::forward` asserts a non-empty block stack).
+    let base_at = floor.to_vec();
+    let base = probe(&base_at);
+    let mut per_block = Vec::new();
+    for (i, kind) in kinds.iter().enumerate() {
+        let mut one = base_at.clone();
+        one[i] += 1;
+        let c = probe(&one);
+        per_block.push(
+            c.checked_sub(&base)
+                .ok_or_else(|| format!("the +1-{kind} graph does not contain the base graph; the cost is not derivable"))?,
+        );
+    }
+    // A check point OUTSIDE the basis: base + 1 of every kind, unless there is
+    // only one kind and that point IS the basis, in which case base + 2.
+    let bump = if kinds.len() == 1 { 2 } else { 1 };
+    let check: Vec<usize> = base_at.iter().map(|b| b + bump).collect();
+    let mut predicted = base.clone();
+    for p in &per_block {
+        predicted.merge(&p.scaled(bump as u64));
+    }
+    let recorded = probe(&check);
+    if let Some(d) = first_difference(&predicted, &recorded) {
+        return Err(format!("block-depth linearity check FAILED at {check:?}: {d}"));
+    }
+    println!(
+        "block-depth linearity check: EXACT at {check:?} ({} dispatches predicted and recorded)",
+        recorded.steps
+    );
+    let mut out = base;
+    for ((p, &n), &b) in per_block.iter().zip(full).zip(floor) {
+        out.merge(&p.scaled((n - b) as u64));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------- flux2 ----
+
+/// A toy FLUX.2 config for exercising the machinery without a real variant's
+/// memory. Deliberately asymmetric, so a confusion between two axes shows up.
+fn flux2_tiny() -> flux2::Flux2Config {
+    flux2::Flux2Config {
+        in_channels: 8,
+        context_in_dim: 12,
+        hidden: 16,
+        n_heads: 2,
+        depth_double: 2,
+        depth_single: 3,
+        axes_dim: [2, 2, 2, 2],
+        txt_len: 8,
+        ..flux2::Flux2Config::klein_4b()
+    }
+}
+
+/// Record one FLUX.2 DiT denoise evaluation at the given block depths.
+/// `live` executes it; otherwise nothing reaches the device.
+fn flux2_probe(
+    gpu: &gpu_core::Gpu,
+    base: &flux2::Flux2Config,
+    nd: usize,
+    ns: usize,
+    lh: usize,
+    lw: usize,
+    refs: &[(usize, usize)],
+    bsz: u32,
+    prec: flux2::Precision,
+    live: bool,
+) -> CostReport {
+    let cfg = flux2::Flux2Config { depth_double: nd, depth_single: ns, ..base.clone() };
+    let n_gen = lh * lw;
+    let ni = n_gen + refs.iter().map(|(h, w)| h * w).sum::<usize>();
+    let mut ts = flux2::Tensors::new();
+    for (name, shape) in cfg.tensor_manifest() {
+        let n: usize = shape.iter().product();
+        ts.insert(name, (shape, vec![0.0f32; n]));
+    }
+    // One device for every probe: a fresh `Gpu::new` per build re-opens the
+    // adapter and starts its own memory accounting, which is noise here.
+    let m = flux2::Flux2Model::new_batched(&cfg, &ts, gpu.share(), (cfg.txt_len + ni) as u32, bsz, prec);
+    drop(ts);
+    let ids = flux2::position_ids(cfg.txt_len, lh, lw, refs);
+    let img = vec![0.0f32; ni * cfg.in_channels];
+    let ctx = vec![0.0f32; cfg.txt_len * cfg.context_in_dim];
+    let samples: Vec<flux2::Sample> =
+        (0..bsz).map(|_| flux2::Sample { img_tokens: &img, ctx: &ctx, t: 0.5 }).collect();
+    let rec = if live { Recording::live() } else { Recording::dry() };
+    let _ = m.forward_batch(&samples, &ids, n_gen);
+    rec.take()
+}
+
+/// `"64x64,32x48"` -> reference image sizes in LATENT tokens.
+fn parse_refs(s: Option<&str>) -> Vec<(usize, usize)> {
+    s.into_iter()
+        .flat_map(|s| s.split(','))
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| {
+            let (h, w) = p.trim().split_once('x').unwrap_or_else(|| {
+                eprintln!("--refs wants HxW pairs in latent tokens, e.g. 64x64");
+                std::process::exit(2);
+            });
+            (h.parse().expect("--refs height"), w.parse().expect("--refs width"))
+        })
+        .collect()
+}
+
+fn flux2_flops(
+    variant: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    steps: Option<u32>,
+    refs: Option<&str>,
+    bsz: u32,
+    i8: bool,
+    run: bool,
+    vae: Option<&str>,
+) {
+    let variant = if variant.is_empty() { "klein-4b" } else { variant };
+    let cfg = match variant {
+        "tiny" => flux2_tiny(),
+        v => flux2::Flux2Config::from_name(v).unwrap_or_else(|e| {
+            eprintln!("brain flops --model flux2: {e}");
+            std::process::exit(2);
+        }),
+    };
+    // FLUX.2 latent tokens: the VAE downsamples 8x and the 2x2 pixel-unshuffle
+    // halves each axis again, so one token spans 16 pixels.
+    let (w, h) = (width.unwrap_or(1024), height.unwrap_or(1024));
+    assert!(w % 16 == 0 && h % 16 == 0, "flux2 works in 16-pixel latent tokens: --width/--height must be multiples of 16");
+    let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
+    let refs = parse_refs(refs);
+    let prec = if i8 { flux2::Precision::Int8 } else { flux2::Precision::F32 };
+    // A distilled klein is 4 Euler steps and no CFG; a base variant is 50
+    // steps, each of which is TWO forwards (conditional + unconditional).
+    let n_steps = steps.unwrap_or(if cfg.distilled { 4 } else { 50 }) as u64;
+    let per_step = if cfg.distilled { 1 } else { 2 };
+    let ni = lh * lw + refs.iter().map(|(a, b)| a * b).sum::<usize>();
+
+    println!(
+        "flux2 {variant}: {w}x{h} = {} generated latent tokens{}, {} text tokens, hidden {} ({} double + {} single blocks), {}",
+        lh * lw,
+        if refs.is_empty() { String::new() } else { format!(" + {} reference tokens", ni - lh * lw) },
+        cfg.txt_len,
+        cfg.hidden,
+        cfg.depth_double,
+        cfg.depth_single,
+        if i8 { "int8 DP4A" } else { "fp32" }
+    );
+    println!(
+        "sampling: {n_steps} steps x {per_step} forward(s)/step ({}), batch {bsz}",
+        if cfg.distilled { "distilled, no CFG" } else { "CFG: conditional + unconditional" }
+    );
+
+    let gpu = gpu_core::Gpu::new(flux2::KERNELS);
+    let roofs = gpu_core::roof::ensure(&gpu);
+    let denoise = affine_block_cost(&["double", "single"], &[cfg.depth_double, cfg.depth_single], &[0, 0], &mut |c| {
+        flux2_probe(&gpu, &cfg, c[0], c[1], lh, lw, &refs, bsz, prec, false)
+    });
+    let denoise = match denoise {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("flux2: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let mut stages = vec![
+        flux2_text_encode_stage(&cfg),
+        Stage::modelled("denoise (MMDiT forward)", n_steps * per_step, denoise),
+        flux2_vae_stage(lh, lw, vae),
+    ];
+    stages.retain(|s| s.runs > 0);
+
+    print_stages(&stages, roofs, None);
+
+    if run {
+        // OFFLINE vs ONLINE on the one build small enough to execute at these
+        // dims: the (1,1) probe. They must agree exactly - a dry recording that
+        // saw a different graph than the device ran would invalidate every
+        // number above.
+        let dry = flux2_probe(&gpu, &cfg, 1, 1, lh, lw, &refs, bsz, prec, false);
+        let wet = flux2_probe(&gpu, &cfg, 1, 1, lh, lw, &refs, bsz, prec, true);
+        match first_difference(&dry, &wet) {
+            None => println!("\noffline == online on the executed (1,1) build: {} dispatches, identical per kernel", wet.steps),
+            Some(d) => {
+                eprintln!("\noffline != online on the executed (1,1) build: {d}");
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
+/// The FLUX.2 text encoder: a Qwen3 prefill of the fixed text window, run only
+/// as far as the deepest tapped layer (the conditioning is a concat of three
+/// hidden states, so the layers past the last tap and the LM head never run).
+fn flux2_text_encode_stage(cfg: &flux2::Flux2Config) -> Stage {
+    let deepest = *flux2::pipeline::TAP_LAYERS.iter().max().expect("tap layers");
+    let te_cfg = match cfg.context_in_dim {
+        12288 => qwen3::QwenConfig::qwen3_8b(),
+        7680 => qwen3::QwenConfig::qwen3_4b(),
+        // A toy config has no real encoder behind it.
+        _ => {
+            return Stage::unmodelled(
+                "text-encode (qwen3)",
+                1,
+                "this variant's context width matches no shipped Qwen3 encoder",
+            )
+        }
+    };
+    let t = cfg.txt_len as u32;
+    let probe = |n: usize| -> CostReport {
+        let shard = Shard { start: 0, end: n, embed: true, head: false, gpu_index: Shard::ANY_GPU };
+        let w = qwen_shard_zeros(&te_cfg, n);
+        let m = qwen3::Qwen::new_shard(te_cfg.clone(), 1, t, &w, false, shard);
+        m.cost_fwd()
+    };
+    let c1 = probe(1);
+    let c2 = probe(2);
+    match c2.checked_sub(&c1) {
+        Some(per_layer) => {
+            let mut out = c1;
+            out.merge(&per_layer.scaled(deepest as u64 - 1));
+            Stage::modelled(format!("text-encode (qwen3, {deepest} of {} layers)", te_cfg.n_layers), 1, out)
+        }
+        None => Stage::unmodelled("text-encode (qwen3)", 1, "the encoder graph is not affine in layer count"),
+    }
+}
+
+/// Zero weights for a Qwen3 build of the first `n_layers` layers only - the
+/// point of a probe is to see the GRAPH, and holding a 4B encoder to look at
+/// two of its layers would defeat it.
+fn qwen_shard_zeros(cfg: &qwen3::QwenConfig, n_layers: usize) -> std::collections::HashMap<String, Vec<f32>> {
+    cfg.param_list()
+        .into_iter()
+        .filter(|(name, _)| match name.strip_prefix("blocks.") {
+            Some(rest) => rest.split('.').next().and_then(|s| s.parse::<usize>().ok()).is_some_and(|l| l < n_layers),
+            None => true,
+        })
+        .map(|(name, n)| (name, vec![0.0f32; n]))
+        .collect()
+}
+
+// ----------------------------------------------------------------- ltxv ----
+
+/// Zero weights at the DiT's own manifest shapes - the probe wants the graph,
+/// not the numbers.
+fn ltxv_zeros(cfg: &ltxv::config::LtxDitConfig) -> vae::blocks::Tensors {
+    ltxv::dit::dit_tensor_manifest(cfg)
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            (name, (shape, vec![0.0f32; n]))
+        })
+        .collect()
+}
+
+/// Record one LTX-2.5 DiT denoise evaluation over a `(lat_t, lh, lw)` latent
+/// grid at the given block depth.
+fn ltxv_probe(
+    base: &ltxv::config::LtxDitConfig,
+    layers: usize,
+    connector_layers: usize,
+    lat_t: usize,
+    lh: usize,
+    lw: usize,
+    ctx_len: usize,
+    fps: f64,
+    live: bool,
+) -> CostReport {
+    let cfg = ltxv::config::LtxDitConfig {
+        num_layers: layers as u32,
+        connector_num_layers: connector_layers as u32,
+        ..*base
+    };
+    let dit = ltxv::dit::LtxDit::new(cfg, ltxv_zeros(&cfg), None);
+    let t = lat_t * lh * lw;
+    let latent = vec![0.0f32; t * cfg.in_channels as usize];
+    let timesteps = vec![0.5f32; t];
+    let keyframes = vec![0.0f32; t];
+    let positions = ltxv::pipeline::real_pixel_positions(lat_t, lh, lw, fps);
+    let context = vec![0.0f32; ctx_len * cfg.cross_attention_dim as usize];
+    let valid = vec![1.0f32; ctx_len];
+    let rec = if live { Recording::live() } else { Recording::dry() };
+    let _ = dit.forward(&latent, &timesteps, &positions, &keyframes, &context, ctx_len, t, &valid);
+    rec.take()
+}
+
+fn ltxv_flops(
+    variant: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    frames: Option<u32>,
+    fps: Option<u32>,
+    steps: Option<u32>,
+    run: bool,
+) {
+    use ltxv::config::LtxDitConfig;
+    let variant = if variant.is_empty() { "ltx25-22b" } else { variant };
+    let cfg = match variant {
+        "ltx25-22b" | "ltx25_22b" => LtxDitConfig::ltx25_22b(),
+        "tiny" => LtxDitConfig::tiny(),
+        v => {
+            eprintln!("brain flops --model ltxv: unknown --variant {v} (ltx25-22b|tiny)");
+            std::process::exit(2);
+        }
+    };
+    let sp = ltxv::pipeline::VAE_SPATIAL_SCALE as u32;
+    let tp = ltxv::pipeline::VAE_TEMPORAL_SCALE as u32;
+    let (w, h) = (width.unwrap_or(768), height.unwrap_or(512));
+    let n_frames = frames.unwrap_or(121);
+    let fps = fps.unwrap_or(24);
+    assert!(w % sp == 0 && h % sp == 0, "ltxv latent cells span {sp} pixels: --width/--height must be multiples of {sp}");
+    assert!(n_frames % tp == 1, "the causal VAE takes 1 + 8k frames; --frames must be 1 mod {tp}");
+    let (lh, lw) = ((h / sp) as usize, (w / sp) as usize);
+    let lat_t = ((n_frames - 1) / tp + 1) as usize;
+    let t = lat_t * lh * lw;
+    // The real checkpoint conditions on the Gemma-4 tokenizer's full fixed
+    // width when the embeddings connector is on; the toy config has no real
+    // encoder behind it, so its stub width stands in.
+    let ctx_len = if cfg.use_embeddings_connector { 1024 } else { 128 };
+    let n_steps = steps.unwrap_or(30) as u64;
+    let seconds = n_frames as f64 / fps as f64;
+
+    println!(
+        "ltxv {variant}: {w}x{h}, {n_frames} frames at {fps} fps = {seconds:.2} s of video",
+    );
+    println!(
+        "latent grid {lat_t} x {lh} x {lw} = {t} tokens, inner_dim {} ({} blocks + {} connector blocks), {ctx_len} text tokens",
+        cfg.inner_dim, cfg.num_layers, cfg.connector_num_layers
+    );
+    println!("sampling: {n_steps} steps x 1 forward/step (distilled, no CFG)");
+
+    // Two independent stacks: the 48 DiT blocks and the caption connector's
+    // own 8. Both are derived, because at 4096 channels neither the real block
+    // stack NOR the real connector fits a 24 GB card in fp32 - which is
+    // exactly the situation an offline cost model is for. `LtxDit::forward`
+    // asserts a non-empty block stack, so the basis floor is one of each.
+    let denoise = affine_block_cost(
+        &["block", "connector"],
+        &[cfg.num_layers as usize, cfg.connector_num_layers as usize],
+        &[1, 1],
+        &mut |c| ltxv_probe(&cfg, c[0], c[1], lat_t, lh, lw, ctx_len, fps as f64, false),
+    );
+    let denoise = match denoise {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ltxv: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let stages = vec![
+        Stage::unmodelled(
+            "text-encode (gemma-4)",
+            1,
+            "the LTX text encoder is a separate architecture that this path does not build; it runs \
+             once per clip against a denoise loop of many steps",
+        ),
+        Stage::modelled("denoise (DiT forward)", n_steps, denoise),
+        Stage::unmodelled(
+            "vae-decode (3D)",
+            1,
+            "the LTX 3D VAE decoder graph is built from a real checkpoint's tensors, which this \
+             weight-free path does not have",
+        ),
+    ];
+
+    let gpu = gpu_core::Gpu::new(&ltxv::block::KERNELS);
+    let roofs = gpu_core::roof::ensure(&gpu);
+    print_stages(&stages, roofs, Some(("second of video", seconds)));
+    println!(
+        "note: the host-side patchify_proj and proj_out linears are not device dispatches and so are \
+         not in these numbers; they are two [{t} x {}] GEMMs against the {} block stack.",
+        cfg.inner_dim, cfg.num_layers
+    );
+
+    if run {
+        let dry = ltxv_probe(&cfg, 1, 1, lat_t, lh, lw, ctx_len, fps as f64, false);
+        let wet = ltxv_probe(&cfg, 1, 1, lat_t, lh, lw, ctx_len, fps as f64, true);
+        match first_difference(&dry, &wet) {
+            None => println!("\noffline == online on the executed 1-block build: {} dispatches, identical per kernel", wet.steps),
+            Some(d) => {
+                eprintln!("\noffline != online on the executed 1-block build: {d}");
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------ flux2 VAE ----
+
+/// Zero tensors at the shapes `vae::VaeDecoder::from_diffusers` asks for, so
+/// the decode graph can be built - and therefore priced - without a
+/// checkpoint.
+///
+/// The decoder records its whole dispatch sequence at CONSTRUCTION
+/// (`VaeDecoder::steps`), so nothing here executes; `Gpu::cost_of` prices that
+/// list directly. What the shapes have to be right about is the buffer sizing:
+/// `Builder::dev` sizes each weight buffer from its data length, so a wrong
+/// length is a wrong binding, not a wrong number. That is why the gate on this
+/// is a real decode at small resolution, not just "it built".
+fn vae_decoder_zeros(cfg: &vae::VaeConfig) -> vae::blocks::Tensors {
+    let mut t = vae::blocks::Tensors::new();
+    let mut put = |name: String, shape: Vec<usize>| {
+        let n: usize = shape.iter().product();
+        t.insert(name, (shape, vec![0.0f32; n]));
+    };
+    let conv = |t: &mut dyn FnMut(String, Vec<usize>), p: &str, cin: u32, cout: u32, k: u32| {
+        t(format!("{p}.weight"), vec![cout as usize, cin as usize, k as usize, k as usize]);
+        t(format!("{p}.bias"), vec![cout as usize]);
+    };
+    let gnorm = |t: &mut dyn FnMut(String, Vec<usize>), p: &str, c: u32| {
+        t(format!("{p}.weight"), vec![c as usize]);
+        t(format!("{p}.bias"), vec![c as usize]);
+    };
+    let resnet = |t: &mut dyn FnMut(String, Vec<usize>), p: &str, cin: u32, cout: u32| {
+        gnorm(t, &format!("{p}.norm1"), cin);
+        conv(t, &format!("{p}.conv1"), cin, cout, 3);
+        gnorm(t, &format!("{p}.norm2"), cout);
+        conv(t, &format!("{p}.conv2"), cout, cout, 3);
+        if cin != cout {
+            conv(t, &format!("{p}.conv_shortcut"), cin, cout, 1);
+        }
+    };
+    // diffusers naming: a 1x1 conv per projection, so the element count is c*c
+    // whether the checkpoint stores it as [c,c,1,1] or [c,c].
+    let attn = |t: &mut dyn FnMut(String, Vec<usize>), p: &str, c: u32| {
+        gnorm(t, &format!("{p}.group_norm"), c);
+        for leaf in ["to_q", "to_k", "to_v", "to_out.0"] {
+            conv(t, &format!("{p}.{leaf}"), c, c, 1);
+        }
+    };
+
+    let zc = cfg.latent_channels;
+    let rc = cfg.reversed_channels();
+    let mid_c = *cfg.block_out_channels.last().expect("block_out_channels");
+    let f = &mut put as &mut dyn FnMut(String, Vec<usize>);
+    if cfg.use_post_quant_conv {
+        conv(f, "post_quant_conv", zc, zc, 1);
+    }
+    conv(f, "decoder.conv_in", zc, mid_c, 3);
+    resnet(f, "decoder.mid_block.resnets.0", mid_c, mid_c);
+    if cfg.mid_block_add_attention {
+        attn(f, "decoder.mid_block.attentions.0", mid_c);
+    }
+    resnet(f, "decoder.mid_block.resnets.1", mid_c, mid_c);
+    let mut prev = mid_c;
+    for (i, &out_c) in rc.iter().enumerate() {
+        for r in 0..cfg.layers_per_block + 1 {
+            let cin = if r == 0 { prev } else { out_c };
+            resnet(f, &format!("decoder.up_blocks.{i}.resnets.{r}"), cin, out_c);
+        }
+        if i < rc.len() - 1 {
+            conv(f, &format!("decoder.up_blocks.{i}.upsamplers.0.conv"), out_c, out_c, 3);
+        }
+        prev = out_c;
+    }
+    gnorm(f, "decoder.conv_norm_out", prev);
+    conv(f, "decoder.conv_out", prev, cfg.out_channels, 3);
+    t
+}
+
+/// The FLUX.2 VAE decode of one image: `[32, lh*2, lw*2]` latent -> RGB.
+///
+/// With `--vae <dir|file>` the same graph is built a second time from the REAL
+/// checkpoint's tensors and the two are compared dispatch by dispatch. That is
+/// the gate on [`vae_decoder_zeros`]: a manifest with a wrong shape or a
+/// misspelled name does not fail loudly by itself - it builds a graph at the
+/// wrong dimensions, which is a wrong number wearing a right number's clothes.
+fn flux2_vae_stage(lh: usize, lw: usize, real: Option<&str>) -> Stage {
+    let cfg = vae::VaeConfig::flux2();
+    let (h8, w8) = ((lh * 2) as u32, (lw * 2) as u32);
+    let ts = vae_decoder_zeros(&cfg);
+    let dec = vae::VaeDecoder::from_diffusers(cfg.clone(), &ts, h8, w8, None);
+    drop(ts);
+    let r = dec.gpu().cost_of(dec.steps());
+    drop(dec);
+    if let Some(path) = real {
+        let p = std::path::Path::new(path);
+        let file = if p.is_dir() { p.join("diffusion_pytorch_model.safetensors") } else { p.to_path_buf() };
+        let cfg_path = file.with_file_name("config.json");
+        let real_cfg = match std::fs::read_to_string(&cfg_path) {
+            Ok(j) => vae::VaeConfig::from_json(&serde_json::from_str(&j).expect("vae config.json")),
+            Err(_) => cfg.clone(),
+        };
+        let mut map = vae::blocks::Tensors::new();
+        for t in checkpoint::safetensors::read(file.to_str().expect("vae path")).unwrap_or_else(|e| {
+            eprintln!("brain flops --vae {path}: {e}");
+            std::process::exit(2);
+        }) {
+            map.insert(t.name, (t.shape, t.data));
+        }
+        let real_dec = vae::VaeDecoder::from_diffusers(real_cfg, &map, h8, w8, None);
+        drop(map);
+        let rr = real_dec.gpu().cost_of(real_dec.steps());
+        match first_difference(&r, &rr) {
+            None => println!("vae manifest check: EXACT - the shape-only weights build the same {} dispatches as {path}", rr.steps),
+            Some(d) => {
+                eprintln!("vae manifest check FAILED against {path}: {d}");
+                std::process::exit(2);
+            }
+        }
+    }
+    Stage::modelled(format!("vae-decode ({}x{} image)", lw * 16, lh * 16), 1, r)
 }

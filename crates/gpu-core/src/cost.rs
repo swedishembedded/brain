@@ -62,6 +62,21 @@ impl Cost {
         self.int_ops += o.int_ops;
         self.bytes += o.bytes;
     }
+
+    /// `k` repetitions of the same work - a denoise loop's per-step cost times
+    /// its step count.
+    pub fn scaled(self, k: u64) -> Cost {
+        Cost { flops: self.flops * k, int_ops: self.int_ops * k, bytes: self.bytes * k }
+    }
+
+    /// `self - o`, or `None` if `o` is not contained in `self`.
+    pub fn checked_sub(self, o: Cost) -> Option<Cost> {
+        Some(Cost {
+            flops: self.flops.checked_sub(o.flops)?,
+            int_ops: self.int_ops.checked_sub(o.int_ops)?,
+            bytes: self.bytes.checked_sub(o.bytes)?,
+        })
+    }
 }
 
 /// Per-kernel slice of a [`CostReport`].
@@ -116,6 +131,58 @@ impl CostReport {
     /// Fraction of steps with a cost formula (1.0 when empty: nothing missing).
     pub fn coverage(&self) -> f64 {
         if self.steps == 0 { 1.0 } else { self.covered as f64 / self.steps as f64 }
+    }
+
+    /// `k` repetitions of this whole report - what turns one denoise step into
+    /// a denoise LOOP without re-recording the graph `k` times.
+    pub fn scaled(&self, k: u64) -> CostReport {
+        CostReport {
+            total: self.total.scaled(k),
+            steps: self.steps * k,
+            covered: self.covered * k,
+            by_kernel: self
+                .by_kernel
+                .iter()
+                .map(|(n, v)| (n.clone(), KernelCost { calls: v.calls * k, cost: v.cost.scaled(k) }))
+                .collect(),
+            uncovered: self.uncovered.iter().map(|(n, c)| (n.clone(), c * k)).collect(),
+        }
+    }
+
+    /// `self - o`, per kernel, or `None` if `o` is not contained in `self`.
+    ///
+    /// This is what makes a whole-model cost DERIVABLE from small probes: the
+    /// per-block cost of a transformer is the difference between the graphs of
+    /// a depth-N and a depth-(N-1) build of the SAME config, so a 4B model's
+    /// denoise cost can be computed exactly without ever holding 4B weights.
+    /// `None` - a kernel in `o` that `self` does not have, or a negative
+    /// difference - means the two graphs are not nested, which invalidates the
+    /// derivation rather than merely perturbing it, so it is not a saturating
+    /// subtraction.
+    pub fn checked_sub(&self, o: &CostReport) -> Option<CostReport> {
+        let mut out = CostReport {
+            total: self.total.checked_sub(o.total)?,
+            steps: self.steps.checked_sub(o.steps)?,
+            covered: self.covered.checked_sub(o.covered)?,
+            by_kernel: self.by_kernel.clone(),
+            uncovered: self.uncovered.clone(),
+        };
+        for (k, v) in &o.by_kernel {
+            let e = out.by_kernel.get_mut(k)?;
+            e.calls = e.calls.checked_sub(v.calls)?;
+            e.cost = e.cost.checked_sub(v.cost)?;
+            if e.calls == 0 {
+                out.by_kernel.remove(k);
+            }
+        }
+        for (k, c) in &o.uncovered {
+            let e = out.uncovered.get_mut(k)?;
+            *e = e.checked_sub(*c)?;
+            if *e == 0 {
+                out.uncovered.remove(k);
+            }
+        }
+        Some(out)
     }
 
     /// Sum another report into this one (e.g. fwd + bwd, or across stages).
@@ -1491,6 +1558,40 @@ mod tests {
         // embed moves bytes, no flops.
         let e = cost("embed", &[8, 5], 40);
         assert_eq!((e.flops, e.bytes), (0, 8 * 5 * 8 + 4 * 5));
+    }
+
+    /// Report arithmetic: a whole-model cost is DERIVED from small probes by
+    /// subtracting nested graphs and scaling the difference, so both operations
+    /// have to be exact per kernel, not just in the totals.
+    #[test]
+    fn report_arithmetic_is_exact_per_kernel() {
+        let mut small = CostReport::default();
+        let mut big = CostReport::default();
+        for r in [&mut small, &mut big] {
+            r.record("matmul", kernel_cost("matmul", Some(&[8, 4, 6]), 48));
+            r.record("nosuch_kernel", None);
+        }
+        big.record("matmul", kernel_cost("matmul", Some(&[8, 4, 6]), 48));
+        big.record("silu", kernel_cost("silu", Some(&[100]), 100));
+
+        let d = big.checked_sub(&small).expect("big contains small");
+        assert_eq!(d.steps, 2);
+        assert_eq!(d.by_kernel["matmul"].calls, 1);
+        assert_eq!(d.by_kernel["silu"].calls, 1);
+        assert!(!d.by_kernel.contains_key("nosuch_kernel"));
+        assert!(d.uncovered.is_empty(), "the uncovered call cancels too");
+        assert_eq!(d.total, Cost { flops: 384 + 400, int_ops: 0, bytes: 4 * 104 + 800 });
+
+        // Scaling a report is scaling every kernel row, not just the total.
+        let x3 = d.scaled(3);
+        assert_eq!(x3.total, d.total.scaled(3));
+        assert_eq!(x3.steps, 6);
+        assert_eq!(x3.by_kernel["silu"].calls, 3);
+        assert_eq!(x3.by_kernel["silu"].cost, d.by_kernel["silu"].cost.scaled(3));
+
+        // Non-nested graphs are refused, not saturated: an unsound derivation
+        // must fail loudly rather than quietly report a smaller model.
+        assert!(small.checked_sub(&big).is_none(), "subtracting a superset must refuse");
     }
 
     /// The three kernels the diffusion image/video graphs dispatch that had no
