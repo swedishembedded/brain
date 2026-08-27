@@ -302,16 +302,37 @@ impl Pipeline {
         // `new_shard`/`new_shard_i8` the same bytes through the
         // `checkpoint::TensorSource` seam they already accept, so the host
         // holds one tensor at a time instead of the model.
+        //
+        // `BRAIN_FLUX2_TE_NO_STREAM=1` forces the old whole-map route. Not a
+        // correctness switch - both produce the same bytes, pinned per tensor
+        // in `qwen3` - but it is how the two are A/B'd on a real checkpoint,
+        // and a valve if a configuration ever needs the map route back.
+        let te_no_stream = std::env::var("BRAIN_FLUX2_TE_NO_STREAM").is_ok_and(|v| v != "0");
+        let te_eager: Option<std::collections::HashMap<String, Vec<f32>>> = if te_no_stream {
+            let ts = checkpoint::safetensors::read_model_dir(std::path::Path::new(&paths.te))?;
+            Some(qwen3::import::brain_init_from_hf(ts, &te_cfg)?)
+        } else {
+            None
+        };
         let te_reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&paths.te))
             .map_err(|e| format!("flux2: open text encoder {}: {e}", paths.te))?;
         // TE placement: default = ambient device; `BRAIN_FLUX2_TE_DEVICE=gpu<i>`
-        // builds a truncated fp32 shard on that card (layers 0..=deepest tap —
-        // res[27] needs no more; drops 9 layers + the head, ~12 GiB resident,
-        // so the DiT can own the other card whole). A `:i8` suffix
-        // (`gpu<i>:i8`) uses the int8 (DP4A) shard instead (~4× smaller —
-        // truncated TE ~4.4 GiB resident, so int8 DiT + int8 TE share ONE
-        // card). The masked-pad kmask path is shared by both shard graphs, so
-        // parity is unchanged (int8 is the lossy tier, gated in its own test).
+        // builds a truncated fp32 shard on that card, so the DiT can own the
+        // other card whole. `Shard::owns` is `l < end`, so the shard keeps
+        // layers `[0, deepest)` - the residual stream the deepest tap reads has
+        // passed through exactly those, and the remaining layers, the final
+        // norm and the LM head are never read. A `:i8` suffix (`gpu<i>:i8`)
+        // uses the int8 (DP4A) shard instead, which is several times smaller.
+        // The masked-pad kmask path is shared by both shard graphs, so parity
+        // is unchanged (int8 is the lossy tier, gated in its own test).
+        //
+        // This is a TWO-CARD layout. Putting the encoder on the DiT's own card
+        // is not a supported configuration at klein-9b/1024x768: measured, the
+        // DiT plus VAE alone comes close to filling a 24 GB card, and even the
+        // truncated int8 encoder is far too large to join it. See the FLUX.2
+        // roadmap for the measured budgets. Today that combination fails as a
+        // raw device out-of-memory rather than a refusal naming the two
+        // budgets, which is a known gap recorded there.
         let deepest = *TAP_LAYERS.iter().max().unwrap();
         // `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]` is user input, parsed to a
         // canonical card index at this edge; the shard's gpu_index is what
@@ -334,11 +355,18 @@ impl Pipeline {
                 // discarded. Narrowed, not weakened: a tensor that IS present
                 // is still element-count checked, and a tensor mapping outside
                 // the config's full parameter list is still a hard error.
-                let src = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
+                let streamed;
+                let src: &dyn checkpoint::TensorSource = match &te_eager {
+                    Some(m) => m,
+                    None => {
+                        streamed = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
+                        &streamed
+                    }
+                };
                 if te_i8 {
-                    qwen3::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, &src, shard)
+                    qwen3::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, src, shard)
                 } else {
-                    qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, &src, false, shard)
+                    qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, src, false, shard)
                 }
             }
             // No explicit placement: the whole encoder on the ambient device,
@@ -348,8 +376,15 @@ impl Pipeline {
             // identical to the one this path always ran.
             _ => {
                 let shard = qwen3::Shard::whole(te_cfg.n_layers as usize);
-                let src = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
-                qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, &src, true, shard)
+                let streamed;
+                let src: &dyn checkpoint::TensorSource = match &te_eager {
+                    Some(m) => m,
+                    None => {
+                        streamed = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
+                        &streamed
+                    }
+                };
+                qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, src, true, shard)
             }
         };
 

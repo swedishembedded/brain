@@ -264,6 +264,44 @@ Still eager, deliberately: the UNPLACED text-encoder branch (no
 truncating it would change what gets built rather than only where the bytes
 live.
 
+### Device budgets, and why the encoder needs its own card
+
+Streaming the text encoder moved HOST memory and left DEVICE memory alone.
+That was the intent, but it had never been measured, so there was no figure to
+write a residency bound against. Measured on 2x Tesla P40, klein-9b int8,
+1024x768, 4 steps, DiT on one card and the truncated int8 encoder alone on the
+other, so each card's peak is attributable:
+
+| | streamed | mapped (`BRAIN_FLUX2_TE_NO_STREAM=1`) |
+|---|---|---|
+| text encoder, device peak | 14097 MiB | 14101 MiB |
+| DiT + VAE, device peak | 24431 MiB | 23397 MiB |
+| host peak | 11.30 GB | 33.37 GB |
+| output PNG md5 | identical | identical |
+
+**Streaming costs 4 MiB of device memory, or 0.03%.** It does not defeat a
+residency decision and does not double-buffer behind one: the buffers a shard
+allocates are decided by `shard_param_list` and are the same either way, and
+`paramstore::upload::Uploader` already bounds device-side staging with a
+periodic drain for every source. The two DiT figures differ by more than the
+two encoder figures do, which is run-to-run variation in the DiT's own
+allocation, not an effect of the encoder route.
+
+**Co-residency on ONE 24 GB card is NOT a supported configuration at this
+size, and never was.** The DiT plus VAE alone peaks within a few hundred MiB
+of a 24 GB card even at 4 steps with no adapter; adding a 14 GB encoder is not
+close. This was briefly mistaken for a regression from the streaming commit;
+the A/B above settles it, both routes fail identically when co-resident. Note
+also that the previous in-code estimate for the truncated int8 encoder was
+several times too small, which is what made co-residency look plausible.
+
+- [ ] **Co-residency fails as a raw `wgpu error: Out of Memory` followed by a
+      leaked device**, rather than a refusal that names the DiT budget, the
+      encoder budget, their sum and the card's capacity. All four numbers are
+      known before either build starts. A pre-flight check would turn an
+      opaque driver fault into an actionable message, and is the smaller and
+      more valuable half of this item.
+
 **With a full-coverage LoRA the streamed path is a TRADE, not a win**: about
 3 s slower than the map route (64 s vs 61 s at 4 steps) while holding 33.2 GB
 instead of 43.3 GB. Every big tensor needs a float domain for the fold, so
