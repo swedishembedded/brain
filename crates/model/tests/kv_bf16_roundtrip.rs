@@ -364,7 +364,7 @@ fn run_rmw_stress(gpu: Gpu, label: &str) {
 
 #[test]
 fn kv_bf16_long_context_parity_on_cpu() {
-    run_long_context_parity(Gpu::new_cpu(&kernel_list()), "cpu");
+    run_long_context_parity(Gpu::new_cpu(kernel_list()), "cpu");
 }
 
 #[test]
@@ -375,12 +375,12 @@ fn kv_bf16_long_context_parity_on_gpu() {
         return;
     }
     eprintln!("kv_bf16_long_context_parity_on_gpu: running on a real wgpu device");
-    run_long_context_parity(Gpu::new_wgpu(&kernel_list()), "gpu");
+    run_long_context_parity(Gpu::new_wgpu(kernel_list()), "gpu");
 }
 
 #[test]
 fn kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_cpu() {
-    run_rmw_stress(Gpu::new_cpu(&kernel_list()), "cpu");
+    run_rmw_stress(Gpu::new_cpu(kernel_list()), "cpu");
 }
 
 #[test]
@@ -391,5 +391,5 @@ fn kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu() {
         return;
     }
     eprintln!("kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu: running on a real wgpu device");
-    run_rmw_stress(Gpu::new_wgpu(&kernel_list()), "gpu");
+    run_rmw_stress(Gpu::new_wgpu(kernel_list()), "gpu");
 }

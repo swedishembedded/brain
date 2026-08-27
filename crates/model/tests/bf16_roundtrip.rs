@@ -152,7 +152,7 @@ const SHAPES: &[(usize, usize, usize, &str)] =
 #[test]
 fn register_tiled_bf16_is_not_reachable_on_the_cpu_backend() {
     use gpu_core::select::{self, KernelSelector, Op, OpShape};
-    let gpu = Gpu::new_cpu(&kernel_list());
+    let gpu = Gpu::new_cpu(kernel_list());
     let caps = gpu.caps();
     assert!(!caps.workgroup_reductions, "backend-cpu's caps must still report workgroup_reductions=false");
     let shape = OpShape { m: 64, n: 128, k: 128, dtype: Dtype::BF16 };
@@ -173,8 +173,7 @@ fn register_tiled_bf16_is_not_reachable_on_the_cpu_backend() {
 #[test]
 fn bf16_matmul_matches_f32_reference_on_cpu() {
     for &(m, n, k, tag) in SHAPES {
-        let list = kernel_list();
-        let gpu = Gpu::new_cpu(&list);
+        let gpu = Gpu::new_cpu(kernel_list());
         check_bf16_matmul(gpu, m, n, k, 0xB16_0000 ^ (m as u64) << 16 ^ n as u64, &format!("cpu/{tag}"));
     }
 }
@@ -191,8 +190,7 @@ fn bf16_matmul_matches_f32_reference_on_gpu() {
     }
     eprintln!("bf16_matmul_matches_f32_reference_on_gpu: running on a real wgpu device");
     for &(m, n, k, tag) in SHAPES {
-        let list = kernel_list();
-        let gpu = Gpu::new_wgpu(&list);
+        let gpu = Gpu::new_wgpu(kernel_list());
         check_bf16_matmul(gpu, m, n, k, 0xB16_0000 ^ (m as u64) << 16 ^ n as u64, &format!("gpu/{tag}"));
     }
 }
