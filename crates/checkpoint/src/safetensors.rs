@@ -143,19 +143,54 @@ fn e4m3fn_to_f32_scalar(b: u8) -> f32 {
 /// forty-seven idled.
 #[cfg(not(target_arch = "wasm32"))]
 fn decode_elems(raw: &[u8], width: usize, f: fn(&[u8]) -> f32) -> Vec<f32> {
+    let mut out = Vec::new();
+    decode_elems_into(raw, width, f, &mut out);
+    out
+}
+
+/// [`decode_elems`] into a caller-owned buffer - the form the streaming
+/// reader needs, and the ONE implementation both the eager whole-file parse
+/// and `crate::mmap::decode_into` share.
+///
+/// They must not drift, for two reasons. Correctness: a streamed tensor and
+/// an eagerly-parsed one have to be the same bytes, which is far easier to
+/// guarantee with one decoder than with two that merely look alike.
+/// Performance: the parallelisation this function documents was added to the
+/// eager path only, so for a long while the STREAMING path - the one a
+/// multi-GB import actually takes - still decoded billions of elements on a
+/// single core. Sharing the implementation is what stops that from silently
+/// happening again.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn decode_elems_into(raw: &[u8], width: usize, f: fn(&[u8]) -> f32, out: &mut Vec<f32>) {
     // Large enough that the per-chunk dispatch is noise, small enough that a
     // lopsided tensor still spreads over the pool.
     const CHUNK: usize = 1 << 16;
     let n = raw.len() / width;
-    let mut out = vec![0f32; n];
-    backend_cpu::par::chunks_mut(&mut out, CHUNK, |c, dst| {
+    // `vec![0f32; n]` takes the allocator's zeroed-pages path: fresh anonymous
+    // pages are already zero, so nothing is written until the parallel fill
+    // below touches them. `Vec::resize` on a fresh buffer instead allocates
+    // uninitialised memory and then memsets it - SINGLE-THREADED, and on a
+    // multi-GB tensor that one extra serial pass over the whole buffer costs
+    // more than the parallel decode it precedes. Reuse the buffer when it is
+    // already the right length (the chunked reader calls this repeatedly);
+    // every element is overwritten, so nothing needs zeroing in that case.
+    if out.len() != n {
+        *out = vec![0f32; n];
+    }
+    backend_cpu::par::chunks_mut(out, CHUNK, |c, dst| {
         let base = c * CHUNK;
         for (j, v) in dst.iter_mut().enumerate() {
             let i = base + j;
             *v = f(&raw[i * width..(i + 1) * width]);
         }
     });
-    out
+}
+
+/// The serial counterpart of [`decode_elems_into`] - wasm has no threads.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn decode_elems_into(raw: &[u8], width: usize, f: fn(&[u8]) -> f32, out: &mut Vec<f32>) {
+    out.clear();
+    out.extend(raw.chunks_exact(width).map(f));
 }
 
 /// The serial decode [`decode_elems`] documents - wasm has no threads and does

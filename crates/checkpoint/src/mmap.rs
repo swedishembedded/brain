@@ -355,15 +355,29 @@ fn dtype_width(dtype: &str) -> usize {
 /// clearing and extending `out` in place — the one implementation both the
 /// whole-tensor [`MmapSafetensors::tensor_f32`] and the chunked
 /// [`MmapSafetensors::with_tensor_chunks`] share, so they cannot drift.
+/// Thin alias for the shared decoder, so each arm of [`decode_into`] reads as
+/// "width + per-element conversion" and nothing else.
+fn decode(raw: &[u8], width: usize, f: fn(&[u8]) -> f32, out: &mut Vec<f32>) {
+    crate::safetensors::decode_elems_into(raw, width, f, out)
+}
+
 fn decode_into(name: &str, dtype: &str, raw: &[u8], out: &mut Vec<f32>) {
     out.clear();
+    // Every fixed-width arm goes through the SHARED, host-parallel
+    // `decode_elems_into` rather than a serial `extend`. Same per-element
+    // function, so the bytes are unchanged; what changes is that a
+    // billion-element bf16 tensor no longer converts on one core. The eager
+    // whole-file parse was fanned out long ago and this, the path a streaming
+    // multi-GB import actually takes, was left behind - which made streaming
+    // look like a memory-for-time trade when most of the "time" was an idle
+    // thread pool.
     match dtype {
-        "F32" => out.extend(raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))),
-        "F16" => out.extend(raw.chunks_exact(2).map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])))),
-        "BF16" => out.extend(raw.chunks_exact(2).map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))),
-        "I64" => out.extend(raw.chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32)),
-        "I32" => out.extend(raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)),
-        "U8" => out.extend(raw.iter().map(|&b| b as f32)),
+        "F32" => decode(raw, 4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]), out),
+        "F16" => decode(raw, 2, |b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])), out),
+        "BF16" => decode(raw, 2, |b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])), out),
+        "I64" => decode(raw, 8, |b| i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32, out),
+        "I32" => decode(raw, 4, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32, out),
+        "U8" => decode(raw, 1, |b| b[0] as f32, out),
         "F8_E4M3" => out.extend(decode_e4m3_bytes(raw)),
         // Named explicitly rather than falling into the `other` panic below:
         // E5M2 is a real, if rarer, FP8 checkpoint format (more exponent
