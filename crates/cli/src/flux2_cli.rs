@@ -24,12 +24,13 @@ const HELP: &str = "brain flux2 <cmd>
                                     # condition on it at all (cheapest: the reference then
                                     # reaches the model only through the init latent)
            [--ref <in.ppm>]...      # reference images => editing mode
-           [--ref-size N]           # downscale every --ref so its LONG edge is at most N px
-                                    # before the /16 crop, preserving aspect. Never upscales;
-                                    # omit and each reference is used at its own resolution.
-                                    # A reference costs (w/16)*(h/16) tokens, so a full-size
-                                    # camera photo costs more than the generation itself -
-                                    # this is the dial that makes a folder of them affordable.
+           [--ref-size N]           # long edge each --ref is encoded at, before the /16
+                                    # crop, preserving aspect. Never upscales. DEFAULT 512:
+                                    # a reference costs (w/16)*(h/16) tokens and attention is
+                                    # quadratic, so an unscaled camera photo would cost more
+                                    # than the generation itself. Pass 0 for no bound. The
+                                    # --strength/--mask init reference is never bounded -- its
+                                    # size is pinned by that role; use --ref-cond-scale for it.
            [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
                                     # --ref exactly (which must be at the output size);
                                     # greys blend. Omit = regenerate everything.
@@ -93,6 +94,32 @@ pub fn run_flux2(args: &[String]) {
     }
 }
 
+/// Long edge, in pixels, a reference is encoded at when the caller does not
+/// say. A reference costs `(w/16)*(h/16)` tokens and attention is quadratic in
+/// the joint sequence, so an unscaled camera photograph costs several times
+/// the generation it is conditioning. Bounding by default is the difference
+/// between `--ref holiday.jpg` working and it quietly becoming the most
+/// expensive part of the run.
+pub const DEFAULT_REF_EDGE: u32 = 512;
+
+/// The long-edge bound for reference `i`, or `None` to encode it at its own
+/// resolution.
+///
+/// `anchored` is true when `refs[0]` seeds the init latent - under
+/// `--strength < 1` or `--mask`. That reference is then pinned to the output
+/// size and must never be bounded; a caller wanting ITS conditioning cost down
+/// has `--ref-cond-scale`, which exists for exactly this asymmetry.
+fn ref_bound(i: usize, anchored: bool, ref_size: Option<u32>) -> Option<u32> {
+    if i == 0 && anchored {
+        return None;
+    }
+    match ref_size {
+        Some(0) => None, // explicit opt-out
+        Some(m) => Some(m),
+        None => Some(DEFAULT_REF_EDGE),
+    }
+}
+
 fn generate(args: &[String]) -> Result<(), String> {
     let mut prompt = None;
     let mut out = None;
@@ -129,8 +156,8 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--ref" => refs.push(need(i)?.clone()),
             "--ref-size" => {
                 let n: u32 = need(i)?.parse().map_err(|e| format!("--ref-size: {e}"))?;
-                if n < 16 {
-                    return Err(format!("--ref-size must be at least 16 (got {n})"));
+                if n != 0 && n < 16 {
+                    return Err(format!("--ref-size must be 0 (unbounded) or at least 16 (got {n})"));
                 }
                 ref_size = Some(n);
             }
@@ -151,15 +178,19 @@ fn generate(args: &[String]) -> Result<(), String> {
     // one full-resolution photograph cannot outspend the whole generation.
     // `--ref-size` absent takes the bound-free path, unchanged.
     let mut ref_imgs: Vec<(Vec<f32>, u32, u32)> = Vec::new();
-    for r in &refs {
+    let anchored = o.strength.is_some_and(|s| s < 1.0) || mask_path.is_some();
+    for (i, r) in refs.iter().enumerate() {
         let (hwc, w, h) = crate::image_io::load_image(r)?;
-        if let Some(m) = ref_size {
+        let bound = ref_bound(i, anchored, ref_size);
+        if let Some(m) = bound {
             let (tw, th) = flux2::pipeline::fit_long_edge(w, h, m);
             if (tw, th) != (w, h) {
                 eprintln!("flux2: ref {r} {w}x{h} -> resampled to {tw}x{th} (--ref-size {m})");
             }
+        } else if i == 0 && anchored {
+            eprintln!("flux2: ref {r} {w}x{h} kept at full size - it seeds the init latent");
         }
-        ref_imgs.push(flux2::pipeline::ref_from_hwc_bounded(&hwc, w, h, ref_size)?);
+        ref_imgs.push(flux2::pipeline::ref_from_hwc_bounded(&hwc, w, h, bound)?);
     }
 
     // The mask is over the OUTPUT canvas, so it is resampled to the latent grid
@@ -366,5 +397,54 @@ mod tests {
         // an uppercase spelling really would take the brain route - but naming
         // it that way is still a trap for a human reading the folder.
         assert!(check_adapter_out("a/b.SAFETENSORS").is_err());
+    }
+}
+
+#[cfg(test)]
+mod ref_size_tests {
+    use super::ref_bound;
+
+    /// `--ref-size` exists so one full-resolution photograph cannot outspend
+    /// the whole generation. It must not touch the **init** reference.
+    ///
+    /// Under `--strength < 1` (and under `--mask`) `refs[0]` is not merely
+    /// conditioning: it is VAE-encoded into the starting latent, and that role
+    /// pins it to the output size. Shrinking it there is not a cost saving,
+    /// it is a broken run - and the caller who wants that reference's
+    /// CONDITIONING cost down already has `--ref-cond-scale`, which is defined
+    /// against exactly this asymmetry.
+    ///
+    /// Without this the two flags cannot be used together at all, which is why
+    /// callers ended up pre-resizing references in a shell script instead.
+    #[test]
+    fn ref_size_spares_the_reference_that_seeds_the_latent() {
+        assert_eq!(ref_bound(0, true, Some(384)), None);
+        assert_eq!(ref_bound(1, true, Some(384)), Some(384));
+        assert_eq!(ref_bound(2, true, Some(384)), Some(384));
+        // not anchored: no reference seeds the latent, so every one binds.
+        assert_eq!(ref_bound(0, false, Some(384)), Some(384));
+    }
+
+    /// Bounding a reference must be the DEFAULT, not something the caller has
+    /// to know to ask for. A reference costs `(w/16)*(h/16)` tokens and
+    /// attention is quadratic in the joint sequence, so one unscaled phone
+    /// photograph costs more than the image being generated - and the caller
+    /// who just passed `--ref holiday.jpg` has no way to know that. Every
+    /// wrapper script that got this right did it by resampling the files
+    /// itself first, which is work brain should not be delegating.
+    #[test]
+    fn references_are_bounded_by_default() {
+        assert_eq!(ref_bound(0, false, None), Some(super::DEFAULT_REF_EDGE));
+        assert_eq!(ref_bound(1, true, None), Some(super::DEFAULT_REF_EDGE));
+        // the init reference is still spared: its size is pinned by its role.
+        assert_eq!(ref_bound(0, true, None), None);
+    }
+
+    /// `0` is the explicit opt-out, for a caller who really does want a
+    /// reference encoded at its own resolution and has counted the tokens.
+    #[test]
+    fn ref_size_zero_means_unbounded() {
+        assert_eq!(ref_bound(1, true, Some(0)), None);
+        assert_eq!(ref_bound(0, false, Some(0)), None);
     }
 }
