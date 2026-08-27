@@ -86,6 +86,32 @@ wrote fox.ppm (512x512)
 
 ---
 
+## A person in a target pose (`portrait_from_refs.sh`)
+
+The only example here that is not a D-Bus client: a short shell wrapper around
+`brain flux2 generate` that takes **one folder** and produces a portrait.
+
+```bash
+BRAIN_FLUX2_DIT=… BRAIN_FLUX2_VAE=… BRAIN_FLUX2_TE=… BRAIN_FLUX2_TOKENIZER=… \
+BRAIN_DEVICE=gpu0 BRAIN_FLUX2_TE_DEVICE=gpu1:i8 \
+  examples/imagegen/portrait_from_refs.sh ~/photos/alice
+```
+
+The folder holds numbered photographs of the person (`ref-01.jpeg`, `02.png`,
+`3.webp` - any format brain decodes) plus one `target.*`, the photograph whose
+pose you want; the script globs both. Unprepared camera photographs are the
+expected input: `--ref-size` bounds each reference before it is tokenized, so
+you never have to work out a token budget by hand.
+
+The target is passed as a reference by default - that is what carries its pose
+and framing across literally, at the cost of pulling some of the target
+person's face along with it. `TARGET_REF=0` drops it and takes the pose from
+the `POSE` prompt text instead, which keeps identity coming from the numbered
+references alone. Read the script's header for the rest of the knobs; there
+are only a handful and they are all environment variables with defaults.
+
+---
+
 ## SDXL (`brain sdxl text2image`)
 
 `sdxl_generate.py` drives the SDXL `text2image` action - dual CLIP-L/OpenCLIP-bigG

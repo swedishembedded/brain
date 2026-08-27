@@ -12,6 +12,7 @@ examples/imagegen/cancel_generation.py	run	--model mock with BRAIN_MOCK_DELAY_MS
 examples/imagegen/edit_image.py	skip	needs real FLUX.2 weights; the mock model has no edit action
 examples/imagegen/generate.py	run	--model mock streams real denoise ticks and returns a real image blob
 examples/imagegen/lora_finetune.py	skip	needs real FLUX.2 weights; the mock model has no lora_train action
+examples/imagegen/portrait_from_refs.sh	skip	needs real FLUX.2 weights and a folder of photographs; the mock model has no reference-conditioned generate
 examples/imaging/edit_pipeline.py	skip	needs sam2 + restore (+ esrgan for the tail) weights; the mock model serves no imgpipe stage
 examples/llm/qwen35moe.py	run	--model mock exercises the generate wire contract for real over all three transports (D-Bus, OpenAI, Anthropic); real Qwen3.5-35B-A3B generation is verified by hand (see docs/models/qwen35/status.md) -- not in this harness's shared server
 examples/qwen3omnimoe/omni.py	run	--model mock exercises the generate wire contract for real over all three transports (D-Bus, OpenAI, Anthropic); multimodal blob in / speech out are verified by hand (see docs/models/qwen3omnimoe/status.md M13/M14) -- not in this harness's shared server
