@@ -15,7 +15,7 @@
 //! untouched) — the on-disk checkpoint is ~35 GB, small enough to fit this
 //! box's 93 GB tmpfs. This is a deliberate departure from every OTHER
 //! model's convention (f32 on disk, quantize transiently at residency-load
-//! time — `crates/qwen3/src/q8.rs`, `crates/zimage/src/block.rs`): Omni is
+//! time - `crates/qwen3/src/q8.rs`, `crates/s3dit/src/block.rs`): Omni is
 //! large enough, specifically because of its MoE expert count, that the
 //! disk cost of the old convention is prohibitive rather than merely
 //! wasteful.

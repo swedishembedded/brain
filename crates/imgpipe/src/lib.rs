@@ -75,9 +75,9 @@ pub enum Stage {
     Feather { radius: u32 },
     /// Select everything the mask does not.
     Invert,
-    /// Blind face restoration (`crates/restore`); `w` is the fidelity dial.
+    /// Blind face restoration (`crates/codeformer`); `w` is the fidelity dial.
     Restore { w: f32 },
-    /// Super-resolution (`crates/upscale`). A **tail**: it changes the image
+    /// Super-resolution (`crates/rrdbnet`). A **tail**: it changes the image
     /// size, so it may only be the LAST stage and runs AFTER the composite —
     /// see [`Spec::parse`].
     Upscale { tile: u32 },

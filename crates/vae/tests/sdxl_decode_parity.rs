@@ -6,7 +6,7 @@
 //! Why this file exists, separately from `decode_parity.rs`: that gate covers
 //! Z-Image's VAE, which is a *16*-channel `AutoencoderKL`, and it skips unless
 //! `BRAIN_S3DIT_VAE` is set - so on this machine, and on CI, **nothing gated a
-//! VAE decode at all**. `crates/unet`'s SDXL pipeline shipped a decode that
+//! VAE decode at all**. `crates/sdxlunet`'s SDXL pipeline shipped a decode that
 //! produced structurally-correct but visibly corrupted pictures, and no test
 //! could see it: the UNet's own 165-tap parity is green, and a
 //! gradient-magnitude sanity check on the output passes on a broken image.

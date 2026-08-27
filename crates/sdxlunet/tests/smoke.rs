@@ -87,7 +87,7 @@ fn tiny_forward_runs_and_is_finite() {
 /// activation pool, which reuses buffers whose last read is already recorded.
 /// A wrong `free` there silently clobbers a live activation, so the pooled
 /// graph must be **bit-identical** to the pinned one — the same gate
-/// `crates/vqgan` and `crates/restore` use.
+/// `crates/vqgan` and `crates/codeformer` use.
 #[test]
 fn pooled_graph_is_bit_identical_to_the_tapped_one() {
     let tapped = tiny(true);

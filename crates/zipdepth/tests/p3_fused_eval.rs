@@ -18,7 +18,7 @@
 //!   3. same equivalence on the real GPU (wgpu), gated by `MOE_SKIP_GPU_TESTS`,
 //!      which is what validates the WGSL act-selector branches end to end.
 //!
-//! Lives in `crates/depth` (not `crates/vision`) because kernels resolve from
+//! Lives in `crates/zipdepth` (not `crates/vision`) because kernels resolve from
 //! the OWNING model's `PIPELINES` — same reasoning as `p2_conv_spec.rs`.
 //!
 //! Run with `BRAIN_DEVICE=cpu` (test 3 needs a real GPU and skips without one).

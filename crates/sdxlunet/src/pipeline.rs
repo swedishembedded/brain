@@ -20,7 +20,7 @@
 //!
 //! # Classifier-free guidance is two forwards, not a batched one
 //!
-//! `crates/unet` records its graph for one sample, so the conditional and
+//! `crates/sdxlunet` records its graph for one sample, so the conditional and
 //! unconditional passes are two `run` calls rather than a batch of two. That is
 //! a cost (two forwards per step) and not a correctness question; batching would
 //! need a graph recorded at `b = 2`.

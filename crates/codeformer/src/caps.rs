@@ -23,7 +23,7 @@
 //!
 //! # Scope this action inherits from the model
 //!
-//! `crates/restore` is forward-only and takes an **aligned** face:
+//! `crates/codeformer` is forward-only and takes an **aligned** face:
 //! detection + 5-point alignment live in
 //! `crates/arcface` and are not chained in here, because CodeFormer's alignment
 //! template is facexlib's 512² one and not `arcface::ARCFACE_DST_112` rescaled -

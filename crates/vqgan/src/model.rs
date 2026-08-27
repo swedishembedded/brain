@@ -392,7 +392,7 @@ impl Vqgan {
 ///
 /// `start` is the global index of `blocks[0]`, so a caller that needs to reach
 /// *between* two blocks records the list in segments and keeps the checkpoint's
-/// positional tensor names correct. That is how `crates/restore` walks the same
+/// positional tensor names correct. That is how `crates/codeformer` walks the same
 /// encoder/generator with CodeFormer's feature taps and controllable-feature
 /// transformation spliced in, rather than owning a second copy of this loop.
 /// [`Vqgan`] passes `start = 0` and the whole list.

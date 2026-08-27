@@ -10,7 +10,7 @@
 //! reference - on BOTH the CPU JIT backend and a real wgpu GPU backend
 //! (`Gpu::new_cpu`/`Gpu::new_wgpu`, `MOE_SKIP_GPU_TESTS` gates the GPU half
 //! exactly like this tree's other dual-backend tests, e.g.
-//! `crates/depth/tests/p3_fused_eval.rs`'s `fused_eval_gpu_matches_cpu`).
+//! `crates/zipdepth/tests/p3_fused_eval.rs`'s `fused_eval_gpu_matches_cpu`).
 //! This is what proves the templated `#w=bf16` kernel sources
 //! (`kernels::template::dtype_variant`) run correctly on both, with zero
 //! device-feature requirement - the whole point of a storage-tier decode

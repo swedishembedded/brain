@@ -131,7 +131,7 @@ pub fn import(raw: Tensors, cfg: &VqganConfig) -> Result<Import, String> {
 /// coverage check reports the real names rather than a half-stripped set.
 ///
 /// Public because every `basicsr` checkpoint in this workspace wraps its state
-/// dict the same way — `crates/restore` reads the *same file* for the
+/// dict the same way - `crates/codeformer` reads the *same file* for the
 /// CodeFormer half and must strip it identically.
 pub fn strip_state_prefix(raw: Tensors) -> Tensors {
     for key in STATE_KEYS {

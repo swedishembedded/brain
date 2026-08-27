@@ -205,7 +205,7 @@ impl ControlNetConfig {
 }
 
 /// The kind of a backbone level, re-exported so a caller configuring a
-/// ControlNet does not have to depend on `crates/unet` directly.
+/// ControlNet does not have to depend on `crates/sdxlunet` directly.
 pub use sdxlunet::config::BlockKind as LevelKind;
 
 #[cfg(test)]

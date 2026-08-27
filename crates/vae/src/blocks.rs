@@ -54,7 +54,7 @@ const K_GN_STATS2: usize = 15;
 const K_CONCAT2: usize = 16;
 
 /// Partials per group for the two-stage GroupNorm reduction. 64 is the value
-/// `crates/wm-diamond` arrived at, and the measurement below was taken at it.
+/// `crates/diamond` arrived at, and the measurement below was taken at it.
 pub(crate) const GN_P: u32 = 64;
 
 /// The `add2` slot inside [`KERNELS`]. Public for the same reason
@@ -96,7 +96,7 @@ pub const NEXT_SLOT: usize = KERNELS.len();
 /// [`model::block::BidirIds`] field order.
 ///
 /// Exported because a crate that layers its own kernels on top of
-/// [`kernels_with`] may want that trio too (`crates/unet` reuses it for the
+/// [`kernels_with`] may want that trio too (`crates/sdxlunet` reuses it for the
 /// self-attention fallback on devices without workgroup reductions) and the
 /// alternative is a literal `8, 9, 10` in the caller — which reorders silently
 /// into a wrong pipeline the moment [`KERNELS`] grows an entry in the middle.
@@ -107,7 +107,7 @@ pub const ATTN_BIDIR_SLOTS: (usize, usize, usize) = (K_ATTN_SCORES, K_ATTN_SOFTM
 /// [`kernels_with`] should hand to [`model::block::pick_gemm`].
 ///
 /// Exported because the alternative is registering a *second* tiled GEMM
-/// alongside this one, which is what `crates/unet` did: it carried both this
+/// alongside this one, which is what `crates/sdxlunet` did: it carried both this
 /// kernel and its own `matmul_reg2`, and every `nn.Linear` in the model went to
 /// the slower of the two. `matmul_reg3` is `matmul_reg2` with the shared-memory
 /// bank conflicts removed — same `Params`, same `@workgroup_size(256)`, same
@@ -609,7 +609,7 @@ impl<'a> Builder<'a> {
     /// GroupNorm inside every `Transformer2DModel` is hardcoded to 1e-6
     /// (diffusers `_init_continuous_input`). Both live in one recorded graph,
     /// so the value has to be switchable at the boundary — a single-epsilon
-    /// builder would force `crates/unet` to hand-roll a second GroupNorm, which
+    /// builder would force `crates/sdxlunet` to hand-roll a second GroupNorm, which
     /// is exactly the private copy this module exists to prevent.
     pub fn set_eps(&mut self, eps: f32) {
         self.eps = eps;
@@ -750,7 +750,7 @@ impl<'a> Builder<'a> {
     ///    per tensor plus a 1-element readback every ~1 GiB forces that drain.
     ///
     /// Neither changes a single bit of the uploaded data — this is purely how
-    /// the memory is obtained. It became necessary when `crates/unet` put a
+    /// the memory is obtained. It became necessary when `crates/sdxlunet` put a
     /// **10.3 GB** model through this builder (the earlier users — the FLUX.2
     /// VAE and the VQGAN pair — are each well under 1 GB and never hit it);
     /// SDXL OOM'd on a P40 with 20 GB free before this.
@@ -1015,7 +1015,7 @@ impl<'a> Builder<'a> {
     /// buffer and rewrites it before each forward. Everything else (the
     /// statistics kernels, the capability gate, the pooling, the training tape)
     /// is identical, which is exactly why this is a seam on the shared block
-    /// rather than a second GroupNorm in `crates/wm-diamond`.
+    /// rather than a second GroupNorm in `crates/diamond`.
     ///
     /// `gb_name` names the buffer on the training tape. For an adaptive norm it
     /// is not a checkpoint key and carries no gradient — DIAMOND trains the

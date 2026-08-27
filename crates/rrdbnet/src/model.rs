@@ -175,7 +175,7 @@ fn lrelu(b: &mut Builder, n: u64, x: &DeviceBuffer) -> DeviceBuffer {
 /// Two dispatches over existing kernels rather than a new one. `scale_add` is
 /// the MoE gated accumulate (`acc = gate[0] * src` at `n_experts = 1`,
 /// `e_idx = 0`, `accumulate = 0`), which is exactly a scalar multiply when the
-/// scalar lives in a one-element buffer — the same use `crates/restore` makes
+/// scalar lives in a one-element buffer - the same use `crates/codeformer` makes
 /// of it. `axpy` would be one dispatch, but it accumulates IN PLACE into a
 /// buffer that must already hold `x`, and `Builder::act` hands back pooled
 /// buffers with arbitrary contents, so it would need a copy first.

@@ -18,7 +18,7 @@
 //! **`run_batch` is deliberately the serial default.** RRDBNet is a dense conv
 //! net: its cost is linear in pixels and so is its peak VRAM, so grouping N
 //! images saves no work and multiplies the high-water mark by N. See
-//! `crates/upscale/src/caps.rs`.
+//! `crates/rrdbnet/src/caps.rs`.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};

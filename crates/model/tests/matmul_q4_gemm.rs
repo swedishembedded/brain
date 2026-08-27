@@ -9,7 +9,7 @@
 //! **Tolerance note**: 4-bit weight quantization is much coarser than int8's
 //! (7 levels per sign vs 127). A tight per-element bound is the wrong gate
 //! here -- the right one is a whole-tensor similarity, the same choice
-//! `crates/zimage/tests/int8_matmul.rs` makes for int8. Measured on these
+//! `crates/s3dit/tests/int8_matmul.rs` makes for int8. Measured on these
 //! tiny synthetic shapes: cosine consistently >= 0.999 and relative-L2 well
 //! under a tenth (both printed below) -- LOWER than "4-bit is famously lossy"
 //! might suggest, because per-CHANNEL scaling (not per-tensor) keeps a single

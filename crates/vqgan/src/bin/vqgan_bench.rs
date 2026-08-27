@@ -15,8 +15,8 @@
 //!
 //! The VQ autoencoder is the subject because its backward IS the shared block
 //! backward set — `conv2d_dx/dw`, `gn_*`, `silu_bwd`, `upsample2_dx`, the
-//! `attn_bwd_*_bidir` quartet — which `crates/vae`, `crates/unet` and
-//! `crates/restore` all train through. A finding here is a finding for all of
+//! `attn_bwd_*_bidir` quartet - which `crates/vae`, `crates/sdxlunet` and
+//! `crates/codeformer` all train through. A finding here is a finding for all of
 //! them.
 //!
 //! Method lives in `gpu_core::profile` — the shared §F.1 profiler this and
@@ -95,10 +95,10 @@ fn init_weights(cfg: &VqganConfig, seed: u64) -> vae::blocks::Tensors {
 ///
 /// `vae::blocks` selects `gn_stats` (serial, one lane per group) or
 /// `gn_stats_wg` (workgroup-cooperative) on `DeviceCaps::workgroup_reductions`.
-/// `crates/wm-diamond` independently built a THIRD path — `gn_part` +
+/// `crates/diamond` independently built a THIRD path - `gn_part` +
 /// `gn_stats2`, a barrier-free two-stage reduction - after profiling put the
 /// serial one at the bulk of its frame time. Nobody has compared them, and the answer
-/// decides whether wm-diamond can drop its private Builder (task #25) or
+/// decides whether diamond can drop its private Builder (task #25) or
 /// whether the shared one has to learn the two-stage path first.
 ///
 /// Barrier-free matters beyond speed: `backend-cpu` reports

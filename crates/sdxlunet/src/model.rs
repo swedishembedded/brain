@@ -690,7 +690,7 @@ impl Unet {
     ///
     /// `taps` records every stage output for the parity ladder; it pins buffers
     /// and therefore disables the activation pool, so a production build passes
-    /// `false` (and `crates/unet/tests/parity.rs` gates the two against each
+    /// `false` (and `crates/sdxlunet/tests/parity.rs` gates the two against each
     /// other bit-for-bit).
     /// [`Unet::new`] recording the reverse-mode tape, for
     /// [`crate::train::UnetTrainer`]. No control residuals and no injection:

@@ -208,9 +208,9 @@ pub fn order_for(backbone: &dyn ControlAdapter, r: &Residuals) -> Result<Vec<Vec
 // The SDXL UNet as a backbone
 // ---------------------------------------------------------------------------
 
-/// `crates/unet`'s `UNet2DConditionModel` is the first [`ControlAdapter`].
+/// `crates/sdxlunet`'s `UNet2DConditionModel` is the first [`ControlAdapter`].
 ///
-/// The impl lives here rather than in `crates/unet` because the trait does:
+/// The impl lives here rather than in `crates/sdxlunet` because the trait does:
 /// `unet` must not depend on this crate (this crate composes `sdxlunet::model::Rec`
 /// for the trainable copy, so the dependency runs one way). Rust's orphan rule
 /// permits it exactly because the trait is local.

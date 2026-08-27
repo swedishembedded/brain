@@ -7,7 +7,7 @@
 //! denoiser architecture: the noise/timestep schedule, the sampler that turns a
 //! sequence of model outputs into a clean latent, the training-time timestep
 //! sampling, the flow-matching (rectified-flow) loss, and classifier-free
-//! guidance. Per-model DiT crates (`zimage`, `flux2`, `hidream`) call into this
+//! guidance. Per-model DiT crates (`s3dit`, `flux2`, `hidream`) call into this
 //! the same way every model calls the shared `model` trainer — the analogue of
 //! how `bench` is model-agnostic.
 //!
@@ -17,7 +17,7 @@
 //!   Z-Image and FLUX.2): `x_σ = (1-σ)·x_0 + σ·ε`, the denoiser predicts a
 //!   velocity, and Euler integrates it.
 //! * [`discrete`] — the **DDPM variance-preserving chain** (SD / SDXL,
-//!   `crates/unet`): `x_t = sqrt(ᾱ_t)·x_0 + sqrt(1-ᾱ_t)·ε`, with
+//!   `crates/sdxlunet`): `x_t = sqrt(ᾱ_t)·x_0 + sqrt(1-ᾱ_t)·ε`, with
 //!   [`DdimScheduler`], [`EulerScheduler`], [`EulerAncestralScheduler`] and
 //!   [`DpmSolverPlusPlusScheduler`], each in the ε- and v-prediction
 //!   parameterisations.

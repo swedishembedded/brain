@@ -24,7 +24,7 @@
 //! an SSA forward, a hand-written reverse over `vae::blocks::grad`, and the VQ
 //! straight-through estimator, gated by `gradcheck::check_vqgan`. The
 //! CodeFormer transformer / controllable feature transformation / fidelity dial
-//! are `crates/restore`.
+//! are `crates/codeformer`.
 //!
 //! The serving contract is met by [`caps`] (the `encode`/`decode`
 //! `capability::Provider`), `crates/cli/src/resident_restore.rs` (the residency

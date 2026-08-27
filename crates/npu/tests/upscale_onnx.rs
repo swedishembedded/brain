@@ -7,7 +7,7 @@
 //! GRAPH, and says so rather than implying more: the op set, the node counts
 //! implied by the config, the residual scalings, and that the exported bytes
 //! re-read as a well-formed model with the declared shapes. Numerical parity
-//! against `crates/upscale` belongs in `npu_live.rs`, on hardware.
+//! against `crates/rrdbnet` belongs in `npu_live.rs`, on hardware.
 //!
 //! That is still worth having. Every defect this catches — a missing residual
 //! scale, a dropped activation, an op OpenVINO cannot compile, a shape that

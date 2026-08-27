@@ -7,7 +7,7 @@
 //! of mechanisms — multi-axis rotary position encoding over a token grid,
 //! adaLN-zero timestep modulation, sinusoidal timestep embedding, latent
 //! patchify/unpatchify, QK-normalized attention, and SwiGLU MLPs. This crate
-//! owns those, so each per-model crate (`zimage`, `flux2`, `hidream`) is a thin
+//! owns those, so each per-model crate (`s3dit`, `flux2`, `hidream`) is a thin
 //! assembly over them, the same way the model crates compose `crates/model`.
 //!
 //! Host-math pieces (which need no device) land first and are unit-tested in

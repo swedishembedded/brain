@@ -1,4 +1,4 @@
-# SDXL UNet2DConditionModel (not yet servable)
+# SDXL UNet2DConditionModel
 
 The diffusion backbone [ControlNet](controlnet.md)'s SDXL producer
 conditions: `CrossAttnDownBlock2D`/`DownBlock2D` -> mid -> up with skip

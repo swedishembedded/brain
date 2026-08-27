@@ -10,7 +10,7 @@
 //! already pinned bitwise (`yolo/tests/p1_forward_pin.rs`); this covers the paths
 //! only ZipDepth reaches.
 //!
-//! Lives in `crates/depth`, not `crates/vision`, because the block's kernels are
+//! Lives in `crates/zipdepth`, not `crates/vision`, because the block's kernels are
 //! resolved from the OWNING MODEL's `PIPELINES` — and `conv2d_gd`/`leaky_relu`
 //! are registered by depth, not by yolo. Testing it here is testing it as it is
 //! actually used.

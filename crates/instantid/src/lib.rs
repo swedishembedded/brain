@@ -16,7 +16,7 @@
 //! **Nothing here re-implements a model brain already has.** The ControlNet half
 //! is `crates/controlnet` — whose SDXL implementation was imported from *this*
 //! release and is parity-gated at 140 comparisons — the backbone is
-//! `crates/unet` (165 comparisons, cosine 0.9999999999) and the face embedding is
+//! `crates/sdxlunet` (165 comparisons, cosine 0.9999999999) and the face embedding is
 //! `crates/arcface` (cosine 1.0000000).
 //!
 //! ## Status: shapes and import only
@@ -26,7 +26,7 @@
 //! site carries BOTH `to_k_ip` and `to_v_ip`.
 //!
 //! What is **not** here, and not claimed: the resampler forward, the decoupled
-//! attention itself, and the wiring into `crates/unet`'s attention sites. The
+//! attention itself, and the wiring into `crates/sdxlunet`'s attention sites. The
 //! reference activations are already dumped
 //! (`tools/goldens/instantid_dump_reference.py` -> `testdata/instantid/`, 21 tensors
 //! covering `proj_in`, every layer's attention and feed-forward, `proj_out`,

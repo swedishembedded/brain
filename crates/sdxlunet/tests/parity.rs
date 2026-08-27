@@ -165,7 +165,7 @@ fn sdxl_unet_forward_matches_diffusers() {
 /// golden at that size, so it is a RESIDENCY measurement, not a parity gate.
 /// Run it explicitly:
 /// ```text
-/// BRAIN_DEVICE=gpu1 BRAIN_SDXL=... cargo test --release -p brain-unet \
+/// BRAIN_DEVICE=gpu1 BRAIN_SDXL=... cargo test --release -p brain-sdxlunet \
 ///     --test parity -- --ignored --nocapture native_resolution
 /// ```
 #[test]

@@ -13,7 +13,7 @@
 //! `bench_max_abs_row.rs` needs it set.
 
 /// A "model" that only knows about the slow kernel — exactly what
-/// `crates/flux2`, `crates/qwen` and `crates/zimage` register today.
+/// `crates/flux2`, `crates/qwen` and `crates/s3dit` register today.
 const AS_A_MODEL_REGISTERS_IT: &[(&str, &str)] = &[("max_abs_row", kernels::MAX_ABS_ROW)];
 
 fn fill(m: u32, k: u32) -> Vec<f32> {

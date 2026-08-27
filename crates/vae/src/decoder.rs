@@ -11,7 +11,7 @@
 //! uploads the latent, submits, and reads the image `[out_ch, H, W]`.
 //!
 //! Reuse: identical conv/GroupNorm/SiLU/add/upsample/attention kernels as the
-//! DIAMOND UNet (`crates/wm-diamond/src/model.rs`), which validates them. VAE
+//! DIAMOND UNet (`crates/diamond/src/model.rs`), which validates them. VAE
 //! specifics vs DIAMOND: static (non-conditioned) affine GroupNorm with **32
 //! groups** and **eps 1e-6**; the mid-block attention is **single-head**
 //! (`head_dim = C`, scale `1/√C`) with the residual added to the **pre-norm**

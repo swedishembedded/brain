@@ -19,7 +19,7 @@
 //!
 //! Run:
 //!   BRAIN_ESRGAN=/path/to/RealESRGAN_x4plus.pth \
-//!     cargo test --release -p brain-upscale --test parity -- --nocapture
+//!     cargo test --release -p brain-rrdbnet --test parity -- --nocapture
 
 use std::collections::HashMap;
 

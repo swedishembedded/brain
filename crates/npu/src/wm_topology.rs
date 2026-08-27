@@ -24,7 +24,7 @@
 //!   - Mid/attn: fused qkv 1x1 conv, 8-dim heads, softmax over keys, out_proj
 //!     1x1 conv, and the residual adds the NORMED input (reference quirk).
 //!
-//! brain-npu does not depend on brain-wm-diamond: [`WmUnetConfig`] mirrors the
+//! brain-npu does not depend on brain-diamond: [`WmUnetConfig`] mirrors the
 //! graph-relevant fields of `diamond::DiamondConfig` and the host glue in
 //! `diamond::npu` converts.
 

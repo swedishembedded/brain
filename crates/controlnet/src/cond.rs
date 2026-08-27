@@ -14,14 +14,14 @@
 //! inline at a call site.
 //!
 //! ## The ZipDepth synergy, and what it costs
-//! brain already produces depth maps (`crates/depth`), so a depth-conditioned
+//! brain already produces depth maps (`crates/zipdepth`), so a depth-conditioned
 //! ControlNet needs no external preprocessor: [`from_depth`] is the whole
 //! adapter — normalise to `[0, 1]` and replicate to three channels, which is
 //! exactly what `diffusers`' depth examples do to a MiDaS/DPT output before
 //! `prepare_image`.
 //!
 //! It is deliberately a **function over an already-computed map, not a
-//! dependency on `crates/depth`**. The cost of wiring the crate itself is not
+//! dependency on `crates/zipdepth`**. The cost of wiring the crate itself is not
 //! the code (a `zipdepth::Predictor` call is a few lines); it is that there is no
 //! depth-conditioned SDXL ControlNet checkpoint on this machine, so such a path
 //! could not be parity-gated and would ship as untested plumbing behind a
@@ -76,7 +76,7 @@ pub fn from_map(map: &[f32], h: u32, w: u32, range: Option<(f32, f32)>) -> Vec<f
     out
 }
 
-/// A ZipDepth (`crates/depth`) prediction as a control image: per-image
+/// A ZipDepth (`crates/zipdepth`) prediction as a control image: per-image
 /// min/max normalisation, replicated to three channels.
 ///
 /// Takes the map rather than a `zipdepth::Predictor` on purpose - see the module

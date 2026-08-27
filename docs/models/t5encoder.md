@@ -1,4 +1,4 @@
-# T5-XXL / umT5-XXL encoder (not yet servable)
+# T5-XXL / umT5-XXL encoder
 
 The text encoder [FLUX.1](flux1.md) conditions on, and the one
 [Wan2.1 video](wan.md) conditions on: a bidirectional encoder-only T5
@@ -21,6 +21,12 @@ tokenizer** (`data::unigram`, the first non-BPE tokenizer in the workspace),
 gated to exact-id equality against the real `google/umt5-xxl` tokenizer over a
 nine-prompt multilingual corpus.
 
+It is **served**: a capability manifest (one `encode` action, model id
+`brain/t5encoder`), a residency adapter (`BRAIN_T5ENCODER_DIR`, holding
+either or both variants' released layout), genuine batched `run_batch`
+(grouped by `(variant, max_len)`, one forward per group), D-Bus `Run`, and a
+runnable example (`examples/embedding/t5_embed.py`).
+
 Two things are worth knowing before trusting a change here. The per-block
 relative bias is a **silent** difference - a port that shares block 0's table
 produces plausible embeddings and subtly wrong video, so the parity test checks
@@ -29,10 +35,10 @@ checkpoint). And the 512-token pad is applied **after** the encoder as hard
 zeros, not taken from the encoder's output at the pad positions, which is not
 small: that output peaks at 0.87.
 
-Still missing: INT8, the serving contract, and training for the umT5 variant
-(the trainer folds one shared bias gradient across the block stack and attends
-over every key, so it refuses a per-block or masked config rather than
-returning a wrong gradient). umT5 does not fit a 24 GB card in fp32, so its
-gate is a `BRAIN_DEVICE=cpu` test today.
+Still missing: INT8, and training for the umT5 variant (the trainer folds one
+shared bias gradient across the block stack and attends over every key, so it
+refuses a per-block or masked config rather than returning a wrong gradient).
+umT5 does not fit a 24 GB card in fp32, so its gate is a `BRAIN_DEVICE=cpu`
+test today.
 
 Package: `brain-t5encoder`.

@@ -194,7 +194,7 @@ impl VqganConfig {
 /// Push one block's `(name, shape)` pairs, in reference declaration order.
 ///
 /// Public because CodeFormer's `Fuse_sft_block` embeds a plain VQGAN `ResBlock`
-/// (`fuse_convs_dict.{size}.encode_enc`), so `crates/restore`'s manifest spells
+/// (`fuse_convs_dict.{size}.encode_enc`), so `crates/codeformer`'s manifest spells
 /// it with this function instead of a second copy of the naming convention.
 pub fn block_tensors(p: &str, b: &Block, m: &mut Vec<(String, Vec<usize>)>) {
     let conv = |m: &mut Vec<(String, Vec<usize>)>, name: String, cin: u32, cout: u32, k: usize| {

@@ -5,7 +5,7 @@
 //! DPM-Solver++(2M), each with the **epsilon** and **v-prediction**
 //! parameterisations.
 //!
-//! These are the schedulers the UNet family (SD / SDXL, `crates/unet`) samples
+//! These are the schedulers the UNet family (SD / SDXL, `crates/sdxlunet`) samples
 //! with, and they are a different family from [`crate::scheduler`]'s
 //! rectified-flow Euler: there the noise level *is* the integration variable
 //! `σ ∈ [0,1]` and the model predicts a velocity; here the forward process is

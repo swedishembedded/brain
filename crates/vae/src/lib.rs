@@ -14,7 +14,7 @@
 //! Everything is composed from brain's existing kernels — conv (`conv_bias_reg`),
 //! GroupNorm (`gn_stats`/`gn_apply`), SiLU, residual add, nearest upsample, and
 //! the bidirectional self-attention trio — the same primitives the DIAMOND UNet
-//! (`crates/wm-diamond`) already validates.
+//! (`crates/diamond`) already validates.
 //!
 //! [`blocks3d`] is the sibling builder for **3D causal video** autoencoders
 //! (`[C, T, H, W]` volumes, causal `conv3d`, cross-chunk `FeatCache`). It is

@@ -13,7 +13,7 @@
 //!   * ZipDepth's RepVGG reparameterization folds each of its three branches
 //!     before merging them into one 3x3.
 //!
-//! The third is why it moved: `crates/depth` must not depend on `brain-npu`,
+//! The third is why it moved: `crates/zipdepth` must not depend on `brain-npu`,
 //! which carries the OpenVINO runtime. A pure function over flat slices with no
 //! imports has no business gating a model crate on a hardware backend.
 

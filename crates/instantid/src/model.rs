@@ -346,7 +346,7 @@ impl SiteAttn {
 
 /// Every decoupled site, ready to be injected into a backbone's cross-attention.
 ///
-/// Implements [`model::attninject::CrossAttnInject`], so `crates/unet` consumes
+/// Implements [`model::attninject::CrossAttnInject`], so `crates/sdxlunet` consumes
 /// it without knowing what an identity is — the same way `crates/controlnet`'s
 /// residuals are consumed without the backbone knowing what a control image is.
 ///

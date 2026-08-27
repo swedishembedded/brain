@@ -27,6 +27,7 @@ named on the model's own page (see
 | [`clip`](clip.md) | text/image embeddings | [x] |
 | [`scrfd`](scrfd.md) | face detection | [x] |
 | [`arcface`](arcface.md) | face identity embedding | [x] |
+| [`t5encoder`](t5encoder.md) | T5-XXL / umT5-XXL text-conditioning embeddings | [x] |
 
 ## Vision-language
 
@@ -36,6 +37,7 @@ named on the model's own page (see
 | [`qwen3vl`](qwen3vl.md) ⤓ | image + text → text | [x] |
 | [`deepseek2ocr`](deepseek2ocr.md) ⤓ | document image → text/markdown (OCR, tables, grounding) | [x] |
 | [`qwen3omnimoe`](qwen3omnimoe/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
+| [`moondream3`](moondream3.md) | image + instruction → text (captioning) | [x] |
 
 ## Speech
 
@@ -58,6 +60,10 @@ named on the model's own page (see
 |---|---|:---:|:---:|
 | [`s3dit`](s3dit.md) ⤓ | text-to-image | [x] | [x] |
 | [`flux2`](flux2.md) | text-to-image + reference-image editing | [x] | [x] |
+| [`sdxlunet`](sdxlunet.md) | text-to-image (SDXL UNet backbone) | [x] | |
+| [`flux1`](flux1.md) | text-to-image + Kontext image editing | [x] | |
+| [`controlnet`](controlnet.md) | text-to-image conditioned on a control image (SDXL ControlNet) | [x] | |
+| [`pulid`](pulid.md) | identity-conditioned image generation (FLUX.1) | [x] | |
 | [`codeformer`](codeformer.md) | blind face restoration | [x] | |
 | [`rrdbnet`](rrdbnet.md) ⤓ | 4x super-resolution | [x] | |
 | [`vqgan`](vqgan.md) | image ↔ codebook encode/decode | [x] | |
@@ -101,13 +107,18 @@ These are parity-gated architecture ports with no CLI/HTTP/D-Bus serving
 surface yet - real, verified code, but not something you can run as a model
 today. Each has its own page with the full status:
 
-- [`t5encoder`](t5encoder.md) - a text conditioner
-- [`sdxlunet`](sdxlunet.md) - a diffusion backbone
-- [`controlnet`](controlnet.md) - spatial conditioning for diffusion backbones
-- [`flux1`](flux1.md) - text-to-image + image editing
-- [`pulid`](pulid.md) - identity-conditioned image generation
 - [`instantid`](instantid.md) - identity-conditioned image generation (SDXL)
-- [`moondream3`](moondream3.md) - a third vision-language model
+
+## Reserved, not started
+
+The architecture id and crate exist (`crates/arch`), but no port has begun -
+distinct from [Not yet servable](#not-yet-servable) above, which is real,
+verified code without a serving surface yet:
+
+- [`supir`](supir.md) - photo-realistic image restoration (SDXL + ZeroSFT
+  adaptors); see `.agents/roadmap/supir.md`
+- [`llava`](llava.md) - image captioning, brought in as `supir`'s optional
+  captioner; see `.agents/roadmap/llava.md`
 
 ## Components
 
