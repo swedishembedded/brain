@@ -94,6 +94,18 @@ pub fn run_flux2(args: &[String]) {
     }
 }
 
+/// The generation's output size.
+///
+/// `anchor` is the size of `refs[0]` when that reference seeds the init latent
+/// (`--strength < 1` or `--mask`). That reference IS the canvas - it is
+/// VAE-encoded into the starting latent - so an anchored run with no explicit
+/// size takes the anchor's, per axis. An explicit `--width`/`--height` always
+/// wins, and with no anchor the documented default stands.
+fn output_size(w: Option<u32>, h: Option<u32>, anchor: Option<(u32, u32)>) -> (u32, u32) {
+    let (dw, dh) = anchor.unwrap_or((512, 512));
+    (w.unwrap_or(dw), h.unwrap_or(dh))
+}
+
 /// Long edge, in pixels, a reference is encoded at when the caller does not
 /// say. A reference costs `(w/16)*(h/16)` tokens and attention is quadratic in
 /// the joint sequence, so an unscaled camera photograph costs several times
@@ -124,6 +136,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut prompt = None;
     let mut out = None;
     let mut o = GenOpts { width: 512, height: 512, ..GenOpts::default() };
+    let (mut want_w, mut want_h): (Option<u32>, Option<u32>) = (None, None);
     let mut variant_name = "klein-4b".to_string();
     let mut precision = flux2::Precision::F32;
     let mut refs: Vec<String> = Vec::new();
@@ -139,8 +152,8 @@ fn generate(args: &[String]) -> Result<(), String> {
         match args[i].as_str() {
             "--prompt" => prompt = Some(need(i)?.clone()),
             "--out" => out = Some(need(i)?.clone()),
-            "--width" => o.width = need(i)?.parse().map_err(|e| format!("--width: {e}"))?,
-            "--height" => o.height = need(i)?.parse().map_err(|e| format!("--height: {e}"))?,
+            "--width" => want_w = Some(need(i)?.parse().map_err(|e| format!("--width: {e}"))?),
+            "--height" => want_h = Some(need(i)?.parse().map_err(|e| format!("--height: {e}"))?),
             "--steps" => o.steps = Some(need(i)?.parse().map_err(|e| format!("--steps: {e}"))?),
             "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--strength" => o.strength = Some(need(i)?.parse().map_err(|e| format!("--strength: {e}"))?),
@@ -192,6 +205,16 @@ fn generate(args: &[String]) -> Result<(), String> {
         }
         ref_imgs.push(flux2::pipeline::ref_from_hwc_bounded(&hwc, w, h, bound)?);
     }
+
+    // The init reference is the canvas, so an anchored run inherits its size
+    // rather than making the caller read the file and echo its dimensions.
+    let anchor = if anchored { ref_imgs.first().map(|&(_, h, w)| (w, h)) } else { None };
+    let (rw, rh) = output_size(want_w, want_h, anchor);
+    if (rw, rh) != (o.width, o.height) && anchor.is_some() && (want_w.is_none() || want_h.is_none()) {
+        eprintln!("flux2: output {rw}x{rh}, taken from the init reference");
+    }
+    o.width = rw;
+    o.height = rh;
 
     // The mask is over the OUTPUT canvas, so it is resampled to the latent grid
     // by the pipeline (area average, both axes independently) rather than being
@@ -446,5 +469,42 @@ mod ref_size_tests {
     fn ref_size_zero_means_unbounded() {
         assert_eq!(ref_bound(1, true, Some(0)), None);
         assert_eq!(ref_bound(0, false, Some(0)), None);
+    }
+}
+
+#[cfg(test)]
+mod output_size_tests {
+    use super::output_size;
+
+    /// Under `--strength`/`--mask` the first reference IS the canvas: it is
+    /// VAE-encoded into the init latent, so the generation has to be the size
+    /// that reference already is. Requiring the caller to pass that size is
+    /// asking them to read the file's dimensions and echo them back, which is
+    /// why wrappers grew a resize step in Python just to make the two agree.
+    ///
+    /// So: no `--width`/`--height` and an anchored run takes its size from the
+    /// anchor.
+    #[test]
+    fn an_anchored_run_takes_its_size_from_the_anchor() {
+        assert_eq!(output_size(None, None, Some((768, 1024))), (768, 1024));
+        assert_eq!(output_size(None, None, Some((512, 512))), (512, 512));
+    }
+
+    /// An explicit size always wins - including when only one axis is given,
+    /// because a caller who says `--width 768` and nothing else means the
+    /// other axis to follow the anchor, not to snap back to a default.
+    #[test]
+    fn an_explicit_size_wins_over_the_anchor() {
+        assert_eq!(output_size(Some(640), Some(480), Some((768, 1024))), (640, 480));
+        assert_eq!(output_size(Some(640), None, Some((768, 1024))), (640, 1024));
+        assert_eq!(output_size(None, Some(480), Some((768, 1024))), (768, 480));
+    }
+
+    /// With no anchor there is nothing to inherit, so the documented default
+    /// stands and free generation is unchanged.
+    #[test]
+    fn free_generation_keeps_its_default() {
+        assert_eq!(output_size(None, None, None), (512, 512));
+        assert_eq!(output_size(Some(768), None, None), (768, 512));
     }
 }
