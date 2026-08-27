@@ -342,6 +342,12 @@ Weights (flag wins over the environment variable):
                                                    only as a stub and cannot
                                                    guide anything)
 
+  $BRAIN_LTXV_AUDIO_VAE is NOT read here. Upscaling refines the VIDEO latent
+  only: it runs no audio-visual DiT and decodes no audio, so setting that
+  variable changes nothing about this command. Note the consequence - the
+  output has NO sound track at all. Any audio --input carried stays in
+  --input, and re-attaching it is a separate ffmpeg mux.
+
 Devices:
   --device <cpu|gpu>         DiT + VAE + upscaler (default: BRAIN_DEVICE)"#;
 
