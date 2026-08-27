@@ -29,9 +29,17 @@ fast and scalable kernel - not a naive one.
    positional embeddings, pre-LN, causal MHA, GELU MLP, untied `lm_head`, masked
    CE. `brain gpt2 {train,eval,infer}`.
 2. **Qwen3 decoder** (`crates/qwen3`) - dense GQA + QK-norm + RoPE + SwiGLU;
-   HF import, LoRA finetune, INT8 (`q8.rs`), tensor/expert sharding, tool-call
+   HF **and GGUF** import behind ONE load path (`import::Naming` sniffs the
+   convention from the file's own tensor names, so `import::source` /
+   `shard_source` serve both and a caller passes a path, not a format; the
+   llama.cpp name map in `gguf_import.rs` is transcribed from llama.cpp's own
+   `tensor_mapping.py`/`constants.py` at a named revision and gated
+   **bit-for-bit** against the safetensors route, because the mistake worth
+   catching - a swapped `k`/`v` - is shape-compatible on every GQA layer).
+   LoRA finetune, INT8 (`q8.rs`), tensor/expert sharding, tool-call
    eval, and the **concurrent paged-KV serving engine** (`serve.rs`, see below).
-   `brain qwen3 {import,infer,serve,export,precompile,train,finetune,toolcall}`.
+   `brain qwen3 {import,infer,serve,export,precompile,train,finetune,toolcall}`,
+   plus the generic `brain import` for a `qwen3` GGUF.
 2b. **Qwen3.5-35B-A3B hybrid decoder** (`crates/qwen35moe`) - 40 layers, 3:1
    **Gated DeltaNet** (chunked linear-attention, `model::gdn`) : **GQA**
    (`full_attention_interval=4`), a 256-expert top-8 sigmoid-gated-shared-expert

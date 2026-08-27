@@ -116,3 +116,70 @@ fn the_real_q8_gguf_and_the_real_bf16_safetensors_are_the_same_model() {
         params.len()
     );
 }
+
+/// The same two sources, but taken all the way to a **built, running
+/// encoder** - the FLUX.2 text-conditioning shape (`start: 0, embed: true,
+/// head: false`, a mid-stack tap), which is the thing `BRAIN_FLUX2_TE`
+/// pointing at a GGUF actually has to produce.
+///
+/// Weights agreeing tensor by tensor is necessary but not sufficient: it does
+/// not prove the GGUF route produces a model that *builds* (device upload
+/// paths, shard truncation, the coverage check narrowing) or that the two
+/// agree once several hundred matmuls have composed their differences. This
+/// runs both encoders over the same tokens and compares the hidden states the
+/// pipeline would condition on.
+///
+/// Parity-gated, not bit-identical, for the same reason as above and one
+/// more: Q8_0 weights differ from bf16 weights, and a transformer amplifies
+/// that. Cosine AND rel_l2, never cosine alone.
+///
+/// `BRAIN_QWEN3_PARITY_LAYERS` sets the depth (default 8). The real FLUX.2 tap
+/// is deeper, but the fp32 shard at the real depth does not fit one 24 GB
+/// card - the pipeline uses the int8 shard there - and the property under test
+/// (does the GGUF route build the same encoder?) does not depend on depth.
+#[test]
+fn a_real_encoder_built_from_the_gguf_matches_one_built_from_the_safetensors() {
+    let (Ok(hf_dir), Ok(gguf)) = (std::env::var("BRAIN_QWEN3_HF_DIR"), std::env::var("BRAIN_QWEN3_GGUF")) else {
+        brain_testutil::skip("set BRAIN_QWEN3_HF_DIR and BRAIN_QWEN3_GGUF to run this");
+        return;
+    };
+    let layers: usize = std::env::var("BRAIN_QWEN3_PARITY_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+
+    let cfg = qwen3::import::config_from_hf(&std::fs::read_to_string(std::path::Path::new(&hf_dir).join("config.json")).unwrap()).unwrap();
+    // The FLUX.2 text-encoder shard shape: embedding + layers [0, end), no
+    // final norm and no LM head.
+    let shard = qwen3::Shard { start: 0, end: layers, embed: true, head: false, gpu_index: qwen3::Shard::ANY_GPU };
+
+    // A prompt of the kind FLUX.2 conditions on, right-padded exactly as the
+    // pipeline pads: the pad rows are part of the conditioning and must agree
+    // too, so masking is exercised rather than skirted.
+    const PAD: u32 = 151643;
+    let t = 64usize;
+    let content: Vec<u32> = (0..24u32).map(|i| 1000 + i * 37).collect();
+    let mut ids = content.clone();
+    ids.resize(t, PAD);
+    let taps = [layers - 1];
+
+    let build = |path: &str| {
+        let r = WeightReader::open_hf_dir(std::path::Path::new(path)).unwrap();
+        let src = qwen3::import::shard_source(&r, &cfg, &shard).expect("shard coverage");
+        let m = qwen3::Qwen::new_shard(cfg.clone(), 1, t as u32, &src, false, shard.clone());
+        m.encode_hiddens_padded(&ids, content.len(), &taps)
+    };
+
+    let from_hf = build(&hf_dir);
+    let from_gguf = build(&gguf);
+
+    let d = cfg.d_model as usize;
+    for (k, (a, b)) in taps.iter().zip(from_gguf.iter().zip(&from_hf)) {
+        let (cos, rel) = agreement(a, b);
+        let (cos_c, rel_c) = agreement(&a[..content.len() * d], &b[..content.len() * d]);
+        let (cos_p, rel_p) = agreement(&a[content.len() * d..], &b[content.len() * d..]);
+        eprintln!("tap {k}: all cos {cos:.8} rel_l2 {rel:.6} | content cos {cos_c:.8} rel_l2 {rel_c:.6} | pad cos {cos_p:.8} rel_l2 {rel_p:.6}");
+        // Floors set to catch a WRONG ENCODER, not to certify Q8_0: a swapped
+        // projection collapses cosine, it does not nudge it.
+        assert!(cos >= 0.99, "tap {k}: cosine {cos:.8} - the two routes built different encoders");
+        assert!(rel <= 0.2, "tap {k}: rel_l2 {rel:.6}");
+        assert!(cos_p >= 0.99, "tap {k}: the PAD rows disagree (cos {cos_p:.8}) - masking differs between the two routes");
+    }
+}

@@ -278,16 +278,16 @@ impl crate::TensorSource for WeightReader {
         }
     }
 
-    /// Bounded chunked decode for safetensors (the real win — a BF16 tensor
+    /// Bounded chunked decode, for both formats: a BF16 safetensors tensor
     /// converts one chunk at a time into a reused scratch instead of once as
-    /// a whole `Vec<f32>`). GGUF inherits the trait default (materialize via
-    /// `with_tensor`, one chunk) — its quant-block dequant does not yet have
-    /// a chunked path; that is a named follow-up, not a silent regression,
-    /// since the default's cost is identical to today's behaviour.
+    /// a whole `Vec<f32>`, and a GGUF tensor dequantizes block-range by
+    /// block-range ([`MmapGguf::with_tensor_chunks`]). Neither inherits the
+    /// trait default, which would materialize the whole tensor and hand back
+    /// the bound the caller asked for.
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
         match &self.inner {
             Inner::St(m) => m.with_tensor_chunks(name, max_elems, f),
-            Inner::Gguf(_) => self.with_tensor(name, &mut |d| f(0, d)),
+            Inner::Gguf(m) => crate::TensorSource::with_tensor_chunks(m, name, max_elems, f),
             Inner::StSharded(readers, owner) => match owner.get(name) {
                 Some(&si) => readers[si].with_tensor_chunks(name, max_elems, f),
                 None => false,

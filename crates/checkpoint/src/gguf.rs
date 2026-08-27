@@ -1040,6 +1040,52 @@ impl crate::TensorSource for MmapGguf {
         }
     }
 
+    /// Bounded chunked dequant: walk the tensor **block by block**, decoding
+    /// at most `max_elems` elements into one scratch at a time.
+    ///
+    /// Without this a GGUF-backed source inherited the trait default, which
+    /// materializes the whole tensor and hands it over as one chunk - so a
+    /// device upload through `paramstore::upload` (which calls this precisely
+    /// to stay bounded) silently paid a whole tensor per weight. On a real
+    /// checkpoint the embedding table alone dominates that.
+    ///
+    /// A quant block is the smallest independently decodable unit, so the
+    /// request is rounded DOWN to a whole number of blocks (never below one).
+    /// Every chunk therefore starts on a block boundary and is decoded by the
+    /// same [`dequantize`] the whole-tensor path uses, over the same bytes -
+    /// which is why the streamed values are bit-identical to it, not merely
+    /// close. Chunks arrive in order, contiguously, offset in elements.
+    ///
+    /// A ggml type with no known block geometry falls back to the whole-tensor
+    /// path rather than guessing at a layout; today every type
+    /// [`dequantize`] supports has geometry, so that arm is unreachable in
+    /// practice and exists so an unsupported type fails in `dequantize`'s own
+    /// error message rather than in a slicing panic here.
+    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        let Some(&(ty, start, nbytes, numel)) = self.index.get(name) else { return false };
+        let Some((block_elems, block_bytes)) = block_geometry(ty) else {
+            return self.with_tensor(name, &mut |d| f(0, d));
+        };
+        let per = if max_elems == 0 { numel } else { (max_elems / block_elems).max(1) * block_elems };
+        let raw = &self.mmap[start..start + nbytes];
+        let mut e0 = 0usize;
+        while e0 < numel {
+            let e1 = (e0 + per).min(numel);
+            // e0 is block-aligned by construction (`per` is a multiple of
+            // `block_elems`); the trailing block may be partial, and
+            // `dequantize` truncates it to the requested count exactly as the
+            // whole-tensor path does.
+            let (b0, b1) = (e0 / block_elems, e1.div_ceil(block_elems));
+            let span = &raw[b0 * block_bytes..(b1 * block_bytes).min(nbytes)];
+            match dequantize(ty, span, e1 - e0) {
+                Ok(v) => f(e0 as u64, &v),
+                Err(e) => panic!("gguf: {name}: dequant failed: {e}"),
+            }
+            e0 = e1;
+        }
+        true
+    }
+
     /// Zero-copy: `name`'s on-disk bytes reinterpreted as `u32` words, borrowed
     /// straight from the mapping. `None` unless the tensor's own ggml type is
     /// already `F32` (nothing to dequantize) AND its byte range is 4-byte
@@ -1089,6 +1135,80 @@ fn gval_json(v: &GgufValue) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GGUF-backed device upload must be bounded the way a safetensors one
+    /// already is. `paramstore::upload` pulls every weight through
+    /// [`crate::TensorSource::with_tensor_chunks`] precisely so the host never
+    /// holds a whole tensor; a source that has no chunked path inherits the
+    /// trait default, which materializes the lot and quietly gives that
+    /// guarantee back.
+    ///
+    /// It is not a theoretical cost. Qwen3-8B's `token_embd.weight` is
+    /// 151936x4096, and the FLUX.2 text encoder loads it - the whole point of
+    /// streaming that encoder was to stop holding tensors of that size.
+    ///
+    /// Two assertions, because either alone is worthless: the chunked read
+    /// must be BOUNDED, and it must be **bit-identical** to the whole-tensor
+    /// dequant. A bounded reader that decoded the wrong values would pass a
+    /// memory test perfectly.
+    #[test]
+    fn gguf_chunked_reads_are_bounded_and_bit_identical_to_the_whole_tensor() {
+        use crate::testalloc::peak_live;
+        use crate::TensorSource;
+
+        // A Q8_0 tensor big enough that one copy is unmistakable: 262144
+        // elements = 8192 blocks = 1 MiB as f32.
+        let numel = 262_144usize;
+        let blocks = numel / Q8_0_BLOCK_ELEMS;
+        let mut raw = Vec::with_capacity(blocks * 34);
+        for b in 0..blocks {
+            raw.extend(half::f16::from_f32(0.5 + (b % 7) as f32 * 0.125).to_le_bytes());
+            raw.extend((0..32).map(|i| ((b + i) % 251) as i8 as u8));
+        }
+        let path = std::env::temp_dir().join(format!("brain-gguf-chunked-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        crate::gguf_write::write(
+            &path,
+            &[("general.architecture".to_string(), GgufValue::String("toy".to_string()))],
+            &[crate::gguf_write::TensorOut { name: "w".to_string(), shape: vec![numel], ty: T_Q8_0, data: raw }],
+            32,
+        )
+        .unwrap();
+
+        let mg = MmapGguf::open(&path).unwrap();
+        let whole = mg.tensor("w").unwrap().unwrap();
+        assert_eq!(whole.len(), numel);
+
+        let chunk = 4_096usize;
+        let (streamed, peak_chunked) = peak_live(|| {
+            let mut acc: Vec<f32> = Vec::with_capacity(numel);
+            let found = mg.with_tensor_chunks("w", chunk, &mut |off, c| {
+                assert_eq!(off as usize, acc.len(), "chunks must arrive in order, contiguously");
+                acc.extend_from_slice(c);
+            });
+            assert!(found);
+            acc
+        });
+        // Bits, not a tolerance: the chunked path must decode exactly what the
+        // whole-tensor path does, or it is a different reader.
+        assert_eq!(streamed, whole, "chunked dequant must be bit-identical to the whole-tensor dequant");
+
+        // The accumulator above is itself a whole tensor, so measure the
+        // bound on a run that retains nothing.
+        let ((), peak_scan) = peak_live(|| {
+            let mut sum = 0.0f64;
+            assert!(mg.with_tensor_chunks("w", chunk, &mut |_, c| sum += c[0] as f64));
+            assert!(sum.is_finite());
+        });
+        let tensor_bytes = numel * 4;
+        assert!(
+            peak_scan < tensor_bytes / 8,
+            "chunked scan peak {peak_scan} is not << one tensor ({tensor_bytes}) - the whole tensor is being materialized"
+        );
+        assert!(peak_chunked >= tensor_bytes, "sanity: retaining every chunk necessarily holds a tensor");
+
+        std::fs::remove_file(&path).ok();
+    }
 
     fn put_str(v: &mut Vec<u8>, s: &str) {
         v.extend((s.len() as u64).to_le_bytes());
