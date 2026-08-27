@@ -318,6 +318,24 @@ impl LoraAdapter {
     /// generation run produces adapter-conditioned images with no model
     /// change. Row/column offsets mirror the build-time fused → split slicing.
     pub fn fold_into_tensors(&self, ts: &mut crate::import::Tensors) -> Result<(), String> {
+        self.fold_into_tensors_at(ts, 1.0)
+    }
+
+    /// [`Self::fold_into_tensors`] with the caller's **strength** on top of the
+    /// checkpoint's own `α/r` - the ComfyUI `strength_model` dial, and what
+    /// `brain flux2 generate --lora-scale` means.
+    ///
+    /// It multiplies the header alpha rather than replacing it, so `1.0` is
+    /// exactly the unscaled fold and an adapter keeps the strength it was
+    /// trained to want as its default. `0.0` reproduces the base bit-for-bit,
+    /// which is the honest way to see what an adapter actually contributes.
+    ///
+    /// Strength lives here, not on the adapter's own `scale` field, because
+    /// that field is the *training* parameter the optimiser steps against:
+    /// bending it for inference would silently change what a resumed run
+    /// trains.
+    pub fn fold_into_tensors_at(&self, ts: &mut crate::import::Tensors, strength: f32) -> Result<(), String> {
+        let scale = self.scale * strength;
         let get = |ts: &mut crate::import::Tensors, key: &str, want: usize| -> Result<Vec<usize>, String> {
             match ts.get(key) {
                 Some((shape, data)) if data.len() == want => Ok(shape.clone()),
@@ -332,20 +350,20 @@ impl LoraAdapter {
                 let qkv = format!("double_blocks.{n}.{s}_attn.qkv.weight");
                 get(ts, &qkv, 3 * d * d)?;
                 let buf = &mut ts.get_mut(&qkv).unwrap().1;
-                sl.wq.delta_strided(self.scale, buf, 0, d, 0);
-                sl.wk.delta_strided(self.scale, buf, d, d, 0);
-                sl.wv.delta_strided(self.scale, buf, 2 * d, d, 0);
+                sl.wq.delta_strided(scale, buf, 0, d, 0);
+                sl.wk.delta_strided(scale, buf, d, d, 0);
+                sl.wv.delta_strided(scale, buf, 2 * d, d, 0);
                 let proj = format!("double_blocks.{n}.{s}_attn.proj.weight");
                 get(ts, &proj, d * d)?;
-                sl.wo.delta(self.scale, &mut ts.get_mut(&proj).unwrap().1);
+                sl.wo.delta(scale, &mut ts.get_mut(&proj).unwrap().1);
                 let m0 = format!("double_blocks.{n}.{s}_mlp.0.weight");
                 get(ts, &m0, 2 * mlp * d)?;
                 let buf = &mut ts.get_mut(&m0).unwrap().1;
-                sl.w1.delta_strided(self.scale, buf, 0, d, 0);
-                sl.w3.delta_strided(self.scale, buf, mlp, d, 0);
+                sl.w1.delta_strided(scale, buf, 0, d, 0);
+                sl.w3.delta_strided(scale, buf, mlp, d, 0);
                 let m2 = format!("double_blocks.{n}.{s}_mlp.2.weight");
                 get(ts, &m2, d * mlp)?;
-                sl.w2.delta(self.scale, &mut ts.get_mut(&m2).unwrap().1);
+                sl.w2.delta(scale, &mut ts.get_mut(&m2).unwrap().1);
             }
         }
         for (n, sl) in self.sgl.iter().enumerate() {
@@ -354,17 +372,17 @@ impl LoraAdapter {
             let l1 = format!("single_blocks.{n}.linear1.weight");
             get(ts, &l1, (3 * d + 2 * mlp) * d)?;
             let buf = &mut ts.get_mut(&l1).unwrap().1;
-            sl.wq.delta_strided(self.scale, buf, 0, d, 0);
-            sl.wk.delta_strided(self.scale, buf, d, d, 0);
-            sl.wv.delta_strided(self.scale, buf, 2 * d, d, 0);
-            sl.w1.delta_strided(self.scale, buf, 3 * d, d, 0);
-            sl.w3.delta_strided(self.scale, buf, 3 * d + mlp, d, 0);
+            sl.wq.delta_strided(scale, buf, 0, d, 0);
+            sl.wk.delta_strided(scale, buf, d, d, 0);
+            sl.wv.delta_strided(scale, buf, 2 * d, d, 0);
+            sl.w1.delta_strided(scale, buf, 3 * d, d, 0);
+            sl.w3.delta_strided(scale, buf, 3 * d + mlp, d, 0);
             let l2 = format!("single_blocks.{n}.linear2.weight");
             get(ts, &l2, d * (d + mlp))?;
             let buf = &mut ts.get_mut(&l2).unwrap().1;
             // linear2 [D, D+mlp]: wo_a occupies columns 0..D, wo_b columns D..D+mlp
-            sl.wo_a.delta_strided(self.scale, buf, 0, d + mlp, 0);
-            sl.wo_b.delta_strided(self.scale, buf, 0, d + mlp, d);
+            sl.wo_a.delta_strided(scale, buf, 0, d + mlp, 0);
+            sl.wo_b.delta_strided(scale, buf, 0, d + mlp, d);
         }
         Ok(())
     }

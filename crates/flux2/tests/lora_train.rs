@@ -129,3 +129,52 @@ fn lora_only_descends_with_base_frozen_and_roundtrips() {
     assert!(max_dev < 1e-5, "fold_into_tensors diverges from apply (max dev {max_dev:.2e})");
     eprintln!("fold_into_tensors changes the forward (max Δ {max_change:.3e}) and matches apply (dev {max_dev:.1e}).");
 }
+
+/// `--lora-scale` must reach a **brain-native** adapter.
+///
+/// The CLI parses the flag into `AdapterSpec::scale` and the third-party
+/// `.safetensors` branch honours it, but the brain-native branch used to fold
+/// the adapter at whatever `alpha/r` the checkpoint header happened to carry
+/// and drop the caller's strength silently. An identity or style adapter
+/// trained on a handful of images is routinely too strong at its shipped
+/// alpha, and dialling it down at inference is the only mitigation that does
+/// not mean retraining - so a strength the model ignores is worse than no
+/// strength at all.
+///
+/// The contract: folding at strength `s` moves every base weight exactly `s`
+/// times as far as folding at `1.0`, `1.0` is unchanged from today, and `0`
+/// reproduces the base bit-for-bit.
+#[test]
+fn lora_strength_scales_a_brain_native_fold() {
+    let c = Cfg::tiny();
+    let fc = tiny_fc();
+    let mut ad = LoraAdapter::new(&c, LoraCfg::new(4));
+    // A fresh adapter is B=0, i.e. a no-op fold; train one step so the deltas
+    // are non-zero and a scale has something to act on.
+    let mut r = rng(0xBEEF);
+    let b = batch(&c, 0.5, &mut r);
+    let base = init_model::<f32>(&c, 0x51a7);
+    let (_, g) = grads(&c, &ad.apply(&base), &b);
+    ad.step(&g, 1e-1);
+
+    let fold_at = |s: f32| {
+        let mut ts = manifest_tensors(&fc, 0xD00D);
+        ad.fold_into_tensors_at(&mut ts, s).expect("fold");
+        ts
+    };
+    let key = "double_blocks.0.img_attn.qkv.weight";
+    let base_ts = manifest_tensors(&fc, 0xD00D);
+    let b0 = base_ts.get(key).unwrap().1.clone();
+    let (one, half, zero) = (fold_at(1.0), fold_at(0.5), fold_at(0.0));
+
+    let d1: Vec<f32> = one.get(key).unwrap().1.iter().zip(&b0).map(|(a, b)| a - b).collect();
+    let dh: Vec<f32> = half.get(key).unwrap().1.iter().zip(&b0).map(|(a, b)| a - b).collect();
+    let d0: Vec<f32> = zero.get(key).unwrap().1.iter().zip(&b0).map(|(a, b)| a - b).collect();
+
+    let mag = d1.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    assert!(mag > 1e-6, "the trained adapter must move the base at strength 1.0 (max |delta| {mag:.2e})");
+    let dev = dh.iter().zip(&d1).map(|(h, o)| (h - 0.5 * o).abs()).fold(0.0f32, f32::max);
+    assert!(dev < 1e-6 * mag.max(1.0), "strength 0.5 must halve the delta (max dev {dev:.2e})");
+    let z = d0.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    assert_eq!(z, 0.0, "strength 0 must reproduce the base exactly");
+}

@@ -796,8 +796,16 @@ impl Pipeline {
                 // the latent grid - any (lh, lw) loads it.
                 let tcfg = crate::modelgrad::Cfg::from_flux2(cfg, 1, 1);
                 let ad = crate::lora::load_adapter(&ap.path, &tcfg)?;
-                ad.fold_into_tensors(&mut dit_ts)?;
-                eprintln!("flux2: folded brain LoRA {} - rank {}", ap.path, ad.rank());
+                // `ap.scale` multiplies the checkpoint's own alpha, exactly as
+                // it does on the external branch above - a strength the CLI
+                // parses but the model ignores is worse than no strength.
+                ad.fold_into_tensors_at(&mut dit_ts, ap.scale)?;
+                eprintln!(
+                    "flux2: folded brain LoRA {} - rank {}, strength {}",
+                    ap.path,
+                    ad.rank(),
+                    ap.scale
+                );
             }
         }
         let model = Flux2Model::new_batched(cfg, &dit_ts, gpu, n_max, max_batch, precision);
