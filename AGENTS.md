@@ -165,7 +165,14 @@ fast and scalable kernel - not a naive one.
     step's own sigma, so preserved regions reach sigma 0 as the source exactly.
     An all-white mask is bit-for-bit the unmasked run; masks are authored, not
     inferred - `.agents/roadmap/flux2.md` records why the depth-based
-    generators tried do not work). 9B weights are NC-licensed - see
+    generators tried do not work). `brain flux2 finetune <dir> --out
+    <adapter.brain>` trains a LoRA on a captioned-image folder (`brain label`
+    writes one) through the same `flux2::finetune::run` the `lora_train`
+    capability action drives; the trainer is host f32 with no device path, so
+    there is no `--precision` and the step cost is what a caller has to budget
+    for. The adapter must NOT be named `.safetensors`: `Pipeline::build_dit`
+    uses that extension to recognise a third-party ai-toolkit/ComfyUI LoRA, so
+    the CLI refuses it. 9B weights are NC-licensed - see
     `docs/models/flux2.md`.
 
 12b-bis. **FLUX.1 / Kontext** (`crates/flux1`) - BFL's 12 B MMDiT: 19
@@ -734,6 +741,7 @@ front-end to depend on.
 | `autodiff` | shared SSA forward-cache / reverse-mode scaffolding - **placeholder** |
 | `imaging` | the image substrate: decode/encode, device-dispatched resize/pad/crop/layout, colour normalisation, **mask algebra** (threshold/dilate/erode/feather/invert/union/intersect/difference/composite) and tiling - one home for what was scattered across zipdepth, yolov8, worldmirror2, s3dit, capture and cli |
 | `imgpipe` | the composed pipeline: a stage list executed as ONE capability call, dispatching its model stages back through `capability::Registry`. Pixels outside the mask come back **bit-identical** |
+| `captioner` | the model-agnostic captioning seam (`Clip` in, text out) plus the resumable folder labeler behind `brain label`. No model code: the implementors live in the VLM crates and depend on this one. Designed for video (the unit is a clip, not a frame), image path built |
 | `data` | char + GPT-2/Qwen3/**CLIP** BPE tokenizers, the shared deterministic PRNGs (`rng::Rng` for datasets, `rng::Lcg` for tests/fixtures), dataset generators, loaders (masking/alignment), normalization |
 | `eval` | perplexity + task exact-match (LM) and detection metrics (mAP@0.5/precision/recall) |
 | `gradcheck` | finite-difference backprop correctness gate |
@@ -820,6 +828,7 @@ front-end to depend on.
 | Capability manifests + generic dispatch (`brain caps` / `brain <arch> <verb>`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
 | Deterministic weight-free mock `Provider` (synthetic image/mask/video/audio/text/bytes, for a `capability::Provider` consumer that must not load real weights) | `crates/capability-mock/src/lib.rs` |
 | Served-model catalog (manifest + weight-free provider ctor per model, ~70 crates, in ONE list, no CLI dependency) | `crates/catalog/src/lib.rs`; the CLI-local residency-adapter extension over it lives in `crates/cli/src/catalog.rs` |
+| **Captioning/labeling a dataset with any VLM** (the seam, not one model) | `crates/captioner/src/{lib,label}.rs` - `Captioner`/`Clip`/`Capabilities`; implementors in `crates/qwen3vl/src/captioner.rs` and `crates/fastvlm/src/captioner.rs`; verb in `crates/cli/src/label_cli.rs`; `docs/training/labeling.md` |
 | JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
 | D-Bus control surface | `crates/dbus`, `examples/dbus` |
 | **Stats snapshot / braintop contract** (add a metric, data-driven sections) | `crates/stats/src/{snapshot,source,build}.rs`; D-Bus `StatsSnapshot`/`StatsStream` in `crates/dbus/src/service.rs`; `Executor::residency` in `crates/residency/src/{executor,manager}.rs` |
