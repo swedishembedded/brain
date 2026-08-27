@@ -74,6 +74,10 @@ fn ltxv_prices_a_clip_and_reports_it_per_second_of_video() {
     ]);
     assert_has(&out, "block-depth linearity check: EXACT");
     assert_has(&out, "denoise (DiT forward)");
+    // The 3D VAE decode is priced as the TILED decode the pipeline really
+    // runs when the clip is big enough for one, not as a whole-volume graph
+    // that would neither fit a card nor describe the same work.
+    assert_has(&out, "vae-decode (3D, 17 frames");
     assert_has(&out, "offline == online");
     // perf-number: the string being asserted is the command's own coverage line
     assert_has(&out, "(100.0%)");

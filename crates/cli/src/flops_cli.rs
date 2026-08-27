@@ -907,12 +907,7 @@ fn ltxv_flops(
              once per clip against a denoise loop of many steps",
         ),
         Stage::modelled("denoise (DiT forward)", n_steps, denoise),
-        Stage::unmodelled(
-            "vae-decode (3D)",
-            1,
-            "the LTX 3D VAE decoder graph is built from a real checkpoint's tensors, which this \
-             weight-free path does not have",
-        ),
+        ltxv_vae_stage(lat_t, lh, lw, n_frames, h, w),
     ];
 
     let gpu = gpu_core::Gpu::new(&ltxv::block::KERNELS);
@@ -1060,4 +1055,44 @@ fn flux2_vae_stage(lh: usize, lw: usize, real: Option<&str>) -> Stage {
         }
     }
     Stage::modelled(format!("vae-decode ({}x{} image)", lw * 16, lh * 16), 1, r)
+}
+
+/// The LTX 3D VAE decode of one clip: `[128, lat_t, lh, lw]` latent -> RGB
+/// frames.
+///
+/// `LtxVaeConfig` carries its own tensor manifest, so - unlike the FLUX.2 2D
+/// decoder - the shapes here are the model's own statement of them, not a
+/// transcription. The decoder records its graph at construction, so pricing it
+/// runs nothing.
+fn ltxv_vae_stage(lat_t: usize, lh: usize, lw: usize, frames: u32, h: u32, w: u32) -> Stage {
+    let cfg = ltxv::vae3d::LtxVaeConfig::conv25();
+    let tiled = ltxv::vae3d::should_tile(frames, h, w);
+    let ts: vae::blocks::Tensors = cfg
+        .tensor_manifest()
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            (name, (shape, vec![0.0f32; n]))
+        })
+        .collect();
+    // Above a size threshold the real pipeline decodes in OVERLAPPING TILES,
+    // and it does so because the whole-volume graph does not fit a card - so
+    // pricing the whole-volume graph here would both misstate the work (tiles
+    // overlap, and the overlap is recomputed) and fail outright on exactly the
+    // clips worth pricing. Cost what actually runs: the tiled decoder builds
+    // one graph per distinct tile shape as it goes, which a dry recording sees
+    // in full without executing any of it.
+    let (r, label) = if tiled {
+        let td = ltxv::vae3d::LtxVaeTiledDecoder::auto(&cfg, &ts, lat_t as u32, lh as u32, lw as u32, None);
+        let tiles = td.plan().tiles().len();
+        let latent = vec![0.0f32; cfg.latent_channels as usize * lat_t * lh * lw];
+        let rec = Recording::dry();
+        let _ = td.decode_with(&latent, |_, _| {});
+        (rec.take(), format!("vae-decode (3D, {frames} frames, {tiles} tiles)"))
+    } else {
+        let dec = ltxv::vae3d::LtxVaeDecoder::build(&cfg, &ts, lat_t as u32, lh as u32, lw as u32, None);
+        (dec.gpu().cost_of(dec.steps()), format!("vae-decode (3D, {frames} frames)"))
+    };
+    drop(ts);
+    Stage::modelled(label, 1, r)
 }
