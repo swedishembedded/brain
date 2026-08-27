@@ -30,6 +30,20 @@ const HELP: &str = "brain flux2 <cmd>
            [--adapter <path>]       # LoRA: brain's own `finetune` checkpoint, or a
                                     # third-party ai-toolkit/ComfyUI .safetensors
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
+  finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
+           [--size S] [--seed K] [--ckpt-every N]
+           # Train a LoRA on a folder of captioned images (see data::imageset for
+           # the caption formats; `brain label` writes one). The adapter it writes
+           # is what `generate --adapter` loads. Do NOT name it '.safetensors':
+           # that extension is how --adapter recognises a THIRD-PARTY LoRA.
+           #   --size S        square training size in px, multiple of 16 (default 512)
+           #   --rank R        LoRA rank (default 16)
+           #   --steps N       training steps (default 200)
+           #   --lr X          learning rate (default 1e-4)
+           #   --ckpt-every N  checkpoint every N steps (default 100; 0 = final only)
+           # The trainer is the host f32 instantiation of the gradchecked reference
+           # math - deterministic and CPU-parallel, with no device path and hence
+           # no --precision. Budget for that before choosing --steps and --size.
 Weights (env): BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
 Text-encoder placement (env): BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] (truncated shard on that card)";
 
@@ -42,6 +56,12 @@ pub fn run_flux2(args: &[String]) {
         "generate" | "infer" => {
             if let Err(e) = generate(&args[1..]) {
                 eprintln!("flux2 generate: {e}");
+                std::process::exit(1);
+            }
+        }
+        "finetune" => {
+            if let Err(e) = finetune(&args[1..]) {
+                eprintln!("flux2 finetune: {e}");
                 std::process::exit(1);
             }
         }
@@ -168,4 +188,130 @@ fn generate(args: &[String]) -> Result<(), String> {
     imaging::save(&out, &imaging::Rgb8::new(w, h, rgb)?)?;
     eprintln!("flux2: wrote {out} ({w}x{h})");
     Ok(())
+}
+
+/// Refuse a `--out` that `--adapter` would later hand to the wrong parser.
+///
+/// `Pipeline::build_dit` distinguishes brain's own adapter container from a
+/// third-party ai-toolkit/ComfyUI one **by file extension** - `.safetensors`
+/// takes the external route, anything else takes `lora::load_adapter`. So an
+/// adapter trained here and named `.safetensors` is written in one format and
+/// read back as another. The failure would surface later, at generation time,
+/// as a confusing parse error over a file that is not actually malformed.
+fn check_adapter_out(path: &str) -> Result<(), String> {
+    if path.to_ascii_lowercase().ends_with(".safetensors") {
+        return Err(format!(
+            "--out {path}: a trained adapter must not be named '.safetensors'. That extension is \
+             how `--adapter` recognises a THIRD-PARTY (ai-toolkit/ComfyUI) LoRA, so this file \
+             would be written in brain's own container and read back with the external parser. \
+             Use '.brain' (or any other extension) instead."
+        ));
+    }
+    Ok(())
+}
+
+/// `brain flux2 finetune <data_dir> --out <adapter>` - train a LoRA adapter on a
+/// folder of captioned images.
+///
+/// The grammar follows `brain glm finetune <data_dir> ...`: the dataset is
+/// positional, everything else is a flag. The training itself is
+/// `flux2::finetune::run`, which is the same code the `lora_train` capability
+/// action drives, so the CLI and the served path cannot drift on defaults.
+fn finetune(args: &[String]) -> Result<(), String> {
+    let mut data_dir: Option<String> = None;
+    let mut variant_name = "klein-4b".to_string();
+    let mut opts = flux2::finetune::TrainOpts {
+        steps: 200,
+        rank: 16,
+        lr: 1e-4,
+        size: 512,
+        seed: 0,
+        save_path: String::new(),
+        ckpt_every: 100,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let need = |i: usize| -> Result<&String, String> {
+            args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i]))
+        };
+        match args[i].as_str() {
+            "--out" | "--save" => opts.save_path = need(i)?.clone(),
+            "--variant" => variant_name = need(i)?.clone(),
+            "--steps" => opts.steps = need(i)?.parse().map_err(|e| format!("--steps: {e}"))?,
+            "--rank" => opts.rank = need(i)?.parse().map_err(|e| format!("--rank: {e}"))?,
+            "--lr" => opts.lr = need(i)?.parse().map_err(|e| format!("--lr: {e}"))?,
+            "--size" => opts.size = need(i)?.parse().map_err(|e| format!("--size: {e}"))?,
+            "--seed" => opts.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
+            "--ckpt-every" => opts.ckpt_every = need(i)?.parse().map_err(|e| format!("--ckpt-every: {e}"))?,
+            "--help" | "-h" => {
+                println!("{HELP}");
+                return Ok(());
+            }
+            other if other.starts_with("--") => return Err(format!("unknown flag {other}\n{HELP}")),
+            // The positional dataset directory, as in `brain glm finetune`.
+            other => {
+                if let Some(first) = &data_dir {
+                    return Err(format!("unexpected argument {other} (the dataset directory is already {first})"));
+                }
+                data_dir = Some(other.to_string());
+                i += 1;
+                continue;
+            }
+        }
+        i += 2;
+    }
+    let data_dir = data_dir.ok_or("the dataset directory is required (a positional argument)")?;
+    if opts.save_path.is_empty() {
+        return Err("--out is required".into());
+    }
+    check_adapter_out(&opts.save_path)?;
+    // `encode_samples` enforces this too, but only after the whole dataset has
+    // been decoded - which on a real folder is minutes spent to learn a typo.
+    if !opts.size.is_multiple_of(16) {
+        return Err(format!("--size must be a multiple of 16 (got {})", opts.size));
+    }
+    if opts.rank == 0 || opts.steps == 0 {
+        return Err("--rank and --steps must both be at least 1".into());
+    }
+    let cfg = Flux2Config::from_name(&variant_name)?;
+    flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
+    let paths = Paths::from_env()?;
+
+    eprintln!(
+        "flux2 finetune: {variant_name} rank {} steps {} size {} lr {} seed {} -> {}",
+        opts.rank, opts.steps, opts.size, opts.lr, opts.seed, opts.save_path
+    );
+    // The CLI has no cancel front-end - an unarmed Default token never fires.
+    let cancel = capability::CancelToken::default();
+    let t0 = std::time::Instant::now();
+    flux2::finetune::run(&cfg, &paths, std::path::Path::new(&data_dir), &opts, &cancel, |done, total, msg| {
+        eprintln!("flux2 finetune [{done}/{total}] {msg}");
+    })?;
+    eprintln!("flux2 finetune: {:.1}s total -> {}", t0.elapsed().as_secs_f32(), opts.save_path);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Pipeline::build_dit` tells brain's own adapter container apart from a
+    /// third-party ai-toolkit/ComfyUI one **by file extension**: a
+    /// `.safetensors` takes the external route. So a `finetune --out` ending in
+    /// `.safetensors` would write brain's own container under a name that the
+    /// `--adapter` flag then hands to the wrong parser. Refuse it at the point
+    /// the name is chosen, where the message can still be acted on.
+    #[test]
+    fn a_trained_adapter_may_not_be_named_safetensors() {
+        let err = check_adapter_out("out/my-lora.safetensors").unwrap_err();
+        assert!(err.contains(".safetensors"), "{err}");
+        assert!(err.contains("--adapter"), "the message must say why it matters: {err}");
+        // The suggested spelling has to be one that actually round-trips.
+        assert!(check_adapter_out("out/my-lora.brain").is_ok());
+        assert!(check_adapter_out("out/my-lora").is_ok());
+        // Case is not a loophole: the extension check downstream is exact, so
+        // an uppercase spelling really would take the brain route - but naming
+        // it that way is still a trap for a human reading the folder.
+        assert!(check_adapter_out("a/b.SAFETENSORS").is_err());
+    }
 }
