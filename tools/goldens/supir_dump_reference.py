@@ -108,7 +108,16 @@ Usage:
       --supir     /path/to/SUPIR-v0Q_fp32.safetensors \\
       --clip-l    /path/to/clip-vit-large-patch14/dir \\
       --clip-bigg /path/to/open_clip_model.safetensors \\
-      --out testdata/supir [--latent 32] [--steps 4]
+      --out testdata/supir [--latent 32] [--steps 4] [--s-churn 5.0]
+
+`--s-churn` defaults to `5.0`, matching the committed `testdata/supir/`
+golden bit-for-bit when omitted. Pass `--s-churn 0.0` (into a DIFFERENT
+`--out` directory, never overwriting `testdata/supir/`) for a
+forward-parity golden: with churn off, `gamma == 0` so `sigma_hat == sigma`
+and every per-step tap is a deterministic function of the seed alone, with
+no unrecoverable churn-noise draw standing between the dump and a Rust-side
+forward replay - see `--s-churn`'s own `--help` text for why the default
+golden cannot be used for that.
 """
 
 import argparse
@@ -136,7 +145,7 @@ CFG_SCALE_START = 4.0    # spt_linear_CFG, Quality preset
 CONTROL_SCALE = 1.0      # s_stage2
 CONTROL_SCALE_START = 0.0
 RESTORATION_SCALE = 4.0  # s_stage1 / restore_cfg - ON (see docstring)
-S_CHURN = 5.0
+S_CHURN_DEFAULT = 5.0    # overridable via --s-churn; see --s-churn's own help
 S_NOISE = 1.01
 
 
@@ -490,7 +499,7 @@ def run_pipeline(model, x, args, store, manifest):
         model.sampler_config.params.guider_config.params.scale_min = CFG_SCALE
         model.sampler_config.params.guider_config.params.scale = CFG_SCALE_START
         model.sampler_config.params.restore_cfg = RESTORATION_SCALE
-        model.sampler_config.params.s_churn = S_CHURN
+        model.sampler_config.params.s_churn = args.s_churn
         model.sampler_config.params.s_noise = S_NOISE
         # `BaseDiffusionSampler.__init__` (sampling.py) also defaults its OWN
         # `device="cuda"` with no YAML override, same class of bug as the two
@@ -712,6 +721,13 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--latent", type=int, default=LATENT_DEFAULT, help="latent H=W (32 => a 256x256 LQ image)")
     ap.add_argument("--steps", type=int, default=STEPS_DEFAULT, help="sampler steps (small: this gates composition, not native step count)")
+    ap.add_argument("--s-churn", type=float, default=S_CHURN_DEFAULT, dest="s_churn",
+                     help="RestoreEDMSampler's s_churn (default 5.0, matching the committed testdata/supir/ "
+                          "golden exactly - a re-run with no override reproduces it bit-for-bit). Pass 0.0 to "
+                          "make gamma identically zero (sigma_hat == sigma), so the forward is deterministic "
+                          "from the seed alone with no unrecoverable churn-noise draw - the shape a Rust-side "
+                          "forward replay needs to compare against exactly. See the module docstring's "
+                          "'first task' note for why the DEFAULT golden cannot be replayed.")
     ap.add_argument("--name", default="stages.safetensors")
     args = ap.parse_args()
 
@@ -762,7 +778,7 @@ def main():
         "torch": torch.__version__,
         "cfg_scale": CFG_SCALE, "cfg_scale_start": CFG_SCALE_START,
         "control_scale": CONTROL_SCALE, "control_scale_start": CONTROL_SCALE_START,
-        "restoration_scale": RESTORATION_SCALE, "s_churn": S_CHURN, "s_noise": S_NOISE,
+        "restoration_scale": RESTORATION_SCALE, "s_churn": args.s_churn, "s_noise": S_NOISE,
         "supir_upstream_commit": "bda91af2000042f8bedfec8897d92917e67c1d88",
         "load_stats": load_stats,
     })
