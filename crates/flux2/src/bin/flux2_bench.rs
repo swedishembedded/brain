@@ -18,6 +18,7 @@
 //!   flux2_bench te      [reps]        the Qwen3-4B 512-token TE prefill, per kind
 //!   flux2_bench tei8    [reps]        ...the INT8 (DP4A) shard of the same
 //!   flux2_bench vae     [reps] [h w]  the FLUX.2 VAE decode graph, per kind
+//!   flux2_bench load    [gguf] [var]  where the one-off weight load spends host time
 //!
 //! `BRAIN_FLUX2_BENCH_BASELINE=1` profiles the PRE-optimization kernel set
 //! (`replay` and `te`/`tei8`), so before/after come from one binary in one run.
@@ -156,6 +157,90 @@ fn bench_mm(gpu: &Gpu, reps: usize) {
         total_gflop / (total_ms / 1e3),
         pct(total_gflop / (total_ms / 1e3))
     );
+}
+
+// -------------------------------------------------------------- load ------
+
+/// Whether `model.rs` uploads this tensor as packed int8 under
+/// [`Precision::Int8`]. Mirrors the tier decisions in `Flux2Model::
+/// new_batched` - the double-block mlp-down, the three boundary linears, the
+/// qk-norm scale vectors and the host-resident conditioning matrices all stay
+/// fp32 there, so quantizing them here would overstate the load's real cost.
+fn is_int8_tier(name: &str, shape: &[usize]) -> bool {
+    if shape.len() != 2 || !shape[1].is_multiple_of(4) {
+        return false;
+    }
+    !(name.ends_with("_mlp.2.weight")
+        || name == "img_in.weight"
+        || name == "txt_in.weight"
+        || name == "final_layer.linear.weight"
+        || name.contains("modulation")
+        || name.starts_with("time_in.")
+        || name.starts_with("guidance_in."))
+}
+
+/// Where the one-off per-process weight load actually spends its host time.
+///
+/// Times the production functions, in the production order, on a real
+/// checkpoint: `checkpoint::gguf::read` (slurp + dequantize to fp32),
+/// `flux2::import_bfl` (name map + two-way manifest coverage) and
+/// `model::int8::quantize_weight` over exactly the tensors the int8 tier
+/// packs. Host only - no GPU, so it runs while a card is busy; the upload is
+/// the remaining term and is timed on the device by `BRAIN_PROFILE`.
+fn bench_load(path: &str, variant: &str) {
+    let cfg = match Flux2Config::from_name(variant) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    println!("\n=== weight load, host side: {variant}, {path} ===");
+    let t0 = Instant::now();
+    let raw = match checkpoint::gguf::read(path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let t_read = t0.elapsed().as_secs_f64();
+    let elems: usize = raw.iter().map(|t| t.data.len()).sum();
+    let nbytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    let t1 = Instant::now();
+    let ts = match flux2::import_bfl(raw, &cfg) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let t_import = t1.elapsed().as_secs_f64();
+
+    let t2 = Instant::now();
+    let (mut q_elems, mut q_count) = (0usize, 0usize);
+    for (name, (shape, data)) in &ts {
+        if !is_int8_tier(name, shape) {
+            continue;
+        }
+        let (n, k) = (shape[0], shape[1]);
+        let _ = model::int8::quantize_weight(data, n, k);
+        q_elems += data.len();
+        q_count += 1;
+    }
+    let t_quant = t2.elapsed().as_secs_f64();
+    let total = t_read + t_import + t_quant;
+
+    let gb = |e: usize| e as f64 * 4.0 / 1e9;
+    println!("  file {:.2} GB, {} tensors, {:.2} G params ({:.1} GB fp32)", nbytes as f64 / 1e9, ts.len(), elems as f64 / 1e9, gb(elems));
+    println!("  {:<28} {:>8.2} s  ({:>4.1}%)   slurp + Q8_0 -> fp32", "gguf::read", t_read, 100.0 * t_read / total);
+    println!("  {:<28} {:>8.2} s  ({:>4.1}%)   name map + manifest coverage", "import_bfl", t_import, 100.0 * t_import / total);
+    println!(
+        "  {:<28} {:>8.2} s  ({:>4.1}%)   {q_count} tensors, {:.1} GB fp32 read",
+        "quantize_weight", t_quant, 100.0 * t_quant / total, gb(q_elems)
+    );
+    println!("  {:<28} {:>8.2} s", "TOTAL host load", total);
 }
 
 // ------------------------------------------------------------- floor ------
@@ -742,6 +827,14 @@ fn main() {
         "te" => return bench_te(arg(2, 3), false, base),
         "tei8" => return bench_te(arg(2, 3), true, base),
         "vae" => return bench_vae(arg(2, 3), arg(3, 64) as u32, arg(4, 64) as u32),
+        "load" => {
+            let path = args.get(2).cloned().or_else(|| std::env::var("BRAIN_FLUX2_DIT").ok());
+            let Some(path) = path else {
+                eprintln!("load: pass a .gguf path or set BRAIN_FLUX2_DIT");
+                std::process::exit(1);
+            };
+            return bench_load(&path, args.get(3).map(|s| s.as_str()).unwrap_or("klein-9b"));
+        }
         _ => {}
     }
     let gpu = Gpu::new_wgpu(KERNELS);
