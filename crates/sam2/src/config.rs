@@ -124,6 +124,43 @@ pub struct Sam2Config {
     /// ImageNet normalisation SAM 2 preprocesses with.
     pub pixel_mean: [f32; 3],
     pub pixel_std: [f32; 3],
+    // ---- video memory bank ----
+    /// Spatial memory slabs the memory attention cross-attends to: 1 initial
+    /// conditioning frame + `num_maskmem - 1` recent frames.
+    pub num_maskmem: u32,
+    /// Channel width of an encoded memory (`memory_encoder.out_proj` output).
+    /// Strictly smaller than [`Self::d_model`], which is what splits one
+    /// `d_model` object pointer into `d_model / mem_dim` memory tokens.
+    pub mem_dim: u32,
+    pub memory_attention_layers: u32,
+    pub memory_attention_heads: u32,
+    pub memory_attention_ff: u32,
+    /// `RoPEAttention(rope_theta=...)` - the axial 2D rotary base.
+    pub memory_rope_theta: f32,
+    /// `MemoryAttention(pos_enc_at_input=True)`: `curr + 0.1 * curr_pos`.
+    pub memory_pos_enc_at_input: bool,
+    /// `MaskDownSampler(kernel_size=3, stride=2, padding=1, total_stride=16)`.
+    pub mem_mask_stride: u32,
+    pub mem_mask_kernel: u32,
+    pub mem_mask_pad: u32,
+    pub mem_mask_total_stride: u32,
+    /// `Fuser(CXBlock(kernel_size=7, padding=3), num_layers=2)`.
+    pub memory_fuser_layers: u32,
+    pub memory_fuser_kernel: u32,
+    pub memory_fuser_pad: u32,
+    /// `PositionEmbeddingSine(num_pos_feats=64)` inside the memory encoder.
+    pub mem_pos_sine_num_pos_feats: u32,
+    /// `mask_for_mem = sigmoid(logits) * scale + bias`.
+    pub sigmoid_scale_for_mem_enc: f32,
+    pub sigmoid_bias_for_mem_enc: f32,
+    /// Object pointers cross-attended in the memory attention.
+    pub max_obj_ptrs_in_encoder: u32,
+    /// XMem/Cutie's `r`: for `t_rel >= 2` the memory frame is taken from every
+    /// `r`-th frame. The released eval config uses 1.
+    pub memory_temporal_stride_for_eval: u32,
+    /// `_forward_sam_heads` replaces a mask logit with this when the object
+    /// score says the object is absent.
+    pub no_obj_score: f32,
 }
 
 impl Sam2Config {
@@ -206,6 +243,26 @@ impl Sam2Config {
             // each declared them byte-identically before they were hoisted.
             pixel_mean: imaging::IMAGENET_MEAN,
             pixel_std: imaging::IMAGENET_STD,
+            num_maskmem: 7,
+            mem_dim: 64,
+            memory_attention_layers: 4,
+            memory_attention_heads: 1,
+            memory_attention_ff: 2048,
+            memory_rope_theta: 10000.0,
+            memory_pos_enc_at_input: true,
+            mem_mask_stride: 2,
+            mem_mask_kernel: 3,
+            mem_mask_pad: 1,
+            mem_mask_total_stride: 16,
+            memory_fuser_layers: 2,
+            memory_fuser_kernel: 7,
+            memory_fuser_pad: 3,
+            mem_pos_sine_num_pos_feats: 64,
+            sigmoid_scale_for_mem_enc: 20.0,
+            sigmoid_bias_for_mem_enc: -10.0,
+            max_obj_ptrs_in_encoder: 16,
+            memory_temporal_stride_for_eval: 1,
+            no_obj_score: -1024.0,
         }
     }
 
@@ -437,6 +494,127 @@ impl Sam2Config {
         if self.fixed_no_obj_ptr {
             v.push(("no_obj_ptr".into(), vec![1, d]));
         }
+        v
+    }
+
+    // -----------------------------------------------------------------------
+    // video memory bank
+    // -----------------------------------------------------------------------
+
+    /// `MaskDownSampler`'s layer count: `log2(total_stride) / log2(stride)`.
+    pub fn mem_mask_layers(&self) -> u32 {
+        let (mut s, mut n) = (1u32, 0u32);
+        while s < self.mem_mask_total_stride {
+            s *= self.mem_mask_stride;
+            n += 1;
+        }
+        assert_eq!(s, self.mem_mask_total_stride, "mask downsampler stride {} does not reach total {}", self.mem_mask_stride, self.mem_mask_total_stride);
+        n
+    }
+
+    /// Channel width entering each `MaskDownSampler` conv, plus the width
+    /// leaving the last one: `1, stride^2, stride^4, ...`.
+    pub fn mem_mask_chans(&self) -> Vec<u32> {
+        let mut v = vec![1u32];
+        for _ in 0..self.mem_mask_layers() {
+            v.push(v[v.len() - 1] * self.mem_mask_stride * self.mem_mask_stride);
+        }
+        v
+    }
+
+    /// Tokens one `d_model` object pointer is split into for the memory
+    /// attention (`d_model / mem_dim`).
+    pub fn obj_ptr_tokens(&self) -> u32 {
+        assert_eq!(self.d_model % self.mem_dim, 0, "d_model {} is not a multiple of mem_dim {}", self.d_model, self.mem_dim);
+        self.d_model / self.mem_dim
+    }
+
+    /// Every VIDEO-path tensor, with its exact checkpoint name and shape - the
+    /// mirror of [`Self::tensor_manifest`] for the memory bank. Together the two
+    /// cover the released checkpoint exactly, which is what lets
+    /// [`crate::import`] hard-error on an unmatched key in either direction.
+    ///
+    /// `mask_downsample` is here because it IS a checkpoint tensor of the video
+    /// half; it belongs to the mask-PROMPT entry point (`add_new_mask` →
+    /// `_use_mask_as_output`), which this port does not implement. It is loaded
+    /// so coverage closes at 154/154 with nothing skipped, and named here rather
+    /// than swept under a skip list.
+    pub fn video_tensor_manifest(&self) -> Vec<(String, Vec<usize>)> {
+        let mut v: Vec<(String, Vec<usize>)> = Vec::new();
+        let d = self.d_model as usize;
+        let m = self.mem_dim as usize;
+        let ff = self.memory_attention_ff as usize;
+
+        v.push(("maskmem_tpos_enc".into(), vec![self.num_maskmem as usize, 1, 1, m]));
+        v.push(("no_mem_pos_enc".into(), vec![1, 1, d]));
+        v.push(("no_obj_embed_spatial".into(), vec![1, m]));
+        v.push(("obj_ptr_tpos_proj.weight".into(), vec![m, d]));
+        v.push(("obj_ptr_tpos_proj.bias".into(), vec![m]));
+        v.push(("mask_downsample.weight".into(), vec![1, 1, 4, 4]));
+        v.push(("mask_downsample.bias".into(), vec![1]));
+
+        // ---- memory attention ----
+        for l in 0..self.memory_attention_layers {
+            let p = format!("memory_attention.layers.{l}");
+            // `self_attn` reads d_model on all three inputs; `cross_attn_image`
+            // has `kv_in_dim = mem_dim`, so ONLY its k/v projections are narrow.
+            for (attn, kv) in [("self_attn", d), ("cross_attn_image", m)] {
+                v.push((format!("{p}.{attn}.q_proj.weight"), vec![d, d]));
+                v.push((format!("{p}.{attn}.q_proj.bias"), vec![d]));
+                for proj in ["k_proj", "v_proj"] {
+                    v.push((format!("{p}.{attn}.{proj}.weight"), vec![d, kv]));
+                    v.push((format!("{p}.{attn}.{proj}.bias"), vec![d]));
+                }
+                v.push((format!("{p}.{attn}.out_proj.weight"), vec![d, d]));
+                v.push((format!("{p}.{attn}.out_proj.bias"), vec![d]));
+            }
+            v.push((format!("{p}.linear1.weight"), vec![ff, d]));
+            v.push((format!("{p}.linear1.bias"), vec![ff]));
+            v.push((format!("{p}.linear2.weight"), vec![d, ff]));
+            v.push((format!("{p}.linear2.bias"), vec![d]));
+            for n in 1..=3 {
+                v.push((format!("{p}.norm{n}.weight"), vec![d]));
+                v.push((format!("{p}.norm{n}.bias"), vec![d]));
+            }
+        }
+        v.push(("memory_attention.norm.weight".into(), vec![d]));
+        v.push(("memory_attention.norm.bias".into(), vec![d]));
+
+        // ---- memory encoder: mask downsampler (Sequential index arithmetic) ----
+        let chans = self.mem_mask_chans();
+        let k = self.mem_mask_kernel as usize;
+        for i in 0..self.mem_mask_layers() as usize {
+            let (cin, cout) = (chans[i] as usize, chans[i + 1] as usize);
+            let p = format!("memory_encoder.mask_downsampler.encoder.{}", 3 * i);
+            v.push((format!("{p}.weight"), vec![cout, cin, k, k]));
+            v.push((format!("{p}.bias"), vec![cout]));
+            let n = format!("memory_encoder.mask_downsampler.encoder.{}", 3 * i + 1);
+            v.push((format!("{n}.weight"), vec![cout]));
+            v.push((format!("{n}.bias"), vec![cout]));
+        }
+        let last = 3 * self.mem_mask_layers() as usize;
+        let cend = *chans.last().unwrap() as usize;
+        v.push((format!("memory_encoder.mask_downsampler.encoder.{last}.weight"), vec![d, cend, 1, 1]));
+        v.push((format!("memory_encoder.mask_downsampler.encoder.{last}.bias"), vec![d]));
+
+        // ---- memory encoder: pix_feat_proj, fuser, out_proj ----
+        v.push(("memory_encoder.pix_feat_proj.weight".into(), vec![d, d, 1, 1]));
+        v.push(("memory_encoder.pix_feat_proj.bias".into(), vec![d]));
+        let fk = self.memory_fuser_kernel as usize;
+        for l in 0..self.memory_fuser_layers {
+            let p = format!("memory_encoder.fuser.layers.{l}");
+            v.push((format!("{p}.dwconv.weight"), vec![d, 1, fk, fk]));
+            v.push((format!("{p}.dwconv.bias"), vec![d]));
+            v.push((format!("{p}.norm.weight"), vec![d]));
+            v.push((format!("{p}.norm.bias"), vec![d]));
+            v.push((format!("{p}.pwconv1.weight"), vec![4 * d, d]));
+            v.push((format!("{p}.pwconv1.bias"), vec![4 * d]));
+            v.push((format!("{p}.pwconv2.weight"), vec![d, 4 * d]));
+            v.push((format!("{p}.pwconv2.bias"), vec![d]));
+            v.push((format!("{p}.gamma"), vec![d]));
+        }
+        v.push(("memory_encoder.out_proj.weight".into(), vec![m, d, 1, 1]));
+        v.push(("memory_encoder.out_proj.bias".into(), vec![m]));
         v
     }
 }

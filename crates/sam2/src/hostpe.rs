@@ -142,6 +142,76 @@ pub fn embed_points(
     out
 }
 
+/// `compute_axial_cis(dim, end_x, end_y, theta)` as the `(cos, sin)` pair the
+/// `rope_interleave_table` kernel takes: two `[end_x*end_y, dim/2]` tables.
+///
+/// SAM 2's memory attention rotates the INTERLEAVED channel pairs `(2j, 2j+1)`
+/// (`view_as_complex` on `reshape(..., -1, 2)`), and splits the `dim/2` pairs in
+/// half: the first `dim/4` carry the X frequency, the second `dim/4` the Y one.
+/// Token `t` sits at `x = t % end_x`, `y = t / end_x`.
+pub fn axial_rope_tables(dim: u32, end_x: u32, end_y: u32, theta: f32) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(dim % 4, 0, "axial RoPE wants dim divisible by 4, got {dim}");
+    let quarter = (dim / 4) as usize;
+    let half = (dim / 2) as usize;
+    // `1 / theta^(arange(0, dim, 4)[:dim/4] / dim)`.
+    let freqs: Vec<f32> = (0..quarter).map(|i| 1.0 / theta.powf((4 * i) as f32 / dim as f32)).collect();
+    let n = (end_x * end_y) as usize;
+    let (mut cos_t, mut sin_t) = (vec![0.0f32; n * half], vec![0.0f32; n * half]);
+    for t in 0..n {
+        let tx = (t as u32 % end_x) as f32;
+        let ty = (t as u32 / end_x) as f32;
+        for j in 0..quarter {
+            let (ax, ay) = (tx * freqs[j], ty * freqs[j]);
+            cos_t[t * half + j] = ax.cos();
+            sin_t[t * half + j] = ax.sin();
+            cos_t[t * half + quarter + j] = ay.cos();
+            sin_t[t * half + quarter + j] = ay.sin();
+        }
+    }
+    (cos_t, sin_t)
+}
+
+/// `sam2_utils.get_1d_sine_pe(pos, dim, temperature)` for one scalar position:
+/// `cat(sin(pos / dim_t), cos(pos / dim_t))` over `dim/2` frequencies, where
+/// `dim_t[i] = temperature^(2*(i/2) / (dim/2))` with INTEGER `i/2` - the two
+/// halves are concatenated, NOT interleaved (unlike `sine`).
+pub fn sine_1d(pos: f32, dim: u32, temperature: f32) -> Vec<f32> {
+    let pe = (dim / 2) as usize;
+    let mut out = vec![0.0f32; dim as usize];
+    for i in 0..pe {
+        let dt = temperature.powf(2.0 * ((i / 2) as f32) / pe as f32);
+        let v = pos / dt;
+        out[i] = v.sin();
+        out[pe + i] = v.cos();
+    }
+    out
+}
+
+/// `y = W x + b` for a handful of rows, on the host.
+///
+/// The object-pointer temporal encoding is at most `max_obj_ptrs_in_encoder`
+/// rows through one `[mem_dim, d_model]` projection - the same "a few rows, run
+/// it on the host" case as the point prompts above, and keeping it here means
+/// the memory-token assembly uploads ONE finished buffer instead of dispatching
+/// a 16-row GEMM.
+pub fn linear_rows(x: &[f32], w: &[f32], b: &[f32], k: usize, n: usize) -> Vec<f32> {
+    assert_eq!(w.len(), n * k, "weight is [n, k]");
+    assert_eq!(b.len(), n, "bias is [n]");
+    assert_eq!(x.len() % k, 0, "x is [rows, k]");
+    let rows = x.len() / k;
+    let mut out = vec![0.0f32; rows * n];
+    for r in 0..rows {
+        for j in 0..n {
+            let mut acc = b[j];
+            for i in 0..k {
+                acc += x[r * k + i] * w[j * k + i];
+            }
+            out[r * n + j] = acc;
+        }
+    }
+    out
+}
+
 /// Tile `src` (`[c, sh, sw]`) over an `h x w` grid — `Tensor.tile` with integer
 /// repeat factors, which is what Hiera does to its window position embedding
 /// before adding it to the interpolated background embedding. Pure index
@@ -169,6 +239,34 @@ mod tests {
         let p = sine(256, 10000.0, 4, 6);
         assert_eq!(p.len(), 256 * 24);
         assert!(p.iter().all(|v| v.abs() <= 1.0 + 1e-6));
+    }
+
+    /// The X half of the axial table must vary along x and be CONSTANT along y
+    /// (and the Y half the mirror image). Transposing the two halves is the
+    /// classic 2D-RoPE bug and it is invisible on a square grid otherwise.
+    #[test]
+    fn axial_rope_splits_x_and_y_into_the_two_halves() {
+        let (cos_t, sin_t) = axial_rope_tables(8, 4, 3, 10000.0);
+        let half = 4usize;
+        assert_eq!(cos_t.len(), 12 * half);
+        // token (x=1,y=0) is index 1; token (x=1,y=1) is index 5.
+        let (a, b) = (1usize, 5usize);
+        // X half (cols 0..2) is the same for both: same x.
+        for j in 0..2 {
+            assert!((cos_t[a * half + j] - cos_t[b * half + j]).abs() < 1e-6, "x half moved with y");
+        }
+        // Y half (cols 2..4) must differ: different y.
+        assert!((sin_t[a * half + 2] - sin_t[b * half + 2]).abs() > 1e-6, "y half did not move with y");
+        // y = 0 leaves the Y half at angle 0.
+        assert!(sin_t[a * half + 2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn sine_1d_concatenates_sin_then_cos() {
+        let e = sine_1d(0.0, 8, 10000.0);
+        assert_eq!(e.len(), 8);
+        assert!(e[..4].iter().all(|v| v.abs() < 1e-6), "sin(0) half");
+        assert!(e[4..].iter().all(|v| (*v - 1.0).abs() < 1e-6), "cos(0) half");
     }
 
     #[test]

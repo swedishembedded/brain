@@ -45,7 +45,7 @@ use vision::{Act, Conv, ConvNames, ConvSpec, ConvTrSpec, ConvTranspose, Ctx, Lay
 
 use crate::config::{BlockSpec, Sam2Config};
 use crate::hostpe;
-use crate::import::{self, Tensors, NO_MEM_EMBED};
+use crate::import::{self, Scope, Tensors, NO_MEM_EMBED};
 
 /// Kernels this model dispatches, by name. `vision::ConvKernelIds::resolve` and
 /// `Gpu::kernel_index` both key on the NAME, so the order here is irrelevant -
@@ -117,6 +117,17 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // coalesced loads.
     ("kv_k_headt", kernels::KV_K_HEADT),
     ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
+    // ---- video memory bank (`crate::video`) ----
+    // The memory encoder's ConvNeXt fuser is DEPTHWISE, and `backend-cpu` binds
+    // its dense fast path to the NAME `conv2d` - a grouped conv must reach
+    // `conv2d_gd`, or it would silently convolve as if dense.
+    ("conv2d", kernels::CONV2D),
+    ("conv2d_gd", kernels::CONV2D_GD),
+    ("conv2d_gd_reg", kernels::CONV2D_GD_REG),
+    // SAM 2's axial 2D RoPE rotates the INTERLEAVED pair (2j, 2j+1) against a
+    // host table - `rope2d` is the rotate-half sibling and is a different
+    // operator, not a faster spelling of this one.
+    ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
 ];
 
 /// Query rows per `chunked_bidir_fwd` dispatch. A multiple of 64 is REQUIRED,
@@ -224,6 +235,10 @@ struct HostConsts {
 pub struct Sam2 {
     pub gpu: Gpu,
     pub cfg: Sam2Config,
+    /// Which half of the checkpoint this instance's [`ParamStore`] holds. The
+    /// video path asserts [`Scope::Video`] rather than letting `ps.w()` panic on
+    /// a name that was never allocated.
+    pub scope: Scope,
     pub ps: ParamStore,
     pub(crate) ids: Ids,
     pub(crate) conv_ids: vision::ConvKernelIds,
@@ -306,13 +321,31 @@ impl Sam2 {
         Sam2::new_with_roles(gpu, cfg, weights, &|_| false)
     }
 
+    /// [`Sam2::new`] holding the WHOLE checkpoint - image path plus memory bank.
+    /// Required by [`crate::video`]; `weights` must come from
+    /// `import::import_scoped(.., Scope::Video)`.
+    pub fn new_video(gpu: Gpu, cfg: Sam2Config, weights: &Tensors) -> Sam2 {
+        Sam2::new_scoped(gpu, cfg, weights, Scope::Video, &|_| false)
+    }
+
     /// [`Sam2::new`] with a per-tensor trainability predicate. `trainable(name)`
     /// picks the parameters that get gradient + AdamW buffers; everything else
     /// stays `Role::Frozen` (weight buffer only). `crate::train` uses this to
     /// build the mask-decoder-finetune role set - the trunk and neck stay frozen
     /// and allocate no optimiser state at all.
     pub fn new_with_roles(gpu: Gpu, cfg: Sam2Config, weights: &Tensors, trainable: &dyn Fn(&str) -> bool) -> Sam2 {
-        let params: Vec<(String, usize, Role)> = import::param_list(&cfg)
+        Sam2::new_scoped(gpu, cfg, weights, Scope::Image, trainable)
+    }
+
+    /// [`Sam2::new_with_roles`] at an explicit [`Scope`].
+    pub fn new_scoped(
+        gpu: Gpu,
+        cfg: Sam2Config,
+        weights: &Tensors,
+        scope: Scope,
+        trainable: &dyn Fn(&str) -> bool,
+    ) -> Sam2 {
+        let params: Vec<(String, usize, Role)> = import::param_list_scoped(&cfg, scope)
             .into_iter()
             .map(|(n, c)| {
                 let r = if trainable(&n) { Role::Trainable } else { Role::Frozen };
@@ -339,7 +372,7 @@ impl Sam2 {
             no_obj_ptr: take(NO_OBJ_PTR),
         };
         assert_eq!(host.gauss.len(), cfg.d_model as usize, "gaussian matrix is [2, d/2]");
-        Sam2 { gpu, cfg, ps, ids, conv_ids, host }
+        Sam2 { gpu, cfg, scope, ps, ids, conv_ids, host }
     }
 
     pub(crate) fn ctx(&self) -> Ctx<'_> {
@@ -419,7 +452,7 @@ impl Sam2 {
     /// SSA copy into a fresh buffer. `axpy` is `out += s*in` (read-modify-write),
     /// so the destination goes in the submit's CLEAR list - relying on a fresh
     /// allocation being zeroed would be a backend-dependent assumption.
-    fn copy_of(&self, src: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    pub(crate) fn copy_of(&self, src: &DeviceBuffer, n: u32) -> DeviceBuffer {
         let out = self.gpu.storage(n as u64);
         self.gpu.submit(&[&out], &[self.gpu.step(self.ids.axpy, &[&out, src], &[n, f(1.0)], n)]);
         out
@@ -912,6 +945,18 @@ impl Sam2 {
     // =======================================================================
 
     pub fn decode(&self, enc: &Encoded, prompt: &Prompt) -> Decoded {
+        self.decode_with(enc, &enc.image_embed, prompt)
+    }
+
+    /// [`Sam2::decode`] against an EXPLICIT backbone feature map, `[1, d, h, w]`
+    /// NCHW, in place of `enc.image_embed`.
+    ///
+    /// The image path passes `enc.image_embed` (`fpn[2] + no_mem_embed`); the
+    /// video path passes the memory-conditioned feature the memory attention
+    /// produced ([`crate::video`]). Everything else - the prompt encoder, the
+    /// two-way transformer, the high-resolution features `enc.high_res` - is
+    /// identical, which is why this is one function and not two.
+    pub fn decode_with(&self, enc: &Encoded, backbone: &DeviceBuffer, prompt: &Prompt) -> Decoded {
         let cfg = &self.cfg;
         let g = &self.gpu;
         let d = cfg.d_model;
@@ -972,7 +1017,7 @@ impl Sam2 {
         let keys0 = g.storage(n_img as u64 * d as u64);
         let key_pe = g.storage(n_img as u64 * d as u64);
         let mut steps = Vec::new();
-        steps.push(g.step(self.ids.add2, &[&enc.image_embed, &dense, &src_in], &[d * n_img], d * n_img));
+        steps.push(g.step(self.ids.add2, &[backbone, &dense, &src_in], &[d * n_img], d * n_img));
         self.to_nlc(&mut steps, &src_in, &keys0, d, n_img);
         self.to_nlc(&mut steps, &dense_pe, &key_pe, d, n_img);
         g.submit(&[], &steps);
@@ -1268,13 +1313,13 @@ impl Sam2 {
         g.submit(&[], &steps);
     }
 
-    fn add(&self, a: &DeviceBuffer, b: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    pub(crate) fn add(&self, a: &DeviceBuffer, b: &DeviceBuffer, n: u32) -> DeviceBuffer {
         let out = self.gpu.storage(n as u64);
         self.gpu.submit(&[], &[self.gpu.step(self.ids.add2, &[a, b, &out], &[n], n)]);
         out
     }
 
-    fn layernorm(&self, x: &DeviceBuffer, prefix: &str, rows: u32, d: u32) -> DeviceBuffer {
+    pub(crate) fn layernorm(&self, x: &DeviceBuffer, prefix: &str, rows: u32, d: u32) -> DeviceBuffer {
         let out = self.gpu.storage(rows as u64 * d as u64);
         self.gpu.submit(
             &[],

@@ -117,20 +117,35 @@ fast and scalable kernel - not a naive one.
     both resident SCRFD is loaded twice - accepted, it is 17 MB. *(`run_batch`
     is the serial default and says why: both released graphs are built for
     `Shape::new(1,3,side,side)`. Backward/gradcheck are listed in that ledger.)*
-9c. **SAM 2.1 promptable segmentation** (`crates/sam2`) - the **image path** of
-    Meta's SAM 2.1: Hiera trunk (windowed attention with a per-block window
-    schedule + `q_pool` stride stages) → FPN neck → prompt encoder (points, boxes
-    and a mask prompt, over a random-Fourier positional encoding) → the two-way
-    mask decoder (4 mask tokens + IoU head + object-score token). Both released
-    variants (`hiera_tiny`, `hiera_large`) imported with two-way coverage and
-    **forward-parity-gated per stage at cosine ≥0.9999999999** over 283
-    comparisons. Composes `model::vit`'s windowed spans and `vision::blocks`;
-    adds no kernel. **Serving contract met**: `sam2::caps` (`segment`),
-    `crates/cli/src/resident_sam2.rs` (`BRAIN_SAM2_WEIGHTS`), D-Bus `Run`,
-    `examples/vision/`; `run_batch` groups a batch **by image**, so N prompts on
-    one frame cost ONE Hiera trunk pass and N decoder passes. *(Forward only: the
-    video memory bank and backward/gradcheck are deferred - see the Limits
-    section of `docs/models/sam2.md`.)*
+9c. **SAM 2.1 promptable segmentation** (`crates/sam2`) - the **image AND video
+    paths** of Meta's SAM 2.1. Image: Hiera trunk (windowed attention with a
+    per-block window schedule + `q_pool` stride stages) → FPN neck → prompt
+    encoder (points, boxes and a mask prompt, over a random-Fourier positional
+    encoding) → the two-way mask decoder (4 mask tokens + IoU head +
+    object-score token). Video (`src/video.rs`): the temporal **memory bank** -
+    4 memory-attention layers (axial 2D RoPE, the query's frequency table
+    REPEATED down the concatenated memory slabs, object-pointer tokens excluded
+    from the rotation), the ConvNeXt memory encoder, and the propagation loop
+    that conditions frame *t* on the memory of the frames before it. So a point
+    on one frame becomes a mask on every frame: `brain sam2 track --video
+    clip.mp4 --point x,y --out masks/` writes a **mask-sequence directory**
+    (`sam2::maskseq`, format `brain/sam2-maskseq/1` - per-frame 8-bit PNGs plus
+    a `masks.json` that **declares its polarity**, which a consumer must read
+    and must never infer). Both released variants (`hiera_tiny`, `hiera_large`)
+    imported with two-way coverage at two `import::Scope`s - `Image` counts the
+    153 video tensors as deliberately skipped, `Video` skips NOTHING and
+    hard-errors on an unmatched key in either direction, so an untrained memory
+    bank is not a reachable state - and **forward-parity-gated per stage at
+    cosine ≥0.9999999999** over 283 image comparisons plus 76 video ones on
+    **cosine AND rel_l2**. Composes `model::vit`'s windowed spans and
+    `vision::blocks`; adds no kernel (the memory attention reuses
+    `rope_interleave_table`). **Serving contract met**: `sam2::caps`
+    (`segment`), `crates/cli/src/resident_sam2.rs` (`BRAIN_SAM2_WEIGHTS`),
+    D-Bus `Run`, `examples/vision/`; `run_batch` groups a batch **by image**, so
+    N prompts on one frame cost ONE Hiera trunk pass and N decoder passes.
+    *(Forward only: backward/gradcheck are deferred, and the video path tracks
+    ONE object per run, forward only - see the Limits section of
+    `docs/models/sam2.md`.)*
 10. **WorldMirror-2 multi-view 3D reconstruction** (`crates/worldmirror2`) - the
     HY-World 2.0 1.26B feed-forward model: per-frame DINOv2 ViT-L/14 encoding,
     24 alternating frame/global attention levels (QK-norm + normalized 2D RoPE),
@@ -772,7 +787,7 @@ front-end to depend on.
 | `yolov8` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
 | `zipdepth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `worldmirror2` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
-| `scrfd` / `arcface` / `sam2` / `clip` | SCRFD face detection; ArcFace identity embedding (+ the 5-point alignment and its trainer); SAM 2.1 promptable segmentation (image path); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
+| `scrfd` / `arcface` / `sam2` / `clip` | SCRFD face detection; ArcFace identity embedding (+ the 5-point alignment and its trainer); SAM 2.1 promptable segmentation (image path + the video memory bank); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
 | `diffusion` / `dit` / `vae` / `s3dit` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
 | `flux1` / `flux2` / `t5encoder` | FLUX.1/Kontext 12B MMDiT + edit path; FLUX.2 Klein 4B/9B MMDiT; T5-XXL and umT5-XXL text-conditioning encoders |
 | `wan` | Wan2.1/2.2 text-to-video: the 3D-latent DiT, the causal 3D VAE, the sampling pipeline, both importers, and the host trainer/LoRA |
@@ -864,6 +879,7 @@ front-end to depend on.
 | CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/goldens/clip_dump_reference.py`; user-facing page `docs/models/clip.md` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/zipdepth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; user-facing page `docs/models/sam2.md` |
+| **SAM 2.1 video tracking** (the temporal memory bank) and the per-frame **mask-sequence format** other models consume | `crates/sam2/src/{video,maskseq}.rs`, `crates/cli/src/sam2_cli.rs` (`brain sam2 track`); goldens via `tools/goldens/sam2_video_dump_reference.py`; the consumer side is `ltxv::maskcond::read_mask_sequence` |
 | DeepSeek-OCR (document image -> text/markdown) | `.agents/roadmap/deepseek2ocr.md`; `crates/deepseek2ocr/src/{config,encoder,layout,model,preprocess,prompt,rows,import,caps}.rs` over `crates/{sam1,clip,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr.rs`; goldens via `tools/goldens/deepseek_ocr_dump_reference.py`; user-facing page `docs/models/deepseek2ocr.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/worldmirror2/{readme,status}.md`; `crates/worldmirror2`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/{readme,status}.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
