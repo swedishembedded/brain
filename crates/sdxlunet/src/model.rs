@@ -273,6 +273,23 @@ impl<'a> Rec<'a> {
         self.prefix = p.to_string();
     }
 
+    /// Install a [`SkipFuse`] implementor, routing [`Rec::join_skip`]/
+    /// [`Rec::fuse_mid`]/[`Rec::pre_upsample`] through it instead of the
+    /// plain concat/identity default.
+    ///
+    /// [`Unet::new_fused`] does exactly this internally (`r.fuse = fuse;`)
+    /// but `fuse` is a private field, so a caller that records more than one
+    /// backbone into a single [`Rec`] - SUPIR's `GLVControl` trunk recorded
+    /// first, then the frozen UNet via [`Unet::record_into`] with the
+    /// adaptors installed - has no way to reach it from outside this crate.
+    /// This is that seam, public for the same reason [`Unet::record_into`]
+    /// is: a caller assembling its own `Rec` by hand needs the same
+    /// building blocks [`Unet::build`] uses internally, not a private copy
+    /// of them.
+    pub fn set_fuse(&mut self, fuse: &'a dyn SkipFuse) {
+        self.fuse = Some(fuse);
+    }
+
     /// Take ownership of the currently-recorded `silu(emb)` slot, leaving it
     /// empty. Two conditioning chains recorded into one `Rec` (SUPIR's trunk
     /// has its own `time_embed`/`label_emb`, distinct from the frozen UNet's)
@@ -1025,7 +1042,7 @@ impl Unet {
     /// see [`Rec::set_prefix`] and [`Rec::conditioning`] - so this takes only
     /// what actually varies per call: the config, the latent size, the input
     /// buffers and whether control residuals are added.
-    fn record_into(r: &mut Rec<'_>, cfg: &UNetConfig, h: u32, w: u32, inputs: &Inputs, control: bool) -> Recorded {
+    pub fn record_into(r: &mut Rec<'_>, cfg: &UNetConfig, h: u32, w: u32, inputs: &Inputs, control: bool) -> Recorded {
         let levels = cfg.levels();
         let c0 = cfg.block_out_channels[0];
         let te = cfg.time_embed_dim;
