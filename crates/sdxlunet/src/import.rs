@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::config::UNetConfig;
+use crate::config::{BlockKind, UNetConfig};
 
 /// Host tensors by brain-side name: `(shape, row-major f32 data)` — the exact
 /// type `vae::blocks::Builder` consumes.
@@ -190,6 +190,198 @@ pub fn remap_manifest(
         return Err(format!("{who} import: produced {} of {} tensors", out.len(), manifest.len()));
     }
     Ok(out)
+}
+
+const LDM_PREFIX: &str = "model.diffusion_model.";
+
+/// Read a CompVis/LDM-format single-file SDXL checkpoint (the
+/// `model.diffusion_model.*` half of the upstream-released
+/// `sd_xl_base_1.0_*.safetensors`) and remap it onto `cfg`'s manifest - the
+/// single-file sibling of [`load`], which only reads the diffusers `unet/`
+/// directory layout.
+///
+/// Needed because `crates/supir` carries no frozen-backbone weights of its
+/// own (its checkpoint is the SUPIR-over-SDXL DELTA only, per that crate's
+/// module doc) - a real deployment loads the frozen UNet from the SAME
+/// single-file release checkpoint the upstream Python reference does, and
+/// there is no diffusers-layout `unet/` directory anywhere in that picture.
+pub fn load_ldm(path: &str, cfg: &UNetConfig) -> Result<Tensors, String> {
+    let src = checkpoint::safetensors::read(path)?;
+    let raw: HashMap<String, (Vec<usize>, Vec<f32>)> = src
+        .into_iter()
+        .filter_map(|t| t.name.strip_prefix(LDM_PREFIX).map(|n| (n.to_string(), (t.shape, t.data))))
+        .collect();
+    remap_ldm(raw, cfg)
+}
+
+/// The pure remap behind [`load_ldm`]: rename the CompVis/LDM outer
+/// structure (`input_blocks`/`middle_block`/`output_blocks`/`time_embed`/
+/// `label_emb`/`out`, already stripped of [`LDM_PREFIX`]) into this crate's
+/// diffusers-style names, then hand off to [`remap_manifest`] for the
+/// qkv/kv/GEGLU fusion - the SAME fusion [`remap`] itself applies, so this
+/// differs from `load`/`remap` only in the outer-structure rename, never in
+/// how a fused leaf is split.
+///
+/// The down+mid half of this walk duplicates
+/// `crates/supir::import::remap_trunk`'s own private LDM rename (that
+/// crate needed it first, for `GLVControl`, before the frozen backbone's own
+/// up path made a second, full-UNet version necessary here) - `crates/supir`
+/// depends on this crate and not the other way around, so hoisting the
+/// shared down+mid half out of `supir` and into this module, with `supir`
+/// calling back into it, is the right fix but a separate change: this one
+/// adds the up path this crate needed and did not have, not a refactor of
+/// already-tested code in a crate two levels away.
+pub fn remap_ldm(mut local: HashMap<String, (Vec<usize>, Vec<f32>)>, cfg: &UNetConfig) -> Result<Tensors, String> {
+    let mut renamed: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+
+    for (src, dst) in [
+        ("time_embed.0", "time_embedding.linear_1"),
+        ("time_embed.2", "time_embedding.linear_2"),
+        ("label_emb.0.0", "add_embedding.linear_1"),
+        ("label_emb.0.2", "add_embedding.linear_2"),
+    ] {
+        for suf in ["weight", "bias"] {
+            let sk = format!("{src}.{suf}");
+            let v = local.remove(&sk).ok_or_else(|| format!("unet-ldm import: missing {LDM_PREFIX}{sk}"))?;
+            renamed.insert(format!("{dst}.{suf}"), v);
+        }
+    }
+
+    // ---- down: `input_blocks` -----------------------------------------
+    enum DownBlk {
+        ConvIn,
+        Resnet { level: usize, layer: usize },
+        Downsample { level: usize },
+    }
+    let mut down_walk = vec![DownBlk::ConvIn];
+    for level in 0..cfg.levels() {
+        for layer in 0..cfg.layers_per_block as usize {
+            down_walk.push(DownBlk::Resnet { level, layer });
+        }
+        if level + 1 < cfg.levels() {
+            down_walk.push(DownBlk::Downsample { level });
+        }
+    }
+    for (bi, blk) in down_walk.into_iter().enumerate() {
+        match blk {
+            DownBlk::ConvIn => {
+                for suf in ["weight", "bias"] {
+                    let sk = format!("input_blocks.{bi}.0.{suf}");
+                    let v = local.remove(&sk).ok_or_else(|| format!("unet-ldm import: missing {LDM_PREFIX}{sk}"))?;
+                    renamed.insert(format!("conv_in.{suf}"), v);
+                }
+            }
+            DownBlk::Resnet { level, layer } => {
+                ldm_rename_resnet(&mut local, &mut renamed, &format!("input_blocks.{bi}.0"), &format!("down_blocks.{level}.resnets.{layer}"))?;
+                if cfg.down_block_types[level] == BlockKind::CrossAttn {
+                    ldm_rename_passthrough(&mut local, &mut renamed, &format!("input_blocks.{bi}.1"), &format!("down_blocks.{level}.attentions.{layer}"));
+                }
+            }
+            DownBlk::Downsample { level } => {
+                for suf in ["weight", "bias"] {
+                    let sk = format!("input_blocks.{bi}.0.op.{suf}");
+                    let v = local.remove(&sk).ok_or_else(|| format!("unet-ldm import: missing {LDM_PREFIX}{sk}"))?;
+                    renamed.insert(format!("down_blocks.{level}.downsamplers.0.conv.{suf}"), v);
+                }
+            }
+        }
+    }
+
+    // ---- mid: `middle_block` -------------------------------------------
+    ldm_rename_resnet(&mut local, &mut renamed, "middle_block.0", "mid_block.resnets.0")?;
+    ldm_rename_passthrough(&mut local, &mut renamed, "middle_block.1", "mid_block.attentions.0");
+    ldm_rename_resnet(&mut local, &mut renamed, "middle_block.2", "mid_block.resnets.1")?;
+
+    // ---- up: `output_blocks` -------------------------------------------
+    // One flat `output_blocks` index `k` per (up_block, resnet-layer) pair,
+    // exactly mirroring the down side's `input_blocks` numbering: submodule
+    // `.0` is always the resnet, `.1` is the transformer when the up-block
+    // has one, and an `Upsample` (verified against the real checkpoint
+    // header: `output_blocks.{2,5}.2.conv.*`, i.e. AFTER the transformer,
+    // for SDXL's own up_block_types) lands at whichever submodule index
+    // comes next, on the LAST resnet of every up-block but the last.
+    let mut k = 0usize;
+    for i in 0..cfg.levels() {
+        let skips = cfg.up_skips(i);
+        let n_this = skips.len();
+        let has_attn = cfg.up_block_types[i] == BlockKind::CrossAttn;
+        for j in 0..n_this {
+            ldm_rename_resnet(&mut local, &mut renamed, &format!("output_blocks.{k}.0"), &format!("up_blocks.{i}.resnets.{j}"))?;
+            let mut next_sub = 1usize;
+            if has_attn {
+                ldm_rename_passthrough(&mut local, &mut renamed, &format!("output_blocks.{k}.1"), &format!("up_blocks.{i}.attentions.{j}"));
+                next_sub = 2;
+            }
+            if j + 1 == n_this && i + 1 < cfg.levels() {
+                for suf in ["weight", "bias"] {
+                    let sk = format!("output_blocks.{k}.{next_sub}.conv.{suf}");
+                    let v = local.remove(&sk).ok_or_else(|| format!("unet-ldm import: missing {LDM_PREFIX}{sk}"))?;
+                    renamed.insert(format!("up_blocks.{i}.upsamplers.0.conv.{suf}"), v);
+                }
+            }
+            k += 1;
+        }
+    }
+
+    // ---- final head: `out.{0,2}` (GroupNorm, SiLU with no params, Conv2d) -
+    for (src, dst) in [("out.0", "conv_norm_out"), ("out.2", "conv_out")] {
+        for suf in ["weight", "bias"] {
+            let sk = format!("{src}.{suf}");
+            let v = local.remove(&sk).ok_or_else(|| format!("unet-ldm import: missing {LDM_PREFIX}{sk}"))?;
+            renamed.insert(format!("{dst}.{suf}"), v);
+        }
+    }
+
+    if !local.is_empty() {
+        let mut extra: Vec<&String> = local.keys().collect();
+        extra.sort();
+        return Err(format!("unet-ldm import: {} unexpected {LDM_PREFIX} tensors, e.g. {:?}", extra.len(), &extra[..extra.len().min(8)]));
+    }
+
+    remap_manifest("unet-ldm", renamed, &cfg.tensor_manifest())
+}
+
+/// Rename one `ResBlock`'s leaves - the SAME rename
+/// `crates/supir::import::remap_trunk`'s own private copy applies (see
+/// [`remap_ldm`]'s doc for why this is not yet shared).
+fn ldm_rename_resnet(
+    local: &mut HashMap<String, (Vec<usize>, Vec<f32>)>,
+    renamed: &mut HashMap<String, (Vec<usize>, Vec<f32>)>,
+    src: &str,
+    dst: &str,
+) -> Result<(), String> {
+    for (s, d) in [
+        ("in_layers.0", "norm1"),
+        ("in_layers.2", "conv1"),
+        ("emb_layers.1", "time_emb_proj"),
+        ("out_layers.0", "norm2"),
+        ("out_layers.3", "conv2"),
+    ] {
+        for suf in ["weight", "bias"] {
+            let sk = format!("{src}.{s}.{suf}");
+            let v = local.remove(&sk).ok_or_else(|| format!("unet-ldm import: missing {LDM_PREFIX}{sk}"))?;
+            renamed.insert(format!("{dst}.{d}.{suf}"), v);
+        }
+    }
+    for suf in ["weight", "bias"] {
+        let sk = format!("{src}.skip_connection.{suf}");
+        if let Some(v) = local.remove(&sk) {
+            renamed.insert(format!("{dst}.conv_shortcut.{suf}"), v);
+        }
+    }
+    Ok(())
+}
+
+/// Move every leaf under `{src}.` to `{dst}.` unchanged - the transformer
+/// sub-block, whose inner leaf names already match diffusers.
+fn ldm_rename_passthrough(local: &mut HashMap<String, (Vec<usize>, Vec<f32>)>, renamed: &mut HashMap<String, (Vec<usize>, Vec<f32>)>, src: &str, dst: &str) {
+    let full = format!("{src}.");
+    let keys: Vec<String> = local.keys().filter(|k| k.starts_with(&full)).cloned().collect();
+    for k in keys {
+        let v = local.remove(&k).expect("just listed");
+        let suffix = &k[full.len()..];
+        renamed.insert(format!("{dst}.{suffix}"), v);
+    }
 }
 
 /// Exact shape equality, not just element count.
