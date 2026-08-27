@@ -125,6 +125,51 @@ text-to-image prompt rather than an edit instruction. If you need a strong
 color or hue change with guaranteed structural fidelity, use the
 undistilled `base` variant (which supports CFG) or train a LoRA for it.
 
+## What `--strength` actually does
+
+`--strength` decides **where the denoise starts**, not how hard the model
+tries. Every rung below runs the same prompt, seed, adapter and step count
+against the same generated empty room; only `--strength` changes.
+
+![the same empty room staged across the full --strength range: only 1.00 furnishes it, every lower rung returns the room unchanged](flux2/strength-ladder.jpg)
+
+Read it as one statement: **1.00 furnishes the room and nothing else does.**
+
+That is the dial working correctly, not failing. Below `1.0` the first
+reference becomes the init latent, so the denoise begins from the
+photograph's own pixels - and those pixels say *empty room*. The model
+reproduces what it was given, more and more literally as the number falls,
+until `0.00` returns the source through a VAE round trip. There is nothing
+for a staging adapter to restyle, and the init latent gives it no licence to
+invent furniture that was never there.
+
+At exactly `1.0` the reference stops being an init latent and becomes
+conditioning only. The denoise starts from noise, the model *looks* at the
+room instead of starting from it, and it is free to put a bed in the middle
+of the floor while keeping the walls, window, radiator and door where the
+reference put them.
+
+So the two ends are different jobs, and which one you want depends on your
+input:
+
+| your source | what you want | setting |
+|---|---|---|
+| empty room | furnish it | `--strength 1.0` |
+| furnished room | restyle what is there | `--strength 0.85`-`0.95` |
+| any image | relight or nudge it | `--strength` below `0.8` |
+| any image | prove the round trip | `--strength 0` returns the source |
+
+The schedule is one curve across that whole range: `--strength` scales
+`klein_sigmas` into `[0, strength]`, so lowering the dial lowers every sigma
+and raises the source weight monotonically, and `1.0` reproduces the
+free-generation schedule bit for bit. An earlier implementation integrated a
+*different* schedule below `1.0`, which made `0.999` and `1.000` behave like
+two unrelated samplers; that is fixed, and the ladder above is the
+regression picture.
+
+The ladder was generated with `--ref-size 768` throughout so every rung pays
+the same reference-token cost and the comparison is about `--strength` alone.
+
 ## Masked editing (blended latent diffusion)
 
 `--strength` is a **global** dial. Some edits need a **spatial** one: redraw
