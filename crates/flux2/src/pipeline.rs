@@ -294,8 +294,16 @@ impl Pipeline {
         } else {
             qwen3::QwenConfig::qwen3_4b()
         };
-        let te_ts = checkpoint::safetensors::read_model_dir(std::path::Path::new(&paths.te))?;
-        let init = qwen3::import::brain_init_from_hf(te_ts, &te_cfg)?;
+        // Streamed, not slurped. `read_model_dir` + `brain_init_from_hf` built
+        // the WHOLE encoder as an fp32 `HashMap` on the host - for Qwen3-8B
+        // that is the largest host allocation the process makes, and it is
+        // made only to be read once, tensor by tensor, into device buffers and
+        // then dropped. A mapped `WeightReader` + `RemapSource` hands
+        // `new_shard`/`new_shard_i8` the same bytes through the
+        // `checkpoint::TensorSource` seam they already accept, so the host
+        // holds one tensor at a time instead of the model.
+        let te_reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&paths.te))
+            .map_err(|e| format!("flux2: open text encoder {}: {e}", paths.te))?;
         // TE placement: default = ambient device; `BRAIN_FLUX2_TE_DEVICE=gpu<i>`
         // builds a truncated fp32 shard on that card (layers 0..=deepest tap —
         // res[27] needs no more; drops 9 layers + the head, ~12 GiB resident,
@@ -317,13 +325,32 @@ impl Pipeline {
                 };
                 let idx: usize = idx_s.parse().map_err(|_| format!("bad BRAIN_FLUX2_TE_DEVICE {s} (gpu<i>[:i8])"))?;
                 let shard = qwen3::Shard { start: 0, end: deepest, embed: true, head: false, gpu_index: idx };
+                // Shard-aware coverage: this build reads the embedding and
+                // layers `[0, deepest)` and nothing else, so the checkpoint is
+                // required to carry exactly those. The layers past the tap,
+                // the final norm and the LM head are neither read nor demanded
+                // - previously they had to be present (and, on a checkpoint
+                // still being fetched, downloaded) purely to be validated and
+                // discarded. Narrowed, not weakened: a tensor that IS present
+                // is still element-count checked, and a tensor mapping outside
+                // the config's full parameter list is still a hard error.
+                let src = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
                 if te_i8 {
-                    qwen3::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, &init, shard)
+                    qwen3::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, &src, shard)
                 } else {
-                    qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, &init, false, shard)
+                    qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, &src, false, shard)
                 }
             }
-            _ => qwen3::Qwen::new(te_cfg, 1, cfg.txt_len as u32, &init),
+            // No explicit placement: the whole encoder on the ambient device,
+            // exactly what `Qwen::new` builds (whole shard, `train`, fp32) -
+            // only the weights now arrive one tensor at a time. A whole shard
+            // requires the whole `param_list()`, so the coverage check here is
+            // identical to the one this path always ran.
+            _ => {
+                let shard = qwen3::Shard::whole(te_cfg.n_layers as usize);
+                let src = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
+                qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, &src, true, shard)
+            }
         };
 
         let vp = std::path::Path::new(&paths.vae);
