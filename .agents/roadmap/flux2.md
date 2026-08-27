@@ -204,8 +204,60 @@ dequant and the free actually disappear. Measured saving is 7 s.
 
 **The process peak is now bounded by the TEXT ENCODER, not the DiT.** The DiT
 phase peaks at 10.4 GB; the 32.9 GB figure is Qwen3-8B's own fp32 import
-arriving afterwards. That makes the shard-aware TE import (listed under Not
-yet done) the next real memory and time lever, worth ~11 s and ~20 GB.
+arriving afterwards. That made the shard-aware TE import the next real memory
+lever - **now done**, see "Streaming the text encoder" below.
+
+### Streaming the text encoder
+
+`pipeline.rs` built `Shard { start: 0, end: deepest tap, embed: true, head:
+false }`, but the truncation happened at BUILD time, long after the import had
+already insisted on the whole checkpoint: `read_model_dir` reads every shard in
+the index's `weight_map` unconditionally, and `brain_init_from_hf` enforced
+two-way coverage against the full `param_list()` of a 36-layer config with
+`tie_embeddings: false`.
+
+Two separate costs, fixed by two separate things. Streaming through a mapped
+`WeightReader` bounds the FOOTPRINT. Deriving the required set from the shard
+(`qwen3::import::hf_shard_source`, off the already-existing `shard_param_list`)
+bounds the BYTES: the layers past the tap, the final norm and the LM head are
+now neither read nor required.
+
+Measured on a real Qwen3-8B (36 layers, 5 shard files, 16.4 GB bf16), dual Xeon
+E5-2690 v3, for the `end: 27, embed, no head` shard this pipeline builds:
+
+| term | before | after |
+|---|---|---|
+| text-encoder import, host peak | 31.67 GiB | **3.48 GiB** |
+| tensors read | 399 | **298** |
+| parameters read | 8.19 G | **5.83 G** |
+| whole-process host peak | 32.9 GB | **11.4 GB** |
+
+The import figures come from `qwen3`'s env-gated real-checkpoint test and are
+reproducible to the megabyte, identical under `BRAIN_DEVICE=cpu`. The
+whole-process figure is weaker evidence and should be labelled as such: both
+cards were contended by another job, and the run it came from reached the VAE
+decode and then hit a device OOM caused by that contention rather than
+completing. The peak occurs during load, well before the decode, so it is a
+real peak for the phases involved - but a clean completed before/after pair on
+an uncontended box has not been taken.
+
+**Bit-identical, not parity-gated.** Both routes decode the same bf16 bytes
+with the same converter; only where the decoded f32 lives differs. All 298
+tensors of the shard are pinned with `assert_eq!` on values against the eager
+import, on the real checkpoint. Five gates, each mutation-verified, each
+failing only for its own mutation.
+
+**The load is SLOWER, and that is the trade.** About 15 s against 4 s in
+isolation: bounding the footprint means dropping each tensor's pages once
+decoded, so the streamed read stays disk-bound while the eager one is served
+from a warm page cache. 28 GB of host RAM bought with load time - the same
+shape of trade the direct Q8_0 requantiser made, and it should not be
+described as a win.
+
+Still eager, deliberately: the UNPLACED text-encoder branch (no
+`BRAIN_FLUX2_TE_DEVICE`) streams but still builds a whole encoder, because
+truncating it would change what gets built rather than only where the bytes
+live.
 
 **With a full-coverage LoRA the streamed path is a TRADE, not a win**: about
 3 s slower than the map route (64 s vs 61 s at 4 steps) while holding 33.2 GB
@@ -299,28 +351,8 @@ TIME is. `BRAIN_FLUX2_NO_STREAM=1` forces the map route for A/B.
 - [ ] Klein-9B's cached-reference-attention variant is out of scope: it needs
       per-token modulation blending, which is incompatible with the current
       approach of folding modulation into the LayerNorm.
-- [ ] The text encoder is imported whole and then truncated, so a large
-      fraction of it is fetched, dequantised and validated only to be
-      discarded. `pipeline.rs` builds `Shard { start: 0, end: deepest tap,
-      embed: true, head: false }`, but that truncation happens at BUILD time,
-      after the import has already insisted on the whole checkpoint:
-      `checkpoint::safetensors::read_model_dir` reads every shard named in
-      the index's `weight_map` unconditionally (it takes no parameter saying
-      what the caller wants), and `qwen3::import::brain_init_from_hf`
-      enforces two-way coverage against the full `param_list()` of a config
-      whose `n_layers` is the untruncated count with `tie_embeddings: false`.
-      For the Qwen3-8B encoder that means the layers past the deepest tap and
-      the LM head - about 4.2 GB of 15.6 GB - are downloaded and checked, and
-      the LM head is never read by any shard the pipeline builds. On a
-      bandwidth-limited box that is most of an hour before the first image.
-      The fix is a shard-aware import: derive the required `param_list()`
-      from the `Shard` the caller will build, and let `read_model_dir` take
-      the resulting name set so it can skip whole shard files. Note
-      `hf_source`'s streaming path is NOT this fix - it lowers the ~32 GB
-      host-RAM import peak but validates against the same full list, so it
-      saves memory and not bytes. Keep the two-way coverage check: it is what
-      catches a wrong checkpoint, and it must stay exact against whatever set
-      is genuinely required.
+- [x] The text encoder was imported whole and then truncated. **Done** - see
+      "Streaming the text encoder" below.
 
 The core GEMM kernel already runs near a structural throughput ceiling for
 its current shared-memory tiling scheme, and batching the diffusion
