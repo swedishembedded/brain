@@ -678,6 +678,7 @@ ladder carries the same 3072 + 1728 joint sequence.
 | 0.60 | 0.832 | 9.8 | 0.844 | 9.2 |
 | 0.40 | 0.890 | 7.9 | 0.894 | 7.6 |
 | 0.20 | 0.953 | 5.4 | 0.954 | 5.4 |
+| 0.00 | 0.985 | 3.4 | 0.985 | 3.4 |
 
 The `1.00` row is the same PNG in both columns - that is the bit-identity
 claim below. Everything else moved.
@@ -689,7 +690,11 @@ rungs down to `0.95` added 0.10 between them; after, those same rungs are
 evenly spaced. **The reversal.** Before, `0.99` (*0.380*) is *less* faithful
 to the source than `0.995` (0.383) - lowering the dial made the output drift
 further from the photograph. After, both metrics fall monotonically over all
-twelve rungs with no reversal anywhere.
+thirteen rungs with no reversal anywhere. The bottom rung is the other end of
+the claim: `--strength 0` returns the photograph through the VAE round trip on
+the real weights and not only in the unit gate, and it does so from both trees
+- the shape of the schedule stops mattering once the trajectory has almost no
+distance to travel.
 
 The before column is flat from `0.995` down: one step off the top already
 spent most of the dial's range, and everything below it was the same picture
