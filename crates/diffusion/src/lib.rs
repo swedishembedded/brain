@@ -34,6 +34,7 @@
 
 pub mod discrete;
 pub mod flowsolvers;
+pub mod restore;
 pub mod scheduler;
 
 pub use discrete::{
