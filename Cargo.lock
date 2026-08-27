@@ -1850,6 +1850,16 @@ dependencies = [
 [[package]]
 name = "brain-supir"
 version = "1.0.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-sdxlunet",
+ "brain-testutil",
+ "brain-vae",
+]
 
 [[package]]
 name = "brain-t5encoder"

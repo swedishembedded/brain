@@ -6,21 +6,20 @@
 //! trunk (`GLVControl`, a hand-written copy of SDXL's encoder + middle block)
 //! and 12 adaptor modules (10 `ZeroSFT` + 2 `ZeroCrossAttn`).
 //!
-//! This is the id-reservation crate, not the port. Registering an
-//! architecture before any of its code exists fixes the crate directory
-//! name, the package name, the `brain supir <verb>` CLI word, and this
-//! page's own filename in one place before anything else is written, rather
-//! than letting four call sites drift into four different spellings for the
-//! same architecture.
+//! This crate started as an id-reservation placeholder, fixing the crate
+//! directory name, the package name, the `brain supir <verb>` CLI word, and
+//! this page's own filename in one place before anything else was written.
 //!
 //! ## Status
 //!
-//! Implementation has not started. The plan is: seams in `sdxlunet`/`vae`/
-//! `diffusion`/`imaging` first (SUPIR's adaptors REPLACE the SDXL UNet's
-//! skip concatenation rather than adding a residual, which needs a new
-//! recording-time seam none of those crates expose yet), then this crate's
-//! `config`/`import`/`trunk`/`adaptors`/`model`/`pipeline`, then INT8,
-//! training, serving, and NPU export.
+//! The seams (`vae::blocks::skipfuse::SkipFuse`, `Op::Mix`,
+//! `diffusion::restore`) and this crate's forward - [`config`] (the tensor
+//! manifest), [`import`] (two-way checkpoint coverage), [`trunk`]
+//! (`GLVControl`), [`adaptors`] (the 12 `ZeroSFT`/`ZeroCrossAttn` modules)
+//! and [`model`] (trunk + adaptors + the frozen UNet, one graph) - are
+//! implemented and weight-free-gated. `pipeline.rs` (the full restoration
+//! loop: dual encode, dual-CLIP conditioning, `RestoreEDMSampler`, colour
+//! fix) and real-checkpoint parity are open.
 //!
 //! ## Licence
 //!
@@ -30,3 +29,10 @@
 //! outputs as ML training data. There is no official HuggingFace repo. This
 //! crate ships no `default_ref`/auto-fetch for that reason - a user points
 //! brain at weights they obtained themselves, at their own licensing risk.
+
+pub mod adaptors;
+pub mod config;
+pub mod import;
+pub mod init;
+pub mod model;
+pub mod trunk;

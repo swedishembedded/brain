@@ -10,3 +10,13 @@ name = "supir"
 path = "src/lib.rs"
 
 [dependencies]
+brain-gpu-core.workspace = true   # Gpu, DeviceBuffer, Step
+brain-kernels.workspace = true    # edm_mix/scale_row - the ZeroSFT/ZeroCrossAttn control_scale lerp
+brain-model.workspace = true      # model::block (cross-attn ids), model::hostmath
+brain-checkpoint.workspace = true # safetensors reader (import)
+brain-sdxlunet.workspace = true   # sdxlunet::model::Rec/Unet - the frozen backbone IS its blocks
+brain-vae.workspace = true        # vae::blocks::{Builder, skipfuse::{Map, SkipFuse}}
+brain-data.workspace = true       # data::rng::Rng for init.rs
+
+[dev-dependencies]
+brain-testutil.workspace = true   # testutil::parity::Table, testutil::golden::Source
