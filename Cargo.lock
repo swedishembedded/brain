@@ -1853,6 +1853,7 @@ version = "1.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
+ "brain-diffusion",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
