@@ -885,6 +885,7 @@ front-end to depend on.
 | Identity conditioning (ArcFace -> ID tokens -> diffusion attention) | `crates/pulid` (FLUX.1, wired), `crates/instantid` (SDXL, shapes only); `pulid::idcond` documents the raw-vs-normalised asymmetry that silently breaks it |
 | Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
+| **Fetch a model's weights** (`brain pull <id\|url>`), and where models live on disk | `crates/cli/src/pull_cli.rs` (the verb + both progress modes), `brain_modelstore::refurl` (what a user may type), `brain_modelstore::default_root` (the ONE answer to "where do models live"; `--brain-data-dir` publishes into it), `crate::supply::execute_plan` (the shared plan/execute/finish core auto-fetch uses too); `docs/using/cli.md` |
 | **Tracing/observability** (`--trace-<family> <0-5>`, adding a family, instrumenting a crate) | `crates/trace` - the family registry is `crates/trace/src/registry.rs`; the CLI wiring is `install_tracing` in `crates/cli/src/main.rs` |
 | **Quantize any checkpoint to a GGUF** (tier, per-tensor policy, streaming write, two-way coverage) | `crates/checkpoint/src/quantize.rs` (`Tier`/`Policy`/`plan`/`convert`), `checkpoint::quant::quantize_par`, `checkpoint::gguf_write::Writer`; CLI `brain quantize` in `crates/cli/src/quantize_cli.rs` |
 

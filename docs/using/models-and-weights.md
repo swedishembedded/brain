@@ -72,14 +72,22 @@ directory:
 ```
 
 `<models-dir>` defaults to `$XDG_DATA_HOME/brain/models` and is overridden by
-`BRAIN_MODELS_DIR` or `--models-dir` - see
-[Configuration](configuration.md#paths).
+`--models-dir`, the global `--brain-data-dir <root>` (models land in
+`<root>/models`), or `BRAIN_MODELS_DIR` - see
+[Configuration](configuration.md#paths) for the full precedence ladder.
 
 ## Getting the weights
 
 There are two ways a model's weights end up in place, and the model catalog
 tells you which applies (look for the **⤓** marker):
 
+- **`brain pull <model>` / auto-fetch (⤓)** - the same operation, explicit or
+  implicit. `brain pull Qwen/Qwen3-0.6B` (or the HuggingFace URL) fetches and
+  converts a model up front, with a progress bar; leaving it out means the
+  first request that needs the model pays for the same fetch silently. Use
+  `brain pull` when you want the download to happen now, on a connection you
+  are watching, rather than in the middle of a first inference. See
+  [The CLI](cli.md#pulling-weights).
 - **Auto-fetch (⤓)** - the model id names a real Hugging Face repo (e.g.
   `Qwen/Qwen3-0.6B`, `Ultralytics/YOLOv8`, `LiquidAI/LFM2.5-350M`), and brain
   fetches and converts it itself the first time it's needed - no manual

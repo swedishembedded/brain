@@ -57,6 +57,16 @@ is also a cross-model correctness check: if the caption names the same object
 the detector found, three independently-trained models just agreed on what's
 actually in the image.
 
+Weights arrive on their own the first time a model is needed. To fetch them
+up front instead - on a connection you are watching, with a progress bar -
+`brain pull` takes the canonical id or the HuggingFace URL, and puts the
+files wherever `--brain-data-dir` says:
+
+```bash
+brain pull Qwen/Qwen3-0.6B
+brain pull https://huggingface.co/Qwen/Qwen3-0.6B --brain-data-dir /mnt/models
+```
+
 **Text generation** - no weights on disk yet, no flags beyond the prompt:
 
 ```bash

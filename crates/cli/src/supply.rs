@@ -394,10 +394,9 @@ fn fetch_default_ref(arch: &str, store: &Store, hub: &dyn Hub) -> Result<brain_m
 /// "several repos" fact lives in the arch table, not in the planner.
 fn fetch_one_ref(default_ref: &str, store: &Store, hub: &dyn Hub) -> Result<brain_modelstore::LocalModel, String> {
     let reference = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
-
     let plan = brain_modelstore::plan(&reference, store, hub).map_err(|e| format!("{default_ref}: {e}"))?;
     let mut last_pct: HashMap<String, u32> = HashMap::new();
-    let deferred = brain_modelstore::execute(store, hub, &plan, &mut |name, got, total| {
+    execute_plan(store, hub, &plan, default_ref, &mut |name, got, total| {
         if let Some(total) = total {
             if let Some(bucket) = next_download_pct_bucket(got, total, last_pct.get(name).copied()) {
                 residency::log::info(&format!("{default_ref}: downloading {name} {bucket}%"));
@@ -405,20 +404,43 @@ fn fetch_one_ref(default_ref: &str, store: &Store, hub: &dyn Hub) -> Result<brai
             }
         }
     })
-    .map_err(|e| format!("{default_ref}: {e}"))?;
+}
+
+/// Run an already-built [`brain_modelstore::Plan`] to completion: download
+/// every outstanding file, run whichever finish step the plan's recipe
+/// deferred, and return the now-servable model.
+///
+/// The one implementation of "materialize this plan" in the CLI. Auto-fetch
+/// reaches it through [`fetch_one_ref`] with a `residency::log` progress
+/// closure; `brain pull` (`crate::pull_cli`) reaches it directly with a
+/// closure that draws a progress bar. Making `brain pull` the explicit
+/// spelling of the operation auto-fetch already performs is the whole point
+/// -- two code paths that fetch models would be two sets of bugs.
+///
+/// `label` is what the caller calls this model in messages (a `default_ref`
+/// string, or the reference the user typed).
+pub(crate) fn execute_plan(
+    store: &Store,
+    hub: &dyn Hub,
+    plan: &brain_modelstore::Plan,
+    label: &str,
+    progress: &mut dyn FnMut(&str, u64, Option<u64>),
+) -> Result<brain_modelstore::LocalModel, String> {
+    let reference = &plan.reference;
+    let deferred = brain_modelstore::execute(store, hub, plan, progress).map_err(|e| format!("{label}: {e}"))?;
 
     for step in &deferred {
         match step {
-            Step::Convert { vendor, repo, recipe } => convert(store, vendor, repo, recipe).map_err(|e| format!("{default_ref}: {e}"))?,
+            Step::Convert { vendor, repo, recipe } => convert(store, vendor, repo, recipe).map_err(|e| format!("{label}: {e}"))?,
             other => {
                 return Err(format!(
-                    "{default_ref}: needs an additional step ({other:?}) auto-fetch does not automate yet -- fetch and convert manually"
+                    "{label}: needs an additional step ({other:?}) auto-fetch does not automate yet -- fetch and convert manually"
                 ))
             }
         }
     }
 
-    store.local(&reference).ok_or_else(|| format!("{default_ref}: fetched but not found on disk (unexpected)"))
+    store.local(reference).ok_or_else(|| format!("{label}: fetched but not found on disk (unexpected)"))
 }
 
 /// The capability-path counterpart to [`ensure_default_weights`]: for each

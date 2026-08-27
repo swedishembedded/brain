@@ -79,6 +79,7 @@ way.
 | `brain npu` | OpenVINO/NPU: `export`, `quantize`, `check`, `run`, `bench`, `sim` |
 | `brain federated` | sharded MoE: `split`, `verify`, `merge`, `assemble`, `train-expert` |
 | `brain bench` | cross-architecture evaluation harness: `eval`, `scale`, `advise`, `compare` |
+| `brain pull <model>` | fetch a model's official weights into the model store, by canonical id or HuggingFace URL - see below |
 | `brain import FILE` | GGUF import with no architecture token - dispatches on the file's own `general.architecture` header instead of the command line |
 | `brain quantize SRC` | the export direction: any safetensors/GGUF checkpoint to a quantized GGUF, with no per-architecture code at all |
 
@@ -101,6 +102,53 @@ per-model-port shape:
 - `brain capabilities` is now `brain caps`.
 - The bare `brain train|eval|generate` (which meant the sparse-MoE toy task)
   is now namespaced: `brain train toymoe`, `brain toymoe eval`, etc.
+
+## Pulling weights
+
+`brain pull <model>` fetches a model's official weights into the model store
+and makes them servable, as an explicit up-front step rather than waiting for
+the auto-fetch that a first `infer`/serve request would trigger. It is the
+same operation, spelled out loud - one plan, one download, one finish step.
+
+The argument is either the canonical reference or the HuggingFace page URL;
+both name the same thing, including a `/tree/<branch>`, `/blob/...` or
+`/resolve/...` deep link, with or without a scheme, a `www.` host or a query
+string:
+
+```bash
+brain pull Qwen/Qwen3-0.6B
+brain pull https://huggingface.co/Qwen/Qwen3-0.6B
+brain pull https://huggingface.co/Qwen/Qwen3-0.6B/tree/main
+```
+
+Anything that is not a model reference - a dataset or space URL, a link to
+another site, a name with no vendor - is refused by name rather than sent to
+the hub as a repo id. `brain fetch` is an accepted alias for the same verb.
+
+Re-running a pull is cheap. Files already in the store are not fetched again,
+so an interrupted download is resumed by repeating the command, and a pull of
+a model that is already complete does no network I/O at all and says so.
+
+### Progress
+
+Progress is written to **stdout**, and the shape depends on whether stdout is
+a terminal:
+
+- **On a terminal** - one line, redrawn in place, showing the bar, the
+  fraction complete, throughput and ETA for the whole pull.
+- **Piped or redirected** - ten plain lines for the whole pull, bracketed by
+  a "need N in M files" header and a completion line. The budget is spent
+  over the *total bytes of every file in the plan*, so a model that ships as
+  six shards still costs ten lines, not sixty. No carriage returns, no escape
+  sequences, one greppable fact per line.
+
+### Where the weights land
+
+`--brain-data-dir <DIR>` sets brain's data root; models live in
+`<DIR>/models`. It is a **global** option, valid on any subcommand, because
+`pull`, auto-fetch and `brain serve`'s catalog scan all have to agree on where
+models are - see [Configuration](configuration.md#paths) for the full
+precedence ladder.
 
 ## Serving
 

@@ -193,3 +193,25 @@ page under `docs/models/`.
 | `BRAIN_PIPELINE_CACHE_DIR` | GPU pipeline/shader cache directory | backend default |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
 | `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default paths | unset |
+
+### Which models directory wins
+
+There is one answer to "where do models live", and everything reads it:
+`brain pull`, auto-fetch, the served catalog scan, and every capability
+provider. Highest precedence first:
+
+1. `--models-dir DIR` - the per-subcommand flag, where a subcommand has one.
+   It names a models directory directly.
+2. `--brain-data-dir DIR` - the **global** flag (valid on any subcommand). It
+   names brain's *data root*; models live in `DIR/models`. Default
+   `~/.local/share/brain`.
+3. `$BRAIN_MODELS_DIR`
+4. `$XDG_DATA_HOME/brain/models`
+5. `$HOME/.local/share/brain/models`
+
+Note that `--brain-data-dir` **does** outrank an explicitly-set
+`$BRAIN_MODELS_DIR` - a flag the user typed beats an inherited environment
+variable, the same rule `--models-dir` and `--device` follow. Because a models
+directory is where tens of gigabytes land, brain says so on stderr when the
+flag actually overrules a differing `$BRAIN_MODELS_DIR`, rather than choosing
+silently.

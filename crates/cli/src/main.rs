@@ -37,6 +37,7 @@ mod omni_cli;
 mod perf_cli;
 mod perf_engine;
 mod pid_cli;
+mod pull_cli;
 mod quantize_cli;
 mod qwen35_cli;
 mod qwen35moe_cli;
@@ -148,6 +149,17 @@ MEMORY CEILINGS (global - valid on any subcommand)
                             ceiling (the default) and costs nothing.
                             Else $BRAIN_LIMIT_VRAM_TOTAL / $BRAIN_LIMIT_RAM_TOTAL.
   Example: brain --limit-vram-total 8G qwen3 infer --weights model.safetensors
+
+MODEL STORE (global - valid on any subcommand)
+  --brain-data-dir <DIR>   brain's data root; models live in <DIR>/models.
+                           Default ~/.local/share/brain. Use it to put pulled
+                           weights on another disk. Precedence, highest first:
+                           --models-dir (where a subcommand has it), then
+                           --brain-data-dir, then $BRAIN_MODELS_DIR, then
+                           $XDG_DATA_HOME/brain/models, then
+                           $HOME/.local/share/brain/models. The flag DOES
+                           outrank an explicitly-set $BRAIN_MODELS_DIR, and
+                           says so on stderr when it does.
 
 DIAGNOSTIC VERBOSITY (global - valid on any subcommand, including auto-fetch)
   -v, --verbose [0-3]      0 errors only (default) | 1 +warnings | 2 +lifecycle
@@ -380,6 +392,18 @@ CAPABILITIES (typed actions; one dispatch path for the CLI, D-Bus and HTTP)
       Any architecture without its own dedicated flags above (`brain caps`
       lists them all) dispatches this way - the action name IS the verb.
       Example: brain scrfd detect --in image=photo.ppm --json
+
+PULL MODEL WEIGHTS (fetch a model's official weights into the store)
+  brain pull <model> [--brain-data-dir DIR]
+      <model> is the canonical reference OR the HuggingFace page URL - a
+      pasted /tree/<branch>, /blob/... or /resolve/... link resolves to the
+      same repo:
+        brain pull Qwen/Qwen3-0.6B
+        brain pull https://huggingface.co/Qwen/Qwen3-0.6B/tree/main
+      Progress goes to STDOUT: an in-place bar with throughput and ETA on a
+      terminal, ten plain lines for the whole pull when piped. Re-running is
+      cheap - files already in the store are skipped, so an interrupted pull
+      resumes by repeating the command. `brain fetch` is an accepted alias.
 
 GGUF IMPORT (one-time conversion; dispatches on general.architecture)
   brain import FILE [--out PATH] [--id VENDOR/REPO]
@@ -868,6 +892,61 @@ fn parse_limits(argv: Vec<String>) -> (Option<u64>, Option<u64>, Vec<String>) {
     (vram, ram, rest)
 }
 
+/// Extract the global `--brain-data-dir <root>` flag from anywhere in `argv`
+/// and publish it, returning the remaining args.
+///
+/// A GLOBAL option, on the top-level parser, deliberately: it answers "where
+/// does brain keep its models", which `brain pull`, a flagless `brain infer`'s
+/// auto-fetch, `brain serve`'s catalog scan and every capability provider all
+/// have to agree on. Scoping it to `pull` alone would mean pulling into one
+/// directory and then serving from another, which is the bug the single
+/// resolver ([`brain_modelstore::default_root`]) exists to prevent. It is
+/// published INTO that resolver rather than passed around, so callers with no
+/// CLI flag in scope see the same answer.
+///
+/// Hard-exits on a missing value, like [`parse_limits`] and [`select_backend`]:
+/// silently ignoring a directory the user typed would download gigabytes to
+/// the wrong disk.
+fn parse_data_dir(argv: Vec<String>) -> (Option<String>, Vec<String>) {
+    let mut root = None;
+    let mut rest = Vec::with_capacity(argv.len());
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "--brain-data-dir" {
+            let Some(value) = argv.get(i + 1) else {
+                eprintln!("brain: --brain-data-dir needs a directory (brain's data root; models land in <DIR>/models)");
+                std::process::exit(2);
+            };
+            root = Some(value.clone());
+            i += 2;
+        } else {
+            rest.push(argv[i].clone());
+            i += 1;
+        }
+    }
+    (root, rest)
+}
+
+/// Publish `--brain-data-dir` into the one models-directory resolver, saying
+/// so out loud when it overrules an explicitly-set `BRAIN_MODELS_DIR`.
+///
+/// The flag outranking the environment is the same rule `--models-dir` and
+/// `--device` already follow, but a models directory is where gigabytes land:
+/// an operator who exported `BRAIN_MODELS_DIR` and then inherited a
+/// `--brain-data-dir` from a wrapper script deserves to be told which one won,
+/// rather than discovering it by running out of disk somewhere unexpected.
+fn apply_data_dir(root: Option<String>) {
+    let Some(root) = root.filter(|s| !s.is_empty()) else { return };
+    let root = std::path::PathBuf::from(root);
+    let models = brain_modelstore::models_dir_in(&root);
+    if let Some(env) = std::env::var_os("BRAIN_MODELS_DIR").filter(|s| !s.is_empty()) {
+        if std::path::Path::new(&env) != models {
+            eprintln!("brain: --brain-data-dir overrides BRAIN_MODELS_DIR ({}); using {}", std::path::Path::new(&env).display(), models.display());
+        }
+    }
+    brain_modelstore::publish_data_root(Some(root));
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let argv = install_tracing(argv);
@@ -879,6 +958,11 @@ fn main() {
     // it.
     let (limit_vram, limit_ram, argv) = parse_limits(argv);
     memauth::publish_limits(limit_vram, limit_ram);
+    // Before any subcommand, so every surface that resolves a models
+    // directory - `pull`, auto-fetch, the served catalog scan - reads the
+    // same published answer.
+    let (data_dir, argv) = parse_data_dir(argv);
+    apply_data_dir(data_dir);
     if matches!(argv.get(1).map(String::as_str), Some("--version" | "-V")) {
         println!("brain {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -907,6 +991,10 @@ fn main() {
         Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
         Some("label") => label_cli::run_label(&argv[2..]),
         Some("caps") => std::process::exit(caps_cli::run_caps(&argv[2..])),
+        // `fetch` is an accepted alias, not a second verb: it is the spelling
+        // several of this workspace's test-fixture instructions already tell a
+        // reader to run, and honouring it costs one arm.
+        Some("pull") | Some("fetch") => std::process::exit(pull_cli::run_pull(&argv[2..])),
         Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
         Some(_) => resolve::dispatch(&argv[1..], HELP),
@@ -915,7 +1003,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_limits, parse_verbosity, HELP};
+    use super::{parse_data_dir, parse_limits, parse_verbosity, HELP};
 
     /// The memory ceilings are stripped from anywhere in `argv`, parse human
     /// sizes, and consume exactly their own value token.
@@ -955,6 +1043,56 @@ mod tests {
             assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec(), "`brain help` documents {flag}, which parse_limits does not strip");
             assert_eq!(vram.or(ram), Some(8 << 30), "`brain help` documents {flag}, which parse_limits does not turn into a ceiling");
         }
+    }
+
+    /// The data-root flag is stripped from anywhere in `argv`, consumes
+    /// exactly its own value token, and leaves everything else untouched --
+    /// including the default path, where it must be a complete no-op.
+    #[test]
+    fn parse_data_dir_strips_the_flag_from_anywhere_and_consumes_its_value() {
+        let argv = ["brain", "pull", "--brain-data-dir", "/synthetic-root/brain", "Qwen/Qwen3-0.6B"].map(String::from).to_vec();
+        let (root, rest) = parse_data_dir(argv);
+        assert_eq!(root.as_deref(), Some("/synthetic-root/brain"));
+        assert_eq!(rest, ["brain", "pull", "Qwen/Qwen3-0.6B"].map(String::from).to_vec());
+
+        // Leading position, before the subcommand.
+        let argv = ["brain", "--brain-data-dir", "/elsewhere", "serve", "--openai"].map(String::from).to_vec();
+        let (root, rest) = parse_data_dir(argv);
+        assert_eq!(root.as_deref(), Some("/elsewhere"));
+        assert_eq!(rest, ["brain", "serve", "--openai"].map(String::from).to_vec());
+
+        // Absent: no root, args byte-identical.
+        let (root, rest) = parse_data_dir(["brain", "caps"].map(String::from).to_vec());
+        assert_eq!(root, None);
+        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
+    }
+
+    /// The same two-directional discipline the trace families and memory
+    /// ceilings get, for the same reason: a global flag that `brain help`
+    /// documents but nothing strips would be swallowed by a subcommand's own
+    /// parser as an unknown flag, and one that is parsed but undocumented is
+    /// undiscoverable.
+    #[test]
+    fn the_data_dir_flag_is_documented_and_the_documented_precedence_is_stated() {
+        assert!(HELP.contains("--brain-data-dir"), "--brain-data-dir is implemented but absent from `brain help`");
+        // The ladder it sits in must be spelled out where the flag is, so a
+        // reader is never left guessing whether it beats the environment.
+        for token in ["BRAIN_MODELS_DIR", "XDG_DATA_HOME", "--models-dir"] {
+            assert!(HELP.contains(token), "{token} missing from the model-store precedence summary");
+        }
+        let (root, rest) = parse_data_dir(["brain".to_string(), "--brain-data-dir".to_string(), "/x".to_string(), "caps".to_string()].to_vec());
+        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec(), "`brain help` documents --brain-data-dir, which parse_data_dir does not strip");
+        assert_eq!(root.as_deref(), Some("/x"));
+    }
+
+    /// `brain pull` must be reachable and documented -- an undocumented verb
+    /// is one nobody finds, and a documented verb with no dispatch arm is a
+    /// command that prints the whole help text instead of pulling anything.
+    #[test]
+    fn the_pull_verb_is_documented_with_both_argument_spellings() {
+        assert!(HELP.contains("brain pull <model>"), "`brain pull` missing from `brain help`");
+        assert!(HELP.contains("https://huggingface.co/"), "`brain help` does not show that a URL is accepted");
+        assert!(HELP.contains("brain fetch"), "the accepted `fetch` alias is undocumented");
     }
 
     /// `-v` is repeatable and additive; the flag itself is stripped from the
