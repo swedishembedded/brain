@@ -41,13 +41,32 @@ pub struct VaeDecoder {
     out: DeviceBuffer,
     out_len: usize,
     taps: Vec<(String, DeviceBuffer, usize)>,
+    device_bytes: u64,
 }
 
 impl VaeDecoder {
     /// Build the decode graph for an input latent `[latent_ch, h, w]` and upload
     /// all decoder weights. `device`: `Some("cpu")` | `Some("gpu")` | `None`.
     pub fn from_diffusers(cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, device: Option<&str>) -> VaeDecoder {
-        let gpu = Gpu::open(device, &KERNELS);
+        VaeDecoder::build(Gpu::open(device, &KERNELS), cfg, tensors, h, w)
+    }
+
+    /// [`VaeDecoder::from_diffusers`] on an EXISTING device: a second handle
+    /// onto `gpu` (same adapter, queue and already-compiled pipelines) rather
+    /// than a fresh one.
+    ///
+    /// A pipeline that encodes several reference images and then decodes a
+    /// result builds several of these graphs in one generation. Each
+    /// `from_diffusers` stands up its own device and recompiles every kernel;
+    /// on a two-card box it also re-resolves the ambient selection, which may
+    /// have moved. Sharing is explicit here for the reason AGENTS.md gives:
+    /// the number of real devices a process holds stays answerable by reading
+    /// the code.
+    pub fn from_diffusers_on(gpu: &Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32) -> VaeDecoder {
+        VaeDecoder::build(gpu.share_or_new(&KERNELS), cfg, tensors, h, w)
+    }
+
+    fn build(gpu: Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32) -> VaeDecoder {
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps_enabled());
 
@@ -132,8 +151,12 @@ impl VaeDecoder {
         b.free(hlen, hs);
         let out_len = (cfg.out_channels * cur_h * cur_w) as usize;
 
+        // `z_in` is allocated here rather than through the builder, so it is
+        // added explicitly: the total has to be what the GRAPH costs, not what
+        // one of its two allocators happened to see.
+        let device_bytes = b.allocated_bytes() + (cfg.latent_channels * h * w) as u64 * 4;
         let (steps, taps) = b.finish();
-        VaeDecoder { gpu, cfg, steps, z_in, out, out_len, taps }
+        VaeDecoder { gpu, cfg, steps, z_in, out, out_len, taps, device_bytes }
     }
 
     /// Decode a latent `[latent_ch·h·w]` (row-major NCHW, batch 1) into the
@@ -155,6 +178,12 @@ impl VaeDecoder {
     }
 
     /// The device the graph was built on (profiling / benches).
+    /// Device bytes this graph holds: weights plus its resident activation
+    /// set. The ground truth [`crate::decoder_device_bytes`] is gated against.
+    pub fn device_bytes(&self) -> u64 {
+        self.device_bytes
+    }
+
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
     }
@@ -182,6 +211,7 @@ pub struct VaeEncoder {
     out: DeviceBuffer,
     out_len: usize,
     taps: Vec<(String, DeviceBuffer, usize)>,
+    device_bytes: u64,
 }
 
 impl VaeEncoder {
@@ -189,7 +219,16 @@ impl VaeEncoder {
     /// NOT latent size) and upload all encoder weights. `device`: `Some("cpu")` |
     /// `Some("gpu")` | `None`.
     pub fn from_diffusers(cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, device: Option<&str>) -> VaeEncoder {
-        let gpu = Gpu::open(device, &KERNELS);
+        VaeEncoder::build(Gpu::open(device, &KERNELS), cfg, tensors, h, w)
+    }
+
+    /// [`VaeEncoder::from_diffusers`] on an EXISTING device - see
+    /// [`VaeDecoder::from_diffusers_on`] for why sharing matters here.
+    pub fn from_diffusers_on(gpu: &Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32) -> VaeEncoder {
+        VaeEncoder::build(gpu.share_or_new(&KERNELS), cfg, tensors, h, w)
+    }
+
+    fn build(gpu: Gpu, cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32) -> VaeEncoder {
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps_enabled());
 
@@ -248,8 +287,10 @@ impl VaeEncoder {
         };
         let out_len = (moments * cur_h * cur_w) as usize;
 
+        // `img_in` is allocated outside the builder - see the decoder's note.
+        let device_bytes = b.allocated_bytes() + (cfg.in_channels * h * w) as u64 * 4;
         let (steps, taps) = b.finish();
-        VaeEncoder { gpu, cfg, steps, img_in, out, out_len, taps }
+        VaeEncoder { gpu, cfg, steps, img_in, out, out_len, taps, device_bytes }
     }
 
     /// Encode an image `[in_channels·H·W]` (row-major NCHW, batch 1) into the
@@ -270,7 +311,175 @@ impl VaeEncoder {
         m[..self.cfg.latent_channels as usize * plane].to_vec()
     }
 
+    /// Device bytes this graph holds - see [`VaeDecoder::device_bytes`].
+    pub fn device_bytes(&self) -> u64 {
+        self.device_bytes
+    }
+
     pub fn read_tap(&self, name: &str) -> Option<Vec<f32>> {
         self.taps.iter().find(|(n, _, _)| n == name).map(|(_, buf, len)| self.gpu.read(buf, *len))
     }
+}
+
+// ---- placement footprint ---------------------------------------------------
+//
+// What a VAE graph costs on the device, answerable BEFORE it is built - which
+// is the only time a placement decision can use it.
+//
+// This exists because a flat guess is not good enough. A FLUX.2 decode at a
+// real output size is dominated by its activations, not its weights, and an
+// estimate that tracks only the checkpoint is short by multiples exactly when
+// it matters: every denoise step completes and then the last stage asks the
+// driver for memory the plan never reserved.
+//
+// The shape is derived; the two constants are CALIBRATED against
+// [`VaeDecoder::device_bytes`]/[`VaeEncoder::device_bytes`] - the builder's own
+// account of what it allocated - and gated in `tests/footprint.rs` at sizes
+// spanning a thumbnail to a full frame, in both directions. A change to the
+// block schedule that moves the real allocation fails that gate rather than
+// silently making every placement decision wrong.
+
+/// Live activation buffers per resolution level, the calibrated multiplier on
+/// [`level_bytes_per_pixel`]. Separate per direction because the two graphs
+/// are not mirror images: the decoder's up-blocks carry one more resnet each
+/// (`layers_per_block + 1`) and its skip-free chain keeps a different number
+/// of buffers alive than the encoder's down path.
+///
+/// The activation pool reuses same-length buffers, so a graph's resident set is
+/// a small multiple of "one buffer at each level" rather than the sum of every
+/// intermediate. That multiple is what these are, rounded UP: an estimate that
+/// is high reserves a little too much, an estimate that is low is a driver
+/// out-of-memory.
+const DECODE_LIVE_BUFFERS_PER_LEVEL: u64 = 11;
+const ENCODE_LIVE_BUFFERS_PER_LEVEL: u64 = 8;
+
+/// The size-independent floor: the chunked-GEMM `col` scratch (capped, see
+/// `blocks::COL_BUDGET_MIB`), the staging a large weight upload leaves
+/// resident, and the driver's own per-context allocation. Flat by nature - it
+/// is what stops the per-pixel term from being asked to explain a constant.
+const FIXED_SCRATCH: u64 = 768 << 20;
+
+/// Bytes of activation per OUTPUT pixel for one live buffer at each level of
+/// `cfg`'s channel schedule.
+///
+/// Level `j` runs at `1/4^j` of the output pixels with `block_out_channels[j]`
+/// channels (the encoder walks it high-res-first, the decoder low-res-first;
+/// the sum is the same either way), so a buffer there costs
+/// `channels * 4 / 4^j` bytes for every output pixel. Reading it off the config
+/// is what makes this follow a different VAE instead of going stale beside one.
+pub fn level_bytes_per_pixel(cfg: &VaeConfig) -> u64 {
+    cfg.block_out_channels
+        .iter()
+        .enumerate()
+        .map(|(j, &ch)| (ch as u64 * 4) / 4u64.pow(j as u32))
+        .sum()
+}
+
+/// Device bytes of DECODER weights, summed from the same tensor schedule
+/// `VaeDecoder::from_diffusers` uploads. Exact, not estimated.
+pub fn decoder_weight_bytes(cfg: &VaeConfig) -> u64 {
+    let (zc, rc) = (cfg.latent_channels as u64, cfg.reversed_channels());
+    let mid_c = *cfg.block_out_channels.last().expect("block_out_channels") as u64;
+    let mut n = 0u64;
+    if cfg.use_post_quant_conv {
+        n += conv_params(zc, zc, 1);
+    }
+    n += conv_params(zc, mid_c, 3);
+    n += resnet_params(mid_c, mid_c);
+    if cfg.mid_block_add_attention {
+        n += attn_params(mid_c);
+    }
+    n += resnet_params(mid_c, mid_c);
+    let mut prev = mid_c;
+    for (i, &out_c) in rc.iter().enumerate() {
+        let out_c = out_c as u64;
+        for r in 0..=cfg.layers_per_block as u64 {
+            n += resnet_params(if r == 0 { prev } else { out_c }, out_c);
+        }
+        if i + 1 < rc.len() {
+            n += conv_params(out_c, out_c, 3);
+        }
+        prev = out_c;
+    }
+    n += 2 * prev; // conv_norm_out
+    n += conv_params(prev, cfg.out_channels as u64, 3);
+    n * 4
+}
+
+/// Device bytes of ENCODER weights - see [`decoder_weight_bytes`].
+pub fn encoder_weight_bytes(cfg: &VaeConfig) -> u64 {
+    let ch: Vec<u64> = cfg.block_out_channels.iter().map(|&c| c as u64).collect();
+    let mut n = conv_params(cfg.in_channels as u64, ch[0], 3);
+    let mut prev = ch[0];
+    for (i, &out_c) in ch.iter().enumerate() {
+        for r in 0..cfg.layers_per_block as u64 {
+            n += resnet_params(if r == 0 { prev } else { out_c }, out_c);
+        }
+        prev = out_c;
+        if i + 1 < ch.len() {
+            n += conv_params(out_c, out_c, 3);
+        }
+    }
+    let mid_c = *ch.last().expect("block_out_channels");
+    n += resnet_params(mid_c, mid_c);
+    if cfg.mid_block_add_attention {
+        n += attn_params(mid_c);
+    }
+    n += resnet_params(mid_c, mid_c);
+    n += 2 * mid_c; // conv_norm_out
+    let moments = 2 * cfg.latent_channels as u64;
+    n += conv_params(mid_c, moments, 3);
+    if cfg.use_quant_conv {
+        n += conv_params(moments, moments, 1);
+    }
+    n * 4
+}
+
+fn conv_params(cin: u64, cout: u64, k: u64) -> u64 {
+    cout * cin * k * k + cout
+}
+
+fn resnet_params(cin: u64, cout: u64) -> u64 {
+    let mut n = 2 * cin + conv_params(cin, cout, 3) + 2 * cout + conv_params(cout, cout, 3);
+    if cin != cout {
+        n += conv_params(cin, cout, 1);
+    }
+    n
+}
+
+/// diffusers stores each projection as a 1x1 conv, plus the group norm.
+fn attn_params(c: u64) -> u64 {
+    2 * c + 4 * conv_params(c, c, 1)
+}
+
+/// Device bytes a decode graph will hold, for a latent of `lh x lw` (i.e. an
+/// output image of `8*lh x 8*lw`). What a placement decision reserves.
+pub fn decoder_device_bytes(cfg: &VaeConfig, lh: u32, lw: u32) -> u64 {
+    decoder_device_bytes_for_pixels(cfg, (lh as u64 * 8) * (lw as u64 * 8))
+}
+
+/// [`decoder_device_bytes`] for a caller that knows the OUTPUT pixel count but
+/// not yet its shape - a pipeline sizing itself for "at most N image tokens"
+/// before any request has said what aspect ratio those are.
+pub fn decoder_device_bytes_for_pixels(cfg: &VaeConfig, px: u64) -> u64 {
+    decoder_weight_bytes(cfg) + DECODE_LIVE_BUFFERS_PER_LEVEL * level_bytes_per_pixel(cfg) * px + FIXED_SCRATCH
+}
+
+/// Device bytes an encode graph will hold, for an image of `h x w`.
+pub fn encoder_device_bytes(cfg: &VaeConfig, h: u32, w: u32) -> u64 {
+    encoder_device_bytes_for_pixels(cfg, h as u64 * w as u64)
+}
+
+/// [`encoder_device_bytes`] by pixel count - see
+/// [`decoder_device_bytes_for_pixels`].
+pub fn encoder_device_bytes_for_pixels(cfg: &VaeConfig, px: u64) -> u64 {
+    encoder_weight_bytes(cfg) + ENCODE_LIVE_BUFFERS_PER_LEVEL * level_bytes_per_pixel(cfg) * px + FIXED_SCRATCH
+}
+
+/// A device carrying the VAE kernel set, for a caller that wants ONE of them
+/// to share across every graph it builds (see
+/// [`VaeDecoder::from_diffusers_on`]). `device`: `Some("cpu")` | `Some("gpu")`
+/// | `Some("gpu<i>")` | `None` for the ambient selection.
+pub fn device(device: Option<&str>) -> Gpu {
+    Gpu::open(device, &KERNELS)
 }

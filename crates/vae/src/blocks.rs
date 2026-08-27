@@ -517,6 +517,16 @@ pub struct Builder<'a> {
     /// Attention head width. `None` is one head of width `C` — what every VAE
     /// architecture here uses. See [`set_attn_head_dim`](Builder::set_attn_head_dim).
     attn_head_dim: Option<u32>,
+    /// Device words this builder has actually allocated: every weight buffer,
+    /// plus every activation that MISSED the pool. A pooled reuse allocates
+    /// nothing and is not counted, so this total is the graph's resident
+    /// high-water set rather than the sum of everything it ever touched.
+    ///
+    /// It exists to be the ground truth a placement ESTIMATE is gated against
+    /// (`crates/vae/tests/footprint.rs`). An estimate that under-reports is
+    /// not a slightly-wrong number, it is a plan that says a card has room
+    /// and then a driver out-of-memory.
+    allocated: u64,
 }
 
 /// Ceiling on the im2col scratch, in f32 words (512 MiB). The lowered conv
@@ -582,6 +592,7 @@ impl<'a> Builder<'a> {
             wmemo: HashMap::new(),
             worder: Vec::new(),
             pool: HashMap::new(),
+            allocated: 0,
             taps_on,
             coop: gpu.caps().workgroup_reductions,
             uploaded: 0,
@@ -744,6 +755,7 @@ impl<'a> Builder<'a> {
     /// VAE and the VQGAN pair — are each well under 1 GB and never hit it);
     /// SDXL OOM'd on a P40 with 20 GB free before this.
     fn upload(&mut self, data: &[f32]) -> DeviceBuffer {
+        self.allocated += data.len() as u64;
         let buf = self.gpu.storage(data.len() as u64);
         let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
         self.gpu.write(&buf, &bits);
@@ -784,7 +796,14 @@ impl<'a> Builder<'a> {
         if let Some(b) = self.pool.get_mut(&len).and_then(Vec::pop) {
             return b;
         }
+        self.allocated += len;
         self.gpu.storage(len)
+    }
+
+    /// Device BYTES this builder has allocated so far - see [`Builder::
+    /// allocated`]. Read before [`Builder::finish`] consumes the builder.
+    pub fn allocated_bytes(&self) -> u64 {
+        self.allocated * 4
     }
 
     /// Return an activation buffer to the pool for reuse. MUST be called only after

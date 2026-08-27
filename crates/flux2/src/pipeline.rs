@@ -365,6 +365,33 @@ pub fn te_bytes(te_cfg: &qwen3::QwenConfig, layers: usize, seq: u64, int8: bool)
         .sum::<u64>()
 }
 
+/// The VAE's device footprint: the largest graph this pipeline will build,
+/// which is the DECODE of a full-size image.
+///
+/// This used to be a flat 2 GiB, and that is what put the reported failure in
+/// the field: every denoise step completed and the run died in `decoding`, on
+/// a card the plan believed had room. A FLUX.2 decode is dominated by its
+/// activations, not its weights, and they scale with the image - at a real
+/// output size it needs several times the old constant. `vae::
+/// decoder_device_bytes_for_pixels` is the architecture-derived figure,
+/// calibrated against the builder's own account of what it allocates and
+/// gated in `crates/vae/tests/footprint.rs`.
+///
+/// `n_out_max` is the pipeline's GENERATED-token ceiling (not the joint
+/// sequence's, which also carries reference conditioning that is encoded but
+/// never decoded); one token is a 16x16 pixel patch, so the output is at most
+/// `256 * n_out_max` pixels.
+///
+/// The ENCODE of a reference at the same size is also priced, and the larger
+/// of the two wins: a reference may legitimately arrive at the output size
+/// (`strength`/`mask` require exactly that). They are never resident
+/// together, because `Pipeline::decode_tokens` releases the encoder cache
+/// before it builds the decoder, so this is a max rather than a sum.
+pub fn vae_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64) -> u64 {
+    let px = 256 * n_out_max;
+    vae::decoder_device_bytes_for_pixels(vae_cfg, px).max(vae::encoder_device_bytes_for_pixels(vae_cfg, px))
+}
+
 /// Where the text encoder is built, and at what width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TePlacement {
@@ -414,13 +441,41 @@ fn te_device_override() -> Result<Option<TePlacement>, String> {
 /// `Shard::owns` is `l < end` and the deepest tap is layer 27, so the layers
 /// past it are never read and a truncated shard's conditioning is
 /// bit-identical to a whole encoder's at the same width.
-fn plan_parts(cfg: &Flux2Config, precision: crate::Precision, n_joint: u64, max_batch: u64) -> (gpu_core::devices::Homes, TePlacement) {
+/// The parts this pipeline is made of, as the engine sees them: `[dit, te,
+/// vae]`, in that order, with the costs each will occupy.
+///
+/// Public and pure so the two ceilings can be told apart under test. They are
+/// easy to confuse and expensive to confuse: `n_joint` carries the reference
+/// conditioning tokens and drives the DiT's scratch, while `n_out_max` is the
+/// generated tokens alone and drives the VAE - a reference is encoded, never
+/// decoded. Pricing the decode off the joint ceiling reserved most of a card
+/// for an image that is never produced.
+///
+/// `te_int8` selects the text encoder's numeric tier (see [`plan_parts`],
+/// which tries the DiT's tier first).
+pub fn part_needs(
+    cfg: &Flux2Config,
+    vae_cfg: &vae::VaeConfig,
+    precision: crate::Precision,
+    n_joint: u64,
+    n_out_max: u64,
+    max_batch: u64,
+) -> Vec<gpu_core::devices::Need> {
     let te_cfg = te_config(cfg);
     let layers = *TAP_LAYERS.iter().max().unwrap();
-    let dit = gpu_core::devices::Need::sized("dit", dit_bytes(cfg, precision, n_joint, max_batch), 0).apart();
-    // The VAE decoder's transient working set at these resolutions; small
-    // beside the DiT, and it must not be the reason a plan is refused.
-    let vae = gpu_core::devices::Need::sized("vae", 2u64 << 30, 0).with("dit");
+    let te_int8 = precision == crate::Precision::Int8;
+    vec![
+        gpu_core::devices::Need::sized("dit", dit_bytes(cfg, precision, n_joint, max_batch), 0).apart(),
+        gpu_core::devices::Need::sized("te", te_bytes(&te_cfg, layers, cfg.txt_len as u64, te_int8), 0).apart(),
+        gpu_core::devices::Need::sized("vae", vae_bytes(vae_cfg, n_out_max), 0).with("dit"),
+    ]
+}
+
+fn plan_parts(cfg: &Flux2Config, vae_cfg: &vae::VaeConfig, precision: crate::Precision, n_joint: u64, n_out_max: u64, max_batch: u64) -> (gpu_core::devices::Homes, TePlacement) {
+    let te_cfg = te_config(cfg);
+    let layers = *TAP_LAYERS.iter().max().unwrap();
+    let needs = part_needs(cfg, vae_cfg, precision, n_joint, n_out_max, max_batch);
+    let (dit, vae) = (needs[0].clone(), needs[2].clone());
     let mut why = String::new();
     // The DiT's tier first, then the smaller one as a fallback. For an int8
     // run those are the same value, so the loop tries int8 once.
@@ -594,10 +649,23 @@ pub struct Pipeline {
     vae_cfg: vae::VaeConfig,
     vae_tensors: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>,
     /// Where this pipeline's parts were placed. Held because the VAE is built
-    /// lazily, per generation, from host tensors: without it the encoder and
-    /// decoder would land on the process-wide default card rather than beside
-    /// the DiT whose latents they are for.
+    /// lazily, per generation, from host tensors: without it a graph would
+    /// land on the process-wide default card rather than beside the DiT whose
+    /// latents it is for.
     homes: gpu_core::devices::Homes,
+    /// The ONE device every VAE graph is built on - see `build_batched`.
+    vae_gpu: gpu_core::Gpu,
+    /// The most recently built encoder, kept for the next reference of the
+    /// SAME size.
+    ///
+    /// Bounded at one on purpose. A generation encodes every reference before
+    /// it denoises, and references are commonly the same shape (one camera,
+    /// one orientation), so a one-entry cache removes the rebuild in the case
+    /// that actually repeats. Caching every distinct size instead would make
+    /// the pipeline's peak memory a function of how many `--ref` the caller
+    /// passed, which no placement estimate can predict - and the estimate is
+    /// the thing that has to stay honest.
+    enc_cache: std::sync::Mutex<Option<((u32, u32), vae::VaeEncoder)>>,
     bn_mean: Vec<f32>,
     bn_var: Vec<f32>,
 }
@@ -624,6 +692,30 @@ impl Pipeline {
     /// ComfyUI uses (patch the weights, then run).
     pub fn build_with(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision) -> Result<Pipeline, String> {
         Pipeline::build_batched(cfg, paths, n_img_max, adapter, precision, 1)
+    }
+
+    /// [`Pipeline::build_batched`] told the OUTPUT size separately.
+    ///
+    /// `n_img_max` is the joint sequence's image ceiling - generated tokens
+    /// PLUS reference-conditioning tokens - and sizes the DiT's scratch.
+    /// `n_out_max` is the generated tokens alone, and sizes the VAE: a
+    /// reference is encoded, never decoded, so pricing the decode from the
+    /// joint ceiling reserves for an image the pipeline will never produce.
+    /// On a five-reference run that is most of a card's worth of nothing.
+    ///
+    /// The wrappers above pass `n_out_max = n_img_max`, which is the safe
+    /// direction (a pipeline with no references decodes exactly that many
+    /// tokens) - callers that know the two apart should use this.
+    pub fn build_sized(
+        cfg: &Flux2Config,
+        paths: &Paths,
+        n_img_max: u32,
+        n_out_max: u32,
+        adapter: Option<&AdapterSpec>,
+        precision: crate::Precision,
+        max_batch: u32,
+    ) -> Result<Pipeline, String> {
+        Pipeline::build_inner(cfg, paths, n_img_max, n_out_max, adapter, precision, max_batch)
     }
 
     /// The DiT half of a build: the weight source decision, any LoRA fold,
@@ -718,10 +810,27 @@ impl Pipeline {
     /// Only the DiT activation scratch grows; the text encoder and VAE stay
     /// single-stream.
     pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
+        Pipeline::build_inner(cfg, paths, n_img_max, n_img_max, adapter, precision, max_batch)
+    }
+
+    fn build_inner(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, n_out_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
         let n_max = cfg.txt_len as u32 + n_img_max;
+        // The VAE config is read FIRST because the placement estimate is
+        // computed from it: the decode's footprint is a property of this
+        // checkpoint's channel schedule and the output size, not a constant.
+        let vp = std::path::Path::new(&paths.vae);
+        let (vae_file, vae_json) = if vp.is_dir() {
+            (vp.join("diffusion_pytorch_model.safetensors"), std::fs::read_to_string(vp.join("config.json")).ok())
+        } else {
+            (vp.to_path_buf(), None)
+        };
+        let vae_cfg = match vae_json {
+            Some(j) => vae::VaeConfig::from_json(&serde_json::from_str(&j).map_err(|e| e.to_string())?),
+            None => vae::VaeConfig::flux2(),
+        };
         // Ask the engine where this pipeline's three parts go, then build
         // each one there. Nothing below names a card.
-        let (homes, auto_te) = plan_parts(cfg, precision, n_max as u64, max_batch.max(1) as u64);
+        let (homes, auto_te) = plan_parts(cfg, &vae_cfg, precision, n_max as u64, n_out_max as u64, max_batch.max(1) as u64);
         // An operator who pinned a layout keeps it; everyone else gets the
         // automatic one. Either way the run says what it did, in the same
         // place it reports reference sizes and token counts.
@@ -739,22 +848,13 @@ impl Pipeline {
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&paths.tokenizer)?;
         let te = build_text_encoder_on(cfg, paths, te_place)?;
+        // ONE device for every VAE graph this pipeline will ever build. Each
+        // encode/decode used to stand up its own - recompiling every kernel,
+        // and (on a two-card box) re-resolving the ambient selection, which
+        // the plan may have moved since. Created here, under the part's own
+        // placement, so every graph built on it lands where the plan said.
+        let vae_gpu = homes.run("vae", || vae::device(None))?;
 
-        let vp = std::path::Path::new(&paths.vae);
-        let (vae_file, vae_json) = if vp.is_dir() {
-            (
-                vp.join("diffusion_pytorch_model.safetensors"),
-                std::fs::read_to_string(vp.join("config.json")).ok(),
-            )
-        } else {
-            (vp.to_path_buf(), None)
-        };
-        let vae_cfg = match vae_json {
-            Some(j) => vae::VaeConfig::from_json(
-                &serde_json::from_str(&j).map_err(|e| e.to_string())?,
-            ),
-            None => vae::VaeConfig::flux2(),
-        };
         let vae_ts = checkpoint::safetensors::read(vae_file.to_str().unwrap())?;
         let mut map = std::collections::HashMap::new();
         let (mut bn_mean, mut bn_var) = (Vec::new(), Vec::new());
@@ -771,7 +871,7 @@ impl Pipeline {
             return Err("vae checkpoint missing bn.running_{mean,var}".into());
         }
 
-        Ok(Pipeline { cfg: cfg.clone(), model, tok, te, vae_cfg, vae_tensors: map, bn_mean, bn_var, homes })
+        Ok(Pipeline { cfg: cfg.clone(), model, tok, te, vae_cfg, vae_tensors: map, bn_mean, bn_var, homes, vae_gpu, enc_cache: std::sync::Mutex::new(None) })
     }
 
     /// Prompt → `[txt_len, context_in_dim]` conditioning (masked-pad,
@@ -801,7 +901,22 @@ impl Pipeline {
     /// VAE-encode an RGB image (`[-1,1]` CHW) to packed+normalized latent
     /// tokens `[lh*lw, 128]` (row-major, matching `position_ids`).
     pub fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
-        let enc = self.homes.run("vae", || vae::VaeEncoder::from_diffusers(self.vae_cfg.clone(), &self.vae_tensors, h, w, None))?;
+        let mut slot = self.enc_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_none_or(|((ch, cw), _)| (*ch, *cw) != (h, w)) {
+            // Drop the previous graph BEFORE building the next one, so two
+            // encoders are never resident at once: the replacement is what
+            // keeps this cache's footprint equal to one encoder rather than
+            // one per distinct reference size.
+            *slot = None;
+            // Under the part's placement, so that even a backend that cannot
+            // hand out a second handle onto `vae_gpu` (and so builds a fresh
+            // device) still builds it on the card the plan chose.
+            let built = self
+                .homes
+                .run("vae", || vae::VaeEncoder::from_diffusers_on(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, h, w))?;
+            *slot = Some(((h, w), built));
+        }
+        let enc = &slot.as_ref().expect("just populated").1;
         let (lh8, lw8) = ((h / 8) as usize, (w / 8) as usize);
         let mean = enc.encode_mean(chw, lh8 as u32, lw8 as u32);
         let eps = self.vae_cfg.batch_norm_eps;
@@ -833,7 +948,14 @@ impl Pipeline {
         let eps = self.vae_cfg.batch_norm_eps;
         let unpacked = vae::latent::unpack(&packed, 32, lh * 2, lw * 2, &self.bn_mean, &self.bn_var, eps);
         let (h, w) = ((lh * 16) as u32, (lw * 16) as u32);
-        let dec = self.homes.run("vae", || vae::VaeDecoder::from_diffusers(self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32, None))?;
+        // Nothing reads a reference encoder again this generation, and the
+        // decode is the largest graph the pipeline ever builds - so release
+        // the cache first. The peak is then max(encode phase, decode phase)
+        // rather than their sum, which is what the placement estimate assumes.
+        *self.enc_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let dec = self.homes.run("vae", || {
+            vae::VaeDecoder::from_diffusers_on(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32)
+        })?;
         let chw = dec.decode(&unpacked);
         // clamp FIRST, then rescale (reference order — reversed produces artifacts)
         let n = (h * w) as usize;

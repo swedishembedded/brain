@@ -30,4 +30,8 @@ pub mod latent;
 pub mod tiling3d;
 
 pub use config::VaeConfig;
-pub use decoder::{Tensors, VaeDecoder, VaeEncoder};
+pub use decoder::{
+    decoder_device_bytes, decoder_device_bytes_for_pixels, decoder_weight_bytes, encoder_device_bytes,
+    encoder_device_bytes_for_pixels, encoder_weight_bytes,
+    device, level_bytes_per_pixel, Tensors, VaeDecoder, VaeEncoder,
+};

@@ -160,7 +160,7 @@ impl ResidentModel for Flux2Resident {
         // Place the pipeline on the assigned card (scoped registry selection;
         // the TE card is flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
         let pipe = crate::resident_llm::on_device(device, || {
-            flux2::Pipeline::build_batched(&cfg, &self.paths, n_gen + nref, adapter.as_ref(), precision, max_batch())
+            flux2::Pipeline::build_sized(&cfg, &self.paths, n_gen + nref, n_gen, adapter.as_ref(), precision, max_batch())
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths) }))
     }

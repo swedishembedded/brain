@@ -79,3 +79,98 @@ fn the_dit_cost_follows_the_architecture_and_the_numeric_tier() {
     let real = dit_bytes(&nine, Precision::Int8, n, 1);
     assert!((8.0..20.0).contains(&gib(real)), "int8 9B DiT budget out of the plausible band: {:.1} GiB", gib(real));
 }
+
+/// The VAE reservation must describe the decode that actually runs.
+///
+/// This is the second field failure in one assertion. Placement chose the
+/// right card, every denoise step completed, and the run died in `decoding` -
+/// because the plan reserved a flat 2 GiB for a stage whose real footprint at
+/// a full-frame output is several times that. A decode's cost is dominated by
+/// activations that scale with the image, so a constant is wrong at every size
+/// except by accident.
+#[test]
+fn the_vae_reservation_covers_a_full_frame_decode() {
+    let vc = vae::VaeConfig::flux2();
+    // 768x1024 out = 48 x 64 latent tokens - the size that failed.
+    let full_frame = 48 * 64;
+    let got = flux2::pipeline::vae_bytes(&vc, full_frame);
+    assert!(
+        gib(got) > 6.0,
+        "a full-frame decode needs far more than the flat 2 GiB this used to reserve: {:.2} GiB",
+        gib(got)
+    );
+    // ...and it has to be the IMAGE that drives it, not a bigger constant.
+    let quarter = flux2::pipeline::vae_bytes(&vc, full_frame / 4);
+    assert!(
+        got > quarter + (got - quarter) / 2,
+        "the reservation must grow with the output: {:.2} GiB at a quarter frame vs {:.2} GiB full",
+        gib(quarter),
+        gib(got)
+    );
+    assert!(
+        got - quarter > (1u64 << 30),
+        "four times the pixels must cost GiBs more, not megabytes: {:.2} -> {:.2} GiB",
+        gib(quarter),
+        gib(got)
+    );
+}
+
+/// Reference images enlarge the DiT's joint sequence; they do not enlarge the
+/// image that gets decoded. Pricing the decode from the joint ceiling reserved
+/// most of a card for an output that is never produced - and on a busy machine
+/// that turns a placeable run into a refusal.
+#[test]
+fn references_grow_the_dit_but_not_the_decode() {
+    let c = flux2::Flux2Config::klein_4b();
+    let vc = vae::VaeConfig::flux2();
+    let n_out = 48 * 64; // 768x1024 generated
+    let n_ref = 5 * 432; // five references at --ref-size 384
+    let txt = c.txt_len as u64;
+
+    let bare = flux2::pipeline::part_needs(&c, &vc, Precision::Int8, txt + n_out, n_out, 1);
+    let with_refs = flux2::pipeline::part_needs(&c, &vc, Precision::Int8, txt + n_out + n_ref, n_out, 1);
+
+    let find = |v: &[gpu_core::devices::Need], n: &str| v.iter().find(|p| p.name == n).expect("part").vram;
+    assert!(
+        find(&with_refs, "dit") > find(&bare, "dit"),
+        "references must grow the DiT's joint-sequence scratch"
+    );
+    assert_eq!(
+        find(&with_refs, "vae"),
+        find(&bare, "vae"),
+        "references are encoded, never decoded: the VAE reservation must not move"
+    );
+    // The mistake is worth GiBs, which is why it is worth a gate.
+    let wrong = flux2::pipeline::vae_bytes(&vc, n_out + n_ref);
+    assert!(
+        wrong > find(&bare, "vae") + (1u64 << 31),
+        "the confusion this pins costs {:.2} GiB, not a rounding error",
+        gib(wrong - find(&bare, "vae"))
+    );
+}
+
+/// The VAE follows the DiT (it decodes the DiT's own latents) and the text
+/// encoder is declared apart from it - the shape the placement engine relies
+/// on to spread a pipeline over two cards.
+#[test]
+fn the_declared_shape_is_dit_te_apart_and_vae_with_the_dit() {
+    let c = flux2::Flux2Config::klein_9b();
+    let vc = vae::VaeConfig::flux2();
+    let needs = flux2::pipeline::part_needs(&c, &vc, Precision::Int8, 512 + 3072, 3072, 1);
+    let names: Vec<&str> = needs.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, vec!["dit", "te", "vae"]);
+    assert_eq!(needs[0].affinity, gpu_core::devices::Affinity::Apart);
+    assert_eq!(needs[1].affinity, gpu_core::devices::Affinity::Apart);
+    assert_eq!(needs[2].affinity, gpu_core::devices::Affinity::With("dit".to_string()));
+
+    // The text encoder is declared at the DiT's own numeric tier. An int8 run
+    // that reserved for an f32 encoder would plan a two-card layout it does
+    // not need - or refuse a one-card one that would have worked.
+    let f32_needs = flux2::pipeline::part_needs(&c, &vc, Precision::F32, 512 + 3072, 3072, 1);
+    assert!(
+        needs[1].vram * 2 < f32_needs[1].vram,
+        "an int8 run must reserve a much smaller encoder than an f32 one: {:.2} vs {:.2} GiB",
+        gib(needs[1].vram),
+        gib(f32_needs[1].vram)
+    );
+}
