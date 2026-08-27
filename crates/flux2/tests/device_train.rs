@@ -250,3 +250,37 @@ fn a_two_card_split_is_the_same_step_as_one_card() {
     }
     eprintln!("FLUX.2 two-card split reproduces the single-card step exactly.");
 }
+
+#[test]
+fn turning_the_frozen_qk_gain_gradient_off_changes_no_adapter_gradient() {
+    if skip() {
+        return;
+    }
+    // The QK-RMSNorm scales are frozen in a LoRA run, so the trainer skips
+    // the two kernels that produce their gain gradient. That is only a valid
+    // saving if it is invisible to everything the optimiser consumes - so
+    // this asserts BIT-IDENTICAL adapter gradients with it on and off, not
+    // merely close ones, and that the qk field comes back EMPTY rather than
+    // zeroed (zeros would read as a computed gradient).
+    let (c, base, batch) = fixture(0x5eed_0005);
+    let ad = adapter(&c, 0xa5);
+    let tr = DeviceTrainer::new(c, RANK, &base);
+
+    let (l_on, g_on) = tr.grads(&ad, &batch);
+    assert!(!g_on.qk.is_empty(), "the gate needs the gain gradient ON by default");
+    tr.set_qk_grads(false);
+    let (l_off, g_off) = tr.grads(&ad, &batch);
+
+    assert!(g_off.qk.is_empty(), "with the gain gradient off, qk must be empty, not zeroed");
+    assert_eq!(l_on.to_bits(), l_off.to_bits(), "loss moved: {l_on} vs {l_off}");
+    assert_eq!(g_on.lora.len(), g_off.lora.len(), "pair count");
+    for (i, ((a1, b1), (a2, b2))) in g_on.lora.iter().zip(&g_off.lora).enumerate() {
+        assert_eq!(a1, a2, "pair {i}: dA moved when the gain gradient was switched off");
+        assert_eq!(b1, b2, "pair {i}: dB moved when the gain gradient was switched off");
+    }
+    for (i, (s1, s2)) in g_on.sites.iter().zip(&g_off.sites).enumerate() {
+        assert_eq!(s1.scale, s2.scale, "site {i}: scale grad moved");
+        assert_eq!(s1.gate, s2.gate, "site {i}: gate grad moved");
+    }
+    eprintln!("Skipping the frozen QK gain gradient leaves all {} adapter gradients bit-identical.", g_on.lora.len());
+}

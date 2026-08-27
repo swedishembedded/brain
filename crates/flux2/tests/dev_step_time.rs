@@ -28,11 +28,16 @@
 //! set by its shapes and its dispatch sequence, and this test is about the
 //! shapes. Correctness lives in `dev_grad.rs` / `device_train.rs`.
 
-use flux2::devtrain::DeviceTrainer;
+use flux2::devtrain::{step_flops, DeviceTrainer};
 use flux2::grad::{DoubleW, SingleW, StreamW};
 use flux2::lora::{LoraAdapter, LoraCfg};
 use flux2::modelgrad::{make_flow_batch, Cfg, ModelWeights};
 use flux2::Flux2Config;
+
+/// Roofs MEASURED on this box (2x Tesla P40), not datasheet numbers. Pascal
+/// has no fast fp16, so there is no half-precision rung to aim at.
+const ROOF_FP32_GFLOPS: f64 = 10_517.0;
+const ROOF_DRAM_GBS: f64 = 287.5;
 
 fn envs(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
@@ -112,6 +117,12 @@ fn device_lora_step_time() {
     eprintln!("  device upload {:.1}s, base+adapter resident {:.2} GiB", t0.elapsed().as_secs_f64(), tr.weight_bytes() as f64 / (1u64 << 30) as f64);
     drop(base);
 
+    // Measure the configuration a REAL run uses, not the gate's. The parity
+    // gate keeps the frozen QK-RMSNorm gain gradient on so it can check it;
+    // `finetune::run` turns it off because nothing consumes it. A harness
+    // that timed the gate's configuration would report a step cost no
+    // training run ever pays.
+    tr.set_qk_grads(false);
     let mut ad = LoraAdapter::new(&c, LoraCfg::new(rank));
     let x0 = fill(c.n_img() * c.in_channels, 0.3);
     let ctx = fill(c.txt_len * c.context_in_dim, 0.1);
@@ -125,6 +136,8 @@ fn device_lora_step_time() {
 
     tr.gpu().set_kernel_timing(true);
     tr.gpu().reset_kernel_times();
+    tr.gpu().reset_ops_counters();
+    tr.reset_timing();
     let mut times = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t = std::time::Instant::now();
@@ -133,17 +146,85 @@ fn device_lora_step_time() {
     }
     let best = times.iter().cloned().fold(f64::INFINITY, f64::min);
     let mean = times.iter().sum::<f64>() / iters as f64;
+    let n = iters as f64;
+
     eprintln!("\nSTEP TIME {variant} @{size}px rank {rank}: best-of-{iters} {best:.2}s, mean {mean:.2}s");
+    eprintln!("  (measured in the trainer's configuration: frozen QK gain gradient OFF)");
     eprintln!("  projected 1500-step run: {:.2} h (at best-of-{iters})", best * 1500.0 / 3600.0);
+
+    // ---- roofline: the analytic model, then what the run actually asked for ----
+    let f = step_flops(&c, rank);
+    let dev = f.device_total() as f64;
+    eprintln!("\n=== ROOFLINE ===");
+    eprintln!("  analytic model, one step (2*M*K*N per GEMM):");
+    for (name, v) in [
+        ("base linears  forward", f.linear_fwd),
+        ("base linears  recompute", f.linear_recompute),
+        ("base linears  backward (dx only)", f.linear_bwd),
+        ("attention     forward", f.attn_fwd),
+        ("attention     recompute", f.attn_recompute),
+        ("attention     backward", f.attn_bwd),
+        ("adapter       forward", f.lora_fwd),
+        ("adapter       recompute", f.lora_recompute),
+        ("adapter       backward", f.lora_bwd),
+        ("embedders + head", f.wrapper),
+    ] {
+        eprintln!("    {name:34} {:>9.1} GFLOP  {:>5.1}%", v as f64 / 1e9, 100.0 * v as f64 / dev);
+    }
+    eprintln!("    {:34} {:>9.1} GFLOP", "DEVICE TOTAL", dev / 1e9);
+    eprintln!("    {:34} {:>9.1} MFLOP (host, m=1)", "conditioning front", f.host_cond as f64 / 1e6);
+    eprintln!("    recompute is {:.1}% of the device total", 100.0 * f.recompute_share());
+
+    let cost = tr.gpu().ops_counters();
+    let meas_flops = cost.total.flops as f64 / n;
+    let meas_bytes = cost.total.bytes as f64 / n;
+    eprintln!("\n  measured dispatch tally (gpu_core::cost, coverage {:.1}%):", 100.0 * cost.coverage());
+    eprintln!("    {:34} {:>9.1} GFLOP  ({:+.1}% vs model)", "per step", meas_flops / 1e9, 100.0 * (meas_flops - dev) / dev);
+    eprintln!("    {:34} {:>9.1} GB", "bytes moved per step", meas_bytes / 1e9);
+    if !cost.uncovered.is_empty() {
+        eprintln!("    UNCOVERED kernels (not in the totals): {:?}", cost.uncovered.keys().collect::<Vec<_>>());
+    }
+
+    let compute_floor = dev / (ROOF_FP32_GFLOPS * 1e9);
+    let memory_floor = meas_bytes / (ROOF_DRAM_GBS * 1e9);
+    let ridge = ROOF_FP32_GFLOPS / ROOF_DRAM_GBS;
+    eprintln!("\n  floors on this hardware (fp32 {ROOF_FP32_GFLOPS:.0} GFLOP/s, DRAM {ROOF_DRAM_GBS:.1} GB/s, ridge {ridge:.1} FLOP/B):");
+    eprintln!("    compute-bound floor {compute_floor:.2} s/step   memory-bound floor {memory_floor:.2} s/step");
+    eprintln!("    step arithmetic intensity {:.1} FLOP/B -> {}-BOUND", dev / meas_bytes.max(1.0), if compute_floor > memory_floor { "COMPUTE" } else { "MEMORY" });
+    let floor = compute_floor.max(memory_floor);
+    eprintln!("    ACHIEVED {:.1}% of the floor ({best:.2} s vs {floor:.2} s, {:.2}x off)", 100.0 * floor / best, best / floor);
+    eprintln!("    floor for a 1500-step run: {:.2} h", floor * 1500.0 / 3600.0);
+
+    // ---- where the wall clock goes: host phases first, then kernels ----
+    let tm = tr.timing();
+    eprintln!("\n=== WALL CLOCK, per step ===");
+    let mut acct = 0.0;
+    for (name, v) in tm.rows() {
+        eprintln!("  {name:26} {v:>7.3} s  {:>5.1}%", 100.0 * v / mean);
+        acct += v;
+    }
+    eprintln!("  {:26} {:>7.3} s  {:>5.1}%", "(optimiser + unaccounted)", mean - acct, 100.0 * (mean - acct) / mean);
 
     if let Some(mut k) = tr.gpu().kernel_times() {
         let total: f64 = k.iter().map(|(_, ms, _)| *ms).sum();
         k.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        eprintln!("\n  GPU kernel time over {iters} steps: {:.1} ms total ({:.0}% of {:.0} ms wall)", total, 100.0 * total / (mean * iters as f64 * 1000.0), mean * iters as f64 * 1000.0);
-        eprintln!("  {:<26} {:>10} {:>8} {:>9}", "kernel", "ms/step", "share", "calls/step");
-        for (name, ms, n) in k.iter().take(18) {
-            eprintln!("  {:<26} {:>10.1} {:>7.1}% {:>9}", name, ms / iters as f64, 100.0 * ms / total, *n as usize / iters);
+        eprintln!("\n=== GPU KERNELS, ranked by share of step wall clock ===");
+        eprintln!("  GPU kernel time is {:.1}% of wall clock ({:.2} s of {mean:.2} s)", 100.0 * total / (mean * n * 1000.0), total / (n * 1000.0));
+        eprintln!("  {:<24} {:>8} {:>7} {:>10} {:>9} {:>8} {:>7}", "kernel", "ms/step", "share", "GFLOP/s", "GB/s", "FLOP/B", "%roof");
+        for (name, ms, calls) in k.iter().take(16) {
+            let per = ms / n;
+            let (fl, by) = cost.by_kernel.get(name).map(|c| (c.cost.flops as f64 / n, c.cost.bytes as f64 / n)).unwrap_or((0.0, 0.0));
+            let secs = per / 1000.0;
+            let gflops = fl / secs.max(1e-9) / 1e9;
+            let gbs = by / secs.max(1e-9) / 1e9;
+            let ai = fl / by.max(1.0);
+            // A kernel below the ridge point is memory-bound and its ceiling is
+            // DRAM, not the FMA rate; above it, the other way round.
+            let pct = if ai >= ridge { 100.0 * gflops / ROOF_FP32_GFLOPS } else { 100.0 * gbs / ROOF_DRAM_GBS };
+            eprintln!("  {name:<24} {per:>8.1} {:>6.1}% {gflops:>10.0} {gbs:>9.1} {ai:>8.1} {pct:>6.1}%", 100.0 * ms / total, );
+            let _ = calls;
         }
+        eprintln!("  (%roof is against DRAM below the ridge point and against fp32 FMA above it)");
     } else {
         eprintln!("  (no GPU timestamp queries on this backend)");
     }

@@ -84,6 +84,13 @@ const K_RINV: usize = 23;
 const K_RDW: usize = 24;
 const K_RDX: usize = 25;
 const K_ADD_INPLACE: usize = 26;
+// Coalesced workgroup-per-row twins of the three row-reduction kernels above.
+// They use multiple workgroup barriers, so they are GPU-only by construction
+// and are selected behind `DeviceCaps::workgroup_reductions`; the per-element
+// originals stay for the CPU backend, which is why both are registered.
+const K_SOFTMAX_ROWS: usize = 27;
+const K_LN_ROWS: usize = 28;
+const K_LN_DX_ROWS: usize = 29;
 
 /// The kernel set the device trainer registers. Every entry is an existing,
 /// gradient-checked kernel - the trainer adds no WGSL of its own.
@@ -115,6 +122,9 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("rmsnorm_dw", kernels::RMSNORM_DW),
     ("rmsnorm_dx_eps", kernels::RMSNORM_DX_EPS),
     ("add_inplace", kernels::ADD_INPLACE),
+    ("softmax_rows", kernels::SOFTMAX_ROWS),
+    ("layernorm_rows", kernels::LAYERNORM_ROWS),
+    ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
 ];
 
 /// LayerNorm / QK-RMSNorm epsilon - 1e-6 in every FLUX.2 variant, matching
@@ -236,6 +246,17 @@ pub struct BlockDev {
     mlp: usize,
     n_max: usize,
     rank: usize,
+    /// Whether this device can run a workgroup reduction - queried once, not
+    /// per dispatch, and the only thing that picks the coalesced row kernels.
+    coop: bool,
+    /// Whether to accumulate the QK-RMSNorm GAIN gradient. Those scales are
+    /// frozen in a LoRA run, so the two kernels that produce it
+    /// (`rms_inv_eps` + `rmsnorm_dw`) are pure gate support there - measured
+    /// at a real, non-trivial share of the step. On by default so the
+    /// correctness gate keeps its coverage; the trainer turns it off, and
+    /// `tests/device_train.rs` asserts that doing so leaves every adapter
+    /// gradient bit-identical.
+    qk_grads: std::cell::Cell<bool>,
     b: HashMap<String, DeviceBuffer>,
 }
 
@@ -303,7 +324,8 @@ impl BlockDev {
             mk("dsb", 2 * d);
             mk("dgt", d);
         }
-        let eng = BlockDev { gpu, d, nh, hd, mlp, n_max: n, rank, b };
+        let coop = gpu.caps().workgroup_reductions;
+        let eng = BlockDev { gpu, d, nh, hd, mlp, n_max: n, rank, coop, qk_grads: std::cell::Cell::new(true), b };
         eng.gpu.write_f32(&eng.b["ones"], &vec![1.0f32; d]);
         eng.gpu.write_f32(&eng.b["zeros"], &vec![0.0f32; d]);
         eng
@@ -317,6 +339,13 @@ impl BlockDev {
     }
     pub fn rank(&self) -> usize {
         self.rank
+    }
+    /// See [`BlockDev::qk_grads`]. Returns the previous setting.
+    pub fn set_qk_grads(&self, on: bool) -> bool {
+        self.qk_grads.replace(on)
+    }
+    pub fn qk_grads_on(&self) -> bool {
+        self.qk_grads.get()
     }
 
     fn g(&self, name: &str) -> &DeviceBuffer {
@@ -612,7 +641,30 @@ impl BlockDev {
     fn ln(&self, x: &DeviceBuffer, r0: usize, o: &DeviceBuffer, m: usize) -> Step {
         let d = self.d;
         let off = self.sl(r0 * d, m * d);
-        self.gpu.step_sliced(K_LN, &[x, self.g("ones"), self.g("zeros"), o], &[off, (0, 0), (0, 0), off], &[d as u32, m as u32, f(EPS)], m as u32)
+        let (kind, threads) = model::block::ln_variant(&self.gpu, K_LN, self.coop.then_some(K_LN_ROWS), m as u32, d as u32);
+        self.gpu.step_sliced(kind, &[x, self.g("ones"), self.g("zeros"), o], &[off, (0, 0), (0, 0), off], &[d as u32, m as u32, f(EPS)], threads)
+    }
+
+    /// Affine-free LayerNorm backward - same binding list and Params as the
+    /// forward, same selection rule.
+    fn ln_dx(&self, x: &DeviceBuffer, xoff: (u64, u64), dy: &DeviceBuffer, off: (u64, u64), dx: &DeviceBuffer, m: usize) -> Step {
+        let d = self.d;
+        let (kind, threads) = model::block::ln_variant(&self.gpu, K_LN_DX, self.coop.then_some(K_LN_DX_ROWS), m as u32, d as u32);
+        self.gpu.step_sliced(kind, &[x, self.g("ones"), dy, dx], &[xoff, (0, 0), off, off], &[d as u32, m as u32, f(EPS)], threads)
+    }
+
+    /// One head's softmax over its contiguous `[n, n]` score block. The
+    /// workgroup-per-row kernel is an order of magnitude better placed for
+    /// this shape (64 threads cooperating on a 1536-wide row against one
+    /// thread walking it), but it is a barrier reduction, so the per-element
+    /// kernel stays for devices without one.
+    fn softmax_head(&self, off: (u64, u64), n: usize) -> Step {
+        let bufs = [self.g("scores"), self.g("probs")];
+        if self.coop {
+            self.gpu.step_sliced(K_SOFTMAX_ROWS, &bufs, &[off, off], &[n as u32, n as u32], (n * 64) as u32)
+        } else {
+            self.gpu.step_sliced(K_SOFTMAX, &bufs, &[off, off], &[1, 1, n as u32], n as u32)
+        }
     }
 
     /// `y = (1 + scale)·xhat + shift` for one site over rows `r0..r0+m`.
@@ -646,8 +698,13 @@ impl BlockDev {
         let rows = (m * nh) as u32;
         let ib = self.sl(slot * self.n_max * nh, m * nh);
         let invb = self.g(inv);
-        s.push(self.gpu.step_sliced(K_RINV, &[x, invb], &[off, ib], &[hd as u32, rows, f(EPS)], rows));
-        s.push(self.gpu.step_sliced(K_RDW, &[dy, x, invb, gw], &[off, off, ib, (0, 0)], &[hd as u32, rows], hd as u32));
+        if self.qk_grads.get() {
+            // The gain gradient needs the per-row inverse; `rmsnorm_dx_eps`
+            // recomputes its own, so both of these drop out together when the
+            // scales are frozen.
+            s.push(self.gpu.step_sliced(K_RINV, &[x, invb], &[off, ib], &[hd as u32, rows, f(EPS)], rows));
+            s.push(self.gpu.step_sliced(K_RDW, &[dy, x, invb, gw], &[off, off, ib, (0, 0)], &[hd as u32, rows], hd as u32));
+        }
         s.push(self.gpu.step_sliced(K_RDX, &[x, scale, dy, dx], &[off, (0, 0), off, off], &[hd as u32, rows, f(EPS)], rows));
     }
 
@@ -750,7 +807,7 @@ impl BlockDev {
         for h in 0..nh {
             // Per-head softmax over the contiguous [n,n] block: the head-major
             // padding gap stays invisible to a single-head dispatch.
-            s.push(self.gpu.step_sliced(K_SOFTMAX, &[self.g("scores"), self.g("probs")], &[self.sl(h * ss, n * n), self.sl(h * ss, n * n)], &[1, 1, n as u32], n as u32));
+            s.push(self.softmax_head(self.sl(h * ss, n * n), n));
         }
         for h in 0..nh {
             // ctx[h] = probs[h] · V[h]   (A·Bᵀ with B = vᵀ[hd,n])
@@ -841,13 +898,7 @@ impl BlockDev {
         let xoff = self.sl(xr0 * d, m * d);
         self.site_dsb(s, xh, dy, site, r0, m);
         s.push(self.gpu.step_sliced(K_FILM_DX, &[dy, self.g(&format!("sb{site}")), self.g("dxh")], &[off, (0, 0), off], &[m as u32, d as u32, m as u32], (m * d) as u32));
-        s.push(self.gpu.step_sliced(
-            K_LN_DX,
-            &[x, self.g("ones"), self.g("dxh"), self.g("dtmp")],
-            &[xoff, (0, 0), off, off],
-            &[d as u32, m as u32, f(EPS)],
-            m as u32,
-        ));
+        s.push(self.ln_dx(x, xoff, self.g("dxh"), off, self.g("dtmp"), m));
     }
 }
 
@@ -899,7 +950,7 @@ impl BlockDev {
         self.site_dsb(&mut s, self.g("xh1"), self.g("dn1"), SITE_FINAL, nt, ni);
         let off = self.sl(nt * d, ni * d);
         s.push(self.gpu.step_sliced(K_FILM_DX, &[self.g("dn1"), self.g(&format!("sb{SITE_FINAL}")), self.g("dxh")], &[off, (0, 0), off], &[ni as u32, d as u32, ni as u32], (ni * d) as u32));
-        s.push(self.gpu.step_sliced(K_LN_DX, &[x, self.g("ones"), self.g("dxh"), dx], &[off, (0, 0), off, off], &[d as u32, ni as u32, f(EPS)], ni as u32));
+        s.push(self.ln_dx(x, off, self.g("dxh"), off, dx, ni));
         self.gpu.submit(&[dx], &s);
         self.gpu.poll_wait();
     }

@@ -154,9 +154,17 @@ impl LoraAdapter {
         let t = self.t;
         let mut pairs = self.pairs_mut();
         assert_eq!(pairs.len(), grads.len(), "adapter has {} pairs, got {} gradient pairs", pairs.len(), grads.len());
-        for (p, (da, db)) in pairs.iter_mut().zip(grads) {
-            p.adam_step(da, db, lr, t);
-        }
+        // One task per pair. Adam is elementwise and pairs share nothing, so
+        // this is bit-identical to the serial walk - which matters, because a
+        // training trajectory that depended on the thread count would not be
+        // reproducible. It is parallel because it is not small: at klein-4b
+        // rank 16 the adapter is tens of millions of parameters and Adam
+        // touches seven floats per parameter, which measured as the largest
+        // single HOST cost of a step.
+        backend_cpu::par::chunks_mut(&mut pairs, 1, |i, one| {
+            let (da, db) = &grads[i];
+            one[0].adam_step(da, db, lr, t);
+        });
     }
 
     /// Build the effective weights `W_eff = W + scale·B·A` (base cloned).

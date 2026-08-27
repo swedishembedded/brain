@@ -944,3 +944,124 @@ the memory arithmetic backwards. Setting it straight:
 Until then the two-card fp32 split, which exists and is gated bit-for-bit,
 reaches the same place with no fidelity question at all - at the cost of the
 dequantise and a second card.
+
+## Roofline: what a training step OUGHT to cost, and what it does
+
+Everything below is klein-4b at 512 px (1536 joint tokens = 512 text + 1024
+image), rank 16, fp32 frozen base resident at 13.93 GiB on ONE Tesla P40,
+best-of-3 after a discarded warm-up, nothing polling `nvidia-smi` while the
+clock runs. Roofs are the MEASURED ones for this box: 10 517 GFLOP/s fp32,
+287.5 GB/s DRAM, ridge point 36.6 FLOP/B.
+
+### The model, and whether to believe it
+
+`flux2::devtrain::step_flops` is an analytic FLOP model derived from the
+config (`2*M*K*N` per GEMM, matching `gpu_core::cost`'s convention). It says
+one step is **31 493.9 GFLOP**. The runtime dispatch tally over the same three
+steps says **31 532.8 GFLOP** - **+0.1%**. The model is not a rule of thumb;
+it is checked against the machine every time the harness runs.
+
+| term | GFLOP | share |
+|---|---|---|
+| base linears, forward | 9422.1 | 29.9 % |
+| base linears, recompute | 9422.1 | 29.9 % |
+| base linears, backward (`dx` only) | 9422.1 | 29.9 % |
+| attention, forward | 724.8 | 2.3 % |
+| attention, recompute | 724.8 | 2.3 % |
+| attention, backward | 1449.6 | 4.6 % |
+| adapter, forward | 75.5 | 0.2 % |
+| adapter, recompute | 75.5 | 0.2 % |
+| adapter, backward | 151.0 | 0.5 % |
+| embedders + head | 26.6 | 0.1 % |
+| **device total** | **31 493.9** | |
+| conditioning front (host, `m = 1`) | 0.34 | - |
+
+Three things this makes concrete. The **adapter's own arithmetic is 0.9 % of
+the step** - at rank 16 it really is free, stated as a number rather than
+assumed. The **backward of a frozen linear is one GEMM, not two**: `dx` is
+computed and `dW` never is, so `linear_bwd == linear_fwd` where a full
+fine-tune would pay double. And the **recompute is 32.5 % of the device
+total** - the reverse sweep re-runs each block's forward, and that is the
+single largest tradeable term in the budget.
+
+### Which roof binds
+
+The step moves **247.3 GB** and does 31.5 TFLOP: arithmetic intensity
+**127.3 FLOP/B**, well above the 36.6 ridge. So:
+
+| floor | s/step | 1500 steps |
+|---|---|---|
+| compute-bound (31.5 TFLOP / 10 517 GFLOP/s) | **2.99** | **1.25 h** |
+| memory-bound (247.3 GB / 287.5 GB/s) | 0.86 | 0.36 h |
+
+**COMPUTE-bound, by 3.5x.** Making the memory-bound kernels faster buys only
+what those kernels themselves cost; it cannot move the floor. Measured
+**11.83 s/step = 25.3 % of the floor, 3.95x off**.
+
+### Where the 11.83 s goes
+
+Host phases first, because 11.5 % of the wall clock is not GPU kernel time:
+
+| phase | s/step | share |
+|---|---|---|
+| backward sweep | 7.737 | 65.0 % |
+| forward sweep | 3.191 | 26.8 % |
+| optimiser (Adam) + unaccounted | 0.516 | 4.3 % |
+| gradient readback | 0.317 | 2.7 % |
+| upload adapter | 0.101 | 0.8 % |
+| host conditioning | 0.024 | 0.2 % |
+| upload mods + rope + batch | 0.007 | 0.1 % |
+| head + loss | 0.007 | 0.1 % |
+
+GPU kernel time is 10.54 s, and the two sweeps wall-clock at 10.93 s, so the
+**submit/poll bubble across roughly 4000 dispatches is 0.39 s** - about
+0.1 ms per dispatch. That is small, and it is a measured answer to "does
+launch overhead matter now that the kernels are 8x cheaper": not yet.
+
+### Per kernel, against the roof that actually binds it
+
+`%roof` is against DRAM below the ridge point and against the fp32 FMA rate
+above it - a memory-bound kernel compared to a compute roof would look
+falsely terrible.
+
+| kernel | ms/step | share | GFLOP/s | GB/s | FLOP/B | %roof |
+|---|---|---|---|---|---|---|
+| `matmul_reg3` | 5259.2 | 49.9 % | 3953 | 18.1 | 217.9 | **37.6 %** |
+| `matmul_dx_reg` | 2435.7 | 23.1 % | 4066 | 18.7 | 217.0 | **38.7 %** |
+| `attn_softmax_bidir` | 806.0 | 7.6 % | 21 | 28.1 | 0.8 | 9.8 % |
+| `matmul_dw_reg` | 728.9 | 6.9 % | 1098 | 32.7 | 33.5 | 11.4 % |
+| `softmax_k_dx` | 420.6 | 4.0 % | - | - | - | (uncovered) |
+| `rmsnorm_dx_eps` | 284.2 | 2.7 % | 8 | 13.3 | 0.6 | 4.6 % |
+| `rmsnorm_dw` | 175.0 | 1.7 % | 4 | 10.8 | 0.4 | 3.8 % |
+| `layernorm_dx` | 79.1 | 0.8 % | 27 | 29.3 | 0.9 | 10.2 % |
+| `layernorm` | 76.4 | 0.7 % | 30 | 30.0 | 1.0 | 10.4 % |
+| `head_pack` | 39.9 | 0.4 % | 21 | 165.4 | 0.1 | 57.5 % |
+| `silu_mul` | 31.8 | 0.3 % | 111 | 266.7 | 0.4 | **92.8 %** |
+| `head_unpack` | 28.6 | 0.3 % | - | 165.1 | - | 57.4 % |
+| `rope_interleave_table` | 20.9 | 0.2 % | 102 | 276.4 | 0.4 | **96.1 %** |
+| `silu_bwd_da` | 20.5 | 0.2 % | 138 | 276.8 | 0.5 | **96.3 %** |
+| `add2` | 19.9 | 0.2 % | 17 | 199.4 | 0.1 | 69.4 % |
+
+The pattern is not subtle. Everything that maps **one thread per element** is
+at 69-96 % of DRAM. Everything that maps **one thread per ROW** - the
+softmaxes, both RMSNorm backward halves, both LayerNorms - is at 4-10 %,
+because a warp's 32 lanes then sit on 32 different rows, one useful float per
+sector. Together those six kernels are 1841 ms, **17.5 % of GPU time**, doing
+work whose memory floor is about a tenth of that.
+
+`gpu_core::cost` covers 91.1 % of the dispatches; `softmax_k_dx`, `film_row*`,
+`gate_row_d*` and `add_inplace` have no cost formula, so their FLOPs and bytes
+are missing from the totals (never counted as zero - the harness names them).
+
+### Negative results from this pass
+
+* **The adapter upload/readback is not the host bottleneck.** The step does
+  420 small buffer writes and 420 small reads (one per adapter factor per
+  direction), which looked like the obvious host cost. Measured: 0.101 s up +
+  0.317 s down = 3.5 % of the step. Batching them into a few large transfers
+  is not worth the packing complexity. The real top host cost was the **Adam
+  optimiser at 0.516 s**, which was not on the hypothesis list.
+* **Kernel launch overhead is not yet a problem.** 0.39 s of bubble across
+  ~4000 dispatches. `gpu_core::scratch`'s replay arena addresses buffer
+  destruction, and nothing here destroys buffers inside a step - the engine is
+  persistent by construction.

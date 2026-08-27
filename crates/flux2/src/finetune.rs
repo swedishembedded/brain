@@ -268,6 +268,11 @@ pub fn run(
     if opts.trainer == Trainer::Device {
         progress(0, opts.steps + 1, "uploading the frozen base to the device".into());
         let t = DeviceTrainer::new_multi(opts.cards.max(1), cfg.clone(), opts.rank, host.as_ref().expect("base"));
+        // The QK-RMSNorm scales are frozen in a LoRA run, so their gain
+        // gradient is work nothing consumes. It stays on under the parity
+        // gate, which is what proves turning it off changes no adapter
+        // gradient.
+        t.set_qk_grads(false);
         let per: Vec<String> = t.weight_bytes_per_card().iter().map(|b| format!("{:.2} GiB", *b as f64 / (1u64 << 30) as f64)).collect();
         progress(0, opts.steps + 1, format!("device base resident on {} card(s): {}", t.cards(), per.join(" + ")));
         dev = Some(t);
