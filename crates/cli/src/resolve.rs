@@ -50,6 +50,11 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("zipdepth", crate::depth_cli::run_depth),
     ("flux2", crate::flux2_cli::run_flux2),
     ("wan", crate::wan_cli::run_wan),
+    // `sam2 track` (the video memory bank) writes a mask-sequence DIRECTORY,
+    // which no single capability blob can carry; every other sam2 verb is
+    // forwarded straight back to the generic path by `run_sam2` itself, so the
+    // image path keeps its `ARCH_TO_MODEL` row below and its shared code.
+    ("sam2", crate::sam2_cli::run_sam2),
     ("ltxv", crate::ltxv_cli::run_ltxv),
     ("worldmirror2", crate::mirror_cli::run_mirror),
     ("splat", crate::splat_cli::run_splat),

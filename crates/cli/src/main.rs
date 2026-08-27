@@ -75,6 +75,7 @@ mod resident_sam2;
 mod resident_restore;
 mod resolve;
 mod run_cli;
+mod sam2_cli;
 mod splat_cli;
 mod supply;
 mod tts_cli;

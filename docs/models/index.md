@@ -76,7 +76,7 @@ named on the model's own page (see
 |---|---|:---:|:---:|
 | [`yolov8`](yolov8/readme.md) ⤓ | anchor-free object detection | [x] | [x] |
 | [`zipdepth`](zipdepth.md) | monocular relative depth | [x] | [x] |
-| [`sam2`](sam2.md) ⤓ | promptable image segmentation | [x] | |
+| [`sam2`](sam2.md) ⤓ | promptable segmentation: a mask from a click, on an image or tracked through a video | [x] | |
 | [`worldmirror2`](worldmirror2.md) | multi-view photos → 3D scene | [x] | |
 | [`splat`](splat.md) | 3D Gaussian Splatting render/fit | [x] | [x] |
 
