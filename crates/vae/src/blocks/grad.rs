@@ -123,6 +123,11 @@ pub struct Trace {
     /// re-registering `mul` in the BACKWARD set would give the CPU JIT two
     /// definitions of one kernel name - see `super::BWD_KERNELS`'s note.
     xf_mul: Option<usize>,
+    /// The caller's `scale_row` slot, carried from `Builder`'s
+    /// [`super::MixIds`]. `Op::Mix`'s adjoint dispatches `scale_row` against
+    /// the host-kept, never-trained `a`/`b` - see `super::MixIds`'s note on
+    /// why this is threaded through rather than registered here.
+    xf_scale_row: Option<usize>,
     /// Tensor name -> length, in first-use order (the parameter list).
     order: Vec<(String, u64)>,
     w: HashMap<String, DeviceBuffer>,
@@ -134,8 +139,9 @@ impl Trace {
         order: Vec<(String, u64)>,
         w: &HashMap<String, DeviceBuffer>,
         xf_mul: Option<usize>,
+        xf_scale_row: Option<usize>,
     ) -> Trace {
-        Trace { ops, order, w: w.clone(), xf_mul }
+        Trace { ops, order, w: w.clone(), xf_mul, xf_scale_row }
     }
 
     /// Every trainable tensor this graph reads, `(name, length in floats)`, in
@@ -557,6 +563,22 @@ impl Trace {
                 r.acc(b, nb, &db, 1.0);
                 r.give(na, da);
                 r.give(nb, db);
+            }
+            // `y = a*x + b*f` -> `dx = a*dy`, `df = b*dy`: `scale_row` IS the
+            // adjoint, dispatched against the same host-kept `a`/`b` the
+            // forward packed into `ab` - no `dab` kernel, exactly `edm_mix`'s
+            // own documented contract.
+            Op::Mix { n, x, f, a, b, y } => {
+                let Some(dy) = r.get(y) else { return };
+                let scale_row = self.xf_scale_row.expect("vae::blocks::grad: Op::Mix recorded with no MixIds::bwd slot");
+                let dx = r.tmp(*n as u64);
+                r.push(r.gpu.step(scale_row, &[&dy, a, &dx], &[*n, *n], *n));
+                r.acc(x, *n as u64, &dx, 1.0);
+                let df = r.tmp(*n as u64);
+                r.push(r.gpu.step(scale_row, &[&dy, b, &df], &[*n, *n], *n));
+                r.acc(f, *n as u64, &df, 1.0);
+                r.give(*n as u64, dx);
+                r.give(*n as u64, df);
             }
         }
     }

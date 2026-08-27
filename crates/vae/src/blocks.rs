@@ -364,6 +364,26 @@ pub struct LayerNormFwd {
     pub ids: model::block::LayerNormIds,
 }
 
+/// The caller's `edm_mix`/`scale_row` slots for [`Builder::mix`]/[`Op::Mix`].
+///
+/// Threaded through rather than registered in [`KERNELS`] for the same
+/// reason `mul` is threaded through [`XformerIds`] instead: `crates/diamond`
+/// already registers both kernels under its own slots, and the CPU backend's
+/// JIT rejects a second definition of the same kernel name. A caller that
+/// wants [`Builder::mix`] registers `edm_mix`/`scale_row` in its own kernel
+/// set and hands the slots over with [`Builder::set_mix_ids`].
+#[derive(Clone, Copy)]
+pub struct MixIds {
+    /// `edm_mix` - [`Builder::mix`]'s forward dispatch.
+    pub fwd: usize,
+    /// `scale_row` - [`Op::Mix`]'s backward. `edm_mix.wgsl`'s own header
+    /// documents this as its exact adjoint (`dx = scale_row(dy, a)`, `df =
+    /// scale_row(dy, b)`); there is no `dab` kernel because the coefficients
+    /// are host constants, never trained - the same shape EDM's own
+    /// `c_skip`/`c_out` already have.
+    pub bwd: usize,
+}
+
 /// One recorded forward stage, with exactly the buffers its adjoint reads.
 ///
 /// Recorded only in **train mode** ([`Builder::set_train`]); the tape is what
@@ -462,6 +482,13 @@ pub(crate) enum Op {
     /// Channel concat of two NCHW maps - the up path's skip join. Its adjoint is
     /// two slices of `dy`, which `concat_split` performs without a scatter.
     Concat { ca: u32, cb: u32, hw: u32, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
+    /// `y = a*x + b*f`, `edm_mix.wgsl`'s own contract - SUPIR's ZeroSFT/
+    /// ZeroCrossAttn `control_scale` lerp reuses it verbatim. `a`/`b` are
+    /// SCALARS (one-element device buffers), kept UNPACKED here (unlike the
+    /// forward's packed `ab[2]`) because the backward (`scale_row`) needs
+    /// each on its own. Host constants, never trained - like EDM's own
+    /// `c_skip`/`c_out`, there is no `dab` kernel.
+    Mix { n: u32, x: DeviceBuffer, f: DeviceBuffer, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
 }
 
 /// Graph-construction state (borrows the device + host tensors).
@@ -528,6 +555,10 @@ pub struct Builder<'a> {
     /// not a slightly-wrong number, it is a plan that says a card has room
     /// and then a driver out-of-memory.
     allocated: u64,
+    /// The caller's `edm_mix`/`scale_row` slots - see [`MixIds`]. `None`
+    /// until [`Builder::set_mix_ids`] is called; [`Builder::mix`] panics by
+    /// name rather than dispatching slot zero if it is missing.
+    mix_ids: Option<MixIds>,
 }
 
 /// Ceiling on the im2col scratch, in f32 words (512 MiB). The lowered conv
@@ -599,6 +630,7 @@ impl<'a> Builder<'a> {
             uploaded: 0,
             col: None,
             attn_head_dim: None,
+            mix_ids: None,
         }
     }
 
@@ -653,6 +685,12 @@ impl<'a> Builder<'a> {
         self.attn_head_dim = d;
     }
 
+    /// Supply the caller's `edm_mix`/`scale_row` slots. Must precede any
+    /// [`Builder::mix`] call - see [`MixIds`].
+    pub fn set_mix_ids(&mut self, ids: MixIds) {
+        self.mix_ids = Some(ids);
+    }
+
     /// Record the reverse-mode tape (see [`Builder::train`]). Set this BEFORE
     /// recording any block — it changes both what is kept and which lowering
     /// each block picks.
@@ -673,7 +711,13 @@ impl<'a> Builder<'a> {
     /// The recorded forward tape + weight buffers, for [`grad::Trace::backward`].
     /// Empty unless [`Builder::set_train`] was called.
     pub fn trace(&self) -> grad::Trace {
-        grad::Trace::new(self.tape.clone(), self.worder.clone(), &self.wmemo, self.xf.map(|x| x.mul))
+        grad::Trace::new(
+            self.tape.clone(),
+            self.worder.clone(),
+            &self.wmemo,
+            self.xf.map(|x| x.mul),
+            self.mix_ids.map(|m| m.bwd),
+        )
     }
 
     /// The device the graph is being recorded on.
@@ -1121,6 +1165,32 @@ impl<'a> Builder<'a> {
         self.steps.push(self.gpu.step(K_CONCAT2, &[a, b, &y], &[1, ca, cb, h, w], n as u32));
         if self.train {
             self.tape.push(Op::Concat { ca, cb, hw: h * w, a: a.clone(), b: b.clone(), y: y.clone() });
+        }
+        y
+    }
+
+    /// `y = a·x + b·f`, reusing `edm_mix.wgsl` verbatim - one scalar pair per
+    /// call, packed as `ab[2] = [a, b]` for the forward dispatch. SUPIR's
+    /// `ZeroSFT`/`ZeroCrossAttn` `control_scale` lerp is exactly this shape:
+    /// one host-known scalar pair, never a gradient target.
+    ///
+    /// `a`/`b` are host floats rather than a caller-owned buffer because they
+    /// ARE host constants here (the sigma-derived EDM coefficients are the
+    /// same shape) - this uploads the packed pair itself, and in train mode
+    /// also the two UNPACKED one-element buffers [`Op::Mix`]'s backward needs
+    /// (`scale_row` reads a per-row array, not `edm_mix`'s packed layout).
+    pub fn mix(&mut self, n: u32, a: f32, b: f32, x: &DeviceBuffer, f: &DeviceBuffer) -> DeviceBuffer {
+        let y = self.act(n as u64);
+        let ab = self.gpu.storage(2);
+        self.gpu.write_f32(&ab, &[a, b]);
+        let slot = self.mix_ids.expect("vae::blocks: Builder::set_mix_ids must precede Builder::mix").fwd;
+        self.steps.push(self.gpu.step(slot, &[x, f, &ab, &y], &[n, n], n));
+        if self.train {
+            let av = self.gpu.storage(1);
+            self.gpu.write_f32(&av, &[a]);
+            let bv = self.gpu.storage(1);
+            self.gpu.write_f32(&bv, &[b]);
+            self.tape.push(Op::Mix { n, x: x.clone(), f: f.clone(), a: av, b: bv, y: y.clone() });
         }
         y
     }
