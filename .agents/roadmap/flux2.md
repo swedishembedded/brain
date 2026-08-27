@@ -785,3 +785,91 @@ its own idea at high noise and trusts what it sees at low noise, giving the
 **bounded** velocity `v = x − g`. Under `Stub` every strength renders the
 same image, so a monotonicity or continuity assertion written against it
 could not fail however the dial was wired.
+
+## Device (WGSL) LoRA trainer - what was built and what it costs
+
+`crates/flux2/src/devgrad.rs` (persistent block engine) +
+`crates/flux2/src/devtrain.rs` (whole-model step) are the GPU instantiation of
+the op sequence `grad.rs`/`modelgrad.rs` define. `brain flux2 finetune
+--trainer device|host` selects between them; `device` is the default and the
+choice is printed at the top of every run.
+
+### Correctness
+
+Gated against the finite-difference-gradchecked host reference on a Tesla P40:
+
+| gate | tensors | worst cosine | worst rel_l2 |
+|---|---|---|---|
+| `dev_grad.rs` double block | 45 | 1.000000000 | 7.772e-7 |
+| `dev_grad.rs` single block | 20 | 1.000000000 | 8.469e-7 |
+| `device_train.rs` whole model | 96 | 1.000000000 | 9.632e-7 |
+
+`device_train.rs` also gates that a `B = 0` adapter reproduces the base loss
+exactly (1.369876396 host vs 1.369876531 device) and that LoRA-only training
+drives a batch's loss from 1.116545 to 0.000227 with the base frozen.
+
+Mutations each gate died to (every one run, every one killed the gate):
+
+| mutation | outcome |
+|---|---|
+| LayerNorm/QK-norm eps 1e-6 → 1e-5 | **cosine stayed 1.000000000**; caught only by rel_l2 (5.454e-5 vs a 1e-5 bound) |
+| RoPE backward rotates by +angle (`nsin` → `sin`) | cosine -0.049 (single), -0.242 (double) |
+| drop the low-rank `dxa·A` term from `dx` | cosine 0.403 (single), 0.341 (double) |
+| pack V un-transposed for the apply GEMM | cosine 0.089 (single), -0.184 (double) |
+| drop the `1/√head_dim` fold from the q-norm weight | cosine 0.566 (single), 0.301 (double) |
+| double-block arms swap the img/txt modulation sites | loss 1.4467 → 1.4637 |
+| backward unwinds the single stack in forward order | cosine 0.995, rel_l2 9.5e-2 |
+
+The epsilon row is the reason both metrics are asserted everywhere: a gate on
+cosine alone would have passed it.
+
+### Cost, before and after the attention rewrite
+
+`tests/dev_step_time.rs --ignored`, klein-4b at 512 px (1536 joint tokens =
+512 text + 1024 image), rank 16, fp32 frozen base resident at 13.93 GiB on one
+P40, best-of-3 after a discarded warm-up, nothing polling `nvidia-smi`:
+
+| | s / step | 1500-step run | GPU kernel time / step |
+|---|---|---|---|
+| naive `attn_*_bidir` attention | ~98 | ~41 h | 97 782 ms |
+| GEMM attention (`head_pack` + register-tiled matmul) | **11.74** | **4.89 h** | 10 522 ms |
+
+Before, by share of GPU kernel time: `attn_bwd_dscores_bidir` 61.6 %,
+`attn_scores_bidir` 22.2 %, `attn_softmax_bidir` 4.3 %, `attn_apply_bidir`
+1.5 % - 89.6 % in four attention kernels, 7.0 % in the GEMMs that do the
+model's actual arithmetic. `attn_bwd_dscores_bidir` is one thread per
+`(head, query)` walking a full `n·head_dim` inner product out of an
+interleaved `[n, nh·hd]` layout **twice** (once for the softmax dot, once to
+write), so consecutive lanes are `nh·hd` floats apart.
+
+After, by share (90 % of wall clock is GPU kernel time):
+
+| kernel | ms / step | share | calls / step |
+|---|---|---|---|
+| `matmul_reg3` | 5251 | 49.9 % | 4053 |
+| `matmul_dx_reg` | 2434 | 23.1 % | 1441 |
+| `attn_softmax_bidir` | 799 | 7.6 % | 1200 |
+| `matmul_dw_reg` | 729 | 6.9 % | 1620 |
+| `softmax_k_dx` | 420 | 4.0 % | 600 |
+| `rmsnorm_dx_eps` | 284 | 2.7 % | 60 |
+| `rmsnorm_dw` | 175 | 1.7 % | 60 |
+| everything else | ~430 | 4.1 % | - |
+
+79.9 % of the step is now in the three register-tiled GEMMs. Remaining
+headroom, in order: `attn_softmax_bidir` (one thread per row, uncoalesced -
+`softmax_rows` is the coalesced sibling, but it is a workgroup-barrier
+reduction and needs a barrier-free fallback before the CPU backend can use
+it), and the RMSNorm backward pair (`rmsnorm_dx_eps`/`rmsnorm_dw` are
+per-element kernels at `head_dim`-wide rows; only the forward has a `_rows`
+variant).
+
+### Why the LoRA structure changes the graph
+
+Only the rank-`r` factors are differentiated. For a targeted linear
+`y = x·Wᵀ + x·Aᵀ·B̃ᵀ` the adapter gradients come straight out of the low-rank
+intermediates (`dA = dxaᵀ·x`, `dB̃ = xaᵀ·dy` with `dxa = dy·B̃`), which is
+algebraically the host path's `Pair::project` of a dense `dW` - asserted as
+such in `dev_grad.rs`. The consequence is that the `dW` GEMM, one third of
+every backward's arithmetic, is replaced by two GEMMs of rank width, no
+`[out, in]` gradient buffer is ever allocated, and the frozen base is only
+ever read.
