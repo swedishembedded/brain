@@ -171,28 +171,49 @@ mapped pages are resident too - it only makes the file's 10 GB clean,
 evictable page cache instead of dirty anonymous memory, and removes the
 memcpy that produced it.
 
-### The largest remaining load lever, and why it did not land
+### Direct Q8_0 -> int8: what it bought, and what it did not
 
-`gguf::read` + `quantize_weight` + dropping the fp32 map is still ~11.5 s,
-and all of it exists only to go Q8_0 -> fp32 -> int8. A **direct
-Q8_0 -> packed-int8 requantisation** would delete all three and drop the
-~43 GB peak to ~12 GB.
+`DitWeights::Gguf` now requantizes a Q8_0 checkpoint straight to this
+engine's per-row packing, one weight matrix at a time, with no fp32 model in
+between. It is **bit-identical**, not parity-gated: `deq_q8_0` yields exactly
+`(q as i8 as f32) * d` (7-bit `q`, 11-bit fp16 `d`, product 18 bits against
+fp32's 24, so exact rather than rounded), and the scale and packing then run
+through the same `int8::row_scale` / `pack_row` that `quantize_weight` calls.
+The gate is `assert_eq!` on the packed words and the scales; end to end, a
+real 9B generation writes the same PNG md5 by either route, with and without
+a LoRA.
 
-It can be made **bit-identical**, which is the part worth recording:
-`deq_q8_0` produces exactly `(q as i8 as f32) * d`, and both factors are
-exactly representable (7-bit `q`, 11-bit fp16 `d`, product needs 18 bits <
-24), so recomputing that same f32 from the block and feeding it through
-`quantize_weight`'s own scale/round/clamp gives the identical packed `u32`.
-The gate is `assert_eq!` on the packed words, not a tolerance.
+Measured, 1024x768, 10 steps, best of 2:
 
-Two things block it, neither numerical:
-- The LoRA fold needs a float domain, but only for the **112 of 201**
-  tensors an adapter touches (8 double x 2 streams x 4, plus 24 single x
-  2). The other 89 never need fp32 at all, and even the 112 only need it
-  ONE TENSOR AT A TIME rather than as a 36 GB resident map.
-- The wiring is in `pipeline.rs::read_dit_tensors` -> `Tensors` ->
-  `Flux2Model::new_batched(&Tensors)`, so the constructor has to be able
-  to take a quantized source instead of an fp32 map.
+| term | before | after |
+|---|---|---|
+| wall | 88 s | **81 s** |
+| DiT load phase | 17.0 s | **10.4 s** |
+| DiT-phase host peak | 43.2 GB | **10.4 GB** |
+| whole-process host peak | 43.2 GB | **32.9 GB** |
+| `gguf::read` whole-model dequant | 4.4 s | gone |
+| free the 36.3 GB fp32 map | 2.9 s | gone |
+| `linear2` column split | 0.6 s | gone |
+| quantize / requantize | 4.6 s | 4.0 s |
+
+**The estimate above this table used to say ~11.5 s. It was wrong, and the
+error is worth keeping.** It assumed the quantize term would go to zero
+because the checkpoint "already holds int8". It does not: the block-scale to
+row-scale conversion still has to touch every weight, so only the whole-model
+dequant and the free actually disappear. Measured saving is 7 s.
+
+**The process peak is now bounded by the TEXT ENCODER, not the DiT.** The DiT
+phase peaks at 10.4 GB; the 32.9 GB figure is Qwen3-8B's own fp32 import
+arriving afterwards. That makes the shard-aware TE import (listed under Not
+yet done) the next real memory and time lever, worth ~11 s and ~20 GB.
+
+**With a full-coverage LoRA the streamed path is a TRADE, not a win**: about
+3 s slower than the map route (64 s vs 61 s at 4 steps) while holding 33.2 GB
+instead of 43.3 GB. Every big tensor needs a float domain for the fold, so
+the decode work remains and only the residency improves. A klein-9b adapter
+touches 112 of 201 tensors and 96% of the parameters, which is why "fold only
+what the adapter touches" is not by itself a saving - handling them ONE AT A
+TIME is. `BRAIN_FLUX2_NO_STREAM=1` forces the map route for A/B.
 
 ## Corrections to earlier entries in this file
 

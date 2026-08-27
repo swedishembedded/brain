@@ -65,9 +65,10 @@ use crate::import::Tensors;
 /// Pre-folding is what the fp32 path does, and it is why the adapter case
 /// used to cost the same 36 GB peak as the unadapted one: the fold needs a
 /// float domain, so every tensor the adapter touches had to be fp32 at the
-/// same moment. A full-coverage klein-9b adapter touches 112 of 201 tensors
-/// and 96% of the parameters, so "only the ones it touches" is no saving at
-/// all unless they are also handled one at a time.
+/// same moment. A full-coverage klein-9b adapter touches 112 of 201 tensors,
+/// and those 112 are the big fused matrices - very nearly the whole
+/// parameter count - so "only the ones it touches" is no saving at all
+/// unless they are also handled one at a time.
 pub struct PendingLora {
     pairs: Vec<model::lora::ExternalPair>,
     scale: f32,
