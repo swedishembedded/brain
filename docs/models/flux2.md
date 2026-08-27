@@ -73,6 +73,9 @@ brain/flux2-klein` lists them) over D-Bus and over HTTP at
   from the reference: low values (around 0.1) preserve structure/texture
   closely, high values (around 0.9) allow more freedom. It does not add
   color/hue changes on its own.
+- `--mask <image>` - a spatial preservation mask over the output canvas.
+  **White regenerates, black preserves, greys blend.** See
+  [Masked editing](#masked-editing-blended-latent-diffusion) below.
 
 For edits, short imperative instructions that name the change
 (`"Colorize this photograph."`, `"Make it snow."`) work much better than a
@@ -80,6 +83,96 @@ descriptive scene prompt - the model treats a description as a
 text-to-image prompt rather than an edit instruction. If you need a strong
 color or hue change with guaranteed structural fidelity, use the
 undistilled `base` variant (which supports CFG) or train a LoRA for it.
+
+## Masked editing (blended latent diffusion)
+
+`--strength` is a **global** dial. Some edits need a **spatial** one: redraw
+the middle of a room, keep the walls and the windows. Virtual staging is the
+motivating case - there is no single `--strength` that both replaces the
+furniture and leaves the architecture where it was, because the two demands
+pull the same knob in opposite directions.
+
+`--mask <image>` takes a greyscale image over the **output canvas**:
+
+* **white (255) = regenerate** - the denoiser owns these pixels;
+* **black (0) = preserve** - these track the first `--ref` image exactly;
+* **grey = blend** - the value is used verbatim as a linear weight, so
+  mid-grey is an even mix of source and generation. There is no threshold, and
+  soft edges are the point: a hard latent-cell boundary between "kept" and
+  "redrawn" shows up as a seam.
+
+After every Euler step the masked-out region is replaced by the source latent
+renoised to that step's own sigma:
+
+```text
+x = m·x_denoised + (1 − m)·((1 − σ)·x₀ + σ·ε)
+```
+
+`(1 − σ)·x₀ + σ·ε` is the rectified-flow forward process - the same one
+`--strength` uses to build its init latent - so the preserved region is always
+a legal point on the source's own trajectory rather than an out-of-distribution
+paste, and at the terminal sigma it is the source latent exactly. That is the
+difference from `--strength`: preserved regions *track* the source at every
+step instead of being softly guided toward it and drifting a little with each
+forward.
+
+```bash
+brain flux2 generate --variant klein-9b --precision int8 \
+    --prompt "..." --ref room.png --mask arch-mask.png \
+    --strength 0.999 --width 1024 --height 768 --steps 12 --out staged.png
+```
+
+### Rules the implementation guarantees
+
+* The first `--ref` is the preserved source and must be at the output size -
+  the same rule `--strength` already imposes. `--mask` does **not** consume
+  it: whether that reference also contributes conditioning tokens is still
+  decided by `--strength` alone.
+* An **all-white** mask is bit-for-bit identical to no mask at all, and an
+  **all-black** one reproduces the source latent exactly. Both are asserted,
+  and both are exact rather than approximate - the mask resampler accumulates
+  integer area overlaps so that a mask which is constant over a latent cell
+  resamples to exactly that constant.
+* The mask is resampled to the latent grid by an exact **area average**
+  (box filter), each axis independently, so a non-square canvas is not a
+  special case. It may be supplied at any resolution.
+* One weight per latent **token** (a 16x16 pixel block), applied to all 128
+  latent channels. That is the finest granularity that exists - latent
+  channels are not spatial - so a mask edge is quantised to 16 pixels before
+  the VAE decoder's own receptive field smears it a little further. Preserved
+  regions are exact in *latent* space; in *pixel* space the guarantee softens
+  within a few pixels of a mask boundary.
+
+### Producing a mask
+
+There is no automatic mask generator in brain, and the honest reason is that
+the obvious ones do not work. A monocular-depth mask (`brain zipdepth --view
+depth --colormap gray --headless`, threshold the near field) segments a bedroom
+where the bed is the only near object, but on a living room it marks the
+*ceiling* as foreground - the ceiling directly above the camera is genuinely
+the nearest surface in the frame - while leaving a sofa against the far wall
+as background. "Near" is not "furniture". A depth top-hat (opening by
+reconstruction) fixes the ceiling but then misses any object larger than the
+structuring element, which for a bed filling half the frame is all of it.
+
+Two things make the segmentation genuinely hard, and both are worth knowing
+before trusting any automatic mask:
+
+1. Staging must **add** furniture where there is none - a rug on bare floor, a
+   plant in an empty corner. A mask that covers only the existing furniture
+   cannot stage. What has to be described is the enclosing shell to keep, not
+   the objects to remove.
+2. The floor is simultaneously architecture (its perspective and material must
+   not drift) and the place new objects go. That is what the grey levels are
+   for: a mid-weight floor band lets objects appear while keeping the plane
+   half-anchored.
+
+So today a mask is authored, not inferred. Any greyscale image works - a paint
+program, a few polygons rasterised over the frame, or a segmentation model's
+output thresholded by hand. A working recipe: mark the interior volume white
+(existing furniture plus the space new furniture must occupy), leave the
+ceiling, walls, windows and doors black, put the floor band at ~0.45 grey,
+and feather the whole thing with a few pixels of blur so the seams blend.
 
 ## Hardware and limits
 

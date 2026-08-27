@@ -151,8 +151,14 @@ fast and scalable kernel - not a naive one.
     (128-ch latent = 32ch × 2×2 unshuffle + eval-BatchNorm). Klein = 4-step
     distilled, no CFG; `base` variants = 50 steps + CFG, same tensors.
     Parity-gated per stage (forward cosine 1.000000 vs diffusers).
-    `brain flux2 generate` (t2i + `--ref` editing). 9B weights are
-    NC-licensed - see `docs/models/flux2.md`.
+    `brain flux2 generate` (t2i + `--ref` editing + `--mask` **masked latent
+    conditioning** - a spatial preservation dial where `--strength` is a global
+    one: white regenerates, black tracks the source latent renoised to each
+    step's own sigma, so preserved regions reach sigma 0 as the source exactly.
+    An all-white mask is bit-for-bit the unmasked run; masks are authored, not
+    inferred - `.agents/roadmap/flux2.md` records why the depth-based
+    generators tried do not work). 9B weights are NC-licensed - see
+    `docs/models/flux2.md`.
 
 12b-bis. **FLUX.1 / Kontext** (`crates/flux1`) - BFL's 12 B MMDiT: 19
     double-stream blocks (separate img/txt weights, joint attention over

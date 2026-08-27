@@ -15,6 +15,9 @@ const HELP: &str = "brain flux2 <cmd>
            [--strength S]           # img2img: 0.2-0.5 keeps the source (colorize),
                                     # omit = generate from noise (reference only conditions)
            [--ref <in.ppm>]...      # reference images => editing mode
+           [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
+                                    # --ref exactly (which must be at the output size);
+                                    # greys blend. Omit = regenerate everything.
            [--adapter <path>]       # LoRA: brain's own `finetune` checkpoint, or a
                                     # third-party ai-toolkit/ComfyUI .safetensors
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
@@ -47,6 +50,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut variant_name = "klein-4b".to_string();
     let mut precision = flux2::Precision::F32;
     let mut refs: Vec<String> = Vec::new();
+    let mut mask_path: Option<String> = None;
     let mut adapter: Option<String> = None;
     let mut lora_scale = 1.0f32;
     let mut i = 0;
@@ -66,6 +70,7 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--variant" => variant_name = need(i)?.clone(),
             "--precision" => precision = flux2::Precision::from_name(need(i)?)?,
             "--ref" => refs.push(need(i)?.clone()),
+            "--mask" => mask_path = Some(need(i)?.clone()),
             "--adapter" => adapter = Some(need(i)?.clone()),
             "--lora-scale" => lora_scale = need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?,
             other => return Err(format!("unknown flag {other}\n{HELP}")),
@@ -83,6 +88,16 @@ fn generate(args: &[String]) -> Result<(), String> {
     for r in &refs {
         let (hwc, w, h) = crate::image_io::load_image(r)?;
         ref_imgs.push(flux2::pipeline::ref_from_hwc(&hwc, w, h)?);
+    }
+
+    // The mask is over the OUTPUT canvas, so it is resampled to the latent grid
+    // by the pipeline (area average, both axes independently) rather than being
+    // required at any particular resolution here.
+    if let Some(p) = &mask_path {
+        let (hwc, w, h) = crate::image_io::load_image(p)?;
+        let m = flux2::Mask::from_hwc(&hwc, w, h)?;
+        eprintln!("flux2: mask {p} -> {m:?}");
+        o.mask = Some(m);
     }
 
     let paths = Paths::from_env()?;
