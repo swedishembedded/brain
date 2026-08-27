@@ -182,6 +182,8 @@ pub const BIAS_ADD: &str = include_str!("../wgsl/bias_add.wgsl");
 pub const BIAS_GRAD: &str = include_str!("../wgsl/bias_grad.wgsl");
 /// `wgsl/bias_grad_ncl.wgsl`
 pub const BIAS_GRAD_NCL: &str = include_str!("../wgsl/bias_grad_ncl.wgsl");
+/// `wgsl/blend_accumulate.wgsl`
+pub const BLEND_ACCUMULATE: &str = include_str!("../wgsl/blend_accumulate.wgsl");
 /// `wgsl/bmm.wgsl`
 pub const BMM: &str = include_str!("../wgsl/bmm.wgsl");
 /// `wgsl/bmm_acc.wgsl`
@@ -976,6 +978,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("bias_add", BIAS_ADD),
     ("bias_grad", BIAS_GRAD),
     ("bias_grad_ncl", BIAS_GRAD_NCL),
+    ("blend_accumulate", BLEND_ACCUMULATE),
     ("bmm", BMM),
     ("bmm_acc", BMM_ACC),
     ("bn_dbeta", BN_DBETA),

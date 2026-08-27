@@ -141,7 +141,7 @@ pub use device::{AlignCorners, Border, Ctx, Filter, ImagingKernelIds, PIPELINES}
 pub use host::resize_bilinear_hwc;
 pub use letterbox::{letterbox_rgb, Letterbox};
 pub use pixels::{ChannelPolicy, Rect, Rgb8};
-pub use tiling::{Tile, TilePlan, TileSpec};
+pub use tiling::{BlendPlan, BlendSpec, BlendTile, Tile, TilePlan, TileSpec};
 
 /// The workspace's NCHW shape type, re-exported so callers need not also depend
 /// on `brain-vision` to name an image's dimensions.

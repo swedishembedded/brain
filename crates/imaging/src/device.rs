@@ -87,6 +87,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // Quantization); with `inv_sqrt_k = 1` it is exactly
     // `torch.where(x > 0, +1, -1)`, which is what a hard threshold needs.
     ("bsq_quantize", kernels::BSQ_QUANTIZE),
+    // `crate::tiling::BlendPlan`'s compositor: per-pixel weighted accumulate,
+    // one value broadcast across every channel.
+    ("blend_accumulate", kernels::BLEND_ACCUMULATE),
 ];
 
 /// Pipeline indices for the kernels this crate dispatches, resolved by name.
@@ -108,6 +111,7 @@ pub struct ImagingKernelIds {
     pub avgpool2d: usize,
     pub conv2d_gd: usize,
     pub bsq_quantize: usize,
+    pub blend_accumulate: usize,
 }
 
 impl ImagingKernelIds {
@@ -141,6 +145,7 @@ impl ImagingKernelIds {
             avgpool2d: k("avgpool2d"),
             conv2d_gd: k("conv2d_gd"),
             bsq_quantize: k("bsq_quantize"),
+            blend_accumulate: k("blend_accumulate"),
         }
     }
 
@@ -396,6 +401,59 @@ impl<'g> Ctx<'g> {
         self.gpu.submit(&[], &[step]);
     }
 
+    /// Weighted-accumulate `src` into `acc` at `at`, in place: `acc[c,h,w] +=
+    /// src[c,h,w] * weight[h,w]` over the region `at`, `weight` broadcast
+    /// across every channel. What `crate::tiling::BlendPlan`'s overlapping
+    /// tiles need instead of [`Ctx::add_region`]'s disjoint-region contract -
+    /// their cores are not exclusive by design, so a plain add would double
+    /// the seam rather than blend it.
+    ///
+    /// `weight` is `at.w * at.h` values, one per pixel of `src`. Three
+    /// dispatches, mirroring [`Ctx::add_region`]'s own two-kernel shape with
+    /// one more in front: `blend_accumulate` multiplies `src` by `weight`
+    /// into a zeroed same-size scratch (its own `+=` onto a freshly-cleared
+    /// buffer is exactly an assign), `pad2d` grows that to the canvas size,
+    /// `add_inplace` folds it in.
+    ///
+    /// Reused a second way by a caller normalising the finished canvas: pass
+    /// the whole image as `at`, the canvas as `src`, and
+    /// [`crate::tiling::BlendPlan::recip_weight`] as `weight` against a fresh
+    /// zeroed `acc` - the same kernel divides by multiplying the reciprocal.
+    pub fn blend_accumulate(&self, acc: &DeviceBuffer, acc_shape: Shape, src: &DeviceBuffer, weight: &DeviceBuffer, at: Rect) {
+        assert!(
+            at.right() <= acc_shape.w && at.bottom() <= acc_shape.h,
+            "blend_accumulate: {at:?} does not fit inside {}x{}",
+            acc_shape.w,
+            acc_shape.h
+        );
+        let src_shape = Shape::new(acc_shape.n, acc_shape.c, at.h, at.w);
+        let hw = at.w * at.h;
+        let weighted = self.buf(src_shape.numel());
+        let total = src_shape.numel();
+        let step = self.gpu.step(
+            self.ids.need(self.ids.blend_accumulate, "blend_accumulate"),
+            &[src, weight, &weighted],
+            &[total, hw],
+            total,
+        );
+        // `weighted` must start at zero - `blend_accumulate` accumulates, and
+        // this is its first (and only) write here.
+        self.gpu.submit(&[&weighted], &[step]);
+
+        let border =
+            Border { left: at.x, right: acc_shape.w - at.right(), top: at.y, bottom: acc_shape.h - at.bottom() };
+        let (grown, grown_shape) = self.pad_zero(&weighted, src_shape, border);
+        debug_assert_eq!(grown_shape.numel(), acc_shape.numel());
+        let total2 = acc_shape.numel();
+        let step2 = self.gpu.step(
+            self.ids.need(self.ids.add_inplace, "add_inplace"),
+            &[acc, &grown],
+            &[total2],
+            total2,
+        );
+        self.gpu.submit(&[], &[step2]);
+    }
+
     /// NCHW -> interleaved HWC (`nchw_nlc`, since NLC with `L = H*W` **is** the
     /// interleaved layout). Params `[total, c, hw]`, one thread per element.
     ///
@@ -535,6 +593,7 @@ mod tests {
                 "avgpool2d" => ids.avgpool2d,
                 "conv2d_gd" => ids.conv2d_gd,
                 "bsq_quantize" => ids.bsq_quantize,
+                "blend_accumulate" => ids.blend_accumulate,
                 other => panic!("PIPELINES has `{other}` but ImagingKernelIds has no field for it"),
             };
             assert_eq!(got, i, "`{name}` resolved to the wrong slot");

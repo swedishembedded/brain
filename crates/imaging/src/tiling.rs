@@ -153,6 +153,208 @@ impl TilePlan {
 }
 
 // ---------------------------------------------------------------------------
+// Blended overlap tiling - the seam this module's header pre-authorizes
+// ---------------------------------------------------------------------------
+//
+// [`TilePlan`] above works because each tile contributes only its CORE to the
+// output: the cores are disjoint, so there is no partition-of-unity question
+// and nothing to blend. That stops working the moment a model's tile-to-tile
+// CONTENT differs rather than just its border error (a diffusion decode tail
+// tiled at the pixel level, for instance) - two overlapping tiles disagree in
+// their overlap on purpose, and a hard core/halo split would show as a seam.
+// [`BlendPlan`] is the blended sibling: tiles overlap everywhere, each
+// contributes its whole footprint weighted by a trapezoidal ramp, and the
+// accumulated weight is divided out once every tile has landed.
+//
+// The math is a direct 2-D port of `vae::tiling3d`'s per-axis outer-product
+// construction (see crates/vae/src/tiling3d.rs's `trapezoidal_mask_1d` and
+// `AxisPlan`) with the temporal axis dropped: `W(h,w) = Wh(h) * Ww(w)`. Only
+// the SPATIAL ramp convention applies here (the fade-in never reaches 0,
+// `left_starts_from_0 = false` there) - there is no causal temporal split to
+// give a different convention meaning.
+
+/// Blended-overlap tiling parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlendSpec {
+    /// Tile edge length in pixels.
+    pub tile: u32,
+    /// Cells of overlap shared with each neighbour, ramped linearly across.
+    /// Must be `< tile`.
+    pub overlap: u32,
+}
+
+impl BlendSpec {
+    pub fn new(tile: u32, overlap: u32) -> BlendSpec {
+        assert!(tile > 0, "BlendSpec: tile edge must be non-zero");
+        assert!(overlap < tile, "BlendSpec: overlap {overlap} must be < tile {tile}");
+        BlendSpec { tile, overlap }
+    }
+}
+
+/// One axis interval with the ramp widths it shares with its neighbours -
+/// the 2-D analogue of `vae::tiling3d::Interval`, dropped down to `u32` since
+/// pixel tiling has no separate latent/pixel scale factor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AxisInterval {
+    start: u32,
+    end: u32,
+    ramp_left: u32,
+    ramp_right: u32,
+}
+
+/// Split one axis of `length` into overlapping intervals of `tile` sharing
+/// `overlap` cells - the exact arithmetic of
+/// `vae::tiling3d::split_by_size` (see that module), re-typed for `u32`.
+fn split_axis(tile: u32, overlap: u32, length: u32) -> Vec<AxisInterval> {
+    assert!(tile > 0, "split_axis: tile must be > 0");
+    assert!(overlap < tile, "split_axis: overlap {overlap} must be < tile {tile}");
+    if length <= tile {
+        return vec![AxisInterval { start: 0, end: length, ramp_left: 0, ramp_right: 0 }];
+    }
+    let stride = tile - overlap;
+    let amount = (length + tile - 2 * overlap - 1) / stride;
+    let mut out = Vec::with_capacity(amount as usize);
+    out.push(AxisInterval { start: 0, end: tile, ramp_left: 0, ramp_right: overlap });
+    for i in 1..amount - 1 {
+        out.push(AxisInterval { start: i * stride, end: i * stride + tile, ramp_left: overlap, ramp_right: overlap });
+    }
+    out.push(AxisInterval { start: (amount - 1) * stride, end: length, ramp_left: overlap, ramp_right: 0 });
+    out
+}
+
+/// 1-D trapezoidal blend weights over `length` cells: a linear ramp in from
+/// `1/(ramp_left+1)` and out to `1/(ramp_right+1)`, `1.0` in the interior.
+/// The spatial convention only (`vae::tiling3d::trapezoidal_mask_1d`'s
+/// `left_starts_from_0 = false`) - see this section's header for why the
+/// other convention does not apply here.
+fn blend_mask_1d(length: u32, ramp_left: u32, ramp_right: u32) -> Vec<f32> {
+    assert!(length > 0, "blend_mask_1d: length must be positive");
+    let ramp_left = ramp_left.min(length);
+    let ramp_right = ramp_right.min(length);
+    let mut mask = vec![1.0f32; length as usize];
+    if ramp_left > 0 {
+        let n = ramp_left + 2;
+        for (i, m) in mask.iter_mut().enumerate().take(ramp_left as usize) {
+            *m *= (i as u32 + 1) as f32 / (n - 1) as f32;
+        }
+    }
+    if ramp_right > 0 {
+        let n = ramp_right + 2;
+        for j in 0..ramp_right {
+            mask[(length - ramp_right + j) as usize] *= 1.0 - (j + 1) as f32 / (n - 1) as f32;
+        }
+    }
+    for v in &mut mask {
+        *v = v.clamp(0.0, 1.0);
+    }
+    mask
+}
+
+/// The accumulated blend weight along one axis - the sum of every interval's
+/// 1-D mask, laid out over the axis. Exactly `1.0` everywhere when the masks
+/// partition unity (`vae::tiling3d::AxisPlan::weights`).
+fn axis_weights(length: u32, ivs: &[AxisInterval]) -> Vec<f32> {
+    let mut w = vec![0.0f32; length as usize];
+    for iv in ivs {
+        let mask = blend_mask_1d(iv.end - iv.start, iv.ramp_left, iv.ramp_right);
+        for (i, m) in mask.iter().enumerate() {
+            w[iv.start as usize + i] += *m;
+        }
+    }
+    w
+}
+
+/// One tile of a [`BlendPlan`]: where to read from the source, and the
+/// per-pixel blend weight [`crate::Ctx::blend_accumulate`] multiplies it by
+/// before folding it into the canvas.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlendTile {
+    /// What to read out of the source image.
+    pub src: Rect,
+    /// Blend weight over `src`'s own footprint, row-major `[h, w]` - the
+    /// outer product of this tile's two 1-D axis masks.
+    pub weight: Vec<f32>,
+}
+
+/// A complete overlapping-tile cover of a `w x h` image, with the separable
+/// divisor needed to normalise the accumulated result. 2-D port of
+/// `vae::tiling3d`'s per-axis outer-product construction - see this
+/// section's header.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlendPlan {
+    pub w: u32,
+    pub h: u32,
+    pub spec: BlendSpec,
+    pub tiles: Vec<BlendTile>,
+    /// Reciprocal of the accumulated weight at every output pixel, row-major
+    /// `[h, w]`, floored at `1e-8` exactly as
+    /// `vae::tiling3d::Blender::finish` floors its divisor - an output cell
+    /// no tile covers (never produced by a correct plan, since the axis
+    /// splits are asserted to cover their axis) reads 0 rather than NaN/Inf.
+    recip_weight: Vec<f32>,
+}
+
+impl BlendPlan {
+    /// Build the cover. A `w x h` that fits in one tile yields exactly one
+    /// tile whose `src` is the whole image and whose `weight` is uniformly
+    /// `1.0`, so a caller need not special-case small images.
+    pub fn new(w: u32, h: u32, spec: BlendSpec) -> BlendPlan {
+        assert!(w > 0 && h > 0, "BlendPlan: image must be non-empty");
+        let h_ivs = split_axis(spec.tile, spec.overlap, h);
+        let w_ivs = split_axis(spec.tile, spec.overlap, w);
+        let wh = axis_weights(h, &h_ivs);
+        let ww = axis_weights(w, &w_ivs);
+
+        let mut tiles = Vec::with_capacity(h_ivs.len() * w_ivs.len());
+        for hi in &h_ivs {
+            let mh = blend_mask_1d(hi.end - hi.start, hi.ramp_left, hi.ramp_right);
+            for wi in &w_ivs {
+                let mw = blend_mask_1d(wi.end - wi.start, wi.ramp_left, wi.ramp_right);
+                let src = Rect::new(wi.start, hi.start, wi.end - wi.start, hi.end - hi.start);
+                let mut weight = Vec::with_capacity((src.w * src.h) as usize);
+                for &mhv in &mh {
+                    for &mwv in &mw {
+                        weight.push(mhv * mwv);
+                    }
+                }
+                tiles.push(BlendTile { src, weight });
+            }
+        }
+
+        let mut recip_weight = Vec::with_capacity((w * h) as usize);
+        for hy in 0..h {
+            for wx in 0..w {
+                recip_weight.push(1.0 / (wh[hy as usize] * ww[wx as usize]).max(1e-8));
+            }
+        }
+
+        BlendPlan { w, h, spec, tiles, recip_weight }
+    }
+
+    pub fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// Reciprocal blend weight at every output pixel, row-major `[h, w]` -
+    /// what a caller multiplies the accumulated canvas by to normalise it
+    /// (`Ctx::blend_accumulate` reused once more: `canvas * recip_weight`).
+    pub fn recip_weight(&self) -> &[f32] {
+        &self.recip_weight
+    }
+
+    /// Largest deviation of the accumulated weight from 1 - zero when the
+    /// masks are a partition of unity (`vae::tiling3d::AxisPlan::unity_error`,
+    /// combined over both axes via the separable product).
+    pub fn unity_error(&self) -> f32 {
+        self.recip_weight.iter().map(|r| (1.0 / r - 1.0).abs()).fold(0.0, f32::max)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VLM crop-tile-count policies - NAMED, never unified
 // ---------------------------------------------------------------------------
 //
@@ -346,6 +548,44 @@ mod tests {
         assert!((o - want).abs() < 1e-6, "overhead {o}, expected {want}");
         assert!((o - 1.128_906_3).abs() < 1e-6, "overhead {o}");
         assert!(o < (576.0f32 / 512.0).powi(2), "must beat the interior ceiling");
+    }
+
+    // ---- BlendPlan ----------------------------------------------------------
+
+    #[test]
+    fn a_small_image_blends_to_a_single_uniform_weight_tile() {
+        let p = BlendPlan::new(50, 30, BlendSpec::new(64, 8));
+        assert_eq!(p.len(), 1);
+        let t = &p.tiles[0];
+        assert_eq!(t.src, Rect::new(0, 0, 50, 30));
+        assert!(t.weight.iter().all(|&w| w == 1.0), "a single tile carries no ramp");
+        assert!(p.unity_error() < 1e-6);
+        assert!(!p.is_empty());
+    }
+
+    /// The property the whole design exists for: the accumulated weight is
+    /// exactly 1 at every output pixel, for a plan that is genuinely
+    /// multi-tile on both axes - the same check
+    /// `vae::tiling3d`'s own `AxisPlan::unity_error` gates (see
+    /// crates/vae/src/tiling3d.rs).
+    #[test]
+    fn blend_weights_partition_unity_when_genuinely_tiled() {
+        for (w, h, tile, overlap) in [(300u32, 200u32, 64u32, 16u32), (129, 65, 32, 5), (1024, 1024, 512, 32)] {
+            let p = BlendPlan::new(w, h, BlendSpec::new(tile, overlap));
+            assert!(p.len() > 1, "expected a genuinely multi-tile plan, got {}", p.len());
+            assert!(p.unity_error() < 1e-5, "{w}x{h} tile={tile} overlap={overlap}: deviation {}", p.unity_error());
+        }
+    }
+
+    #[test]
+    fn every_blend_tile_weight_is_the_outer_product_of_its_axis_masks() {
+        let p = BlendPlan::new(96, 96, BlendSpec::new(32, 8));
+        assert!(p.len() > 1);
+        for t in &p.tiles {
+            assert_eq!(t.weight.len(), (t.src.w * t.src.h) as usize);
+            // Every weight lies in (0, 1] - a ramp product of two (0,1] masks.
+            assert!(t.weight.iter().all(|&w| w > 0.0 && w <= 1.0), "{:?}", t.weight);
+        }
     }
 
     // ---- internvl_grid ----------------------------------------------------

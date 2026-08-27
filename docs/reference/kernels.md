@@ -121,6 +121,7 @@ load of it must already be bare-identifier-indexed.
 | [`bias_add`](../../crates/kernels/wgsl/bias_add.wgsl) | Add a per-output-feature bias in place | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`bias_grad`](../../crates/kernels/wgsl/bias_grad.wgsl) | Bias gradient:  dbias[n] += sum_m dy[m,n] | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`bias_grad_ncl`](../../crates/kernels/wgsl/bias_grad_ncl.wgsl) | Per-channel bias gradient over NCL | one thread per channel, serial reduction over rows*inner | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`blend_accumulate`](../../crates/kernels/wgsl/blend_accumulate.wgsl) | Per-pixel weighted accumulate: acc[c,h,w] += x[c,h,w] * weight[h,w] | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`bmm`](../../crates/kernels/wgsl/bmm.wgsl) | Batched matmul: out[b,m,n] = alpha * sum_k A[b,·]·B[b,·], both operands vary per batch | one thread per output element, serial inner reduction over k | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`bmm_acc`](../../crates/kernels/wgsl/bmm_acc.wgsl) | Batched matmul, accumulating: out[b,m,n] += alpha * sum_k A[b,·]·B[b,·] | one thread per output element, serial inner reduction over k | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`bn_dbeta`](../../crates/kernels/wgsl/bn_dbeta.wgsl) | BatchNorm backward w.r.t. beta | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
