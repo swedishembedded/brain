@@ -716,6 +716,33 @@ pub fn randn(n: usize, seed: u64) -> Vec<f32> {
     out
 }
 
+/// Seeded standard-normal samples (SplitMix64 + Box-Muller) - the shared
+/// diffusion latent-noise source for the SDXL family (`sdxlunet`, `controlnet`,
+/// `flux1`), so a `--seed` reproduces a picture.
+///
+/// **Deliberately a THIRD PRNG construction next to [`randn`] and
+/// `data::rng::Rng::next_gaussian`, not a fourth call site for either.**
+/// [`randn`] is raw xorshift64* in f64 and drives Z-Image/FLUX.2's latent
+/// noise; `next_gaussian` discards the sine term and uses a different
+/// epsilon. None of the three are interchangeable without changing what an
+/// existing `--seed` reproduces for the model family that already uses it -
+/// unifying them is a real behaviour change for users relying on
+/// reproducible generations, not a refactor, and needs its own decision.
+pub fn gaussian(n: usize, seed: u64) -> Vec<f32> {
+    let mut rng = data::rng::Rng::new(seed);
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        let u1 = (rng.next_f32().abs()).max(1e-7);
+        let u2 = rng.next_f32().abs();
+        let r = (-2.0 * u1.ln()).sqrt();
+        let th = std::f32::consts::TAU * u2;
+        out.push(r * th.cos());
+        if out.len() < n {
+            out.push(r * th.sin());
+        }
+    }
+    out
+}
 
 /// Least-squares 2-D **similarity** transform (Umeyama) mapping `src` onto `dst`.
 ///

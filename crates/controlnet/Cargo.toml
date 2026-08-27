@@ -26,12 +26,13 @@ brain-data.workspace = true       # data::rng::Rng for init.rs
 # u8->[0,1] cast and the HWC->CHW permutation `src/cond.rs` needs. Hand-rolling
 # that loop here is the exact duplication `crates/imaging` was created to end.
 brain-imaging.workspace = true
-# `caps`: the served `text2image` action, which is `sdxlunet::pipeline::Sdxl`'s
-# loop re-run with `Unet::new_controlled` + a per-step `ControlNet::run` -
-# needs the same two CLIP towers, the discrete scheduler and the VAE decode.
+# `caps`: the served `text2image` action, which is `sdxlunet::sampler::sample`'s
+# loop with `Unet::new_controlled` + a per-step `ControlNet::run` as the
+# `Denoiser`. The two CLIP towers and the discrete scheduler are reached
+# through `sdxlunet::textenc`/`sdxlunet::sampler` now, not this crate's own
+# `brain-clip`/`brain-diffusion` dependency - only the VAE decode is still
+# driven directly from here.
 brain-capability.workspace = true
-brain-clip.workspace = true
-brain-diffusion.workspace = true
 brain-vae.workspace = true
 serde_json.workspace = true
 

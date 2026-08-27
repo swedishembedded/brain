@@ -7,19 +7,14 @@
 //! with no ControlNet-specific plumbing in the CLI or the transports.
 //!
 //! One action: **`text2image`** - a prompt plus a conditioning image in, an
-//! HWC RGB image out. This is `sdxlunet::pipeline::Sdxl::generate`'s loop
-//! re-run with `sdxlunet::model::Unet::new_controlled` in place of `Unet::new`
-//! and one [`ControlNet::run`] per step, whose [`Residuals`] are ordered by
-//! [`adapter::order_for`] and threaded into `Unet::run_with_control`. Nothing
-//! here re-implements the sampling math - the two CLIP towers, the discrete
+//! HWC RGB image out. This is `sdxlunet::sampler::sample`'s loop with
+//! `sdxlunet::model::Unet::new_controlled` in place of `Unet::new` and one
+//! [`ControlNet::run`] per step, whose [`Residuals`] are ordered by
+//! [`adapter::order_for`] and threaded into `Unet::run_with_control` - the
+//! [`sdxlunet::sampler::Denoiser`] seam `sdxlunet::pipeline::Sdxl` also
+//! implements, over the plain forward. Nothing here re-implements the
+//! sampling math - the two CLIP towers (`sdxlunet::textenc`), the discrete
 //! scheduler and the VAE decode are the same calls `pipeline::Sdxl` makes.
-//!
-//! Reimplemented rather than composed on top of `pipeline::Sdxl`: that struct
-//! builds its `Unet` with the plain (uncontrolled) constructor and has no seam
-//! for a per-step residual, so serving the controlled path needs its own
-//! loop - see the crate's module docs for why `sdxlunet::Unet` is the
-//! `ControlAdapter` and this crate stays the one place that composes it with
-//! a control source.
 //!
 //! # No batching, for the same reason as plain SDXL
 //!
@@ -29,9 +24,6 @@
 use std::sync::{Arc, Mutex};
 
 use capability::{Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
-use clip::config::ClipTextConfig;
-use clip::model::ClipText;
-use diffusion::discrete::{DiscreteConfig, EulerScheduler};
 use gpu_core::Gpu;
 use serde_json::json;
 use vae::config::VaeConfig;
@@ -42,12 +34,12 @@ use crate::config::ControlNetConfig;
 use crate::model::ControlNet;
 use sdxlunet::config::UNetConfig;
 use sdxlunet::model::Unet;
+use sdxlunet::sampler::{sample, Denoiser, SamplerOptions, StepCtx};
+use sdxlunet::textenc::{read_any_safetensors, read_json, TextEncoders, CONTEXT};
 
 /// The model id used on the CLI (`brain do sdxl-controlnet ...`), over D-Bus
 /// and in the residency manifest.
 pub const MODEL: &str = "brain/sdxl-controlnet";
-
-const CONTEXT: usize = 77;
 
 fn text2image_spec() -> ActionSpec {
     ActionSpec::new("text2image", "Generate an image from a text prompt, conditioned on a control image (SDXL ControlNet).")
@@ -98,61 +90,15 @@ fn req_from(inv: &Invocation) -> Req {
 
 // ===================== the pipeline =====================
 
-type Conditioning = (Vec<f32>, Vec<f32>);
-
 /// One (SDXL + ControlNet) pair, recorded for one `(h, w)`.
 struct Controlled {
     gpu: Gpu,
     sdxl_root: String,
-    tok_l: data::clip_bpe::ClipBpe,
-    tok_g: data::clip_bpe::ClipBpe,
     unet: Unet,
     control: ControlNet,
     vae_cfg: VaeConfig,
     ucfg: UNetConfig,
     hw: (u32, u32),
-}
-
-fn read_any_safetensors(dir: &std::path::Path) -> Result<Vec<checkpoint::safetensors::StTensor>, String> {
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("controlnet: reading {}: {e}", dir.display()))?;
-    let mut files: Vec<std::path::PathBuf> = rd
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "safetensors"))
-        .collect();
-    files.sort();
-    if files.is_empty() {
-        return Err(format!("controlnet: no *.safetensors under {}", dir.display()));
-    }
-    let mut out = Vec::new();
-    for f in files {
-        out.extend(checkpoint::safetensors::read(f.to_str().ok_or("controlnet: non-UTF8 path")?)?);
-    }
-    Ok(out)
-}
-
-fn read_json(p: &std::path::Path) -> Result<serde_json::Value, String> {
-    let s = std::fs::read_to_string(p).map_err(|e| format!("controlnet: reading {}: {e}", p.display()))?;
-    serde_json::from_str(&s).map_err(|e| format!("controlnet: parsing {}: {e}", p.display()))
-}
-
-/// Box-Muller normal samples from the workspace's deterministic LCG, so a
-/// seed reproduces a picture - the same construction `sdxlunet::pipeline`
-/// uses, duplicated rather than exposed across the crate boundary for one
-/// function.
-fn gaussian(n: usize, seed: u64) -> Vec<f32> {
-    let mut rng = data::rng::Rng::new(seed);
-    let mut out = Vec::with_capacity(n);
-    while out.len() < n {
-        let u1 = (rng.next_f32().abs()).max(1e-7);
-        let u2 = rng.next_f32().abs();
-        let r = (-2.0 * u1.ln()).sqrt();
-        let th = std::f32::consts::TAU * u2;
-        out.push(r * th.cos());
-        if out.len() < n {
-            out.push(r * th.sin());
-        }
-    }
-    out
 }
 
 impl Controlled {
@@ -166,11 +112,6 @@ impl Controlled {
 
         let gpu = Gpu::new(&sdxlunet::model::KERNELS);
 
-        let tok_l = data::clip_bpe::ClipBpe::from_dir(&r.join("tokenizer"))
-            .map_err(|e| format!("controlnet: tokenizer: {e}"))?;
-        let tok_g = data::clip_bpe::ClipBpe::from_dir(&r.join("tokenizer_2"))
-            .map_err(|e| format!("controlnet: tokenizer_2: {e}"))?;
-
         let ucfg = UNetConfig::sdxl_base();
         let udir = r.join("unet");
         let utensors = sdxlunet::import::load(udir.to_str().ok_or("controlnet: non-UTF8 unet path")?, &ucfg)?;
@@ -182,40 +123,7 @@ impl Controlled {
 
         let vae_cfg = VaeConfig::from_json(&read_json(&r.join("vae/config.json"))?);
 
-        Ok(Controlled { gpu, sdxl_root: sdxl_root.into(), tok_l, tok_g, unet, control, vae_cfg, ucfg, hw: (h, w) })
-    }
-
-    fn tower(&self, sub: &str, cfg: &ClipTextConfig) -> Result<ClipText, String> {
-        let t = clip::import::read_text_encoder(&std::path::Path::new(&self.sdxl_root).join(sub))?;
-        let init = clip::import::import_text(t, cfg)?;
-        let map: std::collections::HashMap<String, Vec<f32>> =
-            init.into_iter().map(|(k, (_, d))| (k, d)).collect();
-        Ok(ClipText::new_on(self.gpu.new_like(clip::model::TEXT_PIPELINES), cfg.clone(), 1, CONTEXT as u32, &map))
-    }
-
-    fn encode_all(&self, prompts: &[&str]) -> Result<Vec<Conditioning>, String> {
-        let l_tower = self.tower("text_encoder", &ClipTextConfig::clip_l())?;
-        let g_tower = self.tower("text_encoder_2", &ClipTextConfig::openclip_bigg())?;
-        Ok(prompts.iter().map(|p| self.encode_with(&l_tower, &g_tower, p)).collect())
-    }
-
-    fn encode_with(&self, l_tower: &ClipText, g_tower: &ClipText, prompt: &str) -> Conditioning {
-        l_tower.set_tokens(&self.tok_l.encode_with_context(prompt, CONTEXT).ids);
-        l_tower.forward();
-        let l = l_tower.read_penultimate();
-
-        g_tower.set_tokens(&self.tok_g.encode_with_context(prompt, CONTEXT).ids);
-        g_tower.forward();
-        let g = g_tower.read_penultimate();
-        let pooled = g_tower.read_text_embeds().unwrap_or_else(|| g_tower.read_pooled());
-
-        let (dl, dg) = (l.len() / CONTEXT, g.len() / CONTEXT);
-        let mut embeds = Vec::with_capacity(CONTEXT * (dl + dg));
-        for t in 0..CONTEXT {
-            embeds.extend_from_slice(&l[t * dl..(t + 1) * dl]);
-            embeds.extend_from_slice(&g[t * dg..(t + 1) * dg]);
-        }
-        (embeds, pooled)
+        Ok(Controlled { gpu, sdxl_root: sdxl_root.into(), unet, control, vae_cfg, ucfg, hw: (h, w) })
     }
 
     /// `cond_chw` is `[3, h, w]`, `[0,1]` - already at this pipeline's `(h, w)`.
@@ -224,48 +132,16 @@ impl Controlled {
         let (lh, lw) = (h / 8, w / 8);
         let n = (self.ucfg.in_channels * lh * lw) as usize;
 
+        let te = TextEncoders::load(self.gpu.share(), &self.sdxl_root)?;
         let do_cfg = req.guidance > 1.0;
-        let mut enc = if do_cfg {
-            self.encode_all(&[req.prompt.as_str(), req.negative.as_str()])?
-        } else {
-            self.encode_all(&[req.prompt.as_str()])?
-        };
+        let mut enc =
+            if do_cfg { te.encode_all(&[req.prompt.as_str(), req.negative.as_str()])? } else { te.encode_all(&[req.prompt.as_str()])? };
         let uncond = do_cfg.then(|| enc.pop().expect("negative encoded"));
-        let (cond, cond_pooled) = enc.pop().expect("prompt encoded");
+        let cond = enc.pop().expect("prompt encoded");
 
-        let mut sched = EulerScheduler::new(DiscreteConfig::sdxl());
-        sched.set_timesteps(req.steps);
-
-        let time_ids = vec![h as f32, w as f32, 0.0, 0.0, h as f32, w as f32];
-
-        let mut lat = gaussian(n, req.seed);
-        let s0 = sched.init_noise_sigma();
-        for v in &mut lat {
-            *v *= s0;
-        }
-
-        let timesteps: Vec<f32> = sched.timesteps().to_vec();
-        for (i, &t) in timesteps.iter().enumerate() {
-            let scaled = sched.scale_model_input(&lat);
-
-            let cres = self.control.run(&scaled, t, &cond, &cond_pooled, &time_ids, cond_chw, req.conditioning_scale);
-            let ordered = order_for(&self.unet, &cres)?;
-            let c = self.unet.run_with_control(&scaled, t, &cond, &cond_pooled, &time_ids, &ordered);
-
-            let eps = match &uncond {
-                None => c,
-                Some((ue, up)) => {
-                    let ucres = self.control.run(&scaled, t, ue, up, &time_ids, cond_chw, req.conditioning_scale);
-                    let uordered = order_for(&self.unet, &ucres)?;
-                    let u = self.unet.run_with_control(&scaled, t, ue, up, &time_ids, &uordered);
-                    u.iter().zip(&c).map(|(a, b)| a + req.guidance * (b - a)).collect()
-                }
-            };
-            lat = sched.step(&eps, &lat);
-            if i % 5 == 0 || i + 1 == timesteps.len() {
-                eprintln!("  step {}/{}  sigma {:.4}", i + 1, timesteps.len(), sched.sigmas()[i]);
-            }
-        }
+        let denoiser = ControlledDenoiser { unet: &self.unet, control: &self.control, cond_chw, conditioning_scale: req.conditioning_scale };
+        let so = SamplerOptions { steps: req.steps, guidance: req.guidance, seed: req.seed, height: h, width: w };
+        let lat = sample(&denoiser, n, &cond, uncond.as_ref(), &so)?;
 
         let sf = self.vae_cfg.scaling_factor;
         let z: Vec<f32> = lat.iter().map(|v| v / sf).collect();
@@ -276,6 +152,23 @@ impl Controlled {
         let chw = vae.decode(&z);
         let rgb: Vec<f32> = chw.iter().map(|v| ((v + 1.0) * 0.5).clamp(0.0, 1.0)).collect();
         Ok(imaging::pixels::chw_to_hwc(&rgb, 3, h as usize, w as usize))
+    }
+}
+
+/// The controlled SDXL forward as a [`Denoiser`]: a [`ControlNet::run`] ahead
+/// of `Unet::run_with_control`, the residuals ordered by [`order_for`].
+struct ControlledDenoiser<'a> {
+    unet: &'a Unet,
+    control: &'a ControlNet,
+    cond_chw: &'a [f32],
+    conditioning_scale: f32,
+}
+
+impl Denoiser for ControlledDenoiser<'_> {
+    fn eval(&self, ctx: &StepCtx<'_>, enc: &[f32], pooled: &[f32], time_ids: &[f32]) -> Result<Vec<f32>, String> {
+        let cres = self.control.run(ctx.scaled, ctx.timestep, enc, pooled, time_ids, self.cond_chw, self.conditioning_scale);
+        let ordered = order_for(self.unet, &cres)?;
+        Ok(self.unet.run_with_control(ctx.scaled, ctx.timestep, enc, pooled, time_ids, &ordered))
     }
 }
 

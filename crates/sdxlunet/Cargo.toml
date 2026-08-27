@@ -19,7 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 brain-gpu-core.workspace = true   # Gpu, DeviceBuffer, Step
 brain-kernels.workspace = true    # the WGSL sources in model::KERNELS
-brain-model.workspace = true      # model::block (layernorm, gemm, attention) + hostmath::timestep_embedding
+brain-model.workspace = true      # model::block (layernorm, gemm, attention) + hostmath::{timestep_embedding,gaussian}
 brain-checkpoint.workspace = true # safetensors reader (import + parity fixtures)
 brain-vae.workspace = true        # vae::blocks::Builder — the whole conv half
 brain-data.workspace = true       # data::rng::Rng for init.rs; clip_bpe for the pipeline

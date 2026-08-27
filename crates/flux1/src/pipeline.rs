@@ -136,25 +136,6 @@ fn unpack_tokens(tokens: &[f32], c: usize, h: usize, w: usize, shift: f32, scale
     out
 }
 
-/// Box-Muller normal samples from the workspace's deterministic LCG, so a
-/// seed reproduces a picture - the same construction `sdxlunet::pipeline`
-/// and `controlnet::caps` use.
-fn gaussian(n: usize, seed: u64) -> Vec<f32> {
-    let mut rng = data::rng::Rng::new(seed);
-    let mut out = Vec::with_capacity(n);
-    while out.len() < n {
-        let u1 = (rng.next_f32().abs()).max(1e-7);
-        let u2 = rng.next_f32().abs();
-        let r = (-2.0 * u1.ln()).sqrt();
-        let th = std::f32::consts::TAU * u2;
-        out.push(r * th.cos());
-        if out.len() < n {
-            out.push(r * th.sin());
-        }
-    }
-    out
-}
-
 /// BFL's `linspace(1, 0, steps+1)`, optionally shifted by the linear
 /// `calculate_shift` mu - see the module docs for why this is not
 /// `diffusion::scheduler::klein_sigmas`/`empirical_mu`.
@@ -342,7 +323,7 @@ impl Flux1 {
         let sigmas = flux1_sigmas(steps, n_gen, dynamic_shift);
 
         let ids = position_ids(max_len, lh, lw, &[]);
-        let mut lat = gaussian(n_gen * self.cfg.in_channels, o.seed);
+        let mut lat = model::hostmath::gaussian(n_gen * self.cfg.in_channels, o.seed);
 
         for i in 0..steps {
             let t = sigmas[i];

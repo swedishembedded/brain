@@ -26,11 +26,14 @@
 //! The discrete schedulers this model samples with live in
 //! `diffusion::discrete` (DDIM / Euler / Euler-ancestral / DPM-Solver++, ε and
 //! v-prediction), not here — they are architecture-independent host math and
-//! belong next to `FlowMatchEulerScheduler`.
+//! belong next to `FlowMatchEulerScheduler`. [`sampler`] is the SDXL-specific
+//! denoise loop built on top of them (seeding, the CFG pair, the per-step
+//! forward seam `controlnet` composes onto); [`textenc`] is the dual CLIP
+//! conditioning both `pipeline::Sdxl` and `controlnet::caps::Controlled` share.
 //!
-//! **Forward only.** Backward/`check_unet`, the serving contract (a
-//! `capability::Provider`, a residency adapter, `run_batch`, D-Bus, an
-//! example), the VAE / text-encoder glue and a sampling CLI are all deferred.
+//! Backward and `check_unet` are done (`train`). The serving contract (a
+//! `capability::Provider`, a residency adapter, D-Bus, an example) is met -
+//! see [`caps`] and `crates/cli/src/resident_sdxl.rs`.
 
 pub mod caps;
 pub mod config;
@@ -39,6 +42,8 @@ pub mod import;
 pub mod init;
 pub mod model;
 pub mod pipeline;
+pub mod sampler;
+pub mod textenc;
 pub mod train;
 
 pub use config::{BlockKind, UNetConfig};

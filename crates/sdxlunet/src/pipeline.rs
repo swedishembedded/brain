@@ -7,43 +7,22 @@
 //! towers (`crates/clip`, 148 stage checks), the UNet (165 comparisons), the VAE
 //! (`crates/vae`) and the discrete schedulers (`crates/diffusion`, 66 checks).
 //! What was missing was the loop that puts them together, which is why nothing
-//! in the imaging workstream could produce a picture.
-//!
-//! # SDXL's conditioning is two encoders, and the layer index matters
-//!
-//! `prompt_embeds` is `concat(CLIP-L penultimate, OpenCLIP-bigG penultimate)`
-//! along the feature axis — 768 + 1280 = 2048 — and `pooled_prompt_embeds` is
-//! bigG's **projected** `text_embeds` alone. The PENULTIMATE hidden state, not
-//! the last: diffusers passes `output_hidden_states=True` and takes
-//! `hidden_states[-2]`. Taking the last layer instead runs, produces an image,
-//! and is not SDXL.
-//!
-//! # Classifier-free guidance is two forwards, not a batched one
-//!
-//! `crates/sdxlunet` records its graph for one sample, so the conditional and
-//! unconditional passes are two `run` calls rather than a batch of two. That is
-//! a cost (two forwards per step) and not a correctness question; batching would
-//! need a graph recorded at `b = 2`.
-//!
-//! # The micro-conditioning is not decoration
-//!
-//! SDXL's `add_time_ids` is `[orig_h, orig_w, crop_top, crop_left, target_h,
-//! target_w]`, projected and added to the timestep embedding. The defaults here
-//! reproduce diffusers' (`original_size = target_size = the generated size`,
-//! `crops_coords_top_left = (0,0)`), because those values genuinely change the
-//! composition — they are how SDXL was taught that a crop is a crop.
+//! in the imaging workstream could produce a picture. The loop itself is
+//! [`crate::sampler::sample`]; the conditioning is [`crate::textenc::TextEncoders`].
+//! This module is a thin [`crate::sampler::Denoiser`] impl around the plain
+//! [`Unet`] plus the load/decode glue - see those modules for the sampling and
+//! conditioning documentation.
 
 use std::path::Path;
 
-use clip::config::ClipTextConfig;
-use clip::model::ClipText;
-use diffusion::discrete::{DiscreteConfig, EulerScheduler};
 use gpu_core::Gpu;
 use vae::config::VaeConfig;
 use vae::VaeDecoder;
 
 use crate::config::UNetConfig;
 use crate::model::{Unet, KERNELS};
+use crate::sampler::{sample, Denoiser, SamplerOptions, StepCtx};
+use crate::textenc::{read_any_safetensors, read_json, TextEncoders, CONTEXT};
 
 /// How the latent is seeded and how many steps to take.
 pub struct GenerateOptions {
@@ -81,49 +60,17 @@ impl Default for GenerateOptions {
 ///
 /// The two text encoders are needed ONCE per generation and the VAE once at the
 /// end, while the UNet runs every step — so the encoders are built for the
-/// encode and dropped, and the VAE is built for the decode and dropped. Same
-/// tiering as FLUX.1, done by construction here rather than through
-/// `crates/residency`, because this pipeline owns its own lifetimes.
+/// encode and dropped (via [`crate::textenc::TextEncoders`]), and the VAE is
+/// built for the decode and dropped. Same tiering as FLUX.1, done by
+/// construction here rather than through `crates/residency`, because this
+/// pipeline owns its own lifetimes.
 pub struct Sdxl {
     gpu: Gpu,
     root: std::path::PathBuf,
-    tok_l: data::clip_bpe::ClipBpe,
-    tok_g: data::clip_bpe::ClipBpe,
     unet: Unet,
     vae_cfg: VaeConfig,
     ucfg: UNetConfig,
     hw: (u32, u32),
-}
-
-const CONTEXT: usize = 77;
-
-/// One prompt's SDXL conditioning: the `77 x 2048` sequence and the 1280-d
-/// pooled vector.
-pub type Conditioning = (Vec<f32>, Vec<f32>);
-
-/// Read every `*.safetensors` in `dir`. The diffusers layout names a component's
-/// weights after the component (`diffusion_pytorch_model[.fp16].safetensors`),
-/// and a variant suffix is normal — so match on the extension, not the stem.
-fn read_any_safetensors(dir: &Path) -> Result<Vec<checkpoint::safetensors::StTensor>, String> {
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("sdxl: reading {}: {e}", dir.display()))?;
-    let mut files: Vec<std::path::PathBuf> = rd
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "safetensors"))
-        .collect();
-    files.sort();
-    if files.is_empty() {
-        return Err(format!("sdxl: no *.safetensors under {}", dir.display()));
-    }
-    let mut out = Vec::new();
-    for f in files {
-        out.extend(checkpoint::safetensors::read(f.to_str().ok_or("sdxl: non-UTF8 path")?)?);
-    }
-    Ok(out)
-}
-
-fn read_json(p: &Path) -> Result<serde_json::Value, String> {
-    let s = std::fs::read_to_string(p).map_err(|e| format!("sdxl: reading {}: {e}", p.display()))?;
-    serde_json::from_str(&s).map_err(|e| format!("sdxl: parsing {}: {e}", p.display()))
 }
 
 impl Sdxl {
@@ -149,12 +96,6 @@ impl Sdxl {
         // same device (AGENTS.md "one GPU device per process").
         let gpu = Gpu::new(&KERNELS);
 
-        // --- tokenizers (cheap; the towers are built per encode) -------------
-        let tok_l = data::clip_bpe::ClipBpe::from_dir(&r.join("tokenizer"))
-            .map_err(|e| format!("sdxl: tokenizer: {e}"))?;
-        let tok_g = data::clip_bpe::ClipBpe::from_dir(&r.join("tokenizer_2"))
-            .map_err(|e| format!("sdxl: tokenizer_2: {e}"))?;
-
         // --- unet ----------------------------------------------------------
         let ucfg = UNetConfig::sdxl_base();
         let udir = r.join("unet");
@@ -163,54 +104,8 @@ impl Sdxl {
 
         // --- vae config only; the decoder is built at decode time -----------
         let vae_cfg = VaeConfig::from_json(&read_json(&r.join("vae/config.json"))?);
-        let _ = (lh, lw);
 
-        Ok(Sdxl { gpu, root: r.to_path_buf(), tok_l, tok_g, unet, vae_cfg, ucfg, hw: (h, w) })
-    }
-
-    /// SDXL's conditioning for one prompt: `(prompt_embeds[77*2048], pooled[1280])`.
-    ///
-    /// Both towers take the PENULTIMATE hidden state; bigG additionally supplies
-    /// the projected pooled vector.
-    fn tower(&self, sub: &str, cfg: &ClipTextConfig) -> Result<ClipText, String> {
-        let t = clip::import::read_text_encoder(&self.root.join(sub))?;
-        let init = clip::import::import_text(t, cfg)?;
-        let map: std::collections::HashMap<String, Vec<f32>> =
-            init.into_iter().map(|(k, (_, d))| (k, d)).collect();
-        // `new_like`: a DIFFERENT kernel set on the SAME device. Each crate
-        // resolves kernel indices against the list it registered, so building a
-        // ClipText on a Gpu made from sdxlunet::KERNELS binds the wrong pipelines.
-        Ok(ClipText::new_on(self.gpu.new_like(clip::model::TEXT_PIPELINES), cfg.clone(), 1, CONTEXT as u32, &map))
-    }
-
-    /// Encode every prompt in one pass, so the towers are built and dropped ONCE
-    /// rather than once per prompt — the conditional and unconditional passes
-    /// would otherwise pay for 3.3 GB of encoder twice.
-    fn encode_all(&self, prompts: &[&str]) -> Result<Vec<Conditioning>, String> {
-        let l_tower = self.tower("text_encoder", &ClipTextConfig::clip_l())?;
-        let g_tower = self.tower("text_encoder_2", &ClipTextConfig::openclip_bigg())?;
-        let out = prompts.iter().map(|p| self.encode_with(&l_tower, &g_tower, p)).collect();
-        // Both towers drop here, before the UNet runs a single step.
-        Ok(out)
-    }
-
-    fn encode_with(&self, l_tower: &ClipText, g_tower: &ClipText, prompt: &str) -> Conditioning {
-        l_tower.set_tokens(&self.tok_l.encode_with_context(prompt, CONTEXT).ids);
-        l_tower.forward();
-        let l = l_tower.read_penultimate();
-
-        g_tower.set_tokens(&self.tok_g.encode_with_context(prompt, CONTEXT).ids);
-        g_tower.forward();
-        let g = g_tower.read_penultimate();
-        let pooled = g_tower.read_text_embeds().unwrap_or_else(|| g_tower.read_pooled());
-
-        let (dl, dg) = (l.len() / CONTEXT, g.len() / CONTEXT);
-        let mut embeds = Vec::with_capacity(CONTEXT * (dl + dg));
-        for t in 0..CONTEXT {
-            embeds.extend_from_slice(&l[t * dl..(t + 1) * dl]);
-            embeds.extend_from_slice(&g[t * dg..(t + 1) * dg]);
-        }
-        (embeds, pooled)
+        Ok(Sdxl { gpu, root: r.to_path_buf(), unet, vae_cfg, ucfg, hw: (h, w) })
     }
 
     /// Generate one image. Returns HWC RGB in `[0,1]`.
@@ -219,45 +114,17 @@ impl Sdxl {
         let (lh, lw) = (h / 8, w / 8);
         let n = (self.ucfg.in_channels * lh * lw) as usize;
 
+        let te = TextEncoders::load(self.gpu.share(), &self.root)?;
         let do_cfg = o.guidance > 1.0;
-        let mut enc = if do_cfg {
-            self.encode_all(&[prompt, o.negative.as_str()])?
-        } else {
-            self.encode_all(&[prompt])?
-        };
+        let mut enc = if do_cfg { te.encode_all(&[prompt, o.negative.as_str()])? } else { te.encode_all(&[prompt])? };
         let uncond = do_cfg.then(|| enc.pop().expect("negative encoded"));
-        let (cond, cond_pooled) = enc.pop().expect("prompt encoded");
+        let cond = enc.pop().expect("prompt encoded");
+        // Both towers drop here (`te`'s scope ends), before the UNet runs a
+        // single step.
 
-        let mut sched = EulerScheduler::new(DiscreteConfig::sdxl());
-        sched.set_timesteps(o.steps);
-
-        // diffusers' micro-conditioning defaults: the generated size is both the
-        // "original" and the "target", with no crop.
-        let time_ids = vec![h as f32, w as f32, 0.0, 0.0, h as f32, w as f32];
-
-        let mut lat = gaussian(n, o.seed);
-        let s0 = sched.init_noise_sigma();
-        for v in &mut lat {
-            *v *= s0;
-        }
-
-        let timesteps: Vec<f32> = sched.timesteps().to_vec();
-        for (i, &t) in timesteps.iter().enumerate() {
-            let scaled = sched.scale_model_input(&lat);
-            let c = self.unet.run(&scaled, t, &cond, &cond_pooled, &time_ids);
-            let eps = match &uncond {
-                None => c,
-                Some((ue, up)) => {
-                    let u = self.unet.run(&scaled, t, ue, up, &time_ids);
-                    // guided = uncond + g * (cond - uncond)
-                    u.iter().zip(&c).map(|(a, b)| a + o.guidance * (b - a)).collect()
-                }
-            };
-            lat = sched.step(&eps, &lat);
-            if i % 5 == 0 || i + 1 == timesteps.len() {
-                eprintln!("  step {}/{}  sigma {:.4}", i + 1, timesteps.len(), sched.sigmas()[i]);
-            }
-        }
+        let denoiser = SdxlDenoiser { unet: &self.unet };
+        let so = SamplerOptions { steps: o.steps, guidance: o.guidance, seed: o.seed, height: h, width: w };
+        let lat = sample(&denoiser, n, &cond, uncond.as_ref(), &so)?;
 
         // The VAE decodes the UNSCALED latent. Built here and dropped on return,
         // so it never shares the card with the encoders.
@@ -283,20 +150,13 @@ impl Sdxl {
     }
 }
 
-/// Box–Muller normal samples from the workspace's deterministic LCG, so a seed
-/// reproduces a picture.
-fn gaussian(n: usize, seed: u64) -> Vec<f32> {
-    let mut rng = data::rng::Rng::new(seed);
-    let mut out = Vec::with_capacity(n);
-    while out.len() < n {
-        let u1 = (rng.next_f32().abs()).max(1e-7);
-        let u2 = rng.next_f32().abs();
-        let r = (-2.0 * u1.ln()).sqrt();
-        let th = std::f32::consts::TAU * u2;
-        out.push(r * th.cos());
-        if out.len() < n {
-            out.push(r * th.sin());
-        }
+/// The plain (uncontrolled) SDXL forward as a [`Denoiser`].
+struct SdxlDenoiser<'a> {
+    unet: &'a Unet,
+}
+
+impl Denoiser for SdxlDenoiser<'_> {
+    fn eval(&self, ctx: &StepCtx<'_>, enc: &[f32], pooled: &[f32], time_ids: &[f32]) -> Result<Vec<f32>, String> {
+        Ok(self.unet.run(ctx.scaled, ctx.timestep, enc, pooled, time_ids))
     }
-    out
 }

@@ -772,9 +772,7 @@ version = "1.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
- "brain-clip",
  "brain-data",
- "brain-diffusion",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
