@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! A from-scratch GGUF v3 writer -- the mirror of [`crate::gguf`]'s reader.
-//! Produces files [`crate::gguf::MmapGguf`]/[`crate::gguf::load_gguf`] read
+//! Produces files [`crate::gguf::MmapGguf`]/[`crate::gguf::read`] read
 //! back byte-identically (same magic, KV encoding, tensor-info layout, and
 //! alignment convention), so anything this crate quantizes with
 //! [`crate::quant`] round-trips through this crate's own reader with no

@@ -100,7 +100,7 @@ fn train(args: &[String], base: Option<&str>) {
         return;
     }
     let mut cfg = match base {
-        Some(p) => GlmConfig::from_json(&checkpoint::load(p).header["config"]),
+        Some(p) => GlmConfig::from_json(&checkpoint::read_config(p)),
         None => preset(&size, block),
     };
     if base.is_none() {
@@ -177,7 +177,7 @@ fn finetune(args: &[String]) {
 }
 
 fn model_block(weights: &str) -> u32 {
-    GlmConfig::from_json(&checkpoint::load(weights).header["config"]).block_size
+    GlmConfig::from_json(&checkpoint::read_config(weights)).block_size
 }
 
 fn infer(args: &[String]) {

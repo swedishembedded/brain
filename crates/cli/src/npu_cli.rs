@@ -166,7 +166,7 @@ fn lfm_bench(args: &[String]) {
     }
 
     // Vocab (for in-range token ids) from the checkpoint config - cheap header read.
-    let cfg = lfm2::config::LfmConfig::from_json(&checkpoint::load(&weights).header["config"]);
+    let cfg = lfm2::config::LfmConfig::from_json(&checkpoint::read_config(&weights));
     let vocab = cfg.vocab;
 
     // 1) Export the fixed-shape graph (external-data sidecar) - pure Rust, one-time.

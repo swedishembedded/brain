@@ -79,10 +79,23 @@ impl WeightReader {
     /// importer streaming through a sharded multi-GB checkpoint never holds
     /// more than one shard's mmap header plus one tensor's fp32 expansion.
     /// Unlike [`open`](Self::open), `config()`/`card()` return empty/`None`
-    /// here — a foreign checkpoint has no `brain.config`/`brain.card`; read
-    /// the source's own `config.json` separately (as every importer already
-    /// does) and build a [`ModelCard`] for the *output*.
+    /// for a *sharded* directory - a foreign checkpoint has no
+    /// `brain.config`/`brain.card`; read the source's own `config.json`
+    /// separately (as every importer already does) and build a [`ModelCard`]
+    /// for the *output*.
+    ///
+    /// `dir` may also be a **single weight file** - a `.gguf` or a
+    /// `.safetensors` - in which case this is [`open`](Self::open). Which one
+    /// a path is, is sniffed rather than declared: what a user has is a path
+    /// to a checkpoint, and making them say which shape it has is an
+    /// opportunity to be wrong about something the filesystem already knows.
+    /// A GGUF opened this way keeps its own `config()`/`card()`/`tokenizer()`,
+    /// since a GGUF genuinely carries them.
     pub fn open_hf_dir(dir: &Path) -> io::Result<WeightReader> {
+        if !dir.is_dir() {
+            let path = dir.to_str().ok_or_else(|| inval("non-utf8 checkpoint path".to_string()))?;
+            return Self::open(path);
+        }
         // HF-transformers and diffusers checkpoints name their shard index
         // differently (mirrors crate::safetensors::index_filename).
         let index_path = ["model.safetensors.index.json", "diffusion_pytorch_model.safetensors.index.json"]
@@ -572,80 +585,7 @@ impl StWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    // ---- test-scoped counting allocator: tracks peak live bytes while armed ----
-    //
-    // A `#[global_allocator]` sees EVERY thread in the test binary, and libtest
-    // runs tests in parallel by default, so the arming state has to be
-    // per-thread rather than one process-wide flag. With a global flag, two
-    // things went wrong at once and both produced wrong numbers rather than
-    // errors: a second `peak_live` on another test's thread disarmed the first
-    // mid-measurement (peaks read back as a few KB instead of megabytes), and
-    // unrelated concurrent allocations were charged to whoever happened to be
-    // armed. The thread-local `MEASURING` flag below fixes both - only the
-    // measuring thread's own allocations are ever counted - and `peak_live`
-    // additionally serializes on `MEASURE_LOCK` so the shared LIVE/PEAK
-    // counters belong to exactly one measurement at a time.
-    //
-    // `MEASURING` is const-initialized, so reading it allocates nothing (a
-    // lazily-initialized thread-local would recurse straight back into `alloc`);
-    // `try_with` keeps a late allocation during TLS teardown from panicking.
-
-    struct Counting;
-    static LIVE: AtomicUsize = AtomicUsize::new(0);
-    static PEAK: AtomicUsize = AtomicUsize::new(0);
-    static MEASURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    thread_local! {
-        static MEASURING: Cell<bool> = const { Cell::new(false) };
-    }
-
-    fn measuring() -> bool {
-        MEASURING.try_with(|m| m.get()).unwrap_or(false)
-    }
-
-    unsafe impl GlobalAlloc for Counting {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let p = System.alloc(layout);
-            if !p.is_null() && measuring() {
-                let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-                PEAK.fetch_max(live, Ordering::Relaxed);
-            }
-            p
-        }
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            if measuring() {
-                // Saturating: frees of pre-arm allocations must not underflow.
-                let mut cur = LIVE.load(Ordering::Relaxed);
-                loop {
-                    let next = cur.saturating_sub(layout.size());
-                    match LIVE.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
-                        Ok(_) => break,
-                        Err(c) => cur = c,
-                    }
-                }
-            }
-            System.dealloc(ptr, layout);
-        }
-    }
-
-    #[global_allocator]
-    static ALLOC: Counting = Counting;
-
-    /// Run `f` with peak-live-byte tracking armed on THIS thread; returns the peak.
-    fn peak_live<R>(f: impl FnOnce() -> R) -> (R, usize) {
-        let guard = MEASURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        LIVE.store(0, Ordering::Relaxed);
-        PEAK.store(0, Ordering::Relaxed);
-        MEASURING.with(|m| m.set(true));
-        let r = f();
-        MEASURING.with(|m| m.set(false));
-        let peak = PEAK.load(Ordering::Relaxed);
-        drop(guard);
-        (r, peak)
-    }
+    use crate::testalloc::peak_live;
 
     fn scratch(name: &str) -> String {
         std::env::temp_dir()
@@ -1213,6 +1153,47 @@ mod tests {
 
         let streamed = WeightReader::open_hf_dir(&dir).unwrap();
         assert_eq!(streamed.tensor("w").unwrap(), vec![9.0, 8.0]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `open_hf_dir` is the entry point every "point me at a foreign
+    /// checkpoint" caller already uses, and what a user hands it is a *path* -
+    /// they should not have to tell brain which kind of thing it is. A single
+    /// weight FILE (a `.gguf`, or a lone `.safetensors`) must open exactly as
+    /// `open` would, while a directory keeps meaning precisely what it meant
+    /// before.
+    #[test]
+    fn open_hf_dir_accepts_a_single_weight_file_as_well_as_a_directory() {
+        let dir = scratch_dir("sniff");
+
+        // A GGUF file, handed in directly.
+        let gguf = dir.join("m.gguf");
+        crate::gguf_write::write(
+            gguf.to_str().unwrap(),
+            &[("general.architecture".to_string(), crate::gguf::GgufValue::String("toy".to_string()))],
+            &[crate::gguf_write::TensorOut {
+                name: "w".to_string(),
+                shape: vec![3],
+                ty: 0,
+                data: [1.5f32, 2.5, 3.5].iter().flat_map(|v| v.to_le_bytes()).collect(),
+            }],
+            32,
+        )
+        .unwrap();
+        let r = WeightReader::open_hf_dir(&gguf).expect("a .gguf FILE is a checkpoint too");
+        assert_eq!(r.tensor("w").unwrap(), vec![1.5, 2.5, 3.5]);
+        assert_eq!(r.config()["general.architecture"], serde_json::json!("toy"));
+
+        // A single safetensors file, handed in directly - and it must agree
+        // with what opening its parent DIRECTORY produces, since that is the
+        // behaviour this must not change.
+        let st = dir.join("model.safetensors");
+        std::fs::write(&st, one_tensor_bytes("w2", &[9.0, 8.0])).unwrap();
+        let by_file = WeightReader::open_hf_dir(&st).unwrap();
+        let by_dir = WeightReader::open_hf_dir(&dir).unwrap();
+        assert_eq!(by_file.tensor("w2").unwrap(), vec![9.0, 8.0]);
+        assert_eq!(by_dir.tensor("w2").unwrap(), by_file.tensor("w2").unwrap());
 
         std::fs::remove_dir_all(&dir).ok();
     }

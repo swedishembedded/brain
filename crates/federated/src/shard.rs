@@ -355,7 +355,7 @@ mod tests {
         // Build an overlay dir carrying only a retrained expert 1 (data = 99).
         let odir = dir.join("overlay");
         fs::create_dir_all(odir.join("experts")).unwrap();
-        let config = checkpoint::load(sdir.join("shared.safetensors").to_str().unwrap()).header["config"].clone();
+        let config = checkpoint::read_config(sdir.join("shared.safetensors").to_str().unwrap());
         // overlay must still carry a shared.safetensors (same config) for verify().
         checkpoint::save(odir.join("shared.safetensors").to_str().unwrap(), config.clone(), &[]);
         let e1 = vec![
@@ -409,7 +409,7 @@ mod tests {
         make_base(base.to_str().unwrap()); // base expert 1 = 11.0 (X)
         let sdir = dir.join("shards");
         split(base.to_str().unwrap(), &sdir).unwrap();
-        let config = checkpoint::load(sdir.join("shared.safetensors").to_str().unwrap()).header["config"].clone();
+        let config = checkpoint::read_config(sdir.join("shared.safetensors").to_str().unwrap());
 
         let odir_a = dir.join("overlay_a");
         make_expert1_overlay(&odir_a, &config, 42.0); // overlay A expert 1 = Y

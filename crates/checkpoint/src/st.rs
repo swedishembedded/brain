@@ -250,10 +250,20 @@ pub fn parse_safetensors(bytes: &[u8]) -> Result<StModel, String> {
 }
 
 /// Read and parse a safetensors file from disk into fp32 tensors + metadata.
+///
+/// The file is **mapped**, not slurped. The result is unchanged - the same
+/// [`parse_safetensors`] decodes the same bytes - but an owned `Vec<u8>` of
+/// the whole file would be live at the same time as every decoded tensor, so
+/// the eager route's peak was the file PLUS the model rather than the model.
+/// A mapping's pages are not heap, and are dropped with the mapping, so what
+/// survives this call is exactly the fp32 tensors the caller asked for.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_safetensors(path: &str) -> io::Result<StModel> {
-    let bytes = std::fs::read(path)?;
-    parse_safetensors(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    let file = std::fs::File::open(path)?;
+    // SAFETY: weight files are treated as immutable for the mapping's lifetime,
+    // the same contract `crate::mmap::MmapSafetensors::open` is built on.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }?;
+    parse_safetensors(&mmap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Write tensors as F32 safetensors. `config` is stored under `brain.config`

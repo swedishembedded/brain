@@ -400,10 +400,7 @@ fn train(args: &[String], base: Option<&str>) {
     // A small default architecture for from-scratch training; finetune reads the
     // architecture from the base checkpoint instead.
     let cfg = match base {
-        Some(p) => {
-            let c = checkpoint::load(p);
-            QwenConfig::from_json(&c.header["config"])
-        }
+        Some(p) => QwenConfig::from_json(&checkpoint::read_config(p)),
         None => QwenConfig {
             vocab: 0, // filled from the dataset
             block_size: block,
@@ -679,7 +676,7 @@ fn finetune_lora(args: &[String]) {
         }
     };
 
-    let base_cfg_json = checkpoint::load(base_weights_path.to_str().unwrap_or_default()).header["config"].clone();
+    let base_cfg_json = checkpoint::read_config(base_weights_path.to_str().unwrap_or_default());
     let vocab = base_cfg_json["vocab_size"].as_u64().unwrap_or(0) as usize;
     if vocab == 0 {
         eprintln!("{}: could not read vocab_size from the base checkpoint's config", base_weights_path.display());
@@ -1155,7 +1152,7 @@ fn calib(args: &[String]) {
     }
 
     if let Some(path) = clip_out {
-        let ckpt_cfg = checkpoint::load(weights_str).header["config"].clone();
+        let ckpt_cfg = checkpoint::read_config(weights_str);
         let cfg = QwenConfig::from_json(&ckpt_cfg);
         let calib = model::kvcalib::KvCalib::from_collector(
             &base_id,

@@ -12,8 +12,9 @@
 //! error (rare; a documented follow-up).
 //!
 //! The core [`parse_gguf`] works from a byte slice (no `Seek`, no fs) so it is
-//! usable from wasm; the native [`load_gguf`]/[`read`] wrappers read the file
-//! then call it — mirroring the `parse`/`load` split in `lib.rs` and `st.rs`.
+//! usable from wasm; the native [`read`] wrapper maps the file then calls it -
+//! mirroring the `parse`/`load` split in `lib.rs` and `st.rs`. (There is a
+//! whole-file `load_gguf` too, but it is `#[cfg(test)]`: see its own doc.)
 //!
 //! GGUF stores dims fastest-varying first (`ne[0]` = innermost); torch/brain
 //! shapes are the reverse. The byte layout of the data is identical row-major,
@@ -404,7 +405,17 @@ pub fn parse_gguf(bytes: &[u8]) -> Result<GgufModel, String> {
 }
 
 /// Read and parse a GGUF file from disk into fp32 tensors + metadata.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// **Test-only, and gated by the compiler rather than by convention.** This
+/// slurps the file into an owned buffer and then dequantizes *every* tensor to
+/// fp32 in host memory at once - two whole-model copies, the second several
+/// times larger than the first for any real quantization tier. Nothing in a
+/// production path may pay that: use [`MmapGguf`] (one tensor at a time, from
+/// a mapping) or [`read`] (mapped, still whole-model but with no owned copy of
+/// the file). The `#[cfg(test)]` is the gate - a production reference does not
+/// compile, so this cannot regress into a load path by inattention the way a
+/// doc-comment warning could.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub fn load_gguf(path: &str) -> Result<GgufModel, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("gguf: open {path}: {e}"))?;
     parse_gguf(&bytes)
@@ -1763,7 +1774,7 @@ mod tests {
     /// already resolve, and `brain fetch ggml-org/DeepSeek-OCR-GGUF` produces
     /// it, so the demand is one a box can actually meet.
     ///
-    /// Deliberately NOT "whatever `.gguf` is lying around": [`load_gguf`]
+    /// Deliberately NOT "whatever `.gguf` is lying around": `load_gguf`
     /// dequantizes the whole file to fp32 in host memory, so picking an
     /// arbitrary one would let a 7 GB 14B checkpoint turn this smoke test into
     /// a 57 GB allocation.

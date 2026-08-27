@@ -51,6 +51,13 @@ impl<'a> RemapSource<'a> {
         RemapSource { inner, plan }
     }
 
+    /// Whether the plan has a fetch for `name`. A caller narrowing a coverage
+    /// check to "everything this checkpoint actually offers" needs to ask, and
+    /// should not have to keep its own shadow copy of the plan to answer it.
+    pub fn has(&self, name: &str) -> bool {
+        self.plan.contains_key(name)
+    }
+
     /// Names-and-shapes-only coverage check, mirroring what
     /// `qwen3::import::brain_init_from_hf` validates today (every destination
     /// name has a source, every size matches) but reading no tensor data —

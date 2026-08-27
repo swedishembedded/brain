@@ -163,10 +163,7 @@ impl GptInfer {
     pub fn load(path: &str) -> GptInfer {
         let itos = gpt2::Gpt::load_itos(path);
         // size T to the model's own block size by peeking the config.
-        let block = {
-            let c = checkpoint::load(path);
-            gpt2::GptConfig::from_json(&c.header["config"]).block_size
-        };
+        let block = gpt2::GptConfig::from_json(&checkpoint::read_config(path)).block_size;
         let model = gpt2::Gpt::load(path, 1, block);
         GptInfer { model, itos }
     }

@@ -143,6 +143,5 @@ fn gen(args: &[String]) {
 
 /// Read the block size from a checkpoint header so the decoder is sized right.
 fn model_block(weights: &str) -> u32 {
-    let c = checkpoint::load(weights);
-    GptConfig::from_json(&c.header["config"]).block_size
+    GptConfig::from_json(&checkpoint::read_config(weights)).block_size
 }

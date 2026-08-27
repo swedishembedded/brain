@@ -26,6 +26,8 @@ pub mod weightio;
 pub mod remap;
 pub mod torchpt;
 pub mod zipread;
+#[cfg(test)]
+mod testalloc;
 
 /// A by-name source of f32 tensor data for **streaming** model construction.
 /// Both the eager `HashMap<String, Vec<f32>>` (a whole-model host copy) and the
@@ -178,7 +180,11 @@ impl Container {
 /// (`web::run_inference`) passes the fetched bytes directly, since there is no
 /// `std::fs` in a browser. Backed by safetensors; every tensor gets role `""`.
 pub fn parse(bytes: &[u8]) -> Container {
-    let m = st::parse_safetensors(bytes).expect("parse safetensors");
+    container(st::parse_safetensors(bytes).expect("parse safetensors"))
+}
+
+/// Repackage a parsed [`st::StModel`] as the public [`Container`] shape.
+fn container(m: st::StModel) -> Container {
     let header = serde_json::json!({ "config": m.config() });
     let tensors = m
         .tensors
@@ -188,10 +194,37 @@ pub fn parse(bytes: &[u8]) -> Container {
     Container { header, tensors }
 }
 
+/// Read a whole checkpoint into host memory.
+///
+/// Eager by design - the ~100 call sites that use this want every tensor as
+/// f32 - but eager about the *tensors* only. It goes through
+/// [`st::load_safetensors`]'s mapping rather than reading the file into an
+/// owned buffer first, so the peak is one copy of the model instead of the
+/// file plus the model. A caller that wants only the config should reach for
+/// [`read_config`], and one that wants one tensor at a time for
+/// [`weightio::WeightReader`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load(path: &str) -> Container {
-    let bytes = std::fs::read(path).unwrap_or_else(|_| panic!("cannot read {path}"));
-    parse(&bytes)
+    container(st::load_safetensors(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}")))
+}
+
+/// The model config of the checkpoint at `path`, for the cost of a header
+/// parse - no tensor data is read.
+///
+/// This is what a call site wanting `block_size`, `vocab` or a whole
+/// `SomeConfig::from_json` should use. The eager alternative,
+/// `load(path).header["config"]`, materializes every tensor in the file as
+/// f32 first and throws them away; on a real checkpoint that is a multi-GB
+/// allocation to reach a few hundred bytes of JSON.
+///
+/// Reads **both** container formats, sniffed by content: a brain-native
+/// safetensors answers with its `brain.config`, a GGUF with its KV map (which
+/// is where a GGUF keeps the same information).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_config(path: &str) -> Value {
+    weightio::WeightReader::open(path)
+        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+        .config()
 }
 
 /// Write a checkpoint: `config` is the model config object, `tensors` is an
@@ -217,6 +250,93 @@ pub fn save_carded(path: &str, config: Value, tensors: &[(String, Vec<u64>, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testalloc::peak_live;
+
+    /// A checkpoint whose tensor blob is big enough that holding it twice is
+    /// unmistakable in the peak, plus the byte counts to compare against.
+    /// Returns `(path, config, tensor_bytes)`.
+    fn big_checkpoint(tag: &str) -> (String, Value, usize) {
+        let p = std::env::temp_dir()
+            .join(format!("brain-ckpt-{}-{}-{}.safetensors", tag, std::process::id(), line!()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cfg = serde_json::json!({"d_model": 64, "n_layers": 3, "name": "big"});
+        let (n, ntensors) = (200_000usize, 8usize);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            (0..ntensors).map(|i| (format!("t{i}"), vec![n as u64], vec![i as f32; n])).collect();
+        save(&p, cfg.clone(), &tensors);
+        (p, cfg, n * ntensors * 4)
+    }
+
+    /// `load` must not hold the raw file bytes AND the decoded tensors at the
+    /// same time. The tensors are F32 on disk, so the file is essentially the
+    /// tensor blob: a `std::fs::read` + decode reaches ~2x the blob, while
+    /// decoding straight out of a mapping reaches ~1x.
+    ///
+    /// This is a *heap* measurement ([`crate::testalloc`]), which is what makes
+    /// the distinction visible at all - a mapping's pages are not heap, so the
+    /// owned-buffer copy is the only thing that can show up twice.
+    #[test]
+    fn load_does_not_hold_the_file_bytes_and_the_decoded_tensors_at_once() {
+        let (p, cfg, tensor_bytes) = big_checkpoint("doubleread");
+
+        let (c, peak) = peak_live(|| load(&p));
+
+        // Still a correct, complete load - the cheaper route must change
+        // nothing a caller can observe.
+        assert_eq!(c.header["config"], cfg);
+        assert_eq!(c.tensors.len(), 8);
+        assert_eq!(c.find("t3", "").unwrap(), &vec![3.0f32; 200_000]);
+
+        assert!(
+            peak < tensor_bytes * 3 / 2,
+            "load peak {peak} is not within ~one copy of the tensor blob ({tensor_bytes}) - the file bytes are being held alongside the decoded tensors"
+        );
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// Reading a checkpoint's config must cost a header parse, not a whole
+    /// model. Every call site that only wants `block_size`/`vocab` out of a
+    /// multi-GB file rides on this.
+    #[test]
+    fn read_config_does_not_materialize_the_tensors() {
+        let (p, cfg, tensor_bytes) = big_checkpoint("cfgonly");
+
+        let (got, peak) = peak_live(|| read_config(&p));
+
+        assert_eq!(got, cfg, "the config must be the same value the eager load reports");
+        assert!(
+            peak < tensor_bytes / 50,
+            "read_config peak {peak} is not a header-sized read of a {tensor_bytes}-byte blob"
+        );
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// ...and it must agree with what the eager path reports, exactly, for
+    /// both a brain-native safetensors checkpoint and a GGUF - the two formats
+    /// `weightio::WeightReader` sniffs between.
+    #[test]
+    fn read_config_agrees_with_the_eager_header_and_reads_gguf_too() {
+        let (p, cfg, _) = big_checkpoint("agree");
+        assert_eq!(read_config(&p), load(&p).header["config"]);
+        assert_eq!(read_config(&p), cfg);
+        std::fs::remove_file(&p).ok();
+
+        // A GGUF has no `brain.config`; its KV map is its config, and the same
+        // accessor must produce it rather than failing or reporting Null.
+        let g = std::env::temp_dir().join(format!("brain-ckpt-agree-{}.gguf", std::process::id()));
+        let g = g.to_str().unwrap();
+        gguf_write::write(
+            g,
+            &[("general.architecture".to_string(), gguf::GgufValue::String("toy".to_string()))],
+            &[gguf_write::TensorOut { name: "w".to_string(), shape: vec![2], ty: 0, data: vec![0u8; 8] }],
+            32,
+        )
+        .unwrap();
+        assert_eq!(read_config(g)["general.architecture"], serde_json::json!("toy"));
+        std::fs::remove_file(g).ok();
+    }
 
     #[test]
     fn save_load_roundtrip() {
