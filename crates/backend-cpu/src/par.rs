@@ -43,6 +43,26 @@ pub fn chunks_mut<T: Send>(buf: &mut [T], chunk_len: usize, f: impl Fn(usize, &m
     buf.par_chunks_mut(chunk_len).enumerate().for_each(|(i, c)| f(i, c));
 }
 
+/// [`chunks_mut`] over TWO outputs at once: chunk `i` of `a` and element `i`
+/// of `b`, in parallel.
+///
+/// The shape of a loop that produces two different things per row and needs
+/// both - packed weight words plus that row's scale being the motivating
+/// case. Splitting it into two passes would either read the input twice or
+/// recompute half the work, and neither is necessary when the two outputs are
+/// disjoint.
+///
+/// Same exactness contract as [`chunks_mut`]: index `i` covers
+/// `a[i*chunk_len..(i+1)*chunk_len]` and `b[i]` regardless of how many
+/// threads run, so a body reading only its own chunk and shared immutable
+/// state is bit-identical to the serial form. `b.len()` must be the number of
+/// chunks in `a`.
+pub fn chunks_mut_with<T: Send, U: Send>(a: &mut [T], chunk_len: usize, b: &mut [U], f: impl Fn(usize, &mut [T], &mut U) + Sync) {
+    assert!(chunk_len > 0, "chunks_mut_with: chunk_len must be non-zero");
+    assert_eq!(a.len().div_ceil(chunk_len), b.len(), "chunks_mut_with: {} chunks but {} second outputs", a.len().div_ceil(chunk_len), b.len());
+    a.par_chunks_mut(chunk_len).zip(b.par_iter_mut()).enumerate().for_each(|(i, (c, s))| f(i, c, s));
+}
+
 /// Apply `f(index, element)` to every element of `buf`, in parallel.
 pub fn each_mut(buf: &mut [f32], f: impl Fn(usize, &mut f32) + Sync) {
     buf.par_iter_mut().enumerate().for_each(|(i, v)| f(i, v));

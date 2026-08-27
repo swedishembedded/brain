@@ -41,21 +41,43 @@ pub fn quantize_weight(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
     // computing the scale a second time inside the pack pass (as an earlier
     // version of this function did) would cost that same read again for
     // nothing - `sw[r]` below is already final.
-    let sw = backend_cpu::par::map_f32(n, |r| w[r * k..r * k + k].iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0);
+    let sw = backend_cpu::par::map_f32(n, |r| row_scale(&w[r * k..r * k + k]));
     let mut packed = vec![0u32; n * kg];
     backend_cpu::par::chunks_mut(&mut packed, kg, |r, prow| {
-        let row = &w[r * k..r * k + k];
-        let inv = 1.0 / sw[r];
-        for (g, word_out) in prow.iter_mut().enumerate() {
-            let mut word = 0u32;
-            for b in 0..4 {
-                let q = (row[g * 4 + b] * inv).round().clamp(-127.0, 127.0) as i32;
-                word |= ((q as u8) as u32) << (8 * b);
-            }
-            *word_out = word;
-        }
+        pack_row(&w[r * k..r * k + k], 1.0 / sw[r], prow);
     });
     (packed, sw)
+}
+
+/// One row's per-channel scale: `max|row| / 127`, floored so an all-zero row
+/// cannot divide by zero.
+///
+/// Split out of [`quantize_weight`] so that a caller which produces a row's
+/// f32 by some OTHER route - decoding it from a quantized checkpoint block
+/// rather than reading it out of a materialized fp32 tensor - can reach the
+/// identical packed bytes by construction rather than by reimplementing this
+/// arithmetic and hoping it matches. The fold is left-to-right and stays that
+/// way: `f32::max` propagates the non-NaN operand, so with a NaN present the
+/// ORDER is observable, and two callers that disagree about it would disagree
+/// about the scale.
+#[inline]
+pub fn row_scale(row: &[f32]) -> f32 {
+    row.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0
+}
+
+/// Pack one row to `[k/4]` u32 (4 int8 per word, little-endian along K) given
+/// `inv = 1/scale`. The companion of [`row_scale`]; see its note on why these
+/// two are shared rather than duplicated.
+#[inline]
+pub fn pack_row(row: &[f32], inv: f32, out: &mut [u32]) {
+    for (g, word_out) in out.iter_mut().enumerate() {
+        let mut word = 0u32;
+        for b in 0..4 {
+            let q = (row[g * 4 + b] * inv).round().clamp(-127.0, 127.0) as i32;
+            word |= ((q as u8) as u32) << (8 * b);
+        }
+        *word_out = word;
+    }
 }
 
 /// The exact host-side inverse of [`quantize_weight`]: unpack `[n, k/4]` u32

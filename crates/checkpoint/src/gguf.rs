@@ -500,6 +500,46 @@ pub(crate) fn tensor_nbytes(ty: u32, numel: usize) -> Option<usize> {
     Some(numel / be * bb + if numel.is_multiple_of(be) { 0 } else { bb })
 }
 
+/// The ggml type id of Q8_0, for a caller matching on
+/// [`MmapGguf::raw_tensor_bytes`]'s reported type.
+pub const TYPE_Q8_0: u32 = T_Q8_0;
+
+/// Elements per Q8_0 block, and the block's on-disk byte size (a 2-byte fp16
+/// scale followed by 32 int8 values).
+pub const Q8_0_BLOCK_ELEMS: usize = 32;
+
+/// Expand elements `[e0, e1)` of a Q8_0 tensor's raw bytes into `out`, which
+/// is CLEARED first. Both bounds must be multiples of
+/// [`Q8_0_BLOCK_ELEMS`], because a Q8_0 block is the smallest independently
+/// decodable unit - a caller wanting an unaligned range must expand the
+/// enclosing blocks and slice.
+///
+/// This exists so that a caller reading a sub-range of a large quantized
+/// tensor (one weight matrix's rows, or one column block of a fused matrix)
+/// does not have to expand the whole tensor to reach it, and does not have to
+/// reimplement the block layout to avoid that. It decodes through the SAME
+/// `deq_q8_0` every other read path uses, so the values are identical to
+/// what [`dequantize`] would have produced for those positions.
+pub fn q8_0_expand(raw: &[u8], e0: usize, e1: usize, out: &mut Vec<f32>) -> Result<(), String> {
+    const BB: usize = 34;
+    if !e0.is_multiple_of(Q8_0_BLOCK_ELEMS) || !e1.is_multiple_of(Q8_0_BLOCK_ELEMS) {
+        return Err(format!("gguf: q8_0_expand range [{e0}, {e1}) is not block-aligned ({Q8_0_BLOCK_ELEMS})"));
+    }
+    if e1 < e0 {
+        return Err(format!("gguf: q8_0_expand range [{e0}, {e1}) is inverted"));
+    }
+    let (b0, b1) = (e0 / Q8_0_BLOCK_ELEMS, e1 / Q8_0_BLOCK_ELEMS);
+    if b1 * BB > raw.len() {
+        return Err(format!("gguf: q8_0_expand needs {} bytes, tensor has {}", b1 * BB, raw.len()));
+    }
+    out.clear();
+    out.reserve(e1 - e0);
+    for b in b0..b1 {
+        deq_q8_0(&raw[b * BB..(b + 1) * BB], out);
+    }
+    Ok(())
+}
+
 /// f16 (ggml_half) at byte offset `i` in `b` → f32.
 fn f16(b: &[u8], i: usize) -> f32 {
     half::f16::from_le_bytes([b[i], b[i + 1]]).to_f32()
