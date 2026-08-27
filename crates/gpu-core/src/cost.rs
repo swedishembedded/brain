@@ -179,6 +179,99 @@ impl fmt::Display for CostReport {
     }
 }
 
+/// Thread-scoped recording of every dispatch submitted through ANY `Gpu`
+/// handle on this thread, optionally with execution suppressed.
+///
+/// [`crate::Gpu::cost_of`] prices a step list a model already holds, which
+/// serves the decoder LMs (`fwd_steps`) and the VAE decoders (`steps()`). A
+/// diffusion transformer has no such list: flux2 and ltxv build their
+/// dispatches inside `forward()` and submit them there, and several models
+/// (the VAE decoders among them) open their own device, so the caller does not
+/// even hold the handle whose counters would see them. A recording is scoped to
+/// the calling THREAD rather than to a handle for exactly that reason - a graph
+/// is built and submitted synchronously by whoever called `forward()`, so a
+/// thread scope catches every handle that call touches and nothing else. Work a
+/// model hands to its own threads (a cross-device sharded stage) is NOT seen,
+/// and a caller relying on this must say so.
+///
+/// [`Recording::dry`] additionally suppresses execution: `submit` folds the
+/// steps in and then drops them, so a whole image or video generation can be
+/// priced with zero device work. That is only sound because a dispatch sequence
+/// is a function of SHAPES, not of buffer contents - true of every graph in
+/// this workspace, and gated in `tests/dry_run_recording.rs` (same report as a
+/// real run, and the output buffer provably untouched).
+///
+/// One recording per thread; nesting panics rather than silently merging two
+/// callers' numbers into one.
+pub struct Recording {
+    /// Not `Send`: a recording belongs to the thread that opened it.
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+struct Active {
+    dry: bool,
+    report: CostReport,
+}
+
+thread_local! {
+    static RECORDING: std::cell::RefCell<Option<Active>> = const { std::cell::RefCell::new(None) };
+}
+
+impl Recording {
+    /// Record AND execute - the graph runs as usual.
+    pub fn live() -> Recording {
+        Recording::start(false)
+    }
+
+    /// Record WITHOUT executing: nothing reaches the device and no buffer
+    /// changes. This is what makes a cost report a prediction.
+    pub fn dry() -> Recording {
+        Recording::start(true)
+    }
+
+    fn start(dry: bool) -> Recording {
+        RECORDING.with(|r| {
+            let mut r = r.borrow_mut();
+            assert!(r.is_none(), "a recording is already open on this thread");
+            *r = Some(Active { dry, report: CostReport::default() });
+        });
+        Recording { _not_send: std::marker::PhantomData }
+    }
+
+    /// Close the recording and take what it saw.
+    pub fn take(self) -> CostReport {
+        let r = RECORDING.with(|r| r.borrow_mut().take()).expect("recording open");
+        std::mem::forget(self); // Drop would clear an already-taken slot.
+        r.report
+    }
+}
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        RECORDING.with(|r| *r.borrow_mut() = None);
+    }
+}
+
+/// Fold `steps` into this thread's recording, if any. Returns true when the
+/// caller must SKIP execution (a dry recording).
+///
+/// The fast path is one thread-local `Option` check, so a production submit
+/// pays a predictable-branch and nothing else.
+pub fn record_submitted(names: &[String], steps: &[Step]) -> bool {
+    RECORDING.with(|r| match &mut *r.borrow_mut() {
+        Some(a) => {
+            tally(&mut a.report, names, steps);
+            a.dry
+        }
+        None => false,
+    })
+}
+
+/// True iff a recording is open on this thread.
+pub fn is_recording() -> bool {
+    RECORDING.with(|r| r.borrow().is_some())
+}
+
 /// True iff `name` has a cost formula (all-ones probe shape; formulas are
 /// polynomial in their params, so shape never changes coverage).
 ///

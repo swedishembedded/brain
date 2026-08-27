@@ -1009,6 +1009,14 @@ mod native_facade {
                 let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
                 crate::cost::tally(&mut ctr, &self.names, steps);
             }
+            // A thread-scoped `cost::Recording`, if one is open, sees every
+            // handle this thread submits through - including the device a model
+            // opened for itself, which the per-handle counters above cannot
+            // reach. A DRY recording folds the steps in and drops them here,
+            // which is what lets a whole generation be priced without running.
+            if crate::cost::record_submitted(&self.names, steps) {
+                return;
+            }
             self.inner.submit(clears, steps)
         }
 
@@ -1187,6 +1195,10 @@ mod wasm_facade {
             if !steps.is_empty() && self.cost_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                 let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
                 crate::cost::tally(&mut ctr, &self.names, steps);
+            }
+            // Thread-scoped offline recording - see the native facade's `submit`.
+            if crate::cost::record_submitted(&self.names, steps) {
+                return;
             }
             Backend::submit(&self.inner, clears, steps)
         }
