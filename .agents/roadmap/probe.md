@@ -53,17 +53,33 @@ checked for it.
   pins the probe side: where the device demonstrably climbed during the ramp,
   the published number must be above the cold first dispatch.
 
-**Result** (same box, `cargo test --release -p brain-model --test probe_gemm
--- --nocapture`, whole-machine profile, machine otherwise idle):
+**Result**, `cargo test --release -p brain-model --test probe_gemm --
+--nocapture`, whole-machine profile, machine otherwise idle:
 
 | device | f32 | bf16 | f16 | i8 | q4 |
 |---|---|---|---|---|---|
 | igpu (wgpu) | 765 GFLOP/s | 874 | 842 | 1442 GOP/s | 184 |
 | cpu (Cranelift JIT) | 195 GFLOP/s | 13.8 | 7.7 | -- | -- |
 
-against 56-65 / 63-77 / 53-63 / 100-125 / 14-22 before. The measured roof rose
-from 542 to 814 GFLOP/s fp32 and from 11.3 to 31.0 GB/s DRAM in the same
-conditions, and `matmul_reg2` reads 92% of that roof at `1024³`.
+**End to end**, which is what the change is for: a live `whale node
+--benchmark-interval 10` plus `whale status` on the same box, against what the
+same two commands printed before the ramp existed.
+
+| device | tier | before | after |
+|---|---|---|---|
+| igpu | f32 | 56-65 GFLOP/s | 528 |
+| | bf16 | 63-77 | 645 |
+| | f16 | 53-63 | 380 |
+| | i8 | 100-125 GOP/s | 547 |
+| | q4 | 14-22 | 75 |
+| cpu | f32 | 138-157 GFLOP/s | 189 |
+
+The number that mattered was never the ratio. It was that the iGPU stopped
+reporting itself as slower than the host CPU at fp32.
+
+The measured roof moved with it, from 542 to 814 GFLOP/s fp32 and from 11.3 to
+31.0 GB/s DRAM in comparable conditions, and `matmul_reg2` reads 92% of that
+roof at `1024³` - which is why no kernel change is part of this work.
 
 ## This box's numbers move with the package power budget - record the state
 
@@ -78,6 +94,13 @@ otherwise-unchanged tree:
   PyTorch job on the CPU), the same `machine` profile read 163 GFLOP/s fp32
   for the iGPU and 35 GFLOP/s for the CPU - both roughly 5x down from the
   idle-box figures above, with the fix in place either way.
+* Two live `whale status` runs from the same binary fourteen minutes apart
+  read 82 and 528 GFLOP/s fp32 on the iGPU. Sampling `rps_act_freq_mhz` and
+  `punit_req_freq_mhz` once a second through the second sweep shows the shape
+  of it: the punit raises its request to 2033 MHz partway in while the actual
+  clock sits at 250-400 MHz, `throttle_reason_pl1` set throughout, package at
+  99-102 C from the first second of GPU work. The device asks for its ceiling
+  and is refused the power to reach it.
 * `roofline.rs::measuring_twice_agrees` had to widen from a 0.25 to a 0.5
   spread band: two back-to-back `roof::measure` calls read 443 and 258
   GFLOP/s, each reproducible alone. That is the chassis, not the probe.
