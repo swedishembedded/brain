@@ -168,9 +168,20 @@ fast and scalable kernel - not a naive one.
     generators tried do not work). `brain flux2 finetune <dir> --out
     <adapter.brain>` trains a LoRA on a captioned-image folder (`brain label`
     writes one) through the same `flux2::finetune::run` the `lora_train`
-    capability action drives; the trainer is host f32 with no device path, so
-    there is no `--precision` and the step cost is what a caller has to budget
-    for. The adapter must NOT be named `.safetensors`: `Pipeline::build_dit`
+    capability action drives. **Two trainers, one op sequence**, selected by
+    `--trainer device|host` (device is the default and the choice is printed
+    on every run): `host` is the FD-gradchecked reference (`grad.rs` +
+    `modelgrad.rs`), `device` is its WGSL instantiation (`devgrad.rs` +
+    `devtrain.rs`) with the frozen base resident on the card and only the
+    low-rank factors differentiated - so no dense `dW` is ever formed and the
+    base is only ever read. Gated against the reference at cosine 1.000000000
+    and rel_l2 < 1e-6 on both block kinds and the whole model
+    (`tests/dev_grad.rs`, `tests/device_train.rs`); attention runs as real
+    GEMMs over `head_pack`ed head-major operands in BOTH directions, not the
+    naive `attn_*_bidir` family. `--cards N` spreads the block stack over N
+    GPUs (klein-9b's fp32 frozen base does not fit one 24 GiB card; klein-4b's
+    does). See `.agents/roadmap/flux2.md` for the measured step cost and the
+    per-kernel profile the next optimisation pass is measured from. The adapter must NOT be named `.safetensors`: `Pipeline::build_dit`
     uses that extension to recognise a third-party ai-toolkit/ComfyUI LoRA, so
     the CLI refuses it. 9B weights are NC-licensed - see
     `docs/models/flux2.md`.

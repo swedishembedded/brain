@@ -70,7 +70,7 @@ pub fn manifest() -> Manifest {
     }
     let edit = edit.output(image_out());
 
-    let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned images (personalise a person/object/style; host f32 trainer)")
+    let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned images (personalise a person/object/style)")
         .streaming()
         .param(ParamSpec::new("data", ParamType::Str, "server-side folder with images + captions (see data::imageset)").required())
         .param(ParamSpec::new("save", ParamType::Str, "server-side output path for the trained adapter").required())
@@ -79,6 +79,8 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("size", ParamType::Int, "training square size, px (multiple of 16)").default(json!(512)))
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("cards", ParamType::Int, "GPUs the device trainer spreads the block stack over (klein-9b's fp32 frozen base does not fit one 24 GiB card)").default(json!(1)))
+        .param(ParamSpec::new("trainer", ParamType::Enum(vec!["device".into(), "host".into()]), "gradient implementation: 'device' runs the WGSL kernels with the frozen base on the card; 'host' is the finite-difference-gradchecked reference it is validated against").default(json!("device")))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt; 9B needs BRAIN_FLUX2_ALLOW_NC=1").default(json!("klein-4b")))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
@@ -246,6 +248,11 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         steps: inv.get_i64("steps").unwrap_or(200).max(1) as u32,
         rank: inv.get_i64("rank").unwrap_or(16).max(1) as usize,
         lr: inv.get_f64("lr").unwrap_or(1e-4) as f32,
+        // Served runs default to the device trainer for the same reason the
+        // CLI does: the host one is the oracle, not a production path. A
+        // caller can still name it, and the choice is echoed in the log.
+        trainer: crate::finetune::Trainer::from_name(&inv.get_str("trainer").unwrap_or_else(|| "device".into()))?,
+        cards: inv.get_i64("cards").unwrap_or(1).max(1) as usize,
         size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
         seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
         save_path: save.clone(),

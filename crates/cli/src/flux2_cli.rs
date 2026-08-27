@@ -37,7 +37,7 @@ const HELP: &str = "brain flux2 <cmd>
                                     # third-party ai-toolkit/ComfyUI .safetensors
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
-           [--size S] [--seed K] [--ckpt-every N]
+           [--size S] [--seed K] [--ckpt-every N] [--trainer device|host] [--cards N]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
            # is what `generate --adapter` loads. Do NOT name it '.safetensors':
@@ -47,9 +47,15 @@ const HELP: &str = "brain flux2 <cmd>
            #   --steps N       training steps (default 200)
            #   --lr X          learning rate (default 1e-4)
            #   --ckpt-every N  checkpoint every N steps (default 100; 0 = final only)
-           # The trainer is the host f32 instantiation of the gradchecked reference
-           # math - deterministic and CPU-parallel, with no device path and hence
-           # no --precision. Budget for that before choosing --steps and --size.
+           #   --trainer T     device (default, WGSL kernels, frozen base on the
+           #                   card) or host (the FD-gradchecked reference the
+           #                   device path is validated against - correct, and
+           #                   minutes per step at klein scale)
+           #   --cards N       GPUs the device trainer spreads the stack over
+           #                   (default 1; klein-9b's fp32 base needs 2)
+           # Both trainers run the same op sequence; the device one keeps the
+           # frozen base on the card and differentiates only the low-rank
+           # factors. Which one ran is printed at the top of every run.
 Weights (env): BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
 Text-encoder placement (env): BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] (truncated shard on that card)";
 
@@ -246,6 +252,11 @@ fn finetune(args: &[String]) -> Result<(), String> {
         steps: 200,
         rank: 16,
         lr: 1e-4,
+        // The device trainer is the default because the host one is the
+        // reference, not a production path - but the choice is printed on
+        // every run and `--trainer host` selects the oracle explicitly.
+        trainer: flux2::finetune::Trainer::Device,
+        cards: 1,
         size: 512,
         seed: 0,
         save_path: String::new(),
@@ -265,6 +276,8 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--size" => opts.size = need(i)?.parse().map_err(|e| format!("--size: {e}"))?,
             "--seed" => opts.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--ckpt-every" => opts.ckpt_every = need(i)?.parse().map_err(|e| format!("--ckpt-every: {e}"))?,
+            "--trainer" => opts.trainer = flux2::finetune::Trainer::from_name(need(i)?)?,
+            "--cards" => opts.cards = need(i)?.parse().map_err(|e| format!("--cards: {e}"))?,
             "--help" | "-h" => {
                 println!("{HELP}");
                 return Ok(());
@@ -300,8 +313,8 @@ fn finetune(args: &[String]) -> Result<(), String> {
     let paths = Paths::from_env()?;
 
     eprintln!(
-        "flux2 finetune: {variant_name} rank {} steps {} size {} lr {} seed {} -> {}",
-        opts.rank, opts.steps, opts.size, opts.lr, opts.seed, opts.save_path
+        "flux2 finetune: {variant_name} {} trainer, rank {} steps {} size {} lr {} seed {} -> {}",
+        opts.trainer.name(), opts.rank, opts.steps, opts.size, opts.lr, opts.seed, opts.save_path
     );
     // The CLI has no cancel front-end - an unarmed Default token never fires.
     let cancel = capability::CancelToken::default();

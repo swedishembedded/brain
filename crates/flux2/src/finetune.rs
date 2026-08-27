@@ -11,29 +11,32 @@
 //!   2. Rectified-flow loop: each step draws a σ, builds
 //!      `x_σ = (1−σ)·x₀ + σ·ε` with target velocity `v = ε − x₀`
 //!      ([`crate::modelgrad::make_flow_batch`] — the exact convention
-//!      [`crate::pipeline`]'s Euler integrator inverts), runs the
-//!      adapter-applied frozen base through the gradchecked **host f32**
-//!      whole-model path ([`crate::modelgrad::grads`]) and projects
-//!      `dL/dW_eff` into an Adam step on the low-rank `A,B`.
+//!      [`crate::pipeline`]'s Euler integrator inverts), runs it through the
+//!      frozen base under the chosen [`Trainer`], and Adam-steps the low-rank
+//!      `A,B`. The host trainer gets there via a dense `dL/dW_eff` it then
+//!      projects; the device trainer produces `(dA, dB)` directly.
 //!   3. Save the adapter ([`crate::lora::save_adapter`]); the inference path
 //!      picks it up via [`crate::lora::LoraAdapter::fold_into_tensors`].
 //!
-//! **Performance / scope.** The trainer is the host f32 instantiation of the
-//! FD-gradchecked reference math — correct, deterministic, and CPU-parallel
-//! only through `model::hostmath::matvec_par`. That makes it practical for
-//! small latent grids and short adapter runs, but a full klein-4B step is
-//! MINUTES of host time: measured on a 48-core box at 256×256 (512 text + 256
-//! image tokens), one LoRA step is overwhelmingly forward/backward, with the
-//! adapter apply and the Adam update small beside it, at ~40 GB resident
-//! (`tests/step_time.rs`, run `--ignored --release` to re-measure). A device (WGSL-kernel) trainer that
-//! replays this exact op sequence on the GPU is the planned follow-up and is
-//! explicitly OUT of scope for this change.
+//! **Two trainers, one op sequence.** [`Trainer::Host`] is the f32
+//! instantiation of the FD-gradchecked reference math ([`crate::modelgrad`]) -
+//! correct, deterministic, and CPU-parallel only through
+//! `model::hostmath::matvec_par`. It is the oracle the device path is gated
+//! against (`tests/dev_grad.rs`, `tests/device_train.rs`) and it stays.
+//! [`Trainer::Device`] replays the same op sequence on the GPU through
+//! [`crate::devtrain::DeviceTrainer`], with the base frozen on the card and
+//! only the low-rank factors differentiated. Which one runs is a caller
+//! decision ([`TrainOpts::trainer`], `brain flux2 finetune --trainer`), never
+//! an implicit fallback: a run that silently used the slow path would look
+//! like a hang, and one that silently used the fast path would hide a missing
+//! GPU.
 
 use std::path::Path;
 
 use crate::config::Flux2Config;
+use crate::devtrain::DeviceTrainer;
 use crate::lora::{save_adapter, LoraAdapter, LoraCfg};
-use crate::modelgrad::{grads, make_flow_batch, Cfg, ModelWeights};
+use crate::modelgrad::{grads, make_flow_batch, Batch, Cfg, ModelWeights};
 use crate::pipeline::{Paths, PAD_TOKEN, TAP_LAYERS};
 use data::qwen_tokenizer::QwenBpe;
 use data::Tokenizer;
@@ -172,11 +175,46 @@ pub fn encode_samples(
     Ok(encoded)
 }
 
+/// Which of the two gradient implementations a run uses. They compute the same
+/// thing; `tests/device_train.rs` is what says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trainer {
+    /// The FD-gradchecked host reference ([`crate::modelgrad`]) - the oracle.
+    Host,
+    /// The WGSL device trainer ([`crate::devtrain`]) - frozen base resident on
+    /// the card, only the adapter differentiated.
+    Device,
+}
+
+impl Trainer {
+    /// Parse the CLI spelling (`host` | `device`).
+    pub fn from_name(v: &str) -> Result<Trainer, String> {
+        match v {
+            "host" => Ok(Trainer::Host),
+            "device" | "gpu" => Ok(Trainer::Device),
+            other => Err(format!("unknown trainer {other} (host|device)")),
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Trainer::Host => "host",
+            Trainer::Device => "device",
+        }
+    }
+}
+
 /// LoRA fine-tuning hyper-parameters.
 pub struct TrainOpts {
     pub steps: u32,
     pub rank: usize,
     pub lr: f32,
+    /// Host reference or device (WGSL) gradients - see [`Trainer`].
+    pub trainer: Trainer,
+    /// How many GPUs the device trainer spreads the block stack over. One card
+    /// holds klein-4B's fp32 frozen base; klein-9B's is larger than a 24 GiB
+    /// card and needs two. Never auto-grabbed: taking a second card is a
+    /// decision about a shared machine, so a caller has to make it.
+    pub cards: usize,
     /// Square training image size in pixels (multiple of 16; latent grid =
     /// size/16 per side).
     pub size: u32,
@@ -215,11 +253,28 @@ pub fn run(
     progress(0, opts.steps + 1, "loading DiT weights".into());
     let (lh, lw) = ((opts.size / 16) as usize, (opts.size / 16) as usize);
     let cfg = train_cfg(fc, lh, lw);
-    let tensors = crate::pipeline::read_dit_tensors(&paths.dit, fc)?;
-    let base = ModelWeights::from_tensors(&cfg, &tensors)?;
+    // `from_tensors` REMOVES as it converts, so the fused map shrinks while the
+    // split one grows: the peak is one copy of the model, not two. At klein-9B
+    // that is the difference between fitting this box and not.
+    let mut tensors = crate::pipeline::read_dit_tensors(&paths.dit, fc)?;
+    let base = ModelWeights::from_tensors(&cfg, &mut tensors)?;
     drop(tensors);
 
-    // 4. adapter + rectified-flow loop
+    // 4. the chosen gradient implementation. The device path uploads the frozen
+    //    base to the card and then releases the host copy, so the two never
+    //    hold the whole model twice.
+    let mut dev = None;
+    let mut host = Some(base);
+    if opts.trainer == Trainer::Device {
+        progress(0, opts.steps + 1, "uploading the frozen base to the device".into());
+        let t = DeviceTrainer::new_multi(opts.cards.max(1), cfg.clone(), opts.rank, host.as_ref().expect("base"));
+        let per: Vec<String> = t.weight_bytes_per_card().iter().map(|b| format!("{:.2} GiB", *b as f64 / (1u64 << 30) as f64)).collect();
+        progress(0, opts.steps + 1, format!("device base resident on {} card(s): {}", t.cards(), per.join(" + ")));
+        dev = Some(t);
+        host = None;
+    }
+
+    // 5. adapter + rectified-flow loop
     let mut adapter = LoraAdapter::new(&cfg, LoraCfg { seed: opts.seed, ..LoraCfg::new(opts.rank) });
     let mut rng = data::rng::Rng::new(opts.seed ^ 0x5eed_f10c);
     for step in 0..opts.steps {
@@ -230,10 +285,17 @@ pub fn run(
         let s = &encoded[step as usize % n_samples];
         let sigma = rng.next_f64().clamp(1e-3, 1.0);
         let noise = model::hostmath::randn(s.x0.len(), opts.seed ^ (0xa5a5 + step as u64));
-        let batch = make_flow_batch(&cfg, &s.x0, &s.ctx, sigma, &noise);
-        let w_eff = adapter.apply(&base);
-        let (loss, g) = grads(&cfg, &w_eff, &batch);
-        adapter.step(&g, opts.lr);
+        let batch: Batch<f32> = make_flow_batch(&cfg, &s.x0, &s.ctx, sigma, &noise);
+        let loss = match (&dev, &host) {
+            (Some(t), _) => t.step(&mut adapter, &batch, opts.lr),
+            (None, Some(b)) => {
+                let w_eff = adapter.apply(b);
+                let (loss, g) = grads(&cfg, &w_eff, &batch);
+                adapter.step(&g, opts.lr);
+                loss
+            }
+            (None, None) => unreachable!("one of the two trainers is always built"),
+        };
         progress(
             step + 1,
             opts.steps + 1,
