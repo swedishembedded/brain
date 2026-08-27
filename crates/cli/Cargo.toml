@@ -62,6 +62,10 @@ brain-sam2.workspace = true
 brain-scrfd.workspace = true
 brain-arcface.workspace = true
 brain-vqgan.workspace = true
+# `brain flops --model flux2|ltxv`: the VAE decode stage of a generation is
+# priced from the decoder's own recorded step list, so the cost model needs the
+# crate that builds it.
+brain-vae.workspace = true
 brain-codeformer.workspace = true
 brain-rrdbnet.workspace = true
 brain-worldmirror2.workspace = true

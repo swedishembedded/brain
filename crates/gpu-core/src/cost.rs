@@ -622,6 +622,17 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, h, hd) = (p(0)?, p(1)?, p(2)?);
             f(0, 8 * rows * h * hd)
         }
+        // Fuse three separate [seq, d] projections into one [seq, 3d] buffer
+        // for the bidirectional/flash attention trio; params [seq_len,
+        // d_model]. Pure movement: every one of the `seq*3*d` output elements
+        // is written once and reads one source element, no arithmetic. This
+        // was the one uncovered kernel on the flux2/ltxv/wan DiT attention
+        // path, and one uncovered kernel is enough to make a whole-generation
+        // total a partial number wearing a complete number's clothes.
+        "pack_qkv" => {
+            let (seq, d) = (p(0)?, p(1)?);
+            f(0, 24 * seq * d)
+        }
         // Workgroup-cooperative row softmax; params [rows, cols] — the same math
         // as attn_softmax_* (max, exp+sum, normalize per row).
         "softmax_rows" => {
@@ -755,6 +766,9 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // denominator under-reports rather than admitting it cannot tell.
         // x*sigmoid(x): exp + reciprocal + multiply, read one write one.
         "silu" => f(4 * n0(), 8 * n0()),
+        // y = 1/(1+exp(-x)): exp + add + divide = 3, one op short of `silu`
+        // above, which is that sigmoid times x. params [total].
+        "sigmoid" => f(3 * n0(), 8 * n0()),
         // dx = dy * s * (1 + x*(1-s)) — the same sigmoid plus the product rule.
         "silu_bwd" => f(8 * n0(), 12 * n0()),
         // params [total, c, inner]: out[i] *= scale[chan(i)].
@@ -997,6 +1011,14 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(0, 8 * n)
         }
         "concat_split" => {
+            let n = p(0)? * p(2)? * p(4)? * p(5)?;
+            f(0, 8 * n)
+        }
+        // `concat_split`'s inverse - copy a source tensor INTO a channel range
+        // of a bigger NCHW destination. Identical `Params` layout
+        // ([N, Ctot, Csrc, c_off, H, W]) and identical traffic: one dispatch
+        // per SOURCE element, read once, written once.
+        "chan_place" => {
             let n = p(0)? * p(2)? * p(4)? * p(5)?;
             f(0, 8 * n)
         }
@@ -1376,6 +1398,28 @@ mod tests {
         // embed moves bytes, no flops.
         let e = cost("embed", &[8, 5], 40);
         assert_eq!((e.flops, e.bytes), (0, 8 * 5 * 8 + 4 * 5));
+    }
+
+    /// The three kernels the diffusion image/video graphs dispatch that had no
+    /// formula, hand-computed. `pack_qkv` and `chan_place` move bytes and do no
+    /// arithmetic, so a "flops" assertion alone would pass on a formula that
+    /// forgot the traffic entirely - both numbers are asserted.
+    #[test]
+    fn diffusion_movement_and_gate_costs() {
+        // pack_qkv [seq=5, d=8]: 5*3*8 = 120 elements, read once + written
+        // once = 8 B each.
+        let pk = cost("pack_qkv", &[5, 8], 120);
+        assert_eq!((pk.flops, pk.int_ops, pk.bytes), (0, 0, 8 * 120));
+        // sigmoid: exp + add + divide per element, one fewer than silu's 4.
+        assert_eq!(cost("sigmoid", &[100], 100).flops, 300);
+        assert_eq!(cost("sigmoid", &[100], 100).bytes, 800);
+        assert_eq!(cost("silu", &[100], 100).flops - cost("sigmoid", &[100], 100).flops, 100);
+        // chan_place [N=2, Ctot=10, Csrc=3, c_off=4, H=5, W=7]: 2*3*5*7 = 210
+        // SOURCE elements - `Ctot` and `c_off` size the destination, not the
+        // work, so a formula that reached for Ctot would report 700.
+        let cp = cost("chan_place", &[2, 10, 3, 4, 5, 7], 210);
+        assert_eq!((cp.flops, cp.bytes), (0, 8 * 210));
+        assert_eq!(cp.bytes, cost("concat_split", &[2, 10, 3, 4, 5, 7], 210).bytes, "chan_place is concat_split's inverse: same traffic");
     }
 
     #[test]

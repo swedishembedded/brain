@@ -711,6 +711,7 @@ dependencies = [
  "brain-toymoe",
  "brain-toypid",
  "brain-trace",
+ "brain-vae",
  "brain-vision",
  "brain-vqgan",
  "brain-vulkan",
