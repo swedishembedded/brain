@@ -30,11 +30,13 @@
 # this first, and always when TARGET_REF=0), TARGET_REF, SIZE (`WxH`), SEED,
 # STEPS, REF_SIZE, VARIANT, PRECISION, BRAIN.
 #
-# Weights and placement come from the environment the pipeline documents:
-# BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}, BRAIN_DEVICE for the DiT, and
-# BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] for the text encoder -- which you want on a
-# second card, since an int8 9B DiT and a text encoder do not share one 24 GB
-# card comfortably.
+# Weights come from BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}. Placement does not:
+# with no --device, brain places the DiT, the text encoder and the VAE itself,
+# on whichever cards can hold them, and prints what it chose. An int8 9B DiT
+# and its text encoder do not share one 24 GB card, so on a two-card box they
+# land on separate cards without you saying so, and on a one-card box the
+# whole encoder stays beside the DiT exactly as it always did. Set BRAIN_DEVICE
+# or BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] only to override that decision.
 
 set -euo pipefail
 

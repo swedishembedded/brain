@@ -290,6 +290,301 @@ pub fn read_dit_tensors(path: &str, cfg: &Flux2Config) -> Result<crate::Tensors,
     }
 }
 
+// ---- automatic placement ---------------------------------------------------
+//
+// A FLUX.2 run is three models that must live somewhere: the DiT, the Qwen3
+// text encoder, and the VAE. Which card each goes on is a CAPACITY question,
+// and brain answers capacity questions in exactly one place -
+// `residency::budget`/`place`/`plan`, reached through the
+// `gpu_core::devices::place` seam. This module therefore DECLARES what the
+// parts cost and lets the engine place them; it never names a card.
+//
+// What it used to do instead - and what `BRAIN_FLUX2_TE_DEVICE` still
+// overrides - was require the operator to know that an int8 9B DiT and its
+// text encoder do not co-reside on one 24 GiB P40, and to say so by hand on
+// every run.
+
+/// Bytes one weight of `precision` occupies on the device. Only 2-D tensors
+/// (the linears) are quantised; norm scales and biases stay f32 in both
+/// tiers, which is what the int8 shard builders actually do.
+fn weight_bytes(shape: &[usize], precision: crate::Precision) -> u64 {
+    let n: usize = shape.iter().product();
+    let w = if precision == crate::Precision::Int8 && shape.len() == 2 { 1 } else { 4 };
+    (n * w) as u64
+}
+
+/// The DiT's device footprint: its own weights at `precision`, plus the
+/// activation scratch the joint sequence needs.
+///
+/// Both terms come from the architecture itself ([`Flux2Config::
+/// tensor_manifest`] and the 16 `[n, hidden]` + 3 `[n, mlp]` f32 scratch
+/// buffers `Flux2Model` allocates), never from a remembered measurement, so
+/// they follow a config change instead of going stale beside it.
+pub fn dit_bytes(cfg: &Flux2Config, precision: crate::Precision, n_joint: u64, max_batch: u64) -> u64 {
+    let weights: u64 = cfg.tensor_manifest().iter().map(|(_, shape)| weight_bytes(shape, precision)).sum();
+    let mut per_slot = n_joint * (16 * cfg.hidden as u64 + 3 * cfg.mlp_hidden() as u64) * 4;
+    if precision == crate::Precision::Int8 {
+        per_slot += n_joint * (cfg.hidden as u64 + cfg.mlp_hidden() as u64);
+    }
+    weights + per_slot * max_batch.max(1)
+}
+
+/// The text encoder's device footprint: weights plus the activation buffers
+/// its blocks hold.
+///
+/// `layers` is how much of the stack is actually built - a truncated shard
+/// keeps `[0, deepest_tap)` and nothing past it, so a whole encoder and a
+/// truncated one differ by real bytes and the placement must see the
+/// difference.
+///
+/// A `Qwen` shard allocates its activation buffers per block rather than
+/// sharing one slab, so the scratch term scales with `layers`, not with 1 -
+/// which is the difference between "the f32 encoder fits a 24 GiB card on
+/// paper" and the two-card layout the FLUX.2 roadmap records as the one that
+/// actually runs. This is a PLACEMENT INPUT, deliberately an approximation
+/// of the same shape `resident_flux2`'s own estimate uses for the DiT; the
+/// per-card headroom automatic placement keeps free absorbs the remainder.
+pub fn te_bytes(te_cfg: &qwen3::QwenConfig, layers: usize, seq: u64, int8: bool) -> u64 {
+    let precision = if int8 { crate::Precision::Int8 } else { crate::Precision::F32 };
+    let scratch = layers as u64 * seq * (16 * te_cfg.d_model as u64 + 3 * te_cfg.d_ff as u64) * 4;
+    scratch
+        + te_cfg
+        .param_list()
+        .iter()
+        .filter(|(name, _)| match name.strip_prefix("blocks.") {
+            Some(rest) => rest.split('.').next().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l < layers),
+            None => !name.starts_with("out.") && !name.starts_with("lm_head"),
+        })
+        // `param_list` gives element counts, not shapes; every quantisable
+        // leaf here is a 2-D linear and every f32-in-both-tiers leaf is a 1-D
+        // norm scale, so element count alone decides the width.
+        .map(|(name, numel)| {
+            let two_d = name.ends_with(".weight") && !name.contains("norm") && !name.contains("ln");
+            *numel as u64 * if precision == crate::Precision::Int8 && two_d { 1 } else { 4 }
+        })
+        .sum::<u64>()
+}
+
+/// Where the text encoder is built, and at what width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TePlacement {
+    /// The canonical card to build the truncated shard on, or `None` for the
+    /// whole encoder on whatever device the caller is already on.
+    pub gpu_index: Option<usize>,
+    pub int8: bool,
+}
+
+impl TePlacement {
+    /// The historical default: the whole encoder, here, in f32.
+    pub fn here() -> TePlacement {
+        TePlacement { gpu_index: None, int8: false }
+    }
+}
+
+/// `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]`, if set. Kept as an OVERRIDE of the
+/// automatic decision below, not as the way to express it: an operator who
+/// has already pinned a layout keeps it, and everybody else stops needing to
+/// know the layout exists.
+fn te_device_override() -> Result<Option<TePlacement>, String> {
+    let Some(s) = std::env::var("BRAIN_FLUX2_TE_DEVICE").ok() else { return Ok(None) };
+    let Some(rest) = s.strip_prefix("gpu") else { return Ok(None) };
+    let (idx_s, int8) = match rest.strip_suffix(":i8") {
+        Some(p) => (p, true),
+        None => (rest, false),
+    };
+    let idx: usize = idx_s.parse().map_err(|_| format!("bad BRAIN_FLUX2_TE_DEVICE {s} (gpu<i>[:i8])"))?;
+    Ok(Some(TePlacement { gpu_index: Some(idx), int8 }))
+}
+
+/// Ask the engine where this pipeline's parts go.
+///
+/// Returns the DiT's home and the text encoder's placement. The VAE is
+/// declared `with("dit")` - it decodes the DiT's own latents, so a cross-card
+/// split there would cost a transfer per step.
+///
+/// The text encoder's numeric tier follows the DiT's, and is not derived from
+/// an estimate. An int8 run asks for the int8 encoder; an f32 run asks for the
+/// f32 one, and falls back to int8 only if that does not fit anywhere.
+///
+/// That is deliberate. The one configuration this pipeline has been measured
+/// in on two cards is an int8 DiT beside a truncated **int8** encoder, and a
+/// placement estimate is an estimate: choosing the far larger f32 encoder for
+/// an int8 run on the strength of one is how a plan that arithmetically fits
+/// becomes a driver out-of-memory. Truncation itself is free of that risk -
+/// `Shard::owns` is `l < end` and the deepest tap is layer 27, so the layers
+/// past it are never read and a truncated shard's conditioning is
+/// bit-identical to a whole encoder's at the same width.
+fn plan_parts(cfg: &Flux2Config, precision: crate::Precision, n_joint: u64, max_batch: u64) -> (gpu_core::devices::Homes, TePlacement) {
+    let te_cfg = te_config(cfg);
+    let layers = *TAP_LAYERS.iter().max().unwrap();
+    let dit = gpu_core::devices::Need::sized("dit", dit_bytes(cfg, precision, n_joint, max_batch), 0).apart();
+    // The VAE decoder's transient working set at these resolutions; small
+    // beside the DiT, and it must not be the reason a plan is refused.
+    let vae = gpu_core::devices::Need::sized("vae", 2u64 << 30, 0).with("dit");
+    let mut why = String::new();
+    // The DiT's tier first, then the smaller one as a fallback. For an int8
+    // run those are the same value, so the loop tries int8 once.
+    let tiers = if precision == crate::Precision::Int8 { [true, true] } else { [false, true] };
+    for int8 in tiers {
+        let te = gpu_core::devices::Need::sized("te", te_bytes(&te_cfg, layers, cfg.txt_len as u64, int8), 0).apart();
+        let homes = match gpu_core::devices::place(&[dit.clone(), te, vae.clone()]) {
+            Ok(h) => h,
+            Err(e) => {
+                why = e;
+                continue;
+            }
+        };
+        let Some(t) = homes.of("te") else { continue };
+        // What was PLANNED must be what is BUILT. The plan costed a
+        // truncated shard, so a truncated shard is what goes on the card -
+        // whether or not it ended up beside the DiT. (A real two-card run
+        // found this the hard way: planning the truncated encoder and then
+        // building the whole one on the same card is a plan that was never
+        // about the model that got built, and it OOMs.)
+        if let gpu_core::devices::Home::Gpu(i) = t {
+            return (homes, TePlacement { gpu_index: Some(i as usize), int8 });
+        }
+        return (homes, TePlacement::here());
+    }
+    // Nothing fits even at int8. Fall back to the historical layout rather
+    // than refusing here - the operator may know something the estimate does
+    // not - but say WHY first, with the real numbers, so the driver OOM that
+    // probably follows is not the first news of it.
+    if !why.is_empty() {
+        eprintln!("flux2: no automatic placement fits ({why}); building on the ambient device");
+    }
+    let here = gpu_core::devices::selected_device()
+        .map(|d| gpu_core::devices::Home::Gpu(d.index))
+        .unwrap_or(gpu_core::devices::Home::Cpu);
+    (gpu_core::devices::Homes::new(vec![("dit".into(), here), ("te".into(), here), ("vae".into(), here)]), TePlacement::here())
+}
+
+/// Which Qwen3 the text encoder is, per DiT width. One place, so the encoder
+/// COSTED for placement is provably the encoder BUILT.
+fn te_config(cfg: &Flux2Config) -> qwen3::QwenConfig {
+    if cfg.context_in_dim == 12288 {
+        qwen3::QwenConfig::qwen3_8b()
+    } else {
+        qwen3::QwenConfig::qwen3_4b()
+    }
+}
+
+/// Build the FLUX.2 text encoder: Qwen3-4B (klein-4b) or Qwen3-8B (klein-9b),
+/// sized for one `txt_len`-token sequence, ready for the 3-tap masked-pad
+/// conditioning [`Pipeline::encode_prompt`] and [`crate::finetune`] both read.
+///
+/// One implementation for both callers on purpose. Generation and fine-tuning
+/// must condition on the *same* encoder or an adapter trained by one is
+/// trained against features the other does not produce, and the two are easy
+/// to drift apart: the finetune path had its own copy that still slurped the
+/// whole checkpoint as an fp32 `HashMap` (`read_model_dir` +
+/// `brain_init_from_hf`) long after this one stopped.
+///
+/// **Streamed, not slurped.** For Qwen3-8B the eager map is the largest host
+/// allocation the process makes, and it is made only to be read once, tensor
+/// by tensor, into device buffers and then dropped. A mapped `WeightReader` +
+/// `RemapSource` hands `new_shard`/`new_shard_i8` the same bytes through the
+/// `checkpoint::TensorSource` seam they already accept, so the host holds one
+/// tensor at a time instead of the model.
+///
+/// **Inference-only.** The encoder is read, never trained: nothing in this
+/// crate differentiates it. `Qwen::new`'s `train = true` gave every parameter
+/// `Role::Trainable`, which allocates a gradient and two Adam moments beside
+/// each weight - four times the model, for three buffers no code path here
+/// ever reads. `Role::Frozen` allocates the weights only, and the forward is
+/// bit-identical (`qwen3`'s `frozen_and_trainable_builds_agree_on_the_forward`).
+///
+/// `BRAIN_FLUX2_TE_NO_STREAM=1` forces the old whole-map route. Not a
+/// correctness switch - both produce the same bytes, pinned per tensor in
+/// `qwen3` - but it is how the two are A/B'd on a real checkpoint, and a valve
+/// if a configuration ever needs the map route back.
+pub fn build_text_encoder(cfg: &Flux2Config, paths: &Paths) -> Result<qwen3::Qwen, String> {
+    // No plan in hand (the finetune path, a direct library caller): honour an
+    // explicit override, else build here - exactly the historical behaviour.
+    let te = te_device_override()?.unwrap_or_else(TePlacement::here);
+    build_text_encoder_on(cfg, paths, te)
+}
+
+/// [`build_text_encoder`] with the placement already decided.
+pub fn build_text_encoder_on(cfg: &Flux2Config, paths: &Paths, te: TePlacement) -> Result<qwen3::Qwen, String> {
+    let te_cfg = te_config(cfg);
+    let te_no_stream = std::env::var("BRAIN_FLUX2_TE_NO_STREAM").is_ok_and(|v| v != "0");
+    let te_eager: Option<std::collections::HashMap<String, Vec<f32>>> = if te_no_stream {
+        let ts = checkpoint::safetensors::read_model_dir(std::path::Path::new(&paths.te))?;
+        Some(qwen3::import::brain_init_from_hf(ts, &te_cfg)?)
+    } else {
+        None
+    };
+    let te_reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&paths.te))
+        .map_err(|e| format!("flux2: open text encoder {}: {e}", paths.te))?;
+    // TE placement: default = ambient device; `BRAIN_FLUX2_TE_DEVICE=gpu<i>`
+    // builds a truncated fp32 shard on that card, so the DiT can own the
+    // other card whole. `Shard::owns` is `l < end`, so the shard keeps
+    // layers `[0, deepest)` - the residual stream the deepest tap reads has
+    // passed through exactly those, and the remaining layers, the final
+    // norm and the LM head are never read. A `:i8` suffix (`gpu<i>:i8`)
+    // uses the int8 (DP4A) shard instead, which is several times smaller.
+    // The masked-pad kmask path is shared by both shard graphs, so parity
+    // is unchanged (int8 is the lossy tier, gated in its own test).
+    //
+    // This is a TWO-CARD layout. Putting the encoder on the DiT's own card
+    // is not a supported configuration at klein-9b/1024x768: measured, the
+    // DiT plus VAE alone comes close to filling a 24 GB card, and even the
+    // truncated int8 encoder is far too large to join it. See the FLUX.2
+    // roadmap for the measured budgets. Today that combination fails as a
+    // raw device out-of-memory rather than a refusal naming the two
+    // budgets, which is a known gap recorded there.
+    let deepest = *TAP_LAYERS.iter().max().unwrap();
+    // `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]` is user input, parsed to a
+    // canonical card index at this edge; the shard's gpu_index is what
+    // places the build (device registry) - later device creation (VAE)
+    // stays on the ambient card beside the DiT.
+    Ok(match te.gpu_index {
+        Some(idx) => {
+            let te_i8 = te.int8;
+            let shard = qwen3::Shard { start: 0, end: deepest, embed: true, head: false, gpu_index: idx };
+            // Shard-aware coverage: this build reads the embedding and
+            // layers `[0, deepest)` and nothing else, so the checkpoint is
+            // required to carry exactly those. The layers past the tap,
+            // the final norm and the LM head are neither read nor demanded
+            // - previously they had to be present (and, on a checkpoint
+            // still being fetched, downloaded) purely to be validated and
+            // discarded. Narrowed, not weakened: a tensor that IS present
+            // is still element-count checked, and a tensor mapping outside
+            // the config's full parameter list is still a hard error.
+            let streamed;
+            let src: &dyn checkpoint::TensorSource = match &te_eager {
+                Some(m) => m,
+                None => {
+                    streamed = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
+                    &streamed
+                }
+            };
+            if te_i8 {
+                qwen3::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, src, shard)
+            } else {
+                qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, src, false, shard)
+            }
+        }
+        // Placed here: the whole encoder on the ambient device, with the
+        // weights arriving one tensor at a time. A whole shard requires the
+        // whole `param_list()`, so the coverage check here is identical to
+        // the one this path always ran.
+        None => {
+            let shard = qwen3::Shard::whole(te_cfg.n_layers as usize);
+            let streamed;
+            let src: &dyn checkpoint::TensorSource = match &te_eager {
+                Some(m) => m,
+                None => {
+                    streamed = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
+                    &streamed
+                }
+            };
+            qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, src, false, shard)
+        }
+    })
+}
+
 /// A ready-to-generate model: DiT + VAE + text encoder held together.
 pub struct Pipeline {
     pub cfg: Flux2Config,
@@ -298,6 +593,11 @@ pub struct Pipeline {
     te: qwen3::Qwen,
     vae_cfg: vae::VaeConfig,
     vae_tensors: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>,
+    /// Where this pipeline's parts were placed. Held because the VAE is built
+    /// lazily, per generation, from host tensors: without it the encoder and
+    /// decoder would land on the process-wide default card rather than beside
+    /// the DiT whose latents they are for.
+    homes: gpu_core::devices::Homes,
     bn_mean: Vec<f32>,
     bn_var: Vec<f32>,
 }
@@ -419,108 +719,26 @@ impl Pipeline {
     /// single-stream.
     pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
         let n_max = cfg.txt_len as u32 + n_img_max;
-        let gpu = gpu_core::Gpu::new(crate::model::KERNELS);
-        let model = Self::build_dit(cfg, paths, n_max, adapter, precision, max_batch.max(1), gpu)?;
+        // Ask the engine where this pipeline's three parts go, then build
+        // each one there. Nothing below names a card.
+        let (homes, auto_te) = plan_parts(cfg, precision, n_max as u64, max_batch.max(1) as u64);
+        // An operator who pinned a layout keeps it; everyone else gets the
+        // automatic one. Either way the run says what it did, in the same
+        // place it reports reference sizes and token counts.
+        let te_place = te_device_override()?.unwrap_or(auto_te);
+        eprintln!(
+            "flux2: placement {} (text encoder: {})",
+            homes.describe(),
+            match te_place.gpu_index {
+                Some(i) => format!("truncated {} shard on gpu{i}", if te_place.int8 { "int8" } else { "f32" }),
+                None => "whole encoder beside the DiT".to_string(),
+            }
+        );
+        let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
+        let model = homes.run("dit", || Self::build_dit(cfg, paths, n_max, adapter, precision, max_batch.max(1), gpu))??;
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&paths.tokenizer)?;
-        let te_cfg = if cfg.context_in_dim == 12288 {
-            qwen3::QwenConfig::qwen3_8b()
-        } else {
-            qwen3::QwenConfig::qwen3_4b()
-        };
-        // Streamed, not slurped. `read_model_dir` + `brain_init_from_hf` built
-        // the WHOLE encoder as an fp32 `HashMap` on the host - for Qwen3-8B
-        // that is the largest host allocation the process makes, and it is
-        // made only to be read once, tensor by tensor, into device buffers and
-        // then dropped. A mapped `WeightReader` + `RemapSource` hands
-        // `new_shard`/`new_shard_i8` the same bytes through the
-        // `checkpoint::TensorSource` seam they already accept, so the host
-        // holds one tensor at a time instead of the model.
-        //
-        // `BRAIN_FLUX2_TE_NO_STREAM=1` forces the old whole-map route. Not a
-        // correctness switch - both produce the same bytes, pinned per tensor
-        // in `qwen3` - but it is how the two are A/B'd on a real checkpoint,
-        // and a valve if a configuration ever needs the map route back.
-        let te_no_stream = std::env::var("BRAIN_FLUX2_TE_NO_STREAM").is_ok_and(|v| v != "0");
-        let te_eager: Option<std::collections::HashMap<String, Vec<f32>>> = if te_no_stream {
-            let ts = checkpoint::safetensors::read_model_dir(std::path::Path::new(&paths.te))?;
-            Some(qwen3::import::brain_init_from_hf(ts, &te_cfg)?)
-        } else {
-            None
-        };
-        let te_reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&paths.te))
-            .map_err(|e| format!("flux2: open text encoder {}: {e}", paths.te))?;
-        // TE placement: default = ambient device; `BRAIN_FLUX2_TE_DEVICE=gpu<i>`
-        // builds a truncated fp32 shard on that card, so the DiT can own the
-        // other card whole. `Shard::owns` is `l < end`, so the shard keeps
-        // layers `[0, deepest)` - the residual stream the deepest tap reads has
-        // passed through exactly those, and the remaining layers, the final
-        // norm and the LM head are never read. A `:i8` suffix (`gpu<i>:i8`)
-        // uses the int8 (DP4A) shard instead, which is several times smaller.
-        // The masked-pad kmask path is shared by both shard graphs, so parity
-        // is unchanged (int8 is the lossy tier, gated in its own test).
-        //
-        // This is a TWO-CARD layout. Putting the encoder on the DiT's own card
-        // is not a supported configuration at klein-9b/1024x768: measured, the
-        // DiT plus VAE alone comes close to filling a 24 GB card, and even the
-        // truncated int8 encoder is far too large to join it. See the FLUX.2
-        // roadmap for the measured budgets. Today that combination fails as a
-        // raw device out-of-memory rather than a refusal naming the two
-        // budgets, which is a known gap recorded there.
-        let deepest = *TAP_LAYERS.iter().max().unwrap();
-        // `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]` is user input, parsed to a
-        // canonical card index at this edge; the shard's gpu_index is what
-        // places the build (device registry) — later device creation (VAE)
-        // stays on the ambient card beside the DiT.
-        let te = match std::env::var("BRAIN_FLUX2_TE_DEVICE").ok().as_deref() {
-            Some(s) if s.starts_with("gpu") => {
-                let (idx_s, te_i8) = match s[3..].strip_suffix(":i8") {
-                    Some(p) => (p, true),
-                    None => (&s[3..], false),
-                };
-                let idx: usize = idx_s.parse().map_err(|_| format!("bad BRAIN_FLUX2_TE_DEVICE {s} (gpu<i>[:i8])"))?;
-                let shard = qwen3::Shard { start: 0, end: deepest, embed: true, head: false, gpu_index: idx };
-                // Shard-aware coverage: this build reads the embedding and
-                // layers `[0, deepest)` and nothing else, so the checkpoint is
-                // required to carry exactly those. The layers past the tap,
-                // the final norm and the LM head are neither read nor demanded
-                // - previously they had to be present (and, on a checkpoint
-                // still being fetched, downloaded) purely to be validated and
-                // discarded. Narrowed, not weakened: a tensor that IS present
-                // is still element-count checked, and a tensor mapping outside
-                // the config's full parameter list is still a hard error.
-                let streamed;
-                let src: &dyn checkpoint::TensorSource = match &te_eager {
-                    Some(m) => m,
-                    None => {
-                        streamed = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
-                        &streamed
-                    }
-                };
-                if te_i8 {
-                    qwen3::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, src, shard)
-                } else {
-                    qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, src, false, shard)
-                }
-            }
-            // No explicit placement: the whole encoder on the ambient device,
-            // exactly what `Qwen::new` builds (whole shard, `train`, fp32) -
-            // only the weights now arrive one tensor at a time. A whole shard
-            // requires the whole `param_list()`, so the coverage check here is
-            // identical to the one this path always ran.
-            _ => {
-                let shard = qwen3::Shard::whole(te_cfg.n_layers as usize);
-                let streamed;
-                let src: &dyn checkpoint::TensorSource = match &te_eager {
-                    Some(m) => m,
-                    None => {
-                        streamed = qwen3::import::hf_shard_source(&te_reader, &te_cfg, &shard)?;
-                        &streamed
-                    }
-                };
-                qwen3::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, src, true, shard)
-            }
-        };
+        let te = build_text_encoder_on(cfg, paths, te_place)?;
 
         let vp = std::path::Path::new(&paths.vae);
         let (vae_file, vae_json) = if vp.is_dir() {
@@ -553,7 +771,7 @@ impl Pipeline {
             return Err("vae checkpoint missing bn.running_{mean,var}".into());
         }
 
-        Ok(Pipeline { cfg: cfg.clone(), model, tok, te, vae_cfg, vae_tensors: map, bn_mean, bn_var })
+        Ok(Pipeline { cfg: cfg.clone(), model, tok, te, vae_cfg, vae_tensors: map, bn_mean, bn_var, homes })
     }
 
     /// Prompt → `[txt_len, context_in_dim]` conditioning (masked-pad,
@@ -583,7 +801,7 @@ impl Pipeline {
     /// VAE-encode an RGB image (`[-1,1]` CHW) to packed+normalized latent
     /// tokens `[lh*lw, 128]` (row-major, matching `position_ids`).
     pub fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
-        let enc = vae::VaeEncoder::from_diffusers(self.vae_cfg.clone(), &self.vae_tensors, h, w, None);
+        let enc = self.homes.run("vae", || vae::VaeEncoder::from_diffusers(self.vae_cfg.clone(), &self.vae_tensors, h, w, None))?;
         let (lh8, lw8) = ((h / 8) as usize, (w / 8) as usize);
         let mean = enc.encode_mean(chw, lh8 as u32, lw8 as u32);
         let eps = self.vae_cfg.batch_norm_eps;
@@ -615,7 +833,7 @@ impl Pipeline {
         let eps = self.vae_cfg.batch_norm_eps;
         let unpacked = vae::latent::unpack(&packed, 32, lh * 2, lw * 2, &self.bn_mean, &self.bn_var, eps);
         let (h, w) = ((lh * 16) as u32, (lw * 16) as u32);
-        let dec = vae::VaeDecoder::from_diffusers(self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32, None);
+        let dec = self.homes.run("vae", || vae::VaeDecoder::from_diffusers(self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32, None))?;
         let chw = dec.decode(&unpacked);
         // clamp FIRST, then rescale (reference order — reversed produces artifacts)
         let n = (h * w) as usize;

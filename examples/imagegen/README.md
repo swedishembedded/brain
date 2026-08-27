@@ -93,9 +93,13 @@ The only example here that is not a D-Bus client: a short shell wrapper around
 
 ```bash
 BRAIN_FLUX2_DIT=… BRAIN_FLUX2_VAE=… BRAIN_FLUX2_TE=… BRAIN_FLUX2_TOKENIZER=… \
-BRAIN_DEVICE=gpu0 BRAIN_FLUX2_TE_DEVICE=gpu1:i8 \
   examples/imagegen/portrait_from_refs.sh ~/photos/alice
 ```
+
+No device variables: with none given, brain places the DiT, the text encoder
+and the VAE itself - on two cards when the machine has two and they do not fit
+one, on one card when it has one - and prints the placement it chose.
+`BRAIN_DEVICE` / `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]` still override it.
 
 The folder holds numbered photographs of the person (`ref-01.jpeg`, `02.png`,
 `3.webp` - any format brain decodes) plus one `target.*`, the photograph whose

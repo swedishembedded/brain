@@ -144,7 +144,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_QWEN35_MAX_BATCH` | Qwen3.8-27B dense serving batch slots | 4 |
 | `BRAIN_LFM2_BATCH` | LFM batched-forward slots per instance | 2 |
 | `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
-| `BRAIN_FLUX2_TE_DEVICE` | FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated int8 shard on that card) | co-located with the DiT |
+| `BRAIN_FLUX2_TE_DEVICE` | **Override** for FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated shard on that card). Unset, placement is automatic: the pipeline declares the DiT, encoder and VAE with their costs and the engine places them on cards that can hold them (`residency::plan`, reached through `gpu_core::devices::place`), printing what it chose | automatic |
 | `BRAIN_FLUX2_NO_STREAM` | `1` forces FLUX.2 to build its DiT from a whole fp32 tensor map instead of requantising a Q8_0 GGUF one tensor at a time. Not a correctness switch - both routes produce the same weights - but it is how the two are A/B'd, and a valve if a checkpoint ever trips the streamed path | off (stream when the tier and file allow it) |
 | `BRAIN_FLUX2_TE_NO_STREAM` | `1` forces the FLUX.2 text encoder to be imported as one whole fp32 map instead of streamed per tensor from a mapping. Same character as `BRAIN_FLUX2_NO_STREAM`: identical weights either way, kept as an A/B instrument and a fallback | off (streamed) |
 | `BRAIN_FLUX2_ALLOW_NC` | `1` opts in to the FLUX Non-Commercial-licensed 9B variants | required, not set |
