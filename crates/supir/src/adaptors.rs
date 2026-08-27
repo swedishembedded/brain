@@ -335,6 +335,18 @@ impl SkipFuse for Adaptors {
         let control = &self.hs[j.control_idx];
         assert_eq!(control.c, j.skip_c, "adaptors: join {k}'s control tensor is {} wide, schedule says {}", control.c, j.skip_c);
 
+        // Tapped under `proj{pm_idx}.in{0,1,2}`, matching
+        // `tools/goldens/supir_dump_reference.py`'s forward-hook capture of
+        // upstream `ZeroSFT.forward(self, c, h, h_ori=None, ...)`'s
+        // POSITIONAL args in call order: `c` (the control tensor) is in0,
+        // `h` (the skip) is in1, `h_ori` is in2 - tapping only the output
+        // would miss a permutation bug among these three same-width-at-some-
+        // joins tensors (see the module doc's "which trunk hidden state"
+        // section).
+        b.tap(format!("proj{}.in0", j.pm_idx), &control.buf, control.c * control.h * control.w);
+        b.tap(format!("proj{}.in1", j.pm_idx), &skip.buf, skip.c * skip.h * skip.w);
+        b.tap(format!("proj{}.in2", j.pm_idx), &h_ori.buf, h_ori.c * h_ori.h * h_ori.w);
+
         let c_out = j.c_out();
         let h_raw = b.concat(h_ori.c, skip.c, h_ori.h, h_ori.w, &h_ori.buf, &skip.buf);
         let zc = self.zero_conv(b, j.pm_idx, control);
@@ -345,6 +357,7 @@ impl SkipFuse for Adaptors {
 
         let n = c_out * h_ori.h * h_ori.w;
         let lerped = b.mix(n, self.control_scale, 1.0 - self.control_scale, &out, &h_raw);
+        b.tap(format!("proj{}", j.pm_idx), &lerped, n);
         Map { buf: lerped, c: c_out, h: h_ori.h, w: h_ori.w }
     }
 
@@ -354,6 +367,12 @@ impl SkipFuse for Adaptors {
         assert_eq!(control.c, m.c, "adaptors: mid control tensor is {} wide, schedule says {}", control.c, m.c);
         assert_eq!(x.c, m.c, "adaptors: mid input is {} wide, schedule says {}", x.c, m.c);
 
+        // Same call-order convention as `fuse_skip`'s taps, minus `in2`:
+        // upstream calls `project_modules[11](control[9], h)` with no
+        // `h_ori` argument at all at this site (see the module doc).
+        b.tap(format!("proj{}.in0", m.pm_idx), &control.buf, control.c * control.h * control.w);
+        b.tap(format!("proj{}.in1", m.pm_idx), &x.buf, x.c * x.h * x.w);
+
         // No `h_ori`: the general `h1 = concat(h_ori, skip + zero_conv(c))`
         // degenerates to `h1 = x + zero_conv(c)` - see config.rs's module
         // doc for why a `zero_conv` tensor still exists at this site.
@@ -362,6 +381,7 @@ impl SkipFuse for Adaptors {
         let h1_map = Map { buf: h1, c: m.c, h: x.h, w: x.w };
         // No `control_scale` lerp at the post-mid site either.
         let out = self.zero_sft_tail(b, m.pm_idx, control, &h1_map, m.c);
+        b.tap(format!("proj{}", m.pm_idx), &out, m.c * x.h * x.w);
         Map { buf: out, c: m.c, h: x.h, w: x.w }
     }
 
@@ -372,6 +392,12 @@ impl SkipFuse for Adaptors {
         let control = &self.hs[spec.control_idx];
         assert_eq!(x.c, spec.x_c, "adaptors: cross site {}: x is {} wide, schedule says {}", spec.pm_idx, x.c, spec.x_c);
         assert_eq!(control.c, spec.context_c, "adaptors: cross site {}: context is {} wide, schedule says {}", spec.pm_idx, control.c, spec.context_c);
+
+        // Same convention, mapped onto upstream `ZeroCrossAttn.forward(self,
+        // context, x, ...)`'s positional order: `context` (the control
+        // tensor) is in0, `x` (the up-block's own running state) is in1.
+        b.tap(format!("proj{}.in0", spec.pm_idx), &control.buf, control.c * control.h * control.w);
+        b.tap(format!("proj{}.in1", spec.pm_idx), &x.buf, x.c * x.h * x.w);
 
         let (tq, tkv) = (x.h * x.w, control.h * control.w);
         let heads = spec.heads();
@@ -393,6 +419,7 @@ impl SkipFuse for Adaptors {
 
         let n = x.c * x.h * x.w;
         let out = b.mix(n, 1.0, self.control_scale, &x.buf, &ao_chw);
+        b.tap(format!("proj{}", spec.pm_idx), &out, n);
         Map { buf: out, c: x.c, h: x.h, w: x.w }
     }
 }

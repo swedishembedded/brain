@@ -70,15 +70,26 @@ pub fn record(
     let x = r.blocks().add(c0 * h * w, &cin, &hint);
     r.blocks().free((c0 * h * w) as u64, cin);
     r.blocks().free((c0 * h * w) as u64, hint);
-    r.blocks().tap(format!("{prefix}hs0"), &x, c0 * h * w);
 
     let (hh, skips, ch, cw) = r.down_path(cfg, h, w, enc_in, &x);
     let mid = r.mid_block(cfg, ch, cw, enc_in, &hh);
     let cmid = *cfg.block_out_channels.last().expect("levels >= 1");
 
     let mut hs: Vec<Map> = skips.into_iter().map(|(buf, c, h, w)| Map { buf, c, h, w }).collect();
-    r.blocks().tap(format!("{prefix}hs_mid"), &mid, cmid * ch * cw);
     hs.push(Map { buf: mid, c: cmid, h: ch, w: cw });
+
+    // Tapped under `trunk.hs{k}` (no `prefix`, unlike every other tap in this
+    // function) to match `tools/goldens/supir_dump_reference.py`'s own
+    // `trunk.hs{k}` naming exactly - the golden hooks `control_model`'s
+    // forward and records its 10 raw list outputs by list index, with no
+    // notion of this crate's `control_model.` weight-name prefix at all.
+    // `hs[0]` IS the `x` this function used to tap separately as
+    // `{prefix}hs0` (the conv_in+hint-add output, `down_path`'s own first
+    // skip push - see that function's doc), so no information is lost by
+    // folding both former taps into this one loop.
+    for (k, m) in hs.iter().enumerate() {
+        r.blocks().tap(format!("trunk.hs{k}"), &m.buf, m.c * m.h * m.w);
+    }
     hs
 }
 
