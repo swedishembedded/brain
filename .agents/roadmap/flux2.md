@@ -906,16 +906,41 @@ That is not the thing that will decide whether an adapter trains. So the
 answer is: **the weight-quantization term is affordable**, and int8 is worth
 building.
 
-Two things this does NOT say, and they are why the trainer still ships fp32:
+One thing this does NOT say: it does not cover the **activation**
+quantization a real `matmul_i8_dyn` adds (a fresh per-token scale on every
+activation feeding every linear). That term is unmeasured here and has to be
+measured on its own before an int8 trainer is trusted.
 
-* it does not cover the **activation** quantization a real `matmul_i8_dyn`
-  adds (a fresh per-token scale on every activation feeding every linear).
-  That term is unmeasured here and has to be measured on its own.
-* the payoff is smaller than it looks. The forward needs `W` row-quantized;
-  the backward's `dx = dy.W` contracts over `W`'s ROW axis, where a per-row
-  scale cannot be factored out of the sum - so a dp4a `dx` needs a SECOND,
-  transposed int8 copy. That is 2x off fp32, not 4x: klein-9b would go from
-  36 GB to about 18 GB, which still does not fit one 24 GiB card next to
-  2.4 GB of activations with room to spare. The two-card fp32 split, which
-  exists and is gated bit-for-bit, gets to the same place today with no
-  fidelity question at all.
+### What an int8 base would actually buy, and what it would cost to build
+
+The prize is **not** mainly memory, and an earlier draft of this section had
+the memory arithmetic backwards. Setting it straight:
+
+* the forward needs `W` row-quantized. The backward's `dx = dy.W` contracts
+  over `W`'s ROW axis, where a per-row scale cannot be factored out of the
+  sum - so a dp4a `dx` needs a SECOND, transposed int8 copy. That is 2x off
+  fp32, not 4x.
+* 2x is still enough. klein-9b's 9.05 G parameters are 36.2 GB at fp32 and
+  about 18.1 GB as two int8 copies; next to roughly 2.4 GB of activations at
+  1536 joint tokens that is about 20.5 GB, which **does** fit one 24 GiB card,
+  with a few GB of headroom. So int8 collapses the two-card split back to one
+  card.
+* the bigger prize is the **dequantise that never happens**. The released
+  klein-9b DiT is Q8_0, and both trainers today go through
+  `read_dit_tensors`, which materialises the whole thing as host fp32 before a
+  single step runs - that expansion, not the training, is what makes the first
+  step so far away (the host trainer has been observed spending over an hour
+  at roughly 100 GB RSS without reaching step 1 at size 512).
+  `weights::DitWeights::try_i8_rect` already goes Q8_0 -> packed int8 with no
+  fp32 intermediate for the inference path; a trainer that took its frozen
+  base the same way would inherit that and start in minutes.
+* what is missing to build it: the transposed copy needs a requantisation
+  along the OTHER axis (Q8_0 blocks run along rows, so the transposed
+  direction cannot reuse `try_i8_rect`'s block-aligned fast path and has to be
+  built explicitly), plus an int8 `dx` GEMM. Neither is speculative - the
+  fidelity measurement above says the weight term is affordable - but both are
+  real work, and the activation term still has to be measured first.
+
+Until then the two-card fp32 split, which exists and is gated bit-for-bit,
+reaches the same place with no fidelity question at all - at the cost of the
+dequantise and a second card.
