@@ -606,10 +606,26 @@ mod tests {
     /// would mean the generic capability path is silently unreachable for it
     /// (ARCH_HANDLERS is checked first), which is exactly the kind of
     /// drift a table like this is supposed to make impossible to miss.
+    ///
+    /// One shape is exempt: a handler that exists only to add a verb the
+    /// capability wire format cannot carry, and that forwards every OTHER
+    /// verb straight back to the generic path. That arch keeps both rows on
+    /// purpose, and the exemption is checked rather than assumed -- it must
+    /// still have the ARCH_TO_MODEL row it claims to be forwarding to.
     #[test]
     fn arch_handlers_and_arch_to_model_do_not_overlap() {
+        // `sam2 track` returns a mask-sequence DIRECTORY, which no single
+        // capability blob can carry, so it needs a handler; `run_sam2`
+        // forwards everything that is not `track` to `caps_cli::run_do`, so
+        // the image path keeps its ARCH_TO_MODEL row and stays reachable.
+        const FORWARDS_TO_GENERIC: &[&str] = &["sam2"];
         for (id, _) in ARCH_HANDLERS {
-            assert!(!ARCH_TO_MODEL.iter().any(|(m, _)| m == id), "{id:?} is in both ARCH_HANDLERS and ARCH_TO_MODEL");
+            let has_model_row = ARCH_TO_MODEL.iter().any(|(m, _)| m == id);
+            if FORWARDS_TO_GENERIC.contains(id) {
+                assert!(has_model_row, "{id:?} is exempted as forwarding to the generic path, but has no ARCH_TO_MODEL row to forward to");
+                continue;
+            }
+            assert!(!has_model_row, "{id:?} is in both ARCH_HANDLERS and ARCH_TO_MODEL");
         }
     }
 }
