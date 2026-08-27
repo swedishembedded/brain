@@ -227,19 +227,20 @@ E5-2690 v3, for the `end: 27, embed, no head` shard this pipeline builds:
 
 | term | before | after |
 |---|---|---|
-| text-encoder import, host peak | 31.67 GiB | **3.48 GiB** |
+| text-encoder import, host peak | 31.67 GiB | **3.47 GiB** |
+| text-encoder import, wall | 3.4 s | 5.5 s |
 | tensors read | 399 | **298** |
 | parameters read | 8.19 G | **5.83 G** |
-| whole-process host peak | 32.9 GB | **11.4 GB** |
+| whole-process host peak | 33.35 GB | **11.27 GB** |
+| whole-process wall | 49.2 s | 49.3 s |
 
 The import figures come from `qwen3`'s env-gated real-checkpoint test and are
 reproducible to the megabyte, identical under `BRAIN_DEVICE=cpu`. The
-whole-process figure is weaker evidence and should be labelled as such: both
-cards were contended by another job, and the run it came from reached the VAE
-decode and then hit a device OOM caused by that contention rather than
-completing. The peak occurs during load, well before the decode, so it is a
-real peak for the phases involved - but a clean completed before/after pair on
-an uncontended box has not been taken.
+whole-process figures are a completed 1024x768 4-step klein-9b int8 generation
+on otherwise idle cards, best of 2, warm page cache.
+
+**The output PNG md5 is identical before and after**, which is the end-to-end
+statement of the same bit-identity the tests assert per tensor.
 
 **Bit-identical, not parity-gated.** Both routes decode the same bf16 bytes
 with the same converter; only where the decoded f32 lives differs. All 298
@@ -247,12 +248,16 @@ tensors of the shard are pinned with `assert_eq!` on values against the eager
 import, on the real checkpoint. Five gates, each mutation-verified, each
 failing only for its own mutation.
 
-**The load is SLOWER, and that is the trade.** About 15 s against 4 s in
-isolation: bounding the footprint means dropping each tensor's pages once
-decoded, so the streamed read stays disk-bound while the eager one is served
-from a warm page cache. 28 GB of host RAM bought with load time - the same
-shape of trade the direct Q8_0 requantiser made, and it should not be
-described as a win.
+**This was a memory-for-time trade until the cause of the "time" was found,
+and then it stopped being one.** Streaming initially cost 13.8 s of wall (49.2
+-> 63.0 s). The first hypothesis - that `advise_dontneed_tensor` was defeating
+kernel readahead - was tested by disabling it and REFUTED: that costs about
+0.4 s and saves 7.6 GiB, so it is close to free. The real cause was that
+`mmap::decode_into`, the decoder every streaming read goes through, was serial
+while the eager whole-file decoder had been fanned across the thread pool long
+before. Sharing one parallel decoder took the streamed import from 15.0 s to
+5.5 s and the end-to-end wall back to parity. Recorded because the wrong
+hypothesis was plausible and the right one was one measurement away.
 
 Still eager, deliberately: the UNPLACED text-encoder branch (no
 `BRAIN_FLUX2_TE_DEVICE`) streams but still builds a whole encoder, because
