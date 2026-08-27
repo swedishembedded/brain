@@ -19,10 +19,14 @@
 //! (whole-model host fwd+bwd under the rectified-flow velocity-MSE loss, incl.
 //! the conditioning path) → [`lora`] (frozen-base low-rank adapters over the
 //! fused checkpoint layout) → [`finetune`] (captioned-image folder →
-//! trained adapter, host f32 trainer).
+//! trained adapter). [`devgrad`] + [`devtrain`] are the **device** (WGSL)
+//! instantiation of the same op sequence, gated against the host reference
+//! above; `finetune` selects between them explicitly.
 
 pub mod caps;
 pub mod config;
+pub mod devgrad;
+pub mod devtrain;
 pub mod finetune;
 pub mod grad;
 pub mod import;

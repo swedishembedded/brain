@@ -111,6 +111,53 @@ impl LoraAdapter {
     pub fn alpha(&self) -> f32 {
         self.scale * self.rank as f32
     }
+    /// The delta scale `α/r` every pair's `B·A` is multiplied by.
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// Every adapter pair in ONE canonical order: for each double block the
+    /// image stream's seven leaves then the text stream's, then each single
+    /// block's seven - the same walk [`Self::to_tensors`] serialises in. The
+    /// device trainer holds its own device-side pairs in this order and steps
+    /// them in lockstep, so the two cannot drift.
+    pub fn pairs(&self) -> Vec<&Pair> {
+        let mut v = Vec::new();
+        for (li, lt) in &self.dbl {
+            v.extend(stream_pairs(li));
+            v.extend(stream_pairs(lt));
+        }
+        for sl in &self.sgl {
+            v.extend(single_pairs(sl));
+        }
+        v
+    }
+
+    /// [`Self::pairs`], mutably - what an optimiser step writes through.
+    pub fn pairs_mut(&mut self) -> Vec<&mut Pair> {
+        let mut v = Vec::new();
+        for (li, lt) in &mut self.dbl {
+            v.extend(stream_pairs_mut(li));
+            v.extend(stream_pairs_mut(lt));
+        }
+        for sl in &mut self.sgl {
+            v.extend(single_pairs_mut(sl));
+        }
+        v
+    }
+
+    /// Adam-step every pair from gradients already in `(dA, dB)` form -
+    /// what the device trainer produces directly, without ever materialising
+    /// the dense `dW` [`Self::step`] projects.
+    pub fn step_projected(&mut self, grads: &[(Vec<f32>, Vec<f32>)], lr: f32) {
+        self.t += 1;
+        let t = self.t;
+        let mut pairs = self.pairs_mut();
+        assert_eq!(pairs.len(), grads.len(), "adapter has {} pairs, got {} gradient pairs", pairs.len(), grads.len());
+        for (p, (da, db)) in pairs.iter_mut().zip(grads) {
+            p.adam_step(da, db, lr, t);
+        }
+    }
 
     /// Build the effective weights `W_eff = W + scale·B·A` (base cloned).
     pub fn apply(&self, base: &ModelWeights<f32>) -> ModelWeights<f32> {
