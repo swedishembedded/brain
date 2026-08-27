@@ -14,6 +14,7 @@
 //! DeepStack → import). Today: configuration.
 
 pub mod caps;
+pub mod captioner;
 pub mod config;
 pub mod encoder;
 pub mod import;

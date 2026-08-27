@@ -92,6 +92,7 @@ models/toypid.md
 models/toyseq2seq.md
 
 == Training
+training/labeling.md
 training/lora.md
 training/forecast-finetune.md
 training/federated-experts.md

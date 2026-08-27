@@ -16,6 +16,10 @@ brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 brain-capability.workspace = true
+# `captioner::Captioner` - the model-agnostic captioning contract this crate
+# satisfies. The contract crate has no model dependency; this direction is the
+# only one, so any VLM can join the seam without the seam knowing about it.
+brain-captioner.workspace = true
 brain-data.workspace = true
 brain-imaging.workspace = true
 serde_json.workspace = true

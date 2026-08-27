@@ -70,6 +70,7 @@ way.
 |---|---|
 | `brain devices` | canonical GPU table (index, PCI bus, UUID, VRAM) + ambient device selection - see [Hardware](../introduction/hardware.md) |
 | `brain data` | dataset generation and tokenizers |
+| `brain label` | caption a dataset with any vision-language model - see [Labeling a dataset](../training/labeling.md) |
 | `brain caps` | every architecture's action manifest - see above |
 | `brain serve` | serve models over HTTP/D-Bus, or (with `--stdio`) run the event-driven stdio controller - see below |
 | `brain perf` | performance benchmarking: latency/throughput/serve/sweep, vs. a baseline |

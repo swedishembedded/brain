@@ -22,6 +22,7 @@ mod federated_cli;
 mod flops_cli;
 mod flux2_cli;
 mod forecast_cli;
+mod label_cli;
 mod glm_cli;
 mod gguf_import;
 mod gpt_cli;
@@ -178,6 +179,14 @@ DEVICES
 DATA
   brain data gen <name> [--out DIR --n N --seed S]
       names: calculator | reverser | wordcalc | timeseries | shakespeare_char | gpt
+
+LABEL (caption a dataset with a vision-language model)
+  brain label images <dir> [--model qwen3vl|fastvlm] [--weights DIR]
+      [--out FILE] [--prompt \"...\"] [--trigger PHRASE] [--max-new N] [--overwrite]
+      Writes <dir>/captions.yaml - what `brain flux2 finetune` and every other
+      captioned-image trainer read. Resumable and idempotent: a re-run fills in
+      only what is missing and never overwrites a hand-edited caption unless
+      --overwrite says so. `brain label --help` for the full flag list.
 
 GPT2 (dense baseline)
   brain gpt2 train <data_dir> [--out F --steps N --batch B --block T
@@ -896,6 +905,7 @@ fn main() {
         Some("bench") => run_bench(&argv[2..]),
         Some("perf") => perf_cli::run_perf(&argv[2..]),
         Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
+        Some("label") => label_cli::run_label(&argv[2..]),
         Some("caps") => std::process::exit(caps_cli::run_caps(&argv[2..])),
         Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),

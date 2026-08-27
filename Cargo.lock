@@ -545,6 +545,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-captioner"
+version = "1.0.0"
+dependencies = [
+ "brain-data",
+ "image",
+]
+
+[[package]]
 name = "brain-capture"
 version = "1.0.0"
 dependencies = [
@@ -635,6 +643,7 @@ dependencies = [
  "brain-backend-api",
  "brain-bench",
  "brain-capability",
+ "brain-captioner",
  "brain-capture",
  "brain-catalog",
  "brain-checkpoint",
@@ -685,6 +694,7 @@ dependencies = [
  "brain-qwen3asr",
  "brain-qwen3omnimoe",
  "brain-qwen3tts",
+ "brain-qwen3vl",
  "brain-residency",
  "brain-rl",
  "brain-rrdbnet",
@@ -945,6 +955,7 @@ name = "brain-fastvlm"
 version = "1.0.0"
 dependencies = [
  "brain-capability",
+ "brain-captioner",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -1631,6 +1642,7 @@ name = "brain-qwen3vl"
 version = "1.0.0"
 dependencies = [
  "brain-capability",
+ "brain-captioner",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",

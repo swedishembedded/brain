@@ -1,0 +1,19 @@
+[package]
+name = "brain-captioner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model-agnostic captioning seam (Clip in, text out) plus the resumable folder labeler built on it. No model code."
+
+[lib]
+name = "captioner"
+path = "src/lib.rs"
+
+[dependencies]
+# `label` writes the caption file the image trainers read, through the ONE
+# writer/reader pair in `data::imageset` - so a labeled folder is by
+# construction a folder `flux2::finetune`/`s3dit` can already train on.
+brain-data.workspace = true
+# Decoding the folder's images to the HWC f32 [0,1] every captioner takes.
+# The same three codecs `brain-data` enables, for the same reason.
+image = { workspace = true, features = ["jpeg", "png", "pnm"] }

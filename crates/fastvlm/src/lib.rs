@@ -18,6 +18,7 @@ pub mod import;
 pub mod vision_import;
 /// `capability::Provider` — the image-caption action (`brain do fastvlm caption`).
 pub mod caps;
+pub mod captioner;
 #[cfg(test)]
 mod parity;
 #[cfg(test)]

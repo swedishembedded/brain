@@ -12,6 +12,9 @@ path = "src/lib.rs"
 [dependencies]
 brain-qwen3.workspace = true
 brain-capability.workspace = true
+# `captioner::Captioner` - the model-agnostic captioning contract this crate
+# satisfies, so `brain label` can drive it exactly like any other VLM.
+brain-captioner.workspace = true
 brain-model.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true

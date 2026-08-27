@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [features]
 # Optional native-Vulkan cooperative-matrix matmul path (ash + naga). OFF by
-# default — the default build stays pure wgpu/WGSL.
+# default - the default build stays pure wgpu/WGSL.
 vulkan-coopmat = ["dep:brain-vulkan"]
 # Enable the engine's fault-injection points for `brain perf faults` (G).
 fault-injection = ["brain-qwen3/fault-injection"]
@@ -38,6 +38,9 @@ brain-qwen3.workspace = true
 brain-rl.workspace = true
 brain-qwen35moe.workspace = true
 brain-qwen35.workspace = true
+brain-qwen3vl.workspace = true
+# `brain label` - the model-agnostic captioning seam plus its folder labeler.
+brain-captioner.workspace = true
 brain-fastvlm.workspace = true
 # `catalog`/`resident_moondream3` - Moondream 3's caps surface and residency adapter.
 brain-moondream3.workspace = true
@@ -124,7 +127,7 @@ sha2.workspace = true
 # absent fixture can be made fatal and absent hardware cannot.
 brain-testutil.workspace = true
 # Drive a real `apiserve::router()` in-process for the HTTP-level serving
-# gates in `tests/` (concurrency/prefix-reuse) — mirrors `crates/apiserve`'s
+# gates in `tests/` (concurrency/prefix-reuse) - mirrors `crates/apiserve`'s
 # own test setup, which cannot depend on `brain-cli` (wrong dependency
 # direction: `brain-cli` already depends on `brain-apiserve`).
 axum.workspace = true

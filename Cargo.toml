@@ -200,6 +200,7 @@ brain-modelstore = { path = "crates/modelstore" }
 brain-capability = { path = "crates/capability" }
 brain-capability-mock = { path = "crates/capability-mock" }
 brain-catalog = { path = "crates/catalog" }
+brain-captioner = { path = "crates/captioner" }
 brain-memauth = { path = "crates/memauth" }
 brain-weightset = { path = "crates/weightset" }
 brain-residency = { path = "crates/residency" }
