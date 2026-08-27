@@ -360,3 +360,114 @@ transformer's forward pass has a small, bounded payoff because its GEMMs are
 already near their row-count-independent plateau at a single sample; most of
 a served image's latency lives in the (currently unbatched) text encoder and
 VAE decode rather than in the transformer itself.
+
+## The VAE latent, measured (`flux2_latent`)
+
+All of the below is the autoencoder alone - encode, edit the latent on the
+host, decode. No DiT, no diffusion. Tesla P40 (gpu1), 1024x768 photographs of
+rooms plus one generated empty room; the latent is `[32, 96, 128]`, one cell
+per 8x8 pixel block (the DiT sees `[128, 48, 64]`, one token per 16x16 block,
+via a 2x2 unshuffle and a frozen BatchNorm - a reshape composed with a
+per-channel affine, so every linear edit below is the same edit in either
+space). Metric definitions live in `flux2::latentops::ImageMetrics`; MAD is in
+8-bit levels, `edge_corr` is the Pearson correlation of Sobel magnitudes on
+Rec.601 luma.
+
+Cost: 5.5 s to read the checkpoint and encode three images; about 2 s per
+decode once the graph is built. The decode is **bit-identical** run to run,
+across processes, and across the two cards - so any nonzero number below is
+the edit, not the hardware.
+
+**Round-trip floor.** MAD 3.39 / edge_corr 0.984 (bedroom photo), 1.24 / 0.995
+(living room), 1.02 / 0.994 (the generated empty room). The often-quoted
+"0.988 / 1.9" is about the mean of these; the spread across images is larger
+than that single figure suggests, and a textured photograph is twice as
+expensive to round-trip as a generated interior.
+
+**Latent blending is a double exposure, and it costs contrast.** At alpha 0.5
+a latent blend differs from a pixel blend of the same two decodes by MAD 10.1
+and edge_corr 0.67 - not a small difference, and not a semantic morph either.
+The direction of the difference is a loss: high-frequency energy (mean |3x3
+Laplacian|) 9.08 vs 13.58, mean saturation 11.27 vs 15.77. Averaging latents
+destroys about a third more detail and a third more colour than averaging
+pixels, and the decoder restores none of it.
+
+**Translation is equivariant; reflection and rotation are equivariant only at
+latent resolution.** `decode(roll(z))` vs `roll(decode(z))`: MAD 0.67-1.6 at
+every shift tried (1, 4, 16 cells, both axes) and at every spatial scale.
+`decode(flip(z))` vs `flip(decode(z))`: MAD 15.6, edge_corr 0.61 at full
+resolution - but box-downsample both to the latent's own 8x grid and it
+becomes MAD 2.7, edge_corr 0.988, with the knee falling exactly between 4x and
+8x. The images are indistinguishable mirrored bedrooms; the disagreement is
+entirely in fine texture. Convolution commutes with translation but not with
+reflection, and the consequence is concrete: **the latent does not store the
+fine texture, the decoder synthesizes it, and the synthesis is
+direction-dependent.** Rotation by a non-multiple of 90 degrees costs real
+content rather than texture phase - it stays at MAD 8.9 / edge_corr 0.94 even
+after 8x downsampling, and the decode is visibly soft with ringing at the
+borders.
+
+**Channel surgery: heavy-tailed, five channels of thirty-two.** Zeroing one
+channel and decoding, ranked by MAD against the unedited decode: ch3 27.7,
+ch8 24.2, ch15 9.1, ch19 8.0, ch11 6.2, then a flat tail of 27 channels
+between 1.2 and 4.7 (max/median 13.5). Signatures: ch3 is luminance-negative
+(luma -6.1, blue-weighted), ch8 luminance-positive (luma +7.6, warm), ch11 is
+almost pure chroma (saturation -13.8 with no luma or hue shift), ch15 and ch19
+carry both saturation and high-frequency energy. Scaling is close to linear in
+the removed fraction (x0.5 gives about half of zero's MAD) and mildly
+asymmetric (x2.0 gives less than zero's, the bright channels clipping at 255).
+Every channel's spatial mean is near zero, so "zero the channel" and "flatten
+it to its own mean" are the same edit - a per-channel DC offset is not where
+the information is.
+
+**Region splice: no artifact, aligned or not.** A hard 256x256 paste of one
+latent into another, decoded, differs from the ideal pixel composite by MAD
+3.8 / edge_corr 0.974 - about the round-trip floor - and looks *better* than
+the composite, because the decoder smooths the seam over about three latent
+cells instead of leaving a razor cut. Misaligning the rectangle by half a DiT
+cell (8 px) or by half a VAE cell (4 px, so boundary cells hold a genuine
+fractional mix of two unrelated latents) changes the seam-band MAD from 24.7
+to 25.3 and 27.6 - a 4-12% effect, with no visible artifact at 1:1. Feathering
+from 0 to 64 px monotonically reduces the seam-band excess (MAD 24.7 -> 12.3,
+excess desaturation 6.3 -> 0.5). Two real costs that are *not* the seam: the
+decoder's mid-block self-attention is global, so the pasted region never
+reaches its own unspliced decode (MAD 9.6 even 100 px inside the rectangle)
+and the untouched exterior still moves by MAD 2.1 arbitrarily far away.
+
+**Noise, and what actually defines a valid latent.** Gaussian noise in units
+of each channel's own spatial std, against the unedited decode: sigma 0.05 ->
+MAD 1.2 / edge_corr 0.998; 0.2 -> 4.6 / 0.966; 0.5 -> 11.5 / 0.838; 1.0 ->
+24.0 / 0.618; 2.0 -> 46.7 / 0.321. Photorealism dies between 0.5 and 1.0, the
+scene stays readable to about 2.0, and gross layout survives 3.0. The failure
+mode is coloured confetti at one-latent-cell granularity, not blur.
+Per-channel noise sensitivity tracks the zeroing ranking at Spearman 0.95
+(ch11, the chroma channel, is the one real outlier - coherent removal shows,
+random jitter averages out).
+
+The interesting part is the comparison at *matched displacement*. An alpha=0.5
+blend moves the latent 0.711 sigma-units - almost exactly the sigma 0.75 noise
+rung - yet decodes to a clean photograph while the noise decodes to confetti.
+Three hypotheses about what makes a direction "valid" were tested and all
+three failed: spatial coherence (noise smoothed to a 2/4/8-cell correlation
+length at the same amplitude is *worse*, not better - MAD 17.7 -> 32.0 with
+saturation blowing out), cross-channel subspace (noise confined to the top 13
+or the bottom 19 principal channel directions of the latent's own per-cell
+covariance is indistinguishable from noise in all 32: MAD 17.8 / 17.5 / 17.7),
+and convexity (`z_bedroom + 0.5*(z_living - z_empty)`, a difference of real
+latents that is *not* a convex combination of anything, decodes to a clean,
+sharp bedroom; so does extrapolating past an endpoint at 1.42 sigma-units,
+which produces a crisp empty room). What survives: a displacement built from
+*differences of real latents* decodes to a real-looking image at any magnitude
+tried, and a random displacement of the same size does not, no matter how its
+spatial or channel statistics are shaped. The constraint is a joint
+spatial-and-channel structure that no factorized random field reproduces, and
+it was not reducible to any simple statistic measured here.
+
+The practical consequence, and a correction: masked-generation artifacts do
+**not** come from latents failing to interpolate into valid images, and they
+do not come from partially-masked cells holding a linear blend of two
+latents. Both of those decode cleanly, and the misalignment penalty is under
+15% of an already-invisible effect. Whatever `--mask` artifacts remain have to
+be explained on the DiT side - most plausibly by the per-step renoise blending
+two trajectories that are at *inconsistent* sigma, which is not the same
+object as a mix of two clean latents.
