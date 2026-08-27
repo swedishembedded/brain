@@ -33,6 +33,7 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
 
 pub mod grad;
+pub mod skipfuse;
 
 // Kernel-table indices (order matches KERNELS).
 const K_CONV: usize = 0;

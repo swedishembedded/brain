@@ -55,6 +55,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block;
+use vae::blocks::skipfuse::{Map, SkipFuse};
 use vae::blocks::{BlockNames, Builder, Tensors};
 
 use crate::config::{BlockKind, UNetConfig, N_TIME_IDS, TRANSFORMER_NORM_EPS};
@@ -189,6 +190,13 @@ pub struct Rec<'a> {
     /// so recording it is calling these same methods a second time with the
     /// prefix switched, rather than a second private copy of the walk.
     prefix: String,
+    /// Installed by [`Unet::new_fused`]: routes [`Rec::join_skip`]/
+    /// [`Rec::fuse_mid`]/[`Rec::pre_upsample`] through a real
+    /// [`SkipFuse`] implementor instead of the plain concat/identity default.
+    fuse: Option<&'a dyn SkipFuse>,
+    /// [`SkipFuse::fuse_skip`] calls emitted so far, in pop order - what
+    /// [`Unet::new_fused`] asserts against [`SkipFuse::joins`].
+    join_idx: usize,
 }
 
 impl<'a> Rec<'a> {
@@ -239,7 +247,18 @@ impl<'a> Rec<'a> {
             reg: Some(K_FLASH_REG),
             reg2: Some(K_FLASH_REG2),
         };
-        Rec { b, flash, coop, t_enc, inject: None, site: 0, temb_act: None, prefix: String::new() }
+        Rec {
+            b,
+            flash,
+            coop,
+            t_enc,
+            inject: None,
+            site: 0,
+            temb_act: None,
+            prefix: String::new(),
+            fuse: None,
+            join_idx: 0,
+        }
     }
 
     /// The underlying block builder — conv / GroupNorm / SiLU / add / upsample.
@@ -693,6 +712,62 @@ impl<'a> Rec<'a> {
     ) -> DeviceBuffer {
         self.b.concat(ca, cb, h, w, a, b)
     }
+
+    /// The up path's `k`-th skip join: [`Rec::concat_channels`] by default, or
+    /// a [`SkipFuse`] implementor's [`SkipFuse::fuse_skip`] when one is
+    /// installed via [`Unet::new_fused`] - the seam a control trunk whose
+    /// adaptors REPLACE the concat needs, which `concat_channels` alone
+    /// cannot express. Returns the joined buffer and its channel width rather
+    /// than assuming `prev + cskip`, since the graph is the authority on what
+    /// was actually recorded.
+    pub fn join_skip(
+        &mut self,
+        prev: u32,
+        cskip: u32,
+        h: u32,
+        w: u32,
+        hh: &DeviceBuffer,
+        skip: &DeviceBuffer,
+    ) -> (DeviceBuffer, u32) {
+        match self.fuse {
+            Some(fuse) => {
+                let k = self.join_idx;
+                self.join_idx += 1;
+                let h_ori = Map { buf: hh.clone(), c: prev, h, w };
+                let sk = Map { buf: skip.clone(), c: cskip, h, w };
+                let out = fuse.fuse_skip(&mut self.b, k, &h_ori, &sk);
+                (out.buf, out.c)
+            }
+            None => (self.concat_channels(prev, cskip, h, w, hh, skip), prev + cskip),
+        }
+    }
+
+    /// The post-mid-block hook: identity by default, or
+    /// [`SkipFuse::fuse_mid`] when a [`SkipFuse`] is installed.
+    pub fn fuse_mid(&mut self, x: &DeviceBuffer, c: u32, h: u32, w: u32) -> (DeviceBuffer, u32) {
+        match self.fuse {
+            Some(fuse) => {
+                let m = Map { buf: x.clone(), c, h, w };
+                let out = fuse.fuse_mid(&mut self.b, &m);
+                (out.buf, out.c)
+            }
+            None => (x.clone(), c),
+        }
+    }
+
+    /// Up-block `i`'s pre-upsample hook: identity by default, or
+    /// [`SkipFuse::pre_upsample`] when a [`SkipFuse`] is installed. `i`
+    /// indexes the up-block, not the join.
+    pub fn pre_upsample(&mut self, i: usize, x: &DeviceBuffer, c: u32, h: u32, w: u32) -> (DeviceBuffer, u32) {
+        match self.fuse {
+            Some(fuse) => {
+                let m = Map { buf: x.clone(), c, h, w };
+                let out = fuse.pre_upsample(&mut self.b, i, &m);
+                (out.buf, out.c)
+            }
+            None => (x.clone(), c),
+        }
+    }
 }
 
 /// The four device buffers a recorded UNet graph reads - exactly
@@ -755,7 +830,7 @@ impl Unet {
     /// [`crate::train::UnetTrainer`]. No control residuals and no injection:
     /// the backward is gated against the plain graph.
     pub fn new_train(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32) -> Unet {
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, false, false, None, true)
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, false, false, None, true, None)
     }
 
     /// The recorded tape, on a [`Unet::new_train`] build.
@@ -828,7 +903,7 @@ impl Unet {
                  construct it from the union of sdxlunet::KERNELS and the adapter's (see model::attninject)"
             );
         }
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, Some(inject), false)
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, Some(inject), false, None)
     }
 
     pub fn new_controlled(
@@ -841,7 +916,39 @@ impl Unet {
         taps: bool,
         control: bool,
     ) -> Unet {
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, None, false)
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, None, false, None)
+    }
+
+    /// [`Unet::new`], but with the up path's skip joins, the post-mid-block
+    /// hook and each up-block's pre-upsample hook routed through `fuse` - a
+    /// [`SkipFuse`] implementor - instead of the plain
+    /// `concat_channels`/identity default. SUPIR's `ZeroSFT`/`ZeroCrossAttn`
+    /// adaptors are the intended (future) implementor; this only wires the
+    /// seam and gates it weight-free against a no-op implementation.
+    ///
+    /// Mirrors [`Unet::new_injected`]'s pre-flight kernel check: every kernel
+    /// `fuse` needs must already be on this `Gpu`, named up front rather than
+    /// discovered mid-record. `fuse`'s join count is asserted against what the
+    /// graph actually recorded, the same shape [`Unet::new_injected`] uses for
+    /// `cross_attention_sites`.
+    pub fn new_fused(
+        gpu: Gpu,
+        cfg: UNetConfig,
+        tensors: &Tensors,
+        h: u32,
+        w: u32,
+        t_enc: u32,
+        taps: bool,
+        fuse: &dyn SkipFuse,
+    ) -> Unet {
+        for (name, _) in fuse.kernels() {
+            assert!(
+                gpu.kernel_index(name).is_some(),
+                "unet: the skip-fuse adapter needs the `{name}` kernel, but this Gpu was not built with it - \
+                 construct it from the union of sdxlunet::KERNELS and the adapter's (see vae::blocks::skipfuse)"
+            );
+        }
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, false, None, false, Some(fuse))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -856,6 +963,7 @@ impl Unet {
         control: bool,
         inject: Option<&dyn model::attninject::CrossAttnInject>,
         train: bool,
+        fuse: Option<&dyn SkipFuse>,
     ) -> Unet {
         let levels = cfg.levels();
         let scale = 1u32 << (levels - 1);
@@ -878,6 +986,7 @@ impl Unet {
 
         let mut r = if train { Rec::new_train(&gpu, &cfg, tensors, t_enc, taps) } else { Rec::new(&gpu, &cfg, tensors, t_enc, taps) };
         r.inject = inject;
+        r.fuse = fuse;
 
         let rec = Unet::record_into(&mut r, &cfg, h, w, &inputs, control);
 
@@ -932,6 +1041,9 @@ impl Unet {
 
         // ---- mid --------------------------------------------------------------
         hh = r.mid_block(cfg, ch, cw, &inputs.enc_in, &hh);
+        let (hh_fused, prev_fused) = r.fuse_mid(&hh, prev, ch, cw);
+        hh = hh_fused;
+        prev = prev_fused;
 
         // ---- control residuals -------------------------------------------------
         let control_shapes: Vec<(u32, u32, u32)> =
@@ -958,8 +1070,7 @@ impl Unet {
                 let (skip, cskip, sh, sw) =
                     skips.pop().expect("the skip stack is sized by UNetConfig::skip_stack");
                 assert_eq!((sh, sw), (ch, cw), "up{i}.resnet{j}: skip is {sh}x{sw}, hidden is {ch}x{cw}");
-                let cin = prev + cskip;
-                let cat = r.concat_channels(prev, cskip, ch, cw, &hh, &skip);
+                let (cat, cin) = r.join_skip(prev, cskip, ch, cw, &hh, &skip);
                 r.b.tap(format!("up{i}.cat{j}"), &cat, cin * ch * cw);
                 let next = r.resnet(
                     &format!("up_blocks.{i}.resnets.{j}"),
@@ -988,6 +1099,8 @@ impl Unet {
                 prev = cout;
             }
             if i + 1 < levels {
+                let (hh_pre, cout) = r.pre_upsample(i, &hh, cout, ch, cw);
+                hh = hh_pre;
                 let up = r.b.upsample(cout, ch, cw, &hh);
                 r.b.tap(format!("up{i}.nearest2x"), &up, cout * 4 * ch * cw);
                 ch *= 2;
@@ -1015,6 +1128,17 @@ impl Unet {
                 "unet: recorded {} cross-attention sites but the adapter serves {}",
                 r.site,
                 inj.sites()
+            );
+        }
+        // Same shape as the cross-attention-site check above: the graph is the
+        // authority on how many skip joins it actually recorded.
+        if let Some(fuse) = r.fuse {
+            assert_eq!(
+                r.join_idx,
+                fuse.joins(),
+                "unet: recorded {} skip-fuse joins but the adapter serves {}",
+                r.join_idx,
+                fuse.joins()
             );
         }
         Recorded { out, control_in, control_shapes, sites: r.site }
