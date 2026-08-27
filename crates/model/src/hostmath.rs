@@ -279,6 +279,31 @@ pub fn matvec_par(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
     matvec(w, x, out, inn)
 }
 
+/// Split a fused `[rows, a + b]` row-major weight into its two column blocks:
+/// `[rows, a]` and `[rows, b]`.
+///
+/// The shape a checkpoint stores as one matrix but the graph consumes as two
+/// independent linears - FLUX's `linear2`, whose output is
+/// `wo_a @ attn ⧺ wo_b @ mlp`, is the motivating case, and both flux1 and
+/// flux2 had their own serial copy of this loop.
+///
+/// Row-parallel through `backend_cpu::par`, the workspace's only rayon seam.
+/// This is **pure data movement** - no arithmetic, so no reassociation - and
+/// row `r` of each output reads only row `r` of the input and writes only its
+/// own span, which makes the split a scheduling change and the result
+/// bit-identical to the serial `extend_from_slice` loop it replaces. That is
+/// worth stating because it is not a micro-optimisation: on a real 9B
+/// checkpoint this moves several GB per model build, once per process start,
+/// and the serial form was the single largest term in that build.
+pub fn split_cols(w: &[f32], rows: usize, a: usize, b: usize) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(w.len(), rows * (a + b), "split_cols: len {} != rows*(a+b) {}", w.len(), rows * (a + b));
+    let (mut left, mut right) = (vec![0f32; rows * a], vec![0f32; rows * b]);
+    let stride = a + b;
+    backend_cpu::par::rows_mut(&mut left, a.max(1), |r, dst| dst.copy_from_slice(&w[r * stride..r * stride + a]));
+    backend_cpu::par::rows_mut(&mut right, b.max(1), |r, dst| dst.copy_from_slice(&w[r * stride + a..(r + 1) * stride]));
+    (left, right)
+}
+
 /// A row-batched [`matvec`]: `out[r] = x[r]·Wᵀ` for every row of `x`
 /// (`[rows, inn] -> [rows, out]`), `W: [out, inn]` row-major.
 ///
