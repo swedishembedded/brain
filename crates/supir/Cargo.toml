@@ -20,3 +20,4 @@ brain-data.workspace = true       # data::rng::Rng for init.rs
 
 [dev-dependencies]
 brain-testutil.workspace = true   # testutil::parity::Table, testutil::golden::Source
+brain-diffusion.workspace = true  # diffusion::restore - verified against real reference numbers here

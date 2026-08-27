@@ -48,7 +48,17 @@ use crate::config::{denoise_encoder_manifest, SupirConfig, HINT_EMBEDDER};
 pub type Tensors = sdxlunet::import::Tensors;
 
 const CM_PREFIX: &str = "model.control_model.";
-const PM_PREFIX: &str = "model.diffusion_model.project_modules.";
+/// Strips only as far as `model.diffusion_model.` (not `...project_modules.`
+/// too), because [`AdaptorConfig::tensor_manifest`]'s own brain-side names
+/// already keep the `project_modules.` segment (matching the checkpoint's
+/// own naming minus this prefix, per that function's doc) - stripping it
+/// here too would leave every lookup below off by one path segment. The
+/// real checkpoint's `model.diffusion_model.*` half carries nothing besides
+/// `project_modules.*` (verified against its header: 118 tensors, all of
+/// them), so this extracts exactly the adaptor half and nothing else; the
+/// two-way coverage check below still catches it by name if that ever
+/// changes.
+const PM_PREFIX: &str = "model.diffusion_model.";
 const DE_PREFIX: &str = "first_stage_model.denoise_encoder.";
 const MASK_LQ: &str = "model.control_model.mask_LQ";
 

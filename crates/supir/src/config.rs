@@ -28,22 +28,23 @@
 //! ## The zero_conv width question, settled against the real checkpoint
 //! One fact upstream source alone does not disambiguate: whether
 //! `ZeroSFT.zero_conv`'s output channel count is the *skip* width or the
-//! *`h_ori`* width - they differ at joins 2, 3, 5 and 6. Reading every
+//! *`h_ori`* width, since they differ at joins 2, 3, 5 and 6. Reading every
 //! `project_modules.*.zero_conv.weight` shape out of the real
 //! `SUPIR-v0Q_fp32.safetensors` checkpoint settles it: at join 2 (`h_ori`
 //! 1280, skip 640), `project_modules.8.zero_conv.weight` is `[640, 640, 1,
-//! 1]` - the SKIP width, not `h_ori`'s. Every other `zero_conv` in the
+//! 1]`, the SKIP width, not `h_ori`'s. Every other `zero_conv` in the
 //! checkpoint is square at exactly the control tensor's OWN channel width,
-//! which by the shape-preservation proof below always equals the skip width
-//! - so `ZeroConv1x1(c)` is a channel-count-preserving `control_c ->
+//! which by the shape-preservation proof below always equals the skip
+//! width, so `ZeroConv1x1(c)` is a channel-count-preserving `control_c ->
 //! control_c` conv, added directly onto `h_skip` (both being `control_c`
 //! wide) before the concat. This also explains why a `zero_conv` tensor
-//! exists at the post-mid site (`project_modules.11`, `[1280, 1280, 1, 1]`)
-//! even though that call has "no concat": with `h_ori` absent, the general
-//! `h1 = concat(h_ori, h_skip + ZeroConv1x1(c))` formula degenerates to `h1
-//! = h + ZeroConv1x1(c)` (`h` standing in for the sole "skip" argument),
-//! which is exactly [`vae::blocks::skipfuse::SkipFuse::fuse_mid`]'s shape -
-//! a genuinely distinct call, not a zero-width `fuse_skip`.
+//! exists at the post-mid site (`project_modules.11`, `[1280, 1280, 1,
+//! 1]`), even though that call has "no concat": with `h_ori` absent, the
+//! general `h1 = concat(h_ori, h_skip + ZeroConv1x1(c))` formula
+//! degenerates to `h1 = h + ZeroConv1x1(c)` (`h` standing in for the sole
+//! "skip" argument), which is exactly
+//! [`vae::blocks::skipfuse::SkipFuse::fuse_mid`]'s shape, a genuinely
+//! distinct call, not a zero-width `fuse_skip`.
 //!
 //! The mapping from checkpoint index to the join-in-pop-order table below
 //! (the injection order, `adapter_idx` 11->0) was cross-checked against
