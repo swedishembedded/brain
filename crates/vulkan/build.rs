@@ -44,11 +44,21 @@ fn main() {
 
     // Neither compiler present: skip, do NOT fail. The runtime will use the
     // naga-compiled scalar matmul fallback.
+    //
+    // Say exactly what to install and exactly what is lost. The previous text
+    // pointed at a README that does not exist in this tree, and "the
+    // tensor-core kernel will be unavailable" reads as though a served model
+    // just got slower - it does not. The cooperative-matrix kernel is reached
+    // only from the `moe pid vk-info` / `moe pid vk-matmul` demo entries; the
+    // real native-Vulkan backend (`--device vulkan`, brain-backend-vulkan)
+    // compiles the ordinary WGSL kernels through naga and never touches it. So
+    // this is a missing DEMO, not a silently degraded inference path.
     println!(
-        "cargo:warning=vulkan-coopmat: no glslc/glslangValidator on PATH; \
-         skipping cooperative-matrix SPIR-V build. The tensor-core kernel will \
-         be unavailable at runtime (scalar fallback used). See README_VULKAN.md \
-         to install a GLSL compiler and recompile."
+        "cargo:warning=vulkan-coopmat: no glslc/glslangValidator on PATH \
+         (Debian/Ubuntu: apt-get install glslc glslang-tools); skipping the \
+         cooperative-matrix SPIR-V build. Only the `moe pid vk-matmul` demo \
+         uses it, and it falls back to the scalar kernel -- no model or \
+         benchmark path is affected."
     );
 }
 

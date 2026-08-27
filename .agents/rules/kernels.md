@@ -306,6 +306,52 @@ If a measurement comes out faster than the device can move memory, you
 measured the CPU. Compute the roof first and sanity-check against it before
 believing a result.
 
+### E.0b Ramp the device first - an idle GPU is not the GPU
+
+`poll_wait()` fixes *what* you timed. This fixes *which device state* you
+timed it in, and on integrated graphics it is worth more than any kernel
+change in this file.
+
+A GPU that has been idle sits at its frequency floor and takes **seconds** of
+continuous work to reach the clock it will run a job at. Measured on an
+integrated Arc (Meteor Lake, 100 MHz floor / 2250 MHz ceiling), same kernel,
+same shape, same buffers, one dispatch per timed iteration:
+
+    matmul_reg2, [256,2048] x [2048,2048]ᵀ, from idle
+      t=0.0s    119 GFLOP/s   gt_act_freq  350 MHz
+      t=1.0s    475            750
+      t=3.0s    943           1800
+      t=6.0s   1078           2150
+    ... and once the package power limit engages, back down to 100-200
+    GFLOP/s at 200-400 MHz, with throttle_reason_pl1 = 1.
+
+The achieved rate tracks `gt_act_freq_mhz` essentially 1:1 (roughly half a
+GFLOP/s per MHz for this kernel). So a probe with a sub-second budget does not
+measure the device at all - it measures the device's *idle clock*, and reports
+a number an order of magnitude below what the same dispatch does in a real
+workload. That is the wrong regime, not a conservative reading of the right
+one. Three consequences, all paid for:
+
+* **Any timed region must be preceded by a ramp**, not just a single warm-up
+  dispatch. `model::probe::warm_up` and `gpu_core::roof::warm_up` are the two
+  in-tree instances; both issue real work until the device is awake and only
+  then time anything. One warm-up dispatch is enough to pay pipeline creation
+  and JIT compilation, and is nowhere near enough to pay DVFS.
+* **A cold roofline is worse than no roofline.** `gpu_core::roof` caches AND
+  persists what it measures, so one cold probe divides every later "% of roof"
+  on that machine for good. A cold probe on the box above reported 542
+  GFLOP/s fp32 and 11.3 GB/s DRAM while `matmul_reg2` - a real memory-fed GEMM,
+  which cannot exceed the silicon - was measured at 1243 GFLOP/s on the same
+  device. **A roof below a real kernel's measured rate is the signature**, and
+  `crates/gpu-core/tests/roofline.rs` now asserts against it.
+* **On a shared power budget, the CPU is part of the measurement.** This part
+  reports `throttle_reason_pl1 = 1` under load and clamps `punit_req_freq_mhz`
+  to its 800 MHz floor; a trivial `bash` polling loop on the host was enough to
+  hold the GPU there and cost roughly 3x. Record what else was running when a
+  number was taken, or the number is not reproducible - and never A/B two
+  kernels with one arm before and one arm after something else heated the
+  package.
+
 So:
 
 1. **Profile per kernel-kind before touching anything, and publish the table.**
