@@ -108,30 +108,15 @@ impl ControlNetConfig {
     /// `(channels, h, w)` of every residual at a `h × w` latent, in injection
     /// order.
     ///
-    /// The spatial size follows the down path: `conv_in` and the
-    /// `layers_per_block` residuals of level `i` are at `h >> i`, and the
-    /// downsampler that ends level `i` is already at `h >> (i+1)`. Recomputing
-    /// it from `skip_stack()`'s channel widths alone is not possible (levels 0
-    /// and 1 of SDXL both contain 320-channel entries), which is why this walks
-    /// the same loop the graph does.
+    /// The down-path portion is [`UNetConfig::skip_shapes`] - hoisted there
+    /// because it is backbone math, not ControlNet math, and the mid block's
+    /// own residual sits at the same `(channels, h, w)` the down path's LAST
+    /// entry already reached: the coarsest level pushes no downsampler after
+    /// its resnets, so `skip_shapes`'s final entry already IS `(cmid, ch, cw)`.
     pub fn residual_shapes(&self, h: u32, w: u32) -> Vec<(u32, u32, u32)> {
-        let cfg = &self.backbone;
-        let levels = cfg.levels();
-        let mut v = vec![(cfg.block_out_channels[0], h, w)];
-        let (mut ch, mut cw) = (h, w);
-        for i in 0..levels {
-            let cout = cfg.block_out_channels[i];
-            for _ in 0..cfg.layers_per_block {
-                v.push((cout, ch, cw));
-            }
-            if i + 1 < levels {
-                ch /= 2;
-                cw /= 2;
-                v.push((cout, ch, cw));
-            }
-        }
-        let cmid = *cfg.block_out_channels.last().expect("levels >= 1");
-        v.push((cmid, ch, cw));
+        let mut v = self.backbone.skip_shapes(h, w);
+        let mid = *v.last().expect("levels >= 1");
+        v.push(mid);
         v
     }
 

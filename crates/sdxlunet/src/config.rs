@@ -191,6 +191,38 @@ impl UNetConfig {
         v
     }
 
+    /// `(channels, h, w)` of every entry in [`UNetConfig::skip_stack`], at a
+    /// `h x w` latent - the spatial companion to its channel widths, walking
+    /// the SAME down-path loop so the two can only ever agree.
+    ///
+    /// Not derivable from `skip_stack()`'s channels alone: two of SDXL's
+    /// levels both carry 320-channel entries, so the spatial size has to come
+    /// from re-walking the loop (`conv_in` and the `layers_per_block` resnets
+    /// of level `i` sit at `h >> i`; the downsampler that ends level `i` is
+    /// already at `h >> (i+1)`).
+    ///
+    /// A ControlNet's residuals are produced at exactly these sites plus one
+    /// more for the mid block, which is why
+    /// `ControlNetConfig::residual_shapes` (crates/controlnet) builds on this
+    /// rather than re-walking the loop a second time.
+    pub fn skip_shapes(&self, h: u32, w: u32) -> Vec<(u32, u32, u32)> {
+        let levels = self.levels();
+        let mut v = vec![(self.block_out_channels[0], h, w)];
+        let (mut ch, mut cw) = (h, w);
+        for i in 0..levels {
+            let cout = self.block_out_channels[i];
+            for _ in 0..self.layers_per_block {
+                v.push((cout, ch, cw));
+            }
+            if i + 1 < levels {
+                ch /= 2;
+                cw /= 2;
+                v.push((cout, ch, cw));
+            }
+        }
+        v
+    }
+
     /// Canonical brain-side tensor manifest: `(name, shape)` for every
     /// parameter the graph binds, in a stable order.
     ///

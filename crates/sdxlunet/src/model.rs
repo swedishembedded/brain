@@ -179,6 +179,16 @@ pub struct Rec<'a> {
     /// before the conditioning chain panics by name instead of binding a
     /// placeholder buffer.
     temb_act: Option<DeviceBuffer>,
+    /// Prepended to every tensor name [`Rec::conditioning`], [`Rec::down_path`],
+    /// [`Rec::resnet`] and [`Rec::transformer`] look up. Empty by default,
+    /// which reproduces today's names byte-for-byte.
+    ///
+    /// The seam that lets ONE `Rec` record two structurally-identical chains
+    /// against two disjoint slices of the same [`Tensors`] manifest - SUPIR's
+    /// `GLVControl` trunk mirrors the frozen UNet's down path and mid block,
+    /// so recording it is calling these same methods a second time with the
+    /// prefix switched, rather than a second private copy of the walk.
+    prefix: String,
 }
 
 impl<'a> Rec<'a> {
@@ -229,12 +239,36 @@ impl<'a> Rec<'a> {
             reg: Some(K_FLASH_REG),
             reg2: Some(K_FLASH_REG2),
         };
-        Rec { b, flash, coop, t_enc, inject: None, site: 0, temb_act: None }
+        Rec { b, flash, coop, t_enc, inject: None, site: 0, temb_act: None, prefix: String::new() }
     }
 
     /// The underlying block builder — conv / GroupNorm / SiLU / add / upsample.
     pub fn blocks(&mut self) -> &mut Builder<'a> {
         &mut self.b
+    }
+
+    /// Route every tensor-name lookup [`Rec::conditioning`]/[`Rec::down_path`]/
+    /// [`Rec::resnet`]/[`Rec::transformer`] make through `p` first. See the
+    /// [`Rec::prefix`] field doc for why this exists.
+    pub fn set_prefix(&mut self, p: &str) {
+        self.prefix = p.to_string();
+    }
+
+    /// Take ownership of the currently-recorded `silu(emb)` slot, leaving it
+    /// empty. Two conditioning chains recorded into one `Rec` (SUPIR's trunk
+    /// has its own `time_embed`/`label_emb`, distinct from the frozen UNet's)
+    /// must not let the second [`Rec::conditioning`] call clobber the first's -
+    /// the caller takes the first chain's activation out before switching
+    /// [`Rec::set_prefix`] and recording the second.
+    pub fn take_temb_act(&mut self) -> DeviceBuffer {
+        self.temb_act.take().expect("rec: no temb_act recorded - call Rec::conditioning first")
+    }
+
+    /// Restore a previously-taken `silu(emb)` slot - the counterpart to
+    /// [`Rec::take_temb_act`], for switching back to the other chain's
+    /// conditioning before its own resnets record.
+    pub fn set_temb_act(&mut self, buf: DeviceBuffer) {
+        self.temb_act = Some(buf);
     }
 
     /// Consume the recorder, yielding the builder so the caller can `finish()`.
@@ -263,28 +297,29 @@ impl<'a> Rec<'a> {
     /// modules (and the same tap names) in `UNet2DConditionModel` and in
     /// `ControlNetModel` — which is why it lives here and not in either.
     pub fn conditioning(&mut self, cfg: &UNetConfig, temb_in: &DeviceBuffer, aug_in: &DeviceBuffer) {
+        let p = self.prefix.clone();
         let (c0, te) = (cfg.block_out_channels[0], cfg.time_embed_dim);
-        let t1 = self.linear("time_embedding.linear_1", 1, c0, te, true, temb_in);
-        self.b.tap("time_embedding.linear_1".into(), &t1, te);
+        let t1 = self.linear(&format!("{p}time_embedding.linear_1"), 1, c0, te, true, temb_in);
+        self.b.tap(format!("{p}time_embedding.linear_1"), &t1, te);
         let t1a = self.b.silu(te, &t1);
         self.b.free(te as u64, t1);
-        let temb = self.linear("time_embedding.linear_2", 1, te, te, true, &t1a);
-        self.b.tap("time_embedding".into(), &temb, te);
+        let temb = self.linear(&format!("{p}time_embedding.linear_2"), 1, te, te, true, &t1a);
+        self.b.tap(format!("{p}time_embedding"), &temb, te);
         self.b.free(te as u64, t1a);
 
         let a1 = self.linear(
-            "add_embedding.linear_1",
+            &format!("{p}add_embedding.linear_1"),
             1,
             cfg.projection_class_embeddings_input_dim,
             te,
             true,
             aug_in,
         );
-        self.b.tap("add_embedding.linear_1".into(), &a1, te);
+        self.b.tap(format!("{p}add_embedding.linear_1"), &a1, te);
         let a1a = self.b.silu(te, &a1);
         self.b.free(te as u64, a1);
-        let aug = self.linear("add_embedding.linear_2", 1, te, te, true, &a1a);
-        self.b.tap("add_embedding".into(), &aug, te);
+        let aug = self.linear(&format!("{p}add_embedding.linear_2"), 1, te, te, true, &a1a);
+        self.b.tap(format!("{p}add_embedding"), &aug, te);
         self.b.free(te as u64, a1a);
 
         let emb = self.b.add(te, &temb, &aug);
@@ -313,6 +348,7 @@ impl<'a> Rec<'a> {
         enc: &DeviceBuffer,
         x: &DeviceBuffer,
     ) -> (DeviceBuffer, Vec<Skip>, u32, u32) {
+        let p = self.prefix.clone();
         let levels = cfg.levels();
         let c0 = cfg.block_out_channels[0];
         let mut hh = x.clone();
@@ -353,7 +389,7 @@ impl<'a> Rec<'a> {
                 // `padding=0` form that `Builder::conv_down` implements — the
                 // two differ by a half-pixel shift in every feature.
                 let next = self.b.conv_s(
-                    &format!("down_blocks.{i}.downsamplers.0.conv"),
+                    &format!("{p}down_blocks.{i}.downsamplers.0.conv"),
                     cout,
                     cout,
                     3,
@@ -368,7 +404,7 @@ impl<'a> Rec<'a> {
                 ch /= 2;
                 cw /= 2;
                 hh = next;
-                self.b.tap(format!("down{i}.downsample0"), &hh, cout * ch * cw);
+                self.b.tap(format!("{p}down{i}.downsample0"), &hh, cout * ch * cw);
                 skips.push((hh.clone(), cout, ch, cw));
             }
             prev = cout;
@@ -406,6 +442,8 @@ impl<'a> Rec<'a> {
         temb_dim: u32,
         x: &DeviceBuffer,
     ) -> DeviceBuffer {
+        let prefix = format!("{}{prefix}", self.prefix);
+        let tap = format!("{}{tap}", self.prefix);
         let (nin, nout) = ((cin * h * w) as u64, (cout * h * w) as u64);
         let (shortcut, owned) = if cin != cout {
             (self.b.conv(&format!("{prefix}.conv_shortcut"), cin, cout, 1, 0, h, w, x), true)
@@ -594,6 +632,8 @@ impl<'a> Rec<'a> {
         enc: &DeviceBuffer,
         x: &DeviceBuffer,
     ) -> DeviceBuffer {
+        let prefix = format!("{}{prefix}", self.prefix);
+        let tap = format!("{}{tap}", self.prefix);
         let c = cfg.block_out_channels[level];
         let (heads, hd) = (cfg.attention_heads[level], cfg.head_dim(level));
         let t = h * w;
@@ -653,6 +693,25 @@ impl<'a> Rec<'a> {
     ) -> DeviceBuffer {
         self.b.concat(ca, cb, h, w, a, b)
     }
+}
+
+/// The four device buffers a recorded UNet graph reads - exactly
+/// [`Unet::inputs`]'s tuple, bundled so [`Unet::record_into`] takes one
+/// argument instead of four positional ones.
+pub struct Inputs {
+    pub sample_in: DeviceBuffer,
+    pub enc_in: DeviceBuffer,
+    pub temb_in: DeviceBuffer,
+    pub aug_in: DeviceBuffer,
+}
+
+/// What [`Unet::record_into`] hands back: the graph's output plus the control
+/// bookkeeping [`Unet::build`] needs to finish assembling a [`Unet`].
+pub struct Recorded {
+    pub out: DeviceBuffer,
+    pub control_in: Vec<DeviceBuffer>,
+    pub control_shapes: Vec<(u32, u32, u32)>,
+    pub sites: usize,
 }
 
 /// A recorded SDXL UNet at one latent resolution and one text-token count.
@@ -805,26 +864,74 @@ impl Unet {
             "unet: latent {h}x{w} is not a multiple of the {scale}x downscale"
         );
         let c0 = cfg.block_out_channels[0];
-        let te = cfg.time_embed_dim;
 
         let sample_in = gpu.storage((cfg.in_channels * h * w) as u64);
         let enc_in = gpu.storage((t_enc * cfg.cross_attention_dim) as u64);
         let temb_in = gpu.storage(c0 as u64);
         let aug_in = gpu.storage(cfg.projection_class_embeddings_input_dim as u64);
+        let inputs = Inputs {
+            sample_in: sample_in.clone(),
+            enc_in: enc_in.clone(),
+            temb_in: temb_in.clone(),
+            aug_in: aug_in.clone(),
+        };
 
         let mut r = if train { Rec::new_train(&gpu, &cfg, tensors, t_enc, taps) } else { Rec::new(&gpu, &cfg, tensors, t_enc, taps) };
         r.inject = inject;
 
-        r.conditioning(&cfg, &temb_in, &aug_in);
+        let rec = Unet::record_into(&mut r, &cfg, h, w, &inputs, control);
+
+        let sites = rec.sites;
+        let blocks = r.into_blocks();
+        let trace = train.then(|| blocks.trace());
+        let (steps, taps) = blocks.finish();
+        Unet {
+            sites,
+            trace,
+            gpu,
+            cfg,
+            hw: (h, w),
+            t_enc,
+            sample_in,
+            enc_in,
+            temb_in,
+            aug_in,
+            control_in: rec.control_in,
+            control_shapes: rec.control_shapes,
+            out: rec.out,
+            steps,
+            taps,
+        }
+    }
+
+    /// Record one full UNet forward - conditioning, `conv_in`, the down path,
+    /// the mid block, the optional control-residual add, the up path and the
+    /// head - into `r`.
+    ///
+    /// Pulled out of [`Unet::build`] so a caller that records more than one
+    /// backbone into a single [`Rec`]/[`vae::blocks::Builder`]/[`Gpu`] (SUPIR's
+    /// `GLVControl` trunk alongside the frozen UNet, submitted together) has
+    /// one method to call per backbone instead of a private copy of this walk.
+    /// `r` carries its own conditioning, injection adapter and prefix state -
+    /// see [`Rec::set_prefix`] and [`Rec::conditioning`] - so this takes only
+    /// what actually varies per call: the config, the latent size, the input
+    /// buffers and whether control residuals are added.
+    fn record_into(r: &mut Rec<'_>, cfg: &UNetConfig, h: u32, w: u32, inputs: &Inputs, control: bool) -> Recorded {
+        let levels = cfg.levels();
+        let c0 = cfg.block_out_channels[0];
+        let te = cfg.time_embed_dim;
+        let gpu = r.b.gpu();
+
+        r.conditioning(cfg, &inputs.temb_in, &inputs.aug_in);
 
         // ---- conv_in + down path ---------------------------------------------
-        let cin = r.b.conv("conv_in", cfg.in_channels, c0, 3, 1, h, w, &sample_in);
+        let cin = r.b.conv("conv_in", cfg.in_channels, c0, 3, 1, h, w, &inputs.sample_in);
         r.b.tap("conv_in".into(), &cin, c0 * h * w);
-        let (mut hh, mut skips, mut ch, mut cw) = r.down_path(&cfg, h, w, &enc_in, &cin);
+        let (mut hh, mut skips, mut ch, mut cw) = r.down_path(cfg, h, w, &inputs.enc_in, &cin);
         let mut prev = *cfg.block_out_channels.last().expect("levels >= 1");
 
         // ---- mid --------------------------------------------------------------
-        hh = r.mid_block(&cfg, ch, cw, &enc_in, &hh);
+        hh = r.mid_block(cfg, ch, cw, &inputs.enc_in, &hh);
 
         // ---- control residuals -------------------------------------------------
         let control_shapes: Vec<(u32, u32, u32)> =
@@ -870,11 +977,11 @@ impl Unet {
                     hh = r.transformer(
                         &format!("up_blocks.{i}.attentions.{j}"),
                         &format!("up{i}.attn{j}"),
-                        &cfg,
+                        cfg,
                         level,
                         ch,
                         cw,
-                        &enc_in,
+                        &inputs.enc_in,
                         &hh,
                     );
                 }
@@ -901,7 +1008,7 @@ impl Unet {
 
         // The graph is the authority on how many cross-attention sites exist —
         // a formula over the config could disagree with what was recorded.
-        if let Some(inj) = inject {
+        if let Some(inj) = r.inject {
             assert_eq!(
                 r.site,
                 inj.sites(),
@@ -910,27 +1017,7 @@ impl Unet {
                 inj.sites()
             );
         }
-        let sites = r.site;
-        let blocks = r.into_blocks();
-        let trace = train.then(|| blocks.trace());
-        let (steps, taps) = blocks.finish();
-        Unet {
-            sites,
-            trace,
-            gpu,
-            cfg,
-            hw: (h, w),
-            t_enc,
-            sample_in,
-            enc_in,
-            temb_in,
-            aug_in,
-            control_in,
-            control_shapes,
-            out,
-            steps,
-            taps,
-        }
+        Recorded { out, control_in, control_shapes, sites: r.site }
     }
 
     /// `(channels, h, w)` of every control-residual injection point, in the
