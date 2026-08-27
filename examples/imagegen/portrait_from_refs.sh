@@ -3,59 +3,79 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 #
-# Put a person into a target pose. Point it at ONE folder, get a portrait.
+# Portraits of a person, from a folder of their photographs.
 #
-#   examples/imagegen/portrait_from_refs.sh <dir> [out.jpg]
+#   examples/imagegen/portrait_from_refs.sh <dir> [count]
 #
 # The folder holds numbered photographs of the person -- `ref-01.jpeg`,
-# `02.png`, `3.webp`, any name that is (optionally `ref-`) a number, in any
-# format brain decodes -- plus one `target.*`, the photograph whose pose you
-# want. There is nothing else to work out: the references are downscaled to a
-# size that fits the card (`--ref-size`), so a folder of full-resolution phone
-# photos is a valid input.
+# `02.png`, any name that is (optionally `ref-`) a number, in any format brain
+# decodes. Results are written as `result-01.jpg` ... one per seed.
 #
-# By DEFAULT the target is passed as a reference too, so every image in the
-# folder is used and pose, framing and lighting arrive as pixels rather than as
-# adjectives. The cost is that reference conditioning carries identity hard: the
-# target person's face can bleed into the result, and the numbered references
-# can just as easily win and bring their own backgrounds with them.
+# The references supply the PERSON. Pose, framing and lighting come from the
+# prompt: edit POSE, it is the knob that matters here.
 #
-# The other way round is `TARGET_REF=0` plus a `POSE` that says in words what
-# the target looks like. The target image is then not conditioned on at all, so
-# identity comes from the numbered references alone and the pose is exactly as
-# specific as your sentence is. Try this one when the default reproduces a
-# reference photo's setting instead of the target's.
+#   POSE='Light from the left, dark background, three-quarter view.' \
+#     examples/imagegen/portrait_from_refs.sh ~/photos 4
 #
-# Optional, all env: POSE (what to reproduce from the target, in words -- edit
-# this first, and always when TARGET_REF=0), TARGET_REF, SIZE (`WxH`), SEED,
-# STEPS, REF_SIZE, VARIANT, PRECISION, BRAIN.
+# MASK=1 switches on inpainting instead: the folder must then hold a
+# `target.*` whose WHITE region is the hole to fill, and that region is
+# regenerated while everything else is preserved exactly. It keeps the
+# original photograph's body and background, at the cost of a visible seam
+# where the two meet -- the blend happens in latent space, which preserves
+# content faithfully but does not make the halves agree on lighting. Prefer
+# the default unless you need the rest of the frame kept bit-for-bit.
 #
-# Weights come from BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}. Placement does not:
-# with no --device, brain places the DiT, the text encoder and the VAE itself,
-# on whichever cards can hold them, and prints what it chose. An int8 9B DiT
-# and its text encoder do not share one 24 GB card, so on a two-card box they
-# land on separate cards without you saying so, and on a one-card box the
-# whole encoder stays beside the DiT exactly as it always did. Set BRAIN_DEVICE
-# or BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] only to override that decision.
+# Optional, all env: MASK, SEED (first seed; each result adds 1), STRENGTH
+# (mask mode only), STEPS, REF_PX (long edge of each reference), SIZE (WxH,
+# default mode only), POSE, VARIANT, PRECISION, BRAIN.
+#
+# Weights come from BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}; brain picks a card
+# with room unless BRAIN_DEVICE says otherwise.
 
 set -euo pipefail
 
-D="${1:?usage: portrait_from_refs.sh <dir-of-images> [out.jpg]}"; D="${D%/}"
-OUT="${2:-$D/portrait.jpg}"
-SIZE="${SIZE:-768x1024}"
+D="${1:?usage: portrait_from_refs.sh <dir-of-images> [count]}"; D="${D%/}"
+N="${2:-4}"
+W="$D/.work"; mkdir -p "$W"
 
-REFS=()
-while IFS= read -r f; do REFS+=(--ref "$D/$f"); done \
-  < <(ls -1 "$D" | grep -Ei '^(ref[-_]?)?[0-9]+\.[a-z0-9]+$' | sort)
-[ "${#REFS[@]}" -gt 0 ] || { echo "$D: no numbered reference images" >&2; exit 1; }
+read -r CW CH < <(python3 - "$D" "$W" "${REF_PX:-384}" "${MASK:-0}" "${SIZE:-768x1024}" <<'PY'
+import sys, os, glob, re
+import numpy as np
+from PIL import Image, ImageFilter
+d, work, refpx, want_mask, size = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1", sys.argv[5]
+for i, p in enumerate(sorted(glob.glob(f"{d}/*")), 1):
+    if re.match(r"^(ref[-_]?)?\d+\.[a-z0-9]+$", os.path.basename(p), re.I):
+        r = Image.open(p).convert("RGB")
+        s = refpx / max(r.size)
+        r.resize((max(16, round(r.width * s / 16) * 16), max(16, round(r.height * s / 16) * 16)), Image.LANCZOS).save(f"{work}/ref{i}.png")
+if not want_mask:
+    print(*(int(v) for v in size.split("x")))
+    raise SystemExit
+tgt = next((p for p in glob.glob(f"{d}/target.*")), None)
+if not tgt:
+    raise SystemExit("MASK=1 but no target.* image")
+im = Image.open(tgt).convert("RGB")
+w, h = (max(16, round(x / 16) * 16) for x in im.size)
+im = im.resize((w, h), Image.LANCZOS)
+im.save(f"{work}/target.png")
+hole = (np.asarray(im, dtype=int) > 245).all(axis=2)
+if not hole.any():
+    raise SystemExit("target has no white region to fill")
+Image.fromarray((hole * 255).astype("uint8")).filter(ImageFilter.GaussianBlur(6)).save(f"{work}/mask.png")
+print(w, h)
+PY
+)
 
-TARGET="$(ls -1 "$D" | grep -Ei '^target\.' | head -1)"
-[ -n "$TARGET" ] || { echo "$D: no target.* image" >&2; exit 1; }
-[ "${TARGET_REF:-1}" != 1 ] || REFS+=(--ref "$D/$TARGET")
+ARGS=()
+[ "${MASK:-0}" = 1 ] && ARGS+=(--mask "$W/mask.png" --ref "$W/target.png" --strength "${STRENGTH:-0.99}")
+for f in "$W"/ref*.png; do [ -e "$f" ] && ARGS+=(--ref "$f"); done
+[ "${#ARGS[@]}" -gt 0 ] || { echo "$D: no numbered reference images" >&2; exit 1; }
 
-exec "${BRAIN:-./target/release/brain}" flux2 generate \
-  --variant "${VARIANT:-klein-9b}" --precision "${PRECISION:-int8}" \
-  --prompt "A photorealistic portrait photograph of the person in the reference images, ${POSE:-in the same pose, framing and lighting as the final reference image}." \
-  --width "${SIZE%x*}" --height "${SIZE#*x}" \
-  --steps "${STEPS:-12}" --seed "${SEED:-1}" \
-  --ref-size "${REF_SIZE:-384}" "${REFS[@]}" --out "$OUT"
+for i in $(seq 1 "$N"); do
+  "${BRAIN:-./target/release/brain}" flux2 generate \
+    --variant "${VARIANT:-klein-9b}" --precision "${PRECISION:-int8}" \
+    --prompt "A photorealistic portrait photograph of the person in the reference images, keeping their exact facial identity, head shape, eye colour and skin texture. ${POSE:-Soft key light from the left, dark plain background, plain dark crew-neck top, head level and facing camera, calm closed-mouth expression, sharp focus on the eyes, 85mm lens, shallow depth of field.}" \
+    --width "$CW" --height "$CH" "${ARGS[@]}" \
+    --steps "${STEPS:-12}" --seed "$(( ${SEED:-101} + i - 1 ))" \
+    --out "$D/result-$(printf '%02d' "$i").jpg"
+done
