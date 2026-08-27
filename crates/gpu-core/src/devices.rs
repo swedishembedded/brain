@@ -237,8 +237,207 @@ pub fn selected_device() -> Option<&'static DeviceId> {
                 panic!("gpu{i} selected but this machine has {} GPU(s)", devs.len())
             }))
         }
-        None => devs.first(),
+        // No preference expressed: ask the installed placement policy which
+        // card can actually hold a model right now (`crates/cli` answers from
+        // live free VRAM through `residency`'s budget model). With no policy
+        // installed, or one that declines, this is the historical
+        // canonical-device-0 default, unchanged.
+        None => auto_gpu().and_then(|i| devs.get(i as usize)).or_else(|| devs.first()),
     }
+}
+
+// ---- the placement seam ----------------------------------------------------
+//
+// `gpu-core` ASKS where a model goes; it does not decide. The decision is a
+// CAPACITY question and capacity is modelled in `crates/residency`
+// (`budget::Budgets` + `place::pick_device` + `plan::plan`), which sits above
+// this crate and must stay there: `crates/stats` depends on `residency`
+// precisely because residency pulls no GPU code, and every model crate depends
+// on `gpu-core` and must not pull the serving stack. Neither crate may depend
+// on the other, so the seam is dependency-inverted, exactly like
+// `residency::supply::ModelSupplier` (declared in `residency`, implemented in
+// `crates/cli`) - only pointing the other way: declared HERE, implemented in
+// `crates/cli`, which is free to depend on both.
+//
+// [`Need`]/[`Home`] are the wire types of that inversion. They carry data, no
+// policy: a name, a byte count, and a constraint. `crates/cli`'s placer
+// translates them into `residency::plan::Part` and back, so there is exactly
+// ONE notion of what fits where in the process.
+
+/// What one part of a model needs from a device. A model DECLARES these; it
+/// never names a card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Need {
+    /// What this part is called in the placement report (`dit`, `te`, `vae`).
+    pub name: String,
+    /// Device bytes it will occupy once built, or 0 for "real bytes, not
+    /// costed" (see [`Need::unsized_`]).
+    pub vram: u64,
+    /// Host bytes it will hold regardless of where it is placed.
+    pub ram: u64,
+    /// True when nobody costed this part - it is placed by free capacity but
+    /// charged nothing, since an invented number would distort every part
+    /// placed after it.
+    pub unsized_: bool,
+    pub affinity: Affinity,
+}
+
+/// A placement constraint one part declares about another.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Affinity {
+    /// Wherever it fits best.
+    #[default]
+    Any,
+    /// Must land on the same device as the named part (a VAE decoding the
+    /// DiT's own latents: cross-device traffic here would be per-step).
+    With(String),
+    /// Prefer a device no other part of this plan is on. A preference, not a
+    /// demand - one card still places every part.
+    Apart,
+}
+
+impl Need {
+    /// A part of known size.
+    pub fn sized(name: impl Into<String>, vram: u64, ram: u64) -> Need {
+        Need { name: name.into(), vram, ram, unsized_: false, affinity: Affinity::Any }
+    }
+    /// A part that holds device memory nobody has costed - the "just give me a
+    /// card" case a bare `Gpu::new` takes.
+    pub fn unsized_(name: impl Into<String>) -> Need {
+        Need { name: name.into(), vram: 0, ram: 0, unsized_: true, affinity: Affinity::Any }
+    }
+    /// Declare [`Affinity::With`].
+    pub fn with(mut self, anchor: impl Into<String>) -> Need {
+        self.affinity = Affinity::With(anchor.into());
+        self
+    }
+    /// Declare [`Affinity::Apart`].
+    pub fn apart(mut self) -> Need {
+        self.affinity = Affinity::Apart;
+        self
+    }
+}
+
+/// Where a part was placed. `Cpu` is the host tier - a model placed there runs
+/// on the CPU backend / out of host RAM rather than failing to be placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Home {
+    Gpu(u32),
+    Cpu,
+}
+
+impl fmt::Display for Home {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Home::Gpu(i) => write!(f, "gpu{i}"),
+            Home::Cpu => write!(f, "cpu"),
+        }
+    }
+}
+
+/// The answer to a whole plan: every part, in the order it was declared.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Homes {
+    parts: Vec<(String, Home)>,
+}
+
+impl Homes {
+    pub fn new(parts: Vec<(String, Home)>) -> Homes {
+        Homes { parts }
+    }
+    pub fn of(&self, name: &str) -> Option<Home> {
+        self.parts.iter().find(|(n, _)| n == name).map(|(_, h)| *h)
+    }
+    pub fn parts(&self) -> &[(String, Home)] {
+        &self.parts
+    }
+    /// One line, in declaration order: `dit=gpu1 te=gpu0 vae=gpu1`. What a run
+    /// prints, so an automatic decision is never a silent one.
+    pub fn describe(&self) -> String {
+        self.parts.iter().map(|(n, h)| format!("{n}={h}")).collect::<Vec<_>>().join(" ")
+    }
+    /// Build `name`'s part with every `Gpu::new` under `f` landing on the
+    /// device this plan gave it. A `Home::Cpu` part runs unscoped (the host
+    /// tier has no card to pin), as does an unknown name.
+    pub fn run<R>(&self, name: &str, f: impl FnOnce() -> R) -> Result<R, String> {
+        match self.of(name) {
+            Some(Home::Gpu(i)) if !gpus().is_empty() => with_gpu(i, f),
+            _ => Ok(f()),
+        }
+    }
+}
+
+/// Implemented by whatever knows the machine's real capacity. `crates/cli`
+/// installs the one production implementation (live free VRAM + host RAM ->
+/// `residency::budget::Budgets` -> `residency::plan::plan`); with none
+/// installed brain behaves exactly as it did before this seam existed.
+///
+/// `place` MUST NOT call back into [`selected_device`] - it is what answers
+/// that function - and must be cheap enough to run per model build.
+pub trait Placer: Send + Sync {
+    fn place(&self, needs: &[Need]) -> Result<Vec<Home>, String>;
+}
+
+static PLACER: std::sync::Mutex<Option<std::sync::Arc<dyn Placer>>> = std::sync::Mutex::new(None);
+/// The memoized no-preference default (see [`auto_gpu`]).
+static AUTO: std::sync::Mutex<Option<Option<u32>>> = std::sync::Mutex::new(None);
+
+/// Install the process-wide placement policy. Idempotent and replaceable;
+/// installing invalidates the memoized default, so a new policy takes effect.
+pub fn install_placer(p: std::sync::Arc<dyn Placer>) {
+    *PLACER.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+    *AUTO.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn placer() -> Option<std::sync::Arc<dyn Placer>> {
+    PLACER.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Ask the installed policy where each part of a model goes.
+///
+/// With no policy installed - a library test, a `brain-` crate used as a
+/// dependency, wasm - every part is answered with the device the caller would
+/// have got anyway ([`selected_device`]), so a model written against this API
+/// behaves identically in both worlds.
+pub fn place(needs: &[Need]) -> Result<Homes, String> {
+    if let Some(p) = placer() {
+        let homes = p.place(needs)?;
+        if homes.len() != needs.len() {
+            return Err(format!("placer returned {} homes for {} parts", homes.len(), needs.len()));
+        }
+        return Ok(Homes::new(needs.iter().map(|n| n.name.clone()).zip(homes).collect()));
+    }
+    let here = selected_device().map(|d| Home::Gpu(d.index)).unwrap_or(Home::Cpu);
+    Ok(Homes::new(needs.iter().map(|n| (n.name.clone(), here)).collect()))
+}
+
+/// The card the no-preference default resolves to, memoized for the process.
+///
+/// Memoized deliberately: a bare `Gpu::new` may be called many times while a
+/// pipeline is built (DiT, then VAE, then a scratch device), and they must all
+/// land on the SAME card. Re-asking a live free-VRAM probe between them would
+/// scatter one model across the machine as its own allocations moved the
+/// answer. [`install_placer`] clears the memo.
+fn auto_gpu() -> Option<u32> {
+    let mut memo = AUTO.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(cached) = *memo {
+        return cached;
+    }
+    let p = placer()?;
+    let chosen = match p.place(&[Need::unsized_("model")]) {
+        Ok(h) => match h.first() {
+            Some(Home::Gpu(i)) => Some(*i),
+            // The host tier, or an empty answer: fall through to the
+            // registry default rather than inventing a card.
+            _ => None,
+        },
+        Err(e) => {
+            tracing::debug!(error = %e, "automatic placement unavailable; using the registry default");
+            None
+        }
+    };
+    *memo = Some(chosen);
+    chosen
 }
 
 /// One requested class of compute, before it is resolved against real hardware.

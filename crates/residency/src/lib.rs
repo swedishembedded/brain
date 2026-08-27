@@ -36,6 +36,7 @@ pub mod manager;
 pub mod model;
 pub mod multi;
 pub mod place;
+pub mod plan;
 pub mod scheduler;
 pub mod supply;
 

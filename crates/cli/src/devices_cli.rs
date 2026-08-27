@@ -69,10 +69,14 @@ pub fn run_devices(_args: &[String]) {
             ),
             Err(e) => println!("ambient selection: ERROR — {e}"),
         },
-        None => println!(
-            "ambient selection: none pinned — Gpu::new lands on gpu0 ({})",
-            devs[0].identity.name
-        ),
+        // Nothing pinned no longer means "card 0": with no --device, brain
+        // asks the placement policy which card can actually hold a model
+        // right now (`gpu_core::devices::selected_device`). Report where a
+        // `Gpu::new` would REALLY land, not where it used to.
+        None => {
+            let d = gpu_core::devices::selected_device().unwrap_or(&devs[0]);
+            println!("ambient selection: none pinned - Gpu::new lands on gpu{} ({})", d.index, d.identity.name);
+        }
     }
     print_npus();
 }

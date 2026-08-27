@@ -37,6 +37,7 @@ mod omni_cli;
 mod perf_cli;
 mod perf_engine;
 mod pid_cli;
+mod placement;
 mod pull_cli;
 mod quantize_cli;
 mod qwen35_cli;
@@ -969,6 +970,13 @@ fn main() {
     }
 
     let argv = select_backend(argv);
+    // After `--device` is resolved (so the candidate set is exactly what the
+    // user made schedulable) and before any model is built. This is what
+    // turns `gpu_core::devices`' placement seam from inert into the
+    // capacity-aware default: with no `--device`, a model lands on a card
+    // that can actually hold it instead of unconditionally on card 0. An
+    // explicit selection never consults it.
+    placement::install();
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("devices") => devices_cli::run_devices(&argv[2..]),
