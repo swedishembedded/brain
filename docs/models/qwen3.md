@@ -30,8 +30,36 @@ also import a checkpoint you already have locally:
 brain qwen3 import --hf /path/to/Qwen3-0.6B --out qwen.safetensors
 ```
 
+A **GGUF** works too -- llama.cpp's `qwen3` architecture, e.g.
+`Qwen/Qwen3-8B-GGUF` -- through the generic importer, which picks the right
+converter from the file's own `general.architecture`:
+
+```bash
+brain import /path/to/Qwen3-8B-Q8_0.gguf --out qwen3-8b.safetensors
+```
+
+Both routes produce the same brain parameters. The tensor-name map is
+transcribed from llama.cpp's own `gguf-py/gguf/tensor_mapping.py` and
+`constants.py`, and a test asserts the two routes agree *bit for bit* on the
+same logical checkpoint -- not to a tolerance, because the mistake worth
+catching (a swapped `k`/`v` projection) is shape-compatible on every GQA layer
+and only an exact comparison sees it.
+
+Note the disk trade: brain's own checkpoint format is fp32, so importing a
+quantized GGUF *expands* it: a Q8_0 file is a much smaller download than the
+bf16 safetensors, and the fp32 conversion is larger than either. Where a
+component reads a GGUF directly -- FLUX.2's text encoder, below -- no
+conversion happens and the download saving is the whole story.
+
 To make a checkpoint a `brain serve` resident, point `BRAIN_QWEN_WEIGHTS`
 (and `BRAIN_QWEN_TOKENIZER`) at it.
+
+### As FLUX.2's text encoder
+
+FLUX.2 Klein conditions on a Qwen3, so `BRAIN_FLUX2_TE` accepts either an HF
+text-encoder **directory** or a Qwen3 **`.gguf` file**. Which one a path is, is
+sniffed from the path and its contents -- there is no flag to set, and
+directory behaviour is unchanged.
 
 ## Running it
 

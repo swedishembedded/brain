@@ -10,6 +10,7 @@ pub mod chat;
 pub mod config;
 pub mod eval;
 pub mod import;
+pub mod gguf_import;
 pub mod init;
 pub mod model;
 pub mod q8;

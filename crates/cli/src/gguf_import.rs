@@ -102,6 +102,28 @@ impl GgufArchitectureImporter for Qwen35MoeImporter {
     }
 }
 
+/// Dense Qwen3 (`general.architecture = "qwen3"`) - the decoder LM, and
+/// FLUX.2's text encoder.
+///
+/// A registration, not a reimplementation. Unlike [`Qwen35MoeImporter`],
+/// whose map was hand-derived from a real checkpoint header, this one is
+/// transcribed from llama.cpp's own `tensor_mapping.py`/`constants.py` at a
+/// named revision and gated bit-for-bit against the safetensors route - see
+/// `qwen3::gguf_import`'s module doc.
+struct Qwen3Importer;
+
+impl GgufArchitectureImporter for Qwen3Importer {
+    fn architecture(&self) -> &'static str {
+        qwen3::gguf_import::GGUF_ARCHITECTURE
+    }
+    fn summary(&self) -> &'static str {
+        "Qwen3 dense decoder (GQA + QK-norm + RoPE + SwiGLU); also FLUX.2's text encoder"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        qwen3::gguf_import::import_mmap(gguf, out_path, id_override).map(|_| ())
+    }
+}
+
 /// Z-Image (S³-DiT), DiT only (`general.architecture = "lumina2"` - shared
 /// with real Lumina2 releases; `s3dit::import::import_gguf` refuses to guess
 /// and checks for a Z-Image-only tensor before converting anything, since
@@ -177,7 +199,8 @@ impl GgufArchitectureImporter for LtxvImporter {
 
 /// Every registered architecture importer. ONE line per architecture - this is
 /// the whole registration surface (see this module's doc).
-const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[&Qwen35MoeImporter, &S3ditImporter, &WanImporter, &LtxvImporter];
+const IMPORTERS: &[&dyn GgufArchitectureImporter] =
+    &[&Qwen3Importer, &Qwen35MoeImporter, &S3ditImporter, &WanImporter, &LtxvImporter];
 
 /// The importer claiming `architecture`, or `None` if none does.
 pub fn importer_for(architecture: &str) -> Option<&'static dyn GgufArchitectureImporter> {
@@ -341,6 +364,36 @@ mod tests {
             }
             assert!(brain_arch::by_gguf(arch).is_some(), "importer {arch:?} has no matching brain_arch row");
         }
+    }
+
+    /// The `qwen3` tag dispatches AND converts, end to end through the
+    /// generic command - so registering a second Qwen family really is the
+    /// one line this module claims it is, and the resulting checkpoint carries
+    /// a card the scan can dispatch on.
+    #[test]
+    fn the_qwen3_tag_dispatches_and_converts() {
+        assert_eq!(importer_for("qwen3").map(|i| i.architecture()), Some("qwen3"));
+        assert_eq!(brain_arch::by_gguf("qwen3").map(|a| a.id), Some("qwen3"));
+
+        let dir = tmp("qwen3-dispatch");
+        let src = dir.join("qwen3.gguf").to_string_lossy().into_owned();
+        let out = dir.join("qwen3.brain.safetensors").to_string_lossy().into_owned();
+        qwen3::gguf_import::testing::write_synthetic_gguf(&src, false);
+
+        import_file(&src, Some(&out), Some("test/qwen3-tiny")).expect("the registry must convert a qwen3 GGUF");
+
+        let card = checkpoint::st::read_card(&out).unwrap().expect("a converted checkpoint carries a card");
+        assert_eq!(card.family, "qwen", "model_dir::resident_for dispatches on this exact string");
+        assert_eq!(card.id, "test/qwen3-tiny");
+
+        // ...and the output really is a loadable brain checkpoint, not just a
+        // file that was written.
+        let cfg = qwen3::QwenConfig::from_json(&checkpoint::read_config(&out));
+        let r = checkpoint::weightio::WeightReader::open(&out).unwrap();
+        for (name, numel) in cfg.param_list() {
+            assert_eq!(r.tensor(&name).unwrap_or_else(|| panic!("missing {name}")).len(), numel, "{name}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

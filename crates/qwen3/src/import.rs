@@ -114,33 +114,104 @@ pub fn brain_init_from_hf(
     Ok(init)
 }
 
+/// Which tensor-naming convention a Qwen3 checkpoint's tensors use.
+///
+/// There is one Qwen3 model and two ways the same weights ship: HuggingFace
+/// safetensors (`model.layers.N.self_attn.q_proj.weight`) and llama.cpp GGUF
+/// (`blk.N.attn_q.weight`). Which one a file uses is a property OF THE FILE,
+/// so it is sniffed here rather than declared by the caller - a caller has a
+/// path, and asking it to also know the format is an invitation to be wrong
+/// about something the bytes already say.
+///
+/// The two maps meet here and nowhere else: [`hf_to_brain`] and
+/// [`crate::gguf_import::gguf_to_brain`] are the only two implementations, and
+/// every streaming source in this crate goes through [`Naming::to_brain`], so
+/// a third route cannot appear without deleting this enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Naming {
+    /// HuggingFace `transformers` names.
+    Hf,
+    /// llama.cpp GGUF names.
+    Gguf,
+}
+
+impl Naming {
+    /// Sniff the convention from a reader's own tensor names.
+    ///
+    /// GGUF's spelling is unmistakable and unshared: llama.cpp names the
+    /// embedding table `token_embd.weight` and prefixes every per-layer tensor
+    /// `blk.`, neither of which appears in any HF checkpoint. Absence of both
+    /// means HF - which is also what every caller predating GGUF support got,
+    /// so an unrecognizable checkpoint fails in exactly the place it used to
+    /// (the coverage check), naming the tensor it could not find.
+    pub fn of(r: &checkpoint::weightio::WeightReader) -> Naming {
+        let gguf = r.names().any(|n| n == "token_embd.weight" || n.starts_with("blk."));
+        if gguf {
+            Naming::Gguf
+        } else {
+            Naming::Hf
+        }
+    }
+
+    /// The brain parameter `name` becomes under this convention, or `None` if
+    /// it is not one (a tied head, a rope-scaling table, an unrecognized leaf).
+    pub fn to_brain(self, name: &str, tie: bool) -> Option<String> {
+        match self {
+            Naming::Hf => hf_to_brain(name, tie),
+            Naming::Gguf => crate::gguf_import::gguf_to_brain(name, tie),
+        }
+    }
+}
+
 /// The streaming sibling of [`brain_init_from_hf`]: a
 /// `checkpoint::remap::RemapSource` over `r` that resolves every brain
-/// parameter name to its HF tensor via [`hf_to_brain`]'s same map, validated
+/// parameter name to its source tensor via [`Naming::to_brain`], validated
 /// the same way (every brain param produced exactly once, right element
-/// count; every mapped HF tensor recognized) — but reading no tensor data.
+/// count; every mapped source tensor recognized) - but reading no tensor data.
 /// `Qwen::new_shard`/`new_shard_i8` accept the result directly, so an
 /// encoder built from this never materializes the whole checkpoint on the
 /// host: peak allocation is one tensor, at upload time.
-pub fn hf_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'a>, String> {
+///
+/// Format-agnostic: HF safetensors and llama.cpp GGUF both stream through
+/// here, sniffed by [`Naming::of`], and are gated to be bit-identical.
+pub fn source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'a>, String> {
     let want = cfg.param_list();
-    let want_names: std::collections::HashSet<&str> = want.iter().map(|(n, _)| n.as_str()).collect();
+    let src = plan_source(r, cfg, &want)?;
+    src.validate(&want)?;
+    Ok(src)
+}
+
+/// The pre-GGUF spelling of [`source`]. A forwarder, not a second
+/// implementation - the only caller left is `flux2::pipeline`, and this goes
+/// away with that call site.
+pub fn hf_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'a>, String> {
+    source(r, cfg)
+}
+
+/// Build the name→fetch plan shared by [`source`] and [`shard_source`]: every
+/// source tensor that maps into `allowed`, refusing anything that maps outside
+/// it or twice. Reads no tensor data.
+fn plan_source<'a>(
+    r: &'a checkpoint::weightio::WeightReader,
+    cfg: &QwenConfig,
+    allowed: &[(String, usize)],
+) -> Result<checkpoint::remap::RemapSource<'a>, String> {
+    let allowed: std::collections::HashSet<&str> = allowed.iter().map(|(n, _)| n.as_str()).collect();
+    let naming = Naming::of(r);
     let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
     for name in r.names() {
-        let Some(bn) = hf_to_brain(name, cfg.tie_embeddings) else { continue };
-        if !want_names.contains(bn.as_str()) {
+        let Some(bn) = naming.to_brain(name, cfg.tie_embeddings) else { continue };
+        if !allowed.contains(bn.as_str()) {
             return Err(format!("import: '{name}' maps to unexpected brain param '{bn}'"));
         }
         if plan.insert(bn.clone(), checkpoint::remap::Fetch::Whole(name.to_string())).is_some() {
             return Err(format!("duplicate mapping to {bn}"));
         }
     }
-    let src = checkpoint::remap::RemapSource::new(r, plan);
-    src.validate(&want)?;
-    Ok(src)
+    Ok(checkpoint::remap::RemapSource::new(r, plan))
 }
 
-/// [`hf_source`] for a caller that will build a **partial** [`crate::Shard`]:
+/// [`source`] for a caller that will build a **partial** [`crate::Shard`]:
 /// the required-tensor set is the shard's own
 /// ([`crate::shard_param_list`]), not the whole `cfg.param_list()`.
 ///
@@ -166,32 +237,31 @@ pub fn hf_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig
 ///   `param_list()` - a 36-layer checkpoint against a 28-layer config, say -
 ///   is still a hard error. The *allowed* set stays the full list; only the
 ///   *required* set shrinks.
-pub fn hf_shard_source<'a>(
+pub fn shard_source<'a>(
     r: &'a checkpoint::weightio::WeightReader,
     cfg: &QwenConfig,
     shard: &crate::Shard,
 ) -> Result<checkpoint::remap::RemapSource<'a>, String> {
     let full = cfg.param_list();
-    let allowed: std::collections::HashSet<&str> = full.iter().map(|(n, _)| n.as_str()).collect();
-    let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
-    for name in r.names() {
-        let Some(bn) = hf_to_brain(name, cfg.tie_embeddings) else { continue };
-        if !allowed.contains(bn.as_str()) {
-            return Err(format!("import: '{name}' maps to unexpected brain param '{bn}'"));
-        }
-        if plan.insert(bn.clone(), checkpoint::remap::Fetch::Whole(name.to_string())).is_some() {
-            return Err(format!("duplicate mapping to {bn}"));
-        }
-    }
-    let src = checkpoint::remap::RemapSource::new(r, plan.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    let src = plan_source(r, cfg, &full)?;
     // Shape-check everything the checkpoint actually offers, required or not.
-    let present: Vec<(String, usize)> =
-        full.into_iter().filter(|(n, _)| plan.contains_key(n)).collect();
+    let present: Vec<(String, usize)> = full.into_iter().filter(|(n, _)| src.has(n)).collect();
     src.validate(&present)?;
     // Then require the shard's own set - the half that can fail on a MISSING
     // tensor, and the reason this function exists.
     src.validate(&crate::shard_param_list(cfg, shard))?;
     Ok(src)
+}
+
+/// The pre-GGUF spelling of [`shard_source`]. A forwarder, not a second
+/// implementation - the only caller left is `flux2::pipeline`, and this goes
+/// away with that call site.
+pub fn hf_shard_source<'a>(
+    r: &'a checkpoint::weightio::WeightReader,
+    cfg: &QwenConfig,
+    shard: &crate::Shard,
+) -> Result<checkpoint::remap::RemapSource<'a>, String> {
+    shard_source(r, cfg, shard)
 }
 
 /// Import `<hf_dir>/config.json` + `model.safetensors` (single **or** sharded via
@@ -560,6 +630,61 @@ mod tests {
             let got = got.unwrap();
             assert_eq!(got.len(), numel, "{name}");
             assert_eq!(&got, &eager[&name], "{name}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **One load path, two container formats.** A Qwen3 GGUF and the HF
+    /// safetensors of the same logical checkpoint must stream through the
+    /// SAME [`shard_source`] and hand a builder byte-identical weights - the
+    /// caller passes a path, not a format.
+    ///
+    /// This is what lets `BRAIN_FLUX2_TE` point at either without the
+    /// pipeline knowing, and it is asserted on bytes: a tolerance here would
+    /// accept a k/v swap (identical shapes on every GQA layer), which is the
+    /// one mistake a name map makes silently.
+    #[test]
+    fn one_source_reads_gguf_and_safetensors_and_they_are_bit_identical() {
+        use checkpoint::TensorSource;
+
+        let dir = std::env::temp_dir().join(format!("brain-qwen3-unified-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hf = dir.join("hf");
+        let gguf = dir.join("m.gguf").to_string_lossy().into_owned();
+        crate::gguf_import::testing::write_synthetic_hf_dir(&hf, false);
+        crate::gguf_import::testing::write_synthetic_gguf(&gguf, false);
+
+        let cfg = config_from_hf(&std::fs::read_to_string(hf.join("config.json")).unwrap()).unwrap();
+
+        // Deliberately opened through the SAME entry point, given two
+        // different kinds of path.
+        let r_hf = checkpoint::weightio::WeightReader::open_hf_dir(&hf).unwrap();
+        let r_gg = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&gguf)).unwrap();
+        assert_eq!(Naming::of(&r_hf), Naming::Hf);
+        assert_eq!(Naming::of(&r_gg), Naming::Gguf);
+
+        // The whole model...
+        let whole = crate::Shard::whole(cfg.n_layers as usize);
+        let s_hf = shard_source(&r_hf, &cfg, &whole).unwrap();
+        let s_gg = shard_source(&r_gg, &cfg, &whole).unwrap();
+        for (name, numel) in cfg.param_list() {
+            let (mut a, mut b) = (None, None);
+            assert!(s_hf.with_tensor(&name, &mut |d| a = Some(d.to_vec())), "hf missing {name}");
+            assert!(s_gg.with_tensor(&name, &mut |d| b = Some(d.to_vec())), "gguf missing {name}");
+            assert_eq!(a.as_ref().unwrap().len(), numel, "{name}");
+            assert_eq!(a, b, "{name}: the two container formats disagree");
+        }
+
+        // ...and a truncated shard, the FLUX.2 text-encoder shape, from the
+        // GGUF: the layers past the tap and the head are never demanded.
+        let tap = crate::Shard { start: 0, end: 1, embed: true, head: false, gpu_index: crate::Shard::ANY_GPU };
+        let s_tap = shard_source(&r_gg, &cfg, &tap).unwrap();
+        for (name, _) in crate::shard_param_list(&cfg, &tap) {
+            let mut v = None;
+            assert!(s_tap.with_tensor(&name, &mut |d| v = Some(d.to_vec())), "gguf tap missing {name}");
+            let mut w = None;
+            assert!(s_hf.with_tensor(&name, &mut |d| w = Some(d.to_vec())));
+            assert_eq!(v, w, "{name}: truncated GGUF shard must match the HF route");
         }
         std::fs::remove_dir_all(&dir).ok();
     }
