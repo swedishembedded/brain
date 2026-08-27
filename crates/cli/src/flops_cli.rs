@@ -918,12 +918,43 @@ fn ltxv_flops(
 
     if run {
         let dry = ltxv_probe(&cfg, 1, 1, lat_t, lh, lw, ctx_len, fps as f64, false);
+        // Device timing is armed around the live probe, so the ratio below is
+        // against KERNEL time. This model does its patchify, its adaLN table
+        // and its RoPE tables on the HOST, and none of that is work a roof
+        // describes; a wall-clock ratio would charge the kernels for it.
+        let timed = gpu.set_kernel_timing(true);
+        gpu.reset_kernel_times();
+        let wall = std::time::Instant::now();
         let wet = ltxv_probe(&cfg, 1, 1, lat_t, lh, lw, ctx_len, fps as f64, true);
+        let wall = wall.elapsed().as_secs_f64();
+        let device = timed.then(|| gpu.kernel_times().map(|v| v.iter().map(|(_, ms, _)| ms).sum::<f64>() / 1e3)).flatten();
+        gpu.set_kernel_timing(false);
         match first_difference(&dry, &wet) {
             None => println!("\noffline == online on the executed 1-block build: {} dispatches, identical per kernel", wet.steps),
             Some(d) => {
                 eprintln!("\noffline != online on the executed 1-block build: {d}");
                 std::process::exit(2);
+            }
+        }
+        if let (Some(r), Some(bound)) = (roofs, roofs.and_then(|r| roof_seconds(&wet.total, &r))) {
+            let _ = r;
+            if let Some(d) = device.filter(|d| *d > 0.0) {
+                println!(
+                    "predicted vs measured on that build (DEVICE time): {bound:.4} s at the roof, {d:.4} s measured -> {:.2}x the bound ({:.1}% of the roof)",
+                    d / bound,
+                    100.0 * bound / d
+                );
+            }
+            if device.is_none_or(|d| d <= 0.0) {
+                println!(
+                    "predicted vs measured on that build: {bound:.4} s at the roof, {wall:.4} s WALL CLOCK -> {:.2}x the bound.\n\
+                     Device time is not attributable here and this ratio is an upper bound, not the kernels' number: \
+                     `LtxDit::forward` opens its OWN device per call, so this handle's kernel timers never see it, and \
+                     this model computes its patchify, its adaLN table and its RoPE tables on the host.",
+                    wall / bound
+                );
+            } else {
+                println!("...and end to end (wall clock, host-side patchify/adaLN/RoPE included): {wall:.4} s -> {:.2}x the bound", wall / bound);
             }
         }
     }
