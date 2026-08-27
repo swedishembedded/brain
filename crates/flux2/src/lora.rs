@@ -108,6 +108,19 @@ impl LoraAdapter {
     pub fn rank(&self) -> usize {
         self.rank
     }
+    /// Optimiser steps already folded into this adapter. Persisted in the
+    /// checkpoint header so an interrupted run can pick up its schedule -
+    /// Adam's bias correction, the sample cycle and the sigma draw are all
+    /// functions of it, and restarting them at zero would silently retrain
+    /// the same first steps rather than continue.
+    pub fn steps_done(&self) -> u64 {
+        self.t
+    }
+    /// Restore the step counter on reload. Separate from the tensors because
+    /// it is metadata, not a parameter.
+    pub fn set_steps_done(&mut self, t: u64) {
+        self.t = t;
+    }
     pub fn alpha(&self) -> f32 {
         self.scale * self.rank as f32
     }
@@ -170,6 +183,22 @@ impl LoraAdapter {
     /// Build the effective weights `W_eff = W + scale·B·A` (base cloned).
     pub fn apply(&self, base: &ModelWeights<f32>) -> ModelWeights<f32> {
         let mut w = base.clone();
+        self.apply_into(&mut w);
+        w
+    }
+
+    /// [`Self::apply`] onto weights the caller already owns: add
+    /// `scale·B·A` into `w` **in place**, no clone.
+    ///
+    /// The clone in `apply` is a whole fp32 copy of the model, so a caller
+    /// that can produce the frozen base directly into its own buffer - by
+    /// re-reading the checkpoint, say - holds one copy where `apply` holds
+    /// two. Same deltas in the same order onto the same bytes, so the result
+    /// is bit-identical to `apply`'s; `apply` is written in terms of it.
+    ///
+    /// `w` must be the **pristine** base: the deltas are additive and applying
+    /// them twice is not the same model.
+    pub fn apply_into(&self, w: &mut ModelWeights<f32>) {
         for ((li, lt), bw) in self.dbl.iter().zip(w.dbl.iter_mut()) {
             apply_stream(li, &mut bw.img, self.scale);
             apply_stream(lt, &mut bw.txt, self.scale);
@@ -183,7 +212,6 @@ impl LoraAdapter {
             l.wo_a.delta(self.scale, &mut bw.wo_a);
             l.wo_b.delta(self.scale, &mut bw.wo_b);
         }
-        w
     }
 
     /// One optimisation step: project the trainer's base-weight grads
@@ -205,6 +233,27 @@ impl LoraAdapter {
             proj_step(&mut l.wo_a, &g.wo_a, scale, lr, t);
             proj_step(&mut l.wo_b, &g.wo_b, scale, lr, t);
         }
+    }
+
+    /// Open one optimisation step whose block gradients arrive **one block at
+    /// a time** ([`crate::modelgrad::GradSink`]) rather than as a whole-model
+    /// [`ModelGrads`]. Advances the Adam counter once, here, so every pair in
+    /// the step sees the same `t` whatever order the blocks arrive in - each
+    /// pair's moments are its own, so the result is identical to
+    /// [`Self::step`]'s.
+    ///
+    /// Only the block linears are LoRA targets, so the global grads
+    /// `backward_into` still returns need no step at all.
+    ///
+    /// The block walk below is written out rather than shared with
+    /// [`Self::step`] **on purpose**: `tests/streamed_grads.rs` gates the two
+    /// against each other to the bit, and a comparison whose two sides call
+    /// the same projection code could not fail. Same reason `modelgrad`'s
+    /// `timestep_embedding` is a deliberate second implementation of
+    /// `hostmath`'s.
+    pub fn stepper(&mut self, lr: f32) -> LoraStep<'_> {
+        self.t += 1;
+        LoraStep { scale: self.scale, t: self.t, lr, ad: self }
     }
 
     /// Serialise to `(name, shape, data)` tensors —
@@ -318,6 +367,49 @@ impl LoraAdapter {
             sl.wo_b.delta_strided(self.scale, buf, 0, d + mlp, d);
         }
         Ok(())
+    }
+}
+
+/// One in-flight optimisation step, opened by [`LoraAdapter::stepper`]: it
+/// Adam-updates the pairs of each block as that block's dense gradients
+/// arrive and lets the caller drop them immediately.
+///
+/// It is a [`crate::modelgrad::GradSink`], so `modelgrad::grads_into` drives
+/// it directly and no whole-model `ModelGrads` is ever built.
+pub struct LoraStep<'a> {
+    ad: &'a mut LoraAdapter,
+    scale: f32,
+    lr: f32,
+    t: u64,
+}
+
+impl LoraStep<'_> {
+    /// Project + Adam-step double block `i`'s two streams.
+    pub fn double_block(&mut self, i: usize, g: &crate::grad::DoubleGrads<f32>) {
+        let (li, lt) = &mut self.ad.dbl[i];
+        step_stream(li, &g.img, self.scale, self.lr, self.t);
+        step_stream(lt, &g.txt, self.scale, self.lr, self.t);
+    }
+    /// Project + Adam-step single block `i`.
+    pub fn single_block(&mut self, i: usize, g: &crate::grad::SingleGrads<f32>) {
+        let (scale, lr, t) = (self.scale, self.lr, self.t);
+        let l = &mut self.ad.sgl[i];
+        proj_step(&mut l.wq, &g.wq, scale, lr, t);
+        proj_step(&mut l.wk, &g.wk, scale, lr, t);
+        proj_step(&mut l.wv, &g.wv, scale, lr, t);
+        proj_step(&mut l.w1, &g.w1, scale, lr, t);
+        proj_step(&mut l.w3, &g.w3, scale, lr, t);
+        proj_step(&mut l.wo_a, &g.wo_a, scale, lr, t);
+        proj_step(&mut l.wo_b, &g.wo_b, scale, lr, t);
+    }
+}
+
+impl crate::modelgrad::GradSink<f32> for LoraStep<'_> {
+    fn double(&mut self, i: usize, g: crate::grad::DoubleGrads<f32>) {
+        self.double_block(i, &g);
+    }
+    fn single(&mut self, i: usize, g: crate::grad::SingleGrads<f32>) {
+        self.single_block(i, &g);
     }
 }
 
@@ -449,13 +541,20 @@ pub fn save_adapter(path: &str, ad: &LoraAdapter) {
         .collect();
     checkpoint::save(
         path,
-        serde_json::json!({"model": "flux2-lora", "rank": ad.rank(), "alpha": ad.alpha()}),
+        serde_json::json!({"model": "flux2-lora", "rank": ad.rank(), "alpha": ad.alpha(), "steps": ad.steps_done()}),
         &t,
     );
 }
 
-/// Load an adapter saved by [`save_adapter`] (rank/alpha from the header;
-/// Adam state reset).
+/// Load an adapter saved by [`save_adapter`] (rank/alpha from the header).
+///
+/// The step counter is restored from the header's `steps` when present - a
+/// checkpoint written before that field existed simply resumes from 0. The
+/// Adam MOMENTS are not stored and do reset: they are a few hundred MB of
+/// state that no inference path reads, and a restarted moment estimate costs
+/// a short warm-up (the bias correction divides a zero moment by
+/// `1 - beta^t`, so the first resumed updates are small and grow back) rather
+/// than a wrong answer.
 pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
     let c = checkpoint::load(path);
     if c.header["config"]["model"] != "flux2-lora" {
@@ -465,5 +564,8 @@ pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
     let alpha = c.header["config"]["alpha"].as_f64().unwrap_or(rank as f64) as f32;
     let map: std::collections::HashMap<String, Vec<f32>> =
         c.tensors.into_iter().map(|t| (t.name, t.data)).collect();
-    LoraAdapter::from_tensors(cfg, LoraCfg { rank, alpha, seed: 0 }, &map)
+    let steps = c.header["config"]["steps"].as_u64().unwrap_or(0);
+    let mut ad = LoraAdapter::from_tensors(cfg, LoraCfg { rank, alpha, seed: 0 }, &map)?;
+    ad.set_steps_done(steps);
+    Ok(ad)
 }

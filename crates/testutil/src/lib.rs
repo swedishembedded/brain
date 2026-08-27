@@ -121,15 +121,51 @@ pub fn model_dir(reference: &str) -> Option<String> {
 /// Off Linux (or if `/proc` is not mounted) both columns print `0.00` rather
 /// than failing: a memory *report* must never be the reason a parity test dies.
 pub fn mem(label: &str) {
-    let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    let kb = |key: &str| -> f64 {
-        st.lines()
-            .find(|l| l.starts_with(key))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-    };
-    println!("  [mem] {label:<34} rss {:>6.2} GiB   peak {:>6.2} GiB", kb("VmRSS:") / 1048576.0, kb("VmHWM:") / 1048576.0);
+    println!(
+        "  [mem] {label:<34} rss {:>6.2} GiB   peak {:>6.2} GiB",
+        rss_bytes() as f64 / (1u64 << 30) as f64,
+        peak_rss_bytes() as f64 / (1u64 << 30) as f64
+    );
+}
+
+fn status_kb(key: &str) -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap_or_default()
+        .lines()
+        .find(|l| l.starts_with(key))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// The process's current resident set in bytes (`VmRSS`), or 0 where `/proc`
+/// is not available.
+pub fn rss_bytes() -> u64 {
+    status_kb("VmRSS:") * 1024
+}
+
+/// The process's peak resident set in bytes (`VmHWM`), or 0 where `/proc` is
+/// not available.
+///
+/// This is the number a memory bound has to be asserted on. A heap-counting
+/// allocator cannot see faulted pages of a mapping or a zero-page allocation
+/// that is later written, so a gate written against the heap alone can pass
+/// while the process's real footprint regresses - measure the whole process.
+pub fn peak_rss_bytes() -> u64 {
+    status_kb("VmHWM:") * 1024
+}
+
+/// Reset `VmHWM` to the current `VmRSS`, so the next [`peak_rss_bytes`] is the
+/// peak of what happens *after* this call rather than of the whole process
+/// lifetime. Needed by any test that measures one phase of a run: `VmHWM` only
+/// ever grows otherwise, and an earlier setup peak would mask the phase under
+/// test.
+///
+/// A no-op (and never an error) on kernels without
+/// `/proc/self/clear_refs`; a test that wants to *require* the reset should
+/// check that the peak actually dropped.
+pub fn reset_peak_rss() {
+    let _ = std::fs::write("/proc/self/clear_refs", "5");
 }
 
 /// Read a raw little-endian `f32` blob fixture (the parity dumps' wire

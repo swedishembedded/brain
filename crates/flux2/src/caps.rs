@@ -42,6 +42,8 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 distilled / 50 base)").default(json!(0)).min(0.0).max(150.0).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
+        .param(ParamSpec::new("ckpt_every", ParamType::Int, "checkpoint the adapter every N steps (0 = only at the end); each write is atomic, so an interrupted one cannot damage the last good checkpoint").default(json!(100)))
+        .param(ParamSpec::new("resume", ParamType::Bool, "continue from the adapter already at 'save' instead of starting over - a cancelled multi-hour run then costs only the steps since its last checkpoint").default(json!(false)))
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)").default(json!("klein-4b")))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier: fp32 (parity reference) or int8 (DP4A, ~4x smaller weights; GPU only)").default(json!("fp32")))
@@ -256,7 +258,10 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
         seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
         save_path: save.clone(),
-        ckpt_every: 100,
+        ckpt_every: inv.get_i64("ckpt_every").unwrap_or(100).max(0) as u32,
+        // A served run is the one most likely to be cancelled and re-issued,
+        // so the same request repeated continues rather than restarting.
+        resume: inv.get_bool("resume").unwrap_or(false),
     };
     let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
     let adapter = crate::finetune::run(&cfg, paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
@@ -336,7 +341,7 @@ impl Action for Flux2Action {
                 if !matches!(&*guard, Some((k, _)) if *k == key) {
                     *guard = None; // free the old resident weights before building new
                     progress(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
-                    let pipe = Pipeline::build_with(&p.cfg, &paths, n_gen + n_ref, p.adapter.as_ref(), p.precision)?;
+                    let pipe = Pipeline::build_sized(&p.cfg, &paths, n_gen + n_ref, n_gen, p.adapter.as_ref(), p.precision, 1)?;
                     *guard = Some((key, pipe));
                 }
                 generate_on(&guard.as_ref().unwrap().1, inv, &refs, &p.opts, progress)

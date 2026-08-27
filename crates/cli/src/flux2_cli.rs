@@ -37,7 +37,7 @@ const HELP: &str = "brain flux2 <cmd>
                                     # third-party ai-toolkit/ComfyUI .safetensors
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
-           [--size S] [--seed K] [--ckpt-every N] [--trainer device|host] [--cards N]
+           [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
            # is what `generate --adapter` loads. Do NOT name it '.safetensors':
@@ -46,7 +46,16 @@ const HELP: &str = "brain flux2 <cmd>
            #   --rank R        LoRA rank (default 16)
            #   --steps N       training steps (default 200)
            #   --lr X          learning rate (default 1e-4)
-           #   --ckpt-every N  checkpoint every N steps (default 100; 0 = final only)
+           #   --ckpt-every N  checkpoint every N steps (default 100; 0 = final only).
+           #                   Each write is atomic (temp file + rename), so an
+           #                   interrupted write cannot damage the last good one.
+           #   --resume        continue from the adapter already at --out, if one
+           #                   is there, instead of starting over; with no file
+           #                   there it starts fresh, so the SAME command is
+           #                   correct whether or not it is the first run. The
+           #                   step count rides in the checkpoint header, so the
+           #                   sample cycle and sigma schedule continue too.
+           #                   Adam moments are not stored and do restart.
            #   --trainer T     device (default, WGSL kernels, frozen base on the
            #                   card) or host (the FD-gradchecked reference the
            #                   device path is validated against - correct, and
@@ -184,7 +193,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     }
     eprintln!("flux2: building pipeline ({n_gen} generated + {n_ref} reference tokens) ...");
     let spec = adapter.map(|path| AdapterSpec { path, scale: lora_scale });
-    let pipe = Pipeline::build_with(&variant, &paths, n_gen + n_ref, spec.as_ref(), precision)?;
+    let pipe = Pipeline::build_sized(&variant, &paths, n_gen + n_ref, n_gen, spec.as_ref(), precision, 1)?;
     let t0 = std::time::Instant::now();
     // Per-phase wall clock: the callback fires immediately BEFORE each phase,
     // so the gap between two calls is the previous phase's duration. Text
@@ -261,6 +270,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
         seed: 0,
         save_path: String::new(),
         ckpt_every: 100,
+        resume: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -276,6 +286,13 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--size" => opts.size = need(i)?.parse().map_err(|e| format!("--size: {e}"))?,
             "--seed" => opts.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--ckpt-every" => opts.ckpt_every = need(i)?.parse().map_err(|e| format!("--ckpt-every: {e}"))?,
+            // A boolean flag, so it consumes no value - `continue` past the
+            // `i += 2` the value-taking arms use.
+            "--resume" => {
+                opts.resume = true;
+                i += 1;
+                continue;
+            }
             "--trainer" => opts.trainer = flux2::finetune::Trainer::from_name(need(i)?)?,
             "--cards" => opts.cards = need(i)?.parse().map_err(|e| format!("--cards: {e}"))?,
             "--help" | "-h" => {
@@ -313,8 +330,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
     let paths = Paths::from_env()?;
 
     eprintln!(
-        "flux2 finetune: {variant_name} {} trainer, rank {} steps {} size {} lr {} seed {} -> {}",
-        opts.trainer.name(), opts.rank, opts.steps, opts.size, opts.lr, opts.seed, opts.save_path
+        "flux2 finetune: {variant_name} {} trainer, rank {} steps {} size {} lr {} seed {} ckpt-every {}{} -> {}",
+        opts.trainer.name(), opts.rank, opts.steps, opts.size, opts.lr, opts.seed, opts.ckpt_every,
+        if opts.resume { " resume" } else { "" }, opts.save_path
     );
     // The CLI has no cancel front-end - an unarmed Default token never fires.
     let cancel = capability::CancelToken::default();

@@ -11,10 +11,10 @@
 //!
 //! The conditioning grad is the structural point: every modulated-LN site and
 //! gate contributes `d_shift/d_scale/d_gate`, accumulated **across the whole
-//! block stack** (the modulation is global — all double blocks share the same
+//! block stack** (the modulation is global - all double blocks share the same
 //! four sites, all single blocks the same one), then routed through the
 //! modulation linears into `d(silu(vec))`, through `silu'`, and back through
-//! the `time_in` MLP — the coupling that trains the network as one.
+//! the `time_in` MLP - the coupling that trains the network as one.
 //!
 //! Generic over [`Fp`] like `grad`: the f64 instantiation is the FD-gradcheck
 //! oracle (`tests/model_grad.rs`, `gradcheck::check_flux2`); the f32
@@ -28,7 +28,7 @@ use crate::grad::{
     ModGrad, SingleCache, SingleGrads, SingleW, StreamW,
 };
 
-/// Minimal config for the training reference — the [`Flux2Config`] fields the
+/// Minimal config for the training reference - the [`Flux2Config`] fields the
 /// host path needs plus the training latent grid (`lh×lw` tokens, no
 /// reference images).
 #[derive(Clone, Debug)]
@@ -67,7 +67,7 @@ impl Cfg {
     }
 
     /// Tiny klein-topology config for gradchecks and unit tests (head_dim 8 =
-    /// Σ axes_dim — per-axis dims must be even for the interleaved RoPE pairs
+    /// Σ axes_dim - per-axis dims must be even for the interleaved RoPE pairs
     /// to exist; 2×2 latent grid).
     pub fn tiny() -> Cfg {
         Cfg {
@@ -141,9 +141,9 @@ pub struct ModelGrads<T> {
 /// `time_in.in_layer` is `[hidden, TDIM]`.
 pub const TDIM: usize = 256;
 
-/// `timestep_embedding(t·1000, 256)`: 128 freqs, **cos first** — the generic-`T`
+/// `timestep_embedding(t·1000, 256)`: 128 freqs, **cos first** - the generic-`T`
 /// twin of `model::hostmath::timestep_embedding` (angles in f64, like the device
-/// path). It is a deliberate second implementation: AGENTS.md exception 1 — a
+/// path). It is a deliberate second implementation: AGENTS.md exception 1 - a
 /// gradcheck oracle that shared code with the thing it checks would prove
 /// nothing, and this one instantiates at `f64` for the FD check.
 pub fn timestep_embedding<T: Fp>(t: f64) -> Vec<T> {
@@ -268,10 +268,67 @@ pub fn loss<T: Fp>(pred: &[T], v_target: &[T]) -> (f64, Vec<T>) {
     (l, dpred)
 }
 
+/// Where [`backward_into`] hands each block's gradients the moment they are
+/// complete, in the reverse order the backward walks the stack.
+///
+/// The backward already produces one block at a time; only the *collecting*
+/// caller needs them all at once. A consumer that reduces a block's grads to
+/// something small - a LoRA projection, an optimiser step - implements this
+/// and never holds the whole-model set, which at klein-9B is one fp32 copy of
+/// the model per training step. [`backward`] is the collecting implementation,
+/// so nothing about the numbers changes: the same `DoubleGrads`/`SingleGrads`
+/// values, fully populated (`dx` included), reach the sink either way.
+pub trait GradSink<T> {
+    /// Double block `i`'s gradients (blocks arrive last-to-first).
+    fn double(&mut self, i: usize, g: DoubleGrads<T>);
+    /// Single block `i`'s gradients (blocks arrive last-to-first).
+    fn single(&mut self, i: usize, g: SingleGrads<T>);
+}
+
+/// The sink [`backward`] itself uses: keep every block, in index order.
+struct Collect<T> {
+    dbl: Vec<Option<DoubleGrads<T>>>,
+    sgl: Vec<Option<SingleGrads<T>>>,
+}
+
+impl<T> GradSink<T> for Collect<T> {
+    fn double(&mut self, i: usize, g: DoubleGrads<T>) {
+        self.dbl[i] = Some(g);
+    }
+    fn single(&mut self, i: usize, g: SingleGrads<T>) {
+        self.sgl[i] = Some(g);
+    }
+}
+
 /// Full backward from `dpred` (grad of the loss w.r.t. the predicted image
 /// tokens). Accumulates the conditioning grad from EVERY modulation site plus
 /// the final-layer adaLN and routes it back through the `time_in` MLP.
 pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, cache: &ModelCache<T>, dpred: &[T]) -> ModelGrads<T> {
+    let mut c = Collect::<T> {
+        dbl: (0..w.dbl.len()).map(|_| None).collect(),
+        sgl: (0..w.sgl.len()).map(|_| None).collect(),
+    };
+    let mut g = backward_into(cfg, w, cache, dpred, &mut c);
+    g.dbl = c.dbl.into_iter().map(|b| b.expect("every double block backward ran")).collect();
+    g.sgl = c.sgl.into_iter().map(|b| b.expect("every single block backward ran")).collect();
+    g
+}
+
+/// [`backward`] with the per-block gradients streamed to `sink` instead of
+/// collected. The returned [`ModelGrads`] carries the **global** parameters
+/// only (embedders, modulation linears, `time_in`, final layer); its `dbl` and
+/// `sgl` are empty, because those went to the sink.
+///
+/// This is the same code path `backward` runs - `backward` is a thin
+/// collecting sink over it - so a caller choosing the streaming form gets
+/// bit-identical gradients, one block's worth of them at a time.
+pub fn backward_into<T: Fp>(
+    cfg: &Cfg,
+    w: &ModelWeights<T>,
+    cache: &ModelCache<T>,
+    dpred: &[T],
+    sink: &mut dyn GradSink<T>,
+) -> ModelGrads<T> {
     let (d, cin) = (cfg.hidden, cfg.in_channels);
     let (nt, ni, n) = (cfg.txt_len, cfg.n_img(), cfg.n());
     let dims = cfg.dims();
@@ -293,30 +350,26 @@ pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, cache: &ModelCache<T>, dp
     dx[nt * d..].copy_from_slice(&dx_img);
 
     // ---- single blocks (reverse), site grads accumulated across the stack ----
-    let mut sgl_g: Vec<SingleGrads<T>> = Vec::with_capacity(w.sgl.len());
     let mut sgl_site = ModGrad::<T>::zeros(d);
-    for (bw, ca) in w.sgl.iter().zip(&cache.sgl_c).rev() {
+    for (i, (bw, ca)) in w.sgl.iter().zip(&cache.sgl_c).enumerate().rev() {
         let g = single_backward(dims, bw, &cache.smod, ca, &dx);
         dx = g.dx.clone();
         sgl_site.add(&g.m);
-        sgl_g.push(g);
+        sink.single(i, g);
     }
-    sgl_g.reverse();
 
     // ---- double blocks (reverse) ----
-    let mut dbl_g: Vec<DoubleGrads<T>> = Vec::with_capacity(w.dbl.len());
     let (mut s_img1, mut s_img2) = (ModGrad::<T>::zeros(d), ModGrad::<T>::zeros(d));
     let (mut s_txt1, mut s_txt2) = (ModGrad::<T>::zeros(d), ModGrad::<T>::zeros(d));
-    for (bw, ca) in w.dbl.iter().zip(&cache.dbl_c).rev() {
+    for (i, (bw, ca)) in w.dbl.iter().zip(&cache.dbl_c).enumerate().rev() {
         let g = double_backward(dims, bw, &cache.dmods, ca, &dx);
         dx = g.dx.clone();
         s_img1.add(&g.img1);
         s_img2.add(&g.img2);
         s_txt1.add(&g.txt1);
         s_txt2.add(&g.txt2);
-        dbl_g.push(g);
+        sink.double(i, g);
     }
-    dbl_g.reverse();
 
     // ---- embedders (inputs are data → weight grads only) ----
     let (_dc, g_txt_in) = linear_bwd(&cache.ctx, nt, cfg.context_in_dim, &w.txt_in, d, &dx[..nt * d]);
@@ -369,8 +422,8 @@ pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, cache: &ModelCache<T>, dp
         mod_single: g_mod_single,
         final_adaln: g_final_adaln,
         final_w: g_final_w,
-        dbl: dbl_g,
-        sgl: sgl_g,
+        dbl: Vec::new(),
+        sgl: Vec::new(),
     }
 }
 
@@ -390,7 +443,7 @@ pub struct Batch<T> {
 /// Build one rectified-flow batch from a clean latent-token set `x0`
 /// (`[n_img·in_channels]`), caption features `ctx`, noise level `σ ∈ (0,1]`
 /// and standard-normal `noise` (same length as `x0`):
-/// `x_σ = (1−σ)·x₀ + σ·ε`, target `v = ε − x₀`, model time `t = σ` — exactly
+/// `x_σ = (1−σ)·x₀ + σ·ε`, target `v = ε − x₀`, model time `t = σ` - exactly
 /// the convention [`crate::pipeline`]'s Euler integrator inverts
 /// (`x += dt·v` with σ stepping 1→0). RoPE tables come from
 /// [`crate::position_ids`] (no reference images) through `dit::rope`.
@@ -419,6 +472,24 @@ pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>) -> (f64, Model
     let (pred, cache) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
     let (l, dpred) = loss(&pred, &b.target);
     (l, backward(cfg, w, &cache, &dpred))
+}
+
+/// [`grads`] with the per-block gradients streamed to `sink`
+/// ([`backward_into`]) instead of collected into one whole-model
+/// [`ModelGrads`]. The returned grads carry the global parameters only.
+///
+/// This is what the host trainer runs: a LoRA step reduces each block's dense
+/// `dW` to its rank-`r` projection and has no use for the block after that, so
+/// holding the whole set costs a second fp32 copy of the model for nothing.
+pub fn grads_into<T: Fp>(
+    cfg: &Cfg,
+    w: &ModelWeights<T>,
+    b: &Batch<T>,
+    sink: &mut dyn GradSink<T>,
+) -> (f64, ModelGrads<T>) {
+    let (pred, cache) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (l, dpred) = loss(&pred, &b.target);
+    (l, backward_into(cfg, w, &cache, &dpred, sink))
 }
 
 // ---- weight construction ----
@@ -463,13 +534,35 @@ impl ModelWeights<f32> {
     /// Build host training weights from imported (BFL-named) tensors, splitting
     /// the fused `qkv`/`mlp.0`/`linear1`/`linear2` exactly as
     /// [`crate::model::Flux2Model::new`] does (row slices; linear2 column
-    /// split) — validated against the device forward by
+    /// split) - validated against the device forward by
     /// `tests/host_forward_parity.rs`.
     ///
     /// **Consumes `ts`**: every tensor it reads is REMOVED from the map (see
     /// [`take`]). A caller that still needs the fused layout afterwards has to
     /// clone the map first, and at klein scale it should think hard about
     /// whether it does.
+    /// Total bytes of fp32 weights this set holds - one copy of the model.
+    ///
+    /// The host trainer's memory is counted in these: a step holds the frozen
+    /// base and the `apply`ed effective copy, and `run` reports the number
+    /// before it starts rather than leaving a caller to discover it.
+    pub fn param_bytes(&self) -> usize {
+        let mut n = self.img_in.len() + self.txt_in.len() + self.time_a.len() + self.time_b.len();
+        n += self.mod_img.len() + self.mod_txt.len() + self.mod_single.len();
+        n += self.final_adaln.len() + self.final_w.len();
+        for b in &self.dbl {
+            for st in [&b.img, &b.txt] {
+                n += st.wq.len() + st.wk.len() + st.wv.len() + st.nq.len() + st.nk.len();
+                n += st.wo.len() + st.w1.len() + st.w3.len() + st.w2.len();
+            }
+        }
+        for b in &self.sgl {
+            n += b.wq.len() + b.wk.len() + b.wv.len() + b.nq.len() + b.nk.len();
+            n += b.w1.len() + b.w3.len() + b.wo_a.len() + b.wo_b.len();
+        }
+        n * std::mem::size_of::<f32>()
+    }
+
     pub fn from_tensors(cfg: &Cfg, ts: &mut crate::import::Tensors) -> Result<ModelWeights<f32>, String> {
         let (d, mlp) = (cfg.hidden, cfg.mlp);
         let mut dbl = Vec::with_capacity(cfg.depth_double);
@@ -523,7 +616,7 @@ impl ModelWeights<f32> {
     }
 }
 
-/// Deterministic random init at any scalar type — for gradchecks and synthetic
+/// Deterministic random init at any scalar type - for gradchecks and synthetic
 /// training tests (real runs import a checkpoint).
 pub fn init_model<T: Fp>(cfg: &Cfg, seed: u64) -> ModelWeights<T> {
     let mut rng = data::rng::Rng::new(seed);

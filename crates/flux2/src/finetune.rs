@@ -14,9 +14,18 @@
 //!      [`crate::pipeline`]'s Euler integrator inverts), runs it through the
 //!      frozen base under the chosen [`Trainer`], and Adam-steps the low-rank
 //!      `A,B`. The host trainer gets there via a dense `dL/dW_eff` it then
-//!      projects; the device trainer produces `(dA, dB)` directly.
+//!      projects, one block at a time as the backward completes it
+//!      ([`crate::modelgrad::grads_into`]) so the whole stack is never
+//!      resident; the device trainer produces `(dA, dB)` directly.
 //!   3. Save the adapter ([`crate::lora::save_adapter`]); the inference path
 //!      picks it up via [`crate::lora::LoraAdapter::fold_into_tensors`].
+//!
+//! **What a host run costs in RAM.** The host trainer differentiates a dense
+//! `W_eff`, so a step holds the frozen base AND its effective copy - two fp32
+//! copies of the model - plus the saved activations. That is inherent to the
+//! reference; it is reported up front by [`run`] rather than discovered from
+//! the OOM killer, and it is why the device trainer, which keeps the base on
+//! the card and forms no dense `dW` at all, is the default.
 //!
 //! **Two trainers, one op sequence.** [`Trainer::Host`] is the f32
 //! instantiation of the FD-gradchecked reference math ([`crate::modelgrad`]) -
@@ -36,7 +45,7 @@ use std::path::Path;
 use crate::config::Flux2Config;
 use crate::devtrain::DeviceTrainer;
 use crate::lora::{save_adapter, LoraAdapter, LoraCfg};
-use crate::modelgrad::{grads, make_flow_batch, Batch, Cfg, ModelWeights};
+use crate::modelgrad::{self, make_flow_batch, Batch, Cfg, ModelWeights};
 use crate::pipeline::{Paths, PAD_TOKEN, TAP_LAYERS};
 use data::qwen_tokenizer::QwenBpe;
 use data::Tokenizer;
@@ -78,18 +87,16 @@ pub fn encode_samples(
     let tok = QwenBpe::from_file(&paths.tokenizer)?;
 
     // --- captions → Qwen taps (layers 9/18/27 concatenated per token) ---
-    // Standalone mirror of `Pipeline::encode_prompt` — the pipeline method
-    // needs the whole built Pipeline (DiT included), which finetune must NOT
-    // keep resident while training.
+    // The SAME encoder generation builds (`pipeline::build_text_encoder`),
+    // built here directly because `Pipeline::encode_prompt` needs the whole
+    // built Pipeline, DiT included, which finetune must NOT keep resident
+    // while training. Conditioning an adapter on features the generation path
+    // would not reproduce is the failure this shares code to avoid - and the
+    // copy that used to live here also slurped the whole encoder as an fp32
+    // `HashMap` before uploading it, the largest single host allocation the
+    // run made.
     let ctxs: Vec<Vec<f32>> = {
-        let te_cfg = if fc.context_in_dim == 12288 {
-            qwen3::QwenConfig::qwen3_8b()
-        } else {
-            qwen3::QwenConfig::qwen3_4b()
-        };
-        let te_ts = checkpoint::safetensors::read_model_dir(Path::new(&paths.te))?;
-        let init = qwen3::import::brain_init_from_hf(te_ts, &te_cfg)?;
-        let te = qwen3::Qwen::new(te_cfg, 1, fc.txt_len as u32, &init);
+        let te = crate::pipeline::build_text_encoder(fc, paths)?;
         let mut out = Vec::with_capacity(n);
         for (i, s) in samples.iter().enumerate() {
             if cancel.is_cancelled() {
@@ -222,6 +229,16 @@ pub struct TrainOpts {
     /// Where to write the adapter (final + every `ckpt_every` steps; 0 = only final).
     pub save_path: String,
     pub ckpt_every: u32,
+    /// Continue from the adapter already at `save_path`, if one is there.
+    ///
+    /// A multi-hour run that is cancelled, or whose box is rebooted, should
+    /// cost the time since the last checkpoint and not the whole run. With
+    /// this set the SAME command re-run picks up where it stopped; with no
+    /// file at `save_path` it starts fresh, so one invocation is correct
+    /// whether or not it is the first. It is a flag rather than automatic
+    /// because silently continuing from whatever happens to be lying at the
+    /// output path is how a run inherits an unrelated adapter.
+    pub resume: bool,
 }
 
 /// Fine-tune a LoRA adapter on `dir` (a captioned-image folder — see
@@ -265,6 +282,23 @@ pub fn run(
     //    hold the whole model twice.
     let mut dev = None;
     let mut host = Some(base);
+    if opts.trainer == Trainer::Host {
+        // Say the bill before running it up. A host step differentiates a
+        // DENSE `W_eff`, so it holds the frozen base AND its effective copy
+        // for the whole forward+backward; a `--trainer host` run at 9B scale
+        // is a multi-tens-of-GB resident job that reaches its first step
+        // slowly, and finding that out from the OOM killer is the worst way to
+        // find it out. Derived from the config, so it cannot go stale.
+        let one = host.as_ref().expect("base").param_bytes() as f64 / (1u64 << 30) as f64;
+        progress(
+            0,
+            opts.steps + 1,
+            format!(
+                "host trainer: fp32 weights {one:.2} GiB; a step holds the frozen base and its effective copy, so expect at least {:.2} GiB resident plus activations",
+                2.0 * one
+            ),
+        );
+    }
     if opts.trainer == Trainer::Device {
         progress(0, opts.steps + 1, "uploading the frozen base to the device".into());
         let t = DeviceTrainer::new_multi(opts.cards.max(1), cfg.clone(), opts.rank, host.as_ref().expect("base"));
@@ -280,9 +314,46 @@ pub fn run(
     }
 
     // 5. adapter + rectified-flow loop
-    let mut adapter = LoraAdapter::new(&cfg, LoraCfg { seed: opts.seed, ..LoraCfg::new(opts.rank) });
+    // 5a. the adapter: fresh, or continued from the last checkpoint.
+    let resume_path = Path::new(&opts.save_path);
+    let (mut adapter, done) = if opts.resume && resume_path.exists() {
+        let ad = crate::lora::load_adapter(&opts.save_path, &cfg)?;
+        if ad.rank() != opts.rank {
+            return Err(format!(
+                "{}: adapter is rank {}, this run asks for rank {} - resuming would silently train the file's rank",
+                opts.save_path,
+                ad.rank(),
+                opts.rank
+            ));
+        }
+        let done = ad.steps_done() as u32;
+        if done >= opts.steps {
+            return Err(format!(
+                "{}: already {done} steps, --steps is {} - nothing left to do",
+                opts.save_path, opts.steps
+            ));
+        }
+        progress(
+            done,
+            opts.steps + 1,
+            format!("resuming from {} at step {done} (Adam moments restart; weights continue)", opts.save_path),
+        );
+        (ad, done)
+    } else {
+        if opts.resume {
+            progress(0, opts.steps + 1, format!("--resume: nothing at {}, starting fresh", opts.save_path));
+        }
+        (LoraAdapter::new(&cfg, LoraCfg { seed: opts.seed, ..LoraCfg::new(opts.rank) }), 0)
+    };
     let mut rng = data::rng::Rng::new(opts.seed ^ 0x5eed_f10c);
-    for step in 0..opts.steps {
+    // Advance the sigma stream past the steps already taken. `sigma` is one
+    // draw per step, so a resumed run that restarted this at zero would
+    // replay the first steps' sigmas against a different sample phase - the
+    // schedule is part of the run, not a per-step detail.
+    for _ in 0..done {
+        let _ = rng.next_f64();
+    }
+    for step in done..opts.steps {
         if cancel.is_cancelled() {
             return Err("cancelled".into());
         }
@@ -295,8 +366,16 @@ pub fn run(
             (Some(t), _) => t.step(&mut adapter, &batch, opts.lr),
             (None, Some(b)) => {
                 let w_eff = adapter.apply(b);
-                let (loss, g) = grads(&cfg, &w_eff, &batch);
-                adapter.step(&g, opts.lr);
+                // Streamed, not collected. A LoRA step reduces each block's
+                // dense `dW` to its rank-r projection and is done with it, so
+                // the whole-model `ModelGrads` `grads` returns is a third fp32
+                // copy of the model held for no reason - at klein-9B that is
+                // the difference between a training step that fits this box
+                // beside the frozen base and its effective copy, and one that
+                // does not. `grads_into` runs the identical backward and hands
+                // each block over as it completes.
+                let mut step = adapter.stepper(opts.lr);
+                let (loss, _globals) = modelgrad::grads_into(&cfg, &w_eff, &batch, &mut step);
                 loss
             }
             (None, None) => unreachable!("one of the two trainers is always built"),
