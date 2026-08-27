@@ -230,18 +230,124 @@ mod kname {
 /// them and risking a silent mismatch against [`Ops::new`]'s own check.
 pub const REQUIRED_KERNELS: &[&str] = kname::ALL;
 
+/// The canonical `(name, wgsl_source)` list [`Ops::new`] requires - the ONE
+/// ready-made kernel list an `Ops`-building caller feeds `Gpu::new` /
+/// `gpu_core::testgpu::dev`, instead of hand-assembling its own.
+///
+/// # Why this could not simply be a `const`
+///
+/// Nine of these entries (the bf16/f16 storage tiers, and B9's paged-KV
+/// bf16 write tier) exist only as values computed at runtime by
+/// [`kernels::template::dtype_variant`]/`dtype_variant_store` - a
+/// specialised variant's WGSL source is generated, not an `include_str!`.
+/// So the list is built once and leaked into a `OnceLock`, exactly the
+/// "tiny working set, leaking it is fine" tradeoff `dtype_variant`'s own
+/// interning cache already makes, which is also what lets this return the
+/// `&'static [(&'static str, &'static str)]` slice `Gpu::new` wants.
+///
+/// # Why it is public, and what it replaced
+///
+/// Every `Ops`-building call site used to hand-maintain a byte-identical
+/// copy of this list (`qwen3::serve::ops_kernel_list`,
+/// `gradcheck::bf16_train::kernel_list`, and four `crates/model/tests/*`
+/// files). That duplication is exactly how `qwen3::serve::ops_kernel_list`
+/// silently drifted **15 kernels short** of [`REQUIRED_KERNELS`] - see
+/// [`assert_kernel_list_complete`] for the full post-mortem. One list,
+/// derived in one place, is the fix; [`assert_kernel_list_complete`] stays
+/// as the gate for any caller that still builds its own (a model that
+/// registers extra kernels of its own beside the façade set).
+#[must_use]
+pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        // `dtype_variant(logical_name, source, binding, dtype)` yields the
+        // `("<name>#<binding>=<dtype>", generated_source)` pair; the names it
+        // produces are exactly the `kname::*_BF16`/`*_F16` spellings
+        // `Ops::new` looks up, which `required_kernels_matches_kname_all`
+        // pins.
+        let var = |name, src, binding, dt| {
+            kernels::template::dtype_variant(name, src, binding, dt)
+                .expect("brain-kernels ships every dtype variant Ops::new requires")
+        };
+        let bf16_matmul = var("matmul", kernels::MATMUL, "w", Dtype::BF16);
+        let bf16_gemv = var("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::BF16);
+        let bf16_reg3 = var("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::BF16);
+        let f16_matmul = var("matmul", kernels::MATMUL, "w", Dtype::F16);
+        let f16_gemv = var("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::F16);
+        let f16_reg3 = var("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16);
+        let bf16_embed = var("embed", kernels::EMBED, "emb", Dtype::BF16);
+        let f16_embed = var("embed", kernels::EMBED, "emb", Dtype::F16);
+        let bf16_moe = var("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::BF16);
+        let f16_moe = var("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::F16);
+        // B9: paged-KV append is the WRITE direction, so it needs
+        // `dtype_variant_store` over the word-granularity sibling kernel -
+        // see `kname::PAGED_KV_APPEND_BATCHED_WORD_BF16`'s own doc comment.
+        let bf16_kv_append = kernels::template::dtype_variant_store(
+            "paged_kv_append_batched_word",
+            kernels::PAGED_KV_APPEND_BATCHED_WORD,
+            "pool",
+            Dtype::BF16,
+        )
+        .expect("brain-kernels ships the paged-KV bf16 store variant");
+        let bf16_decode_scores = var(
+            "paged_decode_scores_batched",
+            kernels::PAGED_DECODE_SCORES_BATCHED,
+            "pool_k",
+            Dtype::BF16,
+        );
+        let bf16_decode_apply = var(
+            "paged_decode_apply_batched",
+            kernels::PAGED_DECODE_APPLY_BATCHED,
+            "pool_v",
+            Dtype::BF16,
+        );
+        // B10: `matmul_dx`'s bf16-weight-read backward variant. `matmul_dw`
+        // has no bf16 variant at all (it never reads the weight - see
+        // `kname::MATMUL_DW`'s own doc comment).
+        let bf16_matmul_dx = var("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16);
+        vec![
+            ("matmul", kernels::MATMUL),
+            ("matmul_gemv", kernels::MATMUL_GEMV),
+            ("matmul_reg2", kernels::MATMUL_REG2),
+            ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+            ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
+            ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+            ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
+            ("max_abs_row", kernels::MAX_ABS_ROW),
+            ("quant_pack", kernels::QUANT_PACK),
+            bf16_matmul,
+            bf16_gemv,
+            bf16_reg3,
+            f16_matmul,
+            f16_gemv,
+            f16_reg3,
+            ("embed", kernels::EMBED),
+            bf16_embed,
+            f16_embed,
+            ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
+            bf16_moe,
+            f16_moe,
+            ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),
+            bf16_kv_append,
+            ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+            bf16_decode_scores,
+            ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+            bf16_decode_apply,
+            ("matmul_dx", kernels::MATMUL_DX),
+            ("matmul_dw", kernels::MATMUL_DW),
+            bf16_matmul_dx,
+        ]
+    })
+}
+
 /// Assert `list` (the `(name, wgsl_source)` pairs a caller is about to feed
 /// `Gpu::new`/`gpu_core::testgpu::dev`, or has already registered on some
 /// other `Gpu` it plans to build an [`Ops`] from) names every kernel in
-/// [`REQUIRED_KERNELS`]. Every real call site in this workspace that builds
-/// an `Ops` (`qwen3::model::pipelines`, `qwen3::serve::ops_kernel_list`,
-/// `gradcheck::bf16_train::kernel_list`, this module's own test-only
-/// `kernel_list`) hand-maintains its own kernel-name list rather than
-/// deriving it from `REQUIRED_KERNELS` directly, because several entries
-/// (the bf16/f16 storage-tier variants) are only available as `(name,
-/// source)` pairs via `kernels::template::dtype_variant`, computed at
-/// runtime, not as `const` values this crate could re-export as a ready-made
-/// list. That hand-maintenance is exactly how `qwen3::serve`'s
+/// [`REQUIRED_KERNELS`]. A caller that registers exactly the façade set
+/// should call [`kernel_list`] rather than assembling its own list and
+/// checking it here; this stays for the callers that register extra kernels
+/// of their own alongside it. Hand-maintenance is exactly how
+/// `qwen3::serve`'s
 /// `ops_kernel_list` silently drifted 15 kernels short of `REQUIRED_KERNELS`
 /// (missing `embed`, `moe_linear_gated`, every `paged_*_batched` bf16 tier,
 /// and `matmul_dx`/`matmul_dw`) without `Ops::new`'s own fail-fast check ever
@@ -1082,121 +1188,34 @@ impl Ops {
         let threads = n * k;
         s.push(self.gpu.step(kind, &[dy, x, dw], &[m, k, n], threads));
     }
+
+    /// Which kernel [`Self::matmul`] would dispatch for this weight at `m`
+    /// rows - the selector's REAL choice, resolved through the same
+    /// [`Self::bind`] the dispatch itself uses.
+    ///
+    /// Exists so a caller that has to *report* what ran (a device benchmark,
+    /// a `--explain` flag) reads it off the one selection path instead of
+    /// re-deriving the policy and drifting from it. Returning the kernel name
+    /// rather than the [`KernelVariant`] is deliberate: the variant alone is
+    /// ambiguous (`PackedInt8` is `matmul_i8_dyn` for `I8` but the naive
+    /// `matmul_q4_dyn` for `Q4`), and the name is what a reader can grep for.
+    #[must_use]
+    pub fn matmul_kernel(&self, w: &Weight, m: u32) -> &'static str {
+        let shape = OpShape { m, n: w.n(), k: w.k(), dtype: w.dtype() };
+        Self::bind(self.selector.select(Op::MatMul, shape, &self.caps), w.dtype())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The full façade kernel set, including the three bf16-storage variants
-    /// (B4) and three f16-storage variants (B5) - built via
-    /// [`kernels::template::dtype_variant`] rather than a `const` list, since
-    /// a specialised variant's source is computed, not a plain
-    /// `include_str!`. `gpu_core::testgpu::dev` wants a `'static` slice, so
-    /// this leaks the `Vec` once (via `OnceLock`) rather than reallocating it
-    /// per call - the same "tiny working set, leaking it is fine" tradeoff
-    /// `dtype_variant`'s own interning cache already makes.
-    fn kernel_list() -> &'static [(&'static str, &'static str)] {
-        static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
-        LIST.get_or_init(|| {
-            let bf16_matmul = kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", Dtype::BF16).unwrap();
-            let bf16_gemv =
-                kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::BF16).unwrap();
-            let bf16_reg3 =
-                kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::BF16).unwrap();
-            let f16_matmul = kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", Dtype::F16).unwrap();
-            let f16_gemv =
-                kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::F16).unwrap();
-            let f16_reg3 =
-                kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16).unwrap();
-            let bf16_embed = kernels::template::dtype_variant("embed", kernels::EMBED, "emb", Dtype::BF16).unwrap();
-            let f16_embed = kernels::template::dtype_variant("embed", kernels::EMBED, "emb", Dtype::F16).unwrap();
-            let bf16_moe = kernels::template::dtype_variant(
-                "moe_linear_gated",
-                kernels::MOE_LINEAR_GATED,
-                "w",
-                Dtype::BF16,
-            )
-            .unwrap();
-            let f16_moe = kernels::template::dtype_variant(
-                "moe_linear_gated",
-                kernels::MOE_LINEAR_GATED,
-                "w",
-                Dtype::F16,
-            )
-            .unwrap();
-            // B9: paged-KV append (WRITE direction, `dtype_variant_store`,
-            // over the word-granularity sibling kernel - see `kname::
-            // PAGED_KV_APPEND_BATCHED_WORD_BF16`'s own doc comment) / scores
-            // / apply (READ direction, `dtype_variant`) bf16 tiers.
-            let bf16_kv_append = kernels::template::dtype_variant_store(
-                "paged_kv_append_batched_word",
-                kernels::PAGED_KV_APPEND_BATCHED_WORD,
-                "pool",
-                Dtype::BF16,
-            )
-            .unwrap();
-            let bf16_decode_scores = kernels::template::dtype_variant(
-                "paged_decode_scores_batched",
-                kernels::PAGED_DECODE_SCORES_BATCHED,
-                "pool_k",
-                Dtype::BF16,
-            )
-            .unwrap();
-            let bf16_decode_apply = kernels::template::dtype_variant(
-                "paged_decode_apply_batched",
-                kernels::PAGED_DECODE_APPLY_BATCHED,
-                "pool_v",
-                Dtype::BF16,
-            )
-            .unwrap();
-            // B10: matmul_dx's bf16-weight-read backward variant. matmul_dw
-            // has no bf16 variant at all (it never reads the weight - see
-            // `kname::MATMUL_DW`'s own doc comment), so only one extra entry
-            // is needed here versus B4's own three-kernel trio.
-            let bf16_matmul_dx =
-                kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap();
-            vec![
-                ("matmul", kernels::MATMUL),
-                ("matmul_gemv", kernels::MATMUL_GEMV),
-                ("matmul_reg2", kernels::MATMUL_REG2),
-                ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-                ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
-                ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
-                ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
-                ("max_abs_row", kernels::MAX_ABS_ROW),
-                ("quant_pack", kernels::QUANT_PACK),
-                bf16_matmul,
-                bf16_gemv,
-                bf16_reg3,
-                f16_matmul,
-                f16_gemv,
-                f16_reg3,
-                ("embed", kernels::EMBED),
-                bf16_embed,
-                f16_embed,
-                ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
-                bf16_moe,
-                f16_moe,
-                ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),
-                bf16_kv_append,
-                ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
-                bf16_decode_scores,
-                ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
-                bf16_decode_apply,
-                ("matmul_dx", kernels::MATMUL_DX),
-                ("matmul_dw", kernels::MATMUL_DW),
-                bf16_matmul_dx,
-            ]
-        })
-    }
-
     #[test]
     fn required_kernels_matches_kname_all() {
-        // `REQUIRED_KERNELS` and this test module's own `kernel_list()` must
-        // name the exact same set -- if `Ops::new`'s check and a real
-        // caller's `Gpu::new` kernel list ever disagree, this is where it
-        // would first show up.
+        // `REQUIRED_KERNELS` and the canonical [`kernel_list`] must name the
+        // exact same set -- if `Ops::new`'s check and what a real caller
+        // registers on its `Gpu` ever disagree, this is where it would first
+        // show up.
         let mut want: Vec<&str> = kernel_list().iter().map(|(n, _)| *n).collect();
         let mut got: Vec<&str> = REQUIRED_KERNELS.to_vec();
         want.sort_unstable();

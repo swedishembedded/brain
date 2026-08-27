@@ -5,7 +5,7 @@
 //! many sequences + **batched** decode that advances every active sequence by one
 //! token per iteration. Each sequence's KV grows a block at a time from a shared
 //! pool (no per-sequence worst-case reservation), and one batched forward serves
-//! the whole running set — so more sequences stay resident and decode together.
+//! the whole running set - so more sequences stay resident and decode together.
 //!
 //! Self-contained: it owns its `Gpu` (with the batched paged kernels), a
 //! `ParamStore` of the decoder weights, per-layer block pools, and the block
@@ -39,7 +39,7 @@ const SCORES_B: usize = 8;
 const SOFTMAX_B: usize = 9;
 const APPLY_B: usize = 10;
 // int8 paged KV (dequant on read). The append kernel is the calibrated
-// (clipped) one — the ONLY i8 append since the unclipped twin was deleted
+// (clipped) one - the ONLY i8 append since the unclipped twin was deleted
 // (audit F42): with the f32::MAX-sentinel clip table the kernel is
 // bit-identical to that old twin by its own contract, so one kernel serves
 // both the calibrated and the uncalibrated path.
@@ -55,7 +55,7 @@ const ARGMAX_FINAL: usize = 16;
 const RMSNORM_ROWS: usize = 17;
 const MATMUL_GEMV: usize = 18;
 // Int8 weight path (A0): per-token activation quant + DP4A GEMMs with
-// per-token x per-channel dequant scales — the tile GEMM for prefill shapes,
+// per-token x per-channel dequant scales - the tile GEMM for prefill shapes,
 // the packed GEMV for decode row counts.
 const MAX_ABS_ROW: usize = 19;
 const QUANT_PACK: usize = 20;
@@ -72,14 +72,14 @@ const TOPK_EXTRACT_STEP: usize = 25;
 // The 128x128 register-tiled fp32 GEMM. It was MISSING from this engine's
 // pipeline table entirely, so `Engine::mm` had only the decode GEMV and the
 // naive kernel to choose between and every chunked-prefill chunk above
-// `DECODE_REGIME_MAX_ROWS` ran one thread per output element — while the
+// `DECODE_REGIME_MAX_ROWS` ran one thread per output element - while the
 // batched forward next door dispatched this same kernel at ~80x the rate.
 const MATMUL_REG3: usize = 26;
 // Coalesced paged scores: one workgroup per score, lanes split the head_dim
 // reduction. Same Params and same output as SCORES_B; selected on the queried
 // `workgroup_reductions`, since it carries a barrier the CPU JIT gates on.
 const SCORES_B_WG: usize = 27;
-/// Scores one `paged_decode_scores_wg` workgroup owns — `64 / LPS` in the
+/// Scores one `paged_decode_scores_wg` workgroup owns - `64 / LPS` in the
 /// kernel. Must match, or the dispatch covers the wrong number of scores.
 const SCORES_WG_PER_GROUP: u32 = 16;
 // Split-K forward GEMM + its fold, for the skinny-M shapes a served step is made
@@ -134,76 +134,13 @@ const PIPELINES: &[(&str, &str)] = &[
 /// `self.gpu`: `Weight::upload` only ever touches buffers, never builds a
 /// `Step` this engine submits.
 fn ops_kernel_list() -> &'static [(&'static str, &'static str)] {
-    use gpu_core::select::Dtype as OpsDtype;
-    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
-    LIST.get_or_init(|| {
-        let mut v = vec![
-            ("matmul", kernels::MATMUL),
-            ("matmul_gemv", kernels::MATMUL_GEMV),
-            ("matmul_reg2", kernels::MATMUL_REG2),
-            ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-            ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
-            ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
-            ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
-            ("max_abs_row", kernels::MAX_ABS_ROW),
-            ("quant_pack", kernels::QUANT_PACK),
-            ("embed", kernels::EMBED),
-            ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
-            ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),
-            ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
-            ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
-            ("matmul_dx", kernels::MATMUL_DX),
-            ("matmul_dw", kernels::MATMUL_DW),
-        ];
-        // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
-        // variants (B4/B5/B8/B9/B10) even though this crate never builds a
-        // `Weight::BF16`/`Weight::F16` and has its own KV-cache mechanism
-        // (never dispatches the generic `paged_*_batched`/`embed`/
-        // `moe_linear_gated`/`matmul_dx`/`matmul_dw` family through this
-        // façade at all) - see `Ops::new`'s own doc comment ("every model
-        // that builds an `Ops` must register the full façade kernel set, not
-        // just the tiers it plans to use"). Compiled, never dispatched.
-        // Mirrors `model::ops`'s own test-only `kernel_list()` and
-        // `qwen3::model::pipelines()` exactly (see those - the same list,
-        // kept in sync by hand since there is no single shared source all
-        // three can pull from).
-        for dt in [OpsDtype::BF16, OpsDtype::F16] {
-            v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
-            v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
-        }
-        v.push(
-            kernels::template::dtype_variant_store(
-                "paged_kv_append_batched_word",
-                kernels::PAGED_KV_APPEND_BATCHED_WORD,
-                "pool",
-                OpsDtype::BF16,
-            )
-            .unwrap(),
-        );
-        v.push(
-            kernels::template::dtype_variant(
-                "paged_decode_scores_batched",
-                kernels::PAGED_DECODE_SCORES_BATCHED,
-                "pool_k",
-                OpsDtype::BF16,
-            )
-            .unwrap(),
-        );
-        v.push(
-            kernels::template::dtype_variant(
-                "paged_decode_apply_batched",
-                kernels::PAGED_DECODE_APPLY_BATCHED,
-                "pool_v",
-                OpsDtype::BF16,
-            )
-            .unwrap(),
-        );
-        v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", OpsDtype::BF16).unwrap());
-        v
-    })
+    // The canonical facade set, from `model::ops::kernel_list`. This function
+    // used to hand-maintain its own copy and famously drifted 15 kernels
+    // short of what `Ops::new` requires -- the drift that made one shared
+    // source worth having. There is nothing engine-specific to add here: this
+    // side `Gpu` exists only so `Weight::upload` can quantize and upload, and
+    // never has a `Step` submitted through it.
+    model::ops::kernel_list()
 }
 
 /// Longest on-device decode window (tokens per host round-trip). The scheduler
@@ -217,7 +154,7 @@ pub const DECODE_WINDOW: usize = 4;
 /// The same number `vae::blocks::DW_SPLITK_TARGET_WGS` was swept to for
 /// `matmul_dw_reg_splitk`, on the same card and against the same defect (a tile
 /// grid that does not grow with the contraction). That sweep found a RULE, not
-/// a constant — every shape's optimum landed on ~288 workgroups — which is why
+/// a constant - every shape's optimum landed on ~288 workgroups - which is why
 /// it transfers here rather than needing its own sweep to start from.
 const SPLITK_TARGET_WGS: u32 = 288;
 
@@ -265,14 +202,14 @@ fn ids() -> KernelIds {
 }
 
 // The decode-regime boundaries (max rows, argmax split vocab) live in the
-// shared selection policy — `gpu_core::select` — not here: which kernel runs
+// shared selection policy - `gpu_core::select` - not here: which kernel runs
 // for a shape on a device is the selector's single job.
 
 /// Chunks per row for the two-stage argmax; 256 threads per row saturates the
 /// reduction without a large partial buffer (256*2 f32 per row).
 const ARGMAX_CHUNKS: u32 = 256;
 
-/// The largest `k` a real (non-greedy) sampling decode step will request —
+/// The largest `k` a real (non-greedy) sampling decode step will request -
 /// device scratch for the iterative top-K extraction is sized to this bound.
 /// 64 comfortably covers the standard `top_k = 40` default with headroom for
 /// a wider top-p nucleus; a request asking for more is clamped to this.
@@ -290,7 +227,7 @@ fn fb(x: f32) -> u32 {
 }
 
 /// Fault injection (G): `brain perf faults` arms a fault, the next pass
-/// through its check point fires it. Feature-gated — a build without
+/// through its check point fires it. Feature-gated - a build without
 /// `fault-injection` compiles the sink to nothing, so there is no release
 /// cost and nothing to accidentally arm in production.
 #[cfg(feature = "fault-injection")]
@@ -314,7 +251,7 @@ pub mod fault {
 pub enum Input<'a> {
     Tokens(&'a [u32]),
     Embeds(&'a [f32]),
-    /// Token ids already resident in the engine's `tok_buf` — the on-device
+    /// Token ids already resident in the engine's `tok_buf` - the on-device
     /// decode window (A4): `decode_feed` wrote them from the previous step's
     /// argmax, and `decode_advance` already advanced the paged metadata, so
     /// the forward performs NO host writes at all.
@@ -345,7 +282,7 @@ fn decoder_param_list(cfg: &QwenConfig) -> Vec<(String, usize)> {
     out
 }
 
-/// Per-(K or V)-buffer word counts for the paged KV pool at this sizing — the
+/// Per-(K or V)-buffer word counts for the paged KV pool at this sizing - the
 /// ONE place the int8/fp32 layout is derived. `from_map_with_gpu`'s
 /// allocation loop and [`kv_pool_bytes`] both call this rather than each
 /// carrying their own copy of the arithmetic, so a caller reading
@@ -377,13 +314,13 @@ pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8
 
 /// Whether `cfg` can take int8 KV at all: the append kernels pack 4 int8
 /// lanes into one `u32`, so a packed word must stay within one head (else its
-/// lanes would span two heads' scales) — `head_dim % 4 == 0`. Every shipped
+/// lanes would span two heads' scales) - `head_dim % 4 == 0`. Every shipped
 /// Qwen3 config (`head_dim` 128) and `QwenConfig::tiny()` (`head_dim` 8)
 /// satisfy this; an imported HF config with an unusual `head_dim` might not.
 ///
 /// The three DEFAULT-selecting call sites (`QwenResident::activate`,
 /// `qwen_cli::serve`, the perf `SynthSpec` builders) call this FIRST and
-/// degrade to fp32 with a printed reason when it is `false` — an explicit
+/// degrade to fp32 with a printed reason when it is `false` - an explicit
 /// `kv_int8: true` request still hits `from_map_with_gpu`'s hard assert,
 /// because a caller that asked for int8 by name should hear about a mismatch
 /// as a failure, not a silent substitution. An implicit default should not
@@ -438,9 +375,9 @@ struct Scratch {
 pub struct Engine {
     cfg: QwenConfig,
     gpu: Gpu,
-    /// The device's capabilities, read once at build — the selector's input.
+    /// The device's capabilities, read once at build - the selector's input.
     caps: DeviceCaps,
-    /// Which kernel variant runs for each (op, shape) — the shared decode-regime
+    /// Which kernel variant runs for each (op, shape) - the shared decode-regime
     /// policy, memoised per distinct shape.
     selector: CachedSelector<DefaultSelector>,
     ps: ParamStore,
@@ -458,7 +395,7 @@ pub struct Engine {
     /// Prompt-prefix cache (D): full prompt blocks are indexed after prefill
     /// and adopted (shared, refcounted) by later prompts with the same prefix,
     /// so prefill computes only the unmatched tail. Purely a prefill
-    /// optimisation — decode never touches it.
+    /// optimisation - decode never touches it.
     prefix: PrefixCache,
     /// Prefix-reuse counters: tokens looked up / tokens served from the cache.
     prefix_lookup_tokens: u64,
@@ -478,14 +415,14 @@ pub struct Engine {
     kv_int8: bool,
     scales_k: Vec<DeviceBuffer>,
     scales_v: Vec<DeviceBuffer>,
-    /// What [`kv_pool_bytes`] computed for this sizing — recorded once at
+    /// What [`kv_pool_bytes`] computed for this sizing - recorded once at
     /// construction (not re-derived by the accessor) so it can never drift
     /// from what `pool_k`/`pool_v`/`scales_k`/`scales_v` actually allocated.
     kv_pool_bytes: u64,
     /// `Some` uploads real calibrated ceilings into `clip_k`/`clip_v`; `None`
     /// (the default) keeps the f32::MAX sentinel there, which the append
     /// kernel's contract documents as bit-identical to the deleted unclipped
-    /// twin (audit F42) — see [`Engine::set_kv_calib`].
+    /// twin (audit F42) - see [`Engine::set_kv_calib`].
     kv_calib: Option<model::kvcalib::KvCalib>,
     /// Per-layer `[n_kv]` clip-ceiling upload buffers (allocated whenever
     /// `kv_int8`; MAX-sentinel-filled until a real calibration is installed).
@@ -515,7 +452,7 @@ pub struct Engine {
     /// like the old `Q8::sx`/`Q8::xq` it replaces.
     i8_scratch: Option<I8Scratch>,
     /// Measured GEMV/tile choices for the int8 linears (S5), keyed by
-    /// `(row bucket, n, k)` — tuned once at build on THIS device (persisted
+    /// `(row bucket, n, k)` - tuned once at build on THIS device (persisted
     /// per adapter), so the hot path never measures. Empty on fp32 engines.
     tuned_i8: HashMap<(u32, u32, u32), KernelVariant>,
     sc: Scratch,
@@ -546,7 +483,7 @@ impl Engine {
 
     /// [`Engine::from_map`] on an EXISTING device (F1 warm start): the caller's
     /// `Gpu` parents this engine via [`Gpu::new_like`], so building another
-    /// engine costs pipeline compilation only — never a second full device
+    /// engine costs pipeline compilation only - never a second full device
     /// init. This is what a serving process or the residency executor should
     /// use: one device per process, many engines on it (many concurrent
     /// devices on one card is both slow and hostile to the driver).
@@ -559,7 +496,7 @@ impl Engine {
     fn from_map_with_gpu(gpu: Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
         // Int8 weights are capability-driven, never assumed: the request only
         // takes effect where the packed-dot GEMM executes (the selector's
-        // PackedInt8 gate). Elsewhere — the CPU JIT — fp32 weights stay, and
+        // PackedInt8 gate). Elsewhere - the CPU JIT - fp32 weights stay, and
         // the fallback is said out loud rather than silently absorbed.
         let caps = gpu.caps();
         // The gate is the CAPABILITY, not the selector's head: which int8
@@ -569,7 +506,7 @@ impl Engine {
         if weights_int8 && !w8_on {
             eprintln!("serve: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
         }
-        // The 7 per-layer linears live in the int8 bank when it is on — loading
+        // The 7 per-layer linears live in the int8 bank when it is on - loading
         // them into the fp32 ParamStore as well would keep both copies resident
         // and forfeit the memory the quantisation buys.
         let roles = decoder_param_list(&cfg)
@@ -593,7 +530,7 @@ impl Engine {
         let widest_n = cfg.d_ff.max(cfg.q_dim()).max(cfg.d_model) as u64;
         let widest_m = max_batch.max(max_prefill) as u64;
         // Sized for the MAX slice count the rule can emit, not a guess. Sizing
-        // it for 8 silently refused the wide shapes — only `wk`/`wv` fitted, so
+        // it for 8 silently refused the wide shapes - only `wk`/`wv` fitted, so
         // 56 of 196 GEMMs split and the rest kept the starved kernel.
         let splitk_cap = (widest_m * widest_n * SPLITK_MAX_SLICES as u64).min(SPLITK_SCRATCH_WORDS);
         let (splitk_part, splitk_cap) = if gpu.caps().workgroup_reductions && splitk_cap > 0 {
@@ -816,13 +753,13 @@ impl Engine {
 
     /// Install a calibrated KV clip table, uploading its per-layer ceilings
     /// once. `None` (or a [`model::kvcalib::KvCalib::disabled`] table) clears
-    /// calibration — the append dispatch falls back to the plain online-
+    /// calibration - the append dispatch falls back to the plain online-
     /// absmax kernel. A no-op on a fp32-KV engine (`kv_int8: false`): there
     /// is nothing to clip, since `run_batched_submit`'s int8 branch (the only
     /// place `kv_calib` is read) never runs. Printed loudly rather than
     /// silent, because a caller installing a table it then never sees take
     /// effect is exactly the kind of no-op AGENTS.md calls out (a gate/config
-    /// that never runs is worse than none) — [`kv_calibrated`] reflects the
+    /// that never runs is worse than none) - [`kv_calibrated`] reflects the
     /// same "did it actually bind" question.
     pub fn set_kv_calib(&mut self, calib: Option<model::kvcalib::KvCalib>) {
         let calib = calib.filter(|c| !c.is_disabled());
@@ -838,7 +775,7 @@ impl Engine {
             self.clip_v = c.v.iter().map(|row| { let b = g.storage(row.len() as u64); g.write(&b, bytemuck::cast_slice(row)); b }).collect();
         } else {
             // No (or disabled) calibration: refill the resident per-layer clip
-            // tables with the f32::MAX sentinel — bit-identical to the deleted
+            // tables with the f32::MAX sentinel - bit-identical to the deleted
             // unclipped twin by the kernel's own contract (audit F42).
             let max_row = vec![f32::MAX; self.cfg.n_kv_heads as usize];
             for b in self.clip_k.iter().chain(self.clip_v.iter()) {
@@ -856,13 +793,13 @@ impl Engine {
     }
 
     /// True when the KV cache is packed int8 rather than fp32 (unlike
-    /// `weights_int8`, this is exactly what the constructor was built with —
+    /// `weights_int8`, this is exactly what the constructor was built with -
     /// int8 KV has no capability gate to fall back from).
     pub fn kv_int8(&self) -> bool {
         self.kv_int8
     }
 
-    /// Device bytes the KV pool costs at this engine's sizing — recorded once
+    /// Device bytes the KV pool costs at this engine's sizing - recorded once
     /// at construction from [`kv_pool_bytes`], never re-derived, so this can
     /// never drift from what `pool_k`/`pool_v`/`scales_k`/`scales_v` actually
     /// allocated.
@@ -871,7 +808,7 @@ impl Engine {
     }
 
     /// The pool's total theoretical cached-token capacity (`num_blocks *
-    /// block_size`), independent of dtype — the number that answers "how
+    /// block_size`), independent of dtype - the number that answers "how
     /// many tokens could this pool ever hold at once", as opposed to
     /// [`kv_pool_bytes`] answering "at what memory cost".
     pub fn kv_pool_capacity_tokens(&self) -> u64 {
@@ -880,7 +817,7 @@ impl Engine {
 
     /// Whether the installed KV clip table is a real, binding calibration
     /// that is ACTUALLY DISPATCHED (not `None`, not `KvCalib::disabled`, and
-    /// the engine is int8 — the clip binding is only read by the i8 append on
+    /// the engine is int8 - the clip binding is only read by the i8 append on
     /// the int8 branch of `run_batched_submit`). A table
     /// installed on an fp32 engine is `Some` in `self.kv_calib` but never
     /// read by anything, so this must say `false` for it or it would claim a
@@ -889,7 +826,7 @@ impl Engine {
         self.kv_int8 && self.kv_calib.is_some()
     }
 
-    /// The device this engine runs on — the parent handle for building more
+    /// The device this engine runs on - the parent handle for building more
     /// engines on the same device ([`Engine::from_map_on`]).
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
@@ -936,7 +873,7 @@ impl Engine {
     }
 
     /// Advance every sequence by one token from a ready-made embedding per sequence
-    /// (`[bsz, d_model]`) — the tts Talker multi-stream path: concurrent voice
+    /// (`[bsz, d_model]`) - the tts Talker multi-stream path: concurrent voice
     /// streams decode together on the shared paged pool.
     pub fn forward_batched_embed(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32]) -> Vec<f32> {
         let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
@@ -946,7 +883,7 @@ impl Engine {
 
     /// Run one batched forward over `bsz` rows given fully-computed metadata:
     /// `positions[i]` RoPE position, `seqlens[i]` the cached length row i attends
-    /// (row i's query attends `j < seqlens[i]` — set to start+i+1 for causal
+    /// (row i's query attends `j < seqlens[i]` - set to start+i+1 for causal
     /// prefill), `(blocks[i], offsets[i])` the pool slot to write row i's K/V, and
     /// `bt` the per-row block tables (`bsz * max_blocks_per_seq`). Serves decode
     /// (one new token per sequence) and prefill chunks alike.
@@ -982,7 +919,7 @@ impl Engine {
     /// [`Self::mm`], but free to emit MORE than one dispatch: the split-K GEMM
     /// needs a fold after it.
     ///
-    /// Split-K only when the tile grid is too small to fill the device — the
+    /// Split-K only when the tile grid is too small to fill the device - the
     /// same rule and the same 288-workgroup target `vae::blocks` measured for
     /// `matmul_dw_reg_splitk`, which is the identical defect on the backward.
     /// `slices = 1` means the plain kernel, so a shape that already fills the
@@ -1014,7 +951,7 @@ impl Engine {
     /// How many k-slices to split this GEMM into, or `None` for the plain
     /// kernel. `None` whenever the device has no scratch, the tile grid already
     /// fills the card, the shape is in the GEMV regime, or the partials would
-    /// not fit the scratch — the last one keeps this from silently allocating.
+    /// not fit the scratch - the last one keeps this from silently allocating.
     fn splitk_slices(&self, m: u32, k: u32, n: u32) -> Option<u32> {
         if !self.caps.workgroup_reductions || m <= DECODE_REGIME_MAX_ROWS {
             return None;
@@ -1030,7 +967,7 @@ impl Engine {
         Some(slices)
     }
 
-    /// The fp32 GEMM tier for this device — the SAME rule `flux1`, `flux2` and
+    /// The fp32 GEMM tier for this device - the SAME rule `flux1`, `flux2` and
     /// `model::rowemit` use, so the serving engine stops having a private one.
     ///
     /// `mm` picks the actual kernel by calling `block::gemm_variant(self.
@@ -1117,8 +1054,8 @@ impl Engine {
 
     /// Measure the GEMV/tile crossover for every distinct int8 linear shape
     /// and row bucket on THIS device (S5). Both candidates are dispatched on
-    /// the engine's real buffers — REPS dispatches per timing so submit/poll
-    /// overhead amortises — and the winner persists per adapter + kernel
+    /// the engine's real buffers - REPS dispatches per timing so submit/poll
+    /// overhead amortises - and the winner persists per adapter + kernel
     /// sources. `BRAIN_NO_AUTOTUNE=1` skips every measurement (static policy).
     fn tune_i8(gpu: &Gpu, caps: &DeviceCaps, weights: &HashMap<String, Weight>, scratch: &I8Scratch, max_rows: u32) -> HashMap<(u32, u32, u32), KernelVariant> {
         let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN]);
@@ -1214,7 +1151,7 @@ impl Engine {
         let scale = 1.0f32 / (hd as f32).sqrt();
         let theta = c.rope_theta;
         let g = &self.gpu;
-        // Resident mode (A4): every input — token ids AND paged metadata — was
+        // Resident mode (A4): every input - token ids AND paged metadata - was
         // produced on the device by `decode_feed`/`decode_advance`, so writing
         // host copies here would both be wrong (stale) and force a flush.
         if !matches!(input, Input::Resident) {
@@ -1306,7 +1243,7 @@ impl Engine {
     }
 
     /// [`Self::run_batched_steps`] plus the submit. Split so a profiler can
-    /// time the served tape per kernel kind without driving a whole request —
+    /// time the served tape per kernel kind without driving a whole request -
     /// the tape is rebuilt per step rather than recorded once, so there was
     /// nothing to hand `gpu_core::profile`.
     #[allow(clippy::too_many_arguments)]
@@ -1345,7 +1282,7 @@ impl Engine {
     ///
     /// Two-stage reduction: `argmax_part` splits each row into
     /// [`ARGMAX_CHUNKS`] chunks reduced by independent threads, `argmax_final`
-    /// folds the partials — `bsz * chunks` threads instead of `bsz`. The
+    /// folds the partials - `bsz * chunks` threads instead of `bsz`. The
     /// original single-thread-per-row `argmax_row` scanned 32k logits alone
     /// and was 10.3% of decode time; it remains registered as the small-vocab
     /// path and the reference the tests compare against.
@@ -1356,7 +1293,7 @@ impl Engine {
     }
 
     /// Record the head steps that turn `sc.xn_final` into `[bsz, vocab]`
-    /// `logits_dev` (int8 or fp32, whichever the engine holds) — shared by
+    /// `logits_dev` (int8 or fp32, whichever the engine holds) - shared by
     /// [`Self::submit_greedy_head`] and [`Self::submit_topk_head`], which
     /// otherwise diverge only in what they do with the resulting logits.
     fn head_steps(&self, steps: &mut Vec<Step>, bsz: u32) {
@@ -1370,7 +1307,7 @@ impl Engine {
     }
 
     /// Record + submit the greedy head (logits + row argmax into
-    /// `argmax_dev`) WITHOUT reading back — the on-device decode window feeds
+    /// `argmax_dev`) WITHOUT reading back - the on-device decode window feeds
     /// the result straight into the next step.
     fn submit_greedy_head(&self, bsz: u32) {
         let g = &self.gpu;
@@ -1396,7 +1333,7 @@ impl Engine {
     }
 
     /// The row's top-`k` (token id, logit) candidates, best first, entirely
-    /// from device work — see [`Self::submit_topk_head`]. `k` is clamped to
+    /// from device work - see [`Self::submit_topk_head`]. `k` is clamped to
     /// [`TOPK_CAPACITY`].
     fn topk_from_hidden(&self, bsz: u32, k: u32) -> Vec<Vec<(u32, f32)>> {
         let k = k.clamp(1, TOPK_CAPACITY);
@@ -1418,7 +1355,7 @@ impl Engine {
     /// of `topk_vals_dev`/`topk_idx_dev`, and masks it out of `logits_dev` so
     /// the next iteration finds the row's next-best value. This is what turns
     /// a `[bsz, vocab]` row into a `[bsz, k]` candidate list with only ONE
-    /// host round-trip (the final readback in [`Self::topk_from_hidden`]) —
+    /// host round-trip (the final readback in [`Self::topk_from_hidden`]) -
     /// the design point of the whole seam: real (non-greedy) sampling must
     /// never ship the full vocab back to the host.
     fn submit_topk_head(&self, bsz: u32, k: u32) {
@@ -1452,10 +1389,10 @@ impl Engine {
     }
 
     /// Advance every sequence by one token, returning the row's top-`k`
-    /// (token id, logit) candidates instead of a single greedy token — the
+    /// (token id, logit) candidates instead of a single greedy token - the
     /// entry point a caller doing real (non-greedy) sampling uses in place of
     /// [`Self::forward_batched_greedy`]. `logits_dev` is mutated (masked) by
-    /// the extraction, exactly as `argmax_dev` already is by the greedy path —
+    /// the extraction, exactly as `argmax_dev` already is by the greedy path -
     /// callers never read either between decode steps.
     pub(crate) fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: u32) -> Vec<Vec<(u32, f32)>> {
         let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
@@ -1509,7 +1446,7 @@ impl Engine {
         if k > 1 {
             g.write(&self.sc.sched_buf, &sched);
         }
-        // Sub-step 0: host-fed, as today — but the argmax stays on the device.
+        // Sub-step 0: host-fed, as today - but the argmax stays on the device.
         self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt);
         self.submit_greedy_head(bsz);
         for s in 1..k {
@@ -1572,7 +1509,7 @@ impl Engine {
             self.block_size,
         );
         // An out-of-vocab id would make the embedding gather read out of
-        // bounds — the kernels are trusted (no per-access clamps on either
+        // bounds - the kernels are trusted (no per-access clamps on either
         // backend), so the failure is silent garbage, not a clean error. The
         // scheduler rejects such requests at admission; this backstop catches
         // callers that bypass it.
@@ -1586,7 +1523,7 @@ impl Engine {
         let chunk = self.max_prefill.max(1);
         // Prefix reuse (D): adopt the longest cached chain of full prompt
         // blocks and compute only the tail. Always leave at least one token to
-        // compute — the caller needs the LAST token's hidden state, which only
+        // compute - the caller needs the LAST token's hidden state, which only
         // a real forward produces.
         let max_reuse = prompt.len().saturating_sub(1);
         let hits = self.prefix.lookup(prompt, bs, max_reuse);
@@ -1626,14 +1563,14 @@ impl Engine {
 
     /// Like [`Engine::prefill`], but returns EVERY position's final-norm
     /// hidden state (`[prompt.len() * d_model]`, row-major) instead of only
-    /// the last — what teacher-forced held-out scoring needs (`qwen3::eval`),
+    /// the last - what teacher-forced held-out scoring needs (`qwen3::eval`),
     /// where every position's loss counts, not just the next-token
     /// prediction after the whole prompt.
     ///
     /// Deliberately bypasses the prefix cache (`self.prefix`) entirely: an
     /// eval pass scores a set of independent held-out samples, not a live
     /// conversation, so there is no shared prefix to exploit and no reason
-    /// to let one sample's cache entries affect another's — full recompute
+    /// to let one sample's cache entries affect another's - full recompute
     /// per sample keeps the measurement simple and reproducible. `run_batched`
     /// itself already computes every chunk row's hidden state (`prefill`
     /// just slices out the last one); this keeps all of them.
@@ -1679,7 +1616,7 @@ impl Engine {
     }
 
     /// Release up to `want` least-recently-used cache-only prefix blocks back
-    /// to the pool — the admission path calls this when the pool is short.
+    /// to the pool - the admission path calls this when the pool is short.
     pub(crate) fn reclaim_prefix(&mut self, want: u32) -> u32 {
         self.prefix.evict(want, &mut self.alloc)
     }
@@ -1690,7 +1627,7 @@ impl Engine {
         (self.prefix_hit_tokens, self.prefix_lookup_tokens, self.prefix.len())
     }
 
-    /// Device-op accounting for this engine's handle (K) — what a benchmark
+    /// Device-op accounting for this engine's handle (K) - what a benchmark
     /// records so submit/dispatch/readback cost is machine-readable. `None`
     /// where the backend does not count.
     pub fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
@@ -1698,11 +1635,11 @@ impl Engine {
     }
 
     /// Admission's one-time first-token logits (before the batched decode
-    /// loop, which never reaches this — see `submit_greedy_head`/
+    /// loop, which never reaches this - see `submit_greedy_head`/
     /// `forward_batched_topk`). `matvec_par` (rayon over `vocab` rows +
     /// AVX2/FMA per row) replaces a single-threaded scalar loop that measured
     /// hundreds of ms at the real 151936×1024 LM-head shape (see
-    /// `hostmath::matvec`'s doc comment) — a real per-request stall this
+    /// `hostmath::matvec`'s doc comment) - a real per-request stall this
     /// device-side-everything-else engine had left unfixed at exactly the one
     /// remaining host head.
     pub(crate) fn logits(&self, hidden: &[f32]) -> Vec<f32> {
@@ -1710,7 +1647,7 @@ impl Engine {
         model::hostmath::matvec_par(&self.head, hidden, v, d)
     }
 
-    /// Blocks free in the pool — the capacity figure `brain perf kvcache` sizes
+    /// Blocks free in the pool - the capacity figure `brain perf kvcache` sizes
     /// its overcommitted session mix against.
     pub fn free_blocks_for_perf(&self) -> u32 {
         self.alloc.free_blocks()
@@ -1729,7 +1666,7 @@ impl Engine {
     /// reason as `Qwen::fwd_steps`: `gpu_core::profile` needs a step list, and
     /// this tape is rebuilt per step rather than recorded once. `bsz` rows with
     /// `seqlens[i] = positions[i] + 1` is a decode step; a chunk of `cc` rows
-    /// from one sequence is a prefill chunk — the two share this tape, which is
+    /// from one sequence is a prefill chunk - the two share this tape, which is
     /// exactly why profiling it is worth doing.
     #[allow(clippy::too_many_arguments)]
     pub fn steps_for_profile(&self, bsz: u32, tokens: &[u32], positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<Step> {
@@ -1737,7 +1674,7 @@ impl Engine {
         // decode window: it deliberately performs no host writes because
         // `decode_feed`/`decode_advance` already produced the token ids AND the
         // paged metadata on the device. Using it from a profiler leaves
-        // `seq_lens` at whatever was in the buffer — zero — so every attention
+        // `seq_lens` at whatever was in the buffer - zero - so every attention
         // thread early-returns and the kernels appear to do almost no work.
         // That is exactly how `paged_decode_scores_batched` came to report a
         // bandwidth well above what the card can physically deliver: the timing
@@ -1750,7 +1687,7 @@ impl Engine {
     pub fn free_blocks(&self) -> u32 {
         self.alloc.free_blocks()
     }
-    /// The prefill chunk size this engine was built with — the unit the
+    /// The prefill chunk size this engine was built with - the unit the
     /// scheduler's per-iteration prefill budget is expressed against.
     pub fn max_prefill_tokens(&self) -> u32 {
         self.max_prefill
@@ -1782,7 +1719,7 @@ impl Engine {
 
     /// Prefill every prompt, then read back the K/V rows each one wrote and
     /// accumulate per-`(layer, K|V, kv_head)` activation-magnitude statistics
-    /// (`model::actstats`) — the design input for a calibrated INT8 KV scale
+    /// (`model::actstats`) - the design input for a calibrated INT8 KV scale
     /// (`brain qwen calib`, `crates/qwen3/src/calib.rs`).
     ///
     /// Offline-only, never called from the hot serving path (`run_batched_submit`
@@ -1791,7 +1728,7 @@ impl Engine {
     /// over a modest prompt set but is NOT the shape a per-request tap could
     /// use without a real perf cost.
     ///
-    /// Needs an fp32-KV engine (`kv_int8: false`) — calibration wants the
+    /// Needs an fp32-KV engine (`kv_int8: false`) - calibration wants the
     /// pre-quantization distribution, not a value already thrown away by
     /// today's online absmax. K rows are read POST-RoPE (RoPE runs before
     /// the KV append in `run_batched_submit`), matching exactly
@@ -1804,7 +1741,7 @@ impl Engine {
         let hkv = n_kv * hd;
         let bs = self.block_size as usize;
 
-        // Prefill every prompt first, keeping every table alive — the
+        // Prefill every prompt first, keeping every table alive - the
         // allocator must not recycle a prompt's blocks before we've read
         // them back below.
         let mut tables: Vec<(BlockTable, usize)> = Vec::with_capacity(prompts.len());
@@ -1896,7 +1833,7 @@ impl Engine {
     /// the running context; the target verifies them in ONE batched forward,
     /// accepting the longest correct prefix plus a bonus/correction token, and
     /// rolling the paged cache back over any rejected tokens. The output is
-    /// identical to plain greedy target decoding — the win is fewer (expensive)
+    /// identical to plain greedy target decoding - the win is fewer (expensive)
     /// target forwards when the draft guesses well. `draft(ctx, want) -> tokens`.
     /// Returns `(generated_tokens, target_forward_count)`.
     pub fn spec_decode<D: FnMut(&[u32], u32) -> Vec<u32>>(&mut self, prompt: &[u32], max_new: usize, k: u32, mut draft: D) -> (Vec<u32>, usize) {
@@ -2107,25 +2044,25 @@ mod tests {
         }
     }
 
-    /// G3 (the scale-bug gate — lesson 2: cosine cannot see a dropped scale,
+    /// G3 (the scale-bug gate - lesson 2: cosine cannot see a dropped scale,
     /// and the int8 bug class IS a scale bug). ONE int8 engine, ONE prefill
     /// (the whole prompt fits in a single `max_prefill`-sized chunk, so it is
     /// exactly one forward pass): the ground truth for "what was quantized"
     /// is read straight out of the engine's OWN scratch (`sc.k`/`sc.v`), which
-    /// still hold the last layer's post-RoPE K/V — the literal `src` the
-    /// append kernel just packed — because nothing overwrites them after the
+    /// still hold the last layer's post-RoPE K/V - the literal `src` the
+    /// append kernel just packed - because nothing overwrites them after the
     /// final layer's dispatch. This deliberately avoids comparing against a
     /// SEPARATE fp32 engine: two independently-built engines can select
     /// different autotuned kernel variants for the identical (op, shape) and
     /// differ by GPU floating-point noise well under any real scale bug but
-    /// well above `assert_eq!` — the oracle must come from the same
+    /// well above `assert_eq!` - the oracle must come from the same
     /// computation being checked, not a second one hoped to agree with it.
     ///
     /// Per `(token, kv-head)`, every element: the scale is EXACTLY
     /// `absmax/127` (or `1.0` when `absmax==0`), the stored byte is EXACTLY
     /// `clamp(round(x/scale), -127, 127)`, the dequantized value sits within
     /// half a quantization step of the truth, and the whole-tensor `rel_l2`
-    /// stays under a DERIVED bound (not a hand-fitted one) — `rel_l2` because
+    /// stays under a DERIVED bound (not a hand-fitted one) - `rel_l2` because
     /// cosine alone cannot see a dropped or doubled scale factor.
     #[test]
     fn int8_kv_scale_and_bytes_match_a_host_oracle() {
@@ -2264,8 +2201,8 @@ mod tests {
 
     /// Single-sequence paged/batched serving must match the reference contiguous
     /// KV generation (`Qwen::generate_kv`) token-for-token, and a two-sequence
-    /// batch must equal running each prompt on its own — proving batched paged
-    /// decode is exact. G4: at BOTH KV dtypes, not just fp32 — the reference is
+    /// batch must equal running each prompt on its own - proving batched paged
+    /// decode is exact. G4: at BOTH KV dtypes, not just fp32 - the reference is
     /// always fp32 (`Qwen::generate_kv` has no paging or quantization at all),
     /// so the int8 arm is asking whether quantization noise ever flips an
     /// argmax; kept `assert_eq!` deliberately, since a flip here on real
@@ -2297,10 +2234,10 @@ mod tests {
     }
 
     /// THE prefix-cache invariant: a warm prefill (served from cached blocks)
-    /// must produce output IDENTICAL to the cold one — a cache hit that
+    /// must produce output IDENTICAL to the cold one - a cache hit that
     /// changes a single token is corruption, not a cache. Also pins that the
     /// cache actually engaged (a test that silently measured two cold runs
-    /// would prove nothing). G4: at BOTH KV dtypes — this is the load-bearing
+    /// would prove nothing). G4: at BOTH KV dtypes - this is the load-bearing
     /// proof that `PrefixCache` block sharing works for int8 KV, not just by
     /// accident of the pool and scales sharing the same `slot` indexing (see
     /// the comment on [`Engine`]'s `scales_k`/`scales_v` fields): if a shared
@@ -2357,17 +2294,17 @@ mod tests {
 
     /// Random shared prefixes: a prompt sharing a random-length prefix with
     /// earlier traffic must prefill (through adopted cached blocks) to the
-    /// same final hidden state a fresh engine computes — within rounding.
+    /// same final hidden state a fresh engine computes - within rounding.
     ///
     /// Deliberately NOT a token-equality test: reused KV is bit-identical to
     /// its original computation, but the CPU backend's blocked GEMMs are not
     /// row-count-invariant in final-bit rounding, so a tail-only prefill can
-    /// differ from a full one by an ulp — which flips argmax on a degenerate
+    /// differ from a full one by an ulp - which flips argmax on a degenerate
     /// random model while meaning nothing. Structural corruption (a wrongly
     /// adopted block) produces O(1) relative error; rounding produces ~1e-6.
     /// The 1e-3 gate separates them cleanly. Token-level identity is pinned by
     /// `warm_prefill_is_identical_to_cold` where chunking is identical.
-    /// G4: at BOTH KV dtypes — the `rel < 1e-3` tolerance here is deliberately
+    /// G4: at BOTH KV dtypes - the `rel < 1e-3` tolerance here is deliberately
     /// NOT bit-exact (see the doc comment above), for reasons unrelated to
     /// `kv_int8`, so this test keeps its existing tolerance under int8 too
     /// rather than tightening it to `assert_eq!`.
@@ -2421,7 +2358,7 @@ mod tests {
         if !eng8.weights_int8() {
             // Capability-gated fallback (CPU JIT): the engine must run fp32
             // and say so. A device whose caps DO report the packed-int8 path
-            // must never land here — a silent fallback on capable hardware is
+            // must never land here - a silent fallback on capable hardware is
             // exactly the regression this branch once masked.
             assert!(
                 !eng8.gpu().caps().numeric.int8_dot,
@@ -2477,7 +2414,7 @@ mod tests {
 
     /// An out-of-vocab token must be REJECTED at admission with a typed
     /// reason. Admitting it would make the embedding gather read out of
-    /// bounds — the kernels are trusted, so the failure would be silent
+    /// bounds - the kernels are trusted, so the failure would be silent
     /// garbage in the hidden states (found the hard way: NaN on CPU, wrong
     /// finite values on GPU), not an error anyone can see.
     #[test]
@@ -2595,7 +2532,7 @@ mod tests {
 
     /// The device-side greedy head must select exactly the token the host head
     /// would. This is the invariant that lets decode skip shipping a
-    /// `[batch, vocab]` logit block back to the host — if it ever drifted, the
+    /// `[batch, vocab]` logit block back to the host - if it ever drifted, the
     /// engine would silently generate different text at speed.
     #[test]
     fn device_head_argmax_matches_the_host_head() {
@@ -2629,7 +2566,7 @@ mod tests {
 
     /// The on-device iterative top-K extraction (`topk_extract_step` composed
     /// with the existing `argmax_part`/`argmax_final`) must return EXACTLY the
-    /// row's true top-K logits+indices, sorted descending — an exact,
+    /// row's true top-K logits+indices, sorted descending - an exact,
     /// deterministic operation with no tolerance to gate on
     /// (dims chosen so vocab != any other dimension, so
     /// a transposed/wrong-stride bug can't hide behind a coincidence).
@@ -2697,7 +2634,7 @@ mod tests {
         let want = a.run();
 
         // Tight budget: one 5-token prompt exhausts it, so the 4 arrivals must
-        // be admitted over MULTIPLE iterations — with decode in between — and
+        // be admitted over MULTIPLE iterations - with decode in between - and
         // still produce token-identical outputs.
         let mut b = Scheduler::new(Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 4, 12, 8, false, false), 4);
         b.set_prefill_budget(5);
@@ -2725,7 +2662,7 @@ mod tests {
     }
 
     /// The two-stage argmax (vocab >= ARGMAX_SPLIT_MIN_VOCAB) must pick exactly
-    /// the token the host head picks — including the lowest-index tie-break.
+    /// the token the host head picks - including the lowest-index tie-break.
     #[test]
     fn split_argmax_matches_the_host_head_at_large_vocab() {
         let mut cfg = QwenConfig::tiny();
@@ -2838,7 +2775,7 @@ mod tests {
     }
 
     /// Continuous batching: requests submitted at DIFFERENT times (one mid-flight)
-    /// must each produce the same tokens as run alone — the scheduler admits,
+    /// must each produce the same tokens as run alone - the scheduler admits,
     /// batches, completes, and frees dynamically without changing any output.
     #[test]
     fn scheduler_dynamic_admission_matches_reference() {
@@ -2884,21 +2821,21 @@ mod tests {
 
     /// REGRESSION (attention-scratch dispatch width): the
     /// on-device decode-WINDOW path (`Engine::forward_batched_greedy_window`,
-    /// `Input::Resident` sub-steps 1..k) had ZERO test coverage before this —
+    /// `Input::Resident` sub-steps 1..k) had ZERO test coverage before this -
     /// every other test here keeps the scheduler in single-step (`k=1`)
     /// territory by always having a waiting/mixed-sampling request in flight,
     /// which forces `k=1` (`model::serve::Scheduler::step`'s `all_greedy &&
     /// self.waiting.is_empty()` gate). `Input::Resident` is also the one
-    /// `Input` variant `run_batched_submit` gets NO host seqlens for (`&[]` —
+    /// `Input` variant `run_batched_submit` gets NO host seqlens for (`&[]` -
     /// see `serve.rs::forward_batched_greedy_window`'s sub-step 1..k calls);
     /// its per-row KV length lives only on-device (`sc.seqlen_buf`, walked by
     /// `decode_advance`). A single request, nothing else submitted, comfortably
     /// exceeding `DECODE_WINDOW` in `max_new`, is exactly the shape that makes
-    /// the scheduler choose `k = DECODE_WINDOW` for most of the run — if the
+    /// the scheduler choose `k = DECODE_WINDOW` for most of the run - if the
     /// window path's on-device bookkeeping (positions/seqlens/block-table
     /// scheduling for those resident sub-steps) were wrong, the argmax'd
     /// tokens would diverge from the independent single-step reference below.
-    /// G4: at BOTH KV dtypes — the on-device window bookkeeping
+    /// G4: at BOTH KV dtypes - the on-device window bookkeeping
     /// (positions/seqlens/block-table scheduling for the resident sub-steps)
     /// is dtype-independent code, but it feeds `run_batched_submit`'s int8
     /// branch just the same as the single-step path, so this is worth proving
@@ -2930,7 +2867,7 @@ mod tests {
                 // produces exactly one token per running row, so a row producing
                 // more than one is direct evidence a window step (k>1) actually
                 // ran. Nothing else was ever submitted, so `waiting` is empty from
-                // the first iteration on — the scheduler has no reason to prefer
+                // the first iteration on - the scheduler has no reason to prefer
                 // k=1 beyond block pressure, which the oversized pool above rules out.
                 if report.produced.iter().any(|&(_, n)| n > 1) {
                     saw_a_window_step = true;
@@ -2947,7 +2884,7 @@ mod tests {
     /// Real (non-greedy) sampling through `Scheduler::submit_sampled`, driven
     /// by the real `Engine` (both the admission-time host sampling and the
     /// per-token on-device top-K path exercised together, mixed with an
-    /// ordinary greedy sequence in the SAME batch — the `all_greedy` fallback
+    /// ordinary greedy sequence in the SAME batch - the `all_greedy` fallback
     /// this plan's Scheduler change hinges on). A fixed seed must reproduce
     /// bit-for-bit; a high temperature must, with overwhelming probability,
     /// diverge from the greedy continuation of the same prompt.
@@ -2988,7 +2925,7 @@ mod tests {
     }
 
     /// G2: `Engine::kv_pool_bytes()` must equal the independently-recomputed
-    /// [`kv_pool_bytes`] free function (two derivations that must agree — the
+    /// [`kv_pool_bytes`] free function (two derivations that must agree - the
     /// engine's is recorded at construction, this test's is a fresh call), and
     /// an int8 engine's pool must be strictly smaller than an fp32 one at the
     /// SAME `num_blocks`.
@@ -3005,12 +2942,12 @@ mod tests {
     }
 
     /// int8 paged KV stays close to fp32 through prefill + decode (both read
-    /// the quantised cache) — a structural sanity check that CUMULATIVE
+    /// the quantised cache) - a structural sanity check that CUMULATIVE
     /// divergence over several autoregressive steps stays small, not a
     /// precision claim: G3 already derives the exact per-element quantization
     /// bound (0.5 of a step) for a single append, and
     /// the REAL accuracy measurement (loss
-    /// delta +0.0154 on Qwen3-0.6B) — this test cannot substitute for either
+    /// delta +0.0154 on Qwen3-0.6B) - this test cannot substitute for either
     /// (lesson 18: a toy config's error magnitude cannot predict the real
     /// one). What it CAN catch is a wiring break that makes int8 decode wildly
     /// diverge from fp32 (a dropped scale propagating through several steps,
@@ -3019,8 +2956,8 @@ mod tests {
     /// not `tiny()` (lesson 4: `tiny()`'s degenerate dims don't exercise real
     /// GQA). Two independently-built engines (fp32, int8) also carry their
     /// own small autotuner-driven kernel-variant noise, independent of
-    /// quantization — see `int8_kv_scale_and_bytes_match_a_host_oracle`'s doc
-    /// comment — which is exactly why this bound is loose and G3's is tight.
+    /// quantization - see `int8_kv_scale_and_bytes_match_a_host_oracle`'s doc
+    /// comment - which is exactly why this bound is loose and G3's is tight.
     #[test]
     fn int8_kv_close_to_fp32() {
         let cfg = kv_probe_cfg();
@@ -3070,7 +3007,7 @@ mod tests {
     }
 
     /// A REAL (binding) calibrated clip must change the KV pool's contents
-    /// relative to the uncalibrated kernel — proving the clipped kernel path
+    /// relative to the uncalibrated kernel - proving the clipped kernel path
     /// actually dispatches and its clip ceiling actually takes effect, not
     /// just that the selector compiles.
     #[test]
@@ -3098,7 +3035,7 @@ mod tests {
     }
 
     /// `kv_calibrated()` must say `false` for a table installed on an fp32
-    /// engine, even though `self.kv_calib` is internally `Some(_)` — the
+    /// engine, even though `self.kv_calib` is internally `Some(_)` - the
     /// table is provably never dispatched there (the int8 branch of
     /// `run_batched_submit` is the only reader). An accessor that reported
     /// `true` here would claim a calibration is binding when it is not.
@@ -3125,8 +3062,8 @@ mod tests {
     }
 
     /// Chunked prefill (small chunk) must produce the same hidden as whole-prompt
-    /// prefill — the prompt streams through in pieces attending the paged prefix.
-    /// G4: at BOTH KV dtypes — chunk boundaries must not change which slot a
+    /// prefill - the prompt streams through in pieces attending the paged prefix.
+    /// G4: at BOTH KV dtypes - chunk boundaries must not change which slot a
     /// token's K/V lands in, at either dtype. Kept at the ORIGINAL `1e-4`
     /// tolerance (not tightened to `assert_eq!`): `prefill_last` builds a
     /// fresh `Engine` per call, so "whole" and "chunked" are two independent
@@ -3156,7 +3093,7 @@ mod tests {
     /// dispatches once per TOKEN (the old `Qwen::prefill`'s per-position
     /// `decode_submit` loop at `m=1`). The paged `Engine::prefill` must cost device
     /// submits proportional to the number of CHUNKS (`ceil(len / max_prefill)`),
-    /// never to the raw token count within one chunk — model-agnostic in spirit
+    /// never to the raw token count within one chunk - model-agnostic in spirit
     /// (any future `PagedDecoder` gets this same shape), asserted here on the one
     /// concrete implementation that exists.
     /// The asserted shape is `submits == chunks * per_chunk` exactly - strictly
@@ -3165,7 +3102,7 @@ mod tests {
     /// out of the measurement below rather than folded into `per_chunk`, because
     /// a constant that only the first chunk pays is not a per-chunk cost and
     /// multiplying it by the chunk count is simply wrong arithmetic.
-    /// G4: at BOTH KV dtypes — submit counts are integers, unaffected by any
+    /// G4: at BOTH KV dtypes - submit counts are integers, unaffected by any
     /// floating-point noise, so this stays `assert_eq!` at both dtypes with no
     /// caveat.
     #[test]
@@ -3216,7 +3153,7 @@ mod tests {
                 after - before
             };
             // One chunk large enough to hold either prompt whole: a 4-token prompt and a
-            // 16-token prompt must cost the SAME number of submits — proof the dispatch
+            // 16-token prompt must cost the SAME number of submits - proof the dispatch
             // is per-CALL, not per-TOKEN (a per-token dispatcher would cost four times more here).
             let short = vec![1u32, 5, 3, 9];
             let long: Vec<u32> = (0..16).map(|i| (i % 20) as u32 + 1).collect();
@@ -3239,10 +3176,10 @@ mod tests {
         }
     }
 
-    /// Speculative decoding output equals plain greedy — with a good (oracle)
+    /// Speculative decoding output equals plain greedy - with a good (oracle)
     /// draft it takes far fewer target forwards; with a bad draft it falls back to
     /// ~one token per forward. Either way the tokens are identical. G4: at BOTH
-    /// KV dtypes — the accept/reject mechanism, and `BlockTable::truncate` on a
+    /// KV dtypes - the accept/reject mechanism, and `BlockTable::truncate` on a
     /// rejection, must agree with plain greedy at int8 too, not just fp32; the
     /// three engines below are built at the SAME dtype within an iteration (a
     /// within-dtype question, not a cross-dtype one), so this is
@@ -3278,9 +3215,9 @@ mod tests {
     }
 
     /// tts multi-stream: N Talker streams (embedding inputs) decoded together on
-    /// the shared paged pool must match each stream decoded alone — bit-for-bit.
+    /// the shared paged pool must match each stream decoded alone - bit-for-bit.
     /// (The Talker is the same Qwen3 block, so the tiny config stands in for it.)
-    /// G4: at BOTH KV dtypes, same `1e-6` threshold — quantization is a
+    /// G4: at BOTH KV dtypes, same `1e-6` threshold - quantization is a
     /// deterministic per-activation function with no cross-stream state, so
     /// batching must not perturb it any more than it already doesn't at fp32.
     #[test]

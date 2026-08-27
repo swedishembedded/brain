@@ -40,71 +40,12 @@ use model::ops::{Ops, Weight};
 /// other. See `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL`.
 static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The full façade kernel set `Ops::new` requires (mirrors
-/// `model::ops::tests::kernel_list` and `bf16_roundtrip.rs`'s own copy),
-/// extended with the B8 `embed`/`moe_linear_gated` bf16/f16 variants this
-/// file's tests dispatch.
-fn kernel_list() -> Vec<(&'static str, &'static str)> {
-    let dv = kernels::template::dtype_variant;
-    let bf16_matmul = dv("matmul", kernels::MATMUL, "w", Dtype::BF16).unwrap();
-    let bf16_gemv = dv("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::BF16).unwrap();
-    let bf16_reg3 = dv("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::BF16).unwrap();
-    let f16_matmul = dv("matmul", kernels::MATMUL, "w", Dtype::F16).unwrap();
-    let f16_gemv = dv("matmul_gemv", kernels::MATMUL_GEMV, "w", Dtype::F16).unwrap();
-    let f16_reg3 = dv("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16).unwrap();
-    let bf16_embed = dv("embed", kernels::EMBED, "emb", Dtype::BF16).unwrap();
-    let f16_embed = dv("embed", kernels::EMBED, "emb", Dtype::F16).unwrap();
-    let bf16_moe = dv("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::BF16).unwrap();
-    let f16_moe = dv("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::F16).unwrap();
-    // B9: paged-KV append (write direction)/scores/apply (read direction)
-    // bf16 tiers - additive, mechanical, same fix this file's own comment
-    // above already needed when B8 landed.
-    let bf16_kv_append = kernels::template::dtype_variant_store(
-        "paged_kv_append_batched_word",
-        kernels::PAGED_KV_APPEND_BATCHED_WORD,
-        "pool",
-        Dtype::BF16,
-    )
-    .unwrap();
-    let bf16_decode_scores =
-        dv("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED, "pool_k", Dtype::BF16).unwrap();
-    let bf16_decode_apply =
-        dv("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED, "pool_v", Dtype::BF16).unwrap();
-    // B10: matmul_dx's bf16-weight-read backward variant. matmul_dw has no
-    // bf16 variant at all (it never reads the weight).
-    let bf16_matmul_dx = dv("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap();
-    vec![
-        ("matmul", kernels::MATMUL),
-        ("matmul_gemv", kernels::MATMUL_GEMV),
-        ("matmul_reg2", kernels::MATMUL_REG2),
-        ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-        ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
-        ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
-        ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
-        ("max_abs_row", kernels::MAX_ABS_ROW),
-        ("quant_pack", kernels::QUANT_PACK),
-        bf16_matmul,
-        bf16_gemv,
-        bf16_reg3,
-        f16_matmul,
-        f16_gemv,
-        f16_reg3,
-        ("embed", kernels::EMBED),
-        bf16_embed,
-        f16_embed,
-        ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
-        bf16_moe,
-        f16_moe,
-        ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),
-        bf16_kv_append,
-        ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
-        bf16_decode_scores,
-        ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
-        bf16_decode_apply,
-        ("matmul_dx", kernels::MATMUL_DX),
-        ("matmul_dw", kernels::MATMUL_DW),
-        bf16_matmul_dx,
-    ]
+/// The canonical façade kernel set, straight from
+/// [`model::ops::kernel_list`] - the one list `Ops::new` requires. This file
+/// used to hand-maintain a byte-identical copy of it, which is exactly the
+/// drift `kernel_list`'s own doc comment describes.
+fn kernel_list() -> &'static [(&'static str, &'static str)] {
+    model::ops::kernel_list()
 }
 
 fn skip_gpu() -> bool {

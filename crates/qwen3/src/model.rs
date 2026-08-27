@@ -252,11 +252,18 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
         // (never dispatches the generic `paged_*_batched` family at all) -
         // see `Ops::new`'s own doc comment ("every model that builds an
         // `Ops` must register the full façade kernel set, not just the
-        // tiers it plans to use"). Compiled, never dispatched. Mirrors
-        // `model::ops`'s own test-only `kernel_list()` exactly (see that
-        // function - this is the same list, kept in sync by hand since
-        // there is no single shared source both a model crate and
-        // `model::ops`'s test module can pull from).
+        // tiers it plans to use"). Compiled, never dispatched.
+        //
+        // This list deliberately does NOT delegate to the canonical
+        // `model::ops::kernel_list()` (which every other `Ops`-building call
+        // site now does), because it is not the facade set: it extends
+        // `STATIC_PIPELINES` and, crucially, registers the NAME
+        // "matmul_reg2" against the `matmul_reg3` SOURCE above - the
+        // sanctioned name/source override `Ops::bind` documents. Pulling in
+        // the canonical list would re-register "matmul_reg2" with the real
+        // (slower) `matmul_reg2` source and silently undo that speed-up. The
+        // `pipelines_has_every_kernel_ops_new_requires` test below is what
+        // keeps this superset honest against `REQUIRED_KERNELS`.
         for dt in [Dtype::BF16, Dtype::F16] {
             v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
