@@ -21,9 +21,31 @@
 
 use captioner::{label_dir, Captioner, LabelOpts};
 
+/// What a `--trigger` phrase names, when the caller does not say. A style,
+/// because that is what most adapters are; a folder of one subject's
+/// photographs needs `--trigger-role "the name of the person"` instead.
+const DEFAULT_TRIGGER_ROLE: &str = "the name of the style";
+
+/// The instruction handed to the captioner for every image.
+///
+/// The trigger is appended as an explicit instruction rather than pasted onto
+/// the answer, so the model works it into the sentence it is already writing
+/// and the phrase reads as part of the description. `role` says what the
+/// phrase names, because an adapter binds the trigger to whatever the caption
+/// claims it is: "the name of the style" on a person's photographs teaches a
+/// look rather than a face, and no amount of training recovers from it.
+fn instruction(prompt: &str, trigger: &str, role: &str) -> String {
+    let trigger = trigger.trim();
+    if trigger.is_empty() {
+        return prompt.to_string();
+    }
+    format!("{prompt} Work the exact phrase \"{trigger}\" into the description naturally, as {role}.")
+}
+
 const HELP: &str = "brain label <cmd>
   images <dir> [--model qwen3vl|fastvlm] [--weights DIR] [--out FILE]
-               [--prompt TEXT] [--trigger PHRASE] [--max-new N] [--max-pixels N]
+               [--prompt TEXT] [--trigger PHRASE] [--trigger-role ROLE]
+               [--max-new N] [--max-pixels N]
                [--overwrite]
 
   Caption every image in <dir> with a vision-language model and write the
@@ -44,6 +66,11 @@ const HELP: &str = "brain label <cmd>
   --trigger P     a phrase woven into every caption, so an adapter trained on
                   the folder binds the concept to it. Pick a phrase you are
                   willing to type at generation time.
+  --trigger-role R what that phrase NAMES, in the captioner's own words
+                  (default \"the name of the style\"). A folder of one
+                  person's photographs wants \"the name of the person\": the
+                  adapter binds the trigger to whatever the caption claims it
+                  is, so calling a face a style trains the wrong thing.
   --max-new N     token budget per caption (default 320). A detailed caption
                   needs a large one, and decode cost is linear in it.
   --max-pixels N  cap the input image AREA in pixels, where the model has such
@@ -118,6 +145,7 @@ fn images(args: &[String]) -> Result<(), String> {
     let out = a.str_or("--out", "captions.yaml");
     let prompt = a.str_or("--prompt", DEFAULT_PROMPT);
     let trigger = a.str_or("--trigger", "");
+    let trigger_role = a.str_or("--trigger-role", DEFAULT_TRIGGER_ROLE);
     let max_new = a.u32_or("--max-new", 320);
     let max_pixels = a.u32_or("--max-pixels", 0);
     let overwrite = a.take_flag("--overwrite");
@@ -127,14 +155,7 @@ fn images(args: &[String]) -> Result<(), String> {
         return Err(format!("the dataset directory is required\n\n{HELP}"));
     }
 
-    // The trigger is appended as an explicit instruction rather than pasted
-    // onto the answer, so the model works it into the sentence it is already
-    // writing and the phrase reads as part of the description.
-    let instruction = if trigger.trim().is_empty() {
-        prompt
-    } else {
-        format!("{prompt} Work the exact phrase \"{}\" into the description naturally, as the name of the style.", trigger.trim())
-    };
+    let instruction = instruction(&prompt, &trigger, &trigger_role);
 
     let mut model = build(&model, &weights, max_pixels)?;
     let caps = model.capabilities();
@@ -156,4 +177,31 @@ fn images(args: &[String]) -> Result<(), String> {
         return Err(format!("{} image(s) could not be captioned (re-run to retry exactly those)", report.failed));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::instruction;
+
+    /// A trigger phrase names something the adapter is being taught, and WHAT
+    /// it names is the caller's to say. Captioning a folder of one person's
+    /// photographs as "the name of the style" trains the wrong binding, and
+    /// nothing downstream can recover from a caption set that says it.
+    #[test]
+    fn trigger_role_is_the_callers_to_choose() {
+        let subject = instruction("Describe it.", "Martin Schroder", "the name of the person");
+        assert!(subject.contains("\"Martin Schroder\""), "the exact phrase is quoted: {subject}");
+        assert!(subject.contains("the name of the person"), "the caller's role is used: {subject}");
+        assert!(!subject.contains("style"), "no style wording leaks in: {subject}");
+
+        let style = instruction("Describe it.", "bohemian loft", "the name of the style");
+        assert!(style.contains("the name of the style"), "{style}");
+    }
+
+    /// With no trigger there is nothing to name, so the prompt is handed to the
+    /// model untouched - a role must not smuggle a phrase in on its own.
+    #[test]
+    fn no_trigger_leaves_the_prompt_alone() {
+        assert_eq!(instruction("Describe it.", "   ", "the name of the person"), "Describe it.");
+    }
 }
