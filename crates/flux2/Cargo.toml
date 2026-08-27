@@ -23,6 +23,11 @@ brain-vae.workspace = true
 brain-qwen3.workspace = true
 brain-data.workspace = true
 brain-diffusion.workspace = true
+# The workspace's one image front door (`imaging::{load, save_png}`) - what the
+# `flux2_latent` latent laboratory reads its test images with and writes its
+# decodes back through. Deliberately not a second PNG path: every other image
+# read in this repo goes through this crate.
+brain-imaging.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 

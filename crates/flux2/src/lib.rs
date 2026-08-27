@@ -26,6 +26,7 @@ pub mod config;
 pub mod finetune;
 pub mod grad;
 pub mod import;
+pub mod latentops;
 pub mod lora;
 pub mod mask;
 pub mod model;
