@@ -8734,3 +8734,289 @@ Stated in this ledger's usual tiers:
    pipeline.
 5. Then, and only then, the `use_prompt_adaln_single` question above becomes
    answerable on real weights - it affects 2.5 and 2.3 identically.
+
+### Phase 39 - masked conditioning: region replacement, not identity replacement
+
+Phase 37 ended by proving the character swap it was asked for is unreachable
+through IC-LoRA on LTX-2.5, and stopped there with a script that produced control
+signals and named the missing adapter. Phase 39 asks the next question - is there
+a route that does NOT need an adapter - and answers yes.
+
+**Outcome in one line: `ltxv::maskcond` ports `VideoConditionByMask`,
+`pipeline::generate_masked` and `brain ltxv v2v` drive it, and the set, camera
+move and lighting of an existing clip now survive a regeneration BIT-exactly -
+but who the replacement character is comes from the prompt alone, so this is
+region replacement, not identity replacement.** Section 5 is the honest
+accounting; do not read the bit-exactness claim as an identity claim.
+
+#### 1 - why this route and not the one Phase 37 built
+
+The two mechanisms are not variations on a theme and the difference is
+architectural:
+
+* **IC-LoRA (`refcond`, Phase 37)** appends the reference's tokens to the
+  sequence. The base checkpoint has no idea what to do with them; attending
+  across the two halves is what the ADAPTER was trained to do
+  (`reference_video_cond.py`'s own docstring says so). Without a matching
+  adapter the appended tokens are an out-of-distribution sequence, not a weaker
+  control signal. LTX-2.5 ships exactly one IC-LoRA and it is a pixel spatial
+  upscaler, so this route is plumbing waiting for weights.
+* **Masked conditioning (`maskcond`, this phase)** writes a per-token
+  `clean_latent` / `denoise_mask` pair, which every reference denoiser already
+  honours on every step through `timesteps_from_mask` and `post_process_latent`.
+  There is nothing for an adapter to have learned. It also preserves more
+  strongly: a conditioned token at `strength = 1.0` sits at timestep 0 for the
+  whole trajectory and is re-pinned after every step, so it leaves the sampler
+  as the exact bits it entered with, not "structurally similar".
+
+That second property is what makes it the right answer even if a 2.5
+structural-control adapter appeared tomorrow. An edge- or depth-conditioned
+generation reproduces a background that RESEMBLES the source. This reproduces
+the source.
+
+#### 2 - what was ported, and the two details that fail silently
+
+`ltxv::maskcond` is `ltx_core.conditioning.types.mask_cond.VideoConditionByMask`
+verbatim - two blends over the latent state - plus the `GaussianNoiser` step the
+reference runs after every conditioning item, plus the consumer side of the
+`brain/sam2-maskseq/1` interchange format. `pipeline::generate_masked` runs it as
+ONE stage at the clip's own resolution (there is nothing to upscale: the content
+already exists at the size it is wanted), and `Stage` gained a `mask` field that
+`denoise_stage` refuses to combine with a conditioning still or a carried latent
+context, since all three write the same two tensors.
+
+Two things here are dangerous specifically because getting them wrong still
+produces a plausible video:
+
+* **Polarity is inverted from intuition.** `mask = 1` is the CONDITIONING
+  position, the one that is KEPT. So a character swap masks the BACKGROUND at 1.
+  Every human-facing mask convention in this repo is the opposite (a tracker
+  paints the SUBJECT), so the flip has exactly one named, tested home,
+  `MaskSeqPolarity::to_conditioning`, driven by the manifest's declared
+  `polarity` and never inferred from the pixels. Reading it backwards preserves
+  the character and regenerates the entire set: visually coherent, completely
+  wrong, and silent.
+* **A fractional mask is not a lerp between the endpoints.** At `mask = 0.5,
+  strength = 1.0` the reference gives `clean = 0.5 * tokens` and `denoise = 0.5`,
+  so the noiser's `lerp(clean, noise, denoise)` starts that token at
+  `0.25 * tokens + 0.5 * noise` - the mask enters the initial latent
+  QUADRATICALLY. That is a direct consequence of the class documenting its mask
+  as binary, it is what every soft mask edge actually gets (and any downsampled
+  mask has soft edges), and it is ported as-is rather than "fixed".
+
+Two storage decisions, both the same lesson `refcond`'s factored attention mask
+records:
+
+* **The mask is stored `[N]`, never `[N, C]`.** The reference broadcasts a
+  `[B, N, 1]` mask against a `[B, N, C]` latent; materialising that costs `C`
+  times the mask for zero information, a 128x blow-up at the real checkpoint's
+  latent width. The golden asserts the factored and expanded forms are
+  bit-identical, which is what licenses it.
+* **The PIXEL mask is never held whole.** A 121-frame 1280x704 mask sequence is
+  109 M samples, larger than the clip it masks, and it is read exactly once on
+  the way to a latent grid thousands of times smaller. `LatentMaskAccumulator`
+  consumes it one frame at a time and is gated bit-for-bit against the
+  whole-buffer reduction, so the memory is not bought with a behaviour change.
+
+#### 3 - the gate, mutation-verified
+
+Gated by `tools/goldens/ltxv_maskcond_dump_reference.py`, a **live run** of the
+official class - 10 cases, 100 tensors. Two of those cases exist only to make the
+reference's redundant-LOOKING terms observable, and they are the ones worth
+copying into the next conditioning port:
+
+* one case with a **non-zero initial latent**, so `clean_latent * inv` is not
+  identically zero. On the default all-zero state that term vanishes and a port
+  that dropped it matches everywhere.
+* one case with **`VideoConditionByLatentIndex` applied first**, so
+  `denoise_mask * inv` is not identically one. On a fresh state the base mask is
+  all ones and `1 - strength * m` is indistinguishable from the real formula.
+
+Every mutation below was applied to the source, the gate run, the source
+restored:
+
+| mutation | cosine | rel_l2 | caught by |
+| --- | --- | --- | --- |
+| M1 `clean * inv` term dropped | 0.688188 | 7.3e-1 | both |
+| M2 `1 - strength * m` for the denoise mask | 0.861164 | 6.2e-1 | both |
+| M3 mask polarity swapped | 0.000000 | 1.5e+0 | both |
+| M4 `GaussianNoiser`'s first lerp dropped | 0.984446 | 2.6e-1 | both |
+| M5 outer lerp endpoints swapped | 0.016930 | 1.2e+0 | both |
+| M6 causal first-frame split dropped | - | - | structural assert |
+| **M7 temporal reduction max, not mean** | **0.999620** | **3.9e-2** | **rel_l2 ONLY** |
+| **M8 sam2 polarity read unflipped** | **0.999774** | **2.1e-2** | **rel_l2 ONLY** |
+| M9 occluded frame emitted empty | - | - | structural assert |
+| **M10 area-average cell end floors** | - | - | **SURVIVED, see below** |
+| M11 conditioning latent written unmasked | 0.688806 | 1.1e+0 | both |
+
+M7 and M8 are the two classes that matter most on this path - the temporal
+collapse (8 source frames into 1 latent frame: a MEAN, not `any`/`all`/`max`) and
+the polarity flip - and **both scored cosine above 0.9996**. A cosine-only gate
+at any plausible bound passes both. That is the third and fourth independent
+reproduction of this ledger's cosine-blindness lesson, after `upsampler_parity`
+and `refcond`'s dropped `clamp(min=0)` (cosine 0.999999884, caught only by
+rel_l2 4.8e-4). The rule is now beyond argument: **assert cosine AND rel_l2, on
+every tap, always.**
+
+#### 3b - the M10 lesson: a resample gate whose ratios all divide cannot fail
+
+**M10 survived, and it is the most transferable finding of this work.**
+
+`downsample_mask_video_to_latent` reduces the mask spatially with
+`F.interpolate(mode="area")`, which is torch's **adaptive** average pooling:
+output cell `i` spans `[floor(i*H/O), ceil((i+1)*H/O))`, so neighbouring cells
+OVERLAP when the ratio does not divide evenly. Mutating the port's cell end from
+`div_ceil` to a plain floor - a real, different pooling rule - changed nothing
+the gate could see.
+
+The reason is that **every ratio in the test table divided evenly**, and at an
+exact ratio adaptive pooling degenerates into a plain box pool: the two rules
+agree bit for bit. The cases were 32 to 4, 16 to 2, 64 to 8. They were chosen to
+look like the VAE's own geometry, and that is exactly the trap, because the VAE's
+32x spatial and 8x temporal factors ALWAYS divide. A gate built only from
+realistic sizes could not distinguish the correct rule from a wrong one, and it
+reported green with full confidence.
+
+Closed by adding non-dividing ratios (9x50x30, 17x45x45) and re-verifying against
+the live reference at rel_l2 1.3e-7 and 7.5e-8. The mutation is killed.
+
+`refcond`'s own gate on the SAME function had the identical hole - all three of
+its cases divided evenly - so both were fixed. Repairing only the instance in
+front of you while announcing the lesson learned is how a defect class survives;
+the fix belongs everywhere the class appears, even outside the files a milestone
+nominally owns.
+
+**Rule for the next resample gate in this repo, whatever it resamples:** at least
+one test ratio must NOT divide evenly. Otherwise the test cannot tell adaptive
+pooling from box pooling, bilinear from nearest-with-rounding, or a
+half-pixel-offset convention from its neighbour - and all of those are wrong in
+the same quiet way, only at cell boundaries, only on soft content.
+
+#### 4 - the interchange format, and where it is enforced
+
+The mask arrives as `brain/sam2-maskseq/1`, written by `brain sam2 track` (one
+click, propagated by SAM 2.1's memory bank): one 8-bit PNG per source frame at
+the source resolution, contiguous from 0, plus a `masks.json` declaring the file
+pattern, frame count, resolution and **polarity**. `maskcond::read_mask_sequence`
+is the consumer and it holds one PNG at a time.
+
+Everything below is a hard error rather than a reconciliation, and all of it is
+exercised through the real CLI:
+
+* a `format` that is not this one;
+* a `polarity` that is missing or unrecognised - never guessed, for the reason in
+  section 2;
+* a frame count or resolution that disagrees with the clip. These are two
+  separate runs; truncating or padding would shift every mask after the
+  discrepancy, invisibly and unrecoverably;
+* an all-conditioning mask, refused rather than spending a whole generation to
+  return the input clip unchanged.
+
+One deliberate non-error: a frame the tracker marks occluded (`object_score < 0`)
+is conditioned **FULLY**. SAM 2 emits an empty mask there, and an empty object
+mask inverts to "regenerate this entire frame" - so one dropped track would
+redraw a second of clip from scratch. Conditioning it instead means the swap
+simply does not happen on that frame. It reads as the edit flickering off rather
+than the shot dissolving, and it is reported at `warn` with the count.
+
+#### 5 - what is proven, and what is NOT
+
+*Proven:*
+
+* **The algebra, against a live run of the official class**, on 10 cases
+  including a non-zero base clean latent, a non-uniform base denoise mask, a
+  temporally varying mask, fractional masks, partial strength and a partial
+  noise scale. Every tap asserts cosine AND rel_l2. 9 tests.
+* **The preservation guarantee itself**, weight-free, against the denoise loop's
+  own machinery rather than the algebra feeding it: a conditioned token starts at
+  the source latent, is announced to the model at timestep 0, passes
+  `to_denoised` as the identity, and is re-pinned by `post_process_latent` after
+  every step - so whatever the model says about it is discarded. This is the
+  property the whole feature exists for, and it needed its own test: a run that
+  merely STARTS a region at the source and then lets it denoise produces a
+  picture that resembles the input, which is indistinguishable from success by
+  eye.
+* **Token order.** At LTX-2.5's `patch_size = 1` the patchified mask is asserted
+  against the live patchifier to be the plain C-order flatten of `[F, H, W]`, so
+  the port is entitled to treat a latent mask as the token vector with no
+  permutation.
+* **The factored `[N]` mask reconstructs the dense `[N, C]` broadcast exactly**,
+  which is what licenses the storage decision.
+* **The streaming pixel reduction is bit-identical to the whole-buffer one**,
+  across dividing AND non-dividing ratios.
+* **Every refusal path in section 4**, run through `brain ltxv v2v` against a
+  real clip and a real mask directory.
+
+*Not proven:*
+
+* **The generation itself has never run. VAE encode, denoise, VAE decode was
+  never executed, because no LTX-2.5 VAE weights exist on this box.** This is the
+  one unrun link and it is the middle of the chain. What HAS run end to end
+  through the real binary is: clip decode, mask read, polarity resolution, latent
+  reduction, every refusal, and the DiT build. What has not is the part that
+  needs the VAE - and the conditioning is defined ON the VAE's latent, so there
+  is no stand-in for it and nothing to substitute.
+* **In its place, the measurement that WOULD prove it was verified separately.**
+  `examples/videogen/character_swap.sh` ends by reporting mean absolute
+  difference between input and output inside the replaced region against the
+  preserved one. Fed a synthetic edit (the tracked half overwritten, the rest
+  untouched) it reported replaced 120.92 against preserved 2.03, so it
+  discriminates. The 2.03 rather than 0.00 is lossy-codec noise from reading the
+  source twice, which is exactly the residual the check is designed to tolerate -
+  it deliberately reports a ratio rather than asserting an exact zero, because
+  the VAE decoder is convolutional and a changed latent bleeds into its
+  neighbours' pixels near a mask boundary.
+* **No real-weight quality claim of any kind.** Whether the regenerated region
+  looks like anything is a property of the 22B checkpoint, which inherits the
+  standing "no real-weight 22B forward" gap unchanged.
+* **Not audio.** A masked pass conditions a video latent and never runs the audio
+  stream, so the output has no sound track; the source's own audio stays in the
+  source file and re-attaching it is one ffmpeg mux.
+* **Not long-form.** One window, one stage, at the clip's own resolution. Past
+  `SINGLE_STAGE_MAX_TOKENS` it warns rather than refusing - that ceiling is a
+  quality observation about generating from noise, and most of a masked sequence
+  is not being generated - but a clip long enough to need several windows has no
+  design here for carrying the mask across them.
+
+#### 6 - region replacement, not identity replacement
+
+This is the conclusion, and it is a scope statement rather than a defect.
+
+What now works: the background, the set, the camera move and the lighting of an
+existing clip survive a regeneration bit-exactly, while a tracked region is
+redrawn from the prompt. That is real and it is useful.
+
+What does not, and cannot today: **nothing anywhere in this path accepts a face
+crop or a per-subject embedding.** Who the replacement character is comes from
+the text prompt alone. The adapter route to identity is closed for the reason
+Phase 37 established and Phase 38 confirmed from the headers: LTX-2.5 ships
+exactly ONE IC-LoRA and it is a pixel spatial upscaler, so there is no
+structural-control adapter to combine with this, and no `Ingredients`-style
+character reference-sheet adapter either - that one is LTX-2.3, generates FROM
+its sheet rather than preserving an input clip, and has no 2.5 build. The
+diffusion video decoder does not help: its entire input is the latent, so it
+cannot paint a face onto a body.
+
+So the truthful description, and the one written into the script header, the
+README and the module doc rather than left for a user to discover: this will
+convincingly put **a different person in a red coat** into your shot with the set
+preserved perfectly. It will not put **your actor** there. Overselling it as
+identity preservation would be discovered on the first real run.
+
+#### 7 - closing the gap the day LTX-2.5 VAE weights are on the box
+
+1. Point `BRAIN_LTXV_VAE` at the real VAE and run
+   `examples/videogen/character_swap.sh` on a clip that is 1 + 8k frames on a
+   32-pixel grid, with a mask directory from `brain sam2 track`.
+2. Without `BRAIN_LTXV_DIT` this already exercises the whole chain: the replaced
+   region will be noise from the tiny random-weight DiT, but the preservation
+   check is real and its preserved number should be near zero. **That is the
+   first thing to look at, before any quality judgement** - it isolates the
+   conditioning from the model.
+3. Then add the real checkpoint and judge the regenerated region.
+4. The failure to watch for is a preserved number that is NOT near zero, which
+   would mean the mask reached the latent but not the sampler. The pipeline tests
+   cover that logic weight-free, so a failure there points at the VAE round trip
+   or the token layout, not at the conditioning algebra.
+5. Long-form and audio are the two scope lines in section 5 to reconsider only
+   after the above is real.
