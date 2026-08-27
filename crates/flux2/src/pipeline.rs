@@ -102,11 +102,22 @@ pub struct GenOpts {
     /// CFG scale — only meaningful for the undistilled base variants.
     pub guidance: f32,
     pub seed: u64,
+    /// Spatial preservation mask over the output canvas: **white regenerates,
+    /// black preserves** the first reference image, which must then be at the
+    /// output size. Where `strength` decides how much of the source survives
+    /// *everywhere*, this decides *where* it survives - after every Euler step
+    /// the masked-out region is replaced by the source latent renoised to that
+    /// step's sigma ([`crate::mask::blend`]), so it tracks the source exactly
+    /// instead of being softly guided toward it.
+    ///
+    /// `None` - and an all-white mask - are bit-for-bit the unmasked
+    /// behaviour.
+    pub mask: Option<crate::mask::Mask>,
 }
 
 impl Default for GenOpts {
     fn default() -> Self {
-        GenOpts { width: 1024, height: 1024, strength: None, steps: None, guidance: 4.0, seed: 0 }
+        GenOpts { width: 1024, height: 1024, strength: None, steps: None, guidance: 4.0, seed: 0, mask: None }
     }
 }
 
@@ -419,236 +430,341 @@ impl Pipeline {
         reqs: &[BatchRequest],
         progress: &mut dyn FnMut(u32, u32, &str),
     ) -> Vec<BatchOutcome> {
-        let mut out: Vec<BatchOutcome> = (0..reqs.len()).map(|_| Err("not run".to_string())).collect();
-        // Partition by position ids: one slab layout per group.
-        let mut groups: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
-        for (i, r) in reqs.iter().enumerate() {
-            match self.plan(r) {
-                Err(e) => out[i] = Err(e),
-                Ok(ids) => match groups.iter_mut().find(|(g, _)| *g == ids) {
-                    Some((_, v)) => v.push(i),
-                    None => groups.push((ids, vec![i])),
-                },
-            }
-        }
-        for (ids, members) in groups {
-            self.denoise_group(reqs, &ids, &members, &mut out, progress);
-        }
-        out
+        generate_batch_on(self, reqs, progress)
     }
+}
 
-    /// Validate one request and return its joint position ids (the key that
-    /// decides which requests can share a batched forward).
-    fn plan(&self, r: &BatchRequest) -> Result<Vec<u32>, String> {
+/// What the sampler needs from the models underneath it: the DiT forward, plus
+/// the two codecs that bracket it.
+///
+/// The seam exists so the sampling logic - the sigma schedule, the img2img
+/// init, the mask blending, the batching and the per-request cancellation - can
+/// be exercised without a multi-gigabyte checkpoint on disk and a card to put
+/// it on. [`Pipeline`] is the one production implementation; there is no second
+/// sampler behind it to drift.
+trait Denoiser {
+    fn cfg(&self) -> &Flux2Config;
+    fn encode_prompt(&self, prompt: &str) -> Vec<f32>;
+    fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String>;
+    fn decode_tokens(&self, tokens: &[f32], lh: usize, lw: usize) -> Result<Vec<u8>, String>;
+    fn max_batch(&self) -> u32;
+    fn forward_batch(&self, samples: &[crate::model::Sample<'_>], ids: &[u32], n_pred: usize) -> Vec<Vec<f32>>;
+}
+
+impl Denoiser for Pipeline {
+    fn cfg(&self) -> &Flux2Config {
+        &self.cfg
+    }
+    fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+        Pipeline::encode_prompt(self, prompt)
+    }
+    fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
+        Pipeline::encode_image(self, chw, h, w)
+    }
+    fn decode_tokens(&self, tokens: &[f32], lh: usize, lw: usize) -> Result<Vec<u8>, String> {
+        Pipeline::decode_tokens(self, tokens, lh, lw)
+    }
+    fn max_batch(&self) -> u32 {
+        self.model.max_batch()
+    }
+    fn forward_batch(&self, samples: &[crate::model::Sample<'_>], ids: &[u32], n_pred: usize) -> Vec<Vec<f32>> {
+        self.model.forward_batch(samples, ids, n_pred)
+    }
+}
+
+/// [`Pipeline::generate_batch`] over any [`Denoiser`].
+fn generate_batch_on<D: Denoiser>(
+    d: &D,
+    reqs: &[BatchRequest],
+    progress: &mut dyn FnMut(u32, u32, &str),
+) -> Vec<BatchOutcome> {
+    let mut out: Vec<BatchOutcome> = (0..reqs.len()).map(|_| Err("not run".to_string())).collect();
+    // Partition by position ids: one slab layout per group.
+    let mut groups: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
+    for (i, r) in reqs.iter().enumerate() {
+        match plan_on(d, r) {
+            Err(e) => out[i] = Err(e),
+            Ok(ids) => match groups.iter_mut().find(|(g, _)| *g == ids) {
+                Some((_, v)) => v.push(i),
+                None => groups.push((ids, vec![i])),
+            },
+        }
+    }
+    for (ids, members) in groups {
+        denoise_group_on(d, reqs, &ids, &members, &mut out, progress);
+    }
+    out
+}
+
+/// Validate one request and return its joint position ids (the key that
+/// decides which requests can share a batched forward).
+fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<u32>, String> {
+    let o = &r.opts;
+    if !o.width.is_multiple_of(16) || !o.height.is_multiple_of(16) {
+        return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
+    }
+    let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
+    // Keep in step with the token builder: under `strength` the first
+    // reference is consumed as the init latent, so it contributes no
+    // reference tokens and therefore no reference position ids.
+    let ref_skip = ref_skip(o);
+    let ref_dims: Vec<(usize, usize)> = r
+        .refs
+        .iter()
+        .skip(ref_skip)
+        .map(|(_, rh, rw)| ((rh / 16) as usize, (rw / 16) as usize))
+        .collect();
+    Ok(position_ids(d.cfg().txt_len, lh, lw, &ref_dims))
+}
+
+/// The source content a masked lane preserves, in latent space.
+///
+/// Held per lane because the blend needs all three at every step: the source
+/// latent, the *same* noise draw the init used (so the preserved region walks
+/// the source's own forward trajectory rather than a fresh one each step), and
+/// the mask resampled to this lane's latent grid.
+struct Preserve {
+    /// One weight per latent token, `n_gen` of them.
+    mask: Vec<f32>,
+    /// The source latent `x₀`, `n_gen * in_channels`.
+    src: Vec<f32>,
+    /// The lane's init noise `ε`, same layout.
+    noise: Vec<f32>,
+}
+
+/// One id-group's shared denoise loop.
+fn denoise_group_on<D: Denoiser>(
+    d: &D,
+    reqs: &[BatchRequest],
+    ids: &[u32],
+    members: &[usize],
+    out: &mut [BatchOutcome],
+    progress: &mut dyn FnMut(u32, u32, &str),
+) {
+    let cfg = d.cfg();
+    // Per-member state; a member that fails to encode drops out here.
+    struct Lane {
+        idx: usize,
+        lh: usize,
+        lw: usize,
+        n_gen: usize,
+        steps: usize,
+        guidance: f32,
+        ctx: Vec<f32>,
+        ctx_uncond: Option<Vec<f32>>,
+        ref_tokens: Vec<f32>,
+        sigmas: Vec<f32>,
+        lat: Vec<f32>,
+        /// First schedule index this lane runs; > 0 for img2img inits.
+        start: usize,
+        /// Set only when the request carries a mask; `None` leaves the
+        /// trajectory bit-for-bit what it was before masking existed.
+        preserve: Option<Preserve>,
+    }
+    let max_steps_hint = members.iter().map(|&i| reqs[i].steps_for(cfg.distilled)).max().unwrap_or(0) as u32;
+    let mut lanes: Vec<Lane> = Vec::new();
+    for &i in members {
+        let r = &reqs[i];
         let o = &r.opts;
-        if !o.width.is_multiple_of(16) || !o.height.is_multiple_of(16) {
-            return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
-        }
         let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
-        // Keep in step with the token builder: under `strength` the first
-        // reference is consumed as the init latent, so it contributes no
-        // reference tokens and therefore no reference position ids.
-        let ref_skip = ref_skip(o);
-        let ref_dims: Vec<(usize, usize)> = r
-            .refs
-            .iter()
-            .skip(ref_skip)
-            .map(|(_, rh, rw)| ((rh / 16) as usize, (rw / 16) as usize))
-            .collect();
-        Ok(position_ids(self.cfg.txt_len, lh, lw, &ref_dims))
-    }
-
-    /// One id-group's shared denoise loop.
-    fn denoise_group(
-        &self,
-        reqs: &[BatchRequest],
-        ids: &[u32],
-        members: &[usize],
-        out: &mut [BatchOutcome],
-        progress: &mut dyn FnMut(u32, u32, &str),
-    ) {
-        let cfg = &self.cfg;
-        // Per-member state; a member that fails to encode drops out here.
-        struct Lane {
-            idx: usize,
-            lh: usize,
-            lw: usize,
-            n_gen: usize,
-            steps: usize,
-            guidance: f32,
-            ctx: Vec<f32>,
-            ctx_uncond: Option<Vec<f32>>,
-            ref_tokens: Vec<f32>,
-            sigmas: Vec<f32>,
-            lat: Vec<f32>,
-            /// First schedule index this lane runs; > 0 for img2img inits.
-            start: usize,
-        }
-        let max_steps_hint = members.iter().map(|&i| reqs[i].steps_for(cfg.distilled)).max().unwrap_or(0) as u32;
-        let mut lanes: Vec<Lane> = Vec::new();
-        for &i in members {
-            let r = &reqs[i];
-            let o = &r.opts;
-            let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
-            let n_gen = lh * lw;
-            let steps = r.steps_for(cfg.distilled);
-            progress(0, max_steps_hint + 2, "encoding prompt");
-            let ctx = self.encode_prompt(&r.prompt);
-            let cf = !cfg.distilled && o.guidance > 1.0;
-            let ctx_uncond = if cf { Some(self.encode_prompt("")) } else { None };
-            let mut ref_tokens: Vec<f32> = Vec::new();
-            let mut failed = None;
-            // With `strength`, the first reference IS the init latent — passing
-            // it again as conditioning tokens would double-anchor it (and its
-            // greyscale evidence), which is not what img2img means. Standard
-            // img2img: the init image is the conditioning. Extra references
-            // (2nd onward) still ride along as edit context.
-            let ref_skip = crate::pipeline::ref_skip(o);
-            for (chw, rh, rw) in r.refs.iter().skip(ref_skip) {
-                progress(0, max_steps_hint + 2, "encoding reference");
-                match self.encode_image(chw, *rh, *rw) {
-                    Ok(t) => ref_tokens.extend(t),
-                    Err(e) => failed = Some(e),
-                }
+        let n_gen = lh * lw;
+        let steps = r.steps_for(cfg.distilled);
+        progress(0, max_steps_hint + 2, "encoding prompt");
+        let ctx = d.encode_prompt(&r.prompt);
+        let cf = !cfg.distilled && o.guidance > 1.0;
+        let ctx_uncond = if cf { Some(d.encode_prompt("")) } else { None };
+        let mut ref_tokens: Vec<f32> = Vec::new();
+        let mut failed = None;
+        // With `strength`, the first reference IS the init latent - passing
+        // it again as conditioning tokens would double-anchor it (and its
+        // greyscale evidence), which is not what img2img means. Standard
+        // img2img: the init image is the conditioning. Extra references
+        // (2nd onward) still ride along as edit context.
+        //
+        // A mask does NOT consume the reference this way: it reads the
+        // source latent for its preserved region but leaves the token
+        // budget alone, so `--mask` composes with either mode.
+        let ref_skip = crate::pipeline::ref_skip(o);
+        for (chw, rh, rw) in r.refs.iter().skip(ref_skip) {
+            progress(0, max_steps_hint + 2, "encoding reference");
+            match d.encode_image(chw, *rh, *rw) {
+                Ok(t) => ref_tokens.extend(t),
+                Err(e) => failed = Some(e),
             }
-            if let Some(e) = failed {
-                out[i] = Err(e);
+        }
+        if let Some(e) = failed {
+            out[i] = Err(e);
+            continue;
+        }
+        let sigmas = diffusion::scheduler::klein_sigmas(steps, n_gen);
+        let noise = model::hostmath::randn(n_gen * cfg.in_channels, o.seed);
+        // The source latent `x₀`. `strength` needs it as the init, a mask
+        // needs it as the preserved content at every step, and both need
+        // it at the output size - so it is encoded ONCE here rather than
+        // once per consumer.
+        let img2img = o.strength.is_some_and(|s| s < 1.0);
+        let want_src = img2img || o.mask.is_some();
+        let src = if want_src {
+            let why = match (img2img, o.mask.is_some()) {
+                (true, true) => "strength/mask",
+                (true, false) => "strength",
+                _ => "mask",
+            };
+            let Some((chw, rh, rw)) = r.refs.first() else {
+                out[i] = Err(format!("{why} needs a reference image"));
+                continue;
+            };
+            if (*rh as usize / 16) * (*rw as usize / 16) != n_gen {
+                out[i] = Err(format!(
+                    "{why} needs the reference at the output size ({}x{}, got {rw}x{rh})",
+                    o.width, o.height
+                ));
                 continue;
             }
-            let sigmas = diffusion::scheduler::klein_sigmas(steps, n_gen);
-            let noise = model::hostmath::randn(n_gen * cfg.in_channels, o.seed);
-            // img2img: start partway down the schedule from the source latent.
-            // `x_σ = (1−σ)·x₀ + σ·ε` is the same forward process the trainer
-            // uses (`modelgrad::make_flow_batch`), so the model sees exactly
-            // the distribution it was trained on at that σ.
-            let (lat, start, sigmas) = match o.strength {
-                Some(st) if st < 1.0 => {
-                    let st = st.clamp(1e-3, 1.0);
-                    // Do NOT slice the distilled schedule: `klein_sigmas` is
-                    // shifted so hard for few-step sampling that its lowest
-                    // non-zero entry is 0.56 at 8 steps (0.75 at 4) — there is
-                    // no low-noise entry point to start an img2img from, and
-                    // starting at 0.84 with 3 steps left resolves to noise.
-                    // The velocity field is defined at every σ, so integrate
-                    // the requested number of Euler steps over [strength, 0]
-                    // instead; `strength` IS the starting noise level.
-                    let sigmas: Vec<f32> =
-                        (0..=steps).map(|k| st * (1.0 - k as f32 / steps as f32)).collect();
-                    let start = 0usize;
-                    let Some((chw, rh, rw)) = r.refs.first() else {
-                        out[i] = Err("strength needs a reference image".into());
-                        continue;
-                    };
-                    if (*rh as usize / 16) * (*rw as usize / 16) != n_gen {
-                        out[i] = Err(format!(
-                            "strength needs the reference at the output size ({}x{}, got {rw}x{rh})",
-                            o.width, o.height
-                        ));
-                        continue;
-                    }
-                    match self.encode_image(chw, *rh, *rw) {
-                        Ok(x0) => {
-                            let lat: Vec<f32> = x0
-                                .iter()
-                                .zip(&noise)
-                                .map(|(&a, &e)| (1.0 - st) * a + st * e)
-                                .collect();
-                            (lat, start, sigmas)
-                        }
-                        Err(e) => {
-                            out[i] = Err(e);
-                            continue;
-                        }
-                    }
+            match d.encode_image(chw, *rh, *rw) {
+                Ok(x0) => Some(x0),
+                Err(e) => {
+                    out[i] = Err(e);
+                    continue;
                 }
-                _ => (noise, 0, sigmas),
+            }
+        } else {
+            None
+        };
+        // Resample the mask to THIS lane's latent grid; the clones are the
+        // price of keeping the source and its noise draw alive for the
+        // whole trajectory, and are only paid when a mask is present.
+        let preserve = match (&o.mask, &src) {
+            (Some(m), Some(x0)) => {
+                Some(Preserve { mask: m.to_latent(lh, lw), src: x0.clone(), noise: noise.clone() })
+            }
+            _ => None,
+        };
+        // img2img: start partway down the schedule from the source latent.
+        // `x_σ = (1−σ)·x₀ + σ·ε` is the same forward process the trainer
+        // uses (`modelgrad::make_flow_batch`), so the model sees exactly
+        // the distribution it was trained on at that σ.
+        let (mut lat, start, sigmas) = if img2img {
+            let st = o.strength.unwrap_or(1.0).clamp(1e-3, 1.0);
+            // Do NOT slice the distilled schedule: `klein_sigmas` is
+            // shifted so hard for few-step sampling that its lowest
+            // non-zero entry is 0.56 at 8 steps (0.75 at 4) - there is
+            // no low-noise entry point to start an img2img from, and
+            // starting at 0.84 with 3 steps left resolves to noise.
+            // The velocity field is defined at every σ, so integrate
+            // the requested number of Euler steps over [strength, 0]
+            // instead; `strength` IS the starting noise level.
+            let sigmas: Vec<f32> =
+                (0..=steps).map(|k| st * (1.0 - k as f32 / steps as f32)).collect();
+            let x0 = src.as_ref().expect("img2img encodes the source above");
+            let lat: Vec<f32> =
+                x0.iter().zip(&noise).map(|(&a, &e)| (1.0 - st) * a + st * e).collect();
+            (lat, 0usize, sigmas)
+        } else {
+            (noise, 0usize, sigmas)
+        };
+        // Seed the preserved region on the source's own trajectory before
+        // the first forward, not just after each step: otherwise the model
+        // spends step 1 looking at pure noise where the walls should be.
+        if let Some(p) = &preserve {
+            crate::mask::blend(&mut lat, &p.mask, &p.src, &p.noise, sigmas[start], cfg.in_channels);
+        }
+        lanes.push(Lane {
+            idx: i,
+            lh,
+            lw,
+            n_gen,
+            steps,
+            guidance: o.guidance,
+            ctx,
+            ctx_uncond,
+            ref_tokens,
+            sigmas,
+            lat,
+            start,
+            preserve,
+        });
+    }
+    if lanes.is_empty() {
+        return;
+    }
+    let max_steps = lanes.iter().map(|l| l.steps).max().unwrap_or(0);
+    let cap = d.max_batch() as usize;
+
+    for i in 0..max_steps {
+        // Cancellation is per request: a cancelled lane leaves the batch and
+        // the others keep going (the scheduler handed us N independent jobs).
+        lanes.retain(|l| {
+            if reqs[l.idx].cancel.is_cancelled() {
+                out[l.idx] = Err("cancelled".into());
+                false
+            } else {
+                true
+            }
+        });
+        let active: Vec<usize> =
+            (0..lanes.len()).filter(|&k| i >= lanes[k].start && i < lanes[k].steps).collect();
+        if active.is_empty() {
+            break;
+        }
+        progress(i as u32 + 1, max_steps as u32 + 2, "denoising");
+
+        // Build one slot per DiT evaluation: (lane, ctx, t). CFG adds the
+        // unconditional pass as a second slot at the same timestep.
+        let mut joints: Vec<Vec<f32>> = Vec::with_capacity(active.len());
+        let mut slots: Vec<(usize, bool, f32)> = Vec::new(); // (active index, is_uncond, t)
+        for (a, &k) in active.iter().enumerate() {
+            let l = &lanes[k];
+            let mut joint = Vec::with_capacity(l.lat.len() + l.ref_tokens.len());
+            joint.extend_from_slice(&l.lat);
+            joint.extend_from_slice(&l.ref_tokens);
+            joints.push(joint);
+            slots.push((a, false, l.sigmas[i]));
+            if l.ctx_uncond.is_some() {
+                slots.push((a, true, l.sigmas[i]));
+            }
+        }
+        // One forward per chunk of at most `max_batch` slots.
+        let mut preds: Vec<Vec<f32>> = Vec::with_capacity(slots.len());
+        for chunk in slots.chunks(cap) {
+            let samples: Vec<crate::model::Sample<'_>> = chunk
+                .iter()
+                .map(|&(a, unc, t)| {
+                    let l = &lanes[active[a]];
+                    let ctx = if unc { l.ctx_uncond.as_ref().unwrap() } else { &l.ctx };
+                    crate::model::Sample { img_tokens: &joints[a], ctx, t }
+                })
+                .collect();
+            preds.extend(d.forward_batch(&samples, ids, lanes[active[0]].n_gen));
+        }
+        // Fold CFG and take the Euler step, per lane.
+        for (a, &k) in active.iter().enumerate() {
+            let cond = slots.iter().position(|&(sa, unc, _)| sa == a && !unc).expect("cond slot");
+            let pred: Vec<f32> = match slots.iter().position(|&(sa, unc, _)| sa == a && unc) {
+                None => preds[cond].clone(),
+                Some(u) => preds[cond].iter().zip(&preds[u]).map(|(&c, &un)| un + lanes[k].guidance * (c - un)).collect(),
             };
-            lanes.push(Lane {
-                idx: i,
-                lh,
-                lw,
-                n_gen,
-                steps,
-                guidance: o.guidance,
-                ctx,
-                ctx_uncond,
-                ref_tokens,
-                sigmas,
-                lat,
-                start,
-            });
+            let l = &mut lanes[k];
+            let dt = l.sigmas[i + 1] - l.sigmas[i];
+            for (x, v) in l.lat.iter_mut().zip(&pred) {
+                *x += dt * v;
+            }
+            // Blended latent diffusion. Outside the mask the latent is not
+            // *guided* toward the source, it IS the source renoised to the
+            // sigma this step just landed on - so the preserved region is
+            // re-anchored every step and reaches σ = 0 as the source
+            // exactly, instead of drifting a little further with each
+            // forward the way `strength` alone lets it.
+            if let Some(p) = &l.preserve {
+                crate::mask::blend(&mut l.lat, &p.mask, &p.src, &p.noise, l.sigmas[i + 1], cfg.in_channels);
+            }
         }
-        if lanes.is_empty() {
-            return;
-        }
-        let max_steps = lanes.iter().map(|l| l.steps).max().unwrap_or(0);
-        let cap = self.model.max_batch() as usize;
+    }
 
-        for i in 0..max_steps {
-            // Cancellation is per request: a cancelled lane leaves the batch and
-            // the others keep going (the scheduler handed us N independent jobs).
-            lanes.retain(|l| {
-                if reqs[l.idx].cancel.is_cancelled() {
-                    out[l.idx] = Err("cancelled".into());
-                    false
-                } else {
-                    true
-                }
-            });
-            let active: Vec<usize> =
-                (0..lanes.len()).filter(|&k| i >= lanes[k].start && i < lanes[k].steps).collect();
-            if active.is_empty() {
-                break;
-            }
-            progress(i as u32 + 1, max_steps as u32 + 2, "denoising");
-
-            // Build one slot per DiT evaluation: (lane, ctx, t). CFG adds the
-            // unconditional pass as a second slot at the same timestep.
-            let mut joints: Vec<Vec<f32>> = Vec::with_capacity(active.len());
-            let mut slots: Vec<(usize, bool, f32)> = Vec::new(); // (active index, is_uncond, t)
-            for (a, &k) in active.iter().enumerate() {
-                let l = &lanes[k];
-                let mut joint = Vec::with_capacity(l.lat.len() + l.ref_tokens.len());
-                joint.extend_from_slice(&l.lat);
-                joint.extend_from_slice(&l.ref_tokens);
-                joints.push(joint);
-                slots.push((a, false, l.sigmas[i]));
-                if l.ctx_uncond.is_some() {
-                    slots.push((a, true, l.sigmas[i]));
-                }
-            }
-            // One forward per chunk of at most `max_batch` slots.
-            let mut preds: Vec<Vec<f32>> = Vec::with_capacity(slots.len());
-            for chunk in slots.chunks(cap) {
-                let samples: Vec<crate::model::Sample<'_>> = chunk
-                    .iter()
-                    .map(|&(a, unc, t)| {
-                        let l = &lanes[active[a]];
-                        let ctx = if unc { l.ctx_uncond.as_ref().unwrap() } else { &l.ctx };
-                        crate::model::Sample { img_tokens: &joints[a], ctx, t }
-                    })
-                    .collect();
-                preds.extend(self.model.forward_batch(&samples, ids, lanes[active[0]].n_gen));
-            }
-            // Fold CFG and take the Euler step, per lane.
-            for (a, &k) in active.iter().enumerate() {
-                let cond = slots.iter().position(|&(sa, unc, _)| sa == a && !unc).expect("cond slot");
-                let pred: Vec<f32> = match slots.iter().position(|&(sa, unc, _)| sa == a && unc) {
-                    None => preds[cond].clone(),
-                    Some(u) => preds[cond].iter().zip(&preds[u]).map(|(&c, &un)| un + lanes[k].guidance * (c - un)).collect(),
-                };
-                let dt = lanes[k].sigmas[i + 1] - lanes[k].sigmas[i];
-                for (x, v) in lanes[k].lat.iter_mut().zip(&pred) {
-                    *x += dt * v;
-                }
-            }
-        }
-
-        progress(max_steps as u32 + 2, max_steps as u32 + 2, "decoding");
-        for l in &lanes {
-            let o = &reqs[l.idx].opts;
-            out[l.idx] = self.decode_tokens(&l.lat, l.lh, l.lw).map(|rgb| (rgb, o.width, o.height));
-        }
+    progress(max_steps as u32 + 2, max_steps as u32 + 2, "decoding");
+    for l in &lanes {
+        let o = &reqs[l.idx].opts;
+        out[l.idx] = d.decode_tokens(&l.lat, l.lh, l.lw).map(|rgb| (rgb, o.width, o.height));
     }
 }
 
@@ -707,6 +823,256 @@ mod tests {
 
     fn img(h: u32, w: u32) -> (Vec<f32>, u32, u32) {
         (Vec::new(), h, w)
+    }
+
+    /// A [`Denoiser`] with no checkpoint behind it, so the sampler itself can
+    /// be gated: schedule, img2img init, mask blending, decode.
+    ///
+    /// * `encode_image` / `decode_tokens` are a real, lossy round trip - the
+    ///   mean of each 16x16 pixel block per channel, broadcast back over the
+    ///   block. Like the VAE it is many-to-one, so "reproduces the source"
+    ///   has to be asserted against the round trip AND against the original
+    ///   with a stated tolerance, exactly as it does on real weights.
+    /// * `forward_batch` is the exact velocity field `v = (x − target)/σ`,
+    ///   whose Euler solution is `x = target + C·σ`. One integration therefore
+    ///   lands on `target` - a fixed, deterministic "generated image" that
+    ///   depends on the prompt and not at all on the source, which is what
+    ///   makes "this region was regenerated" unambiguous.
+    ///
+    /// Unlike the real VAE this decoder is block-local, so the pixel-level
+    /// equalities below are exact. On real weights the same guarantees hold in
+    /// *latent* space, and the decoder's receptive field smears them across
+    /// the mask seam by a few pixels: preserved regions are exact latents, not
+    /// exact pixels, within a few pixels of a mask boundary.
+    struct Stub {
+        cfg: Flux2Config,
+    }
+
+    impl Stub {
+        fn new() -> Stub {
+            Stub { cfg: Flux2Config { in_channels: 4, txt_len: 8, ..Flux2Config::klein_4b() } }
+        }
+    }
+
+    impl Denoiser for Stub {
+        fn cfg(&self) -> &Flux2Config {
+            &self.cfg
+        }
+        fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+            let d = self.cfg.context_in_dim;
+            (0..self.cfg.txt_len * d)
+                .map(|i| ((i + prompt.len()) as f32 * 0.017).sin())
+                .collect()
+        }
+        fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
+            let (h, w) = (h as usize, w as usize);
+            let (lh, lw) = (h / 16, w / 16);
+            let ch = self.cfg.in_channels;
+            let mut t = vec![0.0f32; lh * lw * ch];
+            for c in 0..3.min(ch) {
+                for y in 0..lh {
+                    for x in 0..lw {
+                        let mut s = 0.0f32;
+                        for dy in 0..16 {
+                            for dx in 0..16 {
+                                s += chw[c * h * w + (y * 16 + dy) * w + x * 16 + dx];
+                            }
+                        }
+                        t[(y * lw + x) * ch + c] = s / 256.0;
+                    }
+                }
+            }
+            Ok(t)
+        }
+        fn decode_tokens(&self, tokens: &[f32], lh: usize, lw: usize) -> Result<Vec<u8>, String> {
+            let (h, w) = (lh * 16, lw * 16);
+            let ch = self.cfg.in_channels;
+            let mut out = vec![0u8; h * w * 3];
+            for y in 0..h {
+                for x in 0..w {
+                    for c in 0..3 {
+                        let v = tokens[((y / 16) * lw + x / 16) * ch + c].clamp(-1.0, 1.0);
+                        out[(y * w + x) * 3 + c] = (127.5 * (v + 1.0)) as u8;
+                    }
+                }
+            }
+            Ok(out)
+        }
+        fn max_batch(&self) -> u32 {
+            4
+        }
+        fn forward_batch(&self, samples: &[crate::model::Sample<'_>], _ids: &[u32], n_pred: usize) -> Vec<Vec<f32>> {
+            let ch = self.cfg.in_channels;
+            samples
+                .iter()
+                .map(|s| {
+                    (0..n_pred * ch)
+                        .map(|i| {
+                            // A fixed "generated image", prompt-dependent and
+                            // source-independent.
+                            let target = (i as f32 * 0.031 + s.ctx[0]).sin() * 0.8;
+                            (s.img_tokens[i] - target) / s.t.max(1e-6)
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+    }
+
+    /// A deterministic source photo: `[-1,1]` CHW, structured enough that a
+    /// left half and a right half are visibly different.
+    fn source(h: u32, w: u32) -> (Vec<f32>, u32, u32) {
+        let (hu, wu) = (h as usize, w as usize);
+        let mut chw = vec![0.0f32; 3 * hu * wu];
+        for c in 0..3 {
+            for y in 0..hu {
+                for x in 0..wu {
+                    // Low spatial frequency, like a real photograph relative to
+                    // a 16x16 latent cell: the codec's block average is then a
+                    // faithful round trip rather than a blur beyond
+                    // recognition, which is what the VAE's own fidelity looks
+                    // like and what the tolerances below are calibrated to.
+                    chw[c * hu * wu + y * wu + x] =
+                        ((x as f32 * 0.006 + y as f32 * 0.004 + c as f32).sin()) * 0.9;
+                }
+            }
+        }
+        (chw, h, w)
+    }
+
+    fn run(mask: Option<crate::mask::Mask>, w: u32, h: u32) -> Vec<u8> {
+        let d = Stub::new();
+        let opts = GenOpts {
+            width: w,
+            height: h,
+            strength: Some(0.9),
+            steps: Some(4),
+            guidance: 4.0,
+            seed: 11,
+            mask,
+        };
+        let req = BatchRequest {
+            prompt: "a staged living room".into(),
+            refs: vec![source(h, w)],
+            opts,
+            cancel: Default::default(),
+        };
+        generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation")
+            .0
+    }
+
+    fn solid(v: f32, w: u32, h: u32) -> crate::mask::Mask {
+        crate::mask::Mask::new(vec![v; (w * h) as usize], w, h).unwrap()
+    }
+
+    /// **Gate 1 - masking is free when it is not used.** An all-white mask must
+    /// be BIT-IDENTICAL to no mask at all. Anything weaker leaves every
+    /// existing unmasked generation one rounding step away from its previous
+    /// output, and this feature would be a silent regression for everyone who
+    /// never asked for it.
+    #[test]
+    fn an_all_white_mask_is_bit_identical_to_no_mask() {
+        let (w, h) = (128u32, 96u32); // 4:3, the aspect this was built for
+        assert_eq!(run(None, w, h), run(Some(solid(1.0, w, h)), w, h));
+    }
+
+    /// **Gate 2 - an all-black mask reproduces the source.** Exactly, against
+    /// the codec round trip (the best any latent-space edit can do), and within
+    /// a stated tolerance against the original - asserted on rel_l2 as well as
+    /// cosine, because cosine alone is scale-invariant and would pass a
+    /// uniformly brightened image.
+    #[test]
+    fn an_all_black_mask_reproduces_the_source() {
+        let (w, h) = (128u32, 96u32);
+        let d = Stub::new();
+        let (chw, sh, sw) = source(h, w);
+        let round_trip = d
+            .decode_tokens(&d.encode_image(&chw, sh, sw).unwrap(), (h / 16) as usize, (w / 16) as usize)
+            .unwrap();
+        let got = run(Some(solid(0.0, w, h)), w, h);
+        assert_eq!(got, round_trip, "black must land on the source latent exactly");
+
+        // ... and that round trip is genuinely the source, not a grey field.
+        let n = (h * w) as usize;
+        let mut src8 = vec![0u8; n * 3];
+        for i in 0..n {
+            for c in 0..3 {
+                src8[i * 3 + c] = (127.5 * (chw[c * n + i].clamp(-1.0, 1.0) + 1.0)) as u8;
+            }
+        }
+        let (cos, rel) = agreement(&got, &src8);
+        assert!(cos > 0.99, "cosine {cos}");
+        assert!(rel < 0.15, "rel_l2 {rel}");
+
+        // A generation with no preservation at all must NOT pass that bar -
+        // otherwise the gate above proves nothing about the mask.
+        let (cos_free, rel_free) = agreement(&run(Some(solid(1.0, w, h)), w, h), &src8);
+        assert!(cos_free < 0.99 || rel_free > 0.15, "free run: cosine {cos_free}, rel_l2 {rel_free}");
+    }
+
+    /// **Gate 3 - a mask is spatial.** With the left half white the right half
+    /// must match the preserved baseline and the left half must not; and the
+    /// mirror image must hold against the regenerated baseline. Both directions
+    /// are asserted, because a mask that changes nothing and a mask that
+    /// changes everything are both failures and each assertion alone catches
+    /// only one of them.
+    ///
+    /// Neither baseline is itself produced by a mask: "preserved" is the codec
+    /// round trip of the source and "regenerated" is a plain unmasked run. An
+    /// earlier version of this test compared against all-black and all-white
+    /// *mask* runs and was therefore blind to a global mask inversion, which
+    /// flips the baselines in lockstep with the result.
+    #[test]
+    fn a_split_mask_regenerates_one_half_and_preserves_the_other() {
+        let (w, h) = (128u32, 96u32);
+        let mut v = vec![0.0f32; (w * h) as usize];
+        for y in 0..h as usize {
+            for x in 0..(w / 2) as usize {
+                v[y * w as usize + x] = 1.0;
+            }
+        }
+        let split = run(Some(crate::mask::Mask::new(v, w, h).unwrap()), w, h);
+        let d = Stub::new();
+        let (chw, sh, sw) = source(h, w);
+        let kept = d
+            .decode_tokens(&d.encode_image(&chw, sh, sw).unwrap(), (h / 16) as usize, (w / 16) as usize)
+            .unwrap();
+        let freed = run(None, w, h);
+
+        let half = |img: &[u8], left: bool| -> Vec<u8> {
+            let mut o = Vec::new();
+            for y in 0..h as usize {
+                let (a, b) = if left { (0, w as usize / 2) } else { (w as usize / 2, w as usize) };
+                for x in a..b {
+                    o.extend_from_slice(&img[(y * w as usize + x) * 3..][..3]);
+                }
+            }
+            o
+        };
+        assert_eq!(half(&split, false), half(&kept, false), "the black half must be the source");
+        assert_ne!(half(&split, true), half(&kept, true), "the white half must NOT be the source");
+        assert_ne!(half(&split, false), half(&freed, false), "the black half must not be a free generation");
+        // Gate 1, restricted to a region: the white half is untouched by the
+        // blend, so it reproduces the unmasked run exactly. (Exact here because
+        // this stub's velocity reads only its own token; with real attention
+        // the white half still *sees* the preserved half, which is the point of
+        // masking, so on real weights this is a resemblance, not an equality.)
+        assert_eq!(half(&split, true), half(&freed, true), "the white half must be the unmasked generation");
+    }
+
+    /// Cosine and relative L2 between two u8 images, on the `[-1,1]` scale the
+    /// latents live on.
+    fn agreement(a: &[u8], b: &[u8]) -> (f32, f32) {
+        let f = |x: &[u8]| -> Vec<f32> { x.iter().map(|&v| v as f32 / 127.5 - 1.0).collect() };
+        let (a, b) = (f(a), f(b));
+        let dot: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let d2: f32 = a.iter().zip(&b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt();
+        (dot / (na * nb).max(1e-12), d2 / nb.max(1e-12))
     }
 
     /// A pipeline must be sized for the tokens the denoise loop actually

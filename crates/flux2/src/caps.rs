@@ -134,6 +134,12 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         steps: (steps > 0).then_some(steps),
         guidance: inv.get_f64("guidance").unwrap_or(4.0) as f32,
         seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+        // Masked editing is reachable from `brain flux2 generate --mask` but
+        // has no wire representation yet: it would need a second image blob on
+        // the `edit` action, and `refs_from` currently treats every blob it
+        // finds as a reference image. Declared here rather than hidden behind
+        // `..Default::default()` so the gap is visible at the decode site.
+        mask: None,
     };
     // `lora_scale` is ComfyUI's `strength_model`, not a value read from the
     // adapter file - third-party LoRAs carry no alpha, so this is the dial.

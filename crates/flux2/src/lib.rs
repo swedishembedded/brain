@@ -27,11 +27,13 @@ pub mod finetune;
 pub mod grad;
 pub mod import;
 pub mod lora;
+pub mod mask;
 pub mod model;
 pub mod modelgrad;
 pub mod pipeline;
 
 pub use config::Flux2Config;
 pub use import::{import_bfl, import_diffusers, Tensors};
+pub use mask::Mask;
 pub use model::{position_ids, Flux2Model, Precision, Sample, KERNELS};
 pub use pipeline::{AdapterSpec, BatchRequest, GenOpts, Paths, Pipeline};
