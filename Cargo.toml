@@ -275,6 +275,13 @@ sha2 = "0.10"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML, for the captioned-image dataset's captions.yaml. serde_yaml is
+# ARCHIVED by its author and publishes as "0.9.34+deprecated"; serde_yaml_ng
+# is maintained but still binds dtolnay's equally-archived unsafe-libyaml.
+# serde_norway is the fork whose WHOLE chain is maintained - its
+# unsafe-libyaml-norway has moved past the abandoned 0.2.11 - so it is the
+# one that gets security fixes.
+serde_norway = "0.9.42"
 # Jinja2 execution of a checkpoint's OWN `tokenizer_config.json` chat_template
 # string - the generic path for chat rendering, so a new model family needs no
 # hand-ported template code (see crates/data/src/chat_template.rs). Its own

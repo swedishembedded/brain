@@ -12,6 +12,10 @@ path = "src/lib.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# captions.yaml is parsed by a real YAML implementation into a typed schema
+# (imageset::CaptionFile), never by a hand-rolled line scanner: the caption
+# file is hand-edited, so it meets every corner of the grammar eventually.
+serde_norway.workspace = true
 minijinja.workspace = true
 minijinja-contrib.workspace = true
 # Read the tokenizer embedded in a GGUF's `tokenizer.ggml.*` KV so a `.gguf`

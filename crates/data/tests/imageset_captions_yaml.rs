@@ -199,3 +199,128 @@ fn load_dir_reads_a_block_scalar_caption() {
     assert_eq!(s[0].prompt, "line one, in bohemian style\nline two");
     std::fs::remove_dir_all(&d).ok();
 }
+
+/// Constructs a hand-rolled line scanner gets wrong, and a real parser does
+/// not. Each of these was either silently mis-parsed or silently dropped by the
+/// `split_once(':')` scanner this module used to have; the point of depending
+/// on a YAML implementation is that they are simply correct.
+#[test]
+fn constructs_a_line_scanner_would_mis_parse() {
+    // An escape inside a double-quoted scalar is a real newline, not the two
+    // characters backslash-n. The old scanner only stripped the quotes.
+    let caps = parse("a.png: \"line one\\nline two\"\n");
+    assert_eq!(caps["a.png"], "line one\nline two");
+
+    // A colon inside a quoted KEY. Splitting on the first colon cut this file
+    // name in half.
+    let caps = parse("\"a:b.png\": caption here\n");
+    assert_eq!(caps["a:b.png"], "caption here");
+
+    // An apostrophe is not an opening quote, so the `#` after it still starts a
+    // comment. The old scanner toggled its in-quote flag on the apostrophe and
+    // kept the comment as caption text.
+    let caps = parse("a.png: a cat's paw # note\n");
+    assert_eq!(caps["a.png"], "a cat's paw");
+
+    // Anchors and aliases: shared boilerplate across a caption set.
+    let caps = parse("base: &c a shared caption\na.png: *c\n");
+    assert_eq!(caps["a.png"], "a shared caption");
+
+    // A leading document marker, as any tool that emits YAML will write.
+    let caps = parse("---\na.png: one\n");
+    assert_eq!(caps["a.png"], "one");
+
+    // CRLF, as a file edited on Windows arrives.
+    let caps = parse("a.png: one\r\nb.png: |-\r\n  two\r\n  three\r\n");
+    assert_eq!(caps["a.png"], "one");
+    assert_eq!(caps["b.png"], "two\nthree");
+}
+
+/// A file that is not YAML at all is REPORTED, not silently treated as empty
+/// and not a panic. The old scanner had no failure mode: every line it could
+/// not understand was skipped, so a wholly malformed file looked exactly like
+/// an uncaptioned folder.
+#[test]
+fn a_malformed_caption_file_is_reported_with_its_location() {
+    let d = scratch("malformed");
+    let f = d.join("captions.yaml");
+    // A tab where YAML requires spaces - the classic hand-edit accident.
+    std::fs::write(&f, "a.png: |\n\tone\n").unwrap();
+    let mut warnings = Vec::new();
+    let caps = read_captions_yaml(&f, &mut |w| warnings.push(w.to_string()));
+    assert!(caps.is_empty());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("tab"), "the message must name the problem: {}", warnings[0]);
+    assert!(warnings[0].contains("line 2"), "and where it is: {}", warnings[0]);
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// `captions.jsonl` is the scripted-override lane, and it is deserialized into
+/// [`data::imageset::CaptionLine`] rather than picked apart by hand. A line
+/// that does not fit the schema is reported and skipped; it never becomes a
+/// caption, and it never aborts the folder.
+#[test]
+fn jsonl_overrides_are_typed_and_bad_lines_are_reported() {
+    let d = scratch("jsonl");
+    let mut img = image::RgbImage::new(4, 4);
+    for p in img.pixels_mut() {
+        *p = image::Rgb([10, 20, 30]);
+    }
+    img.save(d.join("a.png")).unwrap();
+    img.save(d.join("b.png")).unwrap();
+    std::fs::write(d.join("captions.yaml"), "a.png: from yaml\nb.png: also from yaml\n").unwrap();
+    std::fs::write(
+        d.join("captions.jsonl"),
+        concat!(
+            "{\"file\":\"a.png\",\"prompt\":\"OVERRIDDEN\"}\n",
+            "\n",
+            "{\"file\":\"b.png\",\"prompt\":\"\"}\n",
+            "{\"file\":\"b.png\"}\n",
+            "not json at all\n",
+        ),
+    )
+    .unwrap();
+
+    let mut warnings = Vec::new();
+    let s = data::imageset::load_dir(&d, 16, |w| warnings.push(w.to_string())).unwrap();
+    let by_name: BTreeMap<&str, &str> =
+        s.iter().map(|x| (x.path.file_name().unwrap().to_str().unwrap(), x.prompt.as_str())).collect();
+
+    assert_eq!(by_name["a.png"], "OVERRIDDEN", "a well-formed override must win");
+    assert_eq!(by_name["b.png"], "also from yaml", "an empty prompt must NOT overwrite a real caption");
+    assert_eq!(warnings.len(), 3, "empty prompt, missing field, and non-JSON: {warnings:?}");
+    assert!(warnings.iter().all(|w| w.starts_with("captions.jsonl:")), "{warnings:?}");
+    // The schema is what produces this message. A loose `Value` lookup would
+    // default the absent field to an empty string and report only that it was
+    // empty, losing the name of what is actually wrong with the line.
+    assert!(
+        warnings.iter().any(|w| w.contains("missing field") && w.contains("prompt")),
+        "a line missing a schema field must be named as such: {warnings:?}"
+    );
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// The schema is what makes a structurally wrong caption file an ERROR rather
+/// than a quiet omission. Walking a free-form YAML value and keeping the
+/// string-shaped entries would drop these silently, and a caption that
+/// vanished between the editor and the trainer is the hardest kind of dataset
+/// bug to notice.
+#[test]
+fn a_value_that_is_not_a_caption_is_an_error_not_a_silent_drop() {
+    let d = scratch("schema");
+    let f = d.join("captions.yaml");
+
+    for (name, text, want) in [
+        ("nested mapping", "a.png:\n  nested: thing\nb.png: fine\n", "invalid type: map"),
+        ("sequence", "a.png:\n  - one\n  - two\nb.png: fine\n", "invalid type: sequence"),
+        ("top-level sequence", "- one\n- two\n", "expected a map"),
+    ] {
+        std::fs::write(&f, text).unwrap();
+        let mut warnings = Vec::new();
+        let caps = read_captions_yaml(&f, &mut |w| warnings.push(w.to_string()));
+        assert!(caps.is_empty(), "{name}: a file that does not fit the schema yields no captions");
+        assert_eq!(warnings.len(), 1, "{name}: {warnings:?}");
+        assert!(warnings[0].contains(want), "{name}: expected {want:?} in {}", warnings[0]);
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
