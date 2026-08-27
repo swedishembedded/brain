@@ -873,3 +873,49 @@ such in `dev_grad.rs`. The consequence is that the `dW` GEMM, one third of
 every backward's arithmetic, is replaced by two GEMMs of rank width, no
 `[out, in]` gradient buffer is ever allocated, and the frozen base is only
 ever read.
+
+### Can the frozen base be int8? What the measurement says
+
+`tests/int8_base_grads.rs --ignored`, one REAL `klein-9b` double block out of
+the released Q8_0 GGUF, 768 joint tokens (512 text + 256 image), rank 16,
+adapter `B` non-zero. The base is round-tripped through brain's own
+per-output-row symmetric int8 grid (`model::int8::row_scale` /`pack_row` -
+exactly what `matmul_i8_dyn` consumes) and the identical backward is run on
+both bases.
+
+**The weights themselves** move by rel_l2 8.4e-3 .. 1.16e-2 per tensor
+(cosine 0.99993 .. 0.99996); the `img_mlp.2` matrix is the worst and the text
+stream's attention projections the best.
+
+**The adapter gradients** that follow:
+
+| | worst | best | where |
+|---|---|---|---|
+| cosine | 0.999530 | 0.999928 | worst at `img.wq.dA` |
+| rel_l2 | 3.076e-2 | 1.200e-2 | worst at `img.wq.dA` |
+
+and the block's input gradient `dx` at cosine 0.999938 / rel_l2 1.115e-2. The
+error grows toward the *front* of the block (q/k/v worse than w1/w3/w2),
+which is what a backward accumulating quantization error along its chain
+should do.
+
+**Reading it.** A 0.9995 cosine is a 1.8-degree direction error and 3% of
+magnitude, against a per-step stochastic gradient that a single-sample
+rectified-flow batch already draws a fresh sigma and a fresh noise vector for.
+That is not the thing that will decide whether an adapter trains. So the
+answer is: **the weight-quantization term is affordable**, and int8 is worth
+building.
+
+Two things this does NOT say, and they are why the trainer still ships fp32:
+
+* it does not cover the **activation** quantization a real `matmul_i8_dyn`
+  adds (a fresh per-token scale on every activation feeding every linear).
+  That term is unmeasured here and has to be measured on its own.
+* the payoff is smaller than it looks. The forward needs `W` row-quantized;
+  the backward's `dx = dy.W` contracts over `W`'s ROW axis, where a per-row
+  scale cannot be factored out of the sum - so a dp4a `dx` needs a SECOND,
+  transposed int8 copy. That is 2x off fp32, not 4x: klein-9b would go from
+  36 GB to about 18 GB, which still does not fit one 24 GiB card next to
+  2.4 GB of activations with room to spare. The two-card fp32 split, which
+  exists and is gated bit-for-bit, gets to the same place today with no
+  fidelity question at all.
