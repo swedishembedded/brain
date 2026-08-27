@@ -43,23 +43,40 @@ impl Paths {
     }
 }
 
-/// How many leading reference images contribute NO conditioning tokens.
+/// The pixel size at which each reference is encoded as **conditioning**, in
+/// order; `None` for a reference that contributes nothing.
 ///
-/// Under `strength` the first reference is VAE-encoded into the init latent
-/// instead of being attended to, so it must not be counted when sizing the
-/// joint sequence. Sizing it in anyway allocates attention scratch for tokens
-/// the denoise loop never reads: at 1024x768 that is an extra 3072 tokens, the
-/// difference between a decode fitting a 24 GB card and an out-of-memory abort.
-/// The denoise loop and the position-id builder both apply this same rule, so
-/// it lives here once rather than being restated at every sizing site.
-pub fn ref_skip(opts: &GenOpts) -> usize {
-    usize::from(opts.strength.is_some_and(|s| s < 1.0))
+/// A supplied reference always conditions the model. `strength` decides how
+/// much of the denoise starts from the init latent, not whether the DiT can
+/// see the photograph - so under `strength < 1` the first reference does
+/// double duty: it is the init latent *and* it is attended to. Because the
+/// init role pins it to the output size, its conditioning copy is downscaled
+/// by [`GenOpts::ref_cond_scale`]; reference tokens cost attention
+/// quadratically, and a full-size copy of a same-size reference doubles the
+/// image half of the joint sequence.
+///
+/// This is the ONE place the rule is written. The sizing entry point
+/// ([`ref_tokens`]), the position-id builder and the denoise loop all read it,
+/// so a pipeline cannot be sized for a sequence different from the one it is
+/// handed.
+pub fn cond_sizes(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> Vec<Option<(u32, u32)>> {
+    let init = opts.strength.is_some_and(|s| s < 1.0);
+    refs.iter()
+        .enumerate()
+        .map(|(i, &(_, h, w))| {
+            if i == 0 && init {
+                init_cond_size(opts.ref_cond_scale, h, w)
+            } else {
+                Some((h, w))
+            }
+        })
+        .collect()
 }
 
 /// Conditioning tokens `refs` actually contribute under `opts` -- what a
 /// pipeline must be sized for, in latent tokens.
 pub fn ref_tokens(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> u32 {
-    refs.iter().skip(ref_skip(opts)).map(|(_, h, w)| (h / 16) * (w / 16)).sum()
+    cond_sizes(refs, opts).into_iter().flatten().map(|(h, w)| (h / 16) * (w / 16)).sum()
 }
 
 /// A LoRA adapter to fold in before the model is built.
@@ -89,13 +106,18 @@ pub struct GenOpts {
     pub width: u32,
     pub height: u32,
     /// Image-to-image init strength in `(0, 1]`. `None` (or 1.0) starts the
-    /// denoise from pure noise — the reference images then only *condition*
-    /// via their tokens, so the result keeps the composition but is a fresh
-    /// generation (this is why a reference-only "colorize" reinterprets the
-    /// scene). With `Some(s)` the
-    /// first reference is VAE-encoded and the trajectory starts partway down
-    /// the schedule from `x_σ = (1−σ)·x₀ + σ·ε` — the rectified-flow forward
-    /// process — so structure is anchored to the source. Small `s` = faithful.
+    /// denoise from pure noise, so the result keeps the composition but is a
+    /// fresh generation (this is why a reference-only "colorize" reinterprets
+    /// the scene). With `Some(s)` the first reference is VAE-encoded and the
+    /// trajectory starts partway down the schedule from
+    /// `x_σ = (1−σ)·x₀ + σ·ε` - the rectified-flow forward process - so
+    /// structure is anchored to the source. Small `s` = faithful.
+    ///
+    /// This is how much of the denoise starts from the init latent, NOT
+    /// whether the model can see the reference: the reference images
+    /// condition the DiT through their tokens at **every** value, including
+    /// under `strength`, where the first one is both the init latent and a
+    /// conditioning input ([`GenOpts::ref_cond_scale`], [`cond_sizes`]).
     pub strength: Option<f32>,
     /// None → the variant default (4 distilled / 50 base).
     pub steps: Option<u32>,
@@ -113,12 +135,81 @@ pub struct GenOpts {
     /// `None` - and an all-white mask - are bit-for-bit the unmasked
     /// behaviour.
     pub mask: Option<crate::mask::Mask>,
+    /// Linear scale of the **conditioning copy** of the init reference, in
+    /// `[0, 1]`. Only `refs[0]` under `strength < 1` is affected: that is the
+    /// one reference whose resolution the caller cannot choose, because the
+    /// init-latent role pins it to the output size. Every other reference
+    /// conditions at whatever size it was supplied at, and `strength >= 1`
+    /// (or `None`) consumes no init latent at all, so this dial does not
+    /// apply there.
+    ///
+    /// `1.0` conditions at the full output size - the largest, most faithful
+    /// and most expensive setting, and the one that makes `strength 0.999`
+    /// cost exactly what `strength 1.0` costs. `0.0` switches the
+    /// conditioning copy off, which is the explicit opt-in to the cheap
+    /// behaviour where the reference reaches the model only through the
+    /// init latent. The default is a downscale, because reference tokens are
+    /// quadratic in the attention and a full-size copy of a same-size
+    /// reference doubles the image half of the joint sequence.
+    pub ref_cond_scale: f32,
 }
+
+/// Default [`GenOpts::ref_cond_scale`]: the conditioning copy of the init
+/// reference is three quarters of its linear size, i.e. a bit over half its
+/// tokens. Reference *resolution* is the architecture-preservation dial, so
+/// this is a fidelity/cost trade and not an implementation detail; the value
+/// is the one that produced the staging results this behaviour was built
+/// for. Raise it with `--ref-cond-scale` when the card has room.
+pub const DEFAULT_REF_COND_SCALE: f32 = 0.75;
 
 impl Default for GenOpts {
     fn default() -> Self {
-        GenOpts { width: 1024, height: 1024, strength: None, steps: None, guidance: 4.0, seed: 0, mask: None }
+        GenOpts {
+            width: 1024,
+            height: 1024,
+            strength: None,
+            steps: None,
+            guidance: 4.0,
+            seed: 0,
+            mask: None,
+            ref_cond_scale: DEFAULT_REF_COND_SCALE,
+        }
     }
+}
+
+/// Pixel size of the conditioning copy of an init reference that is `h x w`,
+/// or `None` when `scale` switches conditioning off.
+///
+/// The result is floored to a multiple of 16 (one latent token) on each axis
+/// independently, so the aspect ratio is preserved up to one token and a
+/// non-square canvas is not a special case. `scale` is clamped to `[0, 1]`:
+/// upscaling a reference past the size it was encoded at buys nothing the VAE
+/// did not already throw away, and costs tokens quadratically.
+pub fn init_cond_size(scale: f32, h: u32, w: u32) -> Option<(u32, u32)> {
+    let s = scale.clamp(0.0, 1.0);
+    let q = |d: u32| (((d as f32 * s) as u32) / 16 * 16).max(16);
+    let (ch, cw) = (q(h), q(w));
+    // Below one latent token in either axis there is nothing to condition on;
+    // `q` floors at 16, so the off switch is the scale itself.
+    (s > 0.0).then_some((ch, cw))
+}
+
+/// Bilinear resize of a reference image (`[-1,1]` CHW, the layout
+/// [`Pipeline::generate`] takes) to `th x tw`.
+///
+/// Each channel plane is contiguous `[h, w]`, which is exactly a 1-channel
+/// interleaved image, so this is the shared host resize applied three times
+/// rather than a fourth resampler in the workspace.
+fn resize_ref(chw: &[f32], h: u32, w: u32, th: u32, tw: u32) -> Vec<f32> {
+    if (th, tw) == (h, w) {
+        return chw.to_vec();
+    }
+    let plane = (h * w) as usize;
+    let mut out = Vec::with_capacity(3 * (th * tw) as usize);
+    for c in 0..3usize {
+        out.extend(imaging::resize_bilinear_hwc(&chw[c * plane..(c + 1) * plane], 1, w, h, tw, th));
+    }
+    out
 }
 
 /// Read DiT weights from a diffusers `transformer/` dir, a BFL single-file
@@ -629,15 +720,14 @@ fn plan_on<D: Denoiser>(d: &D, r: &BatchRequest) -> Result<Vec<u32>, String> {
         return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
     }
     let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
-    // Keep in step with the token builder: under `strength` the first
-    // reference is consumed as the init latent, so it contributes no
-    // reference tokens and therefore no reference position ids.
-    let ref_skip = ref_skip(o);
-    let ref_dims: Vec<(usize, usize)> = r
-        .refs
-        .iter()
-        .skip(ref_skip)
-        .map(|(_, rh, rw)| ((rh / 16) as usize, (rw / 16) as usize))
+    // Keep in step with the token builder: a reference contributes position
+    // ids at the size its CONDITIONING copy is encoded at, which under
+    // `strength` is a downscale of the first reference rather than its own
+    // dimensions.
+    let ref_dims: Vec<(usize, usize)> = cond_sizes(&r.refs, o)
+        .into_iter()
+        .flatten()
+        .map(|(rh, rw)| ((rh / 16) as usize, (rw / 16) as usize))
         .collect();
     Ok(position_ids(d.cfg().txt_len, lh, lw, &ref_dims))
 }
@@ -700,19 +790,27 @@ fn denoise_group_on<D: Denoiser>(
         let ctx_uncond = if cf { Some(d.encode_prompt("")) } else { None };
         let mut ref_tokens: Vec<f32> = Vec::new();
         let mut failed = None;
-        // With `strength`, the first reference IS the init latent - passing
-        // it again as conditioning tokens would double-anchor it (and its
-        // greyscale evidence), which is not what img2img means. Standard
-        // img2img: the init image is the conditioning. Extra references
-        // (2nd onward) still ride along as edit context.
+        // Every supplied reference conditions the model. Under `strength` the
+        // first one does double duty - it is also the init latent below - and
+        // is encoded a second time at its conditioning size, which is a
+        // downscale of itself. That second encode is the price of the model
+        // being able to SEE the reference at all: without it `strength`
+        // silently turns off conditioning, and the reference reaches the
+        // denoiser only as leftover signal in a partially-noised latent.
         //
-        // A mask does NOT consume the reference this way: it reads the
-        // source latent for its preserved region but leaves the token
-        // budget alone, so `--mask` composes with either mode.
-        let ref_skip = crate::pipeline::ref_skip(o);
-        for (chw, rh, rw) in r.refs.iter().skip(ref_skip) {
+        // A mask does not change this either way: it reads the source latent
+        // for its preserved region but leaves the token budget alone.
+        for ((chw, rh, rw), size) in r.refs.iter().zip(cond_sizes(&r.refs, o)) {
+            let Some((ch, cw)) = size else { continue };
             progress(0, max_steps_hint + 2, "encoding reference");
-            match d.encode_image(chw, *rh, *rw) {
+            let small;
+            let src = if (ch, cw) == (*rh, *rw) {
+                chw
+            } else {
+                small = resize_ref(chw, *rh, *rw, ch, cw);
+                &small
+            };
+            match d.encode_image(src, ch, cw) {
                 Ok(t) => ref_tokens.extend(t),
                 Err(e) => failed = Some(e),
             }
@@ -971,11 +1069,18 @@ mod tests {
     /// exact pixels, within a few pixels of a mask boundary.
     struct Stub {
         cfg: Flux2Config,
+        /// Every `(joint image sequence, position-id count)` the sampler
+        /// handed to the DiT. What the model *attends to* is not observable
+        /// from the returned image, so the gates below read it here.
+        seen: std::cell::RefCell<Vec<(Vec<f32>, usize)>>,
     }
 
     impl Stub {
         fn new() -> Stub {
-            Stub { cfg: Flux2Config { in_channels: 4, txt_len: 8, ..Flux2Config::klein_4b() } }
+            Stub {
+                cfg: Flux2Config { in_channels: 4, txt_len: 8, ..Flux2Config::klein_4b() },
+                seen: Default::default(),
+            }
         }
     }
 
@@ -1026,16 +1131,35 @@ mod tests {
         fn max_batch(&self) -> u32 {
             4
         }
-        fn forward_batch(&self, samples: &[crate::model::Sample<'_>], _ids: &[u32], n_pred: usize) -> Vec<Vec<f32>> {
+        fn forward_batch(&self, samples: &[crate::model::Sample<'_>], ids: &[u32], n_pred: usize) -> Vec<Vec<f32>> {
             let ch = self.cfg.in_channels;
             samples
                 .iter()
                 .map(|s| {
+                    self.seen.borrow_mut().push((s.img_tokens.to_vec(), ids.len()));
+                    // The conditioning tail shifts the target's phase. Without
+                    // this the stub's output is blind to the reference tokens
+                    // and a byte-identity gate over a rendered image could not
+                    // see a conditioning change at all - which is the very
+                    // thing being fenced. The summary is deliberately
+                    // POSITION-WEIGHTED: a plain mean is almost invariant to
+                    // resampling the same photograph, so it cannot tell a
+                    // full-size conditioning copy from a downscaled one. It is
+                    // still one scalar shared by every token, so the velocity
+                    // reads only its own latent and the mask gates' exact
+                    // equalities hold.
+                    let tail = &s.img_tokens[n_pred * ch..];
+                    let cond = tail
+                        .iter()
+                        .enumerate()
+                        .map(|(j, &v)| v * (j as f32 * 0.37).sin())
+                        .sum::<f32>()
+                        / (tail.len().max(1)) as f32;
                     (0..n_pred * ch)
                         .map(|i| {
-                            // A fixed "generated image", prompt-dependent and
-                            // source-independent.
-                            let target = (i as f32 * 0.031 + s.ctx[0]).sin() * 0.8;
+                            // A fixed "generated image", prompt- and
+                            // conditioning-dependent, init-latent-independent.
+                            let target = (i as f32 * 0.031 + s.ctx[0] + cond).sin() * 0.8;
                             (s.img_tokens[i] - target) / s.t.max(1e-6)
                         })
                         .collect()
@@ -1075,6 +1199,7 @@ mod tests {
             guidance: 4.0,
             seed: 11,
             mask,
+            ref_cond_scale: DEFAULT_REF_COND_SCALE,
         };
         let req = BatchRequest {
             prompt: "a staged living room".into(),
@@ -1200,32 +1325,186 @@ mod tests {
         (dot / (na * nb).max(1e-12), d2 / nb.max(1e-12))
     }
 
-    /// A pipeline must be sized for the tokens the denoise loop actually
-    /// attends to. Under `strength` the first reference becomes the init
-    /// latent and contributes none, so counting it allocates attention scratch
-    /// for tokens nothing ever reads -- at 1024x768 an extra 3072 of them,
-    /// which is what pushed a klein-9b decode past a 24 GB card.
+    /// **Gate 4 - a supplied reference always conditions the model.**
+    /// `strength` decides how much denoising starts from the init latent; it
+    /// must NOT decide whether the DiT can see the photograph. Under
+    /// `strength < 1` the first reference does double duty: it is the init
+    /// latent AND it contributes conditioning tokens, at
+    /// [`GenOpts::ref_cond_scale`] of its own size (the init role pins it to
+    /// the output size, so it is the one reference whose conditioning
+    /// resolution the caller cannot pick by choosing a file).
     #[test]
-    fn the_strength_init_reference_contributes_no_conditioning_tokens() {
+    fn a_strength_reference_still_contributes_conditioning_tokens() {
         let refs = vec![img(768, 1024), img(768, 1024)];
         let base = GenOpts { width: 1024, height: 768, ..GenOpts::default() };
 
-        // No strength: every reference conditions, so both are counted.
+        // No strength: every reference conditions at its own size.
         let no_str = GenOpts { strength: None, ..base.clone() };
-        assert_eq!(ref_skip(&no_str), 0);
         assert_eq!(ref_tokens(&refs, &no_str), 2 * 48 * 64);
 
-        // With strength: the first is the init latent, only the second conditions.
+        // With strength: the first is BOTH the init latent and conditioning,
+        // downscaled by the default 0.75 (1024x768 -> 768x576 -> 48x36).
         let with_str = GenOpts { strength: Some(0.4), ..base.clone() };
-        assert_eq!(ref_skip(&with_str), 1);
-        assert_eq!(ref_tokens(&refs, &with_str), 48 * 64);
+        assert_eq!(ref_tokens(&refs, &with_str), 36 * 48 + 48 * 64);
 
-        // A lone reference under strength conditions on nothing at all.
-        assert_eq!(ref_tokens(&refs[..1], &with_str), 0);
+        // A lone reference under strength conditions on ITSELF - this is the
+        // whole point. It used to contribute nothing.
+        assert_eq!(ref_tokens(&refs[..1], &with_str), 36 * 48);
 
-        // strength == 1.0 starts from pure noise, so nothing is consumed.
-        let full = GenOpts { strength: Some(1.0), ..base };
-        assert_eq!(ref_skip(&full), 0);
-        assert_eq!(ref_tokens(&refs, &full), 2 * 48 * 64);
+        // The dial reaches both ends: 1.0 is the full-size conditioning copy
+        // (exactly what strength 1.0 costs), 0.0 switches it off entirely -
+        // the documented escape hatch back to the old, cheap behaviour.
+        let full_cond = GenOpts { ref_cond_scale: 1.0, ..with_str.clone() };
+        assert_eq!(ref_tokens(&refs[..1], &full_cond), 48 * 64);
+        let off = GenOpts { ref_cond_scale: 0.0, ..with_str.clone() };
+        assert_eq!(ref_tokens(&refs[..1], &off), 0);
+
+        // strength == 1.0 consumes no init latent, so nothing is downscaled
+        // and the dial does not apply. This is the path that already works.
+        for scale in [0.0, 0.75, 1.0] {
+            let full = GenOpts { strength: Some(1.0), ref_cond_scale: scale, ..base.clone() };
+            assert_eq!(ref_tokens(&refs, &full), 2 * 48 * 64, "scale {scale}");
+        }
+    }
+
+    /// **Gate 5 - a pipeline is sized for exactly the tokens it attends to.**
+    /// The invariant that motivated the removed
+    /// `the_strength_init_reference_contributes_no_conditioning_tokens`: the
+    /// attention scratch is allocated from [`ref_tokens`], so if the denoise
+    /// loop builds a joint sequence of any other length the graph is either
+    /// too small (a wrong-shaped forward) or wastefully too large. Only the
+    /// answer changed; the invariant did not. Asserted against what the DiT
+    /// was actually handed, on both sides of the sizing decision.
+    #[test]
+    fn the_joint_sequence_is_exactly_what_the_pipeline_was_sized_for() {
+        let (w, h) = (128u32, 96u32);
+        let refs = [source(h, w), source(h, w)];
+        let base = GenOpts { width: w, height: h, steps: Some(2), seed: 5, ..GenOpts::default() };
+        let cases = [
+            GenOpts { strength: None, ..base.clone() },
+            GenOpts { strength: Some(0.4), ..base.clone() },
+            GenOpts { strength: Some(0.4), ref_cond_scale: 1.0, ..base.clone() },
+            GenOpts { strength: Some(0.4), ref_cond_scale: 0.0, ..base.clone() },
+            GenOpts { strength: Some(1.0), ..base.clone() },
+        ];
+        for (n, opts) in cases.iter().enumerate() {
+            for k in 1..=refs.len() {
+                let d = Stub::new();
+                let req = BatchRequest {
+                    prompt: "a staged living room".into(),
+                    refs: refs[..k].to_vec(),
+                    opts: opts.clone(),
+                    cancel: Default::default(),
+                };
+                generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+                    .pop()
+                    .unwrap()
+                    .expect("stub generation");
+                let n_gen = ((h / 16) * (w / 16)) as usize;
+                let want = n_gen + ref_tokens(&refs[..k], opts) as usize;
+                let seen = d.seen.borrow();
+                assert!(!seen.is_empty(), "case {n}/{k}: no forward ran");
+                for (joint, n_ids) in seen.iter() {
+                    assert_eq!(joint.len(), want * d.cfg.in_channels, "case {n}/{k}: joint tokens");
+                    assert_eq!(*n_ids, 4 * (d.cfg.txt_len + want), "case {n}/{k}: position ids");
+                }
+            }
+        }
+    }
+
+    /// **Gate 6 - the model actually receives the photograph.** Gate 5 pins
+    /// the *length* of the joint sequence; a pipeline that padded it with
+    /// zeros would pass. This pins the *content*: the tail of what the DiT
+    /// attends to is the encoding of the reference, downscaled by the
+    /// conditioning dial. Under the old behaviour that tail was empty - which
+    /// is exactly the defect: at `--strength 0.95` the DiT never saw the
+    /// user's photograph at all, and only the leftover signal in a
+    /// partially-noised init latent stood between the result and a fresh
+    /// generation.
+    #[test]
+    fn the_denoiser_attends_to_the_downscaled_init_reference() {
+        let (w, h) = (128u32, 96u32);
+        let d = Stub::new();
+        let src = source(h, w);
+        let opts = GenOpts {
+            width: w,
+            height: h,
+            strength: Some(0.95),
+            steps: Some(2),
+            seed: 3,
+            ..GenOpts::default()
+        };
+        let req = BatchRequest {
+            prompt: "a staged living room".into(),
+            refs: vec![src.clone()],
+            opts: opts.clone(),
+            cancel: Default::default(),
+        };
+        generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation");
+
+        let ch = d.cfg.in_channels;
+        let n_gen = ((h / 16) * (w / 16)) as usize;
+        let seen = d.seen.borrow();
+        let (joint, _) = seen.first().expect("at least one forward");
+        let tail = &joint[n_gen * ch..];
+        assert!(
+            !tail.is_empty(),
+            "a supplied reference must be attended to, not merely renoised into the init latent"
+        );
+
+        // 96x128 at the default 0.75 -> 72x96 floored to /16 -> 64x96 -> 4x6.
+        let (ch_px, cw_px) = init_cond_size(opts.ref_cond_scale, h, w).expect("dial is on");
+        assert_eq!((ch_px, cw_px), (64, 96));
+        let small = resize_ref(&src.0, h, w, ch_px, cw_px);
+        let want = d.encode_image(&small, ch_px, cw_px).expect("stub encode");
+        assert_eq!(tail, &want[..], "the conditioning tail must BE the reference");
+    }
+
+    /// **Gate 7 - `strength == 1.0` is byte-for-byte what it always was.**
+    /// The digest below was taken on the code as it stood *before* the
+    /// conditioning change, so it is a genuine before/after fence on the one
+    /// path users already depend on. If a future edit to the reference
+    /// pipeline moves this, it moved a rendered image, not an abstraction.
+    #[test]
+    fn a_strength_one_run_is_byte_identical_to_the_pre_change_output() {
+        let (w, h) = (128u32, 96u32);
+        let refs = vec![source(h, w), source(h, w)];
+        let d = Stub::new();
+        let opts = GenOpts {
+            width: w,
+            height: h,
+            strength: Some(1.0),
+            steps: Some(4),
+            seed: 11,
+            ..GenOpts::default()
+        };
+        let req = BatchRequest {
+            prompt: "a staged living room".into(),
+            refs,
+            opts,
+            cancel: Default::default(),
+        };
+        let rgb = generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation")
+            .0;
+        assert_eq!(fnv1a(&rgb), 0x0d96_f927_7211_6425u64);
+    }
+
+    /// FNV-1a 64 over the rendered bytes. A whole reference image is too large
+    /// to inline and a tolerance would defeat the purpose, so the fence is a
+    /// digest - written here rather than pulled in as a dependency because a
+    /// hash of 36 kB in a unit test needs nothing stronger.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
     }
 }

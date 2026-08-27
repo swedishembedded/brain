@@ -71,8 +71,23 @@ brain/flux2-klein` lists them) over D-Bus and over HTTP at
   check what the adapter is actually contributing.
 - `--strength` - for image-to-image editing, how much the output may drift
   from the reference: low values (around 0.1) preserve structure/texture
-  closely, high values (around 0.9) allow more freedom. It does not add
-  color/hue changes on its own.
+  closely, high values (around 0.9) allow more freedom, and `1.0` starts the
+  denoise from pure noise. It does not add color/hue changes on its own.
+  It controls **how much denoising starts from the init latent, not whether
+  the model can see the reference**: a supplied reference contributes
+  conditioning tokens at every value of `--strength`. Below `1.0` the first
+  reference does double duty - it is the init latent *and* it is attended to.
+- `--ref-cond-scale <S>` - linear size of the **conditioning copy** of that
+  init reference, in `0..=1`, default `0.75`. Only the first `--ref` under
+  `--strength < 1` is affected: the init-latent role pins it to the output
+  size, so it is the one reference whose resolution you cannot choose by
+  picking a different file. Reference tokens cost joint attention
+  quadratically, so a full-size copy of a same-size reference doubles the
+  image half of the sequence; the default downscale keeps an edit at roughly
+  the cost of a moderate second reference. `1.0` conditions at full size -
+  identical token cost to `--strength 1.0`. `0` switches the conditioning
+  copy off, which is the explicit opt-in to the cheap mode where the
+  reference reaches the denoiser only through the init latent.
 - `--mask <image>` - a spatial preservation mask over the output canvas.
   **White regenerates, black preserves, greys blend.** See
   [Masked editing](#masked-editing-blended-latent-diffusion) below.
@@ -126,8 +141,9 @@ brain flux2 generate --variant klein-9b --precision int8 \
 
 * The first `--ref` is the preserved source and must be at the output size -
   the same rule `--strength` already imposes. `--mask` does **not** consume
-  it: whether that reference also contributes conditioning tokens is still
-  decided by `--strength` alone.
+  it and does not change the token budget either way: that reference
+  contributes conditioning tokens regardless, at the size
+  `--ref-cond-scale` picks.
 * An **all-white** mask is bit-for-bit identical to no mask at all, and an
   **all-black** one reproduces the source latent exactly. Both are asserted,
   and both are exact rather than approximate - the mask resampler accumulates

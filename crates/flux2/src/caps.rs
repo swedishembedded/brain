@@ -62,7 +62,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new(
             "strength",
             ParamType::Float,
-            "img2img init strength in (0,1] = the starting noise level: the first input image seeds the              trajectory instead of pure noise. Low = keep the source (0.1 -> ~0.999 structural fidelity),              high = redraw it (0.9 -> ~0.77). Does NOT add colour.              Omit to generate from noise with the references only conditioning.",
+            "img2img init strength in (0,1] = the starting noise level: the first input image seeds the              trajectory instead of pure noise. Low = keep the source, high = redraw it.              Does NOT add colour, and does NOT turn conditioning off - every input image              conditions the model at every strength. Omit to start from pure noise.",
         ).min(0.0).max(1.0).step(0.01))
         .input(BlobSpec::new("image", Media::Image, "the reference image to edit (center-cropped to /16); also the img2img init when `strength` is set").required());
     for r in EXTRA_REFS {
@@ -140,6 +140,11 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         // finds as a reference image. Declared here rather than hidden behind
         // `..Default::default()` so the gap is visible at the decode site.
         mask: None,
+        // No wire parameter yet: over the capability interface the caller
+        // supplies the reference blob itself, so the only reference whose
+        // resolution it cannot pick is the `strength` init latent - which is
+        // exactly the one this default is for.
+        ref_cond_scale: crate::pipeline::DEFAULT_REF_COND_SCALE,
     };
     // `lora_scale` is ComfyUI's `strength_model`, not a value read from the
     // adapter file - third-party LoRAs carry no alpha, so this is the dial.

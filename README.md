@@ -182,13 +182,21 @@ $ brain --device gpu flux2 generate --variant klein-9b --precision int8 \
 
 ![the same room furnished in a boheme style: a bed with layered kilim textiles, twin nightstand lamps, a macrame wall hanging, monstera plants and a jute rug, lit by low golden sunlight](docs/models/flux2/staging-result.jpg)
 
-`--strength` is the dial that matters, and it is a mode switch rather than a
-volume knob. Below `1.0` the reference is consumed as the initial latent, so
-low values repaint the existing pixels and leave furniture essentially where it
-was; at exactly `1.0` the reference is not consumed at all and re-enters as
-conditioning, which doubles the token count. The `0.99` above is the last rung
-before that switch: enough freedom to furnish an empty room, at the single-
-reference token cost.
+`--strength` is the dial that matters, and it is a volume knob: a supplied
+reference **always** conditions the model, at every value. Below `1.0` the
+first reference does double duty - it is the initial latent *and* it is
+attended to - so low values repaint the existing pixels and leave furniture
+essentially where it was, and high values redraw the room while still seeing
+it. At exactly `1.0` nothing is consumed as an init latent and the denoise
+starts from pure noise, conditioned on the reference alone. The `0.99` above is
+the far end of that ramp: enough freedom to furnish an empty room.
+
+Reference tokens are not free - they enter the same joint attention as the
+generated ones. The init reference is pinned to the output size by its
+init-latent role, so its *conditioning* copy is downscaled by default rather
+than doubling the image half of the sequence; `--ref-cond-scale` is that dial,
+with `1.0` conditioning at full size (the same cost as `--strength 1.0`) and
+`0` switching the conditioning copy off for the cheapest possible edit.
 
 That freedom is spatially indiscriminate - at this setting the window and door
 are regenerated along with everything else, which is fine for a room that was

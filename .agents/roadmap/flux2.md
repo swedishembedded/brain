@@ -514,3 +514,96 @@ latents. Both of those decode cleanly, and the misalignment penalty is under
 be explained on the DiT side - most plausibly by the per-step renoise blending
 two trajectories that are at *inconsistent* sigma, which is not the same
 object as a mix of two clean latents.
+
+## `--strength` stops being a hidden mode switch (2026-08-27)
+
+`pipeline::ref_skip` used to drop the FIRST reference from the conditioning
+set whenever `--strength < 1.0`: it became the init latent and contributed
+zero reference tokens and zero position ids. At exactly `1.0` it was not
+consumed as an init latent, so it re-entered as attended conditioning. A dial
+that presents as continuous was therefore a mode switch, with nothing in the
+interface saying so, and the entire range `(0, 1)` ran the DiT **blind to the
+photograph** - the reference reached it only as leftover signal in a
+partially-noised latent.
+
+That is now fixed. A supplied reference always conditions. Under
+`strength < 1` the first reference does double duty: init latent *and*
+conditioning input. Because the init role pins it to the output size, its
+conditioning copy is downscaled by `GenOpts::ref_cond_scale` /
+`--ref-cond-scale`, default `0.75` linear (a bit over half the tokens).
+`1.0` conditions at full size, `0` is the documented escape hatch back to the
+old cheap behaviour. `ref_skip` is gone; `cond_sizes` is the single rule that
+the sizing entry point, the position-id builder and the denoise loop all read.
+
+**Why a downscale and not a budget refusal.** Three options were on the table:
+downscale by default, require an explicit resolution, or pre-flight the device
+budget and refuse. The downscale wins on evidence: the only virtual-staging
+result the user has accepted was `strength 1.00` driven by a 768x576
+reference, i.e. 1728 reference tokens against 3072 generated ones. At
+1024x768 the 0.75 default reproduces exactly that joint sequence, so the
+default lands on the measured-good configuration rather than on a guess.
+Requiring an explicit resolution leaves the broken default in place for
+everyone who does not read the flag; a budget refusal is a bigger change (the
+DiT and the text encoder sit on different cards under different authorities)
+and is orthogonal - it should be added later, for the case where the user
+raises `--ref-cond-scale` themselves. What did land for legibility is a
+per-reference breakdown on stderr naming each reference's supplied size, its
+conditioning size and its token count, so an OOM can be attributed to a
+reference rather than read as a bare `wgpu error: Out of Memory`.
+
+**Backwards compatibility: deliberately broken.** Every existing
+`--strength` + `--ref` invocation now produces a different image. That is the
+point - the old output was produced without the model seeing the reference.
+`--strength 1.0` is unchanged and is fenced by byte equality, below.
+
+Measured on **2x Tesla P40**, `klein-9b` Q8_0 int8 DiT on gpu0 + truncated
+int8 Qwen3-8B text encoder on gpu1 (`BRAIN_FLUX2_TE_DEVICE=gpu1:i8`),
+1024x768 out, seed 7, 12 steps, the rank-32 staging LoRA at scale 1.0, the
+model card's verbatim prompt tier wording. "pipeline" is the CLI's own total,
+"wall" includes weight load; peak is `nvidia-smi` sampled at 2 Hz.
+
+| run | reference | tokens | pipeline | wall | gpu0 peak | gpu1 peak |
+|---|---|---|---|---|---|---|
+| before, strength 1.00 | 768x576 | 3072 + 1728 | 119.9 s | 160 s | 24301 MiB | 14105 MiB |
+| after, strength 1.00 | 768x576 | 3072 + 1728 | 118.5 s | 156 s | 24038 MiB | 14101 MiB |
+| before, strength 0.95 | 1024x768 | 3072 + **0** | 71.4 s | 109 s | 23403 MiB | 14101 MiB |
+| after, strength 0.95 | 1024x768 | 3072 + 1728 | 121.7 s | 159 s | 24039 MiB | 14101 MiB |
+| after, strength 0.90 | 1024x768 | 3072 + 1728 | 121.1 s | 166 s | 24039 MiB | 14101 MiB |
+| after, strength 0.85 | 1024x768 | 3072 + 1728 | 122.3 s | 163 s | 24039 MiB | 14101 MiB |
+
+The cost of the change at `strength 0.95`, 1024x768: +1728 reference tokens,
+denoise 64.5 s -> 113.3 s (1.76x for a 1.56x joint image sequence, i.e.
+sub-quadratic here), device peak +636 MiB on the DiT card, and a
+reference-encode phase that goes from **absent** to 3.5 s - two VAE encodes,
+the full-size init latent plus the downscaled conditioning copy. The absence
+of that phase in the before run is the defect showing up directly in the
+CLI's own per-phase timing: nothing was encoded as a reference at all.
+
+**The dial now varies smoothly.** Edge correlation (Pearson of
+full-resolution Sobel gradient magnitudes vs the source photograph) and MAD
+(mean |RGB| in 0..255), same definitions as the masked-editing table above:
+
+| setting | edge corr | MAD |
+|---|---|---|
+| after, strength 0.85 | 0.729 | 14.2 |
+| after, strength 0.90 | 0.675 | 18.0 |
+| after, strength 0.95 | 0.486 | 30.1 |
+| after, strength 1.00 (768 ref) | 0.278 | 54.1 |
+| *before*, strength 0.95 | *0.290* | *46.9* |
+
+The old `0.95` sat at 0.290 - next to `1.00`'s 0.278, not between `0.90` and
+`1.00`. That is the cliff, in numbers: the top of the range collapsed onto the
+endpoint because the model had nothing to preserve *from*. The new rungs are
+monotone and evenly spaced, and every one of them was rendered with the DiT
+attending to the room.
+
+**What is bit-identical, and what is parity-gated.** `strength 1.0` is
+**bit-identical**: the same invocation before and after the change renders the
+same PNG, sha256 `85076a98...` on the real 9B int8 weights (table row 1 vs
+row 2). At the unit level the same claim is fenced by a golden FNV-1a digest
+of a stub-denoiser render, measured on the pre-change `pipeline.rs` from git
+and asserted by
+`pipeline::tests::a_strength_one_run_is_byte_identical_to_the_pre_change_output`.
+Everything under `strength < 1` is **intentionally not** bit-identical and is
+not parity-gated against the old behaviour - there is no parity to claim
+against a run that ignored its own input.

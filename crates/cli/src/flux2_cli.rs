@@ -12,8 +12,15 @@ const HELP: &str = "brain flux2 <cmd>
   generate --prompt <text> --out <out.ppm> [--width W] [--height H]
            [--steps N] [--seed S] [--guidance G] [--variant klein-4b|klein-9b|base-4b|base-9b]
            [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only)
-           [--strength S]           # img2img: 0.2-0.5 keeps the source (colorize),
-                                    # omit = generate from noise (reference only conditions)
+           [--strength S]           # img2img: how much denoising starts from the first
+                                    # --ref instead of from noise. 0.2-0.5 keeps the source
+                                    # (colorize), 1.0 = start from pure noise. The reference
+                                    # conditions the model at EVERY strength.
+           [--ref-cond-scale S]     # linear size of the conditioning copy of the --strength
+                                    # init reference, 0..1 (default 0.75). 1.0 = full size
+                                    # (same token cost as --strength 1.0); 0 = do not
+                                    # condition on it at all (cheapest: the reference then
+                                    # reaches the model only through the init latent)
            [--ref <in.ppm>]...      # reference images => editing mode
            [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
                                     # --ref exactly (which must be at the output size);
@@ -66,6 +73,12 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--steps" => o.steps = Some(need(i)?.parse().map_err(|e| format!("--steps: {e}"))?),
             "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--strength" => o.strength = Some(need(i)?.parse().map_err(|e| format!("--strength: {e}"))?),
+            "--ref-cond-scale" => {
+                o.ref_cond_scale = need(i)?.parse().map_err(|e| format!("--ref-cond-scale: {e}"))?;
+                if !(0.0..=1.0).contains(&o.ref_cond_scale) {
+                    return Err(format!("--ref-cond-scale must be in 0..=1 (got {})", o.ref_cond_scale));
+                }
+            }
             "--guidance" => o.guidance = need(i)?.parse().map_err(|e| format!("--guidance: {e}"))?,
             "--variant" => variant_name = need(i)?.clone(),
             "--precision" => precision = flux2::Precision::from_name(need(i)?)?,
@@ -102,10 +115,24 @@ fn generate(args: &[String]) -> Result<(), String> {
 
     let paths = Paths::from_env()?;
     let n_gen = (o.height / 16) * (o.width / 16);
-    // Only the references the denoise loop actually attends to: under
-    // `--strength` the first one becomes the init latent instead.
+    // Every supplied reference conditions the model; under `--strength` the
+    // first one does so at `--ref-cond-scale` of its own size *and* seeds the
+    // init latent. Print the per-reference breakdown, not just the total:
+    // reference tokens are what decides whether a run fits the card, and a
+    // bare "N + M" does not say which reference spent them or at what size.
+    let sizes = flux2::pipeline::cond_sizes(&ref_imgs, &o);
     let n_ref = flux2::pipeline::ref_tokens(&ref_imgs, &o);
-    eprintln!("flux2: building pipeline ({} + {} tokens) ...", n_gen, n_ref);
+    for (i, (size, (_, rh, rw))) in sizes.iter().zip(&ref_imgs).enumerate() {
+        let role = if i == 0 && o.strength.is_some_and(|s| s < 1.0) { ", also the init latent" } else { "" };
+        match size {
+            Some((ch, cw)) => eprintln!(
+                "flux2: ref {i} {rw}x{rh} -> conditions at {cw}x{ch} = {} tokens{role}",
+                (ch / 16) * (cw / 16)
+            ),
+            None => eprintln!("flux2: ref {i} {rw}x{rh} -> no conditioning tokens (--ref-cond-scale 0{role})"),
+        }
+    }
+    eprintln!("flux2: building pipeline ({n_gen} generated + {n_ref} reference tokens) ...");
     let spec = adapter.map(|path| AdapterSpec { path, scale: lora_scale });
     let pipe = Pipeline::build_with(&variant, &paths, n_gen + n_ref, spec.as_ref(), precision)?;
     let t0 = std::time::Instant::now();
