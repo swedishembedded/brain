@@ -24,6 +24,25 @@ use gpu_core::select::Dtype;
 use model::ops::{self, Ops};
 use model::probe::{self, Arithmetic, Outcome, Plan, Tier};
 
+/// The probes in this file must not run concurrently **with each other**.
+///
+/// A throughput probe measures the throughput available to it, so two of them
+/// sharing one device measure the contended device and disagree - which is not
+/// a bug in the probe, it is what the probe is for. Every test here shares the
+/// one `testgpu::dev()` handle, and the suite runs multi-threaded by default,
+/// so without this the timing assertions fail purely because a neighbour is
+/// also saturating the GPU. `crates/gpu-core/tests/roofline.rs` guards its own
+/// probes exactly this way and for exactly this reason.
+///
+/// It matters more since the probe learned to ramp the device: each test now
+/// holds the GPU for seconds rather than milliseconds, so the window in which
+/// two of them can collide is far wider than it used to be.
+static PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn probe_lock() -> std::sync::MutexGuard<'static, ()> {
+    PROBE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn ops() -> Ops {
     let gpu = gpu_core::testgpu::dev(ops::kernel_list());
     Ops::new(gpu).expect("the canonical kernel_list() must satisfy Ops::new")
@@ -34,6 +53,7 @@ fn ops() -> Ops {
 /// promoted tier's number under another tier's name.
 #[test]
 fn every_tier_is_either_measured_or_explained_never_faked() {
+    let _probe = probe_lock();
     let ops = ops();
     let caps = ops.caps();
     println!(
@@ -136,6 +156,7 @@ fn the_canonical_kernel_list_builds_an_ops() {
 /// scale its clock the ramp is ~1.0 and that arm self-disables.
 #[test]
 fn the_probe_reports_the_operating_point_not_the_idle_clock() {
+    let _probe = probe_lock();
     let ops = ops();
     let plan = Plan::default();
     let (warm, sweep) = probe::sweep_ramped(&ops, &plan);
@@ -184,6 +205,7 @@ fn the_probe_reports_the_operating_point_not_the_idle_clock() {
 /// reported, and the tiers still measure.
 #[test]
 fn a_plan_with_no_warmup_reports_no_ramp() {
+    let _probe = probe_lock();
     let ops = ops();
     let plan = Plan { warmup: std::time::Duration::ZERO, ..Plan::default() };
     let (warm, sweep) = probe::sweep_ramped(&ops, &plan);
@@ -198,6 +220,7 @@ fn a_plan_with_no_warmup_reports_no_ramp() {
 /// really submit overhead or a no-op dispatch would swing wildly.
 #[test]
 fn repeated_probes_of_the_same_tier_are_in_the_same_ballpark() {
+    let _probe = probe_lock();
     let ops = ops();
     let plan = Plan::default();
     let a = probe::gemm(&ops, Dtype::F32, &plan).expect("f32 is always available");
@@ -210,6 +233,7 @@ fn repeated_probes_of_the_same_tier_are_in_the_same_ballpark() {
 /// A shape the packers cannot take is refused before any device work.
 #[test]
 fn an_unpackable_shape_is_refused_with_a_reason() {
+    let _probe = probe_lock();
     let ops = ops();
     let unpackable = |k| Plan { shapes: vec![(128, 512, k)], ..Plan::default() };
 
@@ -234,6 +258,7 @@ fn an_unpackable_shape_is_refused_with_a_reason() {
 /// no numbers.
 #[test]
 fn the_machine_profile_covers_every_accelerator_including_the_ones_it_cannot_measure() {
+    let _probe = probe_lock();
     let plan = Plan::default();
     let started = std::time::Instant::now();
     let profiles = probe::machine(&plan);
