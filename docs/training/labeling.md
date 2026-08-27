@@ -84,10 +84,19 @@ room-02.jpg: a single line still works
 
 That is what makes a long caption editable: the text sits on its own lines with
 no quoting and no escaping, and `#` and `:` inside it are just characters.
-Single-line forms - bare, `"quoted"`, `'quoted'`, with `#` comments - parse
-exactly as they always did. `captions.jsonl` still overrides `captions.yaml`
-entry by entry. See `data::imageset`'s module documentation for the full
-grammar.
+
+It is ordinary YAML, parsed by `serde_norway` into the typed
+`data::imageset::CaptionFile` schema - not by a caption-specific line scanner -
+so anchors, aliases, document markers, quoted colons, escapes and CRLF all
+behave as YAML says they should, and a file that does not parse is reported
+with a line and column instead of quietly looking like an uncaptioned folder.
+`captions.jsonl` is the same story with `serde_json` and `CaptionLine`, and
+still overrides `captions.yaml` entry by entry.
+
+The writer emits a block scalar for any caption containing a newline and a
+plain scalar otherwise; a caption a block scalar cannot represent exactly (one
+with trailing whitespace on a line, say) is quoted instead, because an exact
+round trip matters more than a pretty one.
 
 ## Choosing a model
 

@@ -742,7 +742,7 @@ front-end to depend on.
 | `imaging` | the image substrate: decode/encode, device-dispatched resize/pad/crop/layout, colour normalisation, **mask algebra** (threshold/dilate/erode/feather/invert/union/intersect/difference/composite) and tiling - one home for what was scattered across zipdepth, yolov8, worldmirror2, s3dit, capture and cli |
 | `imgpipe` | the composed pipeline: a stage list executed as ONE capability call, dispatching its model stages back through `capability::Registry`. Pixels outside the mask come back **bit-identical** |
 | `captioner` | the model-agnostic captioning seam (`Clip` in, text out) plus the resumable folder labeler behind `brain label`. No model code: the implementors live in the VLM crates and depend on this one. Designed for video (the unit is a clip, not a frame), image path built |
-| `data` | char + GPT-2/Qwen3/**CLIP** BPE tokenizers, the shared deterministic PRNGs (`rng::Rng` for datasets, `rng::Lcg` for tests/fixtures), dataset generators, loaders (masking/alignment), normalization |
+| `data` | char + GPT-2/Qwen3/**CLIP** BPE tokenizers, the shared deterministic PRNGs (`rng::Rng` for datasets, `rng::Lcg` for tests/fixtures), dataset generators, loaders (masking/alignment), normalization | The captioned-image dataset's `captions.yaml`/`captions.jsonl` are parsed by `serde_norway`/`serde_json` into the typed `imageset::CaptionFile`/`CaptionLine` schemas - never by a hand-rolled scanner, which is how `key: |` once yielded the literal prompt `"|"`.
 | `eval` | perplexity + task exact-match (LM) and detection metrics (mAP@0.5/precision/recall) |
 | `gradcheck` | finite-difference backprop correctness gate |
 | `bench` | model-agnostic architecture-evaluation suite - *does it **learn**?* (see below) |
