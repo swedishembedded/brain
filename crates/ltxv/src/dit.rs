@@ -101,8 +101,7 @@ pub fn dit_tensor_manifest(cfg: &LtxDitConfig) -> Vec<(String, Vec<usize>)> {
         for attn in ["attn1", "attn2"] {
             push_attn(&mut m, &format!("{p}.{attn}"), dim, dim, dim);
         }
-        m.push((format!("{p}.ff.net.0.proj.weight"), vec![4 * dim, dim]));
-        m.push((format!("{p}.ff.net.2.weight"), vec![dim, 4 * dim]));
+        push_ff(&mut m, &format!("{p}.ff"), dim, 4 * dim, cfg.ff_bias);
         m.push((format!("{p}.scale_shift_table"), vec![cfg.adaln_rows() as usize, dim]));
         m.push((format!("{p}.prompt_scale_shift_table"), vec![2, dim]));
     }
@@ -155,12 +154,26 @@ fn push_attn(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, q_dim: usize, kv_d
 }
 
 /// Push one FFN's two linears (`net.0.proj`, `net.2`), optionally biased.
-/// `has_bias` is a per-instance FACT read off the real header, not derived
-/// from `cfg.*.ff_bias`: the real checkpoint's video-stream `ff` truly has
-/// no bias (`ff_bias: false` governs it) but its `audio_ff` and BOTH
-/// embeddings-connector FFNs carry bias tensors regardless - confirmed by
-/// range-reading the real header at every block (0 and 47) and both
-/// connectors, not assumed from the single shared `ff_bias` config key.
+///
+/// `has_bias` is a per-instance FACT, and the callers split two ways because
+/// the real headers do:
+///
+/// * The **video** stream's own `ff` follows `cfg.*.ff_bias`, and that flag
+///   really does vary across the family - LTX-2.5's 22B header carries no
+///   `transformer_blocks.N.ff.net.*.bias` at all (`ff_bias: false`) while
+///   LTX-2.3's carries all 96 of them (`ff_bias: true`, see
+///   [`crate::config::LtxDitConfig::ltx23_22b`]). Passing a hardcoded
+///   `false` here would make a real LTX-2.3 checkpoint fail import with 96
+///   unused source tensors, and - worse - would build a bias-free FFN for a
+///   forward, since `crate::block`'s `ff_has_bias` reads presence off the
+///   weight map this manifest generates.
+/// * `audio_ff` and BOTH embeddings-connector FFNs carry bias tensors in
+///   EVERY release regardless of any flag - confirmed by range-reading both
+///   the 2.5 and the 2.3 headers at every block (0 and 47) and both
+///   connectors. Those callers pass a literal `true`, not
+///   `cfg.audio.ff_bias`; the reference's separate `audio_ff_bias` key is
+///   set by neither release's `config` KV, so there is no checkpoint value
+///   behind it to honor.
 fn push_ff(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, dim: usize, ff_dim: usize, has_bias: bool) {
     m.push((format!("{prefix}.net.0.proj.weight"), vec![ff_dim, dim]));
     if has_bias {
@@ -216,10 +229,16 @@ fn push_connector(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, num_registers
 /// two shapes that paraphrase got backwards (`keyframes_abs_pos_embedding`
 /// and the connectors' `learnable_registers`, both transposed) and the one
 /// real asymmetry a naive reading of `ff_bias` would miss (audio's FFN and
-/// both connectors' FFNs carry bias; video's main FFN does not).
+/// both connectors' FFNs carry bias in every release; video's main FFN
+/// follows the flag - see [`push_ff`]).
 ///
-/// Tensor count breaks down exactly as the real header does: 59 top-level +
-/// 48 blocks * 84 + 129 * 2 (both connectors) = 4349.
+/// Tensor count breaks down exactly as both real headers do:
+///
+/// * LTX-2.5: 59 top-level + 48 blocks * 84 + 129 * 2 (both connectors)
+///   = **4349**.
+/// * LTX-2.3: the same, minus `keyframes_abs_pos_embedding` (58 top-level)
+///   plus the video FFN's two bias tensors per block (86 per block)
+///   = **4444**. Both counts are asserted in `crate::import`'s tests.
 pub fn av_dit_tensor_manifest(cfg: &LtxAvDitConfig) -> Vec<(String, Vec<usize>)> {
     let vcfg = &cfg.video;
     let acfg = &cfg.audio;
@@ -265,7 +284,7 @@ pub fn av_dit_tensor_manifest(cfg: &LtxAvDitConfig) -> Vec<(String, Vec<usize>)>
         // query - `crate::block::LtxAvBlock`'s doc.
         push_attn(&mut m, &format!("{p}.audio_to_video_attn"), vdim, adim, adim);
         push_attn(&mut m, &format!("{p}.video_to_audio_attn"), adim, vdim, adim);
-        push_ff(&mut m, &format!("{p}.ff"), vdim, 4 * vdim, false);
+        push_ff(&mut m, &format!("{p}.ff"), vdim, 4 * vdim, vcfg.ff_bias);
         push_ff(&mut m, &format!("{p}.audio_ff"), adim, 4 * adim, true);
         m.push((format!("{p}.scale_shift_table"), vec![rows9, vdim]));
         m.push((format!("{p}.prompt_scale_shift_table"), vec![2, vdim]));

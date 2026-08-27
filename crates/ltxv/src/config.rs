@@ -271,6 +271,64 @@ impl LtxDitConfig {
             use_embeddings_connector: true,
         }
     }
+
+    /// The real **LTX-2.3** 22B video-stream config - [`Self::ltx25_22b`]
+    /// with exactly TWO fields changed, and nothing else.
+    ///
+    /// LTX-2.3, 2.4 and 2.5 are the same `AVTransformer3DModel` class behind
+    /// the same `ltxv` GGUF architecture tag, so "the release is a config" is
+    /// a claim this crate can check rather than assume - and it holds. Both
+    /// releases' 22B checkpoint headers were range-read (headers only, never
+    /// weights: the safetensors 8-byte little-endian JSON length followed by
+    /// the JSON) and diffed tensor by tensor:
+    ///
+    /// * 2.5 carries `keyframes_abs_pos_embedding` (`[1, 4096]`); 2.3 does
+    ///   NOT -> [`Self::use_keyframes_abs_pos_embedding`] is `false` here.
+    /// * 2.3 carries 96 video-FFN bias tensors 2.5 does not
+    ///   (`transformer_blocks.{0..47}.ff.net.0.proj.bias` and
+    ///   `.ff.net.2.bias`) -> [`Self::ff_bias`] is `true` here.
+    /// * Every other tensor name is shared, with ZERO shape mismatches
+    ///   across all 4348 of them: 4349 (2.5) - 1 + 96 = 4444 (2.3).
+    ///
+    /// Neither flag is present in 2.3's own embedded `config` KV, so the
+    /// tensor list is what settles them - and the reference agrees
+    /// independently: `LTXAudioVideoModelConfigurator.from_metadata` reads
+    /// `ff_bias=config.get("ff_bias", True)` and
+    /// `use_keyframes_abs_pos_embedding=config.get(
+    /// "use_keyframes_abs_pos_embedding", False)` (`ltx_core...transformer.
+    /// model_configurator`), whose absent-key defaults are exactly the two
+    /// values the 2.3 header shows. Two independent authorities, same answer.
+    ///
+    /// Every OTHER field is transcribed from 2.3's own `config` KV and is
+    /// value-for-value identical to 2.5's, which is why this constructor is
+    /// written as a struct update of [`Self::ltx25_22b`] rather than a second
+    /// copy of 26 numbers that could drift.
+    ///
+    /// **Untested against real LTX-2.3 weights.** No LTX-2.3 checkpoint has
+    /// ever been downloaded or forwarded by this crate, at any size. What IS
+    /// proven: header coverage (the manifest this config generates matches
+    /// the real 4444-tensor header name for name and shape for shape, see
+    /// `crate::import`'s own tests) and the op sequence, which is shared with
+    /// LTX-2.5 line for line and tiny-config parity-gated there. What is NOT:
+    /// any number produced from real 2.3 weights.
+    ///
+    /// Two consequences worth knowing at this call site rather than
+    /// somewhere else:
+    ///
+    /// * `ff_bias: true` puts a bias on the VIDEO stream's FFN for the first
+    ///   time in this crate. The biased-FFN machinery is well exercised
+    ///   (`audio_ff` and both embeddings connectors are biased on every real
+    ///   LTX-2.5 run, same code), but the video stream reaching it is new -
+    ///   every golden and every checkpoint loaded so far is `ff_bias: false`.
+    /// * A 2.3 checkpoint still cannot be RUN end to end, for a reason
+    ///   outside this crate: LTX-2.3's text encoder is Gemma 3 12B, not
+    ///   Gemma-4, and `crates/gemma4` has no Gemma-3 path. The projection
+    ///   geometry is identical (`188160 = 3840 * 49` either way), so the DiT
+    ///   side is ready and the encoder is not. Read this config as
+    ///   "2.3 is loadable and forwardable", never "2.3 is runnable".
+    pub fn ltx23_22b() -> LtxDitConfig {
+        LtxDitConfig { ff_bias: true, use_keyframes_abs_pos_embedding: false, ..LtxDitConfig::ltx25_22b() }
+    }
 }
 
 /// The audio stream's shape configuration - the audio-side counterpart of
@@ -381,6 +439,25 @@ impl LtxAudioDitConfig {
             connector_attention_head_dim: 64,
         }
     }
+
+    /// The real **LTX-2.3** 22B audio-stream config - byte-for-byte
+    /// [`Self::ltx25`] except [`Self::ff_bias`], which follows the video
+    /// stream's (see [`LtxDitConfig::ltx23_22b`]).
+    ///
+    /// The audio FFN's bias tensors (`transformer_blocks.N.audio_ff.net.0.
+    /// proj.bias` / `.net.2.bias`) are present in BOTH releases' headers, so
+    /// this field does not describe them and the manifest does not read it -
+    /// `crate::dit::push_ff`'s doc records that audio's FFN bias is a
+    /// per-instance fact taken off the tensor map, never off a config flag.
+    /// The reference does expose a separate `audio_ff_bias` key
+    /// (`model_configurator.py`, default `True`), but NEITHER release's
+    /// `config` KV sets it, so there is no checkpoint value to transcribe;
+    /// mirroring the video stream keeps the one flag this struct carries
+    /// consistent with the release it names instead of inventing a third
+    /// answer.
+    pub fn ltx23() -> LtxAudioDitConfig {
+        LtxAudioDitConfig { ff_bias: true, ..LtxAudioDitConfig::ltx25() }
+    }
 }
 
 /// The bundled audio<->video DiT configuration - `LTXModelType::AudioVideo`.
@@ -462,6 +539,21 @@ impl LtxAvDitConfig {
     /// range-reading the real header settles it).
     pub fn ltx25() -> LtxAvDitConfig {
         LtxAvDitConfig { video: LtxDitConfig::ltx25_22b(), audio: LtxAudioDitConfig::ltx25(), av_ca_timestep_scale_multiplier: 1000.0 }
+    }
+
+    /// The real **LTX-2.3** 22B AV config - [`LtxDitConfig::ltx23_22b`] +
+    /// [`LtxAudioDitConfig::ltx23`], same `av_ca_timestep_scale_multiplier:
+    /// 1000.0` as 2.5 (both releases' `config` KV carry that number
+    /// explicitly and identically).
+    ///
+    /// Nothing in this crate hardcodes it: [`crate::import::
+    /// av_dit_config_from_kv`] derives the config from whichever checkpoint
+    /// is actually loaded, so 2.3 vs 2.5 selection is a property of the FILE,
+    /// not of a caller-chosen enum. This constructor exists so tests, the
+    /// FLOPs model and the shape ledger can name 2.3's real widths without a
+    /// checkpoint on disk - the same role [`Self::ltx25`] already plays.
+    pub fn ltx23() -> LtxAvDitConfig {
+        LtxAvDitConfig { video: LtxDitConfig::ltx23_22b(), audio: LtxAudioDitConfig::ltx23(), av_ca_timestep_scale_multiplier: 1000.0 }
     }
 }
 
@@ -579,5 +671,62 @@ mod tests {
         assert_eq!(av.audio, a);
         assert_eq!(av.av_ca_timestep_scale_multiplier, 1000.0);
         assert_eq!(av.cross_pe_max_pos(), 20);
+    }
+
+    /// The real LTX-2.3 22B config, at REAL widths, against the real
+    /// checkpoint header - the shape counterpart of
+    /// [`ltx25_config_matches_the_real_checkpoint_header`] above.
+    ///
+    /// Both releases' 22B safetensors headers and the LTX-2.3 GGUF header
+    /// were range-read (metadata only) and diffed tensor by tensor. This
+    /// test pins the result: LTX-2.3 is LTX-2.5 with TWO fields changed and
+    /// **nothing else**. The "nothing else" half is what a struct-update
+    /// constructor could quietly lose - so rather than restating 26 numbers
+    /// (which would drift with `ltx25_22b` and prove nothing), it undoes
+    /// exactly the two documented changes and demands the result be equal to
+    /// the 2.5 config by `PartialEq` over EVERY field. A third divergence
+    /// creeping into either constructor fails here.
+    #[test]
+    fn ltx23_is_ltx25_with_exactly_two_flags_changed() {
+        let v23 = LtxDitConfig::ltx23_22b();
+        let v25 = LtxDitConfig::ltx25_22b();
+
+        // The two that really differ, in the direction the headers show.
+        assert!(v23.ff_bias, "LTX-2.3 carries transformer_blocks.N.ff.net.*.bias");
+        assert!(!v25.ff_bias, "LTX-2.5 does not");
+        assert!(!v23.use_keyframes_abs_pos_embedding, "LTX-2.3 has no keyframes_abs_pos_embedding tensor");
+        assert!(v25.use_keyframes_abs_pos_embedding, "LTX-2.5 has one");
+
+        // ...and nothing else does.
+        let undone = LtxDitConfig { ff_bias: false, use_keyframes_abs_pos_embedding: true, ..v23 };
+        assert_eq!(undone, v25, "LTX-2.3 and LTX-2.5 must differ in exactly ff_bias + use_keyframes_abs_pos_embedding");
+
+        // Real widths, spelled out rather than inherited, so a refactor of
+        // `ltx25_22b` that changed a width would fail here too and not just
+        // silently carry into 2.3.
+        assert_eq!(v23.inner_dim, 4096);
+        assert_eq!(v23.num_heads, 32);
+        assert_eq!(v23.head_dim(), 128);
+        assert_eq!(v23.num_layers, 48);
+        assert_eq!(v23.cross_attention_dim, 4096);
+        assert_eq!(v23.connector_inner_dim(), 4096);
+        assert_eq!(v23.adaln_rows(), 9);
+        v23.assert_supported();
+
+        // Audio stream: same two-flag story, audio-side.
+        let a23 = LtxAudioDitConfig::ltx23();
+        assert!(a23.ff_bias);
+        assert_eq!(LtxAudioDitConfig { ff_bias: false, ..a23 }, LtxAudioDitConfig::ltx25());
+        assert_eq!(a23.inner_dim, 2048);
+        assert_eq!(a23.head_dim(), 64);
+        assert_eq!(a23.connector_inner_dim(), 2048);
+
+        let av23 = LtxAvDitConfig::ltx23();
+        av23.assert_supported();
+        assert_eq!(av23.video, v23);
+        assert_eq!(av23.audio, a23);
+        assert_eq!(av23.av_ca_timestep_scale_multiplier, LtxAvDitConfig::ltx25().av_ca_timestep_scale_multiplier);
+        assert_eq!(av23.cross_pe_max_pos(), 20);
+        assert_ne!(av23, LtxAvDitConfig::ltx25());
     }
 }

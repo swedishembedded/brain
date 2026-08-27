@@ -1,7 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Checkpoint import for the LTX-2.5 video VAE, audio VAE and base vocoder.
+//! Checkpoint import for the LTX-2.x video VAE, audio VAE, base vocoder and
+//! AV DiT.
+//!
+//! **Two packagings, one name space.** LTX-2.5 ships each component as its
+//! own file; LTX-2.3 bundles the transformer (`model.diffusion_model.*`),
+//! the video VAE (`vae.*`), the audio VAE (`audio_vae.*`), the vocoder
+//! (`vocoder.*`) and the Gemma text projection
+//! (`text_embedding_projection.*`, imported by `crates/gemma4`) into ONE
+//! file. Every `import_*` below therefore selects its OWN prefix out of
+//! whatever list it is handed and ignores the rest, so the same function
+//! serves a split file and a bundle - and, because the two releases' VAE,
+//! audio-VAE and vocoder tensors are name-for-name and shape-for-shape
+//! IDENTICAL (both real headers range-read and diffed: 170 / 102 / 1227
+//! tensors, zero differences), no 2.3-specific config exists for any of
+//! them. Only the DiT differs, in two flags - see
+//! [`crate::config::LtxDitConfig::ltx23_22b`].
 //!
 //! The real `ltx-2.5-video-vae-conv-bf16.safetensors` file is already in the
 //! **canonical** (checkpoint-native) name space: bare `encoder.*` /
@@ -76,17 +91,22 @@ pub(crate) fn validate_manifest(map: Tensors, manifest: &[(String, Vec<usize>)],
 }
 
 /// Import the video VAE (encoder + conv decoder, combined - a single file
-/// carries both). Strips an optional `vae.` monolith prefix so a future
-/// non-Comfy-split release of the same checkpoint family imports unchanged;
-/// the real Comfy-split file this milestone targets already has none.
+/// carries both).
+///
+/// Handles an optional `vae.` prefix the same way [`dit_name_space`] handles
+/// the DiT's own: if ANY name carries it, it is a FILTER and non-matching
+/// tensors are dropped; otherwise every tensor is taken bare. LTX-2.5 ships
+/// the video VAE in a Comfy-split file whose 170 keys are already bare;
+/// LTX-2.3 bundles the SAME 170 tensors (identical names, identical shapes -
+/// both real headers were range-read and diffed) under `vae.` alongside the
+/// transformer, the audio VAE, the vocoder and the text projection, so the
+/// filter is what lets one import serve both packagings.
 pub fn import_vae(tensors: Vec<StTensor>, cfg: &LtxVaeConfig) -> Result<Tensors, String> {
-    let map: Tensors = tensors
-        .into_iter()
-        .map(|t| {
-            let name = t.name.strip_prefix("vae.").map(str::to_string).unwrap_or(t.name);
-            (name, (t.shape, t.data))
-        })
-        .collect();
+    let map: Tensors = if tensors.iter().any(|t| t.name.starts_with("vae.")) {
+        tensors.into_iter().filter_map(|t| t.name.strip_prefix("vae.").map(|n| (n.to_string(), (t.shape, t.data)))).collect()
+    } else {
+        tensors.into_iter().map(|t| (t.name, (t.shape, t.data))).collect()
+    };
     validate_manifest(map, &cfg.tensor_manifest(), "video vae")
 }
 
@@ -146,21 +166,25 @@ pub fn import_duration_head(tensors: Vec<StTensor>, cfg: &DurationHeadConfig) ->
 
 /// Import the video-only DiT (`LtxDitConfig`'s canonical names - the same
 /// space [`crate::block::LtxBlock`]'s `tget` calls and [`crate::dit::
-/// dit_tensor_manifest`] already use) with two-way coverage. Names already
-/// bare (no monolith prefix, unlike [`import_vae`]'s `vae.` case) - this
-/// checkpoint family's own tensor names ARE the reference module tree's, so
-/// this is [`validate_manifest`] with no renaming step at all.
+/// dit_tensor_manifest`] already use) with two-way coverage. There is no
+/// RENAMING table: this checkpoint family's own tensor names ARE the
+/// reference module tree's, in every release and both file formats. The only
+/// spelling difference is the optional [`DIT_BUNDLE_PREFIX`] the safetensors
+/// releases carry, which [`dit_name_space`] selects on.
 pub fn import_dit(tensors: Vec<StTensor>, cfg: &LtxDitConfig) -> Result<Tensors, String> {
-    let map: Tensors = tensors.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
-    validate_manifest(map, &dit_tensor_manifest(cfg), "dit")
+    validate_manifest(dit_name_space(tensors), &dit_tensor_manifest(cfg), "dit")
 }
 
 /// Import the audio+video DiT (`LtxAvDitConfig`'s canonical names - see
 /// [`crate::dit::av_dit_tensor_manifest`]'s doc) with two-way coverage. Same
-/// no-renaming shape [`import_dit`] takes.
+/// no-renaming, optional-[`DIT_BUNDLE_PREFIX`] shape [`import_dit`] takes.
+/// `cfg` selects the release: [`LtxAvDitConfig::ltx25`] expects
+/// `keyframes_abs_pos_embedding` and a bias-free video FFN,
+/// [`LtxAvDitConfig::ltx23`] the reverse - a checkpoint imported against the
+/// wrong one fails by name in both directions rather than loading a
+/// half-covered model.
 pub fn import_av_dit(tensors: Vec<StTensor>, cfg: &LtxAvDitConfig) -> Result<Tensors, String> {
-    let map: Tensors = tensors.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
-    validate_manifest(map, &av_dit_tensor_manifest(cfg), "av dit")
+    validate_manifest(dit_name_space(tensors), &av_dit_tensor_manifest(cfg), "av dit")
 }
 
 // ---------------------------------------------------------------------------
@@ -173,27 +197,81 @@ pub fn import_av_dit(tensors: Vec<StTensor>, cfg: &LtxAvDitConfig) -> Result<Ten
 /// without an alias.
 pub const GGUF_ARCHITECTURE: &str = "ltxv";
 
-/// The [`LtxAvDitConfig`] a checkpoint's own embedded `config` KV names.
+/// The `model.diffusion_model.` prefix an LTX-2.x **safetensors** checkpoint
+/// puts on every transformer tensor.
+///
+/// Both releases use it, but they package differently: LTX-2.5 ships the
+/// transformer in a file of its own, so stripping the prefix leaves the file
+/// fully covered, while LTX-2.3 bundles the transformer, both VAEs, the
+/// vocoder and the text projection into ONE file - there, the prefix is a
+/// FILTER, and the tensors that do not match belong to [`import_vae`] /
+/// [`import_audio_vae`] / [`import_vocoder`] / `gemma4`'s own text-projection
+/// import (all four of which already select their own prefix the same way).
+/// The GGUF releases of both carry the bare names with no prefix at all, so
+/// [`import_dit`]/[`import_av_dit`] accept either spelling.
+pub const DIT_BUNDLE_PREFIX: &str = "model.diffusion_model.";
+
+/// Reduce a raw checkpoint tensor list to the DiT's own bare name space.
+///
+/// If ANY name carries [`DIT_BUNDLE_PREFIX`], the prefix is treated as a
+/// filter and every non-matching tensor is dropped (the LTX-2.3 single-file
+/// bundle); otherwise every tensor is taken as-is (the GGUF-derived and
+/// LTX-2.5 transformer-only files, already bare). Two-way coverage is then
+/// asserted over whatever survives, so a bundle whose DiT subset is
+/// incomplete still errors by name.
+fn dit_name_space(tensors: Vec<StTensor>) -> Tensors {
+    if tensors.iter().any(|t| t.name.starts_with(DIT_BUNDLE_PREFIX)) {
+        tensors.into_iter().filter_map(|t| t.name.strip_prefix(DIT_BUNDLE_PREFIX).map(|n| (n.to_string(), (t.shape, t.data)))).collect()
+    } else {
+        tensors.into_iter().map(|t| (t.name, (t.shape, t.data))).collect()
+    }
+}
+
+/// The [`LtxAvDitConfig`] a checkpoint's own embedded `config` JSON names.
 ///
 /// Unlike `wan::import::dit_config_from_shapes` (derived from tensor SHAPES,
-/// because Wan's GGUF carries no config JSON), every real LTX-2.x GGUF
-/// embeds its full diffusers config as ONE JSON-string-valued KV entry
-/// (`config`, holding `{"transformer": {...}, "scheduler": {...}}` -
-/// confirmed by range-reading the real 22B header), so this reads that JSON
-/// directly rather than reverse-engineering shapes. Every field this crate
-/// models is read by name and errors if absent or the wrong JSON type -
-/// never defaulted - except `use_prompt_adaln_single`, which the reference
-/// config never exposes as a flag at all (see [`LtxDitConfig::
-/// use_prompt_adaln_single`]'s doc: this port only implements `false`, the
-/// checkpoint-independent value every real config resolves to for the ONE
-/// op sequence this crate runs).
-pub fn av_dit_config_from_kv(mg: &MmapGguf) -> Result<LtxAvDitConfig, String> {
-    let arch = mg.kv().get("general.architecture").and_then(|v| v.as_str());
-    if arch != Some(GGUF_ARCHITECTURE) {
-        return Err(format!("ltxv gguf import: general.architecture is {arch:?}, expected {GGUF_ARCHITECTURE:?}"));
-    }
-    let raw = mg.kv().get("config").and_then(|v| v.as_str()).ok_or("ltxv gguf import: no 'config' KV string (not an LTX-2.x checkpoint)")?;
-    let full: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("ltxv gguf import: config KV is not valid JSON: {e}"))?;
+/// because Wan's GGUF carries no config JSON), every real LTX-2.x checkpoint
+/// embeds its full diffusers config as one JSON string - a `config` KV entry
+/// in the GGUF releases, a `__metadata__["config"]` entry in the safetensors
+/// ones, holding `{"transformer": {...}, ...}` - so this reads that JSON
+/// directly rather than reverse-engineering shapes. Confirmed by
+/// range-reading the real 22B headers of BOTH releases.
+///
+/// `has_tensor` answers "does this checkpoint carry a tensor with this bare
+/// name". It is needed because **the config JSON is not complete**: the two
+/// flags that differ between LTX-2.3 and LTX-2.5 are the two the 2.3 config
+/// omits entirely.
+///
+/// * `ff_bias` - absent from 2.3's config, `false` in 2.5's. Resolved from
+///   `transformer_blocks.0.ff.net.0.proj.bias`'s presence.
+/// * `use_keyframes_abs_pos_embedding` - absent from 2.3's config, `true` in
+///   2.5's. Resolved from `keyframes_abs_pos_embedding`'s presence.
+///
+/// Deriving them from the tensor list rather than defaulting them is this
+/// port's "checkpoint reality wins over prose" rule applied where it
+/// actually bites: the reference's own absent-key defaults
+/// (`model_configurator.py`: `ff_bias=config.get("ff_bias", True)`,
+/// `use_keyframes_abs_pos_embedding=config.get(..., False)`) agree with what
+/// the real 2.3 header shows, so the two authorities corroborate each other
+/// here - but only the tensor list stays right if a future release changes
+/// its mind, and only the tensor list is what the manifest must match.
+///
+/// Every other field this crate models is read by name and errors if absent
+/// or the wrong JSON type - never defaulted - with ONE exception that is a
+/// known open question rather than a settled reading:
+/// `use_prompt_adaln_single` is hardcoded `false` here because that is the
+/// only path this crate implements ([`crate::config::LtxDitConfig::
+/// use_prompt_adaln_single`], and `assert_supported` panics on `true`). It is
+/// NOT read from the config, and it is not safe to assume it is right:
+/// neither release's config sets the key, the reference's absent-key default
+/// is `True`, and both real headers carry the `prompt_adaln_single.*` /
+/// `audio_prompt_adaln_single.*` tensors the reference only builds when it IS
+/// `True` - tensors the manifest demands (so import stays two-way complete)
+/// and the forward never reads. If the reference reading is right, this
+/// affects LTX-2.5 exactly as much as LTX-2.3, and only a real-weight forward
+/// can settle it.
+pub fn av_dit_config_from_json(config_json: &str, has_tensor: &dyn Fn(&str) -> bool) -> Result<LtxAvDitConfig, String> {
+    let full: serde_json::Value = serde_json::from_str(config_json).map_err(|e| format!("ltxv gguf import: config KV is not valid JSON: {e}"))?;
     let t = &full["transformer"];
     if t.is_null() {
         return Err("ltxv gguf import: config KV has no 'transformer' object".into());
@@ -218,6 +296,10 @@ pub fn av_dit_config_from_kv(mg: &MmapGguf) -> Result<LtxAvDitConfig, String> {
     let audio_pos_max = arr_u32("audio_positional_embedding_max_pos", 1)?;
     let connector_pos_max = arr_u32("connector_positional_embedding_max_pos", 1)?;
 
+    // Absent from LTX-2.3's config, present (`false`) in LTX-2.5's - see
+    // this function's doc for why the tensor list, not a default, settles it.
+    let ff_bias = t["ff_bias"].as_bool().unwrap_or_else(|| has_tensor("transformer_blocks.0.ff.net.0.proj.bias"));
+
     let video = LtxDitConfig {
         inner_dim: video_heads * video_head_dim,
         num_heads: video_heads,
@@ -225,10 +307,10 @@ pub fn av_dit_config_from_kv(mg: &MmapGguf) -> Result<LtxAvDitConfig, String> {
         in_channels,
         out_channels: u("out_channels")?,
         cross_attention_dim: u("cross_attention_dim")?,
-        ff_bias: b("ff_bias")?,
+        ff_bias,
         cross_attention_adaln: b("cross_attention_adaln")?,
         use_prompt_adaln_single: false,
-        use_keyframes_abs_pos_embedding: b("use_keyframes_abs_pos_embedding")?,
+        use_keyframes_abs_pos_embedding: t["use_keyframes_abs_pos_embedding"].as_bool().unwrap_or_else(|| has_tensor("keyframes_abs_pos_embedding")),
         norm_eps: f("norm_eps")? as f32,
         positional_embedding_theta: f("positional_embedding_theta")?,
         positional_embedding_max_pos: [pos_max[0], pos_max[1], pos_max[2]],
@@ -259,13 +341,31 @@ pub fn av_dit_config_from_kv(mg: &MmapGguf) -> Result<LtxAvDitConfig, String> {
         in_channels,
         out_channels: u("audio_out_channels")?,
         cross_attention_dim: u("audio_cross_attention_dim")?,
-        ff_bias: b("ff_bias")?,
+        // Mirrors the video stream's resolved flag. Nothing reads this
+        // field (`crate::dit::push_ff`'s doc: audio's FFN bias is a
+        // per-instance fact, and both releases carry it), and the
+        // reference's own separate `audio_ff_bias` key is set by neither
+        // release's config, so there is no independent value to transcribe.
+        ff_bias,
         positional_embedding_max_pos: [audio_pos_max[0]],
         connector_num_attention_heads: u("audio_connector_num_attention_heads")?,
         connector_attention_head_dim: u("audio_connector_attention_head_dim")?,
     };
     let av_ca_timestep_scale_multiplier = f("av_ca_timestep_scale_multiplier")? as f32;
     Ok(LtxAvDitConfig { video, audio, av_ca_timestep_scale_multiplier })
+}
+
+/// [`av_dit_config_from_json`] over a GGUF's own `config` KV, after checking
+/// the file really is an [`GGUF_ARCHITECTURE`] checkpoint. Tensor presence
+/// is answered by the mmap itself, so the two absent-in-2.3 flags resolve
+/// from the file being loaded rather than from a default.
+pub fn av_dit_config_from_kv(mg: &MmapGguf) -> Result<LtxAvDitConfig, String> {
+    let arch = mg.kv().get("general.architecture").and_then(|v| v.as_str());
+    if arch != Some(GGUF_ARCHITECTURE) {
+        return Err(format!("ltxv gguf import: general.architecture is {arch:?}, expected {GGUF_ARCHITECTURE:?}"));
+    }
+    let raw = mg.kv().get("config").and_then(|v| v.as_str()).ok_or("ltxv gguf import: no 'config' KV string (not an LTX-2.x checkpoint)")?;
+    av_dit_config_from_json(raw, &|name| mg.shape(name).is_some())
 }
 
 /// Check a GGUF's own tensor SHAPES against [`av_dit_tensor_manifest`] in
@@ -698,5 +798,193 @@ mod tests {
         assert!(e4.contains("not valid JSON"), "{e4}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // LTX-2.3
+    // -----------------------------------------------------------------
+
+    /// One checkpoint's `config` JSON. `omit_release_flags` reproduces the
+    /// real LTX-2.3 config, which carries neither `ff_bias` nor
+    /// `use_keyframes_abs_pos_embedding`; LTX-2.5's carries both.
+    fn transformer_config_json(cfg: &LtxAvDitConfig, omit_release_flags: bool) -> String {
+        let mut t = serde_json::json!({
+            "num_attention_heads": cfg.video.num_heads,
+            "attention_head_dim": cfg.video.head_dim(),
+            "num_layers": cfg.video.num_layers,
+            "in_channels": cfg.video.in_channels,
+            "out_channels": cfg.video.out_channels,
+            "cross_attention_dim": cfg.video.cross_attention_dim,
+            "cross_attention_adaln": cfg.video.cross_attention_adaln,
+            "norm_eps": cfg.video.norm_eps,
+            "positional_embedding_theta": cfg.video.positional_embedding_theta,
+            "positional_embedding_max_pos": cfg.video.positional_embedding_max_pos,
+            "timestep_scale_multiplier": cfg.video.timestep_scale_multiplier,
+            "use_middle_indices_grid": cfg.video.use_middle_indices_grid,
+            "apply_gated_attention": cfg.video.apply_gated_attention,
+            "connector_apply_gated_attention": cfg.video.connector_apply_gated_attention,
+            "connector_num_layers": cfg.video.connector_num_layers,
+            "connector_num_attention_heads": cfg.video.connector_num_attention_heads,
+            "connector_attention_head_dim": cfg.video.connector_attention_head_dim,
+            "connector_num_learnable_registers": cfg.video.connector_num_learnable_registers,
+            "connector_positional_embedding_max_pos": cfg.video.connector_positional_embedding_max_pos,
+            "connector_norm_output": cfg.video.connector_norm_output,
+            "caption_proj_before_connector": cfg.video.caption_proj_before_connector,
+            "use_embeddings_connector": cfg.video.use_embeddings_connector,
+            "audio_num_attention_heads": cfg.audio.num_heads,
+            "audio_attention_head_dim": cfg.audio.head_dim(),
+            "audio_out_channels": cfg.audio.out_channels,
+            "audio_cross_attention_dim": cfg.audio.cross_attention_dim,
+            "audio_positional_embedding_max_pos": cfg.audio.positional_embedding_max_pos,
+            "audio_connector_num_attention_heads": cfg.audio.connector_num_attention_heads,
+            "audio_connector_attention_head_dim": cfg.audio.connector_attention_head_dim,
+            "av_ca_timestep_scale_multiplier": cfg.av_ca_timestep_scale_multiplier,
+        });
+        if !omit_release_flags {
+            t["ff_bias"] = serde_json::json!(cfg.video.ff_bias);
+            t["use_keyframes_abs_pos_embedding"] = serde_json::json!(cfg.video.use_keyframes_abs_pos_embedding);
+        }
+        serde_json::json!({ "transformer": t }).to_string()
+    }
+
+    /// [`av_dit_tensor_manifest`] at [`LtxAvDitConfig::ltx23`] reproduces the
+    /// real LTX-2.3 22B checkpoint header, and differs from the LTX-2.5 one
+    /// in exactly the documented way.
+    ///
+    /// Both real 22B headers were range-read (the safetensors 8-byte
+    /// little-endian JSON length, then the JSON - metadata, never weights)
+    /// and diffed name by name and shape by shape; the LTX-2.3 GGUF header
+    /// (`general.architecture = "ltxv"`, same as 2.5) was parsed the same way
+    /// and its 4444 bare names are the SAME set as the safetensors file's
+    /// 4444 `model.diffusion_model.*` names. The numbers below are that diff,
+    /// transcribed:
+    ///
+    /// * 4349 (2.5) and 4444 (2.3) tensors.
+    /// * 2.5 alone has `keyframes_abs_pos_embedding`.
+    /// * 2.3 alone has 96 video-FFN bias tensors (48 blocks x 2).
+    /// * Zero shape mismatches across the 4348 shared names.
+    ///
+    /// Manifests are names and shapes only - no tensor data is built here, so
+    /// this runs at the real 22B widths for the cost of a few string
+    /// allocations rather than the ~88 GB an fp32 materialization would need.
+    #[test]
+    fn ltx23_manifest_reproduces_the_real_22b_header() {
+        use std::collections::BTreeMap;
+
+        let m23: BTreeMap<String, Vec<usize>> = av_dit_tensor_manifest(&LtxAvDitConfig::ltx23()).into_iter().collect();
+        let m25: BTreeMap<String, Vec<usize>> = av_dit_tensor_manifest(&LtxAvDitConfig::ltx25()).into_iter().collect();
+        assert_eq!(m23.len(), 4444, "real LTX-2.3 22B header tensor count");
+        assert_eq!(m25.len(), 4349, "real LTX-2.5 22B header tensor count");
+
+        let only25: Vec<&str> = m25.keys().filter(|k| !m23.contains_key(*k)).map(String::as_str).collect();
+        assert_eq!(only25, ["keyframes_abs_pos_embedding"], "2.5 must add exactly the keyframe marker");
+
+        let only23: Vec<&str> = m23.keys().filter(|k| !m25.contains_key(*k)).map(String::as_str).collect();
+        assert_eq!(only23.len(), 96, "48 blocks x (ff.net.0.proj.bias + ff.net.2.bias)");
+        assert!(
+            only23.iter().all(|n| n.starts_with("transformer_blocks.") && (n.ends_with(".ff.net.0.proj.bias") || n.ends_with(".ff.net.2.bias"))),
+            "2.3's extra tensors must all be the video FFN's own bias: {only23:?}"
+        );
+        // The audio FFN's and both connectors' biases are NOT part of that
+        // difference - both releases carry them (`crate::dit::push_ff`).
+        for n in ["transformer_blocks.0.audio_ff.net.0.proj.bias", "video_embeddings_connector.transformer_1d_blocks.0.ff.net.0.proj.bias"] {
+            assert!(m23.contains_key(n) && m25.contains_key(n), "{n} must be in both");
+        }
+
+        for (name, s23) in &m23 {
+            if let Some(s25) = m25.get(name) {
+                assert_eq!(s23, s25, "{name} must have the same shape in both releases");
+            }
+        }
+        assert_eq!(m23["transformer_blocks.47.ff.net.0.proj.bias"], vec![4 * 4096]);
+        assert_eq!(m23["transformer_blocks.47.ff.net.2.bias"], vec![4096]);
+        assert_eq!(m25["keyframes_abs_pos_embedding"], vec![1, 4096]);
+    }
+
+    /// The two flags LTX-2.3's `config` omits are resolved from the
+    /// checkpoint's own tensor list, not from a default.
+    ///
+    /// The mutation that matters is the last block: the SAME 2.3-shaped JSON
+    /// (both keys absent) against a tensor list that says the opposite must
+    /// produce the opposite config. A constant fallback - even one that
+    /// happened to be right for today's 2.3 - would pass the first two
+    /// assertions and fail this one.
+    #[test]
+    fn absent_release_flags_are_resolved_from_the_tensor_list() {
+        let tiny25 = LtxAvDitConfig::tiny(); // ff_bias false, keyframes true
+        let tiny23 = LtxAvDitConfig {
+            video: LtxDitConfig { ff_bias: true, use_keyframes_abs_pos_embedding: false, ..tiny25.video },
+            audio: LtxAudioDitConfig { ff_bias: true, ..tiny25.audio },
+            ..tiny25
+        };
+
+        // A `has_tensor` built from a manifest is exactly what a real
+        // checkpoint answers, so the two sides cannot drift.
+        let has = |cfg: &LtxAvDitConfig| {
+            let names: std::collections::HashSet<String> = av_dit_tensor_manifest(cfg).into_iter().map(|(n, _)| n).collect();
+            move |n: &str| names.contains(n)
+        };
+
+        // 2.3: keys absent, tensor list carries the FFN bias and no keyframe
+        // marker.
+        let h23 = has(&tiny23);
+        let got = av_dit_config_from_json(&transformer_config_json(&tiny23, true), &h23).expect("2.3-shaped config must parse");
+        assert_eq!(got, tiny23);
+
+        // 2.5: keys present and honored.
+        let h25 = has(&tiny25);
+        let got = av_dit_config_from_json(&transformer_config_json(&tiny25, false), &h25).expect("2.5-shaped config must parse");
+        assert_eq!(got, tiny25);
+
+        // Same 2.3-shaped JSON, opposite tensor list -> opposite answer.
+        let flipped = av_dit_config_from_json(&transformer_config_json(&tiny23, true), &h25).expect("must parse");
+        assert!(!flipped.video.ff_bias, "ff_bias must follow the tensor list");
+        assert!(flipped.video.use_keyframes_abs_pos_embedding, "the keyframe marker must follow the tensor list");
+    }
+
+    /// [`import_av_dit`] accepts both packagings and refuses the wrong
+    /// release.
+    ///
+    /// LTX-2.5 ships the transformer alone; LTX-2.3 bundles it under
+    /// [`DIT_BUNDLE_PREFIX`] next to the VAEs, the vocoder and the text
+    /// projection. Run at tiny widths (a 22B synthetic file would be tens of
+    /// GB) but at the real STRUCTURE: the two configs differ by the same two
+    /// flags the real releases do.
+    #[test]
+    fn av_dit_import_accepts_the_bundle_and_refuses_the_wrong_release() {
+        let cfg25 = LtxAvDitConfig::tiny();
+        let cfg23 = LtxAvDitConfig {
+            video: LtxDitConfig { ff_bias: true, use_keyframes_abs_pos_embedding: false, ..cfg25.video },
+            ..cfg25
+        };
+        let m23 = av_dit_tensor_manifest(&cfg23);
+
+        // Bare names (the GGUF-derived spelling).
+        let w = import_av_dit(build("", &m23), &cfg23).expect("bare 2.3 names");
+        assert_eq!(w.len(), m23.len());
+        drop(w);
+
+        // The bundle: the DiT under its prefix, plus the other subsystems'
+        // tensors, which must be filtered out rather than reported as unused.
+        let bundle = |m: &[(String, Vec<usize>)]| -> Vec<StTensor> {
+            let mut all = build(DIT_BUNDLE_PREFIX, m);
+            for other in ["vae.encoder.conv_in.conv.weight", "audio_vae.decoder.conv_out.conv.bias", "vocoder.vocoder.conv_pre.weight", "text_embedding_projection.video_aggregate_embed.bias"] {
+                all.push(StTensor { name: other.into(), shape: vec![1], data: vec![0.0] });
+            }
+            all
+        };
+        let w = import_av_dit(bundle(&m23), &cfg23).expect("bundled 2.3 names");
+        assert_eq!(w.len(), m23.len());
+        drop(w);
+
+        // The same file at the 2.5 config: the keyframe marker is missing and
+        // the 2 x num_layers FFN bias tensors are unused. Either direction
+        // must error by name - never a silently half-covered model.
+        let e = import_av_dit(bundle(&m23), &cfg25).unwrap_err();
+        assert!(e.contains("keyframes_abs_pos_embedding"), "{e}");
+
+        // ...and the mirror: a 2.5 file imported as 2.3 misses the biases.
+        let e = import_av_dit(build("", &av_dit_tensor_manifest(&cfg25)), &cfg23).unwrap_err();
+        assert!(e.contains("ff.net.0.proj.bias"), "{e}");
     }
 }

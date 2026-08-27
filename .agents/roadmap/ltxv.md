@@ -12,7 +12,10 @@ decoders - a conv mirror and a 3D neighborhood-attention "diffusion decoder"
 in, continuous Gaussian latent), a BigVGAN+snakebeta vocoder with a bandwidth-
 extension stage, two latent upscalers, and a duration-prediction head. `ltxv` names
 the family (LTX-2.3/2.4/2.5 share one `AVTransformer3DModel` class and one GGUF
-architecture tag), the release is a config.
+architecture tag), the release is a config - **checked, not assumed**: the real
+2.3 and 2.5 22B headers differ in exactly two flags and nothing else, and
+`crates/ltxv` builds both (Phase 38, where the untested-on-real-2.3-weights
+caveat is also spelled out).
 
 The port follows `.agents/rules/porting.md` in order, staged **video -> audio ->
 DiffVAE/DFR** (see "Staging" below) because the video path alone is already a full
@@ -3300,12 +3303,38 @@ land. Known traps already identified from reading (not yet test-pinned):
 - The real 22B/2.5 config differs from the code repo's own module defaults (which
   describe the superseded ~19B checkpoints) in several fields the checkpoint
   header settles empirically: `ff_bias: false` (repo default `true`),
-  `use_prompt_adaln_single: false`, `cross_attention_adaln: true`,
-  `caption_proj_before_connector: true`, `use_keyframes_abs_pos_embedding: true`,
-  `av_ca_timestep_scale_multiplier: 1000.0` in the checkpoint metadata (the repo
-  source computes `sigma*1` for the A<->V gate via a *separate* multiplier field
-  read from config, not the hardcoded `1` a stale reading of the code might
-  suggest - verify empirically before building on either number).
+  `cross_attention_adaln: true`, `caption_proj_before_connector: true`,
+  `use_keyframes_abs_pos_embedding: true`, `av_ca_timestep_scale_multiplier:
+  1000.0` in the checkpoint metadata (the repo source computes `sigma*1` for the
+  A<->V gate via a *separate* multiplier field read from config, not the
+  hardcoded `1` a stale reading of the code might suggest - verify empirically
+  before building on either number).
+- **`use_prompt_adaln_single: false` is NOT one of them, and used to be listed
+  here as if it were. It is an open correctness question against the 2.5 port,
+  not a settled fact.** The evidence, gathered while adding LTX-2.3 (Phase 38):
+  the key is **absent from BOTH the 2.5 and the 2.3 `config` KV** - so no header
+  settles it either way; the reference's absent-key default is `True`
+  (`model_configurator.py`: `use_prompt_adaln_single=config.get(
+  "use_prompt_adaln_single", True)`, in all three configurators); and **both**
+  real headers carry the `prompt_adaln_single.*` / `audio_prompt_adaln_single.*`
+  timestep-MLP tensors (6 each), which `model.py` only instantiates when the flag
+  is `True` (`self.prompt_adaln_single = AdaLayerNormSingle(...) if
+  self.cross_attention_adaln and self.use_prompt_adaln_single else None`). Every
+  independent signal therefore points at `True`, while this crate pins `false`,
+  `LtxDitConfig::assert_supported` PANICS on `true` (the timestep-MLP path is
+  unimplemented, only the static `prompt_scale_shift_table` is), the manifest
+  demands those 12 tensors so import still covers them, and the forward never
+  reads them (`av_modelgrad.rs` excludes them from `params_mut` as part of the
+  untrained gap). If the reference reading is right, brain runs **LTX-2.5
+  itself** with the wrong text-K/V modulation path while holding the right
+  weights unused. This is exactly the class of defect the "no real-weight 22B
+  forward" gap hides: tiny-config parity cannot see it, because the tiny golden
+  is dumped at `use_prompt_adaln_single=False` too. **Not fixed here** - the
+  `true` path needs a timestep MLP and cannot be validated without a real-weight
+  22B forward, so it is a tracked gap, not a milestone. Closing it needs a live
+  reference dump at `use_prompt_adaln_single=True` on the tiny config, then the
+  same real-weight forward the 22B gap already waits on. Do not read the current
+  `false` as confirmed by anything.
 - No int8 "convrot" quantization format exists in the reference repo despite the
   HF filename (`comfy-int8-convrot`) implying one - the real formats are
   blockwise FP8, blockwise FP6, and NVFP4. Layers upstream never quantizes:
@@ -8476,3 +8505,232 @@ locked-off shot.
   all. The mask this phase's script already produces is exactly its input.
 * **No real-weight run of anything in this phase.** It is all geometry, gated
   against a live reference; the 22B DiT gap above is untouched and unaffected.
+
+### Phase 38 - LTX-2.3 support: the "release is a config" claim, checked
+
+This ledger has claimed since its first line that LTX-2.3/2.4/2.5 are one
+`AVTransformer3DModel` behind one `ltxv` GGUF architecture tag and that "the
+release is a config". Phase 38 stops asserting that and checks it, because the
+whole structural-control and character-adapter ecosystem the character-swap work
+wants (Phase 37) is **LTX-2.3-22b, not 2.5**: Union-Control, In-Outpainting,
+Ingredients, Motion-Track-Control, DubIt, HDR. 2.5 has exactly one IC-LoRA and it
+is a pixel upscaler. Supporting 2.3 is the prerequisite for any of them.
+
+**Outcome in one line: the claim holds, `crates/ltxv` now builds both releases
+from the checkpoint alone - and 2.3 still cannot generate anything, because its
+text encoder is Gemma 3, not Gemma-4, and brain has no Gemma-3 path.** Section 3
+below is the honest accounting; do not read section 2's import success as
+end-to-end support.
+
+**No weights were fetched.** Not to disk, not to the ramdisk. Everything below
+comes from checkpoint **headers**, range-read over HTTP: for safetensors, the
+first 8 bytes (little-endian `u64` JSON length) followed by that JSON; for GGUF,
+the leading few MB covering the KV block and the tensor-info table. That is
+metadata, and it is what makes a config claim checkable without a 46 GB download.
+
+#### 1 - the claim holds, and the divergence is exactly two flags
+
+Diffed `Lightricks/LTX-2.3`'s `ltx-2.3-22b-dev.safetensors` (5947 tensors,
+`__metadata__.model_version` `2.3.0`) and `ltx-2.3-22b-distilled-1.1.safetensors`
+against `Lightricks/LTX-2.5`'s `diffusion_models/ltx-2.5-22b-dev-transformer-
+bf16.safetensors` (4349, `2.5.0`), name by name and shape by shape, under the
+shared `model.diffusion_model.` prefix:
+
+| | LTX-2.5 | LTX-2.3 |
+| --- | --- | --- |
+| DiT tensors | 4349 | 4444 |
+| `keyframes_abs_pos_embedding` | `[1, 4096]` | **absent** |
+| `transformer_blocks.N.ff.net.{0.proj,2}.bias` | **absent** | present, 48 x 2 = 96 |
+| shape mismatches on the 4348 shared names | \- | **0** |
+
+4349 - 1 + 96 = 4444. That is the entire difference. So:
+`use_keyframes_abs_pos_embedding: false` and `ff_bias: true` for 2.3, and every
+other field is value-for-value identical.
+
+Neither flag appears in 2.3's own embedded `config` JSON, so the **tensor list**
+settles them - and the reference agrees independently, which is the two-authority
+standard this port uses: `model_configurator.py` reads
+`ff_bias=config.get("ff_bias", True)` and `use_keyframes_abs_pos_embedding=
+config.get("use_keyframes_abs_pos_embedding", False)`, whose absent-key defaults
+are exactly the two values the header shows. Its own comments say why - "Default
+True keeps backwards compatibility: pre-2.5 checkpoints lack these keys and
+retain FFN biases. LTX 2.5 (gemma4) sets ff_bias=false."
+
+Comparing the two `config` JSONs field by field: **63 keys, 60 identical, 2
+absent-in-2.3 (the two above), 1 cosmetic** - `text_encoder_norm_type` is spelled
+`PER_TOKEN_RMS` in some files and `per_token_rms` in others, and that casing
+varies *within* 2.3 too (`ltx-2.3-22b-dev` says `per_token_rms`,
+`ltx-2.3-22b-distilled-1.1` says `PER_TOKEN_RMS`), so it is a per-file
+inconsistency, not a release signal. Nothing in this crate reads it. Otherwise:
+same `_class_name`, same 48 layers, same 32x128 video / 32x64 audio, same
+`[20, 2048, 2048]`, same connectors, same `av_ca_timestep_scale_multiplier:
+1000.0`.
+
+Dev and distilled are the same shape: `ltx-2.3-22b-dev.safetensors` and
+`ltx-2.3-22b-distilled-1.1.safetensors` have **identical** 5947-tensor lists,
+identical shapes and (that one casing aside) identical configs, so one config
+serves both - as it already does for 2.5's dev/distilled pair.
+
+The other components go further - they are not merely compatible, they are the
+**same tensors**. Against the real headers, 2.3's `vae.*` (170), `audio_vae.*`
+(102) and `vocoder.*` (1227, BWE included) are name-for-name and shape-for-shape
+identical to 2.5's, and `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` (72) is
+identical to `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors` down to a
+byte-identical `config` metadata string. **No 2.3-specific config exists for any
+of them**, and none was invented.
+
+`unsloth/LTX-2.3-GGUF`'s `ltx-2.3-22b-distilled-1.1-Q8_0.gguf` confirms the
+loader side: `general.architecture = "ltxv"` (the same tag `crates/arch`'s row
+already resolves), an embedded `config` KV in the same shape, and 4444 **bare**
+tensor names that are the exact same set as the safetensors file's 4444 prefixed
+ones. So the GGUF-direct path needs no new detection and no rename table.
+
+#### 2 - what was implemented
+
+* **`config.rs`** - `LtxDitConfig::ltx23_22b()`, `LtxAudioDitConfig::ltx23()`,
+  `LtxAvDitConfig::ltx23()`, written as struct updates of the `ltx25` ones so
+  the 60 shared numbers cannot drift into a second copy.
+* **`dit.rs`** - the video FFN's manifest entry now reads `cfg.ff_bias` instead
+  of a hardcoded `false`. This was a latent defect, not new work for 2.3: the
+  field existed and was ignored. Without it a real 2.3 checkpoint fails import
+  as "96 unused source tensors" and - worse - every other manifest consumer
+  (random weights, `shard.rs`, `devres.rs`) builds a bias-free FFN that the
+  forward then runs silently wrong, because `block.rs`'s `ff_has_bias` reads
+  bias presence off the weight map the manifest generated. The change is a
+  strict no-op for `tiny`/`tiny_gated`/`ltx25_22b`, all of which are
+  `ff_bias: false`. `audio_ff` and both connectors keep their literal `true`:
+  both releases carry those biases regardless of any flag, and the reference's
+  separate `audio_ff_bias` key is set by neither release.
+* **`import.rs`** - `av_dit_config_from_kv` was `b("ff_bias")?`, i.e. it
+  **errored** on any 2.3 checkpoint before reading a single tensor. It is now
+  split into a format-agnostic `av_dit_config_from_json(config_json,
+  has_tensor)` plus a thin GGUF wrapper, and the two absent-in-2.3 flags are
+  resolved from the checkpoint's own tensor list rather than from a default -
+  the same "checkpoint reality wins over prose" rule this port applies
+  everywhere, applied at the one place the prose is actually incomplete.
+* **`import.rs` packaging** - 2.5 ships each component as its own file; 2.3
+  bundles transformer + both VAEs + vocoder + text projection into ONE. So
+  `import_av_dit`/`import_dit` accept either the bare names or the
+  `model.diffusion_model.` prefix (treating it as a FILTER when present), and
+  `import_vae` does the same for `vae.`. `import_audio_vae`/`import_vocoder`
+  already filtered their own prefix and needed no change - the 2.3 bundle drops
+  straight into them.
+* **Nothing selects a release by hand.** There is no variant enum and no
+  `--variant` flag: `LtxvGgufSource::open` derives the config from the file it
+  is given, so 2.3 vs 2.5 is a property of the checkpoint. The named
+  constructors exist for tests, the FLOPs model and this ledger.
+
+#### 3 - what is proven, and what is NOT
+
+Two sentences first, because everything else in this phase reads as a success
+and neither of these does:
+
+* **LTX-2.3 loads. It cannot yet RUN end to end.** The blocker is not the DiT -
+  it is the text encoder. LTX-2.3 pairs with **Gemma 3 12B**
+  (`google/gemma-3-12b-it-qat-q4_0-unquantized`), 2.5 with Gemma-4, and
+  `crates/gemma4` was not touched. There is no Gemma-3 encoder path in this repo,
+  so there is no prompt to condition on and therefore no `brain ltxv generate` on
+  a 2.3 checkpoint, however cleanly the transformer imports. This matters more
+  than it might look: the REASON to support 2.3 is its adapter ecosystem
+  (Union-Control, In-Outpainting, Ingredients, Motion-Track-Control, DubIt, HDR -
+  see Phase 37), and none of that is reachable until the encoder exists. Treat
+  "2.3 is supported" as "2.3 is loadable and forwardable", never as "2.3 is
+  runnable".
+  * What makes it tractable rather than a second port: the projection GEOMETRY is
+    already right. The 2.3 bundle's `text_embedding_projection.{video,audio}_
+    aggregate_embed.weight` are `[4096, 188160]` / `[2048, 188160]` - the same
+    `188160 = 3840 * 49` all-hidden-states concatenation `crates/gemma4` already
+    implements, because Gemma 3 12B and Gemma-4 12B share hidden 3840 and 48
+    layers. The projection head and the DiT side are ready; the 48 encoder
+    blocks are the work.
+* **LTX-2.3 has never been run against real LTX-2.3 weights.** No 2.3 checkpoint
+  has been downloaded, so no forward pass of any kind - not one block, not one
+  tensor of real data - has executed on 2.3 weights.
+
+Stated in this ledger's usual tiers:
+
+*Proven:*
+
+* **Import coverage against the real headers.** `av_dit_tensor_manifest` at
+  `LtxAvDitConfig::ltx23()` is asserted to reproduce the real 4444-tensor header
+  exactly - count, the symmetric difference against 2.5's 4349 (one keyframe
+  marker one way, 96 FFN biases the other), and zero shape mismatches on the
+  4348 shared names. Manifests are names and shapes, so this runs at the REAL
+  22B widths, not toy ones, for the cost of some string allocations.
+* **Flag resolution is read, not defaulted** - and mutation-checked: the same
+  2.3-shaped config JSON (both keys absent) against a tensor list that says the
+  opposite produces the opposite config. A constant fallback that happened to be
+  right for today's 2.3 passes the positive cases and fails that one.
+* **"Exactly two flags"** is a test, not a comment: `ltx23_22b()` with the two
+  documented fields put back must be `PartialEq`-equal to `ltx25_22b()` over
+  every field, so a third divergence creeping into either constructor fails.
+* **Both packagings import**, and the wrong release is refused by name in both
+  directions (a 2.3 bundle at the 2.5 config errors on the missing keyframe
+  marker; a 2.5 file at the 2.3 config errors on the missing FFN bias) - run at
+  tiny widths but at the real structure.
+* **The op sequence** is shared with 2.5 line for line and is tiny-config
+  layer-by-layer parity-gated there (`dit_parity.rs`, `av_dit_parity.rs`).
+  There is no 2.3-specific math.
+
+*Not proven:*
+
+* **No real-weight forward, at any size, on any 2.3 checkpoint.** LTX-2.3
+  therefore sits exactly where the 22B DiT already sits for 2.5 - tiny-config
+  parity plus header coverage, no 22B real-weight forward - and inherits every
+  open item in "Recorded gaps" unchanged.
+* **RISK, distinct from the one above: the biased video FFN is an unexercised
+  code path.** This is not a restatement of "no real-weight forward" - it names
+  a combination that has never executed, at ANY scale, on ANY checkpoint,
+  including every tiny-config golden this port has ever dumped. `ff_bias: true`
+  means the VIDEO stream's FFN carries a bias for the first time in this crate's
+  history. Two things are true at once and only the first is reassuring:
+  * The biased-FFN *machinery* is well exercised - `audio_ff` and both
+    embeddings connectors are biased on every real LTX-2.5 generation, through
+    the same `FfWeights` / `ff_has_bias` / `linear(.., Some(b), ..)` code, on
+    both backends.
+  * The video stream *reaching* that machinery is new. Every golden
+    (`tiny`, `tiny_gated`, the AV pair) and every real checkpoint brain has
+    loaded is `ff_bias: false`, so the video FFN has always taken the
+    bias-free branch. Nothing numeric covers the biased one on the video side:
+    the coverage is the tiny-width import test above (which proves the two bias
+    tensors are demanded and consumed, not that the forward adds them in the
+    right place) plus the argument that it is the same code as audio's.
+  * Concretely, the first thing to check when 2.3 weights land is a single
+    block's FFN output against a live reference at `ff_bias=True`, BEFORE
+    trusting a whole-model number - a dropped bias is a small, smooth,
+    everywhere-present offset, exactly the defect class cosine is blind to
+    (this ledger's `refcond` lesson: cosine 0.999999884, caught only by
+    rel_l2 4.8e-4).
+* **No 2.3 IC-LoRA has been loaded.** Phase 37's finding stands: the adapters
+  are the REASON to support 2.3, and applying one is a separate milestone. The
+  headers say they are the same 960-tensor, 48-blocks x 10-projections shape
+  `lora.rs` already applies, but that is a header reading, not a run.
+* **The Gemma-3 encoder** - stated at the head of this section, and repeated
+  here because it is the one item that decides whether any of this is usable:
+  no encoder, no pipeline, no adapters.
+* **The safetensors bundle cannot be config-read yet.** Its
+  `__metadata__["config"]` carries the identical JSON `av_dit_config_from_json`
+  parses, but `checkpoint::safetensors::parse` does not surface `__metadata__`,
+  so only the GGUF route auto-derives the config today. `av_dit_config_from_json`
+  is public and format-agnostic precisely so that closing this is a
+  `crates/checkpoint` change plus one call, not a re-port.
+
+#### 4 - closing the gap the day 2.3 weights are on the box
+
+1. Fetch `ltx-2.3-22b-distilled-1.1-Q8_0.gguf` (unsloth) or the bundled
+   safetensors; point `BRAIN_LTXV_DIT` at it.
+2. `LtxvGgufSource::open` should derive `LtxAvDitConfig::ltx23()` with no flag
+   and no code change, and `validate_av_dit_gguf_shapes` should cover all 4444
+   tensors two-way. If either fails, this phase's header reading was wrong and
+   the failure names the tensor.
+3. Run the same real-weight gates the 2.5 path already has
+   (`gguf_quant_real.rs`, `host_forward_parity.rs`, `streamed_vs_eager_real.rs`,
+   `clip_stability_real.rs`), asserting **cosine AND rel_l2** - never cosine
+   alone, per this ledger's own `refcond` lesson where a dropped `clamp(min=0)`
+   scored cosine 0.999999884, above a 0.999999 bound, and only rel_l2 4.8e-4
+   caught it.
+4. Pair it with a Gemma-3 12B encoder (new work) before claiming end-to-end
+   generation. Until then 2.3 is loadable and forwardable, not runnable as a
+   pipeline.
+5. Then, and only then, the `use_prompt_adaln_single` question above becomes
+   answerable on real weights - it affects 2.5 and 2.3 identically.
