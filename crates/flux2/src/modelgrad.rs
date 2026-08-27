@@ -137,7 +137,9 @@ pub struct ModelGrads<T> {
     pub sgl: Vec<SingleGrads<T>>,
 }
 
-const TDIM: usize = 256; // timestep sinusoid width
+/// Timestep sinusoid width: `timestep_embedding` emits `[TDIM]` and
+/// `time_in.in_layer` is `[hidden, TDIM]`.
+pub const TDIM: usize = 256;
 
 /// `timestep_embedding(t·1000, 256)`: 128 freqs, **cos first** — the generic-`T`
 /// twin of `model::hostmath::timestep_embedding` (angles in f64, like the device
@@ -421,46 +423,70 @@ pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>) -> (f64, Model
 
 // ---- weight construction ----
 
+/// Take one tensor OUT of the map, by name. The whole-model weight set is the
+/// same bytes in a different arrangement, so a `from_tensors` that cloned
+/// would hold the model twice at its peak - 72 GB for klein-9B, which is what
+/// stands between that model and a box with 184 GB of RAM shared by several
+/// jobs. Removing as it converts keeps the peak at one copy plus the tensor in
+/// flight.
+fn take(ts: &mut crate::import::Tensors, name: &str) -> Result<Vec<f32>, String> {
+    ts.remove(name).map(|(_, v)| v).ok_or_else(|| format!("from_tensors: missing {name}"))
+}
+
+fn rows(v: &[f32], cols: usize, r0: usize, r1: usize) -> Vec<f32> {
+    v[r0 * cols..r1 * cols].to_vec()
+}
+
+/// One double-block stream, split out of the fused checkpoint tensors.
+fn take_stream(ts: &mut crate::import::Tensors, p: &str, d: usize, mlp: usize) -> Result<StreamW<f32>, String> {
+    let qkv = take(ts, &format!("{p}_attn.qkv.weight"))?;
+    let (wq, wk, wv) = (rows(&qkv, d, 0, d), rows(&qkv, d, d, 2 * d), rows(&qkv, d, 2 * d, 3 * d));
+    drop(qkv);
+    let m0 = take(ts, &format!("{p}_mlp.0.weight"))?;
+    // SwiGLU chunk order: x1 (silu-gated) is the FIRST half
+    let (w1, w3) = (rows(&m0, d, 0, mlp), rows(&m0, d, mlp, 2 * mlp));
+    drop(m0);
+    Ok(StreamW {
+        wq,
+        wk,
+        wv,
+        nq: take(ts, &format!("{p}_attn.norm.query_norm.scale"))?,
+        nk: take(ts, &format!("{p}_attn.norm.key_norm.scale"))?,
+        wo: take(ts, &format!("{p}_attn.proj.weight"))?,
+        w1,
+        w3,
+        w2: take(ts, &format!("{p}_mlp.2.weight"))?,
+    })
+}
+
 impl ModelWeights<f32> {
     /// Build host training weights from imported (BFL-named) tensors, splitting
     /// the fused `qkv`/`mlp.0`/`linear1`/`linear2` exactly as
     /// [`crate::model::Flux2Model::new`] does (row slices; linear2 column
     /// split) — validated against the device forward by
     /// `tests/host_forward_parity.rs`.
-    pub fn from_tensors(cfg: &Cfg, ts: &crate::import::Tensors) -> Result<ModelWeights<f32>, String> {
+    ///
+    /// **Consumes `ts`**: every tensor it reads is REMOVED from the map (see
+    /// [`take`]). A caller that still needs the fused layout afterwards has to
+    /// clone the map first, and at klein scale it should think hard about
+    /// whether it does.
+    pub fn from_tensors(cfg: &Cfg, ts: &mut crate::import::Tensors) -> Result<ModelWeights<f32>, String> {
         let (d, mlp) = (cfg.hidden, cfg.mlp);
-        let get = |name: &str| -> Result<&Vec<f32>, String> {
-            ts.get(name).map(|(_, v)| v).ok_or_else(|| format!("from_tensors: missing {name}"))
-        };
-        let rows = |v: &[f32], cols: usize, r0: usize, r1: usize| v[r0 * cols..r1 * cols].to_vec();
-        let stream = |p: &str| -> Result<StreamW<f32>, String> {
-            let qkv = get(&format!("{p}_attn.qkv.weight"))?;
-            let m0 = get(&format!("{p}_mlp.0.weight"))?;
-            Ok(StreamW {
-                wq: rows(qkv, d, 0, d),
-                wk: rows(qkv, d, d, 2 * d),
-                wv: rows(qkv, d, 2 * d, 3 * d),
-                nq: get(&format!("{p}_attn.norm.query_norm.scale"))?.clone(),
-                nk: get(&format!("{p}_attn.norm.key_norm.scale"))?.clone(),
-                wo: get(&format!("{p}_attn.proj.weight"))?.clone(),
-                // SwiGLU chunk order: x1 (silu-gated) is the FIRST half
-                w1: rows(m0, d, 0, mlp),
-                w3: rows(m0, d, mlp, 2 * mlp),
-                w2: get(&format!("{p}_mlp.2.weight"))?.clone(),
-            })
-        };
         let mut dbl = Vec::with_capacity(cfg.depth_double);
         for b in 0..cfg.depth_double {
             dbl.push(DoubleW {
-                img: stream(&format!("double_blocks.{b}.img"))?,
-                txt: stream(&format!("double_blocks.{b}.txt"))?,
+                img: take_stream(ts, &format!("double_blocks.{b}.img"), d, mlp)?,
+                txt: take_stream(ts, &format!("double_blocks.{b}.txt"), d, mlp)?,
             });
         }
         let mut sgl = Vec::with_capacity(cfg.depth_single);
         for b in 0..cfg.depth_single {
             let p = format!("single_blocks.{b}");
-            let l1 = get(&format!("{p}.linear1.weight"))?;
-            let l2 = get(&format!("{p}.linear2.weight"))?;
+            let l1 = take(ts, &format!("{p}.linear1.weight"))?;
+            let (wq, wk, wv) = (rows(&l1, d, 0, d), rows(&l1, d, d, 2 * d), rows(&l1, d, 2 * d, 3 * d));
+            let (w1, w3) = (rows(&l1, d, 3 * d, 3 * d + mlp), rows(&l1, d, 3 * d + mlp, 3 * d + 2 * mlp));
+            drop(l1);
+            let l2 = take(ts, &format!("{p}.linear2.weight"))?;
             // linear2 is [D, D+mlp]; split its input (column) dim
             let mut wo_a = Vec::with_capacity(d * d);
             let mut wo_b = Vec::with_capacity(d * mlp);
@@ -468,28 +494,29 @@ impl ModelWeights<f32> {
                 wo_a.extend_from_slice(&l2[r * (d + mlp)..r * (d + mlp) + d]);
                 wo_b.extend_from_slice(&l2[r * (d + mlp) + d..(r + 1) * (d + mlp)]);
             }
+            drop(l2);
             sgl.push(SingleW {
-                wq: rows(l1, d, 0, d),
-                wk: rows(l1, d, d, 2 * d),
-                wv: rows(l1, d, 2 * d, 3 * d),
-                nq: get(&format!("{p}.norm.query_norm.scale"))?.clone(),
-                nk: get(&format!("{p}.norm.key_norm.scale"))?.clone(),
-                w1: rows(l1, d, 3 * d, 3 * d + mlp),
-                w3: rows(l1, d, 3 * d + mlp, 3 * d + 2 * mlp),
+                wq,
+                wk,
+                wv,
+                nq: take(ts, &format!("{p}.norm.query_norm.scale"))?,
+                nk: take(ts, &format!("{p}.norm.key_norm.scale"))?,
+                w1,
+                w3,
                 wo_a,
                 wo_b,
             })
         }
         Ok(ModelWeights {
-            img_in: get("img_in.weight")?.clone(),
-            txt_in: get("txt_in.weight")?.clone(),
-            time_a: get("time_in.in_layer.weight")?.clone(),
-            time_b: get("time_in.out_layer.weight")?.clone(),
-            mod_img: get("double_stream_modulation_img.lin.weight")?.clone(),
-            mod_txt: get("double_stream_modulation_txt.lin.weight")?.clone(),
-            mod_single: get("single_stream_modulation.lin.weight")?.clone(),
-            final_adaln: get("final_layer.adaLN_modulation.1.weight")?.clone(),
-            final_w: get("final_layer.linear.weight")?.clone(),
+            img_in: take(ts, "img_in.weight")?,
+            txt_in: take(ts, "txt_in.weight")?,
+            time_a: take(ts, "time_in.in_layer.weight")?,
+            time_b: take(ts, "time_in.out_layer.weight")?,
+            mod_img: take(ts, "double_stream_modulation_img.lin.weight")?,
+            mod_txt: take(ts, "double_stream_modulation_txt.lin.weight")?,
+            mod_single: take(ts, "single_stream_modulation.lin.weight")?,
+            final_adaln: take(ts, "final_layer.adaLN_modulation.1.weight")?,
+            final_w: take(ts, "final_layer.linear.weight")?,
             dbl,
             sgl,
         })

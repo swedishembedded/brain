@@ -60,7 +60,9 @@ fn host_f32_forward_matches_device_forward() {
     let b = make_flow_batch(&cfg, &x0, &ctx, 0.4, &noise);
 
     // host f32 trainer path
-    let w = ModelWeights::from_tensors(&cfg, &ts).unwrap();
+    // `from_tensors` consumes the map; the device build below needs the fused
+    // layout, so the host extraction gets a copy (tiny config).
+    let w = ModelWeights::from_tensors(&cfg, &mut ts.clone()).unwrap();
     let (host, _) = forward(&cfg, &w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
 
     // device path on the same tensors/inputs

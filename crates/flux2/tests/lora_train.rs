@@ -113,11 +113,13 @@ fn lora_only_descends_with_base_frozen_and_roundtrips() {
     // the fold's fused row/column offsets equal the build-time split.
     let fc = tiny_fc();
     let mut ts = manifest_tensors(&fc, 0xD00D);
-    let base_ts = ModelWeights::from_tensors(&c, &ts).unwrap();
+    // `from_tensors` consumes the map, and this test needs `ts` again after
+    // the fold, so the pre-fold extraction gets a copy (tiny config).
+    let base_ts = ModelWeights::from_tensors(&c, &mut ts.clone()).unwrap();
     let b = &batches[0];
     let (out_before, _) = forward(&c, &base_ts, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
     ad.fold_into_tensors(&mut ts).expect("fold");
-    let folded = ModelWeights::from_tensors(&c, &ts).unwrap();
+    let folded = ModelWeights::from_tensors(&c, &mut ts).unwrap();
     let (out_after, _) = forward(&c, &folded, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
     let max_change = out_before.iter().zip(&out_after).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(max_change > 1e-4, "folding a trained adapter did not change the forward output");
