@@ -944,6 +944,26 @@ Direct binary - the model is selected by the command:
 # toymoe train | infer | eval        (the bare sparse-MoE toy model)
 ```
 
+**`brain flops` prices a path before you run it.** The per-kernel cost registry
+lives at `crates/gpu-core/src/cost.rs`, hung on the `Gpu::step*` seam so it
+serves every backend and every model; `Gpu::cost_of` prices a recorded step
+list offline and `Gpu::ops_counters` folds the same formulas online at
+`submit`, and on a fully covered path the two agree exactly. `--model
+qwen|gpt|lfm` costs a forward/backward pass; `--model flux2|ltxv` costs a whole
+image or video GENERATION by stage (text encode, N denoise evaluations, VAE
+decode, totalled, and for video per second of output), with arithmetic
+intensity and a roofline classification per stage against the device's own
+measured roofs (`crates/gpu-core/src/roof.rs` - measured, never assumed).
+
+Neither needs weights or a run. A diffusion transformer's graph is captured by
+a dry `cost::Recording` (records every dispatch on this thread, executes none),
+and the full-depth cost is derived from probe builds at one and zero blocks -
+exact because the graph is affine in the block count, which every run re-checks
+at a point outside its own basis rather than assuming. That is what lets a 22B
+video model be priced on a card that cannot hold it. Coverage is honest at both
+levels: a kernel with no formula is listed as UNCOVERED and excluded from the
+totals, and a whole stage that is not modelled is listed the same way.
+
 **GGUF import is generic.** `brain import FILE [--out PATH] [--id NAME]`
 picks the importer from the file's own `general.architecture` via the registry
 in `crates/cli/src/gguf_import.rs`; `--list` prints what's registered. Adding an

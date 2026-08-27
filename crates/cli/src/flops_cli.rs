@@ -42,9 +42,9 @@ use crate::args::Args;
 const USAGE: &str = "usage: brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T] \
                      [--train] [--i8] [--stages N] [--run]\n\
        brain flops --model flux2 [--variant klein-4b|klein-9b|base-4b|base-9b|tiny] \
-                     [--width W] [--height H] [--steps N] [--refs HxW,...] [--batch B] [--i8] [--run] [--vae DIR]\n\
+                     [--width W] [--height H] [--steps N] [--refs HxW,...] [--batch B] [--i8] [--run] [--vae DIR] [--per-kernel]\n\
        brain flops --model ltxv [--variant ltx25-22b|tiny] [--width W] [--height H] \
-                     [--frames F] [--fps R] [--steps N] [--run]";
+                     [--frames F] [--fps R] [--steps N] [--run] [--per-kernel]";
 
 pub fn run_flops(argv: &[String]) {
     // Before the parser: `--help` is not a flag any of the branches below
@@ -72,13 +72,14 @@ pub fn run_flops(argv: &[String]) {
     let fps = a.opt_u32("--fps");
     let refs = a.take_str("--refs");
     let vae = a.take_str("--vae");
+    let per_kernel = a.take_flag("--per-kernel");
     a.finish();
     match model.as_str() {
         "qwen" => qwen_flops(weights.as_deref(), b, block, train, i8, stages, run),
         "gpt" => gpt_flops(weights.as_deref(), b, block, train, stages, run),
         "lfm" => lfm_flops(weights.as_deref(), b, block, train, run),
-        "flux2" => flux2_flops(&variant, width, height, steps, refs.as_deref(), b, i8, run, vae.as_deref()),
-        "ltxv" => ltxv_flops(&variant, width, height, frames, fps, steps, run),
+        "flux2" => flux2_flops(&variant, width, height, steps, refs.as_deref(), b, i8, run, vae.as_deref(), per_kernel),
+        "ltxv" => ltxv_flops(&variant, width, height, frames, fps, steps, run, per_kernel),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -345,7 +346,14 @@ fn roof_seconds(c: &Cost, r: &Roofs) -> Option<f64> {
 
 /// The stage table: per stage and then totalled, with the arithmetic intensity
 /// and roof classification that say which one is worth attacking.
-fn print_stages(stages: &[Stage], roofs: Option<Roofs>, per_unit: Option<(&str, f64)>) {
+fn print_stages(stages: &[Stage], roofs: Option<Roofs>, per_unit: Option<(&str, f64)>, per_kernel: bool) {
+    if per_kernel {
+        for s in stages.iter().filter(|s| s.missing.is_none()) {
+            println!();
+            println!("---- {} x{} (per run) ----", s.name, s.runs);
+            println!("{}", s.per_run);
+        }
+    }
     println!();
     println!(
         "{:<40} {:>5} {:>11} {:>11} {:>11} {:>9} {:>8} {:>11}",
@@ -573,6 +581,7 @@ fn flux2_flops(
     i8: bool,
     run: bool,
     vae: Option<&str>,
+    per_kernel: bool,
 ) {
     let variant = if variant.is_empty() { "klein-4b" } else { variant };
     let cfg = match variant {
@@ -582,8 +591,8 @@ fn flux2_flops(
             std::process::exit(2);
         }),
     };
-    // FLUX.2 latent tokens: the VAE downsamples 8x and the 2x2 pixel-unshuffle
-    // halves each axis again, so one token spans 16 pixels.
+    // FLUX.2 latent tokens: the VAE's eightfold spatial downsample and the
+    // 2x2 pixel-unshuffle compose, so one token spans 16 pixels per axis.
     let (w, h) = (width.unwrap_or(1024), height.unwrap_or(1024));
     assert!(w % 16 == 0 && h % 16 == 0, "flux2 works in 16-pixel latent tokens: --width/--height must be multiples of 16");
     let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
@@ -630,7 +639,7 @@ fn flux2_flops(
     ];
     stages.retain(|s| s.runs > 0);
 
-    print_stages(&stages, roofs, None);
+    print_stages(&stages, roofs, None, per_kernel);
 
     if run {
         // OFFLINE vs ONLINE on the one build small enough to execute at these
@@ -646,7 +655,88 @@ fn flux2_flops(
                 std::process::exit(2);
             }
         }
+        // ...and PREDICTED vs MEASURED on that same build. A cost model that
+        // only agrees with itself has not been tested; the number that tests it
+        // is the ratio of a real run's wall clock to the roofline bound the
+        // model computes for it. Wall clock, so the host-side conditioning
+        // (RoPE tables, modulation, the readback) is inside it - which makes
+        // this an upper bound on the ratio, not a flattering one.
+        if let Some(r) = roofs {
+            let (wall, device) = time_forward(&gpu, &cfg, lh, lw, &refs, bsz, prec, 3);
+            match roof_seconds(&wet.total, &r) {
+                Some(bound) if bound > 0.0 => {
+                    if let Some(d) = device {
+                        println!(
+                            "predicted vs measured on that build (DEVICE time): {bound:.4} s at the roof, {d:.4} s measured -> {:.2}x the bound ({:.1}% of the roof)",
+                            d / bound,
+                            100.0 * bound / d
+                        );
+                    }
+                    println!(
+                        "...and end to end (wall clock, host conditioning included): {wall:.4} s -> {:.2}x the bound",
+                        wall / bound
+                    );
+                }
+                _ => println!("predicted vs measured: the executed build does no measurable work"),
+            }
+        }
     }
+}
+
+/// One executed (1,1) denoise evaluation, timed two ways: best-of-`reps` WALL
+/// seconds, and the summed per-kernel DEVICE time of one pass where the backend
+/// can report it.
+///
+/// Both, because they answer different questions and only one of them tests the
+/// cost model. Device time is what the roofline bound is a bound on. Wall clock
+/// additionally carries this model's host-side conditioning (the RoPE tables,
+/// the folded modulation, the readback), which is real time a user waits but is
+/// not work any roof describes - reporting only the wall figure would blame the
+/// kernels for it.
+///
+/// A warm-up pass runs first: first-touch allocation and shader specialisation
+/// are not what is being measured.
+#[allow(clippy::too_many_arguments)]
+fn time_forward(
+    gpu: &gpu_core::Gpu,
+    base: &flux2::Flux2Config,
+    lh: usize,
+    lw: usize,
+    refs: &[(usize, usize)],
+    bsz: u32,
+    prec: flux2::Precision,
+    reps: usize,
+) -> (f64, Option<f64>) {
+    let cfg = flux2::Flux2Config { depth_double: 1, depth_single: 1, ..base.clone() };
+    let n_gen = lh * lw;
+    let ni = n_gen + refs.iter().map(|(h, w)| h * w).sum::<usize>();
+    let mut ts = flux2::Tensors::new();
+    for (name, shape) in cfg.tensor_manifest() {
+        let n: usize = shape.iter().product();
+        ts.insert(name, (shape, vec![0.0f32; n]));
+    }
+    let m = flux2::Flux2Model::new_batched(&cfg, &ts, gpu.share(), (cfg.txt_len + ni) as u32, bsz, prec);
+    drop(ts);
+    let ids = flux2::position_ids(cfg.txt_len, lh, lw, refs);
+    let img = vec![0.0f32; ni * cfg.in_channels];
+    let ctx = vec![0.0f32; cfg.txt_len * cfg.context_in_dim];
+    let samples: Vec<flux2::Sample> =
+        (0..bsz).map(|_| flux2::Sample { img_tokens: &img, ctx: &ctx, t: 0.5 }).collect();
+    let _ = m.forward_batch(&samples, &ids, n_gen);
+    let mut best = f64::INFINITY;
+    for _ in 0..reps.max(1) {
+        let t0 = std::time::Instant::now();
+        let _ = m.forward_batch(&samples, &ids, n_gen);
+        best = best.min(t0.elapsed().as_secs_f64());
+    }
+    let device = gpu.set_kernel_timing(true).then(|| {
+        gpu.reset_kernel_times();
+        let _ = m.forward_batch(&samples, &ids, n_gen);
+        let secs = gpu.kernel_times().map(|v| v.iter().map(|(_, ms, _)| ms).sum::<f64>() / 1e3);
+        gpu.set_kernel_timing(false);
+        secs
+    });
+    (best, device.flatten())
 }
 
 /// The FLUX.2 text encoder: a Qwen3 prefill of the fixed text window, run only
@@ -752,6 +842,7 @@ fn ltxv_flops(
     fps: Option<u32>,
     steps: Option<u32>,
     run: bool,
+    per_kernel: bool,
 ) {
     use ltxv::config::LtxDitConfig;
     let variant = if variant.is_empty() { "ltx25-22b" } else { variant };
@@ -826,7 +917,7 @@ fn ltxv_flops(
 
     let gpu = gpu_core::Gpu::new(&ltxv::block::KERNELS);
     let roofs = gpu_core::roof::ensure(&gpu);
-    print_stages(&stages, roofs, Some(("second of video", seconds)));
+    print_stages(&stages, roofs, Some(("second of video", seconds)), per_kernel);
     println!(
         "note: the host-side patchify_proj and proj_out linears are not device dispatches and so are \
          not in these numbers; they are two [{t} x {}] GEMMs against the {} block stack.",
@@ -854,10 +945,19 @@ fn ltxv_flops(
 ///
 /// The decoder records its whole dispatch sequence at CONSTRUCTION
 /// (`VaeDecoder::steps`), so nothing here executes; `Gpu::cost_of` prices that
-/// list directly. What the shapes have to be right about is the buffer sizing:
-/// `Builder::dev` sizes each weight buffer from its data length, so a wrong
-/// length is a wrong binding, not a wrong number. That is why the gate on this
-/// is a real decode at small resolution, not just "it built".
+/// list directly.
+///
+/// What has to be right, and what does not: every dispatch's shape comes from
+/// the builder's OWN arguments (`conv(prefix, cin, cout, k, ...)`), which come
+/// from the `VaeConfig`, never from the tensors handed in. So a wrong element
+/// count here cannot change the cost - it would only mis-size a binding, which
+/// matters to a decode that runs and not to one that is only priced. What CAN
+/// change the cost is a wrong NAME (the builder panics, loudly) or a
+/// `VaeConfig` that disagrees with the checkpoint's own `config.json` (a
+/// different number of resnets per up-block is a different graph). `--vae`
+/// gates exactly that second case, by building the same decode from the real
+/// checkpoint's config and tensors and requiring the two graphs to match
+/// dispatch for dispatch.
 fn vae_decoder_zeros(cfg: &vae::VaeConfig) -> vae::blocks::Tensors {
     let mut t = vae::blocks::Tensors::new();
     let mut put = |name: String, shape: Vec<usize>| {
@@ -921,11 +1021,10 @@ fn vae_decoder_zeros(cfg: &vae::VaeConfig) -> vae::blocks::Tensors {
 
 /// The FLUX.2 VAE decode of one image: `[32, lh*2, lw*2]` latent -> RGB.
 ///
-/// With `--vae <dir|file>` the same graph is built a second time from the REAL
-/// checkpoint's tensors and the two are compared dispatch by dispatch. That is
-/// the gate on [`vae_decoder_zeros`]: a manifest with a wrong shape or a
-/// misspelled name does not fail loudly by itself - it builds a graph at the
-/// wrong dimensions, which is a wrong number wearing a right number's clothes.
+/// With `--vae <dir|file>` the same decode is built a second time from the REAL
+/// checkpoint - its own `config.json` and its own tensors - and the two graphs
+/// are compared dispatch by dispatch. See [`vae_decoder_zeros`] for what that
+/// does and does not gate.
 fn flux2_vae_stage(lh: usize, lw: usize, real: Option<&str>) -> Stage {
     let cfg = vae::VaeConfig::flux2();
     let (h8, w8) = ((lh * 2) as u32, (lw * 2) as u32);

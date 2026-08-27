@@ -58,6 +58,33 @@ measured** - the tool never rounds an unmodeled cost down to zero and folds
 it into a total that looks complete. Run `brain flops --help` for the full
 set of flags and the accounting model.
 
+### A whole generation, by stage
+
+`--model flux2` and `--model ltxv` price an image or a video the way one
+actually happens: text encode, then N denoise evaluations, then a VAE decode,
+reported separately and then totalled - because *which stage dominates* is the
+question the number exists to answer. A video is reported per second of output
+as well as per clip.
+
+```
+brain flops --model flux2 --variant klein-4b --width 1024 --height 1024 [--i8] [--per-kernel]
+brain flops --model ltxv --variant ltx25-22b --width 768 --height 512 --frames 121 --fps 24
+```
+
+Nothing runs, and no checkpoint is needed. The denoise cost is derived from
+probe builds of the same config at one and zero blocks, which is exact because
+the graph is affine in the block count - and every run re-checks that at a
+point outside the basis rather than assuming it, refusing to print a total it
+could not verify. That is what lets a 22B video model be priced on a card that
+cannot hold it.
+
+Each stage also reports its arithmetic intensity against the device's own
+measured ridge point, so the output says whether a stage is compute- or
+memory-bound, and a roofline lower bound in seconds. That bound is a bound:
+what it is for is the *ratio* a real run achieves against it, which `--run`
+measures on a build small enough to execute. `--vae <dir>` additionally checks
+the weight-free VAE graph against the one the real checkpoint builds.
+
 ## A number measured on one machine is not a number for yours
 
 Different clocks, different memory bandwidth, different driver, different
