@@ -413,9 +413,25 @@ pub fn load_gguf(path: &str) -> Result<GgufModel, String> {
 /// Read every tensor of a GGUF file as [`StTensor`]s (name + shape + fp32),
 /// dequantizing quantized types. Order is not significant (callers remap by
 /// name). Retained for the FLUX.2 importer.
+///
+/// Reads through a mapping rather than slurping the file into an owned
+/// buffer. The two differ only in where the quantized bytes live while they
+/// are being decoded - every `dequantize` call sees the identical input span,
+/// so the fp32 output is byte-identical (pinned by
+/// `mapped_and_slurped_reads_agree_bit_for_bit`). What changes is the cost:
+/// slurping copies the whole file into anonymous memory first, which on a
+/// multi-GB checkpoint is a serial memcpy on the critical path of every
+/// process start AND a second resident copy of the file alongside the fp32
+/// expansion it is about to produce. Mapped, the decode faults pages in as it
+/// reads them, from the page cache when the file is warm, and the peak drops
+/// by the file's own size.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("gguf: open {path}: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("gguf: open {path}: {e}"))?;
+    // SAFETY: weight files are treated as immutable for the mapping's
+    // lifetime - the same contract `MmapGguf::open` and
+    // `safetensors::read_mmap` already rely on for every mapped checkpoint.
+    let bytes = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("gguf: mmap {path}: {e}"))?;
     let (_, infos, data_start) = parse_header(&bytes)?;
     let mut out = Vec::with_capacity(infos.len());
     for info in infos {
