@@ -320,28 +320,20 @@ fn eng(x: f64) -> String {
     format!("{x:7.0}  ")
 }
 
-/// Arithmetic intensity: total work per byte of streamed traffic. Compared
-/// against the device's ridge point this is what makes a stage's number
-/// actionable - it says whether making the arithmetic faster could help at all.
+/// Arithmetic intensity: total OPS (fp32 flops plus integer ops) per byte of
+/// streamed traffic. Against the device's ridge points this is what makes a
+/// stage's number actionable - it says whether making the arithmetic faster
+/// could help at all. A mixed-precision stage has two ridge points, which is
+/// why the `bound` column is decided by [`Roofs::bound_of`] and not by
+/// comparing this one number to one of them.
 fn intensity(c: &Cost) -> f64 {
     if c.bytes == 0 { f64::INFINITY } else { (c.flops + c.int_ops) as f64 / c.bytes as f64 }
 }
 
 /// Seconds this work needs at the device's own measured roofs - the analytic
-/// prediction, against which a real run's wall clock is the check.
+/// lower bound, against which a real run's time is the check.
 fn roof_seconds(c: &Cost, r: &Roofs) -> Option<f64> {
-    let work = c.flops.max(c.int_ops);
-    if work == 0 && c.bytes == 0 {
-        return None;
-    }
-    let (croof, _) = r.compute_roof(c.flops, c.int_ops);
-    let compute = if croof > 0.0 { work as f64 / (croof as f64 * 1e9) } else { 0.0 };
-    let memory = if r.gbs > 0.0 { c.bytes as f64 / (r.gbs as f64 * 1e9) } else { 0.0 };
-    // The roofline floor: neither unit can go faster than its own roof, so the
-    // stage cannot finish before the slower of the two. This is a LOWER BOUND
-    // on time, not a prediction of it - it assumes perfect overlap and perfect
-    // utilisation, which nothing achieves.
-    Some(compute.max(memory))
+    r.seconds_at_roof(c.flops, c.int_ops, c.bytes)
 }
 
 /// The stage table: per stage and then totalled, with the arithmetic intensity
@@ -357,7 +349,7 @@ fn print_stages(stages: &[Stage], roofs: Option<Roofs>, per_unit: Option<(&str, 
     println!();
     println!(
         "{:<40} {:>5} {:>11} {:>11} {:>11} {:>9} {:>8} {:>11}",
-        "stage", "runs", "flops", "int_ops", "bytes", "flop/B", "bound", "roof-secs"
+        "stage", "runs", "flops", "int_ops", "bytes", "ops/B", "bound", "roof-secs"
     );
     let mut total = CostReport::default();
     for s in stages {
@@ -368,7 +360,7 @@ fn print_stages(stages: &[Stage], roofs: Option<Roofs>, per_unit: Option<(&str, 
         }
         let t = s.total();
         let c = t.total;
-        let bound = roofs.map(|r| r.classify(c.flops.max(c.int_ops), c.bytes).as_str()).unwrap_or("?");
+        let bound = roofs.map(|r| r.bound_of(c.flops, c.int_ops, c.bytes).as_str()).unwrap_or("?");
         let secs = roofs.and_then(|r| roof_seconds(&c, &r)).map(|v| format!("{v:9.4} s")).unwrap_or_else(|| "?".into());
         println!(
             "{:<40} {:>5} {:>11} {:>11} {:>11} {:>9.1} {:>8} {:>11}",
@@ -393,7 +385,7 @@ fn print_stages(stages: &[Stage], roofs: Option<Roofs>, per_unit: Option<(&str, 
         eng(c.int_ops as f64),
         eng(c.bytes as f64),
         intensity(&c),
-        roofs.map(|r| r.classify(c.flops.max(c.int_ops), c.bytes).as_str()).unwrap_or("?"),
+        roofs.map(|r| r.bound_of(c.flops, c.int_ops, c.bytes).as_str()).unwrap_or("?"),
         secs.map(|v| format!("{v:9.4} s")).unwrap_or_else(|| "?".into())
     );
     if let Some((unit, n)) = per_unit {
@@ -415,17 +407,22 @@ fn print_stages(stages: &[Stage], roofs: Option<Roofs>, per_unit: Option<(&str, 
     }
     match roofs {
         Some(r) => println!(
-            "roofs (measured on this device): {:.0} GFLOP/s fp32, {} int8, {:.0} GB/s DRAM, ridge {:.1} flop/B",
+            "roofs (measured on this device): {:.0} GFLOP/s fp32, {} int8, {:.0} GB/s DRAM; ridge {:.1} flop/B fp32{}",
             r.gflops,
             r.int8_gops.map(|g| format!("{g:.0} GOP/s")).unwrap_or_else(|| "unmeasured".into()),
             r.gbs,
-            r.ridge()
+            r.ridge(),
+            r.int8_gops
+                .filter(|g| *g > 0.0 && r.gbs > 0.0)
+                .map(|g| format!(", {:.1} op/B int8", g / r.gbs))
+                .unwrap_or_default()
         ),
         None => println!("roofs: unmeasured on this device - flop/B and the totals stand, the seconds do not"),
     }
     println!(
-        "roof-secs is a LOWER BOUND: max(work/compute-roof, bytes/DRAM-roof), assuming perfect overlap \
-         and perfect utilisation. Nothing achieves it; the ratio of a measured run to it is the number to track."
+        "roof-secs is a LOWER BOUND: fp32 and int8 work share the SMs so their times add, memory overlaps \
+         so it is a max against that sum, and both halves assume perfect utilisation. Nothing achieves it; \
+         the ratio of a measured run to it is the number to track."
     );
 }
 

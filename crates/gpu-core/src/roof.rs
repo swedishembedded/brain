@@ -112,6 +112,53 @@ impl Roofs {
         }
     }
 
+    /// The shortest time this much work can take on this device: the roofline
+    /// LOWER BOUND, in seconds.
+    ///
+    /// Unlike [`Self::utilisation_of`], which grades ONE kernel and can treat
+    /// it as int-dominant or float-dominant, this is for an aggregate - a
+    /// pipeline stage, a whole generation - where both kinds of work are
+    /// present in quantity and neither may be dropped. `max(flops, int_ops)`
+    /// against a single roof is wrong there in both directions: an int8 DiT
+    /// still runs its attention and its norms in fp32, and those fp32 ops
+    /// graded against the (4x faster) DP4A roof simply vanish.
+    ///
+    /// The two op classes share the same SMs, so their times ADD; memory
+    /// overlaps with compute, so it is a `max` against the sum. Both halves
+    /// assume perfect utilisation, which is what makes this a bound and not a
+    /// prediction - the number to track is the ratio a real run achieves
+    /// against it.
+    ///
+    /// `None` when there is no work at all, or when a needed roof is unknown.
+    pub fn seconds_at_roof(&self, flops: u64, int_ops: u64, bytes: u64) -> Option<f64> {
+        if flops == 0 && int_ops == 0 && bytes == 0 {
+            return None;
+        }
+        if self.gflops <= 0.0 {
+            return None;
+        }
+        // An int8 rate the device never reported falls back to the fp32 roof,
+        // which UNDER-states int8 throughput rather than over-stating it.
+        let int_roof = self.int8_gops.filter(|g| *g > 0.0).unwrap_or(self.gflops);
+        let compute = flops as f64 / (self.gflops as f64 * 1e9) + int_ops as f64 / (int_roof as f64 * 1e9);
+        let memory = if self.gbs > 0.0 { bytes as f64 / (self.gbs as f64 * 1e9) } else { 0.0 };
+        Some(compute.max(memory))
+    }
+
+    /// Which roof an aggregate is against, decided by which side takes longer
+    /// rather than by an intensity against one ridge point - a mix of fp32 and
+    /// int8 work has two ridge points, and comparing it to either alone
+    /// misclassifies it.
+    pub fn bound_of(&self, flops: u64, int_ops: u64, bytes: u64) -> Bound {
+        let int_roof = self.int8_gops.filter(|g| *g > 0.0).unwrap_or(self.gflops);
+        if self.gflops <= 0.0 || self.gbs <= 0.0 {
+            return Bound::Compute;
+        }
+        let compute = flops as f64 / self.gflops as f64 + int_ops as f64 / int_roof as f64;
+        let memory = bytes as f64 / self.gbs as f64;
+        if compute >= memory { Bound::Compute } else { Bound::Memory }
+    }
+
     /// Percent of the relevant roof a kernel achieved. `seconds` must be a
     /// `poll_wait`-bracketed device time.
     pub fn utilisation(&self, flops: u64, bytes: u64, seconds: f64) -> Option<f32> {
@@ -638,6 +685,36 @@ mod tests {
         assert!((u - 100.0).abs() < 0.5, "{u}");
         // Zero-length regions produce nothing rather than infinity.
         assert!(r.utilisation(1, 1, 0.0).is_none());
+    }
+
+    /// The bound for an AGGREGATE (a pipeline stage, a whole generation) must
+    /// count both op classes. An int8 diffusion transformer still runs its
+    /// attention and its norms in fp32, and grading the stage by
+    /// `max(flops, int_ops)` against one roof makes whichever class loses that
+    /// comparison disappear entirely - which is how an int8 denoise step came
+    /// out cheaper than its fp32 attention alone.
+    #[test]
+    fn a_mixed_precision_stage_is_not_graded_against_one_roof() {
+        let r = Roofs { gflops: 10_000.0, gbs: 250.0, cache_gbs: 1000.0, int8_gops: Some(40_000.0) };
+        // 10 TFLOP fp32 (1 s at the roof) + 40 TOP int8 (1 s at the roof).
+        let (fp, int) = (10_000_000_000_000u64, 40_000_000_000_000u64);
+        let t = r.seconds_at_roof(fp, int, 0).unwrap();
+        assert!((t - 2.0).abs() < 1e-9, "the two classes share the SMs, so their times add: {t}");
+        // Each class alone is half of it - so neither can have been dropped.
+        assert!((r.seconds_at_roof(fp, 0, 0).unwrap() - 1.0).abs() < 1e-9);
+        assert!((r.seconds_at_roof(0, int, 0).unwrap() - 1.0).abs() < 1e-9);
+        // Memory overlaps with compute rather than adding to it.
+        assert!((r.seconds_at_roof(fp, int, 250_000_000_000).unwrap() - 2.0).abs() < 1e-9);
+        // ...until it dominates.
+        assert!((r.seconds_at_roof(fp, int, 2_500_000_000_000).unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(r.bound_of(fp, int, 2_500_000_000_000), Bound::Memory);
+        assert_eq!(r.bound_of(fp, int, 250_000_000_000), Bound::Compute);
+        // No work at all is not "instant", it is nothing to report.
+        assert!(r.seconds_at_roof(0, 0, 0).is_none());
+        // An unmeasured int8 roof falls back to fp32, which UNDER-states int8
+        // throughput - the safe direction for a lower bound on time.
+        let no_i8 = Roofs { int8_gops: None, ..r };
+        assert!(no_i8.seconds_at_roof(0, int, 0).unwrap() > r.seconds_at_roof(0, int, 0).unwrap());
     }
 
     #[test]
