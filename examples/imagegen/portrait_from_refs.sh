@@ -25,9 +25,27 @@
 # content faithfully but does not make the halves agree on lighting. Prefer
 # the default unless you need the rest of the frame kept bit-for-bit.
 #
-# Optional, all env: MASK, SEED (first seed; each result adds 1), STRENGTH
-# (mask mode only), STEPS, REF_PX (long edge of each reference), SIZE (WxH,
-# default mode only), POSE, VARIANT, PRECISION, BRAIN.
+# ADAPTER points at a per-identity LoRA trained on the same folder (see
+# train_identity_lora.sh). The references condition on the person's APPEARANCE
+# for one generation; an adapter has learned them, and the two compose -- the
+# adapter carries identity even in poses no reference shows, which is what the
+# references alone cannot do. Together they measure far better than either
+# alone -- use both.
+#
+# LORA_SCALE dials the adapter, and 0 reproduces the base model exactly, so it
+# is also how you see what the adapter contributes. Start LOW, around 0.5:
+# identity plateaus well before image quality gives out, so the highest scale
+# that still fits is not the right one -- past the plateau the skin goes waxy
+# and the skull inflates while the measured identity stops improving. Sweep it
+# and score each step rather than trusting one setting.
+#
+# Grade the result with a number, not an opinion:
+#
+#   examples/imagegen/identity_score.sh <dir> <dir>
+#
+# Optional, all env: ADAPTER, LORA_SCALE, MASK, SEED (first seed; each result
+# adds 1), STRENGTH (mask mode only), STEPS, REF_PX (long edge of each
+# reference), SIZE (WxH, default mode only), POSE, VARIANT, PRECISION, BRAIN.
 #
 # Weights come from BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}; brain picks a card
 # with room unless BRAIN_DEVICE says otherwise.
@@ -67,9 +85,11 @@ PY
 )
 
 ARGS=()
+[ -n "${ADAPTER:-}" ] && ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-1.0}")
 [ "${MASK:-0}" = 1 ] && ARGS+=(--mask "$W/mask.png" --ref "$W/target.png" --strength "${STRENGTH:-0.99}")
-for f in "$W"/ref*.png; do [ -e "$f" ] && ARGS+=(--ref "$f"); done
-[ "${#ARGS[@]}" -gt 0 ] || { echo "$D: no numbered reference images" >&2; exit 1; }
+REFS=0
+for f in "$W"/ref*.png; do [ -e "$f" ] && { ARGS+=(--ref "$f"); REFS=$((REFS + 1)); }; done
+[ "$REFS" -gt 0 ] || [ -n "${ADAPTER:-}" ] || { echo "$D: no numbered reference images" >&2; exit 1; }
 
 for i in $(seq 1 "$N"); do
   "${BRAIN:-./target/release/brain}" flux2 generate \

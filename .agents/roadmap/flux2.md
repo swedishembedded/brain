@@ -1120,3 +1120,284 @@ Adding those up: the reachable step is roughly 5-6 s without touching the
 shared GEMM, and about 3.5 s with it. The floor is 2.99 s, so **1.25 h is the
 hard bound for a 1500-step run on one P40** and there is no version of this
 that reaches "minutes".
+
+## Where the host trainer's 100 GB went (2026-08-27)
+
+A `brain flux2 finetune --trainer host` run on klein-9b at `--size 512` sat at
+roughly 100 GB RSS for over an hour without printing step 1, and OOM-killed the
+box. The standing explanation in this file was the Q8_0 -> fp32 dequantise at
+load. **That was wrong**, and it was wrong in a way worth recording: the
+dequantise is one copy of the model and it finishes; the 100 GB is the *step*,
+and the step was still running when the run was killed, because the progress
+line only advances after a step completes.
+
+### Measured, not inferred
+
+Dual Xeon E5-2690 v3, `tests/step_time.rs --ignored` at REAL klein-4b dims
+(3 875 544 576 parameters = **14.44 GiB** of fp32 weights), 16x16 latent grid
+(256 px) and the full 512-token text pad, rank 16, whole-process `VmRSS` /
+`VmHWM` from `/proc/self/status`:
+
+| phase | RSS after | what it added |
+|---|---|---|
+| frozen base resident | 14.44 GiB | one fp32 copy of the model |
+| `adapter.apply(base)` | 28.97 GiB | **a second** copy: `W_eff = W + s.B.A` is a clone |
+| forward + backward | peak 49.69 GiB | **a third** copy: the whole-model `ModelGrads`, plus ~5.3 GiB of saved activations at 768 joint tokens |
+| Adam projection | - | reads the grads, writes only the rank-16 factors |
+
+So the peak is `3 x weights + activations`, and it scales with the parameter
+count exactly. klein-9b is 9 078 581 248 parameters = **33.82 GiB** fp32, and
+1536 joint tokens at `d = 4096` roughly triples the activation term: about
+**115 GiB**. That is the observed number, and neither the load nor the text
+encoder is in it.
+
+### What changed
+
+The Adam step reduces every block's dense `dW` to a rank-`r` projection and is
+finished with it, so the third copy was held for nothing.
+`modelgrad::backward_into` streams each `DoubleGrads`/`SingleGrads` to a
+`GradSink` the instant the block's backward completes, and
+`lora::LoraAdapter::stepper` is the sink that projects and Adam-steps it.
+`backward` is now a thin collecting sink over the same walk, so `gradcheck` and
+every block test see byte-identical output.
+
+Same box, same harness, same 256 px klein-4b step
+(`BRAIN_FLUX2_STEP_COLLECT=1` selects the old route):
+
+| | collecting `ModelGrads` | streaming to the sink |
+|---|---|---|
+| peak whole-process RSS | 49.69 GiB | **36.05 GiB** |
+| RSS after `apply`, before the backward | 28.97 GiB | 28.97 GiB |
+| copies of the model at peak | 3 | **2** |
+| loss | 47.5713 | 47.5713 (identical) |
+| `apply` | 11.3 s | 11.4 s |
+| forward + backward + Adam | 955.7 s | 1007.4 s |
+
+**The wall clock is not separable on this box today** and the table should not
+be read as "streaming is 5% slower": both runs shared the machine with another
+job, and an uncontended run of the identical collecting step earlier the same
+day measured 715 s. The contention spread is several times the difference
+between the two columns. What the runs do establish is the memory and the
+loss, both of which are contention-independent.
+
+Projected to klein-9b at `--size 512` by the same term-by-term arithmetic
+(which reproduces the klein-4b measurement to 0.4%: 14.44 + 14.44 + 5.3 + 0.78
+global grads + 0.98 for one double block = 35.9 GiB against 36.05 measured):
+about **115 GiB -> 85 GiB**. The gate is
+`tests/streamed_grads.rs`, which asserts the adapter is bit-identical over four
+steps and that a step's whole-process peak stays under two copies of the model
+(and over one, so a broken measurement cannot pass the bound for free).
+
+### What is still there, and what each piece is worth
+
+* **The frozen base and its effective copy, 2 x weights (33.8 GiB at 9b).**
+  Inherent to a reference that differentiates a dense `W_eff`; the only
+  bit-exact way out is to stop *holding* the base and rebuild `W_eff` straight
+  from the checkpoint each step (`lora::LoraAdapter::apply_into` exists for
+  exactly that and is gated bit-identical to `apply`). Worth one whole copy -
+  33.8 GiB at klein-9b - for one re-read + dequantise per step, which is noise
+  against an hour-long step. Not landed: done naively it churns 34 GB of
+  allocations per step, and doing it without churn wants
+  `ModelWeights::from_source(&dyn TensorSource)` - i.e. the same "model
+  builders take `&HashMap`, not a streaming source" gap `qwen3::Qwen::new_shard`
+  closed for the text encoder.
+* **Saved activations, ~5.3 GiB at klein-4b/768 tokens, ~14 GiB at
+  klein-9b/1536.** The third-largest term. Activation checkpointing (recompute
+  a block's forward during its backward) is bit-exact here because the forward
+  is deterministic, but it is a real change to `ModelCache`.
+* **The text encoder.** `finetune::encode_samples` built its own Qwen3 with
+  `read_model_dir` + `brain_init_from_hf` + `Qwen::new` long after the
+  generation path stopped - the whole encoder as an fp32 host `HashMap`
+  (32.7 GiB for Qwen3-8B) *and* `Qwen::new`'s hardcoded `train = true`, which
+  gives every parameter `Role::Trainable` and allocates a gradient plus two
+  Adam moments beside each weight: four times the model, for three buffers
+  nothing in this crate ever reads. Both callers now share
+  `pipeline::build_text_encoder`, streamed and `Role::Frozen`.
+  `qwen3::tests::frozen_build` pins that the frozen build's hidden states are
+  bit-identical to the trainable build's.
+* **`Qwen::new` is still the 4x constructor**, and roughly a dozen
+  inference-only call sites across the workspace (`qwen3::eval`,
+  `qwen3::sample`, `fastvlm`) still use it. On the wgpu backend those three
+  buffers are real VRAM; on the CPU backend they are `alloc_zeroed` pages that
+  stay unfaulted, so they cost address space rather than RSS - which is why
+  this has been survivable and invisible. Worth its own pass.
+
+### Corrections
+
+- "the released klein-9b DiT is Q8_0, and both trainers go through
+  `read_dit_tensors`, which materialises the whole thing as host fp32 before a
+  single step runs - **that expansion, not the training, is what makes the
+  first step so far away**" (in the int8-base section above) is wrong. The
+  expansion is one copy and it completes; the hour is the step. A klein-4b
+  step at 256 px measures in the hundreds of seconds on this box, and a
+  klein-9b step at 512 px is ~4.7x that in arithmetic alone. An int8 frozen
+  base is still worth building - it removes one of the two remaining copies -
+  but not for the reason given there.
+- `by_role`'s tensor cloning is **not** implicated in this path:
+  `read_dit_tensors` goes through `checkpoint::{safetensors,gguf}::read`, not
+  `checkpoint::load(..).by_role(..)`. The eager path that *is* implicated is
+  the other one - a model builder that takes an owned `&HashMap` instead of a
+  `checkpoint::TensorSource`.
+
+## Identity conditioning: what preserves a face on klein-4b (2026-08-27)
+
+### The survey, and why there is no PuLID path here
+
+`Fayens/Pulid-Flux2` (the checkpoint behind `iFayens/ComfyUI-PuLID-Flux2`, the
+only PuLID-FLUX.2 implementation that exists) was range-fetched and checked
+tensor by tensor. 119 tensors, all F32, **every one 4096-wide** -
+`id_former.latents [1,4,4096]`. There is no 3072 checkpoint, so nothing in it
+fits klein-4b's hidden size without a projection that does not ship.
+
+Worse, all 84 `pulid_ca_*` tensors sit at **exact PyTorch default init**: 48
+norms exactly 1.0/0.0, and 36 linears whose `max|w|` equals `1/sqrt(fan_in)` to
+seven digits with kurtosis 1.801 (a uniform distribution's is exactly 1.8).
+They are untrained. The checkpoint names them `pulid_ca_double.*` /
+`pulid_ca_single.*` while the module declares `self.double_ca` /
+`self.single_ca`, both load sites pass `strict=False`, and no key remapping
+exists anywhere in the file - so the reference implementation silently drops
+those 84 tensors and redraws them random on every load. Only the IDFormer is
+genuinely trained (`id_former.norm.weight` mean 0.8236 sd 0.0070; layer-0
+`to_q` reaching 0.0299 against an init bound of 0.015625).
+
+A wider sweep found nothing else: no IP-Adapter FaceID, no InstantID, and no
+identity adapter of any kind for FLUX.2 on the hub or on GitHub.
+`Shivammesh26/Pulid-Flux2` is a byte-identical mirror of the same two files.
+Everything the ecosystem actually ships for Klein identity is either a
+**per-identity LoRA** or a 9B image-to-image consistency LoRA. So a
+per-identity LoRA is not the fallback here - it is the state of the art.
+
+**Lesson for any adapter import we do write: two-way coverage that hard-errors
+on unmatched keys.** The absence of exactly that check is why nobody noticed
+these weights were dead.
+
+### Identity is a number: the ladder this is measured against
+
+`examples/imagegen/identity_score.sh` reports the mean ArcFace cosine between
+generated images and the reference photographs, through the antelopev2
+SCRFD + ArcFace stack already in the repo. Anchors, all measured on one
+person's three reference photographs, klein-4b int8, 12 steps, 768x1024,
+identical prompt and seeds across arms:
+
+| arm | mean cosine |
+|---|---|
+| reference photographs against each other (the ceiling) | **0.7581** |
+| text-only, the person named in the prompt, no conditioning | **0.0052** |
+| `--ref` on all three photographs (what `portrait_from_refs.sh` did) | **0.3797** |
+
+The floor at 0.005 is the load-bearing number: it says the metric is not
+saturated and that the base model has no prior for this person at all, so any
+movement is the conditioning and not the prompt.
+
+**A detector caveat that shapes the whole evaluation:** SCRFD does not detect a
+face that fills the frame - it needs roughly 1.5x the face box in context. A
+close-up portrait therefore scores as "no face" rather than scoring badly.
+Generation for measurement must be framed head-and-shoulders, and
+`identity_score.sh` reports undetectable images separately instead of
+folding them in as zeros.
+
+### `--lora-scale` was parsed and then dropped
+
+`flux2_cli.rs` parsed the flag and `AdapterSpec` carried it, the third-party
+`.safetensors` branch honoured it, and the **brain-native branch passed only
+`ap.path`** to `load_adapter` - so strength came from the checkpoint's baked-in
+alpha and the flag was a silent no-op on exactly the adapters brain trains.
+`LoraAdapter::fold_into_tensors_at` now takes the strength and multiplies the
+header alpha with it, keeping 1.0 as the previous behaviour and 0.0 as an exact
+reproduction of the base model. This matters most for a small dataset, where
+the adapter is routinely too strong at its trained alpha and dialling it down
+is the only mitigation short of retraining.
+
+### What a 100-step identity LoRA on three photographs actually buys
+
+rank 16, alpha 16, 512 px, 10 captioned face crops derived from three
+photographs, klein-4b int8, 12 steps, 768x1024, seeds 101/102 held fixed
+across every scale. Scored by `identity_score.sh` against the same three
+photographs:
+
+| `--lora-scale` | mean ArcFace cosine |
+|---|---|
+| control: no adapter at all | 0.0052 |
+| 0.0 | 0.0190 (the same two seeds of the control) |
+| 0.5 | 0.1594 |
+| **1.0** | **0.2805** |
+| 1.5 | 0.1942 |
+| 2.0 | 0.1727 |
+| *native `--ref` on the three photographs, no adapter* | *0.3797* |
+
+Three things this says, all worth keeping:
+
+1. **The adapter works** - 0.005 to 0.28 is the conditioning, not the prompt,
+   because the control names the same person and gets nothing.
+2. **It peaks at 1.0 and falls off on both sides.** Over-driving it does not
+   trade image quality for identity, it loses identity too: past 1.0 the face
+   degrades enough that the embedder sees a worse face, not a different one.
+   A single-point evaluation at whatever alpha the checkpoint shipped with
+   would have missed this entirely, which is the argument for sweeping.
+3. **At 100 steps it does not beat FLUX.2's own reference conditioning**
+   (0.28 vs 0.38). For this model, on this budget, `--ref` is the stronger
+   identity path and the adapter is a supplement to it rather than a
+   replacement. Whether more steps close that gap is untested - the run was
+   stopped at 100 on request.
+
+### The adapter and `--ref` compose, and that is the result worth keeping
+
+Neither path alone is the answer. Run together - the three photographs as
+`--ref` AND the adapter folded in - identity roughly doubles against either
+one, on the same prompt and the same four seeds:
+
+| conditioning | mean ArcFace cosine |
+|---|---|
+| none | 0.0052 |
+| adapter alone, scale 1.0 | 0.2805 |
+| `--ref` alone | 0.3797 |
+| **`--ref` + adapter, scale 0.5** | **0.5309** |
+| `--ref` + adapter, scale 1.0 | 0.5254 |
+| the reference photographs' own ceiling | 0.7581 |
+
+The gain is super-additive, which says the two carry *different* information:
+the references supply appearance for this one generation, the adapter supplies
+a prior over the face that survives poses no reference shows. It also lands
+two thirds of the way to the ceiling from a 100-step adapter over three
+photographs, which is far more than either half suggested.
+
+**Scale 0.5 and 1.0 are indistinguishable on the metric (0.531 vs 0.525) and
+NOT indistinguishable by eye** - at 1.0 the skin goes waxy and the skull
+inflates, at 0.5 the render stays photographic. So the cosine saturates before
+the image quality does, and the right operating point is the *lowest* scale
+that reaches the plateau, not the highest scale that fits. A sweep is the only
+way to see that; a single shipped alpha would have picked the worse one.
+
+The visible failure mode at 100 steps is instructive: the adapter has learned
+the face's geometry well enough to move the cosine, but not that the subject is
+bald, and renders him with hair. Identity is learned coarse-to-fine, and
+cosine climbs before the obvious attributes land.
+
+### Two ways this measurement nearly went wrong
+
+Both cost real time here, and both are invisible in a result that looks fine.
+
+**SCRFD cannot detect a face that fills the frame.** It wants roughly 1.5x the
+face box in context; below that it returns nothing. A tight portrait therefore
+scores as "no face" rather than scoring badly, and the temptation is to fold
+that in as a zero - which would silently punish exactly the conditioning that
+worked hardest. Anything generated for measurement must be framed head and
+shoulders, `identity_score.sh` reports undetectable images separately, and the
+face crops the trainer is fed are checked through the detector before they are
+trusted. The same limit means a training crop tighter than ~1.5x cannot be
+verified, only assumed.
+
+**`pkill -f` matches the agent harness's own `bash -c` wrappers.** A pattern
+naming a script also matches every shell whose command line quotes that name,
+including the tool invocation doing the killing and any sibling task that
+mentions it. Two generation runs were killed this way. Kill by PID from
+`pgrep -a`, or by the exact binary, and confirm against `nvidia-smi` that the
+card actually went idle - a job that is still running looks identical to a job
+that finished, in both the log and the output directory.
+
+### Training cost, measured
+
+Dual Tesla P40, klein-4b, device trainer, rank 16, 512 px, 10 captioned
+768x768 face crops: **9.8-10.1 s/step**, i.e. ~4.1 h for 1500 steps, with one
+card left free for generation alongside. Checkpoints every 100 steps, so the
+identity/overfit trade-off can be read off the curve rather than guessed.
