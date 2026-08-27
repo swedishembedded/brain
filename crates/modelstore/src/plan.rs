@@ -288,6 +288,54 @@ pub fn execute(store: &Store, hub: &dyn Hub, plan: &Plan, progress: &mut dyn FnM
     Ok(deferred)
 }
 
+/// What a [`Plan`] still has to pull off the network: how many files, how
+/// many bytes, and whether the host disclosed a size for every one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Remaining {
+    /// Files [`execute`] will actually download (already-present ones excluded).
+    pub files: usize,
+    /// Their total size, summed over the files the host reported a size for.
+    pub bytes: u64,
+    /// False when at least one remaining file had no size from the host, so
+    /// `bytes` is a floor rather than the total. A progress budget spread
+    /// over `bytes` is only exact when this is true.
+    pub sizes_known: bool,
+}
+
+/// Size `plan`'s outstanding work WITHOUT downloading it, so a caller can
+/// show a whole-pull progress bar rather than a per-file one.
+///
+/// Applies exactly [`execute`]'s own skip rule -- a `dest` that already
+/// exists is a completed download and is excluded from both counts -- so a
+/// resumed pull is sized over what is actually left, and the two cannot
+/// drift apart. A file the host reports no size for still counts toward
+/// `files` but contributes no bytes, and clears `sizes_known`.
+///
+/// One [`Hub::file_sizes`] call per distinct `(vendor, repo, revision)` in
+/// the plan, not one per file.
+pub fn remaining_download(store: &Store, hub: &dyn Hub, plan: &Plan) -> Result<Remaining, HubError> {
+    let dir = store.repo_dir(&plan.reference.base());
+    let mut sizes: std::collections::HashMap<(String, String, String), std::collections::BTreeMap<String, u64>> = std::collections::HashMap::new();
+    let mut out = Remaining { files: 0, bytes: 0, sizes_known: true };
+    for step in &plan.steps {
+        let Step::Download { vendor, repo, revision, file, dest_name } = step else { continue };
+        if dir.join(dest_name).exists() {
+            continue;
+        }
+        out.files += 1;
+        let key = (vendor.clone(), repo.clone(), revision.clone());
+        let table = match sizes.entry(key) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(hub.file_sizes(vendor, repo, revision)?),
+        };
+        match table.get(file) {
+            Some(n) => out.bytes += n,
+            None => out.sizes_known = false,
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +359,88 @@ mod tests {
             Some(&card),
         )
         .unwrap();
+    }
+
+    /// A [`Hub`] that answers everything except sizes -- the shape of a host
+    /// that lists a repo but discloses no `size` for its files.
+    struct NoSizes(FakeHub);
+
+    impl Hub for NoSizes {
+        fn resolve_revision(&self, v: &str, r: &str, rev: &str) -> Result<String, HubError> {
+            self.0.resolve_revision(v, r, rev)
+        }
+        fn list_files(&self, v: &str, r: &str, rev: &str) -> Result<Vec<String>, HubError> {
+            self.0.list_files(v, r, rev)
+        }
+        fn file_sizes(&self, v: &str, r: &str, rev: &str) -> Result<std::collections::BTreeMap<String, u64>, HubError> {
+            self.0.file_sizes(v, r, rev)?;
+            Ok(Default::default())
+        }
+        fn read_file(&self, v: &str, r: &str, rev: &str, f: &str) -> Result<Vec<u8>, HubError> {
+            self.0.read_file(v, r, rev, f)
+        }
+        fn download(&self, v: &str, r: &str, rev: &str, f: &str, dest: &std::path::Path, p: &mut dyn FnMut(u64, Option<u64>)) -> Result<(), HubError> {
+            self.0.download(v, r, rev, f, dest, p)
+        }
+    }
+
+    const CONFIG: &[u8] = br#"{"architectures":["Qwen3ForCausalLM"]}"#;
+
+    fn sharded_hub() -> FakeHub {
+        let mut hub = FakeHub::new();
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", CONFIG.to_vec());
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors.index.json", vec![0u8; 100]);
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model-00001-of-00002.safetensors", vec![1u8; 4000]);
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model-00002-of-00002.safetensors", vec![2u8; 6000]);
+        hub
+    }
+
+    /// Sizing a plan sums every outstanding file, and applies exactly
+    /// `execute`'s own skip rule -- so a resumed pull is measured over what is
+    /// LEFT. If these two ever disagree, a progress bar either finishes early
+    /// or never reaches the end.
+    #[test]
+    fn remaining_download_sums_the_plan_and_excludes_what_is_already_on_disk() {
+        let st = store("modelstore-remaining-test-skip");
+        let hub = sharded_hub();
+        let reference = ModelRef::new("Qwen", "Qwen3-0.6B", None);
+        let p = plan(&reference, &st, &hub).unwrap();
+
+        let total: u64 = CONFIG.len() as u64 + 100 + 4000 + 6000;
+        let all = remaining_download(&st, &hub, &p).unwrap();
+        assert_eq!(all, Remaining { files: 4, bytes: total, sizes_known: true });
+
+        // One shard already landed: both counts drop by exactly that file.
+        let dir = st.repo_dir(&reference.base());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model-00002-of-00002.safetensors"), vec![2u8; 6000]).unwrap();
+        let left = remaining_download(&st, &hub, &p).unwrap();
+        assert_eq!(left, Remaining { files: 3, bytes: total - 6000, sizes_known: true });
+
+        // And `execute` agrees: it downloads three files, not four. Proven by
+        // the shard's bytes staying as written rather than being re-fetched.
+        std::fs::write(dir.join("model-00002-of-00002.safetensors"), b"sentinel").unwrap();
+        let mut seen: Vec<String> = Vec::new();
+        execute(&st, &hub, &p, &mut |name, _, _| {
+            if seen.last().map(String::as_str) != Some(name) {
+                seen.push(name.to_string());
+            }
+        })
+        .unwrap();
+        assert!(!seen.iter().any(|n| n == "model-00002-of-00002.safetensors"), "a completed file must not be re-downloaded: {seen:?}");
+        assert_eq!(std::fs::read(dir.join("model-00002-of-00002.safetensors")).unwrap(), b"sentinel");
+    }
+
+    /// A host that discloses no size still yields a usable file COUNT, and
+    /// says the byte total is a floor rather than reporting a confident zero
+    /// -- which a caller would otherwise divide by.
+    #[test]
+    fn remaining_download_flags_a_host_that_withholds_sizes() {
+        let st = store("modelstore-remaining-test-nosize");
+        let hub = NoSizes(sharded_hub());
+        let reference = ModelRef::new("Qwen", "Qwen3-0.6B", None);
+        let p = plan(&reference, &st, &hub).unwrap();
+        assert_eq!(remaining_download(&st, &hub, &p).unwrap(), Remaining { files: 4, bytes: 0, sizes_known: false });
     }
 
     #[test]

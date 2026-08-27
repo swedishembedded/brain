@@ -27,6 +27,7 @@ pub mod fetch;
 pub mod hub;
 pub mod plan;
 pub mod recipe;
+pub mod refurl;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -37,7 +38,7 @@ use brain_modelref::{AdapterRef, ModelRef, Quant};
 use serde::{Deserialize, Serialize};
 
 pub use hub::{FakeHub, HfHub, Hub, HubError};
-pub use plan::{declared_architecture, execute, family_of_architecture, plan, Plan, PlanError, Step};
+pub use plan::{declared_architecture, execute, family_of_architecture, plan, remaining_download, Plan, PlanError, Remaining, Step};
 
 /// The on-disk container format backing a [`LocalModel`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,15 +101,61 @@ pub struct Store {
     root: PathBuf,
 }
 
-/// Resolve the default models directory purely from the environment:
-/// `BRAIN_MODELS_DIR`, else `$XDG_DATA_HOME/brain/models`, else
-/// `$HOME/.local/share/brain/models`. `None` only when every one of those is
-/// unset (no `$HOME`). This is the env-only tail of `crates/cli/src/
-/// model_dir.rs`'s `resolve` (which layers a `--models-dir` flag override on
-/// top) -- shared here so anything that needs "the models dir" without a CLI
-/// flag in scope (this crate's own callers, `brain_testutil`'s model-backed
-/// test fixtures) doesn't duplicate the precedence.
+/// brain's data root, published by the `--brain-data-dir` flag. `None` (the
+/// default) means "nothing published", not "no data root" -- the environment
+/// ladder in [`default_root`] then answers, exactly as it did before this
+/// existed.
+///
+/// A published override rather than a second resolver function, so
+/// [`default_root`] stays the ONE answer to "where do models live" for every
+/// caller -- including the ones with no CLI flag in scope
+/// (`brain_testutil`'s fixtures, this crate's own internals). A `RwLock`
+/// rather than a `OnceLock` because clearing it has to work: it is written
+/// once at process start in production, but tests must be able to put it
+/// back.
+static DATA_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Publish (or, with `None`, clear) brain's data root -- the top of
+/// [`default_root`]'s ladder. Called once from the CLI's global flag parse
+/// before any subcommand runs; a lock poisoned by a panicking writer is
+/// recovered rather than propagated, since losing the override must not turn
+/// an unrelated panic into a second one here.
+pub fn publish_data_root(root: Option<PathBuf>) {
+    let mut slot = DATA_ROOT.write().unwrap_or_else(|e| e.into_inner());
+    *slot = root;
+}
+
+/// The models directory inside a data root. brain's data root holds more
+/// than models over time, so models live in their own subdirectory; this is
+/// the one place that fact is written down.
+pub fn models_dir_in(data_root: &Path) -> PathBuf {
+    data_root.join("models")
+}
+
+/// Resolve the models directory. Precedence, highest first:
+///
+/// 1. the data root published by `--brain-data-dir <root>`, as
+///    [`models_dir_in`] of it;
+/// 2. `BRAIN_MODELS_DIR`;
+/// 3. `$XDG_DATA_HOME/brain/models`;
+/// 4. `$HOME/.local/share/brain/models`.
+///
+/// `None` only when nothing is published and every one of those is unset (no
+/// `$HOME`). The flag deliberately outranks `BRAIN_MODELS_DIR` -- an
+/// explicitly typed flag beating an inherited environment variable is the
+/// same rule `--models-dir` and `--device` already follow -- and the CLI says
+/// so out loud when both are set and disagree, so the environment is never
+/// silently overruled.
+///
+/// This is the env-only tail of `crates/cli/src/model_dir.rs`'s `resolve`
+/// (which layers a `--models-dir` flag override on top) -- shared here so
+/// anything that needs "the models dir" without a CLI flag in scope (this
+/// crate's own callers, `brain_testutil`'s model-backed test fixtures)
+/// doesn't duplicate the precedence.
 pub fn default_root() -> Option<PathBuf> {
+    if let Some(root) = DATA_ROOT.read().unwrap_or_else(|e| e.into_inner()).as_deref() {
+        return Some(models_dir_in(root));
+    }
     if let Some(p) = std::env::var_os("BRAIN_MODELS_DIR").filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(p));
     }

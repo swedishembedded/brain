@@ -86,6 +86,16 @@ impl std::error::Error for HubError {}
 pub trait Hub: Send + Sync {
     fn resolve_revision(&self, vendor: &str, repo: &str, revision: &str) -> Result<String, HubError>;
     fn list_files(&self, vendor: &str, repo: &str, revision: &str) -> Result<Vec<String>, HubError>;
+    /// Each file's size in bytes, as the host reports it, for the files it
+    /// reports a size for. A file missing from the map is a file whose size
+    /// the host did not disclose -- callers must treat that as "unknown",
+    /// never as zero.
+    ///
+    /// Required rather than defaulted: a caller sizing a download before it
+    /// starts (`brain pull`'s progress budget) needs a real answer, and a
+    /// blanket default returning an empty map would let a new [`Hub`] silently
+    /// disable that budget instead of failing to compile.
+    fn file_sizes(&self, vendor: &str, repo: &str, revision: &str) -> Result<std::collections::BTreeMap<String, u64>, HubError>;
     /// Reads one file fully into memory -- only for small files (`config.json`,
     /// index manifests). Weight files use [`download`](Hub::download).
     fn read_file(&self, vendor: &str, repo: &str, revision: &str, file: &str) -> Result<Vec<u8>, HubError>;
@@ -119,7 +129,16 @@ impl HfHub {
     }
 
     fn revision_info(&self, vendor: &str, repo: &str, revision: &str) -> Result<serde_json::Value, HubError> {
+        self.revision_info_opt(vendor, repo, revision, false)
+    }
+
+    /// [`revision_info`](Self::revision_info), optionally asking the API to
+    /// expand each sibling with its blob metadata (`?blobs=true`), which is
+    /// where the per-file `size` lives. Off by default: the expansion costs
+    /// the host a blob lookup per file, and only [`Hub::file_sizes`] needs it.
+    fn revision_info_opt(&self, vendor: &str, repo: &str, revision: &str, blobs: bool) -> Result<serde_json::Value, HubError> {
         let url = self.api_url(vendor, repo, revision);
+        let url = if blobs { format!("{url}?blobs=true") } else { url };
         let resp = get_following_allowed_redirects(&url)?;
         if resp.status() == 404 {
             return Err(HubError::NotFound(format!("{vendor}/{repo}@{revision}")));
@@ -150,6 +169,27 @@ impl Hub for HfHub {
             .and_then(|v| v.as_array())
             .ok_or_else(|| HubError::BadResponse("revision info missing \"siblings\"".into()))?;
         Ok(siblings.iter().filter_map(|s| s.get("rfilename").and_then(|v| v.as_str()).map(str::to_string)).collect())
+    }
+
+    fn file_sizes(&self, vendor: &str, repo: &str, revision: &str) -> Result<std::collections::BTreeMap<String, u64>, HubError> {
+        let info = self.revision_info_opt(vendor, repo, revision, true)?;
+        let siblings = info
+            .get("siblings")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| HubError::BadResponse("revision info missing \"siblings\"".into()))?;
+        Ok(siblings
+            .iter()
+            .filter_map(|s| {
+                let name = s.get("rfilename").and_then(|v| v.as_str())?;
+                // A plain file carries `size`; an LFS-backed one (every large
+                // weight file) carries the authoritative size under `lfs`,
+                // and its top-level `size` is the pointer file's. Prefer
+                // `lfs.size` so a multi-GB shard is not reported as ~130
+                // bytes.
+                let size = s.get("lfs").and_then(|l| l.get("size")).and_then(serde_json::Value::as_u64).or_else(|| s.get("size").and_then(serde_json::Value::as_u64))?;
+                Some((name.to_string(), size))
+            })
+            .collect())
     }
 
     fn read_file(&self, vendor: &str, repo: &str, revision: &str, file: &str) -> Result<Vec<u8>, HubError> {
@@ -324,6 +364,13 @@ impl Hub for FakeHub {
 
     fn list_files(&self, vendor: &str, repo: &str, revision: &str) -> Result<Vec<String>, HubError> {
         Ok(self.repo(vendor, repo, revision)?.keys().cloned().collect())
+    }
+
+    fn file_sizes(&self, vendor: &str, repo: &str, revision: &str) -> Result<std::collections::BTreeMap<String, u64>, HubError> {
+        // Real sizes of the real registered bytes -- the same numbers
+        // `download` will actually stream, so a size-driven progress budget
+        // tested here is tested against the truth, not against a placeholder.
+        Ok(self.repo(vendor, repo, revision)?.iter().map(|(k, v)| (k.clone(), v.len() as u64)).collect())
     }
 
     fn read_file(&self, vendor: &str, repo: &str, revision: &str, file: &str) -> Result<Vec<u8>, HubError> {
