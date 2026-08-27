@@ -390,7 +390,14 @@ fn dw_kernel_bw(nrows: u32, k: u32) -> (usize, u32) {
 /// verbatim (so the single-device store is byte-identical). A partial shard keeps
 /// only its layers' weights, plus `tok.weight` when it embeds and/or carries the
 /// tied head, and `norm.weight`+head when it is the head stage.
-fn shard_param_list(cfg: &QwenConfig, shard: &Shard) -> Vec<(String, usize)> {
+///
+/// Public because it is also the *required-tensor set* for a shard-aware
+/// import: a loader that will build this shard needs exactly these names and
+/// no others, so `crate::import::hf_shard_source` derives its coverage check
+/// from here rather than from the full `cfg.param_list()`. Keeping one
+/// definition means the set a checkpoint is validated against cannot drift
+/// from the set the build actually reads.
+pub fn shard_param_list(cfg: &QwenConfig, shard: &Shard) -> Vec<(String, usize)> {
     let full = cfg.param_list();
     if shard.is_whole(cfg.n_layers as usize) {
         return full;

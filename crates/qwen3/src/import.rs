@@ -140,6 +140,60 @@ pub fn hf_source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig
     Ok(src)
 }
 
+/// [`hf_source`] for a caller that will build a **partial** [`crate::Shard`]:
+/// the required-tensor set is the shard's own
+/// ([`crate::shard_param_list`]), not the whole `cfg.param_list()`.
+///
+/// This is the difference between "reads the checkpoint efficiently" and
+/// "does not need the whole checkpoint at all". FLUX.2 conditions on hidden
+/// states from a mid-stack tap, so its encoder shard is `start: 0, end:
+/// <deepest tap>, embed: true, head: false` - the layers past the tap, the
+/// final norm and the LM head are never read by any buffer the build
+/// allocates. Validating against the full list forces those tensors to exist
+/// (and, on a checkpoint being fetched, to be downloaded) purely to be
+/// discarded.
+///
+/// The coverage check is **narrowed, never weakened**, and stays exact on
+/// three counts:
+///
+/// - Every tensor the shard genuinely needs must be present with the right
+///   element count, checked before a byte of weight data is read.
+/// - Every tensor that IS present and maps into the full `param_list()` is
+///   *also* element-count checked, even when this shard will not read it - so
+///   a config/checkpoint dimension mismatch is still caught on a tensor
+///   outside the tap range.
+/// - A source tensor mapping to a brain parameter outside the full
+///   `param_list()` - a 36-layer checkpoint against a 28-layer config, say -
+///   is still a hard error. The *allowed* set stays the full list; only the
+///   *required* set shrinks.
+pub fn hf_shard_source<'a>(
+    r: &'a checkpoint::weightio::WeightReader,
+    cfg: &QwenConfig,
+    shard: &crate::Shard,
+) -> Result<checkpoint::remap::RemapSource<'a>, String> {
+    let full = cfg.param_list();
+    let allowed: std::collections::HashSet<&str> = full.iter().map(|(n, _)| n.as_str()).collect();
+    let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
+    for name in r.names() {
+        let Some(bn) = hf_to_brain(name, cfg.tie_embeddings) else { continue };
+        if !allowed.contains(bn.as_str()) {
+            return Err(format!("import: '{name}' maps to unexpected brain param '{bn}'"));
+        }
+        if plan.insert(bn.clone(), checkpoint::remap::Fetch::Whole(name.to_string())).is_some() {
+            return Err(format!("duplicate mapping to {bn}"));
+        }
+    }
+    let src = checkpoint::remap::RemapSource::new(r, plan.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    // Shape-check everything the checkpoint actually offers, required or not.
+    let present: Vec<(String, usize)> =
+        full.into_iter().filter(|(n, _)| plan.contains_key(n)).collect();
+    src.validate(&present)?;
+    // Then require the shard's own set - the half that can fail on a MISSING
+    // tensor, and the reason this function exists.
+    src.validate(&crate::shard_param_list(cfg, shard))?;
+    Ok(src)
+}
+
 /// Import `<hf_dir>/config.json` + `model.safetensors` (single **or** sharded via
 /// `model.safetensors.index.json`) into the brain checkpoint `out_path`.
 /// Validates that every brain parameter is produced exactly once with the right
@@ -260,36 +314,199 @@ mod tests {
     /// pid-only path let one test's `remove_dir_all` cleanup delete the
     /// directory out from under another still-running test.
     fn build_tiny_hf_dir() -> std::path::PathBuf {
+        build_hf_dir(1, true)
+    }
+
+    /// [`build_tiny_hf_dir`] generalised over depth and head tying, so a
+    /// shard-aware test can cut a checkpoint that has layers on both sides of
+    /// the cut. `tied == false` keeps a REAL `lm_head.weight` parameter (the
+    /// FLUX.2 text encoder's shape: `tie_embeddings: false`, so the head is a
+    /// distinct tensor a truncated shard must not need).
+    fn build_hf_dir(n_layers: usize, tied: bool) -> std::path::PathBuf {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("brain-qwen-import-streaming-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let json = r#"{"vocab_size":5,"hidden_size":6,"num_hidden_layers":1,
+        let json = format!(
+            r#"{{"vocab_size":5,"hidden_size":6,"num_hidden_layers":{n_layers},
             "num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,
             "intermediate_size":8,"rope_theta":1000000,"rms_norm_eps":1e-6,
-            "tie_word_embeddings":true}"#;
-        std::fs::write(dir.join("config.json"), json).unwrap();
+            "tie_word_embeddings":{tied}}}"#
+        );
+        std::fs::write(dir.join("config.json"), &json).unwrap();
 
         // hq = 2*4 = 8, hkv = 1*4 = 4, d = 6, ff = 8.
-        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = vec![
+        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = vec![
             ("model.embed_tokens.weight".into(), vec![30], seq(1_000_000.0, 30)),
             ("model.norm.weight".into(), vec![6], seq(2_000_000.0, 6)),
-            ("lm_head.weight".into(), vec![30], seq(3_000_000.0, 30)), // tied -> must be dropped
-            ("model.layers.0.input_layernorm.weight".into(), vec![6], seq(10.0, 6)),
-            ("model.layers.0.self_attn.q_proj.weight".into(), vec![48], seq(20.0, 48)),
-            ("model.layers.0.self_attn.k_proj.weight".into(), vec![24], seq(70.0, 24)),
-            ("model.layers.0.self_attn.v_proj.weight".into(), vec![24], seq(100.0, 24)),
-            ("model.layers.0.self_attn.q_norm.weight".into(), vec![4], seq(130.0, 4)),
-            ("model.layers.0.self_attn.k_norm.weight".into(), vec![4], seq(140.0, 4)),
-            ("model.layers.0.self_attn.o_proj.weight".into(), vec![48], seq(150.0, 48)),
-            ("model.layers.0.post_attention_layernorm.weight".into(), vec![6], seq(200.0, 6)),
-            ("model.layers.0.mlp.gate_proj.weight".into(), vec![48], seq(210.0, 48)),
-            ("model.layers.0.mlp.up_proj.weight".into(), vec![48], seq(260.0, 48)),
-            ("model.layers.0.mlp.down_proj.weight".into(), vec![48], seq(310.0, 48)),
+            // Tied: a redundant head tensor real Qwen3 checkpoints sometimes
+            // ship, which `hf_to_brain` must drop. Untied: the genuine head.
+            ("lm_head.weight".into(), vec![30], seq(3_000_000.0, 30)),
         ];
+        for l in 0..n_layers {
+            // Per-layer base so no two layers share a value: a shard that read
+            // the wrong layer's weights would show up as a value mismatch.
+            let b = 1000.0 * l as f32;
+            let p = |s: &str| format!("model.layers.{l}.{s}");
+            tensors.extend([
+                (p("input_layernorm.weight"), vec![6], seq(b + 10.0, 6)),
+                (p("self_attn.q_proj.weight"), vec![48], seq(b + 20.0, 48)),
+                (p("self_attn.k_proj.weight"), vec![24], seq(b + 70.0, 24)),
+                (p("self_attn.v_proj.weight"), vec![24], seq(b + 100.0, 24)),
+                (p("self_attn.q_norm.weight"), vec![4], seq(b + 130.0, 4)),
+                (p("self_attn.k_norm.weight"), vec![4], seq(b + 140.0, 4)),
+                (p("self_attn.o_proj.weight"), vec![48], seq(b + 150.0, 48)),
+                (p("post_attention_layernorm.weight"), vec![6], seq(b + 200.0, 6)),
+                (p("mlp.gate_proj.weight"), vec![48], seq(b + 210.0, 48)),
+                (p("mlp.up_proj.weight"), vec![48], seq(b + 260.0, 48)),
+                (p("mlp.down_proj.weight"), vec![48], seq(b + 310.0, 48)),
+            ]);
+        }
         checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None)
             .unwrap();
         dir
+    }
+
+    /// Rewrite a fixture checkpoint keeping only the tensors `keep` accepts.
+    fn retain_tensors(dir: &std::path::Path, keep: impl Fn(&str) -> bool) {
+        let full = checkpoint::safetensors::read_model_dir(dir).unwrap();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = full
+            .into_iter()
+            .filter(|t| keep(&t.name))
+            .map(|t| (t.name, t.shape.iter().map(|&s| s as u64).collect(), t.data))
+            .collect();
+        std::fs::remove_file(dir.join("model.safetensors")).unwrap();
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+    }
+
+    /// The FLUX.2 text-encoder shape: embedding + layers `[0, end)`, no head.
+    /// `Shard::owns` is `l < end`, so `end` is the count of layers kept - a tap
+    /// at depth `end` reads the residual stream that has passed through them.
+    fn tap_shard(end: usize) -> crate::Shard {
+        crate::Shard { start: 0, end, embed: true, head: false, gpu_index: crate::Shard::ANY_GPU }
+    }
+
+    /// A truncated shard must load from a checkpoint that HAS the layers past
+    /// its tap - and every value it reads must be bit-identical to what the
+    /// eager whole-checkpoint import produces for the same parameter. This is
+    /// the parity guarantee the pipeline switch rides on.
+    #[test]
+    fn hf_shard_source_matches_eager_over_the_shard_it_will_build() {
+        use checkpoint::TensorSource;
+
+        let dir = build_hf_dir(4, false);
+        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let eager = brain_init_from_hf(checkpoint::safetensors::read_model_dir(&dir).unwrap(), &cfg).unwrap();
+
+        let shard = tap_shard(2);
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        let src = hf_shard_source(&reader, &cfg, &shard).unwrap();
+
+        let want = crate::shard_param_list(&cfg, &shard);
+        // The shard must be a REAL truncation, or this test proves nothing.
+        assert!(want.len() < cfg.param_list().len(), "fixture shard must be partial");
+        assert!(!want.iter().any(|(n, _)| n == "lm_head.weight" || n == "norm.weight"), "a headless shard holds neither");
+        assert!(!want.iter().any(|(n, _)| n.starts_with("blocks.2.") || n.starts_with("blocks.3.")), "layers past the tap");
+
+        for (name, numel) in &want {
+            let mut got = None;
+            assert!(src.with_tensor(name, &mut |d| got = Some(d.to_vec())), "missing {name}");
+            let got = got.unwrap();
+            assert_eq!(got.len(), *numel, "{name}");
+            // Bits, not a tolerance: both routes read the same source tensor.
+            assert_eq!(&got, &eager[name], "{name}: streamed and eager must be identical");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The point of the shard-aware source: a checkpoint that does NOT contain
+    /// the layers past the tap (nor the head) is a perfectly good source for a
+    /// shard that never reads them. The full-list [`hf_source`] must still
+    /// refuse the very same checkpoint - that contrast is the whole change.
+    #[test]
+    fn hf_shard_source_accepts_a_checkpoint_the_full_list_refuses() {
+        let dir = build_hf_dir(4, false);
+        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        retain_tensors(&dir, |n| {
+            !(n == "lm_head.weight" || n == "model.norm.weight" || n.starts_with("model.layers.2.") || n.starts_with("model.layers.3."))
+        });
+
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        hf_shard_source(&reader, &cfg, &tap_shard(2)).expect("a truncated shard must not need what it never reads");
+
+        let err = match hf_source(&reader, &cfg) {
+            Ok(_) => panic!("the full list must still demand every tensor"),
+            Err(e) => e,
+        };
+        assert!(err.contains("blocks.2."), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Narrowed, not weakened (1/2): a tensor the shard DOES read, missing,
+    /// is still a hard failure before any data is touched.
+    #[test]
+    fn hf_shard_source_still_refuses_a_tensor_the_shard_needs() {
+        let dir = build_hf_dir(4, false);
+        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        retain_tensors(&dir, |n| n != "model.layers.1.self_attn.q_proj.weight");
+
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        let err = match hf_shard_source(&reader, &cfg, &tap_shard(2)) {
+            Ok(_) => panic!("a tensor inside the tap range is required"),
+            Err(e) => e,
+        };
+        assert!(err.contains("blocks.1.attn.wq.weight"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Narrowed, not weakened (2/2): the ALLOWED set stays the full
+    /// `param_list()`. A deeper checkpoint than the config describes is the
+    /// classic wrong-checkpoint mistake and must still be caught - even though
+    /// the extra layers are outside the shard and would never be read.
+    #[test]
+    fn hf_shard_source_still_refuses_a_checkpoint_deeper_than_the_config() {
+        let dir = build_hf_dir(4, false);
+        // Same tensors, a config claiming two fewer layers.
+        let mut cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        cfg.n_layers = 2;
+
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        let err = match hf_shard_source(&reader, &cfg, &tap_shard(2)) {
+            Ok(_) => panic!("a 4-layer checkpoint is not a 2-layer model"),
+            Err(e) => e,
+        };
+        assert!(err.contains("blocks.2.") || err.contains("blocks.3."), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// And a present-but-unread tensor is still element-count checked, so a
+    /// config/checkpoint dimension mismatch is caught on a tensor outside the
+    /// tap range rather than silently accepted.
+    #[test]
+    fn hf_shard_source_shape_checks_tensors_it_will_never_read() {
+        let dir = build_hf_dir(4, false);
+        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        // Corrupt the ELEMENT COUNT of a layer past the tap.
+        let full = checkpoint::safetensors::read_model_dir(&dir).unwrap();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = full
+            .into_iter()
+            .map(|t| {
+                if t.name == "model.layers.3.mlp.up_proj.weight" {
+                    return (t.name, vec![24], vec![0.0f32; 24]);
+                }
+                (t.name, t.shape.iter().map(|&s| s as u64).collect(), t.data)
+            })
+            .collect();
+        std::fs::remove_file(dir.join("model.safetensors")).unwrap();
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        let err = match hf_shard_source(&reader, &cfg, &tap_shard(2)) {
+            Ok(_) => panic!("a wrong element count is a wrong checkpoint, read or not"),
+            Err(e) => e,
+        };
+        assert!(err.contains("blocks.3.mlp.up.weight"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -22,7 +22,7 @@ pub mod toolcall_eval;
 
 pub use config::{LoraCfg, QwenConfig};
 pub use init::init_weights;
-pub use model::{Qwen, Shard, IGNORE};
+pub use model::{shard_param_list, Qwen, Shard, IGNORE};
 /// The weight **storage tier** [`Qwen::new_shard_dt`] takes, re-exported so a
 /// caller naming one does not have to depend on `gpu-core` directly.
 pub use gpu_core::select::Dtype;
