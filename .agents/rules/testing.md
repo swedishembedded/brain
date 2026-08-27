@@ -310,8 +310,12 @@ in one binary).
 
 **Profiling / roofline internals:**
 `BRAIN_NO_ROOF` (skip the roofline probe), `BRAIN_ROOF_BUDGET_S` (its time
-budget), `BRAIN_TILE_BUDGET_WORDS` (override the tiled-matmul binding-size
-budget used for kernel selection).
+budget), `BRAIN_ROOF_WARMUP_S` (how long the probe keeps the device busy
+before timing anything, so the roof is measured at the device's operating
+point and not at the frequency an idle GPU parks at; `0` restores the old
+cold-start behaviour and is the A/B switch for that fix),
+`BRAIN_TILE_BUDGET_WORDS` (override the tiled-matmul binding-size budget used
+for kernel selection).
 
 **Training-memory tradeoff:** `BRAIN_OFFLOAD_ADAM` (keep optimizer state in
 host RAM instead of device memory).

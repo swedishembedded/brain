@@ -279,6 +279,41 @@ fn roof_budget() -> std::time::Duration {
     std::time::Duration::from_secs_f64(secs)
 }
 
+/// Continuous work issued before ANY rung of the probe, so the ceiling is
+/// measured at the device's operating point rather than at its idle clock.
+///
+/// **A roof measured on a parked GPU is worse than no roof**, because it is
+/// cached in memory AND persisted to disk (see `persist`), so one cold probe
+/// poisons the denominator of every later "% of roof" claim on that machine
+/// for good. It is also self-evidently wrong in a way nothing checked: on an
+/// integrated Arc (Meteor Lake) a cold probe put the fp32 roof BELOW the rate
+/// `matmul_reg2` - a real memory-fed GEMM, which cannot exceed the silicon -
+/// was measured at on the same device, by more than a factor of two. The
+/// driver's own `gt_act_freq_mhz` sat near its floor for the whole probe
+/// against a ceiling several times higher, which is all of the explanation.
+/// `tests/roofline.rs::real_work_can_never_beat_the_roof` pins the invariant.
+///
+/// The `roof_fma` chain is register-resident and dependency-free, so this
+/// phase is the most direct way there is to ask the device for its clock.
+/// Override with `BRAIN_ROOF_WARMUP_S`; `0` restores the old cold behaviour.
+const DEFAULT_ROOF_WARMUP_S: f64 = 2.0;
+
+/// Trip count for one warm-up dispatch: `1 Mi` threads x 64 iterations x 16
+/// FLOP is about a GFLOP of work, i.e. milliseconds on any real GPU and still
+/// bounded on a slow one. Deliberately NOT the calibration loop's self-scaling
+/// count - this phase is not a measurement, and a warm-up whose own dispatch
+/// length grew with the device would be unbounded.
+const WARMUP_ITERS: u32 = 64;
+
+fn roof_warmup() -> std::time::Duration {
+    let secs = std::env::var("BRAIN_ROOF_WARMUP_S")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(DEFAULT_ROOF_WARMUP_S);
+    std::time::Duration::from_secs_f64(secs)
+}
+
 static CACHE: Mutex<Option<(&'static str, Roofs)>> = Mutex::new(None);
 
 /// Serialises the actual measurement (`ensure`'s cache-miss path): two racing
@@ -398,6 +433,9 @@ pub fn known(backend: &str) -> Option<Roofs> {
 /// can assert the measurement itself rather than a memoised value.
 pub fn measure(gpu: &Gpu) -> Option<Roofs> {
     let g = gpu.new_like(PROBE_KERNELS);
+    // Bring the device to its operating point first, or every rung below
+    // measures the idle clock and persists it as this machine's ceiling.
+    warm_up(&g);
     let gflops = measure_compute(&g)?;
     let gbs = measure_bandwidth(&g, BW_ELEMS)?;
     // The same triad over a working set chosen to stay in cache. Never report a
@@ -456,6 +494,32 @@ fn best_of(gpu: &Gpu, steps: &[crate::Step], reps: usize, deadline: Instant) -> 
         }
     }
     Some(best)
+}
+
+/// Issue the FMA probe back to back until [`roof_warmup`] has elapsed, so the
+/// rungs that follow time a device that is awake. Nothing is recorded: this is
+/// the ramp, not the measurement.
+///
+/// Adds at most `roof_warmup()` plus one dispatch to `measure`'s wall clock -
+/// the deadline is checked before each submit, and `WARMUP_ITERS` bounds how
+/// long any single one can be. A device that times out mid-warm-up returns
+/// early and lets the first real rung report the failure.
+fn warm_up(gpu: &Gpu) {
+    let budget = roof_warmup();
+    if budget.is_zero() {
+        return;
+    }
+    let inp = gpu.storage(FMA_THREADS as u64);
+    let out = gpu.storage(FMA_THREADS as u64);
+    let (c, d) = (backend_api::f(0.5), backend_api::f(0.5));
+    let step = gpu.step(K_FMA, &[&inp, &out], &[FMA_THREADS, WARMUP_ITERS, c, d], FMA_THREADS);
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        gpu.submit(&[], std::slice::from_ref(&step));
+        if !gpu.poll_wait_timeout(PER_DISPATCH_TIMEOUT) {
+            return;
+        }
+    }
 }
 
 fn measure_compute(gpu: &Gpu) -> Option<f32> {
