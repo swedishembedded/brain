@@ -121,7 +121,7 @@ impl Roofs {
     /// present in quantity and neither may be dropped. `max(flops, int_ops)`
     /// against a single roof is wrong there in both directions: an int8 DiT
     /// still runs its attention and its norms in fp32, and those fp32 ops
-    /// graded against the (4x faster) DP4A roof simply vanish.
+    /// graded against the (much faster) DP4A roof simply vanish.
     ///
     /// The two op classes share the same SMs, so their times ADD; memory
     /// overlaps with compute, so it is a `max` against the sum. Both halves
@@ -696,7 +696,8 @@ mod tests {
     #[test]
     fn a_mixed_precision_stage_is_not_graded_against_one_roof() {
         let r = Roofs { gflops: 10_000.0, gbs: 250.0, cache_gbs: 1000.0, int8_gops: Some(40_000.0) };
-        // 10 TFLOP fp32 (1 s at the roof) + 40 TOP int8 (1 s at the roof).
+        // Exactly one second of fp32 work at that roof, plus exactly one
+        // second of int8 work at that roof.
         let (fp, int) = (10_000_000_000_000u64, 40_000_000_000_000u64);
         let t = r.seconds_at_roof(fp, int, 0).unwrap();
         assert!((t - 2.0).abs() < 1e-9, "the two classes share the SMs, so their times add: {t}");
