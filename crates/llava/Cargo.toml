@@ -1,0 +1,12 @@
+[package]
+name = "brain-llava"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LLaVA-1.5-13B: a CLIP-L/14@336 vision tower + Vicuna-1.5 (LLaMA-2) decoder, spliced by an mm_projector. Brought in as SUPIR's optional image captioner."
+
+[lib]
+name = "llava"
+path = "src/lib.rs"
+
+[dependencies]

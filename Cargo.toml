@@ -98,6 +98,8 @@ default-members = [
     "crates/rrdbnet",
     "crates/sdxlunet",
     "crates/controlnet",
+    "crates/supir",
+    "crates/llava",
     "crates/pulid",
     "crates/instantid",
     "crates/imgpipe",
@@ -231,6 +233,8 @@ brain-codeformer = { path = "crates/codeformer" }
 brain-rrdbnet = { path = "crates/rrdbnet" }
 brain-sdxlunet = { path = "crates/sdxlunet" }
 brain-controlnet = { path = "crates/controlnet" }
+brain-supir = { path = "crates/supir" }
+brain-llava = { path = "crates/llava" }
 brain-pulid = { path = "crates/pulid" }
 brain-instantid = { path = "crates/instantid" }
 brain-imgpipe = { path = "crates/imgpipe" }

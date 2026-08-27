@@ -1261,6 +1261,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-llava"
+version = "1.0.0"
+
+[[package]]
 name = "brain-ltxv"
 version = "1.0.0"
 dependencies = [
@@ -1844,6 +1848,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "brain-supir"
+version = "1.0.0"
 
 [[package]]
 name = "brain-t5encoder"

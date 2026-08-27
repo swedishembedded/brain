@@ -1,0 +1,12 @@
+[package]
+name = "brain-supir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SUPIR photo-realistic image restoration: a frozen SDXL 1.0 base UNet, a 1.24B ControlNet-shaped trunk (GLVControl), and 12 ZeroSFT/ZeroCrossAttn adaptors that replace the UNet's skip concatenation."
+
+[lib]
+name = "supir"
+path = "src/lib.rs"
+
+[dependencies]

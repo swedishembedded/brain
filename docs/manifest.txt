@@ -43,6 +43,7 @@ models/qwen3vl.md
 models/vlm.md
 models/fastvlm.md
 models/moondream3.md
+models/llava.md
 models/deepseek2ocr.md
 models/asr.md
 models/qwen3asr.md
@@ -70,6 +71,7 @@ models/t5encoder.md
 models/gemma4.md
 models/sdxlunet.md
 models/controlnet.md
+models/supir.md
 models/pulid.md
 models/instantid.md
 models/codeformer.md

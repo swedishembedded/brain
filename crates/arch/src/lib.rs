@@ -220,6 +220,18 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"), weights_env: &[("BRAIN_QWEN3VL_WEIGHTS", "weights")]),
     arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B"), weights_env: &[("BRAIN_FASTVLM_WEIGHTS", "weights")]),
     arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3", hf: &["Moondream3ForConditionalGeneration"], default_ref: Some("moondream/moondream3-preview"), weights_env: &[("BRAIN_MOONDREAM3_WEIGHTS", "dir")]),
+    // LLaVA-1.5: CLIP-L/14@336 vision tower + a Vicuna-1.5 (LLaMA-2) decoder,
+    // an `mm_projector` splicing patch features into the text stream at
+    // `mm_vision_select_layer = -2`. `hf:` is the original repo's own
+    // `architectures[0]` (`liuhaotian/llava-v1.5-13b/config.json`) -
+    // `LlavaForConditionalGeneration` is the LATER `transformers`-native
+    // reshape of the same weights, a different tensor layout this port does
+    // not target. No `default_ref`: brought in only as SUPIR's captioner
+    // (`crates/supir`'s `caps` dispatches to it through
+    // `capability::Registry`, never a hard dependency), and its weights carry
+    // no auto-fetch here because SUPIR's own weights don't either, for the
+    // same non-commercial-license reason - see the `supir` row below.
+    arch!("llava", "LLaVA-1.5-13B (CLIP-L/14@336 + Vicuna-1.5 decoder)", Multimodal, Brain, "brain-llava", hf: &["LlavaLlamaForCausalLM"]),
     // `default_ref` names the GGUF release repo (`ggml-org/DeepSeek-OCR-GGUF`),
     // not `deepseek-ai/DeepSeek-OCR` -- the latter is a `transformers`-shaped
     // repo with an empty `hf:` list here, so it would fall through to
@@ -324,6 +336,16 @@ pub const ARCHS: &[Arch] = &[
     arch!("autoencoderkl", "diffusers AutoencoderKL (Z-Image/FLUX.2/SDXL VAE)", Image, Brain, "brain-vae"),
     arch!("vqgan", "VQGAN / CodeFormer VQ autoencoder", Image, Brain, "brain-vqgan"),
     arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-codeformer"),
+    // SUPIR: a frozen SDXL 1.0 base UNet + a 1.24B ControlNet-shaped trunk
+    // (`GLVControl`, over the same `sdxlunet::model::Rec` `controlnet` reuses)
+    // + 12 `ZeroSFT`/`ZeroCrossAttn` adaptors that REPLACE the UNet's skip
+    // concatenation rather than adding a residual - a seam `controlnet`'s
+    // additive injection cannot express. No
+    // `hf:` (no `transformers`-native config exists) and deliberately no
+    // `default_ref`/`weights_env` auto-fetch: the SUPIR Software License
+    // Agreement is non-commercial-only and there is no official HF repo -
+    // the user supplies weights they obtained themselves.
+    arch!("supir", "SUPIR photo-realistic image restoration (SDXL + GLVControl + ZeroSFT)", Image, Brain, "brain-supir"),
     arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet", default_ref: Some("schwgHao/RealESRGAN_x4plus"), weights_env: &[("BRAIN_ESRGAN_WEIGHTS", "weights")]),
     // -- Video generation -----------------------------------------------
     // `wan` names the FAMILY, not the release: Wan2.1 and Wan2.2 share one
