@@ -109,6 +109,21 @@
 //! measurably moves GENERATED OUTPUT toward the concept on a held-out
 //! prompt - not merely that loss goes down (lesson #3) - plus a save/reload
 //! round trip closed in a genuinely separate OS process (lesson #23).
+//!
+//! **Two conditioning mechanisms for editing an EXISTING clip** are ported
+//! beside the generation path, and they are not interchangeable.
+//! [`refcond`] is the IC-LoRA one: a reference video's tokens appended to the
+//! sequence carrying its own RoPE bounds re-expressed in the target's frame,
+//! which only means anything with an adapter trained to attend across them -
+//! and LTX-2.5 has exactly one published IC-LoRA, a pixel spatial upscaler, so
+//! that route is plumbing waiting for weights. [`maskcond`] is the one that
+//! works today: `VideoConditionByMask` writes a per-token `clean_latent` /
+//! `denoise_mask` pair the base checkpoint already honours, needs no adapter,
+//! and at `strength = 1.0` returns the conditioned region BIT-exactly rather
+//! than structurally. [`pipeline::generate_masked`] drives it (`brain ltxv
+//! v2v`). Its mask polarity is inverted from every human-facing convention in
+//! this repo - `1` is the position that is KEPT - so the flip has exactly one
+//! named, tested home in [`maskcond::MaskSeqPolarity::to_conditioning`].
 
 pub mod audio;
 pub mod audio_vae;
@@ -134,6 +149,7 @@ pub mod int8;
 pub mod latentdump;
 pub mod longform;
 pub mod lora;
+pub mod maskcond;
 pub mod modelgrad;
 pub mod na_decoder;
 pub mod text_cache;

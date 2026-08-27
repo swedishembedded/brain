@@ -2641,6 +2641,29 @@ struct LatentContext<'a> {
     frames: usize,
 }
 
+/// A SOURCE clip's latent plus the per-token mask that says which of its
+/// tokens this stage carries verbatim and which it regenerates.
+///
+/// `ltx_core.conditioning.types.mask_cond.VideoConditionByMask`, ported and
+/// parity-gated in [`crate::maskcond`]. Unlike [`LatentContext`] (a contiguous
+/// prefix of latent FRAMES) and unlike image conditioning (whole latent frames,
+/// appended or overwritten), this pins an arbitrary per-token region that may
+/// differ on every latent frame - which is what a moving subject needs.
+struct MaskedSource<'a> {
+    /// `[C, lat_t, lh, lw]` - the source clip VAE-encoded at this stage's
+    /// resolution.
+    chw: &'a [f32],
+    /// `[lat_t * lh * lw]` in the reference's own polarity: `1` conditions
+    /// (carried), `0` generates. See [`crate::maskcond`]'s module doc - it is
+    /// inverted from every human-facing mask convention in this repo, and
+    /// [`crate::maskcond::MaskSeqPolarity::to_conditioning`] is the one place
+    /// the flip happens.
+    mask: &'a [f32],
+    /// `VideoConditionByMask::strength`. `1.0` freezes the conditioned tokens
+    /// at the source's own latent for the whole trajectory.
+    strength: f32,
+}
+
 /// One stage's own inputs: the resolution it runs at, its schedule, its
 /// sampler, and - for a refinement stage - the latent it starts from.
 struct Stage<'a> {
@@ -2666,6 +2689,13 @@ struct Stage<'a> {
     /// Steps already reported to `progress` before this stage.
     done_before: u32,
     label: &'static str,
+    /// Per-token masked conditioning over a source clip
+    /// ([`MaskedSource`]); `None` for every stage that generates from
+    /// nothing. Mutually exclusive with [`Self::context`] and with image
+    /// conditioning - all three write the same two tensors, and
+    /// [`denoise_stage`] refuses the combination rather than letting the last
+    /// one silently win.
+    mask: Option<MaskedSource<'a>>,
     /// The audio stream's half of this stage; `None` on a video-only
     /// generation.
     audio: Option<AudioStage>,
@@ -2753,7 +2783,28 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         }
     }
 
-    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if let Some(ctx) = &st.context {
+    let (latent0, positions_d, keyframes_mask_d, denoise_t_count, frozen) = if let Some(ms) = &st.mask {
+        // `VideoConditionByMask` applied to the state `create_initial_state`
+        // builds: base clean all zeros, base denoise mask all ones. Both
+        // terms of both blends are still evaluated - `crate::maskcond` is the
+        // reference's algebra, not a specialisation of it, so this stays
+        // correct if a caller ever hands it a state something else conditioned
+        // first.
+        if o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some() || st.context.is_some() {
+            return Err("a masked video-to-video pass was given a conditioning still or a carried latent context as well: masked conditioning already writes every token's clean latent and denoise mask, so the two cannot both apply".into());
+        }
+        assert_eq!(ms.mask.len(), t, "masked stage: mask has {} tokens, expected {t}", ms.mask.len());
+        let cond_tc = chw_to_tc(ms.chw, c, sc.lat_t, lh, lw);
+        let mc = crate::maskcond::apply_video_condition_by_mask(&vec![0f32; t * c], &vec![1f32; t], &cond_tc, ms.mask, c, ms.strength);
+        // `GaussianNoiser`, which the reference runs after every conditioning
+        // item. `latent0` IS this stage's noise draw, so it stands in for both
+        // the state's own latent and the fresh draw at `noise_scale = 1.0`,
+        // where the noiser's first lerp is the identity.
+        let latent = crate::maskcond::noised_initial_latent(&latent0, &latent0, &mc.clean, &mc.denoise_mask, c, 1.0);
+        let carried = ms.mask.iter().filter(|&&m| m >= 1.0).count();
+        tracing::info!(stage = st.label, tokens = t, carried, strength = ms.strength, "masked conditioning applied");
+        (latent, positions, keyframes_mask, t, Some((mc.denoise_mask, mc.clean)))
+    } else if let Some(ctx) = &st.context {
         // Pinned exactly as `--start-frame` pins latent frame 0, over
         // `ctx.frames` latent frames instead of one: mask 0 (so the per-token
         // timestep is 0 and `to_denoised` is the identity there), content
@@ -2960,6 +3011,7 @@ fn upscale_and_refine(sc: &StageCtx<'_>, mut r: Refine<'_>, total: u32, progress
     denoise_stage(
         sc,
         Stage {
+            mask: None,
             width: r.width,
             height: r.height,
             sigmas: r.sigmas,
@@ -3440,6 +3492,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         let stage1 = denoise_stage(
             &stage_ctx,
             Stage {
+                mask: None,
                 width: w1,
                 height: h1,
                 sigmas: &sigmas,
@@ -3480,6 +3533,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
         denoise_stage(
             &stage_ctx,
             Stage {
+                mask: None,
                 width: o.width,
                 height: o.height,
                 sigmas: &sigmas,
@@ -3952,6 +4006,273 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
     Ok((Video { width: out_w as u32, height: out_h as u32, fps: clip.fps, frames: out_frames, audio: None }, timings))
 }
 
+#[cfg(test)]
+mod masked_stage_tests {
+    use super::*;
+
+    /// The whole claim [`generate_masked`] makes, proven against the loop's own
+    /// machinery and with NO weights: a conditioning position starts at the
+    /// source latent, is announced to the model at timestep 0, passes through
+    /// [`to_denoised`] as the identity, and is re-pinned to the source by
+    /// [`post_process_latent`] after every step - so whatever the model says
+    /// about it is discarded and it leaves the sampler bit-exactly as it
+    /// entered. A generated position is left entirely alone by all three.
+    ///
+    /// This is the part of the path that can be gated without the 22B
+    /// checkpoint or the real VAE, and it is the part where being wrong would
+    /// look plausible: a run that merely STARTS a region at the source and then
+    /// lets it denoise produces a picture that resembles the input, which is
+    /// exactly what a broken preservation guarantee looks like.
+    #[test]
+    fn a_conditioned_token_survives_the_whole_step_untouched() {
+        let (t, c) = (6usize, 4usize);
+        let source: Vec<f32> = (0..t * c).map(|i| 0.25 * i as f32 - 1.0).collect();
+        let noise: Vec<f32> = (0..t * c).map(|i| 7.0 - 0.5 * i as f32).collect();
+        // Tokens 0, 2, 4 are carried; 1, 3, 5 are regenerated.
+        let mask: Vec<f32> = (0..t).map(|i| f32::from(i % 2 == 0)).collect();
+
+        let mc = crate::maskcond::apply_video_condition_by_mask(&vec![0f32; t * c], &vec![1f32; t], &source, &mask, c, 1.0);
+        let latent = crate::maskcond::noised_initial_latent(&noise, &noise, &mc.clean, &mc.denoise_mask, c, 1.0);
+
+        // The sigma the loop announces per token is `denoise_mask * sigma`
+        // (`timesteps_from_mask`), so a carried token is at 0 and `to_denoised`
+        // is the identity there.
+        let sigma = 0.909f32;
+        let timesteps: Vec<f32> = mc.denoise_mask.iter().map(|m| m * sigma).collect();
+        // A velocity the model might have produced - deliberately not zero, so
+        // "the token did not move" cannot be true by accident.
+        let velocity: Vec<f32> = (0..t * c).map(|i| 3.0 + i as f32).collect();
+        let mut denoised = to_denoised(&latent, &velocity, &timesteps, c);
+        post_process_latent(&mut denoised, &Frozen { mask: &mc.denoise_mask, clean: &mc.clean, channels: c });
+
+        for tok in 0..t {
+            let (a, b) = (tok * c, tok * c + c);
+            if mask[tok] == 1.0 {
+                assert_eq!(&latent[a..b], &source[a..b], "token {tok} must START at the source latent");
+                assert_eq!(&denoised[a..b], &source[a..b], "token {tok} must END the step at the source latent, whatever the model said");
+                assert_eq!(timesteps[tok], 0.0, "token {tok} must be announced at timestep 0");
+            } else {
+                assert_eq!(&latent[a..b], &noise[a..b], "token {tok} must start at pure noise");
+                assert_eq!(timesteps[tok], sigma, "token {tok} must be announced at the full sigma");
+                assert_ne!(&denoised[a..b], &noise[a..b], "token {tok} must actually move");
+            }
+        }
+    }
+
+    /// An all-conditioning mask is the identity on the picture, and
+    /// [`generate_masked`] refuses it rather than spending a generation to
+    /// return the input. Checked here as the algebra it rests on.
+    #[test]
+    fn an_all_conditioning_mask_is_the_identity() {
+        let (t, c) = (4usize, 3usize);
+        let source: Vec<f32> = (0..t * c).map(|i| i as f32).collect();
+        let noise = vec![99f32; t * c];
+        let mc = crate::maskcond::apply_video_condition_by_mask(&vec![0f32; t * c], &vec![1f32; t], &source, &vec![1f32; t], c, 1.0);
+        assert_eq!(mc.denoise_mask, vec![0f32; t]);
+        assert_eq!(crate::maskcond::noised_initial_latent(&noise, &noise, &mc.clean, &mc.denoise_mask, c, 1.0), source);
+    }
+}
+
+// ============================================================================
+// Masked video-to-video: regenerate part of a clip, carry the rest verbatim
+// ============================================================================
+
+/// Everything a masked video-to-video pass varies beyond what a generation
+/// already varies.
+#[derive(Clone, Debug)]
+pub struct MaskedOpts {
+    /// A `brain/sam2-maskseq/1` mask-sequence directory - see
+    /// [`crate::maskcond::read_mask_sequence`] for the format, the polarity
+    /// rule, and everything it refuses rather than reconciling.
+    pub mask_dir: String,
+    /// `VideoConditionByMask::strength`. `1.0` is the point of this path: the
+    /// conditioned region leaves the sampler bit-exactly the source's own
+    /// latent, because its per-token timestep is 0 and `post_process_latent`
+    /// re-pins it after every step. Lower values let the carried region drift
+    /// toward the prompt, which is a softer and quite different effect.
+    pub strength: f32,
+    /// Seed, guidance, steps, fps, `dit_config`, device placement. `frames`,
+    /// `width` and `height` are IGNORED - they come from the input clip,
+    /// which is the whole point of this entry point.
+    pub base: GenOpts,
+}
+
+impl Default for MaskedOpts {
+    fn default() -> MaskedOpts {
+        MaskedOpts { mask_dir: String::new(), strength: 1.0, base: GenOpts::default() }
+    }
+}
+
+/// Regenerate the masked-out region of an existing clip and carry everything
+/// else through untouched.
+///
+/// This is [`generate`]'s denoise loop with the initial latent and the
+/// per-token denoise mask coming from a source clip plus a mask sequence
+/// instead of from pure noise: VAE-encode the clip, reduce the pixel-space
+/// mask to the latent grid, apply
+/// `ltx_core.conditioning.types.mask_cond.VideoConditionByMask`, denoise,
+/// VAE-decode.
+///
+/// **What it buys over the IC-LoRA path ([`crate::refcond`]).** An IC-LoRA
+/// appends a reference as extra tokens and depends on an ADAPTER having been
+/// trained to attend across them - and LTX-2.5 has exactly one published
+/// IC-LoRA, a pixel spatial upscaler, so that route is closed on this
+/// checkpoint. Masked conditioning needs no adapter: `clean_latent` and
+/// `denoise_mask` are inputs the base model already honours. It is also
+/// stronger where it applies - a conditioned token at `strength = 1.0` is
+/// preserved BIT-exactly rather than structurally.
+///
+/// **One stage, at the clip's own resolution.** There is nothing to upscale
+/// here: the content already exists at the size it is wanted, so the
+/// two-stage half-resolution-then-detail shape [`generate`] uses would round
+/// trip the carried region through a downscale it does not need. Past
+/// [`SINGLE_STAGE_MAX_TOKENS`] this warns rather than refusing - the ceiling
+/// is a quality observation about generating a clip from noise, and most of
+/// this sequence is not being generated.
+///
+/// **No audio.** A masked pass conditions a video latent; the source's own
+/// sound track stays in the source file, and re-attaching it is one ffmpeg
+/// mux (the same split [`upscale`] documents).
+///
+/// `prompt` describes the WHOLE frame, not just the replacement: the DiT
+/// denoises the generated region in the context of the carried one through
+/// self-attention, and answers to the text context while doing it.
+#[tracing::instrument(level = "info", name = "v2v", skip_all, fields(frames = clip.frames.len(), width = clip.width, height = clip.height, strength = o.strength, seed = o.base.seed))]
+pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
+    let (w, h) = (clip.width as usize, clip.height as usize);
+    let frames = clip.frames.len();
+    if w == 0 || h == 0 || frames == 0 {
+        return Err("the input clip is empty".into());
+    }
+    if !w.is_multiple_of(32) || !h.is_multiple_of(32) {
+        return Err(format!("{w}x{h} is not a multiple of 32 (the VAE's spatial stride) - the input clip has to be VAE-representable before part of it can be regenerated"));
+    }
+    if let Some(bad) = clip.frames.iter().position(|f| f.len() != w * h * 3) {
+        return Err(format!("frame {bad} is {} bytes, expected {} for {w}x{h} RGB8", clip.frames[bad].len(), w * h * 3));
+    }
+    if !(0.0..=1.0).contains(&o.strength) {
+        return Err(format!("strength {} is outside [0, 1]", o.strength));
+    }
+    let vcfg = LtxVaeConfig::conv25();
+    let lat_t = vcfg.latent_frames(frames as u32).ok_or_else(|| format!("{frames} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)"))? as usize;
+    let (lh, lw) = (h / 32, w / 32);
+    let t = lat_t * lh * lw;
+
+    let dit_cfg = dit_config_from_name(&o.base.dit_config).inspect_err(|e| tracing::error!(dit_config = %o.base.dit_config, error = %e, "unknown DiT config"))?;
+    if dit_cfg.in_channels != vcfg.latent_channels {
+        return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", o.base.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
+    }
+    let in_channels = dit_cfg.in_channels as usize;
+
+    // The mask is read and reduced BEFORE any weight is touched: a mask
+    // sequence that does not match the clip, or whose polarity is not
+    // declared, should cost milliseconds rather than a 22B model build.
+    let mask = crate::maskcond::read_mask_sequence(std::path::Path::new(&o.mask_dir), frames, w, h, lat_t, lh, lw)?;
+    let generated = mask.iter().filter(|&&m| m < 1.0).count();
+    if generated == 0 {
+        return Err(format!(
+            "every one of the {t} latent tokens is a conditioning position, so this run would return the input clip unchanged - the mask sequence in {} marks nothing to regenerate (check its declared polarity)",
+            o.mask_dir
+        ));
+    }
+    tracing::info!(latent_tokens = t, touched = generated, "mask reduced to the latent grid");
+
+    let is_real_distilled = o.base.dit_config == "ltx25_22b";
+    let sigmas: Vec<f64> = if is_real_distilled {
+        LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect()
+    } else {
+        ltx2_sigmas(t, o.base.steps, o.base.base_shift, o.base.max_shift, o.base.stretch, o.base.terminal)
+    };
+    if t > SINGLE_STAGE_MAX_TOKENS {
+        tracing::warn!(tokens = t, ceiling = SINGLE_STAGE_MAX_TOKENS, "this pass runs as ONE stage at the clip's own resolution, past the token count the distilled schedule was tuned to generate from noise; the carried region is unaffected");
+    }
+    // Phases: build, encode, every step, decode.
+    let total = sigmas.len() as u32 + 2;
+    let mut timings = Timings::default();
+    let place = o.base.devices.resolve(o.base.device.as_deref());
+
+    progress(0, total, "build transformer");
+    let build_t = Instant::now();
+    let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    timings.build_dit = build_t.elapsed().as_secs_f32();
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let text = build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
+
+    let vweights = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
+    progress(1, total, "vae encode");
+    let enc_t = Instant::now();
+    let source_chw = {
+        let encoder = LtxVaeEncoder::build(&vcfg, &vweights, frames as u32, h as u32, w as u32, o.base.device.as_deref());
+        encoder.encode(&rgb8_to_chw(&clip.frames, h, w))
+    };
+    let mut vae_secs = enc_t.elapsed().as_secs_f32();
+    if cancel.is_cancelled() {
+        return Err("cancelled".into());
+    }
+
+    // `frames`/`width`/`height` come from the clip; image conditioning and
+    // audio are cleared, because this entry point's content comes from the
+    // source and its sound stays in the source file.
+    let pass_opts = GenOpts { frames, width: w, height: h, start_frame: None, mid_frame: None, end_frame: None, audio: false, ..o.base.clone() };
+    let sc = StageCtx {
+        a_ctx_cond: &[],
+        a_ctx_uncond: &[],
+        dit: dit.as_ref(),
+        vcfg: &vcfg,
+        vweights: &vweights,
+        o: &pass_opts,
+        lat_t,
+        in_channels,
+        ctx_cond: &text.cond,
+        ctx_uncond: &text.uncond,
+        context_valid: &text.valid,
+        context_len: text.len,
+        cancel,
+    };
+    let work_t = Instant::now();
+    let stage_out = denoise_stage(
+        &sc,
+        Stage {
+            mask: Some(MaskedSource { chw: &source_chw, mask: &mask, strength: o.strength }),
+            width: w,
+            height: h,
+            sigmas: &sigmas,
+            eta: o.base.eta,
+            seed_chw: None,
+            context: None,
+            seed_salt: 0,
+            done_before: 2,
+            label: "masked",
+            audio: None,
+        },
+        total,
+        &mut progress,
+    )?;
+    timings.denoise = work_t.elapsed().as_secs_f32();
+    // Same reason [`generate`] does it before its own decode: the decoder
+    // opens its own device context and a resident weight window does not fit
+    // alongside one.
+    drop(dit);
+
+    progress(total - 1, total, "vae decode");
+    let dec_t = Instant::now();
+    let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &stage_out.video_chw);
+    vae_secs += dec_t.elapsed().as_secs_f32();
+    if got != frames || pixels.len() != 3 * got * h * w {
+        return Err(format!("decoded to {got} frames / {} values, expected {frames} / {}", pixels.len(), 3 * frames * h * w));
+    }
+    timings.decode = vae_secs;
+    timings.steps = sigmas.len() - 1;
+    timings.tokens = t;
+    timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+
+    progress(total, total, "done");
+    tracing::info!(frames, width = w, height = h, total_secs = timings.total(), "masked video-to-video done");
+    Ok((Video { width: w as u32, height: h as u32, fps: clip.fps, frames: chw_to_rgb8(&pixels, got, h, w), audio: None }, timings))
+}
+
 // ============================================================================
 // Long-form generation: several denoising windows, one rolling latent context
 // ============================================================================
@@ -4236,6 +4557,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
             let stage1 = denoise_stage(
                 &sc,
                 Stage {
+                    mask: None,
                     width: w1,
                     height: h1,
                     sigmas: &sigmas,
@@ -4307,6 +4629,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
             denoise_stage(
                 &sc,
                 Stage {
+                    mask: None,
                     width: o.base.width,
                     height: o.base.height,
                     sigmas: &sigmas,

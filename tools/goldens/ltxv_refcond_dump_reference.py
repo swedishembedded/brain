@@ -193,6 +193,14 @@ MASK_CASES = [  # (name, f_pix, h_pix, w_pix, lat_f, lat_h, lat_w)
     ("m_basic", 9, 32, 32, 2, 4, 4),
     ("m_single_frame", 1, 16, 16, 1, 2, 2),
     ("m_deep", 17, 64, 32, 3, 8, 4),
+    # Spatial ratios that do NOT divide evenly. `mode="area"` is torch's
+    # ADAPTIVE rule - output cell `i` spans `[floor(i*H/O), ceil((i+1)*H/O))`,
+    # so neighbouring cells overlap - and it degenerates to a plain box pool
+    # exactly when the ratio divides, which every ratio the VAE itself produces
+    # does. The three cases above therefore cannot distinguish the two rules; a
+    # port that floors the cell end instead of ceiling it passes all of them.
+    ("m_ragged", 9, 50, 30, 2, 4, 4),
+    ("m_ragged_deep", 17, 45, 45, 3, 8, 8),
 ]
 
 

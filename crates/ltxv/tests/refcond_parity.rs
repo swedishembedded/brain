@@ -224,6 +224,14 @@ fn ltxv_refcond_mask_downsample_matches_reference() {
         ("m_basic", 9, 32, 32, 2, 4, 4),
         ("m_single_frame", 1, 16, 16, 1, 2, 2),
         ("m_deep", 17, 64, 32, 3, 8, 4),
+        // Ratios that do NOT divide evenly. The area average is torch's
+        // ADAPTIVE rule, which collapses to a plain box pool whenever the
+        // ratio divides - and every ratio the VAE produces does, so the three
+        // cases above cannot tell the two rules apart. Found by mutation: a
+        // cell end that floors instead of ceiling survived this gate until
+        // these two were added.
+        ("m_ragged", 9, 50, 30, 2, 4, 4),
+        ("m_ragged_deep", 17, 45, 45, 3, 8, 8),
     ];
     for &(name, fp, hp, wp, lf, lh, lw) in cases {
         let mask = fx.get(&format!("{name}.mask"));

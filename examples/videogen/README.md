@@ -125,37 +125,58 @@ variables) skips the fetch entirely.
 
 ## Swapping a character in an existing clip
 
-`character_swap.sh` takes a clip, a folder of images of the character you want
-in it, and a point identifying which character to replace:
+`character_swap.sh` takes a clip, a mask sequence, and a prompt describing the
+whole frame:
 
 ```bash
-PIN="640,300@0;700,320@48" examples/videogen/character_swap.sh stunt.mp4 actor/ out.mp4
+brain sam2 track --video stunt.mp4 --point 640,300 --out masks/
+examples/videogen/character_swap.sh stunt.mp4 masks/ "a woman in a red coat" out.mp4
 ```
 
-**It does not produce `out.mp4`, and the script says so.** What it writes is the
-two control signals such a swap needs -- a Canny structure reference that pins
-choreography, camera and background, and a mask video that pins *which*
-character the reference governs. The generation step needs an LTX-2.5 IC-LoRA
-trained for edge control, and Lightricks has published exactly one IC-LoRA for
-LTX-2.5: a spatial upscaler. Canny/depth/pose control adapters exist only for
-the older LTX-2.3-22b and LTX-2-19b checkpoints, and a LoRA only works with the
-model it was trained on.
+The mechanism is **masked conditioning** -- LTX-2.5's `VideoConditionByMask`,
+ported and parity-gated in `ltxv::maskcond` and driven by `brain ltxv v2v`.
+Every latent position the mask marks as conditioning is handed the source
+clip's own latent and excluded from denoising, so the set, the camera move and
+the lighting come out of the sampler **bit-exactly unchanged** rather than
+merely similar; everything else is renoised and redrawn from the prompt.
 
-Two further things worth knowing before you plan around this: `IC-LoRA` is
-*In-Context* LoRA, and its reference slot holds exactly one thing. Each adapter
-is trained for one reading of that slot -- Union-Control reads a structure
-signal, LTX-2.3's `Ingredients` reads a character reference sheet -- so "lock
-the choreography *and* inject the actor" wants two incompatible trained meanings
-in one slot. On LTX-2.5 today, who the new character is comes from the prompt. And the diffusion video decoder
-maps a latent to pixels with no identity input at all, so it cannot paint a face
-onto a body. The conditioning mechanism itself is ported and parity-gated in
-`ltxv::refcond`: the token layout, the remapped RoPE position bounds, the
-denoise/keyframe markers and the per-region attention cross-mask an IC-LoRA
-needs. What it does NOT provide, and what nothing can provide today, is the
-trained adapter that gives those appended tokens meaning -- no LTX-2.5
-structural-control IC-LoRA exists. So the reference-conditioning path is
-available and gated, and the character swap it was investigated for is not
-reachable on LTX-2.5 through it.
+Mind the polarity, because it is inverted from intuition and it is the one
+thing here that fails silently: in LTX's own convention `mask = 1` is the
+CONDITIONING position (kept), so a character swap masks the BACKGROUND at 1.
+`brain sam2 track` writes SAM 2's native meaning (white = the tracked subject)
+and records which convention is on disk in `masks.json`; the reader honours
+that field and refuses to run if it is missing or unrecognised, rather than
+guessing and preserving the character while regenerating the entire set.
+
+**What this does NOT give you is an identity swap.** Nothing in this path takes
+a face crop or a per-subject embedding, so who the new character is comes from
+the prompt alone. That is not a gap in the script: the adapter route to it does
+not exist either. Lightricks has published exactly one IC-LoRA for LTX-2.5 and
+it is a pixel spatial upscaler; the Canny/depth/pose/union control adapters are
+LTX-2.3-22b and LTX-2-19b only, and a LoRA works only with the model it was
+trained on. The IC-LoRA conditioning mechanism itself is ported and gated in
+`ltxv::refcond` -- the token layout, the remapped RoPE position bounds, the
+denoise/keyframe markers, the per-region attention cross-mask -- so the day such
+an adapter exists, the plumbing is there. Masked conditioning is the better
+route regardless: it does not depend on an adapter having learned to attend
+across appended tokens, and it preserves exactly rather than structurally.
+
+The script stops rather than pretending whenever a step cannot run: no
+`BRAIN_LTXV_VAE` (the conditioning is defined on that latent and there is no
+stand-in), a clip that is not VAE-representable (1 + 8k frames on a 32-pixel
+grid -- it will not trim, because that would desync a mask sequence produced by
+a separate run), or a mask sequence whose frame count or resolution disagrees
+with the clip. Without `BRAIN_LTXV_DIT` it runs the tiny random-weight DiT and
+says so: the replaced region becomes noise, but the preservation check is still
+real, which makes it a genuine end-to-end test of the conditioning.
+
+That check is the last thing the script prints -- the mean |delta| between
+input and output inside the replaced region and inside the preserved one. A
+preserved value near zero against a much larger replaced value is the
+conditioning working. The two being equal means the mask never reached the
+sampler. It is not exactly zero at the boundary because the VAE decoder is
+convolutional, so a changed latent bleeds a little into its neighbours' pixels.
+
 
 ---
 

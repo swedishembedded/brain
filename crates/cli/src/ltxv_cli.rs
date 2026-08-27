@@ -9,6 +9,7 @@
 //! ```text
 //! brain ltxv t2v --prompt "a cat walking on a beach" --seed 42 --output-path out.mp4
 //! brain ltxv upscale --input out.mp4 --output-path out_2x.mp4 --prompt "a cat walking on a beach"
+//! brain ltxv v2v --input stunt.mp4 --mask masks/ --prompt "a woman in a red coat" --output-path swapped.mp4
 //! ```
 //!
 //! **`--dit-config` decides whether any of this is a quality claim.** The VAE
@@ -22,7 +23,7 @@
 //! encoder. See `ltxv::pipeline`'s module doc for the full account of what
 //! is real and what is not.
 
-use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, LongOpts, Paths, UpscaleOpts};
+use ltxv::pipeline::{DfrOpts, DfrPaths, GenOpts, LongOpts, MaskedOpts, Paths, UpscaleOpts};
 
 const HELP: &str = r#"brain ltxv t2v - LTX-2.5 text to video (M4 smoke test: real VAE + tiny random-weight DiT, no real text encoder yet)
 
@@ -253,6 +254,7 @@ Devices:
 Subcommands:
   brain ltxv t2v --help       text to video (this command)
   brain ltxv upscale --help   re-render a finished clip at 2x
+  brain ltxv v2v --help       regenerate a masked region of an existing clip
   brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test"#;
 
 const UPSCALE_HELP: &str = r#"brain ltxv upscale - re-render a finished clip at twice its resolution
@@ -412,6 +414,12 @@ pub fn run_ltxv(args: &[String]) {
                 std::process::exit(1);
             }
         }
+        "v2v" => {
+            if let Err(e) = v2v(&args[1..]) {
+                eprintln!("ltxv v2v: {e}");
+                std::process::exit(1);
+            }
+        }
         "dfr" => {
             if let Err(e) = dfr(&args[1..]) {
                 eprintln!("ltxv dfr: {e}");
@@ -424,6 +432,85 @@ pub fn run_ltxv(args: &[String]) {
         }
     }
 }
+
+const V2V_HELP: &str = r#"brain ltxv v2v - regenerate a masked region of an existing clip
+
+Usage:
+  brain ltxv v2v --input <clip.mp4> --mask <dir> --prompt <text> --output-path <out.mp4>
+
+Every latent position the mask marks as CONDITIONING is handed the source
+clip's own latent and excluded from denoising, so it leaves the sampler
+bit-exactly unchanged; everything else is renoised and redrawn from the
+prompt. That is LTX-2.5's own `VideoConditionByMask` (ported in
+`ltxv::maskcond`), and it needs no adapter - which matters, because the only
+IC-LoRA published for LTX-2.5 is a pixel spatial upscaler, so the adapter
+route to this is closed.
+
+The clip's size is the output size: this runs ONE stage at the source's own
+resolution and never rescales. It must be VAE-representable - 1 + 8k frames on
+a 32-pixel grid - and it is refused rather than trimmed, because trimming
+would desync it from a mask sequence produced by a separate run.
+
+Required:
+  --input <file>            the clip to edit (anything ffmpeg reads)
+  --mask <dir>              a `brain/sam2-maskseq/1` mask-sequence directory:
+                            one 8-bit PNG per source frame at the source
+                            resolution, plus a masks.json giving the file
+                            pattern, the frame count, the resolution and the
+                            POLARITY. brain's SAM 2 video tracker writes one.
+                            The polarity is read from that manifest and never
+                            inferred: the TRACKED OBJECT is what gets
+                            regenerated, and reading it backwards would
+                            preserve the subject and redraw the entire set.
+                            A frame count or resolution that disagrees with
+                            the clip is an error, never reconciled. A frame
+                            the tracker marks occluded (object_score < 0) is
+                            conditioned FULLY, so the edit simply does not
+                            happen there rather than the frame dissolving.
+  --prompt <text>           what the WHOLE frame shows - the model denoises
+                            the regenerated region in the context of the
+                            carried one. Identity comes from the prompt; no
+                            face crop or per-subject embedding enters here.
+  --output-path <file>      .mp4 / .mkv / .webm / .gif; without ffmpeg the
+                            frames are written as numbered PPMs
+
+Sampling:
+  --strength <S>            how hard the mask's conditioning region is pinned
+                            (default 1.0 = bit-exact; lower lets it drift
+                            toward the prompt)
+  --steps <N>               denoise steps (default 4; IGNORED for
+                            --dit-config ltx25_22b, whose distilled schedule
+                            has a fixed shape)
+  --guidance <G>            classifier-free guidance (default 1.0; <= 1.0
+                            skips the unconditional forward entirely)
+  --seed <S>                noise seed (default 0)
+  --fps <N>                 frame rate for the output. Default: whatever
+                            ffprobe reports for --input
+  --dit-config <name>       "tiny" (default, fresh random weights - a wiring
+                            proof, and enough to verify that the carried
+                            region really is carried) or "ltx25_22b" for the
+                            real checkpoint (needs --dit/$BRAIN_LTXV_DIT)
+
+Sound:
+  This pass conditions a VIDEO latent and never runs the audio stream, so the
+  output has NO sound track. The source's own audio stays in --input, and
+  re-attaching it is a separate ffmpeg mux.
+
+Weights:
+  --vae <path>              $BRAIN_LTXV_VAE       the causal 3D video VAE
+  --dit <path>              $BRAIN_LTXV_DIT       real 22B DiT GGUF (only
+                                                   read when --dit-config
+                                                   names the real model)
+  --text-encoder <path>     $BRAIN_LTXV_TEXT_ENCODER  real Gemma-4 text
+                                                   encoder; without it the
+                                                   prompt reaches a stub
+                            $BRAIN_LTXV_UPSAMPLER_SPATIAL and
+                            $BRAIN_LTXV_AUDIO_VAE are not read by this
+                            command - it never upscales and never generates
+                            sound.
+
+Placement:
+  --device <cpu|gpu>        DiT + VAE (default: the ambient BRAIN_DEVICE)"#;
 
 fn t2v(args: &[String]) -> Result<(), String> {
     let mut o = GenOpts::default();
@@ -820,6 +907,113 @@ fn upscale(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Masked video-to-video: the clip and its mask sequence in, the same clip
+/// with one region redrawn out.
+///
+/// Shaped like [`upscale`] - decode the input with ffmpeg, hand the pipeline a
+/// `Video`, encode what comes back - because the difference between the two is
+/// entirely in what the pipeline does with the latent, not in the file
+/// handling.
+fn v2v(args: &[String]) -> Result<(), String> {
+    let mut o = MaskedOpts::default();
+    let mut prompt: Option<String> = None;
+    let mut input: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut vae: Option<String> = None;
+    let mut dit: Option<String> = None;
+    let mut text_encoder: Option<String> = None;
+    let mut fps: Option<usize> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
+        let num = |i: usize, what: &str| -> Result<usize, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        let flt = |i: usize, what: &str| -> Result<f32, String> { need(i)?.parse().map_err(|e| format!("{what}: {e}")) };
+        match args[i].as_str() {
+            "--prompt" => prompt = Some(need(i)?.clone()),
+            "--input" | "--in" => input = Some(need(i)?.clone()),
+            "--mask" => o.mask_dir = need(i)?.clone(),
+            "--output-path" | "--out" => out = Some(need(i)?.clone()),
+            "--strength" => o.strength = flt(i, "--strength")?,
+            "--steps" => o.base.steps = num(i, "--steps")?,
+            "--guidance" => o.base.guidance = flt(i, "--guidance")?,
+            "--seed" => o.base.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
+            "--fps" => fps = Some(num(i, "--fps")?),
+            "--dit-config" => o.base.dit_config = need(i)?.clone(),
+            "--device" => o.base.device = Some(need(i)?.clone()),
+            "--vae" => vae = Some(need(i)?.clone()),
+            "--dit" => dit = Some(need(i)?.clone()),
+            "--text-encoder" => text_encoder = Some(need(i)?.clone()),
+            "--help" | "-h" => {
+                println!("{V2V_HELP}");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown flag {other}\n\n{V2V_HELP}")),
+        }
+        i += 2;
+    }
+    let input = input.ok_or("--input is required")?;
+    let out = out.ok_or("--output-path is required")?;
+    let prompt = prompt.ok_or("--prompt is required: the model denoises the regenerated region against the text context, and an empty one costs exactly the detail this command exists to produce")?;
+    if o.mask_dir.is_empty() {
+        return Err("--mask is required: without a mask this command has nothing to regenerate and would return the input clip".into());
+    }
+    let paths = Paths::resolve(vae.as_deref(), dit.as_deref(), text_encoder.as_deref(), None)?;
+
+    let in_path = std::path::Path::new(&input);
+    let decoded = imaging::video::decode_frames_rgb8(in_path, &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0 })?;
+    let (w, h) = (decoded[0].w, decoded[0].h);
+    if let Some(bad) = decoded.iter().position(|f| (f.w, f.h) != (w, h)) {
+        return Err(format!("{input} changes size at frame {bad} ({}x{} after {w}x{h}) - a clip has one resolution", decoded[bad].w, decoded[bad].h));
+    }
+    // The source's own rate, so an edit never silently changes playback speed.
+    let fps = fps.unwrap_or_else(|| imaging::video::probe_fps(in_path).map(|f| f.round() as usize).filter(|&f| f > 0).unwrap_or(o.base.fps));
+    o.base.fps = fps;
+    let clip = ltxv::pipeline::Video { width: w, height: h, fps, frames: decoded.into_iter().map(|f| f.px).collect(), audio: None };
+
+    let ctx_desc = if paths.text_encoder.is_some() { "real Gemma-4 text encoder" } else { "stub text context (no real encoder)" };
+    let dit_desc = if o.base.dit_config == "tiny" { "tiny random-weight DiT" } else { "REAL checkpoint DiT (int8 compute)" };
+    eprintln!(
+        "ltxv v2v ({dit_desc}, real VAE, {ctx_desc}): {} frames, {w}x{h} at {fps} fps, mask {}, strength {}, guidance {}, seed {}",
+        clip.frames.len(),
+        o.mask_dir,
+        o.strength,
+        o.base.guidance,
+        o.base.seed
+    );
+
+    let t0 = std::time::Instant::now();
+    // A one-shot CLI run has no second party to cancel it - see `t2v`'s
+    // identical reasoning.
+    let cancel = capability::CancelToken::default();
+    let (video, timings) = ltxv::pipeline::generate_masked(&paths, &prompt, &clip, &o, &cancel, |done, total, phase| {
+        eprint!("\rltxv v2v [{done}/{total}] {phase}                    ");
+    })?;
+    eprintln!();
+    let wall = t0.elapsed().as_secs_f32();
+    eprintln!(
+        "ltxv v2v: {wall:.1}s total  (build {:.2}s, text encode {:.1}s, denoise {:.1}s = {:.3}s/forward, vae {:.1}s, other {:.1}s)",
+        timings.build_dit,
+        timings.text_encode,
+        timings.denoise,
+        timings.secs_per_forward(),
+        timings.decode,
+        timings.unattributed(wall)
+    );
+
+    let (out_w, out_h, out_fps) = (video.width, video.height, video.fps);
+    let frames: Vec<imaging::Rgb8> = video.frames.into_iter().map(|px| imaging::Rgb8::new(out_w, out_h, px)).collect::<Result<_, _>>()?;
+    match imaging::video::encode_frames(&frames, std::path::Path::new(&out), out_fps as f64, &Default::default())? {
+        imaging::video::Encoded::Video(p) => {
+            eprintln!("ltxv v2v: wrote {} ({out_w}x{out_h}, {} frames at {out_fps} fps, no sound - see --help)", p.display(), frames.len());
+        }
+        imaging::video::Encoded::Frames { dir, command, audio: _ } => {
+            eprintln!("ltxv v2v: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
+            eprintln!("ltxv v2v: finish the job with:\n  {command}");
+        }
+    }
+    Ok(())
+}
+
 fn dfr(args: &[String]) -> Result<(), String> {
     let mut o = DfrOpts::default();
     let mut prompt: Option<String> = None;
@@ -990,13 +1184,34 @@ mod tests {
         assert!(super::UPSCALE_HELP.contains(&ltxv::pipeline::REFINE_MAX_TOKENS.to_string()), "the refinement token ceiling in upscale --help is not REFINE_MAX_TOKENS");
     }
 
+    /// Same self-check as [`every_flag_the_parser_accepts_is_documented`],
+    /// scoped to `v2v`'s own flags and help text.
+    #[test]
+    fn every_v2v_flag_the_parser_accepts_is_documented() {
+        let src = include_str!("ltxv_cli.rs");
+        for flag in ["--prompt", "--input", "--mask", "--output-path", "--strength", "--steps", "--guidance", "--seed", "--fps", "--dit-config", "--device", "--vae", "--dit", "--text-encoder"] {
+            assert!(super::V2V_HELP.contains(flag), "{flag} is parsed but not in v2v --help");
+            assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in v2v --help but not parsed");
+        }
+        for (var, _) in ltxv::pipeline::PATH_VARS {
+            assert!(super::V2V_HELP.contains(var), "{var} is read but not in v2v --help");
+        }
+        for (var, _) in ltxv::pipeline::OPTIONAL_PATH_VARS {
+            assert!(super::V2V_HELP.contains(var), "{var} is read but not in v2v --help");
+        }
+        // The interchange format this command consumes is a contract with a
+        // separate producer, so its version string is in the help verbatim
+        // rather than paraphrased.
+        assert!(super::V2V_HELP.contains(ltxv::maskcond::MASKSEQ_FORMAT), "the mask-sequence format v2v --help names is not MASKSEQ_FORMAT");
+    }
+
     /// Every subcommand `run_ltxv` dispatches has to be listed in the help a
     /// bare `brain ltxv` prints, or it is reachable only by reading the
     /// source.
     #[test]
     fn every_subcommand_is_listed() {
         let src = include_str!("ltxv_cli.rs");
-        for sub in ["t2v", "upscale", "dfr"] {
+        for sub in ["t2v", "upscale", "v2v", "dfr"] {
             assert!(src.contains(&format!("\"{sub}\"")), "{sub} is listed but not dispatched");
             assert!(super::HELP.contains(&format!("brain ltxv {sub}")), "{sub} is dispatched but not in --help");
         }

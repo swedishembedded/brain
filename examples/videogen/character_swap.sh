@@ -3,152 +3,110 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 #
-# Swap a character in an existing clip, keeping choreography, camera and set.
+# Replace one character in an existing clip, keeping the set, the camera move
+# and the lighting BIT-EXACTLY.
 #
-#   examples/videogen/character_swap.sh <clip.mp4> <character-image-dir> [out.mp4]
+#   examples/videogen/character_swap.sh <clip.mp4> <masks/> "<prompt>" [out.mp4]
 #
-# READ THIS FIRST -- the swap CANNOT be completed today, and this script stops
-# short of it on purpose rather than pretending. What blocks it is not effort,
-# it is that the required trained weights do not exist:
+# The mechanism is masked conditioning -- LTX-2.5's `VideoConditionByMask`,
+# ported and parity-gated in `ltxv::maskcond`. Every latent position the mask
+# marks as conditioning is handed the source clip's own latent and excluded
+# from denoising, so it comes out of the sampler unchanged rather than merely
+# similar; everything else is renoised and redrawn from the prompt. That needs
+# no adapter, which matters: Lightricks has published exactly ONE IC-LoRA for
+# LTX-2.5 and it is a pixel spatial upscaler, so the adapter route to this is
+# closed. See `examples/videogen/README.md`.
 #
-#   * The mechanism that locks an existing clip's motion is an IC-LoRA -- an
-#     "In-Context LoRA" (NOT "Identity & Composition"). It appends the control
-#     video's latent tokens to the sequence as frozen reference tokens, and the
-#     ADAPTER is what teaches the model to attend across them. See
-#     `ltxv::refcond` for the ported mechanism and its parity gate.
-#   * Lightricks has published exactly ONE IC-LoRA for LTX-2.5, and it is a
-#     pixel spatial upscaler. There is no Canny, depth, pose or union control
-#     adapter for LTX-2.5. Those exist only for the older LTX-2.3-22b
-#     (Union-Control = Canny+Depth+Pose) and LTX-2-19b checkpoints, and a LoRA
-#     only ever works with the model it was trained on.
-#   * The reference slot holds ONE thing, and that is what kills the plan. An
-#     IC-LoRA is trained for one reference SEMANTICS: Union-Control reads it as
-#     a structure signal, while LTX-2.3's Ingredients IC-LoRA reads it as a
-#     character reference sheet. So "lock the choreography AND inject the
-#     actor" needs both meanings in one slot, from two adapters trained
-#     separately. Ingredients also generates FROM its sheet rather than
-#     preserving an input clip, and there is no LTX-2.5 build of it either.
-#     Nothing in this path takes a face crop or a per-subject embedding, so on
-#     LTX-2.5 today "who" the new character is comes from the prompt alone.
-#   * The diffusion video decoder does not help either: it maps a latent to
-#     pixels (`decode_video(latent, tiling, generator)`) and has no identity
-#     input of any kind. It cannot paint a face onto a body.
+# <masks/> is a `brain/sam2-maskseq/1` directory -- one 8-bit PNG per source
+# frame plus a `masks.json` naming the pattern, the frame count, the source
+# resolution and the POLARITY. Produce one by clicking the character once:
 #
-# So what this script DOES do is produce, from your inputs, the two control
-# signals such a swap needs, both of which are real and both of which are
-# exactly what you would feed an IC-LoRA once you have one:
+#   brain sam2 track --video stunt.mp4 --point 640,300 --out masks/
 #
-#   <out>.control.mp4  the structure reference: a Canny edge video of the
-#                      source. This is what pins body position, physics, camera
-#                      move and background, frame for frame.
-#   <out>.mask.mp4     the character pin: which region the reference is allowed
-#                      to govern. White = keep the source structure, black =
-#                      regenerate freely from the prompt. Feeding this as the
-#                      conditioning attention mask is how you say WHICH of
-#                      several characters gets replaced.
+# Either polarity works -- the manifest states which one is on disk and the
+# reader honours it, so `--invert` is not needed here. What is not optional is
+# that the manifest state it AT ALL: the reader refuses to guess, because
+# guessing backwards preserves the character and regenerates the entire set.
+# A frame the tracker marks occluded is conditioned fully, so the swap simply
+# does not happen on that frame rather than the frame dissolving.
 #
-# PIN picks the character by a point on a frame, segmented with SAM 2.1.
-# brain's SAM 2.1 is the IMAGE path only -- the video memory bank is out of
-# scope there -- so a single point on frame 0 cannot be propagated through the
-# clip. Instead give a point per keyframe and the mask is held between them:
+# The prompt describes the WHOLE frame, not just the replacement -- the model
+# denoises the masked region in the context of everything around it. Identity
+# comes from the prompt alone; nothing in this path takes a face crop or a
+# per-subject embedding.
 #
-#   PIN="640,300"                 one point, frame 0, held for the whole clip
-#   PIN="640,300@0;700,320@48"    re-pin at frame 48 (a point per keyframe)
+# Optional, all env: STRENGTH (1.0 pins the conditioned region exactly, lower
+# lets it drift), SEED, STEPS, GUIDANCE, BRAIN_DEVICE, BRAIN.
 #
-# Only the first form is honest for a locked-off shot; anything with real
-# camera or subject movement wants several. This is the nearest true thing to
-# "click the stuntman once" that the parts on hand support.
-#
-# The character images are checked and passed through for the prompt you will
-# write, but note again that they do NOT bind identity anywhere in this path.
-#
-# Optional, all env: PIN, PROMPT, FPS, WIDTH, HEIGHT, EDGE_LOW, EDGE_HIGH,
-# KEEP_FRAMES, BRAIN_DEVICE, BRAIN.
-#
-# Weights: BRAIN_SAM2_WEIGHTS for the mask. ffmpeg does the rest.
+# Weights: BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE}. Without BRAIN_LTXV_DIT this runs
+# the tiny random-weight DiT instead, which is a real end-to-end test of the
+# conditioning (the preservation check below still passes) but paints noise
+# into the replaced region. The script says which of the two it ran.
 
 set -euo pipefail
 
-CLIP="${1:?usage: character_swap.sh <clip.mp4> <character-image-dir> [out.mp4]}"
-CHARS="${2:?a directory of images of the target character is required}"
-OUT="${3:-swapped.mp4}"
+CLIP="${1:?usage: character_swap.sh <clip.mp4> <masks/> \"<prompt>\" [out.mp4]}"
+MASKS="${2:?a brain/sam2-maskseq/1 directory is required (brain sam2 writes one)}"
+PROMPT="${3:?a prompt describing the whole frame is required}"
+OUT="${4:-swapped.mp4}"
 BRAIN="${BRAIN:-./target/release/brain}"
-BASE="${OUT%.*}"
-WORK="$BASE.work"
 
 [ -f "$CLIP" ] || { echo "no clip at $CLIP" >&2; exit 1; }
-[ -d "$CHARS" ] || { echo "no character image directory at $CHARS" >&2; exit 1; }
-NCHAR=$(find "$CHARS" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) | wc -l)
-[ "$NCHAR" -gt 0 ] || { echo "$CHARS holds no .png/.jpg images" >&2; exit 1; }
+[ -f "$MASKS/masks.json" ] || { echo "$MASKS holds no masks.json - see this script's header" >&2; exit 1; }
 
-FPS="${FPS:-$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
-  -of default=nw=1:nk=1 "$CLIP" | awk -F/ '{printf "%d", ($2?$1/$2:$1)}')}"
-IFS=, read -r W H <<<"$(ffprobe -v error -select_streams v:0 \
-  -show_entries stream=width,height -of csv=p=0 "$CLIP")"
-W="${WIDTH:-$W}"; H="${HEIGHT:-$H}"
+# Read by KEY, not by position: ffprobe emits these in its own order, not the
+# order they are asked for, and a positional read silently swaps the frame
+# count with the frame rate.
+while IFS='=' read -r k v; do
+  case "$k" in
+    width) W="$v" ;; height) H="$v" ;; nb_read_frames) NF="$v" ;;
+    r_frame_rate) FPS=$(awk -F/ '{printf "%d", ($2 ? $1 / $2 : $1)}' <<<"$v") ;;
+  esac
+done < <(ffprobe -v error -select_streams v:0 -count_frames \
+  -show_entries stream=width,height,r_frame_rate,nb_read_frames -of default=nw=1 "$CLIP")
 
-rm -rf "$WORK"; mkdir -p "$WORK/frames"
-ffmpeg -v error -y -i "$CLIP" -vf "scale=$W:$H" "$WORK/frames/%06d.ppm"
-NF=$(find "$WORK/frames" -name '*.ppm' | wc -l)
-echo "character_swap: $NF frames at ${W}x${H} @ ${FPS}fps, $NCHAR character image(s)" >&2
-
-# ---- 1. structure reference: Canny edges, the real control signal ----------
-ffmpeg -v error -y -i "$CLIP" \
-  -vf "scale=$W:$H,edgedetect=low=${EDGE_LOW:-0.1}:high=${EDGE_HIGH:-0.4}" \
-  -r "$FPS" "$BASE.control.mp4"
-
-# ---- 2. character pin: SAM 2.1 masks at the pinned keyframes ---------------
-PIN="${PIN:-}"
-if [ -z "$PIN" ]; then
-  echo "character_swap: no PIN given, so the whole frame is pinned (every" >&2
-  echo "  character would be replaced). Pass PIN=\"x,y\" to pick one." >&2
-  ffmpeg -v error -y -f lavfi -i "color=white:s=${W}x${H}:r=$FPS" \
-    -frames:v "$NF" "$BASE.mask.mp4"
-else
-  mkdir -p "$WORK/mask"
-  # Parse "x,y@frame;..." into a sorted keyframe list; a bare "x,y" is frame 0.
-  KFS=$(echo "$PIN" | tr ';' '\n' | awk -F@ '{f=($2==""?0:$2); print f"\t"$1}' | sort -n)
-  echo "$KFS" | while IFS=$'\t' read -r f pt; do
-    [ -n "$pt" ] || continue
-    SRC=$(printf "$WORK/frames/%06d.ppm" $((f + 1)))
-    [ -f "$SRC" ] || { echo "PIN frame $f is past the end of the clip" >&2; exit 1; }
-    "$BRAIN" sam2 segment --in image="$SRC" points="$pt" \
-      --out mask="$WORK/mask/$(printf '%06d' "$f").ppm" >/dev/null
-  done
-  # Hold each keyframe's mask until the next one, so the pin covers every frame.
-  python3 - "$WORK" "$NF" <<'PY'
-import sys, pathlib, shutil
-work, nf = pathlib.Path(sys.argv[1]), int(sys.argv[2])
-md = work / "mask"
-keys = sorted(int(p.stem) for p in md.glob("*.ppm"))
-if not keys:
-    raise SystemExit("character_swap: SAM 2.1 produced no masks")
-out = work / "maskseq"; out.mkdir(exist_ok=True)
-cur = keys[0]
-for i in range(nf):
-    while keys and i >= keys[0]:
-        cur = keys.pop(0)
-    shutil.copyfile(md / f"{cur:06d}.ppm", out / f"{i:06d}.ppm")
-PY
-  ffmpeg -v error -y -framerate "$FPS" -i "$WORK/maskseq/%06d.ppm" \
-    -vf "scale=$W:$H,format=gray" "$BASE.mask.mp4"
+# The causal VAE can only represent 1+8k frames on a 32-pixel grid. Trimming
+# the clip here would desync it from a mask sequence produced separately, so
+# this stops and says what to regenerate rather than silently shifting frames.
+if [ $(( (NF - 1) % 8 )) -ne 0 ] || [ $(( W % 32 )) -ne 0 ] || [ $(( H % 32 )) -ne 0 ]; then
+  echo "character_swap: ${W}x${H}, $NF frames is not VAE-representable (1+8k frames, 32-pixel grid)." >&2
+  echo "  Re-cut the clip AND re-track the masks at the same length, e.g.:" >&2
+  echo "    ffmpeg -i $CLIP -vf scale=$((W/32*32)):$((H/32*32)) -frames:v $(( (NF-1)/8*8 + 1 )) cut.mp4" >&2
+  exit 1
 fi
 
-[ -n "${KEEP_FRAMES:-}" ] || rm -rf "$WORK"
+[ -n "${BRAIN_LTXV_VAE:-}" ] || { echo "character_swap: BRAIN_LTXV_VAE is not set, so this stops here. The clip has" >&2
+  echo "  to go through the real LTX-2.5 video VAE to reach latent space, and there" >&2
+  echo "  is no stand-in for it: the conditioning is defined ON that latent." >&2; exit 1; }
 
-cat >&2 <<EOF
+REAL=(--dit-config ltx25_22b)
+[ -n "${BRAIN_LTXV_DIT:-}" ] || { REAL=(--dit-config tiny); echo "character_swap: no BRAIN_LTXV_DIT - running the tiny random-weight DiT. The" >&2; echo "  preservation check below is still real; the replaced region will be noise." >&2; }
 
-character_swap: control signals written.
-  $BASE.control.mp4   Canny structure reference (locks motion, camera, set)
-  $BASE.mask.mp4      character pin (white = hold structure, black = regenerate)
+"$BRAIN" ltxv v2v --input "$CLIP" --mask "$MASKS" --prompt "$PROMPT" \
+  --strength "${STRENGTH:-1.0}" --seed "${SEED:-7}" --steps "${STEPS:-8}" \
+  --guidance "${GUIDANCE:-1.0}" --fps "$FPS" "${REAL[@]}" --output-path "$OUT"
 
-NOT written: $OUT. Generating it needs an LTX-2.5 IC-LoRA trained for edge
-control, and none is published -- see this script's header. Two honest routes:
-
-  1. Train one. packages/ltx-trainer/configs/v2v_ic_lora.yaml is the config and
-     wants a reference_latents/ dataset; the pair above is one sample of it.
-  2. Run the control video through LTX-2.3-22b with its published
-     IC-LoRA-Union-Control (Canny+Depth+Pose) in the reference pipeline. That
-     preserves choreography -- but the new character comes from the PROMPT, so
-     it is a structure-preserving restyle, not an identity swap.
-EOF
+# ---- the test: the conditioned region must be preserved, the rest must move.
+# Decoded pixels near a mask boundary bleed (the VAE decoder is convolutional),
+# so this measures the two regions' mean |delta| and reports the ratio rather
+# than asserting an exact zero.
+python3 - "$CLIP" "$OUT" "$MASKS" <<'PY'
+import json, subprocess, sys, numpy as np
+from PIL import Image
+clip, out, masks = sys.argv[1:4]
+man = json.load(open(f"{masks}/masks.json"))
+w, h = man["width"], man["height"]
+def frames(p):
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", p, "-f", "rawvideo",
+                          "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(-1, h, w, 3).astype(np.float32)
+a, b = frames(clip), frames(out)
+n = min(len(a), len(b))
+obj = np.stack([np.asarray(Image.open(f"{masks}/{man['pattern'] % i}").convert("L")) for i in range(n)]) > 127
+if man["polarity"] == "object=0":
+    obj = ~obj
+d = np.abs(a[:n] - b[:n]).mean(-1)
+print(f"character_swap: mean |delta| replaced={d[obj].mean():.2f}  preserved={d[~obj].mean():.2f}")
+print("  a preserved value near 0 with a much larger replaced value is the conditioning working;")
+print("  the two being equal means the mask never reached the sampler.")
+PY
