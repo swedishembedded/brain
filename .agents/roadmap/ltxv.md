@@ -8307,3 +8307,172 @@ the sending card's bytes, so a handoff cannot measure fast by moving nothing.
   this driver has. `--test-threads=1` passes in under a second. The default
   `TEST_THREADS=8` reaches it. Not fixed here - it is unrelated to this
   phase - but it is a live trap for anyone running the suite.
+
+### Phase 37 - IC-LoRA reference conditioning, and the character-swap claim it does not support
+
+Asked for an identity-preserving character swap in an existing clip, driven by
+a description of LTX-2.5 as having "structural control layers built natively
+into the inference pipeline" (a "Canny IC-LoRA" node), identity injected through
+the image-to-video path, and a diffusion decoder that "dynamically paints the
+target actor's face onto the stuntman's moving body". Verified first. Most of
+that is wrong, and the parts that are right are not arranged the way it says.
+
+#### 1 - what the reference actually has
+
+* **`ICLoraPipeline` is real, and it is bring-your-own-adapter.** Its own
+  docstring (`packages/ltx-pipelines/src/ltx_pipelines/ic_lora.py:60-69`) says
+  "The specific IC-LoRA model should be provided via the loras parameter", and
+  `main()` passes whatever `--lora` gave it. Nothing structural is "built into"
+  the pipeline: `--video-conditioning` only appends reference tokens, and
+  `reference_video_cond.py:15-18` states that attending across them is what the
+  ADAPTER was trained to do. Feeding reference tokens with no matching IC-LoRA
+  is an out-of-distribution sequence, not a weaker control.
+* **`IC` is `In-Context`, not "Identity & Composition"** - the trainer config
+  header (`packages/ltx-trainer/configs/v2v_ic_lora.yaml`) and every Lightricks
+  model card say so. Identity is not simply absent, though, and the precise
+  shape of the problem is worth carrying: **the reference slot holds exactly one
+  thing, and each adapter is trained for one reading of it.** Union-Control
+  reads it as a structure signal; `LTX-2.3-22b-IC-LoRA-Ingredients` (tagged
+  `character-consistency`, `reference-sheet`) reads it as a character/prop
+  reference sheet. "Lock the choreography AND inject the actor" therefore wants
+  two incompatible trained semantics in one slot. Ingredients also GENERATES
+  from its sheet rather than preserving an input clip, and has no LTX-2.5 build.
+  No path anywhere here accepts a face crop or a per-subject embedding.
+* **There is no Canny control mode in the pipelines package.** The only
+  case-insensitive "canny" hits under `ltx-pipelines` are the word "uncanny"
+  inside negative prompts. Canny appears in the TRAINER as a way to build your
+  own reference dataset (`packages/ltx-trainer/scripts/compute_reference.py`,
+  `docs/dataset-preparation.md:437` and its `Lightricks/Canny-Control-Dataset`).
+* **The diffusion decoder cannot paint a face.** `DiffusionVideoDecoder`'s
+  entire signal input is the latent: `decode_video(latent, tiling_config,
+  generator)` (`packages/ltx-core/.../video_vae/diffusion_video_decoder.py`,
+  `forward`/`decode_video`). It has no identity, text or image input of any
+  kind. Everything about who is in the frame is already fixed by the DiT.
+
+#### 2 - released weights: the finding that decides the whole task
+
+Enumerated all 57 `Lightricks` HF models. **LTX-2.5 has exactly ONE IC-LoRA:
+`LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler`, a detailer.** The structural
+control adapters exist only for older generations - `LTX-2.3-22b-IC-LoRA-Union-
+Control` (its card: "Control Type: Union conditioning - Canny + Depth + Pose"),
+`LTX-2-19b-IC-LoRA-{Canny,Depth,Pose,Union}-Control`, and 13b ones for 0.9.7 -
+and the repo README is explicit that "a LoRA only works with the model it was
+trained on". This crate builds `ltx25_22b` only, so none of them applies.
+
+Placebo-checked every candidate by range-fetching the safetensors header and
+then real weight slices (never a full download). A LoRA at default init has
+`lora_B` exactly zero; all of these are genuinely trained:
+
+| checkpoint | rank | `lora_B` std | kurtosis | frac_zero |
+| --- | --- | --- | --- | --- |
+| `LTX-2.3-22b-IC-LoRA-Union-Control` | 64 | 7.9e-3 | 3.57 | 0.0 |
+| `LTX-2-19b-IC-LoRA-Canny-Control` | 64 | 5.7e-3 | 3.63 | 0.0 |
+| `LTX-2-19b-IC-LoRA-Pose-Control` | 64 | 5.7e-3 | 3.82 | 0.0 |
+| `yuvraj108c/LTX-2.5-22b-IC-LoRA-BBox-Control` (third party) | 32 | 1.2e-2 | 1.26 | 0.0 |
+
+(`LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` is gated and returned 403 to an
+authenticated range request; its licence was not accepted on this box.) All
+960-tensor files, 48 blocks x 10 projections, `attn1/attn2/ff` - the same shape
+`lora.rs` already applies. Kurtosis is nowhere near the 1.801 of a uniform
+default init, which is the check that caught the `pulid.md` placebo.
+
+So: **an identity-preserving character swap is not achievable**, and the nearest
+real thing - structure-preserving v2v that keeps choreography, camera and set
+while the new character comes from the PROMPT - is not achievable on LTX-2.5
+either, for want of a published adapter. That is a weights fact, not a code one.
+
+#### 3 - what was built anyway, and why it is not speculative
+
+`ltxv::refcond` ports the conditioning mechanism itself: reference-token
+positions (`get_pixel_coords` re-expressed in the target frame, with the
+`downscale_factor` spatial stretch and the `temporal_scale_factor` re-spacing +
+translate + clamp), the frozen `1 - strength` denoise mask, the never-marked
+keyframe mask, and `downsample_mask_video_to_latent`. This is the primitive any
+IC-LoRA needs, whoever trains it, and it is pure geometry - so unlike the 22B
+DiT it can be pinned down exactly on this box, which is the point.
+
+* Gated by `tools/goldens/ltxv_refcond_dump_reference.py`, a **live run** of the
+  official `VideoConditionByReferenceLatent`, its attention-strength wrapper and
+  the real `iclora_utils` source - not a transcription. `torchaudio`'s native
+  library is broken here, so the one unrelated import that drags it in is
+  stubbed; the function bodies that produce the goldens are the reference's own.
+* `crates/ltxv/tests/refcond_parity.rs` asserts **cosine AND rel_l2** on every
+  tap. Cosine alone is scale-invariant and this path multiplies by
+  `downscale_factor` and divides by `fps / S` - a wrong scale is the likeliest
+  defect here and precisely the one cosine cannot see, the same trap
+  `upsampler_parity.rs` already records.
+* **The attention mask is stored factored.** The reference materialises a dense
+  `(N+M)^2` matrix; the golden asserts it is exactly reconstructible from the
+  `M`-vector of per-token weights plus `build_attention_mask`'s block structure,
+  so this crate keeps `M` numbers. At 1280x704x121 the dense form would be
+  hundreds of gigabytes for a mask that carries a few thousand distinct values.
+
+#### 3b - the gate, mutation-verified
+
+Every mutation below was applied to `refcond.rs`, the gate run, and the source
+restored. The third row is the one that matters:
+
+| mutation | caught by |
+| --- | --- |
+| `downscale_factor` spatial stretch dropped | cosine 0.999998545 (only just under the bound) |
+| reference re-spaced at `fps` instead of `fps / S` | cosine 0.999947848 |
+| **temporal translate's `clamp(min=0)` dropped** | **rel_l2 4.808e-4 ONLY - cosine was 0.999999884, i.e. ABOVE the 0.999999 bound, so a cosine-only gate would have passed this** |
+| denoise mask `strength` instead of `1 - strength` | cosine 0.707106781 |
+| mask temporal window off by one | cosine 0.999963354 |
+| mask first latent frame taken from pixel frame 1, not 0 | cosine 0.997793604 |
+| factored mask's reference rows flattened to 1.0 | cosine 0.933849528 |
+
+The third row is this repo's cosine-only lesson reproduced on new code before
+anything relied on the gate: the clamp only bites the first latent frame of a
+temporally-scaled reference, so it moves a handful of the 288 values and barely
+rotates the vector while changing its magnitude - exactly the defect class
+cosine is blind to. One mutation attempt (`let _causal = ()` after the causal
+copy) was discarded as a no-op rather than recorded as a gate weakness.
+
+#### 4 - the script, and the pin
+
+`examples/videogen/character_swap.sh` produces the two control signals a swap
+needs - a Canny structure reference (ffmpeg `edgedetect`, the same signal
+`compute_reference.py` builds) and a character-pin mask video - and then STOPS,
+naming the missing adapter. It does not call a generation action that does not
+exist.
+
+The pin is where honesty cost something. A point on frame 0 propagated through
+the clip needs video segmentation, and `crates/sam2` is the **image path only**
+- its own module doc puts the memory bank, memory attention and temporal object
+pointer explicitly out of scope. So the script takes a point PER KEYFRAME
+(`PIN="640,300@0;700,320@48"`), segments each with the real `sam2 segment`
+action, and holds each mask until the next keyframe. That is the nearest true
+thing to "click the stuntman once"; a single point is correct only for a
+locked-off shot.
+
+#### 5 - recorded, NOT done
+
+* **No `brain ltxv v2v` action.** With no LTX-2.5 control adapter to load it
+  would be unrunnable and unvalidatable, so `refcond` is wired into no pipeline
+  yet. The append helper takes the same `(base_t, base_positions,
+  base_keyframes_mask, ...)` shape `append_image_conditioning` does, so the
+  wiring is mechanical when an adapter exists.
+* **No IC-LoRA TRAINING path.** `v2v_ic_lora.yaml` wants a `reference_latents/`
+  dataset; the trainer side of that (reference latents in the loss, not just at
+  inference) is untouched here.
+* **The PIN branch was never run end to end** - `BRAIN_SAM2_WEIGHTS` is not on
+  this box, so `sam2 segment` was not invoked. The ffmpeg branches and the
+  keyframe-hold logic were both run and checked; the SAM 2.1 call is argued from
+  its action spec (`sam2::caps`, `points` as `'x,y;…'` in source pixels, a
+  `mask` blob out), not from a run.
+* **Masked / inpainting conditioning is the better next route, and is also not
+  built.** `ltx_core.conditioning.types.mask_cond.VideoConditionByMask` is real
+  (unmasked positions pinned to the clean source latent, masked positions
+  denoised normally) and, unlike IC-LoRA, is not architecturally dependent on an
+  adapter having been trained to attend across appended tokens - so it is the
+  one mechanism here that could replace a region of an EXISTING clip while
+  keeping the rest of the frame bit-exact, rather than merely structurally
+  similar. Two caveats found while checking it: NO shipped inference pipeline
+  uses it (`grep VideoConditionByMask` across `ltx-pipelines` is empty; it is
+  reachable only through the trainer's `video_inpainting_lora.yaml`), and the
+  released in/out-painting adapter is again LTX-2.3 only
+  (`LTX-2.3-22b-IC-LoRA-In-Outpainting`). brain has no masked conditioning at
+  all. The mask this phase's script already produces is exactly its input.
+* **No real-weight run of anything in this phase.** It is all geometry, gated
+  against a live reference; the 22B DiT gap above is untouched and unaffected.

@@ -123,6 +123,40 @@ command auto-fetches `Wan-AI/Wan2.1-T2V-1.3B` (17.6 GB) into
 `$BRAIN_MODELS_DIR` first. Naming all four paths (or exporting all four
 variables) skips the fetch entirely.
 
+## Swapping a character in an existing clip
+
+`character_swap.sh` takes a clip, a folder of images of the character you want
+in it, and a point identifying which character to replace:
+
+```bash
+PIN="640,300@0;700,320@48" examples/videogen/character_swap.sh stunt.mp4 actor/ out.mp4
+```
+
+**It does not produce `out.mp4`, and the script says so.** What it writes is the
+two control signals such a swap needs -- a Canny structure reference that pins
+choreography, camera and background, and a mask video that pins *which*
+character the reference governs. The generation step needs an LTX-2.5 IC-LoRA
+trained for edge control, and Lightricks has published exactly one IC-LoRA for
+LTX-2.5: a spatial upscaler. Canny/depth/pose control adapters exist only for
+the older LTX-2.3-22b and LTX-2-19b checkpoints, and a LoRA only works with the
+model it was trained on.
+
+Two further things worth knowing before you plan around this: `IC-LoRA` is
+*In-Context* LoRA, and its reference slot holds exactly one thing. Each adapter
+is trained for one reading of that slot -- Union-Control reads a structure
+signal, LTX-2.3's `Ingredients` reads a character reference sheet -- so "lock
+the choreography *and* inject the actor" wants two incompatible trained meanings
+in one slot. On LTX-2.5 today, who the new character is comes from the prompt. And the diffusion video decoder
+maps a latent to pixels with no identity input at all, so it cannot paint a face
+onto a body. The conditioning mechanism itself is ported and parity-gated in
+`ltxv::refcond`: the token layout, the remapped RoPE position bounds, the
+denoise/keyframe markers and the per-region attention cross-mask an IC-LoRA
+needs. What it does NOT provide, and what nothing can provide today, is the
+trained adapter that gives those appended tokens meaning -- no LTX-2.5
+structural-control IC-LoRA exists. So the reference-conditioning path is
+available and gated, and the character swap it was investigated for is not
+reachable on LTX-2.5 through it.
+
 ---
 
 ## Who builds brain
