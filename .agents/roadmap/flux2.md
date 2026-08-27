@@ -73,6 +73,148 @@ Gate 1 (`--mask` white == no mask) was additionally confirmed on the real
 byte-identical PNGs, and a repeated no-mask run is byte-identical to itself,
 so that comparison means something.
 
+## Where a klein-9b int8 generation's time actually goes
+
+Measured on **2x Tesla P40** (GP102, SM 6.1) + dual Xeon E5-2690 v3, 48
+threads, warm page cache. klein-9b int8 DiT on gpu1, truncated int8 Qwen3-8B
+text encoder on gpu0, 1024x768. Device numbers from `BRAIN_PROFILE`
+timestamp queries; host phases from the `flux2 build:` spans and
+`flux2_bench load`; the load/generate split from process wall minus the
+pipeline's own stage total, cross-checked against a 10 Hz /proc RSS
+timeline. `nvidia-smi` was never sampled during a timed run.
+
+Card roofline measured on this box, not datasheet: **10 517 GFLOP/s fp32**,
+**43 560 GOP/s int8 (DP4A)**, **287.5 GB/s** DRAM.
+
+### The two halves
+
+A single-image run is a **one-off weight load** plus a **generation**, and
+before this pass the load was 41% of the process wall and completely
+uninstrumented. The `--steps 10` row of the older table (~61 s) is the
+PIPELINE total, not the process wall; the process wall was ~105 s.
+
+| phase | 10 steps, 3072 img tokens | share of wall |
+|---|---|---|
+| DiT weight load (GGUF read, dequant, quantize, upload, free) | 20.3 s | 23% |
+| text-encoder weight load | ~11 s | 12% |
+| denoise, 10 steps | 54.1 s | 61% |
+| VAE decode | 4.0 s | 4.5% |
+| text encode | 0.8 s | 1% |
+| **process wall** | **88 s** | |
+
+### Denoise, per kernel, at two token counts
+
+`n` is the JOINT sequence the DiT attends over: 512 text + image + any
+reference tokens. Device time over 4 steps, `BRAIN_PROFILE` timestamps.
+
+| kernel | n = 3584 | share | n = 6656 | share | scaling |
+|---|---|---|---|---|---|
+| `matmul_i8_dyn` | 9 678 ms | 45.9% | 18 337 ms | 35.8% | 1.90x (linear) |
+| `flash_attn_bidir_reg2` | 6 914 ms | 32.8% | 23 726 ms | 46.3% | **3.43x (n^2)** |
+| `matmul_reg3` (fp32) | 3 009 ms | 14.3% | 6 469 ms | 12.6% | 2.15x |
+| `layernorm` | 419 ms | 2.0% | 780 ms | 1.5% | |
+| everything else | 1 066 ms | 5.0% | 1 946 ms | 3.8% | |
+| **total** | **21 086 ms** | | **51 258 ms** | | |
+
+Token count is 1.857x between the two columns. Attention scales at 3.43x
+against a 3.45x quadratic prediction: **the flash kernel is exactly
+quadratic and nothing else is**, so the top row CHANGES IDENTITY between
+the two sizes. At 3584 tokens the GEMMs dominate (60% combined); at 6656
+attention alone does. Any further denoise work has to say which size it is
+optimising, and a profile taken at one is not evidence about the other.
+
+Against the measured roofs, per step at n = 3584:
+
+| kernel | achieved | roof | % of roof |
+|---|---|---|---|
+| `matmul_i8_dyn` | ~19 500 GOP/s | 43 560 GOP/s int8 | **45%** |
+| `flash_attn_bidir_reg2` | ~3 900 GFLOP/s | 10 517 GFLOP/s fp32 | **37%** |
+| `matmul_reg3` (fp32) | ~3 910 GFLOP/s | 10 517 GFLOP/s fp32 | **37%** |
+
+The fp32 `matmul_reg3` and the flash kernel sit at the same 37% of fp32
+peak, and that figure is flat across shapes, which points at a structural
+ceiling rather than a tuning gap in either.
+
+### Denoise host occupancy: there is no bubble
+
+Device kernel time over the 4-step denoise was 21 086 ms against a 21 730 ms
+denoise stage wall: **97% of the denoise is the card working.** The
+allocator/host-bubble hypothesis that paid off on ltxv does NOT apply to
+flux2's denoise loop, and `gpu_core::scratch::Arena` / `Gpu::scratch_scope`
+would have nothing to recover here (flux2 does not use them, and should
+not on this evidence). The host bubble is entirely in the LOAD.
+
+## Load path: what landed, and what is left
+
+Host-side load, klein-9b, `flux2_bench load` and the `flux2 build:` spans:
+
+| term | before | after | how |
+|---|---|---|---|
+| `gguf::read` (10.0 GB file) | ~9.8 s | 4.4 s | map the file instead of slurping it |
+| `linear2` column split | 5.84 s | 0.58 s | `hostmath::split_cols`, row-parallel |
+| `quantize_weight` (96 tensors, 31.7 GB fp32 read) | 4.2 s | 4.2 s | untouched |
+| `gpu.write` (11.1 GB) | ~3.5 s | ~3.5 s | untouched, runs at 3.0-3.7 GB/s |
+| staging-reclaim readback x10 | 0.14 s | 0.14 s | untouched |
+| drop the 36.3 GB fp32 map | ~2.9 s | ~2.9 s | untouched |
+
+End to end, best of 2, output **byte-identical** (same PNG md5) at every
+step, since every change is bit-identical:
+
+| config | joint tokens | pipeline before | pipeline after | **wall before** | **wall after** |
+|---|---|---|---|---|---|
+| 10 steps, 1024x768 | 3584 | 60.4 s | 58.9 s | **105 s** | **88 s** |
+| 12 steps, 1024x768 + 768x576 ref, strength 1.0 | 5312 | 120.4 s | 120.4 s | **171 s** | **151 s** |
+| 4 steps, 1024x768 | 3584 | 26.4 s | 26.6 s | **69 s** | **57 s** |
+
+Peak host RSS is UNCHANGED at ~43 GB. Mapping the GGUF does not lower it -
+mapped pages are resident too - it only makes the file's 10 GB clean,
+evictable page cache instead of dirty anonymous memory, and removes the
+memcpy that produced it.
+
+### The largest remaining load lever, and why it did not land
+
+`gguf::read` + `quantize_weight` + dropping the fp32 map is still ~11.5 s,
+and all of it exists only to go Q8_0 -> fp32 -> int8. A **direct
+Q8_0 -> packed-int8 requantisation** would delete all three and drop the
+~43 GB peak to ~12 GB.
+
+It can be made **bit-identical**, which is the part worth recording:
+`deq_q8_0` produces exactly `(q as i8 as f32) * d`, and both factors are
+exactly representable (7-bit `q`, 11-bit fp16 `d`, product needs 18 bits <
+24), so recomputing that same f32 from the block and feeding it through
+`quantize_weight`'s own scale/round/clamp gives the identical packed `u32`.
+The gate is `assert_eq!` on the packed words, not a tolerance.
+
+Two things block it, neither numerical:
+- The LoRA fold needs a float domain, but only for the **112 of 201**
+  tensors an adapter touches (8 double x 2 streams x 4, plus 24 single x
+  2). The other 89 never need fp32 at all, and even the 112 only need it
+  ONE TENSOR AT A TIME rather than as a 36 GB resident map.
+- The wiring is in `pipeline.rs::read_dit_tensors` -> `Tensors` ->
+  `Flux2Model::new_batched(&Tensors)`, so the constructor has to be able
+  to take a quantized source instead of an fp32 map.
+
+## Corrections to earlier entries in this file
+
+- "**a second query row per thread in the flash-attention kernel**" is
+  already done and has been for some time: `flash_attn_bidir_reg2` is
+  exactly that kernel (BR = 128 query rows, two per thread, `q0/q1/o0/o1`
+  in registers), and it is what production dispatches. The remaining 37%
+  of-peak gap is NOT an unclaimed register-blocking win. The kernel issues
+  ~4 FLOP per shared-memory word where the SM needs ~8 to stay
+  compute-bound, so it is shared-memory-bandwidth bound by about 2x. Going
+  to three query rows needs a third 16 KiB `part` buffer on top of the 48
+  KiB already used, which is the Vulkan/NVIDIA compute limit exactly, so
+  that route is closed without an algorithmic change to the cross-lane
+  reduction.
+- The staging-reclaim readbacks in `Flux2Model::new_batched` (`gpu.read(b,
+  1)` every ~1 GiB) cost **0.14 s over 10 flushes**, not seconds. They are
+  not worth removing and removing them risks the non-ReBAR OOM they exist
+  to prevent.
+- `gpu.write` on this box runs at **3.0-3.7 GB/s**, not the ~0.8 GB/s
+  page-fault-bound rate a fresh-destination cross-device transfer shows,
+  so the upload is not a page-fault problem.
+
 ## Not yet done
 
 - [ ] Automatic architecture-mask generation. Masks are authored today. The
@@ -119,9 +261,12 @@ so that comparison means something.
 - [ ] Several smaller kernel-efficiency gaps identified but not yet closed:
       a workgroup-per-row LayerNorm kernel (RMSNorm and softmax already got
       this treatment), a workgroup-per-row reduction for the int8 path's
-      row-max step, wider (vec4) shared-memory tile loads for the core GEMM
-      kernel, and a second query row per thread in the flash-attention
-      kernel.
+      row-max step, and wider (vec4) shared-memory tile loads for the core
+      GEMM kernel. (The fourth item that used to sit here, "a second query
+      row per thread in the flash-attention kernel", was already done -
+      `flash_attn_bidir_reg2` IS that kernel and is what production
+      dispatches. See the corrections section above for what the remaining
+      flash-attention gap actually is.)
 - [ ] Performance sweeps do not record GPU thermal state (temperature,
       clock, throttle reason) per concurrency level, so a multi-level sweep
       on passively-cooled cards can be dominated by thermal throttling
