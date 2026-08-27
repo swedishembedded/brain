@@ -33,6 +33,7 @@ use checkpoint::weightio::StWriter;
 use serde_json::Value;
 
 /// One GGUF source tensor's disposition at import.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Mapped {
     /// A plain 1:1 rename; the tensor is copied verbatim.
     Simple(String),
@@ -64,6 +65,57 @@ impl Mapped {
             into: (0..n_experts).map(|e| format!("blocks.{layer}.mlp.experts.{e}.{leaf}.weight")).collect(),
         }
     }
+}
+
+/// One GGUF tensor name, split along the structure **every** llama.cpp
+/// decoder-LM checkpoint shares: three top-level tensors plus a flat
+/// `blk.{index}.{leaf}` block space.
+///
+/// The structure is llama.cpp's, not any one model's - `gguf-py/gguf/
+/// constants.py`'s `TENSOR_NAMES` spells `token_embd` / `output_norm` /
+/// `output` / `blk.{bid}.…` for every architecture in the table - so parsing
+/// it belongs here rather than in each model's classifier. What stays
+/// per-model is only the `leaf` → brain-name decision.
+///
+/// The `n_layers` argument is what makes [`Leaf::PastDepth`] a category rather
+/// than an accident. Two real situations produce a block index at or beyond
+/// the model's depth, and both must be a *decision*: llama.cpp folds an MTP
+/// layer into the same `blk.N` space as block `n_layers` (Qwen3.5), and a
+/// caller doing a truncated load passes its own smaller depth to drop every
+/// block past the cut before a byte is dequantized.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Leaf<'a> {
+    /// `token_embd.weight` - the input embedding table.
+    TokenEmbd,
+    /// `output_norm.weight` - the final norm before the head.
+    OutputNorm,
+    /// `output.weight` - the LM head. Absent from a tied checkpoint.
+    Output,
+    /// `blk.{layer}.{leaf}` with `layer < n_layers`.
+    Block { layer: usize, leaf: &'a str },
+    /// `blk.{index}.…` with `index >= n_layers`.
+    PastDepth { index: usize },
+    /// Anything else: a vision tower (`v.*`/`mm.*`), a rope-scaling table, a
+    /// leaf this splitter has no opinion about. The classifier decides.
+    Other,
+}
+
+/// Split a GGUF tensor name into its [`Leaf`]. Total: an unparseable name is
+/// [`Leaf::Other`], never a panic - the caller is looking at a downloaded file.
+pub fn split_name(name: &str, n_layers: u32) -> Leaf<'_> {
+    match name {
+        "token_embd.weight" => return Leaf::TokenEmbd,
+        "output_norm.weight" => return Leaf::OutputNorm,
+        "output.weight" => return Leaf::Output,
+        _ => {}
+    }
+    let Some(rest) = name.strip_prefix("blk.") else { return Leaf::Other };
+    let Some((idx_str, leaf)) = rest.split_once('.') else { return Leaf::Other };
+    let Ok(index) = idx_str.parse::<usize>() else { return Leaf::Other };
+    if index >= n_layers as usize {
+        return Leaf::PastDepth { index };
+    }
+    Leaf::Block { layer: index, leaf }
 }
 
 /// What an import actually did - the receipt the two-way coverage check hands

@@ -228,22 +228,17 @@ const DROP_OTHER: &str = "vision (v.*/mm.*) or an unrecognized leaf";
 /// always dropped, and a caller doing a truncated load passes its own smaller
 /// depth to drop every block past the cut the same way.
 fn classify(name: &str, n_layers: u32, n_experts: u32) -> Mapped {
-    if name == "token_embd.weight" {
-        return Mapped::Simple("tok.weight".to_string());
-    }
-    if name == "output.weight" {
-        return Mapped::Simple("lm_head.weight".to_string());
-    }
-    if name == "output_norm.weight" {
-        return Mapped::Simple("norm.weight".to_string());
-    }
-    let Some(rest) = name.strip_prefix("blk.") else { return Mapped::Dropped(DROP_OTHER) };
-    let Some((idx_str, leaf)) = rest.split_once('.') else { return Mapped::Dropped(DROP_OTHER) };
-    let Ok(l) = idx_str.parse::<u32>() else { return Mapped::Dropped(DROP_OTHER) };
-    if l >= n_layers {
-        return Mapped::Dropped(DROP_MTP);
-    }
-    let l = l as usize;
+    // The `blk.N.leaf` / `token_embd` / `output` / `output_norm` structure is
+    // llama.cpp's, shared by every architecture it converts, so the splitting
+    // is `gguf::import`'s and only the leaf decision below is qwen35moe's.
+    let (l, leaf) = match import::split_name(name, n_layers) {
+        import::Leaf::TokenEmbd => return Mapped::Simple("tok.weight".to_string()),
+        import::Leaf::Output => return Mapped::Simple("lm_head.weight".to_string()),
+        import::Leaf::OutputNorm => return Mapped::Simple("norm.weight".to_string()),
+        import::Leaf::PastDepth { .. } => return Mapped::Dropped(DROP_MTP),
+        import::Leaf::Other => return Mapped::Dropped(DROP_OTHER),
+        import::Leaf::Block { layer, leaf } => (layer, leaf),
+    };
     let p = |s: &str| format!("blocks.{l}.{s}");
     match leaf {
         "attn_norm.weight" => Mapped::Simple(p("ln1.weight")),
