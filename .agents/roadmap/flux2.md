@@ -1065,3 +1065,58 @@ are missing from the totals (never counted as zero - the harness names them).
   ~4000 dispatches. `gpu_core::scratch`'s replay arena addresses buffer
   destruction, and nothing here destroys buffers inside a step - the engine is
   persistent by construction.
+
+### After this pass
+
+Same harness, same box, same method, now in the TRAINER's configuration
+(frozen QK gain gradient off - the parity gate's configuration is more
+expensive and no run pays it):
+
+| | s/step | 1500-step run | % of the 2.99 s floor |
+|---|---|---|---|
+| naive `attn_*_bidir` attention | ~98 | ~41 h | 3.1 % |
+| GEMM attention | 11.83 | 4.93 h | 25.3 % |
+| **+ this pass** | **10.53** | **4.39 h** | **28.4 %** |
+
+| what | before | after |
+|---|---|---|
+| Adam (host) | 0.516 s | **0.028 s** |
+| `attn_softmax_bidir` -> `softmax_rows` | 806.0 ms @ 9.8 % of DRAM | **211.9 ms @ 37.2 %** |
+| `layernorm` + `layernorm_dx` -> `*_rows` | 155.5 ms @ ~10 % | left the top sixteen |
+| frozen QK gain gradient | 206 ms | not computed |
+
+GPU kernel time is now 93.1 % of wall clock (was 88.5 %), so the host side is
+close to spent: everything outside the two sweeps is 0.43 s of a 10.53 s step.
+
+### What is left on the table, with what it is worth
+
+The step is now **85.8 % GEMM**, so the remaining question is one number:
+`matmul_reg3` and `matmul_dx_reg` run at **37.5 % and 38.5 % of the fp32
+roof**. Together they are 7.7 s of the 10.53 s step against a 2.7 s floor for
+the arithmetic they do.
+
+* **The GEMMs, ~2.9 s if they reached 60 %.** 38 % is suspiciously close to
+  the occupancy an 8x8 register tile allows on Pascal: 64 accumulator
+  registers plus the A/B fragments puts a 256-thread workgroup near 80
+  registers per thread, which caps an SM at 3 concurrent workgroups out of the
+  8 its 2048-thread budget would otherwise allow - about 37 % occupancy, and
+  too few warps to hide global-load latency. That is a diagnosis, not a
+  measurement, and testing it means varying the register tile in a kernel
+  EVERY model in the repo shares. Highest value, highest blast radius.
+* **The recompute, 3.4 s of arithmetic (32.5 %).** Stashing the eight
+  per-block tensors that cost a GEMM to recreate (`q`,`k`,`v`,`ctx`,`proj`,
+  `h1`,`h2`,`mlpo`) would skip the base-linear recompute entirely. That is
+  226 MB per block, 5.7 GB for all 25 - against roughly 5 GB spare on a 24 GiB
+  card once the 13.93 GiB base and the engine buffers are placed. So it is
+  a partial win on klein-4b (about 19 of 25 blocks fit, ~1.8 s) and needs
+  per-block private buffer sets to implement.
+* **`softmax_k_dx`, 425 ms (4.3 %)** and **`rmsnorm_dx_eps`, 284 ms (2.9 %)**
+  are the last two one-thread-per-row kernels, at 0 % and 4.6 % of the DRAM
+  roof. Neither has a coalesced sibling, so each needs new WGSL - roughly
+  0.55 s between them. `softmax_k_dx` additionally has no `gpu_core::cost`
+  row, so its FLOPs and bytes are missing from the tally.
+
+Adding those up: the reachable step is roughly 5-6 s without touching the
+shared GEMM, and about 3.5 s with it. The floor is 2.99 s, so **1.25 h is the
+hard bound for a 1500-step run on one P40** and there is no version of this
+that reaches "minutes".

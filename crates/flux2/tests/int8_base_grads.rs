@@ -11,11 +11,12 @@
 //! would understate it.
 //!
 //! Method: take one real double block out of the released GGUF, build the
-//! device block engine twice - once on the fp32 weights, once on the same
-//! weights round-tripped through brain's own per-output-row int8 grid
-//! (`model::int8::row_scale`/`pack_row`, exactly what `matmul_i8_dyn` consumes)
-//! - and run the identical backward through both. What is compared is the
-//! **adapter** gradient, since that is the only thing a LoRA run consumes.
+//! device block engine twice (once on the fp32 weights, once on the same
+//! weights round-tripped through brain's own per-output-row int8 grid -
+//! `model::int8::row_scale`/`pack_row`, exactly what `matmul_i8_dyn`
+//! consumes), and run the identical backward through both. What is compared
+//! is the **adapter** gradient, since that is the only thing a LoRA run
+//! consumes.
 //!
 //! Scope, stated because it bounds the conclusion: this measures the
 //! **weight**-quantization term. A real int8 kernel additionally quantizes the
