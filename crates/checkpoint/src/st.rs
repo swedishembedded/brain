@@ -249,21 +249,40 @@ pub fn parse_safetensors(bytes: &[u8]) -> Result<StModel, String> {
     Ok(StModel { tensors, metadata })
 }
 
-/// Read and parse a safetensors file from disk into fp32 tensors + metadata.
+/// Read a safetensors file from disk into fp32 tensors + metadata.
 ///
-/// The file is **mapped**, not slurped. The result is unchanged - the same
-/// [`parse_safetensors`] decodes the same bytes - but an owned `Vec<u8>` of
-/// the whole file would be live at the same time as every decoded tensor, so
-/// the eager route's peak was the file PLUS the model rather than the model.
-/// A mapping's pages are not heap, and are dropped with the mapping, so what
-/// survives this call is exactly the fp32 tensors the caller asked for.
+/// The result is what it always was: every tensor, decoded, in host memory.
+/// How it gets there is not. The file is **mapped and streamed** - decode one
+/// tensor, then tell the kernel it may drop that tensor's pages - rather than
+/// read into an owned buffer and decoded out of it.
+///
+/// Both parts of that matter, and they fix different costs:
+///
+/// - `std::fs::read` put a whole second copy of the file on the **heap**,
+///   live at the same time as every decoded tensor. On a box with no swap,
+///   anonymous memory is the copy that cannot be reclaimed under pressure.
+/// - Mapping alone does not fix the process's **resident** size, because
+///   touching a mapping faults its pages in and they count. Releasing each
+///   tensor's range once it has been decoded keeps the mapping's resident
+///   footprint at roughly one tensor instead of the whole file.
+///
+/// Byte-identical to the eager route: [`crate::mmap::MmapSafetensors`]
+/// decodes the same dtypes from the same bytes, `MADV_DONTNEED` on a
+/// read-only mapping loses nothing (dropped pages re-fault from the file),
+/// and the release happens only after the tensor has been decoded.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_safetensors(path: &str) -> io::Result<StModel> {
-    let file = std::fs::File::open(path)?;
-    // SAFETY: weight files are treated as immutable for the mapping's lifetime,
-    // the same contract `crate::mmap::MmapSafetensors::open` is built on.
-    let mmap = unsafe { memmap2::Mmap::map(&file) }?;
-    parse_safetensors(&mmap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    let m = crate::mmap::MmapSafetensors::open(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut tensors = HashMap::with_capacity(m.names().len());
+    for name in m.names() {
+        let data = m
+            .tensor_f32(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("st: '{name}' vanished between names() and tensor_f32()")))?;
+        tensors.insert(name.clone(), data);
+        m.advise_dontneed_tensor(name);
+    }
+    Ok(StModel { tensors, metadata: m.metadata().clone() })
 }
 
 /// Write tensors as F32 safetensors. `config` is stored under `brain.config`
