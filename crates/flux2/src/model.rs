@@ -257,21 +257,41 @@ impl Flux2Model {
         // non-ReBAR card the un-reclaimed staging OOMs the device (observed
         // 22 GiB for 15.5 GiB of weights on a P40 — zimage's dev.rs documents
         // the same). Flush roughly every GiB.
+        // Build-time spans, printed under `BRAIN_PROFILE`. Device timestamps
+        // cannot see any of this: the load is host work plus queue writes,
+        // with no kernel running, so a per-kernel table reports a near-zero
+        // total for a phase that on a real 9B checkpoint outweighs several
+        // denoise steps. `t_build` is the whole constructor; `quant_ns` and
+        // `write_ns` split the per-linear cost into its two halves, because
+        // they have completely different fixes.
+        let t_build = std::time::Instant::now();
+        let quant_ns = std::cell::Cell::new(0u128);
+        let write_ns = std::cell::Cell::new(0u128);
+        let flush_ns = std::cell::Cell::new(0u128);
+        let flush_n = std::cell::Cell::new(0u32);
+        let split_ns = std::cell::Cell::new(0u128);
+        let bytes_up = std::cell::Cell::new(0u64);
         let uploaded = std::cell::Cell::new(0u64);
         let flush = |b: &DeviceBuffer, words: usize| {
             uploaded.set(uploaded.get() + 4 * words as u64);
+            bytes_up.set(bytes_up.get() + 4 * words as u64);
             if uploaded.get() > (1 << 30) {
                 // force a real flush: a readback drains the queue (an empty
                 // submit records nothing) and the poll reclaims the staging
                 // wgpu holds per write — without this a non-ReBAR card OOMs
                 // at ~22 GiB for 15.5 GiB of weights
+                let t = std::time::Instant::now();
                 let _ = gpu.read(b, 1);
+                flush_ns.set(flush_ns.get() + t.elapsed().as_nanos());
+                flush_n.set(flush_n.get() + 1);
                 uploaded.set(0);
             }
         };
         let upv = |w: &[f32]| -> DeviceBuffer {
+            let t = std::time::Instant::now();
             let b = gpu.storage(w.len() as u64);
             gpu.write(&b, bytemuck::cast_slice(w));
+            write_ns.set(write_ns.get() + t.elapsed().as_nanos());
             flush(&b, w.len());
             b
         };
@@ -281,12 +301,18 @@ impl Flux2Model {
             match precision {
                 Precision::F32 => Lin::F32(upv(w)),
                 Precision::Int8 => {
+                    let tq = std::time::Instant::now();
                     let (packed, sw) = model::int8::quantize_weight(w, n_out, k);
+                    quant_ns.set(quant_ns.get() + tq.elapsed().as_nanos());
+                    let tw = std::time::Instant::now();
                     let pb = gpu.storage(packed.len() as u64);
                     gpu.write(&pb, &packed);
+                    write_ns.set(write_ns.get() + tw.elapsed().as_nanos());
                     flush(&pb, packed.len());
+                    let tw = std::time::Instant::now();
                     let sb = gpu.storage(sw.len() as u64);
                     gpu.write(&sb, bytemuck::cast_slice(&sw));
+                    write_ns.set(write_ns.get() + tw.elapsed().as_nanos());
                     Lin::I8(pb, sb)
                 }
             }
@@ -338,12 +364,9 @@ impl Flux2Model {
                 let (_, l1) = get(&format!("{p}.linear1.weight"));
                 let (_, l2) = get(&format!("{p}.linear2.weight"));
                 // linear2 is [D, D+mlp]; split its input (column) dim
-                let mut wo_a = Vec::with_capacity(d * d);
-                let mut wo_b = Vec::with_capacity(d * mlp);
-                for r in 0..d {
-                    wo_a.extend_from_slice(&l2[r * (d + mlp)..r * (d + mlp) + d]);
-                    wo_b.extend_from_slice(&l2[r * (d + mlp) + d..(r + 1) * (d + mlp)]);
-                }
+                let tsp = std::time::Instant::now();
+                let (wo_a, wo_b) = model::hostmath::split_cols(l2, d, d, mlp);
+                split_ns.set(split_ns.get() + tsp.elapsed().as_nanos());
                 SingleW {
                     wq: lin_n(&format!("{p}.linear1"), rows(l1, d, 0, d), d, d),
                     wk: lin_n(&format!("{p}.linear1"), rows(l1, d, d, 2 * d), d, d),
@@ -402,6 +425,22 @@ impl Flux2Model {
             gate: (0..5).map(|_| a(bd)).collect(),
         };
         let i8scr = (precision == Precision::Int8).then(|| I8Scratch::new(&gpu, n, n, &[cfg.hidden as u32, cfg.mlp_hidden() as u32]));
+
+        if gpu_core::profile::enabled() {
+            let ms = |n: u128| n as f64 / 1e6;
+            let w = ms(write_ns.get());
+            let gb = bytes_up.get() as f64 / 1e9;
+            eprintln!(
+                "flux2 build: {:.0} ms total | quantize {:.0} ms | linear2 split {:.0} ms | write {:.0} ms ({gb:.1} GB, {:.2} GB/s) | staging flush {:.0} ms x{}",
+                ms(t_build.elapsed().as_nanos()),
+                ms(quant_ns.get()),
+                ms(split_ns.get()),
+                w,
+                gb / (w / 1e3),
+                ms(flush_ns.get()),
+                flush_n.get(),
+            );
+        }
 
         Flux2Model {
             cfg: cfg.clone(),
