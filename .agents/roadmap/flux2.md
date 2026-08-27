@@ -1401,3 +1401,44 @@ Dual Tesla P40, klein-4b, device trainer, rank 16, 512 px, 10 captioned
 768x768 face crops: **9.8-10.1 s/step**, i.e. ~4.1 h for 1500 steps, with one
 card left free for generation alongside. Checkpoints every 100 steps, so the
 identity/overfit trade-off can be read off the curve rather than guessed.
+
+
+## Face swap on klein-4b: what works, and the one setting that decides it
+
+`face_swap.sh` keeps one photograph's pose, framing, clothing, background and
+lighting and puts another person's face into it. Measured on a deliberately
+hard pair - a bald man's three photographs onto a long-haired woman in
+three-quarter view - klein-4b int8, 12 steps, ArcFace cosine to the face
+references, plus mean |delta| outside the face region against the target as a
+scene-retention proxy (an untouched copy scores 2.0):
+
+| route | id cosine | scene delta |
+|---|---|---|
+| `--mask`, source face still conditioning | 0.018 | 2.00 |
+| `--strength 0.9`, source face still conditioning | 0.011 | 9.41 |
+| `--strength 0.9` + `--ref-cond-scale 0` | 0.151 | 23.39 |
+| **`--mask` + `--ref-cond-scale 0`** | **0.198** | **2.04** |
+| head-sized mask, the shipped default | 0.169 | 1.32 |
+
+**`--ref-cond-scale 0` is the whole ballgame** - an 11x move on identity at no
+cost to pose. The init reference does double duty: it seeds the latent AND it
+conditions the model. It also *contains the face being replaced*, so leaving
+its conditioning on feeds the model the wrong identity, which then competes
+with the face references and wins, because it is simultaneously what every
+pixel is being pulled back toward. Without it the script runs, looks correct,
+and returns the original person - the exact shape of failure that a
+by-eye check passes.
+
+The mask route beats the strength route on both axes at once, which is not the
+trade-off that was expected: black preserves the target bit-for-bit, so pose
+costs nothing, while `--strength` degrades the whole frame to buy face freedom.
+
+**The honest limit.** 0.17-0.20 against a 0.758 reference ceiling is far below
+the 0.53 the same references and adapter reach for a free-standing portrait.
+Two reasons, both structural rather than tuning: the init latent pulls every
+pixel back toward a different person for the whole trajectory, and whatever the
+mask does not cover is kept exactly - so a swap between people whose *heads*
+differ (bald onto long grey hair) leaves the target's hair and skull outline
+framing a face that is no longer theirs. Growing the mask trades that against
+having to regenerate plausible hair. For a swap between similar head shapes
+this is much easier than the case measured here.
