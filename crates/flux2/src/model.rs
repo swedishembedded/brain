@@ -95,10 +95,6 @@ fn f(x: f32) -> u32 {
     x.to_bits()
 }
 
-/// Split rows `[r0, r1)` out of a fused `[rows, cols]` host tensor.
-fn rows(data: &[f32], cols: usize, r0: usize, r1: usize) -> &[f32] {
-    &data[r0 * cols..r1 * cols]
-}
 
 // The numeric-tier machinery (Precision map, packed-int8 resident weight,
 // K-keyed activation scratch, DP4A dispatch) is shared with flux1 via
@@ -231,6 +227,17 @@ impl Flux2Model {
     /// working set (≈ 0.5 GiB at 512² for klein-4B). `b_max = 1` allocates
     /// exactly what the unbatched model always did.
     pub fn new_batched(cfg: &Flux2Config, ts: &Tensors, gpu: Gpu, n_max: u32, b_max: u32, precision: Precision) -> Flux2Model {
+        Flux2Model::new_from(cfg, &crate::weights::DitWeights::Map(ts), gpu, n_max, b_max, precision)
+    }
+
+    /// [`Flux2Model::new_batched`] over an arbitrary weight source.
+    ///
+    /// `DitWeights::Map` is the fp32 path every other constructor takes.
+    /// `DitWeights::Gguf` decodes a Q8_0 checkpoint one weight matrix at a
+    /// time and, at `Precision::Int8`, requantizes each straight to packed
+    /// int8 without ever building the fp32 model - bit-identical to the round
+    /// trip, see `crate::weights`.
+    pub fn new_from(cfg: &Flux2Config, src: &crate::weights::DitWeights, gpu: Gpu, n_max: u32, b_max: u32, precision: Precision) -> Flux2Model {
         assert!(b_max >= 1, "b_max must be >= 1");
         assert!(!cfg.guidance_embed, "guidance-embedded variants not supported");
         let d = cfg.hidden;
@@ -249,9 +256,7 @@ impl Flux2Model {
             // 0 or txt_len rows, so widths and txt_len must be multiples of 64.
             assert!(cfg.txt_len.is_multiple_of(64) && d.is_multiple_of(64) && mlp.is_multiple_of(64), "int8 slicing alignment");
         }
-        let get = |name: &str| -> &(Vec<usize>, Vec<f32>) {
-            ts.get(name).unwrap_or_else(|| panic!("flux2: missing tensor {name}"))
-        };
+        let getv = |name: &str| -> Vec<f32> { src.with_f32(name, <[f32]>::to_vec) };
         // Periodic poll_wait during the multi-GB weight upload: wgpu holds a
         // staging copy per `write` until a blocking poll reclaims them; on a
         // non-ReBAR card the un-reclaimed staging OOMs the device (observed
@@ -295,7 +300,7 @@ impl Flux2Model {
             flush(&b, w.len());
             b
         };
-        let up = |name: &str| -> DeviceBuffer { upv(&get(name).1) };
+        let up = |name: &str| -> DeviceBuffer { src.with_f32(name, |w| upv(w)) };
         // One linear `[n_out, k]`, uploaded at the requested tier.
         let lin_v = |w: &[f32], n_out: usize, k: usize| -> Lin {
             match precision {
@@ -328,21 +333,67 @@ impl Flux2Model {
                 lin_v(w, n_out, k)
             }
         };
-        let lin = |name: &str, n_out: usize, k: usize| -> Lin { lin_n(name, &get(name).1, n_out, k) };
+        // Upload an already-packed int8 linear (the direct-from-Q8_0 route);
+        // the fp32 tier never reaches here.
+        let up_i8 = |packed: Vec<u32>, sw: Vec<f32>| -> Lin {
+            let tw = std::time::Instant::now();
+            let pb = gpu.storage(packed.len() as u64);
+            gpu.write(&pb, &packed);
+            write_ns.set(write_ns.get() + tw.elapsed().as_nanos());
+            flush(&pb, packed.len());
+            let tw = std::time::Instant::now();
+            let sb = gpu.storage(sw.len() as u64);
+            gpu.write(&sb, bytemuck::cast_slice(&sw));
+            write_ns.set(write_ns.get() + tw.elapsed().as_nanos());
+            Lin::I8(pb, sb)
+        };
+        // ONE rectangle of a stored tensor -> one `Lin`. `store` is the
+        // checkpoint tensor, `label` what BRAIN_FLUX2_I8_KEEP_F32 matches.
+        // Tries the direct Q8_0 -> int8 route first; `try_i8_rect` declines
+        // (returning None) for anything it cannot serve exactly, and the fp32
+        // route below is then the same code the map path has always run.
+        let lin_rect = |store: &str, label: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize| -> Lin {
+            if precision == Precision::Int8 && !keeps.iter().any(|s| label.contains(s.as_str())) {
+                let tq = std::time::Instant::now();
+                let direct = src.try_i8_rect(store, stride, r0, n_out, c0, k);
+                quant_ns.set(quant_ns.get() + tq.elapsed().as_nanos());
+                if let Some((packed, sw)) = direct {
+                    return up_i8(packed, sw);
+                }
+            }
+            src.with_f32(store, |w| {
+                if c0 == 0 && k == stride {
+                    lin_n(label, &w[r0 * stride..(r0 + n_out) * stride], n_out, k)
+                } else {
+                    let tsp = std::time::Instant::now();
+                    let mut blk = vec![0f32; n_out * k];
+                    backend_cpu::par::rows_mut(&mut blk, k, |i, dst| {
+                        let e0 = (r0 + i) * stride + c0;
+                        dst.copy_from_slice(&w[e0..e0 + k]);
+                    });
+                    split_ns.set(split_ns.get() + tsp.elapsed().as_nanos());
+                    lin_n(label, &blk, n_out, k)
+                }
+            })
+        };
+        // A whole stored tensor as one linear.
+        let lin = |name: &str, n_out: usize, k: usize| -> Lin { lin_rect(name, name, k, 0, n_out, 0, k) };
 
         let stream = |p: &str| -> StreamW {
-            let (_, qkv) = get(&format!("{p}_attn.qkv.weight"));
-            let (_, m0) = get(&format!("{p}_mlp.0.weight"));
+            let qkv_n = format!("{p}_attn.qkv.weight");
+            let qkv_l = format!("{p}_attn.qkv");
+            let m0_n = format!("{p}_mlp.0.weight");
+            let m0_l = format!("{p}_mlp.0");
             StreamW {
-                wq: lin_n(&format!("{p}_attn.qkv"), rows(qkv, d, 0, d), d, d),
-                wk: lin_n(&format!("{p}_attn.qkv"), rows(qkv, d, d, 2 * d), d, d),
-                wv: lin_n(&format!("{p}_attn.qkv"), rows(qkv, d, 2 * d, 3 * d), d, d),
+                wq: lin_rect(&qkv_n, &qkv_l, d, 0, d, 0, d),
+                wk: lin_rect(&qkv_n, &qkv_l, d, d, d, 0, d),
+                wv: lin_rect(&qkv_n, &qkv_l, d, 2 * d, d, 0, d),
                 nq: up(&format!("{p}_attn.norm.query_norm.scale")),
                 nk: up(&format!("{p}_attn.norm.key_norm.scale")),
                 wo: lin(&format!("{p}_attn.proj.weight"), d, d),
                 // SwiGLU chunk order: x1 (silu-gated) is the FIRST half
-                w1: lin_n(&format!("{p}_mlp.0"), rows(m0, d, 0, mlp), mlp, d),
-                w3: lin_n(&format!("{p}_mlp.0"), rows(m0, d, mlp, 2 * mlp), mlp, d),
+                w1: lin_rect(&m0_n, &m0_l, d, 0, mlp, 0, d),
+                w3: lin_rect(&m0_n, &m0_l, d, mlp, mlp, 0, d),
                 // The double-block mlp-down stays fp32 (~850 MB over the 10
                 // streams): its input is the SwiGLU activation, whose per-token
                 // outliers early in the stack cost the most int8 parity —
@@ -361,22 +412,22 @@ impl Flux2Model {
         let sgl: Vec<SingleW> = (0..cfg.depth_single)
             .map(|b| {
                 let p = format!("single_blocks.{b}");
-                let (_, l1) = get(&format!("{p}.linear1.weight"));
-                let (_, l2) = get(&format!("{p}.linear2.weight"));
-                // linear2 is [D, D+mlp]; split its input (column) dim
-                let tsp = std::time::Instant::now();
-                let (wo_a, wo_b) = model::hostmath::split_cols(l2, d, d, mlp);
-                split_ns.set(split_ns.get() + tsp.elapsed().as_nanos());
+                let l1_n = format!("{p}.linear1.weight");
+                let l1_l = format!("{p}.linear1");
+                // linear2 is [D, D+mlp]; wo_a/wo_b are its two COLUMN blocks,
+                // which is why `lin_rect` takes a column range at all.
+                let l2_n = format!("{p}.linear2.weight");
+                let l2_l = format!("{p}.linear2");
                 SingleW {
-                    wq: lin_n(&format!("{p}.linear1"), rows(l1, d, 0, d), d, d),
-                    wk: lin_n(&format!("{p}.linear1"), rows(l1, d, d, 2 * d), d, d),
-                    wv: lin_n(&format!("{p}.linear1"), rows(l1, d, 2 * d, 3 * d), d, d),
+                    wq: lin_rect(&l1_n, &l1_l, d, 0, d, 0, d),
+                    wk: lin_rect(&l1_n, &l1_l, d, d, d, 0, d),
+                    wv: lin_rect(&l1_n, &l1_l, d, 2 * d, d, 0, d),
                     nq: up(&format!("{p}.norm.query_norm.scale")),
                     nk: up(&format!("{p}.norm.key_norm.scale")),
-                    w1: lin_n(&format!("{p}.linear1"), rows(l1, d, 3 * d, 3 * d + mlp), mlp, d),
-                    w3: lin_n(&format!("{p}.linear1"), rows(l1, d, 3 * d + mlp, 3 * d + 2 * mlp), mlp, d),
-                    wo_a: lin_n(&format!("{p}.linear2"), &wo_a, d, d),
-                    wo_b: lin_n(&format!("{p}.linear2"), &wo_b, d, mlp),
+                    w1: lin_rect(&l1_n, &l1_l, d, 3 * d, mlp, 0, d),
+                    w3: lin_rect(&l1_n, &l1_l, d, 3 * d + mlp, mlp, 0, d),
+                    wo_a: lin_rect(&l2_n, &l2_l, d + mlp, 0, d, 0, d),
+                    wo_b: lin_rect(&l2_n, &l2_l, d + mlp, 0, d, d, mlp),
                 }
             })
             .collect();
@@ -463,12 +514,12 @@ impl Flux2Model {
             final_w: Lin::F32(up("final_layer.linear.weight")),
             modb,
             scr,
-            time_in_a: get("time_in.in_layer.weight").1.clone(),
-            time_in_b: get("time_in.out_layer.weight").1.clone(),
-            mod_img: get("double_stream_modulation_img.lin.weight").1.clone(),
-            mod_txt: get("double_stream_modulation_txt.lin.weight").1.clone(),
-            mod_single: get("single_stream_modulation.lin.weight").1.clone(),
-            final_adaln: get("final_layer.adaLN_modulation.1.weight").1.clone(),
+            time_in_a: getv("time_in.in_layer.weight"),
+            time_in_b: getv("time_in.out_layer.weight"),
+            mod_img: getv("double_stream_modulation_img.lin.weight"),
+            mod_txt: getv("double_stream_modulation_txt.lin.weight"),
+            mod_single: getv("single_stream_modulation.lin.weight"),
+            final_adaln: getv("final_layer.adaLN_modulation.1.weight"),
             gpu,
         }
     }

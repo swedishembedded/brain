@@ -19,33 +19,50 @@ use crate::config::Flux2Config;
 /// name -> (shape, fp32 data), keyed by canonical BFL names.
 pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
-fn validate(map: Tensors, cfg: &Flux2Config) -> Result<Tensors, String> {
+/// Two-way coverage against [`Flux2Config::tensor_manifest`], by SHAPE only:
+/// every expected tensor present with the right shape, and nothing in
+/// `present` that the manifest does not name.
+///
+/// Split out of [`validate`] so a loader that never materializes fp32 can
+/// still run the identical check. This is the check that catches a wrong
+/// checkpoint, and it must run BEFORE any weight is read - a streaming loader
+/// that validated as it went would be halfway through uploading a mismatched
+/// model before it noticed.
+pub fn validate_manifest(
+    shape_of: &dyn Fn(&str) -> Option<Vec<usize>>,
+    present: &[String],
+    cfg: &Flux2Config,
+) -> Result<(), String> {
     let manifest = cfg.tensor_manifest();
     for (name, shape) in &manifest {
-        match map.get(name) {
+        match shape_of(name) {
             None => return Err(format!("import: missing tensor {name}")),
-            Some((s, d)) => {
-                if s != shape {
-                    return Err(format!(
-                        "import: {name} shape {s:?}, expected {shape:?}"
-                    ));
-                }
-                let n: usize = shape.iter().product();
-                if d.len() != n {
-                    return Err(format!(
-                        "import: {name} has {} values, expected {n}",
-                        d.len()
-                    ));
+            Some(s) => {
+                if &s != shape {
+                    return Err(format!("import: {name} shape {s:?}, expected {shape:?}"));
                 }
             }
         }
     }
-    if map.len() != manifest.len() {
-        let expected: std::collections::HashSet<&str> =
-            manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let extra: Vec<&String> =
-            map.keys().filter(|k| !expected.contains(k.as_str())).collect();
+    if present.len() != manifest.len() {
+        let expected: std::collections::HashSet<&str> = manifest.iter().map(|(n, _)| n.as_str()).collect();
+        let extra: Vec<&String> = present.iter().filter(|k| !expected.contains(k.as_str())).collect();
         return Err(format!("import: unused source tensors: {extra:?}"));
+    }
+    Ok(())
+}
+
+fn validate(map: Tensors, cfg: &Flux2Config) -> Result<Tensors, String> {
+    let names: Vec<String> = map.keys().cloned().collect();
+    validate_manifest(&|n| map.get(n).map(|(s, _)| s.clone()), &names, cfg)?;
+    // Shapes agree; now check each tensor actually carries that many values -
+    // something only a materialized map can be asked.
+    for (name, shape) in cfg.tensor_manifest() {
+        let n: usize = shape.iter().product();
+        let d = &map[&name].1;
+        if d.len() != n {
+            return Err(format!("import: {name} has {} values, expected {n}", d.len()));
+        }
     }
     Ok(map)
 }

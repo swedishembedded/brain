@@ -192,11 +192,67 @@ impl Pipeline {
         Pipeline::build_batched(cfg, paths, n_img_max, adapter, precision, 1)
     }
 
-    /// [`Pipeline::build_with`] sized for up to `max_batch` concurrent
-    /// generations sharing one denoise loop ([`Pipeline::generate_batch`]).
-    /// Only the DiT activation scratch grows; the text encoder and VAE stay
-    /// single-stream.
-    pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
+    /// The DiT half of a build: the weight source decision, any LoRA fold,
+    /// and the model construction.
+    ///
+    /// A Q8_0 GGUF at the int8 tier never needs the fp32 model. The
+    /// checkpoint already holds int8, and `DitWeights::Gguf` requantizes each
+    /// matrix straight to this engine's per-row packing, one at a time;
+    /// routing it through the fp32 map instead materializes the whole model
+    /// (36.3 GB on klein-9b) purely as an intermediate, reads it back twice
+    /// to quantize, and frees it again. The result is BIT-IDENTICAL either
+    /// way - see `crate::weights` for why that is provable rather than
+    /// approximate - so this is a pure cost decision, not a fidelity one.
+    ///
+    /// A third-party LoRA still needs a float domain, but per tensor rather
+    /// than over a resident map, so it rides the same streamed path. brain's
+    /// own adapter container does not: it folds through
+    /// `LoraAdapter::fold_into_tensors`, which is written against the whole
+    /// map. Everything else - safetensors, diffusers dirs, the fp32 tier, a
+    /// GGUF whose tensors are not Q8_0 - takes the map route unchanged.
+    fn build_dit(
+        cfg: &Flux2Config,
+        paths: &Paths,
+        n_max: u32,
+        adapter: Option<&AdapterSpec>,
+        precision: crate::Precision,
+        max_batch: u32,
+        gpu: gpu_core::Gpu,
+    ) -> Result<Flux2Model, String> {
+        let external = adapter.filter(|a| a.path.ends_with(".safetensors"));
+        // `BRAIN_FLUX2_NO_STREAM=1` forces the fp32-map route. Both produce
+        // the same bytes, so this is not a correctness switch - it is what
+        // lets the two be A/B'd on a real checkpoint (which is how the
+        // byte-identity of a real 9B generation was checked, adapter and
+        // all), and a valve if a checkpoint ever trips the streamed path.
+        let no_stream = std::env::var("BRAIN_FLUX2_NO_STREAM").is_ok_and(|v| v != "0");
+        let streamable = !no_stream
+            && precision == crate::Precision::Int8
+            && paths.dit.ends_with(".gguf")
+            && adapter.is_none_or(|a| a.path.ends_with(".safetensors"));
+        if streamable {
+            let g = checkpoint::gguf::MmapGguf::open(&paths.dit)?;
+            // Two-way coverage still has to hold, and it has to hold BEFORE
+            // any weight is read: it is what catches a wrong checkpoint, and
+            // skipping it because the load got cheaper would trade the one
+            // check that matters for the saving.
+            crate::import::validate_manifest(&|n| g.shape(n).map(<[usize]>::to_vec), g.names(), cfg)?;
+            let lora = match external {
+                Some(ap) => {
+                    let l = crate::weights::PendingLora::open(&ap.path, ap.scale, &|n| g.shape(n).map(<[usize]>::to_vec))?;
+                    let (pairs, rank, scale) = l.summary();
+                    // Loud on success too: a run that claims to be adapted
+                    // should say how much of the model it actually moved, so
+                    // a silent no-op cannot hide behind a clean exit.
+                    eprintln!("flux2: folded external LoRA {} - {pairs} linears, rank {rank}, strength {scale}", ap.path);
+                    Some(l)
+                }
+                None => None,
+            };
+            let src = crate::weights::DitWeights::gguf_adapted(&g, lora.as_ref());
+            return Ok(Flux2Model::new_from(cfg, &src, gpu, n_max, max_batch, precision));
+        }
+
         let mut dit_ts = read_dit_tensors(&paths.dit, cfg)?;
         if let Some(ap) = adapter {
             // Two adapter families reach this point, told apart by extension:
@@ -205,9 +261,6 @@ impl Pipeline {
             // checkpoint container. Both fold into the same f32 tensor map.
             if ap.path.ends_with(".safetensors") {
                 let info = crate::lora::fold_external_adapter(&ap.path, &mut dit_ts, ap.scale)?;
-                // Loud on success too: a run that claims to be adapted should
-                // say how much of the model it actually moved, so a silent
-                // no-op cannot hide behind a clean exit.
                 eprintln!(
                     "flux2: folded external LoRA {} - {} linears, rank {}, strength {}",
                     ap.path, info.pairs, info.rank, info.scale
@@ -221,9 +274,19 @@ impl Pipeline {
                 eprintln!("flux2: folded brain LoRA {} - rank {}", ap.path, ad.rank());
             }
         }
-        let gpu = gpu_core::Gpu::new(crate::model::KERNELS);
-        let model = Flux2Model::new_batched(cfg, &dit_ts, gpu, cfg.txt_len as u32 + n_img_max, max_batch.max(1), precision);
+        let model = Flux2Model::new_batched(cfg, &dit_ts, gpu, n_max, max_batch, precision);
         drop(dit_ts);
+        Ok(model)
+    }
+
+    /// [`Pipeline::build_with`] sized for up to `max_batch` concurrent
+    /// generations sharing one denoise loop ([`Pipeline::generate_batch`]).
+    /// Only the DiT activation scratch grows; the text encoder and VAE stay
+    /// single-stream.
+    pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
+        let n_max = cfg.txt_len as u32 + n_img_max;
+        let gpu = gpu_core::Gpu::new(crate::model::KERNELS);
+        let model = Self::build_dit(cfg, paths, n_max, adapter, precision, max_batch.max(1), gpu)?;
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&paths.tokenizer)?;
         let te_cfg = if cfg.context_in_dim == 12288 {

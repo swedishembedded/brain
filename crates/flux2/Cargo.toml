@@ -14,6 +14,9 @@ brain-capability.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
+# `weights::DitWeights` requantizes rows in parallel through `par`, the
+# workspace's only rayon seam.
+brain-backend-cpu.workspace = true
 brain-dit.workspace = true
 brain-model.workspace = true
 brain-vae.workspace = true
