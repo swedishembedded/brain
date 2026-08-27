@@ -16,7 +16,17 @@
 //! Knobs: `BRAIN_FLUX2_TRAIN_VARIANT` (klein-4b | klein-9b, default klein-4b),
 //! `BRAIN_FLUX2_TRAIN_SIZE` (square px, multiple of 16, default 512),
 //! `BRAIN_FLUX2_TRAIN_RANK` (default 16), `BRAIN_FLUX2_TRAIN_ITERS` (timed
-//! steps after the warm-up, default 3).
+//! steps after the warm-up, default 3), `BRAIN_FLUX2_TRAIN_CARDS` (GPUs the
+//! block stack is spread over, default 1).
+//!
+//! `BRAIN_FLUX2_TRAIN_CARDS` exists because without it this harness cannot
+//! measure the variant it names in its own default list: klein-9B's fp32
+//! frozen base is larger than one 24 GiB card, so `klein-9b` here could only
+//! ever out-of-memory. `finetune::run` builds its trainer with
+//! `DeviceTrainer::new_multi(cards, ..)`; so does this, and for the same
+//! reason - a harness that constructed the trainer differently from the run
+//! it is meant to predict would be measuring a configuration nobody trains
+//! in.
 //!
 //! Method: the first step is a **warm-up** and never enters the statistics
 //! (it pays pipeline creation and first-touch page faults); best-of-N is
@@ -104,6 +114,7 @@ fn device_lora_step_time() {
     let size = envn("BRAIN_FLUX2_TRAIN_SIZE", 512);
     let rank = envn("BRAIN_FLUX2_TRAIN_RANK", 16);
     let iters = envn("BRAIN_FLUX2_TRAIN_ITERS", 3);
+    let cards = envn("BRAIN_FLUX2_TRAIN_CARDS", 1).max(1);
     assert!(size.is_multiple_of(16), "size must be a multiple of 16");
     let fc = Flux2Config::from_name(&variant).expect("variant");
     let c = Cfg::from_flux2(&fc, size / 16, size / 16);
@@ -113,8 +124,16 @@ fn device_lora_step_time() {
     let base = weights(&c);
     eprintln!("  host weights built in {:.1}s", t0.elapsed().as_secs_f64());
     let t0 = std::time::Instant::now();
-    let tr = DeviceTrainer::new(c.clone(), rank, &base);
-    eprintln!("  device upload {:.1}s, base+adapter resident {:.2} GiB", t0.elapsed().as_secs_f64(), tr.weight_bytes() as f64 / (1u64 << 30) as f64);
+    let tr = DeviceTrainer::new_multi(cards, c.clone(), rank, &base);
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    let per: Vec<String> = tr.weight_bytes_per_card().iter().map(|b| format!("{:.2}", gib(*b))).collect();
+    eprintln!(
+        "  device upload {:.1}s over {} card(s), base+adapter resident {:.2} GiB ({} GiB)",
+        t0.elapsed().as_secs_f64(),
+        tr.cards(),
+        gib(tr.weight_bytes()),
+        per.join(" + ")
+    );
     drop(base);
 
     // Measure the configuration a REAL run uses, not the gate's. The parity
