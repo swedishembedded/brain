@@ -29,6 +29,14 @@
 //! unreachable. `imaging` owning the `image` dependency is what makes it
 //! reachable from `events`, `cli` and every future capability.
 //!
+//! The same dependency carries `image`'s PNG **and JPEG encoders**, so
+//! [`save_png`] and [`save_jpeg`] are wiring, not new code and not a new
+//! dependency. Writing a DCT/Huffman encoder by hand here would be a second
+//! implementation of something already linked into every binary in the
+//! workspace - the `rmsnorm`-was-seven-times failure mode this crate exists to
+//! undo. `imaging` is dependency-light about what enters the *runtime*, not
+//! about refusing a pure-Rust codec it already ships.
+//!
 //! P6 is sniffed **first** so it always takes the `events` path, never `image`'s
 //! PNM decoder — one format, one implementation, whatever cargo's feature
 //! unification decides to compile.
@@ -100,18 +108,78 @@ pub fn save_png(path: impl AsRef<Path>, img: &Rgb8) -> Result<(), String> {
         .map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
-/// Write an [`Rgb8`], choosing the encoder from `path`'s extension:
-/// `.png`/`.PNG` -> [`save_png`], anything else (including no extension,
-/// `.ppm`, or an extension nobody asked for) -> [`save_ppm`]. This is the
-/// front door every CLI `--out name=path` write should go through: the
-/// extension the caller typed is the format that lands on disk, rather than
-/// always being a P6 regardless of what the path says (the previous
-/// behaviour of every `imaging::save_ppm` call site).
+/// The quality [`save`] encodes a `.jpg`/`.jpeg` path at, on libjpeg's 1-100
+/// scale.
+///
+/// 92 is the "high quality" end of the scale that ImageMagick, GIMP's export
+/// dialog and most photo tools present as their own default-for-keeping, as
+/// opposed to libjpeg's own 75, which is tuned for shipping a photograph over a
+/// slow link. The difference matters here because brain's `.jpg` writes are
+/// *generated* images, not camera captures: flat regions, hard synthetic edges
+/// and text overlays are exactly what shows quantisation ringing first, and a
+/// generated frame is frequently the input to the next stage (an upscale, a
+/// caption, a parity comparison) rather than a final artefact. 92 keeps the
+/// order-of-magnitude size win over PNG while leaving no artefact a viewer
+/// would notice; a caller that wants a different point on the curve calls
+/// [`save_jpeg`] directly rather than being stuck with this one.
+pub const JPEG_QUALITY: u8 = 92;
+
+/// Write an [`Rgb8`] as JPEG at `quality` (1-100, libjpeg's scale), creating the
+/// parent directory.
+///
+/// The encoder is `image`'s (`image::codecs::jpeg`), reached through the `jpeg`
+/// feature this crate already enables for [`decode`] - the same "already a
+/// dependency, so the encoder is free" argument [`save_png`] makes. Baseline
+/// JPEG, 4:4:4, no chroma subsampling.
+///
+/// JPEG is **lossy** and its dimensions are 16-bit: an image wider or taller
+/// than 65535 px is an error here, not a silent crop. Nothing is written unless
+/// the encode succeeds.
+pub fn save_jpeg(path: impl AsRef<Path>, img: &Rgb8, quality: u8) -> Result<(), String> {
+    let path = path.as_ref();
+    // `JpegEncoder::encode` asserts on a mismatched buffer, and `Rgb8`'s fields
+    // are public, so a hand-built struct could reach it. Same guard `save_png`
+    // gets for free from `RgbImage::from_raw`.
+    let need = img.w as usize * img.h as usize * 3;
+    if img.px.len() != need {
+        return Err(format!("{}: pixel buffer does not match {}x{}", path.display(), img.w, img.h));
+    }
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
+        .encode(&img.px, img.w, img.h, image::ExtendedColorType::Rgb8)
+        .map_err(|e| format!("encoding {} as JPEG: {e}", path.display()))?;
+    create_parent_dir(path)?;
+    std::fs::write(path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
+/// Write an [`Rgb8`], choosing the encoder from `path`'s extension
+/// (case-insensitively): `.png` -> [`save_png`], `.jpg`/`.jpeg` ->
+/// [`save_jpeg`] at [`JPEG_QUALITY`], `.ppm` or no extension at all ->
+/// [`save_ppm`]. This is the front door every CLI `--out name=path` write
+/// should go through: the extension the caller typed is the format that lands
+/// on disk.
+///
+/// Any **other** extension is an error naming it, and nothing is written. The
+/// alternative - falling back to P6 - is worse than refusing: `--out
+/// photo.webp` then produces a P6 wearing a `.webp` suffix, which no viewer
+/// opens and which misreports its own format to everything downstream that
+/// trusts the name. An unsupported extension is a typo or an unimplemented
+/// format, and both want to be said out loud.
 pub fn save(path: impl AsRef<Path>, img: &Rgb8) -> Result<(), String> {
     let path = path.as_ref();
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("png") => save_png(path, img),
-        _ => save_ppm(path, img),
+    // `to_string_lossy`, not `to_str`: a non-UTF-8 extension is still an
+    // extension, and must not fall through the `None` arm into a P6 the caller
+    // did not ask for.
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned());
+    match ext.as_deref() {
+        None => save_ppm(path, img),
+        Some(e) if e.eq_ignore_ascii_case("ppm") => save_ppm(path, img),
+        Some(e) if e.eq_ignore_ascii_case("png") => save_png(path, img),
+        Some(e) if e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg") => save_jpeg(path, img, JPEG_QUALITY),
+        Some(e) => Err(format!(
+            "{}: brain cannot write '.{e}' images - supported are .png, .jpg/.jpeg and .ppm (a path with no extension writes .ppm's P6)",
+            path.display()
+        )),
     }
 }
 
@@ -209,8 +277,11 @@ mod tests {
         save(&png, &tiny()).unwrap();
         assert!(std::fs::read(&png).unwrap().starts_with(&[0x89, b'P', b'N', b'G']), "out.png should be PNG bytes");
 
-        // An unrecognised (or absent) extension keeps today's PPM behaviour -
-        // no existing `--out foo.ppm`/`--out foo` caller's output changes.
+        // `.ppm` and an absent extension keep today's PPM behaviour - no
+        // existing `--out foo.ppm`/`--out foo` caller's output changes. An
+        // extension nobody supports is an error instead of a mislabelled P6;
+        // `tests/save_formats.rs` owns that case and the byte-level regression
+        // fence around these two.
         let ppm = dir.join("out.ppm");
         save(&ppm, &tiny()).unwrap();
         assert!(std::fs::read(&ppm).unwrap().starts_with(b"P6"), "out.ppm should still be P6");
