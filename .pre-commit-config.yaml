@@ -28,6 +28,19 @@ repos:
         language: system
         pass_filenames: true
         stages: [pre-commit]
+      - id: workspace-members-parse
+        name: "Every crates/* manifest parses"
+        description: >-
+          The workspace globs crates/*, so ONE unparseable Cargo.toml (most
+          often unresolved conflict markers) makes every crate unresolvable at
+          manifest-parse time, and cargo's own error names whichever member it
+          was resolving rather than the broken file. Names the file and line
+          instead. See scripts/gates/check-workspace-members.sh.
+        entry: bash scripts/gates/check-workspace-members.sh
+        language: system
+        pass_filenames: false
+        files: (^|/)Cargo\.toml$
+        stages: [pre-commit]
       - id: no-large-or-binary-files
         name: "No video, model weights, or oversized files"
         description: >-

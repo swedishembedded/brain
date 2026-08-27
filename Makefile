@@ -56,7 +56,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: check/workspace help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -302,7 +302,13 @@ CARGO_TEST   ?= cargo test --release --offline
 # The clippy gate - a ratchet. Checks that clippy EXITS 0 (it stops at the first
 # deny-by-default lint and then silently reports nothing about everything after
 # it) and that the warning count has not grown. See scripts/gates/clippy-gate.sh.
-clippy:
+# Runs BEFORE the clippy gate: if a manifest is broken, cargo fails at
+# manifest-parse time with an error naming an innocent crate, and every other
+# gate inherits that confusion. Cheap enough to front every slow gate with.
+check/workspace:
+	@scripts/gates/check-workspace-members.sh
+
+clippy: check/workspace
 	@scripts/gates/clippy-gate.sh
 
 test:
