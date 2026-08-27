@@ -271,8 +271,8 @@ mod tests {
 
     /// `load` must not hold the raw file bytes AND the decoded tensors at the
     /// same time. The tensors are F32 on disk, so the file is essentially the
-    /// tensor blob: a `std::fs::read` + decode reaches ~2x the blob, while
-    /// decoding straight out of a mapping reaches ~1x.
+    /// tensor blob: a `std::fs::read` + decode holds that blob twice over,
+    /// while decoding straight out of a mapping holds it once.
     ///
     /// This is a *heap* measurement ([`crate::testalloc`]), which is what makes
     /// the distinction visible at all - a mapping's pages are not heap, so the
