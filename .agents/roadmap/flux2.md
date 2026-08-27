@@ -607,3 +607,176 @@ and asserted by
 Everything under `strength < 1` is **intentionally not** bit-identical and is
 not parity-gated against the old behaviour - there is no parity to claim
 against a run that ignored its own input.
+
+## `--strength` becomes a dial instead of a cliff (2026-08-27)
+
+The change above made a supplied reference condition the model at every
+`--strength`. It did not make `--strength` continuous, and the user's report
+after it was precise: `1.00` stages the room - new bed, new textiles, new
+furniture - and `0.99` repaints the bedding that is already there. Two
+different *jobs*, one dial position apart.
+
+**It was a true code-path discontinuity, not a steep response.** At
+`strength < 1` the sampler integrated a **uniform ramp** over `[strength, 0]`;
+at exactly `1.0` it integrated `klein_sigmas`. Those are different samplers.
+At 12 steps and 3072 generated tokens the two schedules are nowhere near each
+other:
+
+| k | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `klein_sigmas` (`strength 1.0`) | 1.000 | 0.990 | 0.977 | 0.963 | 0.945 | 0.923 | 0.896 | 0.860 | 0.812 | 0.742 | 0.633 | 0.439 |
+| uniform ramp (`strength 0.999`) | 0.999 | 0.916 | 0.833 | 0.749 | 0.666 | 0.583 | 0.500 | 0.416 | 0.333 | 0.250 | 0.167 | 0.083 |
+
+klein is a distilled few-step sampler: its schedule is exponentially shifted
+by a token-count- and step-count-dependent `mu`, it spends eleven of twelve
+steps above sigma 0.43, and it resolves the image in one long final leap. The
+uniform ramp descends evenly and resolves gradually. Crossing between them at
+`1 − 1e-3` swapped the sampler, and the two samplers do different things with
+the same weights, the same prompt and the same seed - which is exactly what
+"a different job" looks like from the outside. The init latent
+`(1−s)·x₀ + s·ε` was never the problem: it is continuous in `s` by
+construction and at `s = 0.999` carries 0.1% of the photograph.
+
+The fix is the one that a true discontinuity calls for, and it is not a
+remap: `pipeline::img2img_sigmas` is now `klein_sigmas` **scaled** into
+`[0, strength]`. `strength` still sets the noise level the init latent is
+mixed at - it has to, the model must be asked to denoise the distribution it
+was handed - but the *shape* of the descent is klein's own at every setting.
+`strength = 1` then reproduces `klein_sigmas` bit for bit (`1.0 · x` is exact
+in IEEE), so the dial **reaches** free generation rather than approaching it,
+and every entry is linear in `strength`, so lowering the dial lowers every
+sigma by at most `1 − strength`.
+
+Scaling, not slicing. Slicing the distilled schedule remains wrong for the
+reason recorded when the uniform ramp was written: `klein_sigmas`' lowest
+non-zero entry is 0.56 at 8 steps and 0.75 at 4, so there is no low-noise
+entry point to start an img2img from and the caller's step budget would
+silently collapse. Scaling keeps every step the caller asked for.
+
+### The response curve, measured
+
+Same 2x Tesla P40 placement and the same metric definitions as the tables
+above (`edge corr` = Pearson correlation of full-resolution Sobel gradient
+magnitudes against the source; `MAD` = mean |RGB difference| in 0..255).
+`image-02`, seed 7, 12 steps, `klein-9b` int8, the rank-32 staging LoRA at
+1.0, the model card's verbatim tier wording. `1.00` is driven by a 768x576
+reference; every lower rung by a 1024x768 one, whose conditioning copy the
+default `--ref-cond-scale 0.75` puts back at 768x576 - so every rung in the
+ladder carries the same 3072 + 1728 joint sequence.
+
+| strength | before edge corr | before MAD | after edge corr | after MAD |
+|---|---|---|---|---|
+| **1.00** (768 ref) | **0.279** | **54.1** | **0.279** | **54.1** |
+| 0.995 | 0.383 | 46.6 | 0.297 | 50.2 |
+| 0.99 | *0.380* | 45.9 | 0.315 | 46.4 |
+| 0.98 | 0.391 | 41.7 | 0.345 | 41.4 |
+| 0.97 | 0.399 | 38.9 | 0.390 | 38.1 |
+| 0.96 | 0.440 | 33.7 | 0.450 | 32.4 |
+| 0.95 | 0.484 | 30.1 | 0.503 | 28.9 |
+| 0.90 | 0.676 | 18.0 | 0.690 | 17.0 |
+| 0.80 | 0.767 | 12.4 | 0.789 | 11.5 |
+| 0.60 | 0.832 | 9.8 | 0.844 | 9.2 |
+| 0.40 | 0.890 | 7.9 | 0.894 | 7.6 |
+| 0.20 | 0.953 | 5.4 | 0.954 | 5.4 |
+
+The `1.00` row is the same PNG in both columns - that is the bit-identity
+claim below. Everything else moved.
+
+Two things to read off it. **The first step off the top.** Before, one 0.005
+move cost 0.104 of edge correlation; after, 0.018. Before, five sixths of the
+dial's whole range was spent between `1.00` and `0.995` and the next eight
+rungs down to `0.95` added 0.10 between them; after, those same rungs are
+evenly spaced. **The reversal.** Before, `0.99` (*0.380*) is *less* faithful
+to the source than `0.995` (0.383) - lowering the dial made the output drift
+further from the photograph. After, both metrics fall monotonically over all
+twelve rungs with no reversal anywhere.
+
+The before column is flat from `0.995` down: one step off the top already
+spent most of the dial's range, and everything below it was the same picture
+with slightly different colour. The after column spreads that range across
+the parameter. Looking at the images rather than the numbers: before, the job
+changed between `1.00` and `0.995` and never changed again; after, `0.995`,
+`0.99` and `0.97` are all still staging the room with progressively more of
+the photograph showing through, and the source bedding comes back gradually
+from about `0.98`.
+
+### Whether to remap the dial on top of this, and why it was not done
+
+With the sampler discontinuity gone the residual response is steep but smooth,
+and it is a property of the model rather than of the code: a few percent of
+the photograph in the init latent is enough to pin the room's low-frequency
+layout. Fitting the after column gives
+
+    edge corr ~ 1.07 * (1 - strength) ^ 0.26
+
+over the whole ladder, so the transform that would make perceptual anchoring
+roughly linear in the dial is `strength = 1 - (1 - dial)^4` (the fitted
+exponent is 1/0.26 = 3.9). It would satisfy every constraint the current
+behaviour does: exact at both ends (`dial 1 -> 1`, `dial 0 -> 0`), monotone
+(`d/d(dial) = 4(1-dial)^3 >= 0`), and *more* continuous at the top, since
+`dial 0.99` would map to `1 - 1e-8`.
+
+It was **not** applied, and the reasons are worth keeping because the fit
+above makes it a one-line change anyone could reach for later:
+
+* `--strength` currently *is* the noise level sigma_0 the init latent
+  `(1-sigma)*x0 + sigma*eps` is mixed at. That is the same quantity the
+  trainer's forward process uses, the same one `--mask` renoises to, and the
+  same one every other tool in this ecosystem spells `strength` / `denoise`.
+  A remap makes the flag a private curve and leaves nothing that names the
+  sigma.
+* It reprices every existing invocation a second time in one day, and the
+  useful band would move from `1.00..0.90` to `1.00..0.45` - so the settings
+  in anyone's scripts would mean something new again, for a convenience gain
+  rather than a correctness one.
+* The residual steepness is real information about the model. Flattening it
+  into the parameter hides that a 1% init-latent mix already decides the
+  composition.
+
+The user-facing requirement - lower the dial and get gradually more of the
+photograph, with `0.99` doing `1.00`'s job - is met by the sampler fix alone,
+and is met by measurement rather than by argument. A remap is a separate
+product decision, and the fit above is what it should be built on.
+
+### What is bit-identical, and what is parity-gated
+
+`--strength 1.0` is **bit-identical**: the same invocation renders sha256
+`85076a98...`, unchanged, on the real 9B int8 weights - verified by rendering
+it with a binary built from the tree before this change and with one built
+after, and comparing the PNGs byte for byte, not by reasoning about the
+branch. Everything under `strength < 1` moves deliberately and is not
+parity-gated against the old behaviour; there is no parity to claim against a
+sampler that was swapped out from under the dial.
+
+### The gates, and the mutation each one died to
+
+| gate | mutation that kills it |
+|---|---|
+| `the_img2img_schedule_reaches_the_free_generation_schedule_exactly` | scale the dial by `0.999` |
+| `a_hair_below_full_strength_is_a_hair_from_the_full_strength_schedule` | restore the uniform ramp (worst \|Δσ\| 0.504 against a 0.05 bound) |
+| `lowering_the_strength_lowers_every_sigma_and_raises_the_source_weight` | a non-monotone remap `s + 0.2·sin(30 s)` |
+| `both_spellings_of_full_strength_integrate_the_klein_schedule` | shrink the free-generation schedule by 0.8 |
+| `the_img2img_branch_integrates_the_img2img_schedule` | let the pipeline build a uniform ramp again |
+| `a_hair_below_full_strength_renders_what_full_strength_renders` | restore the uniform ramp (cosine 0.9984, rel_l2 0.0574 against 0.999 / 0.02) |
+| `anchoring_increases_monotonically_as_strength_falls` | drop `strength` from the init latent |
+| `a_vanishing_strength_returns_the_source` | drop `strength` from the init latent |
+
+**A gate that could not fail, and what replaced it.**
+`a_strength_one_run_is_byte_identical_to_the_pre_change_output` is a golden
+digest over a stub-denoiser render, and it survives *any* change to the sigma
+schedule. `Stub`'s velocity is `(x − g)/σ`, whose exact Euler solution is
+`x = g + C·σ`: one integration lands on `g` from any init latent over any
+sigma list, so the rendered bytes cannot move when the schedule does
+(confirmed by mutation - shrinking `klein_sigmas` by 0.8 left the digest
+untouched). It is a real fence on the conditioning and token path and it is
+kept as one; it is **not** a fence on `--strength`, and reading it as one is
+the trap. `both_spellings_of_full_strength_integrate_the_klein_schedule`
+asserts the sigmas the DiT was evaluated at directly and does die to that
+mutation.
+
+For the same reason the end-to-end strength gates run against a second stub,
+`Flow`, whose clean-image estimate is `x̂₀ = (1−σ)·x + σ·g` - it commits to
+its own idea at high noise and trusts what it sees at low noise, giving the
+**bounded** velocity `v = x − g`. Under `Stub` every strength renders the
+same image, so a monotonicity or continuity assertion written against it
+could not fail however the dial was wired.

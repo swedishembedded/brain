@@ -69,10 +69,25 @@ brain/flux2-klein` lists them) over D-Bus and over HTTP at
   ai-toolkit and ComfyUI resolve the alpha multiplier to exactly 1.0 and this
   flag is the only dial; `0.0` reproduces the base model, which is the way to
   check what the adapter is actually contributing.
-- `--strength` - for image-to-image editing, how much the output may drift
-  from the reference: low values (around 0.1) preserve structure/texture
-  closely, high values (around 0.9) allow more freedom, and `1.0` starts the
-  denoise from pure noise. It does not add color/hue changes on its own.
+- `--strength` - for image-to-image editing, a **continuous anchoring dial**
+  in `0..=1` on the first `--ref` (which must then be supplied at the output
+  size). `1.0` is free generation conditioned on the reference; lowering it
+  anchors progressively more of the source photograph; `0` returns the source
+  through the VAE round trip. It does not add color/hue changes on its own.
+
+  It is a dial and not a mode switch. `--strength` is the noise level the
+  init latent `x_σ = (1−σ)·x₀ + σ·ε` is mixed at, and the descent from there
+  is **the same schedule `--strength 1.0` runs, scaled into `[0, strength]`**
+  - so the same sampler integrates the same shape at every setting, `0.99`
+  renders a hair from what `1.0` renders, and `1.0` is reached exactly rather
+  than approached. Lowering the dial lowers every sigma and raises the
+  source's weight in the init latent, so preservation only ever increases; it
+  never reverses. (A *uniform* ramp over `[strength, 0]` would be a different
+  sampler rather than a lower-noise version of the same one: klein is a
+  distilled few-step model whose schedule is shifted by a token-count- and
+  step-count-dependent `mu` and spends nearly every step at high sigma before
+  one long final leap.)
+
   It controls **how much denoising starts from the init latent, not whether
   the model can see the reference**: a supplied reference contributes
   conditioning tokens at every value of `--strength`. Below `1.0` the first

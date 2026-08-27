@@ -12,10 +12,12 @@ const HELP: &str = "brain flux2 <cmd>
   generate --prompt <text> --out <out.ppm> [--width W] [--height H]
            [--steps N] [--seed S] [--guidance G] [--variant klein-4b|klein-9b|base-4b|base-9b]
            [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only)
-           [--strength S]           # img2img: how much denoising starts from the first
-                                    # --ref instead of from noise. 0.2-0.5 keeps the source
-                                    # (colorize), 1.0 = start from pure noise. The reference
-                                    # conditions the model at EVERY strength.
+           [--strength S]           # img2img anchoring dial, 0..1, on the first --ref
+                                    # (which must then be at the output size). 1.0 = free
+                                    # generation conditioned on the reference; lower anchors
+                                    # progressively more of the source; 0 returns it. The
+                                    # same sampler runs at every value, so 0.99 is a hair
+                                    # from 1.0. The reference conditions at EVERY strength.
            [--ref-cond-scale S]     # linear size of the conditioning copy of the --strength
                                     # init reference, 0..1 (default 0.75). 1.0 = full size
                                     # (same token cost as --strength 1.0); 0 = do not

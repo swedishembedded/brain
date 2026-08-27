@@ -105,13 +105,21 @@ impl AdapterSpec {
 pub struct GenOpts {
     pub width: u32,
     pub height: u32,
-    /// Image-to-image init strength in `(0, 1]`. `None` (or 1.0) starts the
+    /// Image-to-image anchoring in `[0, 1]`. `None` (or 1.0) starts the
     /// denoise from pure noise, so the result keeps the composition but is a
     /// fresh generation (this is why a reference-only "colorize" reinterprets
     /// the scene). With `Some(s)` the first reference is VAE-encoded and the
-    /// trajectory starts partway down the schedule from
+    /// trajectory starts at noise level `s` from
     /// `x_σ = (1−σ)·x₀ + σ·ε` - the rectified-flow forward process - so
-    /// structure is anchored to the source. Small `s` = faithful.
+    /// structure is anchored to the source. Small `s` = faithful, `0` returns
+    /// the source through the codec.
+    ///
+    /// A **smooth dial, not a mode switch**: the descent from `s` is the
+    /// free-generation schedule scaled into `[0, s]`
+    /// ([`img2img_sigmas`]), so the same sampler runs at every value and
+    /// `0.99` renders a hair from what `1.0` renders instead of doing a
+    /// different job. Lowering `s` lowers every sigma and raises the source's
+    /// weight in the init latent, so preservation only ever increases.
     ///
     /// This is how much of the denoise starts from the init latent, NOT
     /// whether the model can see the reference: the reference images
@@ -192,6 +200,41 @@ pub fn init_cond_size(scale: f32, h: u32, w: u32) -> Option<(u32, u32)> {
     // Below one latent token in either axis there is nothing to condition on;
     // `q` floors at 16, so the off switch is the scale itself.
     (s > 0.0).then_some((ch, cw))
+}
+
+/// The noise schedule an img2img run integrates: the free-generation schedule
+/// ([`diffusion::scheduler::klein_sigmas`]) **scaled** to `[0, strength]`,
+/// `steps + 1` entries.
+///
+/// `strength` is the noise level the init latent `x_σ = (1−σ)·x₀ + σ·ε` is
+/// mixed at, so the trajectory has to start at `σ₀ = strength` - the model
+/// must be asked to denoise from the distribution it was actually handed. What
+/// is free is the *shape* of the descent from there, and the shape has to be
+/// klein's own: it is a distilled few-step sampler, its schedule is shifted by
+/// a token-count- and step-count-dependent `mu`, and it spends almost all of
+/// its steps at high sigma before one long final leap. A uniform ramp over
+/// `[strength, 0]` is a different sampler, not a lower-noise version of the
+/// same one, and switching between them at the top of the dial is what made
+/// `--strength 0.99` do a different job from `--strength 1.0` rather than
+/// almost the same one.
+///
+/// Scaling, not slicing. Slicing the distilled schedule does not work and is a
+/// standing temptation: `klein_sigmas` is shifted so hard for few-step
+/// sampling that its lowest non-zero entry is 0.56 at 8 steps (0.75 at 4), so
+/// there is no low-noise entry point to start an img2img from and the caller's
+/// step budget would silently collapse. The velocity field is defined at every
+/// sigma, so the whole shape is compressed into `[0, strength]` and the caller
+/// gets every step they asked for.
+///
+/// Two properties the dial is built on, both gated in this module:
+/// * `strength = 1` reproduces `klein_sigmas` **bit for bit** (`1.0 · x` is
+///   exact in IEEE), so the dial reaches free generation rather than
+///   approaching it;
+/// * every entry is linear in `strength` and every entry lies in `[0, 1]`, so
+///   lowering the dial lowers every sigma, and lowering it by `δ` moves no
+///   sigma by more than `δ`.
+pub fn img2img_sigmas(strength: f32, steps: usize, n_gen: usize) -> Vec<f32> {
+    diffusion::scheduler::klein_sigmas(steps, n_gen).into_iter().map(|s| strength * s).collect()
 }
 
 /// Bilinear resize of a reference image (`[-1,1]` CHW, the layout
@@ -869,16 +912,7 @@ fn denoise_group_on<D: Denoiser>(
         // the distribution it was trained on at that σ.
         let (mut lat, start, sigmas) = if img2img {
             let st = o.strength.unwrap_or(1.0).clamp(1e-3, 1.0);
-            // Do NOT slice the distilled schedule: `klein_sigmas` is
-            // shifted so hard for few-step sampling that its lowest
-            // non-zero entry is 0.56 at 8 steps (0.75 at 4) - there is
-            // no low-noise entry point to start an img2img from, and
-            // starting at 0.84 with 3 steps left resolves to noise.
-            // The velocity field is defined at every σ, so integrate
-            // the requested number of Euler steps over [strength, 0]
-            // instead; `strength` IS the starting noise level.
-            let sigmas: Vec<f32> =
-                (0..=steps).map(|k| st * (1.0 - k as f32 / steps as f32)).collect();
+            let sigmas = img2img_sigmas(st, steps, n_gen);
             let x0 = src.as_ref().expect("img2img encodes the source above");
             let lat: Vec<f32> =
                 x0.iter().zip(&noise).map(|(&a, &e)| (1.0 - st) * a + st * e).collect();
@@ -1073,6 +1107,10 @@ mod tests {
         /// handed to the DiT. What the model *attends to* is not observable
         /// from the returned image, so the gates below read it here.
         seen: std::cell::RefCell<Vec<(Vec<f32>, usize)>>,
+        /// Every sigma the sampler evaluated the DiT at, in order. What
+        /// schedule a run integrates is not observable from the returned
+        /// image either - see the gate that reads this.
+        sigmas: std::cell::RefCell<Vec<f32>>,
     }
 
     impl Stub {
@@ -1080,6 +1118,7 @@ mod tests {
             Stub {
                 cfg: Flux2Config { in_channels: 4, txt_len: 8, ..Flux2Config::klein_4b() },
                 seen: Default::default(),
+                sigmas: Default::default(),
             }
         }
     }
@@ -1137,6 +1176,7 @@ mod tests {
                 .iter()
                 .map(|s| {
                     self.seen.borrow_mut().push((s.img_tokens.to_vec(), ids.len()));
+                    self.sigmas.borrow_mut().push(s.t);
                     // The conditioning tail shifts the target's phase. Without
                     // this the stub's output is blind to the reference tokens
                     // and a byte-identity gate over a rendered image could not
@@ -1148,24 +1188,37 @@ mod tests {
                     // still one scalar shared by every token, so the velocity
                     // reads only its own latent and the mask gates' exact
                     // equalities hold.
-                    let tail = &s.img_tokens[n_pred * ch..];
-                    let cond = tail
-                        .iter()
+                    free_target(n_pred, ch, s)
+                        .into_iter()
                         .enumerate()
-                        .map(|(j, &v)| v * (j as f32 * 0.37).sin())
-                        .sum::<f32>()
-                        / (tail.len().max(1)) as f32;
-                    (0..n_pred * ch)
-                        .map(|i| {
-                            // A fixed "generated image", prompt- and
-                            // conditioning-dependent, init-latent-independent.
-                            let target = (i as f32 * 0.031 + s.ctx[0] + cond).sin() * 0.8;
-                            (s.img_tokens[i] - target) / s.t.max(1e-6)
-                        })
+                        .map(|(i, g)| (s.img_tokens[i] - g) / s.t.max(1e-6))
                         .collect()
                 })
                 .collect()
         }
+    }
+
+    /// The stub denoisers' "free generation": a fixed image determined by the
+    /// prompt and by the conditioning tail, and **independent of the init
+    /// latent** - which is what makes "this region was regenerated"
+    /// unambiguous.
+    ///
+    /// The conditioning summary is deliberately POSITION-WEIGHTED: a plain
+    /// mean is almost invariant to resampling the same photograph, so it could
+    /// not tell a full-size conditioning copy from a downscaled one, and a
+    /// byte-identity gate over a rendered image would be blind to exactly the
+    /// change it is fencing. It is still one scalar shared by every token, so
+    /// each velocity reads only its own latent and the mask gates' exact
+    /// per-region equalities hold.
+    fn free_target(n_pred: usize, ch: usize, s: &crate::model::Sample<'_>) -> Vec<f32> {
+        let tail = &s.img_tokens[n_pred * ch..];
+        let cond = tail
+            .iter()
+            .enumerate()
+            .map(|(j, &v)| v * (j as f32 * 0.37).sin())
+            .sum::<f32>()
+            / (tail.len().max(1)) as f32;
+        (0..n_pred * ch).map(|i| (i as f32 * 0.031 + s.ctx[0] + cond).sin() * 0.8).collect()
     }
 
     /// A deterministic source photo: `[-1,1]` CHW, structured enough that a
@@ -1493,6 +1546,290 @@ mod tests {
             .expect("stub generation")
             .0;
         assert_eq!(fnv1a(&rgb), 0x0d96_f927_7211_6425u64);
+    }
+
+    /// **Gate 7b - both full-strength spellings integrate the klein schedule.**
+    /// Gate 7 above is a byte fence on a rendered image and it is deliberately
+    /// **blind to the sampler**: [`Stub`]'s velocity `(x − g)/σ` drives one
+    /// exact Euler integration onto `g` from any init latent over any sigma
+    /// list, so its digest does not move when the schedule does - verified by
+    /// mutation, and the reason that digest alone must not be read as a fence
+    /// on `--strength`. The sigmas the DiT is evaluated at are therefore
+    /// asserted directly, on both spellings of full strength: no `strength` at
+    /// all (the free-generation branch) and `strength = 1.0` (the img2img
+    /// branch at the top of its range). They are different code paths and they
+    /// must integrate the same schedule, or the dial does not reach the
+    /// setting it is supposed to reach.
+    #[test]
+    fn both_spellings_of_full_strength_integrate_the_klein_schedule() {
+        let (w, h) = (128u32, 96u32);
+        let (steps, n_gen) = (12usize, ((h / 16) * (w / 16)) as usize);
+        let want = diffusion::scheduler::klein_sigmas(steps, n_gen);
+        for strength in [None, Some(1.0f32)] {
+            let d = Stub::new();
+            let req = BatchRequest {
+                prompt: "a staged bedroom".into(),
+                refs: vec![source(h, w)],
+                opts: GenOpts {
+                    width: w,
+                    height: h,
+                    strength,
+                    steps: Some(steps as u32),
+                    seed: 7,
+                    ..GenOpts::default()
+                },
+                cancel: Default::default(),
+            };
+            generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+                .pop()
+                .unwrap()
+                .expect("stub generation");
+            // The terminal 0 is the endpoint of the last step, never a
+            // timestep the model is evaluated at.
+            assert_eq!(d.sigmas.borrow().as_slice(), &want[..steps], "strength {strength:?}");
+        }
+    }
+
+    // ---- `--strength` as a smooth anchoring dial ---------------------------
+
+    /// A denoiser whose clean-image estimate is `x̂₀ = (1−σ)·x + σ·g`: at high
+    /// noise it commits to its own idea `g`, at low noise it trusts the
+    /// structure it is already looking at. The velocity is then
+    /// `v = (x − x̂₀)/σ = x − g`, which is **bounded**, so a trajectory
+    /// starting at `σ₀` displaces the latent by `O(σ₀)` and a low-strength run
+    /// stays near its init latent - the qualitative behaviour every real
+    /// diffusion denoiser has, and the one `--strength` is a dial on.
+    ///
+    /// [`Stub`]'s velocity `(x − g)/σ` is deliberately *un*bounded: one exact
+    /// Euler integration lands on `g` from any init latent over any schedule,
+    /// which is what makes the mask gates' equalities exact. That also makes
+    /// it useless here - under it every strength renders the same image, so a
+    /// monotonicity or continuity assertion written against it could not fail
+    /// however the dial was wired. This denoiser exists so those assertions
+    /// can fail.
+    struct Flow(Stub);
+
+    impl Denoiser for Flow {
+        fn cfg(&self) -> &Flux2Config {
+            self.0.cfg()
+        }
+        fn encode_prompt(&self, prompt: &str) -> Vec<f32> {
+            self.0.encode_prompt(prompt)
+        }
+        fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
+            self.0.encode_image(chw, h, w)
+        }
+        fn decode_tokens(&self, tokens: &[f32], lh: usize, lw: usize) -> Result<Vec<u8>, String> {
+            self.0.decode_tokens(tokens, lh, lw)
+        }
+        fn max_batch(&self) -> u32 {
+            self.0.max_batch()
+        }
+        fn forward_batch(&self, samples: &[crate::model::Sample<'_>], _ids: &[u32], n_pred: usize) -> Vec<Vec<f32>> {
+            let ch = self.0.cfg.in_channels;
+            samples
+                .iter()
+                .map(|s| {
+                    self.0.sigmas.borrow_mut().push(s.t);
+                    free_target(n_pred, ch, s)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, g)| s.img_tokens[i] - g)
+                        .collect()
+                })
+                .collect()
+        }
+    }
+
+    /// One [`Flow`] render of `source(h, w)` at `strength`, everything else
+    /// fixed. `ref_cond_scale` is 1.0 so the conditioning copy is the
+    /// reference at its own size on **both** sides of the `strength < 1`
+    /// branch: the only thing the gates below vary is the dial.
+    fn run_flow(strength: f32, w: u32, h: u32) -> Vec<u8> {
+        let req = BatchRequest {
+            prompt: "a staged bedroom".into(),
+            refs: vec![source(h, w)],
+            opts: GenOpts {
+                width: w,
+                height: h,
+                strength: Some(strength),
+                steps: Some(12),
+                seed: 7,
+                ref_cond_scale: 1.0,
+                ..GenOpts::default()
+            },
+            cancel: Default::default(),
+        };
+        generate_batch_on(&Flow(Stub::new()), std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation")
+            .0
+    }
+
+    /// The strengths the gates below walk, high to low.
+    const LADDER: [f32; 12] =
+        [1.0, 0.995, 0.99, 0.98, 0.97, 0.96, 0.95, 0.90, 0.80, 0.60, 0.40, 0.20];
+
+    /// **Gate 8 - the anchoring dial reaches free generation exactly.**
+    /// `--strength 1.0` takes a different branch (no init latent, no source
+    /// encode), so the only way the dial can be continuous at the top is for
+    /// the img2img schedule to *become* the free-generation schedule there -
+    /// bit for bit, not approximately, because `strength 1.0` is a shipped
+    /// output that must not move by a ULP.
+    #[test]
+    fn the_img2img_schedule_reaches_the_free_generation_schedule_exactly() {
+        for &(steps, n) in &[(4usize, 3072usize), (12, 3072), (12, 1024), (28, 8192)] {
+            assert_eq!(
+                img2img_sigmas(1.0, steps, n),
+                diffusion::scheduler::klein_sigmas(steps, n),
+                "steps {steps}, {n} tokens"
+            );
+        }
+    }
+
+    /// **Gate 9 - the dial is continuous at the top.** This is the user-facing
+    /// complaint in one number: `0.99` must be a hair from `1.00`, not a
+    /// different job. Every sigma lies in `[0, 1]`, so a schedule that is the
+    /// full-strength one scaled by `strength` moves no entry by more than
+    /// `1 − strength`. A schedule that changes *shape* at the top misses that
+    /// bound by more than an order of magnitude, whatever the metric.
+    #[test]
+    fn a_hair_below_full_strength_is_a_hair_from_the_full_strength_schedule() {
+        let (steps, n) = (12usize, 3072usize);
+        let full = diffusion::scheduler::klein_sigmas(steps, n);
+        for &s in &[0.95f32, 0.99, 0.995, 0.999] {
+            let got = img2img_sigmas(s, steps, n);
+            let worst = got.iter().zip(&full).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            // `1 − s` evaluated the way the schedule does, so the bound is the
+            // property and not a float-rounding contest.
+            assert!(worst <= 1.0 - s, "strength {s}: worst |Δσ| = {worst}, bound {}", 1.0 - s);
+        }
+    }
+
+    /// **Gate 10 - the dial is monotone.** Lowering `--strength` may never
+    /// raise the noise level the trajectory starts from or passes through, and
+    /// may never lower the weight the source carries in the init latent.
+    /// Preservation is not directly assertable on a schedule; these two are
+    /// the mechanism behind it, and any remap of the dial has to keep both.
+    #[test]
+    fn lowering_the_strength_lowers_every_sigma_and_raises_the_source_weight() {
+        let (steps, n) = (12usize, 3072usize);
+        for pair in LADDER.windows(2) {
+            let (hi, lo) = (pair[0], pair[1]);
+            let (a, b) = (img2img_sigmas(hi, steps, n), img2img_sigmas(lo, steps, n));
+            for (k, (&x, &y)) in a.iter().zip(&b).enumerate() {
+                assert!(y <= x, "σ[{k}] rose from {x} at strength {hi} to {y} at {lo}");
+                assert!(x <= 0.0 || y < x, "σ[{k}] did not fall from strength {hi} to {lo}");
+            }
+            // The init latent is `(1−s)·x₀ + s·ε`; its source weight is the
+            // preservation dial the schedule is only half of.
+            assert!(1.0 - lo > 1.0 - hi, "source weight did not rise from {hi} to {lo}");
+        }
+    }
+
+    /// The pipeline integrates the schedule the gates above reason about.
+    /// Without this they are assertions on a pure function that nothing has to
+    /// call.
+    #[test]
+    fn the_img2img_branch_integrates_the_img2img_schedule() {
+        let (w, h) = (128u32, 96u32);
+        let (steps, n_gen) = (12usize, ((h / 16) * (w / 16)) as usize);
+        for s in [0.9f32, 0.4] {
+            let d = Flow(Stub::new());
+            let req = BatchRequest {
+                prompt: "a staged bedroom".into(),
+                refs: vec![source(h, w)],
+                opts: GenOpts {
+                    width: w,
+                    height: h,
+                    strength: Some(s),
+                    steps: Some(steps as u32),
+                    seed: 7,
+                    ..GenOpts::default()
+                },
+                cancel: Default::default(),
+            };
+            generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+                .pop()
+                .unwrap()
+                .expect("stub generation");
+            assert_eq!(
+                d.0.sigmas.borrow().as_slice(),
+                &img2img_sigmas(s, steps, n_gen)[..steps],
+                "strength {s}"
+            );
+        }
+    }
+
+    /// **Gate 11 - `0.99` renders what `1.00` renders.** Gate 9 fences the
+    /// schedule; this fences the picture, end to end through the sampler, the
+    /// init latent and the decoder. Asserted on cosine AND relative L2,
+    /// because cosine alone is scale-invariant and would pass an image that
+    /// merely has the same structure at a different contrast.
+    ///
+    /// The bound is the one the mechanism supports: at `1 − s = δ` the init
+    /// latent carries `δ` of the source and every sigma moves by at most `δ`,
+    /// so the rendered difference is `O(δ)` and shrinks with `δ`. A sampler
+    /// that changes *shape* at the top instead lands a fixed distance away
+    /// however small `δ` is - which is what this bound separates.
+    #[test]
+    fn a_hair_below_full_strength_renders_what_full_strength_renders() {
+        let (w, h) = (128u32, 96u32);
+        let full = run_flow(1.0, w, h);
+        for &s in &[0.995f32, 0.99] {
+            let (cos, rel) = agreement(&run_flow(s, w, h), &full);
+            assert!(cos > 0.999, "strength {s} vs 1.0: cosine {cos}, rel_l2 {rel}");
+            assert!(rel < 0.02, "strength {s} vs 1.0: cosine {cos}, rel_l2 {rel}");
+        }
+    }
+
+    /// **Gate 12 - anchoring rises as the dial falls, with no reversal.**
+    /// Measured as the relative L2 between the render and the source's own
+    /// codec round trip - the best any latent-space edit can do - so 0 is
+    /// "returned the photograph" and larger is "redrew more of it".
+    #[test]
+    fn anchoring_increases_monotonically_as_strength_falls() {
+        let (w, h) = (128u32, 96u32);
+        let d = Stub::new();
+        let (chw, sh, sw) = source(h, w);
+        let rt = d
+            .decode_tokens(&d.encode_image(&chw, sh, sw).unwrap(), (h / 16) as usize, (w / 16) as usize)
+            .unwrap();
+        let dist: Vec<f32> = LADDER.iter().map(|&s| agreement(&run_flow(s, w, h), &rt).1).collect();
+        for (pair, ss) in dist.windows(2).zip(LADDER.windows(2)) {
+            assert!(
+                pair[1] < pair[0],
+                "strength {} -> {}: distance from the source went {} -> {} (must fall)",
+                ss[0],
+                ss[1],
+                pair[0],
+                pair[1]
+            );
+        }
+        // ... and the two ends are genuinely far apart, so the run above is
+        // not a flat line that trivially satisfies a strict inequality on
+        // rounding noise.
+        assert!(dist[0] - dist[dist.len() - 1] > 0.3, "dial has no range: {dist:?}");
+    }
+
+    /// **Gate 13 - `--strength 0` returns the photograph.** Within the VAE
+    /// round trip, which is the floor for anything that edits in latent space.
+    /// The free run is measured against the same bar to prove the bar is not
+    /// one anything would clear.
+    #[test]
+    fn a_vanishing_strength_returns_the_source() {
+        let (w, h) = (128u32, 96u32);
+        let d = Stub::new();
+        let (chw, sh, sw) = source(h, w);
+        let rt = d
+            .decode_tokens(&d.encode_image(&chw, sh, sw).unwrap(), (h / 16) as usize, (w / 16) as usize)
+            .unwrap();
+        let (cos, rel) = agreement(&run_flow(0.0, w, h), &rt);
+        assert!(cos > 0.9995, "strength 0: cosine {cos}, rel_l2 {rel}");
+        assert!(rel < 0.02, "strength 0: cosine {cos}, rel_l2 {rel}");
+        let (cf, rf) = agreement(&run_flow(1.0, w, h), &rt);
+        assert!(cf < 0.9995 || rf > 0.02, "a free run cleared the bar: cosine {cf}, rel_l2 {rf}");
     }
 
     /// FNV-1a 64 over the rendered bytes. A whole reference image is too large
