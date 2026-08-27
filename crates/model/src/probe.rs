@@ -20,6 +20,12 @@
 //! `submit` + `poll_wait`, after one discarded warm-up, exactly the way
 //! `crates/gpu-core/tests/bench_matmul.rs` already times a GEMM.
 //!
+//! Before any of that, the device is brought to its **operating point** by
+//! [`warm_up`] - an idle GPU is parked at its frequency floor and a probe
+//! that starts timing immediately measures that floor rather than the device.
+//! See [`Plan`]'s doc; it is the difference between this being a capability
+//! report and being a report about power management.
+//!
 //! It is **not** a roofline peak. [`gpu_core::roof`] measures silicon
 //! ceilings with register-resident FMA chains; this measures a real memory-fed
 //! GEMM, which is what a model actually issues, and will always come in below
@@ -170,19 +176,39 @@ impl Throughput {
 /// # Why the shape escalates instead of being fixed
 ///
 /// A single fixed shape cannot be right for both ends of the hardware range
-/// this engine runs on. Measured on one Meteor Lake box: at `[128,512]×[512,512]`
-/// the integrated Arc GPU reports 10 GFLOP/s, because a 67 MFLOP dispatch is
-/// dominated by submit/complete overhead; the same GPU on `[256,2048]×[2048,2048]`
-/// reports 102 GFLOP/s. Fix the shape small and every fast device is
-/// under-reported by 10×; fix it large and a slow one (that box's Cranelift
-/// CPU backend needs 757 ms for one f16 dispatch at the large shape) spends
-/// seconds per tier.
+/// this engine runs on. At the smallest rung a fast GPU is dominated by
+/// submit/complete overhead and reads a small fraction of what it does at the
+/// largest; at the largest rung a slow CPU backend needs most of a second for
+/// one f16 dispatch. Fix the shape small and every fast device is
+/// under-reported; fix it large and a slow one spends seconds per tier.
 ///
 /// So the probe walks [`Self::shapes`] in ascending order, keeps the **best**
 /// rate any of them elicited, and stops when [`Self::budget`] is spent - the
 /// same self-calibrating shape `gpu_core::roof` already uses to hit its own
 /// minimum probe duration. The first shape always completes, so there is
 /// always a real number even on a device that can only afford one.
+///
+/// # Why there is a warm-up phase, and why it is measured in SECONDS
+///
+/// A GPU that has been idle is not running at the frequency it will run a job
+/// at. An integrated GPU parks at its frequency floor and takes **seconds** of
+/// continuous work to reach its operating point; on an integrated Arc (Meteor
+/// Lake) the floor and the ceiling are more than an order of magnitude apart,
+/// and the rate the same kernel achieves at the same shape on the same buffers
+/// tracks the driver's own `gt_act_freq_mhz` essentially 1:1 all the way up.
+///
+/// A sub-second probe therefore never measures the device - it measures the
+/// device's *idle clock*, and publishes a figure an order of magnitude below
+/// what the same dispatch does in a real workload. That is not a conservative
+/// reading; it is the wrong regime. [`Self::warmup`] issues real GEMMs until
+/// the device is at its operating point, and only then is anything timed.
+/// Devices without frequency scaling (and the CPU backend) pay the wall-clock
+/// and are otherwise unaffected.
+///
+/// [`warm_up`] reports the ramp it saw, so the effect is observable rather
+/// than asserted: `cargo test -p brain-model --test probe_gemm -- --nocapture`
+/// prints the cold first dispatch, the ramped best, and the ratio between them
+/// for whatever device the box really has.
 #[derive(Debug, Clone)]
 pub struct Plan {
     /// Candidate `(m, n, k)` shapes, ascending in work. Every `k` must be a
@@ -194,23 +220,78 @@ pub struct Plan {
     pub budget: Duration,
     /// Timed repetitions per shape; the reported time is the minimum.
     pub reps: usize,
+    /// Continuous real work to issue on a device before ANY tier is timed, so
+    /// the measurement happens at the device's operating point rather than at
+    /// its idle clock (see [`Plan`]'s doc). Paid **once per device**, not once
+    /// per tier: [`sweep`] warms up and then walks all five tiers back to
+    /// back, which is short enough that the device stays ramped throughout.
+    /// `Duration::ZERO` disables it and restores the old cold-start behaviour.
+    pub warmup: Duration,
 }
 
 impl Default for Plan {
-    /// The default escalation: three shapes spanning 67 MFLOP → 2.1 GFLOP per
-    /// dispatch, 150 ms per tier, best-of-2.
+    /// A three-rung shape ladder, a quarter-second timing budget per tier, and
+    /// a per-device clock ramp before any of it.
     ///
-    /// Those three were picked off a real scan (see [`Plan`]'s doc): 67 MFLOP
-    /// is small enough that even a slow CPU backend finishes it, and
-    /// 2.1 GFLOP is where the integrated GPU measured on that box stopped
-    /// getting faster. 150 ms × five tiers is well under a second per device,
-    /// which is the whole point of a probe a scheduler can afford to repeat.
+    /// The rungs were picked off a real scan (see [`Plan`]'s doc): the
+    /// smallest is small enough that even a slow CPU backend finishes it, and
+    /// the largest is where the integrated GPU that scan was taken on stopped
+    /// getting faster with size.
+    ///
+    /// `reps` is a CEILING, not a fixed count - [`timed`]'s deadline check
+    /// stops the loop the moment [`Self::budget`] is spent, so a slow device
+    /// still pays only one timed rep. Raising it costs a fast device nothing
+    /// (the whole ladder fits inside the budget several times over) and gives
+    /// the reported minimum more samples to be the minimum of, which is what
+    /// makes the figure survive a box whose clock is being pulled around by
+    /// whatever else holds the power budget.
+    ///
+    /// The warm-up length is a measurement, not a guess: on the box in
+    /// [`Plan`]'s doc the achieved rate is still climbing at one and two
+    /// seconds and reaches its plateau at about three. It is spent once per
+    /// device, so it dominates what a five-tier sweep costs - which is the
+    /// price of the number being about the device rather than about its idle
+    /// clock, and why `whale node` only benchmarks an idle machine.
     fn default() -> Self {
         Self {
             shapes: vec![(128, 512, 512), (256, 1024, 1024), (256, 2048, 2048)],
-            budget: Duration::from_millis(150),
-            reps: 2,
+            budget: Duration::from_millis(250),
+            reps: 8,
+            warmup: Duration::from_secs(3),
         }
+    }
+}
+
+/// What a [`warm_up`] actually saw, so the ramp is reportable rather than
+/// hidden inside the probe.
+///
+/// The pair `(first_gops, best_gops)` is the honest statement of the problem
+/// this phase exists to solve: on a device with no frequency scaling they are
+/// the same number, and on one that parks when idle they differ by whatever
+/// factor the idle clock is below the operating clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WarmUp {
+    /// The shape the warm-up GEMM ran at - the largest in [`Plan::shapes`].
+    pub m: u32,
+    pub n: u32,
+    pub k: u32,
+    /// How many real GEMMs were issued.
+    pub dispatches: usize,
+    /// Rate of the FIRST dispatch out of idle, giga-FLOP/s. This is the number
+    /// a probe with no warm-up would have reported.
+    pub first_gops: f64,
+    /// Best rate seen during the ramp, giga-FLOP/s.
+    pub best_gops: f64,
+    /// Wall-clock the ramp actually took.
+    pub elapsed: Duration,
+}
+
+impl WarmUp {
+    /// How far the device climbed during the ramp: `best / first`. `1.0` means
+    /// it was already at its operating point when the probe started.
+    #[must_use]
+    pub fn ramp(&self) -> f64 {
+        if self.first_gops > 0.0 { self.best_gops / self.first_gops } else { 1.0 }
     }
 }
 
@@ -289,8 +370,80 @@ fn shape_error(dtype: Dtype, (m, n, k): (u32, u32, u32)) -> Option<String> {
     None
 }
 
+/// Issue real GEMMs until the device is at its operating point, so nothing is
+/// timed at an idle clock. See [`Plan`]'s doc for the measurement that makes
+/// this necessary, and [`WarmUp`] for what comes back.
+///
+/// Runs the LARGEST shape in `plan` at `F32` - the tier every backend supports,
+/// so the ramp never depends on a tier this device might promote away - through
+/// exactly the [`Ops::matmul`] path the timed probe uses. Returns `None` when
+/// there is nothing to warm up with (`plan.warmup` is zero, the plan has no
+/// shapes, or none of them is dispatchable).
+///
+/// [`gemm`] and [`sweep`] already call this; a caller needs it directly only to
+/// report the ramp, or to warm a device up before its own timing loop.
+#[must_use]
+pub fn warm_up(ops: &Ops, plan: &Plan) -> Option<WarmUp> {
+    if plan.warmup.is_zero() {
+        return None;
+    }
+    let &(m, n, k) = plan
+        .shapes
+        .iter()
+        .filter(|&&s| shape_error(Dtype::F32, s).is_none())
+        .max_by_key(|&&(m, n, k)| u64::from(m) * u64::from(n) * u64::from(k))?;
+
+    let gpu = ops.gpu();
+    let x_host = fill((m as usize) * (k as usize), 1);
+    let w_host = fill((n as usize) * (k as usize), 2);
+    let weight = Weight::upload(ops, &w_host, n as usize, k as usize, Dtype::F32);
+    let x = gpu.storage_init("warmup_x", &x_host);
+    let y = gpu.storage(m as u64 * n as u64);
+    let mut prep = Vec::new();
+    let act = ops.act(&mut prep, &x, 0, m, k);
+    gpu.submit(&[], &prep);
+    gpu.poll_wait();
+
+    let flops = 2.0 * f64::from(m) * f64::from(n) * f64::from(k);
+    let started = Instant::now();
+    let deadline = started + plan.warmup;
+    let (mut first, mut best, mut dispatches) = (0.0f64, 0.0f64, 0usize);
+    loop {
+        let t0 = Instant::now();
+        let mut steps = Vec::new();
+        ops.matmul(&mut steps, &weight, &act, &y, 0);
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+        let rate = flops / t0.elapsed().as_secs_f64() / 1e9;
+        if dispatches == 0 {
+            first = rate;
+        }
+        best = best.max(rate);
+        dispatches += 1;
+        // Checked AFTER the dispatch, so a device slow enough that one GEMM
+        // outlasts the whole warm-up still issues exactly one and reports a
+        // real `first_gops` instead of an empty ramp.
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    Some(WarmUp {
+        m,
+        n,
+        k,
+        dispatches,
+        first_gops: first,
+        best_gops: best,
+        elapsed: started.elapsed(),
+    })
+}
+
 /// Times real GEMMs at `dtype` on the device `ops` was built for, escalating
 /// through `plan`'s shapes and returning the best rate any of them reached.
+///
+/// Warms the device up first ([`warm_up`]) so the timing happens at its
+/// operating point. Sweeping every tier costs one warm-up in total, not one
+/// per tier - use [`sweep`] rather than calling this five times.
 ///
 /// See [`Plan`] for why the shape escalates and what bounds the cost, and
 /// this module's doc for what is and is not inside the timed region.
@@ -301,6 +454,18 @@ fn shape_error(dtype: Dtype, (m, n, k): (u32, u32, u32)) -> Option<String> {
 /// tier, and [`ProbeError::Promoted`] when the device does not really support
 /// the tier.
 pub fn gemm(ops: &Ops, dtype: Dtype, plan: &Plan) -> Result<Throughput, ProbeError> {
+    // An unpackable plan is still refused before ANY device work, warm-up
+    // included: spending seconds ramping a device for a probe that cannot
+    // produce a number is exactly the cost this pre-check exists to avoid.
+    if plan.shapes.iter().any(|&s| shape_error(dtype, s).is_none()) {
+        let _ = warm_up(ops, plan);
+    }
+    timed(ops, dtype, plan)
+}
+
+/// [`gemm`] without the warm-up, for a caller that has already warmed the
+/// device up ([`sweep`], which does it once for all five tiers).
+fn timed(ops: &Ops, dtype: Dtype, plan: &Plan) -> Result<Throughput, ProbeError> {
     let deadline = Instant::now() + plan.budget;
     let mut best: Option<Throughput> = None;
     let mut last_shape_error: Option<String> = None;
@@ -416,17 +581,31 @@ fn one_shape(
 ///
 /// One machine's capability profile at one device is exactly this: five rows,
 /// each either a real number or a stated reason there is none. Costs at most
-/// roughly `TIERS.len() * plan.budget` (less, since an unsupported tier is
-/// refused before any timing).
+/// roughly `plan.warmup + TIERS.len() * plan.budget` (less, since an
+/// unsupported tier is refused before any timing) - the warm-up is paid ONCE
+/// here, not once per tier.
 #[must_use]
 pub fn sweep(ops: &Ops, plan: &Plan) -> Vec<Outcome> {
-    TIERS
+    sweep_ramped(ops, plan).1
+}
+
+/// [`sweep`], also returning what the one-off warm-up saw.
+///
+/// The [`WarmUp`] is not decoration: it is the evidence that the five numbers
+/// beside it were taken at the device's operating point rather than at its
+/// idle clock, and on a device that does not scale its clock it says so by
+/// reporting a ramp of ~1.0.
+#[must_use]
+pub fn sweep_ramped(ops: &Ops, plan: &Plan) -> (Option<WarmUp>, Vec<Outcome>) {
+    let warm = warm_up(ops, plan);
+    let tiers = TIERS
         .iter()
-        .map(|&dtype| match gemm(ops, dtype, plan) {
+        .map(|&dtype| match timed(ops, dtype, plan) {
             Ok(t) => Outcome::Measured(t),
             Err(e) => Outcome::Unsupported { dtype, reason: e.to_string() },
         })
-        .collect()
+        .collect();
+    (warm, tiers)
 }
 
 /// Deterministic, bounded fill - the same generator
@@ -582,6 +761,11 @@ pub struct DeviceProfile {
     pub backend: &'static str,
     /// One row per tier in [`TIERS`] - measured, or explained.
     pub tiers: Vec<Outcome>,
+    /// What the one-off clock ramp saw before any tier was timed, or `None`
+    /// for a device that was never opened (or a plan with the warm-up
+    /// disabled). Reported rather than hidden so a reader can see WHICH regime
+    /// [`Self::tiers`] was measured in - see [`WarmUp`].
+    pub warmup: Option<WarmUp>,
     /// Wall-clock cost of profiling this device, including opening it.
     pub elapsed: Duration,
 }
@@ -610,6 +794,7 @@ pub fn profile(device: &DeviceInfo, plan: &Plan) -> DeviceProfile {
             backend: device.enumerated_by,
             device: device.clone(),
             tiers: unsupported(reason.to_string()),
+            warmup: None,
             elapsed: started.elapsed(),
         };
     }
@@ -631,19 +816,22 @@ pub fn profile(device: &DeviceInfo, plan: &Plan) -> DeviceProfile {
         Ops::new(gpu)
     }));
 
-    let (backend, tiers) = match opened {
+    let (backend, warmup, tiers) = match opened {
         Ok(Ok(ops)) => {
             // Read off the OPENED handle: this is what really ran the
             // kernels, which is not always what enumerated the device.
             let backend = ops.gpu().kind();
-            (backend, sweep(&ops, plan))
+            let (warm, tiers) = sweep_ramped(&ops, plan);
+            (backend, warm, tiers)
         }
         Ok(Err(e)) => (
             device.enumerated_by,
+            None,
             unsupported(format!("this device could not be opened: {e}")),
         ),
         Err(_) => (
             device.enumerated_by,
+            None,
             unsupported(
                 "opening this device panicked (driver or adapter failure); it is present \
                  but cannot be measured"
@@ -652,7 +840,7 @@ pub fn profile(device: &DeviceInfo, plan: &Plan) -> DeviceProfile {
         ),
     };
 
-    DeviceProfile { device: device.clone(), backend, tiers, elapsed: started.elapsed() }
+    DeviceProfile { device: device.clone(), backend, warmup, tiers, elapsed: started.elapsed() }
 }
 
 /// [`devices`] then [`profile`] on each - this whole machine's honest

@@ -120,6 +120,78 @@ fn the_canonical_kernel_list_builds_an_ops() {
     let _ = ops();
 }
 
+/// **The probe must report the device's operating point, not its idle clock.**
+///
+/// An integrated GPU parks at its frequency floor when idle and takes seconds
+/// of continuous work to reach the clock it will run a job at. A probe that
+/// times the first dispatch out of idle therefore reports a number an order of
+/// magnitude below what the same kernel, shape and buffers achieve in a real
+/// workload - which is the wrong regime, not a conservative reading of the
+/// right one.
+///
+/// There is still no threshold on GFLOP/s here. What is asserted is the
+/// relation that the fix is about: the ramp is real and reported, and where the
+/// device demonstrably climbed during it, the number finally published is above
+/// the cold one the old probe would have returned. On hardware that does not
+/// scale its clock the ramp is ~1.0 and that arm self-disables.
+#[test]
+fn the_probe_reports_the_operating_point_not_the_idle_clock() {
+    let ops = ops();
+    let plan = Plan::default();
+    let (warm, sweep) = probe::sweep_ramped(&ops, &plan);
+
+    let warm = warm.expect("the default plan warms up, so a ramp must be reported");
+    println!(
+        "\nwarm-up: [{}x{}x{}] {} dispatches in {} ms, first {:.1} -> best {:.1} GFLOP/s \
+         ({:.1}x ramp)",
+        warm.m,
+        warm.k,
+        warm.n,
+        warm.dispatches,
+        warm.elapsed.as_millis(),
+        warm.first_gops,
+        warm.best_gops,
+        warm.ramp()
+    );
+    assert!(warm.dispatches >= 1, "a warm-up that issued nothing is not a warm-up: {warm:?}");
+    assert!(warm.first_gops > 0.0, "a real dispatch cannot take zero time: {warm:?}");
+    assert!(warm.best_gops >= warm.first_gops, "best is a maximum over the ramp: {warm:?}");
+    assert!(
+        plan.shapes.contains(&(warm.m, warm.n, warm.k)),
+        "the ramp must run a shape the plan actually lists: {warm:?}"
+    );
+
+    let f32_row = match &sweep[0] {
+        Outcome::Measured(t) => t.clone(),
+        other => panic!("f32 must always be measurable: {other:?}"),
+    };
+    println!("  f32 reported: {:.1} GFLOP/s ({})", f32_row.gops, f32_row.kernel);
+
+    if warm.ramp() > 2.0 {
+        assert!(
+            f32_row.gops > warm.first_gops,
+            "this device climbed {:.1}x during the warm-up, so a probe reporting {:.1} \
+             GFLOP/s - at or below the {:.1} GFLOP/s of the very first dispatch out of \
+             idle - is timing the idle clock again",
+            warm.ramp(),
+            f32_row.gops,
+            warm.first_gops
+        );
+    }
+}
+
+/// The warm-up is opt-out, and opting out is honest about it: no ramp is
+/// reported, and the tiers still measure.
+#[test]
+fn a_plan_with_no_warmup_reports_no_ramp() {
+    let ops = ops();
+    let plan = Plan { warmup: std::time::Duration::ZERO, ..Plan::default() };
+    let (warm, sweep) = probe::sweep_ramped(&ops, &plan);
+    assert!(warm.is_none(), "a zero warm-up must not invent a ramp: {warm:?}");
+    assert_eq!(sweep.len(), probe::TIERS.len());
+    assert!(matches!(&sweep[0], Outcome::Measured(t) if t.gops > 0.0), "{:?}", sweep[0]);
+}
+
 /// Two probes of the same tier on the same device must agree to within an
 /// order of magnitude. Not a tight bound (a shared CI box is noisy), but it
 /// catches the failure that would matter: a probe whose "measurement" is
