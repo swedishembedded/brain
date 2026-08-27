@@ -72,21 +72,32 @@ impl DiscreteDenoiserWithControl {
         &self.sigmas
     }
 
-    /// Snap `sigma` to the nearest of the 1000 discrete grid values. A value
-    /// outside `[sigmas[0], sigmas[999]]` clamps to whichever end is
-    /// nearest, matching a plain nearest-neighbour search over the whole
-    /// grid (there is no separate out-of-range branch upstream either).
-    pub fn snap(&self, sigma: f32) -> f32 {
-        let mut best = self.sigmas[0];
-        let mut best_d = (sigma - best).abs();
-        for &s in &self.sigmas[1..] {
+    /// Nearest grid INDEX for `sigma` - also the discrete training timestep
+    /// `t` the UNet's own sinusoidal embedding is fed (upstream's
+    /// `sigma_to_idx`, `EpsScaling`'s `c_noise` quantized through it before
+    /// ever reaching `network(...)`): [`Self::new`]'s grid is ascending with
+    /// the training step, so index and timestep are the SAME number, not
+    /// merely correlated. A value outside `[sigmas[0], sigmas[999]]` clamps
+    /// to whichever end is nearest, matching a plain nearest-neighbour
+    /// search over the whole grid (there is no separate out-of-range branch
+    /// upstream either).
+    pub fn index(&self, sigma: f32) -> usize {
+        let mut best = 0usize;
+        let mut best_d = (sigma - self.sigmas[0]).abs();
+        for (i, &s) in self.sigmas.iter().enumerate().skip(1) {
             let d = (sigma - s).abs();
             if d < best_d {
                 best_d = d;
-                best = s;
+                best = i;
             }
         }
         best
+    }
+
+    /// Snap `sigma` to the nearest of the 1000 discrete grid values - the
+    /// VALUE at [`Self::index`]'s position, not the position itself.
+    pub fn snap(&self, sigma: f32) -> f32 {
+        self.sigmas[self.index(sigma)]
     }
 }
 
@@ -222,6 +233,20 @@ mod tests {
         // Strictly between two neighbours: picks whichever is closer.
         let mid = (d.sigmas()[10] + d.sigmas()[11]) / 2.0 - 1e-4;
         assert_eq!(d.snap(mid), d.sigmas()[10]);
+    }
+
+    /// `index` is what a forward replay actually needs (the discrete
+    /// timestep fed to the UNet's own embedding) - `snap` is defined in
+    /// terms of it, not the other way around, so this pins the primitive
+    /// the module doc's `sigma_to_idx` correction depends on.
+    #[test]
+    fn index_finds_the_nearest_grid_position() {
+        let d = DiscreteDenoiserWithControl::new();
+        assert_eq!(d.index(d.sigmas()[500]), 500);
+        assert_eq!(d.index(-5.0), 0);
+        assert_eq!(d.index(1000.0), 999);
+        let mid = (d.sigmas()[10] + d.sigmas()[11]) / 2.0 - 1e-4;
+        assert_eq!(d.index(mid), 10);
     }
 
     #[test]
