@@ -57,6 +57,17 @@ brain/flux2-klein` lists them) over D-Bus and over HTTP at
 - `--precision fp32|int8` - supports INT8 inference for lower VRAM use
 - `--ref <image>` (repeatable) - supplying one or more reference images
   switches generation into editing mode
+- `--ref-size <N>` - downscale every `--ref` so its **long edge** is at most
+  `N` pixels before the /16 centre crop, preserving aspect. Downscale only: a
+  reference already inside the bound is used untouched, and omitting the flag
+  uses every reference at its own resolution, exactly as before. Each
+  reference contributes `(w/16)·(h/16)` tokens to the joint sequence, so a
+  full-resolution camera photograph costs more of them than the generation it
+  is conditioning - and the failure that causes is an out-of-memory during the
+  build, not a warning. This is the dial that makes a folder of unprepared
+  photographs a valid input; the per-reference sizes and token counts are
+  printed before the pipeline is built, so a run that does not fit says which
+  reference spent the budget.
 - `--adapter <path>` - fold a LoRA adapter into the DiT before generating.
   Two families are accepted, told apart by extension: brain's own `finetune`
   checkpoint, or a third-party `.safetensors` adapter in the ai-toolkit /

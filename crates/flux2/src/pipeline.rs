@@ -1074,6 +1074,55 @@ pub fn ref_from_hwc(hwc: &[f32], w: u32, h: u32) -> Result<(Vec<f32>, u32, u32),
     Ok((chw, ch, cw))
 }
 
+/// The largest size with `w x h`'s aspect ratio whose **long edge** is at most
+/// `max_edge`. Downscale-only: an image already inside the bound, and a
+/// `max_edge` of 0, come back unchanged.
+///
+/// This is the sizing half of [`ref_from_hwc_bounded`], separated because it is
+/// what a caller needs to *predict* a reference's cost before paying it: a
+/// reference contributes `(w/16)*(h/16)` tokens, so a 2048x1536 photo is 12288
+/// of them - more than a whole 1024x768 generation - and nothing downstream can
+/// recover from that. Rounding is to the nearest pixel, not to a multiple of
+/// 16: squashing the aspect to land on a /16 grid is visible, and the centre
+/// crop in [`ref_from_hwc`] already takes the <16px remainder off each axis.
+pub fn fit_long_edge(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
+    let long = w.max(h);
+    if max_edge == 0 || long <= max_edge {
+        return (w, h);
+    }
+    let s = max_edge as f64 / long as f64;
+    (((w as f64 * s).round() as u32).max(1), ((h as f64 * s).round() as u32).max(1))
+}
+
+/// [`ref_from_hwc`], with the reference first downscaled so its long edge is at
+/// most `max_edge` pixels.
+///
+/// `None` is not "an unlimited bound" evaluated to a no-op - it takes the
+/// bound-free path, so an unbounded call is the same arithmetic on the same
+/// pixels it always was. `Some(m)` that the image already satisfies does the
+/// same: the bound never upscales, and never resamples an image it would leave
+/// the same size.
+///
+/// The resample is `imaging`'s one host resampler, which is bit-equivalent to
+/// the `resize_bilinear` kernel under `AlignCorners::HalfPixel`. It is the host
+/// copy and not [`imaging::Ctx::resize`] because references are loaded before
+/// the pipeline - and therefore before the `Gpu` - exists.
+pub fn ref_from_hwc_bounded(
+    hwc: &[f32],
+    w: u32,
+    h: u32,
+    max_edge: Option<u32>,
+) -> Result<(Vec<f32>, u32, u32), String> {
+    let (tw, th) = match max_edge {
+        Some(m) => fit_long_edge(w, h, m),
+        None => (w, h),
+    };
+    if (tw, th) == (w, h) {
+        return ref_from_hwc(hwc, w, h);
+    }
+    ref_from_hwc(&imaging::resize_bilinear_hwc(hwc, 3, w, h, tw, th), tw, th)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1830,6 +1879,82 @@ mod tests {
         assert!(rel < 0.02, "strength 0: cosine {cos}, rel_l2 {rel}");
         let (cf, rf) = agreement(&run_flow(1.0, w, h), &rt);
         assert!(cf < 0.9995 || rf > 0.02, "a free run cleared the bar: cosine {cf}, rel_l2 {rf}");
+    }
+
+    /// A `w x h` interleaved-RGB `[0,1]` horizontal ramp. Smooth, so a correct
+    /// bilinear downscale of it is predictable analytically (see below), and
+    /// per-channel distinct, so a channel or axis swap shows up.
+    fn ramp(w: u32, h: u32) -> Vec<f32> {
+        let mut v = vec![0f32; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let t = x as f32 / (w - 1) as f32;
+                let u = y as f32 / (h - 1) as f32;
+                let p = ((y * w + x) * 3) as usize;
+                v[p] = t;
+                v[p + 1] = u;
+                v[p + 2] = 0.5 * t + 0.5 * u;
+            }
+        }
+        v
+    }
+
+    /// **The reference-size bound is opt-in.** Without a bound - and with one
+    /// the image already satisfies - `ref_from_hwc_bounded` must be the
+    /// existing `ref_from_hwc`, byte for byte. This is what lets a
+    /// bound-less invocation keep producing exactly what it produced before
+    /// the bound existed.
+    #[test]
+    fn an_absent_or_slack_ref_bound_changes_nothing() {
+        for &(w, h) in &[(64u32, 48u32), (100, 100), (33, 240), (384, 288)] {
+            let src = ramp(w, h);
+            let want = ref_from_hwc(&src, w, h).unwrap();
+            assert_eq!(ref_from_hwc_bounded(&src, w, h, None).unwrap(), want, "{w}x{h}: no bound");
+            let long = w.max(h);
+            for m in [long, long + 1, long * 3] {
+                assert_eq!(
+                    ref_from_hwc_bounded(&src, w, h, Some(m)).unwrap(),
+                    want,
+                    "{w}x{h}: --ref-size {m} is slack and must not upscale or resample"
+                );
+            }
+        }
+    }
+
+    /// **The bound caps the token count, preserving aspect.** A phone photo
+    /// costs `(w/16)*(h/16)` reference tokens, which is what decides whether a
+    /// run fits the card; the bound is the dial that makes that affordable.
+    #[test]
+    fn a_ref_bound_caps_the_token_count() {
+        let (w, h) = (2048u32, 1536u32);
+        let src = ramp(w, h);
+        assert_eq!(ref_tokens(&[ref_from_hwc(&src, w, h).unwrap()], &GenOpts::default()), 12288);
+        let (chw, ch, cw) = ref_from_hwc_bounded(&src, w, h, Some(384)).unwrap();
+        assert!(cw <= 384 && ch <= 384, "long edge not bounded: {cw}x{ch}");
+        assert_eq!((cw % 16, ch % 16), (0, 0), "not /16-aligned: {cw}x{ch}");
+        // 4:3 in, 4:3 out - within the /16 crop, which can shave <16px an axis.
+        let ar = |a: u32, b: u32| a as f64 / b as f64;
+        assert!((ar(cw, ch) - ar(w, h)).abs() < 0.05, "aspect drifted: {cw}x{ch}");
+        assert_eq!(ref_tokens(&[(chw.clone(), ch, cw)], &GenOpts::default()), (cw / 16) * (ch / 16));
+        assert!(ref_tokens(&[(chw.clone(), ch, cw)], &GenOpts::default()) < 700);
+
+        // And it is a real resample, not a crop or a transpose: the ramp is
+        // linear, so the downscaled `[-1,1]` CHW plane must agree with the
+        // analytic ramp evaluated at the half-pixel source positions.
+        let mut want = vec![0f32; chw.len()];
+        for c in 0..3usize {
+            for y in 0..ch {
+                let fy = (((y as f32 + 0.5) * h as f32 / ch as f32) - 0.5) / (h - 1) as f32;
+                for x in 0..cw {
+                    let fx = (((x as f32 + 0.5) * w as f32 / cw as f32) - 0.5) / (w - 1) as f32;
+                    let v = [fx, fy, 0.5 * fx + 0.5 * fy][c];
+                    want[(c * ch as usize + y as usize) * cw as usize + x as usize] = 2.0 * v - 1.0;
+                }
+            }
+        }
+        let (cos, rel) = brain_testutil::parity::compare(&chw, &want);
+        assert!(cos > 0.9999, "downscale is not the ramp: cosine {cos}, rel_l2 {rel}");
+        assert!(rel < 2e-3, "downscale is not the ramp: cosine {cos}, rel_l2 {rel}");
     }
 
     /// FNV-1a 64 over the rendered bytes. A whole reference image is too large

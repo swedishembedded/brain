@@ -24,6 +24,12 @@ const HELP: &str = "brain flux2 <cmd>
                                     # condition on it at all (cheapest: the reference then
                                     # reaches the model only through the init latent)
            [--ref <in.ppm>]...      # reference images => editing mode
+           [--ref-size N]           # downscale every --ref so its LONG edge is at most N px
+                                    # before the /16 crop, preserving aspect. Never upscales;
+                                    # omit and each reference is used at its own resolution.
+                                    # A reference costs (w/16)*(h/16) tokens, so a full-size
+                                    # camera photo costs more than the generation itself -
+                                    # this is the dial that makes a folder of them affordable.
            [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
                                     # --ref exactly (which must be at the output size);
                                     # greys blend. Omit = regenerate everything.
@@ -79,6 +85,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut variant_name = "klein-4b".to_string();
     let mut precision = flux2::Precision::F32;
     let mut refs: Vec<String> = Vec::new();
+    let mut ref_size: Option<u32> = None;
     let mut mask_path: Option<String> = None;
     let mut adapter: Option<String> = None;
     let mut lora_scale = 1.0f32;
@@ -105,6 +112,13 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--variant" => variant_name = need(i)?.clone(),
             "--precision" => precision = flux2::Precision::from_name(need(i)?)?,
             "--ref" => refs.push(need(i)?.clone()),
+            "--ref-size" => {
+                let n: u32 = need(i)?.parse().map_err(|e| format!("--ref-size: {e}"))?;
+                if n < 16 {
+                    return Err(format!("--ref-size must be at least 16 (got {n})"));
+                }
+                ref_size = Some(n);
+            }
             "--mask" => mask_path = Some(need(i)?.clone()),
             "--adapter" => adapter = Some(need(i)?.clone()),
             "--lora-scale" => lora_scale = need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?,
@@ -118,11 +132,19 @@ fn generate(args: &[String]) -> Result<(), String> {
     flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
 
     // load refs as [-1,1] CHW, center-cropped to /16 (shared helper - the
-    // capability provider uses the same one)
+    // capability provider uses the same one), optionally downscaled first so
+    // one full-resolution photograph cannot outspend the whole generation.
+    // `--ref-size` absent takes the bound-free path, unchanged.
     let mut ref_imgs: Vec<(Vec<f32>, u32, u32)> = Vec::new();
     for r in &refs {
         let (hwc, w, h) = crate::image_io::load_image(r)?;
-        ref_imgs.push(flux2::pipeline::ref_from_hwc(&hwc, w, h)?);
+        if let Some(m) = ref_size {
+            let (tw, th) = flux2::pipeline::fit_long_edge(w, h, m);
+            if (tw, th) != (w, h) {
+                eprintln!("flux2: ref {r} {w}x{h} -> resampled to {tw}x{th} (--ref-size {m})");
+            }
+        }
+        ref_imgs.push(flux2::pipeline::ref_from_hwc_bounded(&hwc, w, h, ref_size)?);
     }
 
     // The mask is over the OUTPUT canvas, so it is resampled to the latent grid
