@@ -28,7 +28,7 @@ BRAIN_BIN ?= ./target/debug/brain
 # sub-make re-reads the Makefile from disk. Cargo.toml's [workspace.package]
 # version is the actual build-time source of truth (--version, D-Bus, the
 # .deb); this mirrors it for the release machinery only.
-BRAIN_VERSION := 1.0.0
+BRAIN_VERSION := 1.1.0
 PIP    ?= python3 -m pip
 DATA   ?= data
 OUT    ?= out

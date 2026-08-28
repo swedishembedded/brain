@@ -3,6 +3,2509 @@
 All notable changes to brain (https://github.com/swedishembedded/brain) are
 documented here. Generated with git-cliff from conventional-commit history;
 see CONTRIBUTING or AGENTS.md for the commit-message convention.
+## [1.1.0] - 2026-08-28
+
+### Bug Fixes
+
+- *(clippy)* Rephrase a doc line clippy read as an unmarked quote ([cd396773](https://github.com/swedishembedded/brain/commit/cd3967730423c74782855a22d86462ea9a2611f8))
+
+- *(gates)* Enforce the no-machine-paths rule that only existed as prose ([a573b9bd](https://github.com/swedishembedded/brain/commit/a573b9bd7769a20f81c3ee493a5ef02385ab490f))
+
+- *(checkpoint)* Read ZIP64 archives, so .pth files over 4 GB load at all ([ad7e55dd](https://github.com/swedishembedded/brain/commit/ad7e55dd17646ba43bede00b8f8e9ddc9aaf8402))
+
+- *(modelstore)* Fetch Wan's native checkpoint instead of rejecting it ([573156f3](https://github.com/swedishembedded/brain/commit/573156f3948fbc5b7fbdc8e649bc82a4f4915d47))
+
+- *(testutil)* Let a run demand that fixtures not be skipped ([64bcd5d6](https://github.com/swedishembedded/brain/commit/64bcd5d69da34a04f7b2bc63c91d9d1b62e4d92b))
+
+- *(gates)* Refuse video and model weights in git, and drop the one that got in ([22c9e2ea](https://github.com/swedishembedded/brain/commit/22c9e2ea3e8203d93e3bbbea65cd20c58f2a02e6))
+
+- *(perf)* Wire a fidelity check into ExecutorTarget ([0a070749](https://github.com/swedishembedded/brain/commit/0a0707491a4f171940fb4588b8a4c76ed0ed6e17))
+
+- *(perf)* Wire a fidelity check into HttpTarget ([1989a8c2](https://github.com/swedishembedded/brain/commit/1989a8c244612e77a657cbe05230b86744551398))
+
+- *(backend-cpu)* Size the transpose tile from the byte budget, not a head width ([7e28c7af](https://github.com/swedishembedded/brain/commit/7e28c7affb8e5e63c1161db2ff8ba5155b7d37eb))
+
+- *(clippy)* Reflow two doc blocks and annotate parked scaffolding, 291 -> 283 ([03fab7fa](https://github.com/swedishembedded/brain/commit/03fab7fa0a12c1443f8dd1aa931156cc4a22ac04))
+
+- *(worldmirror2)* Size the camera refine-net from the config, not a hardcode ([d26dd7bf](https://github.com/swedishembedded/brain/commit/d26dd7bf1b23a9c8a79668738f45d82f97a9364c))
+
+- *(docs)* Reattach doc comments orphaned when helpers moved to hostmath ([413ab970](https://github.com/swedishembedded/brain/commit/413ab9708ea21ba63d6c2cc396afa9abd78f59ff))
+
+- *(residency)* Write GB rather than 1 * GB in the budget test tables ([8147e963](https://github.com/swedishembedded/brain/commit/8147e9637b225c21cf3da297f798c9013f50d720))
+
+- *(clippy)* The remaining lints, and set the ratchet to zero ([ac463c72](https://github.com/swedishembedded/brain/commit/ac463c721c504b7b1ed127f9d1660e56ef337d3c))
+
+- *(gates)* Run the two kronos parity tests separately, as cargo requires ([f109a4b4](https://github.com/swedishembedded/brain/commit/f109a4b429e2b7139ec320d50a58f5d2fa07fcbe))
+
+- *(kronos)* Use the shared prefill on the ForecastModel path, and report the real checkpoint ([a4071b66](https://github.com/swedishembedded/brain/commit/a4071b6676db11ea10b8d8d76d28bc949eaaf13a))
+
+- *(kronos)* Detokenize the rollout inside its context window ([56140879](https://github.com/swedishembedded/brain/commit/561408796a5c40a9bf8da3654dd997ec689221c1))
+
+- *(kronos)* Drop the rotary from the dependency layer at inference ([b64ac4b0](https://github.com/swedishembedded/brain/commit/b64ac4b00742783afd1b9137a26f0a7df1528258))
+
+- *(kronos)* Default the context so the cache stays exact, and score the distribution ([74f5dc13](https://github.com/swedishembedded/brain/commit/74f5dc132944b2aec3d167b05d8968fb163bee95))
+
+- *(gates)* Scope the machine-path check to Rust in both of its modes ([4131c89f](https://github.com/swedishembedded/brain/commit/4131c89f9515b3b81775d6e71ef661ca5ec29fc5))
+
+- *(wan)* Stream the GGUF import instead of materialising it three times ([a5405597](https://github.com/swedishembedded/brain/commit/a54055975971be9b2474313eafecac6f358dd576))
+
+- Stop three test paths reporting a real failure as a skip ([86beeeb9](https://github.com/swedishembedded/brain/commit/86beeeb9dc4dffd988e30aa6ec33882ab17fd2ec))
+
+- Move kronos and chronos2's golden dumps out of git, into testdata/ ([b4e825c0](https://github.com/swedishembedded/brain/commit/b4e825c0e2065d4f31cb422790b1e7384fcda584))
+
+- *(clippy)* Correct two mistyped literal suffixes in ltxv ([f740e4d4](https://github.com/swedishembedded/brain/commit/f740e4d448e867395edf28b368c5c4da2d14f07e))
+
+- *(kronos)* Make the dependency layer causal in training, matching upstream ([29e21264](https://github.com/swedishembedded/brain/commit/29e21264fc45c7f5db4fc3838d8e9a968ef792ac))
+
+- *(s3dit)* Stream the GGUF import, the same defect Wan's importer had ([40a21531](https://github.com/swedishembedded/brain/commit/40a215313acb1bd17c16141c516b134118b14462))
+
+- *(forecast)* Validate finetune's input the same way predict already does ([57b8b282](https://github.com/swedishembedded/brain/commit/57b8b282cecf59005c70d59528ce9746c014f210))
+
+- *(fetch-testdata)* Every mirror default named a path that does not exist ([6ec36139](https://github.com/swedishembedded/brain/commit/6ec36139518edb8ceb0943227557756934a5f49f))
+
+- Remove upstream's own dead tracked golden binaries, kronos and chronos2 ([60117f56](https://github.com/swedishembedded/brain/commit/60117f56e9ef4c138879a9b7730b6ffcdbd5ab3b))
+
+- *(clippy)* Is_multiple_of and div_ceil, upstream's ltxv/gemma4/vae drift ([9afcf725](https://github.com/swedishembedded/brain/commit/9afcf72543822d9459df1704f7ba39f6cb88ddf8))
+
+- *(docs)* Reflow doc-list warnings, one of which was rendering wrong ([e1f0541e](https://github.com/swedishembedded/brain/commit/e1f0541ea04e7a86672494c07e0ec04e20bf6313))
+
+- *(clippy)* Literal hygiene in ltxv - hex grouping, excessive precision ([884e84e5](https://github.com/swedishembedded/brain/commit/884e84e54aa389672e5104e6ce97ba987b511ba3))
+
+- *(clippy)* Derive DfrOpts's Default instead of hand-writing it ([4f5b2057](https://github.com/swedishembedded/brain/commit/4f5b205744ae5bf6e50f0a2e6f5c57bdfd9c85da))
+
+- *(clippy)* Doc_lazy_continuation in qwen35 config's tiny() doc comment ([b6d8ec17](https://github.com/swedishembedded/brain/commit/b6d8ec17b4f9902a8117ffd4e7f4511340a2e393))
+
+- *(clip)* Give embed_image's shared Gpu the vision + resize kernels it needs ([bd41e0e6](https://github.com/swedishembedded/brain/commit/bd41e0e6e63df146fec81b5f3f0b53e39a858d70))
+
+- *(ltxv)* Use the real distilled sigma schedule, not a generic formula ([0aeef320](https://github.com/swedishembedded/brain/commit/0aeef3203a8e1ced81bc6132ce9b86ee04e16010))
+
+- *(cli)* Ltxv dispatch test fixture was missing connector_apply_gated_attention ([79aa9c73](https://github.com/swedishembedded/brain/commit/79aa9c732e3e004c82d332b29a2af226283cc665))
+
+- Strip baked-in absolute machine paths from qwen35 docs, widen the gate ([3e77ad4e](https://github.com/swedishembedded/brain/commit/3e77ad4ee928cd6baf1d07476620789fa7601943))
+
+- *(ltxv)* Clear all clippy warnings in crates/ltxv ([d03a1a2e](https://github.com/swedishembedded/brain/commit/d03a1a2eb81bc84e8e25d92c0fc4796ea9212fcb))
+
+- *(ltxv)* Ltxv_bench streamed was profiling with the connector disabled ([bdeff8bc](https://github.com/swedishembedded/brain/commit/bdeff8bc81b9124fefaee0de767759dda858ea31))
+
+- *(vulkan)* Make the Vulkan instance a process-lifetime singleton ([c6326c14](https://github.com/swedishembedded/brain/commit/c6326c146f346bcff7b7da8f2ce4e95eb5b21035))
+
+- *(ltxv)* Pick the DiT fixture by architecture, not by filename ([0c2299c0](https://github.com/swedishembedded/brain/commit/0c2299c0b9a150e55da72c4ecf1737ae82f42fa7))
+
+- *(ltxv)* The real Gemma-4 encoder pads context to 1024, not to the connector's own register count ([2fec1382](https://github.com/swedishembedded/brain/commit/2fec1382350b80e0e04499c360e9c03b087eedbc))
+
+- *(ltxv)* Build RoPE positions in the reference's real pixel-space units, and add start/end-frame image conditioning ([091c3f9e](https://github.com/swedishembedded/brain/commit/091c3f9efa64e5c6fb1e3bd4fbc74471f2f4a322))
+
+- *(ltxv)* Give frozen conditioning tokens their own zero timestep ([bf00210e](https://github.com/swedishembedded/brain/commit/bf00210e56ccce28a080bf682859df32af1a0246))
+
+- *(ltxv)* Image conditioning was refusing the checkpoint's own sampler ([3eb16256](https://github.com/swedishembedded/brain/commit/3eb162569e456d752ac6bcc3c946ecafa99b36fd))
+
+- *(cli)* Make -v/--verbose a global flag, not brain-serve-only ([8c49a417](https://github.com/swedishembedded/brain/commit/8c49a417afb56eda5b8b86c4b212cd3d6bb4c47c))
+
+- *(model)* Use iter_mut instead of range-loop indexing in test fixture ([390d9994](https://github.com/swedishembedded/brain/commit/390d9994ba4ee4f68da12a09466144121617aa14))
+
+- *(checkpoint)* Resolve diffusers-format single-file checkpoint dirs too ([1016dab8](https://github.com/swedishembedded/brain/commit/1016dab8e3836a24501f92d3443cfd2e2e3c4471))
+
+- *(audio)* Needless_range_loop in bias_ncl_kernels' fwd_ref ([4a3d4172](https://github.com/swedishembedded/brain/commit/4a3d4172667791fcef2fb98e1eec1439ba52fd67))
+
+- *(examples)* Musicgen README's CLI comparison used the wrong flag spelling ([45aac58e](https://github.com/swedishembedded/brain/commit/45aac58e9ffa14ef69f8e70a82fbd4ddf312a276))
+
+- *(model)* Kernel_list() returns a slice, so its callers no longer borrow one ([d22b0251](https://github.com/swedishembedded/brain/commit/d22b0251b68598068d3a4333bb02afd5313f1a35))
+
+- *(gpu-core)* The roofline probe measured the idle clock and cached it forever ([1bbcfc77](https://github.com/swedishembedded/brain/commit/1bbcfc77ed868ea01d52627f457b556f69750bb7))
+
+
+### Build
+
+- A seam for consuming a fixed wgpu, and the fix worth consuming ([1b033a34](https://github.com/swedishembedded/brain/commit/1b033a34870df9afd2eba979235a5990fee7e969))
+
+- Point the wgpu patch fallback at the fork's future main branch ([6985cdc0](https://github.com/swedishembedded/brain/commit/6985cdc0fbb60d2056c8da44419fb5dee329a920))
+
+- Name the manifest that actually broke the workspace ([31a6ca9f](https://github.com/swedishembedded/brain/commit/31a6ca9f1cfc5d3e29db9635931f034ea215d236))
+
+
+### Documentation
+
+- *(wan)* Set the bar for the CLI at one command, one playable file ([da9a2024](https://github.com/swedishembedded/brain/commit/da9a2024b9349f79a596a359012978d8c42c463d))
+
+- *(wan)* Record the training state and what it does not cover ([232f000f](https://github.com/swedishembedded/brain/commit/232f000fe1ed1f2c248c9f56ce97b60dc0f66b8b))
+
+- *(wan)* Quick start, runnable demo and the model page ([10e9bc81](https://github.com/swedishembedded/brain/commit/10e9bc819a46d38d495981f5841ff6789db45542))
+
+- *(wan)* Mark the measured perf figures as reviewed exceptions ([be965fbf](https://github.com/swedishembedded/brain/commit/be965fbf803bd51cf47046e950055b866af94df2))
+
+- *(build)* Say why `make build` is the dev profile, and leave it alone ([22435c72](https://github.com/swedishembedded/brain/commit/22435c728e586fc1446df668781fcede9c519452))
+
+- List ltxv in the README model table and the model catalog ([03d5d208](https://github.com/swedishembedded/brain/commit/03d5d2080680c153bca258179c7c21e40c45dbcb))
+
+- *(ltxv)* Bring the model page current through M9 ([e35cfe27](https://github.com/swedishembedded/brain/commit/e35cfe2739e346577ade8561843cb633ec1a4ba1))
+
+- Reflow doc comments so wrapped prose is not parsed as a list ([0cc21ef1](https://github.com/swedishembedded/brain/commit/0cc21ef184e980715e2c0b9911a8cfff494042ae))
+
+- *(quickstart)* Kronos forecasting, with a chart and an honest caption ([9a2b9396](https://github.com/swedishembedded/brain/commit/9a2b9396c3751583e7af3d1607bea86224fa15e2))
+
+- *(quickstart)* Regenerate the kronos chart from the fixed model ([8254db9d](https://github.com/swedishembedded/brain/commit/8254db9dc173c1ba3105259c9ee5a5510936d90b))
+
+- *(quickstart)* Regenerate the kronos chart on realistic data ([6cbbd2ae](https://github.com/swedishembedded/brain/commit/6cbbd2aef64413edf1729521f56309315da3aa48))
+
+- Regenerate the kernel table after the rebase ([5ecf375a](https://github.com/swedishembedded/brain/commit/5ecf375ae3e9a42492060e1d47a24826e493acb2))
+
+- *(kernels)* Stop stating kernel counts, total or per-tier ([a8b1186b](https://github.com/swedishembedded/brain/commit/a8b1186b0e8e0b7ecfcc9d199ff37fd4f316b52e))
+
+- *(gemma4)* The missing model page, and a gate to stop it recurring ([c7acaaa0](https://github.com/swedishembedded/brain/commit/c7acaaa0fc93f65a66301ecc8fe614cf33c5346e))
+
+- *(agents)* Distinguish FLUX.1's measured int8 cosine from its enforced floor ([e08a47b6](https://github.com/swedishembedded/brain/commit/e08a47b629bb3eb1cb413afd141f7500129ad3c1))
+
+- *(ltxv)* Ledger the int8/AV-sharding milestone; fix the now-stale gap ([f4a6e58c](https://github.com/swedishembedded/brain/commit/f4a6e58c7a451166476bff9637d920a1c2925886))
+
+- *(qwen35)* Real LoRA training example, fix stale hardware/limits claims ([9d2e58f6](https://github.com/swedishembedded/brain/commit/9d2e58f64a5c627efa9da3bc4ed021c4b30ad0df))
+
+- *(qwen35)* Use printf for the example corpus, not a for-loop ([c455be7b](https://github.com/swedishembedded/brain/commit/c455be7b098d6d6abc0508ff194a124566863892))
+
+- *(ltxv)* Strip milestone-number tags from comments and doc ([9d148cb2](https://github.com/swedishembedded/brain/commit/9d148cb2993f2bca7e7e2e14caa47503a654b1ea))
+
+- Strip milestone-number tags from comments across apiserve/chronos2/cli/gemma4/gradcheck/mimi/qwen3/qwen3omnimoe ([533bd9ae](https://github.com/swedishembedded/brain/commit/533bd9ae1298f2a34b68d2433bc78a5341bfb178))
+
+- Point quickstart's Where to go next at the model catalog ([c3a3d297](https://github.com/swedishembedded/brain/commit/c3a3d297aed28c1cd850ceff787ed9b65d56a90f))
+
+- *(qwen35)* Strip milestone-number tags from comments ([f0eec509](https://github.com/swedishembedded/brain/commit/f0eec5095fd01a38e04fbf56cf0b6a1b5cf869f4))
+
+- *(gpu-core)* Strip milestone-number tags from comments ([de670cb2](https://github.com/swedishembedded/brain/commit/de670cb2bf5a804762b026f5d1424cda0eb19be1))
+
+- *(qwen3omnimoe)* Strip the last two milestone-number tags from comments ([5ee29ede](https://github.com/swedishembedded/brain/commit/5ee29ede53590857b801ac0c29a5e07f24063522))
+
+- *(qwen35)* Record why the resident lm_head stays on the CPU backend ([80bcbddf](https://github.com/swedishembedded/brain/commit/80bcbddf11dbfe1c82e3ac217c4c6c7f3b6f2cb2))
+
+- *(ltxv)* Ledger the ada_layer_norm_single parallelization (Phase 9) ([b160d752](https://github.com/swedishembedded/brain/commit/b160d752c265e1ec1a8fc6a5793ab91f9f3b138c))
+
+- *(ltxv)* Ledger the host-side block-weight cache (Phase 9) ([4c503f7c](https://github.com/swedishembedded/brain/commit/4c503f7cc60af186b0971086673886eb402f735f))
+
+- *(ltxv)* TeaCache-style temporal caching killed by measurement (Phase 9) ([b4c258a2](https://github.com/swedishembedded/brain/commit/b4c258a2ca0987176ff0dc6fe547dbdca553622b))
+
+- *(ltxv)* Spatial masking (STA) scoped out on an analytic crossover (Phase 9) ([ef9b6124](https://github.com/swedishembedded/brain/commit/ef9b61242545d6553aeae40808e3fb8e7ecaa784))
+
+- *(ltxv)* Cross-modal optimization scoped out, no real AV forward exists yet (Phase 9) ([ca34154f](https://github.com/swedishembedded/brain/commit/ca34154f3d8beca402c45b6e487e89fed3666afe))
+
+- *(ltxv)* Close the Phase 7 "review: base vs finetuned clips" gate ([9974b893](https://github.com/swedishembedded/brain/commit/9974b893c6f2dd88ef4b3febaa07c118af5c03bb))
+
+- *(ltxv)* Ledger the --trace-ltxv observability milestone ([15b19ee0](https://github.com/swedishembedded/brain/commit/15b19ee0c665db62e8cbc306ec6dbe3c2cc520b8))
+
+- *(ltxv)* Ledger the whole-generation profile and four exact wins (Phase 10) ([33d8c681](https://github.com/swedishembedded/brain/commit/33d8c681043b883252d309e345965604e236760f))
+
+- *(lessons)* A stage missing from the timing struct, and a bench warmed by page cache ([eaa2a630](https://github.com/swedishembedded/brain/commit/eaa2a630def386fa166496046cf92a344e941fdb))
+
+- Two absolute machine paths the no-machine-paths gate was refusing ([6f3d1621](https://github.com/swedishembedded/brain/commit/6f3d16216f4ce01bead09977dd84aee5a96ff541))
+
+- *(ltxv)* Ledger the text-encoder phase, and close two Phase 10 gaps ([bc6534fc](https://github.com/swedishembedded/brain/commit/bc6534fca7d31c11a877de63d16d9ba9f72feaf2))
+
+- *(ltxv)* Ledger the connector, streamed-path, and Gemma-4 real-weight parity gates ([fd2a00d4](https://github.com/swedishembedded/brain/commit/fd2a00d44611019bf951b28832fd580e2cbf9666))
+
+- *(lessons)* A parity gate built from the pipeline's own simplified positions can't catch the pipeline getting positions wrong (#48) ([36aa3ded](https://github.com/swedishembedded/brain/commit/36aa3ded74cdf5c022bc473d8d8ee4d2dadd6767))
+
+- *(ltxv)* Ledger Phase 18 - the forward stops being a PCIe benchmark ([63670013](https://github.com/swedishembedded/brain/commit/63670013bd93105bdf4b0ee6a75621a72cbe7619))
+
+- *(backend-vulkan)* Ledger the device-lost root cause, the 2x SPIR-V deficit, and wgpu's staging heap ([2a027c21](https://github.com/swedishembedded/brain/commit/2a027c21d765c4abe90a0127bb65995ad826d129))
+
+- *(backend-vulkan)* The measured roofline table, both backends, on an idle box ([bd965438](https://github.com/swedishembedded/brain/commit/bd9654387c85887cb0a49c6fd551c977a31d5548))
+
+- *(qwen35)* Record the wgpu buffer-size wall and native-Vulkan findings ([6635b76e](https://github.com/swedishembedded/brain/commit/6635b76e454e5dedb61e5e4220a9eb7c0b0613e8))
+
+- *(minimaxmusic3)* Record the flow-matching DiT milestone ([fad3bc0c](https://github.com/swedishembedded/brain/commit/fad3bc0c5454938dd25c63d804eabb5590b130bf))
+
+- *(minimaxmusic3)* Diagnose and record the real e2e RAM/buffer gap ([49398c8c](https://github.com/swedishembedded/brain/commit/49398c8c35c3ed0c2d718942fb00693d208c0738))
+
+- *(examples)* Musicgen/generate_song.py - MiniMax Music 3 over D-Bus ([63a53fc8](https://github.com/swedishembedded/brain/commit/63a53fc8f915954a731dac939246679c5be1aedb))
+
+- *(minimaxmusic3)* Record M8 (serving contract), update user-facing docs ([a526cdb6](https://github.com/swedishembedded/brain/commit/a526cdb6646b1ceb4ba892851de40ba3a58b27db))
+
+- *(minimaxmusic3)* Update module doc for the serving milestone ([e98b4e8a](https://github.com/swedishembedded/brain/commit/e98b4e8a9ab78865b0a6eb32db8aca5f2c04500c))
+
+- *(minimaxmusic3)* Correct a stale "single-chunk only" gap entry ([cbe45be3](https://github.com/swedishembedded/brain/commit/cbe45be37bb321164287a35e71462c8c75bdfc1c))
+
+- *(cli)* List minimaxmusic3 among the generic-dispatch architectures ([23a366f4](https://github.com/swedishembedded/brain/commit/23a366f466d38401cf60a09eee8e780f50172503))
+
+- *(audio)* Consolidate crate-level module doc for the new front-end/back-end pieces ([60cd7231](https://github.com/swedishembedded/brain/commit/60cd7231051e8bc2a55ba5fe1a6b2f20adf60bc7))
+
+- *(backend-vulkan)* Say which state the box was left in ([3f576422](https://github.com/swedishembedded/brain/commit/3f57642235d4be5fbfaf27f99e2e539a7bb1632c))
+
+- *(backend-vulkan)* The upload regression was two bugs, and both are fixed ([3ab1337b](https://github.com/swedishembedded/brain/commit/3ab1337b1527fd2b50297613ff9bf7d05edb005e))
+
+- *(ltxv)* The bit-identity claim, measured rather than argued ([291549cc](https://github.com/swedishembedded/brain/commit/291549cc4a160c469701d8398c9581e2158f48a1))
+
+- *(ltxv)* Ledger Phase 20 - the prompt starts reaching the picture ([a8f414e5](https://github.com/swedishembedded/brain/commit/a8f414e59c1b9d8f22241d674c7079ededab36af))
+
+- *(cosyvoice)* Record Phase 7a (CosyVoice 3 golden dumper) in the roadmap ([b07475d3](https://github.com/swedishembedded/brain/commit/b07475d356a4d61ea9296d8ab0cf5ca7539b732c))
+
+- *(cosyvoice)* Record Phase 7b (CosyVoice 3 LM/flow/HiFT) in the roadmap ([abeb8046](https://github.com/swedishembedded/brain/commit/abeb8046ac4d604e3cc5d0bd4fce316812dd92f8))
+
+- *(cosyvoice)* Record Phase 10 (partial) LM training in the roadmap ([3a56e00d](https://github.com/swedishembedded/brain/commit/3a56e00dee9a8091ebf5ef485d6296e0dfe0addf))
+
+- *(cosyvoice)* Record Phase 11 (serving contract) in the roadmap ([c5aeb058](https://github.com/swedishembedded/brain/commit/c5aeb0582dbc2031441f7d4d2a5b8714b402f35a))
+
+- *(cosyvoice)* Add CosyVoice to AGENTS.md, README.md, and the model index ([1014b1e9](https://github.com/swedishembedded/brain/commit/1014b1e9e93957c55428da48826326a05da84902))
+
+- *(cosyvoice)* Record Phase 13 (profiling + NPU export) in the roadmap ([f416dfe6](https://github.com/swedishembedded/brain/commit/f416dfe68a164516204a02ad45a9658a3495ad99))
+
+- *(ltxv)* Ledger Phase 21 - the upscaler stops being generation-only ([d1d25585](https://github.com/swedishembedded/brain/commit/d1d255853d2e129baebcbaace115f792cfda1226))
+
+- *(ltxv-cli)* The module doc names all three subcommands, and stops being wrong ([fc03df10](https://github.com/swedishembedded/brain/commit/fc03df1081ba8e78b648e0218104f8fe2faa9d0d))
+
+- *(ltxv)* Ledger Phase 22 - a clip stops being one window long ([700f793a](https://github.com/swedishembedded/brain/commit/700f793a168d144d3ee20a11697e979e1971f21a))
+
+- *(ltxv)* The seam gate's cost is measured, and names the pin that works ([d23e1816](https://github.com/swedishembedded/brain/commit/d23e18169310233590e0401bc040c06578f9a76c))
+
+- *(ltxv)* Ledger Phase 23 - the long-form seam, re-derived and measured ([eff182d5](https://github.com/swedishembedded/brain/commit/eff182d52021734a16d430d6a2ea05a90d7f9b04))
+
+- *(ltxv)* Ledger Phase 24 - a clip stops being one scene long ([0c9c34ad](https://github.com/swedishembedded/brain/commit/0c9c34ad8c953a222c0d583a1e42fdcd8d5898e2))
+
+- The published manual names its publisher ([8ff79f57](https://github.com/swedishembedded/brain/commit/8ff79f578d8951780bba3bfcf16ed92a8e2284ea))
+
+- The two entry pages point at who builds brain ([599a24ec](https://github.com/swedishembedded/brain/commit/599a24ec50604f69a0b5a2ba276c6c1543242a62))
+
+- The ledgers stop claiming work that is already done ([704cfc64](https://github.com/swedishembedded/brain/commit/704cfc64ce74da09d35f688d26f425d359e69c6d))
+
+- Document 19 BRAIN_* variables, and stop the perf gate tripping on identifiers ([97fd989a](https://github.com/swedishembedded/brain/commit/97fd989a6065b89eec9fae81673085bcb39a827d))
+
+- Fix 18 broken links, and gate them so they cannot rot again ([766b441e](https://github.com/swedishembedded/brain/commit/766b441e55ec7ac49bd0887cb0325a50d4ddb45c))
+
+- Three support tables disagreed with the code that derives HTTP exposure ([e2478153](https://github.com/swedishembedded/brain/commit/e247815352f6bec3764d1c452875bb6b4082bec4))
+
+- Six support tables said nothing about HTTP; now they say why not ([7a878906](https://github.com/swedishembedded/brain/commit/7a878906ba5727b60acf4256e773fac0257bfb09))
+
+- *(ltxv)* Ledger Phase 25 - an upscaled clip stops being several clips ([67b67eb8](https://github.com/swedishembedded/brain/commit/67b67eb8414ed724f365cd39667d4b4b6d3f91ba))
+
+- *(ltxv)* Ledger Phase 26 - a clip stops being anchored only at its ends ([87a87ebf](https://github.com/swedishembedded/brain/commit/87a87ebfb8ea291d5610b488e90612e5f3a7df25))
+
+- *(minimaxmusic3)* Ledger Phase 12 - the blockers belonged to the old box ([a68d59da](https://github.com/swedishembedded/brain/commit/a68d59da28902202d43277e2fd98ed9317d60a42))
+
+- *(minimaxmusic3)* Ledger Phase 13 - the first real song ([e2e01145](https://github.com/swedishembedded/brain/commit/e2e0114599b01099b86cca402280c20d34913df0))
+
+- *(minimaxmusic3)* Correct a mislabelled denoise time in Phase 13 ([948502aa](https://github.com/swedishembedded/brain/commit/948502aaa5bfe862ca80d04323997f95665ff665))
+
+- *(minimaxmusic3)* Ledger the resident hoist, the device head, and two-card AR ([a215e1b1](https://github.com/swedishembedded/brain/commit/a215e1b1a4c14b4b8f11be215348e2179bd7fc59))
+
+- *(kernels)* Ledger the decode-GEMV occupancy work and its dead ends ([efdffdf5](https://github.com/swedishembedded/brain/commit/efdffdf54aff3aa224ba25376f12da78805780d0))
+
+- Ledger the conv lowering, the sentinel bug class, and the measurement traps ([f14a0843](https://github.com/swedishembedded/brain/commit/f14a08439630737f288d90b2b0e832e2edd2d31a))
+
+- Document every BRAIN_* variable the crates actually read ([89c51e57](https://github.com/swedishembedded/brain/commit/89c51e574a57c547b1559630591d12067d681e38))
+
+- Ledger the adaLN dedup, and two lessons about what a measurement means ([98112491](https://github.com/swedishembedded/brain/commit/981124919bdc475c6b24cf443208cdb4346164b8))
+
+- *(wan)* Describe the cost shape, not a measured run ([4c6f99da](https://github.com/swedishembedded/brain/commit/4c6f99daabcd25da2ca6eed38e9baf18c017a5f7))
+
+- Ledger the flash cross-attention, the audio wiring, and three rules ([82c1839f](https://github.com/swedishembedded/brain/commit/82c1839fdce1a621f1ba22376bb46cda408c5876))
+
+- The caption file is YAML, described as such ([8e34734d](https://github.com/swedishembedded/brain/commit/8e34734dd6e028bb731b5d67a0a5124dccfee479))
+
+- Show what --strength does, on the room the README generates ([0bf4966d](https://github.com/swedishembedded/brain/commit/0bf4966deafb368ef2fbcb4835989b139e40d50a))
+
+- Correct served-model status and stale crate-path citations ([bcbfeb39](https://github.com/swedishembedded/brain/commit/bcbfeb390afdf1ee30d73df27eb84b26ef37eb09))
+
+- What an idle GPU costs a measurement, and what the coopmat kernel is not ([9bdbec6c](https://github.com/swedishembedded/brain/commit/9bdbec6c00292ba1631a96d0748fb2bdefff84bd))
+
+- *(probe)* The end-to-end numbers, and what the chassis does to them ([3a94ab57](https://github.com/swedishembedded/brain/commit/3a94ab577236426d2721753f41f9743647aae1b6))
+
+- Where a qwen3vl caption's time goes, and what is left ([2c91b981](https://github.com/swedishembedded/brain/commit/2c91b9811b540cb781f93dab3b8f79db302b39ac))
+
+- The int8 tier's real cost, and the batching arithmetic ([53c0ed7e](https://github.com/swedishembedded/brain/commit/53c0ed7ece84c3b8d74db93cfd976cda21eb8a33))
+
+
+### Features
+
+- *(wan)* The Wan-VAE, a causal 3D autoencoder at (4, 8, 8) stride ([1985fe2a](https://github.com/swedishembedded/brain/commit/1985fe2a7072ec50a8d921d94c207b1f54bd2cf0))
+
+- *(data)* SentencePiece unigram tokenizer ([5ac489e9](https://github.com/swedishembedded/brain/commit/5ac489e9bdeaf64e8a2d9e7912512970d0c46d85))
+
+- *(kernels)* Attn_keypad_mask, the bidirectional twin of attn_prefix_mask ([6f98f6db](https://github.com/swedishembedded/brain/commit/6f98f6db234444a75f04b676ca9f4e8b60811f1b))
+
+- *(t5encoder)* UmT5-XXL, the text encoder Wan conditions on ([c5d5e7da](https://github.com/swedishembedded/brain/commit/c5d5e7da4c61eab251bce403044c970137e79c8a))
+
+- *(wan)* The diffusion transformer, at parity on the real 1.3B weights ([2c78af10](https://github.com/swedishembedded/brain/commit/2c78af10f83470a71672d013a9b7e83736e27bad))
+
+- *(wan)* Text to video from one command, ending in a playable mp4 ([8542058b](https://github.com/swedishembedded/brain/commit/8542058b2857ac44594cd9f9dd422ce0725a05eb))
+
+- *(capability)* A Video media type, replacing the Bytes workaround ([ca572b42](https://github.com/swedishembedded/brain/commit/ca572b421ab4b70edce4400388cd6a79967cfa6e))
+
+- *(wan)* Serve text-to-video over the capability surface ([af5277e8](https://github.com/swedishembedded/brain/commit/af5277e8f8ee4cb7ad0cfaf87278c2f6634a4eed))
+
+- *(wan)* GGUF importer for the wan architecture tag ([bc429139](https://github.com/swedishembedded/brain/commit/bc4291397ff417770b6eb78ebf54ba6d062a9618))
+
+- *(wan)* Host training reference, generic over the float type ([3cb7cad2](https://github.com/swedishembedded/brain/commit/3cb7cad24d5bdd956c5a810163a91bd0ea030ce1))
+
+- *(gradcheck)* Check_wan, alongside the other model gradient checks ([6963183f](https://github.com/swedishembedded/brain/commit/6963183f77a21ecba50722d132903d61378bd237))
+
+- *(wan)* LoRA adapters and video-clip fine-tuning ([bfeb29c9](https://github.com/swedishembedded/brain/commit/bfeb29c9e1c9af9235a674e3f4f78269c74e285b))
+
+- *(perf)* A byte-exact fidelity comparator alongside the greedy one ([1a17d805](https://github.com/swedishembedded/brain/commit/1a17d805a2e36f7b3bab3d5ed2948b6813ed5b0d))
+
+- *(perf)* Say out loud when a compared result was never fidelity-checked ([fddf866a](https://github.com/swedishembedded/brain/commit/fddf866a848012f75576a983c4dd9c9e8364e2df))
+
+- *(arch)* Register ltxv, the LTX-2.5 audio+video diffusion transformer ([e31ff6da](https://github.com/swedishembedded/brain/commit/e31ff6da8dfe94b834e9804bacb99cbbf27fc037))
+
+- *(ltxv)* Dump reference goldens for the video VAE, tiny DiT, audio VAE, schedule ([43938fdd](https://github.com/swedishembedded/brain/commit/43938fdde18ad8eb00677c5a40bbfa340f16e43d))
+
+- *(ltxv)* Port the LTX-2.5 causal 3D video VAE (encoder + conv decoder) ([2bf69a4c](https://github.com/swedishembedded/brain/commit/2bf69a4c3b6566b9e2d34252739267a3bf3671f6))
+
+- *(ltxv)* Port the LTX-2.5 video-only DiT stream (M3) ([eb5d5685](https://github.com/swedishembedded/brain/commit/eb5d5685205680e2ce34260ef8cd10c7af632c97))
+
+- *(ltxv)* Pipeline, CLI, and serving contract (M4) ([ab2d4709](https://github.com/swedishembedded/brain/commit/ab2d470952b3ca39f6a7bc9847c00ecedb8e6517))
+
+- *(gemma4)* Port LTX-2.5's Gemma-4 text encoder (M5) ([948a196c](https://github.com/swedishembedded/brain/commit/948a196c441e2a5f121ea72bc40c76e15f1b8c0e))
+
+- *(ltxv)* Port the LTX-2.5 audio VAE and base vocoder ([3e37207b](https://github.com/swedishembedded/brain/commit/3e37207b820cb8c573c471793a3a74f50be1336c))
+
+- *(ltxv)* Add the audio DiT stream and A<->V cross-attention (M6b) ([faa341dc](https://github.com/swedishembedded/brain/commit/faa341dc1dd2c4a539d98106915ee56dbad71db1))
+
+- *(ltxv)* Add training support for the video-only DiT (M7) ([1b51711e](https://github.com/swedishembedded/brain/commit/1b51711ee4f62a6354a6fedd4f0afb27532c3b83))
+
+- *(ltxv)* Port the LTX-2.5 latent upscalers and duration head (M8a) ([0e8ae281](https://github.com/swedishembedded/brain/commit/0e8ae28136833570f58779c9efd0f044c4e7a6a7))
+
+- *(ltxv)* Port the NA diffusion video decoder (M8b) ([a310eda8](https://github.com/swedishembedded/brain/commit/a310eda8796c10a4dd0e53d5a810a528ac406755))
+
+- *(ltxv)* Add the DFR multi-stage pipeline (M8c) ([ade67c86](https://github.com/swedishembedded/brain/commit/ade67c86060c0a849cd8ec0c700b3ba6065c5ca5))
+
+- *(ltxv)* Add INT8 storage format for the DiT's weights (M9 slice) ([c02e5d3e](https://github.com/swedishembedded/brain/commit/c02e5d3ec3a823d968728c9f31599ca2fcf43ed3))
+
+- *(ltxv)* Add pipeline-parallel sharding for the video-only DiT (M9 slice) ([2e73bbda](https://github.com/swedishembedded/brain/commit/2e73bbda7c13307ba56fb24c8d5e1b5282b52182))
+
+- *(ltxv)* Add a performance profiling pass and record the NPU scope decision (M9 slice) ([a2e63b89](https://github.com/swedishembedded/brain/commit/a2e63b89b8b3dd9aa5352829ca692ec7226ebd2b))
+
+- *(kronos)* Auto-fetch both checkpoints, and settle on one env-var spelling ([cd6f12ae](https://github.com/swedishembedded/brain/commit/cd6f12ae73b9afda12ef50738378d52cdbf0d742))
+
+- *(forecast)* OHLCV CSV in, forecast chart out ([61ae72bd](https://github.com/swedishembedded/brain/commit/61ae72bd6c49272e165f7f46cb1d106eac847efe))
+
+- *(forecast)* Generate a series with the character Kronos was trained on ([defc95a3](https://github.com/swedishembedded/brain/commit/defc95a3226edd396b525fe5d070578f562072e5))
+
+- *(qwen35)* Register the qwen35 arch id and disambiguate names (M0) ([3e89273d](https://github.com/swedishembedded/brain/commit/3e89273d39e43fe1ccd9b4cf948f89ed426f9d64))
+
+- *(qwen35)* Dump tiny-dims reference goldens for the dense hybrid decoder (M2) ([86e5e72d](https://github.com/swedishembedded/brain/commit/86e5e72d6a5f1c8f6aa98b5e61695f2cd5aba46f))
+
+- *(qwen35)* New crate - config, param manifest, fresh-weight init (M3) ([401a8055](https://github.com/swedishembedded/brain/commit/401a80551ffaa786e0d2083e54d9f4633f2f25cb))
+
+- *(qwen35)* FP8 blockwise import with two-way coverage (M4) ([26b234b3](https://github.com/swedishembedded/brain/commit/26b234b33ae67fc19d3f59e7ed9f9f528113b915))
+
+- *(qwen35)* Text-only forward at tiny dims, full parity vs the golden (M5) ([1ad2ad4d](https://github.com/swedishembedded/brain/commit/1ad2ad4df30beb070edbf54624587ce705c14bf7))
+
+- *(qwen35)* Backward + gradcheck::check_qwen35 (M6) ([46001e75](https://github.com/swedishembedded/brain/commit/46001e75ddeeb8c82ff70ef4fbc89a0d51a40905))
+
+- *(qwen35)* MTP head (M7) ([1d29dd57](https://github.com/swedishembedded/brain/commit/1d29dd57b31721d50c5dd82f09ceb8c64a06148b))
+
+- *(qwen35)* LoRA + full finetune (M8) ([47b31a12](https://github.com/swedishembedded/brain/commit/47b31a12669c70e891c2aed22f679bba01542029))
+
+- *(qwen35)* Vision tower splice, real-dims parity (M9) ([279bd90a](https://github.com/swedishembedded/brain/commit/279bd90ab46d30087d73b2186bf046547e71dcc4))
+
+- *(qwen35)* Incremental decode + pipeline sharding (M11 core) ([e8aa8580](https://github.com/swedishembedded/brain/commit/e8aa85803ebacb80170b823749b5ab5d9918dbe2))
+
+- *(qwen35)* Sampling, paged serving engine, capability provider (M11) ([be1c304f](https://github.com/swedishembedded/brain/commit/be1c304f77547293f75594e3fd771e6cc263a1b1))
+
+- *(qwen35)* CLI, residency, catalog, docs (M11 finish) ([7e2faff5](https://github.com/swedishembedded/brain/commit/7e2faff59b716bf6c2997262aad939ef61f716fd))
+
+- *(wan)* LoRA finetuning - gradient-checked CPU/GPU trainer, G0-G3 gates ([b1205a7e](https://github.com/swedishembedded/brain/commit/b1205a7ec85542e56d5bbc0b5ee16c7f455048ce))
+
+- *(wan)* Direct GGUF loading (f32/f16/int8/int4) + adapter/dtype CLI ([75bf364d](https://github.com/swedishembedded/brain/commit/75bf364d1f1689b75abcc60ace3fe26e35664e32))
+
+- *(ltxv)* Real 22B config, AV tensor manifest, direct GGUF import ([6e3df2b9](https://github.com/swedishembedded/brain/commit/6e3df2b90f75047b7768f9ca2e6cb6a686ea7538))
+
+- *(ltxv)* Gated attention + embeddings connectors, parity-proven ([edc87525](https://github.com/swedishembedded/brain/commit/edc875251498ce4cccfe9b158fe05dc04d18981c))
+
+- *(gemma4)* Real 12B config, two-way import, real tokenizer ([addcf02e](https://github.com/swedishembedded/brain/commit/addcf02ec367237ac8df685cbacaae18293afadb))
+
+- *(ltxv)* Real-weight parity ladder for the 22B DiT, reduced depth ([d39c8cfa](https://github.com/swedishembedded/brain/commit/d39c8cfa699909790f12ef19ad422c65ad38aa9e))
+
+- *(ltxv)* Int8/int4 compute path + AV sharding, run for real on both P40s ([8d4767e3](https://github.com/swedishembedded/brain/commit/8d4767e33fc8100ac497e8da52993c8f51796b66))
+
+- *(ltxv)* Wire real weights into brain ltxv t2v, first real clip ([22ce8de9](https://github.com/swedishembedded/brain/commit/22ce8de92ecadbfee497a804f65f633d1c1ad282))
+
+- *(ltxv)* Fine-tune validation for the AV DiT (Phase 7) ([1b431009](https://github.com/swedishembedded/brain/commit/1b4310091839fa250f9839c8891ad7b6be7c839a))
+
+- *(ltxv)* Brain perf integration, committed baseline gate, fix real dit_config gap ([73436038](https://github.com/swedishembedded/brain/commit/7343603841a77b5fbeb10626b0bdd1003023957c))
+
+- *(trace)* Workspace-wide structured tracing behind a --trace-<family> registry ([c83ccd06](https://github.com/swedishembedded/brain/commit/c83ccd06f034cfb5e810827ddcf8890715120c95))
+
+- *(ltxv)* Instrument the video pipeline, streamed DiT and served action ([fbfe6ad3](https://github.com/swedishembedded/brain/commit/fbfe6ad3c0480f2197222c148604b8cfe1956fdf))
+
+- *(gpu)* Instrument the four GPU crates for --trace-gpu ([bf998830](https://github.com/swedishembedded/brain/commit/bf998830641d2f1e6e6e8e8cf15d66145f5e5071))
+
+- *(checkpoint)* A generic source-to-quantized-GGUF converter ([11a7fc9b](https://github.com/swedishembedded/brain/commit/11a7fc9b59932c7b6304d444aaa894d8357b9285))
+
+- *(cli)* Brain quantize, the export sibling of brain import ([4625966d](https://github.com/swedishembedded/brain/commit/4625966d27d9da2958e4960638fe33c5d449b058))
+
+- *(gemma4)* A streamed, capability-gated int8 tier over a quantized GGUF ([972519cc](https://github.com/swedishembedded/brain/commit/972519cc0693c544a1ebf5dcbd7119ffb3b4a557))
+
+- *(flux2)* Wire the real FLUX.2 Klein 4B repo into auto-fetch ([cf966c11](https://github.com/swedishembedded/brain/commit/cf966c117c5258d47b383b0416fae26d77bd9617))
+
+- *(qwen35)* Let stream_train_step pick cpu/gpu/vulkan explicitly ([6e499240](https://github.com/swedishembedded/brain/commit/6e499240ee6646bba5ad9089f06b575ac0e40df6))
+
+- *(diffusion)* Let FlowMatchEulerScheduler invert its sigma schedule ([c0468958](https://github.com/swedishembedded/brain/commit/c0468958f3ec819a349dd4fb19be9da4ce5ffbe7))
+
+- *(minimaxmusic3)* Register the architecture and add the crate skeleton ([dedb7e6d](https://github.com/swedishembedded/brain/commit/dedb7e6d40dadab734962d88d2422a748b74ae7c))
+
+- *(minimaxmusic3)* Golden dumper for the four diffusers-PR components ([f3375e40](https://github.com/swedishembedded/brain/commit/f3375e400456dff819b129aa4a15a39ca1039ee0))
+
+- *(minimaxmusic3)* Condition encoder import + forward, real-weight parity ([8d1f68ac](https://github.com/swedishembedded/brain/commit/8d1f68ac69eaf52cb48c37db1ed78a17dddb9afd))
+
+- *(kernels)* Add the Snake1d activation (fwd + backward) ([1c0cbc08](https://github.com/swedishembedded/brain/commit/1c0cbc08e8547aa429e316884e477dc71ce61196))
+
+- *(minimaxmusic3)* Vocoder import + device forward, real-weight parity ([a595874c](https://github.com/swedishembedded/brain/commit/a595874c5770e22a34c2330012cb4d04f6e094aa))
+
+- *(kernels)* Add bias_grad_ncl and tanh_act_bwd ([ac9761fa](https://github.com/swedishembedded/brain/commit/ac9761fa3e22a6685fb9ac0ce98b4092dd914b9c))
+
+- *(minimaxmusic3)* Vocoder backward + gradcheck ([9cbdb87b](https://github.com/swedishembedded/brain/commit/9cbdb87b402dbac046b134812246652d8ba945eb))
+
+- *(minimaxmusic3)* Vocoder LoRA fine-tuning ([fc1513df](https://github.com/swedishembedded/brain/commit/fc1513dff193330c465619be458461ca86212f07))
+
+- *(minimaxmusic3)* STFT-magnitude adversarial discriminator training ([205d2c48](https://github.com/swedishembedded/brain/commit/205d2c48741dcae5efc3be8e9e730c8b5032c55e))
+
+- *(minimaxmusic3)* RVQ depth decoder import + forward/backward + LoRA ([ba1a223b](https://github.com/swedishembedded/brain/commit/ba1a223b94e088c647c85ac3795a5c1987f1d261))
+
+- *(minimaxmusic3)* Flow-matching DiT import + device forward, real-weight parity ([10ade4d2](https://github.com/swedishembedded/brain/commit/10ade4d2e06a231d190deacd85256e368abc63bc))
+
+- *(minimaxmusic3)* DiT backward + gradcheck ([21adb384](https://github.com/swedishembedded/brain/commit/21adb384f72d0ea78336609cbedd04581eeb93a4))
+
+- *(minimaxmusic3)* DiT LoRA fine-tuning ([36f96360](https://github.com/swedishembedded/brain/commit/36f96360b5a89c9e98e00f3b27f4a88621ce39d8))
+
+- *(minimaxmusic3)* DiT int8 storage tier ([00caa7e6](https://github.com/swedishembedded/brain/commit/00caa7e65a774ef3afcca9a9e0baaf080df91bee))
+
+- *(minimaxmusic3)* DiT model::Shardable pipeline-parallel sharding ([2f5ce320](https://github.com/swedishembedded/brain/commit/2f5ce32020a7e99f0a8be479f1f663dc93364064))
+
+- *(minimaxmusic3)* Global LLM streamed import + audio-code CE training ([00d417f6](https://github.com/swedishembedded/brain/commit/00d417f6101143904217ba6512d0b2601c9144b9))
+
+- *(minimaxmusic3)* Port the caption/lyrics text-cleaning contract ([7a73e5e2](https://github.com/swedishembedded/brain/commit/7a73e5e2fce329d65ca32df0afc0d7f312f20de5))
+
+- *(qwen3)* Expose a standalone embedding-row lookup (Qwen::embed_row) ([68a323f7](https://github.com/swedishembedded/brain/commit/68a323f7e6e77a9149164c4c0bb02d6b4177c429))
+
+- *(minimaxmusic3)* CFG-guided AR generation loop (pipeline::generate_frames) ([6401676f](https://github.com/swedishembedded/brain/commit/6401676f56bd6eb5563b68c9691ad9b87ecc5e99))
+
+- *(minimaxmusic3)* Chunked DiT denoise (denoise::denoise_chunk) ([a766c26a](https://github.com/swedishembedded/brain/commit/a766c26a2667ad66397a80aa6bea2590cb04de98))
+
+- *(audio)* Multi-channel WAV write (wav::encode_multi/write_multi) ([59fa2a34](https://github.com/swedishembedded/brain/commit/59fa2a34e73385eeb2103b37d9b5d32d821c09de))
+
+- *(minimaxmusic3)* Vocoder crop-and-stitch (stitch::Stitcher) ([e45a52a6](https://github.com/swedishembedded/brain/commit/e45a52a6e59c650dd75649f35814d79d338b32af))
+
+- *(minimaxmusic3)* AR prompt assembly (global_llm::assemble_prompt) ([090afd67](https://github.com/swedishembedded/brain/commit/090afd67ded848c9018ec8540de34f28fa240f69))
+
+- *(minimaxmusic3)* Serving contract - generate::generate + caps::Provider ([88f08a8c](https://github.com/swedishembedded/brain/commit/88f08a8c1f2a49c5d996ee8be4838328e9db73b4))
+
+- *(cli)* Wire minimaxmusic3 into catalog/resolve/residency/D-Bus ([c7335d65](https://github.com/swedishembedded/brain/commit/c7335d655f8cc26d5b5f3f00629c19a3de058591))
+
+- *(cosyvoice)* Reserve architecture names for CosyVoice 2/3 port ([09031225](https://github.com/swedishembedded/brain/commit/0903122556968608c2f38976f7c7e29f5bed2d87))
+
+- *(audio)* Mixed-radix FFT + center=False mel + CosyVoice mel preset ([dc9315c4](https://github.com/swedishembedded/brain/commit/dc9315c44d500f9269b9f790d35277d9bbb228c2))
+
+- *(audio)* Audio::istft - inverse STFT via overlap-add + NOLA norm ([22059417](https://github.com/swedishembedded/brain/commit/2205941746c130be62af04ba09293bf147beac8f))
+
+- *(audio)* Audio::resample::rational - Kaiser-windowed-sinc resampler ([e532b63d](https://github.com/swedishembedded/brain/commit/e532b63da7ae21e109a218ba565dddddf94e198b))
+
+- *(kernels,audio)* Elu/elu_bwd kernels + audio::act - CosyVoice's f0 predictor ([1fecac85](https://github.com/swedishembedded/brain/commit/1fecac85dda4ffd8577d1cd8aef892f012773c34))
+
+- *(campplus)* CAM++ speaker encoder - import + forward, real-weight parity ([c3e369bb](https://github.com/swedishembedded/brain/commit/c3e369bbdf4c27581354f0eceddc685782b8315a))
+
+- *(s3tokenizer)* S3Tokenizer v2 - FSQ speech tokenizer, exact token-id parity ([6be2a2d4](https://github.com/swedishembedded/brain/commit/6be2a2d4e06a099cb72512f32e685d41c5e86d3b))
+
+- *(cosyvoice)* CosyVoice 2 speech-token LM - Qwen2.5-0.5B on qwen3, forward parity ([f8b19b5f](https://github.com/swedishembedded/brain/commit/f8b19b5f29af1ace941fe33ccbfa112a3d3b79a4))
+
+- *(cosyvoice)* Flow decoder CosyVoice 2 - UpsampleConformerEncoder + UNet CFM, real-weight parity ([3fa5471e](https://github.com/swedishembedded/brain/commit/3fa5471e43826b015e9c320b6863ea4dd8064ed4))
+
+- *(cosyvoice)* HiFT vocoder - conv trunk + NSF source + ISTFT, real-weight parity ([b8a8cfcd](https://github.com/swedishembedded/brain/commit/b8a8cfcdaeddcb4b5c403bce45da05062595fd7b))
+
+- *(cosyvoice)* Non-streaming end-to-end pipeline - text + reference clip to real WAV ([5139936e](https://github.com/swedishembedded/brain/commit/5139936e9e6ac13efef7567ca0918f53a56a3624))
+
+- *(cosyvoice)* Add CosyVoice 3 speech-token LM (CosyVoice3LM) ([c9748bdb](https://github.com/swedishembedded/brain/commit/c9748bdb4950c2bba1d237a77316c871cc2a2cd1))
+
+- *(cosyvoice)* Add CosyVoice 3 DiT flow decoder (CausalMaskedDiffWithDiT) ([279aafc2](https://github.com/swedishembedded/brain/commit/279aafc2e15f364f7d471cf23fad289b541bf59d))
+
+- *(cosyvoice)* Add CosyVoice 3 causal HiFT vocoder (CausalHiFTGenerator) ([aa0332ad](https://github.com/swedishembedded/brain/commit/aa0332ad1ecd3723b126c87fa6a4a5ba9124154d))
+
+- *(cosyvoice)* Add gradient-checked LM training (gradcheck, LoRA, overfit) ([5ad11b07](https://github.com/swedishembedded/brain/commit/5ad11b0790434fde2626534d7bcb747d129a648b))
+
+- *(cosyvoice)* Wire pipeline::generate into the serving contract (M11) ([90d91df7](https://github.com/swedishembedded/brain/commit/90d91df742714cbecf44003a2e5020f3db675988))
+
+- *(cosyvoice)* Profile pipeline::generate per kernel-kind (M13 step 1) ([97b66902](https://github.com/swedishembedded/brain/commit/97b66902c886bbb4cb1cabf8cfa38e1603f8bed2))
+
+- *(npu)* Export CosyVoice 2's HiFT vocoder and LM backbone to ONNX ([a8bc0fd5](https://github.com/swedishembedded/brain/commit/a8bc0fd56c32bd00b320c8ee9169fb9ad5ed0755))
+
+- *(model)* One canonical Ops kernel list, and a real per-dtype GEMM probe ([765e586a](https://github.com/swedishembedded/brain/commit/765e586a4191fb95eb60341eedf53a31cdfe8ba1))
+
+- *(model)* The capability probe reports the operating point, not the idle clock ([1ed2d17b](https://github.com/swedishembedded/brain/commit/1ed2d17b5b97039411326abc083e8ce287f35853))
+
+
+### Miscellaneous
+
+- Stop tracking results/.gitkeep ([fe0ca465](https://github.com/swedishembedded/brain/commit/fe0ca4658e3e625fa806a18b3c5d7545338ebfbd))
+
+- Drop stale and gitignored path citations from source ([0a060a5d](https://github.com/swedishembedded/brain/commit/0a060a5d6e93580138ca8f8cc4ffab53a847ccfc))
+
+- *(ltxv)* Remove machine-specific "this host" language; resolve audio golden gap ([1ad7a69f](https://github.com/swedishembedded/brain/commit/1ad7a69f9ab064121316a30788733bbe383cbb13))
+
+- *(perf)* Stop committing brain-perf baselines to git, repo-wide ([71b41140](https://github.com/swedishembedded/brain/commit/71b411402d17676fcd733d55919d4340115be0ff))
+
+- *(cli)* Derive Debug on quantize_cli's Args ([c5e7d005](https://github.com/swedishembedded/brain/commit/c5e7d00590e313789a6fde331bf2fc45575f2493))
+
+- Untrack a qwen35 perf baseline that slipped back in via a rebase ([02652179](https://github.com/swedishembedded/brain/commit/026521796b33776b195a7714bc9cc0e2950735a0))
+
+- *(cosyvoice)* Clean up clippy warnings in torch_rng/hift_import/hift_parity ([19c76ca8](https://github.com/swedishembedded/brain/commit/19c76ca8cda7c63a5170ac13c745c439f1363cad))
+
+
+### Other
+
+- Migrate mixer int8 dispatch onto model::ops::{Ops,Act,Weight} ([185f902a](https://github.com/swedishembedded/brain/commit/185f902a1e3794eb4a1d69e8099d89118e7c0cca))
+
+- Hoist GDN/GQA mixer orchestration from qwen35/qwen35moe ([de6a113b](https://github.com/swedishembedded/brain/commit/de6a113b46bd5830578fe1a9475e9a76ddd766a4))
+
+- Fix mmap streaming reader rejecting F8_E4M3 tensors ([285aa58f](https://github.com/swedishembedded/brain/commit/285aa58f783f5c5936a2fe6fa1ee5d14e835f6cb))
+
+- Real-weight streaming parity against Qwen/Qwen3.8-27B-FP8 (M10) ([d740e3ed](https://github.com/swedishembedded/brain/commit/d740e3edf392fde3d04e55e0cff70056bdc3da39))
+
+- M13 performance pass - profile-first, FP8 GEMM ruled out ([0e39417d](https://github.com/swedishembedded/brain/commit/0e39417d724cd6bd083919b0a3ca273cff368402))
+
+- M14 int8 (DP4A) weight tier, real-weight sanity verified ([258f43b7](https://github.com/swedishembedded/brain/commit/258f43b7f2d28c3623df2c4e50c221bc030d6c9b))
+
+- ParamSpec min/max/step + brain-py cancellable subscribe ([efc5420d](https://github.com/swedishembedded/brain/commit/efc5420d304818d28e8dd9a3d0f1c49258dfe359))
+
+- Raise on a dead peer mid-Subscribe instead of returning empty ([e809bf40](https://github.com/swedishembedded/brain/commit/e809bf40f625b085d70b2507ef3b86cda1030d46))
+
+- M15 sliding-window streaming forward over all 64 real layers ([d80295e0](https://github.com/swedishembedded/brain/commit/d80295e071f09efdc9b6757f6c2b1c4b46a7e7cc))
+
+- Drop milestone-number references from stream.rs doc comments ([1026e2b5](https://github.com/swedishembedded/brain/commit/1026e2b581b4f49a389b73954ad143e273f058e9))
+
+- Finish documenting BrainError.name's transport-vs-action contract ([1835932a](https://github.com/swedishembedded/brain/commit/1835932aba7bd7262c08997d102e0f25b663e9eb))
+
+- Add the missing D-Bus example, fix AGENTS.md's stale status ([6000b9b9](https://github.com/swedishembedded/brain/commit/6000b9b94e50d850c13008bda44d0afc18611ee6))
+
+- The serving contract - capability, residency, genuine batching ([d67887b5](https://github.com/swedishembedded/brain/commit/d67887b5d30a0d1c9b0242aebf0a7812baf204c2))
+
+- The serving contract - capability, residency, D-Bus example ([29383bda](https://github.com/swedishembedded/brain/commit/29383bdaaa5f351bef9168287204cd45a6139db3))
+
+- The serving contract - its own sampler loop, residency, D-Bus ([5436720c](https://github.com/swedishembedded/brain/commit/5436720c8e3145770735024a3638d35eca3bf046))
+
+- A text2image sampling pipeline + the serving contract ([c85f05ab](https://github.com/swedishembedded/brain/commit/c85f05abc9be5e30e556d1adabfa269c77644a39))
+
+- Identity-conditioned FLUX.1 - the image path + the serving contract ([99ae2e4b](https://github.com/swedishembedded/brain/commit/99ae2e4b4f2be306e7b0958eae9ee09f114d80e4))
+
+- Add MmapSafetensors::tensor_f32_range for bounded row reads ([7ac89ebe](https://github.com/swedishembedded/brain/commit/7ac89ebe5c5cd3a50d023dd77c16a56226d06451))
+
+- M16 real end-to-end streaming generation ([9fb68686](https://github.com/swedishembedded/brain/commit/9fb686865cd66eaff8b8f44fc561875b968daa7e))
+
+- ResidentModels - list what's warm without parsing StatsSnapshot ([44c0dedd](https://github.com/swedishembedded/brain/commit/44c0dedd2f76a191f829f2df53117deb040acf9a))
+
+- Memoize E4M3 byte decode, ~90% of real FP8 tensor import cost ([068d2ff5](https://github.com/swedishembedded/brain/commit/068d2ff53e4f6970e36d72b832405d0951bb5ef7))
+
+- M17 phase 1 - real-weight MTP import ([a7eb4d41](https://github.com/swedishembedded/brain/commit/a7eb4d41ac3cc88870b1097131990bf3291ab72c))
+
+- M17 phase 2-4 - MTP-accelerated greedy streaming decode ([86b271c2](https://github.com/swedishembedded/brain/commit/86b271c2ff1607dac712e2f657eabcabfb7c15c0))
+
+- M18 streaming LoRA fine-tuning through the real 27B checkpoint ([686be490](https://github.com/swedishembedded/brain/commit/686be4902da8b4a8f5ae7157568696230142accc))
+
+- M19 part 1 - measure the streaming residency-window policy for real ([960b4234](https://github.com/swedishembedded/brain/commit/960b4234458bb12fcc053a84def5d1288bc85d55))
+
+- Parallelize the FP8 (E4M3) byte decode across cores ([cda3003f](https://github.com/swedishembedded/brain/commit/cda3003fc7b43631d7c5867c339be6c97c397331))
+
+- M19 part 2 - wire the streaming decode path into crates/perf ([5545f83b](https://github.com/swedishembedded/brain/commit/5545f83bb35c0ba14060c2b660634baecdc02076))
+
+- Sampling must not crash or silently misfire on a NaN logit ([07214869](https://github.com/swedishembedded/brain/commit/0721486922b25df51a67c96ef6238fc9724d0905))
+
+- One process-wide --limit-vram-total/--limit-ram-total ceiling ([0b25aaeb](https://github.com/swedishembedded/brain/commit/0b25aaebe1ce86636a3fd821cc4e2af54af53a2f))
+
+- Flash attention for self-attention (7.6x on attn1, 1080p now possible) ([0c1eb10c](https://github.com/swedishembedded/brain/commit/0c1eb10c65c9b13ef90dae2062aa09e5af72b86b))
+
+- The block-weight cache stops dying with the generation ([ef9a0151](https://github.com/swedishembedded/brain/commit/ef9a015150fd3800739a88fe8d98e2593233a15a))
+
+- The adaLN-single host stage, and a correction to Phase 12's attribution ([1ee64780](https://github.com/swedishembedded/brain/commit/1ee64780e997bbda4296c9446e9052320fe69baa))
+
+- The two CFG branches run on two cards, bit-identically ([83850b15](https://github.com/swedishembedded/brain/commit/83850b15a759b2d55e238797ca14cce6ad55ba24))
+
+- A device pool, and LTX batches stop running one at a time ([c6c23eaa](https://github.com/swedishembedded/brain/commit/c6c23eaa0a8f5736dd8f59f2f7031feaf1111a19))
+
+- Ledger Phase 15 - the second card starts existing ([99a5e139](https://github.com/swedishembedded/brain/commit/99a5e139aa4227042e233f2367687d5fef1cf66e))
+
+- Overlapping-tile geometry for 3D causal video autoencoders ([b3bb10d5](https://github.com/swedishembedded/brain/commit/b3bb10d5b761daa7b2176e4f746251e656c5871b))
+
+- The VAE decoder stops being the 1080p ceiling ([676c223a](https://github.com/swedishembedded/brain/commit/676c223a617e97e4263191b9ca07cfbb0ec7f649))
+
+- The x0 conversion runs at the token's own timestep ([739ad8fa](https://github.com/swedishembedded/brain/commit/739ad8fa12ede69832e32b26ff3e6bed32885c36))
+
+- Adaln_row, a per-token adaLN table row extract + block-table add ([92f55824](https://github.com/swedishembedded/brain/commit/92f5582428f7751cfff88cb154e98159e07d6ee2))
+
+- The DiT forward stops being a PCIe benchmark (2.22x at 720p) ([aba8dfbf](https://github.com/swedishembedded/brain/commit/aba8dfbf25bc8e8cc989f5f1f3870c42312396b6))
+
+- The resident window must leave room for the rest of the generation ([2cfb0383](https://github.com/swedishembedded/brain/commit/2cfb038380b9e766963fd468de98c4ef4e2ac4c9))
+
+- Deferred reclaim freed buffers live descriptor sets still named ([5caee512](https://github.com/swedishembedded/brain/commit/5caee5120390e86fc5c7363e8c4e57ad18121a46))
+
+- Stop compiling every kernel with runtime checks wgpu turns off ([ed11bf2b](https://github.com/swedishembedded/brain/commit/ed11bf2bdf22af0f20f553cb0b3f31924c89bd9e))
+
+- *(model)* Fix needless_range_loop in the quantize-invariance fixture ([a9703a8f](https://github.com/swedishembedded/brain/commit/a9703a8f0a4245648ad29af60e6e95022f9fa558))
+
+- Split a generation's denoise half from its decode half, for bisecting ([ef2af76f](https://github.com/swedishembedded/brain/commit/ef2af76f72a2bb821cbd8962e7be5bd710a37956))
+
+- Uploads are work too, so flush has to submit them ([4c80c054](https://github.com/swedishembedded/brain/commit/4c80c0542ce8e3ad19ae0db0e1a6c3cdb71e179b))
+
+- The clip stops falling apart before it ends (1080p) ([d679b3ea](https://github.com/swedishembedded/brain/commit/d679b3eae5aa92c3acd68be49245ef2570a9749a))
+
+- The 49-state text projection is not a bare Linear ([7d86e4a7](https://github.com/swedishembedded/brain/commit/7d86e4a79bf70012afdc8c12e7df4685a2c299ee))
+
+- The text context stops being a constant ([7af34a0e](https://github.com/swedishembedded/brain/commit/7af34a0e6c33b5b0d9cd9c8f5a6d1cebfb573128))
+
+- A video decode that keeps its bytes, and one that reports its fps ([904da75c](https://github.com/swedishembedded/brain/commit/904da75c05b2196ebad3c37f5cc487abfb614517))
+
+- A finished clip can go back through the upscaler that made it ([97b49bd9](https://github.com/swedishembedded/brain/commit/97b49bd9255c547672414fde48f171b4e7463f53))
+
+- The per-segment GenOpts stops disagreeing with the stage it accompanies ([5059b3d8](https://github.com/swedishembedded/brain/commit/5059b3d89e34fa46b82228aac10fa952e14e1900))
+
+- A clip stops being one window long ([b25b4ad6](https://github.com/swedishembedded/brain/commit/b25b4ad6ca5440fe5646bd0dcea4c97b64ae5b9a))
+
+- --frames stops having a ceiling ([03fbd10f](https://github.com/swedishembedded/brain/commit/03fbd10f3c68e6afe0d8ca9b91fb8076539831e3))
+
+- The seam gate stops rewarding a stall that undercuts a near-perfect seam ([1e3d8578](https://github.com/swedishembedded/brain/commit/1e3d8578817487abe8e71e6bb623c56924bc3b85))
+
+- A half-conditioned token stops stepping from an unblended estimate ([e4b1d8d6](https://github.com/swedishembedded/brain/commit/e4b1d8d6af972749994c4aae91af3e877d0e6891))
+
+- A window loop stops holding the card it is about to need ([4c053a83](https://github.com/swedishembedded/brain/commit/4c053a83208c066ad69e922cbea640f2ea69b322))
+
+- A clip stops being one scene long ([f4c0c33d](https://github.com/swedishembedded/brain/commit/f4c0c33dcd47dfad14816481a2fa9abe4af4228c))
+
+- --scene puts several scenes in one file ([bc104415](https://github.com/swedishembedded/brain/commit/bc104415e88be9602586bf23216661d23cab532c))
+
+- The workspace license stops contradicting every file in it ([b6e73b8f](https://github.com/swedishembedded/brain/commit/b6e73b8f47b161caa11ff50b9a0205f933c8a243))
+
+- Name Swedish Embedded AB as the author of brain ([e08d8fdf](https://github.com/swedishembedded/brain/commit/e08d8fdf2ac37ce8253be4b13dbba966fca7cc69))
+
+- Fill in the copyright owner ([2ae27243](https://github.com/swedishembedded/brain/commit/2ae272437de3f1ba9eeaad4b166a995b5d9023c6))
+
+- Say who builds brain, and what we can be hired for ([23533e39](https://github.com/swedishembedded/brain/commit/23533e390357bf2bb58c65bad50ac46616f30886))
+
+- Name what we do on the front page of the 14 core crates ([e5518780](https://github.com/swedishembedded/brain/commit/e551878036547094f5926e0963f89eb612ac919d))
+
+- Each integration demo says who can build this for you ([6ea0bdd6](https://github.com/swedishembedded/brain/commit/6ea0bdd6f196d64d427ba289b037dc63587567ea))
+
+- A killed fetch resumes instead of re-downloading ([d6a67a03](https://github.com/swedishembedded/brain/commit/d6a67a0324ed3236338dfa8e6fce3ac1d1a57d7a))
+
+- GLM is discoverable without a checkpoint on the box ([76d0bfb8](https://github.com/swedishembedded/brain/commit/76d0bfb837006cbcb5a5f69c627a6ca09fae1890))
+
+- The 16 newest dumpers record which checkpoint they dumped from ([fbce80c2](https://github.com/swedishembedded/brain/commit/fbce80c2fb6e552f66110257a6ee96f2a754bffb))
+
+- Record what Phase 0/1 actually found, not what it predicted ([173884fe](https://github.com/swedishembedded/brain/commit/173884fe477a4d675acd539009ce3fc281743964))
+
+- A Cargo.toml edited mid-build misdiagnoses itself ([24b2e3fc](https://github.com/swedishembedded/brain/commit/24b2e3fc66de83f39e777d3713b5a904f46a24a5))
+
+- The link check covers .agents/ too, and finds one there ([8b00e3c2](https://github.com/swedishembedded/brain/commit/8b00e3c26441604a77f67c92871637daed265330))
+
+- Clear the 23-warning backlog the gate's zero baseline was already failing ([09f96330](https://github.com/swedishembedded/brain/commit/09f96330aa3ece1c83a6bd4849f78be98cd316e2))
+
+- The vision tower moved to wgpu; the budget never heard about it ([894ebd1e](https://github.com/swedishembedded/brain/commit/894ebd1e5b838f685ad4d2708b4cff3cfb0d704c))
+
+- The composite rebuilt all 8.8 B params on every forward ([ad25543a](https://github.com/swedishembedded/brain/commit/ad25543a3fcc9686e6ecf760815c5bffafca1831))
+
+- Variant='cosyvoice3' was discoverable but always refused ([f6ea9255](https://github.com/swedishembedded/brain/commit/f6ea9255e7ce01b9dad3954c702dbd605a438d32))
+
+- The only code that could load a real checkpoint was in a test ([96c69992](https://github.com/swedishembedded/brain/commit/96c6999216053092f0401eb6941287d308e0140e))
+
+- The composite could compute a loss but not emit a token ([4d9c59b6](https://github.com/swedishembedded/brain/commit/4d9c59b6d363279749189c3892d782b8877393a4))
+
+- Close check_unet -- the transformer half was not differentiable at all ([7537e04c](https://github.com/swedishembedded/brain/commit/7537e04ca6d9a226f6b68253ff338ffcea6e2020))
+
+- Say what the serving surface is actually blocked on ([ad95952e](https://github.com/swedishembedded/brain/commit/ad95952edac22ac53c3cdc608e848933e1575b6f))
+
+- Make it fit -- int8 experts and one shared activation set ([06cba7b9](https://github.com/swedishembedded/brain/commit/06cba7b9899766721d77685b55a2411ab37a96e2))
+
+- The serving contract -- caption over caps, residency, D-Bus ([434b399d](https://github.com/swedishembedded/brain/commit/434b399d58ffb906fc10ca779b35873b770a389d))
+
+- KV-cached decode -- O(pos) per token instead of a full recompute ([8c1aeff9](https://github.com/swedishembedded/brain/commit/8c1aeff9068a455299ac35e660f622b30ee9a031))
+
+- Real run_batch on the axis this architecture actually has ([9023bfb8](https://github.com/swedishembedded/brain/commit/9023bfb8ee8efd682daa40a357956cdef791a0e4))
+
+- GPU placement, with the plumbing actually checked ([cf2d03ae](https://github.com/swedishembedded/brain/commit/cf2d03ae0598c60adc0a30690b86b1f9dab5ccef))
+
+- Make the region-head port discoverable instead of guessing at it ([e4a0faa3](https://github.com/swedishembedded/brain/commit/e4a0faa3ca853b628a063a6397f8beab596cee60))
+
+- The KV decode loop round-tripped the hidden state per layer ([fb211f97](https://github.com/swedishembedded/brain/commit/fb211f97d610b4e57e43041174b8386505b03c9f))
+
+- An upscaled clip stops being several clips ([cb357b04](https://github.com/swedishembedded/brain/commit/cb357b04ad4daaa98b670a946aa23365374272ea))
+
+- A clip stops being anchored only at its ends ([2dfc45b4](https://github.com/swedishembedded/brain/commit/2dfc45b418bca6a304af3c8c729668010507b4d2))
+
+- --mid-frame anchors the middle of a clip ([55b3280e](https://github.com/swedishembedded/brain/commit/55b3280e19a4e1e8526aac14bec618583e75b925))
+
+- One device-token -> Gpu mapping, and it understands an indexed card ([8174865f](https://github.com/swedishembedded/brain/commit/8174865fda0421f40545df86c4d0591179099bc1))
+
+- The DiT stops re-uploading its weights every denoise step ([015d3500](https://github.com/swedishembedded/brain/commit/015d3500f920b451271b3748eae043bc2d2789a8))
+
+- The DiT and vocoder stop being pinned to the CPU backend ([387667a4](https://github.com/swedishembedded/brain/commit/387667a4d4ab4b2d0ee45be5c38c90a1d2b8216e))
+
+- A multi-minute generate stops reporting nothing ([978c6d65](https://github.com/swedishembedded/brain/commit/978c6d65dda7a1ae14cf14d3ce4c66777c4c28ad))
+
+- The e2e gate compiles again, and narrates itself ([3d3af921](https://github.com/swedishembedded/brain/commit/3d3af9215abcf2b3be01bebb3044f2da68d2ccd3))
+
+- Vae, diamond, s3dit, wan, gemma4, ltxv: use the shared device-token mapping
+
+Replaces all 17 private copies of the `Some("cpu") => new_cpu / Some("gpu") =>
+new_wgpu / _ => new` match with `Gpu::open`. Seven were inline in a public
+constructor; ten were `open_device`/`new_gpu` wrappers, now deleted rather
+than left forwarding - a local alias for a shared function is how the private
+copy comes back at the next edit.
+
+Five of those wrappers were `pub`, so 14 further call sites across wan,
+gemma4 and ltxv (including six integration tests) now call `Gpu::open`
+directly.
+
+Behavioural change, stated plainly: every one of these 17 sites previously
+dropped a `gpu<i>` token through the `_` arm into the ambient selection, so a
+caller asking for the second card silently got the first. They now honour it,
+and an out-of-range index panics naming the token instead of landing on card
+0. That is the point of the shared helper, but `Some("gpu1")` reaching any of
+these constructors changes outcome.
+
+Two observability labels in ltxv/src/dit.rs named the deleted function
+(`stage_time("... open_device ...")`, `stage = "open_device"`) and now
+describe the operation instead. Nothing in crates/perf or scripts/ parses
+them - checked, because BRAIN_PROFILE stage totals ARE parsed by perf gates
+elsewhere. Historical measurement tables in .agents/roadmap/ltxv.md keep the
+old label: they record what was measured then. ([30907a40](https://github.com/swedishembedded/brain/commit/30907a40a033e1c757ac0942c883b625f0ee03e2))
+
+- The reference is a pip release, not an unmerged PR ([215acdcf](https://github.com/swedishembedded/brain/commit/215acdcf4b31d7484c7a3b7ba4c39d737b2787ca))
+
+- Parity gates stop being CPU-only ([6f0f4f4a](https://github.com/swedishembedded/brain/commit/6f0f4f4a03feb0636139126b6345a5142b525dda))
+
+- Clear the 22 pre-existing clippy warnings ([b03471fa](https://github.com/swedishembedded/brain/commit/b03471fa388e9405827e520204ac68366d3509df))
+
+- KV-cache the depth decoder, 3.75x for identical output ([f111e6cb](https://github.com/swedishembedded/brain/commit/f111e6cb373a1677e9224797aa8c7b6721629b76))
+
+- The f16/bf16 storage tier becomes requestable, and is proven to dispatch ([1d707a09](https://github.com/swedishembedded/brain/commit/1d707a0975706e7a8b891d790aec1b9574d05cf5))
+
+- The first real song, and the DiT stops using the naive matmul ([594a3db3](https://github.com/swedishembedded/brain/commit/594a3db3cb164308e4028adf6bea763cfd7e0bb7))
+
+- The vocoder stops allocating 4x the device memory it needs ([07063173](https://github.com/swedishembedded/brain/commit/070631735d5bdb0aa441a3a32a58ede53d580fe4))
+
+- The training paths stop allocating 4x their device memory too ([0df12c05](https://github.com/swedishembedded/brain/commit/0df12c05453d8d1099e04fcb7dddfd068890cff4))
+
+- A multi-chunk song survives the vocoder, on the second card ([7525154b](https://github.com/swedishembedded/brain/commit/7525154b55cddfb754a3d260a9674ff885e5f081))
+
+- Retract a wrong claim about wgpu's memory behaviour ([52b76be6](https://github.com/swedishembedded/brain/commit/52b76be6bb128cffde4559c3ba44b1a02a7a0d3d))
+
+- A per-kernel-kind bench, and it kills the stated hypothesis ([3c5f30d7](https://github.com/swedishembedded/brain/commit/3c5f30d778854b487d77af7fdadb6f69ac02b677))
+
+- The DiT stops copying 3.26 GB per forward, and gets flash attention ([57d48265](https://github.com/swedishembedded/brain/commit/57d482653dafd0b03349b2644fbdb8e3b8b5d476))
+
+- The two CFG branches run on two cards, 1.69x ([b05faa55](https://github.com/swedishembedded/brain/commit/b05faa55083af4b9f14de8501f108b06ef5ba1a1))
+
+- The depth decoder moves to the device, 4.28x ([83d7e28d](https://github.com/swedishembedded/brain/commit/83d7e28df93c12bbbef3af62497ead26c0f8214d))
+
+- Honest VRAM, warm weights, and a run_batch that says why it is serial ([e2157e58](https://github.com/swedishembedded/brain/commit/e2157e58e09aae50c51af07ab02cb7cbb0b2574f))
+
+- The DiT weights upload once per generation, not once per chunk ([9c84952b](https://github.com/swedishembedded/brain/commit/9c84952b2b2db8dfd23d603523c078d2d3497df4))
+
+- Qwen3, minimaxmusic3: a device LM head, and the AR branches step concurrently
+
+Two changes to the AR stage, which after the DiT work is the largest cost in a
+generation - and where both P40s read 0% utilisation while 30 GB of weights sat
+resident, because the stage was host-bound and serial.
+
+1. THE LM HEAD MOVES TO THE DEVICE. qwen3's incremental decode returns the
+   hidden state and leaves the head to the caller - its own doc says so - so
+   EVERY decoder in the workspace applies a multi-GB head with
+   hostmath::matvec_par. For minimaxmusic3 that is a [200000, 4096] fp32 table
+   applied twice per 25 Hz frame, streaming 6.56 GB of host memory per frame,
+   plus a 3.28 GB duplicate held in host RAM by read_weight.
+
+   Qwen::decode_logits applies it on device, vocab-tiled, into a lazy [vocab]
+   buffer (800 KB) - the batched [n, vocab] slab is deliberately not
+   resurrected on a decode build.
+
+   Tiling is mandatory, not an optimisation: wgpu clamps
+   max_storage_buffer_binding_size to i32::MAX on every card, and this box
+   measures max_buffer_size 4094 MiB against a 2047 MiB binding limit, so a
+   3.28 GB table cannot be bound whole even on a 24 GB P40.
+
+   The head needs its OWN tiling rather than vocab_tiles(). The GEMV writes
+   out[row*n + col] with col local to the dispatch, so the OUTPUT binding must
+   start at v0, and wgpu requires that offset be 256-byte aligned;
+   tiles_with_budget does not guarantee it (P40: stride 65503 rows, odd).
+   align_head_tiles keeps that fix local to qwen3 rather than perturbing the
+   shared vocab_tiles* that lfm2 and t5encoder also use for embeddings.
+
+   Not matmul_tile, which forward_steps uses: one thread per output element
+   with adjacent threads reading weight rows d_model apart is uncoalesced, on
+   a dispatch that is pure traffic over 3.28 GB. The GEMV arm is offered only
+   when self.coop, because backend-cpu's FastIdx routes matmul/matmul_reg* to
+   native AVX2 but does not know matmul_gemv - otherwise it is a GPU win paid
+   for on CPU.
+
+   The head stays fp32: Dtype::I8 only ever populates self.weights with the 7
+   per-layer linears, so tok.weight/lm_head.weight remain f32 in the
+   ParamStore.
+
+2. THE TWO CFG BRANCHES STEP CONCURRENTLY, one per card. ar_branch_devices
+   already placed them on different cards, and pipeline.rs then stepped them
+   one after the other, so each card idled while the other worked.
+
+   qwen3::Qwen is Send but genuinely !Sync - probed, not assumed: Cell<f32>,
+   Cell<bool>, Cell<Option<..>> and RefCell<Option<optim::*>> reached through
+   optim::Optim. So ltxv::dispatch_cfg_pair's shape - share &D across
+   thread::scope with D: Sync as the compiler-checked safety argument - is NOT
+   available here, and was not forced.
+
+   ArBranches instead holds the unconditional branch by unique borrow
+   (&mut Qwen, Send) and reborrows it into the spawned thread for one step. A
+   &mut cannot alias, so the compiler still proves the moved branch is
+   untouchable from the orchestrating thread while the scope is open. Same
+   guarantee, different route. One private generic `pair` serves both the
+   prefill and the per-frame step, so there is no second copy.
+
+   Gated on the existing BRAIN_MINIMAXMUSIC3_CFG_PARALLEL knob rather than a
+   second one; one card, the CPU backend, or a pinned device keeps the
+   byte-for-byte sequential path with no thread spawned.
+
+   embed_row still runs on lm_cond only and is hoisted out of the loop, the
+   feedback embedding is still sampled once and broadcast, and the host fold,
+   RNG order and progress call after the join are unchanged. The depth decoder
+   is untouched - it already runs its CFG pair batched at b=2 in one step.
+
+Bit-identical, gated by the_concurrent_ar_branches_are_bit_identical_to_the_
+sequential_ones over a whole 4-frame AR loop with differing prompts per branch,
+assert_eq! on the f32 vectors, at tiny dims with no checkpoint.
+
+Also fixes a test that referenced model::block::vocab_tiles_with_budget_for_test,
+which does not exist. align_head_tiles is a pure function of a base tiling, so
+the test now builds one to the same rule locally rather than widening
+model::block's public API for a single caller. ([dd9250f0](https://github.com/swedishembedded/brain/commit/dd9250f078e8c1621645491da66d3639cac23363))
+
+- Kernels, gpu-core: a register-accumulator decode GEMV, upgraded per shape
+
+`matmul_gemv` holds its accumulators in workgroup memory, which costs a GPU
+twice: `partial` is sized for the worst case (m = 32), so every workgroup
+reserves 8 KB of shared memory at every m, and the inner loop is a
+read-modify-write per (k, m), so each accumulator carries a dependency chain
+through shared-memory latency. On a GP102 that is ~37.5% occupancy and 36% of
+the card's measured memory roof.
+
+`matmul_gemv_reg` is the same arithmetic in registers. Both limiters come off
+one `kernels::template` knob, `MREG`, which sizes the accumulator array and
+`partial` together. It is a second file rather than a template variant of the
+first because a function-local accumulator array is a different body AND the
+CPU JIT rejects one outright, which is the constraint that makes the workgroup
+accumulators mandatory over there; each header points at the other.
+
+Selection goes in `gpu_core::upgrade` rather than a new `gemm_variant` slot -
+same Params, same bindings, same n*64 thread count, so it is a drop-in, and
+every decode path in the tree inherits it with no edits. Rows may now be
+shape-specialised: a knob plus a bucket ladder, the bucket chosen from the
+caller's own params. The ladder is measured, not assumed - a single MREG=32
+build is a 0.44x REGRESSION at m=1, while power-of-two buckets win >= 1.7x
+across m in 1..=32.
+
+Bit-identical, and gated as such: same k-stride, own accumulator per output,
+same 64-partial fold in the same order, so nothing reassociates and the gate
+asserts raw bits rather than a tolerance. Mutation-verified - reversing the
+fold order, pure reassociation with no arithmetic error, fails the bit
+assertion while passing an independent f64 oracle.
+
+Two seams cleaned up on the way: `Gpu::physical_kernel_name` becomes
+`physical_kernel_names`, since one caller slot now maps to several physical
+pipelines and taking the first silently zeroed profile rows; and
+`kernelmeta.py::cpu` now derives `@cpu` from both structural facts the JIT
+actually checks (barrier count and work-group-kernel local arrays), with
+`wgsl-cpu`'s skip list matching, so the declaration and the compiler cannot
+drift. No existing kernel's `@cpu` cell changes.
+
+Measured, mm3_bench depth 8 3 on an idle P40, A/B via BRAIN_NO_KERNEL_UPGRADE:
+
+  matmul_gemv   21.9 ms -> 8.3 ms   2.64x   36.0% -> 96.6% of the memory roof
+  whole pass    24.01 ms -> 10.53 ms   2.28x
+
+The top row now sits essentially at its roof, so the remaining lever there is a
+narrower weight tier, not a kernel. ([0135ee5d](https://github.com/swedishembedded/brain/commit/0135ee5df1f7bef6a754705d16d1e61033c0f919))
+
+- Gate the vocoder on relative L2, not cosine alone ([8835c941](https://github.com/swedishembedded/brain/commit/8835c9410a01c2ec602d4031a742c3f9b10f2787))
+
+- Audio, kernels: lower the 1-D convolutions to GEMM
+
+The DAV vocoder ran its 1-D convolutions on one-thread-per-output kernels:
+`conv1d` at 2.2% of this card's compute roof, `convtr1d` at 0.4%, together 99%
+of the stage. Unlike the DiT's two misses there was no fast sibling to
+register - `conv1d`/`convtr1d` (+`_dx`/`_dw`) are the only 1-D conv kernels in
+the tree and `audio::conv` had no selector at all, so all ~12 crates that
+convolve in 1-D ran the naive kernel. The 2-D side already had the pattern to
+port (`vae::blocks::conv_s`).
+
+The algebra needs no transposes and no weight permutes, which is what makes
+this cheap: the native `[Cout, Cin/G, K]` weight IS `[Cout, Cin*K]` row-major,
+so `matmul_reg3` takes it directly; `K == 1` skips im2col entirely via the NN
+form and covers `dec_in_proj` plus twelve residual convs; and the transposed
+conv's TN form takes the native NCL input and native weight as-is, doing `L`
+rows rather than `Lo` for the same FLOP.
+
+Two new kernels (`im2col1d_at`, `col2im1d_bias`), both barrier-free, and a new
+additive selector in `audio::conv` gated through `backend_api::select`.
+`ConvKernels`, both backward builders and `train.rs` are untouched, so the
+trainer and gradcheck stay bit-identical. Chunking is mandatory rather than an
+optimisation: the unchunked stage-3 `col` is 1.9 GB against a 2047 MiB binding
+limit.
+
+Deduplicated rather than copied: `gpu_core::lower` now owns the budget and
+chunk arithmetic, replacing two byte-identical copies in `vae::blocks` and
+`blocks3d`, and the existing `nlc_bias_nchw` is reused instead of a second
+epilogue kernel.
+
+Thresholds are measured per kernel pair, not inherited: `GEMM_CONV1D_MIN_COUT`
+is 16 and the transposed one is 4, where the 2-D lowering uses 32. Its baseline
+is a fast kernel at ~700 GFLOP/s; ours is a naive one at 2.2% of roof, and a
+weaker baseline crosses earlier. Copying 32 would have cost 1.9-6.0x across
+16 <= Cout < 32.
+
+Measured, mm3_bench vocoder 689, one P40, best-of-3, A/B in the same binary via
+BRAIN_CONV1D_GEMM=0:
+
+  whole pass    16642 ms -> 1424 ms   11.7x    0.48x -> 5.62x realtime
+  device time   16060 ms ->  797 ms   20.2x
+  convtr1d       7668 ms ->   96 ms   80.9x
+
+No kernel in the pass is below its roof floor any more. Parity holds at cosine
+1.000000000, rel_l2 1.676e-6 against a 1e-4 ceiling.
+
+Mutation-verified. One mutation is worth recording: dropping the chunk offset
+in `im2col1d_at` was NOT caught at first, because every shape in the suite fit
+a single chunk. The suite gained a three-chunk case, and the fix is what the
+gate now rests on - a chunked path whose tests never cross a chunk boundary is
+not tested. ([3ac9d3ea](https://github.com/swedishembedded/brain/commit/3ac9d3eacaa7176f2d4961b4bc38a144dfa7ba2d))
+
+- Model, minimaxmusic3: a real unregistered-slot sentinel, and the training GEMM
+
+Two defects, one file in common.
+
+`model::block::UNREGISTERED` did not exist, so models filled unused `KernelIds`
+slots with `0` - a real, registered kernel in every PIPELINES list in this
+workspace. A builder reading such a slot runs that kernel against another
+kernel's bindings and uniform. On a GPU backend the binding check makes it a
+panic; on `backend-cpu`, the backend every unit test in these crates uses,
+there is no buffer-count or uniform-size check at dispatch, so it is an
+out-of-bounds read that no test on that backend can see.
+
+Thirteen sites, not the two originally identified. Seven held a literal `0`;
+six more wore a better disguise - a live index for a DIFFERENT kernel,
+commented as a harmless placeholder, invariably a backward-pass slot holding a
+forward-pass kernel in a crate that never runs backward. Each slot was
+confirmed genuinely undispatched by reading which builder consumes it.
+
+The gate is dispatch-linked rather than static: it runs the real pass, reads
+the device's own per-kernel counters, and fails only if an unused slot names a
+kernel that pass actually dispatched - so it reports whether getting it wrong
+would have mattered, not merely that a field changed. It also asserts the pass
+dispatched something, so it cannot pass vacuously. `KernelIds::slots()` lives
+next to the struct so adding a field cannot leave the gate checking 15 of 16.
+
+Separately, `dit_train.rs` registered only `matmul`/`matmul_dx`/`matmul_dw` and
+dispatched the naive kernel at every site - the same defect the inference path
+had. It now shares `dit.rs`'s `linear_step` (hoisted, not copied) and routes
+the backward through `model::block::pick_gemm`. New kernels are appended to
+PIPELINES so no existing index moves.
+
+Read the training numbers with their caveat. Per-kernel the forward gains
+111-342x and the backward 10-26x at real dims, but this changed nothing that
+runs today: `Trainer::new` hardcoded `Gpu::new_cpu`, and `backend-cpu`
+intercepts these kernels by identity and routes them to the same AVX2 GEMMs as
+their `_reg` siblings, so on the only device this trainer could reach the two
+tiers were the same code. `Trainer::new_on` is what makes the fast tier
+reachable and therefore checkable; without it the fix would have been untested
+dead code. `Trainer::new` is unchanged.
+
+Split-K was measured and rejected in both families - it lost at every shape and
+slice count, its tile grids here being 256-2048 workgroups on a 30-SM card, the
+opposite of the starved-grid case it exists for. Both split-K kernels are also
+GPU-only with no `backend-cpu` native path, which is the all-zero-gradient trap
+this repo gates against.
+
+Gradcheck green on both backends; lib tests 93 -> 96.
+
+Drive-by, because staging the files surfaced it: a qwen35moe doc comment cited
+an absolute machine path for the reference implementation and pointed at a
+report that is not in the repo. Both replaced with the checkpoint-relative
+filename and the env var that resolves it. ([a58ffb60](https://github.com/swedishembedded/brain/commit/a58ffb6022d6f0e5e55c230b12d0cc860e41cc5f))
+
+- Do not print a profile banner for a run that never profiled ([1ee1d945](https://github.com/swedishembedded/brain/commit/1ee1d945cca8d9631ddb385929f58da4b0eff187))
+
+- Ltxv, dit: one adaLN row per distinct timestep, not one per token
+
+`ada_layer_norm_single` computed a row per token. Every row is a function of
+that token's scalar timestep and nothing else, and `pipeline::denoise` builds
+those timesteps two ways: `vec![sigma; t]` with no conditioning, and
+`mask * sigma` with it, where the mask is 1.0 (generated), 0.0 (frozen - an
+image anchor, a long-form window's carried context) or `1 - strength`. So the
+distinct count is ONE for plain text-to-video and TWO once anything is frozen.
+At the real 720p token count that is 3520 rows of which 1-2 are distinct and
+the rest are recomputed copies.
+
+Tuning was already exhausted: the `[3520,4096]x[36864,4096]^T` table GEMM ran
+at 120 GFLOP/s against this host's own measured 127.8 GFLOP/s scalar-MAC
+ceiling. The only lever left was fewer rows.
+
+Deduplication is GENERIC, not a "uniform" fast path. A uniform special case
+would drop every anchored and every long-form shape back to full cost, and
+those are precisely the shapes a fallback exists to serve. Measured at 8
+layers, T=3520: no dedup 10302 ms, two distinct 609 ms, one distinct 199 ms,
+and `distinct == t` degrades continuously to exactly the old cost.
+
+`adaln_row.wgsl` takes a fourth binding, the row map, and gathers
+`tab[map[r]*NR*D + off]`. It also gained the `gpu_core::cost` row it never had
+- it was UNCOVERED, so the harness could not have reported it as a defect.
+
+Bit-identical, gated on raw bits rather than a tolerance: same table, same
+arithmetic, only the row lookup moved. Mutation-verified on this change's real
+failure mode, which is a wrong scatter rather than wrong arithmetic - rotating
+the gather by one token PASSES the uniform case and fails only the
+two-interleaved one, on both backends. A suite whose every case was uniform
+would have shipped it.
+
+Measured, 48 layers, T=3520, ctx 1024, one idle P40, best-of-4, warm-up
+excluded:
+
+  adaLN stage      10243.4 ms ->  222.0 ms   46x
+  adaLN upload         519 MB ->  161 KB
+  warm forward       47.91 s  -> 36.41 s     1.32x
+
+A real CLI generation came in at 393.2 s against a 547.0 s reference, and the
+11.25 s per-forward CLI delta matches the controlled bench delta of 11.50 s on
+two independent harnesses. Only ~90 s of the 153.8 s whole-run difference is
+attributable; the rest is not, and is recorded as unattributed rather than
+claimed.
+
+`ltxv_bench` also now prints the DEFECT block that the other five benches in
+this tree already print. It was the only one that did not, which is why this
+model's roof-floor defects had never appeared in its own harness output. ([b13cda56](https://github.com/swedishembedded/brain/commit/b13cda5617b08cbd976ea20436d3e5e29f43680b))
+
+- Ltxv, cli: bound the text cache, and stop refusing a clip that fits one window
+
+Three defects found while profiling, plus one cosmetic.
+
+**The text-context cache had no bound.** No budget, no eviction, no prune -
+`store()` wrote and returned. Measured: 86 entries at 33.5 MB each = 2.7 GB,
+growing by one entry per distinct prompt forever, on a filesystem at 96%.
+
+Eviction is least-recently-USED, and that choice is load-bearing rather than a
+coin flip: this cache exists for the same prompt re-encoded on every iteration
+of a change-something-else loop, and under oldest-written eviction the entry
+being iterated on is exactly the one thrown away. Recency rides on mtime,
+rewritten on every hit, because the default `relatime` does not update atime on
+a read within the day. The most-recently-used entry is never evicted: a budget
+below one entry is not honoured by deleting what the caller is about to read -
+`BRAIN_LTXV_TEXT_CACHE=0` is the switch for caching nothing.
+
+There is no existing disk-cache budget convention in this workspace to follow,
+so the default reuses the only comparable number in the tree rather than
+inventing one, and the env-var shape copies `longform::max_window_tokens_from_env`.
+
+**`window_plan` refused a request that fits a single window.** The
+`max_lat < context + 1` guard sat before the early return it should follow. At
+1920x1088, `max_lat` is 6 and a 25-frame clip has `k_total = 3`, so the early
+return emits `k_total + 1 <= max_lat` frames carrying zero context - that
+window always fits on its own, and the guard protected nothing on that path.
+Past the early return `k_total >= max_lat`, a continuation window genuinely
+exists and the guard is genuinely required, so it moves rather than goes. The
+refinement caller is unaffected: it passes `fitted_context`, which already caps
+at `max_lat - 1`. `max_lat == 0` is still refused.
+
+The regression test was watched failing with the exact reported error before
+the fix, and it asserts up front that the grid really is too dense for a
+context so it cannot silently stop testing anything.
+
+**`--help` claimed a specific CFG-parallel multiplier.** It advertised 1.94x
+where a fresh reading showed 1.46-1.48x. Rather than bake in another figure
+that the adaLN work in the previous commit was about to move again, the claim
+is now the mechanism plus how to measure it on your own box - matching this
+repo's convention for perf claims elsewhere in the docs.
+
+Also: `brain flops --help` warned about an unrecognised argument and exited 2
+with usage on stderr. It now exits 0 with usage on stdout, from a single shared
+const so the two paths cannot drift, and a genuinely unusable invocation still
+fails.
+
+Drive-by: two `text_cache` tests mutate process-wide env vars while `make test`
+runs at 48 threads. They now share a module-local mutex, since adding a third
+would have made an existing race worse. ([1004e4b7](https://github.com/swedishembedded/brain/commit/1004e4b704603b6dae705830982e5655a609aad3))
+
+- Mimi, ecapatdnn: make three parity gates actually run, and gate on two metrics
+
+All three skipped, and a skipped test reports as a pass here. So a served TTS
+codec decoder and a speaker encoder had no executable numerical parity
+coverage at all - the same state the MiniMax-Music3 gates were in before their
+goldens existed. Both checkpoints were already on the box; only the goldens
+were missing.
+
+Qwen3-TTS is in no release of `transformers`, and the published checkpoints
+carry no remote modelling code, so the only reference is the `qwen-tts` package
+and the transformers version it pins. The dumper installs that pinned stack
+into a private directory on `sys.path` for its own process, leaving the shared
+environment untouched, and registers the two namespace packages bare so their
+`__init__` bodies do not drag in a different tokenizer and an audio stack.
+**Not one line of the reference is patched** - a golden that came from
+modified reference code proves nothing about the port.
+
+Reproducibility was verified rather than assumed: deleting the reference tree
+and re-running from empty re-fetches everything and produces byte-identical
+dumps. Both dumpers carry checkpoint provenance read from the checkpoints they
+actually loaded, so a mismatched fixture becomes a named skip instead of a
+wrong number.
+
+Now measured, with zero skips under `BRAIN_REQUIRE_FIXTURES=1`:
+
+  mimi decode      max-abs 5.721e-4, log-mel L1 7.691e-4
+  mimi encode      code match 100.00% (400/400)
+  ecapatdnn        cosine 1.0000000000, rel_l2 7.089e-7
+
+The mimi decode figure is ~65x better than the comment that stood in its place,
+which claimed 3.7e-2 and blamed fp accumulation order. That number was dumped
+from a bf16 reference forward, so it recorded the REFERENCE's precision while
+reading as a measurement of this port. Corrected here and in the README.
+
+`ecapatdnn` asserted a cosine floor and nothing else. Cosine is scale
+invariant, so a uniformly mis-scaled embedding scores a perfect 1.0 and passes.
+It now asserts a relative-L2 ceiling too, set two orders of magnitude off the
+measured clean value rather than fitted to one run.
+
+Every gate mutation-verified, applied then reverted, and each mutation was
+caught by a different metric: a uniform scale on the embedding by rel_l2 alone
+with cosine printing 1.0000000000 unchanged; a uniform scale on the waveform by
+log-mel L1 alone, having slipped UNDER the max-abs ceiling; and a scaled RVQ
+input by code match, with the damage concentrated in the residual codebooks.
+Each single-metric gate would have missed at least one of them.
+
+All three added to the strict parity suites so they are certified rather than
+merely present.
+
+Pre-existing defects fixed on the way: all three mimi tests deleted the shared
+fixture they memoize, which is a hard failure run serially and a race run in
+parallel; the intermediate checkpoints were named per-pid, so every run leaked
+one and a 646 MB stale file from the previous day was sitting on a 96%-full
+disk; and three test docs named packages that do not exist.
+
+campplus is deliberately left skipping: its gate is already well formed, it
+needs ~8-9 GB of checkpoint and scratch environment, and its dumper is
+all-or-nothing so the 28 MB piece it needs cannot be fetched alone. ([d1605046](https://github.com/swedishembedded/brain/commit/d16050463930effb8bc77161e835611771ee6068))
+
+- Certify the mimi and ecapatdnn parity suites ([5e73953d](https://github.com/swedishembedded/brain/commit/5e73953da775902a2ca8d3fc9d5c17e94ccb3418))
+
+- Crates, tools: no hardcoded performance numbers in source narration
+
+A perf number written into a comment, a doc-comment or a string literal is a
+claim that outlives the hardware, driver and code that produced it, and nothing
+revalidates it. Two failures in this repo inside one day: a comment recording a
+stage at "~76 s per forward" described the tree BEFORE the commit that
+introduced it, and a later reader took it as current, costing an hour of
+reconciliation against a fresh measurement of the same stage at 10.2 s; and
+`ltxv t2v --help` advertised a two-card speedup a third larger than a fresh
+reading showed. Users read help text as fact.
+
+727 flagged lines across 285 files. The transformation everywhere keeps the
+claim and its reasoning and drops the figure, because most of these numbers are
+load-bearing to the argument around them - deleting the digits and leaving the
+sentence produces something worse than either. A benchmark table becomes a
+pointer to the harness that reproduces it plus the SHAPE of the result: which
+kernel dominates, what is memory- versus compute-bound, which way the crossover
+goes. A threshold the code actually depends on keeps its value, and the prose
+now says it is a measured threshold rather than a reported result.
+
+No escape hatch is used anywhere. The strongest candidate was a datasheet table
+in the Vulkan peak-flops test, and even that rewrote: the values already live in
+the constants the test computes against, so the header keeps the derivation and
+points at them.
+
+Two things found while reading rather than merely stale: a five-line comment
+block duplicated verbatim in `qwen3::serve`, and `matmul_i8_gemv`'s rationale,
+whose subject was ambiguous enough to read as an argument against the kernel it
+introduces. It is not - the kernel measured slower there is the TILED int8 GEMM
+run in the decode regime, which is precisely why this one exists. Said
+explicitly now.
+
+Drive-by, because staging these files surfaced it: two more absolute machine
+paths in a qwen35moe doc comment, replaced with the checkpoint-relative name
+and the env var that resolves it.
+
+Numbers keep their home in dated, immutable records - commit messages, the
+per-model roadmap ledger, and the rules ledger where the value often IS the
+lesson. What changes is that they no longer sit in code, where they read as
+current truth. ([564c3ad1](https://github.com/swedishembedded/brain/commit/564c3ad1e30fccf5ce0865af17923446bda00910))
+
+- Extend the no-perf-numbers gate to source narration ([0cbb4673](https://github.com/swedishembedded/brain/commit/0cbb46735f3dca7fd23f37c025b41af88c0319cb))
+
+- Ltxv, kernels: a flash text cross-attention, and the RMSNorm sibling ltxv never registered
+
+Two kernels, both found by profiling at the width the model is actually run at
+rather than the width that is cheap to profile.
+
+**Text cross-attention had no flash kernel anywhere in the tree.** It ran as a
+materialized trio - scores, softmax, apply - at roughly 5% of BOTH the compute
+and the memory roof, which this repo's own rule calls a bug rather than a
+ceiling, while self-attention in the same block did more arithmetic at 36% of
+roof. `flash_attn_cross_reg2` is a port of `flash_attn_bidir_reg2` rather than
+of the causal GQA kernel: the bidirectional rung is the closer template and the
+port is two changes, three operand buffers instead of one fused slab and an
+`nq`/`nk` split. It needs no `pack_qkv` because ltxv's attention already
+produces q/k/v as three plain buffers. Selection goes through a shared
+`model::block` seam, so any model with a cross trio adopts it in one call, and
+`BRAIN_NO_FLASH_CROSS` is the A/B switch - without one, an A/B on a capable
+device compares the fused path against itself and reports a parity that looks
+like evidence and is not.
+
+**RMSNorm was the recurring defect class**: `rmsnorm_rows` already existed and
+`wan` and `flux2` already registered it. ltxv had simply never learned about
+it, so every norm in every block ran one thread per row. One registration, one
+call site.
+
+Measured on one idle Tesla P40 (GP102, measured roofline 10517 GFLOP/s fp32,
+287.5 GB/s DRAM), via `BRAIN_PROFILE=1 ltxv_bench streamed 8 13200 1024 1 1 1`,
+8 layers at 13200 tokens and 1024 context, cache-hit arm, cards confirmed idle
+before each run and never sampled during. `BRAIN_PROFILE`'s tables are
+cumulative, so every figure is the difference between the tables at the end of
+call 2 and call 1:
+
+  text cross-attention   3688.5 ms -> 486.8 ms   7.58x   (5% -> 34.6% of roof)
+  RMSNorm                1060.2 ms -> 108.6 ms   9.76x
+  GPU kernel time         14471.6 -> 10308.8 ms  1.404x
+  wall, 8 layers            27.88 s -> 23.20 s   1.202x
+
+Control: across three separate runs the rows NOT touched reproduce to under
+0.4%, so the deltas are the change rather than run-to-run noise. Wall moves
+less than device time because a forward also spends time on activation upload
+and a host RoPE table build, neither touched here. The fused kernel also stops
+allocating a multi-gigabyte score-plus-probabilities slab per layer.
+
+Parity on real Q8_0 weights, from printed output: `dit_parity` including the
+exact tap replaced at cosine 1.000000000, `host_forward_parity`,
+`shard_parity`, `streamed_vs_eager_real`, `connector_real_parity`,
+`int8_compute`, and `av_dit_parity` - the A<->V cross-attentions are fused by
+the same seam.
+
+New gates assert max_abs AND rel_l2 alongside cosine over six shapes with both
+`nq>nk` and `nq<nk` and both tile tails, plus an analytic V-index test.
+Mutation-verified, and one mutation is the reason the gate is not cosine-only:
+a score-scale error scores cosine 0.999979 while rel_l2 reads 6.864e-3 - four
+orders less alarming on the metric most people would gate on, and the more
+plausible bug of the set.
+
+One hypothesis was refuted rather than implemented. A recorded note claimed
+`head_dim = 64` against a 128-wide tile wasted half of every tile. This model
+is `inner_dim 4096 / 32 heads`, so head_dim is 128 and matches the tile
+exactly. There is no zero-fill and a template knob would compile to the
+identical kernel, so none was built. ([50569233](https://github.com/swedishembedded/brain/commit/505692337a9ad383c8ae51423435fa6ba6f0b50c))
+
+- Native audio-visual generation, wired end to end ([0c4eedb2](https://github.com/swedishembedded/brain/commit/0c4eedb29a6bf0f69217848e055ce3771c8cccd3))
+
+- A quantized, device-resident audio-visual block ([5dc2ce08](https://github.com/swedishembedded/brain/commit/5dc2ce08ee1ede20d199c60692010f2a550947e9))
+
+- Audio crosses a window seam, so a long clip can have sound ([5c5d3b3b](https://github.com/swedishembedded/brain/commit/5c5d3b3be63ca66ee50996dfa68ca6f0a5fb62b3))
+
+- Capability-mock, catalog: an in-process weight-free Provider, and the served-model catalog as a library
+
+Groundwork for whale/Loom linking brain's capability crate in-process:
+whale must never download or run real weights during development, and
+wants to enumerate the full ~70-model catalog without going through the
+CLI/D-Bus/HTTP transports.
+
+brain-capability-mock (capability_mock) depends on nothing but
+brain-capability + serde_json. MockProvider advertises a Manifest built
+by hand (new + action) or mirrored 1:1 from a real one (from_manifest,
+inferring each action's synthetic shape from its declared output Media
+kind), and every action generates deterministic content by pure wrapping
+arithmetic - no RNG crate, no file I/O, no GPU: a seeded HWC gradient for
+Image/Mask (through blob::image_blob, mask re-tagged via
+Blob::with_media), a moving-gradient clip for Video (through
+blob::video_blob, meta.fps set), a sine tone as raw f32-LE PCM for Audio
+(meta.sample_rate/meta.channels, no WAV container - matching
+audio::asr_caps's raw-PCM convention), a prompt-derived string for Text,
+and a counter byte pattern for Bytes. Every action ticks a handful of
+Progress::steps and polls the invocation's CancelToken between them,
+aborting promptly on cancel - the discipline every real model action is
+required to follow, demonstrated rather than merely documented.
+Round-tripped through capability::blob's own decoders.
+
+Note: the builder MockProvider::action(self, spec, output) and the
+Provider::action(&self, name) dispatch method share a name by design
+(matching the requested shape); method-call syntax always resolves to the
+inherent builder, so a caller dispatching by name needs
+Provider::action(&provider, name) - documented on the type and used
+throughout its own tests.
+
+brain-catalog (catalog) is crates/cli/src/catalog.rs promoted to a
+library: the LazyProvider machinery, ModelEntry, the always!/from_env!/
+resident!/resident_multi! macros, and models()/manifests()/provider() -
+one manifest + weight-free provider constructor per registered model
+crate, in ONE list, so an in-process consumer (this workspace's
+brain-cli, or a separate binary like whale) enumerates and constructs
+every model with no CLI/D-Bus/HTTP transport in the loop.
+
+Deviation from a purely mechanical move: about twenty models' residency
+adapters (Sam2Resident and siblings) are crate::resident_* types defined
+in crates/cli, which - per this workspace's crate-graph layer rule (cli
+aggregates everything and sits at the top of the stack; catalog sits in
+the same layer as capability/residency/dbus, all of which cli depends on,
+never the reverse) - brain-catalog must not depend on. Splitting the
+manifest/provider pair out per model would have reintroduced exactly the
+multi-list drift this file was built to kill, so instead brain-catalog
+stays the single source of truth for manifest + provider (every model, no
+exceptions), and crates/cli/src/catalog.rs becomes a thin extension: it
+patches the CLI-local residency adapters back onto catalog::models()'s
+entries by the model crate's own caps::MODEL constant (a rename now fails
+to compile instead of quietly un-serving a model), and appends the four
+entries whose MANIFEST itself is CLI-local (imageops/demo, and the three
+forecasters, whose manifest fns are pub(crate) in resident_forecast.rs
+and were never reachable from outside crates/cli regardless of this
+split). residents()/multi_residents() move to this CLI-local file
+entirely, since they are inherently about CLI-local ResidentModel impls.
+
+crates/cli gains a brain-catalog dependency and loses brain-qwen3vl (no
+longer used anywhere in crates/cli now that the old catalog.rs's one
+reference moved into the new crate - confirmed via cargo build --tests,
+no other CLI file names it). brain caps still lists the exact same 38
+models (verified with a throwaway count test before removing it);
+ltxv_cli::tests::every_upscale_flag_the_parser_accepts_is_documented
+fails identically on main before this change, a pre-existing, unrelated
+drift in that file's own --help text.
+
+Both new crates build with zero warnings (cargo build/clippy
+--all-targets); 15 new unit tests in capability-mock (round-trip through
+capability::blob's real decoders, from_manifest inference, two
+cancellation tests) and 4 in catalog pass; crates/cli's existing catalog
+tests (uniqueness, constructibility, imgpipe stage ids, the two
+residency-specific invariants, a new one pinning every patched id) all
+pass, plus one new test asserting the patch table's ids are real. Root
+Cargo.toml: both crates added to default-members and
+[workspace.dependencies]. .agents/rules/architecture.md and AGENTS.md
+document both under the serving and front-ends layer. ([859427cf](https://github.com/swedishembedded/brain/commit/859427cf0a4c0ef724cd26c5992421ce200affb1))
+
+- Route audio-visual generation through the quantized path ([db675eb2](https://github.com/swedishembedded/brain/commit/db675eb20d5e8d04f6ba7adc51b2c058a41a2e99))
+
+- Give the int8 GEMM a shared tile shaped for DP4A, not for FFMA ([a9e3e5f6](https://github.com/swedishembedded/brain/commit/a9e3e5f6ec5c356e51c01d69b8f9561502573c12))
+
+- Gpu-core, ltxv: a replay scratch arena, because the host half was the allocator
+
+A warm forward at real width spent a third of its wall clock with the card
+idle. Profiling the host half - in-process spans first, then `perf record -g
+--call-graph dwarf` from outside, agreeing - found it is not host MATH at all.
+It is the Vulkan allocator, and half of it was somewhere nothing was timing.
+
+Attribution of a 48-layer warm forward's 30.24 s of host time, every row a
+span overlapping no other, with **zero unaccounted**:
+
+  device buffer allocation   12.04 s  39.8%   (~74 temporaries per block x 48)
+  device buffer destruction  10.53 s  34.8%   (the same set, dropped per block)
+  submit + poll residual      1.84 s   6.1%
+  block weight upload         1.67 s   5.5%
+  graph recording             1.65 s   5.4%
+  output stage (host)         0.88 s   2.9%
+  ... nine smaller rows       1.63 s   5.5%
+
+**Destruction had never appeared in any table.** The recorded figure for this
+cost covered allocation only, because every existing timing span closes before
+the function returns and dropping the buffers is the last thing it does. A
+span ending at a closing brace cannot see its own scope's destruction. The two
+halves together were 75% of the host time.
+
+`perf` confirms it from outside the process: the allocator's block-new and
+free paths, `ioctl` and `munmap` together dominate, and all four vanish or
+halve in the fixed arm. Note the frame that dominates a flat profile here is
+the process blocked in `device.poll(Wait)`, which is device time rather than
+host stall - its share RISES after this change, which is the correct direction.
+
+`gpu_core::scratch::Arena` + `Gpu::scratch_scope` is a replay arena: a repeated
+pass asks for the same temporaries in the same order every iteration, so the
+arena hands the same buffers back and nothing is created or destroyed after
+the first block. It lives in the shared facade rather than in one model, so
+opting in is one line per loop body.
+
+Aliasing safety is three separate parts, and they were verified separately
+because they mask each other: the cursor only advances, so no collision within
+a scope; a slot is refused while any caller still names its buffer, which also
+makes the chained activation correct with no special case; and the caller must
+drain, which the existing blocking one-word read already does. A first draft
+of the doc claimed the refcount also covered submitted dispatches - checked in
+the backend and it does not, a recorded `Step` holds a bind group rather than a
+buffer clone, so that argument would have been circular.
+
+Measured on one idle P40, best-of-2 warm, no concurrent build, 48 layers at
+13200 tokens, A/B through `BRAIN_LTXV_NO_SCRATCH_POOL`:
+
+  video  warm forward  87.72 s -> 64.56 s  1.36x   host -78.5%, device +0.3%
+  audio+video          101.60 -> 72.98 s   1.39x   host -76.0%, device +0.4%
+  device share of wall   66.1% -> 90.1% (video), 62.6% -> 87.5% (AV)
+
+Device time unchanged is the control; output mean/std/min/max are identical to
+six decimals on both streams, and the residency grant and peak VRAM did not
+move. Independently reproduced at 8 layers: 16.01 -> 12.30 s wall with device
+9.66 s in BOTH arms and identical output stats.
+
+The before arm is a fresh run rather than a citation, and it does not
+reproduce an earlier phase's absolutes - both halves measure about 6% faster
+here, box or toolchain. The host SHARE reproduces to the decimal, 33.9% then
+and now, which is the figure the conclusion rests on.
+
+Five mutations, each restored and re-confirmed. The finding is that the guards
+mask each other: deleting the size check first PASSED, because the uniqueness
+guard refused the slot before the size ever mattered. That test now releases
+the buffer so the size check is what it actually exercises. Dropping
+uniqueness AND handing back the previous slot turns the real-weight bit gate
+red at 2048 of 2048 words, which is what proves that gate can see aliasing at
+all. ([c2a442c8](https://github.com/swedishembedded/brain/commit/c2a442c86955dc636d50aacb6ee3bd75f4b0d93b))
+
+- Vae, kernels: one fused channel norm, and one device for the whole tiled decode
+
+The VAE decode is a fifth of a real generation and every optimisation this
+model has had went into denoise. Profiled at the real clip geometry it is
+85.7% device-bound, and three of the top five kernels turn out to be ONE
+operation.
+
+`nchw_nlc` -> `l2norm_scale` -> `nlc_nchw` is a channel-wise L2/RMS norm
+written as a permute sandwich. That form pays the strided channel walk TWICE,
+once per permute, to spare the middle kernel from paying it once - and the
+middle kernel then redoes each position's whole sum of squares once per
+channel. Both permutes tripped this repo's roof-floor rule at a real tile
+shape. The argument against the sandwich was already settled for LayerNorm by
+an existing fused kernel; the L2/RMS twin had simply never been written.
+
+`l2norm_scale2d` is that twin: one invocation per spatial position, one pass
+over the channel axis, barrier-free. Bit-identical - the permutes are exact
+and both arms fold over ascending channels - so the gate asserts the bits.
+
+It went into the single shared call site both norms already route through, so
+`crates/wan`'s VAE inherited it with no change in that crate at all, and a
+private byte-identical copy of the same trio inside this crate's audio VAE now
+uses the shared kernel instead.
+
+Second fix: each tile SHAPE was opening its own device and re-uploading the
+whole decoder. One device and one weight memo now thread through every build.
+
+Measured on one P40 at the real geometry, same binary, A/B through
+`BRAIN_VAE3D_SPLIT_NORM` and `BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS`:
+
+  norm kernels        61.82 s -> 2.28 s   27.1x
+  VAE device         332.49 s -> 273.27 s  1.217x
+  host                 25.8 s -> 27.0 s    unchanged, the control
+  graph build, 8 shapes 31.96 s -> 5.83 s
+  graph drop, 8 shapes   7.03 s -> 1.86 s
+
+The two convolution rows agree to 0.2% and 1% across the matched pair, so they
+did not move; both roof-floor rows are gone and the pass went from 26.5% to
+30.3% of its roof at one tile shape. The stage is now 91% device-bound and its
+device half is 95% two kernels.
+
+Two recorded numbers are corrected. Tile overlap waste at this geometry is
+1.502x, not the 1.192x on record - that figure came from a 25-frame clip whose
+temporal axis never split, where this clip plans 16 tiles in 8 shapes. And
+this harness measures the pre-change decode at 357.9 s where the pipeline
+reports 645.7 s for the same geometry; the gap is not chased here, so read the
+ratios rather than the absolutes.
+
+Mutation-verified, each separately: a REVERSED FOLD ORDER turns the gate red
+at 2709 of 5040 words, which is what proves it sees a pure re-association
+rather than only gross error; a dropped per-channel gain turns it red; a wrong
+NLC indexing assumption segfaults the CPU JIT, which catches an indexing class
+the bounds-checked GPU arm only shows as garbage; a mis-keyed weight memo turns
+the sharing gate red.
+
+The sharing gate's own shape-count guard fired on the first geometry chosen for
+it: an 8x8 latent under a 4-cell tile splits into three EQUAL tiles, so that
+geometry would have compared the shared arm against itself and passed forever.
+
+Left undone deliberately: at this geometry a third of the stage's device time
+decodes pixels the blend averages away, and a tile-size search bottoms out near
+1.31x overlap - about 12% of the stage with no kernel written. Taking it needs
+a per-request VRAM estimate the residency path still lacks, and guessing one
+here would give the workspace a second answer to how much fits.
+
+Measurements were taken on a shared box: the other card ran a concurrent
+workstream and this card ran thermally throttled for part of the session, which
+is why the headline is a matched-thermal pair rather than a first-and-last
+comparison. ([7caf167c](https://github.com/swedishembedded/brain/commit/7caf167c8b41b957bacf39fc789b2844499d9047))
+
+- Ltxv, backend-wgpu: record the next block while this one runs
+
+The scratch arena left the block loop 89% device-bound, and the remaining host
+time was serialised rather than large. A block body is RECORD, SUBMIT, WAIT,
+and recording touches no device memory - a bind group NAMES a buffer, it does
+not write one. So the per-block drain never had to sit between this block's
+submit and the next block's recording. It only has to sit between the previous
+block's submit and this block's SUBMIT:
+
+  serial     record(l) submit(l) wait(l)   record(l+1) submit(l+1) wait(l+1)
+  pipelined  record(l) wait(l-1) submit(l) record(l+1) wait(l)     submit(l+1)
+
+Same drains, same submissions in the same order, at most one block in flight
+either way. `BRAIN_LTXV_NO_PIPELINE` is the A/B arm.
+
+The alternating-arena design this was dispatched with was unnecessary and is
+not built. It assumed the aliasing window is "recording block N+1 while N
+runs"; it is not, because N+1 only takes the arena's HANDLES while recording
+and every dispatch that writes one is submitted after the wait that completes
+N. One arena, no extra VRAM. `gpu_core::scratch`'s contract is restated to the
+condition actually required: drained before the new scope's dispatches are
+SUBMITTED, not before the scope is entered.
+
+The instrument had to be fixed first, and this is the part worth reading.
+`flush_timed` resolved its query sets and then MAPPED them, which blocks until
+the submission completes - so the harness that reports "device share of wall"
+was itself a per-flush drain, and the pipelined arm measured identical to the
+serial one. The timestamp readback is now deferred and folded in on a
+deliberate read.
+
+The buffer-lifetime question was checked in the backend rather than inherited.
+A recorded step holds a bind group, not a buffer clone, as previously
+established - but the conclusion drawn from that was incomplete: this wgpu
+prepends a transit pass built from the DEVICE-GLOBAL tracker on every submit,
+and a storage buffer is never in the ordered-uses mask, so a recycled buffer's
+old and new users are ordered by the backend across submissions. The drain is
+load-bearing for MEMORY, not for arithmetic. That is why deleting it turns no
+bit gate red, and why the control mutation below matters.
+
+Measured, 48 layers at 13200 tokens, int8, resident, best warm call with the
+first excluded, same binary A/B:
+
+  warm forward   65.44 s -> 62.49 s   1.047x
+  device          58.22 s -> 58.24 s   +0.03%, the control
+  host             7.22 s ->  4.24 s   -41%
+  device share      89.0% -> 93.2%
+  cold forward   138.87 s -> 106.21 s  1.31x
+  peak VRAM        18092 -> 18555 MiB  bounded, flat over six forwards
+
+One block of lookahead, with the number that decides it: deleting the wait
+entirely is 1.1% faster and costs 23222 MiB of 24576, which does not fit the
+audio-visual path at all since it already peaks at 21082. At one block the card
+is busy 1.21 s per block against 0.09 s of host work, so the host is already
+idle 93% of the loop.
+
+Mutation-verified, each separately. Deleting the drain turns NOTHING red, which
+is not a blind gate: the control - reusing the previous arena slot with the
+uniqueness guard removed - turns both bit gates red under the pipelined arm, so
+the gate can see aliasing and the backend really does order the other case.
+
+A bug shipped and then found by measuring, which is the same shape as the one
+this workstream started from. Resolving timestamps in the profile dump made
+EVERY handle drop wait for the queue, including the shared handle an evicted
+resident block holds, dropped once per streamed block mid-forward. A destructor
+sits outside every span the caller times, so it appeared nowhere: the stage
+table blamed the weight upload, 2.3 s to 34.4 s, and it read as the pipelining
+not working. A temporary probe around the loop's phases found it at 96 ms to
+9801 ms per block drop. Only the last handle resolves now, and a new gate pins
+it.
+
+The audio-visual path takes the same reordering but was not re-measured; the
+bit gate covers the video stream. Measurements were taken while another
+workstream shared the CPU and occasionally gpu0 - one before-run whose device
+time landed outside the 58.0-58.3 s band was discarded, and every pair above is
+same-binary. ([b55bff84](https://github.com/swedishembedded/brain/commit/b55bff84c3ec708479883cd0eaa9035809cdf0bd))
+
+- Reuse the readback staging buffer, and stop casting mapped bytes in place ([70a91b01](https://github.com/swedishembedded/brain/commit/70a91b0184d107135054f9a994a846607ea1192a))
+
+- Model, flux2: load and fold third-party LoRA adapters
+
+brain could TRAIN a FLUX.2 LoRA but not LOAD someone else's: `lora::load_adapter`
+accepted only brain's own checkpoint container, and `LoraAdapter::from_tensors`
+holds per-slice pairs (separate A/B for q, k, v) that a third-party file's FUSED
+qkv pair cannot be read into at all. So every adapter published for FLUX.2 Klein
+was unusable here.
+
+`model::lora::read_external_adapter` parses the ai-toolkit / ComfyUI / diffusers
+convention into per-linear pairs, resolving each to the base tensor it targets by
+ComfyUI's own rule: strip a leading `diffusion_model.`, strip the
+`.lora_{A,B}.weight` suffix, and the stem plus `.weight` is the base key. The
+three common A/B spellings and `.alpha` are accepted. `flux2::fold_external_adapter`
+then validates the WHOLE adapter against the tensor map before writing anything and
+folds `W += strength*(alpha/r)*B*A`.
+
+The fused form is a simpler fold than brain's own, not a harder one: every target is
+a whole tensor at offset 0, so `Pair::delta` is the exact operation and no second
+`B*A` is introduced (`Pair::from_ab` supplies a moment-free pair for it).
+
+Semantics are taken from the reference implementations rather than inferred:
+
+  * ComfyUI `comfy/weight_adapter/lora.py` - `weight += (strength * alpha) *
+    mm(mat1, mat2)`, `mat1` the up/`lora_B`, `mat2` the down/`lora_A`, and
+    `alpha = v[2]/rank` or `1.0` when no `.alpha` tensor is present.
+  * ai-toolkit `toolkit/network_mixins.py` - `scale = alpha / lora_dim`, with alpha
+    initialised to the rank and `.alpha` stripped from PEFT-format saves.
+
+Both therefore resolve an alpha-less file to a multiplier of exactly 1.0, by two
+different routes. `B*A` needs no transpose: both store PyTorch `nn.Linear` weights
+`[out, in]`, already brain's row-major manifest layout.
+
+Failure is loud by design. An adapter key matching no base tensor, a half pair, a
+rank disagreement or an unrecognised name is an error naming the tensor, and the
+base weights are left untouched. A loader that quietly skips a key returns
+base-model output from a run the user believes is adapted, which is the one failure
+mode here that looks exactly like success; `tests/lora_external.rs` gates each of
+those cases, plus a `BRAIN_FLUX2_LORA` test that folds a real published adapter over
+the real klein-9b manifest and asserts all 112 of its linears are reached.
+
+clippy-gate: exit 0, 0 warnings (baseline 0). ([58eee7af](https://github.com/swedishembedded/brain/commit/58eee7afd7d610f9418833f425bd83a7c37a7bc8))
+
+- Flux2, cli: apply a LoRA adapter from the CLI, with a strength dial
+
+The adapter loader landed in the previous commit but nothing could reach it.
+`brain flux2 generate` passed a literal `None` where the pipeline takes an
+adapter and had no flag to pass one, so the only route to a folded LoRA was
+D-Bus or HTTP, and even that route could load only brain's own checkpoints.
+
+`Pipeline::build_*` now takes an `AdapterSpec { path, scale }` instead of a bare
+path, and picks the family by extension: a `.safetensors` goes to
+`fold_external_adapter`, anything else to brain's own `load_adapter`. Both fold
+into the same f32 tensor map before quantization, so an adapter works at fp32 or
+int8 - the same order ComfyUI uses, patch the weights then run.
+
+`scale` exists because a third-party adapter file carries no alpha to read. Both
+ai-toolkit and ComfyUI resolve an alpha-less file to a multiplier of exactly 1.0,
+so 1.0 is the default and this is ComfyUI's `strength_model`, a user dial rather
+than a value recovered from the file. `--lora-scale 0` reproduces the base model
+exactly, which is how to see what an adapter actually contributes.
+
+Surfaces:
+
+  * `brain flux2 generate --adapter <path> [--lora-scale S]`
+  * the capability `adapter` param now accepts either family, plus a `lora_scale`
+    param, so HTTP and D-Bus get the same dial
+  * the resident instance key carries the strength next to the path, since a
+    different strength is different folded weights and must not reuse a cached
+    pipeline. The path stays last in the key because it is the only field that
+    may contain ':'
+
+Folding is announced on stderr with the linear count, rank and strength. A run
+that claims to be adapted should say how much of the model it moved, so a silent
+no-op cannot hide behind a clean exit.
+
+clippy-gate: exit 0, 0 warnings (baseline 0). ([b8d12fe6](https://github.com/swedishembedded/brain/commit/b8d12fe665fdddab7d74702f88cbb7f267d3b189))
+
+- Stop discarding BRAIN_GPU_INDEX on a run that narrows nothing ([f25c2763](https://github.com/swedishembedded/brain/commit/f25c2763af881692acc9845f68d5008bae336f1c))
+
+- Imaging, cli: report where a clip's sound actually went, not where it was sent
+
+`encode_frames` filters a generated audio track against the requested
+container: a path whose extension carries no audio stream drops the track
+and says so. The no-ffmpeg fallback then printed, from `ltxv_cli`:
+
+  imaging::video: . carries no audio stream; the clip is written silent
+  ltxv: the generated sound is <dir>/audio.wav - it is NOT lost, the
+        command below muxes it in
+
+Three lines apart, and the second is false. The file was never written and
+the printed ffmpeg command has no second input. `ltxv_cli` derived that
+reassurance from `video.audio.is_some()` - whether the PIPELINE made sound
+- so it fired precisely when the encoder had discarded it. "It is NOT
+lost" is also the one sentence that makes a user stop looking.
+
+`write_frame_dir_with_audio` now returns `(command, the WAV it wrote)` and
+`Encoded::Frames` carries that as `audio`, so the encoder's own answer is
+the only thing a caller can report. The false statement is no longer
+representable: `has_audio` cannot reach the message. When a track was
+generated and then dropped, the CLI now names the remedy instead:
+
+  ltxv: the generated sound was DROPPED - re-run with an --output-path
+        ending in .mp4/.mkv/.mov/.webm to keep it
+
+The four call sites that never mentioned audio (`ltxv upscale`, `ltxv
+dfr`, `wan`, `caps`) bind the new field as `_`.
+
+Also: an extensionless path rendered the container as a bare "." in that
+first message, which reads as a typo rather than as the cause.
+
+Gated by a test asserting the fallback reports the WAV it wrote and
+reports nothing when silent, mutation-verified by making the function
+return `Some(dir.join("audio.wav"))` unconditionally - the exact defect
+shape - which fails it on "no sound track means there is nothing to
+report". Verified end to end on this 2x Tesla P40 host by generating with
+ffmpeg hidden from PATH: an extensionless `--output-path` now prints the
+DROPPED line, and a `.mp4` one writes a real `audio.wav` beside the PPMs.
+
+brain-imaging lib 59 passed, clippy-gate: exit 0, 0 warnings (baseline 0). ([568f377f](https://github.com/swedishembedded/brain/commit/568f377fd260558b8dec6f5d335ffbe146e1d1f3))
+
+- Stop `ltxv_bench vae` reporting a path a generation would not take ([5f67f67d](https://github.com/swedishembedded/brain/commit/5f67f67d1aec12d627f4397e87fe59fb2da182a7))
+
+- Flux2 roadmap: record the whole-checkpoint text-encoder import
+
+`pipeline.rs` builds the text encoder as `Shard { start: 0, end: deepest
+tap, embed: true, head: false }`, so the layers past the deepest tap and
+the LM head are never read. The import does not know that: it runs first
+and demands the whole checkpoint.
+
+`checkpoint::safetensors::read_model_dir` reads every shard named in the
+index's `weight_map` and takes no parameter describing what the caller
+wants, and `qwen3::import::brain_init_from_hf` enforces two-way coverage
+against the full `param_list()` of a config carrying the untruncated
+`n_layers` with `tie_embeddings: false`. Both must be satisfied before the
+`Shard` is ever consulted.
+
+For the Qwen3-8B encoder that is roughly 4.2 GB of 15.6 GB fetched,
+dequantised and validated to be discarded, the LM head among it. Found
+while waiting on that download at this host's measured ~2.6 MB/s uplink,
+where it is most of an hour before the first image.
+
+Recorded rather than fixed: the shape of the fix is a shard-aware import
+(derive the required names from the `Shard`, and let `read_model_dir` take
+that set so it can skip whole shard files), which is not a change to make
+underneath a run in progress. The note also pins two things a later
+attempt would otherwise get wrong: `hf_source`'s streaming path is not
+this fix (it lowers the ~32 GB host-RAM import peak but validates against
+the same full list, so it saves memory and not bytes), and the two-way
+coverage check must stay exact against whatever set is genuinely required
+rather than be relaxed, since it is what catches a wrong checkpoint. ([6f75c29f](https://github.com/swedishembedded/brain/commit/6f75c29f4dccaaddbf2eb11ad6f284642e9598f0))
+
+- Stop force-fetching a default checkpoint a fully configured run cannot use ([7efd8e25](https://github.com/swedishembedded/brain/commit/7efd8e2581e8e18ec0c042ca32d9c2f12650d444))
+
+- Size a pipeline for the reference tokens it will actually attend to ([959e8c34](https://github.com/swedishembedded/brain/commit/959e8c346f0cc18b6f7f4a7b09d08561cc54bd59))
+
+- Give the denoise loop a spatial dial, not just a global one ([6813f003](https://github.com/swedishembedded/brain/commit/6813f00367efcfd944ef4adf9b6f95ed451649f3))
+
+- Cli, docs: expose the FLUX.2 preservation mask as `--mask`
+
+`brain flux2 generate --mask <image>`: white regenerates, black preserves the
+first `--ref` exactly, greys blend. Any resolution - the pipeline area-averages
+it to the latent grid - and the load path is the same PPM/PNG/JPEG decoder the
+`--ref` images already use, so a mask is just an image.
+
+The run prints what it loaded and how much of the canvas the mask actually
+frees ("Mask(1024x768, 53.4% regenerate)"), because a mask that silently came
+out all-black would otherwise look exactly like a model that refuses to stage.
+
+The docs say plainly that there is no automatic mask generator and why the two
+obvious ones were tried and rejected on the real photographs: a monocular-depth
+near-field threshold marks the CEILING as foreground on a living room (directly
+above the camera it genuinely is the nearest surface) while leaving a sofa
+against the far wall as background, and a depth top-hat fixes the ceiling but
+misses any object larger than its structuring element - a bed filling half the
+frame is entirely missed. "Near" is not "furniture". Also recorded: staging has
+to ADD furniture where there is none, so a mask covering only what is already
+in the room cannot stage, and the floor is at once architecture and the place
+new objects go, which is what the grey levels are for.
+
+The roadmap carries the measured ladder for both real photographs, on 2x Tesla
+P40, and the note that the whole-frame edge correlation of a genuinely restaged
+room cannot exceed roughly 0.4 - new furniture has new edges. The number worth
+gating is edge correlation on the PRESERVED region, which reaches 0.980 and
+0.991 against VAE-round-trip ceilings of 0.988 and 0.996. ([479c8575](https://github.com/swedishembedded/brain/commit/479c8575e19a8d2ec579ff44ff353d8947b0dea5))
+
+- Ltxv cli: say in `upscale --help` that it reads no audio VAE and emits no sound
+
+`BRAIN_LTXV_AUDIO_VAE` joined `pipeline::OPTIONAL_PATH_VARS` without reaching
+`UPSCALE_HELP`, which `every_upscale_flag_the_parser_accepts_is_documented`
+catches - the suite has been red on it, unrelated to whatever change happens
+to be in flight.
+
+Documenting it "not used here" is the honest resolution rather than relaxing
+the test: `upscale` runs no audio-visual DiT. But the interesting half is the
+consequence, which nothing in the help said either - `upscale` builds its
+`Video` with `audio: None`, so the upscaled clip comes out SILENT and the
+input's sound track stays in the input file. A user upscaling a clip they
+generated with `--audio` would otherwise find out by watching the result. ([09834032](https://github.com/swedishembedded/brain/commit/0983403254091f54a0eaef6726ea4b79491e0363))
+
+- Read a GGUF through a mapping instead of slurping it ([63f79d0b](https://github.com/swedishembedded/brain/commit/63f79d0b27735b68deda5a0ffc56fa99232c946d))
+
+- Split a fused linear's columns in parallel, once, for everyone ([7a83a747](https://github.com/swedishembedded/brain/commit/7a83a74791265fa188b41592916c3ee01a029081))
+
+- Time the model build, and stop splitting linear2 serially ([2dd1cea6](https://github.com/swedishembedded/brain/commit/2dd1cea69c7d77c8ccf9578220b96205f2d8ab73))
+
+- A `load` mode, because the weight load is not free ([2761892a](https://github.com/swedishembedded/brain/commit/2761892ab080a34858b64b6e3b8ea14173fbbfd1))
+
+- Flux2 roadmap: record where a klein-9b int8 generation's time goes
+
+Ranked, measured, at BOTH token counts, host and device, with the roofline
+each kernel is actually against. Numbers live here rather than in code or
+docs, per the meta-rule in .agents/rules/kernels.md.
+
+The three findings that change what to do next:
+
+1. A single-image run is a one-off weight LOAD plus a generation, and the
+   load was 41% of process wall with zero instrumentation on it. The older
+   table's "~61 s" was the pipeline stage total, not the process wall; the
+   wall was ~105 s. Both are now recorded so they cannot be confused again.
+
+2. The denoise top row CHANGES IDENTITY with sequence length. Attention
+   scales 3.43x against a 3.45x quadratic prediction while everything else
+   is linear, so GEMMs dominate at 3584 joint tokens (60% combined) and
+   attention alone dominates at 6656 (46%). A profile at one size is not
+   evidence about the other.
+
+3. Device kernel time is 97% of the denoise stage wall, so there is no host
+   bubble in the denoise loop and the replay-arena work that paid off on
+   ltxv has nothing to recover here.
+
+Also corrects three stale or wrong entries: the flash-attention "second
+query row per thread" item was already implemented (`flash_attn_bidir_reg2`
+is that kernel, and the real remaining gap is a ~2x shared-memory-bandwidth
+bound that a third query row cannot fix inside the 48 KiB limit); the
+staging-reclaim readbacks cost 0.14 s, not seconds; and `gpu.write` runs at
+3.0-3.7 GB/s, not the page-fault-bound rate.
+
+Records the largest remaining load lever - a direct Q8_0 to packed-int8
+requantisation - together with the argument that it can be made
+BIT-identical, and the two non-numerical things blocking it. ([c5ff59af](https://github.com/swedishembedded/brain/commit/c5ff59afb2c0233bef2cde2e56ad0830d2effe86))
+
+- A two-command virtual-staging example with a third-party LoRA ([a9c5221b](https://github.com/swedishembedded/brain/commit/a9c5221b48ab59052fff4049a5176b5e2950d7c2))
+
+- Backend-cpu, model, checkpoint: the primitives a direct requantiser needs
+
+Three small additions, inert until the next commit uses them. Each is
+deliberately a SHARED primitive rather than something the caller
+reimplements, because the caller's whole claim is going to be bit-identity,
+and bit-identity against a reimplementation is a coincidence waiting to
+break.
+
+`par::chunks_mut_with` - `chunks_mut` over two disjoint outputs at once. The
+shape of a loop producing two different things per row and needing both:
+packed weight words plus that row's scale. Two passes would either read the
+input twice or recompute half the work.
+
+`int8::row_scale` / `int8::pack_row` - `quantize_weight`'s per-row
+arithmetic, lifted out and made public, with `quantize_weight` now calling
+them. A caller that obtains a row's f32 by some other route (decoding it from
+a quantized checkpoint block rather than indexing a materialized fp32 tensor)
+can now reach the identical packed bytes by CONSTRUCTION - running the same
+code - rather than by reimplementing the scale/round/clamp and hoping. The
+left-to-right fold in `row_scale` is load-bearing and says so: `f32::max`
+propagates the non-NaN operand, so with a NaN present the order is
+observable.
+
+`gguf::q8_0_expand` - decode a block-aligned element range of a Q8_0 tensor
+without expanding the whole tensor, through the same `deq_q8_0` every other
+read path uses. Refuses an unaligned range rather than rounding it, since a
+Q8_0 block is the smallest independently decodable unit. ([2329f5b8](https://github.com/swedishembedded/brain/commit/2329f5b8d42c8306b82c69e5fbfabc83d16cb63d))
+
+- Requantise Q8_0 straight to int8, never building the fp32 model ([5f100912](https://github.com/swedishembedded/brain/commit/5f1009129215ea7e63d80cf1328dc6ee0ff32cff))
+
+- Flux2 roadmap: record what the direct Q8_0 path actually bought
+
+Replaces the estimate with the measurement, and keeps the estimate's ERROR
+on the record because it is the more useful half: it predicted ~11.5 s on
+the assumption that the quantize term would go to zero once the checkpoint
+"already holds int8". It does not - the block-scale to row-scale conversion
+still touches every weight - so only the whole-model dequant and the free
+disappear, and the measured saving is 7 s.
+
+Also records the two things the measurement changed about what to do next.
+The process host peak is now bounded by the TEXT ENCODER's fp32 import
+rather than the DiT (the DiT phase peaks at 10.4 GB; the 32.9 GB figure
+arrives afterwards), which promotes the shard-aware TE import to the next
+real lever. And with a full-coverage LoRA the streamed path is a trade -
+slower, but holding 10 GB less - not a win, and is written down as a trade.
+
+Drops a bare percentage from `weights.rs` prose that
+check-no-perf-numbers.sh flagged; the claim reads the same without it. ([386176dc](https://github.com/swedishembedded/brain/commit/386176dcf589f8745db39941889ea8bd4a965ea6))
+
+- A shard-aware streaming import, so a truncated encoder needs only its own tensors ([cbda83d7](https://github.com/swedishembedded/brain/commit/cbda83d7e14bcfd1671902ac558af325da652bd2))
+
+- Stream the text encoder instead of importing it whole ([517a52d8](https://github.com/swedishembedded/brain/commit/517a52d80662ed2126592f715077bc803e829d52))
+
+- Flux2 roadmap: record what streaming the text encoder actually bought
+
+Closes the shard-aware-import item with the measured numbers, and keeps the
+two things that are easy to lose: the whole-process figure is weaker evidence
+than the import figure (contended cards, a run that OOMed in VAE decode rather
+than completing), and the load got SLOWER - bounded footprint is paid for in
+page-cache misses. Also records what deliberately stayed eager. ([d8a2092c](https://github.com/swedishembedded/brain/commit/d8a2092cc5289a376246d427c91dc5cf9f890f12))
+
+- A VAE-only latent laboratory, so latent-space claims can be measured ([b59bd3e2](https://github.com/swedishembedded/brain/commit/b59bd3e20f50026d2bdf92e2dfd8763bc0f2fe0b))
+
+- Flux2 roadmap: what the VAE latent actually is, measured
+
+Twelve experiments through the new `flux2_latent`, all VAE-only. The three
+that change what we should say out loud:
+
+Reflection and rotation are equivariant ONLY at latent resolution - MAD 15.6
+at full resolution, 2.7 after box-downsampling to the latent's own 8x grid,
+with the knee exactly at the cell size. The latent does not store fine
+texture; the decoder synthesizes it, and the synthesis is direction-dependent.
+
+A region splice decodes with no artifact whether or not it is cell-aligned.
+Misaligning by half a cell, so boundary cells hold a genuine fractional mix of
+two unrelated latents, moves the seam-band MAD by 4-12% and is invisible at
+1:1. This refutes the explanation previously given for masked-generation
+artifacts, and the roadmap now says so.
+
+At matched displacement (0.711 sigma-units) a latent blend decodes to a clean
+photograph and Gaussian noise decodes to confetti. Three candidate
+explanations for the difference - spatial coherence, cross-channel subspace,
+convexity - were each tested and each refuted. What holds is that
+differences of real latents are safe directions at any magnitude tried; that
+was not reduced to a simpler statistic, and the entry says that too.
+
+Measured on a Tesla P40 (gpu1): 5.5 s to load the VAE and encode three
+1024x768 images, ~2 s per decode, bit-identical run to run and across cards. ([f1b5d6df](https://github.com/swedishembedded/brain/commit/f1b5d6df1598a3faa246f0482e9a1cac745362e4))
+
+- Give the streaming decoder the parallelism the eager one already had ([2fac869c](https://github.com/swedishembedded/brain/commit/2fac869c540effdd094a48d5f143033d0fcdd034))
+
+- Flux2 roadmap: streaming the encoder is no longer a memory-for-time trade
+
+The earlier entry recorded a 13.8 s wall cost as the price of a bounded host
+footprint. That price turned out to be a serial decoder in the streaming path,
+not an inherent cost of streaming, and it is gone.
+
+Keeps the refuted hypothesis alongside the confirmed one: `advise_dontneed` was
+the obvious suspect and was innocent, which is worth remembering the next time
+a streaming path looks slow. Also replaces the contended, OOMed whole-process
+numbers with a completed best-of-2 pair on idle cards, and records that the
+output PNG md5 is identical before and after. ([d432c67d](https://github.com/swedishembedded/brain/commit/d432c67d667b94c652eb608afae23e9bd6dc64b4))
+
+- A valve for the text-encoder route, and the device budgets to justify it ([1a7bac2c](https://github.com/swedishembedded/brain/commit/1a7bac2c2c6d41b1a0cc1fece4ae3d451d545f04))
+
+- Read a checkpoint once, and give its config a cheap door ([39a54371](https://github.com/swedishembedded/brain/commit/39a54371bf2b222d1216d6250eba5c3c538fb1e9))
+
+- The blk.N name shape belongs to llama.cpp, not to one model ([24be7b82](https://github.com/swedishembedded/brain/commit/24be7b8236d1859b4f5519e89c28a0158fdb7f33))
+
+- One load path, two container formats ([df3cd48c](https://github.com/swedishembedded/brain/commit/df3cd48cd3c225dd26f0597a933760b88dbb7316))
+
+- A reference the model can actually see at every --strength ([acef1073](https://github.com/swedishembedded/brain/commit/acef10735178871923ca7469a5e56dbf677d3c5e))
+
+- Release each tensor's pages once it has been decoded ([a77e8931](https://github.com/swedishembedded/brain/commit/a77e8931f45c5161d0b863b5fbf9c82a77c2ed67))
+
+- Dequantize a GGUF tensor in bounded chunks, like every other source ([6a408a56](https://github.com/swedishembedded/brain/commit/6a408a568a5813b59180cf045a887f1371e60bdb))
+
+- --strength is one sampler at every setting, not two ([62e5886d](https://github.com/swedishembedded/brain/commit/62e5886db2eee397aa21a8d739f217453cbdff6e))
+
+- `--out photo.jpg` writes a JPEG, and an extension nobody supports is an error ([cf85f21b](https://github.com/swedishembedded/brain/commit/cf85f21bc67579f51d0b648bda59aa489dc832de))
+
+- Say the memory invariant in words, not multipliers ([9dd9a743](https://github.com/swedishembedded/brain/commit/9dd9a74339b194281a4f0a25fda853785a470efa))
+
+- Flux2 roadmap: the bottom rung of the --strength ladder
+
+`--strength 0` returning the source was gated in the unit tests and asserted
+in prose; it was never rendered on the real weights. It is now: edge corr
+0.985, MAD 3.4 against the source photograph, i.e. the VAE round trip, which
+is the floor for anything that edits in latent space. Rendered from both
+trees, and the two agree to every digit recorded - once the trajectory has
+almost no distance to travel the shape of the schedule stops mattering, which
+is the reason the discontinuity showed at the TOP of the dial and nowhere
+else.
+
+Measured on the same 2x Tesla P40 placement, klein-9b Q8_0 int8, image-02,
+seed 7, 12 steps, LoRA 1.0. ([168457c5](https://github.com/swedishembedded/brain/commit/168457c561370ce9fa57a713a281b9dc016b5ef0))
+
+- A caption can be a paragraph, not a line ([02f2e4fe](https://github.com/swedishembedded/brain/commit/02f2e4fef9b50456b40da4adc627eb74b434dad8))
+
+- Labeling a dataset is a capability, not a script ([c1c3e113](https://github.com/swedishembedded/brain/commit/c1c3e113a161a9a213f390cd25a4a79449d21d5e))
+
+- The trainer the CLI could not reach ([79354e8c](https://github.com/swedishembedded/brain/commit/79354e8cfd16ff37dd8c9a0f0211a1a2577bd02f))
+
+- Route to the labeler and the flux2 finetune verb ([994b998b](https://github.com/swedishembedded/brain/commit/994b998b69951e1651dbbbc79f730fa809b3f3c6))
+
+- --ref-size, so an unprepared photograph is a valid reference ([71055ff0](https://github.com/swedishembedded/brain/commit/71055ff076784b663f562c9e15704a039eb192cd))
+
+- One folder in, that person in the target pose out ([00f6b74e](https://github.com/swedishembedded/brain/commit/00f6b74e7e1a3b81a99f2a2e5bc3b81c7a2c5436))
+
+- Parse captions.yaml with a YAML parser, not with our own ([20e749e3](https://github.com/swedishembedded/brain/commit/20e749e30355218e7c46bdcb6669ce789c1b7120))
+
+- Hold the training weights once, not twice ([a71b4281](https://github.com/swedishembedded/brain/commit/a71b4281cb57c4aee1fb0233d06bfaff71537b32))
+
+- The LoRA trainer that runs on the card ([6276bdb6](https://github.com/swedishembedded/brain/commit/6276bdb67dc6487609a0530af11fb44183af4e6d))
+
+- `finetune --trainer device|host`, said out loud ([0c879bd9](https://github.com/swedishembedded/brain/commit/0c879bd9ee714c350c90dae6bd8183209c158cbf))
+
+- Flux2 roadmap: what a training step costs, and what it costs it
+
+`tests/dev_step_time.rs` is the step-cost harness the optimisation pass was
+measured with (warm-up discarded, best-of-N with N printed, nothing polling
+nvidia-smi while the clock runs) and `.agents/roadmap/flux2.md` records the
+before/after and the per-kernel profile ranked by share of the step, so the
+next pass has a baseline instead of an anecdote. On one Tesla P40, klein-4b at
+512 px, rank 16: about 98 s per step became 11.74 s, and a 1500-step run went
+from roughly 41 hours to 4.9. 79.9% of the step is now in the three
+register-tiled GEMMs; the next two targets, with their reasons, are written
+down.
+
+`tests/int8_base_grads.rs` asks the open question with a measurement rather
+than an assumption: an int8 frozen base would put klein-9b on one card instead
+of two, so it takes one REAL double block out of the released checkpoint,
+round-trips it through brain's own per-output-row int8 grid, and reports what
+that does to the adapter gradients. It reports rather than asserts a
+threshold, and it says which term of the error it does NOT cover (the
+per-token activation quantization a real int8 kernel would add). ([47020643](https://github.com/swedishembedded/brain/commit/47020643d0600ba7248189d8a263adb68bfa8aaf))
+
+- Flux2 roadmap: the int8 frozen base, measured on real klein-9b weights
+
+One real double block out of the released Q8_0 checkpoint, round-tripped
+through brain's own per-output-row int8 grid, backward run on both bases: the
+weights move by about 1% rel_l2 and the adapter gradients come back at worst
+cosine 0.999530 / rel_l2 3.08e-2, with dx at 0.999938 / 1.11e-2. A 1.8-degree
+direction error and 3% of magnitude is not what decides whether an adapter
+trains, so the weight-quantization term is affordable.
+
+What that does not settle is written down next to it: the per-token activation
+quantization a real dp4a kernel adds is unmeasured, and the saving is 2x
+rather than 4x because `dx = dy.W` contracts over W's row axis, where a
+per-row scale will not factor out - so a dp4a backward needs a second,
+transposed int8 copy. 18 GB still does not leave room on a 24 GiB card, and
+the two-card fp32 split already gets there with no fidelity question. ([be8c7697](https://github.com/swedishembedded/brain/commit/be8c769786ddf0c9d106412b63161fb6f230861c))
+
+- Flux2 roadmap: the int8 memory arithmetic, the right way round
+
+An earlier draft concluded that two int8 copies of klein-9b "still does not
+fit one 24 GiB card". That is wrong: 9.05 G parameters are about 18.1 GB as
+two int8 copies, and next to roughly 2.4 GB of activations at 1536 joint
+tokens the total is about 20.5 GB, which fits with a few GB to spare. int8
+collapses the two-card split back to one card.
+
+It also under-weighted the real prize. The released klein-9b DiT is Q8_0 and
+both trainers reach it through `read_dit_tensors`, which materialises the
+whole model as host fp32 before a single step runs - that expansion, not the
+training, is what puts the first step an hour away. `DitWeights::try_i8_rect`
+already goes Q8_0 to packed int8 with no fp32 intermediate for inference; a
+trainer taking its frozen base the same way inherits it.
+
+What is missing to build it is written down next to the claim: the transposed
+copy the backward needs cannot reuse `try_i8_rect`'s block-aligned fast path
+(Q8_0 blocks run along rows), and the per-token activation term is still
+unmeasured. ([06a1415d](https://github.com/swedishembedded/brain/commit/06a1415d614ee23f5c2539855dfa6d67140908fd))
+
+- Roofline the training step, then close the gaps it names ([c80b8459](https://github.com/swedishembedded/brain/commit/c80b84593f59ec2b6e66aa4ea1925e13086eac3a))
+
+- Flux2 roadmap: the after-profile, and the size of what is left
+
+Records the step cost this pass reached (10.53 s, 4.39 h for 1500 steps, 28.4%
+of the 2.99 s roofline floor) and what each change bought, then prices the
+three remaining items so the next pass can choose instead of guess:
+
+* the two register-tiled GEMMs are 85.8% of the step at 37.5% / 38.5% of the
+  fp32 roof - about 2.9 s if they reached 60%. The diagnosis (an 8x8
+  accumulator tile caps Pascal at ~3 workgroups per SM, which is about 37%
+  occupancy) is written down as a hypothesis to test, not a finding, and the
+  blast radius is named: that kernel is shared by every model here.
+* the recompute is 32.5% of the arithmetic; stashing the eight per-block
+  tensors that cost a GEMM to recreate needs 5.7 GB against roughly 5 GB
+  spare, so it is a partial win on klein-4b and needs per-block buffers.
+* `softmax_k_dx` and `rmsnorm_dx_eps` are the last one-thread-per-row kernels,
+  0% and 4.6% of the DRAM roof, ~0.55 s between them, and each needs new WGSL.
+
+Also fixes the one clippy warning in `int8_base_grads.rs` (a wrapped sentence
+whose continuation dash started a line, which reads as an unindented markdown
+list item). ([5bf268c2](https://github.com/swedishembedded/brain/commit/5bf268c220e4bd52a80cb0400ec890c960c9c02a))
+
+- Price pack_qkv, sigmoid and chan_place ([6c0b1c46](https://github.com/swedishembedded/brain/commit/6c0b1c468286ec07b8ba8bffa9eb499aa880bf5c))
+
+- Cost::Recording, so a graph can be priced without running it ([a0390b58](https://github.com/swedishembedded/brain/commit/a0390b58fcc261bf8971ca9f04835763f873c089))
+
+- Three shell examples for the tasks people actually arrive with ([7f1459ca](https://github.com/swedishembedded/brain/commit/7f1459ca6f037b842de1604d43790ea51dc6c0a6))
+
+- What a user may type, and where models live ([b0dd9654](https://github.com/swedishembedded/brain/commit/b0dd96545a36d6ce06415ba8d88b7e90f8073773))
+
+- Price a whole image or video generation, offline, by stage ([d405aa7c](https://github.com/swedishembedded/brain/commit/d405aa7ccd90ecf66cb383b8ecf04bb0c7c5dbd1))
+
+- Brain pull, said out loud ([cf8a25e0](https://github.com/swedishembedded/brain/commit/cf8a25e0a1f95d52bb8b0e0f7d977d34f7b8ab34))
+
+- Measure the predictor against the machine, and document it ([3a37d971](https://github.com/swedishembedded/brain/commit/3a37d971f5070d17d9758893943c40125e4e921e))
+
+- Gate the trainer at each variant's real widths, not just tiny dims ([6caeaf29](https://github.com/swedishembedded/brain/commit/6caeaf295ce518cc00a3d8e5c3533e1f5970daf7))
+
+- Price the LTX 3D VAE decode, as the tiled decode that really runs ([5ea9df09](https://github.com/swedishembedded/brain/commit/5ea9df098465e74e4066247ff2d0acb20143eea7))
+
+- An aggregate is not one kernel, and cannot be graded like one ([2c4daefd](https://github.com/swedishembedded/brain/commit/2c4daefd781d6ba768fed49640d2180fb000dd5f))
+
+- Say what the ltxv measurement can and cannot attribute ([48a00bd8](https://github.com/swedishembedded/brain/commit/48a00bd8402134a0df8af0923301389d6c85dbdb))
+
+- Drop the bare hardware ratio from the mixed-roof docs ([d838f6a1](https://github.com/swedishembedded/brain/commit/d838f6a1b0473c19f15972474071529bbac18173))
+
+- One capacity-aware seam every model inherits, instead of card 0 ([0703d325](https://github.com/swedishembedded/brain/commit/0703d3257f37de3ab35699785a3e95471f24615d))
+
+- Declare the pipeline's parts, let the engine place them ([36c06391](https://github.com/swedishembedded/brain/commit/36c0639142809bb0e8215f770a2d9b56139614df))
+
+- Price the decode from the graph, and stop building a device per image ([7da4f718](https://github.com/swedishembedded/brain/commit/7da4f718846fc94472f8c314dc877af9837653af))
+
+- Run a trained adapter, and make the portrait mask opt-in ([cfb7854b](https://github.com/swedishembedded/brain/commit/cfb7854bf051f368647c8e85f1ca7aabdea89287))
+
+- Port the video memory bank, so a mask follows the moving object ([6bcc0e79](https://github.com/swedishembedded/brain/commit/6bcc0e79fd3d9dd99d5e6a12c9a8c504106368c3))
+
+- Brain sam2 track - a clip and a click in, a mask sequence out ([00cb9c26](https://github.com/swedishembedded/brain/commit/00cb9c26ca4897cb07e4d810d021b5211b62f33c))
+
+- Port IC-LoRA reference-video conditioning, and say what it cannot do ([cc817f86](https://github.com/swedishembedded/brain/commit/cc817f860890799c00777daac62fd23cc01594b3))
+
+- Build LTX-2.3 too, because the release really is a config ([4db8e2eb](https://github.com/swedishembedded/brain/commit/4db8e2eb8a7759afa43e144f5f965dce0aad7d70))
+
+- Masked conditioning, so a character swap keeps the set bit-exactly ([8cdbca2d](https://github.com/swedishembedded/brain/commit/8cdbca2df9a7d4ad8ca5b8d970b1a64427503796))
+
+- Record Phase 39 - masked conditioning, and the resample-gate lesson ([58108d15](https://github.com/swedishembedded/brain/commit/58108d15c747dd0d81ff033b88929f3aff63e934))
+
+- Stream the block gradients, and let a run resume where it stopped ([1efcf226](https://github.com/swedishembedded/brain/commit/1efcf226e5f7817a8c4dee3dfa5c92c110d98a38))
+
+- Default the portrait script to the variant that is on the box ([797a61c2](https://github.com/swedishembedded/brain/commit/797a61c277b62b89539729a52a2c26a2f3ec2baf))
+
+- Make --lora-scale reach a brain-trained adapter, not just a foreign one ([5557ea48](https://github.com/swedishembedded/brain/commit/5557ea481fe1a4caac89d099eec43ae479e925fa))
+
+- Let the caller say what a trigger phrase NAMES, instead of assuming a style ([e7511e3f](https://github.com/swedishembedded/brain/commit/e7511e3f5f41fa07d7d8ac1c9228752d3afe7b3e))
+
+- Train a face onto klein-4b, and grade it with a number ([f66b7920](https://github.com/swedishembedded/brain/commit/f66b7920168d40e82097c83f51adbbd309f69c7a))
+
+- Size reference images in brain, instead of making the caller do it ([069304f2](https://github.com/swedishembedded/brain/commit/069304f28443bf5cbedff6ebdc70b558cab19ce0))
+
+- Take the output size from the reference that IS the canvas ([52544385](https://github.com/swedishembedded/brain/commit/525443859bb082be94520f241e2e713fcf3f92f8))
+
+- Face_swap.sh, and stop resampling images the CLI can size itself ([360553e6](https://github.com/swedishembedded/brain/commit/360553e61164a6286f9bfbc25a9daf52554fcf10))
+
+- Let an arch keep both table rows when its handler forwards the rest ([94121f93](https://github.com/swedishembedded/brain/commit/94121f93867cf00076e7b4372b173f236a8127b1))
+
+- Arch, supir, llava: reserve the two architecture ids for SUPIR restoration
+
+Registers supir and llava in crates/arch's canonical table before any of
+their code exists - this fixes the crate directory names, package names,
+CLI words and docs filenames in one place up front. Both crates are
+placeholders (module docs only, no implementation yet); llava is brought
+in as supir's optional captioner, never a hard dependency. supir ships no
+default_ref/auto-fetch - the released weights are under a non-commercial
+license with no official HF repo.
+
+.agents/roadmap/{supir,llava}.md carry the full architecture spec (verified
+against upstream source and the real checkpoint headers) and the staged
+implementation plan, so neither has to be re-derived later. ([efc44106](https://github.com/swedishembedded/brain/commit/efc44106fe9f9dfae012fefc3728d129d86fbb57))
+
+- Sdxlunet, controlnet: factor the duplicated SDXL sampling loop
+
+sdxlunet::pipeline::Sdxl::generate and controlnet::caps::Controlled::
+generate were near-identical copies (byte-identical gaussian/encode_with,
+same CLIP-tower plumbing, same Euler loop, same CFG expression, same
+VAE-decode tail) because Sdxl built its Unet with the plain constructor
+and had no seam for a per-step residual. A SUPIR pipeline would have been
+a third copy, and SUPIR's loop differs from both anyway (a per-step LQ
+latent, its own scheduler), so this had to happen before that port
+started, not after.
+
+New: sdxlunet::sampler (a Denoiser trait - one forward per step - plus
+the shared seed/CFG/scheduler loop) and sdxlunet::textenc (the dual CLIP
+conditioning). Sdxl and Controlled are now a ~15-line Denoiser impl each
+over the shared loop. controlnet no longer depends on brain-clip/
+brain-diffusion directly.
+
+model::hostmath::gaussian is the Box-Muller helper both crates duplicated,
+moved to the one place host math belongs and pointed at from flux1's
+identical third copy too. It is deliberately a distinct function from the
+existing hostmath::randn (Z-Image/FLUX.2's own noise source) and
+data::rng::Rng::next_gaussian (minimaxmusic3's) - unifying those would
+silently change what an existing --seed reproduces for the model family
+that already uses it, which is a behaviour change, not a refactor.
+
+No behaviour change: controlnet's real-weight parity tests
+(sdxl_controlnet_residuals_match_diffusers) and sdxlunet's
+(sdxl_unet_forward_matches_diffusers) pass unchanged. ([0f180937](https://github.com/swedishembedded/brain/commit/0f1809375f00a7fa461990605e12aee9c9d233af))
+
+- Dump real SUPIR reference activations for the parity ladder ([22e65816](https://github.com/swedishembedded/brain/commit/22e65816a49aa3f8e86c129fc41df44540e2f0d2))
+
+- Debt-first prerequisites for the SUPIR seams ([9053d6b3](https://github.com/swedishembedded/brain/commit/9053d6b37d888454b986c2d7b4d8e34e98b59a9f))
+
+- The SkipFuse seam that replaces the up path's skip concat ([cff35b74](https://github.com/swedishembedded/brain/commit/cff35b745b5efb67ee3fe06e9e6e0c71495f04d8))
+
+- Op::Mix, the ZeroSFT/ZeroCrossAttn lerp, reusing edm_mix.wgsl ([93bc2fe5](https://github.com/swedishembedded/brain/commit/93bc2fe57800d392e93ae4dd3c2d99021c0c0817))
+
+- Restore, SUPIR's RestoreEDMSampler scalar math ([a96c52ec](https://github.com/swedishembedded/brain/commit/a96c52ec237f4661f9e96da7a83116348d865dae))
+
+- Imaging, kernels: a blended TilePlan variant, for SUPIR's tiled sampler
+
+imaging::tiling's own module doc already pre-authorised this: halo
+tiling gives every tile a disjoint core and no blend, which is right
+for a model that only degrades near a tile's border - wrong for a
+diffusion tail, where each tile's CONTENT differs, not just its edge
+error. SUPIR's tiled sampler and tiled VAE both need real blended
+overlap.
+
+The weight math is vae::tiling3d's separable trapezoidal construction
+(W(h,w) = Wh*Ww), dropped to 2D. One new kernel, blend_accumulate
+(acc[c,h,w] += x[c,h,w] * weight[h,w]) - checked against
+.agents/rules/kernels.md's existing-kernel survey first; nothing already
+expressed a per-pixel weighted accumulate into a live canvas. Division by
+the summed weight is a separate pass, so the kernel itself stays a plain
+accumulate with no reduction.
+
+Gated: a tiled identity transform (no actual model in the loop) round-trips
+to fp32 round-off, and a single-tile plan blends to the identity - the
+cheapest possible partition-of-unity check. ([f2bbae29](https://github.com/swedishembedded/brain/commit/f2bbae2983f15df05ef4edcbd4317addc4079767))
+
+- Widen record_into and add Rec::set_fuse for external callers ([6c2108c3](https://github.com/swedishembedded/brain/commit/6c2108c38dee70c304306627e7ad0e7894a6cd06))
+
+- Implement config/import/trunk/adaptors/model (weight-free gated) ([83ca8cb0](https://github.com/swedishembedded/brain/commit/83ca8cb046a5f6088e156178e6d570cd3fe38c5b))
+
+- Real-checkpoint import coverage + restore schedule parity (step 5, partial) ([57664c99](https://github.com/swedishembedded/brain/commit/57664c997f4fb646e1b1a98de60d649400846ce0))
+
+- Update Cargo.lock for the brain-diffusion dev-dependency ([fd7d1307](https://github.com/swedishembedded/brain/commit/fd7d1307553923bb299c655b852c0fab54fed759))
+
+- *(supir)* Thread an --s-churn override through the reference dumper ([cd17ff09](https://github.com/swedishembedded/brain/commit/cd17ff094d5fab84792b3a230e6203b7c265ec1c))
+
+- Restore::DiscreteDenoiserWithControl::index, snap's missing half ([ad9c05c2](https://github.com/swedishembedded/brain/commit/ad9c05c2e0a0e1791925a32515ef70a973095446))
+
+- Import a single-file CompVis/LDM SDXL checkpoint (load_ldm) ([c33fc131](https://github.com/swedishembedded/brain/commit/c33fc131e0d4d46ff7eabc5d101627c2c615ce16))
+
+- Tap every trunk/adaptor stage, and real-checkpoint forward parity ([a3e5dc24](https://github.com/swedishembedded/brain/commit/a3e5dc2417b6793d5308b657e8344bd61861ad67))
+
+- Sdxlunet, supir: int8 host-memory quantization, honestly gated
+
+sdxlunet::int8 (group-wise, QUANT_GROUP=32) and supir::int8 pack eligible
+weights to int8 in host RAM, verified against the real checkpoints: sdxlunet
+alone drops 8.90 GB fp32 -> 2.23 GB packed (cosine 0.999990698, rel_l2
+4.315e-3); the combined SUPIR trunk+adaptors+backbone drops 15.60 GB ->
+5.62 GB host-resident.
+
+That host-side win does not close the device-memory ceiling found in Phase
+3: vae::blocks::Builder::set_packed dequantizes each packed tensor to fp32
+at upload, so device-resident buffers are still fp32-sized. On this box's
+Intel iGPU (2047 MiB per-buffer cap, no discrete card), recording the full
+SUPIR graph still hits a wgpu Out-of-Memory - reproduced with per-tap
+buffer pinning both on and off, ruling that out as the cause. Genuine
+device-side int8 storage (a dequantizing GEMM, the shape crates/flux1 and
+crates/s3dit already have) is real, scoped follow-up work, not done here.
+
+supir_full_forward_int8_fits_this_machine and its taps-off sibling are
+gated behind BRAIN_SUPIR_ALLOW_FULL_MEMORY=1, matching the fp32 sibling
+test, and skip themselves with the measured numbers rather than claim a
+false pass. .agents/roadmap/supir.md records the gap and reflects actual
+Phase 0-4 progress instead of the stale "everything unstarted" placeholder. ([5c7eef7e](https://github.com/swedishembedded/brain/commit/5c7eef7ed6069f0cf12dd3ddab7f4f8654105027))
+
+- Training - trunk+adaptors backward, gradcheck, LoRA, adaptor-only/full-backbone finetune ([438c1b1a](https://github.com/swedishembedded/brain/commit/438c1b1af6c6e80e0d9a7bea6b8d5845fe451029))
+
+- Clip, qwen3: LLaVA-1.5 config presets (clip_l336, llama2_13b)
+
+ClipVisionConfig::clip_l336() - the openai/clip-vit-large-patch14-336
+vision tower (24x1024, 16 heads, MLP 4096, patch 14, 577 positions,
+quick-GELU), reusing the deepseek_ocr() topology unchanged since the
+two towers differ only in image_size/n_positions.
+
+QwenConfig::llama2_13b() - Vicuna-1.5-13B's decoder half, a LLaMA-2-13B
+fine-tune with no architecture changes (40 layers, d_model 5120, 40
+heads, plain MHA via n_kv_heads == n_heads, d_ff 13824, rope_theta
+10000, rms_eps 1e-5, untied lm_head). Verified against the real
+meta-llama/Llama-2-13b-hf config.json (mirrored at
+NousResearch/Llama-2-13b-hf) rather than trusted from the port plan.
+
+Both are config-preset additions with no new capability; first step of
+Phase 6 (crates/llava) per .agents/roadmap/llava.md. ([0d2c6500](https://github.com/swedishembedded/brain/commit/0d2c65008f2fb7714fff42f72833d00ff01909be))
+
+- Llama_bpe - LLaMA-2/Vicuna SentencePiece byte-fallback BPE ([a55114f7](https://github.com/swedishembedded/brain/commit/a55114f71038ba9ad11de3c9dfc3bcdcb44b6376))
+
+- The crate - vision->projector->decoder splice, template, INT8, serving ([4d31e9d1](https://github.com/swedishembedded/brain/commit/4d31e9d1700955610d0c39336ce4b3c1b077a98e))
+
+- Supir, imaging, npu: restoration pipeline, served restore action, ZeroCrossAttn NPU export
+
+crates/supir/src/pipeline.rs closes the gap the crate's own doc had left
+open: the full restoration loop (dual encode - denoise_encoder's CompVis
+weights renamed to the diffusers keys vae::VaeEncoder reads, merged with
+the frozen backbone's own quant_conv - dual-CLIP conditioning reused
+unmodified from sdxlunet::textenc, RestoreEDMSampler driven directly off
+diffusion::restore's primitives, CFG combined in eps-space) and colour fix
+(a new imaging::colorfix module: wavelet_reconstruction, the real 5-level
+a-trous decomposition upstream's own default uses, plus adain for its
+other supported mode).
+
+crates/supir/src/caps.rs is the served restore action: capability::blob
+image I/O, cancellable per denoise step (inv.cancel, the wan::caps
+contract), and optional LLaVA auto-captioning through a capability::Registry
+the caller supplies - this crate links no VLM.
+
+crates/npu/src/supir_topology.rs + supir_export.rs export ZeroCrossAttn
+(the one SUPIR adaptor with linear projections) through the shared
+topo::linear_quant emitter, structurally tested. ZeroSFT and the 1.24B
+GLVControl trunk have no export path yet - no cross-attention UNet has
+ever been exported from this tree, so there is no existing block walk to
+adapt - recorded honestly in the roadmap rather than implied.
+
+All weight-free and gated; a real end-to-end run is expected to hit the
+device-memory ceiling crates/supir/tests/parity.rs already documents. ([23915066](https://github.com/swedishembedded/brain/commit/2391506609b1146be0dfb5d4ead82c8e1c119bd3))
+
+- Cli, catalog, imgpipe, docs: serve SUPIR (CLI verb, D-Bus, GGUF stub, imgpipe stage)
+
+crates/cli/src/resident_supir.rs is the residency adapter over
+supir::caps::Session, run_batch serial for the stated reason
+resident_sdxl.rs/resident_controlnet.rs give: every restore call is its
+own multi-step sample. crates/catalog registers brain/supir (with an
+LLaVA-carrying capability::Registry for the caption auto-fill, the same
+"registry supplied by the caller" precedent crates/imgpipe's own
+PipelineProvider set); crates/cli's own catalog.rs patches the residency
+adapter back in and adds a cross-check that supir::caps::LLAVA_MODEL still
+names the real llava::caps::MODEL. One ARCH_TO_MODEL row makes `brain
+supir restore ...` work - sdxlunet/controlnet ship no such shortcut at
+all, so this is one line ahead of that precedent, not a new supir_cli.rs.
+
+crates/cli/src/gguf_import.rs registers supir::import::GGUF_ARCHITECTURE
+("sdxl", a borrowed spelling - the frozen backbone genuinely is SDXL, the
+same reasoning s3dit used for "lumina2") as a second documented
+ambiguous-tag exception, with a stub import_gguf that states plainly no
+real file has ever been observed. D-Bus Run needed no new code - it
+dispatches generically over the residency Executor once a model is
+registered.
+
+crates/imgpipe gets a new Stage::SupirRestore variant (not
+Stage::Restore{w}, whose fidelity dial has no SUPIR meaning): a second
+size-changing tail alongside Stage::Upscale, mutually exclusive with it
+since this crate defines no combined order for two tails that each change
+the resolution.
+
+Docs: supir.md rewritten from its placeholder, index.md/README.md move
+supir and llava out of "reserved, not started" into their real tables,
+imgpipe.md documents the new stage, examples/restore gets a worked SUPIR
+script alongside restore_face.py's. Roadmap and lessons.md updated with
+this phase's honest scope: NPU export covers ZeroCrossAttn only, the
+per-step control-scale ramp and tiled sampling are not wired into the
+pipeline, and a real end-to-end run needs more device memory than this
+port's own hardware has. ([1cb9d63d](https://github.com/swedishembedded/brain/commit/1cb9d63d9701995b72d7fe9869f60f2c6daab369))
+
+- Flux2, gradcheck, ltxv, sam2, sdxlunet, supir, vae: mark reviewed perf numbers
+
+check-no-perf-numbers flags a bare number next to a performance
+unit/claim unless a human has reviewed it with a `perf-number:`
+comment. Thirteen hits across these crates were unreviewed: mostly
+architecture/config constants the gate's context-gating cannot tell
+apart from a measured claim (int8's 4x byte-width ratio, a VAE's
+32x32/8x downsample factors, a checkpoint's 128 latent channels, a
+tolerance-headroom multiplier), plus two genuine dated hardware
+measurements (flux2's roofline baseline, supir's OOM investigation)
+that are legitimately reviewed exceptions, not live promises.
+
+supir::finetune's one true drift risk - a specific loss-reduction
+percentage from a single real training run, cited only as narrative
+rationale for an unrelated ratio-based assertion - is reworded to
+drop the bare number instead, pointing at `--nocapture` to see the
+current trajectory on your own hardware. ([6758b197](https://github.com/swedishembedded/brain/commit/6758b197692b6633b8beca103c8ca31399f845a2))
+
+- Add fetch/label/pull to check-arch-names' infra-verb list ([db280a7f](https://github.com/swedishembedded/brain/commit/db280a7f38ac747c48542413ab006b49828b43c1))
+
+- *(ltxv, sam2)* Add the missing source block to three dumpers ([0dc5dfff](https://github.com/swedishembedded/brain/commit/0dc5dfff1f496edee4df23f79a77b2da42bc7705))
+
+- Read a component that ships as a file, not only as a directory ([1a94acec](https://github.com/swedishembedded/brain/commit/1a94acec53f1e12b7a8fd2a871eec03ef929a9f5))
+
+- --text-encoder, so the encoder can be swapped per run ([21c5a250](https://github.com/swedishembedded/brain/commit/21c5a250ae28fc1a719ef3ba02b72a7d587b1772))
+
+- Make the adapter and the encoder flags, not just env vars ([5e955117](https://github.com/swedishembedded/brain/commit/5e955117e6ca845bc337710113e9654f0b5c726b))
+
+- Name one file, or let a GGUF repo name one quantization ([7dcdafd9](https://github.com/swedishembedded/brain/commit/7dcdafd93471dc496b24ac4f8cd555d78854e75c))
+
+- A missing mask or adapter warns, instead of ending the run ([4f99de1f](https://github.com/swedishembedded/brain/commit/4f99de1f1aa54722ea6d38ee84905633e225c5a2))
+
+- List an image that could not be captioned, with an empty caption ([51d83cb0](https://github.com/swedishembedded/brain/commit/51d83cb0be7ed5d2148578776f78729048a71b53))
+
+- Say that resume is per file, not per byte ([45a98fac](https://github.com/swedishembedded/brain/commit/45a98facd13219636003f4e2a7373eb442ffe781))
+
+- One seam answers which model a GGUF is ([1f6825be](https://github.com/swedishembedded/brain/commit/1f6825be118a44482df5e168dec1899555d170ae))
+
+- Load a two-file GGUF checkpoint ([ee2d5ae3](https://github.com/swedishembedded/brain/commit/ee2d5ae39c1c7092338078bceb5b3a1e804516c3))
+
+- One architecture table, with a direct-load column ([b90bdc2c](https://github.com/swedishembedded/brain/commit/b90bdc2c83c14dbee3f669ac5b3992a7797553d9))
+
+- Pick the captioner from the checkpoint's own architecture ([161340f6](https://github.com/swedishembedded/brain/commit/161340f6a7b81e4f9aa8a76d50c13eee1a68abdb))
+
+- One M-RoPE decode step that leaves its result on the device ([9f7da65c](https://github.com/swedishembedded/brain/commit/9f7da65c2ed4bece263bbc839c37cbe80e15875b))
+
+- Dispatch the register-tiled GEMM where a model registers one ([f8b0f6e1](https://github.com/swedishembedded/brain/commit/f8b0f6e12ce8a8b5f30fe79562b2feb47af9fee0))
+
+- Chunk the tower's attention, and give it the tiled GEMM ([4350812a](https://github.com/swedishembedded/brain/commit/4350812a64f62ab20c18e3dd0fb08623bb4c201b))
+
+- Run the vision tower where the decoder runs ([acb65142](https://github.com/swedishembedded/brain/commit/acb6514298fbacc3c9e9e907eabdc1562488cef4))
+
+- Apply the LM head on the device, and stop reading back prefill ([99e957ff](https://github.com/swedishembedded/brain/commit/99e957ffaafeb60fba4f38425acf5f0a17f4de3f))
+
+- A bench that says where a caption's time goes ([a084f5c2](https://github.com/swedishembedded/brain/commit/a084f5c231da7e2c0efe264a646dfb4c58fee25d))
+
+- Fuse the bidirectional attention where a model registers flash ([7e37a158](https://github.com/swedishembedded/brain/commit/7e37a15869873ca995b888148c2bf858d9ca0659))
+
+- Hold the vision tower resident instead of rebuilding it per image ([449af5d2](https://github.com/swedishembedded/brain/commit/449af5d2d7b5ea0cb0651ff46c0eca376e940f2e))
+
+- Stop packing int8 activations an fp32 model never reads ([2a6d8efb](https://github.com/swedishembedded/brain/commit/2a6d8efb204651e630aeb4a811392758b742bad4))
+
+- --profile, so a resident model's kernel table is reachable ([7f932443](https://github.com/swedishembedded/brain/commit/7f932443e26a2cb16a5d707d66c278c2be08c55f))
+
+- Charge prefill only for the weights a prefill step reads ([98cb4958](https://github.com/swedishembedded/brain/commit/98cb49589f958ed6e49185dd05c939b62a805147))
+
+- Final qwen3vl numbers, the dead int8 packing, and three meter bugs ([1d68f45c](https://github.com/swedishembedded/brain/commit/1d68f45c3943b9d7fad876c91b842535eeb6ddaf))
+
+- Give the int8 decode GEMV the register accumulators fp32 got ([8b6678d5](https://github.com/swedishembedded/brain/commit/8b6678d56449e736dceba4da907658916b189afd))
+
+- An opt-in int8 decoder tier, gated as the lossy thing it is ([246ce63c](https://github.com/swedishembedded/brain/commit/246ce63c5e5a4a0ef5ed0b665c23b1d75cf3556a))
+
+- --precision, and a compare mode that prices quality too ([4a2d57ed](https://github.com/swedishembedded/brain/commit/4a2d57ed850ad93edb3da97dbcf13f97622ac63c))
+
+- Unwrap a prose dash that clippy reads as a markdown list ([71c543a7](https://github.com/swedishembedded/brain/commit/71c543a7be93cf8c760d6fcacb6d45c163c538f1))
+
+- Optimisation pass - per-kernel profile, no low-hanging fruit found ([69e4e44a](https://github.com/swedishembedded/brain/commit/69e4e44aea15d70c6351819ce200727d53ebc322))
+
+
+### Performance
+
+- *(build)* Switch the release profile to thin LTO ([7e84ec16](https://github.com/swedishembedded/brain/commit/7e84ec169fbae53eea90659c53cbf849ccf54d8a))
+
+- *(wan)* First optimization pass, 1.63x end to end ([fad075e2](https://github.com/swedishembedded/brain/commit/fad075e2393caf6c01519770505c038d9691684e))
+
+- *(attn)* Coalesce cross-attention scores for the ViT and cross callers ([f451e547](https://github.com/swedishembedded/brain/commit/f451e5473e0d67c1aca0819c94026c85b38d348e))
+
+- *(attn)* Migrate the last four models to coalesced cross-attention ([69a796ee](https://github.com/swedishembedded/brain/commit/69a796ee0fd1319b4be86c98dbe08a948bc14772))
+
+- *(attn)* Register-tiled bidirectional flash attention, 1.98x ([a34a4ef9](https://github.com/swedishembedded/brain/commit/a34a4ef91fa8098a676d91fa0a295fd1e90e7e8b))
+
+- *(wan)* Rewrite wan_bench onto the shared device-timed profiler ([3e3ec27c](https://github.com/swedishembedded/brain/commit/3e3ec27cf05abeb8e576f60ac0acd7b35ae04c0f))
+
+- *(gpu-core)* Cost formulas for ltxv's 3D conv/attention/rope/elementwise kernels ([a4b153da](https://github.com/swedishembedded/brain/commit/a4b153dafcde2949acb761728c355876548cdf8d))
+
+- *(ltxv)* Fix fp32 GEMM and cross-attention kernel-selector regressions ([7bf03d2e](https://github.com/swedishembedded/brain/commit/7bf03d2edbfe14b19ae57fb2471ca55a67e07b34))
+
+- *(qwen35 import)* Parallelize+fix fp8 dequant and int8 pack (M15 follow-up) ([b52fced1](https://github.com/swedishembedded/brain/commit/b52fced19e6c7efd504299113ce425d1d6dadb81))
+
+- *(ltxv)* Parallelize the host linear() behind ada_layer_norm_single ([5ca1c006](https://github.com/swedishembedded/brain/commit/5ca1c006c7596bb4d5921e28aa62cec2c653d73d))
+
+- *(ltxv)* Host-side per-generation block-weight cache ([1279b295](https://github.com/swedishembedded/brain/commit/1279b2952aa755c2b19d573b645370b2031fa700))
+
+- *(model)* Row-parallel int8/int4 weight quantization ([8ccba57f](https://github.com/swedishembedded/brain/commit/8ccba57f8efc87ba0af9787f45253b734a09939f))
+
+- *(checkpoint)* Block-parallel GGUF dequantization, and gate the block-to-output mapping ([310bc77f](https://github.com/swedishembedded/brain/commit/310bc77fb471f61260f2c93ec4ebd61d05036aec))
+
+- *(checkpoint)* Map safetensors instead of slurping, and decode dtypes in parallel ([c4c62992](https://github.com/swedishembedded/brain/commit/c4c6299210d47065a7f4723a9195b9a2f3d9a828))
+
+- *(ltxv)* Cache the embeddings-connector routing for a generation ([4e74cf3d](https://github.com/swedishembedded/brain/commit/4e74cf3d61be54fcb1e628e744c48443df098be7))
+
+- *(ltxv)* Stream the text encoder from a quantized GGUF, and cache its output ([8da5c89d](https://github.com/swedishembedded/brain/commit/8da5c89d0d7296bdb4465ee1fe7b87040c6b4bcd))
+
+
+### Refactor
+
+- *(dit)* Hoist timestep embedding, patchify and adaLN-table into crates/dit ([7b78e8b2](https://github.com/swedishembedded/brain/commit/7b78e8b2d7a482e5d9d1670d8aa805e456b79473))
+
+- Walk slices with enumerate() where the loop steps with them ([7f742690](https://github.com/swedishembedded/brain/commit/7f742690be284468b06b3c013b3548d7eac6fbf3))
+
+- Walk two more slices with enumerate() where they step together ([f875e2a3](https://github.com/swedishembedded/brain/commit/f875e2a39bbc43e9a0659e3c96f2de1995370bd2))
+
+- *(model)* Hoist GDN scratch allocators out of qwen35moe (M1) ([e24cdcec](https://github.com/swedishembedded/brain/commit/e24cdcec564ef70f84f781a19222b7551c09aa83))
+
+- *(model)* Hoist linear_rows/linear_rows_bwd into hostmath, add dsilu ([ba0b0ae1](https://github.com/swedishembedded/brain/commit/ba0b0ae1aae79216874148d9d4324cc96434fe78))
+
+- *(audio)* Hoist fold_weight_norm out of minimaxmusic3 into audio::conv ([266c6365](https://github.com/swedishembedded/brain/commit/266c636563a1d970c8e153735f8bdb84e6474665))
+
+
+### Testing
+
+- One skip helper and one parity report, across the workspace ([d2a34538](https://github.com/swedishembedded/brain/commit/d2a3453886537df3653701f89616d452957e97de))
+
+- *(kronos)* Gate the CSV-to-forecast path, and read the checkpoint's own config ([b10f6600](https://github.com/swedishembedded/brain/commit/b10f6600d8fcc9087d68eafda2ff0b319f570e71))
+
+- *(kronos)* Gate the whole ladder against upstream, on the shipped checkpoint ([5345cb24](https://github.com/swedishembedded/brain/commit/5345cb24622093f1a66cca4efbb5c739659dd5ec))
+
+- *(kronos)* Assert calibration, not a point-accuracy claim the data cannot support ([2112bee2](https://github.com/swedishembedded/brain/commit/2112bee2acf778d33a34e9598707750f4dba96bd))
+
+- Make a golden name the checkpoint it was dumped from ([c6d9b4f9](https://github.com/swedishembedded/brain/commit/c6d9b4f9b2393a8af0edd8208a0365a64a28d787))
+
+- Actually run the parity for clip, pulid, instantid and sam2 ([f9d6d5b6](https://github.com/swedishembedded/brain/commit/f9d6d5b6eb857e660b004c0ab843d408e0760724))
+
+- Route every remaining skip through a helper that says which kind it is ([1f7d7333](https://github.com/swedishembedded/brain/commit/1f7d7333ef313a1e3c50a9c30b72cc15de2bd921))
+
+- *(ltxv)* Close gate holes so real-weight parity suites can actually fail ([e1df72fd](https://github.com/swedishembedded/brain/commit/e1df72fd05473c5edb318f045ca66ad43e2cc25d))
+
+- *(kernels)* Validate matmul-family CPU native fast paths and cross-backend dispatch ([2f2d04e4](https://github.com/swedishembedded/brain/commit/2f2d04e4c30c52c3490cb35abda9e826a2f8d761))
+
+- *(checkpoint)* Cover more than one decode group in the dequant gate ([12f9e3a1](https://github.com/swedishembedded/brain/commit/12f9e3a1659a662cb10c5a2c867659bf045480ce))
+
+- *(ltxv)* Real-weight parity for the embeddings connector and the streamed forward path ([7ae61ed3](https://github.com/swedishembedded/brain/commit/7ae61ed350cefc4161df0ca413d70043ac4dc8c2))
+
+- *(gemma4)* Real-weight, real-width port correctness parity ([9bbdc0ed](https://github.com/swedishembedded/brain/commit/9bbdc0ede16ca137f9d5af08cbe6ff9cae1b5c91))
+
+- *(ltxv)* Gate that a generated clip actually moves, on a metric a frozen clip cannot pass ([c73cde5e](https://github.com/swedishembedded/brain/commit/c73cde5e204ca9acbb61a48494afd2e73225adb1))
+
+- *(minimaxmusic3)* Vocoder overfits a single batch ([0905ac6c](https://github.com/swedishembedded/brain/commit/0905ac6cadef2fb0ddd026e0f82c48042ec123a0))
+
+- *(minimaxmusic3)* Real short end-to-end generation gate ([2f42370a](https://github.com/swedishembedded/brain/commit/2f42370aee58da0d083cbfe0a9ace724e085f9c3))
+
+- *(cosyvoice)* Golden reference dumper against real CosyVoice2-0.5B weights ([def79e4a](https://github.com/swedishembedded/brain/commit/def79e4ab622d9175b3f606c7289d184aea92740))
+
+- *(gpu-core)* Price the other half of the staging trade, not just the half that improved ([33805bf3](https://github.com/swedishembedded/brain/commit/33805bf3b937b31dca35db9281883a4525199a11))
+
+- *(gpu-core)* The staging trade stopped being a trade ([8bedddb0](https://github.com/swedishembedded/brain/commit/8bedddb02d2f166597f7b42c17da5cc448972ca1))
+
+- *(cosyvoice)* Golden reference dumper against real CosyVoice3-0.5B-2512 weights ([177a35be](https://github.com/swedishembedded/brain/commit/177a35bee602f21f78350d446f7da4420352930e))
+
+- *(model)* Serialise the probe tests, which now hold the GPU for seconds ([5e9f357a](https://github.com/swedishembedded/brain/commit/5e9f357a32652d85c2c41c019af1d9355f7788c4))
+
+
 ## [1.0.0] - 2026-08-17
 
 brain is a small, dependency-light framework for training and evaluating
