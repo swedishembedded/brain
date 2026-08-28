@@ -274,6 +274,14 @@ Plus `BRAIN_DIAMOND_REPO`, `BRAIN_GENIEREDUX_REPO`.
   is re-run, rather than taking every suite red at once.
 - `BRAIN_MODELS_DIR` - overrides the model-store root tests resolve checkpoints under.
 - `BRAIN_E2E` - enables the heavy, opt-in e2e suites (real weights + GPU).
+- `BRAIN_SUPIR_ALLOW_FULL_MEMORY` - opts a SUPIR full-forward test or the
+  `supir_bench full` subcommand into recording the true combined
+  trunk+adaptors+backbone graph, unmodified. Off by default because on a
+  device without enough memory for that graph, recording it fails loudly
+  (an out-of-memory error from the graphics backend) rather than degrading -
+  the same reason `BRAIN_FLUX2_ALLOW_NC` gates a licence opt-in rather than
+  silently switching behaviour. Set it only on a machine known to have
+  enough device memory for the whole checkpoint.
 
 **Production-namespaced but test-only in practice** (these look like serving
 config but in this codebase only ever gate whole test suites):

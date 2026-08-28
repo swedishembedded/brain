@@ -314,7 +314,87 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       `vae::VaeEncoder`/`VaeDecoder` are diffusers-NAMED, not merely
       diffusers-SHAPED, despite sitting on the genuinely generic
       `vae::blocks::Builder`/`BlockNames`.
-- [ ] Optimisation pass.
+- [x] Optimisation pass. `crates/supir/src/bin/supir_bench.rs` - a weight-free
+      per-kernel profiler over synthetic (shape-correct scratch) tensors,
+      mirroring `sdxlunet::unet_bench`'s method exactly (`gpu_core::profile`,
+      best-of-N wall time, `poll_wait`-bracketed). The real combined
+      trunk+adaptors+backbone graph (`Supir::new`, `~15.5 GB` fp32) is
+      already documented elsewhere in this ledger to hit `wgpu error: Out of
+      Memory` on this machine's Intel iGPU regardless of latent size - that
+      OOM is driven by total resident weight bytes, not resolution, so no
+      `h`/`w` choice avoids it. The bench therefore splits the SAME real
+      dispatch sequence into two phases that each independently fit (proven:
+      the 10.27 GB frozen backbone alone already fits, per `unet_bench`):
+      `trunk` (`GLVControl` alone, full SDXL-shaped `UNetConfig`, 1.243 B
+      params / 4.97 GB fp32, over its own `Rec`/`Gpu`) and `fused` (the
+      frozen backbone + the 12 adaptors via `Rec`/`Unet::record_into` over
+      `supir::adaptors::Adaptors` as the `SkipFuse`, 2.622 B params / 10.49 GB
+      fp32, reading the trunk's 10 control tensors from scratch buffers sized
+      off the backbone's own `skip_shapes`/`AdaptorConfig::mid` rather than a
+      real trunk forward - the trunk's cost is exactly what the `trunk` phase
+      already measures). A gated `full` subcommand replays the true one-graph
+      `Supir::new` dispatch verbatim, behind `BRAIN_SUPIR_ALLOW_FULL_MEMORY=1`
+      (same convention as the parity suite's own full-forward tests); on this
+      machine it correctly declines by default rather than OOMing the bench
+      process.
+
+      Measured at a 32x32 latent (`t_enc=77`, 3 reps, this box's Intel iGPU):
+      whole-pass wall time (the reliable number - `best_of`'s
+      `poll_wait`-bracketed timing) was 549-1102 ms for `trunk` and
+      1579-2754 ms for `fused` across repeated runs, a roughly 2x spread on
+      the SAME dispatch sequence that is DVFS/clock-state noise (an idle
+      integrated GPU needs several continuous seconds of work to reach its
+      running clock), not a measurement bug - consistent with this box's own
+      documented cold-clock behaviour. Combined (merged) wall time ran
+      2643-3304 ms, trunk taking roughly 40% of it and fused 60%. Per-kernel
+      shares (ratio of each kernel-kind's time to the summed total, stable
+      across runs even though the DVFS noise moves the absolute wall time):
+      `matmul_reg3` ~30%, `bias_add` ~16%, `layernorm_rows` ~9-14%, `add2`
+      ~6-10%, then a long tail (cross-attention `attn_scores_cross`/
+      `attn_apply_cross`/`attn_softmax_cross`/`flash_attn_bidir_reg2`,
+      `gelu_erf`, `silu`, `gn_stats_wg`/`gn_apply`, `mul`, `im2col_at`,
+      `nlc_bias_nchw`) each 1-4%. SUPIR's OWN new kernel - `edm_mix`, the
+      `ZeroSFT`/`ZeroCrossAttn` lerp - measured at 0.2% of the fused pass:
+      genuinely negligible.
+
+      **Observed, not introduced here**: on this box's adapter
+      (`Intel(R) Arc(tm) Graphics (MTL)`, Vulkan), the per-row absolute
+      `ms`/`GFLOP/s`/`%roof` columns the device-timestamp path prints for
+      this kernel set are corrupted by many orders of magnitude (`1e16`-
+      `1e17` "ms" for a pass whose real wall time is under 3 seconds) -
+      reproduced verbatim on `sdxlunet::unet_bench`, unmodified, so this
+      predates SUPIR and is a `gpu-core`/`backend-wgpu` timestamp-query
+      conversion defect, cross-cutting across every model that profiles on
+      this kernel family. The whole-pass wall-clock number and the per-row
+      RATIOS (each row's share of the corrupted domain's own sum, which
+      cancels a shared corruption factor) both stayed sane and are what the
+      analysis above and `supir_bench`'s own printed tables rely on; the
+      absolute per-row `ms`/roof columns do not and should not be trusted on
+      this machine for this kernel set. Fixing the underlying timestamp
+      conversion is real, valuable work but is infrastructure spanning every
+      model that profiles here, not a SUPIR-scoped change - filed as a
+      separate follow-up rather than pulled into this phase.
+
+      **Conclusion: no SUPIR-specific optimisation applied, and that is the
+      honest result of profiling first.** The dominant kernel-kind shares
+      (`matmul_reg3`/`bias_add`/`layernorm_rows`/`add2`) are inherited from
+      the shared `sdxlunet`/`vae::blocks` GEMM-plus-elementwise
+      infrastructure `GLVControl` and the frozen backbone both sit on, and
+      closely match that backbone's OWN already-measured profile shape
+      (`unet_bench` on the plain SDXL UNet alone: `matmul_reg3` 27.7%,
+      `bias_add` 17.0%, `add2` 11.8%, `layernorm_rows` 9.7% - essentially the
+      same proportions). SUPIR's own incremental compute - the adaptors'
+      `edm_mix` lerp - is 0.2% of the fused pass, confirming the "one-graph"
+      design and the "reuse existing kernels" discipline from earlier phases
+      already left no meaningful residual overhead to attack. The one real
+      hypothesis this profile surfaces - fusing `bias_add` into its preceding
+      GEMM's own write, cutting a separate memory-bound read+write pass over
+      a kernel-kind that is 16% of the whole pass - is genuine, but it is
+      `vae::blocks::Builder`-level infrastructure shared by roughly ten
+      models on this engine, not something a SUPIR-scoped change can safely
+      land or validate; forcing it into this phase would trade a real,
+      narrowly-scoped SUPIR deliverable for an unreviewed cross-cutting one.
+      Recorded here rather than attempted.
 
 ## Staged plan
 
