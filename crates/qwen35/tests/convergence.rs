@@ -6,6 +6,9 @@
 //! `glmdsa/tests/convergence.rs`. Gated by `MOE_SKIP_GPU_TESTS` (these need a
 //! working backend - CPU JIT or GPU).
 
+use std::collections::HashMap;
+
+use data::rng::Rng;
 use gpu_core::Gpu;
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
@@ -46,8 +49,30 @@ fn qwen35_full_finetune_overfits_fixed_batch() {
     assert!(after < before * 0.3, "full finetune did not reduce loss enough: {before} -> {after}");
 }
 
+/// Copy every trained parameter out of `m` into a fresh **inference-shaped**
+/// (`b == 1`) instance, so the single-sequence decode path
+/// (`Qwen35::step`, via `qwen35::sample::generate_kv`) can be run against
+/// what training produced. `logits_all`/`step` both assert `b == 1`, and the
+/// training instances here are built with `b == 2`, so this transfer - the
+/// same `param_names`/`read_weight` pair `Qwen35::save` itself uses - is what
+/// makes a behavioural check on a trained model possible without going
+/// through a checkpoint file.
+fn decode_copy(m: &Qwen35, cfg: &Qwen35Config, t: u32) -> Qwen35 {
+    let w: HashMap<String, Vec<f32>> = m.param_names().iter().map(|n| (n.clone(), m.read_weight(n))).collect();
+    Qwen35::new_on(Gpu::new(pipelines()), cfg.clone(), 1, t, &w)
+}
+
 /// A short cyclic sequence is exactly memorisable; the model should reach a
-/// low loss floor. Mirrors `glmdsa::glm_memorizes_cyclic_sequence`.
+/// low loss floor **and then actually decode the cycle**. Mirrors
+/// `glmdsa::glm_memorizes_cyclic_sequence`.
+///
+/// The loss threshold alone is a weak gate: an average cross-entropy under
+/// 0.20 is satisfiable while individual next-token predictions at the
+/// higher-loss positions are still wrong. On an exactly-periodic sequence the
+/// right answer is unambiguous, so the second assertion below asks the
+/// question directly - greedily decode from a prefix and require the
+/// continuation to BE the cycle, token for token. That cannot be satisfied by
+/// a model that merely got the average down.
 #[test]
 fn qwen35_memorizes_cyclic_sequence() {
     if skip() {
@@ -66,6 +91,18 @@ fn qwen35_memorizes_cyclic_sequence() {
     train_batch(&m, &x, &y, 300, 1e-2);
     let loss = m.forward();
     assert!(loss < 0.20, "cyclic memorization loss too high: {loss}");
+
+    // Greedy decode from the cycle's own first three tokens. The prefix
+    // starts at absolute position 0, exactly as the first training window
+    // did, so RoPE/M-RoPE positions line up with what was learned.
+    let g = decode_copy(&m, &cfg, t);
+    let prefix: Vec<u32> = (0..3u32).collect();
+    let n_new = 4usize;
+    let want: Vec<u32> = (prefix.len() as u32..prefix.len() as u32 + n_new as u32).map(|i| i % vocab).collect();
+    let mut rng = Rng::new(0);
+    // temperature 0 => greedy argmax; no eos ids, so it always runs to length.
+    let got = qwen35::sample::generate_kv(&g, &prefix, n_new, 0.0, 0, 1.0, &[], &mut rng);
+    assert_eq!(got, want, "greedy continuation of the memorised cycle is wrong (prefix {prefix:?}, loss {loss})");
 }
 
 /// LoRA (adapters only, base frozen) must also drive a fixed batch's loss

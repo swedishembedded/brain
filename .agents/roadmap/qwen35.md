@@ -1453,6 +1453,25 @@ themselves; see lesson 64 in `.agents/rules/lessons.md`.
   Tracked as the current work-in-progress; see the sibling int8-migration and
   two-GPU-resident-serving entries once they land.
 
+- **M18 follow-up: `stream_train_real.rs` asserts on loss only, never on the
+  generations it prints.** That file's single test
+  (`short_real_streaming_lora_finetune_reduces_loss_and_shifts_generation`)
+  prints a BEFORE and an AFTER greedy generation from the real 27B
+  checkpoint, but its only gates are that the losses are finite
+  and that the last one is below the first - the test's own name promises a
+  generation shift that nothing in it checks. Closing it needs one of: an
+  expected-phrase check specific to `resources/qwen35_finetune/corpus.txt`'s
+  content, or a perplexity-on-held-out-corpus-lines comparison
+  (BEFORE vs AFTER) - both of which require encoding domain knowledge of that
+  corpus that this file does not currently carry. Blocked on this box either
+  way: the test is `BRAIN_QWEN35_DIR`-gated on the ~54 GB HF-safetensors FP8
+  checkpoint, which is not present here (only the community GGUF is) and
+  cannot be fetched - `df -h /` on this box moves between 41 GB and 58 GB
+  free as the build tree churns, i.e. never reliably more than the download
+  alone, never mind headroom beside it. A change to the assertions cannot be
+  validated against weights that are not here, so the test is left as-is and
+  the gap recorded instead.
+
 Otherwise nothing - all milestones (M0-M20) are complete. Remaining scope is
 the recorded gaps below, none of which are achievable on the ORIGINAL
 development machine (no discrete GPU, 18 GiB usable RAM) this ledger was
