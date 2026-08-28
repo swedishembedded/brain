@@ -1017,7 +1017,10 @@ impl Qwen35 {
         let n = (b * t) as u64;
         let tokens = gpu.storage(n);
         let targets = gpu.storage(n);
-        let logits = gpu.storage(n * cfg.vocab as u64);
+        // A non-head shard never reads `logits` (`run_forward` only writes it
+        // `if self.shard.head`) - on an inference build this is `n * vocab`
+        // (248320) of dead VRAM per non-head card.
+        let logits = gpu.storage(if shard.head { n * cfg.vocab as u64 } else { 1 });
         let ce_buf = gpu.storage(n);
         let ce_grad_uni = gpu.uniform_dynamic(4);
         let d = cfg.d_model as u64;
@@ -1047,7 +1050,18 @@ impl Qwen35 {
         let gdn_bh = cfg.linear_num_value_heads as u64;
         let gdn_state_len = gdn_bh * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
         let gdn_hist_len = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
-        for ty in cfg.layer_types() {
+        // A layer this shard does not own never runs its decode step
+        // (`run_decode_step` loops only `shard.start..shard.end`), so its
+        // cache/state/history buffers are dead weight - a full-size GQA KV
+        // cache or GDN state per un-owned layer, on every non-owning shard.
+        for (l, ty) in cfg.layer_types().into_iter().enumerate() {
+            if !shard.owns(l) {
+                gqa_kcache.push(gpu.storage(1));
+                gqa_vcache.push(gpu.storage(1));
+                gdn_state.push(gpu.storage(1));
+                gdn_hist.push(gpu.storage(1));
+                continue;
+            }
             match ty {
                 LayerType::Full => {
                     gqa_kcache.push(gpu.storage(t as u64 * kv_dim));
@@ -1064,8 +1078,10 @@ impl Qwen35 {
             }
         }
 
-        let dres_boundary_in = gpu.storage(n * d);
-        let dres_boundary_out = RefCell::new(gpu.storage(n * d));
+        // Backward-pass boundary scratch for gradient checkpointing across
+        // shard seams - only meaningful when this instance actually trains.
+        let dres_boundary_in = gpu.storage(if train { n * d } else { 1 });
+        let dres_boundary_out = RefCell::new(gpu.storage(if train { n * d } else { 1 }));
 
         Qwen35 {
             gpu,
@@ -2667,6 +2683,77 @@ mod tests {
     /// difference is that the boundary residual makes a lossless fp32 round
     /// trip through host memory. Anything but bit-equality here is a real
     /// difference in what was computed, so there is no tolerance to pick.
+    /// Re-run this test binary as a child process, executing only the named
+    /// `#[ignore]`d helper, with a generous ceiling published on both memory
+    /// classes so [`gpu_core::Gpu::charged_bytes`] is populated regardless of
+    /// which backend the ambient device selection resolves to here. Mirrors
+    /// `crates/qwen3/tests/mem_budget_inference.rs`'s own helper exactly.
+    fn measure_charged_bytes(helper: &str) -> u64 {
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"]);
+        cmd.env("BRAIN_LIMIT_VRAM_TOTAL", "64G");
+        cmd.env("BRAIN_LIMIT_RAM_TOTAL", "64G");
+        let out = cmd.output().expect("spawn subprocess");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "child {helper} exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status.code());
+        stdout
+            .lines()
+            .find_map(|l| l.split_once("CHARGED=").map(|(_, rest)| rest.trim().to_string()))
+            .unwrap_or_else(|| panic!("child never printed CHARGED; stdout:\n{stdout}"))
+            .parse()
+            .expect("CHARGED must be a byte count")
+    }
+
+    /// A shard that owns only ONE layer out of many must not pay for every
+    /// OTHER layer's decode state as if it owned those too.
+    ///
+    /// Before `run_decode_step` was made shard-aware, `new_impl_on` built a
+    /// full-size GQA KV cache or GDN state/history buffer for every layer
+    /// position regardless of `shard.owns(l)`, a full-size `logits` buffer
+    /// regardless of `shard.head`, and full-size gradient-checkpoint boundary
+    /// scratch regardless of `train` - the same defect class already fixed
+    /// for `qwen3` (`crates/qwen3/src/model.rs`'s `train`-gated buffers). On
+    /// the real 64-layer/GQA-every-4th-layer checkpoint this means a
+    /// single-layer resident stage would pay for all 64 layers' worth of
+    /// cache/state, not its own one.
+    ///
+    /// This config makes every layer `Full` (`full_attention_interval = 1`,
+    /// the type with the expensive `t`-sized KV cache) so a shard owning only
+    /// ONE of many identically-expensive layers gives the clearest possible
+    /// signal: correctly gated, its charged bytes are dominated by the fixed
+    /// per-model residual-stream buffers (`res`, sized by `cfg.n_layers`
+    /// regardless of shard size) plus its own one layer's cache; regressed,
+    /// every one of the other unowned layers leaks a full KV cache on top.
+    #[test]
+    fn a_shard_owning_one_layer_does_not_pay_for_every_other_layers_decode_state() {
+        let charged = measure_charged_bytes("model::tests::child_measure_narrow_shard_charged_bytes");
+        const MIB: u64 = 1 << 20;
+        // Correctly gated: ~res_fixed (33 * 96 * 4 * 2048 = ~25.7 MiB) + this
+        // shard's one owned layer's KV cache (~2 MiB) + small weights/rope/
+        // lora scratch. Regressed (ownership check removed): the other 31
+        // unowned `Full` layers each leak a full KV cache on top, an extra
+        // ~62 MiB - comfortably clear of this bound either way.
+        assert!(
+            charged < 40 * MIB,
+            "a shard owning 1 of 32 layers requested {charged} bytes ({:.1} MiB) - \
+             expected well under 40 MiB given only one layer's decode state should be \
+             live; this is the per-layer cache/state-not-gated-on-ownership regression",
+            charged as f64 / MIB as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "child process helper, driven by a_shard_owning_one_layer_does_not_pay_for_every_other_layers_decode_state"]
+    fn child_measure_narrow_shard_charged_bytes() {
+        let cfg = Qwen35Config { n_layers: 32, full_attention_interval: 1, block_size: 2048, ..Qwen35Config::tiny_i8() };
+        let init = crate::init::init_weights(&cfg, 7);
+        let shard = Shard { start: 16, end: 17, embed: false, head: false, gpu_index: Shard::ANY_GPU };
+        let m = Qwen35::new_i8_shard(cfg.clone(), 1, cfg.block_size, &init, shard);
+        println!("CHARGED={}", m.gpu.charged_bytes());
+    }
+
     #[test]
     fn two_shard_int8_decode_matches_the_whole_shard_model() {
         let cfg = Qwen35Config::tiny_i8();
