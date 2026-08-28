@@ -335,15 +335,22 @@ fn caption_mode(args: &Args) {
     report("image preprocess", pre, 0, (img.w as u64 * img.h as u64 * 3 + n * v.patch_vec_dim() as u64) * 4, r);
     report("vision tower", st.vision_s, vit_flops(v, n), vit_weight_bytes(v), r);
     report("projector/merger", st.merge_s, merger_flops(v, n) * (1 + cfg.vision.deepstack_indexes.len() as u64), 0, r);
-    report("prefill", st.prefill_s, 2 * params * st.prompt_tokens as u64, 4 * params * st.prompt_tokens as u64, r);
+    // Prefill does NOT apply the head, and the embedding gather reads ONE row
+    // rather than the table - so charging it the tied `[vocab, d_model]` table
+    // per token overstated its traffic by about a tenth and reported it at
+    // 100.3% of a roof nothing can exceed. The layers alone are what a prefill
+    // step reads.
+    let head_params = cfg.text.vocab as u64 * cfg.text.d_model as u64;
+    let layer_params = params - head_params;
+    report("prefill", st.prefill_s, 2 * layer_params * st.prompt_tokens as u64, 4 * layer_params * st.prompt_tokens as u64, r);
     // The generation loop is pipelined, so it is priced as ONE stage - see
     // `StageTimes`' own doc on why splitting it costs more than it tells you.
     // The two halves are still printed, unpriced, so a reader can see the
     // shape of the loop.
     let gen_s = st.decode_s + st.head_s;
-    let head_flops = 2 * cfg.text.vocab as u64 * cfg.text.d_model as u64 * st.new_tokens as u64;
-    let head_bytes = 4 * cfg.text.vocab as u64 * cfg.text.d_model as u64 * st.new_tokens as u64;
-    report("decode + head", gen_s, 2 * params * st.new_tokens as u64 + head_flops, 4 * params * st.new_tokens as u64 + head_bytes, r);
+    // The generation loop DOES read both: the layers per step, then the tied
+    // head once per token.
+    report("decode + head", gen_s, 2 * params * st.new_tokens as u64, 4 * params * st.new_tokens as u64, r);
     println!("    of which {:>7.1} ms submitting decode steps, {:>7.1} ms in the head (which drains them)", st.decode_s * 1e3, st.head_s * 1e3);
     let per_image = st.total_s() + pre;
     println!("  {:<22} {:>9.1} ms", "TOTAL (per image)", per_image * 1e3);
