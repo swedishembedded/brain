@@ -111,9 +111,9 @@ USAGE: brain <verb> <architecture> [options]   OR   brain <architecture> <verb> 
 Both orders are the SAME command - `brain train gpt2 ...` and `brain gpt2
 train ...` dispatch identically. `brain caps` lists every architecture brain
 knows about, along with its actions (its \"verbs\"). An architecture with its
-own dedicated flags (gpt2, qwen3, qwen35moe, glmdsa, lfm2, qwen3tts, yolov8,
-zipdepth, flux2, wan, worldmirror2, splat, qwen3omnimoe, diamond, toypid,
-toymoe)
+own dedicated flags (gpt2, qwen3, qwen35, qwen35moe, glmdsa, lfm2, qwen3tts,
+yolov8, zipdepth, flux2, wan, worldmirror2, splat, qwen3omnimoe, diamond,
+toypid, toymoe)
 is documented below; every other one (`brain caps` shows the full list -
 s3dit, fastvlm, qwen3vl, sam2, scrfd, arcface, vqgan, codeformer, rrdbnet,
 clip, deepseek2ocr, nemotronasr, qwen3asr, chronos2, fincast, kronos, ...) is

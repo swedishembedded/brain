@@ -98,7 +98,7 @@ impl ResidentModel for Qwen35Resident {
         // floor on real serving capacity.
         Manifest::new(
             &self.id,
-            "text generation (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder; single-GPU, fp32 weights + fp32 KV, one active sequence at a time -- see crate::resident_qwen35's module doc)",
+            "text generation (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder; single-GPU, fp32 weights + fp32 KV; multiple sequences may be admitted and scheduled concurrently on a shared engine, but the GPU dispatch itself runs one sequence's step at a time -- see crate::resident_qwen35's module doc)",
             vec![generate_spec("generate text (Qwen3.8-27B; chat template optional)", true)],
         )
         .with_max_context_tokens(Self::ctx() as u64)
