@@ -25,11 +25,17 @@
 //! warning recommending migration to the store layout.
 //!
 //! [`resident_for`] dispatches by `card.family`: `qwen`, `gpt`, `glm`, `lfm`,
-//! `yolo`, `depth`, `qwen35` today. A `.gguf` whose `general.architecture` has
-//! a registered importer ([`crate::gguf_import`]) but is not itself servable is
-//! reported with the one-time `brain import-gguf` command that makes it
-//! servable - see that module's doc for why the scan does not convert it in
-//! place. Each family's own checkpoint-writing code must
+//! `yolo`, `depth`, `qwen35` today. A raw `.gguf` reaches that dispatch at all
+//! only for the families whose resident reads GGUF itself
+//! ([`family_reads_gguf`]) - every other `.gguf` is answered BEFORE the match
+//! with [`gguf_advice`], because a GGUF card's family is its
+//! `general.architecture` verbatim and so may spell any family's name. A
+//! `.gguf` whose architecture has a registered importer
+//! ([`crate::gguf_import`]) but is not itself servable is reported with the
+//! one-time `brain import-gguf` command that makes it servable - see that
+//! module's doc for why the scan does not convert it in place.
+//!
+//! Each family's own checkpoint-writing code must
 //! attach a real [`ModelCard`] (`checkpoint::save_carded`, not the plain
 //! `checkpoint::save`, which never carries one) for a checkpoint to be
 //! reachable here at all — a `from_card` resident constructor alone is not
@@ -230,12 +236,68 @@ fn brain_family(reported: &str) -> &str {
     }
 }
 
+/// Whether a family's resident can open a raw `.gguf` weights path ITSELF.
+///
+/// The opt-in half of [`resident_for`]'s GGUF gate, and deliberately an
+/// allowlist rather than a list of exclusions: a GGUF card's `family` is
+/// `general.architecture` verbatim (see [`card_of`]), so ANY architecture
+/// string is free to collide with ANY family name here, and the safe answer
+/// for a family nobody has checked is "no" - the caller then prints the
+/// `brain import-gguf` advice instead of handing GGUF bytes to a resident
+/// that cannot parse them.
+///
+/// The three listed all reach their weights through
+/// `checkpoint::weightio::WeightReader`, which sniffs the container and reads
+/// safetensors and GGUF alike; `qwen` additionally has a documented `.gguf`
+/// decode path and an embedded-tokenizer fallback
+/// (`crate::resident_llm::QwenResident::activate`). Every other family loads
+/// through `checkpoint::load` / `checkpoint::torchpt`, which are
+/// safetensors-only: `qwen35`/`qwen35moe`'s serving `Engine`, yolo's
+/// `yolov8::Yolo::load`, depth's `zipdepth::import::load`.
+fn family_reads_gguf(family: &str) -> bool {
+    matches!(family, "gpt" | "glm" | "qwen")
+}
+
+/// What to do with a raw `.gguf` no family resident can open - the one line
+/// [`resident_for`] logs before declining it, keyed on the file's own
+/// `general.architecture`.
+///
+/// A `.gguf` whose architecture IS in the importer table is not a dead end -
+/// name what to do with it instead of reporting it as unservable. Which advice
+/// is right comes from the table's own direct-load column: an architecture
+/// that streams its GGUF at inference has no conversion to run, and telling
+/// someone to convert one would send them to a command that refuses. See
+/// `crate::gguf_import`'s module doc for why discovery does not run a
+/// conversion itself.
+fn gguf_advice(weights: &str, architecture: &str) -> String {
+    match crate::gguf_import::importer_for(architecture) {
+        Some(entry) if entry.loads_directly() => {
+            format!("{weights}: GGUF architecture '{architecture}' loads directly through its own verb, not the model-dir scan")
+        }
+        Some(_) => format!("{weights}: GGUF architecture '{architecture}' needs a one-time conversion -- run `brain import-gguf {weights}`"),
+        None => format!("family '{architecture}' not servable from the model dir yet"),
+    }
+}
+
 /// Construct the resident matching `card.family` (normalized via
 /// [`brain_family`]), or log + `None` for an unknown / not-yet-dispatchable
 /// family. `adapter` (a named LoRA adapter's own weight file) is meaningful
 /// only to the `qwen` family today -- other families ignore it.
 fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapter: Option<&str>) -> Option<Arc<dyn ResidentModel>> {
-    match brain_family(&card.family) {
+    let family = brain_family(&card.family);
+    // The GGUF gate, BEFORE the family match: a GGUF card's family is its
+    // `general.architecture` copied verbatim, so an architecture string is
+    // free to spell a brain-native family name and fall into that family's arm
+    // below - handing a resident that only reads safetensors a file it cannot
+    // parse, which surfaces as a low-level error at activate() instead of the
+    // actionable import advice. Gating here rather than per-arm is what makes
+    // the whole collision class impossible: an arm is reached by a `.gguf`
+    // only if its family opted in via `family_reads_gguf`.
+    if weights.ends_with(".gguf") && !family_reads_gguf(family) {
+        eprintln!("brain: skip {} ({})", card.id, gguf_advice(weights, &card.family));
+        return None;
+    }
+    match family {
         "gpt" => Some(Arc::new(crate::resident_llm::GptResident::from_card(weights, card, tokenizer))),
         "glm" => Some(Arc::new(crate::resident_llm::GlmResident::from_card(weights, card, tokenizer))),
         "qwen" => Some(Arc::new(crate::resident_llm::QwenResident::from_card(weights, card, tokenizer, adapter))),
@@ -269,25 +331,10 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
                 None
             }
         },
+        // Only a brain-native (safetensors) checkpoint reaches here: the gate
+        // above already answered every `.gguf` whose family has no arm.
         other => {
-            // A `.gguf` whose architecture IS in the importer table is not a
-            // dead end - name what to do with it instead of reporting it as
-            // unservable. Which advice is right comes from the table's own
-            // direct-load column: an architecture that streams its GGUF at
-            // inference has no conversion to run, and telling someone to
-            // convert one would send them to a command that refuses. See
-            // `crate::gguf_import`'s module doc for why discovery does not run
-            // a conversion itself.
-            let entry = weights.ends_with(".gguf").then(|| crate::gguf_import::importer_for(other)).flatten();
-            if let Some(entry) = entry {
-                if entry.loads_directly() {
-                    eprintln!("brain: skip {} ({weights}: GGUF architecture '{other}' loads directly through its own verb, not the model-dir scan)", card.id);
-                } else {
-                    eprintln!("brain: skip {} ({weights}: GGUF architecture '{other}' needs a one-time conversion -- run `brain import-gguf {weights}`)", card.id);
-                }
-            } else {
-                eprintln!("brain: skip {} (family '{other}' not servable from the model dir yet)", card.id);
-            }
+            eprintln!("brain: skip {} (family '{other}' not servable from the model dir yet)", card.id);
             None
         }
     }
@@ -570,6 +617,52 @@ mod tests {
         let gen = m.actions.iter().find(|a| a.name == "generate").expect("generate action");
         assert!(gen.streaming, "qwen generate must stream");
         assert!(gen.params.iter().any(|p| p.name == "messages"), "qwen generate must accept chat messages");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A raw `.gguf` must never be handed to a brain-native family resident
+    /// just because its `general.architecture` happens to spell that family's
+    /// name. `card_of` copies the architecture into `card.family` VERBATIM, so
+    /// a `qwen35moe`/`qwen35` GGUF collides with the two arms serving those
+    /// families' brain-native checkpoints -- residents whose `Engine` reads
+    /// `checkpoint::load` (safetensors ONLY) and cannot open GGUF bytes at
+    /// all. The collision must resolve to the `brain import-gguf` guidance,
+    /// not to a resident that dies with a low-level parse error at activate().
+    /// A GGUF architecture whose resident DOES read GGUF (`qwen3` -> `qwen`)
+    /// is unaffected.
+    #[test]
+    fn a_raw_gguf_never_reaches_a_safetensors_only_family_resident() {
+        let dir = tmp_dir("gguf-family-collision");
+        // The store layout hands a sibling tokenizer.json over, so the two
+        // residents below would construct happily -- the tokenizer is not what
+        // is supposed to be stopping them.
+        write_tokenizer(&dir);
+        let tok_path = dir.join("tokenizer.json");
+        let tok = tok_path.to_str();
+
+        for arch in ["qwen35moe", "qwen35"] {
+            let file = format!("{arch}.gguf");
+            write_gguf(&dir, &file, arch, &format!("toy-{arch}-gguf"));
+            let p = dir.join(&file);
+            let card = card_of(&p).expect("gguf card");
+            assert_eq!(card.family, arch, "a GGUF card's family IS general.architecture, verbatim");
+            assert!(
+                resident_for(p.to_str().unwrap(), &card, tok, None).is_none(),
+                "raw {arch}.gguf routed into the brain-native '{arch}' resident, which cannot read GGUF bytes"
+            );
+        }
+
+        // ...and the guidance is the actionable one, not a bare "unservable":
+        // an architecture WITH a registered importer names the exact command.
+        assert!(gguf_advice("m.gguf", "qwen35moe").contains("run `brain import-gguf m.gguf`"), "{}", gguf_advice("m.gguf", "qwen35moe"));
+
+        // The GGUF path that DOES work must keep working: qwen3 aliases to the
+        // `qwen` family, whose resident streams a `.gguf` directly.
+        write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
+        let p = dir.join("qwen3.gguf");
+        let card = card_of(&p).expect("gguf card");
+        assert!(resident_for(p.to_str().unwrap(), &card, None, None).is_some(), "a qwen3 GGUF must still serve from the scan");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
