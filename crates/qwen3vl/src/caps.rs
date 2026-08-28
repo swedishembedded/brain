@@ -300,6 +300,21 @@ pub fn device_roof(dir: &str, max_pixels: u32) -> Result<Option<gpu_core::roof::
     with_resident(dir, max_pixels, |hot| Ok(gpu_core::roof::ensure(hot.model.gpu())))
 }
 
+/// Print the per-kernel `BRAIN_PROFILE` table for this checkpoint's resident.
+///
+/// The accumulator normally prints when the device drops, and a resident
+/// model's device never does - so on this path the table was simply never
+/// emitted. `Gpu::dump_profile` is the escape hatch for exactly that; this is
+/// where a caller with a checkpoint path can reach it. `BRAIN_PROFILE` must
+/// already be set when the resident is BUILT, since the backend reads it once
+/// at construction.
+pub fn dump_profile(dir: &str, max_pixels: u32) -> Result<(), String> {
+    with_resident(dir, max_pixels, |hot| {
+        hot.model.gpu().dump_profile();
+        Ok(())
+    })
+}
+
 /// Build (or reuse) the resident for `(dir, max_pixels)` and report how long
 /// that took, without generating anything - the one-off setup cost a caption
 /// profile must not fold into its per-image numbers.

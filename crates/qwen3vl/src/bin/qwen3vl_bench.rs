@@ -38,8 +38,10 @@ use qwen3vl::preprocess::{image_token_count, patch_grid, smart_resize, DEFAULT_M
 const USAGE: &str = "usage: qwen3vl_bench <mode> [options]
   vision  [--pixels N] [--reps N] [--device cpu|gpu|both]
           ViT tower + PatchMerger at the real 4B geometry, random weights.
-  caption [--image FILE] [--pixels N] [--max-new N] [--reps N]
-          the real checkpoint end to end ($BRAIN_QWEN3VL_WEIGHTS), per stage.";
+  caption [--image FILE] [--pixels N] [--max-new N] [--reps N] [--profile]
+          the real checkpoint end to end ($BRAIN_QWEN3VL_WEIGHTS), per stage.
+          --profile adds the per-kernel device table (timestamp queries
+          perturb, so read it for shares between kernels, not absolutes).";
 
 /// The captioner's own resident pixel budget (`qwen3vl::captioner`), so the
 /// default profile is the shape `brain label images` actually runs.
@@ -261,6 +263,11 @@ fn vision_mode(args: &Args) {
 // ---------------------------------------------------------------------------
 
 fn caption_mode(args: &Args) {
+    if args.profile {
+        // The backend reads this once, at construction, so it has to be set
+        // before the resident is built rather than left to the caller's shell.
+        std::env::set_var("BRAIN_PROFILE", "1");
+    }
     let dir = std::env::var("BRAIN_QWEN3VL_WEIGHTS").unwrap_or_default();
     if dir.is_empty() {
         eprintln!("caption: set BRAIN_QWEN3VL_WEIGHTS to a Qwen3-VL checkpoint directory");
@@ -360,6 +367,12 @@ fn caption_mode(args: &Args) {
         per_image
     );
     println!("\ncaption: {}", text.trim());
+    if args.profile {
+        // Timestamp queries perturb, so read this for SHARES between kernels,
+        // not as an absolute next to the stage table above.
+        println!();
+        let _ = qwen3vl::caps::dump_profile(&dir, pixels);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -371,13 +384,14 @@ struct Args {
     pixels: Option<u32>,
     max_new: u32,
     image: Option<String>,
+    profile: bool,
 }
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // caption reps default to 1: one rep is minutes long, and `--reps N`
     // switches on the warm-up as well as the statistics.
-    let mut a = Args { mode: String::new(), device: "both".into(), reps: 0, pixels: None, max_new: 90, image: None };
+    let mut a = Args { mode: String::new(), device: "both".into(), reps: 0, pixels: None, max_new: 90, image: None, profile: false };
     let mut i = 0;
     while i < argv.len() {
         let next = |i: &mut usize| -> String {
@@ -393,6 +407,7 @@ fn main() {
             "--pixels" => a.pixels = next(&mut i).parse().ok(),
             "--max-new" => a.max_new = next(&mut i).parse().unwrap_or(a.max_new),
             "--image" => a.image = Some(next(&mut i)),
+            "--profile" => a.profile = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return;
