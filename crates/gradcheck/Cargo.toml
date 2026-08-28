@@ -36,6 +36,9 @@ brain-vqgan.workspace = true
 brain-vae.workspace = true
 # `check_unet` (src/unet.rs) - the SDXL UNet2DConditionModel training graph.
 brain-sdxlunet.workspace = true
+# `check_supir` / `check_supir_elementwise` (src/supir.rs) - the SUPIR control
+# trunk + adaptors training graph.
+brain-supir.workspace = true
 brain-gpu-core.workspace = true
 # `check_arcface` (src/arcface.rs) - the ArcFace/IResNet training graph.
 brain-arcface.workspace = true

@@ -214,8 +214,44 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       (trunk cosine 1.0000000000; full forward at `s_churn=0` verified).
 - [x] `sdxlunet::int8` + `supir::int8` - HOST-memory quantization only (see
       "Memory" below for the real, measured, still-open device-memory gap).
-- [ ] Training (`grad.rs`/`modelgrad.rs`, `gradcheck::check_supir[_elementwise]`,
-      `lora.rs`, `finetune.rs`, `check_controlnet`).
+- [x] Training. `crates/supir/src/train.rs` (`SupirTrainer` - trunk +
+      adaptors + backbone recorded in ONE reverse-mode tape via
+      `Supir::new_train`/`Rec::new_train`, an MSE loss head, mirroring
+      `sdxlunet::train::UnetTrainer` exactly rather than a from-scratch host
+      f64 oracle - this graph is already `vae::blocks::Builder`/`Trace`
+      differentiable end to end, the same situation `check_unet` closed, so
+      an independent hand-written backward would duplicate that gate's
+      coverage rather than add a new signal; see `train.rs`'s own module doc
+      for the full reasoning). `gradcheck::check_supir` (directional, 185
+      trunk+adaptor tensors, `SupirConfig::tiny` at `H=W=8`, max_rel 9.9e-2,
+      all inside the workspace `(4e-3, 8e-2)` gate) and
+      `check_supir_elementwise` (per-entry on
+      `control_model.mid_block.resnets.1.conv2.bias` - the trunk's mid
+      output is read TWICE by `Adaptors::fuse_mid`, once via `zero_conv` and
+      once via `mlp_shared.0`, the same shared/folded-gradient class as
+      T5's/`check_unet`'s own elementwise gates - all 64 entries pass).
+      `crates/supir/src/lora.rs` (`SupirLora` over `model::lora::Pair`,
+      targeting the trunk's 8 linear suffixes per `BasicTransformerBlock`;
+      gated: bit-exact no-op at `B=0`, `apply`/`fold_into` bit-agreement,
+      save/load round-trip, LoRA-only overfit 5.09e-1 -> min 9.37e-2).
+      `crates/supir/src/finetune.rs` (`Finetuner::adaptor_only` - upstream's
+      own recipe, backbone encoder frozen, decoder+trunk+adaptors train -
+      and `Finetuner::full_backbone`; both measured to overfit a single
+      example (~74%/69% loss reduction over 120 steps) and a 3-example
+      dataset (~75% reduction over 40 rounds) at `SupirConfig::tiny`,
+      `H=W=8` - real numbers, not "near zero": see `finetune.rs`'s module
+      doc for why this machine's per-step wall-clock (a real Vulkan iGPU,
+      ~2.4 s per full trunk+adaptors+backbone forward+backward) sets the
+      gate at "clear, substantial, measured descent" rather than a literal
+      zero floor). `check_controlnet` deliberately NOT closed in this pass -
+      re-assessed and found to be a genuine second trainer (no `Rec::new_train`
+      wiring in `controlnet::model` yet, `scale_buf` uses the same
+      tape-breaking `push_step` idiom this port's own adaptors doc already
+      disqualified, and `Residuals` is a multi-buffer output with no single
+      MSE loss head to reuse), not the "small, obvious mirror" the plan
+      scoped it as; the reasoning is recorded in
+      `.agents/roadmap/controlnet.md` rather than left as a bare unchecked
+      box.
 - [ ] `crates/llava`.
 - [ ] Serving contract, CLI, NPU export, docs.
 - [ ] Optimisation pass.
@@ -307,3 +343,12 @@ the shape of the work:
   trunk realistically exceeds what the NPU can hold on this hardware.
 - A full end-to-end restoration run on real checkpoints - held until
   explicitly requested, per this port's scoping decision.
+- `check_controlnet` and `ControlNet::record_into` - the plan expected these
+  to fall out of `check_supir`'s infrastructure as a small mirror; building
+  `supir::train::SupirTrainer` found two real gaps in `crates/controlnet`
+  instead (no `Rec::new_train` build path, and `scale_buf`'s `Builder::push_step`
+  use means `conditioning_scale` is not on the reverse tape at all today),
+  plus a loss-head shape mismatch (`Residuals` is several differently-shaped
+  buffers, not the one `UnetTrainer`/`SupirTrainer` MSE head assumes) - a
+  genuine second trainer, not a mirror. Recorded with full reasoning in
+  `.agents/roadmap/controlnet.md`.

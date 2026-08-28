@@ -89,6 +89,10 @@ pub struct Supir {
     temb_in: DeviceBuffer,
     aug_in: DeviceBuffer,
     out: DeviceBuffer,
+    /// The reverse-mode tape, present only on a [`Supir::new_train`] build -
+    /// mirrors [`sdxlunet::model::Unet`]'s own `trace` field exactly, for the
+    /// same reason: [`crate::train::SupirTrainer`] is built on it.
+    trace: Option<vae::blocks::grad::Trace>,
     steps: Vec<Step>,
     taps: Vec<(String, DeviceBuffer, usize)>,
 }
@@ -110,7 +114,7 @@ impl Supir {
         taps: bool,
         control_scale: f32,
     ) -> Supir {
-        Supir::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control_scale)
+        Supir::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control_scale, false)
     }
 
     /// [`Supir::new`], but every weight `tensors` doesn't carry falls back to
@@ -136,7 +140,22 @@ impl Supir {
         taps: bool,
         control_scale: f32,
     ) -> Supir {
-        Supir::build(gpu, cfg, tensors, Some(packed), h, w, t_enc, taps, control_scale)
+        Supir::build(gpu, cfg, tensors, Some(packed), h, w, t_enc, taps, control_scale, false)
+    }
+
+    /// [`Supir::new`], recording the reverse-mode tape - what
+    /// [`crate::train::SupirTrainer`] builds on. Mirrors
+    /// [`sdxlunet::model::Unet::new_train`] exactly: `taps` off (the SSA
+    /// forward the tape needs doubles as its own cache), no int8 packing (a
+    /// training build wants every gradient buffer, so the host-memory saving
+    /// `set_packed` buys is not the relevant axis here).
+    pub fn new_train(gpu: Gpu, cfg: SupirConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, control_scale: f32) -> Supir {
+        Supir::build(gpu, cfg, tensors, None, h, w, t_enc, false, control_scale, true)
+    }
+
+    /// The recorded tape, on a [`Supir::new_train`] build.
+    pub fn trace(&self) -> &vae::blocks::grad::Trace {
+        self.trace.as_ref().expect("supir: no tape recorded - build with Supir::new_train")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -150,6 +169,7 @@ impl Supir {
         t_enc: u32,
         taps: bool,
         control_scale: f32,
+        train: bool,
     ) -> Supir {
         let levels = cfg.backbone.levels();
         let scale = 1u32 << (levels - 1);
@@ -166,7 +186,11 @@ impl Supir {
         let temb_in = gpu.storage(c0 as u64);
         let aug_in = gpu.storage(cfg.backbone.projection_class_embeddings_input_dim as u64);
 
-        let mut r = Rec::new(&gpu, &cfg.backbone, tensors, t_enc, taps);
+        let mut r = if train {
+            Rec::new_train(&gpu, &cfg.backbone, tensors, t_enc, taps)
+        } else {
+            Rec::new(&gpu, &cfg.backbone, tensors, t_enc, taps)
+        };
         if let Some(p) = packed {
             r.set_packed(p);
         }
@@ -200,8 +224,10 @@ impl Supir {
         };
         let recorded = Unet::record_into(&mut r, &cfg.backbone, h, w, &inputs, false);
 
-        let (steps, taps) = r.into_blocks().finish();
-        Supir { gpu, cfg, hw: (h, w), t_enc, sample_in, hint_in, enc_in, temb_in, aug_in, out: recorded.out, steps, taps }
+        let blocks = r.into_blocks();
+        let trace = train.then(|| blocks.trace());
+        let (steps, taps) = blocks.finish();
+        Supir { gpu, cfg, hw: (h, w), t_enc, sample_in, hint_in, enc_in, temb_in, aug_in, out: recorded.out, trace, steps, taps }
     }
 
     pub fn config(&self) -> &SupirConfig {
@@ -216,15 +242,22 @@ impl Supir {
         &self.steps
     }
 
-    /// One evaluation: the frozen UNet's raw output (pre EDM `c_skip`/`c_out`
-    /// - `diffusion::restore`'s job, not this graph's).
+    /// The graph's output buffer - what [`crate::train::SupirTrainer`]'s loss
+    /// head reads.
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+
+    /// Write the graph's four device inputs, without submitting - the shared
+    /// half of [`Supir::run`] and [`crate::train::SupirTrainer::set_inputs`],
+    /// mirroring [`sdxlunet::model::Unet::write_inputs`]'s own split (one
+    /// implementation of the host-side embeddings, not two).
     ///
     /// * `sample` - `[4 · H · W]`, the noisy latent `x_t`.
     /// * `hint` - `[4 · H · W]`, `_z` (the degradation-robust encode).
     /// * `enc`/`pooled`/`time_ids` - identical in shape and convention to
     ///   [`sdxlunet::model::Unet::run`]'s.
-    #[allow(clippy::too_many_arguments)]
-    pub fn run(&self, sample: &[f32], hint: &[f32], timestep: f32, enc: &[f32], pooled: &[f32], time_ids: &[f32]) -> Vec<f32> {
+    pub fn write_inputs(&self, sample: &[f32], hint: &[f32], timestep: f32, enc: &[f32], pooled: &[f32], time_ids: &[f32]) {
         let c = &self.cfg.backbone;
         let (h, w) = self.hw;
         assert_eq!(sample.len(), (c.in_channels * h * w) as usize, "supir: sample size");
@@ -246,6 +279,15 @@ impl Supir {
         self.gpu.write_f32(&self.enc_in, enc);
         self.gpu.write_f32(&self.temb_in, &temb);
         self.gpu.write_f32(&self.aug_in, &aug);
+    }
+
+    /// One evaluation: the frozen UNet's raw output (pre EDM `c_skip`/`c_out`
+    /// - `diffusion::restore`'s job, not this graph's).
+    #[allow(clippy::too_many_arguments)]
+    pub fn run(&self, sample: &[f32], hint: &[f32], timestep: f32, enc: &[f32], pooled: &[f32], time_ids: &[f32]) -> Vec<f32> {
+        let c = &self.cfg.backbone;
+        let (h, w) = self.hw;
+        self.write_inputs(sample, hint, timestep, enc, pooled, time_ids);
         self.gpu.submit(&[], &self.steps);
         self.gpu.read(&self.out, (c.out_channels * h * w) as usize)
     }

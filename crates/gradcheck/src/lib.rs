@@ -37,6 +37,11 @@ pub mod vqgan;
 pub mod unet;
 pub use vqgan::check_vqgan;
 
+/// `check_supir` / `check_supir_elementwise` - the SUPIR control trunk +
+/// adaptors training graph, recorded alongside the frozen SDXL backbone.
+pub mod supir;
+pub use supir::{check_supir, check_supir_elementwise};
+
 pub mod clip;
 pub use clip::check_clip;
 
