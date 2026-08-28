@@ -179,21 +179,32 @@ deb/release: build/release
 # release/{patch,minor,major} - because both need credentials (a working git
 # remote, `gh auth login`) that a routine version bump should not silently
 # assume are present.
-release/patch: ## Bump patch version, commit, tag (local only - see release/publish)
+# Every tool `release/{patch,minor,major}` -> `_release/finalize` needs,
+# checked BEFORE the first commit - bump2version commits immediately and
+# unconditionally, so a missing tool discovered only once `_release/finalize`
+# is already running (as `changelog`'s own `git-cliff` check used to do)
+# strands the repo mid-release: version bumped and committed, but no
+# changelog and no tag, with no clean way to resume (re-running the bump
+# would skip straight past the stranded version). Fail here instead, while
+# nothing has been touched yet.
+.PHONY: _release/preflight
+_release/preflight:
+	@command -v bump2version >/dev/null 2>&1 || \
+		{ echo "error: bump2version not found - install with 'pip install bump2version'"; exit 1; }
+	@command -v git-cliff >/dev/null 2>&1 || \
+		{ echo "error: git-cliff not found - install with 'cargo install git-cliff'"; exit 1; }
 	@[ -z "$$(git status --porcelain)" ] || \
 		{ echo "error: dirty working tree"; git status --short; exit 1; }
+
+release/patch: _release/preflight ## Bump patch version, commit, tag (local only - see release/publish)
 	bump2version --no-tag patch
 	$(MAKE) _release/finalize
 
-release/minor: ## Bump minor version, commit, tag (local only - see release/publish)
-	@[ -z "$$(git status --porcelain)" ] || \
-		{ echo "error: dirty working tree"; git status --short; exit 1; }
+release/minor: _release/preflight ## Bump minor version, commit, tag (local only - see release/publish)
 	bump2version --no-tag minor
 	$(MAKE) _release/finalize
 
-release/major: ## Bump major version, commit, tag (local only - see release/publish)
-	@[ -z "$$(git status --porcelain)" ] || \
-		{ echo "error: dirty working tree"; git status --short; exit 1; }
+release/major: _release/preflight ## Bump major version, commit, tag (local only - see release/publish)
 	bump2version --no-tag major
 	$(MAKE) _release/finalize
 
