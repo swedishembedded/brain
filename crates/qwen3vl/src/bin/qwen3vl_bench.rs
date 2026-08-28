@@ -117,11 +117,12 @@ fn layer_bytes_per_param(p: Precision) -> f64 {
 /// and a tenth of roof on another.
 ///
 /// The head is fp32 in both, which is why int8's ceiling is not simply four
-/// times fp32's.
+/// times fp32's. int8 also carries one f32 scale per `model::int8::GROUP` (32)
+/// weights - 1/8 byte per weight, so 1.125 bytes/param, not 1.0.
 fn decode_ceiling_tok_s(layer_params: u64, head_params: u64, r: Option<roof::Roofs>) -> Option<(f64, f64)> {
     let bw = r?.gbs as f64 * 1e9;
     let at = |bpp: f64| bw / (layer_params as f64 * bpp + head_params as f64 * 4.0);
-    Some((at(4.0), at(1.0)))
+    Some((at(4.0), at(1.0 + 4.0 / model::int8::GROUP as f64)))
 }
 
 // ---------------------------------------------------------------------------

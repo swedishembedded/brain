@@ -111,9 +111,11 @@ use crate::{directional_check, CheckModel, Report};
 
 const M: u32 = 8;
 // `Ops::act` unconditionally quantizes to an int8 scratch buffer regardless
-// of the WEIGHT's own dtype (`model::ops`'s own module doc) - `model::int8::
-// quantize_weight`'s packing requires `K % 4 == 0`, so this fixture's `K`
-// must be a multiple of 4 even though the weight itself is bf16, not int8.
+// of the WEIGHT's own dtype (`model::ops`'s own module doc) - `quant_pack`
+// writes 4 int8 per u32, so this fixture's `K` must be a multiple of 4 even
+// though the weight itself is bf16, not int8. (The stricter `K % 32` rule the
+// int8/q4 WEIGHT quantizers carry does not apply here: nothing quantizes a
+// weight in this fixture.)
 const K: u32 = 8;
 const N: u32 = 6;
 

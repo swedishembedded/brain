@@ -96,6 +96,22 @@ impl QwenConfig {
         }
     }
 
+    /// [`Self::tiny`] at dims the INT8/W4A8 tiers can actually take.
+    ///
+    /// `model::int8::quantize_weight` scales a weight per `model::int8::GROUP`
+    /// (32) elements of its contraction axis, so every quantized linear's `k`
+    /// must be a whole number of groups. `tiny`'s `d_model = 16` is not, and
+    /// `tiny` is shared by ~100 fp32 tests and the gradient checker, none of
+    /// which should pay a bigger fixture for a constraint only the quantized
+    /// tiers have. This raises exactly the three widths that ARE a quantized
+    /// `k` - `d_model` (q/k/v-proj, gate, up), `q_dim` (o_proj) and `d_ff`
+    /// (down) - to 64 / 32 / 96, keeping all four of `d_model`, `q_dim`,
+    /// `kv_dim` and `d_ff` mutually DISTINCT so a transpose between any two
+    /// still cannot hide (lesson #4), and leaves everything else `tiny`'s.
+    pub fn tiny_i8() -> QwenConfig {
+        QwenConfig { d_model: 64, d_ff: 96, ..QwenConfig::tiny() }
+    }
+
     /// The published Qwen3-0.6B shape (from its `config.json`).
     pub fn qwen3_0_6b() -> QwenConfig {
         QwenConfig {

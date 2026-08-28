@@ -479,20 +479,25 @@ mod tests {
     /// The tiny config the tests below build, plus its weights.
     fn tiny(vision_dim: u32, conn_in: u32, tau: bool, seed: u64) -> TinyFixture {
         let vision = VisionConfig { dim: vision_dim, patch: 2, n_layers: 2, ff_dim: 2 * vision_dim, n_heads: 2, crop_size: 8, max_crops: 4, overlap_margin: 1 };
+        // `dim` and `moe.inner_dim` are the two CONTRACTION widths the int8
+        // tier quantizes over (`MoeFfn8`: `w_h`/`w_g` contract over `dim`,
+        // `w_down` over `inner_dim`), so both must be whole multiples of
+        // `model::int8::GROUP` (32). Everything else stays as small and as
+        // mutually distinct as it was.
         let cfg = MoondreamConfig {
-            dim: 24,
+            dim: 32,
             ff_dim: 48,
             n_layers: 2,
             vocab: 23,
-            n_heads: 3,
+            n_heads: 4,
             head_dim: 8,
             prefix_attn: 17, // 1 bos + 16 image
             rot_dim: 4,
             rope_theta: 1.5e6,
             proj_inner: 48,
-            proj_out: 24,
+            proj_out: 32,
             vision: vision.clone(),
-            moe: MoeConfig { num_experts: 3, start_layer: 1, top_k: 2, inner_dim: 8 },
+            moe: MoeConfig { num_experts: 3, start_layer: 1, top_k: 2, inner_dim: 32 },
         };
         let ppc = vision.patches_per_crop();
         let c = vision.dim as usize;
@@ -578,7 +583,7 @@ mod tests {
 
     #[test]
     fn end_to_end_image_to_loss() {
-        // Tiny everything: ViT 2×2-patch dim 32 → connector 32→48→24 → decoder d24.
+        // Tiny everything: ViT 2×2-patch dim 32 → connector 32→48→32 → decoder d32.
         let (cfg, vw, cw, dw) = tiny(32, 32, false, 2);
         let vision = cfg.vision.clone();
         let ppc = vision.patches_per_crop();

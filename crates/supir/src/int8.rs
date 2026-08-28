@@ -72,7 +72,7 @@ pub fn is_never_quantized(tensor_name: &str) -> bool {
 }
 
 fn is_eligible(name: &str, shape: &[usize]) -> bool {
-    shape.len() == 2 && shape[1].is_multiple_of(4) && !is_never_quantized(name)
+    shape.len() == 2 && shape[1].is_multiple_of(model::int8::GROUP) && !is_never_quantized(name)
 }
 
 /// The SUPIR-scoped sibling of `sdxlunet::int8::QuantizedTensors`: same

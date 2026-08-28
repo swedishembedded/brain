@@ -76,12 +76,13 @@ pub fn is_never_quantized(tensor_name: &str) -> bool {
 }
 
 /// A tensor is int8-storage-eligible iff it is a plain `[n, k]` matrix
-/// (`k % 4 == 0`, the packing width `model::int8::quantize_weight`
-/// requires) and its name is not on the never-quantize list. Every conv
+/// (`k % 32 == 0`, the scale-group width `model::int8::quantize_weight`
+/// requires - `model::int8::GROUP`) and its name is not on the never-quantize
+/// list. Every conv
 /// weight in this graph is rank 4 and every norm gain/bias is rank 1, so
 /// this excludes them structurally rather than by name.
 fn is_eligible(name: &str, shape: &[usize]) -> bool {
-    shape.len() == 2 && shape[1].is_multiple_of(4) && !is_never_quantized(name)
+    shape.len() == 2 && shape[1].is_multiple_of(model::int8::GROUP) && !is_never_quantized(name)
 }
 
 /// A [`Tensors`] map split into its int8-eligible weights (packed) and

@@ -214,7 +214,7 @@ impl Flux2Model {
     }
 
     /// [`Flux2Model::new`] with a numeric tier. [`Precision::Int8`] uploads
-    /// every linear as packed int8 + per-channel scales (~4× smaller — the 4B
+    /// every linear as packed int8 + group-wise scales (~4× smaller - the 4B
     /// DiT drops from ~15.5 GiB to ~3.9 GiB resident) and the forward runs the
     /// quant→DP4A sequence per linear. GPU only (DP4A + workgroup barriers).
     pub fn new_with(cfg: &Flux2Config, ts: &Tensors, gpu: Gpu, n_max: u32, precision: Precision) -> Flux2Model {

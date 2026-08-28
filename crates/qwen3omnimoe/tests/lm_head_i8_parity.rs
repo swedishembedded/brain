@@ -33,9 +33,11 @@ fn lm_head_i8_matches_fp32_within_quant_tolerance() {
     let g = gpu_core::testgpu::dev(thinker_pipelines());
     let ids8 = LmHeadIds8 { matmul_i8: idx(&g, "matmul_i8_dyn"), quant: [idx(&g, "max_abs_row"), idx(&g, "quant_pack")] };
 
-    // n (rows) small, d/vocab multiples of 4 (int8 packing needs k % 4 == 0
-    // on the contracted dim; vocab, the output dim, has no such constraint).
-    let (n, d, vocab) = (5u32, 16u32, 37u32);
+    // n (rows) small; `d` - the CONTRACTED dim - must be a whole number of
+    // 32-element weight-scale groups (`model::int8::GROUP`), and 64 gives two
+    // of them so a group-indexing slip shows. `vocab`, the output dim, has no
+    // such constraint and is deliberately not round.
+    let (n, d, vocab) = (5u32, 64u32, 37u32);
     let mut rng = Lcg::new(0xC0FFEE);
     let h_host = rng.vec_scaled((n * d) as usize, 1.0);
     let w_host = rng.vec_scaled((vocab * d) as usize, 0.4);

@@ -1041,6 +1041,7 @@ dependencies = [
  "brain-data",
  "brain-diffusion",
  "brain-dit",
+ "brain-gguf",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
@@ -1089,7 +1090,9 @@ name = "brain-gguf"
 version = "1.1.0"
 dependencies = [
  "brain-arch",
+ "brain-backend-cpu",
  "brain-checkpoint",
+ "brain-model",
  "brain-testutil",
  "serde_json",
 ]

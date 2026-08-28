@@ -10,7 +10,7 @@
 //! Shared verbatim (no second copy): `dit::rope` (the multi-axis interleaved
 //! RoPE table build — 3 axes at theta 10000 here instead of 4 at 2000),
 //! `model::block::flash_bidir_step` (joint bidirectional attention),
-//! `model::int8` (per-channel symmetric weight packing + DP4A GEMM),
+//! `model::int8` (group-wise symmetric weight packing + DP4A GEMM),
 //! `model::hostmath` (the conditioning mat-vecs), and the kernels
 //! `layernorm(_rows)`, `film_row`, `gate_row`, `bias_add`, `gelu`,
 //! `rmsnorm_rows`, `rope_interleave_table`, `pack_qkv`, `matmul_reg3`,
@@ -131,7 +131,7 @@ fn f(x: f32) -> u32 {
 // ~12 GiB. Norms / RoPE / attention / GELU always stay f32.
 pub use model::dispatch::Precision;
 
-// The resident-weight representation (fp32 | packed int8 + per-channel
+// The resident-weight representation (fp32 | packed int8 + group-wise
 // scale) is shared with flux2 via `model::dispatch`.
 use model::dispatch::LinW;
 
@@ -298,7 +298,7 @@ impl Flux1Model {
 
     /// [`Flux1Model::new`] at a numeric tier.
     ///
-    /// Under [`Precision::Int8`] every linear is packed int8 + per-channel
+    /// Under [`Precision::Int8`] every linear is packed int8 + group-wise
     /// scales EXCEPT the three boundary linears (`img_in`, `txt_in`,
     /// `final_layer.linear`, ~51 MiB), whose inputs are raw conditioning or the
     /// model's own output — the exemptions FLUX.2 measured as the ones that

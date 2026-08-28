@@ -19,11 +19,14 @@ use qwen3omnimoe::thinker::{layer_decode_step, layer_fwd, thinker_pipelines, Thi
 fn tiny_config(n_layers: u32) -> MoeTextConfig {
     MoeTextConfig {
         n_layers,
-        hidden: 16,       // multiple of 4 -- int8 packing needs k % 4 == 0
-        n_heads: 2,
+        // Every CONTRACTED dim is a whole number of 32-element weight-scale
+        // groups (`model::int8::GROUP`), including `n_heads * head_dim`, which
+        // is `attn.wo`'s K.
+        hidden: 32,
+        n_heads: 4,
         n_kv_heads: 1,
         head_dim: 8,
-        moe_intermediate: 12, // multiple of 4
+        moe_intermediate: 32,
         shared_expert_intermediate: 0,
         n_experts: 5,
         top_k: 2,

@@ -963,13 +963,17 @@ mod tests {
         assert_eq!(windowed.main_reloads(), 0);
     }
 
-    /// Like `tiny_cfg`, but `dim`/`hidden` are multiples of 4 — DP4A int8
-    /// packs 4 lanes per `u32`, so `ZImageDitI8` (unlike the fp32 engines)
-    /// asserts every quantized matmul's K dimension divides evenly by 4;
-    /// `tiny_cfg`'s `hidden = 8*8/3 = 21` fails that and was never
-    /// exercised against int8 before this test.
+    /// Like `tiny_cfg`, but every CONTRACTION width is a whole number of
+    /// `model::int8::GROUP`s (32) - the weight scale is per 32-element block
+    /// of K, so `ZImageDitI8` (unlike the fp32 engines) asserts that for
+    /// every quantized matmul. The two that matter are `dim` (attention
+    /// q/k/v/out and `w1`/`w3`) and `hidden = dim*8/3` (`w2`): `dim = 96`
+    /// makes `hidden = 256`, and both divide by 32. `tiny_cfg`'s own
+    /// `dim = 8`/`hidden = 21` clears neither and is a golden-adjacent
+    /// fp32 fixture that must not move. `axes_dims` sums to `head_dim`
+    /// (96/2 = 48), the same invariant `ZImageConfig::turbo` holds.
     fn tiny_cfg_int8() -> ZImageConfig {
-        ZImageConfig { dim: 12, n_heads: 2, ..tiny_cfg() }
+        ZImageConfig { dim: 96, n_heads: 2, axes_dims: vec![16, 16, 16], ..tiny_cfg() }
     }
 
     /// The whole point of a demote/promote cache: rebuilding purely from

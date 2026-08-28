@@ -20,7 +20,7 @@
 //! disk cost of the old convention is prohibitive rather than merely
 //! wasteful.
 //! Norms, biases, layer-scales, and embeddings/heads stay f32 (any tensor
-//! that is not rank-2, or whose last dimension is not a multiple of 4 —
+//! that is not rank-2, or whose last dimension is not a multiple of 32 -
 //! `model::int8::quantize_weight`'s hard requirement — falls back to f32
 //! automatically; [`should_quantize`] is the single decision point).
 //!
@@ -340,14 +340,15 @@ pub fn hf_to_brain(hf: &str) -> Option<String> {
 /// Whether a tensor of this shape should be int8-quantized: rank-2 (a plain
 /// `[n, k]` weight matrix — attention/expert/shared-expert/router
 /// projections, embeddings, heads) with `k` (the last, contraction,
-/// dimension) a multiple of 4 (`model::int8::quantize_weight`'s hard
-/// requirement). Every real 2-D weight in this checkpoint meets that (2048,
-/// 1024, 1152, 768, 384, 4304, 5120, 3072, 1280, 480, 152064, … are all
-/// multiples of 4); convolutions
+/// dimension) a multiple of `model::int8::GROUP` = 32 (`quantize_weight`'s
+/// hard requirement - the weight scale is per 32-element block of `k`, so a
+/// ragged tail has no scale to belong to). Every real 2-D weight in this
+/// checkpoint meets that (2048, 1024, 1152, 768, 384, 5120, 3072, 1280, 480,
+/// 152064, … are all multiples of 32); convolutions
 /// (rank 3: `[out, in, kernel]`) and every 1-D tensor (norms, biases,
 /// layer-scales) fall through to f32 automatically, not by a special case.
 pub fn should_quantize(shape: &[u64]) -> bool {
-    shape.len() == 2 && shape[1].is_multiple_of(4)
+    shape.len() == 2 && shape[1].is_multiple_of(model::int8::GROUP as u64)
 }
 
 /// Buffers one audio-tower layer's q/k/v weight+bias until all six sibling
@@ -421,7 +422,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
         if quant {
             let (n, k) = (shape[0], shape[1]);
             plan.push((brain_name.clone(), vec![n, k / 4], checkpoint::weightio::Dtype::U32));
-            plan.push((format!("{brain_name}.scale"), vec![n], checkpoint::weightio::Dtype::F32));
+            plan.push((format!("{brain_name}.scale"), vec![n, k / model::int8::GROUP as u64], checkpoint::weightio::Dtype::F32));
         } else {
             plan.push((brain_name.clone(), shape, checkpoint::weightio::Dtype::F32));
         }
@@ -525,8 +526,8 @@ mod import_as_tests {
     #[test]
     fn streams_qkv_fuse_and_quantizes_2d_weights() {
         let dir = scratch_dir("e2e");
-        // d=8 (multiple of 4, so every 2-D weight below is a real
-        // should_quantize candidate), 2 experts, 1 layer per decoder.
+        // d=32 (a whole `model::int8::GROUP`, so every 2-D weight below is a
+        // real should_quantize candidate), 2 experts, 1 layer per decoder.
         let config = serde_json::json!({
             "thinker_config": {
                 "audio_config": {"num_mel_bins": 8, "d_model": 8, "encoder_attention_heads": 2,
@@ -557,27 +558,27 @@ mod import_as_tests {
         // the engine's test-PRNG convention (a plain counter is enough here:
         // int8 tolerance is checked, not exact reproduction of a real model).
         let src_plan: Vec<(&str, Vec<u64>)> = vec![
-            ("thinker.audio_tower.layers.0.self_attn.q_proj.weight", vec![8, 8]),
-            ("thinker.audio_tower.layers.0.self_attn.k_proj.weight", vec![8, 8]),
-            ("thinker.audio_tower.layers.0.self_attn.v_proj.weight", vec![8, 8]),
+            ("thinker.audio_tower.layers.0.self_attn.q_proj.weight", vec![8, 32]),
+            ("thinker.audio_tower.layers.0.self_attn.k_proj.weight", vec![8, 32]),
+            ("thinker.audio_tower.layers.0.self_attn.v_proj.weight", vec![8, 32]),
             ("thinker.audio_tower.layers.0.self_attn.q_proj.bias", vec![8]),
             ("thinker.audio_tower.layers.0.self_attn.k_proj.bias", vec![8]),
             ("thinker.audio_tower.layers.0.self_attn.v_proj.bias", vec![8]),
-            ("thinker.audio_tower.layers.0.self_attn.out_proj.weight", vec![8, 8]), // quantized (2D)
+            ("thinker.audio_tower.layers.0.self_attn.out_proj.weight", vec![8, 32]), // quantized (2D)
             ("thinker.audio_tower.layers.0.self_attn_layer_norm.weight", vec![8]), // f32 (1D)
-            ("thinker.model.embed_tokens.weight", vec![8, 8]),
+            ("thinker.model.embed_tokens.weight", vec![8, 32]),
             ("thinker.model.norm.weight", vec![8]),
             ("thinker.model.layers.0.input_layernorm.weight", vec![8]),
-            ("thinker.model.layers.0.self_attn.q_proj.weight", vec![8, 8]),
-            ("thinker.model.layers.0.mlp.gate.weight", vec![2, 8]), // router
-            ("thinker.model.layers.0.mlp.experts.0.gate_proj.weight", vec![8, 8]),
-            ("thinker.model.layers.0.mlp.experts.0.up_proj.weight", vec![8, 8]),
-            ("thinker.model.layers.0.mlp.experts.0.down_proj.weight", vec![8, 8]),
-            ("thinker.model.layers.0.mlp.experts.1.gate_proj.weight", vec![8, 8]),
-            ("thinker.model.layers.0.mlp.experts.1.up_proj.weight", vec![8, 8]),
-            ("thinker.model.layers.0.mlp.experts.1.down_proj.weight", vec![8, 8]),
-            ("talker.model.layers.0.mlp.shared_expert.gate_proj.weight", vec![8, 8]),
-            ("talker.code_predictor.model.layers.0.self_attn.q_proj.weight", vec![8, 8]),
+            ("thinker.model.layers.0.self_attn.q_proj.weight", vec![8, 32]),
+            ("thinker.model.layers.0.mlp.gate.weight", vec![2, 32]), // router
+            ("thinker.model.layers.0.mlp.experts.0.gate_proj.weight", vec![8, 32]),
+            ("thinker.model.layers.0.mlp.experts.0.up_proj.weight", vec![8, 32]),
+            ("thinker.model.layers.0.mlp.experts.0.down_proj.weight", vec![8, 32]),
+            ("thinker.model.layers.0.mlp.experts.1.gate_proj.weight", vec![8, 32]),
+            ("thinker.model.layers.0.mlp.experts.1.up_proj.weight", vec![8, 32]),
+            ("thinker.model.layers.0.mlp.experts.1.down_proj.weight", vec![8, 32]),
+            ("talker.model.layers.0.mlp.shared_expert.gate_proj.weight", vec![8, 32]),
+            ("talker.code_predictor.model.layers.0.self_attn.q_proj.weight", vec![8, 32]),
             ("code2wav.pre_transformer.norm.weight", vec![8]),
         ];
         let src_data: HashMap<&str, Vec<f32>> =
@@ -605,7 +606,7 @@ mod import_as_tests {
 
         // qkv fused correctly: concatenated q|k|v, in that order.
         let qkv = sts.tensor("audio.blocks.0.qkv.weight").unwrap();
-        assert_eq!(qkv.shape(), &[24, 8]); // 3*8 rows
+        assert_eq!(qkv.shape(), &[24, 32]); // 3*8 rows
         let qkv_f32: Vec<f32> = qkv.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
         let mut want = src_data["thinker.audio_tower.layers.0.self_attn.q_proj.weight"].clone();
         want.extend(&src_data["thinker.audio_tower.layers.0.self_attn.k_proj.weight"]);
@@ -625,24 +626,28 @@ mod import_as_tests {
         let packed_view = sts.tensor("thinker.embed_tokens.weight").unwrap();
         let scale_view = sts.tensor("thinker.embed_tokens.weight.scale").unwrap();
         // The tensor-level byte claim (not a whole-file comparison, which at
-        // this toy 8x8 scale is swamped by per-tensor JSON header overhead --
+        // this toy 8x32 scale is swamped by per-tensor JSON header overhead --
         // real savings come from the WEIGHT bytes shrinking to a quarter, which only
         // dominates the header at real model row widths): packed u32 +
-        // per-row f32 scale must still be fewer bytes than the f32-equivalent
-        // for this same tensor (8*8*4 = 256 B) even at this tiny size, since
-        // the scale is only 1 f32 per ROW (8), not per element (64).
-        let f32_equivalent_bytes = 8 * 8 * 4;
+        // group f32 scale must still be fewer bytes than the f32-equivalent
+        // for this same tensor (8*32*4 = 1024 B) even at this tiny size, since
+        // the scale is 1 f32 per 32-element GROUP (8), not per element (256).
+        let (rows, cols) = (8usize, 32usize);
+        let gs = cols / model::int8::GROUP;
+        let f32_equivalent_bytes = rows * cols * 4;
         let quantized_bytes = packed_view.data().len() + scale_view.data().len();
         assert!(quantized_bytes < f32_equivalent_bytes, "quantized {quantized_bytes} B should be less than f32-equivalent {f32_equivalent_bytes} B");
+        assert_eq!(scale_view.shape(), &[rows, gs], "the scale sibling must be [n, k/32], not [n]");
         let packed_u32: Vec<u32> = packed_view.data().chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
         let scale: Vec<f32> = scale_view.data().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
         let original = &src_data["thinker.model.embed_tokens.weight"];
-        for r in 0..8usize {
-            for c in 0..8usize {
-                let word = packed_u32[r * 2 + c / 4];
+        for r in 0..rows {
+            for c in 0..cols {
+                let word = packed_u32[r * (cols / 4) + c / 4];
                 let q = ((word >> (8 * (c % 4))) & 0xff) as u8 as i8;
-                let deq = q as f32 * scale[r];
-                assert!((deq - original[r * 8 + c]).abs() <= scale[r] * 0.5 + 1e-6, "row {r} col {c}: deq={deq} orig={}", original[r * 8 + c]);
+                let s = scale[r * gs + c / model::int8::GROUP];
+                let deq = q as f32 * s;
+                assert!((deq - original[r * cols + c]).abs() <= s * 0.5 + 1e-6, "row {r} col {c}: deq={deq} orig={}", original[r * cols + c]);
             }
         }
 

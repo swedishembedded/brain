@@ -61,11 +61,12 @@ fn int8_gemm_matches_fp32() {
     gpu.submit(&[], &[s]);
     let want = gpu.read(&refb, m * n);
 
-    // int8: per-channel weight quant on host, activation quant on device.
+    // int8: group-wise (32-element) weight quant on host, per-token activation
+    // quant on device.
     let (wq, sw) = quantize_weight(&w, n, k);
     let wqb = gpu.storage(wq.len() as u64);
     gpu.write(&wqb, &wq);
-    let swb = gpu.storage_init("sw", &sw); // per-channel scales [N]
+    let swb = gpu.storage_init("sw", &sw); // group scales [N, K/32]
     let sx = gpu.storage(m as u64); // per-token scales [M]
     let xq = gpu.storage((m * k / 4) as u64);
     let out8 = gpu.storage((m * n) as u64);

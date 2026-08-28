@@ -250,7 +250,7 @@ pub const fn kernels_with<const N: usize>() -> [(&'static str, &'static str); N]
 pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
 /// One int8-packed weight - `model::int8::quantize_weight`'s packed `[n,
-/// k/4]` u32 words plus its per-row `[n]` f32 scale, alongside the logical
+/// k/4]` u32 words plus its `[n, k/32]` f32 group scale, alongside the logical
 /// `[n, k]` shape needed to dequantize it (the packed shape alone cannot
 /// recover `k`, the same reason `model::int8::upload_dequantized` takes
 /// `n`/`k` as separate arguments).

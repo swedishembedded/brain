@@ -1504,7 +1504,8 @@ impl LtxAvBlock {
 // 24 GiB P40, not throughput. Every
 // int8-eligible linear weight (`crate::int8::is_never_quantized`'s excluded
 // set stays fp32, unchanged) is packed per-output-row (`model::int8::
-// quantize_weight`, 4 int8 lanes/u32) with a fp32 scale; activations are
+// quantize_weight`, 4 int8 lanes/u32) with one fp32 scale per 32-element
+// group of K (`model::int8::GROUP`); activations are
 // quantized dynamically per row each forward (`max_abs_row` -> `quant_pack`,
 // the SAME recipe `crates/wan/src/block.rs`'s `QTier` path uses) and the
 // DP4A GEMM (`matmul_i8_dyn`) dequantizes with `sx*sw` on the way out -
@@ -1784,7 +1785,8 @@ pub use crate::weightcache::{CacheStats, CheckpointId, GenerationCache};
 ///
 /// Per quantized linear (`model::int8::quantize_weight` /
 /// `int4::quantize_weight_q4`): `out*in/4` packed `u32` words at int8 (i.e.
-/// `out*in` bytes) or `out*in/8` at int4, plus `out` fp32 row scales, plus an
+/// `out*in` bytes) or `out*in/8` at int4, plus `out*in/32` fp32 GROUP scales
+/// (`model::int8::GROUP`, the same count at either tier), plus an
 /// unquantized fp32 bias where the linear has one. Everything else - the two
 /// RMSNorm gains, the optional attention gate, and the two scale/shift tables
 /// - stays fp32 exactly as the cache stores it.
@@ -1800,7 +1802,7 @@ pub fn cached_block_bytes(cfg: &LtxDitConfig, tier: QTier) -> u64 {
             QTier::Int8 => out * inp / 4,
             QTier::Int4 => out * inp / 8,
         };
-        words * 4 + f32s(out)
+        words * 4 + f32s(out * inp / model::int8::GROUP as u64)
     };
     // One attention module: to_q/to_k/to_v (dim x dim, biased), to_out.0
     // (dim x dim, biased), q_norm/k_norm (dim each), optional gate.
@@ -1843,8 +1845,9 @@ impl QBlockWeights {
 
 /// Quantize `x` (`[rows, k]`) into `(xq, sx)` with a fresh dynamic per-row
 /// scale - the shared activation-quant step every quantized linear below
-/// reads. `k` must be a multiple of 4 (`model::int8::quantize_weight`'s own
-/// packing requirement).
+/// reads. `k` must be a multiple of 4 (`quant_pack` writes four int8 per
+/// `u32`); the WEIGHT side additionally needs `k % 32 == 0`
+/// (`model::int8::GROUP`).
 fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx: &DeviceBuffer, rows: u32, k: u32) {
     s.push(gpu.step(K_MAX_ABS_ROW, &[x, sx], &[rows, k], rows));
     s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));
@@ -2620,7 +2623,7 @@ pub fn cached_av_block_bytes(vcfg: &LtxDitConfig, acfg: &LtxAudioDitConfig, tier
             QTier::Int8 => out * inp / 4,
             QTier::Int4 => out * inp / 8,
         };
-        words * 4 + f32s(out)
+        words * 4 + f32s(out * inp / model::int8::GROUP as u64)
     };
     let gated = vcfg.apply_gated_attention;
     // One `Attention` at `(q_dim, kv_dim, inner_dim)`: to_q [inner,q]+bias,

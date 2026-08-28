@@ -129,7 +129,9 @@ fn i8_model_without_int8_dot_capability_falls_back_to_fp32_not_a_panic() {
 /// available) - this test's OWN premise, checked, not assumed.
 #[test]
 fn i8_model_reports_int_ops_on_an_int8_dot_capable_device() {
-    let cfg = QwenConfig::tiny();
+    // `tiny_i8`, not `tiny`: every quantized `k` must be a whole
+    // `model::int8::GROUP` (see `QwenConfig::tiny_i8`'s own doc).
+    let cfg = QwenConfig::tiny_i8();
     let init = init_weights(&cfg, 3);
     let m8 = Qwen::new_shard_i8(cfg.clone(), 1, cfg.block_size, &init, Shard::whole(cfg.n_layers as usize));
     if !m8.gpu().caps().numeric.int8_dot {

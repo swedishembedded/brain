@@ -616,8 +616,8 @@ impl Int8Weights {
 
 /// Quantize one block's seven linears from `t` plus read its two f32 norm
 /// weights — the checkpoint-read + compute half, shared by [`Int8Weights::
-/// upload`]/[`Int8Weights::upload_with_cache`]. `quantize_weight` computes a
-/// per-row scale over the WHOLE matrix, so this pulls one tensor at a time
+/// upload`]/[`Int8Weights::upload_with_cache`]. `quantize_weight` needs a
+/// whole row before it can pack it, so this pulls one tensor at a time
 /// (never the whole model) but cannot itself be chunk-bounded further
 /// without a row-block quantizer — that refinement belongs to the windowed-
 /// execution phase, which needs it anyway for the fp32 stress case.

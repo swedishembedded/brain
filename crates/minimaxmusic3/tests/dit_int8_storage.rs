@@ -2,12 +2,17 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! INT8 STORAGE round-trip parity for the flow-matching DiT, mirroring
-//! `crates/ltxv/tests/int8_storage.rs`'s own "the test that matters": the
-//! SAME tiny [`DitConfig::tiny`] forward pass run twice - once at plain
-//! f32, once with every eligible weight round-tripped through
-//! `minimaxmusic3::dit_int8` storage first - with the two outputs compared
-//! by cosine. This bounds int8's real accuracy cost on an actual model
-//! forward, not just per-tensor norm preservation.
+//! `crates/ltxv/tests/int8_storage.rs`'s own "the test that matters": one
+//! tiny forward pass run twice - once at plain f32, once with every eligible
+//! weight round-tripped through `minimaxmusic3::dit_int8` storage first -
+//! with the two outputs compared by cosine. This bounds int8's real accuracy
+//! cost on an actual model forward, not just per-tensor norm preservation.
+//!
+//! The int8 test uses [`tiny_quantizable`] rather than [`DitConfig::tiny`]:
+//! `tiny`'s inner dim (8) and `ff_inner_dim` (16) are each smaller than ONE
+//! `model::int8::GROUP`, so nothing in it is quantizable at all, and `tiny`
+//! itself is pinned by `dit_parity.rs` against a diffusers golden and must
+//! not move. The f32 round-trip test above keeps using `tiny` unchanged.
 //!
 //! No fixture dependency (unlike `dit_parity.rs`): [`dit_train::
 //! random_weights`] needs no golden, so this test always runs.
@@ -94,14 +99,24 @@ fn to_tensors_round_trips_through_from_tensors() {
     assert_eq!(got, want, "to_tensors/from_tensors round trip must reproduce the exact same forward output");
 }
 
+/// [`DitConfig::tiny`]'s shape with the two CONTRACTION widths raised to
+/// whole `model::int8::GROUP`s: `inner_dim` (attention q/k/v/out and `ff.0`
+/// all contract over it) and `ff_inner_dim` (`ff.2`'s own K). Everything
+/// else - layer count, head count, the channel/condition widths, the rotary
+/// split - is `tiny`'s, so this stays a toy config and still exercises two
+/// blocks' worth of attention and FFN.
+fn tiny_quantizable() -> DitConfig {
+    DitConfig { attention_head_dim: 16, ff_inner_dim: 64, ..DitConfig::tiny() }
+}
+
 #[test]
 fn dit_forward_stays_close_after_int8_storage_round_trip() {
-    let cfg = DitConfig::tiny();
+    let cfg = tiny_quantizable();
     let (w, latents, condition, timestep, length) = fixture(&cfg, 2);
     let tensors = to_tensors(&w, &cfg);
 
     let q = quantize_tensors(&tensors);
-    println!("int8 storage: {} of {} tensors int8-eligible for DitConfig::tiny()", q.int8.len(), tensors.len());
+    println!("int8 storage: {} of {} tensors int8-eligible for tiny_quantizable()", q.int8.len(), tensors.len());
     assert!(!q.int8.is_empty(), "tiny config must have at least one int8-eligible tensor");
     // Exactly the DiT's 6 per-block linears, per block.
     assert_eq!(q.int8.len(), cfg.num_layers as usize * 6, "unexpected int8-eligible tensor count");
@@ -116,7 +131,7 @@ fn dit_forward_stays_close_after_int8_storage_round_trip() {
     assert_eq!(out_f32.len(), out_i8.len());
     let (cos, max_abs) = brain_testutil::parity::compare(&out_f32, &out_i8);
     println!("int8 storage forward parity: cosine={cos:.9} max_abs={max_abs:.6}");
-    // Measured on this fixture (DitConfig::tiny, length=3): cosine lands at
+    // Measured on this fixture (tiny_quantizable, length=3): cosine lands at
     // 0.999999+ - the boundary/conditioning tables (proj_in/proj_out/
     // time_embed) held at full f32 keep int8 noise from ever reaching the
     // output through more than 2 blocks' worth of attention/FFN

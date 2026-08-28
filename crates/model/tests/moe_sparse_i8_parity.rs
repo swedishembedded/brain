@@ -47,8 +47,10 @@ fn int8_matches_fp32_sparse_within_quant_tolerance() {
         quant: [idx(&g, "max_abs_row"), idx(&g, "quant_pack")],
     };
 
-    // d_model and moe_ff must be multiples of 4 (int8 packing).
-    let shape = MoeShape { rows: 6, d_model: 16, moe_ff: 12, n_experts: 8, top_k: 2 };
+    // d_model and moe_ff must be multiples of 32: each is the CONTRACTION
+    // width of some expert linear, and `model::int8::quantize_weight` scales
+    // per 32-element group of it (`model::int8::GROUP`).
+    let shape = MoeShape { rows: 6, d_model: 64, moe_ff: 32, n_experts: 8, top_k: 2 };
     let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
 
     let mut rng = Lcg::new(4242);

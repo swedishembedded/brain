@@ -144,7 +144,7 @@ fn cache_hit_is_correct_across_different_contexts_sharing_one_cache() {
 /// estimate wrong.
 #[test]
 fn cached_block_bytes_matches_a_real_measured_block() {
-    for (label, base) in [("tiny", LtxDitConfig::tiny()), ("tiny_gated", LtxDitConfig::tiny_gated())] {
+    for (label, base) in [("tiny", LtxDitConfig::tiny()), ("tiny_gated", tiny_gated_quantizable())] {
         for tier in [QTier::Int8, QTier::Int4] {
             let cfg = LtxDitConfig { num_layers: 1, ..base };
             let w = random_tiny_weights(&cfg, 0x000C_ACE7);
@@ -156,6 +156,27 @@ fn cached_block_bytes_matches_a_real_measured_block() {
             let predicted = ltxv::block::cached_block_bytes(&cfg, tier);
             assert_eq!(predicted, measured, "{label}/{tier:?}: the closed-form footprint must equal a really-quantized block's own byte_len");
         }
+    }
+}
+
+/// [`LtxDitConfig::tiny_gated`] at dims the quantized tiers can actually
+/// take. `tiny_gated` is a GOLDEN-parity fixture: its `inner_dim = 24` is
+/// transcribed from the reference dumper and must not move. But
+/// `model::int8::quantize_weight` scales per 32-element group of a linear's
+/// contraction axis (`model::int8::GROUP`), so 24 is not quantizable at all.
+/// 96 keeps everything this config exists to exercise - the gates on, the
+/// connector on, and TWO different factorizations of one `inner_dim`
+/// (3 x 32 for the main attention, 4 x 24 for the connector, so a
+/// heads/head_dim transpose between them still cannot hide) - while being
+/// three whole scale groups wide. `head_dim` stays even and `inner_dim / 2`
+/// stays a multiple of `num_heads`, `crate::rope::ltx_rope_tables`'s own
+/// divisibility rule.
+fn tiny_gated_quantizable() -> LtxDitConfig {
+    LtxDitConfig {
+        inner_dim: 96,
+        cross_attention_dim: 96,
+        connector_attention_head_dim: 24,
+        ..LtxDitConfig::tiny_gated()
     }
 }
 
@@ -284,7 +305,7 @@ fn eviction_under_a_tight_ram_ceiling_repopulates_correctly() {
 /// its output is skipping repeated work, not approximating it.
 #[test]
 fn cached_connector_routing_is_bit_identical_to_recomputing_it() {
-    let cfg = LtxDitConfig { num_layers: 2, ..LtxDitConfig::tiny_gated() };
+    let cfg = LtxDitConfig { num_layers: 2, ..tiny_gated_quantizable() };
     assert!(cfg.use_embeddings_connector, "test setup: this config must actually route through the connector");
     let w = random_tiny_weights(&cfg, 0x000C_ACE3);
     let head = load_head_tensors_from_source(&w, &cfg);
@@ -315,7 +336,7 @@ fn cached_connector_routing_is_bit_identical_to_recomputing_it() {
 /// the two outputs would collapse onto each other.
 #[test]
 fn two_contexts_sharing_one_cache_each_get_their_own_connector_routing() {
-    let cfg = LtxDitConfig { num_layers: 2, ..LtxDitConfig::tiny_gated() };
+    let cfg = LtxDitConfig { num_layers: 2, ..tiny_gated_quantizable() };
     let w = random_tiny_weights(&cfg, 0x000C_ACE4);
     let head = load_head_tensors_from_source(&w, &cfg);
     let regs = cfg.connector_num_learnable_registers as usize;

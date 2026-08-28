@@ -240,9 +240,15 @@ fn an_unpackable_shape_is_refused_with_a_reason() {
     let err = probe::gemm(&ops, Dtype::F32, &unpackable(6)).expect_err("K=6 is not a multiple of 4");
     assert!(err.to_string().contains("multiple of 4"), "{err}");
 
-    let err =
-        probe::gemm(&ops, Dtype::Q4, &unpackable(12)).expect_err("K=12 is not a multiple of 8");
-    assert!(err.to_string().contains("multiple of 8"), "{err}");
+    // A QUANTIZED tier needs whole 32-element weight-scale groups
+    // (`model::int8::GROUP`), which is stricter than either packing width.
+    let err = probe::gemm(&ops, Dtype::Q4, &unpackable(12)).expect_err("K=12 is not a multiple of 32");
+    assert!(err.to_string().contains("multiple of 32"), "{err}");
+    let err = probe::gemm(&ops, Dtype::I8, &unpackable(16)).expect_err("K=16 is not a multiple of 32");
+    assert!(err.to_string().contains("multiple of 32"), "{err}");
+    // ... and an fp32 plan at the same K is fine: only the weight quantizers
+    // group, and the activation pack's own %4 is all fp32 has to clear.
+    probe::gemm(&ops, Dtype::F32, &unpackable(16)).expect("K=16 is packable at fp32");
 
     let err = probe::gemm(&ops, Dtype::F32, &Plan { shapes: Vec::new(), ..Plan::default() })
         .expect_err("a plan with no shapes measures nothing");

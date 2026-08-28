@@ -57,7 +57,7 @@ pub fn is_never_quantized(tensor_name: &str) -> bool {
 }
 
 /// One int8-eligible weight after [`quantize_tensors`]: `model::int8::
-/// quantize_weight`'s packed `[n, k/4]` u32 words plus its per-row `[n]`
+/// quantize_weight`'s packed `[n, k/4]` u32 words plus its `[n, k/32]`
 /// f32 scale, alongside the logical `[n, k]` shape - needed to dequantize,
 /// since the packed shape alone cannot recover `k` (same reason `model::
 /// int8::upload_dequantized` takes `n`/`k` as separate arguments).
@@ -77,14 +77,15 @@ pub struct QuantizedTensors {
 }
 
 /// A tensor is int8-storage-eligible iff it is a plain `[n, k]` matrix
-/// (`k % 4 == 0`, the packing width `model::int8::quantize_weight` requires)
-/// and its name is not on the never-quantize list. Every eligible weight in
+/// (`k % 32 == 0`, the scale-group width `model::int8::quantize_weight`
+/// requires - `model::int8::GROUP`) and its name is not on the never-quantize
+/// list. Every eligible weight in
 /// this crate's real tensor manifest is an attention/MLP projection
 /// (`to_q`/`to_k`/`to_v`/`to_out.0`, `ff.net.0.proj`/`ff.net.2`, and their
 /// audio/cross-attention counterparts) - never a bias or a norm gain, since
 /// those are 1D.
 fn is_eligible(name: &str, shape: &[usize]) -> bool {
-    shape.len() == 2 && shape[1].is_multiple_of(4) && !is_never_quantized(name)
+    shape.len() == 2 && shape[1].is_multiple_of(model::int8::GROUP) && !is_never_quantized(name)
 }
 
 /// Quantize every eligible 2D weight in `w` via

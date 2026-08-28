@@ -242,7 +242,7 @@ impl WeightReader {
     /// Decode exactly one tensor as packed `u32` words -- the read side of
     /// [`StWriter::write_u32`]'s int8-native packed layout
     /// (`model::int8::quantize_weight`'s 4-int8-per-u32 packing, stored
-    /// as-is). `None` if the name is unknown. Panics if the tensor's declared
+    /// as-is; see [`PACKED_INT8_LAYOUT`] for the scale sibling's shape). `None` if the name is unknown. Panics if the tensor's declared
     /// dtype is not `U32` (safetensors: [`MmapSafetensors::tensor_u32`]'s own
     /// panic), or unconditionally for GGUF -- brain writes int8-native
     /// checkpoints only as safetensors, so a GGUF caller reaching for this
@@ -369,12 +369,34 @@ fn inval(e: String) -> io::Error {
 
 // ---- incremental safetensors writer ----
 
+/// Version of brain's **packed-int8 on-disk convention** - a `Dtype::U32`
+/// tensor `"{name}"` plus its f32 scale sibling `"{name}.scale"`.
+///
+/// * **1** (never written again): one scale per output row, `scale` shaped
+///   `[n]`. Whole-channel, the defect `AGENTS.md` records at cosine 0.994.
+/// * **2** (current): `model::int8::GROUP`-wise, `scale` shaped `[n, k/32]`,
+///   matching GGUF `Q8_0`'s block exactly.
+///
+/// Deliberately NOT a compatibility switch - brain reads version 2 and
+/// nothing else. It exists so a writer can stamp what it wrote into the
+/// checkpoint's config (`"packed_int8_layout"`), and so the constant that
+/// tells a reader which layout is expected has one home. The check that
+/// actually fires on an old file is `model::int8::check_scale_len`, driven by
+/// the scale tensor's own element count: a version 1 file's `[n]` scale can
+/// never be mistaken for a version 2 `[n, k/32]` one, and the error names the
+/// format change.
+pub const PACKED_INT8_LAYOUT: u32 = 2;
+
+/// The config-JSON key [`PACKED_INT8_LAYOUT`] is stamped under by a writer of
+/// an int8-native checkpoint.
+pub const PACKED_INT8_LAYOUT_KEY: &str = "packed_int8_layout";
+
 /// A planned tensor's on-disk element type. Both variants are 4 bytes/element
 /// (so byte-range planning is dtype-agnostic — only the header's declared
 /// `dtype` string and which `write*` method may target the slot differ).
 /// `U32` is for int8-native storage: `model::int8::quantize_weight`'s packed
 /// layout (4 int8 packed per u32) stored as-is, no repacking at load time —
-/// see [`StWriter::create_mixed`].
+/// see [`StWriter::create_mixed`] and [`PACKED_INT8_LAYOUT`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dtype {
     F32,
@@ -437,8 +459,8 @@ impl StWriter {
     /// [`create`](StWriter::create), but each planned tensor declares its own
     /// [`Dtype`] — the seam an int8-native checkpoint (packed weights stored
     /// as `Dtype::U32`, matching `model::int8::quantize_weight`'s layout
-    /// exactly, plus an ordinary `Dtype::F32` per-channel scale tensor
-    /// alongside it) needs. `create` is unchanged and still produces
+    /// exactly, plus an ordinary `Dtype::F32` `[n, k/32]` group-scale tensor
+    /// alongside it - [`PACKED_INT8_LAYOUT`]) needs. `create` is unchanged and still produces
     /// byte-identical output to before this existed — every current caller
     /// (`qwen`/`glm`/`lfm`'s importers) is unaffected.
     pub fn create_mixed(
@@ -662,17 +684,19 @@ mod tests {
     fn create_mixed_writes_packed_int8_alongside_f32_scale() {
         // The Qwen3-Omni motivation: a real DP4A packed weight
         // (model::int8::quantize_weight's exact output shape) plus its
-        // per-channel scale, stored as two entries with different dtypes in
-        // one file, and an ordinary F32 tensor alongside them.
+        // group-wise [n, k/32] scale, stored as two entries with different
+        // dtypes in one file, and an ordinary F32 tensor alongside them.
         let p = scratch("i8-mixed");
         let cfg = serde_json::json!({"family": "omni"});
         let card = ModelCard::new("m", "omni");
+        // n=2, k=64: packed [2, k/4=16] u32, scale [2, k/32=2] f32 - a real
+        // pair of shapes under PACKED_INT8_LAYOUT, not an arbitrary one.
         let plan = vec![
-            ("expert.0.gate.weight".to_string(), vec![4u64, 2], Dtype::U32), // [n=4, k/4=2]
-            ("expert.0.gate.scale".to_string(), vec![4u64], Dtype::F32),
+            ("expert.0.gate.weight".to_string(), vec![2u64, 16], Dtype::U32),
+            ("expert.0.gate.scale".to_string(), vec![2u64, 2], Dtype::F32),
             ("plain.weight".to_string(), vec![3u64], Dtype::F32),
         ];
-        let packed: Vec<u32> = vec![0x0403_0201, 0xFFFE_FDFC, 0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444, 0x5555_5555, 0x6666_6666];
+        let packed: Vec<u32> = (0..32u32).map(|i| 0x0403_0201u32.wrapping_mul(i + 1) ^ (i << 24)).collect();
         let scale = vec![0.01f32, 0.02, 0.03, 0.04];
         let plain = vec![9.0f32, 8.0, 7.0];
 
@@ -696,7 +720,7 @@ mod tests {
 
         let full = safetensors::SafeTensors::deserialize(&bytes).unwrap();
         let got_packed = full.tensor("expert.0.gate.weight").unwrap();
-        assert_eq!(got_packed.shape(), &[4, 2]);
+        assert_eq!(got_packed.shape(), &[2, 16]);
         let got_packed_u32: Vec<u32> = got_packed.data().chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
         assert_eq!(got_packed_u32, packed);
 

@@ -11,9 +11,10 @@
 //!
 //! # Why this exists
 //!
-//! The DiT's int8 tier wants, per linear, `(packed u32, per-row scale)`. A
-//! Q8_0 checkpoint already stores int8 with a per-32-block fp16 scale. Going
-//! Q8_0 -> fp32 -> per-row int8 therefore materializes an entire fp32 model
+//! The DiT's int8 tier wants, per linear, `(packed u32, per-32-group scale)`.
+//! A Q8_0 checkpoint already stores int8 with a per-32-block fp16 scale - the
+//! SAME group size, which is why `model::int8::GROUP` is 32. Going
+//! Q8_0 -> fp32 -> group-wise int8 therefore materializes an entire fp32 model
 //! purely as an intermediate: on klein-9b that is 36.3 GB written, read back
 //! twice by the quantizer, and freed again, none of which the result depends
 //! on.
@@ -31,9 +32,17 @@
 //!   fp32's 24-bit significand. It is exact, not rounded.
 //! - Every f32 that the round trip would have fed to the quantizer is
 //!   therefore reproduced exactly by decoding the same block.
-//! - The scale and the packing then run through `model::int8::row_scale` and
-//!   `pack_row`, which are the very functions `quantize_weight` calls. Not a
-//!   reimplementation of them - the same code.
+//! - The scales and the packing then run through `model::int8::group_scales`
+//!   and `pack_row`, which are the very functions `quantize_weight` calls. Not
+//!   a reimplementation of them - the same code.
+//!
+//! Now that `model::int8::GROUP` is 32, one of brain's scale groups IS one
+//! Q8_0 block, and the requantization is not merely bit-identical to the fp32
+//! round trip - it is the IDENTITY. A Q8_0 block stores `d = max|x|/127` and
+//! `q = round(x/d)`, so `max|q| = 127`; the group's own absmax is therefore
+//! `127*d`, brain's scale comes out as exactly `d`, and every `q` re-quantizes
+//! to itself. Requantizing a Q8_0 checkpoint into this layout loses nothing at
+//! all, which was not true when the scale spanned a whole row.
 //!
 //! So the packed `u32` words and the `f32` scales agree bit for bit, which is
 //! why `gguf_int8_is_bit_identical_to_the_fp32_round_trip` asserts with
@@ -218,17 +227,18 @@ impl<'a> DitWeights<'a> {
             return None;
         }
         let kg = k / 4;
+        let gs = k / model::int8::GROUP;
         let mut packed = vec![0u32; n_out * kg];
-        let mut sw = vec![0f32; n_out];
+        let mut sw = vec![0f32; n_out * gs];
         // One output row per task: each reads only its own block range and
-        // writes only its own words and scale, so this is bit-identical to
+        // writes only its own words and scales, so this is bit-identical to
         // the serial form and to the fp32 round trip alike.
-        backend_cpu::par::chunks_mut_with(&mut packed, kg, &mut sw, |i, prow, s| {
+        backend_cpu::par::chunks2_mut(&mut packed, kg, &mut sw, gs, |i, prow, srow| {
             let mut row = Vec::with_capacity(k);
             let e0 = (r0 + i) * stride + c0;
             checkpoint::gguf::q8_0_expand(raw, e0, e0 + k, &mut row).expect("block-aligned above");
-            *s = model::int8::row_scale(&row);
-            model::int8::pack_row(&row, 1.0 / *s, prow);
+            model::int8::group_scales(&row, srow);
+            model::int8::pack_row(&row, srow, prow);
         });
         Some((packed, sw))
     }

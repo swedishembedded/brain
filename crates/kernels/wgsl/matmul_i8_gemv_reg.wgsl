@@ -18,8 +18,9 @@
 // it at dispatch, so a change to either that is not mirrored in the other
 // silently changes results on exactly one backend.
 //
-//   x_q : [M, K/4] u32   w_q : [N, K/4] u32   sx: [M]   sw: [N]
-//   out : [M, N] f32     params: m, kg (=K/4), n. REQUIRES m <= MREG.
+//   x_q : [M, K/4] u32   w_q : [N, K/4] u32   sx: [M]   sw: [N, K/32]
+//   out : [M, N] f32     params: m, kg (=K/4), n. REQUIRES m <= MREG and K a
+//   multiple of 32.
 //   Dispatch: n * 64 invocations - the SAME thread count `matmul_i8_gemv`
 //   takes, so a caller needs no change at all.
 //
@@ -55,13 +56,17 @@
 //
 // ## Bit-identity with `matmul_i8_gemv`
 //
-// Stronger here than in the fp32 pair, and by construction rather than by
-// care: the accumulator is `i32` and integer addition is exact and
-// associative, so no grouping of the same terms can differ. On top of that the
-// k-stride is the same (`g = t; g += 64`), each output keeps its own
-// accumulator, and the final fold sums the same 64 partials in the same
-// ascending order. The single f32 operation is the dequantise multiply at the
-// very end, applied to an identical integer. Gated on the raw bits.
+// The accumulator is f32 here (the weight scale is per 32-element GROUP of K,
+// so a word cannot wait for a channel-wide integer sum before it is scaled -
+// see `matmul_i8_gemv`'s own header for why the k-stride leaves no same-group
+// run to accumulate over). f32 addition is NOT associative, so bit-identity is
+// no longer free the way it was with an i32 accumulator; it is instead a
+// property of these two kernels performing the identical operations in the
+// identical order. The k-stride is the same (`g = t; g += 64`), the same
+// `f32(dot4I8Packed(...)) * sw[...]` term is formed per word, each output
+// keeps its own accumulator, and the final fold sums the same 64 partials in
+// the same ascending order. Gated on the raw bits - which is exactly why the
+// two must be edited together.
 //
 // ## `MREG` and rows past `p.m`
 //
@@ -82,7 +87,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, kg]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, kg]
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
-@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N]
+@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, kg/8]
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
 /// Rows this specialisation carries in registers. `kernels::template`
@@ -90,9 +95,12 @@ struct Params {
 /// picks which rewrite runs for a given `p.m`.
 const MREG: u32 = 32u;
 
+/// Packed u32 words per weight-scale group: GROUP(32 int8) / 4 lanes per word.
+const WPG: u32 = 8u;
+
 // Only the cross-thread FOLD needs shared memory now, so this is `MREG * 64`
-// i32s rather than the worst case - 512 B at MREG = 2, against 8 KB.
-var<workgroup> partial: array<i32, MREG * 64u>;
+// f32s rather than the worst case - 512 B at MREG = 2, against 8 KB.
+var<workgroup> partial: array<f32, MREG * 64u>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg: vec3<u32>,
@@ -102,20 +110,22 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     let t = li.x;
     if (col >= p.n || p.m == 0u) { return; }
 
-    var acc: array<i32, MREG>;
+    var acc: array<f32, MREG>;
     var xoff: array<u32, MREG>;
     for (var m = 0u; m < MREG; m = m + 1u) {
-        acc[m] = 0;
+        acc[m] = 0.0;
         // Rows past `p.m` are computed and thrown away (see the header); point
         // them at row 0, which is already hot, instead of past the binding.
         xoff[m] = select(0u, m * p.kg, m < p.m);
     }
 
     let wbase = col * p.kg;
+    let swbase = col * (p.kg / WPG);
     for (var g = t; g < p.kg; g = g + 64u) {
         let wv = wq[wbase + g];
+        let s = sw[swbase + g / WPG];
         for (var m = 0u; m < MREG; m = m + 1u) {
-            acc[m] = acc[m] + dot4I8Packed(xq[xoff[m] + g], wv);
+            acc[m] = acc[m] + f32(dot4I8Packed(xq[xoff[m] + g], wv)) * s;
         }
     }
 
@@ -132,10 +142,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     // PAST the workgroup array. Under the contract the two expressions are
     // equal, so this costs nothing and cannot change a correct result.
     if (t < min(p.m, MREG)) {
-        var s = 0;
+        var s = 0.0;
         for (var i = 0u; i < 64u; i = i + 1u) {
             s = s + partial[t * 64u + i];
         }
-        out[t * p.n + col] = f32(s) * sx[t] * sw[col];
+        out[t * p.n + col] = s * sx[t];
     }
 }

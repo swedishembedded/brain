@@ -21,7 +21,7 @@ use std::path::Path;
 
 use gpu_core::Gpu;
 use ltxv::block::{EmbeddingsConnector, KERNELS};
-use ltxv::{load_tiny_weights, LtxAvDit, LtxAvDitConfig};
+use ltxv::{load_tiny_weights, LtxAudioDitConfig, LtxAvDit, LtxAvDitConfig, LtxDitConfig};
 
 // ------------------------------------------------------------------ metrics
 
@@ -407,8 +407,44 @@ struct AvBlockCase {
 }
 
 impl AvBlockCase {
+    /// [`LtxAvDitConfig::tiny_gated`]'s shape at dims the QUANTIZED tiers can
+    /// take. `tiny_gated` is a golden-parity fixture (video `inner_dim` 24,
+    /// audio 12) and must not move; `model::int8::quantize_weight` scales per
+    /// 32-element group of each linear's contraction axis, and neither 24 nor
+    /// 12 is a whole group. This fixture carries no golden - its weights are
+    /// `random_av_tiny_weights` - so it can be widened to 96 (video) and 64
+    /// (audio), which keeps the two streams' dims DISTINCT (lesson #4), keeps
+    /// the head COUNT equal across streams and `audio.cross_attention_dim ==
+    /// audio.inner_dim` (`LtxAvDitConfig::assert_supported`), keeps every
+    /// `head_dim` even with `inner_dim/2` a multiple of `num_heads`
+    /// (`crate::rope::ltx_rope_tables`), and keeps both connectors a DIFFERENT
+    /// factorization of their own stream's `inner_dim` than the main
+    /// attention's.
+    fn quantizable_gated_cfg() -> LtxAvDitConfig {
+        let base = LtxAvDitConfig::tiny_gated();
+        LtxAvDitConfig {
+            video: LtxDitConfig {
+                inner_dim: 96,
+                num_heads: 2,
+                cross_attention_dim: 96,
+                connector_num_attention_heads: 4,
+                connector_attention_head_dim: 24,
+                ..base.video
+            },
+            audio: LtxAudioDitConfig {
+                inner_dim: 64,
+                num_heads: 2,
+                cross_attention_dim: 64,
+                connector_num_attention_heads: 4,
+                connector_attention_head_dim: 16,
+                ..base.audio
+            },
+            ..base
+        }
+    }
+
     fn tiny(seed: u64) -> AvBlockCase {
-        let cfg = LtxAvDitConfig::tiny_gated();
+        let cfg = AvBlockCase::quantizable_gated_cfg();
         cfg.assert_supported();
         assert!(cfg.video.apply_gated_attention, "this suite must exercise the GATED attention path");
         let (vdim, adim) = (cfg.video.inner_dim as usize, cfg.audio.inner_dim as usize);

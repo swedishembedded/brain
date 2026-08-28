@@ -11,7 +11,7 @@
 // @dtype f32
 //
 // Naive W4A8 matmul: 8-bit dynamic per-token activations times 4-bit
-// per-channel weights, out = dequant(x_q8 @ w_q4^T). The int4-weight sibling
+// GROUP-WISE-scaled weights, out = dequant(x_q8 @ w_q4^T). The int4-weight sibling
 // of `matmul.wgsl` / `matmul_i8_dyn.wgsl`'s naive tier -- deliberately NOT
 // register-tiled -- get it correct, then freeze it. A register-tiled
 // `matmul_q4_reg`/`matmul_q4_dyn` mirroring
@@ -21,9 +21,12 @@
 //
 //   x_q : [M, K/4] u32  -- 4 int8 activations packed along K per u32 (model::int8 / quant_pack.wgsl)
 //   w_q : [N, K/8] u32  -- 8 int4 weights    packed along K per u32 (model::int4::quantize_weight_q4)
-//   sx  : [M] per-token activation scale     sw : [N] per-channel weight scale
-//   out : [M, N] f32    -- out[m,n] = acc_i32 * sx[m] * sw[n]
-//   params: m, k (LOGICAL K, a multiple of 8), n. `k` is passed un-divided
+//   sx  : [M] per-token activation scale
+//   sw  : [N, K/32] GROUP-WISE weight scale, one per 32 int4 along K
+//         (`model::int8::GROUP`, which the q4 tier shares - Q4_0's block is
+//         Q8_0's). Four w words per group.
+//   out : [M, N] f32    -- out[m,n] = sx[m] * sum_g acc_i32[m,n,g] * sw[n,g]
+//   params: m, k (LOGICAL K, a multiple of 32), n. `k` is passed un-divided
 //   because x and w have DIFFERENT word densities for the same K (4 vs 8
 //   values/u32) -- a single shared `kg` the way the int8 family uses would be
 //   ambiguous about which operand it counts.
@@ -56,11 +59,17 @@
 
 struct Params { m: u32, k: u32, n: u32 };
 
+// Packed u32 words of w per weight-scale group: GROUP(32 int4) / 8 nibbles per
+// word. The inner loop walks K in order, so a group's four words are
+// consecutive and the integer sum runs to the group boundary before it is
+// converted and scaled - one FMA per 32 weights, not per 8.
+const WPG4: u32 = 4u;
+
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k/8]
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
-@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N]
+@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, k/32]
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
 @compute @workgroup_size(64)
@@ -77,23 +86,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let kgw = p.k / 8u; // w words per row (int4 packing)
     let x_base = row * kgx;
     let w_base = col * kgw;
-    var acc = 0i;
-    for (var g: u32 = 0u; g < kgw; g = g + 1u) {
-        let ww = wq[w_base + g];
-        // One octet (8 logical K values) of w == exactly two u32 of x.
-        let xw0 = xq[x_base + 2u * g];
-        let xw1 = xq[x_base + 2u * g + 1u];
-        for (var b: u32 = 0u; b < 8u; b = b + 1u) {
-            let wn = bitcast<i32>(ww << (28u - 4u * b)) >> 28u;
-            var xb: i32;
-            if (b < 4u) {
-                xb = bitcast<i32>(xw0 << (24u - 8u * b)) >> 24u;
-            } else {
-                let bb = b - 4u;
-                xb = bitcast<i32>(xw1 << (24u - 8u * bb)) >> 24u;
+    let ng = kgw / WPG4;
+    let s_base = col * ng;
+    var accf = 0.0;
+    for (var gr: u32 = 0u; gr < ng; gr = gr + 1u) {
+        var acc = 0i;
+        for (var j: u32 = 0u; j < WPG4; j = j + 1u) {
+            let g = gr * WPG4 + j;
+            let ww = wq[w_base + g];
+            // One octet (8 logical K values) of w == exactly two u32 of x.
+            let xw0 = xq[x_base + 2u * g];
+            let xw1 = xq[x_base + 2u * g + 1u];
+            for (var b: u32 = 0u; b < 8u; b = b + 1u) {
+                let wn = bitcast<i32>(ww << (28u - 4u * b)) >> 28u;
+                var xb: i32;
+                if (b < 4u) {
+                    xb = bitcast<i32>(xw0 << (24u - 8u * b)) >> 24u;
+                } else {
+                    let bb = b - 4u;
+                    xb = bitcast<i32>(xw1 << (24u - 8u * bb)) >> 24u;
+                }
+                acc = acc + wn * xb;
             }
-            acc = acc + wn * xb;
         }
+        accf = accf + f32(acc) * sw[s_base + gr];
     }
-    out[idx] = f32(acc) * sx[row] * sw[col];
+    out[idx] = accf * sx[row];
 }

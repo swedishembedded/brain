@@ -44,7 +44,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
         .param(
-            ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (per-channel weights + dynamic activation quant)")
+            ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (group-wise 32-element weight scales + dynamic activation quant)")
                 .default(json!("fp32")),
         )
         .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the tokenizer's <|im_end|>/<|endoftext|> when a tokenizer is given; -1 disables)"))

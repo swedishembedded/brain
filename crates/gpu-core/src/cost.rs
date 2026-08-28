@@ -431,7 +431,9 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // (the batched int8 forward) could not report a rate at all.
         "matmul_i8" | "matmul_i8_dyn" | "matmul_i8_gemv" => {
             let (m, kg, n) = (p(0)?, p(1)?, p(2)?);
-            c(2 * m * n, 8 * m * kg * n, 4 * (m * kg + n * kg + m * n + m + n))
+            // Weight scales are GROUP-wise (`model::int8::GROUP` = 32 int8 =
+            // 8 packed words), so the `sw` term is `n * kg/8`, not `n`.
+            c(2 * m * n, 8 * m * kg * n, 4 * (m * kg + n * kg + m * n + m + n * kg / 8))
         }
         // q4 W4A8 GEMMs (int8 activation, int4 weight): params [m, k, n] with
         // `k` the LOGICAL (un-divided) K, unlike the int8 family's `kg` --
@@ -443,7 +445,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // w's HALF-that [n, k/8] u32 footprint.
         "matmul_q4_dyn" | "matmul_q4_gemv" => {
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
-            c(2 * m * n, 2 * m * k * n, 4 * (m * (k / 4) + n * (k / 8) + m * n + m + n))
+            c(2 * m * n, 2 * m * k * n, 4 * (m * (k / 4) + n * (k / 8) + m * n + m + n * (k / 32)))
         }
         // Activation quantization: params [m, k]; q = clamp(round(x/sx)).
         "quant_pack" => {

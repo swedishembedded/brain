@@ -50,7 +50,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("prompt", ParamType::Str, "instruction for the model").default(serde_json::json!("Describe this image.")))
         .param(ParamSpec::new("max_new", ParamType::Int, "max caption tokens").default(serde_json::json!(48)))
         .param(
-            ParamSpec::new("precision", ParamType::Str, "decoder precision: fp32, or int8 (per-channel weights + dynamic activation quant)")
+            ParamSpec::new("precision", ParamType::Str, "decoder precision: fp32, or int8 (group-wise 32-element weight scales + dynamic activation quant)")
                 .default(serde_json::json!("fp32")),
         )
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h}").required())
@@ -275,7 +275,7 @@ fn load_decode(dir: &str, precision: &str) -> Result<DecodeStage, String> {
             dec.insert(k, t.data);
         }
     }
-    // Resident KV decoder, fp32 or int8 (per-channel weights + dynamic
+    // Resident KV decoder, fp32 or int8 (group-wise weight scales + dynamic
     // activation quant through the decode-regime packed GEMV). Context sized
     // for prompt + image span + the longest caption.
     let cfg = crate::config::FastVlmConfig::fastvlm_0_5b().decoder;

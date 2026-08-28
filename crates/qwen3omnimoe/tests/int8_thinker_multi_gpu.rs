@@ -22,7 +22,7 @@
 //! (already covered separately by `thinker_int8_parity.rs`/`int8_resident`'s
 //! own tests). The checkpoint quantizes the attention/router projections
 //! exactly like a real `qwen3omnimoe::import` output would (`should_quantize`: rank
-//! 2, last dim a multiple of 4 — true for every 2-D tensor at this config's
+//! 2, last dim a multiple of 32 - true for every 2-D tensor at this config's
 //! shapes), so this also exercises `load_layer_bufs`'s dequantize-on-load
 //! path, not just its plain-f32 path.
 

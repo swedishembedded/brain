@@ -392,10 +392,10 @@ pub struct LmHeadIds8 {
 /// once, share across readers" concern the MoE path has), `lm_head_w` is
 /// ALREADY a packed [`model::moe::Lin8`] view (the checkpoint's real
 /// `lm_head.weight` is quantized on disk by `qwen3omnimoe::import::should_quantize`
-/// like every other rank-2 `k%4==0` weight - a caller loads it via
+/// like every other rank-2 `k%32==0` weight - a caller loads it via
 /// `crate::int8_resident`'s `load_lin8` rather than dequantizing, unlike
 /// [`crate::int8_thinker_resident::load_mat`]'s current always-dequantize
-/// path). vocab is not required to be a multiple of 4 for the OUTPUT side
+/// path). vocab is not required to be a multiple of 32 for the OUTPUT side
 /// (only `d`, the K dimension, needs to be - the packing constraint is on
 /// the CONTRACTED dimension, matching every other int8 GEMM in this crate).
 pub fn lm_head_fwd_i8(g: &Gpu, ids: &LmHeadIds8, lm_head_w: model::moe::Lin8, hidden: &DeviceBuffer, n: u32, d: u32, vocab: u32) -> DeviceBuffer {

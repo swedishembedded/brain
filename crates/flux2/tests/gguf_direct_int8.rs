@@ -13,8 +13,9 @@
 //! at all is arithmetic rather than luck: `deq_q8_0` yields exactly
 //! `(q as i8 as f32) * d`, needing at most 18 significand bits against fp32's
 //! 24, so decoding a block reproduces the round trip's f32 input exactly, and
-//! `row_scale`/`pack_row` are then literally the same functions
-//! `quantize_weight` calls.
+//! `group_scales`/`pack_row` are then literally the same functions
+//! `quantize_weight` calls - over the SAME 32-element blocks Q8_0 itself uses,
+//! now that `model::int8::GROUP` is 32.
 //!
 //! So these tests use `assert_eq!` on the packed `u32` words and on the `f32`
 //! scales. If one goes red, the premise above is wrong somewhere and the fix
@@ -28,8 +29,9 @@ use checkpoint::gguf::MmapGguf;
 use checkpoint::quantize::{convert, Policy, Tier};
 use flux2::weights::DitWeights;
 
-/// Deterministic filler with both signs and a per-row magnitude spread, so
-/// per-row scales genuinely differ and a dropped or transposed scale shows.
+/// Deterministic filler with both signs and a magnitude spread along the row,
+/// so neighbouring 32-element groups genuinely differ and a dropped or
+/// mis-indexed scale shows.
 fn filler(seed: u64, n: usize, row: usize) -> Vec<f32> {
     let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
     (0..n)
@@ -80,7 +82,7 @@ fn gguf_int8_is_bit_identical_to_the_fp32_round_trip() {
         let got = src.try_i8_rect("w", cols, r0, n_out, 0, cols).expect("Q8_0 rect must take the direct path");
         let want = round_trip(&g, "w", cols, r0, n_out, 0, cols);
         assert_eq!(got.0, want.0, "packed words, rows [{r0}, {})", r0 + n_out);
-        assert_eq!(got.1, want.1, "row scales, rows [{r0}, {})", r0 + n_out);
+        assert_eq!(got.1, want.1, "group scales, rows [{r0}, {})", r0 + n_out);
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -97,7 +99,7 @@ fn a_column_block_is_bit_identical_too() {
         let got = src.try_i8_rect("w", stride, 0, rows, c0, k).expect("block-aligned column range must take the direct path");
         let want = round_trip(&g, "w", stride, 0, rows, c0, k);
         assert_eq!(got.0, want.0, "packed words, cols [{c0}, {})", c0 + k);
-        assert_eq!(got.1, want.1, "row scales, cols [{c0}, {})", c0 + k);
+        assert_eq!(got.1, want.1, "group scales, cols [{c0}, {})", c0 + k);
     }
     let _ = std::fs::remove_file(&path);
 }

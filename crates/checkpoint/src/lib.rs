@@ -71,7 +71,8 @@ pub trait TensorSource {
     /// Ordered chunks of at most `max_elems` **packed `u32` words** - the
     /// bounded reader for brain's int8-native storage convention
     /// (`model::int8::quantize_weight`'s 4-int8-per-`u32` layout, written by
-    /// `weightio::StWriter::write_u32`). Same `O(max_elems)` peak guarantee as
+    /// `weightio::StWriter::write_u32`; its scale sibling is a separate
+    /// `[n, k/32]` F32 tensor - `weightio::PACKED_INT8_LAYOUT`). Same `O(max_elems)` peak guarantee as
     /// [`with_tensor_chunks`](Self::with_tensor_chunks), for the dtype that
     /// one cannot serve (a packed tensor has no meaningful f32 decoding).
     ///

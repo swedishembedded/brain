@@ -46,7 +46,8 @@ use gpu_core::Gpu;
 ///
 /// One entry differs from the identity, and it is a brain convention rather
 /// than a dtype: a safetensors `U32` tensor is brain's packed-int8 storage
-/// (`model::int8::quantize_weight`'s 4-lanes-per-word layout), so its shape
+/// (`model::int8::quantize_weight`'s 4-lanes-per-word layout, whose scale
+/// sibling is `[n, k/32]`), so its shape
 /// says `[n, k/4]` while the f32 it decodes to is `[n, k]` - four times as
 /// many elements. Charging it its stored count is a 4x under-report of what a
 /// loader actually places on the card.

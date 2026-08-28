@@ -58,24 +58,60 @@ fn diff(want: &[f32], got: &[f32]) -> (f32, f32) {
     (maxd, maxd / scale)
 }
 
-/// Per-row symmetric quantization, matching `model::int8::quantize_weight` /
-/// `model::int4::quantize_weight_q4`'s math (duplicated here - `gpu-core` has
-/// no dependency on `brain-model`, same reason `bench_matmul.rs`'s own
-/// `quant_rows` duplicates it). Returns packed `[rows, k/per_word]` u32, the
-/// per-row scale, and the UNPACKED signed values for an exact host reference.
-fn quant_rows(x: &[f32], rows: usize, k: usize, per_word: usize, qmax: f32) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
-    let kg = k / per_word;
-    let bits = 32 / per_word;
+/// Weight-scale group along K, mirroring `model::int8::GROUP` (duplicated
+/// here - `gpu-core` has no dependency on `brain-model`, same reason
+/// `bench_matmul.rs`'s own `quant_rows` duplicates the quantizer).
+const GROUP: usize = 32;
+
+/// Per-row symmetric quantization of an ACTIVATION, matching what
+/// `max_abs_row`/`quant_pack` do on device: one scale per row, 4 int8 per u32.
+/// Returns packed `[rows, k/4]` u32, the per-row scale, and the UNPACKED
+/// signed values for an exact host reference.
+fn quant_act(x: &[f32], rows: usize, k: usize) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
+    let kg = k / 4;
     let mut packed = vec![0u32; rows * kg];
     let mut scale = vec![0f32; rows];
     let mut q = vec![0i8; rows * k];
     for r in 0..rows {
         let row = &x[r * k..r * k + k];
-        let amax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
-        let s = amax.max(1e-8) / qmax;
+        let s = row.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0;
         scale[r] = s;
         for c in 0..k {
-            q[r * k + c] = (row[c] / s).round().clamp(-qmax, qmax) as i8;
+            q[r * k + c] = (row[c] / s).round().clamp(-127.0, 127.0) as i8;
+        }
+        for g in 0..kg {
+            let mut word = 0u32;
+            for b in 0..4 {
+                word |= (q[r * k + g * 4 + b] as u8 as u32) << (8 * b);
+            }
+            packed[r * kg + g] = word;
+        }
+    }
+    (packed, scale, q)
+}
+
+/// GROUP-wise symmetric quantization of a WEIGHT, matching
+/// `model::int8::quantize_weight` / `model::int4::quantize_weight_q4`'s math:
+/// one scale per 32 elements of K, `per_word` values per u32. Returns packed
+/// `[rows, k/per_word]` u32, the `[rows, k/32]` scale, and the UNPACKED signed
+/// values for an exact host reference.
+fn quant_weight(x: &[f32], rows: usize, k: usize, per_word: usize, qmax: f32) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
+    assert_eq!(k % GROUP, 0, "quant_weight: k must be a whole number of groups");
+    let kg = k / per_word;
+    let gs = k / GROUP;
+    let bits = 32 / per_word;
+    let mut packed = vec![0u32; rows * kg];
+    let mut scale = vec![0f32; rows * gs];
+    let mut q = vec![0i8; rows * k];
+    for r in 0..rows {
+        let row = &x[r * k..r * k + k];
+        for g in 0..gs {
+            let blk = &row[g * GROUP..g * GROUP + GROUP];
+            let s = blk.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / qmax;
+            scale[r * gs + g] = s;
+            for c in 0..GROUP {
+                q[r * k + g * GROUP + c] = (blk[c] / s).round().clamp(-qmax, qmax) as i8;
+            }
         }
         for g in 0..kg {
             let mut word = 0u32;
@@ -88,16 +124,24 @@ fn quant_rows(x: &[f32], rows: usize, k: usize, per_word: usize, qmax: f32) -> (
     (packed, scale, q)
 }
 
-/// Exact integer reference: `out[m,n] = (sum_k xq*wq) * sx[m] * sw[n]`.
-fn host_int_gemm(xq: &[i8], wq: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+/// Exact reference for the group-wise contract:
+/// `out[m,n] = sx[m] * sum_g (sum_{k in g} xq*wq) * sw[n,g]`. The inner sum is
+/// integer and exact; only the cross-group fold is floating point, which is
+/// exactly what the kernels do.
+fn host_group_gemm(xq: &[i8], wq: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    let gs = k / GROUP;
     let mut out = vec![0f32; m * n];
     for mi in 0..m {
         for ni in 0..n {
-            let mut acc = 0i32;
-            for ki in 0..k {
-                acc += xq[mi * k + ki] as i32 * wq[ni * k + ki] as i32;
+            let mut acc = 0f32;
+            for g in 0..gs {
+                let mut ia = 0i32;
+                for ki in g * GROUP..g * GROUP + GROUP {
+                    ia += xq[mi * k + ki] as i32 * wq[ni * k + ki] as i32;
+                }
+                acc += ia as f32 * sw[ni * gs + g];
             }
-            out[mi * n + ni] = acc as f32 * sx[mi] * sw[ni];
+            out[mi * n + ni] = acc * sx[mi];
         }
     }
     out
@@ -145,9 +189,10 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
     let gpu = gpu_core::testgpu::dev(kernels::ALL);
 
     // Any-M shapes (matmul / matmul_reg2 / matmul_reg3 / matmul_i8_dyn /
-    // matmul_q4_dyn): not multiples of the 128x128 tile, K a multiple of 8
-    // (both the int8 4-pack and the int4 8-pack divide it evenly).
-    let (m, k, n) = (37usize, 24usize, 41usize);
+    // matmul_q4_dyn): not multiples of the 128x128 tile, K a multiple of 32
+    // (the weight-scale GROUP, which subsumes both the int8 4-pack and the
+    // int4 8-pack) and MORE than one group, so a group-indexing slip shows.
+    let (m, k, n) = (37usize, 64usize, 41usize);
     let a = fill(m * k, 1);
     let b = fill(n * k, 2);
     let want_f32 = matmul_abt(&a, &b, m, k, n);
@@ -182,9 +227,9 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
 
     // matmul_i8_dyn / matmul_q4_dyn: any-M tiled quantized GEMMs.
     {
-        let (xq, sx, xi) = quant_rows(&a, m, k, 4, 127.0);
-        let (wq, sw, wi) = quant_rows(&b, n, k, 4, 127.0);
-        let want = host_int_gemm(&xi, &wi, &sx, &sw, m, k, n);
+        let (xq, sx, xi) = quant_act(&a, m, k);
+        let (wq, sw, wi) = quant_weight(&b, n, k, 4, 127.0);
+        let want = host_group_gemm(&xi, &wi, &sx, &sw, m, k, n);
         let xb = gpu.storage(xq.len() as u64);
         gpu.write(&xb, &xq);
         let wb = gpu.storage(wq.len() as u64);
@@ -202,9 +247,9 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         }
     }
     {
-        let (xq, sx, xi) = quant_rows(&a, m, k, 4, 127.0); // W4A8: activations stay int8
-        let (wq, sw, wi) = quant_rows(&b, n, k, 8, 7.0); // weights are int4
-        let want = host_int_gemm(&xi, &wi, &sx, &sw, m, k, n);
+        let (xq, sx, xi) = quant_act(&a, m, k); // W4A8: activations stay int8
+        let (wq, sw, wi) = quant_weight(&b, n, k, 8, 7.0); // weights are int4
+        let want = host_group_gemm(&xi, &wi, &sx, &sw, m, k, n);
         let xb = gpu.storage(xq.len() as u64);
         gpu.write(&xb, &xq);
         let wb = gpu.storage(wq.len() as u64);
@@ -222,7 +267,7 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
 
     // Decode-regime (m<=32) GEMV family: matmul_gemv / matmul_i8_gemv /
     // matmul_q4_gemv.
-    let (dm, dk, dn) = (6usize, 24usize, 13usize);
+    let (dm, dk, dn) = (6usize, 64usize, 13usize);
     let da = fill(dm * dk, 3);
     let db8 = fill(dn * dk, 4);
     let db4 = fill(dn * dk, 5);
@@ -240,9 +285,9 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         assert!(drel < TOL_F32, "matmul_gemv: diverges (rel {drel:.3e}, abs {dabs:.3e})");
     }
     {
-        let (xq, sx, xi) = quant_rows(&da, dm, dk, 4, 127.0);
-        let (wq, sw, wi) = quant_rows(&db8, dn, dk, 4, 127.0);
-        let want = host_int_gemm(&xi, &wi, &sx, &sw, dm, dk, dn);
+        let (xq, sx, xi) = quant_act(&da, dm, dk);
+        let (wq, sw, wi) = quant_weight(&db8, dn, dk, 4, 127.0);
+        let want = host_group_gemm(&xi, &wi, &sx, &sw, dm, dk, dn);
         let xb = gpu.storage(xq.len() as u64);
         gpu.write(&xb, &xq);
         let wb = gpu.storage(wq.len() as u64);
@@ -259,9 +304,9 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         assert!(drel < TOL_INT, "matmul_i8_gemv: diverges (rel {drel:.3e}, abs {dabs:.3e})");
     }
     {
-        let (xq, sx, xi) = quant_rows(&da, dm, dk, 4, 127.0);
-        let (wq, sw, wi) = quant_rows(&db4, dn, dk, 8, 7.0);
-        let want = host_int_gemm(&xi, &wi, &sx, &sw, dm, dk, dn);
+        let (xq, sx, xi) = quant_act(&da, dm, dk);
+        let (wq, sw, wi) = quant_weight(&db4, dn, dk, 8, 7.0);
+        let want = host_group_gemm(&xi, &wi, &sx, &sw, dm, dk, dn);
         let xb = gpu.storage(xq.len() as u64);
         gpu.write(&xb, &xq);
         let wb = gpu.storage(wq.len() as u64);

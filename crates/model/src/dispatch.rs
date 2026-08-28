@@ -23,7 +23,7 @@ use crate::block::{gemm_variant, GemmVariants};
 use crate::int8::{quant_rows_steps, QuantRows};
 
 /// DiT numeric tier: fp32 is the parity reference; int8 quantizes every
-/// in-block linear (per-channel symmetric weights + dynamic per-token
+/// in-block linear (group-wise symmetric weights + dynamic per-token
 /// activation quant, DP4A GEMM - GPU only). Norms/RoPE/attention/activations
 /// always stay f32 (the engine's fp32-only core-compute rule).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,8 +51,8 @@ impl Precision {
 }
 
 /// One linear's resident weight: fp32, or int8 (packed `[n, k/4]` u32 +
-/// per-channel scale `[n]` - `model::int8::quantize_weight` layout). A model
-/// whose linears carry biases wraps this with its own bias buffer.
+/// group-wise scale `[n, k/32]` - `model::int8::quantize_weight` layout). A
+/// model whose linears carry biases wraps this with its own bias buffer.
 pub enum LinW {
     F32(DeviceBuffer),
     I8(DeviceBuffer, DeviceBuffer),
@@ -116,7 +116,8 @@ pub fn mm_rows_off(g: &Gpu, tier: GemmVariants, x: &DeviceBuffer, w: &DeviceBuff
 
 /// Int8 DP4A matmul over pre-quantized rows `xr0..xr0+m` of the K-matched
 /// packed scratch, writing the `m·n` floats of `o` at float offset `ooff`.
-/// Dequantizes with the per-token `sx` (sliced at `xr0`) × per-channel `sw`.
+/// Dequantizes with the per-token `sx` (sliced at `xr0`) × the group-wise
+/// `sw` (bound whole; the kernel derives the group count from `k/4`).
 /// `i8_tier` is the DP4A GEMM family (same selection rule and dispatch
 /// geometry as the fp32 tier; GPU-only, hence always a `Fast` arm).
 #[allow(clippy::too_many_arguments)]

@@ -20,14 +20,14 @@ use ltxv::int8::is_never_quantized;
 use ltxv::LtxAvDitConfig;
 
 /// A tensor is int8-storage-eligible iff it is a plain `[n, k]` matrix with
-/// `k` a multiple of 4 (`model::int8::quantize_weight`'s packing width) and
-/// not on the never-quantize list - the exact predicate `crate::int8::
+/// `k` a multiple of 32 (`model::int8::GROUP`, `quantize_weight`'s scale-group
+/// width) and not on the never-quantize list - the exact predicate `crate::int8::
 /// quantize_tensors` applies (re-derived here rather than imported, since
 /// `is_eligible` there is private - the two must still agree, which is
 /// exactly what `int8_storage.rs`'s own predicate-pin test already checks
 /// against the video-only manifest).
 fn is_eligible(name: &str, shape: &[usize]) -> bool {
-    shape.len() == 2 && shape[1].is_multiple_of(4) && !is_never_quantized(name)
+    shape.len() == 2 && shape[1].is_multiple_of(model::int8::GROUP) && !is_never_quantized(name)
 }
 
 #[test]
@@ -49,9 +49,9 @@ fn real_22b_int8_storage_ratio_is_measured_not_assumed() {
         if is_eligible(name, shape) {
             eligible_count += 1;
             eligible_numel += numel;
-            // Packed int8 (1 byte/element) + one fp32 scale per output row.
-            let n = shape[0] as u64;
-            int8_bytes += numel + n * 4;
+            // Packed int8 (1 byte/element) + one fp32 scale per 32-element
+            // group of the contraction axis.
+            int8_bytes += numel + (numel / model::int8::GROUP as u64) * 4;
         } else {
             // Never-quantized / ineligible tensors stay fp32 in the storage
             // format too (`crate::int8::quantize_tensors`'s `full` map).
@@ -66,15 +66,29 @@ fn real_22b_int8_storage_ratio_is_measured_not_assumed() {
         manifest.len()
     );
 
+    // The ceiling is NOT four-to-one. A group-wise int8 weight costs 1 byte
+    // per parameter for the packed lane PLUS one f32 scale per
+    // `model::int8::GROUP` parameters, i.e. 4/32 = 0.125 B/param, so a model
+    // with every tensor eligible would reach 4 / 1.125 = 3.5556x and no
+    // more. That 12.5% is what a scale which does not span 17408 elements of
+    // K costs, and it is the honest number to gate against - whole-channel
+    // scales were free at this granularity and wrong at the one that matters
+    // (see `model::int8`'s module doc for the measurement).
+    //
     // Measured on the real config's own manifest: the vast majority of
     // parameters live in the ten quantizable linears per block (attention
     // Q/K/V/O + FFN, both streams, both AV cross-attention directions) at 48
     // layers - the never-quantized set (patchify/adaLN/proj_out/scale_shift/
     // to_gate_logits tables, plus the connectors' own small tensors) is a
     // small fraction of total parameters, so the ratio should land close to
-    // (but strictly below, per `is_never_quantized`'s doc) the theoretical
-    // four-to-one a fully-eligible model would get - asserted as a real
-    // measured range, not a round number.
+    // (but strictly below, per `is_never_quantized`'s doc) that 3.5556
+    // ceiling - asserted as a real measured range, not a round number.
+    let ceiling = 4.0 / (1.0 + 4.0 / model::int8::GROUP as f64);
     assert!(eligible_frac > 0.9, "expected the vast majority of real 22B parameters to be int8-eligible, got {eligible_frac:.4}");
-    assert!(ratio > 3.5 && ratio < 4.0, "real 22B int8 storage ratio {ratio:.4} outside the expected (3.5, 4.0) band - is_never_quantized's exclusions should keep it close to but below four-to-one");
+    assert!(
+        ratio > 3.2 && ratio < ceiling,
+        "real 22B int8 storage ratio {ratio:.4} outside the expected (3.2, {ceiling:.4}) band - the upper bound is the group-wise \
+         ceiling 4/(1 + 4/{}) and is_never_quantized's exclusions should keep the measurement just below it",
+        model::int8::GROUP
+    );
 }

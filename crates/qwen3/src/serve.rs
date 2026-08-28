@@ -55,7 +55,7 @@ const ARGMAX_FINAL: usize = 16;
 const RMSNORM_ROWS: usize = 17;
 const MATMUL_GEMV: usize = 18;
 // Int8 weight path (A0): per-token activation quant + DP4A GEMMs with
-// per-token x per-channel dequant scales - the tile GEMM for prefill shapes,
+// per-token x per-group dequant scales - the tile GEMM for prefill shapes,
 // the packed GEMV for decode row counts.
 const MAX_ABS_ROW: usize = 19;
 const QUANT_PACK: usize = 20;
@@ -2352,7 +2352,9 @@ mod tests {
     /// fidelity gate, which measures it on real checkpoints.
     #[test]
     fn int8_weights_track_fp32() {
-        let cfg = QwenConfig::tiny();
+        // `tiny_i8`, not `tiny`: every quantized `k` must be a whole
+        // `model::int8::GROUP` (see `QwenConfig::tiny_i8`'s own doc).
+        let cfg = QwenConfig::tiny_i8();
         let map = tiny_weights(&cfg);
         let mut eng8 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 2, 8, 32, false, true);
         if !eng8.weights_int8() {

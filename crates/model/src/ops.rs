@@ -396,10 +396,12 @@ pub enum Weight {
     /// browser, exactly like `BF16`.
     F16 { w: DeviceBuffer, n: u32, k: u32 },
     /// DP4A int8: `w` packed `[n, k/4]` u32 (`model::int8::quantize_weight`'s
-    /// layout), `s` the per-channel (per-row) scale `[n]`.
+    /// layout), `s` the GROUP-WISE scale `[n, k/32]`
+    /// (`model::int8::GROUP`).
     I8 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32 },
     /// W4A8 int4: `w` packed `[n, k/8]` u32 (`model::int4::quantize_weight_q4`'s
-    /// layout), `s` the per-channel scale `[n]`. Activations stay int8 - see
+    /// layout), `s` the same group-wise `[n, k/32]` scale the int8 tier uses.
+    /// Activations stay int8 - see
     /// this module's doc comment on the offset-arithmetic rule this implies.
     Q4 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32 },
 }

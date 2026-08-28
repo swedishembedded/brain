@@ -191,7 +191,7 @@ fn upload(gpu: &Gpu, data: &[f32]) -> DeviceBuffer {
 enum Proj {
     F32(DeviceBuffer),
     /// `model::int8::quantize_weight`'s packed `[n, k/4]` u32 words plus its
-    /// per-output-row f32 scale.
+    /// `[n, k/32]` f32 group scale.
     I8 { w: DeviceBuffer, sw: DeviceBuffer },
 }
 

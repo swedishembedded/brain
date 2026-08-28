@@ -253,7 +253,7 @@ fn logical_shape(reader: &WeightReader, name: &str) -> Result<(usize, usize), St
 /// One tensor, real, host-resident: plain f32 if the checkpoint stored it
 /// that way, or unpacked via [`model::int8::dequantize_weight`] if
 /// `qwen3omnimoe::import` quantized it (`should_quantize`: rank-2, last dim a
-/// multiple of 4). `n`/`k` are only consulted on the quantized branch.
+/// multiple of 32). `n`/`k` are only consulted on the quantized branch.
 ///
 /// **Prefer [`load_mat`]** for anything going to a device: this materializes
 /// the whole f32 expansion on the host (1.2 GB for a real `lm_head`), which

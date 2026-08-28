@@ -41,9 +41,12 @@
 // INTEGER, so the result is bit-identical to the pre-fix kernel, not merely
 // close.
 //
-// K must be a multiple of 4 (packing). Per-tensor scales here; per-row (x) /
-// per-column (w) scales are the production refinement — same kernel, scales
-// indexed by m / n in the epilogue.
+// K must be a multiple of 4 (packing). Per-TENSOR scales here, both from the
+// uniform - this kernel reads no scale buffer at all, which is why the move to
+// group-wise weight scales (`model::int8::GROUP`) did not touch it. The
+// production refinement is `matmul_i8_dyn`, which takes a per-token `sx[m]`
+// buffer and a group-wise `sw[n, K/32]` one and applies the weight scale per
+// k-chunk; this kernel is kept as the minimal DP4A reference shape.
 //
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the CPU
 // int8 reference lives in the validation test, so parity is still gated.

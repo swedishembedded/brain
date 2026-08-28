@@ -88,19 +88,21 @@ fn dit_weight_bytes(cfg: &wan::WanConfig, dtype: wan::WanDtype) -> u64 {
     // dim*dim projections (self+cross attention q/k/v/o) plus ffn.0
     // (ffn*dim) and ffn.2 (dim*ffn).
     let quant_elems_per_layer = 8 * dim * dim + 2 * dim * ffn;
-    // Sum of OUTPUT rows across those same ten linears - the per-row scale
-    // count `quantize_weight`/`quantize_weight_q4` produce one f32 per.
-    let rows_per_layer = 8 * dim + ffn + dim;
+    // Group-scale count across those same ten linears: both quantizers emit
+    // one f32 per `model::int8::GROUP` (32) elements of each linear's
+    // CONTRACTION axis, so it is the element count over 32 - not the output
+    // row count, which is what a per-channel scale would have given.
+    let scales_per_layer = quant_elems_per_layer / model::int8::GROUP as u64;
     let always_fp32_bytes = dim * text_dim * 4;
     match dtype {
         // Unchanged from before this dtype support existed.
         wan::WanDtype::F32 | wan::WanDtype::F16 => (quant_elems_per_layer * layers) * 4 + always_fp32_bytes,
         // 1 byte/element packed (4 int8 lanes per u32 = 4 bytes = 4 elements)
-        // plus one f32 scale per output row.
-        wan::WanDtype::Int8 => quant_elems_per_layer * layers + rows_per_layer * layers * 4 + always_fp32_bytes,
+        // plus one f32 scale per 32-element group of K.
+        wan::WanDtype::Int8 => quant_elems_per_layer * layers + scales_per_layer * layers * 4 + always_fp32_bytes,
         // 0.5 byte/element packed (8 int4 lanes per u32) plus the same
-        // per-row f32 scale int8 uses.
-        wan::WanDtype::Int4 => (quant_elems_per_layer * layers) / 2 + rows_per_layer * layers * 4 + always_fp32_bytes,
+        // group-wise f32 scale count int8 has.
+        wan::WanDtype::Int4 => (quant_elems_per_layer * layers) / 2 + scales_per_layer * layers * 4 + always_fp32_bytes,
     }
 }
 

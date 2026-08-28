@@ -18,15 +18,23 @@
 //
 //   x_q : [M, K/4] u32  -- 4 int8 activations packed along K per u32
 //   w_q : [N, K/8] u32  -- 8 int4 weights    packed along K per u32
-//   sx  : [M] per-token activation scale     sw : [N] per-channel weight scale
-//   out : [M, N] f32    -- out[m,n] = acc_i32 * sx[m] * sw[n]
-//   params: m, k (LOGICAL K, a multiple of 8). REQUIRES m <= 32.
+//   sx  : [M] per-token activation scale
+//   sw  : [N, K/32] GROUP-WISE weight scale (`model::int8::GROUP`, shared with
+//         the int8 tier - Q4_0's block is Q8_0's). Four w words per group.
+//   out : [M, N] f32    -- out[m,n] = sx[m] * sum_g acc_i32[m,n,g] * sw[n,g]
+//   params: m, k (LOGICAL K, a multiple of 32). REQUIRES m <= 32.
 //
 // Why this exists: the same reason `matmul_i8_gemv` exists next to
 // `matmul_i8_dyn` -- at decode M is 1..32 and a wide tile is mostly idle. This
 // gives q4 the identical decode-regime shape int8 already has: 64 threads
 // split the packed K axis, each reads its slice of W row `col` ONCE and
 // applies it to all M rows, one barrier, threads 0..m fold the partials.
+//
+// The accumulator is f32, for the same reason `matmul_i8_gemv`'s is: the
+// k-stride is 64 WORDS, which spans 16 scale groups, so consecutive steps of
+// one thread never share a group and there is no run to accumulate in i32
+// over. The eight nibbles WITHIN a word still sum exactly in i32 before the
+// single convert-and-scale.
 //
 // NOT register-tiled (correct, then freeze) --
 // this is the naive-but-cooperative tier, same complexity class as
@@ -50,12 +58,15 @@ struct Params {
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k/8]
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
-@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N]
+@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, k/32]
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
-// i32 accumulators in workgroup memory (indexed [m*64 + t]) -- same layout as
+// Packed u32 words of w per weight-scale group: GROUP(32 int4) / 8 per word.
+const WPG4: u32 = 4u;
+
+// f32 accumulators in workgroup memory (indexed [m*64 + t]) -- same layout as
 // matmul_i8_gemv, same CPU-JIT-compatible single-barrier shape.
-var<workgroup> partial: array<i32, 2048>; // up to 32 rows x 64 threads
+var<workgroup> partial: array<f32, 2048>; // up to 32 rows x 64 threads
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg: vec3<u32>,
@@ -65,13 +76,15 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     let t = li.x;
     if (col >= p.n) { return; }
     for (var m = 0u; m < p.m; m = m + 1u) {
-        partial[m * 64u + t] = 0;
+        partial[m * 64u + t] = 0.0;
     }
     let kgx = p.k / 4u; // x words per row (int8 packing)
     let kgw = p.k / 8u; // w words per row (int4 packing)
     let wbase = col * kgw;
+    let swbase = col * (kgw / WPG4);
     for (var g = t; g < kgw; g = g + 64u) {
         let wv = wq[wbase + g];
+        let s = sw[swbase + g / WPG4];
         for (var m = 0u; m < p.m; m = m + 1u) {
             let xbase = m * kgx + 2u * g;
             let xw0 = xq[xbase];
@@ -88,16 +101,17 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
                 }
                 local = local + wn * xb;
             }
-            partial[m * 64u + t] = partial[m * 64u + t] + local;
+            partial[m * 64u + t] = partial[m * 64u + t] + f32(local) * s;
         }
     }
     workgroupBarrier();
-    // Threads 0..m each fold one row's 64 partials and dequantize.
+    // Threads 0..m each fold one row's 64 partials and apply the per-token
+    // activation scale (the weight side is already in).
     if (t < p.m) {
-        var s = 0;
+        var s = 0.0;
         for (var i = 0u; i < 64u; i = i + 1u) {
             s = s + partial[t * 64u + i];
         }
-        out[t * p.n + col] = f32(s) * sx[t] * sw[col];
+        out[t * p.n + col] = s * sx[t];
     }
 }

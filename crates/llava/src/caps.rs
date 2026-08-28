@@ -59,7 +59,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("prompt", ParamType::Str, "instruction for the model").default(serde_json::json!(DEFAULT_PROMPT)))
         .param(ParamSpec::new("max_new", ParamType::Int, "max caption tokens").default(serde_json::json!(128)))
         .param(
-            ParamSpec::new("precision", ParamType::Str, "decoder precision: fp32, or int8 (per-channel weights + dynamic activation quant)")
+            ParamSpec::new("precision", ParamType::Str, "decoder precision: fp32, or int8 (group-wise 32-element weight scales + dynamic activation quant)")
                 .default(serde_json::json!("fp32")),
         )
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h}").required())

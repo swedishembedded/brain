@@ -212,7 +212,8 @@ impl Throughput {
 #[derive(Debug, Clone)]
 pub struct Plan {
     /// Candidate `(m, n, k)` shapes, ascending in work. Every `k` must be a
-    /// multiple of 8 for the whole tier set to be probeable at that shape.
+    /// multiple of `crate::int8::GROUP` (32) for the whole tier set to be
+    /// probeable at that shape - the quantized tiers scale per group of `k`.
     pub shapes: Vec<(u32, u32, u32)>,
     /// Wall-clock ceiling for ONE `(device, dtype)` probe, warm-ups included.
     /// Checked between dispatches, so a single very slow dispatch can
@@ -353,19 +354,20 @@ fn shape_error(dtype: Dtype, (m, n, k): (u32, u32, u32)) -> Option<String> {
     if m == 0 || n == 0 || k == 0 {
         return Some(format!("degenerate GEMM shape {m}x{k}x{n}"));
     }
-    // `int8::quantize_weight` packs four int8 weights per u32 word and
-    // `int4::quantize_weight_q4` packs eight, so K has to divide evenly. The
-    // int8 ACTIVATION pack `Ops::act` runs applies at every tier that reaches
-    // it, which is why the /4 check is unconditional rather than i8-only.
+    // The int8 ACTIVATION pack `Ops::act` runs works in 4-per-u32 words and
+    // applies at every tier that reaches it, which is why the /4 check is
+    // unconditional rather than i8-only.
     if k % 4 != 0 {
         return Some(format!(
             "K={k} must be a multiple of 4 (the int8 activation pack works in 4-per-u32 words)"
         ));
     }
-    if dtype == Dtype::Q4 && k % 8 != 0 {
-        return Some(format!(
-            "K={k} must be a multiple of 8 for the q4 tier (eight int4 weights per u32 word)"
-        ));
+    // Both WEIGHT quantizers scale per `int8::GROUP` (32) elements of K, so a
+    // quantized tier needs whole groups - the stricter rule that subsumes both
+    // packing widths (4 for int8, 8 for q4).
+    let g = crate::int8::GROUP as u32;
+    if matches!(dtype, Dtype::I8 | Dtype::Q4) && k % g != 0 {
+        return Some(format!("K={k} must be a multiple of {g} for a quantized tier (the weight scale is per {g}-element group of K)"));
     }
     None
 }

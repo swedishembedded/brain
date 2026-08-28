@@ -269,26 +269,60 @@ fn bench_matmul_quant() {
     let cpu = Gpu::new_cpu(&ks);
     let wgpu = Gpu::new_wgpu(&ks);
 
-    /// Per-row symmetric quantization (scale = max|row|/qmax), matching
-    /// `model::int8::quantize_weight` / `model::int4::quantize_weight_q4`'s
-    /// math exactly but duplicated here (gpu-core has no dependency on
-    /// `brain-model`) — returns packed `[rows, k/per_word]` u32, per-row
-    /// scale, and the UNPACKED signed values (kept for the exact-integer host
-    /// reference below; round-tripping through f32 dequant would launder a
-    /// packing bug).
-    fn quant_rows(x: &[f32], rows: usize, k: usize, per_word: usize, qmax: f32) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
-        let kg = k / per_word;
-        let bits = 32 / per_word;
+    /// Weight-scale group along K, mirroring `model::int8::GROUP`.
+    const GROUP: usize = 32;
+
+    /// Per-row symmetric quantization of an ACTIVATION (scale = max|row|/127),
+    /// matching what `max_abs_row`/`quant_pack` do on device, duplicated here
+    /// (gpu-core has no dependency on `brain-model`) - returns packed
+    /// `[rows, k/4]` u32, per-row scale, and the UNPACKED signed values (kept
+    /// for the exact host reference below; round-tripping through f32 dequant
+    /// would launder a packing bug).
+    fn quant_act(x: &[f32], rows: usize, k: usize) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
+        let kg = k / 4;
         let mut packed = vec![0u32; rows * kg];
         let mut scale = vec![0f32; rows];
         let mut q = vec![0i8; rows * k];
         for r in 0..rows {
             let row = &x[r * k..r * k + k];
-            let amax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
-            let s = amax.max(1e-8) / qmax;
+            let s = row.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / 127.0;
             scale[r] = s;
             for c in 0..k {
-                q[r * k + c] = (row[c] / s).round().clamp(-qmax, qmax) as i8;
+                q[r * k + c] = (row[c] / s).round().clamp(-127.0, 127.0) as i8;
+            }
+            for g in 0..kg {
+                let mut word = 0u32;
+                for b in 0..4 {
+                    word |= (q[r * k + g * 4 + b] as u8 as u32) << (8 * b);
+                }
+                packed[r * kg + g] = word;
+            }
+        }
+        (packed, scale, q)
+    }
+
+    /// GROUP-wise symmetric quantization of a WEIGHT (one scale per 32
+    /// elements of K), matching `model::int8::quantize_weight` /
+    /// `model::int4::quantize_weight_q4` exactly. Returns packed
+    /// `[rows, k/per_word]` u32, the `[rows, k/32]` scale, and the unpacked
+    /// signed values.
+    fn quant_weight(x: &[f32], rows: usize, k: usize, per_word: usize, qmax: f32) -> (Vec<u32>, Vec<f32>, Vec<i8>) {
+        assert_eq!(k % GROUP, 0, "quant_weight: k must be a whole number of groups");
+        let kg = k / per_word;
+        let gs = k / GROUP;
+        let bits = 32 / per_word;
+        let mut packed = vec![0u32; rows * kg];
+        let mut scale = vec![0f32; rows * gs];
+        let mut q = vec![0i8; rows * k];
+        for r in 0..rows {
+            let row = &x[r * k..r * k + k];
+            for g in 0..gs {
+                let blk = &row[g * GROUP..g * GROUP + GROUP];
+                let s = blk.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-8) / qmax;
+                scale[r * gs + g] = s;
+                for c in 0..GROUP {
+                    q[r * k + g * GROUP + c] = (blk[c] / s).round().clamp(-qmax, qmax) as i8;
+                }
             }
             for g in 0..kg {
                 let mut word = 0u32;
@@ -301,19 +335,24 @@ fn bench_matmul_quant() {
         (packed, scale, q)
     }
 
-    /// Exact integer reference: `out[m,n] = (sum_k xq*wq) * sx[m] * sw[n]`,
-    /// bit-for-bit what every kernel below computes (int32 accumulation is
-    /// exact, so this is not merely "close" — see `matmul_i8_dyn.wgsl`'s own
-    /// header for the same claim about its DP4A reordering).
-    fn host_int_gemm(xq: &[i8], wq: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    /// Reference for the group-wise contract:
+    /// `out[m,n] = sx[m] * sum_g (sum_{k in g} xq*wq) * sw[n,g]`. Each group's
+    /// sum is exact integer; only the cross-group fold is floating point,
+    /// which is what every kernel below does too.
+    fn host_group_gemm(xq: &[i8], wq: &[i8], sx: &[f32], sw: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let gs = k / GROUP;
         let mut out = vec![0f32; m * n];
         for mi in 0..m {
             for ni in 0..n {
-                let mut acc = 0i32;
-                for ki in 0..k {
-                    acc += xq[mi * k + ki] as i32 * wq[ni * k + ki] as i32;
+                let mut acc = 0f32;
+                for g in 0..gs {
+                    let mut ia = 0i32;
+                    for ki in g * GROUP..g * GROUP + GROUP {
+                        ia += xq[mi * k + ki] as i32 * wq[ni * k + ki] as i32;
+                    }
+                    acc += ia as f32 * sw[ni * gs + g];
                 }
-                out[mi * n + ni] = acc as f32 * sx[mi] * sw[ni];
+                out[mi * n + ni] = acc * sx[mi];
             }
         }
         out
@@ -362,9 +401,9 @@ fn bench_matmul_quant() {
     fn run_i8_dyn(wgpu: &Gpu, m: usize, k: usize, n: usize, reps: usize) {
         let x = fill(m * k, 1);
         let w = fill(n * k, 2);
-        let (xq, sx, xi) = quant_rows(&x, m, k, 4, 127.0);
-        let (wq, sw, wi) = quant_rows(&w, n, k, 4, 127.0);
-        let want = host_int_gemm(&xi, &wi, &sx, &sw, m, k, n);
+        let (xq, sx, xi) = quant_act(&x, m, k);
+        let (wq, sw, wi) = quant_weight(&w, n, k, 4, 127.0);
+        let want = host_group_gemm(&xi, &wi, &sx, &sw, m, k, n);
 
         let xb = wgpu.storage(xq.len() as u64);
         wgpu.write(&xb, &xq);
@@ -382,7 +421,7 @@ fn bench_matmul_quant() {
             "int8 dyn (DP4A)  m={m:<5} k={k:<5} n={n:<5}  gpu {:>8.3} ms  {:>8.0} GOP/s  max-abs/rel {:.2e}/{:.2e}  (no CPU-capable kernel at this M)",
             t * 1e3, gops, dabs, drel
         );
-        assert!(drel < 1e-6, "matmul_i8_dyn diverges (rel {drel:.3e})");
+        assert!(drel < 1e-5, "matmul_i8_dyn diverges (rel {drel:.3e})");
     }
 
     /// Runs int4/W4A8 (`matmul_q4_dyn`, CPU+GPU — naive, "correct, then
@@ -390,9 +429,9 @@ fn bench_matmul_quant() {
     fn run_q4_dyn(cpu: &Gpu, wgpu: &Gpu, m: usize, k: usize, n: usize, reps: usize) {
         let x = fill(m * k, 3);
         let w = fill(n * k, 4);
-        let (xq, sx, xi) = quant_rows(&x, m, k, 4, 127.0); // W4A8: activations stay int8
-        let (wq, sw, wi) = quant_rows(&w, n, k, 8, 7.0); // weights are int4
-        let want = host_int_gemm(&xi, &wi, &sx, &sw, m, k, n);
+        let (xq, sx, xi) = quant_act(&x, m, k); // W4A8: activations stay int8
+        let (wq, sw, wi) = quant_weight(&w, n, k, 8, 7.0); // weights are int4
+        let want = host_group_gemm(&xi, &wi, &sx, &sw, m, k, n);
         let threads = (m * n) as u32;
 
         for (label, g) in [("cpu", cpu), ("gpu", wgpu)] {
@@ -411,7 +450,7 @@ fn bench_matmul_quant() {
                 "int4 dyn (W4A8)  m={m:<5} k={k:<5} n={n:<5}  {label:<3} {:>8.3} ms  {:>8.0} GOP/s  max-abs/rel {:.2e}/{:.2e}",
                 t * 1e3, gops, dabs, drel
             );
-            assert!(drel < 1e-6, "matmul_q4_dyn diverges on {label} (rel {drel:.3e})");
+            assert!(drel < 1e-5, "matmul_q4_dyn diverges on {label} (rel {drel:.3e})");
         }
     }
 
@@ -421,11 +460,11 @@ fn bench_matmul_quant() {
         let x = fill(m * k, 5);
         let w8 = fill(n * k, 6);
         let w4 = fill(n * k, 7);
-        let (xq, sx, xi) = quant_rows(&x, m, k, 4, 127.0);
-        let (wq8, sw8, wi8) = quant_rows(&w8, n, k, 4, 127.0);
-        let (wq4, sw4, wi4) = quant_rows(&w4, n, k, 8, 7.0);
-        let want8 = host_int_gemm(&xi, &wi8, &sx, &sw8, m, k, n);
-        let want4 = host_int_gemm(&xi, &wi4, &sx, &sw4, m, k, n);
+        let (xq, sx, xi) = quant_act(&x, m, k);
+        let (wq8, sw8, wi8) = quant_weight(&w8, n, k, 4, 127.0);
+        let (wq4, sw4, wi4) = quant_weight(&w4, n, k, 8, 7.0);
+        let want8 = host_group_gemm(&xi, &wi8, &sx, &sw8, m, k, n);
+        let want4 = host_group_gemm(&xi, &wi4, &sx, &sw4, m, k, n);
         let threads = (n * 64) as u32;
 
         for (label, g) in [("cpu", cpu), ("gpu", wgpu)] {
@@ -455,8 +494,8 @@ fn bench_matmul_quant() {
                  parity int8 {:.2e}/{:.2e}  int4 {:.2e}/{:.2e}",
                 t8 * 1e3, t4 * 1e3, d8abs, d8rel, d4abs, d4rel
             );
-            assert!(d8rel < 1e-6, "matmul_i8_gemv diverges on {label} (rel {d8rel:.3e})");
-            assert!(d4rel < 1e-6, "matmul_q4_gemv diverges on {label} (rel {d4rel:.3e})");
+            assert!(d8rel < 1e-5, "matmul_i8_gemv diverges on {label} (rel {d8rel:.3e})");
+            assert!(d4rel < 1e-5, "matmul_q4_gemv diverges on {label} (rel {d4rel:.3e})");
         }
     }
 

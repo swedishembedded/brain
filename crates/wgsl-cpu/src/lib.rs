@@ -1661,11 +1661,16 @@ mod tests {
     /// (single barrier, so JIT-able) against a host int8 reference. Signed
     /// bytes are the trap — a zero-extend instead of sign-extend passes on
     /// positive values and corrupts every negative weight.
+    ///
+    /// `k = 64` is TWO of `model::int8::GROUP`'s 32-element weight-scale
+    /// groups, so `sw` is `[n, 2]` and a kernel that ignored the group axis
+    /// (applying group 0's scale to the whole row) fails here rather than
+    /// passing on a one-group shape.
     #[test]
     fn dot4i8packed_matches_host_reference() {
         let jit = Jit::new(&[("matmul_i8_gemv", kernels::MATMUL_I8_GEMV)]).expect("compile i8 gemv");
-        let (m, k, n) = (2usize, 8usize, 3usize);
-        let kg = k / 4;
+        let (m, k, n) = (2usize, 64usize, 3usize);
+        let (kg, ng) = (k / 4, k / 32);
         // Deliberately mixed-sign int8 values.
         let xq_i: Vec<i8> = (0..m * k).map(|i| ((i as i32 * 37 + 11) % 255 - 127) as i8).collect();
         let wq_i: Vec<i8> = (0..n * k).map(|i| ((i as i32 * 53 + 5) % 255 - 127) as i8).collect();
@@ -1683,7 +1688,9 @@ mod tests {
         let mut xq = pack(&xq_i);
         let mut wq = pack(&wq_i);
         let mut sx: Vec<f32> = vec![0.5, 0.25];
-        let mut sw: Vec<f32> = vec![1.0, 2.0, 0.125];
+        // [n, ng], every entry distinct so a wrong group index shows.
+        let mut sw: Vec<f32> = vec![1.0, 4.0, 2.0, 8.0, 0.125, 0.5];
+        assert_eq!(sw.len(), n * ng);
         let mut out = vec![0.0f32; m * n];
         let bufs = [xq.as_mut_ptr() as *mut u8,
             wq.as_mut_ptr() as *mut u8,
@@ -1697,13 +1704,20 @@ mod tests {
         }
         for row in 0..m {
             for col in 0..n {
-                let acc: i32 = (0..k)
-                    .map(|kk| xq_i[row * k + kk] as i32 * wq_i[col * k + kk] as i32)
-                    .sum();
-                let want = acc as f32 * sx[row] * sw[col];
+                // Group-wise dequant: each 32-element block carries its own
+                // scale, so the sum is per group and then folded.
+                let want: f32 = (0..ng)
+                    .map(|g| {
+                        let acc: i32 = (g * 32..g * 32 + 32)
+                            .map(|kk| xq_i[row * k + kk] as i32 * wq_i[col * k + kk] as i32)
+                            .sum();
+                        acc as f32 * sw[col * ng + g]
+                    })
+                    .sum::<f32>()
+                    * sx[row];
                 let got = out[row * n + col];
                 assert!(
-                    (got - want).abs() < 1e-4,
+                    (got - want).abs() <= want.abs() * 1e-5 + 1e-3,
                     "out[{row},{col}] = {got}, want {want}"
                 );
             }

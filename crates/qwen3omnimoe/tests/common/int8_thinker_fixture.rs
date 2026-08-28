@@ -21,11 +21,15 @@ use std::collections::HashMap;
 pub fn tiny_cfg(n_layers: u32) -> MoeTextConfig {
     MoeTextConfig {
         n_layers,
-        hidden: 16,
-        n_heads: 2,
+        // Every CONTRACTED dim must be a whole number of 32-element
+        // weight-scale groups (`model::int8::GROUP`): `hidden` (wq/wk/wv,
+        // router, embed, lm_head, expert gate/up), `moe_intermediate`
+        // (expert down) and `n_heads * head_dim` (attn.wo).
+        hidden: 32,
+        n_heads: 4,
         n_kv_heads: 1,
         head_dim: 8,
-        moe_intermediate: 12,
+        moe_intermediate: 32,
         shared_expert_intermediate: 0,
         n_experts: 4,
         top_k: 2,
@@ -91,11 +95,12 @@ pub fn write_synthetic_checkpoint(path: &str, cfg: &MoeTextConfig, seed: u64) {
     let mut f32_by_name: HashMap<String, Vec<f32>> = HashMap::new();
     let mut packed_by_name: HashMap<String, (Vec<u32>, Vec<f32>)> = HashMap::new();
 
-    // qwen3omnimoe::import::should_quantize's own rule: rank-2, last dim a multiple
-    // of 4 -- true for every 2-D tensor at this test's shapes, so every one
-    // of these ends up quantized, exactly like a real import would (this is
-    // what makes the reference path exercise `load_layer_bufs`'s dequant
-    // branch, not just its plain-f32 branch).
+    // qwen3omnimoe::import::should_quantize's own rule: rank-2, last dim a
+    // multiple of `model::int8::GROUP` (32) -- true for every 2-D tensor at
+    // this test's shapes, so every one of these ends up quantized, exactly
+    // like a real import would (this is what makes the reference path
+    // exercise `load_layer_bufs`'s dequant branch, not just its plain-f32
+    // branch).
     fn plan_mat(
         rng: &mut Lcg,
         plan: &mut Vec<(String, Vec<u64>, Dtype)>,
@@ -107,7 +112,7 @@ pub fn write_synthetic_checkpoint(path: &str, cfg: &MoeTextConfig, seed: u64) {
         let w = rng.vec_scaled(n * k, 0.5);
         let (packed, scale) = quantize_weight(&w, n, k);
         plan.push((name.clone(), vec![n as u64, (k / 4) as u64], Dtype::U32));
-        plan.push((format!("{name}.scale"), vec![n as u64], Dtype::F32));
+        plan.push((format!("{name}.scale"), vec![n as u64, (k / model::int8::GROUP) as u64], Dtype::F32));
         packed_by_name.insert(name, (packed, scale));
     }
     fn plan_vec(rng: &mut Lcg, plan: &mut Vec<(String, Vec<u64>, Dtype)>, f32_by_name: &mut HashMap<String, Vec<f32>>, name: String, n: usize) {

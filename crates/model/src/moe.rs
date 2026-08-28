@@ -542,7 +542,8 @@ pub struct MoeIds8 {
 }
 
 /// One int8-quantized expert linear's weight, in `crate::int8::quantize_weight`'s
-/// packed layout: `wq` is `[n, k/4]` u32, `sw` is `[n]` f32 per-channel scale.
+/// packed layout: `wq` is `[n, k/4]` u32, `sw` is `[n, k/32]` f32 group scale
+/// (`crate::int8::GROUP`).
 #[derive(Clone, Copy)]
 pub struct Lin8<'a> {
     pub wq: &'a DeviceBuffer,
@@ -859,7 +860,7 @@ pub fn shared_expert_bwd(
 }
 
 /// Kernel indices [`shared_expert_fwd_i8`] dispatches. The gate/up/down
-/// SwiGLU linears go through `matmul_i8_dyn` (`crate::int8`'s per-channel
+/// SwiGLU linears go through `matmul_i8_dyn` (`crate::int8`'s group-wise
 /// weight scale + per-token dynamic activation scale - the SAME kernel
 /// `qwen3::q8::Q8::mm8` uses), NOT [`expert_fwd_i8`]'s GATED
 /// `moe_linear_gated_i8`: the shared expert applies to every row

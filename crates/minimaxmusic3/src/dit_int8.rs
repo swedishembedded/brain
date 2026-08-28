@@ -50,7 +50,7 @@ pub fn is_never_quantized(tensor_name: &str) -> bool {
 }
 
 /// One int8-eligible weight after [`quantize_tensors`]: `model::int8::
-/// quantize_weight`'s packed `[n, k/4]` u32 words plus its per-row `[n]` f32
+/// quantize_weight`'s packed `[n, k/4]` u32 words plus its `[n, k/32]` f32
 /// scale, alongside the logical `[n, k]` shape - needed to dequantize, since
 /// the packed shape alone cannot recover `k`.
 pub struct QuantizedWeight {
@@ -70,13 +70,14 @@ pub struct QuantizedTensors {
 }
 
 /// A tensor is int8-storage-eligible iff it is a plain `[n, k]` matrix
-/// (`k % 4 == 0`, the packing width `model::int8::quantize_weight` requires)
-/// and its name is not on the never-quantize list. In this crate's real
+/// (`k % 32 == 0`, the scale-group width `model::int8::quantize_weight`
+/// requires - `model::int8::GROUP`) and its name is not on the never-quantize
+/// list. In this crate's real
 /// tensor manifest that leaves exactly the DiT's 6 per-block linears
 /// eligible - never a bias, a norm gain, `time_proj.weight` (`k=1`), or
 /// either `k=1` conv kernel (rank 3).
 fn is_eligible(name: &str, shape: &[usize]) -> bool {
-    shape.len() == 2 && shape[1].is_multiple_of(4) && !is_never_quantized(name)
+    shape.len() == 2 && shape[1].is_multiple_of(model::int8::GROUP) && !is_never_quantized(name)
 }
 
 /// Quantize every eligible 2D weight in `tensors` via `model::int8::
@@ -123,7 +124,7 @@ mod tests {
     fn never_quantized_names_are_excluded_from_eligibility() {
         for name in ["proj_in.weight", "proj_out.weight", "time_embed.linear_1.weight", "time_embed.linear_2.weight"] {
             assert!(is_never_quantized(name), "{name} should be on the never-quantize list");
-            assert!(!is_eligible(name, &[8, 8]), "{name} must not be int8-eligible even at a valid [n,k] shape");
+            assert!(!is_eligible(name, &[8, 64]), "{name} must not be int8-eligible even at a valid [n,k] shape");
         }
         // Sanity: attention's output projection must NOT collide with the
         // "proj_out" substring - it is named "to_out", not "proj_out".
@@ -132,8 +133,11 @@ mod tests {
 
     #[test]
     fn ordinary_linears_are_eligible_biases_and_norms_are_not() {
-        assert!(is_eligible("transformer_blocks.0.attn.to_q.weight", &[8, 8]));
+        assert!(is_eligible("transformer_blocks.0.attn.to_q.weight", &[8, 64]));
         assert!(!is_eligible("transformer_blocks.0.norm1.bias", &[8])); // rank 1
         assert!(!is_eligible("preprocess_conv.weight", &[14, 14, 1])); // rank 3
+        // `k` must be a whole number of `model::int8::GROUP`s: a matrix that
+        // is otherwise perfectly ordinary is kept in fp32 when it is not.
+        assert!(!is_eligible("transformer_blocks.0.attn.to_q.weight", &[8, 8]));
     }
 }

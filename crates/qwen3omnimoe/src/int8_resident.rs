@@ -14,7 +14,7 @@
 //! layers) are stored here. Attention (`wq`/`wk`/`wv`/`wo`), the router,
 //! norms, `embed_tokens`, and `lm_head` stay fp32, read and held resident
 //! the ordinary way. `qwen3omnimoe::import::should_quantize` DID quantize those too
-//! at import time (every 2-D weight with `k % 4 == 0`, not just MoE
+//! at import time (every 2-D weight with `k % 32 == 0`, not just MoE
 //! experts) - so this is a real, deliberate scope cut, not a checkpoint
 //! limitation: the non-expert weights total only ~5-6 GiB combined (attention
 //! ~3 GiB + embed/lm_head ~2.4 GiB across 48 layers + vocab 152064, computed
@@ -34,7 +34,7 @@ use paramstore::upload::Uploader;
 
 use crate::config::MoeTextConfig;
 
-/// One int8-quantized expert linear: packed weight + per-channel scale, read
+/// One int8-quantized expert linear: packed weight + group scale, read
 /// straight from the checkpoint's ALREADY-quantized `U32`/`F32` `.scale`
 /// pair (`qwen3omnimoe::import` quantized at IMPORT time - unlike `qwen3::q8::Q8`,
 /// which quantizes an fp32 SOURCE checkpoint on load, there is no
@@ -154,7 +154,7 @@ pub(crate) fn load_lin8(up: &mut Uploader, reader: &WeightReader, name: &str) ->
 /// `[1, hidden]` sigmoid-gate projection) is loaded fp32-resident via
 /// [`crate::int8_thinker_resident::load_mat`], which dequantizes on read if
 /// the checkpoint happened to quantize it (`qwen3omnimoe::import::should_quantize`'s
-/// literal rank-2/k%4==0 rule does not special-case a singleton output
+/// literal rank-2/k%32==0 rule does not special-case a singleton output
 /// channel) - matching `model::moe::shared_expert_fwd_i8`'s own "not worth
 /// quantizing a rank-1 output" scope cut regardless of how the checkpoint
 /// stored it.
@@ -337,7 +337,7 @@ mod tests {
                     let (packed, scale) = quantize_weight(&w, n, k);
                     let name = expert_name(l, e, leaf);
                     plan.push((name.clone(), vec![n as u64, (k / 4) as u64], Dtype::U32));
-                    plan.push((format!("{name}.scale"), vec![n as u64], Dtype::F32));
+                    plan.push((format!("{name}.scale"), vec![n as u64, (k / model::int8::GROUP) as u64], Dtype::F32));
                     packed_by_name.insert(name.clone(), (packed, scale));
                     host_weights.insert((l, e, leaf), w);
                 }
@@ -360,10 +360,11 @@ mod tests {
     fn tiny_cfg() -> MoeTextConfig {
         let mut cfg = MoeTextConfig::thinker_defaults();
         // Shrink to a size real hardware/CI can build+validate in
-        // milliseconds -- d_model/moe_ff stay multiples of 4 (int8 packing).
+        // milliseconds -- d_model/moe_ff stay multiples of 32, the int8
+        // weight-scale group (`model::int8::GROUP`).
         cfg.n_layers = 3;
-        cfg.hidden = 16;
-        cfg.moe_intermediate = 12;
+        cfg.hidden = 32;
+        cfg.moe_intermediate = 32;
         cfg.n_experts = 5;
         cfg.top_k = 2;
         cfg
@@ -518,9 +519,9 @@ mod tests {
     fn talker_tiny_cfg() -> MoeTextConfig {
         let mut cfg = MoeTextConfig::talker_defaults();
         cfg.n_layers = 3;
-        cfg.hidden = 16;
-        cfg.moe_intermediate = 12;
-        cfg.shared_expert_intermediate = 8;
+        cfg.hidden = 32;
+        cfg.moe_intermediate = 32;
+        cfg.shared_expert_intermediate = 32;
         cfg.n_experts = 5;
         cfg.top_k = 2;
         cfg
@@ -548,7 +549,7 @@ mod tests {
                     let (packed, scale) = quantize_weight(&w, n, k);
                     let name = talker_expert_name(l, e, leaf);
                     plan.push((name.clone(), vec![n as u64, (k / 4) as u64], Dtype::U32));
-                    plan.push((format!("{name}.scale"), vec![n as u64], Dtype::F32));
+                    plan.push((format!("{name}.scale"), vec![n as u64, (k / model::int8::GROUP) as u64], Dtype::F32));
                     packed_by_name.insert(name.clone(), (packed, scale));
                     host_weights.insert((l, e, leaf), w);
                 }
@@ -558,7 +559,7 @@ mod tests {
                 let (packed, scale) = quantize_weight(&w, n, k);
                 let name = talker_shared_expert_name(l, leaf);
                 plan.push((name.clone(), vec![n as u64, (k / 4) as u64], Dtype::U32));
-                plan.push((format!("{name}.scale"), vec![n as u64], Dtype::F32));
+                plan.push((format!("{name}.scale"), vec![n as u64, (k / model::int8::GROUP) as u64], Dtype::F32));
                 packed_by_name.insert(name.clone(), (packed, scale));
                 host_weights.insert((l, usize::MAX, leaf), w); // usize::MAX marks "shared expert", not a routed index
             }

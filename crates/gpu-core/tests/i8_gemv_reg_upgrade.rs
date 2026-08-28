@@ -8,16 +8,19 @@
 //! it happened, so there is no call site where a reviewer would see a
 //! tolerance being introduced.
 //!
-//! The bit-identity claim is STRONGER here than in the fp32 pair, and it is
-//! structural rather than careful: the accumulator is `i32`, and integer
-//! addition is exact and associative, so no regrouping of the same terms can
-//! differ. The one floating-point operation is the dequantise multiply at the
-//! very end, applied to an identical integer.
+//! Bit-identity between the pair is still asserted on the raw bits, but it is
+//! now a property of the two kernels doing the identical operations in the
+//! identical order rather than of integer associativity: the weight scale is
+//! per 32-element GROUP of K, so each word is converted and scaled as it is
+//! consumed (see `matmul_i8_gemv.wgsl`'s header) and the accumulator is f32.
 //!
-//! That also lets this file do something its fp32 sibling cannot: check
-//! against an **exact** oracle rather than a tolerance. The reference sum is
-//! computed on the host in `i64`, so "both kernels agree" is not the claim -
-//! "both kernels are right" is.
+//! The oracle is still an oracle, not a second opinion: the per-group sums are
+//! computed on the host in `i64` (exact) and folded in `f64`. What that cannot
+//! be is EXACT to the last bit, because the kernel's own fold is f32 over a
+//! stride-64 partition. So the tolerance is scaled by the sum of the terms'
+//! MAGNITUDES - the backward-stable bound - rather than by the (possibly
+//! heavily cancelled) result, which is the difference between a tolerance that
+//! means something and one fitted to what passed.
 
 use gpu_core::Gpu;
 
@@ -61,34 +64,52 @@ fn scales(n: usize, seed: u64) -> Vec<f32> {
     (0..n).map(|_| 1e-3 + (r.next_u32() % 1000) as f32 * 1e-5).collect()
 }
 
-/// `out[m,n] = (sum_k xq[m,k] . wq[n,k]) * sx[m] * sw[n]`, with the sum in
-/// `i64` - EXACT, so this is an oracle and not a second opinion.
-fn oracle(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], m: usize, kg: usize, n: usize) -> Vec<f32> {
+/// Packed `u32` words per weight-scale group (`model::int8::GROUP` / 4).
+const WPG: usize = 8;
+
+/// `out[m,n] = sx[m] * sum_g (sum_{k in g} xq . wq) * sw[n,g]`, the inner sums
+/// in `i64` and the fold in `f64`. Returns `(value, magnitude)` per element,
+/// the magnitude being `sum_g |term|` - what a floating-point fold of these
+/// terms can be off by, per unit of rounding.
+fn oracle(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], m: usize, kg: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
     let lanes = |w: u32| (0..4).map(move |l| ((w >> (8 * l)) & 0xff) as u8 as i8 as i64);
+    let ng = kg / WPG;
     let mut out = vec![0f32; m * n];
+    let mut mag = vec![0f32; m * n];
     for mi in 0..m {
         for ni in 0..n {
-            let mut acc = 0i64;
-            for g in 0..kg {
-                acc += lanes(xq[mi * kg + g]).zip(lanes(wq[ni * kg + g])).map(|(a, b)| a * b).sum::<i64>();
+            let mut acc = 0f64;
+            let mut amag = 0f64;
+            for gr in 0..ng {
+                let mut ia = 0i64;
+                for g in gr * WPG..gr * WPG + WPG {
+                    ia += lanes(xq[mi * kg + g]).zip(lanes(wq[ni * kg + g])).map(|(a, b)| a * b).sum::<i64>();
+                }
+                let term = ia as f64 * sw[ni * ng + gr] as f64;
+                acc += term;
+                amag += term.abs();
             }
-            out[mi * n + ni] = acc as f32 * sx[mi] * sw[ni];
+            out[mi * n + ni] = (acc * sx[mi] as f64) as f32;
+            mag[mi * n + ni] = (amag * sx[mi] as f64) as f32;
         }
     }
-    out
+    (out, mag)
 }
 
-/// Run one shape through both slots, returning `(upgraded, reference, oracle)`.
-fn run(gpu: &Gpu, m: u32, kg: u32, n: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+/// Run one shape through both slots, returning
+/// `(upgraded, reference, oracle, oracle_magnitude)`.
+fn run(gpu: &Gpu, m: u32, kg: u32, n: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    assert_eq!(kg as usize % WPG, 0, "kg must be a whole number of weight-scale groups");
+    let ng = kg / WPG as u32;
     let xq = packed((m * kg) as usize, u64::from(m) * 7 + 1);
     let wq = packed((n * kg) as usize, u64::from(n) * 13 + 3);
     let sx = scales(m as usize, u64::from(m) + 101);
-    let sw = scales(n as usize, u64::from(n) + 202);
+    let sw = scales((n * ng) as usize, u64::from(n) + 202);
 
     let xb = gpu.storage(u64::from(m * kg));
     let wb = gpu.storage(u64::from(n * kg));
     let sxb = gpu.storage(u64::from(m));
-    let swb = gpu.storage(u64::from(n));
+    let swb = gpu.storage(u64::from(n * ng));
     gpu.write(&xb, &xq);
     gpu.write(&wb, &wq);
     gpu.write_f32(&sxb, &sx);
@@ -103,8 +124,8 @@ fn run(gpu: &Gpu, m: u32, kg: u32, n: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         ],
     );
     gpu.poll_wait();
-    let want = oracle(&xq, &wq, &sx, &sw, m as usize, kg as usize, n as usize);
-    (gpu.read(&a, (m * n) as usize), gpu.read(&b, (m * n) as usize), want)
+    let (want, mag) = oracle(&xq, &wq, &sx, &sw, m as usize, kg as usize, n as usize);
+    (gpu.read(&a, (m * n) as usize), gpu.read(&b, (m * n) as usize), want, mag)
 }
 
 /// The row is ACTIVE on this device, with one appended pipeline per bucket.
@@ -146,27 +167,31 @@ fn the_register_kernel_is_byte_identical_and_exact() {
         return;
     }
     // `kg` spans many 64-wide strides (so the fold really folds 64 non-trivial
-    // partials), plus one ragged `kg` and one `n` that is not a multiple of
-    // anything.
-    for (kg, n) in [(128u32, 384u32), (96, 512), (131, 129), (16, 71)] {
+    // partials), plus one `kg` that is a whole number of scale groups but not
+    // of the 64-wide stride, and one `n` that is not a multiple of anything.
+    // Every `kg` is a multiple of 8 - K must be a whole number of 32-element
+    // weight-scale groups.
+    for (kg, n) in [(128u32, 384u32), (96, 512), (136, 129), (16, 71)] {
         for m in 1..=MAX_ROWS {
-            let (up, refr, want) = run(&gpu, m, kg, n);
+            let (up, refr, want, mag) = run(&gpu, m, kg, n);
             let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
             assert_eq!(
                 bits(&up),
                 bits(&refr),
                 "matmul_i8_gemv_reg must be BYTE-identical to matmul_i8_gemv at m={m}, kg={kg}, n={n} - \
-                 both accumulate the same terms in i32, so a difference here is a real defect, not rounding"
+                 both form and fold the same terms in the same order, so a difference here is a real defect, \
+                 not rounding"
             );
-            // The integer sum is exact; only the final dequantise multiply is
-            // floating point, so the tolerance is a single rounding, not an
-            // accumulated one.
-            for (i, (g, w)) in up.iter().zip(&want).enumerate() {
-                let tol = w.abs() * 1e-6 + 1e-6;
+            // Each group's sum is exact integer; the cross-group fold is f32,
+            // so the bound is a few roundings of the terms' MAGNITUDE - not of
+            // the cancelled result, and not a number fitted to what passed.
+            for (i, ((g, w), mg)) in up.iter().zip(&want).zip(&mag).enumerate() {
+                let tol = mg * 1e-5 + 1e-6;
                 assert!(
                     (g - w).abs() <= tol,
-                    "m={m} kg={kg} n={n} element {i}: got {g:e}, oracle {w:e} - the i32 accumulation is exact, \
-                     so this is a lane-order, sign-extension or scale-application error, not noise"
+                    "m={m} kg={kg} n={n} element {i}: got {g:e}, oracle {w:e} (magnitude {mg:e}) - each group's \
+                     sum is exact, so a miss this large is a lane-order, sign-extension or scale-indexing error, \
+                     not noise"
                 );
             }
         }

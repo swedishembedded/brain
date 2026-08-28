@@ -45,14 +45,15 @@
 //!   out.
 //! - Norms/RoPE/`A_log`/`dt_bias`/conv1d: not matmuls, untouched either way.
 //!
-//! ## The k%4 packing constraint, and why the real checkpoint always clears it
+//! ## The k%32 scale-group constraint, and why the real checkpoint always clears it
 //!
-//! `model::int8::quantize_weight`/the DP4A kernels pack 4 int8 lanes per
-//! `u32` along the contraction dimension `k`, so every quantized linear's `k`
-//! must be a multiple of 4 (asserted in `quantize_weight` itself - the same
+//! `model::int8::quantize_weight` scales a weight per 32-element GROUP of the
+//! contraction dimension `k` (`model::int8::GROUP`, GGUF `Q8_0`'s own block),
+//! so every quantized linear's `k` must be a multiple of 32 (asserted in
+//! `quantize_weight` itself - the same
 //! constraint applies to the mixer linears' `model::ops::Weight::upload` in
 //! `model.rs`). At the real 35B-A3B scale every `k` this module quantizes
-//! against IS a multiple of 4 (`d_model=2048`, `moe_intermediate_size=512`,
+//! against IS a multiple of 32 (`d_model=2048`, `moe_intermediate_size=512`,
 //! ...) - real Transformer hidden widths are chosen to divide evenly for far
 //! more demanding tiling reasons than this one. `Qwen35Config::tiny()`'s
 //! deliberately tiny, deliberately ODD toy dimensions do NOT all clear this
@@ -71,8 +72,8 @@ pub use model::int8::quantize_weight;
 
 use crate::config::Qwen35Config;
 
-/// One int8 linear: packed int8 weight (`[n, k/4]` u32) + per-channel scale
-/// `[n]` - identical layout to `qwen3::q8::Lin8`, duplicated rather than
+/// One int8 linear: packed int8 weight (`[n, k/4]` u32) + group scale
+/// `[n, k/32]` - identical layout to `qwen3::q8::Lin8`, duplicated rather than
 /// reused because `qwen3::q8` is that crate's own private tier (its `Lin8` is
 /// not `pub` beyond `qwen`) and `model::moe::Lin8` is a borrowed VIEW
 /// (`&DeviceBuffer` fields, sized for one call) rather than an owner of the

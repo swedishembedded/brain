@@ -12,23 +12,21 @@
 //!
 //! ## Why this test does NOT use `Qwen35Config::tiny()` verbatim
 //!
-//! `model::int8::quantize_weight`/the DP4A kernels pack 4 int8 lanes per
-//! `u32` along a quantized linear's contraction dimension `k`, so every such
-//! `k` must be a multiple of 4 (asserted in `quantize_weight` itself - see
-//! `crates/qwen35moe/src/q8.rs`'s own module doc for the full rationale). At the
-//! real 35B-A3B scale every relevant `k` clears that bar
+//! `model::int8::quantize_weight` scales a weight per 32-element GROUP of its
+//! contraction dimension `k` (`model::int8::GROUP`, Q8_0's block), so every
+//! such `k` must be a multiple of 32 (asserted in `quantize_weight` itself -
+//! see `crates/qwen35moe/src/q8.rs`'s own module doc for the full rationale).
+//! At the real 35B-A3B scale every relevant `k` clears that bar
 //! (`d_model=2048`, `moe_intermediate_size=512`, `linear_value_dim=4096`,
 //! `q_dim=4096`), but `tiny()`'s `moe_intermediate_size = 10` (feeds every
-//! expert's `down`) does not (`tiny()`'s mixer dims all clear the bar --
-//! `model::ops::Ops::act`'s own eager activation quantization needs that
-//! unconditionally, fp32 builds included, not just this module's int8 one).
+//! expert's `down`) does not.
 //! Rather than add silent per-tensor fp32-fallback logic to `q8.rs` for
 //! a mismatch that only ever occurs at this one toy scale (never at any real
 //! checkpoint size), this test uses [`tiny_i8_cfg`] - a bespoke config with
 //! `tiny()`'s same shape (8 layers, `interval=4` so layers 3/7 are GQA and
 //! the rest GDN, a small multi-expert MoE, a multi-chunk GDN sequence) but
-//! every dimension rounded to a multiple of 4. This is exactly what the
-//! task's own brief asks for: "mirroring `Qwen35Config::tiny()`" (small,
+//! every quantized `k` rounded up to a multiple of 32. This is exactly what
+//! the task's own brief asks for: "mirroring `Qwen35Config::tiny()`" (small,
 //! exercising both layer types) - not "identical to `tiny()`'s literal field
 //! values."
 
@@ -47,7 +45,7 @@ fn tiny_i8_cfg() -> Qwen35Config {
         vocab: 29,
         block_size: 24,
         n_layers: 8,
-        d_model: 16,
+        d_model: 32,
         rms_eps: 1e-6,
         max_position_embeddings: 24,
         tie_embeddings: false,
@@ -64,13 +62,14 @@ fn tiny_i8_cfg() -> Qwen35Config {
         linear_num_key_heads: 2,
         linear_num_value_heads: 4,
         linear_key_head_dim: 4,
-        linear_value_head_dim: 4,
+        // 4 value heads x 8 = linear_value_dim 32, the GDN out_proj's own K.
+        linear_value_head_dim: 8,
         linear_conv_kernel_dim: 4,
 
         n_experts: 6,
         top_k: 2,
-        moe_intermediate_size: 8,
-        // Deliberately NOT forced to a multiple of 4: the shared expert is
+        moe_intermediate_size: 32,
+        // Deliberately NOT forced to a multiple of 32: the shared expert is
         // never quantized (see `q8.rs`'s module doc), so its own `k` is free
         // to stay odd, same as `tiny()`'s own `shared_expert_intermediate_size=7`.
         shared_expert_intermediate_size: 7,
@@ -112,10 +111,11 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 #[test]
 fn tiny_i8_cfg_clears_the_int8_packing_and_chunking_bars() {
     let cfg = tiny_i8_cfg();
-    assert_eq!(cfg.d_model % 4, 0, "d_model must be int8-packable (feeds q/k/v-proj, in_proj_*, expert gate/up)");
-    assert_eq!(cfg.q_dim() % 4, 0, "q_dim must be int8-packable (feeds o_proj)");
-    assert_eq!(cfg.linear_value_dim() % 4, 0, "linear_value_dim must be int8-packable (feeds GDN out_proj)");
-    assert_eq!(cfg.moe_intermediate_size % 4, 0, "moe_intermediate_size must be int8-packable (feeds every expert's down)");
+    let g = model::int8::GROUP as u32;
+    assert_eq!(cfg.d_model % g, 0, "d_model must be a whole number of int8 scale groups (feeds q/k/v-proj, in_proj_*, expert gate/up)");
+    assert_eq!(cfg.q_dim() % g, 0, "q_dim must be a whole number of int8 scale groups (feeds o_proj)");
+    assert_eq!(cfg.linear_value_dim() % g, 0, "linear_value_dim must be a whole number of int8 scale groups (feeds GDN out_proj)");
+    assert_eq!(cfg.moe_intermediate_size % g, 0, "moe_intermediate_size must be a whole number of int8 scale groups (feeds every expert's down)");
 
     let t = cfg.block_size;
     let chunk = gdn_chunk_size(t);
@@ -247,7 +247,7 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
     // estimate would suggest. Gated at `matmul_q4_gemm`'s own cosine/rel_l2
     // shape (this task's suggested model) rather than the measured value
     // directly, for real headroom against seed/shape/backend drift; a
-    // mutation check (scaling one quantized weight's per-channel scale by
+    // mutation check (scaling one quantized weight's group scale by
     // a third) moved rel_l2 from 6.6e-6 to 6.9e-4, and a far larger scaling
     // moved cosine to 0.40 -- confirming this comparison is sensitive to a real int8-path
     // regression, not vacuously passing.

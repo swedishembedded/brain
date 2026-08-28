@@ -656,7 +656,7 @@ impl Qwen {
         Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true)
     }
 
-    /// [`Self::load_inference`] with the int8 numeric tier: per-channel weight
+    /// [`Self::load_inference`] with the int8 numeric tier: group-wise weight
     /// quantisation + dynamic activation quant, for both batched forwards and
     /// KV-cache decode (the m=1 packed GEMV).
     pub fn load_inference_i8(path: &str, b: u32, t: u32) -> Qwen {
@@ -716,7 +716,7 @@ impl Qwen {
     ///
     /// * [`Dtype::F32`] - identical to `new_shard(.., train = false, ..)`: the
     ///   `Weight`s alias the `ParamStore`'s own buffers, no second upload.
-    /// * [`Dtype::I8`] - per-channel symmetric DP4A weights + dynamic
+    /// * [`Dtype::I8`] - group-wise symmetric DP4A weights + dynamic
     ///   per-token activation quant (~4× smaller). Needs
     ///   `caps.numeric.int8_dot`.
     /// * [`Dtype::F16`] / [`Dtype::BF16`] - the **storage** tiers: the weight
@@ -2579,8 +2579,9 @@ impl Qwen {
     /// Bytes the resident per-layer linears occupy on the device, at whatever
     /// tier [`Self::linear_dtype`] reports - the packed size `Weight::upload`
     /// actually allocated (`Dtype::per_word()` values to a `u32` word, plus
-    /// the `[n]` f32 per-channel scale the `I8`/`Q4` tiers carry), not a
-    /// driver VRAM reading and not the fp32 size of the source tensor.
+    /// the `[n, k/32]` f32 GROUP scale the `I8`/`Q4` tiers carry -
+    /// `model::int8::GROUP`), not a driver VRAM reading and not the fp32 size
+    /// of the source tensor.
     pub fn linear_weight_bytes(&self) -> u64 {
         self.weights
             .values()
@@ -2589,7 +2590,7 @@ impl Qwen {
                 let per_word = w.dtype().per_word() as u64;
                 let packed = elems.div_ceil(per_word) * 4;
                 let scale = match w {
-                    Weight::I8 { .. } | Weight::Q4 { .. } => w.n() as u64 * 4,
+                    Weight::I8 { .. } | Weight::Q4 { .. } => model::int8::scale_len(w.n() as usize, w.k() as usize) as u64 * 4,
                     _ => 0,
                 };
                 packed + scale
@@ -3226,13 +3227,15 @@ mod tests {
 
     /// Int8 KV decode (the packed GEMV at m=1) must track the fp32 KV decode
     /// within honest quantisation noise: a scale-handling bug is O(1) relative
-    /// error, per-channel int8 noise is well under the 10% gate.
+    /// error, group-wise int8 noise is well under the 10% gate.
     #[test]
     fn int8_kv_decode_tracks_fp32() {
         if gpu_disabled() {
             return;
         }
-        let cfg = QwenConfig::tiny();
+        // `tiny_i8`, not `tiny`: the int8 tier scales per 32-element group of
+        // each linear's contraction axis (see that constructor's own doc).
+        let cfg = QwenConfig::tiny_i8();
         let w = crate::init::init_weights(&cfg, 7);
         let f = Qwen::new(cfg.clone(), 1, 16, &w);
         let q = Qwen::new_shard_i8(cfg.clone(), 1, 16, &w, model::shard::Shard::whole(cfg.n_layers as usize));
@@ -3248,11 +3251,18 @@ mod tests {
         let rel = err / norm.max(1e-12);
         assert!(rel < 0.10, "int8 KV decode diverged from fp32: rel L2 {rel:.4}");
         // `linear_weight_bytes` must account for the tier it actually got: a
-        // quarter of fp32 for the packed weights, plus the `[n]` f32
-        // per-channel scale int8 (unlike f16) also has to keep resident.
+        // quarter of fp32 for the packed weights, plus the `[n, k/32]` f32
+        // group scale int8 (unlike f16) also has to keep resident.
         if q.linear_dtype() == Some(Dtype::I8) {
-            let rows: u64 = crate::q8::Q8::LINEARS.iter().map(|leaf| dims_of(&cfg, leaf).0 as u64).sum::<u64>() * cfg.n_layers as u64;
-            assert_eq!(q.linear_weight_bytes(), f.linear_weight_bytes() / 4 + rows * 4, "int8 resident linear bytes");
+            let scales: u64 = crate::q8::Q8::LINEARS
+                .iter()
+                .map(|leaf| {
+                    let (n, k) = dims_of(&cfg, leaf);
+                    model::int8::scale_len(n as usize, k as usize) as u64
+                })
+                .sum::<u64>()
+                * cfg.n_layers as u64;
+            assert_eq!(q.linear_weight_bytes(), f.linear_weight_bytes() / 4 + scales * 4, "int8 resident linear bytes");
         }
     }
 

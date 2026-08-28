@@ -10,7 +10,7 @@
 //! `--device vulkan`, measures no such overhead on the same
 //! card), so under the default backend the fp32 encoder needs ~30 GB and does
 //! not fit one 24 GB P40 (nor split alongside the 13 GB int8 DiT). Quantizing
-//! the linears to int8 (per-channel symmetric,
+//! the linears to int8 (group-wise symmetric,
 //! packed 4-per-`u32`) drops the linear weights to a quarter (~12.6 GB to
 //! ~3.2 GB), so the whole encoder is ~4.8 GB of weights and ~9.5 GB resident,
 //! and fits GPU 1 alone, leaving the DiT its own card. The encode then runs
@@ -27,13 +27,14 @@ use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-/// Per-channel symmetric int8 weight quantization — the engine-wide shared
-/// implementation (`model::int8`, also used by `zimage` and `flux2`),
-/// re-exported so `q8::quantize_weight` callers keep their path. The packed
-/// layout is what `matmul_i8*.wgsl` consume.
+/// Group-wise (32-element) symmetric int8 weight quantization - the
+/// engine-wide shared implementation (`model::int8`, also used by `zimage`
+/// and `flux2`), re-exported so `q8::quantize_weight` callers keep their
+/// path. The packed layout is what `matmul_i8*.wgsl` consume.
 pub use model::int8::quantize_weight;
 
-/// One int8 linear: packed int8 weight (`[n, k/4]` u32) + per-channel scale `[n]`.
+/// One int8 linear: packed int8 weight (`[n, k/4]` u32) + group scale
+/// `[n, k/32]`.
 pub struct Lin8 {
     pub packed: DeviceBuffer,
     pub scale: DeviceBuffer,
@@ -160,7 +161,7 @@ impl Q8 {
         s.push(gpu.step(self.k_quant_pack, &[x, &self.sx, &self.xq], &[n_tokens, k], n_tokens * k / 4));
     }
 
-    /// `out = dequant(xq @ wᵀ)`: dynamic per-token scale `self.sx` × per-channel
+    /// `out = dequant(xq @ wᵀ)`: dynamic per-token scale `self.sx` × group-wise
     /// weight scale. Must be preceded by a matching [`Q8::quant`] on the same input.
     pub fn mm8(&self, gpu: &Gpu, s: &mut Vec<Step>, w: &Lin8, out: &DeviceBuffer, n_tokens: u32) {
         s.push(gpu.step(

@@ -1126,7 +1126,7 @@ impl MoondreamBlockGrads {
 }
 
 /// One expert's three linears, int8-packed: `[n, k/4]` u32 words plus the
-/// `[n]` per-output-channel f32 scale [`model::int8::quantize_weight`] wrote.
+/// `[n, k/32]` f32 group scale [`model::int8::quantize_weight`] wrote.
 struct Expert8 {
     w_h: (DeviceBuffer, DeviceBuffer),
     w_g: (DeviceBuffer, DeviceBuffer),
@@ -1193,8 +1193,9 @@ pub struct MoeFfn8 {
 
 impl MoeFfn8 {
     /// Quantize `weights` (the same fp32 map [`MoeFfn::new`] takes) and upload
-    /// the packed form. `d` and `inner` must both be multiples of 4 - the
-    /// packing is 4 int8 lanes per `u32`, which `quantize_weight` asserts.
+    /// the packed form. `d` and `inner` must both be multiples of
+    /// `model::int8::GROUP` (32) - the weight scale is per 32-element group of
+    /// the contraction axis, which `quantize_weight` asserts.
     pub fn new(gpu: &Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, inner: u32, e: u32, top_k: u32) -> MoeFfn8 {
         let get = |n: &str| weights.get(n).unwrap_or_else(|| panic!("moe weight missing: {n}"));
         let pack = |name: &str, n: u32, k: u32| -> (DeviceBuffer, DeviceBuffer) {
@@ -1993,7 +1994,7 @@ mod tests {
     #[test]
     fn moe_ffn_geglu_runs() {
         let gpu = gpu_core::testgpu::dev(pipelines());
-        let (t, d, inner, e, top_k) = (4u32, 8u32, 4u32, 3u32, 2u32);
+        let (t, d, inner, e, top_k) = (4u32, 64u32, 32u32, 3u32, 2u32);
         let mut rng = Rng::new(5);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
         let mut w = HashMap::new();
@@ -2011,8 +2012,9 @@ mod tests {
     }
 
     /// `(weights, input)` for a small MoE at `(t, d, inner, e)`, deterministic
-    /// for a fixed seed. `d` and `inner` are multiples of 4 - the int8 packing
-    /// is 4 lanes per u32 and `quantize_weight` asserts it.
+    /// for a fixed seed. `d` and `inner` are multiples of `model::int8::GROUP`
+    /// (32) - the weight scale is per 32-element group of the contraction axis
+    /// and `quantize_weight` asserts it.
     fn moe_fixture(t: u32, d: u32, inner: u32, e: u32, seed: u64) -> (HashMap<String, Vec<f32>>, Vec<f32>) {
         let mut rng = Rng::new(seed);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
@@ -2042,7 +2044,7 @@ mod tests {
     #[test]
     fn int8_experts_agree_with_the_fp32_tier() {
         let gpu = gpu_core::testgpu::dev(pipelines());
-        let (t, d, inner, e, top_k) = (4u32, 8u32, 4u32, 3u32, 2u32);
+        let (t, d, inner, e, top_k) = (4u32, 64u32, 32u32, 3u32, 2u32);
         let (w, x) = moe_fixture(t, d, inner, e, 5);
         let xn = gpu.storage_init("xn", &x);
 
@@ -2076,7 +2078,7 @@ mod tests {
     #[test]
     fn int8_experts_are_deterministic() {
         let gpu = gpu_core::testgpu::dev(pipelines());
-        let (t, d, inner, e, top_k) = (4u32, 8u32, 4u32, 3u32, 2u32);
+        let (t, d, inner, e, top_k) = (4u32, 64u32, 32u32, 3u32, 2u32);
         let (w, x) = moe_fixture(t, d, inner, e, 9);
         let xn = gpu.storage_init("xn", &x);
         let ffn = MoeFfn8::new(&gpu, &w, t, d, inner, e, top_k);

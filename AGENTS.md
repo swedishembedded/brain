@@ -1440,10 +1440,16 @@ a metric that isn't there was simply forgotten.
   shared emitter** (`crate::topo::linear_quant`) -- three files (`glm_topology`,
   `kronos_topology`, `fincast_topology`) had drifted into their own
   byte-identical, whole-channel-only copies before this was caught; a new
-  per-model copy is the same mistake again. This applies equally to
-  `model::int8::quantize_weight` (the GPU-serving INT8 path shared by
-  `qwen3::q8`, `s3dit`, `flux1`/`flux2`) if/when it is audited for the same
-  granularity.
+  per-model copy is the same mistake again. The GPU-serving INT8/W4A8 path is
+  now held to the same rule: `model::int8::GROUP = 32` is THE granularity
+  constant, `model::int8::quantize_weight` and `model::int4::quantize_weight_q4`
+  both emit an `[n, k/32]` scale, and every quantized `k` must be a whole
+  number of groups (asserted, never padded). A tensor whose `k` is not is kept
+  in fp32 by its model's own `is_eligible`/`should_quantize`, not quantized
+  raggedly. The on-disk packed-int8 convention is versioned
+  (`checkpoint::weightio::PACKED_INT8_LAYOUT` = 2); a pre-group-wise checkpoint
+  fails at load through `model::int8::check_scale_len`, which recognises the
+  old `[n]` shape by name rather than misreading it.
 - **Kernels follow `.agents/rules/kernels.md`** - before writing one, check for
   an existing fast sibling (`_rows`/`_wg`/`_reg*`/`_tiled`) and put the fix in
   *selection*, not a new copy: the single most expensive defect class here is a

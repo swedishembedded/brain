@@ -12,8 +12,8 @@
 //!
 //! Method: take one real double block out of the released GGUF, build the
 //! device block engine twice (once on the fp32 weights, once on the same
-//! weights round-tripped through brain's own per-output-row int8 grid -
-//! `model::int8::row_scale`/`pack_row`, exactly what `matmul_i8_dyn`
+//! weights round-tripped through brain's own group-wise (32) int8 grid -
+//! `model::int8::group_scales`/`pack_row`, exactly what `matmul_i8_dyn`
 //! consumes), and run the identical backward through both. What is compared
 //! is the **adapter** gradient, since that is the only thing a LoRA run
 //! consumes.
@@ -68,14 +68,19 @@ fn rel_l2(dev: &[f32], host: &[f32]) -> f64 {
     df / nh.max(1e-30)
 }
 
-/// `w` through brain's per-output-row symmetric int8 grid and back -
+/// `w` through brain's group-wise (32-element) symmetric int8 grid and back -
 /// `matmul_i8_dyn`'s exact weight representation.
 fn int8_round_trip(w: &[f32], out: usize, inn: usize) -> Vec<f32> {
+    let g = model::int8::GROUP;
+    assert_eq!(inn % g, 0, "int8_round_trip: k={inn} must be a whole number of {g}-element groups");
+    let gs = inn / g;
+    let mut scales = vec![0.0f32; gs];
     let mut q = vec![0.0f32; w.len()];
     for o in 0..out {
         let row = &w[o * inn..(o + 1) * inn];
-        let s = model::int8::row_scale(row);
+        model::int8::group_scales(row, &mut scales);
         for (i, &v) in row.iter().enumerate() {
+            let s = scales[i / g];
             q[o * inn + i] = (v / s).round().clamp(-127.0, 127.0) * s;
         }
     }

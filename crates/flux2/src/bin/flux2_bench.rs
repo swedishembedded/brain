@@ -167,7 +167,7 @@ fn bench_mm(gpu: &Gpu, reps: usize) {
 /// qk-norm scale vectors and the host-resident conditioning matrices all stay
 /// fp32 there, so quantizing them here would overstate the load's real cost.
 fn is_int8_tier(name: &str, shape: &[usize]) -> bool {
-    if shape.len() != 2 || !shape[1].is_multiple_of(4) {
+    if shape.len() != 2 || !shape[1].is_multiple_of(model::int8::GROUP) {
         return false;
     }
     !(name.ends_with("_mlp.2.weight")
@@ -682,17 +682,19 @@ fn build_te_replay(gpu: &Gpu, layers: u32, t: u32, i8: bool, base: bool) -> (Vec
     let w_o = a(du * hq as u64);
     let w_ff = a(ffu * du);
     let w_down = a(du * ffu);
-    // int8 weights: packed [n, k/4] u32 + per-channel scale [n].
+    // int8 weights: packed [n, k/4] u32 + group scale [n, k/32]
+    // (`model::int8::GROUP`).
+    let g = model::int8::GROUP as u64;
     let p_q = a(hq as u64 * du / 4);
     let p_kv = a(hkv as u64 * du / 4);
     let p_o = a(du * hq as u64 / 4);
     let p_ff = a(ffu * du / 4);
     let p_down = a(du * ffu / 4);
-    let s_q = a(hq as u64);
-    let s_kv = a(hkv as u64);
-    let s_o = a(du);
-    let s_ff = a(ffu);
-    let s_down = a(du);
+    let s_q = a(hq as u64 * du / g);
+    let s_kv = a(hkv as u64 * du / g);
+    let s_o = a(du * hq as u64 / g);
+    let s_ff = a(ffu * du / g);
+    let s_down = a(du * ffu / g);
     let sx = a(nu);
     let xq = a(nu * ffu / 4);
 

@@ -12,17 +12,20 @@
 //! `crates/s3dit/tests/int8_matmul.rs` makes for int8. Measured on these
 //! tiny synthetic shapes: cosine consistently >= 0.999 and relative-L2 well
 //! under a tenth (both printed below) -- LOWER than "4-bit is famously lossy"
-//! might suggest, because per-CHANNEL scaling (not per-tensor) keeps a single
-//! outlier row from crushing the rest of that row's resolution, exactly as
-//! `model::int8::quantize_weight`'s own doc explains for int8. A test that
-//! reads "cosine 0.999" and worries the kernel is TOO accurate for 4-bit is
-//! mistaking a per-channel-scaled synthetic shape's easy case for the general
-//! one; do not tighten this gate off one observed run.
+//! might suggest, because GROUP-wise scaling (one scale per 32 elements of K,
+//! not per tensor and not per channel) keeps a single outlier from crushing
+//! the rest of the row's resolution, exactly as `model::int8::quantize_weight`'s
+//! own doc explains for int8. A test that reads "cosine 0.999" and worries the
+//! kernel is TOO accurate for 4-bit is mistaking a group-scaled synthetic
+//! shape's easy case for the general one; do not tighten this gate off one
+//! observed run.
 //!
-//! `k = 16` is chosen deliberately in every shape below: x (int8-packed) has
-//! `k/4 = 4` u32 words per row, w (int4-packed) has `k/8 = 2` -- HALF as
-//! many -- so a stride mistake between the two operands is not hideable by a
-//! coincidentally-equal word count the way a larger, rounder `k` might hide it.
+//! `k = 64` is chosen deliberately in every shape below, for two reasons at
+//! once: x (int8-packed) has `k/4 = 16` u32 words per row and w (int4-packed)
+//! has `k/8 = 8` -- HALF as many -- so a stride mistake between the two
+//! operands is not hideable by a coincidentally-equal word count; and it is
+//! TWO 32-element weight-scale groups, not one, so a kernel that indexed the
+//! group wrongly (or ignored the group axis) would not pass either.
 
 use data::rng::Lcg;
 use gpu_core::Gpu;
@@ -89,8 +92,10 @@ fn matmul_q4_dyn_matches_fp32_oracle() {
     let g = gpu_core::testgpu::dev(KERNELS);
     let (k_maxr, k_qp, k_dyn) = (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "matmul_q4_dyn"));
 
-    // k=16: x has k/4=4 words/row, w has k/8=2 -- a stride mismatch is not hideable here.
-    let (m, k, n) = (4usize, 16usize, 5usize);
+    // k=64: x has k/4=16 words/row, w has k/8=8 -- a stride mismatch is not
+    // hideable here -- and TWO 32-element weight-scale groups per row, so a
+    // group-indexing slip is not hideable either.
+    let (m, k, n) = (4usize, 64usize, 5usize);
     let mut rng = Lcg::new(7001);
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
@@ -122,8 +127,8 @@ fn matmul_q4_gemv_matches_fp32_oracle_and_matches_dyn() {
     let (k_maxr, k_qp, k_dyn, k_gemv) = (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "matmul_q4_dyn"), idx(&g, "matmul_q4_gemv"));
 
     // Decode-regime shape: small M (<= 32, the gemv kernel's REQUIRES), same
-    // k=16 stride-mismatch shape as the dyn test above.
-    let (m, k, n) = (3usize, 16usize, 7usize);
+    // k=64 stride-mismatch / two-scale-group shape as the dyn test above.
+    let (m, k, n) = (3usize, 64usize, 7usize);
     let mut rng = Lcg::new(7002);
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);
@@ -166,7 +171,7 @@ fn moe_linear_gated_q4_matches_fp32_oracle_and_zeroes_ungated_rows() {
     let g = gpu_core::testgpu::dev(KERNELS);
     let (k_maxr, k_qp, k_moe) = (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "moe_linear_gated_q4"));
 
-    let (m, k, n, n_experts, e_idx) = (6usize, 16usize, 5usize, 3u32, 1u32);
+    let (m, k, n, n_experts, e_idx) = (6usize, 64usize, 5usize, 3u32, 1u32);
     let mut rng = Lcg::new(7003);
     let x_h = rng.vec_scaled(m * k, 1.0);
     let w_h = rng.vec_scaled(n * k, 1.0);

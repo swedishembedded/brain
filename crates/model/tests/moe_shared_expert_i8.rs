@@ -73,7 +73,9 @@ fn shared_expert_i8_matches_fp32_within_quant_tolerance() {
     };
 
     // d_model and shared_ff must be multiples of 4 (int8 packing).
-    let (rows, d, ff) = (6usize, 16usize, 12usize);
+    // `d` and `ff` are each some linear's contraction width, so both must be
+    // whole multiples of `model::int8::GROUP` (32).
+    let (rows, d, ff) = (6usize, 64usize, 32usize);
     let mut rng = Lcg::new(0x5EED);
     let x_h = rng.vec_scaled(rows * d, 1.0);
     let gw_h = rng.vec_scaled(ff * d, 0.5);
@@ -158,7 +160,9 @@ fn shared_expert_i8_unweighted_matches_fp32_within_quant_tolerance() {
         quant: [idx(&g, "max_abs_row"), idx(&g, "quant_pack")],
     };
 
-    let (rows, d, ff) = (6usize, 16usize, 12usize);
+    // `d` and `ff` are each some linear's contraction width, so both must be
+    // whole multiples of `model::int8::GROUP` (32).
+    let (rows, d, ff) = (6usize, 64usize, 32usize);
     let mut rng = Lcg::new(0x1234);
     let x_h = rng.vec_scaled(rows * d, 1.0);
     let gw_h = rng.vec_scaled(ff * d, 0.5);

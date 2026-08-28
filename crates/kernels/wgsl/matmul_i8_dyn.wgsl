@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Tiled int8 (DP4A) GEMM with a DYNAMIC per-token activation scale and a per-channel weight scale, both read from buffers - the prefill/DiT int8 GEMM
-// @how   DP4A packed int8, vec4 shared tiles, register block per thread, 256-thread workgroup tile, 3 barriers
+// @what  Tiled int8 (DP4A) GEMM with a DYNAMIC per-token activation scale and a GROUP-WISE (32-element) weight scale, both read from buffers - the prefill/DiT int8 GEMM
+// @how   DP4A packed int8, vec4 shared tiles, register block per thread, per-k-chunk group dequant, 256-thread workgroup tile, 3 barriers
 // @opt   5
 // @cpu   no
 // @gpu   yes-wg256
@@ -14,9 +14,14 @@
 // than from the uniform, so one build serves every shape and the activation
 // scale can be recomputed per forward.
 //
-//   x_q : [M, K/4] u32  - 4 int8 activations packed along K per u32 (row-major)
-//   w_q : [N, K/4] u32  - 4 int8 weights    packed along K per u32 (row-major)
-//   out : [M, N]  f32   - dequantized:  out[m,n] = acc_i32 * sx * sw
+//   x_q : [M, K/4] u32   - 4 int8 activations packed along K per u32 (row-major)
+//   w_q : [N, K/4] u32   - 4 int8 weights    packed along K per u32 (row-major)
+//   sx  : [M]      f32   - per-token activation scale
+//   sw  : [N, K/32] f32  - GROUP-WISE weight scale (`model::int8::GROUP` = 32)
+//   out : [M, N]   f32   - out[m,n] = sx[m] * Σ_g acc_i32[m,n,g] * sw[n,g]
+//
+// K must be a multiple of 32 (the group), which subsumes the multiple of 4 the
+// packing needs.
 //
 // This is the P40's fastest inference path. DP4A (`dot4I8Packed`) does four
 // int8 multiply-accumulates in one instruction, four times the MACs of an fp32
@@ -64,24 +69,43 @@
 // tx-group read 16 consecutive shared rows and the epilogue's global stores
 // become 16 consecutive elements per instruction instead of a stride-8 scatter.
 //
-// The accumulation is INTEGER, so re-ordering the k-axis sum is exact: this
-// kernel is bit-identical to the k-major scalar form, not merely close
-// (mutation-verified: `qwen_bench gemm8` gates on `max|Δ| == 0` against a host
-// i32 reference).
+// ## Where the group scale is applied, and what it costs
 //
-// K must be a multiple of 4 (packing). Per-row (x) and per-column (w) scales
-// are applied in the epilogue.
+// `BKG` is 8 packed groups = 32 int8 along K, which is EXACTLY one weight-scale
+// group. So one k-chunk of this kernel is one quantization group, and the
+// dequantize lands on the chunk boundary: the 64 integer accumulators sum a
+// chunk exactly as before, then fold into 64 f32 running totals scaled by that
+// chunk's `sw[n, c]`. The integer sum inside a group is still exact and
+// re-orderable; only the 64 cross-group folds per chunk are floating point.
+//
+// That costs 64 FMAs per 512 DP4A - about 12% of the inner loop's issue slots -
+// and, more importantly, DOUBLES the accumulator register block (64 i32 for
+// the live group plus 64 f32 for the running sum). On a GP102 that pushes the
+// kernel from two resident 256-thread workgroups per SM to one, so some of the
+// latency hiding the double-buffered staging was written for now has to come
+// from the software pipeline alone. That is the price of a weight scale that
+// does not span 17408 elements of K, and it is a price this repo has already
+// decided to pay - see `model::int8`'s module doc for the measurement.
+//
+// The alternative that keeps 64 registers - convert and scale every individual
+// DP4A result - was rejected: it triples the inner loop's instruction count
+// (convert + FMA per dot4 instead of one integer add) in a kernel whose own
+// header explains it is arithmetic-limited, not occupancy-limited.
+//
+// The accumulation WITHIN a group is INTEGER, so re-ordering the k-axis sum
+// inside a chunk is exact; the cross-chunk sum is f32 and runs in ascending
+// chunk order.
 //
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the CPU
 // int8 reference lives in the validation test, so parity is still gated.
 
-struct Params { m: u32, kg: u32, n: u32 };  // dynamic sx + per-channel sw, kg = K/4
+struct Params { m: u32, kg: u32, n: u32 };  // dynamic sx + group-wise sw, kg = K/4
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       x:   array<u32>;  // [M, kg]
 @group(0) @binding(2) var<storage, read>       w:   array<u32>;  // [N, kg]
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M] per-token activation scale
-@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N] per-channel weight scale
+@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, kg/BKG] group-wise weight scale
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
 const BM: u32 = 128u;
@@ -130,10 +154,29 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     var c60 = 0i; var c61 = 0i; var c62 = 0i; var c63 = 0i; var c64 = 0i; var c65 = 0i; var c66 = 0i; var c67 = 0i;
     var c70 = 0i; var c71 = 0i; var c72 = 0i; var c73 = 0i; var c74 = 0i; var c75 = 0i; var c76 = 0i; var c77 = 0i;
 
+    // 64 f32 running totals: the integer block above holds ONE weight-scale
+    // group (one k-chunk); these carry the dequantized sum across groups.
+    var d00 = 0.0; var d01 = 0.0; var d02 = 0.0; var d03 = 0.0; var d04 = 0.0; var d05 = 0.0; var d06 = 0.0; var d07 = 0.0;
+    var d10 = 0.0; var d11 = 0.0; var d12 = 0.0; var d13 = 0.0; var d14 = 0.0; var d15 = 0.0; var d16 = 0.0; var d17 = 0.0;
+    var d20 = 0.0; var d21 = 0.0; var d22 = 0.0; var d23 = 0.0; var d24 = 0.0; var d25 = 0.0; var d26 = 0.0; var d27 = 0.0;
+    var d30 = 0.0; var d31 = 0.0; var d32 = 0.0; var d33 = 0.0; var d34 = 0.0; var d35 = 0.0; var d36 = 0.0; var d37 = 0.0;
+    var d40 = 0.0; var d41 = 0.0; var d42 = 0.0; var d43 = 0.0; var d44 = 0.0; var d45 = 0.0; var d46 = 0.0; var d47 = 0.0;
+    var d50 = 0.0; var d51 = 0.0; var d52 = 0.0; var d53 = 0.0; var d54 = 0.0; var d55 = 0.0; var d56 = 0.0; var d57 = 0.0;
+    var d60 = 0.0; var d61 = 0.0; var d62 = 0.0; var d63 = 0.0; var d64 = 0.0; var d65 = 0.0; var d66 = 0.0; var d67 = 0.0;
+    var d70 = 0.0; var d71 = 0.0; var d72 = 0.0; var d73 = 0.0; var d74 = 0.0; var d75 = 0.0; var d76 = 0.0; var d77 = 0.0;
+
     var rA: vec4<u32>;
     var rB: vec4<u32>;
 
     let nchunks = (p.kg + BKG - 1u) / BKG;
+    // Weight-scale groups per row. Equal to `nchunks` under the contract
+    // (K a multiple of 32 => kg a multiple of BKG); computed separately, and
+    // the group index clamped below, so a caller that broke the contract gets
+    // a wrong number rather than a read past the binding.
+    let ng = p.kg / BKG;
+    // This thread's eight output columns, in the same stride-16 interleave the
+    // epilogue stores with.
+    let cc = col0 + tx;
 
     // Prime chunk 0. The whole-quad case is one uniform branch and four
     // consecutive loads; the ragged tail (`kg` not a multiple of BKG, or a
@@ -283,6 +326,36 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
                 c77 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
             }
         }
+        // One chunk == one weight-scale group: fold this group's exact integer
+        // sums into the f32 running totals through the group's own scale, then
+        // clear them for the next group.
+        {
+            let sg = select(0u, c, c < ng);
+            let e0 = select(0.0, sw[(cc +   0u) * ng + sg], cc +   0u < p.n);
+            let e1 = select(0.0, sw[(cc +  16u) * ng + sg], cc +  16u < p.n);
+            let e2 = select(0.0, sw[(cc +  32u) * ng + sg], cc +  32u < p.n);
+            let e3 = select(0.0, sw[(cc +  48u) * ng + sg], cc +  48u < p.n);
+            let e4 = select(0.0, sw[(cc +  64u) * ng + sg], cc +  64u < p.n);
+            let e5 = select(0.0, sw[(cc +  80u) * ng + sg], cc +  80u < p.n);
+            let e6 = select(0.0, sw[(cc +  96u) * ng + sg], cc +  96u < p.n);
+            let e7 = select(0.0, sw[(cc + 112u) * ng + sg], cc + 112u < p.n);
+            d00 += f32(c00) * e0; d01 += f32(c01) * e1; d02 += f32(c02) * e2; d03 += f32(c03) * e3; d04 += f32(c04) * e4; d05 += f32(c05) * e5; d06 += f32(c06) * e6; d07 += f32(c07) * e7;
+            d10 += f32(c10) * e0; d11 += f32(c11) * e1; d12 += f32(c12) * e2; d13 += f32(c13) * e3; d14 += f32(c14) * e4; d15 += f32(c15) * e5; d16 += f32(c16) * e6; d17 += f32(c17) * e7;
+            d20 += f32(c20) * e0; d21 += f32(c21) * e1; d22 += f32(c22) * e2; d23 += f32(c23) * e3; d24 += f32(c24) * e4; d25 += f32(c25) * e5; d26 += f32(c26) * e6; d27 += f32(c27) * e7;
+            d30 += f32(c30) * e0; d31 += f32(c31) * e1; d32 += f32(c32) * e2; d33 += f32(c33) * e3; d34 += f32(c34) * e4; d35 += f32(c35) * e5; d36 += f32(c36) * e6; d37 += f32(c37) * e7;
+            d40 += f32(c40) * e0; d41 += f32(c41) * e1; d42 += f32(c42) * e2; d43 += f32(c43) * e3; d44 += f32(c44) * e4; d45 += f32(c45) * e5; d46 += f32(c46) * e6; d47 += f32(c47) * e7;
+            d50 += f32(c50) * e0; d51 += f32(c51) * e1; d52 += f32(c52) * e2; d53 += f32(c53) * e3; d54 += f32(c54) * e4; d55 += f32(c55) * e5; d56 += f32(c56) * e6; d57 += f32(c57) * e7;
+            d60 += f32(c60) * e0; d61 += f32(c61) * e1; d62 += f32(c62) * e2; d63 += f32(c63) * e3; d64 += f32(c64) * e4; d65 += f32(c65) * e5; d66 += f32(c66) * e6; d67 += f32(c67) * e7;
+            d70 += f32(c70) * e0; d71 += f32(c71) * e1; d72 += f32(c72) * e2; d73 += f32(c73) * e3; d74 += f32(c74) * e4; d75 += f32(c75) * e5; d76 += f32(c76) * e6; d77 += f32(c77) * e7;
+            c00 = 0i; c01 = 0i; c02 = 0i; c03 = 0i; c04 = 0i; c05 = 0i; c06 = 0i; c07 = 0i;
+            c10 = 0i; c11 = 0i; c12 = 0i; c13 = 0i; c14 = 0i; c15 = 0i; c16 = 0i; c17 = 0i;
+            c20 = 0i; c21 = 0i; c22 = 0i; c23 = 0i; c24 = 0i; c25 = 0i; c26 = 0i; c27 = 0i;
+            c30 = 0i; c31 = 0i; c32 = 0i; c33 = 0i; c34 = 0i; c35 = 0i; c36 = 0i; c37 = 0i;
+            c40 = 0i; c41 = 0i; c42 = 0i; c43 = 0i; c44 = 0i; c45 = 0i; c46 = 0i; c47 = 0i;
+            c50 = 0i; c51 = 0i; c52 = 0i; c53 = 0i; c54 = 0i; c55 = 0i; c56 = 0i; c57 = 0i;
+            c60 = 0i; c61 = 0i; c62 = 0i; c63 = 0i; c64 = 0i; c65 = 0i; c66 = 0i; c67 = 0i;
+            c70 = 0i; c71 = 0i; c72 = 0i; c73 = 0i; c74 = 0i; c75 = 0i; c76 = 0i; c77 = 0i;
+        }
         workgroupBarrier();
         if (has_next) {
             As[sh_idx] = rA;
@@ -291,18 +364,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         workgroupBarrier();
     }
 
-    // Guarded stores: thread (ty,tx) owns rows ty+16i and columns tx+16j.
-    var swc: array<f32, 8>;
-    let c0 = col0 + tx;
-    swc[0] = select(0.0, sw[c0 + 0u],   c0 + 0u   < p.n);
-    swc[1] = select(0.0, sw[c0 + 16u],  c0 + 16u  < p.n);
-    swc[2] = select(0.0, sw[c0 + 32u],  c0 + 32u  < p.n);
-    swc[3] = select(0.0, sw[c0 + 48u],  c0 + 48u  < p.n);
-    swc[4] = select(0.0, sw[c0 + 64u],  c0 + 64u  < p.n);
-    swc[5] = select(0.0, sw[c0 + 80u],  c0 + 80u  < p.n);
-    swc[6] = select(0.0, sw[c0 + 96u],  c0 + 96u  < p.n);
-    swc[7] = select(0.0, sw[c0 + 112u], c0 + 112u < p.n);
-
+    // Guarded stores: thread (ty,tx) owns rows ty+16i and columns tx+16j. The
+    // weight scale is already inside `dXY` (applied per k-chunk above), so the
+    // epilogue only has the per-token activation scale left to apply.
     let m0 = row0 + ty + 0u;
     let m1 = row0 + ty + 16u;
     let m2 = row0 + ty + 32u;
@@ -318,90 +382,90 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
 
     if (m0 < p.m) {
         let r0 = m0 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r0 + 0u]   = f32(c00) * sv0 * swc[0]; }
-        if (col0 + tx + 16u < p.n) { out[r0 + 16u]  = f32(c01) * sv0 * swc[1]; }
-        if (col0 + tx + 32u < p.n) { out[r0 + 32u]  = f32(c02) * sv0 * swc[2]; }
-        if (col0 + tx + 48u < p.n) { out[r0 + 48u]  = f32(c03) * sv0 * swc[3]; }
-        if (col0 + tx + 64u < p.n) { out[r0 + 64u]  = f32(c04) * sv0 * swc[4]; }
-        if (col0 + tx + 80u < p.n) { out[r0 + 80u]  = f32(c05) * sv0 * swc[5]; }
-        if (col0 + tx + 96u < p.n) { out[r0 + 96u]  = f32(c06) * sv0 * swc[6]; }
-        if (col0 + tx + 112u < p.n) { out[r0 + 112u] = f32(c07) * sv0 * swc[7]; }
+        if (col0 + tx + 0u < p.n)   { out[r0 + 0u]   = d00 * sv0; }
+        if (col0 + tx + 16u < p.n) { out[r0 + 16u]  = d01 * sv0; }
+        if (col0 + tx + 32u < p.n) { out[r0 + 32u]  = d02 * sv0; }
+        if (col0 + tx + 48u < p.n) { out[r0 + 48u]  = d03 * sv0; }
+        if (col0 + tx + 64u < p.n) { out[r0 + 64u]  = d04 * sv0; }
+        if (col0 + tx + 80u < p.n) { out[r0 + 80u]  = d05 * sv0; }
+        if (col0 + tx + 96u < p.n) { out[r0 + 96u]  = d06 * sv0; }
+        if (col0 + tx + 112u < p.n) { out[r0 + 112u] = d07 * sv0; }
     }
     if (m1 < p.m) {
         let r1 = m1 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r1 + 0u]   = f32(c10) * sv1 * swc[0]; }
-        if (col0 + tx + 16u < p.n) { out[r1 + 16u]  = f32(c11) * sv1 * swc[1]; }
-        if (col0 + tx + 32u < p.n) { out[r1 + 32u]  = f32(c12) * sv1 * swc[2]; }
-        if (col0 + tx + 48u < p.n) { out[r1 + 48u]  = f32(c13) * sv1 * swc[3]; }
-        if (col0 + tx + 64u < p.n) { out[r1 + 64u]  = f32(c14) * sv1 * swc[4]; }
-        if (col0 + tx + 80u < p.n) { out[r1 + 80u]  = f32(c15) * sv1 * swc[5]; }
-        if (col0 + tx + 96u < p.n) { out[r1 + 96u]  = f32(c16) * sv1 * swc[6]; }
-        if (col0 + tx + 112u < p.n) { out[r1 + 112u] = f32(c17) * sv1 * swc[7]; }
+        if (col0 + tx + 0u < p.n)   { out[r1 + 0u]   = d10 * sv1; }
+        if (col0 + tx + 16u < p.n) { out[r1 + 16u]  = d11 * sv1; }
+        if (col0 + tx + 32u < p.n) { out[r1 + 32u]  = d12 * sv1; }
+        if (col0 + tx + 48u < p.n) { out[r1 + 48u]  = d13 * sv1; }
+        if (col0 + tx + 64u < p.n) { out[r1 + 64u]  = d14 * sv1; }
+        if (col0 + tx + 80u < p.n) { out[r1 + 80u]  = d15 * sv1; }
+        if (col0 + tx + 96u < p.n) { out[r1 + 96u]  = d16 * sv1; }
+        if (col0 + tx + 112u < p.n) { out[r1 + 112u] = d17 * sv1; }
     }
     if (m2 < p.m) {
         let r2 = m2 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r2 + 0u]   = f32(c20) * sv2 * swc[0]; }
-        if (col0 + tx + 16u < p.n) { out[r2 + 16u]  = f32(c21) * sv2 * swc[1]; }
-        if (col0 + tx + 32u < p.n) { out[r2 + 32u]  = f32(c22) * sv2 * swc[2]; }
-        if (col0 + tx + 48u < p.n) { out[r2 + 48u]  = f32(c23) * sv2 * swc[3]; }
-        if (col0 + tx + 64u < p.n) { out[r2 + 64u]  = f32(c24) * sv2 * swc[4]; }
-        if (col0 + tx + 80u < p.n) { out[r2 + 80u]  = f32(c25) * sv2 * swc[5]; }
-        if (col0 + tx + 96u < p.n) { out[r2 + 96u]  = f32(c26) * sv2 * swc[6]; }
-        if (col0 + tx + 112u < p.n) { out[r2 + 112u] = f32(c27) * sv2 * swc[7]; }
+        if (col0 + tx + 0u < p.n)   { out[r2 + 0u]   = d20 * sv2; }
+        if (col0 + tx + 16u < p.n) { out[r2 + 16u]  = d21 * sv2; }
+        if (col0 + tx + 32u < p.n) { out[r2 + 32u]  = d22 * sv2; }
+        if (col0 + tx + 48u < p.n) { out[r2 + 48u]  = d23 * sv2; }
+        if (col0 + tx + 64u < p.n) { out[r2 + 64u]  = d24 * sv2; }
+        if (col0 + tx + 80u < p.n) { out[r2 + 80u]  = d25 * sv2; }
+        if (col0 + tx + 96u < p.n) { out[r2 + 96u]  = d26 * sv2; }
+        if (col0 + tx + 112u < p.n) { out[r2 + 112u] = d27 * sv2; }
     }
     if (m3 < p.m) {
         let r3 = m3 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r3 + 0u]   = f32(c30) * sv3 * swc[0]; }
-        if (col0 + tx + 16u < p.n) { out[r3 + 16u]  = f32(c31) * sv3 * swc[1]; }
-        if (col0 + tx + 32u < p.n) { out[r3 + 32u]  = f32(c32) * sv3 * swc[2]; }
-        if (col0 + tx + 48u < p.n) { out[r3 + 48u]  = f32(c33) * sv3 * swc[3]; }
-        if (col0 + tx + 64u < p.n) { out[r3 + 64u]  = f32(c34) * sv3 * swc[4]; }
-        if (col0 + tx + 80u < p.n) { out[r3 + 80u]  = f32(c35) * sv3 * swc[5]; }
-        if (col0 + tx + 96u < p.n) { out[r3 + 96u]  = f32(c36) * sv3 * swc[6]; }
-        if (col0 + tx + 112u < p.n) { out[r3 + 112u] = f32(c37) * sv3 * swc[7]; }
+        if (col0 + tx + 0u < p.n)   { out[r3 + 0u]   = d30 * sv3; }
+        if (col0 + tx + 16u < p.n) { out[r3 + 16u]  = d31 * sv3; }
+        if (col0 + tx + 32u < p.n) { out[r3 + 32u]  = d32 * sv3; }
+        if (col0 + tx + 48u < p.n) { out[r3 + 48u]  = d33 * sv3; }
+        if (col0 + tx + 64u < p.n) { out[r3 + 64u]  = d34 * sv3; }
+        if (col0 + tx + 80u < p.n) { out[r3 + 80u]  = d35 * sv3; }
+        if (col0 + tx + 96u < p.n) { out[r3 + 96u]  = d36 * sv3; }
+        if (col0 + tx + 112u < p.n) { out[r3 + 112u] = d37 * sv3; }
     }
     if (m4 < p.m) {
         let r4 = m4 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r4 + 0u]   = f32(c40) * sv4 * swc[0]; }
-        if (col0 + tx + 16u < p.n) { out[r4 + 16u]  = f32(c41) * sv4 * swc[1]; }
-        if (col0 + tx + 32u < p.n) { out[r4 + 32u]  = f32(c42) * sv4 * swc[2]; }
-        if (col0 + tx + 48u < p.n) { out[r4 + 48u]  = f32(c43) * sv4 * swc[3]; }
-        if (col0 + tx + 64u < p.n) { out[r4 + 64u]  = f32(c44) * sv4 * swc[4]; }
-        if (col0 + tx + 80u < p.n) { out[r4 + 80u]  = f32(c45) * sv4 * swc[5]; }
-        if (col0 + tx + 96u < p.n) { out[r4 + 96u]  = f32(c46) * sv4 * swc[6]; }
-        if (col0 + tx + 112u < p.n) { out[r4 + 112u] = f32(c47) * sv4 * swc[7]; }
+        if (col0 + tx + 0u < p.n)   { out[r4 + 0u]   = d40 * sv4; }
+        if (col0 + tx + 16u < p.n) { out[r4 + 16u]  = d41 * sv4; }
+        if (col0 + tx + 32u < p.n) { out[r4 + 32u]  = d42 * sv4; }
+        if (col0 + tx + 48u < p.n) { out[r4 + 48u]  = d43 * sv4; }
+        if (col0 + tx + 64u < p.n) { out[r4 + 64u]  = d44 * sv4; }
+        if (col0 + tx + 80u < p.n) { out[r4 + 80u]  = d45 * sv4; }
+        if (col0 + tx + 96u < p.n) { out[r4 + 96u]  = d46 * sv4; }
+        if (col0 + tx + 112u < p.n) { out[r4 + 112u] = d47 * sv4; }
     }
     if (m5 < p.m) {
         let r5 = m5 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r5 + 0u]   = f32(c50) * sv5 * swc[0]; }
-        if (col0 + tx + 16u < p.n) { out[r5 + 16u]  = f32(c51) * sv5 * swc[1]; }
-        if (col0 + tx + 32u < p.n) { out[r5 + 32u]  = f32(c52) * sv5 * swc[2]; }
-        if (col0 + tx + 48u < p.n) { out[r5 + 48u]  = f32(c53) * sv5 * swc[3]; }
-        if (col0 + tx + 64u < p.n) { out[r5 + 64u]  = f32(c54) * sv5 * swc[4]; }
-        if (col0 + tx + 80u < p.n) { out[r5 + 80u]  = f32(c55) * sv5 * swc[5]; }
-        if (col0 + tx + 96u < p.n) { out[r5 + 96u]  = f32(c56) * sv5 * swc[6]; }
-        if (col0 + tx + 112u < p.n) { out[r5 + 112u] = f32(c57) * sv5 * swc[7]; }
+        if (col0 + tx + 0u < p.n)   { out[r5 + 0u]   = d50 * sv5; }
+        if (col0 + tx + 16u < p.n) { out[r5 + 16u]  = d51 * sv5; }
+        if (col0 + tx + 32u < p.n) { out[r5 + 32u]  = d52 * sv5; }
+        if (col0 + tx + 48u < p.n) { out[r5 + 48u]  = d53 * sv5; }
+        if (col0 + tx + 64u < p.n) { out[r5 + 64u]  = d54 * sv5; }
+        if (col0 + tx + 80u < p.n) { out[r5 + 80u]  = d55 * sv5; }
+        if (col0 + tx + 96u < p.n) { out[r5 + 96u]  = d56 * sv5; }
+        if (col0 + tx + 112u < p.n) { out[r5 + 112u] = d57 * sv5; }
     }
     if (m6 < p.m) {
         let r6 = m6 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r6 + 0u]   = f32(c60) * sv6 * swc[0]; }
-        if (col0 + tx + 16u < p.n) { out[r6 + 16u]  = f32(c61) * sv6 * swc[1]; }
-        if (col0 + tx + 32u < p.n) { out[r6 + 32u]  = f32(c62) * sv6 * swc[2]; }
-        if (col0 + tx + 48u < p.n) { out[r6 + 48u]  = f32(c63) * sv6 * swc[3]; }
-        if (col0 + tx + 64u < p.n) { out[r6 + 64u]  = f32(c64) * sv6 * swc[4]; }
-        if (col0 + tx + 80u < p.n) { out[r6 + 80u]  = f32(c65) * sv6 * swc[5]; }
-        if (col0 + tx + 96u < p.n) { out[r6 + 96u]  = f32(c66) * sv6 * swc[6]; }
-        if (col0 + tx + 112u < p.n) { out[r6 + 112u] = f32(c67) * sv6 * swc[7]; }
+        if (col0 + tx + 0u < p.n)   { out[r6 + 0u]   = d60 * sv6; }
+        if (col0 + tx + 16u < p.n) { out[r6 + 16u]  = d61 * sv6; }
+        if (col0 + tx + 32u < p.n) { out[r6 + 32u]  = d62 * sv6; }
+        if (col0 + tx + 48u < p.n) { out[r6 + 48u]  = d63 * sv6; }
+        if (col0 + tx + 64u < p.n) { out[r6 + 64u]  = d64 * sv6; }
+        if (col0 + tx + 80u < p.n) { out[r6 + 80u]  = d65 * sv6; }
+        if (col0 + tx + 96u < p.n) { out[r6 + 96u]  = d66 * sv6; }
+        if (col0 + tx + 112u < p.n) { out[r6 + 112u] = d67 * sv6; }
     }
     if (m7 < p.m) {
         let r7 = m7 * p.n + col0 + tx;
-        if (col0 + tx + 0u < p.n)   { out[r7 + 0u]   = f32(c70) * sv7 * swc[0]; }
-        if (col0 + tx + 16u < p.n) { out[r7 + 16u]  = f32(c71) * sv7 * swc[1]; }
-        if (col0 + tx + 32u < p.n) { out[r7 + 32u]  = f32(c72) * sv7 * swc[2]; }
-        if (col0 + tx + 48u < p.n) { out[r7 + 48u]  = f32(c73) * sv7 * swc[3]; }
-        if (col0 + tx + 64u < p.n) { out[r7 + 64u]  = f32(c74) * sv7 * swc[4]; }
-        if (col0 + tx + 80u < p.n) { out[r7 + 80u]  = f32(c75) * sv7 * swc[5]; }
-        if (col0 + tx + 96u < p.n) { out[r7 + 96u]  = f32(c76) * sv7 * swc[6]; }
-        if (col0 + tx + 112u < p.n) { out[r7 + 112u] = f32(c77) * sv7 * swc[7]; }
+        if (col0 + tx + 0u < p.n)   { out[r7 + 0u]   = d70 * sv7; }
+        if (col0 + tx + 16u < p.n) { out[r7 + 16u]  = d71 * sv7; }
+        if (col0 + tx + 32u < p.n) { out[r7 + 32u]  = d72 * sv7; }
+        if (col0 + tx + 48u < p.n) { out[r7 + 48u]  = d73 * sv7; }
+        if (col0 + tx + 64u < p.n) { out[r7 + 64u]  = d74 * sv7; }
+        if (col0 + tx + 80u < p.n) { out[r7 + 80u]  = d75 * sv7; }
+        if (col0 + tx + 96u < p.n) { out[r7 + 96u]  = d76 * sv7; }
+        if (col0 + tx + 112u < p.n) { out[r7 + 112u] = d77 * sv7; }
     }
 }
