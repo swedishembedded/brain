@@ -126,6 +126,7 @@
 
 pub mod codec;
 pub mod color;
+pub mod colorfix;
 pub mod device;
 pub mod host;
 pub mod letterbox;

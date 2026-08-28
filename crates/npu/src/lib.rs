@@ -41,6 +41,8 @@ pub mod glm_topology;
 pub mod qwen35moe_export;
 pub mod qwen35moe_topology;
 pub mod lfm_topology;
+pub mod supir_export;
+pub mod supir_topology;
 pub mod upscale_topology;
 pub mod vae_topology;
 pub mod lfm_export;

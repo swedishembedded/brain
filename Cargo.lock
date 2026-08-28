@@ -1871,15 +1871,18 @@ dependencies = [
 name = "brain-supir"
 version = "1.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-diffusion",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-sdxlunet",
  "brain-testutil",
  "brain-vae",
+ "serde_json",
 ]
 
 [[package]]

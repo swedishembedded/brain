@@ -17,7 +17,11 @@ brain-checkpoint.workspace = true # safetensors reader (import)
 brain-sdxlunet.workspace = true   # sdxlunet::model::Rec/Unet - the frozen backbone IS its blocks
 brain-vae.workspace = true        # vae::blocks::{Builder, skipfuse::{Map, SkipFuse}}
 brain-data.workspace = true       # data::rng::Rng for init.rs
+# pipeline.rs (the restoration loop) + caps.rs (the served `restore` action):
+brain-diffusion.workspace = true  # diffusion::restore - RestoreEDMSampler's scalar math
+brain-imaging.workspace = true    # pipeline: resize/CHW<->HWC/wavelet+AdaIN colour fix
+brain-capability.workspace = true # caps: the served restore action
+serde_json.workspace = true       # caps: ActionSpec/Outcome JSON values
 
 [dev-dependencies]
 brain-testutil.workspace = true   # testutil::parity::Table, testutil::golden::Source
-brain-diffusion.workspace = true  # diffusion::restore - verified against real reference numbers here

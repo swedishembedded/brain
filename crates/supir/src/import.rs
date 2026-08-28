@@ -343,6 +343,119 @@ fn remap_denoise_encoder(mut local: HashMap<String, (Vec<usize>, Vec<f32>)>, vcf
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// The denoise encoder, again: CompVis leaf names -> diffusers leaf names, for
+// `vae::VaeEncoder::from_diffusers` (which only ever reads diffusers-style
+// keys - see `vae::decoder::VaeEncoder::build`). `remap_denoise_encoder`
+// above produces the CompVis names the real checkpoint ships (kept as this
+// crate's own manifest, since nothing bound them to a forward before now);
+// this is the second, pipeline-only step that was deferred alongside it - a
+// pure key rename plus one shape flatten (CompVis stores the attention
+// projections as 1x1 convs, `[C,C,1,1]`; diffusers stores the identical
+// values as a plain `[C,C]` linear - same row-major bytes, so this is a
+// metadata change, not a data transform).
+// ---------------------------------------------------------------------------
+
+/// No official GGUF distribution of SUPIR exists upstream, and no GGUF file
+/// with `general.architecture` set to any spelling this crate would recognise
+/// has ever been observed. Registered anyway so a future community export
+/// auto-dispatches with no further CLI change (the `s3dit`/`wan` precedent for
+/// architectures with no real GGUF release yet).
+///
+/// `"sdxl"`, not `"supir"`: of the two backbones a SUPIR checkpoint carries,
+/// the frozen one is BYTE-IDENTICAL to `stable-diffusion-xl-base-1.0` (see
+/// this crate's own module doc), so a hypothetical converter quantizing a
+/// SUPIR checkpoint is most likely to reuse whatever spelling it already uses
+/// for a plain SDXL UNet, the same way `s3dit` reuses the REAL `"lumina2"`
+/// spelling for a model that is structurally derived from it. `import_gguf`
+/// below still refuses to guess the SUPIR-specific delta, so a real SDXL GGUF
+/// file (holding none of it) fails loudly rather than silently importing as
+/// a restoration model.
+pub const GGUF_ARCHITECTURE: &str = "sdxl";
+
+/// A GGUF architecture importer's `import` body needs a real file to convert;
+/// none has ever been observed for this architecture (see
+/// [`GGUF_ARCHITECTURE`]'s doc), so this states that plainly instead of
+/// guessing at a tensor-name mapping nothing can test.
+pub fn import_gguf(_gguf: &checkpoint::gguf::MmapGguf, _out_path: &str, _id_override: Option<&str>) -> Result<(), String> {
+    Err(format!(
+        "supir: no GGUF file with general.architecture={GGUF_ARCHITECTURE:?} carrying a SUPIR delta has ever \
+         been observed upstream - this importer is registered so one auto-dispatches the day it exists, but \
+         there is nothing to convert yet. Use a native safetensors checkpoint (crate::import::load) instead."
+    ))
+}
+
+/// Rename `denoise_encoder.*`'s CompVis leaf names (see
+/// [`crate::config::denoise_encoder_manifest`]) into the diffusers-style keys
+/// [`vae::decoder::VaeEncoder::build`] looks up, under an `"encoder."` prefix
+/// so the result can be merged directly with the frozen backbone VAE's own
+/// `quant_conv.weight`/`.bias` (denoise_encoder reuses those FROZEN, per the
+/// module doc - they are not part of this rename, the caller supplies them).
+pub fn denoise_encoder_diffusers_names(denc: &Tensors, vcfg: &VaeConfig) -> Tensors {
+    let mut out: Tensors = HashMap::new();
+    let take = |out: &mut Tensors, denc: &Tensors, src: &str, dst: String| {
+        if let Some(v) = denc.get(src) {
+            out.insert(dst, v.clone());
+        }
+    };
+    // conv_in.
+    for suf in ["weight", "bias"] {
+        take(&mut out, denc, &format!("conv_in.{suf}"), format!("encoder.conv_in.{suf}"));
+    }
+    // Down blocks: resnets + one downsample per level but the last.
+    let levels = vcfg.block_out_channels.len();
+    for i in 0..levels {
+        for j in 0..vcfg.layers_per_block as usize {
+            rename_ldm_resnet(&mut out, denc, &format!("down.{i}.block.{j}"), &format!("encoder.down_blocks.{i}.resnets.{j}"));
+        }
+        if i + 1 < levels {
+            for suf in ["weight", "bias"] {
+                take(&mut out, denc, &format!("down.{i}.downsample.conv.{suf}"), format!("encoder.down_blocks.{i}.downsamplers.0.conv.{suf}"));
+            }
+        }
+    }
+    // Mid block: resnet, (optional) attention, resnet.
+    rename_ldm_resnet(&mut out, denc, "mid.block_1", "encoder.mid_block.resnets.0");
+    if vcfg.mid_block_add_attention {
+        for suf in ["weight", "bias"] {
+            take(&mut out, denc, &format!("mid.attn_1.norm.{suf}"), format!("encoder.mid_block.attentions.0.group_norm.{suf}"));
+        }
+        for (src, dst) in [("q", "to_q"), ("k", "to_k"), ("v", "to_v"), ("proj_out", "to_out.0")] {
+            if let Some((shape, data)) = denc.get(&format!("mid.attn_1.{src}.weight")) {
+                // [C,C,1,1] conv -> [C,C] linear: identical row-major bytes.
+                let flat = vec![shape[0], shape[1]];
+                out.insert(format!("encoder.mid_block.attentions.0.{dst}.weight"), (flat, data.clone()));
+            }
+            take(&mut out, denc, &format!("mid.attn_1.{src}.bias"), format!("encoder.mid_block.attentions.0.{dst}.bias"));
+        }
+    }
+    rename_ldm_resnet(&mut out, denc, "mid.block_2", "encoder.mid_block.resnets.1");
+    // Head.
+    for suf in ["weight", "bias"] {
+        take(&mut out, denc, &format!("norm_out.{suf}"), format!("encoder.conv_norm_out.{suf}"));
+        take(&mut out, denc, &format!("conv_out.{suf}"), format!("encoder.conv_out.{suf}"));
+    }
+    out
+}
+
+/// One `resnet(p, cin, cout)` block, CompVis leaves -> diffusers leaves:
+/// `norm1`/`conv1`/`norm2`/`conv2` pass through unchanged, `nin_shortcut` ->
+/// `conv_shortcut` (present only when the block's width changes).
+fn rename_ldm_resnet(out: &mut Tensors, denc: &Tensors, src: &str, dst: &str) {
+    for leaf in ["norm1", "conv1", "norm2", "conv2"] {
+        for suf in ["weight", "bias"] {
+            if let Some(v) = denc.get(&format!("{src}.{leaf}.{suf}")) {
+                out.insert(format!("{dst}.{leaf}.{suf}"), v.clone());
+            }
+        }
+    }
+    for suf in ["weight", "bias"] {
+        if let Some(v) = denc.get(&format!("{src}.nin_shortcut.{suf}")) {
+            out.insert(format!("{dst}.conv_shortcut.{suf}"), v.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +660,36 @@ mod tests {
         let mut raw = synthetic_checkpoint(&cfg);
         raw.insert(format!("{PM_PREFIX}999.zero_conv.weight"), (vec![1], vec![0.0]));
         assert!(remap(raw, &cfg).is_err());
+    }
+
+    /// The rename covers every key [`crate::config::denoise_encoder_manifest`]
+    /// declares (minus the frozen `quant_conv` the caller supplies
+    /// separately), and the attention projections come out 2D.
+    #[test]
+    fn denoise_encoder_rename_covers_the_manifest_and_flattens_attention() {
+        let cfg = SupirConfig::tiny();
+        let vcfg = &cfg.denoise_encoder;
+        let raw = synthetic_checkpoint(&cfg);
+        let denc: Tensors = raw
+            .into_iter()
+            .filter_map(|(k, v)| k.strip_prefix(DE_PREFIX).map(|s| (s.to_string(), v)))
+            .collect();
+        let renamed = denoise_encoder_diffusers_names(&denc, vcfg);
+
+        assert!(renamed.contains_key("encoder.conv_in.weight"));
+        assert!(renamed.contains_key("encoder.conv_norm_out.weight"));
+        assert!(renamed.contains_key("encoder.conv_out.weight"));
+        assert!(renamed.contains_key("encoder.mid_block.resnets.0.norm1.weight"));
+        assert!(renamed.contains_key("encoder.mid_block.resnets.1.conv2.bias"));
+        if vcfg.mid_block_add_attention {
+            let (shape, _) = renamed.get("encoder.mid_block.attentions.0.to_q.weight").expect("to_q");
+            assert_eq!(shape.len(), 2, "attention projection must flatten to a 2D linear weight, got {shape:?}");
+            assert!(renamed.contains_key("encoder.mid_block.attentions.0.group_norm.weight"));
+            assert!(renamed.contains_key("encoder.mid_block.attentions.0.to_out.0.weight"));
+        }
+        // No stray CompVis-named keys and no accidental `quant_conv` (that
+        // tensor is not part of `denoise_encoder`'s own 106 - see the doc).
+        assert!(!renamed.contains_key("quant_conv.weight"));
+        assert!(!renamed.keys().any(|k| k.contains("nin_shortcut")));
     }
 }

@@ -17,9 +17,14 @@
 //! manifest), [`import`] (two-way checkpoint coverage), [`trunk`]
 //! (`GLVControl`), [`adaptors`] (the 12 `ZeroSFT`/`ZeroCrossAttn` modules)
 //! and [`model`] (trunk + adaptors + the frozen UNet, one graph) - are
-//! implemented and weight-free-gated. `pipeline.rs` (the full restoration
+//! implemented and weight-free-gated. [`pipeline`] (the full restoration
 //! loop: dual encode, dual-CLIP conditioning, `RestoreEDMSampler`, colour
-//! fix) and real-checkpoint parity are open.
+//! fix) and [`caps`] (the served `restore` action, cost-aware residency,
+//! NPU export and CLI wiring) are also implemented and weight-free-gated -
+//! real-checkpoint end-to-end parity is open, and a real run on this port's
+//! own development machine is expected to hit the device-memory ceiling
+//! this crate's own parity tests already document (int8 reduces host memory
+//! only, not device memory, on that hardware).
 //!
 //! ## Licence
 //!
@@ -31,6 +36,7 @@
 //! brain at weights they obtained themselves, at their own licensing risk.
 
 pub mod adaptors;
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod init;
@@ -38,5 +44,6 @@ pub mod finetune;
 pub mod int8;
 pub mod lora;
 pub mod model;
+pub mod pipeline;
 pub mod train;
 pub mod trunk;
