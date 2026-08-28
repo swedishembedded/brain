@@ -252,8 +252,68 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       scoped it as; the reasoning is recorded in
       `.agents/roadmap/controlnet.md` rather than left as a bare unchecked
       box.
-- [ ] `crates/llava`.
-- [ ] Serving contract, CLI, NPU export, docs.
+- [x] `crates/llava` (see `.agents/roadmap/llava.md`) - the vision tower ->
+      projector -> decoder splice, the `vicuna_v1` template, INT8 decoder
+      path and served `caption` action, all weight-free-gated; not yet
+      exercised against real checkpoint bytes (a multi-ten-GB download none
+      was fetched this session).
+- [x] Serving contract, CLI, NPU export, docs. `crates/supir/src/pipeline.rs`
+      (the restoration loop this crate's own doc had left as future work: the
+      dual encode - `denoise_encoder`'s CompVis-named weights renamed to the
+      diffusers keys `vae::VaeEncoder` reads via
+      `crate::import::denoise_encoder_diffusers_names`, merged with the
+      frozen backbone's own `quant_conv` - dual-CLIP conditioning via
+      `sdxlunet::textenc::TextEncoders` reused unmodified, the
+      `RestoreEDMSampler` loop driven directly off `diffusion::restore`'s
+      primitives - `DiscreteDenoiserWithControl`, `churn_gamma`/`sigma_hat`/
+      `apply_churn_noise`, `restore_guidance`, `linear_cfg_scale`,
+      `euler_step` - CFG combined in eps-space per this codebase's own
+      convention, and colour fix via a new `imaging::colorfix` module -
+      `wavelet_reconstruction`, the real 5-level a-trous decomposition
+      upstream's own default uses, plus `adain` for its other supported
+      mode). `crates/supir/src/caps.rs` (the `restore` action; cancellable
+      per denoise step via `inv.cancel`, the same contract `wan::caps`
+      documents; optional LLaVA auto-captioning dispatched through a
+      `capability::Registry` supplied by the caller - `crates/supir` links no
+      VLM - mirroring `crates/imgpipe`'s own "registry supplied by the
+      caller" precedent). `crates/cli/src/resident_supir.rs` (the residency
+      adapter; `run_batch` serial, stated in-file for the same reason
+      `resident_sdxl.rs`/`resident_controlnet.rs` give: every request is its
+      own multi-step sample) plus the `crates/catalog` `ModelEntry` and the
+      `crates/cli/src/catalog.rs` patch line, all invariant-tested by that
+      file's own suite (`every_listed_model_is_constructible_by_name`,
+      `every_patched_id_is_a_real_catalog_entry`). One `ARCH_TO_MODEL` row
+      (`brain supir restore ...`) - `sdxlunet`/`controlnet` themselves ship
+      no CLI shortcut at all (only `brain do brain/sdxl ...`/the served
+      transports), so this is one line ahead of that precedent, not a new
+      `supir_cli.rs`. `supir::import::GGUF_ARCHITECTURE` (`"sdxl"`, a
+      borrowed spelling - the frozen backbone genuinely is byte-identical
+      SDXL, the same reasoning `s3dit` used for `"lumina2"`) registered as a
+      SECOND documented ambiguous-tag exception in
+      `crates/cli/src/gguf_import.rs`'s own test, alongside a stub
+      `import_gguf` that states plainly no real file has ever been observed
+      rather than guessing a tensor mapping against one. D-Bus `Run` needed
+      no new code (it dispatches generically over the residency `Executor`
+      once a model is registered) - `examples/restore/supir_restore.py` +
+      README update mirror `restore_face.py`'s existing shape.
+      `crates/imgpipe`: a NEW `Stage::SupirRestore` variant (not
+      `Stage::Restore{w}`, whose fidelity dial has no SUPIR meaning) - a
+      SECOND size-changing tail alongside `Stage::Upscale`, mutually
+      exclusive with it since this crate defines no combined order for two
+      tails that each change the working resolution; `catalog`'s
+      `imgpipe_stage_ids_match_the_catalog` test extended to cover it.
+      `crates/npu/src/supir_topology.rs` + `supir_export.rs`: `ZeroCrossAttn`
+      (the one adaptor with LINEAR projections, quantized through the shared
+      `topo::linear_quant` emitter) - structurally tested, no real checkpoint
+      or NPU hardware involved. Docs: `docs/models/supir.md` rewritten from
+      its Phase-0 placeholder, `docs/models/llava.md` (already Phase 6),
+      `docs/models/index.md` (both moved out of "Reserved, not started" into
+      their real tables), `docs/models/imgpipe.md` (the new stage),
+      `README.md`'s model list. `docs/manifest.txt` already carried both
+      pages' entries. Lesson recorded in `.agents/rules/lessons.md` (#63):
+      `vae::VaeEncoder`/`VaeDecoder` are diffusers-NAMED, not merely
+      diffusers-SHAPED, despite sitting on the genuinely generic
+      `vae::blocks::Builder`/`BlockNames`.
 - [ ] Optimisation pass.
 
 ## Staged plan
@@ -339,10 +399,44 @@ the shape of the work:
   is not in the released repo).
 - `RestoreDPMPP2MSampler` + the Juggernaut-Lightning 8-step config.
 - Per-tile local prompts (upstream supports it only at batch size 1).
-- Full NPU validation of the trunk - the export path should exist, but the
-  trunk realistically exceeds what the NPU can hold on this hardware.
+- **NPU export covers `ZeroCrossAttn` only** (`crates/npu/src/supir_topology.rs`
+  + `supir_export.rs`, structurally tested, `topo::linear_quant` for its
+  linear projections). The 10 `ZeroSFT` adaptors (pure conv + GroupNorm - the
+  same primitives `vae_topology.rs` already exports, just under a different
+  block walk) and the 1.24B `GLVControl` trunk itself have NO export path:
+  unlike every other NPU topology in this crate, an SDXL/ControlNet-shaped
+  cross-attention UNet has never been exported to ONNX anywhere in this
+  tree - neither `sdxlunet` nor `controlnet` has a topology file at all - so
+  there is no existing block-walk to adapt, only `Unet::record_into`'s Rust
+  implementation to port from scratch. Filed as real, separate follow-up
+  work, distinct from (and larger than) "the trunk exceeds what the NPU can
+  hold on this hardware" below.
+- Full NPU validation, even of the piece that IS exported - there is no NPU
+  on this port's own development machine, so `ZeroCrossAttn`'s graph is
+  gated structurally (node counts, quantization shape, non-empty bytes), not
+  against real hardware or a real checkpoint. The trunk realistically
+  exceeds what an NPU can hold on this hardware even once exported.
+- **`linear_s_stage2` (the optional per-step control-scale ramp) is not
+  implemented in `crates/supir/src/pipeline.rs`.** `control_scale` is baked
+  into `Supir::new`'s graph as a constant (see that function's own doc); a
+  faithful per-step ramp would mean rebuilding - and re-uploading - the whole
+  trunk+adaptors+backbone graph every denoise step. Upstream's own CLI
+  default (`linear_s_stage2 = False`) already runs the constant path this
+  pipeline implements. A rewritable control-scale device buffer
+  (`CodeFormer`'s `w`/`scale_add` is the precedent) is the real fix.
+- **Tiled VAE / tiled diffusion are not wired into `crates/supir/src/pipeline.rs`.**
+  The seams exist (`imaging::tiling`'s blended `TilePlan` variant, built in
+  an earlier phase of this port), but composing them into the restoration
+  loop - splitting the sampler's per-step forward across overlapping windows
+  with a shared per-step noise field sliced per tile, and the VAE encode/
+  decode across tiles with GroupNorm statistics propagated between them - is
+  independent, sizeable work this phase leaves for a follow-up. Every
+  `Restorer::restore` call runs the whole working-resolution image through
+  one graph.
 - A full end-to-end restoration run on real checkpoints - held until
-  explicitly requested, per this port's scoping decision.
+  explicitly requested, per this port's scoping decision, and expected to
+  hit the device-memory ceiling documented above regardless (int8 reduces
+  host memory only on this hardware, not device memory).
 - `check_controlnet` and `ControlNet::record_into` - the plan expected these
   to fall out of `check_supir`'s infrastructure as a small mirror; building
   `supir::train::SupirTrainer` found two real gaps in `crates/controlnet`

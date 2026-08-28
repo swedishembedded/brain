@@ -34,6 +34,7 @@ named on the model's own page (see
 | Architecture | Solves | Infer |
 |---|---|:---:|
 | [`fastvlm`](fastvlm.md) ⤓ | image captioning | [x] |
+| [`llava`](llava.md) | image captioning (also [SUPIR](supir.md)'s optional auto-caption input) | [x] (untested against real weights - see the model's own page) |
 | [`qwen3vl`](qwen3vl.md) ⤓ | image + text → text | [x] |
 | [`deepseek2ocr`](deepseek2ocr.md) ⤓ | document image → text/markdown (OCR, tables, grounding) | [x] |
 | [`qwen3omnimoe`](qwen3omnimoe/readme.md) | text/audio/image/video → text, plus spoken output | [x] |
@@ -65,6 +66,7 @@ named on the model's own page (see
 | [`controlnet`](controlnet.md) | text-to-image conditioned on a control image (SDXL ControlNet) | [x] | |
 | [`pulid`](pulid.md) | identity-conditioned image generation (FLUX.1) | [x] | |
 | [`codeformer`](codeformer.md) | blind face restoration | [x] | |
+| [`supir`](supir.md) | photo-realistic blind image restoration (SDXL + GLVControl + ZeroSFT/ZeroCrossAttn) | [x] (untested end to end on real weights - device memory, see the model's own page) | [x] |
 | [`rrdbnet`](rrdbnet.md) ⤓ | 4x super-resolution | [x] | |
 | [`vqgan`](vqgan.md) | image ↔ codebook encode/decode | [x] | |
 | [`imgpipe`](imgpipe.md) | composed segment → restore → upscale, one call | [x] | |
@@ -108,17 +110,6 @@ surface yet - real, verified code, but not something you can run as a model
 today. Each has its own page with the full status:
 
 - [`instantid`](instantid.md) - identity-conditioned image generation (SDXL)
-
-## Reserved, not started
-
-The architecture id and crate exist (`crates/arch`), but no port has begun -
-distinct from [Not yet servable](#not-yet-servable) above, which is real,
-verified code without a serving surface yet:
-
-- [`supir`](supir.md) - photo-realistic image restoration (SDXL + ZeroSFT
-  adaptors); see `.agents/roadmap/supir.md`
-- [`llava`](llava.md) - image captioning, brought in as `supir`'s optional
-  captioner; see `.agents/roadmap/llava.md`
 
 ## Components
 

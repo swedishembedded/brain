@@ -430,6 +430,25 @@ pub fn models() -> Vec<ModelEntry> {
             ),
             resident: None,
         },
+        // SUPIR photo-realistic restoration: a frozen SDXL backbone
+        // (BRAIN_SDXL_DIR, same layout `sdxlunet`/`controlnet` load) plus its
+        // own 1.24B GLVControl trunk + 12 adaptors (BRAIN_SUPIR_DIR - a
+        // delta checkpoint file, or a directory holding exactly one). No
+        // `default_ref`/auto-fetch - the SUPIR weights carry a
+        // non-commercial licence (see `supir`'s own crate doc). Optional
+        // LLaVA auto-captioning dispatches through `supir_registry` below,
+        // not a direct dependency - see `supir::caps`'s own module doc.
+        ModelEntry {
+            manifest: supir::caps::manifest,
+            provider: || {
+                let paths = supir::pipeline::Paths::from_env()?;
+                if !std::path::Path::new(&paths.backbone_root).join("unet").exists() {
+                    return Err(format!("supir: {} holds no unet/", paths.backbone_root));
+                }
+                Ok(Arc::new(supir::caps::RestoreProvider::with_registry(paths.backbone_root, paths.supir_ckpt, Arc::new(supir_registry()))) as Arc<dyn Provider>)
+            },
+            resident: None,
+        },
         ModelEntry {
             manifest: flux1::caps::manifest,
             provider: from_env!(
@@ -550,6 +569,22 @@ fn stage_registry() -> capability::Registry {
         }
     }
     inner
+}
+
+/// The registry SUPIR's optional caption auto-fill dispatches
+/// [`supir::caps::LLAVA_MODEL`] through, for the direct `brain do`/D-Bus-via-
+/// provider path (`crates/cli`'s own residency adapter,
+/// `resident_supir.rs`, builds an equivalent registry for the served path,
+/// since it cannot reach this crate's private helpers - see that file's doc).
+/// A stub `LlavaProvider` costs nothing to construct (it loads weights lazily
+/// per call, same as every other captioner in the tree), so this is built
+/// unconditionally rather than gated on `BRAIN_LLAVA_WEIGHTS` being set - an
+/// unset checkpoint just means the eventual `caption` call fails with
+/// llava's own clean error, same as calling it directly would.
+fn supir_registry() -> capability::Registry {
+    let mut reg = capability::Registry::new();
+    reg.register(Arc::new(llava::caps::LlavaProvider::new()));
+    reg
 }
 
 /// Every model's static manifest, for `brain caps`.

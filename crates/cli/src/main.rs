@@ -73,6 +73,7 @@ mod resident_scrfd;
 mod resident_arcface;
 mod resident_sam2;
 mod resident_restore;
+mod resident_supir;
 mod resolve;
 mod run_cli;
 mod sam2_cli;

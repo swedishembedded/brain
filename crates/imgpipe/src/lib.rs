@@ -81,7 +81,25 @@ pub enum Stage {
     /// size, so it may only be the LAST stage and runs AFTER the composite —
     /// see [`Spec::parse`].
     Upscale { tile: u32 },
+    /// Full-image generative restoration (`crates/supir`) - a SECOND kind of
+    /// tail, for a different reason than [`Stage::Upscale`]'s: SUPIR does not
+    /// edit within a mask the way [`Stage::Restore`] does (it regenerates the
+    /// whole frame), and its own resize/snap step (short side >= 1024, both
+    /// axes snapped to a 64 multiple) can change the working resolution
+    /// before a single pixel is composited - the same "changes the grid, so
+    /// nothing after it can assume the old one" property `Upscale` has.
+    /// Mutually exclusive with `Upscale` in one [`Spec`] (see
+    /// [`Spec::parse`]) rather than defining their combined order, which
+    /// upstream SUPIR does not do either - it is its own end-to-end tool,
+    /// never chained after a separate super-resolution pass.
+    SupirRestore { control_scale: f32 },
 }
+
+/// Default `s_stage2`/control_scale when `supir_restore` omits it -
+/// `diffusion::restore::RestoreEDMSamplerConfig::default().s_stage2`,
+/// restated here since this crate links no model and therefore no
+/// `diffusion` dependency either.
+pub const DEFAULT_CONTROL_SCALE: f32 = 1.0;
 
 /// Default fidelity dial when `restore` omits `w`.
 pub const DEFAULT_W: f32 = 0.5;
@@ -99,6 +117,7 @@ pub const UPSCALE_MODEL: &str = "brain/rrdbnet";
 /// The catalog ids of the other model-backed stages, for the same reason.
 pub const SEGMENT_MODEL: &str = "brain/sam2";
 pub const RESTORE_MODEL: &str = "brain/codeformer";
+pub const SUPIR_RESTORE_MODEL: &str = "brain/supir";
 
 /// The parameter names each `op` accepts. Anything else is an error rather than
 /// a silent default — a misspelled `radius` that quietly became 0 would produce
@@ -110,6 +129,7 @@ fn allowed(op: &str) -> &'static [&'static str] {
         "invert" => &["op"],
         "restore" => &["op", "w"],
         "upscale" => &["op", "tile"],
+        "supir_restore" => &["op", "control_scale"],
         _ => &[],
     }
 }
@@ -162,6 +182,9 @@ impl Stage {
             "upscale" => Stage::Upscale {
                 tile: o.get("tile").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             },
+            "supir_restore" => Stage::SupirRestore {
+                control_scale: o.get("control_scale").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(DEFAULT_CONTROL_SCALE),
+            },
             _ => unreachable!("guarded by `allowed`"),
         })
     }
@@ -190,6 +213,12 @@ impl Spec {
         // composite therefore happens at source size and the upscale runs after
         // it. Rejecting a mid-list `upscale` here is much better than silently
         // resampling a mask nobody asked to resample.
+        // Checked before either tail's own "must be last" rule, so a list
+        // carrying both never reports a misleading position error instead of
+        // naming the real problem: two size-changing tails with no defined order.
+        if stages.iter().any(|s| matches!(s, Stage::Upscale { .. })) && stages.iter().any(|s| matches!(s, Stage::SupirRestore { .. })) {
+            return Err("imgpipe: 'supir_restore' and 'upscale' cannot appear in the same pipeline".into());
+        }
         if let Some(i) = stages.iter().position(|s| matches!(s, Stage::Upscale { .. })) {
             if i + 1 != stages.len() {
                 return Err(format!(
@@ -201,6 +230,24 @@ impl Spec {
             }
             if stages.iter().filter(|s| matches!(s, Stage::Upscale { .. })).count() > 1 {
                 return Err("imgpipe: at most one 'upscale' stage".into());
+            }
+        }
+        // `supir_restore` is the same kind of size-changing tail `upscale` is
+        // (see `Stage::SupirRestore`'s doc) - LAST stage, at most one, and not
+        // combined with `upscale` in the same list (this crate defines no
+        // order between two size-changing tails, and upstream SUPIR is never
+        // chained after a separate super-resolution pass either).
+        if let Some(i) = stages.iter().position(|s| matches!(s, Stage::SupirRestore { .. })) {
+            if i + 1 != stages.len() {
+                return Err(format!(
+                    "imgpipe: 'supir_restore' changes the image size, so it must be the LAST stage \
+                     (it is stage {} of {})",
+                    i + 1,
+                    stages.len()
+                ));
+            }
+            if stages.iter().filter(|s| matches!(s, Stage::SupirRestore { .. })).count() > 1 {
+                return Err("imgpipe: at most one 'supir_restore' stage".into());
             }
         }
         Ok(Spec { stages })
@@ -276,8 +323,8 @@ impl<'a> Pipeline<'a> {
                     let out = imaging::mask::invert(&ctx, &m, m_shape);
                     mask_host = ctx.download(&out, m_shape.numel());
                 }
-                // The tail runs after the composite; the loop skips it.
-                Stage::Upscale { .. } => {}
+                // Both tails run after the composite; the loop skips them.
+                Stage::Upscale { .. } | Stage::SupirRestore { .. } => {}
                 Stage::Restore { w: dial } => {
                     cur_host = self.restore(&cur_host, w, h, *dial).map_err(|e| format!("stage {i}: {e}"))?;
                     if cur_host.len() != img_shape.numel() as usize {
@@ -325,6 +372,15 @@ impl<'a> Pipeline<'a> {
             );
             return Ok(Outcome { image: up, mask: ctx.download(&mup, mshape.numel()), w: ow, h: oh });
         }
+        // The `supir_restore` tail, same shape as `upscale`'s above: it may
+        // change the resolution (SUPIR's own resize/snap), so it runs on the
+        // already-composited image and the returned mask is resized to match.
+        if let Some(Stage::SupirRestore { control_scale }) = spec.stages.last() {
+            let (restored, ow, oh) = self.supir_restore(&image, w, h, *control_scale)?;
+            let m = ctx.upload("imgpipe.mask", &mask_host);
+            let (mup, mshape) = ctx.resize(&m, m_shape, oh, ow, imaging::Filter::Nearest, imaging::AlignCorners::HalfPixel);
+            return Ok(Outcome { image: restored, mask: ctx.download(&mup, mshape.numel()), w: ow, h: oh });
+        }
         Ok(Outcome { image, mask: mask_host, w, h })
     }
 
@@ -367,6 +423,23 @@ impl<'a> Pipeline<'a> {
         let b = out.blobs.get("image").ok_or("restore returned no 'image' blob")?;
         let hwc = decode_rgb(b, w, h)?;
         Ok(imaging::pixels::hwc_to_chw(&hwc, 3, h as usize, w as usize))
+    }
+
+    /// Run the `supir_restore` tail through the capability layer, like every
+    /// other stage. The output size is [`SUPIR_RESTORE_MODEL`]'s to report
+    /// (its own resize/snap rule, not this crate's), so it is read back from
+    /// the outcome rather than assumed - the same discipline `upscale`'s own
+    /// comment states.
+    fn supir_restore(&self, chw: &[f32], w: u32, h: u32, control_scale: f32) -> Result<(Vec<f32>, u32, u32), String> {
+        let hwc = imaging::pixels::chw_to_hwc(chw, 3, h as usize, w as usize);
+        let inv = Invocation::new()
+            .set("control_scale", serde_json::json!(control_scale))
+            .blob("image", capability::blob::image_blob(&hwc, w, h, 3));
+        let out = self.registry.run(SUPIR_RESTORE_MODEL, "restore", inv, &mut |_| {})?;
+        let b = out.blobs.get("image").ok_or("supir restore returned no 'image' blob")?;
+        let (ow, oh) = blob_wh(b).ok_or("supir restore's image blob carries no w/h meta")?;
+        let hwc = decode_rgb(b, ow, oh)?;
+        Ok((imaging::pixels::hwc_to_chw(&hwc, 3, oh as usize, ow as usize), ow, oh))
     }
 }
 
@@ -596,6 +669,29 @@ mod tests {
     fn at_most_one_upscale() {
         let e = Spec::parse(r#"{"stages":[{"op":"upscale"},{"op":"upscale"}]}"#).unwrap_err();
         assert!(e.contains("LAST stage") || e.contains("at most one"), "{e}");
+    }
+
+    /// `supir_restore` is the same kind of size-changing tail `upscale` is:
+    /// last-only, at most one, and never combined with `upscale` in one list.
+    #[test]
+    fn supir_restore_must_be_the_last_stage_and_alone() {
+        let e = Spec::parse(r#"{"stages":[{"op":"supir_restore"},{"op":"invert"}]}"#).unwrap_err();
+        assert!(e.contains("LAST stage") && e.contains("stage 1 of 2"), "{e}");
+        assert!(Spec::parse(r#"{"stages":[{"op":"invert"},{"op":"supir_restore"}]}"#).is_ok());
+
+        let e = Spec::parse(r#"{"stages":[{"op":"supir_restore"},{"op":"supir_restore"}]}"#).unwrap_err();
+        assert!(e.contains("LAST stage") || e.contains("at most one"), "{e}");
+
+        let e = Spec::parse(r#"{"stages":[{"op":"supir_restore"},{"op":"upscale"}]}"#).unwrap_err();
+        assert!(e.contains("same pipeline"), "{e}");
+    }
+
+    #[test]
+    fn supir_restore_control_scale_defaults_and_parses() {
+        let s = Spec::parse(r#"{"stages":[{"op":"supir_restore"}]}"#).expect("parse");
+        assert!(matches!(s.stages[0], Stage::SupirRestore { control_scale } if (control_scale - DEFAULT_CONTROL_SCALE).abs() < 1e-6));
+        let s = Spec::parse(r#"{"stages":[{"op":"supir_restore","control_scale":0.6}]}"#).expect("parse");
+        assert!(matches!(s.stages[0], Stage::SupirRestore { control_scale } if (control_scale - 0.6).abs() < 1e-6));
     }
 
     /// The tail runs AFTER the composite, and the returned mask is resized with

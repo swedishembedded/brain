@@ -1,17 +1,19 @@
-# Face restoration and the VQ latent, over D-Bus
+# Image restoration, over D-Bus
 
-Two models from the CodeFormer stack driven through `com.swedishembedded.Brain1`
-with the generic `Run` method - images and code grids travel as file descriptors
+Three restoration models driven through `com.swedishembedded.Brain1` with the
+generic `Run` method - images and code grids travel as file descriptors
 (memfd/dmabuf), not as bytes marshalled through D-Bus.
 
 | model | actions | weights env |
 |---|---|---|
 | `restore` | `restore_face` - a degraded face + `w` → a restored 512² face | `BRAIN_CODEFORMER_WEIGHTS` (`codeformer.pth`, or its directory) |
 | `vqgan` | `encode` → codebook indices, `decode` → an image | `BRAIN_VQGAN_WEIGHTS` (a released checkpoint, or its directory) |
+| `supir` | `restore` - a degraded image + text prompt → a full photo-realistic reconstruction, any size | `BRAIN_SDXL_DIR` (the frozen SDXL backbone) + `BRAIN_SUPIR_DIR` (SUPIR's own delta checkpoint) |
 
 ```bash
 brain caps brain/codeformer
 brain caps brain/vqgan
+brain caps brain/supir
 ```
 
 ## Run it
@@ -96,13 +98,56 @@ gather the underlying `embed` kernel would otherwise do.
 Both actions share ONE resident instance: `instance_key` is the square `size`,
 not the action name, so a round trip builds the graph once.
 
+## `supir_restore.py` - full generative restoration, not a masked edit
+
+Unlike CodeFormer's aligned-face crop, SUPIR takes ANY degraded image (photo
+compression, downscaling, noise, blur) and regenerates the whole frame through
+a frozen SDXL 1.0 base UNet, a 1.24B `GLVControl` trunk and 12
+`ZeroSFT`/`ZeroCrossAttn` adaptors, driven by `RestoreEDMSampler` - a real
+multi-step (50 by default) diffusion sample, so this call is seconds-to-minutes,
+not sub-second like `restore_face`. The output size is SUPIR's own resize/snap
+rule (short side >= 1024, both axes snapped to a 64px multiple), read back
+from the result rather than assumed - `supir_restore.py` does this the same
+way `vq_roundtrip.py` reads its own output shape back.
+
+```bash
+BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 \
+BRAIN_SUPIR_DIR=/path/to/SUPIR-v0Q_fp32.safetensors \
+BRAIN_LLAVA_WEIGHTS=/path/to/llava-v1.5-13b \
+  dbus-run-session -- bash -c '
+    brain serve --dbus & sleep 3
+    python3 examples/restore/supir_restore.py --image degraded.ppm'
+```
+
+`BRAIN_LLAVA_WEIGHTS` is optional: set it (and leave `--caption` unset) to
+auto-caption the degraded image through LLaVA-1.5-13B (CLIP-L/14@336 vision
+tower + Vicuna-1.5-13B decoder) before restoring it, exactly SUPIR's own
+upstream behaviour when `--no_llava` is not passed. `crates/supir` links no
+VLM - the auto-caption call goes through a `capability::Registry`
+`crates/cli`/`crates/catalog` build for it, never a direct dependency.
+
+SUPIR's weights carry a non-commercial licence (SUPIR Software License
+Agreement, © 2024 SupPixel Pty Ltd): commercial use, including SaaS
+deployment and using the output as training data for another model, needs
+written permission from the licensor - read that licence before using output
+commercially. This port's own development machine has never completed a real
+end-to-end run either: the combined trunk+adaptors+backbone graph exceeds its
+single integrated GPU's device memory even quantized (INT8 reduces host
+memory only in this codebase, not device memory). The wiring is complete and
+weight-free tested; running it for real needs more device memory than this
+port's own hardware has.
+
 ## What is NOT here
 
-Neither model batches. Both are **recorded step lists over fixed buffers**
-(`CodeFormer::new` / `Vqgan::new` size every buffer from one `[3, H, W]` image),
-so there is no N axis to widen at call time - the default serial `run_batch`
-stands, with the reason stated in `crates/cli/src/resident_restore.rs`. What does
-amortise is residency: a `w` sweep, or an encode/decode pair, costs one build.
+None of the three models batches. CodeFormer/VQGAN are **recorded step lists
+over fixed buffers** (`CodeFormer::new` / `Vqgan::new` size every buffer from
+one `[3, H, W]` image), so there is no N axis to widen at call time - the
+default serial `run_batch` stands, with the reason stated in
+`crates/cli/src/resident_restore.rs`. What does amortise is residency: a `w`
+sweep, or an encode/decode pair, costs one build. SUPIR's own `run_batch` is
+serial for a different reason (stated in `crates/cli/src/resident_supir.rs`):
+each `restore` call is its own full multi-step diffusion sample, so there is
+no batch axis a residency-level grouping could fill either way.
 
 ---
 

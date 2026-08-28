@@ -148,6 +148,33 @@ impl GgufArchitectureImporter for S3ditImporter {
     }
 }
 
+/// SUPIR photo-realistic restoration (`general.architecture = "sdxl"` -
+/// borrowed, not real: no GGUF file carrying a SUPIR delta has ever been
+/// observed, see `supir::import::GGUF_ARCHITECTURE`'s own doc for why this
+/// spelling was chosen anyway).
+///
+/// A SECOND documented ambiguous-tag exception, same shape as
+/// [`S3ditImporter`]'s `"lumina2"`: `"sdxl"` is exactly the tag a real,
+/// vanilla SDXL GGUF conversion would also plausibly carry, and `sdxlunet`
+/// itself claims no GGUF spelling today - so `brain_arch` deliberately does
+/// NOT resolve `"sdxl"` to this importer either. `supir::import::import_gguf`
+/// reflects the same "nothing to convert yet" honesty this module's own
+/// design doc asks for (§ "explicit one-time import") rather than guessing a
+/// tensor-name mapping against a file that has never been seen.
+struct SupirImporter;
+
+impl GgufArchitectureImporter for SupirImporter {
+    fn architecture(&self) -> &'static str {
+        supir::import::GGUF_ARCHITECTURE
+    }
+    fn summary(&self) -> &'static str {
+        "SUPIR photo-realistic restoration (no real GGUF release observed yet - registered so one auto-dispatches the day it exists)"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        supir::import::import_gguf(gguf, out_path, id_override)
+    }
+}
+
 /// Wan2.1/2.2 video diffusion, DiT only (`general.architecture = "wan"`).
 ///
 /// The contrast with [`S3ditImporter`] is the point: `wan`'s brain id IS its
@@ -200,7 +227,7 @@ impl GgufArchitectureImporter for LtxvImporter {
 /// Every registered architecture importer. ONE line per architecture - this is
 /// the whole registration surface (see this module's doc).
 const IMPORTERS: &[&dyn GgufArchitectureImporter] =
-    &[&Qwen3Importer, &Qwen35MoeImporter, &S3ditImporter, &WanImporter, &LtxvImporter];
+    &[&Qwen3Importer, &Qwen35MoeImporter, &S3ditImporter, &WanImporter, &LtxvImporter, &SupirImporter];
 
 /// The importer claiming `architecture`, or `None` if none does.
 pub fn importer_for(architecture: &str) -> Option<&'static dyn GgufArchitectureImporter> {
@@ -347,15 +374,19 @@ mod tests {
     /// what lets `import_file`'s error message tell "brain has a name for
     /// this but no importer" apart from "brain has never heard of this".
     ///
-    /// `s3dit`'s spelling ("lumina2") is the one documented exception: it is
-    /// shared with real Lumina2 releases (see `s3dit::import::GGUF_ARCHITECTURE`'s
-    /// doc), so `brain_arch` deliberately does NOT claim it as s3dit's `gguf:`
-    /// spelling -- `import_gguf` discriminates by tensor presence instead,
-    /// not by architecture string. This test asserts that non-resolution is
+    /// `s3dit`'s spelling ("lumina2") and `supir`'s ("sdxl") are the two
+    /// documented exceptions: each is shared with a real (or plausible)
+    /// release under a DIFFERENT architecture's own name (see
+    /// `s3dit::import::GGUF_ARCHITECTURE`'s and `supir::import::GGUF_ARCHITECTURE`'s
+    /// own docs), so `brain_arch` deliberately does NOT claim either as that
+    /// importer's `gguf:` spelling -- `s3dit::import::import_gguf` discriminates
+    /// by tensor presence instead of by architecture string, and
+    /// `supir::import::import_gguf` has nothing to discriminate yet (no real
+    /// file has ever been observed). This test asserts that non-resolution is
     /// intentional, not a silent gap.
     #[test]
     fn every_registered_importer_matches_a_brain_arch_row_or_is_a_documented_ambiguous_tag() {
-        const AMBIGUOUS_TAG_EXCEPTIONS: &[&str] = &["lumina2"];
+        const AMBIGUOUS_TAG_EXCEPTIONS: &[&str] = &["lumina2", "sdxl"];
         for i in IMPORTERS {
             let arch = i.architecture();
             if AMBIGUOUS_TAG_EXCEPTIONS.contains(&arch) {

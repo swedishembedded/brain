@@ -85,6 +85,9 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
     if model_id == controlnet::caps::MODEL {
         return catalog::resident!(crate::resident_controlnet::ControlnetResident::from_env);
     }
+    if model_id == supir::caps::MODEL {
+        return catalog::resident!(crate::resident_supir::SupirResident::from_env);
+    }
     if model_id == flux1::caps::MODEL {
         return catalog::resident!(crate::resident_flux1::Flux1Resident::from_env);
     }
@@ -291,6 +294,18 @@ mod tests {
         assert_eq!(imgpipe::UPSCALE_MODEL, rrdbnet::caps::MODEL);
         assert_eq!(imgpipe::RESTORE_MODEL, codeformer::caps::MODEL);
         assert_eq!(imgpipe::SEGMENT_MODEL, sam2::caps::MODEL);
+        assert!(ids.contains(imgpipe::SUPIR_RESTORE_MODEL), "imgpipe dispatches to '{}', which is not a catalog model", imgpipe::SUPIR_RESTORE_MODEL);
+        assert_eq!(imgpipe::SUPIR_RESTORE_MODEL, supir::caps::MODEL);
+    }
+
+    /// `crates/supir` links no VLM, so its optional caption auto-fill names
+    /// LLaVA by STRING (`supir::caps::LLAVA_MODEL`) - this is the other half
+    /// of that decision: the CLI sees both real constants, so it asserts the
+    /// string still names the real catalog entry - the same drift class
+    /// `imgpipe_stage_ids_match_the_catalog` guards against.
+    #[test]
+    fn supir_llava_model_id_matches_the_catalog() {
+        assert_eq!(supir::caps::LLAVA_MODEL, llava::caps::MODEL);
     }
 
     /// An unknown name must still be an error, not a panic or a default.
@@ -320,6 +335,7 @@ mod tests {
             t5encoder::caps::MODEL,
             sdxlunet::caps::MODEL,
             controlnet::caps::MODEL,
+            supir::caps::MODEL,
             flux1::caps::MODEL,
             pulid::caps::MODEL,
             deepseek2ocr::caps::MODEL,

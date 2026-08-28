@@ -36,6 +36,7 @@ brain-clip.workspace = true
 brain-t5encoder.workspace = true
 brain-sdxlunet.workspace = true
 brain-controlnet.workspace = true
+brain-supir.workspace = true
 brain-flux1.workspace = true
 brain-pulid.workspace = true
 brain-deepseek2ocr.workspace = true

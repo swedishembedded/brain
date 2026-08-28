@@ -343,6 +343,7 @@ including those.
 | [`qwen3omnimoe`](docs/models/qwen3omnimoe/readme.md) | Multimodal | text/audio/image/video in, text + speech out (Thinker+Talker+Code2Wav) |
 | [`brain/qwen3vl`](docs/models/qwen3vl.md) | Multimodal | general image + text -> text |
 | [`brain/fastvlm`](docs/models/fastvlm.md) | Multimodal | dedicated fast image captioning |
+| [`brain/llava`](docs/models/llava.md) | Multimodal | image captioning (also [SUPIR](docs/models/supir.md)'s optional auto-caption input) |
 | [`deepseek-ai/DeepSeek-OCR`](docs/models/deepseek2ocr.md) | Multimodal | document image -> text/markdown |
 | [`brain/nemotronasr`](docs/models/nemotronasr.md) | Audio | streaming speech-to-text (FastConformer + RNN-T) |
 | [`brain/qwen3asr`](docs/models/qwen3asr.md) | Audio | offline speech-to-text |
@@ -358,6 +359,7 @@ including those.
 | [`Tongyi-MAI/Z-Image-Turbo`](docs/models/s3dit.md) | Image | text-to-image diffusion (S3-DiT) |
 | [`brain/flux2-klein`](docs/models/flux2.md) | Image | text-to-image + editing (MMDiT) |
 | [`brain/codeformer`](docs/models/codeformer.md) | Image | blind face restoration |
+| [`brain/supir`](docs/models/supir.md) | Image | photo-realistic blind image restoration (SDXL + GLVControl + ZeroSFT/ZeroCrossAttn) |
 | [`brain/rrdbnet`](docs/models/rrdbnet.md) | Image | super-resolution |
 | [`brain/vqgan`](docs/models/vqgan.md) | Image | VQ autoencoder (CodeFormer's codebook) |
 | [`brain/wan`](docs/models/wan.md) | Video | text-to-video diffusion (3D-latent DiT + causal 3D VAE) |

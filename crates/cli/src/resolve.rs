@@ -121,6 +121,13 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("kronos", "brain/kronos"),
     ("minimaxmusic3", "brain/minimaxmusic3"),
     ("cosyvoice", "brain/cosyvoice"),
+    // `sdxlunet`/`controlnet` chose no CLI shortcut at all (only `brain do
+    // brain/sdxl …`/the residency-served transports) - SUPIR's own single
+    // action makes a one-line shortcut cheap enough to add here instead,
+    // matching `llava`'s row just above it: `brain supir restore …` reaches
+    // the exact same `supir::caps` this row's model id already serves
+    // through `brain do`/D-Bus.
+    ("supir", "brain/supir"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
     // listed-but-unreachable gap `catalog.rs`'s own module docs warn about

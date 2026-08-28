@@ -27,6 +27,7 @@ unconfigured fails with that model's own error:
 - `segment` → `BRAIN_SAM2_WEIGHTS`
 - `restore` → `BRAIN_CODEFORMER_WEIGHTS`
 - `upscale` → `BRAIN_ESRGAN_WEIGHTS`
+- `supir_restore` → `BRAIN_SDXL_DIR` + `BRAIN_SUPIR_DIR`
 
 ## Running it
 
@@ -51,6 +52,10 @@ Stage ops, applied in order:
 - `restore` - `w`, the [restore](codeformer.md) fidelity dial
 - `upscale` - `tile`, see [upscale](rrdbnet.md); since it changes the image
   size, `upscale` must be the last stage in the list
+- `supir_restore` - `control_scale`, full-image generative restoration via
+  [SUPIR](supir.md) rather than a masked edit; a size-changing tail like
+  `upscale` (SUPIR's own resize/snap rule), so it too must be last, and the
+  two size-changing tails cannot appear in the same stage list
 
 ## Hardware and limits
 
