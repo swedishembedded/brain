@@ -67,6 +67,7 @@
 use checkpoint::gguf::MmapGguf;
 use checkpoint::st::ModelCard;
 use gguf::import::{self, ImportStats, Leaf, Mapped};
+use gguf::leaf::Role;
 use gguf::ArchKv;
 
 use crate::config::QwenConfig;
@@ -101,21 +102,24 @@ pub fn gguf_to_brain(name: &str, tie: bool) -> Option<String> {
         Leaf::OutputNorm => Some("norm.weight".to_string()),
         Leaf::Output => (!tie).then(|| "lm_head.weight".to_string()),
         Leaf::Block { layer, leaf } => {
-            let leaf = match leaf {
-                "attn_norm.weight" => "ln1.weight",
-                "ffn_norm.weight" => "ln2.weight",
-                "attn_q.weight" => "attn.wq.weight",
-                "attn_k.weight" => "attn.wk.weight",
-                "attn_v.weight" => "attn.wv.weight",
-                "attn_output.weight" => "attn.wo.weight",
-                "attn_q_norm.weight" => "attn.q_norm.weight",
-                "attn_k_norm.weight" => "attn.k_norm.weight",
-                "attn_q.bias" => "attn.wq.bias",
-                "attn_k.bias" => "attn.wk.bias",
-                "attn_v.bias" => "attn.wv.bias",
-                "ffn_gate.weight" => "mlp.gate.weight",
-                "ffn_up.weight" => "mlp.up.weight",
-                "ffn_down.weight" => "mlp.down.weight",
+            // The leaf VOCABULARY (which spellings exist and what they mean)
+            // is `gguf::leaf`'s, shared with `qwen35moe`/`qwen35`; only this
+            // model's own brain-parameter suffix is qwen3-specific.
+            let leaf = match gguf::leaf::role(leaf)? {
+                Role::AttnNorm => "ln1.weight",
+                Role::FfnNorm => "ln2.weight",
+                Role::AttnQ => "attn.wq.weight",
+                Role::AttnK => "attn.wk.weight",
+                Role::AttnV => "attn.wv.weight",
+                Role::AttnOutput => "attn.wo.weight",
+                Role::AttnQNorm => "attn.q_norm.weight",
+                Role::AttnKNorm => "attn.k_norm.weight",
+                Role::AttnQBias => "attn.wq.bias",
+                Role::AttnKBias => "attn.wk.bias",
+                Role::AttnVBias => "attn.wv.bias",
+                Role::FfnGate => "mlp.gate.weight",
+                Role::FfnUp => "mlp.up.weight",
+                Role::FfnDown => "mlp.down.weight",
                 _ => return None,
             };
             Some(format!("blocks.{layer}.{leaf}"))

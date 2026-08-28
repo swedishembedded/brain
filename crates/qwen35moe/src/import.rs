@@ -240,35 +240,42 @@ fn classify(name: &str, n_layers: u32, n_experts: u32) -> Mapped {
         import::Leaf::Block { layer, leaf } => (layer, leaf),
     };
     let p = |s: &str| format!("blocks.{l}.{s}");
-    match leaf {
-        "attn_norm.weight" => Mapped::Simple(p("ln1.weight")),
-        "post_attention_norm.weight" => Mapped::Simple(p("ln2.weight")),
+    // The leaf VOCABULARY (which spellings exist and what they structurally
+    // mean) is `gguf::leaf`'s, shared with `qwen3`; only the brain-parameter
+    // suffix below is qwen35moe-specific.
+    let Some(role) = gguf::leaf::role(leaf) else {
+        return Mapped::Dropped(DROP_OTHER);
+    };
+    use gguf::leaf::Role;
+    match role {
+        Role::AttnNorm => Mapped::Simple(p("ln1.weight")),
+        Role::FfnNorm => Mapped::Simple(p("ln2.weight")),
         // Full attention.
-        "attn_q.weight" => Mapped::Simple(p("self_attn.q_proj.weight")),
-        "attn_k.weight" => Mapped::Simple(p("self_attn.k_proj.weight")),
-        "attn_v.weight" => Mapped::Simple(p("self_attn.v_proj.weight")),
-        "attn_q_norm.weight" => Mapped::Simple(p("self_attn.q_norm.weight")),
-        "attn_k_norm.weight" => Mapped::Simple(p("self_attn.k_norm.weight")),
-        "attn_output.weight" => Mapped::Simple(p("self_attn.o_proj.weight")),
+        Role::AttnQ => Mapped::Simple(p("self_attn.q_proj.weight")),
+        Role::AttnK => Mapped::Simple(p("self_attn.k_proj.weight")),
+        Role::AttnV => Mapped::Simple(p("self_attn.v_proj.weight")),
+        Role::AttnQNorm => Mapped::Simple(p("self_attn.q_norm.weight")),
+        Role::AttnKNorm => Mapped::Simple(p("self_attn.k_norm.weight")),
+        Role::AttnOutput => Mapped::Simple(p("self_attn.o_proj.weight")),
         // Gated DeltaNet (linear attention).
-        "attn_qkv.weight" => Mapped::Simple(p("linear_attn.in_proj_qkv.weight")),
-        "attn_gate.weight" => Mapped::Simple(p("linear_attn.in_proj_z.weight")),
-        "ssm_alpha.weight" => Mapped::Simple(p("linear_attn.in_proj_a.weight")),
-        "ssm_beta.weight" => Mapped::Simple(p("linear_attn.in_proj_b.weight")),
-        "ssm_conv1d.weight" => Mapped::Simple(p("linear_attn.conv1d.weight")),
-        "ssm_a" => Mapped::Simple(p("linear_attn.A_log")),
-        "ssm_dt.bias" => Mapped::Simple(p("linear_attn.dt_bias")),
-        "ssm_norm.weight" => Mapped::Simple(p("linear_attn.norm.weight")),
-        "ssm_out.weight" => Mapped::Simple(p("linear_attn.out_proj.weight")),
+        Role::AttnQkv => Mapped::Simple(p("linear_attn.in_proj_qkv.weight")),
+        Role::AttnGate => Mapped::Simple(p("linear_attn.in_proj_z.weight")),
+        Role::SsmAlpha => Mapped::Simple(p("linear_attn.in_proj_a.weight")),
+        Role::SsmBeta => Mapped::Simple(p("linear_attn.in_proj_b.weight")),
+        Role::SsmConv1d => Mapped::Simple(p("linear_attn.conv1d.weight")),
+        Role::SsmA => Mapped::Simple(p("linear_attn.A_log")),
+        Role::SsmDtBias => Mapped::Simple(p("linear_attn.dt_bias")),
+        Role::SsmNorm => Mapped::Simple(p("linear_attn.norm.weight")),
+        Role::SsmOut => Mapped::Simple(p("linear_attn.out_proj.weight")),
         // MoE.
-        "ffn_gate_inp.weight" => Mapped::Simple(p("mlp.router.weight")),
-        "ffn_gate_inp_shexp.weight" => Mapped::Simple(p("mlp.shared_expert_gate.weight")),
-        "ffn_gate_shexp.weight" => Mapped::Simple(p("mlp.shared_expert.gate.weight")),
-        "ffn_up_shexp.weight" => Mapped::Simple(p("mlp.shared_expert.up.weight")),
-        "ffn_down_shexp.weight" => Mapped::Simple(p("mlp.shared_expert.down.weight")),
-        "ffn_gate_exps.weight" => Mapped::expert_stack(l, "gate", n_experts as usize),
-        "ffn_up_exps.weight" => Mapped::expert_stack(l, "up", n_experts as usize),
-        "ffn_down_exps.weight" => Mapped::expert_stack(l, "down", n_experts as usize),
+        Role::FfnGateInp => Mapped::Simple(p("mlp.router.weight")),
+        Role::FfnGateInpShexp => Mapped::Simple(p("mlp.shared_expert_gate.weight")),
+        Role::FfnGateShexp => Mapped::Simple(p("mlp.shared_expert.gate.weight")),
+        Role::FfnUpShexp => Mapped::Simple(p("mlp.shared_expert.up.weight")),
+        Role::FfnDownShexp => Mapped::Simple(p("mlp.shared_expert.down.weight")),
+        Role::FfnGateExps => Mapped::expert_stack(l, "gate", n_experts as usize),
+        Role::FfnUpExps => Mapped::expert_stack(l, "up", n_experts as usize),
+        Role::FfnDownExps => Mapped::expert_stack(l, "down", n_experts as usize),
         _ => Mapped::Dropped(DROP_OTHER),
     }
 }

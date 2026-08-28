@@ -14,6 +14,10 @@
 //! - [`import`] - the streaming import driver: classify, dequantize one tensor
 //!   at a time, write, and prove two-way coverage (nothing planned missing,
 //!   nothing in the source unaccounted for).
+//! - [`leaf`] - llama.cpp's own per-block leaf-name vocabulary (GQA, dense
+//!   FFN, MoE FFN, Gated-DeltaNet/SSM), shared by every decoder-LM importer so
+//!   `attn_q.weight`/`ffn_gate.weight`/`ssm_alpha.weight` are spelled once,
+//!   not re-transcribed per model.
 //! - [`route`] - "which model is this file", answered once for every consumer:
 //!   `general.architecture` resolved against the canonical architecture
 //!   registry, plus the secondary `clip.projector_type` discriminator that a
@@ -32,8 +36,10 @@ pub mod deepseek_ocr;
 pub mod deepseek_ocr_vision;
 pub mod import;
 pub mod kv;
+pub mod leaf;
 pub mod route;
 
 pub use import::{ImportStats, Mapped};
 pub use kv::{architecture, ArchKv};
+pub use leaf::{role, Role};
 pub use route::{route, route_path, Route};
