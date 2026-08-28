@@ -113,6 +113,14 @@ const ANY_SHAPE: select::OpShape =
 const DECODE_SHAPE: select::OpShape =
     select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::F32 };
 
+/// [`DECODE_SHAPE`]'s int8 twin. A separate constant rather than a reused one
+/// because the two dtypes reach `WorkgroupPerOutput` through DIFFERENT arms of
+/// `select::candidates` - the int8 arm additionally requires `int8_dot`, so
+/// probing with the f32 shape would activate the int8 row on a device that
+/// cannot run its kernel at all.
+const DECODE_SHAPE_I8: select::OpShape =
+    select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::I8 };
+
 /// The `MREG` ladder for `matmul_gemv_reg`. Powers of two, so "the smallest
 /// bucket covering `m`" carries at most twice the rows actually needed, and the
 /// ladder is complete by construction for `matmul_gemv`'s own `m <= 32`
@@ -154,6 +162,31 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         op: select::Op::MatMul,
         probe: DECODE_SHAPE,
         knob: Some(("MREG", 0)), // Params { m, k, n } -> m
+        buckets: GEMV_MREG_BUCKETS,
+        gpu_only: true,
+    },
+    Upgrade {
+        // The int8 twin of the row above, and it is here because the fix was
+        // made for one dtype and its sibling never got it: `matmul_i8_gemv`
+        // still accumulates in workgroup memory sized for `m = 32`, paying the
+        // same 8 KB-per-workgroup occupancy cap and the same per-`(k, m)`
+        // shared-memory dependency chain the fp32 kernel was rescued from.
+        // Measured on a Tesla P40 at Qwen3-VL-4B's decode shape, it streamed
+        // its weights at about half the card's DRAM roof where the fp32
+        // register kernel reached essentially all of it - so int8's four-fold
+        // smaller weights were returning a little over two-fold in time.
+        //
+        // Same `Params`, same bindings, same `n * 64` thread count. Results
+        // are bit-identical BY CONSTRUCTION rather than by care: the
+        // accumulator is `i32`, and integer addition is exact and associative,
+        // so no regrouping of the same terms can differ.
+        slow: "matmul_i8_gemv",
+        fast: "matmul_i8_gemv_reg",
+        src: kernels::MATMUL_I8_GEMV_REG,
+        thread_mul: 1,
+        op: select::Op::MatMul,
+        probe: DECODE_SHAPE_I8,
+        knob: Some(("MREG", 0)), // Params { m, kg, n } -> m
         buckets: GEMV_MREG_BUCKETS,
         gpu_only: true,
     },
