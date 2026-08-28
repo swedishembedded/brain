@@ -2,9 +2,17 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! What a user is allowed to TYPE for a model, as opposed to what the store
-//! calls it. [`parse_model_arg`] takes the two spellings that reach a command
-//! line -- the canonical `<vendor>/<repo>` id, and a HuggingFace page URL
-//! pasted out of a browser -- and produces the one [`ModelRef`] both name.
+//! calls it. [`parse_pull_arg`] takes every spelling that reaches a command
+//! line -- the canonical `<vendor>/<repo>[-<QUANT>]` id, and a HuggingFace
+//! page URL pasted out of a browser -- and produces the one [`PullTarget`]
+//! they all name: a repo, optionally a revision of it, optionally ONE
+//! artifact inside it.
+//!
+//! ONE parser, in one place. [`parse_model_arg`] is a view of
+//! [`parse_pull_arg`]'s result for the callers that only want the
+//! [`ModelRef`], not a second thing that understands URLs -- two of those is
+//! how a pasted `/blob/main/<file>` link came to silently lose its filename
+//! and pull the whole repo instead.
 //!
 //! Pure: no network, no filesystem, no environment. The whole point is that
 //! `brain pull https://huggingface.co/Qwen/Qwen3-8B` is decided before any
@@ -40,11 +48,29 @@ const MODEL_PAGE_HOSTS: &[&str] = &["huggingface.co", "hf.co"];
 /// check below.
 const NON_MODEL_SECTIONS: &[&str] = &["datasets", "spaces", "collections", "docs", "blog", "papers", "organizations", "settings", "posts"];
 
-/// Path components that may legally FOLLOW `<vendor>/<repo>` on a model page:
-/// the deep links a browser produces while you are looking at a repo. The
-/// rest of the path is dropped -- `brain pull` fetches the repo, not the one
-/// file you happened to be viewing.
-const REPO_SUBPATHS: &[&str] = &["tree", "blob", "resolve", "raw", "commit", "commits", "discussions", "edit", "blame"];
+/// What a path component following `<vendor>/<repo>` names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// `/tree/<rev>` -- the repo itself, at a revision.
+    Repo,
+    /// `/blob|resolve|raw/<rev>/<path>` -- ONE artifact, at a revision.
+    /// `/blob/` is what the address bar shows, `/resolve/` is the
+    /// direct-download link, `/raw/` is the un-rendered view. Three spellings
+    /// of the same file, so all three name the same artifact.
+    File,
+}
+
+/// The repo views brain can act on, and what each names. A component that is
+/// not in this table is refused BY NAME rather than dropped: `/commits/main`
+/// and `/discussions/3` name a conversation about a repo, not its contents,
+/// and quietly pulling the whole repo instead is doing something adjacent to
+/// what was asked.
+const VIEWS: &[(&str, View)] = &[("tree", View::Repo), ("blob", View::File), ("resolve", View::File), ("raw", View::File)];
+
+/// [`VIEWS`]' keys, for an error that has to state the closed set.
+fn view_names() -> String {
+    VIEWS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+}
 
 /// Why an argument is not a model reference. Every variant's [`Display`]
 /// names the offending input AND what was expected, because this error is
@@ -79,21 +105,51 @@ impl std::fmt::Display for RefArgError {
 
 impl std::error::Error for RefArgError {}
 
-/// Parse one command-line model argument into the [`ModelRef`] it names.
+/// What one `brain pull` argument names: always a repo, sometimes a specific
+/// revision of it, sometimes exactly ONE artifact inside it.
+///
+/// The artifact is the whole point of the type. A file URL already answers
+/// "which of this repo's 15 quantizations" with nothing left to infer, so it
+/// deliberately bypasses quantization parsing entirely: the file is named, so
+/// nothing needs guessing, and a name outside the closed [`Quant`] set
+/// (`...-BF16.gguf`) is pullable this way and only this way.
+///
+/// [`Quant`]: brain_modelref::Quant
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullTarget {
+    /// The repo, quant suffix and adapter suffix included when the argument
+    /// was a bare id (a URL never carries either -- HF has no such page).
+    pub reference: ModelRef,
+    /// The revision the argument named, percent-decoded (`refs%2Fpr%2F1` ->
+    /// `refs/pr/1`). `None` means the repo's default branch.
+    pub revision: Option<String>,
+    /// The one artifact the argument named, as a repo-relative path with its
+    /// directories intact (`text_encoder/model.safetensors`). `None` means
+    /// the whole repo.
+    pub artifact: Option<String>,
+}
+
+/// Parse one command-line model argument into the [`PullTarget`] it names.
 ///
 /// Accepts the canonical id (`Qwen/Qwen3-8B`, quant suffix and all) and a
 /// HuggingFace model URL with or without a scheme, with or without a trailing
-/// slash, with or without a `www.` host, with or without a `/tree/<branch>`,
-/// `/blob/...` or `/resolve/...` tail, and with or without a query string or
-/// fragment. A URL's deep-link tail is DROPPED: the unit `brain pull` works
-/// in is a repo, so `.../blob/main/model.safetensors` pulls the repo that
-/// file belongs to.
-pub fn parse_model_arg(arg: &str) -> Result<ModelRef, RefArgError> {
+/// slash, with or without a `www.` host, with or without a query string or
+/// fragment, and with any of the repo views in [`VIEWS`]. A file view carries
+/// its artifact through; a view brain does not recognise, or one that names
+/// neither the repo nor a single file, is a named error.
+pub fn parse_pull_arg(arg: &str) -> Result<PullTarget, RefArgError> {
     let trimmed = arg.trim();
     match split_url(trimmed)? {
         Some((host, path)) => parse_url_path(arg, &host, &path),
-        None => as_bare_ref(arg, trimmed),
+        None => Ok(PullTarget { reference: as_bare_ref(arg, trimmed)?, revision: None, artifact: None }),
     }
+}
+
+/// The [`ModelRef`]-only view of [`parse_pull_arg`], for callers that want
+/// the repo and nothing else. Not a second parser: it drops fields, it does
+/// not re-derive them.
+pub fn parse_model_arg(arg: &str) -> Result<ModelRef, RefArgError> {
+    parse_pull_arg(arg).map(|t| t.reference)
 }
 
 /// `Some((host, path))` when `s` is a URL, `None` when it is a bare id.
@@ -130,12 +186,13 @@ fn is_model_page_host(host: &str) -> bool {
     MODEL_PAGE_HOSTS.contains(&host)
 }
 
-/// The `<vendor>/<repo>[/<subpath>...]` half of a model-page URL.
-fn parse_url_path(arg: &str, host: &str, path: &str) -> Result<ModelRef, RefArgError> {
+/// The `<vendor>/<repo>[/<view>/<rev>[/<path>]]` half of a model-page URL.
+fn parse_url_path(arg: &str, host: &str, path: &str) -> Result<PullTarget, RefArgError> {
     if !is_model_page_host(host) {
         return Err(RefArgError::ForeignHost { arg: arg.to_string(), host: host.to_string() });
     }
-    // A share link's `?...` / `#...` tail names a view, not a repo.
+    // A share link's `?...` / `#...` tail names a view of the page, not part
+    // of the path -- `?download=true` is what HF's own download button emits.
     let path = path.split(['?', '#']).next().unwrap_or("");
     let parts: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
 
@@ -148,15 +205,90 @@ fn parse_url_path(arg: &str, host: &str, path: &str) -> Result<ModelRef, RefArgE
         [vendor, repo, ..] => (*vendor, *repo),
         _ => return Err(RefArgError::NotAModelPath { arg: arg.to_string(), why: "the URL names no <vendor>/<repo>".to_string() }),
     };
-    // Anything after the repo must be a repo view brain knows how to ignore.
-    // An unrecognised tail is refused rather than guessed at, so a future HF
-    // URL shape that means something else does not get pulled as a repo.
-    if let Some(tail) = parts.get(2) {
-        if !REPO_SUBPATHS.contains(&tail.to_ascii_lowercase().as_str()) {
-            return Err(RefArgError::NotAModelPath { arg: arg.to_string(), why: format!("{tail:?} is not a repo view brain recognises") });
+    let reference = as_bare_ref(arg, &format!("{vendor}/{repo}"))?;
+
+    let Some(view_name) = parts.get(2) else {
+        return Ok(PullTarget { reference, revision: None, artifact: None });
+    };
+    let lowered = view_name.to_ascii_lowercase();
+    let Some((_, view)) = VIEWS.iter().find(|(n, _)| *n == lowered) else {
+        return Err(RefArgError::NotAModelPath {
+            arg: arg.to_string(),
+            why: format!("{view_name:?} is not a repo view brain can pull (expected one of: {})", view_names()),
+        });
+    };
+    let Some(rev) = parts.get(3) else {
+        return Err(RefArgError::NotAModelPath { arg: arg.to_string(), why: format!("/{view_name}/ names no revision") });
+    };
+    let revision = Some(safe_component(arg, &percent_decode(arg, rev)?, "revision")?);
+    let rest = &parts[4..];
+    match view {
+        View::Repo if rest.is_empty() => Ok(PullTarget { reference, revision, artifact: None }),
+        // A subdirectory is neither the repo nor one artifact, and pulling
+        // the whole repo because a directory was named is exactly the silent
+        // near-miss this parser exists to refuse.
+        View::Repo => Err(RefArgError::NotAModelPath {
+            arg: arg.to_string(),
+            why: "the URL names a directory inside the repo; brain pulls a whole repo or one file".to_string(),
+        }),
+        View::File if rest.is_empty() => Err(RefArgError::NotAModelPath { arg: arg.to_string(), why: format!("/{view_name}/{rev}/ names no file") }),
+        View::File => {
+            // Decoded per component and rejoined, so a nested path survives
+            // whole and a `%2F` inside one segment becomes a real separator.
+            let mut segs = Vec::with_capacity(rest.len());
+            for seg in rest {
+                segs.push(percent_decode(arg, seg)?);
+            }
+            let joined = segs.join("/");
+            // Re-split AFTER decoding: `%2e%2e` is a `..` that was not one
+            // before, and this path becomes both a URL and a filename under
+            // the store root.
+            for c in joined.split('/') {
+                safe_component(arg, c, "file path")?;
+            }
+            Ok(PullTarget { reference, revision, artifact: Some(joined) })
         }
     }
-    as_bare_ref(arg, &format!("{vendor}/{repo}"))
+}
+
+/// One decoded path component that is safe to use as both a URL segment and
+/// a filename under the store root: non-empty, not a traversal primitive, no
+/// control characters.
+fn safe_component(arg: &str, c: &str, what: &str) -> Result<String, RefArgError> {
+    if c.is_empty() || c == "." || c == ".." {
+        return Err(RefArgError::NotAModelPath { arg: arg.to_string(), why: format!("the {what} contains an empty or \".\"/\"..\" component") });
+    }
+    if c.chars().any(char::is_control) {
+        return Err(RefArgError::NotAModelPath { arg: arg.to_string(), why: format!("the {what} contains a control character") });
+    }
+    Ok(c.to_string())
+}
+
+/// `%XX` percent-decoding, strict: a malformed escape or a decode that is not
+/// UTF-8 is refused rather than passed through as literal `%`. Strict beats
+/// guessing here for the same reason it does in the quant grammar -- a
+/// half-decoded path would be sent to the hub and 404 there instead.
+fn percent_decode(arg: &str, s: &str) -> Result<String, RefArgError> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = bytes.get(i + 1).and_then(|c| (*c as char).to_digit(16));
+            let lo = bytes.get(i + 2).and_then(|c| (*c as char).to_digit(16));
+            match (hi, lo) {
+                (Some(hi), Some(lo)) => {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                }
+                _ => return Err(RefArgError::NotAModelPath { arg: arg.to_string(), why: format!("{s:?} has a malformed percent-escape") }),
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| RefArgError::NotAModelPath { arg: arg.to_string(), why: format!("{s:?} percent-decodes to invalid UTF-8") })
 }
 
 /// The final gate for both paths: the [`ModelRef`] grammar itself (reserved

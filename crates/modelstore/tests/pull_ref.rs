@@ -126,3 +126,114 @@ fn an_hf_content_cdn_url_is_not_a_model_page() {
         other => panic!("a CDN blob host is not a model page, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// A pull argument names a repo, and MAY name a revision and one artifact
+// inside it. `parse_pull_arg` is the structured form of the same single
+// parser `parse_model_arg` above is the ref-only view of.
+// ---------------------------------------------------------------------------
+
+use brain_modelref::Quant;
+use brain_modelstore::refurl::parse_pull_arg;
+
+/// The repo every row below names, whichever way it is spelled.
+const REPO: &str = "unsloth/FLUX.2-klein-9B-GGUF";
+/// One artifact inside it, at the repo root.
+const FILE: &str = "flux-2-klein-9b-Q8_0.gguf";
+
+/// One row per URL shape a user can produce, each asserting all three parts
+/// of the result: the repo, the revision, and the artifact. The revision and
+/// the artifact are exactly what used to be dropped on the floor, so a table
+/// that only checked the repo (the one above) passed while `brain pull` of a
+/// file URL fetched something else entirely.
+#[test]
+fn every_pull_url_shape_resolves_to_the_same_repo_revision_and_artifact() {
+    let rows: &[(&str, Option<&str>, Option<&str>)] = &[
+        // Bare id, and the URL shapes that name the whole repo.
+        ("unsloth/FLUX.2-klein-9B-GGUF", None, None),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF", None, None),
+        ("http://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF", None, None),
+        ("https://www.huggingface.co/unsloth/FLUX.2-klein-9B-GGUF", None, None),
+        ("huggingface.co/unsloth/FLUX.2-klein-9B-GGUF", None, None),
+        ("https://hf.co/unsloth/FLUX.2-klein-9B-GGUF", None, None),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/", None, None),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF?library=diffusers", None, None),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF#usage", None, None),
+        // The branch view names a revision and no artifact.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/tree/main", Some("main"), None),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/tree/9a3b0c1d", Some("9a3b0c1d"), None),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/tree/refs%2Fpr%2F1", Some("refs/pr/1"), None),
+        // The file views: `/blob/` is what the address bar shows, `/resolve/`
+        // is the direct-download link. Same artifact, two spellings.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/flux-2-klein-9b-Q8_0.gguf", Some("main"), Some(FILE)),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q8_0.gguf", Some("main"), Some(FILE)),
+        // HF's own download button appends a query string.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q8_0.gguf?download=true", Some("main"), Some(FILE)),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/flux-2-klein-9b-Q8_0.gguf#L1", Some("main"), Some(FILE)),
+        // A non-default revision in the file forms, including the
+        // percent-encoded one the branch view already accepts.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/refs%2Fpr%2F1/flux-2-klein-9b-Q8_0.gguf", Some("refs/pr/1"), Some(FILE)),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/9a3b0c1d/flux-2-klein-9b-Q8_0.gguf", Some("9a3b0c1d"), Some(FILE)),
+        // A NESTED artifact path survives whole -- keeping only the last
+        // segment would fetch the wrong URL and land the wrong name.
+        (
+            "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/text_encoder/model.safetensors",
+            Some("main"),
+            Some("text_encoder/model.safetensors"),
+        ),
+        // The raw view is a file view too.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/raw/main/README.md", Some("main"), Some("README.md")),
+    ];
+    for (arg, revision, artifact) in rows {
+        let got = parse_pull_arg(arg).unwrap_or_else(|e| panic!("{arg:?} should parse: {e}"));
+        assert_eq!(got.reference.to_string(), REPO, "{arg:?}: wrong repo");
+        assert_eq!(got.revision.as_deref(), *revision, "{arg:?}: wrong revision");
+        assert_eq!(got.artifact.as_deref(), *artifact, "{arg:?}: wrong artifact");
+    }
+}
+
+/// A URL that names neither the whole repo nor one artifact must be refused
+/// by name. Truncating it back to the repo and pulling that instead is doing
+/// something adjacent to what was asked, which is worse than an error.
+#[test]
+fn a_url_that_names_neither_a_repo_nor_one_artifact_is_refused_by_name() {
+    let rows: &[(&str, &str)] = &[
+        // A file view with no file.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main", "names no file"),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/", "names no file"),
+        // A view with no revision at all.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob", "names no revision"),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/tree", "names no revision"),
+        // Views that name a conversation about the repo, not its contents.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/commits/main", "commits"),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/discussions/3", "discussions"),
+        // A subdirectory is not one artifact.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/tree/main/text_encoder", "directory"),
+        // Malformed and unsafe artifact paths.
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/%zz.gguf", "percent"),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/../../etc/passwd", ".."),
+        ("https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/%2e%2e/x.gguf", ".."),
+    ];
+    for (arg, needle) in rows {
+        match parse_pull_arg(arg) {
+            Err(e) => {
+                let why = e.to_string();
+                assert!(why.contains(needle), "{arg:?}: expected the refusal to mention {needle:?}, got {why:?}");
+            }
+            Ok(t) => panic!("{arg:?} must be refused, got {t:?}"),
+        }
+    }
+}
+
+/// Which quantization to pull is spelled with the reference grammar's OWN
+/// `-<QUANT>` suffix, not a second `:QUANT` spelling invented for pull: `:`
+/// is already the adapter separator (`vendor/repo:owner:name:tag`), so a
+/// colon form would collide with a grammar that exists.
+#[test]
+fn a_quantization_is_named_by_the_reference_grammars_own_suffix() {
+    let t = parse_pull_arg("unsloth/FLUX.2-klein-9B-GGUF-Q8_0").unwrap();
+    assert_eq!(t.reference.repo(), "FLUX.2-klein-9B-GGUF");
+    assert_eq!(t.reference.quant(), Some(Quant::Q8_0));
+    assert_eq!(t.artifact, None, "a quant suffix names a quantization, not a file path");
+    assert!(parse_pull_arg("unsloth/FLUX.2-klein-9B-GGUF:Q8_0").is_err(), "the colon form is the adapter grammar and must not be reinterpreted");
+}

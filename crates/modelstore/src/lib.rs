@@ -38,7 +38,7 @@ use brain_modelref::{AdapterRef, ModelRef, Quant};
 use serde::{Deserialize, Serialize};
 
 pub use hub::{FakeHub, HfHub, Hub, HubError};
-pub use plan::{declared_architecture, execute, family_of_architecture, plan, remaining_download, Plan, PlanError, Remaining, Step};
+pub use plan::{declared_architecture, execute, family_of_architecture, plan, plan_at, plan_file, remaining_download, Plan, PlanError, Remaining, Step};
 
 /// The on-disk container format backing a [`LocalModel`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

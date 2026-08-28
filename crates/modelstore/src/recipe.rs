@@ -17,13 +17,14 @@
 //! here and lives in `crates/cli/src/supply.rs::convert`, keyed by
 //! [`ArtifactRecipe::id`] carried on the resulting `Step::Convert`.
 
-use brain_modelref::ModelRef;
+use brain_modelref::{ModelRef, Quant};
 
 use crate::hub::Hub;
 use crate::plan::{declared_architecture, is_supported_architecture, PlanError, REVISION};
 
 /// One upstream file to fetch, and the name it lands under in the repo's
 /// store directory.
+#[derive(Debug)]
 pub struct Artifact {
     pub file: String,
     pub dest_name: String,
@@ -64,6 +65,17 @@ pub trait ArtifactRecipe: Send + Sync {
     /// the one signature in the crate that returns it from a `dyn` trait
     /// method rather than a concrete function already accounted for.
     fn artifacts(&self, reference: &ModelRef, listing: &[String], hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>>;
+    /// The quantization this recipe RESOLVED for `reference`, when the repo
+    /// offers several and exactly one was chosen. `None` (the default) means
+    /// the question does not arise for this family.
+    ///
+    /// It exists so a choice made here is reportable rather than silent:
+    /// [`crate::plan`] puts it on the resulting [`crate::Plan`]'s reference,
+    /// which is both what the front end prints and what
+    /// [`crate::Store::local`] looks the finished download up by.
+    fn resolved_quant(&self, _reference: &ModelRef, _listing: &[String]) -> Option<Quant> {
+        None
+    }
 }
 
 /// The registry `plan_base` walks, in order. [`TransformersRecipe`] is last
@@ -72,6 +84,10 @@ pub trait ArtifactRecipe: Send + Sync {
 pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
     let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(ZimageRecipe), Box::new(WanRecipe), Box::new(YoloRecipe)];
     v.extend(FILES_RECIPES.iter().map(|r| Box::new(*r) as Box<dyn ArtifactRecipe>));
+    // After the named rows (a repo whose GGUFs are a fixed SET, like
+    // `deepseek2ocr-gguf`'s model+mmproj pair, must be claimed by its own row
+    // first) and before the catch-all.
+    v.push(Box::new(GgufRecipe));
     v.push(Box::new(TransformersRecipe));
     v
 }
@@ -474,6 +490,155 @@ impl ArtifactRecipe for WanRecipe {
             return Err(Box::new(PlanError::NoUpstreamArtifact(reference.clone(), "no diffusion_pytorch_model*.safetensors in repo".to_string())));
         }
         Ok(artifacts)
+    }
+}
+
+/// The `.gguf` extension, in one place -- it is both a filename test and the
+/// store's own destination suffix.
+const GGUF_EXT: &str = ".gguf";
+
+/// One `.gguf` file in a repo listing, and the quantization its NAME
+/// declares.
+pub struct GgufPick {
+    pub file: String,
+    pub quant: Quant,
+}
+
+/// The quantization a GGUF filename declares: an exact, case-sensitive
+/// `-<QUANT>.gguf` tail, `QUANT` from the closed [`Quant`] set.
+///
+/// A name that does not end that way declares NOTHING, and is therefore never
+/// auto-selected. That is deliberate on three real shapes: `-BF16.gguf` /
+/// `-F16.gguf` are unquantized dumps (bigger than the base checkpoint and
+/// outside the quant grammar on purpose), `-Q8_0-00001-of-00003.gguf` is one
+/// PART of a split model rather than a model, and `-q8_0.gguf` is a
+/// lowercase spelling the grammar refuses rather than guesses at. Any of
+/// them can still be pulled -- by its own file URL, which names the artifact
+/// outright and infers nothing.
+pub fn quant_of_gguf(file: &str) -> Option<Quant> {
+    let stem = file.strip_suffix(GGUF_EXT)?;
+    let (_, token) = stem.rsplit_once('-')?;
+    Quant::parse(token)
+}
+
+/// A repo whose ENTIRE release is GGUF quantizations of one model:
+/// `unsloth/FLUX.2-klein-9B-GGUF` (15 quantizations, no `config.json`,
+/// confirmed live via the HF API) and the hundreds of `*-GGUF` repos shaped
+/// like it.
+///
+/// This shape needs a recipe because it needs a CHOICE. Every other recipe
+/// here answers "which files does this family need"; this one answers "which
+/// ONE of these interchangeable files", because downloading the listing would
+/// be over 100 GB for the repo above, fourteen fifteenths of it a model the
+/// user did not ask for. Three rules, in order:
+///
+/// 1. the reference's own `-<QUANT>` suffix, when it has one -- the grammar
+///    `brain_modelref` already defines, not a second spelling;
+/// 2. otherwise the highest-fidelity quantization the repo offers that
+///    [`Quant::fidelity_rank`] ranks, which is `Q8_0` whenever it is
+///    published. That default is DERIVED, not a table of repo names: the
+///    ladder ranks by fidelity, and the legacy block-of-32 types
+///    (`Q4_0`/`Q4_1`/`Q5_0`/`Q5_1`/`Q8_K`) rank last precisely so they are
+///    never chosen for someone -- they remain selectable by name;
+/// 3. anything ambiguous (a quantization the repo does not publish, or two
+///    files claiming the same one) is an ERROR listing what the repo really
+///    offers, because the mistake this class of repo invites is a hundred-
+///    gigabyte one.
+///
+/// [`matches`](ArtifactRecipe::matches) is deliberately narrow: a `.gguf`
+/// merely sitting NEXT to a real checkpoint is not a GGUF release, and
+/// claiming such a repo would fetch one quantization instead of the model --
+/// the same hazard [`FilesRecipe`]'s own doc describes for a bare
+/// `config.json` signature. Any of a root `config.json`, a `model_index.json`,
+/// a `.safetensors`, a `.pt`/`.pth` or an `.onnx` anywhere in the listing
+/// means some other family owns this repo.
+pub struct GgufRecipe;
+
+impl GgufRecipe {
+    /// The candidate files: `.gguf` at the repo ROOT. A nested one belongs to
+    /// a component of some larger pipeline layout, which is a different shape
+    /// with a different recipe.
+    fn root_ggufs(listing: &[String]) -> Vec<&String> {
+        listing.iter().filter(|f| !f.contains('/') && f.ends_with(GGUF_EXT)).collect()
+    }
+
+    /// A file that proves some OTHER family owns this repo.
+    fn belongs_to_another_family(file: &str) -> bool {
+        file == "config.json"
+            || file == "model_index.json"
+            || file.ends_with(".safetensors")
+            || file.ends_with(".pt")
+            || file.ends_with(".pth")
+            || file.ends_with(".onnx")
+    }
+
+    /// Every quantization the listing declares, best-ranked first, each with
+    /// the file that declares it.
+    fn offered(listing: &[String]) -> Vec<GgufPick> {
+        let mut v: Vec<GgufPick> = Self::root_ggufs(listing).into_iter().filter_map(|f| quant_of_gguf(f).map(|q| GgufPick { file: f.clone(), quant: q })).collect();
+        v.sort_by(|a, b| a.quant.fidelity_rank().cmp(&b.quant.fidelity_rank()).then_with(|| a.file.cmp(&b.file)));
+        v
+    }
+
+    /// The refusal every ambiguous case shares: say what went wrong, then
+    /// list the closed set the repo actually publishes.
+    fn refuse(reference: &ModelRef, listing: &[String], why: &str) -> Box<PlanError> {
+        let offered = Self::offered(listing);
+        let quants: Vec<&str> = offered.iter().map(|p| p.quant.as_str()).collect();
+        let unnamed = Self::root_ggufs(listing).len() - offered.len();
+        let base = reference.base();
+        let mut msg = format!("{why}; this repo offers {}", if quants.is_empty() { "no named quantization".to_string() } else { quants.join(", ") });
+        if let Some(best) = quants.first() {
+            msg.push_str(&format!(" -- name one as {base}-{best}"));
+        }
+        if unnamed > 0 {
+            msg.push_str(&format!(", and {unnamed} more .gguf file(s) whose names declare no quantization (pull one by its own file URL)"));
+        }
+        Box::new(PlanError::NoUpstreamArtifact(reference.clone(), msg))
+    }
+
+    /// The one file this repo resolves to for `reference`. Pure over the
+    /// listing, so the planner can ask for the CHOICE
+    /// ([`resolved_quant`](ArtifactRecipe::resolved_quant)) and the artifact
+    /// separately without two implementations of the policy.
+    fn choose(reference: &ModelRef, listing: &[String]) -> Result<GgufPick, Box<PlanError>> {
+        let offered = Self::offered(listing);
+        let want = match reference.quant() {
+            Some(q) => q,
+            None => match offered.iter().find(|p| p.quant.fidelity_rank() != u8::MAX) {
+                Some(p) => p.quant,
+                None => return Err(Self::refuse(reference, listing, "no quantization named and none of this repo's files is one brain ranks")),
+            },
+        };
+        let mut hits = offered.into_iter().filter(|p| p.quant == want);
+        match (hits.next(), hits.next()) {
+            (Some(pick), None) => Ok(pick),
+            (Some(_), Some(_)) => Err(Self::refuse(reference, listing, &format!("more than one file declares {want} -- which is meant is not brain's to guess"))),
+            (None, _) => Err(Self::refuse(reference, listing, &format!("no {want} quantization here"))),
+        }
+    }
+}
+
+impl ArtifactRecipe for GgufRecipe {
+    fn id(&self) -> &'static str {
+        "gguf"
+    }
+
+    fn matches(&self, _reference: &ModelRef, listing: &[String]) -> bool {
+        !Self::root_ggufs(listing).is_empty() && !listing.iter().any(|f| Self::belongs_to_another_family(f))
+    }
+
+    fn artifacts(&self, reference: &ModelRef, listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
+        let pick = Self::choose(reference, listing)?;
+        // The store's own quant destination (`<QUANT>.gguf`, what
+        // `Store::local` looks a quant reference up by), so pulling this repo
+        // by name and pulling one of its files by URL land the same bytes
+        // under the same path.
+        Ok(vec![artifact(pick.file, format!("{}{GGUF_EXT}", pick.quant.as_str()))])
+    }
+
+    fn resolved_quant(&self, reference: &ModelRef, listing: &[String]) -> Option<Quant> {
+        Self::choose(reference, listing).ok().map(|p| p.quant)
     }
 }
 
@@ -893,5 +1058,109 @@ mod tests {
         let (family, roles) = files_recipe_roles("deepseek2ocr-gguf").unwrap();
         assert_eq!(family, "deepseek2ocr");
         assert_eq!(roles, &[("dir", ".")]);
+    }
+
+    /// The exact `unsloth/FLUX.2-klein-9B-GGUF` file listing, confirmed live
+    /// via the HF API this session: 15 quantizations of ONE model, no
+    /// `config.json`, and no safetensors anywhere. Pulling all of it is over
+    /// 100 GB, which is what makes "download the listing" the wrong answer
+    /// for this shape.
+    fn flux2_klein_9b_gguf_listing() -> Vec<String> {
+        let mut v: Vec<String> = [".gitattributes", "LICENSE.md", "README.md", "assets/flux2klein9b.png", "editing.jpg", "others.jpg", "realism.jpg"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        for q in ["BF16", "F16", "Q2_K", "Q3_K_M", "Q3_K_S", "Q4_0", "Q4_1", "Q4_K_M", "Q4_K_S", "Q5_0", "Q5_1", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0"] {
+            v.push(format!("flux-2-klein-9b-{q}.gguf"));
+        }
+        v
+    }
+
+    #[test]
+    fn gguf_recipe_claims_a_gguf_only_repo_ahead_of_transformers() {
+        let listing = flux2_klein_9b_gguf_listing();
+        let r = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None);
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
+        assert_eq!(matched.id(), "gguf", "a GGUF-only repo must not fall through to the transformers catch-all");
+    }
+
+    #[test]
+    fn gguf_recipe_downloads_exactly_one_quantization_and_defaults_to_the_highest_ranked() {
+        let listing = flux2_klein_9b_gguf_listing();
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None);
+        let artifacts = GgufRecipe.artifacts(&r, &listing, &hub).unwrap();
+        assert_eq!(artifacts.len(), 1, "never more than one quantization, whatever the repo offers");
+        assert_eq!(artifacts[0].file, "flux-2-klein-9b-Q8_0.gguf");
+        // The store's own quant convention, so pulling by URL and pulling by
+        // `<repo>-<QUANT>` land the same bytes in the same place.
+        assert_eq!(artifacts[0].dest_name, "Q8_0.gguf");
+        assert_eq!(GgufRecipe.resolved_quant(&r, &listing), Some(Quant::Q8_0), "the choice must be reportable, not silent");
+
+        // ... and an explicitly named quantization is the one fetched.
+        let r = r.with_quant(Quant::Q4KM);
+        let artifacts = GgufRecipe.artifacts(&r, &listing, &hub).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].file, "flux-2-klein-9b-Q4_K_M.gguf");
+        assert_eq!(artifacts[0].dest_name, "Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn gguf_recipe_names_every_quantization_the_repo_offers_when_the_asked_for_one_is_absent() {
+        let listing = flux2_klein_9b_gguf_listing();
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", Some(Quant::Q3KL));
+        let err = GgufRecipe.artifacts(&r, &listing, &hub).unwrap_err().to_string();
+        assert!(err.contains("Q3_K_L"), "the refusal must name what was asked for: {err}");
+        for q in ["Q8_0", "Q6_K", "Q5_K_M", "Q2_K"] {
+            assert!(err.contains(q), "the refusal must list {q}, which this repo does offer: {err}");
+        }
+    }
+
+    /// The hazard `FilesRecipe`'s own doc calls out, in this recipe's terms: a
+    /// repo that merely SHIPS a `.gguf` next to a real transformers checkpoint
+    /// is not a GGUF release, and claiming it would fetch one quantization
+    /// instead of the model.
+    #[test]
+    fn gguf_recipe_does_not_claim_a_repo_that_merely_ships_a_gguf_alongside() {
+        let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
+        for listing in [
+            vec!["config.json".to_string(), "model.safetensors".to_string(), "Qwen3-0.6B-Q8_0.gguf".to_string()],
+            vec!["model_index.json".to_string(), "transformer/model-Q8_0.gguf".to_string()],
+            vec!["yolov8n.pt".to_string(), "yolov8n-Q8_0.gguf".to_string()],
+        ] {
+            assert!(!GgufRecipe.matches(&r, &listing), "{listing:?} is not a GGUF-only release");
+        }
+        // ... and the catch-all still gets an ordinary transformers repo.
+        let listing = vec!["config.json".to_string(), "model.safetensors".to_string()];
+        assert_eq!(recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap().id(), "transformers");
+    }
+
+    /// A GGUF-only repo that ships a PAIR of files per quantization (a model
+    /// plus its mmproj) is two artifacts, not one, so the generic recipe must
+    /// not guess -- the named `deepseek2ocr-gguf` row claims it first, and
+    /// without that row the generic recipe refuses rather than fetching half
+    /// a model.
+    #[test]
+    fn a_named_gguf_pair_still_routes_to_its_own_recipe() {
+        let listing: Vec<String> = ["README.md", "DeepSeek-OCR-Q8_0.gguf", "mmproj-DeepSeek-OCR-Q8_0.gguf"].into_iter().map(String::from).collect();
+        let r = ModelRef::new("ggml-org", "DeepSeek-OCR-GGUF", None);
+        assert_eq!(recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap().id(), "deepseek2ocr-gguf");
+        let hub = crate::hub::FakeHub::new();
+        let err = GgufRecipe.artifacts(&r, &listing, &hub).unwrap_err().to_string();
+        assert!(err.contains("Q8_0"), "the ambiguity must name the quantization two files claim: {err}");
+    }
+
+    /// A filename declares a quantization only by an exact, case-sensitive
+    /// `-<QUANT>.gguf` tail. Everything else declares none, and is therefore
+    /// never auto-selected -- a split shard would otherwise be fetched as if
+    /// it were the whole model.
+    #[test]
+    fn only_an_exact_quant_tail_declares_a_quantization() {
+        assert_eq!(quant_of_gguf("flux-2-klein-9b-Q8_0.gguf"), Some(Quant::Q8_0));
+        assert_eq!(quant_of_gguf("flux-2-klein-9b-Q4_K_M.gguf"), Some(Quant::Q4KM));
+        for f in ["flux-2-klein-9b-BF16.gguf", "flux-2-klein-9b-F16.gguf", "flux-2-klein-9b-q8_0.gguf", "model-Q8_0-00001-of-00003.gguf", "model.gguf", "model-Q8_0.safetensors"] {
+            assert_eq!(quant_of_gguf(f), None, "{f} must declare no quantization");
+        }
     }
 }

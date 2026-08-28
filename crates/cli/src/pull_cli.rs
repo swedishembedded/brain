@@ -39,7 +39,7 @@ use std::io::{IsTerminal, Write};
 
 use std::time::{Duration, Instant};
 
-use brain_modelstore::refurl::parse_model_arg;
+use brain_modelstore::refurl::parse_pull_arg;
 use brain_modelstore::{HfHub, Remaining, Step, Store};
 
 /// How many progress lines a whole piped pull is allowed to spend.
@@ -314,12 +314,25 @@ const USAGE: &str = "\
 usage: brain pull <model> [--brain-data-dir DIR]
 
 Fetch a model's official weights into brain's model store and make them
-servable. <model> is either the canonical reference or the HuggingFace page
-URL - both name the same thing:
+servable. <model> is the canonical reference or a HuggingFace URL - the repo
+page, a branch view, or one file's page:
 
   brain pull Qwen/Qwen3-0.6B
   brain pull https://huggingface.co/Qwen/Qwen3-0.6B
   brain pull https://huggingface.co/Qwen/Qwen3-0.6B/tree/main
+
+A file URL pulls exactly that ONE file, whatever its extension, from whatever
+revision the URL names - nothing is inferred, because the file is named:
+
+  brain pull https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/flux-2-klein-9b-Q8_0.gguf
+
+A GGUF repo publishes many quantizations of one model, and only ONE is ever
+fetched. Name it with the reference grammar's own quantization suffix, or
+name none and let brain pick the highest-fidelity one the repo offers (which
+it prints):
+
+  brain pull unsloth/FLUX.2-klein-9B-GGUF-Q4_K_M
+  brain pull unsloth/FLUX.2-klein-9B-GGUF
 
 Progress goes to stdout: an in-place bar with throughput and ETA on a
 terminal, ten plain lines for the whole pull when piped.
@@ -357,13 +370,14 @@ pub fn run_pull(args: &[String]) -> i32 {
         return 2;
     };
 
-    let reference = match parse_model_arg(model) {
-        Ok(r) => r,
+    let target = match parse_pull_arg(model) {
+        Ok(t) => t,
         Err(e) => {
             eprintln!("brain pull: {e}");
             return 2;
         }
     };
+    let reference = target.reference.clone();
     let Some(root) = crate::model_dir::resolve(None) else {
         eprintln!("brain pull: no models directory (pass --brain-data-dir, or set BRAIN_MODELS_DIR or HOME)");
         return 2;
@@ -371,7 +385,14 @@ pub fn run_pull(args: &[String]) -> i32 {
     let store = Store::new(root);
     let hub = HfHub::new();
 
-    let plan = match brain_modelstore::plan(&reference, &store, &hub) {
+    // One argument, two plans: a URL that named a file asks for exactly that
+    // artifact, anything else asks for the repo. Both honour the revision the
+    // argument named.
+    let built = match target.artifact.as_deref() {
+        Some(file) => brain_modelstore::plan_file(&reference, file, target.revision.as_deref(), &hub),
+        None => brain_modelstore::plan_at(&reference, target.revision.as_deref(), &store, &hub),
+    };
+    let plan = match built {
         Ok(p) => p,
         Err(e) => {
             eprintln!("brain pull: {e}");
@@ -382,6 +403,16 @@ pub fn run_pull(args: &[String]) -> i32 {
     if plan.steps == [Step::Serve] {
         println!("brain pull {reference}: already complete in {}", dir.display());
         return 0;
+    }
+    // A choice made for the user is a choice said out loud. The planner puts
+    // what it resolved on the plan's reference, so this fires exactly when
+    // the repo offered several interchangeable artifacts and the argument
+    // named none of them.
+    if reference.quant().is_none() && target.artifact.is_none() {
+        if let Some(q) = plan.reference.quant() {
+            println!("brain pull {reference}: no quantization named, selected {q} (the highest-fidelity one this repo offers)");
+            println!("brain pull {reference}: pull another as {reference}-<QUANT>, or paste a file's URL to name it exactly");
+        }
     }
     let remaining = match brain_modelstore::remaining_download(&store, &hub, &plan) {
         Ok(r) => r,
@@ -394,17 +425,30 @@ pub fn run_pull(args: &[String]) -> i32 {
     let mode = Mode::of(std::io::stdout().is_terminal());
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    let mut reporter = Reporter::new(mode, &mut lock, reference.to_string(), remaining);
+    let label = plan.reference.to_string();
+    let mut reporter = Reporter::new(mode, &mut lock, label.clone(), remaining);
     if remaining.files > 0 {
         reporter.header();
     }
-    let outcome = crate::supply::execute_plan(&store, &hub, &plan, &reference.to_string(), &mut |name, got, total| reporter.on_bytes(name, got, total));
+    let outcome = crate::supply::execute_plan_opt(&store, &hub, &plan, &label, &mut |name, got, total| reporter.on_bytes(name, got, total));
     let (moved, secs) = reporter.finish();
     drop(reporter);
 
     match outcome {
         Ok(local) => {
-            println!("brain pull {reference}: fetched {} in {} -> {}", human_bytes(moved), human_secs(secs), local.dir.display());
+            // Where it landed. A pull that produced exactly ONE file still
+            // there afterwards reports that FILE: it is the path a
+            // `--dit`/`--text-encoder` flag gets pointed at, and naming the
+            // directory instead would send the user looking. A pull whose
+            // artifact was rewritten or deleted by its finish step (the yolo
+            // `.pt`), or that produced several files, reports the servable
+            // model's directory as before.
+            let where_ = match (landed_file(&plan, &dir), local) {
+                (Some(f), _) => f,
+                (None, Some(l)) => l.dir.display().to_string(),
+                (None, None) => dir.display().to_string(),
+            };
+            println!("brain pull {label}: fetched {} in {} -> {where_}", human_bytes(moved), human_secs(secs));
             0
         }
         Err(e) => {
@@ -412,6 +456,23 @@ pub fn run_pull(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// The path of the single file a plan produced, when it produced exactly one
+/// AND that file is still there -- the artifact a file URL named, or the one
+/// quantization a GGUF repo resolved to. `None` for a multi-file pull, and
+/// for a finish step that consumed its download (`convert_yolo` deletes the
+/// `.pt` it rewrote), so this never names a path that is not there.
+fn landed_file(plan: &brain_modelstore::Plan, dir: &std::path::Path) -> Option<String> {
+    let mut downloads = plan.steps.iter().filter_map(|s| match s {
+        Step::Download { dest_name, .. } => Some(dest_name),
+        _ => None,
+    });
+    let dest = match (downloads.next(), downloads.next()) {
+        (Some(dest), None) => dir.join(dest),
+        _ => return None,
+    };
+    dest.is_file().then(|| dest.display().to_string())
 }
 
 #[cfg(test)]

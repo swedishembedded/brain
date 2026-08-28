@@ -10,6 +10,7 @@
 use brain_modelref::{ModelRef, Quant};
 
 use crate::hub::{Hub, HubError};
+use crate::recipe::{quant_of_gguf, ArtifactRecipe};
 use crate::{LocalModel, Store};
 
 /// One thing [`plan`] decided has to happen. `modelstore` executes
@@ -85,19 +86,112 @@ pub(crate) const REVISION: &str = "main";
 /// upstream quantized artifact (download), or the base checkpoint plus a
 /// local quantize step (recurse + append).
 pub fn plan(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
-    if store.local(reference).is_some() {
+    plan_at(reference, None, store, hub)
+}
+
+/// [`plan`] at a caller-named `revision` (a branch, tag or sha). `None` is
+/// the repo's default branch, which is what [`plan`] passes and what every
+/// caller that has no revision in hand wants.
+///
+/// The revision reaches here from a pasted URL's own `/tree/<rev>` or
+/// `/blob/<rev>/...` segment (`crate::refurl`). The store keys a repo
+/// directory by `vendor/repo` alone, so fetching a non-default revision
+/// REPLACES the default one's files in that directory rather than living
+/// beside them -- explicit, and the same thing `git checkout` of another
+/// branch into one working tree does.
+pub fn plan_at(reference: &ModelRef, revision: Option<&str>, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
+    // Naming the default branch is naming no revision: `/tree/main` and the
+    // bare repo URL are the same request, so they must take the same
+    // already-on-disk fast path rather than one of them re-listing the repo.
+    let revision = revision.filter(|r| *r != REVISION);
+    if revision.is_none() && store.local(reference).is_some() {
         return Ok(Plan { reference: reference.clone(), steps: vec![Step::Serve] });
     }
     if reference.is_reserved() {
         return Err(Box::new(PlanError::NotFetchable(reference.clone())));
     }
+    let revision = revision.unwrap_or(REVISION);
     match reference.quant() {
-        Some(q) => plan_quant(reference, q, store, hub),
-        None => plan_base(reference, store, hub),
+        Some(q) => plan_quant(reference, q, revision, store, hub),
+        None => plan_base(reference, revision, store, hub),
     }
 }
 
-fn plan_quant(reference: &ModelRef, quant: Quant, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
+/// The plan for ONE named artifact inside a repo -- what a pasted
+/// `/blob/<rev>/<path>` or `/resolve/<rev>/<path>` URL asks for.
+///
+/// This is the shape that needs no policy at all: the file is named, so
+/// nothing is inferred, no quantization ladder runs, and any extension works
+/// (a single `.safetensors` component is as valid a target as a `.gguf` --
+/// `brain flux2 generate --text-encoder <file>` takes exactly such a file).
+/// A GGUF whose name declares a quantization is the one exception, and it is
+/// a naming one rather than a policy one: it lands under the store's own
+/// `<QUANT>.gguf` destination so that pulling it by URL and pulling it as
+/// `<repo>-<QUANT>` are the same artifact in the same place, not two copies.
+pub fn plan_file(reference: &ModelRef, file: &str, revision: Option<&str>, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
+    if reference.is_reserved() {
+        return Err(Box::new(PlanError::NotFetchable(reference.clone())));
+    }
+    let vendor = reference.vendor();
+    let repo = reference.repo();
+    let revision = revision.unwrap_or(REVISION);
+    let listing = hub.list_files(vendor, repo, revision).map_err(|e| Box::new(PlanError::Hub(e)))?;
+    if !listing.iter().any(|f| f == file) {
+        return Err(Box::new(PlanError::NoUpstreamArtifact(reference.clone(), format!("no file {file:?} at revision {revision:?}; it holds {}", listed(&listing)))));
+    }
+    // A quantization token in the name is the store's own destination
+    // convention; anything else keeps its own repo-relative path, nested
+    // directories included (`execute` creates them, the same way the
+    // diffusers-pipeline recipe's role directories already rely on).
+    let (reference, dest) = match quant_of_gguf(file).filter(|_| !file.contains('/')) {
+        Some(q) => (reference.with_quant(q), format!("{}.gguf", q.as_str())),
+        None => (reference.clone(), file.to_string()),
+    };
+    let mut steps = vec![Step::Download {
+        vendor: vendor.to_string(),
+        repo: repo.to_string(),
+        revision: revision.to_string(),
+        file: file.to_string(),
+        dest_name: dest.clone(),
+    }];
+    // A GGUF gets the same finish step a whole-repo GGUF pull gets: its
+    // header is read back off disk and its `general.architecture` reported.
+    // That check cannot happen before the download -- see `Hub`, which has no
+    // range request to read a header with.
+    if dest.ends_with(".gguf") {
+        steps.push(Step::Convert { vendor: vendor.to_string(), repo: repo.to_string(), recipe: "gguf" });
+    }
+    Ok(Plan { reference, steps })
+}
+
+/// A repo's file listing, rendered for an error a human reads. Capped: a
+/// listing is occasionally hundreds of entries, and a wall of them buries
+/// the sentence above it.
+fn listed(listing: &[String]) -> String {
+    const MAX: usize = 30;
+    let shown: Vec<&str> = listing.iter().take(MAX).map(String::as_str).collect();
+    match listing.len().checked_sub(MAX) {
+        Some(rest) if rest > 0 => format!("{} and {rest} more", shown.join(", ")),
+        _ => shown.join(", "),
+    }
+}
+
+fn plan_quant(reference: &ModelRef, quant: Quant, revision: &str, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
+    // The repo the user NAMED gets first refusal. When it is itself a GGUF
+    // release, `-<QUANT>` selects a file inside it, and the naming ladder
+    // below -- which guesses at SIBLING repos (`<repo>-GGUF`) -- must not run
+    // at all: it would miss (upstream file names are not `<repo>-<QUANT>`),
+    // then fall through to fetching a base checkpoint to quantize locally,
+    // which for a repo that already publishes the exact file asked for is
+    // both wrong and enormous.
+    if let Ok(listing) = hub.list_files(reference.vendor(), reference.repo(), revision) {
+        if crate::recipe::GgufRecipe.matches(reference, &listing) {
+            return plan_from_listing(reference, &listing, revision, hub);
+        }
+    }
+    // A revision the caller named applies to the repo it named, not to a
+    // DIFFERENT repo guessed at below -- `<repo>-GGUF`'s branches have
+    // nothing to do with `<repo>`'s -- so the ladder stays on the default.
     for (vendor, repo, file) in quant_candidates(reference, quant) {
         match hub.list_files(&vendor, &repo, REVISION) {
             Ok(files) if files.iter().any(|f| f == &file) => {
@@ -121,7 +215,7 @@ fn plan_quant(reference: &ModelRef, quant: Quant, store: &Store, hub: &dyn Hub) 
         }
     }
     let base = reference.base();
-    let mut base_plan = plan_base(&base, store, hub)?;
+    let mut base_plan = plan_base(&base, revision, store, hub)?;
     base_plan.reference = reference.clone();
     base_plan.steps.push(Step::Quantize { base, quant });
     Ok(base_plan)
@@ -172,34 +266,49 @@ fn quant_candidates(reference: &ModelRef, quant: Quant) -> Vec<(String, String, 
     out
 }
 
-fn plan_base(reference: &ModelRef, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
-    if let Some(local) = store.local(reference) {
-        return Ok(Plan { reference: reference.clone(), steps: local_serve_steps(&local) });
+fn plan_base(reference: &ModelRef, revision: &str, store: &Store, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
+    if revision == REVISION {
+        if let Some(local) = store.local(reference) {
+            return Ok(Plan { reference: reference.clone(), steps: local_serve_steps(&local) });
+        }
     }
+    let listing = hub.list_files(reference.vendor(), reference.repo(), revision).map_err(|e| Box::new(PlanError::Hub(e)))?;
+    plan_from_listing(reference, &listing, revision, hub)
+}
+
+/// The recipe half of [`plan_base`], over a listing the caller already has --
+/// so the quant path can hand its own listing straight over instead of
+/// asking the hub for it a second time.
+fn plan_from_listing(reference: &ModelRef, listing: &[String], revision: &str, hub: &dyn Hub) -> Result<Plan, Box<PlanError>> {
     let vendor = reference.vendor();
     let repo = reference.repo();
-    let listing = hub.list_files(vendor, repo, REVISION).map_err(|e| Box::new(PlanError::Hub(e)))?;
-
     let recipe = crate::recipe::recipes()
         .into_iter()
-        .find(|r| r.matches(reference, &listing))
+        .find(|r| r.matches(reference, listing))
         .expect("the last recipe in the registry is a catch-all and always matches");
-    let artifacts = recipe.artifacts(reference, &listing, hub)?;
+    let artifacts = recipe.artifacts(reference, listing, hub)?;
+    // A recipe that CHOSE between interchangeable artifacts says so, and the
+    // choice rides on the plan's reference: that is what the front end prints
+    // and what `Store::local` resolves the finished download by.
+    let resolved = match recipe.resolved_quant(reference, listing) {
+        Some(q) => reference.with_quant(q),
+        None => reference.clone(),
+    };
 
-    let mut steps: Vec<Step> = artifacts.into_iter().map(|a| download_step(vendor, repo, &a.file, &a.dest_name)).collect();
+    let mut steps: Vec<Step> = artifacts.into_iter().map(|a| download_step(vendor, repo, revision, &a.file, &a.dest_name)).collect();
     steps.push(Step::Convert { vendor: vendor.to_string(), repo: repo.to_string(), recipe: recipe.id() });
-    Ok(Plan { reference: reference.clone(), steps })
+    Ok(Plan { reference: resolved, steps })
 }
 
 fn local_serve_steps(_local: &LocalModel) -> Vec<Step> {
     vec![Step::Serve]
 }
 
-fn download_step(vendor: &str, repo: &str, file: &str, dest_name: &str) -> Step {
+fn download_step(vendor: &str, repo: &str, revision: &str, file: &str, dest_name: &str) -> Step {
     Step::Download {
         vendor: vendor.to_string(),
         repo: repo.to_string(),
-        revision: REVISION.to_string(),
+        revision: revision.to_string(),
         file: file.to_string(),
         dest_name: dest_name.to_string(),
     }
@@ -506,9 +615,9 @@ mod tests {
         assert_eq!(
             p.steps,
             vec![
-                download_step("Qwen", "Qwen3-0.6B", "config.json", "config.json"),
-                download_step("Qwen", "Qwen3-0.6B", "tokenizer.json", "tokenizer.json"),
-                download_step("Qwen", "Qwen3-0.6B", "model.safetensors", "model.safetensors"),
+                download_step("Qwen", "Qwen3-0.6B", REVISION, "config.json", "config.json"),
+                download_step("Qwen", "Qwen3-0.6B", REVISION, "tokenizer.json", "tokenizer.json"),
+                download_step("Qwen", "Qwen3-0.6B", REVISION, "model.safetensors", "model.safetensors"),
                 Step::Convert { vendor: "Qwen".to_string(), repo: "Qwen3-0.6B".to_string(), recipe: "transformers" },
             ]
         );
@@ -749,5 +858,87 @@ mod tests {
 
         assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), b"already-here");
         assert_eq!(std::fs::read(dir.join("model.safetensors")).unwrap(), vec![7u8; 32], "the missing file was not fetched");
+    }
+
+    /// A GGUF-release hub fixture: 15 quantizations of one model, no
+    /// `config.json` -- the shape `unsloth/FLUX.2-klein-9B-GGUF` really has.
+    fn gguf_release_hub() -> FakeHub {
+        let mut hub = FakeHub::new();
+        hub.add_file("unsloth", "FLUX.2-klein-9B-GGUF", "main", "README.md", vec![b'#'; 10]);
+        for (i, q) in ["BF16", "F16", "Q2_K", "Q3_K_M", "Q3_K_S", "Q4_0", "Q4_1", "Q4_K_M", "Q4_K_S", "Q5_0", "Q5_1", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0"].iter().enumerate() {
+            hub.add_file("unsloth", "FLUX.2-klein-9B-GGUF", "main", &format!("flux-2-klein-9b-{q}.gguf"), vec![i as u8; 8]);
+        }
+        hub
+    }
+
+    /// The bug: a GGUF-only repo fell through to the transformers catch-all
+    /// and failed with "no config.json in repo". It must instead resolve to
+    /// exactly ONE quantization, and the plan must SAY which -- the resolved
+    /// reference carries it, so the front end can print the choice rather
+    /// than making it silently.
+    #[test]
+    fn a_gguf_only_repo_plans_exactly_one_quantization_and_reports_which() {
+        let st = store("modelstore-plan-gguf-default");
+        let hub = gguf_release_hub();
+        let reference = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None);
+        let p = plan(&reference, &st, &hub).unwrap();
+        assert_eq!(p.reference.quant(), Some(Quant::Q8_0), "the plan must name the quantization it chose");
+        let downloads: Vec<&Step> = p.steps.iter().filter(|s| matches!(s, Step::Download { .. })).collect();
+        assert_eq!(downloads.len(), 1, "never more than one quantization: {:?}", p.steps);
+        let Step::Download { file, dest_name, .. } = downloads[0] else { unreachable!() };
+        assert_eq!(file, "flux-2-klein-9b-Q8_0.gguf");
+        assert_eq!(dest_name, "Q8_0.gguf");
+    }
+
+    /// The reference grammar's own `-<QUANT>` suffix selects a quantization
+    /// inside a repo the user NAMED, rather than sending the sibling-repo
+    /// naming ladder off to guess at `<repo>-GGUF`.
+    #[test]
+    fn a_quant_suffix_selects_a_file_inside_the_named_gguf_repo() {
+        let st = store("modelstore-plan-gguf-named");
+        let hub = gguf_release_hub();
+        let reference = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", Some(Quant::Q4KM));
+        let p = plan(&reference, &st, &hub).unwrap();
+        let downloads: Vec<&Step> = p.steps.iter().filter(|s| matches!(s, Step::Download { .. })).collect();
+        assert_eq!(downloads.len(), 1);
+        let Step::Download { file, dest_name, .. } = downloads[0] else { unreachable!() };
+        assert_eq!(file, "flux-2-klein-9b-Q4_K_M.gguf");
+        assert_eq!(dest_name, "Q4_K_M.gguf");
+        assert!(!p.steps.iter().any(|s| matches!(s, Step::Quantize { .. })), "an upstream artifact exists; nothing may be re-quantized locally");
+
+        // A quantization this repo does NOT offer fails with the list, rather
+        // than falling back to downloading a base checkpoint to quantize.
+        let absent = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", Some(Quant::Q3KL));
+        let err = plan(&absent, &st, &hub).unwrap_err().to_string();
+        assert!(err.contains("Q3_K_L") && err.contains("Q6_K"), "{err}");
+    }
+
+    /// A file URL names the artifact outright: pull exactly that one file,
+    /// whatever its extension, from whatever revision was named.
+    #[test]
+    fn a_named_file_is_pulled_verbatim_from_the_revision_that_named_it() {
+        let mut hub = gguf_release_hub();
+        hub.add_file("unsloth", "FLUX.2-klein-9B-GGUF", "refs/pr/1", "text_encoder/model.safetensors", vec![3u8; 16]);
+        let reference = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None);
+
+        // A GGUF whose name declares a quantization lands under the store's
+        // own `<QUANT>.gguf` name, so this and `<repo>-Q8_0` are one artifact.
+        let p = plan_file(&reference, "flux-2-klein-9b-Q8_0.gguf", None, &hub).unwrap();
+        assert_eq!(p.reference.quant(), Some(Quant::Q8_0));
+        let Some(Step::Download { file, dest_name, revision, .. }) = p.steps.first() else { panic!("{:?}", p.steps) };
+        assert_eq!(file, "flux-2-klein-9b-Q8_0.gguf");
+        assert_eq!(dest_name, "Q8_0.gguf");
+        assert_eq!(revision, "main");
+
+        // Any other file lands under its own path, nested directories intact.
+        let p = plan_file(&reference, "text_encoder/model.safetensors", Some("refs/pr/1"), &hub).unwrap();
+        let Some(Step::Download { file, dest_name, revision, .. }) = p.steps.first() else { panic!("{:?}", p.steps) };
+        assert_eq!(file, "text_encoder/model.safetensors");
+        assert_eq!(dest_name, "text_encoder/model.safetensors");
+        assert_eq!(revision, "refs/pr/1");
+
+        // A file the revision does not hold is refused with what it does.
+        let err = plan_file(&reference, "flux-2-klein-9b-Q9_9.gguf", None, &hub).unwrap_err().to_string();
+        assert!(err.contains("Q9_9") && err.contains("flux-2-klein-9b-Q8_0.gguf"), "{err}");
     }
 }

@@ -46,11 +46,52 @@ fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<(), 
         // fallback, which would otherwise write the `FilesRecipe` row's
         // (deliberately empty) `roles` verbatim. See `convert_qwen3tts`.
         "qwen3tts" => convert_qwen3tts(store, vendor, repo),
+        "gguf" => convert_gguf(store, vendor, repo),
         other => match brain_modelstore::recipe::files_recipe_roles(other) {
             Some((family, roles)) => convert_files(store, vendor, repo, family, roles),
             None => Err(format!("{vendor}/{repo}: convert: unknown recipe {other:?} (bug: modelstore::recipe::recipes() and this dispatch have drifted)")),
         },
     }
+}
+
+/// The GGUF recipe's finish step. There is no tensor rewrite and no manifest
+/// to write: a `<QUANT>.gguf` sitting in a repo directory is already exactly
+/// what `Store::local` resolves a quantized reference to.
+///
+/// What it does instead is read each landed file's header back off disk and
+/// report the architecture it declares. That is the FIRST moment that fact is
+/// knowable: `brain_modelstore::Hub` exposes list / read-whole-file /
+/// stream-to-disk and no range request, so a multi-gigabyte checkpoint's
+/// `general.architecture` cannot be consulted while choosing which file to
+/// fetch, and the choice upstream is therefore made on the filename's
+/// quantization token alone. Reading the header here is what catches a
+/// "download" that is not a GGUF at all -- an LFS pointer file, an HTML error
+/// page -- before a model crate is handed it, and it costs one mmap of the
+/// header, not a read of the weights.
+fn convert_gguf(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
+    let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{vendor}/{repo}: convert: {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "gguf"))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(format!("{vendor}/{repo}: convert: no .gguf file landed in {}", dir.display()));
+    }
+    for f in &files {
+        let path = f.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 path {}", f.display()))?;
+        let g = checkpoint::gguf::MmapGguf::open(path).map_err(|e| format!("{vendor}/{repo}: convert: {path}: not a readable GGUF: {e}"))?;
+        let arch = g
+            .kv()
+            .get("general.architecture")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{vendor}/{repo}: convert: {path}: GGUF declares no general.architecture"))?;
+        let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        eprintln!("brain: {vendor}/{repo}: {name}: GGUF architecture {arch:?}, {} tensors", g.names().len());
+    }
+    Ok(())
 }
 
 /// A [`brain_modelstore::recipe::FilesRecipe`]'s finish step: the files it
@@ -426,6 +467,24 @@ pub(crate) fn execute_plan(
     label: &str,
     progress: &mut dyn FnMut(&str, u64, Option<u64>),
 ) -> Result<brain_modelstore::LocalModel, String> {
+    execute_plan_opt(store, hub, plan, label, progress)?.ok_or_else(|| format!("{label}: fetched but not found on disk (unexpected)"))
+}
+
+/// [`execute_plan`] without the requirement that the result be a servable
+/// model. Every plan that materializes a whole repo produces one, which is
+/// why [`execute_plan`] insists; a plan for ONE named artifact inside a repo
+/// (`brain_modelstore::plan_file`, what a pasted file URL asks for) may not:
+/// a lone `text_encoder/model.safetensors` is a file a `--text-encoder` flag
+/// can be pointed at, not a checkpoint the store can serve by name. `None`
+/// is that case, and the caller reports the path instead -- never a swallowed
+/// failure, since every step still had to succeed to get here.
+pub(crate) fn execute_plan_opt(
+    store: &Store,
+    hub: &dyn Hub,
+    plan: &brain_modelstore::Plan,
+    label: &str,
+    progress: &mut dyn FnMut(&str, u64, Option<u64>),
+) -> Result<Option<brain_modelstore::LocalModel>, String> {
     let reference = &plan.reference;
     let deferred = brain_modelstore::execute(store, hub, plan, progress).map_err(|e| format!("{label}: {e}"))?;
 
@@ -440,7 +499,7 @@ pub(crate) fn execute_plan(
         }
     }
 
-    store.local(reference).ok_or_else(|| format!("{label}: fetched but not found on disk (unexpected)"))
+    Ok(store.local(reference))
 }
 
 /// The capability-path counterpart to [`ensure_default_weights`]: for each
@@ -581,7 +640,12 @@ impl StoreSupplier {
         // that gap atomically (unlike a separate check-then-`register()`, which
         // is itself a TOCTOU race between episodes), making this call genuinely
         // idempotent per this trait's own "MUST be idempotent" doc.
-        let local = self.store.local(&r).ok_or_else(|| format!("{model}: fetched but not found on disk (unexpected)"))?;
+        // `plan.reference`, not the ref parsed from `model`: a plan whose
+        // recipe CHOSE between interchangeable artifacts records the choice
+        // there (a GGUF release repo resolving to one quantization), and that
+        // resolved reference is what `Store::local` finds the fetched bytes
+        // under. Identical to `r` for every recipe that makes no choice.
+        let local = self.store.local(&plan.reference).ok_or_else(|| format!("{model}: fetched but not found on disk (unexpected)"))?;
         let resident = crate::model_dir::resident_for_local(&local).ok_or_else(|| format!("{model}: family not servable"))?;
         exec.register_if_absent(resident);
         Ok(())
@@ -869,6 +933,44 @@ mod tests {
         let mut progressed = false;
         supplier.ensure("Qwen/Qwen3-0.6B-Q8_0", &e, &mut |_, _, _| progressed = true).unwrap();
         assert!(progressed);
+        let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
+        assert_eq!(names, vec!["toy-qwen-gguf".to_string()]);
+    }
+
+    #[test]
+    fn a_gguf_only_repo_fetches_one_quantization_and_its_header_is_read_back() {
+        // The bug this recipe exists to fix: a repo whose whole release is
+        // GGUF quantizations of one model had no recipe, fell through to the
+        // transformers catch-all and failed with "no config.json in repo".
+        // Fetching the listing would have been the other wrong answer -- for
+        // the real repo that is over 100 GB of interchangeable copies.
+        //
+        // End to end: plan -> download exactly ONE file -> `convert_gguf`
+        // opens what landed and reads its `general.architecture` back (the
+        // first moment that is knowable: `Hub` has no range request) ->
+        // `Store::local` resolves it under the quant convention, so a
+        // resident is built from the fetched bytes with no env var involved.
+        let mut hub = FakeHub::new();
+        hub.add_file("unsloth", "Toy-Model-GGUF", "main", "README.md", b"#".to_vec());
+        for q in ["Q2_K", "Q4_K_M", "Q6_K", "Q8_0"] {
+            hub.add_file("unsloth", "Toy-Model-GGUF", "main", &format!("toy-model-{q}.gguf"), tiny_qwen3_gguf());
+        }
+        let dir = store("supply-test-gguf-only-repo").root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        supplier.ensure("unsloth/Toy-Model-GGUF", &e, &mut |_, _, _| {}).unwrap();
+
+        // Exactly one file, under the store's own quant name -- so this and
+        // an explicit `unsloth/Toy-Model-GGUF-Q8_0` are one artifact, and the
+        // three quantizations nobody asked for were never fetched.
+        let repo_dir = dir.join("unsloth").join("Toy-Model-GGUF");
+        let mut ggufs: Vec<String> =
+            std::fs::read_dir(&repo_dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".gguf")).collect();
+        ggufs.sort();
+        assert_eq!(ggufs, ["Q8_0.gguf"], "one quantization, defaulted to the highest-fidelity one offered");
+
+        // ... and the fetched bytes are what got registered, read through the
+        // GGUF header rather than assumed from the filename.
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["toy-qwen-gguf".to_string()]);
     }

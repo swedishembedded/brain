@@ -110,10 +110,10 @@ and makes them servable, as an explicit up-front step rather than waiting for
 the auto-fetch that a first `infer`/serve request would trigger. It is the
 same operation, spelled out loud - one plan, one download, one finish step.
 
-The argument is either the canonical reference or the HuggingFace page URL;
-both name the same thing, including a `/tree/<branch>`, `/blob/...` or
-`/resolve/...` deep link, with or without a scheme, a `www.` host or a query
-string:
+The argument is the canonical reference or a HuggingFace URL, with or without
+a scheme, a `www.` host, a trailing slash, a query string or a fragment. A
+repo page and a `/tree/<revision>` branch view both name the whole repo, at
+the revision the URL names:
 
 ```bash
 brain pull Qwen/Qwen3-0.6B
@@ -124,6 +124,44 @@ brain pull https://huggingface.co/Qwen/Qwen3-0.6B/tree/main
 Anything that is not a model reference - a dataset or space URL, a link to
 another site, a name with no vendor - is refused by name rather than sent to
 the hub as a repo id. `brain fetch` is an accepted alias for the same verb.
+
+### Pulling one file
+
+A `/blob/<revision>/<path>` or `/resolve/<revision>/<path>` URL - the two
+spellings of a file's page, one from the address bar and one from the download
+button - pulls **exactly that one file**, whatever its extension and from
+whatever revision the URL names. Nothing is inferred, because the file is
+named. The command prints the path the file landed at, which is what a flag
+like `brain flux2 generate --text-encoder <path>` is then pointed at:
+
+```bash
+brain pull https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/flux-2-klein-9b-Q8_0.gguf
+```
+
+A URL that names neither the whole repo nor one file - a subdirectory view, a
+`/commits/` or `/discussions/` page, a `/blob/<rev>/` with no filename - is
+refused by name. Pulling the whole repo because a directory was named would be
+doing something adjacent to what was asked, which is worse than an error.
+
+### Pulling one quantization from a GGUF repo
+
+A `*-GGUF` repo publishes many quantizations of the *same* model - fifteen of
+them, over 100 GB in total, for `unsloth/FLUX.2-klein-9B-GGUF`. Exactly one is
+ever fetched. Name it with the reference grammar's own quantization suffix:
+
+```bash
+brain pull unsloth/FLUX.2-klein-9B-GGUF-Q4_K_M
+```
+
+Name none, and brain picks the highest-fidelity quantization the repo offers
+(`Q8_0` whenever it is published) **and prints the choice** along with how to
+ask for a different one. Asking for a quantization the repo does not publish
+fails with the list of the ones it does, rather than falling back to
+downloading a base checkpoint to quantize locally.
+
+Either spelling lands the file as `<QUANT>.gguf` in the repo's store
+directory, so pulling `<repo>-Q8_0` and pulling that same file by its URL are
+one artifact in one place, not two copies.
 
 Re-running a pull is cheap. Files already in the store are not fetched again,
 so an interrupted download is resumed by repeating the command, and a pull of

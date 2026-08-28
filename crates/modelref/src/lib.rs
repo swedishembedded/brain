@@ -419,12 +419,19 @@ impl Quant {
         !matches!(self, Quant::Q4_0 | Quant::Q4_1 | Quant::Q5_0 | Quant::Q5_1 | Quant::Q8_0)
     }
 
-    /// A rough fidelity ordering, highest first — for the monotonicity
-    /// assertion in the quantizer's correctness gate (`checkpoint::quant`'s
-    /// tests), NOT for choosing a quantization: `Q8_0 > Q6_K > Q5_K_M >
+    /// A rough fidelity ordering, highest first: `Q8_0 > Q6_K > Q5_K_M >
     /// Q5_K_S > Q4_K_M > Q4_K_S > Q3_K_L > Q3_K_M > Q3_K_S > Q2_K`. `Q4_0`/
     /// `Q4_1`/`Q5_0`/`Q5_1`/`Q8_K` are legacy/internal types with no fixed
-    /// place in this ladder and rank last (never chosen by the ladder logic).
+    /// place in this ladder and rank last, so nothing that walks the ladder
+    /// ever lands on one by accident.
+    ///
+    /// Two callers, both of which want exactly this order and neither of
+    /// which may define its own: the monotonicity assertion in the
+    /// quantizer's correctness gate (`checkpoint::quant`'s tests), and the
+    /// default choice a GGUF release repo needs when it publishes fifteen
+    /// interchangeable quantizations of one model and the user named none
+    /// (`modelstore::recipe`). Ranking last is what keeps the legacy types
+    /// out of that default while leaving them selectable by name.
     pub const fn fidelity_rank(self) -> u8 {
         match self {
             Quant::Q8_0 => 0,
