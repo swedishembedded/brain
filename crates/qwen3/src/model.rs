@@ -2164,11 +2164,39 @@ impl Qwen {
     /// `qwen -> qwenvl` dependency cycle, since `qwenvl` already depends on
     /// `qwen`).
     pub fn step_mrope(&self, token_id: u32, cos: &[f32], sin: &[f32]) -> Vec<f32> {
+        self.prefill_mrope(PrefillInput::Token(token_id), cos, sin, None);
+        self.gpu.read(&self.xn_final, self.cfg.d_model as usize)
+    }
+
+    /// One M-RoPE decode step that leaves its result ON THE DEVICE: the KV
+    /// cache is filled and `xn_final` holds the step's final-norm hidden
+    /// state, but nothing is read back and the cache position is advanced.
+    ///
+    /// [`Self::step_mrope`] and [`Self::step_embed_mrope`] are this plus the
+    /// `[d_model]` readback they promise, so there is one implementation of
+    /// the step and the readback is what differs. A caller that only wants the
+    /// cache filled (a multimodal PREFILL, where the prompt is mostly image
+    /// rows) or that applies the head on the device ([`Self::decode_logits`])
+    /// never looks at that vector, and paying a submit+fence+map round trip
+    /// per prompt token to produce it is the same pure waste
+    /// [`Self::prefill`]'s own doc describes - this is that entry point with
+    /// the M-RoPE table and DeepStack row `prefill` cannot carry.
+    ///
+    /// `deepstack_row`: see [`Self::decode_steps`].
+    pub fn prefill_mrope(&self, input: PrefillInput<'_>, cos: &[f32], sin: &[f32], deepstack_row: Option<u32>) {
         let pos = self.dec_pos.get();
+        let token = match input {
+            PrefillInput::Token(t) => Some(t),
+            PrefillInput::Embed(e) => {
+                assert_eq!(e.len(), self.cfg.d_model as usize, "prefill_mrope wants one d_model row");
+                // The embedding lands where EMBED would have written it.
+                self.gpu.write(&self.res[0], bytemuck::cast_slice(e));
+                None
+            }
+        };
         self.write_decode_mrope_table(cos, sin);
-        let hidden = self.decode_at(Some(token_id), pos, Some((&self.decode_mrope_cos, &self.decode_mrope_sin)), None);
+        self.decode_submit(token, pos, Some((&self.decode_mrope_cos, &self.decode_mrope_sin)), deepstack_row);
         self.dec_pos.set(pos + 1);
-        hidden
     }
 
     /// Write this step's 1-row M-RoPE table -- see [`Self::step_mrope`]'s doc.
@@ -2241,13 +2269,8 @@ impl Qwen {
     /// on a DeepStack-enabled checkpoint, `None` otherwise (every caller
     /// before this parameter existed, unchanged).
     pub fn step_embed_mrope(&self, embed: &[f32], cos: &[f32], sin: &[f32], deepstack_row: Option<u32>) -> Vec<f32> {
-        assert_eq!(embed.len(), self.cfg.d_model as usize, "step_embed_mrope wants one d_model row");
-        let pos = self.dec_pos.get();
-        self.gpu.write(&self.res[0], bytemuck::cast_slice(embed));
-        self.write_decode_mrope_table(cos, sin);
-        let hidden = self.decode_at(None, pos, Some((&self.decode_mrope_cos, &self.decode_mrope_sin)), deepstack_row);
-        self.dec_pos.set(pos + 1);
-        hidden
+        self.prefill_mrope(PrefillInput::Embed(embed), cos, sin, deepstack_row);
+        self.gpu.read(&self.xn_final, self.cfg.d_model as usize)
     }
 
     /// Record + run the incremental decode tape for one token at absolute `pos`.
