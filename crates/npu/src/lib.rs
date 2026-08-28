@@ -63,6 +63,10 @@ pub mod qwenvl_topology;
 
 // OpenVINO runtime seam (real on x86_64 linux/windows, stub elsewhere).
 pub mod openvino;
+// Measured (never assumed) NPU roofline: fp16/int8 throughput via a synthetic
+// MatMul + the free device_info() capability report. Builds on `openvino`
+// alone, so it compiles against both the real and stub backends unchanged.
+pub mod roofline;
 
 pub use calib::{calibrate, calibrate_from_weights, load_calib_images, RangeCollector};
 pub use codec_export::{
