@@ -163,9 +163,15 @@ Either spelling lands the file as `<QUANT>.gguf` in the repo's store
 directory, so pulling `<repo>-Q8_0` and pulling that same file by its URL are
 one artifact in one place, not two copies.
 
-Re-running a pull is cheap. Files already in the store are not fetched again,
-so an interrupted download is resumed by repeating the command, and a pull of
-a model that is already complete does no network I/O at all and says so.
+Re-running a pull is cheap for what already landed: a file already complete in
+the store is not fetched again, and a pull of a model that is already complete
+does no network I/O at all and says so.
+
+**Resume is per file, not per byte.** A transfer interrupted part-way through a
+file restarts *that file* from the beginning - the partial download is
+discarded, not continued. For a sharded checkpoint that costs one shard. For a
+GGUF repo, where the whole artifact is a single multi-gigabyte file, it costs
+the entire transfer, so prefer a connection you can leave alone.
 
 ### Progress
 

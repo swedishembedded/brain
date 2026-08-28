@@ -337,8 +337,10 @@ it prints):
 Progress goes to stdout: an in-place bar with throughput and ETA on a
 terminal, ten plain lines for the whole pull when piped.
 
-Re-running a pull is cheap: files already in the store are not fetched again,
-so an interrupted download is resumed by repeating the command.
+Re-running a pull is cheap for what already landed: a file already complete in
+the store is not fetched again. Resume is per FILE, not per byte - a transfer
+interrupted part-way through a file restarts that file from the beginning. For
+a single-file GGUF that is the whole transfer.
 
 --brain-data-dir DIR   brain's data root; models land in <DIR>/models.
                        Default ~/.local/share/brain. This is a GLOBAL option
@@ -687,10 +689,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// An interrupted pull is resumed by re-running it: what is already on
-    /// disk is skipped, and -- the part that matters for progress -- it is
-    /// excluded from the byte budget, so the bar measures what is LEFT rather
-    /// than jumping partway along instantly.
+    /// Re-running an interrupted pull skips the whole files already on disk,
+    /// and -- the part that matters for progress -- excludes them from the
+    /// byte budget, so the bar measures what is LEFT rather than jumping
+    /// partway along instantly. Whole files: a file that was only partly
+    /// transferred is not on disk at all (it is still a `.part`) and is
+    /// re-fetched from the start, so it counts in full here.
     #[test]
     fn a_resumed_pull_sizes_only_what_is_still_missing() {
         let dir = scratch("resume");

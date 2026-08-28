@@ -17,6 +17,16 @@ use sha2::{Digest, Sha256};
 /// than one fixed-size chunk regardless of file size (the same OOM invariant
 /// weight loading follows). `progress(got, total)` is called after each chunk;
 /// `total` is `None` when the caller does not know the expected size.
+///
+/// **No byte-level resume.** The `.part` is `File::create`d, so a retry after
+/// an interrupted transfer starts that file over rather than continuing it.
+/// Resume is per FILE, one level up (`crate::plan`'s already-on-disk skip).
+/// That was a fair trade while every large checkpoint arrived as a shard set:
+/// an interrupted pull lost at most one shard. A GGUF release repo breaks the
+/// assumption, since its whole artifact is ONE multi-gigabyte file and losing
+/// it means losing the entire transfer. Fixing it needs an HTTP `Range`
+/// request, which [`crate::Hub`] cannot express today -- its three methods are
+/// list, read-a-whole-small-file, and stream-to-disk.
 pub fn stream_to_file(
     mut reader: impl Read,
     dest: &Path,
