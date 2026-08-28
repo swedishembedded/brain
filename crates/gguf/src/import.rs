@@ -52,9 +52,76 @@ pub enum Mapped {
     /// `data[i * chunk .. (i + 1) * chunk]`. Splitting an inner axis would
     /// need strides and is deliberately not offered.
     Split { into: Vec<String> },
+    /// A 1:1 rename whose VALUES also need an elementwise transform, because
+    /// llama.cpp's converter stored something other than what the reference
+    /// checkpoint holds. See [`ElemOp`] - there is exactly one such tensor
+    /// family today and it is not optional.
+    Transformed { into: String, op: ElemOp },
     /// Not imported. The `&'static str` is the reason, counted and reported by
     /// [`ImportStats`] - "dropped" must always be a decision on the record.
     Dropped(&'static str),
+}
+
+/// An elementwise transform a GGUF tensor needs before it is brain's.
+///
+/// This exists because a rename is not always enough: `convert_hf_to_gguf.py`
+/// PRE-APPLIES some math so llama.cpp's own runtime does not have to, and a
+/// brain kernel that reimplements the reference formula then applies it a
+/// second time. The transform is invisible to every structural check - the
+/// name matches, the shape matches, the values are finite and plausible - so
+/// only a real end-to-end generation catches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElemOp {
+    /// `x -> ln(-x)`: recover an SSM/Gated-DeltaNet layer's `A_log` from the
+    /// `ssm_a` llama.cpp actually stores, which is `-exp(A_log)`
+    /// (`convert_hf_to_gguf.py` applies `-torch.exp(...)` on the way in, so
+    /// `ggml_ssm_scan` can use the value directly).
+    ///
+    /// brain's `gdn_decay_gate.wgsl` computes the reference formula
+    /// `g = -exp(A_log) * softplus(a + dt_bias)`, i.e. it wants the ORIGINAL
+    /// `A_log`. Feeding it llama.cpp's already-transformed value computes
+    /// `-exp(-exp(A_log))`, which for the real Qwen3.8-27B checkpoint turns a
+    /// per-head decay coefficient of 0.0038..0.34 into 0.71..1.00 - a decay
+    /// gate up to 260x too strong, which annihilates the recurrent state
+    /// within a step or two. Measured symptom on the real weights: the model
+    /// stops integrating context and echoes the last few prompt tokens in a
+    /// loop ("The capital city of France is" -> " France is France is ...").
+    ///
+    /// Every element must be strictly negative (it is minus an exponential);
+    /// anything else means the source is NOT llama.cpp's `ssm_a` and
+    /// [`ElemOp::apply`] refuses rather than emitting `NaN`.
+    LnNeg,
+}
+
+impl ElemOp {
+    /// Apply in place, or refuse with a named reason. Never produces a
+    /// non-finite value from finite input: a domain violation is an error,
+    /// not a `NaN` that surfaces 60 layers later.
+    pub fn apply(self, name: &str, data: &mut [f32]) -> Result<(), String> {
+        match self {
+            ElemOp::LnNeg => {
+                if let Some(bad) = data.iter().find(|v| **v >= 0.0 || !v.is_finite()) {
+                    return Err(format!(
+                        "{name}: ElemOp::LnNeg needs every element strictly negative (llama.cpp stores -exp(A_log)), found {bad}"
+                    ));
+                }
+                for v in data.iter_mut() {
+                    *v = (-*v).ln();
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// [`Self::apply`] to a copy - for a caller reading through a
+    /// `checkpoint::TensorSource` (a resident loading straight from the GGUF)
+    /// rather than driving this module's own import loop, so both routes use
+    /// ONE definition of the math.
+    pub fn applied(self, name: &str, data: &[f32]) -> Result<Vec<f32>, String> {
+        let mut out = data.to_vec();
+        self.apply(name, &mut out)?;
+        Ok(out)
+    }
 }
 
 impl Mapped {
@@ -217,10 +284,17 @@ fn run<S: Sink>(
         }
         // One source tensor's fp32 expansion is the driver's peak host cost -
         // and a dry run does not pay even that.
-        let data = if S::NEEDS_DATA { read(mg, name, label)? } else { Vec::new() };
+        let mut data = if S::NEEDS_DATA { read(mg, name, label)? } else { Vec::new() };
         let numel = if S::NEEDS_DATA { data.len() } else { numel_of(mg, name, label)? };
 
         match mapped {
+            Mapped::Transformed { into, op } => {
+                if S::NEEDS_DATA {
+                    op.apply(name, &mut data).map_err(|e| format!("{label} import: {e}"))?;
+                }
+                put(sink, &mut written, &into, numel, &data)?;
+                stats.written += 1;
+            }
             Mapped::Simple(brain_name) => {
                 put(sink, &mut written, &brain_name, numel, &data)?;
                 stats.written += 1;
@@ -376,6 +450,27 @@ mod tests {
     use super::*;
     use checkpoint::gguf::GgufValue;
     use checkpoint::gguf_write::{write, TensorOut};
+
+    /// [`ElemOp::LnNeg`] is the exact inverse of what `convert_hf_to_gguf.py`
+    /// applies (`-torch.exp`), and it REFUSES a domain violation rather than
+    /// emitting `NaN` - a `NaN` here would surface as a dead layer sixty
+    /// layers downstream, which is precisely the class of defect this op
+    /// exists to close.
+    #[test]
+    fn ln_neg_inverts_minus_exp_and_refuses_a_non_negative_input() {
+        let a_log = [-5.5625f32, -3.203125, -1.0859375, 0.0, 2.75];
+        let stored: Vec<f32> = a_log.iter().map(|x| -x.exp()).collect();
+        assert!(stored.iter().all(|v| *v < 0.0), "-exp(x) is always negative: {stored:?}");
+        let back = ElemOp::LnNeg.applied("ssm_a", &stored).expect("every element is negative");
+        for (got, want) in back.iter().zip(a_log) {
+            assert!((got - want).abs() < 1e-5, "ln(-(-exp(x))) must recover x: got {got}, want {want}");
+        }
+        // A tensor that was NOT stored as -exp(...) - the "this classifier is
+        // pointed at the wrong leaf" case - is an error, not a NaN.
+        let err = ElemOp::LnNeg.applied("ssm_a", &[0.1, -0.2]).unwrap_err();
+        assert!(err.contains("strictly negative"), "{err}");
+        assert!(ElemOp::LnNeg.applied("ssm_a", &[0.0]).is_err(), "zero has no logarithm and must be refused, not -inf");
+    }
 
     /// Two source tensors: a plain one and a 3-way stack, plus one to drop.
     fn synthetic(path: &str) {

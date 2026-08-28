@@ -61,7 +61,7 @@ use std::collections::HashSet;
 use checkpoint::gguf::{GgufValue, MmapGguf};
 use checkpoint::st::ModelCard;
 use checkpoint::weightio::StWriter;
-use gguf::import::{self, ImportStats, Leaf, Mapped};
+use gguf::import::{self, ElemOp, ImportStats, Leaf, Mapped};
 use gguf::leaf::Role;
 use gguf::ArchKv;
 
@@ -234,7 +234,13 @@ fn block_leaf_suffix(role: Role, ty: LayerType) -> Option<&'static str> {
 /// Classify one GGUF tensor for the MAIN decoder stack (layers
 /// `[0, cfg.n_layers)` plus the three top-level tensors). The MTP block is
 /// deliberately dropped here - see this module's doc.
-fn classify(name: &str, cfg: &Qwen35Config) -> Mapped {
+///
+/// `pub(crate)` because it is THE llama.cpp-name classifier for this
+/// architecture and `crate::int8_gguf_resident` builds its live
+/// `checkpoint::remap::RemapSource` fetch plan from it - a second, drifting
+/// copy of this table is exactly the defect the shared `gguf::leaf`
+/// vocabulary exists to prevent.
+pub(crate) fn classify(name: &str, cfg: &Qwen35Config) -> Mapped {
     let (l, leaf) = match import::split_name(name, cfg.n_layers) {
         Leaf::TokenEmbd => return Mapped::Simple("tok.weight".to_string()),
         Leaf::Output => return Mapped::Simple("lm_head.weight".to_string()),
@@ -244,9 +250,15 @@ fn classify(name: &str, cfg: &Qwen35Config) -> Mapped {
         Leaf::Block { layer, leaf } => (layer, leaf),
     };
     let ty = cfg.layer_types()[l]; // l < cfg.n_layers, guaranteed by split_name's own PastDepth cut
-    match gguf::leaf::role(leaf).and_then(|role| block_leaf_suffix(role, ty)) {
-        Some(suffix) => Mapped::Simple(format!("blocks.{l}.{suffix}")),
-        None => Mapped::Dropped(DROP_OTHER),
+    let Some(role) = gguf::leaf::role(leaf) else { return Mapped::Dropped(DROP_OTHER) };
+    let Some(suffix) = block_leaf_suffix(role, ty) else { return Mapped::Dropped(DROP_OTHER) };
+    let brain = format!("blocks.{l}.{suffix}");
+    match role {
+        // `ssm_a` is the ONE leaf in this architecture that is not a plain
+        // rename: llama.cpp's converter stores `-exp(A_log)`, brain's
+        // `gdn_decay_gate.wgsl` wants `A_log`. See `ElemOp::LnNeg`.
+        Role::SsmA => Mapped::Transformed { into: brain, op: ElemOp::LnNeg },
+        _ => Mapped::Simple(brain),
     }
 }
 
@@ -379,6 +391,15 @@ pub mod testing {
             let shape_us: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
             TensorOut { name: name.to_string(), shape: shape_us, ty: 0, data: (0..numel).flat_map(|i| ((i + 1) as f32 * 0.1).to_le_bytes()).collect() }
         };
+        // `ssm_a` is the ONE leaf llama.cpp stores transformed: it holds
+        // `-exp(A_log)`, so every element is strictly NEGATIVE. The fixture
+        // must be realistic about that or it cannot exercise
+        // `gguf::import::ElemOp::LnNeg` at all (and would be refused by it).
+        let neg_exp_t = |shape: Vec<u64>, name: &str| {
+            let numel: u64 = shape.iter().product();
+            let shape_us: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+            TensorOut { name: name.to_string(), shape: shape_us, ty: 0, data: (0..numel).flat_map(|i| (-((i + 1) as f32 * 0.1)).to_le_bytes()).collect() }
+        };
         let dense_mlp = |tensors: &mut Vec<TensorOut>, prefix: &str| {
             tensors.push(f32t(vec![ff, d], format!("{prefix}ffn_gate.weight").leak()));
             tensors.push(f32t(vec![ff, d], format!("{prefix}ffn_up.weight").leak()));
@@ -399,7 +420,7 @@ pub mod testing {
         tensors.push(f32t(vec![lin_vh, d], "blk.0.ssm_alpha.weight"));
         tensors.push(f32t(vec![lin_vh, d], "blk.0.ssm_beta.weight"));
         tensors.push(f32t(vec![2 * key_dim + value_dim, conv_k], "blk.0.ssm_conv1d.weight"));
-        tensors.push(f32t(vec![lin_vh], "blk.0.ssm_a"));
+        tensors.push(neg_exp_t(vec![lin_vh], "blk.0.ssm_a"));
         tensors.push(f32t(vec![lin_vh], "blk.0.ssm_dt.bias"));
         tensors.push(f32t(vec![lin_vd], "blk.0.ssm_norm.weight"));
         tensors.push(f32t(vec![d, value_dim], "blk.0.ssm_out.weight"));
@@ -530,6 +551,19 @@ mod tests {
         // exactly 0.1 in the fixture must read back as exactly 0.1, not 1.1.
         let ln1 = reader.tensor("blocks.0.ln1.weight").unwrap();
         assert!((ln1[0] - 0.1).abs() < 1e-6, "GGUF route must NOT apply the (1+w) fold, got {}", ln1[0]);
+
+        // ...but `ssm_a` IS transformed, and must be: llama.cpp stores
+        // `-exp(A_log)` and `gdn_decay_gate.wgsl` wants `A_log`. The fixture
+        // writes -0.1, -0.2, so the imported `A_log` must be ln(0.1), ln(0.2).
+        // Found on the REAL checkpoint, where importing it verbatim made the
+        // decay gate up to 260x too strong and the model stopped integrating
+        // context - see `gguf::import::ElemOp::LnNeg`.
+        let a_log = reader.tensor("blocks.0.linear_attn.A_log").expect("A_log must be imported");
+        for (i, v) in a_log.iter().enumerate() {
+            let want = (0.1 * (i + 1) as f32).ln();
+            assert!((v - want).abs() < 1e-5, "A_log[{i}] = {v}, expected ln(-ssm_a) = {want}");
+        }
+        assert!(a_log.iter().all(|v| v.is_finite()), "A_log must be finite");
 
         // The eh_proj column split: column [0,d) -> fc_e (all 0.03), column
         // [d,2d) -> fc_h (all 0.04) - the exact convention `crate::import::

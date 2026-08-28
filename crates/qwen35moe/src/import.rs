@@ -75,7 +75,7 @@
 //! | `ssm_alpha.weight` | `[2048,32]` | `[32,2048]` | `linear_attn.in_proj_a.weight` (`[num_v_heads,hidden]`=`[32,2048]`) - HF's math literally computes the decay from `a` |
 //! | `ssm_beta.weight` | `[2048,32]` | `[32,2048]` | `linear_attn.in_proj_b.weight` (same shape) - HF computes `beta=sigmoid(b)` |
 //! | `ssm_conv1d.weight` | `[4,8192]` | `[8192,4]` | `linear_attn.conv1d.weight` (`[conv_dim,kernel]`=`[8192,4]` - HF's own `nn.Conv1d` weight is `[conv_dim,1,4]`, squeezed; the reference code itself calls `.squeeze(1)` before use) |
-//! | `ssm_a` | `[32]` | `[32]` | `linear_attn.A_log` (`[num_v_heads]`) |
+//! | `ssm_a` | `[32]` | `[32]` | `linear_attn.A_log` (`[num_v_heads]`) - **values transformed**, `A_log = ln(-ssm_a)`: llama.cpp stores `-exp(A_log)`, see `gguf::import::ElemOp::LnNeg` |
 //! | `ssm_dt.bias` | `[32]` | `[32]` | `linear_attn.dt_bias` (`[num_v_heads]`) |
 //! | `ssm_norm.weight` | `[128]` | `[128]` | `linear_attn.norm.weight` (`[head_v_dim]`, the gated-RMSNorm weight) |
 //! | `ssm_out.weight` | `[4096,2048]` | `[2048,4096]` | `linear_attn.out_proj.weight` (`[hidden,value_dim]`) |
@@ -263,7 +263,11 @@ fn classify(name: &str, n_layers: u32, n_experts: u32) -> Mapped {
         Role::SsmAlpha => Mapped::Simple(p("linear_attn.in_proj_a.weight")),
         Role::SsmBeta => Mapped::Simple(p("linear_attn.in_proj_b.weight")),
         Role::SsmConv1d => Mapped::Simple(p("linear_attn.conv1d.weight")),
-        Role::SsmA => Mapped::Simple(p("linear_attn.A_log")),
+        // NOT a plain rename: llama.cpp's converter stores `-exp(A_log)` and
+        // `model::gdn`'s decay gate wants `A_log` - see `gguf::import::ElemOp::LnNeg`
+        // for the measured consequence of getting this wrong (the identical
+        // defect was found on `qwen35`'s own GGUF route, on real weights).
+        Role::SsmA => Mapped::Transformed { into: p("linear_attn.A_log"), op: gguf::import::ElemOp::LnNeg },
         Role::SsmDtBias => Mapped::Simple(p("linear_attn.dt_bias")),
         Role::SsmNorm => Mapped::Simple(p("linear_attn.norm.weight")),
         Role::SsmOut => Mapped::Simple(p("linear_attn.out_proj.weight")),
@@ -393,6 +397,15 @@ pub mod testing {
             let shape_us: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
             TensorOut { name: name.to_string(), shape: shape_us, ty: 0, data: (0..numel).flat_map(|i| ((i + 1) as f32 * 0.1).to_le_bytes()).collect() }
         };
+        // `ssm_a` holds `-exp(A_log)` in a llama.cpp GGUF, so every element is
+        // strictly negative - the fixture has to be realistic about that to
+        // exercise `gguf::import::ElemOp::LnNeg` (and would be refused by it
+        // otherwise).
+        let neg_exp_t = |shape: Vec<u64>, name: &str| {
+            let numel: u64 = shape.iter().product();
+            let shape_us: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+            TensorOut { name: name.to_string(), shape: shape_us, ty: 0, data: (0..numel).flat_map(|i| (-((i + 1) as f32 * 0.1)).to_le_bytes()).collect() }
+        };
 
         let mut tensors = vec![
             f32t(vec![vocab, d], "token_embd.weight"),
@@ -408,7 +421,7 @@ pub mod testing {
         tensors.push(f32t(vec![lin_vh, d], "blk.0.ssm_alpha.weight"));
         tensors.push(f32t(vec![lin_vh, d], "blk.0.ssm_beta.weight"));
         tensors.push(f32t(vec![2 * key_dim + value_dim, conv_k], "blk.0.ssm_conv1d.weight"));
-        tensors.push(f32t(vec![lin_vh], "blk.0.ssm_a"));
+        tensors.push(neg_exp_t(vec![lin_vh], "blk.0.ssm_a"));
         tensors.push(f32t(vec![lin_vh], "blk.0.ssm_dt.bias"));
         tensors.push(f32t(vec![lin_vd], "blk.0.ssm_norm.weight"));
         tensors.push(f32t(vec![d, value_dim], "blk.0.ssm_out.weight"));
