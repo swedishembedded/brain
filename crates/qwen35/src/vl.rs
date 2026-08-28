@@ -97,9 +97,9 @@ impl Qwen35Vl {
         // Vision tower -> merger -> visual tokens at the decoder width. No
         // DeepStack taps (empty `deepstack_indexes`, asserted in `new`).
         let enc = VisionEncoder::new(&self.vgpu, self.vcfg.clone(), &self.vweights);
-        let feats = enc.encode(gh, gw, pixels);
+        let feats = enc.encode(&self.vgpu, gh, gw, pixels);
         let merger = PatchMerger::new(&self.vgpu, &self.merger_weights, self.vcfg.hidden, self.merge, d_model, false);
-        let visual = merger.merge(&feats, n);
+        let visual = merger.merge(&self.vgpu, &feats, n);
         assert_eq!(visual.len(), (n_visual * d_model) as usize);
 
         // M-RoPE tables from the REAL 3-axis position ids for this stream

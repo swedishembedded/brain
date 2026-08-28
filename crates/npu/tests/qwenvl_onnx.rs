@@ -128,9 +128,9 @@ fn vision_head_matches_reference_on_cpu() {
     // reference (device) head: ViT encode -> main PatchMerger.
     let gpu = gpu_core::Gpu::new_cpu(vision_pipelines());
     let vit = VisionEncoder::new(&gpu, cfg.clone(), &enc_w);
-    let features = vit.encode(gh, gw, &pixels);
+    let features = vit.encode(&gpu, gh, gw, &pixels);
     let merger = PatchMerger::new(&gpu, &mrg_w, cfg.hidden, cfg.spatial_merge_size, cfg.out_hidden_size, false);
-    let reference = merger.merge(&features, gh * gw);
+    let reference = merger.merge(&gpu, &features, gh * gw);
     let mrows = (gh * gw / (cfg.spatial_merge_size * cfg.spatial_merge_size)) as usize;
     assert_eq!(reference.len(), mrows * cfg.out_hidden_size as usize);
 

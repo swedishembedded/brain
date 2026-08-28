@@ -26,10 +26,15 @@ use crate::mrope::{get_rope_index, mrope_tables};
 pub struct Qwen3Vl {
     vgpu: Gpu,
     vcfg: VisionConfig,
-    vweights: HashMap<String, Vec<f32>>,
-    merger_weights: HashMap<String, Vec<f32>>,
-    /// One postshuffle-norm merger weight set per DeepStack tap (empty = no DeepStack).
-    ds_merger_weights: Vec<HashMap<String, Vec<f32>>>,
+    /// The tower, built ONCE. It used to be assembled inside every forward
+    /// from host `Vec<f32>` weights, which re-uploaded the ViT and all four
+    /// mergers - about 1.7 GB - per image, and held that much host RAM for the
+    /// life of the model on top of the device copy. The cost is a fixed one
+    /// per image, so it dominated a small image entirely.
+    encoder: VisionEncoder,
+    merger: PatchMerger,
+    /// One postshuffle-norm merger per DeepStack tap (empty = no DeepStack).
+    ds_mergers: Vec<PatchMerger>,
     decoder: Qwen,
     merge: u32,
     image_token_id: u32,
@@ -147,17 +152,12 @@ impl Qwen3Vl {
         // On a CPU-only build `new_like` still lands on the CPU backend, so
         // placement follows the decoder rather than being asserted here.
         let vgpu = decoder.gpu().new_like(vision_pipelines());
-        Qwen3Vl {
-            vgpu,
-            vcfg,
-            vweights,
-            merger_weights,
-            ds_merger_weights,
-            decoder,
-            merge,
-            image_token_id,
-            mrope_section,
-        }
+        let d_model = decoder.cfg.d_model;
+        let encoder = VisionEncoder::new(&vgpu, vcfg.clone(), &vweights);
+        let merger = PatchMerger::new(&vgpu, &merger_weights, vcfg.hidden, merge, d_model, false);
+        let ds_mergers =
+            ds_merger_weights.iter().map(|mw| PatchMerger::new(&vgpu, mw, vcfg.hidden, merge, d_model, true)).collect();
+        Qwen3Vl { vgpu, vcfg, encoder, merger, ds_mergers, decoder, merge, image_token_id, mrope_section }
     }
 
     /// Assemble from already-loaded HF tensors (name → f32). Partitions them via
@@ -245,16 +245,13 @@ impl Qwen3Vl {
         let d_model = self.decoder.cfg.d_model;
 
         // Vision tower → visual tokens at the decoder width (+ DeepStack taps).
-        let enc = VisionEncoder::new(&self.vgpu, self.vcfg.clone(), &self.vweights);
-        let (feats, tap_feats) = enc.encode_with_taps(gh, gw, pixels, &self.vcfg.deepstack_indexes);
-        let merger = PatchMerger::new(&self.vgpu, &self.merger_weights, self.vcfg.hidden, self.merge, d_model, false);
-        let visual = merger.merge(&feats, n);
+        let (feats, tap_feats) = self.encoder.encode_with_taps(&self.vgpu, gh, gw, pixels, &self.vcfg.deepstack_indexes);
+        let visual = self.merger.merge(&self.vgpu, &feats, n);
         assert_eq!(visual.len(), (n_visual * d_model) as usize);
 
         // DeepStack: each tap → its own postshuffle merger → decoder level buffer.
-        for (level, (tap, mw)) in tap_feats.iter().zip(&self.ds_merger_weights).enumerate() {
-            let ds = PatchMerger::new(&self.vgpu, mw, self.vcfg.hidden, self.merge, d_model, true);
-            self.decoder.write_deepstack(level, &ds.merge(tap, n));
+        for (level, (tap, ds)) in tap_feats.iter().zip(&self.ds_mergers).enumerate() {
+            self.decoder.write_deepstack(level, &ds.merge(&self.vgpu, tap, n));
         }
 
         // M-RoPE tables from the 3-axis position ids for this stream.
@@ -343,17 +340,14 @@ impl Qwen3Vl {
 
         // Vision tower -> visual tokens (+ DeepStack taps), same as forward().
         let t_vision = Instant::now();
-        let enc = VisionEncoder::new(&self.vgpu, self.vcfg.clone(), &self.vweights);
-        let (feats, tap_feats) = enc.encode_with_taps(gh, gw, pixels, &self.vcfg.deepstack_indexes);
+        let (feats, tap_feats) = self.encoder.encode_with_taps(&self.vgpu, gh, gw, pixels, &self.vcfg.deepstack_indexes);
         st.vision_s = t_vision.elapsed().as_secs_f64();
 
         let t_merge = Instant::now();
-        let merger = PatchMerger::new(&self.vgpu, &self.merger_weights, self.vcfg.hidden, self.merge, d_model as u32, false);
-        let visual = merger.merge(&feats, n);
+        let visual = self.merger.merge(&self.vgpu, &feats, n);
         assert_eq!(visual.len(), (n_visual as usize) * d_model);
-        for (level, (tap, mw)) in tap_feats.iter().zip(&self.ds_merger_weights).enumerate() {
-            let ds = PatchMerger::new(&self.vgpu, mw, self.vcfg.hidden, self.merge, d_model as u32, true);
-            self.decoder.write_deepstack(level, &ds.merge(tap, n));
+        for (level, (tap, ds)) in tap_feats.iter().zip(&self.ds_mergers).enumerate() {
+            self.decoder.write_deepstack(level, &ds.merge(&self.vgpu, tap, n));
         }
         st.merge_s = t_merge.elapsed().as_secs_f64();
         st.visual_tokens = n_visual;

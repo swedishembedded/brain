@@ -478,8 +478,8 @@ fn encode_vision_mode(a: &[String]) {
     let n = gh * gw;
     let pixels = fill(0xC0FFEE, n as usize * pv, 0.5);
     let secs = report(&format!("encode-vision grid={gh}x{gw}"), reps, || {
-        let features = enc.encode(gh, gw, &pixels);
-        merger.merge(&features, n);
+        let features = enc.encode(&gpu, gh, gw, &pixels);
+        merger.merge(&gpu, &features, n);
     });
     println!("-> {:.0} patches/s", n as f64 / secs);
 }

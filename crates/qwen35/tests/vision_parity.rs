@@ -80,7 +80,7 @@ fn run(gpu: Gpu) {
 
     let enc = VisionEncoder::new(&gpu, vcfg.clone(), &golden.encoder_w);
     let tap_indices = [0u32, vcfg.depth - 1];
-    let (features, tap_feats) = enc.encode_with_taps(h, w, &golden.taps["patches"], &tap_indices);
+    let (features, tap_feats) = enc.encode_with_taps(&gpu, h, w, &golden.taps["patches"], &tap_indices);
 
     let mut table = Table::new(0.9999, 1e-3);
     table.check("block0", &tap_feats[0], &golden.taps["block0"]);
@@ -88,7 +88,7 @@ fn run(gpu: Gpu) {
     table.check("hidden (pre-merger)", &features, &golden.taps["hidden"]);
 
     let merger = PatchMerger::new(&gpu, &golden.merger_w, vcfg.hidden, vcfg.spatial_merge_size, vcfg.out_hidden_size, false);
-    let merged = merger.merge(&features, h * w);
+    let merged = merger.merge(&gpu, &features, h * w);
     table.check("merged (post-merger)", &merged, &golden.taps["merged"]);
 
     table.print();

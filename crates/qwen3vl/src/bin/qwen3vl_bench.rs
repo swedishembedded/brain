@@ -203,18 +203,18 @@ fn bench_vision(label: &str, gpu: &Gpu, v: &VisionConfig, gh: u32, gw: u32, reps
     println!("  weight upload + pipeline build: {:.1} ms", upload * 1e3);
 
     // Warm-up never enters the statistics.
-    let (mut feats, _) = enc.encode_with_taps(gh, gw, &pixels, &v.deepstack_indexes);
-    let _ = merger.merge(&feats, n);
+    let (mut feats, _) = enc.encode_with_taps(gpu, gh, gw, &pixels, &v.deepstack_indexes);
+    let _ = merger.merge(gpu, &feats, n);
 
     let mut best_vit = f64::INFINITY;
     let mut best_mrg = f64::INFINITY;
     for _ in 0..reps {
         let t = Instant::now();
-        let (f, _) = enc.encode_with_taps(gh, gw, &pixels, &v.deepstack_indexes);
+        let (f, _) = enc.encode_with_taps(gpu, gh, gw, &pixels, &v.deepstack_indexes);
         best_vit = best_vit.min(t.elapsed().as_secs_f64());
         feats = f;
         let t = Instant::now();
-        let out = merger.merge(&feats, n);
+        let out = merger.merge(gpu, &feats, n);
         best_mrg = best_mrg.min(t.elapsed().as_secs_f64());
         assert!(out.iter().all(|x| x.is_finite()), "merger produced non-finite output");
     }
@@ -224,8 +224,8 @@ fn bench_vision(label: &str, gpu: &Gpu, v: &VisionConfig, gh: u32, gw: u32, reps
 
     if gpu.set_kernel_timing(true) {
         gpu.reset_kernel_times();
-        let (f, _) = enc.encode_with_taps(gh, gw, &pixels, &v.deepstack_indexes);
-        let _ = merger.merge(&f, n);
+        let (f, _) = enc.encode_with_taps(gpu, gh, gw, &pixels, &v.deepstack_indexes);
+        let _ = merger.merge(gpu, &f, n);
         let mut rows = gpu.kernel_times().unwrap_or_default();
         rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         print_kernel_table(&format!("  {label} kernels"), &rows);

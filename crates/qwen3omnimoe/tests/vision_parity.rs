@@ -11,7 +11,7 @@
 //! `thinker.visual.*` (shard 1 of 15, same shard the audio tower needs) is
 //! not on disk.
 //!
-//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=[path/to/Qwen3-Omni-30B-A3B-Instruct] \
 //!         cargo test --release -p brain-omni --test vision_parity -- --ignored --nocapture`
 
 use std::collections::HashMap;
@@ -95,7 +95,7 @@ fn matches_the_real_vision_tower() {
     let (t, h, w) = (grid[0] as i32, grid[1] as u32, grid[2] as u32);
     assert_eq!(t, 1, "this test covers the single-frame (image) case; video (t>1) is a separate, not-yet-covered path");
 
-    let (encoder_out, tap_feats) = enc.encode_with_taps(h, w, &patches, &cfg.deepstack_indexes);
+    let (encoder_out, tap_feats) = enc.encode_with_taps(&gpu, h, w, &patches, &cfg.deepstack_indexes);
 
     // The golden's "hidden" is `Qwen3OmniMoeVisionEncoder.forward`'s
     // `last_hidden_state` -- the RAW per-patch ViT output, BEFORE the
@@ -116,7 +116,7 @@ fn matches_the_real_vision_tower() {
     // real-weight shape/finiteness check, since its weights are already
     // streamed and count-checked.
     let main_merger = PatchMerger::new(&gpu, &main_merger_w, cfg.hidden, cfg.spatial_merge_size, cfg.out_hidden_size, false);
-    let merged = main_merger.merge(&encoder_out, h * w);
+    let merged = main_merger.merge(&gpu, &encoder_out, h * w);
     assert_eq!(merged.len(), (h * w / cfg.merge_unit() * cfg.out_hidden_size) as usize);
     assert!(merged.iter().all(|v| v.is_finite()), "primary merger produced non-finite output on real weights");
 
@@ -129,7 +129,7 @@ fn matches_the_real_vision_tower() {
         // and merge must match the tap's actual (pre-merge, hidden-width)
         // layout, not the already-merged output width.
         let merger = PatchMerger::new(&gpu, &deepstack_w[i], cfg.hidden, cfg.spatial_merge_size, cfg.out_hidden_size, true);
-        let got_tap = merger.merge(tap, h * w);
+        let got_tap = merger.merge(&gpu, tap, h * w);
         let want_tap = golden.tensor_f32(&format!("deepstack{i}")).unwrap_or_else(|| panic!("golden deepstack{i}"));
         let (cos_t, max_abs_t) = cosine_max_abs(&got_tap, &want_tap);
         println!("vision deepstack{i}: cosine={cos_t:.6} max_abs={max_abs_t:.6}");

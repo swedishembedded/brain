@@ -191,20 +191,26 @@ pub const BLOCK_LEAVES: &[&str] = &[
 ];
 
 /// Qwen3-VL ViT encoder over a `Gpu` preloaded with [`vision_pipelines`].
-pub struct VisionEncoder<'g> {
-    gpu: &'g Gpu,
+///
+/// Owns its DEVICE weights and takes the handle as an argument rather than
+/// borrowing it, so a model can hold one across requests: a struct cannot own
+/// both a device and something borrowing it, and the borrowing shape forced
+/// every caller to rebuild the encoder - and therefore re-upload every weight -
+/// inside each forward. That is the same fix `moondream3` made for the same
+/// reason, and the shape `sam1::SamEncoder`/`sam2::Sam2` already use.
+pub struct VisionEncoder {
     cfg: VisionConfig,
     w: HashMap<String, DeviceBuffer>,
     /// Host copy of the learned pos-embed table `[num_position_embeddings, hidden]`.
     pos_table: Vec<f32>,
 }
 
-impl<'g> VisionEncoder<'g> {
+impl VisionEncoder {
     /// Build from host weights. Required keys: `patch_embed.weight` `[hidden,
     /// patch_vec]`, `patch_embed.bias` `[hidden]`, `pos_embed` `[num_pos, hidden]`,
     /// and per block `blocks.{b}.<leaf>` for every `BLOCK_LEAVES`. (No post-block
     /// norm - the PatchMerger's LayerNorm is the final norm, matching HF.)
-    pub fn new(gpu: &'g Gpu, cfg: VisionConfig, weights: &HashMap<String, Vec<f32>>) -> VisionEncoder<'g> {
+    pub fn new(gpu: &Gpu, cfg: VisionConfig, weights: &HashMap<String, Vec<f32>>) -> VisionEncoder {
         let mut w = HashMap::new();
         for (name, data) in weights {
             if name == "pos_embed" {
@@ -213,7 +219,7 @@ impl<'g> VisionEncoder<'g> {
             w.insert(name.clone(), gpu.storage_init(name, data));
         }
         let pos_table = weights["pos_embed"].clone();
-        VisionEncoder { gpu, cfg, w, pos_table }
+        VisionEncoder { cfg, w, pos_table }
     }
 
     fn wb(&self, name: &str) -> &DeviceBuffer {
@@ -242,16 +248,16 @@ impl<'g> VisionEncoder<'g> {
     /// Encode one image of `grid_h × grid_w` patches (`t = 1`). `pixels` is the
     /// host-packed `[N, patch_vec]` patch tensor in merge-block order. Returns the
     /// `[N, hidden]` patch features (post final LayerNorm).
-    pub fn encode(&self, grid_h: u32, grid_w: u32, pixels: &[f32]) -> Vec<f32> {
-        self.encode_with_taps(grid_h, grid_w, pixels, &[]).0
+    pub fn encode(&self, gpu: &Gpu, grid_h: u32, grid_w: u32, pixels: &[f32]) -> Vec<f32> {
+        self.encode_with_taps(gpu, grid_h, grid_w, pixels, &[]).0
     }
 
     /// Like [`Self::encode`], but also snapshot the output of each block whose
     /// index is in `taps` (DeepStack tap points, e.g. `[5, 11, 17]`). Returns the
     /// final `[N, hidden]` features and one `[N, hidden]` snapshot per tap (in the
     /// order given), for the DeepStack mergers.
-    pub fn encode_with_taps(&self, grid_h: u32, grid_w: u32, pixels: &[f32], taps: &[u32]) -> (Vec<f32>, Vec<Vec<f32>>) {
-        let g = self.gpu;
+    pub fn encode_with_taps(&self, gpu: &Gpu, grid_h: u32, grid_w: u32, pixels: &[f32], taps: &[u32]) -> (Vec<f32>, Vec<Vec<f32>>) {
+        let g = gpu;
         let ids = vit_ids();
         let c = self.cfg.hidden;
         let n = grid_h * grid_w;
@@ -348,8 +354,8 @@ impl<'g> VisionEncoder<'g> {
 
     /// Training-mode forward (per-block [`VitBlockCache`] for the backward). No
     /// post-LN - the last block's output is the feature map (matching `encode`).
-    pub fn forward_train(&self, grid_h: u32, grid_w: u32, pixels: &[f32]) -> QwenVitTrain {
-        let g = self.gpu;
+    pub fn forward_train(&self, gpu: &Gpu, grid_h: u32, grid_w: u32, pixels: &[f32]) -> QwenVitTrain {
+        let g = gpu;
         let ids = vit_ids();
         let kb = vit_bwd_ids();
         let (c, pv) = (self.cfg.hidden, self.cfg.patch_vec_dim());
@@ -385,8 +391,8 @@ impl<'g> VisionEncoder<'g> {
     /// ViT backward from the feature-map grad `d_out` (`[N, hidden]`): fill `gr` and
     /// return the input-patch grad `[N, patch_vec]`. No post-LN; blocks in reverse
     /// (`vit_block_bwd`, 2-D RoPE) → patch-embed + pos-embed (bilinear-transpose).
-    pub fn backward(&self, tr: &QwenVitTrain, d_out: &DeviceBuffer, gr: &QwenVitGrads) -> Vec<f32> {
-        let g = self.gpu;
+    pub fn backward(&self, gpu: &Gpu, tr: &QwenVitTrain, d_out: &DeviceBuffer, gr: &QwenVitGrads) -> Vec<f32> {
+        let g = gpu;
         let ids = vit_ids();
         let kb = vit_bwd_ids();
         let (c, pv) = (self.cfg.hidden, self.cfg.patch_vec_dim());
@@ -523,8 +529,7 @@ impl QwenVitGrads {
 /// because patches arrive in spatial-merge-block order. Required weight keys:
 /// `ln.weight`/`ln.bias`, `fc1.weight` `[merged, merged]`/`fc1.bias`,
 /// `fc2.weight` `[out_dim, merged]`/`fc2.bias`, where `merged = in_dim·merge²`.
-pub struct PatchMerger<'g> {
-    gpu: &'g Gpu,
+pub struct PatchMerger {
     w: HashMap<String, DeviceBuffer>,
     in_dim: u32,
     merge: u32,
@@ -534,15 +539,15 @@ pub struct PatchMerger<'g> {
     postshuffle_norm: bool,
 }
 
-impl<'g> PatchMerger<'g> {
+impl PatchMerger {
     pub fn new(
-        gpu: &'g Gpu,
+        gpu: &Gpu,
         weights: &HashMap<String, Vec<f32>>,
         in_dim: u32,
         merge: u32,
         out_dim: u32,
         postshuffle_norm: bool,
-    ) -> PatchMerger<'g> {
+    ) -> PatchMerger {
         // The LayerNorm width differs between the two merger kinds, and the
         // kernel takes it from `Params`, not from the buffer - so a main
         // merger's `[in_dim]` norm handed to a DeepStack merger reads
@@ -558,7 +563,7 @@ impl<'g> PatchMerger<'g> {
             assert_eq!(got, want as usize, "merger weight {name}: expected {want} elements for a {}postshuffle merger of in_dim {in_dim} merge {merge} out_dim {out_dim}, got {got}", if postshuffle_norm { "" } else { "non-" });
         }
         let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
-        PatchMerger { gpu, w, in_dim, merge, out_dim, postshuffle_norm }
+        PatchMerger { w, in_dim, merge, out_dim, postshuffle_norm }
     }
 
     fn wb(&self, name: &str) -> &DeviceBuffer {
@@ -567,8 +572,8 @@ impl<'g> PatchMerger<'g> {
 
     /// Merge `x` `[n, in_dim]` (patch features, merge-block order) into
     /// `[n/merge², out_dim]` visual tokens.
-    pub fn merge(&self, x: &[f32], n: u32) -> Vec<f32> {
-        let g = self.gpu;
+    pub fn merge(&self, gpu: &Gpu, x: &[f32], n: u32) -> Vec<f32> {
+        let g = gpu;
         let m2 = self.merge * self.merge;
         assert!(n.is_multiple_of(m2), "n must be a multiple of merge²");
         let mrows = n / m2;
@@ -677,17 +682,17 @@ mod tests {
         let nn = n * c;
 
         let enc = VisionEncoder::new(&gpu, cfg.clone(), &w);
-        let tr = enc.forward_train(gh, gw, &pixels);
+        let tr = enc.forward_train(&gpu, gh, gw, &pixels);
         let d_out = gpu.storage_init("dout", &vec![1.0f32; nn]);
         let gr = QwenVitGrads::new(&gpu, &cfg, cfg.num_position_embeddings);
-        let d_pix = enc.backward(&tr, &d_out, &gr);
+        let d_pix = enc.backward(&gpu, &tr, &d_out, &gr);
         let g_pe = gpu.read(&gr.patch_embed_w, c * pv);
         let g_fc1 = gpu.read(&gr.blocks[0].fc1_w, (cfg.intermediate * cfg.hidden) as usize);
         let g_pos = gpu.read(&gr.pos_embed, (cfg.num_position_embeddings * cfg.hidden) as usize);
 
         let loss = |wm: &HashMap<String, Vec<f32>>, px: &[f32]| -> f32 {
             let e = VisionEncoder::new(&gpu, cfg.clone(), wm);
-            gpu.read(&e.forward_train(gh, gw, px).x_last, nn).iter().sum::<f32>()
+            gpu.read(&e.forward_train(&gpu, gh, gw, px).x_last, nn).iter().sum::<f32>()
         };
         let eps = 1e-3f32;
         let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
@@ -727,7 +732,7 @@ mod tests {
         let pixels: Vec<f32> = (0..n * pv).map(|_| rng.next_f32() - 0.5).collect();
 
         // Tap block 0 (its output must differ from the final post-norm features).
-        let (features, taps) = enc.encode_with_taps(gh, gw, &pixels, &[0]);
+        let (features, taps) = enc.encode_with_taps(&gpu, gh, gw, &pixels, &[0]);
         assert_eq!(taps.len(), 1);
         assert_eq!(taps[0].len(), n * cfg.hidden as usize);
         assert!(taps[0].iter().all(|v| v.is_finite()) && taps[0].iter().any(|&v| v.abs() > 1e-6));
@@ -737,7 +742,7 @@ mod tests {
         let (in_dim, merge, out_dim) = (cfg.hidden, cfg.spatial_merge_size, cfg.out_hidden_size);
         let mw = merger_weights(in_dim, merge, out_dim, true, 8);
         let ds = PatchMerger::new(&gpu, &mw, in_dim, merge, out_dim, true);
-        let embeds = ds.merge(&taps[0], gh * gw);
+        let embeds = ds.merge(&gpu, &taps[0], gh * gw);
         assert_eq!(embeds.len(), (gh * gw / (merge * merge) * out_dim) as usize);
         assert!(embeds.iter().all(|v| v.is_finite()));
     }
@@ -751,7 +756,7 @@ mod tests {
         for postshuffle in [false, true] {
             let w = merger_weights(in_dim, merge, out_dim, postshuffle, 5);
             let m = PatchMerger::new(&gpu, &w, in_dim, merge, out_dim, postshuffle);
-            let out = m.merge(&x, n);
+            let out = m.merge(&gpu, &x, n);
             assert_eq!(out.len(), (n / (merge * merge) * out_dim) as usize); // 2×10
             assert!(out.iter().all(|v| v.is_finite()));
             assert!(out.iter().any(|&v| v.abs() > 1e-6));
@@ -769,7 +774,7 @@ mod tests {
         let pv = cfg.patch_vec_dim() as usize;
         let mut rng = Rng::new(99);
         let pixels: Vec<f32> = (0..n * pv).map(|_| rng.next_f32() - 0.5).collect();
-        let out = enc.encode(gh, gw, &pixels);
+        let out = enc.encode(&gpu, gh, gw, &pixels);
         assert_eq!(out.len(), n * cfg.hidden as usize);
         assert!(out.iter().all(|v| v.is_finite()), "output must be finite");
         assert!(out.iter().any(|&v| v.abs() > 1e-6), "output must not be all zero");

@@ -242,9 +242,9 @@ pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h
 
     let gpu_local = gpu.new_like(vision_pipelines());
     let enc = VisionEncoder::new(&gpu_local, cfg.clone(), &encoder_w);
-    let encoder_out = enc.encode(gh, gw, &patches);
+    let encoder_out = enc.encode(&gpu_local, gh, gw, &patches);
     let merger = PatchMerger::new(&gpu_local, &main_merger_w, cfg.hidden, cfg.spatial_merge_size, cfg.out_hidden_size, false);
-    let embeds = merger.merge(&encoder_out, gh * gw);
+    let embeds = merger.merge(&gpu_local, &encoder_out, gh * gw);
 
     let merge = cfg.spatial_merge_size;
     let n_rows = image_token_count(hp, wp, cfg.patch_size, merge);
@@ -313,8 +313,8 @@ pub fn encode_video_frames(reader: &WeightReader, gpu: &Gpu, frames: &[(Vec<f32>
     for g in 0..n_groups {
         let group: Vec<&[f32]> = chw_frames[(g * temporal) as usize..((g + 1) * temporal) as usize].iter().map(|f| f.as_slice()).collect();
         let patches = pack_patches_temporal(&group, 3, hp, wp, cfg.patch_size, merge, temporal);
-        let encoder_out = enc.encode(gh, gw, &patches);
-        embeds.extend(merger.merge(&encoder_out, gh * gw));
+        let encoder_out = enc.encode(&gpu_local, gh, gw, &patches);
+        embeds.extend(merger.merge(&gpu_local, &encoder_out, gh * gw));
     }
 
     Ok(ImageSplice { embeds, n_rows: n_groups * n_rows_per_group, grid: (n_groups, gh / merge, gw / merge) })

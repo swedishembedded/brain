@@ -122,13 +122,13 @@ fn pixels(v: &VisionConfig) -> Vec<f32> {
 /// The tower + main merger, end to end, on `gpu`.
 fn tower(gpu: &Gpu, v: &VisionConfig, vw: &HashMap<String, Vec<f32>>) -> Vec<f32> {
     let enc = VisionEncoder::new(gpu, v.clone(), vw);
-    let (feats, taps) = enc.encode_with_taps(GRID, GRID, &pixels(v), &v.deepstack_indexes);
+    let (feats, taps) = enc.encode_with_taps(gpu, GRID, GRID, &pixels(v), &v.deepstack_indexes);
     assert_eq!(taps.len(), 1, "the DeepStack tap must actually be taken");
     let merger = PatchMerger::new(gpu, &merger_weights(v, 5, false), v.hidden, v.spatial_merge_size, v.out_hidden_size, false);
-    let mut out = merger.merge(&feats, GRID * GRID);
+    let mut out = merger.merge(gpu, &feats, GRID * GRID);
     // Fold the tap in so a change confined to it cannot pass unnoticed.
     let ds = PatchMerger::new(gpu, &merger_weights(v, 9, true), v.hidden, v.spatial_merge_size, v.out_hidden_size, true);
-    out.extend(ds.merge(&taps[0], GRID * GRID));
+    out.extend(ds.merge(gpu, &taps[0], GRID * GRID));
     out
 }
 
