@@ -165,6 +165,53 @@ impl VitScratch {
     }
 }
 
+/// One large forward linear of a ViT block, `out = x · Wᵀ`.
+///
+/// `matmul_rows` (8 output rows per thread) is the portable reference every
+/// model here registers. A model that ALSO registers `matmul_reg3` gets the
+/// 128x128 register-tiled kernel once the output is at least one whole tile in
+/// both dimensions - resolved BY NAME off the handle, the same opt-in
+/// [`crate::block::LayerNormIds::resolve_fwd`] uses, so a model adopts this by
+/// adding one row to its own PIPELINES instead of every `VitKernelIds` literal
+/// in the workspace growing a field.
+///
+/// **Bit-identical on a GPU**, and numerically equal on the CPU JIT - a real
+/// distinction, not a hedge. On a GPU `matmul_reg3` tiles the OUTPUT, never
+/// `k`: each thread still contracts the whole `k` axis in order into its own
+/// accumulator, so this is a different memory schedule for the same sum.
+/// (`matmul_reg3_splitk` WOULD reassociate, which is why it is not what this
+/// resolves.) On `backend-cpu` the two names are two IMPLEMENTATIONS: every
+/// `matmul*_reg*` name routes to the native AVX2 GEMM and `matmul_rows` has no
+/// native path at all, so the swap moves the linears off Cranelift-compiled
+/// WGSL onto the AVX2 kernel - a large win there too, but a different
+/// summation order. A model adopting this re-certifies its own parity;
+/// `crates/qwen3vl/tests/vision_tower_parity.rs` is what that looks like.
+///
+/// The tile threshold is a floor, not a swept crossover: one full 128x128 tile
+/// in each dimension is the point below which the tiled kernel is provably
+/// paying for empty lanes, so a small tower (a test config, a tiny ViT) keeps
+/// the reference and cannot regress. Every real vision tower is far above it.
+///
+fn gemm_step(
+    g: &Gpu,
+    k: &VitKernelIds,
+    reg: Option<usize>,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    out: &DeviceBuffer,
+    m: u32,
+    kdim: u32,
+    n: u32,
+) -> Step {
+    const TILE: u32 = 128;
+    match reg {
+        Some(i) if m >= TILE && n >= TILE => {
+            g.step(i, &[x, w, out], &[m, kdim, n], m.div_ceil(TILE) * n.div_ceil(TILE) * 256)
+        }
+        _ => g.step(k.matmul_rows, &[x, w, out], &[m, kdim, n], m.div_ceil(8) * n),
+    }
+}
+
 /// Largest query-chunk size whose `[heads, chunk, max_span]` f32 score slab
 /// fits in `budget_bytes` (min 64 rows so tiny budgets still work).
 pub fn attn_chunk_for(sh: &VitShape, max_span: u32, budget_bytes: u64) -> u32 {
@@ -315,12 +362,14 @@ pub fn vit_block_fwd(
     // The coalesced workgroup-per-row LayerNorm where the model registered
     // it (2.3-9.1x on a P40); reference otherwise. See `block::LayerNormIds`.
     let ln = crate::block::LayerNormIds::resolve_fwd(g, k.layernorm);
+    // The register-tiled GEMM where this model registered it - see `gemm_step`.
+    let reg = g.kernel_index("matmul_reg3");
     let hd = sh.head_dim();
     let stride = 3 * c;
 
     // ---- attention half ----
     steps.push(crate::block::layernorm_fwd(g, &ln, x, w.norm1_w, w.norm1_b, &scr.ln, c, rows, sh.eps));
-    steps.push(g.step(k.matmul_rows, &[&scr.ln, w.qkv_w, &scr.qkv], &[rows, c, stride], rows.div_ceil(8) * stride));
+    steps.push(gemm_step(g, k, reg, &scr.ln, w.qkv_w, &scr.qkv, rows, c, stride));
     steps.push(g.step(k.bias_add, &[&scr.qkv, w.qkv_b], &[rows, stride], rows * stride));
     if let Some(qk) = &w.qk_norm {
         steps.push(g.step(k.ln_head, &[&scr.qkv, qk.q_w, qk.q_b], &[rows, sh.heads, hd, stride, 0, f(sh.eps)], rows * sh.heads));
@@ -332,7 +381,7 @@ pub fn vit_block_fwd(
         steps.push(g.step(k.rope2d, &[&scr.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, c, r.tmod, f(1.0)], rows * sh.heads * half));
     }
     chunked_attn_fwd(g, k, sh, &scr.qkv, &scr.ctx, &scr.scores, &scr.probs, &scr.kt, spans, chunk, steps);
-    steps.push(g.step(k.matmul_rows, &[&scr.ctx, w.proj_w, &scr.ln], &[rows, c, c], rows.div_ceil(8) * c));
+    steps.push(gemm_step(g, k, reg, &scr.ctx, w.proj_w, &scr.ln, rows, c, c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.proj_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls1) = w.ls1 {
         steps.push(g.step(k.scale_chan, &[&scr.ln, ls1, &scr.ctx], &[rows * c, c, 1], rows * c));
@@ -344,10 +393,10 @@ pub fn vit_block_fwd(
 
     // ---- MLP half ----
     steps.push(crate::block::layernorm_fwd(g, &ln, &scr.res, w.norm2_w, w.norm2_b, &scr.ln, c, rows, sh.eps));
-    steps.push(g.step(k.matmul_rows, &[&scr.ln, w.fc1_w, &scr.h], &[rows, c, sh.mlp], rows.div_ceil(8) * sh.mlp));
+    steps.push(gemm_step(g, k, reg, &scr.ln, w.fc1_w, &scr.h, rows, c, sh.mlp));
     steps.push(g.step(k.bias_add, &[&scr.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.mlp_act, &[&scr.h, &scr.h2], &[rows * sh.mlp], rows * sh.mlp));
-    steps.push(g.step(k.matmul_rows, &[&scr.h2, w.fc2_w, &scr.ln], &[rows, sh.mlp, c], rows.div_ceil(8) * c));
+    steps.push(gemm_step(g, k, reg, &scr.h2, w.fc2_w, &scr.ln, rows, sh.mlp, c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.fc2_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls2) = w.ls2 {
         steps.push(g.step(k.scale_chan, &[&scr.ln, ls2, &scr.ctx], &[rows * c, c, 1], rows * c));
