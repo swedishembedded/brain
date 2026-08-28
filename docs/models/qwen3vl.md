@@ -100,6 +100,36 @@ qwen3vl_bench caption --image photo.jpg    # the real checkpoint, per stage, wit
 reports each stage against the machine's own measured roofline plus the
 weight-bandwidth ceiling a batch-1 decode cannot beat.
 
+## The int8 decoder tier
+
+`--precision int8` (or the `precision` action parameter) builds the decoder's
+per-layer linears as packed int8 instead of fp32. The vision tower and the LM
+head stay fp32. Because captioning is weight-bandwidth bound, reading a
+quarter of the weight bytes per token is a large speed-up.
+
+**It is lossy, it is never the default, and it should not be chosen from a
+speed number alone.** Quantization perturbs the decode hidden state enough to
+flip a greedy argmax, and one flipped token rewrites the rest of the caption.
+In practice int8 and fp32 captions of the same photograph usually differ.
+Many differences are cosmetic - the same scene described in a different
+order, or as prose instead of a list - but some are not: the two tiers can
+name a different object, or a different number of them, in the same part of
+the picture. If the captions are training data, that is the decision, not the
+speed.
+
+```bash
+qwen3vl_bench compare --dir <dir>     # both tiers, side by side, with the divergence
+```
+
+That mode captions the same images at both tiers and prints both texts in
+full alongside the time and a word-overlap figure. Read the captions: a
+similarity score cannot tell you whether a difference is cosmetic or
+substantive, and that is the whole question.
+
+Every load states the tier that ACTUALLY ran. A device that cannot serve a
+packed int8 dot has the request promoted back to fp32, and that is reported
+as a warning rather than passing silently.
+
 ## Hardware and limits
 
 No D-Bus/HTTP serving adapter yet - CLI only, one request at a time, fp32,
@@ -108,5 +138,6 @@ command yet.
 
 Prefill runs one token at a time, so its cost is linear in the prompt and
 close to the card's memory bandwidth. There is no batched prefill and no
-int8 decoder tier for this model yet; both are recorded, with measured
-numbers, in `.agents/roadmap/vlm.md`.
+batching across images, so a folder is captioned one photograph at a time;
+both are recorded, with measured numbers and the memory arithmetic that
+bounds them, in `.agents/roadmap/vlm.md`.

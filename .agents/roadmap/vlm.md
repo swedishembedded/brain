@@ -358,11 +358,7 @@ bounds a batch-1 step at 17.8 tok/s on this card, so a 1580-token prompt
 prefilled one token at a time cannot beat about 89 s however good the
 kernels are. Only two things move it:
 
-- **INT8 decoder weights.** The ceiling goes to 71.3 tok/s, so prefill would
-  be about 28 s and the whole image about 50 s. `Qwen::new_shard_dt_decode`
-  already takes a `Dtype` and the int8 GEMV kernels are already registered
-  on the decode path, so the code change is small. It is LOSSY, so it must
-  be opt-in and gated separately, never folded into a parity claim.
+- **INT8 decoder weights.** Done, opt-in, measured - see the next section.
 - **Batched prefill** - one weight sweep per N positions instead of per
   token, worth roughly an order of magnitude on the dominant stage. The
   decode tape is m=1 by construction (its activation buffers are sized for
@@ -395,7 +391,125 @@ This is deliberately NOT a default change. Fewer visual tokens is less of
 the image, and how much detail a caption needs is the caller's judgement,
 not the engine's - so it stays a flag with a published cost curve.
 
-### Doubt the meter first: three instrument bugs in one pass
+### The int8 tier: what it costs in time, and what it costs in captions
+
+`--precision int8` on `brain label images`, `precision` on the served action.
+Opt-in, never a default, and gated in its own file
+(`crates/qwen3vl/tests/int8_tier.rs`) which asserts nothing about caption
+equality - the exact-output claim this crate makes is about the fp32 path and
+must stay unqualified.
+
+**Speed**, same 2048x1536 photograph, `--max-new 90`, Tesla P40:
+
+| `--max-pixels` | fp32 | int8 | speedup |
+|---|---|---|---|
+| 512x512 (234 visual tokens) | 22.3 s | 10.7 s | 2.08x |
+| 1280x1280 (1564 visual tokens) | 118.7 s | 63.6 s | 1.87x |
+
+int8 at the small budget is **32x** the original 339 s run. The gain SHRINKS
+with context, which is not a defect but a consequence: the per-step attention
+is O(position) and the small per-step kernels are fixed, and both were hidden
+under a 50 ms fp32 weight read that int8 cuts to 12.6 ms. At the default
+budget int8 prefill sits at 39.7% of the DRAM roof where fp32 sits at 76.5%,
+because there is simply less weight traffic left to be bound by.
+
+**It only reached that speed after a kernel fix.** `matmul_gemv` had been
+rescued from its workgroup-memory accumulator by `matmul_gemv_reg`, wired
+through `gpu_core::upgrade` so every model inherits it - and the int8 twin
+was never given the same treatment. `matmul_i8_gemv` still carried
+`array<i32, 2048>` in workgroup memory, sized for the worst case, with a
+read-modify-write per `(k, m)`: 149 GB/s against a 287.5 GB/s roof, where the
+fp32 register kernel reaches essentially all of it. So int8's four-fold
+smaller weights were returning a little over two-fold in time.
+`matmul_i8_gemv_reg` plus its upgrade row took that kernel to 258 GB/s (90%
+of roof) and a whole captioning run from 1.52x to 2.08x. Bit-identity there
+is structural rather than careful - the accumulator is `i32`, and integer
+addition is exact and associative - which let its gate check the raw bits AND
+an exact `i64` oracle, so a bit-identical pair cannot be identically wrong.
+
+**Quality: this is not a free 2x.** Over six real photographs, **0 of 6**
+int8 captions matched fp32, mean word overlap 0.517. Greedy decoding is a
+chain, so one flipped token rewrites everything after it and that count
+overstates the QUALITY gap while accurately stating the determinism one. What
+matters is the character of the differences, and reading them, they split
+roughly evenly:
+
+* **Structural, not factual.** Two images diverged at the first word into a
+  different document shape - flowing prose against a bulleted room inventory.
+  Both are good captions; neither is wrong.
+* **Factual, and they cannot both be right.** The pendant lamp is "multiple
+  concentric rings" at fp32 and "two concentric, circular tiers" at int8. A
+  bedroom is "modern, rustic" against "modern, minimalist". A hallway has "a
+  white wall-mounted unit holding a small vase with pink flowers" at fp32 and
+  "a white pillar or partition" at int8 - different objects named in the same
+  place.
+
+For labelling training data that second class is the whole decision, and it
+is why the tier is opt-in with a `compare` mode rather than a default with a
+speed number. `qwen3vl_bench compare --dir <dir>` prints both captions in
+full, and says in its own output that a similarity score cannot tell cosmetic
+from substantive.
+
+The bound underneath all of this is `qwen3`'s own
+`int8_kv_decode_tracks_fp32`: relative L2 under 10% on the decode hidden
+state. That is a generous bound, and a 10% perturbation of the hidden state
+flips a greedy argmax readily - which is precisely why the captions differ,
+and why nobody should be surprised by it.
+
+### Batching across images: the same work as batched prefill, and cheaper than it looked
+
+Asked whether a labelling run could batch N photographs at once. It can, and
+the enabling work is the SAME piece as batched prefill - which changes the
+cost calculus, so it is written down here rather than left implied.
+
+**`qwen3::serve::Engine` already is the batched graph.** It has paged KV over
+`max_batch` sequences, a `max_prefill`-row batched prefill forward,
+`Input::Embeds` for raw embedding rows (which is exactly how an image's
+merged visual tokens would enter), a device-side batched greedy head, and
+`weights_int8`/`kv_int8` flags. It does not need the training constructor;
+that was my earlier scoping and it was wrong.
+
+**What it is missing is one thing: M-RoPE.** `serve` rotates through
+`rope_paged`, which takes one SCALAR position per row and the analytic theta.
+Qwen3-VL needs a 3-axis position with an interleaved section split, i.e. a
+per-row cos/sin table. `rope2d` is already that shape (`rows, heads, half,
+stride, offset, tmod`) and serve's `sc.q`/`sc.k` are contiguous `[b, hq]`
+slabs, so the change is a table-driven RoPE variant plus a per-request table
+upload. The genuinely new work beside it is DeepStack, which is wired into
+`forward_steps` and `decode_steps` but not into `run_batched_steps`.
+
+**Where the win actually is, which is not where it sounds like it is.**
+Prefill within ONE image is already batchable: its 1580 positions are
+independent given causal masking, and `max_prefill` processes a whole chunk
+per weight sweep. That alone turns 1580 weight sweeps into single digits, and
+it needs no second image. Across-image batching helps the DECODE phase, where
+each image contributes exactly one row per step.
+
+**Saturation.** Prefill stops being weight-bandwidth bound and becomes
+compute bound at `R = 2F/B` rows per sweep - 73 rows at fp32's measured 10517
+GFLOP/s and 287.5 GB/s. One image's prefill already supplies far more than
+that, so batching MORE images adds nothing to prefill. Decode contributes one
+row per image per step, so it scales close to linearly with batch size until
+the same 73-row crossover, which is far beyond what memory allows.
+
+**And memory is the binding constraint, but not the one expected.** Per
+sequence at the default budget: KV cache 0.46 GiB, per-row activations
+negligible - and the LM head's `[batch, vocab]` logits slab at **0.57 GiB per
+sequence**. On a 24 GiB card, fp32 leaves about 7 GiB after weights and the
+vision tower and int8 leaves about 17 GiB, so KV alone would allow roughly 15
+and 37 sequences. The logits slab caps both at about **6**, because at 8
+sequences it is 4.9 GB - past `max_buffer_size` (4094 MiB) entirely, and any
+single binding of it is past `max_storage_buffer_binding_size` (2047 MiB)
+from 4 sequences up.
+
+That cap is removable and the mechanism already exists: `Qwen::head_steps`
+vocab-tiles the head WEIGHT for exactly this reason. Tiling the logits too,
+with a running argmax folded across tiles, would take int8 to roughly 16
+sequences. Whoever picks this up should treat "tile the logits" as part of
+the work rather than discovering the 2047 MiB limit the way the vision tower
+did.
+
+### Doubt the meter first: four instrument bugs in one pass
 
 Every one of them made the engine look better, or the analysis look sharper,
 than it was, and none would have been caught by a test:
@@ -409,6 +523,11 @@ than it was, and none would have been caught by a test:
   prefill applies no LM head and its embedding gather reads one row, not the
   table. About a tenth too much - enough to print prefill at 100.3% of a
   roof nothing can exceed.
+- The same byte model then priced INT8 weights at four bytes each and
+  reported prefill at 164.5% of roof. Two of the four were caught by an
+  impossible number rather than by a test, which is the argument for printing
+  a fraction of a measured roof next to every stage instead of a bare
+  millisecond count.
 
 Also: `BRAIN_PROFILE`'s per-kernel table prints when the device DROPS, and a
 resident model's device never drops, so on this path it simply never
