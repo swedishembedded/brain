@@ -19,6 +19,12 @@
 //!   as well as a GPU one - but it means CPU equality is numeric, and this
 //!   file says which is which instead of asserting the stronger claim
 //!   everywhere and quietly loosening the threshold until it passes.
+//! * **The fused flash attention computes the same attention as the
+//!   scores/softmax/apply trio.** This one genuinely reassociates - the online
+//!   softmax rescales its running maximum as it walks the key tiles - so no
+//!   exact claim is made or gated. It is held to the same two-sided numeric
+//!   bar as the cross-backend comparison, on the same fixture, so the two are
+//!   directly comparable.
 //! * **The tower computes the same function on both backends.** Two different
 //!   GEMM implementations on two different devices cannot be bit-equal, so
 //!   this is gated numerically - on **cosine AND rel_l2**, never cosine alone,
@@ -136,6 +142,17 @@ fn pipelines_without_reg3() -> Vec<(&'static str, &'static str)> {
     v
 }
 
+/// `vision_pipelines()` with the flash family taken back out, leaving the
+/// chunked scores/softmax/apply trio that `model::vit::flash_ids` falls back
+/// to. Dropping `flash_attn_bidir` alone would be enough (it is the required
+/// slot), but all four go so the A/B cannot be confused by a half-registered
+/// set.
+fn pipelines_without_flash() -> Vec<(&'static str, &'static str)> {
+    let v: Vec<_> = vision_pipelines().iter().copied().filter(|(n, _)| !n.starts_with("flash_attn_")).collect();
+    assert_eq!(v.len() + 4, vision_pipelines().len(), "the flash family must be registered to be removable");
+    v
+}
+
 /// The two-sided threshold every NUMERIC comparison in this file uses. Cosine
 /// alone is not a gate: the mutation below scores 0.999999998 against it and
 /// is rejected only by the magnitude term.
@@ -234,4 +251,40 @@ fn the_tower_agrees_between_the_cpu_jit_and_the_gpu() {
     println!("mutated: cosine={mcos:.9} rel_l2={mrel:.3e}");
     assert!(mcos < COS_FLOOR || mrel > REL_L2_CEIL, "the parity gate cannot fail, so it is not a gate");
     assert!(mrel > REL_L2_CEIL, "rel_l2 must be the term that catches a small uniform scale: {mrel:.3e}");
+}
+
+/// The fused flash dispatch must compute the attention the chunked trio
+/// computes. It reassociates, so this is numeric by nature - and gated on
+/// cosine AND rel_l2 at the same thresholds as everything else here, because
+/// "it reassociates" is a reason to state a numeric bound, not a licence to
+/// skip one.
+#[test]
+fn the_fused_flash_attention_matches_the_chunked_trio() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        brain_testutil::skip("MOE_SKIP_GPU_TESTS set");
+        return;
+    }
+    let v = cfg();
+    let vw = weights(&v, 3);
+    let flash = Gpu::new_wgpu(vision_pipelines());
+    assert!(model::vit::flash_ids(&flash).is_some(), "this device cannot run the fused path, so this test proves nothing");
+
+    let got = tower(&flash, &v, &vw);
+    let want = tower(&Gpu::new_wgpu(&pipelines_without_flash()), &v, &vw);
+    assert!(got.iter().all(|x| x.is_finite()), "the fused path produced non-finite output");
+
+    let (cos, max) = brain_testutil::parity::compare(&got, &want);
+    let rel = brain_testutil::parity::rel_l2(&got, &want);
+    println!("flash vs chunked trio: cosine={cos:.9} rel_l2={rel:.3e} max_abs={max:.3e}");
+    assert!(cos >= COS_FLOOR, "cosine {cos:.9} below floor {COS_FLOOR}");
+    assert!(rel <= REL_L2_CEIL, "rel_l2 {rel:.3e} above ceiling {REL_L2_CEIL:.0e}");
+
+    // Mutation-verify against the SAME reference, so the threshold above is
+    // demonstrably tight enough to reject a real defect rather than merely
+    // loose enough to accept a real kernel.
+    let mutated = tower(&flash, &v, &mutate(&vw, "blocks.0.qkv.weight"));
+    let mrel = brain_testutil::parity::rel_l2(&mutated, &want);
+    let (mcos, _) = brain_testutil::parity::compare(&mutated, &want);
+    println!("mutated: cosine={mcos:.9} rel_l2={mrel:.3e}");
+    assert!(mrel > REL_L2_CEIL, "the gate cannot fail, so it is not a gate: rel_l2 {mrel:.3e}");
 }

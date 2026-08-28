@@ -165,6 +165,32 @@ impl VitScratch {
     }
 }
 
+/// The fused bidirectional flash-attention kernels this handle carries,
+/// resolved BY NAME, or `None` when the model registered none of them or the
+/// device cannot run a workgroup reduction (the CPU JIT cannot).
+///
+/// Same opt-in shape as [`gemm_step`]'s - a model adopts the fused path by
+/// adding the `flash_attn_bidir*` rows to its own PIPELINES - but a
+/// deliberately SEPARATE opt-in, because it is a different kind of claim. The
+/// GEMM swap is the same arithmetic in a different order; the online softmax
+/// rescales its running maximum as it walks the key tiles, so it genuinely
+/// reassociates and a model must re-certify its own parity against it rather
+/// than inherit it.
+///
+/// Exposed rather than private because a caller has to SIZE FOR the answer:
+/// the fused path never materialises a `[heads, chunk, span]` score slab, so a
+/// tower that takes it can allocate a token one instead of hundreds of
+/// megabytes it will not touch.
+pub fn flash_ids(g: &Gpu) -> Option<crate::block::FlashIds> {
+    let bidir = g.kernel_index("flash_attn_bidir")?;
+    g.caps().workgroup_reductions.then(|| crate::block::FlashIds {
+        bidir,
+        split: g.kernel_index("flash_attn_bidir_split"),
+        reg: g.kernel_index("flash_attn_bidir_reg"),
+        reg2: g.kernel_index("flash_attn_bidir_reg2"),
+    })
+}
+
 /// One large forward linear of a ViT block, `out = x · Wᵀ`.
 ///
 /// `matmul_rows` (8 output rows per thread) is the portable reference every
@@ -380,7 +406,14 @@ pub fn vit_block_fwd(
         steps.push(g.step(k.rope2d, &[&scr.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, 0, r.tmod, f(1.0)], rows * sh.heads * half));
         steps.push(g.step(k.rope2d, &[&scr.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, c, r.tmod, f(1.0)], rows * sh.heads * half));
     }
-    chunked_attn_fwd(g, k, sh, &scr.qkv, &scr.ctx, &scr.scores, &scr.probs, &scr.kt, spans, chunk, steps);
+    // The fused online-softmax dispatch where the model registered it: one
+    // kernel per span instead of the scores/softmax/apply trio, and no score
+    // slab at all. `head_dim > 128` is outside what the flash family accepts,
+    // so such a tower keeps the chunked path.
+    match flash_ids(g).filter(|_| hd <= 128) {
+        Some(f) => crate::block::flash_bidir_fwd(g, f, sh.heads, hd, c, &scr.qkv, stride, 0, c, 2 * c, &scr.ctx, spans, steps),
+        None => chunked_attn_fwd(g, k, sh, &scr.qkv, &scr.ctx, &scr.scores, &scr.probs, &scr.kt, spans, chunk, steps),
+    }
     steps.push(gemm_step(g, k, reg, &scr.ctx, w.proj_w, &scr.ln, rows, c, c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.proj_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls1) = w.ls1 {

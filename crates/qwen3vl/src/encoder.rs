@@ -84,13 +84,22 @@ pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
         // sweep coalesced loads.
         ("kv_k_headt", kernels::KV_K_HEADT),                // 27
         ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT), // 28
+        // ---- fused bidirectional attention ----
+        // The tower attends the whole image as one span, so the scores/softmax/
+        // apply trio's `[heads, chunk, n]` slab grows with n^2 while the fused
+        // kernels' memory does not grow with n at all. `model::vit::flash_ids`
+        // resolves these by name and picks the best the card can run.
+        ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),             // 29
+        ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT), // 30
+        ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),     // 31
+        ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),   // 32
         // ---- register-tiled GEMM ----
         // Opted into BY NAME, not by index: `model::vit::gemm_step` and the
         // PatchMerger below both resolve "matmul_reg3" off the handle, so this
         // one row moves every large linear in the tower and the projector off
         // the row-blocked/naive reference kernels. Bit-identical (the tiling is
         // over the output, never over the contraction) - see that function.
-        ("matmul_reg3", kernels::MATMUL_REG3),              // 29
+        ("matmul_reg3", kernels::MATMUL_REG3),                       // 33
     ]
 }
 
@@ -142,7 +151,15 @@ fn patch_embed_step(g: &Gpu, naive: usize, x: &DeviceBuffer, w: &DeviceBuffer, o
 
 /// Query-chunk width for one image's full-image attention span: as many rows
 /// as [`ATTN_SLAB_BUDGET`] holds, and never more than this device will bind.
+///
+/// A device taking the fused path never reads the score slab, so the chunk
+/// only has to be legal, not large - `attn_chunk_for`'s own floor is what
+/// makes the scratch a rounding error there instead of half a gigabyte the
+/// tower would allocate beside a decoder that needs it.
 fn attn_chunk(g: &Gpu, sh: &VitShape, n: u32) -> u32 {
+    if model::vit::flash_ids(g).is_some() {
+        return attn_chunk_for(sh, n, 0).min(n);
+    }
     let budget = ATTN_SLAB_BUDGET.min(g.max_storage_binding_bytes());
     attn_chunk_for(sh, n, budget).min(n)
 }
