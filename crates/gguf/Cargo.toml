@@ -11,7 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-arch.workspace = true
+brain-backend-cpu.workspace = true
 brain-checkpoint.workspace = true
+brain-model.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

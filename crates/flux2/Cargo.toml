@@ -18,6 +18,7 @@ brain-checkpoint.workspace = true
 # workspace's only rayon seam.
 brain-backend-cpu.workspace = true
 brain-dit.workspace = true
+brain-gguf.workspace = true
 brain-model.workspace = true
 brain-vae.workspace = true
 brain-qwen3.workspace = true

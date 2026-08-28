@@ -206,40 +206,22 @@ impl<'a> DitWeights<'a> {
 
     /// Requantize the rectangle `rows [r0, r0+n_out) x cols [c0, c0+k)` of a
     /// tensor stored as `[_, stride]` straight from Q8_0 blocks to
-    /// `(packed, scales)`.
+    /// `(packed, scales)` - `gguf::try_i8_rect`, the shared implementation
+    /// (this crate's own module was where the byte-repack fact was first
+    /// proven; it now lives in `crates/gguf` so a second GGUF-sourced model
+    /// does not re-derive it).
     ///
     /// `None` - meaning "use the fp32 route" - whenever the direct path does
     /// not apply: an fp32 map source, a non-Q8_0 tensor, a tensor the LoRA
-    /// touches (the fold needs a float domain), or a rectangle whose bounds
-    /// are not Q8_0-block-aligned. Returning `None` is always safe; the
-    /// caller's fallback produces the same bytes by the longer route.
+    /// touches (the fold needs a float domain, checked here since it is
+    /// this crate's own concern), or a rectangle whose bounds are not
+    /// Q8_0-block-aligned. Returning `None` is always safe; the caller's
+    /// fallback produces the same bytes by the longer route.
     pub fn try_i8_rect(&self, name: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize) -> Option<(Vec<u32>, Vec<f32>)> {
         let DitWeights::Gguf { gguf, lora, .. } = self else { return None };
         if lora.is_some_and(|l| l.touches(name)) {
             return None;
         }
-        let be = checkpoint::gguf::Q8_0_BLOCK_ELEMS;
-        if !stride.is_multiple_of(be) || !c0.is_multiple_of(be) || !k.is_multiple_of(be) {
-            return None;
-        }
-        let (raw, ty) = gguf.raw_tensor_bytes(name)?;
-        if ty != checkpoint::gguf::TYPE_Q8_0 {
-            return None;
-        }
-        let kg = k / 4;
-        let gs = k / model::int8::GROUP;
-        let mut packed = vec![0u32; n_out * kg];
-        let mut sw = vec![0f32; n_out * gs];
-        // One output row per task: each reads only its own block range and
-        // writes only its own words and scales, so this is bit-identical to
-        // the serial form and to the fp32 round trip alike.
-        backend_cpu::par::chunks2_mut(&mut packed, kg, &mut sw, gs, |i, prow, srow| {
-            let mut row = Vec::with_capacity(k);
-            let e0 = (r0 + i) * stride + c0;
-            checkpoint::gguf::q8_0_expand(raw, e0, e0 + k, &mut row).expect("block-aligned above");
-            model::int8::group_scales(&row, srow);
-            model::int8::pack_row(&row, srow, prow);
-        });
-        Some((packed, sw))
+        gguf::try_i8_rect(gguf, name, stride, r0, n_out, c0, k)
     }
 }
