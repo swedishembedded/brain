@@ -576,6 +576,7 @@ dependencies = [
  "brain-glmdsa",
  "brain-imgpipe",
  "brain-lfm2",
+ "brain-llava",
  "brain-ltxv",
  "brain-minimaxmusic3",
  "brain-moondream3",
@@ -674,6 +675,7 @@ dependencies = [
  "brain-imgpipe",
  "brain-kronos",
  "brain-lfm2",
+ "brain-llava",
  "brain-ltxv",
  "brain-memauth",
  "brain-mimi",
@@ -1262,6 +1264,23 @@ dependencies = [
 [[package]]
 name = "brain-llava"
 version = "1.0.0"
+dependencies = [
+ "brain-capability",
+ "brain-captioner",
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-data",
+ "brain-gguf",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-qwen3",
+ "brain-testutil",
+ "bytemuck",
+ "serde_json",
+]
 
 [[package]]
 name = "brain-ltxv"

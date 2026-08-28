@@ -42,6 +42,7 @@ brain-qwen3vl.workspace = true
 # `brain label` - the model-agnostic captioning seam plus its folder labeler.
 brain-captioner.workspace = true
 brain-fastvlm.workspace = true
+brain-llava.workspace = true
 # `catalog`/`resident_moondream3` - Moondream 3's caps surface and residency adapter.
 brain-moondream3.workspace = true
 brain-glmdsa.workspace = true

@@ -324,6 +324,11 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
+            manifest: llava::caps::manifest,
+            provider: always!(llava::caps::LlavaProvider::new()),
+            resident: None,
+        },
+        ModelEntry {
             manifest: qwen3vl::caps::manifest,
             provider: always!(qwen3vl::caps::QwenVlProvider::new()),
             resident: None, // no residency adapter yet -- brain caps/brain do only, matching fastvlm's own state

@@ -195,7 +195,7 @@ DATA
       names: calculator | reverser | wordcalc | timeseries | shakespeare_char | gpt
 
 LABEL (caption a dataset with a vision-language model)
-  brain label images <dir> [--model qwen3vl|fastvlm] [--weights DIR]
+  brain label images <dir> [--model qwen3vl|fastvlm|llava] [--weights DIR]
       [--out FILE] [--prompt \"...\"] [--trigger PHRASE] [--max-new N] [--overwrite]
       Writes <dir>/captions.yaml - what `brain flux2 finetune` and every other
       captioned-image trainer read. Resumable and idempotent: a re-run fills in

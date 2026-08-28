@@ -3,10 +3,31 @@ name = "brain-llava"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "LLaVA-1.5-13B: a CLIP-L/14@336 vision tower + Vicuna-1.5 (LLaMA-2) decoder, spliced by an mm_projector. Brought in as SUPIR's optional image captioner."
+description = "LLaVA-1.5-13B: CLIP-L/14@336 vision tower + mlp2x_gelu projector over a spliced Vicuna-1.5 (LLaMA-2 13B) decoder."
 
 [lib]
 name = "llava"
 path = "src/lib.rs"
 
 [dependencies]
+brain-qwen3.workspace = true
+brain-clip.workspace = true
+brain-gguf.workspace = true
+brain-capability.workspace = true
+# `captioner::Captioner` - the model-agnostic captioning contract this crate
+# satisfies, so `brain label` can drive it exactly like any other VLM.
+brain-captioner.workspace = true
+brain-model.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-paramstore.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+# The caption provider tokenizes (data) and reads safetensors (checkpoint)
+# at run time, not just in tests.
+brain-data.workspace = true
+brain-imaging.workspace = true
+brain-checkpoint.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

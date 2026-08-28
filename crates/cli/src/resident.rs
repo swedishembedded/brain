@@ -177,6 +177,10 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // stateless resident — invoking it with no checkpoint on disk is a clean
     // per-call error, not a registration failure.
     models.push(Arc::new(ProviderResident::stateless(Arc::new(fastvlm::caps::FastVlmProvider::new()))));
+    // LLaVA-1.5-13B captioning: same stateless-resident shape as FastVLM
+    // above - the provider manages its own weight residency lazily, per
+    // checkpoint dir.
+    models.push(Arc::new(ProviderResident::stateless(Arc::new(llava::caps::LlavaProvider::new()))));
     // brain/imgpipe: the pipeline holds no weights of its own (each stage
     // resolves its own via BRAIN_* env vars, same as when called through
     // `brain do`), so it is stateless from the scheduler's point of view too.

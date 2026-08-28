@@ -454,6 +454,17 @@ impl ClipVisionConfig {
         self.native_grid() * self.native_grid()
     }
 
+    /// The 0-based block whose OUTPUT is `hidden_states[-2]` - the same
+    /// indexing [`ClipTextConfig::penultimate_layer`] documents
+    /// (`hidden_states[0]` is the embedding output, `hidden_states[k]` is
+    /// block `k-1`'s output, so `hidden_states[-2] == hidden_states[layers-1]`
+    /// = block `layers-2`'s raw output). LLaVA-1.5's
+    /// `mm_vision_select_layer = -2` reads exactly this block via
+    /// `model::ClipVision::read_block_out`.
+    pub fn penultimate_layer(&self) -> u32 {
+        self.layers() - 2
+    }
+
     /// `openai/clip-vit-large-patch14-336` - the LLaVA-1.5 vision tower: 24
     /// layers, 1024-d, 16 heads, MLP 4096, patch 14, 336px input, 577 learned
     /// positions (576 patches + 1 class token), quick-GELU. Byte-identical
@@ -707,6 +718,7 @@ mod tests {
         assert_eq!(c.native_patches(), 576);
         assert_eq!(c.n_positions(), 577);
         assert_eq!(c.act, TextAct::QuickGelu);
+        assert_eq!(c.penultimate_layer(), 22, "hidden_states[-2] = block 22's output");
         // 5 stem + 24 blocks x 12.
         assert_eq!(c.tensor_manifest().len(), 5 + 24 * 12);
     }

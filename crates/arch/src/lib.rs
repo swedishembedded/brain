@@ -231,7 +231,7 @@ pub const ARCHS: &[Arch] = &[
     // `capability::Registry`, never a hard dependency), and its weights carry
     // no auto-fetch here because SUPIR's own weights don't either, for the
     // same non-commercial-license reason - see the `supir` row below.
-    arch!("llava", "LLaVA-1.5-13B (CLIP-L/14@336 + Vicuna-1.5 decoder)", Multimodal, Brain, "brain-llava", hf: &["LlavaLlamaForCausalLM"]),
+    arch!("llava", "LLaVA-1.5-13B (CLIP-L/14@336 + Vicuna-1.5 decoder)", Multimodal, Brain, "brain-llava", hf: &["LlavaLlamaForCausalLM"], weights_env: &[("BRAIN_LLAVA_WEIGHTS", "weights")]),
     // `default_ref` names the GGUF release repo (`ggml-org/DeepSeek-OCR-GGUF`),
     // not `deepseek-ai/DeepSeek-OCR` -- the latter is a `transformers`-shaped
     // repo with an empty `hf:` list here, so it would fall through to

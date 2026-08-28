@@ -104,6 +104,7 @@ fn run_toymoe(args: &[String]) {
 const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("s3dit", "brain/s3dit"),
     ("fastvlm", "brain/fastvlm"),
+    ("llava", "brain/llava"),
     ("qwen3vl", "brain/qwen3vl"),
     ("sam2", "brain/sam2"),
     ("scrfd", "brain/scrfd"),

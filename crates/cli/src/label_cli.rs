@@ -43,7 +43,7 @@ fn instruction(prompt: &str, trigger: &str, role: &str) -> String {
 }
 
 const HELP: &str = "brain label <cmd>
-  images <dir> [--model qwen3vl|fastvlm] [--weights DIR] [--out FILE]
+  images <dir> [--model qwen3vl|fastvlm|llava] [--weights DIR] [--out FILE]
                [--prompt TEXT] [--trigger PHRASE] [--trigger-role ROLE]
                [--max-new N] [--max-pixels N]
                [--overwrite]
@@ -56,7 +56,7 @@ const HELP: &str = "brain label <cmd>
                   implementing captioner::Captioner can be listed here; the
                   workflow itself is model-agnostic.
   --weights DIR   checkpoint directory, else the model's own env var
-                  ($BRAIN_QWEN3VL_WEIGHTS / $BRAIN_FASTVLM_WEIGHTS).
+                  ($BRAIN_QWEN3VL_WEIGHTS / $BRAIN_FASTVLM_WEIGHTS / $BRAIN_LLAVA_WEIGHTS).
   --out FILE      caption file, relative to <dir> (default captions.yaml).
   --prompt TEXT   the instruction handed to the model for every image. This
                   is where caption quality is decided; the built-in default
@@ -134,7 +134,8 @@ fn build(model: &str, weights: &str, max_pixels: u32) -> Result<Box<dyn Captione
             Ok(Box::new(c))
         }
         "fastvlm" => Ok(Box::new(fastvlm::captioner::FastVlmCaptioner::new(weights))),
-        other => Err(format!("unknown --model {other} (qwen3vl, fastvlm)")),
+        "llava" => Ok(Box::new(llava::captioner::LlavaCaptioner::new(weights))),
+        other => Err(format!("unknown --model {other} (qwen3vl, fastvlm, llava)")),
     }
 }
 

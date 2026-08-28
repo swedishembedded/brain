@@ -22,6 +22,7 @@ brain-qwen35moe.workspace = true
 brain-qwen35.workspace = true
 brain-lfm2.workspace = true
 brain-fastvlm.workspace = true
+brain-llava.workspace = true
 brain-qwen3vl.workspace = true
 brain-yolov8.workspace = true
 brain-zipdepth.workspace = true
