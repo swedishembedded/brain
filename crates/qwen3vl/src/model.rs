@@ -89,8 +89,19 @@ impl Qwen3Vl {
         if !ds_merger_weights.is_empty() {
             decoder.enable_deepstack(image_row0, n_visual, ds_merger_weights.len() as u32);
         }
+        // The vision tower runs on the SAME physical device as the decoder it
+        // feeds. `new_like` is a second KERNEL SET on the decoder's own card,
+        // not a second device: the two halves are strictly sequential (the
+        // merged visual rows ARE the decoder's prefill input), so there is
+        // nothing to gain by separating them, and a hard-coded CPU handle here
+        // put the whole 24-block tower plus all four PatchMergers on the CPU
+        // JIT no matter where the caller placed the model - which is the
+        // larger half of a caption's arithmetic, so it decided the run's cost.
+        // On a CPU-only build `new_like` still lands on the CPU backend, so
+        // placement follows the decoder rather than being asserted here.
+        let vgpu = decoder.gpu().new_like(vision_pipelines());
         Qwen3Vl {
-            vgpu: Gpu::new_cpu(vision_pipelines()),
+            vgpu,
             vcfg,
             vweights,
             merger_weights,

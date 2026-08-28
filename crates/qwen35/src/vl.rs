@@ -74,7 +74,12 @@ impl Qwen35Vl {
         let mrope_section = dcfg.mrope_section;
         let mut decoder = Qwen35::new_on(Gpu::new(pipelines()), dcfg, 1, seq_len, dweights);
         decoder.enable_mm_splice(image_row0, n_visual);
-        Qwen35Vl { vgpu: Gpu::new_cpu(vision_pipelines()), vcfg, vweights, merger_weights, decoder, merge, image_token_id, mrope_section }
+        // The tower runs on the device the decoder runs on -- see
+        // `qwen3vl::model::Qwen3Vl::new` for why a hard-coded CPU handle here
+        // silently overrode the caller's placement for the larger half of the
+        // model. This crate splices that same tower, so it inherited it.
+        let vgpu = decoder.gpu.new_like(vision_pipelines());
+        Qwen35Vl { vgpu, vcfg, vweights, merger_weights, decoder, merge, image_token_id, mrope_section }
     }
 
     /// End-to-end forward for one image + text stream; returns the decoder's
