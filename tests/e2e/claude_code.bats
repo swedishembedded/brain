@@ -27,7 +27,7 @@ setup_file() {
   REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
   BRAIN="${BRAIN_BIN:-$REPO/target/release/brain}"
   [ -x "$BRAIN" ] || BRAIN="$REPO/target/debug/brain"
-  [ -x "$BRAIN" ] || skip "no brain binary (run: make build)"
+  [ -x "$BRAIN" ] || skip "no brain binary (run: make build/debug)"
 
   export E2E_DIR="$(mktemp -d)"
   export E2E_PORT="${E2E_PORT:-8792}"

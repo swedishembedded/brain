@@ -22,7 +22,7 @@ setup_file() {
   REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
   export REPO
   BRAIN="${BRAIN_BIN:-$REPO/target/release/brain}"
-  [ -x "$BRAIN" ] || skip "no brain binary (build with: make release, or set BRAIN_BIN)"
+  [ -x "$BRAIN" ] || skip "no brain binary (build with: make build/release, or set BRAIN_BIN)"
   export BRAIN
 
   IMG_DIR="$REPO/docs/quickstart/img"

@@ -36,7 +36,7 @@ FLOOR="${QWEN_SERVING_PERF_FLOOR:-0.5}"
 SHAPE="${QWEN_SERVING_PERF_SHAPE:-28x1024x16x151936}" # Qwen3-0.6B's real shape
 export BRAIN_DEVICE="${BRAIN_DEVICE:-cpu}"
 
-[ -x "$BIN" ] || { echo "build first: make release"; exit 2; }
+[ -x "$BIN" ] || { echo "build first: make build/release"; exit 2; }
 if [ -z "${QWEN_TOKENIZER:-}" ]; then
   echo "SKIP qwen-serving-perf-gate (set QWEN_TOKENIZER to a real tokenizer.json)"
   exit 0

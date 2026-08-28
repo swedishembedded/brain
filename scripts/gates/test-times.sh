@@ -10,7 +10,7 @@
 # which is the measurement you need before deciding what to move out of the fast
 # lane.
 #
-# Build first (`make release`), then:
+# Build first (`make build/release`), then:
 #   scripts/gates/test-times.sh              # rank every binary
 #   scripts/gates/test-times.sh --top 10     # just the worst offenders
 #   scripts/gates/test-times.sh --budget 5   # exit non-zero if any binary exceeds 5s
@@ -36,7 +36,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -d "$DEPS" ] || { echo "no $DEPS — run 'make release' first"; exit 2; }
+[ -d "$DEPS" ] || { echo "no $DEPS - run 'make build/release' first"; exit 2; }
 
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT

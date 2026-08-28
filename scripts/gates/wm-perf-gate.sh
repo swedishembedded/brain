@@ -20,7 +20,7 @@ WEIGHTS=out/diamond-breakout.weights
 RUNS=3
 export DISPLAY=
 
-[ -x "$BIN" ] || { echo "build first: make release"; exit 2; }
+[ -x "$BIN" ] || { echo "build first: make build/release"; exit 2; }
 [ -f "$WEIGHTS" ] || { echo "missing $WEIGHTS (brain diamond import ...)"; exit 2; }
 
 best_ms() { # "device [extra args]" -> best mean ms/frame over RUNS

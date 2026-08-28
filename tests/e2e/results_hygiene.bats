@@ -18,7 +18,7 @@ setup() {
   REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
   export REPO
   BRAIN="$REPO/target/release/brain"
-  [ -x "$BRAIN" ] || skip "no release brain binary (build with: make release)"
+  [ -x "$BRAIN" ] || skip "no release brain binary (build with: make build/release)"
   export BRAIN
 
   RESULTS="$REPO/results"

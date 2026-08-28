@@ -49,7 +49,7 @@ MODEL="${MODEL:-$([ "$MOCK" = "0" ] && echo Qwen/Qwen3-0.6B || echo brain/mock)}
 BRAIN="${BRAIN:-./target/release/brain}"
 
 # ---- preflight --------------------------------------------------------------
-[ -x "$BRAIN" ] || { echo "error: brain binary not found at '$BRAIN' (build: make release)" >&2; exit 1; }
+[ -x "$BRAIN" ] || { echo "error: brain binary not found at '$BRAIN' (build: make build/release)" >&2; exit 1; }
 if [ "$CHECK" = "0" ]; then
   command -v claude >/dev/null 2>&1 || { echo "error: the 'claude' CLI is not installed" >&2; exit 1; }
 fi

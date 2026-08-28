@@ -35,7 +35,7 @@ INPUT="${FORECAST_PERF_INPUT:-96}"
 export BRAIN_DEVICE="${BRAIN_DEVICE:-cpu}"
 export BRAIN_FORECAST_HORIZON="${BRAIN_FORECAST_HORIZON:-12}"
 
-[ -x "$BIN" ] || { echo "build first: make release"; exit 2; }
+[ -x "$BIN" ] || { echo "build first: make build/release"; exit 2; }
 update=0; [ "${1:-}" = "--update" ] && update=1
 fail=0
 

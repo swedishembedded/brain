@@ -2,7 +2,7 @@
 
 Two runnable paths: train a small model from scratch, then run a real LLM
 without touching a checkpoint file yourself. Both assume you've already run
-`make release` (see [Install](install.md)).
+`make build/release` (see [Install](install.md)).
 
 ## Train something in 5 minutes
 

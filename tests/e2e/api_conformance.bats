@@ -27,7 +27,7 @@ setup_file() {
   export REPO
   BRAIN="${BRAIN_BIN:-$REPO/target/debug/brain}"
   [ -x "$BRAIN" ] || BRAIN="$REPO/target/release/brain"
-  [ -x "$BRAIN" ] || skip "no brain binary (build with: CARGO_BUILD_JOBS=6 make build, or set BRAIN_BIN)"
+  [ -x "$BRAIN" ] || skip "no brain binary (build with: CARGO_BUILD_JOBS=6 make build/debug, or set BRAIN_BIN)"
   export BRAIN
 
   export SPECS="$REPO/crates/apiserve/tests/specs"

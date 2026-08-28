@@ -902,6 +902,7 @@ front-end to depend on.
 | Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` - clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 | **Fetch a model's weights** (`brain pull <id\|url>`), and where models live on disk | `crates/cli/src/pull_cli.rs` (the verb + both progress modes), `brain_modelstore::refurl` (what a user may type), `brain_modelstore::default_root` (the ONE answer to "where do models live"; `--brain-data-dir` publishes into it), `crate::supply::execute_plan` (the shared plan/execute/finish core auto-fetch uses too); `docs/using/cli.md` |
+| **See what's on disk / declared-but-not-pulled, and what it costs** (`brain models list\|list-adapters\|info\|profile`) | `crates/cli/src/models_cli.rs` (the four verbs) over `crates/cli/src/tree.rs` (the shared plain/interactive-ratatui renderer - every LEAF line is self-contained, so `\| grep` works); the declared-quant registry is `brain_arch::Arch::variants`; per-model cost is the shared `crates/modelcost` cache (below) |
 | **Tracing/observability** (`--trace-<family> <0-5>`, adding a family, instrumenting a crate) | `crates/trace` - the family registry is `crates/trace/src/registry.rs`; the CLI wiring is `install_tracing` in `crates/cli/src/main.rs` |
 | **Quantize any checkpoint to a GGUF** (tier, per-tensor policy, streaming write, two-way coverage) | `crates/checkpoint/src/quantize.rs` (`Tier`/`Policy`/`plan`/`convert`), `checkpoint::quant::quantize_par`, `checkpoint::gguf_write::Writer`; CLI `brain quantize` in `crates/cli/src/quantize_cli.rs` |
 
@@ -909,10 +910,10 @@ front-end to depend on.
 
 ## Essential commands
 
-**Always build through the Makefile, never `cargo` directly:** `make build`
-(debug), `make release` (optimized), `make test` (suite). They wrap cargo with
+**Always build through the Makefile, never `cargo` directly:** `make build/debug`
+(debug), `make build/release` (optimized), `make test` (suite). They wrap cargo with
 the project's expected flags/targets, and - critically - all three share the
-same `./target` dir, so a `make build` after a `make release` (or vice versa)
+same `./target` dir, so a `make build/debug` after a `make build/release` (or vice versa)
 reuses the other's downloaded/compiled dependency graph instead of a cold
 rebuild. Interleaving raw `cargo build -p <crate>` calls (or worse, a
 one-off `CARGO_HOME` override on just that call) does not add a second cache -
@@ -924,8 +925,8 @@ build fails with a registry/permission error under the shell's default
 per-invocation.
 
 ```bash
-make build                           # debug build
-make release && make test            # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU;
+make build/debug                     # debug build
+make build/release && make test      # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU;
                                      # tests run at TEST_THREADS=8 on the pooled test device - every
                                      # test binary shares one device via gpu_core::testgpu)
 make gradcheck                       # backprop correctness gate
@@ -952,7 +953,7 @@ Direct binary - the model is selected by the command:
 
 ```bash
 ./target/release/brain <verb> <arch> [opts]      # or: brain <arch> <verb> [opts] - same command
-# infra verbs: data devices npu federated bench perf forecast caps serve gradcheck flops
+# infra verbs: data devices npu federated bench perf forecast caps serve gradcheck flops models
 # archs with their own dedicated CLI module: gpt2 qwen3 qwen35moe qwen35 glmdsa lfm2 qwen3tts
 #   yolov8 zipdepth flux2 worldmirror2 splat qwen3omnimoe diamond toypid toymoe
 # every other arch (`brain caps` lists them all) is reached the same way, its
@@ -979,6 +980,35 @@ at a point outside its own basis rather than assuming. That is what lets a 22B
 video model be priced on a card that cannot hold it. Coverage is honest at both
 levels: a kernel with no formula is listed as UNCOVERED and excluded from the
 totals, and a whole stage that is not modelled is listed the same way.
+
+**`crates/modelcost` is the shared registry+cache above that engine** -
+`brain flops` and `brain models list`/`brain models profile` are two front
+ends over it, not two independent pricers. An exact-tier `CostEntry.price`
+(config -> zero-init model -> `cost_fwd`, registered per architecture -
+`qwen3`/`gpt2`/`lfm2` today) and a bandwidth-tier `tensor_manifest` (tensor
+bytes from shape alone, no device, registered for a few more architectures)
+both persist to `gpu_core::cache_dir()/models/cost.json`, keyed by
+`(arch, variant_ref)` and invalidated on a config-hash mismatch - the same
+corrupt-or-unknown-schema-is-dropped-never-trusted rule
+`roof::persist::RoofStore` follows for its own file. An unattended bulk
+re-price (`brain models list --reprofile`) MUST call
+`price_and_cache_bandwidth_only`, never the exact tier - the exact tier
+materializes a real zero-init weight buffer at the config's shape, a bounded
+cost for the ONE model a human just named and an unbounded one multiplied
+across however many multi-billion-parameter checkpoints happen to be in the
+store.
+
+A THIRD, real-execution tier lives alongside the two dry ones:
+`CostEntry.measure` (`modelcost::measure`, `brain models profile --measure`)
+actually builds the model and runs it, reporting load time separately from a
+forward pass's own time, the cold (first) pass separately from the best of N
+hot passes, and a per-layer FLOP figure - DERIVED (0/1/2-layer dry probes,
+verified affine at the point outside that basis - `pricers::per_unit_cost`,
+the single-axis case of `flops_cli::affine_block_cost`) for a uniform stack
+(qwen3, gpt2), or the plain average (`total / n_layers`) for a hybrid one
+whose layers are not interchangeable (lfm2's per-layer conv/attention
+choice) - never presented as more precise than that. Never cached: a timing
+describes this machine right now, not the model.
 
 **GGUF import is generic.** `brain import FILE [--out PATH] [--id NAME]`
 picks the importer from the file's own `general.architecture` via the registry
@@ -1390,7 +1420,7 @@ a metric that isn't there was simply forgotten.
   compiler, so `--device npu` is a separate export→quantize→compile→run path
   (`crates/npu`), not a per-op backend. The default build stays free of OpenVINO
   at the source level; the runtime is loaded at run time (`runtime-linking`), so
-  `make build`/`make test` stay green with no OpenVINO installed.
+  `make build/debug`/`make test` stay green with no OpenVINO installed.
 - **Weight-only quantization must be block/group-wise, never whole-channel-only.**
   A scale spanning an entire output channel (`inp` up to 3072 in these models)
   lets one outlier weight set the quantization step for every other weight

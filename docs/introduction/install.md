@@ -16,15 +16,15 @@ A few things are optional, needed only for specific paths:
 - **Python + OpenVINO** — only for the Intel NPU export/run path
   (`brain npu …`) and a couple of benchmark reference scripts. `make
   requirements` installs this tooling; the Rust engine itself never needs it,
-  and `make build`/`make test` stay green without it installed.
+  and `make build/debug`/`make test` stay green without it installed.
 
 ## Build
 
 ```bash
-make release          # build the optimized ./target/release/brain
+make build/release          # build the optimized ./target/release/brain
 ```
 
-`make build` also exists for an unoptimized debug build, but `make release`
+`make build/debug` also exists for an unoptimized debug build, but `make build/release`
 is what you want for anything performance-sensitive — training and inference
 both.
 

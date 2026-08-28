@@ -91,7 +91,7 @@ groups them into one batch (`max_batch: 3` in `brain.stats()`), which
 
 > Numbers above were measured on a Tesla P40 with a **debug** build of `brain`
 > and the `hiera_tiny` checkpoint; the first call also includes the 156 MB
-> checkpoint import. Use `make release` for representative latency.
+> checkpoint import. Use `make build/release` for representative latency.
 
 ## `face_id.py` — SCRFD + ArcFace
 

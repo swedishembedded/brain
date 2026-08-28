@@ -44,7 +44,7 @@ workload runtime that scales across both accelerators and nodes.
 ## Quick start
 
 ```bash
-make release                          # build the optimized ./target/release/brain
+make build/release                          # build the optimized ./target/release/brain
 make test                             # full test suite
 make gradcheck                        # backprop correctness gate (finite differences)
 ```

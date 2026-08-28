@@ -28,7 +28,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO"
 
 BRAIN="${BRAIN:-$REPO/target/release/brain}"
-[ -x "$BRAIN" ] || { echo "quickstart: no brain binary at $BRAIN -- run 'make release' first" >&2; exit 1; }
+[ -x "$BRAIN" ] || { echo "quickstart: no brain binary at $BRAIN -- run 'make build/release' first" >&2; exit 1; }
 
 : "${BRAIN_MODELS_DIR:=$REPO/.quickstart-models}"
 export BRAIN_MODELS_DIR

@@ -9,7 +9,7 @@
 # The browser/WebGPU demo lives in crates/web (delegated below).
 #
 # Quick start:
-#   make release
+#   make build/release
 #   make data/calculator
 #   make train/gpt/calculator
 #   make eval/gpt/calculator
@@ -19,9 +19,9 @@
 
 BRAIN  ?= ./target/release/brain
 # The debug-build binary the e2e bats suites drive by default (they build via the
-# `build` target, not `release`, so the fast lane stays fast). Override to point
-# an e2e run at a release build instead: `BRAIN_BIN=./target/release/brain make
-# test/e2e/api-conformance`.
+# `build/debug` target, not `build/release`, so the fast lane stays fast). Override
+# to point an e2e run at a release build instead: `BRAIN_BIN=./target/release/brain
+# make test/e2e/api-conformance`.
 BRAIN_BIN ?= ./target/debug/brain
 # Rewritten in place by `make release/{patch,minor,major}` (bump2version) -
 # the single source the release targets below read AFTER the bump, since a
@@ -56,7 +56,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: check/workspace help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: check/workspace help build/debug build/release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -70,7 +70,8 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
 
 help:
 	@echo "brain targets:"
-	@echo "  make release                 build the optimized 'brain' binary"
+	@echo "  make build/release           build the optimized 'brain' binary"
+	@echo "  make build/debug             build the dev-profile 'brain' binary"
 	@echo "  make requirements            pip-install the Python tooling (OpenVINO/NPU, torch, ...)"
 	@echo "  make environment             requirements + detect/verify a real Intel NPU (no-op if absent)"
 	@echo "  make environment/openvino    OpenVINO/NPU setup only, skips torch/CUDA (fast iteration)"
@@ -154,20 +155,20 @@ help:
 # e2e lane reporting green while running nothing. The dev tree is the price of
 # that (tens of GB on the shared build volume, alongside release's own); it
 # buys a link step fast enough to keep the e2e lane a fast lane, which is why
-# `release` below stays the separate, slower target everything else runs.
-build:
+# `build/release` below stays the separate, slower target everything else runs.
+build/debug:
 	cargo build
 
-release:
+build/release:
 	cargo build --release
 
 # Build self-contained Debian packages for package-only integrations.
 deb: deb/release
 
-deb/debug: build
+deb/debug: build/debug
 	bash scripts/build/build-deb.sh --binary target/debug/brain --flavor debug
 
-deb/release: release
+deb/release: build/release
 	bash scripts/build/build-deb.sh
 
 # ---- release -----------------------------------------------------------------
@@ -265,7 +266,7 @@ release/publish:
 # Three things were making the full suite take ~an hour, all measured:
 #
 #  1. `cargo test` defaults to the DEBUG profile, so it recompiled the whole
-#     workspace even right after `make release`. Tests now run `--release` and
+#     workspace even right after `make build/release`. Tests now run `--release` and
 #     reuse that build.
 #  2. Doc-tests link one binary per crate against the full graph - ~18s per
 #     crate for ~30 examples, most of them `no_run`. They are real coverage but
@@ -441,7 +442,7 @@ test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
-test/times: release
+test/times: build/release
 	scripts/gates/test-times.sh --top 15
 
 # End-to-end: drive the real `claude` CLI against a local `brain serve --anthropic`,
@@ -449,7 +450,7 @@ test/times: release
 # installed AND a served qwen model is configured:
 #   BRAIN_QWEN_WEIGHTS=... BRAIN_QWEN_TOKENIZER=... make test/e2e/claude-code
 # (import one first: brain qwen3 import --hf <hf_qwen_dir> --out qwen.safetensors)
-test/e2e/claude-code: release
+test/e2e/claude-code: build/release
 	bats tests/e2e/claude_code.bats
 
 # End-to-end: HTTP API conformance over a real socket against a single `brain serve`
@@ -458,7 +459,7 @@ test/e2e/claude-code: release
 # the vendored OpenAPI specs. Fast + deterministic. Needs only a debug/release brain
 # binary + jq (+ optional Python jsonschema for full schema validation).
 #   make test/e2e/api-conformance   (or: BRAIN_BIN=./target/debug/brain bats tests/e2e/api_conformance.bats)
-test/e2e/api-conformance: build
+test/e2e/api-conformance: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/api_conformance.bats
 
 # End-to-end: `brain serve` actually stops on SIGINT/SIGTERM, for every combination
@@ -466,7 +467,7 @@ test/e2e/api-conformance: build
 # alone). Each test starts and kills its own server; the D-Bus cases use a private
 # per-test dbus-daemon, never the real session/system bus. Needs a debug/release
 # binary + a working dbus-daemon.
-test/e2e/shutdown: build
+test/e2e/shutdown: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/shutdown.bats
 
 # End-to-end: every example under examples/ is actually exercised - the harness
@@ -479,7 +480,7 @@ test/e2e/shutdown: build
 # dbus-daemon, curl, and `pip install -e brain-py` (jeepney) on EXAMPLES_PY
 # (default python3).
 #   make test/e2e/examples   (or: EXAMPLES_PY=/path/to/python3 bats tests/e2e/examples.bats)
-test/e2e/examples: build
+test/e2e/examples: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/examples.bats
 
 # Heavy, opt-in: brain's residency scheduler (batching/eviction) + the generate ->
@@ -495,7 +496,7 @@ test/e2e/scheduler:
 # wait on PATH alone and then read the keys with no retry. BRAIN_MOCK=1,
 # CPU-only, no real weights. Needs a debug/release binary + jq + curl (+
 # dbus-daemon/busctl for the D-Bus cases, which skip cleanly without them).
-test/e2e/ready: build
+test/e2e/ready: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/ready.bats
 
 # Heavy, opt-in, same shape as test/e2e/scheduler: re-runs README.md's Quick
@@ -505,7 +506,7 @@ test/e2e/ready: build
 # docs/quickstart` first (or BRAIN_QUICKSTART_E2E=1 scripts/demo/quickstart.sh)
 # to populate docs/quickstart/img/, which this asserts against rather than
 # re-fetching itself.
-test/e2e/quickstart: release
+test/e2e/quickstart: build/release
 	BRAIN_QUICKSTART_E2E=1 BRAIN_BIN=$(BRAIN) bats tests/e2e/quickstart.bats
 
 # End-to-end: the release .deb is a real, correctly-formed Debian package -
@@ -593,7 +594,7 @@ wm-fixtures:
 # Play the deterministic fake world model in an SDL window (WASD; Esc quits).
 # The SDL window is always compiled into the standard build (needs system
 # libSDL2 at link); it only OPENS when a run needs it.
-wm/play: release
+wm/play: build/release
 	./target/release/brain diamond play --model fake
 
 # Cross-backend parity gate: CPU == Vulkan == NPU (gradcheck on both backends +
@@ -610,14 +611,14 @@ forecast/parity:
 # vs a local baseline (scripts/gates/forecast-perf-baselines/, gitignored -
 # `--update` to capture/refresh it on this machine). Weights via env
 # (BRAIN_KRONOS_*/BRAIN_CHRONOS2/BRAIN_FINCAST).
-forecast/perf-gate: release
+forecast/perf-gate: build/release
 	scripts/gates/forecast-perf-gate.sh
 
 # World-model fps regression gate (best-of-3 vs a local
 # scripts/gates/wm-perf-baselines.json, gitignored; hard floors only).
 # Dev-box gate, not CI: needs out/diamond-breakout.weights (brain diamond
 # import ...) and a real display/GPU. `--update` captures/rewrites it.
-wm/perf-gate: release
+wm/perf-gate: build/release
 	scripts/gates/wm-perf-gate.sh
 
 # Concurrent-serving-performance regression gate: the real HTTP-served path
@@ -626,18 +627,18 @@ wm/perf-gate: release
 # (scripts/gates/qwen-serving-perf-baselines/, gitignored - `--update` to
 # capture/refresh it on this machine).
 # Needs a real tokenizer via QWEN_TOKENIZER; SKIPS (not fails) when unset.
-qwen/serving-perf-gate: release
+qwen/serving-perf-gate: build/release
 	scripts/gates/qwen-serving-perf-gate.sh
 
 # ---- data generation ------------------------------------------------------
-data/calculator data/reverser data/wordcalc: release
+data/calculator data/reverser data/wordcalc: build/release
 	$(BRAIN) data gen $(@F) --out $(DATA)/$(@F) --n $(N) --seed $(SEED)
 
-data/timeseries: release
+data/timeseries: build/release
 	$(BRAIN) data gen timeseries --out $(DATA)/timeseries --n 200000 --seed $(SEED)
 
 # Synthetic Qwen3-TTS `text -> codebook-0 codes` stream (for Talker SFT smokes).
-data/tts: release
+data/tts: build/release
 	$(BRAIN) data gen tts --out $(DATA)/tts --n $(N) --seed $(SEED)
 
 # Populate the gitignored testdata/ tree (checkpoints/goldens/audio) that parity
@@ -648,12 +649,12 @@ fetch/testdata:
 
 $(DATA)/shakespeare_char/input.txt:
 	mkdir -p $(DATA)/shakespeare_char && curl -sSL -o $@ $(SHAKE_URL)
-data/shakespeare_char: release $(DATA)/shakespeare_char/input.txt
+data/shakespeare_char: build/release $(DATA)/shakespeare_char/input.txt
 	$(BRAIN) data gen shakespeare_char --out $(DATA)/shakespeare_char
 
 $(DATA)/gpt/input.txt:
 	mkdir -p $(DATA)/gpt && curl -sSL -o $@ $(SHAKE_URL)
-data/gpt: release $(DATA)/gpt/input.txt
+data/gpt: build/release $(DATA)/gpt/input.txt
 	$(BRAIN) data gen gpt --out $(DATA)/gpt
 
 # ---- train (pattern: train/gpt/<dataset>) ---------------------------------
@@ -662,7 +663,7 @@ MASK_calculator := --mask =
 MASK_reverser   := --mask =
 MASK_wordcalc   := --mask =
 
-train/gpt/%: release
+train/gpt/%: build/release
 	@mkdir -p $(OUT)
 	$(BRAIN) gpt2 train $(DATA)/$* --out $(OUT)/gpt-$*.safetensors \
 		--steps $(STEPS) --batch $(BATCH) --block $(BLOCK) \
@@ -670,7 +671,7 @@ train/gpt/%: release
 		--seed $(SEED) $(MASK_$*)
 
 # ---- eval (pattern: eval/gpt/<dataset>) -----------------------------------
-eval/gpt/%: release
+eval/gpt/%: build/release
 	$(BRAIN) gpt2 eval --weights $(OUT)/gpt-$*.safetensors --data $(DATA)/$*
 
 # ---- Qwen LoRA fine-tuning: one command to fully retrain and overwrite the
@@ -686,7 +687,7 @@ QWEN_LR    ?= 5e-5
 QWEN_BATCH ?= 4
 QWEN_BLOCK ?= 1024
 
-train/qwen/lora: release
+train/qwen/lora: build/release
 	@test -n "$(DATASET)" || (echo "usage: make train/qwen/lora DATASET=<dir> ADAPTER=<owner/name[:tag]>" && exit 1)
 	@test -n "$(ADAPTER)" || (echo "usage: make train/qwen/lora DATASET=<dir> ADAPTER=<owner/name[:tag]>" && exit 1)
 	$(BRAIN) qwen3 finetune --lora $(LORA_RANK) --alpha $(LORA_ALPHA) \
@@ -700,19 +701,19 @@ train/qwen/lora: release
 # trains the tiny detector on it; `eval/yolo` reports mAP@0.5/precision/recall;
 # `detect/yolo` runs inference on a sample image (dataset image 0) and prints the
 # boxes as JSON lines. All CPU-friendly (the YOLO model runs on the CPU backend).
-data/detect: release
+data/detect: build/release
 	$(BRAIN) data gen detect --out $(DATA)/detect --n $(YOLO_N) --seed $(SEED)
 
-train/yolo: release
+train/yolo: build/release
 	@mkdir -p $(OUT)
 	$(BRAIN) yolov8 train $(DATA)/detect --out $(OUT)/yolo.safetensors \
 		--steps $(YOLO_STEPS) --batch $(YOLO_BATCH) --lr $(YOLO_LR) --seed $(SEED)
 
-eval/yolo: release
+eval/yolo: build/release
 	$(BRAIN) yolov8 eval --weights $(OUT)/yolo.safetensors --data $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
-detect/yolo: release
+detect/yolo: build/release
 	$(BRAIN) yolov8 detect --weights $(OUT)/yolo.safetensors --image $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
@@ -721,18 +722,18 @@ detect/yolo: release
 ZIPDEPTH_PTH ?= 
 DEPTH_IMG    ?= 
 
-depth/demo: release
+depth/demo: build/release
 	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
 	@test -n "$(DEPTH_IMG)"    || (echo "set DEPTH_IMG=<image.ppm>"; exit 2)
 	$(BRAIN) zipdepth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH)
 
-depth/smoke: release
+depth/smoke: build/release
 	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
 	@test -n "$(DEPTH_IMG)"    || (echo "set DEPTH_IMG=<image.ppm>"; exit 2)
 	DISPLAY= $(BRAIN) zipdepth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH) \
 		--headless --out $(OUT)/depth.ppm
 
-depth/camera: release
+depth/camera: build/release
 	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
 	$(BRAIN) zipdepth --camera --weights $(ZIPDEPTH_PTH) $(DEPTH_ARGS)
 
@@ -741,32 +742,32 @@ depth/camera: release
 MIRROR_CKPT    ?=
 MIRROR_WEIGHTS ?= $(OUT)/mirror.safetensors
 
-mirror/import: release
+mirror/import: build/release
 	@test -n "$(MIRROR_CKPT)" || (echo "set MIRROR_CKPT=<model.safetensors|hf_dir>"; exit 2)
 	$(BRAIN) worldmirror2 import $(MIRROR_CKPT) --out $(MIRROR_WEIGHTS)
 
 # 3DGS scene viewer (interactive fly-through; WASD + mouse, see --help).
 SPLAT_SCENE ?=
 
-splat/view: release
+splat/view: build/release
 	@test -n "$(SPLAT_SCENE)" || (echo "set SPLAT_SCENE=<scene.ply>"; exit 2)
 	$(BRAIN) splat view $(SPLAT_SCENE) $(SPLAT_ARGS)
 
 # images -> 3DGS scene (+ view). MIRROR_IMAGES = dir of .ppm or comma list.
 MIRROR_IMAGES ?=
 
-mirror/infer: release
+mirror/infer: build/release
 	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
 	$(BRAIN) worldmirror2 infer --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
 
-mirror/demo: release
+mirror/demo: build/release
 	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
 	$(BRAIN) worldmirror2 demo --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
 
 # Train ZipDepth end to end on the synthetic RGB->depth pairs (placeholder data,
 # real loop: forward -> masked L1 -> backward -> AdamW; loss printed per step).
 # Fine-tune a released checkpoint instead with ZIPDEPTH_PTH set.
-train/zipdepth: release
+train/zipdepth: build/release
 	$(BRAIN) zipdepth train --out $(OUT)/zipdepth.safetensors --steps 50 --batch 2 \
 		$(if $(ZIPDEPTH_PTH),--weights $(ZIPDEPTH_PTH),)
 
@@ -775,7 +776,7 @@ train/zipdepth: release
 # `export/yolo-onnx` and `quantize/yolo` are PURE RUST (run on any machine);
 # `sim/yolo-int8` measures fp32-vs-INT8 mAP with NO NPU. `run/yolo-npu` and
 # `bench/yolo-npu` REQUIRE OpenVINO 2024.x + an Intel NPU (3720 / Meteor Lake) at
-# run time - they are NOT part of `make build`/`make test`. The NPU is a
+# run time - they are NOT part of `make build/debug`/`make test`. The NPU is a
 # whole-graph compiler, separate from --device cpu|gpu; see docs/yolo/NPU.md.
 ONNX        ?= $(OUT)/yolo.onnx
 ONNX_INT8   ?= $(OUT)/yolo.int8.onnx
@@ -784,24 +785,24 @@ NPU_CACHE   ?= $(OUT)/npu-cache
 NPU_CALIB   ?= $(DATA)/detect
 NPU_NCALIB  ?= 256
 
-export/yolo-onnx: release
+export/yolo-onnx: build/release
 	@mkdir -p $(OUT)
 	$(BRAIN) npu export --weights $(OUT)/yolo.safetensors --out $(ONNX)
 
-quantize/yolo: release
+quantize/yolo: build/release
 	@mkdir -p $(OUT)
 	$(BRAIN) npu quantize --weights $(OUT)/yolo.safetensors --calib $(NPU_CALIB) \
 		--out $(ONNX_INT8) --num-calib $(NPU_NCALIB) --scales-out $(OUT)/yolo.scales.json
 
-sim/yolo-int8: release
+sim/yolo-int8: build/release
 	$(BRAIN) npu sim --weights $(OUT)/yolo.safetensors --data $(DATA)/detect \
 		--calib $(NPU_CALIB) --num-calib $(NPU_NCALIB) --conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
-run/yolo-npu: release
+run/yolo-npu: build/release
 	$(BRAIN) npu run --onnx $(ONNX_INT8) --image $(DATA)/detect --device $(NPU_DEVICE) \
 		--cache-dir $(NPU_CACHE) --conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
-bench/yolo-npu: release
+bench/yolo-npu: build/release
 	$(BRAIN) npu bench --onnx $(ONNX_INT8) --device $(NPU_DEVICE) \
 		--cache-dir $(NPU_CACHE) --hint throughput --iters 200 --warmup 20
 
@@ -811,7 +812,7 @@ bench/yolo-npu: release
 # runs a single benchmark, e.g. `make bench/mqar` (multi-query associative recall).
 # Add new benchmarks by registering them in crates/bench/src/lib.rs::registry -
 # the generic `bench/%` rule runs any registered name with no Makefile change.
-bench: release
+bench: build/release
 	$(BRAIN) bench --seed $(SEED)
 
 # ---- forecasting ----------------------------------------------------------
@@ -821,13 +822,13 @@ bench: release
 # non-zero if any model falsely beats naive on it. Add HTML=path to also write a
 # self-contained HTML report. Foundation models join the same battery as they
 # are imported.
-forecast/compare: release
+forecast/compare: build/release
 	$(BRAIN) forecast compare --seed $(SEED) $(if $(HTML),--html $(HTML),)
 
 # `make forecast/serve` starts the unified JSONL server with the baselines
 # registered. Defaults to a Unix socket; override with LISTEN=host:port for TCP
 # or SOCKET=path for a different socket path.
-forecast/serve: release
+forecast/serve: build/release
 	$(BRAIN) forecast serve $(if $(LISTEN),--listen $(LISTEN),--socket $(or $(SOCKET),/tmp/brain-forecast.sock))
 
 # `make bench/scaling` runs the multi-scale scaling-law sweep (a separate entry
@@ -835,14 +836,14 @@ forecast/serve: release
 # sizes and fits L(N) = E + A*N^-alpha, printing the size|params|flops|loss table
 # plus the fitted exponent alpha and fit R^2. Foundation for the later
 # per-capability predictive-scaling / eval-harness work. ~5 min on the CPU backend.
-bench/scaling: release
+bench/scaling: build/release
 	$(BRAIN) bench scaling --seed $(SEED)
 
 # `make bench/eval ARCH=<name>` runs the turn-key architecture-eval harness: the
 # WHOLE registered battery against one architecture, aggregated per capability
 # axis, writing a structured artifact to results/<arch>-<seed>.json. Add a new
 # architecture in crates/bench/src/arch.rs::arch_registry, then ARCH=<name> here.
-bench/eval: release
+bench/eval: build/release
 	$(BRAIN) bench eval --arch $(ARCH) --seed $(SEED)
 
 # `make bench/scale ARCH=<name>` runs the PREDICTIVE per-capability scaling sweep:
@@ -851,14 +852,14 @@ bench/eval: release
 # score at 2x/4x the largest N, and write results/scale-<arch>-<seed>.json. This
 # answers "how will each capability improve as we grow the model?" before paying
 # for the bigger run. ~few min on the CPU backend (3 sizes x 6 axes, smoke budget).
-bench/scale: release
+bench/scale: build/release
 	$(BRAIN) bench scale --arch $(ARCH) --seed $(SEED)
 
 # `make bench/advise` prints RANKED tuning recommendations (what to tune to improve
 # in the best capability direction): headroom x size-slope per axis, with a concrete
 # action (increase size | change mechanism | more data/reg | deprioritize). Consumes
 # the eval artifact and, if present, the scaling artifact for the same ARCH/SEED.
-bench/advise: release
+bench/advise: build/release
 	@set -e; ev="results/$(ARCH)-$(SEED).json"; sc="results/scale-$(ARCH)-$(SEED).json"; \
 	if [ ! -f "$$ev" ]; then \
 		echo "no $$ev - run 'make bench/eval ARCH=$(ARCH)' first"; exit 2; \
@@ -869,7 +870,7 @@ bench/advise: release
 # `make bench/compare` prints a side-by-side leaderboard (overall pass-rate +
 # per-axis + per-benchmark scores, columns = architectures) over every artifact
 # under results/, so a new architecture is diffed against priors at a glance.
-bench/compare: release
+bench/compare: build/release
 	@set -e; \
 	n=$$(find results -maxdepth 1 -name '*.json' ! -name 'scale-*' -print0 2>/dev/null | tr -cd '\0' | wc -c); \
 	if [ "$$n" -eq 0 ]; then \
@@ -879,14 +880,14 @@ bench/compare: release
 
 # Generic single-benchmark rule (`make bench/mqar`, …). The explicit bench/eval,
 # bench/compare, bench/scaling, bench/char targets above take precedence.
-bench/%: release
+bench/%: build/release
 	$(BRAIN) bench $* --seed $(SEED)
 
 # ---- shared GPT char-dataset benchmark (legacy) ---------------------------
 # Train + eval the GPT baseline on the same char datasets, fixed seed/splits,
 # so results are comparable. (MoE-on-char-data + federated rows are a documented
 # follow-up - the MoE engine currently trains on its own 64-symbol rule task.)
-bench/char: release
+bench/char: build/release
 	@for d in calculator reverser; do \
 		echo "=== dataset: $$d ==="; \
 		$(MAKE) data/$$d N=$(N) SEED=$(SEED); \
@@ -895,7 +896,7 @@ bench/char: release
 	done
 
 # ---- federated MoE artifact round-trip ------------------------------------
-federated-demo: release
+federated-demo: build/release
 	@mkdir -p $(OUT)
 	$(BRAIN) train --steps 50 --out $(OUT)/moe.safetensors
 	$(BRAIN) federated split $(OUT)/moe.safetensors $(OUT)/shards
@@ -931,14 +932,14 @@ PERF_LADDER ?= 1,2,4,8,16,32
 
 # The whole core battery on the current device: latency floor, saturated
 # ceiling, realistic serving, and the concurrency curve.
-perf: release
+perf: build/release
 	@set -e; for s in latency throughput serve; do \
 		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --seed $(SEED); \
 	done; \
 	$(BRAIN) perf run sweep --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) --seed $(SEED)
 
 # One scenario: `make perf/sweep`, `make perf/serve`, …
-perf/%: release
+perf/%: build/release
 	$(BRAIN) perf run $* --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) --seed $(SEED)
 
 # LFM2.5-Encoder concurrency benchmark, standalone: the residency-executor
@@ -949,7 +950,7 @@ perf/%: release
 # depth/mirror/splat targets).
 LFM_WEIGHTS ?= out/lfm-230m.safetensors
 LFM_INPUT ?= 8192
-perf/lfm: release
+perf/lfm: build/release
 	@test -n "$(LFM_TOKENIZER)" || (echo "set LFM_TOKENIZER=<path to LFM2.5-Encoder tokenizer.json>"; exit 2)
 	@set -e; for s in latency sweep; do \
 		$(BRAIN) perf run $$s --target lfm:$(LFM_WEIGHTS):$(LFM_TOKENIZER) \
@@ -965,7 +966,7 @@ perf/lfm: release
 FLUX2_SIZE ?= 512x512x4
 FLUX2_REQUESTS ?= 2
 FLUX2_WARMUP ?= 1
-perf/flux2: release
+perf/flux2: build/release
 	@test -n "$(BRAIN_FLUX2_DIT)" || (echo "set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER"; exit 2)
 	$(BRAIN) perf run latency --target flux2:$(FLUX2_SIZE) \
 		--concurrency 1 --requests $(FLUX2_REQUESTS) --warmup $(FLUX2_WARMUP) \
@@ -982,7 +983,7 @@ perf/flux2: release
 WAN_SIZE ?= 9x256x256x4
 WAN_REQUESTS ?= 2
 WAN_WARMUP ?= 1
-perf/wan: release
+perf/wan: build/release
 	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER"; exit 2)
 	$(BRAIN) perf run latency --target wan:$(WAN_SIZE) \
 		--concurrency 1 --requests $(WAN_REQUESTS) --warmup $(WAN_WARMUP) \
@@ -990,14 +991,14 @@ perf/wan: release
 
 # Leaderboard over every perf artifact. Refuses to rank across artifact units,
 # excludes runs whose correctness gate failed, and warns on differing axes.
-perf/compare: release
+perf/compare: build/release
 	@set -e; \
 	n=$$(find results -maxdepth 1 -name 'perf-*.json' -print0 2>/dev/null | tr -cd '\0' | wc -c); \
 	if [ "$$n" -eq 0 ]; then echo "no perf artifacts yet - run 'make perf' first"; exit 2; fi; \
 	find results -maxdepth 1 -name 'perf-*.json' -print0 | xargs -0 $(BRAIN) perf compare
 
 # CI-sized: every scenario shrunk to seconds, on the CPU backend.
-perf/smoke: release
+perf/smoke: build/release
 	@set -e; for s in latency throughput serve sweep mixed overload soak frontend; do \
 		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload interactive --smoke --seed $(SEED); \
 	done
@@ -1015,7 +1016,7 @@ docs:
 # Heavy and network-bound, not compute-bound - see scripts/demo/quickstart.sh's
 # own docs. `test/e2e/quickstart` asserts on this target's output afterward.
 .PHONY: docs/quickstart
-docs/quickstart: release
+docs/quickstart: build/release
 	scripts/demo/quickstart.sh
 
 # Real end-to-end s3dit (Z-Image) int8 generation (256x256) against the fetched
@@ -1025,11 +1026,11 @@ s3dit/int8-e2e:
 	bash scripts/run_s3dit_int8_e2e.sh
 
 # ---- FLUX.2 Klein (crates/flux2; weights via BRAIN_FLUX2_* env) ----
-flux2/generate: release
+flux2/generate: build/release
 	@test -n "$(BRAIN_FLUX2_DIT)" || (echo "set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER"; exit 2)
 	$(BRAIN) flux2 generate --prompt "$(PROMPT)" --out out/flux2.ppm $(FLUX2_FLAGS)
 
-flux2/edit: release
+flux2/edit: build/release
 	@test -n "$(FLUX2_REF)" || (echo "set FLUX2_REF=<ref.ppm> PROMPT=..."; exit 2)
 	$(BRAIN) flux2 generate --prompt "$(PROMPT)" --ref $(FLUX2_REF) --out out/flux2-edit.ppm $(FLUX2_FLAGS)
 
@@ -1049,7 +1050,7 @@ wan/parity:
 	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE (and BRAIN_TESTDATA if the goldens are not in ./testdata)"; exit 2)
 	BRAIN_REQUIRE_FIXTURES=1 $(CARGO_TEST) -p brain-wan --test dit_parity --test vae_parity
 
-wan/t2v: release
+wan/t2v: build/release
 	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER"; exit 2)
 	$(BRAIN) wan t2v --prompt "$(WAN_PROMPT)" --output-path out/wan.mp4 $(WAN_FLAGS)
 

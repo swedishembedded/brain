@@ -24,7 +24,7 @@ only different `ANTHROPIC_*` environment variables.
 ## Run it
 
 ```bash
-make release
+make build/release
 examples/api/claude-with-brain.sh                 # interactive claude on Qwen/Qwen3-0.6B
 examples/api/claude-with-brain.sh -p "hi"          # or pass any claude flags through
 ```

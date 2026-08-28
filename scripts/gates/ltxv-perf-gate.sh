@@ -57,7 +57,7 @@ FLOOR="${LTXV_PERF_FLOOR:-0.5}"
 SHAPE="${LTXV_PERF_SHAPE:-9x64x64x4}" # the M4 smoke shape: 2 latent frames, 2x2 latent grid
 export BRAIN_DEVICE=cpu
 
-[ -x "$BIN" ] || { echo "build first: make release"; exit 2; }
+[ -x "$BIN" ] || { echo "build first: make build/release"; exit 2; }
 if [ -z "${BRAIN_LTXV_VAE:-}" ]; then
   echo "SKIP ltxv-perf-gate (set BRAIN_LTXV_VAE to a real ltx-2.5-video-vae-conv-bf16.safetensors)"
   exit 0

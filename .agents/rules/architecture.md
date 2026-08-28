@@ -162,8 +162,8 @@ Always go through the Makefile - it wraps cargo with the project's expected
 flags and targets.
 
 ```bash
-make build                  # debug build, native default-members
-make release                # optimized ./target/release/brain
+make build/debug                  # debug build, native default-members
+make build/release                # optimized ./target/release/brain
 make test                   # full suite (MOE_SKIP_GPU_TESTS=1 with no GPU;
                             # BRAIN_DEVICE=cpu runs the whole suite GPU-free)
 make gradcheck              # finite-difference backprop gate

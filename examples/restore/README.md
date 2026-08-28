@@ -65,7 +65,7 @@ every model the server has built, so it is only `1` when `restore` is the only
 one served; what matters is that the sweep does not *increase* it.)
 
 > Measured on a Tesla P40 with a **debug** build; the first call includes the
-> import. Use `make release` for representative latency.
+> import. Use `make build/release` for representative latency.
 
 ### Scope
 
