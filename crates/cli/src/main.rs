@@ -295,7 +295,12 @@ FEDERATED MoE (train experts separately, then assemble)
 
 BENCHMARK SUITE (architecture evaluation)
   brain bench [<name>] [--seed S]          # run all benchmarks, or one by name
-      names: mqar                          # prints a benchmark|score|threshold|pass table
+                                           # prints a benchmark|score|threshold|pass table
+      names: mqar | toolcall | mad_recall | mad_fuzzy_recall | mad_noisy_recall |
+             mad_selective_copy | mad_memorize | parity | mod_add | dyck |
+             mad_compress | forecast_seasonal_trend | forecast_ar1 |
+             forecast_garch_vol | forecast_regime_switch | forecast_random_walk |
+             forecast_jump_diffusion
   brain bench scaling [--seed S]           # multi-size scaling-law sweep: trains the MQAR
                                            # task at several sizes, fits L(N)=E+A*N^-alpha,
                                            # prints the size|params|flops|loss table + alpha,R2

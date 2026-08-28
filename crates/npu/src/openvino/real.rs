@@ -1458,15 +1458,16 @@ pub fn bench(
         samples.push(t.elapsed().as_secs_f64() * 1e3);
     }
     let wall = t0.elapsed().as_secs_f64();
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let pct = |p: f64| samples[((samples.len() as f64 * p) as usize).min(samples.len() - 1)];
-    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    // Shared latency stats (`perf::stats::Dist`) instead of a locally
+    // reimplemented sort+index percentile.
+    let mut d = perf::stats::Dist::from_millis(samples);
+    let n = d.len();
     Ok(BenchResult {
         device: session.device().to_string(),
-        iters: samples.len(),
-        p50_ms: pct(0.50),
-        p99_ms: pct(0.99),
-        mean_ms: mean,
-        throughput_fps: samples.len() as f64 / wall,
+        iters: n,
+        p50_ms: d.percentile(0.50).unwrap_or(0.0),
+        p99_ms: d.percentile(0.99).unwrap_or(0.0),
+        mean_ms: d.mean().unwrap_or(0.0),
+        throughput_fps: n as f64 / wall,
     })
 }

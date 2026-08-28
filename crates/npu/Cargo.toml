@@ -31,6 +31,11 @@ brain-worldmirror2.workspace = true
 brain-data.workspace = true
 brain-eval.workspace = true
 brain-events.workspace = true
+# Shared latency-percentile/stats math (`stats::Dist`) so the KV-cache and
+# OpenVINO bench paths report the same p50/p99/mean definition the rest of the
+# performance suite does, instead of a locally reimplemented one. No cycle:
+# brain-perf does not (transitively) depend on brain-npu.
+brain-perf.workspace = true
 bytemuck.workspace = true
 serde_json.workspace = true
 

@@ -163,13 +163,12 @@ fn assert_device(got: &str, want: NpuDevice, allow_fallback: bool) {
     }
 }
 
-fn percentiles(mut xs: Vec<f64>) -> (f64, f64, f64) {
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = xs.len();
-    let mean = xs.iter().sum::<f64>() / n as f64;
-    let p50 = xs[n / 2];
-    let p99 = xs[((n as f64 * 0.99) as usize).min(n - 1)];
-    (p50, p99, mean)
+/// p50/p99/mean over `xs`, via the shared [`perf::stats::Dist`] so this bin
+/// reports latency the same way the rest of the performance suite does,
+/// rather than a locally reimplemented percentile.
+fn percentiles(xs: Vec<f64>) -> (f64, f64, f64) {
+    let mut d = perf::stats::Dist::from_millis(xs);
+    (d.percentile(0.50).unwrap_or(0.0), d.percentile(0.99).unwrap_or(0.0), d.mean().unwrap_or(0.0))
 }
 
 /// Deterministic in-vocab id (Knuth multiplicative hash), matching the

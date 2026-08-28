@@ -1464,6 +1464,7 @@ dependencies = [
  "brain-nemotronasr",
  "brain-onnx",
  "brain-paramstore",
+ "brain-perf",
  "brain-qwen3",
  "brain-qwen35moe",
  "brain-qwen3asr",
