@@ -643,6 +643,7 @@ dependencies = [
  "brain-arch",
  "brain-audio",
  "brain-backend-api",
+ "brain-backend-cpu",
  "brain-bench",
  "brain-capability",
  "brain-captioner",

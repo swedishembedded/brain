@@ -264,10 +264,16 @@ fn run_list(args: &[String]) -> i32 {
 }
 
 fn run_reprofile(locals: &[LocalModel]) {
+    // Still does the real remeasure - every local model's price below needs
+    // fresh roofline numbers - but no longer prints its OWN GFLOP/s+GB/s
+    // summary of it: `brain roofline` is now the canonical place to see the
+    // full hardware picture (every accelerator, every dtype), so a second,
+    // differently-formatted dump of the same GPU numbers here would just be
+    // a duplicate that can drift out of sync with it.
     let gpu = gpu_core::Gpu::new(&[]);
     match gpu_core::roof::reprofile(&gpu) {
-        Some(r) => println!("hardware profile refreshed: {:.0} GFLOP/s fp32, {:.0} GB/s DRAM", r.gflops, r.gbs),
-        None => println!("hardware profile: unavailable on this device/backend (BRAIN_NO_ROOF, or an unprobeable backend)"),
+        Some(_) => println!("hardware roofline refreshed - see 'brain roofline' for the full picture"),
+        None => println!("hardware roofline: unavailable on this device/backend (BRAIN_NO_ROOF, or an unprobeable backend)"),
     }
     let mut priced = 0;
     for l in locals {

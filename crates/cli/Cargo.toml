@@ -32,6 +32,7 @@ brain-residency.workspace = true
 brain-memauth.workspace = true
 brain-backend-api.workspace = true
 brain-gpu-core.workspace = true
+brain-backend-cpu.workspace = true
 brain-wm-core.workspace = true
 brain-diamond.workspace = true
 brain-wm-display.workspace = true

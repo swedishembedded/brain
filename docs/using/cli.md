@@ -69,6 +69,7 @@ way.
 | Command | Purpose |
 |---|---|
 | `brain devices` | canonical GPU table (index, PCI bus, UUID, VRAM) + ambient device selection - see [Hardware](../introduction/hardware.md) |
+| `brain roofline` | measured, cross-accelerator hardware compute-capacity report: every GPU, the NPU, and the CPU, each dtype it supports, streamed as each finishes |
 | `brain data` | dataset generation and tokenizers |
 | `brain label` | caption a dataset with any vision-language model - see [Labeling a dataset](../training/labeling.md) |
 | `brain caps` | every architecture's action manifest - see above |
@@ -87,16 +88,20 @@ way.
 | `brain import FILE` | GGUF import with no architecture token - dispatches on the file's own `general.architecture` header instead of the command line |
 | `brain quantize SRC` | the export direction: any safetensors/GGUF checkpoint to a quantized GGUF, with no per-architecture code at all |
 
-`models`, `flops`, `perf`, `bench` and `devices` sound similar but answer
-different questions, and none of them subsumes another: `models` is what you
-HAVE (an inventory, cache-only, fast even over a large store); `flops` prices
-ONE model's forward/backward pass in detail, on demand (and - naming a real
-checkpoint via `--weights` - feeds the very cache `models list`/`models
-profile` read, so the two can never disagree); `perf` MEASURES real
-latency/throughput against a regression baseline, correctness-gated; `bench`
-asks whether an architecture learns at all, no hardware axis; `devices` is
-just the GPU table. `models`'s size/cost columns read `devices`' device data
-and `flops`'s pricing engine directly - never a second copy of either.
+`models`, `flops`, `perf`, `bench`, `devices` and `roofline` sound similar but
+answer different questions, and none of them subsumes another: `models` is
+what you HAVE (an inventory, cache-only, fast even over a large store);
+`flops` prices ONE model's forward/backward pass in detail, on demand (and -
+naming a real checkpoint via `--weights` - feeds the very cache `models
+list`/`models profile` read, so the two can never disagree); `perf` MEASURES
+real latency/throughput against a regression baseline, correctness-gated;
+`bench` asks whether an architecture learns at all, no hardware axis;
+`devices` is just the GPU table, no timing; `roofline` answers "what can this
+hardware do" - raw, model-INDEPENDENT compute capacity (GFLOP/s, GOP/s,
+GB/s) for every accelerator on the box - which is the number `flops`' own
+"roofs" line and `perf`'s utilisation figures are both graded against.
+`models`'s size/cost columns read `devices`' device data and `flops`'s
+pricing engine directly - never a second copy of either.
 
 Run `brain <cmd> --help` (or `brain <architecture> --help`) for any
 subcommand's full flag list - `brain help` and this page are the map, not the

@@ -903,6 +903,7 @@ front-end to depend on.
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 | **Fetch a model's weights** (`brain pull <id\|url>`), and where models live on disk | `crates/cli/src/pull_cli.rs` (the verb + both progress modes), `brain_modelstore::refurl` (what a user may type), `brain_modelstore::default_root` (the ONE answer to "where do models live"; `--brain-data-dir` publishes into it), `crate::supply::execute_plan` (the shared plan/execute/finish core auto-fetch uses too); `docs/using/cli.md` |
 | **See what's on disk / declared-but-not-pulled, and what it costs** (`brain models list\|list-adapters\|info\|profile`) | `crates/cli/src/models_cli.rs` (the four verbs) over `crates/cli/src/tree.rs` (the shared plain/interactive-ratatui renderer - every LEAF line is self-contained, so `\| grep` works); the declared-quant registry is `brain_arch::Arch::variants`; per-model cost is the shared `crates/modelcost` cache (below) |
+| **What can this hardware do** - raw, model-independent GPU+NPU+CPU compute capacity (`brain roofline [gpu\|npu\|cpu] [--reprofile] [--json]`) | `crates/cli/src/roofline_cli.rs`, streamed over `gpu_core::roof` (every physical GPU, not just the ambient one), `npu::roofline` (fp16/int8 GOP/s, `None` never fabricated), `backend_cpu::roofline` (fp32 GFLOP/s) |
 | **Tracing/observability** (`--trace-<family> <0-5>`, adding a family, instrumenting a crate) | `crates/trace` - the family registry is `crates/trace/src/registry.rs`; the CLI wiring is `install_tracing` in `crates/cli/src/main.rs` |
 | **Quantize any checkpoint to a GGUF** (tier, per-tensor policy, streaming write, two-way coverage) | `crates/checkpoint/src/quantize.rs` (`Tier`/`Policy`/`plan`/`convert`), `checkpoint::quant::quantize_par`, `checkpoint::gguf_write::Writer`; CLI `brain quantize` in `crates/cli/src/quantize_cli.rs` |
 
@@ -953,7 +954,7 @@ Direct binary - the model is selected by the command:
 
 ```bash
 ./target/release/brain <verb> <arch> [opts]      # or: brain <arch> <verb> [opts] - same command
-# infra verbs: data devices npu federated bench perf forecast caps serve gradcheck flops models
+# infra verbs: data devices npu federated bench perf forecast caps serve gradcheck flops models roofline
 # archs with their own dedicated CLI module: gpt2 qwen3 qwen35moe qwen35 glmdsa lfm2 qwen3tts
 #   yolov8 zipdepth flux2 worldmirror2 splat qwen3omnimoe diamond toypid toymoe
 # every other arch (`brain caps` lists them all) is reached the same way, its

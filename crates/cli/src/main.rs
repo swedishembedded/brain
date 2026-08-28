@@ -76,6 +76,7 @@ mod resident_sam2;
 mod resident_restore;
 mod resident_supir;
 mod resolve;
+mod roofline_cli;
 mod run_cli;
 mod sam2_cli;
 mod splat_cli;
@@ -441,6 +442,22 @@ MODELS (the store's own view of itself: what's local, what isn't, what it costs)
       builds the model for real and TIMES it (load time, cold pass, best of
       --reps (default 5) hot passes, achieved FLOP/s, per-layer FLOPs) -
       real execution, never cached.
+
+ROOFLINE (measured, cross-accelerator hardware compute capacity)
+  brain roofline [gpu|npu|cpu] [--reprofile] [--json]
+      What can this box actually DO - raw, model-independent GFLOP/s, GOP/s
+      and GB/s for every GPU (not just the ambient one), the NPU, and the
+      CPU, each dtype it supports. Streamed as each accelerator's
+      measurement completes - GPU first, then NPU, then CPU - so a GPU
+      number lands well under 10s regardless of how long the NPU probe
+      takes to conclude \"not present\". `gpu`/`npu`/`cpu` scope the report
+      to just that section. --reprofile forces a fresh measurement instead
+      of GPU's own cache-first path (NPU's probe has no cache to bypass, so
+      it is always fresh already; CPU always measures fresh, it is fast).
+      Distinct from `brain flops` (one model's cost, see FLOP/OPS ACCOUNTING
+      above) and `brain perf` (empirical serving load, see PERFORMANCE
+      BENCHMARKING above). Plain rows are self-contained
+      (`brain roofline | grep gpu0`); --json emits the same rows as an array.
 
 GGUF IMPORT (one-time conversion; dispatches on general.architecture)
   brain import FILE [--out PATH] [--id VENDOR/REPO]
@@ -1040,6 +1057,7 @@ fn main() {
         // reader to run, and honouring it costs one arm.
         Some("pull") | Some("fetch") => std::process::exit(pull_cli::run_pull(&argv[2..])),
         Some("models") => std::process::exit(models_cli::run_models(&argv[2..])),
+        Some("roofline") => std::process::exit(roofline_cli::run_roofline(&argv[2..])),
         Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
         Some(_) => resolve::dispatch(&argv[1..], HELP),
