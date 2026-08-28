@@ -34,11 +34,19 @@ const HELP: &str = "brain flux2 <cmd>
            [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
                                     # --ref exactly (which must be at the output size);
                                     # greys blend. Omit = regenerate everything.
+           [--text-encoder <path>]  # swap the text encoder: an HF directory, or a single
+                                    # .safetensors/.gguf FILE. Overrides BRAIN_FLUX2_TE.
+                                    # The shape is taken from --variant (klein-4b => Qwen3-4B,
+                                    # klein-9b => Qwen3-8B), never from a config.json, so any
+                                    # checkpoint with the stock tensor names and shapes drops
+                                    # in - a fine-tune, an abliteration, a re-quantisation.
+                                    # A checkpoint of a DIFFERENT shape is rejected at load.
            [--adapter <path>]       # LoRA: brain's own `finetune` checkpoint, or a
                                     # third-party ai-toolkit/ComfyUI .safetensors
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
+           [--text-encoder <path>]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
            # is what `generate --adapter` loads. Do NOT name it '.safetensors':
@@ -144,6 +152,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut mask_path: Option<String> = None;
     let mut adapter: Option<String> = None;
     let mut lora_scale = 1.0f32;
+    let mut text_encoder: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> {
@@ -177,6 +186,7 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--mask" => mask_path = Some(need(i)?.clone()),
             "--adapter" => adapter = Some(need(i)?.clone()),
             "--lora-scale" => lora_scale = need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?,
+            "--text-encoder" => text_encoder = Some(need(i)?.clone()),
             other => return Err(format!("unknown flag {other}\n{HELP}")),
         }
         i += 2;
@@ -226,7 +236,10 @@ fn generate(args: &[String]) -> Result<(), String> {
         o.mask = Some(m);
     }
 
-    let paths = Paths::from_env()?;
+    let mut paths = Paths::from_env()?;
+    if let Some(te) = text_encoder {
+        paths.te = te;
+    }
     let n_gen = (o.height / 16) * (o.width / 16);
     // Every supplied reference conditions the model; under `--strength` the
     // first one does so at `--ref-cond-scale` of its own size *and* seeds the
@@ -311,6 +324,7 @@ fn check_adapter_out(path: &str) -> Result<(), String> {
 fn finetune(args: &[String]) -> Result<(), String> {
     let mut data_dir: Option<String> = None;
     let mut variant_name = "klein-4b".to_string();
+    let mut ft_text_encoder: Option<String> = None;
     let mut opts = flux2::finetune::TrainOpts {
         steps: 200,
         rank: 16,
@@ -348,6 +362,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
                 continue;
             }
             "--trainer" => opts.trainer = flux2::finetune::Trainer::from_name(need(i)?)?,
+            "--text-encoder" => ft_text_encoder = Some(need(i)?.clone()),
             "--cards" => opts.cards = need(i)?.parse().map_err(|e| format!("--cards: {e}"))?,
             "--help" | "-h" => {
                 println!("{HELP}");
@@ -381,7 +396,13 @@ fn finetune(args: &[String]) -> Result<(), String> {
     }
     let cfg = Flux2Config::from_name(&variant_name)?;
     flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
-    let paths = Paths::from_env()?;
+    let mut paths = Paths::from_env()?;
+    // Training and generation must be able to name the SAME encoder: an
+    // adapter learns against the conditioning it was shown, so training on one
+    // encoder and generating on another silently degrades every result.
+    if let Some(te) = ft_text_encoder {
+        paths.te = te;
+    }
 
     eprintln!(
         "flux2 finetune: {variant_name} {} trainer, rank {} steps {} size {} lr {} seed {} ckpt-every {}{} -> {}",
