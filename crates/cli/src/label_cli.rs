@@ -45,7 +45,7 @@ fn instruction(prompt: &str, trigger: &str, role: &str) -> String {
 const HELP: &str = "brain label <cmd>
   images <dir> [--model qwen3vl|fastvlm|llava] [--weights DIR] [--out FILE]
                [--prompt TEXT] [--trigger PHRASE] [--trigger-role ROLE]
-               [--max-new N] [--max-pixels N]
+               [--max-new N] [--max-pixels N] [--precision fp32|int8]
                [--overwrite]
 
   Caption every image in <dir> with a vision-language model and write the
@@ -77,7 +77,14 @@ const HELP: &str = "brain label <cmd>
                   a knob (qwen3vl). Fewer pixels means fewer visual tokens,
                   which is the cheapest way to make a large captioner
                   affordable on a busy machine; 0 (default) keeps the model's
-                  own default.
+                  own default. Captioning cost is close to linear in this.
+  --precision P   decoder storage tier, where the model has one (qwen3vl):
+                  fp32 (default, exact) or int8. int8 reads a quarter of the
+                  weight bytes per token, and captioning is bandwidth-bound,
+                  so it is much faster - but it is LOSSY, and these captions
+                  are training data. Compare both on YOUR images before
+                  choosing it (`qwen3vl_bench compare --dir <dir>` prints the
+                  two side by side with the divergence).
   --overwrite     re-caption images that already have a caption, discarding
                   what is there. WITHOUT this flag a re-run is resumable and
                   idempotent: existing captions - including hand edits - are
@@ -131,17 +138,31 @@ const CAPTIONERS: &[&str] = &["qwen3vl", "fastvlm", "llava"];
 /// `max_pixels` is honoured only where the model has such a knob - FastVLM's
 /// tower is fixed-size, so there is nothing to tune. That asymmetry is exactly
 /// the kind of per-model detail the seam keeps out of the workflow.
-fn build(model: &str, weights: &str, max_pixels: u32) -> Result<Box<dyn Captioner>, String> {
+fn build(model: &str, weights: &str, max_pixels: u32, precision: &str) -> Result<Box<dyn Captioner>, String> {
     match model {
         "qwen3vl" => {
-            let mut c = qwen3vl::captioner::Qwen3VlCaptioner::new(weights);
+            let mut c = qwen3vl::captioner::Qwen3VlCaptioner::new(weights).with_precision(qwen3vl::caps::Precision::from_name(precision)?);
             if max_pixels > 0 {
                 c = c.with_max_pixels(max_pixels);
             }
             Ok(Box::new(c))
         }
-        "fastvlm" => Ok(Box::new(fastvlm::captioner::FastVlmCaptioner::new(weights))),
-        "llava" => Ok(Box::new(llava::captioner::LlavaCaptioner::new(weights))),
+        "fastvlm" => {
+            if !precision.is_empty() && precision != "fp32" {
+                return Err(format!("--precision {precision} is not available for fastvlm (its tower and decoder are fp32 only)"));
+            }
+            Ok(Box::new(fastvlm::captioner::FastVlmCaptioner::new(weights)))
+        }
+        "llava" => {
+            // Same rule as fastvlm: a captioner with no int8 tier REFUSES the
+            // request rather than quietly serving fp32. A run that asked for a
+            // lossy tier and did not get it must not be mistaken for one that
+            // did - that is the whole point of the tier being explicit.
+            if !precision.is_empty() && precision != "fp32" {
+                return Err(format!("--precision {precision} is not available for llava (fp32 only)"));
+            }
+            Ok(Box::new(llava::captioner::LlavaCaptioner::new(weights)))
+        }
         other => Err(format!("unknown --model {other} ({})", CAPTIONERS.join(", "))),
     }
 }
@@ -226,6 +247,7 @@ fn images(args: &[String]) -> Result<(), String> {
     let trigger_role = a.str_or("--trigger-role", DEFAULT_TRIGGER_ROLE);
     let max_new = a.u32_or("--max-new", 320);
     let max_pixels = a.u32_or("--max-pixels", 0);
+    let precision = a.str_or("--precision", "fp32");
     let overwrite = a.take_flag("--overwrite");
     let dir = a.positional().unwrap_or_default();
     a.finish();
@@ -245,7 +267,7 @@ fn images(args: &[String]) -> Result<(), String> {
         // brain can fetch one.
         crate::supply::ensure_env_weights(&model);
     }
-    let mut model = build(&model, &weights, max_pixels)?;
+    let mut model = build(&model, &weights, max_pixels, &precision)?;
     let caps = model.capabilities();
     eprintln!("label: {} -> {}/{out} (max_new {max_new}{})", caps.model, dir, if overwrite { ", overwrite" } else { ", resuming" });
 

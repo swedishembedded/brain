@@ -52,6 +52,49 @@ use crate::preprocess::{normalize_unit, pack_patches, patch_grid, smart_resize};
 
 pub const MODEL: &str = "brain/qwen3vl";
 
+/// The storage tier this checkpoint's DECODER is built at. The vision tower
+/// is always fp32: it is a small fraction of the weights and none of the
+/// per-token bandwidth, so narrowing it would trade accuracy for nothing.
+///
+/// `int8` is **LOSSY** and exists as a named request precisely so that it can
+/// never arrive by defaulting. Everything downstream of a caption made this
+/// way is downstream of a different model, so it is reported on load and it
+/// is part of the resident key - an int8 request never silently reuses an
+/// fp32 resident, or the reverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Precision {
+    #[default]
+    F32,
+    I8,
+}
+
+impl Precision {
+    /// Parse the user-facing spelling. The ONE place these strings are
+    /// recognised, so a CLI flag, an action parameter and an error message
+    /// cannot drift about what `int8` is called.
+    pub fn from_name(v: &str) -> Result<Precision, String> {
+        match v {
+            "fp32" | "f32" | "" => Ok(Precision::F32),
+            "int8" | "i8" => Ok(Precision::I8),
+            other => Err(format!("qwenvl: unknown precision {other:?} (fp32, int8)")),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Precision::F32 => "fp32",
+            Precision::I8 => "int8",
+        }
+    }
+
+    fn dtype(self) -> gpu_core::select::Dtype {
+        match self {
+            Precision::F32 => gpu_core::select::Dtype::F32,
+            Precision::I8 => gpu_core::select::Dtype::I8,
+        }
+    }
+}
+
 /// Default checkpoint directory - `$BRAIN_QWEN3VL_WEIGHTS`, never a baked-in
 /// absolute path (AGENTS.md: no absolute paths in source).
 fn default_weights() -> String {
@@ -86,6 +129,10 @@ pub fn generate_spec() -> ActionSpec {
             ParamSpec::new("max_pixels", ParamType::Int, "resident capacity: max input image area in pixels (larger requests error, never silently truncate)")
                 .default(json!(DEFAULT_SERVE_MAX_PIXELS)),
         )
+        .param(
+            ParamSpec::new("precision", ParamType::Str, "decoder storage tier: fp32 (default, exact) or int8 (LOSSY, ~4x less weight traffic per token)")
+                .default(json!("fp32")),
+        )
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required())
         .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
@@ -104,6 +151,10 @@ use capability::last_user_text;
 struct Resident {
     weights: String,
     max_pixels: u32,
+    /// The tier this resident was BUILT at, part of its key - see
+    /// [`Precision`]. What the device actually landed on is
+    /// `Qwen3Vl::linear_dtype`, which `load_resident` checks against this.
+    precision: Precision,
     /// How many visual tokens this resident's DeepStack/splice buffers were
     /// allocated for (computed once at construction from `max_pixels`) - see
     /// this module's own doc on why construction-time capacity, not one
@@ -161,7 +212,8 @@ impl Action for GenerateAction {
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
-        let (text, ntok) = with_resident(&dir, max_pixels, |hot| {
+        let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
+        let (text, ntok) = with_resident(&dir, max_pixels, precision, |hot| {
             let p = Prepared::build(hot, &hwc, w, h, &prompt, max_new)?;
             progress(Progress::step(0, max_new, "generating"));
             // Real per-token streaming deltas (the spec declares `.streaming()`):
@@ -197,11 +249,11 @@ impl Action for GenerateAction {
 /// point (the profiler below) cannot acquire it in a different order or forget
 /// to swap on a key change. `f` runs under the lock, which is also the
 /// concurrency contract this action already had ("one request at a time").
-fn with_resident<T>(dir: &str, max_pixels: u32, f: impl FnOnce(&Resident) -> Result<T, String>) -> Result<T, String> {
+fn with_resident<T>(dir: &str, max_pixels: u32, precision: Precision, f: impl FnOnce(&Resident) -> Result<T, String>) -> Result<T, String> {
     let mut guard = RESIDENT.lock().map_err(|_| "qwenvl: resident lock poisoned")?;
-    if !matches!(&*guard, Some(r) if r.weights == dir && r.max_pixels == max_pixels) {
+    if !matches!(&*guard, Some(r) if r.weights == dir && r.max_pixels == max_pixels && r.precision == precision) {
         *guard = None;
-        *guard = Some(load_resident(dir, max_pixels)?);
+        *guard = Some(load_resident(dir, max_pixels, precision)?);
     }
     f(guard.as_ref().unwrap())
 }
@@ -272,16 +324,18 @@ impl Prepared {
 /// of the shipped path: a bench that re-assembled the prompt or re-built the
 /// model itself would be measuring its own copy, and every optimisation would
 /// then be justified against a program nobody runs.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_profiled(
     dir: &str,
     max_pixels: u32,
+    precision: Precision,
     prompt: &str,
     hwc: &[f32],
     w: u32,
     h: u32,
     max_new: u32,
 ) -> Result<(String, crate::model::StageTimes, f64), String> {
-    with_resident(dir, max_pixels, |hot| {
+    with_resident(dir, max_pixels, precision, |hot| {
         let p = Prepared::build(hot, hwc, w, h, prompt, max_new)?;
         let (ids, st) = hot.model.generate_timed(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, |_| {});
         debug_assert_eq!(st.visual_tokens, p.n_visual);
@@ -296,8 +350,33 @@ pub fn generate_profiled(
 /// caller that has not itself called `ensure` on a real handle gets `None` and
 /// silently reports every stage as "no measured roof". The handle lives behind
 /// the resident, so this is where the two can meet.
-pub fn device_roof(dir: &str, max_pixels: u32) -> Result<Option<gpu_core::roof::Roofs>, String> {
-    with_resident(dir, max_pixels, |hot| Ok(gpu_core::roof::ensure(hot.model.gpu())))
+pub fn device_roof(dir: &str, max_pixels: u32, precision: Precision) -> Result<Option<gpu_core::roof::Roofs>, String> {
+    with_resident(dir, max_pixels, precision, |hot| Ok(gpu_core::roof::ensure(hot.model.gpu())))
+}
+
+/// The tier this checkpoint's decoder ACTUALLY landed on, as the same string
+/// [`Precision::name`] uses.
+///
+/// `None` when the shard owns no layer at all. The distinction that matters is
+/// between what was ASKED for and what runs: a device that cannot serve a
+/// packed int8 dot has its request promoted back to fp32 by `Weight::upload`,
+/// and a caller reporting its own request would claim a lossy run that never
+/// happened - or, worse, miss one that did.
+pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<Option<String>, String> {
+    use gpu_core::select::Dtype;
+    // Exhaustive, and deliberately not a `Debug` format: this string is
+    // compared against [`Precision::name`]'s vocabulary, and `{:?}` spells
+    // `F32` as "f32" where that vocabulary says "fp32". Matching every variant
+    // means a new tier is a compile error here rather than a name that
+    // silently matches nothing.
+    let name = |dt: Dtype| match dt {
+        Dtype::F32 => Precision::F32.name(),
+        Dtype::I8 => Precision::I8.name(),
+        Dtype::F16 => "f16",
+        Dtype::BF16 => "bf16",
+        Dtype::Q4 => "q4",
+    };
+    with_resident(dir, max_pixels, precision, |hot| Ok(hot.model.linear_dtype().map(|dt| name(dt).to_string())))
 }
 
 /// Print the per-kernel `BRAIN_PROFILE` table for this checkpoint's resident.
@@ -308,8 +387,8 @@ pub fn device_roof(dir: &str, max_pixels: u32) -> Result<Option<gpu_core::roof::
 /// where a caller with a checkpoint path can reach it. `BRAIN_PROFILE` must
 /// already be set when the resident is BUILT, since the backend reads it once
 /// at construction.
-pub fn dump_profile(dir: &str, max_pixels: u32) -> Result<(), String> {
-    with_resident(dir, max_pixels, |hot| {
+pub fn dump_profile(dir: &str, max_pixels: u32, precision: Precision) -> Result<(), String> {
+    with_resident(dir, max_pixels, precision, |hot| {
         hot.model.gpu().dump_profile();
         Ok(())
     })
@@ -318,10 +397,31 @@ pub fn dump_profile(dir: &str, max_pixels: u32) -> Result<(), String> {
 /// Build (or reuse) the resident for `(dir, max_pixels)` and report how long
 /// that took, without generating anything - the one-off setup cost a caption
 /// profile must not fold into its per-image numbers.
-pub fn load_time(dir: &str, max_pixels: u32) -> Result<f64, String> {
+pub fn load_time(dir: &str, max_pixels: u32, precision: Precision) -> Result<f64, String> {
     let t0 = std::time::Instant::now();
-    with_resident(dir, max_pixels, |_| Ok(()))?;
+    with_resident(dir, max_pixels, precision, |_| Ok(()))?;
     Ok(t0.elapsed().as_secs_f64())
+}
+
+/// Say on every load which tier the decoder ACTUALLY landed on, and refuse a
+/// silent fallback.
+///
+/// A lossy tier is a different model, so a run that asked for it and did not
+/// get it must not look like a run that did - and a run that got it must say
+/// so where the operator can see it, because nothing downstream of a caption
+/// can tell. `Weight::upload` promotes a request the device cannot serve back
+/// to fp32; that is a legitimate outcome and an illegitimate silence.
+fn report_tier(model: &Qwen3Vl, asked: Precision) {
+    let landed = model.linear_dtype();
+    let landed_i8 = landed == Some(gpu_core::select::Dtype::I8);
+    match (asked, landed_i8) {
+        (Precision::I8, false) => eprintln!(
+            "qwenvl: WARNING: int8 was requested but this device promoted the decoder back to fp32 \
+             (its capabilities cannot serve a packed int8 dot) -- this run is exact, and slow"
+        ),
+        (Precision::I8, true) => eprintln!("qwenvl: decoder linears at INT8 (lossy tier, explicitly requested); vision tower fp32"),
+        (Precision::F32, _) => {}
+    }
 }
 
 fn preprocess_min_pixels() -> u32 {
@@ -364,17 +464,17 @@ fn classify_source(weights: &str) -> Result<Source, String> {
     Err(format!("qwenvl: {weights} is neither a checkpoint directory nor a GGUF file"))
 }
 
-fn load_resident(dir: &str, max_pixels: u32) -> Result<Resident, String> {
+fn load_resident(dir: &str, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
     match classify_source(dir)? {
-        Source::HfDir(d) => load_hf_resident(dir, &d, max_pixels),
-        Source::Gguf(files) => load_gguf_resident(dir, files, max_pixels),
+        Source::HfDir(d) => load_hf_resident(dir, &d, max_pixels, precision),
+        Source::Gguf(files) => load_gguf_resident(dir, files, max_pixels, precision),
     }
 }
 
 /// Build from a two-file llama.cpp checkpoint. Both halves are named on the
 /// way in, because a run that silently used a different projector than the
 /// operator expected has no visible symptom.
-fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_pixels: u32) -> Result<Resident, String> {
+fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
     eprintln!("qwenvl: gguf checkpoint: model {}, vision projector {}", files.lm.display(), files.mmproj.display());
     let tok = crate::gguf_import::tokenizer(&files)?;
     let lm = checkpoint::gguf::MmapGguf::open(files.lm.to_str().ok_or("qwenvl: non-UTF8 lm path")?)?;
@@ -393,8 +493,10 @@ fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_p
         0,
         n_visual_capacity,
         cfg.mrope_section,
+        precision.dtype(),
     );
-    Ok(Resident { weights: weights.to_string(), max_pixels, n_visual_capacity, cfg, model, tok })
+    report_tier(&model, precision);
+    Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, cfg, model, tok })
 }
 
 /// Capacity placement: image_row0 is arbitrary (Qwen3Vl::generate's
@@ -413,7 +515,7 @@ fn visual_capacity(cfg: &Qwen3VlConfig, max_pixels: u32) -> u32 {
     crate::preprocess::image_token_count(h_cap, w_cap, cfg.vision.patch_size, cfg.vision.spatial_merge_size)
 }
 
-fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32) -> Result<Resident, String> {
+fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
     let cfg_path = format!("{dir}/config.json");
     let cfg_text = std::fs::read_to_string(&cfg_path).map_err(|e| format!("qwenvl: cannot read {cfg_path}: {e}"))?;
     let cfg_json: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("qwenvl: cannot parse {cfg_path}: {e}"))?;
@@ -421,9 +523,11 @@ fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32) -> Result<Residen
     let tok = data::qwen_tokenizer::QwenBpe::from_dir(dir).map_err(|e| format!("qwenvl: tokenizer: {e}"))?;
 
     let n_visual_capacity = visual_capacity(&cfg, max_pixels);
-    let model = Qwen3Vl::from_hf(dir, cfg.vision.clone(), cfg.text.clone(), SEQ_LEN, cfg.image_token_id, 0, n_visual_capacity, cfg.mrope_section)?;
+    let model =
+        Qwen3Vl::from_hf(dir, cfg.vision.clone(), cfg.text.clone(), SEQ_LEN, cfg.image_token_id, 0, n_visual_capacity, cfg.mrope_section, precision.dtype())?;
+    report_tier(&model, precision);
 
-    Ok(Resident { weights: weights.to_string(), max_pixels, n_visual_capacity, cfg, model, tok })
+    Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, cfg, model, tok })
 }
 
 /// Bilinear-resample interleaved-HWC `[0,1]` pixels from `(w,h)` to

@@ -33,13 +33,26 @@ use serde_json::json;
 pub struct Qwen3VlCaptioner {
     dir: String,
     max_pixels: u32,
+    precision: crate::caps::Precision,
 }
 
 impl Qwen3VlCaptioner {
     /// Caption with the checkpoint in `dir`. An empty `dir` falls back to
     /// `$BRAIN_QWEN3VL_WEIGHTS`, the same as the served path.
     pub fn new(dir: impl Into<String>) -> Qwen3VlCaptioner {
-        Qwen3VlCaptioner { dir: dir.into(), max_pixels: DEFAULT_MAX_PIXELS }
+        Qwen3VlCaptioner { dir: dir.into(), max_pixels: DEFAULT_MAX_PIXELS, precision: crate::caps::Precision::F32 }
+    }
+
+    /// Build the decoder at a narrower storage tier.
+    ///
+    /// `int8` is LOSSY and is never the default: a captioning run is usually
+    /// making training data, and a caption that is faster and subtly wrong is
+    /// a worse trade there than anywhere else. `qwen3vl_bench compare` prints
+    /// both tiers' captions side by side with the time and the divergence,
+    /// which is the evidence this choice should be made on.
+    pub fn with_precision(mut self, p: crate::caps::Precision) -> Qwen3VlCaptioner {
+        self.precision = p;
+        self
     }
 
     /// Cap the input image area. Larger images are downsampled to fit by the
@@ -72,6 +85,7 @@ impl Captioner for Qwen3VlCaptioner {
             .set("prompt", json!(req.instruction))
             .set("max_new", json!(req.max_new.min(MAX_NEW_LIMIT)))
             .set("max_pixels", json!(self.max_pixels))
+            .set("precision", json!(self.precision.name()))
             .blob("image", capability::blob::image_blob(&f.hwc, f.w, f.h, 3));
         if !self.dir.is_empty() {
             inv = inv.set("weights", json!(self.dir));

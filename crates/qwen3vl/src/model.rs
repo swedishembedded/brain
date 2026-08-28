@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use gpu_core::Gpu;
-use qwen3::{Qwen, QwenConfig};
+use qwen3::{Dtype, Qwen, QwenConfig, Shard};
 
 use crate::config::VisionConfig;
 use crate::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
@@ -41,6 +41,34 @@ pub struct Qwen3Vl {
     mrope_section: [u32; 3],
 }
 
+
+/// How this composite's inner decoder is built.
+///
+/// Replaces a bare `decode_only: bool`, because there were always two
+/// independent facts to state and a bool could only carry one: which GRAPH the
+/// decoder gets, and which storage TIER its per-layer linears land on. Picking
+/// the graph wrong is a silent correctness hazard rather than an OOM (see
+/// [`Qwen3Vl::new`]), and the tier is lossy, so neither should be inferable
+/// from the other or default silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecoderBuild {
+    /// `Qwen::new`, the full BATCHED TRAINING constructor - every parameter
+    /// trainable (weight+grad+adam_m+adam_v) plus the quadratic attention and
+    /// `seq_len*vocab` logits buffers. For a caller that runs
+    /// `forward()`/`backward()`. Always fp32: a quantized weight has no
+    /// gradient.
+    Batched,
+    /// `Qwen::new_shard_dt_decode`, the incremental KV-cache decode graph, at
+    /// the given storage tier for the 7 per-layer linears.
+    ///
+    /// [`Dtype::I8`] is **lossy** and must be an explicit, opt-in request that
+    /// never arrives by defaulting. The tier a caller ASKS for is not
+    /// necessarily the one it gets - `Weight::upload` promotes a request the
+    /// device cannot serve back to fp32 - so read `Qwen::linear_dtype` (which
+    /// [`Qwen3Vl::linear_dtype`] forwards) for what actually landed, never
+    /// this request.
+    Decode(Dtype),
+}
 
 /// Wall-clock attribution of one [`Qwen3Vl::generate_timed`] call, by the
 /// stage boundaries an optimisation actually acts on.
@@ -91,9 +119,10 @@ impl Qwen3Vl {
     /// Assemble from a vision config, a decoder config (its `d_model` must equal
     /// the merger output width), pre-uploaded host weights, and the image
     /// placement. `enable_mm_splice`/`enable_mrope` are wired on the decoder here.
-    /// `decode_only` selects the inner decoder's construction path:
+    /// `build` selects the inner decoder's construction path:
     ///
-    /// - `true` - [`Qwen::from_tensors_decode`], for [`Qwen3Vl::generate`]'s
+    /// - [`DecoderBuild::Decode`] - the KV-cache decode graph, for
+    ///   [`Qwen3Vl::generate`]'s
     ///   incremental KV-cache decode path (`decode_steps`/`generate_cb`),
     ///   which never calls `forward()`/`backward()` (see this crate's
     ///   `caps.rs` module doc). `Qwen::new` (the alternative, below) is the
@@ -107,7 +136,7 @@ impl Qwen3Vl {
     ///   `from_tensors_decode` allocates frozen weights only (1x, not 4x)
     ///   and `[heads,ctx]`-linear KV-cache scratch instead of the quadratic
     ///   batched shape - exactly what a greedy-decode-only model needs.
-    /// - `false` - `Qwen::new`, the batched training constructor, for a
+    /// - [`DecoderBuild::Batched`] - `Qwen::new`, the batched training constructor, for a
     ///   caller that runs `forward()`/`backward()` (gradcheck-style tests,
     ///   a future training path). A `decode_only` decoder never allocates
     ///   the batched `fwd_steps`/`bwd_steps` graph's buffers at all, so
@@ -127,14 +156,14 @@ impl Qwen3Vl {
         image_row0: u32,
         n_visual: u32,
         mrope_section: [u32; 3],
-        decode_only: bool,
+        build: DecoderBuild,
     ) -> Qwen3Vl {
         assert_eq!(ds_merger_weights.len(), vcfg.deepstack_indexes.len(), "one merger per DeepStack tap");
         let merge = vcfg.spatial_merge_size;
-        let mut decoder = if decode_only {
-            Qwen::from_tensors_decode(dcfg, dweights, seq_len)
-        } else {
-            Qwen::new(dcfg, 1, seq_len, dweights)
+        let n_layers = dcfg.n_layers as usize;
+        let mut decoder = match build {
+            DecoderBuild::Decode(dt) => Qwen::new_shard_dt_decode(dcfg, seq_len, dweights, Shard::whole(n_layers), dt),
+            DecoderBuild::Batched => Qwen::new(dcfg, 1, seq_len, dweights),
         };
         decoder.enable_mm_splice(image_row0, n_visual);
         decoder.enable_mrope();
@@ -172,10 +201,11 @@ impl Qwen3Vl {
         image_row0: u32,
         n_visual: u32,
         mrope_section: [u32; 3],
+        dt: Dtype,
     ) -> Qwen3Vl {
         let map: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
         let w = crate::import::partition(map, vcfg.deepstack_indexes.len());
-        Qwen3Vl::from_imported(w, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section)
+        Qwen3Vl::from_imported(w, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section, dt)
     }
 
     /// Assemble from the four already-partitioned weight sets.
@@ -196,9 +226,13 @@ impl Qwen3Vl {
         image_row0: u32,
         n_visual: u32,
         mrope_section: [u32; 3],
+        dt: Dtype,
     ) -> Qwen3Vl {
         // This is the real-checkpoint load path (`brain qwen3vl generate`) -
-        // always decode-only, see `Qwen3Vl::new`'s doc.
+        // always the decode graph, see `Qwen3Vl::new`'s doc. `dt` is the
+        // caller's explicit tier request for the decoder's per-layer linears;
+        // the vision tower stays fp32 either way (it is a small fraction of
+        // the weights and none of the per-token bandwidth).
         Qwen3Vl::new(
             vcfg,
             dcfg,
@@ -211,7 +245,7 @@ impl Qwen3Vl {
             image_row0,
             n_visual,
             mrope_section,
-            true,
+            DecoderBuild::Decode(dt),
         )
     }
 
@@ -228,9 +262,10 @@ impl Qwen3Vl {
         image_row0: u32,
         n_visual: u32,
         mrope_section: [u32; 3],
+        dt: Dtype,
     ) -> Result<Qwen3Vl, String> {
         let tensors = checkpoint::safetensors::read_model_dir(std::path::Path::new(dir))?;
-        Ok(Self::from_tensors(tensors, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section))
+        Ok(Self::from_tensors(tensors, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section, dt))
     }
 
     /// End-to-end forward for one image + text stream; returns the decoder's scalar
@@ -305,6 +340,15 @@ impl Qwen3Vl {
     /// emissions around the whole decode; audit F11).
     pub fn generate_cb(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32], on_token: impl FnMut(u32)) -> Vec<u32> {
         self.generate_timed(tokens, grid, pixels, max_new, eos_ids, on_token).0
+    }
+
+    /// The storage tier the decoder's per-layer linears ACTUALLY landed on,
+    /// read off the resident weights rather than off the request. A device
+    /// that cannot serve the asked-for tier is promoted back to fp32 by
+    /// `Weight::upload`, and a caller reporting what it asked for would then
+    /// claim a lossy run that never happened - or hide one that did.
+    pub fn linear_dtype(&self) -> Option<Dtype> {
+        self.decoder.linear_dtype()
     }
 
     /// The device this model runs on - both halves of it, since the vision
@@ -558,7 +602,7 @@ mod tests {
         }
 
         let model =
-            Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, tokens.len() as u32, IMG, 2, 4, [2, 1, 1], false);
+            Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, tokens.len() as u32, IMG, 2, 4, [2, 1, 1], DecoderBuild::Batched);
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
         let mut rng = Rng::new(4);
@@ -677,7 +721,7 @@ mod tests {
         let tokens: Vec<u32> = vec![1, 2, IMG, IMG, IMG, IMG, 3];
         let seq_len = 16u32; // >= prompt len + max_new, so decode never exceeds the KV cache
 
-        let model = Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, seq_len, IMG, 2, 4, [2, 1, 1], true);
+        let model = Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, seq_len, IMG, 2, 4, [2, 1, 1], DecoderBuild::Decode(Dtype::F32));
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
         let mut rng = Rng::new(14);
@@ -764,7 +808,7 @@ mod tests {
             2,
             4,
             [2, 1, 1],
-            true,
+            DecoderBuild::Decode(Dtype::F32),
         );
         let out2 = model2.generate(&tokens, (4, 4), &pixels, max_new, &[]);
         assert_eq!(out1, out2, "greedy generation must be deterministic across independently-constructed identical models");
