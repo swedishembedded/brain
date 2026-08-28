@@ -427,6 +427,7 @@ pub fn shard_param_list(cfg: &QwenConfig, shard: &Shard) -> Vec<(String, usize)>
         .collect()
 }
 
+#[derive(Clone)]
 struct Layer {
     xn1: DeviceBuffer,
     q_pre: DeviceBuffer,
@@ -885,15 +886,59 @@ impl Qwen {
         for i in 0..=cfg.n_layers as usize {
             let live = i >= shard.start && i <= shard.end;
             res.push(if live { st(n * d) } else { st(1) });
-            dres.push(if live && !decode_only { st(n * d) } else { st(1) });
+            // `dres[l]` is the gradient w.r.t. the residual entering layer
+            // `l`, read only by `build_backward_steps` - never touched by a
+            // pure forward pass. Gated on `train` (not `!decode_only`, which
+            // used to allocate it for EVERY `!decode_only` build regardless
+            // of whether backward ever runs - `decode_only` builds always
+            // have `train == false`, see the `new_impl` assert above, so
+            // this is a strict generalisation, not a behaviour change for
+            // that case).
+            dres.push(if live && train { st(n * d) } else { st(1) });
         }
         let dummy_layer = || Layer {
             xn1: st(1), q_pre: st(1), q: st(1), k_pre: st(1), k: st(1), v: st(1),
             probs: st(1), ctx: st(1), xmid: st(1), xn2: st(1), gate_pre: st(1), up: st(1), h: st(1),
         };
+        // Forward-only per-layer scratch (`!train`, whether decode-only or
+        // the batched forward-only build `Qwen::new_shard(..., train=false,
+        // ...)` uses): `forward_steps`/`decode_submit` process layer `l`
+        // strictly before layer `l+1` and only ever read `lb.*` from WITHIN
+        // that one layer's own dispatch sequence - the value that actually
+        // crosses a layer boundary is `res[l+1]`, never `lb.xn1`/`lb.q`/etc.
+        // So every layer's temporaries can be the SAME physical buffers,
+        // overwritten each layer, instead of one permanently-resident copy
+        // PER layer - which is where a batched inference build's memory
+        // mostly went (N_LAYERS copies of buffers only one of which is ever
+        // live at a time; ~11+ GiB of the ~17-18 GiB a real Qwen3-0.6B
+        // `train=false` build used to request against a 15.2 GiB card).
+        // `train == true` keeps one buffer PER layer, byte-for-byte as
+        // before: `build_backward_steps` reads every layer's SAVED forward
+        // activation, so they must all stay resident simultaneously - this
+        // pooling must never touch that path, and it does not (`shared` is
+        // `None` whenever `train`).
+        let shared = (!train).then(|| Layer {
+            xn1: st(n * d),
+            q_pre: st(n * hq),
+            q: st(n * hq),
+            k_pre: st(n * hkv),
+            k: st(n * hkv),
+            v: st(n * hkv),
+            probs: st(bht2),
+            ctx: st(n * hq),
+            xmid: st(n * d),
+            xn2: st(n * d),
+            gate_pre: st(n * ff),
+            up: st(n * ff),
+            h: st(n * ff),
+        });
         let mut layers = Vec::new();
         for l in 0..cfg.n_layers as usize {
-            layers.push(if shard.owns(l) {
+            layers.push(if !shard.owns(l) {
+                dummy_layer()
+            } else if let Some(sh) = &shared {
+                sh.clone()
+            } else {
                 Layer {
                     xn1: st(n * d),
                     q_pre: st(n * hq),
@@ -909,8 +954,6 @@ impl Qwen {
                     up: st(n * ff),
                     h: st(n * ff),
                 }
-            } else {
-                dummy_layer()
             });
         }
         // `inv` must hold the per-row RMS for the largest norm: QK-norm-q has
@@ -930,7 +973,16 @@ impl Qwen {
         // host-side, see `sample::generate_kv_stream`) and all backward scratch
         // (backward never runs - `train` is forced false), regardless of `head`.
         let hd_or_dummy = |x: u64| if decode_only { st(1) } else { hd_v(x) };
-        let bwd = |x: u64| if decode_only { st(1) } else { st(x) };
+        // Backward scratch: read only by `build_backward_steps`/`backward`,
+        // which never run unless `train`. The old gate here was
+        // `decode_only` alone, so a batched forward-only build
+        // (`train=false, decode_only=false` - exactly what
+        // `Qwen::new_shard(..., false, ...)` passes) still paid for a full
+        // set of backward-shaped buffers it could never dispatch into.
+        // `decode_only` builds are always `train == false` too (see the
+        // `new_impl` assert above), so this is a strict generalisation of
+        // the old condition, not a behaviour change for that case.
+        let bwd = |x: u64| if train { st(x) } else { st(1) };
 
         // Per-layer linear weights (B7): every layer this shard owns gets its 7
         // projections as a `model::ops::Weight`, built ONCE here. A non-fp32
