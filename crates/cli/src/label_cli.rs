@@ -118,8 +118,15 @@ pub fn run_label(argv: &[String]) {
     }
 }
 
-/// Build the named captioner. This is the ONE place the CLI knows which models
-/// exist; everything after it is `dyn Captioner`.
+/// Every captioner this verb can build, keyed by its `brain_arch` id.
+///
+/// One row per model, and the id is the registry's own, so `--model`, the
+/// error message below and the architecture a GGUF names in its own metadata
+/// are all the same vocabulary rather than three that drift.
+const CAPTIONERS: &[&str] = &["qwen3vl", "fastvlm", "llava"];
+
+/// Build the captioner for `model`. This is the ONE place the CLI knows which
+/// models exist; everything after it is `dyn Captioner`.
 ///
 /// `max_pixels` is honoured only where the model has such a knob - FastVLM's
 /// tower is fixed-size, so there is nothing to tune. That asymmetry is exactly
@@ -135,12 +142,82 @@ fn build(model: &str, weights: &str, max_pixels: u32) -> Result<Box<dyn Captione
         }
         "fastvlm" => Ok(Box::new(fastvlm::captioner::FastVlmCaptioner::new(weights))),
         "llava" => Ok(Box::new(llava::captioner::LlavaCaptioner::new(weights))),
-        other => Err(format!("unknown --model {other} (qwen3vl, fastvlm, llava)")),
+        other => Err(format!("unknown --model {other} ({})", CAPTIONERS.join(", "))),
     }
+}
+
+/// The architecture a `--weights` path names, when the path is a GGUF (or a
+/// directory holding one).
+///
+/// This is the user-visible half of brain's GGUF seam: a GGUF states its own
+/// architecture in its own metadata, so pointing `--weights` at one is enough
+/// to select the model, and `--model` becomes a thing to CHECK rather than a
+/// thing to be told. `gguf::route` resolves that string against the canonical
+/// architecture registry, so a new architecture becomes reachable here by
+/// being registered there plus having a captioner, never by a branch added to
+/// this function.
+///
+/// `Ok(None)` for a path that is not a GGUF: a HuggingFace directory carries
+/// no such tag and the caller's `--model` stands.
+/// Also reports whether the file was a projector, so the caller can say
+/// something better than "no captioner for 'clip'" when someone names an
+/// mmproj.
+fn architecture_and_role(weights: &str) -> Result<Option<(String, bool)>, String> {
+    if weights.is_empty() {
+        return Ok(None);
+    }
+    let p = std::path::Path::new(weights);
+    // A directory of GGUFs is named by the model half, not by the projector:
+    // an `mmproj-*.gguf` declares `clip`, which is the tower's architecture
+    // and not the model's.
+    let file = if p.is_dir() {
+        let mut ggufs: Vec<std::path::PathBuf> =
+            std::fs::read_dir(p).map_err(|e| format!("{weights}: {e}"))?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|q| gguf::route::is_gguf(q)).collect();
+        ggufs.sort();
+        match ggufs.into_iter().find(|q| q.to_str().and_then(|s| gguf::route_path(s).ok()).is_some_and(|r| !r.is_projector())) {
+            Some(q) => q,
+            None => return Ok(None),
+        }
+    } else if gguf::route::is_gguf(p) {
+        p.to_path_buf()
+    } else {
+        return Ok(None);
+    };
+    let path = file.to_str().ok_or_else(|| format!("{}: path is not valid UTF-8", file.display()))?;
+    let route = gguf::route_path(path)?;
+    Ok(Some((route.id().to_string(), route.is_projector())))
+}
+
+/// Reconcile `--model` with what the weights themselves declare.
+///
+/// A GGUF names its own architecture, so it decides. An explicit `--model`
+/// that disagrees is refused rather than silently overridden: the two
+/// statements cannot both be honoured and picking one quietly is how someone
+/// ends up captioning with a model they did not choose. An architecture with
+/// no captioner is refused BY NAME, listing the ones that exist.
+fn resolve_model(model_flag: &str, model_was_given: bool, weights: &str) -> Result<String, String> {
+    let Some((arch, is_projector)) = architecture_and_role(weights)? else {
+        return Ok(model_flag.to_string());
+    };
+    if is_projector {
+        // Every mmproj declares `clip`, so routing on the architecture alone
+        // would report "no captioner for 'clip'" - true, and useless. The
+        // file is half of a checkpoint, and the other half is what to name.
+        return Err(format!("{weights} is the VISION half of a vision-language checkpoint (an mmproj), not the model -- point --weights at the language-half GGUF beside it"));
+    }
+    if model_was_given && model_flag != arch {
+        return Err(format!("--model {model_flag} but {weights} declares GGUF architecture '{arch}' -- drop --model and let the checkpoint decide, or point --weights at a {model_flag} checkpoint"));
+    }
+    if !CAPTIONERS.contains(&arch.as_str()) {
+        return Err(format!("{weights} is a '{arch}' checkpoint, which has no captioner in brain (captioners: {})", CAPTIONERS.join(", ")));
+    }
+    eprintln!("label: {weights} declares GGUF architecture '{arch}'; captioning with the {arch} model");
+    Ok(arch)
 }
 
 fn images(args: &[String]) -> Result<(), String> {
     let mut a = crate::args::Args::new(args);
+    let model_was_given = args.iter().any(|x| x == "--model");
     let model = a.str_or("--model", "qwen3vl");
     let weights = a.str_or("--weights", "");
     let out = a.str_or("--out", "captions.yaml");
@@ -158,6 +235,16 @@ fn images(args: &[String]) -> Result<(), String> {
 
     let instruction = instruction(&prompt, &trigger, &trigger_role);
 
+    let model = resolve_model(&model, model_was_given, &weights)?;
+    if weights.is_empty() {
+        // No `--weights`: fetch the architecture's own default checkpoint and
+        // set the env var its captioner already reads, the same auto-supply
+        // every `brain infer <arch>` gets. Without this, the first thing a new
+        // user sees from `brain label images <dir>` is the captioner
+        // complaining that no checkpoint directory was set, with no hint that
+        // brain can fetch one.
+        crate::supply::ensure_env_weights(&model);
+    }
     let mut model = build(&model, &weights, max_pixels)?;
     let caps = model.capabilities();
     eprintln!("label: {} -> {}/{out} (max_new {max_new}{})", caps.model, dir, if overwrite { ", overwrite" } else { ", resuming" });
