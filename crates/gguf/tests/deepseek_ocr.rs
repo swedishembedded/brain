@@ -192,18 +192,30 @@ fn vision_imports_with_full_two_way_coverage() {
     std::fs::remove_file(&out).ok();
 }
 
+/// Both shipped files route by their own metadata, through the one seam every
+/// GGUF consumer shares.
+///
+/// This used to assert against a second architecture table private to this
+/// crate. That table's rows now live in the single importer table beside every
+/// other architecture (`cli::gguf_import`), which is what this crate cannot
+/// see and does not need to: what belongs here is that the two REAL files
+/// resolve to the right architecture and the right projector type, which is
+/// exactly what a consumer dispatches on.
 #[test]
-fn the_registry_routes_both_files_by_their_own_metadata() {
+fn both_shipped_files_route_by_their_own_metadata() {
     // The `clip` architecture is shared by every mmproj ever produced, so the
-    // vision file must be selected by its projector_type, not by `clip` alone.
+    // vision file must be told apart by its projector_type, not by `clip`
+    // alone.
     if let Some(mg) = open(LM_FILE) {
-        let e = gguf::registry::lookup(&mg).expect("the LM file must route");
-        assert_eq!(e.id, "deepseek-ocr");
-        assert_eq!(e.discriminator, None);
+        let r = gguf::route(&mg).expect("the LM file must route");
+        assert_eq!(r.tag, gguf::deepseek_ocr::GGUF_ARCHITECTURE);
+        assert_eq!(r.id(), "deepseek2ocr");
+        assert!(!r.is_projector(), "the decoder half is not a projector");
     }
     if let Some(mg) = open(MMPROJ_FILE) {
-        let e = gguf::registry::lookup(&mg).expect("the mmproj file must route");
-        assert_eq!(e.id, "deepseek-ocr-vision");
-        assert_eq!(e.discriminator, Some(("clip.projector_type", "deepseekocr")));
+        let r = gguf::route(&mg).expect("the mmproj file must route");
+        assert_eq!(r.tag, gguf::deepseek_ocr_vision::GGUF_ARCHITECTURE);
+        assert!(r.is_projector(), "the mmproj half must be recognized as a projector");
+        assert_eq!(r.projector.as_deref(), Some(gguf::deepseek_ocr_vision::PROJECTOR_TYPE));
     }
 }

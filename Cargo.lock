@@ -668,6 +668,7 @@ dependencies = [
  "brain-flux1",
  "brain-flux2",
  "brain-forecast",
+ "brain-gguf",
  "brain-glmdsa",
  "brain-gpt2",
  "brain-gpu-core",
@@ -1083,6 +1084,7 @@ dependencies = [
 name = "brain-gguf"
 version = "1.0.0"
 dependencies = [
+ "brain-arch",
  "brain-checkpoint",
  "brain-testutil",
  "serde_json",
@@ -1671,6 +1673,7 @@ dependencies = [
  "brain-captioner",
  "brain-checkpoint",
  "brain-data",
+ "brain-gguf",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",

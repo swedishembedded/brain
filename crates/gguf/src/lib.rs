@@ -14,9 +14,13 @@
 //! - [`import`] - the streaming import driver: classify, dequantize one tensor
 //!   at a time, write, and prove two-way coverage (nothing planned missing,
 //!   nothing in the source unaccounted for).
-//! - [`registry`] - dispatch on `general.architecture`, plus a secondary
-//!   discriminator where the architecture alone is ambiguous (every mmproj
-//!   file declares `clip`).
+//! - [`route`] - "which model is this file", answered once for every consumer:
+//!   `general.architecture` resolved against the canonical architecture
+//!   registry, plus the secondary `clip.projector_type` discriminator that a
+//!   multimodal projector needs (every mmproj file declares `clip`). It
+//!   resolves the architecture; the table of what to DO with each one lives
+//!   with the model crates, in `cli::gguf_import`, because that is the only
+//!   layer that can see them.
 //!
 //! A model supplies only its own decisions: a hyperparameter struct with a
 //! `param_list`, and a tensor-name classifier. [`deepseek_ocr`] (a decoder)
@@ -28,8 +32,8 @@ pub mod deepseek_ocr;
 pub mod deepseek_ocr_vision;
 pub mod import;
 pub mod kv;
-pub mod registry;
+pub mod route;
 
 pub use import::{ImportStats, Mapped};
 pub use kv::{architecture, ArchKv};
-pub use registry::{import_gguf, ArchEntry, ARCHITECTURES};
+pub use route::{route, route_path, Route};
