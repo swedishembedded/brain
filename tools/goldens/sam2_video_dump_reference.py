@@ -431,9 +431,25 @@ def main():
     vmodel, _ = dump_video(a.code, a.config, a.ckpt, a.out, index,
                            a.frames, a.seed, a.prompt_frame, occlude)
 
+    from golden_source import source_block  # noqa: E402  (tools/goldens dir is on sys.path[0])
+
     manifest = {
         "files": index,
         "weight_health": health,
+        "source": source_block(
+            checkpoint="facebook/sam2.1",
+            files=[a.ckpt],
+            identity={
+                "image_size": int(vmodel.image_size),
+                "backbone_stride": int(vmodel.backbone_stride),
+                "hidden_dim": int(vmodel.hidden_dim),
+                "mem_dim": int(vmodel.mem_dim),
+                "num_maskmem": int(vmodel.num_maskmem),
+                "max_obj_ptrs_in_encoder": int(vmodel.max_obj_ptrs_in_encoder),
+                "memory_attention_layers": len(vmodel.memory_attention.layers),
+                "memory_attention_ff": int(vmodel.memory_attention.layers[0].dim_feedforward),
+            },
+        ),
         "params": {
             "image_size": vmodel.image_size,
             "backbone_stride": vmodel.backbone_stride,

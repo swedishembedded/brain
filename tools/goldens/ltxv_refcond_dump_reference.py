@@ -245,14 +245,20 @@ def main():
     def sha(p):
         return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
+    from golden_source import source_block  # noqa: E402  (tools/goldens dir is on sys.path[0])
+
     (out / "manifest.json").write_text(json.dumps({
-        "source": "ltx_core.conditioning.types.reference_video_cond / attention_strength_wrapper"
+        "modules": "ltx_core.conditioning.types.reference_video_cond / attention_strength_wrapper"
                   " + ltx_pipelines.iclora_utils (real sources, live run)",
         "torch": torch.__version__,
         "patch_size": PATCH,
         "channels": CHANNELS,
         "cases": meta,
         "mask_cases": mmeta,
+        "source": source_block(
+            checkpoint="Lightricks/LTX-2.5",
+            identity={"patch_size": PATCH, "channels": CHANNELS},
+        ),
         "files": {f: {"sha256": sha(out / f),
                       "tensors": {k: list(v.shape) for k, v in
                                   (tensors if f == "refcond.safetensors" else mtensors).items()}}

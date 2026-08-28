@@ -232,8 +232,11 @@ def main():
 
     save_file(tensors, str(out / "maskcond.safetensors"))
     sha = hashlib.sha256((out / "maskcond.safetensors").read_bytes()).hexdigest()
+
+    from golden_source import source_block  # noqa: E402  (tools/goldens dir is on sys.path[0])
+
     (out / "manifest.json").write_text(json.dumps({
-        "source": "ltx_core.conditioning.types.mask_cond.VideoConditionByMask"
+        "modules": "ltx_core.conditioning.types.mask_cond.VideoConditionByMask"
                   " + latent_cond.VideoConditionByLatentIndex + components.noisers.GaussianNoiser"
                   " (real sources, live run)",
         "torch": torch.__version__,
@@ -242,6 +245,10 @@ def main():
         "fps": FPS,
         "noise_seed": NOISE_SEED,
         "cases": meta,
+        "source": source_block(
+            checkpoint="Lightricks/LTX-2.5",
+            identity={"patch_size": PATCH, "channels": CHANNELS},
+        ),
         "files": {"maskcond.safetensors": {
             "sha256": sha,
             "tensors": {k: list(v.shape) for k, v in tensors.items()},
