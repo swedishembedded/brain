@@ -237,13 +237,20 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       `crates/supir/src/finetune.rs` (`Finetuner::adaptor_only` - upstream's
       own recipe, backbone encoder frozen, decoder+trunk+adaptors train -
       and `Finetuner::full_backbone`; both measured to overfit a single
-      example (~74%/69% loss reduction over 120 steps) and a 3-example
-      dataset (~75% reduction over 40 rounds) at `SupirConfig::tiny`,
-      `H=W=8` - real numbers, not "near zero": see `finetune.rs`'s module
-      doc for why this machine's per-step wall-clock (a real Vulkan iGPU,
-      ~2.4 s per full trunk+adaptors+backbone forward+backward) sets the
-      gate at "clear, substantial, measured descent" rather than a literal
-      zero floor). `check_controlnet` deliberately NOT closed in this pass -
+      example to a literal near-zero floor at `SupirConfig::tiny`, `H=W=8`,
+      120 Adam steps at `lr = 0.005`: adaptor-only 7.44e-1 -> 1.38e-7,
+      full-backbone 7.06e-1 -> 1.96e-7, and a 3-example dataset
+      7.88e-1 -> 2.99e-6 over 40 rounds, on a Tesla P40 / Vulkan.
+      `lr` here is calibrated for STABILITY, not speed - at `lr = 0.03`,
+      which is what these gates originally shipped at, the trainer is above
+      its own stability threshold and runs a limit cycle whose excursions
+      reach 1.40x the starting loss, which is what made
+      `full_backbone_overfits_a_single_sample` fail deterministically at
+      7.06e-1 -> 4.68e-1. Full sweep and the reasoning in
+      `.agents/rules/lessons.md` #66; the gates now assert both
+      `last < 1e-4 * l0` and "no post-warm-up step above `l0`", so the
+      regime is checked and not just the endpoint.)
+      `check_controlnet` deliberately NOT closed in this pass -
       re-assessed and found to be a genuine second trainer (no `Rec::new_train`
       wiring in `controlnet::model` yet, `scale_buf` uses the same
       tape-breaking `push_step` idiom this port's own adaptors doc already

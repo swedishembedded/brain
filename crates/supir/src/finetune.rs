@@ -27,14 +27,13 @@
 //! whichever parameter names the installed freeze predicate lets through.
 //!
 //! ## Scale
-//! Every test in this file runs at [`crate::config::SupirConfig::tiny`] -
-//! this machine has one shared Intel iGPU with a 2047 MiB per-buffer cap and
-//! no discrete card, and the combined trunk+adaptors+backbone graph's fp32
-//! resident set is already documented (`crate::int8`'s module doc) to
-//! exceed that at real-checkpoint scale. "Full-backbone" here means "every
-//! parameter in this SMALL graph trains", not a claim that the real 15 GB
-//! SUPIR checkpoint fits a full-backbone fine-tune on this hardware - that
-//! remains a residency/int8 problem for a later pass, exactly as the
+//! Every test in this file runs at [`crate::config::SupirConfig::tiny`]. The
+//! combined trunk+adaptors+backbone graph's fp32 resident set is already
+//! documented (`crate::int8`'s module doc) to exceed a single card's
+//! per-buffer binding cap at real-checkpoint scale. "Full-backbone" here
+//! means "every parameter in this SMALL graph trains", not a claim that the
+//! real 15 GB SUPIR checkpoint fits a full-backbone fine-tune on one card -
+//! that remains a residency/int8 problem for a later pass, exactly as the
 //! roadmap's own Phase 4 framing states.
 //!
 //! ## "Batch"
@@ -124,17 +123,27 @@ mod tests {
     }
 
     // Matches `gradcheck::supir`'s own scale: each training step is a FULL
-    // forward+backward of the fused trunk+adaptors+backbone graph, and on
-    // this machine's software/iGPU backend that is measured to dominate
-    // wall-clock at anything larger - `H=W=16` made a 120-step overfit loop
-    // take multiple minutes per test. `H=W=8` (still SDXL-shaped, still a
-    // perf-number: UNetConfig::tiny's downscale factor is an architecture constant, not a measured speedup
-    // multiple of `UNetConfig::tiny`'s 2x downscale) keeps the whole file's
+    // forward+backward of the fused trunk+adaptors+backbone graph, which
+    // dominates this file's wall-clock at anything larger. `H=W=8` is still
+    // SDXL-shaped - a multiple of `UNetConfig::tiny`'s 2x downscale, an
+    // architecture constant, not a tuned number - and keeps the whole file's
     // test suite inside a normal `cargo test` budget.
     const H: u32 = 8;
     const W: u32 = 8;
     const T_ENC: u32 = 5;
     const CONTROL_SCALE: f32 = 0.7;
+
+    /// The learning rate every overfit gate in this file steps at, and the
+    /// only genuinely calibrated number here - see [`overfit_single`] for
+    /// what it is calibrated FOR (stability, not speed).
+    const LR: f32 = 0.005;
+
+    /// Steps excluded from [`overfit_single`]'s stability check. Adam's
+    /// first updates are taken against bias-corrected moments estimated from
+    /// one or two gradients, so a transient above `l0` in the first handful
+    /// of steps is the optimizer warming up, not the instability this gate
+    /// is looking for.
+    const WARMUP: usize = 20;
 
     fn example(cfg: &crate::config::SupirConfig, seed: u64) -> Example {
         let c = &cfg.backbone;
@@ -190,29 +199,52 @@ mod tests {
         assert_ne!(before_trunk, after_trunk, "the trunk weight did not move under adaptor-only training");
     }
 
-    /// Overfit-one-sample. The threshold below (see the assertion in each
-    /// caller) and this function's step count are calibrated against a real
-    /// run on this machine's real Vulkan iGPU backend (not software): a
-    /// fresh adaptor-only trainer showed a clear, substantial,
-    /// still-descending loss reduction well past that threshold before
-    /// plateauing - see the module doc's "near zero" note for why this gate
-    /// asserts "clear, substantial descent" rather than a literal near-zero
-    /// floor. Full-backbone (strictly more trainable capacity) measured at
-    /// least as well. Re-run either caller with `--nocapture` to see the
-    /// current per-step loss trajectory on your own hardware.
-    fn overfit_single(mode_full: bool, seed: u64, steps: usize, lr: f32) -> (f32, f32) {
+    /// Overfit-one-sample, both modes through one loop.
+    ///
+    /// ## What [`LR`] is calibrated for: stability, not speed
+    /// [`model::lora::adam`]'s update is scale-FREE - every unfrozen entry
+    /// moves by about `lr` per step whatever its own gradient's magnitude -
+    /// so `lr` here is not "how fast" but "how big a step relative to a
+    /// weight whose init scale is `1/sqrt(fan_in)`", which at
+    /// [`sdxlunet::config::UNetConfig::tiny`]'s widths is a few hundredths.
+    /// Past a threshold the trainer enters a limit cycle: the loss still
+    /// trends down between excursions, but the excursions reach ABOVE `l0`,
+    /// so a gate reading ONE step's loss reads the cycle's phase rather than
+    /// the training. Below it, both modes drive this single example to a
+    /// literal near-zero floor, monotonically after a short warm-up - which
+    /// is why the assertions below are four orders of magnitude, not a
+    /// "clear descent" fraction.
+    ///
+    /// That threshold is a property of WHICH parameters are unfrozen, not of
+    /// how many: unfreezing the backbone encoder moves the input every later
+    /// stage is conditioned on, so full-backbone leaves the stable regime
+    /// first even though it has strictly more capacity.
+    ///
+    /// Re-run either caller with `--nocapture` for the current per-step
+    /// trajectory on your own hardware.
+    ///
+    /// Returns `(l0, last, tail_max)`. `tail_max` - the worst loss seen after
+    /// the [`WARMUP`] steps - is what makes the gate see the regime and not
+    /// just the endpoint: an every-20th-step print of a diverging run still
+    /// looks monotone, and a single endpoint below a threshold can be one
+    /// descending step of a cycle whose peaks are above `l0`.
+    fn overfit_single(mode_full: bool, seed: u64, steps: usize, lr: f32) -> (f32, f32, f32) {
         let (cfg, trainer) = new_trainer(seed);
         set(&trainer, &example(&cfg, seed ^ 0xF00D));
         let mut f = if mode_full { Finetuner::full_backbone(trainer) } else { Finetuner::adaptor_only(trainer) };
         let mut last = f.step(lr);
         let l0 = last;
+        let mut tail_max = 0.0f32;
         for step in 1..steps {
             last = f.step(lr);
+            if step >= WARMUP {
+                tail_max = tail_max.max(last);
+            }
             if step % 20 == 0 {
                 eprintln!("  step {step:3}: loss = {last:.4e}");
             }
         }
-        (l0, last)
+        (l0, last, tail_max)
     }
 
     #[test]
@@ -220,9 +252,10 @@ mod tests {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let (l0, last) = overfit_single(false, 101, 120, 0.03);
-        eprintln!("adaptor-only overfit: {l0:.4e} -> {last:.4e}");
-        assert!(last < l0 * 0.35, "adaptor-only training did not overfit: {l0:.4e} -> {last:.4e}");
+        let (l0, last, tail_max) = overfit_single(false, 101, 120, LR);
+        eprintln!("adaptor-only overfit: {l0:.4e} -> {last:.4e} (worst after warm-up {tail_max:.4e})");
+        assert!(tail_max < l0, "adaptor-only training left the stable regime: {l0:.4e} -> peak {tail_max:.4e}");
+        assert!(last < l0 * 1e-4, "adaptor-only training did not overfit: {l0:.4e} -> {last:.4e}");
     }
 
     #[test]
@@ -230,9 +263,10 @@ mod tests {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let (l0, last) = overfit_single(true, 202, 120, 0.03);
-        eprintln!("full-backbone overfit: {l0:.4e} -> {last:.4e}");
-        assert!(last < l0 * 0.35, "full-backbone training did not overfit: {l0:.4e} -> {last:.4e}");
+        let (l0, last, tail_max) = overfit_single(true, 202, 120, LR);
+        eprintln!("full-backbone overfit: {l0:.4e} -> {last:.4e} (worst after warm-up {tail_max:.4e})");
+        assert!(tail_max < l0, "full-backbone training left the stable regime: {l0:.4e} -> peak {tail_max:.4e}");
+        assert!(last < l0 * 1e-4, "full-backbone training did not overfit: {l0:.4e} -> {last:.4e}");
     }
 
     /// The "batch" gate - see the module doc for why this is a small FIXED
@@ -241,7 +275,10 @@ mod tests {
     /// identical for full-backbone (only the freeze predicate differs, and
     /// that is already covered by the single-sample gate above), so a
     /// second heavy multi-example loop would add wall-clock time without a
-    /// new correctness signal.
+    /// new correctness signal. Steps at the same [`LR`] and carries the same
+    /// stability check as [`overfit_single`], for the same reason - a
+    /// per-round average smooths the excursions a diverging run makes but
+    /// does not remove them.
     #[test]
     fn adaptor_only_overfits_a_small_dataset() {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
@@ -260,15 +297,24 @@ mod tests {
             total / examples.len() as f32
         };
 
-        let l0 = avg_loss(&mut f, 0.03);
+        let l0 = avg_loss(&mut f, LR);
         let mut last = l0;
+        let mut tail_max = 0.0f32;
         for round in 1..40 {
-            last = avg_loss(&mut f, 0.03);
+            last = avg_loss(&mut f, LR);
+            // `WARMUP` counts STEPS, and a round is one step per example.
+            if round * examples.len() >= WARMUP {
+                tail_max = tail_max.max(last);
+            }
             if round % 10 == 0 {
                 eprintln!("  round {round:3}: avg loss = {last:.4e}");
             }
         }
-        eprintln!("adaptor-only small-dataset overfit ({} examples): {l0:.4e} -> {last:.4e}", examples.len());
-        assert!(last < l0 * 0.4, "small-dataset training did not overfit: {l0:.4e} -> {last:.4e}");
+        eprintln!(
+            "adaptor-only small-dataset overfit ({} examples): {l0:.4e} -> {last:.4e} (worst after warm-up {tail_max:.4e})",
+            examples.len()
+        );
+        assert!(tail_max < l0, "small-dataset training left the stable regime: {l0:.4e} -> peak {tail_max:.4e}");
+        assert!(last < l0 * 1e-3, "small-dataset training did not overfit: {l0:.4e} -> {last:.4e}");
     }
 }
