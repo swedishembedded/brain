@@ -24,6 +24,7 @@
 mod fast_conv;
 pub mod fast_ops;
 pub mod host_gemm;
+pub mod roofline;
 
 use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
 pub mod par;
