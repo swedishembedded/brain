@@ -309,6 +309,14 @@ fn index_filename(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
+    // A component can be shipped as a bare file rather than a directory - a
+    // swapped-in text encoder is the usual case. Mirrors
+    // `weightio::WeightReader::open_hf_dir`, so the eager and the streaming
+    // loader accept exactly the same paths; if only one of them did, the same
+    // path would work or fail depending on an unrelated env var.
+    if dir.is_file() {
+        return read(dir.to_str().ok_or("safetensors: non-utf8 path")?);
+    }
     if let Some(index) = index_filename(dir) {
         let idx_bytes =
             std::fs::read(&index).map_err(|e| format!("cannot read {}: {e}", index.display()))?;
@@ -354,6 +362,36 @@ pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A text encoder (or any component) may be shipped as a bare
+    /// `.safetensors` file rather than an HF directory - swapping in a
+    /// different encoder should not require inventing a directory around it,
+    /// nor a `config.json`, since the caller already knows the shape it
+    /// expects. So a path that IS a file is read directly.
+    #[test]
+    fn read_model_dir_accepts_a_single_file_not_only_a_directory() {
+        let header = serde_json::json!({
+            "w": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+        });
+        let hbytes = serde_json::to_vec(&header).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(hbytes.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&hbytes);
+        buf.extend_from_slice(&3.25f32.to_le_bytes());
+        buf.extend_from_slice(&(-0.5f32).to_le_bytes());
+
+        let dir = std::env::temp_dir().join("brain-st-single-file-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Deliberately NOT one of the names `read_model_dir` looks for inside
+        // a directory, so passing the file can only work by reading it.
+        let file = dir.join("some-other-encoder.safetensors");
+        std::fs::write(&file, &buf).unwrap();
+
+        let ts = read_model_dir(&file).unwrap();
+        let w = ts.iter().find(|t| t.name == "w").unwrap();
+        assert_eq!(w.data, vec![3.25, -0.5]);
+        std::fs::remove_file(&file).ok();
+    }
 
     #[test]
     fn bf16_and_f32_roundtrip() {
