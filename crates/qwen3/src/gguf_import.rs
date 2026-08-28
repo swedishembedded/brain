@@ -90,7 +90,7 @@ const DROP_ROPE_FREQS: &str = "rope_freqs.weight (RoPE scaling factors, recomput
 /// Shared with [`crate::import::hf_shard_source`]'s GGUF arm, so the streaming
 /// text-encoder path and the whole-checkpoint importer cannot disagree about
 /// which tensor is which.
-pub(crate) fn gguf_to_brain(name: &str, tie: bool) -> Option<String> {
+pub fn gguf_to_brain(name: &str, tie: bool) -> Option<String> {
     // n_layers is deliberately u32::MAX here: this is the *name* map, and it
     // has no opinion about depth. A block index beyond the config's depth
     // still maps, and is then rejected by the caller's coverage check as a
@@ -154,6 +154,16 @@ fn classify(name: &str, tie: bool) -> Result<Mapped, String> {
 /// `max_position_embeddings`) would size them absurdly.
 pub fn config_from_gguf(mg: &MmapGguf) -> Result<QwenConfig, String> {
     let kv = ArchKv::expect_architecture(mg, GGUF_ARCHITECTURE)?;
+    config_from_kv(&kv, mg)
+}
+
+/// [`config_from_gguf`]'s core, against an already-scoped KV view.
+///
+/// Split out because a Qwen3 decoder is not always the whole checkpoint: a
+/// Qwen3-VL GGUF carries the same dense decoder under its OWN architecture
+/// prefix (`qwen3vl.*`), and reading it there must not mean a second
+/// transcription of llama.cpp's key names that can drift from this one.
+pub fn config_from_kv(kv: &ArchKv, mg: &MmapGguf) -> Result<QwenConfig, String> {
     let block_size = 2048;
     let vocab = mg
         .shape("token_embd.weight")

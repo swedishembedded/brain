@@ -17,6 +17,7 @@ pub mod caps;
 pub mod captioner;
 pub mod config;
 pub mod encoder;
+pub mod gguf_import;
 pub mod import;
 pub mod model;
 #[cfg(test)]

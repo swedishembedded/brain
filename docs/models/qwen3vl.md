@@ -22,9 +22,41 @@ captioning instead, see [FastVLM](fastvlm.md); both are compared on the
 Model id: `brain/qwen3vl` (the served id itself is never fetched, per this
 project's naming grammar) - but `Qwen/Qwen3-VL-4B-Instruct` auto-fetches (⤓)
 on first CLI use, no env var needed. To point at a different checkpoint, set
-`BRAIN_QWEN3VL_WEIGHTS` to a directory holding `config.json` +
-`model.safetensors[.index.json]` + `tokenizer.json` (overridable per call
-via the `weights` param).
+`BRAIN_QWEN3VL_WEIGHTS` (overridable per call via the `weights` param) to
+either of the two checkpoint layouts brain reads. Which one a path is, is
+sniffed, never declared:
+
+**HuggingFace safetensors** - a directory holding `config.json` +
+`model.safetensors[.index.json]` + `tokenizer.json`.
+
+**GGUF (llama.cpp)** - a vision-language GGUF release is **two files**, and
+both are required:
+
+| File | What it is |
+|---|---|
+| `Qwen3-VL-4B-Instruct-Q8_0.gguf` | the language half (`general.architecture = "qwen3vl"`) |
+| `mmproj-F16.gguf` | the vision tower (`clip.projector_type = "qwen3vl_merger"`) |
+
+Point `weights` at the language half, or at the directory holding both. The
+projector is found beside it by its own metadata rather than by filename, so
+any of the `mmproj-BF16` / `mmproj-F16` / `mmproj-F32` spellings resolve, and
+the pair actually used is printed on every load.
+
+A language half with **no** projector beside it is refused, naming the
+missing file. This is deliberate: a decoder without its vision tower is still
+a fluent language model, so it would answer "describe this image" with a
+confident description of an image it never saw, and nothing downstream could
+tell.
+
+```bash
+brain pull https://huggingface.co/unsloth/Qwen3-VL-4B-Instruct-GGUF/blob/main/Qwen3-VL-4B-Instruct-Q8_0.gguf
+brain pull https://huggingface.co/unsloth/Qwen3-VL-4B-Instruct-GGUF/blob/main/mmproj-F16.gguf
+```
+
+Only the **dense** Qwen3-VL configuration is built. A GGUF whose
+`general.architecture` names an architecture brain has no row for (the
+30B-A3B release declares the MoE `qwen3vlmoe`) is refused by that name rather
+than loaded as the adjacent dense model.
 
 ## Running it
 
@@ -39,8 +71,9 @@ BRAIN_QWEN3VL_WEIGHTS=/path/to/qwen3-vl \
 - `prompt` - the instruction/question.
 - `max_new` - max tokens to generate.
 - `image` input - raw HWC f32 pixels in `[0,1]`, with `{w,h}` metadata.
-- `weights` - per-call override of the checkpoint directory (in place of
-  `BRAIN_QWEN3VL_WEIGHTS`).
+- `weights` - per-call override of the checkpoint (in place of
+  `BRAIN_QWEN3VL_WEIGHTS`): a safetensors directory, a GGUF language half, or
+  the directory holding a GGUF pair.
 
 ## Hardware and limits
 

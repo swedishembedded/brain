@@ -117,8 +117,30 @@ impl Qwen3Vl {
     ) -> Qwen3Vl {
         let map: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
         let w = crate::import::partition(map, vcfg.deepstack_indexes.len());
-        // `from_tensors`/`from_hf` are the real-checkpoint load path (`brain
-        // qwen3vl generate`) - always decode-only, see `Qwen3Vl::new`'s doc.
+        Qwen3Vl::from_imported(w, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section)
+    }
+
+    /// Assemble from the four already-partitioned weight sets.
+    ///
+    /// The seam every source format meets at: `from_tensors` reaches it after
+    /// partitioning HF safetensors names, `crate::gguf_import` reaches it after
+    /// reading a two-file GGUF checkpoint, and neither format gets its own copy
+    /// of the construction below. Placement is NOT decided here -- whatever
+    /// device policy `Qwen3Vl::new` applies is the one both formats get, so a
+    /// GGUF checkpoint can never end up somewhere a safetensors one would not.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_imported(
+        w: crate::import::ImportedWeights,
+        vcfg: VisionConfig,
+        dcfg: QwenConfig,
+        seq_len: u32,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+    ) -> Qwen3Vl {
+        // This is the real-checkpoint load path (`brain qwen3vl generate`) -
+        // always decode-only, see `Qwen3Vl::new`'s doc.
         Qwen3Vl::new(
             vcfg,
             dcfg,

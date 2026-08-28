@@ -11,6 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-qwen3.workspace = true
+# The shared GGUF layer: `gguf::route` answers "which model is this file" for
+# every consumer, and `gguf::ArchKv` reads llama.cpp's KV convention. This
+# crate adds no second architecture table of its own.
+brain-gguf.workspace = true
 brain-model.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true

@@ -233,29 +233,102 @@ fn preprocess_min_pixels() -> u32 {
     crate::preprocess::DEFAULT_MIN_PIXELS
 }
 
+/// Which of the two checkpoint formats `weights` names, and everything read
+/// out of it that does not depend on the resident's capacity.
+///
+/// The choice is made from the files themselves, never from a flag: what a
+/// user has is a path to a checkpoint, and asking them to also declare its
+/// format is an opportunity to be wrong about something the filesystem
+/// already knows. A GGUF is recognized by its own leading magic (and, for a
+/// directory, by a GGUF being what is in it), then routed by the
+/// `general.architecture` in its metadata.
+enum Source {
+    /// A HuggingFace directory: `config.json` + `model.safetensors[.index.json]`
+    /// + `tokenizer.json`.
+    HfDir(String),
+    /// A llama.cpp checkpoint: the language half plus its `mmproj-*.gguf`
+    /// vision tower.
+    Gguf(crate::gguf_import::GgufFiles),
+}
+
+fn classify_source(weights: &str) -> Result<Source, String> {
+    let p = std::path::Path::new(weights);
+    let is_gguf = if p.is_dir() {
+        std::fs::read_dir(p)
+            .map(|it| it.filter_map(|e| e.ok()).any(|e| gguf::route::is_gguf(&e.path())))
+            .unwrap_or(false)
+    } else {
+        gguf::route::is_gguf(p)
+    };
+    if is_gguf {
+        return Ok(Source::Gguf(crate::gguf_import::GgufFiles::locate(p)?));
+    }
+    if p.is_dir() {
+        return Ok(Source::HfDir(weights.to_string()));
+    }
+    Err(format!("qwenvl: {weights} is neither a checkpoint directory nor a GGUF file"))
+}
+
 fn load_resident(dir: &str, max_pixels: u32) -> Result<Resident, String> {
+    match classify_source(dir)? {
+        Source::HfDir(d) => load_hf_resident(dir, &d, max_pixels),
+        Source::Gguf(files) => load_gguf_resident(dir, files, max_pixels),
+    }
+}
+
+/// Build from a two-file llama.cpp checkpoint. Both halves are named on the
+/// way in, because a run that silently used a different projector than the
+/// operator expected has no visible symptom.
+fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_pixels: u32) -> Result<Resident, String> {
+    eprintln!("qwenvl: gguf checkpoint: model {}, vision projector {}", files.lm.display(), files.mmproj.display());
+    let tok = crate::gguf_import::tokenizer(&files)?;
+    let lm = checkpoint::gguf::MmapGguf::open(files.lm.to_str().ok_or("qwenvl: non-UTF8 lm path")?)?;
+    let mmproj = checkpoint::gguf::MmapGguf::open(files.mmproj.to_str().ok_or("qwenvl: non-UTF8 mmproj path")?)?;
+    let cfg = crate::gguf_import::config(&lm, &mmproj, &tok)?;
+    drop(lm);
+    drop(mmproj);
+    let n_visual_capacity = visual_capacity(&cfg, max_pixels);
+    let w = crate::gguf_import::weights(&files, &cfg)?;
+    let model = Qwen3Vl::from_imported(
+        w,
+        cfg.vision.clone(),
+        cfg.text.clone(),
+        SEQ_LEN,
+        cfg.image_token_id,
+        0,
+        n_visual_capacity,
+        cfg.mrope_section,
+    );
+    Ok(Resident { weights: weights.to_string(), max_pixels, n_visual_capacity, cfg, model, tok })
+}
+
+/// Capacity placement: image_row0 is arbitrary (Qwen3Vl::generate's
+/// incremental decode derives real placement from the token stream -- see this
+/// module's own doc); this is the CAPACITY this resident's DeepStack/splice
+/// buffers are sized for, not any one request's actual visual-token count.
+///
+/// A square at the pixel budget is the largest-area, most token-hungry shape
+/// smart_resize can produce for that budget (any other aspect ratio at the same
+/// area yields <= tokens after patch-grid rounding), so it is the right
+/// capacity upper bound to allocate for.
+fn visual_capacity(cfg: &Qwen3VlConfig, max_pixels: u32) -> u32 {
+    let factor = cfg.vision.patch_size * cfg.vision.spatial_merge_size;
+    let side = (max_pixels as f64).sqrt() as u32;
+    let (h_cap, w_cap) = smart_resize(side, side, factor, preprocess_min_pixels(), max_pixels);
+    crate::preprocess::image_token_count(h_cap, w_cap, cfg.vision.patch_size, cfg.vision.spatial_merge_size)
+}
+
+fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32) -> Result<Resident, String> {
     let cfg_path = format!("{dir}/config.json");
     let cfg_text = std::fs::read_to_string(&cfg_path).map_err(|e| format!("qwenvl: cannot read {cfg_path}: {e}"))?;
     let cfg_json: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("qwenvl: cannot parse {cfg_path}: {e}"))?;
     let cfg = Qwen3VlConfig::from_hf(&cfg_json);
     let tok = data::qwen_tokenizer::QwenBpe::from_dir(dir).map_err(|e| format!("qwenvl: tokenizer: {e}"))?;
 
-    // Capacity placement: image_row0 is arbitrary (Qwen3Vl::generate's
-    // incremental decode derives real placement from the token stream, not
-    // from this construction-time value -- see this module's own doc);
-    // n_visual is the CAPACITY this resident's DeepStack/splice buffers are
-    // sized for, not any one request's actual visual-token count.
-    let factor = cfg.vision.patch_size * cfg.vision.spatial_merge_size;
-    // A square at the pixel budget is the largest-area, most token-hungry
-    // shape smart_resize can produce for that budget (any other aspect ratio
-    // at the same area yields <= tokens after patch-grid rounding), so it is
-    // the right capacity upper bound to allocate for.
-    let side = (max_pixels as f64).sqrt() as u32;
-    let (h_cap, w_cap) = smart_resize(side, side, factor, preprocess_min_pixels(), max_pixels);
-    let n_visual_capacity = crate::preprocess::image_token_count(h_cap, w_cap, cfg.vision.patch_size, cfg.vision.spatial_merge_size);
+    let n_visual_capacity = visual_capacity(&cfg, max_pixels);
     let model = Qwen3Vl::from_hf(dir, cfg.vision.clone(), cfg.text.clone(), SEQ_LEN, cfg.image_token_id, 0, n_visual_capacity, cfg.mrope_section)?;
 
-    Ok(Resident { weights: dir.to_string(), max_pixels, n_visual_capacity, cfg, model, tok })
+    Ok(Resident { weights: weights.to_string(), max_pixels, n_visual_capacity, cfg, model, tok })
 }
 
 /// Bilinear-resample interleaved-HWC `[0,1]` pixels from `(w,h)` to
@@ -321,7 +394,13 @@ mod tests {
             .blob("image", Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w": 1, "h": 1})));
         let r = GenerateAction.run(&inv, &mut |_| {});
         let err = r.err().unwrap_or_default();
-        assert!(err.contains("cannot read"), "{err}");
+        // The spec is that a weights path that is neither of the two supported
+        // checkpoint shapes is refused BY NAME, before any tensor is touched.
+        // It used to be phrased as "cannot read <dir>/config.json", which only
+        // held while a directory of safetensors was the single thing this
+        // could load.
+        assert!(err.contains("/nonexistent/qwenvl"), "the error must name the path: {err}");
+        assert!(err.contains("neither a checkpoint directory nor a GGUF"), "{err}");
     }
 
     #[test]
