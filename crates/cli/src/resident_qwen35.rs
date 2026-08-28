@@ -31,6 +31,16 @@
 //!     (`Engine::from_map`'s `max_concurrent`, i.e. `num_blocks` - NOT how
 //!     many are dispatched together on the GPU per step, which is always 1
 //!     for this engine). Default 4.
+//!
+//! A THIRD way in lives at the bottom of this file:
+//! [`multi_gpu_gguf_from_env`], the factory for
+//! `qwen35::int8_gguf_resident::Qwen35GgufResident` - a genuinely different
+//! model (`unsloth/Qwen3.8-27B-Q8_0`, INT8 weights read straight from the
+//! released Q8_0 GGUF and layer-sharded across as many cards as they need),
+//! not a mode of the one above. The two coexist: this one still serves an
+//! fp32 brain checkpoint that fits one card, that one serves the real 27B
+//! release on a box with enough cards and no room on disk for a ~108 GB fp32
+//! conversion.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use data::qwen_tokenizer::QwenBpe;
@@ -251,6 +261,61 @@ fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, eos: Option<u32>, i
     results.into_iter().map(|r| r.expect("every batch index resolved")).collect()
 }
 
+/// The INT8, multi-GPU, load-straight-from-GGUF Qwen3.8-27B
+/// (`qwen35::int8_gguf_resident::Qwen35GgufResident`). Reachable ONLY via
+/// `Executor::register_multi`: it occupies real bytes on SEVERAL cards at
+/// once, and a plain `register` would budget only one of them (see
+/// `crates/residency/src/multi.rs`' module doc).
+///
+/// Where the `.gguf` comes from, in order:
+///   1. `BRAIN_QWEN35_GGUF` - an explicit path. The same variable
+///      `qwen35::gguf_import`'s own real-checkpoint gate uses, so a box
+///      configured to run those tests is configured to serve this.
+///   2. the model store's canonical location for the upstream release
+///      (`<models-dir>/unsloth/Qwen3.8-27B/Q8_0.gguf`, resolved through
+///      `modelstore::Store` - never a hardcoded machine path), when a
+///      `brain fetch` put it there.
+///
+/// Neither present ⇒ not served, and this returns `None`.
+///
+/// `gpus` is `build_executor`'s own budgeted GPU list as `(index, TOTAL
+/// bytes)` and `reserved` the per-card headroom it keeps free, so what is
+/// handed on is each card's genuinely USABLE capacity - the same figure the
+/// scheduler budgets against. Passing capacity (not just identity) is what
+/// lets `model::shard::plan_fewest_devices` size the split to the hardware
+/// instead of assuming matched cards.
+pub fn multi_gpu_gguf_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwen35::int8_gguf_resident::Qwen35GgufResident> {
+    let path = resolve_qwen35_gguf()?;
+    if gpus.is_empty() {
+        eprintln!(
+            "brain: {} not served (no GPU budgeted -- its weights are int8 device buffers, there is no CPU path)",
+            qwen35::int8_gguf_resident::MODEL
+        );
+        return None;
+    }
+    let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
+    let cap = qwen35::int8_gguf_resident::Qwen35GgufResident::ctx_from_env();
+    Some(qwen35::int8_gguf_resident::Qwen35GgufResident::new(path, devices, cap))
+}
+
+/// [`multi_gpu_gguf_from_env`]'s file resolution: the env var, else the model
+/// store's canonical path for the upstream release. Returns `None` (never a
+/// guessed path) when neither exists on disk.
+fn resolve_qwen35_gguf() -> Option<String> {
+    /// The upstream release this resident serves, as a `modelref` id.
+    const RELEASE: &str = "unsloth/Qwen3.8-27B-Q8_0";
+    if let Some(p) = std::env::var(qwen35::int8_gguf_resident::GGUF_ENV).ok().filter(|p| !p.is_empty()) {
+        if !std::path::Path::new(&p).is_file() {
+            eprintln!("brain: {}={p} does not name a readable file -- {} not served", qwen35::int8_gguf_resident::GGUF_ENV, qwen35::int8_gguf_resident::MODEL);
+            return None;
+        }
+        return Some(p);
+    }
+    let r = brain_modelref::ModelRef::parse(RELEASE).ok()?;
+    let store = brain_modelstore::Store::new(brain_modelstore::default_root()?);
+    Some(store.local(&r)?.weights.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +332,19 @@ mod tests {
         if std::env::var("BRAIN_QWEN35_MAX_BATCH").is_err() {
             assert_eq!(Qwen35Resident::max_concurrent(), 4);
         }
+    }
+
+    /// The GGUF resident is gated on a REAL file, not on the variable merely
+    /// being set: a stale `BRAIN_QWEN35_GGUF` pointing at a deleted download
+    /// must decline (and say so) rather than register a resident whose every
+    /// `estimate_multi` then reports zero devices and whose every request
+    /// fails placement.
+    #[test]
+    fn multi_gpu_gguf_declines_a_path_that_is_not_a_file() {
+        // SAFETY: no other test in this process reads/writes this exact var.
+        unsafe { std::env::set_var(qwen35::int8_gguf_resident::GGUF_ENV, "/nonexistent/qwen35.gguf") };
+        assert!(multi_gpu_gguf_from_env(&[(0, 24 << 30)], 2 << 30).is_none());
+        unsafe { std::env::remove_var(qwen35::int8_gguf_resident::GGUF_ENV) };
     }
 
     #[test]

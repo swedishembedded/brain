@@ -332,6 +332,37 @@ impl MmapSafetensors {
     }
 }
 
+/// The streaming source contract, satisfied entirely by this type's own
+/// inherent accessors above - it was the one mmap-backed reader in this crate
+/// that did not declare it (`weightio::WeightReader` and `gguf::MmapGguf`
+/// both do), which meant a caller generic over `TensorSource` could not be
+/// handed a `MmapSafetensors` even though every method it needs is already
+/// here, verbatim. Declaring it is what lets ONE bounded loader serve both a
+/// safetensors checkpoint and a GGUF (see `qwen35::stream::quantize_i8_rows`).
+impl crate::TensorSource for MmapSafetensors {
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.tensor_f32(name) {
+            Some(v) => {
+                f(&v);
+                true
+            }
+            None => false,
+        }
+    }
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        MmapSafetensors::raw_words(self, name)
+    }
+    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        MmapSafetensors::with_tensor_chunks(self, name, max_elems, f)
+    }
+    fn with_tensor_u32_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[u32])) -> bool {
+        MmapSafetensors::with_tensor_u32_chunks(self, name, max_elems, f)
+    }
+    fn numel(&self, name: &str) -> Option<usize> {
+        MmapSafetensors::numel(self, name)
+    }
+}
+
 /// On-disk byte width of one element for a safetensors dtype string, or `None`
 /// for a dtype this reader does not know. Only the dtypes [`decode_into`] knows
 /// how to decode as f32 (`tensor_u32`'s `U32` is handled separately — packed,

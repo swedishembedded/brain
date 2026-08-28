@@ -1,0 +1,1126 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Qwen3.8-27B served INT8 and GPU-RESIDENT across as many cards as its real
+//! per-layer bytes need, loaded **directly from the released Q8_0 GGUF** -
+//! no fp32 intermediate file anywhere on the path.
+//!
+//! That last clause is the whole reason this module exists next to
+//! [`crate::serve`]'s single-GPU `Engine`. `Engine` loads a brain-native
+//! `.safetensors` through `checkpoint::load`, which means the deployment
+//! story for a real checkpoint is "first convert 29 GB of Q8_0 into ~108 GB
+//! of fp32 on disk, then load that" - a conversion most boxes that can RUN
+//! this model still cannot STORE. Here the released `.gguf` IS the load
+//! format: `checkpoint::gguf::MmapGguf` is a `checkpoint::TensorSource` that
+//! dequantizes one tensor at a time out of the mapping, and
+//! [`Qwen35::new_i8_shard`] consumes exactly that trait, re-quantizing each
+//! leaf to brain's own group-wise INT8 as it uploads. Peak host use is one
+//! tensor, never one model.
+//!
+//! # What this composes (and deliberately does not reimplement)
+//!
+//! * **Placement** - `model::shard::plan_fewest_devices`, the capacity-aware
+//!   exact-DP contiguous layer partitioner. Nothing here knows how many cards
+//!   the box has or whether they match: it supplies real per-layer byte costs
+//!   ([`layer_cost`]) and takes the plan it is given. One card, two P40s, or a
+//!   mixed 24/8 GB pair all work, and a model that genuinely does not fit is
+//!   reported as unplaceable rather than OOMing partway through a multi-minute
+//!   load.
+//! * **Name mapping** - `checkpoint::remap::RemapSource` over a
+//!   [`Fetch::Whole`] plan built from [`crate::gguf_import::classify`], the
+//!   SAME llama.cpp-name classifier the offline `brain import` converter
+//!   drives. There is no second name table here, and no dequantize/copy step
+//!   of this module's own: `RemapSource` streams straight through to the
+//!   inner `MmapGguf`.
+//! * **Stage construction** - [`Qwen35::new_i8_shard`], one instance per card,
+//!   each holding only its own `shard.start..shard.end` layers.
+//! * **Decode** - `Qwen35::decode_step_stage` per stage per token, with the
+//!   boundary residual host-staged from card to card (`d_model` floats, 20 KiB
+//!   at this shape). Gated at tiny scale by
+//!   `crate::model`'s own `two_shard_int8_decode_matches_the_whole_shard_model`,
+//!   which proves the two-stage composition is bit-equal to the whole-shard
+//!   model.
+//! * **Head epilogue** - `crate::stream::head_logits_on`, the same final-norm
+//!   + int8-`lm_head` projection the streaming real-weight path already uses.
+//!
+//! # The endpoints do not live in a shard, and cannot
+//!
+//! Both `[vocab, d_model]` tables are 5_085_593_600 bytes as fp32 at this
+//! shape. On a 24 GB Tesla P40 that is over `max_buffer_size` (~4.09 GiB) AND
+//! 2.4x `max_storage_buffer_binding_size` (2047 MiB, which wgpu clamps to
+//! `i32::MAX` on every backend), so an fp32 endpoint is not a thing that can
+//! be allocated OR bound here - it is not a size question. Measured, not
+//! assumed: the first real load of this resident died in
+//! `paramstore::upload` with "needs a single 5085593600-byte buffer but this
+//! device's queried max_buffer_size is 4292870144 bytes".
+//!
+//! So every stage is built with `embed: false, head: false` and this module
+//! owns both ends:
+//!
+//! * the **embedding** is never uploaded and never materialized - decode needs
+//!   one ROW per token, and `checkpoint::gguf::MmapGguf::tensor_range`
+//!   dequantizes exactly the quant blocks that row touches, straight out of
+//!   the mapping. It enters stage 0 through `run_decode_step`'s own
+//!   `input_override` seam, the same seam that carries the residual between
+//!   cards, so no new path exists for it.
+//! * the **head** is quantized to INT8 (1.42 GB, inside both limits) by
+//!   `crate::stream::quantize_i8_rows` straight from the mapping, and lives on
+//!   the last stage's card.
+//!
+//! Both choices follow `crate::stream`'s real-weight path rather than
+//! inventing anything: that module reached the identical conclusion about the
+//! same two tensors on the same hardware.
+//!
+//! # Scope, deliberately
+//!
+//! * **No MTP.** The GGUF's `blk.64.*` + `nextn.*` MTP block is not imported
+//!   and `cfg.mtp` is forced `false`: `Qwen35::new_impl_on` asserts that MTP
+//!   implies a whole shard (the head needs `res[n_layers]` and the shared
+//!   `lm_head`), which a multi-card split is not by construction.
+//!   Self-speculative decode stays a single-GPU concern.
+//! * **Per-token prefill.** The prompt is replayed one token at a time
+//!   through the same decode path, exactly as [`crate::serve::Engine::prefill`]
+//!   does and for the same reason (`model::gdn`'s chunked prefill would need
+//!   a `t`-sized build per stage, i.e. a `[t, vocab]` logits buffer plus
+//!   `n_layers` `[t, d_model]` residual slabs on EVERY card, for a path that
+//!   is already correct one token at a time).
+//! * **One sequence per dispatch.** Every stage is built at `b = t = 1`, so
+//!   `run_batch` is the serial default - see its own doc.
+//! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
+
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress};
+use checkpoint::gguf::MmapGguf;
+use checkpoint::remap::{Fetch, RemapSource};
+use data::qwen_tokenizer::QwenBpe;
+use data::tokenizer::Tokenizer;
+use data::rng::Rng;
+use gguf::import::{ElemOp, Mapped};
+use gpu_core::{DeviceBuffer, Gpu};
+use model::shard::{LayerBytes, Shard};
+use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
+use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+use serde_json::json;
+
+use crate::config::{LayerType, Qwen35Config};
+use crate::model::{DecodeCaches, Qwen35};
+
+/// Catalog id. Names the real upstream release this resident loads, exactly
+/// (`https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`, the `Q8_0` file) -
+/// per AGENTS.md every served model is `<vendor>/<repo>[-<QUANT>]` matching
+/// its upstream URL, and `brain/` is reserved for built-ins with no upstream
+/// provenance (which is what `crate::caps::MODEL`, the fp32 brain-checkpoint
+/// path, is).
+pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
+
+/// The environment variable naming the `.gguf` to serve - the same name the
+/// existing real-checkpoint gate in [`crate::gguf_import`] already uses, so a
+/// box configured for one is configured for both.
+pub const GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
+
+/// Default per-sequence `prompt + max_new` cap (also this resident's KV/GDN
+/// cache capacity, since every sequence gets the whole cache).
+const DEFAULT_CTX: u32 = 2048;
+
+// ------------------------------------------------------------ byte accounting
+
+/// Bytes one sequence's DECODE state costs on the card that owns layer `l` -
+/// the per-layer half of what [`ShardCaches`] allocates, charged to the same
+/// stage the layer itself is charged to (which is exactly where it lands: a
+/// layer's cache lives on that layer's own device, never crossing a card).
+///
+/// A GQA layer carries a `[cap, kv_dim]` K and V cache; a GDN layer carries a
+/// fixed-size recurrent state plus a conv history, both independent of `cap`.
+/// Same shapes `crate::serve`'s `Engine` allocates for its own pool.
+fn layer_decode_state_bytes(cfg: &Qwen35Config, ty: LayerType, cap: u32) -> u64 {
+    match ty {
+        LayerType::Full => 2 * cap as u64 * cfg.kv_dim() as u64 * 4,
+        LayerType::Linear => {
+            let state = cfg.linear_num_value_heads as u64 * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
+            let hist = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
+            (state + hist) * 4
+        }
+    }
+}
+
+/// Device bytes the INT8 `lm_head` occupies: `model::ops::Weight::I8`'s
+/// `[n, k/4]` packed words plus its `[n, k/GROUP]` f32 scales, both 4 bytes
+/// an element. 1.42 GB at the real shape - against 5.09 GB for the fp32 table
+/// this replaces, which is not merely large but IMPOSSIBLE on a 24 GB P40
+/// (past `max_buffer_size`, and 2.4x the 2047 MiB storage-binding limit).
+fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
+    let (v, d) = (cfg.vocab as u64, cfg.d_model as u64);
+    v * d + v * (d / model::int8::GROUP as u64) * 4
+}
+
+/// The byte-exact per-stage cost model this resident hands to
+/// `model::shard::plan_fewest_devices`, at `cap` decode positions.
+///
+/// * `per_layer` - the layer's INT8 weights (`Qwen35Config::layer_i8_bytes`,
+///   itself gated against what `model::ops::Weight::upload` really places)
+///   plus that layer's own decode state.
+/// * `embed` - **zero**. The `[vocab, d_model]` embedding is never uploaded:
+///   decode only ever needs one ROW per token, so [`Qwen35GgufInstance`] reads
+///   it straight out of the mapping ([`MmapGguf::tensor_range`], which decodes
+///   only the quant blocks that row touches). 5.09 GB that exists neither in
+///   VRAM nor in host RAM.
+/// * `head` - `norm.weight` plus the INT8 `lm_head` ([`head_i8_bytes`]), both
+///   held by this resident on the last stage's card rather than by the shard
+///   (the shard is built `head: false`; see [`Qwen35GgufInstance::head`]).
+///
+/// Charging the endpoints truthfully matters more here than anywhere else: at
+/// this vocab a mis-charged endpoint is several GB, i.e. the difference
+/// between a plan that fits and a card that OOMs mid-load.
+pub fn layer_cost(cfg: &Qwen35Config, cap: u32) -> LayerBytes {
+    let per_layer = cfg
+        .layer_types()
+        .into_iter()
+        .map(|ty| cfg.layer_i8_bytes(ty) + layer_decode_state_bytes(cfg, ty, cap))
+        .collect();
+    LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 }
+}
+
+// ------------------------------------------------------------ the fetch plan
+
+/// Every brain-canonical name this GGUF offers for the MAIN decoder stack,
+/// mapped to the GGUF tensor it comes from - built by running
+/// [`crate::gguf_import::classify`] (the offline converter's OWN llama.cpp
+/// name classifier, not a second copy) over `mg.names()`.
+///
+/// `Mapped::Dropped` names are skipped, which is exactly how the MTP block
+/// (`blk.{n_layers}.*` and its `nextn.*` extras) excludes itself: `classify`
+/// already drops it wholesale, so this resident never has to special-case it.
+///
+/// [`Mapped::Transformed`] is a 1:1 rename too and belongs in this map -
+/// the VALUE transform it carries is applied on read by [`SsmALogFix`], which
+/// checks the destination name, so the two mechanisms agree by construction
+/// as long as this function does not silently drop the transformed leaf.
+/// (It did, once: every `A_log` vanished from the plan the moment `classify`
+/// stopped returning `Simple` for it, and the load failed by name - loudly,
+/// which is the only reason that was a five-minute fix rather than a silent
+/// hole.) `Mapped::Split` genuinely has no place here: it produces SEVERAL
+/// destinations from one source and `Fetch::Whole` cannot express that; this
+/// architecture is dense and emits none.
+fn gguf_name_map(mg: &MmapGguf, cfg: &Qwen35Config) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for name in mg.names() {
+        match crate::gguf_import::classify(name, cfg) {
+            Mapped::Simple(brain) | Mapped::Transformed { into: brain, .. } => {
+                out.insert(brain, name.clone());
+            }
+            Mapped::Split { .. } | Mapped::Dropped(_) => {}
+        }
+    }
+    out
+}
+
+/// The GGUF tensor names of the three ENDPOINT tensors this resident holds
+/// itself rather than inside a shard, resolved through the same
+/// [`gguf_name_map`] so no llama.cpp spelling is written down twice:
+/// `(embedding table, final norm, lm_head)`.
+///
+/// They are outside the shards because neither `[vocab, d_model]` table can
+/// be an fp32 device buffer at this scale (5.09 GB, past a 24 GB P40's
+/// `max_buffer_size`): the embedding is read a row at a time from the
+/// mapping, and the head is quantized to INT8. See [`layer_cost`].
+pub fn endpoint_names(mg: &MmapGguf, cfg: &Qwen35Config) -> Result<(String, String, String), String> {
+    let available = gguf_name_map(mg, cfg);
+    let get = |brain: &str| available.get(brain).cloned().ok_or_else(|| format!("{MODEL}: this GGUF offers no tensor for '{brain}'"));
+    Ok((get("tok.weight")?, get("norm.weight")?, get(cfg.head_weight())?))
+}
+
+/// The `checkpoint::remap::RemapSource` fetch plan for ONE stage: exactly the
+/// tensors `Qwen35::new_i8_shard` will ask for on `shard` - its own
+/// `blocks.{l}.*` for `l` in `shard.start..shard.end`, plus whichever
+/// endpoints `shard` declares it owns - each a 1:1 [`Fetch::Whole`] rename of
+/// the GGUF tensor [`crate::gguf_import::classify`] maps to it.
+///
+/// This resident always builds its stages with `embed: false, head: false`
+/// (see [`endpoint_names`]), so in practice the plan is layers only; the
+/// function stays honest about `shard` regardless, which is what lets a test
+/// pin the endpoint behaviour too.
+///
+/// The wanted set is [`crate::model::shard_param_list`] itself, not a
+/// re-derivation of it, so a plan that satisfies this function is by
+/// construction a plan `new_i8_shard` cannot find a hole in.
+pub fn shard_fetch_plan(mg: &MmapGguf, cfg: &Qwen35Config, shard: &Shard) -> Result<HashMap<String, Fetch>, String> {
+    let available = gguf_name_map(mg, cfg);
+    let want = crate::model::shard_param_list(cfg, shard);
+    let mut plan = HashMap::with_capacity(want.len());
+    let mut missing = Vec::new();
+    for (name, _) in &want {
+        match available.get(name) {
+            Some(src) => {
+                plan.insert(name.clone(), Fetch::Whole(src.clone()));
+            }
+            None => missing.push(name.clone()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!("{MODEL}: this GGUF offers no tensor for {} required name(s): {}", missing.len(), missing.join(", ")));
+    }
+    Ok(plan)
+}
+
+/// The brain-canonical leaf whose VALUES llama.cpp stores transformed - see
+/// [`ElemOp::LnNeg`]. Named once, so [`SsmALogFix`] and
+/// [`crate::gguf_import::classify`] (the offline converter's own arm for the
+/// same tensor) cannot disagree about which leaf it is.
+const A_LOG_LEAF: &str = "linear_attn.A_log";
+
+/// A [`RemapSource`] with the ONE non-rename this checkpoint needs applied on
+/// read: `ssm_a` holds `-exp(A_log)`, brain's `gdn_decay_gate.wgsl` wants
+/// `A_log`. [`crate::gguf_import::classify`] expresses the same fix as a
+/// `Mapped::Transformed` for the offline converter; this is the streaming
+/// counterpart, and both call the SAME [`ElemOp::LnNeg`].
+///
+/// Getting this wrong is not a crash and not obviously wrong output - it is a
+/// decay gate up to 260x too strong, i.e. a model that quietly stops
+/// integrating context. `ElemOp::LnNeg`'s own doc records the measurement.
+pub struct SsmALogFix<'a> {
+    inner: RemapSource<'a>,
+}
+
+impl SsmALogFix<'_> {
+    fn is_a_log(name: &str) -> bool {
+        name.ends_with(A_LOG_LEAF)
+    }
+}
+
+impl checkpoint::TensorSource for SsmALogFix<'_> {
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        if !Self::is_a_log(name) {
+            return self.inner.with_tensor(name, f);
+        }
+        let mut fixed = None;
+        let found = self.inner.with_tensor(name, &mut |d| {
+            fixed = Some(ElemOp::LnNeg.applied(name, d).unwrap_or_else(|e| panic!("{MODEL}: {e}")));
+        });
+        match (found, fixed) {
+            (true, Some(v)) => {
+                f(&v);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Never lend raw words for the transformed leaf - a zero-copy borrow
+    /// would hand the caller llama.cpp's untransformed bytes and bypass
+    /// [`ElemOp::LnNeg`] entirely, which is exactly the silent-wrong-weights
+    /// failure this type exists to prevent.
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        if Self::is_a_log(name) {
+            return None;
+        }
+        self.inner.raw_words(name)
+    }
+
+    /// Same rule as [`Self::raw_words`]: the transformed leaf is served whole
+    /// (it is `[num_v_heads]`, 48 floats at the real shape), never streamed
+    /// past the transform.
+    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        if Self::is_a_log(name) {
+            return self.with_tensor(name, &mut |d| f(0, d));
+        }
+        self.inner.with_tensor_chunks(name, max_elems, f)
+    }
+
+    fn numel(&self, name: &str) -> Option<usize> {
+        self.inner.numel(name)
+    }
+}
+
+/// [`shard_fetch_plan`] wrapped as a live, transform-applying source over
+/// `mg`, with the plan checked against every wanted tensor's declared element
+/// count BEFORE a single byte is uploaded (`RemapSource::validate` reads
+/// shapes only).
+///
+/// Validating up front is what turns a config-vs-checkpoint mismatch into one
+/// named error instead of a panic dozens of gigabytes into a load.
+pub fn shard_source<'a>(mg: &'a MmapGguf, cfg: &Qwen35Config, shard: &Shard) -> Result<SsmALogFix<'a>, String> {
+    let plan = shard_fetch_plan(mg, cfg, shard)?;
+    let src = RemapSource::new(mg, plan);
+    src.validate(&crate::model::shard_param_list(cfg, shard))?;
+    Ok(SsmALogFix { inner: src })
+}
+
+/// [`crate::gguf_import::config_from_gguf`] with the two adjustments a
+/// multi-card resident needs, in one place so the resident and its tests
+/// cannot disagree:
+///
+/// * `mtp = false` - the importer sets `true` because IT imports the MTP
+///   block; this path must not (see this module's doc).
+/// * `block_size = cap` - purely descriptive here (every stage is built at
+///   `t = 1`), kept truthful so a `to_json` dump of this config says what the
+///   resident actually serves.
+pub fn resident_config(mg: &MmapGguf, cap: u32) -> Result<Qwen35Config, String> {
+    let mut cfg = crate::gguf_import::config_from_gguf(mg)?;
+    cfg.mtp = false;
+    cfg.block_size = cap;
+    Ok(cfg)
+}
+
+// ------------------------------------------------------------ per-shard state
+
+/// One sequence's per-layer decode state for ONE stage, indexed by ABSOLUTE
+/// layer index with a size-1 dummy everywhere the stage/layer-type does not
+/// apply - `crate::model::DecodeCaches`' own documented convention, and the
+/// same shapes `crate::serve`'s `GdnSlot`/GQA pool allocate.
+struct ShardCaches {
+    gqa_k: Vec<DeviceBuffer>,
+    gqa_v: Vec<DeviceBuffer>,
+    gdn_state: Vec<DeviceBuffer>,
+    gdn_hist: Vec<DeviceBuffer>,
+    cap: u32,
+}
+
+impl ShardCaches {
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32) -> ShardCaches {
+        let kv = cfg.kv_dim() as u64;
+        let state = cfg.linear_num_value_heads as u64 * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
+        let hist = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
+        let n = cfg.n_layers as usize;
+        let (mut gqa_k, mut gqa_v) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let (mut gdn_state, mut gdn_hist) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for (l, ty) in cfg.layer_types().into_iter().enumerate() {
+            let mine = shard.owns(l);
+            let (k, v) = if mine && ty == LayerType::Full { (cap as u64 * kv, cap as u64 * kv) } else { (1, 1) };
+            let (s, h) = if mine && ty == LayerType::Linear { (state, hist) } else { (1, 1) };
+            gqa_k.push(gpu.storage(k));
+            gqa_v.push(gpu.storage(v));
+            gdn_state.push(gpu.storage(s));
+            gdn_hist.push(gpu.storage(h));
+        }
+        let caches = ShardCaches { gqa_k, gqa_v, gdn_state, gdn_hist, cap };
+        caches.reset(gpu);
+        caches
+    }
+
+    /// Zero every GDN recurrent state / conv history for a fresh sequence.
+    /// `Gpu::storage` does not guarantee zeroed memory and a fresh sequence's
+    /// recurrent state MUST start at zero. The GQA caches are deliberately
+    /// left alone - `gqa_decode_step` only ever reads rows `0..=pos`, so a
+    /// stale row past the new sequence's length is never read (the same
+    /// argument `Qwen35::reset_decode_cache` makes).
+    fn reset(&self, gpu: &Gpu) {
+        let clears: Vec<&DeviceBuffer> = self.gdn_state.iter().chain(self.gdn_hist.iter()).collect();
+        gpu.submit(&clears, &[]);
+    }
+
+    fn view(&self) -> DecodeCaches<'_> {
+        DecodeCaches {
+            gqa_kcache: &self.gqa_k,
+            gqa_vcache: &self.gqa_v,
+            gqa_cap: self.cap,
+            gdn_state: &self.gdn_state,
+            gdn_hist: &self.gdn_hist,
+        }
+    }
+}
+
+/// One card's stage: the [`Qwen35`] instance holding that card's layer range,
+/// plus this sequence's decode state on the SAME card.
+///
+/// The stage's `Shard` is always `embed: false, head: false` - the endpoints
+/// are the instance's ([`EmbedTable`], [`Head`]), not the shard's, because
+/// neither `[vocab, d_model]` table can be an fp32 device buffer at this
+/// scale (see [`layer_cost`]).
+struct DeviceShard {
+    qwen35: Qwen35,
+    caches: ShardCaches,
+}
+
+/// How this instance reads one embedding row.
+///
+/// The table is `[vocab, d_model]` - 5.09 GB as f32 - and decode only ever
+/// needs a per-token ROW, never a GEMM. So it is neither uploaded nor
+/// materialized on the host: [`MmapGguf::tensor_range`] dequantizes exactly
+/// the quant blocks that row touches, straight out of the mapping. Peak
+/// allocation is one row (20 KiB).
+struct EmbedTable {
+    /// The GGUF tensor name (`token_embd.weight` on a llama.cpp file, but
+    /// resolved via [`endpoint_names`], never spelled here).
+    name: String,
+    d: usize,
+}
+
+/// The head epilogue this resident owns, on the LAST stage's card: the final
+/// `norm.weight` and an INT8 `lm_head`, projected with
+/// `crate::stream::head_logits_on` (the same implementation the streaming
+/// real-weight path uses - there is exactly one "final norm then project to
+/// vocab logits" in this crate).
+///
+/// It lives here rather than inside the last `Qwen35` shard because
+/// `Qwen35::new_impl_on` would hold the head as plain fp32, which at
+/// `[248320, 5120]` is 5.09 GB - past a 24 GB P40's `max_buffer_size`, so
+/// such a shard cannot be built at all. Quantized it is 1.42 GB, inside both
+/// that and the 2047 MiB storage-binding limit.
+struct Head {
+    ops: model::ops::Ops,
+    kernels: model::block::KernelIds,
+    norm: DeviceBuffer,
+    w: model::ops::Weight,
+}
+
+// ------------------------------------------------------------ the instance
+
+/// A built, multi-card, GGUF-resident Qwen3.8-27B.
+pub struct Qwen35GgufInstance {
+    cfg: Qwen35Config,
+    shards: Vec<DeviceShard>,
+    /// Kept open for the instance's lifetime so embedding rows can be read on
+    /// demand. This is the header + mapping handle, not data.
+    mg: MmapGguf,
+    embed: EmbedTable,
+    head: Head,
+    tok: QwenBpe,
+    /// Stop ids from the GGUF's own embedded tokenizer metadata plus the chat
+    /// markup this model's template emits.
+    eos: Vec<u32>,
+    /// `prompt + max_new` ceiling for one sequence (the cache capacity every
+    /// stage was built with).
+    cap: u32,
+    /// The last [`Self::generate`] call's real timings, surfaced through
+    /// [`Instance::metrics`]. Prefill and decode are the same primitive here
+    /// (one token per pass), so the ONLY way to tell how much of a request's
+    /// wall clock was prompt replay versus new tokens is to time them
+    /// separately - and that ratio is exactly what decides whether a batched
+    /// prefill is worth building next. `Cell`, because `metrics` takes
+    /// `&self`; an `Instance` is owned by one worker thread at a time.
+    last: Cell<Timings>,
+    /// Why the last [`Self::generate`] loop ended - `"eos"`, `"length"` or
+    /// `"caller"` (a stop string / cancellation seen by the streamer). Also
+    /// reported through [`Instance::metrics`]: with one primitive serving both
+    /// prefill and decode, "it produced 4 tokens" is ambiguous between a model
+    /// that chose to stop and a loop that gave up, and those need different
+    /// investigations.
+    stop: Cell<&'static str>,
+}
+
+/// One `generate` call's measured cost, reported by [`Instance::metrics`].
+#[derive(Clone, Copy, Debug, Default)]
+struct Timings {
+    prefill_s: f64,
+    prefill_tokens: u32,
+    decode_s: f64,
+    decode_tokens: u32,
+}
+
+impl Qwen35GgufInstance {
+    /// Token `t`'s embedding row, `[d_model]`, read from the mapping.
+    fn embed_row(&self, t: u32) -> Result<Vec<f32>, String> {
+        self.mg
+            .tensor_range(&self.embed.name, t as usize * self.embed.d, self.embed.d)
+            .ok_or_else(|| format!("{MODEL}: token id {t} is outside '{}'", self.embed.name))?
+    }
+
+    /// One token through EVERY stage in order, then the head - returning
+    /// `[vocab]` logits. The residual stream crosses each card boundary
+    /// host-staged (`d_model` fp32, 20 KiB at this shape), which is also how
+    /// the embedding enters stage 0 and how the final hidden state reaches the
+    /// head.
+    ///
+    /// A stage whose layer range is empty (which a capacity-driven plan may
+    /// legitimately produce) needs no special case: `run_decode_step` passes
+    /// its input straight through.
+    fn stack_step(&self, token_id: u32, pos: u32) -> Result<Vec<f32>, String> {
+        let mut carry = self.embed_row(token_id)?;
+        let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
+        let mut per_stage_rms = Vec::new();
+        for s in &self.shards {
+            let caches = s.caches.view();
+            carry = s.qwen35.decode_step_stage(token_id, pos, &caches, Some(&carry));
+            if debug {
+                per_stage_rms.push((carry.iter().map(|v| v * v).sum::<f32>() / carry.len() as f32).sqrt());
+            }
+        }
+        let last = self.shards.last().expect("a plan always has at least one stage");
+        let logits = crate::stream::head_logits_on(&last.qwen35.gpu, &self.head.ops, &self.head.kernels, &self.cfg, &self.head.norm, &self.head.w, &carry);
+        self.debug_step(pos, &per_stage_rms, &logits);
+        Ok(logits)
+    }
+
+    fn reset(&self) {
+        for s in &self.shards {
+            s.caches.reset(&s.qwen35.gpu);
+        }
+    }
+
+    /// Opt-in (`BRAIN_QWEN35_GGUF_DEBUG=1`) per-step dump: the RMS of the
+    /// residual leaving each card, and the top-5 `(token, logit, text)` the
+    /// head prefers.
+    ///
+    /// This is the diagnostic that distinguishes the two ways a big sharded
+    /// stack goes wrong, which decoded text alone cannot: a residual whose
+    /// magnitude explodes or collapses across a card boundary (a plumbing
+    /// bug) versus a healthy residual whose top logits are simply the wrong
+    /// tokens (a weights bug). Costs nothing when unset.
+    fn debug_step(&self, pos: u32, per_stage_rms: &[f32], logits: &[f32]) {
+        if std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_none() {
+            return;
+        }
+        let mut top: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+        top.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let shown: Vec<String> =
+            top.iter().take(5).map(|&(i, l)| format!("({i}, {l:.3}, {:?})", self.tok.decode(&[i as u32]))).collect();
+        eprintln!("{MODEL}: pos {pos}: stage residual rms {per_stage_rms:?} | top5 {}", shown.join(" "));
+    }
+
+    /// Real generation: per-token prefill of `prompt`, then greedy/sampled
+    /// decode until `max_new` tokens or a stop id. `on_token` sees every
+    /// generated id as it is produced (streaming), and returning `true` from
+    /// it stops early.
+    ///
+    /// Returns the GENERATED ids only (prompt excluded) - the same contract
+    /// `crate::sample::generate_kv` has.
+    pub fn generate(
+        &self,
+        prompt: &[u32],
+        max_new: u32,
+        temp: f32,
+        top_k: usize,
+        top_p: f32,
+        seed: u64,
+        on_token: &mut dyn FnMut(&[u32]) -> bool,
+    ) -> Result<Vec<u32>, String> {
+        if prompt.is_empty() {
+            return Err(format!("{MODEL}: empty prompt"));
+        }
+        let need = prompt.len() as u64 + max_new as u64;
+        if need > self.cap as u64 {
+            return Err(format!("{MODEL}: prompt ({}) + max_new ({max_new}) = {need} exceeds this instance's context capacity {}", prompt.len(), self.cap));
+        }
+        if let Some(bad) = prompt.iter().find(|&&t| t >= self.cfg.vocab) {
+            return Err(format!("{MODEL}: prompt token id {bad} is outside vocab {}", self.cfg.vocab));
+        }
+        self.reset();
+        let mut rng = Rng::new(seed);
+        let mut pos = 0u32;
+        let mut logits = Vec::new();
+        let t0 = std::time::Instant::now();
+        for &t in prompt {
+            logits = self.stack_step(t, pos)?;
+            pos += 1;
+        }
+        let prefill_s = t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let mut out = Vec::with_capacity(max_new as usize);
+        let mut stop = "length";
+        for _ in 0..max_new {
+            let next = crate::sample::sample_logits(&logits, temp, top_k, top_p, &mut rng);
+            if self.eos.contains(&next) {
+                stop = "eos";
+                break;
+            }
+            out.push(next);
+            if out.len() as u32 == max_new {
+                break;
+            }
+            if on_token(&out) {
+                stop = "caller";
+                break;
+            }
+            logits = self.stack_step(next, pos)?;
+            pos += 1;
+        }
+        self.last.set(Timings {
+            prefill_s,
+            prefill_tokens: prompt.len() as u32,
+            decode_s: t1.elapsed().as_secs_f64(),
+            decode_tokens: out.len() as u32,
+        });
+        self.stop.set(stop);
+        Ok(out)
+    }
+}
+
+impl Instance for Qwen35GgufInstance {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action != "generate" {
+            return Err(format!("{MODEL}: unknown action '{action}' (only 'generate' exists)"));
+        }
+        // The SAME request parser/streamer every other Qwen-family served
+        // model uses (`messages`/`prompt`/`system`/`tools`/`stop`, chat
+        // markup rendering, stop-string scanning, tool-call extraction) -
+        // not a second copy of that param handling.
+        let req = qwen3::chat::parse_request(&self.tok, inv)?;
+        let mut seq = qwen3::chat::SeqState::new(&req, inv.cancel.clone());
+        progress(Progress::step(0, req.max_new as u32, "generating"));
+        let mut stop = false;
+        let ids = self.generate(
+            &req.ids,
+            req.max_new as u32,
+            req.temp,
+            req.top_k,
+            req.top_p,
+            req.seed,
+            &mut |so_far| {
+                stop = seq.advance(&self.tok, so_far, progress);
+                stop
+            },
+        )?;
+        Ok(seq.finish(&self.tok, &ids, progress))
+    }
+
+    /// Serial, and this is why: every stage of this model is built at
+    /// `b = t = 1` and `Qwen35::run_decode_step` is an `n = 1` primitive, so
+    /// there is no batch axis to fill - two concurrent sequences would need
+    /// two independent KV/GDN cache sets AND a `b > 1` build on every card.
+    /// `crate::serve::Engine`, the single-GPU path, makes exactly the same
+    /// call for exactly the same reason; genuine multi-sequence batching is
+    /// one change for both, not a per-resident one.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
+    }
+
+    /// The last request's real split between prompt replay and new tokens
+    /// (see [`Qwen35GgufInstance::last`]), plus why the loop ended. Both are
+    /// polled by the dispatcher and surface in `Executor::stats().metrics`.
+    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
+        let t = self.last.get();
+        let rate = |tokens: u32, secs: f64| if secs > 0.0 { tokens as f64 / secs } else { 0.0 };
+        vec![
+            ("prefill_seconds".to_string(), json!(t.prefill_s)),
+            ("prefill_tokens".to_string(), json!(t.prefill_tokens)),
+            ("prefill_tok_per_s".to_string(), json!(rate(t.prefill_tokens, t.prefill_s))),
+            ("decode_seconds".to_string(), json!(t.decode_s)),
+            ("decode_tokens".to_string(), json!(t.decode_tokens)),
+            ("decode_tok_per_s".to_string(), json!(rate(t.decode_tokens, t.decode_s))),
+            ("stop_reason".to_string(), json!(self.stop.get())),
+        ]
+    }
+}
+
+// ------------------------------------------------------------ the resident
+
+/// The placement this resident committed to, computed once from the GGUF
+/// header alone (no GPU, no tensor data) and reused by BOTH `estimate_multi`
+/// and `activate_multi` - so the bytes the scheduler reserves and the bytes
+/// the loader places can never describe different cards.
+#[derive(Clone, Debug, Default)]
+struct Plan {
+    cfg: Option<Qwen35Config>,
+    /// `(device, that stage's shard, that stage's bytes)`.
+    stages: Vec<(Device, Shard, u64)>,
+}
+
+/// The [`ResidentModel`] / [`MultiDeviceResidentModel`] adapter. See this
+/// module's doc for what it composes.
+pub struct Qwen35GgufResident {
+    gguf_path: String,
+    /// Candidate devices with each one's USABLE bytes - a real number the
+    /// caller queried, not an assumption. Capacity travels with identity
+    /// because the split has to RESPECT it (see
+    /// `model::shard::plan_by_capacity`).
+    devices: Vec<(Device, u64)>,
+    cap: u32,
+    plan: OnceLock<Plan>,
+}
+
+impl Qwen35GgufResident {
+    pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32) -> Qwen35GgufResident {
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), plan: OnceLock::new() }
+    }
+
+    /// Per-sequence `prompt + max_new` ceiling, from `BRAIN_QWEN35_GGUF_CTX`
+    /// (default [`DEFAULT_CTX`]). It is also every stage's KV/GDN cache
+    /// capacity, so it is charged into [`layer_cost`] and therefore into the
+    /// placement - raising it makes the model need more cards, honestly,
+    /// rather than silently overrunning one.
+    pub fn ctx_from_env() -> u32 {
+        std::env::var("BRAIN_QWEN35_GGUF_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_CTX).max(1)
+    }
+
+    /// The placement, computed once. Returns a plan naming ZERO devices -
+    /// never a panic - when there are no candidate devices, the GGUF cannot
+    /// be opened or understood, or the model does not fit across the devices
+    /// given. That is [`MultiDeviceResidentModel::estimate_multi`]'s
+    /// documented "unavailable" signal, which `ResidencyManager::claim_multi`
+    /// turns into a clean per-job error instead of a dispatcher crash.
+    fn plan(&self) -> Plan {
+        if let Some(p) = self.plan.get() {
+            return p.clone();
+        }
+        let computed = self.plan_uncached();
+        // A losing racer's value is dropped; `plan_uncached` is a pure
+        // function of `self`, so which racer wins cannot matter.
+        let _ = self.plan.set(computed.clone());
+        computed
+    }
+
+    fn plan_uncached(&self) -> Plan {
+        if self.devices.is_empty() {
+            return Plan::default();
+        }
+        let mg = match MmapGguf::open(&self.gguf_path) {
+            Ok(mg) => mg,
+            Err(e) => {
+                eprintln!("{MODEL}: cannot open '{}': {e} -- reporting zero devices so the claim fails placement instead of panicking", self.gguf_path);
+                return Plan::default();
+            }
+        };
+        let cfg = match resident_config(&mg, self.cap) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{MODEL}: '{}' is not a servable Qwen3.8 GGUF: {e} -- reporting zero devices", self.gguf_path);
+                return Plan::default();
+            }
+        };
+        let cost = layer_cost(&cfg, self.cap);
+        // `plan_fewest_devices` wants `(index into self.devices, capacity)`;
+        // mapping back afterwards is what makes a non-GPU device in the list
+        // (which this model cannot use) rejected rather than mis-indexed.
+        let mut caps: Vec<(usize, u64)> = Vec::with_capacity(self.devices.len());
+        for (i, &(d, cap)) in self.devices.iter().enumerate() {
+            match d {
+                Device::Gpu(_) => caps.push((i, cap)),
+                other => eprintln!("{MODEL}: ignoring non-GPU device {other:?} (this model is GPU-only)"),
+            }
+        }
+        let Some(placements) = model::shard::plan_fewest_devices(&cost, &caps) else {
+            eprintln!(
+                "{MODEL}: {} does not fit across the {} budgeted device(s) ({} bytes needed, {} available) -- reporting zero devices",
+                self.gguf_path,
+                caps.len(),
+                cost.total(),
+                caps.iter().map(|&(_, c)| c).sum::<u64>()
+            );
+            return Plan::default();
+        };
+        let stages = placements
+            .iter()
+            .map(|p| {
+                let (device, _) = self.devices[p.shard.gpu_index];
+                // `plan_*` indexes `caps`, whose `.0` is an index into
+                // `self.devices`; the physical card is that entry's own
+                // `Device::Gpu(i)`.
+                let physical = match device {
+                    Device::Gpu(i) => i as usize,
+                    _ => unreachable!("only Gpu devices enter `caps`"),
+                };
+                (device, Shard { gpu_index: physical, ..p.shard.clone() }, p.bytes)
+            })
+            .collect();
+        Plan { cfg: Some(cfg), stages }
+    }
+
+    /// The total device bytes this checkpoint needs whatever the split, and
+    /// the per-layer profile behind it - for a caller sizing budgets or
+    /// reporting "will this fit at all?".
+    pub fn total_device_bytes(&self) -> Result<u64, String> {
+        let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let cfg = resident_config(&mg, self.cap)?;
+        Ok(layer_cost(&cfg, self.cap).total())
+    }
+
+    /// Which layer range and how many bytes each device holds, as planned -
+    /// `(device, start, end, bytes)`. Empty when unplaceable.
+    pub fn placement(&self) -> Vec<(Device, usize, usize, u64)> {
+        self.plan().stages.iter().map(|(d, s, b)| (*d, s.start, s.end, *b)).collect()
+    }
+}
+
+/// Stop ids for this checkpoint: the GGUF's own declared EOS plus the chat
+/// markup terminators, resolved through the embedded vocabulary rather than
+/// hardcoded. Duplicates are dropped so `eos.contains` stays a plain scan.
+fn stop_ids(tok: &QwenBpe, declared: Option<u32>) -> Vec<u32> {
+    let mut ids: Vec<u32> = declared.into_iter().collect();
+    for s in ["<|im_end|>", "<|endoftext|>"] {
+        if let Some(id) = tok.special_id(s) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+impl ResidentModel for Qwen35GgufResident {
+    fn manifest(&self) -> Manifest {
+        let generate = ActionSpec::new(
+            "generate",
+            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from the released Q8_0 GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 KV/GDN state; one sequence per dispatch)",
+        )
+        .streaming()
+        .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
+        .param(ParamSpec::new("messages", ParamType::Str, "JSON array of {role,content,...} chat turns (overrides prompt)"))
+        .param(ParamSpec::new("system", ParamType::Str, "optional system prompt prepended to the chat"))
+        .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt").default(json!(true)))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
+        .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (0 or negative = disabled)").default(json!(40)))
+        .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
+        .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"))
+        .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
+        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (accepted, ignored)"))
+        .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)))
+        .output(BlobSpec::new("text", Media::Text, "the generated text"));
+        Manifest::new(
+            MODEL,
+            "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from the released Q8_0 GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; one sequence per dispatch.",
+            vec![generate],
+        )
+        .with_max_context_tokens(self.cap as u64)
+    }
+
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(MODEL, "default")
+    }
+
+    /// Deliberately unusable: this model occupies real bytes on SEVERAL cards
+    /// at once, so it has no meaningful single-device footprint. It is
+    /// registered via `Executor::register_multi` and budgeted through
+    /// [`MultiDeviceResidentModel::estimate_multi`]; see
+    /// `crates/residency/src/multi.rs`' module doc for why a plain `register`
+    /// would let it spend VRAM the scheduler never budgeted.
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        MemCost::new(0, 0)
+    }
+
+    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+        Err(format!("{MODEL}: single-device activate is not supported -- this model is multi-device only, claim it via ResidencyManager::claim_multi"))
+    }
+}
+
+impl MultiDeviceResidentModel for Qwen35GgufResident {
+    fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
+        let plan = self.plan();
+        // Host RAM: the mapping is header-only plus whatever one streamed
+        // tensor costs at a time (`MmapGguf::with_tensor_chunks` decodes a
+        // bounded block window, `Weight::upload` materialises one leaf), so
+        // the honest steady-state figure is the largest single leaf.
+        let ram = plan
+            .cfg
+            .as_ref()
+            .map(|c| c.intermediate_size as u64 * c.d_model as u64 * 4)
+            .unwrap_or(0);
+        MultiDeviceCost::new(plan.stages.iter().map(|&(d, _, bytes)| (d, bytes)).collect(), ram)
+    }
+
+    fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        let plan = self.plan();
+        let Some(cfg) = plan.cfg.clone() else {
+            return Err(format!("{MODEL}: no placement (GGUF unreadable, or it does not fit the budgeted devices)"));
+        };
+        if plan.stages.is_empty() {
+            return Err(format!("{MODEL}: no placement (GGUF unreadable, or it does not fit the budgeted devices)"));
+        }
+        // `claim_multi` reserves against exactly the devices `estimate_multi`
+        // named, so it hands back the same set. Insisting on that (rather
+        // than silently re-planning for whatever arrives) is what makes the
+        // reservation and the allocation describe the same bytes.
+        if devices.len() != plan.stages.len() || !devices.iter().all(|d| plan.stages.iter().any(|(pd, _, _)| pd == d)) {
+            return Err(format!(
+                "{MODEL}: activate_multi got devices {devices:?} but the plan placed {:?} -- the reservation and the load would describe different cards",
+                plan.stages.iter().map(|&(d, _, _)| d).collect::<Vec<_>>()
+            ));
+        }
+
+        let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let gtok = mg.tokenizer().ok_or_else(|| format!("{MODEL}: '{}' carries no embedded tokenizer (tokenizer.ggml.* KV)", self.gguf_path))?;
+        let declared_eos = gtok.eos;
+        let tok = QwenBpe::from_gguf(&gtok).map_err(|e| format!("{MODEL}: embedded tokenizer: {e}"))?;
+        let eos = stop_ids(&tok, declared_eos);
+        let (embed_name, norm_name, head_name) = endpoint_names(&mg, &cfg)?;
+
+        let mut shards = Vec::with_capacity(plan.stages.len());
+        for (_, placed, _) in &plan.stages {
+            // The planner's `embed`/`head` flags say which stage is CHARGED
+            // the endpoint bytes; the stage itself is built holding neither
+            // (see `DeviceShard`'s own doc - this instance owns both
+            // endpoints, because an fp32 `[vocab, d_model]` cannot be a
+            // device buffer here at all).
+            let shard = &Shard { embed: false, head: false, ..placed.clone() };
+            let src = shard_source(&mg, &cfg, shard)?;
+            // `b = t = 1`: this instance's own `res`/`logits`/`tokens` and
+            // its per-instance decode state are sized to the smallest legal
+            // value (`gdn_chunk_size(1) == 1`, so `t % chunk == 0` holds for
+            // every config). The real per-sequence cache is `ShardCaches`
+            // below, at `self.cap` - the same split `crate::serve::Engine`
+            // makes for the same reason.
+            let qwen35 = Qwen35::new_i8_shard(cfg.clone(), 1, 1, &src, shard.clone());
+            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap);
+            shards.push(DeviceShard { qwen35, caches });
+        }
+
+        // The head epilogue, on the LAST stage's card - see `Head`'s own doc
+        // for why it is the instance's and not that shard's.
+        let last = shards.last().ok_or_else(|| format!("{MODEL}: plan has zero stages"))?;
+        let gpu = &last.qwen35.gpu;
+        let (v, d) = (cfg.vocab as usize, cfg.d_model as usize);
+        // ROWS_PER_CHUNK: `crate::stream::generate`'s own figure, bounding the
+        // host scratch this quantization needs to `rows * d_model` f32 (~84 MB
+        // here) instead of the whole 5.09 GB table.
+        const ROWS_PER_CHUNK: usize = 4096;
+        let head_w = crate::stream::quantize_i8_rows(gpu, &mg, &head_name, v, d, ROWS_PER_CHUNK);
+        let norm = match mg.tensor(&norm_name) {
+            Some(Ok(w)) if w.len() == d => gpu.storage_init("qwen35.gguf.final_norm", &w),
+            Some(Ok(w)) => return Err(format!("{MODEL}: '{norm_name}' has {} elements, expected {d}", w.len())),
+            Some(Err(e)) => return Err(format!("{MODEL}: '{norm_name}': {e}")),
+            None => return Err(format!("{MODEL}: '{norm_name}' vanished between planning and load")),
+        };
+        let head = Head {
+            ops: model::ops::Ops::new(gpu.share()).map_err(|e| format!("{MODEL}: Ops::new on the head card: {e}"))?,
+            kernels: crate::model::kernel_ids(),
+            norm,
+            w: head_w,
+        };
+        let embed = EmbedTable { name: embed_name, d };
+
+        Ok(Box::new(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, last: Cell::default(), stop: Cell::new("length") }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GB: u64 = 1 << 30;
+
+    /// The streaming loader must apply the SAME `ssm_a -> A_log` transform
+    /// the offline converter does, and apply it to NOTHING else - including
+    /// through the zero-copy `raw_words` path, which would otherwise hand the
+    /// device llama.cpp's untransformed bytes and silently bypass it.
+    ///
+    /// Driven over a plain `HashMap` source (which really does lend zero-copy
+    /// words), so the bypass is a reachable state in this test rather than a
+    /// hypothetical.
+    #[test]
+    fn the_streaming_loader_untransforms_a_log_and_only_a_log() {
+        use checkpoint::TensorSource;
+        let stored: Vec<f32> = [-5.5f32, -3.2, -1.1].iter().map(|x: &f32| -x.exp()).collect();
+        let untouched = vec![0.25f32, -0.5, 2.0];
+        let inner: HashMap<String, Vec<f32>> = [
+            ("blocks.0.linear_attn.A_log".to_string(), stored.clone()),
+            ("blocks.0.linear_attn.dt_bias".to_string(), untouched.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let plan: HashMap<String, Fetch> = inner.keys().map(|k| (k.clone(), Fetch::Whole(k.clone()))).collect();
+        let src = SsmALogFix { inner: RemapSource::new(&inner, plan) };
+
+        let mut got = Vec::new();
+        assert!(src.with_tensor("blocks.0.linear_attn.A_log", &mut |d| got = d.to_vec()));
+        for (g, want) in got.iter().zip([-5.5f32, -3.2, -1.1]) {
+            assert!((g - want).abs() < 1e-5, "A_log must be ln(-ssm_a): got {g}, want {want}");
+        }
+        assert!(src.raw_words("blocks.0.linear_attn.A_log").is_none(), "the transformed leaf must never be lent zero-copy");
+        let mut chunked = Vec::new();
+        assert!(src.with_tensor_chunks("blocks.0.linear_attn.A_log", 1, &mut |_, d| chunked.extend_from_slice(d)));
+        assert_eq!(chunked, got, "the chunked path must deliver the transformed values too");
+
+        // Everything else passes through untouched, zero-copy included.
+        let mut other = Vec::new();
+        assert!(src.with_tensor("blocks.0.linear_attn.dt_bias", &mut |d| other = d.to_vec()));
+        assert_eq!(other, untouched, "only A_log is transformed");
+        assert!(src.raw_words("blocks.0.linear_attn.dt_bias").is_some(), "an untransformed leaf keeps its zero-copy path");
+        assert_eq!(src.numel("blocks.0.linear_attn.A_log"), Some(3));
+    }
+
+    /// The endpoints are charged for what this resident ACTUALLY places, and
+    /// what it places is what a 24 GB P40 can hold.
+    ///
+    /// Both `[vocab, d_model]` tables are 5_085_593_600 bytes as fp32 -
+    /// simultaneously over that card's `max_buffer_size` (~4.09 GiB) and 2.4x
+    /// its 2047 MiB storage-BINDING limit, so "just allocate it" is not an
+    /// option this cost model may describe. The embedding is therefore not on
+    /// the card at all (row-at-a-time out of the mapping ⇒ 0 bytes) and the
+    /// head is INT8 (1.42 GB, inside both limits). A cost model that charged
+    /// either at the fp32 rate would plan a split that cannot load.
+    #[test]
+    fn the_endpoints_are_charged_for_what_is_really_placed() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let cost = layer_cost(&cfg, 2048);
+        let fp32_table = cfg.vocab as u64 * cfg.d_model as u64 * 4;
+        assert_eq!(fp32_table, 5_085_593_600, "the fp32 table this resident refuses to place");
+        assert_eq!(cost.embed, 0, "the embedding is read from the mapping a row at a time, never uploaded");
+        assert_eq!(cost.head, head_i8_bytes(&cfg) + cfg.d_model as u64 * 4, "int8 lm_head + fp32 norm.weight");
+        assert!(cost.head < fp32_table / 3, "the int8 head must be far smaller than the fp32 table: {}", cost.head);
+        // Inside the 2047 MiB storage-buffer BINDING limit, which is the
+        // constraint that actually decides whether this can run at all.
+        assert!(head_i8_bytes(&cfg) < 2047 << 20, "the packed head must be bindable: {}", head_i8_bytes(&cfg));
+    }
+
+    /// A layer's decode state is charged to the stage that owns the layer -
+    /// without it a placement would under-budget every card by the whole KV
+    /// pool. GQA layers scale with context, GDN layers do not.
+    #[test]
+    fn per_layer_cost_includes_this_sequences_decode_state() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let small = layer_cost(&cfg, 128);
+        let large = layer_cost(&cfg, 8192);
+        let types = cfg.layer_types();
+        let gqa = types.iter().position(|t| *t == LayerType::Full).unwrap();
+        let gdn = types.iter().position(|t| *t == LayerType::Linear).unwrap();
+        assert!(small.per_layer[gqa] > cfg.layer_i8_bytes(LayerType::Full), "a GQA layer must be charged its KV cache");
+        assert!(small.per_layer[gdn] > cfg.layer_i8_bytes(LayerType::Linear), "a GDN layer must be charged its recurrent state");
+        assert!(large.per_layer[gqa] > small.per_layer[gqa], "GQA cache scales with context");
+        assert_eq!(large.per_layer[gdn], small.per_layer[gdn], "GDN state is O(1) in context, not O(T)");
+    }
+
+    /// The real model at the real shape does NOT fit one 24 GB P40 and DOES
+    /// fit two - the whole reason this resident exists. Pure arithmetic, no
+    /// GPU and no checkpoint: it is a property of the published dims.
+    #[test]
+    fn the_real_model_needs_two_24gb_cards_and_fits_them() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let cost = layer_cost(&cfg, 2048);
+        let p40 = 24 * GB; // 24 GiB usable, i.e. a card with no reserve at all
+        assert!(cost.total() > p40, "if it fitted one card this resident would be pointless: {} bytes", cost.total());
+        assert!(model::shard::plan_by_capacity(&cost, &[(0, p40)]).is_none(), "one card must be reported infeasible, not planned");
+        let two = model::shard::plan_fewest_devices(&cost, &[(0, p40), (1, p40)]).expect("two 24 GiB cards must hold it");
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].shard.start, 0);
+        assert!(two[0].shard.embed && !two[0].shard.head);
+        assert_eq!(two[1].shard.end, cfg.n_layers as usize);
+        assert!(two[1].shard.head && !two[1].shard.embed);
+        assert_eq!(two[0].shard.end, two[1].shard.start, "contiguous, no gap");
+        for p in &two {
+            assert!(p.bytes <= p40, "stage of {} bytes overruns a {p40}-byte card", p.bytes);
+        }
+    }
+
+    /// `estimate_multi` must never panic and must report ZERO devices for an
+    /// unreadable checkpoint - the documented "unavailable" signal. It runs
+    /// on the `Executor` dispatcher thread, where a panic takes every other
+    /// model on the server down with it.
+    #[test]
+    fn an_unreadable_gguf_reports_zero_devices_rather_than_panicking() {
+        let r = Qwen35GgufResident::new("/nonexistent/qwen35.gguf".to_string(), vec![(Device::Gpu(0), 24 * GB)], 2048);
+        let cost = r.estimate_multi(&InstanceKey::new(MODEL, "default"));
+        assert_eq!(cost.devices().count(), 0);
+        assert!(r.placement().is_empty());
+        assert!(r.activate_multi(&InstanceKey::new(MODEL, "default"), &[]).is_err());
+        // The plan is memoized, so a second call must agree with the first
+        // rather than re-deciding (and must still not panic).
+        assert_eq!(r.estimate_multi(&InstanceKey::new(MODEL, "default")).devices().count(), 0);
+    }
+
+    /// No budgeted GPU is also "unavailable", not a panic and not a CPU
+    /// fallback (there is no CPU path - the weights are int8 device buffers).
+    #[test]
+    fn no_gpu_reports_zero_devices() {
+        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048);
+        assert_eq!(r.estimate_multi(&InstanceKey::new(MODEL, "default")).devices().count(), 0);
+    }
+
+    /// Single-device activation is refused, loudly - registering this model
+    /// with the plain `Executor::register` would budget only one of the cards
+    /// it actually occupies.
+    #[test]
+    fn single_device_activation_is_refused() {
+        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![(Device::Gpu(0), 24 * GB)], 2048);
+        let key = InstanceKey::new(MODEL, "default");
+        assert_eq!(r.estimate(&key).vram, 0);
+        let err = match r.activate(&key, Device::Gpu(0)) {
+            Ok(_) => panic!("single-device activate must be refused"),
+            Err(e) => e,
+        };
+        assert!(err.contains("multi-device only"), "{err}");
+    }
+}

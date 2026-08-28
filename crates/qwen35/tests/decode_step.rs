@@ -83,3 +83,77 @@ fn decode_step_matches_full_prefill_cpu() {
 fn decode_step_matches_full_prefill_default_backend() {
     run(Gpu::new(pipelines()));
 }
+
+/// The SAME prefill-vs-decode equivalence at the **INT8** tier, which the two
+/// tests above cannot see: they build with `Qwen35::new_on`, i.e. fp32, so
+/// every quantized code path is unreachable from them.
+///
+/// This is the crossing a prior fix named and only half closed: that fix
+/// addressed a *panic* - the int8 decode tape looked its
+/// projections up in the fp32 `ParamStore`, which an int8 build deliberately
+/// does not populate - and the regression test it left behind
+/// (`model.rs`'s `two_shard_int8_decode_matches_the_whole_shard_model`)
+/// compares int8-decode against int8-decode. A systematic numeric error in
+/// the int8 decode tape (a wrong activation-quantization scale, a mis-shaped
+/// `Act`, the wrong `Weight` for a leaf) is identical on both sides of that
+/// comparison and passes it. Only a cross-TIER or cross-PATH reference can
+/// catch it, and this is the cross-path one: the int8 PREFILL tape
+/// (`ops_linear` through `Ops::matmul`, validated by `model_i8_smoke.rs` and
+/// `int8_real_weight_sanity.rs`) against the int8 DECODE tape at every
+/// position of the same sequence.
+///
+/// Tolerance: the two tapes run the identical quantized kernels over the
+/// identical weights and differ only in row count per dispatch (`t` vs 1),
+/// so the residual difference is dynamic activation quantization on
+/// different row groupings plus fp32 reduction order - not a different
+/// computation. `2e-2` on logits of order 1 is loose enough for that and
+/// nowhere near loose enough to hide a wrong tape (the failure mode this
+/// exists for produces logits that disagree in ARGMAX, not in the third
+/// decimal).
+fn run_i8(gpu: Gpu) {
+    let cfg = Qwen35Config::tiny_i8();
+    let t = cfg.block_size;
+    let d = cfg.d_model as usize;
+    let v = cfg.vocab as usize;
+    let init = qwen35::init::init_weights(&cfg, 7);
+
+    let m = Qwen35::new_on_i8(gpu, cfg.clone(), 1, t, &init);
+    let tokens: Vec<u32> = (0..t).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+
+    let full_logits = m.logits_all(&tokens);
+    assert_eq!(full_logits.len(), t as usize * v);
+    assert!(full_logits.iter().all(|x| x.is_finite()), "int8 logits_all produced a non-finite value");
+
+    // `lm_head` stays fp32 on an int8 build (`is_i8_linear` never names it),
+    // so the host head below is the same weight both tapes use.
+    let head_w = m.read_weight(cfg.head_weight()); // [v, d]
+    m.reset_decode_cache();
+
+    let mut worst = 0.0f32;
+    let mut argmax_mismatches = 0;
+    for (i, &tok) in tokens.iter().enumerate() {
+        let hidden = m.step(tok);
+        assert!(hidden.iter().all(|x| x.is_finite()), "position {i}: int8 step() produced a non-finite hidden state");
+        let logits_i: Vec<f32> =
+            (0..v).map(|row| { let wr = &head_w[row * d..(row + 1) * d]; wr.iter().zip(&hidden).map(|(a, b)| a * b).sum::<f32>() }).collect();
+        let want = &full_logits[i * v..(i + 1) * v];
+        worst = worst.max(maxabs(&logits_i, want));
+        let am = |s: &[f32]| s.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(j, _)| j).unwrap();
+        if am(&logits_i) != am(want) {
+            argmax_mismatches += 1;
+        }
+    }
+    println!("int8 decode vs int8 prefill over {t} positions: worst maxabs = {worst:e}, argmax mismatches = {argmax_mismatches}");
+    assert_eq!(argmax_mismatches, 0, "int8 decode picks a different token than int8 prefill at {argmax_mismatches} position(s)");
+    assert!(worst < 2e-2, "int8 decode vs int8 prefill maxabs={worst}");
+}
+
+#[test]
+fn int8_decode_step_matches_int8_full_prefill_cpu() {
+    run_i8(Gpu::new_cpu(pipelines()));
+}
+
+#[test]
+fn int8_decode_step_matches_int8_full_prefill_default_backend() {
+    run_i8(Gpu::new(pipelines()));
+}

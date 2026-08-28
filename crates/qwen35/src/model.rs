@@ -313,7 +313,7 @@ const ATTN_DECODE_SCORES: usize = 78;
 const DECODE_SOFTMAX: usize = 79;
 const ATTN_DECODE_APPLY: usize = 80;
 
-fn kernel_ids() -> KernelIds {
+pub(crate) fn kernel_ids() -> KernelIds {
     KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: RMS_INV,
@@ -703,13 +703,31 @@ pub(crate) struct DecodeCaches<'a> {
     pub gdn_hist: &'a [DeviceBuffer],
 }
 
+/// The device a shard runs on: `shard.gpu_index`'s canonical physical card,
+/// or the ambient selection for [`Shard::ANY_GPU`]. Written once so every
+/// shard constructor places the same way (they used to carry a byte-identical
+/// copy each).
+fn shard_gpu(shard: &Shard) -> Gpu {
+    if shard.gpu_index == Shard::ANY_GPU {
+        Gpu::new(pipelines())
+    } else {
+        Gpu::new_on_index(shard.gpu_index as u32, pipelines()).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
+    }
+}
+
 /// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
 /// verbatim (so the single-device store is byte-identical). A partial shard
 /// keeps only its layers' weights, plus `tok.weight` when it embeds and/or
 /// carries the tied head, and `norm.weight`+head when it is the head stage.
 /// Mirrors `qwen35moe::model::shard_param_list` exactly, adapted for this
 /// config's `"blocks.{l}."`-prefixed naming.
-fn shard_param_list(cfg: &Qwen35Config, shard: &Shard) -> Vec<(String, usize)> {
+///
+/// `pub(crate)` because it is also THE definition of "which tensors must a
+/// loader supply for this stage": `crate::int8_gguf_resident` builds its
+/// `checkpoint::remap::RemapSource` fetch plan from exactly this list (and
+/// validates the plan against its numels), so the loader and
+/// [`Qwen35::new_i8_shard`] can never disagree about a stage's tensor set.
+pub(crate) fn shard_param_list(cfg: &Qwen35Config, shard: &Shard) -> Vec<(String, usize)> {
     let full = cfg.param_list();
     if shard.is_whole(cfg.n_layers as usize) {
         return full;
@@ -802,12 +820,7 @@ impl Qwen35 {
     /// meant for outside tests). `cfg.mtp` requires a whole shard - see this
     /// function's own assert.
     pub fn new_shard(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen35 {
-        let gpu = if shard.gpu_index == Shard::ANY_GPU {
-            Gpu::new(pipelines())
-        } else {
-            Gpu::new_on_index(shard.gpu_index as u32, pipelines()).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
-        };
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, init, false, true, shard)
     }
 
     /// [`Self::new_shard`]'s int8-INFERENCE sibling (`i8 = true`, `train =
@@ -827,12 +840,26 @@ impl Qwen35 {
     /// `cfg.mtp` requires a whole shard, asserted in `new_impl_on` - shared
     /// with every other constructor, so it covers this one unchanged.
     pub fn new_i8_shard(cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen35 {
-        let gpu = if shard.gpu_index == Shard::ANY_GPU {
-            Gpu::new(pipelines())
-        } else {
-            Gpu::new_on_index(shard.gpu_index as u32, pipelines()).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
-        };
-        Qwen35::new_impl_on(gpu, cfg, b, t, src, true, false, shard)
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, true, false, shard)
+    }
+
+    /// [`Self::new_i8_shard`]'s **fp32** sibling: the same stage, the same
+    /// [`checkpoint::TensorSource`] streaming load, weights kept at full
+    /// precision.
+    ///
+    /// Exists so a quantized stage can be compared against an
+    /// otherwise-identical unquantized one built from the SAME real
+    /// checkpoint bytes - the only reference available for "does int8 still
+    /// track fp32 on REAL weights, through a real stack of layers", which
+    /// per-leaf cosine (`tests/int8_real_weight_sanity.rs`) and tiny-config
+    /// parity (`tests/model_i8_smoke.rs`) both leave open. A truncated
+    /// `cfg.n_layers` makes that comparison fit one card at 27B dims; see
+    /// `tests/gguf_i8_vs_fp32_real.rs`.
+    ///
+    /// It is not a serving path: at the real depth the fp32 weights are
+    /// ~108 GB.
+    pub fn new_fp32_shard_src(cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen35 {
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, false, false, shard)
     }
 
     fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, i8: bool, train: bool, shard: Shard) -> Qwen35 {
@@ -2005,6 +2032,24 @@ impl Qwen35 {
     /// on the host to get logits, exactly as `logits_all`'s own caller would
     /// from a row of its output.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
+        self.step_with_input(token_id, None)
+    }
+
+    /// [`Self::step`] for a stage that does NOT own the token embedding:
+    /// `input` is this stage's `[d_model]` INPUT residual, exactly what
+    /// [`Self::run_decode_step`]'s `input_override` seam takes (the previous
+    /// stage's output, or - on the first stage of a pipeline whose embedding
+    /// lives off-device - the token's embedding row).
+    ///
+    /// Uses THIS instance's own per-sequence decode state, so its capacity is
+    /// the `t` it was built with. A serving path that needs a capacity
+    /// independent of `t`, or several concurrent sequences, supplies its own
+    /// `DecodeCaches` instead (`crate::serve::Engine`,
+    /// `crate::int8_gguf_resident`); this is the single-sequence convenience
+    /// both of those wrap.
+    ///
+    /// `None` is exactly [`Self::step`] and requires `shard.embed`.
+    pub fn step_with_input(&self, token_id: u32, input: Option<&[f32]>) -> Vec<f32> {
         assert_eq!(self.b, 1, "qwen35::step requires b==1 (single sequence)");
         assert!(
             (token_id as usize) < self.cfg.vocab as usize,
@@ -2020,7 +2065,7 @@ impl Qwen35 {
             gdn_state: &self.gdn_state,
             gdn_hist: &self.gdn_hist,
         };
-        let hidden = self.run_decode_step(token_id, pos, &caches, None);
+        let hidden = self.run_decode_step(token_id, pos, &caches, input);
         self.dec_pos.set(pos + 1);
         self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
@@ -2102,6 +2147,24 @@ impl Qwen35 {
         } else {
             res
         }
+    }
+
+    /// [`Self::run_decode_step`] staged to the HOST - the one call a
+    /// multi-stage decode driver (`crate::int8_gguf_resident`) needs per stage
+    /// per token. Returns `[d_model]`: this stage's last-layer residual, ready
+    /// to be handed to the next stage as its `input_override` (or, on a head
+    /// stage, already through the final `norm.weight`).
+    ///
+    /// Deliberately does NOT apply an `lm_head` projection, even on a head
+    /// stage. At the real Qwen3.8-27B shape a `[248320, 5120]` fp32 head is
+    /// 5.09 GB - past `max_buffer_size` on a 24 GB P40, so it cannot be a
+    /// device buffer at all and a shard that owned it would fail to load.
+    /// Both real-weight callers therefore keep the head OUTSIDE the shard, as
+    /// an int8 `model::ops::Weight` (1.27 GB packed, inside the binding
+    /// limit), and project with `crate::stream::head_logits_on`.
+    pub(crate) fn decode_step_stage(&self, token_id: u32, pos: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> Vec<f32> {
+        let hidden = self.run_decode_step(token_id, pos, caches, input_override);
+        self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
 
     /// One Gated DeltaNet layer's decode step - the single-token sibling of

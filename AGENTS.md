@@ -61,13 +61,31 @@ fast and scalable kernel - not a naive one.
    MLP on every layer (no MoE), plus a single-layer multi-token-prediction
    (MTP) head sharing the token embedding/LM head, and the same spliced
    Qwen3-VL vision front-end (`qwen35::vl::Qwen35Vl`). Weights ship as
-   DeepSeek-V3-style blockwise FP8, dequantized host-side at import (no GGUF
-   importer for this arch). Rank/alpha LoRA on all 12 targetable GDN/GQA/MLP
+   DeepSeek-V3-style blockwise FP8, dequantized host-side at import; the
+   `unsloth/Qwen3.8-27B-GGUF` release imports too (`gguf_import.rs`, MTP block
+   included). Rank/alpha LoRA on all 12 targetable GDN/GQA/MLP
    projections, full finetune, incremental single-sequence decode, paged
    HTTP/D-Bus/batched serving (`caps.rs`/`serve.rs`), and cross-GPU pipeline
    sharding (`model::shard::Shardable`). Gradient-checked
    (`gradcheck::check_qwen35`, `check_qwen35_lora`, `check_qwen35_mtp`).
-   `brain qwen35 infer`. See `.agents/roadmap/qwen35.md`.
+   `brain qwen35 infer`. **A path to serve the REAL checkpoint from its
+   released Q8_0 GGUF exists and LOADS but does not yet generate correct
+   text** (its correctness gate is deliberately red - see
+   `.agents/roadmap/qwen35.md` M21): `int8_gguf_resident.rs` (model id
+   `unsloth/Qwen3.8-27B-Q8_0`, `BRAIN_QWEN35_GGUF`) streams each leaf out of
+   `MmapGguf` (a `TensorSource`) into a group-wise INT8 `new_i8_shard` stage
+   per card, layer-sharded by `model::shard::plan_fewest_devices` over real
+   per-layer bytes - measured 27.05 GiB across 2x24 GiB P40 (layers 0..34 /
+   34..64) with no fp32 intermediate on disk (the offline route would need
+   ~108 GB). Its endpoints deliberately live OUTSIDE the shards: both
+   `[248320, 5120]` tables are 5.09 GB fp32, past `max_buffer_size` AND 2.4x
+   the 2047 MiB storage-binding limit, so the embedding is read a row at a
+   time from the mapping and the `lm_head` is INT8 (see
+   `.agents/rules/lessons.md` #69). No MTP on that path (MTP requires a whole
+   shard). The open defect is a GGUF-vs-safetensors weight difference, NOT
+   the sharding, the int8 decode tape, or `ssm_a` (that one was found and
+   fixed - lesson #70); see `.agents/roadmap/qwen35.md` M21 for the
+   rule-out table.
 3. **Sparse MoE Transformer** (`crates/toymoe`) - RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
 4. **GLM-5.2 decoder** (`crates/glmdsa`) - `glm_moe_dsa`: **MLA** (low-rank q/kv with

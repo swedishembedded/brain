@@ -414,7 +414,7 @@ pub fn run_weights_qwen35_with(opt: &Options, budget: u32, passes: u32) -> Resul
         "Drives the real weightset::WeightSet/ResidencyPlan code (not a \
          re-simulation) over qwen35's 64 real decoder layers, weighted by \
          their real int8 byte cost (qwen35::config::Qwen35Config::\
-         layer_i8_bytes, ~372-383 MB depending on GDN vs GQA layer type), \
+         layer_i8_bytes, ~419-431 MB depending on GDN vs GQA layer type), \
          comparing CyclicScan/Lru/AllResident's reload counts AND real bytes \
          moved on identical seeds -- there is no randomness here, the \
          schedule is fully deterministic. Pure host bookkeeping: no GPU, no \

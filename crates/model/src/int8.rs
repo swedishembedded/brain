@@ -359,7 +359,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "multiple of 32")]
     fn quantize_weight_rejects_a_ragged_k() {
-        quantize_weight(&vec![0.5f32; 2 * 12], 2, 12);
+        quantize_weight(&[0.5f32; 2 * 12], 2, 12);
     }
 
     /// The whole point of the group-wise layout, stated as a measurement.

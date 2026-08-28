@@ -31,6 +31,11 @@ DeepSeek-V3-style blockwise FP8 (E4M3 + BF16 `weight_scale_inv`), dequantized
 host-side at import. No GGUF importer for this architecture - the real
 checkpoint is safetensors-only.
 
+A **GGUF** of the same model IS servable, though - see "Serving the real
+checkpoint from its Q8_0 GGUF" below. That path reads
+`unsloth/Qwen3.8-27B-GGUF`'s `Q8_0` file directly and never writes an fp32
+intermediate.
+
 ## Running it
 
 ```bash
@@ -42,6 +47,66 @@ Serving (HTTP/D-Bus, paged continuous batching):
 ```bash
 BRAIN_QWEN35_WEIGHTS=qwen35.safetensors BRAIN_QWEN35_TOKENIZER=tokenizer.json brain serve
 ```
+
+## Serving the real checkpoint from its Q8_0 GGUF (multi-GPU, INT8)
+
+Model id: `unsloth/Qwen3.8-27B-Q8_0`
+(`crates/qwen35/src/int8_gguf_resident.rs`). A SEPARATE resident from
+`brain/qwen35` above, not a mode of it - the two coexist and are registered
+independently.
+
+> **Status: the loading/placement/decode path works and is gated; the
+> GENERATED TEXT is not yet correct.** The model plans across two 24 GiB
+> P40s, loads with no fp32 intermediate, decodes at ~3.9 tok/s and is
+> bit-stable under greedy sampling - but a factual greedy continuation still
+> comes out wrong, which means a tensor this GGUF route loads still differs
+> from what the safetensors route loads. The two questions have two separate
+> tests in `crates/qwen35/tests/gguf_resident_real.rs`; the correctness one
+> (`the_two_card_stack_continues_a_factual_prompt_correctly`) is deliberately
+> left RED. `.agents/roadmap/qwen35.md` (M21) records exactly what has been
+> ruled out and how. Do not enable this resident expecting usable output yet.
+
+```bash
+BRAIN_QWEN35_GGUF=/path/to/Qwen3.8-27B-Q8_0.gguf brain serve
+# or drop the file at <models-dir>/unsloth/Qwen3.8-27B/Q8_0.gguf and it is
+# discovered with no env var at all.
+BRAIN_QWEN35_GGUF_CTX=2048   # per-sequence prompt+max_new cap (default 2048)
+```
+
+What it does differently:
+
+- **No fp32 intermediate anywhere.** `checkpoint::gguf::MmapGguf` is a
+  `TensorSource`, so `Qwen35::new_i8_shard` streams each leaf out of the
+  mapping and re-quantizes it to brain's group-wise INT8 on the way to the
+  card. Peak host use is one tensor. (The offline `brain import` route would
+  need ~108 GB of disk for the fp32 conversion.)
+- **Layer-sharded across as many cards as it needs**, by
+  `model::shard::plan_fewest_devices` over real per-layer byte costs. On a
+  box with two 24 GiB Tesla P40s and the default 2 GiB/card reserve it plans
+  **27.05 GiB total: layers 0..34 on gpu0 (13.67 GiB), 34..64 on gpu1 (13.38
+  GiB)**. One card is correctly reported infeasible rather than attempted.
+- **The endpoints are not in a shard.** Both `[248320, 5120]` tables are 5.09
+  GB as fp32, which is over a P40's `max_buffer_size` AND 2.4x its 2047 MiB
+  storage-binding limit - not a tight fit, an impossible one. The embedding
+  is read one row at a time from the mapping
+  (`MmapGguf::tensor_range`, ~20 KiB peak, never uploaded); the `lm_head` is
+  INT8 (1.42 GB) and projected by `crate::stream::head_logits_on`, the same
+  head epilogue the streaming path uses.
+- **No MTP.** `cfg.mtp` is forced `false` - `Qwen35::new_impl_on` requires MTP
+  to sit on a whole shard, which a multi-card split is not. The GGUF's
+  `blk.64.*` block is excluded by `gguf_import::classify` itself.
+- **`ssm_a` is un-transformed on read.** llama.cpp's converter stores
+  `-exp(A_log)`; brain's `gdn_decay_gate.wgsl` wants `A_log`. Both the
+  offline importer (`Mapped::Transformed`) and this resident
+  (`SsmALogFix`) apply `gguf::import::ElemOp::LnNeg`. Importing verbatim
+  makes the Gated-DeltaNet decay gate up to 260x too strong and the model
+  stops integrating context - it was found by the real end-to-end gate, not
+  by any structural check. See `.agents/rules/lessons.md` #70.
+- **Text only, one sequence per dispatch, per-token prefill** - same shape as
+  `crate::serve::Engine` and for the same reasons.
+
+Gated by `crates/qwen35/tests/gguf_resident_real.rs` (real file + real cards,
+self-skipping loudly without either).
 
 ## LoRA training
 
@@ -69,7 +134,7 @@ There is no literal "set a ceiling in GB" flag - the actual knob is
 `--window-budget N`, the number of decoder layers' worth of weights kept
 resident on the device at once (everything else stays on disk, streamed in
 via `crates/weightset` as needed). Memory cost is roughly `N x per-layer
-size`: ~373-383 MB/layer at int8 (the plain inference path), or ~4x that at
+size`: ~419-431 MB/layer at int8 (the plain inference path), or ~4x that at
 fp32 (training needs fp32 - see below), so `--window-budget 2` (the
 trainer's own default) costs on the order of a few GB device-resident
 regardless of the checkpoint's real ~28 GB total size. The plain streaming
@@ -205,7 +270,17 @@ reading claims below, they have very different capabilities:
   No LoRA adapter folding into this path yet. No multi-GPU sharding wired in
   either (the underlying `model::Shardable` capability exists and is gated
   by its own test, `crates/qwen35/tests/shard_parity.rs`, which self-skips
-  without 2+ discrete GPUs - not available on every box).
+  without 2+ discrete GPUs - not available on every box). At the real 27B
+  shape this path cannot load the real checkpoint on a 24 GB card at all: its
+  fp32 `tok.weight`/`lm_head.weight` are each over `max_buffer_size`. Use the
+  GGUF resident below for the real weights.
+- **The INT8 multi-GPU GGUF resident** (`crate::int8_gguf_resident`, model id
+  `unsloth/Qwen3.8-27B-Q8_0`, behind HTTP/D-Bus/`brain serve`) - the path that
+  actually serves the REAL checkpoint on real hardware: INT8 weights read
+  straight from the released Q8_0 GGUF, layer-sharded across as many cards as
+  its real per-layer bytes need, host-staged residual between cards. Also one
+  sequence per dispatch and per-token prefill; no MTP, no vision, no LoRA.
+  See "Serving the real checkpoint from its Q8_0 GGUF" above.
 - **The streaming path** (`crate::stream`/`crate::stream_train`, behind
   `generate --streaming true` and the standalone `stream_train_step`
   binary - see "LoRA training" above) runs the REAL checkpoint on a machine

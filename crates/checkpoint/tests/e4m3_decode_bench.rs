@@ -23,7 +23,7 @@
 use std::time::Instant;
 
 /// One real layer's worth of FP8 bytes (`qwen35::config::Qwen35Config::
-/// layer_i8_bytes`'s own real numbers are ~372-383 MB for the INT8-packed
+/// layer_i8_bytes`'s own real numbers are ~419-431 MB for the INT8-packed
 /// size; the raw FP8 checkpoint tensor is the same element count, 1 byte
 /// each) - big enough that per-call overhead is negligible next to the
 /// actual decode work, matching the real scale this fix targets.

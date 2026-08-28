@@ -2515,6 +2515,70 @@ tape pays it per layer per token where prefill amortizes it over `t` rows -
 `qwen3::model::Qwen::ops_act` already had the answer (fall back to `act_f32`
 when every resident weight is `F32`), and the qwen35 decode path now mirrors it.
 
+## 68. A byte-cost formula that mirrors a layout is a copy of that layout, and it went stale silently
+
+`Qwen35Config::layer_i8_bytes` - the per-layer INT8 byte cost that
+`model::shard`'s placement planner and `crates/perf`'s `weights` scenario both
+build on - charged `n*4` for a leaf's quantization scale (one f32 per output
+row, the WHOLE-CHANNEL convention) long after `model::ops::Weight::I8`
+itself became group-wise (`GROUP=32`, one f32 per 32-element block along `k`,
+`n*k.div_ceil(32)*4` bytes). Nothing broke: the formula still returned a
+plausible-looking number, `Weight::upload` still worked, every existing test
+still passed - a hand-transcribed cost model has no way to notice that the
+thing it transcribes changed shape out from under it. The gap was 12.5% per
+layer (the packed-word term, `n*k`, dominates at real `k`, so a scale term
+too small by `k/32/4` is easy to miss until it is added up: 3.4 GB across the
+real 64-layer model), and it fed directly into a placement DECISION - a
+multi-GPU shard plan built on an undercount can genuinely not fit the card it
+was told would hold it.
+
+The fix is not "update the constant" - it is "stop transcribing the layout at
+all". `layer_i8_bytes` now runs the real `model::int8::quantize_weight` over
+each leaf's real shape and sums what it actually returns, gated by a test
+(`layer_i8_bytes_equals_what_weight_upload_really_places_on_the_card`) that
+would go red the next time `Weight::I8`'s layout changes, instead of staying
+green while quietly disagreeing with it.
+
+The general shape: any formula whose whole job is to predict a real
+function's output size, kept as a SEPARATE hand-written expression instead of
+calling that function (or a cheap stand-in for it) and measuring, is a copy
+with no way to notice the original moved. If the real cost is affordable to
+compute directly, compute it; if it must stay a formula (too expensive to
+call per-plan), gate the formula against one real measurement, not against
+its own previously-hand-verified numbers.
+
+## 69. Two limits, not one: a weight can be allocatable and still unbindable, and 5 GB is neither
+
+Placing `Qwen3.8-27B`'s two largest tensors - `tok.weight` and
+`lm_head.weight`, `[248320, 5120]` fp32, 5,085,593,600 bytes each - as a
+pipeline stage's `embed`/`head` endpoint (the way training's `Shard::whole`
+already treats them) failed inside `paramstore::upload`, not at the planner:
+5.09 GB exceeds this card's `max_buffer_size` (4,292,870,144 bytes, a real
+driver/hardware ALLOCATION ceiling) by itself, and separately exceeds the
+2047 MiB (2,147,483,648-byte) storage-buffer BINDING limit - the WebGPU
+guarantee this whole engine is written against - by 2.4x. These are not the
+same number and not the same failure mode: a buffer under the allocation
+ceiling can still be too large for any ONE shader binding to reference
+whole, and a cost model (or a human) that checks only the first will build a
+plan that allocates fine and then cannot be bound by any kernel that needs
+to read it in one dispatch.
+
+Consequence for `int8_gguf_resident`: the vocab endpoints cannot live inside
+a pipeline stage at all, sharded or not, at this model's real vocab width.
+The resident holds them itself, outside the shard loop - the embedding read
+one row at a time straight from the mapping (`MmapGguf::tensor_range`, the
+GGUF twin of `MmapSafetensors::tensor_f32_range`, needed for exactly this),
+the head as INT8 (`stream::quantize_i8_rows` + `stream::head_logits_on`,
+generalized out of `crate::stream`, which had already reached the same
+conclusion about the same two tensors from the training side). `LayerBytes.
+embed` is correctly `0` as a result - the embedding is never resident device
+memory at all, so it costs nothing to place.
+
+The general shape: "does it fit on the card" has (at least) two independent
+answers on this engine - allocatable and bindable - and a size that clears
+one by a wide margin can still fail the other. Check both, separately,
+before assuming a large single tensor can be a stage's own resident weight.
+
 ## 70. `convert_hf_to_gguf.py` PRE-APPLIES math, and a name-and-shape-correct import can still be silently wrong
 
 The first real two-GPU generation from `unsloth/Qwen3.8-27B-GGUF` produced

@@ -1003,6 +1003,45 @@ impl MmapGguf {
         Some(dequantize(ty, raw, numel).map_err(|e| format!("gguf: {name}: {e}")))
     }
 
+    /// Dequantize elements `[start_elem, start_elem + len_elem)` of `name`'s
+    /// FLAT, row-major layout - for a `[rows, cols]` tensor, one row is `cols`
+    /// elements starting at `row * cols`. The GGUF twin of
+    /// [`crate::mmap::MmapSafetensors::tensor_f32_range`], and it exists for
+    /// the same caller: a handful of embedding rows out of a
+    /// `[vocab, d_model]` table where decoding the whole thing (5.1 GB as f32
+    /// at Qwen3.8-27B's 248320 x 5120) is not an option, and even
+    /// [`crate::TensorSource::with_tensor_chunks`]' scan from offset 0 would
+    /// read the entire table to reach a row near its end.
+    ///
+    /// Only the quant BLOCKS the range touches are decoded, so the cost is
+    /// `O(len_elem)` regardless of where in the tensor the range sits. The
+    /// requested range need not be block-aligned: the decode is widened to
+    /// whole blocks and the result sliced back, so the values are bit-identical
+    /// to the corresponding slice of [`Self::tensor`]'s whole-tensor output.
+    ///
+    /// `None` when `name` is absent, when the range falls even partially
+    /// outside the tensor (never a silently truncated read), or when the ggml
+    /// type has no known block geometry - the last of which is exactly the set
+    /// [`dequantize`] cannot decode either, so it is "unsupported type", not a
+    /// missing fast path.
+    pub fn tensor_range(&self, name: &str, start_elem: usize, len_elem: usize) -> Option<Result<Vec<f32>, String>> {
+        let &(ty, start, nbytes, numel) = self.index.get(name)?;
+        let end_elem = start_elem.checked_add(len_elem)?;
+        if end_elem > numel {
+            return None;
+        }
+        let (block_elems, block_bytes) = block_geometry(ty)?;
+        let b0 = start_elem / block_elems;
+        let b1 = end_elem.div_ceil(block_elems);
+        let span = &self.mmap[start + b0 * block_bytes..(start + b1 * block_bytes).min(start + nbytes)];
+        // `dequantize` truncates its output to the requested count exactly as
+        // the whole-tensor path does, so asking for everything from this
+        // range's first block boundary up to `end_elem` and slicing the
+        // leading partial block off is byte-identical to a full decode.
+        let lead = start_elem - b0 * block_elems;
+        Some(dequantize(ty, span, lead + len_elem).map(|v| v[lead..].to_vec()).map_err(|e| format!("gguf: {name}: {e}")))
+    }
+
     /// `name`'s RAW on-disk bytes (still quantized, if applicable) plus its
     /// ggml type id - for a caller that wants to dequantize INDEPENDENTLY of
     /// [`Self::tensor`]'s own [`dequantize`] (e.g. a quantization-exactness
@@ -1775,6 +1814,57 @@ mod tests {
         let found_missing = mg.with_tensor("does_not_exist", &mut |_| never_called = false);
         assert!(!found_missing, "with_tensor must report an absent name as false, not panic");
         assert!(never_called, "the closure must never run for an absent name");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A range read must be bit-identical to the corresponding slice of a
+    /// whole-tensor decode, on a QUANTIZED tensor (where the range does not
+    /// line up with the on-disk blocks) as well as a plain one, and must
+    /// refuse an out-of-range request rather than truncating it.
+    ///
+    /// This is the accessor an embedding-row gather uses on a `[vocab,
+    /// d_model]` table that cannot be decoded whole, so "reads only the
+    /// blocks it needs" and "reads exactly the right values" are the same
+    /// requirement.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn tensor_range_matches_the_whole_tensor_decode_including_mid_block_starts() {
+        use crate::gguf_write::{write, TensorOut};
+
+        let path = std::env::temp_dir()
+            .join(format!("gguf-range-test-{}.gguf", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let f32_vals: Vec<f32> = (0..12).map(|i| i as f32 * 0.25 - 1.0).collect();
+        let f32_data: Vec<u8> = f32_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        // Two Q8_0 blocks (32 elements each), so a range can straddle a block
+        // boundary and start mid-block - the case a naive block-aligned read
+        // gets wrong.
+        let mut q_data = Vec::new();
+        for blk in 0..2u8 {
+            q_data.extend(half::f16::from_f32(0.5).to_le_bytes());
+            q_data.extend((0..32u8).map(|i| i.wrapping_add(blk * 7)));
+        }
+        let tensors = vec![
+            TensorOut { name: "f.weight".to_string(), shape: vec![3, 4], ty: T_F32, data: f32_data },
+            TensorOut { name: "q.weight".to_string(), shape: vec![64], ty: T_Q8_0, data: q_data },
+        ];
+        write(&path, &[], &tensors, 32).unwrap();
+        let mg = MmapGguf::open(&path).unwrap();
+
+        for name in ["f.weight", "q.weight"] {
+            let whole = mg.tensor(name).unwrap().unwrap();
+            for (start, len) in [(0usize, 1usize), (1, 3), (5, 4), (whole.len() - 1, 1), (0, whole.len())] {
+                let got = mg.tensor_range(name, start, len).unwrap_or_else(|| panic!("{name}[{start}..+{len}] must be readable")).unwrap();
+                assert_eq!(got, whole[start..start + len], "{name}[{start}..+{len}] differs from the whole-tensor decode");
+            }
+            // Out of range is `None`, never a short read.
+            assert!(mg.tensor_range(name, whole.len(), 1).is_none());
+            assert!(mg.tensor_range(name, 0, whole.len() + 1).is_none());
+            assert!(mg.tensor_range(name, usize::MAX, 1).is_none());
+        }
+        assert!(mg.tensor_range("nope", 0, 1).is_none());
 
         std::fs::remove_file(&path).ok();
     }

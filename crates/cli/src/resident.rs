@@ -240,6 +240,21 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     } else {
         eprintln!("brain: {} not served over the scheduler (set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT)", qwen3omnimoe::int8_thinker_resident::MODEL);
     }
+    // Qwen3.8-27B straight from its released Q8_0 GGUF, INT8 and layer-sharded
+    // across as many cards as its real per-layer bytes need. Multi-device only,
+    // so registered here rather than folded into `models` above -- same reason
+    // as the two residents just above it. A separate model from `brain/qwen35`
+    // (the single-GPU fp32 brain-checkpoint path), not a mode of it; see
+    // `resident_qwen35::multi_gpu_gguf_from_env`'s own doc.
+    if let Some(q) = crate::resident_qwen35::multi_gpu_gguf_from_env(gpus, reserved) {
+        exec.register_multi(Arc::new(q));
+    } else {
+        eprintln!(
+            "brain: {} not served over the scheduler (set {} to a Qwen3.8-27B*.gguf, or fetch it into the model store)",
+            qwen35::int8_gguf_resident::MODEL,
+            qwen35::int8_gguf_resident::GGUF_ENV
+        );
+    }
     exec
 }
 

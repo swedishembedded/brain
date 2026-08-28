@@ -1589,6 +1589,7 @@ dependencies = [
  "brain-paramstore",
  "brain-qwen3",
  "brain-qwen3vl",
+ "brain-residency",
  "brain-testutil",
  "brain-weightset",
  "bytemuck",

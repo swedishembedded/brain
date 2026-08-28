@@ -108,7 +108,7 @@ use crate::sample::{argmax, sample_logits};
 /// **Measured, not merely asserted**: `crates/perf`'s `weights-qwen35`
 /// scenario drives this exact `CyclicScan`/`Lru`/`AllResident` code against
 /// this model's real 64-layer int8 byte-cost profile
-/// (`Qwen35Config::layer_i8_bytes`, ~372-383 MB depending on GDN vs GQA layer
+/// (`Qwen35Config::layer_i8_bytes`, ~419-431 MB depending on GDN vs GQA layer
 /// type - a real but small heterogeneity). At every budget tested (2,
 /// 4, 8, 16, 32 slots, 8 passes), `CyclicScan`'s `churn_overhead` is exactly
 /// `1.0` on BOTH the plain reload-count metric and a byte-weighted one - the
@@ -965,9 +965,9 @@ pub(crate) fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: u
     Ok(out)
 }
 
-/// Quantize `name` (`[n, k]`, plain BF16 - `lm_head.weight`/
+/// Quantize `name` (`[n, k]` - `lm_head.weight`/
 /// `model.language_model.embed_tokens.weight` when tied) to int8 (DP4A)
-/// straight from the mmap, WITHOUT ever holding the whole dequantized
+/// straight from `reader`, WITHOUT ever holding the whole dequantized
 /// `[n, k]` f32 array in host RAM at once (design decision 4). `model::
 /// int8::quantize_weight`'s scales never cross a ROW, so quantizing
 /// `rows_per_chunk`
@@ -984,9 +984,16 @@ pub(crate) fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: u
 /// The resulting `Weight::I8` (~1.18 GiB packed) is what [`generate`] keeps
 /// resident on device for the whole call - built ONCE, never re-quantized
 /// per decode step.
-fn quantize_i8_from_mmap_rows(gpu: &Gpu, reader: &MmapSafetensors, name: &str, n: usize, k: usize, rows_per_chunk: usize) -> Weight {
-    assert!(k.is_multiple_of(model::int8::GROUP), "quantize_i8_from_mmap_rows: k must be a multiple of {} (got {k})", model::int8::GROUP);
-    assert!(rows_per_chunk > 0, "quantize_i8_from_mmap_rows: rows_per_chunk must be > 0");
+///
+/// Takes a `checkpoint::TensorSource` rather than a concrete reader, so the
+/// SAME bounded quantizer serves this module's safetensors checkpoint
+/// directory and `crate::int8_gguf_resident`'s Q8_0 GGUF - a
+/// `[vocab, d_model]` head is over `max_buffer_size` as fp32 on a 24 GB P40,
+/// so there is no non-int8 alternative for EITHER path and there must not be
+/// two implementations of it.
+pub(crate) fn quantize_i8_rows(gpu: &Gpu, reader: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize, rows_per_chunk: usize) -> Weight {
+    assert!(k.is_multiple_of(model::int8::GROUP), "quantize_i8_rows: k must be a multiple of {} (got {k})", model::int8::GROUP);
+    assert!(rows_per_chunk > 0, "quantize_i8_rows: rows_per_chunk must be > 0");
     let kg = k / 4;
     let gs = k / model::int8::GROUP;
     let w = gpu.storage((n * kg) as u64);
@@ -994,15 +1001,15 @@ fn quantize_i8_from_mmap_rows(gpu: &Gpu, reader: &MmapSafetensors, name: &str, n
     let mut any = false;
     let found = reader.with_tensor_chunks(name, rows_per_chunk * k, &mut |off, chunk| {
         any = true;
-        assert_eq!(off as usize % k, 0, "quantize_i8_from_mmap_rows: chunk offset {off} is not row-aligned (k={k})");
-        assert_eq!(chunk.len() % k, 0, "quantize_i8_from_mmap_rows: chunk length {} is not a whole number of rows (k={k})", chunk.len());
+        assert_eq!(off as usize % k, 0, "quantize_i8_rows: chunk offset {off} is not row-aligned (k={k})");
+        assert_eq!(chunk.len() % k, 0, "quantize_i8_rows: chunk length {} is not a whole number of rows (k={k})", chunk.len());
         let rows = chunk.len() / k;
         let row0 = off as usize / k;
         let (packed, scales) = model::int8::quantize_weight(chunk, rows, k);
         gpu.write_at(&w, (row0 * kg) as u64, &packed);
         gpu.write_f32_at(&s, (row0 * gs) as u64, &scales);
     });
-    assert!(found && any, "quantize_i8_from_mmap_rows: {name} not found or empty");
+    assert!(found && any, "quantize_i8_rows: {name} not found or empty");
     Weight::I8 { w, s, n: n as u32, k: k as u32 }
 }
 
@@ -1036,16 +1043,36 @@ pub(crate) fn read_final_norm(reader: &MmapSafetensors, d: usize) -> Result<Vec<
 /// argument: there is only one implementation of "apply the final norm and
 /// project to vocab logits" for either path to possibly diverge on.
 fn head_logits(state: &StreamState, cfg: &Qwen35Config, final_norm_buf: &DeviceBuffer, head: &Weight, hidden_row: &[f32]) -> Vec<f32> {
-    let g = &state.gpu;
+    head_logits_on(&state.gpu, &state.ops, &state.ids.kernels, cfg, final_norm_buf, head, hidden_row)
+}
+
+/// [`head_logits`] over an EXPLICIT device/`Ops`/kernel-id triple instead of a
+/// [`StreamState`] - the same three values that struct holds, named
+/// separately so a caller that is not a streaming pass can drive the identical
+/// epilogue. `crate::int8_gguf_resident`'s last shard is that caller: it holds
+/// its own `norm.weight` and int8 `lm_head` on the head card (a partial shard
+/// built with `head: false`, because a `[vocab, d_model]` fp32 head cannot be
+/// allocated on a 24 GB P40 at all), and applies them here rather than owning
+/// a second copy of "final norm then project to vocab logits".
+pub(crate) fn head_logits_on(
+    g: &Gpu,
+    ops: &model::ops::Ops,
+    kernels: &model::block::KernelIds,
+    cfg: &Qwen35Config,
+    final_norm_buf: &DeviceBuffer,
+    head: &Weight,
+    hidden_row: &[f32],
+) -> Vec<f32> {
     let d = cfg.d_model as usize;
-    let x = g.storage_init("stream.generate.row", hidden_row);
+    assert_eq!(hidden_row.len(), d, "head_logits_on: hidden_row must be one [d_model] row");
+    let x = g.storage_init("qwen35.head.row", hidden_row);
     let normed = g.storage(d as u64);
-    g.submit(&[], &[rmsnorm_fwd(g, &state.ids.kernels, &x, final_norm_buf, &normed, d as u32, 1)]);
+    g.submit(&[], &[rmsnorm_fwd(g, kernels, &x, final_norm_buf, &normed, d as u32, 1)]);
 
     let mut s = Vec::new();
-    let act = state.ops.act(&mut s, &normed, 0, 1, d as u32);
+    let act = ops.act(&mut s, &normed, 0, 1, d as u32);
     let logits_buf = g.storage(cfg.vocab as u64);
-    state.ops.matmul(&mut s, head, &act, &logits_buf, 0);
+    ops.matmul(&mut s, head, &act, &logits_buf, 0);
     g.submit(&[], &s);
     g.read(&logits_buf, cfg.vocab as usize)
 }
@@ -1151,7 +1178,7 @@ pub fn generate_with_stats(
     let gpu = Gpu::new(crate::model::pipelines());
     // The int8 lm_head: quantized ONCE here, kept resident on device for the
     // whole call (design decision 4) - never re-quantized per decode step.
-    let head = quantize_i8_from_mmap_rows(&gpu, &outside, head_name, cfg.vocab as usize, d, 4096);
+    let head = quantize_i8_rows(&gpu, &outside, head_name, cfg.vocab as usize, d, 4096);
     let final_norm = read_final_norm(&outside, d)?;
     let final_norm_buf = gpu.storage_init("stream.generate.final_norm", &final_norm);
 

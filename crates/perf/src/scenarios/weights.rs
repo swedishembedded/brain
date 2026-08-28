@@ -116,7 +116,7 @@ pub fn render(runs: &[Run]) -> String {
 // interval=4` means 3 of every 4 layers are Gated DeltaNet (`LayerType::
 // Linear`) and 1 of every 4 is GQA (`LayerType::Full`), and the two differ in
 // real int8 footprint (`qwen35::config::Qwen35Config::layer_i8_bytes`,
-// ~372-383 MB depending on type - verified against the real checkpoint's own
+// ~419-431 MB depending on type - verified against the real checkpoint's own
 // dims by that function's own pinned test). [`ByteRun`] is additive, not a
 // replacement for [`Run`]: Z-Image's block sizes were never claimed uniform
 // either, but nothing upstream of this milestone ever measured whether that
@@ -137,7 +137,7 @@ fn qwen35_layer_bytes() -> Vec<u64> {
 /// [`Run`]'s pure reload-COUNT sibling, extended with the real bytes moved.
 /// `churn_overhead` (count-based) and `bytes_churn_overhead` (byte-weighted)
 /// are reported side by side so a reader can see directly whether qwen35's
-/// real ~372-383 MB per-layer spread (a real, but small, heterogeneity)
+/// real ~419-431 MB per-layer spread (a real, but small, heterogeneity)
 /// changes which policy wins, rather than a doc merely asserting it doesn't.
 #[derive(Clone, Debug)]
 pub struct ByteRun {
@@ -293,7 +293,7 @@ mod tests {
     }
 
     /// qwen35's real per-layer byte profile has real heterogeneity (GDN vs
-    /// GQA, ~372-383 MB) - this is the check that it does NOT flip the
+    /// GQA, ~419-431 MB) - this is the check that it does NOT flip the
     /// leaderboard result `run`'s own test above already established on
     /// Z-Image's uniform blocks: CyclicScan stays optimal on BOTH metrics,
     /// exactly (`1.0`), because its pin/tail split is fixed by the schedule

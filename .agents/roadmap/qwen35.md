@@ -1441,17 +1441,113 @@ GGUF bytes at all, instead of the actionable `brain import-gguf` hint. Fixed
 with a gate before the match, allowlisting only the families that read GGUF
 themselves; see lesson 64 in `.agents/rules/lessons.md`.
 
+### M21 (PARTIAL): a resident that reads the Q8_0 GGUF directly, across two GPUs, with no fp32 intermediate
+
+`crates/qwen35/src/int8_gguf_resident.rs`, model id
+`unsloth/Qwen3.8-27B-Q8_0`, registered via
+`crates/cli/src/resident_qwen35.rs::multi_gpu_gguf_from_env` and
+`Executor::register_multi`.
+
+**Status, plainly: the PLUMBING works and is gated green; the OUTPUT is
+still wrong and is gated RED.** Both gates live in
+`crates/qwen35/tests/gguf_resident_real.rs`
+(`a_real_two_card_load_runs_end_to_end` and
+`the_two_card_stack_continues_a_factual_prompt_correctly`), kept separate so
+a reader can tell which question is settled.
+
+Composed, not written: `checkpoint::gguf::MmapGguf` (already a
+`checkpoint::TensorSource`) -> `checkpoint::remap::RemapSource` over a
+`Fetch::Whole` plan built from `gguf_import::classify` itself ->
+`Qwen35::new_i8_shard` per card -> `model::shard::plan_fewest_devices` for
+the split -> `Qwen35::run_decode_step`'s `input_override` seam for the
+cross-card residual, whose correctness is already gated bit-for-bit at tiny
+scale by `model.rs`'s `two_shard_int8_decode_matches_the_whole_shard_model`.
+
+**Measured on the real file, this box** (2x Tesla P40, 2 GiB/card reserve,
+cap 512):
+
+- placement: **27.05 GiB total - layers 0..34 on gpu0 (13.67 GiB), 34..64 on
+  gpu1 (13.38 GiB)**; one card correctly reported infeasible rather than
+  attempted. Real peak was ~14.3 GiB/card (staging + pipelines on top of the
+  planned weights), inside the 2 GiB reserve.
+- cold load: **545.7 s** from cold page cache, **~40-65 s** warm, for the
+  whole 29 GB file (dequantize each Q8_0 leaf out of the mapping,
+  re-quantize to brain's group-wise INT8, upload).
+- throughput: **3.83 tok/s prefill, 3.93 tok/s decode** (they are the same
+  one-token-per-pass primitive here, so the near-equality is expected, and
+  the split is now reported by `Instance::metrics`).
+- greedy decoding is bit-stable across requests on one instance.
+
+**The endpoints do not live in a shard, and cannot.** The first real load
+died in `paramstore::upload`: `tok.weight` is 5_085_593_600 bytes as fp32
+and this card's `max_buffer_size` is 4_292_870_144; both `[248320, 5120]`
+tables are also 2.4x the 2047 MiB storage-BINDING limit. So the stages are
+built `embed: false, head: false` and the resident owns both ends - the
+embedding is read one row at a time from the mapping
+(`MmapGguf::tensor_range`, new, the GGUF twin of
+`MmapSafetensors::tensor_f32_range`) and the head is INT8 via
+`stream::quantize_i8_rows` + `stream::head_logits_on`, both generalized out
+of `crate::stream`, which had already reached the same conclusion about the
+same two tensors. See `.agents/rules/lessons.md` #69.
+
+**A real, measured import defect this found and fixed:** llama.cpp's
+converter stores `ssm_a = -exp(A_log)`, brain's `gdn_decay_gate.wgsl` wants
+`A_log`. Importing verbatim made the GDN decay gate up to 260x too strong -
+the recurrent state was annihilated every step, so the model kept ~one token
+of context and echoed the prompt (`"The capital city of France is"` ->
+`" France is France is France is"`). Fixed in the SHARED driver
+(`gguf::import::Mapped::Transformed` + `ElemOp::LnNeg`), in this crate's
+importer AND in `qwen35moe`'s (which had copied the same wrong assumption),
+and in the resident's streaming loader (`SsmALogFix`, which also has to
+refuse the zero-copy `raw_words` path or the transform is bypassed). Both
+crates' synthetic fixtures wrote `ssm_a` POSITIVE - a value llama.cpp cannot
+emit - so they could not have caught it; they now write it negative and
+`ElemOp::LnNeg` refuses a non-negative input. See lesson #70.
+
+**A second, quieter defect found on the way:** `Qwen35Config::layer_i8_bytes`
+- the number this placement is built on, and the one `crates/perf`'s
+`weights` scenario reports - charged `n*4` for a leaf's scales when
+`model::ops::Weight::I8` has been group-wise (`n*k/8`) for a long time. It
+under-counted every layer by 12.5%, 3.4 GB across the model. Fixed and now
+gated against the real `model::int8::quantize_weight` output rather than
+against its own pinned numbers; lesson #68.
+
+**What is still wrong, and what has been ruled out.** After the `ssm_a` fix
+the output changed but is still not the model's: `"The capital city of
+France is"` -> `"..\n\n\n\n..."`. `BRAIN_QWEN35_GGUF_DEBUG=1` dumps the
+per-card residual RMS and the head's top-5, and shows a model that predicts
+sensibly at short range (it continues `"Kal"` with `"man"`, and predicts
+`" city"` after `"The capital"`) and degrades as context grows - i.e. the
+long-range mechanisms are degraded, not the graph.
+
+Ruled out, each by a gate that now exists:
+
+| Hypothesis | Evidence against |
+|---|---|
+| the cross-card split | `model.rs`'s `two_shard_int8_decode_matches_the_whole_shard_model` - bit-exact |
+| the int8 DECODE tape | new `tests/decode_step.rs::int8_decode_step_matches_int8_full_prefill_{cpu,default_backend}` - int8 decode vs int8 prefill, worst maxabs 1.0e-7 (CPU) / 6.0e-8 (P40), 0 argmax mismatches. This closes the other half of lesson #67, which fixed the panic but left the VALUES ungated |
+| the int8 tier itself, at depth | new `tests/gguf_i8_vs_fp32_real.rs` builds the SAME real layers twice from the SAME GGUF bytes (`Qwen35::new_fp32_shard_src`, also new) - worst cosine 0.9963 at 4 layers, 0.9862 at 8, 0.9877 at 12: real loss, but not collapsing with depth. And M16 above already got `" Paris."` out of 64 real layers at this same INT8 tier from the FP8 checkpoint |
+| the embedding row read | `MmapGguf::tensor_range` is gated bit-identical against a whole-tensor decode incl. mid-block starts, on Q8_0 |
+| the `(1+w)` norm folds | every norm's real value distribution is consistent with llama.cpp having already folded the plain norms and NOT folded the gated `ssm_norm` (which `Qwen3_5RMSNormGated` does not reparameterize - `crate::import`'s own doc) |
+| an `ssm_alpha`/`ssm_beta` swap | tried on the real file: strictly worse (`"I"` then EOS) |
+
+So the remaining defect is a difference between what this GGUF route loads
+and what the safetensors route loads, in a tensor whose name and shape are
+both right. **No external oracle is available on this box** - no llama.cpp
+binary, no `gguf` python module, no `convert_hf_to_gguf.py`, and the FP8
+safetensors checkpoint (`BRAIN_QWEN35_DIR`) is not present and does not fit
+the free disk. The next step needs one of: llama.cpp's own converter source
+for this architecture (to read its `modify_tensors` hooks the way `ElemOp::
+LnNeg` was derived), or a small `qwen35`-architecture GGUF that can be
+cross-checked against a safetensors copy of the same weights the way
+`crates/qwen3`'s GGUF route already is bit-for-bit.
+
+**Deliberately not in this milestone**: MTP (requires a whole shard,
+asserted in `new_impl_on`), vision, LoRA, batched prefill, and more than one
+sequence per dispatch.
+
 ## Not yet done
 
-- **M21: a resident that reads Q8_0 bytes directly, no fp32 intermediate.**
-  The real prerequisite for "brain finds the already-downloaded GGUF and
-  serves it" on a box like this one. Depends on `model::int8` becoming
-  group-wise (`GROUP=32`, matching Q8_0's own block size exactly) - once it
-  does, this becomes a byte-repack (34-byte Q8_0 blocks -> brain's packed-u32
-  int8 + widened f32 scales) with no dequantization step for weight tensors
-  at all, not a `Naming`-sniff-and-dequant-to-fp32 route like `qwen3`'s.
-  Tracked as the current work-in-progress; see the sibling int8-migration and
-  two-GPU-resident-serving entries once they land.
 
 - **M18 follow-up: `stream_train_real.rs` asserts on loss only, never on the
   generations it prints.** That file's single test

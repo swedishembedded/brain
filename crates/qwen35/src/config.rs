@@ -282,10 +282,16 @@ impl Qwen35Config {
     /// StreamState::build_layer` uploads via `Weight::upload(..., Dtype::I8)`:
     /// the 5 GDN or 4 GQA mixer-adjacent leaves for `ty`, plus the 3 dense-MLP
     /// leaves every layer type owns. Each leaf costs `n*k` packed bytes plus
-    /// its own `[n]` f32 per-row scale (`model::ops::Weight::I8`'s layout) -
+    /// its `[n, k/`[`model::int8::GROUP`]`]` f32 scale block
+    /// (`model::ops::Weight::I8`'s layout - GROUP-wise along the contraction
+    /// axis, NOT one scale per output row, so the scales are `n*k/8` bytes,
+    /// an eighth of the packed weight rather than a rounding error) -
     /// mirrored here rather than read off a live `Weight`, since this exists
     /// for a host-side perf model (`crates/perf`'s `weights` scenario) that
-    /// has no GPU and must never build one just to learn a byte count.
+    /// has no GPU and must never build one just to learn a byte count. Gated
+    /// against the real `model::int8::quantize_weight` output by
+    /// `layer_i8_bytes_equals_what_weight_upload_really_places_on_the_card`,
+    /// so the mirror cannot silently drift from the thing it mirrors again.
     /// Excludes the handful of small fp32 aux tensors (norms, GDN's
     /// `A_log`/`dt_bias`, GQA's `q_norm`/`k_norm`) - negligible next to the
     /// quantized leaves at this config's real dims (well under 0.1% of a
@@ -293,7 +299,8 @@ impl Qwen35Config {
     pub fn layer_i8_bytes(&self, ty: LayerType) -> u64 {
         let d = self.d_model as u64;
         let ff = self.intermediate_size as u64;
-        let i8_leaf = |n: u64, k: u64| n * k + n * 4;
+        let group = model::int8::GROUP as u64;
+        let i8_leaf = |n: u64, k: u64| n * k + n * k.div_ceil(group) * 4;
         let mlp = i8_leaf(ff, d) * 2 + i8_leaf(d, ff); // gate, up, down
         let mixer = match ty {
             LayerType::Linear => {
@@ -753,24 +760,64 @@ mod tests {
     }
 
     /// Pins [`Qwen35Config::layer_i8_bytes`]'s real numbers at the real
-    /// `qwen38_27b` scale: `crates/perf`'s `weights` scenario (Piece A of the
-    /// milestone this landed in) depends on these being accurate, not merely
-    /// plausible - a silent drift here would make that scenario's "real
-    /// per-layer byte profile" claim false. GDN (`Linear`) is the larger of
+    /// `qwen38_27b` scale: `crates/perf`'s `weights` scenario and
+    /// `crate::int8_gguf_resident`'s cross-GPU placement both depend on these
+    /// being accurate, not merely plausible - a silent drift here would make
+    /// that scenario's "real per-layer byte profile" claim false and would
+    /// let the resident under-budget a card. GDN (`Linear`) is the larger of
     /// the two layer types at this config's dims (more/wider mixer-adjacent
-    /// leaves than GQA's 4), both in the ~372-383 MB range this milestone's
-    /// own measurement cites.
+    /// leaves than GQA's 4), both in the ~419-431 MB range.
     #[test]
     fn layer_i8_bytes_matches_the_real_measured_qwen38_27b_range() {
         let cfg = Qwen35Config::qwen38_27b();
         let gdn = cfg.layer_i8_bytes(LayerType::Linear);
         let gqa = cfg.layer_i8_bytes(LayerType::Full);
-        assert_eq!(gdn, 383_467_904, "GDN (Linear) layer int8 byte cost drifted: {gdn}");
-        assert_eq!(gqa, 372_482_048, "GQA (Full) layer int8 byte cost drifted: {gqa}");
+        assert_eq!(gdn, 431_124_480, "GDN (Linear) layer int8 byte cost drifted: {gdn}");
+        assert_eq!(gqa, 418_775_040, "GQA (Full) layer int8 byte cost drifted: {gqa}");
         assert!(gdn > gqa, "GDN must be the larger layer type at this config's real dims");
         for b in [gdn, gqa] {
             let mb = b as f64 / 1e6;
-            assert!((372.0..=384.0).contains(&mb), "layer_i8_bytes {mb:.1} MB outside the documented 372-383 MB range");
+            assert!((418.0..=432.0).contains(&mb), "layer_i8_bytes {mb:.1} MB outside the documented 419-431 MB range");
         }
+    }
+
+    /// GROUND TRUTH for [`Qwen35Config::layer_i8_bytes`]: the number it
+    /// returns must be what `model::ops::Weight::upload(.., Dtype::I8)`
+    /// ACTUALLY places on the card for that layer's quantized leaves, not a
+    /// hand-transcribed formula that once matched. Measured here by running
+    /// the real `model::int8::quantize_weight` (the same call `Weight::upload`
+    /// makes) over each leaf's real shape and summing the two buffers it
+    /// returns - `[n, k/4]` packed u32 words plus a `[n, k/GROUP]` f32 scale
+    /// per row-group, both 4 bytes per element.
+    ///
+    /// Uses [`Qwen35Config::tiny_i8`] (the int8-legal tiny fixture) so the
+    /// quantization is real and cheap; the formula is dimension-generic, so
+    /// agreeing here is agreeing at every scale, and the sibling test above
+    /// pins the real 27B numbers that follow from it.
+    ///
+    /// This is the check that was missing: the scale used to be `[n]`
+    /// (one per output row) and the formula still charged `n * 4` long after
+    /// `model::int8::GROUP`-wise scales made the real cost `n * (k/32) * 4`,
+    /// i.e. 12.5% of the packed weight rather than a rounding error.
+    #[test]
+    fn layer_i8_bytes_equals_what_weight_upload_really_places_on_the_card() {
+        let cfg = Qwen35Config::tiny_i8();
+        let (d, ff) = (cfg.d_model as usize, cfg.intermediate_size as usize);
+        // The real device cost of one `[n, k]` leaf, measured, not derived.
+        let measured = |n: usize, k: usize| -> u64 {
+            let w = vec![0.5f32; n * k];
+            let (packed, scales) = model::int8::quantize_weight(&w, n, k);
+            (packed.len() + scales.len()) as u64 * 4
+        };
+        let mlp = measured(ff, d) * 2 + measured(d, ff);
+        let gdn = measured(cfg.linear_conv_dim() as usize, d)
+            + measured(cfg.linear_value_dim() as usize, d)
+            + measured(cfg.linear_num_value_heads as usize, d) * 2
+            + measured(d, cfg.linear_value_dim() as usize);
+        let gqa = measured(cfg.q_proj_dim() as usize, d)
+            + measured(cfg.kv_dim() as usize, d) * 2
+            + measured(d, cfg.q_dim() as usize);
+        assert_eq!(cfg.layer_i8_bytes(LayerType::Linear), gdn + mlp, "GDN layer cost disagrees with the real quantized footprint");
+        assert_eq!(cfg.layer_i8_bytes(LayerType::Full), gqa + mlp, "GQA layer cost disagrees with the real quantized footprint");
     }
 }

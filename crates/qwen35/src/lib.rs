@@ -19,6 +19,7 @@ pub mod config;
 pub mod finetune;
 pub mod gguf_import;
 pub mod import;
+pub mod int8_gguf_resident;
 pub mod init;
 pub mod model;
 pub mod sample;
