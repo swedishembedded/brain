@@ -43,6 +43,7 @@ use sdxlunet::import::Tensors;
 use sdxlunet::model::{Inputs, Rec, Unet};
 
 use vae::blocks::skipfuse::SkipFuse;
+use vae::blocks::PackedTensors;
 
 use crate::adaptors::Adaptors;
 use crate::config::SupirConfig;
@@ -109,6 +110,47 @@ impl Supir {
         taps: bool,
         control_scale: f32,
     ) -> Supir {
+        Supir::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control_scale)
+    }
+
+    /// [`Supir::new`], but every weight `tensors` doesn't carry falls back to
+    /// `packed` (`supir::int8::quantize_tensors`'s output) - the ACTUAL fix
+    /// for the measured OOM `crates/supir/tests/parity.rs`'s full-forward
+    /// test documents: `tensors` here is the SMALL residual
+    /// (`supir::int8::QuantizedTensors::full` - never-quantized names,
+    /// biases, norm gains, every conv), not the whole ~15.6 GB manifest, and
+    /// `vae::blocks::Builder::dev` dequantizes `packed`'s entries ONE TENSOR
+    /// AT A TIME at upload rather than reconstructing a whole-model fp32 map
+    /// first. The device buffers this produces are bit-identical to
+    /// [`Supir::new`]'s (same dispatch, same fp32 GEMM) - only the
+    /// HOST-resident bytes differ.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_quantized(
+        gpu: Gpu,
+        cfg: SupirConfig,
+        tensors: &Tensors,
+        packed: &PackedTensors,
+        h: u32,
+        w: u32,
+        t_enc: u32,
+        taps: bool,
+        control_scale: f32,
+    ) -> Supir {
+        Supir::build(gpu, cfg, tensors, Some(packed), h, w, t_enc, taps, control_scale)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        gpu: Gpu,
+        cfg: SupirConfig,
+        tensors: &Tensors,
+        packed: Option<&PackedTensors>,
+        h: u32,
+        w: u32,
+        t_enc: u32,
+        taps: bool,
+        control_scale: f32,
+    ) -> Supir {
         let levels = cfg.backbone.levels();
         let scale = 1u32 << (levels - 1);
         assert!(
@@ -125,6 +167,9 @@ impl Supir {
         let aug_in = gpu.storage(cfg.backbone.projection_class_embeddings_input_dim as u64);
 
         let mut r = Rec::new(&gpu, &cfg.backbone, tensors, t_enc, taps);
+        if let Some(p) = packed {
+            r.set_packed(p);
+        }
 
         r.set_prefix("control_model.");
         let hs = crate::trunk::record(&mut r, &cfg.trunk, "control_model.", h, w, &enc_in, &hint_in, &sample_in, &temb_in, &aug_in);

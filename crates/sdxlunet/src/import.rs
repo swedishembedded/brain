@@ -205,12 +205,34 @@ const LDM_PREFIX: &str = "model.diffusion_model.";
 /// module doc) - a real deployment loads the frozen UNet from the SAME
 /// single-file release checkpoint the upstream Python reference does, and
 /// there is no diffusers-layout `unet/` directory anywhere in that picture.
+///
+/// **Reads via `checkpoint::mmap::MmapSafetensors`, not `checkpoint::
+/// safetensors::read`, and only decodes tensors under [`LDM_PREFIX`].** The
+/// released single-file checkpoint this reads (`sd_xl_base_1.0_*.safetensors`)
+/// carries the TWO CLIP text encoders and the VAE alongside the UNet - the
+/// eager whole-file reader would decode ALL of them to fp32 (measured: a
+/// 6.9 GB mostly-fp16 file expands to roughly 13.8 GB of `Vec<f32>` before
+/// this function's own filter ever runs, of which only the ~10.27 GB UNet
+/// portion is wanted) and hold that whole `Vec<StTensor>` resident at once.
+/// `MmapSafetensors::tensor_f32` decodes ONE named tensor from the mapping
+/// and `madvise`s its pages away immediately after
+/// (`advise_dontneed_tensor`, that accessor's own doc) - so a CLIP/VAE
+/// tensor this function skips is never decoded at all, and a UNet tensor it
+/// does want never leaves more than one tensor's worth of page-cache behind
+/// it. This is exactly the streaming discipline
+/// `tools/goldens/supir_dump_reference.py`'s own `load_state_dict_streaming`
+/// uses on the Python side of this port - found to be missing here while
+/// chasing `crates/supir/tests/parity.rs`'s real-checkpoint OOM (see
+/// `crates/supir/src/int8.rs`'s module doc for the rest of that story).
 pub fn load_ldm(path: &str, cfg: &UNetConfig) -> Result<Tensors, String> {
-    let src = checkpoint::safetensors::read(path)?;
-    let raw: HashMap<String, (Vec<usize>, Vec<f32>)> = src
-        .into_iter()
-        .filter_map(|t| t.name.strip_prefix(LDM_PREFIX).map(|n| (n.to_string(), (t.shape, t.data))))
-        .collect();
+    let mm = checkpoint::mmap::MmapSafetensors::open(path)?;
+    let mut raw: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+    for name in mm.names() {
+        let Some(n) = name.strip_prefix(LDM_PREFIX) else { continue };
+        let shape = mm.shape(name).ok_or_else(|| format!("unet-ldm import: '{name}' has no shape"))?.to_vec();
+        let data = mm.tensor_f32(name).ok_or_else(|| format!("unet-ldm import: '{name}' has no f32 decoding"))?;
+        raw.insert(n.to_string(), (shape, data));
+    }
     remap_ldm(raw, cfg)
 }
 

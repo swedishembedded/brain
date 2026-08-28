@@ -34,5 +34,6 @@ pub mod adaptors;
 pub mod config;
 pub mod import;
 pub mod init;
+pub mod int8;
 pub mod model;
 pub mod trunk;

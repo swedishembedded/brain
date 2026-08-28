@@ -40,6 +40,7 @@ pub mod config;
 pub mod hostemb;
 pub mod import;
 pub mod init;
+pub mod int8;
 pub mod model;
 pub mod pipeline;
 pub mod sampler;

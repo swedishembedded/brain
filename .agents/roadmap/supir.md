@@ -203,8 +203,22 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
 
 ## What is and is not started
 
-- [ ] Everything. The architecture id (`crates/arch`) and this placeholder
-      crate are the only things that exist.
+- [x] Architecture id (`crates/arch`), the shared-loop refactor (§0.2), doc
+      drift fixes (§0.3).
+- [x] Resources + reference goldens (real checkpoints, `tools/goldens/
+      supir_dump_reference.py`, `testdata/supir/` + `testdata/
+      supir_forward_parity/`, gitignored).
+- [x] The three seams: `vae::blocks::skipfuse::SkipFuse` + `Unet::new_fused`,
+      `diffusion::restore`, blended `imaging::tiling`.
+- [x] `crates/supir` forward pass, parity-proven against the real checkpoint
+      (trunk cosine 1.0000000000; full forward at `s_churn=0` verified).
+- [x] `sdxlunet::int8` + `supir::int8` - HOST-memory quantization only (see
+      "Memory" below for the real, measured, still-open device-memory gap).
+- [ ] Training (`grad.rs`/`modelgrad.rs`, `gradcheck::check_supir[_elementwise]`,
+      `lora.rs`, `finetune.rs`, `check_controlnet`).
+- [ ] `crates/llava`.
+- [ ] Serving contract, CLI, NPU export, docs.
+- [ ] Optimisation pass.
 
 ## Staged plan
 
@@ -266,6 +280,24 @@ the shape of the work:
 
 ## Deferred, recorded rather than silently skipped
 
+- **`sdxlunet::int8`/`supir::int8` reduce HOST memory only, not device
+  memory.** Measured: the combined trunk+adaptors+backbone graph (2608
+  tensors, 15.60 GB fp32) drops to 5.62 GB host-resident after quantization
+  (889 tensors packed to int8, 1719 left fp32) - a real win for import/host
+  peak. But `vae::blocks::Builder::set_packed` dequantizes each packed
+  tensor to fp32 AT UPLOAD, so the device-resident buffers `wgpu` allocates
+  are still fp32-sized. On this box (one Intel iGPU, no discrete card,
+  `wgpu` reports a 2047 MiB per-buffer/per-binding cap) recording the full
+  graph hits `wgpu error: Out of Memory` before a forward ever runs -
+  reproduced 3 times, including with per-tap buffer pinning disabled
+  (`supir_full_forward_int8_no_taps_fits_this_machine`), ruling out tap
+  pinning as the cause. Closing this for real needs genuine on-device int8
+  storage with a dequantizing GEMM - the shape `crates/flux1`/`crates/s3dit`
+  already have - threaded through `vae::blocks::Builder`, the shared block
+  recorder ~10 architectures depend on. Both int8 full-forward tests in
+  `crates/supir/tests/parity.rs` are gated behind `BRAIN_SUPIR_ALLOW_FULL_MEMORY=1`
+  (same as the fp32 sibling) and skip themselves honestly rather than claim
+  a false pass. Filed as Phase 8 (optimisation) or a dedicated follow-up.
 - Batch > 1 (the SDXL graph is recorded at batch 1; CFG is two `run()` calls).
 - The unshipped "trimmed" paper trunk (`options/dev/SUPIR_paper_version.yaml`
   is not in the released repo).

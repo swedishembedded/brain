@@ -249,6 +249,23 @@ pub const fn kernels_with<const N: usize>() -> [(&'static str, &'static str); N]
 /// `(shape, row-major f32 data)`.
 pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
+/// One int8-packed weight - `model::int8::quantize_weight`'s packed `[n,
+/// k/4]` u32 words plus its per-row `[n]` f32 scale, alongside the logical
+/// `[n, k]` shape needed to dequantize it (the packed shape alone cannot
+/// recover `k`, the same reason `model::int8::upload_dequantized` takes
+/// `n`/`k` as separate arguments).
+pub struct PackedWeight {
+    pub shape: Vec<usize>,
+    pub packed: Vec<u32>,
+    pub scale: Vec<f32>,
+}
+
+/// Packed int8 weights by name - the storage-tier sibling of [`Tensors`].
+/// [`Builder::dev`] consults this AFTER `Tensors` for a name it cannot find
+/// there - see [`Builder::set_packed`] for why a name lives in one map or
+/// the other, never both.
+pub type PackedTensors = HashMap<String, PackedWeight>;
+
 /// The per-architecture leaf tensor names the shared blocks look up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockNames {
@@ -559,6 +576,12 @@ pub struct Builder<'a> {
     /// until [`Builder::set_mix_ids`] is called; [`Builder::mix`] panics by
     /// name rather than dispatching slot zero if it is missing.
     mix_ids: Option<MixIds>,
+    /// An int8-packed fallback weight source - see [`Builder::set_packed`].
+    /// `None` for every caller except an int8 build (`sdxlunet::int8`,
+    /// `supir::int8`): the plain fp32 path is completely unaffected, since
+    /// [`Builder::dev`] only ever consults this after `t` reports a name
+    /// missing.
+    packed: Option<&'a PackedTensors>,
 }
 
 /// Ceiling on the im2col scratch, in f32 words (512 MiB). The lowered conv
@@ -631,6 +654,7 @@ impl<'a> Builder<'a> {
             col: None,
             attn_head_dim: None,
             mix_ids: None,
+            packed: None,
         }
     }
 
@@ -689,6 +713,28 @@ impl<'a> Builder<'a> {
     /// [`Builder::mix`] call - see [`MixIds`].
     pub fn set_mix_ids(&mut self, ids: MixIds) {
         self.mix_ids = Some(ids);
+    }
+
+    /// Install a packed int8 weight source: a name [`Builder::dev`] cannot
+    /// find in the plain `tensors` map falls back to here, dequantized ONE
+    /// TENSOR AT A TIME at upload rather than the whole map at once.
+    ///
+    /// This is the seam that lets an int8 build avoid ever holding a
+    /// whole-model fp32 `Tensors` map in host RAM: `sdxlunet::int8`/
+    /// `supir::int8`'s `quantize_tensors` splits a checkpoint into a small
+    /// `full` map (never-quantized names, biases, norm gains - everything
+    /// that isn't a rank-2 GEMM operand) and a `packed` map roughly a
+    /// quarter the bytes (`model::int8::quantize_weight`'s packed `[n,k/4]`
+    /// u32 layout). `dev` still uploads a plain fp32 device buffer either
+    /// way - this crate dispatches no int8 kernel of its own - so the
+    /// SAVING is host-side only: on a unified-memory box (no discrete GPU,
+    /// so "device" memory is the same system RAM) that is exactly the
+    /// difference between a 15.6 GB resident checkpoint and a ~4 GB one
+    /// while the device-side upload climbs toward its own full fp32 size,
+    /// which is what closed a real, measured OOM in `crates/supir`'s
+    /// combined trunk+adaptors+backbone build (see that crate's `int8.rs`).
+    pub fn set_packed(&mut self, p: &'a PackedTensors) {
+        self.packed = Some(p);
     }
 
     /// Record the reverse-mode tape (see [`Builder::train`]). Set this BEFORE
@@ -767,6 +813,12 @@ impl<'a> Builder<'a> {
     /// Upload a host tensor to the device by name (memoized: one tensor is one
     /// device buffer, so a training build has exactly one gradient buffer per
     /// tensor however many blocks read it).
+    ///
+    /// Checks the plain fp32 map first, then the packed int8 fallback (see
+    /// [`Builder::set_packed`]) - dequantizing there is bounded to THIS ONE
+    /// tensor (at most tens of MB for anything in this workspace), never the
+    /// whole checkpoint, and the scratch is dropped the moment `upload`
+    /// returns.
     pub fn dev(&mut self, name: &str) -> DeviceBuffer {
         if let Some(b) = self.wmemo.get(name) {
             return b.clone();
@@ -775,9 +827,17 @@ impl<'a> Builder<'a> {
         // reference out lets `upload` take `&mut self` without cloning the
         // tensor (the SDXL feed-forward weights are 52 MB each).
         let t = self.t;
-        let data = &t.get(name).unwrap_or_else(|| panic!("vae::blocks: missing tensor {name}")).1;
-        let buf = self.upload(data);
-        self.remember(name, buf, data.len() as u64)
+        if let Some((_, data)) = t.get(name) {
+            let buf = self.upload(data);
+            return self.remember(name, buf, data.len() as u64);
+        }
+        if let Some(pw) = self.packed.and_then(|p| p.get(name)) {
+            let (n, k) = (pw.shape[0], pw.shape[1]);
+            let data = model::int8::dequantize_weight(&pw.packed, &pw.scale, n, k);
+            let buf = self.upload(&data);
+            return self.remember(name, buf, data.len() as u64);
+        }
+        panic!("vae::blocks: missing tensor {name} (checked both the plain and the packed weight source)");
     }
 
     /// Upload one weight tensor, non-ReBAR-safe.

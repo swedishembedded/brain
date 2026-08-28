@@ -56,7 +56,7 @@
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block;
 use vae::blocks::skipfuse::{Map, SkipFuse};
-use vae::blocks::{BlockNames, Builder, Tensors};
+use vae::blocks::{BlockNames, Builder, PackedTensors, Tensors};
 
 use crate::config::{BlockKind, UNetConfig, N_TIME_IDS, TRANSFORMER_NORM_EPS};
 use crate::hostemb;
@@ -288,6 +288,19 @@ impl<'a> Rec<'a> {
     /// of them.
     pub fn set_fuse(&mut self, fuse: &'a dyn SkipFuse) {
         self.fuse = Some(fuse);
+    }
+
+    /// Install a packed int8 weight source (`sdxlunet::int8::quantize_tensors`'s
+    /// `packed` half) - every subsequent `dev()` lookup this recorder makes
+    /// (via `Rec::linear`/`resnet`/`transformer`/…) falls back to it for a
+    /// name the plain `tensors` map given to [`Rec::new`] doesn't have. See
+    /// `vae::blocks::Builder::set_packed`'s doc for the memory rationale;
+    /// this is the public seam a caller assembling its own `Rec` needs
+    /// (`crates/supir`'s combined trunk+backbone build), the same reason
+    /// [`Rec::set_fuse`] is public rather than only reachable through
+    /// [`Unet::new_quantized`].
+    pub fn set_packed(&mut self, p: &'a vae::blocks::PackedTensors) {
+        self.b.set_packed(p);
     }
 
     /// Take ownership of the currently-recorded `silu(emb)` slot, leaving it
@@ -847,7 +860,7 @@ impl Unet {
     /// [`crate::train::UnetTrainer`]. No control residuals and no injection:
     /// the backward is gated against the plain graph.
     pub fn new_train(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32) -> Unet {
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, false, false, None, true, None)
+        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, false, false, None, true, None)
     }
 
     /// The recorded tape, on a [`Unet::new_train`] build.
@@ -920,7 +933,7 @@ impl Unet {
                  construct it from the union of sdxlunet::KERNELS and the adapter's (see model::attninject)"
             );
         }
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, Some(inject), false, None)
+        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control, Some(inject), false, None)
     }
 
     pub fn new_controlled(
@@ -933,7 +946,7 @@ impl Unet {
         taps: bool,
         control: bool,
     ) -> Unet {
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, None, false, None)
+        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control, None, false, None)
     }
 
     /// [`Unet::new`], but with the up path's skip joins, the post-mid-block
@@ -965,7 +978,18 @@ impl Unet {
                  construct it from the union of sdxlunet::KERNELS and the adapter's (see vae::blocks::skipfuse)"
             );
         }
-        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, false, None, false, Some(fuse))
+        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, false, None, false, Some(fuse))
+    }
+
+    /// [`Unet::new`], but every weight `tensors` doesn't carry falls back to
+    /// `packed` (`sdxlunet::int8::quantize_tensors`'s output) - see
+    /// `vae::blocks::Builder::set_packed`'s doc for the memory rationale.
+    /// `tensors` is expected to be the SMALL residual (`QuantizedTensors::full`
+    /// - never-quantized names, biases, norm gains), not the whole manifest;
+    /// the device buffers this produces are bit-identical to `Unet::new`'s
+    /// (same dispatch, same fp32 GEMM), only the host-resident bytes differ.
+    pub fn new_quantized(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, packed: &PackedTensors, h: u32, w: u32, t_enc: u32, taps: bool) -> Unet {
+        Unet::build(gpu, cfg, tensors, Some(packed), h, w, t_enc, taps, false, None, false, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -973,6 +997,7 @@ impl Unet {
         gpu: Gpu,
         cfg: UNetConfig,
         tensors: &Tensors,
+        packed: Option<&PackedTensors>,
         h: u32,
         w: u32,
         t_enc: u32,
@@ -1004,6 +1029,9 @@ impl Unet {
         let mut r = if train { Rec::new_train(&gpu, &cfg, tensors, t_enc, taps) } else { Rec::new(&gpu, &cfg, tensors, t_enc, taps) };
         r.inject = inject;
         r.fuse = fuse;
+        if let Some(p) = packed {
+            r.set_packed(p);
+        }
 
         let rec = Unet::record_into(&mut r, &cfg, h, w, &inputs, control);
 
