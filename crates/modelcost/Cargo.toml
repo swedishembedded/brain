@@ -1,0 +1,24 @@
+[package]
+name = "brain-modelcost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The one shared model-pricing registry and on-disk cache: `brain flops` (a real device build, per architecture) and `brain models list`/`profile` (a fast cache read) are two front ends over this ONE engine, so pricing a model happens in exactly one place in the workspace instead of drifting two independent implementations."
+
+[lib]
+name = "modelcost"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Tier 1 (exact, dry-recorded) + tier 2 (generic byte-sum from a shape
+# manifest) pricers, one arch per crate -- see `registry()`'s own doc for why
+# this list is short and how it grows.
+brain-qwen3.workspace = true
+brain-gpt2.workspace = true
+brain-lfm2.workspace = true
+brain-qwen35.workspace = true
+brain-qwen35moe.workspace = true

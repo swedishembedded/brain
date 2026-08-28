@@ -15,8 +15,8 @@
 //! split.
 //!
 //! Field names and defaults are taken directly from the real checkpoint's
-//! `config.json`/`configuration_qwen3_5_moe.py` — see
-//! `/data/workspace/resources/qwen3.5/` for the sources this was built
+//! `config.json`/`configuration_qwen3_5_moe.py` - see
+//! [path/to/qwen3.5] for the sources this was built
 //! against. A config default must mirror the
 //! *reference's* default, not "off": `configuration_qwen3_5_moe.py`'s
 //! `__post_init__` hardcodes `partial_rotary_factor = 0.25` and
@@ -286,6 +286,43 @@ impl Qwen35Config {
         v
     }
 
+    /// Every JSON key [`Self::from_json`] must find to read this config's
+    /// real per-checkpoint SHAPE - see `qwen35::config::Qwen35Config::SHAPE_KEYS`'s
+    /// sibling doc for the full rationale (same architecture family, same
+    /// reference-constant-vs-per-checkpoint-value distinction), extended
+    /// with this arch's MoE routing dims.
+    pub const SHAPE_KEYS: &'static [&'static str] = &[
+        "vocab_size",
+        "block_size",
+        "n_layers",
+        "d_model",
+        "n_heads",
+        "n_kv_heads",
+        "head_dim",
+        "rms_norm_eps",
+        "rope_theta",
+        "num_experts",
+        "num_experts_per_tok",
+        "moe_intermediate_size",
+    ];
+
+    /// Which of [`Self::SHAPE_KEYS`] `c` is missing.
+    pub fn missing_shape_keys(c: &Value) -> Vec<&'static str> {
+        Self::SHAPE_KEYS.iter().filter(|k| c.get(**k).is_none()).copied().collect()
+    }
+
+    /// [`Self::from_json`], but refuses a config that would silently default
+    /// any shape-defining key instead of reading it.
+    pub fn from_json_checked(c: &Value) -> Result<Qwen35Config, String> {
+        let missing = Self::missing_shape_keys(c);
+        if !missing.is_empty() {
+            return Err(format!(
+                "config is missing shape key(s) {missing:?} - from_json would silently substitute an unrelated default for each rather than this checkpoint's real value"
+            ));
+        }
+        Ok(Self::from_json(c))
+    }
+
     pub fn from_json(c: &Value) -> Qwen35Config {
         let g = |k: &str, d: u32| c[k].as_u64().map(|v| v as u32).unwrap_or(d);
         let gf = |k: &str, d: f32| c[k].as_f64().map(|v| v as f32).unwrap_or(d);
@@ -443,6 +480,25 @@ impl Qwen35Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_json_checked_accepts_a_real_to_json_round_trip() {
+        let c = Qwen35Config::tiny().to_json();
+        assert!(Qwen35Config::missing_shape_keys(&c).is_empty());
+        assert!(Qwen35Config::from_json_checked(&c).is_ok());
+    }
+
+    #[test]
+    fn from_json_checked_rejects_a_config_missing_moe_routing_dims() {
+        let c = serde_json::json!({
+            "vocab_size": 29, "block_size": 24, "n_layers": 4, "d_model": 96,
+            "n_heads": 3, "n_kv_heads": 1, "head_dim": 40, "rms_norm_eps": 1e-6, "rope_theta": 1e7,
+        });
+        let err = Qwen35Config::from_json_checked(&c).expect_err("missing num_experts/num_experts_per_tok/moe_intermediate_size must be refused");
+        for key in ["num_experts", "num_experts_per_tok", "moe_intermediate_size"] {
+            assert!(err.contains(key), "error {err:?} should name {key:?}");
+        }
+    }
 
     #[test]
     fn layer_type_schedule_matches_reference_formula() {

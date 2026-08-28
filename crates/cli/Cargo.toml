@@ -86,6 +86,7 @@ brain-eval.workspace = true
 brain-bench.workspace = true
 brain-perf.workspace = true
 brain-checkpoint.workspace = true
+brain-modelcost.workspace = true
 brain-capability.workspace = true
 # The served-model catalog (manifest + provider ctor per model, ~70 crates) -
 # `catalog.rs` is a thin CLI-local extension over this (patches back the
@@ -96,6 +97,11 @@ brain-catalog.workspace = true
 # every library crate emits through the plain `tracing` facade.
 brain-trace.workspace = true
 clap.workspace = true
+# `brain models list`'s interactive tree (TTY only - piped/`--plain` output
+# never touches either of these, same split `braintop` draws between its TUI
+# and `--cli` paths).
+ratatui.workspace = true
+crossterm.workspace = true
 brain-s3dit.workspace = true
 brain-flux2.workspace = true
 # `brain wan t2v`: the video pipeline (DiT + umT5 + Wan-VAE) behind wan_cli.

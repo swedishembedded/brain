@@ -138,13 +138,43 @@ fn synthetic_tokens(n: usize, vocab: u32) -> Vec<u32> {
     (0..n).map(|i| i as u32 % vocab.max(1)).collect()
 }
 
+/// `brain flops` is the first version of the pricing engine `modelcost` now
+/// owns (see that crate's module doc); this is the one place a REAL priced
+/// model feeds back into the cache `brain models list`/`brain models profile`
+/// read, so running `brain flops` on a checkpoint is not throwaway work.
+///
+/// Deliberately narrow: only `--weights` naming a checkpoint whose own card
+/// carries `vendor`/`repo` (a servable, discoverable model - a bare `tiny()`
+/// config or a local/toy checkpoint with no card has no `variant_ref` to key
+/// a cache entry by), and only the plain single-shard fp32 inference report -
+/// `--train`/`--i8`/`--stages > 1` price something other than "the whole
+/// model, plain inference", which is what a `models list` row means. A silent
+/// no-op outside that case, never a wrong or misleading cache write.
+fn cache_if_named(arch: &str, weights: Option<&str>, cfg_json: &serde_json::Value, report: &CostReport, stages: usize, train: bool, i8: bool) {
+    if stages != 1 || train || i8 {
+        return;
+    }
+    let Some(path) = weights else { return };
+    let Ok(Some(card)) = checkpoint::st::read_card(path) else { return };
+    let (Some(vendor), Some(repo)) = (card.vendor, card.repo) else { return };
+    let variant_ref = match card.quant {
+        Some(q) => format!("{vendor}/{repo}-{q}"),
+        None => format!("{vendor}/{repo}"),
+    };
+    modelcost::cache_report(arch, &variant_ref, cfg_json, report);
+}
+
 fn qwen_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, i8: bool, stages: usize, run: bool) {
     use qwen3::{init_weights, Qwen, QwenConfig};
     assert!(!(i8 && train), "the int8 path is inference-only");
     let (cfg, init) = match weights {
         Some(path) => {
             let c = checkpoint::load(path);
-            (QwenConfig::from_json(&c.header["config"]), c.by_role(""))
+            let cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| {
+                eprintln!("brain flops --model qwen --weights {path}: {e}");
+                std::process::exit(2);
+            });
+            (cfg, c.by_role(""))
         }
         None => {
             let cfg = QwenConfig::tiny();
@@ -172,6 +202,7 @@ fn qwen_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, i8
             Qwen::new_shard(cfg.clone(), b, t, &init, train, sh)
         };
         let fwd = m.cost_fwd();
+        cache_if_named("qwen3", weights, &cfg.to_json(), &fwd, stages, train, i8);
         let bwd = train.then(|| m.cost_bwd());
         let online = run.then(|| {
             let x = synthetic_tokens((b * t) as usize, cfg.vocab);
@@ -211,6 +242,7 @@ fn gpt_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, sta
         let label = if stages > 1 { format!("stage {si} (layers {}..{})", sh.start, sh.end) } else { "gpt".to_string() };
         let m = Gpt::new_shard(cfg.clone(), b, t, &init, sh);
         let fwd = m.cost_fwd();
+        cache_if_named("gpt2", weights, &cfg.to_json(), &fwd, stages, train, false);
         let bwd = train.then(|| m.cost_bwd());
         let online = run.then(|| {
             let x = synthetic_tokens((b * t) as usize, cfg.vocab);
@@ -247,6 +279,7 @@ fn lfm_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, run
     };
     println!("lfm: b={b} t={t} mode={}", if train { "train" } else { "infer" });
     let fwd = m.cost_fwd();
+    cache_if_named("lfm2", weights, &m.cfg.to_json(), &fwd, 1, train, false);
     let bwd = train.then(|| m.cost_bwd());
     let online = run.then(|| {
         let x = synthetic_tokens((b * t) as usize, m.cfg.vocab);

@@ -71,10 +71,101 @@ directory:
     Q8_0.gguf                   # a quant, downloaded or locally produced
 ```
 
-`<models-dir>` defaults to `$XDG_DATA_HOME/brain/models` and is overridden by
-`--models-dir`, the global `--brain-data-dir <root>` (models land in
-`<root>/models`), or `BRAIN_MODELS_DIR` - see
-[Configuration](configuration.md#paths) for the full precedence ladder.
+`<models-dir>` defaults to `$XDG_DATA_HOME/brain/models` (in practice, absent
+`XDG_DATA_HOME`, `$HOME/.local/share/brain/models` - **not**
+`~/.local/brain/models`) and is overridden by `--models-dir`, the global
+`--brain-data-dir <root>` (models land in `<root>/models`), or
+`BRAIN_MODELS_DIR` - see [Configuration](configuration.md#paths) for the full
+precedence ladder.
+
+## Seeing what you have
+
+`brain models list` is the store's own view of itself: architecture →
+provider repo → quantization, joining what is actually on disk against each
+architecture's declared official quantizations (`brain_arch::Arch::variants`
+- a real, verified-against-upstream list, not a live probe) and a cached
+per-model cost.
+
+```
+qwen3  Qwen3 dense decoder  (6 repos, 1 local)
+├─ Qwen/Qwen3-0.6B  0.60B params  local
+│  ├─ qwen3 Qwen/Qwen3-0.6B          base    local  1.9 GiB  gpu0 fits  exact 1.2 GFLOP (100% covered)
+│  └─ qwen3 Qwen/Qwen3-0.6B-Q8_0     Q8_0    not pulled
+└─ Qwen/Qwen3-8B  8.20B params  not pulled
+   ├─ qwen3 Qwen/Qwen3-8B-Q4_K_M     Q4_K_M  not pulled
+   └─ qwen3 Qwen/Qwen3-8B-Q8_0       Q8_0    not pulled
+```
+
+On a terminal this renders as an interactive tree (arrow keys / `j`/`k` /
+`PageUp`/`PageDown` to move, `Enter`/`Space` to expand or collapse a branch -
+or, on a pulled model's own row, open its tensor detail view, the same tree
+`brain models info` prints, with its own arrows/pgup/pgdn scrolling - `Esc` to
+leave a detail view or quit at the top level, `/` to filter, `q` to quit);
+piped or redirected it renders as the plain lines above, and every LEAF line
+carries the full canonical id, so `brain models list | grep Q4_K_M` returns
+complete, self-explanatory lines rather than fragments that only make sense
+next to a parent row. `--json` emits the same tree as data; `--arch <id>`
+filters to one architecture; `--local` drops every declared-but-not-pulled
+row.
+
+The cost column is a **cache read** - `brain models list` never opens a
+device or builds a model by itself, so it stays fast regardless of how many
+models are in the store. A model that has never been priced on this machine
+reads `not profiled`, not a guess. Three ways to fill it in:
+
+- `brain models list --reprofile` re-measures this device's hardware
+  roofline and re-prices **every** local model, at the cheap bandwidth-only
+  tier (tensor byte sizes, no real weight buffer materialized) - safe to run
+  unattended regardless of how large a local checkpoint is.
+- `brain models profile <model>` prices **one** already-pulled model now, at
+  the exact tier if its architecture has one registered, and errors (never
+  fetches) if it is not pulled.
+- `brain flops --model ... --weights <path>` (see [The
+  CLI](cli.md#infrastructure-verbs-unchanged-not-per-architecture)) writes
+  into this SAME cache when it prices a real on-disk model - `brain flops`
+  and `brain models list` share one pricing engine (`crates/modelcost`), so
+  running one primes the other.
+
+An exact-tier price needs a real (if weight-free) model build and is only
+registered for a few architectures so far (`qwen3`, `gpt2`, `lfm2`); every
+architecture with a shape manifest gets the bandwidth tier at least - a real
+weight size and a memory-bandwidth-bound lower bound, never a fabricated FLOP
+count (GGUF quantization changes bytes moved, not floating-point operation
+count, in brain's dequantize-on-load engine).
+
+`brain models list-adapters` is the same idea for LoRA adapters: architecture
+→ base variant → adapter, with rank/alpha/targets/dataset from the adapter's
+own card. `brain models info <model>` prints one checkpoint's real tensor
+tree - every tensor's own name, dtype and shape (a GGUF routinely mixes
+precision per tensor) - with any pulled adapter's tensors merged in at the
+node they target, marked with a leading `+`.
+
+### Real, timed measurement: `brain models profile --measure`
+
+Everything above is a *dry* cost - shape-derived, no device, no execution.
+`brain models profile <model> --measure [--reps N]` is the other kind: it
+builds the model for real and runs it, reporting
+
+- **load** time (weight upload + pipeline build) separately from a forward
+  pass's own time - folding the two together would answer a different
+  question than either "how long does inference take" or "how long before
+  the first request";
+- **cold** (the first pass, pipeline specialisation still pending) separately
+  from **hot** (the best of `--reps` passes after that, default 5) - a
+  single flattering "average" would hide the real one-time cost a cold start
+  actually pays;
+- achieved FLOP/s at both cold and hot, from the wall-clock measurement
+  against the same FLOP total the dry tier already computes;
+- a per-layer FLOP figure - for a uniform stack (`qwen3`, `gpt2`) this is
+  DERIVED from dry probes at 0/1/2 layers and verified affine at the
+  point outside that basis, exactly the way this workspace already prices
+  flux2/ltxv's block-depth-affine graphs; for a hybrid stack whose layers
+  are not interchangeable (`lfm2`'s per-layer choice of gated short-conv vs
+  attention) it is the plain average (`total ÷ layer count`) instead, and is
+  never presented as more precise than that.
+
+Never cached - a timing is a fact about this machine right now, not about the
+model, unlike the dry tiers above.
 
 ## Getting the weights
 

@@ -486,7 +486,10 @@ pub(crate) fn ggml_type_name(ty: u32) -> Option<&'static str> {
 }
 
 /// Block geometry `(elements_per_block, bytes_per_block)` for a ggml type.
-pub(crate) fn block_geometry(ty: u32) -> Option<(usize, usize)> {
+/// Elements per block and on-disk bytes per block for ggml type `ty`. `None`
+/// for a type id this reader has no block-format entry for (an IQ/TQ/MXFP4
+/// codebook, or an unknown id) - never a guessed geometry.
+pub fn block_geometry(ty: u32) -> Option<(usize, usize)> {
     Some(match ty {
         T_F32 => (1, 4),
         T_F16 | T_BF16 => (1, 2),
@@ -506,7 +509,7 @@ pub(crate) fn block_geometry(ty: u32) -> Option<(usize, usize)> {
 }
 
 /// Total on-disk byte count for `numel` elements of `ty`.
-pub(crate) fn tensor_nbytes(ty: u32, numel: usize) -> Option<usize> {
+pub fn tensor_nbytes(ty: u32, numel: usize) -> Option<usize> {
     let (be, bb) = block_geometry(ty)?;
     Some(numel / be * bb + if numel.is_multiple_of(be) { 0 } else { bb })
 }
@@ -1879,6 +1882,18 @@ mod tests {
         assert_eq!(dequantize(T_Q8_0, raw_q, 32).unwrap(), mg.tensor("q.weight").unwrap().unwrap());
 
         assert!(mg.raw_tensor_bytes("does_not_exist").is_none());
+
+        // `crate::weightio::WeightReader::nbytes` (built on `raw_tensor_bytes`
+        // for the GGUF branch) reports the SAME exact sizes, and their sum
+        // equals the tensor data actually on disk in this file - not a
+        // fs::metadata(whole file) comparison, since the header/KV bytes
+        // aren't tensor data, but the two tensor byte ranges must not overlap
+        // or leave a gap, which their sum matching each raw slice's own
+        // length independently confirms.
+        let wr = crate::weightio::WeightReader::open(&path).unwrap();
+        assert_eq!(wr.nbytes("f.weight"), Some(f32_data.len() as u64));
+        assert_eq!(wr.nbytes("q.weight"), Some(q_data.len() as u64));
+        assert_eq!(wr.nbytes("does_not_exist"), None);
 
         std::fs::remove_file(&path).ok();
     }

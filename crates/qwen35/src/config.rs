@@ -322,6 +322,36 @@ impl Qwen35Config {
         v
     }
 
+    /// Every JSON key [`Self::from_json`] must find to read this config's
+    /// real per-checkpoint SHAPE rather than silently substitute an
+    /// unrelated hardcoded default - see that function's own `g`/`gf`
+    /// closures. Deliberately excludes fields whose defaults are a
+    /// documented REFERENCE CONSTANT for this whole architecture family
+    /// (`partial_rotary_factor`, `mrope_section`, `full_attention_interval`,
+    /// the `linear_*` GDN dims, `max_position_embeddings`), not a
+    /// per-checkpoint value that varies by model size - unlike a missing
+    /// `vocab_size`/`d_model`/`n_layers`, which produces a DIFFERENT model,
+    /// silently.
+    pub const SHAPE_KEYS: &'static [&'static str] =
+        &["vocab_size", "block_size", "n_layers", "d_model", "n_heads", "n_kv_heads", "head_dim", "rms_norm_eps", "rope_theta"];
+
+    /// Which of [`Self::SHAPE_KEYS`] `c` is missing.
+    pub fn missing_shape_keys(c: &Value) -> Vec<&'static str> {
+        Self::SHAPE_KEYS.iter().filter(|k| c.get(**k).is_none()).copied().collect()
+    }
+
+    /// [`Self::from_json`], but refuses a config that would silently default
+    /// any shape-defining key instead of reading it.
+    pub fn from_json_checked(c: &Value) -> Result<Qwen35Config, String> {
+        let missing = Self::missing_shape_keys(c);
+        if !missing.is_empty() {
+            return Err(format!(
+                "config is missing shape key(s) {missing:?} - from_json would silently substitute an unrelated default for each rather than this checkpoint's real value"
+            ));
+        }
+        Ok(Self::from_json(c))
+    }
+
     pub fn from_json(c: &Value) -> Qwen35Config {
         let g = |k: &str, d: u32| c[k].as_u64().map(|v| v as u32).unwrap_or(d);
         let gf = |k: &str, d: f32| c[k].as_f64().map(|v| v as f32).unwrap_or(d);
@@ -488,6 +518,20 @@ impl Qwen35Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_json_checked_accepts_a_real_to_json_round_trip() {
+        let c = Qwen35Config::tiny().to_json();
+        assert!(Qwen35Config::missing_shape_keys(&c).is_empty());
+        assert!(Qwen35Config::from_json_checked(&c).is_ok());
+    }
+
+    #[test]
+    fn from_json_checked_rejects_a_config_using_the_wrong_key_name() {
+        let c = serde_json::json!({"vocab": 29, "block_size": 24, "n_layers": 4});
+        let err = Qwen35Config::from_json_checked(&c).expect_err("missing vocab_size and friends must be refused");
+        assert!(err.contains("vocab_size"), "error {err:?} should name vocab_size");
+    }
 
     #[test]
     fn layer_type_schedule_matches_reference_formula() {

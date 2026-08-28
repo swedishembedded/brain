@@ -434,6 +434,22 @@ mod tests {
     }
 
     #[test]
+    fn every_declared_arch_variant_quant_token_parses_as_a_real_quant() {
+        // `brain_arch::Variant::quants` stays a leaf-crate `&'static str` (see
+        // that field's own doc for why), so this is the one place its
+        // spelling is checked against the closed `Quant` enum it is supposed
+        // to mirror -- both crates are already in scope here, unlike in
+        // `brain-arch` itself.
+        for a in brain_arch::ARCHS {
+            for v in a.variants {
+                for q in v.quants {
+                    assert!(Quant::parse(q).is_some(), "{:?}: variant {:?} declares quant {q:?}, which is not a real Quant token", a.id, v.reference);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn repo_dir_is_vendor_slash_repo_regardless_of_quant() {
         let store = scratch_store("modelstore-lib-test-repo-dir");
         let base = ModelRef::new("Qwen", "Qwen3-0.6B", None);

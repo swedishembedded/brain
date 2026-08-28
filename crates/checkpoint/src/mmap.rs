@@ -168,6 +168,14 @@ impl MmapSafetensors {
         Some((m.end - m.start) / dtype_width(&m.dtype))
     }
 
+    /// On-disk byte size of `name`, without decoding - the raw
+    /// `data_offsets` span from the header, so it is exact even for a dtype
+    /// this reader cannot decode to f32.
+    pub fn nbytes(&self, name: &str) -> Option<u64> {
+        let m = self.index.get(name)?;
+        Some((m.end - m.start) as u64)
+    }
+
     /// Decode elements `[start_elem, start_elem+len_elem)` of `name`'s FLAT,
     /// row-major layout - for a `[rows, cols]` tensor, one row is `cols`
     /// elements starting at `row*cols`. Unlike [`Self::tensor_f32`] (whole

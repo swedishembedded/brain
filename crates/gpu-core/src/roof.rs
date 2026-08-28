@@ -429,6 +429,27 @@ pub fn known(backend: &str) -> Option<Roofs> {
     cached_for(backend)
 }
 
+/// Force a fresh measurement of `gpu`'s roofline, bypassing (and then
+/// overwriting) both the in-memory and on-disk cache [`ensure`] would
+/// otherwise serve. `BRAIN_NO_ROOF=1` still wins - a caller asking to skip
+/// probing entirely is honored even here, so this is "reprofile if roofing is
+/// allowed at all", not an unconditional override of that opt-out.
+///
+/// The one entry point `brain models list --reprofile` (and `brain models
+/// profile`) needs: every OTHER caller wants [`ensure`]'s cache-first
+/// behavior, and should keep calling that, not this.
+pub fn reprofile(gpu: &Gpu) -> Option<Roofs> {
+    if matches!(std::env::var("BRAIN_NO_ROOF").as_deref(), Ok(v) if v != "0") {
+        return None;
+    }
+    let r = measure(gpu)?;
+    if let Some(s) = persist::store(gpu.kind()) {
+        s.save(r);
+    }
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((gpu.kind(), r));
+    Some(r)
+}
+
 /// Run both probes now, ignoring and not updating the cache. Exposed so a test
 /// can assert the measurement itself rather than a memoised value.
 pub fn measure(gpu: &Gpu) -> Option<Roofs> {

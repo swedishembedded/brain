@@ -43,3 +43,24 @@ fn vae_kernels_are_all_costed() {
 fn wan_kernels_are_all_costed() {
     assert_all_covered("wan::block::KERNELS", &wan::block::KERNELS);
 }
+
+// The decoder LMs (`brain flops --model qwen|gpt|lfm`, and `crates/modelcost`'s
+// exact-tier pricers behind `brain models list`/`profile`) already gate this
+// at the crate level (`pipelines_fully_costed`, one test per crate) - these
+// three are the CLI-integration-level mirror of that, closing the one gap
+// the diffusion models above didn't have: nothing at this level previously
+// asserted these three stayed fully costed as `pipelines()`/`PIPELINES` grows.
+#[test]
+fn qwen3_kernels_are_all_costed() {
+    assert_all_covered("qwen3::model::pipelines()", qwen3::model::pipelines());
+}
+
+#[test]
+fn gpt2_kernels_are_all_costed() {
+    assert_all_covered("gpt2::model::PIPELINES", gpt2::model::PIPELINES);
+}
+
+#[test]
+fn lfm2_kernels_are_all_costed() {
+    assert_all_covered("lfm2::model::PIPELINES", lfm2::model::PIPELINES);
+}

@@ -80,8 +80,23 @@ way.
 | `brain federated` | sharded MoE: `split`, `verify`, `merge`, `assemble`, `train-expert` |
 | `brain bench` | cross-architecture evaluation harness: `eval`, `scale`, `advise`, `compare` |
 | `brain pull <model>` | fetch a model's official weights into the model store, by canonical id or HuggingFace URL - see below |
+| `brain models list` | architecture → provider repo → quantization: what's local, what's declared-but-not-pulled, size/fit/cost - see [Seeing what you have](models-and-weights.md#seeing-what-you-have) |
+| `brain models list-adapters` | architecture → base variant → LoRA adapter, with rank/alpha/dataset from the adapter's own card |
+| `brain models info <model>` | one checkpoint's real tensor tree - name, dtype, shape, size; adapter tensors merged in |
+| `brain models profile <model>` | price one already-pulled model now and cache the result - errors, never fetches, if it isn't pulled |
 | `brain import FILE` | GGUF import with no architecture token - dispatches on the file's own `general.architecture` header instead of the command line |
 | `brain quantize SRC` | the export direction: any safetensors/GGUF checkpoint to a quantized GGUF, with no per-architecture code at all |
+
+`models`, `flops`, `perf`, `bench` and `devices` sound similar but answer
+different questions, and none of them subsumes another: `models` is what you
+HAVE (an inventory, cache-only, fast even over a large store); `flops` prices
+ONE model's forward/backward pass in detail, on demand (and - naming a real
+checkpoint via `--weights` - feeds the very cache `models list`/`models
+profile` read, so the two can never disagree); `perf` MEASURES real
+latency/throughput against a regression baseline, correctness-gated; `bench`
+asks whether an architecture learns at all, no hardware axis; `devices` is
+just the GPU table. `models`'s size/cost columns read `devices`' device data
+and `flops`'s pricing engine directly - never a second copy of either.
 
 Run `brain <cmd> --help` (or `brain <architecture> --help`) for any
 subcommand's full flag list - `brain help` and this page are the map, not the

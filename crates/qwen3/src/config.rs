@@ -266,6 +266,45 @@ impl QwenConfig {
         v
     }
 
+    /// Every JSON key [`Self::from_json`] must find to read this config's real
+    /// SHAPE (param counts, FLOPs, tensor sizes) rather than silently
+    /// substitute an unrelated hardcoded default for it - see that
+    /// function's own `g`/`gf` closures, which do exactly that for any
+    /// absent key with no warning. Deliberately excludes
+    /// `max_position_embeddings` (documented on that field as legitimately
+    /// absent from an old checkpoint, defaulting to `block_size`) and the
+    /// boolean/optional fields (`tie_word_embeddings`, `qk_norm`,
+    /// `attention_bias`, `lora`), whose defaults are small, sensible,
+    /// Qwen3-shaped fallbacks - not a silently-wrong shape parameter the way
+    /// a missing `vocab_size` defaulting to `23` is.
+    pub const SHAPE_KEYS: &'static [&'static str] =
+        &["vocab_size", "block_size", "n_layers", "d_model", "n_heads", "n_kv_heads", "head_dim", "d_ff", "rope_theta", "rms_norm_eps"];
+
+    /// Which of [`Self::SHAPE_KEYS`] `c` is missing - empty means
+    /// [`Self::from_json`] on `c` reads `c`'s real shape, not a default
+    /// standing in for it.
+    pub fn missing_shape_keys(c: &Value) -> Vec<&'static str> {
+        Self::SHAPE_KEYS.iter().filter(|k| c.get(**k).is_none()).copied().collect()
+    }
+
+    /// [`Self::from_json`], but refuses a config that would silently default
+    /// any shape-defining key instead of reading it - the gap that let a
+    /// config spelling the vocab key `"vocab"` instead of `"vocab_size"` get
+    /// silently priced as `vocab=23` with `brain flops`/`brain models
+    /// profile` reporting "100% covered, exact" for the wrong model. Every
+    /// caller that prices or serves a REAL checkpoint (as opposed to
+    /// building a synthetic `tiny()`-style config by hand, which has no JSON
+    /// to mismatch against) should call this, not `from_json` directly.
+    pub fn from_json_checked(c: &Value) -> Result<QwenConfig, String> {
+        let missing = Self::missing_shape_keys(c);
+        if !missing.is_empty() {
+            return Err(format!(
+                "config is missing shape key(s) {missing:?} - from_json would silently substitute an unrelated default for each rather than this checkpoint's real value"
+            ));
+        }
+        Ok(Self::from_json(c))
+    }
+
     pub fn from_json(c: &Value) -> QwenConfig {
         let g = |k: &str, d: u32| c[k].as_u64().map(|v| v as u32).unwrap_or(d);
         let gf = |k: &str, d: f32| c[k].as_f64().map(|v| v as f32).unwrap_or(d);
@@ -428,5 +467,42 @@ mod tests {
         // no qk_norm rows, no attn-bias rows) + norm + lm_head.
         let params = c.param_list();
         assert_eq!(params.len(), 1 + 40 * 9 + 1 + 1);
+    }
+
+    #[test]
+    fn from_json_checked_accepts_a_real_to_json_round_trip() {
+        let c = QwenConfig::tiny().to_json();
+        assert!(QwenConfig::missing_shape_keys(&c).is_empty(), "to_json's own output must satisfy from_json_checked - anything else means the two have drifted apart");
+        assert!(QwenConfig::from_json_checked(&c).is_ok());
+    }
+
+    #[test]
+    fn from_json_checked_rejects_a_config_using_the_wrong_key_name() {
+        // The real bug this guards: "vocab" instead of "vocab_size" reads as
+        // present-but-irrelevant to `from_json`'s `c["vocab_size"]` lookup,
+        // which silently falls back to its hardcoded default (23) rather
+        // than erroring - exactly the gap that let a mis-keyed test fixture
+        // get priced as a different model than the one it named.
+        let c = serde_json::json!({
+            "vocab": 16, "block_size": 32, "n_layers": 2, "d_model": 8,
+            "n_heads": 2, "n_kv_heads": 1, "head_dim": 4,
+        });
+        let err = QwenConfig::from_json_checked(&c).expect_err("a config missing vocab_size/d_ff/rope_theta/rms_norm_eps must be refused");
+        for key in ["vocab_size", "d_ff", "rope_theta", "rms_norm_eps"] {
+            assert!(err.contains(key), "error {err:?} should name the missing key {key:?}");
+        }
+        // "vocab" is not one of from_json's real keys, so it must NOT be
+        // reported as satisfied.
+        assert!(!err.contains("\"vocab\","), "must not be fooled by the similarly-named but wrong key: {err:?}");
+    }
+
+    #[test]
+    fn missing_shape_keys_does_not_flag_the_deliberately_optional_fields() {
+        // max_position_embeddings (documented default: block_size) and the
+        // boolean/optional fields must never appear in SHAPE_KEYS - their
+        // defaults are legitimate, not a silent-wrong-shape footgun.
+        for optional in ["max_position_embeddings", "tie_word_embeddings", "qk_norm", "attention_bias", "lora"] {
+            assert!(!QwenConfig::SHAPE_KEYS.contains(&optional), "{optional:?} must stay optional, not become a hard requirement");
+        }
     }
 }

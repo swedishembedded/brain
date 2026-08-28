@@ -32,6 +32,7 @@ mod lfm_cli;
 mod ltxv_cli;
 mod mirror_cli;
 mod model_dir;
+mod models_cli;
 mod npu_cli;
 mod omni_cli;
 mod perf_cli;
@@ -79,6 +80,7 @@ mod run_cli;
 mod sam2_cli;
 mod splat_cli;
 mod supply;
+mod tree;
 mod tts_cli;
 mod tts_serve;
 mod wan_cli;
@@ -349,6 +351,9 @@ FLOP/OPS ACCOUNTING
       backward with --train) - no execution. --run also executes one pass and
       prints the ONLINE counters (accumulated at dispatch; int8 kernels count
       integer OPS). --stages N reports per-stage = per-device numbers.
+      --weights naming a real pulled checkpoint also writes into the shared
+      pricing cache `brain models list`/`brain models profile` read - see
+      MODELS below.
 
 QWEN3 (dense decoder; paged continuous-batching serving)
   brain qwen3 import <hf_dir|safetensors> --out F
@@ -407,6 +412,30 @@ PULL MODEL WEIGHTS (fetch a model's official weights into the store)
       terminal, ten plain lines for the whole pull when piped. Re-running is
       cheap - files already in the store are skipped, so an interrupted pull
       resumes by repeating the command. `brain fetch` is an accepted alias.
+
+MODELS (the store's own view of itself: what's local, what isn't, what it costs)
+  brain models list [--arch ID] [--local] [--plain|--tui] [--json] [--reprofile]
+      Architecture -> provider repo -> quantization. A terminal gets an
+      interactive tree (arrow/j/k/pgup/pgdn move, enter/space expand-collapse
+      a branch OR open a pulled model's tensor detail view, esc back out of
+      a detail view or quit at the top, / filter, q quit); piped gets plain
+      box-drawing lines whose LEAF lines carry the full canonical id, so
+      `brain models list | grep Q4_K_M` returns complete lines. --reprofile
+      re-measures this device's roofline and re-prices every local model
+      (bandwidth tier - safe regardless of size).
+  brain models list-adapters [--arch ID] [--plain|--tui] [--json]
+      Architecture -> base variant -> LoRA adapter, with rank/alpha/dataset
+      from the adapter's own card.
+  brain models info <model> [--json]
+      One checkpoint's real tensor tree: name, dtype, shape, size - adapter
+      tensors merged in and marked with a leading '+'.
+  brain models profile <model> [--measure [--reps N]]
+      Price ONE already-pulled model now and cache the result. Errors, never
+      fetches, if it is not pulled. `brain flops --weights <path>` writes into
+      the same cache - see FLOP/OPS ACCOUNTING above. --measure instead
+      builds the model for real and TIMES it (load time, cold pass, best of
+      --reps (default 5) hot passes, achieved FLOP/s, per-layer FLOPs) -
+      real execution, never cached.
 
 GGUF IMPORT (one-time conversion; dispatches on general.architecture)
   brain import FILE [--out PATH] [--id VENDOR/REPO]
@@ -1005,6 +1034,7 @@ fn main() {
         // several of this workspace's test-fixture instructions already tell a
         // reader to run, and honouring it costs one arm.
         Some("pull") | Some("fetch") => std::process::exit(pull_cli::run_pull(&argv[2..])),
+        Some("models") => std::process::exit(models_cli::run_models(&argv[2..])),
         Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
         Some(_) => resolve::dispatch(&argv[1..], HELP),

@@ -153,12 +153,54 @@ pub struct Arch {
     /// weights resolution (an `ARCH_HANDLERS` architecture using `--weights`
     /// directly, or one with no auto-fetch story yet).
     pub weights_env: &'static [(&'static str, &'static str)],
+    /// Upstream `<vendor>/<repo>` checkpoints this architecture is known to be
+    /// published at, and the GGUF quantizations each one officially ships
+    /// (repo file listing, or its conventional `-GGUF` sibling repo) - `brain
+    /// models list`'s declared half of "what could I pull", independent of
+    /// [`default_ref`](Self::default_ref) (the ONE repo auto-fetch reaches for)
+    /// and of what quant discovery finds live on the hub at pull time
+    /// (`modelstore::plan::quant_candidates`). A DECLARATION, verified against
+    /// the real upstream listing when written, never a claim about what is on
+    /// disk or reachable right now - staleness (a repo renamed, a quant
+    /// dropped) is a documentation debt, not a correctness bug, the same way a
+    /// stale `default_ref` would be. Empty when no survey has been done for
+    /// this architecture yet.
+    pub variants: &'static [Variant],
+}
+
+/// One upstream repo plus the quantizations it publishes - see
+/// [`Arch::variants`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Variant {
+    /// `<vendor>/<repo>`, exact upstream spelling.
+    pub reference: &'static str,
+    /// Total parameter count, for a size estimate before anything is pulled.
+    /// `0` when not known precisely enough to publish.
+    pub params: u64,
+    /// GGUF quant tokens this repo (or its conventional GGUF sibling) ships,
+    /// in the exact canonical spelling `brain_modelref::Quant::as_str()`
+    /// produces (`"Q4_K_M"`, not `"q4_k_m"` or `"Q4KM"`). This crate has no
+    /// dependency on `brain-modelref` (see the module doc), so that
+    /// round-trip is asserted where both are already in scope -
+    /// `crates/modelstore`'s test suite, not here.
+    pub quants: &'static [&'static str],
 }
 
 /// Every field [`arch!`] does not set explicitly, for its trailing
 /// functional-update `..DEFAULT`.
-const DEFAULT: Arch =
-    Arch { id: "", display: "", domain: Domain::Toy, source: Source::Toy, package: "", gguf: None, hf: &[], default_ref: None, extra_refs: &[], weights_env: &[] };
+const DEFAULT: Arch = Arch {
+    id: "",
+    display: "",
+    domain: Domain::Toy,
+    source: Source::Toy,
+    package: "",
+    gguf: None,
+    hf: &[],
+    default_ref: None,
+    extra_refs: &[],
+    weights_env: &[],
+    variants: &[],
+};
 
 macro_rules! arch {
     ($id:expr, $display:expr, $domain:expr, $source:expr, $package:expr $(, $key:ident : $val:expr)* $(,)?) => {
@@ -186,7 +228,20 @@ pub const ARCHS: &[Arch] = &[
     // "qwen3" is the real config.json `model_type` fallback value (used when
     // `architectures[0]` is absent), alongside the real `architectures[0]`
     // class name.
-    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B")),
+    // Quant lists are the VENDOR's own GGUF repo (or its `-GGUF` sibling) file
+    // listing, verified against huggingface.co when written - never a guess,
+    // and never a community (bartowski/unsloth) repo, which is a different
+    // vendor namespace `Variant`'s one `reference` field cannot also name.
+    // The 0.6B/1.7B vendor GGUF repos ship Q8_0 only; 4B and up ship five.
+    arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B"),
+        variants: &[
+            Variant { reference: "Qwen/Qwen3-0.6B", params: 596_000_000, quants: &["Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-1.7B", params: 1_700_000_000, quants: &["Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-4B", params: 4_000_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-8B", params: 8_200_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-14B", params: 14_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-32B", params: 32_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
+        ]),
     arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe")),
     // The DENSE sibling of qwen35moe - llama.cpp registers the two as
     // separate architectures (`LLM_ARCH_QWEN35` vs `LLM_ARCH_QWEN35MOE`)
@@ -202,7 +257,15 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8"), weights_env: &[("BRAIN_QWEN35_DIR", "dir")]),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
-    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M")),
+    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M"),
+        variants: &[
+            Variant { reference: "LiquidAI/LFM2.5-230M", params: 229_693_184, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "LiquidAI/LFM2.5-350M", params: 354_500_000, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "LiquidAI/LFM2.5-1.2B-Instruct", params: 1_170_340_608, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "LiquidAI/LFM2.5-2.6B", params: 2_697_198_592, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
+            // MoE: 32 experts, 4 active/token - `params` is TOTAL, not active.
+            Variant { reference: "LiquidAI/LFM2.5-8B-A1B", params: 8_467_856_128, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
+        ]),
     // The LTX-2.5 text encoder: Gemma4Unified's text tower (12B, 26 GB bf16 -
     // real-weight import out of scope until a machine that can hold it; see
     // `crates/gemma4`'s own doc). `transformers.models.gemma4_unified` is
@@ -217,7 +280,15 @@ pub const ARCHS: &[Arch] = &[
     arch!("gemma4", "Gemma-4 unified text tower (LTX-2.5's text encoder)", Text, Brain, "brain-gemma4", hf: &["Gemma4UnifiedForConditionalGeneration"]),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
-    arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"), weights_env: &[("BRAIN_QWEN3VL_WEIGHTS", "weights")]),
+    arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"), weights_env: &[("BRAIN_QWEN3VL_WEIGHTS", "weights")],
+        variants: &[
+            Variant { reference: "Qwen/Qwen3-VL-2B-Instruct", params: 2_127_532_032, quants: &["Q4_K_M", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-VL-4B-Instruct", params: 4_400_000_000, quants: &["Q4_K_M", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-VL-8B-Instruct", params: 8_767_123_696, quants: &["Q4_K_M", "Q8_0"] },
+            // MoE: ~3B active of 31B total.
+            Variant { reference: "Qwen/Qwen3-VL-30B-A3B-Instruct", params: 31_070_000_000, quants: &["Q4_K_M", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-VL-32B-Instruct", params: 33_357_390_064, quants: &["Q4_K_M", "Q8_0"] },
+        ]),
     arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B"), weights_env: &[("BRAIN_FASTVLM_WEIGHTS", "weights")]),
     arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3", hf: &["Moondream3ForConditionalGeneration"], default_ref: Some("moondream/moondream3-preview"), weights_env: &[("BRAIN_MOONDREAM3_WEIGHTS", "dir")]),
     // LLaVA-1.5: CLIP-L/14@336 vision tower + a Vicuna-1.5 (LLaMA-2) decoder,
@@ -239,11 +310,17 @@ pub const ARCHS: &[Arch] = &[
     // the checkpoint `crates/deepseek2ocr` actually loads (`BRAIN_DEEPSEEK_OCR_DIR`
     // wants the two-GGUF pair, not an HF safetensors dir). See
     // `crates/modelstore/src/recipe.rs`'s `deepseek2ocr-gguf` `FilesRecipe` row.
-    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"), weights_env: &[("BRAIN_DEEPSEEK_OCR_DIR", "dir")]),
+    arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"), weights_env: &[("BRAIN_DEEPSEEK_OCR_DIR", "dir")],
+        variants: &[Variant { reference: "ggml-org/DeepSeek-OCR-GGUF", params: 3_336_106_240, quants: &["Q8_0"] }]),
     arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr", hf: &["Qwen3ASRForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-ASR-1.7B"), weights_env: &[("BRAIN_QWEN3ASR", "weights")]),
-    arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr", hf: &["Nemotron3_5AsrForRNNT"], default_ref: Some("nvidia/nemotron-3.5-asr-streaming-0.6b"), weights_env: &[("BRAIN_NEMOTRONASR", "weights")]),
+    arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr", hf: &["Nemotron3_5AsrForRNNT"], default_ref: Some("nvidia/nemotron-3.5-asr-streaming-0.6b"), weights_env: &[("BRAIN_NEMOTRONASR", "weights")],
+        variants: &[Variant { reference: "nvidia/nemotron-3.5-asr-streaming-0.6b", params: 637_997_088, quants: &["Q8_0"] }]),
     // -- Audio / TTS ------------------------------------------------------
-    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), weights_env: &[("BRAIN_QWEN3TTS_WEIGHTS", "weights_dir"), ("BRAIN_QWEN3TTS_CKPT", "ckpt")]),
+    // No vendor GGUF (safetensors only) - a community-only repo exists but
+    // names a different vendor than this row's `reference` could carry; see
+    // the `qwen3` row's comment on why community quantizer repos are omitted.
+    arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), weights_env: &[("BRAIN_QWEN3TTS_WEIGHTS", "weights_dir"), ("BRAIN_QWEN3TTS_CKPT", "ckpt")],
+        variants: &[Variant { reference: "Qwen/Qwen3-TTS-12Hz-0.6B-Base", params: 914_643_008, quants: &[] }]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
     // `weights_env` names the directory containing the released
@@ -312,7 +389,17 @@ pub const ARCHS: &[Arch] = &[
     // -- Vision: detection / segmentation / face / depth -------------------
     arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8")),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),
-    arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2", default_ref: Some("facebook/sam2.1-hiera-tiny"), weights_env: &[("BRAIN_SAM2_WEIGHTS", "weights")]),
+    // No GGUF anywhere for this family - SAM2 is not part of the
+    // llama.cpp/GGUF ecosystem. Rows below have empty `quants` deliberately,
+    // not omitted: "this repo is real, no official quant exists" is itself
+    // useful information for `brain models list` to render.
+    arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2", default_ref: Some("facebook/sam2.1-hiera-tiny"), weights_env: &[("BRAIN_SAM2_WEIGHTS", "weights")],
+        variants: &[
+            Variant { reference: "facebook/sam2.1-hiera-tiny", params: 38_963_010, quants: &[] },
+            Variant { reference: "facebook/sam2.1-hiera-small", params: 46_060_866, quants: &[] },
+            Variant { reference: "facebook/sam2.1-hiera-base-plus", params: 80_850_690, quants: &[] },
+            Variant { reference: "facebook/sam2.1-hiera-large", params: 224_447_154, quants: &[] },
+        ]),
     arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-scrfd"),
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
@@ -324,9 +411,16 @@ pub const ARCHS: &[Arch] = &[
     // transformer/vae/text_encoder/tokenizer role dirs) and even reuses
     // Z-Image's exact `vae/diffusion_pytorch_model.safetensors` filename, so
     // no new recipe is needed - confirmed against the real repo listing.
+    // Vendor publishes no GGUF at all for either size (community quantizers
+    // do - a different vendor namespace, omitted per the `qwen3` row comment).
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2",
           default_ref: Some("black-forest-labs/FLUX.2-klein-4B"),
-          weights_env: &[("BRAIN_FLUX2_DIT", "dit"), ("BRAIN_FLUX2_VAE", "vae"), ("BRAIN_FLUX2_TE", "text_encoder"), ("BRAIN_FLUX2_TOKENIZER", "tokenizer")]),
+          weights_env: &[("BRAIN_FLUX2_DIT", "dit"), ("BRAIN_FLUX2_VAE", "vae"), ("BRAIN_FLUX2_TE", "text_encoder"), ("BRAIN_FLUX2_TOKENIZER", "tokenizer")],
+          variants: &[
+              Variant { reference: "black-forest-labs/FLUX.2-klein-4B", params: 3_875_544_576, quants: &[] },
+              // Gated under a non-commercial license, unlike the 4B row above.
+              Variant { reference: "black-forest-labs/FLUX.2-klein-9B", params: 9_078_581_248, quants: &[] },
+          ]),
     arch!("flux1", "FLUX.1 dev / Kontext / schnell MMDiT", Image, Brain, "brain-flux1"),
     arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5encoder"),
     arch!("sdxlunet", "SDXL UNet2DConditionModel", Image, Brain, "brain-sdxlunet"),
@@ -370,11 +464,20 @@ pub const ARCHS: &[Arch] = &[
     // NOT in `weights_env`: it does not exist in the T2V repo, and I2V's own
     // checkpoint is a different `default_ref` -- so it stays an explicitly-set
     // variable rather than something auto-fetch would fail to resolve.
+    // No vendor GGUF for any Wan repo - what exists (city96/QuantStack) is
+    // community-only, omitted per the `qwen3` row comment.
     arch!("wan", "Wan2.1/2.2 video diffusion transformer (T2V/I2V)", Video, Brain, "brain-wan",
           hf: &["WanTransformer3DModel"],
           default_ref: Some("Wan-AI/Wan2.1-T2V-1.3B"),
           weights_env: &[("BRAIN_WAN_DIT", "dit"), ("BRAIN_WAN_VAE", "vae"),
-                         ("BRAIN_WAN_T5", "text_encoder"), ("BRAIN_WAN_TOKENIZER", "tokenizer")]),
+                         ("BRAIN_WAN_T5", "text_encoder"), ("BRAIN_WAN_TOKENIZER", "tokenizer")],
+          variants: &[
+              Variant { reference: "Wan-AI/Wan2.1-T2V-1.3B", params: 1_418_996_800, quants: &[] },
+              Variant { reference: "Wan-AI/Wan2.1-T2V-14B", params: 14_288_491_584, quants: &[] },
+              Variant { reference: "Wan-AI/Wan2.2-TI2V-5B", params: 5_000_000_000, quants: &[] },
+              // MoE: two 14B experts (HighNoise/LowNoise), 14B active/step.
+              Variant { reference: "Wan-AI/Wan2.2-T2V-A14B", params: 27_000_000_000, quants: &[] },
+          ]),
     // `id` IS the GGUF spelling: `general.architecture = "ltxv"` on every
     // LTX-2.x GGUF observed (confirmed by range-reading the header of both
     // `unsloth/LTX-2.3-GGUF` and `city96/LTX-Video-gguf`), so `gguf: None`.
@@ -402,10 +505,17 @@ pub const ARCHS: &[Arch] = &[
     // combined release - see `extra_refs`. `-base` rather than `-small` as
     // the default because it is the tier the published RankIC results are
     // quoted for, and 391 MB is not a size worth trading accuracy for.
+    // No GGUF anywhere - a small forecasting transformer outside the
+    // llama.cpp/GGUF ecosystem, like `sam2` above.
     arch!("kronos", "Kronos BSQ-tokenizer candlestick model", Forecast, Brain, "brain-kronos",
           default_ref: Some("NeoQuasar/Kronos-base"),
           extra_refs: &["NeoQuasar/Kronos-Tokenizer-base"],
-          weights_env: &[("BRAIN_KRONOS_DECODER", "decoder"), ("BRAIN_KRONOS_TOKENIZER", "tokenizer")]),
+          weights_env: &[("BRAIN_KRONOS_DECODER", "decoder"), ("BRAIN_KRONOS_TOKENIZER", "tokenizer")],
+          variants: &[
+              Variant { reference: "NeoQuasar/Kronos-mini", params: 4_108_192, quants: &[] },
+              Variant { reference: "NeoQuasar/Kronos-small", params: 24_741_696, quants: &[] },
+              Variant { reference: "NeoQuasar/Kronos-base", params: 102_311_008, quants: &[] },
+          ]),
     arch!("fincast", "FinCast patched decoder + sparse MoE", Forecast, Brain, "brain-fincast"),
     // -- World models ---------------------------------------------------
     arch!("diamond", "DIAMOND EDM diffusion world model", World, Brain, "brain-diamond"),
@@ -599,6 +709,71 @@ mod tests {
         assert_eq!(wan.gguf, None, "wan's id IS its GGUF spelling -- an explicit `gguf:` here means the id drifted off the upstream name");
         assert_eq!(by_gguf("wan").map(|a| a.id), Some("wan"));
         assert_eq!(by_hf("WanTransformer3DModel").map(|a| a.id), Some("wan"));
+    }
+
+    #[test]
+    fn variant_references_are_non_reserved_two_segment_refs() {
+        // Same shape rule as default_ref/extra_refs: a Variant.reference names
+        // a real upstream repo, never a reserved vendor and never a stray
+        // third path segment.
+        for a in ARCHS {
+            for v in a.variants {
+                let (vendor, repo) =
+                    v.reference.split_once('/').unwrap_or_else(|| panic!("{:?}: variant ref {:?} has no '/'", a.id, v.reference));
+                assert!(!repo.contains('/'), "{:?}: variant ref {:?} has more than one '/'", a.id, v.reference);
+                assert!(
+                    !matches!(vendor, "brain" | "local" | "test"),
+                    "{:?}: variant ref {:?} names a reserved vendor -- reserved vendors are never pulled",
+                    a.id,
+                    v.reference
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn variant_references_are_unique_within_an_arch() {
+        for a in ARCHS {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for v in a.variants {
+                assert!(seen.insert(v.reference), "{:?}: variant ref {:?} listed twice", a.id, v.reference);
+            }
+        }
+    }
+
+    #[test]
+    fn default_ref_appears_among_variants_when_both_are_set() {
+        // `variants` is documented as the superset `default_ref` is drawn
+        // from -- if a row sets both, the default must actually be one of the
+        // declared variants, or `brain models list` would render the arch's
+        // own auto-fetch target as an option nothing else has heard of.
+        for a in ARCHS {
+            let (Some(d), false) = (a.default_ref, a.variants.is_empty()) else { continue };
+            assert!(a.variants.iter().any(|v| v.reference == d), "{:?}: default_ref {d:?} is not among its own variants {:?}", a.id, a.variants);
+        }
+    }
+
+    #[test]
+    fn variant_quant_tokens_are_nonempty_and_uppercase() {
+        // The exact closed-set round-trip against `brain_modelref::Quant`
+        // lives in `crates/modelstore`'s tests, which already depend on both
+        // crates (`crates/arch` stays a leaf, per this module's own doc). This
+        // is the structural half that belongs here: brain's quant tokens are
+        // always upper-case-with-underscores ("Q4_K_M"), never lower-case or
+        // the compact "Q4KM" spelling `Quant`'s own variant NAMES use.
+        for a in ARCHS {
+            for v in a.variants {
+                for q in v.quants {
+                    assert!(!q.is_empty(), "{:?}: variant {:?} has an empty quant token", a.id, v.reference);
+                    assert!(
+                        q.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                        "{:?}: variant {:?} quant {q:?} is not in canonical Q..._K_M form",
+                        a.id,
+                        v.reference
+                    );
+                }
+            }
+        }
     }
 
     #[test]

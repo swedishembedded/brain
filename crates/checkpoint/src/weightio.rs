@@ -187,6 +187,18 @@ impl WeightReader {
         }
     }
 
+    /// `name`'s exact on-disk byte size, read from the header's own offsets -
+    /// never recomputed from shape × an assumed dtype width, so a tensor whose
+    /// GGUF quant type this reader cannot dequantize still reports a real
+    /// size. `None` if the name is unknown.
+    pub fn nbytes(&self, name: &str) -> Option<u64> {
+        match &self.inner {
+            Inner::St(m) => m.nbytes(name),
+            Inner::Gguf(m) => m.raw_tensor_bytes(name).map(|(raw, _ty)| raw.len() as u64),
+            Inner::StSharded(readers, owner) => readers[*owner.get(name)?].nbytes(name),
+        }
+    }
+
     /// The model config: `brain.config` for safetensors, the KV map for GGUF.
     pub fn config(&self) -> Value {
         match &self.inner {
@@ -631,6 +643,18 @@ mod tests {
         assert_eq!(seen["a"], a);
         assert_eq!(seen["b"], b);
         assert_eq!(r.tensor("a").unwrap(), a);
+
+        // `nbytes` reports the exact on-disk span per tensor - both f32
+        // (4 bytes/elem) here - and the two spans plus the JSON header
+        // account for the whole file, so nothing is double-counted or missed
+        // between them.
+        assert_eq!(r.nbytes("a"), Some((a.len() * 4) as u64));
+        assert_eq!(r.nbytes("b"), Some((b.len() * 4) as u64));
+        assert_eq!(r.nbytes("does-not-exist"), None);
+        let header_and_blob = std::fs::metadata(&p).unwrap().len();
+        let tensor_bytes: u64 = r.names().map(|n| r.nbytes(n).unwrap()).sum();
+        assert!(tensor_bytes < header_and_blob, "tensor bytes ({tensor_bytes}) must be smaller than the whole file (header + blob = {header_and_blob})");
+
         std::fs::remove_file(&p).ok();
     }
 

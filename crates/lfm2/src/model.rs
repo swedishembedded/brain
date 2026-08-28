@@ -135,7 +135,7 @@ const FLASH_BIDIR_SPLIT: usize = 56;
 const FLASH_BIDIR_REG: usize = 59;
 const FLASH_BIDIR_REG2: usize = 60;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),

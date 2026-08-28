@@ -212,6 +212,45 @@ fn caps_expose_the_roofs_only_after_something_measured_them() {
     assert_eq!(caps.ridge_flops_per_byte(), Some(r.ridge()));
 }
 
+/// `reprofile` must overwrite BOTH the in-memory and on-disk cache `ensure`
+/// would otherwise serve - the `brain models list --reprofile` entry point,
+/// which needs a fresh number even when a (possibly stale) one is already
+/// cached, unlike every other caller.
+#[test]
+fn reprofile_overwrites_a_stale_cached_value() {
+    if skip_gpu() {
+        return;
+    }
+    let _probe = probe_lock();
+    let scratch = std::env::temp_dir().join(format!("brain-roofline-reprofile-test-{}", std::process::id()));
+    roof::set_cache_dir(Some(scratch.clone()));
+    let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
+
+    // `reprofile` (unlike `ensure`) never consults the in-memory CACHE on
+    // entry, so calling it first (rather than `ensure`) is what makes this
+    // test self-contained regardless of what an earlier test in this same
+    // process already measured and cached for this backend name.
+    let Some(_) = roof::reprofile(&gpu) else {
+        roof::set_cache_dir(None);
+        std::fs::remove_dir_all(&scratch).ok();
+        return; // unprobeable device - nothing to reprofile
+    };
+    let stale_path = std::fs::read_dir(&scratch).unwrap().next().unwrap().unwrap().path();
+    // A hand-planted stale record: the SECOND `reprofile` below must not
+    // trust it, and must replace it on disk, not merely shadow it in memory.
+    std::fs::write(&stale_path, "gflops=1\ngbs=1\ncache_gbs=1\n").unwrap();
+
+    let fresh = roof::reprofile(&gpu).expect("reprofile must measure a probeable device");
+    assert_ne!((fresh.gflops, fresh.gbs), (1.0, 1.0), "reprofile served the hand-planted stale record instead of measuring");
+    assert_eq!(roof::known(gpu.kind()), Some(fresh), "reprofile must update the in-memory cache too, not just the disk file");
+
+    let reloaded_text = std::fs::read_to_string(&stale_path).unwrap();
+    assert!(reloaded_text.contains(&format!("gflops={}", fresh.gflops)), "reprofile must overwrite the on-disk record: got {reloaded_text:?}");
+
+    roof::set_cache_dir(None);
+    std::fs::remove_dir_all(&scratch).ok();
+}
+
 /// `ensure` must not run any probe kernel at all on the CPU backend unless the
 /// caller explicitly opts in (`BRAIN_NO_ROOF=0`) — see the doc on `roof::ensure`.
 /// A probe that actually launched would take at minimum `MIN_PROBE_SECONDS`

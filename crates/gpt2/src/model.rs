@@ -257,6 +257,30 @@ impl GptConfig {
         })
     }
 
+    /// Every JSON key [`Self::from_json`] must find to read this config's
+    /// real SHAPE rather than silently substitute an unrelated hardcoded
+    /// default - see that function's own `g` closure, which does exactly
+    /// that for any absent key with no warning. See `qwen3::QwenConfig`'s
+    /// sibling constant for the fuller rationale (same footgun, same fix).
+    pub const SHAPE_KEYS: &'static [&'static str] = &["vocab_size", "block_size", "n_layers", "d_model", "n_heads", "d_ff"];
+
+    /// Which of [`Self::SHAPE_KEYS`] `c` is missing.
+    pub fn missing_shape_keys(c: &Value) -> Vec<&'static str> {
+        Self::SHAPE_KEYS.iter().filter(|k| c.get(**k).is_none()).copied().collect()
+    }
+
+    /// [`Self::from_json`], but refuses a config that would silently default
+    /// any shape-defining key instead of reading it.
+    pub fn from_json_checked(c: &Value) -> Result<GptConfig, String> {
+        let missing = Self::missing_shape_keys(c);
+        if !missing.is_empty() {
+            return Err(format!(
+                "config is missing shape key(s) {missing:?} - from_json would silently substitute an unrelated default for each rather than this checkpoint's real value"
+            ));
+        }
+        Ok(Self::from_json(c))
+    }
+
     pub fn from_json(c: &Value) -> GptConfig {
         let g = |k: &str, d: u32| c[k].as_u64().map(|v| v as u32).unwrap_or(d);
         GptConfig {
@@ -1096,6 +1120,20 @@ mod tests {
                  add one (its dispatches would otherwise be reported UNCOVERED)"
             );
         }
+    }
+
+    #[test]
+    fn from_json_checked_accepts_a_real_to_json_round_trip() {
+        let c = GptConfig::tiny().to_json();
+        assert!(GptConfig::missing_shape_keys(&c).is_empty());
+        assert!(GptConfig::from_json_checked(&c).is_ok());
+    }
+
+    #[test]
+    fn from_json_checked_rejects_a_config_using_the_wrong_key_name() {
+        let c = serde_json::json!({"vocab": 65, "block_size": 64, "n_layers": 2, "d_model": 32, "n_heads": 4});
+        let err = GptConfig::from_json_checked(&c).expect_err("missing vocab_size/d_ff must be refused");
+        assert!(err.contains("vocab_size") && err.contains("d_ff"), "error {err:?} should name the missing keys");
     }
 
     fn gpu_disabled() -> bool {

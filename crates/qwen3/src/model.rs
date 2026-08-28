@@ -219,7 +219,7 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
 /// adapter, queue and compiled pipelines" (`Gpu::share`'s own doc) - which
 /// only works if the ORIGINAL handle already compiled every name `Ops::new`
 /// looks up; hence this function, not a second kernel list.
-fn pipelines() -> &'static [(&'static str, &'static str)] {
+pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     use gpu_core::select::Dtype;
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {

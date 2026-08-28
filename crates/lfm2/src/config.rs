@@ -145,6 +145,33 @@ impl LfmConfig {
         })
     }
 
+    /// Every JSON key [`Self::from_json`] must find to read this config's
+    /// real SHAPE rather than silently substitute an unrelated hardcoded
+    /// default - see that function's own `g`/`gf` closures (a missing
+    /// `layer_types` even falls back to a whole DIFFERENT config's field,
+    /// `tiny().layer_types`). `tie_word_embeddings` stays optional (a
+    /// sensible boolean default), same rationale as
+    /// `qwen3::QwenConfig::SHAPE_KEYS`.
+    pub const SHAPE_KEYS: &'static [&'static str] =
+        &["vocab_size", "block_size", "d_model", "n_heads", "n_kv_heads", "head_dim", "d_ff", "conv_k", "rope_theta", "norm_eps", "layer_types"];
+
+    /// Which of [`Self::SHAPE_KEYS`] `c` is missing.
+    pub fn missing_shape_keys(c: &Value) -> Vec<&'static str> {
+        Self::SHAPE_KEYS.iter().filter(|k| c.get(**k).is_none()).copied().collect()
+    }
+
+    /// [`Self::from_json`], but refuses a config that would silently default
+    /// any shape-defining key instead of reading it.
+    pub fn from_json_checked(c: &Value) -> Result<LfmConfig, String> {
+        let missing = Self::missing_shape_keys(c);
+        if !missing.is_empty() {
+            return Err(format!(
+                "config is missing shape key(s) {missing:?} - from_json would silently substitute an unrelated default for each rather than this checkpoint's real value"
+            ));
+        }
+        Ok(Self::from_json(c))
+    }
+
     pub fn from_json(c: &Value) -> LfmConfig {
         let g = |k: &str, d: u32| c[k].as_u64().map(|v| v as u32).unwrap_or(d);
         let gf = |k: &str, d: f32| c[k].as_f64().map(|v| v as f32).unwrap_or(d);
@@ -222,6 +249,22 @@ impl LfmConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_json_checked_accepts_a_real_to_json_round_trip() {
+        let c = LfmConfig::tiny().to_json();
+        assert!(LfmConfig::missing_shape_keys(&c).is_empty());
+        assert!(LfmConfig::from_json_checked(&c).is_ok());
+    }
+
+    #[test]
+    fn from_json_checked_rejects_a_config_using_the_wrong_key_name() {
+        let c = serde_json::json!({"vocab": 23, "block_size": 12, "d_model": 16, "n_heads": 4, "n_kv_heads": 2, "head_dim": 4});
+        let err = LfmConfig::from_json_checked(&c).expect_err("missing vocab_size/d_ff/conv_k/rope_theta/norm_eps/layer_types must be refused");
+        for key in ["vocab_size", "d_ff", "conv_k", "rope_theta", "norm_eps", "layer_types"] {
+            assert!(err.contains(key), "error {err:?} should name the missing key {key:?}");
+        }
+    }
 
     #[test]
     fn ff_auto_adjust_matches_hf() {

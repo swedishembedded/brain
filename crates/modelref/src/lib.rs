@@ -447,6 +447,36 @@ impl Quant {
             Quant::Q4_0 | Quant::Q4_1 | Quant::Q5_0 | Quant::Q5_1 | Quant::Q8K => 255,
         }
     }
+
+    /// The single ggml block-type id every tensor in a file of this quant
+    /// uses, when there is one - `None` for `Q3_K_S`/`Q3_K_M`/`Q3_K_L` and
+    /// `Q4_K_S`/`Q4_K_M`/`Q5_K_S`/`Q5_K_M`, which name a MIXED per-tensor
+    /// recipe (attention/output tensors at a higher block type than the rest)
+    /// rather than one block format - the closed set has no bare `Q3_K`/
+    /// `Q4_K`/`Q5_K` variant for exactly this reason, unlike `Q2_K`/`Q6_K`/
+    /// `Q8_K`, which really are one uniform block type across the whole file.
+    /// A caller wanting an exact per-quant byte size must go tensor-by-tensor
+    /// against the real file (`checkpoint::checkpoint::MmapGguf::dtype`), not
+    /// assume one type from the file-level quant name.
+    ///
+    /// Values are the ggml spec's own stable type ids (mirrored, not
+    /// imported, from `checkpoint::gguf`'s private `T_*` consts - this crate
+    /// stays dependency-free per its own module doc, and these ids are a
+    /// third-party wire format brain does not own, not something that could
+    /// drift between the two copies).
+    pub const fn ggml_type(self) -> Option<u32> {
+        match self {
+            Quant::Q4_0 => Some(2),
+            Quant::Q4_1 => Some(3),
+            Quant::Q5_0 => Some(6),
+            Quant::Q5_1 => Some(7),
+            Quant::Q8_0 => Some(8),
+            Quant::Q2K => Some(10),
+            Quant::Q6K => Some(14),
+            Quant::Q8K => Some(15),
+            Quant::Q3KS | Quant::Q3KM | Quant::Q3KL | Quant::Q4KS | Quant::Q4KM | Quant::Q5KS | Quant::Q5KM => None,
+        }
+    }
 }
 
 impl fmt::Display for Quant {
@@ -705,5 +735,31 @@ mod tests {
         assert_eq!(Quant::parse("Q9_0"), None);
         assert_eq!(Quant::parse("BF16"), None);
         assert_eq!(Quant::parse("F16"), None);
+    }
+
+    #[test]
+    fn ggml_type_is_none_for_every_mixed_recipe_and_some_for_every_pure_tier() {
+        // The pure legacy tiers and the three bare K-types (no S/M/L suffix)
+        // are one ggml block type across the whole file.
+        for q in [Quant::Q4_0, Quant::Q4_1, Quant::Q5_0, Quant::Q5_1, Quant::Q8_0, Quant::Q2K, Quant::Q6K, Quant::Q8K] {
+            assert!(q.ggml_type().is_some(), "{q:?} is a pure block type and should report one ggml type id");
+        }
+        // The S/M/L recipes mix block types per tensor -- no single answer.
+        for q in [Quant::Q3KS, Quant::Q3KM, Quant::Q3KL, Quant::Q4KS, Quant::Q4KM, Quant::Q5KS, Quant::Q5KM] {
+            assert_eq!(q.ggml_type(), None, "{q:?} names a mixed per-tensor recipe, not one block type");
+        }
+    }
+
+    #[test]
+    fn ggml_type_ids_match_the_ggml_spec() {
+        // Spot-check against the upstream `GGML_TYPE_*` enum values this
+        // crate mirrors (see `ggml_type`'s doc) -- these three cross the
+        // reserved-id gaps (3/4/5, 9) so a copy/paste slip would show up.
+        assert_eq!(Quant::Q4_0.ggml_type(), Some(2));
+        assert_eq!(Quant::Q5_0.ggml_type(), Some(6));
+        assert_eq!(Quant::Q8_0.ggml_type(), Some(8));
+        assert_eq!(Quant::Q2K.ggml_type(), Some(10));
+        assert_eq!(Quant::Q6K.ggml_type(), Some(14));
+        assert_eq!(Quant::Q8K.ggml_type(), Some(15));
     }
 }
