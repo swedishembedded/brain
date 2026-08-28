@@ -21,6 +21,39 @@
 //! apart - the same single-table discipline `model_dir::resident_for` applies
 //! to family→resident dispatch.
 //!
+//! ## One table, after there were two
+//!
+//! This table is the only one. `crates/gguf` used to carry a second
+//! architecture table of its own, holding DeepSeek-OCR's two halves, that
+//! nothing outside that crate's tests ever called. The cost was not
+//! theoretical: `brain import-gguf` on a real DeepSeek-OCR file reported
+//! "architecture 'deepseek2-ocr' ... has no GGUF importer yet" while the
+//! importer sat two crates away. Those rows are now here, beside every other
+//! architecture. What stayed in `crates/gguf` is `gguf::route`, which answers
+//! the prior question - WHICH architecture is this file - once, against the
+//! canonical registry (`brain_arch::by_gguf`), for every consumer.
+//!
+//! ## Conversion is not the only way to consume a GGUF
+//!
+//! Some architectures read a GGUF directly at inference, streaming one weight
+//! matrix at a time out of the mapping and never materializing an fp32 model
+//! (FLUX.2's Q8_0 tier, `wan::gguf_src`, `ltxv::gguf_src`, Qwen3-VL). Forcing
+//! those through a dequantize-everything conversion would throw away the
+//! saving that makes them work on one card, so the table has a column for it
+//! rather than an opinion: [`GgufArchitectureImporter::loads_directly`]. A
+//! caller holding a `.gguf` path reads that column and decides; an
+//! architecture that loads directly and has no conversion answers with the
+//! command that DOES work, never "unsupported".
+//!
+//! ## Two files, one model
+//!
+//! A vision-language checkpoint is a model GGUF plus an `mmproj-*.gguf`, and
+//! every projector file ever produced declares `general.architecture =
+//! "clip"`. So an entry may also claim a `clip.projector_type`
+//! ([`GgufArchitectureImporter::projector`]), and lookup prefers the more
+//! specific match - otherwise the first `clip` row would swallow every other
+//! model's vision tower and import it with the wrong tensor map.
+//!
 //! ## Design decision: explicit one-time import, NOT auto-conversion on scan
 //!
 //! Discovering a `.gguf` with a registered architecture does **not** silently
@@ -70,6 +103,32 @@ pub trait GgufArchitectureImporter: Sync {
     /// matched EXACTLY (llama.cpp's own spelling, e.g. `"qwen35moe"`).
     fn architecture(&self) -> &'static str;
 
+    /// An extra `clip.projector_type` this entry also requires, for the one
+    /// architecture several models share: every multimodal projector file
+    /// llama.cpp's mtmd tooling produces declares `general.architecture =
+    /// "clip"` and identifies its real owner only in that second key. `None`
+    /// for an ordinary model file, and an entry claiming `"clip"` without one
+    /// would swallow every other model's projector - which a test below
+    /// refuses.
+    fn projector(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Whether this architecture's own runtime ALSO reads a `.gguf` directly
+    /// at inference, with no conversion step.
+    ///
+    /// The opt-in that keeps a fast path fast. A direct loader streams one
+    /// weight matrix at a time out of the mapping and can feed a quantized
+    /// tier without ever materializing the fp32 model, which is a real memory
+    /// win and not something a generic "dequantize everything to safetensors"
+    /// route can offer. Declaring it here is what lets a caller holding a
+    /// `.gguf` path decide between handing it straight to the model and
+    /// converting first, from the one table, rather than from a per-model
+    /// branch.
+    fn loads_directly(&self) -> bool {
+        false
+    }
+
     /// One line for `brain import-gguf --list`.
     fn summary(&self) -> &'static str;
 
@@ -115,6 +174,12 @@ struct Qwen3Importer;
 impl GgufArchitectureImporter for Qwen3Importer {
     fn architecture(&self) -> &'static str {
         qwen3::gguf_import::GGUF_ARCHITECTURE
+    }
+    fn loads_directly(&self) -> bool {
+        // `qwen3::import::source`/`shard_source` sniff the naming convention
+        // from the file's own tensor names, so a `.gguf` is a first-class
+        // weights path everywhere a Qwen3 is loaded.
+        true
     }
     fn summary(&self) -> &'static str {
         "Qwen3 dense decoder (GQA + QK-norm + RoPE + SwiGLU); also FLUX.2's text encoder"
@@ -189,6 +254,11 @@ impl GgufArchitectureImporter for WanImporter {
     fn architecture(&self) -> &'static str {
         wan::import::GGUF_ARCHITECTURE
     }
+    fn loads_directly(&self) -> bool {
+        // `wan::gguf_src::WanGgufSource` is a `checkpoint::TensorSource` over
+        // the mapping itself.
+        true
+    }
     fn summary(&self) -> &'static str {
         "Wan2.1/2.2 text-to-video transformer (DiT only - VAE/umT5/tokenizer come from their own source)"
     }
@@ -216,6 +286,10 @@ impl GgufArchitectureImporter for LtxvImporter {
     fn architecture(&self) -> &'static str {
         ltxv::import::GGUF_ARCHITECTURE
     }
+    fn loads_directly(&self) -> bool {
+        // `ltxv::gguf_src::LtxvGgufSource`, the same shape as Wan's.
+        true
+    }
     fn summary(&self) -> &'static str {
         "LTX-2.5 audio+video diffusion transformer (AV DiT only - VAEs/text-encoder/tokenizer come from their own source)"
     }
@@ -224,20 +298,165 @@ impl GgufArchitectureImporter for LtxvImporter {
     }
 }
 
-/// Every registered architecture importer. ONE line per architecture - this is
-/// the whole registration surface (see this module's doc).
-const IMPORTERS: &[&dyn GgufArchitectureImporter] =
-    &[&Qwen3Importer, &Qwen35MoeImporter, &S3ditImporter, &WanImporter, &LtxvImporter, &SupirImporter];
+/// DeepSeek-OCR's decoder half (`general.architecture = "deepseek2-ocr"`).
+///
+/// This entry and [`DeepseekOcrVisionImporter`] below used to live in a
+/// SECOND architecture table, in `crates/gguf`'s own `registry` module, which
+/// nothing outside that crate's tests ever called. The consequence was
+/// visible: `brain import-gguf` on a real DeepSeek-OCR file answered "has no
+/// GGUF importer yet" while the importer sat two crates away. One table, so
+/// that cannot recur.
+struct Deepseek2OcrImporter;
 
-/// The importer claiming `architecture`, or `None` if none does.
-pub fn importer_for(architecture: &str) -> Option<&'static dyn GgufArchitectureImporter> {
-    IMPORTERS.iter().copied().find(|i| i.architecture() == architecture)
+impl GgufArchitectureImporter for Deepseek2OcrImporter {
+    fn architecture(&self) -> &'static str {
+        gguf::deepseek_ocr::GGUF_ARCHITECTURE
+    }
+    fn loads_directly(&self) -> bool {
+        // `deepseek2ocr::import` opens both shipped GGUFs directly; this
+        // architecture never needs a conversion to be served.
+        true
+    }
+    fn summary(&self) -> &'static str {
+        "DeepSeek-OCR decoder (DeepSeek-V2 MLA; the vision tower is its own mmproj file)"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        gguf::deepseek_ocr::import(gguf, out_path, id_override).map(|_| ())
+    }
 }
 
-/// Every registered `general.architecture` value, for error messages and
-/// `--list`.
+/// DeepSeek-OCR's vision half: a projector file, so it is claimed by
+/// `general.architecture = "clip"` PLUS its own `clip.projector_type`.
+struct DeepseekOcrVisionImporter;
+
+impl GgufArchitectureImporter for DeepseekOcrVisionImporter {
+    fn architecture(&self) -> &'static str {
+        gguf::deepseek_ocr_vision::GGUF_ARCHITECTURE
+    }
+    fn projector(&self) -> Option<&'static str> {
+        Some(gguf::deepseek_ocr_vision::PROJECTOR_TYPE)
+    }
+    fn loads_directly(&self) -> bool {
+        true
+    }
+    fn summary(&self) -> &'static str {
+        "DeepSeek-OCR vision tower (SAM + CLIP + projector), the mmproj half of the checkpoint"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        gguf::deepseek_ocr_vision::import(gguf, out_path, id_override).map(|_| ())
+    }
+}
+
+/// Qwen3-VL: the language half. Its vision half is
+/// [`Qwen3VlVisionImporter`] below, and neither is useful without the other.
+struct Qwen3VlImporter;
+
+impl GgufArchitectureImporter for Qwen3VlImporter {
+    fn architecture(&self) -> &'static str {
+        qwen3vl::gguf_import::GGUF_ARCHITECTURE
+    }
+    fn loads_directly(&self) -> bool {
+        true
+    }
+    fn summary(&self) -> &'static str {
+        "Qwen3-VL decoder (loaded directly with its mmproj vision tower; no conversion needed)"
+    }
+    fn import(&self, _gguf: &MmapGguf, _out: &str, _id: Option<&str>) -> Result<(), String> {
+        Err(direct_only(qwen3vl::gguf_import::GGUF_ARCHITECTURE, "brain label images <dir> --weights <the language-half .gguf>"))
+    }
+}
+
+/// Qwen3-VL's vision half (`clip` + `clip.projector_type = "qwen3vl_merger"`).
+struct Qwen3VlVisionImporter;
+
+impl GgufArchitectureImporter for Qwen3VlVisionImporter {
+    fn architecture(&self) -> &'static str {
+        gguf::deepseek_ocr_vision::GGUF_ARCHITECTURE
+    }
+    fn projector(&self) -> Option<&'static str> {
+        Some(qwen3vl::gguf_import::PROJECTOR_TYPE)
+    }
+    fn loads_directly(&self) -> bool {
+        true
+    }
+    fn summary(&self) -> &'static str {
+        "Qwen3-VL vision tower (ViT + PatchMerger + DeepStack), the mmproj half of the checkpoint"
+    }
+    fn import(&self, _gguf: &MmapGguf, _out: &str, _id: Option<&str>) -> Result<(), String> {
+        Err(direct_only(qwen3vl::gguf_import::GGUF_ARCHITECTURE, "brain label images <dir> --weights <the language-half .gguf>"))
+    }
+}
+
+/// The error for an architecture that is registered, and loads its GGUF
+/// directly, but has no conversion to a brain-native checkpoint.
+///
+/// A dead end reported as "unsupported" would be wrong twice over: the file IS
+/// supported, and the thing to do about it is a different command.
+fn direct_only(arch: &str, how: &str) -> String {
+    format!("architecture {arch:?} loads its GGUF directly at inference; there is no conversion to run. Use: {how}")
+}
+
+/// Every registered architecture importer. ONE line per architecture - this is
+/// the whole registration surface (see this module's doc).
+const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[
+    &Qwen3Importer,
+    &Qwen35MoeImporter,
+    &S3ditImporter,
+    &WanImporter,
+    &LtxvImporter,
+    &SupirImporter,
+    &Deepseek2OcrImporter,
+    &DeepseekOcrVisionImporter,
+    &Qwen3VlImporter,
+    &Qwen3VlVisionImporter,
+];
+
+/// The entry claiming `mg`, by the one architecture resolution
+/// (`gguf::route`) every consumer shares.
+///
+/// A projector-discriminated entry wins over a bare architecture match, so a
+/// file that says `clip` plus a `projector_type` reaches its own model rather
+/// than whichever `clip` entry happens to be listed first.
+pub fn importer_for_gguf(mg: &MmapGguf) -> Option<&'static dyn GgufArchitectureImporter> {
+    let arch = architecture_of(mg);
+    let projector = mg.kv().get(gguf::route::PROJECTOR_TYPE_KEY).and_then(|v| v.as_str());
+    let mut fallback = None;
+    for i in IMPORTERS.iter().copied().filter(|i| i.architecture() == arch) {
+        match i.projector() {
+            Some(want) => {
+                if projector == Some(want) {
+                    return Some(i);
+                }
+            }
+            None => fallback = Some(i),
+        }
+    }
+    fallback
+}
+
+/// The importer claiming `architecture` with no projector discriminator, or
+/// `None`. For callers that hold only the architecture string (the model-dir
+/// scan reads it off a `ModelCard`); a caller holding the open file should use
+/// [`importer_for_gguf`], which can also resolve the projector case.
+pub fn importer_for(architecture: &str) -> Option<&'static dyn GgufArchitectureImporter> {
+    IMPORTERS.iter().copied().find(|i| i.architecture() == architecture && i.projector().is_none())
+}
+
+/// Every registered `general.architecture` value, in table order, for error
+/// messages and `--list`.
+///
+/// Deduplicated, keeping the first occurrence: `clip` is claimed once per
+/// projector-carrying model, and listing it N times says nothing extra. The
+/// duplicates are not adjacent (each model's projector row sits beside its own
+/// model row), so this cannot be `Vec::dedup`.
 pub fn architectures() -> Vec<&'static str> {
-    IMPORTERS.iter().map(|i| i.architecture()).collect()
+    let mut seen: Vec<&'static str> = Vec::with_capacity(IMPORTERS.len());
+    for a in IMPORTERS.iter().map(|i| i.architecture()) {
+        if !seen.contains(&a) {
+            seen.push(a);
+        }
+    }
+    seen
 }
 
 /// Read a GGUF's `general.architecture`, or `""` when the key is absent.
@@ -262,7 +481,7 @@ pub fn default_out_path(gguf_path: &str) -> String {
 pub fn import_file(gguf_path: &str, out_path: Option<&str>, id: Option<&str>) -> Result<String, String> {
     let mg = MmapGguf::open(gguf_path)?;
     let arch = architecture_of(&mg);
-    let importer = importer_for(arch).ok_or_else(|| {
+    let importer = importer_for_gguf(&mg).ok_or_else(|| {
         let known = architectures().join(", ");
         if arch.is_empty() {
             format!("{gguf_path}: no 'general.architecture' in the GGUF metadata (registered architectures: {known})")
@@ -290,7 +509,12 @@ pub fn run_import_gguf(args: &[String]) {
     if args.iter().any(|a| a == "--list") {
         println!("registered GGUF architectures (general.architecture -> importer):");
         for i in IMPORTERS {
-            println!("  {:<12} {}", i.architecture(), i.summary());
+            let key = match i.projector() {
+                Some(p) => format!("{}/{p}", i.architecture()),
+                None => i.architecture().to_string(),
+            };
+            let how = if i.loads_directly() { "direct" } else { "convert" };
+            println!("  {key:<22} [{how:>7}] {}", i.summary());
         }
         return;
     }
@@ -352,6 +576,19 @@ mod tests {
         use checkpoint::gguf_write::{write, TensorOut};
         let kvs = vec![("general.architecture".to_string(), GgufValue::String(arch.to_string()))];
         let tensors = vec![TensorOut { name: "w".into(), shape: vec![4], ty: 0, data: (0..4u32).flat_map(|i| (i as f32).to_le_bytes()).collect() }];
+        write(path, &kvs, &tensors, 32).unwrap();
+    }
+
+    /// A synthetic mmproj: the shared `clip` architecture plus the one key
+    /// that says whose projector it is.
+    fn write_projector_gguf(path: &str, projector: &str) {
+        use checkpoint::gguf::GgufValue;
+        use checkpoint::gguf_write::{write, TensorOut};
+        let kvs = vec![
+            ("general.architecture".to_string(), GgufValue::String("clip".to_string())),
+            ("clip.projector_type".to_string(), GgufValue::String(projector.to_string())),
+        ];
+        let tensors = vec![TensorOut { name: "w".into(), shape: vec![1], ty: 0, data: 0f32.to_le_bytes().to_vec() }];
         write(path, &kvs, &tensors, 32).unwrap();
     }
 
@@ -428,16 +665,76 @@ mod tests {
     }
 
     #[test]
+    fn the_architecture_list_names_each_tag_once() {
+        let list = architectures();
+        let mut sorted = list.clone();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), n, "an architecture is listed twice: {list:?}");
+        assert!(list.contains(&"clip"), "the shared projector tag is still listed once: {list:?}");
+    }
+
+    #[test]
     fn a_named_but_unimported_architecture_gets_a_more_specific_error() {
         let dir = tmp("named-unimported");
-        // deepseek2ocr's GGUF spelling ("deepseek2-ocr") is a real brain_arch
-        // row with no GgufArchitectureImporter yet -- the error should say so
-        // by name, not just "no importer registered".
+        // `t5encoder` is a real brain_arch row with no GgufArchitectureImporter
+        // -- the error should say so by name, not just "no importer
+        // registered". (This example was `deepseek2-ocr` until that
+        // architecture's importer, which had been sitting in a second table in
+        // `crates/gguf` that nothing called, was merged into IMPORTERS. It now
+        // imports, so it can no longer stand for "named but unimported".)
         let src = dir.join("named.gguf").to_string_lossy().into_owned();
-        write_gguf(&src, "deepseek2-ocr");
+        write_gguf(&src, "t5encoder");
         let err = import_file(&src, None, None).unwrap_err();
-        assert!(err.contains("deepseek2ocr"), "must name the known brain_arch id: {err}");
+        assert!(err.contains("t5encoder"), "must name the known brain_arch id: {err}");
         assert!(err.contains("no GGUF importer"), "must say it is a known-but-unimported gap: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The merge, asserted directly: DeepSeek-OCR's two halves are reachable
+    /// through the ONE table, and the projector half is told apart from every
+    /// other model's `clip` file by its projector_type.
+    #[test]
+    fn the_deepseek_ocr_halves_route_through_the_one_table() {
+        assert!(importer_for("deepseek2-ocr").is_some(), "the decoder half must be registered here, not in a second table");
+
+        let dir = tmp("mmproj-discriminator");
+        for (projector, want) in [(gguf::deepseek_ocr_vision::PROJECTOR_TYPE, "DeepSeek-OCR vision"), (qwen3vl::gguf_import::PROJECTOR_TYPE, "Qwen3-VL vision")] {
+            let src = dir.join(format!("mmproj-{projector}.gguf"));
+            write_projector_gguf(src.to_str().unwrap(), projector);
+            let mg = MmapGguf::open(src.to_str().unwrap()).unwrap();
+            let i = importer_for_gguf(&mg).unwrap_or_else(|| panic!("{projector} must route"));
+            assert_eq!(i.projector(), Some(projector));
+            assert!(i.summary().starts_with(want), "{projector} routed to {:?}", i.summary());
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The fast-path opt-in is a real column, not decoration: the
+    /// architectures whose own runtime streams a GGUF say so, and a caller
+    /// holding a `.gguf` path reads that from the one table.
+    #[test]
+    fn architectures_with_a_direct_loader_declare_it() {
+        for arch in ["qwen3", "wan", "ltxv", "qwen3vl", "deepseek2-ocr"] {
+            assert!(importer_for(arch).is_some_and(|i| i.loads_directly()), "{arch} loads its GGUF directly and must declare it");
+        }
+        // qwen35moe genuinely has no direct loader: its real checkpoint is
+        // ~140 GB at fp32, and the streaming import is the whole point.
+        assert!(importer_for("qwen35moe").is_some_and(|i| !i.loads_directly()));
+    }
+
+    /// A direct-loading architecture with no conversion says what to run
+    /// instead of reporting the file as unsupported.
+    #[test]
+    fn a_direct_only_architecture_names_the_command_to_use() {
+        let dir = tmp("direct-only");
+        let src = dir.join("qwen3vl.gguf").to_string_lossy().into_owned();
+        write_gguf(&src, qwen3vl::gguf_import::GGUF_ARCHITECTURE);
+        let err = import_file(&src, None, None).unwrap_err();
+        assert!(err.contains("loads its GGUF directly"), "{err}");
+        assert!(err.contains("brain label images"), "must name the command that does work: {err}");
+        assert!(!std::path::Path::new(&default_out_path(&src)).exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

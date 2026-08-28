@@ -270,13 +270,21 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
             }
         },
         other => {
-            // A `.gguf` whose architecture HAS a registered importer is not a
-            // dead end, it just needs the one-time conversion - name the exact
-            // command instead of reporting it as unservable. See
+            // A `.gguf` whose architecture IS in the importer table is not a
+            // dead end - name what to do with it instead of reporting it as
+            // unservable. Which advice is right comes from the table's own
+            // direct-load column: an architecture that streams its GGUF at
+            // inference has no conversion to run, and telling someone to
+            // convert one would send them to a command that refuses. See
             // `crate::gguf_import`'s module doc for why discovery does not run
-            // that conversion itself.
-            if weights.ends_with(".gguf") && crate::gguf_import::importer_for(other).is_some() {
-                eprintln!("brain: skip {} ({weights}: GGUF architecture '{other}' needs a one-time conversion -- run `brain import-gguf {weights}`)", card.id);
+            // a conversion itself.
+            let entry = weights.ends_with(".gguf").then(|| crate::gguf_import::importer_for(other)).flatten();
+            if let Some(entry) = entry {
+                if entry.loads_directly() {
+                    eprintln!("brain: skip {} ({weights}: GGUF architecture '{other}' loads directly through its own verb, not the model-dir scan)", card.id);
+                } else {
+                    eprintln!("brain: skip {} ({weights}: GGUF architecture '{other}' needs a one-time conversion -- run `brain import-gguf {weights}`)", card.id);
+                }
             } else {
                 eprintln!("brain: skip {} (family '{other}' not servable from the model dir yet)", card.id);
             }

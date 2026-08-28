@@ -22,6 +22,9 @@ fault-injection = ["brain-qwen3/fault-injection"]
 brain-dbus.workspace = true
 brain-shutdown.workspace = true
 brain-arch.workspace = true
+# `gguf::route` - the one seam that answers "which model is this GGUF", and
+# the DeepSeek-OCR importers whose architecture table this crate now owns.
+brain-gguf.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-apiserve.workspace = true
