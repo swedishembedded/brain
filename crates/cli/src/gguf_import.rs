@@ -161,6 +161,26 @@ impl GgufArchitectureImporter for Qwen35MoeImporter {
     }
 }
 
+/// Qwen3.8-27B dense hybrid decoder (`general.architecture = "qwen35"`) -
+/// `qwen35moe`'s dense sibling. A registration, not a reimplementation: the
+/// GDN/GQA/dense-MLP leaf vocabulary is `gguf::leaf`'s, shared with
+/// `qwen35moe`'s own importer above; what is unique here is importing the MTP
+/// head (`qwen35moe` drops its own MTP block, this one does not) - see
+/// `qwen35::gguf_import`'s module doc.
+struct Qwen35Importer;
+
+impl GgufArchitectureImporter for Qwen35Importer {
+    fn architecture(&self) -> &'static str {
+        qwen35::gguf_import::GGUF_ARCHITECTURE
+    }
+    fn summary(&self) -> &'static str {
+        "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder + MTP"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        qwen35::gguf_import::import_mmap(gguf, out_path, id_override).map(|_| ())
+    }
+}
+
 /// Dense Qwen3 (`general.architecture = "qwen3"`) - the decoder LM, and
 /// FLUX.2's text encoder.
 ///
@@ -401,6 +421,7 @@ fn direct_only(arch: &str, how: &str) -> String {
 const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[
     &Qwen3Importer,
     &Qwen35MoeImporter,
+    &Qwen35Importer,
     &S3ditImporter,
     &WanImporter,
     &LtxvImporter,
@@ -778,6 +799,47 @@ mod tests {
         // (it needs the conversion, which is the whole design decision above).
         let ids: Vec<String> = crate::model_dir::discover(&dir).iter().map(|r| r.manifest().model).collect();
         assert!(ids.contains(&"test/qwen35-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The dense sibling's own dispatch check, mirroring the qwen35moe test
+    /// above: `general.architecture = "qwen35"` reaches `Qwen35Importer`, not
+    /// the qwen35moe one two entries above it in the table.
+    #[test]
+    fn a_qwen35_dense_architecture_dispatches_to_its_own_importer() {
+        let dir = tmp("dispatch-qwen35");
+        let src = dir.join("toy.gguf").to_string_lossy().into_owned();
+        write_gguf(&src, qwen35::gguf_import::GGUF_ARCHITECTURE);
+        let err = import_file(&src, None, None).unwrap_err();
+        assert!(err.contains("qwen35"), "must reach the qwen35 importer, got: {err}");
+        assert!(!err.contains("no importer registered"), "must not fall through to the unknown-architecture error: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// End to end for the dense sibling, including the MTP head and the
+    /// routing-collision fix in `model_dir::resident_for`: a raw
+    /// `general.architecture = "qwen35"` file converts through the registry,
+    /// and the CONVERTED (now brain-native, non-`.gguf`) checkpoint is what
+    /// `discover` serves - the raw `.gguf` itself is never routed to the
+    /// `qwen35` family resident, which cannot open it (see
+    /// `model_dir::resident_for`'s GGUF gate).
+    #[test]
+    fn dispatch_converts_qwen35_dense_and_the_scan_then_serves_the_conversion() {
+        let dir = tmp("e2e-qwen35");
+        let src = dir.join("toy.gguf").to_string_lossy().into_owned();
+        qwen35::gguf_import::testing::write_synthetic_gguf(&src);
+        std::fs::write(dir.join("tokenizer.json"), br#"{"model":{"vocab":{"a":0}}}"#).unwrap();
+
+        let out = import_file(&src, None, Some("test/qwen35-dense-tiny")).expect("registry dispatch must convert, MTP included");
+        assert_eq!(out, default_out_path(&src), "default output is a sibling .brain.safetensors");
+
+        let reader = checkpoint::weightio::WeightReader::open(&out).unwrap();
+        assert!(reader.tensor("tok.weight").is_some(), "the importer really ran");
+        assert!(reader.tensor("mtp.fc_e.weight").is_some(), "the MTP head must be imported, unlike qwen35moe's own GGUF route");
+        assert_eq!(reader.card().expect("a model card must be written").id, "test/qwen35-dense-tiny");
+
+        let ids: Vec<String> = crate::model_dir::discover(&dir).iter().map(|r| r.manifest().model).collect();
+        assert!(ids.contains(&"test/qwen35-dense-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
