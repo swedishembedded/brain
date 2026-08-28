@@ -161,13 +161,73 @@ impl Action for GenerateAction {
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
-        let mut guard = RESIDENT.lock().map_err(|_| "qwenvl: resident lock poisoned")?;
-        if !matches!(&*guard, Some(r) if r.weights == dir && r.max_pixels == max_pixels) {
-            *guard = None;
-            *guard = Some(load_resident(&dir, max_pixels)?);
-        }
-        let hot = guard.as_ref().unwrap();
+        let (text, ntok) = with_resident(&dir, max_pixels, |hot| {
+            let p = Prepared::build(hot, &hwc, w, h, &prompt, max_new)?;
+            progress(Progress::step(0, max_new, "generating"));
+            // Real per-token streaming deltas (the spec declares `.streaming()`):
+            // re-decode the running id list each token and emit the UTF-8-safe
+            // suffix, exactly like qwen3::chat's streaming path.
+            let mut ids: Vec<u32> = Vec::new();
+            let mut printed = String::new();
+            let mut step = 0u32;
+            let out_ids = hot.model.generate_cb(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, |tok_id| {
+                ids.push(tok_id);
+                step += 1;
+                let full = hot.tok.decode(&ids);
+                let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
+                printed = np;
+                if !delta.is_empty() {
+                    progress(Progress::token(step, max_new, delta));
+                }
+            });
+            Ok((hot.tok.decode(&out_ids), out_ids.len()))
+        })?;
+        progress(Progress::step(max_new, max_new, text.clone()));
+        Ok(Outcome::new()
+            .set("text", json!(text.clone()))
+            .set("tokens", json!(ntok))
+            .blob("text", Blob::new(Media::Text, text.into_bytes())))
+    }
+}
 
+/// Run `f` against the process-wide resident for `(dir, max_pixels)`, building
+/// it first when the key changed.
+///
+/// The ONE place the resident is built and the lock is held, so a second entry
+/// point (the profiler below) cannot acquire it in a different order or forget
+/// to swap on a key change. `f` runs under the lock, which is also the
+/// concurrency contract this action already had ("one request at a time").
+fn with_resident<T>(dir: &str, max_pixels: u32, f: impl FnOnce(&Resident) -> Result<T, String>) -> Result<T, String> {
+    let mut guard = RESIDENT.lock().map_err(|_| "qwenvl: resident lock poisoned")?;
+    if !matches!(&*guard, Some(r) if r.weights == dir && r.max_pixels == max_pixels) {
+        *guard = None;
+        *guard = Some(load_resident(dir, max_pixels)?);
+    }
+    f(guard.as_ref().unwrap())
+}
+
+/// Everything one request needs from its image and prompt, before any model
+/// weight is touched: the packed patch tensor, its grid, the token stream with
+/// the image run spliced in, and the stop set.
+///
+/// Extracted so the served action and the profiler share it byte-for-byte -
+/// two copies of the prompt assembly would be free to disagree about the chat
+/// template, and a profile of a DIFFERENT prompt than the one that ships is
+/// not a profile of anything.
+struct Prepared {
+    tokens: Vec<u32>,
+    eos: Vec<u32>,
+    grid: (u32, u32),
+    pixels: Vec<f32>,
+    n_visual: u32,
+    /// Host-side preprocessing wall time (smart resize, resample, normalize,
+    /// pack) - a stage in its own right at real image sizes.
+    preprocess_s: f64,
+}
+
+impl Prepared {
+    fn build(hot: &Resident, hwc: &[f32], w: u32, h: u32, prompt: &str, max_new: u32) -> Result<Prepared, String> {
+        let t0 = std::time::Instant::now();
         // Smart-resize to a patch-aligned target, bilinear resample, pack
         // patches -- the same three real preprocessing steps the checkpoint's
         // HF processor runs, no "caller must pre-align" shortcut.
@@ -181,8 +241,7 @@ impl Action for GenerateAction {
                 hot.n_visual_capacity, hot.max_pixels
             ));
         }
-        let chw = hwc_to_chw_resized(&hwc, w, h, w_bar, h_bar);
-        let mut chw = chw;
+        let mut chw = hwc_to_chw_resized(hwc, w, h, w_bar, h_bar);
         normalize_unit(&mut chw);
         let pixels = pack_patches(&chw, hot.cfg.vision.in_channels, h_bar, w_bar, hot.cfg.vision.patch_size, hot.cfg.vision.spatial_merge_size, hot.cfg.vision.temporal_patch_size);
 
@@ -201,32 +260,53 @@ impl Action for GenerateAction {
                 tokens.len()
             ));
         }
-
-        progress(Progress::step(0, max_new, "generating"));
-        let (gh, gw) = patch_grid(h_bar, w_bar, hot.cfg.vision.patch_size);
-        // Real per-token streaming deltas (the spec declares `.streaming()`):
-        // re-decode the running id list each token and emit the UTF-8-safe
-        // suffix, exactly like qwen3::chat's streaming path.
-        let mut ids: Vec<u32> = Vec::new();
-        let mut printed = String::new();
-        let mut step = 0u32;
-        let out_ids = hot.model.generate_cb(&tokens, (gh, gw), &pixels, max_new, &eos, |tok_id| {
-            ids.push(tok_id);
-            step += 1;
-            let full = hot.tok.decode(&ids);
-            let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
-            printed = np;
-            if !delta.is_empty() {
-                progress(Progress::token(step, max_new, delta));
-            }
-        });
-        let text = hot.tok.decode(&out_ids);
-        progress(Progress::step(max_new, max_new, text.clone()));
-        Ok(Outcome::new()
-            .set("text", json!(text.clone()))
-            .set("tokens", json!(out_ids.len()))
-            .blob("text", Blob::new(Media::Text, text.into_bytes())))
+        let grid = patch_grid(h_bar, w_bar, hot.cfg.vision.patch_size);
+        Ok(Prepared { tokens, eos, grid, pixels, n_visual, preprocess_s: t0.elapsed().as_secs_f64() })
     }
+}
+
+/// One caption through the SAME resident, preprocessing, prompt assembly and
+/// decode the `generate` action runs, with per-stage wall-clock attribution.
+///
+/// The seam `qwen3vl_bench` measures from. It exists so a profile is a profile
+/// of the shipped path: a bench that re-assembled the prompt or re-built the
+/// model itself would be measuring its own copy, and every optimisation would
+/// then be justified against a program nobody runs.
+pub fn generate_profiled(
+    dir: &str,
+    max_pixels: u32,
+    prompt: &str,
+    hwc: &[f32],
+    w: u32,
+    h: u32,
+    max_new: u32,
+) -> Result<(String, crate::model::StageTimes, f64), String> {
+    with_resident(dir, max_pixels, |hot| {
+        let p = Prepared::build(hot, hwc, w, h, prompt, max_new)?;
+        let (ids, st) = hot.model.generate_timed(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, |_| {});
+        debug_assert_eq!(st.visual_tokens, p.n_visual);
+        Ok((hot.tok.decode(&ids), st, p.preprocess_s))
+    })
+}
+
+/// The MEASURED roofline of the device this checkpoint's resident runs on,
+/// measuring it once if this process has not already.
+///
+/// `gpu_core::roof::known` only ever answers from the in-process cache, so a
+/// caller that has not itself called `ensure` on a real handle gets `None` and
+/// silently reports every stage as "no measured roof". The handle lives behind
+/// the resident, so this is where the two can meet.
+pub fn device_roof(dir: &str, max_pixels: u32) -> Result<Option<gpu_core::roof::Roofs>, String> {
+    with_resident(dir, max_pixels, |hot| Ok(gpu_core::roof::ensure(hot.model.gpu())))
+}
+
+/// Build (or reuse) the resident for `(dir, max_pixels)` and report how long
+/// that took, without generating anything - the one-off setup cost a caption
+/// profile must not fold into its per-image numbers.
+pub fn load_time(dir: &str, max_pixels: u32) -> Result<f64, String> {
+    let t0 = std::time::Instant::now();
+    with_resident(dir, max_pixels, |_| Ok(()))?;
+    Ok(t0.elapsed().as_secs_f64())
 }
 
 fn preprocess_min_pixels() -> u32 {
