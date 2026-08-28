@@ -1232,6 +1232,23 @@ impl Qwen {
     /// so a caller only runs `lora_fwd` when this is `true`, matching this
     /// function's pre-B7 shape exactly: LoRA used to live only in the fp32
     /// arm of the fp32-vs-int8 fork this replaces).
+    /// The activation every per-layer linear on this shard reads, packed for
+    /// int8 only where an int8 weight will actually read it.
+    ///
+    /// `Ops::act`'s packing is two dispatches and one `I8Scratch` allocation
+    /// per activation, and a decode tape builds four of them per layer per
+    /// token - all of it dead on an fp32 model, which is what every
+    /// `from_tensors_decode`/`load_inference` build is. The tier is read off
+    /// the resident weights rather than off a remembered request, the same
+    /// rule `Self::linear_dtype` states, so a tier that silently fell back to
+    /// fp32 gets the cheap path it deserves.
+    fn ops_act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, rows: u32, k: u32) -> Act {
+        if self.weights.values().all(|w| matches!(w, Weight::F32 { .. })) {
+            return self.ops.act_f32(x, 0, rows, k);
+        }
+        self.ops.act(s, x, 0, rows, k)
+    }
+
     fn ops_linear(&self, s: &mut Vec<Step>, act: &Act, wname: &str, out: &DeviceBuffer) -> bool {
         let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen: no Ops weight for {wname}"));
         self.ops.matmul(s, w, act, out, 0);
@@ -1491,7 +1508,7 @@ impl Qwen {
             // does not use... a reasonable follow-up... deliberately left"),
             // not something introduced here - see the B7 ledger entry for
             // the sizing/measurement discussion.
-            let act1 = self.ops.act(&mut s, &lb.xn1, 0, n, d);
+            let act1 = self.ops_act(&mut s, &lb.xn1, n, d);
             if self.ops_linear(&mut s, &act1, &p("attn.wq.weight"), &lb.q_pre) {
                 self.lora_fwd(&mut s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
             }
@@ -1528,7 +1545,7 @@ impl Qwen {
             } else {
                 s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             }
-            let act_o = self.ops.act(&mut s, &lb.ctx, 0, n, hq);
+            let act_o = self.ops_act(&mut s, &lb.ctx, n, hq);
             if self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj) {
                 self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
             }
@@ -1536,7 +1553,7 @@ impl Qwen {
             // --- SwiGLU MLP ---
             s.push(self.rms_step(&lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
             // xn2 quantized once, shared by gate/up.
-            let act2 = self.ops.act(&mut s, &lb.xn2, 0, n, d);
+            let act2 = self.ops_act(&mut s, &lb.xn2, n, d);
             if self.ops_linear(&mut s, &act2, &p("mlp.gate.weight"), &lb.gate_pre) {
                 self.lora_fwd(&mut s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
             }
@@ -1544,7 +1561,7 @@ impl Qwen {
                 self.lora_fwd(&mut s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
             }
             s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &lb.h, n * ff));
-            let act_h = self.ops.act(&mut s, &lb.h, 0, n, ff);
+            let act_h = self.ops_act(&mut s, &lb.h, n, ff);
             if self.ops_linear(&mut s, &act_h, &p("mlp.down.weight"), &self.mlp_out) {
                 self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
             }
@@ -2399,7 +2416,7 @@ impl Qwen {
             // already folded into the base weights before construction -
             // `Self::from_tensors_decode`'s own doc), so `ops_linear`'s
             // returned "was this F32" bool is intentionally unused here.
-            let act1 = self.ops.act(&mut s, &lb.xn1, 0, 1, d);
+            let act1 = self.ops_act(&mut s, &lb.xn1, 1, d);
             self.ops_linear(&mut s, &act1, &p("attn.wq.weight"), &lb.q_pre);
             self.ops_linear(&mut s, &act1, &p("attn.wk.weight"), &lb.k_pre);
             self.ops_linear(&mut s, &act1, &p("attn.wv.weight"), &lb.v);
@@ -2437,16 +2454,16 @@ impl Qwen {
             // append+decode-attend dispatch this function always did, now
             // shared with qwen3omnimoe::thinker instead of duplicated.
             s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &self.kcache[l], &self.vcache[l], &self.scores, &lb.probs, &lb.ctx));
-            let act_o = self.ops.act(&mut s, &lb.ctx, 0, 1, hq);
+            let act_o = self.ops_act(&mut s, &lb.ctx, 1, hq);
             self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj);
             s.push(g.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[d], d));
             // --- SwiGLU MLP ---
             rms(&mut s, &lb.xmid, w(&p("ln2.weight")), &lb.xn2, d, 1);
-            let act2 = self.ops.act(&mut s, &lb.xn2, 0, 1, d);
+            let act2 = self.ops_act(&mut s, &lb.xn2, 1, d);
             self.ops_linear(&mut s, &act2, &p("mlp.gate.weight"), &lb.gate_pre);
             self.ops_linear(&mut s, &act2, &p("mlp.up.weight"), &lb.up);
             s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
-            let act_h = self.ops.act(&mut s, &lb.h, 0, 1, ff);
+            let act_h = self.ops_act(&mut s, &lb.h, 1, ff);
             self.ops_linear(&mut s, &act_h, &p("mlp.down.weight"), &self.mlp_out);
             s.push(g.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
             // DeepStack decode: this step's row IS one of the image rows

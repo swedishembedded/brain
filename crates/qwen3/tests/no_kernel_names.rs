@@ -185,9 +185,23 @@ fn migrated_forward_paths_never_hand_pick_a_gemm_kernel() {
     // vacuously pass the bans above.
     for name in ["forward_steps", "decode_steps"] {
         let body = function_body(&model_src, name);
-        assert!(body.contains("self.ops.act("), "no_kernel_names: {name} never calls `self.ops.act` - did the migration get reverted?");
+        assert!(
+            body.contains("self.ops.act(") || body.contains("self.ops_act("),
+            "no_kernel_names: {name} never reaches `Ops` for its activation - did the migration get reverted?"
+        );
         assert!(body.contains("self.ops_linear(") || body.contains("ops_linear("), "no_kernel_names: {name} never calls `ops_linear`/`Ops::matmul`");
     }
+
+    // `ops_act` is allowed to stand in for `Ops::act` above only because it is
+    // itself a thin choice BETWEEN two façade entry points. Check that here, so
+    // the widened assertion cannot be satisfied by a helper that hand-rolls the
+    // activation packing the façade exists to own.
+    let helper = function_body(&model_src, "ops_act");
+    check(helper, "qwen3::model::Qwen::ops_act");
+    assert!(
+        helper.contains("self.ops.act(") && helper.contains("self.ops.act_f32("),
+        "no_kernel_names: `ops_act` must choose between the two `Ops` activation entry points, not build one itself"
+    );
 
     let serve_src = read(SERVE_RS);
     check(function_body(&serve_src, "run_batched_steps"), "qwen3::serve::Engine::run_batched_steps");

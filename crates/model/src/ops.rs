@@ -626,7 +626,11 @@ pub struct Act {
     xr0: u32,
     m: u32,
     k: u32,
-    quant: I8Scratch,
+    /// The packed int8 view of these rows. `None` when the caller declared,
+    /// via [`Ops::act_f32`], that no weight reading this activation is
+    /// quantized - which is what makes the two packing dispatches skippable
+    /// rather than merely unused.
+    quant: Option<I8Scratch>,
 }
 
 /// A model-facing façade over `backend_api::select`'s kernel selector,
@@ -682,7 +686,26 @@ impl Ops {
         let total = (xr0 + rows) as u64;
         let quant = I8Scratch::new(&self.gpu, total, total, &[k]);
         quant.quant_rows(&self.gpu, [self.idx[kname::MAX_ABS_ROW], self.idx[kname::QUANT_PACK]], s, x, xr0, xr0 + rows, k);
-        Act { x: x.clone(), xr0, m: rows, k, quant }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant) }
+    }
+
+    /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
+    /// packed int8 view would be built and never read.
+    ///
+    /// The packing is not free: it is a `max_abs_row` and a `quant_pack`
+    /// dispatch plus a fresh `I8Scratch` allocation per activation, and a
+    /// decode tape builds one activation per linear group per layer per token.
+    /// Measured on a Qwen3-VL-4B caption (fp32 weights throughout), the two
+    /// kernels were 4.4% of all device time and the allocations ran to tens of
+    /// thousands per image, for a buffer no dispatch ever bound.
+    ///
+    /// The declaration is the CALLER's because only the caller knows its
+    /// weight tier; passing an `act_f32` activation to a quantized weight is
+    /// refused by name in [`Ops::matmul`] rather than silently reading
+    /// whatever a missing buffer would have held.
+    pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
+        assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
+        Act { x: x.clone(), xr0, m: rows, k, quant: None }
     }
 
     /// `(variant, dtype) -> kernel name`. The ONLY place in this crate a
@@ -822,9 +845,13 @@ impl Ops {
                     Dtype::I8 => kg as u32,
                     _ => k,
                 };
+                let quant = act.quant.as_ref().expect(
+                    "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
+                     quantized weight reads it - build it with Ops::act instead",
+                );
                 s.push(self.gpu.step_sliced(
                     kind,
-                    &[act.quant.xq_for(k), wb, &act.quant.sx, sw, y],
+                    &[quant.xq_for(k), wb, &quant.sx, sw, y],
                     &[xo, (0, 0), so, (0, 0), oo],
                     &[m, param_k, n],
                     threads,
