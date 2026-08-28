@@ -126,9 +126,17 @@ fi
 
 for f in "${REFS[@]}"; do ARGS+=(--ref "$f"); done
 [ "${#REFS[@]}" -gt 0 ] || [ -n "${ADAPTER:-}" ] || { echo "$D: no numbered reference images" >&2; exit 1; }
+# A missing adapter warns rather than stops: the rest of the run is still
+# worth having. But it warns LOUDLY, because the result then looks like a
+# weak adapter rather than like a path that was never read -- which is a
+# far more expensive thing to debug than a typo.
 if [ -n "${ADAPTER:-}" ]; then
-  [ -e "$ADAPTER" ] || { echo "adapter not found: $ADAPTER" >&2; exit 1; }
-  ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+  if [ -e "$ADAPTER" ]; then
+    ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+  else
+    echo "WARNING: adapter not found, generating WITHOUT it: $ADAPTER" >&2
+    echo "         (every image below is the base model; check the path)" >&2
+  fi
 fi
 [ -n "${TEXT_ENCODER:-}" ] && ARGS+=(--text-encoder "$TEXT_ENCODER")
 

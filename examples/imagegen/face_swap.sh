@@ -110,26 +110,51 @@ TARGET="${REFS[0]}"
 FACES=("${REFS[@]:1}")
 echo "target: $(basename "$TARGET")   face: ${#FACES[@]} image(s)" >&2
 
+# A mask is an OPTIMISATION, not a requirement: it pins the pixels outside it
+# so they come back bit-for-bit. Without one the model still gets the target as
+# the init latent and the faces as conditioning, and works out the rest itself
+# -- a softer result with no seam. So every way of not having a mask (MASK=0,
+# no mask.* in the folder, no detector weights, no face found, no python)
+# lands on the same route rather than stopping the run.
 ARGS=(--ref "$TARGET" --ref-cond-scale 0)
+MASK_FILE=""
 if [ "${MASK:-1}" != 0 ]; then
   SUPPLIED="$(find "$D" -maxdepth 1 -type f \
     | grep -Ei '/mask\.(jpe?g|png|ppm|webp|bmp)$' | sort | head -1 || true)"
   if [ -n "$SUPPLIED" ]; then
     echo "mask: using $(basename "$SUPPLIED") from the folder" >&2
     cp "$SUPPLIED" "$W/mask.png"
+    MASK_FILE="$W/mask.png"
+  elif BRAIN="$BRAIN" python3 "$(dirname "$0")/head_mask.py" \
+         "$TARGET" "$W/mask.png" "${MASK_GROW:-2.0}"; then
+    MASK_FILE="$W/mask.png"
   else
-    BRAIN="$BRAIN" python3 "$(dirname "$0")/head_mask.py" \
-      "$TARGET" "$W/mask.png" "${MASK_GROW:-2.0}"
+    echo "mask: none derived - continuing without one, letting the model place" >&2
+    echo "      the face itself. Supply $D/mask.png to pin the rest of the frame." >&2
   fi
-  ARGS+=(--mask "$W/mask.png" --strength "${STRENGTH:-0.99}")
+fi
+
+if [ -n "$MASK_FILE" ]; then
+  ARGS+=(--mask "$MASK_FILE" --strength "${STRENGTH:-0.99}")
 else
+  # No mask: the whole frame is regenerated, so the init latent has to carry
+  # the pose rather than being pinned around a hole. A lower default strength
+  # anchors it more.
   ARGS+=(--strength "${STRENGTH:-0.9}")
 fi
 
 for f in "${FACES[@]}"; do ARGS+=(--ref "$f"); done
+# A missing adapter warns rather than stops: the rest of the run is still
+# worth having. But it warns LOUDLY, because the result then looks like a
+# weak adapter rather than like a path that was never read -- which is a
+# far more expensive thing to debug than a typo.
 if [ -n "${ADAPTER:-}" ]; then
-  [ -e "$ADAPTER" ] || { echo "adapter not found: $ADAPTER" >&2; exit 1; }
-  ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+  if [ -e "$ADAPTER" ]; then
+    ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+  else
+    echo "WARNING: adapter not found, generating WITHOUT it: $ADAPTER" >&2
+    echo "         (every image below is the base model; check the path)" >&2
+  fi
 fi
 [ -n "${TEXT_ENCODER:-}" ] && ARGS+=(--text-encoder "$TEXT_ENCODER")
 
