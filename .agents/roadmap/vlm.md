@@ -270,17 +270,18 @@ identical before and after.
 
 | stage | before | after | fraction of measured roof | bound |
 |---|---|---|---|---|
-| image preprocess | 54 ms | 32 ms | 0.8% | bandwidth |
-| vision tower | 133535 ms | 3686 ms | 19.8% | compute |
-| projector / merger | 2257 ms | 217 ms | 15.1% | compute |
-| prefill (1580 tokens) | 148662 ms | 111326 ms | 79.6% | bandwidth |
-| decode + head (90 tokens) | 54891 ms | 13857 ms | 39.9% | bandwidth |
-| **per image** | **339399 ms** | **129118 ms** | | |
-| model build (once per process) | 8.5 s | 13.1 s | | |
+| image preprocess | 54 ms | 41 ms | 0.7% | bandwidth |
+| vision tower | 133535 ms | 3587 ms | 20.4% | compute |
+| projector / merger | 2257 ms | 220 ms | 14.8% | compute |
+| prefill (1580 tokens) | 148662 ms | 104550 ms | 76.5% | bandwidth |
+| decode + head (90 tokens) | 54891 ms | 10313 ms | 48.9% | bandwidth |
+| **per image** | **339399 ms** | **118710 ms** | | |
+| model build (once per process) | 8.5 s | 16.0 s | | |
 
-2.6x end to end, and 36x on the vision half. The one-off model build is
+2.9x end to end, and 37x on the vision half. The one-off model build is
 noise next to the per-image cost, so there was never a loading problem to
-find: the whole cost was marginal.
+find: the whole cost was marginal. (The build grew because the vision
+weights now upload once there instead of once per image.)
 
 ### What was actually wrong
 
@@ -327,6 +328,16 @@ loop discarded, 1580 times per image. `Qwen::prefill` already called that
 readback "pure waste" in its own doc but could not carry an M-RoPE table or
 a DeepStack row; `Qwen::prefill_mrope` is that step without the readback.
 
+**An fp32 model was packing int8 activations.** `Ops::act` quantized every
+activation unconditionally - a `max_abs_row` dispatch, a `quant_pack`
+dispatch and a fresh `I8Scratch` allocation per activation group per layer
+per token - for a buffer only the `I8`/`Q4` arm of `Ops::matmul` reads, and
+there were no such weights. Two kernels at 4.4% of all device time, tens of
+thousands of dead allocations per image, and dispatches per caption fell
+from 310216 to 224968 when it stopped. `Ops::act_f32` is the opt-out and the
+tier is read off the resident weights, never off a remembered request. This
+one is not qwen3vl-specific: it applies to every fp32 `Qwen` decode.
+
 **The tower was rebuilt inside every forward.** `VisionEncoder` and
 `PatchMerger` borrowed a `&Gpu`, so a model could not hold one, so
 `Qwen3Vl` kept host `Vec<f32>` weights and re-uploaded about 1.7 GB per
@@ -336,8 +347,12 @@ tower was 4080 ms, most of it upload.
 
 ### What is left, and what it is worth
 
-Prefill is now 111 s of the 129 s and sits at **79.6% of this card's
-measured DRAM bandwidth**. It is not a kernel problem any more. The decoder
+Prefill is now 105 s of the 119 s and sits at **76.5% of this card's
+measured DRAM bandwidth** at the default budget and 89.3% at the smallest.
+It is not a kernel problem any more: `qwen3vl_bench caption --profile` puts
+`matmul_gemv_reg` at 83-87% of all device time and, dividing the weight
+bytes it must stream by the time it takes, at essentially the card's full
+measured 287.5 GB/s. There is nothing left in the GEMV. The decoder
 is 4.02B fp32 parameters = 15.0 GiB read once per token at batch 1, which
 bounds a batch-1 step at 17.8 tok/s on this card, so a 1580-token prompt
 prefilled one token at a time cannot beat about 89 s however good the
@@ -364,19 +379,41 @@ same 2048x1536 photograph at `--max-new 90`, after everything above:
 
 | `--max-pixels` | visual tokens | per image | end-to-end tok/s |
 |---|---|---|---|
-| 512x512 | 234 | 24.3 s | 3.71 |
+| 512x512 | 234 | 22.8 s | 3.95 |
 | 768x768 | 540 | 44.6 s | 2.02 |
 | 1024x1024 | 972 | 76.9 s | 1.17 |
-| 1280x1280 (the captioner default) | 1564 | 129.1 s | 0.70 |
+| 1280x1280 (the captioner default) | 1564 | 118.7 s | 0.76 |
 
-At the smallest budget prefill reaches **96.0% of the card's measured DRAM
-bandwidth**, which is as close to the wall as this shape gets. 512x512 is
-14x faster than the original run at the default budget, and the caption it
-produces is still a full descriptive paragraph.
+At the smallest budget prefill reaches **89.3% of the card's measured DRAM
+bandwidth**, which is about as close to the wall as this shape gets. 512x512
+is **15x faster than the original run at the default budget**, and the
+caption it produces is still a full descriptive paragraph - arguably better
+organised prose than the largest budget, which spends its tokens on a
+bulleted furniture inventory.
 
 This is deliberately NOT a default change. Fewer visual tokens is less of
 the image, and how much detail a caption needs is the caller's judgement,
 not the engine's - so it stays a flag with a published cost curve.
+
+### Doubt the meter first: three instrument bugs in one pass
+
+Every one of them made the engine look better, or the analysis look sharper,
+than it was, and none would have been caught by a test:
+
+- `roof::utilisation_of` returns a PERCENT, and the profiler scaled it again
+  - 1.6% of roof was printed as 162%.
+- `roof::known` answers only from an in-process cache, so querying it before
+  any device existed reported every stage as having no measured roof.
+  `caps::device_roof` reaches the handle behind the resident instead.
+- The prefill byte model charged the whole parameter count per token, but
+  prefill applies no LM head and its embedding gather reads one row, not the
+  table. About a tenth too much - enough to print prefill at 100.3% of a
+  roof nothing can exceed.
+
+Also: `BRAIN_PROFILE`'s per-kernel table prints when the device DROPS, and a
+resident model's device never drops, so on this path it simply never
+appeared. `qwen3vl_bench caption --profile` goes through `Gpu::dump_profile`,
+which exists for exactly that.
 
 ### Cosine is not a gate. This is the fifth independent reproduction.
 
