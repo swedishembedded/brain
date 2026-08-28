@@ -1448,12 +1448,15 @@ themselves; see lesson 64 in `.agents/rules/lessons.md`.
 `crates/cli/src/resident_qwen35.rs::multi_gpu_gguf_from_env` and
 `Executor::register_multi`.
 
-**Status, plainly: the PLUMBING works and is gated green; the OUTPUT is
-still wrong and is gated RED.** Both gates live in
+**Status, plainly: the PLUMBING works and is gated green, the LOADING is now
+proven correct against an external oracle and gated green, and the OUTPUT is
+still wrong and is gated RED.** The first two gates live in
 `crates/qwen35/tests/gguf_resident_real.rs`
 (`a_real_two_card_load_runs_end_to_end` and
 `the_two_card_stack_continues_a_factual_prompt_correctly`), kept separate so
-a reader can tell which question is settled.
+a reader can tell which question is settled; the loading gate is
+`crates/qwen35/tests/gguf_reference_parity_real.rs` (see "An external oracle
+now exists" below).
 
 Composed, not written: `checkpoint::gguf::MmapGguf` (already a
 `checkpoint::TensorSource`) -> `checkpoint::remap::RemapSource` over a
@@ -1531,16 +1534,89 @@ Ruled out, each by a gate that now exists:
 | the `(1+w)` norm folds | every norm's real value distribution is consistent with llama.cpp having already folded the plain norms and NOT folded the gated `ssm_norm` (which `Qwen3_5RMSNormGated` does not reparameterize - `crate::import`'s own doc) |
 | an `ssm_alpha`/`ssm_beta` swap | tried on the real file: strictly worse (`"I"` then EOS) |
 
-So the remaining defect is a difference between what this GGUF route loads
-and what the safetensors route loads, in a tensor whose name and shape are
-both right. **No external oracle is available on this box** - no llama.cpp
-binary, no `gguf` python module, no `convert_hf_to_gguf.py`, and the FP8
-safetensors checkpoint (`BRAIN_QWEN35_DIR`) is not present and does not fit
-the free disk. The next step needs one of: llama.cpp's own converter source
-for this architecture (to read its `modify_tensors` hooks the way `ElemOp::
-LnNeg` was derived), or a small `qwen35`-architecture GGUF that can be
-cross-checked against a safetensors copy of the same weights the way
-`crates/qwen3`'s GGUF route already is bit-for-bit.
+Two rows of that table have since been corrected by measurement, and are
+kept above only so the correction is legible: the int8 row's "not collapsing
+with depth" was an extrapolation from a depth-8 gate and is WRONG (see "A
+real defect this DID find" below), and the whole framing that followed it -
+that the loader must be mis-reading a tensor - is disproven next.
+
+**An external oracle now exists, and it clears the loader.** The claim above
+("the remaining defect is a difference between what this GGUF route loads
+and what the safetensors route loads") is now DISPROVEN.
+`tools/goldens/qwen35_gguf_reference_forward.py` is a second, independent
+implementation of this exact architecture - pure CPython, no torch/numpy/
+transformers/llama.cpp, transcribed from the published `modeling_qwen3_5`
+reference module - that parses the GGUF header, dequantizes Q8_0 itself and
+runs the real decoder over the real bytes. Against it, `Qwen35::
+new_fp32_shard_src` fed by `int8_gguf_resident::shard_source` is
+**bit-equal**: cosine 1.000000 and relative L2 0.0000 at 1, 4, 8 and 12 real
+layers across 4 real decode positions, with the residual's `sum` (a
+projection no permutation preserves) agreeing to 6 significant digits. The
+first four layers of that comparison are now a standing gate,
+`tests/gguf_reference_parity_real.rs`.
+
+Every remaining layout question was settled from the FILE's own statistics
+rather than by assumption, and each agrees with what the loader does:
+
+| Question | How the file itself answers it |
+|---|---|
+| is `attn_q` per-head `[query\|gate]`-interleaved, or globally chunked? | interleaved: averaged over heads, the FIRST 256 rows of each 512-row block carry the rotary break at row 64 that `attn_k` also has (ratio 0.93 vs 1.00 for the second block, corr 0.41-0.54 against `attn_k`'s profile vs ~0.0) - the second block is the gate, which has no rotary structure |
+| did llama.cpp apply its LLaMA-style q/k row permute (half-split -> adjacent-pair RoPE)? | no: `attn_k`'s row magnitude is a function of `d mod 32` over the 64 rotary channels (low `[0,16)`, high `[16,32)`, repeated), i.e. `d` pairs with `d+32`; an adjacent-pair permute would make it a function of `floor(d/2)`, and even/odd rows would differ (they do not) |
+| are `attn_k`/`attn_v` swapped? | no: `attn_k`'s per-position profile has the rotary break at 64 (ratio 0.68-0.87), `attn_v`'s is flat (0.99) |
+| `ssm_conv1d` layout and which tap is the current token | `[channel][tap]`, tap fastest, tap `K-1` current: the whole-tensor magnitude profile has its one regime change at flat index 16384 = `4096 channels * 4 taps`, exactly the k->v channel boundary, which the `[tap][channel]` reading cannot produce |
+| `attn_qkv` order | `q\|k\|v`: the row-scale profile breaks at 2048/4096, matching `ssm_conv1d`'s own channel structure |
+| is the block order scrambled? | no: `post_attention_norm` rises monotonically 0.78 -> 1.36 with depth, `attn_q_norm` 1.23 -> 1.66, `ssm_dt.bias` max grows with depth - a lexicographic or shuffled block order would be jagged |
+| is `output.weight` really the head (not tied to `token_embd`)? | different bytes, and projecting the final residual through `token_embd` instead gives pure garbage (`"ipped"`, CJK fragments) |
+
+**A real defect this DID find: the int8 tier collapses along the SEQUENCE,
+not just with depth.** `gguf_i8_vs_fp32_real.rs` measures 8 layers and
+concluded "real loss, but not collapsing"; that extrapolation was wrong,
+because the resident decodes one token at a time through a PERSISTENT GDN
+recurrent state, so W8A8 error compounds along the sequence as well as along
+depth. Measured against the reference oracle at 32 real layers (half the
+model), same tokens, same driver:
+
+| position | cosine(int8, fp32) | rel. L2 |
+|---|---|---|
+| 0 | 0.9888 | 0.17 |
+| 1 | 0.9098 | 0.44 |
+| 2 | 0.7988 | 0.60 |
+| 3 | 0.8856 | 0.49 |
+
+At 8 and 16 layers the same positions are still 0.988-0.999, which is why a
+depth-8 gate cannot see this. M16's `" Paris."` at "the same INT8 tier" is
+NOT a counter-example: `stream::generate` re-runs the whole sequence through
+chunked prefill every step and therefore never carries quantization error in
+a recurrent state at all.
+
+**What is still open.** The exact fp32 computation of these weights - brain's
+and the independent reference's, which agree bit-for-bit - does not answer
+the question either: for `"The capital city of France is"` the reference's
+own top-10 is `" France"/" a"/" capital"/" is"/" the"/" "/" in"/" at"/
+" around"/" of"`, with `" Paris"` at rank 80 (logit 9.47 against 15.25).
+Grammar is intact, facts are not, and the distribution flattens as context
+grows. Attention is not the culprit (probing layers 3/31/63 at position 5
+shows peaked, content-dependent, per-head-varying distributions, and
+disabling RoPE barely moves them - at theta 1e7 the angles over 6 positions
+are tiny), nor is the GDN decay (measured per-head `exp(g)` on real
+activations is 0.0013..1.0 with medians rising 0.47 -> 0.99 with depth, i.e.
+long memory, not annihilation), nor per-layer contribution health (GQA layers
+contribute 0.28-0.73 of the residual, GDN 0.07-0.65, both growing smoothly
+with depth). Three whole-model reference variants were run end to end and
+none recovers the answer: GDN `q`/`k` swapped (invisible at position 0 by
+symmetry, so the exact shape of the symptom - and still wrong), the GDN
+recurrent state force-zeroed each step, and a `<|endoftext|>` BOS/attention
+sink prepended (stopped after 5 of its 7 positions - every one of them was
+still topped by a prompt token, so it was not going to turn). So the
+remaining defect is either in the community
+conversion itself (unverifiable here: no llama.cpp binary, no
+`convert_hf_to_gguf.py`, no `gguf` python module, and the FP8 safetensors
+checkpoint does not fit the free disk) or in a convention the two
+implementations share and the file's own statistics cannot distinguish - the
+GDN value-head grouping (`repeat_interleave` vs tile) and an
+`ssm_alpha`/`ssm_beta` swap are the two such conventions left, and both are
+statistically symmetric. A second `qwen35`-architecture GGUF from a
+different quantizer would settle it in one run.
 
 **Deliberately not in this milestone**: MTP (requires a whole shard,
 asserted in `new_impl_on`), vision, LoRA, batched prefill, and more than one
@@ -1594,7 +1670,12 @@ not do.
   qwen35moe's own `shard_parity.rs` does not run on this machine either, so any
   claim it protects a refactor here is a claim about a different machine.
 - No serving throughput/latency or residency measurement on real weights.
-- MTP head: structurally implemented, **no reference oracle** (see above) -
+- MTP head: structurally implemented, **no reference oracle** - and this is
+  now CHECKED rather than assumed: the published `modeling_qwen3_5` and
+  `modeling_qwen3_5_moe` reference modules do not implement the MTP head at
+  all, they drop it on load (`_keys_to_ignore_on_load_unexpected = [r"^mtp.*"]`),
+  so no amount of reference-module access closes this gap; only a real
+  checkpoint's own MTP predictions could. The head is therefore
   gradchecked and overfit-tested, never parity-claimed. M17 landed the
   first real-weight import (`crate::import::import_mtp`) and wired it into
   a real greedy-decode speedup (`crate::stream::generate`'s `use_mtp`

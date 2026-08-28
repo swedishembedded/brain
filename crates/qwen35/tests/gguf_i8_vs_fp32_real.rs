@@ -23,11 +23,19 @@
 //! side fits one card: at 27B dims an fp32 layer is ~1.5 GB against int8's
 //! ~0.4 GB.
 //!
-//! Truncating the layer stack is legitimate here rather than a compromise:
-//! the question is whether the quantized tape tracks the unquantized one on
-//! this weight distribution, and that is a per-layer property whose answer
-//! compounds with depth. If eight real layers already diverge, sixty-four
-//! cannot converge.
+//! Truncating the layer stack is a real limit, not a free choice. What this
+//! file measures is "eight layers, eight positions"; it is NOT evidence about
+//! sixty-four. The one-directional reading is the only sound one - if eight
+//! real layers already diverge, sixty-four cannot converge - and the
+//! converse was once used here as a rule-out and was wrong. Measured against
+//! `tools/goldens/qwen35_gguf_reference_forward.py` at 32 real layers, the
+//! same tier on the same tokens gives cosine 0.9888 at position 0, 0.9098 at
+//! position 1 and 0.7988 at position 2, while 8 and 16 layers hold
+//! 0.988-0.999 at those same positions: the divergence compounds along the
+//! SEQUENCE (the persistent Gated-DeltaNet recurrent state carries each
+//! step's activation-quantization error into every later step) as well as
+//! along depth, and this depth cannot see it. Raising the depth is blocked
+//! by the fp32 side, not by taste: 32 layers is ~48 GB, past one card.
 //!
 //! ```text
 //! BRAIN_QWEN35_GGUF=/path/to/Qwen3.8-27B-Q8_0.gguf \
