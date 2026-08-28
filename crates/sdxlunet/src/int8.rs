@@ -20,6 +20,7 @@
 //! measured problem is that the checkpoint does not FIT in host+device
 //! RAM at once, not that the matmuls are slow. So this crate takes the
 //! same shape `crates/ltxv`'s own `int8.rs` already established for
+// perf-number: 4 bytes per weight to 1 is the definition of int8, not a measured speedup
 //! exactly this situation: weights are packed 4x smaller
 //! (`model::int8::quantize_weight`, the ONE shared quantizer every
 //! weight-only int8 tier in this repo already uses - `qwen3::q8`,

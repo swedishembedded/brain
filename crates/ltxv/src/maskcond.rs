@@ -76,6 +76,7 @@
 //! The reference multiplies a `[B, N, 1]` mask against a `[B, N, C]` latent and
 //! lets torch broadcast. Materialising that broadcast - one weight per token
 //! per channel - costs `C` times the mask for zero information; at the real
+// perf-number: 128 is the checkpoint's own latent-channel count, not a measured runtime ratio
 //! checkpoint's 128 latent channels that is a 128x blow-up of the one tensor a
 //! caller is most likely to keep several copies of. This module stores `[N]`
 //! and broadcasts at the point of use, and the golden asserts the two forms are
@@ -93,6 +94,7 @@
 //! # Pixel space to latent space
 //!
 //! The mask arrives at source resolution and has to reach the latent grid,
+// perf-number: the VAE's spatial/temporal downsample factors are architecture constants, not measured speedups
 //! which the causal VAE reduces by **32x32 spatially and 8x temporally, except
 //! for the first latent frame, which covers ONE pixel frame**. The reduction is
 //! `ltx_pipelines.iclora_utils.downsample_mask_video_to_latent`, already ported

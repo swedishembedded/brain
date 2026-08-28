@@ -121,6 +121,7 @@ fn the_decode_estimate_grows_with_the_image_it_decodes() {
     let big = vae::decoder_device_bytes(&c, 64, 48) - fixed;
     assert!(
         big > small,
+        // perf-number: pixel-count ratio in the assertion message (64x48 vs 32x24), not a measured runtime speedup
         "4x the pixels must cost more ({:.1} -> {:.1} MiB above weights)",
         mib(small),
         mib(big)

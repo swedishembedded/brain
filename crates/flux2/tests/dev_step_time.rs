@@ -44,6 +44,7 @@ use flux2::lora::{LoraAdapter, LoraCfg};
 use flux2::modelgrad::{make_flow_batch, Cfg, ModelWeights};
 use flux2::Flux2Config;
 
+// perf-number: this file's own reviewed, dated hardware roofline baseline; "2x" here names the GPU count, not a speedup
 /// Roofs MEASURED on this box (2x Tesla P40), not datasheet numbers. Pascal
 /// has no fast fp16, so there is no half-precision rung to aim at.
 const ROOF_FP32_GFLOPS: f64 = 10_517.0;

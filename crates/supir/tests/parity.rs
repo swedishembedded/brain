@@ -585,6 +585,7 @@ const REL_GATE_INT8: f64 = 0.2;
 /// Measured on this box, taps ON: import is 2608 tensors / 3 899 803 596
 /// params = 15.60 GB fp32; `quantize_tensors` packs 889 of 2608 tensors to
 /// int8 (3.34 GB) and leaves 1719 fp32 (2.29 GB) = 5.62 GB host-resident
+// perf-number: a dated, reviewed record of this box's actual OOM investigation, not a live promise - re-run to get current numbers
 /// (a genuine ~2.8x host reduction from 15.60 GB); recording the graph then
 /// hits `wgpu error: Out of Memory` on this box's adapter (`Intel(R) Arc(tm)
 /// Graphics (MTL)`, `IntegratedGpu`, Vulkan; `max_buffer_size` /

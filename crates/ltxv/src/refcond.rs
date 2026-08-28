@@ -293,6 +293,7 @@ pub fn dense_attention_mask(base_t: usize, cross_mask: &[f32]) -> Vec<f32> {
 }
 
 /// Pixel-space extent a reference latent of `ref_dims` covers, for sizing the
+// perf-number: the VAE's spatial/temporal downsample factors are architecture constants, not measured speedups
 /// mask video a caller has to supply: the VAE's own `32x32` spatial and `8x`
 /// causal temporal factors.
 pub fn reference_pixel_extent(ref_dims: (usize, usize, usize)) -> (usize, usize, usize) {

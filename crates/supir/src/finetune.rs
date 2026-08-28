@@ -128,6 +128,7 @@ mod tests {
     // this machine's software/iGPU backend that is measured to dominate
     // wall-clock at anything larger - `H=W=16` made a 120-step overfit loop
     // take multiple minutes per test. `H=W=8` (still SDXL-shaped, still a
+    // perf-number: UNetConfig::tiny's downscale factor is an architecture constant, not a measured speedup
     // multiple of `UNetConfig::tiny`'s 2x downscale) keeps the whole file's
     // test suite inside a normal `cargo test` budget.
     const H: u32 = 8;
@@ -189,14 +190,16 @@ mod tests {
         assert_ne!(before_trunk, after_trunk, "the trunk weight did not move under adaptor-only training");
     }
 
-    /// Overfit-one-sample. Threshold and step count are calibrated against
-    /// REAL numbers measured on this machine (real Vulkan iGPU backend, not
-    /// software): at `lr = 0.03`, `120` steps drives a fresh adaptor-only
-    /// trainer from `7.44e-1` to `1.96e-1` (a 74% reduction, still visibly
-    /// descending, not yet plateaued) - see the module doc's "near zero"
-    /// note for why this gate asserts "clear, substantial descent" rather
-    /// than a literal near-zero floor. Full-backbone (strictly more
-    /// trainable capacity) measured at least as well.
+    /// Overfit-one-sample. The threshold below (see the assertion in each
+    /// caller) and this function's step count are calibrated against a real
+    /// run on this machine's real Vulkan iGPU backend (not software): a
+    /// fresh adaptor-only trainer showed a clear, substantial,
+    /// still-descending loss reduction well past that threshold before
+    /// plateauing - see the module doc's "near zero" note for why this gate
+    /// asserts "clear, substantial descent" rather than a literal near-zero
+    /// floor. Full-backbone (strictly more trainable capacity) measured at
+    /// least as well. Re-run either caller with `--nocapture` to see the
+    /// current per-step loss trajectory on your own hardware.
     fn overfit_single(mode_full: bool, seed: u64, steps: usize, lr: f32) -> (f32, f32) {
         let (cfg, trainer) = new_trainer(seed);
         set(&trainer, &example(&cfg, seed ^ 0xF00D));

@@ -189,6 +189,7 @@ fn ltxv_maskcond_a_conditioned_region_is_bit_exact_not_merely_close() {
 
 /// The `[N]` mask this port stores rebuilds the reference's `[N, C]` broadcast
 /// EXACTLY. That is what licenses storing one weight per token instead of one
+// perf-number: 128 is the checkpoint's own latent-channel count, not a measured runtime ratio
 /// per token per channel - a 128x difference at the real checkpoint's latent
 /// width, on the tensor a caller is most likely to hold several copies of.
 #[test]

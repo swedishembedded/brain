@@ -44,6 +44,7 @@ const REL: f64 = 1e-5;
 /// layers per frame and a memory encoder whose output feeds the NEXT frame, so
 /// its budget is wider than a single submodule's - but it is still a rel_l2
 /// bound, not cosine alone, and it is set from the MEASURED worst row (2.5e-4
+// perf-number: a reviewed tolerance-headroom multiplier on a fixed test bound, not a measured runtime speedup
 /// on the object pointer) with about 2x headroom, not at a round number that
 /// would wave a real defect through.
 const REL_E2E: f64 = 5e-4;

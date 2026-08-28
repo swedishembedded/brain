@@ -46,6 +46,7 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("resume", ParamType::Bool, "continue from the adapter already at 'save' instead of starting over - a cancelled multi-hour run then costs only the steps since its last checkpoint").default(json!(false)))
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)").default(json!("klein-4b")))
+        // perf-number: 4 bytes per weight to 1 is the definition of int8, not a measured speedup
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier: fp32 (parity reference) or int8 (DP4A, ~4x smaller weights; GPU only)").default(json!("fp32")))
         .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply: brain's own lora_train checkpoint, or a third-party ai-toolkit/ComfyUI .safetensors"))
         .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier (ComfyUI strength_model); 1.0 = the reference default").default(json!(1.0)).min(0.0).max(4.0).step(0.05))

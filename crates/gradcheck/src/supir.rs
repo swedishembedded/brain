@@ -74,6 +74,7 @@ use supir::train::{SupirTrainer, TRAIN_PIPELINES};
 use crate::{directional_check, elementwise_check, CheckModel, Report};
 
 // Matches `gradcheck::unet`'s own scale (`H = 8, W = 8, T_ENC = 5`) - this
+// perf-number: op-count ratio from the graph's own structure, not a measured runtime speedup
 // graph is trunk+adaptors+backbone (roughly 2-3x a plain UNet's op count),
 // and `directional_check`/`elementwise_check` cost is linear in the number
 // of FULL forward passes (`2·n_dirs·n_tensors` and `2·numel` respectively),
