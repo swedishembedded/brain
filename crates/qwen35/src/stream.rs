@@ -969,10 +969,11 @@ pub(crate) fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: u
 /// `model.language_model.embed_tokens.weight` when tied) to int8 (DP4A)
 /// straight from the mmap, WITHOUT ever holding the whole dequantized
 /// `[n, k]` f32 array in host RAM at once (design decision 4). `model::
-/// int8::quantize_weight`'s scale is per ROW, so quantizing `rows_per_chunk`
+/// int8::quantize_weight`'s scales never cross a ROW, so quantizing
+/// `rows_per_chunk`
 /// rows at a time via [`MmapSafetensors::with_tensor_chunks`] (chunk size a
 /// multiple of `k`, so every chunk boundary lands on a row boundary) and
-/// writing each chunk's packed int8 words / per-row scales straight into a
+/// writing each chunk's packed int8 words / group scales straight into a
 /// pre-sized device buffer via [`Gpu::write_at`]/[`Gpu::write_f32_at`] is
 /// byte-identical to `Weight::upload(ops, whole_tensor, n, k, Dtype::I8)`,
 /// bounding peak EXTRA host allocation to `O(rows_per_chunk * k)` (tens of
@@ -984,11 +985,12 @@ pub(crate) fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: u
 /// resident on device for the whole call - built ONCE, never re-quantized
 /// per decode step.
 fn quantize_i8_from_mmap_rows(gpu: &Gpu, reader: &MmapSafetensors, name: &str, n: usize, k: usize, rows_per_chunk: usize) -> Weight {
-    assert!(k.is_multiple_of(4), "quantize_i8_from_mmap_rows: k must be a multiple of 4 (got {k})");
+    assert!(k.is_multiple_of(model::int8::GROUP), "quantize_i8_from_mmap_rows: k must be a multiple of {} (got {k})", model::int8::GROUP);
     assert!(rows_per_chunk > 0, "quantize_i8_from_mmap_rows: rows_per_chunk must be > 0");
     let kg = k / 4;
+    let gs = k / model::int8::GROUP;
     let w = gpu.storage((n * kg) as u64);
-    let s = gpu.storage(n as u64);
+    let s = gpu.storage(model::int8::scale_len(n, k) as u64);
     let mut any = false;
     let found = reader.with_tensor_chunks(name, rows_per_chunk * k, &mut |off, chunk| {
         any = true;
@@ -998,7 +1000,7 @@ fn quantize_i8_from_mmap_rows(gpu: &Gpu, reader: &MmapSafetensors, name: &str, n
         let row0 = off as usize / k;
         let (packed, scales) = model::int8::quantize_weight(chunk, rows, k);
         gpu.write_at(&w, (row0 * kg) as u64, &packed);
-        gpu.write_f32_at(&s, row0 as u64, &scales);
+        gpu.write_f32_at(&s, (row0 * gs) as u64, &scales);
     });
     assert!(found && any, "quantize_i8_from_mmap_rows: {name} not found or empty");
     Weight::I8 { w, s, n: n as u32, k: k as u32 }

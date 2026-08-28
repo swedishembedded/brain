@@ -169,6 +169,35 @@ impl Qwen35Config {
         }
     }
 
+    /// [`Self::tiny`] made int8-legal: the SAME shape (4 layers,
+    /// `interval = 4` so layer 3 is GQA and the rest GDN, a multi-chunk GDN
+    /// sequence, every dimension still distinct from every other) with each
+    /// quantized linear's CONTRACTION dim rounded to a multiple of
+    /// `model::int8::GROUP` (32).
+    ///
+    /// `tiny()` itself cannot be used with the int8 tier:
+    /// `model::int8::quantize_weight` scales per 32-element group of the
+    /// contraction axis and asserts `k % GROUP == 0`, which `tiny()`'s
+    /// `q_dim = 120`, `linear_value_dim = 120` and `intermediate_size = 112`
+    /// all fail - and `tiny()` must not grow to satisfy a constraint the fp32
+    /// smoke suite, the goldens and the gradient checker do not have (it is
+    /// pinned dimension-for-dimension to
+    /// `tools/goldens/qwen35_dump_reference.py`'s `TINY_TEXT`).
+    ///
+    /// `head_dim` 40 -> 32 also halves `rotary_dim` from 10 to 8, so
+    /// `mrope_section` (which must sum to `rotary_dim/2`) goes from `[2,2,1]`
+    /// to `[2,1,1]`. `crates/qwen35/tests/model_i8_smoke.rs` asserts every one
+    /// of those group constraints against this fixture directly.
+    pub fn tiny_i8() -> Qwen35Config {
+        Qwen35Config {
+            head_dim: 32,              // q_dim = 3 * 32 = 96
+            mrope_section: [2, 1, 1],  // sums to rotary_dim/2 = 4
+            linear_value_head_dim: 16, // linear_value_dim = 6 * 16 = 96
+            intermediate_size: 128,
+            ..Qwen35Config::tiny()
+        }
+    }
+
     /// The published Qwen3.8-27B shape (from its real `config.json` -
     /// `Qwen/Qwen3.8-27B-FP8`; the HF module itself still cites
     /// `Qwen/Qwen3.5-27B` in its docstrings, since `model_type: "qwen3_5"`

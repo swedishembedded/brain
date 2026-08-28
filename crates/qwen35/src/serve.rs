@@ -283,7 +283,7 @@ impl Engine {
         let phys = table.blocks()[0];
         let hidden = {
             let caches = self.caches_for(phys);
-            self.model.run_decode_step(input, offset, &caches)
+            self.model.run_decode_step(input, offset, &caches, None)
         };
         self.model.gpu.read(&hidden, self.model.cfg.d_model as usize)
     }
@@ -407,7 +407,7 @@ impl Engine {
             let pos = i as u32;
             let h = {
                 let caches = self.caches_for(phys);
-                self.model.run_decode_step(tok, pos, &caches)
+                self.model.run_decode_step(tok, pos, &caches, None)
             };
             hidden = self.model.gpu.read(&h, d);
         }

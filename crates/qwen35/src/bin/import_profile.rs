@@ -106,7 +106,7 @@ fn main() {
     println!("[2] fp8::dequant_block128 ({reps} reps):        {:>9.2} ms  ({dequant_meps:>8.1} Melem/s, {dequant_gbs:>6.2} GB/s r+w)", dequant_s * 1e3);
 
     // --- Stage 3: quantize_weight, isolated, repeated for a stable mean --
-    assert_eq!(cols % 4, 0, "quantize_weight needs k%4==0 (k={cols})");
+    assert_eq!(cols % model::int8::GROUP, 0, "quantize_weight needs k%32==0 (k={cols})");
     let mut quant_total = 0f64;
     for _ in 0..reps {
         let t2 = Instant::now();

@@ -12,14 +12,19 @@
 //! fresh init weights, run `forward`, and confirm the outputs track each
 //! other within a generous but real tolerance.
 //!
-//! Unlike `qwen35moe::model`'s own int8 smoke suite, this crate's
-//! `Qwen35Config::tiny()` already clears the int8 packing bar (`k` a
-//! multiple of 4) for every quantizable linear - `d_model=96,
-//! intermediate_size=112, linear_conv_dim=184, linear_value_dim=120,
-//! q_proj_dim=240, q_dim=120, kv_dim=40`, all `%4==0` - so this test uses
-//! `tiny()` directly rather than inventing a bespoke config (see
-//! [`tiny_cfg_clears_the_int8_packing_bar`] below, which checks this claim
-//! rather than trusting it).
+//! ## Why this test does NOT use `Qwen35Config::tiny()` verbatim
+//!
+//! `model::int8::quantize_weight` scales a weight per 32-element GROUP of its
+//! contraction dimension (`model::int8::GROUP`, Q8_0's own block), so every
+//! quantized linear's `k` must be a whole number of groups. `tiny()`'s
+//! `q_dim=120`, `linear_value_dim=120` and `intermediate_size=112` are not,
+//! and `tiny()` is shared with the fp32 smoke suite and the gradient checker,
+//! which have no such constraint and should not pay a bigger fixture for it.
+//! So this file uses [`tiny_i8`] - `tiny()`'s exact shape (4 layers,
+//! `interval=4` so layer 3 is GQA and the rest GDN, a multi-chunk GDN
+//! sequence, every dimension still distinct from every other) with each
+//! quantized `k` rounded to a multiple of 32. This mirrors what
+//! `crates/qwen35moe/tests/model_i8_smoke.rs` already does for its own crate.
 
 use gpu_core::Gpu;
 use qwen35::config::{LayerType, Qwen35Config};
@@ -27,6 +32,15 @@ use qwen35::model::{pipelines, Qwen35};
 
 fn init_weights(cfg: &Qwen35Config, seed: u64) -> std::collections::HashMap<String, Vec<f32>> {
     qwen35::init::init_weights(cfg, seed)
+}
+
+/// See this file's module doc for why this exists instead of `tiny()`. The
+/// fixture itself lives next to `tiny()` in `config.rs` (the crate's int8
+/// unit tests need it too, and one canonical int8-legal shape beats two
+/// copies that can drift); [`tiny_i8_cfg_clears_the_int8_scale_group_bar`]
+/// below is its contract test.
+fn tiny_i8() -> Qwen35Config {
+    Qwen35Config::tiny_i8()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -51,21 +65,26 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
     (num / den.max(1e-12)).sqrt()
 }
 
-/// Sanity check on [`Qwen35Config::tiny`] itself, independent of any device:
-/// every dimension the int8 (DP4A) path needs to be a multiple of 4
-/// (`model::int8::quantize_weight`'s own packing requirement) actually is -
-/// this file's module doc asserts this rather than trusting it, in case a
-/// config field is misremembered.
+/// Sanity check on [`tiny_i8`] itself, independent of any device: every
+/// CONTRACTION dimension the int8 (DP4A) path quantizes along really is a
+/// whole number of `model::int8::GROUP`s, and the fixture still exercises
+/// both mixer types and a multi-chunk GDN sequence - this file's module doc
+/// asserts these rather than trusting them, in case a config field is
+/// misremembered.
 #[test]
-fn tiny_cfg_clears_the_int8_packing_bar() {
-    let cfg = Qwen35Config::tiny();
-    assert_eq!(cfg.d_model % 4, 0, "d_model must be int8-packable (feeds q/k/v-proj, in_proj_*, gate/up)");
-    assert_eq!(cfg.intermediate_size % 4, 0, "intermediate_size must be int8-packable (feeds down)");
-    assert_eq!(cfg.linear_conv_dim() % 4, 0, "linear_conv_dim must be int8-packable (feeds in_proj_qkv)");
-    assert_eq!(cfg.linear_value_dim() % 4, 0, "linear_value_dim must be int8-packable (feeds GDN out_proj)");
-    assert_eq!(cfg.q_proj_dim() % 4, 0, "q_proj_dim must be int8-packable (feeds q_proj)");
-    assert_eq!(cfg.q_dim() % 4, 0, "q_dim must be int8-packable (feeds o_proj)");
-    assert_eq!(cfg.kv_dim() % 4, 0, "kv_dim must be int8-packable (feeds k/v-proj)");
+fn tiny_i8_cfg_clears_the_int8_scale_group_bar() {
+    let cfg = tiny_i8();
+    let g = model::int8::GROUP as u32;
+    assert_eq!(cfg.d_model % g, 0, "d_model is the K of q/k/v-proj, in_proj_*, gate/up");
+    assert_eq!(cfg.intermediate_size % g, 0, "intermediate_size is the K of down");
+    assert_eq!(cfg.linear_value_dim() % g, 0, "linear_value_dim is the K of the GDN out_proj");
+    assert_eq!(cfg.q_dim() % g, 0, "q_dim is the K of o_proj");
+    // in_proj_qkv / q_proj / k_proj / v_proj contract along `d_model`; their
+    // own widths are OUTPUT dims and carry no group constraint. Checked here
+    // so a reader does not add a bogus assertion for them later.
+    assert_eq!(cfg.linear_conv_dim() % 4, 0, "linear_conv_dim is an output width; only the activation pack's %4 applies");
+    assert_eq!(cfg.q_proj_dim() % 4, 0, "q_proj_dim is an output width");
+    assert_eq!(cfg.kv_dim() % 4, 0, "kv_dim is an output width");
 
     let t = cfg.block_size;
     let chunk = qwen35::model::gdn_chunk_size(t);
@@ -76,7 +95,7 @@ fn tiny_cfg_clears_the_int8_packing_bar() {
     assert!(types.contains(&LayerType::Full));
 }
 
-/// Runs both an fp32 and an int8 `Qwen35` forward at `tiny()` from the SAME
+/// Runs both an fp32 and an int8 `Qwen35` forward at [`tiny_i8`] from the SAME
 /// fresh init weights, and checks the int8 path's logits track the fp32
 /// path's within a generous quantization tolerance. Shared by the default-
 /// backend and CPU variants below (a barrier-crossing kernel can silently
@@ -84,7 +103,7 @@ fn tiny_cfg_clears_the_int8_packing_bar() {
 /// much tighter assertion lives in its own test, not here, since CPU
 /// genuinely demotes every mixer/MLP linear to fp32 (see that test's doc).
 fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) -> (f64, f64) {
-    let cfg = Qwen35Config::tiny();
+    let cfg = tiny_i8();
     let b = 1;
     let t = cfg.block_size;
     let init = init_weights(&cfg, 7);
@@ -116,7 +135,7 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) -> (f64, f64) {
 #[test]
 fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
     let (cos, rel) = run_parity(Gpu::new(pipelines()), Gpu::new(pipelines()));
-    eprintln!("qwen35 int8 vs fp32 (tiny, default backend): cosine={cos:.9} rel_l2={rel:.9}");
+    eprintln!("qwen35 int8 vs fp32 (tiny_i8, default backend): cosine={cos:.9} rel_l2={rel:.9}");
     assert!(cos > 0.99, "qwen35 int8 path diverged too far from fp32: cosine={cos:.6} (want > 0.99)");
     assert!(rel < 0.1, "qwen35 int8 path diverged too far from fp32: rel_l2={rel:.4} (want < 0.1)");
 }
@@ -142,7 +161,7 @@ fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
 #[test]
 fn int8_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion() {
     let (cos, rel) = run_parity(Gpu::new_cpu(pipelines()), Gpu::new_cpu(pipelines()));
-    eprintln!("qwen35 int8 vs fp32 (tiny, CPU backend, full fp32 demotion): cosine={cos:.9} rel_l2={rel:.9}");
+    eprintln!("qwen35 int8 vs fp32 (tiny_i8, CPU backend, full fp32 demotion): cosine={cos:.9} rel_l2={rel:.9}");
     assert!(cos > 0.999999, "qwen35 CPU int8 build should be an almost-exact fp32 demotion: cosine={cos:.9} (want > 0.999999)");
     assert!(rel < 1e-4, "qwen35 CPU int8 build should be an almost-exact fp32 demotion: rel_l2={rel:.9} (want < 1e-4)");
 }
@@ -151,12 +170,12 @@ fn int8_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion() {
 /// `ParamStore` (no redundant fp32 copy uploaded) - `Qwen35::param_names`
 /// only lists the fp32 store's own contents, so a quantized model's list
 /// must be strictly SHORTER than the fp32 model's, by exactly the count of
-/// quantizable leaves `tiny()`'s own shape implies: 5 GDN leaves * 3 GDN
+/// quantizable leaves `tiny_i8()`'s own shape implies: 5 GDN leaves * 3 GDN
 /// layers + 4 GQA leaves * 1 GQA layer + 3 MLP leaves * 4 layers (every
 /// layer, both mixer types) = 15 + 4 + 12 = 31.
 #[test]
 fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
-    let cfg = Qwen35Config::tiny();
+    let cfg = tiny_i8();
     let b = 1;
     let t = cfg.block_size;
     let init = init_weights(&cfg, 7);
@@ -173,7 +192,7 @@ fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
     assert_eq!(n_gdn + n_gqa, cfg.n_layers as usize);
     let expected_quantized = n_gdn * 5 + n_gqa * 4 + (cfg.n_layers as usize) * 3;
 
-    assert!(expected_quantized > 0, "tiny() must have at least one quantized linear to make this check meaningful");
+    assert!(expected_quantized > 0, "tiny_i8() must have at least one quantized linear to make this check meaningful");
     assert_eq!(i8_names.len(), fp32_names.len() - expected_quantized);
 
     const LEAVES: &[&str] = &[
@@ -204,7 +223,7 @@ fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
 /// naming on its own.
 #[test]
 fn int8_forward_covers_the_mtp_head_when_mtp_is_enabled() {
-    let cfg = Qwen35Config { mtp: true, ..Qwen35Config::tiny() };
+    let cfg = Qwen35Config { mtp: true, ..tiny_i8() };
     let b = 1;
     let t = cfg.block_size;
     let init = init_weights(&cfg, 7);

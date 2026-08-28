@@ -810,6 +810,31 @@ impl Qwen35 {
         Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
     }
 
+    /// [`Self::new_shard`]'s int8-INFERENCE sibling (`i8 = true`, `train =
+    /// false`): one pipeline stage of a quantized model, placed on
+    /// `shard.gpu_index`'s physical card exactly as `new_shard` does for
+    /// training. This is what a multi-GPU resident serving path builds, one
+    /// instance per card, driving each stage's decode with
+    /// [`Self::run_decode_step`]'s `input_override` seam.
+    ///
+    /// `src` is any [`checkpoint::TensorSource`] rather than the
+    /// `&HashMap<String, Vec<f32>>` the training constructors take, so a real
+    /// checkpoint loads straight from its own mmap with no whole-model fp32
+    /// intermediate - `checkpoint::gguf::MmapGguf` implements the trait and
+    /// dequantizes Q8_0 to f32 on read. A `HashMap` still works (it
+    /// implements the trait too), which is what tests pass.
+    ///
+    /// `cfg.mtp` requires a whole shard, asserted in `new_impl_on` - shared
+    /// with every other constructor, so it covers this one unchanged.
+    pub fn new_i8_shard(cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen35 {
+        let gpu = if shard.gpu_index == Shard::ANY_GPU {
+            Gpu::new(pipelines())
+        } else {
+            Gpu::new_on_index(shard.gpu_index as u32, pipelines()).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
+        };
+        Qwen35::new_impl_on(gpu, cfg, b, t, src, true, false, shard)
+    }
+
     fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, i8: bool, train: bool, shard: Shard) -> Qwen35 {
         assert!(!(i8 && train), "qwen35: int8 path is inference-only (Qwen35::new_train_on is fp32-only)");
         let chunk = gdn_chunk_size(t);
@@ -1111,6 +1136,24 @@ impl Qwen35 {
         let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen35: no Ops weight for {wname}"));
         self.ops.matmul(s, w, act, out, 0);
         matches!(w, Weight::F32 { .. })
+    }
+
+    /// The activation an [`Self::ops_linear`] dispatch reads, packed for int8
+    /// only where an int8 weight will actually read it. Mirrors
+    /// `qwen3::model::Qwen::ops_act` exactly, and for the same reason:
+    /// `Ops::act`'s packing is two dispatches plus an `I8Scratch` allocation
+    /// per activation, all of it dead on an fp32 build, and a DECODE tape
+    /// pays that per layer per token (prefill amortizes it over `t` rows,
+    /// which is why the prefill helpers still call `Ops::act` directly). The
+    /// tier is read off the weights this instance actually holds, not off a
+    /// remembered "int8 was requested" flag - `Weight::upload` demotes to
+    /// fp32 on a device without the DP4A path, and such a build should get
+    /// the cheap activation.
+    fn ops_act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, rows: u32, k: u32) -> Act {
+        if self.weights.values().all(|w| matches!(w, Weight::F32 { .. })) {
+            return self.ops.act_f32(x, 0, rows, k);
+        }
+        self.ops.act(s, x, 0, rows, k)
     }
 
     /// The gradient buffer for a trainable weight - only valid on a
@@ -1977,25 +2020,56 @@ impl Qwen35 {
             gdn_state: &self.gdn_state,
             gdn_hist: &self.gdn_hist,
         };
-        let hidden = self.run_decode_step(token_id, pos, &caches);
+        let hidden = self.run_decode_step(token_id, pos, &caches, None);
         self.dec_pos.set(pos + 1);
         self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
 
     /// One incremental decode step's full layer stack - the decode-shaped
-    /// (`n=1`) sibling of [`Self::run_forward`]. Returns the final-norm
-    /// hidden state buffer (unread). `caches` selects WHICH sequence's
-    /// per-layer GQA cache / GDN state this call reads and updates - see
-    /// [`DecodeCaches`]'s own doc.
-    pub(crate) fn run_decode_step(&self, token_id: u32, pos: u32, caches: &DecodeCaches) -> DeviceBuffer {
+    /// (`n=1`) sibling of [`Self::run_forward`], **shard-aware in exactly the
+    /// same way**: only `self.shard`'s own layers run, the token embedding
+    /// happens on the embed stage only, and the final norm on the head stage
+    /// only. `caches` selects WHICH sequence's per-layer GQA cache / GDN
+    /// state this call reads and updates - see [`DecodeCaches`]'s own doc
+    /// (its fields are indexed by ABSOLUTE layer index, so a partial shard
+    /// indexes into them with its own absolute `l` and needs no remapping).
+    ///
+    /// `input_override` carries the cross-stage seam, the decode-shaped
+    /// counterpart of the training pipeline's `read_out_res`/`write_in_res`
+    /// (which are `b*t`-shaped and so cannot serve an `n=1` decode step):
+    /// * embed stage - must be `None`; `token_id` is embedded as usual.
+    /// * non-embed stage - must be `Some(x)` with `x.len() == d_model`: the
+    ///   PREVIOUS stage's returned residual, staged through the host. Passing
+    ///   both, or neither, is a caller wiring error and panics rather than
+    ///   silently picking one. `token_id` is unused on such a stage.
+    ///
+    /// Returns the final-norm hidden state buffer (unread) on the head stage;
+    /// on a non-head stage it returns that stage's LAST-LAYER RESIDUAL,
+    /// **unnormed** - the next stage's `input_override`, not a finished
+    /// hidden state.
+    pub(crate) fn run_decode_step(&self, token_id: u32, pos: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> DeviceBuffer {
         let g = &self.gpu;
         let d = self.cfg.d_model;
 
-        g.write(&self.dec_tokens, &[token_id]);
-        let mut res = g.storage(d as u64);
-        g.submit(&[], &[g.step(EMBED, &[&self.dec_tokens, self.w("tok.weight"), &res], &[d, 1], d)]);
+        let mut res = if self.shard.embed {
+            assert!(input_override.is_none(), "qwen35: run_decode_step got an input_override on the EMBED stage - it embeds `token_id` itself, so a caller supplying both is a wiring error");
+            g.write(&self.dec_tokens, &[token_id]);
+            let res = g.storage(d as u64);
+            g.submit(&[], &[g.step(EMBED, &[&self.dec_tokens, self.w("tok.weight"), &res], &[d, 1], d)]);
+            res
+        } else {
+            let x = input_override.expect("qwen35: run_decode_step on a NON-EMBED stage needs the previous stage's residual as `input_override` (this stage holds no `tok.weight`)");
+            assert_eq!(x.len(), d as usize, "qwen35: run_decode_step input_override must be one [d_model] row");
+            g.storage_init("qwen35.decode.res_in", x)
+        };
 
-        for (l, ty) in self.cfg.layer_types().iter().enumerate() {
+        let types = self.cfg.layer_types();
+        // `l` is the ABSOLUTE layer index (into `types`, `caches.*` and the
+        // `blocks.{l}.*` weight names below), not just a loop counter -
+        // exactly as in `Self::run_forward`.
+        #[allow(clippy::needless_range_loop)]
+        for l in self.shard.start..self.shard.end {
+            let ty = types[l];
             let xn1 = g.storage(d as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, 1)]);
 
@@ -2018,9 +2092,16 @@ impl Qwen35 {
             res = res_next;
         }
 
-        let xn_final = g.storage(d as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w("norm.weight"), &xn_final, d, 1)]);
-        xn_final
+        // Head epilogue (final norm): head stage only - `run_forward`'s own
+        // `shard.head` branch, at `n=1`. A non-head stage returns its raw
+        // residual for the next stage to pick up as `input_override`.
+        if self.shard.head {
+            let xn_final = g.storage(d as u64);
+            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w("norm.weight"), &xn_final, d, 1)]);
+            xn_final
+        } else {
+            res
+        }
     }
 
     /// One Gated DeltaNet layer's decode step - the single-token sibling of
@@ -2052,9 +2133,22 @@ impl Qwen35 {
         let kw = c.linear_conv_kernel_dim;
         let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
 
-        // 1. mixed_qkv = in_proj_qkv(xn1).
+        // 1. mixed_qkv = in_proj_qkv(xn1). Every projection in this function
+        // goes through `self.ops`/`self.weights` (`ops_linear`) rather than
+        // the fp32 ParamStore, exactly as prefill's `layer_gdn_fwd` does: on
+        // an int8 build the 12 `is_i8_linear` leaves are NOT in the
+        // ParamStore at all, so a direct `self.w` lookup here would panic -
+        // and on an fp32 build `Ops` holds a clone of the very same buffer.
+        // `act1` is `xn1` prepared once and reused by in_proj_b/a/z in step 5
+        // (nothing rewrites `xn1` in between), mirroring prefill's own
+        // sharing.
         let mixed_qkv = g.storage(conv_dim as u64);
-        g.submit(&[], &[g.step(MATMUL, &[xn1, self.w(&p("in_proj_qkv.weight")), &mixed_qkv], &[1, d, conv_dim], conv_dim)]);
+        let mut s1 = Vec::new();
+        let act1 = self.ops_act(&mut s1, xn1, 1, d);
+        if self.ops_linear(&mut s1, &act1, &p("in_proj_qkv.weight"), &mixed_qkv) {
+            self.lora_fwd(&mut s1, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, 1, d, conv_dim);
+        }
+        g.submit(&[], &s1);
 
         // 2. Streaming causal conv1d + SiLU (activation after the conv).
         let conv_out = g.storage(conv_dim as u64);
@@ -2092,14 +2186,19 @@ impl Qwen35 {
         let bproj = g.storage(nvh as u64);
         let aproj = g.storage(nvh as u64);
         let z = g.storage(value_dim as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_b.weight")), &bproj], &[1, d, nvh], nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_a.weight")), &aproj], &[1, d, nvh], nvh),
-                g.step(MATMUL, &[xn1, self.w(&p("in_proj_z.weight")), &z], &[1, d, value_dim], value_dim),
-            ],
-        );
+        {
+            let mut s = Vec::new();
+            if self.ops_linear(&mut s, &act1, &p("in_proj_b.weight"), &bproj) {
+                self.lora_fwd(&mut s, "in_proj_b", xn1, &p("in_proj_b.weight"), &bproj, 1, d, nvh);
+            }
+            if self.ops_linear(&mut s, &act1, &p("in_proj_a.weight"), &aproj) {
+                self.lora_fwd(&mut s, "in_proj_a", xn1, &p("in_proj_a.weight"), &aproj, 1, d, nvh);
+            }
+            if self.ops_linear(&mut s, &act1, &p("in_proj_z.weight"), &z) {
+                self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, 1, d, value_dim);
+            }
+            g.submit(&[], &s);
+        }
         let beta = g.storage(nvh as u64);
         let g_decay = g.storage(nvh as u64);
         g.submit(
@@ -2143,9 +2242,16 @@ impl Qwen35 {
             ],
         );
 
-        // 9. out_proj.
+        // 9. out_proj. Fresh activation: `gated` is not `xn1`.
         let out = g.storage(d as u64);
-        g.submit(&[], &[g.step(MATMUL, &[&gated, self.w(&p("out_proj.weight")), &out], &[1, value_dim, d], d)]);
+        {
+            let mut s = Vec::new();
+            let act3 = self.ops_act(&mut s, &gated, 1, value_dim);
+            if self.ops_linear(&mut s, &act3, &p("out_proj.weight"), &out) {
+                self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, 1, value_dim, d);
+            }
+            g.submit(&[], &s);
+        }
         out
     }
 
@@ -2175,17 +2281,25 @@ impl Qwen35 {
         let (qpd, qd, kvd) = (c.q_proj_dim(), c.q_dim(), c.kv_dim());
         let p = |s: &str| format!("{prefix}.{s}");
 
+        // q/k/v-proj through `self.ops`/`self.weights`, exactly as prefill's
+        // `layer_gqa_fwd` does - see `layer_gdn_decode_step`'s step 1 for why
+        // a direct ParamStore lookup cannot serve an int8 build. `xn1`
+        // prepared once, shared by all three.
         let q_full = g.storage(qpd as u64);
         let k = g.storage(kvd as u64);
         let v = g.storage(kvd as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(MATMUL, &[xn1, self.w(&p("q_proj.weight")), &q_full], &[1, d, qpd], qpd),
-                g.step(MATMUL, &[xn1, self.w(&p("k_proj.weight")), &k], &[1, d, kvd], kvd),
-                g.step(MATMUL, &[xn1, self.w(&p("v_proj.weight")), &v], &[1, d, kvd], kvd),
-            ],
-        );
+        let mut s1 = Vec::new();
+        let act1 = self.ops_act(&mut s1, xn1, 1, d);
+        if self.ops_linear(&mut s1, &act1, &p("q_proj.weight"), &q_full) {
+            self.lora_fwd(&mut s1, "q_proj", xn1, &p("q_proj.weight"), &q_full, 1, d, qpd);
+        }
+        if self.ops_linear(&mut s1, &act1, &p("k_proj.weight"), &k) {
+            self.lora_fwd(&mut s1, "k_proj", xn1, &p("k_proj.weight"), &k, 1, d, kvd);
+        }
+        if self.ops_linear(&mut s1, &act1, &p("v_proj.weight"), &v) {
+            self.lora_fwd(&mut s1, "v_proj", xn1, &p("v_proj.weight"), &v, 1, d, kvd);
+        }
+        g.submit(&[], &s1);
 
         // Per-head de-interleaved [query|gate] split - same as prefill, n=1.
         let q_value = g.storage(qd as u64);
@@ -2233,14 +2347,16 @@ impl Qwen35 {
         let gate = g.storage(qd as u64);
         let ctx_gated = g.storage(qd as u64);
         let out = g.storage(d as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(SIGMOID, &[&q_gate, &gate], &[qd], qd),
-                g.step(MUL, &[&ctx, &gate, &ctx_gated], &[qd], qd),
-                g.step(MATMUL, &[&ctx_gated, self.w(&p("o_proj.weight")), &out], &[1, qd, d], d),
-            ],
-        );
+        // Output gate, then o_proj - one submit, as before: the steps run in
+        // the order they are listed, which is what let the original
+        // MUL-then-MATMUL pair share a submit. `act2` is a fresh activation
+        // (`ctx_gated` is not `xn1`).
+        let mut s = vec![g.step(SIGMOID, &[&q_gate, &gate], &[qd], qd), g.step(MUL, &[&ctx, &gate, &ctx_gated], &[qd], qd)];
+        let act2 = self.ops_act(&mut s, &ctx_gated, 1, qd);
+        if self.ops_linear(&mut s, &act2, &p("o_proj.weight"), &out) {
+            self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, 1, qd, d);
+        }
+        g.submit(&[], &s);
         out
     }
 
@@ -2436,5 +2552,94 @@ impl model::Model for Qwen35 {
     }
     fn config_json(&self) -> serde_json::Value {
         self.cfg.to_json()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One decode step of ONE pipeline stage, driven by hand: the same
+    /// `DecodeCaches` [`Qwen35::step`] builds from this instance's own
+    /// per-sequence state, but with an explicit `pos` and the cross-stage
+    /// `input_override` seam exposed (`step` itself is the whole-shard
+    /// convenience wrapper and always passes `None`).
+    fn decode_stage(m: &Qwen35, token_id: u32, pos: u32, input: Option<&[f32]>) -> Vec<f32> {
+        let caches = DecodeCaches {
+            gqa_kcache: &m.gqa_kcache,
+            gqa_vcache: &m.gqa_vcache,
+            gqa_cap: m.dec_cap,
+            gdn_state: &m.gdn_state,
+            gdn_hist: &m.gdn_hist,
+        };
+        let out = m.run_decode_step(token_id, pos, &caches, input);
+        m.gpu.read(&out, m.cfg.d_model as usize)
+    }
+
+    /// The two-GPU int8 resident-serving seam, end to end at tiny scale: the
+    /// same weights loaded as TWO [`Qwen35::new_i8_shard`] stages must decode
+    /// exactly what ONE whole-shard [`Qwen35::new_i8`] instance decodes, for
+    /// several consecutive positions.
+    ///
+    /// This is the one thing "the existing whole-shard decode tests still
+    /// pass" cannot show, because every one of them constructs a
+    /// `Shard::whole` model where the new code paths are unreachable. Here
+    /// all three compose at once: the layer-range partition
+    /// (`shard.start..shard.end` over ABSOLUTE indices, so each stage hits
+    /// its own `blocks.{l}.*` weights and its own `caches.*[l]` slot), the
+    /// embed/head endpoint skips (stage 0 embeds and does NOT final-norm,
+    /// stage 1 final-norms and does NOT embed), and the host round-trip of
+    /// the boundary residual.
+    ///
+    /// The cut at layer 2 puts a GDN layer on each side and the single GQA
+    /// layer (3, `full_attention_interval = 4`) on the downstream stage, so
+    /// BOTH kinds of per-layer decode state - the GDN recurrent state/conv
+    /// history and the GQA KV cache - are threaded across steps on a
+    /// PARTIAL shard, which is where an absolute-vs-relative layer indexing
+    /// mistake would surface. Several steps, not one: a stage-local cache
+    /// indexed wrongly can still agree at `pos = 0`.
+    ///
+    /// Equality is exact. The two paths run the identical kernels over
+    /// identically quantized weights in the identical order; the only
+    /// difference is that the boundary residual makes a lossless fp32 round
+    /// trip through host memory. Anything but bit-equality here is a real
+    /// difference in what was computed, so there is no tolerance to pick.
+    #[test]
+    fn two_shard_int8_decode_matches_the_whole_shard_model() {
+        let cfg = Qwen35Config::tiny_i8();
+        let n_layers = cfg.n_layers as usize;
+        let cut = 2usize;
+        assert_eq!(cfg.layer_types()[cut - 1], LayerType::Linear, "cut must leave a GDN layer upstream");
+        assert_eq!(cfg.layer_types()[n_layers - 1], LayerType::Full, "the GQA layer must sit downstream of the cut");
+
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+
+        let whole = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        let stage0 = Qwen35::new_i8_shard(cfg.clone(), 1, t, &init, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: Shard::ANY_GPU });
+        let stage1 = Qwen35::new_i8_shard(cfg.clone(), 1, t, &init, Shard { start: cut, end: n_layers, embed: false, head: true, gpu_index: Shard::ANY_GPU });
+
+        whole.reset_decode_cache();
+        stage0.reset_decode_cache();
+        stage1.reset_decode_cache();
+
+        let tokens: Vec<u32> = (0..6).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        for (i, &tok) in tokens.iter().enumerate() {
+            let pos = i as u32;
+            let want = whole.step(tok);
+
+            let boundary = decode_stage(&stage0, tok, pos, None);
+            assert_eq!(boundary.len(), d);
+            assert!(boundary.iter().all(|x| x.is_finite()), "pos {pos}: stage 0 emitted a non-finite boundary residual");
+            assert!(boundary.iter().any(|x| x.abs() > 1e-6), "pos {pos}: stage 0's boundary residual is all ~0 - the seam would carry no information and this test would be vacuous");
+
+            // `token_id` is unused on a non-embed stage, which reads its input
+            // from the seam instead. Feeding stage 1 a DELIBERATELY WRONG
+            // token makes that a checked fact: if it ever embedded the token
+            // rather than using `input_override`, this step would diverge.
+            let got = decode_stage(&stage1, (tok + 1) % cfg.vocab, pos, Some(&boundary));
+            assert_eq!(got, want, "pos {pos}: two-shard decode diverged from the whole-shard model");
+        }
     }
 }
