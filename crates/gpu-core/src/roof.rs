@@ -814,8 +814,8 @@ mod persist {
     /// first silently became "the roof" for both - a plugged-in-and-measured
     /// second card would then either overwrite that file (poisoning the
     /// first card's numbers) or read it back as its own (poisoning the
-    /// second's). The identity slug (PCI bus / UUID / `vendor:device:ordinal`
-    /// - `identity_slug`'s own doc has the priority) makes the two cards'
+    /// second's). The identity slug (PCI bus / UUID / `vendor:device:ordinal`,
+    /// see `identity_slug`'s own doc for the priority) makes the two cards'
     /// files distinct by construction.
     ///
     /// The human-readable part of the slug prefers `key.identity`'s own
