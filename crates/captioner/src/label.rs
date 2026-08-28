@@ -99,7 +99,12 @@ pub fn label_dir(
         return Err(format!("label: no images in {} (looked for {})", dir.display(), IMAGE_EXTENSIONS.join(", ")));
     }
 
-    let todo: Vec<&String> = files.iter().filter(|f| opts.overwrite || !captions.contains_key(*f)).collect();
+    // "Not done" is no entry OR an empty one. A failed image is written with an
+    // empty caption (below) so the file inventories the whole folder; treating
+    // that entry as finished would make every failure permanent on the next
+    // run, which is the opposite of what listing it is for.
+    let todo: Vec<&String> =
+        files.iter().filter(|f| opts.overwrite || captions.get(*f).is_none_or(|c| c.trim().is_empty())).collect();
     let mut report = LabelReport { skipped: files.len() - todo.len(), ..LabelReport::default() };
     let total = todo.len();
     for (i, file) in todo.into_iter().enumerate() {
@@ -115,6 +120,13 @@ pub fn label_dir(
             Err(e) => {
                 warn(&format!("{file}: {e}"));
                 report.failed += 1;
+                // List it anyway, with an empty caption: the captions file is
+                // then a complete inventory of the folder, so a consumer never
+                // has to guess whether a missing name failed or was never seen.
+                // The resume rule above treats an empty caption as outstanding,
+                // so this does not cost the retry.
+                captions.entry(file.clone()).or_default();
+                data::imageset::write_captions_yaml(&out, &captions)?;
             }
         }
     }
@@ -277,10 +289,19 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// One unreadable file must not cost the rest of the folder, and must be
-    /// left uncaptioned so a re-run retries exactly it.
+    /// One unreadable file must not cost the rest of the folder. It IS listed
+    /// in the captions file, with an empty caption, so the file is a complete
+    /// inventory of the folder rather than a list of the lucky images - a
+    /// caller diffing the two no longer has to ask which images are absent
+    /// because they failed and which because they were never seen.
+    ///
+    /// An empty caption is nevertheless NOT a caption: a re-run must retry
+    /// exactly those, so the resume rule is "no caption or an empty one",
+    /// not "no key". Both halves are asserted here, because writing the key
+    /// without relaxing the resume rule would silently make every failure
+    /// permanent, which is the more expensive half of the bug.
     #[test]
-    fn a_bad_image_is_reported_and_skipped_without_aborting() {
+    fn a_bad_image_is_listed_with_an_empty_caption_and_still_retried() {
         let d = scratch("bad");
         png(&d, "good.png", 128, 4, 4);
         std::fs::write(d.join("broken.png"), b"not a png at all").unwrap();
@@ -294,7 +315,12 @@ mod tests {
 
         let back = data::imageset::read_captions_yaml(&d.join("captions.yaml"), &mut |_| {});
         assert!(back.contains_key("good.png"));
-        assert!(!back.contains_key("broken.png"), "a failed image must stay uncaptioned so a re-run retries it");
+        assert_eq!(back.get("broken.png").map(String::as_str), Some(""), "a failed image is listed with an empty caption");
+
+        // Re-run: the empty entry must be retried, not counted as done.
+        let mut m2 = MeanCaptioner { calls: 0, tag: "t" };
+        let r2 = label_dir(&mut m2, &d, &LabelOpts::new("describe"), |_, _, _| {}, |_| {}).unwrap();
+        assert_eq!(r2, LabelReport { captioned: 0, skipped: 1, failed: 1 }, "the empty entry is retried; the captioned one is skipped");
         std::fs::remove_dir_all(&d).ok();
     }
 

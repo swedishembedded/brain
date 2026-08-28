@@ -83,6 +83,14 @@ pub fn load_dir(dir: &Path, size: u32, mut warn: impl FnMut(&str)) -> Result<Vec
             warn(&format!("caption references missing image {file} - skipping"));
             continue;
         }
+        // An entry with no caption text is an inventory line, not a sample:
+        // the labeler lists an image it could not caption so the file covers
+        // the whole folder, and re-running the labeler fills it in. Training
+        // on an empty prompt would quietly teach the empty string.
+        if prompt.trim().is_empty() {
+            warn(&format!("{file} has no caption yet - skipping (re-run `brain label` to fill it in)"));
+            continue;
+        }
         match load_image_square(&path, size) {
             Ok(hwc) => samples.push(Sample { path, prompt: prompt.clone(), hwc, size }),
             Err(e) => warn(&format!("skipping {file}: {e}")),
@@ -146,12 +154,12 @@ pub fn read_captions_yaml(path: &Path, warn: &mut impl FnMut(&str)) -> BTreeMap<
 /// to a quoted form for the strings a block scalar cannot represent exactly
 /// (a line with trailing whitespace, for instance). Preferring exactness over
 /// prettiness in those cases is what keeps the round trip total.
+/// An empty caption is allowed and meaningful: it records an image the labeler
+/// saw but could not caption, so the file is a complete inventory of the folder
+/// rather than a list of the ones that worked. [`load_dir`] skips such an entry
+/// with a warning and `brain label` treats it as outstanding work, so nothing
+/// downstream mistakes it for a real caption.
 pub fn write_captions_yaml(path: &Path, caps: &BTreeMap<String, String>) -> Result<(), String> {
-    for (file, prompt) in caps {
-        if prompt.is_empty() {
-            return Err(format!("captions.yaml: empty caption for {file} (the loader would skip it)"));
-        }
-    }
     let text = serde_norway::to_string(&CaptionFile(caps.clone())).map_err(|e| format!("captions.yaml: {e}"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("captions.yaml: {}: {e}", parent.display()))?;
