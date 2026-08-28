@@ -105,7 +105,7 @@ EOF
 # name literally -- everything else routes through crate::resolve instead.
 # Keep this list in sync with that match arm-for-arm; a new infra verb needs
 # a line here, a new architecture must NOT need one.
-infra_verbs="data devices npu federated flops gradcheck bench perf forecast caps serve help -h --help"
+infra_verbs="data devices npu federated flops gradcheck bench perf forecast label caps fetch pull serve help -h --help"
 
 # Bounded to fn main's own top-level `match argv.get(1)...` block, not the
 # whole file: nested match blocks further down (`run_bench`'s own `eval`/
