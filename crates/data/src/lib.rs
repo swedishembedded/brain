@@ -21,6 +21,7 @@ pub mod bpe;
 pub mod clip_bpe;
 pub mod episode;
 pub mod imageset;
+pub mod llama_bpe;
 pub mod loader;
 pub mod mlm;
 pub mod qwen_chat;
