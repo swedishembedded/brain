@@ -75,8 +75,38 @@ BRAIN_QWEN3VL_WEIGHTS=/path/to/qwen3-vl \
   `BRAIN_QWEN3VL_WEIGHTS`): a safetensors directory, a GGUF language half, or
   the directory holding a GGUF pair.
 
+## How long a caption takes, and the one knob that changes it
+
+Both halves of the model run on the placed device: the ViT tower is a second
+kernel set on the decoder's own card, not a second device.
+
+Cost is dominated by **prefill**, and prefill is weight-bandwidth bound - the
+decoder reads every one of its fp32 weights once per prompt token. So the
+number that decides how long a caption takes is how many **visual tokens**
+the image becomes, and that is what `--max-pixels` (`brain label images`) or
+the `max_pixels` action parameter sets. Halving the pixel budget roughly
+halves the time. A smaller budget is less of the image, so it is a real
+tradeoff and brain does not pick it for you; `qwen3vl_bench` prints the
+cost curve for your own hardware.
+
+`crates/qwen3vl/src/bin/qwen3vl_bench.rs` is the profiler:
+
+```bash
+qwen3vl_bench vision                       # the tower at the real geometry, no checkpoint needed
+qwen3vl_bench caption --image photo.jpg    # the real checkpoint, per stage, with tok/s
+```
+
+`caption` mode drives the same served path `brain label images` does, and
+reports each stage against the machine's own measured roofline plus the
+weight-bandwidth ceiling a batch-1 decode cannot beat.
+
 ## Hardware and limits
 
 No D-Bus/HTTP serving adapter yet - CLI only, one request at a time, fp32,
 greedy decoding. Does not batch concurrent requests. No LoRA/fine-tuning
 command yet.
+
+Prefill runs one token at a time, so its cost is linear in the prompt and
+close to the card's memory bandwidth. There is no batched prefill and no
+int8 decoder tier for this model yet; both are recorded, with measured
+numbers, in `.agents/roadmap/vlm.md`.

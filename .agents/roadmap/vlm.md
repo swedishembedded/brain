@@ -256,3 +256,146 @@ integrated GPU, no checkpoint present). Gate it with tiny-config end-to-end
 tests through the PRODUCTION path - `import::load`, not a test-local loader -
 and leave the real-weight tests skip-if-absent, the arrangement
 `crates/deepseek2ocr` uses.
+
+## qwen3vl - where a caption's time went, and where it goes now
+
+Captioning was measured at about six minutes per image on a box with two
+idle 24 GiB Tesla P40s, with the run burning far more user CPU time than
+wall time while both cards sat empty. The profiler built for this
+(`crates/qwen3vl/src/bin/qwen3vl_bench.rs`, `caption` mode) attributes one
+image per stage against the machine's own MEASURED roofline; every number
+below is best-of-N with warm-up excluded, on one 2048x1536 photograph at
+`--max-new 90`, machine otherwise idle, and the caption text is byte-for-byte
+identical before and after.
+
+| stage | before | after | fraction of measured roof | bound |
+|---|---|---|---|---|
+| image preprocess | 54 ms | 32 ms | 0.8% | bandwidth |
+| vision tower | 133535 ms | 3686 ms | 19.8% | compute |
+| projector / merger | 2257 ms | 217 ms | 15.1% | compute |
+| prefill (1580 tokens) | 148662 ms | 111326 ms | 79.6% | bandwidth |
+| decode + head (90 tokens) | 54891 ms | 13857 ms | 39.9% | bandwidth |
+| **per image** | **339399 ms** | **129118 ms** | | |
+| model build (once per process) | 8.5 s | 13.1 s | | |
+
+2.6x end to end, and 36x on the vision half. The one-off model build is
+noise next to the per-image cost, so there was never a loading problem to
+find: the whole cost was marginal.
+
+### What was actually wrong
+
+**The vision tower was pinned to the CPU JIT.** `Qwen3Vl::new` hard-coded
+`Gpu::new_cpu(vision_pipelines())` for its vision half while the decoder
+honoured the caller's placement, so the entire 24-block ViT and all four
+PatchMergers ran on Cranelift-compiled WGSL no matter where the model was
+placed. At the captioner's default pixel budget that is about 8 TFLOP per
+image. The same line had been copied verbatim into `qwen35` and
+`qwen35moe`, so it was a class rather than an incident; all three are fixed.
+
+**Flipping the device alone would have crashed, not sped up - and this was
+measured rather than assumed.** The tower attends the whole image as one
+span and materialised a `[heads, n, n]` score slab; at 6400 patches that is
+a 2621440000-byte binding against the card's 2147483644-byte
+`max_storage_buffer_binding_size`, and the failure is a `create_bind_group`
+validation error. `model::vit::attn_chunk_for` had existed for exactly this
+and was never called from here, which is the most likely reason someone
+pinned the tower to the CPU in the first place. Chunk first, prove the tower
+runs on the card, then move it.
+
+**Three fast siblings were registered and never dispatched**, which is this
+repo's most reliable source of large wins:
+
+- `matmul_reg3` instead of `matmul_rows` for the block linears, the patch
+  embed and the projector: those dispatches went 39351 ms to 723 ms, the
+  projector 2858 ms to 40 ms, and the tower 54.1 s to 14.8 s. `matmul_rows`
+  is also the one member of the matmul family `backend-cpu` has no native
+  AVX2 path for, so the same swap is worth 60.8 to 106.2 GFLOP/s on the CPU
+  backend.
+- `flash_attn_bidir_reg2` instead of the scores/softmax/apply trio: after
+  the GEMM swap the trio was 94% of the tower's device time at about 2.8% of
+  roof; fusing it took attention 13758 ms to 2086 ms and the tower to 24.0%
+  of roof.
+- `Qwen::decode_logits` instead of a host LM head. `generate` read the whole
+  tied 151936x2560 table off the device once per caption (1.5 GB into RAM)
+  and then swept it scalar and single-threaded per token: 45909 ms to
+  2358 ms. That method's own doc already named this caller as the case it
+  was written for.
+
+**Two host round trips per token that nothing looked at.** Prefill drove
+`step_mrope`/`step_embed_mrope`, each ending in a `[d_model]` readback the
+loop discarded, 1580 times per image. `Qwen::prefill` already called that
+readback "pure waste" in its own doc but could not carry an M-RoPE table or
+a DeepStack row; `Qwen::prefill_mrope` is that step without the readback.
+
+**The tower was rebuilt inside every forward.** `VisionEncoder` and
+`PatchMerger` borrowed a `&Gpu`, so a model could not hold one, so
+`Qwen3Vl` kept host `Vec<f32>` weights and re-uploaded about 1.7 GB per
+image. This is the same defect `moondream3` fixed for the same reason. It is
+a FIXED cost per image, so it dominates small images: on a 600x600 photo the
+tower was 4080 ms, most of it upload.
+
+### What is left, and what it is worth
+
+Prefill is now 111 s of the 129 s and sits at **79.6% of this card's
+measured DRAM bandwidth**. It is not a kernel problem any more. The decoder
+is 4.02B fp32 parameters = 15.0 GiB read once per token at batch 1, which
+bounds a batch-1 step at 17.8 tok/s on this card, so a 1580-token prompt
+prefilled one token at a time cannot beat about 89 s however good the
+kernels are. Only two things move it:
+
+- **INT8 decoder weights.** The ceiling goes to 71.3 tok/s, so prefill would
+  be about 28 s and the whole image about 50 s. `Qwen::new_shard_dt_decode`
+  already takes a `Dtype` and the int8 GEMV kernels are already registered
+  on the decode path, so the code change is small. It is LOSSY, so it must
+  be opt-in and gated separately, never folded into a parity claim.
+- **Batched prefill** - one weight sweep per N positions instead of per
+  token, worth roughly an order of magnitude on the dominant stage. The
+  decode tape is m=1 by construction (its activation buffers are sized for
+  one row and `gqa_decode_step` attends one query against the cache), and
+  `qwen3::serve`'s batched paged path has no M-RoPE, so this is a real piece
+  of work rather than a patch. Note that `matmul_gemv`'s own header says it
+  accepts `m <= 32`, so the kernel side of a small batch already exists.
+
+### The pixel budget is the cheapest lever, and it is the caller's
+
+Prefill dominates and its cost is linear in the visual-token count, so
+`--max-pixels` buys more than any kernel left in this model. Measured on the
+same 2048x1536 photograph at `--max-new 90`, after everything above:
+
+| `--max-pixels` | visual tokens | per image | end-to-end tok/s |
+|---|---|---|---|
+| 512x512 | 234 | 24.3 s | 3.71 |
+| 768x768 | 540 | 44.6 s | 2.02 |
+| 1024x1024 | 972 | 76.9 s | 1.17 |
+| 1280x1280 (the captioner default) | 1564 | 129.1 s | 0.70 |
+
+At the smallest budget prefill reaches **96.0% of the card's measured DRAM
+bandwidth**, which is as close to the wall as this shape gets. 512x512 is
+14x faster than the original run at the default budget, and the caption it
+produces is still a full descriptive paragraph.
+
+This is deliberately NOT a default change. Fewer visual tokens is less of
+the image, and how much detail a caption needs is the caller's judgement,
+not the engine's - so it stays a flag with a published cost curve.
+
+### Cosine is not a gate. This is the fifth independent reproduction.
+
+`crates/qwen3vl/tests/vision_tower_parity.rs` mutates one weight by a
+relative 5e-4 and re-runs the tower. The mutant scores **cosine
+0.999999998** against the reference - it passes a 0.9999999 cosine floor -
+and is rejected only by rel_l2 at 5.7e-5 against a 1e-5 ceiling. The fused
+flash path reproduced the same figure independently on the same fixture.
+
+That is five separate components in this codebase where a real defect scored
+0.99999+ on cosine, so it should be read as a property of these numerics
+rather than as bad luck. **Assert cosine AND rel_l2, never cosine alone**,
+and mutation-verify the pair in the test file itself: two gates found here
+in one day could not fail at all, and a gate nobody has watched fail is a
+hypothesis.
+
+The same file caught a real out-of-bounds read while being written. A main
+PatchMerger's `[in_dim]` LayerNorm handed to a DeepStack merger reads
+`merge^2 - 1` rows past its own buffer, because the LayerNorm width comes
+from the dispatch `Params` and not from the buffer; the result is NaN or
+finite-looking garbage with nothing to say which weight was wrong.
+`PatchMerger::new` now checks the four shapes that decide its dispatch.
