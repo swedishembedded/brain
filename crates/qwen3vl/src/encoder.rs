@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::vit::{vit_block_bwd, vit_block_fwd, vit_block_fwd_cached, RopeTables, VitBlockCache, VitBlockGrads, VitBlockWeights, VitBwdIds, VitBwdScratch, VitKernelIds, VitScratch, VitShape};
+use model::vit::{attn_chunk_for, vit_block_bwd, vit_block_fwd, vit_block_fwd_cached, RopeTables, VitBlockCache, VitBlockGrads, VitBlockWeights, VitBwdIds, VitBwdScratch, VitKernelIds, VitScratch, VitShape};
 
 use crate::config::VisionConfig;
 use crate::vision::{pos_embed_bilinear, vision_position_ids, vision_rope_tables};
@@ -27,6 +27,23 @@ use crate::vision::{pos_embed_bilinear, vision_position_ids, vision_rope_tables}
 const VISION_ROPE_THETA: f32 = 10000.0;
 /// LayerNorm eps in the ViT (matches the text side; HF vision uses 1e-6).
 const VISION_EPS: f32 = 1e-6;
+
+/// Ceiling on ONE of the two `[heads, chunk, span]` attention score slabs.
+///
+/// The tower attends the WHOLE image as a single span, so the slab grows with
+/// the square of the patch count: at the captioning pixel budget that is over
+/// two gigabytes, past what a card will BIND, never mind hold two of. Queries
+/// are therefore dispatched in chunks under this budget - which splits the
+/// query rows only, never the keys, so every row still softmaxes over the
+/// whole image in the same order and the result is bit-identical to one
+/// unchunked dispatch.
+///
+/// 256 MiB rather than as much as the card will bind: the tower shares its
+/// card with a decoder whose fp32 weights are most of it, and a chunk this
+/// wide still keeps tens of thousands of score rows in flight, so the extra
+/// dispatches cost nothing measurable while the gigabyte saved is a gigabyte
+/// the decoder needs.
+const ATTN_SLAB_BUDGET: u64 = 256 * 1024 * 1024;
 
 /// The kernels the ViT dispatches, in the order [`vision_pipelines`] lists them.
 /// gelu slot carries the **tanh** GELU (Qwen3-VL vision act = gelu_pytorch_tanh).
@@ -67,6 +84,13 @@ pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
         // sweep coalesced loads.
         ("kv_k_headt", kernels::KV_K_HEADT),                // 27
         ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT), // 28
+        // ---- register-tiled GEMM ----
+        // Opted into BY NAME, not by index: `model::vit::gemm_step` and the
+        // PatchMerger below both resolve "matmul_reg3" off the handle, so this
+        // one row moves every large linear in the tower and the projector off
+        // the row-blocked/naive reference kernels. Bit-identical (the tiling is
+        // over the output, never over the contraction) - see that function.
+        ("matmul_reg3", kernels::MATMUL_REG3),              // 29
     ]
 }
 
@@ -104,6 +128,24 @@ const M_LAYERNORM: usize = 0;
 const M_MATMUL: usize = 1;
 const M_BIAS_ADD: usize = 3;
 const M_GELU_ERF: usize = 12;
+
+/// The patch-embed projection `[N, patch_vec] x [hidden, patch_vec]^T`: the
+/// register-tiled GEMM where this model registered it, else the naive
+/// reference the `VitKernelIds::matmul` slot names. Same selection and same
+/// bit-identical guarantee as `model::vit`'s block linears.
+fn patch_embed_step(g: &Gpu, naive: usize, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, n: u32, pv: u32, c: u32) -> Step {
+    match g.kernel_index("matmul_reg3") {
+        Some(i) if n >= 128 && c >= 128 => g.step(i, &[x, w, out], &[n, pv, c], n.div_ceil(128) * c.div_ceil(128) * 256),
+        _ => g.step(naive, &[x, w, out], &[n, pv, c], n * c),
+    }
+}
+
+/// Query-chunk width for one image's full-image attention span: as many rows
+/// as [`ATTN_SLAB_BUDGET`] holds, and never more than this device will bind.
+fn attn_chunk(g: &Gpu, sh: &VitShape, n: u32) -> u32 {
+    let budget = ATTN_SLAB_BUDGET.min(g.max_storage_binding_bytes());
+    attn_chunk_for(sh, n, budget).min(n)
+}
 
 fn vit_ids() -> VitKernelIds {
     VitKernelIds {
@@ -213,11 +255,14 @@ impl<'g> VisionEncoder<'g> {
         let x = g.storage((n * c) as u64);
         let tap_bufs: Vec<DeviceBuffer> = taps.iter().map(|_| g.storage((n * c) as u64)).collect();
 
-        let scr = VitScratch::new(g, &sh, n, n, n); // one image → whole-image spans
+        // One image -> one whole-image span, queries chunked under the slab
+        // budget (and under whatever this device will actually bind).
+        let chunk = attn_chunk(g, &sh, n);
+        let scr = VitScratch::new(g, &sh, n, chunk, n);
 
         let mut steps: Vec<Step> = Vec::new();
         // patch-embed matmul [N,pv]·[hidden,pv]^T + bias, then x = patch_embed + pos.
-        steps.push(g.step(ids.matmul, &[&pix, self.wb("patch_embed.weight"), &pe], &[n, pv, c], n * c));
+        steps.push(patch_embed_step(g, ids.matmul, &pix, self.wb("patch_embed.weight"), &pe, n, pv, c));
         steps.push(g.step(ids.bias_add, &[&pe, self.wb("patch_embed.bias")], &[n, c], n * c));
         steps.push(g.step(ids.add2, &[&pe, &pos, &x], &[n * c], n * c));
 
@@ -243,7 +288,7 @@ impl<'g> VisionEncoder<'g> {
                 fc2_b: p("fc2.bias"),
                 ls2: None,
             };
-            vit_block_fwd(g, &ids, &sh, &bw, &x, n, &[(0, n)], n, &scr, &mut steps);
+            vit_block_fwd(g, &ids, &sh, &bw, &x, n, &[(0, n)], chunk, &scr, &mut steps);
             // Snapshot this block's output for DeepStack before the next block
             // overwrites x (region_copy: whole-buffer contiguous copy).
             if let Some(i) = taps.iter().position(|&t| t == b) {
@@ -308,7 +353,7 @@ impl<'g> VisionEncoder<'g> {
         let scores = g.storage((sh.heads * n * n) as u64);
 
         let mut steps: Vec<Step> = Vec::new();
-        steps.push(g.step(ids.matmul, &[&pix, self.wb("patch_embed.weight"), &pe], &[n, pv, c], n * c));
+        steps.push(patch_embed_step(g, ids.matmul, &pix, self.wb("patch_embed.weight"), &pe, n, pv, c));
         steps.push(g.step(ids.bias_add, &[&pe, self.wb("patch_embed.bias")], &[n, c], n * c));
         steps.push(g.step(ids.add2, &[&pe, &pos, &caches[0].x_in], &[n * c], n * c));
         for b in 0..self.cfg.depth as usize {
@@ -481,6 +526,20 @@ impl<'g> PatchMerger<'g> {
         out_dim: u32,
         postshuffle_norm: bool,
     ) -> PatchMerger<'g> {
+        // The LayerNorm width differs between the two merger kinds, and the
+        // kernel takes it from `Params`, not from the buffer - so a main
+        // merger's `[in_dim]` norm handed to a DeepStack merger reads
+        // `merge^2 - 1` rows past its own buffer and returns finite-looking
+        // garbage or NaN, with nothing to say which. Check the four shapes
+        // that decide the dispatch here, where the caller can still be told
+        // which one it got wrong.
+        let merged = in_dim * merge * merge;
+        let ln_dim = if postshuffle_norm { merged } else { in_dim };
+        let need = [("ln.weight", ln_dim), ("ln.bias", ln_dim), ("fc1.weight", merged * merged), ("fc2.weight", out_dim * merged)];
+        for (name, want) in need {
+            let got = weights.get(name).map(|v| v.len()).unwrap_or_else(|| panic!("merger weight missing: {name}"));
+            assert_eq!(got, want as usize, "merger weight {name}: expected {want} elements for a {}postshuffle merger of in_dim {in_dim} merge {merge} out_dim {out_dim}, got {got}", if postshuffle_norm { "" } else { "non-" });
+        }
         let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
         PatchMerger { gpu, w, in_dim, merge, out_dim, postshuffle_norm }
     }
@@ -499,6 +558,14 @@ impl<'g> PatchMerger<'g> {
         let merged = self.in_dim * m2; // e.g. 1024·4 = 4096
         let eps = gpu_core::f(VISION_EPS);
 
+        // The projector's two linears are the widest GEMMs outside the tower
+        // (`[rows, hidden*merge^2] x [hidden*merge^2, *]`), and the naive
+        // one-thread-per-output `matmul` was what dispatched them.
+        let reg = g.kernel_index("matmul_reg3");
+        let gemm = |m: u32, kdim: u32, nn: u32, a: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer| match reg {
+            Some(i) if m >= 128 && nn >= 128 => g.step(i, &[a, wt, out], &[m, kdim, nn], m.div_ceil(128) * nn.div_ceil(128) * 256),
+            _ => g.step(M_MATMUL, &[a, wt, out], &[m, kdim, nn], m * nn),
+        };
         let inp = g.storage_init("mrg.in", x);
         let xn = g.storage((n * self.in_dim) as u64); // == mrows·merged elements
         let mut steps: Vec<Step> = Vec::new();
@@ -511,11 +578,11 @@ impl<'g> PatchMerger<'g> {
         }
         let h = g.storage((mrows * merged) as u64);
         let h2 = g.storage((mrows * merged) as u64);
-        steps.push(g.step(M_MATMUL, &[&xn, self.wb("fc1.weight"), &h], &[mrows, merged, merged], mrows * merged));
+        steps.push(gemm(mrows, merged, merged, &xn, self.wb("fc1.weight"), &h));
         steps.push(g.step(M_BIAS_ADD, &[&h, self.wb("fc1.bias")], &[mrows, merged], mrows * merged));
         steps.push(g.step(M_GELU_ERF, &[&h, &h2], &[mrows * merged], mrows * merged));
         let out = g.storage((mrows * self.out_dim) as u64);
-        steps.push(g.step(M_MATMUL, &[&h2, self.wb("fc2.weight"), &out], &[mrows, merged, self.out_dim], mrows * self.out_dim));
+        steps.push(gemm(mrows, merged, self.out_dim, &h2, self.wb("fc2.weight"), &out));
         steps.push(g.step(M_BIAS_ADD, &[&out, self.wb("fc2.bias")], &[mrows, self.out_dim], mrows * self.out_dim));
         g.submit(&[], &steps);
         g.read(&out, (mrows * self.out_dim) as usize)
