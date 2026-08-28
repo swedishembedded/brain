@@ -12,6 +12,7 @@
 //! as is DeepStack and the vision backward for full-tower finetune).
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use gpu_core::Gpu;
 use qwen3::{Qwen, QwenConfig};
@@ -33,6 +34,52 @@ pub struct Qwen3Vl {
     merge: u32,
     image_token_id: u32,
     mrope_section: [u32; 3],
+}
+
+
+/// Wall-clock attribution of one [`Qwen3Vl::generate_timed`] call, by the
+/// stage boundaries an optimisation actually acts on.
+///
+/// The five numbers sum to the call. Four of the stages end in a device drain,
+/// so their clocks are honest on their own. The exception is stated rather
+/// than papered over: [`Self::decode_s`] and [`Self::head_s`] are the two
+/// halves of one PIPELINED loop - the step submits without reading anything,
+/// and the head's readback on the next iteration is what drains it - so
+/// `head_s` carries the preceding step's execution and `decode_s` is closer to
+/// the host-side encode cost. Forcing the split with a fence per token was
+/// measured, and it cost about as much per token as the step itself; a
+/// truthful pair of numbers with a note beats a precise pair that is slower to
+/// produce. Read `decode_s + head_s` as the generation loop's real cost.
+///
+/// Kept as data rather than printed, so the caller (a bench, a served run's
+/// log) decides what to do with it and nothing is emitted on the ordinary
+/// path.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StageTimes {
+    /// ViT tower: patch embed, `depth` blocks, DeepStack tap snapshots.
+    pub vision_s: f64,
+    /// The main PatchMerger plus one DeepStack merger per tap.
+    pub merge_s: f64,
+    /// Prompt prefill (text tokens + spliced visual rows) into the KV cache.
+    pub prefill_s: f64,
+    /// The generation loop's decode steps - submit-only, see this struct's doc.
+    pub decode_s: f64,
+    /// The device LM head, its `[vocab]` readback and the argmax - and, since
+    /// that readback is the loop's only fence, the preceding step's execution.
+    pub head_s: f64,
+    /// Visual tokens the image produced (post-merge rows).
+    pub visual_tokens: u32,
+    /// Prompt length in tokens, image placeholders included.
+    pub prompt_tokens: u32,
+    /// Tokens actually generated (may be under `max_new` on an EOS).
+    pub new_tokens: u32,
+}
+
+impl StageTimes {
+    /// Total wall time of the call the stages were measured over.
+    pub fn total_s(&self) -> f64 {
+        self.vision_s + self.merge_s + self.prefill_s + self.decode_s + self.head_s
+    }
 }
 
 impl Qwen3Vl {
@@ -259,7 +306,35 @@ impl Qwen3Vl {
     /// caps path uses to emit REAL streaming deltas (its ActionSpec declares
     /// `.streaming()`, which used to be satisfied by exactly two Progress
     /// emissions around the whole decode; audit F11).
-    pub fn generate_cb(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32], mut on_token: impl FnMut(u32)) -> Vec<u32> {
+    pub fn generate_cb(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32], on_token: impl FnMut(u32)) -> Vec<u32> {
+        self.generate_timed(tokens, grid, pixels, max_new, eos_ids, on_token).0
+    }
+
+    /// The device this model runs on - both halves of it, since the vision
+    /// tower is a second kernel set on the decoder's own card. For placement
+    /// reporting and for the roofline a profile is graded against.
+    pub fn gpu(&self) -> &Gpu {
+        self.decoder.gpu()
+    }
+
+    /// [`Self::generate_cb`] with per-stage wall-clock attribution.
+    ///
+    /// The measuring seam this crate's profiler drives: the stage boundaries
+    /// are inside this function, so a bench cannot get them by wrapping the
+    /// public call, and two parallel implementations of the generate loop (one
+    /// timed, one not) would be free to drift about which stage owns what.
+    /// Timing is a few `Instant::now()` calls around work measured in seconds,
+    /// so the untimed entry point above is exactly this one.
+    pub fn generate_timed(
+        &self,
+        tokens: &[u32],
+        grid: (u32, u32),
+        pixels: &[f32],
+        max_new: u32,
+        eos_ids: &[u32],
+        mut on_token: impl FnMut(u32),
+    ) -> (Vec<u32>, StageTimes) {
+        let mut st = StageTimes { prompt_tokens: tokens.len() as u32, ..StageTimes::default() };
         let (gh, gw) = grid;
         let n = gh * gw;
         let m2 = self.merge * self.merge;
@@ -267,8 +342,12 @@ impl Qwen3Vl {
         let d_model = self.decoder.cfg.d_model as usize;
 
         // Vision tower -> visual tokens (+ DeepStack taps), same as forward().
+        let t_vision = Instant::now();
         let enc = VisionEncoder::new(&self.vgpu, self.vcfg.clone(), &self.vweights);
         let (feats, tap_feats) = enc.encode_with_taps(gh, gw, pixels, &self.vcfg.deepstack_indexes);
+        st.vision_s = t_vision.elapsed().as_secs_f64();
+
+        let t_merge = Instant::now();
         let merger = PatchMerger::new(&self.vgpu, &self.merger_weights, self.vcfg.hidden, self.merge, d_model as u32, false);
         let visual = merger.merge(&feats, n);
         assert_eq!(visual.len(), (n_visual as usize) * d_model);
@@ -276,6 +355,8 @@ impl Qwen3Vl {
             let ds = PatchMerger::new(&self.vgpu, mw, self.vcfg.hidden, self.merge, d_model as u32, true);
             self.decoder.write_deepstack(level, &ds.merge(tap, n));
         }
+        st.merge_s = t_merge.elapsed().as_secs_f64();
+        st.visual_tokens = n_visual;
 
         // M-RoPE positions for the KNOWN prompt (whole-sequence, once).
         let grids_llm = [(1, gh / self.merge, gw / self.merge)];
@@ -286,58 +367,77 @@ impl Qwen3Vl {
         // step_mrope, each with its own 1-row M-RoPE table (mrope_tables
         // called per-position -- the plan's own recommended shape, "a
         // single-element positions slice").
+        let t_prefill = Instant::now();
         self.decoder.reset_cache();
         let mut visual_row = 0usize;
-        let mut hidden = Vec::new();
         for (i, &tok) in tokens.iter().enumerate() {
             let (cos, sin) = mrope_tables(&prompt_positions[i..=i], self.mrope_section, self.decoder.cfg.head_dim, self.decoder.cfg.rope_theta);
-            hidden = if tok == self.image_token_id {
+            // Nothing reads a prompt position's hidden state -- only the LAST
+            // one matters, and the device head below takes that from
+            // `xn_final` where the step left it. `prefill_mrope` therefore
+            // submits without the `[d_model]` readback its `step_*` siblings
+            // promise, which at a VL prompt (mostly image rows) is one
+            // submit+fence+map round trip per token removed.
+            let input = if tok == self.image_token_id {
                 let row = &visual[visual_row * d_model..(visual_row + 1) * d_model];
                 let ds_row = Some(visual_row as u32);
                 visual_row += 1;
-                self.decoder.step_embed_mrope(row, &cos, &sin, ds_row)
+                self.decoder.prefill_mrope(qwen3::model::PrefillInput::Embed(row), &cos, &sin, ds_row);
+                continue;
             } else {
-                self.decoder.step_mrope(tok, &cos, &sin)
+                qwen3::model::PrefillInput::Token(tok)
             };
+            self.decoder.prefill_mrope(input, &cos, &sin, None);
         }
         assert_eq!(visual_row, n_visual as usize, "image token count in the prompt must match n_visual");
+        // Prefill no longer reads anything back, so without this the host
+        // clock would stop while the tape was still queued and the first head
+        // dispatch below would inherit the whole backlog - a stage split that
+        // charges the wrong stage is worse than no split at all. The fence is
+        // free in wall-clock terms: the head's own readback would block on the
+        // same work one statement later.
+        self.decoder.gpu().poll_wait();
+        st.prefill_s = t_prefill.elapsed().as_secs_f64();
 
         // Decode: greedy argmax, continuing the position sequence past the
-        // prompt as plain text.
-        let head = self.decoder.read_weight(self.decoder.cfg.head_weight());
-        let vocab = self.decoder.cfg.vocab as usize;
+        // prompt as plain text. The head is applied ON the device the weights
+        // already sit on (`Qwen::decode_logits`, vocab-tiled so each binding
+        // stays inside the limit) and only a `[vocab]` row crosses back. The
+        // host path this replaces read the WHOLE tied head table once per
+        // caption -- 1.5 GB at the 4B config -- and then swept it, scalar and
+        // single-threaded, for every generated token.
         let mut next_pos = prompt_positions.last().map(|p| p[0] + 1).unwrap_or(0);
         let mut out = Vec::with_capacity(max_new as usize);
         for _ in 0..max_new {
-            let next = argmax_tied_head(&head, &hidden, vocab, d_model);
+            let t_head = Instant::now();
+            let next = argmax(&self.decoder.decode_logits());
+            st.head_s += t_head.elapsed().as_secs_f64();
             if eos_ids.contains(&next) {
                 break;
             }
             out.push(next);
             on_token(next);
+            let t_step = Instant::now();
             let (cos, sin) = mrope_tables(&[[next_pos; 3]], self.mrope_section, self.decoder.cfg.head_dim, self.decoder.cfg.rope_theta);
-            hidden = self.decoder.step_mrope(next, &cos, &sin);
+            self.decoder.prefill_mrope(qwen3::model::PrefillInput::Token(next), &cos, &sin, None);
+            st.decode_s += t_step.elapsed().as_secs_f64();
             next_pos += 1;
         }
-        out
+        st.new_tokens = out.len() as u32;
+        (out, st)
     }
 }
 
-/// `argmax_i(head[i] . hidden)` -- the host-side tied/untied head application
-/// every KV-cache decode path in this engine uses (`qwen3::sample`'s own doc:
-/// "The tied/untied head is applied on the host to the final-norm hidden
-/// state"), inlined rather than imported since `qwen3::sample`'s equivalent
-/// (`sample_logits`) is private and bundled with temperature/top-k/top-p
-/// machinery this validation-tier greedy path does not need.
-fn argmax_tied_head(head: &[f32], hidden: &[f32], vocab: usize, d_model: usize) -> u32 {
+/// Greedy pick over one `[vocab]` logit row; ties go to the LOWEST index -
+/// the rule `argmax_row.wgsl` states, so moving this reduction onto the device
+/// later cannot change which token is chosen.
+fn argmax(logits: &[f32]) -> u32 {
     let mut best = 0usize;
     let mut best_v = f32::NEG_INFINITY;
-    for row in 0..vocab {
-        let wr = &head[row * d_model..(row + 1) * d_model];
-        let v: f32 = wr.iter().zip(hidden).map(|(a, b)| a * b).sum();
+    for (i, &v) in logits.iter().enumerate() {
         if v > best_v {
             best_v = v;
-            best = row;
+            best = i;
         }
     }
     best as u32
