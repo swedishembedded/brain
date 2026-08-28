@@ -454,6 +454,28 @@ impl ClipVisionConfig {
         self.native_grid() * self.native_grid()
     }
 
+    /// `openai/clip-vit-large-patch14-336` - the LLaVA-1.5 vision tower: 24
+    /// layers, 1024-d, 16 heads, MLP 4096, patch 14, 336px input, 577 learned
+    /// positions (576 patches + 1 class token), quick-GELU. Byte-identical
+    /// topology to [`Self::deepseek_ocr`]'s CLIP-L/14@224 stem - only
+    /// `image_size` (hence `n_positions`) differs, which is exactly what this
+    /// type exists to parameterise.
+    pub fn clip_l336() -> ClipVisionConfig {
+        ClipVisionConfig {
+            shape: gguf::deepseek_ocr_vision::ClipConfig {
+                d_model: 1024,
+                n_layers: 24,
+                n_heads: 16,
+                ffn_hidden: 4096,
+                patch_size: 14,
+                image_size: 336,
+                n_positions: 577,
+                layer_norm_eps: 1e-5,
+            },
+            act: TextAct::QuickGelu,
+        }
+    }
+
     /// Canonical brain-side tensor manifest (see
     /// [`ClipTextConfig::tensor_manifest`]).
     ///
@@ -668,6 +690,25 @@ mod tests {
         assert_eq!(c.native_patches(), 256);
         assert_eq!(c.n_positions(), 1 + c.native_patches());
         assert_eq!(c.head_dim(), 64);
+    }
+
+    /// `openai/clip-vit-large-patch14-336` - LLaVA-1.5's vision tower.
+    #[test]
+    fn clip_l336_matches_the_published_shape() {
+        let c = ClipVisionConfig::clip_l336();
+        assert_eq!(c.d_model(), 1024);
+        assert_eq!(c.layers(), 24);
+        assert_eq!(c.heads(), 16);
+        assert_eq!(c.head_dim(), 64);
+        assert_eq!(c.mlp_hidden(), 4096);
+        assert_eq!(c.patch(), 14);
+        assert_eq!(c.image_size(), 336);
+        assert_eq!(c.native_grid(), 24);
+        assert_eq!(c.native_patches(), 576);
+        assert_eq!(c.n_positions(), 577);
+        assert_eq!(c.act, TextAct::QuickGelu);
+        // 5 stem + 24 blocks x 12.
+        assert_eq!(c.tensor_manifest().len(), 5 + 24 * 12);
     }
 
     #[test]

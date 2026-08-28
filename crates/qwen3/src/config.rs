@@ -187,6 +187,35 @@ impl QwenConfig {
         }
     }
 
+    /// Vicuna-1.5-13B's decoder half - a LLaMA-2-13B fine-tune with **no**
+    /// architecture changes: 40 layers, `hidden_size` 5120, 40 attention heads,
+    /// `num_key_value_heads` 40 (plain MHA, unlike Qwen3's GQA), `head_dim` 128
+    /// (5120/40), SwiGLU `intermediate_size` 13824, RoPE base 10000 (no
+    /// `rope_scaling`), `rms_norm_eps` 1e-5, `max_position_embeddings` 4096,
+    /// untied `lm_head`, no QK-norm, no attention bias. Read off the real
+    /// `meta-llama/Llama-2-13b-hf` `config.json` (mirrored, ungated, at
+    /// `NousResearch/Llama-2-13b-hf`) - vocab 32000 matches `data::llama_bpe`'s
+    /// SentencePiece byte-fallback tokenizer.
+    pub fn llama2_13b() -> QwenConfig {
+        QwenConfig {
+            vocab: 32000,
+            block_size: 4096,
+            n_layers: 40,
+            d_model: 5120,
+            n_heads: 40,
+            n_kv_heads: 40,
+            head_dim: 128,
+            d_ff: 13824,
+            rope_theta: 10000.0,
+            rms_eps: 1e-5,
+            max_position_embeddings: 4096,
+            tie_embeddings: false,
+            qk_norm: false,
+            attn_bias: false,
+            lora: None,
+        }
+    }
+
     /// Apply derived defaults (head_dim = d_model/n_heads when unset).
     pub fn with_defaults(mut self) -> Self {
         if self.head_dim == 0 {
@@ -363,5 +392,41 @@ impl QwenConfig {
             out.push(("lm_head.weight".to_string(), v * d));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pinned against the real `meta-llama/Llama-2-13b-hf` `config.json`:
+    /// `hidden_size` 5120, `num_hidden_layers` 40, 40 attention heads, 40
+    /// key/value heads (plain MHA), `intermediate_size` 13824, `rms_norm_eps`
+    /// 1e-5, `max_position_embeddings` 4096, `tie_word_embeddings` false,
+    /// vocab 32000, no `rope_scaling` (base 10000).
+    #[test]
+    fn llama2_13b_matches_the_published_shape() {
+        let c = QwenConfig::llama2_13b().with_defaults();
+        assert_eq!(c.vocab, 32000);
+        assert_eq!(c.n_layers, 40);
+        assert_eq!(c.d_model, 5120);
+        assert_eq!(c.n_heads, 40);
+        assert_eq!(c.n_kv_heads, 40, "Vicuna/LLaMA-2 is plain MHA, not GQA");
+        assert_eq!(c.head_dim, 128);
+        assert_eq!(c.q_dim(), c.kv_dim(), "MHA: query and kv widths must match");
+        assert_eq!(c.group(), 1, "MHA: one query head per kv head");
+        assert_eq!(c.d_ff, 13824);
+        assert_eq!(c.rope_theta, 10000.0);
+        assert_eq!(c.rms_eps, 1e-5);
+        assert_eq!(c.max_position_embeddings, 4096);
+        assert!(!c.tie_embeddings, "LLaMA-2-13B has an untied lm_head");
+        assert!(!c.qk_norm, "no QK-norm in the LLaMA-2 family");
+        assert!(!c.attn_bias, "no attention bias in the LLaMA-2 family");
+        assert_eq!(c.head_weight(), "lm_head.weight");
+
+        // 1 embed + 40 layers x 9 (ln1, wq, wk, wv, wo, ln2, gate, up, down -
+        // no qk_norm rows, no attn-bias rows) + norm + lm_head.
+        let params = c.param_list();
+        assert_eq!(params.len(), 1 + 40 * 9 + 1 + 1);
     }
 }
