@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! wgpu eager [`Backend`] — the portable GPU backend (Vulkan/Metal/DX12/GL on
+//! wgpu eager [`Backend`] - the portable GPU backend (Vulkan/Metal/DX12/GL on
 //! native, WebGPU on wasm). WGSL kernels are compiled into compute pipelines at
 //! init; dispatches are lazily accumulated and flushed into a single compute pass
 //! per forward (see [`WgpuBackend::submit`]).
@@ -33,7 +33,7 @@ pub type WgpuStep = (usize, wgpu::BindGroup, u32, u32, bool);
 /// so `brain perf` embeds this in every result artifact.
 #[derive(Clone, Debug)]
 pub struct AdapterDesc {
-    /// `"<name> (<device_type>, <backend>)"` — the same text `log_adapter` prints.
+    /// `"<name> (<device_type>, <backend>)"` - the same text `log_adapter` prints.
     pub description: String,
     pub name: String,
     pub device_type: String,
@@ -46,7 +46,7 @@ static ADAPTER: std::sync::OnceLock<AdapterDesc> = std::sync::OnceLock::new();
 /// The instance options every backend is built from.
 ///
 /// wgpu's default `InstanceFlags` are `from_build_config()`, which turns on
-/// `DEBUG | VALIDATION` whenever `debug_assertions` is set — so a plain
+/// `DEBUG | VALIDATION` whenever `debug_assertions` is set - so a plain
 /// `cargo test` / `make build` silently enables the Vulkan validation layers and
 /// `VK_EXT_debug_utils` object naming, while `make release` does not.
 ///
@@ -61,7 +61,7 @@ static ADAPTER: std::sync::OnceLock<AdapterDesc> = std::sync::OnceLock::new();
 /// instance.
 fn instance_descriptor() -> wgpu::InstanceDescriptor {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-    // PRIMARY (Vulkan/Metal/DX12/WebGPU) — never the GL fallback. brain reaches
+    // PRIMARY (Vulkan/Metal/DX12/WebGPU) - never the GL fallback. brain reaches
     // old GPUs through Vulkan and browsers through WebGPU, so GL adds nothing;
     // enumerating it initialises EGL, and the EGL driver cores are the crash
     // site of two distinct suite failures: Mesa's loader faulted under
@@ -133,13 +133,13 @@ fn instance() -> wgpu::Instance {
 /// Serialises backend construction across threads.
 ///
 /// Building a backend creates a `wgpu::Instance`, which enumerates **every**
-/// graphics backend — including GL via EGL. Mesa's EGL/GL loader is not safe to
+/// graphics backend - including GL via EGL. Mesa's EGL/GL loader is not safe to
 /// enter concurrently from several threads in one process: doing so faults
 /// inside the driver (seen as `MESA: error: ZINK: failed to choose pdev`
 /// followed by SIGSEGV) whenever more than one test thread builds a device at
 /// the same time. Device creation happens once per engine and never on a hot
 /// path, so serialising it costs nothing measurable and makes multi-threaded
-/// construction safe — which the test suite and any multi-model host both do.
+/// construction safe - which the test suite and any multi-model host both do.
 #[cfg(not(target_arch = "wasm32"))]
 fn init_lock() -> std::sync::MutexGuard<'static, ()> {
     static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -166,10 +166,10 @@ pub fn adapter_desc() -> Option<AdapterDesc> {
 /// `pd_identity` rather than calling it: backends depend only on
 /// `brain-backend-api` (a cross-backend dependency would break that layering),
 /// and both sides must fill `GpuIdentity` identically for `same_device` to
-/// match across enumerations — the contract `backend_api::GpuIdentity` states.
+/// match across enumerations - the contract `backend_api::GpuIdentity` states.
 ///
 /// `ordinal` is the position among adapters with the same (vendor, device) pair
-/// in the caller's enumeration order — for Vulkan adapters that order is
+/// in the caller's enumeration order - for Vulkan adapters that order is
 /// `vkEnumeratePhysicalDevices` (the same ICD order the ash enumeration in
 /// `backend-vulkan` sees), which is what makes the fallback key match across
 /// the two enumerations.
@@ -234,8 +234,8 @@ fn adapter_identity(adapter: &wgpu::Adapter, ordinal: usize) -> backend_api::Gpu
 }
 
 /// The physical-GPU adapter list this backend selects cards from: real GPUs
-/// only (no software rasteriser), narrowed to one graphics backend — Vulkan
-/// when present — so a card enumerated once per backend appears once.
+/// only (no software rasteriser), narrowed to one graphics backend - Vulkan
+/// when present - so a card enumerated once per backend appears once.
 #[cfg(not(target_arch = "wasm32"))]
 async fn physical_adapters(instance: &wgpu::Instance) -> Vec<wgpu::Adapter> {
     let mut adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
@@ -251,7 +251,7 @@ async fn physical_adapters(instance: &wgpu::Instance) -> Vec<wgpu::Adapter> {
     adapters
 }
 
-/// Identities of the physical-GPU adapters, in enumeration order — the
+/// Identities of the physical-GPU adapters, in enumeration order - the
 /// registry's FALLBACK enumeration for machines where the ash path has no
 /// loader/ICD. Where the ash enumeration works it is canonical instead, and
 /// this list matches it card-for-card (same ICD order, same identity keys).
@@ -374,8 +374,8 @@ impl PlCache {
 /// single card deadlocked the test suite roughly half the time (all threads in
 /// futex wait) and made every model activation pay a full device init. One
 /// process now builds this once per distinct kernel set and shares it.
-/// Ceiling for one bounded GPU wait. Generous — a legitimate prefill dispatch
-/// is slow — but finite: `wait_indefinitely()` (the previous value everywhere)
+/// Ceiling for one bounded GPU wait. Generous - a legitimate prefill dispatch
+/// is slow - but finite: `wait_indefinitely()` (the previous value everywhere)
 /// made a wedged queue block the process forever rather than error, which is
 /// why past hangs (`omni_bench encode-vision`, `gpu_core::roofline`) presented as
 /// unkillable instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
@@ -438,7 +438,7 @@ fn read_staging_reuse() -> bool {
 
 struct DeviceShared {
     // ManuallyDrop so teardown can control ORDER and LOCKING: everything —
-    // pipelines, queue, device — is destroyed inside `drop` under the same lock
+    // pipelines, queue, device - is destroyed inside `drop` under the same lock
     // that guards creation. Dropping a device while its driver worker thread
     // ("[vkps] Update") is still optimising pipelines, or while another thread
     // creates on a sibling device, segfaults this NVIDIA driver.
@@ -446,14 +446,14 @@ struct DeviceShared {
     queue: std::mem::ManuallyDrop<wgpu::Queue>,
     /// Serialises submission and readback across every handle on this device.
     ///
-    /// One device, one lane — the same policy the residency executor applies at
+    /// One device, one lane - the same policy the residency executor applies at
     /// the scheduling layer. Mechanically: this NVIDIA driver's worker threads
     /// ("[vkps] Update") segfault intermittently under concurrent
     /// submit + poll(wait) from many host threads on one device, and many
     /// devices per process instead deadlocks it. Serialising the short
     /// encode/submit/poll critical sections is cheap (production serving drives
     /// the GPU from one scheduler thread anyway) and makes multi-threaded use —
-    /// the test suite, multi-model hosts — safe on this driver.
+    /// the test suite, multi-model hosts - safe on this driver.
     io: std::sync::Mutex<()>,
     /// The `MAP_READ` staging buffer [`WgpuBackend::read`] copies into, kept
     /// between calls instead of allocated per call.
@@ -489,7 +489,7 @@ struct DeviceShared {
     /// The dispatch grid must be laid out with the kernel's OWN size, because the
     /// kernel reconstructs its flat invocation id from it.
     wgsizes: Vec<u32>,
-    /// What this device can do — computed once from the adapter at construction
+    /// What this device can do - computed once from the adapter at construction
     /// and shared by every handle (see `backend_api::DeviceCaps`).
     caps: backend_api::DeviceCaps,
     /// Persisted driver pipeline cache (F2), shared across kernel sets on this
@@ -499,10 +499,10 @@ struct DeviceShared {
     /// `BRAIN_PROFILE` per-kernel GPU timing (native only, and only when the
     /// adapter has TIMESTAMP_QUERY): each dispatch runs in its own compute pass
     /// with begin/end timestamps, resolved and accumulated per kernel name.
-    /// Pure observability — the non-profiling flush path is untouched.
+    /// Pure observability - the non-profiling flush path is untouched.
     #[cfg(not(target_arch = "wasm32"))]
     gpu_profile: Option<GpuProfile>,
-    /// Set by `device.set_device_lost_callback` — read by the bounded wait
+    /// Set by `device.set_device_lost_callback` - read by the bounded wait
     /// helper so a timeout can be reported as "device lost" instead of a bare
     /// "wedged submit" when the driver actually dropped the device out from
     /// under us.
@@ -529,6 +529,21 @@ struct DeviceShared {
     /// which then LEAKS the device instead of destroying it - see
     /// [`Self::faulted`]'s use there for the abort this prevents.
     faulted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Stable identity of the physical card this device is bound to (PCI
+    /// bus id / Vulkan `deviceUUID` where available, else the
+    /// `(vendor:device, ordinal)` fallback key) - see `backend_api::
+    /// GpuIdentity`'s own doc for the priority order. Captured once at
+    /// construction and carried unchanged through `new_like_device` (same
+    /// physical device, same identity). This is what lets a per-device
+    /// consumer (`gpu_core::roof`'s cache/persist keying) tell TWO physical
+    /// cards on the same backend apart instead of treating every handle on
+    /// `"wgpu"` as "whichever device this process saw first" - the exact
+    /// limitation `roof.rs` used to carry as an open TODO before this field
+    /// existed. wasm has no ash escape hatch to read PCI/UUID off, so this
+    /// is native-only; `Backend::identity` stays the safe `None` default on
+    /// wasm the same way the trait itself does not declare the method there.
+    #[cfg(not(target_arch = "wasm32"))]
+    identity: backend_api::GpuIdentity,
 }
 
 impl DeviceShared {
@@ -545,6 +560,7 @@ impl DeviceShared {
         caps: backend_api::DeviceCaps,
         plcache: Option<std::sync::Arc<PlCache>>,
         vendor_id: u32,
+        #[cfg(not(target_arch = "wasm32"))] identity: backend_api::GpuIdentity,
     ) -> DeviceShared {
         let device_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -555,8 +571,8 @@ impl DeviceShared {
             });
         }
         // BRAIN_GPU_CHECKED=1 restores wgpu's runtime bounds checks for kernel
-        // debugging; the default trusts the kernels — no clamp instruction on
-        // every buffer load/store — matching the CPU backend, whose Cranelift
+        // debugging; the default trusts the kernels - no clamp instruction on
+        // every buffer load/store - matching the CPU backend, whose Cranelift
         // JIT has always run with `MemFlags::trusted()`. The safety argument is
         // the same on both backends: every kernel self-bounds on its uniform
         // (`if (idx >= total) return`) and buffer sizes are fixed by the model.
@@ -571,7 +587,7 @@ impl DeviceShared {
             .map(|(name, src)| {
                 // SAFETY: kernels self-bound on their uniform and contain no
                 // unbounded loops (every loop is counted by a uniform field);
-                // buffer sizes are fixed by the model — the identical contract
+                // buffer sizes are fixed by the model - the identical contract
                 // the CPU JIT has always relied on with `MemFlags::trusted()`.
                 let module = unsafe {
                     device.create_shader_module_trusted(
@@ -651,6 +667,8 @@ impl DeviceShared {
             writes_pending: std::sync::atomic::AtomicBool::new(false),
             vendor_id,
             faulted,
+            #[cfg(not(target_arch = "wasm32"))]
+            identity,
         }
     }
 }
@@ -748,7 +766,7 @@ impl Drop for DeviceShared {
         // drain the queue, drop the pipelines, then the queue, then the device.
         // Without the drain + serialisation, destroying a device races the
         // driver's background pipeline-optimiser thread and other threads'
-        // device-level calls — observed as intermittent SIGSEGV in
+        // device-level calls - observed as intermittent SIGSEGV in
         // "[vkps] Update" while the test suite ran concurrently.
         let _guard = init_lock();
         // Bounded, not `wait_indefinitely()`: teardown must not join a wedged
@@ -798,7 +816,7 @@ pub struct WgpuBackend {
     /// encoding+submitting immediately, and `flush` records the WHOLE batch into a
     /// single compute pass + one `queue.submit` (on the next read/write/poll). So
     /// a forward's ~130 block dispatches become ONE submission and ONE compute
-    /// pass — instead of ~one queue.submit and ~one pass *per block*, each of
+    /// pass - instead of ~one queue.submit and ~one pass *per block*, each of
     /// which is a GPU pipeline barrier that serialises an integrated GPU.
     /// `Mutex` keeps `WgpuBackend: Sync`; it is only ever locked single-threaded.
     pending: std::sync::Mutex<Vec<WgpuStep>>,
@@ -991,8 +1009,8 @@ impl WgpuBackend {
     ///
     /// Explicit on purpose. Building a device costs seconds and several
     /// concurrent devices on one card are hostile to the driver, so callers that
-    /// need more than one handle — a serving process running several models, a
-    /// test binary — should create the device once and share it. Making that a
+    /// need more than one handle - a serving process running several models, a
+    /// test binary - should create the device once and share it. Making that a
     /// hidden process-global cache would be less code at the call site but would
     /// tie every `Gpu` in the process together invisibly, and make "how many
     /// devices exist" unanswerable from the code.
@@ -1023,6 +1041,8 @@ impl WgpuBackend {
             self.shared.caps.clone(),
             self.shared.plcache.clone(),
             self.shared.vendor_id,
+            #[cfg(not(target_arch = "wasm32"))]
+            self.shared.identity.clone(),
         ));
         WgpuBackend::from_shared(shared, profile_on)
     }
@@ -1044,7 +1064,7 @@ impl WgpuBackend {
     ///
     /// Card selection does NOT happen here: the canonical device registry
     /// (`gpu_core::devices`) resolves placement and calls [`Self::new_on`]. This
-    /// path takes wgpu's high-performance default — the software-rasteriser
+    /// path takes wgpu's high-performance default - the software-rasteriser
     /// fallback on GPU-less boxes, and the only path that exists on wasm.
     pub async fn new_async(kernels: &[(&str, &str)]) -> WgpuBackend {
         let instance = instance();
@@ -1056,7 +1076,22 @@ impl WgpuBackend {
             })
             .await
             .expect("no suitable GPU adapter found");
-        Self::from_adapter(&adapter, kernels).await
+        // Ordinal 0: this path (wgpu's own HighPerformance pick, never an
+        // identity-matched enumeration) does not know its position among
+        // same-(vendor,device) twins. That only degrades the LAST-RESORT
+        // tiebreaker key in `GpuIdentity` - `same_device` prefers UUID, then
+        // PCI bus, both unaffected - so the identity built here is exact on
+        // any card that reports either, and only ambiguous between identical
+        // twin cards with neither, on this specific entry point.
+        #[cfg(not(target_arch = "wasm32"))]
+        let identity = adapter_identity(&adapter, 0);
+        Self::from_adapter(
+            &adapter,
+            kernels,
+            #[cfg(not(target_arch = "wasm32"))]
+            identity,
+        )
+        .await
     }
 
     /// Blocking [`Self::new_on_async`].
@@ -1084,13 +1119,13 @@ impl WgpuBackend {
             *ord += 1;
             if target.same_device(&id) {
                 tracing::debug!(name = %target.name, pci = ?target.pci_bus, enumerated = adapters.len(), "matched the requested physical card");
-                return Self::from_adapter(a, kernels).await;
+                return Self::from_adapter(a, kernels, id).await;
             }
         }
         // ZERO adapters is a different failure from "none of them matched", and
         // only the second one is a placement error. When wgpu enumerates
         // nothing at all there is no other card this could land on by mistake,
-        // so the identity check has nothing left to protect — and
+        // so the identity check has nothing left to protect - and
         // `request_adapter` is a DIFFERENT wgpu path from `enumerate_adapters`
         // (it asks the backends to pick rather than listing them), which is
         // worth trying before declaring the machine GPU-less.
@@ -1143,15 +1178,31 @@ impl WgpuBackend {
         adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
         assert!(adapters.len() >= count, "need {count} discrete GPUs, found {}", adapters.len());
         let mut out = Vec::with_capacity(count);
+        // Same per-(vendor,device) ordinal counting as `enumerate_gpus`, over
+        // this SAME single enumeration - so the identity built here matches
+        // what a caller comparing against `enumerate_gpus`' own list sees.
+        let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
         for a in adapters.iter().take(count) {
-            out.push(Self::from_adapter(a, kernels).await);
+            let info = a.get_info();
+            let ord = ordinals.entry((info.vendor, info.device)).or_insert(0);
+            let identity = adapter_identity(a, *ord);
+            *ord += 1;
+            out.push(Self::from_adapter(a, kernels, identity).await);
         }
         out
     }
 
-    /// Build a backend from an already-selected adapter (shared by [`new_async`]
-    /// and [`new_multi_async`]).
-    async fn from_adapter(adapter: &wgpu::Adapter, kernels: &[(&str, &str)]) -> WgpuBackend {
+    /// Build a backend from an already-selected adapter (shared by [`new_async`],
+    /// [`new_on_async`], and [`new_multi_async`]). `identity` is the caller's
+    /// own already-computed [`backend_api::GpuIdentity`] for this exact
+    /// adapter (each caller enumerates/matches its own way; recomputing it a
+    /// second time in here would risk a different ordinal than the one the
+    /// caller actually selected by).
+    async fn from_adapter(
+        adapter: &wgpu::Adapter,
+        kernels: &[(&str, &str)],
+        #[cfg(not(target_arch = "wasm32"))] identity: backend_api::GpuIdentity,
+    ) -> WgpuBackend {
         let info = adapter.get_info();
         log_adapter(&info);
 
@@ -1188,14 +1239,14 @@ impl WgpuBackend {
         // The one that matters for honest attribution: writing timestamps
         // BETWEEN dispatches inside a single compute pass. Without it the only
         // way to time a dispatch is to give it its own pass, which changes the
-        // execution being measured — so its numbers are not the production
+        // execution being measured - so its numbers are not the production
         // pass's numbers.
         let want_ts_inside =
             want_ts && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
         if want_ts_inside {
             required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
         }
-        // Persisted pipeline cache (F2 warm start) — request where present;
+        // Persisted pipeline cache (F2 warm start) - request where present;
         // absent (WebGPU, non-Vulkan) the engine just stays cold-start.
         if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
             required_features |= wgpu::Features::PIPELINE_CACHE;
@@ -1250,7 +1301,7 @@ impl WgpuBackend {
 
         // `BRAIN_GPU_CHECKED=1` restores wgpu's injected per-access bounds
         // clamps (the debugging default). Otherwise shaders compile TRUSTED —
-        // no clamp instruction on every buffer load/store — matching the CPU
+        // no clamp instruction on every buffer load/store - matching the CPU
         // backend, whose Cranelift JIT has always run with
         // `MemFlags::trusted()` and no bounds checks anywhere. The safety
         // argument is the same on both backends: every kernel self-bounds on
@@ -1260,7 +1311,15 @@ impl WgpuBackend {
         let caps = Self::query_caps(adapter, &info, &device);
         let plcache = PlCache::open(&device, adapter, &info).map(std::sync::Arc::new);
         let shared = std::sync::Arc::new(DeviceShared::compile(
-            device, queue, kernels, want_ts, caps, plcache, info.vendor,
+            device,
+            queue,
+            kernels,
+            want_ts,
+            caps,
+            plcache,
+            info.vendor,
+            #[cfg(not(target_arch = "wasm32"))]
+            identity,
         ));
         WgpuBackend::from_shared(shared, profile_on)
     }
@@ -1309,7 +1368,7 @@ impl WgpuBackend {
     }
 
     /// Fill [`backend_api::DeviceCaps`] from what wgpu can actually report.
-    /// Unknowable values stay `None`/false — never assumed present.
+    /// Unknowable values stay `None`/false - never assumed present.
     fn query_caps(
         adapter: &wgpu::Adapter,
         info: &wgpu::AdapterInfo,
@@ -1328,7 +1387,7 @@ impl WgpuBackend {
             // A software rasteriser executes on host cores; a selector must
             // size for cores, not for thousands of GPU lanes.
             wgpu::DeviceType::Cpu => DeviceClass::Cpu,
-            // Unknown/virtual: the conservative middle — no discrete-GPU tile
+            // Unknown/virtual: the conservative middle - no discrete-GPU tile
             // assumptions; unified memory is decided separately (below), so
             // this does NOT assume zero-copy.
             _ => DeviceClass::IntegratedGpu,
@@ -1363,7 +1422,7 @@ impl WgpuBackend {
             peak_gflops: None,
             numeric: NumericSupport {
                 // dot4I8Packed is core WGSL: naga lowers it to hardware DP4A
-                // where the driver has it, else a polyfill — the packed-int8
+                // where the driver has it, else a polyfill - the packed-int8
                 // kernels execute either way and the 4x weight-byte saving
                 // holds regardless.
                 int8_dot: true,
@@ -1580,7 +1639,7 @@ impl WgpuBackend {
     ///
     /// This is the honest per-kernel time source. The alternative
     /// ([`Self::flush_profiled`]) gives each dispatch its own pass to get
-    /// begin/end timestamps, which changes the execution being measured — wgpu
+    /// begin/end timestamps, which changes the execution being measured - wgpu
     /// inserts barriers between passes, so a dispatch that would have overlapped
     /// its neighbour no longer does, and the totals are not the production
     /// pass's totals (measured: a "GPU time" total several times the wall time
@@ -1589,7 +1648,7 @@ impl WgpuBackend {
     /// Here the pass structure is untouched. `n + 1` timestamps bracket `n`
     /// dispatches, so dispatch `i` costs `t[i+1] - t[i]`. Query sets cap out
     /// well below a large graph's dispatch count, so the timestamps are spread
-    /// over several sets — all written inside the SAME pass, which is legal;
+    /// over several sets - all written inside the SAME pass, which is legal;
     /// only `resolve_query_set` has to wait until the pass closes. Each set
     /// repeats its predecessor's final timestamp as its own first, so a chunk
     /// boundary does not lose a dispatch.
@@ -1983,7 +2042,7 @@ impl WgpuBackend {
 
     /// Clear the given buffers, then run all steps as a compute pass. The work is
     /// RECORDED into a lazily-accumulated command encoder (one per forward) and
-    /// only sent to the GPU on the next read/write/poll — so a whole forward's
+    /// only sent to the GPU on the next read/write/poll - so a whole forward's
     /// dispatches coalesce into a single `queue.submit` instead of one per call.
     /// wgpu inserts the inter-dispatch barriers within and across the passes.
     pub fn submit(&self, clears: &[&wgpu::Buffer], steps: &[WgpuStep]) {
@@ -2016,7 +2075,7 @@ impl WgpuBackend {
         self.shared.writes_pending.store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// [`Self::write`] at a byte offset of `offset_words * 4` — see the
+    /// [`Self::write`] at a byte offset of `offset_words * 4` - see the
     /// `Backend::write_at` doc for why a caller streaming a large tensor should
     /// call this in bounded chunks rather than `write` once for the whole thing.
     pub fn write_at(&self, buf: &wgpu::Buffer, offset_words: u64, data: &[u32]) {
@@ -2029,7 +2088,7 @@ impl WgpuBackend {
     /// Block until all submitted GPU work has completed, letting wgpu reclaim the
     /// transient per-submit resources (command buffers and `write_buffer` staging
     /// memory) that accrue otherwise. A long training loop that only submits —
-    /// never reads back — never triggers this reclaim, so those transients pile
+    /// never reads back - never triggers this reclaim, so those transients pile
     /// up in the GPU memory aperture until an allocation fails mid-run (on
     /// integrated GPUs the aperture is small, ~355 MiB). Call once per step to
     /// bound the in-flight transient memory to a single iteration.
@@ -2044,7 +2103,7 @@ impl WgpuBackend {
 
     /// [`Self::poll_wait`], but give up after `timeout` instead of blocking
     /// forever. `wgpu::PollType::Wait`'s own `timeout` field does the actual
-    /// bounding — this is safe to call (unlike a hypothetical bounded wait on
+    /// bounding - this is safe to call (unlike a hypothetical bounded wait on
     /// the Vulkan backend) because a `PollError::Timeout` here does not
     /// invalidate anything: wgpu still owns and tracks every resource's real
     /// completion state internally regardless of whether this call waited
@@ -2242,7 +2301,7 @@ impl WgpuBackend {
 // methods take resolution priority, so `WgpuBackend::method(self, …)` is
 // unambiguous.
 
-/// Weak handle onto a [`DeviceShared`] — see `backend_api::Backend::downgrade`.
+/// Weak handle onto a [`DeviceShared`] - see `backend_api::Backend::downgrade`.
 /// Holds no strong count, so the device still dies with its last real handle.
 struct WeakWgpu(std::sync::Weak<DeviceShared>);
 
@@ -2260,6 +2319,10 @@ impl Backend for WgpuBackend {
     }
     fn caps(&self) -> backend_api::DeviceCaps {
         self.shared.caps.clone()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn identity(&self) -> Option<backend_api::GpuIdentity> {
+        Some(self.shared.identity.clone())
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn dump_profile(&self) {
@@ -2314,7 +2377,7 @@ impl Backend for WgpuBackend {
         })
     }
     // Forward the device's real limit; without this override the trait default
-    // (a fixed ~2 GiB) silently misreports the card — too small for a big-VRAM
+    // (a fixed ~2 GiB) silently misreports the card - too small for a big-VRAM
     // card, too LARGE for a downlevel device, where an oversized binding is a
     // validation error at dispatch. (Native trait only; the wasm trait variant
     // has no such method.)
@@ -2388,7 +2451,7 @@ impl Backend for WgpuBackend {
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn flush(&self) {
-        // Submit the accumulated compute pass; no wait — the point is overlap.
+        // Submit the accumulated compute pass; no wait - the point is overlap.
         WgpuBackend::flush(self);
     }
 }

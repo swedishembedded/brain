@@ -603,6 +603,16 @@ mod native_facade {
             self.inner.kind()
         }
 
+        /// Stable identity of the PHYSICAL card this handle runs on - see
+        /// `backend_api::GpuIdentity`. `None` where the backend has not been
+        /// wired to expose one (today: everything except `backend-wgpu`), in
+        /// which case a per-device consumer must treat every handle on that
+        /// backend as one shared device - the same process-wide,
+        /// first-device-wins behaviour every backend had before this existed.
+        pub fn identity(&self) -> Option<backend_api::GpuIdentity> {
+            self.inner.identity()
+        }
+
         /// What this device can actually do - class, limits, numeric tiers.
         /// Cached at backend construction; reading it is free.
         ///
@@ -613,7 +623,7 @@ mod native_facade {
         /// never assumed present.
         pub fn caps(&self) -> backend_api::DeviceCaps {
             let mut c = self.inner.caps();
-            if let Some(r) = crate::roof::known(self.kind()) {
+            if let Some(r) = crate::roof::known(self.kind(), self.identity().as_ref()) {
                 c.peak_gflops = Some(r.gflops);
                 c.peak_bandwidth_gbs = Some(r.gbs);
             }

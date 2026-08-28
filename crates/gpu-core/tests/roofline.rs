@@ -242,7 +242,7 @@ fn reprofile_overwrites_a_stale_cached_value() {
 
     let fresh = roof::reprofile(&gpu).expect("reprofile must measure a probeable device");
     assert_ne!((fresh.gflops, fresh.gbs), (1.0, 1.0), "reprofile served the hand-planted stale record instead of measuring");
-    assert_eq!(roof::known(gpu.kind()), Some(fresh), "reprofile must update the in-memory cache too, not just the disk file");
+    assert_eq!(roof::known(gpu.kind(), gpu.identity().as_ref()), Some(fresh), "reprofile must update the in-memory cache too, not just the disk file");
 
     let reloaded_text = std::fs::read_to_string(&stale_path).unwrap();
     assert!(reloaded_text.contains(&format!("gflops={}", fresh.gflops)), "reprofile must overwrite the on-disk record: got {reloaded_text:?}");
@@ -312,7 +312,7 @@ fn measure_is_bounded_by_the_roof_budget_even_if_a_rung_stalls() {
 fn a_streaming_kernel_is_graded_against_bandwidth_not_flops() {
     // Pure arithmetic on the type — no device needed, so this runs everywhere
     // and pins the classification rule itself.
-    let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
+    let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0), f16_gflops: None };
     // `axpy`: 2 FLOP per 12 bytes moved.
     assert_eq!(r.classify(2, 12), Bound::Memory);
     // `col2im` measured a small fraction of that roof, far under the

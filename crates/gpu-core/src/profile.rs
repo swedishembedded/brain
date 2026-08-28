@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn defects_are_rows_under_their_own_classs_floor() {
-        let roofs = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
+        let roofs = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0), f16_gflops: None };
         // col2im-shaped: a long row moving ~3.3 GB, i.e. a small fraction of
         // the bandwidth roof.
         let col2im = row("col2im", 0.14275, 0, 3_312_000_000, true);

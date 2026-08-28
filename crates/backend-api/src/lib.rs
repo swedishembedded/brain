@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Backend abstraction API — the seam every brain compute backend plugs into.
+//! Backend abstraction API - the seam every brain compute backend plugs into.
 //!
 //! The one contract here is [`Backend`] - the *eager, per-step* compute
 //! device (wgpu, native CPU JIT, native Vulkan). It mirrors the historical
@@ -23,7 +23,7 @@
 //!
 //! A backend is registered by name (see [`register_backend`]); the facade
 //! constructs one via [`create_backend`]. That is what makes "add a backend" a
-//! new crate that depends only on this one — no edits to `brain-gpu-core`.
+//! new crate that depends only on this one - no edits to `brain-gpu-core`.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ type Erased = dyn Any + Send + Sync;
 #[cfg(target_arch = "wasm32")]
 type Erased = dyn Any;
 
-/// `Send + Sync` on native, empty on wasm — the bound a value must meet to be
+/// `Send + Sync` on native, empty on wasm - the bound a value must meet to be
 /// wrapped in a neutral handle. (A blanket impl makes it automatic.)
 #[cfg(not(target_arch = "wasm32"))]
 pub trait ThreadSafe: Send + Sync {}
@@ -58,7 +58,7 @@ impl<T: ?Sized> ThreadSafe for T {}
 /// reproduces the same tiling so the kernels' index math is identical.
 pub const MAX_GROUPS_PER_DIM: u32 = 65535;
 
-/// The workgroup size a kernel gets when its source declares none — and the
+/// The workgroup size a kernel gets when its source declares none - and the
 /// size all but the register-tiled GEMMs use.
 pub const DEFAULT_WORKGROUP_SIZE: u32 = 64;
 
@@ -71,7 +71,7 @@ pub fn grid(threads: u32) -> (u32, u32) {
 
 /// [`grid`] for a kernel whose `@workgroup_size` is `wg` rather than 64.
 ///
-/// A kernel is free to declare a different workgroup size — a register-tiled
+/// A kernel is free to declare a different workgroup size - a register-tiled
 /// GEMM wants 256 invocations per tile so it can hold a 128×128 output block —
 /// but then *every* backend must lay out the grid with that same `wg`, and the
 /// kernel must reconstruct its flat id as `gid.y*(nwg.x*WG)+gid.x` using its own
@@ -95,12 +95,12 @@ pub fn grid_ws(threads: u32, wg: u32) -> (u32, u32) {
 /// point, and the wgpu backend would have to re-parse), the attribute is a
 /// literal in every in-repo kernel, and a wrong answer here would show up
 /// immediately as a wrong dispatch size in the cross-backend parity tests.
-/// Only decimal literals are recognised — `@workgroup_size(WG)` with a `const`
+/// Only decimal literals are recognised - `@workgroup_size(WG)` with a `const`
 /// would silently fall back to 64, so kernels spell the number out.
 pub fn workgroup_size_of(src: &str) -> u32 {
     // Scan the CODE, not the comments. This used to take the first
     // `@workgroup_size` anywhere in the source, and ten in-repo kernels mention
-    // the attribute in their header prose ("`@workgroup_size(256)`.") — which
+    // the attribute in their header prose ("`@workgroup_size(256)`.") - which
     // sits ABOVE the declaration, so the parse read the comment. Every one of
     // them happens to state the right number, so nothing was broken; a single
     // stale or aspirational comment would have laid out every backend's
@@ -124,7 +124,7 @@ pub fn workgroup_size_of(src: &str) -> u32 {
 }
 
 /// Per-kernel workgroup sizes for a `(name, wgsl)` registration list, in the
-/// same order — what a backend stores alongside its compiled pipelines.
+/// same order - what a backend stores alongside its compiled pipelines.
 pub fn workgroup_sizes(kernels: &[(&str, &str)]) -> Vec<u32> {
     kernels.iter().map(|(_, src)| workgroup_size_of(src)).collect()
 }
@@ -136,16 +136,16 @@ pub fn f(x: f32) -> u32 {
 
 // ---- device capability model ------------------------------------------------
 //
-// What the device can actually do — the inputs a kernel selector needs to pick
+// What the device can actually do - the inputs a kernel selector needs to pick
 // a variant, and what `brain perf` records so a result is machine-comparable.
 // One struct, plain data, filled by each backend at construction and cached;
-// where a value is unknowable it is `None`, and a consumer must cope — an
+// where a value is unknowable it is `None`, and a consumer must cope - an
 // unknown capability is never assumed present.
 
-/// Broad device class — the coarsest input a kernel selector keys on.
+/// Broad device class - the coarsest input a kernel selector keys on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeviceClass {
-    /// Host CPU execution — the Cranelift JIT backend, or a software
+    /// Host CPU execution - the Cranelift JIT backend, or a software
     /// rasteriser behind a GPU API (llvmpipe/lavapipe): the work runs on cores
     /// either way, and tiles sized for thousands of GPU lanes thrash both.
     Cpu,
@@ -155,7 +155,7 @@ pub enum DeviceClass {
     /// [`Backend`]; the class exists so caps recorded from that path share the
     /// same vocabulary.
     Npu,
-    /// WebGPU in a browser — the portability floor: no subgroups, no f16,
+    /// WebGPU in a browser - the portability floor: no subgroups, no f16,
     /// no native queries beyond the WebGPU limits.
     Browser,
 }
@@ -163,7 +163,7 @@ pub enum DeviceClass {
 /// Numeric paths a device supports beyond the always-present fp32 baseline.
 ///
 /// Semantics are "brain's kernels for this tier execute on this device", as
-/// established by the backend at construction — never assumed from the device's
+/// established by the backend at construction - never assumed from the device's
 /// marketing. Speed *within* a supported tier is the autotuner's question, not
 /// this struct's: a device may expose f16 at 1/64 rate (Pascal), which is why
 /// `f16` here means *fast* f16 and stays `false` until measured.
@@ -175,7 +175,7 @@ pub enum DeviceClass {
 /// storage-only support is never sufficient to skip that promotion.
 #[derive(Clone, Copy, Debug)]
 pub struct NumericSupport {
-    /// Always true — the portable baseline and the numerical reference every
+    /// Always true - the portable baseline and the numerical reference every
     /// other tier is parity-gated against.
     pub f32: bool,
     /// The packed-int8 dot kernels (`matmul_i8*`, WGSL `dot4I8Packed`)
@@ -485,13 +485,13 @@ pub struct DeviceCaps {
     /// real GPU path; false on the CPU JIT, whose split-at-barrier execution
     /// model mis-executes the decode-regime reduction kernels (its native
     /// fast paths own that regime instead). A selector must not choose a
-    /// cooperative variant where this is false — that is a correctness gate,
+    /// cooperative variant where this is false - that is a correctness gate,
     /// not a tuning preference.
     pub workgroup_reductions: bool,
     /// Peak memory bandwidth, GB/s. `None` = unknown.
     ///
     /// No graphics/compute API reports this, so it is filled by *measurement*
-    /// (`gpu_core::roof`), not by a query — and it stays `None` until something
+    /// (`gpu_core::roof`), not by a query - and it stays `None` until something
     /// measures it. It is the denominator every memory-bound kernel is judged
     /// against; reporting a memory-bound kernel as a FLOP rate is meaningless.
     pub peak_bandwidth_gbs: Option<f32>,
@@ -499,8 +499,8 @@ pub struct DeviceCaps {
     ///
     /// Same rule as [`Self::peak_bandwidth_gbs`]: measured, never queried and
     /// never derived from a marketing figure. Together the two are the roofline
-    /// this engine's kernels are graded on, and having them here — rather than
-    /// as a `PEAK_TFLOPS` literal in each bench — is what makes a "% of peak"
+    /// this engine's kernels are graded on, and having them here - rather than
+    /// as a `PEAK_TFLOPS` literal in each bench - is what makes a "% of peak"
     /// claim a statement about *the device that ran*, on any hardware.
     pub peak_gflops: Option<f32>,
     pub numeric: NumericSupport,
@@ -511,7 +511,7 @@ impl DeviceCaps {
     ///
     /// The ridge is `peak_gflops / peak_bandwidth_gbs` FLOP/byte: below it a
     /// kernel cannot be compute-bound however it is tiled, above it bandwidth
-    /// cannot be the limit. `None` when either roof is unmeasured — an
+    /// cannot be the limit. `None` when either roof is unmeasured - an
     /// unknown capability is never assumed present.
     pub fn ridge_flops_per_byte(&self) -> Option<f32> {
         match (self.peak_gflops, self.peak_bandwidth_gbs) {
@@ -613,7 +613,7 @@ impl std::ops::BitOr for BufUsage {
 /// An opaque device buffer on whichever backend created it. Model code holds
 /// these and passes `&DeviceBuffer` to the dispatch methods without knowing the
 /// backend; the backend downcasts back to its native buffer type. Cloning is
-/// cheap (an `Arc` bump) and aliases the same underlying buffer — every backend's
+/// cheap (an `Arc` bump) and aliases the same underlying buffer - every backend's
 /// native buffer is already reference-counted or a no-op-drop handle.
 #[derive(Clone)]
 pub struct DeviceBuffer(Arc<Erased>);
@@ -644,7 +644,7 @@ impl DeviceBuffer {
         Arc::strong_count(&self.0) == 1
     }
     /// Recover the native buffer. Panics on a backend mismatch (a buffer from one
-    /// backend handed to another) — the same fail-fast the enum dispatch had.
+    /// backend handed to another) - the same fail-fast the enum dispatch had.
     pub fn downcast_ref<T: Any>(&self) -> &T {
         self.0
             .downcast_ref::<T>()
@@ -656,7 +656,7 @@ impl DeviceBuffer {
 /// and the uniform params it was recorded with. Attached by the `gpu_core`
 /// facade at `step*` time, so cost accounting (offline `cost_of`, online
 /// per-submit counters) never reaches into a backend's native dispatch record.
-/// `params` is `None` for `step_buf` dispatches — their uniform lives in a
+/// `params` is `None` for `step_buf` dispatches - their uniform lives in a
 /// caller-owned buffer whose contents the facade cannot see.
 #[derive(Clone, Debug)]
 pub struct StepMeta {
@@ -723,7 +723,7 @@ pub trait Backend: Send + Sync {
     /// start) with host `data`. Native-only, like `read`/`poll_wait` below: it
     /// exists so a large host upload (an importer streaming multi-GB weight
     /// tensors) can be split into bounded chunks instead of one `write` call
-    /// sized to the whole tensor — on this engine's non-ReBAR discrete GPUs,
+    /// sized to the whole tensor - on this engine's non-ReBAR discrete GPUs,
     /// wgpu's internal write-staging allocation is kept (not freed) for reuse
     /// and sized to the largest single write ever issued, so one giant `write`
     /// per tensor leaves a same-size staging buffer permanently resident
@@ -765,14 +765,14 @@ pub trait Backend: Send + Sync {
     /// report "unmeasurable" instead of hanging the whole process.
     ///
     /// **On `false` (timeout), the backend's completion state for the timed-
-    /// out work is UNKNOWN — it may finish later, on its own schedule.** A
+    /// out work is UNKNOWN - it may finish later, on its own schedule.** A
     /// caller MUST NOT reuse buffers, descriptor sets, or any other resource
     /// that timed-out work might still be writing to; treat the whole
     /// device/backend handle as unsafe to continue timing precisely and
     /// either drop it or fall back to the unbounded `poll_wait` before doing
     /// anything else with it. This is why the default implementation below
     /// (inherited by any backend that does not override it) simply calls the
-    /// normal blocking `poll_wait` and always returns `true` — that is
+    /// normal blocking `poll_wait` and always returns `true` - that is
     /// exactly as safe as today's behaviour, at the cost of not actually
     /// bounding anything. Only override this where the backend's own API can
     /// honestly report "timed out, nothing was disturbed" (see
@@ -780,7 +780,7 @@ pub trait Backend: Send + Sync {
     /// `backend-vulkan` does NOT override this: its resource recycling is
     /// only sound once a fence wait has *actually* proven the work idle
     /// (`crates/backend-vulkan/src/lib.rs`'s `recycle_transients` doc), and a
-    /// timed-out `vkWaitForFences` leaves that unproven — threading a bound
+    /// timed-out `vkWaitForFences` leaves that unproven - threading a bound
     /// through it safely needs a real design pass, filed as a follow-up
     /// rather than risked here.
     fn poll_wait_timeout(&self, _timeout: std::time::Duration) -> bool {
@@ -788,7 +788,7 @@ pub trait Backend: Send + Sync {
         true
     }
     /// Send recorded-but-unsubmitted work to the device WITHOUT waiting for
-    /// completion — the frame-pipelining hook: start the device on frame n,
+    /// completion - the frame-pipelining hook: start the device on frame n,
     /// overlap the host's preprocessing of frame n+1, synchronise at the next
     /// `read`. Backends that execute eagerly at `submit` (CPU) have nothing
     /// pending, so the default no-op is correct for them.
@@ -823,7 +823,7 @@ pub trait Backend: Send + Sync {
         0
     }
     /// The largest a single storage-buffer binding may be on this device, in
-    /// bytes — the hardware limit a kernel's biggest buffer must fit under.
+    /// bytes - the hardware limit a kernel's biggest buffer must fit under.
     /// Card-dependent (wgpu reports the adapter's value); the default is the
     /// common ~2 GiB so callers that never query a real device stay conservative.
     /// A second handle onto the **same** device: same queue and compiled
@@ -834,7 +834,7 @@ pub trait Backend: Send + Sync {
     /// devices on one physical card are hostile to the driver, so a process
     /// running many models wants one device and many handles.
     /// Which execution backend this is: `"wgpu" | "cpu" | "vulkan"`. Kernel
-    /// selection needs it — e.g. the decode-regime workgroup kernels help every
+    /// selection needs it - e.g. the decode-regime workgroup kernels help every
     /// GPU but are mis-executed by the CPU JIT's barrier-split model (and the
     /// CPU backend has its own native fast paths), so they are gated off there.
     fn kind(&self) -> &'static str;
@@ -846,13 +846,13 @@ pub trait Backend: Send + Sync {
     /// A weak handle onto this backend's shared device state, for pools and
     /// fixtures that must NOT keep the device alive: a device should die with
     /// its last real handle (an orderly, in-process `vkDestroyDevice`), never
-    /// at process exit — a device torn down during exit crashes the NVIDIA
+    /// at process exit - a device torn down during exit crashes the NVIDIA
     /// driver's worker threads. `None` when the backend has no shared state.
     fn downgrade(&self) -> Option<Box<dyn WeakBackend>> {
         None
     }
 
-    /// A backend for a **different kernel set** on the **same device** — the
+    /// A backend for a **different kernel set** on the **same device** - the
     /// multi-model form of [`Backend::share`]. One process serving N models
     /// wants one device carrying N pipeline sets, not N devices: many
     /// concurrent devices on one card is both slow (a full device init each)
@@ -882,13 +882,25 @@ pub trait Backend: Send + Sync {
         u64::MAX
     }
 
-    /// What this device can actually do — see [`DeviceCaps`]. Filled at
+    /// What this device can actually do - see [`DeviceCaps`]. Filled at
     /// construction; querying is a cached read, never a device round-trip.
     fn caps(&self) -> DeviceCaps;
 
+    /// Stable identity of the PHYSICAL card this handle runs on - see
+    /// [`GpuIdentity`]. `None` where the backend has not (yet) been wired to
+    /// expose one - today that is every backend except `backend-wgpu` - in
+    /// which case a caller keying a per-device cache on this falls back to
+    /// treating every handle on that backend as the same device (the
+    /// process-wide, first-device-wins behaviour every backend had before
+    /// `backend-wgpu` grew real identity plumbing). A cached read, never a
+    /// device round-trip.
+    fn identity(&self) -> Option<GpuIdentity> {
+        None
+    }
+
     /// Device-op accounting for THIS handle since its creation, if the backend
     /// counts (relaxed atomics, negligible next to a dispatch). `None` = not
-    /// counted — a consumer must report null, never zero.
+    /// counted - a consumer must report null, never zero.
     fn stats(&self) -> Option<DeviceStats> {
         None
     }
@@ -897,7 +909,7 @@ pub trait Backend: Send + Sync {
     /// whether it is now on. `false` means the backend cannot time kernels.
     ///
     /// This exists because host wall-clock around a drained slice is not a
-    /// measurement of a kernel — it measures launch + execute + fence, whose
+    /// measurement of a kernel - it measures launch + execute + fence, whose
     /// floor is roughly constant and therefore inflates small kernels in inverse
     /// proportion to their size (by more than an order of magnitude, measured).
     /// A profiler that attributes time between kernels must use device time.
@@ -907,7 +919,7 @@ pub trait Backend: Send + Sync {
 
     /// Per-kernel accumulated DEVICE time since the last [`Self::reset_kernel_times`],
     /// as `(kernel name, milliseconds, calls)`. `None` where the backend cannot
-    /// time kernels — a consumer must then say so, never substitute host time
+    /// time kernels - a consumer must then say so, never substitute host time
     /// silently.
     fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
         None
@@ -917,7 +929,7 @@ pub trait Backend: Send + Sync {
     fn reset_kernel_times(&self) {}
 
     /// Print the per-kernel `BRAIN_PROFILE` timing table NOW (stderr). The
-    /// dump otherwise fires only at drop — which a RESIDENT model held in a
+    /// dump otherwise fires only at drop - which a RESIDENT model held in a
     /// static never reaches, so its profile was unreadable by construction.
     /// No-op when profiling is off or the backend does not time kernels.
     fn dump_profile(&self) {}
@@ -934,7 +946,7 @@ pub fn profile_enabled() -> bool {
     std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false)
 }
 
-/// Per-handle device-op counters — the queryable form of what
+/// Per-handle device-op counters - the queryable form of what
 /// `BRAIN_PROFILE` used to print only to stderr. What a benchmark records so
 /// "how many submits/readbacks did this run cost" is machine-readable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -975,14 +987,14 @@ pub trait Backend {
     fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step;
     /// Clear the given buffers, then run all recorded steps.
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]);
-    /// What this device can actually do — see [`DeviceCaps`]. The default is
+    /// What this device can actually do - see [`DeviceCaps`]. The default is
     /// the browser floor, which is exactly what wasm is.
     fn caps(&self) -> DeviceCaps {
         DeviceCaps::portable_baseline(DeviceClass::Browser)
     }
 }
 
-/// A weak reference to a backend's shared device state — see [`Backend::downgrade`].
+/// A weak reference to a backend's shared device state - see [`Backend::downgrade`].
 pub trait WeakBackend: ThreadSafe {
     /// A fresh strong handle, if the device is still alive.
     fn upgrade(&self) -> Option<Box<dyn Backend>>;
@@ -991,7 +1003,7 @@ pub trait WeakBackend: ThreadSafe {
 // ---- backend registry -------------------------------------------------------
 //
 // A backend registers a factory under a name; the facade constructs one by name.
-// This is what lets a new backend be a standalone crate — implement `Backend`,
+// This is what lets a new backend be a standalone crate - implement `Backend`,
 // call `register_backend`, and the dispatch core never changes. Native-only: the
 // wasm build has exactly one backend (wgpu) and the facade holds it concretely.
 
@@ -1040,7 +1052,7 @@ mod tests {
     /// A comment mentioning the attribute must not win over the declaration.
     ///
     /// Ten in-repo kernels document their own `@workgroup_size` in the header
-    /// prose, which sits ABOVE the code — so a first-occurrence scan read the
+    /// prose, which sits ABOVE the code - so a first-occurrence scan read the
     /// comment. All ten happen to agree with their code, so this was latent;
     /// the failure it prevents is silent and total (every backend lays out the
     /// dispatch grid with the wrong size, and the kernel reconstructs its flat
@@ -1115,7 +1127,7 @@ fn main() {}\n";
         }
     }
 
-    /// Past the 65535-group limit the grid tiles into Y — the case every
+    /// Past the 65535-group limit the grid tiles into Y - the case every
     /// kernel's `gid.y*(nwg.x*WG)+gid.x` reconstruction depends on.
     #[test]
     fn grid_ws_tiles_into_y_past_the_limit() {
