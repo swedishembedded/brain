@@ -49,18 +49,47 @@
 # bit-for-bit. To swap a face INTO another photograph, use face_swap.sh, which
 # is built for exactly that and masks the head for you.
 #
-# Optional, all env: ADAPTER, LORA_SCALE, MASK, SEED (first seed; each result
-# adds 1), STRENGTH (mask mode only), STEPS, REF_PX (bound on each reference's
-# encoded long edge; 0 = each at its own resolution), SIZE (WxH, default mode
-# only), POSE, VARIANT, PRECISION, BRAIN.
+# The LoRA and the text encoder are FLAGS, because they are the two things
+# worth changing between one run and the next:
+#
+#   examples/imagegen/portrait_from_refs.sh ~/photos 4 \\
+#     --adapter out/adapter.brain --lora-scale 0.5
+#
+#   --adapter <path>        a per-identity LoRA (see train_identity_lora.sh)
+#   --lora-scale <s>        its strength, default 0.5 - see above, start low
+#   --text-encoder <path>   swap the encoder: an HF directory, or a single
+#                           .safetensors/.gguf file
+#   --                      end of flags (a count may follow the directory)
+#
+# Every flag also has an environment variable of the same name in caps
+# (ADAPTER, LORA_SCALE, TEXT_ENCODER), and the flag wins when both are given.
+#
+# Other options, env only: MASK, SEED (first seed; each result adds 1),
+# STRENGTH (mask mode only), STEPS, REF_PX (bound on each reference's encoded
+# long edge; 0 = each at its own resolution), SIZE (WxH, default mode only),
+# POSE, VARIANT, PRECISION, BRAIN.
 #
 # Weights come from BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}; brain picks a card
 # with room unless BRAIN_DEVICE says otherwise.
 
 set -euo pipefail
 
-D="${1:?usage: portrait_from_refs.sh <dir-of-images> [count]}"; D="${D%/}"
-N="${2:-4}"
+USAGE='usage: portrait_from_refs.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-encoder P]'
+D=""; N=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --adapter)      ADAPTER="${2:?--adapter needs a path}"; shift 2 ;;
+    --lora-scale)   LORA_SCALE="${2:?--lora-scale needs a number}"; shift 2 ;;
+    --text-encoder) TEXT_ENCODER="${2:?--text-encoder needs a path}"; shift 2 ;;
+    -h|--help)      echo "$USAGE"; exit 0 ;;
+    --)             shift; continue ;;
+    -*)             echo "unknown flag $1" >&2; echo "$USAGE" >&2; exit 1 ;;
+    *)              if [ -z "$D" ]; then D="$1"; elif [ -z "$N" ]; then N="$1";
+                    else echo "unexpected argument $1" >&2; exit 1; fi; shift ;;
+  esac
+done
+[ -n "$D" ] || { echo "$USAGE" >&2; exit 1; }
+D="${D%/}"; N="${N:-4}"
 BRAIN="${BRAIN:-./target/release/brain}"
 
 mapfile -t REFS < <(
@@ -97,7 +126,11 @@ fi
 
 for f in "${REFS[@]}"; do ARGS+=(--ref "$f"); done
 [ "${#REFS[@]}" -gt 0 ] || [ -n "${ADAPTER:-}" ] || { echo "$D: no numbered reference images" >&2; exit 1; }
-[ -n "${ADAPTER:-}" ] && ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+if [ -n "${ADAPTER:-}" ]; then
+  [ -e "$ADAPTER" ] || { echo "adapter not found: $ADAPTER" >&2; exit 1; }
+  ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+fi
+[ -n "${TEXT_ENCODER:-}" ] && ARGS+=(--text-encoder "$TEXT_ENCODER")
 
 for i in $(seq 1 "$N"); do
   "$BRAIN" flux2 generate \

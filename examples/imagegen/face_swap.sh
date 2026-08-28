@@ -56,9 +56,22 @@
 # is a real photograph almost everywhere, so it looks convincing whether or not
 # the face actually changed.
 #
-# Optional, all env: MASK (0 disables), MASK_GROW, STRENGTH, ADAPTER (a
-# per-identity LoRA from train_identity_lora.sh -- it composes with the
-# references), LORA_SCALE, SEED, STEPS, PROMPT, VARIANT, PRECISION, BRAIN.
+# The LoRA and the text encoder are FLAGS, matching portrait_from_refs.sh:
+#
+#   examples/imagegen/face_swap.sh ~/shot 2 --adapter out/adapter.brain
+#
+#   --adapter <path>        a per-identity LoRA from train_identity_lora.sh --
+#                           it COMPOSES with the face references, and the two
+#                           together measure far better than either alone
+#   --lora-scale <s>        its strength, default 0.5
+#   --text-encoder <path>   swap the encoder: an HF directory, or a single
+#                           .safetensors/.gguf file
+#
+# Each also has an environment variable of the same name in caps, and the flag
+# wins when both are given.
+#
+# Other options, env only: MASK (0 disables), MASK_GROW, STRENGTH, SEED, STEPS,
+# PROMPT, VARIANT, PRECISION, BRAIN.
 #
 # Weights: BRAIN_SCRFD_DIR for the landmarks, BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}
 # for generation. References are sized by brain and the output takes the
@@ -66,8 +79,22 @@
 
 set -euo pipefail
 
-D="${1:?usage: face_swap.sh <dir-of-images> [count]}"; D="${D%/}"
-N="${2:-2}"
+USAGE='usage: face_swap.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-encoder P]'
+D=""; N=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --adapter)      ADAPTER="${2:?--adapter needs a path}"; shift 2 ;;
+    --lora-scale)   LORA_SCALE="${2:?--lora-scale needs a number}"; shift 2 ;;
+    --text-encoder) TEXT_ENCODER="${2:?--text-encoder needs a path}"; shift 2 ;;
+    -h|--help)      echo "$USAGE"; exit 0 ;;
+    --)             shift; continue ;;
+    -*)             echo "unknown flag $1" >&2; echo "$USAGE" >&2; exit 1 ;;
+    *)              if [ -z "$D" ]; then D="$1"; elif [ -z "$N" ]; then N="$1";
+                    else echo "unexpected argument $1" >&2; exit 1; fi; shift ;;
+  esac
+done
+[ -n "$D" ] || { echo "$USAGE" >&2; exit 1; }
+D="${D%/}"; N="${N:-2}"
 BRAIN="${BRAIN:-./target/release/brain}"
 W="$D/.swap"; mkdir -p "$W"
 
@@ -100,7 +127,11 @@ else
 fi
 
 for f in "${FACES[@]}"; do ARGS+=(--ref "$f"); done
-[ -n "${ADAPTER:-}" ] && ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+if [ -n "${ADAPTER:-}" ]; then
+  [ -e "$ADAPTER" ] || { echo "adapter not found: $ADAPTER" >&2; exit 1; }
+  ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+fi
+[ -n "${TEXT_ENCODER:-}" ] && ARGS+=(--text-encoder "$TEXT_ENCODER")
 
 for i in $(seq 1 "$N"); do
   "$BRAIN" flux2 generate \
