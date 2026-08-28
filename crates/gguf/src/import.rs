@@ -284,18 +284,47 @@ pub fn to_st(
     label: &str,
 ) -> Result<ImportStats, String> {
     let plan: Vec<(String, Vec<u64>)> = param_list.iter().map(|(n, numel)| (n.clone(), vec![*numel as u64])).collect();
-    let expected: HashMap<&str, usize> = param_list.iter().map(|(n, numel)| (n.as_str(), *numel)).collect();
-    if expected.len() != param_list.len() {
-        return Err(format!("{label} import: parameter list contains duplicate names"));
-    }
-
     let mut writer = StWriter::create(out_path, &plan, config, card).map_err(|e| format!("create {out_path}: {e}"))?;
-    let stats = run(mg, &expected, classify, &mut writer, label)?;
+    let stats = to_st_into(mg, param_list, classify, &mut writer, label)?;
     // `finish` re-checks the plan itself; `run`'s check has already reported
     // any gap by name, which is the message worth reading.
     writer.finish().map_err(|e| e.to_string())?;
     eprintln!("{label}: {stats} -> {out_path}");
     Ok(stats)
+}
+
+/// [`to_st`]'s generic per-tensor loop, writing into an ALREADY-CREATED
+/// writer instead of creating and finishing one.
+///
+/// The seam a model needs when part of its checkpoint cannot be expressed as
+/// a single-source-tensor [`Mapped`] decision - e.g. a fused tensor whose
+/// SOURCE columns (the fastest, innermost torch axis) must be split into
+/// several destination tensors. [`Mapped::Split`] only offers the OUTERMOST
+/// axis (a contiguous byte range, since GGUF's dequantized output is
+/// row-major in torch order); an innermost-axis split needs the row width and
+/// must gather each destination's columns out of every row, which is a
+/// per-model reshape, not a structural GGUF-import decision this driver
+/// should grow a variant for on the strength of one caller.
+///
+/// The caller creates the writer with its FULL plan (this function's own
+/// `param_list` plus whatever it writes by hand), calls this for the
+/// generically-mapped subset, writes its own tensors directly via
+/// [`StWriter::write`], then calls [`StWriter::finish`] itself - `finish`'s
+/// own completeness check (against the writer's full plan) catches a gap in
+/// the manual pass exactly as it would catch one in the generic pass, so
+/// splitting the work this way loses no coverage guarantee.
+pub fn to_st_into(
+    mg: &MmapGguf,
+    param_list: &[(String, usize)],
+    classify: &dyn Fn(&str) -> Result<Mapped, String>,
+    writer: &mut StWriter,
+    label: &str,
+) -> Result<ImportStats, String> {
+    let expected: HashMap<&str, usize> = param_list.iter().map(|(n, numel)| (n.as_str(), *numel)).collect();
+    if expected.len() != param_list.len() {
+        return Err(format!("{label} import: parameter list contains duplicate names"));
+    }
+    run(mg, &expected, classify, writer, label)
 }
 
 /// Import into an in-memory map instead of a file.

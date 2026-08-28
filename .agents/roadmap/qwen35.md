@@ -1374,12 +1374,92 @@ the 19 already-recorded, pre-existing `crates/ltxv` errors (pulled in
 because `brain-cli` depends on it; not touched by, or related to, this
 milestone); `make build` and `make gradcheck` both pass.
 
+### M20: GGUF import (`crates/qwen35/src/gguf_import.rs`), including MTP - on a NEW box (2x P40, 48 AVX2 cores, 184 GiB RAM)
+
+A real community GGUF exists for this model: `unsloth/Qwen3.8-27B-GGUF`
+(Q8_0, imatrix-calibrated, `general.architecture = "qwen35"`, 866 tensors,
+248320-token embedded gpt2-BPE tokenizer + chat template). Unlike the FP8
+HF-safetensors route ([`crate::import`]), this importer **imports the MTP
+head** - `qwen35moe`'s own GGUF importer drops its MTP block, but this
+checkpoint's MTP tensors (`blk.64.*` + its `nextn.*` extras) are right there
+in the file, and the streaming driver was extended
+(`gguf::import::to_st_into`) to let a bespoke pass (the `nextn.eh_proj.weight`
+column split, the one reshape no `Mapped` variant expresses) write into the
+SAME output file as the generic per-tensor loop, so MTP costs no second
+checkpoint or second coverage contract.
+
+The leaf-name vocabulary (`attn_q.weight`, `ffn_gate.weight`,
+`ssm_alpha.weight`, …) was extracted into `gguf::leaf` as a shared `Role`
+enum and retrofitted onto `qwen3`/`qwen35moe`'s own GGUF importers in the
+same change (zero behavior change - their existing bit-for-bit/coverage
+gates stayed green) so this port's leaf table is the third USE of that
+vocabulary, not a third re-transcription of it.
+
+**Verified against the real file** (not just the tiny synthetic fixture):
+`config_from_gguf` derives every dimension correctly from the real header
+(vocab 248320, d=5120, ff=17408, 24/4 heads, head_dim 256, 48 GDN + 16 GQA
+layers, `mrope_section=[11,11,10]` recovered from the KV's 4-slot array with
+its always-zero 4th entry asserted, not just dropped) and the embedded
+tokenizer round-trips a real sentence exactly
+(`config_and_tokenizer_extract_from_the_real_checkpoint`, gated on
+`BRAIN_QWEN35_GGUF`, real run: 1.13 s, header/tokenizer-only).
+
+**A real, measured norm-fold trap, resolved empirically rather than
+assumed**: [`crate::import::fold_plain_rmsnorm_weights`] undoes HF's
+zero-init `(1+w)` RMSNorm convention on the safetensors route. Reading real
+norm weights directly off the GGUF (`blk.0.attn_norm.weight` in `[0.89,
+1.05]`, `output_norm.weight` in `[1.6, 2.0]`) showed llama.cpp's conversion
+has ALREADY applied that fold - so `gguf_import.rs` must NOT (and does not)
+call it a second time. Had this been assumed instead of measured, the
+GGUF route would have silently corrupted every plain norm on the real
+checkpoint while passing every synthetic-fixture test (whose norm values are
+arbitrary and cannot expose the direction of a fold).
+
+**A full offline `brain import-gguf` conversion of the real file could NOT be
+run on this box**: the roadmap's own standing rule two paragraphs below
+("never write an intermediate full-precision whole-model file, ~108 GB") is
+not theoretical here - this box has 53 GB free (296 GB disk, 244 GB already
+used). The synthetic-fixture round-trip
+(`import_gguf_covers_the_main_stack_and_the_mtp_head_with_no_norm_fold`,
+including a value-level check of the `eh_proj` column split) plus the
+real-header config/tokenizer test above are what stands in for it. This
+means `Qwen35Importer::loads_directly()` is honestly `false` (the trait
+default) for now - the model has NO practical route to a servable checkpoint
+yet until a resident reads the Q8_0 bytes DIRECTLY (M21, tracked in "Not yet
+done" below); registering the offline converter was still worth doing (one
+line in `crates/cli/src/gguf_import.rs`'s table, gated by its own dispatch
+tests) since it is the honest, generic answer for any future smaller
+quantization tier or a bigger box.
+
+**A real, pre-existing defect this port's investigation surfaced (fixed in
+the same effort, different file)**: `crates/cli/src/model_dir.rs`'s
+`resident_for` synthesized a GGUF card's `family` from `general.architecture`
+verbatim and dispatched it through the SAME match as brain-native checkpoint
+families - so a raw `qwen35`/`qwen35moe` GGUF, dropped into the model
+directory, was routed straight into a resident whose `Engine` cannot open
+GGUF bytes at all, instead of the actionable `brain import-gguf` hint. Fixed
+with a gate before the match, allowlisting only the families that read GGUF
+themselves; see lesson 64 in `.agents/rules/lessons.md`.
+
 ## Not yet done
 
-Nothing - all milestones (M0-M19) are complete. Remaining scope is the
-recorded gaps below, none of which are achievable on this development
-machine (no discrete GPU, 18 GiB usable RAM), plus M14's/M15's/M16's/M17's/
-M18's/M19's own "not done" items just above.
+- **M21: a resident that reads Q8_0 bytes directly, no fp32 intermediate.**
+  The real prerequisite for "brain finds the already-downloaded GGUF and
+  serves it" on a box like this one. Depends on `model::int8` becoming
+  group-wise (`GROUP=32`, matching Q8_0's own block size exactly) - once it
+  does, this becomes a byte-repack (34-byte Q8_0 blocks -> brain's packed-u32
+  int8 + widened f32 scales) with no dequantization step for weight tensors
+  at all, not a `Naming`-sniff-and-dequant-to-fp32 route like `qwen3`'s.
+  Tracked as the current work-in-progress; see the sibling int8-migration and
+  two-GPU-resident-serving entries once they land.
+
+Otherwise nothing - all milestones (M0-M20) are complete. Remaining scope is
+the recorded gaps below, none of which are achievable on the ORIGINAL
+development machine (no discrete GPU, 18 GiB usable RAM) this ledger was
+written against, plus M14's/M15's/M16's/M17's/M18's/M19's own "not done"
+items just above. M20 was validated on a different box (2x Tesla P40, 48 AVX2
+cores, 184 GiB RAM) - see its own section for what that box could and could
+not do.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
