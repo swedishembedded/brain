@@ -984,8 +984,8 @@ impl Unet {
     /// [`Unet::new`], but every weight `tensors` doesn't carry falls back to
     /// `packed` (`sdxlunet::int8::quantize_tensors`'s output) - see
     /// `vae::blocks::Builder::set_packed`'s doc for the memory rationale.
-    /// `tensors` is expected to be the SMALL residual (`QuantizedTensors::full`
-    /// - never-quantized names, biases, norm gains), not the whole manifest;
+    /// `tensors` is expected to be the SMALL residual (`QuantizedTensors::full` -
+    /// never-quantized names, biases, norm gains), not the whole manifest;
     /// the device buffers this produces are bit-identical to `Unet::new`'s
     /// (same dispatch, same fp32 GEMM), only the host-resident bytes differ.
     pub fn new_quantized(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, packed: &PackedTensors, h: u32, w: u32, t_enc: u32, taps: bool) -> Unet {

@@ -16,8 +16,8 @@
 //!
 //! `crates/supir` links no VLM (see `supir::caps`'s own doc): the optional
 //! auto-caption call goes through a `capability::Registry` this file builds
-//! itself, carrying `llava::caps::LlavaProvider` under `supir::caps::LLAVA_MODEL`
-//! - `brain-cli` sits at the top of the crate-graph layering and may depend on
+//! itself, carrying `llava::caps::LlavaProvider` under `supir::caps::LLAVA_MODEL` -
+//! `brain-cli` sits at the top of the crate-graph layering and may depend on
 //! both, unlike `crates/supir`. `crates/catalog`'s own SUPIR entry builds an
 //! equivalent registry for the direct `brain do`/D-Bus-via-provider path (see
 //! that crate's `supir_registry`), so the two callers agree without sharing code
@@ -45,8 +45,8 @@ pub struct SupirResident {
 }
 
 impl SupirResident {
-    /// `None` unless both are set and the backbone holds a released `unet/`
-    /// - registering a model whose every call would fail is worse than not
+    /// `None` unless both are set and the backbone holds a released `unet/` -
+    /// registering a model whose every call would fail is worse than not
     /// serving it.
     pub fn from_env() -> Option<SupirResident> {
         let sdxl_root = std::env::var("BRAIN_SDXL_DIR").ok().filter(|p| !p.is_empty())?;

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Device-path gate for `imaging::tiling::BlendPlan` + `Ctx::blend_accumulate`
-//! - the blended-overlap tiling variant this crate's own module doc
+//! Device-path gate for `imaging::tiling::BlendPlan` + `Ctx::blend_accumulate` -
+//! the blended-overlap tiling variant this crate's own module doc
 //! pre-authorizes ("if a model genuinely needs blended overlap ... that
 //! arrives as a kernel plus a plan variant").
 //!

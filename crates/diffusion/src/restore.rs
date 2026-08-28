@@ -131,8 +131,8 @@ pub fn apply_churn_noise(x: &[f32], noise: &[f32], sigma: f32, sigma_hat: f32, s
 }
 
 /// The restoration-guidance pull: `denoised -= (denoised - x_center)·(σ/σ_max)^restore_cfg`,
-/// applied only when `next_sigma > `[`RESTORE_CFG_S_TMIN`]` AND restore_cfg > 0`
-/// - both gates must hold, or `denoised` passes through unchanged (SUPIR's
+/// applied only when `next_sigma > `[`RESTORE_CFG_S_TMIN`]` AND restore_cfg > 0` -
+/// both gates must hold, or `denoised` passes through unchanged (SUPIR's
 /// CLI default is `restore_cfg = -1`, i.e. this is OFF by default despite
 /// the shipped YAML's `4.0`).
 pub fn restore_guidance(denoised: &[f32], x_center: &[f32], sigma: f32, sigma_max: f32, restore_cfg: f32, next_sigma: f32) -> Vec<f32> {
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn apply_churn_noise_matches_hand_computed_values() {
         let got = apply_churn_noise(&[0.0], &[1.0], 1.0, 1.5, 1.01);
-        assert!((got[0] - 1.129214328637394).abs() < 1e-5, "{}", got[0]);
+        assert!((got[0] - 1.129_214_3).abs() < 1e-5, "{}", got[0]);
         // gamma = 0: sigma_hat == sigma, so this must be a true no-op.
         let noop = apply_churn_noise(&[3.0, -2.0], &[9.0, 9.0], 2.0, 2.0, 1.01);
         assert_eq!(noop, vec![3.0, -2.0]);
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn restore_guidance_matches_hand_computed_values_and_both_gates() {
         let got = restore_guidance(&[2.0], &[1.0], 1.0, SIGMA_MAX, 1.5, 1.0);
-        assert!((got[0] - 1.9821013778430658).abs() < 1e-5, "{}", got[0]);
+        assert!((got[0] - 1.982_101_3).abs() < 1e-5, "{}", got[0]);
 
         // Off at the CLI default (restore_cfg = -1): unchanged regardless of sigma.
         let cfg = RestoreEDMSamplerConfig::default();
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn euler_step_matches_hand_computed_values() {
         let got = euler_step(&[1.0], &[0.6], 1.5, 1.0);
-        assert!((got[0] - 0.8666666666666667).abs() < 1e-6, "{}", got[0]);
+        assert!((got[0] - 0.866_666_7).abs() < 1e-6, "{}", got[0]);
     }
 
     #[test]

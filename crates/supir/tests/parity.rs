@@ -21,15 +21,15 @@
 //! Every trunk/adaptor/UNet tap in the golden was captured during ONE real
 //! forward - the sampler's very first `denoise()` call, batched as
 //! `cat([uncond, cond])` along dim 0 (verified against
-//! `sgm/modules/diffusionmodules/guiders.py`'s `torch.cat((uc[k], c[k]), 0)`
-//! - uncond is batch index 0, cond is batch index 1). `brain-supir` records
+//! `sgm/modules/diffusionmodules/guiders.py`'s `torch.cat((uc[k], c[k]), 0)` -
+//! uncond is batch index 0, cond is batch index 1). `brain-supir` records
 //! its graph at batch 1 (the same design `sdxlunet`/`controlnet` already
 //! use: CFG is two separate `run()` calls, not one batched call), so this
 //! suite reproduces the golden's batched forward as two batch-1 runs and
 //! compares each against its own half of every `[2, ...]`-shaped golden
 //! tensor. `x` and the hint (`_z`) are IDENTICAL between the two halves
-//! (`in.noised_z` before any churn, and `cond.c.control == cond.uc.control`
-//! - both asserted below); only the text conditioning (`crossattn`/
+//! (`in.noised_z` before any churn, and `cond.c.control == cond.uc.control` -
+//! both asserted below); only the text conditioning (`crossattn`/
 //! `pooled`) differs between the two runs.
 //!
 //! ## A real finding, carried from the dumper script into this test
