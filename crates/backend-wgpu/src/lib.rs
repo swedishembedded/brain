@@ -130,27 +130,27 @@ fn instance() -> wgpu::Instance {
     wgpu::Instance::new(instance_descriptor())
 }
 
-/// Serialises backend construction/teardown against every other thread in
-/// this process AND every other process on this machine.
+/// Serialises backend construction/teardown against every other THREAD in
+/// this process.
 ///
-/// Both halves matter and neither is sufficient alone. Building a backend
-/// creates a `wgpu::Instance`, which enumerates **every** graphics backend -
-/// including GL via EGL. Mesa's EGL/GL loader is not safe to enter
-/// concurrently from several threads in one process: doing so faults inside
-/// the driver (seen as `MESA: error: ZINK: failed to choose pdev` followed by
-/// SIGSEGV) whenever more than one test thread builds a device at the same
-/// time. And separate OS processes - each `tests/*.rs` file compiles to its
-/// own, and a host can run several `brain serve` instances - race the SAME
-/// hazard on the same physical card, which no in-process `Mutex` can express:
-/// `crates/backend-wgpu/tests/upload_flush.rs` reproducibly spun ONE thread
-/// at 100% CPU forever whenever its process started shortly after a
-/// DIFFERENT, already-exited test binary's device had just been torn down on
-/// that card.
+/// Building a backend creates a `wgpu::Instance`, which enumerates **every**
+/// graphics backend - including GL via EGL. Mesa's EGL/GL loader is not safe
+/// to enter concurrently from several threads in one process: doing so
+/// faults inside the driver (seen as `MESA: error: ZINK: failed to choose
+/// pdev` followed by SIGSEGV) whenever more than one test thread builds a
+/// device at the same time.
 ///
-/// [`backend_api::hardware::device_init_lock`] carries both, shared with
-/// every other backend that opens the same silicon - `brain-vulkan` reaches
-/// the same P40s through raw `ash` and now takes the same lock, which it
-/// could not do while this lived here as a private function.
+/// Deliberately NOT cross-process: a host-wide lock here once caused one
+/// brain process's device work to stall an unrelated process targeting a
+/// different, idle card, with neither side able to see why - coordinating
+/// GPU access across processes is a scheduling decision for whatever embeds
+/// brain, not something this library should impose. See
+/// [`backend_api::hardware`]'s own module doc for the full reasoning.
+///
+/// [`backend_api::hardware::device_init_lock`] is shared with every other
+/// backend that opens the same silicon - `brain-vulkan` reaches the same
+/// P40s through raw `ash` and takes the same lock, which it could not do
+/// while this lived here as a private function.
 #[cfg(not(target_arch = "wasm32"))]
 fn init_lock() -> backend_api::hardware::DeviceInitGuard {
     backend_api::hardware::device_init_lock()
@@ -2534,13 +2534,13 @@ mod gpu_lock_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    /// [`super::init_lock`] must be the SAME host-wide lock every other
-    /// backend takes, not a private one that happens to have the same shape.
-    /// Held here through this crate's own accessor and contended from another
+    /// [`super::init_lock`] must be the SAME shared lock every other backend
+    /// takes, not a private one that happens to have the same shape. Held
+    /// here through this crate's own accessor and contended from another
     /// thread through the shared one: if the two ever diverge, the contender
     /// acquires immediately and this fails.
     #[test]
-    fn init_lock_is_the_shared_host_wide_lock() {
+    fn init_lock_is_the_shared_lock() {
         let _held = super::init_lock();
         let taken = Arc::new(AtomicBool::new(false));
         let taken_writer = taken.clone();

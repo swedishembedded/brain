@@ -364,10 +364,10 @@ fn enumeration_instance() -> Result<&'static (ash::Entry, ash::Instance), String
         std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| unsafe {
-            // Same host-wide lock every other device-touching path in this
+            // Same in-process lock every other device-touching path in this
             // workspace takes: `vkCreateInstance` `dlopen`s every installed
-            // ICD, which is not safe to enter concurrently with another
-            // process doing the same thing on the same cards.
+            // ICD, which is not safe to enter concurrently from another
+            // thread of this same process doing the same thing.
             let _init = backend_api::hardware::device_init_lock();
             let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
             // 1.1 for VkPhysicalDeviceIDProperties / properties2.

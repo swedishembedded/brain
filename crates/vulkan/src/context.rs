@@ -516,16 +516,17 @@ impl VkContext {
             device_info = device_info.push_next(&mut en_dot);
         }
 
-        // `vkCreateDevice` on a card another PROCESS is simultaneously
-        // creating or destroying a device on is the hazard that hung the test
-        // suite from `backend-wgpu` (lesson #73). This crate reaches the same
-        // physical cards through raw `ash`, so it is a direct contention
-        // partner and takes the SAME host-wide lock - a second, private lock
-        // here would serialise nothing that matters. Scoped to the FFI call
-        // pair (device + its command pool) and released immediately: the
+        // `vkCreateDevice` racing another THREAD in this same process,
+        // simultaneously creating or destroying a device on the same card, is
+        // a real driver hazard (Mesa's EGL/GL loader is not re-entrant, and
+        // the driver's own worker threads race a concurrent destroy - see
+        // `backend_api::hardware`'s module doc). This crate reaches the same
+        // physical cards through raw `ash`, so it takes the SAME shared
+        // in-process lock `backend-wgpu` does - a second, private lock here
+        // would serialise nothing that matters. Scoped to the FFI call pair
+        // (device + its command pool) and released immediately: the
         // capability queries above and the buffer work afterwards are not
-        // part of the hazard, and holding a host-wide lock across them would
-        // serialise every process on the box for no benefit.
+        // part of the hazard.
         let (device, queue, command_pool) = {
             let _init = backend_api::hardware::device_init_lock();
             let device = instance
@@ -1059,10 +1060,10 @@ impl VkContext {
 
 impl Drop for VkContext {
     fn drop(&mut self) {
-        // Teardown is half the hazard, not an afterthought: what reproducibly
-        // wedged the next process's `vkCreateDevice` was the driver still
-        // finishing a just-exited holder's device destruction on the same
-        // card. So destruction takes the same host-wide lock creation does.
+        // Teardown is half the hazard, not an afterthought: destroying a
+        // device races the driver's own background worker threads and a
+        // concurrent create/destroy on another thread of THIS process. So
+        // destruction takes the same in-process lock creation does.
         //
         // Blocking, deliberately, even though this is a `Drop` that can run
         // on the residency dispatcher thread: the alternative - give up after

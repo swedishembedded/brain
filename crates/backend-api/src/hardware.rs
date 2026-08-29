@@ -13,30 +13,42 @@
 //!
 //! Every backend in this workspace opens the same class of resource: an
 //! external device reached through a synchronous FFI call into a vendor
-//! driver, shared by every process on the host, with no cooperative
-//! cancellation anywhere in the path. Before this module each backend
-//! invented (or omitted) its own story for that, and the stories disagreed:
-//! `backend-wgpu` had a [`std::sync::Mutex`] which orders THREADS in one
-//! address space and therefore serialised nothing between two test binaries
-//! on the same card, while `brain-vulkan` opened and destroyed logical
-//! devices on those same cards with no lock at all. One incomplete mechanism
-//! and one absent mechanism protecting the same silicon is not two problems,
-//! it is one.
+//! driver, with no cooperative cancellation anywhere in the path. Before
+//! this module each backend invented (or omitted) its own story for the
+//! THREAD-safety half of that, and the stories disagreed: `backend-wgpu`
+//! had a private [`std::sync::Mutex`], `brain-vulkan` had no lock at all.
+//! One incomplete mechanism and one absent mechanism protecting the same
+//! silicon is not two problems, it is one.
+//!
+//! **This is deliberately IN-PROCESS ONLY.** An earlier version of this
+//! module also took a host-wide `flock(2)`, on the reasoning that two
+//! separate OS processes creating/destroying Vulkan devices on one
+//! physical card raced the same driver hazard as two threads. That is
+//! true, and it is also the wrong place to fix it: a process-wide lock
+//! makes one brain process's device work stall an UNRELATED process
+//! targeting a completely different, idle card, with no way for either
+//! side to see why - reported directly against a real deployment, where
+//! it read as brain simply hanging. Coordinating GPU access ACROSS
+//! processes is a scheduling decision belonging to whatever embeds brain
+//! (it already knows which processes exist and which cards they want);
+//! within one process, this module still owns the invariant, because a
+//! single process's own threads are entirely its call to serialise.
 //!
 //! This module lives in `brain-backend-api` because that is the crate every
 //! backend already depends on and the only one upstream of all of them
 //! (`brain-gpu-core` is the facade *above* the backends, so it cannot be
 //! their shared foundation). It is std-only, like the rest of this crate.
 //!
-//! Three pieces, each solving a distinct half of the hazard:
+//! Two pieces, each solving a distinct half of the hazard:
 //!
-//! 1. [`device_init_lock`] / [`device_class_lock`] - mutual exclusion that
-//!    actually spans the set of principals that can reach the device: this
-//!    process's threads *and* every other process on the host, keyed by which
-//!    physically distinct piece of hardware is being guarded.
+//! 1. [`device_init_lock`] / [`device_class_lock`] - mutual exclusion
+//!    across this process's OWN threads, keyed by which physically
+//!    distinct piece of hardware is being guarded.
 //! 2. [`bounded`] / [`try_bounded_for`] - a wall-clock bound on a call that
 //!    can wedge inside the driver, so a wedge is a named, reported failure
-//!    instead of an unattributed infinite hang.
+//!    instead of an unattributed infinite hang. Unrelated to the above:
+//!    this bounds a single call regardless of what else, if anything, is
+//!    contending for the device.
 //! 3. [`own_kernels`] / [`borrow_kernels`] - the borrow-detaching shim a
 //!    backend needs to pass its `&[(&str, &str)]` kernel list into
 //!    [`bounded`]'s `'static` worker closure.
@@ -108,13 +120,6 @@ pub const GPU: &str = "gpu";
 /// point over unrelated hardware".
 pub const NPU: &str = "npu";
 
-/// The well-known file every process on this host takes `class`'s device-init
-/// lock on. The path is part of the contract: two brain processes only
-/// serialise against each other if they agree on it.
-fn lock_path(class: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("brain-{class}-device-init.lock"))
-}
-
 /// The in-process half of `class`'s lock. Leaked on first use; the number of
 /// classes is fixed and tiny, so this is a handful of words for the life of
 /// the process and lets the guard borrow a `'static` mutex.
@@ -127,36 +132,18 @@ fn class_mutex(class: &'static str) -> &'static std::sync::Mutex<()> {
 }
 
 // `HELD` records which classes THIS thread already holds a lock for.
-//
-// Required, not a nicety. `flock(2)` locks an open file *description*, so a
-// second `open` + `LOCK_EX` from the same process on a different descriptor
-// blocks against the first exactly as a foreign process would - verified, it
-// reports `WouldBlock` to a `try_lock` probe. Without this any layering at
-// all (a backend crate bounding construction while the context crate
-// underneath it locks device creation) would self-deadlock the moment the two
-// regions nested.
 thread_local! {
     static HELD: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Exclusive access to device creation/teardown, held until the returned
-/// guard drops.
+/// Exclusive access, within THIS PROCESS, to device creation/teardown for
+/// [`GPU`], held until the returned guard drops.
 ///
-/// Excludes, in one acquisition:
-///
-/// * **other threads in this process** - a [`std::sync::Mutex`]. Building a
-///   backend enumerates every installed ICD through the Vulkan/EGL loaders,
-///   which are not re-entrant, and destroying a device races the driver's own
-///   background worker threads.
-/// * **other processes on this host** - a `flock(2)` (via
-///   [`std::fs::File::lock`]) on [`lock_path`]. This is the half a `Mutex`
-///   cannot express and the half that actually broke: every `tests/*.rs` file
-///   compiles to its own OS process, and two of them creating or destroying
-///   Vulkan devices on one physical card had zero coordination despite the
-///   `Mutex` existing. A `flock` is visible host-wide, blocks in a real kernel
-///   wait rather than a spin, and releases itself the instant the holder's
-///   descriptor closes - including on a hard crash, which is exactly when a
-///   PID-file convention would leave the lock stuck.
+/// A [`std::sync::Mutex`]: building a backend enumerates every installed ICD
+/// through the Vulkan/EGL loaders, which are not re-entrant, and destroying a
+/// device races the driver's own background worker threads. Both are
+/// properties of THIS process's own threads: two different processes on the
+/// host are not this module's concern (see this module's own doc for why).
 ///
 /// Re-entrant on one thread: a nested call returns a guard that owns nothing
 /// and releases nothing, so the outermost acquisition defines the critical
@@ -184,33 +171,8 @@ pub fn device_class_lock(class: &'static str) -> DeviceInitGuard {
     // A poisoned lock only means some other thread panicked while building a
     // device; the data is `()`, so recovering is always correct.
     let mutex = class_mutex(class).lock().unwrap_or_else(|e| e.into_inner());
-    let path = lock_path(class);
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .unwrap_or_else(|e| panic!("open the cross-process {class} init lock {path:?}: {e}"));
-    file.lock().unwrap_or_else(|e| panic!("lock the cross-process {class} init lock {path:?}: {e}"));
     HELD.with(|h| h.borrow_mut().push(class));
-    DeviceInitGuard { class, held: Some(Held { file, mutex }) }
-}
-
-/// What an outermost [`device_class_lock`] owns. Field order is the release
-/// order: the host-wide lock goes first, then the in-process one.
-struct Held {
-    file: std::fs::File,
-    #[allow(dead_code)]
-    mutex: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        // Closing the descriptor would release it anyway; unlocking
-        // explicitly makes the release a checked operation rather than a
-        // side effect of a drop order that a later refactor could reorder.
-        let _ = self.file.unlock();
-    }
+    DeviceInitGuard { class, held: Some(mutex) }
 }
 
 /// The RAII handle returned by [`device_class_lock`]. `None` inside means
@@ -218,7 +180,7 @@ impl Drop for Held {
 /// class, so it owns and releases nothing.
 pub struct DeviceInitGuard {
     class: &'static str,
-    held: Option<Held>,
+    held: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
 impl Drop for DeviceInitGuard {
@@ -374,11 +336,10 @@ mod tests {
         assert!(err.to_string().contains("BRAIN_GPU_WAIT_S"), "the failure must name the knob that set the bound: {err}");
     }
 
-    /// [`device_init_lock`] must actually exclude a second holder while the
-    /// first is live - the property the whole fix depends on. Modelled with
-    /// two THREADS rather than two processes: `flock` locks by open file
-    /// description regardless of which thread or process opened it, so this
-    /// drives the identical kernel path a second PROCESS would.
+    /// [`device_init_lock`] must actually exclude a second holder on another
+    /// THREAD while the first is live - the in-process property this module
+    /// still owns (see this module's own doc for why cross-PROCESS exclusion
+    /// is deliberately not this module's job).
     #[test]
     fn device_init_lock_excludes_a_concurrent_holder() {
         let released = Arc::new(AtomicBool::new(false));
@@ -387,7 +348,7 @@ mod tests {
             let _g = device_init_lock();
             std::thread::sleep(Duration::from_millis(200));
             released_writer.store(true, Ordering::SeqCst);
-            // `_g` (and with it the flock) drops here, at thread exit.
+            // `_g` drops here, at thread exit.
         });
         // Give the holder thread a head start so it wins the lock first.
         std::thread::sleep(Duration::from_millis(50));
@@ -400,12 +361,12 @@ mod tests {
     }
 
     /// Nesting the lock on ONE thread must not deadlock. Without the
-    /// re-entrancy flag this test hangs forever: the inner acquisition opens
-    /// a second descriptor and `flock(LOCK_EX)` blocks it against the outer
-    /// one held by the same process. This is the property that makes the lock
-    /// safe to name at more than one layer (a backend crate bounding
-    /// construction, the context crate beneath it guarding device creation),
-    /// which is exactly what a single shared primitive has to support.
+    /// re-entrancy flag this test hangs forever: the inner acquisition tries
+    /// to lock the same `std::sync::Mutex` the outer one already holds. This
+    /// is the property that makes the lock safe to name at more than one
+    /// layer (a backend crate bounding construction, the context crate
+    /// beneath it guarding device creation), which is exactly what a single
+    /// shared primitive has to support.
     #[test]
     fn device_init_lock_is_reentrant_within_one_thread() {
         let outer = device_init_lock();

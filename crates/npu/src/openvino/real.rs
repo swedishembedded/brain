@@ -142,11 +142,11 @@ fn ensure_unversioned_solinks(dir: &std::path::Path) {
 ///   against every other thread's read of the environment.
 /// * `Core::new` makes the runtime `dlopen` its plugin set, and the device
 ///   plugin then opens the accelerator - the loader path this workspace has
-///   already been bitten by on the graphics side, and one that a second
-///   PROCESS contends for identically.
+///   already been bitten by on the graphics side, and one that another
+///   THREAD of this same process contends for identically.
 ///
 /// Held only across construction: the compiles that follow are long, and
-/// serialising those host-wide would cost far more than the race is worth.
+/// serialising those in-process would cost far more than the race is worth.
 /// Bounding the driver-side compile itself is a separate, larger change: the
 /// compile borrows the `Core` and the model, so it cannot cross into a worker
 /// thread without restructuring session construction.
