@@ -177,6 +177,37 @@ conditioning working. The two being equal means the mask never reached the
 sampler. It is not exactly zero at the boundary because the VAE decoder is
 convolutional, so a changed latent bleeds a little into its neighbours' pixels.
 
+## Generating a clip from a folder of images and a prompt (LTX-2.5)
+
+`images_to_video.sh` is the simplest LTX-2.5 path: point it at a folder
+holding `prompt.txt` and 1-3 stills, get one clip back.
+
+```bash
+mkdir shot/
+echo "a cat walking on a beach at sunset" > shot/prompt.txt
+cp first_frame.png shot/01.png        # optionally also 02.png (end) or
+                                       # 02.png + 03.png (mid, end)
+
+BRAIN_LTXV_DIT=/path/to/ltx-2.5-22b.gguf \
+BRAIN_LTXV_VAE=/path/to/ltx-2.5-vae.safetensors \
+BRAIN_LTXV_TEXT_ENCODER=/path/to/gemma-4 \
+examples/videogen/images_to_video.sh shot/ out.mp4 5
+```
+
+The stills are conditioning anchors, not a slideshow -- LTX-2.5 denoises
+everything between them from the prompt, so the result is one continuous
+shot that starts on (and, with two or three stills, passes through and ends
+on) exactly those pixels. How many images decide which of the model's
+conditioning slots are used: one image conditions the opening frame only,
+two condition the opening and closing frames, three add a fixed point at the
+clip's midpoint as well -- the way to keep a longer or moving-camera clip on
+course throughout its length, not only at its ends. See the script's own
+header comment for the exact flag mapping and `brain ltxv t2v --help` for
+what each conditioning slot actually does.
+
+Without `BRAIN_LTXV_DIT` the script runs the tiny random-weight DiT instead
+of failing -- a real wiring test (the stills genuinely condition the noise)
+but not a quality claim.
 
 ---
 
