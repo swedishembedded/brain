@@ -336,6 +336,55 @@ this port:
       (`diffusion_tiling.py`'s overlapping-tile trapezoidal blend), the
       CHUNKED/BLACKWELL_DSL block variants, and multi-step Euler sampling
       (moot for this checkpoint) remain explicit, tracked gaps - see below.
+- [x] **Both real video-VAE releases load, and generation decodes through
+      whichever one the user downloaded** (`crate::import::{VideoVaeArch,
+      VideoVae, detect_video_vae_arch}`, `na_decoder::{decode, output_shape,
+      check_decode, max_scores_bytes}`, `pipeline::decode_video`) - the
+      official Lightricks repo ships the video VAE as TWO files and only the
+      `-conv-` one was usable, which a real user hit running
+      `examples/videogen/images_to_video.sh` against a complete, correctly
+      named download. The two files' `encoder.*` trees and both
+      `per_channel_statistics.*` are BYTE-identical (86 tensors, range-read
+      and compared); only the decoder differs, which is what lets ONE loader
+      validate the encoder half against `LtxVaeConfig::encoder_manifest`
+      whichever decoder came with it and hand `decoder.*` to the matching
+      importer. Two-way coverage survives the split (everything the decoder
+      importer does not claim goes to the encoder check as-is, so a stray
+      tensor still surfaces as `validate_manifest`'s "unused source
+      tensors"); a file matching neither schema is diagnosed by the
+      top-level prefixes it actually contains plus the two supported
+      schemas, and a file carrying both trees says so rather than reporting
+      one architecture's tensors as missing from the other. The scale
+      contract turned out to be IDENTICAL, not merely compatible - the four
+      real upsample strides composed with each temporal-stride-2 shuffle's
+      leading-frame drop give exactly `1 + 8*(lat_t-1)` frames at
+      `lh*32 x lw*32`, the conv decoder's own formula - so `decode_video`
+      dispatches on the detected architecture with no shape renegotiation.
+      Real-weight gates: both shipped files through the one loader, and the
+      whole NA chain composed end to end on the real checkpoint from the
+      golden fixture's own latent (17 frames at 224x224, every pixel finite,
+      range [-1.198, 1.198], mean -0.297), on top of M8b's existing cosine
+      1.000000000 stage-1-4 and stage-5 taps.
+      **The remaining gap is a VOLUME ceiling, not a correctness one.**
+      `na_attention` materialises a dense `[heads, nq, window]` f32 score
+      buffer per attention call, and stage 5's window is `11x11x11` = 1331
+      over the FULL output context, so the requirement grows with the clip:
+      1082 MiB for the smallest clip this decoder can run at all (a `(3,7,7)`
+      latent, i.e. 17 frames at 224x224 - stage 0's own `(3,7,7)` window is a
+      hard floor) and 5928 MiB for 512x512, against a MEASURED 2047 MiB
+      `max_storage_buffer_binding_size` on a Tesla P40. So on that card the
+      NA decoder is usable to roughly 17 frames at 288x288 and refused above
+      it, by name, with the number and the way out (`check_decode`) rather
+      than by a driver allocation failure or a plausible-looking wrong
+      picture. Closing that needs upstream's `diffusion_tiling.py`
+      overlapping-tile trapezoidal blend ported - the same already-tracked
+      M8b gap, now with a concrete number attached - and, independently, a
+      scores-free fused NA attention kernel would remove the buffer rather
+      than tile around it (`na3d_scores`/`na3d_apply` are a deliberate
+      gather-then-dense pair; a flash-style fusion is the standard fix and
+      this repo already has that shape in `block.rs`). Until one of those
+      lands, `examples/videogen`'s resolver preferring the `-conv-` file is
+      CORRECT for realistic resolutions, not a leftover workaround.
 - [x] **DFR geometry + a smoke-level multi-stage pipeline** (`crates/ltxv/src/
       dfr.rs`, `pipeline::generate_dfr`, `brain ltxv dfr`, plus a `dfr`
       `capability::Action` in `caps.rs`/`resident_ltxv.rs` alongside `t2v` -
@@ -367,9 +416,7 @@ this port:
       pipeline broadcasts one scalar sigma to every token, same limit
       `denoise`'s own doc already records for M4 - `TileRange::
       anchor_kf_global` still computes the real anchor position for a future
-      milestone to wire in), the NA diffusion decoder (M8b) is not wired in
-      as an alternative decode path (its tiling/scale contract differs
-      enough to be a separate integration), no real distilled-schedule sigma
+      milestone to wire in), no real distilled-schedule sigma
       tables (every stage uses the same generic `ltx2_sigmas` M4 already
       proved), and keyframe-slot RoPE positions use this port's existing
       plain-integer-latent-grid convention rather than upstream's
