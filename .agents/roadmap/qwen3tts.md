@@ -7,6 +7,9 @@ fine-tuning. Parity against the reference is verified.
 
 ## Not yet done
 
+- [ ] The RMSNorm backward is still the per-element kernel; only the forward
+      selects the coalesced `rmsnorm_rows` (measured 11.2x on both the Talker's
+      per-token norms and the MTP's per-frame norms)
 - [ ] Cancellation support for in-flight synth/clone requests
 - [ ] Batched inference (`run_batch`) - only sequential single-request
       inference exists; autoregressive decode makes a genuine batched

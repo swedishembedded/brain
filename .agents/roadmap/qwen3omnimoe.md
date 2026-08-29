@@ -11,6 +11,9 @@ backward pass.
 
 ## Not yet done
 
+- [ ] The RMSNorm BACKWARD kernels are still per-element; only the forward
+      selects the coalesced `rmsnorm_rows` (measured 14.7x on the Thinker's
+      per-token norms, 8.7x on the Talker's)
 - [ ] `converse` action (real audio/image input combined with speech output
       in the same turn)
 - [ ] `transcribe` action

@@ -8,6 +8,13 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
 
 ## Not yet done
 
+- [ ] The RMSNorm backward (`rms_inv`/`rmsnorm_dx`) and the DSA indexer's
+      LayerNorm are still per-element kernels; only `norm_fwd` selects the
+      coalesced `rmsnorm_rows` (measured 23.5x on one decode token's norms,
+      186 ms -> 7.9 ms at the 78-layer shape)
+- [ ] `norm_fwd` normalizes at the 1e-6 `rmsnorm.wgsl` hardcodes, not at
+      `GlmConfig::rms_eps` (1e-5); `rmsnorm_eps`/`rmsnorm_eps_rows` are not
+      registered, so the config field is round-tripped but not honoured
 - [x] GLM discovery and the direct action path. `glmdsa::caps` now carries a
       **weight-free** manifest plus a `GlmProvider`, wired into
       `cli::catalog::models()`, so `brain caps` lists `brain/glm` and

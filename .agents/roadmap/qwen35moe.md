@@ -4,6 +4,7 @@ Qwen3.5-35B-A3B: a hybrid decoder mixing Gated DeltaNet (chunked linear-attentio
 
 ## Not yet done
 
+- [ ] The prefill/training tape's RMSNorm BACKWARD (`rms_inv`/`rmsnorm_dx`) is still the per-element kernel; only the forward selects the coalesced `rmsnorm_rows` (measured 16.3x on one decode token's norms).
 - [ ] Multi-GPU INT8/INT4 residency serving (the full `PagedDecoder` engine), including layer-range sharding across GPUs for the served path - the full model does not fit a single GPU's memory.
 - [ ] Multi-sequence GPU batching, prefix-cache reuse, chunked/batched prefill, and speculative decode in the serving engine.
 - [ ] INT8/INT4 paged KV cache for served decode.

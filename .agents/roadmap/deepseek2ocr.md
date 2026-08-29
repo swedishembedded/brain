@@ -573,6 +573,9 @@ token fails loudly.
 
 ## Not yet done
 
+- [ ] The LM decoder's RMSNorm backward is still the per-element kernel; only
+      the forward selects the coalesced `rmsnorm_rows` (measured 12.2x on one
+      decode token's norms)
 - [x] Generic GGUF loader (`crates/gguf`) with two-way coverage, proven
       against both real files.
 - [x] Checkpoint-free goldens: `tools/goldens/deepseek_ocr_dump_reference.py
