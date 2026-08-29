@@ -262,6 +262,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // `Qwen35::moe_sublayer_decode_sparse`. Appended at the true end, same
     // convention as the splice/LoRA tiers above.
     ("router_topk_compact", kernels::ROUTER_TOPK_COMPACT),       // 93
+    // -- coalesced RMSNorm -- the throughput twin of index 0, selected by
+    // `block::rms_variant` inside `block::rmsnorm_fwd`. Appended at the true
+    // end, same convention as the tiers above, so every const stays put.
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),                     // 94
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -331,6 +335,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
 }
 
 const RMSNORM: usize = 0;
+const RMSNORM_ROWS: usize = 94;
 const MATMUL: usize = 1;
 const EMBED: usize = 2;
 const SIGMOID: usize = 3;
@@ -452,7 +457,7 @@ fn kernel_ids() -> KernelIds {
         silu_mul: SILU_MUL,
         silu_da: SILU_BWD_DA,
         silu_db: SILU_BWD_DB,
-        rmsnorm_rows: block::UNREGISTERED,
+        rmsnorm_rows: RMSNORM_ROWS,
     }
 }
 
@@ -3070,5 +3075,41 @@ mod decode_sparse_moe_tests {
             cfg.moe_intermediate_size,
             dense_best / sparse_best
         );
+    }
+}
+
+/// The coalesced RMSNorm this model now selects (`rmsnorm_rows`, via
+/// `block::rms_variant` inside `block::rmsnorm_fwd`) is NOT bit-identical to
+/// the per-element `rmsnorm` it replaced: 64 partial sums fold in a different
+/// order. It was adopted for throughput, so what it computes is gated here,
+/// against a HOST reference, at the shapes THIS model's decode tape really
+/// dispatches - narrow rows are where the two reduction orders differ most,
+/// and they are also the whole reason the swap is worth making.
+#[cfg(test)]
+mod rmsnorm_variant_agreement {
+    use super::*;
+
+    /// The slot really names the coalesced kernel. A registration this model
+    /// gets wrong by one index does not fail - it silently dispatches a
+    /// DIFFERENT kernel through the RMSNorm bindings.
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(STATIC_PIPELINES[kernel_ids().rmsnorm_rows].0, "rmsnorm_rows");
+    }
+
+    #[test]
+    fn the_decode_tape_norms_match_the_host_reference() {
+        let c = crate::config::Qwen35Config::qwen35_35b_a3b();
+        // Every `(rows, dim)` `run_decode_step`, `layer_gqa_decode_step` and
+        // `layer_gdn_decode_step` dispatch an RMSNorm at, read off the config
+        // rather than written down.
+        let shapes = [
+            (1, c.d_model, "ln1/ln2/final norm: one residual row"),
+            (c.n_heads, c.head_dim, "GQA q_norm"),
+            (c.n_kv_heads, c.head_dim, "GQA k_norm"),
+            (c.linear_num_value_heads, c.linear_value_head_dim, "GDN gated norm"),
+        ];
+        let gpu = gpu_core::testgpu::dev(pipelines());
+        block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), &shapes);
     }
 }

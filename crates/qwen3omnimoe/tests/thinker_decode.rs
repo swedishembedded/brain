@@ -78,6 +78,16 @@ fn weights<'a>(b: &'a LayerBufs) -> ThinkerLayerWeights<'a> {
     ThinkerLayerWeights { ln1: &b.ln1, wq: &b.wq, wk: &b.wk, wv: &b.wv, wo: &b.wo, q_norm: &b.q_norm, k_norm: &b.k_norm, ln2: &b.ln2, router: &b.router, experts: &b.experts }
 }
 
+/// The oracle must select the SAME RMSNorm kernel the code under test does.
+/// The crate registers the coalesced `rmsnorm_rows`, and it is not
+/// bit-identical to the per-element reference - so an oracle left on the
+/// reference would fail this `assert_eq!` for a reason that has nothing to do
+/// with what the test is about. Resolved by NAME, so it cannot drift out of
+/// step with the pipeline list's own order.
+fn rmsnorm_rows_slot() -> usize {
+    thinker_pipelines().iter().position(|(n, _)| *n == "rmsnorm_rows").expect("the crate no longer registers rmsnorm_rows")
+}
+
 #[test]
 fn decode_matches_hand_chained_layer_fwd_plus_final_norm() {
     let n_layers = 3u32;
@@ -114,7 +124,7 @@ fn decode_matches_hand_chained_layer_fwd_plus_final_norm() {
         let (out, ..) = layer_fwd(&gpu, &cfg, lw, &h, &cos, &sin, n, None, None);
         h = out;
     }
-    let ids = KernelIds { rmsnorm: 0, rms_inv: 0, rmsnorm_dx: 0, rmsnorm_dw: 0, rope: 0, rope_bwd: 0, gqa_scores: 0, gqa_apply: 0, attn_softmax: 0, gqa_dscores: 0, gqa_dv: 0, gqa_dq: 0, gqa_dk: 0, silu_mul: 0, silu_da: 0, silu_db: 0, rmsnorm_rows: model::block::UNREGISTERED };
+    let ids = KernelIds { rmsnorm: 0, rms_inv: 0, rmsnorm_dx: 0, rmsnorm_dw: 0, rope: 0, rope_bwd: 0, gqa_scores: 0, gqa_apply: 0, attn_softmax: 0, gqa_dscores: 0, gqa_dv: 0, gqa_dq: 0, gqa_dk: 0, silu_mul: 0, silu_da: 0, silu_db: 0, rmsnorm_rows: rmsnorm_rows_slot() };
     let normed = gpu.storage((n * cfg.hidden) as u64);
     gpu.submit(&[], &[rmsnorm_fwd(&gpu, &ids, &h, &final_norm, &normed, cfg.hidden, n)]);
     let want_host = gpu.read(&normed, (n * cfg.hidden) as usize);

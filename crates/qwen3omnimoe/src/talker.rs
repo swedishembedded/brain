@@ -67,6 +67,9 @@ pub fn talker_pipelines() -> &'static [(&'static str, &'static str)] {
         ("quant_pack", kernels::QUANT_PACK),                   // 19
         ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8), // 20
         ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),             // 21 -- shared expert's own dense linears.
+        // Coalesced RMSNorm -- the throughput twin of index 0, selected by
+        // `block::rms_variant` inside `block::rmsnorm_fwd`.
+        ("rmsnorm_rows", kernels::RMSNORM_ROWS),               // 22
     ]
 }
 
@@ -92,7 +95,7 @@ fn kernel_ids() -> KernelIds {
         silu_mul: 9,
         silu_da: block::UNREGISTERED,
         silu_db: block::UNREGISTERED,
-        rmsnorm_rows: block::UNREGISTERED,
+        rmsnorm_rows: RMSNORM_ROWS,
     }
 }
 
@@ -141,6 +144,9 @@ const SIGMOID: usize = 12;
 const SCALE_ROW: usize = 13;
 const KV_APPEND: usize = 14;
 const MATMUL_I8_DYN: usize = 21;
+// Coalesced RMSNorm - the throughput twin of index 0, selected by
+// `block::rms_variant` inside `block::rmsnorm_fwd`.
+const RMSNORM_ROWS: usize = 22;
 /// `model::vlm::splice_fwd`'s kernel index - see `crate::thinker`'s module doc.
 pub const SPLICE: usize = 11;
 
@@ -342,4 +348,36 @@ pub fn decode(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerWeights, x: &DeviceBuffer,
     let normed = g.storage((n * cfg.hidden) as u64);
     g.submit(&[], &[rmsnorm_fwd(g, &ids, &h, w.final_norm, &normed, cfg.hidden, n)]);
     normed
+}
+
+/// The coalesced RMSNorm this model now selects (`rmsnorm_rows`, via
+/// `block::rms_variant` inside `block::rmsnorm_fwd`) is NOT bit-identical to
+/// the per-element `rmsnorm` it replaced: 64 partial sums fold in a different
+/// order. It was adopted for throughput, so what it computes is gated here,
+/// against a HOST reference, at the shapes THIS model's decode tape really
+/// dispatches - narrow rows are where the two reduction orders differ most,
+/// and they are also the whole reason the swap is worth making.
+#[cfg(test)]
+mod rmsnorm_variant_agreement {
+    use super::*;
+
+    /// The slot really names the coalesced kernel. A registration this model
+    /// gets wrong by one index does not fail - it silently dispatches a
+    /// DIFFERENT kernel through the RMSNorm bindings.
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(talker_pipelines()[kernel_ids().rmsnorm_rows].0, "rmsnorm_rows");
+    }
+
+    #[test]
+    fn the_decode_tape_norms_match_the_host_reference() {
+        let c = crate::config::MoeTextConfig::talker_defaults();
+        let shapes = [
+            (1, c.hidden, "ln1/ln2/final norm at decode"),
+            (c.n_heads, c.head_dim, "q_norm at decode"),
+            (c.n_kv_heads, c.head_dim, "k_norm at decode"),
+        ];
+        let gpu = gpu_core::testgpu::dev(talker_pipelines());
+        block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), &shapes);
+    }
 }

@@ -141,6 +141,7 @@ const ATTN_DECODE_SCORES: usize = 43;
 const DECODE_SOFTMAX: usize = 44;
 const ATTN_DECODE_APPLY: usize = 45;
 const KV_APPEND: usize = 46;
+const RMSNORM_ROWS: usize = 47;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -202,6 +203,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("decode_softmax", kernels::DECODE_SOFTMAX),
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
     ("kv_append", kernels::KV_APPEND),
+    // Coalesced RMSNorm -- the throughput twin of `rmsnorm` above, selected
+    // by `block::rms_variant` inside `block::rmsnorm_fwd`. Appended, so
+    // every index above is unchanged.
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -222,7 +227,7 @@ fn kernel_ids() -> KernelIds {
         silu_mul: SILU_MUL,
         silu_da: SILU_DA,
         silu_db: SILU_DB,
-        rmsnorm_rows: block::UNREGISTERED,
+        rmsnorm_rows: RMSNORM_ROWS,
     }
 }
 
@@ -1826,5 +1831,37 @@ mod tests {
         );
         assert_eq!(m.generate_greedy_kv(&prompt, n_new), all, "generate_greedy_kv diverges from generate_greedy_kv_cb");
         assert_eq!(m.generate_greedy(&prompt, n_new), all, "recompute diverges from the KV-cached callback loop");
+    }
+}
+
+/// The coalesced RMSNorm this model now selects (`rmsnorm_rows`, via
+/// `block::rms_variant` inside `block::rmsnorm_fwd`) is NOT bit-identical to
+/// the per-element `rmsnorm` it replaced: 64 partial sums fold in a different
+/// order. It was adopted for throughput, so what it computes is gated here,
+/// against a HOST reference, at the shapes THIS model's decode tape really
+/// dispatches - narrow rows are where the two reduction orders differ most,
+/// and they are also the whole reason the swap is worth making.
+#[cfg(test)]
+mod rmsnorm_variant_agreement {
+    use super::*;
+
+    /// The slot really names the coalesced kernel. A registration this model
+    /// gets wrong by one index does not fail - it silently dispatches a
+    /// DIFFERENT kernel through the RMSNorm bindings.
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(PIPELINES[kernel_ids().rmsnorm_rows].0, "rmsnorm_rows");
+    }
+
+    #[test]
+    fn the_decode_tape_norms_match_the_host_reference() {
+        // DeepSeek-OCR is plain MHA with no QK-norm, so every RMSNorm this
+        // model dispatches is `d_model` wide; `decode_at` runs three of them
+        // per layer at `rows = 1`, `build_forward` the same three at `rows = n`.
+        let c = DeepseekV2Config::deepseek_ocr(2048);
+        let d = c.d_model();
+        let shapes = [(1, d, "ln1/ln2/final norm at decode"), (64, d, "the same norms at prefill width")];
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), &shapes);
     }
 }

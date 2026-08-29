@@ -43,6 +43,9 @@ const DECODE_SOFTMAX: usize = 10;
 const ATTN_DECODE_APPLY: usize = 11;
 const KV_APPEND: usize = 12;
 const ROPE_AT: usize = 13;
+// Coalesced RMSNorm - the throughput twin of `RMSNORM`, selected by
+// `block::rms_variant` inside `block::rmsnorm_fwd`.
+const RMSNORM_ROWS: usize = 14;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -59,6 +62,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
     ("kv_append", kernels::KV_APPEND),
     ("rope_at", kernels::ROPE_AT),
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
 ];
 
 /// Which position-dependent uniform a cached decode step needs refreshed each token.
@@ -142,7 +146,7 @@ fn only_fwd_ids() -> KernelIds {
         silu_mul: SILU_MUL,
         silu_da: block::UNREGISTERED,
         silu_db: block::UNREGISTERED,
-        rmsnorm_rows: block::UNREGISTERED,
+        rmsnorm_rows: RMSNORM_ROWS,
     }
 }
 
@@ -696,5 +700,35 @@ mod kv_tests {
             let full_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
             println!("ctx={ctx:>5}: KV step {kv_ms:>7.2} ms/tok ({:>6.1} tok/s)  |  full-recompute {full_ms:>8.2} ms/tok ({:>5.1} tok/s)  |  speedup {:.1}x", 1e3 / kv_ms, 1e3 / full_ms, full_ms / kv_ms);
         }
+    }
+}
+
+/// The coalesced RMSNorm this model now selects (`rmsnorm_rows`, via
+/// `block::rms_variant` inside `block::rmsnorm_fwd`) is NOT bit-identical to
+/// the per-element `rmsnorm` it replaced: 64 partial sums fold in a different
+/// order. It was adopted for throughput, so what it computes is gated here,
+/// against a HOST reference, at the shapes THIS model's decode tape really
+/// dispatches - narrow rows are where the two reduction orders differ most,
+/// and they are also the whole reason the swap is worth making.
+#[cfg(test)]
+mod rmsnorm_variant_agreement {
+    use super::*;
+
+    /// The slot really names the coalesced kernel. A registration this model
+    /// gets wrong by one index does not fail - it silently dispatches a
+    /// DIFFERENT kernel through the RMSNorm bindings.
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(PIPELINES[only_fwd_ids().rmsnorm_rows].0, "rmsnorm_rows");
+    }
+
+    #[test]
+    fn the_decode_tape_norms_match_the_host_reference() {
+        // The released 0.6B Talker: d_model 1024, 16/8 heads of 128 (see
+        // `TalkerConfig`). `build_dec_cache` dispatches ln1/ln2/final at
+        // `rows = 1` and the two QK-norms at a HEAD count.
+        let shapes = [(1, 1024, "ln1/ln2/final norm at decode"), (16, 128, "q_norm at decode"), (8, 128, "k_norm at decode")];
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        block::assert_rmsnorm_variant_agrees(&gpu, &only_fwd_ids(), &shapes);
     }
 }

@@ -57,6 +57,7 @@ const MATMUL_REG3: usize = 42;
 const MATMUL_DX: usize = 2;
 const MATMUL_DW: usize = 3;
 const RMSNORM: usize = 4;
+const RMSNORM_ROWS: usize = 51;
 const RMS_INV: usize = 5;
 const RMSNORM_DX: usize = 6;
 const RMSNORM_DW: usize = 7;
@@ -234,6 +235,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // function's call site below for why it isn't a named `usize` const like the
     // other kernels (its scatter target is looked up once, not per dispatch site).
     ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD),
+    // Coalesced RMSNorm: `rmsnorm.wgsl` gives thread `t` row `t`, so the
+    // decode tape's `rows = 1` norms run a whole `d_model` reduction on ONE
+    // thread. `rmsnorm_rows` walks a row with 64. Selected by
+    // `model::block::rms_variant` in `Glm::norm_fwd` below; appended here, so
+    // every index above is unchanged.
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -721,8 +728,28 @@ impl Glm {
         s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
     }
 
+    /// RMSNorm forward, through `model::block::rms_variant`: the coalesced
+    /// `rmsnorm_rows` where the device can run a workgroup reduction, the
+    /// per-element `rmsnorm` otherwise.
+    ///
+    /// Every tape in this model funnels through here, and the one that pays
+    /// most is `decode_at`: four `rows = 1` norms per layer plus the final
+    /// one, which at GLM-5.2's 78 layers is 313 single-thread reductions per
+    /// generated token over widths 6144 / 2048 / 512.
+    ///
+    /// The epsilon is passed explicitly - and it is the 1e-6 `rmsnorm.wgsl`
+    /// hardcodes, NOT `cfg.rms_eps` (1e-5). The two kernels must share one
+    /// `Params` layout and the cooperative one reads a third `eps` field, so a
+    /// two-field list would hand it whatever the uniform happened to hold.
+    /// Whether this model should be normalizing at its config's own epsilon is
+    /// a separate question from which kernel does it; changing the value here
+    /// would change what every tape computes, which this is not.
+    ///
+    /// Not a bit-identical swap (64 partial sums fold in a different order,
+    /// agreeing to ~3e-6) - gated by `rmsnorm_variant_agreement`.
     fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
-        s.push(self.gpu.step(RMSNORM, &[x, self.w(wname), out], &[dim, rows], rows));
+        let (kind, threads) = model::block::rms_variant(&self.gpu, RMSNORM, Some(RMSNORM_ROWS), rows, dim);
+        s.push(self.gpu.step(kind, &[x, self.w(wname), out], &[dim, rows, f(model::block::RMSNORM_EPS)], threads));
     }
 
     /// RMSNorm backward: gain grad (if trainable) via `rms_inv`+`rmsnorm_dw`, then
@@ -1756,5 +1783,60 @@ mod compact_forward_tests {
             assert!(d < 1e-5, "logits_all_compact diverged from logits_all at seq_len={seq}: maxabs={d}");
         }
         println!("logits_all_compact_matches_logits_all: worst maxabs={worst:.3e}");
+    }
+}
+
+/// The coalesced RMSNorm this model now selects (`rmsnorm_rows`, via
+/// `block::rms_variant` inside `block::rmsnorm_fwd`) is NOT bit-identical to
+/// the per-element `rmsnorm` it replaced: 64 partial sums fold in a different
+/// order. It was adopted for throughput, so what it computes is gated here,
+/// against a HOST reference, at the shapes THIS model's decode tape really
+/// dispatches - narrow rows are where the two reduction orders differ most,
+/// and they are also the whole reason the swap is worth making.
+#[cfg(test)]
+mod rmsnorm_variant_agreement {
+    use super::*;
+
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(PIPELINES[RMSNORM_ROWS].0, "rmsnorm_rows");
+        assert_eq!(PIPELINES[RMSNORM].0, "rmsnorm");
+    }
+
+    #[test]
+    fn the_decode_tape_norms_match_the_host_reference() {
+        // MLA norms two low-rank latents as well as the residual, so
+        // `decode_at` dispatches three different widths, all at `rows = 1`.
+        let c = GlmConfig::glm5_2();
+        let shapes = [
+            (1, c.d_model, "input_ln/post_ln/final norm"),
+            (1, c.q_lora_rank, "MLA q_a_norm"),
+            (1, c.kv_lora_rank, "MLA kv_a_norm"),
+            (64, c.d_model, "the same residual norms at prefill width"),
+        ];
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        // `norm_fwd` is a method on a built model, so the gate goes through
+        // the shared helper with the same two indices that method selects
+        // between - the pair asserted above.
+        let ids = model::block::KernelIds {
+            rmsnorm: RMSNORM,
+            rmsnorm_rows: RMSNORM_ROWS,
+            rms_inv: model::block::UNREGISTERED,
+            rmsnorm_dx: model::block::UNREGISTERED,
+            rmsnorm_dw: model::block::UNREGISTERED,
+            rope: model::block::UNREGISTERED,
+            rope_bwd: model::block::UNREGISTERED,
+            gqa_scores: model::block::UNREGISTERED,
+            gqa_apply: model::block::UNREGISTERED,
+            attn_softmax: model::block::UNREGISTERED,
+            gqa_dscores: model::block::UNREGISTERED,
+            gqa_dv: model::block::UNREGISTERED,
+            gqa_dq: model::block::UNREGISTERED,
+            gqa_dk: model::block::UNREGISTERED,
+            silu_mul: model::block::UNREGISTERED,
+            silu_da: model::block::UNREGISTERED,
+            silu_db: model::block::UNREGISTERED,
+        };
+        model::block::assert_rmsnorm_variant_agrees(&gpu, &ids, &shapes);
     }
 }

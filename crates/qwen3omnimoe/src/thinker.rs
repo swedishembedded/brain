@@ -90,6 +90,9 @@ pub fn thinker_pipelines() -> &'static [(&'static str, &'static str)] {
         // `attn_ids`/`flash_attn_causal_gqa.wgsl`'s doc for the real
         // ERROR_OUT_OF_DEVICE_MEMORY this closes.
         ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA), // 20
+        // Coalesced RMSNorm -- the throughput twin of index 0, selected by
+        // `block::rms_variant` inside `block::rmsnorm_fwd`.
+        ("rmsnorm_rows", kernels::RMSNORM_ROWS),             // 21
     ]
 }
 
@@ -115,7 +118,7 @@ fn kernel_ids() -> KernelIds {
         silu_mul: 9,
         silu_da: block::UNREGISTERED,
         silu_db: block::UNREGISTERED,
-        rmsnorm_rows: block::UNREGISTERED,
+        rmsnorm_rows: RMSNORM_ROWS,
     }
 }
 
@@ -156,6 +159,9 @@ const ROPE2D: usize = 1;
 /// a multimodal embedding sequence before [`decode`]; see the module doc.
 pub const SPLICE: usize = 11;
 const KV_APPEND: usize = 12;
+// Coalesced RMSNorm - the throughput twin of index 0, selected by
+// `block::rms_variant` inside `block::rmsnorm_fwd`.
+const RMSNORM_ROWS: usize = 21;
 
 /// One decoder layer's weights, keyed exactly as they arrive from
 /// `qwen3omnimoe::import` (`thinker.blocks.{l}.*`, prefix already stripped by the
@@ -407,4 +413,40 @@ pub fn lm_head_fwd_i8(g: &Gpu, ids: &LmHeadIds8, lm_head_w: model::moe::Lin8, hi
     steps.push(g.step(ids.matmul_i8, &[&xq, lm_head_w.wq, &sx, lm_head_w.sw, &out], &[n, d / 4, vocab], n.div_ceil(128) * vocab.div_ceil(128) * 256));
     g.submit(&[], &steps);
     out
+}
+
+/// The coalesced RMSNorm this model now selects (`rmsnorm_rows`, via
+/// `block::rms_variant` inside `block::rmsnorm_fwd`) is NOT bit-identical to
+/// the per-element `rmsnorm` it replaced: 64 partial sums fold in a different
+/// order. It was adopted for throughput, so what it computes is gated here,
+/// against a HOST reference, at the shapes THIS model's decode tape really
+/// dispatches - narrow rows are where the two reduction orders differ most,
+/// and they are also the whole reason the swap is worth making.
+#[cfg(test)]
+mod rmsnorm_variant_agreement {
+    use super::*;
+
+    /// The slot really names the coalesced kernel. A registration this model
+    /// gets wrong by one index does not fail - it silently dispatches a
+    /// DIFFERENT kernel through the RMSNorm bindings.
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(thinker_pipelines()[kernel_ids().rmsnorm_rows].0, "rmsnorm_rows");
+    }
+
+    #[test]
+    fn the_decode_tape_norms_match_the_host_reference() {
+        // `layer_decode_step` runs `block::gqa_attn_qkv` (ln1 + the two
+        // QK-norms) and `moe_sublayer` (ln2) at `n = 1`, then one final norm -
+        // and three of those four are norms this crate never dispatches
+        // itself, they live inside the shared builder.
+        let c = crate::config::MoeTextConfig::thinker_defaults();
+        let shapes = [
+            (1, c.hidden, "ln1/ln2/final norm at decode"),
+            (c.n_heads, c.head_dim, "q_norm at decode"),
+            (c.n_kv_heads, c.head_dim, "k_norm at decode"),
+        ];
+        let gpu = gpu_core::testgpu::dev(thinker_pipelines());
+        block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), &shapes);
+    }
 }

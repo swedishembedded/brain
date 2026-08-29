@@ -39,6 +39,9 @@ const ATTN_SOFTMAX: usize = 5;
 const GQA_APPLY: usize = 6;
 const SILU_MUL: usize = 7;
 const ADD2: usize = 8;
+// Coalesced RMSNorm - the throughput twin of `RMSNORM`, selected by
+// `block::rms_variant` inside `block::rmsnorm_fwd`.
+const RMSNORM_ROWS: usize = 9;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -50,6 +53,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("gqa_apply", kernels::GQA_APPLY),
     ("silu_mul", kernels::SILU_MUL),
     ("add2", kernels::ADD2),
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
 ];
 
 struct Layer {
@@ -109,7 +113,7 @@ impl MtpModel {
             silu_mul: SILU_MUL,
             silu_da: block::UNREGISTERED,
             silu_db: block::UNREGISTERED,
-            rmsnorm_rows: block::UNREGISTERED,
+            rmsnorm_rows: RMSNORM_ROWS,
         }
     }
 
@@ -598,5 +602,33 @@ mod tests {
         assert_eq!(&embeds[d..2 * d], &cb0[..]);
         let logits = m.logits(&embeds);
         assert!(logits.iter().all(|x| x.is_finite()));
+    }
+}
+
+/// The coalesced RMSNorm this model now selects (`rmsnorm_rows`, via
+/// `block::rms_variant` inside `block::rmsnorm_fwd`) is NOT bit-identical to
+/// the per-element `rmsnorm` it replaced: 64 partial sums fold in a different
+/// order. It was adopted for throughput, so what it computes is gated here,
+/// against a HOST reference, at the shapes THIS model's decode tape really
+/// dispatches - narrow rows are where the two reduction orders differ most,
+/// and they are also the whole reason the swap is worth making.
+#[cfg(test)]
+mod rmsnorm_variant_agreement {
+    use super::*;
+
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(PIPELINES[MtpModel::only_fwd_ids().rmsnorm_rows].0, "rmsnorm_rows");
+    }
+
+    #[test]
+    fn the_tape_norms_match_the_host_reference() {
+        // The MTP tape is the one adopting tape here that is NOT
+        // decode-shaped: its rows are the 16 code groups, never 1, and it is
+        // replayed 15 times per audio frame. Real MTP: d_model 1024, 16/8
+        // heads of 128, num_code_groups 16.
+        let shapes = [(16, 1024, "ln1/ln2/final norm"), (256, 128, "q_norm (t*n_heads)"), (128, 128, "k_norm (t*n_kv_heads)")];
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        model::block::assert_rmsnorm_variant_agrees(&gpu, &MtpModel::only_fwd_ids(), &shapes);
     }
 }
