@@ -188,9 +188,6 @@ echo "a cat walking on a beach at sunset" > shot/prompt.txt
 cp first_frame.png shot/01.png        # optionally also 02.png (end) or
                                        # 02.png + 03.png (mid, end)
 
-BRAIN_LTXV_DIT=/path/to/ltx-2.5-22b.gguf \
-BRAIN_LTXV_VAE=/path/to/ltx-2.5-vae.safetensors \
-BRAIN_LTXV_TEXT_ENCODER=/path/to/gemma-4 \
 examples/videogen/images_to_video.sh shot/ out.mp4 5
 ```
 
@@ -205,9 +202,33 @@ course throughout its length, not only at its ends. See the script's own
 header comment for the exact flag mapping and `brain ltxv t2v --help` for
 what each conditioning slot actually does.
 
-Without `BRAIN_LTXV_DIT` the script runs the tiny random-weight DiT instead
-of failing -- a real wiring test (the stills genuinely condition the noise)
-but not a quality claim.
+### Weights
+
+Neither script above asks for `BRAIN_LTXV_{DIT,VAE,TEXT_ENCODER}` by hand --
+they find them for you under `$BRAIN_MODELS_DIR/Lightricks/LTX-2.5`, brain's
+standard model directory (defaults to `~/.local/share/brain/models`), from
+the OFFICIAL [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5)
+filenames -- `ltx-2.5-video-vae-bf16.safetensors`,
+`gemma4-12b-with-proj-ltx-2.5-bf16.safetensors`, and so on. Put the files
+there **flat** (no `vae/`/`text_encoders/`/`diffusion_models/`
+subfolders -- that repo ships them in subfolders, this expects them moved up
+one level) and the scripts pick them up automatically; `LTX_MODEL_DIR` points
+at a different folder if you keep them elsewhere.
+
+**The DiT is the one exception.** Lightricks publishes the 22B transformer
+only as `.safetensors`; brain's loader reads a GGUF quantization of it
+(`ltx-2.5-22b-distilled-transformer-{Q8_0,Q4_K_M}.gguf`), which has to come
+from a community conversion or from running `brain quantize` yourself
+against the bf16 file -- it will never just appear in that directory from
+the official repo alone.
+
+Whatever the scripts cannot find, they ask for once, interactively (and
+error immediately, rather than hang, if stdin is not a terminal -- set the
+`BRAIN_LTXV_*` variable yourself in that case). `LTX_TINY=1` skips all of
+this and runs the tiny random-weight DiT instead -- a real wiring test (the
+stills genuinely condition the noise) but not a quality claim. See
+`_resolve_ltxv_weights.sh`'s own header for the exact file list and search
+order.
 
 ## Chaining a numbered sequence of stills into one long clip
 

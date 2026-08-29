@@ -33,11 +33,17 @@
 #
 # Optional, all env: WIDTH, HEIGHT, STEPS, SEED, FPS, BRAIN_DEVICE, BRAIN.
 #
-# Weights come from BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE}. Without
-# BRAIN_LTXV_DIT this runs the tiny random-weight DiT - a real end-to-end
-# wiring test (the stills genuinely condition the noise), but not a quality
-# claim; see examples/videogen/README.md and ltxv_cli's own --help for what
-# "real" requires at each flag.
+# Weights: point LTX_MODEL_DIR at a folder holding LTX-2.5's files FLAT (no
+# vae/text_encoders/diffusion_models subfolders - see
+# _resolve_ltxv_weights.sh's own header for exactly which filenames and why
+# the DiT is the one file that folder alone will not contain) and this finds
+# BRAIN_LTXV_{DIT,VAE,TEXT_ENCODER} for you; unset, it defaults to
+# $BRAIN_MODELS_DIR/Lightricks/LTX-2.5, brain's own standard model
+# directory (BRAIN_MODELS_DIR, else XDG_DATA_HOME/brain/models, else
+# ~/.local/share/brain/models). Anything not found there is asked for
+# interactively, once. LTX_TINY=1 skips all of this and runs the
+# tiny random-weight DiT instead - a real end-to-end wiring test (the
+# stills genuinely condition the noise), but not a quality claim.
 
 set -euo pipefail
 
@@ -45,6 +51,14 @@ DIR="${1:?usage: images_to_video.sh <folder/> [out.mp4] [seconds]}"
 OUT="${2:-clip.mp4}"
 FPS="${FPS:-24}"
 FRAMES=$(( ${3:-5} * FPS / 8 * 8 + 1 ))   # must be 1 + 8k
+
+if [ "${LTX_TINY:-0}" = "1" ]; then
+  DIT_CONFIG=tiny
+else
+  # shellcheck source=_resolve_ltxv_weights.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/_resolve_ltxv_weights.sh"
+  DIT_CONFIG=ltx25_22b
+fi
 
 [ -d "$DIR" ] || { echo "images_to_video: no such folder: $DIR" >&2; exit 1; }
 
@@ -70,6 +84,6 @@ exec "${BRAIN:-./target/release/brain}" ltxv t2v \
   --prompt "$PROMPT" \
   --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
   --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
-  --dit-config ltx25_22b \
+  --dit-config "$DIT_CONFIG" \
   "${ANCHORS[@]}" \
   --output-path "$OUT"

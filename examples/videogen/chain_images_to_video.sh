@@ -40,9 +40,14 @@
 # BRAIN. Segment N is written to <out>.segments/clip-N.mp4 - inspect them
 # individually if the final concatenation is not what you expected.
 #
-# Weights come from BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE}; see
-# examples/videogen/images_to_video.sh's header for what running without
-# BRAIN_LTXV_DIT does and does not prove.
+# Weights: point LTX_MODEL_DIR at a folder holding LTX-2.5's files FLAT (no
+# vae/text_encoders/diffusion_models subfolders); unset, it defaults to
+# $BRAIN_MODELS_DIR/Lightricks/LTX-2.5. Anything missing is asked for
+# interactively, once - see _resolve_ltxv_weights.sh's header for exactly
+# which filenames and why the DiT is the one file that folder alone will
+# not contain. LTX_TINY=1 skips all of this and runs the tiny
+# random-weight DiT instead - see examples/videogen/images_to_video.sh's
+# header for what that does and does not prove.
 
 set -euo pipefail
 
@@ -52,6 +57,14 @@ FPS="${FPS:-24}"
 FRAMES=$(( ${3:-5} * FPS / 8 * 8 + 1 ))   # must be 1 + 8k
 MID="${MID:-0}"
 BRAIN="${BRAIN:-./target/release/brain}"
+
+if [ "${LTX_TINY:-0}" = "1" ]; then
+  DIT_CONFIG=tiny
+else
+  # shellcheck source=_resolve_ltxv_weights.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/_resolve_ltxv_weights.sh"
+  DIT_CONFIG=ltx25_22b
+fi
 
 command -v ffmpeg >/dev/null || { echo "chain_images_to_video: ffmpeg is required (concatenates the segments)" >&2; exit 1; }
 
@@ -101,7 +114,7 @@ while [ $(( i + STEP )) -lt "$N" ]; do
     --prompt "$PROMPT" \
     --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
     --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
-    --dit-config ltx25_22b \
+    --dit-config "$DIT_CONFIG" \
     "${ANCHORS[@]}" \
     --output-path "$SEG"
 
