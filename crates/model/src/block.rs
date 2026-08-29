@@ -64,6 +64,20 @@ pub struct KernelIds {
     pub silu_mul: usize,
     pub silu_da: usize,
     pub silu_db: usize,
+    /// The COALESCED RMSNorm forward twin (`rmsnorm_rows`), or [`UNREGISTERED`]
+    /// when the model has not registered that pipeline. Purely a performance
+    /// slot: [`rmsnorm_fwd`] selects between it and `rmsnorm` through
+    /// [`rms_variant`], and a model that leaves it unregistered keeps
+    /// dispatching the per-element reference exactly as before.
+    ///
+    /// It is a slot on [`KernelIds`] rather than an argument because the
+    /// builders that pay the most for the naive kernel are the SHARED ones -
+    /// [`gqa_attn_qkv`]'s three norms, [`crate::gqa_mixer::gqa_mixer_fwd`]'s
+    /// QK-norms, [`crate::gdn_mixer::gdn_mixer_fwd`]'s gated norm - which no
+    /// model can reach from its own call sites. Registering one pipeline and
+    /// filling one slot switches every RMSNorm a model composes, including
+    /// the ones inside those builders.
+    pub rmsnorm_rows: usize,
 }
 
 impl KernelIds {
@@ -71,9 +85,10 @@ impl KernelIds {
     /// "no unused slot is dispatchable" gate walks. It lives here, next to the
     /// struct, so adding a field cannot leave a gate silently checking 16 of 17
     /// slots.
-    pub fn slots(&self) -> [(&'static str, usize); 16] {
+    pub fn slots(&self) -> [(&'static str, usize); 17] {
         [
             ("rmsnorm", self.rmsnorm),
+            ("rmsnorm_rows", self.rmsnorm_rows),
             ("rms_inv", self.rms_inv),
             ("rmsnorm_dx", self.rmsnorm_dx),
             ("rmsnorm_dw", self.rmsnorm_dw),
@@ -112,10 +127,38 @@ impl Gqa {
     }
 }
 
+/// The epsilon `rmsnorm.wgsl` hardcodes. [`rmsnorm_fwd`] has to pass it
+/// explicitly because its two variants share one `Params` layout and the
+/// cooperative one reads a third `eps` field; a two-field list would hand it
+/// whatever the uniform happened to hold.
+pub const RMSNORM_EPS: f32 = 1e-6;
+
 /// RMSNorm forward: `out = (x / rms(x)) * w` over the last `dim` axis, one row
 /// per invocation (`rows` total).
+///
+/// Dispatches the coalesced `rmsnorm_rows` when the model registered it
+/// ([`KernelIds::rmsnorm_rows`]) and the device can run a workgroup reduction,
+/// the per-element `rmsnorm` otherwise - the choice is [`rms_variant`]'s, i.e.
+/// `backend_api::select`'s, never a backend name's.
+///
+/// Why the seam is here and not only at model call sites: `rmsnorm.wgsl` gives
+/// thread `t` row `t`, so a warp's 32 loads are `dim` floats apart and every
+/// 32-byte sector fetched serves ONE useful float. That penalty is worst at
+/// the `rows = 1` of a decode step - measured on a real two-card Qwen3.8-27B
+/// it was 48% of all device time per token, more than the whole int8 weight
+/// stream underneath it - but the swept comparison in `rmsnorm_rows.wgsl` wins
+/// at every row width. Models compose this builder from inside
+/// [`gqa_attn_qkv`], [`crate::gqa_mixer`] and [`crate::gdn_mixer`], so a
+/// per-model fix cannot reach those norms at all.
+///
+/// NOT a bit-identical swap: 64 partial sums fold in a different order,
+/// agreeing to ~3e-6 max_abs. That is why it lives behind a registration a
+/// model opts into, and why every adopting model gates it with a
+/// variant-agreement test against a HOST reference.
 pub fn rmsnorm_fwd(g: &Gpu, k: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
-    g.step(k.rmsnorm, &[x, w, out], &[dim, rows], rows)
+    let coop = (k.rmsnorm_rows != UNREGISTERED).then_some(k.rmsnorm_rows);
+    let (kind, threads) = rms_variant(g, k.rmsnorm, coop, rows, dim);
+    g.step(kind, &[x, w, out], &[dim, rows, f(RMSNORM_EPS)], threads)
 }
 
 /// RMSNorm backward: always the input grad (`dx`); the gain grad (`gw`, needing
@@ -1446,6 +1489,56 @@ pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d:
     }
 }
 
+/// Gate for a model that has just registered [`KernelIds::rmsnorm_rows`]:
+/// assert the seam computes the reference normalization at every `(rows, dim)`
+/// its own tapes dispatch one at.
+///
+/// Adopting `rmsnorm_rows` is a THROUGHPUT change to a kernel that is not
+/// bit-identical to the one it replaces (64 partial sums fold in a different
+/// order, agreeing to ~3e-6), so every adopting model owes a numerical gate.
+/// The reference is a HOST one - [`crate::hostmath::rmsnorm_rows`], written to
+/// match `rmsnorm.wgsl`'s reduction and epsilon placement exactly. Comparing
+/// the two device kernels to each other would pass if both were wrong the same
+/// way.
+///
+/// It lives here, next to the seam, because five models adopted it in one pass
+/// and five byte-identical copies of this comparison is how a tolerance drifts.
+/// Same "a production module can carry the one test helper for the thing it
+/// implements" convention as `gpu_core::testgpu`.
+///
+/// `shapes` are `(rows, dim, what)`; `what` names the dispatch site so a
+/// failure says which tape broke, not just which number.
+pub fn assert_rmsnorm_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32, u32, &str)]) {
+    // The kernels differ only in reduction ORDER over the same `dim` squares,
+    // so the error is O(sqrt(dim) * eps) on a sum whose scale is `dim`;
+    // `rmsnorm_rows`'s own header records 3.3e-6 max_abs over a wide sweep.
+    // TIGHT on purpose: a real defect (a wrong eps, a missed tail element, a
+    // mis-strided row) moves the answer by orders of magnitude more.
+    const TOL: f32 = 2e-5;
+    assert!(!shapes.is_empty(), "no shapes given, so this gate would pass vacuously");
+
+    for &(rows, dim, what) in shapes {
+        let (rows_u, dim_u) = (rows as usize, dim as usize);
+        // Deterministic, no RNG (engine convention), and scaled well away from
+        // 1.0 so a dropped `eps` or a wrong element count cannot hide inside a
+        // coincidentally-unit normalization.
+        let x: Vec<f32> = (0..rows_u * dim_u).map(|i| 3.0 * (i as f32 * 0.7 + 0.1).sin()).collect();
+        let w: Vec<f32> = (0..dim_u).map(|i| 0.5 * (i as f32 * 0.31 + 0.2).cos()).collect();
+        let want = crate::hostmath::rmsnorm_rows(&x, &w, rows_u, dim_u, RMSNORM_EPS);
+
+        let xb = g.storage_init("rms_agree_x", &x);
+        let wb = g.storage_init("rms_agree_w", &w);
+        let ob = g.storage((rows_u * dim_u) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, ids, &xb, &wb, &ob, dim, rows)]);
+        let got = g.read(&ob, rows_u * dim_u);
+
+        assert!(got.iter().all(|v| v.is_finite()), "{what} ({rows}x{dim}): produced a non-finite value");
+        let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+        let e = got.iter().zip(&want).fold(0.0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+        assert!(e <= TOL, "{what} ({rows}x{dim}): relative error {e:e} exceeds {TOL:e}");
+    }
+}
+
 /// RMSNorm backward with runtime epsilon: input grad always (`rmsnorm_dx_eps`),
 /// gain grad only when `gw` is `Some` (`rms_inv_eps` + `rmsnorm_dw`; the dw
 /// kernel is eps-free - eps enters through the per-row inverse).
@@ -1870,6 +1963,7 @@ mod kv_cache_tests {
             silu_mul: 0,
             silu_da: 0,
             silu_db: 0,
+            rmsnorm_rows: UNREGISTERED,
         };
         let decode_ids = GqaDecodeIds { kv_append: 3, attn_decode_scores: 4, decode_softmax: 5, attn_decode_apply: 6 };
 
@@ -1985,6 +2079,7 @@ mod kv_cache_tests {
             silu_mul: 0,
             silu_da: 0,
             silu_db: 0,
+            rmsnorm_rows: UNREGISTERED,
         };
 
         // Deterministic pseudo-random q/k/v -- same fixed-formula convention

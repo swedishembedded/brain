@@ -512,6 +512,7 @@ impl KronosTrain {
             rope: ROPE, rope_bwd: ROPE_BWD, gqa_scores: GQA_SCORES, gqa_apply: GQA_APPLY,
             attn_softmax: ATTN_SOFTMAX, gqa_dscores: GQA_DSCORES, gqa_dv: GQA_DV, gqa_dq: GQA_DQ,
             gqa_dk: GQA_DK, silu_mul: SILU_MUL, silu_da: SILU_DA, silu_db: SILU_DB,
+            rmsnorm_rows: block::UNREGISTERED,
         }
     }
     fn gqa(&self) -> Gqa {

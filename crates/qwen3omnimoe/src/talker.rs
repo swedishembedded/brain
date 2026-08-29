@@ -92,6 +92,7 @@ fn kernel_ids() -> KernelIds {
         silu_mul: 9,
         silu_da: block::UNREGISTERED,
         silu_db: block::UNREGISTERED,
+        rmsnorm_rows: block::UNREGISTERED,
     }
 }
 

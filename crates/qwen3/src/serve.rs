@@ -198,6 +198,7 @@ fn ids() -> KernelIds {
         gqa_dk: block::UNREGISTERED,
         silu_da: block::UNREGISTERED,
         silu_db: block::UNREGISTERED,
+        rmsnorm_rows: block::UNREGISTERED,
     }
 }
 

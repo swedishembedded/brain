@@ -53,6 +53,7 @@ fn ids(g: &Gpu) -> KernelIds {
         silu_mul: usize::MAX,
         silu_da: usize::MAX,
         silu_db: usize::MAX,
+        rmsnorm_rows: model::block::UNREGISTERED,
     }
 }
 

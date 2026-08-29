@@ -109,6 +109,7 @@ impl MtpModel {
             silu_mul: SILU_MUL,
             silu_da: block::UNREGISTERED,
             silu_db: block::UNREGISTERED,
+            rmsnorm_rows: block::UNREGISTERED,
         }
     }
 

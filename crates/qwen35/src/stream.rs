@@ -263,6 +263,7 @@ pub(crate) fn kernel_ids(g: &Gpu) -> KernelIds {
         silu_mul: idx(g, "silu_mul"),
         silu_da: idx(g, "silu_bwd_da"),
         silu_db: idx(g, "silu_bwd_db"),
+        rmsnorm_rows: model::block::UNREGISTERED,
     }
 }
 

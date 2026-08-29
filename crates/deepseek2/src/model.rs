@@ -222,6 +222,7 @@ fn kernel_ids() -> KernelIds {
         silu_mul: SILU_MUL,
         silu_da: SILU_DA,
         silu_db: SILU_DB,
+        rmsnorm_rows: block::UNREGISTERED,
     }
 }
 
