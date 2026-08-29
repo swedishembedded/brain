@@ -769,7 +769,7 @@ front-end to depend on.
 |---|---|
 | `kernels` | every WGSL kernel (the source of truth) as consts + `src()` |
 | `gpu-core` | compute-device facade: selects and forwards to an eager `Backend` |
-| `backend-api` | `Backend`/`GraphBackend` traits, neutral buffer/step handles, registry - a new backend depends only on this |
+| `backend-api` | `Backend` trait, neutral buffer/step handles, registry - a new backend depends only on this. Also `backend_api::hardware`: the ONE cross-thread **and** cross-process device-init lock, the ONE `BRAIN_GPU_WAIT_S` bound, and the bounded-worker helper for un-cancellable driver FFI. A backend that opens real hardware uses these; it does not write its own |
 | `backend-wgpu` | wgpu (Vulkan/Metal/DX12/GL/WebGPU) eager backend - **the default** |
 | `backend-cpu` | native CPU backend: WGSL → Cranelift JIT across cores, AVX2 fast paths |
 | `backend-vulkan` | native Vulkan (ash + naga WGSL→SPIR-V) eager backend |
@@ -850,7 +850,7 @@ front-end to depend on.
 | Canonical GPU registry / placement (`brain devices`, `Gpu::new_on`, `with_gpu`) | `docs/introduction/hardware.md`; `crates/gpu-core/src/devices.rs` |
 | Kernel selection policy + autotuner (which variant runs, measured per device) | `backend_api::select` (`candidates`/`DefaultSelector`/`AutoTuner`), `gpu_core::tune`; `BRAIN_NO_AUTOTUNE=1` forces static |
 | Roofline probe (compute/bandwidth ceiling used for "% of roof") | `gpu_core::roof`; bounded by `BRAIN_ROOF_BUDGET_S` (default 10s); off by default on the CPU device class, force-run there with `BRAIN_NO_ROOF=0` |
-| GPU backend wait bound (Vulkan fence wait, wgpu `poll`) | `BRAIN_GPU_WAIT_S` (default 30s) - a wedged submit now panics with which call site timed out instead of hanging the process forever; see `.agents/rules/lessons.md` #38 |
+| GPU backend wait bound (Vulkan fence wait, wgpu `poll`, device creation) | `BRAIN_GPU_WAIT_S` (default 30s), parsed in exactly one place: `backend_api::hardware::wait_timeout`. A wedged submit or device creation panics naming which call site timed out instead of hanging the process forever; see `.agents/rules/lessons.md` #38, #73, #74 |
 | Kernel specialisation (one WGSL source, tunable constants) | `kernels::template` |
 | Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen3::serve::Engine::prefill` |
 | Int8 serving weights + on-device decode window | `qwen3::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |

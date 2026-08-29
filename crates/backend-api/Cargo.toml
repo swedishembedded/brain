@@ -3,7 +3,7 @@ name = "brain-backend-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Backend abstraction: Backend/GraphBackend traits, neutral buffer/step handles, and a backend registry. A new backend crate depends only on this."
+description = "Backend abstraction: the Backend trait, neutral buffer/step handles, a backend registry, and the shared cross-process device-init lock + bounded-wait primitives. A new backend crate depends only on this."
 
 [lib]
 name = "backend_api"
