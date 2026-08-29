@@ -27,6 +27,9 @@ tracing.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 ash.workspace = true
+# `flock(2)` for `cross_process_gpu_lock` - the cross-PROCESS half of
+# `init_lock`'s device create/destroy serialisation (see that function's doc).
+libc.workspace = true
 
 # Browser GPU stack: wgpu's WebGPU backend only, plus async-readback glue.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
