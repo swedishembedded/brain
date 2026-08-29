@@ -130,7 +130,28 @@ fn ensure_unversioned_solinks(dir: &std::path::Path) {
     }
 }
 
+/// Build an OpenVINO `Core` under the shared NPU device-init lock.
+///
+/// Same defect class as the GPU backends' device creation, on physically
+/// different silicon, so it takes the NPU key rather than the GPU one (see
+/// [`backend_api::hardware`]). Two things here are unsafe to run
+/// concurrently:
+///
+/// * [`ensure_openvino_on_path`] mutates the process-global
+///   `LD_LIBRARY_PATH`. Two threads opening sessions at once race that write
+///   against every other thread's read of the environment.
+/// * `Core::new` makes the runtime `dlopen` its plugin set, and the device
+///   plugin then opens the accelerator - the loader path this workspace has
+///   already been bitten by on the graphics side, and one that a second
+///   PROCESS contends for identically.
+///
+/// Held only across construction: the compiles that follow are long, and
+/// serialising those host-wide would cost far more than the race is worth.
+/// Bounding the driver-side compile itself is a separate, larger change: the
+/// compile borrows the `Core` and the model, so it cannot cross into a worker
+/// thread without restructuring session construction.
 fn new_core() -> Result<Core, NpuError> {
+    let _init = backend_api::hardware::device_class_lock(backend_api::hardware::NPU);
     ensure_openvino_on_path();
     Core::new().map_err(|e| NpuError::RuntimeNotFound(format!("{e:?}")))
 }

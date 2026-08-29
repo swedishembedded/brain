@@ -11,6 +11,11 @@ name = "npu"
 path = "src/lib.rs"
 
 [dependencies]
+# The shared hardware-contention primitives (`backend_api::hardware`): this
+# crate opens a real accelerator through a vendor runtime, so it takes the
+# same kind of cross-thread AND cross-process device-init lock the GPU
+# backends do - on its own key, since the NPU is physically separate silicon.
+brain-backend-api.workspace = true
 brain-model.workspace = true
 brain-onnx.workspace = true
 brain-checkpoint.workspace = true
