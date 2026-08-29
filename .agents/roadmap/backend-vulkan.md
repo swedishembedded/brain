@@ -31,12 +31,19 @@ GPU-touching code in the same process ever reads `BRAIN_VK_SERIAL` while this
 test's env mutation is in flight, or if the actual mechanism serializing GPU
 access across concurrent test *binaries* is weaker than the Makefile's "GPU
 serialised" comment (`Makefile:191`) implies, a build-vs-run race here is
-plausible. No file-lock or other cross-process GPU serialization mechanism
-was found in the codebase during a search for one (`flock`/`gpu_lock`/
-similar) - worth confirming whether one is expected to exist and is missing,
-or whether concurrent GPU test binaries were never actually meant to be
-mutually exclusive and this is a driver-level multi-process contention issue
-instead.
+plausible.
+
+**Answered.** "No file-lock or other cross-process GPU serialization
+mechanism was found in the codebase during a search for one" was correct:
+there was none, and one was needed. Concurrent GPU test binaries WERE meant
+to be mutually exclusive and were not - `init_lock()` was a
+`std::sync::Mutex`, which orders threads inside one address space and
+therefore serialised nothing at all between two test processes on one card.
+It is now `backend_api::hardware::device_init_lock`, a `flock(2)` on a
+well-known file plus that mutex, taken by every crate that opens a device
+(`backend-wgpu`, `backend-vulkan`, `brain-vulkan`) rather than by one of
+them. See `.agents/rules/lessons.md` #73 and #74, and
+`.agents/roadmap/gpu-supervisor.md` for what that lock still cannot do.
 
 **Practical impact (updated)**: `make test` used to be unreliable end-to-end
 on this box without a lucky scheduling draw. A full session dedicated to
