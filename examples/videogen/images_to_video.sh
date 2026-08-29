@@ -30,6 +30,14 @@
 #
 # Optional, all env: WIDTH, HEIGHT, STEPS, SEED, FPS, BRAIN_DEVICE, BRAIN.
 #
+# LTX_TRACE=<0-5> (default 4) controls how much of the load/generate is
+# printed as it happens (`brain --trace-ltxv`, an existing, tested
+# instrumentation family - not something this script adds): 4 gives each
+# host stage's duration and the per-generation weight cache's hit/miss
+# split; 5 adds every transformer block individually (GGUF-read/quantize/
+# GPU milliseconds), useful when the model's own weight streaming - not
+# generation itself - is what's taking a while. 0 is silent.
+#
 # Weights: point LTX_MODEL_DIR at a folder holding LTX-2.5's files FLAT (no
 # vae/text_encoders/diffusion_models subfolders - see
 # _resolve_ltxv_weights.sh's own header for exactly which filenames and why
@@ -86,7 +94,7 @@ echo "images_to_video: prompt: $PROMPT" >&2
 for IMG in "${IMAGES[@]}"; do
   OUT="${IMG%.*}.mp4"
   echo "images_to_video: $IMG -> $OUT"
-  "${BRAIN:-./target/release/brain}" ltxv t2v \
+  "${BRAIN:-./target/release/brain}" --trace-ltxv "${LTX_TRACE:-4}" ltxv t2v \
     --prompt "$PROMPT" \
     --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
     --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \

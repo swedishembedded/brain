@@ -40,6 +40,10 @@
 # BRAIN. Segment N is written to <out>.segments/clip-N.mp4 - inspect them
 # individually if the final concatenation is not what you expected.
 #
+# LTX_TRACE=<0-5> (default 4) controls how much of each segment's load/
+# generate is printed as it happens - see images_to_video.sh's header for
+# what each level shows.
+#
 # Weights: point LTX_MODEL_DIR at a folder holding LTX-2.5's files FLAT (no
 # vae/text_encoders/diffusion_models subfolders); unset, it defaults to
 # $BRAIN_MODELS_DIR/Lightricks/LTX-2.5. Anything missing is asked for
@@ -111,7 +115,7 @@ while [ $(( i + STEP )) -lt "$N" ]; do
   fi
 
   echo "chain_images_to_video: segment $n: ${ANCHORS[*]}"
-  "$BRAIN" ltxv t2v \
+  "$BRAIN" --trace-ltxv "${LTX_TRACE:-4}" ltxv t2v \
     --prompt "$PROMPT" \
     --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
     --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
