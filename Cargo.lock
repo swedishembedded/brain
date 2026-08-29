@@ -491,7 +491,6 @@ dependencies = [
  "bytemuck",
  "futures-channel",
  "half",
- "libc",
  "pollster",
  "tracing",
  "web-sys",
@@ -1451,6 +1450,7 @@ dependencies = [
 name = "brain-npu"
 version = "1.1.0"
 dependencies = [
+ "brain-backend-api",
  "brain-checkpoint",
  "brain-chronos2",
  "brain-cosyvoice",
@@ -2061,6 +2061,7 @@ name = "brain-vulkan"
 version = "1.1.0"
 dependencies = [
  "ash",
+ "brain-backend-api",
  "brain-kernels",
  "brain-testutil",
  "bytemuck",

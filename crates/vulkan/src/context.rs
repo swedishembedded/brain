@@ -247,6 +247,11 @@ fn shared_instance() -> Result<&'static (ash::Entry, ash::Instance, bool), Strin
     SHARED
         .get_or_init(|| unsafe {
             tracing::info!("creating the process-lifetime Vulkan instance (once, never destroyed)");
+            // `vkCreateInstance` makes the loader `dlopen` every installed
+            // ICD, which is the same non-re-entrant loader path `backend-wgpu`
+            // serialises when it builds its `wgpu::Instance`. Same lock, so
+            // the two cannot enter it at the same moment from two processes.
+            let _init = backend_api::hardware::device_init_lock();
             let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
 
             let app_name = CString::new("brain-vk").unwrap();
@@ -511,17 +516,30 @@ impl VkContext {
             device_info = device_info.push_next(&mut en_dot);
         }
 
-        let device = instance
-            .create_device(physical_device, &device_info, None)
-            .map_err(|e| format!("vkCreateDevice failed: {e}"))?;
-        let queue = device.get_device_queue(queue_family_index, 0);
-
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let command_pool = device
-            .create_command_pool(&pool_info, None)
-            .map_err(|e| format!("create_command_pool failed: {e}"))?;
+        // `vkCreateDevice` on a card another PROCESS is simultaneously
+        // creating or destroying a device on is the hazard that hung the test
+        // suite from `backend-wgpu` (lesson #73). This crate reaches the same
+        // physical cards through raw `ash`, so it is a direct contention
+        // partner and takes the SAME host-wide lock - a second, private lock
+        // here would serialise nothing that matters. Scoped to the FFI call
+        // pair (device + its command pool) and released immediately: the
+        // capability queries above and the buffer work afterwards are not
+        // part of the hazard, and holding a host-wide lock across them would
+        // serialise every process on the box for no benefit.
+        let (device, queue, command_pool) = {
+            let _init = backend_api::hardware::device_init_lock();
+            let device = instance
+                .create_device(physical_device, &device_info, None)
+                .map_err(|e| format!("vkCreateDevice failed: {e}"))?;
+            let queue = device.get_device_queue(queue_family_index, 0);
+            let pool_info = vk::CommandPoolCreateInfo::default()
+                .queue_family_index(queue_family_index)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+            let command_pool = device
+                .create_command_pool(&pool_info, None)
+                .map_err(|e| format!("create_command_pool failed: {e}"))?;
+            (device, queue, command_pool)
+        };
 
         let mem_props = instance.get_physical_device_memory_properties(physical_device);
 
@@ -719,7 +737,13 @@ impl VkContext {
             let fence = self.device.create_fence(&vk::FenceCreateInfo::default(), None).expect("fence");
             let cmds = [cmd];
             self.device.queue_submit(self.queue, &[vk::SubmitInfo::default().command_buffers(&cmds)], fence).expect("submit");
-            self.device.wait_for_fences(&[fence], true, u64::MAX).expect("wait");
+            // Bounded, never `u64::MAX`: an unbounded fence wait is what turns
+            // a wedged queue into an unkillable process instead of a reported
+            // failure. Same `BRAIN_GPU_WAIT_S` ceiling every other wait on a
+            // device in this workspace uses.
+            self.device
+                .wait_for_fences(&[fence], true, backend_api::hardware::wait_timeout_ns())
+                .expect("wait_for_fences timed out or failed (BRAIN_GPU_WAIT_S) -- device likely wedged");
             self.device.destroy_fence(fence, None);
             self.device.free_command_buffers(self.command_pool, &cmds);
         }
@@ -893,9 +917,10 @@ impl VkContext {
             self.device
                 .queue_submit(self.queue, &[submit], fence)
                 .expect("queue_submit");
+            // Bounded, never `u64::MAX` - see `run_cmd`'s wait.
             self.device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .expect("wait_for_fences");
+                .wait_for_fences(&[fence], true, backend_api::hardware::wait_timeout_ns())
+                .expect("wait_for_fences timed out or failed (BRAIN_GPU_WAIT_S) -- device likely wedged");
 
             self.device.destroy_fence(fence, None);
             self.device.free_command_buffers(self.command_pool, &cmds);
@@ -1034,6 +1059,22 @@ impl VkContext {
 
 impl Drop for VkContext {
     fn drop(&mut self) {
+        // Teardown is half the hazard, not an afterthought: what reproducibly
+        // wedged the next process's `vkCreateDevice` was the driver still
+        // finishing a just-exited holder's device destruction on the same
+        // card. So destruction takes the same host-wide lock creation does.
+        //
+        // Blocking, deliberately, even though this is a `Drop` that can run
+        // on the residency dispatcher thread: the alternative - give up after
+        // a while and destroy the device anyway - is the unserialised
+        // teardown that was observed as an intermittent SIGSEGV inside the
+        // driver's own background pipeline thread. Every holder of this lock
+        // is itself bounded, so the wait is bounded in practice; the case
+        // that is not (an abandoned worker thread from a timed-out
+        // `backend_api::hardware::bounded`) needs a supervised, killable
+        // child process to fix properly, and cannot be fixed by making
+        // teardown less safe.
+        let _init = backend_api::hardware::device_init_lock();
         unsafe {
             let _ = self.device.device_wait_idle();
             // Same poisoning risk as `with_staging` above -- Drop must never

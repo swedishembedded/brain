@@ -11,6 +11,13 @@ name = "vulkan"
 path = "src/lib.rs"
 
 [dependencies]
+# The shared hardware-contention primitives ONLY (`backend_api::hardware`):
+# the one cross-thread AND cross-process lock around device create/destroy,
+# and the one `BRAIN_GPU_WAIT_S` bound. This crate opens logical devices on
+# the very cards `backend-wgpu` opens, so it has to take the SAME lock, not a
+# second one of its own. `brain-backend-api` is itself dependency-free, so
+# this adds no graph weight and cannot cycle (nothing in it depends on this).
+brain-backend-api.workspace = true
 brain-kernels.workspace = true
 bytemuck.workspace = true
 ash.workspace = true
