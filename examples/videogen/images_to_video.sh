@@ -3,33 +3,30 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 #
-# A folder of stills and a prompt in, one clip out.
+# Each image becomes its OWN video - point this at one still, or at a
+# folder of them, and get one clip per image, named after it.
 #
-#   examples/videogen/images_to_video.sh <folder/> [out.mp4] [seconds]
+#   examples/videogen/images_to_video.sh <image-or-folder> ["prompt"] [seconds]
 #
-# <folder/> holds:
-#   prompt.txt          the whole clip's prompt (required)
-#   1-3 PNG/JPEG stills, named so sorting gives the order you want them in
-#                        (01.png, 02.png, ... is the simplest scheme)
+# <image-or-folder> is either:
+#   a single PNG/JPEG file    -> one clip: photo.png makes photo.mp4
+#   a folder of PNG/JPEG files -> one clip PER image, same rule, so
+#                                 shots/a.png and shots/b.jpg make
+#                                 shots/a.mp4 and shots/b.mp4
 #
-# The stills are anchor frames, not a slideshow: LTX-2.5 denoises everything
-# BETWEEN them from the prompt, so what you get is one continuous shot that
-# starts at (and, with two or three stills, passes through and ends at)
-# exactly those pixels. How many stills decides which of the model's
-# conditioning slots get used:
+# Each image conditions ONLY its own clip's opening frame
+# (`brain ltxv t2v --start-frame`) - this is independent image-to-video,
+# not a sequence: N images make N unrelated clips, not one clip that
+# passes through all of them. For a single continuous clip that opens on
+# one still, passes through others, and closes on a last one, see
+# examples/videogen/chain_images_to_video.sh instead.
 #
-#   1 image  -> --start-frame                 opens on that still
-#   2 images -> --start-frame + --end-frame   opens and closes on them
-#   3 images -> --start-frame + --mid-frame + --end-frame
-#               opens, passes through the middle one at the clip's
-#               midpoint, and closes on the last - the way to keep a
-#               longer or moving-camera clip on course throughout, not
-#               only at its ends
-#
-# Passing the SAME image twice (e.g. as both --start-frame and --end-frame)
-# asks for a clip that returns to where it started, which some prompts read
-# as "loop" and others as "the same picture, unmoving" - describe motion
-# explicitly in the prompt if you want the former.
+# The prompt is, in order: the second argument if given; else
+# <folder>/prompt.txt if the input is a folder and that file exists (used
+# for every image in it); else a generic placeholder describing plain
+# image-to-video motion, which is a wiring convenience, NOT something to
+# rely on for quality - a real prompt describing what should actually
+# happen in the shot is always better than the default.
 #
 # Optional, all env: WIDTH, HEIGHT, STEPS, SEED, FPS, BRAIN_DEVICE, BRAIN.
 #
@@ -43,12 +40,14 @@
 # ~/.local/share/brain/models). Anything not found there is asked for
 # interactively, once. LTX_TINY=1 skips all of this and runs the
 # tiny random-weight DiT instead - a real end-to-end wiring test (the
-# stills genuinely condition the noise), but not a quality claim.
+# still genuinely conditions the noise), but not a quality claim.
 
 set -euo pipefail
 
-DIR="${1:?usage: images_to_video.sh <folder/> [out.mp4] [seconds]}"
-OUT="${2:-clip.mp4}"
+DEFAULT_PROMPT="the scene comes to life with smooth, natural motion and a gently moving camera"
+
+SRC="${1:?usage: images_to_video.sh <image-or-folder> [\"prompt\"] [seconds]}"
+CLI_PROMPT="${2:-}"
 FPS="${FPS:-24}"
 FRAMES=$(( ${3:-5} * FPS / 8 * 8 + 1 ))   # must be 1 + 8k
 
@@ -60,30 +59,38 @@ else
   DIT_CONFIG=ltx25_22b
 fi
 
-[ -d "$DIR" ] || { echo "images_to_video: no such folder: $DIR" >&2; exit 1; }
-
-PROMPT_FILE="$DIR/prompt.txt"
-[ -f "$PROMPT_FILE" ] || { echo "images_to_video: $DIR has no prompt.txt (the clip's prompt goes there)" >&2; exit 1; }
-PROMPT="$(cat "$PROMPT_FILE")"
-[ -n "$PROMPT" ] || { echo "images_to_video: $PROMPT_FILE is empty" >&2; exit 1; }
-
 IMAGES=()
-while IFS= read -r -d '' f; do IMAGES+=("$f"); done < <(
-  find "$DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) -print0 | sort -z
-)
+FOLDER_PROMPT_FILE=""
+if [ -f "$SRC" ]; then
+  IMAGES=("$SRC")
+elif [ -d "$SRC" ]; then
+  while IFS= read -r -d '' f; do IMAGES+=("$f"); done < <(
+    find "$SRC" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) -print0 | sort -z
+  )
+  [ "${#IMAGES[@]}" -gt 0 ] || { echo "images_to_video: $SRC has no PNG/JPEG images" >&2; exit 1; }
+  FOLDER_PROMPT_FILE="$SRC/prompt.txt"
+else
+  echo "images_to_video: no such file or folder: $SRC" >&2
+  exit 1
+fi
 
-case "${#IMAGES[@]}" in
-  0) echo "images_to_video: $DIR has no PNG/JPEG stills (need 1-3)" >&2; exit 1 ;;
-  1) ANCHORS=(--start-frame "${IMAGES[0]}") ;;
-  2) ANCHORS=(--start-frame "${IMAGES[0]}" --end-frame "${IMAGES[1]}") ;;
-  3) ANCHORS=(--start-frame "${IMAGES[0]}" --mid-frame "${IMAGES[1]}" --end-frame "${IMAGES[2]}") ;;
-  *) echo "images_to_video: $DIR has ${#IMAGES[@]} stills, only 1-3 are supported (start/mid/end)" >&2; exit 1 ;;
-esac
+if [ -n "$CLI_PROMPT" ]; then
+  PROMPT="$CLI_PROMPT"
+elif [ -n "$FOLDER_PROMPT_FILE" ] && [ -s "$FOLDER_PROMPT_FILE" ]; then
+  PROMPT="$(cat "$FOLDER_PROMPT_FILE")"
+else
+  PROMPT="$DEFAULT_PROMPT"
+  echo "images_to_video: no prompt given, using the generic default (see this script's header)" >&2
+fi
 
-exec "${BRAIN:-./target/release/brain}" ltxv t2v \
-  --prompt "$PROMPT" \
-  --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
-  --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
-  --dit-config "$DIT_CONFIG" \
-  "${ANCHORS[@]}" \
-  --output-path "$OUT"
+for IMG in "${IMAGES[@]}"; do
+  OUT="${IMG%.*}.mp4"
+  echo "images_to_video: $IMG -> $OUT"
+  "${BRAIN:-./target/release/brain}" ltxv t2v \
+    --prompt "$PROMPT" \
+    --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
+    --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
+    --dit-config "$DIT_CONFIG" \
+    --start-frame "$IMG" \
+    --output-path "$OUT"
+done

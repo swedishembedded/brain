@@ -177,30 +177,35 @@ conditioning working. The two being equal means the mask never reached the
 sampler. It is not exactly zero at the boundary because the VAE decoder is
 convolutional, so a changed latent bleeds a little into its neighbours' pixels.
 
-## Generating a clip from a folder of images and a prompt (LTX-2.5)
+## Turning stills into video, one clip per image (LTX-2.5)
 
-`images_to_video.sh` is the simplest LTX-2.5 path: point it at a folder
-holding `prompt.txt` and 1-3 stills, get one clip back.
+`images_to_video.sh` is the simplest LTX-2.5 path: point it at ONE image or
+at a folder of them, get ONE independent clip PER image back, each named
+after its source (`photo.png` -> `photo.mp4`).
 
 ```bash
-mkdir shot/
-echo "a cat walking on a beach at sunset" > shot/prompt.txt
-cp first_frame.png shot/01.png        # optionally also 02.png (end) or
-                                       # 02.png + 03.png (mid, end)
+# a single still, an explicit prompt
+examples/videogen/images_to_video.sh photo.png "a cat walking on a beach at sunset"
 
-examples/videogen/images_to_video.sh shot/ out.mp4 5
+# a folder of stills, sharing one prompt -> photo1.mp4, photo2.mp4, ...
+mkdir shots/
+echo "a cat walking on a beach at sunset" > shots/prompt.txt
+cp photo1.png photo2.png shots/
+examples/videogen/images_to_video.sh shots/
 ```
 
-The stills are conditioning anchors, not a slideshow -- LTX-2.5 denoises
-everything between them from the prompt, so the result is one continuous
-shot that starts on (and, with two or three stills, passes through and ends
-on) exactly those pixels. How many images decide which of the model's
-conditioning slots are used: one image conditions the opening frame only,
-two condition the opening and closing frames, three add a fixed point at the
-clip's midpoint as well -- the way to keep a longer or moving-camera clip on
-course throughout its length, not only at its ends. See the script's own
-header comment for the exact flag mapping and `brain ltxv t2v --help` for
-what each conditioning slot actually does.
+Each image conditions only its OWN clip's opening frame
+(`brain ltxv t2v --start-frame`) - this is independent image-to-video, not
+a sequence: N images make N unrelated clips, never one clip that passes
+through several of them. The prompt is, in order: the second argument if
+given; else `prompt.txt` inside the folder if the input is a folder; else a
+generic placeholder for plain image-to-video motion (a wiring convenience,
+not something to rely on for quality - a real prompt describing what
+should actually happen is always better).
+
+For one continuous clip that opens on a still, optionally passes through a
+middle one, and closes on a last one, see "Chaining a numbered sequence of
+stills" below instead - that is a different job with a different script.
 
 ### Weights
 
