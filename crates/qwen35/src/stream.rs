@@ -1043,11 +1043,11 @@ pub(crate) fn read_final_norm(reader: &MmapSafetensors, d: usize) -> Result<Vec<
 /// argument: there is only one implementation of "apply the final norm and
 /// project to vocab logits" for either path to possibly diverge on.
 fn head_logits(state: &StreamState, cfg: &Qwen35Config, final_norm_buf: &DeviceBuffer, head: &Weight, hidden_row: &[f32]) -> Vec<f32> {
-    head_logits_on(&state.gpu, &state.ops, &state.ids.kernels, cfg, final_norm_buf, head, hidden_row)
+    head_logits_on(&state.gpu, &state.ops, cfg, final_norm_buf, head, hidden_row)
 }
 
-/// [`head_logits`] over an EXPLICIT device/`Ops`/kernel-id triple instead of a
-/// [`StreamState`] - the same three values that struct holds, named
+/// [`head_logits`] over an EXPLICIT device/`Ops` pair instead of a
+/// [`StreamState`] - the same two values that struct holds, named
 /// separately so a caller that is not a streaming pass can drive the identical
 /// epilogue. `crate::int8_gguf_resident`'s last shard is that caller: it holds
 /// its own `norm.weight` and int8 `lm_head` on the head card (a partial shard
@@ -1057,7 +1057,6 @@ fn head_logits(state: &StreamState, cfg: &Qwen35Config, final_norm_buf: &DeviceB
 pub(crate) fn head_logits_on(
     g: &Gpu,
     ops: &model::ops::Ops,
-    kernels: &model::block::KernelIds,
     cfg: &Qwen35Config,
     final_norm_buf: &DeviceBuffer,
     head: &Weight,
@@ -1067,7 +1066,9 @@ pub(crate) fn head_logits_on(
     assert_eq!(hidden_row.len(), d, "head_logits_on: hidden_row must be one [d_model] row");
     let x = g.storage_init("qwen35.head.row", hidden_row);
     let normed = g.storage(d as u64);
-    g.submit(&[], &[rmsnorm_fwd(g, kernels, &x, final_norm_buf, &normed, d as u32, 1)]);
+    // Through the decode tape's own RMSNorm seam: this is a ONE-ROW norm on the
+    // served path, the exact shape the per-element kernel is worst at.
+    g.submit(&[], &[crate::model::rms_step(g, &x, final_norm_buf, &normed, d as u32, 1)]);
 
     let mut s = Vec::new();
     let act = ops.act(&mut s, &normed, 0, 1, d as u32);

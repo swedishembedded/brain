@@ -158,6 +158,9 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("max_abs_row", kernels::MAX_ABS_ROW), // 81
     ("quant_pack", kernels::QUANT_PACK), // 82
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN), // 83
+    // -- coalesced RMSNorm -- see `rms_step`. Registered LAST so every
+    // hand-numbered const above keeps its position.
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS), // 84
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -312,6 +315,43 @@ const KV_APPEND: usize = 77;
 const ATTN_DECODE_SCORES: usize = 78;
 const DECODE_SOFTMAX: usize = 79;
 const ATTN_DECODE_APPLY: usize = 80;
+const RMSNORM_ROWS: usize = 84;
+
+/// This model's RMSNorm epsilon. Exactly what `rmsnorm.wgsl` hardcodes, but it
+/// has to be passed explicitly here - see [`rms_step`].
+const RMS_EPS: f32 = 1e-6;
+
+/// One RMSNorm through `block::rms_variant`: the cooperative workgroup-per-row
+/// kernel (`rmsnorm_rows`) where the device can run a workgroup reduction, the
+/// per-element `rmsnorm` otherwise.
+///
+/// Used by the DECODE tape ([`Qwen35::run_decode_step`] and the two mixer step
+/// functions), which is also this model's per-token PREFILL tape - the resident
+/// replays a prompt one token at a time through the same primitive, so this one
+/// seam covers every RMSNorm a served request pays for.
+///
+/// Why it was worth a seam: `rmsnorm.wgsl` gives thread `t` row `t`, so at the
+/// `rows = 1` of a decode step it runs a 5120-element reduction on ONE thread
+/// of a 3840-core card, with every 32-byte sector fetched serving a single
+/// useful float. Measured on the real two-card Qwen3.8-27B resident it was the
+/// TOP row of the decode profile at 48% of all device time - more than the
+/// entire 27 GB int8 weight stream underneath it - at 210 calls and 117 ms per
+/// token. `rmsnorm_rows` walks the row with 64 threads instead.
+///
+/// The epsilon is passed explicitly even though 1e-6 is what `rmsnorm.wgsl`
+/// hardcodes, because the two kernels must share one `Params` layout and the
+/// cooperative one reads a third `eps` field; a two-field list would hand it
+/// whatever the uniform happened to hold. (Same reasoning, same shape, as
+/// `minimaxmusic3::depth_decoder`'s own `rms_step`.)
+///
+/// This is NOT a bit-identical swap - the 64 partial sums fold in a different
+/// order, agreeing to ~3e-6 max_abs - which is exactly why it lives at the call
+/// site behind `rms_variant` rather than in `gpu_core::upgrade`, whose bar is
+/// bit-identity.
+pub fn rms_step(g: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
+    let (kind, threads) = block::rms_variant(g, RMSNORM, Some(RMSNORM_ROWS), rows, dim);
+    g.step(kind, &[x, w, out], &[dim, rows, f(RMS_EPS)], threads)
+}
 
 pub(crate) fn kernel_ids() -> KernelIds {
     KernelIds {
@@ -2132,7 +2172,7 @@ impl Qwen35 {
         for l in self.shard.start..self.shard.end {
             let ty = types[l];
             let xn1 = g.storage(d as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, 1)]);
+            g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, 1)]);
 
             let mixer_out = match ty {
                 LayerType::Linear => self.layer_gdn_decode_step(l, &xn1, &caches.gdn_state[l], &caches.gdn_hist[l]),
@@ -2145,7 +2185,7 @@ impl Qwen35 {
             g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[d], d)]);
 
             let xn2 = g.storage(d as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, 1)]);
+            g.submit(&[], &[rms_step(g, &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, 1)]);
 
             let (mlp_out, _) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, 1);
             let res_next = g.storage(d as u64);
@@ -2158,7 +2198,7 @@ impl Qwen35 {
         // residual for the next stage to pick up as `input_override`.
         if self.shard.head {
             let xn_final = g.storage(d as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w("norm.weight"), &xn_final, d, 1)]);
+            g.submit(&[], &[rms_step(g, &res, self.w("norm.weight"), &xn_final, d, 1)]);
             xn_final
         } else {
             res
@@ -2315,7 +2355,7 @@ impl Qwen35 {
         g.submit(
             &[],
             &[
-                rmsnorm_fwd(g, &kernel_ids(), &out_bh, self.w(&p("norm.weight")), &normed, vhd, nvh),
+                rms_step(g, &out_bh, self.w(&p("norm.weight")), &normed, vhd, nvh),
                 g.step(SILU, &[&z, &z_silu], &[value_dim], value_dim),
                 g.step(MUL, &[&normed, &z_silu, &gated], &[value_dim], value_dim),
             ],
@@ -2396,8 +2436,8 @@ impl Qwen35 {
         g.submit(
             &[],
             &[
-                rmsnorm_fwd(g, &kernel_ids(), &q_value, self.w(&p("q_norm.weight")), &q_normed, hd, nh),
-                rmsnorm_fwd(g, &kernel_ids(), &k, self.w(&p("k_norm.weight")), &k_normed, hd, nkv),
+                rms_step(g, &q_value, self.w(&p("q_norm.weight")), &q_normed, hd, nh),
+                rms_step(g, &k, self.w(&p("k_norm.weight")), &k_normed, hd, nkv),
             ],
         );
 

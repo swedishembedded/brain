@@ -461,7 +461,6 @@ struct EmbedTable {
 /// that and the 2047 MiB storage-binding limit.
 struct Head {
     ops: model::ops::Ops,
-    kernels: model::block::KernelIds,
     norm: DeviceBuffer,
     w: model::ops::Weight,
 }
@@ -539,7 +538,7 @@ impl Qwen35GgufInstance {
             }
         }
         let last = self.shards.last().expect("a plan always has at least one stage");
-        let logits = crate::stream::head_logits_on(&last.qwen35.gpu, &self.head.ops, &self.head.kernels, &self.cfg, &self.head.norm, &self.head.w, &carry);
+        let logits = crate::stream::head_logits_on(&last.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &carry);
         self.debug_step(pos, &per_stage_rms, &logits);
         Ok(logits)
     }
@@ -635,6 +634,148 @@ impl Qwen35GgufInstance {
         });
         self.stop.set(stop);
         Ok(out)
+    }
+
+    /// Encode text with the checkpoint's OWN embedded tokenizer, raw (no chat
+    /// template). What a profiler needs to build a realistic prompt without
+    /// going through `qwen3::chat`'s whole request parser.
+    pub fn tokenize(&self, text: &str) -> Vec<u32> {
+        self.tok.encode(text)
+    }
+
+    /// Drain every stage's queue, so a wall clock taken around a decode region
+    /// measures work that has actually FINISHED rather than work that has been
+    /// enqueued.
+    ///
+    /// [`Self::stack_step`] already ends in a `read` per stage plus the head's
+    /// logits read, so in practice the queues are drained when it returns; this
+    /// makes that explicit at the region boundary instead of relying on it.
+    pub fn poll_wait(&self) {
+        for s in &self.shards {
+            s.qwen35.gpu.poll_wait();
+        }
+    }
+
+    /// The `n = 1` decode loop, profiled per kernel kind.
+    ///
+    /// Two separate measurements, because they answer different questions and
+    /// only one of them can be trusted as a cost:
+    ///
+    /// * `wall_s` is `steps` decode passes on the PRODUCTION flush path,
+    ///   `poll_wait`-bracketed. This is the whole-pass number, and the only one
+    ///   an optimization is allowed to be judged by.
+    /// * `rows` is a second, separately-driven set of passes with the backend's
+    ///   timestamp path armed, which runs one compute pass per dispatch and
+    ///   reads back per flush. It RANKS the kernels; its total is an upper
+    ///   bound on their real cost, not the cost, because each dispatch is
+    ///   drained on its own and loses the overlap it would have had in the
+    ///   production submit.
+    ///
+    /// Both regions are preceded by a warm-up that also establishes the
+    /// recurrent state: `prompt` is replayed through the real stack first, so
+    /// the profiled steps are steady-state decode at a realistic position, not
+    /// a cold first token. `rows` merges every stage's table (the head's card
+    /// is the last stage's, so it is already included) - a per-card split would
+    /// invite tuning one card's share of a pipeline that runs them in series.
+    ///
+    /// Panics rather than reporting zero if the prompt plus the profiled steps
+    /// would run past this instance's capacity: a silently truncated profile is
+    /// worse than no profile.
+    pub fn profile_decode(&self, prompt: &[u32], steps: u32) -> DecodeProfile {
+        assert!(steps > 0, "profile_decode: steps must be > 0");
+        let need = prompt.len() as u64 + 2 * steps as u64;
+        assert!(need <= self.cap as u64, "profile_decode: prompt ({}) + 2*{steps} profiled steps = {need} exceeds capacity {}", prompt.len(), self.cap);
+        assert!(!prompt.is_empty(), "profile_decode: needs a non-empty prompt to establish decode state");
+
+        // Warm-up: real prompt replay. Establishes the GDN recurrent state and
+        // the GQA cache, compiles every pipeline, and leaves `pos` where a real
+        // decode step would find it.
+        self.reset();
+        let mut pos = 0u32;
+        let mut last = prompt[0];
+        for &t in prompt {
+            self.stack_step(t, pos).expect("profile_decode warm-up");
+            last = t;
+            pos += 1;
+        }
+        self.poll_wait();
+
+        // Region 1: the production path. The token fed back is `last` rather
+        // than a sampled id - the cost of a decode step is its shapes, which do
+        // not depend on WHICH token it is, and reusing one id keeps the profile
+        // from wandering into an EOS.
+        let t0 = std::time::Instant::now();
+        for _ in 0..steps {
+            self.stack_step(last, pos).expect("profile_decode production region");
+            pos += 1;
+        }
+        self.poll_wait();
+        let wall_s = t0.elapsed().as_secs_f64();
+
+        // Region 2: the same work with timestamp queries armed. A backend that
+        // cannot time kernels reports no rows rather than a table of zeros.
+        let timed = self.shards.iter().all(|s| s.qwen35.gpu.set_kernel_timing(true));
+        for s in &self.shards {
+            s.qwen35.gpu.reset_kernel_times();
+        }
+        let t1 = std::time::Instant::now();
+        for _ in 0..steps {
+            self.stack_step(last, pos).expect("profile_decode timed region");
+            pos += 1;
+        }
+        self.poll_wait();
+        let timed_wall_s = t1.elapsed().as_secs_f64();
+
+        let mut merged: std::collections::BTreeMap<String, (f64, u64)> = Default::default();
+        if timed {
+            for s in &self.shards {
+                for (name, ms, calls) in s.qwen35.gpu.kernel_times().unwrap_or_default() {
+                    let e = merged.entry(name).or_insert((0.0, 0));
+                    e.0 += ms;
+                    e.1 += calls;
+                }
+            }
+        }
+        for s in &self.shards {
+            s.qwen35.gpu.set_kernel_timing(false);
+        }
+
+        let mut rows: Vec<(String, f64, u64)> = merged.into_iter().map(|(n, (ms, c))| (n, ms, c)).collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        DecodeProfile { steps, wall_s, timed_wall_s, rows }
+    }
+}
+
+/// What [`Qwen35GgufInstance::profile_decode`] measured. See that method's doc
+/// for why the wall clock and the table are kept apart.
+#[derive(Clone, Debug)]
+pub struct DecodeProfile {
+    /// Decode passes in each measured region.
+    pub steps: u32,
+    /// Wall seconds for `steps` passes on the production flush path - the
+    /// whole-pass number an optimization is judged by.
+    pub wall_s: f64,
+    /// Wall seconds for the same passes with per-dispatch timestamps armed.
+    /// Always larger; reported so the inflation is visible rather than implied.
+    pub timed_wall_s: f64,
+    /// `(kernel, device ms, calls)` over every stage, descending by time.
+    /// Empty when the backend cannot time individual kernels.
+    pub rows: Vec<(String, f64, u64)>,
+}
+
+impl DecodeProfile {
+    /// Whole-pass decode rate, tokens per second.
+    pub fn tok_per_s(&self) -> f64 {
+        if self.wall_s > 0.0 {
+            self.steps as f64 / self.wall_s
+        } else {
+            0.0
+        }
+    }
+
+    /// Summed device time across the table, in ms.
+    pub fn device_ms(&self) -> f64 {
+        self.rows.iter().map(|(_, ms, _)| ms).sum()
     }
 }
 
@@ -903,6 +1044,22 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
     }
 
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(self.activate_owned(devices)?))
+    }
+}
+
+impl Qwen35GgufResident {
+    /// [`MultiDeviceResidentModel::activate_multi`] returning the CONCRETE
+    /// instance rather than a `Box<dyn Instance>`.
+    ///
+    /// The trait object is the right surface for the executor, which only ever
+    /// calls `run`/`metrics`. A profiler is the other kind of caller: it needs
+    /// [`Qwen35GgufInstance::profile_decode`], which is not on `Instance` and
+    /// should not be (nothing about serving wants a per-kernel table). So the
+    /// build lives here and `activate_multi` boxes what this returns - one
+    /// loader, two surfaces, rather than a second copy of the load sequence
+    /// that could drift from the one being measured.
+    pub fn activate_owned(&self, devices: &[Device]) -> Result<Qwen35GgufInstance, String> {
         let plan = self.plan();
         let Some(cfg) = plan.cfg.clone() else {
             return Err(format!("{MODEL}: no placement (GGUF unreadable, or it does not fit the budgeted devices)"));
@@ -966,13 +1123,12 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
         };
         let head = Head {
             ops: model::ops::Ops::new(gpu.share()).map_err(|e| format!("{MODEL}: Ops::new on the head card: {e}"))?,
-            kernels: crate::model::kernel_ids(),
             norm,
             w: head_w,
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        Ok(Box::new(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, last: Cell::default(), stop: Cell::new("length") }))
+        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, last: Cell::default(), stop: Cell::new("length") })
     }
 }
 

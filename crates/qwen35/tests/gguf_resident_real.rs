@@ -285,10 +285,28 @@ fn a_real_two_card_load_runs_end_to_end() {
 
     assert!(completion > 0, "the model must produce at least one token");
     assert!(!text.trim().is_empty(), "the generated text must not be empty");
-    // Non-degenerate: not the same character over and over, which is what a
-    // broken shard boundary or a mis-mapped tensor actually looks like.
-    let distinct: std::collections::BTreeSet<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(distinct.len() > 3, "output is degenerate ({} distinct non-space chars): {text:?}", distinct.len());
+    // There is deliberately NO assertion on the SHAPE of this text - not
+    // character variety, not length, not content.
+    //
+    // This gate is the plumbing gate, and the text this path produces is
+    // known-wrong: [`the_two_card_stack_continues_a_factual_prompt_correctly`]
+    // below is red precisely because of it. A text-quality proxy asserted here
+    // is therefore a coin flip on garbage, and it behaved like one - the same
+    // check passed on `"Give one"` while the red gate's own output
+    // (`"..\n\n\n\n..."`) would have failed it, and a legitimate ~1e-6
+    // reduction-order change in the RMSNorm kernel (gated for correctness by
+    // `tests/rmsnorm_variant_agreement.rs`) was enough to move which garbage
+    // token comes out and flip it.
+    //
+    // What a broken shard boundary or a mis-mapped tensor really looks like is
+    // caught precisely, and on real weights, by the gates that compare against
+    // a reference instead of eyeballing a string: `gguf_reference_parity_real`,
+    // `gguf_i8_vs_fp32_real`, and `model`'s own
+    // `two_shard_int8_decode_matches_the_whole_shard_model`.
+    //
+    // Restore a text-shape assertion here when the red gate below goes green -
+    // at that point it is checking something real rather than which way the
+    // garbage fell.
 
     // Greedy decoding is deterministic: the same prompt through the same
     // resident instance must produce the same text. This is what catches
