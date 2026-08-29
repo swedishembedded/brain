@@ -78,8 +78,15 @@ _ltxv_resolve_one() {
   export "$var=$reply"
 }
 
+# NOT "ltx-2.5-video-vae-bf16.safetensors" - that file is a real, correctly
+# named Lightricks release, but its decoder is a different architecture
+# (crate::na_decoder, "det_stages"/"diff_blocks" tensor names) that is
+# ported and tested but not wired into `brain ltxv t2v`'s live generation
+# path. The "-conv-" file is the one `crate::vae3d`/`import_vae` actually
+# reads (bare `encoder.*`/`decoder.*` conv tensors) - see that module's own
+# doc for why there is exactly one supported name space today.
 _ltxv_resolve_one "VAE" BRAIN_LTXV_VAE 1 \
-  "ltx-2.5-video-vae-bf16.safetensors" "ltx-2.5-video-vae-conv-bf16.safetensors"
+  "ltx-2.5-video-vae-conv-bf16.safetensors"
 _ltxv_resolve_one "DiT" BRAIN_LTXV_DIT 1 \
   "ltx-2.5-22b-distilled-transformer-*.gguf" "ltx-2.5-22b-dev-transformer-*.gguf"
 _ltxv_resolve_one "text encoder" BRAIN_LTXV_TEXT_ENCODER 1 \

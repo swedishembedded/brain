@@ -74,6 +74,7 @@ PROMPT_FILE="$DIR/prompt.txt"
 [ -f "$PROMPT_FILE" ] || { echo "chain_images_to_video: $DIR has no prompt.txt (used for every segment)" >&2; exit 1; }
 PROMPT="$(cat "$PROMPT_FILE")"
 [ -n "$PROMPT" ] || { echo "chain_images_to_video: $PROMPT_FILE is empty" >&2; exit 1; }
+echo "chain_images_to_video: prompt: $PROMPT" >&2
 
 IMAGES=()
 while IFS= read -r -d '' f; do IMAGES+=("$f"); done < <(

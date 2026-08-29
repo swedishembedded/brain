@@ -80,8 +80,8 @@ elif [ -n "$FOLDER_PROMPT_FILE" ] && [ -s "$FOLDER_PROMPT_FILE" ]; then
   PROMPT="$(cat "$FOLDER_PROMPT_FILE")"
 else
   PROMPT="$DEFAULT_PROMPT"
-  echo "images_to_video: no prompt given, using the generic default (see this script's header)" >&2
 fi
+echo "images_to_video: prompt: $PROMPT" >&2
 
 for IMG in "${IMAGES[@]}"; do
   OUT="${IMG%.*}.mp4"
