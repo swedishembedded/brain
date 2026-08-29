@@ -25,3 +25,49 @@ final-status-level = "flaky"
 # Real-weight / heavy e2e tests are already opt-in via #[ignore] or an env-var
 # gate (BRAIN_QUICKSTART_E2E, etc.) and are not part of this default profile
 # at all -- nothing here needs a per-test override for them.
+
+# Process isolation stops one wedged test from blocking ANOTHER test's
+# result, but nextest's default scheduler still runs many test BINARIES
+# concurrently across the whole run - which for these packages means several
+# separate OS processes opening a Vulkan device on the SAME two physical
+# GPUs at once. That contended device create/destroy on this hardware/driver
+# combination is real, not a hypothesis: `crates/backend-wgpu/tests/
+# upload_flush.rs` reproducibly spun one thread at 100% CPU forever whenever
+# its process started shortly after a different, already-exited test
+# binary's device had just been torn down on the same card - root-caused and
+# fixed in `backend-wgpu`'s own `cross_process_gpu_lock`/`bounded` (a
+# `flock` across every process on the host, plus a bounded wait so a wedge
+# becomes a named, reported failure instead of an infinite spin). That fix
+# lives at the crate that owns the device, and covers every caller of it -
+# what belongs here is the fleet-wide policy for every OTHER package that
+# can also open real hardware and has not been driven through the same
+# stress cycle: don't rediscover the same class of hang one crate at a time.
+#
+# So: put every package whose tests can open a real GPU/NPU device into one
+# nextest test-group with `max-threads = 1`, so nextest itself serialises
+# all hardware-touching tests process-wide - no two of them ever run at the
+# same time, regardless of which crate or binary they belong to - while
+# every other (non-hardware) test in the suite keeps running at full default
+# parallelism. This is `max-threads`'s designed purpose (a scarce shared
+# external resource, not a CPU-bound slow test), not a blanket
+# `--test-threads` reduction: a global thread cut slows down thousands of
+# unrelated CPU-only tests to reduce the odds of two GPU tests landing in
+# the same wave, and still does not guarantee they never do.
+[test-groups.gpu-exclusive]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = '''
+    package(brain-audio) + package(brain-backend-cpu) + package(brain-backend-vulkan)
+    + package(brain-backend-wgpu) + package(brain-campplus) + package(brain-chronos2)
+    + package(brain-clip) + package(brain-codeformer) + package(brain-deepseek2ocr)
+    + package(brain-flux2) + package(brain-genieredux) + package(brain-gpu-core)
+    + package(brain-kronos) + package(brain-ltxv) + package(brain-minimaxmusic3)
+    + package(brain-model) + package(brain-npu) + package(brain-optim)
+    + package(brain-qwen35) + package(brain-qwen35moe) + package(brain-qwen3omnimoe)
+    + package(brain-qwen3vl) + package(brain-sam1) + package(brain-splat)
+    + package(brain-vqgan) + package(brain-vulkan) + package(brain-wan)
+    + package(brain-wm-core) + package(brain-worldmirror2) + package(brain-yolov8)
+    + package(brain-zipdepth)
+'''
+test-group = 'gpu-exclusive'
