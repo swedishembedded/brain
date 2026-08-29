@@ -130,67 +130,30 @@ fn instance() -> wgpu::Instance {
     wgpu::Instance::new(instance_descriptor())
 }
 
-/// Serialises backend construction/teardown across every process on this
-/// machine, not only this one's own threads.
+/// Serialises backend construction/teardown against every other thread in
+/// this process AND every other process on this machine.
 ///
-/// The [`std::sync::Mutex`] below only orders threads inside ONE address
-/// space. Several test binaries (each `tests/*.rs` file compiles to its own
-/// process) or several `brain serve` instances are separate processes, each
-/// racing the SAME hazard the Mutex was built for with zero coordination
-/// between them - the doc on [`DeviceShared`] already names it: "several
-/// concurrent Vulkan devices on a single card deadlocked the test suite
-/// roughly half the time". That gap is real, not hypothetical:
+/// Both halves matter and neither is sufficient alone. Building a backend
+/// creates a `wgpu::Instance`, which enumerates **every** graphics backend -
+/// including GL via EGL. Mesa's EGL/GL loader is not safe to enter
+/// concurrently from several threads in one process: doing so faults inside
+/// the driver (seen as `MESA: error: ZINK: failed to choose pdev` followed by
+/// SIGSEGV) whenever more than one test thread builds a device at the same
+/// time. And separate OS processes - each `tests/*.rs` file compiles to its
+/// own, and a host can run several `brain serve` instances - race the SAME
+/// hazard on the same physical card, which no in-process `Mutex` can express:
 /// `crates/backend-wgpu/tests/upload_flush.rs` reproducibly spun ONE thread
-/// at 100% CPU forever - `wchan` pinned at `0`, no kernel wait at all, so not
-/// the "all threads futex wait" deadlock the Mutex half already fixes - when
-/// its process started shortly after a DIFFERENT, already-exited test
-/// binary's device had just been created/destroyed on the same physical
-/// card. A `Mutex` held by that other, already-dead process cannot be what
-/// blocked this one; only a lock visible across process boundaries can.
+/// at 100% CPU forever whenever its process started shortly after a
+/// DIFFERENT, already-exited test binary's device had just been torn down on
+/// that card.
 ///
-/// `flock(2)` on a well-known file is visible to every process on the host,
-/// blocks with a real kernel wait (never a spin) while another process holds
-/// it, and releases itself - even on a hard crash - the instant the holder's
-/// file descriptor closes, which is why this is a `flock`, not a
-/// PID-file-in-`/tmp` convention (those get stuck exactly when a crash is
-/// interesting enough to want the lock released).
+/// [`backend_api::hardware::device_init_lock`] carries both, shared with
+/// every other backend that opens the same silicon - `brain-vulkan` reaches
+/// the same P40s through raw `ash` and now takes the same lock, which it
+/// could not do while this lived here as a private function.
 #[cfg(not(target_arch = "wasm32"))]
-fn cross_process_gpu_lock() -> std::fs::File {
-    let path = std::env::temp_dir().join("brain-gpu-device-init.lock");
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .unwrap_or_else(|e| panic!("open the cross-process GPU init lock {path:?}: {e}"));
-    // SAFETY: `f`'s fd is owned exclusively by this call; `flock` operates on
-    // the open file description, not the path, so this cannot race the
-    // `OpenOptions::open` above. `LOCK_EX` blocks the calling thread (a real
-    // futex-style kernel wait, not a spin) until every other holder - in this
-    // process or another - releases it via `close`/process exit.
-    let rc = unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&f), libc::LOCK_EX) };
-    assert_eq!(rc, 0, "flock(LOCK_EX) on {path:?} failed: {}", std::io::Error::last_os_error());
-    f
-}
-
-/// Serialises backend construction across threads (see
-/// [`cross_process_gpu_lock`] for the process-crossing half).
-///
-/// Building a backend creates a `wgpu::Instance`, which enumerates **every**
-/// graphics backend - including GL via EGL. Mesa's EGL/GL loader is not safe to
-/// enter concurrently from several threads in one process: doing so faults
-/// inside the driver (seen as `MESA: error: ZINK: failed to choose pdev`
-/// followed by SIGSEGV) whenever more than one test thread builds a device at
-/// the same time. Device creation happens once per engine and never on a hot
-/// path, so serialising it costs nothing measurable and makes multi-threaded
-/// construction safe - which the test suite and any multi-model host both do.
-#[cfg(not(target_arch = "wasm32"))]
-fn init_lock() -> (std::sync::MutexGuard<'static, ()>, std::fs::File) {
-    static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // A poisoned lock only means some other thread panicked while building a
-    // device; the data is `()`, so recovering is always correct.
-    let guard = INIT.lock().unwrap_or_else(|e| e.into_inner());
-    (guard, cross_process_gpu_lock())
+fn init_lock() -> backend_api::hardware::DeviceInitGuard {
+    backend_api::hardware::device_init_lock()
 }
 
 /// The adapter this process selected, or `None` if no wgpu backend was built
@@ -410,78 +373,41 @@ impl PlCache {
     }
 }
 
-/// The **expensive, shareable** half of a wgpu backend: the instance/adapter/
-/// device/queue and every compiled pipeline.
-///
-/// Split out from [`WgpuBackend`] because building it is what costs seconds (device
-/// init plus one shader compile per kernel), and because creating many of them on
-/// one physical GPU is actively harmful: several concurrent Vulkan devices on a
-/// single card deadlocked the test suite roughly half the time (all threads in
-/// futex wait) and made every model activation pay a full device init. One
-/// process now builds this once per distinct kernel set and shares it.
 /// Ceiling for one bounded GPU wait. Generous - a legitimate prefill dispatch
 /// is slow - but finite: `wait_indefinitely()` (the previous value everywhere)
 /// made a wedged queue block the process forever rather than error, which is
 /// why past hangs (`omni_bench encode-vision`, `gpu_core::roofline`) presented as
 /// unkillable instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
+///
+/// One shared parse, in [`backend_api::hardware`], so a backend cannot end up
+/// with its own subtly different ladder or (worse) none at all.
 #[cfg(not(target_arch = "wasm32"))]
 fn gpu_wait_timeout() -> std::time::Duration {
-    const DEFAULT_S: f64 = 30.0;
-    let secs = std::env::var("BRAIN_GPU_WAIT_S")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(DEFAULT_S);
-    std::time::Duration::from_secs_f64(secs)
+    backend_api::hardware::wait_timeout()
 }
 
 /// Bounds a blocking call that can wedge INSIDE the driver and cannot be
 /// cancelled once started - device/adapter creation is, at bottom, a
 /// synchronous FFI call into the Vulkan loader and ultimately an `ioctl` into
-/// a proprietary kernel module. There is no cooperative way to interrupt that
-/// mid-flight, so this is not a "retry with backoff" or a spin: `f` runs on
-/// its own thread, and the caller waits for it with a timeout instead of
-/// blocking its own thread on it directly.
+/// a proprietary kernel module.
 ///
-/// [`cross_process_gpu_lock`] closes the ordinary case (two devices racing
-/// each other), but a lock only guarantees no two holders run at once - it
-/// cannot bound how long the driver's OWN teardown of a just-exited holder's
-/// device takes before the next one's `vkCreateDevice` is safe, and that
-/// residual window reproduced a real hang even with the lock held for the
-/// entire critical section. When creation still wedges despite the lock,
-/// this turns "the calling thread spins or blocks forever, unattributed"
-/// into "a named, bounded, reported failure after `BRAIN_GPU_WAIT_S`" - the
-/// same trade `gpu_wait_timeout` already makes for dispatch/submit/teardown
-/// waits, extended to the one operation here that had no bound at all.
-///
-/// On timeout the worker thread is deliberately abandoned, not joined: there
-/// is nothing to reclaim from a thread stuck inside a driver call, and
-/// waiting for it to finish would defeat the bound. It leaks until the
-/// driver unwedges on its own or the process exits - the same leak-over-crash
-/// trade [`DeviceShared`]'s `Drop` already accepts for a faulted device.
+/// [`init_lock`] closes the ordinary case (two devices racing each other), but
+/// a lock only guarantees no two holders run at once - it cannot bound how
+/// long the driver's OWN teardown of a just-exited holder's device takes
+/// before the next one's `vkCreateDevice` is safe, and that residual window
+/// reproduced a real hang even with the lock held for the entire critical
+/// section. See [`backend_api::hardware::bounded`] for the mechanism and for
+/// what it deliberately does not guarantee.
 #[cfg(not(target_arch = "wasm32"))]
 fn bounded<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
-    bounded_for(what, gpu_wait_timeout(), f)
-}
-
-/// [`bounded`] with an explicit timeout - split out so the timeout behaviour
-/// itself is testable without touching the process-global `BRAIN_GPU_WAIT_S`
-/// environment variable, which every test in this binary would otherwise race.
-#[cfg(not(target_arch = "wasm32"))]
-fn bounded_for<T: Send + 'static>(what: &str, timeout: std::time::Duration, f: impl FnOnce() -> T + Send + 'static) -> T {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    rx.recv_timeout(timeout)
-        .unwrap_or_else(|_| panic!("{what} exceeded {timeout:?} (BRAIN_GPU_WAIT_S) -- driver likely wedged; see `bounded`'s doc"))
+    backend_api::hardware::bounded(what, f)
 }
 
 /// Detach `kernels` from its caller's borrow so it can cross into
 /// [`bounded`]'s spawned thread, which needs a `'static` closure.
 #[cfg(not(target_arch = "wasm32"))]
 fn owned_kernels(kernels: &[(&str, &str)]) -> Vec<(String, String)> {
-    kernels.iter().map(|(name, src)| (name.to_string(), src.to_string())).collect()
+    backend_api::hardware::own_kernels(kernels)
 }
 
 /// The borrowed shape [`WgpuBackend::new_async`] and friends actually take,
@@ -490,7 +416,7 @@ fn owned_kernels(kernels: &[(&str, &str)]) -> Vec<(String, String)> {
 /// never needs to outlive it).
 #[cfg(not(target_arch = "wasm32"))]
 fn borrowed_kernels(owned: &[(String, String)]) -> Vec<(&str, &str)> {
-    owned.iter().map(|(name, src)| (name.as_str(), src.as_str())).collect()
+    backend_api::hardware::borrow_kernels(owned)
 }
 
 /// Copy `T`s out of a mapped buffer's bytes WITHOUT assuming the mapping is
@@ -539,6 +465,15 @@ fn read_staging_reuse() -> bool {
     *ON.get_or_init(|| !std::env::var("BRAIN_GPU_NO_READ_STAGING_REUSE").map(|v| v != "0").unwrap_or(false))
 }
 
+/// The **expensive, shareable** half of a wgpu backend: the instance/adapter/
+/// device/queue and every compiled pipeline.
+///
+/// Split out from [`WgpuBackend`] because building it is what costs seconds (device
+/// init plus one shader compile per kernel), and because creating many of them on
+/// one physical GPU is actively harmful: several concurrent Vulkan devices on a
+/// single card deadlocked the test suite roughly half the time (all threads in
+/// futex wait) and made every model activation pay a full device init. One
+/// process now builds this once per distinct kernel set and shares it.
 struct DeviceShared {
     // ManuallyDrop so teardown can control ORDER and LOCKING: everything —
     // pipelines, queue, device - is destroyed inside `drop` under the same lock
@@ -2585,58 +2520,53 @@ pub fn register() {
     backend_api::register_backend("wgpu", |kernels| Ok(Box::new(WgpuBackend::new(kernels))));
 }
 
+/// What this crate still owns about device-init concurrency: the WIRING.
+///
+/// The mechanisms themselves (exclusion, re-entrancy, the bound, the
+/// `BRAIN_GPU_WAIT_S` ladder) are gated where they now live, in
+/// `backend_api::hardware`'s own tests. What can only be checked here is that
+/// this backend is actually plugged into them, because a future refactor
+/// re-introducing a crate-private lock would leave every one of those tests
+/// green while silently un-fixing the hang they were written for.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod gpu_lock_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
-    /// A call that never returns must fail with a NAMED, bounded error - not
-    /// hang the calling thread forever. This is the whole point of
-    /// [`super::bounded`]: device/adapter creation is a synchronous FFI call
-    /// into a proprietary driver with no cooperative cancellation, so a wedge
-    /// there can only ever be handled by NOT waiting on it directly.
+    /// [`super::init_lock`] must be the SAME host-wide lock every other
+    /// backend takes, not a private one that happens to have the same shape.
+    /// Held here through this crate's own accessor and contended from another
+    /// thread through the shared one: if the two ever diverge, the contender
+    /// acquires immediately and this fails.
+    #[test]
+    fn init_lock_is_the_shared_host_wide_lock() {
+        let _held = super::init_lock();
+        let taken = Arc::new(AtomicBool::new(false));
+        let taken_writer = taken.clone();
+        let other = std::thread::spawn(move || {
+            let _g = backend_api::hardware::device_init_lock();
+            taken_writer.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let raced = taken.load(Ordering::SeqCst);
+        drop(_held);
+        other.join().unwrap();
+        assert!(!raced, "backend-wgpu's init_lock did not exclude a holder of backend_api::hardware's lock - they are not the same lock");
+    }
+
+    /// [`super::bounded`] must report a wedge rather than hang, at whatever
+    /// `BRAIN_GPU_WAIT_S` resolves to. Checks the wiring, not the mechanism:
+    /// with a bound that has already elapsed, a call that never returns must
+    /// still come back.
     #[test]
     #[should_panic(expected = "exceeded")]
-    fn bounded_for_reports_a_named_timeout_instead_of_hanging_forever() {
-        super::bounded_for("test op", Duration::from_millis(50), || {
+    fn bounded_reports_a_named_timeout_instead_of_hanging_forever() {
+        // Deliberately not `super::bounded`: that would spend the real
+        // 30s default. Same code path, explicit bound.
+        backend_api::hardware::bounded_for("test op", Duration::from_millis(50), || {
             std::thread::sleep(Duration::from_secs(3600));
         });
-    }
-
-    /// A call that finishes well inside the bound returns normally - the
-    /// timeout must not fire on the ordinary, fast path every real device
-    /// creation takes.
-    #[test]
-    fn bounded_for_returns_the_value_when_the_call_finishes_in_time() {
-        let got = super::bounded_for("test op", Duration::from_secs(5), || 42);
-        assert_eq!(got, 42);
-    }
-
-    /// [`super::cross_process_gpu_lock`] must actually exclude a second
-    /// holder while the first is live - the property the whole fix depends
-    /// on. Modelled on a real cross-process race with two THREADS instead
-    /// (one process, `flock` locks by open file description regardless of
-    /// which thread holds it, so this exercises the identical kernel path a
-    /// second PROCESS would).
-    #[test]
-    fn cross_process_gpu_lock_excludes_a_concurrent_holder() {
-        let released = Arc::new(AtomicBool::new(false));
-        let released_writer = released.clone();
-        let holder = std::thread::spawn(move || {
-            let _f = super::cross_process_gpu_lock();
-            std::thread::sleep(Duration::from_millis(200));
-            released_writer.store(true, Ordering::SeqCst);
-            // `_f` (and with it the flock) drops here, at thread exit.
-        });
-        // Give the holder thread a head start so it wins the lock first.
-        std::thread::sleep(Duration::from_millis(50));
-        let _f = super::cross_process_gpu_lock();
-        assert!(
-            released.load(Ordering::SeqCst),
-            "acquired the lock before the first holder released it - cross_process_gpu_lock is not exclusive"
-        );
-        holder.join().unwrap();
     }
 }
 

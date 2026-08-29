@@ -31,6 +31,12 @@ use std::sync::Arc;
 /// Kernel selection: which implementation of an op runs, given shape + device.
 pub mod select;
 
+/// Shared device-contention and wedge-containment primitives: the one
+/// cross-thread AND cross-process lock around device create/destroy, and the
+/// one bound on driver calls that cannot be cancelled. Every backend uses
+/// these instead of inventing (or omitting) its own.
+pub mod hardware;
+
 // The neutral handles and the `Backend` trait are `Send + Sync` on native (the
 // CPU backend hands disjoint buffer sub-ranges to rayon workers, and models cross
 // threads), but NOT on wasm: WebGPU's `wgpu::Buffer`/`Device` are `Rc`-based and
