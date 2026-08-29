@@ -38,14 +38,12 @@ use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
 /// wedged queue block the process forever rather than error, which is why past
 /// hangs (`omni_bench encode-vision`, `gpu_core::roofline`) presented as unkillable
 /// instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
+///
+/// One shared parse, in [`backend_api::hardware`]: this used to be a private
+/// transcription of the same ladder `backend-wgpu` also kept privately, and a
+/// per-crate copy is how a new call site ends up with no bound at all.
 fn gpu_wait_timeout_ns() -> u64 {
-    const DEFAULT_S: f64 = 30.0;
-    let secs = std::env::var("BRAIN_GPU_WAIT_S")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(DEFAULT_S);
-    (secs * 1e9) as u64
+    backend_api::hardware::wait_timeout_ns()
 }
 
 /// A recorded dispatch: (pipeline index, descriptor set, grid_x, grid_y). All
@@ -366,6 +364,11 @@ fn enumeration_instance() -> Result<&'static (ash::Entry, ash::Instance), String
         std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| unsafe {
+            // Same host-wide lock every other device-touching path in this
+            // workspace takes: `vkCreateInstance` `dlopen`s every installed
+            // ICD, which is not safe to enter concurrently with another
+            // process doing the same thing on the same cards.
+            let _init = backend_api::hardware::device_init_lock();
             let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
             // 1.1 for VkPhysicalDeviceIDProperties / properties2.
             let app_info = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
@@ -409,7 +412,7 @@ impl VulkanBackend {
     /// Returns `Err` (so the caller can fall back to wgpu) if no Vulkan device is
     /// available or a kernel fails to compile.
     pub fn try_new(kernels: &[(&str, &str)]) -> Result<VulkanBackend, String> {
-        let r = Self::try_new_impl(kernels, None);
+        let r = Self::bounded_new(kernels, None);
         if let Err(e) = &r {
             tracing::warn!(error = %e, "native Vulkan backend unavailable; caller falls back to wgpu");
         }
@@ -421,11 +424,37 @@ impl VulkanBackend {
     /// registry-resolved placement path.
     pub fn try_new_on(kernels: &[(&str, &str)], target: &backend_api::GpuIdentity) -> Result<VulkanBackend, String> {
         tracing::trace!(name = %target.name, pci = ?target.pci_bus, "opening device (native Vulkan)");
-        let r = Self::try_new_impl(kernels, Some(target));
+        let r = Self::bounded_new(kernels, Some(target));
         if let Err(e) = &r {
             tracing::warn!(name = %target.name, pci = ?target.pci_bus, error = %e, "native Vulkan backend unavailable for the requested card; caller falls back to wgpu");
         }
         r
+    }
+
+    /// [`VulkanBackend::try_new_impl`] under the shared wall-clock bound.
+    ///
+    /// `vkCreateDevice` is a synchronous FFI call into the loader and
+    /// ultimately an `ioctl` into a proprietary kernel module, with no
+    /// cooperative cancellation anywhere in the path - the exact operation
+    /// that wedged a thread at 100% CPU forever from the wgpu backend. It
+    /// had no bound at all here.
+    ///
+    /// Reported as `Err`, not a panic: every caller of this backend already
+    /// falls back to wgpu on failure, so a wedged Vulkan driver should
+    /// degrade the run rather than abort the process. The lock itself is
+    /// taken inside `VkContext`, i.e. on the worker thread, so waiting for a
+    /// foreign process to release it is bounded too.
+    fn bounded_new(
+        kernels: &[(&str, &str)],
+        target: Option<&backend_api::GpuIdentity>,
+    ) -> Result<VulkanBackend, String> {
+        let owned = backend_api::hardware::own_kernels(kernels);
+        let target = target.cloned();
+        let what = "VulkanBackend::try_new (vkCreateDevice + pipeline compile)";
+        backend_api::hardware::try_bounded(what, move || {
+            Self::try_new_impl(&backend_api::hardware::borrow_kernels(&owned), target.as_ref())
+        })
+        .unwrap_or_else(|wedged| Err(wedged.to_string()))
     }
 
     fn try_new_impl(kernels: &[(&str, &str)], target: Option<&backend_api::GpuIdentity>) -> Result<VulkanBackend, String> {
