@@ -9,8 +9,19 @@ Erlang/OTP system have done here" was asked and answered honestly.
 
 **Status: designed, not implemented.** Nothing in this file is code today.
 What shipped instead is the smaller, complete fix it builds on: one shared
-cross-thread AND cross-process device-init lock plus one shared wall-clock
-bound, in `backend_api::hardware`, used by every crate that opens a device.
+cross-thread device-init lock plus one shared wall-clock bound, in
+`backend_api::hardware`, used by every crate that opens a device.
+
+The cross-process half of that lock was reverted (`.agents/rules/lessons.md`
+#79): a host-wide lock made one process's ordinary device work stall an
+unrelated process on unrelated, idle hardware. `device_init_lock` is
+in-process only now. Any future revival of cross-process coordination -
+including the per-card worker design below - has to be scoped so that a
+process touching card A is never blocked by a process touching card B; the
+design below predates that finding and its cross-process serialisation
+claims (the child worker sharing `device_init_lock` "against any process
+that has not been migrated yet") need re-deriving against it, not assuming
+it still holds.
 
 ---
 
@@ -23,8 +34,11 @@ does **not** reclaim anything:
 
 * The abandoned thread is still inside the driver, still holding whatever
   file descriptors, mappings and driver contexts the call had opened.
-* It still holds the device-init lock it acquired, so a wedge in one process
-  can starve device creation host-wide until that process exits.
+* It still holds the device-init lock it acquired, so a wedge can starve
+  device creation for every OTHER THREAD of that same process until it
+  exits. This no longer crosses processes (`device_init_lock` is in-process
+  only, see the status note above), but it is still real within one
+  process.
 * There is no safe way to fix this from inside the process. Forcibly killing
   a thread mid-`ioctl` leaves the allocator and the driver's own bookkeeping
   in states that do not agree with each other, which is the same class of
@@ -79,9 +93,12 @@ all; it holds a `WorkerHandle` and speaks a request/response protocol.
   startup, not through the socket: the protocol carries offsets and lengths,
   never megabytes.
 * The child takes the same `backend_api::hardware::device_init_lock` around
-  its own device creation, so workers for two cards, and workers belonging to
-  two different parents, still serialise against each other and against any
-  process that has not been migrated yet.
+  its own device creation, guarding its own threads exactly as any other
+  brain process would. It does NOT serialise against other worker
+  processes or other parents - per the status note above, cross-process
+  device-creation ordering is deliberately not this lock's job, and a
+  design that reintroduces it has to solve the same-card-vs-different-card
+  distinction this roadmap did not originally account for.
 
 ### Protocol
 
@@ -109,8 +126,8 @@ space crosses the boundary.
 * Each request has a deadline (the existing `BRAIN_GPU_WAIT_S` ladder).
 * Deadline exceeded: `SIGKILL` the worker, `waitpid` it, and **the kernel
   reclaims the driver context** - the property the thread version cannot
-  offer. The device-init lock the child held is released by the kernel too,
-  because a `flock` dies with the descriptor.
+  offer. The in-process device-init lock the child held is released the
+  instant the process is gone, same as any other process exit.
 * Restart policy, per card: restart on the first two wedges within 600s,
   replaying `Open` + `Compile` (both are pure functions of data the parent
   still holds; in-flight buffer contents are lost and the request that
@@ -158,6 +175,7 @@ and the reason this is a roadmap item and not a patch.
   state and the latter for the decision.
 * One worker per card, or one per (card, kernel set)? Pipeline compilation is
   the slow part of `Open`, and residency already keys on kernel sets.
-* Windows has no `SIGKILL`/`flock`; `TerminateProcess` plus `LockFileEx` are
-  the equivalents, and `std::fs::File::lock` already abstracts the second.
-  The first needs a small platform seam.
+* Windows has no `SIGKILL`; `TerminateProcess` is the equivalent and needs a
+  small platform seam. (`device_init_lock` itself is a plain
+  `std::sync::Mutex` now, so no cross-platform file-lock equivalent is
+  needed for it.)
