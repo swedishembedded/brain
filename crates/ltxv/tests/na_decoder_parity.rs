@@ -143,6 +143,59 @@ fn ltxv_na_diff_matches_reference() {
     report("x0_pred", &x0_pred, fx.get("x0_pred"), 0.999999);
 }
 
+/// The WHOLE decoder, composed, on real weights: `na_decoder::decode` from a
+/// normalized latent straight to pixels. Stages 1-4 and stage 5 each have
+/// their own cosine-1.0 gate above; what this adds is that composing them -
+/// the noise draw, the context handoff, the output shape - produces a real,
+/// finite, in-range picture volume at the conv decoder's own scale contract,
+/// rather than a plausible-looking NaN field.
+///
+/// Runs at the smallest volume this decoder allows (a `(3,7,7)` latent, i.e.
+/// 17 frames at 224x224 - stage 0's `(3,7,7)` window is a hard floor). That
+/// is not a small amount of work: stage 5 alone dispatches ~284M score
+/// threads per block over 8 blocks, so this is opt-in behind the real
+/// weights like every other suite here.
+#[test]
+fn ltxv_na_decode_composes_end_to_end_on_real_weights() {
+    let Some(w) = weights() else {
+        brain_testutil::skip("set BRAIN_LTXV_NA_VAE to ltx-2.5-video-vae-bf16.safetensors");
+        return;
+    };
+    let cfg = NaDecoderConfig::ltx25();
+    let gpu = gpu_core::Gpu::open(None, &na_decoder::KERNELS);
+    let (lat_t, lh, lw) = (3u32, 7u32, 7u32);
+    if let Err(e) = na_decoder::check_decode(&gpu, &cfg, lat_t, lh, lw) {
+        brain_testutil::skip_unavailable(&format!("this device cannot run even the smallest NA decode: {e}"));
+        return;
+    }
+
+    // A real latent, not zeros: the golden fixture's own, which is what the
+    // stage-1-4 parity gate above decodes.
+    let fx = testdata("golden/ltxv/na_decoder/na_context.safetensors");
+    let latent = if Path::new(&fx).exists() {
+        let t = checkpoint::safetensors::read(&fx).expect("read golden");
+        Fixture { t }.get("latent").to_vec()
+    } else {
+        brain_testutil::skip("fixture na_context.safetensors absent - run tools/goldens/ltxv_na_decoder_dump_reference.py");
+        return;
+    };
+
+    let px = na_decoder::decode(&gpu, w, &cfg, &latent, lat_t, lh, lw, 42).expect("decode");
+    let (frames, h, wd) = na_decoder::output_shape(&cfg, lat_t, lh, lw);
+    assert_eq!((frames, h, wd), (17, 224, 224), "the conv decoder's own scale contract");
+    assert_eq!(px.len(), 3 * frames as usize * h as usize * wd as usize);
+    assert!(px.iter().all(|v| v.is_finite()), "decode produced non-finite pixels");
+    let (lo, hi) = px.iter().fold((f32::MAX, f32::MIN), |(l, h), &v| (l.min(v), h.max(v)));
+    let mean = px.iter().map(|&v| v as f64).sum::<f64>() / px.len() as f64;
+    eprintln!("na decode: min={lo:.4} max={hi:.4} mean={mean:.4} n={}", px.len());
+    // The decoder targets a [-1,1] pixel volume (upstream clamps OUTSIDE the
+    // model, so a little overshoot is expected and a lot is not), and a real
+    // picture is neither a constant nor centred far off zero.
+    assert!(hi - lo > 0.1, "decode is nearly constant: [{lo}, {hi}]");
+    assert!(lo > -4.0 && hi < 4.0, "decode is far outside the [-1,1] pixel range: [{lo}, {hi}]");
+    assert!(mean.abs() < 1.0, "decode mean {mean} is not near a centred picture");
+}
+
 /// The importer against the REAL shipped file, both directions - reuses the
 /// process-wide cached [`weights`] for the OK case and
 /// [`NaDecoderConfig::tensor_manifest`] for the negative-case stubs, same

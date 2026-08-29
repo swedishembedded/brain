@@ -1037,9 +1037,211 @@ pub fn forward_diff(gpu: &Gpu, weights: &Tensors, cfg: &NaDecoderConfig, context
     crate::patchify::unpatchify(&y_chw, 3, t as usize, h as usize, w as usize, p as usize, p as usize)
 }
 
+// -------------------------------------------------------- whole decode
+
+/// The `(T,H,W)` volume each of the 4 deterministic stages RUNS at, plus the
+/// stage-5 context volume as the 5th entry - i.e. `plan[i]` is the volume
+/// stage `i`'s own attention sees, and `plan[4]` is what stage 5 sees.
+///
+/// Each `LinearPixelShuffleUpsample` multiplies by its stride and, when the
+/// temporal stride is 2, drops the duplicate leading frame
+/// ([`upsample_forward`]). Composed over the real config's four strides
+/// (`[1,2,2]`, `[2,1,1]`, `[2,2,2]`, `[2,2,2]`) that is a fixed x8 on H and
+/// W and `1 + 8*(lat_t-1)` on T - the SAME contract [`crate::vae3d`]'s conv
+/// decoder has, which is what lets one pipeline call site decode through
+/// either architecture without renegotiating the output shape.
+fn stage_volumes(cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> [(u32, u32, u32); 5] {
+    let mut out = [(0u32, 0u32, 0u32); 5];
+    let (mut t, mut h, mut w) = (lat_t, lh, lw);
+    for (stage, slot) in out.iter_mut().enumerate() {
+        *slot = (t, h, w);
+        if stage == 4 {
+            break;
+        }
+        let (stride, _) = cfg.upsamples[stage];
+        t *= stride[0];
+        h *= stride[1];
+        w *= stride[2];
+        if stride[0] == 2 {
+            t -= 1;
+        }
+    }
+    out
+}
+
+/// The `(frames, height, width)` pixel volume [`decode`] produces from a
+/// `[in_channels, lat_t, lh, lw]` latent. Identical to the conv decoder's
+/// own `(1 + 8*(lat_t-1), lh*32, lw*32)` - see [`stage_volumes`].
+pub fn output_shape(cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> (u32, u32, u32) {
+    let (t, h, w) = stage_volumes(cfg, lat_t, lh, lw)[4];
+    (t, h * cfg.patch_size, w * cfg.patch_size)
+}
+
+/// Bytes in the LARGEST single attention `scores`/`probs` buffer [`decode`]
+/// allocates, and the stage that allocates it.
+///
+/// [`na_attention`] materialises a dense `[heads, nq, window]` f32 score
+/// volume per attention call, so this grows with the OUTPUT volume, not the
+/// latent: stage 5 runs at the full `1 + 8*(lat_t-1)` x `lh*8` x `lw*8`
+/// context with an `11x11x11` = 1331-wide window, which is where every
+/// realistic clip's ceiling comes from. Reported as a number rather than
+/// discovered as a driver allocation failure, because a decode that dies
+/// inside wgpu tells a user nothing about which knob moves it.
+pub fn max_scores_bytes(cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> (u64, usize) {
+    let vols = stage_volumes(cfg, lat_t, lh, lw);
+    let mut worst = (0u64, 0usize);
+    for (stage, &(t, h, w)) in vols.iter().enumerate() {
+        let kernel = if stage == 4 { cfg.stage5_kernel } else { cfg.stage_kernels[stage] };
+        let heads = cfg.stage_channels[stage] / cfg.head_dim;
+        let window = kernel[0] as u64 * kernel[1] as u64 * kernel[2] as u64;
+        let bytes = heads as u64 * t as u64 * h as u64 * w as u64 * window * 4;
+        if bytes > worst.0 {
+            worst = (bytes, stage);
+        }
+    }
+    worst
+}
+
+/// Whether this decoder can decode a `[in_channels, lat_t, lh, lw]` latent
+/// on `gpu` at all, naming the exact reason when it cannot.
+///
+/// Two independent limits, both structural rather than incidental:
+///
+/// * **Volume floor.** Every stage's NA window is used whole and never
+///   masked, so a stage cannot run below its own kernel. Stage 0's
+///   `(3,7,7)` puts a hard floor on the LATENT (`lat_t>=3`, `lh,lw>=7`);
+///   stage 5's `(11,11,11)` puts one on the context, which for the real
+///   config the latent floor already satisfies.
+/// * **Score-volume ceiling.** [`max_scores_bytes`] against the device's own
+///   `max_storage_binding_bytes`. Upstream clears this with
+///   `diffusion_tiling.py`'s overlapping-tile trapezoidal blend, which this
+///   module does not implement (see its header) - so above the ceiling the
+///   honest answer is a named refusal, not a driver-level allocation
+///   failure or a silently wrong decode.
+pub fn check_decode(gpu: &Gpu, cfg: &NaDecoderConfig, lat_t: u32, lh: u32, lw: u32) -> Result<(), String> {
+    let vols = stage_volumes(cfg, lat_t, lh, lw);
+    for (stage, &(t, h, w)) in vols.iter().enumerate() {
+        let kernel = if stage == 4 { cfg.stage5_kernel } else { cfg.stage_kernels[stage] };
+        if t < kernel[0] || h < kernel[1] || w < kernel[2] {
+            let what = if stage == 4 { "stage 5's context".to_string() } else { format!("stage {stage}") };
+            let [ft, fh, fw] = cfg.stage_kernels[0];
+            let (min_frames, min_h, min_w) = output_shape(cfg, ft, fh, fw);
+            return Err(format!(
+                "ltxv NA video vae decode: a ({lat_t},{lh},{lw}) latent puts {what} at ({t},{h},{w}), below its own \
+                 {kernel:?} neighborhood-attention window - this decoder's smallest decodable clip is a \
+                 ({ft},{fh},{fw}) latent, i.e. {min_frames} frames at {min_w}x{min_h}. Generate a larger clip, or \
+                 decode through the conv decoder release, which has no such floor."
+            ));
+        }
+    }
+    let (bytes, stage) = max_scores_bytes(cfg, lat_t, lh, lw);
+    let cap = gpu.max_storage_binding_bytes();
+    if bytes > cap {
+        let (frames, h, w) = output_shape(cfg, lat_t, lh, lw);
+        let what = if stage == 4 { "stage 5".to_string() } else { format!("stage {stage}") };
+        return Err(format!(
+            "ltxv NA video vae decode: {frames} frames at {w}x{h} needs a {} MiB attention-score buffer in {what}, \
+             over this device's {} MiB single-binding limit. This decoder runs the full volume in one pass - \
+             upstream's overlapping-tile chunked decode (diffusion_tiling.py) is not ported, so there is no tiled \
+             fallback here the way crate::vae3d has one. Decode through the conv decoder release \
+             (ltx-2.5-video-vae-conv-bf16.safetensors), which tiles, or generate a smaller clip.",
+            bytes / (1024 * 1024),
+            cap / (1024 * 1024),
+        ));
+    }
+    Ok(())
+}
+
+/// Decode a NORMALISED `[in_channels, lat_t, lh, lw]` latent into
+/// `[3, frames, lh*32, lw*32]` - the whole decoder, stages 1-5, in the one
+/// call shape `crate::pipeline`'s single VAE-decode site needs, and the
+/// same `[3, frames, h, w]` channel-first layout
+/// [`crate::vae3d::LtxVaeDecoder::decode`] returns.
+///
+/// Stage 5 denoises pixel-space noise rather than transforming the context
+/// directly, so a decode needs a noise draw: `seed` drives the same
+/// `data::rng::Rng` Gaussian stream `crate::pipeline`'s own latent noise
+/// uses. At this checkpoint's `default_num_inference_steps=1` /
+/// `model_output_type="x0"` that draw is the single `t=1.0` input whose
+/// prediction IS the output (see [`forward_diff`]), so it behaves as a
+/// decode seed, not as a sampling trajectory.
+///
+/// Refuses, by name, any latent [`check_decode`] cannot run - both the
+/// window floor and the score-buffer ceiling.
+pub fn decode(gpu: &Gpu, weights: &Tensors, cfg: &NaDecoderConfig, latent: &[f32], lat_t: u32, lh: u32, lw: u32, seed: u64) -> Result<Vec<f32>, String> {
+    check_decode(gpu, cfg, lat_t, lh, lw)?;
+    let want = (cfg.in_channels * lat_t * lh * lw) as usize;
+    if latent.len() != want {
+        return Err(format!("ltxv NA video vae decode: latent has {} values, expected {want}", latent.len()));
+    }
+    let t = std::time::Instant::now();
+    let (context, t4, h4, w4) = forward_context(gpu, weights, cfg, latent, lat_t, lh, lw);
+    gpu_core::profile::stage_time("ltxv na vae decode: context (stages 1-4)", t);
+
+    let (frames, ph, pw) = output_shape(cfg, lat_t, lh, lw);
+    let mut rng = data::rng::Rng::new(seed);
+    let x_t: Vec<f32> = (0..3 * (frames as usize) * (ph as usize) * (pw as usize)).map(|_| rng.next_gaussian() as f32).collect();
+
+    let t = std::time::Instant::now();
+    let out = forward_diff(gpu, weights, cfg, &context, t4, h4, w4, &x_t);
+    gpu_core::profile::stage_time("ltxv na vae decode: diffusion (stage 5)", t);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The composed decoder's scale contract is the CONV decoder's, exactly -
+    /// `1 + 8*(lat_t-1)` frames at `lh*32 x lw*32` - which is the whole
+    /// reason `crate::pipeline`'s single decode call site can dispatch on
+    /// the checkpoint's architecture without the caller renegotiating an
+    /// output shape. Composed here from the four real upsample strides and
+    /// their leading-frame drops, then checked against the conv decoder's
+    /// own independently-derived formula rather than against itself.
+    ///
+    /// The `(3,7,7)` row is also the golden fixture's own latent, so its
+    /// `(9,28,28)` stage-4 input and `(17,56,56)` context are the shapes
+    /// `tests/na_decoder_parity.rs` already proves at cosine 1.0 against the
+    /// reference - this pins the whole-decode walk to that same chain.
+    #[test]
+    fn the_composed_decode_has_the_conv_decoders_scale_contract() {
+        let cfg = NaDecoderConfig::ltx25();
+        let conv = crate::vae3d::LtxVaeConfig::conv25();
+        for (lat_t, lh, lw) in [(3u32, 7u32, 7u32), (4, 16, 16), (5, 12, 20)] {
+            let (frames, h, w) = output_shape(&cfg, lat_t, lh, lw);
+            assert_eq!(frames, 1 + 8 * (lat_t - 1), "frames at ({lat_t},{lh},{lw})");
+            assert_eq!((h, w), (lh * 32, lw * 32), "pixels at ({lat_t},{lh},{lw})");
+            assert_eq!(conv.latent_frames(frames), Some(lat_t), "conv decoder agrees at ({lat_t},{lh},{lw})");
+        }
+        let vols = stage_volumes(&cfg, 3, 7, 7);
+        assert_eq!(vols[3], (9, 28, 28), "stage-4 input volume");
+        assert_eq!(vols[4], (17, 56, 56), "stage-5 context volume");
+    }
+
+    /// Neither structural limit on this decoder may present as a driver
+    /// crash or a wrong picture: a clip below stage 0's own `(3,7,7)` window
+    /// and a clip whose stage-5 score volume exceeds the device binding
+    /// limit both have to be named, with the reason and the way out.
+    ///
+    /// The ceiling is real, not hypothetical: stage 5 materialises a dense
+    /// `[heads, nq, 11*11*11]` f32 score volume over the FULL output
+    /// context, so it grows with the clip, and a 512x512 17-frame clip
+    /// already needs several GiB in one binding.
+    #[test]
+    fn the_decode_volume_limits_are_named_numbers_not_crashes() {
+        let cfg = NaDecoderConfig::ltx25();
+        // Stage 5 dominates at every real shape: 1331-wide window over the
+        // full context, against 147/75 over much smaller volumes earlier.
+        let (bytes, stage) = max_scores_bytes(&cfg, 3, 7, 7);
+        assert_eq!(stage, 4, "stage 5 is the ceiling");
+        assert_eq!(bytes, 4 * 17 * 56 * 56 * 1331 * 4, "smallest legal clip's score buffer");
+        // A realistic 512x512 clip is an order of magnitude past a 4 GiB
+        // single-binding limit - the reason the tiled decode upstream has
+        // (diffusion_tiling.py) is a tracked gap and not an optimisation.
+        let (big, _) = max_scores_bytes(&cfg, 3, 16, 16);
+        assert!(big > 4 * 1024 * 1024 * 1024, "512x512 needs {big} bytes");
+    }
 
     #[test]
     fn real_config_shapes() {
