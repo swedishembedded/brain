@@ -93,7 +93,11 @@ _ltxv_resolve_one "text encoder" BRAIN_LTXV_TEXT_ENCODER 1 \
   "gemma4-*-with-proj-ltx-2.5-bf16.safetensors"
 _ltxv_resolve_one "spatial upsampler" BRAIN_LTXV_UPSAMPLER_SPATIAL "" \
   "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
-_ltxv_resolve_one "audio VAE" BRAIN_LTXV_AUDIO_VAE "" \
+# Required unless the caller opted out of sound with LTX_AUDIO=0 - LTX-2.5 is
+# natively audio-visual and generates from the same forwards as the picture,
+# so a caller that wants `--audio` needs this resolved the same way the
+# other required roles are, not left to fail deep inside generation.
+_ltxv_resolve_one "audio VAE" BRAIN_LTXV_AUDIO_VAE "$([ "${LTX_AUDIO:-1}" = "1" ] && echo 1)" \
   "ltx-2.5-audio-vae-bf16.safetensors"
 
 unset -f _ltxv_resolve_one

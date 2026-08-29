@@ -44,6 +44,12 @@
 # generate is printed as it happens - see images_to_video.sh's header for
 # what each level shows.
 #
+# Audio is ON by default for every segment (LTX_AUDIO=0 turns it off) -
+# see images_to_video.sh's header for what that needs and costs. Each
+# segment generates its own independent audio track from the same
+# prompt; the final `ffmpeg -c copy` concatenation carries audio and
+# video through together, the same way it already does for the picture.
+#
 # Weights: point LTX_MODEL_DIR at a folder holding LTX-2.5's files FLAT (no
 # vae/text_encoders/diffusion_models subfolders); unset, it defaults to
 # $BRAIN_MODELS_DIR/Lightricks/LTX-2.5. Anything missing is asked for
@@ -64,10 +70,13 @@ BRAIN="${BRAIN:-./target/release/brain}"
 
 if [ "${LTX_TINY:-0}" = "1" ]; then
   DIT_CONFIG=tiny
+  AUDIO_FLAG=()
 else
   # shellcheck source=_resolve_ltxv_weights.sh
   source "$(dirname "${BASH_SOURCE[0]}")/_resolve_ltxv_weights.sh"
   DIT_CONFIG=ltx25_22b
+  AUDIO_FLAG=()
+  [ "${LTX_AUDIO:-1}" = "1" ] && AUDIO_FLAG=(--audio)
 fi
 
 command -v ffmpeg >/dev/null || { echo "chain_images_to_video: ffmpeg is required (concatenates the segments)" >&2; exit 1; }
@@ -119,7 +128,7 @@ while [ $(( i + STEP )) -lt "$N" ]; do
     --prompt "$PROMPT" \
     --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
     --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
-    --dit-config "$DIT_CONFIG" \
+    --dit-config "$DIT_CONFIG" "${AUDIO_FLAG[@]}" \
     "${ANCHORS[@]}" \
     --output-path "$SEG"
 

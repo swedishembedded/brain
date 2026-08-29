@@ -30,6 +30,13 @@
 #
 # Optional, all env: WIDTH, HEIGHT, STEPS, SEED, FPS, BRAIN_DEVICE, BRAIN.
 #
+# Audio is ON by default: LTX-2.5 is natively audio-visual and generates
+# sound from the SAME forwards as the picture, over the same prompt - it
+# only reads as a description of sound if the prompt actually describes
+# one (the default placeholder above does; a real prompt should too, or
+# the track comes out close to silent/mono). LTX_AUDIO=0 turns it off
+# (a real video-only DiT forward, cheaper, no BRAIN_LTXV_AUDIO_VAE needed).
+#
 # LTX_TRACE=<0-5> (default 4) controls how much of the load/generate is
 # printed as it happens (`brain --trace-ltxv`, an existing, tested
 # instrumentation family - not something this script adds): 4 gives each
@@ -52,7 +59,7 @@
 
 set -euo pipefail
 
-DEFAULT_PROMPT="the scene comes to life with smooth, natural motion and a gently moving camera"
+DEFAULT_PROMPT="the scene comes to life with smooth, natural motion and a gently moving camera, with ambient sound matching the setting"
 
 SRC="${1:?usage: images_to_video.sh <image-or-folder> [\"prompt\"] [seconds]}"
 CLI_PROMPT="${2:-}"
@@ -61,10 +68,13 @@ FRAMES=$(( ${3:-5} * FPS / 8 * 8 + 1 ))   # must be 1 + 8k
 
 if [ "${LTX_TINY:-0}" = "1" ]; then
   DIT_CONFIG=tiny
+  AUDIO_FLAG=()
 else
   # shellcheck source=_resolve_ltxv_weights.sh
   source "$(dirname "${BASH_SOURCE[0]}")/_resolve_ltxv_weights.sh"
   DIT_CONFIG=ltx25_22b
+  AUDIO_FLAG=()
+  [ "${LTX_AUDIO:-1}" = "1" ] && AUDIO_FLAG=(--audio)
 fi
 
 IMAGES=()
@@ -98,7 +108,7 @@ for IMG in "${IMAGES[@]}"; do
     --prompt "$PROMPT" \
     --frames "$FRAMES" --width "${WIDTH:-1280}" --height "${HEIGHT:-704}" \
     --steps "${STEPS:-8}" --seed "${SEED:-7}" --fps "$FPS" \
-    --dit-config "$DIT_CONFIG" \
+    --dit-config "$DIT_CONFIG" "${AUDIO_FLAG[@]}" \
     --start-frame "$IMG" \
     --output-path "$OUT"
 done
