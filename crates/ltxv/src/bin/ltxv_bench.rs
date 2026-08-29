@@ -236,7 +236,7 @@ fn bench_vae(reps: usize, frames: u32, height: u32, width: u32) {
 
     let t0 = Instant::now();
     let raw = checkpoint::safetensors::read(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
-    let weights = ltxv::import::import_vae(raw, &cfg).unwrap_or_else(|e| panic!("importing {path}: {e}"));
+    let weights = ltxv::import::import_vae(raw, &cfg).and_then(|v| v.conv()).unwrap_or_else(|e| panic!("importing {path}: {e}"));
     let dec = LtxVaeDecoder::build(&cfg, &weights, lat_t, lh, lw, Some("gpu"));
     drop(weights);
     eprintln!("built in {:.1} s (real checkpoint, {} tensors)", t0.elapsed().as_secs_f64(), cfg.tensor_manifest().len());
@@ -334,7 +334,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
             ups.upsample(&data)
         } else {
             let vraw2 = checkpoint::safetensors::read(&vae).unwrap_or_else(|e| panic!("reading {vae}: {e}"));
-            let vw = ltxv::import::import_vae(vraw2, &cfg).unwrap_or_else(|e| panic!("importing {vae}: {e}"));
+            let vw = ltxv::import::import_vae(vraw2, &cfg).and_then(|v| v.conv()).unwrap_or_else(|e| panic!("importing {vae}: {e}"));
             let (m, sd) = ltxv::vae3d::per_channel_statistics(&vw);
             ltxv::upsampler::upsample_video(&ups, &m, &sd, &data)
         };
@@ -379,7 +379,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
     println!("\ndecoding [{}, {}, {lh}, {lw}] ({h0}..{h1} x {w0}..{w1}) -> {frames} frames at {pw}x{ph}, path = {mode}", shape.c, shape.t);
 
     let raw = checkpoint::safetensors::read(&vae).unwrap_or_else(|e| panic!("reading {vae}: {e}"));
-    let weights = ltxv::import::import_vae(raw, &cfg).unwrap_or_else(|e| panic!("importing {vae}: {e}"));
+    let weights = ltxv::import::import_vae(raw, &cfg).and_then(|v| v.conv()).unwrap_or_else(|e| panic!("importing {vae}: {e}"));
     let t0 = Instant::now();
     let pixels = match mode {
         "whole" => {

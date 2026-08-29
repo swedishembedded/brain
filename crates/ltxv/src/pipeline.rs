@@ -99,6 +99,7 @@ use vae::blocks::Tensors;
 
 use crate::config::{LtxAvDitConfig, LtxDitConfig};
 use crate::dit::{random_tiny_weights, LtxDit};
+use crate::import::VideoVaeArch;
 use crate::longform::Scene;
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
 use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};
@@ -557,6 +558,13 @@ fn fnv1a(s: &str) -> u64 {
 /// same numbers. `"AUDIO"`, which is also what makes it recognisable in a
 /// trace.
 const AUDIO_SEED_SALT: u64 = 0x41_55_44_49_4f;
+
+/// Salt for the NA/diffusion VAE decoder's own pixel-space noise draw, so
+/// one `--seed` still reproduces a whole run without the decode reusing the
+/// exact stream the DiT's latent noise already consumed. Only
+/// [`crate::import::VideoVaeArch::NaDiffusion`] draws at all - the conv
+/// decoder is deterministic in the latent (see [`decode_video`]).
+const VAE_DECODE_SEED_SALT: u64 = 0x5641_455f_4445_4300;
 
 /// Standard-normal noise from a seeded SplitMix64 stream - the same
 /// generator `wan::pipeline::seeded_noise` uses, deliberately not torch's
@@ -1241,33 +1249,57 @@ pub fn tc_to_chw(x: &[f32], c: usize, t: usize, h: usize, w: usize) -> Vec<f32> 
 }
 
 /// The one VAE-decode call site both [`generate`] and [`generate_dfr`] use:
-/// decode a `[C, lat_t, lh, lw]` latent, taking the WHOLE-clip path when it
-/// fits and the overlapping-tile path when it does not.
+/// decode a `[C, lat_t, lh, lw]` latent through whichever decoder the loaded
+/// checkpoint actually carries, taking the WHOLE-clip path when it fits and
+/// the overlapping-tile path when it does not.
 ///
-/// Which path runs is [`crate::vae3d::should_tile`]'s measured output-pixel-volume
-/// policy (with `BRAIN_LTXV_VAE_TILE` as the override). Every shape this port
-/// shipped before this change stays on the exact whole path bit for bit; what
-/// the tiled path adds is the shapes that used to abort with a `wgpu`
+/// `arch` comes from [`crate::import::import_vae`], which detects it from
+/// the file: the two real Lightricks LTX-2.5 video-VAE releases share one
+/// conv encoder but ship structurally different decoders under the same
+/// `decoder.*` name, and both are valid downloads. Both produce the same
+/// `(1 + 8*(lat_t-1), lh*32, lw*32)` `[3, frames, h, w]` volume, which is
+/// what lets one call site serve either without the caller knowing.
+///
+/// [`VideoVaeArch::Conv3d`] picks between the whole and tiled paths by
+/// [`crate::vae3d::should_tile`]'s measured output-pixel-volume policy (with
+/// `BRAIN_LTXV_VAE_TILE` as the override). Every shape this port shipped
+/// before that change stays on the exact whole path bit for bit; what the
+/// tiled path adds is the shapes that used to abort with a `wgpu`
 /// out-of-memory - 25 frames at 1080p above all, which is 52.2 Mpx against a
 /// measured ~35 Mpx ceiling on a 24 GiB card.
+///
+/// [`VideoVaeArch::NaDiffusion`] has no tiled path at all - upstream's
+/// `diffusion_tiling.py` overlapping-tile blend is not ported (see
+/// [`crate::na_decoder`]'s header), so its own volume ceiling is a named
+/// refusal from [`crate::na_decoder::check_decode`] rather than a silent
+/// driver failure. That is why this function returns a `Result` where the
+/// conv-only version could not fail.
 ///
 /// Borrows `vweights`: the tiled path needs them across several graph builds
 /// (one per distinct tile shape), and [`upscale`] decodes several segments of
 /// one clip against the same weights, so neither can be handed ownership
 /// without a ~3 GB host copy.
-fn decode_video(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, latent: &[f32]) -> (Vec<f32>, usize) {
+#[allow(clippy::too_many_arguments)]
+fn decode_video(vcfg: &LtxVaeConfig, arch: VideoVaeArch, vweights: &vae::blocks::Tensors, lat_t: u32, lh: u32, lw: u32, device: Option<&str>, latent: &[f32], seed: u64) -> Result<(Vec<f32>, usize), String> {
     let frames = 1 + 8 * (lat_t - 1);
     let (h, w) = (lh * 32, lw * 32);
     crate::latentdump::dump_if_requested(crate::latentdump::LatentShape { c: (latent.len() / (lat_t * lh * lw) as usize) as u32, t: lat_t, h: lh, w: lw }, latent);
+    if arch == VideoVaeArch::NaDiffusion {
+        let cfg = crate::na_decoder::NaDecoderConfig::ltx25();
+        let gpu = gpu_core::Gpu::open(device, &crate::na_decoder::KERNELS);
+        tracing::info!(frames, h, w, "VAE decode: NA/diffusion decoder (whole clip, no tiling)");
+        let px = crate::na_decoder::decode(&gpu, vweights, &cfg, latent, lat_t, lh, lw, seed)?;
+        return Ok((px, frames as usize));
+    }
     if crate::vae3d::should_tile(frames, h, w) {
         let dec = crate::vae3d::LtxVaeTiledDecoder::auto(vcfg, vweights, lat_t, lh, lw, device);
         let n = dec.plan().tiles().len();
         tracing::info!(tiles = n, waste = dec.plan().overlap_waste(), frames, h, w, "VAE decode: tiled (whole-clip decode would not fit)");
         let px = dec.decode_with(latent, |done, total| tracing::debug!(done, total, "vae tile"));
-        (px, dec.frames() as usize)
+        Ok((px, dec.frames() as usize))
     } else {
         let dec = LtxVaeDecoder::build(vcfg, vweights, lat_t, lh, lw, device);
-        (dec.decode(latent), dec.frames() as usize)
+        Ok((dec.decode(latent), dec.frames() as usize))
     }
 }
 
@@ -3438,7 +3470,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // reuses them) because image conditioning needs a real VAE ENCODE before
     // any denoising, once per stage at that stage's own resolution.
     let vraw = read_any(&paths.vae)?;
-    let vweights = crate::import::import_vae(vraw, &vcfg)?;
+    let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(vraw, &vcfg)?;
     // The audio stream's own initial noise, drawn from a seed derived from -
     // but never equal to - the video stream's, so one `--seed` reproduces the
     // whole audio-visual run and the two streams never start from the same
@@ -3578,7 +3610,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     // `denoise_stage` already stripped any appended image-conditioning tokens
     // and returned the `[C, lat_t, lh, lw]` video latent - the conditioning
     // frame is the source image itself, not a new frame to render.
-    let (pixels, frames) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref(), &final_chw);
+    let (pixels, frames) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.device.as_deref(), &final_chw, o.seed ^ VAE_DECODE_SEED_SALT)?;
     let (w, h) = (o.width, o.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));
@@ -3882,7 +3914,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
     let text = build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
     let (ctx_cond, ctx_uncond, context_valid, context_len) = (text.cond, text.uncond, text.valid, text.len);
 
-    let vweights = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
+    let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
     let in_channels = dit_cfg.in_channels as usize;
     let work_t = Instant::now();
     let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(frames);
@@ -3983,7 +4015,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         dit.release_devices();
         progress(done_before + per_pass - 1, total, "vae decode");
         let dec_t = Instant::now();
-        let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &refined);
+        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &refined, o.base.seed ^ VAE_DECODE_SEED_SALT)?;
         vae_secs += dec_t.elapsed().as_secs_f32();
         if got != len || pixels.len() != 3 * got * out_h * out_w {
             return Err(format!("pass {si} decoded to {got} frames / {} values, expected {len} / {}", pixels.len(), 3 * len * out_h * out_w));
@@ -4200,7 +4232,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     }
     let text = build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
 
-    let vweights = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
+    let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
     progress(1, total, "vae encode");
     let enc_t = Instant::now();
     let source_chw = {
@@ -4258,7 +4290,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
 
     progress(total - 1, total, "vae decode");
     let dec_t = Instant::now();
-    let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &stage_out.video_chw);
+    let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &stage_out.video_chw, o.base.seed ^ VAE_DECODE_SEED_SALT)?;
     vae_secs += dec_t.elapsed().as_secs_f32();
     if got != frames || pixels.len() != 3 * got * h * w {
         return Err(format!("decoded to {got} frames / {} values, expected {frames} / {}", pixels.len(), 3 * frames * h * w));
@@ -4465,7 +4497,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, a_cond, a_uncond } =
         build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
     let (a_ctx_cond, a_ctx_uncond) = (a_cond.unwrap_or_default(), a_uncond.unwrap_or_default());
-    let vweights = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
+    let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
     // One cache for the whole clip, filled by the first window that refines
     // and reused by every later one (see [`SpatialUpsampler`]).
     let upsampler = SpatialUpsampler::default();
@@ -4667,7 +4699,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         dit.release_devices();
         progress(done_before, total, "vae decode");
         let dec_t = Instant::now();
-        let (pixels, got) = decode_video(&vcfg, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &final_chw);
+        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &final_chw, o.base.seed ^ VAE_DECODE_SEED_SALT)?;
         vae_secs += dec_t.elapsed().as_secs_f32();
         if got != w.decoded_frames() || pixels.len() != 3 * got * o.base.height * o.base.width {
             return Err(format!("window {wi} decoded to {got} frames / {} values, expected {} / {}", pixels.len(), w.decoded_frames(), 3 * w.decoded_frames() * o.base.height * o.base.width));
@@ -5084,7 +5116,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // `crate::upsampler::upsample_video`); the decode below reuses it, so the
     // file is still read exactly once.
     let vraw = read_any(&paths.vae)?;
-    let vweights = crate::import::import_vae(vraw, &vcfg)?;
+    let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(vraw, &vcfg)?;
     let sraw = read_any(&paths.spatial_upsampler)?;
     let scfg = LatentUpsamplerConfig::spatial_x2();
     let sweights = crate::import::import_upsampler(sraw, &scfg)?;
@@ -5249,7 +5281,7 @@ pub fn generate_dfr(paths: &DfrPaths, prompt: &str, o: &DfrOpts, cancel: &capabi
     // ---- decode -------------------------------------------------------------
     progress(total_phases - 1, total_phases, "vae decode");
     let decode_t = Instant::now();
-    let (pixels, frames) = decode_video(&vcfg, &vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref(), &video_chw);
+    let (pixels, frames) = decode_video(&vcfg, varch, &vweights, cur_lat_t as u32, lh2 as u32, lw2 as u32, base.device.as_deref(), &video_chw, base.seed ^ VAE_DECODE_SEED_SALT)?;
     let (w, h) = (base.width, base.height);
     if pixels.len() != 3 * frames * h * w {
         return Err(format!("VAE returned {} values, expected {}", pixels.len(), 3 * frames * h * w));

@@ -226,7 +226,7 @@ fn the_upscaler_is_un_normalized_around_exactly_as_the_reference_does_it() {
     };
     let cfg = LatentUpsamplerConfig::spatial_x2();
     let uw = import_upsampler(checkpoint::safetensors::read(&up_path).expect("read upscaler"), &cfg).expect("import upscaler");
-    let vw = ltxv::import::import_vae(checkpoint::safetensors::read(&vae_path).expect("read vae"), &ltxv::vae3d::LtxVaeConfig::conv25()).expect("import vae");
+    let vw = ltxv::import::import_vae(checkpoint::safetensors::read(&vae_path).expect("read vae"), &ltxv::vae3d::LtxVaeConfig::conv25()).and_then(|v| v.conv()).expect("import vae");
     let (mean, std) = ltxv::vae3d::per_channel_statistics(&vw);
     assert!(std.iter().all(|&v| v.abs() > 0.0), "a zero per-channel std would make `normalize` a division by zero");
 

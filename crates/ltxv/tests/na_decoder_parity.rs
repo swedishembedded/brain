@@ -67,6 +67,17 @@ fn weights_path() -> Option<String> {
     Path::new(p).exists().then(|| p.to_string())
 }
 
+/// The CONV release, the other half of the "both real files load" gate:
+/// `BRAIN_LTXV_VAE` (the variable `crate::pipeline` itself reads), else the
+/// repo-relative copy `vae_parity.rs` resolves.
+fn conv_weights_path() -> Option<String> {
+    if let Ok(p) = std::env::var("BRAIN_LTXV_VAE") {
+        return (!p.is_empty() && Path::new(&p).exists()).then_some(p);
+    }
+    let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/ltxv/weights/vae/ltx-2.5-video-vae-conv-bf16.safetensors");
+    Path::new(p).exists().then(|| p.to_string())
+}
+
 struct Fixture {
     t: Vec<checkpoint::safetensors::StTensor>,
 }
@@ -141,6 +152,36 @@ fn ltxv_na_diff_matches_reference() {
     let (t, h, wd) = (cs[0] as u32, cs[1] as u32, cs[2] as u32);
     let x0_pred = na_decoder::forward_diff(&gpu, w, &cfg, fx.get("context"), t, h, wd, fx.get("x_t"));
     report("x0_pred", &x0_pred, fx.get("x0_pred"), 0.999999);
+}
+
+/// BOTH real Lightricks video-VAE releases go through the ONE loader and
+/// come back usable, each naming the decoder it carries - the property a
+/// user hits when they point `BRAIN_LTXV_VAE` at whichever file they
+/// downloaded. The shared conv encoder and `per_channel_statistics` have to
+/// survive the NA branch too, since the pipeline encodes (image
+/// conditioning) and un-normalizes off the same map it decodes from.
+#[test]
+fn ltxv_video_vae_loader_takes_both_real_releases() {
+    let Some(na_path) = weights_path() else {
+        brain_testutil::skip("set BRAIN_LTXV_NA_VAE to ltx-2.5-video-vae-bf16.safetensors");
+        return;
+    };
+    let Some(conv_path) = conv_weights_path() else {
+        brain_testutil::skip("set BRAIN_LTXV_VAE to ltx-2.5-video-vae-conv-bf16.safetensors");
+        return;
+    };
+    let cfg = ltxv::vae3d::LtxVaeConfig::conv25();
+
+    let na = ltxv::import::import_vae(checkpoint::safetensors::read(&na_path).expect("read NA vae"), &cfg).expect("the NA release loads");
+    assert_eq!(na.arch, ltxv::import::VideoVaeArch::NaDiffusion);
+    for name in ["encoder.conv_in.conv.weight", "per_channel_statistics.mean-of-means", "decoder.diff_blocks.0.attn.to_q.weight"] {
+        assert!(na.weights.contains_key(name), "NA release lost {name}");
+    }
+    assert!(na.conv().unwrap_err().contains("-conv-"));
+
+    let conv = ltxv::import::import_vae(checkpoint::safetensors::read(&conv_path).expect("read conv vae"), &cfg).expect("the -conv- release loads");
+    assert_eq!(conv.arch, ltxv::import::VideoVaeArch::Conv3d);
+    assert_eq!(conv.weights.len(), cfg.tensor_manifest().len());
 }
 
 /// The WHOLE decoder, composed, on real weights: `na_decoder::decode` from a

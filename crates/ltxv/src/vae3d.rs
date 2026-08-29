@@ -204,65 +204,86 @@ impl LtxVaeConfig {
     /// `....conv.{weight,bias}` leaf (confirmed against the real header:
     /// `encoder.conv_in.conv.weight`, not `encoder.conv_in.weight`).
     pub fn tensor_manifest(&self) -> Vec<(String, Vec<usize>)> {
-        let mut m: Vec<(String, Vec<usize>)> = Vec::new();
-        let conv = |m: &mut Vec<(String, Vec<usize>)>, prefix: &str, cout: u32, cin: u32| {
-            m.push((format!("{prefix}.conv.weight"), vec![cout as usize, cin as usize, 3, 3, 3]));
-            m.push((format!("{prefix}.conv.bias"), vec![cout as usize]));
-        };
+        let mut m = self.encoder_manifest();
+        m.extend(self.decoder_manifest());
+        m.push(("per_channel_statistics.mean-of-means".into(), vec![self.latent_channels as usize]));
+        m.push(("per_channel_statistics.std-of-means".into(), vec![self.latent_channels as usize]));
+        m
+    }
 
-        // ---- encoder ----
+    /// The `encoder.*` half of [`Self::tensor_manifest`], on its own.
+    ///
+    /// Both real LTX-2.5 video-VAE releases carry this SAME encoder - the
+    /// `-conv-` file and the NA-decoder file are byte-identical across every
+    /// `encoder.*` tensor and both `per_channel_statistics.*` (86 tensors,
+    /// range-read and compared, zero differences); only the decoder tree
+    /// differs. That is why `crate::import::import_vae` can validate the
+    /// encoder against this half whichever decoder the file turns out to
+    /// carry, instead of having a second encoder config per release.
+    pub fn encoder_manifest(&self) -> Vec<(String, Vec<usize>)> {
+        let mut m: Vec<(String, Vec<usize>)> = Vec::new();
         // `conv_in` widens the patchified input to `latent_channels` (upstream:
         // `feature_channels = out_channels`, the encoder's OWN `out_channels`
         // ctor param, i.e. `latent_channels`) - the down-block walk then grows
         // that to `bottleneck` before `conv_out`. Confirmed against the real
         // header: `encoder.conv_in.conv.weight` is `[128,48,...]`, not `[1024,...]`.
         let in_ch = 3 * self.patch_size * self.patch_size;
-        conv(&mut m, "encoder.conv_in", self.latent_channels, in_ch);
+        conv_entry(&mut m, "encoder.conv_in", self.latent_channels, in_ch);
         let mut c = self.latent_channels;
         for (i, b) in self.enc_blocks().iter().enumerate() {
             let p = format!("encoder.down_blocks.{i}");
             match *b {
                 EncBlock::Res(ResX { n }) => {
                     for j in 0..n {
-                        conv(&mut m, &format!("{p}.res_blocks.{j}.conv1"), c, c);
-                        conv(&mut m, &format!("{p}.res_blocks.{j}.conv2"), c, c);
+                        conv_entry(&mut m, &format!("{p}.res_blocks.{j}.conv1"), c, c);
+                        conv_entry(&mut m, &format!("{p}.res_blocks.{j}.conv2"), c, c);
                     }
                 }
                 EncBlock::Down { stride, mult } => {
                     let prod = stride.t * stride.h * stride.w;
                     let cout_ext = c * mult;
-                    conv(&mut m, &format!("{p}.conv"), cout_ext / prod, c);
+                    conv_entry(&mut m, &format!("{p}.conv"), cout_ext / prod, c);
                     c = cout_ext;
                 }
             }
         }
-        conv(&mut m, "encoder.conv_out", self.latent_channels + 1, c);
+        conv_entry(&mut m, "encoder.conv_out", self.latent_channels + 1, c);
+        m
+    }
 
-        // ---- decoder ----
-        conv(&mut m, "decoder.conv_in", self.bottleneck, self.latent_channels);
+    /// The `decoder.*` half of [`Self::tensor_manifest`], on its own - the
+    /// conv decoder this module implements, i.e. exactly the tree the
+    /// `-conv-` release carries and the NA-decoder release does not.
+    pub fn decoder_manifest(&self) -> Vec<(String, Vec<usize>)> {
+        let mut m: Vec<(String, Vec<usize>)> = Vec::new();
+        conv_entry(&mut m, "decoder.conv_in", self.bottleneck, self.latent_channels);
         let mut c = self.bottleneck;
         for (i, b) in self.dec_blocks().iter().enumerate() {
             let p = format!("decoder.up_blocks.{i}");
             match *b {
                 DecBlock::Res(ResX { n }) => {
                     for j in 0..n {
-                        conv(&mut m, &format!("{p}.res_blocks.{j}.conv1"), c, c);
-                        conv(&mut m, &format!("{p}.res_blocks.{j}.conv2"), c, c);
+                        conv_entry(&mut m, &format!("{p}.res_blocks.{j}.conv1"), c, c);
+                        conv_entry(&mut m, &format!("{p}.res_blocks.{j}.conv2"), c, c);
                     }
                 }
                 DecBlock::Up { stride, mult } => {
                     let prod = stride.t * stride.h * stride.w;
-                    conv(&mut m, &format!("{p}.conv"), (prod * c) / mult, c);
+                    conv_entry(&mut m, &format!("{p}.conv"), (prod * c) / mult, c);
                     c /= mult;
                 }
             }
         }
-        conv(&mut m, "decoder.conv_out", 3 * self.patch_size * self.patch_size, c);
-
-        m.push(("per_channel_statistics.mean-of-means".into(), vec![self.latent_channels as usize]));
-        m.push(("per_channel_statistics.std-of-means".into(), vec![self.latent_channels as usize]));
+        conv_entry(&mut m, "decoder.conv_out", 3 * self.patch_size * self.patch_size, c);
         m
     }
+}
+
+/// One `CausalConv3d`'s `[cout, cin, 3, 3, 3]` weight + `[cout]` bias
+/// manifest rows, under the doubled `.conv.` leaf the real checkpoint uses.
+fn conv_entry(m: &mut Vec<(String, Vec<usize>)>, prefix: &str, cout: u32, cin: u32) {
+    m.push((format!("{prefix}.conv.weight"), vec![cout as usize, cin as usize, 3, 3, 3]));
+    m.push((format!("{prefix}.conv.bias"), vec![cout as usize]));
 }
 
 // ---------------------------------------------------------------- blocks

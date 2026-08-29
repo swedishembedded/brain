@@ -116,7 +116,7 @@ fn weights() -> Option<&'static Tensors> {
             let wp = weights_path()?;
             let cfg = LtxVaeConfig::conv25();
             let raw = checkpoint::safetensors::read(&wp).ok()?;
-            let w = import_vae(raw, &cfg).ok()?;
+            let w = import_vae(raw, &cfg).and_then(|v| v.conv()).ok()?;
             eprintln!("imported real VAE weights from {wp}");
             Some(w)
         })

@@ -58,6 +58,7 @@ use crate::audio_vae::AudioVaeConfig;
 use crate::config::{LtxAudioDitConfig, LtxAvDitConfig, LtxDitConfig};
 use crate::dit::{av_dit_tensor_manifest, dit_tensor_manifest};
 use crate::duration_head::DurationHeadConfig;
+use crate::na_decoder::NaDecoderConfig;
 use crate::upsampler::LatentUpsamplerConfig;
 use crate::vae3d::LtxVaeConfig;
 use crate::vocoder::VocoderConfig;
@@ -90,40 +91,193 @@ pub(crate) fn validate_manifest(map: Tensors, manifest: &[(String, Vec<usize>)],
     Ok(map)
 }
 
-/// Import the video VAE (encoder + conv decoder, combined - a single file
-/// carries both).
+/// Which decoder a real video-VAE checkpoint carries. The official
+/// Lightricks LTX-2.5 repository ships the video VAE as TWO files whose
+/// `encoder.*` trees and `per_channel_statistics.*` are byte-identical (86
+/// tensors, range-read and compared) and whose DECODERS are structurally
+/// different architectures living under the same `decoder.*` top-level
+/// name. Neither is the "wrong" file - which one a checkpoint carries is a
+/// property to detect, not an error to report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoVaeArch {
+    /// `decoder.conv_in.conv.*` / `decoder.up_blocks.*` - the causal-conv
+    /// decoder [`crate::vae3d`] implements, shipped as
+    /// `ltx-2.5-video-vae-conv-bf16.safetensors` (170 tensors).
+    Conv3d,
+    /// `decoder.det_stages.*` / `decoder.diff_blocks.*` - the
+    /// neighborhood-attention diffusion decoder [`crate::na_decoder`]
+    /// implements, shipped as `ltx-2.5-video-vae-bf16.safetensors` (396
+    /// tensors).
+    NaDiffusion,
+}
+
+impl VideoVaeArch {
+    /// The Lightricks filename fragment that identifies this release, for
+    /// error messages that have to tell a user which download they have.
+    pub fn release_hint(&self) -> &'static str {
+        match self {
+            VideoVaeArch::Conv3d => "ltx-2.5-video-vae-conv-bf16.safetensors",
+            VideoVaeArch::NaDiffusion => "ltx-2.5-video-vae-bf16.safetensors",
+        }
+    }
+}
+
+/// An imported video VAE: the conv encoder (both releases carry the same
+/// one) plus whichever decoder the checkpoint actually shipped, in ONE
+/// weight map. `arch` says which decoder the `decoder.*` entries belong to,
+/// and therefore which forward path may read them - [`crate::vae3d::
+/// LtxVaeDecoder`] for [`VideoVaeArch::Conv3d`], [`crate::na_decoder`] for
+/// [`VideoVaeArch::NaDiffusion`]. `per_channel_statistics.*` is present
+/// either way, so [`crate::vae3d::per_channel_statistics`] and
+/// [`crate::vae3d::LtxVaeEncoder`] work against both.
+pub struct VideoVae {
+    pub arch: VideoVaeArch,
+    pub weights: Tensors,
+}
+
+impl std::fmt::Debug for VideoVae {
+    /// Tensor COUNT, never the tensors - a `Tensors` here is gigabytes of
+    /// weights, and `unwrap_err()` on an `import_vae` result formats the Ok
+    /// side.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VideoVae").field("arch", &self.arch).field("tensors", &self.weights.len()).finish()
+    }
+}
+
+impl VideoVae {
+    /// The weight map, for a call site that can only drive the conv decoder
+    /// ([`crate::vae3d::LtxVaeDecoder::build`] and the tiled decoder read
+    /// `decoder.up_blocks.*` unconditionally). An NA-decoder checkpoint is
+    /// refused HERE, by name, rather than by whichever conv tensor the
+    /// forward path happens to look up first.
+    pub fn conv(self) -> Result<Tensors, String> {
+        match self.arch {
+            VideoVaeArch::Conv3d => Ok(self.weights),
+            VideoVaeArch::NaDiffusion => Err(format!(
+                "ltxv video vae: this call site decodes through the conv decoder (crate::vae3d), but this \
+                 checkpoint carries the NA/diffusion decoder (decoder.det_stages.*/decoder.diff_blocks.*, \
+                 crate::na_decoder) - use the Lightricks release with \"-conv-\" in its filename ({}) instead.",
+                VideoVaeArch::Conv3d.release_hint()
+            )),
+        }
+    }
+}
+
+/// Which decoder architecture a video-VAE tensor list carries, decided from
+/// a handful of tell-tale prefixes before any full manifest check runs.
+///
+/// A file matching NEITHER schema is diagnosed by what it actually contains,
+/// i.e. a sample of the top-level prefixes present, rather than by the first
+/// tensor of whichever manifest happened to be validated first, which for a
+/// corrupted download or an unrelated checkpoint reads as "this file is
+/// slightly incomplete" when it is nothing of the sort.
+pub fn detect_video_vae_arch<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<VideoVaeArch, String> {
+    let mut prefixes: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let (mut na, mut conv) = (false, false);
+    for n in names {
+        na |= n.starts_with("decoder.det_stages.") || n.starts_with("decoder.diff_blocks.");
+        conv |= n.starts_with("decoder.up_blocks.") || n.starts_with("decoder.conv_in.conv.");
+        // Two components is enough to tell `decoder.up_blocks` from
+        // `decoder.det_stages` while collapsing the per-block index that
+        // would otherwise make this list hundreds of entries long.
+        let cut = n.match_indices('.').nth(1).map(|(i, _)| i).unwrap_or(n.len());
+        prefixes.insert(&n[..cut]);
+    }
+    match (conv, na) {
+        (true, false) => Ok(VideoVaeArch::Conv3d),
+        (false, true) => Ok(VideoVaeArch::NaDiffusion),
+        (true, true) => Err(format!(
+            "ltxv video vae import: this file carries BOTH decoder architectures' tensors \
+             (conv decoder.up_blocks.*/decoder.conv_in.conv.* AND NA decoder.det_stages.*/\
+             decoder.diff_blocks.*) - no real Lightricks release does, so this checkpoint has \
+             been merged or corrupted. Found: {}",
+            sample_prefixes(&prefixes)
+        )),
+        (false, false) => Err(format!(
+            "ltxv video vae import: this file is neither supported video-VAE checkpoint. Expected \
+             either the conv decoder (decoder.up_blocks.*/decoder.conv_in.conv.*, shipped as {}) or \
+             the NA/diffusion decoder (decoder.det_stages.*/decoder.diff_blocks.*, shipped as {}). \
+             Found: {}",
+            VideoVaeArch::Conv3d.release_hint(),
+            VideoVaeArch::NaDiffusion.release_hint(),
+            sample_prefixes(&prefixes)
+        )),
+    }
+}
+
+/// Up to 12 of a tensor list's top-level prefixes, for a diagnosis that has
+/// to say what a file actually contained without pasting a whole header.
+fn sample_prefixes(prefixes: &std::collections::BTreeSet<&str>) -> String {
+    if prefixes.is_empty() {
+        return "no tensors at all".to_string();
+    }
+    let shown: Vec<&str> = prefixes.iter().take(12).copied().collect();
+    let more = prefixes.len().saturating_sub(shown.len());
+    if more == 0 {
+        format!("{shown:?}")
+    } else {
+        format!("{shown:?} and {more} more")
+    }
+}
+
+/// Import the video VAE (encoder + decoder, combined - a single file carries
+/// both), dispatching on whichever decoder architecture the checkpoint turns
+/// out to carry. Both real Lightricks LTX-2.5 releases load; a file matching
+/// neither schema is refused by [`detect_video_vae_arch`] with a diagnosis
+/// of what it did contain.
+///
+/// Coverage stays two-way in BOTH branches. The conv branch validates the
+/// whole file against [`LtxVaeConfig::tensor_manifest`] as before. The NA
+/// branch splits the file in three - `encoder.*`, `decoder.*` +
+/// `per_channel_statistics.*`, and anything else - validates the first
+/// against [`LtxVaeConfig::encoder_manifest`] and the second against
+/// `crate::na_decoder`'s own manifest, and refuses a non-empty third
+/// bucket, so "unused source tensor" still means the same thing for either
+/// file rather than being quietly waived for the two-importer path.
 ///
 /// Handles an optional `vae.` prefix the same way [`dit_name_space`] handles
 /// the DiT's own: if ANY name carries it, it is a FILTER and non-matching
 /// tensors are dropped; otherwise every tensor is taken bare. LTX-2.5 ships
-/// the video VAE in a Comfy-split file whose 170 keys are already bare;
-/// LTX-2.3 bundles the SAME 170 tensors (identical names, identical shapes -
-/// both real headers were range-read and diffed) under `vae.` alongside the
+/// the video VAE in a Comfy-split file whose keys are already bare; LTX-2.3
+/// bundles the SAME conv tensors (identical names, identical shapes - both
+/// real headers were range-read and diffed) under `vae.` alongside the
 /// transformer, the audio VAE, the vocoder and the text projection, so the
 /// filter is what lets one import serve both packagings.
-pub fn import_vae(tensors: Vec<StTensor>, cfg: &LtxVaeConfig) -> Result<Tensors, String> {
-    let map: Tensors = if tensors.iter().any(|t| t.name.starts_with("vae.")) {
+pub fn import_vae(tensors: Vec<StTensor>, cfg: &LtxVaeConfig) -> Result<VideoVae, String> {
+    import_video_vae(tensors, cfg, &NaDecoderConfig::ltx25())
+}
+
+/// [`import_vae`] with both decoder configs supplied explicitly - the
+/// config-driven form the parity tests drive, and the one a second real NA
+/// release (a different `config.vae.decoder` metadata block) would be
+/// selected through.
+pub fn import_video_vae(tensors: Vec<StTensor>, cfg: &LtxVaeConfig, na_cfg: &NaDecoderConfig) -> Result<VideoVae, String> {
+    let mut map: Tensors = if tensors.iter().any(|t| t.name.starts_with("vae.")) {
         tensors.into_iter().filter_map(|t| t.name.strip_prefix("vae.").map(|n| (n.to_string(), (t.shape, t.data)))).collect()
     } else {
         tensors.into_iter().map(|t| (t.name, (t.shape, t.data))).collect()
     };
-    // A real, correctly-named Lightricks release - `ltx-2.5-video-vae-
-    // bf16.safetensors`, not the `-conv-` file this import targets - carries
-    // `crate::na_decoder`'s architecture instead of this module's conv
-    // decoder, under the SAME `decoder.*` top-level name every conv tensor
-    // also uses. Naming that up front, before `validate_manifest` reports
-    // the first conv tensor it happens to miss, is the difference between
-    // "wrong file, here is why" and "this checkpoint looks damaged".
-    if map.keys().any(|k| k.starts_with("decoder.det_stages") || k.starts_with("decoder.diff_blocks")) {
-        return Err(
-            "ltxv video vae import: this file's decoder is the NA/diffusion architecture \
-             (decoder.det_stages.*/decoder.diff_blocks.* tensors found) - crate::na_decoder's \
-             ported importer, not this module's conv decoder. Use the Lightricks release with \
-             \"-conv-\" in its filename (e.g. ltx-2.5-video-vae-conv-bf16.safetensors) instead."
-                .to_string(),
-        );
+    let arch = detect_video_vae_arch(map.keys().map(|k| k.as_str()))?;
+    match arch {
+        VideoVaeArch::Conv3d => Ok(VideoVae { arch, weights: validate_manifest(map, &cfg.tensor_manifest(), "video vae")? }),
+        VideoVaeArch::NaDiffusion => {
+            let decoder_keys: Vec<String> = map.keys().filter(|k| k.starts_with("decoder.") || k.starts_with("per_channel_statistics.")).cloned().collect();
+            let mut decoder_side: Vec<StTensor> = Vec::with_capacity(decoder_keys.len());
+            for name in decoder_keys {
+                let (shape, data) = map.remove(&name).expect("key just listed from this map");
+                decoder_side.push(StTensor { name, shape, data });
+            }
+            // Everything NOT claimed by the decoder importer goes to the
+            // encoder check as-is, strays included: a tensor belonging to
+            // neither half then surfaces as `validate_manifest`'s own
+            // "unused source tensors", which is the direction the two-
+            // importer path would otherwise be the one place to lose.
+            let mut encoder = validate_manifest(map, &cfg.encoder_manifest(), "video vae encoder")?;
+            let decoder = crate::na_decoder::import_na_decoder(decoder_side, na_cfg)?;
+            encoder.extend(decoder);
+            Ok(VideoVae { arch, weights: encoder })
+        }
     }
-    validate_manifest(map, &cfg.tensor_manifest(), "video vae")
 }
 
 /// Import the audio VAE (encoder + decoder + shared per-channel stats) from
@@ -497,11 +651,12 @@ mod tests {
         let manifest = cfg.tensor_manifest();
 
         let w = import_vae(build("", &manifest), &cfg).expect("bare names");
-        assert_eq!(w.len(), manifest.len());
+        assert_eq!(w.arch, VideoVaeArch::Conv3d);
+        assert_eq!(w.weights.len(), manifest.len());
         drop(w);
 
         let w2 = import_vae(build("vae.", &manifest), &cfg).expect("vae.-prefixed names");
-        assert_eq!(w2.len(), manifest.len());
+        assert_eq!(w2.weights.len(), manifest.len());
         drop(w2);
 
         let mut missing = build("", &manifest);
@@ -523,25 +678,71 @@ mod tests {
         assert!(e.contains("encoder.conv_in.conv.weight") && e.contains("expected"), "{e}");
     }
 
-    /// A real, correctly-named Lightricks release
-    /// (`ltx-2.5-video-vae-bf16.safetensors`, NOT the `-conv-` file this
-    /// import targets) carries a structurally different decoder -
-    /// `crate::na_decoder`'s architecture, `decoder.det_stages.*`/
-    /// `decoder.diff_blocks.*` - that this importer cannot read. Handing it
-    /// the wrong file must name what it actually got, not report the first
-    /// conv-decoder tensor it happens to miss as if the file were merely
-    /// incomplete.
+    /// Both real Lightricks video-VAE releases are valid checkpoints and the
+    /// loader has to take EITHER: the `-conv-` file (conv decoder) and the
+    /// NA-decoder file (`decoder.det_stages.*`/`decoder.diff_blocks.*` under
+    /// the same shared conv encoder) both import, each reporting which
+    /// decoder it carries. Two-way coverage survives the split: an extra
+    /// tensor in the NA file is still "unused", and a call site that can
+    /// only drive the conv decoder still refuses the NA file by name.
+    ///
+    /// Built and dropped one file at a time - both synthetic checkpoints are
+    /// GB-scale at these real widths, for the reason
+    /// [`import_validates_both_directions_and_both_name_spaces`] records.
     #[test]
-    fn import_names_the_na_decoder_architecture_instead_of_a_generic_missing_tensor() {
+    fn import_takes_either_real_decoder_architecture_and_says_which() {
         let cfg = LtxVaeConfig::conv25();
-        let mut na_shaped = build("", &cfg.tensor_manifest());
-        na_shaped.retain(|t| !t.name.starts_with("decoder."));
-        na_shaped.push(StTensor { name: "decoder.det_stages.0.0.attn.qkv.weight".into(), shape: vec![1], data: vec![0.0] });
-        na_shaped.push(StTensor { name: "decoder.diff_blocks.0.attn.qkv.weight".into(), shape: vec![1], data: vec![0.0] });
+        let na_cfg = crate::na_decoder::NaDecoderConfig::ltx25();
+        let na_file = || {
+            let mut v = build("", &cfg.encoder_manifest());
+            v.extend(build("", &na_cfg.tensor_manifest()));
+            v
+        };
 
-        let e = import_vae(na_shaped, &cfg).unwrap_err();
-        assert!(e.contains("na_decoder") || e.contains("NA decoder") || e.contains("det_stages"), "{e}");
-        assert!(e.contains("-conv-"), "{e}");
+        let conv = import_vae(build("", &cfg.tensor_manifest()), &cfg).expect("the -conv- release");
+        assert_eq!(conv.arch, VideoVaeArch::Conv3d);
+        assert!(conv.conv().is_ok());
+
+        let na = import_vae(na_file(), &cfg).expect("the NA-decoder release is a real, valid checkpoint");
+        assert_eq!(na.arch, VideoVaeArch::NaDiffusion);
+        // The shared conv encoder came through alongside the NA decoder, so
+        // `LtxVaeEncoder`/`per_channel_statistics` work off either file.
+        assert!(na.weights.contains_key("encoder.conv_in.conv.weight"), "encoder half missing");
+        assert!(na.weights.contains_key("per_channel_statistics.mean-of-means"), "stats missing");
+        assert!(na.weights.contains_key("decoder.diff_blocks.0.attn.to_q.weight"), "decoder half missing");
+        let e = na.conv().unwrap_err();
+        assert!(e.contains("det_stages") && e.contains("-conv-"), "{e}");
+
+        let mut extra = na_file();
+        extra.push(StTensor { name: "encoder.down_blocks.99.conv.conv.weight".into(), shape: vec![1], data: vec![0.0] });
+        let e = import_vae(extra, &cfg).unwrap_err();
+        assert!(e.contains("unused source tensors") && e.contains("encoder.down_blocks.99"), "{e}");
+    }
+
+    /// A file matching NEITHER schema - a corrupted download, an unrelated
+    /// checkpoint, a future third decoder - must be diagnosed by what it
+    /// actually contains and by which two schemas exist, not by the first
+    /// tensor of whichever manifest happened to be checked first.
+    #[test]
+    fn import_diagnoses_a_checkpoint_that_is_neither_architecture() {
+        let cfg = LtxVaeConfig::conv25();
+        let stray = vec![
+            StTensor { name: "decoder.mystery_stages.0.weight".into(), shape: vec![1], data: vec![0.0] },
+            StTensor { name: "model.diffusion_model.blocks.0.attn.weight".into(), shape: vec![1], data: vec![0.0] },
+        ];
+        let e = import_vae(stray, &cfg).unwrap_err();
+        assert!(e.contains("neither"), "{e}");
+        assert!(e.contains("decoder.up_blocks") && e.contains("decoder.det_stages"), "names both schemas: {e}");
+        assert!(e.contains("decoder.mystery_stages") && e.contains("model.diffusion_model"), "names what was found: {e}");
+
+        // Both trees at once is not a real release either, and saying so
+        // beats picking one and reporting the other's tensors as missing.
+        let both = vec![
+            StTensor { name: "decoder.up_blocks.0.conv.conv.weight".into(), shape: vec![1], data: vec![0.0] },
+            StTensor { name: "decoder.det_stages.0.0.attn.qkv.weight".into(), shape: vec![1], data: vec![0.0] },
+        ];
+        let e = import_vae(both, &cfg).unwrap_err();
+        assert!(e.contains("BOTH"), "{e}");
     }
 
     /// [`import_audio_vae`] and [`import_vocoder`] each filter their own
