@@ -107,6 +107,22 @@ pub fn import_vae(tensors: Vec<StTensor>, cfg: &LtxVaeConfig) -> Result<Tensors,
     } else {
         tensors.into_iter().map(|t| (t.name, (t.shape, t.data))).collect()
     };
+    // A real, correctly-named Lightricks release - `ltx-2.5-video-vae-
+    // bf16.safetensors`, not the `-conv-` file this import targets - carries
+    // `crate::na_decoder`'s architecture instead of this module's conv
+    // decoder, under the SAME `decoder.*` top-level name every conv tensor
+    // also uses. Naming that up front, before `validate_manifest` reports
+    // the first conv tensor it happens to miss, is the difference between
+    // "wrong file, here is why" and "this checkpoint looks damaged".
+    if map.keys().any(|k| k.starts_with("decoder.det_stages") || k.starts_with("decoder.diff_blocks")) {
+        return Err(
+            "ltxv video vae import: this file's decoder is the NA/diffusion architecture \
+             (decoder.det_stages.*/decoder.diff_blocks.* tensors found) - crate::na_decoder's \
+             ported importer, not this module's conv decoder. Use the Lightricks release with \
+             \"-conv-\" in its filename (e.g. ltx-2.5-video-vae-conv-bf16.safetensors) instead."
+                .to_string(),
+        );
+    }
     validate_manifest(map, &cfg.tensor_manifest(), "video vae")
 }
 
@@ -505,6 +521,27 @@ mod tests {
         }
         let e = import_vae(wrong, &cfg).unwrap_err();
         assert!(e.contains("encoder.conv_in.conv.weight") && e.contains("expected"), "{e}");
+    }
+
+    /// A real, correctly-named Lightricks release
+    /// (`ltx-2.5-video-vae-bf16.safetensors`, NOT the `-conv-` file this
+    /// import targets) carries a structurally different decoder -
+    /// `crate::na_decoder`'s architecture, `decoder.det_stages.*`/
+    /// `decoder.diff_blocks.*` - that this importer cannot read. Handing it
+    /// the wrong file must name what it actually got, not report the first
+    /// conv-decoder tensor it happens to miss as if the file were merely
+    /// incomplete.
+    #[test]
+    fn import_names_the_na_decoder_architecture_instead_of_a_generic_missing_tensor() {
+        let cfg = LtxVaeConfig::conv25();
+        let mut na_shaped = build("", &cfg.tensor_manifest());
+        na_shaped.retain(|t| !t.name.starts_with("decoder."));
+        na_shaped.push(StTensor { name: "decoder.det_stages.0.0.attn.qkv.weight".into(), shape: vec![1], data: vec![0.0] });
+        na_shaped.push(StTensor { name: "decoder.diff_blocks.0.attn.qkv.weight".into(), shape: vec![1], data: vec![0.0] });
+
+        let e = import_vae(na_shaped, &cfg).unwrap_err();
+        assert!(e.contains("na_decoder") || e.contains("NA decoder") || e.contains("det_stages"), "{e}");
+        assert!(e.contains("-conv-"), "{e}");
     }
 
     /// [`import_audio_vae`] and [`import_vocoder`] each filter their own
