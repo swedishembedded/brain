@@ -4752,6 +4752,79 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames, audio }, timings))
 }
 
+/// One scene's own [`LongOpts`] within a [`generate_scenes`] run - `frames`
+/// and `seed` become the scene's own, `start_frame` conditions scene 0's
+/// opening only, and everything else (including `end_frame`/`mid_frame`)
+/// passes through from the caller's request untouched.
+///
+/// **Do not add an unconditional `end_frame: None` (or `mid_frame: None`)
+/// here.** `generate_scenes` calls this for the `scenes.len() == 1` case
+/// too - the ordinary, no-`--scene` `t2v` request - and an earlier version
+/// of this function zeroed `end_frame` for every scene regardless of `si`,
+/// which silently discarded `--end-frame` on every single-scene call ever
+/// made. The multi-scene
+/// refusal in `generate_scenes`, run before this is ever called more than
+/// once, is what keeps `end_frame`/`mid_frame` at `None` once more than one
+/// scene is in play; this function has no case of its own left to enforce.
+fn scene_gen_opts(o: &LongOpts, s: &Scene, si: usize) -> LongOpts {
+    LongOpts {
+        base: GenOpts {
+            frames: s.frames,
+            // The still conditions the clip's own opening, which is the first
+            // scene's first window and nowhere else.
+            start_frame: if si == 0 { o.base.start_frame.clone() } else { None },
+            seed: o.base.seed ^ crate::longform::SCENE_SEED_SALT.wrapping_mul(si as u64),
+            ..o.base.clone()
+        },
+        ..o.clone()
+    }
+}
+
+#[cfg(test)]
+mod scene_gen_opts_tests {
+    use super::*;
+
+    fn scene(frames: usize, prompt: &str) -> Scene {
+        Scene { frames, prompt: prompt.into() }
+    }
+
+    /// The exact defect this function was extracted to stop from coming
+    /// back: a single-scene request (`si == 0`, the ordinary `t2v` path)
+    /// must keep the caller's own `end_frame`/`mid_frame`, not silently
+    /// drop them.
+    #[test]
+    fn a_single_scene_keeps_the_callers_end_and_mid_frame() {
+        let o = LongOpts { base: GenOpts { end_frame: Some("end.png".into()), mid_frame: Some("mid.png".into()), mid_frame_at: Some(4), ..GenOpts::default() }, ..LongOpts::default() };
+        let got = scene_gen_opts(&o, &scene(9, "a shot"), 0);
+        assert_eq!(got.base.end_frame.as_deref(), Some("end.png"), "single-scene end_frame must survive unchanged");
+        assert_eq!(got.base.mid_frame.as_deref(), Some("mid.png"), "single-scene mid_frame must survive unchanged");
+        assert_eq!(got.base.mid_frame_at, Some(4));
+    }
+
+    /// `start_frame` conditions scene 0's opening only - unchanged behaviour,
+    /// pinned down alongside the fix above so the two do not drift apart
+    /// again under a future edit.
+    #[test]
+    fn only_scene_zero_keeps_the_start_frame() {
+        let o = LongOpts { base: GenOpts { start_frame: Some("start.png".into()), ..GenOpts::default() }, ..LongOpts::default() };
+        assert_eq!(scene_gen_opts(&o, &scene(9, "a"), 0).base.start_frame.as_deref(), Some("start.png"));
+        assert_eq!(scene_gen_opts(&o, &scene(9, "b"), 1).base.start_frame, None);
+    }
+
+    /// Each scene gets the request's own frame count and a distinct,
+    /// deterministic seed - the two fields this function derives rather than
+    /// copying verbatim.
+    #[test]
+    fn each_scene_gets_its_own_frame_count_and_a_distinct_seed() {
+        let o = LongOpts { base: GenOpts { seed: 7, ..GenOpts::default() }, ..LongOpts::default() };
+        let s0 = scene_gen_opts(&o, &scene(9, "a"), 0);
+        let s1 = scene_gen_opts(&o, &scene(17, "b"), 1);
+        assert_eq!(s0.base.frames, 9);
+        assert_eq!(s1.base.frames, 17);
+        assert_ne!(s0.base.seed, s1.base.seed, "each scene must denoise from its own seed");
+    }
+}
+
 /// Progress units one scene of a [`generate_scenes`] run is worth.
 ///
 /// A scene's own phase count is not known until [`generate_long`] has planned
@@ -4779,7 +4852,11 @@ const SCENE_PROGRESS_UNITS: u32 = 100;
 /// content to continue is asking for one scene, and says so by writing one.
 ///
 /// **A single-scene call is handed straight to [`generate_long`]**, so a
-/// request that names one scene is bit-for-bit the run it already was.
+/// request that names one scene is bit-for-bit the run it already was -
+/// including `end_frame`/`mid_frame`, which [`scene_gen_opts`] must not
+/// touch: the multi-scene refusal below is what keeps them `None` by the
+/// time more than one scene is in play, so this function has no case of its
+/// own left to enforce.
 ///
 /// [`LongOpts::base`]'s own `frames` is NOT read - each [`Scene`] brings its
 /// own length, and the clip's length is their sum. `start_frame` conditions
@@ -4790,18 +4867,7 @@ pub fn generate_scenes(paths: &Paths, scenes: &[Scene], o: &LongOpts, cancel: &c
     let Some(first) = scenes.first() else {
         return Err("a generation needs at least one scene".into());
     };
-    let scene_opts = |s: &Scene, si: usize| LongOpts {
-        base: GenOpts {
-            frames: s.frames,
-            // The still conditions the clip's own opening, which is the first
-            // scene's first window and nowhere else.
-            start_frame: if si == 0 { o.base.start_frame.clone() } else { None },
-            end_frame: None,
-            seed: o.base.seed ^ crate::longform::SCENE_SEED_SALT.wrapping_mul(si as u64),
-            ..o.base.clone()
-        },
-        ..o.clone()
-    };
+    let scene_opts = |s: &Scene, si: usize| scene_gen_opts(o, s, si);
     if scenes.len() == 1 {
         return generate_long(paths, &first.prompt, &scene_opts(first, 0), cancel, progress);
     }
