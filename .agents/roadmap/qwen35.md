@@ -1622,6 +1622,103 @@ different quantizer would settle it in one run.
 asserted in `new_impl_on`), vision, LoRA, batched prefill, and more than one
 sequence per dispatch.
 
+### M22 - decode throughput: first honest profile, 3.94 -> 7.44 tok/s on the real two-card resident
+
+**Status: done.** Measured on the real `unsloth/Qwen3.8-27B-Q8_0` GGUF across
+2x Tesla P40, 64 real layers, INT8, `n = 1`. Every number below is a
+WHOLE-PASS number from `qwen35_decode_profile` on the production flush path;
+the per-kernel tables it also prints are used only to rank.
+
+**There was no decode profiler.** `qwen35_bench` prices one layer at prefill
+widths on random weights, which cannot answer where a served token goes: at
+`T = 1` the model is memory-bound on its own weights and the ranking is a
+different ranking. `crates/qwen35/src/bin/qwen35_decode_profile.rs` drives the
+real resident and reports the whole-pass rate, the per-kernel table (all
+stages merged), and the weight-streaming roof the rate is judged against.
+
+| | tok/s | ms/token |
+|---|---|---|
+| baseline (start of M22) | 3.94 | 253.6 |
+| + `rmsnorm_rows` on the decode tape | 7.19 | 139.1 |
+| + M-RoPE dedup and an explicit per-layer flush | **7.44** | **134.4** |
+
+**1.89x.** Baseline artifact:
+`scripts/gates/qwen35-perf-baselines/qwen35-resident-int8-cpu48-gpu2.json`.
+
+**What the profile actually said.** The top row was not the GEMM:
+
+```
+rmsnorm                 117.478 ms/token   210 calls   48.2%
+matmul_i8_gemv_reg      103.076 ms/token   497 calls   42.3%
+bmm                       5.780 ms/token    96 calls    2.4%
+```
+
+RMSNorm cost more than the entire 27 GB int8 weight stream underneath it.
+`rmsnorm.wgsl` assigns thread `t` row `t`, so a one-row decode norm runs a
+5120-element reduction on ONE thread of a 3840-core card with every 32-byte
+sector serving a single useful float. The coalesced `rmsnorm_rows` already
+existed, `backend_api::select` already preferred it, and `block::rms_variant`
+was already the seam three other models selected it through; qwen35 dispatched
+the reference by hardcoded index and never asked. 19.4x on the kernel, 1.82x
+on the pass. Gated by `tests/rmsnorm_variant_agreement.rs` against a HOST
+reference (the swap is not bit-identical - 64 partials fold in a different
+order, agreeing to ~3e-6 - which is why it sits at the call site and not in
+`gpu_core::upgrade`).
+
+**The expensive surprise** is lesson #75: deduplicating the per-GQA-layer
+M-RoPE upload, which is strictly less work, made the pass 1.45x SLOWER,
+because `Gpu::write*` flushes the pending queue and those 32 uploads per token
+had been the only thing giving the pass any host/device overlap. One explicit
+`Gpu::flush()` per decoder layer recovered it and made the dedup free.
+Measured cadences: 1/layer 7.47, 2/layer 7.31, 1/2 layers 7.44.
+
+**Where it stops, and why that is the honest end of this phase.** The pass is
+now device-bound: 131.6 ms/token of device time against 134.4 ms/token of wall
+clock. `matmul_i8_gemv_reg` is 78% of it at 103 ms/token, streaming ~14.5 GB
+per card per token at roughly 280 GB/s, which is about 81% of a P40's 346 GB/s
+theoretical DRAM roof. Per the kernel checklist section F.2, a top row already
+at its memory roof cannot be fixed by a kernel change; the only levers left are
+to move fewer bytes (INT4 - a precision change, not a speed change) or to batch
+independent rows over the same weights (MTP self-speculative decode, or a
+second concurrent sequence - both separate phases). Everything else in the
+table put together is 28 ms/token, so even reducing ALL of it to zero would
+reach only about 9.5 tok/s.
+
+**Hypotheses from the pre-M22 survey that the profile KILLED**, recorded
+because a dead hypothesis is worth as much as a confirmed one:
+
+* *"8 of 11 per-layer decode GEMMs dispatch the naive `MATMUL` instead of the
+  selector."* Stale - already fixed. Every projection in
+  `layer_gdn_decode_step`/`layer_gqa_decode_step`/`mlp_fwd` goes through
+  `ops_linear` -> `Ops::matmul` -> `select`, and at `m = 1` with an INT8
+  weight that lands on `matmul_i8_gemv`, upgraded to
+  `matmul_i8_gemv_reg#MREG=1`. The profile shows that name and no `matmul`.
+* *"The LM head runs on the host (`hostmath::matvec_par` over
+  `[248320, 5120]`)."* True of `serve::Engine`, NOT of this resident, which
+  has always used `stream::head_logits_on` with an INT8 device weight.
+* *"~800 `submit()` calls per token."* Real, and free. `Gpu::submit` on this
+  backend appends to a pending list under a mutex; it is not a queue
+  submission. Collapsing them would have bought nothing - and see lesson #75
+  for how the opposite turned out to be true of the calls that DO submit.
+* *"~1200 `create_buffer`/destroy pairs per token; `Gpu::scratch_scope` is
+  unused."* Real and still unused, but host time is now ~2% of the pass
+  (134.4 wall vs 131.6 device), so the whole remaining prize is under 3
+  ms/token. Not worth the aliasing-contract risk at this point; revisit only
+  if the device side is ever cut enough to expose it.
+
+**Correctness.** Unchanged, and separately gated. Every real-weight gate stays
+green (`gguf_reference_parity_real`, `gguf_i8_vs_fp32_real`, `decode_step`,
+`shard_parity`, `two_shard_int8_decode_matches_the_whole_shard_model`), and
+`the_two_card_stack_continues_a_factual_prompt_correctly` stays RED for the
+reason M21 records - the int8-along-the-sequence compounding of lesson #72,
+unrelated to anything here. One consequence worth noting: the e2e plumbing
+gate used to assert that the generated text had more than three distinct
+characters, and that check was a coin flip on known-garbage output (it passed
+on `"Give one"` while the red gate's own `"..\n\n..."` would have failed it).
+A legitimate 1e-6 reduction-order change flipped it, so it was removed with a
+comment pointing at the reference-comparing gates that catch broken plumbing
+properly, and at the condition for restoring it.
+
 ## Not yet done
 
 

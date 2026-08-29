@@ -683,11 +683,24 @@ pub struct Qwen35 {
     dec_cap: u32,
     /// One-token input buffer for the decode-path `EMBED` gather.
     dec_tokens: DeviceBuffer,
-    /// Decode-path M-RoPE: a single-row `[rotary_dim/2]` cos/sin table,
-    /// rewritten every [`Self::layer_gqa_decode_step`] call for that step's
-    /// absolute position - see that function's own doc for why.
+    /// Decode-path M-RoPE: a single-row `[rotary_dim/2]` cos/sin table for one
+    /// absolute position - see [`Self::layer_gqa_decode_step`]'s own doc for
+    /// why a slice of the whole-sequence table cannot serve here.
     dec_cos: DeviceBuffer,
     dec_sin: DeviceBuffer,
+    /// The position [`Self::dec_cos`]/[`Self::dec_sin`] currently hold, so a
+    /// decode step's GQA layers compute and upload that row ONCE between them
+    /// instead of once each.
+    ///
+    /// The table is a pure function of `pos` (everything else feeding
+    /// `mrope_tables` is a config constant), so "same pos, same bytes" is exact
+    /// rather than approximate and needs no invalidation on a cache reset. At
+    /// this model's `full_attention_interval = 4` that is 16 identical
+    /// recomputes and 32 uploads per token collapsing to one and two - and each
+    /// upload is not just bytes: `Gpu::write*` flushes the pending dispatch
+    /// queue first, so every one of them was a queue break in the middle of a
+    /// layer.
+    dec_rope_pos: Cell<Option<u32>>,
     /// Per-layer plain (non-paged) KV cache for GQA layers, `[dec_cap,
     /// kv_dim]`; a size-1 dummy at GDN layer indices.
     gqa_kcache: Vec<DeviceBuffer>,
@@ -1161,6 +1174,7 @@ impl Qwen35 {
             dec_tokens,
             dec_cos,
             dec_sin,
+            dec_rope_pos: Cell::new(None),
             gqa_kcache,
             gqa_vcache,
             gdn_state,
@@ -2191,6 +2205,26 @@ impl Qwen35 {
             let res_next = g.storage(d as u64);
             g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[d], d)]);
             res = res_next;
+
+            // Hand this layer to the device NOW and keep building the next one.
+            //
+            // `Gpu::submit` on this backend does not submit - it appends to a
+            // pending list that is flushed at the terminal readback - so
+            // WITHOUT this a decode step records every one of its ~1250
+            // dispatches (bind groups, uniforms and all) on the host before the
+            // card starts any of them, and then waits. Zero overlap, and at
+            // `n = 1` the host side of that is not small next to the device
+            // side.
+            //
+            // Measured, and it is not a small effect: this model used to get
+            // the overlap BY ACCIDENT, because `layer_gqa_decode_step` uploaded
+            // an M-RoPE row per GQA layer and `Gpu::write*` flushes the queue
+            // first. Deduplicating those uploads to one per position - a
+            // strictly smaller amount of work - cost 1.45x on the whole pass
+            // (7.19 -> 4.96 tok/s) purely by removing the flushes that had been
+            // pipelining the pass. Flushing on purpose, per layer, is what that
+            // accident was worth and is why the dedup is now free.
+            g.flush();
         }
 
         // Head epilogue (final norm): head stage only - `run_forward`'s own
@@ -2385,9 +2419,10 @@ impl Qwen35 {
     /// `row % tmod` with `tmod` always the dispatch's own row count, so at
     /// `rows=1` that is always table row 0 - a slice into the
     /// construction-time whole-sequence `Self::cos`/`Self::sin` table at row
-    /// `pos` cannot be addressed this way. Instead this recomputes a fresh
-    /// 1-row table for `pos` into the persistent `Self::dec_cos`/`Self::
-    /// dec_sin` buffers and rewrites it every call.
+    /// `pos` cannot be addressed this way. Instead this builds a fresh 1-row
+    /// table for `pos` into the persistent `Self::dec_cos`/`Self::dec_sin`
+    /// buffers - once per position, shared by every GQA layer at that position
+    /// (see `Self::dec_rope_pos`).
     ///
     /// `kcache`/`vcache`/`cap` are THIS call's KV cache buffers and capacity
     /// (layer `l`'s slice of whichever [`DecodeCaches`] the caller is
@@ -2443,9 +2478,13 @@ impl Qwen35 {
 
         // Single-position partial M-RoPE - see this function's own doc.
         let half = c.rotary_dim() / 2;
-        let (cos_row, sin_row) = qwen3vl::mrope::mrope_tables(&[[pos, pos, pos]], c.mrope_section, c.rotary_dim(), c.rope_theta);
-        g.write_f32(&self.dec_cos, &cos_row);
-        g.write_f32(&self.dec_sin, &sin_row);
+        // Once per POSITION, not once per GQA layer - see `dec_rope_pos`.
+        if self.dec_rope_pos.get() != Some(pos) {
+            let (cos_row, sin_row) = qwen3vl::mrope::mrope_tables(&[[pos, pos, pos]], c.mrope_section, c.rotary_dim(), c.rope_theta);
+            g.write_f32(&self.dec_cos, &cos_row);
+            g.write_f32(&self.dec_sin, &sin_row);
+            self.dec_rope_pos.set(Some(pos));
+        }
         g.submit(
             &[],
             &[
