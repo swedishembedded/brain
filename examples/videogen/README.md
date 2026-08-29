@@ -209,6 +209,36 @@ Without `BRAIN_LTXV_DIT` the script runs the tiny random-weight DiT instead
 of failing -- a real wiring test (the stills genuinely condition the noise)
 but not a quality claim.
 
+## Chaining a numbered sequence of stills into one long clip
+
+`chain_images_to_video.sh` is `images_to_video.sh`'s sibling for more than
+three stills: point it at `image-00.*, image-01.*, image-02.*, ...` (plus
+one `prompt.txt` used for every segment) and it generates one clip per
+consecutive PAIR -- image-00 to image-01, then image-01 to image-02, and so
+on -- and concatenates them into one file.
+
+```bash
+mkdir story/
+echo "a boat sailing across the ocean at sunset" > story/prompt.txt
+cp frame0.png story/image-00.png
+cp frame1.png story/image-01.png
+cp frame2.png story/image-02.png
+
+examples/videogen/chain_images_to_video.sh story/ out.mp4 5
+```
+
+Because each clip's END still is the next clip's START still, consecutive
+clips already agree at the seam, which is what makes a plain `ffmpeg -c
+copy` concatenation (no re-encode) work -- the individual segments land in
+`out.segments/` beside the final file.
+
+`MID=1` uses the mid-frame conditioning slot too, grouping stills into
+non-overlapping triples (image-00/01/02, then image-02/03/04, ...) instead
+of pairs -- needs an odd still count, and is the way to keep a longer or
+moving-camera SEGMENT on course through its own middle, not only at its
+ends. See the script's own header comment for the exact grouping and why an
+even count is rejected in that mode.
+
 ---
 
 ## Who builds brain
