@@ -4326,16 +4326,73 @@ pub struct LongOpts {
     /// cannot set it.
     pub context_latent_frames: usize,
     /// Per-window video-token ceiling, [`crate::longform::LONGFORM_MAX_TOKENS`]
-    /// by default.
+    /// by default.  Governs stage 1's half-resolution plan.
     pub max_window_tokens: usize,
+    /// Per-pass video-token ceiling for stage 2's refinement, mirroring
+    /// [`crate::pipeline::REFINE_MAX_TOKENS`].  Defaults to
+    /// [`crate::pipeline::REFINE_MAX_TOKENS`].
+    pub max_refine_tokens: usize,
     /// `frames` is the WHOLE clip's length, not one window's.
     pub base: GenOpts,
 }
 
 impl Default for LongOpts {
     fn default() -> LongOpts {
-        LongOpts { context_latent_frames: crate::longform::CONTEXT_LATENT_FRAMES, max_window_tokens: crate::longform::LONGFORM_MAX_TOKENS, base: GenOpts::default() }
+        LongOpts {
+            context_latent_frames: crate::longform::CONTEXT_LATENT_FRAMES,
+            max_window_tokens: crate::longform::LONGFORM_MAX_TOKENS,
+            max_refine_tokens: REFINE_MAX_TOKENS,
+            base: GenOpts::default(),
+        }
     }
+}
+
+/// Two independent window plans for a stage-major long-form generation:
+/// stage 1 at half resolution (where motion is decided) and stage 2 at full
+/// resolution (where refinement detail is carried).
+///
+/// Stage 1's plan determines the clip's motion structure; stage 2's plan
+/// fragments only as much as memory demands, with no quality cost because the
+/// motion is already fixed by stage 1.
+#[derive(Clone, Debug)]
+pub struct TwoStageLongPlan {
+    /// Half-resolution window plan (where motion is decided).
+    pub stage1: Vec<crate::longform::Window>,
+    /// Full-resolution window plan (refinement detail).
+    pub stage2: Vec<crate::longform::Window>,
+    /// Latent frames in the global half-resolution latent buffer (sum of
+    /// stage1 windows' `new` fields).
+    pub lat_t: usize,
+    /// Stage 2's context: the number of full-res latent frames carried across
+    /// each stage-2 seam (may differ from stage 1's context if the grids
+    /// differ).
+    pub stage2_context: usize,
+}
+
+/// Build two independent window plans for a stage-major long-form generation.
+///
+/// Calls [`crate::longform::window_plan_aligned`] twice, once at the
+/// half-resolution grid (stage 1) and once at the full-resolution grid
+/// (stage 2).  Stage 2's context is capped to what fits under
+/// `max_stage2_tokens` on the denser grid.
+///
+/// Returns `Err` when either grid cannot express the clip.
+pub fn two_stage_long_plan(
+    frames: usize,
+    lh1: usize,
+    lw1: usize,
+    lh: usize,
+    lw: usize,
+    context: usize,
+    max_stage1_tokens: usize,
+    max_stage2_tokens: usize,
+    align: usize,
+) -> Result<TwoStageLongPlan, String> {
+    let stage1 = crate::longform::window_plan_aligned(frames, lh1, lw1, context, max_stage1_tokens, align)?;
+    let stage2_ctx = crate::longform::fitted_context(lh, lw, context, max_stage2_tokens)?;
+    let stage2 = crate::longform::window_plan_aligned(frames, lh, lw, stage2_ctx, max_stage2_tokens, align)?;
+    let lat_t = stage1.iter().map(|w| w.new).sum();
+    Ok(TwoStageLongPlan { stage1, stage2, lat_t, stage2_context: stage2_ctx })
 }
 
 /// Text to video of arbitrary length: one clip built out of several
@@ -4409,6 +4466,17 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         // generation, and this entry point must not become a second way of
         // spelling it.
         return generate(paths, prompt, &o.base, cancel, progress);
+    }
+    // Stage-major long-form: when the kill switch is enabled (default) and the
+    // clip is video-only, route to the stage-major loop which runs stage 1 at
+    // half resolution for the whole clip, then stage 2 at full resolution.
+    // Audio-visual clips keep today's window-major loop (Phase F defers that).
+    let stage_major_enabled = match std::env::var("BRAIN_LTXV_LONGFORM_STAGE_MAJOR").ok().as_deref() {
+        Some("0") | Some("off") | Some("false") => false,
+        _ => !o.base.audio,
+    };
+    if stage_major_enabled {
+        return run_stage_major(paths, prompt, o, cancel, progress);
     }
     check_audio_request(paths, &o.base)?;
     if o.base.end_frame.is_some() {
@@ -4763,6 +4831,243 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     progress(total, total, "done");
     tracing::info!(frames = out_frames.len(), windows = plan.len(), audio = audio.is_some(), total_secs = timings.total(), "long-form generation done");
     Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames, audio }, timings))
+}
+
+/// Stage-major long-form generation: stage 1 builds the clip's motion
+/// structure at half resolution in as few, as global a pass as possible;
+/// stage 2 refines at full resolution, reading slices of stage 1's output.
+///
+/// This is the path gated behind `BRAIN_LTXV_LONGFORM_STAGE_MAJOR` (enabled
+/// by default for video-only clips).  Audio-visual clips keep the window-major
+/// loop in [`generate_long`].
+///
+/// Stage 1's plan is sized by the half-resolution token count, so clips whose
+/// entire stage-1 trajectory fits in one window get a single global pass.
+/// Stage 2 fragments as much as memory demands, with no quality cost because
+/// the motion is already fixed by stage 1.
+fn run_stage_major(
+    paths: &Paths,
+    prompt: &str,
+    o: &LongOpts,
+    cancel: &capability::CancelToken,
+    mut progress: impl FnMut(u32, u32, &str),
+) -> Result<(Video, Timings), String> {
+    let vcfg = LtxVaeConfig::conv25();
+    if vcfg.latent_frames(o.base.frames as u32).is_none() {
+        return Err(format!("{} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)", o.base.frames));
+    }
+    if !o.base.width.is_multiple_of(32) || !o.base.height.is_multiple_of(32) {
+        return Err(format!("{}x{} is not a multiple of 32 (the VAE's spatial stride)", o.base.width, o.base.height));
+    }
+    let (lh, lw) = (o.base.height / 32, o.base.width / 32);
+    let (w1, h1) = (o.base.width / 2, o.base.height / 2);
+    let (lh1, lw1) = (h1 / 32, w1 / 32);
+    let align = 1u32; // video-only; audio clips never reach here
+
+    let tsp = two_stage_long_plan(
+        o.base.frames, lh1, lw1, lh, lw,
+        o.context_latent_frames, o.max_window_tokens, o.max_refine_tokens,
+        align as usize,
+    )?;
+    if tsp.stage2.len() < 2 {
+        return Err("stage-major path requires >= 2 stage-2 windows (otherwise generate_long's fast path handles it)".into());
+    }
+
+    check_audio_request(paths, &o.base)?;
+    if o.base.steps == 0 {
+        return Err("--steps must be at least 1".into());
+    }
+
+    let dit_cfg = dit_config_from_name(&o.base.dit_config)?;
+    if dit_cfg.in_channels != vcfg.latent_channels {
+        return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", o.base.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
+    }
+    let in_channels = dit_cfg.in_channels as usize;
+    let is_real_distilled = o.base.dit_config == "ltx25_22b";
+    let context = o.context_latent_frames;
+
+    let sigmas: Vec<f64> = if is_real_distilled {
+        LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect()
+    } else {
+        ltx2_sigmas(tsp.stage1[0].tokens(lh1, lw1), o.base.steps, o.base.base_shift, o.base.max_shift, o.base.stretch, o.base.terminal)
+    };
+    let steps = sigmas.len() - 1;
+    let refine_sigmas = stage2_sigmas(LTX2_STAGE2_STEPS)?;
+
+    // Phases: build, stage-1 windows, stage-2 windows, one decode.
+    let per_s1 = steps as u32;
+    let per_s2 = LTX2_STAGE2_STEPS as u32 + 1;
+    let total = 1 + tsp.stage1.len() as u32 * per_s1 + tsp.stage2.len() as u32 * per_s2 + 1;
+    tracing::info!(
+        stage1_windows = tsp.stage1.len(),
+        stage2_windows = tsp.stage2.len(),
+        stage1_max_tokens = o.max_window_tokens,
+        stage2_max_tokens = o.max_refine_tokens,
+        stage2_context = tsp.stage2_context,
+        frames = o.base.frames,
+        "stage-major long-form generation planned"
+    );
+
+    let mut timings = Timings::default();
+    let place = o.base.devices.resolve(o.base.device.as_deref());
+    progress(0, total, "build transformer");
+    let build_t = Instant::now();
+    let dit = build_denoiser(paths, dit_cfg, &o.base, place)?;
+    if o.base.audio && !dit.has_audio() {
+        return Err("ltxv: audio was requested but the built denoiser carries no audio stream".into());
+    }
+    timings.build_dit = build_t.elapsed().as_secs_f32();
+    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, len: context_len, .. } =
+        build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
+    let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
+    let upsampler = SpatialUpsampler::default();
+
+    let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(o.base.frames);
+    let mut vae_secs = 0.0f32;
+    let work_t = Instant::now();
+    let mut done_before = 1u32;
+
+    // ---- Stage 1: build the global half-res latent -------------------------
+    let mut global_half = vec![0f32; in_channels * tsp.lat_t * lh1 * lw1];
+    let mut s1_carried: Option<(Vec<f32>, usize)> = None;
+    for (wi, w) in tsp.stage1.iter().enumerate() {
+        if cancel.is_cancelled() { return Err("cancelled".into()); }
+        let lat_t = w.latent_frames();
+        let win_opts = GenOpts {
+            frames: w.decoded_frames(),
+            start_frame: if wi == 0 { o.base.start_frame.clone() } else { None },
+            end_frame: None,
+            mid_frame: None,
+            ..o.base.clone()
+        };
+        let sc = StageCtx {
+            a_ctx_cond: &[],
+            a_ctx_uncond: &[],
+            dit: dit.as_ref(),
+            vcfg: &vcfg,
+            vweights: &vweights,
+            o: &win_opts,
+            lat_t,
+            in_channels,
+            ctx_cond: &ctx_cond,
+            ctx_uncond: &ctx_uncond,
+            context_valid: &context_valid,
+            context_len,
+            cancel,
+        };
+        let seed_salt = 0x57_49_4e_44_00_00_00_00u64 ^ wi as u64;
+        tracing::info!(window = wi, of = tsp.stage1.len(), latent_frames = lat_t, carried = w.context, new = w.new, tokens = w.tokens(lh1, lw1), "stage1 window starting");
+
+        let stage_out = denoise_stage(
+            &sc,
+            Stage {
+                mask: None,
+                width: w1,
+                height: h1,
+                sigmas: &sigmas,
+                eta: o.base.eta,
+                seed_chw: None,
+                context: s1_carried.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
+                seed_salt,
+                done_before,
+                label: "s1",
+                audio: None,
+            },
+            total,
+            &mut progress,
+        )?;
+        let stage1_chw = stage_out.video_chw;
+        s1_carried = Some((crate::longform::carry_tail(&stage1_chw, in_channels, lat_t, lh1, lw1, context.min(lat_t)), context.min(lat_t)));
+        // Write this window's NEW frames into the global half-res buffer.
+        let first_lat = w.first_latent_frame(if wi == 0 { 0 } else { tsp.stage1[..wi].iter().map(|w| w.new).sum() });
+        crate::longform::write_latent_window(&mut global_half, in_channels, tsp.lat_t, lh1, lw1, first_lat, &stage1_chw[(w.context * lh1 * lw1 * in_channels)..]);
+        done_before += per_s1;
+    }
+
+    // ---- Stage 2: refine each stage-2 window from the global half-res ------
+    let mut carried_full: Option<(Vec<f32>, usize)> = None;
+    for (wi, w) in tsp.stage2.iter().enumerate() {
+        if cancel.is_cancelled() { return Err("cancelled".into()); }
+        let lat_t = w.latent_frames();
+        // Stage 2 reads its slice of the global half-res latent.
+        let first_lat = w.first_latent_frame(if wi == 0 { 0 } else { tsp.stage2[..wi].iter().map(|w| w.new).sum() });
+        let s1_slice = crate::longform::latent_window(&global_half, in_channels, tsp.lat_t, lh1, lw1, first_lat, lat_t);
+        let win_opts = GenOpts {
+            frames: w.decoded_frames(),
+            start_frame: if wi == 0 { o.base.start_frame.clone() } else { None },
+            end_frame: None,
+            mid_frame: None,
+            ..o.base.clone()
+        };
+        let sc = StageCtx {
+            a_ctx_cond: &[],
+            a_ctx_uncond: &[],
+            dit: dit.as_ref(),
+            vcfg: &vcfg,
+            vweights: &vweights,
+            o: &win_opts,
+            lat_t,
+            in_channels,
+            ctx_cond: &ctx_cond,
+            ctx_uncond: &ctx_uncond,
+            context_valid: &context_valid,
+            context_len,
+            cancel,
+        };
+        let seed_salt = 0x57_49_4e_44_00_00_00_00u64 ^ (tsp.stage1.len() + wi) as u64;
+        tracing::info!(window = wi, of = tsp.stage2.len(), latent_frames = lat_t, carried = w.context, new = w.new, tokens = w.tokens(lh, lw), "stage2 window starting");
+
+        dit.release_devices();
+        let stage_out = upscale_and_refine(
+            &sc,
+            Refine {
+                upsampler: &upsampler,
+                upsampler_path: paths.spatial_upsampler.as_deref().expect("checked before the first forward"),
+                latent_chw: &s1_slice,
+                lat_t,
+                lh1,
+                lw1,
+                width: o.base.width,
+                height: o.base.height,
+                sigmas: &refine_sigmas,
+                context: carried_full.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
+                seed_salt,
+                done_before,
+                label: "s2",
+                audio: None,
+            },
+            total,
+            &mut progress,
+        )?;
+        let final_chw = stage_out.video_chw;
+        carried_full = Some((crate::longform::carry_tail(&final_chw, in_channels, lat_t, lh, lw, tsp.stage2_context.min(lat_t)), tsp.stage2_context.min(lat_t)));
+        done_before += per_s2;
+
+        dit.release_devices();
+        progress(done_before, total, "vae decode");
+        let dec_t = Instant::now();
+        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, o.base.device.as_deref(), &final_chw, o.base.seed ^ VAE_DECODE_SEED_SALT)?;
+        vae_secs += dec_t.elapsed().as_secs_f32();
+        if got != w.decoded_frames() || pixels.len() != 3 * got * o.base.height * o.base.width {
+            return Err(format!("window {wi} decoded to {got} frames / {} values, expected {} / {}", pixels.len(), w.decoded_frames(), 3 * w.decoded_frames() * o.base.height * o.base.width));
+        }
+        let rgb = chw_to_rgb8(&pixels, got, o.base.height, o.base.width);
+        out_frames.extend(rgb.into_iter().skip(w.dropped_frames()));
+        done_before += 1;
+    }
+    drop(dit);
+
+    if out_frames.len() != o.base.frames {
+        return Err(format!("reassembled {} frames from {} stage-2 windows, expected {}", out_frames.len(), tsp.stage2.len(), o.base.frames));
+    }
+    timings.decode = vae_secs;
+    timings.denoise = (work_t.elapsed().as_secs_f32() - vae_secs).max(0.0);
+    timings.steps = tsp.stage1.len() * steps + tsp.stage2.len() * LTX2_STAGE2_STEPS;
+    timings.tokens = tsp.stage2.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
+    timings.forwards_per_step = if o.base.guidance > 1.0 { 2 } else { 1 };
+    progress(total, total, "done");
+    tracing::info!(frames = out_frames.len(), stage1_windows = tsp.stage1.len(), stage2_windows = tsp.stage2.len(), total_secs = timings.total(), "stage-major long-form generation done");
+    Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames, audio: None }, timings))
 }
 
 /// One scene's own [`LongOpts`] within a [`generate_scenes`] run - `frames`

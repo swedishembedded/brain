@@ -222,6 +222,85 @@ impl Window {
     pub fn source_first_frame(&self) -> usize {
         self.first_frame - self.dropped_frames()
     }
+
+    /// The latent frame index where this window's first NEW latent frame sits
+    /// in a global latent buffer (a `[C, total_lat_t, lh, lw]` that holds
+    /// every window's generated latent frames concatenated).
+    ///
+    /// Window 0 starts at latent frame 0 (it has no carried prefix).  A
+    /// continuation window's first new frame is at `sum of new over all
+    /// preceding windows`, because the carried context occupies latent frames
+    /// `[0, context)` of THIS window's sequence but is NOT part of the
+    /// generated latent (it is a copy of the predecessor's tail).
+    pub fn first_latent_frame(&self, preceding_new: usize) -> usize {
+        preceding_new
+    }
+
+    /// Convert a global pixel frame to a local latent frame within this
+    /// window's own sequence, or `None` if the pixel frame does not fall
+    /// inside this window's decoded range.
+    ///
+    /// A window decodes from pixel frame `self.first_frame - self.dropped_frames()`
+    /// to `self.first_frame - self.dropped_frames() + self.decoded_frames() - 1`.
+    /// The local latent frame is `(pixel_frame - source_first_frame) / 8` for
+    /// pixel frames within the decoded range, with the first latent frame
+    /// (at `source_first_frame`) being latent frame 0.
+    pub fn local_frame(&self, global_pixel_frame: usize) -> Option<usize> {
+        let src_first = self.source_first_frame();
+        let src_last = src_first + self.decoded_frames();
+        if global_pixel_frame < src_first || global_pixel_frame >= src_last {
+            return None;
+        }
+        Some((global_pixel_frame - src_first) / 8)
+    }
+}
+
+/// Slice out latent frames `[start..start+count)` from a `[C, lat_t, lh, lw]`
+/// channel-major buffer, returning a `[C, count, lh, lw]` copy.
+///
+/// Returns an empty `Vec` when `count == 0` (a degenerate window).  Panics
+/// when the range extends past `lat_t`.
+pub fn latent_window(latent_chw: &[f32], channels: usize, lat_t: usize, lh: usize, lw: usize, start: usize, count: usize) -> Vec<f32> {
+    let plane = lh * lw;
+    assert!(start + count <= lat_t, "latent_window: [{start}..{}) past lat_t {lat_t}", start + count);
+    assert_eq!(latent_chw.len(), channels * lat_t * plane, "latent_window: {} values, expected {}", latent_chw.len(), channels * lat_t * plane);
+    let mut out = vec![0f32; channels * count * plane];
+    for c in 0..channels {
+        let src = (c * lat_t + start) * plane;
+        out[c * count * plane..(c + 1) * count * plane].copy_from_slice(&latent_chw[src..src + count * plane]);
+    }
+    out
+}
+
+/// Write latent frames from a `[C, count, lh, lw]` source into a
+/// `[C, lat_t, lh, lw]` destination at position `start` in the time axis.
+///
+/// Panics when the range extends past `lat_t` or when `src`'s shape does not
+/// match `(channels, count, lh, lw)`.
+pub fn write_latent_window(dest: &mut [f32], channels: usize, lat_t: usize, lh: usize, lw: usize, start: usize, src: &[f32]) {
+    let plane = lh * lw;
+    let count = src.len() / (channels * plane);
+    assert!(start + count <= lat_t, "write_latent_window: [{start}..{}) past lat_t {lat_t}", start + count);
+    assert_eq!(src.len(), channels * count * plane, "write_latent_window: {} values, expected {}", src.len(), channels * count * plane);
+    for c in 0..channels {
+        let dst = (c * lat_t + start) * plane;
+        dest[dst..dst + count * plane].copy_from_slice(&src[c * count * plane..(c + 1) * count * plane]);
+    }
+}
+
+/// Route a clip-global pixel frame to the window that owns it and the local
+/// latent frame within that window.
+///
+/// Returns `(window_index, local_latent_frame)` when the pixel frame falls
+/// inside a window's decoded range.  `None` when the pixel frame does not
+/// land inside any window (out of bounds).
+pub fn route_mid_anchor(plan: &[Window], global_pixel_frame: usize) -> Option<(usize, usize)> {
+    for (i, w) in plan.iter().enumerate() {
+        if let Some(local) = w.local_frame(global_pixel_frame) {
+            return Some((i, local));
+        }
+    }
+    None
 }
 
 /// Latent frames one `max_tokens` forward holds on an `lh` x `lw` grid.

@@ -235,7 +235,7 @@ mod real_weights {
     use std::path::Path;
 
     use ltxv::longform::{scene_plan, window_plan, Scene, CONTEXT_LATENT_FRAMES, SCENE_SEED_SALT};
-    use ltxv::pipeline::{generate_long, generate_scenes, GenOpts, LongOpts, Paths};
+    use ltxv::pipeline::{generate_long, generate_scenes, GenOpts, LongOpts, Paths, REFINE_MAX_TOKENS};
 
     /// The named environment variable, else the repo-relative
     /// `resources/ltxv/weights/` the real files ship under - never a literal
@@ -270,6 +270,7 @@ mod real_weights {
         let o = LongOpts {
             context_latent_frames: context,
             max_window_tokens: max_tokens,
+            max_refine_tokens: REFINE_MAX_TOKENS,
             base: GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), seed: 5, ..GenOpts::default() },
         };
         let plan = window_plan(frames, 2, 2, context, max_tokens).expect("the plan is legal");
@@ -312,7 +313,7 @@ mod real_weights {
         let scenes = [Scene { frames: 41, prompt: "a moving bar".into() }, Scene { frames: 25, prompt: "a spinning square".into() }];
         let total: usize = scenes.iter().map(|s| s.frames).sum();
         let base = GenOpts { width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), seed: 5, ..GenOpts::default() };
-        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, base: base.clone() };
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: REFINE_MAX_TOKENS, base: base.clone() };
 
         let plan = scene_plan(&scenes, 2, 2, context, max_tokens).expect("the plan is legal");
         assert_eq!(plan[0].len(), 2, "scene 1 has to span several windows for this test to say anything about the intra-scene context: {:?}", plan[0]);
@@ -353,7 +354,7 @@ mod real_weights {
         let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
         let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
         let base = GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() };
-        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, base };
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: REFINE_MAX_TOKENS, base };
         assert!(window_plan(frames, 2, 2, context, max_tokens).expect("legal").len() > 1, "this shape has to need several windows");
         let cancel = capability::CancelToken::default();
 
@@ -420,7 +421,7 @@ mod real_weights {
 mod seam_real {
     use ltxv::clipmetric::frame_to_frame_diffs;
     use ltxv::longform::{window_plan, CONTEXT_LATENT_FRAMES};
-    use ltxv::pipeline::{generate, generate_long, GenOpts, LongOpts, Paths, Video};
+    use ltxv::pipeline::{generate, generate_long, GenOpts, LongOpts, Paths, Video, REFINE_MAX_TOKENS};
 
     /// 384x192 is 72 tokens per latent frame, the shape `motion_real.rs` and
     /// `anchor_real.rs` both calibrate at. The window ceiling is forced to 14
@@ -490,7 +491,7 @@ mod seam_real {
         let cancel = capability::CancelToken::default();
 
         // Arm A: the rolling latent context.
-        let o = LongOpts { context_latent_frames: CONTEXT_LATENT_FRAMES, max_window_tokens: MAX_WINDOW_TOKENS, base: base_opts(FRAMES) };
+        let o = LongOpts { context_latent_frames: CONTEXT_LATENT_FRAMES, max_window_tokens: MAX_WINDOW_TOKENS, max_refine_tokens: REFINE_MAX_TOKENS, base: base_opts(FRAMES) };
         let (rolling, _) = generate_long(&paths, PROMPT, &o, &cancel, |_, _, _| {}).unwrap_or_else(|e| panic!("generate_long failed: {e}"));
         assert_eq!(rolling.frames.len(), FRAMES);
 

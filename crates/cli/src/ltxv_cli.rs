@@ -632,7 +632,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         let vcfg = ltxv::LtxVaeConfig::conv25();
         vcfg.latent_frames(context_frames as u32).ok_or_else(|| format!("--context-frames {context_frames} is not of the form 1 + 8k"))? as usize
     };
-    let long = LongOpts { context_latent_frames: context_latents, max_window_tokens: ltxv::longform::max_window_tokens_from_env(), base: o.clone() };
+    let long = LongOpts { context_latent_frames: context_latents, max_window_tokens: ltxv::longform::max_window_tokens_from_env(), max_refine_tokens: ltxv::pipeline::REFINE_MAX_TOKENS, base: o.clone() };
     // The plan decides what this run actually is, so it is resolved before
     // the preview line rather than after: a multi-window clip's per-forward
     // token count is one WINDOW's, and reporting the whole clip's would name
