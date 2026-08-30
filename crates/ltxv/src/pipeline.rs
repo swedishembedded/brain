@@ -4538,17 +4538,16 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     }
     check_audio_request(paths, &o.base)?;
     if o.base.end_frame.is_some() {
-        // Not an LTX limitation - an appended keyframe guide is a temporal
-        // coordinate, not "the last slot of a window", so nothing about the
-        // mechanism itself rules this out. What is actually missing is the
-        // orchestration: mapping a clip-global anchor position onto the
-        // specific window(s) whose emitted+context range covers it, in that
-        // window's own local frame numbering.
-        return Err("--end-frame is not supported for a multi-window clip: this crate has no policy yet for mapping a clip-global anchor position onto the window(s) that cover it".into());
+        // The window-major path has no clip-global stage to route an anchor
+        // into: each window is an independent denoising pass with its own
+        // frame numbering.  The stage-major path (run_stage_major) handles
+        // this correctly via window_gen_opts, but this window-major path does
+        // not have that orchestration.
+        return Err("--end-frame is not supported for a multi-window clip under the window-major path: use BRAIN_LTXV_TWO_STAGE=1 to enable the stage-major path which routes anchors correctly".into());
     }
     if o.base.mid_frame.is_some() {
         return Err(format!(
-            "--mid-frame is not supported for a multi-window clip: this {}-frame request is {} windows, and an anchor at a clip-wide pixel frame has to be routed to the window that covers it and re-expressed in that window's own frame numbering, which has not been designed",
+            "--mid-frame is not supported for a multi-window clip under the window-major path: this {}-frame request is {} windows, and the window-major path has no clip-global stage to route an anchor into. Use BRAIN_LTXV_TWO_STAGE=1 to enable the stage-major path which routes anchors correctly",
             o.base.frames,
             plan.len()
         ));
