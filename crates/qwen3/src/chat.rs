@@ -208,17 +208,24 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
     let (max_new, temp, top_k, seed) = sampling_params(inv);
     let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
     let enable_thinking = inv.get_bool("enable_thinking").unwrap_or(true);
+    // Resolve reasoning_effort: upstream Qwen3.8 defaults to "xhigh" when
+    // thinking is enabled and no value is provided.
+    let reasoning_effort = if enable_thinking {
+        Some(inv.get_str("reasoning_effort").unwrap_or_else(|| "xhigh".into()))
+    } else {
+        None // thinking disabled: reasoning_effort is ignored
+    };
     let tools = parse_tools(inv.get_str("tools").as_deref())?;
     let text = match inv.get_str("messages").filter(|s| !s.is_empty()) {
         Some(raw) => {
             let msgs = parse_chat_messages(&raw, inv.get_str("system").as_deref())?;
-            qwen_chat::render_for_generation(&msgs, &tools, enable_thinking)?
+            qwen_chat::render_for_generation(&msgs, &tools, enable_thinking, reasoning_effort.clone())?
         }
         None => {
             let prompt = inv.get_str("prompt").unwrap_or_default();
             if inv.get_bool("chat").unwrap_or(true) {
                 let msgs = [ChatMessage::user(prompt)];
-                qwen_chat::render_for_generation(&msgs, &tools, enable_thinking)?
+                qwen_chat::render_for_generation(&msgs, &tools, enable_thinking, reasoning_effort.clone())?
             } else {
                 prompt
             }

@@ -100,16 +100,21 @@ impl ChatMessage {
 }
 
 /// Rendering knobs the Jinja template reads from the caller's generation
-/// config (`add_generation_prompt`, `enable_thinking`).
-#[derive(Clone, Copy, Debug)]
+/// config (`add_generation_prompt`, `enable_thinking`, `reasoning_effort`).
+#[derive(Clone, Debug)]
 pub struct TemplateOpts {
     pub add_generation_prompt: bool,
     pub enable_thinking: bool,
+    /// Qwen3.8 `reasoning_effort`: `xhigh` (default when thinking enabled),
+    /// `medium`, or `low`.  Injected as a system-prompt instruction before the
+    /// tools/system content.  `None` means "use the template default" (which
+    /// is `xhigh` when `enable_thinking` is true, ignored when false).
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for TemplateOpts {
     fn default() -> TemplateOpts {
-        TemplateOpts { add_generation_prompt: true, enable_thinking: true }
+        TemplateOpts { add_generation_prompt: true, enable_thinking: true, reasoning_effort: None }
     }
 }
 
@@ -441,8 +446,29 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
     let has_tools = !tools.is_empty();
     let first_is_system = msgs.first().map(|m| m.role) == Some(Role::System);
 
+    // Resolve reasoning_effort: default to "xhigh" when thinking is enabled,
+    // matching upstream Qwen3.8's Jinja template convention.
+    let reasoning_directive = if opts.enable_thinking {
+        match opts.reasoning_effort.as_deref() {
+            Some("low") => Some("Reasoning effort is set to low. Keep your thinking brief and focused, \
+                 moving directly to the conclusion without unnecessary elaboration."),
+            Some("medium") => None, // medium: no injected instruction
+            None => None, // not specified: no injection (callers resolve defaults)
+            Some("xhigh") => Some("Reasoning effort is set to xhigh. Please think carefully through the task, \
+                 validate key assumptions, consider plausible alternatives, and prioritize \
+                 correctness, consistency, and clarity in the final answer."),
+            Some(other) => return Err(format!("Unexpected reasoning effort '{other}'. Supported types are xhigh (default), medium, and low.")),
+        }
+    } else {
+        None // thinking disabled: reasoning_effort is ignored
+    };
+
     if has_tools {
         out.push_str("<|im_start|>system\n");
+        if let Some(dir) = reasoning_directive {
+            out.push_str(dir);
+            out.push_str("\n\n");
+        }
         if first_is_system {
             out.push_str(&msgs[0].content);
             out.push_str("\n\n");
@@ -460,9 +486,15 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
              arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": \
              <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n",
         );
-    } else if first_is_system {
+    } else if first_is_system || reasoning_directive.is_some() {
         out.push_str("<|im_start|>system\n");
-        out.push_str(&msgs[0].content);
+        if let Some(dir) = reasoning_directive {
+            out.push_str(dir);
+            out.push_str("\n\n");
+        }
+        if first_is_system {
+            out.push_str(&msgs[0].content);
+        }
         out.push_str("<|im_end|>\n");
     }
 
@@ -539,8 +571,8 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
 }
 
 /// `render` with `add_generation_prompt=true` — the common inference-time call.
-pub fn render_for_generation(msgs: &[ChatMessage], tools: &[String], enable_thinking: bool) -> Result<String, String> {
-    render(msgs, tools, TemplateOpts { add_generation_prompt: true, enable_thinking })
+pub fn render_for_generation(msgs: &[ChatMessage], tools: &[String], enable_thinking: bool, reasoning_effort: Option<String>) -> Result<String, String> {
+    render(msgs, tools, TemplateOpts { add_generation_prompt: true, enable_thinking, reasoning_effort })
 }
 
 /// Resolve an assistant message's `(reasoning, content)` pair: the explicit
@@ -1203,7 +1235,7 @@ mod tests {
     #[test]
     fn render_disable_thinking_appends_empty_think_block() {
         let msgs = vec![ChatMessage::user("hi")];
-        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: true, enable_thinking: false }).unwrap();
+        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: true, enable_thinking: false , ..Default::default() }).unwrap();
         assert!(s.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"), "got: {s:?}");
     }
 
@@ -1438,5 +1470,90 @@ mod tests {
                 ChatEvent::Content("after".to_string()),
             ]
         );
+    }
+
+    // ---- render: reasoning_effort ----------------------------------------------------
+
+    #[test]
+    fn reasoning_effort_xhigh_injects_system_instruction() {
+        let msgs = vec![ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts {
+            enable_thinking: true,
+            reasoning_effort: Some("xhigh".into()),
+            ..Default::default()
+        }).unwrap();
+        assert!(s.contains("Reasoning effort is set to xhigh"), "xhigh should inject instruction: {s:?}");
+        assert!(s.contains("validate key assumptions"), "xhigh should mention validation: {s:?}");
+    }
+
+    #[test]
+    fn reasoning_effort_medium_injects_nothing() {
+        let msgs = vec![ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts {
+            enable_thinking: true,
+            reasoning_effort: Some("medium".into()),
+            ..Default::default()
+        }).unwrap();
+        assert!(!s.contains("Reasoning effort"), "medium should not inject instruction: {s:?}");
+    }
+
+    #[test]
+    fn reasoning_effort_low_injects_brief_instruction() {
+        let msgs = vec![ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts {
+            enable_thinking: true,
+            reasoning_effort: Some("low".into()),
+            ..Default::default()
+        }).unwrap();
+        assert!(s.contains("Reasoning effort is set to low"), "low should inject instruction: {s:?}");
+        assert!(s.contains("brief and focused"), "low should mention brevity: {s:?}");
+    }
+
+    #[test]
+    fn reasoning_effort_none_means_no_injection() {
+        let msgs = vec![ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts {
+            enable_thinking: true,
+            reasoning_effort: None,
+            ..Default::default()
+        }).unwrap();
+        assert!(!s.contains("Reasoning effort"), "None should inject nothing (caller resolves defaults): {s:?}");
+    }
+
+    #[test]
+    fn reasoning_effort_ignored_when_thinking_disabled() {
+        let msgs = vec![ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts {
+            enable_thinking: false,
+            reasoning_effort: Some("xhigh".into()),
+            ..Default::default()
+        }).unwrap();
+        assert!(!s.contains("Reasoning effort"), "should be ignored when thinking disabled: {s:?}");
+    }
+
+    #[test]
+    fn reasoning_effort_invalid_value_errors() {
+        let msgs = vec![ChatMessage::user("hi")];
+        let result = render(&msgs, &[], TemplateOpts {
+            enable_thinking: true,
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        });
+        assert!(result.is_err(), "invalid effort should error");
+        assert!(result.unwrap_err().contains("Unexpected reasoning effort"), "error message should name the value");
+    }
+
+    #[test]
+    fn reasoning_effort_with_tools_goes_before_tools() {
+        let tools = vec![r#"{"type":"function","function":{"name":"get_weather"}}"#.into()];
+        let msgs = vec![ChatMessage::user("weather?")];
+        let s = render(&msgs, &tools, TemplateOpts {
+            enable_thinking: true,
+            reasoning_effort: Some("xhigh".into()),
+            ..Default::default()
+        }).unwrap();
+        let re_pos = s.find("Reasoning effort").unwrap();
+        let tools_pos = s.find("# Tools").unwrap();
+        assert!(re_pos < tools_pos, "reasoning should come before tools: re_pos={re_pos}, tools_pos={tools_pos}");
     }
 }

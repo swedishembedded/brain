@@ -62,7 +62,7 @@ fn matches_qwen_chat_on_a_tool_call_conversation() {
         QcMessage::tool("18C, sunny"),
         QcMessage::assistant("2+2 is 4, and it's 18C and sunny in Paris."),
     ];
-    let expected = qwen_chat::render(&qc_msgs, &[], TemplateOpts { add_generation_prompt: false, enable_thinking: true }).expect("qwen_chat render");
+    let expected = qwen_chat::render(&qc_msgs, &[], TemplateOpts { add_generation_prompt: false, enable_thinking: true , ..Default::default() }).expect("qwen_chat render");
 
     // -------- generic Jinja engine side (same conversation, as JSON) --------
     let messages_json = r#"[
@@ -93,7 +93,7 @@ fn matches_qwen_chat_with_a_tools_schema_and_generation_prompt() {
 
     let qc_msgs = vec![QcMessage::system("sys prompt"), QcMessage::user("hi")];
     let expected =
-        qwen_chat::render(&qc_msgs, &tools_src, TemplateOpts { add_generation_prompt: true, enable_thinking: true }).expect("qwen_chat render");
+        qwen_chat::render(&qc_msgs, &tools_src, TemplateOpts { add_generation_prompt: true, enable_thinking: true , ..Default::default() }).expect("qwen_chat render");
 
     let messages = parse_json_ordered(r#"[{"role":"system","content":"sys prompt"},{"role":"user","content":"hi"}]"#).unwrap();
     let tools = parse_json_ordered(&format!("[{}]", tools_src[0])).unwrap();
@@ -111,7 +111,7 @@ fn matches_qwen_chat_with_enable_thinking_false_generation_prompt() {
         return;
     };
     let qc_msgs = vec![QcMessage::user("hi")];
-    let expected = qwen_chat::render_for_generation(&qc_msgs, &[], false).expect("qwen_chat render");
+    let expected = qwen_chat::render_for_generation(&qc_msgs, &[], false, None).expect("qwen_chat render");
 
     let messages = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
     let mut extra = BTreeMap::new();

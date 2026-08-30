@@ -62,7 +62,7 @@ fn encode_matches_the_qwen_chat_oracle_text_with_correct_mask_boundaries() {
 
     let qc_msgs = vec![QcMessage::system("You are a helpful assistant."), QcMessage::user("What is 2+2?"), QcMessage::assistant("2+2 is 4.")];
     let expected_text =
-        qwen_chat::render(&qc_msgs, &[], TemplateOpts { add_generation_prompt: false, enable_thinking: true }).expect("qwen_chat render");
+        qwen_chat::render(&qc_msgs, &[], TemplateOpts { add_generation_prompt: false, enable_thinking: true , ..Default::default() }).expect("qwen_chat render");
     let expected_text_with_eot = format!("{expected_text}<|endoftext|>");
 
     let decoded = tok.decode(&ids);

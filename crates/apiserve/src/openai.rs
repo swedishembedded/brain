@@ -348,6 +348,18 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     if let Some(et) = enable_thinking {
         inv = inv.set("enable_thinking", json!(et));
     }
+    // `reasoning_effort` (Qwen3.8 xhigh/medium/low): same extension point as
+    // `enable_thinking` - nested under `chat_template_kwargs` or, tolerated,
+    // top-level. The value is validated downstream by the chat template
+    // renderer itself (unknown values error with the template's own message).
+    let reasoning_effort = body
+        .get("chat_template_kwargs")
+        .and_then(|k| k.get("reasoning_effort"))
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("reasoning_effort").and_then(|v| v.as_str()));
+    if let Some(re) = reasoning_effort {
+        inv = inv.set("reasoning_effort", json!(re));
+    }
 
     // image_url/input_audio content parts' REAL bytes -- flatten_message's
     // own "content" (message_content) now preserves a lightweight, payload-
@@ -510,7 +522,7 @@ fn content_text(c: Option<&Value>) -> String {
 /// `"audio_url"` (additive - the original `"type"`/`"input_audio"` keys stay
 /// untouched, so any other consumer of the raw shape is unaffected): read
 /// directly off the real checkpoint's `chat_template.json`
-/// (`/tmp/.X11-unix/brain/omni/Qwen3-Omni-30B-A3B-Instruct/chat_template.json`
+/// ([model-store path]/omni/Qwen3-Omni-30B-A3B-Instruct/chat_template.json
 /// at the time this was written), the template's own audio detection is
 /// `content.type == 'audio' or 'audio' in content or 'audio_url' in
 /// content` - none of which match OpenAI's real

@@ -21,12 +21,12 @@
 //! - Chat rendering (`messages`/`system`/`tools`/`stop`-strings/
 //!   `enable_thinking`/tool-call scanning) is `qwen3::chat`'s
 //!   `parse_request`/`SeqState`, reused as-is, exactly like `qwen35moe::caps`
-//!   does. `reasoning_effort` (xhigh/medium/low) is NOT wired here: neither
-//!   `qwen3::chat` nor `qwen35moe::caps` implement it today (only
-//!   `enable_thinking`, a plain bool, exists), and this crate found no
-//!   verified prompt-injection convention to implement it against without
-//!   guessing at Qwen3.8's actual chat template - recorded as a roadmap gap
-//!   rather than fabricated.
+//!   does. `reasoning_effort` (xhigh/medium/low) is wired through the same
+//!   path: resolved in `qwen3::chat::parse_request` (default `xhigh` when
+//!   thinking is enabled, ignored when it is disabled) and injected by
+//!   `data::qwen_chat::render` as a system-turn instruction ahead of the
+//!   system content / tools preamble, matching the upstream Qwen3.8 chat
+//!   template's own convention.
 //! - No LoRA, no multi-GPU sharding wired into this action (the underlying
 //!   capabilities exist - `crate::model`'s LoRA branch, `crate::shard` - but
 //!   this streaming `generate` action, like `qwen35moe::caps`'s own, only
@@ -87,6 +87,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema; needs a tokenizer)"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (accepted, ignored)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block (needs a tokenizer)").default(json!(true)))
+        .param(ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level: xhigh (default, detailed deliberation), medium (no instruction), or low (brief thinking)").default(json!("xhigh")))
         .param(ParamSpec::new("use_mtp", ParamType::Bool, "enable MTP speculative acceleration in streaming mode (greedy only; requires streaming=true)").default(json!(false)))
         .param(ParamSpec::new(
             "streaming",
