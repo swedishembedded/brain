@@ -339,13 +339,16 @@ mod real_weights {
         assert_eq!(timings.steps, t0.steps + t1.steps, "the aggregated timings lost a scene's work");
     }
 
-    /// **An anchor a multi-window plan cannot honour is refused, not
-    /// dropped.** `--end-frame` pins the last frame of ONE window and
-    /// `--mid-frame` names a pixel frame of the whole clip that would have to
-    /// be routed to whichever window covers it; neither is designed. A caller
-    /// who supplied a still and got a clip that ignored it would have no way
-    /// to tell, so both are errors - raised before any weight is read, which
-    /// is why this costs no generation despite living beside the ones that do.
+    /// **An anchor the plan cannot honour is refused, not dropped.** Since the
+    /// stage-major path routes clip-global anchors into the window whose
+    /// decoded range covers each anchor's instant, `--end-frame` and
+    /// `--mid-frame` on a multi-window plan are HONOURED, not refused - the
+    /// one anchor that can still fail to route is a `--mid-frame-at` outside
+    /// the clip it names: no window's decoded range contains it, every window
+    /// would silently generate without it, and a caller who supplied a still
+    /// and got a clip that ignored it would have no way to tell. So it is an
+    /// error - raised before any weight is read, which is why this costs no
+    /// generation despite living beside the ones that do.
     #[test]
     fn an_anchor_a_multi_window_plan_cannot_honour_is_refused_rather_than_ignored() {
         let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
@@ -354,19 +357,91 @@ mod real_weights {
         let paths = Paths::resolve(Some(&vae), None, None, None).expect("the configured path resolves");
         let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
         let base = GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() };
-        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: REFINE_MAX_TOKENS, base };
+        // `max_refine_tokens` forced down with the window ceiling so the
+        // stage-2 plan splits and the stage-major path - the one that routes
+        // anchors - actually serves this shape instead of refusing it.
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: max_tokens, base };
         assert!(window_plan(frames, 2, 2, context, max_tokens).expect("legal").len() > 1, "this shape has to need several windows");
         let cancel = capability::CancelToken::default();
 
-        for (label, opts) in [
-            ("--mid-frame", GenOpts { mid_frame: Some("unread.png".into()), ..o.base.clone() }),
-            ("--end-frame", GenOpts { end_frame: Some("unread.png".into()), ..o.base.clone() }),
-        ] {
-            let Err(e) = generate_long(&paths, "a moving bar", &LongOpts { base: opts, ..o.clone() }, &cancel, |_, _, _| {}) else {
-                panic!("a multi-window plan generated a clip instead of refusing {label}");
-            };
-            assert!(e.contains(label), "the refusal does not name {label}: {e}");
-        }
+        let opts = GenOpts {
+            mid_frame: Some("mid.png".into()),
+            mid_frame_at: Some(frames + 8),
+            ..o.base.clone()
+        };
+        let Err(e) = generate_long(&paths, "a moving bar", &LongOpts { base: opts, ..o.clone() }, &cancel, |_, _, _| {}) else {
+            panic!("an out-of-clip mid anchor generated a clip instead of refusing --mid-frame-at");
+        };
+        assert!(e.contains("--mid-frame-at"), "the refusal does not name --mid-frame-at: {e}");
+    }
+
+    /// **Stage-major long-form with all three keyframes composes end to
+    /// end.** The stage-major loop refines the half-res motion with a SECOND
+    /// independent window plan at full resolution, and that loop has a
+    /// history of geometry bugs no smaller test could see: a continuation
+    /// window whose refine input was read from the wrong half-res span
+    /// (content shifted 64 px frames), one whose context was the LAST
+    /// stage-1 window's tail - the clip's own end - instead of its own
+    /// predecessor, and one whose sequence length disagreed with the plan it
+    /// came from. Every one of those either panics, refuses, or stitches a
+    /// clip whose seams are hard content jumps; all of them survive any test
+    /// that never runs the loop.
+    ///
+    /// So this runs the loop. Real conv VAE, real spatial upsampler, tiny
+    /// random-weight DiT, CPU; 41 frames at 64x64 with both ceilings forced
+    /// to 20 tokens so the full-res grid (2x2) splits into two stage-2
+    /// windows under the default 2-latent-frame context. The claim is
+    /// WIRING: with `--start-frame` + `--mid-frame` + `--end-frame` all
+    /// supplied - start conditioning window 0, the mid routed to the window
+    /// whose decoded range covers frame 20, the end appended to the last
+    /// window's final frame - the run completes and reassembles exactly the
+    /// requested clip, which is precisely what each of those geometry bugs
+    /// broke.
+    #[test]
+    fn a_stage_major_run_with_three_keyframes_comes_back_as_one_clip() {
+        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        };
+        let Some(upsampler) = weights_path("BRAIN_LTXV_UPSAMPLER_SPATIAL", "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors") else {
+            return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial upscaler");
+        };
+        let paths = Paths::resolve(Some(&vae), None, None, Some(&upsampler)).expect("the configured paths resolve");
+        let dir = std::env::temp_dir().join(format!("ltxv-stage-major-anchors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let still = |name: &str, rgb: [u8; 3]| {
+            let path = dir.join(name);
+            let px: Vec<u8> = std::iter::repeat_n(rgb, 64 * 64).flatten().collect();
+            image::RgbImage::from_raw(64, 64, px).expect("a flat RGB image").save(&path).expect("write the conditioning still");
+            path.to_string_lossy().into_owned()
+        };
+        let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
+        let base = GenOpts {
+            frames,
+            width: 64,
+            height: 64,
+            steps: 2,
+            fps: 8,
+            device: Some("cpu".into()),
+            seed: 5,
+            start_frame: Some(still("start.png", [220, 30, 30])),
+            mid_frame: Some(still("mid.png", [30, 220, 30])),
+            end_frame: Some(still("end.png", [230, 230, 30])),
+            ..GenOpts::default()
+        };
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: max_tokens, base };
+        // The shape has to split at BOTH stages for this test to mean
+        // anything: one stage-1 window builds the motion, two stage-2 windows
+        // refine it across one full-res seam.
+        assert!(window_plan(frames, 2, 2, context, max_tokens).expect("legal").len() > 1, "the full-res grid has to need several windows");
+        let cancel = capability::CancelToken::default();
+
+        let (video, _) = generate_long(&paths, "a single continuous shot", &o, &cancel, |_, _, _| {}).expect("stage-major long-form with keyframes");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(video.frames.len(), frames, "the clip is not the requested length");
+        assert_eq!((video.width, video.height), (64, 64));
+        assert!(video.frames.iter().all(|f: &Vec<u8>| f.len() == 64 * 64 * 3), "a frame is the wrong size");
+        assert!(video.frames.iter().any(|f: &Vec<u8>| f.iter().any(|&v| v != f[0])), "every frame is a flat colour - nothing was decoded");
     }
 
     /// The default context is the one this crate ships, and a default-shaped

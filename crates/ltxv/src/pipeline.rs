@@ -4431,11 +4431,19 @@ pub fn window_gen_opts(
                 (None, None)
             }
         } else {
-            // No explicit mid_frame_at; compute the default position.
-            let local_frames = w.decoded_frames();
-            if local_frames >= 3 {
-                let local_at = (local_frames - 1) / 2;
-                (Some(path.clone()), Some(local_at))
+            // No explicit mid_frame_at; the anchor belongs at the middle of the
+            // FULL clip, so only the window that owns that position pins it.
+            // Giving every window its own middle anchor would weld a separate
+            // keyframe to a different instant in every window and fracture the
+            // motion into per-window trajectories.
+            let global_at = (base.frames - 1) / 2;
+            if let Some((owning_wi, _local_latent)) = crate::longform::route_mid_anchor(plan, global_at) {
+                if owning_wi == wi {
+                    let local_pixel = global_at - w.source_first_frame();
+                    (Some(path.clone()), Some(local_pixel))
+                } else {
+                    (None, None)
+                }
             } else {
                 (None, None)
             }
@@ -4494,18 +4502,22 @@ pub fn window_gen_opts(
 /// plan and refuses rather than rounding. `crate::audio`'s module doc carries
 /// the rule and why a rounded seam is the failure mode that matters.
 ///
-/// **Scope (window-major).** `--start-frame` conditions window 0, as it would
-/// a single clip. `--end-frame` and `--mid-frame` are refused because the
-/// window-major path has no clip-global stage to route anchors into.
-/// Use `BRAIN_LTXV_TWO_STAGE=1` to enable the stage-major path which routes
-/// anchors correctly.
+/// **Scope (window-major).** This path is what serves audio-visual clips,
+/// clips whose stage-2 refinement plan fits one window (see the stage-major
+/// dispatch below), and anything with `BRAIN_LTXV_LONGFORM_STAGE_MAJOR`
+/// disabled. `--start-frame` conditions window 0, as it would a single clip.
+/// `--end-frame` and `--mid-frame` are refused because the window-major path
+/// has no clip-global stage to route anchors into.
 ///
 /// # Stage-major path (two-stage, video-only, default)
 ///
-/// When `BRAIN_LTXV_TWO_STAGE` is enabled (default for real-distilled models)
-/// and `BRAIN_LTXV_LONGFORM_STAGE_MAJOR` is not disabled (default for
-/// video-only clips), the generation is restructured to run stage 1 at half
-/// resolution for the whole clip, then stage 2 at full resolution:
+/// A video-only multi-window request goes to [`run_stage_major`] when its
+/// STAGE-2 refinement plan - the full-res grid under `max_refine_tokens`,
+/// not the dispatch plan under `max_window_tokens` - splits into at least two
+/// windows. Anything else falls through to the window-major loop above, which
+/// has always served exactly those shapes. There the generation is
+/// restructured to run stage 1 at half resolution for the whole clip, then
+/// stage 2 at full resolution:
 ///
 /// 1. **Stage 1** builds a global half-resolution latent using
 ///    [`two_stage_long_plan`]'s independent half-res window plan.  This lets
@@ -4517,8 +4529,9 @@ pub fn window_gen_opts(
 ///    stage 2 can fragment freely with no quality cost.
 ///
 /// Clip-global anchors (`--start-frame`, `--end-frame`, `--mid-frame`) are
-/// routed to their owning window via [`window_gen_opts`].  Audio-visual clips
-/// keep the window-major path (Phase F defers that design).
+/// routed to their owning window via [`window_gen_opts`]; a mid anchor
+/// outside the clip is refused rather than silently dropped.  Audio-visual
+/// clips keep the window-major path (Phase F defers that design).
 ///
 /// Long-form generation is otherwise the ordinary generation path - same
 /// schedule, same CFG fold, same two-stage decision per window, same VAE.
@@ -4553,7 +4566,19 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         Some("0") | Some("off") | Some("false") => false,
         _ => !o.base.audio,
     };
-    if stage_major_enabled {
+    // The stage-major loop needs its OWN stage-2 plan to split: it refines the
+    // half-res motion across >= 2 full-resolution windows, and a clip whose
+    // stage-2 plan fits one window is exactly what the window-major loop below
+    // has always served. The dispatch plan above is cut at `max_window_tokens`
+    // on the full-res grid, while stage 2 plans at `max_refine_tokens` - close
+    // but not the same ceiling, so "the dispatch plan splits" does not imply
+    // "the stage-2 plan splits" - and dispatching on the wrong one made every
+    // such request die in run_stage_major's own refusal instead of generating.
+    if stage_major_enabled
+        && two_stage_long_plan(o.base.frames, lh / 2, lw / 2, lh, lw, o.context_latent_frames, o.max_window_tokens, o.max_refine_tokens, align as usize)
+            .map(|t| t.stage2.len() >= 2)
+            .unwrap_or(false)
+    {
         return run_stage_major(paths, prompt, o, cancel, progress);
     }
     check_audio_request(paths, &o.base)?;
@@ -4563,11 +4588,11 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
         // frame numbering.  The stage-major path (run_stage_major) handles
         // this correctly via window_gen_opts, but this window-major path does
         // not have that orchestration.
-        return Err("--end-frame is not supported for a multi-window clip under the window-major path: use BRAIN_LTXV_TWO_STAGE=1 to enable the stage-major path which routes anchors correctly".into());
+        return Err("--end-frame is not supported on a multi-window clip that the window-major path is serving: the stage-major path routes clip-global anchors, but this shape's stage-2 refinement plan fits one window (set BRAIN_LTXV_LONGFORM_STAGE_MAJOR=0 to force this path)".into());
     }
     if o.base.mid_frame.is_some() {
         return Err(format!(
-            "--mid-frame is not supported for a multi-window clip under the window-major path: this {}-frame request is {} windows, and the window-major path has no clip-global stage to route an anchor into. Use BRAIN_LTXV_TWO_STAGE=1 to enable the stage-major path which routes anchors correctly",
+            "--mid-frame is not supported on a multi-window clip that the window-major path is serving: this {}-frame request is {} windows, and the window-major path has no clip-global stage to route an anchor into. The stage-major path routes clip-global anchors, but this shape's stage-2 refinement plan fits one window (set BRAIN_LTXV_LONGFORM_STAGE_MAJOR=0 to force this path)",
             o.base.frames,
             plan.len()
         ));
@@ -4949,6 +4974,17 @@ fn run_stage_major(
     if tsp.stage2.len() < 2 {
         return Err("stage-major path requires >= 2 stage-2 windows (otherwise generate_long's fast path handles it)".into());
     }
+    // A mid anchor that routes into no window would be honoured by none of
+    // them - silently dropped, the defect the window-major path refuses
+    // rather than commits. Every pixel frame inside the clip lands in exactly
+    // one window's decoded range (the ranges tile the clip), so only an
+    // out-of-clip anchor can fail to route: refuse it here, before any weight
+    // is read.
+    if let (Some(_), Some(global_at)) = (&o.base.mid_frame, o.base.mid_frame_at) {
+        if crate::longform::route_mid_anchor(&tsp.stage1, global_at).is_none() {
+            return Err(format!("--mid-frame-at {global_at} lands outside this {}-frame clip: no window's decoded range contains it, so no window could honour it", o.base.frames));
+        }
+    }
 
     check_audio_request(paths, &o.base)?;
     if o.base.steps == 0 {
@@ -5059,57 +5095,39 @@ fn run_stage_major(
     let mut carried_full: Option<(Vec<f32>, usize)> = None;
     for (wi, w) in tsp.stage2.iter().enumerate() {
         if cancel.is_cancelled() { return Err("cancelled".into()); }
-        // Stage 2 reads its NEW frames from the global half-res latent, then
-        // prepends the half-res context from stage-1 to form the full latent
-        // that upscale_and_refine expects.
+        // Stage 2 reads its NEW frames from the global half-res latent. The
+        // window's shape comes from the PLAN (`w.context + w.new`): the refine
+        // input must be exactly this window's own `latent_frames()` so every
+        // decoded frame count the plan promised holds, and the context slots
+        // hold the half-res frames immediately before this window's own -
+        // never some other window's tail.
         let new_count = w.new;
         let first_lat = w.first_latent_frame(if wi == 0 { 0 } else { tsp.stage2[..wi].iter().map(|w| w.new).sum() });
         let s1_new = crate::longform::latent_window(&global_half, in_channels, tsp.lat_t, lh1, lw1, first_lat, new_count);
-        // Build the full latent (context + new) at half resolution for upscale_and_refine.
-        // The context comes from stage-1's half-res carry (s1_carried).
-        let (s1_slice, lat_t) = if let Some((ref ctx_chw, ctx_frames)) = s1_carried {
-            let total = ctx_frames + new_count;
-            let mut latent = vec![0f32; in_channels * total * lh1 * lw1];
-            latent[..ctx_frames * lh1 * lw1 * in_channels].copy_from_slice(ctx_chw);
-            latent[ctx_frames * lh1 * lw1 * in_channels..].copy_from_slice(&s1_new);
-            (latent, total)
-        } else {
-            (s1_new, new_count)
-        };
-        // Stage 2 is a refinement pass: ALL clip-global keyframes must be
-        // present in EVERY stage-2 window, not routed per-window like stage 1.
-        // The official LTX-2.5 implementation applies keyframes to both stages
-        // (re-encoded at each stage's resolution). Routing them per-window
-        // (start→window 0, end→last, mid→its owner) leaves each window missing
-        // the other keyframes, producing three disconnected trajectories
-        // instead of a smooth motion guided by all anchors.
-        let mid_frame_at = if o.base.mid_frame.is_some() {
-            let global_mid = mid_anchor_frame(o.base.frames, o.base.mid_frame_at)?;
-            // The window's decoded frame range starts at source_first_frame.
-            // mid_frame_at is the local pixel frame within this window.
-            let window_first = w.source_first_frame();
-            let window_frames = w.decoded_frames();
-            if global_mid >= window_first && global_mid < window_first + window_frames {
-                Some(global_mid - window_first)
-            } else {
-                // Mid-frame falls outside this window's range; still pass it
-                // as a global anchor so the model sees all three keyframes.
-                // The RoPE position will point outside this window's range,
-                // which is the same as the official implementation's behavior
-                // when a keyframe is outside the current denoising window.
-                Some(global_mid.saturating_sub(window_first))
-            }
-        } else {
-            None
-        };
-        let win_opts = GenOpts {
-            frames: w.decoded_frames(),
-            start_frame: o.base.start_frame.clone(),
-            end_frame: o.base.end_frame.clone(),
-            mid_frame: o.base.mid_frame.clone(),
-            mid_frame_at,
-            ..o.base.clone()
-        };
+        // `ctx_count` is THIS window's own plan context: 0 for the first
+        // stage-2 window, `tsp.stage2_context` for the rest.  The context
+        // slots are filled from the global half-res buffer (the frames just
+        // before this window's own), giving the upscaler real content to
+        // chew on; for every window with context > 0 the `carried_full`
+        // overlay inside `denoise_stage` then overwrites them with the
+        // previous stage-2 window's own refined output.
+        let ctx_count = w.context;
+        let lat_t = ctx_count + new_count;
+        let mut s1_slice = vec![0f32; in_channels * lat_t * lh1 * lw1];
+        if ctx_count > 0 {
+            let ctx_first = first_lat.saturating_sub(ctx_count);
+            let ctx_data = crate::longform::latent_window(&global_half, in_channels, tsp.lat_t, lh1, lw1, ctx_first, ctx_count);
+            s1_slice[..ctx_count * lh1 * lw1 * in_channels].copy_from_slice(&ctx_data);
+        }
+        s1_slice[ctx_count * lh1 * lw1 * in_channels..].copy_from_slice(&s1_new);
+        // Stage-2 keyframes route per-window, exactly like stage 1: an anchor
+        // belongs at the position where its instant lives in THIS window's own
+        // sequence. Blasting every keyframe into every window instead pins the
+        // start still onto position 0 of windows whose position 0 is a frozen
+        // mid-video context frame - conditioning that contradicts the carried
+        // context and re-anchors each segment, which is one way a long-form
+        // clip fractures into per-window trajectories.
+        let win_opts = window_gen_opts(&o.base, &tsp.stage2, wi)?;
         let sc = StageCtx {
             a_ctx_cond: &[],
             a_ctx_uncond: &[],
