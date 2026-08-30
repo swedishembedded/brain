@@ -87,6 +87,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema; needs a tokenizer)"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (accepted, ignored)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block (needs a tokenizer)").default(json!(true)))
+        .param(ParamSpec::new("use_mtp", ParamType::Bool, "enable MTP speculative acceleration in streaming mode (greedy only; requires streaming=true)").default(json!(false)))
         .param(ParamSpec::new(
             "streaming",
             ParamType::Bool,
