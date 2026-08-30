@@ -444,6 +444,70 @@ mod real_weights {
         assert!(video.frames.iter().any(|f: &Vec<u8>| f.iter().any(|&v| v != f[0])), "every frame is a flat colour - nothing was decoded");
     }
 
+    /// **The window-major path honours all three keyframes too.** This loop
+    /// built each window's options INLINE: `end_frame` was `None` for every
+    /// window - the end still silently dropped - and `mid_frame`/`mid_frame_at`
+    /// passed through from the clip-global base verbatim, so the clip-global
+    /// position was reinterpreted as each window's LOCAL frame. A bandage
+    /// refused keyframes on this path outright; the fix routes them through
+    /// [`ltxv::pipeline::window_gen_opts`] like every other path.
+    ///
+    /// The shape targets the window-major path specifically: the window
+    /// ceiling is forced low enough to split the main plan while
+    /// `max_refine_tokens` stays at its default, so the stage-2 plan fits one
+    /// window and dispatch falls back here. `--mid-frame-at 36` names an
+    /// instant inside the SECOND window's emitted span - the exact request the
+    /// inline options refused, because window 0's own 33-frame span cannot
+    /// hold pixel 36.
+    #[test]
+    fn a_window_major_run_with_three_keyframes_honours_all_three() {
+        let Some(vae) = weights_path("BRAIN_LTXV_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
+            return brain_testutil::skip("set BRAIN_LTXV_VAE to the real VAE checkpoint");
+        };
+        let Some(upsampler) = weights_path("BRAIN_LTXV_UPSAMPLER_SPATIAL", "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors") else {
+            return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial upscaler");
+        };
+        let paths = Paths::resolve(Some(&vae), None, None, Some(&upsampler)).expect("the configured paths resolve");
+        let dir = std::env::temp_dir().join(format!("ltxv-window-major-anchors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let still = |name: &str, rgb: [u8; 3]| {
+            let path = dir.join(name);
+            let px: Vec<u8> = std::iter::repeat_n(rgb, 64 * 64).flatten().collect();
+            image::RgbImage::from_raw(64, 64, px).expect("a flat RGB image").save(&path).expect("write the conditioning still");
+            path.to_string_lossy().into_owned()
+        };
+        let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
+        let base = GenOpts {
+            frames,
+            width: 64,
+            height: 64,
+            steps: 2,
+            fps: 8,
+            device: Some("cpu".into()),
+            seed: 5,
+            start_frame: Some(still("start.png", [220, 30, 30])),
+            mid_frame: Some(still("mid.png", [30, 220, 30])),
+            end_frame: Some(still("end.png", [230, 230, 30])),
+            mid_frame_at: Some(36),
+            ..GenOpts::default()
+        };
+        // Only the window ceiling is forced: with `max_refine_tokens` left at
+        // its default the stage-2 plan fits one window, so the stage-major
+        // dispatch does not take this shape and the window-major loop serves
+        // it - the path this test pins.
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: ltxv::pipeline::REFINE_MAX_TOKENS, base };
+        assert!(window_plan(frames, 2, 2, context, max_tokens).expect("legal").len() > 1, "the full-res grid has to need several windows");
+        let cancel = capability::CancelToken::default();
+
+        let (video, _) = generate_long(&paths, "a single continuous shot", &o, &cancel, |_, _, _| {}).expect("window-major long-form with keyframes routes them per window");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(video.frames.len(), frames, "the clip is not the requested length");
+        assert_eq!((video.width, video.height), (64, 64));
+        assert!(video.frames.iter().all(|f: &Vec<u8>| f.len() == 64 * 64 * 3), "a frame is the wrong size");
+        assert!(video.frames.iter().any(|f: &Vec<u8>| f.iter().any(|&v| v != f[0])), "every frame is a flat colour - nothing was decoded");
+    }
+
     /// The default context is the one this crate ships, and a default-shaped
     /// long request really does plan several windows against it - a guard
     /// against a future ceiling change silently turning long-form generation

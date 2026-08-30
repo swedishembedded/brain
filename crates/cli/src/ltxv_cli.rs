@@ -233,7 +233,10 @@ Long-form clips:
   BRAIN_LTXV_LONGFORM_MAX_TOKENS overrides the per-window token ceiling
   (default 13200, the largest single-window generation this crate has a
   recorded real run at). --start-frame conditions the first window as
-  usual.
+  usual; --end-frame and --mid-frame condition the windows that own their
+  instants, and every window also receives the anchors still ahead of it
+  as appended guides, so each window bends its motion toward the next
+  keyframe instead of running on alone.
 
   Stage-major (two-stage, video-only, default): When two-stage generation
   is enabled, the clip is generated via two independent window plans:

@@ -175,6 +175,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         // `crates/cli/src/resident_ltxv.rs`, which hands each concurrently
         // admitted generation its own card); a one-shot CLI run keeps the
         // default, which uses both cards for one generation's CFG pair.
+        future_anchors: Vec::new(),
         devices: d.devices,
     };
     use crate::vae3d::LtxVaeConfig;
@@ -247,6 +248,7 @@ pub fn dfr_params_from(inv: &Invocation) -> Result<DfrParams, String> {
         mid_frame: None,
         mid_frame_at: None,
         conditioning_strength: d.conditioning_strength,
+        future_anchors: Vec::new(),
         devices: d.devices,
     };
     let temporal_upsample_rounds = inv.get_i64("temporal_upsample_rounds").unwrap_or(0).max(0) as usize;
