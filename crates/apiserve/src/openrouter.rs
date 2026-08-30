@@ -3,7 +3,8 @@
 
 //! The OpenRouter-compatible surface. Same request grammar and chat handler as
 //! OpenAI (it reuses [`crate::openai::handle_chat`]) with `native = true`, which
-//! adds OpenRouter's `native_finish_reason` (mirroring `finish_reason`) and the
+//! adds OpenRouter's `native_finish_reason` (the contract finish_reason,
+//! verbatim) and the
 //! `system_fingerprint` its `ChatResult` requires. Embeddings and image generation
 //! reuse the shared OpenAI handlers verbatim (identical request grammar).
 

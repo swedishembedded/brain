@@ -224,7 +224,8 @@ pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
 }
 
 /// The chat handler shared by the OpenAI and OpenRouter surfaces. `native` adds
-/// OpenRouter's `native_finish_reason` (mirroring `finish_reason`) and the
+/// OpenRouter's `native_finish_reason` (the contract finish_reason, verbatim -
+/// it may carry values the OpenAI enum collapses) and the
 /// `system_fingerprint` its `ChatResult` requires.
 pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response {
     let provider = state.provider;
@@ -567,8 +568,11 @@ fn normalize_content_part_for_template(p: &Value) -> Value {
 }
 
 /// Map the contract `finish_reason` to OpenAI's enum. There is no `stop_sequence`
-/// in OpenAI; a stop-sequence hit is reported as `stop`. `tool_calls` passes
-/// through unchanged (both the contract and OpenAI use that exact name).
+/// or `tool_choice_unmet` in OpenAI; both are reported as `stop` (a client
+/// enforcing a forced tool choice detects the unmet demand by the absent
+/// `tool_calls`; the contract value itself stays visible under
+/// `native_finish_reason`). `tool_calls` passes through unchanged (both the
+/// contract and OpenAI use that exact name).
 fn finish_openai(fr: &str) -> &'static str {
     match fr {
         "length" => "length",
@@ -600,7 +604,10 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
         "logprobs": Value::Null,
     });
     if native {
-        choice["native_finish_reason"] = json!(fr);
+        // The CONTRACT finish_reason, verbatim - OpenRouter's
+        // native_finish_reason exists precisely to carry provider-specific
+        // values the OpenAI enum collapses (tool_choice_unmet, stop_sequence).
+        choice["native_finish_reason"] = json!(co.finish);
     }
     let mut body = json!({
         "id": format!("chatcmpl-{}", Uuid::new_v4().simple()),
@@ -634,9 +641,12 @@ fn openai_tool_calls(calls: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// One streaming `chat.completion.chunk`.
+/// One streaming `chat.completion.chunk`. `finish` is the CONTRACT finish_reason
+/// (streamed verbatim under `native_finish_reason`; mapped to OpenAI's enum for
+/// `finish_reason` via [`finish_openai`]).
 fn chunk(id: &str, model: &str, delta: Value, finish: Option<&str>, native: bool) -> Value {
-    let mut choice = json!({ "index": 0, "delta": delta, "finish_reason": finish });
+    let fr = finish.map(finish_openai);
+    let mut choice = json!({ "index": 0, "delta": delta, "finish_reason": fr });
     if native {
         choice["native_finish_reason"] = json!(finish);
     }
@@ -1101,8 +1111,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
             yield Ok(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
         }
         // Terminal chunk: empty delta + finish_reason.
-        let fr = finish_openai(&finish);
-        yield Ok(Event::default().data(chunk(&id, &model, json!({}), Some(fr), native).to_string()));
+        yield Ok(Event::default().data(chunk(&id, &model, json!({}), Some(&finish), native).to_string()));
 
         if want_usage {
             let usage_chunk = json!({

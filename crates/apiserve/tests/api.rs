@@ -2004,6 +2004,52 @@ fn toolcall_app(provider: Provider) -> (Router, String) {
     (router(state), key)
 }
 
+/// The sibling of [`FakeToolCallChat`]: prose only, reporting the contract
+/// finish_reason a resident emits when a `required`/`named` tool_choice demand
+/// went unmet (see `qwen3::chat::SeqState::finish`). Exercises the surface
+/// mapping: OpenAI's enum collapses it to `stop`, while the OpenRouter
+/// surface's `native_finish_reason` carries it verbatim.
+struct FakeUnmetToolChoiceChat;
+struct FakeUnmetToolChoiceChatInst;
+impl ResidentModel for FakeUnmetToolChoiceChat {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "brain-unmet",
+            "a chat model with an unmet tool_choice demand",
+            vec![ActionSpec::new("generate", "generate text").streaming().param(ParamSpec::new("prompt", ParamType::Str, "the prompt")).output(BlobSpec::new("text", Media::Text, "generated text"))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-unmet", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeUnmetToolChoiceChatInst))
+    }
+}
+impl Instance for FakeUnmetToolChoiceChatInst {
+    fn run(&mut self, _a: &str, _inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        Ok(Outcome::new()
+            .set("prompt_tokens", json!(3))
+            .set("completion_tokens", json!(7))
+            .set("finish_reason", json!("tool_choice_unmet"))
+            .blob("text", Blob::new(Media::Text, b"the weather in Paris is lovely".to_vec())))
+    }
+}
+fn unmet_executor() -> Executor {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeUnmetToolChoiceChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    Executor::start(models, budgets, Policy::default())
+}
+fn unmet_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(unmet_executor(), key.clone(), provider);
+    (router(state), key)
+}
+
 #[tokio::test]
 async fn openai_chat_tool_calls_nonstream_validates_content_null_and_arguments_parse() {
     let (app, key) = toolcall_app(Provider::OpenAI);
@@ -2178,6 +2224,51 @@ async fn openrouter_chat_tool_calls_validate_against_the_openrouter_spec() {
         }
     }
     assert!(saw_tool_calls, "openrouter stream must carry tool_calls deltas");
+}
+
+/// `finish_reason: "tool_choice_unmet"` from the resident (a `required`/`named`
+/// tool_choice demand the model did not satisfy - see
+/// `qwen3::chat::SeqState::finish`) survives the surface mapping: OpenAI's enum
+/// collapses it to `stop`, while OpenRouter's `native_finish_reason` carries the
+/// contract value verbatim (non-streaming AND the streaming terminal chunk).
+#[tokio::test]
+async fn unmet_tool_choice_collapses_to_stop_but_surfaces_under_native_finish_reason() {
+    let body = json!({"model": "brain-unmet", "messages": [{"role": "user", "content": "hi"}]});
+
+    // Non-streaming, OpenRouter surface.
+    let (app, key) = unmet_app(Provider::OpenRouter);
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["finish_reason"], "stop", "OpenAI's enum has no tool_choice_unmet");
+    assert_eq!(v["choices"][0]["native_finish_reason"], "tool_choice_unmet");
+    assert!(v["choices"][0]["message"]["tool_calls"].is_null());
+    assert_eq!(v["choices"][0]["message"]["content"], "the weather in Paris is lovely");
+
+    // Non-streaming, plain OpenAI surface: no native field at all.
+    let (app, key) = unmet_app(Provider::OpenAI);
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert!(v["choices"][0].get("native_finish_reason").is_none());
+
+    // Streaming: the terminal chunk carries the same pair.
+    let (app, key) = unmet_app(Provider::OpenRouter);
+    let body_stream = json!({"model": "brain-unmet", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenRouter, &key, "/chat/completions", &body_stream).await;
+    assert_eq!(st, StatusCode::OK);
+    let mut saw_terminal = false;
+    for d in text.lines().filter_map(|l| l.strip_prefix("data: ")) {
+        if d == "[DONE]" {
+            break;
+        }
+        let v: Value = serde_json::from_str(d).unwrap();
+        if v["choices"][0]["finish_reason"].is_string() {
+            saw_terminal = true;
+            assert_eq!(v["choices"][0]["finish_reason"], "stop");
+            assert_eq!(v["choices"][0]["native_finish_reason"], "tool_choice_unmet");
+        }
+    }
+    assert!(saw_terminal, "stream must carry a terminal finish_reason chunk");
 }
 
 #[tokio::test]

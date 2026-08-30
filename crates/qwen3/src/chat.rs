@@ -108,6 +108,69 @@ pub fn parse_tools(raw: Option<&str>) -> Result<Vec<String>, String> {
     arr.iter().map(|t| serde_json::to_string(t).map_err(|e| format!("qwen: tools JSON: {e}"))).collect()
 }
 
+/// The OpenAI-compatible `tool_choice` constraint, parsed from the raw JSON
+/// text the invocation carries (apiserve serializes the request value; absent
+/// or empty means [`ToolChoice::Auto`]).
+///
+/// Semantics follow vLLM/SGLang's constrained-decoding contract: `none` hides
+/// the tool schemas from the prompt entirely (no tool call is possible);
+/// `required` / `named` demand a (specific) tool call in the response. Upstream
+/// delivers that demand with grammar-constrained decoding at sampling time -
+/// which brain does not yet implement - so the forced-call variants are
+/// enforced post-hoc by [`SeqState::finish`] (an unmet demand is reported as
+/// `finish_reason: "tool_choice_unmet"` rather than silently returning prose).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToolChoice {
+    /// Model decides (the default; tool schemas rendered normally).
+    Auto,
+    /// Tool schemas withheld from the prompt; the model cannot call tools.
+    None,
+    /// The response must contain at least one tool call.
+    Required,
+    /// The response must contain a call to exactly this function.
+    Named(String),
+}
+
+/// Parse the raw `tool_choice` invocation text (a JSON-encoded string or
+/// object, exactly the shapes OpenAI's API and vLLM accept) into the typed
+/// constraint. Errors carry the same message apiserve's own
+/// `validate_tool_choice` uses, so a value that slips past one is rejected by
+/// the other with identical wording.
+pub fn parse_tool_choice(raw: Option<&str>) -> Result<ToolChoice, String> {
+    const EXPECTED: &str =
+        "qwen: tool_choice must be \"auto\", \"none\", \"required\", or {\"type\":\"function\",\"function\":{\"name\":...}}";
+    let Some(raw) = raw.filter(|s| !s.is_empty()) else { return Ok(ToolChoice::Auto) };
+    let v: serde_json::Value = serde_json::from_str(raw).map_err(|_| EXPECTED.to_string())?;
+    match v {
+        serde_json::Value::String(s) => match s.as_str() {
+            "auto" => Ok(ToolChoice::Auto),
+            "none" => Ok(ToolChoice::None),
+            "required" => Ok(ToolChoice::Required),
+            _ => Err(EXPECTED.to_string()),
+        },
+        serde_json::Value::Object(o) => {
+            if o.get("type").and_then(|t| t.as_str()) != Some("function") {
+                return Err(EXPECTED.to_string());
+            }
+            match o.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                Some(name) if !name.is_empty() => Ok(ToolChoice::Named(name.to_string())),
+                _ => Err(EXPECTED.to_string()),
+            }
+        }
+        _ => Err(EXPECTED.to_string()),
+    }
+}
+
+/// Extract each tool schema's `function.name` (best-effort: a schema without a
+/// name contributes nothing and is never matchable by [`ToolChoice::Named`]).
+fn tool_schema_names(tools: &[String]) -> Vec<String> {
+    tools
+        .iter()
+        .filter_map(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+        .filter_map(|t| t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()).map(|s| s.to_string()))
+        .collect()
+}
+
 /// Forward a batch of [`ChatEvent`]s from the [`ChatScanner`] as [`Progress`]
 /// ticks: visible [`ChatEvent::Content`] becomes [`Progress::token`] (exactly what
 /// a no-tools request already streamed); reasoning/tool-call events become
@@ -188,6 +251,7 @@ pub fn text_outcome(text: String) -> Outcome {
 /// The four sampling/prompt params every request needs, parsed once and
 /// shared by every caller — prompt rendering and param parsing don't depend
 /// on which model instance/engine ends up consuming them.
+#[derive(Debug)]
 pub struct ParsedRequest {
     pub ids: Vec<u32>,
     pub max_new: usize,
@@ -196,6 +260,10 @@ pub struct ParsedRequest {
     pub top_p: f32,
     pub seed: u64,
     pub stops: Vec<String>,
+    /// The parsed `tool_choice` constraint - enforced at prompt level for
+    /// [`ToolChoice::None`] (schemas withheld) and post-generation for the
+    /// forced-call variants (see [`ToolChoice`]'s doc).
+    pub tool_choice: ToolChoice,
 }
 
 /// Build a [`ParsedRequest`] from an [`Invocation`]: `messages` (chat template,
@@ -215,7 +283,23 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
     } else {
         None // thinking disabled: reasoning_effort is ignored
     };
-    let tools = parse_tools(inv.get_str("tools").as_deref())?;
+    let tool_choice = parse_tool_choice(inv.get_str("tool_choice").as_deref())?;
+    let mut tools = parse_tools(inv.get_str("tools").as_deref())?;
+    // Prompt-level tool_choice enforcement:
+    //  - `none` withholds the tool schemas entirely (the model cannot emit a
+    //    well-formed `<tool_call>` for a function it was never shown).
+    //  - `named` must name a function the tools array actually offers - the
+    //    same validation OpenAI/vLLM apply server-side. Without it, a typo'd
+    //    name would silently degrade into an unmet post-hoc demand.
+    match &tool_choice {
+        ToolChoice::None => tools.clear(),
+        ToolChoice::Named(name) => {
+            if !tool_schema_names(&tools).iter().any(|n| n == name) {
+                return Err(format!("qwen: tool_choice names function '{name}' which is not present in tools"));
+            }
+        }
+        _ => {}
+    }
     let text = match inv.get_str("messages").filter(|s| !s.is_empty()) {
         Some(raw) => {
             let msgs = parse_chat_messages(&raw, inv.get_str("system").as_deref())?;
@@ -236,7 +320,7 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
         return Err("qwen: empty prompt".to_string());
     }
     let stops = parse_stops(inv.get_str("stop").as_deref())?;
-    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops })
+    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops, tool_choice })
 }
 
 /// Per-sequence streaming/finalisation state, common to every caller: the
@@ -251,13 +335,24 @@ pub struct SeqState {
     cancelled: bool,
     max_new: usize,
     prompt_tokens: usize,
+    tool_choice: ToolChoice,
 }
 
 impl SeqState {
     pub fn new(req: &ParsedRequest, cancel: CancelToken) -> SeqState {
         // `thinking_open=false`: the model must emit its own literal `<think>`
         // tag to think (no prefilled-open-think prefix on this path).
-        SeqState { stops: req.stops.clone(), cancel, printed: String::new(), scan: ChatScanner::new(false), stop_at: None, cancelled: false, max_new: req.max_new, prompt_tokens: req.ids.len() }
+        SeqState {
+            stops: req.stops.clone(),
+            cancel,
+            printed: String::new(),
+            scan: ChatScanner::new(false),
+            stop_at: None,
+            cancelled: false,
+            max_new: req.max_new,
+            prompt_tokens: req.ids.len(),
+            tool_choice: req.tool_choice.clone(),
+        }
     }
 
     /// Stream the delta between `all_tokens` (everything generated so far) and
@@ -291,6 +386,13 @@ impl SeqState {
     /// [`ChatScanner::finish`] closes out a still-open tool call (truncated
     /// by `max_new`) rather than silently dropping it.
     pub fn finish(mut self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> Outcome {
+        // Post-hoc `required`/`named` enforcement: did the model actually
+        // produce the demanded tool call? Evaluated AFTER the scanner is
+        // flushed below, so a call closing only in the final held-back tail
+        // still counts. A stop-string cut takes precedence (existing
+        // behavior); a cancelled sequence is the caller's doing, not the
+        // model failing the constraint.
+        let demanded = matches!(self.tool_choice, ToolChoice::Required | ToolChoice::Named(_));
         let (text, finish) = if let Some(idx) = self.stop_at {
             (self.printed[..idx].to_string(), "stop_sequence")
         } else {
@@ -304,10 +406,26 @@ impl SeqState {
             let mut evs = Vec::new();
             self.scan.finish(&mut evs);
             emit_chat_events(&evs, progress, all_tokens.len() as u32, self.max_new as u32);
-            let reason = if !self.scan.tool_calls().is_empty() {
+            let calls_present = !self.scan.tool_calls().is_empty();
+            let met = match &self.tool_choice {
+                ToolChoice::Auto | ToolChoice::None => true,
+                ToolChoice::Required => calls_present,
+                ToolChoice::Named(name) => self.scan.tool_calls().iter().any(|c| &c.name == name),
+            };
+            // Precedence: an unmet demand outranks a mismatched tool call;
+            // a cancellation is the caller's doing and never reports
+            // tool_choice_unmet. tool_calls > cancelled > length > stop is
+            // the pre-existing order, kept.
+            let reason = if self.cancelled {
+                if calls_present {
+                    "tool_calls"
+                } else {
+                    "stop"
+                }
+            } else if demanded && !met {
+                "tool_choice_unmet"
+            } else if calls_present {
                 "tool_calls"
-            } else if self.cancelled {
-                "stop"
             } else if all_tokens.len() >= self.max_new {
                 "length"
             } else {
@@ -426,5 +544,141 @@ mod tests {
         assert_eq!(concat, "Hi€!");
         // No replacement char ever escapes into an emitted fragment.
         assert!(!concat.contains('\u{FFFD}'));
+    }
+
+    // ---- tool_choice (M2.2) ----
+
+    /// Every `tool_choice` shape OpenAI's API and vLLM accept, absent/empty ->
+    /// [`ToolChoice::Auto`], and the malformed-shape error paths.
+    #[test]
+    fn tool_choice_parses_every_shape() {
+        assert_eq!(parse_tool_choice(None), Ok(ToolChoice::Auto));
+        assert_eq!(parse_tool_choice(Some("")), Ok(ToolChoice::Auto));
+        assert_eq!(parse_tool_choice(Some("\"auto\"")), Ok(ToolChoice::Auto));
+        assert_eq!(parse_tool_choice(Some("\"none\"")), Ok(ToolChoice::None));
+        assert_eq!(parse_tool_choice(Some("\"required\"")), Ok(ToolChoice::Required));
+        assert_eq!(
+            parse_tool_choice(Some(r#"{"type":"function","function":{"name":"get_weather"}}"#)),
+            Ok(ToolChoice::Named("get_weather".into()))
+        );
+        // Unwrapped text (the literal word, not its JSON encoding) is
+        // rejected: apiserve always JSON-serializes the request value.
+        assert!(parse_tool_choice(Some("required")).is_err());
+        assert!(parse_tool_choice(Some("\"sometimes\"")).is_err());
+        assert!(parse_tool_choice(Some(r#"{"type":"tool","function":{"name":"f"}}"#)).is_err());
+        assert!(parse_tool_choice(Some(r#"{"type":"function","function":{}}"#)).is_err());
+        assert!(parse_tool_choice(Some(r#"{"type":"function","function":{"name":""}}"#)).is_err());
+        assert!(parse_tool_choice(Some(r#"{"type":"function","function":{"name":42}}"#)).is_err());
+        assert!(parse_tool_choice(Some("[]")).is_err());
+    }
+
+    /// A real Qwen3 tokenizer for the chat-path tests below; skipped loudly
+    /// when `QWEN3_DIR` is unset.
+    fn real_tok() -> Option<QwenBpe> {
+        match std::env::var("QWEN3_DIR") {
+            Ok(dir) => Some(QwenBpe::from_file(&format!("{dir}/tokenizer.json")).expect("load Qwen3 tokenizer")),
+            Err(_) => {
+                brain_testutil::skip("QWEN3_DIR unset (needs a real Qwen3 tokenizer.json)");
+                None
+            }
+        }
+    }
+
+    const WEATHER_TOOLS: &str = r#"[{"type":"function","function":{"name":"get_weather","description":"get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}},{"type":"function","function":{"name":"get_time","description":"get time","parameters":{}}}]"#;
+
+    /// Parse a chat request with the weather tools and the given serialized
+    /// `tool_choice` invocation value.
+    fn req_with_tool_choice(tok: &QwenBpe, tc: &str) -> Result<ParsedRequest, String> {
+        parse_request(
+            tok,
+            &Invocation::new()
+                .set("messages", json!(r#"[{"role": "user", "content": "weather?"}]"#))
+                .set("tools", json!(WEATHER_TOOLS))
+                .set("max_new", json!(64))
+                .set("tool_choice", json!(tc)),
+        )
+    }
+
+    /// Server-side named-function validation: `tool_choice` naming a function
+    /// the tools array doesn't offer is rejected before any prompt is rendered
+    /// (a typo would otherwise degrade into a guaranteed-unmet post-hoc
+    /// demand).
+    #[test]
+    fn tool_choice_named_function_must_exist_in_tools() {
+        let Some(tok) = real_tok() else { return };
+        let err = req_with_tool_choice(&tok, r#"{"type":"function","function":{"name":"no_such_tool"}}"#).unwrap_err();
+        assert!(err.contains("no_such_tool"), "got: {err}");
+        // ... and one that DOES exist parses fine.
+        let req = req_with_tool_choice(&tok, r#"{"type":"function","function":{"name":"get_time"}}"#).unwrap();
+        assert_eq!(req.tool_choice, ToolChoice::Named("get_time".into()));
+    }
+
+    /// Prompt-level enforcement: `none` withholds the tool schemas entirely
+    /// (the model cannot emit a well-formed call for a function it was never
+    /// shown) while `auto` renders the `<tools>` block as usual.
+    #[test]
+    fn tool_choice_none_withholds_tool_schemas_from_the_prompt() {
+        let Some(tok) = real_tok() else { return };
+        let auto = req_with_tool_choice(&tok, "\"auto\"").unwrap();
+        let none = req_with_tool_choice(&tok, "\"none\"").unwrap();
+        let auto_text = tok.decode(&auto.ids);
+        let none_text = tok.decode(&none.ids);
+        assert!(auto_text.contains("<tools>"), "auto must render the tool block:\n{auto_text}");
+        assert!(
+            !none_text.contains("<tools>") && !none_text.contains("get_weather"),
+            "none must withhold the schemas entirely:\n{none_text}"
+        );
+    }
+
+    /// Post-hoc enforcement in [`SeqState::finish`]: `required`/`named` demand
+    /// a tool call in the generated text; prose (or a call to a different
+    /// function) is reported as `finish_reason: "tool_choice_unmet"` rather
+    /// than silently returning prose - upstream delivers the same demand with
+    /// grammar-constrained decoding, which brain does not implement yet.
+    #[test]
+    fn tool_choice_required_and_named_are_enforced_after_generation() {
+        let Some(tok) = real_tok() else { return };
+        let call = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+        let prose = "The weather in Paris is lovely today.";
+        let finish = |req: &ParsedRequest, gen: &str| {
+            let seq = SeqState::new(req, CancelToken::default());
+            seq.finish(&tok, &tok.encode(gen), &mut |_| {})
+        };
+        let reason = |out: &Outcome| out.outputs.get("finish_reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        // auto: prose is a perfectly good answer.
+        assert_eq!(reason(&finish(&req_with_tool_choice(&tok, "\"auto\"").unwrap(), prose)), "stop");
+        // demanded, prose generated: the constraint is unmet.
+        assert_eq!(reason(&finish(&req_with_tool_choice(&tok, "\"required\"").unwrap(), prose)), "tool_choice_unmet");
+        assert_eq!(
+            reason(&finish(&req_with_tool_choice(&tok, r#"{"type":"function","function":{"name":"get_weather"}}"#).unwrap(), prose)),
+            "tool_choice_unmet"
+        );
+        // demanded and (specifically) met: a tool call, and the right one.
+        for tc in ["\"required\"", r#"{"type":"function","function":{"name":"get_weather"}}"#] {
+            let out = finish(&req_with_tool_choice(&tok, tc).unwrap(), call);
+            assert_eq!(reason(&out), "tool_calls");
+            assert!(out.outputs.get("tool_calls").is_some());
+        }
+        // named() met by a call to a DIFFERENT offered function: unmet.
+        assert_eq!(
+            reason(&finish(&req_with_tool_choice(&tok, r#"{"type":"function","function":{"name":"get_time"}}"#).unwrap(), call)),
+            "tool_choice_unmet"
+        );
+    }
+
+    /// A cancelled sequence is the caller's doing, not the model failing the
+    /// constraint: cancellation still wins over an unmet `tool_choice`
+    /// demand.
+    #[test]
+    fn cancellation_wins_over_unmet_tool_choice() {
+        let Some(tok) = real_tok() else { return };
+        let req = req_with_tool_choice(&tok, "\"required\"").unwrap();
+        let cancel = CancelToken::armed();
+        let mut seq = SeqState::new(&req, cancel.clone());
+        cancel.cancel();
+        assert!(seq.advance(&tok, &tok.encode("prose"), &mut |_| {}));
+        let out = seq.finish(&tok, &tok.encode("prose"), &mut |_| {});
+        assert_eq!(out.outputs.get("finish_reason").and_then(|v| v.as_str()), Some("stop"));
     }
 }

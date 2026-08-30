@@ -85,7 +85,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("system", ParamType::Str, "optional system prompt prepended to the chat (needs a tokenizer)"))
         .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings (needs a tokenizer)"))
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema; needs a tokenizer)"))
-        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (accepted, ignored)"))
+        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block (needs a tokenizer)").default(json!(true)))
         .param(ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level: xhigh (default, detailed deliberation), medium (no instruction), or low (brief thinking)").default(json!("xhigh")))
         .param(ParamSpec::new("use_mtp", ParamType::Bool, "enable MTP speculative acceleration in streaming mode (greedy only; requires streaming=true)").default(json!(false)))

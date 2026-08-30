@@ -87,7 +87,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("system", ParamType::Str, "optional system prompt prepended to the chat (needs a tokenizer)"))
         .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings (needs a tokenizer)"))
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema; needs a tokenizer)"))
-        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (accepted, ignored)"))
+        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block (needs a tokenizer)").default(json!(true)))
         .output(BlobSpec::new("text", Media::Text, "the generated text (space-separated token ids when no tokenizer is given)"));
     Manifest::new(MODEL, "Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder — autoregressive text generation with per-token streaming.", vec![generate])
