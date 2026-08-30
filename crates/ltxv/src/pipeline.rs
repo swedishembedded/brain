@@ -295,13 +295,13 @@ pub const SINGLE_STAGE_MAX_TOKENS: usize = 6144;
 /// `BRAIN_LTXV_TWO_STAGE=1`/`0` overrides the token test (never the
 /// divisibility one, which is a hard geometric requirement).
 pub fn should_two_stage(tokens: usize, width: usize, height: usize, real_distilled: bool) -> bool {
-    if !real_distilled || !width.is_multiple_of(64) || !height.is_multiple_of(64) {
+    if !width.is_multiple_of(64) || !height.is_multiple_of(64) {
         return false;
     }
     match std::env::var("BRAIN_LTXV_TWO_STAGE").ok().as_deref() {
         Some("1") | Some("on") | Some("true") => true,
         Some("0") | Some("off") | Some("false") => false,
-        _ => tokens > SINGLE_STAGE_MAX_TOKENS,
+        _ => real_distilled && tokens > SINGLE_STAGE_MAX_TOKENS,
     }
 }
 
