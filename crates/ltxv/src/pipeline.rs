@@ -5076,18 +5076,7 @@ fn run_stage_major(
         } else {
             (s1_new, new_count)
         };
-        // Stage 2 must NOT carry keyframes: it refines what stage 1 already
-        // decided. Passing start/mid/end-frame here would re-condition the
-        // latent on different stills, producing disconnected chunks instead of
-        // a smooth refinement of stage 1's motion.
-        let win_opts = GenOpts {
-            frames: w.decoded_frames(),
-            start_frame: None,
-            end_frame: None,
-            mid_frame: None,
-            mid_frame_at: None,
-            ..o.base.clone()
-        };
+        let win_opts = window_gen_opts(&o.base, &tsp.stage2, wi)?;
         let sc = StageCtx {
             a_ctx_cond: &[],
             a_ctx_uncond: &[],
