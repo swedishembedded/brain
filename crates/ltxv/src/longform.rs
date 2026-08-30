@@ -18,6 +18,26 @@
 //! reads from, and [`fitted_context`], which says what a four-times-denser
 //! grid can afford to carry.
 //!
+//! # Stage-major long-form generation
+//!
+//! For two-stage clips, [`crate::pipeline::run_stage_major`] builds TWO
+//! independent window plans via [`crate::pipeline::two_stage_long_plan`]:
+//! one at half resolution (stage 1, where motion is decided) and one at full
+//! resolution (stage 2, where refinement detail is carried).  Stage 1's plan
+//! is sized by the half-resolution token count, so clips whose entire
+//! stage-1 trajectory fits in one window get a single global pass.  Stage 2
+//! fragments as much as memory demands, with no quality cost because the
+//! motion is already fixed by stage 1.
+//!
+//! Stage 1's output is a global half-resolution latent buffer
+//! [`crate::pipeline::run_stage_major`] builds by writing each window's NEW
+//! frames into their positions via [`write_latent_window`].  Stage 2 reads
+//! slices of this buffer via [`latent_window`] for each window.
+//!
+//! Clip-global anchors (`--start-frame`, `--end-frame`, `--mid-frame`) are
+//! routed to their owning window via [`crate::pipeline::window_gen_opts`].
+//! Each anchor is re-expressed in the window's own local frame numbering.
+//!
 //! # What crosses a seam, and why it is not a picture
 //!
 //! Chaining windows by decoding window `n`, taking its last RGB frame and

@@ -4461,6 +4461,8 @@ pub fn window_gen_opts(
 /// every shape this crate already generated keeps its exact behaviour, bit
 /// for bit, and this entry point costs nothing below the ceiling.
 ///
+/// # Window-major path (single-stage and audio-visual)
+///
 /// Above it ([`crate::longform::window_plan`]), the loop is: generate window
 /// 0 normally; slice its last `context_latent_frames` latent frames out of
 /// the final latent with [`crate::longform::carry_tail`] BEFORE anything is
@@ -4492,16 +4494,34 @@ pub fn window_gen_opts(
 /// plan and refuses rather than rounding. `crate::audio`'s module doc carries
 /// the rule and why a rounded seam is the failure mode that matters.
 ///
-/// **Scope.** `--start-frame` conditions window 0, as it would a single
-/// clip. `--end-frame` is refused: a continuation window's latent context and
-/// an appended keyframe block both want to be the thing the window is pinned
-/// to, and "the clip ends on this still" over a multi-window plan has not
-/// been designed. `--mid-frame` is refused for a second reason on top of that
-/// one: its position is a pixel frame of the WHOLE clip, and routing it means
-/// finding the window whose emitted range covers it and re-expressing it in
-/// that window's own frame numbering. Long-form generation is otherwise the
-/// ordinary generation path - same schedule, same CFG fold, same two-stage
-/// decision per window, same VAE.
+/// **Scope (window-major).** `--start-frame` conditions window 0, as it would
+/// a single clip. `--end-frame` and `--mid-frame` are refused because the
+/// window-major path has no clip-global stage to route anchors into.
+/// Use `BRAIN_LTXV_TWO_STAGE=1` to enable the stage-major path which routes
+/// anchors correctly.
+///
+/// # Stage-major path (two-stage, video-only, default)
+///
+/// When `BRAIN_LTXV_TWO_STAGE` is enabled (default for real-distilled models)
+/// and `BRAIN_LTXV_LONGFORM_STAGE_MAJOR` is not disabled (default for
+/// video-only clips), the generation is restructured to run stage 1 at half
+/// resolution for the whole clip, then stage 2 at full resolution:
+///
+/// 1. **Stage 1** builds a global half-resolution latent using
+///    [`two_stage_long_plan`]'s independent half-res window plan.  This lets
+///    stage 1 decide the clip's motion in as few, as global a pass as
+///    possible, with fragments only when memory demands it.
+///
+/// 2. **Stage 2** refines each window from a slice of stage 1's output, using
+///    the full-res window plan.  The motion is already fixed by stage 1, so
+///    stage 2 can fragment freely with no quality cost.
+///
+/// Clip-global anchors (`--start-frame`, `--end-frame`, `--mid-frame`) are
+/// routed to their owning window via [`window_gen_opts`].  Audio-visual clips
+/// keep the window-major path (Phase F defers that design).
+///
+/// Long-form generation is otherwise the ordinary generation path - same
+/// schedule, same CFG fold, same two-stage decision per window, same VAE.
 #[tracing::instrument(level = "info", name = "generate_long", skip_all, fields(frames = o.base.frames, width = o.base.width, height = o.base.height, seed = o.base.seed, context = o.context_latent_frames))]
 pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
     let vcfg = LtxVaeConfig::conv25();

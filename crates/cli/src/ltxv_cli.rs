@@ -164,8 +164,9 @@ Stages:
   6144 video tokens (a 25-frame clip above ~1600x896) one stage measurably
   disintegrates the END of the clip while the start stays correct, so a
   request past that ceiling runs the reference's own two stages: the full
-  schedule at half resolution, a real x2 latent upscale, then three
-  deterministic refinement steps at the requested size. That needs
+  schedule at half resolution (stage 1, where motion is decided), a real
+  x2 latent upscale, then three deterministic refinement steps at the
+  requested size (stage 2, where detail is refined).  That needs
   $BRAIN_LTXV_UPSAMPLER_SPATIAL, and both --width and --height must be
   multiples of 64 (not just 32) so halving lands on the VAE's own stride.
   BRAIN_LTXV_TWO_STAGE=1/0 forces the choice either way.
@@ -231,11 +232,16 @@ Long-form clips:
   generated exactly as it always was, and none of this runs.
   BRAIN_LTXV_LONGFORM_MAX_TOKENS overrides the per-window token ceiling
   (default 13200, the largest single-window generation this crate has a
-  recorded real run at). --end-frame and --mid-frame are not supported for
-  a multi-window clip (the first pins one window's last frame, the second
-  names a pixel frame of the whole clip and would have to be routed to
-  whichever window covers it); --start-frame conditions the first window as
+  recorded real run at). --start-frame conditions the first window as
   usual.
+
+  Stage-major (two-stage, video-only, default): When two-stage generation
+  is enabled, the clip is generated via two independent window plans:
+  stage 1 at half resolution (where motion is decided) and stage 2 at full
+  resolution (where refinement detail is carried).  Clip-global anchors
+  (--end-frame, --mid-frame) are routed to their owning window via
+  window_gen_opts.  Audio-visual clips keep the window-major path.
+  BRAIN_LTXV_LONGFORM_STAGE_MAJOR=0 disables the stage-major path.
 
 Scenes:
   One --frames/--prompt run is one continuous SHOT: every window shares the
