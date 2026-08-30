@@ -4395,6 +4395,64 @@ pub fn two_stage_long_plan(
     Ok(TwoStageLongPlan { stage1, stage2, lat_t, stage2_context: stage2_ctx })
 }
 
+/// Build per-window generation options from a clip-global base, routing
+/// `start_frame`, `end_frame`, and `mid_frame` to the window that owns each.
+///
+/// - `start_frame`: window 0 only (pixel frame 0 only exists there).
+/// - `end_frame`: last window only (its `frames = w.decoded_frames()` already
+///   re-expresses the anchor with no arithmetic).
+/// - `mid_frame` / `mid_frame_at`: routed via [`crate::longform::route_mid_anchor`]
+///   to the window whose decoded range contains the pixel frame, and re-expressed
+///   as the local pixel frame within that window.
+///
+/// Returns `Err` when the base options carry an anchor that doesn't land
+/// inside any window (out-of-bounds pixel frame).
+pub fn window_gen_opts(
+    base: &GenOpts,
+    plan: &[crate::longform::Window],
+    wi: usize,
+) -> Result<GenOpts, String> {
+    let w = &plan[wi];
+    let start_frame = if wi == 0 { base.start_frame.clone() } else { None };
+    let end_frame = if wi == plan.len() - 1 { base.end_frame.clone() } else { None };
+    let (mid_frame, mid_frame_at) = if let Some(ref path) = base.mid_frame {
+        if let Some(global_at) = base.mid_frame_at {
+            // Route the clip-global mid_frame_at to this window, if it owns it.
+            if let Some((owning_wi, _local_latent)) = crate::longform::route_mid_anchor(plan, global_at) {
+                if owning_wi == wi {
+                    // The global pixel frame falls inside this window's decoded range.
+                    // Re-express as the local pixel frame within this window.
+                    let local_pixel = global_at - w.source_first_frame();
+                    (Some(path.clone()), Some(local_pixel))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            // No explicit mid_frame_at; compute the default position.
+            let local_frames = w.decoded_frames();
+            if local_frames >= 3 {
+                let local_at = (local_frames - 1) / 2;
+                (Some(path.clone()), Some(local_at))
+            } else {
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+    Ok(GenOpts {
+        frames: w.decoded_frames(),
+        start_frame,
+        end_frame,
+        mid_frame,
+        mid_frame_at,
+        ..base.clone()
+    })
+}
+
 /// Text to video of arbitrary length: one clip built out of several
 /// consecutive denoising windows, each conditioned on the previous window's
 /// own last latent frames.
@@ -4933,13 +4991,7 @@ fn run_stage_major(
     for (wi, w) in tsp.stage1.iter().enumerate() {
         if cancel.is_cancelled() { return Err("cancelled".into()); }
         let lat_t = w.latent_frames();
-        let win_opts = GenOpts {
-            frames: w.decoded_frames(),
-            start_frame: if wi == 0 { o.base.start_frame.clone() } else { None },
-            end_frame: None,
-            mid_frame: None,
-            ..o.base.clone()
-        };
+        let win_opts = window_gen_opts(&o.base, &tsp.stage1, wi)?;
         let sc = StageCtx {
             a_ctx_cond: &[],
             a_ctx_uncond: &[],
@@ -4992,13 +5044,7 @@ fn run_stage_major(
         // Stage 2 reads its slice of the global half-res latent.
         let first_lat = w.first_latent_frame(if wi == 0 { 0 } else { tsp.stage2[..wi].iter().map(|w| w.new).sum() });
         let s1_slice = crate::longform::latent_window(&global_half, in_channels, tsp.lat_t, lh1, lw1, first_lat, lat_t);
-        let win_opts = GenOpts {
-            frames: w.decoded_frames(),
-            start_frame: if wi == 0 { o.base.start_frame.clone() } else { None },
-            end_frame: None,
-            mid_frame: None,
-            ..o.base.clone()
-        };
+        let win_opts = window_gen_opts(&o.base, &tsp.stage2, wi)?;
         let sc = StageCtx {
             a_ctx_cond: &[],
             a_ctx_uncond: &[],
