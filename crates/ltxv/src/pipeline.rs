@@ -5059,10 +5059,23 @@ fn run_stage_major(
     let mut carried_full: Option<(Vec<f32>, usize)> = None;
     for (wi, w) in tsp.stage2.iter().enumerate() {
         if cancel.is_cancelled() { return Err("cancelled".into()); }
-        let lat_t = w.latent_frames();
-        // Stage 2 reads its slice of the global half-res latent.
+        // Stage 2 reads its NEW frames from the global half-res latent, then
+        // prepends the half-res context from stage-1 to form the full latent
+        // that upscale_and_refine expects.
+        let new_count = w.new;
         let first_lat = w.first_latent_frame(if wi == 0 { 0 } else { tsp.stage2[..wi].iter().map(|w| w.new).sum() });
-        let s1_slice = crate::longform::latent_window(&global_half, in_channels, tsp.lat_t, lh1, lw1, first_lat, lat_t);
+        let s1_new = crate::longform::latent_window(&global_half, in_channels, tsp.lat_t, lh1, lw1, first_lat, new_count);
+        // Build the full latent (context + new) at half resolution for upscale_and_refine.
+        // The context comes from stage-1's half-res carry (s1_carried).
+        let (s1_slice, lat_t) = if let Some((ref ctx_chw, ctx_frames)) = s1_carried {
+            let total = ctx_frames + new_count;
+            let mut latent = vec![0f32; in_channels * total * lh1 * lw1];
+            latent[..ctx_frames * lh1 * lw1 * in_channels].copy_from_slice(ctx_chw);
+            latent[ctx_frames * lh1 * lw1 * in_channels..].copy_from_slice(&s1_new);
+            (latent, total)
+        } else {
+            (s1_new, new_count)
+        };
         let win_opts = window_gen_opts(&o.base, &tsp.stage2, wi)?;
         let sc = StageCtx {
             a_ctx_cond: &[],
