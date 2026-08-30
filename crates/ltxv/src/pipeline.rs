@@ -5076,7 +5076,40 @@ fn run_stage_major(
         } else {
             (s1_new, new_count)
         };
-        let win_opts = window_gen_opts(&o.base, &tsp.stage2, wi)?;
+        // Stage 2 is a refinement pass: ALL clip-global keyframes must be
+        // present in EVERY stage-2 window, not routed per-window like stage 1.
+        // The official LTX-2.5 implementation applies keyframes to both stages
+        // (re-encoded at each stage's resolution). Routing them per-window
+        // (start→window 0, end→last, mid→its owner) leaves each window missing
+        // the other keyframes, producing three disconnected trajectories
+        // instead of a smooth motion guided by all anchors.
+        let mid_frame_at = if o.base.mid_frame.is_some() {
+            let global_mid = mid_anchor_frame(o.base.frames, o.base.mid_frame_at)?;
+            // The window's decoded frame range starts at source_first_frame.
+            // mid_frame_at is the local pixel frame within this window.
+            let window_first = w.source_first_frame();
+            let window_frames = w.decoded_frames();
+            if global_mid >= window_first && global_mid < window_first + window_frames {
+                Some(global_mid - window_first)
+            } else {
+                // Mid-frame falls outside this window's range; still pass it
+                // as a global anchor so the model sees all three keyframes.
+                // The RoPE position will point outside this window's range,
+                // which is the same as the official implementation's behavior
+                // when a keyframe is outside the current denoising window.
+                Some(global_mid.saturating_sub(window_first))
+            }
+        } else {
+            None
+        };
+        let win_opts = GenOpts {
+            frames: w.decoded_frames(),
+            start_frame: o.base.start_frame.clone(),
+            end_frame: o.base.end_frame.clone(),
+            mid_frame: o.base.mid_frame.clone(),
+            mid_frame_at,
+            ..o.base.clone()
+        };
         let sc = StageCtx {
             a_ctx_cond: &[],
             a_ctx_uncond: &[],
