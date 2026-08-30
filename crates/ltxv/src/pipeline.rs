@@ -2836,71 +2836,69 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         let carried = ms.mask.iter().filter(|&&m| m >= 1.0).count();
         tracing::info!(stage = st.label, tokens = t, carried, strength = ms.strength, "masked conditioning applied");
         (latent, positions, keyframes_mask, t, Some((mc.denoise_mask, mc.clean)))
-    } else if let Some(ctx) = &st.context {
-        // Pinned exactly as `--start-frame` pins latent frame 0, over
-        // `ctx.frames` latent frames instead of one: mask 0 (so the per-token
-        // timestep is 0 and `to_denoised` is the identity there), content
-        // written straight into the initial latent rather than noised
-        // (`GaussianNoiser`'s `lerp(clean, noised, denoise_mask)` at mask 0
-        // is exactly `clean`), and re-pinned every step by
-        // `post_process_latent`.
-        if o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some() {
-            // NOT a tensor conflict - a carried context pins the BASE range's
-            // own leading tokens, an appended keyframe guide occupies tokens
-            // AFTER base_t, and the two index ranges do not overlap. The
-            // refusal is honest about what it actually is: `denoise_stage`
-            // builds these as mutually exclusive branches (mask, then
-            // context, then image conditioning), so composing a carried
-            // prefix with an appended guide in the same state is real,
-            // unbuilt work, not something this check is protecting a real
-            // conflict from.
-            return Err("a long-form continuation window carries a latent context AND was given a conditioning still: composing a carried prefix with an appended image guide in the same denoise state is not implemented yet, not a genuine tensor conflict between the two".into());
-        }
-        let ctx_tokens = ctx.frames * lh * lw;
-        if ctx.frames > sc.lat_t {
-            return Err(format!("a {}-latent-frame context does not fit a {}-latent-frame window", ctx.frames, sc.lat_t));
-        }
-        let ctx_tc = chw_to_tc(ctx.chw, c, ctx.frames, lh, lw);
-        let mut latent = latent0;
-        latent[..ctx_tokens * c].copy_from_slice(&ctx_tc);
-        let mut clean = vec![0f32; t * c];
-        clean[..ctx_tokens * c].copy_from_slice(&ctx_tc);
-        let mut denoise_mask = vec![1f32; t];
-        denoise_mask[..ctx_tokens].fill(0.0);
-        tracing::info!(stage = st.label, context_latent_frames = ctx.frames, context_tokens = ctx_tokens, tokens = t, "latent context frozen");
-        (latent, positions, keyframes_mask, t, Some((denoise_mask, clean)))
-    } else if o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some() {
-        // WHICH mechanism runs is [`conditioned_latent`]'s decision - the
-        // reference has two conditioning builders for these two cases
-        // (image-to-video's in-place overwrite of latent frame 0, keyframe
-        // interpolation's appended guiding blocks). See that function's doc
-        // for the reference citations and for where
-        // `conditioning_strength` lands.
-        //
-        // The same path passed for both ends is encoded ONCE: a real VAE
-        // encode is not free, and the loop case (one still at both ends) is
-        // the common one.
-        let enc = |p: &str| encode_still(sc.vcfg, sc.vweights, p, st.width, st.height, c, o.device.as_deref());
-        let start_tokens = o.start_frame.as_deref().map(&enc).transpose()?;
-        let end_tokens = match (&o.end_frame, &o.start_frame) {
-            (Some(e), Some(s)) if e == s => start_tokens.clone(),
-            (Some(e), _) => Some(enc(e.as_str())?),
-            (None, _) => None,
-        };
-        // Resolved from the clip's frame count, which is the same in both
-        // stages of a two-stage run, so the anchor names the same instant at
-        // half resolution and at full.
-        let mid_at = o.mid_frame.as_deref().map(|_| mid_anchor_frame(o.frames, o.mid_frame_at)).transpose()?;
-        let mid_tokens = o.mid_frame.as_deref().map(&enc).transpose()?;
-        let mid = mid_at.zip(mid_tokens.as_deref());
-        if let Some((at, _)) = mid {
-            tracing::info!(stage = st.label, mid_frame = at, latent_frame = latent_frame_containing(at), of_frames = o.frames, "mid-frame anchor placed");
-        }
-        let cl = conditioned_latent(latent0, &positions, &keyframes_mask, t, lh, lw, c, o.frames, o.fps as f64, start_tokens.as_deref(), mid, end_tokens.as_deref(), o.conditioning_strength);
-        tracing::info!(stage = st.label, strength = o.conditioning_strength, tokens = cl.t, base_tokens = t, appended_blocks = blocks, "image conditioning applied");
-        (cl.latent, cl.positions, cl.keyframes_mask, cl.t, Some((cl.denoise_mask, cl.clean)))
     } else {
-        (latent0, positions, keyframes_mask, t, None)
+        // Merged context + image branch: context pins a prefix over
+        // an already-built conditioning state.  The two write provably
+        // disjoint index ranges: context writes [0, ctx_tokens) and
+        // image conditioning writes [base_t, base_t+blocks*lh*lw),
+        // where ctx_tokens = ctx.frames * lh * lw and base_t = t.
+        //
+        // One refusal: context + lone --start-frame is a genuine
+        // collision - start-frame's overwrite of latent frame 0 sits
+        // inside the carried prefix.
+        if st.context.is_some() && o.start_frame.is_some() && o.mid_frame.is_none() && o.end_frame.is_none() {
+            return Err("a carried latent context and a lone --start-frame cannot compose: start-frame's overwrite of latent frame 0 sits inside the carried prefix".into());
+        }
+        let has_image = o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some();
+        let (mut latent, positions_d, keyframes_mask_d, denoise_t_count, mut frozen) = if has_image {
+            // WHICH mechanism runs is [`conditioned_latent`]'s decision - the
+            // reference has two conditioning builders for these two cases
+            // (image-to-video's in-place overwrite of latent frame 0, keyframe
+            // interpolation's appended guiding blocks). See that function's doc
+            // for the reference citations and for where
+            // `conditioning_strength` lands.
+            //
+            // The same path passed for both ends is encoded ONCE: a real VAE
+            // encode is not free, and the loop case (one still at both ends) is
+            // the common one.
+            let enc = |p: &str| encode_still(sc.vcfg, sc.vweights, p, st.width, st.height, c, o.device.as_deref());
+            let start_tokens = o.start_frame.as_deref().map(&enc).transpose()?;
+            let end_tokens = match (&o.end_frame, &o.start_frame) {
+                (Some(e), Some(s)) if e == s => start_tokens.clone(),
+                (Some(e), _) => Some(enc(e.as_str())?),
+                (None, _) => None,
+            };
+            // Resolved from the clip's frame count, which is the same in both
+            // stages of a two-stage run, so the anchor names the same instant at
+            // half resolution and at full.
+            let mid_at = o.mid_frame.as_deref().map(|_| mid_anchor_frame(o.frames, o.mid_frame_at)).transpose()?;
+            let mid_tokens = o.mid_frame.as_deref().map(&enc).transpose()?;
+            let mid = mid_at.zip(mid_tokens.as_deref());
+            if let Some((at, _)) = mid {
+                tracing::info!(stage = st.label, mid_frame = at, latent_frame = latent_frame_containing(at), of_frames = o.frames, "mid-frame anchor placed");
+            }
+            let cl = conditioned_latent(latent0, &positions, &keyframes_mask, t, lh, lw, c, o.frames, o.fps as f64, start_tokens.as_deref(), mid, end_tokens.as_deref(), o.conditioning_strength);
+            tracing::info!(stage = st.label, strength = o.conditioning_strength, tokens = cl.t, base_tokens = t, appended_blocks = blocks, "image conditioning applied");
+            (cl.latent, cl.positions, cl.keyframes_mask, cl.t, Some((cl.denoise_mask, cl.clean)))
+        } else {
+            (latent0, positions, keyframes_mask, t, None)
+        };
+        // Overlay the carried latent context prefix, if present.
+        if let Some(ctx) = &st.context {
+            let ctx_tokens = ctx.frames * lh * lw;
+            if ctx.frames > sc.lat_t {
+                return Err(format!("a {}-latent-frame context does not fit a {}-latent-frame window", ctx.frames, sc.lat_t));
+            }
+            let ctx_tc = chw_to_tc(ctx.chw, c, ctx.frames, lh, lw);
+            latent[..ctx_tokens * c].copy_from_slice(&ctx_tc);
+            let (ref mut denoise_mask, ref mut clean) = frozen.get_or_insert_with(|| {
+                (vec![1f32; t], vec![0f32; t * c])
+            });
+            clean[..ctx_tokens * c].copy_from_slice(&ctx_tc);
+            denoise_mask[..ctx_tokens].fill(0.0);
+            tracing::info!(stage = st.label, context_latent_frames = ctx.frames, context_tokens = ctx_tokens, tokens = t, "latent context frozen");
+        }
+        (latent, positions_d, keyframes_mask_d, denoise_t_count, frozen)
     };
     let frozen_ref = frozen.as_ref().map(|(mask, clean)| Frozen { mask, clean, channels: c });
     tracing::info!(stage = st.label, width = st.width, height = st.height, tokens = denoise_t_count, base_tokens = t, steps = st.sigmas.len() - 1, eta = st.eta, seeded = st.seed_chw.is_some(), "stage denoising");
