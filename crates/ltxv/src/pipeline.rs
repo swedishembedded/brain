@@ -2845,7 +2845,16 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         // is exactly `clean`), and re-pinned every step by
         // `post_process_latent`.
         if o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some() {
-            return Err("a long-form continuation window carries a latent context AND was given a conditioning still: the two both claim latent frame 0 and cannot be applied together".into());
+            // NOT a tensor conflict - a carried context pins the BASE range's
+            // own leading tokens, an appended keyframe guide occupies tokens
+            // AFTER base_t, and the two index ranges do not overlap. The
+            // refusal is honest about what it actually is: `denoise_stage`
+            // builds these as mutually exclusive branches (mask, then
+            // context, then image conditioning), so composing a carried
+            // prefix with an appended guide in the same state is real,
+            // unbuilt work, not something this check is protecting a real
+            // conflict from.
+            return Err("a long-form continuation window carries a latent context AND was given a conditioning still: composing a carried prefix with an appended image guide in the same denoise state is not implemented yet, not a genuine tensor conflict between the two".into());
         }
         let ctx_tokens = ctx.frames * lh * lw;
         if ctx.frames > sc.lat_t {
@@ -4405,7 +4414,13 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     }
     check_audio_request(paths, &o.base)?;
     if o.base.end_frame.is_some() {
-        return Err("--end-frame is not supported for a multi-window clip: it pins the last frame of ONE window, and pinning the end of a rolling plan has not been designed".into());
+        // Not an LTX limitation - an appended keyframe guide is a temporal
+        // coordinate, not "the last slot of a window", so nothing about the
+        // mechanism itself rules this out. What is actually missing is the
+        // orchestration: mapping a clip-global anchor position onto the
+        // specific window(s) whose emitted+context range covers it, in that
+        // window's own local frame numbering.
+        return Err("--end-frame is not supported for a multi-window clip: this crate has no policy yet for mapping a clip-global anchor position onto the window(s) that cover it".into());
     }
     if o.base.mid_frame.is_some() {
         return Err(format!(

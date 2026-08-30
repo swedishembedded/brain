@@ -71,23 +71,37 @@ Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
   --dit-config <name>         DiT config; "tiny" (default, fresh random
                              weights) or "ltx25_22b" (the real 22B
                              checkpoint, needs --dit/$BRAIN_LTXV_DIT)
-  --start-frame <path>         PNG/JPEG still, encoded through the real VAE
-                             and held fixed as frame 0 while the rest of
-                             the clip denoises around it.
-  --end-frame <path>           same, held fixed as the clip's LAST pixel
-                             frame instead. Pass the SAME path as
-                             --start-frame for a clip that loops
-                             seamlessly (the generated content in between
-                             connects the still to itself); a different
-                             path for a clip that morphs between two
-                             stills. Either flag works alone.
-  --mid-frame <path>           same again, held fixed at ONE INTERIOR
-                             instant, so a single pass can be anchored at
-                             its start, its middle and its end at once -
-                             the way to keep a long or moving-camera clip
-                             on course rather than only pinning where it
-                             begins and ends. Works alone or with either
-                             of the two above.
+  --start-frame <path>         PNG/JPEG still, encoded through the real VAE.
+                             Given ALONE, it overwrites the clip's own
+                             frame 0 outright (the generated video IS the
+                             still there). Given alongside --mid-frame/
+                             --end-frame, all of them switch to the OTHER
+                             mechanism below - an appended guide, not a
+                             replacement.
+  --end-frame <path>           a clean image-guidance latent, appended to
+                             the sequence at the clip's LAST pixel frame's
+                             timestamp - not a replacement of that frame:
+                             the generated token there still denoises
+                             freely, strongly pulled toward the guide via
+                             attention but not overwritten by it. Pass the
+                             SAME path as --start-frame for a clip that
+                             loops seamlessly (the generated content in
+                             between connects the still to itself); a
+                             different path for a clip that morphs between
+                             two stills. Either flag works alone.
+  --mid-frame <path>           same appended-guide mechanism, anchored at
+                             ONE INTERIOR instant, so a single pass can be
+                             anchored at its start, its middle and its end
+                             at once - the way to keep a long or moving-
+                             camera clip on course rather than only
+                             pinning where it begins and ends. Works alone
+                             or with either of the two above. Because this
+                             is guidance rather than replacement, how
+                             closely the clip actually reaches the mid
+                             still's content depends on how much the scene
+                             has to change to get there and how many
+                             denoising steps it has to do it in - see
+                             --conditioning-strength.
   --mid-frame-at <N>           which pixel frame --mid-frame anchors,
                              strictly between 0 and --frames minus one.
                              The default is the clip's own midpoint,
