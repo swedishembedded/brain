@@ -27,7 +27,7 @@
 //! BRAIN_LTXV_DIT=<...22b-distilled-transformer-Q8_0.gguf> \
 //! BRAIN_LTXV_VAE=<...video-vae-conv-bf16.safetensors> \
 //! BRAIN_LTXV_TEXT_ENCODER=<...gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
-//! BRAIN_LTXV_UPSAMPLER=<...latent-spatial-upscaler-x2-bf16-1.0.safetensors> \
+//! BRAIN_LTXV_UPSAMPLER_SPATIAL=<...latent-spatial-upscaler-x2-bf16-1.0.safetensors> \
 //! cargo test -p brain-ltxv --test anchor_two_stage_real -- --ignored --nocapture
 //! ```
 
@@ -92,7 +92,7 @@ fn a_start_frame_anchor_survives_the_two_stage_refinement() {
         return brain_testutil::skip("set BRAIN_LTXV_DIT + BRAIN_LTXV_VAE to the real LTX-2.5 checkpoints");
     };
     if paths.spatial_upsampler.is_none() {
-        return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER to the real spatial x2 latent upscaler - the two-stage path needs it");
+        return brain_testutil::skip("set BRAIN_LTXV_UPSAMPLER_SPATIAL to the real spatial x2 latent upscaler - the two-stage path needs it");
     }
     // SAFETY (test-only): this is the only test in this binary that reads or
     // writes this variable.
