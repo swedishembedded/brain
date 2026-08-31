@@ -24,7 +24,7 @@ than a rectangle held still.
 
 ## Getting the weights
 
-Model id: `brain/sam2`. `facebook/sam2.1-hiera-tiny` auto-fetches (⤓) on
+Model id: `brain/sam2`. `facebook/sam2.1-hiera-tiny` auto-fetches (⤓, opt-in `--autofetch`) on
 first CLI use - no env var or manual download needed. For the `large`
 variant, or to point at a checkpoint you already have, set
 `BRAIN_SAM2_WEIGHTS` to a `sam2.1_hiera_{tiny,large}.pt` release checkpoint

@@ -23,7 +23,7 @@ own data.
 
 ## Getting the weights
 
-`Qwen/Qwen3-0.6B` is auto-fetched from Hugging Face on first use. You can
+`Qwen/Qwen3-0.6B` is auto-fetched from Hugging Face on first use (opt-in: `--autofetch`). You can
 also import a checkpoint you already have locally:
 
 ```bash

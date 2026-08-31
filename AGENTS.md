@@ -442,7 +442,8 @@ fast and scalable kernel - not a naive one.
     `examples/videogen/`. **Training done, host only**: `grad.rs`/`modelgrad.rs`/
     `lora.rs`/`finetune.rs`, gated by `gradcheck::check_wan`
     (block FD 1.8e-9, model FD 1.7e-8, LoRA a bit-exact no-op at init).
-    `brain wan t2v` is one command to a playable mp4, with auto-fetch.
+    `brain wan t2v` is one command to a playable mp4 (fetching is opt-in:
+    `--autofetch` or a pulled store).
     *(**No image-to-video**, no INT8, no `lora_train` action, no batched forward,
     and NOT optimized - see `.agents/roadmap/wan.md` for the published per-kernel
     profile that a later optimization pass is measured against.)*

@@ -21,7 +21,7 @@ Qwen3-1.7B decoder. For live/streaming transcription instead, see
 ## Getting the weights
 
 Model id: `brain/qwen3asr` (the served id itself is never fetched, per this
-project's naming grammar) - but `Qwen/Qwen3-ASR-1.7B` auto-fetches (⤓) on
+project's naming grammar) - but `Qwen/Qwen3-ASR-1.7B` auto-fetches (⤓, opt-in `--autofetch`) on
 first CLI use, no env var needed. To point at a different checkpoint, set
 `BRAIN_QWEN3ASR` to an HF-layout checkpoint directory.
 

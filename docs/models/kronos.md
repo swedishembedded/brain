@@ -21,7 +21,8 @@ brain's three forecasting models with CLI-reachable fine-tuning.
 
 ## Getting the weights
 
-Nothing to do: `brain forecast predict` auto-fetches on first use, like every
+Nothing to do: `brain forecast predict` auto-fetches on first use (opt-in:
+`--autofetch`), like every
 other model in the README's Quick start.
 
 Kronos is **one model published as two upstream repos** - the BSQ tokenizer
@@ -35,7 +36,8 @@ both and points one environment variable at each:
 
 Set either variable yourself and auto-fetch leaves it alone, so a local
 checkout or a `.safetensors` fine-tune checkpoint from `brain forecast
-finetune` still wins. `BRAIN_AUTO_FETCH=0` disables the fetch entirely.
+finetune` still wins. Fetching is opt-in: without `--autofetch` / `BRAIN_AUTO_FETCH=1` a run whose
+weights are missing errors naming the variables instead of downloading.
 
 - **Model id:** `brain/kronos` - a reserved `brain/` id for serving; the
   fetchable upstream references are the two `NeoQuasar/...` repos above.

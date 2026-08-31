@@ -21,12 +21,12 @@ it can be fine-tuned with LoRA on your own images.
 
 ## Getting the weights
 
-Model id: `Tongyi-MAI/Z-Image-Turbo`. Weights auto-fetch (⤓) on first use - no
+Model id: `Tongyi-MAI/Z-Image-Turbo`. Weights auto-fetch (⤓, opt-in `--autofetch`) on first use - no
 env var or manual download needed. The first request downloads and converts
 the checkpoint into the local model store; every request after is instant.
 
 The slower, non-distilled `Tongyi-MAI/Z-Image` base model auto-fetches the
-same way when requested by name (use it with a higher `guidance` and more
+same way when requested by name (also opt-in) (use it with a higher `guidance` and more
 `steps`).
 
 ### From a GGUF

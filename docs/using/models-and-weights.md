@@ -173,18 +173,22 @@ There are two ways a model's weights end up in place, and the model catalog
 tells you which applies (look for the **⤓** marker):
 
 - **`brain pull <model>` / auto-fetch (⤓)** - the same operation, explicit or
-  implicit. `brain pull Qwen/Qwen3-0.6B` (or the HuggingFace URL) fetches and
-  converts a model up front, with a progress bar; leaving it out means the
-  first request that needs the model pays for the same fetch silently. Use
-  `brain pull` when you want the download to happen now, on a connection you
-  are watching, rather than in the middle of a first inference. See
-  [The CLI](cli.md#pulling-weights).
-- **Auto-fetch (⤓)** - the model id names a real Hugging Face repo (e.g.
-  `Qwen/Qwen3-0.6B`, `Ultralytics/YOLOv8`, `LiquidAI/LFM2.5-350M`), and brain
-  fetches and converts it itself the first time it's needed - no manual
-  export, no extra setup. This happens on the serving surfaces (`brain
+  opt-in. `brain pull Qwen/Qwen3-0.6B` (or the HuggingFace URL) fetches and
+  converts a model up front, with a progress bar. Auto-fetch is the same
+  fetch run implicitly by a first inference or serve request, but only when
+  you ask for it: pass the global `--autofetch` flag (or export
+  `BRAIN_AUTO_FETCH=1`). With it off - the default - a run whose weights are
+  not pulled prints an error naming what is missing instead of downloading
+  anything. Use `brain pull` when you want the download to happen now, on a
+  connection you are watching, rather than in the middle of a first
+  inference. See [The CLI](cli.md#pulling-weights).
+- **Auto-fetch (⤓, opt-in)** - the model id names a real Hugging Face repo
+  (e.g. `Qwen/Qwen3-0.6B`, `Ultralytics/YOLOv8`, `LiquidAI/LFM2.5-350M`), and
+  brain fetches and converts it itself the first time it's needed - no manual
+  export, no extra setup. This happens only with `--autofetch` /
+  `BRAIN_AUTO_FETCH=1`, on the CLI and on the serving surfaces (`brain
   serve`'s HTTP and D-Bus transports, which resolve a named model on demand);
-  `brain do` does not auto-fetch - it only reaches models already registered
+  `brain do` never auto-fetches - it only reaches models already registered
   locally by name. The first request against a not-yet-fetched model pays a
   one-time download-and-convert cost; every request after that just loads the
   cached, already-converted checkpoint.

@@ -116,7 +116,7 @@ served, with no error.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
-| `BRAIN_AUTO_FETCH` | `0`/`false`/`off` disables transparent auto-fetch of missing model files | enabled |
+| `BRAIN_AUTO_FETCH` | `1`/`true`/`on` enables on-demand fetching of missing model files (`--autofetch` publishes the same thing and wins over an exported `0`); a pulled model still resolves with the gate off | disabled |
 | `BRAIN_CONF` | stdio-loop YOLO confidence threshold (also `--conf`) | 0.25 |
 | `BRAIN_ADMIT_DEADLINE_MS` | how long a request waits for a free lane before it's shed with 429 | 10000 |
 | `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS` | longer deadline applied instead, but only while the request's own model is still cold-building (its first-ever activation) | 180000 |

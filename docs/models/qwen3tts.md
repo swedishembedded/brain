@@ -20,7 +20,7 @@ assistant pipeline - all running locally, no external TTS service.
 ## Getting the weights
 
 Model id: `brain/qwen3tts`. `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (Base only, the
-variant with a speaker encoder for voice cloning) auto-fetches (⤓) on first
+variant with a speaker encoder for voice cloning) auto-fetches (⤓, opt-in `--autofetch`) on first
 CLI use - no env var, no manual `import` step. That default run:
 downloads the checkpoint (including its nested `speech_tokenizer/` codec),
 converts it exactly the way `brain qwen3tts import` does by hand (below),

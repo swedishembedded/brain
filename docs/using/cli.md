@@ -126,9 +126,10 @@ per-model-port shape:
 ## Pulling weights
 
 `brain pull <model>` fetches a model's official weights into the model store
-and makes them servable, as an explicit up-front step rather than waiting for
-the auto-fetch that a first `infer`/serve request would trigger. It is the
-same operation, spelled out loud - one plan, one download, one finish step.
+and makes them servable, as an explicit up-front step rather than the
+on-demand fetch a first `infer`/serve request makes when `--autofetch` is
+passed. It is the same operation, spelled out loud - one plan, one download,
+one finish step.
 
 The argument is the canonical reference or a HuggingFace URL, with or without
 a scheme, a `www.` host, a trailing slash, a query string or a fragment. A

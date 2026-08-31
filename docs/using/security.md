@@ -18,12 +18,15 @@ machine.
   and inputs are size- and depth-bounded, so an overly large or maliciously nested
   request is turned away with a 4xx rather than exhausting memory or hanging the
   server.
-- **What brain talks to on the network:** with auto-fetch enabled (the default —
-  `BRAIN_AUTO_FETCH`, see [`docs/using/configuration.md`](configuration.md#serving--admission)),
-  a request for a model brain doesn't have locally can trigger an outbound download.
-  The only destination that ever reaches is `huggingface.co` — nothing else. Set
-  `BRAIN_AUTO_FETCH=0` if you want brain to only ever serve models already present on
-  disk and make no outbound connections at all.
+- **What brain talks to on the network:** fetching is opt-in - by default brain
+  makes no outbound connections at all and a request for a model it doesn't
+  have locally is an error naming what is missing. Passing `--autofetch` (or
+  exporting `BRAIN_AUTO_FETCH=1`, see
+  [`docs/using/configuration.md`](configuration.md#serving--admission)) allows
+  such a request to trigger an outbound download; the only destination that
+  ever reaches is `huggingface.co` - nothing else. Leave the gate off (the
+  default) to keep brain serving only models already present on disk, or use
+  `brain pull <model>` to fetch explicitly, connection watched.
 
 For the wire-level detail of each surface, see
 [`docs/using/http-api.md`](http-api.md) and [`docs/using/dbus-api.md`](dbus-api.md).

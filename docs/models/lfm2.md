@@ -22,7 +22,7 @@ that's what Qwen3 is for.
 ## Getting the weights
 
 `LiquidAI/LFM2.5-350M` (also available as the smaller `-230M` variant) is
-auto-fetched on first use. To import a checkpoint you already have locally:
+auto-fetched on first use (opt-in: `--autofetch`). To import a checkpoint you already have locally:
 
 ```bash
 brain lfm import --hf <hf_dir> --out lfm-350m.safetensors

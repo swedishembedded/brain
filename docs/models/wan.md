@@ -66,7 +66,7 @@ forward is a change to the engine, not to the adapter.
 ## Getting the weights
 
 Model id: `brain/wan` on the capability surface; the checkpoint it fetches is
-`Wan-AI/Wan2.1-T2V-1.3B` (17.6 GB). Weights auto-fetch on first use - no env var
+`Wan-AI/Wan2.1-T2V-1.3B` (17.6 GB). Weights auto-fetch (opt-in `--autofetch`) on first use - no env var
 or manual download needed. That one repository is self-contained:
 transformer, VAE, umT5-XXL text encoder and tokenizer all live in it, which is
 why it is the default rather than the `-Diffusers` export (28.9 GB, because it

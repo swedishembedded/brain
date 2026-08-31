@@ -52,7 +52,7 @@ for the composite-level merge helper (`lora_init_map`) that exists so far.
 ## Getting the weights
 
 Model id: `deepseek-ai/DeepSeek-OCR`. The checkpoint is the GGUF pair
-`ggml-org/DeepSeek-OCR-GGUF` publishes, and it auto-fetches (⤓) on first CLI
+`ggml-org/DeepSeek-OCR-GGUF` publishes, and it auto-fetches (⤓, opt-in `--autofetch`) on first CLI
 use, no env var needed:
 
 ```text

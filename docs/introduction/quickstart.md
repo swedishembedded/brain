@@ -27,7 +27,7 @@ This runs `Qwen/Qwen3-0.6B`, a real instruct/chat model, over brain's
 OpenAI-compatible HTTP API — no manual download or conversion step:
 
 ```bash
-brain serve --openai 8788 &
+brain serve --openai 8788 --autofetch &   # --autofetch: allow the one-time fetch below
 # brain prints a line like: APIKEY openai sk-brain-...  -- copy that key
 
 curl http://localhost:8788/v1/chat/completions \
@@ -40,8 +40,10 @@ curl http://localhost:8788/v1/chat/completions \
 ```
 
 The first request downloads and converts `Qwen/Qwen3-0.6B` from Hugging Face
-automatically (a one-time cost), then answers it; every request after that
-is served from the already-converted, resident checkpoint. See
+automatically (a one-time cost; fetching is opt-in, hence the `--autofetch`
+above - without it the request errors naming the missing weights), then
+answers it; every request after that is served from the already-converted,
+resident checkpoint. See
 [Models & weights](../using/models-and-weights.md) for how model ids and
 auto-fetch work, and [Serving](../using/serving.md) for the full `brain
 serve` reference.
