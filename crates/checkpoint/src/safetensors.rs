@@ -200,8 +200,9 @@ fn decode_elems(raw: &[u8], width: usize, f: fn(&[u8]) -> f32) -> Vec<f32> {
     raw.chunks_exact(width).map(f).collect()
 }
 
-/// Parse a safetensors byte buffer into fp32 tensors (declared order preserved).
-pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
+/// Split a safetensors buffer into its parsed header and the tensor blob
+/// behind it.
+fn header_and_blob(bytes: &[u8]) -> Result<(Value, &[u8]), String> {
     if bytes.len() < 8 {
         return Err("safetensors: file too short".into());
     }
@@ -212,7 +213,37 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
     }
     let header: Value = serde_json::from_slice(&bytes[8..hend])
         .map_err(|e| format!("safetensors: bad header json: {e}"))?;
-    let blob = &bytes[hend..];
+    Ok((header, &bytes[hend..]))
+}
+
+/// The tensors' on-disk byte total declared by the header - what a
+/// [`crate::load_progress::LoadMeter`] for this file counts against.
+fn tensor_byte_total(bytes: &[u8]) -> Result<u64, String> {
+    let (header, _) = header_and_blob(bytes)?;
+    let obj = header.as_object().ok_or("safetensors: header is not an object")?;
+    let mut total = 0u64;
+    for (name, meta) in obj {
+        if name == "__metadata__" {
+            continue;
+        }
+        let off = meta["data_offsets"].as_array().ok_or("safetensors: missing data_offsets")?;
+        let start = off[0].as_u64().unwrap_or(0);
+        let end = off[1].as_u64().unwrap_or(0);
+        total += end.saturating_sub(start);
+    }
+    Ok(total)
+}
+
+/// Parse a safetensors byte buffer into fp32 tensors (declared order preserved).
+pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
+    parse_inner(bytes, |_| {})
+}
+
+/// [`parse`] for callers that materialize a whole file: `on_tensor` receives
+/// each tensor's on-disk byte length as it is decoded, the hook the mmap
+/// readers' load-progress reporting hangs on.
+fn parse_inner(bytes: &[u8], mut on_tensor: impl FnMut(usize)) -> Result<Vec<StTensor>, String> {
+    let (header, blob) = header_and_blob(bytes)?;
     let obj = header.as_object().ok_or("safetensors: header is not an object")?;
 
     let mut out = Vec::new();
@@ -255,6 +286,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
             "F8_E5M2" => return Err(format!("safetensors: F8_E5M2 not supported for {name} (only F8_E4M3 is)")),
             other => return Err(format!("safetensors: unsupported dtype {other} for {name}")),
         };
+        on_tensor(raw.len());
         out.push(StTensor { name: name.clone(), shape, data });
     }
     Ok(out)
@@ -282,7 +314,8 @@ pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
     // `crate::gguf::MmapGguf::open` already rely on for every mapped
     // checkpoint in this crate.
     let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("cannot mmap {path}: {e}"))?;
-    parse(&mmap)
+    let meter = crate::load_progress::LoadMeter::new(path.to_string(), tensor_byte_total(&mmap)?);
+    parse_inner(&mmap, |raw| meter.note(raw as u64))
 }
 
 /// Read all tensors from a HuggingFace model directory, handling both the
@@ -362,6 +395,58 @@ pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The materializing reader reports the same load-progress stream the
+    /// mmap readers emit: one cumulative per-tensor event against the file's
+    /// whole tensor-byte total, under the file's own path.
+    #[test]
+    fn the_materializing_reader_reports_load_progress_to_the_observer() {
+        // The observer is process-global and last-wins: serialize against the
+        // other reader tests that install one.
+        let _serial = crate::load_progress::tests::observe_lock();
+        let header = serde_json::json!({
+            "a": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+            "b": {"dtype": "BF16", "shape": [2], "data_offsets": [8, 12]},
+        });
+        let hbytes = serde_json::to_vec(&header).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(hbytes.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&hbytes);
+        buf.extend_from_slice(&1.5f32.to_le_bytes());
+        buf.extend_from_slice(&(-2.0f32).to_le_bytes());
+        buf.extend_from_slice(&0x3F80u16.to_le_bytes());
+        buf.extend_from_slice(&0xC080u16.to_le_bytes());
+
+        // Fresh every run: pid + start time, so the dir is never a
+        // pre-existing path and nothing old is ever deleted to make room.
+        let dir = std::env::temp_dir().join(format!(
+            "brain-st-progress-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("model.safetensors");
+        std::fs::write(&path, &buf).unwrap();
+
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let observed = path.display().to_string();
+        crate::load_progress::observe(Box::new(move |e| {
+            if e.file == observed {
+                if let Ok(mut v) = sink.lock() {
+                    v.push((e.done, e.total));
+                }
+            }
+        }));
+        let ts = read(path.to_str().unwrap()).unwrap();
+        crate::load_progress::clear();
+        assert_eq!(ts.len(), 2);
+        let ev = events.lock().unwrap().clone();
+        assert_eq!(ev.last().copied(), Some((12, 12)), "the final event carries the file's whole tensor-byte total: {ev:?}");
+        assert_eq!(ev.len(), 2, "one event per decoded tensor: {ev:?}");
+        assert!(ev.windows(2).all(|w| w[0].0 <= w[1].0), "done is cumulative: {ev:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// A text encoder (or any component) may be shipped as a bare
     /// `.safetensors` file rather than an HF directory - swapping in a
