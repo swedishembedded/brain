@@ -248,8 +248,13 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // fetch (or hang, if `BRAIN_MODELS_DIR` points somewhere with no local
     // weights and the network is slow/unreachable) just to print itself.
     let wants_help = rest.iter().any(|a| a == "-h" || a == "--help");
-    if !wants_help && !weights_already_named(arch, &rest) {
-        crate::supply::ensure_env_weights(arch);
+    if !wants_help {
+        // Weight-load progress for this command's own runs, named after the
+        // architecture (`ltxv load ...`). Infra verbs keep their own output.
+        crate::load_line::install(arch);
+        if !weights_already_named(arch, &rest) {
+            crate::supply::ensure_env_weights(arch);
+        }
     }
     if let Some((_, handler)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == arch) {
         let rest = maybe_inject_default_weights(arch, rest);

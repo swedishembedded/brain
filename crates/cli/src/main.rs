@@ -29,6 +29,7 @@ mod gpt_cli;
 mod image_io;
 mod imageops;
 mod lfm_cli;
+mod load_line;
 mod ltxv_cli;
 mod mirror_cli;
 mod model_dir;
