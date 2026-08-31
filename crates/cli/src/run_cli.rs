@@ -127,6 +127,10 @@ MODEL CONFIGURATION (env-only - there is no config file)
   weights var is unset is simply not served. Run `brain serve --help` for the
   full reference table of every serving variable.
 
+  FETCHING: a request for a model that is not pulled errors with zero network
+  I/O unless --autofetch (or $BRAIN_AUTO_FETCH=1) was passed; `brain pull`
+  fetches without it.
+
 GLOBAL
   --device cpu|gpu|npu|gpu0|cpu0-7|gpu,cpu   consumed before this subcommand
                                              (see brain --help); $BRAIN_DEVICE

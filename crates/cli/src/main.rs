@@ -168,6 +168,14 @@ MODEL STORE (global - valid on any subcommand)
                            outrank an explicitly-set $BRAIN_MODELS_DIR, and
                            says so on stderr when it does.
 
+AUTO-FETCH (global - valid on any subcommand)
+  --autofetch              Allow missing model weights to be downloaded on
+                           demand (same as $BRAIN_AUTO_FETCH=1; the flag wins
+                           over an exported =0). Default OFF: a run whose
+                           weights are not pulled prints an error naming them
+                           instead of downloading. `brain pull <model>`
+                           fetches without the flag.
+
 DIAGNOSTIC VERBOSITY (global - valid on any subcommand, including auto-fetch)
   -v, --verbose [0-3]      0 errors only (default) | 1 +warnings | 2 +lifecycle
                            (model activate/evict, auto-fetch download progress)
@@ -982,6 +990,36 @@ fn parse_data_dir(argv: Vec<String>) -> (Option<String>, Vec<String>) {
     (root, rest)
 }
 
+/// Extract the global `--autofetch` switch from anywhere in `argv` and
+/// return `(present, remaining args)`. Pure - no process-global side effect -
+/// so it's testable like [`parse_verbosity`] and [`parse_limits`]; [`main`]
+/// is the sole caller of [`apply_autofetch`] with this result.
+fn parse_autofetch(argv: Vec<String>) -> (bool, Vec<String>) {
+    let mut on = false;
+    let mut rest = Vec::with_capacity(argv.len());
+    for a in argv {
+        if a == "--autofetch" {
+            on = true;
+        } else {
+            rest.push(a);
+        }
+    }
+    (on, rest)
+}
+
+/// Publish `--autofetch` into the one variable every fetch site gates on
+/// ([`crate::supply::auto_fetch_enabled`]): resolve's weight resolution, the
+/// `--model` resolver and `brain serve`'s supplier. Setting the variable
+/// (rather than threading a bool through every entry point) is what makes
+/// one gate the single source of truth, and an explicitly typed flag
+/// outranking an inherited `BRAIN_AUTO_FETCH=0` is the same flag-beats-env
+/// rule `--brain-data-dir` applies to `BRAIN_MODELS_DIR`.
+fn apply_autofetch(on: bool) {
+    if on {
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
+    }
+}
+
 /// Publish `--brain-data-dir` into the one models-directory resolver, saying
 /// so out loud when it overrules an explicitly-set `BRAIN_MODELS_DIR`.
 ///
@@ -1018,6 +1056,11 @@ fn main() {
     // same published answer.
     let (data_dir, argv) = parse_data_dir(argv);
     apply_data_dir(data_dir);
+    // Before any subcommand, so every fetch site -- resolve's weight
+    // resolution, the `--model` resolver, `brain serve`'s supplier -- reads
+    // the same published opt-in.
+    let (autofetch, argv) = parse_autofetch(argv);
+    apply_autofetch(autofetch);
     if matches!(argv.get(1).map(String::as_str), Some("--version" | "-V")) {
         println!("brain {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -1067,7 +1110,51 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_data_dir, parse_limits, parse_verbosity, HELP};
+    use super::{apply_autofetch, parse_autofetch, parse_data_dir, parse_limits, parse_verbosity, HELP};
+    use brain_testutil::env_lock;
+
+    /// The opt-in fetch flag is stripped from anywhere in `argv`, consumes
+    /// no value (it is a switch, not a dial), and leaves everything else
+    /// untouched -- including the default path, where it must be a complete
+    /// no-op.
+    #[test]
+    fn parse_autofetch_strips_the_flag_from_anywhere() {
+        let (on, rest) = parse_autofetch(["brain", "--autofetch", "flux2", "generate"].map(String::from).to_vec());
+        assert!(on);
+        assert_eq!(rest, ["brain", "flux2", "generate"].map(String::from).to_vec());
+
+        let (on, rest) = parse_autofetch(["brain", "serve", "--autofetch", "--openai", "8787"].map(String::from).to_vec());
+        assert!(on);
+        assert_eq!(rest, ["brain", "serve", "--openai", "8787"].map(String::from).to_vec());
+
+        let (on, rest) = parse_autofetch(["brain", "caps"].map(String::from).to_vec());
+        assert!(!on, "absent must be off");
+        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
+    }
+
+    /// Publishing is the flag setting the one variable every fetch site
+    /// gates on; an explicitly typed flag outranks an inherited opt-out,
+    /// the same flag-beats-env rule `--brain-data-dir` applies.
+    #[test]
+    fn apply_autofetch_publishes_the_opt_in_over_an_inherited_opt_out() {
+        let _serial = env_lock();
+        std::env::set_var("BRAIN_AUTO_FETCH", "0");
+        apply_autofetch(false);
+        assert_eq!(std::env::var("BRAIN_AUTO_FETCH").as_deref(), Ok("0"), "no flag must not touch the environment");
+        apply_autofetch(true);
+        assert_eq!(std::env::var("BRAIN_AUTO_FETCH").as_deref(), Ok("1"), "the flag outranks an inherited =0");
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+    }
+
+    /// The same two-directional discipline the memory ceilings and the
+    /// data-dir flag get: documented AND stripped.
+    #[test]
+    fn the_autofetch_flag_is_documented_and_stripped() {
+        assert!(HELP.contains("--autofetch"), "--autofetch is implemented but absent from `brain help`");
+        let (on, rest) = parse_autofetch(["brain".to_string(), "--autofetch".to_string(), "caps".to_string()].to_vec());
+        assert!(on);
+        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec(), "`brain help` documents --autofetch, which parse_autofetch does not strip");
+    }
 
     /// The memory ceilings are stripped from anywhere in `argv`, parse human
     /// sizes, and consume exactly their own value token.
