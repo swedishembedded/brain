@@ -20,7 +20,8 @@ const HELP: &str = "brain flux2 <cmd>
                                     # progressively more of the source; 0 returns it. The
                                     # same sampler runs at every value, so 0.99 is a hair
                                     # from 1.0. The reference conditions at EVERY strength.
-           [--ref-cond-scale S]     # linear size of the conditioning copy of the --strength
+           [--ref-resolution-scale S]
+                                    # linear size of the conditioning copy of the --strength
                                     # init reference, 0..1 (default 0.75). 1.0 = full size
                                     # (same token cost as --strength 1.0); 0 = do not
                                     # condition on it at all (cheapest: the reference then
@@ -32,7 +33,7 @@ const HELP: &str = "brain flux2 <cmd>
                                     # quadratic, so an unscaled camera photo would cost more
                                     # than the generation itself. Pass 0 for no bound. The
                                     # --strength/--mask init reference is never bounded -- its
-                                    # size is pinned by that role; use --ref-cond-scale for it.
+                                    # size is pinned by that role; use --ref-resolution-scale for it.
            [--mask <mask.png>]      # WHITE = regenerate, BLACK = preserve the first
                                     # --ref exactly (which must be at the output size);
                                     # greys blend. Omit = regenerate everything.
@@ -137,7 +138,7 @@ pub const DEFAULT_REF_EDGE: u32 = 512;
 /// `anchored` is true when `refs[0]` seeds the init latent - under
 /// `--strength < 1` or `--mask`. That reference is then pinned to the output
 /// size and must never be bounded; a caller wanting ITS conditioning cost down
-/// has `--ref-cond-scale`, which exists for exactly this asymmetry.
+/// has `--ref-resolution-scale`, which exists for exactly this asymmetry.
 fn ref_bound(i: usize, anchored: bool, ref_size: Option<u32>) -> Option<u32> {
     if i == 0 && anchored {
         return None;
@@ -177,11 +178,17 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--steps" => o.steps = Some(need(i)?.parse().map_err(|e| format!("--steps: {e}"))?),
             "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--strength" => o.strength = Some(need(i)?.parse().map_err(|e| format!("--strength: {e}"))?),
-            "--ref-cond-scale" => {
-                o.ref_cond_scale = need(i)?.parse().map_err(|e| format!("--ref-cond-scale: {e}"))?;
-                if !(0.0..=1.0).contains(&o.ref_cond_scale) {
-                    return Err(format!("--ref-cond-scale must be in 0..=1 (got {})", o.ref_cond_scale));
+            "--ref-resolution-scale" => {
+                o.ref_resolution_scale = need(i)?.parse().map_err(|e| format!("--ref-resolution-scale: {e}"))?;
+                if !(0.0..=1.0).contains(&o.ref_resolution_scale) {
+                    return Err(format!("--ref-resolution-scale must be in 0..=1 (got {})", o.ref_resolution_scale));
                 }
+            }
+            // A dedicated error rather than "unknown flag": a script carrying
+            // the old spelling should be told where the dial went, not left to
+            // find it in the help text.
+            "--ref-cond-scale" => {
+                return Err("--ref-cond-scale was renamed to --ref-resolution-scale (the same 0..=1 dial)".into())
             }
             "--guidance" => o.guidance = need(i)?.parse().map_err(|e| format!("--guidance: {e}"))?,
             "--variant" => variant_name = need(i)?.clone(),
@@ -275,7 +282,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     eprintln!("flux2: model {} ({}, {})", model_name.as_deref().unwrap_or(&paths.dit), variant_name, precision.name());
     let n_gen = (o.height / 16) * (o.width / 16);
     // Every supplied reference conditions the model; under `--strength` the
-    // first one does so at `--ref-cond-scale` of its own size *and* seeds the
+    // first one does so at `--ref-resolution-scale` of its own size *and* seeds the
     // init latent. Print the per-reference breakdown, not just the total:
     // reference tokens are what decides whether a run fits the card, and a
     // bare "N + M" does not say which reference spent them or at what size.
@@ -288,7 +295,7 @@ fn generate(args: &[String]) -> Result<(), String> {
                 "flux2: ref {i} {rw}x{rh} -> conditions at {cw}x{ch} = {} tokens{role}",
                 (ch / 16) * (cw / 16)
             ),
-            None => eprintln!("flux2: ref {i} {rw}x{rh} -> no conditioning tokens (--ref-cond-scale 0{role})"),
+            None => eprintln!("flux2: ref {i} {rw}x{rh} -> no conditioning tokens (--ref-resolution-scale 0{role})"),
         }
     }
     eprintln!("flux2: building pipeline ({n_gen} generated + {n_ref} reference tokens) ...");
@@ -488,7 +495,7 @@ mod ref_size_tests {
     /// conditioning: it is VAE-encoded into the starting latent, and that role
     /// pins it to the output size. Shrinking it there is not a cost saving,
     /// it is a broken run - and the caller who wants that reference's
-    /// CONDITIONING cost down already has `--ref-cond-scale`, which is defined
+    /// CONDITIONING cost down already has `--ref-resolution-scale`, which is defined
     /// against exactly this asymmetry.
     ///
     /// Without this the two flags cannot be used together at all, which is why

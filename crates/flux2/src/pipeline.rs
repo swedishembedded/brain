@@ -62,7 +62,7 @@ impl Paths {
 /// see the photograph - so under `strength < 1` the first reference does
 /// double duty: it is the init latent *and* it is attended to. Because the
 /// init role pins it to the output size, its conditioning copy is downscaled
-/// by [`GenOpts::ref_cond_scale`]; reference tokens cost attention
+/// by [`GenOpts::ref_resolution_scale`]; reference tokens cost attention
 /// quadratically, and a full-size copy of a same-size reference doubles the
 /// image half of the joint sequence.
 ///
@@ -76,7 +76,7 @@ pub fn cond_sizes(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> Vec<Option<(
         .enumerate()
         .map(|(i, &(_, h, w))| {
             if i == 0 && init {
-                init_cond_size(opts.ref_cond_scale, h, w)
+                init_cond_size(opts.ref_resolution_scale, h, w)
             } else {
                 Some((h, w))
             }
@@ -136,7 +136,7 @@ pub struct GenOpts {
     /// whether the model can see the reference: the reference images
     /// condition the DiT through their tokens at **every** value, including
     /// under `strength`, where the first one is both the init latent and a
-    /// conditioning input ([`GenOpts::ref_cond_scale`], [`cond_sizes`]).
+    /// conditioning input ([`GenOpts::ref_resolution_scale`], [`cond_sizes`]).
     pub strength: Option<f32>,
     /// None → the variant default (4 distilled / 50 base).
     pub steps: Option<u32>,
@@ -170,16 +170,16 @@ pub struct GenOpts {
     /// init latent. The default is a downscale, because reference tokens are
     /// quadratic in the attention and a full-size copy of a same-size
     /// reference doubles the image half of the joint sequence.
-    pub ref_cond_scale: f32,
+    pub ref_resolution_scale: f32,
 }
 
-/// Default [`GenOpts::ref_cond_scale`]: the conditioning copy of the init
+/// Default [`GenOpts::ref_resolution_scale`]: the conditioning copy of the init
 /// reference is three quarters of its linear size, i.e. a bit over half its
 /// tokens. Reference *resolution* is the architecture-preservation dial, so
 /// this is a fidelity/cost trade and not an implementation detail; the value
 /// is the one that produced the staging results this behaviour was built
-/// for. Raise it with `--ref-cond-scale` when the card has room.
-pub const DEFAULT_REF_COND_SCALE: f32 = 0.75;
+/// for. Raise it with `--ref-resolution-scale` when the card has room.
+pub const DEFAULT_REF_RESOLUTION_SCALE: f32 = 0.75;
 
 impl Default for GenOpts {
     fn default() -> Self {
@@ -191,7 +191,7 @@ impl Default for GenOpts {
             guidance: 4.0,
             seed: 0,
             mask: None,
-            ref_cond_scale: DEFAULT_REF_COND_SCALE,
+            ref_resolution_scale: DEFAULT_REF_RESOLUTION_SCALE,
         }
     }
 }
@@ -1925,7 +1925,7 @@ mod tests {
             guidance: 4.0,
             seed: 11,
             mask,
-            ref_cond_scale: DEFAULT_REF_COND_SCALE,
+            ref_resolution_scale: DEFAULT_REF_RESOLUTION_SCALE,
         };
         let req = BatchRequest {
             prompt: "a staged living room".into(),
@@ -2056,7 +2056,7 @@ mod tests {
     /// must NOT decide whether the DiT can see the photograph. Under
     /// `strength < 1` the first reference does double duty: it is the init
     /// latent AND it contributes conditioning tokens, at
-    /// [`GenOpts::ref_cond_scale`] of its own size (the init role pins it to
+    /// [`GenOpts::ref_resolution_scale`] of its own size (the init role pins it to
     /// the output size, so it is the one reference whose conditioning
     /// resolution the caller cannot pick by choosing a file).
     #[test]
@@ -2080,15 +2080,15 @@ mod tests {
         // The dial reaches both ends: 1.0 is the full-size conditioning copy
         // (exactly what strength 1.0 costs), 0.0 switches it off entirely -
         // the documented escape hatch back to the old, cheap behaviour.
-        let full_cond = GenOpts { ref_cond_scale: 1.0, ..with_str.clone() };
+        let full_cond = GenOpts { ref_resolution_scale: 1.0, ..with_str.clone() };
         assert_eq!(ref_tokens(&refs[..1], &full_cond), 48 * 64);
-        let off = GenOpts { ref_cond_scale: 0.0, ..with_str.clone() };
+        let off = GenOpts { ref_resolution_scale: 0.0, ..with_str.clone() };
         assert_eq!(ref_tokens(&refs[..1], &off), 0);
 
         // strength == 1.0 consumes no init latent, so nothing is downscaled
         // and the dial does not apply. This is the path that already works.
         for scale in [0.0, 0.75, 1.0] {
-            let full = GenOpts { strength: Some(1.0), ref_cond_scale: scale, ..base.clone() };
+            let full = GenOpts { strength: Some(1.0), ref_resolution_scale: scale, ..base.clone() };
             assert_eq!(ref_tokens(&refs, &full), 2 * 48 * 64, "scale {scale}");
         }
     }
@@ -2109,8 +2109,8 @@ mod tests {
         let cases = [
             GenOpts { strength: None, ..base.clone() },
             GenOpts { strength: Some(0.4), ..base.clone() },
-            GenOpts { strength: Some(0.4), ref_cond_scale: 1.0, ..base.clone() },
-            GenOpts { strength: Some(0.4), ref_cond_scale: 0.0, ..base.clone() },
+            GenOpts { strength: Some(0.4), ref_resolution_scale: 1.0, ..base.clone() },
+            GenOpts { strength: Some(0.4), ref_resolution_scale: 0.0, ..base.clone() },
             GenOpts { strength: Some(1.0), ..base.clone() },
         ];
         for (n, opts) in cases.iter().enumerate() {
@@ -2182,7 +2182,7 @@ mod tests {
         );
 
         // 96x128 at the default 0.75 -> 72x96 floored to /16 -> 64x96 -> 4x6.
-        let (ch_px, cw_px) = init_cond_size(opts.ref_cond_scale, h, w).expect("dial is on");
+        let (ch_px, cw_px) = init_cond_size(opts.ref_resolution_scale, h, w).expect("dial is on");
         assert_eq!((ch_px, cw_px), (64, 96));
         let small = resize_ref(&src.0, h, w, ch_px, cw_px);
         let want = d.encode_image(&small, ch_px, cw_px).expect("stub encode");
@@ -2315,7 +2315,7 @@ mod tests {
     }
 
     /// One [`Flow`] render of `source(h, w)` at `strength`, everything else
-    /// fixed. `ref_cond_scale` is 1.0 so the conditioning copy is the
+    /// fixed. `ref_resolution_scale` is 1.0 so the conditioning copy is the
     /// reference at its own size on **both** sides of the `strength < 1`
     /// branch: the only thing the gates below vary is the dial.
     fn run_flow(strength: f32, w: u32, h: u32) -> Vec<u8> {
@@ -2328,7 +2328,7 @@ mod tests {
                 strength: Some(strength),
                 steps: Some(12),
                 seed: 7,
-                ref_cond_scale: 1.0,
+                ref_resolution_scale: 1.0,
                 ..GenOpts::default()
             },
             cancel: Default::default(),

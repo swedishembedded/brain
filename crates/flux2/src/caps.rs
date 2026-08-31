@@ -149,7 +149,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         // supplies the reference blob itself, so the only reference whose
         // resolution it cannot pick is the `strength` init latent - which is
         // exactly the one this default is for.
-        ref_cond_scale: crate::pipeline::DEFAULT_REF_COND_SCALE,
+        ref_resolution_scale: crate::pipeline::DEFAULT_REF_RESOLUTION_SCALE,
     };
     // `lora_scale` is ComfyUI's `strength_model`, not a value read from the
     // adapter file - third-party LoRAs carry no alpha, so this is the dial.
