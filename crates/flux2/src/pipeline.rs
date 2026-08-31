@@ -150,8 +150,16 @@ pub struct GenOpts {
     /// under `strength`, where the first one is both the init latent and a
     /// conditioning input ([`GenOpts::ref_resolution_scale`], [`cond_sizes`]).
     pub strength: Option<f32>,
-    /// None → the variant default (4 distilled / 50 base).
+    /// None → the variant default (4 distilled / 50 base). On a distilled
+    /// variant the count is FIXED at 4 - BFL ships the klein samplers as
+    /// fixed-param models - and an explicit `steps` is ignored unless
+    /// [`GenOpts::experimental_steps`] opted in ([`resolved_steps`]).
     pub steps: Option<u32>,
+    /// Honor `steps` on a distilled variant, whose step count is otherwise
+    /// locked to the 4 the checkpoint ships with. Off by default: a
+    /// distilled model sampled at any other count is an experiment, not a
+    /// supported mode (`--experimental-steps`).
+    pub experimental_steps: bool,
     /// CFG scale — only meaningful for the undistilled base variants.
     pub guidance: f32,
     pub seed: u64,
@@ -198,6 +206,7 @@ impl Default for GenOpts {
             height: 1024,
             strength: None,
             steps: None,
+            experimental_steps: false,
             guidance: 4.0,
             seed: 0,
             mask: None,
@@ -1663,10 +1672,23 @@ pub struct BatchRequest {
     pub cancel: capability::CancelToken,
 }
 
+/// The step count a run actually integrates: the caller's [`GenOpts::steps`],
+/// except on a distilled variant, which ships a FIXED 4-step sampler (BFL
+/// marks the step count a fixed param of the klein checkpoints) and ignores
+/// the caller's count unless [`GenOpts::experimental_steps`] opted in.
+/// Variant-specific by construction: the same options resolve to the fixed
+/// schedule on klein and to the caller's wish on the base models.
+pub fn resolved_steps(opts: &GenOpts, distilled: bool) -> u32 {
+    if distilled && !opts.experimental_steps {
+        return 4;
+    }
+    opts.steps.unwrap_or(if distilled { 4 } else { 50 })
+}
+
 impl BatchRequest {
-    /// Resolved step count (`opts.steps` or the variant default).
+    /// Resolved step count ([`resolved_steps`] on this request's options).
     fn steps_for(&self, distilled: bool) -> usize {
-        self.opts.steps.unwrap_or(if distilled { 4 } else { 50 }) as usize
+        resolved_steps(&self.opts, distilled) as usize
     }
 }
 
@@ -1946,6 +1968,7 @@ mod tests {
             height: h,
             strength: Some(0.9),
             steps: Some(4),
+            experimental_steps: false,
             guidance: 4.0,
             seed: 11,
             mask,
@@ -2131,7 +2154,14 @@ mod tests {
     fn the_joint_sequence_is_exactly_what_the_pipeline_was_sized_for() {
         let (w, h) = (128u32, 96u32);
         let refs = [source(h, w), source(h, w)];
-        let base = GenOpts { width: w, height: h, steps: Some(2), seed: 5, ..GenOpts::default() };
+        let base = GenOpts {
+            width: w,
+            height: h,
+            steps: Some(2),
+            experimental_steps: true, // this gate is about sizing, at 2 steps
+            seed: 5,
+            ..GenOpts::default()
+        };
         let cases = [
             GenOpts { strength: None, ..base.clone() },
             GenOpts { strength: Some(0.4), ..base.clone() },
@@ -2189,6 +2219,7 @@ mod tests {
                 height: h,
                 strength: Some(0.95),
                 steps: Some(2),
+                experimental_steps: true, // 2 steps suffice to see the tail
                 seed: 3,
                 ref_resolution_scale: scale,
                 ..GenOpts::default()
@@ -2283,6 +2314,7 @@ mod tests {
                     height: h,
                     strength,
                     steps: Some(steps as u32),
+                    experimental_steps: true, // the schedule is the subject
                     seed: 7,
                     ..GenOpts::default()
                 },
@@ -2362,6 +2394,7 @@ mod tests {
                 height: h,
                 strength: Some(strength),
                 steps: Some(12),
+                experimental_steps: true, // the 12-step dial walk is the subject
                 seed: 7,
                 ref_resolution_scale: 1.0,
                 ..GenOpts::default()
@@ -2453,6 +2486,7 @@ mod tests {
                     height: h,
                     strength: Some(s),
                     steps: Some(steps as u32),
+                    experimental_steps: true, // the schedule is the subject
                     seed: 7,
                     ..GenOpts::default()
                 },
@@ -2594,6 +2628,67 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("output size"), "{err}");
         assert!(err.contains("128x96") && err.contains("96x128"), "{err}");
+    }
+
+    /// **Gate 14 - a distilled variant runs its fixed sampler.** BFL ships
+    /// the klein models as fixed-param checkpoints: 4 steps, guidance 1.0, no
+    /// CFG. Honouring a caller's `--steps 12` there silently sampled a
+    /// 4-step distilled schedule at whatever count was named, which is not a
+    /// mode the checkpoint supports. The count is locked unless the override
+    /// is explicit, and the base variants - which have no fixed sampler -
+    /// keep taking the caller's count.
+    #[test]
+    fn a_distilled_variant_runs_its_fixed_step_count_unless_overridden() {
+        let (w, h) = (128u32, 96u32);
+        let n_gen = ((h / 16) * (w / 16)) as usize;
+        let run = |d: Stub, experimental: bool| -> Vec<f32> {
+            let req = BatchRequest {
+                prompt: "a staged bedroom".into(),
+                refs: vec![source(h, w)],
+                opts: GenOpts {
+                    width: w,
+                    height: h,
+                    steps: Some(12),
+                    experimental_steps: experimental,
+                    ..GenOpts::default()
+                },
+                cancel: Default::default(),
+            };
+            generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+                .pop()
+                .unwrap()
+                .expect("stub generation");
+            d.sigmas.borrow().as_slice().to_vec()
+        };
+
+        // The stub IS distilled (klein-4b), so the lock applies to it: 12
+        // requested, the fixed 4-step schedule delivered.
+        assert!(Stub::new().cfg().distilled, "the stub must be distilled for the lock to bite");
+        assert_eq!(run(Stub::new(), false), &diffusion::scheduler::klein_sigmas(4, n_gen)[..4]);
+        // The override is explicit and does exactly what it says.
+        assert_eq!(run(Stub::new(), true), &diffusion::scheduler::klein_sigmas(12, n_gen)[..12]);
+
+        // A base variant has no fixed sampler: the caller's count stands.
+        let base = Stub {
+            cfg: Flux2Config { distilled: false, ..Flux2Config::klein_4b() },
+            seen: Default::default(),
+            sigmas: Default::default(),
+        };
+        let req = BatchRequest {
+            prompt: "a staged bedroom".into(),
+            refs: vec![source(h, w)],
+            opts: GenOpts { width: w, height: h, steps: Some(12), guidance: 1.0, ..GenOpts::default() },
+            cancel: Default::default(),
+        };
+        generate_batch_on(&base, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation");
+        assert_eq!(
+            base.sigmas.borrow().as_slice(),
+            &diffusion::scheduler::klein_sigmas(12, n_gen)[..12],
+            "a base variant honours the caller's step count"
+        );
     }
 
     /// A `w x h` interleaved-RGB `[0,1]` horizontal ramp. Smooth, so a correct

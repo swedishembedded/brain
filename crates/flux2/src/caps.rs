@@ -145,6 +145,9 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         // finds as a reference image. Declared here rather than hidden behind
         // `..Default::default()` so the gap is visible at the decode site.
         mask: None,
+        // No wire parameter: a served call never overrides the distilled
+        // fixed step count.
+        experimental_steps: false,
         // No wire parameter yet: over the capability interface the caller
         // supplies the reference blob itself, so the only reference whose
         // resolution it cannot pick is the `strength` init latent - which is

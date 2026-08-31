@@ -12,6 +12,11 @@ use flux2::{AdapterSpec, Flux2Config, GenOpts, Paths, Pipeline};
 const HELP: &str = "brain flux2 <cmd>
   generate --prompt <text> --out <out.ppm> [--width W] [--height H]
            [--steps N] [--seed S] [--guidance G] [--variant klein-4b|klein-9b|base-4b|base-9b]
+                                    # on the distilled klein variants the sampler is FIXED (4
+                                    # steps, guidance 1.0, no CFG - BFL ships both as fixed
+                                    # params): --steps is ignored there, --guidance is a no-op
+                                    # and warned about; --experimental-steps honours --steps
+                                    # again for experiments that accept that
            [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only);
                                     # .gguf defaults to int8 and rejects explicit fp32
            [--strength S]           # brain extension: img2img anchoring dial, 0..1, on the
@@ -181,6 +186,13 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--width" => want_w = Some(need(i)?.parse().map_err(|e| format!("--width: {e}"))?),
             "--height" => want_h = Some(need(i)?.parse().map_err(|e| format!("--height: {e}"))?),
             "--steps" => o.steps = Some(need(i)?.parse().map_err(|e| format!("--steps: {e}"))?),
+            // A boolean flag, so it consumes no value - `continue` past the
+            // `i += 2` the value-taking arms use.
+            "--experimental-steps" => {
+                o.experimental_steps = true;
+                i += 1;
+                continue;
+            }
             "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--strength" => o.strength = Some(need(i)?.parse().map_err(|e| format!("--strength: {e}"))?),
             "--ref-resolution-scale" => {
@@ -282,9 +294,23 @@ fn generate(args: &[String]) -> Result<(), String> {
     // Omitted `--precision` therefore follows the source; an explicit fp32
     // request is rejected rather than silently changing it.
     precision = flux2::pipeline::effective_dit_precision(&paths.dit, precision, precision_was_explicit)?;
+    // Resolve the sampler the variant actually runs, and say so. BFL ships
+    // the distilled klein models as fixed-param checkpoints (4 steps,
+    // guidance 1.0, no CFG): a caller's --steps is ignored there unless
+    // --experimental-steps opted in, and --guidance is a no-op the run
+    // warns about rather than silently swallowing.
+    let steps = flux2::pipeline::resolved_steps(&o, variant.distilled);
+    if variant.distilled {
+        if let Some(s) = o.steps.filter(|_| !o.experimental_steps) {
+            eprintln!("flux2: {variant_name} is distilled (fixed 4-step sampler); --steps {s} ignored (pass --experimental-steps to override)");
+        }
+        if o.guidance > 1.0 {
+            eprintln!("flux2: warning: --guidance {} is a no-op on distilled {variant_name} (guidance is fixed at 1.0, no CFG)", o.guidance);
+        }
+    }
     // Which model this run is actually about to load, before anything is
     // loaded.
-    eprintln!("flux2: model {} ({}, {})", model_name.as_deref().unwrap_or(&paths.dit), variant_name, precision.name());
+    eprintln!("flux2: model {} ({}, {}, steps {steps})", model_name.as_deref().unwrap_or(&paths.dit), variant_name, precision.name());
     let n_gen = (o.height / 16) * (o.width / 16);
     // Every supplied reference conditions the model; under `--strength` the
     // first one does so at `--ref-resolution-scale` of its own size *and* seeds the
