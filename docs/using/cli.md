@@ -207,6 +207,20 @@ a terminal:
   six shards still costs ten lines, not sixty. No carriage returns, no escape
   sequences, one greppable fact per line.
 
+Auto-fetch downloads (a `<vendor>/<repo>` id a model command resolves when
+`--autofetch` is on) draw the *same* reporter, on **stderr** - the command's
+stdout carries its own output - with a `fetched <bytes> in <time>` line when
+the download finishes.
+
+### Weight loading
+
+Once a model command starts reading weights from disk, it prints one line on
+**stderr** under its architecture's name - `ltxv load <file> 34% (2.1
+GiB/6.2 GiB)` - redrawn in place on a terminal as the checkpoint streams in,
+committed to the scrollback when the file is done. A pipe or a log gets one
+plain completion line per file instead. Serve and pull keep their own output
+surfaces.
+
 ### Where the weights land
 
 `--brain-data-dir <DIR>` sets brain's data root; models live in

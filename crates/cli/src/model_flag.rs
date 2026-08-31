@@ -32,7 +32,7 @@
 //! ergonomics then you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::Path;
 
 use brain_modelref::ModelRef;
@@ -106,14 +106,15 @@ fn resolve_with(arg: &str, role: &str, store_root: Option<&Path>, hub: &dyn brai
         }
         eprintln!("brain: {arg}: no local copy - downloading ...");
         let plan = brain_modelstore::plan(&reference, &store, hub).map_err(|e| format!("--model {arg}: {e}"))?;
-        let mut last: HashMap<String, u32> = HashMap::new();
-        let local = crate::supply::execute_plan(&store, hub, &plan, arg, &mut |name, got, total| {
-            let Some(total) = total else { return };
-            if let Some(pct) = crate::supply::next_download_pct_bucket(got, total, last.get(name).copied()) {
-                eprintln!("brain: {arg}: downloading {name} ... {pct}%");
-                last.insert(name.to_string(), pct);
-            }
-        })?;
+        // Progress on stderr: the command's stdout carries its own output.
+        let mut err = std::io::stderr();
+        let mode = crate::pull_cli::Mode::of(err.is_terminal());
+        let (local, moved, secs) = crate::supply::execute_plan_reported(&store, hub, &plan, arg, mode, &mut err)?;
+        eprintln!(
+            "brain: {arg}: fetched {} in {}",
+            crate::pull_cli::human_bytes(moved),
+            crate::pull_cli::human_secs(secs)
+        );
         // The plan's reference, not the argument's: a recipe that CHOSE
         // between interchangeable artifacts (a GGUF release resolving to one
         // quant) records the choice there, and that choice is the canonical

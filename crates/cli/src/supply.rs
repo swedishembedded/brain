@@ -21,6 +21,7 @@
 //! checkpoint.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -456,15 +457,43 @@ fn default_weights_from_local(arch: &str, local: &brain_modelstore::LocalModel) 
 fn fetch_one_ref(default_ref: &str, store: &Store, hub: &dyn Hub) -> Result<brain_modelstore::LocalModel, String> {
     let reference = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
     let plan = brain_modelstore::plan(&reference, store, hub).map_err(|e| format!("{default_ref}: {e}"))?;
-    let mut last_pct: HashMap<String, u32> = HashMap::new();
-    execute_plan(store, hub, &plan, default_ref, &mut |name, got, total| {
-        if let Some(total) = total {
-            if let Some(bucket) = next_download_pct_bucket(got, total, last_pct.get(name).copied()) {
-                residency::log::info(&format!("{default_ref}: downloading {name} {bucket}%"));
-                last_pct.insert(name.to_string(), bucket);
-            }
-        }
-    })
+    // Progress on stderr: this runs inside a model command whose stdout
+    // carries the command's own output.
+    let mut err = std::io::stderr();
+    let mode = crate::pull_cli::Mode::of(err.is_terminal());
+    let (local, moved, secs) =
+        execute_plan_reported(store, hub, &plan, default_ref, mode, &mut err)?;
+    eprintln!(
+        "brain: {default_ref}: fetched {} in {}",
+        crate::pull_cli::human_bytes(moved),
+        crate::pull_cli::human_secs(secs)
+    );
+    Ok(local)
+}
+
+/// Run an already-built [`brain_modelstore::Plan`] to completion, rendering
+/// the downloads through [`crate::pull_cli::Reporter`] - the same progress
+/// shape `brain pull` draws, because an auto-fetch download IS a pull, just
+/// one the user did not spell out by name. Returns the now-servable model
+/// plus what moved and how long it took, so the caller states the outcome
+/// once, its own way. `mode` and `out` are parameters rather than reaching
+/// for stderr here, so the rendering is testable byte-for-byte.
+///
+/// `label` is what the reporter shows (the reference the user typed, or the
+/// one the command resolved).
+pub(crate) fn execute_plan_reported(
+    store: &Store,
+    hub: &dyn Hub,
+    plan: &brain_modelstore::Plan,
+    label: &str,
+    mode: crate::pull_cli::Mode,
+    out: &mut dyn std::io::Write,
+) -> Result<(brain_modelstore::LocalModel, u64, f64), String> {
+    let remaining = brain_modelstore::remaining_download(store, hub, plan).map_err(|e| format!("{label}: {e}"))?;
+    let mut reporter = crate::pull_cli::Reporter::new(mode, out, label, remaining);
+    let model = execute_plan(store, hub, plan, label, &mut |name, got, total| reporter.on_bytes(name, got, total))?;
+    let (moved, secs) = reporter.finish();
+    Ok((model, moved, secs))
 }
 
 /// Run an already-built [`brain_modelstore::Plan`] to completion: download
@@ -472,11 +501,11 @@ fn fetch_one_ref(default_ref: &str, store: &Store, hub: &dyn Hub) -> Result<brai
 /// deferred, and return the now-servable model.
 ///
 /// The one implementation of "materialize this plan" in the CLI. Auto-fetch
-/// reaches it through [`fetch_one_ref`] with a `residency::log` progress
-/// closure; `brain pull` (`crate::pull_cli`) reaches it directly with a
-/// closure that draws a progress bar. Making `brain pull` the explicit
-/// spelling of the operation auto-fetch already performs is the whole point
-/// -- two code paths that fetch models would be two sets of bugs.
+/// reaches it through [`execute_plan_reported`]; `brain pull`
+/// (`crate::pull_cli`) reaches it directly with a closure that draws a
+/// progress bar. Making `brain pull` the explicit spelling of the operation
+/// auto-fetch already performs is the whole point -- two code paths that
+/// fetch models would be two sets of bugs.
 ///
 /// `label` is what the caller calls this model in messages (a `default_ref`
 /// string, or the reference the user typed).
@@ -836,6 +865,45 @@ pub(crate) mod tests {
         // total == 0 has no meaningful percentage and must never divide by it.
         assert_eq!(next_download_pct_bucket(0, 0, None), None);
         assert_eq!(next_download_pct_bucket(500, 0, None), None);
+    }
+
+    /// A reported fetch renders progress the way `brain pull` does - one
+    /// budgeted ladder of plain percentage lines piped, a bar on a terminal -
+    /// and hands back what moved, for the caller's own single outcome line.
+    /// (Pipe mode plus a byte sink here: deterministic lines, no pty.)
+    #[test]
+    fn a_reported_fetch_renders_pull_style_progress_and_reports_what_moved() {
+        // Fresh every run: pid + start time, so the dir is never a
+        // pre-existing path and nothing old is ever deleted to make room.
+        let dir = std::env::temp_dir().join(format!(
+            "brain-supply-reported-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::new(&dir);
+        let (config, weights) = tiny_qwen3_hf_files();
+        let mut hub = FakeHub::new();
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", config.clone());
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", weights.clone());
+        let reference = ModelRef::parse("Qwen/Qwen3-0.6B").unwrap();
+        let plan = brain_modelstore::plan(&reference, &store, &hub).unwrap();
+        let mut sink: Vec<u8> = Vec::new();
+        let (_local, moved, _secs) = execute_plan_reported(
+            &store,
+            &hub,
+            &plan,
+            "Qwen/Qwen3-0.6B",
+            crate::pull_cli::Mode::Pipe,
+            &mut sink,
+        )
+        .unwrap();
+        // Only downloads move bytes; the deferred convert does not report.
+        assert_eq!(moved, (config.len() + weights.len()) as u64);
+        let out = String::from_utf8(sink).unwrap();
+        assert!(out.contains("100%"), "the ladder reaches 100%: {out:?}");
+        assert!(!out.contains('\r'), "pipe mode has no carriage returns: {out:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
