@@ -393,9 +393,21 @@ fn maybe_inject_default_weights(arch: &str, rest: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `std::env` is process-global, and cargo runs a binary's tests on
+    /// parallel threads: tests that set and remove `BRAIN_FLUX2_*` /
+    /// `BRAIN_WAN_*` variables race each other's assertions unless
+    /// serialized. Every env-mutating test below holds this for its whole
+    /// body.
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
     #[test]
@@ -455,6 +467,7 @@ mod tests {
     /// than on "declares weights_env".
     #[test]
     fn a_fully_configured_weights_env_architecture_skips_the_default_fetch() {
+        let _serial = env_lock();
         let a = brain_arch::by_id("flux2").expect("flux2 row");
         let vars: Vec<&str> = a.weights_env.iter().map(|(v, _)| *v).collect();
         assert!(vars.len() >= 2, "flux2 should declare several roles");
@@ -544,6 +557,7 @@ mod tests {
     /// neither set nor named still leaves the fetch in place.
     #[test]
     fn a_model_flag_counts_as_naming_the_primary_weights() {
+        let _serial = env_lock();
         let vars: Vec<_> = brain_arch::by_id("flux2").expect("flux2 row").weights_env.iter().map(|(v, _)| *v).collect();
         for &var in &vars {
             std::env::remove_var(var);
@@ -635,6 +649,7 @@ mod tests {
 
     #[test]
     fn explicit_weight_flags_suppress_the_auto_fetch() {
+        let _serial = env_lock();
         // `wan` declares four roles; naming all four on the command line must
         // stop the 17.6 GB default-ref fetch, and naming three must not.
         assert_eq!(flag_twin("wan", "BRAIN_WAN_DIT"), "--dit");
