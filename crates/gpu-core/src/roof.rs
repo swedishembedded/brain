@@ -1069,6 +1069,16 @@ mod tests {
     ///    (currently permanently-closed) `caps().numeric.f16` gate - exactly
     ///    as `native_f16.rs` measures the real mechanism directly rather than
     ///    through a flag nothing sets.
+    ///
+    /// The two probes are independent calibration loops on separate device
+    /// handles seconds apart, so the comparison samples the machine at two
+    /// different moments - and the fast lane runs suites in parallel, so
+    /// concurrent load can independently depress either side by more than
+    /// the f16-vs-fp32 margin (observed once: f16 265 vs fp32 279 GFLOP/s
+    /// under a 4-thread lane, passing in isolation immediately after). The
+    /// halves are therefore interleaved for several rounds and compared
+    /// best-vs-best: both sides then sample the same clock/thermal window,
+    /// and one depressed sample cannot decide a hardware-invariant verdict.
     #[test]
     fn f16_roof_is_none_while_uncapped_and_never_slower_than_fp32_where_hardware_supports_it() {
         if skip_gpu() {
@@ -1098,7 +1108,20 @@ mod tests {
             );
             return;
         }
-        let (Some(fp32), Some(fp16)) = (measure_compute(&gpu), measure_f16(&gpu)) else {
+        let (mut best_fp32, mut best_fp16) = (None, None);
+        for _ in 0..5 {
+            if let Some(v) = measure_compute(&gpu) {
+                if best_fp32.is_none_or(|b| v > b) {
+                    best_fp32 = Some(v);
+                }
+            }
+            if let Some(v) = measure_f16(&gpu) {
+                if best_fp16.is_none_or(|b| v > b) {
+                    best_fp16 = Some(v);
+                }
+            }
+        }
+        let (Some(fp32), Some(fp16)) = (best_fp32, best_fp16) else {
             return; // unprobeable device - callers print `-`, never a guess
         };
         assert!(fp16.is_finite() && fp16 > 0.0, "f16 roof {fp16}");
