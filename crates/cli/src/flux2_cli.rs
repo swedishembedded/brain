@@ -14,11 +14,15 @@ const HELP: &str = "brain flux2 <cmd>
            [--steps N] [--seed S] [--guidance G] [--variant klein-4b|klein-9b|base-4b|base-9b]
            [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only);
                                     # .gguf defaults to int8 and rejects explicit fp32
-           [--strength S]           # img2img anchoring dial, 0..1, on the first --ref
-                                    # (which must then be at the output size). 1.0 = free
-                                    # generation conditioned on the reference; lower anchors
-                                    # progressively more of the source; 0 returns it. The
-                                    # same sampler runs at every value, so 0.99 is a hair
+           [--strength S]           # brain extension: img2img anchoring dial, 0..1, on the
+                                    # first --ref (which must then be at the output size).
+                                    # 1.0 = free generation conditioned on the reference;
+                                    # lower anchors progressively more of the source; 0 IS
+                                    # the source (exact codec round trip, no denoise step).
+                                    # The schedule is COMPRESSED into [0,S] - upstream
+                                    # diffusers slices its timestep list instead, which a
+                                    # distilled few-step sampler cannot survive - so the
+                                    # same sampler runs at every value and 0.99 is a hair
                                     # from 1.0. The reference conditions at EVERY strength.
            [--ref-resolution-scale S]
                                     # linear size of the conditioning copy of the FIRST --ref,

@@ -125,8 +125,9 @@ pub struct GenOpts {
     /// the scene). With `Some(s)` the first reference is VAE-encoded and the
     /// trajectory starts at noise level `s` from
     /// `x_σ = (1−σ)·x₀ + σ·ε` - the rectified-flow forward process - so
-    /// structure is anchored to the source. Small `s` = faithful, `0` returns
-    /// the source through the codec.
+    /// structure is anchored to the source. Small `s` = faithful, `0` (or
+    /// lower) IS the source: no schedule is integrated and no denoiser
+    /// evaluation runs, so the output is the exact VAE codec round trip.
     ///
     /// A **smooth dial, not a mode switch**: the descent from `s` is the
     /// free-generation schedule scaled into `[0, s]`
@@ -134,6 +135,14 @@ pub struct GenOpts {
     /// `0.99` renders a hair from what `1.0` renders instead of doing a
     /// different job. Lowering `s` lowers every sigma and raises the source's
     /// weight in the init latent, so preservation only ever increases.
+    ///
+    /// This option is brain's own extension, not an upstream FLUX.2
+    /// parameter, and its semantics are a **compressed** schedule, not
+    /// diffusers' timestep slicing: upstream cuts the timestep list at
+    /// `strength`, which a distilled few-step sampler cannot survive (its
+    /// shifted schedule has no low-noise entries to slice from), so brain
+    /// scales the whole shape into `[0, s]` instead and keeps every requested
+    /// step. See [`img2img_sigmas`].
     ///
     /// This is how much of the denoise starts from the init latent, NOT
     /// whether the model can see the reference: the reference images
@@ -1507,9 +1516,16 @@ fn denoise_group_on<D: Denoiser>(
         // img2img: start partway down the schedule from the source latent.
         // `x_σ = (1−σ)·x₀ + σ·ε` is the same forward process the trainer
         // uses (`modelgrad::make_flow_batch`), so the model sees exactly
-        // the distribution it was trained on at that σ.
-        let (mut lat, start, sigmas) = if img2img {
-            let st = o.strength.unwrap_or(1.0).clamp(1e-3, 1.0);
+        // the distribution it was trained on at that σ. At `strength 0` the
+        // requested image IS the source: the lane skips the schedule and the
+        // sampler entirely (`steps 0` keeps it out of the denoise loop below)
+        // and the decoder receives `x₀` untouched, which is the exact codec
+        // round trip the option documents.
+        let st = o.strength.unwrap_or(1.0);
+        let zero = img2img && st <= 0.0;
+        let (mut lat, start, sigmas) = if zero {
+            (src.as_ref().expect("img2img encodes the source above").clone(), 0usize, Vec::new())
+        } else if img2img {
             let sigmas = img2img_sigmas(st, steps, n_gen);
             let x0 = src.as_ref().expect("img2img encodes the source above");
             let lat: Vec<f32> =
@@ -1521,15 +1537,17 @@ fn denoise_group_on<D: Denoiser>(
         // Seed the preserved region on the source's own trajectory before
         // the first forward, not just after each step: otherwise the model
         // spends step 1 looking at pure noise where the walls should be.
-        if let Some(p) = &preserve {
-            crate::mask::blend(&mut lat, &p.mask, &p.src, &p.noise, sigmas[start], cfg.in_channels);
+        // (Nothing to seed on a zero-strength lane: it never leaves `x₀`, and
+        // with nowhere to regenerate the mask has nothing to do.)
+        if let (Some(p), Some(&s0)) = (&preserve, sigmas.first()) {
+            crate::mask::blend(&mut lat, &p.mask, &p.src, &p.noise, s0, cfg.in_channels);
         }
         lanes.push(Lane {
             idx: i,
             lh,
             lw,
             n_gen,
-            steps,
+            steps: if zero { 0 } else { steps },
             guidance: o.guidance,
             ctx,
             ctx_uncond,
@@ -2499,10 +2517,13 @@ mod tests {
         assert!(dist[0] - dist[dist.len() - 1] > 0.3, "dial has no range: {dist:?}");
     }
 
-    /// **Gate 13 - `--strength 0` returns the photograph.** Within the VAE
-    /// round trip, which is the floor for anything that edits in latent space.
-    /// The free run is measured against the same bar to prove the bar is not
-    /// one anything would clear.
+    /// **Gate 13 - `--strength 0` returns the photograph.** Byte for byte the
+    /// codec round trip, which is the floor for anything that edits in latent
+    /// space, and with NO denoiser evaluation at all: the option promises the
+    /// source, not a barely-noised sampling of it, so the lane skips the
+    /// schedule and the sampler and goes straight to the decoder. The free
+    /// run is measured against the same bar to prove the bar is not one
+    /// anything would clear.
     #[test]
     fn a_vanishing_strength_returns_the_source() {
         let (w, h) = (128u32, 96u32);
@@ -2511,9 +2532,29 @@ mod tests {
         let rt = d
             .decode_tokens(&d.encode_image(&chw, sh, sw).unwrap(), (h / 16) as usize, (w / 16) as usize)
             .unwrap();
-        let (cos, rel) = agreement(&run_flow(0.0, w, h), &rt);
-        assert!(cos > 0.9995, "strength 0: cosine {cos}, rel_l2 {rel}");
-        assert!(rel < 0.02, "strength 0: cosine {cos}, rel_l2 {rel}");
+        let req = BatchRequest {
+            prompt: "a staged bedroom".into(),
+            refs: vec![source(h, w)],
+            opts: GenOpts {
+                width: w,
+                height: h,
+                strength: Some(0.0),
+                steps: Some(12),
+                seed: 7,
+                ref_resolution_scale: 1.0,
+                ..GenOpts::default()
+            },
+            cancel: Default::default(),
+        };
+        let got = generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .expect("stub generation")
+            .0;
+        assert_eq!(got, rt, "strength 0 must BE the codec round trip, byte for byte");
+        assert!(d.seen.borrow().is_empty(), "no denoiser evaluation may run at strength 0");
+        assert!(d.sigmas.borrow().is_empty(), "no schedule may be integrated at strength 0");
+
         let (cf, rf) = agreement(&run_flow(1.0, w, h), &rt);
         assert!(cf < 0.9995 || rf > 0.02, "a free run cleared the bar: cosine {cf}, rel_l2 {rf}");
     }
