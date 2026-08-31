@@ -1650,8 +1650,14 @@ a metric that isn't there was simply forgotten.
   the vendored specs from upstream with the **`api-sync`** command (`.claude/commands/
   api-sync.md`), then adapt brain to any drift and re-green the conformance tests.
 - **No absolute paths in source - anywhere.** Never hardcode a machine-specific
-  absolute path (`/data/…`, `/home/…`, `/tmp/…`) in `crates/**`: not in code, not
-  in a test `const`, not as a runtime default, not in a doc comment. Two homes for
+  absolute path (`/data/…`, `/home/…`, `/tmp/…`): not in code, not in a test
+  `const`, not as a runtime default, not in a doc comment. `/data/…` - the dev
+  box's data mount - is banned in EVERY tracked file, in any form: code, prose,
+  an overridable `${VAR:-/data/...}` script default, a rule-text example. The
+  only thing allowed to contain it is pattern text that names the root as a
+  class (a gate regex, this sentence). `/home/…` and friends are banned as
+  path-starting literals in `crates/**` and sanctioned only as overridable
+  script defaults. Two homes for
   what used to be hardcoded:
   1. **Test / parity fixtures** live under the **gitignored `testdata/` tree** -
      inputs and goldens ONLY (audio/image/text fixtures, dumped-golden tensors);
@@ -1674,9 +1680,10 @@ a metric that isn't there was simply forgotten.
      **`make fetch/testdata`** (`scripts/data/fetch-testdata.sh`) - it hard-links from
      a local mirror, fetching only files not already present, organised as a tree
      (`testdata/<domain>/<model>/…`); there is currently no URL-download fallback
-     (say so if you add one - don't leave the claim stale). The mirror location is
-     an overridable script variable - the ONE permitted place a machine path may
-     appear in `crates/**`'s fixture-resolution path.
+     (say so if you add one - don't leave the claim stale). The mirror location
+     comes from the `BRAIN_*_MIRROR` variables (plus `BRAIN_MODELS_DIR`); no
+     machine path is baked in, not even as an overridable default - an unset
+     mirror is reported missing, with the variable to set.
   2. **In-repo artifacts** (`out/…` build outputs, `scratchpad/…`) are resolved
      **repo-relative** (`concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/…")`), never
      as an absolute literal.
@@ -1690,8 +1697,9 @@ a metric that isn't there was simply forgotten.
   whose example values are not ours to edit. (A `/data/`
   substring mid-string - a URL, or a torch-archive-internal `…/data/<key>` - is
   not a filesystem path and is fine.) `scripts/` and `tools/` get the equivalent
-  check via `make check/scripts` (below) - they are not `crates/**`, but they are
-  not exempt from the spirit of this rule either.
+  check via `make check/scripts` (below), and the `/data/…` ban is enforced
+  repo-wide - any tracked file, both modes of the gate - by
+  `scripts/gates/check-no-machine-paths.sh`.
 - **`scripts/` vs `tools/`.** `scripts/` is repo automation - invoked by a
   Makefile target or a bats test, nothing else. `tools/` is developer utilities a
   human runs by hand (golden dumpers, converters, benchmarks) - it needs

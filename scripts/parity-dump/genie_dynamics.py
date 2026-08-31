@@ -15,7 +15,12 @@ Outputs (gitignored): scratchpad/parity/genie_dynamics_{ids.u32,actions.f32,logi
 """
 import os, sys
 
-REPO = os.environ.get("BRAIN_GENIEREDUX_REPO", "/data/workspace/resources/world-models/repos/GenieRedux")
+REPO = os.environ.get("BRAIN_GENIEREDUX_REPO") or "resources/world-models/repos/GenieRedux"
+if not os.path.isdir(REPO):
+    sys.exit(
+        f"GenieRedux checkout not found at {REPO!r} - set BRAIN_GENIEREDUX_REPO "
+        "to the repo (the dump imports its models/ package)"
+    )
 TOK = "scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt"
 DYN = "scratchpad/wm-checkpoints/GenieRedux_Guided_CoinRun_80mln_v1.0.pt"
 OUT = "scratchpad/parity"

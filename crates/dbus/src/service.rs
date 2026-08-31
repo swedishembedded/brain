@@ -947,7 +947,7 @@ mod tests {
                 Supply::Fetchable
             }
             fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
-                Err("hub error: /data/workspace/secret-internal-path unreachable".to_string())
+                Err("hub error: /abs/workspace/secret-internal-path unreachable".to_string())
             }
         }
         let mgr = Manager::new(empty_exec()).with_supplier(Some(std::sync::Arc::new(AlwaysFails) as std::sync::Arc<dyn residency::ModelSupplier>));

@@ -6,8 +6,7 @@
 //!
 //! See `crates/qwen35moe/src/config.rs` for the architecture summary.
 //! Built against the real `Qwen/Qwen3.5-35B-A3B` checkpoint's
-//! `config.json`/`modeling_qwen3_5_moe.py` (see
-//! `/data/workspace/resources/qwen3.5/` for the reference sources).
+//! `config.json`/`modeling_qwen3_5_moe.py`.
 
 pub mod caps;
 pub mod config;

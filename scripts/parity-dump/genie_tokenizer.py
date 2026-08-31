@@ -16,7 +16,12 @@ genie_tokenizer_idx.u32, genie_tokenizer_meta.txt
 """
 import os, sys, struct
 
-REPO = os.environ.get("BRAIN_GENIEREDUX_REPO", "/data/workspace/resources/world-models/repos/GenieRedux")
+REPO = os.environ.get("BRAIN_GENIEREDUX_REPO") or "resources/world-models/repos/GenieRedux"
+if not os.path.isdir(REPO):
+    sys.exit(
+        f"GenieRedux checkout not found at {REPO!r} - set BRAIN_GENIEREDUX_REPO "
+        "to the repo (the dump imports its models/ package)"
+    )
 CKPT = "scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt"
 OUT = "scratchpad/parity"
 

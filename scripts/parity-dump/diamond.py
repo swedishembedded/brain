@@ -23,9 +23,13 @@ import pathlib
 import subprocess
 import sys
 
-DIAMOND_REPO = pathlib.Path(
-    os.environ.get("BRAIN_DIAMOND_REPO", "/data/workspace/resources/world-models/repos/diamond")
-)
+_repo = os.environ.get("BRAIN_DIAMOND_REPO") or "resources/world-models/repos/diamond"
+if not pathlib.Path(_repo, "src").is_dir():
+    sys.exit(
+        f"diamond checkout not found at {_repo!r} - set BRAIN_DIAMOND_REPO "
+        "to the repo (the dump loads its src/models/ modules)"
+    )
+DIAMOND_REPO = pathlib.Path(_repo)
 
 import torch  # noqa: E402
 

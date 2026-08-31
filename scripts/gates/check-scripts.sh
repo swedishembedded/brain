@@ -17,10 +17,12 @@
 #      references is exactly the "nobody remembers why this exists, does it
 #      even still work" rot an unreferenced-scripts audit of this repo found.
 #   3. ABSOLUTE PATHS — no non-overridable absolute machine path
-#      (`/data/…`, `/home/…`, `/tmp/…`, …), mirroring the existing
-#      `crates/**` grep gate in AGENTS.md. The one sanctioned exception is a
-#      mirror-location default of the shape `${VAR:-/abs/path}` — an
-#      overridable variable, not a baked-in path — which this check allows.
+#      (`/home/…`, `/tmp/…`, …), mirroring the existing `crates/**` grep gate
+#      in AGENTS.md. The one sanctioned exception is an overridable default of
+#      the shape `${VAR:-/abs/path}` - a variable, not a baked-in path.
+#      `/data/…` is the exception to the exception: the dev box's data mount
+#      may not appear in ANY tracked file, not even as an overridable default
+#      (the repo-wide rule AGENTS.md states), so it is not sanctioned at all.
 #
 # Usage: scripts/gates/check-scripts.sh   (exits non-zero with every violation
 # printed, not just the first, so one run tells you everything to fix)
@@ -79,12 +81,13 @@ while IFS= read -r -d '' f; do
     # still use a placeholder (see worldmirror2_dump_reference.py), but that's a
     # documentation-quality call, not this gate's job.
     case "$trimmed" in '#'*) continue ;; esac
-    # ${VAR:-/abs/path} or os.environ.get(V, "/abs/path") — both an overridable
-    # variable with a default, not a baked-in path — are sanctioned.
-    if [[ "$full_line" =~ \$\{[A-Za-z_][A-Za-z0-9_]*:-/(data|home|tmp|opt|mnt|root)/ ]]; then
+    # ${VAR:-/abs/path} or os.environ.get(V, "/abs/path") - both an overridable
+    # variable with a default, not a baked-in path - are sanctioned, EXCEPT for
+    # /data (the repo-wide ban, see AGENTS.md): no /data default of any shape.
+    if [[ "$full_line" =~ \$\{[A-Za-z_][A-Za-z0-9_]*:-/(home|tmp|opt|mnt|root)/ ]]; then
       continue
     fi
-    if [[ "$full_line" =~ environ\.get\([^,]+,.*/(data|home|tmp|opt|mnt|root)/ ]]; then
+    if [[ "$full_line" =~ environ\.get\([^,]+,.*/(home|tmp|opt|mnt|root)/ ]]; then
       continue
     fi
     echo "  ABS PATH: $f:$lineno: $trimmed"
@@ -92,9 +95,10 @@ while IFS= read -r -d '' f; do
   done < <(grep -nP '(?<![A-Za-z0-9_])/(data|home|tmp|opt|mnt|root)/[A-Za-z0-9_./-]+' "$f" || true)
 done < <(git ls-files -z 'scripts/*.sh' 'scripts/*.py' 'tools/*.sh' 'tools/*.py')
 if [ "$abs" -gt 0 ]; then
-  echo "  $abs absolute path literal(s) — make them an overridable \${VAR:-/path}"
-  echo "  default (see scripts/data/fetch-testdata.sh's BRAIN_*_MIRROR vars), or a"
-  echo "  repo-relative path."
+  echo "  $abs absolute path literal(s) - make them env-required with a clear"
+  echo "  error, an overridable \${VAR:-/path} default (see fetch-testdata.sh's"
+  echo "  BRAIN_*_MIRROR vars), or a repo-relative path. A /data literal is"
+  echo "  banned even as a default - the data mount never appears in git."
   fail=1
 else
   echo "  ok"

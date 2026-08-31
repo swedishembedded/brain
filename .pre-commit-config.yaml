@@ -57,15 +57,16 @@ repos:
         pass_filenames: true
         stages: [pre-commit]
       - id: no-machine-paths-in-crates
-        name: "No baked-in absolute machine paths under crates/"
+        name: "No baked-in absolute machine paths; /data banned repo-wide"
         description: >-
           crates/ must resolve weights and fixtures from an env var or a CLI
-          flag, never a literal like "/data/workspace/resources/...". Such a
+          flag, never a literal like "/abs/workspace/resources/...". Such a
           path resolves on one machine; everywhere else the .exists() check
           fails and the test skips itself, so a misconfigured run is
           indistinguishable from a missing fixture - and a skipped test is
           green. AGENTS.md has stated this rule, and quoted the grep for it,
-          since long before anything ran it. See
+          since long before anything ran it. The dev box's /data mount is the
+          stricter case: banned in ANY staged file, in any form. See
           scripts/gates/check-no-machine-paths.sh. Diff-scoped here; the same
           script scans the whole tree under make check/paths.
         entry: bash scripts/gates/check-no-machine-paths.sh

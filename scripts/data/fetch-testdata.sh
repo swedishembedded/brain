@@ -69,25 +69,29 @@ fi
 #     checkpoint below is addressed by exactly the reference `brain fetch` takes,
 #     and one variable covers all of them. This replaces a per-domain
 #     `<root>/<domain>/weights/…` arrangement that predates the store and no
-#     longer exists on any box. It resolves through `$BRAIN_MODELS_DIR` first
-#     precisely because that IS the store on a configured box - the absolute
-#     default is the fallback for a shell that has not set it. Only the handful
-#     of checkpoints whose tests read them from `testdata/` are copied out of it;
-#     the rest are reported present-or-absent and left where they lie.
+#     longer exists on any box. It resolves through `$BRAIN_MODELS_DIR`
+#     because that IS the store on a configured box; with neither variable set
+#     the checkpoints are reported missing below, with the variables to set.
+#     Only the handful of checkpoints whose tests read them from `testdata/` are
+#     copied out of it; the rest are reported present-or-absent and left where
+#     they lie.
 #   * DUMPED GOLDENS and RAW TEST MEDIA - the `*_MIRROR` variables under it.
 #     These are NOT checkpoints, so they are not in the model store and have no
 #     canonical address; each one names a directory to hard-link from if you
 #     have it. A tree whose mirror is absent is reported by name together with
 #     where its contents come from (`_origin` below), because "absent" is the
 #     normal state for these - they are regenerated per box, not distributed.
-#     Their defaults are the directories these trees were last produced in on
-#     this box; none of them exists here today, and none is guessed at - a wrong
-#     guess would be a fixture that never arrives, reported as though it might.
-MODEL_MIRROR="${BRAIN_MODEL_MIRROR:-${BRAIN_MODELS_DIR:-/data/workspace/resources}}"
-ASR_MIRROR="${BRAIN_ASR_MIRROR:-/data/workspace/resources/asr}"
-VL_MIRROR="${BRAIN_VL_MIRROR:-/data/workspace/resources/vl}"
-TTS_MIRROR="${BRAIN_TTS_MIRROR:-/data/workspace/tmp/qwen3-tts-resources}"
-GOLDEN_MIRROR="${BRAIN_GOLDEN_MIRROR:-/data/workspace/resources/brain-goldens}"
+#     None of them has a baked-in default: a mirror directory is per-box state,
+#     so pointing at one is the caller's declaration - export BRAIN_MODEL_MIRROR
+#     (or BRAIN_MODELS_DIR) and the other BRAIN_*_MIRROR variables. An unset
+#     mirror behaves exactly like an absent one - its trees are reported missing
+#     with the variable to set - and none is guessed at; a wrong guess would be
+#     a fixture that never arrives, reported as though it might.
+MODEL_MIRROR="${BRAIN_MODEL_MIRROR:-${BRAIN_MODELS_DIR:-}}"
+ASR_MIRROR="${BRAIN_ASR_MIRROR:-}"
+VL_MIRROR="${BRAIN_VL_MIRROR:-}"
+TTS_MIRROR="${BRAIN_TTS_MIRROR:-}"
+GOLDEN_MIRROR="${BRAIN_GOLDEN_MIRROR:-}"
 
 added=0 skipped=0 missing=0
 # Where the tree being linked right now comes from when its mirror is absent -
@@ -118,7 +122,7 @@ _origin() {
 # whose one mirror repo holds two differently-named destinations.
 _link_from() {
   local root="$1" sub_src="$2" sub_dst="$3" extra_exclude="${4:-}"
-  local src="$root/$sub_src" dst="$DEST/$sub_dst"
+  local src="${root:+$root/}$sub_src" dst="$DEST/$sub_dst"
   if [ ! -d "$src" ]; then
     echo "  · $sub_dst: mirror '$src' absent - skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
     _origin
@@ -158,7 +162,7 @@ _link_from() {
 _link_files() {
   local root="$1" sub_src="$2" sub_dst="$3"
   shift 3
-  local src="$root/$sub_src" dst="$DEST/$sub_dst"
+  local src="${root:+$root/}$sub_src" dst="$DEST/$sub_dst"
   if [ ! -d "$src" ]; then
     echo "  · $sub_dst: mirror '$src' absent - skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
     _origin
@@ -202,8 +206,8 @@ tts_tree() { _link_from "$TTS_MIRROR" "$1" "$2"; }
 ckpt_tree() { _link_from "$MODEL_MIRROR" "$1" "$2" "${3:-}"; }
 
 echo "brain: populating testdata at $DEST, models at $MODELS_DIR"
-echo "       checkpoint mirror: $MODEL_MIRROR"
-echo "       fixture mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR"
+echo "       checkpoint mirror: ${MODEL_MIRROR:-<unset: export BRAIN_MODEL_MIRROR or BRAIN_MODELS_DIR>}"
+echo "       fixture mirrors: asr=${ASR_MIRROR:-<unset BRAIN_ASR_MIRROR>} vl=${VL_MIRROR:-<unset BRAIN_VL_MIRROR>} tts=${TTS_MIRROR:-<unset BRAIN_TTS_MIRROR>} golden=${GOLDEN_MIRROR:-<unset BRAIN_GOLDEN_MIRROR>}"
 
 # --- Checkpoints the parity tests import ------------------------------------
 # REPORTED, never fetched. Each is an upstream HF repo the model crates read out

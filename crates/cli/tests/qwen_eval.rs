@@ -18,7 +18,7 @@
 //! `tokenizer.json` + `tokenizer_config.json`), skips loudly if unset:
 //!
 //! ```text
-//! QWEN3_DIR=/data/workspace/resources/llm/qwen/qwen3-0.6b \
+//! QWEN3_DIR=/path/to/qwen3-0.6b \
 //!   cargo test --release -p brain-cli --test qwen_eval -- --ignored --nocapture
 //! ```
 

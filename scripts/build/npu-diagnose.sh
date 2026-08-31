@@ -255,7 +255,7 @@ sect "7/7 brain's own crates/npu path (best-effort, needs cargo)"
 if ! command -v cargo >/dev/null 2>&1; then
   skip "no cargo on PATH -- this layer only runs inside the devcontainer"
 else
-  export CARGO_HOME="${CARGO_HOME:-/data/resources/cargo-home}"
+  export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
   brain_out="$(cargo test -p brain-npu --release --test npu_live -- --nocapture 2>&1)"
   brain_rc=$?
   verbose "$brain_out"

@@ -606,8 +606,8 @@ kernels-table/check:
 	scripts/build/gen-kernel-table.py --check
 
 # Regenerate the DIAMOND parity fixtures (gitignored - never committed) from
-# the reference implementation in resources/world-models/repos/diamond.
-# Needs python3 + torch; see docs/world-models/FIXTURES.md for provenance.
+# the reference implementation (resources/world-models/repos/diamond, or set
+# BRAIN_DIAMOND_REPO). Needs python3 + torch; see docs/world-models/FIXTURES.md.
 wm-fixtures:
 	python3 scripts/parity-dump/diamond.py --out crates/diamond/tests/fixtures/diamond
 

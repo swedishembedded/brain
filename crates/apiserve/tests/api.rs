@@ -1895,7 +1895,7 @@ async fn a_failed_fetch_404s_without_leaking_the_internal_error_reason() {
             residency::Supply::Fetchable
         }
         fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
-            Err("hub error: /data/workspace/secret-internal-path unreachable".to_string())
+            Err("hub error: /abs/workspace/secret-internal-path unreachable".to_string())
         }
     }
     let key = "sk-brain-test-key".to_string();

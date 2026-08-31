@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-# No baked-in absolute machine paths under crates/, docs/, or .agents/.
+# No baked-in absolute machine paths under crates/, docs/, or .agents/ - plus a
+# repo-wide ban on /data/... (the dev box's data mount): ANY tracked file.
 #
 # Two distinct failure modes, two checks:
 #
 #  1. crates/**/*.rs: a weight or fixture location belongs in an env var or a
-#     CLI flag. A literal like "/data/workspace/resources/..." resolves on
+#     CLI flag. A literal like "/abs/workspace/resources/..." resolves on
 #     exactly one machine; on every other it fails the `.exists()` check and
 #     the test skips itself, which reads as "the fixture is absent" rather
 #     than "the path is wrong". That is the worst possible failure mode for a
@@ -16,14 +17,14 @@
 #     e.g. a usage example in a doc comment - which the original
 #     quoted-string-literal-only pattern missed (real incident: four
 #     `crates/qwen35/tests/*.rs` usage-example doc comments shipped a literal
-#     "/data/workspace/..." that no gate ever ran over).
+#     "/abs/workspace/..." that no gate ever ran over).
 #  2. docs/**/*.md and .agents/**/*.md: these are prose/example text, not
 #     compiled code, so the failure mode is different (a misleading example
 #     shown to a human, not a silently-skipped test) but the fix is the same
 #     - show a placeholder like `[path/to/qwen3.8]`, never a literal that only
 #     resolves on the machine that happened to write it. Real incident: a
 #     freshly-written docs/models/qwen35.md example shipped
-#     "/data/workspace/resources/qwen3.8" verbatim, uncaught, because this
+#     "/abs/workspace/resources/qwen3.8" verbatim, uncaught, because this
 #     gate only ever looked at crates/.
 #
 # The rule long predates this script and is written down in AGENTS.md, which
@@ -38,9 +39,11 @@
 # not make sense inside crates/.
 #
 # Usage: scripts/gates/check-no-machine-paths.sh [file ...]
-#   With no arguments, scans the whole crates/, docs/, and .agents/ trees.
-#   With arguments (how the pre-commit hook calls it), scans only those,
-#   ignoring anything outside those three.
+#   With no arguments, scans the whole crates/, docs/, and .agents/ trees for
+#   the patterns above, plus every tracked file for the repo-wide /data ban.
+#   With arguments (how the pre-commit hook calls it), scans the crates/docs/
+#   .agents files among them as above, and every file given - whatever it is -
+#   for the /data ban, the one rule with no scope carve-out.
 #
 # The per-file mode used to scan every staged file under crates/ regardless of
 # extension, so a vendored third-party fixture with a machine path in it
@@ -64,13 +67,21 @@ BARE_PATTERN='(^|[[:space:]`(=])/(data|home|tmp|opt|mnt|root)/'
 # Same, but for docs/.agents prose: /tmp is a universal, portable scratch
 # convention used constantly in illustrative shell examples everywhere (it
 # does not "resolve differently on every machine" the way a bespoke project
-# mount like /data/workspace does) - excluded here on purpose, kept in
+# mount like the data volume does) - excluded here on purpose, kept in
 # BARE_PATTERN/QUOTED_PATTERN above for crates/ code, where a hardcoded
 # /tmp/fixture path IS a real portability problem for an automated test.
 MD_PATTERN='(^|[[:space:]`(=])/(data|home|opt|mnt|root)/'
+# The repo-wide /data ban (AGENTS.md: the dev box's data mount never appears in
+# git). Matches ANY occurrence of /data/<name> - quoted, bare, mid-string, prose
+# - because the rule has no form carve-out. The [A-Za-z0-9_] continuation keeps
+# out the non-paths: a bare `/data/` root mention in rule text, a torch-archive
+# `<root>/data/<key>` key, a gitignore line. The lookbehind keeps out mid-word
+# hits like `testdata/...` and URL `host/data/...`.
+DATA_PATTERN='(?<![A-Za-z0-9_])/(data)/[A-Za-z0-9_]'
 
 rs_hits=""
 md_hits=""
+data_hits=""
 
 if [ "$#" -gt 0 ]; then
   rs_files=()
@@ -87,12 +98,14 @@ if [ "$#" -gt 0 ]; then
     rs_hits=$(printf '%s\n%s' "$quoted" "$bare_comment" | sed '/^$/d')
   fi
   [ "${#md_files[@]}" -gt 0 ] && md_hits=$(grep -nE "$MD_PATTERN" "${md_files[@]}" 2>/dev/null)
+  data_hits=$(grep -InP "$DATA_PATTERN" "$@" 2>/dev/null || true)
 else
   rs_hits=$(grep -rnE "$QUOTED_PATTERN" crates --include='*.rs' 2>/dev/null)
   md_hits=$(grep -rnE "$MD_PATTERN" docs .agents --include='*.md' 2>/dev/null)
+  data_hits=$(git grep -InP "$DATA_PATTERN" 2>/dev/null || true)
 fi
 
-hits="${rs_hits}${rs_hits:+$'\n'}${md_hits}"
+hits="${rs_hits}${rs_hits:+$'\n'}${md_hits}${data_hits:+$'\n'}${data_hits}"
 
 [ -z "$hits" ] && { [ "$#" -eq 0 ] && echo "check-no-machine-paths: OK"; exit 0; }
 
@@ -111,5 +124,9 @@ literal that only resolves on the machine that wrote it.
 
 And skip the test when it resolves to nothing. A literal path makes a
 misconfigured run look like a missing fixture, and a skipped test is green.
+
+A /data path (the dev box's data mount) may not appear in ANY tracked file -
+not in code, not in prose, not as an overridable default. Take the location
+from an env var with no baked-in default, or a repo-relative path.
 EOF
 exit 1

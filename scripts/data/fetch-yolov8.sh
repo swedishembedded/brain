@@ -9,7 +9,7 @@
 #   scripts/data/fetch-yolov8.sh [--variant yolov8n] [--out DIR]
 #
 # Defaults: variant yolov8n (nano, 80 COCO classes, 640px); out is $OUT if set,
-# else /data/resources/yolo (override with --out or $OUT).
+# else scratchpad/yolo under the repo root (override with --out or $OUT).
 # Produces  <out>/<variant>.pt  (the source) and  <out>/<variant>.brain.weights
 # (the brain checkpoint). Point brain at the latter:
 #
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 VARIANT=yolov8n
-OUT="${OUT:-/data/resources/yolo}"
+OUT="${OUT:-scratchpad/yolo}"
 ASSETS_URL=https://github.com/ultralytics/assets/releases/download/v8.2.0
 
 while [ $# -gt 0 ]; do
