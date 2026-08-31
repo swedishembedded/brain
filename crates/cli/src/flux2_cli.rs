@@ -21,11 +21,12 @@ const HELP: &str = "brain flux2 <cmd>
                                     # same sampler runs at every value, so 0.99 is a hair
                                     # from 1.0. The reference conditions at EVERY strength.
            [--ref-resolution-scale S]
-                                    # linear size of the conditioning copy of the --strength
-                                    # init reference, 0..1 (default 0.75). 1.0 = full size
-                                    # (same token cost as --strength 1.0); 0 = do not
-                                    # condition on it at all (cheapest: the reference then
-                                    # reaches the model only through the init latent)
+                                    # linear size of the conditioning copy of the FIRST --ref,
+                                    # 0..1, the same at every strength (default 1.0 = the
+                                    # reference's own size). 0 = do not condition on it at all
+                                    # (cheapest: the reference then reaches the model only
+                                    # through the init latent). Lower it to buy tokens back;
+                                    # the conditioning sequence never changes with --strength.
            [--ref <in.ppm>]...      # reference images => editing mode
            [--ref-size N]           # long edge each --ref is encoded at, before the /16
                                     # crop, preserving aspect. Never upscales. DEFAULT 512:

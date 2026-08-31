@@ -57,25 +57,28 @@ impl Paths {
 /// The pixel size at which each reference is encoded as **conditioning**, in
 /// order; `None` for a reference that contributes nothing.
 ///
-/// A supplied reference always conditions the model. `strength` decides how
+/// A supplied reference always conditions the model - `strength` decides how
 /// much of the denoise starts from the init latent, not whether the DiT can
-/// see the photograph - so under `strength < 1` the first reference does
-/// double duty: it is the init latent *and* it is attended to. Because the
-/// init role pins it to the output size, its conditioning copy is downscaled
-/// by [`GenOpts::ref_resolution_scale`]; reference tokens cost attention
-/// quadratically, and a full-size copy of a same-size reference doubles the
-/// image half of the joint sequence.
+/// see the photograph. The FIRST reference is the canvas (`strength < 1`
+/// mixes it into the init latent, a mask preserves it), so the init role pins
+/// its file to the output size and the caller cannot make it cheaper by
+/// choosing a smaller file; its conditioning copy is scaled by
+/// [`GenOpts::ref_resolution_scale`] - at EVERY strength, not only below 1.0.
+/// Keeping the dial in charge across the full-strength boundary is what makes
+/// the conditioning sequence a continuous function of the options: nothing
+/// about what the model sees may jump where the pipeline switches branch.
+/// References 1.. are encoded at whatever size they were supplied at;
+/// `--ref-size` bounds those before they get here.
 ///
 /// This is the ONE place the rule is written. The sizing entry point
 /// ([`ref_tokens`]), the position-id builder and the denoise loop all read it,
 /// so a pipeline cannot be sized for a sequence different from the one it is
 /// handed.
 pub fn cond_sizes(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> Vec<Option<(u32, u32)>> {
-    let init = opts.strength.is_some_and(|s| s < 1.0);
     refs.iter()
         .enumerate()
         .map(|(i, &(_, h, w))| {
-            if i == 0 && init {
+            if i == 0 {
                 init_cond_size(opts.ref_resolution_scale, h, w)
             } else {
                 Some((h, w))
@@ -154,32 +157,30 @@ pub struct GenOpts {
     /// `None` - and an all-white mask - are bit-for-bit the unmasked
     /// behaviour.
     pub mask: Option<crate::mask::Mask>,
-    /// Linear scale of the **conditioning copy** of the init reference, in
-    /// `[0, 1]`. Only `refs[0]` under `strength < 1` is affected: that is the
-    /// one reference whose resolution the caller cannot choose, because the
-    /// init-latent role pins it to the output size. Every other reference
-    /// conditions at whatever size it was supplied at, and `strength >= 1`
-    /// (or `None`) consumes no init latent at all, so this dial does not
-    /// apply there.
+    /// Linear scale of the **conditioning copy** of the first reference, in
+    /// `[0, 1]`, at every strength. `1.0` (the default) conditions on the
+    /// reference at its own size; `0.0` switches the conditioning copy off,
+    /// which is the explicit opt-in to the cheap behaviour where the
+    /// reference reaches the model only through the init latent.
     ///
-    /// `1.0` conditions at the full output size - the largest, most faithful
-    /// and most expensive setting, and the one that makes `strength 0.999`
-    /// cost exactly what `strength 1.0` costs. `0.0` switches the
-    /// conditioning copy off, which is the explicit opt-in to the cheap
-    /// behaviour where the reference reaches the model only through the
-    /// init latent. The default is a downscale, because reference tokens are
-    /// quadratic in the attention and a full-size copy of a same-size
-    /// reference doubles the image half of the joint sequence.
+    /// This is a RESOLUTION dial, not a strength dial, and it is continuous
+    /// in `strength` by construction: the same scale applies whether the
+    /// first reference is the canvas (`strength < 1`, or a mask) or a plain
+    /// conditioning image, so `strength 0.999` and `strength 1.0` hand the
+    /// model the same token sequence. Every other reference conditions at
+    /// whatever size it was supplied at. Lower it only to buy cost down - a
+    /// full-size copy of a same-size reference doubles the image half of the
+    /// joint sequence, and attention is quadratic in that.
     pub ref_resolution_scale: f32,
 }
 
-/// Default [`GenOpts::ref_resolution_scale`]: the conditioning copy of the init
-/// reference is three quarters of its linear size, i.e. a bit over half its
-/// tokens. Reference *resolution* is the architecture-preservation dial, so
-/// this is a fidelity/cost trade and not an implementation detail; the value
-/// is the one that produced the staging results this behaviour was built
-/// for. Raise it with `--ref-resolution-scale` when the card has room.
-pub const DEFAULT_REF_RESOLUTION_SCALE: f32 = 0.75;
+/// Default [`GenOpts::ref_resolution_scale`]: the first reference conditions
+/// at its own size. Reference *resolution* is a fidelity/cost trade, and the
+/// default is the fidelity end - the setting that keeps the model input
+/// continuous in `strength`, so whatever resolution conditioned the canvas at
+/// `strength 0.999` is what conditions the plain reference at `1.0`. Pass
+/// `--ref-resolution-scale` below 1 to buy tokens back.
+pub const DEFAULT_REF_RESOLUTION_SCALE: f32 = 1.0;
 
 impl Default for GenOpts {
     fn default() -> Self {
@@ -1429,13 +1430,14 @@ fn denoise_group_on<D: Denoiser>(
         let ctx_uncond = if cf { Some(d.encode_prompt("")) } else { None };
         let mut ref_tokens: Vec<f32> = Vec::new();
         let mut failed = None;
-        // Every supplied reference conditions the model. Under `strength` the
-        // first one does double duty - it is also the init latent below - and
-        // is encoded a second time at its conditioning size, which is a
-        // downscale of itself. That second encode is the price of the model
-        // being able to SEE the reference at all: without it `strength`
-        // silently turns off conditioning, and the reference reaches the
-        // denoiser only as leftover signal in a partially-noised latent.
+        // Every supplied reference conditions the model. The first one does
+        // double duty under `strength` - it is also the init latent below -
+        // and is encoded a second time at its conditioning size
+        // (`ref_resolution_scale` of itself; a no-op at the default 1.0). That
+        // second encode is the price of the model being able to SEE the
+        // reference at all: without it `strength` silently turns off
+        // conditioning, and the reference reaches the denoiser only as
+        // leftover signal in a partially-noised latent.
         //
         // A mask does not change this either way: it reads the source latent
         // for its preserved region but leaves the token budget alone.
@@ -2051,45 +2053,47 @@ mod tests {
         (dot / (na * nb).max(1e-12), d2 / nb.max(1e-12))
     }
 
-    /// **Gate 4 - a supplied reference always conditions the model.**
-    /// `strength` decides how much denoising starts from the init latent; it
-    /// must NOT decide whether the DiT can see the photograph. Under
-    /// `strength < 1` the first reference does double duty: it is the init
-    /// latent AND it contributes conditioning tokens, at
-    /// [`GenOpts::ref_resolution_scale`] of its own size (the init role pins it to
-    /// the output size, so it is the one reference whose conditioning
-    /// resolution the caller cannot pick by choosing a file).
+    /// **Gate 4 - the conditioning resolution is decided by the dial, not by
+    /// `strength`.** `strength` decides how much denoising starts from the
+    /// init latent; the size of the conditioning copy of the first reference
+    /// is [`GenOpts::ref_resolution_scale`]'s alone, and must be the SAME at
+    /// every strength - across the `1.0` boundary most of all, where the
+    /// pipeline switches branch. A dial that jumps there makes `strength
+    /// 0.999` a different model input from `strength 1.0`, which is exactly
+    /// the discontinuity this decoupling removes.
     #[test]
-    fn a_strength_reference_still_contributes_conditioning_tokens() {
+    fn the_conditioning_resolution_does_not_depend_on_strength() {
         let refs = vec![img(768, 1024), img(768, 1024)];
         let base = GenOpts { width: 1024, height: 768, ..GenOpts::default() };
 
-        // No strength: every reference conditions at its own size.
-        let no_str = GenOpts { strength: None, ..base.clone() };
-        assert_eq!(ref_tokens(&refs, &no_str), 2 * 48 * 64);
+        for scale in [DEFAULT_REF_RESOLUTION_SCALE, 0.75, 1.0] {
+            for s in [None, Some(0.0), Some(0.4), Some(0.999), Some(1.0)] {
+                let o = GenOpts { strength: s, ref_resolution_scale: scale, ..base.clone() };
+                assert_eq!(
+                    cond_sizes(&refs, &o),
+                    vec![init_cond_size(scale, 768, 1024), Some((768, 1024))],
+                    "scale {scale}, strength {s:?}"
+                );
+            }
+        }
 
-        // With strength: the first is BOTH the init latent and conditioning,
-        // downscaled by the default 0.75 (1024x768 -> 768x576 -> 48x36).
-        let with_str = GenOpts { strength: Some(0.4), ..base.clone() };
-        assert_eq!(ref_tokens(&refs, &with_str), 36 * 48 + 48 * 64);
+        // The lone-reference case is the point of the whole mechanism: under
+        // strength the first reference is BOTH the init latent and
+        // conditioning - it conditions on ITSELF, at the dial's size.
+        for s in [None, Some(0.4), Some(1.0)] {
+            let o = GenOpts { strength: s, ..base.clone() };
+            assert_eq!(ref_tokens(&refs[..1], &o), 48 * 64, "strength {s:?}");
+        }
 
-        // A lone reference under strength conditions on ITSELF - this is the
-        // whole point. It used to contribute nothing.
-        assert_eq!(ref_tokens(&refs[..1], &with_str), 36 * 48);
-
-        // The dial reaches both ends: 1.0 is the full-size conditioning copy
-        // (exactly what strength 1.0 costs), 0.0 switches it off entirely -
-        // the documented escape hatch back to the old, cheap behaviour.
-        let full_cond = GenOpts { ref_resolution_scale: 1.0, ..with_str.clone() };
-        assert_eq!(ref_tokens(&refs[..1], &full_cond), 48 * 64);
-        let off = GenOpts { ref_resolution_scale: 0.0, ..with_str.clone() };
-        assert_eq!(ref_tokens(&refs[..1], &off), 0);
-
-        // strength == 1.0 consumes no init latent, so nothing is downscaled
-        // and the dial does not apply. This is the path that already works.
-        for scale in [0.0, 0.75, 1.0] {
-            let full = GenOpts { strength: Some(1.0), ref_resolution_scale: scale, ..base.clone() };
-            assert_eq!(ref_tokens(&refs, &full), 2 * 48 * 64, "scale {scale}");
+        // The dial reaches both ends at every strength: 1.0 is the full-size
+        // copy, 0.0 switches the conditioning copy off entirely - the
+        // documented escape hatch back to the cheap behaviour where the
+        // reference reaches the model only through the init latent.
+        for s in [None, Some(0.4), Some(1.0)] {
+            let full = GenOpts { strength: s, ref_resolution_scale: 1.0, ..base.clone() };
+            assert_eq!(ref_tokens(&refs, &full), 2 * 48 * 64, "strength {s:?}");
+            let off = GenOpts { strength: s, ref_resolution_scale: 0.0, ..base.clone() };
+            assert_eq!(ref_tokens(&refs, &off), 48 * 64, "strength {s:?}");
         }
     }
 
@@ -2141,52 +2145,61 @@ mod tests {
     /// **Gate 6 - the model actually receives the photograph.** Gate 5 pins
     /// the *length* of the joint sequence; a pipeline that padded it with
     /// zeros would pass. This pins the *content*: the tail of what the DiT
-    /// attends to is the encoding of the reference, downscaled by the
-    /// conditioning dial. Under the old behaviour that tail was empty - which
-    /// is exactly the defect: at `--strength 0.95` the DiT never saw the
-    /// user's photograph at all, and only the leftover signal in a
+    /// attends to is the encoding of the reference at the resolution the
+    /// dial names - the reference's own size at the default, a resized copy
+    /// at an explicit downscale. Under the old behaviour that tail was empty
+    /// - which is exactly the defect: at `--strength 0.95` the DiT never saw
+    /// the user's photograph at all, and only the leftover signal in a
     /// partially-noised init latent stood between the result and a fresh
     /// generation.
     #[test]
-    fn the_denoiser_attends_to_the_downscaled_init_reference() {
+    fn the_denoiser_attends_to_the_conditioning_copy_of_the_init_reference() {
         let (w, h) = (128u32, 96u32);
-        let d = Stub::new();
-        let src = source(h, w);
-        let opts = GenOpts {
-            width: w,
-            height: h,
-            strength: Some(0.95),
-            steps: Some(2),
-            seed: 3,
-            ..GenOpts::default()
-        };
-        let req = BatchRequest {
-            prompt: "a staged living room".into(),
-            refs: vec![src.clone()],
-            opts: opts.clone(),
-            cancel: Default::default(),
-        };
-        generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
-            .pop()
-            .unwrap()
-            .expect("stub generation");
+        // The default is the reference's own size: a full-strength run and a
+        // strength edit hand the model the same photograph, at the same
+        // resolution, which is the continuity Gate 4 pins from the sizes.
+        assert_eq!(DEFAULT_REF_RESOLUTION_SCALE, 1.0);
+        for scale in [DEFAULT_REF_RESOLUTION_SCALE, 0.75] {
+            let d = Stub::new();
+            let src = source(h, w);
+            let opts = GenOpts {
+                width: w,
+                height: h,
+                strength: Some(0.95),
+                steps: Some(2),
+                seed: 3,
+                ref_resolution_scale: scale,
+                ..GenOpts::default()
+            };
+            let req = BatchRequest {
+                prompt: "a staged living room".into(),
+                refs: vec![src.clone()],
+                opts,
+                cancel: Default::default(),
+            };
+            generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+                .pop()
+                .unwrap()
+                .expect("stub generation");
 
-        let ch = d.cfg.in_channels;
-        let n_gen = ((h / 16) * (w / 16)) as usize;
-        let seen = d.seen.borrow();
-        let (joint, _) = seen.first().expect("at least one forward");
-        let tail = &joint[n_gen * ch..];
-        assert!(
-            !tail.is_empty(),
-            "a supplied reference must be attended to, not merely renoised into the init latent"
-        );
+            let ch = d.cfg.in_channels;
+            let n_gen = ((h / 16) * (w / 16)) as usize;
+            let seen = d.seen.borrow();
+            let (joint, _) = seen.first().expect("at least one forward");
+            let tail = &joint[n_gen * ch..];
+            assert!(
+                !tail.is_empty(),
+                "a supplied reference must be attended to, not merely renoised into the init latent"
+            );
 
-        // 96x128 at the default 0.75 -> 72x96 floored to /16 -> 64x96 -> 4x6.
-        let (ch_px, cw_px) = init_cond_size(opts.ref_resolution_scale, h, w).expect("dial is on");
-        assert_eq!((ch_px, cw_px), (64, 96));
-        let small = resize_ref(&src.0, h, w, ch_px, cw_px);
-        let want = d.encode_image(&small, ch_px, cw_px).expect("stub encode");
-        assert_eq!(tail, &want[..], "the conditioning tail must BE the reference");
+            // The conditioning copy at `scale`, byte for byte: at 1.0 that is
+            // the reference itself (no resample), at 0.75 the resized copy -
+            // 96x128 -> 72x96 floored to /16 -> 64x96.
+            let (ch_px, cw_px) = init_cond_size(scale, h, w).expect("dial is on");
+            let small = resize_ref(&src.0, h, w, ch_px, cw_px);
+            let want = d.encode_image(&small, ch_px, cw_px).expect("stub encode");
+            assert_eq!(tail, &want[..], "scale {scale}: the conditioning tail must BE the reference");
+        }
     }
 
     /// **Gate 7 - `strength == 1.0` is byte-for-byte what it always was.**
