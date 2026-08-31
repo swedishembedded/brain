@@ -215,3 +215,84 @@ fn an_oversized_group_is_refused_naming_what_it_is_grouped_with() {
     let msg = e.to_string();
     assert!(msg.contains("dit") && msg.contains("vae"), "the refusal must name both members: {msg}");
 }
+
+/// Parts in different PHASES never co-reside: the caller frees phase k's
+/// weights before allocating phase k+1's (a diffusion pipeline evicts its
+/// denoiser before it builds the decode graph). A card is therefore charged
+/// the MAX over phases, not the sum - which is what lets a 16 GiB denoiser
+/// and a 16 GiB decode graph take turns on one 24 GiB card instead of
+/// needing two.
+#[test]
+fn parts_in_different_phases_take_turns_on_one_card() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 24 * GIB, 0);
+    let parts = [
+        Part::new("dit", MemCost::new(16 * GIB, 0)).phase(1),
+        Part::new("vae", MemCost::new(16 * GIB, 0)).phase(2),
+    ];
+    let p = plan(&parts, &b).expect("16 GiB then 16 GiB, never both: one card holds both");
+    assert_eq!(p.of("dit"), Some(Device::Gpu(0)));
+    assert_eq!(p.of("vae"), Some(Device::Gpu(0)));
+}
+
+/// Phases bound WHEN a part is live, not where it may go: two parts in the
+/// SAME phase are two simultaneous residents and are charged as a sum, exactly
+/// as unphased parts are.
+#[test]
+fn parts_in_the_same_phase_still_charge_as_a_sum() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 24 * GIB, 0);
+    let parts = [
+        Part::new("dit", MemCost::new(16 * GIB, 0)).phase(1),
+        Part::new("enc", MemCost::new(16 * GIB, 0)).phase(1),
+    ];
+    let e = plan(&parts, &b).expect_err("32 GiB live at once does not fit 24");
+    assert!(e.to_string().contains("enc"), "{e}");
+}
+
+/// A permanent part (no phase) is resident in EVERY phase, so it is charged
+/// beside each of them - the decode graph takes the denoiser's place but
+/// never the text encoder's.
+#[test]
+fn a_permanent_part_is_charged_beside_every_phase() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 24 * GIB, 0);
+    let parts = [
+        Part::new("te", MemCost::new(10 * GIB, 0)),
+        Part::new("dit", MemCost::new(16 * GIB, 0)).phase(1),
+    ];
+    let e = plan(&parts, &b).expect_err("the te outlives the denoise, so 26 GiB is really live");
+    assert!(e.to_string().contains("dit"), "{e}");
+
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 24 * GIB, 0);
+    let parts = [
+        Part::new("te", MemCost::new(6 * GIB, 0)),
+        Part::new("dit", MemCost::new(16 * GIB, 0)).phase(1),
+        Part::new("vae", MemCost::new(16 * GIB, 0)).phase(2),
+    ];
+    let p = plan(&parts, &b).expect("6 + max(16, 16) = 22 GiB peak: fits");
+    assert_eq!(p.of("dit"), Some(Device::Gpu(0)));
+    assert_eq!(p.of("vae"), Some(Device::Gpu(0)));
+}
+
+/// The FLUX.2 shape end to end: a mixed-phase `With` group (the VAE's encode
+/// graph lives while the denoiser does, its decode graph after the denoiser
+/// is evicted) is charged per member phase, so the group can join the
+/// denoiser's card.
+#[test]
+fn a_mixed_phase_group_is_charged_per_phase_not_as_a_sum() {
+    let mut b = Budgets::new();
+    b.set(Device::Gpu(0), 22 * GIB, 0);
+    let parts = [
+        Part::new("dit", MemCost::new(13 * GIB, 0)).phase(1),
+        // The VAE's two graphs share one card; encode coexists with the
+        // denoiser, decode does not.
+        Part::new("vae_enc", MemCost::new(8 * GIB, 0)).phase(1).with("vae_dec"),
+        Part::new("vae_dec", MemCost::new(11 * GIB, 0)).phase(2).with("vae_enc"),
+    ];
+    let p = plan(&parts, &b).expect("peak = max(13+8, 11) = 21 GiB: fits one card");
+    assert_eq!(p.of("dit"), Some(Device::Gpu(0)));
+    assert_eq!(p.of("vae_enc"), Some(Device::Gpu(0)));
+    assert_eq!(p.of("vae_dec"), Some(Device::Gpu(0)));
+}

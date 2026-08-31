@@ -116,7 +116,10 @@ impl BudgetPlacer {
 
 /// `gpu_core`'s wire type -> `residency`'s. Data only; no policy crosses here.
 fn to_part(n: &Need) -> Part {
-    let p = if n.unsized_ { Part::unsized_(n.name.clone()) } else { Part::new(n.name.clone(), MemCost::new(n.vram, n.ram)) };
+    let mut p = if n.unsized_ { Part::unsized_(n.name.clone()) } else { Part::new(n.name.clone(), MemCost::new(n.vram, n.ram)) };
+    if let Some(k) = n.phase {
+        p = p.phase(k);
+    }
     match &n.affinity {
         gpu_core::devices::Affinity::Any => p,
         gpu_core::devices::Affinity::With(a) => p.with(a.clone()),
@@ -233,6 +236,28 @@ mod tests {
             .expect("plan");
         assert_ne!(homes[0], homes[1], "dit and te must not share: {homes:?}");
         assert_eq!(homes[0], homes[2], "vae must follow the dit: {homes:?}");
+    }
+
+    /// The 9B-diffusion shape that motivated phases: a denoiser and a decode
+    /// graph that cannot co-reside take turns on ONE card, because the
+    /// pipeline evicts the denoiser before it builds the decode graph. The
+    /// same declaration without phases - a 24 GiB simultaneous resident on a
+    /// 23 GiB card - must still be refused.
+    #[test]
+    fn phased_parts_take_turns_on_one_card() {
+        let p = BudgetPlacer::new(budgets(&[(0, 23 * GIB)], 128 * GIB));
+        let needs = [
+            Need::sized("dit", 13 * GIB, 0).apart().phase(1),
+            Need::sized("te", 7 * GIB, 0).apart(),
+            Need::sized("vae_dec", 11 * GIB, 0).with("dit").phase(2),
+        ];
+        assert_eq!(
+            p.place(&needs).expect("peak = 7 + max(13, 11) = 20 GiB: fits"),
+            vec![Home::Gpu(0), Home::Gpu(0), Home::Gpu(0)]
+        );
+        let unphased: Vec<Need> = needs.iter().cloned().map(|n| Need { phase: None, ..n }).collect();
+        let e = p.place(&unphased).expect_err("13 + 7 + 11 = 31 GiB live at once does not fit 23");
+        assert!(e.contains("dit"), "{e}");
     }
 
     /// Nothing fits: the refusal names the part, its size and every card's

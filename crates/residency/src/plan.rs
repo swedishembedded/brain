@@ -36,7 +36,7 @@
 //! caller's job - `crates/cli` does it, exactly as it supplies the concrete
 //! [`crate::supply::ModelSupplier`] this crate only declares.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::budget::Budgets;
 use crate::place::pick_device;
@@ -73,6 +73,12 @@ pub struct Part {
     /// any other accelerator part, and CHARGED nothing - an invented number
     /// would distort every part that follows it.
     pub unsized_: bool,
+    /// The pipeline stage this part is live in, when the caller evicts between
+    /// stages. Parts in different phases never co-reside on a device - the
+    /// caller frees phase k's weights before allocating phase k+1's - so a
+    /// device is charged the MAX over phases rather than the sum. `None` (the
+    /// default) is permanent: resident in every phase, charged beside each.
+    pub phase: Option<u32>,
 }
 
 /// The cost an unsized part is *placed* by: the smallest possible non-zero
@@ -86,13 +92,13 @@ const UNSIZED_PROBE: MemCost = MemCost { vram: 1, ram: 0, npu: 0, mapped: 0 };
 impl Part {
     /// A part of known size, unconstrained.
     pub fn new(name: impl Into<String>, cost: MemCost) -> Part {
-        Part { name: name.into(), cost, affinity: Affinity::Any, unsized_: false }
+        Part { name: name.into(), cost, affinity: Affinity::Any, unsized_: false, phase: None }
     }
     /// A part whose size is not known yet - the "just give me a card" case
     /// every bare `Gpu::new` takes. It is charged nothing, so it lands on the
     /// emptiest accelerator and does not distort what follows it.
     pub fn unsized_(name: impl Into<String>) -> Part {
-        Part { name: name.into(), cost: MemCost::new(0, 0), affinity: Affinity::Any, unsized_: true }
+        Part { name: name.into(), cost: MemCost::new(0, 0), affinity: Affinity::Any, unsized_: true, phase: None }
     }
     /// Declare [`Affinity::With`].
     pub fn with(mut self, anchor: impl Into<String>) -> Part {
@@ -102,6 +108,13 @@ impl Part {
     /// Declare [`Affinity::Apart`].
     pub fn apart(mut self) -> Part {
         self.affinity = Affinity::Apart;
+        self
+    }
+    /// Declare the pipeline stage this part is live in. The caller owes the
+    /// eviction: phase k's weights must be freed before phase k+1's allocate,
+    /// on every device, or the plan's max-over-phases charge is a lie.
+    pub fn phase(mut self, phase: u32) -> Part {
+        self.phase = Some(phase);
         self
     }
 }
@@ -183,6 +196,12 @@ impl std::error::Error for Unplaceable {}
 /// [`Affinity::With`] always waits for its anchor - so affinity is
 /// declarative, not positional. The returned [`Placement`] is in the caller's
 /// declaration order regardless.
+///
+/// Phased parts ([`Part::phase`]) are charged per phase: a device's charge is
+/// its permanent bytes plus its heaviest single phase, never the sum over
+/// phases, and a group joining a card is charged only how far that peak
+/// GROWS (its marginal). This is a contract, not magic - the caller evicts
+/// phase k's weights before phase k+1's allocate, or the charge is a lie.
 pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable> {
     let mut b = budgets.clone();
     let index_of = |name: &str| parts.iter().position(|p| p.name == name);
@@ -217,11 +236,20 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
     roots.sort_unstable();
     roots.dedup();
 
-    // 2. Each group's summed cost, and whether any member asked to be Apart.
+    // 2. Each group's summed cost, its per-phase VRAM charges, and whether any
+    //    member asked to be Apart.
     struct Group {
         root: usize,
         members: Vec<usize>,
         cost: MemCost,
+        /// The VRAM each member charges the card it lands on, paired with the
+        /// phase it is live in (`None` = permanent). Phased charging is a VRAM
+        /// contract: host RAM and NPU bytes are never evicted between stages.
+        adds: Vec<(Option<u32>, u64)>,
+        /// The device peak the group reaches alone on an empty card: its
+        /// permanent bytes plus its heaviest single phase. At most
+        /// `cost.vram` (the sum), and equal to it when nothing is phased.
+        peak_vram: u64,
         unsized_: bool,
         apart: bool,
     }
@@ -230,34 +258,115 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
         .map(|&r| {
             let members: Vec<usize> = (0..parts.len()).filter(|&i| root(&mut group.clone(), i) == r).collect();
             let mut cost = MemCost::new(0, 0);
+            let mut permanent = 0u64;
+            let mut phases: BTreeMap<u32, u64> = BTreeMap::new();
             let mut unsized_ = true;
             let mut apart = false;
             for &m in &members {
                 cost.vram += parts[m].cost.vram;
                 cost.ram += parts[m].cost.ram;
                 cost.npu += parts[m].cost.npu;
+                match parts[m].phase {
+                    None => permanent += parts[m].cost.vram,
+                    Some(k) => *phases.entry(k).or_insert(0) += parts[m].cost.vram,
+                }
                 unsized_ &= parts[m].unsized_;
                 apart |= parts[m].affinity == Affinity::Apart;
             }
-            Group { root: r, members, cost, unsized_, apart }
+            let peak_vram = permanent + phases.values().copied().max().unwrap_or(0);
+            let adds: Vec<(Option<u32>, u64)> =
+                members.iter().map(|&m| (parts[m].phase, parts[m].cost.vram)).collect();
+            Group { root: r, members, cost, adds, peak_vram, unsized_, apart }
         })
         .collect();
     // Largest first: the part with the least choice of homes must choose
     // before the parts that fit anywhere take one.
-    groups.sort_by_key(|g| (std::cmp::Reverse(g.cost.vram.max(g.cost.ram).max(g.cost.npu)), g.root));
+    groups.sort_by_key(|g| (std::cmp::Reverse(g.peak_vram.max(g.cost.ram).max(g.cost.npu)), g.root));
+
+    // A card's running residency, split by phase. `peak` is what is actually
+    // live at the worst moment under the caller's eviction contract, and what
+    // the budget is charged: the group a card holds is permanent bytes plus
+    // its heaviest single phase, never the sum over phases.
+    #[derive(Default, Clone)]
+    struct Ledger {
+        permanent: u64,
+        phases: BTreeMap<u32, u64>,
+    }
+    impl Ledger {
+        fn peak(&self) -> u64 {
+            self.permanent + self.phases.values().copied().max().unwrap_or(0)
+        }
+        fn add(&mut self, phase: Option<u32>, vram: u64) {
+            match phase {
+                None => self.permanent += vram,
+                Some(k) => *self.phases.entry(k).or_insert(0) += vram,
+            }
+        }
+    }
+
+    // Choose a GPU for a group the way `pick_device` chooses for a flat cost -
+    // most free bytes wins among the cards that fit, `exclude` skipped - except
+    // that what must fit is the group's MARGINAL charge on that card: how far
+    // the card's ledger peak grows when the group lands. A flat probe cannot
+    // express this. A mixed-phase group joining a card that already holds part
+    // of its peak charges less than its own peak (the decode graph takes the
+    // denoiser's place at no cost the denoiser did not already pay), so a probe
+    // that is exact on an empty card over-refuses on a shared one.
+    fn pick_gpu(adds: &[(Option<u32>, u64)], b: &Budgets, ledgers: &HashMap<Device, Ledger>, exclude: &HashSet<Device>) -> Option<Device> {
+        let mut best: Option<(Device, u64)> = None;
+        for d in b.gpus() {
+            if exclude.contains(&d) {
+                continue;
+            }
+            let mut trial = ledgers.get(&d).cloned().unwrap_or_default();
+            let before = trial.peak();
+            for &(phase, vram) in adds {
+                trial.add(phase, vram);
+            }
+            let marginal = trial.peak() - before;
+            if b.fits_on(d, marginal) {
+                let free = b.free_on(d);
+                if best.is_none_or(|(_, f)| free > f) {
+                    best = Some((d, free));
+                }
+            }
+        }
+        best.map(|(d, _)| d)
+    }
 
     // 3. Place each group, charging it so the groups that follow see what is
     //    actually left.
     let mut placed: Vec<Option<Device>> = vec![None; parts.len()];
     let mut used: HashSet<Device> = HashSet::new();
+    let mut ledgers: HashMap<Device, Ledger> = HashMap::new();
     for g in &groups {
-        // What the group is placed BY (see `UNSIZED_PROBE`); what it is
-        // charged is always its own cost, which for an unsized group is zero.
-        let probe = if g.unsized_ { UNSIZED_PROBE } else { g.cost };
-        let dev = if g.apart {
-            pick_device(&probe, &b, &used).or_else(|| pick_device(&probe, &b, &HashSet::new()))
+        // What the group is placed BY on the flat paths (see `UNSIZED_PROBE`):
+        // its peak, not its sum - the sum over phases is never live at once.
+        let probe = if g.unsized_ {
+            UNSIZED_PROBE
         } else {
-            pick_device(&probe, &b, &HashSet::new())
+            MemCost { vram: g.peak_vram, ram: g.cost.ram, npu: g.cost.npu, mapped: 0 }
+        };
+        let apart_pick = |exclude: &HashSet<Device>| {
+            if g.cost.vram == 0 {
+                return pick_device(&probe, &b, exclude);
+            }
+            // An NPU-capable group keeps `pick_device`'s class order: its NPU
+            // bytes are unphased, so where the NPU fits, the flat probe is
+            // exact and the NPU still wins over any GPU.
+            if g.cost.npu > 0 && b.npus().iter().any(|d| b.fits_on(*d, probe.npu)) {
+                return pick_device(&probe, &b, exclude);
+            }
+            pick_gpu(&g.adds, &b, &ledgers, exclude).or_else(|| {
+                // `pick_device`'s own CPU-spill rule: the host tier takes a
+                // VRAM group only when no GPU class exists to be evicted for.
+                b.gpus().is_empty().then(|| pick_device(&probe, &b, exclude)).flatten()
+            })
+        };
+        let dev = if g.apart {
+            apart_pick(&used).or_else(|| apart_pick(&HashSet::new()))
+        } else {
+            apart_pick(&HashSet::new())
         };
         let Some(dev) = dev else {
             let mut free: Vec<(Device, u64)> = b.devices().map(|d| (d, b.free_on(d))).collect();
@@ -276,12 +385,24 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
                 } else {
                     parts[biggest].name.clone()
                 },
-                cost: g.cost,
+                cost: probe,
                 free,
                 placed: parts.iter().zip(&placed).filter_map(|(p, d)| d.map(|d| (p.name.clone(), d))).collect(),
             });
         };
-        b.alloc(dev, g.cost.on(dev));
+        match dev {
+            Device::Gpu(_) => {
+                let ledger = ledgers.entry(dev).or_default();
+                let before = ledger.peak();
+                for &(phase, vram) in &g.adds {
+                    ledger.add(phase, vram);
+                }
+                b.alloc(dev, ledger.peak() - before);
+            }
+            // Host RAM and NPU bytes are not phased (see `Group::adds`), so a
+            // group landing there is charged its full sum, as before.
+            _ => b.alloc(dev, g.cost.on(dev)),
+        }
         used.insert(dev);
         for &m in &g.members {
             placed[m] = Some(dev);

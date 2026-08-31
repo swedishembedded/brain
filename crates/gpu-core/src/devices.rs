@@ -280,6 +280,11 @@ pub struct Need {
     /// placed after it.
     pub unsized_: bool,
     pub affinity: Affinity,
+    /// The pipeline stage this part is live in, when the caller evicts between
+    /// stages (see `residency::plan::Part::phase`): parts in different phases
+    /// never co-reside, so a device is charged the max over phases rather than
+    /// the sum. `None` (the default) is permanent.
+    pub phase: Option<u32>,
 }
 
 /// A placement constraint one part declares about another.
@@ -299,12 +304,12 @@ pub enum Affinity {
 impl Need {
     /// A part of known size.
     pub fn sized(name: impl Into<String>, vram: u64, ram: u64) -> Need {
-        Need { name: name.into(), vram, ram, unsized_: false, affinity: Affinity::Any }
+        Need { name: name.into(), vram, ram, unsized_: false, affinity: Affinity::Any, phase: None }
     }
     /// A part that holds device memory nobody has costed - the "just give me a
     /// card" case a bare `Gpu::new` takes.
     pub fn unsized_(name: impl Into<String>) -> Need {
-        Need { name: name.into(), vram: 0, ram: 0, unsized_: true, affinity: Affinity::Any }
+        Need { name: name.into(), vram: 0, ram: 0, unsized_: true, affinity: Affinity::Any, phase: None }
     }
     /// Declare [`Affinity::With`].
     pub fn with(mut self, anchor: impl Into<String>) -> Need {
@@ -314,6 +319,13 @@ impl Need {
     /// Declare [`Affinity::Apart`].
     pub fn apart(mut self) -> Need {
         self.affinity = Affinity::Apart;
+        self
+    }
+    /// Declare the pipeline stage this part is live in. The caller owes the
+    /// eviction: phase k's weights must be freed before phase k+1's allocate,
+    /// on every device, or the plan's max-over-phases charge is a lie.
+    pub fn phase(mut self, phase: u32) -> Need {
+        self.phase = Some(phase);
         self
     }
 }

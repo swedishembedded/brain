@@ -15,7 +15,10 @@ use std::collections::HashMap;
 
 use checkpoint::gguf::{MmapGguf, Q8_0_BLOCK_ELEMS};
 use checkpoint::quantize::{convert, Policy, Tier};
-use flux2::pipeline::{dit_bytes, effective_dit_precision, gguf_dit_device_bytes, plan_parts, te_bytes, vae_bytes};
+use flux2::pipeline::{
+    dit_bytes, effective_dit_precision, evict_denoiser_before_decode, gguf_dit_device_bytes, part_needs, plan_parts,
+    te_bytes, vae_decoder_bytes, vae_encoder_bytes,
+};
 use gpu_core::devices::{install_placer, Placer};
 use std::sync::{Arc, Mutex, OnceLock};
 use flux2::Precision;
@@ -213,7 +216,7 @@ fn gguf_plan_uses_the_header_cost_and_the_int8_build_precision() {
     assert_eq!(te.gpu_index, Some(1));
     let needs = recorded.0.lock().unwrap().take().unwrap();
     assert_eq!(needs[0].vram, expected);
-    assert_eq!(needs[2].vram, vae_bytes(&vae, 32));
+    assert_eq!(needs[2].vram, vae_decoder_bytes(&vae, 32));
     assert_eq!(effective_dit_precision(&path, Precision::F32, false).unwrap(), Precision::Int8);
     let _ = std::fs::remove_file(path);
 }
@@ -279,7 +282,7 @@ fn the_dit_cost_follows_the_architecture_and_the_numeric_tier() {
     assert!((8.0..20.0).contains(&gib(real)), "int8 9B DiT budget out of the plausible band: {:.1} GiB", gib(real));
 }
 
-/// The VAE reservation must describe the decode that actually runs.
+/// The VAE decode reservation must describe the decode that actually runs.
 ///
 /// This is the second field failure in one assertion. Placement chose the
 /// right card, every denoise step completed, and the run died in `decoding` -
@@ -292,14 +295,14 @@ fn the_vae_reservation_covers_a_full_frame_decode() {
     let vc = vae::VaeConfig::flux2();
     // 768x1024 out = 48 x 64 latent tokens - the size that failed.
     let full_frame = 48 * 64;
-    let got = flux2::pipeline::vae_bytes(&vc, full_frame);
+    let got = flux2::pipeline::vae_decoder_bytes(&vc, full_frame);
     assert!(
         gib(got) > 6.0,
         "a full-frame decode needs far more than the flat 2 GiB this used to reserve: {:.2} GiB",
         gib(got)
     );
     // ...and it has to be the IMAGE that drives it, not a bigger constant.
-    let quarter = flux2::pipeline::vae_bytes(&vc, full_frame / 4);
+    let quarter = flux2::pipeline::vae_decoder_bytes(&vc, full_frame / 4);
     assert!(
         got > quarter + (got - quarter) / 2,
         "the reservation must grow with the output: {:.2} GiB at a quarter frame vs {:.2} GiB full",
@@ -326,8 +329,8 @@ fn references_grow_the_dit_but_not_the_decode() {
     let n_ref = 5 * 432; // five references at --ref-size 384
     let txt = c.txt_len as u64;
 
-    let bare = flux2::pipeline::part_needs(&c, &vc, Precision::Int8, txt + n_out, n_out, 1);
-    let with_refs = flux2::pipeline::part_needs(&c, &vc, Precision::Int8, txt + n_out + n_ref, n_out, 1);
+    let bare = part_needs(&c, &vc, Precision::Int8, txt + n_out, n_out, 1);
+    let with_refs = part_needs(&c, &vc, Precision::Int8, txt + n_out + n_ref, n_out, 1);
 
     let find = |v: &[gpu_core::devices::Need], n: &str| v.iter().find(|p| p.name == n).expect("part").vram;
     assert!(
@@ -335,41 +338,75 @@ fn references_grow_the_dit_but_not_the_decode() {
         "references must grow the DiT's joint-sequence scratch"
     );
     assert_eq!(
-        find(&with_refs, "vae"),
-        find(&bare, "vae"),
-        "references are encoded, never decoded: the VAE reservation must not move"
+        find(&with_refs, "vae_dec"),
+        find(&bare, "vae_dec"),
+        "references are encoded, never decoded: the decode reservation must not move"
     );
+    // What references DO add is an encode graph - declared only when a
+    // reference can occur, and live in the denoiser's phase (it is gone
+    // before the decode builds).
+    assert!(bare.iter().all(|p| p.name != "vae_enc"), "no reference, no encoder declared");
+    let enc = with_refs.iter().find(|p| p.name == "vae_enc").expect("references declare an encoder");
+    assert_eq!(enc.vram, vae_encoder_bytes(&vc, n_out));
+    assert_eq!(enc.phase, Some(1));
+    assert_eq!(enc.affinity, gpu_core::devices::Affinity::With("vae_dec".to_string()));
     // The mistake is worth GiBs, which is why it is worth a gate.
-    let wrong = flux2::pipeline::vae_bytes(&vc, n_out + n_ref);
+    let wrong = flux2::pipeline::vae_decoder_bytes(&vc, n_out + n_ref);
     assert!(
-        wrong > find(&bare, "vae") + (1u64 << 31),
+        wrong > find(&bare, "vae_dec") + (1u64 << 31),
         "the confusion this pins costs {:.2} GiB, not a rounding error",
-        gib(wrong - find(&bare, "vae"))
+        gib(wrong - find(&bare, "vae_dec"))
     );
 }
 
-/// The VAE follows the DiT (it decodes the DiT's own latents) and the text
-/// encoder is declared apart from it - the shape the placement engine relies
-/// on to spread a pipeline over two cards.
+/// The VAE decode follows the DiT (it decodes the DiT's own latents, in the
+/// denoiser's PLACE - phase 2, after the eviction), and the text encoder is
+/// declared apart from both - the shape the placement engine relies on to
+/// spread a pipeline over two cards.
 #[test]
-fn the_declared_shape_is_dit_te_apart_and_vae_with_the_dit() {
+fn the_declared_shape_is_phased_and_the_encoder_is_apart() {
     let c = flux2::Flux2Config::klein_9b();
     let vc = vae::VaeConfig::flux2();
-    let needs = flux2::pipeline::part_needs(&c, &vc, Precision::Int8, 512 + 3072, 3072, 1);
+    let needs = part_needs(&c, &vc, Precision::Int8, 512 + 3072, 3072, 1);
     let names: Vec<&str> = needs.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(names, vec!["dit", "te", "vae"]);
+    assert_eq!(names, vec!["dit", "te", "vae_dec"]);
     assert_eq!(needs[0].affinity, gpu_core::devices::Affinity::Apart);
+    assert_eq!(needs[0].phase, Some(1), "the denoiser is evicted before the decode builds");
     assert_eq!(needs[1].affinity, gpu_core::devices::Affinity::Apart);
+    assert_eq!(needs[1].phase, None, "the text encoder is resident in every phase");
     assert_eq!(needs[2].affinity, gpu_core::devices::Affinity::With("dit".to_string()));
+    assert_eq!(needs[2].phase, Some(2), "the decode graph takes the denoiser's place");
 
     // The text encoder is declared at the DiT's own numeric tier. An int8 run
     // that reserved for an f32 encoder would plan a two-card layout it does
     // not need - or refuse a one-card one that would have worked.
-    let f32_needs = flux2::pipeline::part_needs(&c, &vc, Precision::F32, 512 + 3072, 3072, 1);
+    let f32_needs = part_needs(&c, &vc, Precision::F32, 512 + 3072, 3072, 1);
     assert!(
         needs[1].vram * 2 < f32_needs[1].vram,
         "an int8 run must reserve a much smaller encoder than an f32 one: {:.2} vs {:.2} GiB",
         gib(needs[1].vram),
         gib(f32_needs[1].vram)
     );
+}
+
+/// The eviction the pipeline owes the planner: when denoiser and decode were
+/// placed on the same accelerator, the decode can only be built in the
+/// denoiser's place, so the weights must go first. A Cpu home holds no device
+/// weights, and different cards never needed to take turns.
+#[test]
+fn the_decode_evicts_the_denoiser_only_when_they_share_a_card() {
+    let h = |parts: Vec<(&str, gpu_core::devices::Home)>| {
+        gpu_core::devices::Homes::new(parts.into_iter().map(|(n, h)| (n.to_string(), h)).collect())
+    };
+    use gpu_core::devices::Home;
+    assert!(evict_denoiser_before_decode(&h(vec![("dit", Home::Gpu(1)), ("vae_dec", Home::Gpu(1))])));
+    assert!(
+        !evict_denoiser_before_decode(&h(vec![("dit", Home::Gpu(0)), ("vae_dec", Home::Gpu(1))])),
+        "different cards co-reside; nothing to evict"
+    );
+    assert!(
+        !evict_denoiser_before_decode(&h(vec![("dit", Home::Cpu), ("vae_dec", Home::Cpu)])),
+        "host residency holds no device weights to evict"
+    );
+    assert!(!evict_denoiser_before_decode(&h(vec![("dit", Home::Gpu(0))])), "no decode placement, no contract");
 }
