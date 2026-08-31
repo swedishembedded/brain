@@ -1,23 +1,47 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! **A mid-frame anchor must be realised at its instant across long-form
-//! windows.** `anchor_with_mid_real.rs` gates the single-generation case.
-//! Long-form is different in the one way that matters here: the clip is
-//! refined across several full-resolution windows, and an interior anchor's
-//! instant belongs to exactly one of them. If the routing loses the mid
-//! still - drops it, or conditions it at the wrong local instant - the
-//! trajectory interpolates start to end and glides past the middle without
-//! ever showing it, which is what real usage reports.
+//! **A mid-frame anchor must be REALISED at its instant across long-form
+//! windows - the clip has to pass through the mid image, visibly and for
+//! its full pinned span - not merely bend toward it.** `anchor_with_mid_
+//! real.rs` gates the single-generation case. Long-form is different in the
+//! one way that matters here: the clip is refined across several
+//! full-resolution windows, and an interior anchor's instant belongs to
+//! exactly one of them. If the routing loses the mid still - drops it, or
+//! conditions it at the wrong local instant - the trajectory interpolates
+//! start to end and glides past the middle without ever showing it, which
+//! is what real usage reports.
 //!
-//! The claim measured here is positional, not cosmetic: the frame of the
-//! generated clip that lies CLOSEST to the mid still must be the frame at
-//! the mid instant (within the VAE's own frame-grouping slack). The stills
-//! are decoded frames of an unconditioned reference run at the same shape -
-//! in distribution, at the exact target resolution, the same reasoning
-//! `anchor_with_mid_real.rs` uses - so an ignored mid leaves the closest
-//! approach wherever the start-to-end wander happens to dip, not at the
-//! named instant.
+//! All stills come from an unconditioned reference run at the same shape
+//! (in distribution, at the exact target resolution, the same reasoning
+//! `anchor_with_mid_real.rs` uses). Three claims, each calibrated by three
+//! measured real-22B runs (guide / pin / pin+guide - the two pin variants
+//! measured identically at the instant, so the plain pin ships):
+//!
+//! 1. **Position**: the generated frame closest to the mid still is the
+//!    frame at the mid instant (within the VAE's own frame-grouping slack).
+//!    Guide run: frame 20 at 11.62 - already positional, and NOT enough.
+//! 2. **Depth**: the delta AT the mid instant is pin-class, not
+//!    guide-class. An appended guiding block only bends the trajectory -
+//!    its best measured delta is 11.62, a one-frame dip between 16.33 and
+//!    17.71 neighbours, which reads on screen as "the motion changes
+//!    direction but nothing resembles the mid frame". The pin measured
+//!    9.25 (both variants; the start pin covers every pixel and measures
+//!    ~4, but an interior still competes with the prompt-driven motion the
+//!    clip keeps rendering AROUND it inside the pinned span, so its floor
+//!    is structurally higher and the guide's 11.62 is the number that has
+//!    to be beaten). Measured floor evidence: the unconditioned reference
+//!    clip's own frames sit 14.75-20.13 from the mid still across the same
+//!    span - the pinned clip is closer to the mid still than the moving
+//!    scene itself ever was. Gate: `<= 10.0`, between the measured pin
+//!    floor and the measured guide best.
+//! 3. **Hold**: the mid content HOLDS across the pinned slot's whole pixel
+//!    span - the latent slot owning the instant covers 8 pixel frames at
+//!    this geometry (frames 17..=24), and the causal decoder renders the
+//!    still across all of them. That is what separates the mechanisms on
+//!    screen: the guide's delta climbs straight back up outside its
+//!    one-frame dip (spread 6.09), the pin's plateau spreads only 1.18.
+//!    Gate: every span frame within 2.0 of the instant's delta.
 //!
 //! Swedish Embedded AB implements long-form video diffusion pipelines and
 //! their measurement gates for its clients. If your team needs expertise in
@@ -34,7 +58,7 @@
 //! cargo test -p brain-ltxv --test longform_mid_real -- --ignored --nocapture
 //! ```
 
-use ltxv::pipeline::{generate, generate_long, GenOpts, LongOpts, Paths};
+use ltxv::pipeline::{generate, generate_long, latent_frame_containing, GenOpts, LongOpts, Paths};
 
 const FRAMES: usize = 41;
 const MID: usize = 20;
@@ -119,9 +143,23 @@ fn the_mid_anchor_is_realised_at_its_instant_in_a_stage_major_run() {
     let d_start = mean_abs_delta(&video.frames[0], &reference.frames[0]);
     let d_mid = to_mid[MID];
     let d_end = mean_abs_delta(&video.frames[FRAMES - 1], &reference.frames[FRAMES - 1]);
+    // The pinned slot's own pixel span: the latent slot containing the mid
+    // instant covers `VAE_TEMPORAL_SCALE` pixel frames, and the causal
+    // decoder renders the still across all of them. For MID 20 at fps 8 that
+    // is latent frame 3, pixel frames 17..=24.
+    let slot_px = (1 + (latent_frame_containing(MID) - 1) * ltxv::pipeline::VAE_TEMPORAL_SCALE)..1 + latent_frame_containing(MID) * ltxv::pipeline::VAE_TEMPORAL_SCALE;
+    let span = &to_mid[slot_px.clone()];
+    let span_max = span.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    // The reference clip's own motion over the same span - how far a
+    // freely-moving scene at those frames sits from the mid still. Printed as
+    // context for future recalibration: it bounds what "close to the mid
+    // still" can even mean while the scene moves.
+    let ref_motion: Vec<f64> = (slot_px.clone()).map(|i| mean_abs_delta(&reference.frames[i], &reference.frames[MID])).collect();
 
     println!("anchor deltas: start {d_start:.2}, mid(instant) {d_mid:.2}, end {d_end:.2}");
     println!("closest approach to the mid still: frame {best_i} at {best_d:.2} (mid instant is frame {MID})");
+    println!("pinned span {slot_px:?}: video-vs-mid {span:?}");
+    println!("reference's own motion over the span: {ref_motion:?}");
     for (i, d) in to_mid.iter().enumerate().step_by(2) {
         println!("  frame {i:3}: {d:.2}");
     }
@@ -129,5 +167,13 @@ fn the_mid_anchor_is_realised_at_its_instant_in_a_stage_major_run() {
     assert!(
         (18..=22).contains(&best_i),
         "the clip's closest approach to the mid still is frame {best_i}, not the mid instant {MID}: the mid anchor is not being realised where it is conditioned (start {d_start:.2}, mid {d_mid:.2}, end {d_end:.2})"
+    );
+    assert!(
+        d_mid <= 10.0,
+        "the mid anchor is only approached (delta {d_mid:.2} at its instant), not realised: pin-class is <= 10.0 (the pin mechanism measured 9.25, the start pin's whole-frame pin ~4); guide-class bending with the mid as an appended block measured 11.62 at best (start {d_start:.2}, end {d_end:.2})"
+    );
+    assert!(
+        span_max <= d_mid + 2.0,
+        "the mid content does not HOLD across its pinned span {slot_px:?}: worst frame sits at {span_max:.2} against {d_mid:.2} at the instant (spread > 2.0) - the guide mechanism's signature, a one-frame dip between 16.33 and 17.71, not the pin's plateau (measured spread 1.18)"
     );
 }

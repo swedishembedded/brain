@@ -404,14 +404,14 @@ pub struct GenOpts {
     /// Image conditioning at one INTERIOR instant of the clip, so a single
     /// generation can be pinned at its start, its middle and its end at once.
     ///
-    /// Mechanically this is the same appended guiding block `end_frame`
-    /// already uses - `ltx_core.conditioning.types.keyframe_cond.
-    /// VideoConditionByKeyframeIndex(frame_idx=N)`, whose `frame_idx` is a raw
-    /// pixel-frame offset added to the RoPE time coordinate with no snapping
-    /// and no bound on how many items a request carries. The reference's own
-    /// `--image PATH FRAME_IDX STRENGTH` is repeatable for exactly this
-    /// reason; see [`mid_anchor_frame`] for where the default position comes
-    /// from.
+    /// Mechanically this is a PIN, not the appended guiding block `end_frame`
+    /// uses: [`conditioned_latent`] overwrites the latent slot containing
+    /// this instant with the encoded still and freezes it there (the
+    /// deviation from the reference is documented on that function - an
+    /// appended guide measurably bends the trajectory toward the instant
+    /// without ever realising the still's content). The end still stays an
+    /// appended guide; see [`mid_anchor_frame`] for where the default
+    /// position comes from.
     pub mid_frame: Option<String>,
     /// Which pixel frame [`Self::mid_frame`] anchors. `None` takes the
     /// reference's own single-interior-keyframe position - see
@@ -1149,11 +1149,15 @@ pub fn mid_anchor_frame(frames: usize, at: Option<usize>) -> Result<usize, Strin
 /// [`real_pixel_positions`]' causal fix, where latent frame 0 covers exactly
 /// one pixel frame and every later one covers [`VAE_TEMPORAL_SCALE`].
 ///
-/// Reported rather than enforced: an appended guide block carries its own RoPE
-/// position and does not overwrite this latent frame (see [`mid_anchor_frame`]
-/// on why nothing is snapped). It names the instant of the clip a caller is
-/// pointing at, which is what a log line and a window plan both need.
-fn latent_frame_containing(pixel_frame: usize) -> usize {
+/// It names the instant of the clip a caller is pointing at - the log line
+/// and the window plan both read it - and, since the mid anchor moved from
+/// an appended guide to a pin, it is also the slot [`conditioned_latent`]
+/// overwrites with the mid still (see that function's deviation note). The
+/// pixel frame itself is still not snapped to an x8 border (see
+/// [`mid_anchor_frame`]): the pin lands on the slot CONTAINING the named
+/// instant, so the still's content renders across the slot's whole pixel
+/// span.
+pub fn latent_frame_containing(pixel_frame: usize) -> usize {
     if pixel_frame == 0 {
         0
     } else {
@@ -1366,7 +1370,6 @@ struct ImageConditioning {
 fn append_image_conditioning(base_t: usize, base_positions: &[f32], base_keyframes_mask: &[f32], lh: usize, lw: usize, channels: usize, fps: f64, appended_denoise_mask: f32, blocks: &[(usize, &[f32])]) -> ImageConditioning {
     assert_eq!(base_positions.len(), 3 * base_t * 2, "append_image_conditioning: base_positions has {} values, expected {}", base_positions.len(), 3 * base_t * 2);
     assert_eq!(base_keyframes_mask.len(), base_t, "append_image_conditioning: base_keyframes_mask has {} values, expected {base_t}", base_keyframes_mask.len());
-    assert!(!blocks.is_empty(), "append_image_conditioning: blocks must be non-empty");
     let block_t = lh * lw;
     for (_, tokens) in blocks {
         assert_eq!(tokens.len(), block_t * channels, "append_image_conditioning: a block has {} values, expected {}", tokens.len(), block_t * channels);
@@ -1546,6 +1549,42 @@ struct ConditionedLatent {
 ///   tokens denoising freely. `frame_idx` is a raw pixel-frame offset onto
 ///   the RoPE time coordinate, so a block may point at any instant of the
 ///   clip, and the reference caps neither the count nor the positions.
+///   **The one deliberate deviation from the reference is the interior
+///   anchor's mechanism.** The reference would append the mid still as a
+///   third guide like any other; measured on the real 22B checkpoint
+///   (`crates/ltxv/tests/longform_mid_real.rs`), a guide BENDS the
+///   trajectory toward its instant (delta 11.62 at the mid still, against
+///   25-29 everywhere else) but never REALISES its content - attention-only
+///   pull lets the model compromise, which reads on screen as "the motion
+///   changes direction but nothing resembles the mid frame". So this port
+///   PINS the mid still into the base grid's own latent slot - the slot
+///   [`latent_frame_containing`] names - with the same in-place
+///   overwrite-and-freeze the image-to-video builder applies at frame 0
+///   (`VideoConditionByLatentIndex`'s `clean_latent[:, start:stop] = tokens`,
+///   `denoise_mask[:, start:stop] = 1 - strength`; the same freezing a masked
+///   video-to-video pass trains on). The pinned slot keeps the base grid's
+///   own positions and keyframes mask - it is a structural frame of the
+///   clip, not an appended token block - and the causal VAE renders its
+///   content across the slot's whole pixel span, so the trajectory must pass
+///   through the mid image rather than merely bend toward it. Two further
+///   variants were MEASURED and rejected against the plain pin
+///   (`crates/ltxv/tests/longform_mid_real.rs`, real 22B checkpoint, mid
+///   delta at its instant): the still also appended as a guide at the
+///   owner's instant changed nothing (9.25 either way - the pinned latent's
+///   decode dominates its pixel span, so the guide's attention-only pull has
+///   nothing left to move), and encoding the still through the video path
+///   with its span repeated (the interior slot's native 8-frame aggregation)
+///   produced a bit-identical trajectory - a constant signal's temporal
+///   aggregation IS its one-frame latent, so the cheap image-path encode is
+///   already the right pin content. The measured delta floor at the instant
+///   (~9) is the prompt-driven motion the clip keeps rendering AROUND the
+///   still's content inside the pinned span - a pinned interior still
+///   competes with the scene's own movement, where the start pin covers
+///   every pixel - and it holds across the slot's whole pixel span plus one
+///   frame of causal bleed backward, which is what "the clip passes through
+///   the mid image" looks like on screen. The end stills stay pure appended
+///   guides: those measurably work, and a pinned last latent frame would
+///   hold the clip's final second motionless.
 ///
 /// **What the difference buys, and what it does NOT.** Overwriting latent
 /// frame 0 freezes a whole latent frame of the GENERATED sequence: the
@@ -1567,10 +1606,11 @@ struct ConditionedLatent {
 /// **Which of the two runs is decided by how many stills were given, not by
 /// which ones.** One still at frame 0 and nothing else is image-to-video and
 /// takes the overwrite; every other request - including any [`GenOpts::
-/// mid_frame`] anchor - is keyframe interpolation and appends every still it
-/// was given, `frame_idx == 0` included, because that is what
-/// `image_conditionings_by_adding_guiding_latent` does. Nothing about the
-/// existing one- and two-still requests changes.
+/// mid_frame`] anchor - is keyframe interpolation. There the end stills are
+/// appended guides, `frame_idx == 0` included, because that is what
+/// `image_conditionings_by_adding_guiding_latent` does - and the mid anchor
+/// is pinned into its slot instead (see the deviation above). Nothing about
+/// the existing one- and two-still requests changes.
 ///
 /// `start`/`mid`/`end` are already-encoded `[lh*lw, channels]` latent token
 /// blocks (one real VAE encode each; the SAME image passed at both ends is
@@ -1636,6 +1676,16 @@ fn conditioned_latent(noise: Vec<f32>, base_positions: &[f32], base_keyframes_ma
             latent[off + i] = (1.0 - m) * c + m * latent[off + i];
         }
     };
+    // The mid anchor's slot on the BASE grid: the latent frame whose pixel
+    // span contains the instant it names. It must name a real interior frame
+    // - pixel frame 0 is the start still's own slot - and fit the grid the
+    // caller built; both violations are mis-routed requests, not user error.
+    let mid_slot = mid.map(|(px, _)| {
+        assert!(px >= 1, "conditioned_latent: mid anchor names pixel frame 0, which is the start still's own slot");
+        let slot = latent_frame_containing(px);
+        assert!((slot + 1) * block_t <= base_t, "conditioned_latent: mid anchor at pixel frame {px} lands in latent frame {slot}, beyond this pass's {0}-latent-frame grid", base_t / block_t);
+        slot
+    });
 
     // Image-to-video: one still at frame 0 and nothing else overwrites the
     // base video's own first latent frame.
@@ -1651,15 +1701,29 @@ fn conditioned_latent(noise: Vec<f32>, base_positions: &[f32], base_keyframes_ma
         }
     }
 
-    // Keyframe interpolation: every still appended as its own guiding block in
-    // timeline order, the base video untouched (see this function's doc). The
-    // future anchors come last: their named instants lie beyond this window's
-    // own span, and every in-window anchor sits inside it.
-    let anchors: Vec<(usize, &[f32])> = [start.map(|s| (0usize, s)), mid, end.map(|e| (frames - 1, e))].into_iter().flatten().chain(future.iter().copied()).collect();
-    let ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, &anchors);
+    // Keyframe interpolation: the end stills appended as their own guiding
+    // blocks in timeline order, the base video otherwise untouched (see this
+    // function's doc). The future anchors come last: their named instants lie
+    // beyond this window's own span, and every in-window anchor sits inside
+    // it. The mid anchor is NOT among them - it takes the pin below.
+    let anchors: Vec<(usize, &[f32])> = [start.map(|s| (0usize, s)), end.map(|e| (frames - 1, e))].into_iter().flatten().chain(future.iter().copied()).collect();
+    let mut ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, &anchors);
     let mut latent = noise;
     for (bi, (_, tokens)) in anchors.iter().enumerate() {
         mix(&mut latent, tokens, base_t + bi * block_t);
+    }
+    // The mid pin: overwrite the slot on the base grid whose pixel span
+    // contains the named instant, freeze it there (the same `1 - strength`
+    // algebra every conditioning item applies). The slot keeps the base
+    // grid's own positions and keyframes mask - it is a structural frame of
+    // the clip the trajectory must pass through, not an appended guide the
+    // model may compromise with. `mid.is_some()` and `mid_slot.is_none()`
+    // cannot disagree: both derive from the same `mid`.
+    if let (Some((_, tokens)), Some(slot)) = (mid, mid_slot) {
+        mix(&mut latent, tokens, slot * block_t);
+        let (s0, s1) = (slot * block_t, (slot + 1) * block_t);
+        ic.denoise_mask[s0..s1].fill(m);
+        ic.clean[s0 * channels..s1 * channels].copy_from_slice(tokens);
     }
     ConditionedLatent { latent, positions: ic.positions, keyframes_mask: ic.keyframes_mask, denoise_mask: ic.denoise_mask, clean: ic.clean, t: total_t }
 }
@@ -1668,14 +1732,18 @@ fn conditioned_latent(noise: Vec<f32>, base_positions: &[f32], base_keyframes_ma
 /// APPEND for a given request - `0` for image-to-video (a lone start still
 /// overwrites latent frame 0 in place), otherwise one per still given,
 /// start included. The future anchors count as stills: a start still beside
-/// any one of them is interpolation, not the overwrite. [`generate`] needs
-/// this before the stills are encoded, to draw the initial noise at the full
-/// post-conditioning length in one go (see [`conditioned_latent`]'s `noise`).
+/// any one of them is interpolation, not the overwrite. The mid anchor
+/// contributes NO block of its own - it pins into the base grid's latent
+/// slot - but its PRESENCE still flips a start still onto the interpolation
+/// mechanism, so it takes part in the decision without adding to the count.
+/// [`generate`] needs this before the stills are encoded, to draw the
+/// initial noise at the full post-conditioning length in one go (see
+/// [`conditioned_latent`]'s `noise`).
 fn conditioning_block_count(start: bool, mid: bool, end: bool, future: usize) -> usize {
     if start && !mid && !end && future == 0 {
         0
     } else {
-        usize::from(start) + usize::from(mid) + usize::from(end) + future
+        usize::from(start) + usize::from(end) + future
     }
 }
 
@@ -1804,29 +1872,31 @@ mod conditioned_latent_tests {
     }
 
     /// The block count `generate` needs BEFORE the stills are encoded, to
-    /// draw one noise vector at the full post-conditioning length.
+    /// draw one noise vector at the full post-conditioning length. The mid
+    /// anchor never appends - it pins into its owning latent slot - but its
+    /// presence still moves a start still onto the interpolation mechanism.
     #[test]
     fn appended_block_count_matches_the_mechanism_each_request_uses() {
         assert_eq!(conditioning_block_count(false, false, false, 0), 0, "unconditioned");
         assert_eq!(conditioning_block_count(true, false, false, 0), 0, "image-to-video overwrites in place");
         assert_eq!(conditioning_block_count(false, false, true, 0), 1);
-        assert_eq!(conditioning_block_count(true, false, true, 0), 2, "keyframe interpolation appends BOTH stills");
-        assert_eq!(conditioning_block_count(false, true, false, 0), 1, "a lone mid anchor is one appended guide");
-        assert_eq!(conditioning_block_count(true, true, false, 0), 2, "adding an interior anchor stops the start still from being an in-place overwrite");
-        assert_eq!(conditioning_block_count(true, true, true, 0), 3);
+        assert_eq!(conditioning_block_count(true, false, true, 0), 2, "keyframe interpolation appends BOTH end stills");
+        assert_eq!(conditioning_block_count(false, true, false, 0), 0, "a lone mid anchor pins and appends nothing");
+        assert_eq!(conditioning_block_count(true, true, false, 0), 1, "the mid pin moves the start still onto an appended guide: one block, the start's");
+        assert_eq!(conditioning_block_count(true, true, true, 0), 2, "the two end stills append; the mid pins");
         assert_eq!(conditioning_block_count(true, false, false, 1), 2, "a future anchor turns the start still into an appended guide: it appends, and so does the start");
         assert_eq!(conditioning_block_count(false, false, false, 2), 2, "future anchors alone are their own appended blocks");
     }
 
-    /// **Three anchors in one pass.** Start, middle and end each get their own
-    /// appended guiding block, carrying their own encoded content, at their
-    /// own pixel-frame position, with every token of the generated video still
-    /// free - the reference's `image_conditionings_by_adding_guiding_latent`
-    /// wraps EVERY image in `VideoConditionByKeyframeIndex` with no special
-    /// case for frame 0 and no cap on how many items a request carries.
+    /// **The mid anchor is both pinned and appended; start and end are pure
+    /// guides.** The two end stills each get their own appended guiding
+    /// block (the reference's `image_conditionings_by_adding_guiding_latent`
+    /// semantics); the interior anchor is written INTO the latent slot
+    /// containing its pixel instant, frozen there - structural, not advisory,
+    /// and appended nowhere.
     #[test]
-    fn three_anchors_append_three_guiding_blocks_at_their_own_instants() {
-        let (latent, positions, km, base_t) = base(3);
+    fn three_anchors_pin_the_mid_and_append_the_two_ends() {
+        let (latent, positions, km, base_t) = base(2);
         let (s, m, e) = (tokens(0.0), tokens(50.0), tokens(100.0));
         let mid_at = mid_anchor_frame(FRAMES, None).expect("a 9-frame clip has an interior");
         assert_eq!(mid_at, 4);
@@ -1834,55 +1904,103 @@ mod conditioned_latent_tests {
         let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), Some((mid_at, &m)), Some(&e), &[], 1.0);
 
         let block_t = LH * LW;
-        assert_eq!(c.t, base_t + 3 * block_t);
-        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..], "every token of the generated video still denoises freely");
-        assert_eq!(&c.denoise_mask[base_t..], &vec![0.0f32; 3 * block_t][..], "all three guiding blocks are frozen");
-        assert_eq!(&c.latent[..base_t * CH], &latent[..base_t * CH], "nothing is overwritten");
-        // Timeline order, each block holding its OWN image.
-        assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &s[..]);
-        assert_eq!(&c.clean[(base_t + block_t) * CH..(base_t + 2 * block_t) * CH], &m[..]);
-        assert_eq!(&c.clean[(base_t + 2 * block_t) * CH..], &e[..]);
-        // And each at its own instant: 0, 4 and 8 pixel frames at 8 frames/second.
-        for (bi, want) in [(0usize, 0.0f32), (1, 0.5), (2, 1.0)] {
-            let off = base_t + bi * block_t;
-            assert_eq!(c.positions[off * 2], want, "guiding block {bi} sits at the wrong instant");
+        assert_eq!(c.t, base_t + 2 * block_t, "only the two end stills are appended; the mid pin costs no tokens");
+        assert_eq!(&c.denoise_mask[base_t..], &vec![0.0f32; 2 * block_t][..], "both appended guiding blocks are frozen");
+        // Pixel frame 4 of a 9-frame clip sits in latent frame 1 (px [1, 9)):
+        // the pin occupies exactly that slot of the base grid.
+        let slot = latent_frame_containing(mid_at) * block_t;
+        assert_eq!(slot, block_t);
+        assert_eq!(&c.latent[slot * CH..(slot + block_t) * CH], &m[..], "the pinned slot carries the mid still, replacing its noise");
+        assert_eq!(&c.denoise_mask[slot..slot + block_t], &vec![0.0f32; block_t][..], "the pinned slot is frozen at strength 1.0");
+        assert_eq!(&c.clean[slot * CH..(slot + block_t) * CH], &m[..], "the pinned slot's clean target is the still");
+        assert_eq!(&c.denoise_mask[..slot], &vec![1.0f32; slot][..], "every other generated token still denoises freely");
+        assert_eq!(&c.denoise_mask[slot + block_t..base_t], &vec![1.0f32; base_t - slot - block_t][..]);
+        assert_eq!(&c.latent[..slot * CH], &latent[..slot * CH], "tokens outside the pin keep their own noise");
+        assert_eq!(&c.latent[(slot + block_t) * CH..base_t * CH], &latent[(slot + block_t) * CH..base_t * CH]);
+        // The pinned slot keeps the video's OWN grid positions - it is a
+        // structural frame of the clip, not an appended guide with its own
+        // one-frame-wide RoPE span.
+        for axis in 0..3 {
+            let src = &positions[axis * base_t * 2..(axis + 1) * base_t * 2];
+            let dst = &c.positions[axis * c.t * 2..(axis + 1) * c.t * 2];
+            assert_eq!(&dst[slot * 2..(slot + block_t) * 2], &src[slot * 2..(slot + block_t) * 2], "axis {axis}: the pinned slot uses the base grid's own positions");
         }
+        // The end stills land at their own instants as appended guides.
+        assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[0.0, 0.125]);
+        let second = base_t + block_t;
+        assert_eq!(&c.positions[second * 2..second * 2 + 2], &[1.0, 1.125]);
     }
 
-    /// A middle anchor with no still at either end is one appended guide and
-    /// nothing else - the mechanism does not need company.
+    /// A middle anchor with no still at either end is a pin into its slot and
+    /// nothing else - the mechanism does not need company, and no block is
+    /// appended for it.
     #[test]
-    fn a_lone_mid_anchor_appends_one_guiding_block_at_its_own_instant() {
-        let (latent, positions, km, base_t) = base(1);
+    fn a_lone_mid_anchor_pins_into_its_slot() {
+        let (latent, positions, km, base_t) = base(0);
         let m = tokens(50.0);
 
         let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, Some((4, &m)), None, &[], 1.0);
 
         let block_t = LH * LW;
-        assert_eq!(c.t, base_t + block_t);
-        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..]);
-        assert_eq!(&c.clean[base_t * CH..], &m[..]);
-        assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[0.5, 0.625], "pixel frame 4 at 8 frames/second is a one-frame-wide [4/8, 5/8) span");
+        assert_eq!(c.t, base_t, "nothing is appended");
+        let slot = latent_frame_containing(4) * block_t;
+        assert_eq!(&c.latent[slot * CH..(slot + block_t) * CH], &m[..]);
+        assert_eq!(&c.denoise_mask[slot..slot + block_t], &vec![0.0f32; block_t][..]);
+        assert_eq!(&c.clean[slot * CH..(slot + block_t) * CH], &m[..]);
+        assert_eq!(&c.denoise_mask[..slot], &vec![1.0f32; slot][..]);
+        assert_eq!(c.positions, positions, "the base grid's positions are untouched - the pin reuses its own slot");
+    }
+
+    /// A pinned mid at strength < 1.0 blends both the mask and the initial
+    /// latent exactly like every other conditioning item - the pin is the
+    /// same `1 - strength` algebra, applied to a slot of the base grid.
+    #[test]
+    fn a_pinned_mid_blends_at_strength_below_one() {
+        let (latent, positions, km, base_t) = base(0);
+        let m_img = tokens(50.0);
+        let strength = 0.8f32;
+        let m = 1.0 - strength;
+
+        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, Some((4, &m_img)), None, &[], strength);
+
+        let block_t = LH * LW;
+        let slot = latent_frame_containing(4) * block_t;
+        assert_eq!(&c.denoise_mask[slot..slot + block_t], &vec![m; block_t][..]);
+        for (i, &v) in c.latent[slot * CH..(slot + block_t) * CH].iter().enumerate() {
+            let want = (1.0 - m) * m_img[i] + m * latent[slot * CH + i];
+            assert!((v - want).abs() < 1e-5, "token {i}: the pinned slot's initial latent is lerp(clean, noise, 1-strength): got {v}, want {want}");
+        }
+    }
+
+    /// Pixel frame 0 is the start still's own slot: a mid anchor naming it is
+    /// a mis-routed request, refused loudly rather than silently pinning the
+    /// clip's first latent frame twice.
+    #[test]
+    #[should_panic(expected = "mid anchor names pixel frame 0")]
+    fn a_pinned_mid_refuses_pixel_frame_zero() {
+        let (latent, positions, km, base_t) = base(0);
+        let m = tokens(50.0);
+        let _ = conditioned_latent(latent, &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, Some((0, &m)), None, &[], 1.0);
     }
 
     /// Adding a middle anchor to a `--start-frame` run moves the start still
-    /// off the in-place overwrite and onto an appended guide, which is what
-    /// the reference's interpolation builder does with every image it is
-    /// given. The generated video's own latent frame 0 must be released when
-    /// that happens, or the clip would be pinned twice at the same instant.
+    /// off the in-place overwrite and onto an appended guide, while the mid
+    /// takes the pin - the two stills condition different mechanisms, and the
+    /// generated video's own latent frame 0 must be released for the start
+    /// guide, or the clip would be pinned twice at the same instant.
     #[test]
     fn a_mid_anchor_moves_the_start_still_from_an_overwrite_to_a_guide() {
-        let (latent, positions, km, base_t) = base(2);
+        let (latent, positions, km, base_t) = base(1);
         let (s, m) = (tokens(0.0), tokens(50.0));
 
         let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), Some((4, &m)), None, &[], 1.0);
 
         let block_t = LH * LW;
-        assert_eq!(c.t, base_t + 2 * block_t);
-        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..], "latent frame 0 is no longer overwritten");
-        assert_eq!(&c.latent[..base_t * CH], &latent[..base_t * CH], "the base video keeps its own noise");
-        assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &s[..]);
-        assert_eq!(&c.clean[(base_t + block_t) * CH..], &m[..]);
+        assert_eq!(c.t, base_t + block_t, "only the start still is appended");
+        assert_eq!(&c.denoise_mask[..base_t - block_t], &vec![1.0f32; base_t - block_t][..], "latent frame 0 is no longer overwritten");
+        let slot = latent_frame_containing(4) * block_t;
+        assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &s[..], "the start still is the appended guide");
+        assert_eq!(&c.clean[slot * CH..(slot + block_t) * CH], &m[..], "the mid still is the pin");
     }
 
     /// A future anchor rides along as its own appended block at the RAW pixel
@@ -2688,10 +2806,18 @@ fn denoise(
 /// `ltx_pipelines.distilled.DistilledPipeline.__call__` does (it calls
 /// `combined_image_conditionings` separately for stage 1 and stage 2, with
 /// `stage_1_h/stage_1_w` and then `height/width`).
-#[allow(clippy::too_many_arguments)]
-fn encode_still(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, path: &str, width: usize, height: usize, channels: usize, device: Option<&str>) -> Result<Vec<f32>, String> {
-    let (lh, lw) = (height / 32, width / 32);
-    let img_t = Instant::now();
+///
+/// This is also the right content for the mid anchor's PIN, which sits in an
+/// interior latent slot whose decoder normally aggregates 8 pixel frames:
+/// fed the same still repeated across its span instead, the encoder produced
+/// a bit-identical trajectory end to end (a constant signal's temporal
+/// aggregation IS its one-frame latent), so the pin keeps the cheap
+/// image-path encode.
+
+/// Load and resize one conditioning still to the VAE's `[-1, 1]` input
+/// range, `[3, height, width]` row-major - the part of the conditioning
+/// encodes that does not care how many frames the VAE will be fed.
+fn load_still_chw(path: &str, width: usize, height: usize) -> Result<Vec<f32>, String> {
     let img = image::open(path).map_err(|e| format!("{path}: {e}"))?.resize_exact(width as u32, height as u32, image::imageops::FilterType::Lanczos3).to_rgb8();
     let mut img_chw = vec![0f32; 3 * height * width];
     for y in 0..height {
@@ -2705,6 +2831,13 @@ fn encode_still(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, path: &str
             }
         }
     }
+    Ok(img_chw)
+}
+
+fn encode_still(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, path: &str, width: usize, height: usize, channels: usize, device: Option<&str>) -> Result<Vec<f32>, String> {
+    let (lh, lw) = (height / 32, width / 32);
+    let img_t = Instant::now();
+    let img_chw = load_still_chw(path, width, height)?;
     let enc = LtxVaeEncoder::build(vcfg, vweights, 1, height as u32, width as u32, device);
     let cond_latent_chw = enc.encode(&img_chw);
     let cond_tokens = chw_to_tc(&cond_latent_chw, channels, 1, lh, lw);
@@ -2880,7 +3013,8 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
 
     // One draw over the WHOLE post-conditioning sequence, matching
     // `GaussianNoiser._sample_noise`, which runs after every conditioning
-    // item has appended its tokens.
+    // item has appended its tokens. The mid anchor adds no block: it pins
+    // into the base grid instead of appending (see [`conditioned_latent`]).
     let blocks = conditioning_block_count(o.start_frame.is_some(), o.mid_frame.is_some(), o.end_frame.is_some(), o.future_anchors.len());
     let mut latent0 = seeded_noise((t + blocks * lh * lw) * c, o.seed ^ st.seed_salt);
     if let Some(seed_chw) = st.seed_chw {
@@ -2958,7 +3092,21 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
             let mid_tokens = o.mid_frame.as_deref().map(&enc).transpose()?;
             let mid = mid_at.zip(mid_tokens.as_deref());
             if let Some((at, _)) = mid {
-                tracing::info!(stage = st.label, mid_frame = at, latent_frame = latent_frame_containing(at), of_frames = o.frames, "mid-frame anchor placed");
+                tracing::info!(stage = st.label, mid_frame = at, latent_frame = latent_frame_containing(at), of_frames = o.frames, "mid-frame anchor pinned into its latent slot");
+            }
+            // The mid pin writes INSIDE the base range, at the pinned slot's
+            // token range, while a carried context overwrites [0, ctx_tokens)
+            // of that same range - so the pin must sit beyond the carried
+            // prefix. Window routing only ever hands this pass a mid owned by
+            // its EMITTED span, which starts a whole latent frame past the
+            // context; the refusal keeps that invariant loud instead of
+            // silently letting the context overwrite the pin.
+            if let (Some(ctx), Some((at, _))) = (&st.context, mid) {
+                let slot = latent_frame_containing(at);
+                let ctx_tokens = ctx.frames * lh * lw;
+                if slot * lh * lw < ctx_tokens {
+                    return Err(format!("the mid anchor pinned at window pixel frame {at} lands in latent frame {slot}, inside the carried context's {} latent frames: window routing must own the mid instant in this window's emitted span", ctx.frames));
+                }
             }
             // The long-form windows' future anchors: appended guides at the raw
             // local pixel positions they name, which may lie beyond this
