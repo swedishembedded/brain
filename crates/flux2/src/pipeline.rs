@@ -1487,7 +1487,11 @@ fn denoise_group_on<D: Denoiser>(
                 out[i] = Err(format!("{why} needs a reference image"));
                 continue;
             };
-            if (*rh as usize / 16) * (*rw as usize / 16) != n_gen {
+            // Per axis, not as a product: `(rh/16)*(rw/16) == n_gen` is also
+            // satisfied by a TRANSPOSED canvas (1024x768 reference, 768x1024
+            // output, both 3072 tokens), and the position ids and mask cells
+            // are built from the output grid the latent would not match.
+            if (*rh as usize / 16, *rw as usize / 16) != (lh, lw) {
                 out[i] = Err(format!(
                     "{why} needs the reference at the output size ({}x{}, got {rw}x{rh})",
                     o.width, o.height
@@ -2557,6 +2561,39 @@ mod tests {
 
         let (cf, rf) = agreement(&run_flow(1.0, w, h), &rt);
         assert!(cf < 0.9995 || rf > 0.02, "a free run cleared the bar: cosine {cf}, rel_l2 {rf}");
+    }
+
+    /// **The init reference must match the output GEOMETRY, not just the
+    /// output token count.** The check this replaces compared
+    /// `(rh/16)·(rw/16)` against `n_gen` - a scalar product a transposed
+    /// canvas satisfies: a 768x1024 reference "fits" a 1024x768 output
+    /// because both are 3072 latent tokens, and the run then denoises a
+    /// latent whose rows and columns are swapped relative to every position
+    /// id and mask cell built from the output grid. Asserted per axis.
+    #[test]
+    fn an_init_reference_must_match_the_output_geometry() {
+        // 96 high x 128 wide output, 128 high x 96 wide reference: the same
+        // token count (48), a transposed latent grid.
+        let d = Stub::new();
+        let req = BatchRequest {
+            prompt: "a staged bedroom".into(),
+            refs: vec![source(128, 96)],
+            opts: GenOpts {
+                width: 128,
+                height: 96,
+                strength: Some(0.5),
+                steps: Some(2),
+                seed: 5,
+                ..GenOpts::default()
+            },
+            cancel: Default::default(),
+        };
+        let err = generate_batch_on(&d, std::slice::from_ref(&req), &mut |_, _, _| {})
+            .pop()
+            .unwrap()
+            .unwrap_err();
+        assert!(err.contains("output size"), "{err}");
+        assert!(err.contains("128x96") && err.contains("96x128"), "{err}");
     }
 
     /// A `w x h` interleaved-RGB `[0,1]` horizontal ramp. Smooth, so a correct
