@@ -24,6 +24,7 @@ pub const PAD_TOKEN: u32 = 151643;
 /// safetensors, or BF16 GGUF), `BRAIN_FLUX2_VAE` (diffusers `vae/` dir or
 /// file), `BRAIN_FLUX2_TE` (HF text-encoder dir), `BRAIN_FLUX2_TOKENIZER`
 /// (`tokenizer.json`).
+#[derive(Debug)]
 pub struct Paths {
     pub dit: String,
     pub vae: String,
@@ -33,9 +34,19 @@ pub struct Paths {
 
 impl Paths {
     pub fn from_env() -> Result<Paths, String> {
+        Self::from_env_with_dit(None)
+    }
+
+    /// [`Self::from_env`], but the DiT may come from the CLI's `--model`
+    /// flag instead of `BRAIN_FLUX2_DIT`: the flag names the DiT weights
+    /// outright, so the variable is then not required. The other three
+    /// components have no flag and stay required either way.
+    pub fn from_env_with_dit(dit: Option<String>) -> Result<Paths, String> {
         let get = |k: &str| std::env::var(k).map_err(|_| format!("{k} not set"));
         Ok(Paths {
-            dit: get("BRAIN_FLUX2_DIT")?,
+            dit: dit
+                .or_else(|| std::env::var("BRAIN_FLUX2_DIT").ok())
+                .ok_or_else(|| "BRAIN_FLUX2_DIT not set (pass --model to name the DiT weights)".to_string())?,
             vae: get("BRAIN_FLUX2_VAE")?,
             te: get("BRAIN_FLUX2_TE")?,
             tokenizer: get("BRAIN_FLUX2_TOKENIZER")?,
@@ -1477,6 +1488,34 @@ mod tests {
 
     fn img(h: u32, w: u32) -> (Vec<f32>, u32, u32) {
         (Vec::new(), h, w)
+    }
+
+    /// `--model` names the DiT outright, so `BRAIN_FLUX2_DIT` must not be
+    /// required when the CLI hands one in -- while the three components with
+    /// no flag stay required, and `from_env` itself is unchanged.
+    #[test]
+    fn from_env_with_dit_lets_the_flag_stand_in_for_the_variable() {
+        std::env::remove_var("BRAIN_FLUX2_DIT");
+        for (k, v) in [("BRAIN_FLUX2_VAE", "v"), ("BRAIN_FLUX2_TE", "t"), ("BRAIN_FLUX2_TOKENIZER", "k")] {
+            std::env::set_var(k, v);
+        }
+
+        let p = Paths::from_env_with_dit(Some("d".to_string())).unwrap();
+        assert_eq!(p.dit, "d");
+        assert_eq!(p.vae, "v");
+
+        // Without a flag the variable is still required -- and the error
+        // teaches the flag that replaces it.
+        let err = Paths::from_env_with_dit(None).unwrap_err();
+        assert!(err.contains("BRAIN_FLUX2_DIT") && err.contains("--model"), "{err}");
+
+        // The other three have no flag: still required with one present.
+        std::env::remove_var("BRAIN_FLUX2_VAE");
+        assert!(Paths::from_env_with_dit(Some("d".to_string())).is_err());
+
+        // `from_env` keeps requiring all four.
+        std::env::set_var("BRAIN_FLUX2_VAE", "v");
+        assert!(Paths::from_env().is_err());
     }
 
     /// A [`Denoiser`] with no checkpoint behind it, so the sampler itself can

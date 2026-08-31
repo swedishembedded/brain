@@ -3,7 +3,8 @@
 
 //! `brain flux2 …` - FLUX.2 Klein text-to-image + image editing.
 //!
-//! Weights via env (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`); images in/out are
+//! Weights via env (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`) with the generic
+//! `--model` flag overriding the DiT (see `model_flag`); images in/out are
 //! binary PPM P6 (the CLI-wide convention).
 
 use flux2::{AdapterSpec, Flux2Config, GenOpts, Paths, Pipeline};
@@ -41,6 +42,13 @@ const HELP: &str = "brain flux2 <cmd>
                                     # checkpoint with the stock tensor names and shapes drops
                                     # in - a fine-tune, an abliteration, a re-quantisation.
                                     # A checkpoint of a DIFFERENT shape is rejected at load.
+           [--model <path>]         # the DiT weights. Overrides BRAIN_FLUX2_DIT. An
+                                    # explicit .gguf/.safetensors extension is taken
+                                    # literally (the file must exist); without one,
+                                    # <name>.gguf then <name>.safetensors are probed beside
+                                    # the path; a <vendor>/<repo> id resolves through the
+                                    # model store and is DOWNLOADED when no local copy
+                                    # exists. VAE/TE/tokenizer still come from env.
            [--adapter <path>]       # LoRA: brain's own `finetune` checkpoint, or a
                                     # third-party ai-toolkit/ComfyUI .safetensors
            [--lora-scale S]         # LoRA strength (ComfyUI strength_model), default 1.0
@@ -153,6 +161,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut adapter: Option<String> = None;
     let mut lora_scale = 1.0f32;
     let mut text_encoder: Option<String> = None;
+    let mut model: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> {
@@ -187,6 +196,7 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--adapter" => adapter = Some(need(i)?.clone()),
             "--lora-scale" => lora_scale = need(i)?.parse().map_err(|e| format!("--lora-scale: {e}"))?,
             "--text-encoder" => text_encoder = Some(need(i)?.clone()),
+            "--model" => model = Some(need(i)?.clone()),
             other => return Err(format!("unknown flag {other}\n{HELP}")),
         }
         i += 2;
@@ -236,10 +246,23 @@ fn generate(args: &[String]) -> Result<(), String> {
         o.mask = Some(m);
     }
 
-    let mut paths = Paths::from_env()?;
+    // A store id resolves to a canonical name worth printing; a plain path
+    // (and the env-provided DiT) IS its own identity. The flag stands in
+    // for BRAIN_FLUX2_DIT, so the variable is not required with it present.
+    let mut model_name: Option<String> = None;
+    let mut dit = None;
+    if let Some(m) = &model {
+        let resolved = crate::model_flag::resolve(m, "dit")?;
+        dit = Some(resolved.path);
+        model_name = Some(resolved.name);
+    }
+    let mut paths = Paths::from_env_with_dit(dit)?;
     if let Some(te) = text_encoder {
         paths.te = te;
     }
+    // Which model this run is actually about to load, before anything is
+    // loaded.
+    eprintln!("flux2: model {} ({}, {})", model_name.as_deref().unwrap_or(&paths.dit), variant_name, precision.name());
     let n_gen = (o.height / 16) * (o.width / 16);
     // Every supplied reference conditions the model; under `--strength` the
     // first one does so at `--ref-cond-scale` of its own size *and* seeds the

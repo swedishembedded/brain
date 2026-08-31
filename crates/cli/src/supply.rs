@@ -362,8 +362,10 @@ enum FetchState {
 /// number an operator watching `-v -v` would choose to see scroll by).
 /// `total == 0` (genuinely empty file, or a host that never reported a
 /// Content-Length) has no meaningful percentage -- `None`, never a divide.
-/// Pure so it's directly testable without a real download.
-fn next_download_pct_bucket(got: u64, total: u64, last: Option<u32>) -> Option<u32> {
+/// Pure so it's directly testable without a real download. `pub(crate)`:
+/// the `--model` resolver (`model_flag`) prints the same 10% ladder for the
+/// downloads it triggers -- one progress convention, not two.
+pub(crate) fn next_download_pct_bucket(got: u64, total: u64, last: Option<u32>) -> Option<u32> {
     if total == 0 {
         return None;
     }
@@ -706,7 +708,7 @@ impl ModelSupplier for StoreSupplier {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use brain_modelstore::FakeHub;
     use residency::budget::Budgets;
@@ -1133,7 +1135,7 @@ mod tests {
 
     /// A minimal GGUF (one f32 tensor) with a `qwen` family card, mirroring
     /// `model_dir.rs`'s own `write_gguf_qwen` test fixture.
-    fn tiny_qwen3_gguf() -> Vec<u8> {
+    pub(crate) fn tiny_qwen3_gguf() -> Vec<u8> {
         fn put_str(v: &mut Vec<u8>, s: &str) {
             v.extend((s.len() as u64).to_le_bytes());
             v.extend(s.as_bytes());

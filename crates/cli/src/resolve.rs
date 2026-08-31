@@ -291,8 +291,16 @@ fn weights_already_named(arch: &str, rest: &[String]) -> bool {
     if a.weights_env.is_empty() {
         return false; // nothing to name; `ensure_env_weights` no-ops anyway
     }
-    a.weights_env.iter().all(|(var, _)| {
-        std::env::var_os(var).is_some_and(|v| !v.is_empty()) || rest.iter().any(|t| *t == flag_twin(arch, var))
+    // `--model` (the generic resolver, `model_flag`) names the PRIMARY
+    // weights outright -- the component `weights_env[0]`'s variable carries --
+    // so it satisfies that one the way its flag twin would: a `--model` run
+    // must not re-fetch the default ref's primary component it is about to
+    // override. The resolver fetches its own when the name needs it.
+    let model_names_primary = rest.iter().any(|t| t == "--model");
+    a.weights_env.iter().enumerate().all(|(i, (var, _))| {
+        std::env::var_os(var).is_some_and(|v| !v.is_empty())
+            || rest.iter().any(|t| *t == flag_twin(arch, var))
+            || (i == 0 && model_names_primary)
     })
 }
 
@@ -348,7 +356,18 @@ fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
 
 fn maybe_inject_default_weights(arch: &str, rest: Vec<String>) -> Vec<String> {
     let is_infer = wants_default_weights(arch, rest.first().map(String::as_str));
-    if !is_infer || rest.iter().any(|a| a == "--weights") {
+    // `--model` names the weights the way `--weights` does (the generic
+    // resolver, `model_flag`): an invocation that carries it has already said
+    // what to load, and the injected flag would only be rejected by a parser
+    // that does not take `--weights` at all. Help is not an inference
+    // invocation at all, whatever the verb says (`canon_verb("generate")` is
+    // "infer"): usage must never block on a fetch, the same rule
+    // `dispatch_arch` applies to `ensure_env_weights`.
+    if !is_infer
+        || rest.iter().any(|a| a == "--weights")
+        || rest.iter().any(|a| a == "--model")
+        || rest.iter().any(|a| a == "-h" || a == "--help")
+    {
         return rest;
     }
     match crate::supply::ensure_default_weights(arch) {
@@ -495,6 +514,55 @@ mod tests {
         assert_eq!(maybe_inject_default_weights("zipdepth", rest.clone()), rest);
         let rest = s(&["fill-mask", "--weights", "explicit.safetensors", "--text", "hi"]);
         assert_eq!(maybe_inject_default_weights("lfm2", rest.clone()), rest);
+    }
+
+    /// `--model` names the weights too (the generic resolver): an invocation
+    /// carrying it must short-circuit the same way `--weights` does -- before
+    /// the network-dependent `ensure_default_weights` call -- rather than
+    /// have a fetched default injected beside it.
+    #[test]
+    fn maybe_inject_default_weights_leaves_a_model_flag_untouched() {
+        let rest = s(&["infer", "--model", "black-forest-labs/FLUX.2-klein-4B"]);
+        assert_eq!(maybe_inject_default_weights("zipdepth", rest.clone()), rest);
+    }
+
+    /// Help is not an inference invocation, even when the verb is
+    /// (`canon_verb("generate")` is "infer"): `brain flux2 generate --help`
+    /// fetched the default ref over the network just to print usage, the
+    /// same way `ensure_env_weights`'s own help gate exists to prevent.
+    #[test]
+    fn maybe_inject_default_weights_ignores_a_help_request() {
+        for rest in [s(&["generate", "--help"]), s(&["generate", "-h"]), s(&["--help"])] {
+            assert_eq!(maybe_inject_default_weights("flux2", rest.clone()), rest);
+        }
+    }
+
+    /// `--model` stands in for the PRIMARY weights role (`weights_env[0]`'s
+    /// variable): with the auxiliary roles set, naming the primary via
+    /// `--model` must stop the default-ref fetch, which would otherwise
+    /// re-download the very component `--model` overrides. A role that is
+    /// neither set nor named still leaves the fetch in place.
+    #[test]
+    fn a_model_flag_counts_as_naming_the_primary_weights() {
+        let vars: Vec<_> = brain_arch::by_id("flux2").expect("flux2 row").weights_env.iter().map(|(v, _)| *v).collect();
+        for &var in &vars {
+            std::env::remove_var(var);
+        }
+        let with_model = s(&["generate", "--model", "some/dit", "--prompt", "p"]);
+        assert!(!weights_already_named("flux2", &with_model), "the auxiliary roles are still unnamed");
+
+        std::env::set_var("BRAIN_FLUX2_VAE", "v");
+        std::env::set_var("BRAIN_FLUX2_TE", "t");
+        std::env::set_var("BRAIN_FLUX2_TOKENIZER", "k");
+        assert!(weights_already_named("flux2", &with_model), "--model names the DiT; the rest are in the env");
+        assert!(
+            !weights_already_named("flux2", &s(&["generate", "--prompt", "p"])),
+            "without --model the unset primary still wants the fetch"
+        );
+
+        for &var in &vars {
+            std::env::remove_var(var);
+        }
     }
 
     #[test]

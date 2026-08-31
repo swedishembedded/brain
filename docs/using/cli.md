@@ -214,6 +214,30 @@ a terminal:
 models are - see [Configuration](configuration.md#paths) for the full
 precedence ladder.
 
+### Naming weights on a model command: `--model`
+
+Model commands grow the same `--model` argument for their primary weights
+(the DiT, for an image or video model) instead of a per-command flag:
+`brain flux2 generate --model <ARG>` overrides `BRAIN_FLUX2_DIT`. The
+command prints the model it is about to load before anything is loaded.
+
+`ARG` is read against one ladder, whichever way you mean it:
+
+- **An explicit `.gguf`/`.safetensors` extension** names the file outright.
+  It is taken literally - a missing file is an error, nothing is probed or
+  fetched.
+- **Without an extension**, `<ARG>.gguf` then `<ARG>.safetensors` are probed
+  beside the path.
+- **A `<vendor>/<repo>[-<QUANT>]` id** resolves through the model store: a
+  local copy wins; otherwise the model is announced and downloaded, with
+  per-file progress. A compound checkpoint (a diffusers pipeline) hands the
+  command its named role. For `flux2`, the remaining components - VAE, text
+  encoder, tokenizer - still come from their `BRAIN_FLUX2_*` variables, so
+  mix sources with that in mind.
+
+Anything else is refused with what was probed and what a model id looks
+like, rather than silently fetching something adjacent.
+
 ## Serving
 
 `brain serve` covers two distinct things depending on the flags given:
