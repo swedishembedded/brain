@@ -35,6 +35,9 @@ pub struct MmapSafetensors {
     order: Vec<String>,
     /// The file's `__metadata__` string map (holds `brain.config`, card fields).
     metadata: BTreeMap<String, String>,
+    /// Load-progress accounting: cumulative on-disk bytes walked, reported
+    /// through [`crate::load_progress`].
+    meter: crate::load_progress::LoadMeter,
 }
 
 impl MmapSafetensors {
@@ -97,7 +100,9 @@ impl MmapSafetensors {
             order.push(name.clone());
         }
         order.sort(); // deterministic; callers remap by name
-        Ok(MmapSafetensors { mmap, blob_start: hend, index, order, metadata })
+        let tensor_bytes: u64 = index.values().map(|m| (m.end - m.start) as u64).sum();
+        let meter = crate::load_progress::LoadMeter::new(path.display().to_string(), tensor_bytes);
+        Ok(MmapSafetensors { mmap, blob_start: hend, index, order, metadata, meter })
     }
 
     /// Tensor names, sorted (deterministic).
@@ -150,6 +155,7 @@ impl MmapSafetensors {
     /// not a value worth defaulting to `[]` for. Use [`Self::tensor_u32`].
     pub fn tensor_f32(&self, name: &str) -> Option<Vec<f32>> {
         let m = self.index.get(name)?;
+        self.meter.note((m.end - m.start) as u64);
         let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
         let mut out = Vec::new();
         decode_into(name, &m.dtype, raw, &mut out);
@@ -202,6 +208,7 @@ impl MmapSafetensors {
         }
         let start = self.blob_start + m.start + start_elem * width;
         let end = start + len_elem * width;
+        self.meter.note((len_elem * width) as u64);
         let mut out = Vec::new();
         decode_into(name, &m.dtype, &self.mmap[start..end], &mut out);
         Some(out)
@@ -222,7 +229,9 @@ impl MmapSafetensors {
             return None;
         }
         let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
-        bytemuck::try_cast_slice::<u8, u32>(raw).ok()
+        bytemuck::try_cast_slice::<u8, u32>(raw).ok().inspect(|_| {
+            self.meter.note(raw.len() as u64);
+        })
     }
 
     /// Ordered chunks of at most `max_elems` f32, each decoded into ONE
@@ -250,6 +259,7 @@ impl MmapSafetensors {
         // the caller, so its pages can be dropped instead of sitting resident
         // for the rest of a whole-checkpoint streaming scan.
         self.advise_dontneed_tensor(name);
+        self.meter.note((m.end - m.start) as u64);
         true
     }
 
@@ -282,6 +292,7 @@ impl MmapSafetensors {
         // Same rationale as `with_tensor_chunks`: fully consumed, so the pages
         // need not stay resident for the rest of a whole-checkpoint scan.
         self.advise_dontneed_tensor(name);
+        self.meter.note((m.end - m.start) as u64);
         true
     }
 
@@ -295,6 +306,7 @@ impl MmapSafetensors {
     pub fn tensor_u32(&self, name: &str) -> Option<Vec<u32>> {
         let m = self.index.get(name)?;
         assert_eq!(m.dtype, "U32", "tensor_u32: '{name}' has dtype {}, not U32", m.dtype);
+        self.meter.note((m.end - m.start) as u64);
         let raw = &self.mmap[self.blob_start + m.start..self.blob_start + m.end];
         Some(raw.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
     }
@@ -457,7 +469,11 @@ mod tests {
             "a": {"dtype": "F32", "shape": [4], "data_offsets": [0, a_end]},
             "b": {"dtype": "BF16", "shape": [3], "data_offsets": [a_end, b_end]},
         });
-        let hbytes = serde_json::to_vec(&header).unwrap();
+        let mut hbytes = serde_json::to_vec(&header).unwrap();
+        // The safetensors spec pads the header with spaces so the blob starts
+        // on an 8-byte boundary - without it, `raw_words` correctly declines
+        // every tensor as unaligned.
+        hbytes.resize(hbytes.len().next_multiple_of(8), b' ');
         let mut file = (hbytes.len() as u64).to_le_bytes().to_vec();
         file.extend_from_slice(&hbytes);
         file.extend_from_slice(&blob);
@@ -770,5 +786,46 @@ mod tests {
             assert_eq!((&x.name, &x.shape, &x.data), (&y.name, &y.shape, &y.data));
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Every leaf read reports load progress against the file's tensor-byte
+    /// total: one event per leaf call (a chunked read is one event, not one
+    /// per chunk), cumulative across tensors, and a re-read adds its bytes
+    /// again because the mapping was genuinely walked a second time. This is
+    /// what a load-progress line is fed from - without it, the multi-second
+    /// weight-streaming stretch of a run has nothing to show.
+    #[test]
+    fn leaf_reads_report_load_progress_to_the_observer() {
+        let _serial = crate::load_progress::tests::observe_lock();
+        let (path, _a, _b) = make_file();
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = got.clone();
+        // The closure never panics and the observer is detached before the
+        // assertions: a failed assert must not leave a stale observer behind
+        // for the other tests' reads to trip over.
+        crate::load_progress::observe(Box::new(move |e| {
+            if let Ok(mut v) = sink.lock() {
+                v.push((e.file.clone(), e.done, e.total));
+            }
+        }));
+        let mm = MmapSafetensors::open(&path).unwrap();
+        assert!(mm.tensor_f32("a").is_some());
+        assert!(mm.tensor_f32("b").is_some());
+        assert!(mm.with_tensor_chunks("b", 1, &mut |_, _| {}));
+        assert!(mm.raw_words("a").is_some());
+        let events = got.lock().unwrap().clone();
+        crate::load_progress::clear();
+        std::fs::remove_file(&path).ok();
+        // The observer is process-global and the suite runs its tests
+        // concurrently, so other files' events land in the same sink: only
+        // this file's stream is asserted on (my reads are sequential, hence
+        // ordered).
+        let mine: Vec<(u64, u64)> = events
+            .iter()
+            .filter(|(f, _, _)| *f == path.display().to_string())
+            .map(|&(_, done, total)| (done, total))
+            .collect();
+        // a is F32, 4 elements = 16 bytes on disk; b is BF16, 3 elements = 6.
+        assert_eq!(mine, vec![(16, 22), (22, 22), (28, 22), (44, 22)]);
     }
 }

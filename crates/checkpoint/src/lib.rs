@@ -23,6 +23,8 @@ pub mod quantize;
 pub mod mmap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod weightio;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod load_progress;
 pub mod remap;
 pub mod torchpt;
 pub mod zipread;

@@ -911,6 +911,9 @@ pub struct MmapGguf {
     index: HashMap<String, (u32, usize, usize, usize)>,
     shapes: BTreeMap<String, Vec<usize>>,
     order: Vec<String>,
+    /// Load-progress accounting: cumulative on-disk bytes walked, reported
+    /// through [`crate::load_progress`].
+    meter: crate::load_progress::LoadMeter,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -938,7 +941,9 @@ impl MmapGguf {
             shapes.insert(info.name.clone(), info.shape);
             order.push(info.name);
         }
-        Ok(MmapGguf { mmap, kv, index, shapes, order })
+        let tensor_bytes: u64 = index.values().map(|&(_, _, nbytes, _)| nbytes as u64).sum();
+        let meter = crate::load_progress::LoadMeter::new(path.to_string(), tensor_bytes);
+        Ok(MmapGguf { mmap, kv, index, shapes, order, meter })
     }
 
     /// Tensor names, in the file's declared order.
@@ -999,6 +1004,7 @@ impl MmapGguf {
     /// eager [`parse_gguf`] for the same tensor.
     pub fn tensor(&self, name: &str) -> Option<Result<Vec<f32>, String>> {
         let &(ty, start, nbytes, numel) = self.index.get(name)?;
+        self.meter.note(nbytes as u64);
         let raw = &self.mmap[start..start + nbytes];
         Some(dequantize(ty, raw, numel).map_err(|e| format!("gguf: {name}: {e}")))
     }
@@ -1125,6 +1131,9 @@ impl crate::TensorSource for MmapGguf {
             }
             e0 = e1;
         }
+        // One event for the whole call, after the last chunk - the fallback
+        // arm above reports through `with_tensor` -> `tensor` instead.
+        self.meter.note(nbytes as u64);
         true
     }
 
@@ -1141,7 +1150,11 @@ impl crate::TensorSource for MmapGguf {
         if ty != T_F32 {
             return None;
         }
-        bytemuck::try_cast_slice::<u8, u32>(&self.mmap[start..start + nbytes]).ok()
+        bytemuck::try_cast_slice::<u8, u32>(&self.mmap[start..start + nbytes])
+            .ok()
+            .inspect(|_| {
+                self.meter.note(nbytes as u64);
+            })
     }
 
     /// Element count of `name`, without decoding - known from the header for
@@ -2027,5 +2040,58 @@ mod tests {
             assert!(data.iter().all(|v| v.is_finite()), "non-finite in {name}");
         }
         let _ = m.model_card();
+    }
+
+    /// Every leaf read reports load progress against the file's tensor-byte
+    /// total: one event per leaf call (a chunked read is one event, not one
+    /// per chunk), cumulative across tensors, and a re-read adds its bytes
+    /// again because the mapping was genuinely walked a second time. Same
+    /// contract as the safetensors reader's test - a load-progress line is
+    /// fed from either checkpoint format alike.
+    #[test]
+    fn leaf_reads_report_load_progress_to_the_observer() {
+        use crate::TensorSource;
+
+        let _serial = crate::load_progress::tests::observe_lock();
+        let path = std::env::temp_dir().join(format!("brain-gguf-progress-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        let mut data = Vec::new();
+        for x in [1.0f32, -2.5, 3.25, 0.0, 7.0, -0.125] {
+            data.extend_from_slice(&x.to_le_bytes());
+        }
+        crate::gguf_write::write(
+            &path,
+            &[],
+            &[crate::gguf_write::TensorOut { name: "w".to_string(), shape: vec![2, 3], ty: T_F32, data }],
+            32,
+        )
+        .unwrap();
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = got.clone();
+        // The closure never panics and the observer is detached before the
+        // assertions: a failed assert must not leave a stale observer behind
+        // for the other tests' reads to trip over.
+        crate::load_progress::observe(Box::new(move |e| {
+            if let Ok(mut v) = sink.lock() {
+                v.push((e.file.clone(), e.done, e.total));
+            }
+        }));
+        let mg = MmapGguf::open(&path).unwrap();
+        assert!(mg.with_tensor("w", &mut |_| {}));
+        assert!(mg.raw_words("w").is_some());
+        assert!(mg.with_tensor_chunks("w", 4, &mut |_, _| {}));
+        let events = got.lock().unwrap().clone();
+        crate::load_progress::clear();
+        std::fs::remove_file(&path).ok();
+        // The observer is process-global and the suite runs its tests
+        // concurrently, so only this file's stream is asserted on.
+        let mine: Vec<(u64, u64)> = events
+            .iter()
+            .filter(|(f, _, _)| f == &path)
+            .map(|&(_, done, total)| (done, total))
+            .collect();
+        // "w" is F32, 6 elements = 24 bytes on disk, and every read is of the
+        // whole tensor, so each one adds 24 to the cumulative counter.
+        assert_eq!(mine, vec![(24, 24), (48, 24), (72, 24)]);
     }
 }
