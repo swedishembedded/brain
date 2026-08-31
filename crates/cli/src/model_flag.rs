@@ -18,7 +18,9 @@
 //!    A local copy in the model store wins (a compound checkpoint hands back
 //!    the `role` the caller names -- `"dit"`, `"vae"`, ...); otherwise the
 //!    model is announced and DOWNLOADED through the store's resolution
-//!    ladder, printing per-file progress.
+//!    ladder, printing per-file progress -- but only when fetching is enabled
+//!    (`--autofetch` / `BRAIN_AUTO_FETCH=1`); with it off the error names
+//!    `brain pull <model>` instead.
 //!
 //! The caller learns the resolved weights path plus a display name (the
 //! canonical reference for a store id, the argument as typed for a path), so
@@ -85,38 +87,40 @@ fn resolve_with(arg: &str, role: &str, store_root: Option<&Path>, hub: &dyn brai
         }
     }
 
-    // Nothing on disk: read the name as a store id and fetch it if needed.
-    // `plan()` is the resolution ladder itself -- it answers "already local"
-    // with a Serve step before touching the hub, so a store hit costs no
-    // network and the "downloading" announcement below only prints when a
-    // download genuinely has to happen.
+    // Nothing on disk: read the name as a store id. A local copy serves with
+    // no hub touch at all -- the same fast path [`brain_modelstore::plan`]
+    // itself takes -- and anything else is where fetching is opt-in
+    // ([`crate::supply::auto_fetch_enabled`]): a store id that is not pulled
+    // errors naming both remedies rather than downloading.
     let reference = ModelRef::parse(arg).map_err(|e| {
         format!("--model {arg}: no weights file found (tried {arg}.gguf, {arg}.safetensors) and the name is not a <vendor>/<repo> model id either ({e})")
     })?;
     let root = store_root
         .ok_or_else(|| "--model: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)".to_string())?;
     let store = brain_modelstore::Store::new(root);
-    let plan = brain_modelstore::plan(&reference, &store, hub).map_err(|e| format!("--model {arg}: {e}"))?;
-    let local = match plan.steps.as_slice() {
-        [brain_modelstore::Step::Serve] => store
-            .local(&reference)
-            .expect("a Serve plan is exactly `store.local` finding the reference"),
-        _ => {
-            eprintln!("brain: {arg}: no local copy - downloading ...");
-            let mut last: HashMap<String, u32> = HashMap::new();
-            crate::supply::execute_plan(&store, hub, &plan, arg, &mut |name, got, total| {
-                let Some(total) = total else { return };
-                if let Some(pct) = crate::supply::next_download_pct_bucket(got, total, last.get(name).copied()) {
-                    eprintln!("brain: {arg}: downloading {name} ... {pct}%");
-                    last.insert(name.to_string(), pct);
-                }
-            })?
+    let Some(local) = store.local(&reference) else {
+        if !crate::supply::auto_fetch_enabled() {
+            return Err(format!(
+                "--model {arg}: not pulled. Fetch with `brain pull {arg}`, or rerun with --autofetch (BRAIN_AUTO_FETCH=1)."
+            ));
         }
+        eprintln!("brain: {arg}: no local copy - downloading ...");
+        let plan = brain_modelstore::plan(&reference, &store, hub).map_err(|e| format!("--model {arg}: {e}"))?;
+        let mut last: HashMap<String, u32> = HashMap::new();
+        let local = crate::supply::execute_plan(&store, hub, &plan, arg, &mut |name, got, total| {
+            let Some(total) = total else { return };
+            if let Some(pct) = crate::supply::next_download_pct_bucket(got, total, last.get(name).copied()) {
+                eprintln!("brain: {arg}: downloading {name} ... {pct}%");
+                last.insert(name.to_string(), pct);
+            }
+        })?;
+        // The plan's reference, not the argument's: a recipe that CHOSE
+        // between interchangeable artifacts (a GGUF release resolving to one
+        // quant) records the choice there, and that choice is the canonical
+        // name.
+        return stored(&local, &plan.reference, role, arg);
     };
-    // The plan's reference, not the argument's: a recipe that CHOSE between
-    // interchangeable artifacts (a GGUF release resolving to one quant)
-    // records the choice there, and that choice is the canonical name.
-    stored(&local, &plan.reference, role, arg)
+    stored(&local, &reference, role, arg)
 }
 
 /// Pick the weights file out of a store model: the role the caller named for
@@ -143,7 +147,8 @@ fn has_weights_extension(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain_modelstore::{FakeHub, Hub};
+    use brain_modelstore::FakeHub;
+    use brain_testutil::env_lock;
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("cli-model-flag-{name}"));
@@ -237,6 +242,8 @@ mod tests {
     /// second resolve hits the store with an empty hub.
     #[test]
     fn a_compound_model_id_is_downloaded_and_resolves_to_the_named_role() {
+        let _serial = env_lock(); // the download path is opt-in
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
         let dir = scratch("compound");
         let mut hub = FakeHub::new();
         for f in [
@@ -257,26 +264,59 @@ mod tests {
 
         let again = resolve_with("Tongyi-MAI/Z-Image-Turbo", "dit", Some(&dir), &FakeHub::new()).unwrap();
         assert_eq!(again.path, m.path, "the second resolve must be a store hit, not a re-download");
+        std::env::remove_var("BRAIN_AUTO_FETCH");
     }
 
     /// A GGUF-release id resolves to the one quant file itself (no roles),
     /// which is what `--model` on a quantized DiT looks like.
     #[test]
     fn a_gguf_release_id_downloads_and_resolves_to_the_gguf_itself() {
+        let _serial = env_lock(); // the download path is opt-in
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
         let dir = scratch("gguf-release");
         let mut hub = FakeHub::new();
         hub.add_file("unsloth", "Toy-GGUF", "main", "toy-Q8_0.gguf", crate::supply::tests::tiny_qwen3_gguf());
         let m = resolve_with("unsloth/Toy-GGUF", "dit", Some(&dir), &hub).unwrap();
         assert_eq!(m.name, "unsloth/Toy-GGUF-Q8_0");
         assert!(m.path.ends_with("Q8_0.gguf"), "{}", m.path);
+        std::env::remove_var("BRAIN_AUTO_FETCH");
     }
 
     /// A model id that exists nowhere fails with the store's own fetch error,
     /// not a silent success or a panic.
     #[test]
     fn a_model_id_that_nowhere_exists_fails_with_the_fetch_error() {
+        let _serial = env_lock(); // the download path is opt-in
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
         let dir = scratch("fetch-miss");
         let err = resolve_with("someone/absent-model", "dit", Some(&dir), &FakeHub::new()).unwrap_err();
         assert!(err.contains("someone/absent-model"), "{err}");
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+    }
+
+    /// Fetching is opt-in: a store id with no local copy must fail naming
+    /// both remedies (`brain pull`, `--autofetch`) rather than download --
+    /// the hub here holds nothing, so any fetch attempt would be a different
+    /// error and fail the assertion.
+    #[test]
+    fn a_store_id_is_not_fetched_unless_autofetch_is_enabled() {
+        let _serial = env_lock();
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+        let dir = scratch(&format!("gate-miss-{}", std::process::id()));
+        let err = resolve_with("someone/absent-model", "dit", Some(&dir), &FakeHub::new()).unwrap_err();
+        assert!(err.contains("brain pull someone/absent-model"), "{err}");
+        assert!(err.contains("--autofetch"), "{err}");
+        // A local store hit is NOT a fetch: it must resolve with the gate off.
+        let repo = dir.join("Qwen/Qwen3-0.6B");
+        std::fs::create_dir_all(&repo).unwrap();
+        checkpoint::st::save_safetensors(
+            repo.join("model.brain.safetensors").to_str().unwrap(),
+            &[("weight".to_string(), vec![2], vec![1.0, 2.0])],
+            &serde_json::json!({"hidden_size": 8}),
+            None,
+        )
+        .unwrap();
+        let m = resolve_with("Qwen/Qwen3-0.6B", "dit", Some(&dir), &FakeHub::new()).unwrap();
+        assert!(m.path.ends_with("model.brain.safetensors"), "{}", m.path);
     }
 }

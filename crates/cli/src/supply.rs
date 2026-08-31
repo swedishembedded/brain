@@ -344,10 +344,10 @@ fn remove_upstream_weights(dir: &Path) {
     }
 }
 
-/// Constructed by `run_cli.rs::build_auto_fetch_supplier` and threaded into
-/// every HTTP/D-Bus surface (`run_apis`), behind `BRAIN_AUTO_FETCH=0` to
-/// disable. Wiring it in went through the full watertight-API security pass
-/// (AGENTS.md).
+/// Constructed by `run_cli.rs::build_auto_fetch_supplier` -- only when
+/// fetching is enabled ([`auto_fetch_enabled`]) -- and threaded into
+/// every HTTP/D-Bus surface (`run_apis`). Wiring it in went through the full
+/// watertight-API security pass (AGENTS.md).
 #[derive(Clone)]
 enum FetchState {
     Running,
@@ -371,6 +371,20 @@ pub(crate) fn next_download_pct_bucket(got: u64, total: u64, last: Option<u32>) 
     }
     let bucket = (got.min(total) * 100 / total / 10 * 10) as u32;
     last.is_none_or(|l| bucket > l).then_some(bucket)
+}
+
+/// Whether fetching weights on demand is enabled for this process. Default
+/// OFF: a CLI run or serve request whose weights are not on disk is an error
+/// naming what is missing, never a download -- the network is something the
+/// caller asks for, with `--autofetch` (which `main` publishes by setting
+/// `BRAIN_AUTO_FETCH=1`) or by exporting the variable directly. The old
+/// opt-out spellings (`0`/`false`/`off`) keep reading as off, so an
+/// environment written against the previous default keeps the behavior it
+/// asked for.
+pub fn auto_fetch_enabled() -> bool {
+    std::env::var("BRAIN_AUTO_FETCH").ok().is_some_and(|v| {
+        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on")
+    })
 }
 
 /// Auto-fetch `arch`'s [`brain_arch::Arch::default_ref`] checkpoint into the
@@ -410,23 +424,27 @@ pub struct DefaultWeights {
 /// real network or `$HOME` -- the same split every other fetch path in this
 /// file (`StoreSupplier`, `convert_*`) already uses.
 fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<DefaultWeights, String> {
-    let local = fetch_default_ref(arch, store, hub)?;
+    let a = brain_arch::by_id(arch).ok_or_else(|| format!("{arch}: not a registered architecture"))?;
+    let default_ref = a.default_ref.ok_or_else(|| format!("{arch}: no default checkpoint known -- pass --weights explicitly"))?;
+    if !auto_fetch_enabled() {
+        // Fetching is opt-in: a pulled checkpoint resolves locally, a
+        // missing one is the remedy-naming error, never a download.
+        let r = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
+        let Some(local) = store.local(&r) else {
+            return Err(format!(
+                "{arch}: {default_ref} is not pulled. Fetch with `brain pull {default_ref}`, or rerun with --autofetch (BRAIN_AUTO_FETCH=1)."
+            ));
+        };
+        return default_weights_from_local(arch, &local);
+    }
+    let local = fetch_one_ref(default_ref, store, hub)?;
+    default_weights_from_local(arch, &local)
+}
+
+fn default_weights_from_local(arch: &str, local: &brain_modelstore::LocalModel) -> Result<DefaultWeights, String> {
     let weights = local.weights.to_str().map(str::to_string).ok_or_else(|| format!("{arch}: non-UTF8 store path"))?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str()).map(str::to_string);
     Ok(DefaultWeights { weights, tokenizer })
-}
-
-/// The plan/execute/convert core [`ensure_default_weights_with`] and
-/// [`ensure_env_weights_with`] both need: resolve `arch`'s `default_ref`,
-/// fetch and (when the recipe has one) run its finish step, and return the
-/// resulting [`brain_modelstore::LocalModel`] -- single-file, GGUF, or
-/// compound, whichever `default_ref` turned out to be. One implementation of
-/// "fetch this architecture's default checkpoint", not two call sites each
-/// re-driving `plan`/`execute`/`convert` their own way.
-fn fetch_default_ref(arch: &str, store: &Store, hub: &dyn Hub) -> Result<brain_modelstore::LocalModel, String> {
-    let a = brain_arch::by_id(arch).ok_or_else(|| format!("{arch}: not a registered architecture"))?;
-    let default_ref = a.default_ref.ok_or_else(|| format!("{arch}: no default checkpoint known -- pass --weights explicitly"))?;
-    fetch_one_ref(default_ref, store, hub)
 }
 
 /// Fetch ONE `<vendor>/<repo>` and run its recipe's finish step. Factored out
@@ -504,49 +522,86 @@ pub(crate) fn execute_plan_opt(
     Ok(store.local(reference))
 }
 
-/// The capability-path counterpart to [`ensure_default_weights`]: for each
+/// The env-path counterpart to [`ensure_default_weights`]: for each
 /// `(env var, role)` pair `arch`'s [`brain_arch::Arch::weights_env`] lists, if
 /// that variable is unset, fetch `default_ref` (plus each of
 /// [`brain_arch::Arch::extra_refs`], for a model upstream publishes as several
 /// repos) and set every listed var from the merged roles of what was fetched.
 /// Never overrides a variable already
 /// set -- the same rule [`crate::resolve::maybe_inject_default_weights`]
-/// follows for `--weights`. Called once, lazily, right before capability
-/// dispatch resolves a provider (`caps_cli.rs::run_do`), so `brain sam2
-/// segment ...` with no env exported becomes a real one-liner.
+/// follows for `--weights`. Called from [`crate::resolve::dispatch_arch`] and
+/// the verbs with their own explicit call (`label_cli.rs`, `forecast_cli.rs`),
+/// so `brain wan t2v ...` with no env exported becomes a real one-liner.
 ///
 /// CLI-process-only, matching [`ensure_default_weights`]'s own scope note:
-/// `brain serve`'s `StoreSupplier` auto-fetch path is untouched, since
+/// `brain serve`'s `StoreSupplier` fetch path is untouched, since
 /// mutating process env from a server-lifetime resident is exactly what
 /// `AGENTS.md` forbids -- a short-lived CLI invocation setting its OWN env
 /// before it does anything else is a different thing.
 ///
-/// `BRAIN_AUTO_FETCH=0` (also `off`/`false`, case-insensitive, matching the
-/// spelling `run_cli.rs::build_auto_fetch_supplier` already accepts) disables
-/// this -- an unresolved var is left unset and the model's own "set
-/// BRAIN_X_WEIGHTS to ..." error fires exactly as it does without this
-/// function existing. Errors are reported, never silently swallowed, but
-/// deliberately non-fatal to the caller (`caps_cli.rs` still tries the
-/// provider afterward and lets its own from-env error explain what's
-/// missing) -- a fetch failure should not read differently from "you forgot
-/// to export the var" when auto-fetch was never in the picture for this
-/// architecture at all.
+/// Fetching is OPT-IN ([`auto_fetch_enabled`]): `--autofetch`, which `main`
+/// publishes by setting the variable, or `BRAIN_AUTO_FETCH=1` itself. With
+/// it off, a pulled checkpoint still resolves -- `Store::local` is local
+/// I/O, not a fetch -- and a missing one prints the error naming the unset
+/// variables and both remedies, then exits. A fetch FAILURE while opted in
+/// is deliberately non-fatal: the vars that did resolve stay set and the
+/// model's own "set BRAIN_X_WEIGHTS to ..." error fires exactly as it does
+/// without this function having fetched anything -- a failed download should
+/// not read differently from "you forgot to export the var".
 pub fn ensure_env_weights(arch: &str) {
-    let disabled = std::env::var("BRAIN_AUTO_FETCH").ok().is_some_and(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        v == "0" || v == "false" || v == "off"
-    });
-    if disabled {
-        return;
-    }
-    let Some(a) = brain_arch::by_id(arch) else { return };
-    if a.weights_env.is_empty() || a.weights_env.iter().all(|(var, _)| std::env::var_os(var).is_some_and(|v| !v.is_empty())) {
-        return; // nothing to resolve, or every var the caller needs is already set
-    }
     let Some(root) = crate::model_dir::resolve(None) else { return };
     let store = Store::new(root);
-    let hub = brain_modelstore::HfHub::new();
-    let Some(default_ref) = a.default_ref else { return };
+    if let Err(e) = ensure_env_weights_with(arch, &store, &brain_modelstore::HfHub::new()) {
+        eprintln!("brain: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// [`ensure_env_weights`]'s resolution, store and hub injected so the gate
+/// is testable without a network or the process environment the CLI would
+/// resolve. The `Err` case is exactly the fetching-off-and-not-pulled error
+/// the CLI prints and exits on.
+fn ensure_env_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<(), String> {
+    let Some(a) = brain_arch::by_id(arch) else { return Ok(()) };
+    if a.weights_env.is_empty() || a.weights_env.iter().all(|(var, _)| std::env::var_os(var).is_some_and(|v| !v.is_empty())) {
+        return Ok(()); // nothing to resolve, or every var the caller needs is already set
+    }
+    let Some(default_ref) = a.default_ref else { return Ok(()) };
+    let unset: Vec<(&str, &str)> = a
+        .weights_env
+        .iter()
+        .filter(|(var, _)| std::env::var_os(var).is_none_or(|v| v.is_empty()))
+        .map(|(var, role)| (*var, *role))
+        .collect();
+
+    if !auto_fetch_enabled() {
+        // Fetching is opt-in. A pulled checkpoint still resolves -- the
+        // store lookup is local I/O, not a fetch -- but a missing one is a
+        // hard error naming the unset variables and both remedies, never a
+        // download. Nothing is set unless every role is accounted for: a
+        // half-configured environment is the error, not a state to leave.
+        let mut roles: BTreeMap<String, String> = BTreeMap::new();
+        for reference in std::iter::once(default_ref).chain(a.extra_refs.iter().copied()) {
+            let r = ModelRef::parse(reference).map_err(|e| format!("{reference}: {e}"))?;
+            for (role, p) in store.local(&r).into_iter().flat_map(|local| local.roles.into_iter().flatten()) {
+                if let Some(s) = p.to_str() {
+                    roles.insert(role, s.to_string());
+                }
+            }
+        }
+        let missing: Vec<&str> =
+            unset.iter().filter(|(_, role)| !roles.contains_key(*role)).map(|(var, _)| *var).collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{arch}: not pulled: {} unset and no local copy of {default_ref} in the model store. Fetch with `brain pull {default_ref}`, or rerun with --autofetch (BRAIN_AUTO_FETCH=1).",
+                missing.join(", ")
+            ));
+        }
+        for (var, role) in unset {
+            std::env::set_var(var, &roles[role]);
+        }
+        return Ok(());
+    }
 
     // Every `weights_env` architecture today fetches through a `FilesRecipe`
     // (or `convert_transformers`'s passthrough branch), which always writes a
@@ -561,11 +616,11 @@ pub fn ensure_env_weights(arch: &str) {
     // test in `crates/arch` enforces it), so the merge cannot shadow.
     let mut roles: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     for reference in std::iter::once(default_ref).chain(a.extra_refs.iter().copied()) {
-        match fetch_one_ref(reference, &store, &hub) {
+        match fetch_one_ref(reference, store, hub) {
             Ok(local) => roles.extend(local.roles.into_iter().flatten()),
             Err(e) => {
                 eprintln!("brain: {arch}: auto-fetch failed ({e}) -- falling back to whatever BRAIN_* env is set");
-                return;
+                return Ok(());
             }
         }
     }
@@ -579,6 +634,7 @@ pub fn ensure_env_weights(arch: &str) {
             None => eprintln!("brain: {arch}: fetched but role {role:?} (for {var}) has no path (non-UTF8, not a compound checkpoint, or this recipe doesn't produce it)"),
         }
     }
+    Ok(())
 }
 
 /// One single-flight gate per model: the fetch's outcome plus the condvar
@@ -713,6 +769,7 @@ pub(crate) mod tests {
     use brain_modelstore::FakeHub;
     use residency::budget::Budgets;
     use residency::{Device, Policy};
+    use brain_testutil::env_lock;
 
     fn store(name: &str) -> Store {
         let dir = std::env::temp_dir().join(name);
@@ -725,6 +782,37 @@ pub(crate) mod tests {
         let mut budgets = Budgets::new();
         budgets.set(Device::Cpu, 1 << 30, 0);
         Executor::start(vec![], budgets, Policy::default())
+    }
+
+    /// Seed one servable `Wan-AI/Wan2.1-T2V-1.3B` compound into a fresh
+    /// store through the real plan/download/convert ladder and return the
+    /// store root. The file list is the real repo listing;
+    /// `ensure_completes_the_native_wan_plan_and_registers_a_wan_resident`
+    /// documents it file by file -- the fetch-gate tests need the same
+    /// bytes, so they share this instead of restating it. The directory is
+    /// pid-suffixed so a fresh store is guaranteed, never a reused one.
+    fn seed_wan(name: &str) -> std::path::PathBuf {
+        let mut hub = FakeHub::new();
+        for f in [
+            "README.md",
+            "LICENSE.txt",
+            "assets/logo.png",
+            "config.json",
+            "diffusion_pytorch_model.safetensors",
+            "Wan2.1_VAE.pth",
+            "models_t5_umt5-xxl-enc-bf16.pth",
+            "google/umt5-xxl/tokenizer.json",
+            "google/umt5-xxl/tokenizer_config.json",
+            "google/umt5-xxl/special_tokens_map.json",
+            "google/umt5-xxl/spiece.model",
+        ] {
+            hub.add_file("Wan-AI", "Wan2.1-T2V-1.3B", "main", f, b"stub".to_vec());
+        }
+        let dir = store(&format!("{name}-{}", std::process::id())).root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        supplier.ensure("Wan-AI/Wan2.1-T2V-1.3B", &e, &mut |_, _, _| {}).unwrap();
+        dir
     }
 
     #[test]
@@ -752,6 +840,8 @@ pub(crate) mod tests {
 
     #[test]
     fn ensure_default_weights_fetches_converts_and_returns_the_brain_safetensors_path() {
+        let _serial = env_lock(); // fetching is opt-in; this test IS the opted-in path
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
         let (config, weights) = tiny_qwen3_hf_files();
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", config);
@@ -759,6 +849,7 @@ pub(crate) mod tests {
         let store = store("supply-test-default-weights-qwen3");
 
         let got = ensure_default_weights_with("qwen3", &store, &hub).unwrap();
+        std::env::remove_var("BRAIN_AUTO_FETCH");
         assert!(got.weights.ends_with("Qwen/Qwen3-0.6B/model.brain.safetensors"), "{}", got.weights);
         assert!(std::path::Path::new(&got.weights).exists(), "{} must actually exist on disk", got.weights);
     }
@@ -780,6 +871,134 @@ pub(crate) mod tests {
         let hub = FakeHub::new();
         let err = ensure_default_weights_with("totally-bogus", &store, &hub).unwrap_err();
         assert!(err.contains("not a registered architecture"), "{err}");
+    }
+
+    // -- The auto-fetch gate: fetching is opt-in -------------------------
+
+    /// Default OFF: unset never fetches, only a truthy `BRAIN_AUTO_FETCH`
+    /// (what `--autofetch` publishes) does. The off spellings stay off so an
+    /// operator who exported `=0` under the old opt-out convention keeps
+    /// exactly the behavior they asked for.
+    #[test]
+    fn auto_fetch_is_off_unless_the_environment_opts_in() {
+        let _serial = env_lock();
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+        assert!(!auto_fetch_enabled(), "unset must be OFF: fetching is opt-in");
+        for off in ["0", "false", "off", "OFF", "False", " nope "] {
+            std::env::set_var("BRAIN_AUTO_FETCH", off);
+            assert!(!auto_fetch_enabled(), "{off:?} must not enable fetching");
+        }
+        for on in ["1", "true", "TRUE", "on", " On "] {
+            std::env::set_var("BRAIN_AUTO_FETCH", on);
+            assert!(auto_fetch_enabled(), "{on:?} must enable fetching");
+        }
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+    }
+
+    /// A pulled checkpoint resolves with fetching OFF -- the store lookup is
+    /// local I/O, not a fetch, so a pulled model works exactly as before.
+    #[test]
+    fn ensure_env_weights_resolves_a_pulled_checkpoint_from_the_local_store_when_fetching_is_off() {
+        let _serial = env_lock();
+        let dir = seed_wan("supply-test-env-weights-local");
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
+            std::env::remove_var(var);
+        }
+        ensure_env_weights_with("wan", &Store::new(dir), &FakeHub::new()).unwrap();
+        for (var, role) in brain_arch::by_id("wan").unwrap().weights_env {
+            let p = std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set from the local store"));
+            assert!(std::path::Path::new(&p).exists(), "{var} -> {role:?} -> {p} must exist");
+        }
+        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// Default OFF and nothing pulled: a hard error naming the unset
+    /// variables and both remedies (`brain pull`, `--autofetch`) -- never a
+    /// download, and never the provider's bare "BRAIN_X not set" as the
+    /// caller's only clue.
+    #[test]
+    fn ensure_env_weights_names_the_remedy_when_nothing_is_pulled_and_fetching_is_off() {
+        let _serial = env_lock();
+        let dir = store(&format!("supply-test-env-weights-missing-{}", std::process::id()));
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
+            std::env::remove_var(var);
+        }
+        let err = ensure_env_weights_with("wan", &dir, &FakeHub::new()).unwrap_err();
+        assert!(err.contains("BRAIN_WAN_DIT"), "{err}");
+        assert!(err.contains("brain pull Wan-AI/Wan2.1-T2V-1.3B"), "{err}");
+        assert!(err.contains("--autofetch"), "{err}");
+        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// Opted in, the original behavior is byte-for-byte intact: missing
+    /// weights are fetched through the store's ladder and every role lands
+    /// in its variable.
+    #[test]
+    fn ensure_env_weights_fetches_when_the_environment_opts_in() {
+        let _serial = env_lock();
+        let dir = store(&format!("supply-test-env-weights-fetch-{}", std::process::id()));
+        let mut hub = FakeHub::new();
+        for f in [
+            "config.json",
+            "diffusion_pytorch_model.safetensors",
+            "Wan2.1_VAE.pth",
+            "models_t5_umt5-xxl-enc-bf16.pth",
+            "google/umt5-xxl/tokenizer.json",
+            "google/umt5-xxl/tokenizer_config.json",
+            "google/umt5-xxl/special_tokens_map.json",
+            "google/umt5-xxl/spiece.model",
+        ] {
+            hub.add_file("Wan-AI", "Wan2.1-T2V-1.3B", "main", f, b"stub".to_vec());
+        }
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
+        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
+            std::env::remove_var(var);
+        }
+        ensure_env_weights_with("wan", &dir, &hub).unwrap();
+        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
+            assert!(std::env::var_os(var).is_some_and(|v| !v.is_empty()), "{var} must be set by the fetch");
+        }
+        for (var, _) in brain_arch::by_id("wan").unwrap().weights_env {
+            std::env::remove_var(var);
+        }
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+    }
+
+    /// A pulled ref resolves with fetching OFF and a hub holding NOTHING --
+    /// any hub call would fail the resolution, so an Ok here is proof the
+    /// store answer never touched the network.
+    #[test]
+    fn ensure_default_weights_resolves_a_pulled_ref_without_touching_the_hub_when_fetching_is_off() {
+        let _serial = env_lock();
+        let (config, weights) = tiny_qwen3_hf_files();
+        let mut hub = FakeHub::new();
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", config);
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", weights);
+        let store = store(&format!("supply-test-default-weights-local-{}", std::process::id()));
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
+        ensure_default_weights_with("qwen3", &store, &hub).unwrap(); // seed the store
+        std::env::set_var("BRAIN_AUTO_FETCH", "0");
+        let got = ensure_default_weights_with("qwen3", &store, &FakeHub::new()).unwrap();
+        assert!(got.weights.ends_with("Qwen/Qwen3-0.6B/model.brain.safetensors"), "{}", got.weights);
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+    }
+
+    /// Fetching OFF and nothing pulled: the error is the remedy, not the
+    /// provider's downstream confusion.
+    #[test]
+    fn ensure_default_weights_names_the_remedy_when_fetching_is_off_and_nothing_is_pulled() {
+        let _serial = env_lock();
+        let store = store(&format!("supply-test-default-weights-missing-{}", std::process::id()));
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+        let err = ensure_default_weights_with("qwen3", &store, &FakeHub::new()).unwrap_err();
+        assert!(err.contains("brain pull Qwen/Qwen3-0.6B"), "{err}");
+        assert!(err.contains("--autofetch"), "{err}");
     }
 
     #[test]

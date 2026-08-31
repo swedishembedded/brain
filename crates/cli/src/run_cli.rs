@@ -563,24 +563,21 @@ fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool, http_up: boo
 /// second-signal escape hatch is the backstop if this window is not enough.
 const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Build the transparent auto-fetch supplier for a live `brain serve`, unless
-/// disabled via `BRAIN_AUTO_FETCH=0` (also accepts `false`/`off`,
-/// case-insensitive; anything else -- including unset -- is enabled, since
-/// transparent auto-fetch is the point of `brain serve`). `None` when
-/// disabled OR when no models directory can be resolved at all (no `$HOME`) --
-/// either way, an unresolved model then just 404s/errors with zero I/O, same as
-/// before this existed.
+/// Build the transparent auto-fetch supplier for a live `brain serve`, but
+/// only when fetching is enabled: `--autofetch` (which `main` publishes by
+/// setting `BRAIN_AUTO_FETCH=1`) or the same variable the caller exported.
+/// Default is OFF -- a request for a model that is not pulled returns an
+/// error to that caller, with zero network I/O; nothing downloads from a
+/// node the operator did not opt in. `None` also when no models directory
+/// can be resolved at all (no `$HOME`), same as before this existed.
 ///
 /// Every HTTP/D-Bus surface in this process shares ONE supplier instance (not
 /// one per surface): `StoreSupplier`'s in-flight map is what makes concurrent
 /// requests for the same cold model share a single fetch rather than each
 /// surface racing its own download.
 fn build_auto_fetch_supplier(models_dir: Option<&str>) -> Option<Arc<dyn residency::ModelSupplier>> {
-    let disabled = std::env::var("BRAIN_AUTO_FETCH")
-        .ok()
-        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"));
-    if disabled {
-        eprintln!("brain serve: BRAIN_AUTO_FETCH disabled -- an unresolved model 404s/errors instead of auto-fetching");
+    if !crate::supply::auto_fetch_enabled() {
+        eprintln!("brain serve: auto-fetch off -- a request for a model that is not pulled errors (pass --autofetch or set BRAIN_AUTO_FETCH=1 to enable on-demand fetching)");
         return None;
     }
     // The SAME models directory `build_serving_executor`'s startup scan
@@ -780,6 +777,35 @@ pub(crate) fn query_ram_bytes() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::HELP;
+    use brain_testutil::env_lock;
+
+    /// The node's fetch gateway: with the default (no opt-in) there is NO
+    /// auto-fetch supplier, so every surface answers a request for an
+    /// unpulled model with an error and zero network I/O; `--autofetch`
+    /// (published as `BRAIN_AUTO_FETCH=1`) builds the supplier.
+    #[test]
+    fn the_auto_fetch_supplier_is_built_only_when_fetching_is_enabled() {
+        let _serial = env_lock();
+        let dir = std::env::temp_dir().join(format!("run-cli-autofetch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+        assert!(
+            super::build_auto_fetch_supplier(Some(dir.to_str().unwrap())).is_none(),
+            "unset must build no supplier: fetching is opt-in"
+        );
+        std::env::set_var("BRAIN_AUTO_FETCH", "0");
+        assert!(
+            super::build_auto_fetch_supplier(Some(dir.to_str().unwrap())).is_none(),
+            "=0 must keep fetching off"
+        );
+        std::env::set_var("BRAIN_AUTO_FETCH", "1");
+        assert!(
+            super::build_auto_fetch_supplier(Some(dir.to_str().unwrap())).is_some(),
+            "=1 (what --autofetch publishes) must build the supplier"
+        );
+        std::env::remove_var("BRAIN_AUTO_FETCH");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Every flag the hand-rolled loop in `run_serve` actually parses must be
     /// documented in `HELP` -- this is the content-side gate for the bench

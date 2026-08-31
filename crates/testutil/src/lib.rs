@@ -52,6 +52,22 @@ pub fn skip(reason: &str) {
     eprintln!("SKIP: {reason}");
 }
 
+/// Serialize the tests of one test binary that mutate the process
+/// environment.
+///
+/// `std::env` is process-global, and cargo runs a binary's tests on parallel
+/// threads, so two tests that set and remove the same variable race each
+/// other's assertions - and the race crosses module lines (a `resolve.rs`
+/// fetch-gate test and a `supply.rs` fixture test both clear `BRAIN_WAN_*`).
+/// A lock per module guards nothing there: every env-mutating test in a
+/// binary must hold THIS one lock for its whole body. Tests that only read
+/// variables another test writes may also need it, when the value read is
+/// part of what is asserted.
+pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ENV_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
+}
+
 /// Name what a test is skipping because this MACHINE cannot run it, and let no
 /// flag turn that into a failure.
 ///

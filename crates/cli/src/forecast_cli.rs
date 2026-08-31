@@ -113,14 +113,15 @@ fn predict(args: &[String]) {
         }
     };
 
-    // Weights: explicit flags win, else the env pair, else auto-fetch sets the
-    // env pair from `NeoQuasar/Kronos-base` + `NeoQuasar/Kronos-Tokenizer-base`.
+    // Weights: explicit flags win, else the env pair, else the default Kronos
+    // refs fill the pair in -- fetching only when opted in
+    // ([`crate::supply::auto_fetch_enabled`]).
     if kronos_tok.is_none() || kronos_dec.is_none() {
         crate::supply::ensure_env_weights("kronos");
     }
     let env = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty());
     let (Some(tok), Some(dec)) = (kronos_tok.or_else(|| env("BRAIN_KRONOS_TOKENIZER")), kronos_dec.or_else(|| env("BRAIN_KRONOS_DECODER"))) else {
-        eprintln!("brain forecast predict: no kronos checkpoint - auto-fetch did not resolve one, and neither");
+        eprintln!("brain forecast predict: no kronos checkpoint resolved, and neither");
         eprintln!("  --kronos-tokenizer/--kronos-decoder nor BRAIN_KRONOS_TOKENIZER/BRAIN_KRONOS_DECODER are set");
         std::process::exit(1);
     };

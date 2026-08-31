@@ -307,7 +307,8 @@ fn weights_already_named(arch: &str, rest: &[String]) -> bool {
 /// For an `infer`-shaped verb with no `--weights` already given, auto-fetch
 /// the architecture's default checkpoint
 /// ([`brain_arch::Arch::default_ref`], via
-/// [`crate::supply::ensure_default_weights`]) and inject `--weights <path>`
+/// [`crate::supply::ensure_default_weights`]; fetching is opt-in, so with it
+/// off an unpulled default errors instead) and inject `--weights <path>`
 /// (plus `--tokenizer <path>`, when the fetched checkpoint has one and
 /// `--tokenizer` was not already given) -- what makes `brain infer zipdepth
 /// --in image=x.jpg` (no flags beyond the input) resolve a real checkpoint on
@@ -330,9 +331,9 @@ fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
     // A `Arch::weights_env` architecture whose vars the caller has ALREADY
     // exported has fully specified its weights, so there is nothing to fetch
     // and nothing to inject. `supply::ensure_default_weights` below would
-    // download the whole `default_ref` regardless: unlike
-    // `supply::ensure_env_weights`, it consults neither those vars nor
-    // `BRAIN_AUTO_FETCH`. `brain flux2 generate` hit exactly that -- `canon_verb`
+    // still resolve the whole `default_ref` regardless: unlike
+    // `supply::ensure_env_weights`, it consults none of those vars.
+    // `brain flux2 generate` hit exactly that -- `canon_verb`
     // maps `generate` to `infer`, so a klein-9b run with all four
     // `BRAIN_FLUX2_*` paths exported still fetched the 4B `default_ref` it can
     // never use, then appended a `--weights` flag `flux2_cli` rejects.
@@ -393,21 +394,10 @@ fn maybe_inject_default_weights(arch: &str, rest: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use brain_testutil::env_lock;
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// `std::env` is process-global, and cargo runs a binary's tests on
-    /// parallel threads: tests that set and remove `BRAIN_FLUX2_*` /
-    /// `BRAIN_WAN_*` variables race each other's assertions unless
-    /// serialized. Every env-mutating test below holds this for its whole
-    /// body.
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
     #[test]
@@ -458,8 +448,7 @@ mod tests {
     /// `--weights` injected. `brain flux2 generate` downloaded the 4B
     /// `default_ref` with all four `BRAIN_FLUX2_*` paths set, because
     /// `canon_verb` maps `generate` to `infer` and `ensure_default_weights`
-    /// (unlike `ensure_env_weights`) consults neither those vars nor
-    /// `BRAIN_AUTO_FETCH`.
+    /// (unlike `ensure_env_weights`) consults none of those vars.
     ///
     /// The partially-configured and unset cases must still fetch: several rows
     /// (`s3dit`, `qwen3vl`, `qwen35`, ...) declare `weights_env` AND depend on
