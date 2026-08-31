@@ -12,7 +12,8 @@ use flux2::{AdapterSpec, Flux2Config, GenOpts, Paths, Pipeline};
 const HELP: &str = "brain flux2 <cmd>
   generate --prompt <text> --out <out.ppm> [--width W] [--height H]
            [--steps N] [--seed S] [--guidance G] [--variant klein-4b|klein-9b|base-4b|base-9b]
-           [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only)
+           [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only);
+                                    # .gguf defaults to int8 and rejects explicit fp32
            [--strength S]           # img2img anchoring dial, 0..1, on the first --ref
                                     # (which must then be at the output size). 1.0 = free
                                     # generation conditioned on the reference; lower anchors
@@ -155,6 +156,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let (mut want_w, mut want_h): (Option<u32>, Option<u32>) = (None, None);
     let mut variant_name = "klein-4b".to_string();
     let mut precision = flux2::Precision::F32;
+    let mut precision_was_explicit = false;
     let mut refs: Vec<String> = Vec::new();
     let mut ref_size: Option<u32> = None;
     let mut mask_path: Option<String> = None;
@@ -183,7 +185,10 @@ fn generate(args: &[String]) -> Result<(), String> {
             }
             "--guidance" => o.guidance = need(i)?.parse().map_err(|e| format!("--guidance: {e}"))?,
             "--variant" => variant_name = need(i)?.clone(),
-            "--precision" => precision = flux2::Precision::from_name(need(i)?)?,
+            "--precision" => {
+                precision = flux2::Precision::from_name(need(i)?)?;
+                precision_was_explicit = true;
+            },
             "--ref" => refs.push(need(i)?.clone()),
             "--ref-size" => {
                 let n: u32 = need(i)?.parse().map_err(|e| format!("--ref-size: {e}"))?;
@@ -260,6 +265,11 @@ fn generate(args: &[String]) -> Result<(), String> {
     if let Some(te) = text_encoder {
         paths.te = te;
     }
+    // Q8_0 GGUF is not an fp32 checkpoint with an optional output tier: the
+    // FLUX.2 constructor consumes it through its packed DP4A representation.
+    // Omitted `--precision` therefore follows the source; an explicit fp32
+    // request is rejected rather than silently changing it.
+    precision = flux2::pipeline::effective_dit_precision(&paths.dit, precision, precision_was_explicit)?;
     // Which model this run is actually about to load, before anything is
     // loaded.
     eprintln!("flux2: model {} ({}, {})", model_name.as_deref().unwrap_or(&paths.dit), variant_name, precision.name());

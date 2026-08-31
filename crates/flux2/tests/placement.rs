@@ -11,12 +11,211 @@
 //! across the cards a machine actually has, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
-use flux2::pipeline::{dit_bytes, te_bytes};
+use std::collections::HashMap;
+
+use checkpoint::gguf::{MmapGguf, Q8_0_BLOCK_ELEMS};
+use checkpoint::quantize::{convert, Policy, Tier};
+use flux2::pipeline::{dit_bytes, effective_dit_precision, gguf_dit_device_bytes, plan_parts, te_bytes, vae_bytes};
+use gpu_core::devices::{install_placer, Placer};
+use std::sync::{Arc, Mutex, OnceLock};
 use flux2::Precision;
 
 const GIB: f64 = (1u64 << 30) as f64;
 fn gib(b: u64) -> f64 {
     b as f64 / GIB
+}
+
+/// Build a small complete FLUX.2-shaped Q8_0 source. The tiny dimensions keep
+/// the fixture cheap while preserving every allocation class used by the real
+/// constructor: host-only modulation, fp32 boundary/down/norm buffers, and
+/// packed int8 linears.
+fn tiny_dit(policy: Policy) -> (flux2::Flux2Config, MmapGguf, String) {
+    let cfg = flux2::Flux2Config {
+        in_channels: 32,
+        context_in_dim: 64,
+        hidden: 32,
+        n_heads: 1,
+        depth_double: 1,
+        depth_single: 1,
+        mlp_ratio: 1.0,
+        axes_dim: [8, 8, 8, 8],
+        rope_theta: 2000.0,
+        norm_eps: 1e-6,
+        txt_len: 64,
+        guidance_embed: false,
+        distilled: true,
+    };
+    let src: HashMap<_, _> = cfg
+        .tensor_manifest()
+        .into_iter()
+        .map(|(name, shape)| {
+            let n = shape.iter().product();
+            (name, (shape, vec![0.125f32; n]))
+        })
+        .collect();
+    let path = std::env::temp_dir()
+        .join(format!(
+            "flux2-placement-q8-{}-{}.gguf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+        .to_string_lossy()
+        .into_owned();
+    convert(&src, Tier::Q8_0, &policy, &[], &path, &mut |_, _| {}).unwrap();
+    let g = MmapGguf::open(&path).unwrap();
+    (cfg, g, path)
+}
+
+fn tiny_q8_dit() -> (flux2::Flux2Config, MmapGguf, String) {
+    let (cfg, g, path) = tiny_dit(Policy::new().min_elems(1));
+    let quantized = cfg
+        .tensor_manifest()
+        .iter()
+        .filter(|(name, _)| g.dtype(name) == Some("Q8_0"))
+        .count();
+    assert_eq!(quantized, 19, "the fixture must preserve the writer's rank-2 Q8_0 / rank-1 F32 mix");
+    (cfg, g, path)
+}
+
+/// The CLI's implicit fp32 default follows a GGUF's executable int8 format,
+/// but an operator's explicit fp32 request is never silently ignored. The
+/// returned precision is also what `Pipeline::build_inner` passes to planning
+/// and `Flux2Model::new_from`.
+#[test]
+fn gguf_effective_precision_is_planned_and_built_as_int8() {
+    assert_eq!(
+        effective_dit_precision("model.gguf", Precision::F32, false).unwrap(),
+        Precision::Int8
+    );
+    assert_eq!(
+        effective_dit_precision("model.gguf", Precision::Int8, true).unwrap(),
+        Precision::Int8
+    );
+    assert!(effective_dit_precision("model.gguf", Precision::F32, true).is_err());
+    assert_eq!(
+        effective_dit_precision("model.safetensors", Precision::F32, true).unwrap(),
+        Precision::F32
+    );
+}
+
+/// Q8_0 has 34 raw bytes per 32 elements. `Flux2Model::new_from` re-packs an
+/// int8 linear into 32 packed bytes plus one f32 scale, or retains a deliberate
+/// f32 exception as 128 bytes. This is deliberately written from the file
+/// header byte lengths rather than the config element counts: the production
+/// estimate must describe the source it validated. Rank-1 norms remain F32 in
+/// the source and are separately counted as their f32 device buffers.
+#[test]
+fn q8_gguf_cost_matches_the_buffers_flux2_keeps_on_device() {
+    let (cfg, g, path) = tiny_q8_dit();
+    let kept_on_host = [
+        "time_in.in_layer.weight",
+        "time_in.out_layer.weight",
+        "double_stream_modulation_img.lin.weight",
+        "double_stream_modulation_txt.lin.weight",
+        "single_stream_modulation.lin.weight",
+        "final_layer.adaLN_modulation.1.weight",
+    ];
+    let f32_on_device = |name: &str| {
+        name == "img_in.weight"
+            || name == "txt_in.weight"
+            || name == "final_layer.linear.weight"
+            || name.contains("norm.query_norm.scale")
+            || name.contains("norm.key_norm.scale")
+            || (name.starts_with("double_blocks.") && name.ends_with("_mlp.2.weight"))
+    };
+    let expected_weights: u64 = cfg
+        .tensor_manifest()
+        .iter()
+        .map(|(name, _)| {
+            let (raw, ty) = g.raw_tensor_bytes(name).expect("manifest tensor");
+            if kept_on_host.contains(&name.as_str()) {
+                0
+            } else if f32_on_device(name) {
+                // Intentional F32 device buffers include rank-1 norm scales,
+                // which the writer preserves as F32 in this mixed fixture.
+                let elems = if ty == checkpoint::gguf::TYPE_Q8_0 {
+                    assert_eq!(raw.len() % 34, 0);
+                    assert_eq!(raw.len() / 34 * Q8_0_BLOCK_ELEMS, raw.len() / 34 * 32);
+                    raw.len() as u64 / 34 * 32
+                } else {
+                    raw.len() as u64 / 4
+                };
+                elems * 4
+            } else {
+                assert_eq!(g.dtype(name), Some("Q8_0"));
+                assert_eq!(raw.len() % 34, 0);
+                assert_eq!(raw.len() / 34 * Q8_0_BLOCK_ELEMS, raw.len() / 34 * 32);
+                assert_eq!(ty, checkpoint::gguf::TYPE_Q8_0);
+                (raw.len() as u64 / 34) * 36
+            }
+        })
+        .sum();
+    let n_joint = 96;
+    let got = gguf_dit_device_bytes(&g, &cfg, n_joint, 1).expect("Q8_0 header cost");
+    let legacy = dit_bytes(&cfg, Precision::Int8, n_joint, 1);
+    assert!(got > expected_weights, "scratch is a real device allocation");
+    assert_ne!(got, legacy, "the GGUF route must not fall back to config-wide int8 pricing");
+    let _ = std::fs::remove_file(path);
+}
+
+/// A non-Q8_0 normal linear cannot fall through the streamed constructor's
+/// host-f32 re-quantization path. The header validator must reject it before a
+/// device is chosen, while allowing rank-1 F32 norm scales and the intentional
+/// F32 device exceptions covered above.
+#[test]
+fn gguf_non_q8_linear_is_rejected_before_placement() {
+    let (cfg, g, path) = tiny_dit(Policy::new().min_elems(1).never_quantize(&["single_blocks.0.linear1.weight"]));
+    assert_eq!(g.dtype("single_blocks.0.linear1.weight"), Some("F32"));
+    let err = gguf_dit_device_bytes(&g, &cfg, 96, 1).unwrap_err();
+    assert!(
+        err.contains("single_blocks.0.linear1.weight is F32") && err.contains("will not upcast it"),
+        "unexpected error: {err}"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+/// A GGUF DiT is costed from its header before the planner sees it, and that
+/// same source resolves the model's executable precision to Int8. A fake
+/// placer makes this a hardware-free contract test: legacy fp32 placement
+/// would reject this layout, while the GGUF cost is accepted without falling
+/// back to an ambient device.
+#[test]
+fn gguf_plan_uses_the_header_cost_and_the_int8_build_precision() {
+    struct RecordingPlacer(std::sync::Mutex<Option<Vec<gpu_core::devices::Need>>>);
+    impl Placer for RecordingPlacer {
+        fn place(&self, needs: &[gpu_core::devices::Need]) -> Result<Vec<gpu_core::devices::Home>, String> {
+            *self.0.lock().unwrap() = Some(needs.to_vec());
+            Ok(vec![
+                gpu_core::devices::Home::Gpu(0),
+                gpu_core::devices::Home::Gpu(1),
+                gpu_core::devices::Home::Gpu(0),
+            ])
+        }
+    }
+    static PLACER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _serial = PLACER_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let (cfg, g, path) = tiny_q8_dit();
+    let expected = gguf_dit_device_bytes(&g, &cfg, 96, 1).unwrap();
+    let recorded = Arc::new(RecordingPlacer(Mutex::new(None)));
+    install_placer(recorded.clone());
+    let paths = flux2::Paths {
+        dit: path.clone(),
+        vae: "unused".to_string(),
+        te: "unused".to_string(),
+        tokenizer: "unused".to_string(),
+    };
+    let vae = vae::VaeConfig::flux2();
+    let (homes, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1).unwrap();
+    assert_eq!(homes.of("dit"), Some(gpu_core::devices::Home::Gpu(0)));
+    assert_eq!(te.gpu_index, Some(1));
+    let needs = recorded.0.lock().unwrap().take().unwrap();
+    assert_eq!(needs[0].vram, expected);
+    assert_eq!(needs[2].vram, vae_bytes(&vae, 32));
+    assert_eq!(effective_dit_precision(&path, Precision::F32, false).unwrap(), Precision::Int8);
+    let _ = std::fs::remove_file(path);
 }
 
 /// The measured constraint this whole mechanism exists for: on a 24 GiB card

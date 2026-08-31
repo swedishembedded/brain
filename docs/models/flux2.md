@@ -263,10 +263,24 @@ and feather the whole thing with a few pixels of blur so the seams blend.
 
 ## Hardware and limits
 
-INT8 precision lowers resident VRAM use for the transformer. Klein does not
+INT8 precision lowers resident VRAM use for the transformer. A `.gguf` DiT is
+executed through that Q8_0/DP4A path automatically when `--precision` is
+omitted; `--precision fp32` with a `.gguf` DiT is rejected rather than silently
+building a different representation. Automatic placement reads each validated
+GGUF tensor header and budgets the buffers FLUX.2 actually retains: Q8_0
+linears become packed int8 plus group scales, while boundary linears,
+double-stream MLP-down projections, and QK/RMS scales remain f32 by design.
+The entire DiT remains GPU-resident today: GGUF mmap loading limits host
+materialization during construction, but it is not runtime weight paging, so
+there is no host-RAM placement mode. Klein does not
 use classifier-free guidance, so it cannot be steered as strongly as the
 `base` variants for edits that need to fight the source image's content - use
 `base-4b`/`base-9b` or a LoRA for those.
+
+A GGUF with non-Q8_0 DiT linears is rejected. Preserving and executing mixed
+quantizations without conversion, and an explicit opt-in fp16-to-fp32 fallback
+for hardware that cannot execute fp16, require dedicated runtime support and
+are not implicit behaviors.
 
 Licensing: Klein 4B, the FLUX.2 VAE, and the Qwen3 text encoders are Apache
 2.0 (commercial use OK). The 9B variants (`klein-9b`, `base-9b`) are under the

@@ -324,20 +324,132 @@ fn weight_bytes(shape: &[usize], precision: crate::Precision) -> u64 {
     (n * w) as u64
 }
 
+/// The device scratch that `Flux2Model::new_from` allocates for the joint
+/// sequence. This is shared by the architecture-only and GGUF-header cost
+/// routes so neither can price weights accurately but omit the buffers that
+/// coexist with them on the card.
+fn dit_scratch_bytes(cfg: &Flux2Config, precision: crate::Precision, n_joint: u64, max_batch: u64) -> u64 {
+    let batch = max_batch.max(1);
+    let n = n_joint * batch;
+    let d = cfg.hidden as u64;
+    let mlp = cfg.mlp_hidden() as u64;
+    let hd = cfg.head_dim() as u64;
+    // `Scratch`: 16 D-wide words (qkv counts as three), three MLP-wide words,
+    // two latent IO buffers, cos+sin totalling one head-width, context input,
+    // and score/prob buffers (one word each under the fast GPU path; otherwise
+    // the materialized [B,H,T,T] buffers).
+    let attn_words = if precision == crate::Precision::Int8 {
+        2
+    } else {
+        2 * batch * cfg.n_heads as u64 * n_joint * n_joint
+    };
+    let f32_words = n * (16 * d + 3 * mlp + 2 * cfg.in_channels as u64 + hd)
+        + batch * cfg.txt_len as u64 * cfg.context_in_dim as u64
+        + attn_words
+        + batch * 17 * d;
+    let mut bytes = f32_words * 4;
+    if precision == crate::Precision::Int8 {
+        // I8Scratch: one f32 scale per row plus packed [row, K] buffers for
+        // hidden and MLP widths. `storage` is addressed in four-byte words.
+        bytes += n * (4 + d + mlp);
+    }
+    bytes
+}
+
 /// The DiT's device footprint: its own weights at `precision`, plus the
 /// activation scratch the joint sequence needs.
 ///
-/// Both terms come from the architecture itself ([`Flux2Config::
-/// tensor_manifest`] and the 16 `[n, hidden]` + 3 `[n, mlp]` f32 scratch
-/// buffers `Flux2Model` allocates), never from a remembered measurement, so
-/// they follow a config change instead of going stale beside it.
+/// This route describes brain-native fp32 maps. A Q8_0 GGUF uses
+/// [`gguf_dit_device_bytes`] instead because the constructor retains a mixture
+/// of packed-int8 and deliberate-fp32 buffers that cannot be inferred from
+/// tensor rank alone.
 pub fn dit_bytes(cfg: &Flux2Config, precision: crate::Precision, n_joint: u64, max_batch: u64) -> u64 {
     let weights: u64 = cfg.tensor_manifest().iter().map(|(_, shape)| weight_bytes(shape, precision)).sum();
-    let mut per_slot = n_joint * (16 * cfg.hidden as u64 + 3 * cfg.mlp_hidden() as u64) * 4;
-    if precision == crate::Precision::Int8 {
-        per_slot += n_joint * (cfg.hidden as u64 + cfg.mlp_hidden() as u64);
+    weights + dit_scratch_bytes(cfg, precision, n_joint, max_batch)
+}
+
+/// Whether `name` becomes a retained fp32 device buffer even on FLUX.2's int8
+/// Q8_0 route. This exactly follows `Flux2Model::new_from`: boundary linears,
+/// QK/RMS scales, and double-stream MLP-down are intentionally not packed.
+fn gguf_f32_device_weight(name: &str) -> bool {
+    name == "img_in.weight"
+        || name == "txt_in.weight"
+        || name == "final_layer.linear.weight"
+        || name.contains("norm.query_norm.scale")
+        || name.contains("norm.key_norm.scale")
+        || (name.starts_with("double_blocks.") && name.ends_with("_mlp.2.weight"))
+}
+
+/// Whether `name` remains a host `Vec<f32>` rather than a device buffer.
+///
+/// The mmap itself is file-backed and demand-paged, not committed RAM; these
+/// six vectors are the owned data relevant to the constructor's device cost.
+fn gguf_host_weight(name: &str) -> bool {
+    matches!(
+        name,
+        "time_in.in_layer.weight"
+            | "time_in.out_layer.weight"
+            | "double_stream_modulation_img.lin.weight"
+            | "double_stream_modulation_txt.lin.weight"
+            | "single_stream_modulation.lin.weight"
+            | "final_layer.adaLN_modulation.1.weight"
+    )
+}
+
+/// The exact Q8_0-GGUF DiT device budget used by the streamed constructor.
+///
+/// Every tensor is classified from its own header dtype and raw byte count.
+/// Q8_0 source blocks are repacked quant→quant into the DP4A layout: 34 source
+/// bytes (32 values) become 32 packed bytes plus one f32 scale, or
+/// `raw_bytes / 34 * 36`. Deliberate fp32 device exceptions are reconstructed
+/// as `element_count * 4`; host modulation vectors upload no device bytes.
+/// A non-Q8_0 tensor is rejected: accepting it would silently decode and
+/// requantize a mixed-quant checkpoint, which is not a supported FLUX.2 import
+/// contract. Header byte lengths, rather than a model-size label or whole-file
+/// size, keep this correct for the actual validated checkpoint.
+pub fn gguf_dit_device_bytes(g: &checkpoint::gguf::MmapGguf, cfg: &Flux2Config, n_joint: u64, max_batch: u64) -> Result<u64, String> {
+    const Q8_FILE_BLOCK_BYTES: u64 = 34;
+    const Q8_DEVICE_PACKED_BYTES: u64 = 36;
+    let mut device = 0u64;
+    for (name, shape) in cfg.tensor_manifest() {
+        let (raw, ty) = g.raw_tensor_bytes(&name).ok_or_else(|| format!("flux2: GGUF is missing {name}"))?;
+        let raw = raw.len() as u64;
+        let elements = shape.iter().product::<usize>() as u64;
+        if gguf_host_weight(&name) {
+            continue;
+        }
+        let bytes = if gguf_f32_device_weight(&name) {
+            // `up` dequantizes source values to host f32 then uploads this
+            // deliberate F32 buffer. That behavior predates this placement
+            // fix; the resulting device allocation is exactly elements * 4.
+            elements.checked_mul(4).ok_or("flux2: GGUF device footprint overflow")?
+        } else if ty == checkpoint::gguf::TYPE_Q8_0 {
+            if !raw.is_multiple_of(Q8_FILE_BLOCK_BYTES) {
+                return Err(format!("flux2: GGUF Q8_0 tensor {name} has invalid {raw}-byte payload"));
+            }
+            raw / Q8_FILE_BLOCK_BYTES * Q8_DEVICE_PACKED_BYTES
+        } else {
+            return Err(format!("flux2: GGUF tensor {name} is {}; FLUX.2 only supports Q8_0 for packed int8 linears and will not upcast it", g.dtype(&name).unwrap_or("unknown")));
+        };
+        device = device.checked_add(bytes).ok_or("flux2: GGUF device footprint overflow")?;
     }
-    weights + per_slot * max_batch.max(1)
+    device.checked_add(dit_scratch_bytes(cfg, crate::Precision::Int8, n_joint, max_batch)).ok_or_else(|| "flux2: GGUF device footprint overflow".to_string())
+}
+
+/// Resolve the one precision that both placement and construction will use.
+/// A Q8_0 GGUF is always consumed by FLUX.2's GPU-only packed-int8 path. The
+/// CLI distinguishes its historical implicit fp32 default from an explicit
+/// `--precision fp32`: the former follows the GGUF source, while the latter is
+/// refused rather than silently planning one format and building another. The
+/// header validator rejects non-Q8_0 DiT linears before construction.
+pub fn effective_dit_precision(dit: &str, requested: crate::Precision, f32_was_explicit: bool) -> Result<crate::Precision, String> {
+    if dit.ends_with(".gguf") {
+        if requested == crate::Precision::F32 && f32_was_explicit {
+            return Err("flux2: --precision fp32 is incompatible with a .gguf DiT; FLUX.2 executes Q8_0 GGUF through its GPU-only int8 path (use --precision int8)".to_string());
+        }
+        return Ok(crate::Precision::Int8);
+    }
+    Ok(requested)
 }
 
 /// The text encoder's device footprint: weights plus the activation buffers
@@ -482,10 +594,15 @@ pub fn part_needs(
     ]
 }
 
-fn plan_parts(cfg: &Flux2Config, vae_cfg: &vae::VaeConfig, precision: crate::Precision, n_joint: u64, n_out_max: u64, max_batch: u64) -> (gpu_core::devices::Homes, TePlacement) {
+pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, precision: crate::Precision, n_joint: u64, n_out_max: u64, max_batch: u64) -> Result<(gpu_core::devices::Homes, TePlacement), String> {
     let te_cfg = te_config(cfg);
     let layers = *TAP_LAYERS.iter().max().unwrap();
-    let needs = part_needs(cfg, vae_cfg, precision, n_joint, n_out_max, max_batch);
+    let mut needs = part_needs(cfg, vae_cfg, precision, n_joint, n_out_max, max_batch);
+    if paths.dit.ends_with(".gguf") {
+        let g = checkpoint::gguf::MmapGguf::open(&paths.dit)?;
+        crate::import::validate_manifest(&|n| g.shape(n).map(<[usize]>::to_vec), g.names(), cfg)?;
+        needs[0].vram = gguf_dit_device_bytes(&g, cfg, n_joint, max_batch)?;
+    };
     let (dit, vae) = (needs[0].clone(), needs[2].clone());
     let mut why = String::new();
     // The DiT's tier first, then the smaller one as a fallback. For an int8
@@ -508,21 +625,22 @@ fn plan_parts(cfg: &Flux2Config, vae_cfg: &vae::VaeConfig, precision: crate::Pre
         // building the whole one on the same card is a plan that was never
         // about the model that got built, and it OOMs.)
         if let gpu_core::devices::Home::Gpu(i) = t {
-            return (homes, TePlacement { gpu_index: Some(i as usize), int8 });
+            return Ok((homes, TePlacement { gpu_index: Some(i as usize), int8 }));
         }
-        return (homes, TePlacement::here());
+        return Ok((homes, TePlacement::here()));
     }
     // Nothing fits even at int8. Fall back to the historical layout rather
     // than refusing here - the operator may know something the estimate does
     // not - but say WHY first, with the real numbers, so the driver OOM that
-    // probably follows is not the first news of it.
+    // probably follows is not the first news of it. A Cpu `Home` would merely
+    // leave `Gpu::new` unscoped; it is not host-resident DiT execution.
     if !why.is_empty() {
-        eprintln!("flux2: no automatic placement fits ({why}); building on the ambient device");
+        eprintln!("flux2: no automatic GPU placement fits ({why}); FLUX.2 has no host-resident DiT execution, so attempting the historical ambient-device fallback");
     }
     let here = gpu_core::devices::selected_device()
         .map(|d| gpu_core::devices::Home::Gpu(d.index))
         .unwrap_or(gpu_core::devices::Home::Cpu);
-    (gpu_core::devices::Homes::new(vec![("dit".into(), here), ("te".into(), here), ("vae".into(), here)]), TePlacement::here())
+    Ok((gpu_core::devices::Homes::new(vec![("dit".into(), here), ("te".into(), here), ("vae".into(), here)]), TePlacement::here()))
 }
 
 /// Which Qwen3 the text encoder is, per DiT width. One place, so the encoder
@@ -733,20 +851,21 @@ impl Pipeline {
     /// and the model construction.
     ///
     /// A Q8_0 GGUF at the int8 tier never needs the fp32 model. The
-    /// checkpoint already holds int8, and `DitWeights::Gguf` requantizes each
-    /// matrix straight to this engine's per-row packing, one at a time;
-    /// routing it through the fp32 map instead materializes the whole model
-    /// (36.3 GB on klein-9b) purely as an intermediate, reads it back twice
-    /// to quantize, and frees it again. The result is BIT-IDENTICAL either
-    /// way - see `crate::weights` for why that is provable rather than
+    /// checkpoint already holds int8, and `DitWeights::Gguf` repacks each
+    /// Q8_0 matrix quant→quant into this engine's per-row layout, one at a
+    /// time; routing it through the fp32 map instead materializes the whole
+    /// model (36.3 GB on klein-9b) purely as an intermediate, reads it back
+    /// twice to quantize, and frees it again. The result is BIT-IDENTICAL
+    /// either way - see `crate::weights` for why that is provable rather than
     /// approximate - so this is a pure cost decision, not a fidelity one.
     ///
     /// A third-party LoRA still needs a float domain, but per tensor rather
     /// than over a resident map, so it rides the same streamed path. brain's
     /// own adapter container does not: it folds through
     /// `LoraAdapter::fold_into_tensors`, which is written against the whole
-    /// map. Everything else - safetensors, diffusers dirs, the fp32 tier, a
-    /// GGUF whose tensors are not Q8_0 - takes the map route unchanged.
+    /// map. Safetensors, diffusers dirs, and the fp32 tier take the map route;
+    /// a GGUF with a non-Q8_0 DiT linear is rejected during placement rather
+    /// than silently converted.
     fn build_dit(
         cfg: &Flux2Config,
         paths: &Paths,
@@ -763,8 +882,10 @@ impl Pipeline {
         // byte-identity of a real 9B generation was checked, adapter and
         // all), and a valve if a checkpoint ever trips the streamed path.
         let no_stream = std::env::var("BRAIN_FLUX2_NO_STREAM").is_ok_and(|v| v != "0");
-        let streamable = !no_stream
-            && precision == crate::Precision::Int8
+        if no_stream && paths.dit.ends_with(".gguf") {
+            return Err("flux2: BRAIN_FLUX2_NO_STREAM is incompatible with a .gguf DiT; whole-map loading would decode its quantized tensors before construction".to_string());
+        }
+        let streamable = precision == crate::Precision::Int8
             && paths.dit.ends_with(".gguf")
             && adapter.is_none_or(|a| a.path.ends_with(".safetensors"));
         if streamable {
@@ -834,6 +955,10 @@ impl Pipeline {
 
     fn build_inner(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, n_out_max: u32, adapter: Option<&AdapterSpec>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
         let n_max = cfg.txt_len as u32 + n_img_max;
+        // Resolve the source's executable representation before placement.
+        // Planning and construction must receive this same value; otherwise a
+        // Q8_0 GGUF could be budgeted as packed int8 then built as fp32.
+        let precision = effective_dit_precision(&paths.dit, precision, false)?;
         // The VAE config is read FIRST because the placement estimate is
         // computed from it: the decode's footprint is a property of this
         // checkpoint's channel schedule and the output size, not a constant.
@@ -849,7 +974,7 @@ impl Pipeline {
         };
         // Ask the engine where this pipeline's three parts go, then build
         // each one there. Nothing below names a card.
-        let (homes, auto_te) = plan_parts(cfg, &vae_cfg, precision, n_max as u64, n_out_max as u64, max_batch.max(1) as u64);
+        let (homes, auto_te) = plan_parts(cfg, paths, &vae_cfg, precision, n_max as u64, n_out_max as u64, max_batch.max(1) as u64)?;
         // An operator who pinned a layout keeps it; everyone else gets the
         // automatic one. Either way the run says what it did, in the same
         // place it reports reference sizes and token counts.
