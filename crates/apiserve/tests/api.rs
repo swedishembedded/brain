@@ -1946,6 +1946,7 @@ impl ResidentModel for FakeToolCallChat {
                 .param(ParamSpec::new("tool_choice", ParamType::Str, "tool choice"))
                 .param(ParamSpec::new("enable_thinking", ParamType::Bool, "thinking").default(json!(true)))
                 .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "preserve history reasoning"))
+                .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor"))
                 .output(BlobSpec::new("text", Media::Text, "generated text"))],
         )
     }
@@ -1969,8 +1970,9 @@ impl Instance for FakeToolCallChatInst {
         let tools_len = inv.get_str("tools").map(|s| s.len()).unwrap_or(0);
         let enable_thinking = inv.get_bool("enable_thinking").map(|b| b.to_string()).unwrap_or_else(|| "unset".to_string());
         let preserve_thinking = inv.get_bool("preserve_thinking").map(|b| b.to_string()).unwrap_or_else(|| "unset".to_string());
+        let template_flavor = inv.get_str("template_flavor").unwrap_or_else(|| "unset".to_string());
         let image_wh = inv.get_blob("image").map(|b| format!("{}x{}", b.meta["w"], b.meta["h"])).unwrap_or_else(|| "none".to_string());
-        let reasoning = format!("deciding (tools_len:{tools_len};enable_thinking:{enable_thinking};preserve_thinking:{preserve_thinking};image:{image_wh})");
+        let reasoning = format!("deciding (tools_len:{tools_len};enable_thinking:{enable_thinking};preserve_thinking:{preserve_thinking};template_flavor:{template_flavor};image:{image_wh})");
         progress(Progress::event(0, 1, json!({ "kind": "reasoning", "text": reasoning })));
 
         let mut calls: Vec<Value> = Vec::with_capacity(TOOLCALL_SCRIPT.len());
@@ -2178,6 +2180,42 @@ async fn openai_chat_preserve_thinking_reaches_the_invocation() {
     assert_eq!(st, StatusCode::OK);
     let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
     assert!(reasoning.contains("preserve_thinking:true"), "{reasoning}");
+}
+
+#[tokio::test]
+async fn openai_chat_template_flavor_reaches_the_invocation() {
+    // `template_flavor` (which upstream chat template the resident renders,
+    // and with it the tool-call wire form) follows the same extension point
+    // as the other chat-template kwargs: nested under `chat_template_kwargs`
+    // or, tolerated, top-level.
+    let (app, key) = toolcall_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-toolcall",
+        "messages": [{"role": "user", "content": "hi"}],
+        "chat_template_kwargs": {"template_flavor": "qwen3.8"},
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
+    assert!(reasoning.contains("template_flavor:qwen3.8"), "'template_flavor' must reach the invocation: {reasoning}");
+    // ...and the top-level spelling is tolerated too.
+    let body = json!({
+        "model": "brain-toolcall",
+        "messages": [{"role": "user", "content": "hi"}],
+        "template_flavor": "qwen3",
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
+    assert!(reasoning.contains("template_flavor:qwen3"), "{reasoning}");
+    // Unset stays unset: the resident owns the flavor default (a Qwen3.8
+    // model defaults its own flavor; the API surface must not silently pick
+    // one for it).
+    let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
+    assert!(reasoning.contains("template_flavor:unset"), "{reasoning}");
 }
 
 #[tokio::test]

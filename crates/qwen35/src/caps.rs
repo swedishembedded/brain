@@ -55,6 +55,19 @@ use crate::model::Qwen35;
 /// matters (import/fetch), not as this catalog entry's id.
 pub const MODEL: &str = "brain/qwen35";
 
+/// This model IS Qwen3.8-27B: default the chat-template flavor to the 3.8
+/// template (the XML tool-call wire form, the prefilled open `<think>`) -
+/// the shared `qwen3::chat` request parser defaults to the Qwen3-era flavor,
+/// which would silently mis-render this model's prompt. An explicitly
+/// requested `template_flavor` wins.
+pub(crate) fn with_template_flavor_default(inv: &Invocation) -> Invocation {
+    if inv.get_str("template_flavor").is_some() {
+        inv.clone()
+    } else {
+        inv.clone().set("template_flavor", json!("qwen3.8"))
+    }
+}
+
 /// The full, static capability manifest - safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (Qwen3.8-27B dense hybrid GDN/GQA decoder, KV-cache decode, one Progress per token)")
@@ -88,7 +101,8 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block (needs a tokenizer)").default(json!(true)))
         .param(ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level: xhigh (default, detailed deliberation), medium (no instruction), or low (brief thinking)").default(json!("xhigh")))
-        .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (takes effect on the Qwen3.8-flavor render; the shared chat path currently renders the Qwen3-era template, where framing is positional)").default(json!(true)))
+        .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (takes effect on the Qwen3.8-flavor render, this model's default)").default(json!(true)))
+        .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor: qwen3.8 (default; XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)").default(json!("qwen3.8")))
         .param(ParamSpec::new("use_mtp", ParamType::Bool, "enable MTP speculative acceleration in streaming mode (greedy only; requires streaming=true)").default(json!(false)))
         .param(ParamSpec::new(
             "streaming",
@@ -174,7 +188,7 @@ impl Action for GenerateAction {
         };
         let plan = match &tok {
             Some(t) => {
-                let req = parse_request(t, inv)?;
+                let req = parse_request(t, &with_template_flavor_default(inv))?;
                 // Stop tokens: explicit param wins (-1 disables); else both Qwen3
                 // EOS ids (`<|im_end|>` and `<|endoftext|>`) from the tokenizer -
                 // Qwen3.8 shares the same special-token vocabulary.
@@ -454,8 +468,10 @@ mod tests {
             brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
             return;
         };
-
-        let cfg = Qwen35Config { vocab: 151936, ..Qwen35Config::tiny() };
+        // The checkpoint's vocab must cover every id the tokenizer can emit:
+        // derive it from the tokenizer rather than a hardcoded era-specific
+        // constant (Qwen3 = 151936 ids, Qwen3.8 = 248k).
+        let cfg = Qwen35Config { vocab: QwenBpe::from_file(&tok_path).expect("load tokenizer").vocab_size() as u32, ..Qwen35Config::tiny() };
         let init = crate::init::init_weights(&cfg, 11);
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
             .param_list()
@@ -487,5 +503,50 @@ mod tests {
         assert!(out.outputs.get("completion_tokens").is_some());
         assert!(events > 0, "must stream at least the final 'done' Progress");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The flavor default: a request that names no `template_flavor` gets
+    /// THIS model's own template (Qwen3.8), an explicitly requested flavor
+    /// wins unchanged.
+    #[test]
+    fn template_flavor_defaults_to_this_models_own_flavor() {
+        let inv = Invocation::new().set("prompt", json!("hi"));
+        assert_eq!(
+            with_template_flavor_default(&inv).get_str("template_flavor").as_deref(),
+            Some("qwen3.8"),
+            "unset must default to the Qwen3.8 template"
+        );
+        let inv = Invocation::new().set("prompt", json!("hi")).set("template_flavor", json!("qwen3"));
+        assert_eq!(
+            with_template_flavor_default(&inv).get_str("template_flavor").as_deref(),
+            Some("qwen3"),
+            "an explicitly requested flavor must win"
+        );
+    }
+
+    /// The default is the RENDER, not just the param: with a tokenizer, a
+    /// chat request carrying tools and no `template_flavor` must render the
+    /// Qwen3.8 template's tools preamble (XML wire form) - the regression
+    /// this guard exists for is the shared parser's Qwen3-era default
+    /// silently mis-rendering this model's prompt.
+    ///
+    /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) -
+    /// self-skips loudly when unset.
+    #[test]
+    fn tokenizer_present_renders_the_qwen38_flavor_without_asking() {
+        let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
+            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+            return;
+        };
+        let tok = QwenBpe::from_file(&tok_path).expect("load Qwen3 tokenizer");
+        let messages = json!([{"role": "user", "content": "what's the weather in Paris?"}]).to_string();
+        let tools = json!([{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]).to_string();
+        let inv = Invocation::new().set("messages", json!(messages)).set("tools", json!(tools));
+        let req = parse_request(&tok, &with_template_flavor_default(&inv)).unwrap();
+        let text = tok.decode(&req.ids);
+        assert_eq!(req.flavor, data::qwen_chat::TemplateFlavor::Qwen38, "flavor must default to Qwen38 for this model");
+        assert!(req.thinking_open, "the 3.8 render prefills an open <think> when thinking is enabled");
+        assert!(text.contains("You have access to the following functions:"), "3.8 tools preamble:\n{text}");
+        assert!(text.ends_with("<|im_start|>assistant\n<think>\n"), "3.8 prefilled open think:\n{text}");
     }
 }

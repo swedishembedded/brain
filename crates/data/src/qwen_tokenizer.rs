@@ -302,6 +302,16 @@ impl QwenBpe {
         self.specials.iter().find(|(c, _)| c == content).map(|(_, id)| *id)
     }
 
+    /// Number of distinct ids this tokenizer can produce (max id + 1,
+    /// covering added tokens beyond the base vocab table) - the embedding /
+    /// LM-head row count a checkpoint built against this tokenizer needs.
+    /// A synthetic test checkpoint sizing its vocab to a hardcoded
+    /// Qwen3-era constant (151936) panics on the first decode of a prompt
+    /// encoded with the larger Qwen3.8 table (248k ids) otherwise.
+    pub fn vocab_size(&self) -> usize {
+        self.vocab_size
+    }
+
     /// Special-token ids the checkpoint's post-processor prepends to a single
     /// sequence (LFM2.5: `[<|startoftext|>]`; Qwen: empty). `encode()` does not
     /// apply this - callers wanting HF-equivalent encodings prepend it.

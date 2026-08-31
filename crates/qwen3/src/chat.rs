@@ -264,6 +264,14 @@ pub struct ParsedRequest {
     /// [`ToolChoice::None`] (schemas withheld) and post-generation for the
     /// forced-call variants (see [`ToolChoice`]'s doc).
     pub tool_choice: ToolChoice,
+    /// The template flavor the prompt was rendered with - also the tool-call
+    /// wire form (`<tool_call>` JSON vs Qwen3.8's `<function=…>` XML) the
+    /// per-sequence scanner must parse.
+    pub flavor: qwen_chat::TemplateFlavor,
+    /// True when the rendered generation prompt prefilled an open `<think>`
+    /// (the Qwen3.8 flavor with thinking enabled): the model continues
+    /// INSIDE the think block, so the scanner must start reasoning-open.
+    pub thinking_open: bool,
 }
 
 /// Build a [`ParsedRequest`] from an [`Invocation`]: `messages` (chat template,
@@ -288,6 +296,17 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
     // Qwen3-era flavor the upstream template has no such kwarg and the value
     // is inert, but it is forwarded so a flavor switch needs no parser change.
     let preserve_thinking = inv.get_bool("preserve_thinking");
+    // `template_flavor` selects which upstream template the prompt is
+    // rendered with (and, with it, the tool-call wire form): the Qwen3-era
+    // JSON form (default) or the Qwen3.8 XML form. The 3.8 template also
+    // prefills an open `<think>` when thinking is enabled.
+    let flavor = match inv.get_str("template_flavor").as_deref() {
+        None | Some("qwen3") => qwen_chat::TemplateFlavor::Qwen3,
+        Some("qwen3.8") | Some("qwen38") => qwen_chat::TemplateFlavor::Qwen38,
+        Some(other) => {
+            return Err(format!("qwen: unsupported template_flavor '{other}' (expected \"qwen3\" or \"qwen3.8\")"))
+        }
+    };
     let tool_choice = parse_tool_choice(inv.get_str("tool_choice").as_deref())?;
     let mut tools = parse_tools(inv.get_str("tools").as_deref())?;
     // Prompt-level tool_choice enforcement:
@@ -305,6 +324,10 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
         }
         _ => {}
     }
+    // The prefill follows the render: only a template-rendered prompt with
+    // the Qwen3.8 flavor and thinking enabled ends in an open `<think>\n`
+    // (a raw `chat=false` prompt has no template and no prefill).
+    let mut thinking_open = flavor == qwen_chat::TemplateFlavor::Qwen38 && enable_thinking;
     let text = match inv.get_str("messages").filter(|s| !s.is_empty()) {
         Some(raw) => {
             let msgs = parse_chat_messages(&raw, inv.get_str("system").as_deref())?;
@@ -312,6 +335,7 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
                 enable_thinking,
                 reasoning_effort: reasoning_effort.clone(),
                 preserve_thinking,
+                flavor,
                 ..Default::default()
             })?
         }
@@ -322,9 +346,11 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
                 qwen_chat::render_for_generation(&msgs, &tools, qwen_chat::TemplateOpts {
                     enable_thinking,
                     reasoning_effort: reasoning_effort.clone(),
+                    flavor,
                     ..Default::default()
                 })?
             } else {
+                thinking_open = false; // no template, no prefilled `<think>`
                 prompt
             }
         }
@@ -334,7 +360,7 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
         return Err("qwen: empty prompt".to_string());
     }
     let stops = parse_stops(inv.get_str("stop").as_deref())?;
-    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops, tool_choice })
+    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops, tool_choice, flavor, thinking_open })
 }
 
 /// Per-sequence streaming/finalisation state, common to every caller: the
@@ -354,13 +380,16 @@ pub struct SeqState {
 
 impl SeqState {
     pub fn new(req: &ParsedRequest, cancel: CancelToken) -> SeqState {
-        // `thinking_open=false`: the model must emit its own literal `<think>`
-        // tag to think (no prefilled-open-think prefix on this path).
+        // `thinking_open` is set by the Qwen3.8 flavor's prefilled open
+        // `<think>`: the model continues INSIDE the think block, so the
+        // scanner starts reasoning-open. Otherwise the model must emit its
+        // own literal `<think>` tag to think. The flavor also selects the
+        // tool-call wire form the scanner parses (JSON vs 3.8 XML).
         SeqState {
             stops: req.stops.clone(),
             cancel,
             printed: String::new(),
-            scan: ChatScanner::new(false),
+            scan: ChatScanner::with_flavor(req.thinking_open, req.flavor),
             stop_at: None,
             cancelled: false,
             max_new: req.max_new,
@@ -725,5 +754,72 @@ mod tests {
             assert!(!text.contains("thinking one"), "pt={pt:?}:\n{text}");
             assert!(text.contains("a1"), "pt={pt:?}:\n{text}");
         }
+    }
+
+    /// `template_flavor` selects which upstream template generation
+    /// `parse_request` renders: `qwen3.8` (or the `qwen38` alias) renders the
+    /// 3.8 flavor - the XML tools preamble, the prefilled open `<think>` -
+    /// and the parsed request carries the flavor plus the prefill state so
+    /// [`SeqState`]'s scanner parses the matching tool-call wire form. The
+    /// default stays `qwen3`.
+    #[test]
+    fn template_flavor_selects_the_qwen38_render() {
+        let Some(tok) = real_tok() else { return };
+        let inv = || {
+            Invocation::new()
+                .set("messages", json!(r#"[{"role": "user", "content": "weather?"}]"#))
+                .set("tools", json!(WEATHER_TOOLS))
+        };
+        let q3 = parse_request(&tok, &inv()).unwrap();
+        assert_eq!(q3.flavor, qwen_chat::TemplateFlavor::Qwen3);
+        assert!(!q3.thinking_open);
+        let q38 = parse_request(&tok, &inv().set("template_flavor", json!("qwen3.8"))).unwrap();
+        assert_eq!(q38.flavor, qwen_chat::TemplateFlavor::Qwen38);
+        assert!(q38.thinking_open, "3.8 prefills an open <think> when thinking is enabled");
+        let text = tok.decode(&q38.ids);
+        assert!(text.contains("You have access to the following functions:"), "3.8 tools preamble:\n{text}");
+        // The 3.8 preamble ships a FIXED example call (upstream's
+        // `example_function_name`), not one derived from the offered tools;
+        // the tools themselves appear as JSON inside <tools>.
+        assert!(text.contains("<function=example_function_name>"), "3.8 XML tool example:\n{text}");
+        assert!(text.contains(r#""name": "get_weather""#), "tool schema JSON:\n{text}");
+        assert!(text.ends_with("<|im_start|>assistant\n<think>\n"), "3.8 prefilled open think:\n{text}");
+        // Thinking disabled: the flavor still applies, the prefill does not.
+        let off = parse_request(&tok, &inv().set("template_flavor", json!("qwen3.8")).set("enable_thinking", json!(false))).unwrap();
+        assert_eq!(off.flavor, qwen_chat::TemplateFlavor::Qwen38);
+        assert!(!off.thinking_open);
+        // The alias is accepted; unknown values are a request error.
+        assert_eq!(
+            parse_request(&tok, &inv().set("template_flavor", json!("qwen38"))).unwrap().flavor,
+            qwen_chat::TemplateFlavor::Qwen38
+        );
+        let err = parse_request(&tok, &inv().set("template_flavor", json!("llama"))).unwrap_err();
+        assert!(err.contains("template_flavor"), "got: {err}");
+    }
+
+    /// End-to-end under the 3.8 flavor: the scanner starts reasoning-open
+    /// (the prefilled `<think>` means the model continues INSIDE the think
+    /// block, so its first tokens are reasoning, not visible content), and
+    /// the XML tool-call form is parsed into a tool_calls outcome.
+    #[test]
+    fn qwen38_seqstate_scans_reasoning_first_and_xml_tool_calls() {
+        let Some(tok) = real_tok() else { return };
+        let req = parse_request(
+            &tok,
+            &Invocation::new()
+                .set("messages", json!(r#"[{"role": "user", "content": "weather?"}]"#))
+                .set("tools", json!(WEATHER_TOOLS))
+                .set("template_flavor", json!("qwen3.8")),
+        )
+        .unwrap();
+        let head = "thinking hard</think>\n\n";
+        let call = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
+        let mut seq = SeqState::new(&req, CancelToken::default());
+        assert!(!seq.advance(&tok, &tok.encode(head), &mut |_| {}));
+        let out = seq.finish(&tok, &tok.encode(&format!("{head}{call}")), &mut |_| {});
+        assert_eq!(out.outputs.get("reasoning_content"), Some(&json!("thinking hard")), "out: {out:?}");
+        assert_eq!(out.outputs.get("finish_reason"), Some(&json!("tool_calls")));
+        let calls = out.outputs.get("tool_calls").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(calls.contains("get_weather") && calls.contains("call_0"), "tool_calls: {calls}");
     }
 }

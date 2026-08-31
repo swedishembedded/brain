@@ -787,8 +787,10 @@ impl Instance for Qwen35GgufInstance {
         // The SAME request parser/streamer every other Qwen-family served
         // model uses (`messages`/`prompt`/`system`/`tools`/`stop`, chat
         // markup rendering, stop-string scanning, tool-call extraction) -
-        // not a second copy of that param handling.
-        let req = qwen3::chat::parse_request(&self.tok, inv)?;
+        // not a second copy of that param handling. The flavor defaults to
+        // this model's own template (see `crate::caps::with_template_flavor_default`).
+        let inv = crate::caps::with_template_flavor_default(inv);
+        let req = qwen3::chat::parse_request(&self.tok, &inv)?;
         let mut seq = qwen3::chat::SeqState::new(&req, inv.cancel.clone());
         progress(Progress::step(0, req.max_new as u32, "generating"));
         let mut stop = false;
@@ -998,8 +1000,10 @@ impl ResidentModel for Qwen35GgufResident {
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
         .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"))
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
-        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (accepted, ignored)"))
+        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)))
+        .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (takes effect on the Qwen3.8-flavor render, this model's default)").default(json!(true)))
+        .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor: qwen3.8 (default; XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)").default(json!("qwen3.8")))
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
         Manifest::new(
             MODEL,

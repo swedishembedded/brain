@@ -6,9 +6,10 @@ GQA layers, a sigmoid attention-output gate, partial RoPE + M-RoPE on the GQA
 layers, but a plain dense SwiGLU MLP on every layer instead of a sparse MoE.
 Adds a single-layer multi-token-prediction (MTP) head sharing the token
 embedding and LM head, and a spliced Qwen3-VL-style vision tower (ViT +
-PatchMerger, reused unchanged) for image input. `reasoning_effort` is a
-chat-template concept, not an architectural one - this port has no verified
-prompt-injection convention for it yet (see below).
+PatchMerger, reused unchanged) for image input. `reasoning_effort` and the
+chat-template flavor (`qwen3.8` default, `qwen3` opt-out) are chat-template
+concepts, not architectural ones - both are wired through the shared chat
+path (see the note at the end of this page).
 
 ## Support
 
@@ -295,7 +296,10 @@ reading claims below, they have very different capabilities:
   every layer's weights from disk) - a profiling/optimization pass is in
   progress to bring this down.
 
-`reasoning_effort` (xhigh/medium/low) is not implemented: no verified
-Qwen3.8 prompt-injection convention was found to build it against without
-guessing - only the existing `enable_thinking` boolean is wired, reused from
-`qwen3::chat`.
+`reasoning_effort` (xhigh/medium/low) is wired through the shared chat path
+(`qwen3::chat::parse_request`, defaulting to `xhigh` when thinking is
+enabled), validated against the real Qwen3.8 chat template. The template
+flavor is selectable too: requests default to this model's own Qwen3.8
+template (XML `<function=...>` tool-call payloads, prefilled open `<think>`,
+live `preserve_thinking`), and `template_flavor: "qwen3"` opts back into the
+Qwen3-era JSON tool-call form.

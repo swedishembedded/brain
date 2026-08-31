@@ -375,6 +375,21 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     if let Some(pt) = preserve_thinking {
         inv = inv.set("preserve_thinking", json!(pt));
     }
+    // `template_flavor` (which upstream chat template the resident renders,
+    // and with it the tool-call wire form): same extension point as the other
+    // chat-template kwargs - nested under `chat_template_kwargs` or,
+    // tolerated, top-level. Unset stays unset: the flavor default belongs to
+    // the resident model (a Qwen3.8 model defaults its own flavor), not to
+    // this API surface. The value is validated downstream by the request
+    // parser (unknown values error with a template_flavor message).
+    let template_flavor = body
+        .get("chat_template_kwargs")
+        .and_then(|k| k.get("template_flavor"))
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("template_flavor").and_then(|v| v.as_str()));
+    if let Some(tf) = template_flavor {
+        inv = inv.set("template_flavor", json!(tf));
+    }
 
     // image_url/input_audio content parts' REAL bytes -- flatten_message's
     // own "content" (message_content) now preserves a lightweight, payload-

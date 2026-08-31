@@ -1803,15 +1803,20 @@ not do.
   against the REAL Qwen3.8 chat template (the resources dir
   `tokenizer_config.json`, executed through `data::chat_template` and
   cross-checked against the hand-port in `data`'s
-  `chat_template_cross_check.rs`, `matches_qwen_chat_qwen38_*`). What is
-  still NOT wired end-to-end: the hand-ported Qwen3.8 template flavor itself
+  `chat_template_cross_check.rs`, `matches_qwen_chat_qwen38_*`). The
+  hand-ported Qwen3.8 template flavor itself
   (`data::qwen_chat::TemplateFlavor::Qwen38`, render-exact and
-  cross-validated) is not selectable by the serving path - `parse_request`
-  still renders the Qwen3-era template with the Qwen3.8 kwarg semantics
-  layered on, which leaves `preserve_thinking` inert at serve time (the
-  Qwen3-era template has no such kwarg) and keeps the tool-call wire format
-  on the JSON form; selecting the Qwen38 flavor for serving additionally
-  needs the tool-call scanner to learn the 3.8 XML `<function=...>` form.
+  cross-validated) IS now wired end-to-end: `template_flavor` is a real
+  request param (`qwen3.8` default for this model, `qwen3` opt-out),
+  `parse_request` renders the flavor (making `preserve_thinking` live at
+  serve time), `ParsedRequest` carries the flavor plus the prefilled-open-
+  `<think>` state, `SeqState`'s scanner starts reasoning-open and parses the
+  3.8 XML `<function=...>` wire form, and `apiserve` forwards
+  `template_flavor` from the OpenAI chat surface (`chat_template_kwargs`
+  nested or top-level). This crate's two tokenizer entry points
+  (`caps.rs`'s GenerateAction and the GGUF resident instance) inject the
+  `qwen3.8` default before the shared parse, so the model is served by its
+  own template without asking.
 - No cross-pass persistent weight cache in `stream::generate`'s decode loop
   (M19's own investigation) - this box's usable RAM is smaller than the
   checkpoint's on-disk footprint, so the win is capped by disk I/O regardless

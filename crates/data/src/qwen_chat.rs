@@ -786,33 +786,59 @@ pub enum ChatEvent {
     ToolCallEnd { index: u32 },
 }
 
-/// Internal scan state. `CallHeader`/`CallArgs` buffer raw text in
+/// Internal scan state. The call states buffer raw text in
 /// [`ChatScanner::pending`] rather than carrying their own buffer, since the
 /// withholding logic that guards against a marker splitting across two
-/// [`ChatScanner::push`] calls already lives there.
+/// [`ChatScanner::push`] calls already lives there. `CallHeader`/`CallArgs`
+/// are the Qwen3 JSON payload form; `XmlBetween`/`XmlKey`/`XmlValue` walk one
+/// Qwen3.8 XML call (`<function=name>` → per-argument `<parameter=key>`
+/// blocks → `</function>`).
 #[derive(Debug)]
 enum St {
     Content,
     Think,
     CallHeader,
     CallArgs { in_string: bool, escape: bool, depth: i32, started: bool },
+    /// Between XML parameter blocks: awaiting the next `<parameter=` or the
+    /// closing `</function>`. Whitespace between blocks is discarded; stray
+    /// text is surfaced as content (a ToolCallStart has already streamed, so
+    /// the invalid-header policy of re-labeling the whole call is unavailable).
+    XmlBetween,
+    /// Inside a `<parameter=` header, awaiting the `>` that ends the key.
+    XmlKey,
+    /// Inside a parameter value, awaiting `</parameter>`. The value is
+    /// buffered whole (its JSON form - verbatim when it parses as JSON,
+    /// escaped as a string otherwise - can only be chosen once it is complete).
+    XmlValue { key: String },
     CallTail,
 }
 
-/// A streaming scanner over a Qwen3 generation: splits raw model output into
-/// visible content, `<think>…</think>` reasoning, and `<tool_call>…
-/// </tool_call>` blocks, one `push()` at a time — safe against a marker being
-/// split across two calls (as real token-by-token streaming does), down to a
-/// single byte per call.
+/// A streaming scanner over a Qwen3/Qwen3.8 generation: splits raw model
+/// output into visible content, `<think>…</think>` reasoning, and
+/// `<tool_call>…</tool_call>` blocks, one `push()` at a time - safe against a
+/// marker being split across two calls (as real token-by-token streaming
+/// does), down to a single byte per call. The tool-call PAYLOAD form inside
+/// the fence follows the [`TemplateFlavor`]: Qwen3's JSON
+/// `{"name": …, "arguments": {…}}`, or Qwen3.8's `<function=name>` +
+/// `<parameter=key>` XML (reconstructed into the same JSON-arguments shape,
+/// so callers and the render direction see one representation).
 pub struct ChatScanner {
     state: St,
+    flavor: TemplateFlavor,
     /// Raw text not yet resolved into an event: either the tail of `Content`/
     /// `Think` text that could still be the start of a marker, or (in the
-    /// `CallHeader`/`CallArgs`/`CallTail` states) everything since the state was
-    /// entered that hasn't yet been consumed.
+    /// call states) everything since the state was entered that hasn't yet
+    /// been consumed.
     pending: String,
     content: String,
     reasoning: String,
+    /// Set when a literal `<think>` tag was seen mid-stream: the render
+    /// frames a think block as `<think>\n...\n</think>`, so exactly one
+    /// newline after the tag (and one before the close) is framing, not
+    /// reasoning. False when the scan starts inside an already-open think
+    /// block (prefilled `<think>\n`) - there the framing newline belonged
+    /// to the prompt, not to the generation.
+    think_lead_nl: bool,
     tool_calls: Vec<ToolCallMsg>,
     next_index: u32,
     cur_name: String,
@@ -822,18 +848,30 @@ pub struct ChatScanner {
 const MARKERS_CONTENT: [&str; 2] = ["<think>", "<tool_call>"];
 const MARKERS_THINK: [&str; 1] = ["</think>"];
 const MARKERS_TAIL: [&str; 1] = ["</tool_call>"];
+/// Markers that end the current position inside a Qwen3.8 XML call: the next
+/// parameter block, or the end of the parameter list.
+const MARKERS_XML_BETWEEN: [&str; 2] = ["<parameter=", "</function>"];
 
 impl ChatScanner {
     /// `thinking_open=true` seeds an already-open [`St::Think`] state (for a
     /// prompt whose generation-prefix already emitted a bare `<think>`, e.g.
     /// `enable_thinking` with a prefill); `false` is the normal case where the
     /// model must emit the literal `<think>` tag itself if it wants to think.
+    /// Defaults to the [`TemplateFlavor::Qwen3`] tool-call form.
     pub fn new(thinking_open: bool) -> ChatScanner {
+        ChatScanner::with_flavor(thinking_open, TemplateFlavor::Qwen3)
+    }
+
+    /// Same, with an explicit template flavor selecting the tool-call payload
+    /// form the scanner expects ([`TemplateFlavor::Qwen38`] = the XML form).
+    pub fn with_flavor(thinking_open: bool, flavor: TemplateFlavor) -> ChatScanner {
         ChatScanner {
             state: if thinking_open { St::Think } else { St::Content },
+            flavor,
             pending: String::new(),
             content: String::new(),
             reasoning: String::new(),
+            think_lead_nl: false,
             tool_calls: Vec::new(),
             next_index: 0,
             cur_name: String::new(),
@@ -878,6 +916,28 @@ impl ChatScanner {
                 self.pending.clear();
                 self.close_call(out);
             }
+            St::XmlBetween | St::XmlKey { .. } => {
+                // The call header already streamed as a ToolCallStart, so the
+                // whole-call re-labeling the JSON header does here is
+                // unavailable: discard whatever partial marker text is left
+                // (never real prose - real text was surfaced as content as it
+                // arrived), close the arguments object, and report the call.
+                self.pending.clear();
+                self.xml_close_object(out);
+                self.close_call(out);
+            }
+            St::XmlValue { .. } => {
+                // Cut mid-value: the buffered text is the value.
+                let raw = std::mem::take(&mut self.pending);
+                let value = raw.strip_prefix('\n').unwrap_or(&raw);
+                let value = value.strip_suffix('\n').unwrap_or(value);
+                let St::XmlValue { key } = &self.state else { unreachable!("XmlValue arm") };
+                let key = key.clone();
+                let fragment = xml_push_parameter_state(&mut self.cur_args, &key, value);
+                out.push(ChatEvent::ToolCallArgs { index: self.next_index, fragment });
+                self.xml_close_object(out);
+                self.close_call(out);
+            }
         }
         self.state = St::Content;
     }
@@ -896,13 +956,47 @@ impl ChatScanner {
         if self.pending.is_empty() {
             return;
         }
-        let text = std::mem::take(&mut self.pending);
+        let mut text = std::mem::take(&mut self.pending);
+        if reasoning {
+            // Unclosed think block at finish: the open-side framing strip
+            // still applies; there is no `</think>` to strip a close-side
+            // newline against.
+            self.strip_think_framing(&mut text, false);
+        }
+        if text.is_empty() {
+            return;
+        }
         if reasoning {
             self.reasoning.push_str(&text);
             out.push(ChatEvent::Reasoning(text));
         } else {
             self.content.push_str(&text);
             out.push(ChatEvent::Content(text));
+        }
+    }
+
+    /// The render frames a think block as `<think>\n{reasoning}\n</think>`,
+    /// so the scan direction drops exactly one newline right after a seen
+    /// `<think>` tag and one right before `</think>` - the inverse of the
+    /// render's own trimming, which is what makes a rendered assistant turn
+    /// scan back to the reasoning it was rendered from. `trailing` selects
+    /// the close-side strip (only at the `</think>` transition, where the
+    /// Think-state withholding guarantees the framing newline is still
+    /// buffered); the open-side strip applies while [`Self::think_lead_nl`]
+    /// is set, and only if the text actually begins with that newline.
+    fn strip_think_framing(&mut self, text: &mut String, trailing: bool) {
+        if trailing && text.ends_with('\n') {
+            text.pop();
+        }
+        if self.think_lead_nl {
+            if let Some(rest) = text.strip_prefix('\n') {
+                let rest = rest.to_string();
+                text.clear();
+                text.push_str(&rest);
+                self.think_lead_nl = false;
+            } else if !text.is_empty() {
+                self.think_lead_nl = false;
+            }
         }
     }
 
@@ -914,6 +1008,18 @@ impl ChatScanner {
             arguments: std::mem::take(&mut self.cur_args),
         });
         self.next_index += 1;
+    }
+
+    /// End of a Qwen3.8 XML parameter list: close the JSON arguments object
+    /// (`{}` when no parameter arrived) and stream the closing fragment, so
+    /// the Args fragments still concatenate to exactly
+    /// [`ToolCallMsg::arguments`]. The call itself is closed by the caller
+    /// (via `</tool_call>`'s [`St::CallTail`], or [`ChatScanner::finish`]
+    /// when the generation was cut).
+    fn xml_close_object(&mut self, out: &mut Vec<ChatEvent>) {
+        let tail = if self.cur_args.is_empty() { "{}" } else { "}" }.to_string();
+        self.cur_args.push_str(&tail);
+        out.push(ChatEvent::ToolCallArgs { index: self.next_index, fragment: tail });
     }
 
     /// Consume as much of `pending` as the current state can resolve
@@ -934,7 +1040,11 @@ impl ChatScanner {
                 }
                 St::CallHeader => {
                     let chars: Vec<char> = self.pending.chars().collect();
-                    match parse_header(&chars) {
+                    let outcome = match self.flavor {
+                        TemplateFlavor::Qwen3 => parse_header(&chars),
+                        TemplateFlavor::Qwen38 => parse_xml_header(&chars),
+                    };
+                    match outcome {
                         HeaderOutcome::Incomplete => return,
                         HeaderOutcome::Invalid => {
                             let text = format!("<tool_call>{}", std::mem::take(&mut self.pending));
@@ -949,10 +1059,70 @@ impl ChatScanner {
                             self.cur_name = name.clone();
                             self.cur_args.clear();
                             out.push(ChatEvent::ToolCallStart { index: self.next_index, name });
-                            self.state = St::CallArgs { in_string: false, escape: false, depth: 0, started: false };
+                            self.state = match self.flavor {
+                                TemplateFlavor::Qwen3 => St::CallArgs { in_string: false, escape: false, depth: 0, started: false },
+                                TemplateFlavor::Qwen38 => St::XmlBetween,
+                            };
                         }
                     }
                 }
+                St::XmlBetween => {
+                    // Either the next parameter block or the end of the
+                    // parameter list; anything before it is block separator
+                    // whitespace (discarded) or stray model text (surfaced as
+                    // content - see St's doc).
+                    let found = MARKERS_XML_BETWEEN.iter().filter_map(|m| self.pending.find(m).map(|p| (p, *m))).min_by_key(|(p, _)| *p);
+                    match found {
+                        None => {
+                            let keep = withheld_suffix_len(&self.pending, &MARKERS_XML_BETWEEN);
+                            let rest: String = self.pending.drain(..self.pending.len() - keep).collect();
+                            if rest.trim_start_matches([' ', '\t', '\n', '\r']).is_empty() {
+                                // block separator whitespace - nothing
+                            } else {
+                                self.content.push_str(&rest);
+                                out.push(ChatEvent::Content(rest));
+                            }
+                            return;
+                        }
+                        Some((pos, marker)) => {
+                            let pre: String = self.pending.drain(..pos).collect();
+                            if !pre.trim_start_matches([' ', '\t', '\n', '\r']).is_empty() {
+                                self.content.push_str(&pre);
+                                out.push(ChatEvent::Content(pre));
+                            }
+                            self.pending.drain(..marker.len());
+                            if marker == "</function>" {
+                                self.xml_close_object(out);
+                                self.state = St::CallTail;
+                            } else {
+                                self.state = St::XmlKey;
+                            }
+                        }
+                    }
+                }
+                St::XmlKey => match self.pending.find('>') {
+                    None => return,
+                    Some(gt) => {
+                        let key: String = self.pending.drain(..gt).collect();
+                        self.pending.drain(..1);
+                        self.state = St::XmlValue { key };
+                    }
+                },
+                St::XmlValue { key } => match self.pending.find("</parameter>") {
+                    // The value buffers whole in `pending` - its JSON form
+                    // (verbatim vs escaped) is only decidable at the block
+                    // end, so nothing may be emitted or dropped early.
+                    None => return,
+                    Some(pos) => {
+                        let raw: String = self.pending.drain(..pos).collect();
+                        self.pending.drain(.."</parameter>".len());
+                        let value = raw.strip_prefix('\n').unwrap_or(&raw);
+                        let value = value.strip_suffix('\n').unwrap_or(value);
+                        let fragment = xml_push_parameter_state(&mut self.cur_args, key, value);
+                        out.push(ChatEvent::ToolCallArgs { index: self.next_index, fragment });
+                        self.state = St::XmlBetween;
+                    }
+                },
                 St::CallArgs { .. } => {
                     // The template's fixed `"arguments": ` separator can leave
                     // whitespace before the JSON value that has nothing to do
@@ -1004,14 +1174,23 @@ impl ChatScanner {
         match found {
             Some((pos, marker)) => {
                 if pos > 0 {
-                    let text: String = self.pending.drain(..pos).collect();
+                    let mut text: String = self.pending.drain(..pos).collect();
                     if reasoning {
-                        self.reasoning.push_str(&text);
-                        out.push(ChatEvent::Reasoning(text));
+                        // The marker is `</think>` (the only Think-state
+                        // marker): the text right before it may end with the
+                        // render's framing newline.
+                        self.strip_think_framing(&mut text, true);
+                        if !text.is_empty() {
+                            self.reasoning.push_str(&text);
+                            out.push(ChatEvent::Reasoning(text));
+                        }
                     } else {
                         self.content.push_str(&text);
                         out.push(ChatEvent::Content(text));
                     }
+                }
+                if marker == "<think>" {
+                    self.think_lead_nl = true;
                 }
                 self.pending.drain(..marker.len());
                 self.state = if marker == "<think>" {
@@ -1025,13 +1204,20 @@ impl ChatScanner {
                 true
             }
             None => {
-                let keep = withheld_suffix_len(&self.pending, markers);
+                let keep = if reasoning {
+                    withheld_think_suffix_len(&self.pending, markers)
+                } else {
+                    withheld_suffix_len(&self.pending, markers)
+                };
                 let emit_len = self.pending.len() - keep;
                 if emit_len > 0 {
-                    let text: String = self.pending.drain(..emit_len).collect();
+                    let mut text: String = self.pending.drain(..emit_len).collect();
                     if reasoning {
-                        self.reasoning.push_str(&text);
-                        out.push(ChatEvent::Reasoning(text));
+                        self.strip_think_framing(&mut text, false);
+                        if !text.is_empty() {
+                            self.reasoning.push_str(&text);
+                            out.push(ChatEvent::Reasoning(text));
+                        }
                     } else {
                         self.content.push_str(&text);
                         out.push(ChatEvent::Content(text));
@@ -1120,6 +1306,20 @@ fn withheld_suffix_len(s: &str, markers: &[&str]) -> usize {
         }
     }
     0
+}
+
+/// Think-state withholding: in addition to a suffix that could still start a
+/// marker, everything from the last newline on must stay buffered - a trailing
+/// newline may be the render's framing `\n` before `</think>`, which the
+/// close-time strip removes and which therefore can never be emitted as
+/// reasoning text. Withholding from the newline also keeps any later
+/// marker-prefix suffix intact.
+fn withheld_think_suffix_len(s: &str, markers: &[&str]) -> usize {
+    let keep = withheld_suffix_len(s, markers);
+    match s.rfind('\n') {
+        Some(i) => keep.max(s.len() - i),
+        None => keep,
+    }
 }
 
 enum HeaderOutcome {
@@ -1234,6 +1434,56 @@ fn parse_header(buf: &[char]) -> HeaderOutcome {
     tri!(expect(buf, &mut i, ':'));
     skip_ws(buf, &mut i);
     HeaderOutcome::Done { name, consumed_chars: i }
+}
+
+/// Parse the Qwen3.8 XML call header `<function=NAME>` (whitespace-tolerant
+/// before the tag) from the start of `buf`, mirroring [`parse_header`]'s
+/// outcome contract: [`HeaderOutcome::Done`] with the parsed name and how
+/// many *chars* of `buf` made up the header, [`HeaderOutcome::Incomplete`]
+/// while `buf` could still extend into a valid header, [`HeaderOutcome::Invalid`]
+/// when it structurally cannot (e.g. a Qwen3 JSON payload under the 3.8
+/// flavor).
+fn parse_xml_header(buf: &[char]) -> HeaderOutcome {
+    let mut i = 0usize;
+    while matches!(buf.get(i), Some(' ' | '\t' | '\n' | '\r')) {
+        i += 1;
+    }
+    for ch in "<function=".chars() {
+        match buf.get(i) {
+            None => return HeaderOutcome::Incomplete,
+            Some(&c) if c == ch => i += 1,
+            Some(_) => return HeaderOutcome::Invalid,
+        }
+    }
+    let name_start = i;
+    while matches!(buf.get(i), Some(c) if *c != '>') {
+        i += 1;
+    }
+    match buf.get(i) {
+        None => HeaderOutcome::Incomplete,
+        Some('>') => HeaderOutcome::Done { name: buf[name_start..i].iter().collect(), consumed_chars: i + 1 },
+        Some(_) => unreachable!("the scan above stops only at '>'"),
+    }
+}
+
+/// One completed `<parameter=key>` value: append its JSON piece to the
+/// arguments object being built and stream it as a fragment (the first
+/// parameter opens the object, the object close comes from
+/// [`ChatScanner`]'s XML end-of-call handling). A value that parses as JSON
+/// is taken verbatim - the exact inverse of the render direction's
+/// string-verbatim/others-tojson split (`append_xml_parameters`); anything
+/// else is escaped as a JSON string.
+fn xml_push_parameter_state(cur_args: &mut String, key: &str, value: &str) -> String {
+    let kjson = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
+    let vjson = if serde_json::from_str::<serde_json::Value>(value).is_ok() {
+        value.to_string()
+    } else {
+        serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
+    };
+    let kv = format!("{kjson}: {vjson}");
+    let fragment = if cur_args.is_empty() { format!("{{{}", kv) } else { format!(", {}", kv) };
+    cur_args.push_str(&fragment);
+    fragment
 }
 
 /// One-shot convenience: run a whole generated string through a fresh
@@ -1578,6 +1828,178 @@ mod tests {
         // one byte at a time
         let byte_by_byte = run_byte_at_a_time(text);
         assert_eq!(byte_by_byte, whole, "mismatch feeding one byte at a time");
+    }
+
+    // ---- scanner: Qwen3.8 XML tool-call flavor ----------------------------------------------------
+
+    /// Qwen3.8 emits a tool call as XML nested in the SAME `<tool_call>` fence
+    /// the Qwen3 JSON form uses: `<function=name>` followed by one
+    /// `<parameter=key>` block per argument. The scanner reconstructs a JSON
+    /// arguments object from them - the same `ToolCallMsg.arguments` shape the
+    /// Qwen3 flavor produces, and the exact inverse of the render direction
+    /// (`append_xml_parameters`: string values verbatim, every other value
+    /// re-serialized JSON).
+    fn xml_transcript() -> &'static str {
+        "<think>\nchecking the weather\n</think>\n\nLet me look that up.\
+         <tool_call>\n<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call>\
+         Done."
+    }
+
+    /// How a transcript is fed to the scanner: one push, one split, or one
+    /// byte per push - the chunking-invariance axes.
+    enum Chunk {
+        Whole,
+        SplitAt(usize),
+        ByteAtATime,
+    }
+
+    /// Scan `text` through a [`ChatScanner`] of `flavor` fed per `chunk`, with
+    /// the same fragment-coalescing the Qwen3-flavor helpers above apply.
+    fn run_flavor(text: &str, flavor: TemplateFlavor, chunk: Chunk) -> Vec<ChatEvent> {
+        let mut scanner = ChatScanner::with_flavor(false, flavor);
+        let mut events = Vec::new();
+        match chunk {
+            Chunk::Whole => scanner.push(text, &mut events),
+            Chunk::SplitAt(at) => {
+                scanner.push(&text[..at], &mut events);
+                scanner.push(&text[at..], &mut events);
+            }
+            Chunk::ByteAtATime => {
+                for b in text.as_bytes() {
+                    let s = std::str::from_utf8(std::slice::from_ref(b)).expect("ascii-only transcript");
+                    scanner.push(s, &mut events);
+                }
+            }
+        }
+        scanner.finish(&mut events);
+        coalesce(events)
+    }
+
+    /// The full XML transcript must scan identically however the stream is
+    /// chunked - the same streaming invariant the Qwen3 flavor holds to.
+    #[test]
+    fn scanner_qwen38_xml_chunking_invariance() {
+        let text = xml_transcript();
+        let whole = run_flavor(text, TemplateFlavor::Qwen38, Chunk::Whole);
+        assert!(!whole.is_empty());
+        for at in 0..=text.len() {
+            if !text.is_char_boundary(at) {
+                continue;
+            }
+            assert_eq!(run_flavor(text, TemplateFlavor::Qwen38, Chunk::SplitAt(at)), whole, "mismatch splitting at byte {at}");
+        }
+        assert_eq!(run_flavor(text, TemplateFlavor::Qwen38, Chunk::ByteAtATime), whole, "mismatch feeding one byte at a time");
+    }
+
+    #[test]
+    fn scanner_qwen38_xml_tool_call_reconstructs_json_arguments() {
+        let text = xml_transcript();
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::Qwen38);
+        let mut events = Vec::new();
+        scanner.push(text, &mut events);
+        scanner.finish(&mut events);
+        assert_eq!(scanner.content(), "\n\nLet me look that up.Done.");
+        // The transcript's `<think>\n...\n</think>` framing is stripped: the
+        // scanner is the exact inverse of the render, which writes one framing
+        // newline on each side of the reasoning.
+        assert_eq!(scanner.reasoning(), "checking the weather");
+        let [call] = scanner.tool_calls() else { panic!("expected exactly one tool call, got {:?}", scanner.tool_calls()) };
+        assert_eq!(call.id, "call_0");
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(call.arguments, r#"{"location": "Paris", "days": 3}"#);
+        // Streaming events stay coherent: Start names the call, the adjacent
+        // Args fragments concatenate to the same arguments string, End closes.
+        assert_eq!(
+            coalesce(events),
+            vec![
+                ChatEvent::Reasoning("checking the weather".to_string()),
+                ChatEvent::Content("\n\nLet me look that up.".to_string()),
+                ChatEvent::ToolCallStart { index: 0, name: "get_weather".to_string() },
+                ChatEvent::ToolCallArgs { index: 0, fragment: r#"{"location": "Paris", "days": 3}"#.to_string() },
+                ChatEvent::ToolCallEnd { index: 0 },
+                ChatEvent::Content("Done.".to_string()),
+            ]
+        );
+    }
+
+    /// Value forms: a bare string that is not JSON (escaped), a number and a
+    /// nested JSON literal (passed through verbatim - the inverse of the
+    /// render's string-verbatim/others-tojson split), and a parameter-less
+    /// call (empty object).
+    #[test]
+    fn scanner_qwen38_xml_value_forms() {
+        let text = "<tool_call>\n<function=a>\n<parameter=s>\nline1\nline2 \"quoted\"\n</parameter>\n<parameter=n>\n42\n</parameter>\n<parameter=o>\n{\"k\": [1, 2]}\n</parameter>\n</function>\n</tool_call>\
+                    <tool_call>\n<function=b>\n</function>\n</tool_call>tail";
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::Qwen38);
+        let mut events = Vec::new();
+        scanner.push(text, &mut events);
+        scanner.finish(&mut events);
+        let calls = scanner.tool_calls();
+        assert_eq!(calls.len(), 2, "calls: {calls:?}");
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[0].arguments, r#"{"s": "line1\nline2 \"quoted\"", "n": 42, "o": {"k": [1, 2]}}"#);
+        assert_eq!(calls[1].name, "b");
+        assert_eq!(calls[1].arguments, "{}");
+        assert_eq!(scanner.content(), "tail");
+    }
+
+    /// A call cut off mid-generation still closes out rather than dropping
+    /// (the JSON flavor's finish policy): a mid-VALUE cut takes the buffered
+    /// text as the value; a mid-KEY cut contributes nothing; both close the
+    /// arguments object.
+    #[test]
+    fn scanner_qwen38_xml_truncated_call_still_closes() {
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::Qwen38);
+        let mut events = Vec::new();
+        scanner.push("<tool_call>\n<function=f>\n<parameter=k>\npartial value", &mut events);
+        scanner.finish(&mut events);
+        let [call] = scanner.tool_calls() else { panic!("call must close on finish, got {:?}", scanner.tool_calls()) };
+        assert_eq!(call.name, "f");
+        assert_eq!(call.arguments, r#"{"k": "partial value"}"#);
+
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::Qwen38);
+        let mut events = Vec::new();
+        scanner.push("<tool_call>\n<function=f>\n<parameter=ke", &mut events);
+        scanner.finish(&mut events);
+        let [call] = scanner.tool_calls() else { panic!("call must close on finish, got {:?}", scanner.tool_calls()) };
+        assert_eq!(call.name, "f");
+        assert_eq!(call.arguments, "{}");
+    }
+
+    /// A Qwen3-JSON payload under the 3.8 flavor is not the expected header;
+    /// it surfaces as content rather than a silently dropped call (the same
+    /// policy as the JSON flavor's invalid-header path).
+    #[test]
+    fn scanner_qwen38_json_shaped_call_surfaces_as_content() {
+        let text = "<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_call>";
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::Qwen38);
+        let mut events = Vec::new();
+        scanner.push(text, &mut events);
+        scanner.finish(&mut events);
+        assert!(scanner.tool_calls().is_empty());
+        assert_eq!(scanner.content(), "<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_call>");
+    }
+
+    /// The scanner is the exact inverse of the render direction: an assistant
+    /// tool_calls message rendered with the Qwen3.8 flavor scans back to the
+    /// same calls (arguments compared as parsed JSON - the render's own
+    /// `| tojson` spacing need not survive).
+    #[test]
+    fn render_scan_roundtrip_qwen38_tool_calls() {
+        let calls = vec![ToolCallMsg { id: "call_0".into(), name: "get_weather".into(), arguments: r#"{"location": "Paris", "days": 3}"#.into() }];
+        let msgs = vec![ChatMessage { reasoning_content: Some("hmm".into()), ..ChatMessage::assistant("Let me look.") }.with_tool_calls(calls)];
+        let rendered = render(&msgs, &[], TemplateOpts { flavor: TemplateFlavor::Qwen38, add_generation_prompt: false, ..Default::default() }).unwrap();
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::Qwen38);
+        let mut events = Vec::new();
+        scanner.push(&rendered, &mut events);
+        scanner.finish(&mut events);
+        assert_eq!(scanner.reasoning(), "hmm");
+        let [call] = scanner.tool_calls() else { panic!("rendered tool call must scan back, got {:?} from {rendered:?}", scanner.tool_calls()) };
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+            serde_json::from_str::<serde_json::Value>(r#"{"location": "Paris", "days": 3}"#).unwrap()
+        );
     }
 
     // ---- scanner: tool call argument/index details ----------------------------------------------------
