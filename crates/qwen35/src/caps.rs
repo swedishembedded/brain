@@ -88,6 +88,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block (needs a tokenizer)").default(json!(true)))
         .param(ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level: xhigh (default, detailed deliberation), medium (no instruction), or low (brief thinking)").default(json!("xhigh")))
+        .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (takes effect on the Qwen3.8-flavor render; the shared chat path currently renders the Qwen3-era template, where framing is positional)").default(json!(true)))
         .param(ParamSpec::new("use_mtp", ParamType::Bool, "enable MTP speculative acceleration in streaming mode (greedy only; requires streaming=true)").default(json!(false)))
         .param(ParamSpec::new(
             "streaming",

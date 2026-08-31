@@ -1945,6 +1945,7 @@ impl ResidentModel for FakeToolCallChat {
                 .param(ParamSpec::new("tools", ParamType::Str, "tool definitions"))
                 .param(ParamSpec::new("tool_choice", ParamType::Str, "tool choice"))
                 .param(ParamSpec::new("enable_thinking", ParamType::Bool, "thinking").default(json!(true)))
+                .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "preserve history reasoning"))
                 .output(BlobSpec::new("text", Media::Text, "generated text"))],
         )
     }
@@ -1967,8 +1968,9 @@ impl Instance for FakeToolCallChatInst {
         // `reasoning_content` (itself under test for streaming/non-stream parity).
         let tools_len = inv.get_str("tools").map(|s| s.len()).unwrap_or(0);
         let enable_thinking = inv.get_bool("enable_thinking").map(|b| b.to_string()).unwrap_or_else(|| "unset".to_string());
+        let preserve_thinking = inv.get_bool("preserve_thinking").map(|b| b.to_string()).unwrap_or_else(|| "unset".to_string());
         let image_wh = inv.get_blob("image").map(|b| format!("{}x{}", b.meta["w"], b.meta["h"])).unwrap_or_else(|| "none".to_string());
-        let reasoning = format!("deciding (tools_len:{tools_len};enable_thinking:{enable_thinking};image:{image_wh})");
+        let reasoning = format!("deciding (tools_len:{tools_len};enable_thinking:{enable_thinking};preserve_thinking:{preserve_thinking};image:{image_wh})");
         progress(Progress::event(0, 1, json!({ "kind": "reasoning", "text": reasoning })));
 
         let mut calls: Vec<Value> = Vec::with_capacity(TOOLCALL_SCRIPT.len());
@@ -2151,10 +2153,39 @@ async fn openai_chat_tools_and_enable_thinking_reach_the_invocation() {
 }
 
 #[tokio::test]
+async fn openai_chat_preserve_thinking_reaches_the_invocation() {
+    // `preserve_thinking` (the Qwen3.8 chat-template kwarg that gates whether
+    // prior assistant turns keep their <think> blocks in the rendered
+    // history) follows the same extension point as `reasoning_effort`:
+    // nested under `chat_template_kwargs` or, tolerated, top-level.
+    let (app, key) = toolcall_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-toolcall",
+        "messages": [{"role": "user", "content": "hi"}],
+        "chat_template_kwargs": {"preserve_thinking": false},
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
+    assert!(reasoning.contains("preserve_thinking:false"), "'preserve_thinking' must reach the invocation: {reasoning}");
+    // ...and the top-level spelling is tolerated too.
+    let body = json!({
+        "model": "brain-toolcall",
+        "messages": [{"role": "user", "content": "hi"}],
+        "preserve_thinking": true,
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
+    assert!(reasoning.contains("preserve_thinking:true"), "{reasoning}");
+}
+
+#[tokio::test]
 async fn openai_chat_no_tools_means_unset_enable_thinking_in_the_invocation() {
     // The sibling of the round-trip test above: when the client sends neither
-    // `tools` nor `enable_thinking`, the invocation must carry neither (an
-    // absent optional param, not a false/empty default silently injected).
+    // `tools` nor `enable_thinking` (nor `preserve_thinking`), the invocation
+    // must carry neither (an absent optional param, not a false/empty default
+    // silently injected).
     let (app, key) = toolcall_app(Provider::OpenAI);
     let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}]});
     let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
@@ -2162,6 +2193,7 @@ async fn openai_chat_no_tools_means_unset_enable_thinking_in_the_invocation() {
     let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
     assert!(reasoning.contains("tools_len:0"));
     assert!(reasoning.contains("enable_thinking:unset"));
+    assert!(reasoning.contains("preserve_thinking:unset"));
 }
 
 #[tokio::test]

@@ -1797,9 +1797,21 @@ not do.
   correctly; folding a trained adapter into the serving path - like
   `qwen3::lora::fold_adapter_into` - has no counterpart here yet) - matches
   qwen35moe's own `serve.rs` scope exactly, not a this-box limitation.
-- `reasoning_effort` (xhigh/medium/low) is not wired into `caps.rs`: no
-  verified Qwen3.8 prompt-injection convention was found to implement it
-  against - only `enable_thinking` (reused from `qwen3::chat`) is real.
+- `reasoning_effort` (xhigh/medium/low), `tool_choice` and `preserve_thinking`
+  ARE now wired into `caps.rs` and the shared chat path
+  (`qwen3::chat::parse_request`, reused by `qwen35moe`), each validated
+  against the REAL Qwen3.8 chat template (the resources dir
+  `tokenizer_config.json`, executed through `data::chat_template` and
+  cross-checked against the hand-port in `data`'s
+  `chat_template_cross_check.rs`, `matches_qwen_chat_qwen38_*`). What is
+  still NOT wired end-to-end: the hand-ported Qwen3.8 template flavor itself
+  (`data::qwen_chat::TemplateFlavor::Qwen38`, render-exact and
+  cross-validated) is not selectable by the serving path - `parse_request`
+  still renders the Qwen3-era template with the Qwen3.8 kwarg semantics
+  layered on, which leaves `preserve_thinking` inert at serve time (the
+  Qwen3-era template has no such kwarg) and keeps the tool-call wire format
+  on the JSON form; selecting the Qwen38 flavor for serving additionally
+  needs the tool-call scanner to learn the 3.8 XML `<function=...>` form.
 - No cross-pass persistent weight cache in `stream::generate`'s decode loop
   (M19's own investigation) - this box's usable RAM is smaller than the
   checkpoint's on-disk footprint, so the win is capped by disk I/O regardless

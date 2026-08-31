@@ -99,6 +99,28 @@ impl ChatMessage {
     }
 }
 
+/// Which upstream template generation [`render`] transcribes. Qwen rewrote
+/// several behaviors between the Qwen3 and Qwen3.8 releases, and both remain
+/// live (the dense Qwen3 checkpoints still ship the old template; Qwen3.8
+/// ships the new one), so the port carries both, selected per model family:
+///
+/// | behavior | [`TemplateFlavor::Qwen3`] | [`TemplateFlavor::Qwen38`] |
+/// |---|---|---|
+/// | tools preamble | "You may call one or more functions…", system content BEFORE the tools block, JSON `<tool_call>` example | "You have access to the following functions:", system content AFTER the `<IMPORTANT>` block, `<function=…><parameter=…>` example |
+/// | history tool calls | `{"name": …, "arguments": {…}}` JSON payload | `<function=name>` + one `<parameter=key>` block per argument |
+/// | assistant reasoning source | `reasoning_content` field, else split out of an embedded `</think>` in `content` | `reasoning_content` field only |
+/// | history reasoning framing | only after the last real user query, and only the final turn or a reasoned one | `preserve_thinking` kwarg: kept on EVERY turn by default; `false` strips everything up to the last real user query |
+/// | whitespace | content emitted verbatim | `content`/`reasoning_content` trimmed (the Jinja `\|trim`) |
+/// | generation prompt (thinking on) | nothing after `<\|im_start\|>assistant` | prefills an open `<think>\n` |
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TemplateFlavor {
+    /// The Qwen3-generation template (dense Qwen3 checkpoints, e.g. 0.6B).
+    #[default]
+    Qwen3,
+    /// The Qwen3.8-generation template (Qwen3.8 checkpoints, e.g. 27B).
+    Qwen38,
+}
+
 /// Rendering knobs the Jinja template reads from the caller's generation
 /// config (`add_generation_prompt`, `enable_thinking`, `reasoning_effort`).
 #[derive(Clone, Debug)]
@@ -108,13 +130,24 @@ pub struct TemplateOpts {
     /// Qwen3.8 `reasoning_effort`: `xhigh` (default when thinking enabled),
     /// `medium`, or `low`.  Injected as a system-prompt instruction before the
     /// tools/system content.  `None` means "use the template default" (which
-    /// is `xhigh` when `enable_thinking` is true, ignored when false).
+    /// is `xhigh` when `enable_thinking` is true, ignored when false). Under
+    /// [`TemplateFlavor::Qwen38`] the template's own `\|default('xhigh')` applies
+    /// at render time, so `None` and `Some("xhigh")` render identically.
     pub reasoning_effort: Option<String>,
+    /// Which template generation to transcribe (default [`TemplateFlavor::Qwen3`],
+    /// the behavior this port was originally validated against).
+    pub flavor: TemplateFlavor,
+    /// Qwen3.8's `preserve_thinking` chat-template kwarg. `None` is the
+    /// template's `undefined` and keeps reasoning on EVERY assistant turn;
+    /// `Some(false)` strips reasoning from every assistant turn up to and
+    /// including the last real (non-tool-response) user query. Ignored under
+    /// [`TemplateFlavor::Qwen3`].
+    pub preserve_thinking: Option<bool>,
 }
 
 impl Default for TemplateOpts {
     fn default() -> TemplateOpts {
-        TemplateOpts { add_generation_prompt: true, enable_thinking: true, reasoning_effort: None }
+        TemplateOpts { add_generation_prompt: true, enable_thinking: true, reasoning_effort: None, flavor: TemplateFlavor::Qwen3, preserve_thinking: None }
     }
 }
 
@@ -134,7 +167,7 @@ mod json_py {
     /// (so `1.0` stays `1.0`, not renormalized to `1`) rather than round-tripping
     /// through a float — the client's tool schema is echoed back, not recomputed.
     #[derive(Clone, Debug, PartialEq)]
-    enum Node {
+    pub(super) enum Node {
         Obj(Vec<(String, Node)>),
         Arr(Vec<Node>),
         Str(String),
@@ -154,7 +187,7 @@ mod json_py {
         Ok(out)
     }
 
-    fn write_node(n: &Node, out: &mut String) {
+    pub(super) fn write_node(n: &Node, out: &mut String) {
         match n {
             Node::Null => out.push_str("null"),
             Node::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -209,7 +242,7 @@ mod json_py {
 
     // ---- a small recursive-descent JSON parser, order- and lexeme-preserving ----
 
-    fn parse(raw: &str) -> Result<Node, String> {
+    pub(super) fn parse(raw: &str) -> Result<Node, String> {
         let c: Vec<char> = raw.chars().collect();
         let mut i = 0usize;
         skip_ws(&c, &mut i);
@@ -446,14 +479,20 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
     let has_tools = !tools.is_empty();
     let first_is_system = msgs.first().map(|m| m.role) == Some(Role::System);
 
-    // Resolve reasoning_effort: default to "xhigh" when thinking is enabled,
-    // matching upstream Qwen3.8's Jinja template convention.
+    // Resolve reasoning_effort. Qwen3 flavor: None means "no injection"
+    // (callers resolve defaults). Qwen38 flavor: the template's own
+    // `|default('xhigh')` applies at render time, so None renders as xhigh.
     let reasoning_directive = if opts.enable_thinking {
-        match opts.reasoning_effort.as_deref() {
+        let effort = if opts.flavor == TemplateFlavor::Qwen38 {
+            Some(opts.reasoning_effort.as_deref().unwrap_or("xhigh"))
+        } else {
+            opts.reasoning_effort.as_deref()
+        };
+        match effort {
             Some("low") => Some("Reasoning effort is set to low. Keep your thinking brief and focused, \
                  moving directly to the conclusion without unnecessary elaboration."),
             Some("medium") => None, // medium: no injected instruction
-            None => None, // not specified: no injection (callers resolve defaults)
+            None => None, // not specified: no injection (Qwen3 flavor; callers resolve defaults)
             Some("xhigh") => Some("Reasoning effort is set to xhigh. Please think carefully through the task, \
                  validate key assumptions, consider plausible alternatives, and prioritize \
                  correctness, consistency, and clarity in the final answer."),
@@ -464,28 +503,88 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
     };
 
     if has_tools {
-        out.push_str("<|im_start|>system\n");
-        if let Some(dir) = reasoning_directive {
-            out.push_str(dir);
-            out.push_str("\n\n");
+        if opts.flavor == TemplateFlavor::Qwen38 {
+            out.push_str("<|im_start|>system\n");
+            if let Some(dir) = reasoning_directive {
+                out.push_str(dir);
+                out.push_str("\n\n");
+            }
+            out.push_str("# Tools\n\nYou have access to the following functions:\n\n<tools>");
+            for tool in tools {
+                out.push('\n');
+                out.push_str(&json_py::dumps(tool)?);
+            }
+            out.push_str("\n</tools>");
+            out.push_str(
+                "\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n\
+                 <tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n\
+                 </parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\n\
+                 that can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n\
+                 - Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n\
+                 - Required parameters MUST be specified\n\
+                 - You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n\
+                 - If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n\
+                 </IMPORTANT>",
+            );
+            // System content comes AFTER the <IMPORTANT> block in Qwen3.8
+            // (the Qwen3-generation template puts it before "# Tools").
+            if first_is_system {
+                let content = msgs[0].content.trim();
+                if !content.is_empty() {
+                    out.push_str("\n\n");
+                    out.push_str(content);
+                }
+            }
+            out.push_str("<|im_end|>\n");
+        } else {
+            out.push_str("<|im_start|>system\n");
+            if let Some(dir) = reasoning_directive {
+                out.push_str(dir);
+                out.push_str("\n\n");
+            }
+            if first_is_system {
+                out.push_str(&msgs[0].content);
+                out.push_str("\n\n");
+            }
+            out.push_str(
+                "# Tools\n\nYou may call one or more functions to assist with the user query.\n\n\
+                 You are provided with function signatures within <tools></tools> XML tags:\n<tools>",
+            );
+            for tool in tools {
+                out.push('\n');
+                out.push_str(&json_py::dumps(tool)?);
+            }
+            out.push_str(
+                "\n</tools>\n\nFor each function call, return a json object with function name and \
+                 arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": \
+                 <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n",
+            );
         }
+    } else if opts.flavor == TemplateFlavor::Qwen38 {
+        // Qwen3.8 no-tools system turn: trimmed content, the directive
+        // separated from content by exactly one blank line (no trailing one
+        // when the content is absent), and the whole turn skipped when both
+        // are empty.
         if first_is_system {
-            out.push_str(&msgs[0].content);
-            out.push_str("\n\n");
+            let content = msgs[0].content.trim();
+            if !content.is_empty() {
+                out.push_str("<|im_start|>system\n");
+                if let Some(dir) = reasoning_directive {
+                    out.push_str(dir);
+                    out.push_str("\n\n");
+                }
+                out.push_str(content);
+                out.push_str("<|im_end|>\n");
+            } else if let Some(dir) = reasoning_directive {
+                out.push_str("<|im_start|>system\n");
+                out.push_str(dir);
+                out.push_str("<|im_end|>\n");
+            }
+        } else if let Some(dir) = reasoning_directive {
+            out.push_str("<|im_start|>system\n");
+            out.push_str(dir);
+            out.push_str("<|im_end|>\n");
         }
-        out.push_str(
-            "# Tools\n\nYou may call one or more functions to assist with the user query.\n\n\
-             You are provided with function signatures within <tools></tools> XML tags:\n<tools>",
-        );
-        for tool in tools {
-            out.push('\n');
-            out.push_str(&json_py::dumps(tool)?);
-        }
-        out.push_str(
-            "\n</tools>\n\nFor each function call, return a json object with function name and \
-             arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": \
-             <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n",
-        );
     } else if first_is_system || reasoning_directive.is_some() {
         out.push_str("<|im_start|>system\n");
         if let Some(dir) = reasoning_directive {
@@ -499,15 +598,17 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
     }
 
     // last_query_index: reverse scan, first (from the end) real user turn.
+    // Qwen3.8 trims the content before the synthetic-tool-response check
+    // (the Jinja `render_content(...)|trim` at the top of the scan).
     let mut last_query_index = msgs.len().saturating_sub(1);
     let mut multi_step_tool = true;
     for (index, m) in msgs.iter().enumerate().rev() {
-        if multi_step_tool
-            && m.role == Role::User
-            && !(m.content.starts_with("<tool_response>") && m.content.ends_with("</tool_response>"))
-        {
-            multi_step_tool = false;
-            last_query_index = index;
+        if multi_step_tool && m.role == Role::User {
+            let content: &str = if opts.flavor == TemplateFlavor::Qwen38 { m.content.trim() } else { &m.content };
+            if !(content.starts_with("<tool_response>") && content.ends_with("</tool_response>")) {
+                multi_step_tool = false;
+                last_query_index = index;
+            }
         }
     }
 
@@ -518,31 +619,67 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
             out.push_str("<|im_start|>");
             out.push_str(m.role.as_str());
             out.push('\n');
-            out.push_str(content);
+            if opts.flavor == TemplateFlavor::Qwen38 {
+                out.push_str(content.trim());
+            } else {
+                out.push_str(content);
+            }
             out.push_str("<|im_end|>\n");
         } else if m.role == Role::Assistant {
-            let (reasoning, content) = resolve_reasoning(m);
-            let is_last = index == msgs.len() - 1;
-            if index > last_query_index && (is_last || !reasoning.is_empty()) {
-                out.push_str("<|im_start|>assistant\n<think>\n");
-                out.push_str(reasoning.trim_matches('\n'));
-                out.push_str("\n</think>\n\n");
-                out.push_str(content.trim_start_matches('\n'));
-            } else {
-                out.push_str("<|im_start|>assistant\n");
-                out.push_str(&content);
-            }
-            for (ci, call) in m.tool_calls.iter().enumerate() {
-                if ci != 0 || !content.is_empty() {
-                    out.push('\n');
+            let (reasoning, content) = resolve_reasoning(m, opts.flavor == TemplateFlavor::Qwen38);
+            if opts.flavor == TemplateFlavor::Qwen38 {
+                // Qwen3.8: field-only reasoning, everything trimmed, and the
+                // think block gated by preserve_thinking (default: keep on
+                // EVERY assistant turn) rather than by position heuristics.
+                let reasoning = reasoning.trim();
+                let content = content.trim();
+                if opts.preserve_thinking.unwrap_or(true) || index > last_query_index {
+                    out.push_str("<|im_start|>assistant\n<think>\n");
+                    out.push_str(reasoning);
+                    out.push_str("\n</think>\n\n");
+                    out.push_str(content);
+                } else {
+                    out.push_str("<|im_start|>assistant\n");
+                    out.push_str(content);
                 }
-                out.push_str("<tool_call>\n{\"name\": \"");
-                out.push_str(&call.name);
-                out.push_str("\", \"arguments\": ");
-                out.push_str(&call.arguments);
-                out.push_str("}\n</tool_call>");
+                for (ci, call) in m.tool_calls.iter().enumerate() {
+                    if ci == 0 {
+                        if !content.is_empty() {
+                            out.push_str("\n\n");
+                        }
+                    } else {
+                        out.push('\n');
+                    }
+                    out.push_str("<tool_call>\n<function=");
+                    out.push_str(&call.name);
+                    out.push_str(">\n");
+                    append_xml_parameters(&call.arguments, &mut out);
+                    out.push_str("</function>\n</tool_call>");
+                }
+                out.push_str("<|im_end|>\n");
+            } else {
+                let is_last = index == msgs.len() - 1;
+                if index > last_query_index && (is_last || !reasoning.is_empty()) {
+                    out.push_str("<|im_start|>assistant\n<think>\n");
+                    out.push_str(reasoning.trim_matches('\n'));
+                    out.push_str("\n</think>\n\n");
+                    out.push_str(content.trim_start_matches('\n'));
+                } else {
+                    out.push_str("<|im_start|>assistant\n");
+                    out.push_str(&content);
+                }
+                for (ci, call) in m.tool_calls.iter().enumerate() {
+                    if ci != 0 || !content.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str("<tool_call>\n{\"name\": \"");
+                    out.push_str(&call.name);
+                    out.push_str("\", \"arguments\": ");
+                    out.push_str(&call.arguments);
+                    out.push_str("}\n</tool_call>");
+                }
+                out.push_str("<|im_end|>\n");
             }
-            out.push_str("<|im_end|>\n");
         } else if m.role == Role::Tool {
             let run_start = is_first || msgs[index - 1].role != Role::Tool;
             let run_end = index == msgs.len() - 1 || msgs[index + 1].role != Role::Tool;
@@ -550,7 +687,11 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
                 out.push_str("<|im_start|>user");
             }
             out.push_str("\n<tool_response>\n");
-            out.push_str(content);
+            if opts.flavor == TemplateFlavor::Qwen38 {
+                out.push_str(content.trim());
+            } else {
+                out.push_str(content);
+            }
             out.push_str("\n</tool_response>");
             if run_end {
                 out.push_str("<|im_end|>\n");
@@ -564,6 +705,10 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
         out.push_str("<|im_start|>assistant\n");
         if !opts.enable_thinking {
             out.push_str("<think>\n\n</think>\n\n");
+        } else if opts.flavor == TemplateFlavor::Qwen38 {
+            // Qwen3.8 prefills the open think tag: the model continues
+            // INSIDE the think block (the scanner must start reasoning-open).
+            out.push_str("<think>\n");
         }
     }
 
@@ -571,19 +716,27 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
 }
 
 /// `render` with `add_generation_prompt=true` — the common inference-time call.
-pub fn render_for_generation(msgs: &[ChatMessage], tools: &[String], enable_thinking: bool, reasoning_effort: Option<String>) -> Result<String, String> {
-    render(msgs, tools, TemplateOpts { add_generation_prompt: true, enable_thinking, reasoning_effort })
+pub fn render_for_generation(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Result<String, String> {
+    render(msgs, tools, TemplateOpts { add_generation_prompt: true, ..opts })
 }
 
-/// Resolve an assistant message's `(reasoning, content)` pair: the explicit
-/// `reasoning_content` field if present, else split out of an embedded
-/// `</think>` in `content` (Jinja: `content.split('</think>')[0].rstrip('\n')
-/// .split('<think>')[-1].lstrip('\n')` for the reasoning, `content.split
-/// ('</think>')[-1].lstrip('\n')` for the remaining content), else empty
-/// reasoning with `content` unchanged.
-fn resolve_reasoning(m: &ChatMessage) -> (String, String) {
+/// Resolve an assistant message's `(reasoning, content)` pair.
+///
+/// Qwen3 flavor: the explicit `reasoning_content` field if present, else
+/// split out of an embedded `</think>` in `content` (Jinja:
+/// `content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n')`
+/// for the reasoning, `content.split('</think>')[-1].lstrip('\n')` for the
+/// remaining content), else empty reasoning with `content` unchanged.
+///
+/// Qwen3.8 flavor: the `reasoning_content` field only
+/// (`message.reasoning_content is string`), with `content` unchanged - the
+/// new template never splits `<think>` markers out of content.
+fn resolve_reasoning(m: &ChatMessage, qwen38: bool) -> (String, String) {
     if let Some(r) = &m.reasoning_content {
         return (r.clone(), m.content.clone());
+    }
+    if qwen38 {
+        return (String::new(), m.content.clone());
     }
     let Some(split_at) = m.content.find("</think>") else {
         return (String::new(), m.content.clone());
@@ -596,6 +749,28 @@ fn resolve_reasoning(m: &ChatMessage) -> (String, String) {
     let reasoning = reasoning.trim_start_matches('\n').to_string();
     let content = m.content[split_at + "</think>".len()..].trim_start_matches('\n').to_string();
     (reasoning, content)
+}
+
+/// Qwen3.8 history tool-call arguments: one `<parameter=key>\n{value}\n</parameter>\n`
+/// block per key of the arguments object, in the object's own key order.
+/// String values verbatim (the Jinja `| string`); every other JSON value
+/// re-serialized Python-json-style (the Jinja `| tojson`). A payload that is
+/// not an object (or does not parse) contributes no parameters - upstream
+/// always sends objects, and the template's `arguments != ''` guard gives the
+/// empty case nothing to iterate.
+fn append_xml_parameters(arguments: &str, out: &mut String) {
+    let Ok(node) = json_py::parse(arguments) else { return };
+    let json_py::Node::Obj(entries) = node else { return };
+    for (key, value) in entries {
+        out.push_str("<parameter=");
+        out.push_str(&key);
+        out.push_str(">\n");
+        match value {
+            json_py::Node::Str(s) => out.push_str(&s),
+            other => json_py::write_node(&other, out),
+        }
+        out.push_str("\n</parameter>\n");
+    }
 }
 
 // ===================== ChatScanner: generated text -> events =====================
@@ -1555,5 +1730,149 @@ mod tests {
         let re_pos = s.find("Reasoning effort").unwrap();
         let tools_pos = s.find("# Tools").unwrap();
         assert!(re_pos < tools_pos, "reasoning should come before tools: re_pos={re_pos}, tools_pos={tools_pos}");
+    }
+
+    // ---- render: Qwen3.8 template flavor (Qwen38) ------------------------------------
+    //
+    // Every expectation below is transcribed from the real Qwen3.8
+    // tokenizer_config.json chat_template and cross-validated against the
+    // template itself in tests/chat_template_cross_check.rs (the
+    // matches_qwen_chat_qwen38_* tests there) whenever that template is on
+    // the box.
+
+    fn qwen38_msgs_with_history_reasoning() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::user("q1"),
+            ChatMessage { role: Role::Assistant, content: "a1".into(), reasoning_content: Some("thinking one".into()), ..Default::default() },
+            ChatMessage::user("q2"),
+            ChatMessage::assistant("a2"),
+        ]
+    }
+
+    #[test]
+    fn qwen38_generation_prompt_prefills_an_open_think_tag() {
+        let msgs = vec![ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts { enable_thinking: true, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert!(s.ends_with("<|im_start|>assistant\n<think>\n"), "got: {s:?}");
+        // Thinking disabled stays a closed empty block (same as Qwen3).
+        let s = render(&msgs, &[], TemplateOpts { enable_thinking: false, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert!(s.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_preserve_thinking_default_keeps_history_reasoning() {
+        // Default (kwarg undefined): EVERY assistant turn keeps its think
+        // block - the pre-query turn, and the final turn that has no
+        // reasoning at all (empty reasoning, still framed).
+        let msgs = qwen38_msgs_with_history_reasoning();
+        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert!(s.contains("<|im_start|>assistant\n<think>\nthinking one\n</think>\n\na1<|im_end|>\n"), "got: {s:?}");
+        assert!(s.contains("<|im_start|>assistant\n<think>\n\n</think>\n\na2<|im_end|>\n"), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_preserve_thinking_false_strips_pre_query_reasoning() {
+        let msgs = qwen38_msgs_with_history_reasoning();
+        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, preserve_thinking: Some(false), ..Default::default() }).unwrap();
+        // a1 sits before the last real user query (index 1 < 2): stripped.
+        assert!(s.contains("<|im_start|>assistant\na1<|im_end|>\n"), "got: {s:?}");
+        assert!(!s.contains("thinking one"), "got: {s:?}");
+        // The trailing assistant (after the last query) keeps its block.
+        assert!(s.contains("<|im_start|>assistant\n<think>\n\n</think>\n\na2<|im_end|>\n"), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_preserve_thinking_true_matches_the_default() {
+        let msgs = qwen38_msgs_with_history_reasoning();
+        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, preserve_thinking: Some(true), ..Default::default() }).unwrap();
+        assert!(s.contains("<|im_start|>assistant\n<think>\nthinking one\n</think>\n\na1<|im_end|>\n"), "got: {s:?}");
+        assert!(s.contains("<|im_start|>assistant\n<think>\n\n</think>\n\na2<|im_end|>\n"), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_history_reasoning_and_content_are_trimmed() {
+        let msgs = vec![
+            ChatMessage::user("q"),
+            ChatMessage { role: Role::Assistant, content: "\n answer \n".into(), reasoning_content: Some(" \n hard think \n".into()), ..Default::default() },
+        ];
+        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert!(s.contains("<|im_start|>assistant\n<think>\nhard think\n</think>\n\nanswer<|im_end|>\n"), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_reasoning_content_only_never_splits_embedded_think() {
+        // The Qwen3.8 template reads the reasoning_content FIELD only; a
+        // literal <think> block inside content stays in content verbatim
+        // (the Qwen3 flavor's split-and-reframe fallback is gone).
+        let msgs = vec![
+            ChatMessage::user("q"),
+            ChatMessage { role: Role::Assistant, content: "<think>old</think>answer".into(), ..Default::default() },
+        ];
+        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert!(s.contains("<|im_start|>assistant\n<think>\n\n</think>\n\n<think>old</think>answer<|im_end|>\n"), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_history_tool_calls_render_xml_parameters() {
+        let msgs = vec![
+            ChatMessage::user("weather in Paris?"),
+            ChatMessage {
+                role: Role::Assistant,
+                content: "checking".into(),
+                tool_calls: vec![ToolCallMsg { id: "c1".into(), name: "get_weather".into(), arguments: r#"{"city": "Paris", "n": 2}"#.into() }],
+                ..Default::default()
+            },
+            ChatMessage::tool("18C, sunny"),
+            ChatMessage::assistant("It is 18C."),
+        ];
+        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        let expected = "<|im_start|>assistant\n<think>\n\n</think>\n\nchecking\n\n<tool_call>\n<function=get_weather>\n\
+             <parameter=city>\nParis\n</parameter>\n<parameter=n>\n2\n</parameter>\n</function>\n</tool_call><|im_end|>\n";
+        assert!(s.contains(expected), "got: {s:?}");
+        // Tool results are unchanged from the Qwen3 flavor (modulo trimming).
+        assert!(s.contains("<|im_start|>user\n<tool_response>\n18C, sunny\n</tool_response><|im_end|>\n"), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_tools_preamble_matches_upstream() {
+        let tools = vec![r#"{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}"#.to_string()];
+        let msgs = vec![ChatMessage::system("Be terse."), ChatMessage::user("hi")];
+        let s = render(&msgs, &tools, TemplateOpts { add_generation_prompt: true, enable_thinking: false, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert!(s.starts_with("<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n"), "got: {s:?}");
+        assert!(s.contains("\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n\
+             <tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n\
+             </parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\n\
+             that can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n\
+             - Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n\
+             - Required parameters MUST be specified\n\
+             - You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n\
+             - If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n\
+             </IMPORTANT>\n\nBe terse.<|im_end|>\n"), "system content must come AFTER the <IMPORTANT> block: {s:?}");
+        assert!(s.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_reasoning_directive_layout_matches_the_template() {
+        // With system content: directive + exactly one blank line, then the
+        // content. Without: the directive turn carries no trailing blank line.
+        let low = "Reasoning effort is set to low. Keep your thinking brief and focused, \
+             moving directly to the conclusion without unnecessary elaboration.";
+        let msgs = vec![ChatMessage::system("Be terse."), ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts { enable_thinking: true, reasoning_effort: Some("low".into()), flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert!(s.starts_with(&format!("<|im_start|>system\n{low}\n\nBe terse.<|im_end|>\n")), "got: {s:?}");
+        let msgs = vec![ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts { enable_thinking: true, reasoning_effort: Some("low".into()), flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert!(s.starts_with(&format!("<|im_start|>system\n{low}<|im_end|>\n")), "got: {s:?}");
+    }
+
+    #[test]
+    fn qwen38_reasoning_effort_defaults_to_xhigh_at_render_time() {
+        // The template's own |default('xhigh'): unlike the Qwen3 flavor,
+        // None and Some("xhigh") render identically under Qwen38.
+        let msgs = vec![ChatMessage::user("hi")];
+        let s = render(&msgs, &[], TemplateOpts { enable_thinking: true, reasoning_effort: None, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        let s_xhigh = render(&msgs, &[], TemplateOpts { enable_thinking: true, reasoning_effort: Some("xhigh".into()), flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
+        assert_eq!(s, s_xhigh);
+        assert!(s.contains("Reasoning effort is set to xhigh"), "got: {s:?}");
     }
 }

@@ -283,6 +283,11 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
     } else {
         None // thinking disabled: reasoning_effort is ignored
     };
+    // Qwen3.8's `preserve_thinking` chat-template kwarg: only takes effect on
+    // a Qwen38-flavor render (see data::qwen_chat); under this module's
+    // Qwen3-era flavor the upstream template has no such kwarg and the value
+    // is inert, but it is forwarded so a flavor switch needs no parser change.
+    let preserve_thinking = inv.get_bool("preserve_thinking");
     let tool_choice = parse_tool_choice(inv.get_str("tool_choice").as_deref())?;
     let mut tools = parse_tools(inv.get_str("tools").as_deref())?;
     // Prompt-level tool_choice enforcement:
@@ -303,13 +308,22 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
     let text = match inv.get_str("messages").filter(|s| !s.is_empty()) {
         Some(raw) => {
             let msgs = parse_chat_messages(&raw, inv.get_str("system").as_deref())?;
-            qwen_chat::render_for_generation(&msgs, &tools, enable_thinking, reasoning_effort.clone())?
+            qwen_chat::render_for_generation(&msgs, &tools, qwen_chat::TemplateOpts {
+                enable_thinking,
+                reasoning_effort: reasoning_effort.clone(),
+                preserve_thinking,
+                ..Default::default()
+            })?
         }
         None => {
             let prompt = inv.get_str("prompt").unwrap_or_default();
             if inv.get_bool("chat").unwrap_or(true) {
                 let msgs = [ChatMessage::user(prompt)];
-                qwen_chat::render_for_generation(&msgs, &tools, enable_thinking, reasoning_effort.clone())?
+                qwen_chat::render_for_generation(&msgs, &tools, qwen_chat::TemplateOpts {
+                    enable_thinking,
+                    reasoning_effort: reasoning_effort.clone(),
+                    ..Default::default()
+                })?
             } else {
                 prompt
             }
@@ -680,5 +694,36 @@ mod tests {
         assert!(seq.advance(&tok, &tok.encode("prose"), &mut |_| {}));
         let out = seq.finish(&tok, &tok.encode("prose"), &mut |_| {});
         assert_eq!(out.outputs.get("finish_reason").and_then(|v| v.as_str()), Some("stop"));
+    }
+
+    /// `preserve_thinking` threads through to the renderer, but it is the
+    /// QWEN3.8 template's kwarg: under the Qwen3-era flavor this module
+    /// renders, the upstream template has no such kwarg and history framing
+    /// stays positional (a reasoned turn after the last user query keeps its
+    /// think block, earlier turns lose it) regardless of the kwarg. If this
+    /// test ever fails, parse_request started rendering a different flavor -
+    /// which also flips the tool-call wire format (JSON vs the 3.8 XML form)
+    /// and needs the scanner to follow.
+    #[test]
+    fn preserve_thinking_is_inert_under_the_qwen3_flavor() {
+        let Some(tok) = real_tok() else { return };
+        let msgs = r#"[
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1", "reasoning_content": "thinking one"},
+            {"role": "user", "content": "q2"}
+        ]"#;
+        let render = |pt: Option<bool>| {
+            let mut inv = Invocation::new().set("messages", json!(msgs));
+            if let Some(pt) = pt {
+                inv = inv.set("preserve_thinking", json!(pt));
+            }
+            tok.decode(&parse_request(&tok, &inv).unwrap().ids)
+        };
+        for pt in [None, Some(true), Some(false)] {
+            let text = render(pt);
+            // Earlier turn's reasoning dropped, its content kept.
+            assert!(!text.contains("thinking one"), "pt={pt:?}:\n{text}");
+            assert!(text.contains("a1"), "pt={pt:?}:\n{text}");
+        }
     }
 }

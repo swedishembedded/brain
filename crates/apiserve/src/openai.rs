@@ -361,6 +361,20 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     if let Some(re) = reasoning_effort {
         inv = inv.set("reasoning_effort", json!(re));
     }
+    // `preserve_thinking` (Qwen3.8 chat-template kwarg: keep <think> blocks
+    // from prior assistant turns in the rendered history): same extension
+    // point as `reasoning_effort` - nested under `chat_template_kwargs` or,
+    // tolerated, top-level. It only takes effect on the Qwen3.8-flavor render
+    // (the Qwen3-era template has no such kwarg; its history framing is
+    // positional), which the chat renderer itself owns.
+    let preserve_thinking = body
+        .get("chat_template_kwargs")
+        .and_then(|k| k.get("preserve_thinking"))
+        .and_then(|v| v.as_bool())
+        .or_else(|| body.get("preserve_thinking").and_then(|v| v.as_bool()));
+    if let Some(pt) = preserve_thinking {
+        inv = inv.set("preserve_thinking", json!(pt));
+    }
 
     // image_url/input_audio content parts' REAL bytes -- flatten_message's
     // own "content" (message_content) now preserves a lightweight, payload-
