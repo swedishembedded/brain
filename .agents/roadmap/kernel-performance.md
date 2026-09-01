@@ -1178,7 +1178,23 @@ every file this milestone touched (the doc-comment numbers in the table
 above live in this ledger, not in source - `check-no-perf-numbers.sh` only
 scans `docs/**/*.md` and source narration, not `.agents/`).
 
-**Commits**: six - `backend-api: add Op::PagedAttentionFused` (`select.rs`
+**A second existing gate caught a real mistake before it shipped, the same
+"checked, not assumed" pattern as the scratch-sizing fix above.**
+`qwen3/tests/no_kernel_names.rs`'s own `migrated_forward_paths_never_hand_
+pick_a_gemm_kernel` bans a literal reference to the selector's return enum
+anywhere inside `run_batched_steps`'s own source text - not scoped to GEMM
+names specifically, a blunter rule than its own doc implies. The first
+wiring inlined the `Op::PagedAttentionFused` selector call directly in
+`run_batched_steps`, tripping it. Fixed by factoring the call into
+`model::block::paged_attention_fused`, mirroring `paged_scores_variant`'s
+own already-established shape exactly (that function lives outside
+`run_batched_steps` for the identical reason) - `run_batched_steps` now only
+calls it by name. Re-verified: `no_kernel_names.rs` (3 passed),
+`check-kernel-selection.sh` (unaffected - `paged_flash_prefill` has no stem
+sibling in the catalogue either way), full `brain-qwen3` `--lib` and
+`--tests` (104 + 19 binaries, 0 failed) after the move.
+
+**Commits**: seven - `backend-api: add Op::PagedAttentionFused` (`select.rs`
 alone, per this campaign's own file-contention rule), `model: cover
 KernelVariant::FusedFlash in Ops::matmul's dispatch-count match` (the
 resulting exhaustive-match fix), `backend-api: drop bare perf numbers from
@@ -1186,7 +1202,8 @@ Op::PagedAttentionFused's doc comment` (a `check-no-perf-numbers.sh`
 follow-up), `qwen3: wire Op::PagedAttentionFused into serve, shrink
 Scratch::{scores,probs}` (the milestone's own change, including the
 prerequisite compile fix), `docs: record the selector/scratch-sizing rule
-M2.4 caught` (F.7b).
+M2.4 caught` (F.7b), `model, qwen3: move the M2.4 fused-attention selector
+call out of run_batched_steps` (the `no_kernel_names.rs` fix above).
 
 ---
 
