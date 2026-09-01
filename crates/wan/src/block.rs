@@ -454,7 +454,9 @@ impl Sel {
                 layernorm_dx_rows: None,
             },
             rms_rows: Some(K_RMSNORM_ROWS),
-            softmax_rows: fast.then_some(K_SOFTMAX_ROWS),
+            // Gated inside model::block::softmax_variant on DeviceCaps, same
+            // as the *_rows fields above - not here.
+            softmax_rows: Some(K_SOFTMAX_ROWS),
             cross: CrossIds { scores: K_XSCORES, softmax: K_XSOFTMAX, apply: K_XAPPLY },
             flash: FlashIds {
                 bidir: K_FLASH,
@@ -518,9 +520,11 @@ fn push_cross(
             &[1, nh, qn, te, hd, dim, 0],
             nh * qn * te,
         ));
-        match sel.softmax_rows {
-            Some(i) => s.push(gpu.step(i, &[&scr.xscores, &scr.xprobs], &[nh * qn, te], nh * qn * 64)),
-            None => s.push(gpu.step(K_XSOFTMAX, &[&scr.xscores, &scr.xprobs], &[1, nh, qn, te], nh * qn)),
+        let (sk, st) = model::block::softmax_variant(gpu, K_XSOFTMAX, sel.softmax_rows, nh * qn, te);
+        if sk == K_SOFTMAX_ROWS {
+            s.push(gpu.step(sk, &[&scr.xscores, &scr.xprobs], &[nh * qn, te], st));
+        } else {
+            s.push(gpu.step(sk, &[&scr.xscores, &scr.xprobs], &[1, nh, qn, te], st));
         }
         s.push(gpu.step_sliced(
             K_XAPPLY,
