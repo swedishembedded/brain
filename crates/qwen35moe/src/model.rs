@@ -695,6 +695,16 @@ pub struct Qwen35 {
     /// force-unified with the façade. See `crate::q8`'s module doc for the
     /// current (narrower) scope.
     q8: Option<Qwen35Q8>,
+    /// `[layer][expert] -> (gate.weight, up.weight, down.weight)` name
+    /// triples, built ONCE here rather than `format!`ed by [`Self::
+    /// moe_sublayer`]/[`Self::moe_sublayer_bwd`]'s per-expert dispatch loops
+    /// on every forward/backward pass. Those loops run `n_experts` (256 at
+    /// the real 35B-A3B scale) times per layer per pass; re-formatting the
+    /// SAME three strings that many times, only to immediately hash them
+    /// again in [`Self::w`]/[`Self::g`], was pure host-side allocation with
+    /// no behavioural purpose since a weight's name never changes after
+    /// construction.
+    moe_expert_names: Vec<Vec<(String, String, String)>>,
     /// The `model::ops` façade - see [`Qwen35::ops_linear`]'s own doc.
     ops: Ops,
     /// Per-layer GDN/GQA mixer linears (the 9 leaves `Qwen35Q8::
@@ -1029,6 +1039,23 @@ impl Qwen35 {
         let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
+        // See the field's own doc: computed once here so the per-expert
+        // forward/backward dispatch loops index into it instead of
+        // `format!`ing the same names every pass.
+        let moe_expert_names: Vec<Vec<(String, String, String)>> = (0..cfg.n_layers as usize)
+            .map(|l| {
+                (0..cfg.n_experts as usize)
+                    .map(|ei| {
+                        (
+                            format!("blocks.{l}.mlp.experts.{ei}.gate.weight"),
+                            format!("blocks.{l}.mlp.experts.{ei}.up.weight"),
+                            format!("blocks.{l}.mlp.experts.{ei}.down.weight"),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
         // Quantize+upload the int8 MoE-expert linears from the SAME source,
         // streaming one tensor at a time (see `Qwen35Q8::build`'s own doc -
         // MoE experts only; the mixer linears build `weights` below instead).
@@ -1178,6 +1205,7 @@ impl Qwen35 {
             shard,
             ps,
             q8,
+            moe_expert_names,
             ops,
             weights,
             b,
@@ -1598,16 +1626,16 @@ impl Qwen35 {
         } else if self.is_train {
             let acts = MoeActs::new(g, &shape);
             for ei in 0..e {
-                let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+                let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
                 steps.extend(expert_fwd(
                     g,
                     &moe_ids(),
                     &shape,
                     &xn2,
                     &gate,
-                    self.w(&ep("gate.weight")),
-                    self.w(&ep("up.weight")),
-                    self.w(&ep("down.weight")),
+                    self.w(gn),
+                    self.w(un),
+                    self.w(dn),
                     &acts.at(ei as usize),
                     &moe_acc,
                     ei,
@@ -1630,16 +1658,16 @@ impl Qwen35 {
                 expert_out: &g.storage((n * d) as u64),
             };
             for ei in 0..e {
-                let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+                let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
                 steps.extend(expert_fwd(
                     g,
                     &moe_ids(),
                     &shape,
                     &xn2,
                     &gate,
-                    self.w(&ep("gate.weight")),
-                    self.w(&ep("up.weight")),
-                    self.w(&ep("down.weight")),
+                    self.w(gn),
+                    self.w(un),
+                    self.w(dn),
                     &scratch,
                     &moe_acc,
                     ei,
@@ -1790,16 +1818,16 @@ impl Qwen35 {
             expert_out: &g.storage(d as u64),
         };
         for (i, &ei) in real_ids.iter().enumerate() {
-            let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+            let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
             steps.extend(expert_fwd(
                 g,
                 &moe_ids(),
                 shape,
                 xn2,
                 gate,
-                self.w(&ep("gate.weight")),
-                self.w(&ep("up.weight")),
-                self.w(&ep("down.weight")),
+                self.w(gn),
+                self.w(un),
+                self.w(dn),
                 &scratch,
                 moe_acc,
                 ei,
@@ -2036,8 +2064,8 @@ impl Qwen35 {
         };
         let expert_weights: Vec<(DeviceBuffer, DeviceBuffer, DeviceBuffer)> = (0..e)
             .map(|ei| {
-                let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
-                (self.w(&ep("gate.weight")).clone(), self.w(&ep("up.weight")).clone(), self.w(&ep("down.weight")).clone())
+                let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
+                (self.w(gn).clone(), self.w(un).clone(), self.w(dn).clone())
             })
             .collect();
         // Never a LoRA target (per the standing LoRA task's own scope note:
@@ -2045,11 +2073,11 @@ impl Qwen35 {
         // build, so each field is `None` there (`ExpertGrads`' own contract).
         let expert_grads: Vec<ExpertGrads> = (0..e)
             .map(|ei| {
-                let ep = |s: &str| format!("blocks.{l}.mlp.experts.{ei}.{s}");
+                let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
                 ExpertGrads {
-                    gate_w: self.trainable(&ep("gate.weight")).then(|| self.g(&ep("gate.weight"))),
-                    up_w: self.trainable(&ep("up.weight")).then(|| self.g(&ep("up.weight"))),
-                    down_w: self.trainable(&ep("down.weight")).then(|| self.g(&ep("down.weight"))),
+                    gate_w: self.trainable(gn).then(|| self.g(gn)),
+                    up_w: self.trainable(un).then(|| self.g(un)),
+                    down_w: self.trainable(dn).then(|| self.g(dn)),
                 }
             })
             .collect();

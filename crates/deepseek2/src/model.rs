@@ -375,6 +375,16 @@ pub struct DeepseekV2 {
     pub gpu: Gpu,
     pub cfg: DeepseekV2Config,
     ps: ParamStore,
+    /// `[layer][expert] -> (gate.weight, up.weight, down.weight)` name
+    /// triples for every MoE layer (empty `Vec` for a dense layer), built
+    /// ONCE here instead of `format!`ed by the per-expert dispatch loops in
+    /// [`Self::decode_at`] (and, for the one-time cost, [`Self::
+    /// build_forward`]/[`Self::build_backward`]) -- `decode_at` in
+    /// particular re-records its whole tape every generated token, so
+    /// re-formatting the SAME `n_experts` name triples there each time was a
+    /// real per-decode-step host allocation with no behavioural purpose,
+    /// since a weight's name never changes after construction.
+    moe_expert_names: Vec<Vec<(String, String, String)>>,
     opt: Optim,
     b: u32,
     t: u32,
@@ -598,12 +608,34 @@ impl DeepseekV2 {
             });
         }
 
+        // See the field's own doc: computed once here so the per-expert
+        // dispatch loops index into it instead of `format!`ing the same
+        // names every call.
+        let moe_expert_names: Vec<Vec<(String, String, String)>> = (0..cfg.n_layers() as usize)
+            .map(|l| {
+                if cfg.is_moe_layer(l as u32) {
+                    (0..cfg.n_experts() as usize)
+                        .map(|ei| {
+                            (
+                                format!("blocks.{l}.mlp.experts.{ei}.gate.weight"),
+                                format!("blocks.{l}.mlp.experts.{ei}.up.weight"),
+                                format!("blocks.{l}.mlp.experts.{ei}.down.weight"),
+                            )
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+
         let mut m = DeepseekV2 {
             cfg,
             b,
             t,
             count: Cell::new(1.0),
             ps,
+            moe_expert_names,
             opt,
             tokens: gpu.storage(n),
             targets: gpu.storage(n),
@@ -834,16 +866,16 @@ impl DeepseekV2 {
                     // did not win before the K-reduction, so the cost is
                     // proportional to the rows actually routed here.
                     for ei in 0..e as usize {
-                        let ep = |nm: &str| format!("blocks.{l}.mlp.experts.{ei}.{nm}");
+                        let (gn, un, dn) = &self.moe_expert_names[l][ei];
                         s.extend(moe::expert_fwd(
                             &self.gpu,
                             &moe_ids(),
                             &shape,
                             &lb.xn2,
                             gate,
-                            self.w(&ep("gate.weight")),
-                            self.w(&ep("up.weight")),
-                            self.w(&ep("down.weight")),
+                            self.w(gn),
+                            self.w(un),
+                            self.w(dn),
                             &acts.at(ei),
                             &self.moe_acc,
                             ei as u32,
@@ -976,17 +1008,18 @@ impl DeepseekV2 {
 
                     let expert_weights: Vec<(DeviceBuffer, DeviceBuffer, DeviceBuffer)> = (0..e as usize)
                         .map(|ei| {
-                            let ep = |nm: &str| format!("blocks.{l}.mlp.experts.{ei}.{nm}");
-                            (self.w(&ep("gate.weight")).clone(), self.w(&ep("up.weight")).clone(), self.w(&ep("down.weight")).clone())
+                            let (gn, un, dn) = &self.moe_expert_names[l][ei];
+                            (self.w(gn).clone(), self.w(un).clone(), self.w(dn).clone())
                         })
                         .collect();
                     let expert_grads: Vec<ExpertGrads> = (0..e as usize)
                         .map(|ei| {
-                            let gr = |nm: &str| {
-                                let full = format!("blocks.{l}.mlp.experts.{ei}.{nm}");
-                                self.trainable(&full).then(|| self.g(&full))
-                            };
-                            ExpertGrads { gate_w: gr("gate.weight"), up_w: gr("up.weight"), down_w: gr("down.weight") }
+                            let (gn, un, dn) = &self.moe_expert_names[l][ei];
+                            ExpertGrads {
+                                gate_w: self.trainable(gn).then(|| self.g(gn)),
+                                up_w: self.trainable(un).then(|| self.g(un)),
+                                down_w: self.trainable(dn).then(|| self.g(dn)),
+                            }
                         })
                         .collect();
                     s.extend(moe::moe_layer_bwd(
@@ -1353,16 +1386,16 @@ impl DeepseekV2 {
                 // count is not the same thing as a whole-pass win, and only
                 // the whole-pass number decides whether a fix worked.
                 for ei in 0..e as usize {
-                    let ep = |nm: &str| format!("blocks.{l}.mlp.experts.{ei}.{nm}");
+                    let (gn, un, dn) = &self.moe_expert_names[l][ei];
                     s.extend(moe::expert_fwd(
                         g,
                         &moe_kernel_ids,
                         &shape1,
                         &dec.xn2,
                         &dec.gate,
-                        self.w(&ep("gate.weight")),
-                        self.w(&ep("up.weight")),
-                        self.w(&ep("down.weight")),
+                        self.w(gn),
+                        self.w(un),
+                        self.w(dn),
                         &dec.moe_acts.at(ei),
                         &dec.moe_acc,
                         ei as u32,
