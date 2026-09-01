@@ -190,13 +190,75 @@ went green against the implementation; `crates/testutil`'s full suite and
 uses this yet - that lands with the Phase 8 work it's built ahead of (FP8/FP4,
 native f16/bf16, VNNI/AMX/AVX-512), per decision 2.
 
+### M0.1 - The profiler stops silently dropping timing above 8192 dispatches
+
+`backend-vulkan::flush()` gated its timestamp query pool on `steps.len() <
+MAX_TIMED_DISPATCHES` (8192) and skipped timing the whole batch above it with
+no warning - exactly the MoE-scale batches (tens of thousands of dispatches
+per forward) that most need per-kernel attribution went completely
+unattributed. `MAX_TIMED_DISPATCHES` was never a queried Vulkan device limit,
+so the fix is real chunking, not a warning: `flush` now splits an oversized
+batch into `ceil(n / MAX_TIMED_DISPATCHES)` bounded sub-batches
+(`flush_chunk`), each its own submit+fence-bounded timestamp bracket, folding
+every sub-batch into the same per-kernel accumulator. The untimed path is
+byte-for-byte unchanged (one chunk = the whole batch when timing is off).
+New test `kernel_times_attributes_every_kind_above_the_query_pool_capacity`
+(8300 mixed dispatches, RED against the pre-fix code, GREEN after) pins the
+contract; the full `backend-vulkan`/`backend-cpu`/`gpu-core` suites and
+`cargo clippy --all-targets` stay green. Lesson recorded as
+`.agents/rules/lessons.md` #81. Commit `1e930207` (implementation + test).
+
+### M0.4b - Hoisted `BRAIN_VK_SERIAL`/`BRAIN_VK_NO_SERIAL` out of `flush()`
+
+Same file as M0.1: both env vars were read via `std::env::var` on every single
+`flush()` call rather than once per process. Resolved each once via a
+`OnceLock` (`vk_serial_forced`/`vk_serial_disabled`), matching
+`backend_api::select`'s `BRAIN_NO_COOP_LN`/`BRAIN_NO_COOP_GRADNORM`
+convention. Pure hoist - same resolution semantics and fallback order, no
+behavior change, confirmed by the full `backend-vulkan` suite staying green.
+Commit `1ab6f562`.
+
+### M0.4a - Deleted the dead `crates/autodiff` placeholder
+
+483-byte doc-comment-only file, zero consumers (verified by grep before
+deletion), still declared in the workspace. Removed the crate, its workspace-
+member entry, its `Cargo.lock` entry, and its `AGENTS.md` row (the
+placeholder note now names only `crates/timeseries`). `make build/release`,
+`make check/doc-links`, `make check/scripts` all green. Commit `6eee2197`.
+
+### M0.4c - CPU ISA tier resolved once per call, not per row/chunk
+
+`crates/backend-cpu`'s `avx512_available()`/`avx2_available()` if-ladder was
+re-evaluated inside every per-row/per-chunk hot-loop closure across
+`fast_ops.rs` (`silu`, `silu_mul`, `matmul_abt`, `affine_sigmoid_inplace`,
+`affine_silu_inplace`, `bn_eval`, `axpy`, `scale_add`,
+`moe_linear_gated_fwd`). `is_x86_feature_detected!` already caches its CPUID
+probe internally, so this was never a correctness bug - just wasted
+if-ladder/closure-capture work per iteration. Added `fast_conv::IsaTier` +
+`isa_tier()` (a `OnceLock`, resolved once ahead of the loop) and moved every
+call site onto it - a pure hoist, proven by the existing `*_matches_scalar`
+bit-identity tests staying green (no path selection changed). Commit
+`8d0f8115`.
+
+### M0.4d - Precomputed MoE per-expert weight-name tables
+
+`qwen35moe`'s `moe_sublayer{,_bwd}`/`moe_sublayer_decode_sparse` and
+`deepseek2`'s `decode_at` (the token-by-token hot loop; `build_forward`/
+`build_backward` fixed too, cheap and one-time) `format!`-allocated
+`blocks.{l}.mlp.experts.{e}.{gate,up,down}.weight` per expert per layer per
+forward pass. Both models now build a `[layer][expert] ->
+(gate,up,down)` name table once at construction and index into it. No
+change to `ParamStore`/weight-lookup architecture, dispatch order, or
+numerics. Verified via `check_qwen35moe`/`check_qwen35moe_lora` gradcheck,
+`deepseek2`'s 8 finite-difference tests, and both crates' full suites +
+clippy, all green. Commit `ca4b6c00`.
+
 ---
 
 ## Not yet done
 
-Phases 0 (remaining: M0.1 profiler fix, M0.2 baselines,
-M0.4 debt sweep) through 8, as structured above. Track sub-milestone status
-against the approved plan; update this section as each phase closes, recording
-the measurement that proved it - a number nothing checks is a number that
-silently goes stale (`AGENTS.md`'s own rule, restated here because a
-multi-phase campaign is exactly where it erodes).
+Phase 0's M0.2 (baselines) remains, then Phases 1-8 as structured above.
+Track sub-milestone status against the approved plan; update this section as
+each phase closes, recording the measurement that proved it - a number
+nothing checks is a number that silently goes stale (`AGENTS.md`'s own rule,
+restated here because a multi-phase campaign is exactly where it erodes).
