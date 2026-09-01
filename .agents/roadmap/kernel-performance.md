@@ -168,6 +168,56 @@ constraints hold everywhere with no exceptions, which the bullet says
 explicitly so a partial Phase 8 landing can never be read as license to bypass
 them early.
 
+### M0.2 - The baselines this campaign is measured against
+
+Checkpoint-free profiles via existing infrastructure (`qwen_bench serve` and
+`vqgan_bench`) - no new profiler code needed, `qwen_bench serve`'s `[rows]`
+parameter already produces a decode-shaped (`rows=1`) or prefill-shaped
+(`rows=N`) served step through the real `qwen3::serve::Engine` tape at
+Qwen3-0.6B's real shape, on random weights. Measured on this box (2x Tesla
+P40, `BRAIN_DEVICE=gpu`, measured roofline 10297 GFLOP/s / 285.4 GB/s DRAM).
+**Per this repo's own convention** (`scripts/gates/*-perf-baselines/` is
+gitignored - `.gitignore:68`, `check-large-files.sh` rule 2 - a dev box's
+absolute numbers are one machine's snapshot, not portable source), the raw
+per-kernel tables are NOT committed; they live locally at
+`scripts/gates/kernel-campaign-perf-baselines/*.txt` (reproducible via the
+commands below) and the measured numbers are recorded here as prose,
+matching `qwen35.md`'s own M22 precedent.
+
+**Decode** (`qwen_bench serve 1 20 512`, 590 dispatches, 18.14 ms/step,
+55 rows/s): the paged-attention triad this campaign's Phase 2 targets -
+`decode_softmax_batched` (22.6%) + `paged_decode_apply_batched` (16.2%) +
+`paged_decode_scores_wg` (2.8%) - is **41.6% of the whole decode pass**,
+with the profiler's own defect flag firing on two of the three
+(`decode_softmax_batched` at 0.2% of its memory roof against a 35% floor,
+`paged_decode_apply_batched` at 7.2%). `matmul_gemv` is the single largest
+line (43.3%) at 80.1% of roof - already well optimised, confirming the
+attention triad, not the GEMV, is this shape's actual opportunity.
+
+**Prefill** (`qwen_bench serve 128 20 512`, 786 dispatches, 132.18 ms/step,
+968 rows/s): the same triad - `paged_decode_apply_batched` (29.4%) +
+`paged_decode_scores_wg` (27.5%) + `decode_softmax_batched` (4.5%) - is
+**61.4% of the whole pass**, ahead of the GEMM family entirely
+(`matmul_reg3_splitk` + `dw_splitk_reduce` together 35.7%). This is real,
+first-hand confirmation (not the audit's architectural inference) that
+fused paged attention is this box's single highest-value target, at BOTH
+the decode and prefill regimes.
+
+**Training step** (`vqgan_bench 256 5`, 256x256, latent 8x8): forward
+(409.21 ms) is 96.9% one kernel, `conv_bias_reg`, at only 3.5% of its
+compute roof (DEFECT, floor 30%) - a register-tiled kernel that is
+nonetheless far under its own roof at this shape, worth a dedicated look
+before assuming register-tiled means roof-bound. Backward (456.66 ms) is
+led by `col2im` (27.0%, 9.3% of memory roof) and `bias_grad` (19.1%, 1.3% of
+memory roof) - both real `@opt` findings for Phase 5's conv-family sweep
+(M5.3), not yet gated by name here since that phase profiles and selects
+per kernel, not per model.
+
+Reproduce: `make build/release`, then
+`BRAIN_DEVICE=gpu ./target/release/qwen_bench serve 1 20 512`,
+`BRAIN_DEVICE=gpu ./target/release/qwen_bench serve 128 20 512`,
+`BRAIN_DEVICE=gpu ./target/release/vqgan_bench 256 5`.
+
 ### M0.3 - The hardware-harness contract
 
 Added `brain_testutil::skip_unvalidated_capability(cap, reason)` beside the
@@ -257,8 +307,10 @@ clippy, all green. Commit `ca4b6c00`.
 
 ## Not yet done
 
-Phase 0's M0.2 (baselines) remains, then Phases 1-8 as structured above.
-Track sub-milestone status against the approved plan; update this section as
-each phase closes, recording the measurement that proved it - a number
-nothing checks is a number that silently goes stale (`AGENTS.md`'s own rule,
-restated here because a multi-phase campaign is exactly where it erodes).
+Phase 0 is closed. Phases 1-8 remain, as structured above - Phase 2 (fused
+paged attention) is next by measured priority per M0.2's real numbers, not
+merely the audit's architectural inference. Track sub-milestone status
+against the approved plan; update this section as each phase closes,
+recording the measurement that proved it - a number nothing checks is a
+number that silently goes stale (`AGENTS.md`'s own rule, restated here
+because a multi-phase campaign is exactly where it erodes).
