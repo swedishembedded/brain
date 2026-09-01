@@ -434,6 +434,55 @@ honest answer is no), not this milestone's. Not touched; recorded here per
 decision 3 rather than force-fitting a selector call that would name a
 kernel family these crates do not use.
 
+### M1.1's MoE milestone - `Op::MoeExpertLinear`, and the `kv_int8`-shaped claim that turned out true this time
+
+`Op::MoeExpertLinear` lands scoped exactly as the recalibration table below
+prescribes: the dtype/quant tier only (F32/BF16/F16 vs I8 vs Q4), mirroring
+`Op::MatMul`'s `Dtype` arm, with the dense-loop-vs-compact-vs-decode-sparse
+dispatch policy in `crates/model/src/moe.rs` left unmigrated - that policy is
+host-synchronizing and data-dependent, and already differs by design between
+models (glmdsa always compacts; qwen35moe only at `n==1`). Unlike
+`Op::MatMul`, this Op has NO shape gate at any dtype: none of
+`moe_linear_gated{,_i8,_q4}.wgsl` has a cooperative or register-tiled
+sibling, by construction - a per-thread early `return` for a non-routed row
+is only safe without a `workgroupBarrier()` in the kernel at all, so there is
+no decode-vs-prefill regime to split on. F32/BF16/F16 is unconditionally
+`Reference`; I8/Q4 is `PackedInt8`.
+
+The claim this milestone's brief carried forward - "qwen35/qwen35moe's
+int8-expert path never checks `caps.numeric.int8_dot`" - has the exact same
+shape as the paged-attention milestone's `kv_int8` claim above, and was
+investigated the same way (`kernels.md` §B: read the kernel source before
+gating anything on it). This time the claim held: `moe_linear_gated_i8.wgsl`
+calls `dot4I8Packed` once per weight-scale group in its inner loop, so it
+genuinely is DP4A-bound, unlike `paged_decode_scores_i8_batched`'s plain
+scalar bit-unpacking. `Dtype::Q4` mirrors `Dtype::I8`'s `int8_dot`
+requirement exactly as `Op::MatMul`'s own Q4 arm already does, even though
+`moe_linear_gated_q4.wgsl` itself unpacks nibbles with plain scalar
+bit-shifts and calls `dot4I8Packed` nowhere - the SAME mismatch
+`matmul_q4_dyn`/`matmul_q4_gemv` already carry against `Op::MatMul`'s Q4 arm
+(this ledger's own "Q4 uses zero `dot4I8Packed`" finding above). Fixing that
+mismatch is Phase 5 (M5.5) territory for both Ops alike, not re-litigated
+per-Op here - mirroring `Op::MatMul`'s arm means inheriting its known
+imperfection too, not quietly correcting only the new copy.
+
+TDD: `moe_expert_linear_is_capability_only_with_no_shape_gate` was written
+first and failed to compile before the variant existed (the same shape as
+`Op::PagedAttention`'s own precedent - a new enum variant makes the match in
+`candidates` non-exhaustive until the arm is added).
+`candidates_head_is_the_default_policy` extended to cover the new Op. Full
+`brain-backend-api` suite (40 tests) and `cargo clippy -p brain-backend-api
+--all-targets` stay green. Landed as its own first, tight commit touching
+`select.rs` (`f9a66961`), per this campaign's contention rule for that file -
+a concurrent uncommitted `Op::Conv2d` change already in the working tree at
+the time was set aside (`git diff` saved, file reverted to `HEAD`) before
+this milestone's edit, then reapplied via a 3-way merge after the commit and
+verified byte-identical to its pre-existing form. No caller in the tree
+dispatches through this Op yet - migrating `crates/model/src/moe.rs` and its
+per-model callers onto it is `M1.2`/later-Phase-1 territory, per the same
+"seam first, migration second" split `Op::MatMul` itself already went
+through.
+
 ---
 
 ## M1.1's scope, recalibrated against an exhaustive call-site map
