@@ -517,6 +517,22 @@ pub const ARCHS: &[Arch] = &[
               Variant { reference: "NeoQuasar/Kronos-base", params: 102_311_008, quants: &[] },
           ]),
     arch!("fincast", "FinCast patched decoder + sparse MoE", Forecast, Brain, "brain-fincast"),
+    // Google's TimesFM 3.0: a 20-layer stacked mixing transformer with
+    // sequence AND cross-variate attention, CPM iterative RevIN, linear
+    // detrending and forecast stitching, natively multivariate with past-only
+    // and past-and-future covariates. Config carries no `architectures` key
+    // (not a transformers-family repo) so `hf` is empty; the checkpoint's own
+    // `model_type`-less `config.json` is what `TimesfmRecipe` sniffs instead.
+    // No GGUF anywhere, like `chronos2`/`kronos` above. The 3.0 pretrained
+    // weights are `timesfm-non-commercial-license-v1.0` (source is
+    // Apache-2.0) - `weights_env` still fetches them for free; the loader
+    // gates real use behind an explicit acknowledgement, not this table.
+    arch!("timesfm3", "TimesFM-3 stacked mixing transformer (variate attention)", Forecast, Brain, "brain-timesfm3",
+          default_ref: Some("google/timesfm-3.0-pytorch"),
+          weights_env: &[("BRAIN_TIMESFM3", "weights")],
+          variants: &[
+              Variant { reference: "google/timesfm-3.0-pytorch", params: 330_710_976, quants: &[] },
+          ]),
     // -- World models ---------------------------------------------------
     arch!("diamond", "DIAMOND EDM diffusion world model", World, Brain, "brain-diamond"),
     arch!("genieredux", "GenieRedux-G ST-transformer world model", World, Brain, "brain-genieredux"),
