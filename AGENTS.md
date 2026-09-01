@@ -845,6 +845,7 @@ front-end to depend on.
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
 | Performance: methodology (profiling, kernel selection, INT8, where numbers live) | `docs/performance/overview.md` |
 | Performance: session-specific findings (what sped a given model up + why, with real numbers) | `.agents/roadmap/<model>.md` |
+| **Cross-cutting kernel/execution-architecture campaign** (selector coverage, fused paged attention, host-sync removal, block fusion, the `@opt` 1-2 kernel sweep, Vulkan async execution, collectives, precision tiers, the provider seam) | `.agents/roadmap/kernel-performance.md` - the ordering ledger; per-model detail stays in that model's own `.agents/roadmap/<model>.md` |
 | **Performance benchmarking** (`brain perf`): design | `docs/performance/benchmarking.md`; `crates/perf`, `crates/cli/src/perf_cli.rs` |
 | Perf regression gate (hard floors vs a committed baseline) | `brain perf gate`; `crates/perf/src/gate.rs` |
 | Device capabilities (class/limits/numeric tiers, queried never assumed) | `backend_api::DeviceCaps`; filled per backend, `Gpu::caps()` |
@@ -1408,6 +1409,20 @@ a metric that isn't there was simply forgotten.
   must be gated on the device's **queried** `DeviceCaps::max_workgroup_size`
   (256 is the WebGPU floor, so a 64-thread fallback stays selectable).
   This is what keeps the engine portable to old GPUs and WebGPU.
+
+  **WGSL is the portable reference and correctness oracle, not a claim that it
+  is the only implementation an operator may ever have.** A source-level audit
+  (2026-09, `.agents/roadmap/kernel-performance.md`) found the constraints
+  above genuinely block reaching peak throughput on hardware with matrix
+  engines, async copy, or native low-precision compute (tensor cores, AMX,
+  FP8/FP4) - none of which this repo's own boxes have, so the constraint has
+  never yet cost a measured regression here. The sanctioned extension point,
+  once it lands, is an `OperatorProvider` seam (kernel-performance.md Phase 8):
+  a logical operator resolves to a provider, WGSL is *always* the reference
+  provider every other one is gated against for correctness, and every rule in
+  this section keeps applying to that reference provider without exception.
+  Until that seam exists, WGSL remains the only implementation and this
+  section's constraints hold everywhere, with no exceptions.
 - **Never put a large `var<function>` array behind a runtime loop bound.** WGSL
   function-scope arrays only become registers if the compiler can unroll every
   index; bound the loop by a `Params` field and the array lands in *local*

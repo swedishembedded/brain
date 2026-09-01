@@ -399,6 +399,19 @@ unblocks.**
 "every confident hypothesis on this engine has been wrong, and the profile has
 been right."**
 
+This phase is *model-specific* perf work, ranked by measured cost against each
+model's own baseline. The *cross-cutting* engine work underneath all of it -
+selection-seam coverage, fused paged attention, host-sync removal in serving,
+transformer-block fusion, the `@opt` 1-2 kernel sweep, Vulkan async execution,
+device-resident collectives, precision tiers, and the native-accelerator
+provider seam - is tracked separately in
+**[`.agents/roadmap/kernel-performance.md`](kernel-performance.md)**, because
+none of it is specific to one model and mixing the two ledgers would make
+neither readable as a work list. A model-specific item below may turn out to be
+subsumed by that campaign (e.g. a fused-attention kernel it lands would also
+close part of #3 here) - check that ledger before re-deriving one of its
+findings.
+
 Ranked by measured cost:
 
 1. **`qwen3omnimoe` int8 MoE expert kernel** - with weights resident and decode
