@@ -63,6 +63,13 @@ pub struct Timesfm3Config {
     pub input_patch_len: usize,
     pub output_patch_len: usize,
     pub num_quantiles: usize,
+    /// The actual quantile LEVELS, `len() == num_quantiles` - kept alongside
+    /// the count (rather than assumed from the crate-level [`QUANTILES`]
+    /// constant, which is only the real checkpoint's own 9) so a forecaster
+    /// interpolating to caller-requested levels reads the levels this
+    /// specific config actually has, not a hardcoded assumption a
+    /// differently-sized config (e.g. [`Self::tiny`]) would silently violate.
+    pub quantile_levels: Vec<f32>,
     pub max_variates: usize,
     pub max_context: usize,
     // preprocessing/postprocessing toggles - all on in the published config,
@@ -96,6 +103,7 @@ impl Default for Timesfm3Config {
             input_patch_len: 32,
             output_patch_len: 64,
             num_quantiles: 9,
+            quantile_levels: QUANTILES.to_vec(),
             max_variates: 32,
             max_context: 15360,
             use_variate_attention: true,
@@ -129,6 +137,7 @@ impl Timesfm3Config {
             input_patch_len: 4,
             output_patch_len: 8,
             num_quantiles: 5,
+            quantile_levels: vec![0.1, 0.3, 0.5, 0.7, 0.9],
             max_variates: 9,
             max_context: 16,
             ..Timesfm3Config::default()
@@ -183,7 +192,7 @@ impl Timesfm3Config {
         if num_heads == 0 || model_dims % num_heads != 0 {
             return Err(format!("config.json: model_dims {model_dims} not divisible by num_heads {num_heads}"));
         }
-        let num_quantiles = v["quantiles"].as_array().map(|a| a.len()).ok_or("config.json: missing quantiles array")?;
+        let quantile_levels = parse_quantiles(v).ok_or("config.json: missing quantiles array")?;
         Ok(Timesfm3Config {
             num_layers: u(tc, "num_layers")?,
             model_dims,
@@ -193,7 +202,8 @@ impl Timesfm3Config {
             rms_norm_eps: RMS_NORM_EPS,
             input_patch_len: u(v, "input_patch_len")?,
             output_patch_len: u(v, "output_patch_len")?,
-            num_quantiles,
+            num_quantiles: quantile_levels.len(),
+            quantile_levels,
             max_variates: u(t, "max_variates").unwrap_or(32),
             max_context: Timesfm3Config::default().max_context,
             use_variate_attention: v["use_variate_attention"].as_bool().unwrap_or(true),
@@ -223,6 +233,7 @@ impl Timesfm3Config {
             input_patch_len: u("input_patch_len")?,
             output_patch_len: u("output_patch_len")?,
             num_quantiles: u("num_quantiles")?,
+            quantile_levels: parse_quantiles(v).unwrap_or_else(|| QUANTILES.to_vec()),
             max_variates: u("max_variates").unwrap_or(32),
             max_context: u("max_context").unwrap_or(15360),
             use_variate_attention: b("use_variate_attention", true),
@@ -246,7 +257,7 @@ impl Timesfm3Config {
             "input_patch_len": self.input_patch_len,
             "output_patch_len": self.output_patch_len,
             "num_quantiles": self.num_quantiles,
-            "quantiles": QUANTILES.to_vec(),
+            "quantiles": self.quantile_levels.clone(),
             "max_variates": self.max_variates,
             "max_context": self.max_context,
             "use_variate_attention": self.use_variate_attention,
@@ -301,6 +312,13 @@ impl Timesfm3Config {
 /// learned per-head-dim scale, and a post-norm. No bias anywhere in this
 /// sublayer (`use_bias=false` in the published config) and no V-norm
 /// (`v_norm="none"`).
+/// Read a `"quantiles": [f32, ...]` array, shared by [`Timesfm3Config::from_json`]
+/// and [`Timesfm3Config::from_hf_config_json`] (both schemas use the same key
+/// and shape for this field).
+fn parse_quantiles(v: &serde_json::Value) -> Option<Vec<f32>> {
+    v["quantiles"].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
+}
+
 fn attention_sublayer(p: &mut Vec<Param>, pre: &str, name: &str, d: usize, head_dim: usize) {
     p.push((format!("{pre}.pre_{name}_ln.weight"), vec![d]));
     p.push((format!("{pre}.{name}.query_proj.weight"), vec![d, d]));

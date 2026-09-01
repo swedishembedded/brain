@@ -23,9 +23,11 @@
 //! architecture. The checkpoint is never committed to this repository.
 
 pub mod config;
+pub mod forecaster;
 pub mod import;
 pub mod model;
 pub mod preprocess;
 
 pub use config::{Timesfm3Config, Param, QUANTILES};
+pub use forecaster::Timesfm3Forecaster;
 pub use model::Timesfm3;
