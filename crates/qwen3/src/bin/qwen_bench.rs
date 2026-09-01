@@ -37,6 +37,15 @@
 //!                                          # `m` sweep at fixed k,n — the D0
 //!                                          # occupancy-hypothesis check
 //!                                          # (§F.2) before touching any WGSL
+//!   qwen_bench flash-decode [seq] [reps]   # M2.1's per-kernel delta:
+//!                                          # `paged_flash_decode` (one fused
+//!                                          # dispatch) against the exact
+//!                                          # three-kernel triad `serve`
+//!                                          # dispatches at this shape, at
+//!                                          # Qwen3-0.6B's real decode-head
+//!                                          # shape and `qwen_bench serve`'s
+//!                                          # own steady-state seq_len==cap
+//!                                          # regime
 
 use std::time::Instant;
 
@@ -146,6 +155,12 @@ fn main() {
         let n: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2048);
         let reps: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
         gemm8_sweep(k, n, reps);
+        return;
+    }
+    if mode == "flash-decode" {
+        let seq: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
+        let reps: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
+        flash_decode_bench(seq, reps);
         return;
     }
 
@@ -377,4 +392,100 @@ pub fn gemm8_sweep(k: u32, n: u32, reps: usize) {
     for &m in &[8u32, 32, 128, 256, 512, 1024, 2048] {
         gemm8_ab(m, k, n, reps);
     }
+}
+
+/// M2.1's per-kernel delta: `paged_flash_decode` (one fused dispatch, online
+/// softmax, no materialised `scores`/`probs`) against the exact three-kernel
+/// triad `qwen3::serve`'s decode tape dispatches at this shape today
+/// (`paged_decode_scores_wg` -> `decode_softmax_batched` ->
+/// `paged_decode_apply_batched` - the SAME three kernels the M0.2 baseline
+/// profile named as the largest share of the whole decode pass). One
+/// (batch=1, head) pair's
+/// worth of work, at Qwen3-0.6B's real decode-head shape (`n_heads=16,
+/// n_kv_heads=8, head_dim=128`) and the SAME steady-state `seq_len == cap`
+/// regime `qwen_bench serve` measures (a decode step at the END of a full
+/// context, not a ramp - see `serve`'s own comment on why that is the
+/// case worth optimising).
+///
+/// `qwen_bench flash-decode [seq] [reps]` - `seq` defaults to 512, matching
+/// `qwen_bench serve 1 20 512`'s own baseline shape.
+pub fn flash_decode_bench(seq: u32, reps: usize) {
+    let gpu = Gpu::new(&[
+        ("paged_decode_scores_wg", kernels::PAGED_DECODE_SCORES_WG),
+        ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+        ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+        ("paged_flash_decode", kernels::PAGED_FLASH_DECODE),
+    ]);
+    let roofs = banner(&gpu);
+
+    let (batch, n_heads, n_kv_heads, head_dim, bs) = (1u32, 16u32, 8u32, 128u32, 16u32);
+    let group = n_heads / n_kv_heads;
+    let kv_stride = n_kv_heads * head_dim;
+    let mbs = seq.div_ceil(bs);
+    let cap = mbs * bs;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut rng = data::rng::Rng::new(17);
+    let q: Vec<f32> = (0..batch * n_heads * head_dim).map(|_| rng.next_gaussian() as f32).collect();
+    let pool_len = (mbs * bs * kv_stride) as usize;
+    let pk: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
+    let pv: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
+    let bt: Vec<u32> = (0..mbs).collect(); // one sequence, blocks laid out contiguously
+    let seq_lens = [cap];
+
+    let qb = gpu.storage_init("q", &q);
+    let poolk = gpu.storage_init("pk", &pk);
+    let poolv = gpu.storage_init("pv", &pv);
+    let btb = gpu.storage(mbs as u64);
+    gpu.write(&btb, &bt);
+    let sl = gpu.storage(1);
+    gpu.write(&sl, &seq_lens);
+
+    let sc = gpu.storage((n_heads * cap) as u64);
+    let pr = gpu.storage((n_heads * cap) as u64);
+    let ctx_ref = gpu.storage((n_heads * head_dim) as u64);
+    let scores_total = batch * n_heads * cap;
+    let scores_threads = scores_total.div_ceil(model::block::PAGED_SCORES_PER_WORKGROUP) * 64;
+    let ref_steps = vec![
+        gpu.step(
+            0,
+            &[&qb, &poolk, &btb, &sl, &sc],
+            &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs, scale.to_bits()],
+            scores_threads,
+        ),
+        gpu.step(1, &[&sc, &sl, &pr], &[batch, n_heads, cap], batch * n_heads),
+        gpu.step(
+            2,
+            &[&pr, &poolv, &btb, &sl, &ctx_ref],
+            &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs],
+            batch * n_heads * head_dim,
+        ),
+    ];
+    let t_ref = gpu_core::profile::best_of(&gpu, &ref_steps, reps);
+
+    let ctx_flash = gpu.storage((n_heads * head_dim) as u64);
+    let flash_steps = vec![gpu.step(
+        3,
+        &[&qb, &poolk, &poolv, &btb, &sl, &ctx_flash],
+        &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs],
+        batch * n_heads * 64, // 64 = paged_flash_decode's own @workgroup_size
+    )];
+    let t_flash = gpu_core::profile::best_of(&gpu, &flash_steps, reps);
+
+    // Bytes moved reading K+V once each, f32, over every cached key - the
+    // same "streamed once, never rematerialised" traffic both the triad and
+    // the fused kernel actually do at this shape (the triad's `scores`/
+    // `probs` writes are the thing being eliminated, not counted here).
+    let bytes = (batch * n_heads * cap * head_dim) as u64 * 2 * 4;
+    let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs));
+    println!(
+        "\npaged attention @ seq={seq}: triad (scores_wg+softmax+apply) {:>8.4} ms  vs  paged_flash_decode {:>8.4} ms",
+        t_ref * 1e3,
+        t_flash * 1e3,
+    );
+    println!(
+        "triad {}  |  flash {}",
+        pct(t_ref).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+        pct(t_flash).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+    );
 }

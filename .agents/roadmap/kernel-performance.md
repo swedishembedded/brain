@@ -835,15 +835,103 @@ real hardware; `cargo clippy --all-targets` clean for `brain-gpu-core` and
 `brain-backend-api`. No `select.rs` change, so nothing else in this campaign's
 most-contended file was touched.
 
+### M2.1 - `paged_flash_decode`, a corrected gate, and a measured regression worth recording
+
+Wrote `crates/kernels/wgsl/paged_flash_decode.wgsl`: one workgroup per
+`(sequence, head)` walks that sequence's block table in `BC = 8`-key tiles,
+each tile's `head_dim` dot product split across `LANES = 8` threads (on the
+SAME flat top `paged_decode_scores_wg`'s own sweep records for "8 and 4"),
+running online max/sum and folding the softmax-weighted V straight into a
+per-lane accumulator - no `scores`/`probs` buffer at all, unlike the
+`paged_decode_scores{,_wg}` -> `decode_softmax_batched` ->
+`paged_decode_apply_batched` triad it sits beside. Five top-level
+`workgroupBarrier()`s (one query stage + four per key tile) exceed the CPU
+JIT's one-barrier-per-body limit, so it is `@cpu no`, a GPU-only sibling; the
+three-stage path stays registered as the CPU/reference implementation behind
+`Op::PagedAttention`, untouched - wiring the fused kernel in through that
+selector is M2.4's job, not this one's, and `select.rs` was not touched this
+milestone.
+
+**The plan's "bit-comparable" gate does not hold - checked against source
+before writing the test, per this campaign's own rule, not taken on trust.**
+`rmsnorm_rows`'s own precedent (this file's `block.rs`: "64 partial sums fold
+in a different order, agreeing to ~3e-6") and `flash_attn_causal_gqa`'s own
+gate against its materialized reference (`1e-3` absolute error, not
+`assert_eq`) both establish that a reassociated online-softmax reduction is
+never bit-exact against a two-pass exact-max reference: the triad computes
+one exact max over the whole row before a single un-rescaled exp/sum pass,
+this kernel rescales its running sum once per tile. The test
+(`crates/model/src/paged.rs::flash_tests::paged_flash_decode_matches_batched_
+triad`) asserts a `1e-3` maxabs bound instead, matching that precedent.
+Measured maxabs on this box: `2.3841858e-7`, identical on `BRAIN_DEVICE=gpu`
+(wgpu) and `BRAIN_DEVICE=vulkan` - both this kernel's GPU backends, `@cpu no`
+deliberately excluding the CPU JIT. `gradcheck` unaffected (forward-only
+path, no new `Op` variant).
+
+**Two defects a first draft shipped with, caught before landing.** (1) The
+first `Params` carried both `n_kv_heads` and a separate `kv_stride` field,
+values that are always mutually derivable (`kv_stride == n_kv_heads *
+head_dim` at every real call site checked) - the kernel body never actually
+read `kv_stride`, a dead uniform. Dropped it; the pool's row stride is
+computed from `n_kv_heads * head_dim` exactly as `flash_attn_causal_gqa.wgsl`
+already does, per the milestone's own instruction to copy that kernel's
+`Params` shape. (2) The first tile size (`BC = 16`, `LANES = 4`) sized shared
+memory at ~16.9 KiB - OVER WebGPU's guaranteed 16 KiB
+`maxComputeWorkgroupStorageSize` floor that `flash_attn_causal_gqa` sits
+exactly AT. Corrected to `BC = 8`/`LANES = 8` (~8.8 KiB): same measured
+coalescing optimum, half the tile footprint, comfortably portable.
+
+**Measured delta against the M0.2 baseline shape - a regression, published
+honestly rather than assumed away.** `crates/qwen3` was mid-edit by a
+concurrent session (a selector-migration refactor leaving `qwen3::serve`
+uncompilable for the duration of this milestone), so `qwen_bench
+flash-decode` - added to `crates/qwen3/src/bin/qwen_bench.rs` as this
+milestone's reproducer, `qwen_bench flash-decode [seq] [reps]` - could not be
+run through the qwen3 binary itself; the identical dispatch code was run
+through a throwaway `brain-gpu-core` integration test instead (deleted after
+use, no dependency on the blocked crate) to avoid blocking this milestone on
+someone else's unrelated WIP. At Qwen3-0.6B's real decode-head shape
+(`n_heads=16, n_kv_heads=8, head_dim=128`) and M0.2's own `seq_len=cap=512`
+steady-state regime: at `batch=1` the triad (`paged_decode_scores_wg` +
+`decode_softmax_batched` + `paged_decode_apply_batched`) took 0.41 ms against
+the fused kernel's 0.83 ms; sweeping `batch` (the concurrent-decode-batch
+regime continuous batching actually runs at) to 8/32/128 converges to the
+fused kernel taking consistently ~1.8-1.9x the triad's time at every size
+(0.55x/0.55x/0.53x throughput ratio), the triad reaching up to 115% of the
+measured DRAM roof (cache-resident at this size) against the fused kernel's
+61%. Root cause, not just the number: this design dispatches only
+`batch * n_heads` workgroups (e.g. 2048 at `batch=128`), each serialising
+`ntiles = cap / BC = 64` barrier-synced tile iterations one after another;
+the triad's scores kernel instead dispatches one independent workgroup per
+*score* (`batch * n_heads * cap / 16` of them - over a million at
+`batch=128`), so it hides the SAME global-memory latency behind far more
+parallelism than a single-kernel, tiled-online-softmax design can generate at
+this shape. Eliminating the `scores`/`probs` buffer traffic (this design's
+whole rationale) does not pay for the parallelism given up to get it, on
+this hardware, at this shape - this is exactly the kind of finding decision 4
+names as a legitimate, published, non-blocking outcome of measuring before
+trusting the audit's architectural inference: the kernel is a correct,
+GPU-only sibling as specified, but M2.4 (wiring it behind the selector) must
+not treat this as a drop-in win without re-measuring against a design that
+raises this kernel's own occupancy (e.g. a split-key-then-combine two-pass
+shape) - flagged here so that work is not repeated blind.
+
+**Commit**: one (the kernel + catalogue regen + the correctness test);
+`qwen_bench flash-decode` lands in the same commit since it is this
+milestone's own published reproducer, not a separate change.
+
 ---
 
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
-Phases 2-8 remain, as structured in the plan - Phase 2 (fused paged
-attention) is next by measured priority per M0.2's real numbers, not merely
-the audit's architectural inference. Track sub-milestone status against the
-approved plan; update this section as each phase closes, recording the
-measurement that proved it - a number nothing checks is a number that
-silently goes stale (`AGENTS.md`'s own rule, restated here because a
-multi-phase campaign is exactly where it erodes).
+Phase 2's M2.1 is done, with a measured regression recorded rather than
+assumed fixed - M2.2 (int8-KV/bf16-storage variants) and M2.3
+(`paged_flash_prefill`) should re-measure occupancy at their own shapes
+before repeating this kernel's tiling strategy, and M2.4 (wiring `Op::
+PagedAttention` to the fused path) must not do so unconditionally given M2.1's
+own number. Phases 3-8 remain, as structured in the plan. Track sub-milestone
+status against the approved plan; update this section as each phase closes,
+recording the measurement that proved it - a number nothing checks is a
+number that silently goes stale (`AGENTS.md`'s own rule, restated here
+because a multi-phase campaign is exactly where it erodes).

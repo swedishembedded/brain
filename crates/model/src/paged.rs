@@ -703,3 +703,119 @@ mod batched_tests {
         assert!(worst < 1e-6, "batched paged vs per-sequence maxabs={worst}");
     }
 }
+
+#[cfg(test)]
+mod flash_tests {
+    use data::rng::Rng;
+
+    static PIPES: &[(&str, &str)] = &[
+        ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+        ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+        ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+        ("paged_flash_decode", kernels::PAGED_FLASH_DECODE),
+    ];
+
+    fn fb(x: f32) -> u32 {
+        x.to_bits()
+    }
+
+    /// `paged_flash_decode` (one dispatch, online softmax, no materialised
+    /// scores/probs) must numerically agree with the three-stage reference
+    /// triad (`paged_decode_scores_batched` -> `decode_softmax_batched` ->
+    /// `paged_decode_apply_batched`) it sits beside, never replaces, behind
+    /// the M1.1 selector.
+    ///
+    /// NOT bit-identical - checked against source, not assumed: the fused
+    /// kernel rescales its running sum/accumulator once per 16-key tile
+    /// (textbook online softmax), while the triad computes one exact max over
+    /// the WHOLE row before a single un-rescaled exp/sum pass, so the two
+    /// reduction orders agree to within float error, not bit for bit - the
+    /// same reason `flash_attn_causal_gqa` is checked against its
+    /// materialized reference with an absolute-error gate, not `assert_eq`,
+    /// in this crate's `block.rs` (`flash_causal_gqa_matches_materialized_
+    /// gqa_fwd`), whose `t=100` choice this test also borrows.
+    ///
+    /// Run once as-is (wgpu, `gpu_core::testgpu::dev`) and once more with
+    /// `BRAIN_DEVICE=vulkan` - the kernel's two GPU backends, `@cpu no`
+    /// deliberately excluding the CPU JIT (see the kernel's own header).
+    ///
+    /// Sequence lengths deliberately straddle the kernel's own `BC=8` tile
+    /// size (one key, under one tile, exactly one tile, one tile + 1, several
+    /// tiles, and `t=100`). GQA (`n_kv_heads < n_heads`) exercises
+    /// `hkv = h / group` the same way every other paged-attention test in
+    /// this file does. Block tables are interleaved (scrambled) across ONE
+    /// shared pool, `batched_paged_matches_per_sequence`'s own convention,
+    /// so the paged indirection is genuinely exercised rather than
+    /// degenerating to a contiguous layout.
+    #[test]
+    fn paged_flash_decode_matches_batched_triad() {
+        let g = gpu_core::testgpu::dev(PIPES);
+        let (nh, nkv, hd) = (4u32, 2u32, 8u32);
+        let group = nh / nkv;
+        let (hkv, hq) = (nkv * hd, nh * hd);
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let lens = [1u32, 7, 8, 9, 41, 100];
+        let batch = lens.len() as u32;
+        let bs = 4u32;
+        let num_blocks = 256u32;
+        let max_bt = 26u32; // >= ceil(100/4)
+        let cap = max_bt * bs;
+
+        let mut rng = Rng::new(29);
+        let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
+        let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+        let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+
+        // Interleaved (scrambled) physical block tables sharing one pool.
+        let tables: Vec<Vec<u32>> = (0..batch).map(|b| (0..max_bt).map(|i| b + i * batch).collect()).collect();
+
+        let mut pk = vec![0f32; (num_blocks * bs * hkv) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * hkv) as usize];
+        for b in 0..batch as usize {
+            for tok in 0..lens[b] {
+                let phys = tables[b][(tok / bs) as usize];
+                let dst = ((phys * bs + tok % bs) * hkv) as usize;
+                let src = (tok * hkv) as usize;
+                pk[dst..dst + hkv as usize].copy_from_slice(&ks[b][src..src + hkv as usize]);
+                pv[dst..dst + hkv as usize].copy_from_slice(&vs[b][src..src + hkv as usize]);
+            }
+        }
+
+        let qb = g.storage_init("q", &qflat);
+        let poolk = g.storage_init("pk", &pk);
+        let poolv = g.storage_init("pv", &pv);
+        let btflat: Vec<u32> = (0..batch as usize).flat_map(|b| tables[b].clone()).collect();
+        let bt = g.storage((batch * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(batch as u64);
+        g.write(&sl, &lens);
+
+        // --- reference: the three-stage batched triad ---
+        let sc = g.storage((batch * nh * cap) as u64);
+        let pr = g.storage((batch * nh * cap) as u64);
+        let ctx_ref_buf = g.storage((batch * hq) as u64);
+        let steps = vec![
+            g.step(0, &[&qb, &poolk, &bt, &sl, &sc], &[batch, nh, group, hd, bs, hkv, cap, max_bt, fb(scale)], batch * nh * cap),
+            g.step(1, &[&sc, &sl, &pr], &[batch, nh, cap], batch * nh),
+            g.step(2, &[&pr, &poolv, &bt, &sl, &ctx_ref_buf], &[batch, nh, group, hd, bs, hkv, cap, max_bt], batch * nh * hd),
+        ];
+        g.submit(&[], &steps);
+        let ctx_ref = g.read(&ctx_ref_buf, (batch * hq) as usize);
+
+        // --- one fused dispatch, no scores/probs buffer at all ---
+        let ctx_flash_buf = g.storage((batch * hq) as u64);
+        let fsteps = vec![g.step(
+            3,
+            &[&qb, &poolk, &poolv, &bt, &sl, &ctx_flash_buf],
+            &[batch, nh, nkv, hd, group, bs, max_bt],
+            batch * nh * 64, // 64 = paged_flash_decode's own @workgroup_size
+        )];
+        g.submit(&[], &fsteps);
+        let ctx_flash = g.read(&ctx_flash_buf, (batch * hq) as usize);
+
+        let worst = ctx_ref.iter().zip(&ctx_flash).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!("paged_flash_decode vs batched triad: worst maxabs = {worst:e}");
+        assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
+        assert!(worst < 1e-3, "paged_flash_decode vs batched triad maxabs={worst}");
+    }
+}
