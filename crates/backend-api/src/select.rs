@@ -67,9 +67,10 @@ pub enum Op {
     /// `paged_decode_scores_i8_batched`) - the SCORES half only. The
     /// softmax/apply halves have no cooperative sibling at all today, so
     /// this Op is deliberately scoped narrower than the whole paged-decode
-    /// triad - see [`candidates`] for the I8 tier's own shape. `m` is
-    /// `batch` times `n_heads`, `n` = `cap` (the key axis each score
-    /// reduces over); `k` unused.
+    /// triad - see [`candidates`] for the I8 tier's own shape (it is NOT
+    /// DP4A-bound, unlike [`Op::MatMul`]'s packed GEMMs - see that arm's
+    /// comment). `m` is `batch` times `n_heads`, `n` = `cap` (the key axis
+    /// each score reduces over); `k` unused.
     PagedAttention,
 }
 
@@ -507,25 +508,25 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // `workgroup_reductions` the only gate (`paged_decode_scores_wg` vs
         // `paged_decode_scores_batched`).
         //
-        // INT8 KV is NOT a variant of those two: `paged_decode_scores_i8_
-        // batched` reads a packed int8 pool through its own dedicated
-        // dtype-storage contract, and there is no int8-COOPERATIVE scores
-        // kernel at all (unlike `Op::MatMul`'s I8 tier, which at least has
-        // both a GEMV and a tiled option - here the packed kernel is the
-        // ONLY physical implementation). Reusing `Op::MaxAbsRow`'s arm
-        // verbatim would let an I8-tagged shape fall through to
-        // `Reference` the moment `WorkgroupPerOutput` gets filtered out for
-        // lacking `int8_dot` - and `Reference` here is physically
-        // `paged_decode_scores_batched`, a kernel that cannot read a
-        // packed pool at all. So I8/Q4 gets its OWN arm, `PackedInt8`
-        // only, mirroring `Op::MatMul`'s I8/Q4 arm's structure: the
-        // uniform filter below still turns "no int8_dot" into the safe
-        // `[Reference]` fallback (never a wrong-contract kernel), it just
-        // does so AFTER this dtype match rather than by leaking a
-        // float-only variant into an int8-tagged shape.
+        // INT8 KV is NOT a variant of those two, and - unlike `Op::MatMul`'s
+        // I8 tier - it is not `PackedInt8` either. `paged_decode_scores_i8_
+        // batched` reads a packed int8 pool by plain scalar bit-unpacking
+        // (`(pool[e/4u] >> (8u*(e%4u))) & 0xffu`, no `dot4I8Packed` call
+        // anywhere in its source), so unlike the DP4A-bound `matmul_i8*`
+        // family it needs NO device capability at all - it is `@cpu yes,
+        // @gpu yes` in the kernel catalogue, exactly as portable as the
+        // float `Reference` kernel it sits beside. There is also no
+        // int8-COOPERATIVE sibling (`paged_decode_scores_wg` is F32-only).
+        // So I8/Q4 is its own arm, `Reference` unconditionally (the
+        // physical kernel differs from the F32 arm's `Reference`, same as
+        // every dtype-keyed `reference: usize` slot in this file's
+        // `*_variant` callers) - never `WorkgroupPerOutput` (which would
+        // wrongly imply `paged_decode_scores_wg` can read a packed pool)
+        // and never `PackedInt8` (which would wrongly impose the `int8_dot`
+        // requirement this kernel does not have).
         Op::PagedAttention => match shape.dtype {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![WorkgroupPerOutput, Reference],
-            Dtype::I8 | Dtype::Q4 => vec![PackedInt8],
+            Dtype::I8 | Dtype::Q4 => vec![Reference],
         },
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
         // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
@@ -966,13 +967,17 @@ mod tests {
     /// `Op::MaxAbsRow`: a per-(batch,head) reduction over `cap` keys, no
     /// row/col gate. The INT8 KV tier is a THIRD physical kernel
     /// (`paged_decode_scores_i8_batched`), not a variant of the other two -
-    /// there is no int8-cooperative scores kernel at all - so this test also
-    /// pins that an I8-tagged shape selects `PackedInt8` (gated on
-    /// `int8_dot`) and NEVER `Reference`'s physical kernel
-    /// (`paged_decode_scores_batched`, which cannot read a packed pool) just
-    /// because `WorkgroupPerOutput` got filtered out for lacking `int8_dot`.
+    /// there is no int8-cooperative scores kernel, AND (unlike `Op::MatMul`'s
+    /// I8 tier) no capability gate either: the kernel unpacks its int8 pool
+    /// with plain scalar WGSL (no `dot4I8Packed`), so it is `@cpu yes, @gpu
+    /// yes` in the catalogue - as portable as `Reference` itself. This test
+    /// pins that an I8-tagged shape ALWAYS selects `Reference` (never
+    /// `WorkgroupPerOutput`, which would wrongly imply the F32-only
+    /// cooperative kernel can read a packed pool, and never `PackedInt8`,
+    /// which would wrongly impose an `int8_dot` requirement this kernel does
+    /// not have) on every capability combination, not just some.
     #[test]
-    fn paged_attention_scores_is_cooperative_at_every_shape_and_i8_requires_the_capability() {
+    fn paged_attention_scores_is_cooperative_at_every_shape_and_i8_never_gates_on_int8_dot() {
         let s = DefaultSelector;
         for m in [1u32, 8, 32, 512, 4096] {
             for n in [16u32, 128, 1024, 8192] {
@@ -990,10 +995,11 @@ mod tests {
                 );
             }
         }
-        // The int8 KV tier: PackedInt8 only where int8_dot executes, and
-        // Reference (never a lucky-but-wrong WorkgroupPerOutput) otherwise.
+        // The int8 KV tier: always Reference (its own physical kernel, not
+        // the F32 one), on every capability combination - never gated on
+        // int8_dot, unlike Op::MatMul's genuinely DP4A-bound packed GEMMs.
         let i8_shape = shape(8, 512, 0, Dtype::I8);
-        assert_eq!(s.select(Op::PagedAttention, i8_shape, &gpu_caps()), KernelVariant::PackedInt8);
+        assert_eq!(s.select(Op::PagedAttention, i8_shape, &gpu_caps()), KernelVariant::Reference);
         assert_eq!(s.select(Op::PagedAttention, i8_shape, &cpu_caps()), KernelVariant::Reference);
     }
 
