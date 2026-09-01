@@ -787,6 +787,27 @@ a capability branch inside a shared block module — reaches every model that
 already calls it, including ones written later. A fix in one model's `model.rs`
 reaches exactly that model.
 
+### F.7b A memory shrink downstream of a selector choice must ask the SAME selector, not a hand-duplicated capability check
+
+If a buffer's size depends on which kernel variant a dispatch will actually
+pick (a fused kernel that needs no scratch vs. a multi-stage triad that
+does), the sizing decision and the dispatch decision must derive from the
+literal same `selector.select(Op::..., shape, caps)` call - not two
+independently-written conditions that happen to agree on the hardware you
+tested on. `qwen3::serve`'s M2.4 milestone caught exactly this before it
+shipped: an initial version shrank `Scratch::{scores,probs}` whenever KV was
+fp32 (`!kv_int8`), reasoning "fp32 KV always gets the fused causal-chunk-
+prefill kernel now." The fused kernel ALSO requires `caps.workgroup_
+reductions`, true on every GPU backend tested but false on the CPU JIT -
+which is this project's own default backend (`BRAIN_DEVICE=cpu` in
+`qwen-serving-perf-gate.sh`). On that backend the dispatch correctly falls
+back to the triad (the selector's own capability gate), but the shrunk
+scratch was sized for the fused kernel's zero need - an out-of-bounds device
+write waiting for a prefill chunk longer than `max_batch` on any device
+without that one capability. Fixed by computing the boolean through the
+identical selector call the dispatch site uses (`m`/`n` set to 0 when the Op
+does not gate on them), so the two can never drift apart again.
+
 ### F.8 Gate it, then mutation-verify the gate
 
 Write the correctness gate before wiring the fast path in (a `gradcheck` test
