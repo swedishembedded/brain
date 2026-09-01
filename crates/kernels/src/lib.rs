@@ -156,6 +156,8 @@ pub const ATTN_SCORES_FULL: &str = include_str!("../wgsl/attn_scores_full.wgsl")
 pub const ATTN_SCORES_MASKED: &str = include_str!("../wgsl/attn_scores_masked.wgsl");
 /// `wgsl/attn_scores_qk.wgsl`
 pub const ATTN_SCORES_QK: &str = include_str!("../wgsl/attn_scores_qk.wgsl");
+/// `wgsl/attn_scores_qk_kmask.wgsl`
+pub const ATTN_SCORES_QK_KMASK: &str = include_str!("../wgsl/attn_scores_qk_kmask.wgsl");
 /// `wgsl/attn_softmax.wgsl`
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
@@ -967,6 +969,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_full", ATTN_SCORES_FULL),
     ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_scores_qk", ATTN_SCORES_QK),
+    ("attn_scores_qk_kmask", ATTN_SCORES_QK_KMASK),
     ("attn_softmax", ATTN_SOFTMAX),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
