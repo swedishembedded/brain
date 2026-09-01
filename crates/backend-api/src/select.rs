@@ -132,17 +132,17 @@ pub enum Op {
     ///
     /// Decode's fused kernels measured a REGRESSION against the triad at
     /// every batch size tested on this campaign's own hardware (M2.1's
-    /// ledger entry: 0.53-0.55x the triad's throughput at batch 8/32/128) -
-    /// inherited unconditionally by the I8/bf16 siblings too (M2.2's own
-    /// entry: correctness-gated only, occupancy never independently
-    /// re-measured) - so [`candidates`] never offers `FusedFlash` for `k =
-    /// 0`; `Reference` (the triad) is the only candidate there until a
-    /// design that wins occupancy replaces it. Causal-chunk prefill's `k = 1`
-    /// arm is where `FusedFlash` is actually reachable: `paged_flash_prefill`
-    /// measured 1.6x-12x FASTER than the triad across a `start`/`cc` sweep on
-    /// the same hardware (`qwen_bench flash-prefill`), and has no int8-KV
-    /// tier yet (its own `@dtype f32` header), so `FusedFlash` is offered
-    /// only at `Dtype::F32`.
+    /// ledger entry, reproduced via `qwen_bench flash-decode`) - inherited
+    /// unconditionally by the I8/bf16 siblings too (M2.2's own entry:
+    /// correctness-gated only, occupancy never independently re-measured) -
+    /// so [`candidates`] never offers `FusedFlash` for `k = 0`; `Reference`
+    /// (the triad) is the only candidate there until a design that wins
+    /// occupancy replaces it. Causal-chunk prefill's `k = 1` arm is where
+    /// `FusedFlash` is actually reachable: `paged_flash_prefill` measured
+    /// substantially FASTER than the triad across a `start`/`cc` sweep on the
+    /// same hardware (reproduce via `qwen_bench flash-prefill`), and has no
+    /// int8-KV tier yet (its own `@dtype f32` header), so `FusedFlash` is
+    /// offered only at `Dtype::F32`.
     PagedAttentionFused,
 }
 
