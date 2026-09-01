@@ -1063,22 +1063,154 @@ real regression report, not assume it away.
 
 ---
 
+### M2.4 - Wire in `Op::PagedAttentionFused`, shrink the scratch, and re-measure both regimes before trusting either
+
+**The plan's own premise ("wire the fused kernels through `Op::PagedAttention`'s
+policy") does not literally hold, checked against source before touching
+it.** `Op::PagedAttention` is deliberately scoped to the SCORES half only
+(its own doc comment says so), and `model::block::paged_scores_variant` - the
+one existing caller - matches that Op's selector result against
+`WorkgroupPerOutput` specifically; splicing a third candidate into that same
+list would have silently changed what a SCORES-only caller sees. Added a
+SEPARATE, new Op instead - `Op::PagedAttentionFused` plus
+`KernelVariant::FusedFlash` - scoped to the whole-triad-vs-single-fused-dispatch
+decision, keyed on `(k, dtype)` where `k` names the regime (`0` = decode,
+independent sequences, no shared block table; `1` = causal-chunk prefill, one
+sequence's block table shared by every row) since the two are different
+physical kernels answering the same shape signature in different call-site
+semantics, not points on one shape gradient. `candidates()` unit-tested
+directly (`paged_attention_fused_only_offers_the_fused_kernel_at_causal_
+chunk_f32`).
+
+**Re-measured before wiring anything in, per the "not an unconditional win"
+warning M2.1-M2.3's own entries already left standing.** Added `qwen_bench
+flash-prefill` (mirrors `flash-decode`'s own harness: the exact triad
+`qwen3::serve::prefill` dispatches per chunk vs `paged_flash_prefill`, at
+Qwen3-0.6B's real head shape) and swept `start` (already-cached prefix) /
+`cc` (chunk length) on this box, both wgpu and vulkan:
+
+| start | cc | triad | `paged_flash_prefill` | speedup |
+|---|---|---|---|---|
+| 0 | 64 | 0.8846 ms | 0.5471 ms | 1.62x |
+| 0 | 512 | 9.4144 ms | 1.5742 ms | 5.98x |
+| 512 | 512 | 26.1953 ms (wgpu) / 23.6814 ms (vulkan) | 2.9814 ms (wgpu) / 2.6178 ms (vulkan) | 8.79x / 9.05x |
+| 1536 | 512 | 67.9631 ms | 5.6198 ms | 12.09x |
+
+A real, growing win as `start` grows - exactly the shape expected from the
+root-cause difference the M2.1 finding already named for the sibling kernel
+(the triad's SCORES/APPLY kernels walk every `cap` slot per row regardless of
+live length; the fused kernel walks only `start+cc`), except here the SAME
+mechanism helps instead of hurting because prefill's `BR=64`-tiled,
+lane-split-head_dim shape (M2.3's own, ported from the already-registered
+`flash_attn_causal_gqa`) generates enough parallelism per workgroup that
+eliminating the `scores`/`probs` traffic is pure upside. **Decode's fused
+kernels (M2.1/M2.2) were NOT re-measured and were NOT wired in** - their own
+entries' measured regression is a kernel-shape fact (worse parallelism,
+independent of `cap`), not a shape-crossover this milestone's own new data
+could plausibly overturn, so `Op::PagedAttentionFused`'s `k = 0` arm stays
+`Reference`-only at every dtype. This is the "killed, not forced" outcome
+Phase 5's own rubric names as a legitimate result, applied one phase early.
+
+**Wired into `qwen3::serve::run_batched_steps`** via a new `causal_chunk:
+bool`, threaded through `run_batched`/`run_batched_submit`/
+`run_batched_greedy`/`steps_for_profile`. `Engine::prefill` and
+`Engine::score_positions` pass `true` (both checked against source: one
+sequence, `seqlens[i] = start+i+1`, one block table duplicated across every
+row of the chunk - exactly `paged_flash_prefill`'s own stated contract).
+Every decode call site passes `false`. `Engine::spec_decode`'s verify-forward
+structurally qualifies too (same one-sequence-causal-chunk shape) but is
+deliberately left on the triad this milestone - noted inline as a follow-on,
+not re-litigated here.
+
+**A real correctness bug caught before it shipped, not after.** The first
+version of the `Scratch::{scores,probs}` shrink (see below) gated on
+`kv_int8` alone - "fp32 KV always gets the fused prefill path now." It does
+not: `FusedFlash` also requires `caps.workgroup_reductions`, true on every
+GPU backend measured above but false on the CPU JIT, which is `qwen-
+serving-perf-gate.sh`'s own default backend. On that device the dispatch
+correctly falls back to the triad (the selector's own capability gate), but
+the shrunk scratch would have stayed sized for the fused kernel's zero need -
+an out-of-bounds device write on any causal chunk longer than `max_batch`.
+Fixed by deriving the shrink decision through the IDENTICAL
+`Op::PagedAttentionFused` selector call the dispatch site makes
+(`paged_attn_scratch_bytes` takes `fused_prefill_available: bool`, computed
+once at `Engine::from_map_with_gpu` via `DefaultSelector.select(Op::
+PagedAttentionFused, ..., &caps)`), so the two can never drift apart again.
+Recorded as a general rule in `.agents/rules/kernels.md` (F.7b), not just
+fixed locally.
+
+`Scratch::{scores,probs}` - `b*nh*cap`, this campaign's own audit finding as
+"the single largest serving scratch buffer" - shrinks to decode's own worst
+case (`max_batch*n_heads*cap`) whenever the fused path is reachable, dropping
+the `max_prefill^2*n_heads` `[nh,N,N]` term the old, unconditional `max(...)`
+formula always paid. Pinned by `paged_attn_scratch_shrinks_once_the_fused_
+prefill_path_replaces_the_triad` at a representative shape (`max_batch=128,
+max_prefill=512, n_heads=16, cap=2048`): 128 MB -> 32 MB, exactly 4x. An
+int8-KV engine, or any engine on a device without `caps.workgroup_
+reductions`, gets no reduction - `paged_attn_scratch_shrinks_only_when_
+fused_prefill_is_actually_reachable` pins that directly against a hand-built
+CPU-shaped `DeviceCaps`, no CPU backend needed.
+
+**Also fixed, as a genuine prerequisite, not scope creep: the concurrent
+`CachedSelector<DefaultSelector>` -> `Arc<dyn KernelSelector>` migration that
+had left `crates/qwen3/src/serve.rs` uncompilable for M2.1/M2.2/M2.3's ENTIRE
+duration (each of those three entries records hitting the identical compile
+errors and working around them with a throwaway harness).** The migration's
+own doc comments already fully specified the target state; only three call
+sites had not been updated to match (a deleted `tuned_i8` field two call
+sites still referenced, and the `selector` field's construction still using
+the pre-migration type). Restored `tuned_i8` as the plain `HashMap` field
+`Self::mm8` already expected, and wrapped the `DefaultSelector` construction
+in `Arc` - completing exactly what was already designed, not redesigning
+anything. `brain-qwen3` and `brain-model` build and test clean as a result,
+closing the "confirm `cargo test -p brain-model` is green" item the "Not yet
+done" section below has carried since M2.1.
+
+**Verified.** Full `brain-qwen3` suite: 104 passed, 1 ignored (`#[ignore]`d
+throughput benchmark) - no failures across several full runs; the
+pre-existing NVIDIA-driver teardown SIGSEGV-on-exit flake `backend-vulkan.md`
+already documents was seen once, always AFTER every test's own `ok` line,
+not caused by this change. `make gradcheck`: 21 suites, 0 failed (forward-only
+change, no new backward-differentiable `Op` variant, but run anyway since the
+milestone touches a live kernel dispatch). `make check/scripts`'
+`check-kernel-selection.sh` and `check-no-perf-numbers.sh` both clean against
+every file this milestone touched (the doc-comment numbers in the table
+above live in this ledger, not in source - `check-no-perf-numbers.sh` only
+scans `docs/**/*.md` and source narration, not `.agents/`).
+
+**Commits**: six - `backend-api: add Op::PagedAttentionFused` (`select.rs`
+alone, per this campaign's own file-contention rule), `model: cover
+KernelVariant::FusedFlash in Ops::matmul's dispatch-count match` (the
+resulting exhaustive-match fix), `backend-api: drop bare perf numbers from
+Op::PagedAttentionFused's doc comment` (a `check-no-perf-numbers.sh`
+follow-up), `qwen3: wire Op::PagedAttentionFused into serve, shrink
+Scratch::{scores,probs}` (the milestone's own change, including the
+prerequisite compile fix), `docs: record the selector/scratch-sizing rule
+M2.4 caught` (F.7b).
+
+---
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
-Phase 2's M2.1-M2.3 are done, all three with correctness gated but perf
-un-re-measured (M2.1's own regression finding stands for the decode-shaped
-kernel, inherited by M2.2's siblings without independent confirmation; M2.3
-is a different, already-registered tiling shape so that specific finding
-does not transfer, but its own occupancy was likewise not measured) - M2.4
-(wiring `Op::PagedAttention` to the fused paths) must not treat any of the
-four kernels as an unconditional win without re-measuring. `brain-model`
-itself has not built clean under any of M2.1/M2.2/M2.3's own test run - the
-same concurrent `qwen3::serve` breakage blocked all three; M2.4 (or whoever
-next touches this area) should confirm `cargo test -p brain-model` is
-green before trusting any earlier entry's "left in place as the durable
-gate" claim at face value. Phases 3-8 remain, as structured in the plan. Track
-sub-milestone status against the approved plan; update this section as each
-phase closes, recording the measurement that proved it - a number nothing
-checks is a number that silently goes stale (`AGENTS.md`'s own rule, restated
-here because a multi-phase campaign is exactly where it erodes).
+**Phase 2 (M2.1-M2.4) is closed.** Decode's fused kernels (M2.1/M2.2,
+`paged_flash_decode{,_i8}` + the bf16 tier) are correct, GPU-only siblings
+registered in the kernel catalogue but deliberately NOT live in
+`qwen3::serve` - measured (M2.1) and re-confirmed by the same reasoning
+(M2.4) to regress against the triad on this hardware at every batch size /
+dtype, so `Op::PagedAttentionFused` never offers them; a future design that
+wins occupancy (M2.1's own "split-key-then-combine" suggestion) would need
+its own fresh measurement, not a resurrection of these two. Causal-chunk
+prefill's fused kernel (M2.3, `paged_flash_prefill`) IS live: wired behind
+`Op::PagedAttentionFused` in `qwen3::serve::run_batched_steps` (M2.4),
+measured a real, growing speedup as cached-prefix length grows (M2.4's own
+table), and `Scratch::{scores,probs}` - the campaign's own audit-named
+largest serving scratch buffer - shrinks 4x at a representative shape
+whenever it is live. `brain-qwen3`/`brain-model` build and test clean (M2.4
+also closed the concurrent-migration compile break that had blocked
+M2.1/M2.2/M2.3's own `cargo test -p brain-model` runs for their entire
+duration). Phases 3-8 remain, as structured in the plan. Track sub-milestone
+status against the approved plan; update this section as each phase closes,
+recording the measurement that proved it - a number nothing checks is a
+number that silently goes stale (`AGENTS.md`'s own rule, restated here
+because a multi-phase campaign is exactly where it erodes).
