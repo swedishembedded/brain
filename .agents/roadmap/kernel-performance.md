@@ -981,18 +981,103 @@ assume it away.
 **Commit**: two (`paged_flash_decode_i8` + its test; then the bf16 `@tpl`
 header change + its test), per the milestone's own "one per variant" split.
 
+### M2.3 - `paged_flash_prefill`, `flash_attn_causal_gqa`'s tiling ported onto the paged pool
+
+`crates/kernels/wgsl/paged_flash_prefill.wgsl`: one workgroup owns `BR = 64`
+causal query rows of ONE sequence's prefill chunk, per (head, query-tile) -
+`flash_attn_causal_gqa.wgsl`'s own BR-tiled, lane-split-head_dim tiling (the
+register-spill fix that kernel's header already derives in full - `q`/`o` in
+`array<f32,32>` per lane, not `array<f32,128>` per thread), ported from a
+dense `[B*T,...]` K/V buffer onto `paged_flash_decode.wgsl`'s block-table
+addressing. **Not a repeat of decode's own tiling strategy** (one query per
+workgroup, `LANES=8`) that M2.1/M2.2's own entries left un-re-measured for
+occupancy - this is a different, already-registered `@opt 4` shape, so that
+caution does not transfer here. No `scores`/`probs` buffer at all: the
+three-stage triad it replaces is dispatched by `qwen3::serve::
+run_batched_steps` once per prefill CHUNK with `bsz` = chunk length (checked
+against that function's source, not assumed), so its scratch is exactly the
+`[nh,N,N]` shape `Engine::from_map_with_gpu`'s own scratch-sizing comment
+names once `cap` grows to cover a whole chunk.
+
+Same tape as `paged_flash_decode`/the triad (`Params`, `q`/`pool_k`/
+`pool_v`/`block_tables`/`seq_lens`/`ctx`): `qwen3::serve::prefill` already
+builds `seqlens[i] = start+i+1` and duplicates one block table across every
+row of a chunk (source-checked: one prefill dispatch is always one
+sequence), so M2.4's wiring needs no host-side buffer changes. Two contracts
+the kernel states explicitly, both following from that same fact: every row
+in a workgroup's tile shares one physical block table (read through the
+tile's first row), and `seq_lens` is non-decreasing across a tile (so the
+workgroup's largest live-key count, and how many K tiles it visits at all,
+is its last row's own value) - the same assumption `flash_attn_causal_gqa`
+already makes implicitly (row i's boundary IS i there; here it is data, so
+the kernel says so).
+
+**The plan's "token-for-token" gate does not literally hold, for the same
+reason M2.1's own entry already recorded and this milestone inherits
+unchanged (checked against source before writing the test, not taken on
+trust): a reassociated online-softmax reduction, rescaling once per
+`BC=8`-key tile, is never bit-exact against the triad's exact-max-then-
+single-pass reference.** Gated at the same `1e-3` absolute-error bound
+`paged_flash_decode_matches_batched_triad` uses
+(`crates/model/src/paged.rs::flash_tests::
+paged_flash_prefill_matches_batched_triad`), comparing the attention CONTEXT
+the triad already produces during prefill (not a full forward's logits -
+everything downstream of attention is unchanged here, so a matching `ctx` is
+the direct, sufficient proof). Scenario: one sequence, `start=17`
+already-cached tokens, a `cc=130`-row chunk spanning three `BR=64` query
+tiles (exercises the tile-boundary and causal-early-exit logic, not just one
+full tile), GQA (`n_kv_heads=2` of `n_heads=4`), a scrambled (reversed)
+block-table permutation. Measured maxabs on this box: `4.172325e-7`,
+identical on `BRAIN_DEVICE=gpu` (wgpu) and `BRAIN_DEVICE=vulkan` - same order
+of magnitude as M2.1's own `2.3841858e-7`.
+
+GPU-only by construction (`@cpu no`, 3 top-level `workgroupBarrier()`s per
+key tile, over the CPU JIT's one-barrier limit) - the three-stage path stays
+registered as the CPU/reference implementation; this is an additional GPU
+sibling. `select.rs` was not touched this milestone; wiring behind
+`Op::PagedAttention` and shrinking `Scratch::{scores,probs}` is M2.4's job.
+No perf/occupancy measurement was taken (the milestone's own gate is
+correctness only, matching M2.1/M2.2's precedent of leaving the wired-in
+measurement to M2.4); `gradcheck` is unaffected (forward-only path, no new
+`Op` variant).
+
+**Verified via a throwaway harness, documented rather than hidden - the
+identical situation M2.1's and M2.2's own entries already recorded, now a
+third time with the SAME root cause.** `crates/qwen3/src/serve.rs` was
+mid-edit by a concurrent session for this milestone's entire duration (the
+same `CachedSelector` vs `Arc<dyn KernelSelector>` / `tuned_i8`-field compile
+errors M2.2's entry already quotes, unchanged), which blocks `brain-model`'s
+own test target the same way (`brain-gradcheck` hard-depends on
+`brain-qwen3`, no feature gate to route around). The measurement above came
+from running the identical dispatch code through a throwaway `brain-gpu-core`
+integration test (no dependency on the blocked crate, deleted after use).
+`crates/model/src/paged.rs::flash_tests::
+paged_flash_prefill_matches_batched_triad` was written, reviewed against the
+actual kernel source, and left in place as the durable gate; it was not run
+through `cargo test -p brain-model` itself before this entry was written,
+because that build was not possible during this milestone's window either.
+Whoever next builds `brain-model` clean should treat a red result here as a
+real regression report, not assume it away.
+
+**Commit**: one (the kernel + catalogue regen + the correctness test).
+
 ---
 
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
-Phase 2's M2.1 and M2.2 are done, both with correctness gated but perf
-un-re-measured (M2.1's own regression finding stands, inherited by M2.2's
-siblings without independent confirmation) - M2.3 (`paged_flash_prefill`)
-should re-measure occupancy at its own shape before repeating this family's
-tiling strategy again, and M2.4 (wiring `Op::PagedAttention` to the fused
-path) must not do so unconditionally for any of the three siblings given
-M2.1's own number. Phases 3-8 remain, as structured in the plan. Track
+Phase 2's M2.1-M2.3 are done, all three with correctness gated but perf
+un-re-measured (M2.1's own regression finding stands for the decode-shaped
+kernel, inherited by M2.2's siblings without independent confirmation; M2.3
+is a different, already-registered tiling shape so that specific finding
+does not transfer, but its own occupancy was likewise not measured) - M2.4
+(wiring `Op::PagedAttention` to the fused paths) must not treat any of the
+four kernels as an unconditional win without re-measuring. `brain-model`
+itself has not built clean under any of M2.1/M2.2/M2.3's own test run - the
+same concurrent `qwen3::serve` breakage blocked all three; M2.4 (or whoever
+next touches this area) should confirm `cargo test -p brain-model` is
+green before trusting any earlier entry's "left in place as the durable
+gate" claim at face value. Phases 3-8 remain, as structured in the plan. Track
 sub-milestone status against the approved plan; update this section as each
 phase closes, recording the measurement that proved it - a number nothing
 checks is a number that silently goes stale (`AGENTS.md`'s own rule, restated

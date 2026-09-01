@@ -1044,4 +1044,112 @@ mod flash_tests {
         assert!(l2 < 0.01, "paged_flash_decode bf16 vs fp32 fused: rel_l2={l2} too high");
         assert!((1.0 - cos) < 0.01, "paged_flash_decode bf16 vs fp32 fused: cosine={cos} too low");
     }
+
+    /// `paged_flash_prefill` (M2.3, one dispatch, `BR=64` query rows/workgroup,
+    /// online softmax) must numerically agree with the SAME three-stage
+    /// reference triad `paged_flash_decode_matches_batched_triad` above gates
+    /// against - checked against `qwen3::serve::prefill`'s own source, not
+    /// assumed: that function calls `run_batched` (hence the triad) once per
+    /// CHUNK with `bsz` = chunk length and `seqlens[i] = start+i+1`, `bt`
+    /// duplicated identically across every row of the chunk (one prefill
+    /// dispatch is always ONE sequence). This test builds exactly that shape:
+    /// a `start > 0` prefix (as if earlier chunks/`KV_APPEND` already wrote
+    /// it) plus a `cc` = 130 row chunk spanning THREE `BR=64` query tiles, so
+    /// the fused kernel's tile-boundary and causal-early-exit logic are both
+    /// exercised, not just a single full tile.
+    ///
+    /// Own separate pipeline list (not [`PIPES`]): this is a fresh kernel set
+    /// this test needs no other test's [`PIPES`] entries to spin up, and
+    /// `gpu_core::testgpu::dev` shares the underlying device across distinct
+    /// kernel sets anyway (keyed by the slice's own address, `new_like`
+    /// parented onto whichever device is already live).
+    ///
+    /// Same `1e-3` absolute-error bound `paged_flash_decode_matches_batched_
+    /// triad` uses, for the identical reason: the fused kernel rescales its
+    /// running sum once per `BC=8`-key tile (online softmax) where the triad
+    /// takes one exact max over the whole row first - not bit-identical, per
+    /// this file's own repeated precedent.
+    #[test]
+    fn paged_flash_prefill_matches_batched_triad() {
+        static PREFILL_PIPES: &[(&str, &str)] = &[
+            ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+            ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+            ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+            ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
+        ];
+        let g = gpu_core::testgpu::dev(PREFILL_PIPES);
+        let (nh, nkv, hd) = (4u32, 2u32, 8u32);
+        let group = nh / nkv;
+        let (kv_stride, hq) = (nkv * hd, nh * hd);
+        let scale = 1.0f32 / (hd as f32).sqrt();
+
+        let start = 17u32; // tokens already cached by an earlier chunk
+        let cc = 130u32; // this chunk's own rows - spans 3 BR=64 query tiles
+        let total = start + cc; // live keys once this chunk's own K/V land
+        let bs = 4u32;
+        let num_blocks = 64u32;
+        let max_bt = (total.div_ceil(bs) + 4).max(8); // headroom past what's used
+        let cap = total;
+
+        let mut rng = Rng::new(53);
+        let qflat: Vec<f32> = (0..cc * hq).map(|_| rng.next_gaussian() as f32).collect();
+        let kflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
+        let vflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
+
+        // A scrambled (reversed) logical->physical block mapping, shared by
+        // every row of the chunk - `qwen3::serve::prefill`'s own
+        // construction duplicates the SAME table across every row since a
+        // chunk is always one sequence.
+        let table: Vec<u32> = (0..max_bt).map(|lb| num_blocks - 1 - lb).collect();
+
+        let mut pk = vec![0f32; (num_blocks * bs * kv_stride) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * kv_stride) as usize];
+        for tok in 0..total {
+            let phys = table[(tok / bs) as usize];
+            let dst = ((phys * bs + tok % bs) * kv_stride) as usize;
+            let src = (tok * kv_stride) as usize;
+            pk[dst..dst + kv_stride as usize].copy_from_slice(&kflat[src..src + kv_stride as usize]);
+            pv[dst..dst + kv_stride as usize].copy_from_slice(&vflat[src..src + kv_stride as usize]);
+        }
+
+        let seqlens: Vec<u32> = (0..cc).map(|i| start + i + 1).collect(); // causal: row i attends 0..=start+i
+        let btflat: Vec<u32> = (0..cc as usize).flat_map(|_| table.clone()).collect();
+
+        let qb = g.storage_init("q", &qflat);
+        let poolk = g.storage_init("pk", &pk);
+        let poolv = g.storage_init("pv", &pv);
+        let bt = g.storage((cc * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(cc as u64);
+        g.write(&sl, &seqlens);
+
+        // --- reference: the three-stage batched triad, `bsz = cc` rows ---
+        let sc = g.storage((cc * nh * cap) as u64);
+        let pr = g.storage((cc * nh * cap) as u64);
+        let ctx_ref_buf = g.storage((cc * hq) as u64);
+        let steps = vec![
+            g.step(0, &[&qb, &poolk, &bt, &sl, &sc], &[cc, nh, group, hd, bs, kv_stride, cap, max_bt, fb(scale)], cc * nh * cap),
+            g.step(1, &[&sc, &sl, &pr], &[cc, nh, cap], cc * nh),
+            g.step(2, &[&pr, &poolv, &bt, &sl, &ctx_ref_buf], &[cc, nh, group, hd, bs, kv_stride, cap, max_bt], cc * nh * hd),
+        ];
+        g.submit(&[], &steps);
+        let ctx_ref = g.read(&ctx_ref_buf, (cc * hq) as usize);
+
+        // --- one fused dispatch per (head, query-tile), no scores/probs at all ---
+        let ctx_flash_buf = g.storage((cc * hq) as u64);
+        let ntiles_q = cc.div_ceil(64); // BR = paged_flash_prefill's own tile size
+        let fsteps = vec![g.step(
+            3,
+            &[&qb, &poolk, &poolv, &bt, &sl, &ctx_flash_buf],
+            &[cc, nh, nkv, hd, group, bs, max_bt],
+            nh * ntiles_q * 256, // 256 = paged_flash_prefill's own @workgroup_size
+        )];
+        g.submit(&[], &fsteps);
+        let ctx_flash = g.read(&ctx_flash_buf, (cc * hq) as usize);
+
+        let worst = ctx_ref.iter().zip(&ctx_flash).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!("paged_flash_prefill vs batched triad: worst maxabs = {worst:e}");
+        assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
+        assert!(worst < 1e-3, "paged_flash_prefill vs batched triad maxabs={worst}");
+    }
 }
