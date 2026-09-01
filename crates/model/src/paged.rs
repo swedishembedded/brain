@@ -950,4 +950,98 @@ mod flash_tests {
         assert!(l2 < 0.01, "paged_flash_decode_i8 vs fp32 fused: rel_l2={l2} too high");
         assert!((1.0 - cos) < 0.01, "paged_flash_decode_i8 vs fp32 fused: cosine={cos} too low");
     }
+
+    /// `paged_flash_decode`'s `dtype_variant`-templated bf16 storage tier
+    /// (M2.2) against the plain fp32 fused kernel - chaining `dtype_variant`
+    /// twice over `pool_k` then `pool_v`, since (unlike the split scores/apply
+    /// pair) this kernel reads both pools in one dispatch. Not registered in
+    /// [`PIPES`] since the templated source only exists once `dtype_variant`
+    /// runs (it is not a `.wgsl` file on disk); this test builds its own tiny
+    /// pipeline list instead, the same "leak a runtime `Vec` to `'static`"
+    /// pattern `dtype_variant`'s own cache already uses internally.
+    #[test]
+    fn paged_flash_decode_bf16_matches_fp32_fused_kernel() {
+        use gpu_core::select::Dtype;
+
+        let (n1, s1) =
+            kernels::template::dtype_variant("paged_flash_decode", kernels::PAGED_FLASH_DECODE, "pool_k", Dtype::BF16).unwrap();
+        let (bf16_name, bf16_src) = kernels::template::dtype_variant(n1, s1, "pool_v", Dtype::BF16).unwrap();
+
+        let pipes: Vec<(&str, &str)> = vec![("paged_flash_decode", kernels::PAGED_FLASH_DECODE), (bf16_name, bf16_src)];
+        let pipes: &'static [(&str, &str)] = Box::leak(pipes.into_boxed_slice());
+        let g = gpu_core::testgpu::dev(pipes);
+
+        let (nh, nkv, hd) = (4u32, 2u32, 8u32);
+        let group = nh / nkv;
+        let (hkv, hq) = (nkv * hd, nh * hd);
+        let lens = [1u32, 7, 8, 9, 41, 100];
+        let batch = lens.len() as u32;
+        let bs = 4u32;
+        let num_blocks = 256u32;
+        let max_bt = 26u32;
+
+        let mut rng = Rng::new(41);
+        let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
+        let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+        let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+
+        let tables: Vec<Vec<u32>> = (0..batch).map(|b| (0..max_bt).map(|i| b + i * batch).collect()).collect();
+
+        let mut pk = vec![0f32; (num_blocks * bs * hkv) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * hkv) as usize];
+        for b in 0..batch as usize {
+            for tok in 0..lens[b] {
+                let phys = tables[b][(tok / bs) as usize];
+                let dst = ((phys * bs + tok % bs) * hkv) as usize;
+                let src = (tok * hkv) as usize;
+                pk[dst..dst + hkv as usize].copy_from_slice(&ks[b][src..src + hkv as usize]);
+                pv[dst..dst + hkv as usize].copy_from_slice(&vs[b][src..src + hkv as usize]);
+            }
+        }
+
+        let qb = g.storage_init("q", &qflat);
+        let poolk_f32 = g.storage_init("pk", &pk);
+        let poolv_f32 = g.storage_init("pv", &pv);
+        let btflat: Vec<u32> = (0..batch as usize).flat_map(|b| tables[b].clone()).collect();
+        let bt = g.storage((batch * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(batch as u64);
+        g.write(&sl, &lens);
+
+        let ctx_fp32_buf = g.storage((batch * hq) as u64);
+        let fp32_steps = vec![g.step(
+            0,
+            &[&qb, &poolk_f32, &poolv_f32, &bt, &sl, &ctx_fp32_buf],
+            &[batch, nh, nkv, hd, group, bs, max_bt],
+            batch * nh * 64,
+        )];
+        g.submit(&[], &fp32_steps);
+        let ctx_fp32 = g.read(&ctx_fp32_buf, (batch * hq) as usize);
+
+        // Same flat-index packing `model::half::pack_bf16`'s own convention
+        // and `dtype_variant`'s decode agree on: element `2i` low half,
+        // `2i+1` high half of word `i`.
+        let pk_bf16 = crate::half::pack_bf16(&pk);
+        let pv_bf16 = crate::half::pack_bf16(&pv);
+        let poolk_bf16 = g.storage(pk_bf16.len() as u64);
+        g.write(&poolk_bf16, &pk_bf16);
+        let poolv_bf16 = g.storage(pv_bf16.len() as u64);
+        g.write(&poolv_bf16, &pv_bf16);
+
+        let ctx_bf16_buf = g.storage((batch * hq) as u64);
+        let bf16_steps = vec![g.step(
+            1,
+            &[&qb, &poolk_bf16, &poolv_bf16, &bt, &sl, &ctx_bf16_buf],
+            &[batch, nh, nkv, hd, group, bs, max_bt],
+            batch * nh * 64,
+        )];
+        g.submit(&[], &bf16_steps);
+        let ctx_bf16 = g.read(&ctx_bf16_buf, (batch * hq) as usize);
+
+        let l2 = rel_l2(&ctx_fp32, &ctx_bf16);
+        let cos = crate::hostmath::cosine(&ctx_fp32, &ctx_bf16);
+        println!("paged_flash_decode#pool_k=bf16#pool_v=bf16 vs fp32 fused: rel_l2={l2:.6} cosine={cos:.8}");
+        assert!(l2 < 0.01, "paged_flash_decode bf16 vs fp32 fused: rel_l2={l2} too high");
+        assert!((1.0 - cos) < 0.01, "paged_flash_decode bf16 vs fp32 fused: cosine={cos} too low");
+    }
 }

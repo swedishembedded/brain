@@ -8,7 +8,16 @@
 // @gpu   yes
 // @npu   no
 // @quant none
-// @dtype f32
+// @dtype f32|bf16
+// @tpl   pool_k,pool_v -> bf16 storage variant (M2.2: SAME mechanism
+//        `paged_decode_scores_batched#pool_k=bf16`/`paged_decode_apply_
+//        batched#pool_v=bf16` already use, chained twice over this kernel -
+//        `kernels::template::dtype_variant("paged_flash_decode", ..,
+//        "pool_k", BF16)` then `dtype_variant` again over ITS OWN output
+//        with "pool_v", since this kernel - unlike the split scores/apply
+//        pair - reads both pools in one dispatch. Both `pool_k[slot]` and
+//        `pool_v[slot]` already index with the bare identifier `slot` the
+//        templater requires (see the K/V tile staging loop below).
 //
 // Fused decode-shaped paged attention: for each sequence `b`'s single query,
 // walk its cached keys/values through its own block table and produce the
