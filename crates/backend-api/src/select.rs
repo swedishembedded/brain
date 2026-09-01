@@ -103,6 +103,47 @@ pub enum Op {
     /// Unlike [`Op::Conv1d`], BOTH `m` and `n` gate the lowering - see
     /// [`GEMM_CONV2D_MIN_COUT`]/[`GEMM_CONV2D_MIN_HW`].
     Conv2d,
+    /// Whole-paged-attention TRIAD vs single-FUSED-dispatch choice (M2.4).
+    /// Decode dispatches `paged_decode_scores{,_wg,_i8}_batched` ->
+    /// `decode_softmax_batched` -> `paged_decode_apply{,_i8}_batched`
+    /// (`[Op::PagedAttention]`'s own SCORES-only choice happens INSIDE that
+    /// triad's first stage) - this Op decides whether to run the triad AT
+    /// ALL, or the single fused kernel that replaces every stage of it and
+    /// never materialises `scores`/`probs` (M2.1-M2.3's `paged_flash_decode
+    /// {,_i8}`/`paged_flash_prefill`). Deliberately a SEPARATE Op from
+    /// [`Op::PagedAttention`], not a widening of it: `model::block::
+    /// paged_scores_variant` calls `Op::PagedAttention`'s selector directly
+    /// and branches on getting `WorkgroupPerOutput` back specifically - a
+    /// third candidate spliced into THAT list would silently change what a
+    /// SCORES-only caller sees.
+    ///
+    /// Two regimes, each with its own physical fused kernel and NO shared
+    /// crossover between them - `k` names which one a shape describes (0 =
+    /// decode: independent sequences, no shared block table; 1 = causal-
+    /// chunk prefill: one sequence's block table shared by every row,
+    /// `seq_lens` non-decreasing across the chunk, `paged_flash_prefill`'s
+    /// own documented contract) since the two are different physical
+    /// kernels answering the same shape signature in different call-site
+    /// semantics, not points on one shape gradient - `OpShape::k` is
+    /// otherwise unused by attention Ops (see [`Op::PagedAttention`]'s own
+    /// doc), repurposed here for exactly this distinction. `m`/`n` mirror
+    /// `Op::PagedAttention`'s own (`batch*n_heads`, `cap`); `dtype` is the KV
+    /// storage tier, same convention as `Op::PagedAttention`'s.
+    ///
+    /// Decode's fused kernels measured a REGRESSION against the triad at
+    /// every batch size tested on this campaign's own hardware (M2.1's
+    /// ledger entry: 0.53-0.55x the triad's throughput at batch 8/32/128) -
+    /// inherited unconditionally by the I8/bf16 siblings too (M2.2's own
+    /// entry: correctness-gated only, occupancy never independently
+    /// re-measured) - so [`candidates`] never offers `FusedFlash` for `k =
+    /// 0`; `Reference` (the triad) is the only candidate there until a
+    /// design that wins occupancy replaces it. Causal-chunk prefill's `k = 1`
+    /// arm is where `FusedFlash` is actually reachable: `paged_flash_prefill`
+    /// measured 1.6x-12x FASTER than the triad across a `start`/`cc` sweep on
+    /// the same hardware (`qwen_bench flash-prefill`), and has no int8-KV
+    /// tier yet (its own `@dtype f32` header), so `FusedFlash` is offered
+    /// only at `Dtype::F32`.
+    PagedAttentionFused,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -147,6 +188,12 @@ pub enum KernelVariant {
     /// kernel stages its tile in workgroup memory behind
     /// `workgroupBarrier()`).
     RegisterTiled,
+    /// One dispatch collapsing an op's whole multi-kernel pipeline into a
+    /// single kernel with no intermediate buffer - `Op::PagedAttentionFused`'s
+    /// `paged_flash_decode{,_i8}`/`paged_flash_prefill` (M2.1-M2.3): GPU-only
+    /// by construction (`@cpu no` - each exceeds the CPU JIT's one-
+    /// barrier-per-body limit). Requires `caps.workgroup_reductions`.
+    FusedFlash,
 }
 
 /// What a [`KernelVariant`] needs from the device to correctly execute a
@@ -232,6 +279,9 @@ impl KernelVariant {
             }
             KernelVariant::PackedInt8 => Requirement { int8_dot: true, ..Requirement::default() },
             KernelVariant::RegisterTiled => {
+                Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) }
+            }
+            KernelVariant::FusedFlash => {
                 Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) }
             }
         }
@@ -699,6 +749,17 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
                 vec![Reference, SplitReduction]
             }
         }
+        // See this Op's own doc for the full measured story. `k = 1`
+        // (causal-chunk prefill) at F32 KV storage is the only regime with a
+        // live, measured win (`paged_flash_prefill`) - every other (k,
+        // dtype) pair has either a measured non-win (decode, `k = 0`, every
+        // dtype) or no fused kernel at all yet (prefill at a non-F32 storage
+        // tier) and stays `Reference`-only, the module's own "a call site
+        // has no kernel for falls back to Reference" rule.
+        Op::PagedAttentionFused => match (shape.k, shape.dtype) {
+            (1, Dtype::F32) => vec![FusedFlash, Reference],
+            _ => vec![Reference],
+        },
     };
     let filtered: Vec<KernelVariant> =
         raw.into_iter().filter(|v| v.requires(shape.dtype).satisfied_by(caps)).collect();
@@ -729,6 +790,7 @@ impl KernelVariant {
             KernelVariant::SplitReduction => "split_reduction",
             KernelVariant::PackedInt8 => "packed_int8",
             KernelVariant::RegisterTiled => "register_tiled",
+            KernelVariant::FusedFlash => "fused_flash",
         }
     }
     /// Inverse of [`KernelVariant::as_str`]. Deliberately NOT `from_str`:
@@ -741,6 +803,7 @@ impl KernelVariant {
             "split_reduction" => KernelVariant::SplitReduction,
             "packed_int8" => KernelVariant::PackedInt8,
             "register_tiled" => KernelVariant::RegisterTiled,
+            "fused_flash" => KernelVariant::FusedFlash,
             _ => return None,
         })
     }
@@ -1147,6 +1210,52 @@ mod tests {
         assert_eq!(s.select(Op::PagedAttention, i8_shape, &cpu_caps()), KernelVariant::Reference);
     }
 
+    /// M2.4's own Op: `FusedFlash` is reachable ONLY at `k = 1` (causal-chunk
+    /// prefill) and `Dtype::F32` - `paged_flash_prefill`'s own measured win
+    /// (`qwen_bench flash-prefill`) and its only storage tier. Every other
+    /// `(k, dtype)` pair - decode (`k = 0`) at ANY dtype, inheriting M2.1/
+    /// M2.2's own measured non-win unconditionally, and prefill at a
+    /// non-F32 storage tier, which has no fused kernel yet - stays
+    /// `Reference`-only, on both a GPU and the CPU JIT (the CPU JIT could
+    /// never run `FusedFlash` anyway - `workgroup_reductions` is false
+    /// there, the SAME correctness gate `Op::PagedAttention`'s own
+    /// `WorkgroupPerOutput` arm uses).
+    #[test]
+    fn paged_attention_fused_only_offers_the_fused_kernel_at_causal_chunk_f32() {
+        let s = DefaultSelector;
+        for m in [1u32, 128, 2048] {
+            for n in [16u32, 512, 8192] {
+                let prefill_f32 = shape(m, n, 1, Dtype::F32);
+                assert_eq!(
+                    s.select(Op::PagedAttentionFused, prefill_f32, &gpu_caps()),
+                    KernelVariant::FusedFlash,
+                    "m={m} n={n}"
+                );
+                assert_eq!(
+                    s.select(Op::PagedAttentionFused, prefill_f32, &cpu_caps()),
+                    KernelVariant::Reference,
+                    "m={m} n={n}: CPU JIT cannot run a barrier-shaped kernel"
+                );
+                for dtype in [Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::Q4] {
+                    let prefill_other = shape(m, n, 1, dtype);
+                    assert_eq!(
+                        s.select(Op::PagedAttentionFused, prefill_other, &gpu_caps()),
+                        KernelVariant::Reference,
+                        "m={m} n={n} dtype={dtype:?}: no fused prefill kernel at this storage tier yet"
+                    );
+                }
+                for dtype in [Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::Q4] {
+                    let decode = shape(m, n, 0, dtype);
+                    assert_eq!(
+                        s.select(Op::PagedAttentionFused, decode, &gpu_caps()),
+                        KernelVariant::Reference,
+                        "m={m} n={n} dtype={dtype:?}: decode's fused kernels never measured a win"
+                    );
+                }
+            }
+        }
+    }
+
     /// Sparse-MoE expert linear has NO shape gate at any dtype - unlike every
     /// other dtype-keyed Op in this file, none of `moe_linear_gated{,_i8,
     /// _q4}.wgsl` has a cooperative/register-tiled sibling, so `m`/`n` never
@@ -1437,6 +1546,7 @@ mod tests {
             KernelVariant::SplitReduction,
             KernelVariant::PackedInt8,
             KernelVariant::RegisterTiled,
+            KernelVariant::FusedFlash,
         ] {
             assert_eq!(KernelVariant::parse_str(v.as_str()), Some(v), "{v:?}");
         }
