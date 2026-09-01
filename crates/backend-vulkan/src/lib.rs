@@ -415,6 +415,24 @@ pub fn enumerate_physical_gpus() -> Result<Vec<backend_api::GpuIdentity>, String
     }
 }
 
+/// `BRAIN_VK_SERIAL=1` forces the Intel-ANV per-dispatch serialize workaround
+/// (`VulkanBackend::flush`) everywhere, for diagnosis. Resolved once per
+/// process via a `OnceLock`, matching `backend_api::select`'s
+/// `BRAIN_NO_COOP_LN`/`BRAIN_NO_COOP_GRADNORM` convention - previously
+/// re-read from the environment on every single `flush()` call.
+fn vk_serial_forced() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("BRAIN_VK_SERIAL").is_ok())
+}
+
+/// `BRAIN_VK_NO_SERIAL=1` disables the Intel-ANV workaround even on Intel, to
+/// confirm the underlying driver bug on that hardware. Same once-per-process
+/// resolution as [`vk_serial_forced`].
+fn vk_serial_disabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("BRAIN_VK_NO_SERIAL").is_ok())
+}
+
 impl VulkanBackend {
     /// Try to build the Vulkan backend, compiling every kernel to a pipeline.
     /// Returns `Err` (so the caller can fall back to wgpu) if no Vulkan device is
@@ -921,10 +939,11 @@ impl VulkanBackend {
         // not faster).
         // Gate the workaround to Intel (vendor 0x8086). `BRAIN_VK_SERIAL` forces
         // it everywhere (diagnostic); `BRAIN_VK_NO_SERIAL` disables it (to confirm
-        // the Intel bug on that hardware).
+        // the Intel bug on that hardware). Resolved once per process, not
+        // re-read from the environment on every flush.
         const VENDOR_INTEL: u32 = 0x8086;
-        let force_serial = std::env::var("BRAIN_VK_SERIAL").is_ok();
-        let no_serial = std::env::var("BRAIN_VK_NO_SERIAL").is_ok();
+        let force_serial = vk_serial_forced();
+        let no_serial = vk_serial_disabled();
         let vendor_needs_serial = self.ctx.vendor_id == VENDOR_INTEL;
         if !no_serial && (force_serial || (vendor_needs_serial && steps.iter().any(|s| s.sliced))) {
             let time_this = self.timing_active();
