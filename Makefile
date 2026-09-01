@@ -390,6 +390,13 @@ test/slow:
 # directions - see that script for the full rationale.
 # check-linear-history.sh fails if HEAD's history contains a merge commit -
 # the working branch must always be rebased, never merged into.
+# check-kernel-selection.sh cross-references docs/reference/kernels.md for
+# every kernel that has a structurally faster sibling (a `_rows`/`_wg`/
+# `_reg*`/`_tiled`/`_part`/`_dyn` suffix, or a higher `@opt` sibling of the
+# same stem) and fails if it is dispatched by name outside a
+# `backend_api::select` seam and outside its own reasoned allow-list - see
+# that script for the full rationale and the M1.3 entry in
+# .agents/roadmap/kernel-performance.md for the inventory it produced.
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
@@ -400,6 +407,7 @@ check/scripts:
 	bash scripts/gates/check-linear-history.sh
 	bash scripts/gates/check-golden-source.sh
 	bash scripts/gates/check-doc-links.sh
+	bash scripts/gates/check-kernel-selection.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"

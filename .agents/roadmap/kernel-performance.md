@@ -670,6 +670,95 @@ drop-in swap the way the four named sites were - it needs the two concerns
 split first. Left unmigrated; a future pass can fold them onto `flash_gate`
 once that split is done.
 
+### M1.3 - `check-kernel-selection.sh`, a workspace-wide gate, and the inventory it produced
+
+Checked the brief's premise against source rather than following it literally:
+"generalize `crates/qwen3/tests/no_kernel_names.rs`" reads as "replace it",
+but that test's check 1 (banning `crate::q8::Q8`/`Lin8` INSTANCE inspection
+anywhere in the crate) polices an internal-API-design invariant with no
+kernel-catalogue analogue at all - a generic name-vs-catalogue gate cannot
+express it and would silently drop that coverage. Left `no_kernel_names.rs`
+untouched and added `scripts/gates/check-kernel-selection.sh` as a second,
+complementary, workspace-wide gate (wired into `check/scripts`, which
+`test/full` already depends on) rather than forcing a replacement.
+
+**What "faster sibling" means, cross-referenced against `kernels.md` rather
+than assumed**: two kernels are siblings if their names share a stem once
+trailing "structural variant" words are stripped from each - the six suffix
+families the milestone brief names (`_rows`/`_wg`/`_reg*`/`_tiled`/`_part`/
+`_dyn`) plus two the catalogue's own naming convention already needs for the
+same purpose (`_batched`, `_final`). A first, more permissive version that
+stripped ANY trailing token misclassified `conv2d_dw`/`conv2d_dx` (backward
+passes) as siblings of `conv2d_tiled` purely because `dw`/`dx` are also
+strippable-looking tokens - caught by hand-checking the tool's own output
+against the kernel sources before trusting it, the same discipline this
+campaign's `kv_int8`/paged-attention and MoE recalibrations already needed.
+Restricting the strip vocabulary to the eight real structural words fixed it:
+19 real stem families with a genuine `@opt` spread, 23 individual "slow"
+kernel names.
+
+**What "outside a selection seam" means**: the slow kernel's identifier as
+the first argument of a real dispatch call (`.step`/`.step_buf`/
+`.step_sliced`/`.dispatch`), unless the call lives in `select.rs` itself or a
+`KernelVariant::`/`.select(Op::`/`selector.select(`/`candidates(Op::` token
+appears in the ten lines above it - the shape every real seam consumer
+already has (`model::ops::Ops::bind`, `optim::Optim::coop_gradnorm`,
+`qwen3::serve::Engine::rms`). A pipeline-table registration line
+(`("name", kernels::NAME)`) or a `const NAME: usize = …` index declaration is
+not itself a selection and is correctly never flagged - it is the identifier
+comparison rule (`[A-Z][A-Z0-9_]*` only) that keeps a lowercase local
+binding of the same word (`crates/model/tests/moe_compact_parity.rs`'s
+`matmul: &Op` parameter, seen and fixed during the same pass) from being
+mistaken for a kernel index.
+
+**The inventory this gate produced, seeded into its own allow-list, 44
+rows over 7 kernel names and 20 files** (every row carries its own reason in
+the script; not reproduced verbatim here): `matmul`/`matmul_dw`/`matmul_dx`/
+`rmsnorm`/`layernorm` bare-dispatched in roughly a dozen model/training
+crates (`deepseek2`, `qwen35`, `qwen35moe`, `toyseq2seq`, `toypid`, `toymoe`,
+`toyautoencoder`, `kronos`, `fincast`, `mimi`, `chronos2`, `qwen3omnimoe`,
+`qwen3tts`, `gpt2`) that have never been migrated onto the `MatMul`/`RmsNorm`/
+`LayerNorm` `Op`s that already exist - filed as Phase 1 M1.4 / Phase 5
+backlog, not fixed by this gate. `matmul_dw`/`matmul_dx` specifically have NO
+`select::Op` at all yet (a gap Phase 5's own family table, M22, does not
+itemise) - filed the same way, flagged here so it is not lost. `qwen3::
+model.rs`'s own `lora_fwd`/`proj_bwd` still bare-dispatch `MATMUL` too - B7's
+migration scoped only `forward_steps`/`decode_steps`/`run_batched_steps`/
+`head_steps`, not LoRA or backward, so this is pre-existing, not a new
+regression. `decode_softmax` in `glmdsa`/`gpt2`'s own incremental-decode path
+has no cooperative sibling wired through `select::Op` either - the same
+paged-attention triad this ledger's M0.2 baseline already flagged as the
+campaign's top target, now confirmed present in two more model crates.
+`minimaxmusic3::discriminator`'s `conv2d` dispatch is outside `Op::Conv2d`'s
+deliberately narrow scope (`vae::blocks::Builder::conv_s` only), the same
+category as `vision::blocks::Conv`'s already-documented exemption.
+`crates/model/tests/tensor_parallel.rs`'s raw `matmul`/`matmul_dw`/
+`matmul_dx` steps are a dp/shard-parity test harness by design, never through
+`model::ops::Ops`.
+
+Every OTHER kernel this gate's stem analysis found a faster sibling for
+(`clip_coef`, `conv2d_gd`, `conv_act`, `conv_bias`, `gn_stats`,
+`layernorm_dx`, `ln_stats`, `matmul_gemv`, `matmul_rows`, `paged_decode_apply`,
+`paged_decode_scores`, `paged_decode_scores_batched`, `prelu_bwd`,
+`flash_attn_bidir`) had ZERO unallowed dispatch sites - already fully behind
+an existing seam (`optim::Optim::coop_gradnorm`, `Op::MatMul`, `Op::
+PagedAttention`) or never bare-dispatched at all.
+
+Mutation-verify: removed the `matmul`/`crates/gpt2/src/model.rs` allow-list
+row, confirmed the gate turned RED listing exactly `gpt2/src/model.rs`'s 6
+bare `MATMUL` dispatches with `matmul_reg`/`matmul_reg2`/`matmul_reg3` named
+as the faster siblings, then restored the row and confirmed GREEN again. The
+gate also fails on a STALE row (one that no longer matches any real
+violation), verified the same way, so the allow-list can only ever track
+reality rather than merely grow. `bash scripts/gates/check-kernel-selection.sh`
+green; `check-scripts.sh` (syntax/orphan/absolute-path),
+`check-no-doc-citations.sh` and `check-doc-links.sh` green for the new file.
+`check-env-docs.sh`/`check-no-perf-numbers.sh`/`check-arch-names.sh` were
+already red on this tree before this change, from unrelated pre-existing
+findings (none in any file this milestone touched) - left as-is, not this
+milestone's scope. No Rust source changed, so no crate's test suite,
+`clippy`, `parity` or `gradcheck` is affected.
+
 ---
 
 ## Not yet done
