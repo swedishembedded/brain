@@ -713,6 +713,7 @@ mod flash_tests {
         ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
         ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
         ("paged_flash_decode", kernels::PAGED_FLASH_DECODE),
+        ("paged_flash_decode_i8", kernels::PAGED_FLASH_DECODE_I8),
     ];
 
     fn fb(x: f32) -> u32 {
@@ -817,5 +818,136 @@ mod flash_tests {
         println!("paged_flash_decode vs batched triad: worst maxabs = {worst:e}");
         assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
         assert!(worst < 1e-3, "paged_flash_decode vs batched triad maxabs={worst}");
+    }
+
+    /// Whole-tensor `rel_l2` (f64-accumulated sum-of-squares ratio) - the
+    /// SAME formula `qwen3::serve`'s own `int8_kv_scale_and_bytes_match_a_
+    /// host_oracle` gates at `< 0.01` ("the serving tolerance already used by
+    /// kv_int8", M2.2's own gate wording), reused here rather than a fresh
+    /// hand-fitted bound.
+    fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
+        let (mut sq_err, mut sq_mag) = (0f64, 0f64);
+        for (x, y) in a.iter().zip(b) {
+            sq_err += (*x as f64 - *y as f64).powi(2);
+            sq_mag += *x as f64 * *x as f64;
+        }
+        (sq_err / sq_mag.max(1e-12)).sqrt()
+    }
+
+    /// Per-`(physical slot, kv head)` symmetric int8 quantization of a flat
+    /// `[num_slots, n_kv*head_dim]` pool - the identical `absmax/127` scale
+    /// and round-clamp `qwen3::serve`'s real `paged_kv_append_i8_clipped_
+    /// batched` path uses (pinned by `int8_kv_scale_and_bytes_match_a_host_
+    /// oracle`), packed 4-per-`u32` the same way `paged_decode_scores_i8_
+    /// batched`'s `pool` binding reads it. A never-written slot's row is all
+    /// zero, so `absmax == 0` -> `scale = 1.0`, byte `0` -> dequants back to
+    /// exactly `0.0`, matching the masked-key path unaffected either way.
+    fn quantize_pool_i8(pool: &[f32], n_kv: u32, hd: u32) -> (Vec<u32>, Vec<f32>) {
+        let hkv = (n_kv * hd) as usize;
+        assert_eq!(pool.len() % hkv, 0, "pool length must be a whole number of {hkv}-wide rows");
+        let num_slots = pool.len() / hkv;
+        let mut bytes = vec![0u8; pool.len()];
+        let mut scales = vec![0f32; num_slots * n_kv as usize];
+        for slot in 0..num_slots {
+            for h in 0..n_kv as usize {
+                let base = slot * hkv + h * hd as usize;
+                let row = &pool[base..base + hd as usize];
+                let absmax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
+                let scale = if absmax == 0.0 { 1.0 } else { absmax / 127.0 };
+                scales[slot * n_kv as usize + h] = scale;
+                for (d, &v) in row.iter().enumerate() {
+                    let q = (v / scale).round().clamp(-127.0, 127.0) as i32;
+                    bytes[base + d] = (q as i8) as u8;
+                }
+            }
+        }
+        let words = bytes.chunks(4).map(|c| c.iter().enumerate().fold(0u32, |w, (i, &b)| w | (u32::from(b) << (8 * i)))).collect();
+        (words, scales)
+    }
+
+    /// `paged_flash_decode_i8` (M2.2's int8-KV twin) against `paged_flash_
+    /// decode` itself - the fp32 FUSED kernel, per the milestone's own gate
+    /// wording ("cosine/rel_l2 vs the fp32 fused kernel"), not the three-stage
+    /// triad. Same shapes/scrambled block tables as `paged_flash_decode_
+    /// matches_batched_triad` above; the pool is quantized with
+    /// [`quantize_pool_i8`] (the real production scale/round/clamp scheme),
+    /// so the only source of disagreement is genuine int8 quantization noise,
+    /// not a synthetic one.
+    #[test]
+    fn paged_flash_decode_int8_matches_fp32_fused_kernel() {
+        let g = gpu_core::testgpu::dev(PIPES);
+        let (nh, nkv, hd) = (4u32, 2u32, 8u32);
+        let group = nh / nkv;
+        let (hkv, hq) = (nkv * hd, nh * hd);
+        let lens = [1u32, 7, 8, 9, 41, 100];
+        let batch = lens.len() as u32;
+        let bs = 4u32;
+        let num_blocks = 256u32;
+        let max_bt = 26u32; // >= ceil(100/4)
+
+        let mut rng = Rng::new(37);
+        let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
+        let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+        let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+
+        let tables: Vec<Vec<u32>> = (0..batch).map(|b| (0..max_bt).map(|i| b + i * batch).collect()).collect();
+
+        let mut pk = vec![0f32; (num_blocks * bs * hkv) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * hkv) as usize];
+        for b in 0..batch as usize {
+            for tok in 0..lens[b] {
+                let phys = tables[b][(tok / bs) as usize];
+                let dst = ((phys * bs + tok % bs) * hkv) as usize;
+                let src = (tok * hkv) as usize;
+                pk[dst..dst + hkv as usize].copy_from_slice(&ks[b][src..src + hkv as usize]);
+                pv[dst..dst + hkv as usize].copy_from_slice(&vs[b][src..src + hkv as usize]);
+            }
+        }
+
+        let qb = g.storage_init("q", &qflat);
+        let poolk_f32 = g.storage_init("pk", &pk);
+        let poolv_f32 = g.storage_init("pv", &pv);
+        let btflat: Vec<u32> = (0..batch as usize).flat_map(|b| tables[b].clone()).collect();
+        let bt = g.storage((batch * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(batch as u64);
+        g.write(&sl, &lens);
+
+        // --- ground truth: the fp32 fused kernel ---
+        let ctx_fp32_buf = g.storage((batch * hq) as u64);
+        let fp32_steps = vec![g.step(
+            3,
+            &[&qb, &poolk_f32, &poolv_f32, &bt, &sl, &ctx_fp32_buf],
+            &[batch, nh, nkv, hd, group, bs, max_bt],
+            batch * nh * 64,
+        )];
+        g.submit(&[], &fp32_steps);
+        let ctx_fp32 = g.read(&ctx_fp32_buf, (batch * hq) as usize);
+
+        // --- the int8-KV twin, over a quantized copy of the SAME pool ---
+        let (pk_words, sk) = quantize_pool_i8(&pk, nkv, hd);
+        let (pv_words, sv) = quantize_pool_i8(&pv, nkv, hd);
+        let poolk_i8 = g.storage(pk_words.len() as u64);
+        g.write(&poolk_i8, &pk_words);
+        let poolv_i8 = g.storage(pv_words.len() as u64);
+        g.write(&poolv_i8, &pv_words);
+        let scales_k = g.storage_init("sk", &sk);
+        let scales_v = g.storage_init("sv", &sv);
+
+        let ctx_i8_buf = g.storage((batch * hq) as u64);
+        let i8_steps = vec![g.step(
+            4,
+            &[&qb, &poolk_i8, &poolv_i8, &scales_k, &scales_v, &bt, &sl, &ctx_i8_buf],
+            &[batch, nh, nkv, hd, group, bs, max_bt],
+            batch * nh * 64,
+        )];
+        g.submit(&[], &i8_steps);
+        let ctx_i8 = g.read(&ctx_i8_buf, (batch * hq) as usize);
+
+        let l2 = rel_l2(&ctx_fp32, &ctx_i8);
+        let cos = crate::hostmath::cosine(&ctx_fp32, &ctx_i8);
+        println!("paged_flash_decode_i8 vs fp32 fused: rel_l2={l2:.6} cosine={cos:.8}");
+        assert!(l2 < 0.01, "paged_flash_decode_i8 vs fp32 fused: rel_l2={l2} too high");
+        assert!((1.0 - cos) < 0.01, "paged_flash_decode_i8 vs fp32 fused: cosine={cos} too low");
     }
 }

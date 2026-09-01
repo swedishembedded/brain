@@ -678,6 +678,8 @@ pub const PAGED_DECODE_SCORES_I8_BATCHED: &str = include_str!("../wgsl/paged_dec
 pub const PAGED_DECODE_SCORES_WG: &str = include_str!("../wgsl/paged_decode_scores_wg.wgsl");
 /// `wgsl/paged_flash_decode.wgsl`
 pub const PAGED_FLASH_DECODE: &str = include_str!("../wgsl/paged_flash_decode.wgsl");
+/// `wgsl/paged_flash_decode_i8.wgsl`
+pub const PAGED_FLASH_DECODE_I8: &str = include_str!("../wgsl/paged_flash_decode_i8.wgsl");
 /// `wgsl/paged_kv_append.wgsl`
 pub const PAGED_KV_APPEND: &str = include_str!("../wgsl/paged_kv_append.wgsl");
 /// `wgsl/paged_kv_append_batched.wgsl`
@@ -1234,6 +1236,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_decode_scores_i8_batched", PAGED_DECODE_SCORES_I8_BATCHED),
     ("paged_decode_scores_wg", PAGED_DECODE_SCORES_WG),
     ("paged_flash_decode", PAGED_FLASH_DECODE),
+    ("paged_flash_decode_i8", PAGED_FLASH_DECODE_I8),
     ("paged_kv_append", PAGED_KV_APPEND),
     ("paged_kv_append_batched", PAGED_KV_APPEND_BATCHED),
     ("paged_kv_append_batched_word", PAGED_KV_APPEND_BATCHED_WORD),
