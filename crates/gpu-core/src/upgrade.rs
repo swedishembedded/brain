@@ -59,9 +59,14 @@
 //! is SLOWER than the workgroup-accumulator kernel it replaces when only 1 row
 //! is asked for. The ladder is a measurement, never a guess (checklist §F.6).
 //!
-//! A shape-specialised row cannot fire from [`crate::Gpu::step_buf`], whose
-//! shape lives in a caller-owned uniform buffer this seam cannot read. That
-//! path keeps the kernel the caller registered - correct, just not upgraded.
+//! A shape-specialised row cannot resolve its bucket from
+//! [`crate::Gpu::step_buf`] alone - its shape lives in a caller-owned uniform
+//! buffer this seam cannot read, so that path keeps the kernel the caller
+//! registered: correct, just not upgraded. A caller that already holds the
+//! values it wrote into that buffer can hand them back through
+//! [`crate::Gpu::step_buf_shaped`] instead, which reaches [`apply`] exactly
+//! as [`crate::Gpu::step`]'s own `params` slice does
+//! (`tests/gemv_reg_upgrade_step_buf.rs`).
 
 use backend_api::{select, DeviceCaps};
 

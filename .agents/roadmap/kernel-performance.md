@@ -759,6 +759,82 @@ findings (none in any file this milestone touched) - left as-is, not this
 milestone's scope. No Rust source changed, so no crate's test suite,
 `clippy`, `parity` or `gradcheck` is affected.
 
+### M1.4 - Closed the `step_buf` blind spot; M1.3's inventory has no drop-in row to add
+
+Checked the brief's second half against source before building it, per the
+AGENTS.md rule this campaign keeps re-invoking: "add an upgrade row for every
+drop-in-qualifying pair M1.3's gate inventory found" reads as "there are rows
+to add", but M1.3's own inventory is seven kernel names
+(`matmul`/`matmul_dw`/`matmul_dx`/`rmsnorm`/`layernorm`/`decode_softmax`/
+`conv2d`), and every one of them fails at least one of `gpu_core::upgrade`'s
+own four bars once read against its actual WGSL:
+
+- **`rmsnorm` -> `rmsnorm_rows`**: different `Params` struct (`d_model,
+  seq_len` vs `d, rows, eps`) and `rmsnorm_rows.wgsl`'s own header states the
+  agreement is `max_abs 3.3e-6` because "the reduction order differs" - fails
+  bar 1 (contract) and bar 2 (bit-identical) on its own words.
+- **`layernorm` -> `layernorm_rows`**: same `Params` this time, but
+  `layernorm_rows.wgsl`'s header documents a DIFFERENT algorithm (the shifted
+  one-pass form, forced by the CPU JIT's one-barrier limit) against
+  `layernorm.wgsl`'s textbook two-pass - "agreement... is checked in
+  `bench_layernorm`", i.e. tolerance, not bit-identity. Fails bar 2.
+- **`decode_softmax` -> `decode_softmax_batched`**: different `Params`
+  (`n_heads, t, cap` vs `batch, n_heads, cap`) and an extra `seq_lens` binding
+  - a batched rewrite, not a same-contract thread-count change. Fails bar 1.
+- **`matmul`/`matmul_dw`/`matmul_dx` -> their `_reg`/`_reg2`/`_reg3` siblings**:
+  contract and accumulation order both hold (`select.rs:323`'s own comment:
+  "the `matmul_reg*` family accumulates strictly in increasing `k`", confirmed
+  by reading `matmul_reg.wgsl`'s chunk loop - `gk = c*BK+kk` visits `0..K-1` in
+  order, same as `matmul.wgsl`'s serial loop, so no reassociation). What fails
+  is bar 3: `gpt2::model::linear_kernel`'s own measured threshold (`m < 8` before
+  BLK 128x128 tile wins) and `dx_kernel`'s (`m < 128 || k < 128`) are exactly
+  the regimes `gpt2::model::decode_at`'s bare `MATMUL` dispatch runs at
+  (`m = 1`, single-token decode) - the naive kernel is not a defect there, it
+  is the FASTER choice at that shape, so a blanket redirect would regress every
+  decode step. The kernel this seam could add would have to win at `m = 1`
+  too, and by construction the 128x128-tile kernel cannot.
+- **`conv2d` (`minimaxmusic3::discriminator`) -> the register-tiled sibling**:
+  same shape-dependence, confirmed by `select.rs`'s own `Op::Conv2d` test
+  (`narrow_cout`/`narrow_hw` -> `Reference`, `wide` -> `RegisterTiled`) -
+  already a policy `select::candidates` owns, not a constant-win drop-in.
+
+The common shape is not a coincidence: every "fast" sibling in this inventory
+only wins in a shape regime, which is precisely what `select::Op` (not
+`gpu_core::upgrade`) exists to arbitrate, and duplicating that shape policy as
+a second copy inside `upgrade::UPGRADES` would be exactly the "one
+implementation" rule violation this campaign already corrects elsewhere. The
+seven names stay migration targets for an explicit `Op::MatMul`/`Op::LayerNorm`
+/`Op::RmsNorm` call-site migration (already the pattern `model::ops::Ops`
+provides) or a Phase 5 kernel rewrite - not this seam. Recorded here as a
+correction to M1.3's own filing, not a failure of this milestone: the premise
+was checked, found not to hold, and the real defect (the `step_buf` blind spot
+the milestone's first half named) was fixed instead.
+
+**The real fix**: `gpu_core::upgrade`'s shape-specialised rows (the
+`matmul_gemv`/`matmul_i8_gemv` `MREG` ladders) could not resolve a bucket from
+`Gpu::step_buf`, because `apply` had no `params` to read - the uniform lives in
+a caller-owned buffer the seam cannot see into. Added `Gpu::step_buf_shaped`
+(both the native and wasm facades) alongside the unchanged `step_buf`: a caller
+that already holds the values it wrote into its own uniform buffer hands them
+back as a `shape: &[u32]` probe, reaching `upgrade::apply`'s existing
+`Some(params)` path exactly as `step`/`step_sliced` already do. `step_buf`
+itself is untouched - same signature, same `None` probe, same fallback to the
+registered kernel.
+
+TDD: `crates/gpu-core/tests/gemv_reg_upgrade_step_buf.rs` went RED first
+(`step_buf_shaped` did not exist) then GREEN, on real Tesla P40 hardware via
+`Gpu::kernel_times()` (the same per-pipeline device-timing table
+`BRAIN_PROFILE` prints) as the oracle for which PHYSICAL kernel actually ran:
+`step_buf` alone stays on `matmul_gemv` at every `m`; `step_buf_shaped` reaches
+the exact same `MREG` bucket `step` would pick (`m=1`->`MREG=1`, `m=3`->
+`MREG=4`, `m=32`->`MREG=32`); the two dispatch paths agree bit-for-bit at
+`m in {1,5,17,32}`; `BRAIN_NO_KERNEL_UPGRADE=1` pins `step_buf_shaped` back onto
+`matmul_gemv` the same way it already does for `step`. Full `brain-gpu-core`
+suite (24 test binaries, 69 lib unit tests including `upgrade::tests`) green on
+real hardware; `cargo clippy --all-targets` clean for `brain-gpu-core` and
+`brain-backend-api`. No `select.rs` change, so nothing else in this campaign's
+most-contended file was touched.
+
 ---
 
 ## Not yet done

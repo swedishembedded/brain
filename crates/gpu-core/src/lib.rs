@@ -1011,6 +1011,27 @@ mod native_facade {
                 .step_buf(k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
+        /// [`Self::step_buf`] for a caller that already holds the values it
+        /// wrote into `ubuf` and wants a shape-specialised [`crate::upgrade`]
+        /// row to see them - closes the blind spot `crate::upgrade`'s own doc
+        /// names: the seam cannot read a caller-owned uniform buffer, but the
+        /// caller already computed `shape` to build that buffer, so handing it
+        /// back costs nothing extra. `shape` is read-only probing data for the
+        /// seam; it is never re-uploaded, so it must match `ubuf`'s contents or
+        /// the wrong bucket gets picked.
+        pub fn step_buf_shaped(
+            &self,
+            kind: usize,
+            ubuf: &DeviceBuffer,
+            bufs: &[&DeviceBuffer],
+            shape: &[u32],
+            threads: u32,
+        ) -> Step {
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(shape), threads);
+            self.inner
+                .step_buf(k, ubuf, bufs, t)
+                .with_meta(StepMeta { kernel: kind, params: Some(shape.to_vec()), threads })
+        }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
             // Only when armed (see `cost_enabled`): tallying is a mutex lock
             // plus a per-dispatch string match - measurement machinery, not a
@@ -1199,6 +1220,20 @@ mod wasm_facade {
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, None, threads);
             Backend::step_buf(&self.inner, k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
+        }
+        /// See the native facade's `step_buf_shaped` - closes the same
+        /// `crate::upgrade` blind spot for the wasm/WebGPU target.
+        pub fn step_buf_shaped(
+            &self,
+            kind: usize,
+            ubuf: &DeviceBuffer,
+            bufs: &[&DeviceBuffer],
+            shape: &[u32],
+            threads: u32,
+        ) -> Step {
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(shape), threads);
+            Backend::step_buf(&self.inner, k, ubuf, bufs, t)
+                .with_meta(StepMeta { kernel: kind, params: Some(shape.to_vec()), threads })
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
             // Off until armed - see the native facade's `submit`.

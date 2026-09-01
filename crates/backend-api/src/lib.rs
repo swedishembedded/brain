@@ -662,8 +662,10 @@ impl DeviceBuffer {
 /// and the uniform params it was recorded with. Attached by the `gpu_core`
 /// facade at `step*` time, so cost accounting (offline `cost_of`, online
 /// per-submit counters) never reaches into a backend's native dispatch record.
-/// `params` is `None` for `step_buf` dispatches - their uniform lives in a
-/// caller-owned buffer whose contents the facade cannot see.
+/// `params` is `None` for a `step_buf` dispatch whose caller did not supply a
+/// shape hint - `step_buf`'s uniform lives in a caller-owned buffer whose
+/// contents the facade cannot see on its own. `step_buf_shaped` callers get
+/// `Some` here, the same as `step`/`step_sliced`.
 #[derive(Clone, Debug)]
 pub struct StepMeta {
     /// Index into the `(name, wgsl)` kernel set the device was built with.
