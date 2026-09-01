@@ -168,11 +168,33 @@ constraints hold everywhere with no exceptions, which the bullet says
 explicitly so a partial Phase 8 landing can never be read as license to bypass
 them early.
 
+### M0.3 - The hardware-harness contract
+
+Added `brain_testutil::skip_unvalidated_capability(cap, reason)` beside the
+existing `skip`/`skip_unavailable` in `crates/testutil/src/lib.rs`: prints a
+prominent stderr warning naming the capability and why it's unvalidated here,
+states plainly the result MAY FAIL on hardware that has it, and appends a
+tab-separated row (`cap`, `reason`, `#[track_caller]` call site - no
+wall-clock timestamp, so it stays deterministic-friendly) to a ledger at
+`$BRAIN_CAPABILITY_LEDGER` (default `<repo>/out/capability-ledger.tsv`).
+Non-fatal by default; `BRAIN_REQUIRE_CAPABILITIES=<comma-separated caps>`
+promotes a named capability's skip to a hard failure, mirroring
+`BRAIN_REQUIRE_FIXTURES` but keyed by a list since capabilities are graded
+per-box rather than one binary present/absent fact. `make
+test/capability-report` (`scripts/gates/capability-report.sh`) renders the
+ledger as a table (capability, skip count, reasons, call sites). TDD: a red
+test asserting non-panic + ledger row + panic-under-`BRAIN_REQUIRE_CAPABILITIES`
+went green against the implementation; `crates/testutil`'s full suite and
+`cargo clippy --all-targets` stay warning-free. Documented in
+`.agents/rules/testing.md` (prose + the env-var tables). No caller in the tree
+uses this yet - that lands with the Phase 8 work it's built ahead of (FP8/FP4,
+native f16/bf16, VNNI/AMX/AVX-512), per decision 2.
+
 ---
 
 ## Not yet done
 
-Phases 0 (remaining: M0.1 profiler fix, M0.2 baselines, M0.3 harness contract,
+Phases 0 (remaining: M0.1 profiler fix, M0.2 baselines,
 M0.4 debt sweep) through 8, as structured above. Track sub-milestone status
 against the approved plan; update this section as each phase closes, recording
 the measurement that proved it - a number nothing checks is a number that

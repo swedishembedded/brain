@@ -89,9 +89,20 @@ absent-fixture skip into a hard failure in a run whose purpose is to prove
 parity. A skip for absent HARDWARE is the other helper,
 **`brain_testutil::skip_unavailable(reason)`**, which no flag may turn fatal -
 `BRAIN_REQUIRE_FIXTURES` asserts "the data is on this box" and has nothing to
-say about a box with no discrete GPU, no NPU, no OpenVINO and no ffmpeg. Which
-bucket a skip is in is a judgement a reviewer must be able to check by reading
-the call, which is why there are two functions and not one flag.
+say about a box with no discrete GPU, no NPU, no OpenVINO and no ffmpeg. A
+third bucket is code that IS implemented and capability-gated but whose gated
+branch this box's hardware never exercises (FP8 tensor cores, AMX,
+AVX-512+VNNI): **`brain_testutil::skip_unvalidated_capability(cap, reason)`**
+prints a prominent warning naming the capability and why it is unvalidated
+here, states plainly that the result MAY FAIL on hardware that has it, and
+appends a row to a machine-readable ledger (`make test/capability-report`
+renders it) - modelled on how firmware/RTOS suites gate on a hardware test
+harness rather than skip silently. Non-fatal by default like
+`skip_unavailable`, but `BRAIN_REQUIRE_CAPABILITIES=<comma-separated caps>`
+promotes a named capability's skip to a hard failure on the box that DOES have
+it - see "Test-only environment variables" below. Which bucket a skip is in is
+a judgement a reviewer must be able to check by reading the call, which is why
+there are three functions and not one flag.
 
 Verify a change here by removing `testdata/`, re-running `make fetch/testdata`,
 and re-running the crates in the table above; a fixture that stopped resolving
@@ -272,6 +283,18 @@ Plus `BRAIN_DIAMOND_REPO`, `BRAIN_GENIEREDUX_REPO`.
   before the convention, which prints `UNVERIFIED GOLDEN SOURCE` and still runs.
   It is a ratchet, like the clippy one - switch it on per suite as each dumper
   is re-run, rather than taking every suite red at once.
+- `BRAIN_CAPABILITY_LEDGER` - overrides where
+  `brain_testutil::skip_unvalidated_capability` appends its ledger row (default
+  `<repo>/out/capability-ledger.tsv`). Test isolation only, so parallel tests
+  that exercise the gate itself don't interleave writes into the real ledger.
+- `BRAIN_REQUIRE_CAPABILITIES` - comma-separated capability names
+  (`fp8-tensor-core`, `avx512-vnni`, ...); any `cap` named here turns its
+  matching `brain_testutil::skip_unvalidated_capability(cap, reason)` call into
+  a hard failure instead of a loud, ledgered skip. The capability analogue of
+  `BRAIN_REQUIRE_FIXTURES`, keyed by a list rather than one flag because a
+  box's capabilities are graded (some present, some not), not a single
+  present/absent fact the way "has a GPU" is. `make test/capability-report`
+  renders the ledger.
 - `BRAIN_MODELS_DIR` - overrides the model-store root tests resolve checkpoints under.
 - `BRAIN_E2E` - enables the heavy, opt-in e2e suites (real weights + GPU).
 - `BRAIN_SUPIR_ALLOW_FULL_MEMORY` - opts a SUPIR full-forward test or the

@@ -87,6 +87,97 @@ pub fn skip_unavailable(reason: &str) {
     eprintln!("SKIP: {reason}");
 }
 
+/// Name a hardware CAPABILITY (`cap`, e.g. `"fp8-tensor-core"`, `"avx512-vnni"`)
+/// that this box does not have, for code that IS implemented and
+/// capability-gated but whose gated branch is therefore never exercised - and
+/// so never validated - on any box this repo currently runs on.
+///
+/// This is a third bucket, distinct from both [`skip`] and [`skip_unavailable`]:
+/// [`skip_unavailable`] is for hardware so absent the code path is never even
+/// reached (no discrete GPU at all); this is for a `cap`-gated implementation
+/// that runs right now on THIS box's fallback path, where nothing here can
+/// prove the gated branch itself is correct on hardware that has `cap`.
+/// Modelled on how firmware/RTOS suites (Zephyr-style) gate a test on a
+/// hardware test harness rather than skip silently: this prints a prominent
+/// warning naming `cap` and `reason` (expected to name the hardware needed,
+/// e.g. "needs Hopper/Blackwell tensor cores"), states plainly that the result
+/// is UNVALIDATED ON THIS BOX and MAY FAIL on hardware that has `cap`, and
+/// appends a row to the machine-readable capability ledger (`out/` by default,
+/// [`capability_ledger_path`]; `make test/capability-report` renders it).
+///
+/// Non-fatal by default, like [`skip_unavailable`] - missing a capability is
+/// not a bug. UNLIKE `skip_unavailable`, a box that DOES have `cap` can
+/// promote this into a hard failure with
+/// `BRAIN_REQUIRE_CAPABILITIES=<comma-separated caps>`, the per-capability
+/// analogue of [`skip`]'s `BRAIN_REQUIRE_FIXTURES`: keyed by a list rather than
+/// one global flag because capabilities are graded, not one binary
+/// present/absent fact about the whole box.
+///
+/// ```no_run
+/// brain_testutil::skip_unvalidated_capability("fp8-tensor-core", "needs Hopper/Blackwell tensor cores");
+/// ```
+#[track_caller]
+pub fn skip_unvalidated_capability(cap: &str, reason: &str) {
+    let loc = std::panic::Location::caller();
+    eprintln!("================================================================");
+    eprintln!("UNVALIDATED CAPABILITY: {cap}");
+    eprintln!("  reason: {reason}");
+    eprintln!("  called from: {loc}");
+    eprintln!(
+        "  This behaviour is UNVALIDATED ON THIS BOX and MAY FAIL on hardware \
+         that actually has {cap}. (Zephyr-style hardware-harness gate: loud and \
+         traceable, never a silent skip.)"
+    );
+    eprintln!("================================================================");
+
+    append_capability_ledger(cap, reason, &loc.to_string());
+
+    let required = std::env::var("BRAIN_REQUIRE_CAPABILITIES").unwrap_or_default();
+    if required.split(',').map(str::trim).any(|c| c == cap) {
+        panic!(
+            "BRAIN_REQUIRE_CAPABILITIES includes {cap:?}, so this test may not skip it as \
+             unvalidated: {reason} (at {loc})"
+        );
+    }
+}
+
+/// The path to the machine-readable capability-skip ledger
+/// [`skip_unvalidated_capability`] appends to: `$BRAIN_CAPABILITY_LEDGER` if set
+/// (and non-empty), else `<repo>/out/capability-ledger.tsv` - `out/` being
+/// where every other run-output artifact (bench/perf output, ad-hoc scripts)
+/// already lands, and gitignored the same way.
+///
+/// Tab-separated (`cap\treason\tlocation`), one row per call, append-only: a
+/// wall-clock timestamp would make this non-deterministic-friendly, and a
+/// monotonic append already answers "did this happen, how often, and where" -
+/// the only questions a capability report needs.
+pub fn capability_ledger_path() -> std::path::PathBuf {
+    std::env::var("BRAIN_CAPABILITY_LEDGER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/capability-ledger.tsv"))
+        })
+}
+
+fn append_capability_ledger(cap: &str, reason: &str, location: &str) {
+    use std::io::Write;
+    let path = capability_ledger_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Tab-separated, one row per line - a capability/reason/location may
+    // contain commas but must not contain a tab or newline (both are stripped
+    // rather than rejected, so a malformed caller cannot corrupt the ledger's
+    // line structure for every reader after it).
+    let clean = |s: &str| s.replace(['\t', '\n'], " ");
+    let row = format!("{}\t{}\t{}\n", clean(cap), clean(reason), clean(location));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(row.as_bytes());
+    }
+}
+
 /// The path to a testdata fixture, `<testdata-root>/<rel>`. The root is
 /// `$BRAIN_TESTDATA` if set (and non-empty), else `<repo>/testdata`.
 pub fn testdata(rel: &str) -> String {
@@ -283,5 +374,81 @@ mod tests {
                 None => std::env::remove_var("BRAIN_MODELS_DIR"),
             }
         }
+    }
+
+    /// Both env vars this module's capability gate reads/writes are
+    /// process-global, and cargo runs a binary's tests on parallel threads -
+    /// so every test that touches either holds [`env_lock`] for its whole
+    /// body, restores both on the way out via `Drop` (not a post-call
+    /// restore, since half of these deliberately provoke a panic that would
+    /// skip a plain restore), and points the ledger at its own tmp file so
+    /// runs never interleave writes into the real `out/` ledger.
+    struct CapabilityEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        orig_require: Option<std::ffi::OsString>,
+        orig_ledger: Option<std::ffi::OsString>,
+        ledger: std::path::PathBuf,
+    }
+
+    impl CapabilityEnv {
+        fn set_up(tag: &str) -> CapabilityEnv {
+            let guard = env_lock();
+            let orig_require = std::env::var_os("BRAIN_REQUIRE_CAPABILITIES");
+            let orig_ledger = std::env::var_os("BRAIN_CAPABILITY_LEDGER");
+            let ledger = std::env::temp_dir()
+                .join(format!("brain-testutil-capability-ledger-{tag}-{}.tsv", std::process::id()));
+            let _ = std::fs::remove_file(&ledger);
+            unsafe {
+                std::env::remove_var("BRAIN_REQUIRE_CAPABILITIES");
+                std::env::set_var("BRAIN_CAPABILITY_LEDGER", &ledger);
+            }
+            CapabilityEnv { _guard: guard, orig_require, orig_ledger, ledger }
+        }
+    }
+
+    impl Drop for CapabilityEnv {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.ledger);
+            unsafe {
+                match self.orig_require.take() {
+                    Some(v) => std::env::set_var("BRAIN_REQUIRE_CAPABILITIES", v),
+                    None => std::env::remove_var("BRAIN_REQUIRE_CAPABILITIES"),
+                }
+                match self.orig_ledger.take() {
+                    Some(v) => std::env::set_var("BRAIN_CAPABILITY_LEDGER", v),
+                    None => std::env::remove_var("BRAIN_CAPABILITY_LEDGER"),
+                }
+            }
+        }
+    }
+
+    /// (a) non-fatal by default, (b) the ledger records the row.
+    #[test]
+    fn skip_unvalidated_capability_records_and_does_not_panic_by_default() {
+        let env = CapabilityEnv::set_up("record");
+        skip_unvalidated_capability("test-cap", "needs test-hardware");
+        let body = std::fs::read_to_string(&env.ledger).expect("ledger row was appended");
+        let row = body.lines().next().expect("at least one row");
+        let mut cols = row.split('\t');
+        assert_eq!(cols.next(), Some("test-cap"));
+        assert_eq!(cols.next(), Some("needs test-hardware"));
+        assert!(cols.next().is_some(), "a location column was recorded");
+    }
+
+    /// (c) `BRAIN_REQUIRE_CAPABILITIES` naming `cap` promotes the same call to
+    /// a hard failure - the capability analogue of `BRAIN_REQUIRE_FIXTURES`.
+    #[test]
+    fn skip_unvalidated_capability_is_fatal_when_required() {
+        let _env = CapabilityEnv::set_up("required");
+        unsafe {
+            std::env::set_var("BRAIN_REQUIRE_CAPABILITIES", "other-cap,test-cap");
+        }
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let out = std::panic::catch_unwind(|| {
+            skip_unvalidated_capability("test-cap", "needs test-hardware");
+        });
+        std::panic::set_hook(prev);
+        assert!(out.is_err(), "BRAIN_REQUIRE_CAPABILITIES naming test-cap must turn the skip fatal");
     }
 }

@@ -56,7 +56,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: check/workspace help build/debug build/release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: check/workspace help build/debug build/release deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -81,6 +81,8 @@ help:
 	@echo "  make test/full               test + test/doc + test/slow + test/e2e + the check/*"
 	@echo "                               gates + parity/strict (needs make fetch/testdata)"
 	@echo "  make test/times              rank test binaries by wall time"
+	@echo "  make test/capability-report  render the hardware-capability skip ledger"
+	@echo "                               (brain_testutil::skip_unvalidated_capability)"
 	@echo "  make test/e2e                every fast end-to-end bats suite (api-conformance|"
 	@echo "                               shutdown|examples|ready; test/e2e/<name> runs one;"
 	@echo "                               claude-code + scheduler are heavier, opt-in)"
@@ -455,6 +457,13 @@ test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths
 # what keeps the fast lane fast.
 test/times: build/release
 	scripts/gates/test-times.sh --top 15
+
+# Render the capability-skip ledger `brain_testutil::skip_unvalidated_capability`
+# appends to: which hardware-gated code paths ran UNVALIDATED on this box, why,
+# how many times, and which call sites. Run the suite first - the ledger only
+# grows when a gated test actually executes its fallback path.
+test/capability-report:
+	scripts/gates/capability-report.sh
 
 # End-to-end: drive the real `claude` CLI against a local `brain serve --anthropic`,
 # proving brain works as a Claude Code backend. Skips cleanly unless `claude` is
