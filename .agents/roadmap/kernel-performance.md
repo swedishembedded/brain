@@ -512,6 +512,22 @@ as its own carefully-scoped piece of work. This is more commits than the
 original plan's "one per op family" implied, because two of the six
 "families" turned out to be two decisions each (fit vs no-fit).
 
+### M1.1's Conv2d milestone - `Op::Conv2d`, scoped to `vae::blocks` only
+
+Lands with the shape the recalibration predicted: capability + shape gated
+(`RegisterTiled` requires `workgroup_reductions` via `KernelVariant::requires`,
+plus BOTH `Cout >= GEMM_CONV2D_MIN_COUT` (32) and `hw >= GEMM_CONV2D_MIN_HW`
+(128) - unlike `Op::Conv1d`, a 2D conv's output-position count genuinely can
+be small, so there is a decode-shaped regime here to protect). Migrated
+`vae::blocks`'s own `GEMM_CONV_MIN_COUT`/inline `hw >= 128` check into
+`select.rs` verbatim, sweep provenance included, so the threshold lives in
+the one place the decision is made. `vision::blocks::Conv`'s separate
+env-var/registration-driven tree (no `DeviceCaps` read anywhere) stays
+explicitly out of scope, unchanged. `brain-vae` and `brain-backend-api`
+(40 tests, incl. the new gate test) green; `brain-flux2`/`brain-sdxlunet`
+(downstream VAE consumers) build clean. Zero clippy warnings. Commit
+`f87f85a0`.
+
 ---
 
 ## Not yet done
