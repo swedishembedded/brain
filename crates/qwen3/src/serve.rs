@@ -324,12 +324,6 @@ pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8
 /// as a failure, not a silent substitution. An implicit default should not
 /// turn an unusual imported checkpoint into a serving-process panic nobody
 /// asked for.
-///
-/// This is the SHAPE gate only. `from_map_with_gpu` also applies a
-/// CAPABILITY gate (`caps.numeric.int8_dot`, same rule as `weights_int8`/
-/// `w8_on`) - unlike this one, that gate degrades silently to fp32 KV with a
-/// printed reason rather than asserting, because a device simply lacking
-/// DP4A is not the checkpoint's fault the way an unsupported `head_dim` is.
 pub fn kv_int8_supported(cfg: &QwenConfig) -> bool {
     cfg.head_dim.is_multiple_of(4)
 }
@@ -407,10 +401,7 @@ pub struct Engine {
     pool_k: Vec<DeviceBuffer>,
     pool_v: Vec<DeviceBuffer>,
     // int8 KV: pools hold packed int8 (4/u32, ~4x smaller) + per-(token,kv-head)
-    // dequant scales. Empty when kv_int8 is false (fp32 pools). This field
-    // holds the GATED decision (the request survived `caps.numeric.int8_dot`,
-    // same rule as `weights_int8`/`w8_on`), not the raw constructor argument -
-    // see `from_map_with_gpu`'s `kv8_on`.
+    // dequant scales. Empty when kv_int8 is false (fp32 pools).
     //
     // INVARIANT: `pool_k`/`pool_v` and `scales_k`/`scales_v` MUST both be
     // addressed by the same `slot = physical*block_size + offset` -- this is
@@ -513,20 +504,6 @@ impl Engine {
         if weights_int8 && !w8_on {
             eprintln!("serve: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
         }
-        // Int8 KV is capability-driven the SAME way: `paged_decode_scores_i8_
-        // batched`/`paged_decode_apply_i8_batched` need `dot4I8Packed` exactly
-        // like the packed-int8 GEMMs do, and nothing downstream of this flag
-        // checked that before this fix - a device without DP4A would have
-        // gotten wrong results (or a driver crash) from those two kernels
-        // rather than the same fp32-fallback `w8_on` already gets. The
-        // shape check (`kv_int8_supported`/`head_dim % 4 == 0`, asserted
-        // below) stays keyed on the RAW request: an explicit `kv_int8: true`
-        // on an unsupported HEAD_DIM must still hard-fail, only a missing
-        // CAPABILITY degrades quietly.
-        let kv8_on = kv_int8 && caps.numeric.int8_dot;
-        if kv_int8 && !kv8_on {
-            eprintln!("serve: int8 KV requested but this device has no packed-int8 path; using fp32 KV");
-        }
         // The 7 per-layer linears live in the int8 bank when it is on - loading
         // them into the fp32 ParamStore as well would keep both copies resident
         // and forfeit the memory the quantisation buys.
@@ -572,14 +549,11 @@ impl Engine {
         // The WGSL append kernels require head_dim % 4 == 0 (a packed u32 must
         // stay within one head, else its 4 lanes span two heads' scales) --
         // asserted here, once, rather than left as an unguarded `/ 4` that
-        // would silently under-allocate the pool for an odd head_dim. Keyed
-        // on the RAW request (not `kv8_on`): a caller that asked for int8 KV
-        // by name on an unsupported head_dim should hear about the mismatch
-        // as a failure regardless of what this device's capabilities are.
+        // would silently under-allocate the pool for an odd head_dim.
         if kv_int8 {
             assert!(cfg.head_dim.is_multiple_of(4), "int8 KV requires head_dim % 4 == 0 (got {})", cfg.head_dim);
         }
-        let (pool_words, scale_words) = kv_pool_words(&cfg, block_size, num_blocks, kv8_on);
+        let (pool_words, scale_words) = kv_pool_words(&cfg, block_size, num_blocks, kv_int8);
         let mut pool_k = Vec::new();
         let mut pool_v = Vec::new();
         let mut scales_k = Vec::new();
@@ -593,7 +567,7 @@ impl Engine {
         for _ in 0..cfg.n_layers {
             pool_k.push(st(pool_words));
             pool_v.push(st(pool_words));
-            if kv8_on {
+            if kv_int8 {
                 scales_k.push(st(scale_words));
                 scales_v.push(st(scale_words));
                 let ck = st(cfg.n_kv_heads as u64);
@@ -735,7 +709,7 @@ impl Engine {
             prefix_hit_tokens: 0,
             pool_k,
             pool_v,
-            kv_int8: kv8_on,
+            kv_int8,
             scales_k,
             scales_v,
             kv_pool_bytes: kv_pool_bytes_val,
@@ -816,11 +790,11 @@ impl Engine {
         self.i8_scratch.is_some()
     }
 
-    /// True when the KV cache is packed int8 rather than fp32 - same
-    /// "survived the device capability gate" contract as `weights_int8`
-    /// (both fall back to fp32, with a printed reason, when the request was
-    /// `true` but `caps.numeric.int8_dot` is `false`). What a caller should
-    /// report, rather than what was asked for.
+    /// True when the KV cache is packed int8 rather than fp32 (unlike
+    /// `weights_int8`, this is exactly what the constructor was built with -
+    /// int8 KV has no capability gate to fall back from: the packed-int8 KV
+    /// kernels are plain scalar WGSL, portable to every backend, unlike the
+    /// DP4A-bound `matmul_i8*` GEMM family `weights_int8`/`w8_on` gates).
     pub fn kv_int8(&self) -> bool {
         self.kv_int8
     }

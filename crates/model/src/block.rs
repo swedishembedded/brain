@@ -1707,9 +1707,11 @@ pub const PAGED_SCORES_PER_WORKGROUP: u32 = 16;
 /// independently reimplemented exactly this rule before this seam existed.
 ///
 /// Only the F32 tier is expressed here (this Op's `Dtype::I8` arm has no
-/// cooperative sibling at all - see `Op::PagedAttention`'s doc); a caller
-/// dispatching the packed-int8 KV trio makes that choice on its own
-/// capability gate, matching `weights_int8`/`w8_on`'s shape, not this one.
+/// cooperative sibling at all, and no capability gate either - see
+/// `Op::PagedAttention`'s doc: unlike `Op::MatMul`'s DP4A-bound packed
+/// GEMMs, the packed-int8 KV kernels are plain scalar WGSL, portable to
+/// every backend); a caller dispatching the packed-int8 KV trio always
+/// uses it unconditionally, with no `*_variant` seam needed on that side.
 pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batch_heads: u32, cap: u32) -> (usize, u32) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: batch_heads, n: cap, k: 0, dtype: Dtype::F32 };
