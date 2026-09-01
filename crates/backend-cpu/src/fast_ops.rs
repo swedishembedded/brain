@@ -15,12 +15,15 @@ pub fn silu(x: &[f32], out: &mut [f32]) {
     let n = x.len().min(out.len());
     // Parallel chunks; each chunk vectorised (AVX2) or scalar.
     let chunk = (n / (rayon::current_num_threads() * 4)).max(4096);
+    // Resolved once, before the chunk fan-out, not re-checked per chunk.
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar;
     out[..n]
         .par_chunks_mut(chunk)
         .zip(x[..n].par_chunks(chunk))
         .for_each(|(o, xi)| {
             #[cfg(target_arch = "x86_64")]
-            if crate::fast_conv::avx2_available() {
+            if use_avx2 {
                 unsafe { silu_avx2(xi, o) };
                 return;
             }
@@ -66,13 +69,16 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
 pub fn silu_mul(a: &[f32], b: &[f32], out: &mut [f32]) {
     let n = a.len().min(b.len()).min(out.len());
     let chunk = (n / (rayon::current_num_threads() * 4)).max(4096);
+    // Resolved once, before the chunk fan-out, not re-checked per chunk.
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar;
     out[..n]
         .par_chunks_mut(chunk)
         .zip(a[..n].par_chunks(chunk))
         .zip(b[..n].par_chunks(chunk))
         .for_each(|((o, ai), bi)| {
             #[cfg(target_arch = "x86_64")]
-            if crate::fast_conv::avx2_available() {
+            if use_avx2 {
                 unsafe { silu_mul_avx2(ai, bi, o) };
                 return;
             }
@@ -117,14 +123,17 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
     if m == 0 || n == 0 {
         return;
     }
+    // Resolved once, before `row` is defined, not re-walked per row.
+    #[cfg(target_arch = "x86_64")]
+    let tier = crate::fast_conv::isa_tier();
     let row = |arow: &[f32], crow: &mut [f32]| {
         #[cfg(target_arch = "x86_64")]
-        if crate::fast_conv::avx512_available() {
+        if tier == crate::fast_conv::IsaTier::Avx512 {
             unsafe { row_abt_avx512(arow, b, crow, k, n) };
             return;
         }
         #[cfg(target_arch = "x86_64")]
-        if crate::fast_conv::avx2_available() {
+        if tier == crate::fast_conv::IsaTier::Avx2 {
             unsafe { row_abt_avx2(arow, b, crow, k, n) };
             return;
         }
@@ -316,7 +325,7 @@ pub(crate) fn affine_relu_inplace(buf: &mut [f32], s: f32, b: f32) {
 /// gate-producing convs). AVX2 via the shared `exp256_ps` when available.
 pub(crate) fn affine_sigmoid_inplace(buf: &mut [f32], s: f32, b: f32) {
     #[cfg(target_arch = "x86_64")]
-    if crate::fast_conv::avx2_available() {
+    if crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar {
         unsafe { affine_sigmoid_avx2(buf, s, b) };
         return;
     }
@@ -354,7 +363,7 @@ unsafe fn affine_sigmoid_avx2(buf: &mut [f32], s: f32, b: f32) {
 /// fallback; AVX2 variant below.
 pub(crate) fn affine_silu_inplace(buf: &mut [f32], s: f32, b: f32) {
     #[cfg(target_arch = "x86_64")]
-    if crate::fast_conv::avx2_available() {
+    if crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar {
         unsafe { affine_silu_avx2(buf, s, b) };
         return;
     }
@@ -447,6 +456,9 @@ pub fn bn_eval(params: &[u32], x: &[f32], mv: &[f32], gb: &[f32], out: &mut [f32
     // rayon scheduling cost stays negligible vs the per-plane affine.
     let planes = n * c;
     let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    // Resolved once, before the per-plane fan-out, not re-checked per plane.
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar;
     out.par_chunks_mut(hw * group).enumerate().for_each(|(gi, chunk)| {
         for (k, o) in chunk.chunks_mut(hw).enumerate() {
             let plane = gi * group + k;
@@ -455,7 +467,7 @@ pub fn bn_eval(params: &[u32], x: &[f32], mv: &[f32], gb: &[f32], out: &mut [f32
             let xi = &x[plane * hw..plane * hw + o.len()];
             if act == 0 {
                 #[cfg(target_arch = "x86_64")]
-                if crate::fast_conv::avx2_available() {
+                if use_avx2 {
                     unsafe { affine_avx2(xi, s, b, o) };
                     continue;
                 }
@@ -834,7 +846,7 @@ fn axpy(dst: &mut [f32], scale: f32, src: &[f32]) {
         return;
     }
     #[cfg(target_arch = "x86_64")]
-    if crate::fast_conv::avx2_available() {
+    if crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar {
         unsafe { axpy_avx2(dst, scale, src) };
         return;
     }
@@ -903,6 +915,9 @@ pub fn scale_add(
     if seq_len == 0 || d_model == 0 {
         return;
     }
+    // Resolved once, before `row` is defined, not re-checked per row.
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar;
     let row = |t: usize, srow: &[f32], arow: &mut [f32]| {
         let g = gate[t * n_experts + e_idx];
         if accumulate {
@@ -911,7 +926,7 @@ pub fn scale_add(
             axpy(arow, g, srow);
         } else {
             #[cfg(target_arch = "x86_64")]
-            if crate::fast_conv::avx2_available() {
+            if use_avx2 {
                 unsafe { scale_set_avx2(arow, g, srow) };
                 return;
             }
@@ -968,18 +983,21 @@ pub fn moe_linear_gated_fwd(
     if m == 0 || n == 0 {
         return;
     }
+    // Resolved once, before `row` is defined, not re-walked per row.
+    #[cfg(target_arch = "x86_64")]
+    let tier = crate::fast_conv::isa_tier();
     let row = |r: usize, xrow: &[f32], orow: &mut [f32]| {
         if gate[r * n_experts + e_idx] <= 0.0 {
             orow.iter_mut().for_each(|v| *v = 0.0);
             return;
         }
         #[cfg(target_arch = "x86_64")]
-        if crate::fast_conv::avx512_available() {
+        if tier == crate::fast_conv::IsaTier::Avx512 {
             unsafe { row_abt_avx512(xrow, w, orow, k, n) };
             return;
         }
         #[cfg(target_arch = "x86_64")]
-        if crate::fast_conv::avx2_available() {
+        if tier == crate::fast_conv::IsaTier::Avx2 {
             unsafe { row_abt_avx2(xrow, w, orow, k, n) };
             return;
         }

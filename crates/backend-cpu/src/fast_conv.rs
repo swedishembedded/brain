@@ -125,6 +125,39 @@ pub fn avx512_available() -> bool {
     }
 }
 
+/// The ISA tier a hot loop should dispatch at: `avx512_available()` beats
+/// `avx2_available()` beats scalar, exactly the priority every avx512-then-avx2
+/// if-ladder in this crate already encoded. [`avx2_available`] and
+/// [`avx512_available`] each cache their own CPUID probe inside
+/// `std::is_x86_feature_detected!`, so this enum does not save a probe - it
+/// collapses the two-function ladder that per-row/per-chunk call sites were
+/// re-walking on every iteration into one value, so it can be resolved once
+/// (see [`isa_tier`]) and reused for the rest of that call.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IsaTier {
+    Scalar,
+    Avx2,
+    Avx512,
+}
+
+/// Resolve [`IsaTier`] once per process via a `OnceLock`. Call this ONCE at
+/// the top of a hot-loop function (before the loop/closure, never inside it)
+/// and branch on the returned value, instead of re-calling
+/// `avx512_available()`/`avx2_available()` per row.
+#[inline]
+pub fn isa_tier() -> IsaTier {
+    static TIER: std::sync::OnceLock<IsaTier> = std::sync::OnceLock::new();
+    *TIER.get_or_init(|| {
+        if avx512_available() {
+            IsaTier::Avx512
+        } else if avx2_available() {
+            IsaTier::Avx2
+        } else {
+            IsaTier::Scalar
+        }
+    })
+}
+
 /// Compute the bias-free NCHW convolution, matching `conv2d.wgsl` exactly (up to
 /// fp reassociation). Uses the AVX2 GEMM path when available, else a portable
 /// scalar GEMM with the same tiling.
