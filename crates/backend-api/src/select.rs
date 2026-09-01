@@ -72,6 +72,25 @@ pub enum Op {
     /// comment). `m` is `batch` times `n_heads`, `n` = `cap` (the key axis
     /// each score reduces over); `k` unused.
     PagedAttention,
+    /// Sparse-MoE expert linear (`moe_linear_gated.wgsl`'s dtype family:
+    /// `moe_linear_gated_i8.wgsl`/`moe_linear_gated_q4.wgsl`) - the dtype/
+    /// quant tier ONLY, mirroring [`Op::MatMul`]'s `Dtype` arm. Deliberately
+    /// narrower than that: every physical kernel in this family is a naive
+    /// one-thread-per-output dispatch with an ordinary `return` for a
+    /// non-routed row (no `workgroupBarrier()` anywhere in any of them - a
+    /// per-thread early exit ahead of a barrier every thread must reach
+    /// uniformly would be undefined WGSL behaviour), so there is no
+    /// cooperative/register-tiled sibling at ANY dtype and therefore no
+    /// shape gate - see [`candidates`] for why F32/BF16/F16 is
+    /// unconditionally [`KernelVariant::Reference`] while I8/Q4 genuinely
+    /// needs `caps.numeric.int8_dot` (unlike [`Op::PagedAttention`]'s I8
+    /// tier, which does not). The dense-loop-vs-compact-vs-decode-sparse
+    /// dispatch policy is a separate, host-synchronizing, data-dependent
+    /// decision that differs by design between models - explicitly OUT of
+    /// this Op's scope, left unmigrated (the campaign ledger's "M1.1's
+    /// scope, recalibrated" entry). `m`/`n`/`k` are unused - shape never
+    /// gates this Op.
+    MoeExpertLinear,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -527,6 +546,31 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::PagedAttention => match shape.dtype {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![WorkgroupPerOutput, Reference],
             Dtype::I8 | Dtype::Q4 => vec![Reference],
+        },
+        // Sparse-MoE expert linear - capability only, NO shape gate, unlike
+        // `Op::MatMul`'s Dtype arm this mirrors: none of
+        // `moe_linear_gated{,_i8,_q4}.wgsl` has a cooperative/register-tiled
+        // sibling (see `Op::MoeExpertLinear`'s doc for why a barrier-shaped
+        // tile is unsafe with this family's per-row early exit), so there is
+        // no decode-vs-prefill regime to split on at any dtype.
+        //
+        // F32/BF16/F16 -> `Reference` (`moe_linear_gated.wgsl`, needs
+        // nothing). I8/Q4 -> `PackedInt8`, and UNLIKE `Op::PagedAttention`'s
+        // I8 tier this really is `int8_dot`-gated - checked against the
+        // actual kernel source, not assumed from the shape of the earlier
+        // (wrong) `kv_int8` claim: `moe_linear_gated_i8.wgsl` calls
+        // `dot4I8Packed` once per weight-scale group in its inner loop, so
+        // it is genuinely DP4A-bound, same as `Op::MatMul`'s packed GEMMs.
+        // `moe_linear_gated_q4.wgsl` itself unpacks nibbles with plain
+        // scalar bit-shifts (no `dot4I8Packed` call) - the SAME mismatch
+        // `matmul_q4_dyn`/`matmul_q4_gemv` already have against `Op::MatMul`'s
+        // Q4 arm (this ledger's own "Q4 uses zero `dot4I8Packed`" finding);
+        // fixing that is Phase 5 (M5.5) territory, not re-litigated per Op
+        // here, so Q4 mirrors I8's `int8_dot` requirement exactly as
+        // `Op::MatMul` already does.
+        Op::MoeExpertLinear => match shape.dtype {
+            Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![Reference],
+            Dtype::I8 | Dtype::Q4 => vec![PackedInt8],
         },
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
         // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
@@ -1003,6 +1047,57 @@ mod tests {
         assert_eq!(s.select(Op::PagedAttention, i8_shape, &cpu_caps()), KernelVariant::Reference);
     }
 
+    /// Sparse-MoE expert linear has NO shape gate at any dtype - unlike every
+    /// other dtype-keyed Op in this file, none of `moe_linear_gated{,_i8,
+    /// _q4}.wgsl` has a cooperative/register-tiled sibling, so `m`/`n` never
+    /// move the choice. F32/BF16/F16 is unconditionally `Reference`
+    /// (`moe_linear_gated.wgsl` needs no device capability). I8/Q4 genuinely
+    /// needs `int8_dot`: checked against the actual kernel source (per this
+    /// campaign's own rule, after the paged-attention `kv_int8` claim turned
+    /// out false the same shape) - `moe_linear_gated_i8.wgsl` calls
+    /// `dot4I8Packed` once per weight-scale group, so it IS DP4A-bound, unlike
+    /// `Op::PagedAttention`'s I8 tier. A device without `int8_dot` therefore
+    /// falls back to `Reference` via the uniform "never empty" filter.
+    #[test]
+    fn moe_expert_linear_is_capability_only_with_no_shape_gate() {
+        let s = DefaultSelector;
+        for dtype in [Dtype::F32, Dtype::BF16, Dtype::F16] {
+            for m in [1u32, 8, 32, 512, 4096] {
+                for n in [16u32, 128, 1024, 8192] {
+                    let sh = shape(m, n, 512, dtype);
+                    assert_eq!(
+                        s.select(Op::MoeExpertLinear, sh, &gpu_caps()),
+                        KernelVariant::Reference,
+                        "dtype={dtype:?} m={m} n={n}"
+                    );
+                    assert_eq!(
+                        s.select(Op::MoeExpertLinear, sh, &cpu_caps()),
+                        KernelVariant::Reference,
+                        "dtype={dtype:?} m={m} n={n}"
+                    );
+                }
+            }
+        }
+        for dtype in [Dtype::I8, Dtype::Q4] {
+            for m in [1u32, 8, 512, 4096] {
+                let sh = shape(m, 4096, 512, dtype);
+                assert_eq!(
+                    s.select(Op::MoeExpertLinear, sh, &gpu_caps()),
+                    KernelVariant::PackedInt8,
+                    "dtype={dtype:?} m={m}"
+                );
+                // No `int8_dot` (the CPU JIT) -> falls back to `Reference`,
+                // never `PackedInt8` (which would be a real correctness gap:
+                // the CPU JIT has no packed-int8 compute path at all).
+                assert_eq!(
+                    s.select(Op::MoeExpertLinear, sh, &cpu_caps()),
+                    KernelVariant::Reference,
+                    "dtype={dtype:?} m={m}"
+                );
+            }
+        }
+    }
+
     /// The candidate list is never empty and its head IS the default policy —
     /// one list, so the static choice and the tuner's probe set cannot drift.
     #[test]
@@ -1018,6 +1113,7 @@ mod tests {
                 Op::MaxAbsRow,
                 Op::Softmax,
                 Op::PagedAttention,
+                Op::MoeExpertLinear,
             ] {
                 for m in [1u32, 8, 9, 33, 4096] {
                     for dtype in [Dtype::F32, Dtype::I8] {
