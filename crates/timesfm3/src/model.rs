@@ -133,12 +133,26 @@ impl Timesfm3 {
         Ok(Timesfm3 { gpu, cfg, w })
     }
 
-    /// Load a model from a brain `.safetensors` container (see [`crate::import`]).
+    /// Load a model from EITHER a brain `.safetensors` container (see
+    /// [`crate::import::import`]) or a raw fetched checkpoint directory
+    /// (`brain pull google/timesfm-3.0-pytorch`'s own output - `config.json`
+    /// + `model.safetensors`, never converted). A directory is always the
+    /// raw form and a brain container is always a single file - `import`'s
+    /// own output convention - so that alone tells the two apart, the same
+    /// way `kronos::import::load_decoder` accepts both without the caller
+    /// naming which one it has. This is what makes `brain pull` +
+    /// `BRAIN_TIMESFM3=<fetched dir>` work with no manual `brain forecast
+    /// import` step in between.
     pub fn load(path: &str) -> Result<Timesfm3, String> {
         Timesfm3::load_on(Gpu::new(PIPELINES), path)
     }
 
     pub fn load_on(gpu: Gpu, path: &str) -> Result<Timesfm3, String> {
+        if std::path::Path::new(path).is_dir() {
+            let cfg = crate::import::load_config(path)?;
+            let weights = crate::import::load_hf(&cfg, path)?;
+            return Timesfm3::from_weights_on(gpu, cfg, &weights);
+        }
         let c = checkpoint::load(path);
         let cfg = Timesfm3Config::from_json(&c.header["config"])?;
         let weights = c.by_role("");
