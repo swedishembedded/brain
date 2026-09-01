@@ -27,7 +27,6 @@ default-members = [
     "crates/optim",
     "crates/atif",
     "crates/rl",
-    "crates/autodiff",
     "crates/data",
     "crates/audio",
     "crates/model",

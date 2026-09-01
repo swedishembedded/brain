@@ -697,8 +697,8 @@ fast and scalable kernel - not a naive one.
     (`diamond` is the one served world-model architecture today; SDL window
     via `crates/wm-display`).
 
-> `crates/timeseries` and `crates/autodiff` are **placeholders** - declared in the
-> workspace, implemented in a later phase.
+> `crates/timeseries` is a **placeholder** - declared in the workspace,
+> implemented in a later phase.
 
 ---
 
@@ -783,7 +783,6 @@ front-end to depend on.
 | `shutdown` | process lifecycle for every serving surface: one shutdown source (`Shutdown`) and one readiness latch (`ready::Gate`). SIGINT/SIGTERM disposition is **process-wide** - if each surface calls `tokio::signal::ctrl_c()` independently, only the first registration receives it and which one is unspecified. `install_signals` owns the single registration on a dedicated thread, so it does not matter which surface's runtime is built first |
 | `checkpoint` | `.safetensors` container + manifest/SHA-256 + expert-shard I/O (no fs on wasm) |
 | `model` | architecture-agnostic `Model` abstraction, generic trainer, shared block builders (`block.rs`, `vit.rs`), paged KV, and the multi-GPU parallelism layer |
-| `autodiff` | shared SSA forward-cache / reverse-mode scaffolding - **placeholder** |
 | `imaging` | the image substrate: decode/encode, device-dispatched resize/pad/crop/layout, colour normalisation, **mask algebra** (threshold/dilate/erode/feather/invert/union/intersect/difference/composite) and tiling - one home for what was scattered across zipdepth, yolov8, worldmirror2, s3dit, capture and cli |
 | `imgpipe` | the composed pipeline: a stage list executed as ONE capability call, dispatching its model stages back through `capability::Registry`. Pixels outside the mask come back **bit-identical** |
 | `captioner` | the model-agnostic captioning seam (`Clip` in, text out) plus the resumable folder labeler behind `brain label`. No model code: the implementors live in the VLM crates and depend on this one. Designed for video (the unit is a clip, not a frame), image path built |
