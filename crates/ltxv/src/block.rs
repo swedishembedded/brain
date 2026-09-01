@@ -481,23 +481,28 @@ const FLASH_IDS: model::block::FlashIds =
 ///   thing.
 /// * `head_dim <= 128` - the family's hard limit (`flash_bidir_fwd` asserts
 ///   it); checked here so the fallback is a decision, not a panic.
-/// * `DeviceCaps::workgroup_reductions` - every kernel in the family is
+/// * `DeviceCaps::workgroup_reductions`, via the shared
+///   [`model::block::flash_gate`] outer gate - every kernel in the family is
 ///   workgroup-cooperative and forward-only, and the Cranelift CPU JIT
 ///   supports one top-level barrier per kernel where these need two or three.
 ///   `flash_bidir_fwd`'s own doc names [`attn_scores_kt`]'s materialized trio
 ///   as the fallback contract, which is exactly what the `else` arm below is.
 ///   This is the branch `make gradcheck` and every `BRAIN_DEVICE=cpu` test
-///   take, so it stays the reference definition of the math.
+///   take, so it stays the reference definition of the math. `self_attn &&
+///   head_dim <= 128` is this crate's own `extra` condition to that shared
+///   gate.
 fn flash_self_attn(gpu: &Gpu, self_attn: bool, head_dim: u32) -> bool {
-    self_attn && head_dim <= 128 && gpu.caps().workgroup_reductions
+    model::block::flash_gate(&gpu.caps(), self_attn && head_dim <= 128)
 }
 
 /// Whether THIS attention call takes the fused CROSS path
 /// (`model::block::flash_cross_step`). The mirror of [`flash_self_attn`], with
-/// the same two non-device conditions and the shared selector's own device
-/// gate - which is stricter than `workgroup_reductions` alone, because the one
-/// registered rung also needs 48 KiB of workgroup memory and a 256-thread
-/// workgroup. Anything it refuses keeps the materialized
+/// the same two non-device conditions run through the same shared
+/// [`model::block::flash_gate`], ANDed with
+/// [`model::block::flash_cross_supported`] - stricter than
+/// `workgroup_reductions` alone, because the one registered rung also needs
+/// 48 KiB of workgroup memory and a 256-thread workgroup. Anything it refuses
+/// keeps the materialized
 /// scores/softmax/apply trio, which stays the reference definition of the math
 /// (it is the branch `make gradcheck` and every `BRAIN_DEVICE=cpu` test take).
 ///
@@ -506,7 +511,8 @@ fn flash_self_attn(gpu: &Gpu, self_attn: bool, head_dim: u32) -> bool {
 /// SELF-attention call here would cost the `pack_qkv`-free layout the flash
 /// self path is built around for nothing.
 fn flash_cross_attn(gpu: &Gpu, self_attn: bool, head_dim: u32) -> bool {
-    !self_attn && head_dim <= 128 && model::block::flash_cross_supported(&gpu.caps())
+    let caps = gpu.caps();
+    model::block::flash_gate(&caps, !self_attn && head_dim <= 128) && model::block::flash_cross_supported(&caps)
 }
 
 /// The attention context `[nq, inner_dim]` for already-projected, already-
