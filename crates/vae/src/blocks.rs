@@ -29,6 +29,7 @@
 //! down/mid/up schedule, `vqgan::model` walks the reference's flat
 //! `nn.ModuleList`. Neither owns a copy of a block.
 
+use gpu_core::select::{DefaultSelector, KernelSelector, KernelVariant, Op as SelectOp, OpShape};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
 
@@ -213,9 +214,10 @@ pub const DW_SPLITK_TARGET_WGS: u32 = 288;
 /// through `Cout = 16` and the lowering's lead widens from 32 upward.
 ///
 /// The crossover sits between 16 and 32, so 32 is the threshold. This is NOT
-/// the forward's `GEMM_CONV_MIN_COUT` (128) - different kernels, separately
-/// measured, and assuming they share a threshold would leave a growing win
-/// unclaimed for every 32..128-channel conv.
+/// the forward's `backend_api::select::GEMM_CONV2D_MIN_COUT` (128) -
+/// different kernels, separately measured, and assuming they share a
+/// threshold would leave a growing win unclaimed for every 32..128-channel
+/// conv.
 pub const GEMM_CONV_BWD_MIN_COUT: u32 = 32;
 
 /// Copy [`KERNELS`] into the front of a fixed-size kernel set whose remaining
@@ -593,32 +595,11 @@ pub struct Builder<'a> {
 /// tree, see [`gpu_core::lower`].
 const COL_BUDGET_MIB: u64 = 512;
 
-/// Minimum output channels for the lowered conv: `matmul_reg3` computes a
-/// 128-wide column tile, so a conv with fewer output channels pays for a full
-/// tile and wins nothing (the FLUX.2 `conv_out`, Cout = 3, is 42x wasted). It
-/// stays on the direct register-tiled conv.
-///
-/// # 32, swept — it was 128, inherited from a kernel pair that no longer runs
-///
-/// The 128 came from the ORIGINAL lowering and was never re-derived after
-/// `matmul_reg3` replaced `matmul_reg2` in it. Re-swept with `vqgan_bench
-/// convfwd` (P40, best of 5, 3x3 stride-1; direct = `conv_bias_reg`, lowered =
-/// `im2col_at` + `matmul_reg3` + `nlc_bias_nchw`). Re-run it for this box's
-/// own figures. Across the (128, Cout) 256² sweep and the (256, 32) 128² /
-/// (512, 64) 64² shapes alike, the direct kernel's time climbs with `Cout`
-/// while the lowering's barely moves.
-///
-/// The crossover is between 16 and 32 - the SAME place the backward's
-/// re-derivation landed ([`GEMM_CONV_BWD_MIN_COUT`]), because it is the same
-/// GEMM. At 128 every conv with `32 <= Cout < 128` took the direct kernel and
-/// gave up anything from a slim win to a multiple.
-///
-/// Who this actually moves: **inference only**, and only for architectures in
-/// that channel band. `conv_s` pins train mode to the direct lowering (its
-/// adjoints are the ones that exist), and VQGAN/AutoencoderKL/SDXL all carry
-/// at least 128 channels - so this is worth nothing to them and everything to
-/// RRDBNet (`num_feat` 64, `num_grow_ch` 32) and the vision backbones.
-const GEMM_CONV_MIN_COUT: u32 = 32;
+// `conv_s`'s direct-vs-lowered choice now runs through
+// `backend_api::select::Op::Conv2d` (`GEMM_CONV2D_MIN_COUT`/
+// `GEMM_CONV2D_MIN_HW` in that module carry the measured thresholds and
+// their sweep provenance - migrated there verbatim so this campaign's
+// selection seam is the one place the decision lives, per that `Op`'s doc).
 
 impl<'a> Builder<'a> {
     /// New builder over `gpu` (built with a kernel set whose first
@@ -973,6 +954,19 @@ impl<'a> Builder<'a> {
         b
     }
 
+    /// Ask `backend_api::select` whether `conv_s`'s lowered GEMM
+    /// (`Op::Conv2d`) is the one to run for this shape. `RegisterTiled`
+    /// names the whole lowering (im2col + GEMM + bias epilogue), and carries
+    /// the `workgroup_reductions` requirement the register-tiled GEMM needs,
+    /// which is what keeps the CPU JIT, whose split-at-barrier model
+    /// mis-executes it, on the direct kernel without a backend-name test.
+    /// `m` = output positions (`hw`), `n` = `Cout`, `k` = the contraction
+    /// (`Cin*K*K`), same shape convention as `Op::Conv1d`'s callers.
+    fn conv2d_lowered(gpu: &Gpu, hw: u32, cout: u32, cinkk: u32) -> bool {
+        let shape = OpShape { m: hw, n: cout, k: cinkk, dtype: gpu_core::select::Dtype::F32 };
+        DefaultSelector.select(SelectOp::Conv2d, shape, &gpu.caps()) == KernelVariant::RegisterTiled
+    }
+
     /// Conv with an explicit stride and output size. Two lowerings:
     ///
     /// * **direct** - `conv_bias_reg`, the 8x4 register-tiled kernel. Measured
@@ -981,12 +975,14 @@ impl<'a> Builder<'a> {
     ///   Its ceiling is structural rather than a tuning miss: 12 global loads
     ///   per 32 FMAs is 0.75 byte/FLOP, so the arithmetic-intensity roofline
     ///   already sits about where it measures, with caching worth a little more.
-    /// * **lowered** (`self.coop`, `cout >= GEMM_CONV_MIN_COUT`) — `im2col_at` +
-    ///   `matmul_reg3` + `nlc_bias_nchw`, i.e. `y[HW, Cout] = col[HW, CinKK] ·
-    ///   Wᵀ`, which runs at the GEMM's far higher share of peak. This is the same trade
-    ///   already scoped to "a compute-bound discrete GPU" and taken for
-    ///   YOLO's convs; the P40 is that GPU. The transposed orientation (positions as GEMM ROWS)
-    ///   is what makes it chunkable: a spatial chunk is a contiguous row range
+    /// * **lowered** (`backend_api::select::Op::Conv2d` picks
+    ///   `KernelVariant::RegisterTiled` - capability + shape gated, see
+    ///   [`conv2d_lowered`]) - `im2col_at` + `matmul_reg3` + `nlc_bias_nchw`,
+    ///   i.e. `y[HW, Cout] = col[HW, CinKK] · Wᵀ`, which runs at the GEMM's
+    ///   far higher share of peak. This is the same trade already scoped to
+    ///   "a compute-bound discrete GPU" and taken for YOLO's convs; the P40
+    ///   is that GPU. The transposed orientation (positions as GEMM ROWS) is
+    ///   what makes it chunkable: a spatial chunk is a contiguous row range
     ///   of both `col` and the output, so the 2.4 GB whole-image operand
     ///   becomes a bounded scratch (see `im2col_at.wgsl`).
     #[allow(clippy::too_many_arguments)]
@@ -1009,7 +1005,7 @@ impl<'a> Builder<'a> {
         let bias = self.dev(&bn);
         let hw = ho * wo;
         let cinkk = cin * k * k;
-        if self.train || !(self.coop && cout >= GEMM_CONV_MIN_COUT && hw >= 128) {
+        if self.train || !Self::conv2d_lowered(self.gpu, hw, cout, cinkk) {
             return self.conv_direct(wn, bn, &wgt, &bias, cin, cout, k, stride, pad, h, w, ho, wo, x);
         }
         let y = self.act((cout * ho * wo) as u64);

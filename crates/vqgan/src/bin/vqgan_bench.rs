@@ -441,7 +441,7 @@ fn dwtn_ab(reps: usize) {
     }
 }
 
-/// `vqgan_bench convfwd [reps]` — re-derive `GEMM_CONV_MIN_COUT`.
+/// `vqgan_bench convfwd [reps]` - re-derive `backend_api::select::GEMM_CONV2D_MIN_COUT`.
 ///
 /// The forward threshold (128) was measured for the ORIGINAL kernel pair and
 /// never re-derived after `matmul_reg3` replaced `matmul_reg2` in the lowering.

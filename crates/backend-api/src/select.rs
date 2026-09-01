@@ -91,6 +91,18 @@ pub enum Op {
     /// scope, recalibrated" entry). `m`/`n`/`k` are unused - shape never
     /// gates this Op.
     MoeExpertLinear,
+    /// Forward 2D convolution, NCHW (`conv_bias_reg` direct vs the
+    /// `im2col_at` + `matmul_reg3` + `nlc_bias_nchw` GEMM lowering) - scoped
+    /// to `vae::blocks::Builder::conv_s`'s capability + shape-gated decision
+    /// tree, the genuine [`Op::Conv1d`] analogue. `vision::blocks::Conv`'s
+    /// separate env-var/registration-driven tree reads no `DeviceCaps`
+    /// anywhere and is a structurally different decision - explicitly out of
+    /// scope for this variant (the campaign ledger's "M1.1's scope,
+    /// recalibrated" entry). Shape is the LOWERED GEMM's: `m` = output
+    /// positions (`Ho·Wo`), `n` = `Cout`, `k` = the contraction (`Cin·K·K`).
+    /// Unlike [`Op::Conv1d`], BOTH `m` and `n` gate the lowering - see
+    /// [`GEMM_CONV2D_MIN_COUT`]/[`GEMM_CONV2D_MIN_HW`].
+    Conv2d,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -281,7 +293,7 @@ pub const GEMM_TILE_MIN_COLS: u32 = 128;
 ///
 /// # 16, swept - NOT the 2D lowering's 32, and the difference is the baseline
 ///
-/// `vae::blocks`'s `GEMM_CONV_MIN_COUT` measured 32 for the same GEMM, but its
+/// [`GEMM_CONV2D_MIN_COUT`] measured 32 for the same GEMM, but its
 /// "direct" side is `conv_bias_reg`, an `@opt 5` register-tiled conv that
 /// reaches a large fraction of the card's compute roof. The 1D direct side is
 /// `conv1d`, one thread per output element with a serial reduction, which the
@@ -333,6 +345,55 @@ pub const GEMM_CONV1D_MIN_COUT: u32 = 16;
 /// narrowest width actually measured, not because anything is known to break
 /// below it.
 pub const GEMM_CONVTR1D_MIN_COUT: u32 = 4;
+
+/// Minimum output channels for the GEMM-lowered 2D convolution
+/// ([`Op::Conv2d`], scoped to `vae::blocks::Builder::conv_s`'s tree - see
+/// that variant's doc for why `vision::blocks::Conv`'s separate tree is out
+/// of scope). `matmul_reg3` computes a 128-wide column tile, so a conv with
+/// fewer output channels pays for a full tile and wins nothing (the FLUX.2
+/// `conv_out`, Cout = 3, is 42x wasted). It stays on the direct
+/// register-tiled conv (`conv_bias_reg`) below this.
+///
+/// # 32, swept - it was 128, inherited from a kernel pair that no longer runs
+///
+/// The 128 came from the ORIGINAL lowering and was never re-derived after
+/// `matmul_reg3` replaced `matmul_reg2` in it. Re-swept with `vqgan_bench
+/// convfwd` (P40, best of 5, 3x3 stride-1; direct = `conv_bias_reg`, lowered
+/// = `im2col_at` + `matmul_reg3` + `nlc_bias_nchw`). Re-run it for this box's
+/// own figures. Across the (128, Cout) 256² sweep and the (256, 32) 128² /
+/// (512, 64) 64² shapes alike, the direct kernel's time climbs with `Cout`
+/// while the lowering's barely moves.
+///
+/// The crossover is between 16 and 32 - the SAME place `vae::blocks::grad`'s
+/// backward re-derivation landed (`GEMM_CONV_BWD_MIN_COUT`), because it is
+/// the same GEMM. At 128 every conv with `32 <= Cout < 128` took the direct
+/// kernel and gave up anything from a slim win to a multiple.
+///
+/// Who this actually moves: **inference only**, and only for architectures
+/// in that channel band. `conv_s` pins train mode to the direct lowering
+/// (its adjoints are the ones that exist), and VQGAN/AutoencoderKL/SDXL all
+/// carry at least 128 channels - so this is worth nothing to them and
+/// everything to RRDBNet (`num_feat` 64, `num_grow_ch` 32) and the vision
+/// backbones.
+///
+/// Migrated verbatim from `vae::blocks`'s own constant of the same value -
+/// this campaign's selection seam is now the one place that decision lives,
+/// per [`Op::Conv2d`]'s doc.
+pub const GEMM_CONV2D_MIN_COUT: u32 = 32;
+
+/// Minimum output POSITIONS (`Ho·Wo`) for the GEMM-lowered 2D convolution
+/// ([`Op::Conv2d`]) - the row-tile companion to [`GEMM_CONV2D_MIN_COUT`]'s
+/// column-tile threshold. `matmul_reg3` computes a 128-row tile just as it
+/// computes a 128-wide column tile, so a conv whose output plane has fewer
+/// than 128 positions (a small feature map late in an encoder, or a coarse
+/// decode step) pays for a mostly-idle row tile the same way a narrow
+/// `Cout` pays for a mostly-idle column tile.
+///
+/// Migrated verbatim from `vae::blocks::Builder::conv_s`'s inline `hw >= 128`
+/// check - unlike [`GEMM_CONV2D_MIN_COUT`] this literal was never
+/// independently swept against the direct kernel; it is carried over
+/// unchanged, not invented here.
+pub const GEMM_CONV2D_MIN_HW: u32 = 128;
 
 /// `BRAIN_NO_COOP_LN=1` pins LayerNorm to the per-element kernels — the A/B
 /// switch the end-to-end speedup was measured with, and the fallback if a
@@ -608,6 +669,27 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
                 None => vec![Reference],
             }
         }
+        // The 2D convolution, scoped to `vae::blocks::Builder::conv_s`'s
+        // tree - see `Op::Conv2d`'s doc for why `vision::blocks::Conv`'s
+        // separate tree is out of scope. Same GEMM-vs-direct shape as
+        // `Op::Conv1d` (`RegisterTiled` again means the whole lowering, so
+        // it inherits `workgroup_reductions` from
+        // `KernelVariant::requires`), but BOTH axes gate it here: `conv_s`'s
+        // own `hw >= 128` check (a mostly-idle 128-row tile,
+        // `GEMM_CONV2D_MIN_HW`) alongside the `Cout` column-tile gate
+        // (`GEMM_CONV2D_MIN_COUT`) - unlike a 1D conv's `Lo`, a 2D conv's
+        // `Ho*Wo` genuinely can be small (a coarse late-encoder feature map),
+        // so there IS a decode-shaped regime here to protect. No env-var
+        // override exists for this one - `conv_s` never had one, and this
+        // migration preserves its exact prior behaviour rather than adding a
+        // new knob.
+        Op::Conv2d => {
+            if shape.n >= GEMM_CONV2D_MIN_COUT && shape.m >= GEMM_CONV2D_MIN_HW {
+                vec![RegisterTiled, Reference]
+            } else {
+                vec![Reference]
+            }
+        }
         // Device-independent: the split kernels have no barrier, so the
         // boundary is purely the row length.
         Op::ArgMaxRow => {
@@ -825,6 +907,24 @@ mod tests {
             // Few positions, wide output: still lowered. `m` is not a gate.
             assert_eq!(s.select(op, shape(8, 256, 512, Dtype::F32), &gpu_caps()), KernelVariant::RegisterTiled, "{op:?}");
         }
+    }
+
+    /// The 2D convolution, scoped to `vae::blocks::Builder::conv_s`'s tree
+    /// (`Op::Conv2d`'s doc). Unlike [`Op::Conv1d`], BOTH the output-position
+    /// count (`m`) and the output-channel count (`n`) must clear their
+    /// threshold - `conv_s`'s own `hw >= 128` check alongside the `Cout`
+    /// column-tile gate - and, same as the 1D convolutions, direct on any
+    /// device without workgroup reductions.
+    #[test]
+    fn conv2d_is_gated_on_both_hw_and_cout_and_on_workgroup_reductions() {
+        let s = DefaultSelector;
+        let wide = shape(GEMM_CONV2D_MIN_HW, GEMM_CONV2D_MIN_COUT, 288, Dtype::F32);
+        let narrow_cout = shape(GEMM_CONV2D_MIN_HW, GEMM_CONV2D_MIN_COUT - 1, 288, Dtype::F32);
+        let narrow_hw = shape(GEMM_CONV2D_MIN_HW - 1, GEMM_CONV2D_MIN_COUT, 288, Dtype::F32);
+        assert_eq!(s.select(Op::Conv2d, wide, &gpu_caps()), KernelVariant::RegisterTiled);
+        assert_eq!(s.select(Op::Conv2d, narrow_cout, &gpu_caps()), KernelVariant::Reference);
+        assert_eq!(s.select(Op::Conv2d, narrow_hw, &gpu_caps()), KernelVariant::Reference);
+        assert_eq!(s.select(Op::Conv2d, wide, &cpu_caps()), KernelVariant::Reference);
     }
 
     /// The decode regime picks the cooperative kernels on a GPU and must NOT
