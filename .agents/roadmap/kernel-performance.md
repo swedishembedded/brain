@@ -528,6 +528,148 @@ explicitly out of scope, unchanged. `brain-vae` and `brain-backend-api`
 (downstream VAE consumers) build clean. Zero clippy warnings. Commit
 `f87f85a0`.
 
+### M1.1-moe-int8-dot-wiring - closing the last open piece of the MoE milestone, and a second recalibration on `qwen35` (dense)
+
+The MoE milestone above scoped `Op::MoeExpertLinear` to `select.rs` only and
+left `crates/qwen35moe/src/model.rs`/`crates/qwen35/src/model.rs`'s own
+construction-time decision ("should this instance even build int8 weights")
+unmigrated. Checked both against source rather than taking that scoping note
+as license to skip verification:
+
+**`qwen35moe` (MoE) had a real, narrower bug than the brief described.**
+`Qwen35::new_impl_on`'s `q8` field (`crate::q8::Qwen35Q8`, the packed int8
+bank for every routed expert's gate/up/down) was built unconditionally
+whenever `i8` was requested, with no `caps.numeric.int8_dot` check and no
+fp32 fallback of its own - unlike the 9 GDN/GQA mixer linears beside it,
+which already self-gate via `model::ops::Weight::upload`'s own
+`want.promote(&ops.caps.numeric)` call (the `weights` field's own doc already
+documented this asymmetry: "F32 unless ... the device caps support the DP4A
+path" for `weights`, no such clause for `q8`). This mattered for real: on a
+Vulkan/wgpu GPU whose caps report no `shaderIntegerDotProduct` device feature
+(`backend-vulkan`'s `int8_dot` is exactly that measured feature,
+`ctx.prec.dp4a`), an unconditionally-built `q8` would still hand
+`model::moe::expert_fwd_i8` a `moe_linear_gated_i8.wgsl` dispatch - the same
+`dot4I8Packed`-calling, DP4A-bound kernel the already-landed
+`Op::MoeExpertLinear` policy (`f9a66961`) requires `int8_dot` for. Fixed by
+computing `i8_on = i8 && gpu.caps().numeric.int8_dot` once in
+`new_impl_on` (mirroring `qwen3::serve::Engine::from_map_with_gpu`'s
+`weights_int8`/`w8_on` pattern exactly, including the same
+"print the fallback, never degrade silently" `eprintln!`) and using it for
+the `q8` construction, the mixer-linear upload closure, and the `ParamStore`
+role-exclusion filter that all three previously drove off the raw,
+caps-blind `i8` flag.
+
+An existing CPU-backend test (`int8_forward_completes_on_cpu_backend_with_
+mixer_weights_demoted_to_fp32`) had locked in the OLD, ungated behaviour as
+intentional, reasoning that `moe_linear_gated_i8.wgsl` has no
+`workgroupBarrier()` and so happens to execute correctly through the CPU
+JIT's software `dot4I8Packed` lowering (confirmed true - `wgsl-cpu`'s
+`Dot4I8Packed` lowers to four sign-extending scalar `imul`s regardless of
+`int8_dot`) even though `backend-cpu::caps` reports `int8_dot: false` for an
+unrelated reason (`matmul_i8_dyn`/`matmul_i8_gemv_reg`'s multi-barrier shape,
+not `dot4I8Packed`'s own correctness). That reasoning is correct about the
+CPU JIT specifically but is exactly the kind of implicit, kernel-by-kernel
+capability exception this campaign's Phase 1 exists to remove: `int8_dot`'s
+own doc states the packed-dot kernels "execute" as a per-device fact, not a
+per-kernel one, and the already-landed `Op::MoeExpertLinear` policy already
+requires it unconditionally. Updated that test (now
+`int8_forward_matches_fp32_exactly_on_cpu_backend_lacking_int8_dot`) and
+`int8_model_excludes_quantized_names_from_the_fp32_param_store` (moved to the
+default backend, since the exclusion it checks now only happens on a
+capable device) to match the corrected contract, and added
+`int8_moe_dispatch_is_unreachable_without_int8_dot` - the dedicated gate test
+this task's brief asked for, plus a `Qwen35::moe_int8_active()` accessor so a
+test can observe the gate without reaching into the private `q8` field. TDD:
+both new/renamed CPU tests were confirmed RED against the pre-fix code
+(reverted `i8_on` usage back to raw `i8`, re-ran) before being confirmed
+GREEN after.
+
+**`qwen35` (dense) has no MoE and no bug here at all - the brief's premise
+was wrong for this crate, the same way the kv_int8/paged-attention findings
+were wrong before it.** It has no `q8` field; every quantizable linear (the
+12 per-layer mixer/MLP leaves) already lives on `self.weights` and goes
+through the identical `Weight::upload` self-gate the qwen35moe mixer linears
+use. Its own existing test suite already proves and documents this end to
+end (`int8_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion`:
+"an 'int8' CPU build is actually a COMPLETE fp32 demotion", cosine >
+0.999999) - a grep for the literal string `int8_dot` finding zero hits in
+`qwen35/src/model.rs` reflects that the gate lives one layer down in
+`Weight::upload`'s shared `promote` call, not that it is missing. Left
+untouched; no changes landed in `crates/qwen35/src/model.rs` or its tests.
+
+Full `brain-qwen35moe` suite (53 tests across `lib` + 10 integration files,
+including the 7-test `model_i8_smoke` file) green on the default backend;
+`cargo clippy -p brain-qwen35moe --all-targets` zero warnings. Does not touch
+`crates/backend-api/src/select.rs`.
+
+### M1.1-attn-gate - `model::block::flash_gate`, the attention outer-gate consolidation deferred to the end
+
+The scope recalibration above named this the highest-risk piece of `M1.1` and
+deferred it to its own pass. Checked against source rather than taken on
+trust: the actual flash-vs-materialized ladder
+(`flash_bidir_variant`/`flash_cross_supported`/`gqa_attn_sublayer_fwd`) was
+confirmed already centralized in `model::block`, but the OUTER gate deciding
+whether to even ASK it was reimplemented four times, each a different subset
+of the same `caps.workgroup_reductions` check: `wan::block::attn_mode` (the
+check alone), `lfm2::Model::flash_selectable` (plus "the ladder actually beat
+the materialised baseline rung"), `sdxlunet::Rec`'s self-attention (plus "not
+a training/gradient-recording pass"), and `ltxv::block::flash_self_attn`/
+`flash_cross_attn` (plus `head_dim <= 128`) - lesson #78's exact shape, just
+for a gate instead of a kernel: `flash_bidir_variant` itself does not read
+`workgroup_reductions` (it only picks a rung by shared-memory/workgroup-size
+fit), so every caller had to make that correctness check itself before
+asking, and a future change to it would have had to be hunted down and
+reapplied in four places.
+
+Added `model::block::flash_gate(caps, extra) -> bool`
+(`caps.workgroup_reductions && extra`) as the one shared predicate, with each
+site's genuinely different extra condition kept as an explicit argument
+rather than folded into a config enum (train-mode exclusion, the measured
+"beats the baseline" check, the `head_dim` ceiling - forcing these into one
+shared type would only move the duplication into picking which enum variant
+each site needs). Migrated all four sites onto it; deleted `sdxlunet::Rec`'s
+now-dead `coop` field (its only reader). `ltxv::block::flash_cross_attn` ANDs
+`flash_gate` with the already-centralised, stricter `flash_cross_supported`
+explicitly (shared memory + workgroup size on top of the same
+`workgroup_reductions` bit), since that is a different, correct gate for the
+cross family and not part of the duplication this milestone targets.
+
+Landed as two commits (wan/lfm2/sdxlunet migrated together once their full
+suites confirmed green; ltxv separately once its own, much longer, suite
+confirmed green) rather than one, since the milestone's own gate held each
+crate's full suite to green independently and there was no reason to block
+the confirmed three on the slowest one. A new `flash_gate` unit test in
+`model::block` pins the truth table at all four `(workgroup_reductions,
+extra)` points. Verified: `brain-model` (153 tests, incl. the new test),
+`brain-wan`, `brain-lfm2` and `brain-sdxlunet` full suites green (wan's
+real-weight `dit_parity`/`gguf_import_real`/`gguf_direct_real` included); the
+full `brain-ltxv` suite (41 integration test files, incl. real-weight
+`dit_parity`/`av_dit_parity`/`upscale`/`vae_tiling`) green end to end; zero
+clippy warnings on all five crates. `make parity`'s CPU-backend gradcheck
+suite passed clean (61/61); its Vulkan-backend gradcheck suite could not be
+run clean on this box - it hard-fails on `bf16_train::tests::matmul_bf16_
+weight_eps_plateau` ("this harness requires a real bf16 weight" - `Weight::
+upload`'s `DType::promote` gate correctly demoting BF16 to F32 on a P40,
+which per this campaign's own hardware section has none), then further tests
+that share the weak GPU device pool appear to hang rather than fail cleanly,
+reproducing identically in two independent, isolated runs. Confirmed
+unrelated to this change by dependency graph, not just by rerun: `flash_gate`
+is a pure addition and every migrated call site lives in `wan`/`lfm2`/
+`sdxlunet`/`ltxv`, none of which `t5`/`clip`/`sam2`/`vqgan`/`deepseekocr`/
+`unet`/`restore`/`supir`/`bf16_train` (the failing set) depend on. Recorded
+here rather than in `lessons.md` since the poisoning mechanism is inferred,
+not yet root-caused to the level that rule expects.
+
+Found but out of scope for this pass: `flux1`, `flux2` and `minimaxmusic3`
+each duplicate the identical `caps.workgroup_reductions` check for their own
+flash-attention outer gate (`flux1`/`flux2`'s `push_attention`,
+`minimaxmusic3::dit::flash_attn`), not named in this milestone's four sites.
+`flux1`/`flux2` reuse the SAME boolean (`self.fast`) for both this gate and
+`model::block::gemm_variant`'s GEMM-tier decision, so migrating them is not a
+drop-in swap the way the four named sites were - it needs the two concerns
+split first. Left unmigrated; a future pass can fold them onto `flash_gate`
+once that split is done.
+
 ---
 
 ## Not yet done
