@@ -46,6 +46,19 @@
 //!                                          # shape and `qwen_bench serve`'s
 //!                                          # own steady-state seq_len==cap
 //!                                          # regime
+//!   qwen_bench flash-prefill [start] [cc] [reps]
+//!                                          # M2.4's per-kernel delta:
+//!                                          # `paged_flash_prefill` (M2.3)
+//!                                          # against the exact three-kernel
+//!                                          # triad `qwen3::serve::prefill`
+//!                                          # dispatches per CHUNK, at a
+//!                                          # `start`-token prefix already
+//!                                          # cached plus a `cc`-row causal
+//!                                          # chunk - the triad's own cost is
+//!                                          # `O(cap)` per row regardless of
+//!                                          # `start`, so a nonzero `start`
+//!                                          # is the regime this kernel
+//!                                          # targets
 
 use std::time::Instant;
 
@@ -163,6 +176,13 @@ fn main() {
         flash_decode_bench(seq, reps);
         return;
     }
+    if mode == "flash-prefill" {
+        let start: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
+        let cc: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
+        let reps: usize = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
+        flash_prefill_bench(start, cc, reps);
+        return;
+    }
 
     let reps: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
 
@@ -268,7 +288,7 @@ fn main() {
 
             let tokens: Vec<u32> = (0..rows).map(|i| (i * 131 + 7) % cfg.vocab).collect();
             let steps =
-                eng.steps_for_profile(rows, &tokens, &positions, &seqlens, &blocks, &offsets, &bt);
+                eng.steps_for_profile(rows, &tokens, &positions, &seqlens, &blocks, &offsets, &bt, false);
             let secs = report(&gpu, &format!("SERVE {rows} rows"), &steps, reps, roofs);
             println!(
                 "\none served step at {rows} rows: {:.2} ms  ->  {:.0} rows/s",
@@ -480,6 +500,102 @@ pub fn flash_decode_bench(seq: u32, reps: usize) {
     let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs));
     println!(
         "\npaged attention @ seq={seq}: triad (scores_wg+softmax+apply) {:>8.4} ms  vs  paged_flash_decode {:>8.4} ms",
+        t_ref * 1e3,
+        t_flash * 1e3,
+    );
+    println!(
+        "triad {}  |  flash {}",
+        pct(t_ref).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+        pct(t_flash).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into()),
+    );
+}
+
+/// M2.4's per-kernel delta: `paged_flash_prefill` (M2.3, one fused dispatch
+/// per (head, query-tile), online softmax, no materialised `scores`/`probs`)
+/// against the exact three-kernel triad `qwen3::serve::prefill` dispatches
+/// per CHUNK today (`paged_decode_scores_batched` -> `decode_softmax_batched`
+/// -> `paged_decode_apply_batched` - the REFERENCE scores kernel, matching
+/// what a `cc`-row chunk's `m = cc*n_heads` actually selects, not the
+/// decode-regime cooperative `_wg` variant `flash_decode_bench` above uses).
+/// `start` cached tokens already sit in the pool before this chunk (as a
+/// real serving session's Nth chunk would find), `cc` fresh causal rows land
+/// in the SAME dispatch - the triad's own SCORES/APPLY cost is `O(cap)` per
+/// row regardless of `start` (it walks every capacity slot, masking with
+/// `seq_lens`), where the fused kernel's cost is `O(start+cc)`, so a nonzero
+/// `start` is exactly the regime this kernel targets and the triad's
+/// baseline profile never exercised.
+///
+/// `qwen_bench flash-prefill [start] [cc] [reps]` - `start`/`cc` default to
+/// 512 each, one `max_prefill`-sized chunk landing after one full prior
+/// chunk, at Qwen3-0.6B's real head shape (`n_heads=16, n_kv_heads=8,
+/// head_dim=128`).
+pub fn flash_prefill_bench(start: u32, cc: u32, reps: usize) {
+    let gpu = Gpu::new(&[
+        ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+        ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+        ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+        ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
+    ]);
+    let roofs = banner(&gpu);
+
+    let (n_heads, n_kv_heads, head_dim, bs) = (16u32, 8u32, 128u32, 16u32);
+    let group = n_heads / n_kv_heads;
+    let kv_stride = n_kv_heads * head_dim;
+    let hq = n_heads * head_dim;
+    let total = start + cc;
+    let max_bt = total.div_ceil(bs);
+    let cap = max_bt * bs;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let mut rng = data::rng::Rng::new(29);
+    let q: Vec<f32> = (0..cc * hq).map(|_| rng.next_gaussian() as f32).collect();
+    // `total` live keys already sit in the pool (this chunk's own K/V are
+    // appended by the SAME layer's `KV_APPEND` earlier in the real tape;
+    // here they are simply pre-populated, since only attention is timed).
+    let pool_len = (max_bt * bs * kv_stride) as usize;
+    let pk: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
+    let pv: Vec<f32> = (0..pool_len).map(|_| rng.next_gaussian() as f32).collect();
+    let table: Vec<u32> = (0..max_bt).collect(); // one sequence, contiguous blocks
+    let bt: Vec<u32> = (0..cc as usize).flat_map(|_| table.clone()).collect();
+    let seq_lens: Vec<u32> = (0..cc).map(|i| start + i + 1).collect(); // causal
+
+    let qb = gpu.storage_init("q", &q);
+    let poolk = gpu.storage_init("pk", &pk);
+    let poolv = gpu.storage_init("pv", &pv);
+    let btb = gpu.storage((cc * max_bt) as u64);
+    gpu.write(&btb, &bt);
+    let sl = gpu.storage(cc as u64);
+    gpu.write(&sl, &seq_lens);
+
+    let sc = gpu.storage((cc * n_heads * cap) as u64);
+    let pr = gpu.storage((cc * n_heads * cap) as u64);
+    let ctx_ref = gpu.storage((cc * hq) as u64);
+    let ref_steps = vec![
+        gpu.step(0, &[&qb, &poolk, &btb, &sl, &sc], &[cc, n_heads, group, head_dim, bs, kv_stride, cap, max_bt, scale.to_bits()], cc * n_heads * cap),
+        gpu.step(1, &[&sc, &sl, &pr], &[cc, n_heads, cap], cc * n_heads),
+        gpu.step(2, &[&pr, &poolv, &btb, &sl, &ctx_ref], &[cc, n_heads, group, head_dim, bs, kv_stride, cap, max_bt], cc * n_heads * head_dim),
+    ];
+    let t_ref = gpu_core::profile::best_of(&gpu, &ref_steps, reps);
+
+    let ctx_flash = gpu.storage((cc * hq) as u64);
+    let ntiles_q = cc.div_ceil(64); // BR = paged_flash_prefill's own tile size
+    let flash_steps = vec![gpu.step(
+        3,
+        &[&qb, &poolk, &poolv, &btb, &sl, &ctx_flash],
+        &[cc, n_heads, n_kv_heads, head_dim, group, bs, max_bt],
+        n_heads * ntiles_q * 256, // 256 = paged_flash_prefill's own @workgroup_size
+    )];
+    let t_flash = gpu_core::profile::best_of(&gpu, &flash_steps, reps);
+
+    // Bytes moved reading K+V once each, f32, over every LIVE key (`total`,
+    // not `cap`) - the fused kernel's own traffic; the triad reads `cap` per
+    // row regardless of `total`, so this underestimates the triad's own
+    // bytes (its utilisation % below is therefore an UPPER bound on the
+    // triad's real efficiency, making any measured gap conservative).
+    let bytes = (cc * n_heads * total * head_dim) as u64 * 2 * 4;
+    let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs));
+    println!(
+        "\npaged attention prefill @ start={start} cc={cc}: triad (scores+softmax+apply) {:>8.4} ms  vs  paged_flash_prefill {:>8.4} ms",
         t_ref * 1e3,
         t_flash * 1e3,
     );

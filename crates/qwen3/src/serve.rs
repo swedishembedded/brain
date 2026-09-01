@@ -87,6 +87,7 @@ const SCORES_B_WG: usize = 27;
 // arithmetic that says splitting pays at THIS shape.
 const MATMUL_REG3_SPLITK: usize = 28;
 const SPLITK_REDUCE: usize = 29;
+const PAGED_FLASH_PREFILL: usize = 30;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -119,6 +120,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_decode_scores_wg", kernels::PAGED_DECODE_SCORES_WG),
     ("matmul_reg3_splitk", kernels::MATMUL_REG3_SPLITK),
     ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
+    ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -310,6 +312,34 @@ pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8
     n_layers * 2 * (pool_words + scale_words) * 4 // K + V, every layer, 4 bytes/word
 }
 
+/// Device bytes `Scratch::{scores,probs}` costs at this sizing (M2.4) - the
+/// single largest serving scratch buffer before this milestone (this
+/// campaign's own audit finding). Decode's own worst case (`max_batch *
+/// n_heads * cap`) is UNCONDITIONAL: decode never gets `paged_flash_prefill`'s
+/// fused kernel (`Op::PagedAttentionFused`'s own doc - M2.1/M2.2's own
+/// measured non-win for the decode-shaped fused kernels, inherited at every
+/// dtype). Causal-chunk prefill's own worst case (`max_prefill^2 * n_heads`,
+/// the `[nh,N,N]` shape this function's own call site originally derived it
+/// from) is only shed when `fused_prefill_available` - the SAME condition
+/// `run_batched_steps`'s own dispatch gates on
+/// (`Op::PagedAttentionFused`'s selector, i.e. F32 KV storage AND
+/// `caps.workgroup_reductions`), computed by the ONE call site that has both
+/// `kv_int8` and `caps` (`Engine::from_map_with_gpu`), not re-derived here:
+/// a device without `workgroup_reductions` (the CPU JIT) falls back to the
+/// triad for causal-chunk prefill exactly as it always did, so shrinking this
+/// buffer there would be an out-of-bounds write waiting to happen, not a
+/// memory saving.
+pub fn paged_attn_scratch_bytes(cfg: &QwenConfig, max_batch: u32, max_prefill: u32, cap: u32, fused_prefill_available: bool) -> u64 {
+    let nh = cfg.n_heads as u64;
+    let words = if fused_prefill_available {
+        max_batch as u64 * nh * cap as u64
+    } else {
+        let b = max_batch.max(max_prefill) as u64;
+        (b * nh * cap as u64).max(max_prefill as u64 * max_prefill as u64 * nh)
+    };
+    words * 2 * 4 // scores + probs, 4 bytes/word
+}
+
 /// Whether `cfg` can take int8 KV at all: the append kernels pack 4 int8
 /// lanes into one `u32`, so a packed word must stay within one head (else its
 /// lanes would span two heads' scales) - `head_dim % 4 == 0`. Every shipped
@@ -375,9 +405,15 @@ pub struct Engine {
     gpu: Gpu,
     /// The device's capabilities, read once at build - the selector's input.
     caps: DeviceCaps,
-    /// Which kernel variant runs for each (op, shape) - the shared decode-regime
-    /// policy, memoised per distinct shape.
-    selector: CachedSelector<DefaultSelector>,
+    /// The shared static policy (`DefaultSelector`, memoised) every op below
+    /// `Op::MatMul`'s int8 arm resolves through, and `Op::MatMul`'s own
+    /// fallback for an int8 shape `self.tuned_i8` has no measurement for.
+    /// An `Arc<dyn KernelSelector>` (not the bare `CachedSelector<
+    /// DefaultSelector>` this used to be) so it is injectable into any
+    /// `model::ops::Ops` this engine builds (`Ops::with_selector`) - the
+    /// measured `tuned_i8` table stays a plain field (see its own doc): it is
+    /// consulted directly by `Self::mm8`, not wrapped into this selector.
+    selector: std::sync::Arc<dyn KernelSelector>,
     ps: ParamStore,
     block_size: u32,
     max_batch: u32,
@@ -417,6 +453,11 @@ pub struct Engine {
     /// construction (not re-derived by the accessor) so it can never drift
     /// from what `pool_k`/`pool_v`/`scales_k`/`scales_v` actually allocated.
     kv_pool_bytes: u64,
+    /// What [`paged_attn_scratch_bytes`] computed for this sizing (M2.4) -
+    /// recorded once at construction, same reason as `kv_pool_bytes` above,
+    /// so it can never drift from what `sc.scores`/`sc.probs` actually
+    /// allocated.
+    scratch_bytes: u64,
     /// `Some` uploads real calibrated ceilings into `clip_k`/`clip_v`; `None`
     /// (the default) keeps the f32::MAX sentinel there, which the append
     /// kernel's contract documents as bit-identical to the deleted unclipped
@@ -452,6 +493,9 @@ pub struct Engine {
     /// Measured GEMV/tile choices for the int8 linears (S5), keyed by
     /// `(row bucket, n, k)` - tuned once at build on THIS device (persisted
     /// per adapter), so the hot path never measures. Empty on fp32 engines.
+    /// Looked up directly by `Self::mm8` (a plain `HashMap`, not folded into
+    /// `self.selector`); `self.selector` is `Op::MatMul`'s FALLBACK for a
+    /// shape this table has no measurement for, not a wrapper around it.
     tuned_i8: HashMap<(u32, u32, u32), KernelVariant>,
     sc: Scratch,
     /// `[vocab, d]` tied/untied head, kept on the host for the prefill path
@@ -536,9 +580,25 @@ impl Engine {
         } else {
             (None, None)
         };
-        let nh = cfg.n_heads as u64;
-        // scores/probs hold decode [rows,nh,cap] OR prefill causal [nh,N,N].
-        let bcap = (b * nh * cap as u64).max(max_prefill as u64 * max_prefill as u64 * nh);
+        // scores/probs hold decode [rows,nh,cap] always, and prefill causal
+        // [nh,N,N] too unless the fused kernel actually replaces the triad
+        // there - see `paged_attn_scratch_bytes`'s own doc for the M2.4
+        // shrink. `fused_prefill_available` asks `Op::PagedAttentionFused`'s
+        // OWN selector (the exact same call `run_batched_steps`'s dispatch
+        // makes, m/n irrelevant to that Op - see its own `candidates()` arm)
+        // rather than hand-duplicating its dtype/capability rule here, so
+        // the two can never drift apart: a device without `caps.
+        // workgroup_reductions` (the CPU JIT) or an int8-KV engine both
+        // correctly keep the full, unshrunk size.
+        let fused_prefill_available = DefaultSelector.select(
+            Op::PagedAttentionFused,
+            OpShape { m: 0, n: 0, k: 1, dtype: if kv_int8 { Dtype::I8 } else { Dtype::F32 } },
+            &caps,
+        ) == KernelVariant::FusedFlash;
+        // `/2/4` undoes `paged_attn_scratch_bytes`'s own "scores+probs, 4
+        // bytes/word" to recover the per-buffer WORD count `st` (below) wants.
+        let scratch_bytes_val = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, fused_prefill_available);
+        let bcap = scratch_bytes_val / 2 / 4;
         let st = |x: u64| gpu.storage(x);
 
         let mut res = Vec::new();
@@ -613,23 +673,33 @@ impl Engine {
         // with `w8_on` above by construction: both read the SAME `caps.
         // numeric.int8_dot`). Built via a throwaway `Ops` on a side `Gpu`
         // (`Gpu::new_like`) purely for `Weight::upload`'s convenience
-        // (capability-aware quantize+upload) - this engine keeps its OWN
-        // tuned dispatch (`Self::linear`/`Self::mm8`/`Self::tune_i8`, below)
-        // rather than routing through `Ops::matmul`, so - unlike `qwen3::
+        // (capability-aware quantize+upload): `Weight::upload` only touches
+        // buffers and never asks a selector anything, so which selector this
+        // particular `Ops` holds is irrelevant here - unlike `qwen3::
         // model::Qwen`'s `self.ops` (see that crate's `pipelines()` doc
-        // comment) - index-space compatibility with `self.gpu` is NOT
-        // required: `Weight::upload` only touches buffers, it never builds a
-        // `Step` this engine would submit.
+        // comment), index-space compatibility with `self.gpu` is NOT
+        // required either, since `Weight::upload` never builds a `Step` this
+        // engine would submit.
         //
-        // **Why this engine does NOT route dispatch through `Ops::matmul`,
-        // unlike `qwen3::model::Qwen` (B7).** `Ops::matmul` always resolves
-        // its kernel via a FIXED internal `CachedSelector<DefaultSelector>` -
-        // there is no way for a caller to inject a different one. This
-        // engine's `tuned_i8` (below) is a REAL, per-device MEASURED
-        // selector (`Self::tune_i8`/`AutoTuner`/`FileTuneStore`) that the
-        // serving-performance regression gate this phase must not regress
-        // directly depends on - routing through `Ops::matmul` would silently
-        // discard it in favour of the static policy.
+        // **This engine still keeps its OWN GEMM dispatch
+        // (`Self::linear`/`Self::mm`/`Self::mm8`), rather than calling
+        // `Ops::matmul` directly - but no longer because the SELECTOR is
+        // unreachable (`Ops::with_selector` fixed that).** Two real, narrower
+        // reasons remain: (1) `Self::mm_into`'s split-K fold has no
+        // equivalent in `Ops::matmul` at all (`select::KernelVariant` has no
+        // split-K member - splitting is a dispatch-COUNT decision orthogonal
+        // to which kernel variant runs); (2) this engine's int8 activations
+        // live in ONE persistent, reused `I8Scratch` (`self.i8_scratch`,
+        // requantized in place every layer), while `Ops::act` allocates a
+        // FRESH `I8Scratch` per call - fine for a model forward pass that
+        // quantizes once per layer, a real per-decode-step allocation
+        // regression for a hot serving loop. What WAS unreachable - the
+        // measured `Self::tune_i8` policy - is now `self.selector`, an
+        // injectable `Arc<dyn KernelSelector>` (`model::ops::Ops::
+        // with_selector`'s whole reason to exist), so `Self::mm8` asks the
+        // SAME kind of seam `Ops::matmul` does instead of hand-checking a
+        // private `HashMap` before falling back to a second, separate
+        // selector field.
         let want = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
         let ops = Ops::new(gpu.new_like(ops_kernel_list())).unwrap_or_else(|e| panic!("serve: Ops::new: {e}"));
         let (dm, ffm) = (cfg.d_model as usize, cfg.d_ff as usize);
@@ -694,7 +764,7 @@ impl Engine {
             cfg,
             caps,
             gpu,
-            selector: CachedSelector::new(DefaultSelector),
+            selector: std::sync::Arc::new(CachedSelector::new(DefaultSelector)),
             ps,
             block_size,
             max_batch,
@@ -713,6 +783,7 @@ impl Engine {
             scales_k,
             scales_v,
             kv_pool_bytes: kv_pool_bytes_val,
+            scratch_bytes: scratch_bytes_val,
             kv_calib: None,
             clip_k,
             clip_v,
@@ -807,6 +878,14 @@ impl Engine {
         self.kv_pool_bytes
     }
 
+    /// Device bytes `Scratch::{scores,probs}` costs at this engine's sizing
+    /// (M2.4) - recorded once at construction from
+    /// [`paged_attn_scratch_bytes`], never re-derived, so this can never
+    /// drift from what `sc.scores`/`sc.probs` actually allocated.
+    pub fn paged_attn_scratch_bytes(&self) -> u64 {
+        self.scratch_bytes
+    }
+
     /// The pool's total theoretical cached-token capacity (`num_blocks *
     /// block_size`), independent of dtype - the number that answers "how
     /// many tokens could this pool ever hold at once", as opposed to
@@ -861,7 +940,7 @@ impl Engine {
     /// Advance every sequence by one token (decode).
     pub(crate) fn forward_batched(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<f32> {
         let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
-        self.run_batched(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt)
+        self.run_batched(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt, false)
     }
 
     /// Advance every sequence by one token and return the **greedy next token**
@@ -869,7 +948,7 @@ impl Engine {
     /// [`Engine::run_batched_greedy`]).
     pub(crate) fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
-        self.run_batched_greedy(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt)
+        self.run_batched_greedy(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt, false)
     }
 
     /// Advance every sequence by one token from a ready-made embedding per sequence
@@ -878,7 +957,7 @@ impl Engine {
     pub fn forward_batched_embed(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32]) -> Vec<f32> {
         let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
         assert_eq!(embeds.len(), bsz as usize * self.cfg.d_model as usize);
-        self.run_batched(bsz, Input::Embeds(embeds), &positions, &seqlens, &blocks, &offsets, &bt)
+        self.run_batched(bsz, Input::Embeds(embeds), &positions, &seqlens, &blocks, &offsets, &bt, false)
     }
 
     /// Run one batched forward over `bsz` rows given fully-computed metadata:
@@ -886,10 +965,12 @@ impl Engine {
     /// (row i's query attends `j < seqlens[i]` - set to start+i+1 for causal
     /// prefill), `(blocks[i], offsets[i])` the pool slot to write row i's K/V, and
     /// `bt` the per-row block tables (`bsz * max_blocks_per_seq`). Serves decode
-    /// (one new token per sequence) and prefill chunks alike.
+    /// (one new token per sequence) and prefill chunks alike - `causal_chunk`
+    /// tells the two apart for `Op::PagedAttentionFused` (M2.4; see
+    /// `run_batched_steps`'s own doc).
     #[allow(clippy::too_many_arguments)]
-    fn run_batched(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<f32> {
-        let b = self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt);
+    fn run_batched(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<f32> {
+        let b = self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt, causal_chunk);
         self.gpu.read(&self.sc.xn_final, (b * self.cfg.d_model) as usize)
     }
 
@@ -900,14 +981,12 @@ impl Engine {
     /// than two. Returns the row count.
     // qwen3-serve-manual-gemm-dispatch BEGIN (B7, `no_kernel_names.rs`'s own
     // allow-list) - this engine's own tuned fp32/int8 GEMM selection, kept
-    // OFF the `model::ops::Ops` façade deliberately: `Ops::matmul` always
-    // resolves through a FIXED internal `CachedSelector<DefaultSelector>`
-    // with no way to inject a different one, but `tuned_i8` (below) is a
-    // REAL, per-device MEASURED selector (`Self::tune_i8`/`AutoTuner`/
-    // `FileTuneStore`) the qwen-serving-perf-gate directly depends on -
-    // routing through `Ops::matmul` would silently discard it. See
-    // `no_kernel_names.rs`'s own module doc for exactly what this allow-lists
-    // and why.
+    // OFF the `model::ops::Ops` façade for the reasons `Self::from_map_with_
+    // gpu`'s own comment gives (split-K has no `Ops::matmul` equivalent, and
+    // `I8Scratch` reuse vs. per-call allocation) - NOT because the selector
+    // is unreachable there any more (`Ops::with_selector` fixed that; see
+    // this struct's `selector` field doc). See `no_kernel_names.rs`'s own
+    // module doc for exactly what this allow-lists and why.
     /// `out = x @ W^T`, choosing the decode-regime GEMV (one workgroup per
     /// output column, W streamed once across all rows) when the selector says
     /// the shape is in that regime. Same contract, same result.
@@ -1133,8 +1212,17 @@ impl Engine {
     }
     // qwen3-serve-manual-gemm-dispatch END
 
+    /// `causal_chunk` distinguishes the two regimes `Op::PagedAttentionFused`
+    /// itself cannot infer from `bsz`/`cap` alone (M2.4): `true` for a
+    /// prefill/spec-decode-verify chunk of ONE sequence's causally-increasing
+    /// rows sharing one physical block table (`bt` duplicated identically
+    /// across every row - `Engine::prefill`'s own construction, checked
+    /// against source), `false` for decode's independent-sequences rows. The
+    /// two are different physical kernels answering the same shape
+    /// signature in different call-site semantics, not points on one shape
+    /// gradient - see `Op::PagedAttentionFused`'s own doc.
     #[allow(clippy::too_many_arguments)]
-    fn run_batched_steps(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> (Vec<Step>, u32) {
+    fn run_batched_steps(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> (Vec<Step>, u32) {
         #[cfg(feature = "fault-injection")]
         if fault::take_kernel_failure() {
             panic!("injected fault: kernel dispatch failure");
@@ -1205,25 +1293,53 @@ impl Engine {
                 // as bit-identical to the old unclipped twin.
                 s.push(g.step(APPEND_I8_CLIPPED, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
                 s.push(g.step(APPEND_I8_CLIPPED, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
+                // No `Op::PagedAttentionFused` check here: `paged_flash_
+                // prefill` has no int8-KV tier yet (its own `@dtype f32`
+                // header), and decode's fused kernels never measured a win at
+                // any dtype (M2.1/M2.2) - every candidate this Op could
+                // return at `Dtype::I8` is `Reference` (see its own doc), so
+                // asking would be a dead call.
                 s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
             } else {
                 s.push(g.step(KV_APPEND_B, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.pool_k[l]], &[b, hkv, bs], b * hkv));
                 s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[b, hkv, bs], b * hkv));
-                // One workgroup per score where the device runs workgroup
-                // reductions: the per-element kernel's lanes are `kv_stride`
-                // floats apart (4 KB at 0.6B), so a fetched sector serves one
-                // useful float in eight: measured at a small fraction of the
-                // bandwidth roof while taking about half of a served step.
-                // Gated via `model::block::paged_scores_variant`
-                // (`Op::PagedAttention`), not a hand-rolled
-                // `caps.workgroup_reductions` check - this engine registers
-                // both kernels unconditionally, so `coop` is always `Some`.
-                let (sk, st) = model::block::paged_scores_variant(g, SCORES_B, Some(SCORES_B_WG), b * nh, cap);
-                s.push(g.step(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
-                s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
-                s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
+                // M2.4: whole-triad-vs-single-fused-dispatch choice, through
+                // `Op::PagedAttentionFused` (a SEPARATE Op from
+                // `Op::PagedAttention` below - see its own doc for why).
+                // `causal_chunk` (this call's own regime, not inferable from
+                // `b`/`cap` alone) is `k`; KV storage dtype is always F32 in
+                // this branch (the `kv_int8` arm above never reaches here).
+                let fused_shape = OpShape { m: b * nh, n: cap, k: causal_chunk as u32, dtype: Dtype::F32 };
+                let use_fused = self.selector.select(Op::PagedAttentionFused, fused_shape, &self.caps) == KernelVariant::FusedFlash;
+                if use_fused {
+                    // `paged_flash_prefill` (M2.3): one dispatch per (head,
+                    // query-tile), no `scores`/`probs` at all - BR=64 is the
+                    // kernel's own tile size, @workgroup_size(256) its own
+                    // launch shape (both pinned in its own WGSL header).
+                    let ntiles_q = b.div_ceil(64);
+                    s.push(g.step(
+                        PAGED_FLASH_PREFILL,
+                        &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
+                        &[b, nh, nkv, hd, group, bs, mbt],
+                        nh * ntiles_q * 256,
+                    ));
+                } else {
+                    // One workgroup per score where the device runs workgroup
+                    // reductions: the per-element kernel's lanes are `kv_stride`
+                    // floats apart (4 KB at 0.6B), so a fetched sector serves one
+                    // useful float in eight: measured at a small fraction of the
+                    // bandwidth roof while taking about half of a served step.
+                    // Gated via `model::block::paged_scores_variant`
+                    // (`Op::PagedAttention`), not a hand-rolled
+                    // `caps.workgroup_reductions` check - this engine registers
+                    // both kernels unconditionally, so `coop` is always `Some`.
+                    let (sk, st) = model::block::paged_scores_variant(g, SCORES_B, Some(SCORES_B_WG), b * nh, cap);
+                    s.push(g.step(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
+                    s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
+                    s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
+                }
             }
             self.quant_once(&mut s, &sc.ctx, hq, b);
             self.linear(&mut s, &self.lin_weights[&p("attn.wo.weight")], &sc.ctx, &sc.proj, b);
@@ -1247,8 +1363,8 @@ impl Engine {
     /// the tape is rebuilt per step rather than recorded once, so there was
     /// nothing to hand `gpu_core::profile`.
     #[allow(clippy::too_many_arguments)]
-    fn run_batched_submit(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> u32 {
-        let (s, b) = self.run_batched_steps(bsz, input, positions, seqlens, blocks, offsets, bt);
+    fn run_batched_submit(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> u32 {
+        let (s, b) = self.run_batched_steps(bsz, input, positions, seqlens, blocks, offsets, bt, causal_chunk);
         self.gpu.submit(&[], &s);
         b
     }
@@ -1268,13 +1384,13 @@ impl Engine {
     /// `argmax_row` reduces each row, so only `bsz` indices are read back
     /// instead of a `[bsz, vocab]` block.
     #[allow(clippy::too_many_arguments)]
-    fn run_batched_greedy(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<u32> {
+    fn run_batched_greedy(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<u32> {
         assert!(
             bsz <= self.max_batch,
             "greedy decode is sized for max_batch={} rows, got {bsz}",
             self.max_batch
         );
-        self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt);
+        self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt, causal_chunk);
         self.greedy_from_hidden(bsz)
     }
 
@@ -1396,7 +1512,7 @@ impl Engine {
     /// callers never read either between decode steps.
     pub(crate) fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: u32) -> Vec<Vec<(u32, f32)>> {
         let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
-        self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt);
+        self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt, false);
         self.topk_from_hidden(bsz, k)
     }
 
@@ -1447,7 +1563,7 @@ impl Engine {
             g.write(&self.sc.sched_buf, &sched);
         }
         // Sub-step 0: host-fed, as today - but the argmax stays on the device.
-        self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt);
+        self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt, false);
         self.submit_greedy_head(bsz);
         for s in 1..k {
             let g = &self.gpu;
@@ -1471,7 +1587,7 @@ impl Engine {
                 bsz,
             );
             g.submit(&[], &[feed, adv]);
-            self.run_batched_submit(bsz, Input::Resident, &[], &[], &[], &[], &[]);
+            self.run_batched_submit(bsz, Input::Resident, &[], &[], &[], &[], &[], false);
             self.submit_greedy_head(bsz);
         }
         // Record the final sub-step's tokens, then read the whole window once.
@@ -1551,7 +1667,7 @@ impl Engine {
                     bt[i as usize * mbt + lb] = phys;
                 }
             }
-            let hidden = self.run_batched(cc, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), &positions, &seqlens, &blocks, &offsets, &bt);
+            let hidden = self.run_batched(cc, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), &positions, &seqlens, &blocks, &offsets, &bt, true);
             let cu = cc as usize;
             last = hidden[(cu - 1) * d..cu * d].to_vec();
             start += cc;
@@ -1608,7 +1724,7 @@ impl Engine {
                     bt[i as usize * mbt + lb] = phys;
                 }
             }
-            let hidden = self.run_batched(cc, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), &positions, &seqlens, &blocks, &offsets, &bt);
+            let hidden = self.run_batched(cc, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), &positions, &seqlens, &blocks, &offsets, &bt, true);
             out[start as usize * d..(start + cc) as usize * d].copy_from_slice(&hidden[..cc as usize * d]);
             start += cc;
         }
@@ -1667,9 +1783,10 @@ impl Engine {
     /// this tape is rebuilt per step rather than recorded once. `bsz` rows with
     /// `seqlens[i] = positions[i] + 1` is a decode step; a chunk of `cc` rows
     /// from one sequence is a prefill chunk - the two share this tape, which is
-    /// exactly why profiling it is worth doing.
+    /// exactly why profiling it is worth doing. `causal_chunk` selects which
+    /// one the caller built (see `run_batched_steps`'s own doc, M2.4).
     #[allow(clippy::too_many_arguments)]
-    pub fn steps_for_profile(&self, bsz: u32, tokens: &[u32], positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<Step> {
+    pub fn steps_for_profile(&self, bsz: u32, tokens: &[u32], positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<Step> {
         // `Input::Tokens`, NOT `Input::Resident`. Resident mode is the on-device
         // decode window: it deliberately performs no host writes because
         // `decode_feed`/`decode_advance` already produced the token ids AND the
@@ -1680,7 +1797,7 @@ impl Engine {
         // bandwidth well above what the card can physically deliver: the timing
         // was right and the kernel really was that fast, because it was not
         // attending to anything.
-        self.run_batched_steps(bsz, Input::Tokens(tokens), positions, seqlens, blocks, offsets, bt).0
+        self.run_batched_steps(bsz, Input::Tokens(tokens), positions, seqlens, blocks, offsets, bt, causal_chunk).0
     }
 
     /// Physical KV blocks currently free in the pool.
@@ -1875,7 +1992,14 @@ impl Engine {
                     bt[i as usize * mbt + lb] = phys;
                 }
             }
-            let hidden = self.run_batched(rows, Input::Tokens(&inputs), &positions, &seqlens, &blocks, &offsets, &bt);
+            // `causal_chunk = false`: this verify-forward structurally
+            // matches the fused kernel's contract too (one sequence, one
+            // shared block table, causally-increasing `seqlens`) but is left
+            // on the triad for THIS milestone - `paged_flash_prefill`'s own
+            // correctness gate and M2.4's own wiring test only cover
+            // `Engine::prefill`/`score_positions`'s own construction; wiring
+            // this call site in as well is a follow-on, not re-litigated here.
+            let hidden = self.run_batched(rows, Input::Tokens(&inputs), &positions, &seqlens, &blocks, &offsets, &bt, false);
             forwards += 1;
 
             // hidden[j] gives the target distribution that should have produced
@@ -2197,6 +2321,100 @@ mod tests {
         let ratio = |c: &QwenConfig| kv_pool_bytes(c, bs, nb, false) as f64 / kv_pool_bytes(c, bs, nb, true) as f64;
         assert!((ratio(&real) - 4.0 * 128.0 / 132.0).abs() < 1e-9, "real head_dim=128 ratio must be 3.8788...");
         assert!((ratio(&QwenConfig::tiny()) - 4.0 * 8.0 / 12.0).abs() < 1e-9, "tiny head_dim=8 ratio must be 2.6667... -- NOT the same number as the real shape");
+    }
+
+    /// M2.4's own memory-budget gate: `Scratch::{scores,probs}` (`docs`'s own
+    /// audit finding, "the single largest serving scratch buffer") shrinks
+    /// once the fused causal-chunk-prefill path (`paged_flash_prefill`)
+    /// replaces the triad for an fp32-KV engine - decode's own worst case
+    /// (`max_batch * n_heads * cap`) is the ONLY term left, dropping the
+    /// `max_prefill^2 * n_heads` `[nh,N,N]` term the old, unconditional
+    /// `max(...)` formula always paid. Pinned exact numbers at round values
+    /// (not the real Qwen3-0.6B shape - `kv_pool_bytes_identity_holds_at_the_
+    /// real_shape` already covers pinning against that; this test's own job
+    /// is the REDUCTION shape, which round numbers make easy to verify by
+    /// hand): `max_batch=128, max_prefill=512, n_heads=16, cap=2048`.
+    ///
+    /// An int8-KV engine gets NO reduction - documented, not assumed:
+    /// `paged_flash_prefill` has no int8-KV tier yet, so a `kv_int8` engine
+    /// still runs causal-chunk prefill through the triad and needs the SAME
+    /// scratch this milestone shrinks for fp32.
+    #[test]
+    fn paged_attn_scratch_shrinks_once_the_fused_prefill_path_replaces_the_triad() {
+        let mut cfg = QwenConfig::tiny();
+        cfg.n_heads = 16;
+        let (max_batch, max_prefill, cap) = (128u32, 512u32, 2048u32);
+
+        // The OLD, unconditional formula every prior milestone shipped
+        // (`b = max_batch.max(max_prefill)`, `max(decode, causal-chunk)`) -
+        // inlined here as the regression floor, not re-derived from the
+        // current (shrunk) implementation.
+        let b = max_batch.max(max_prefill) as u64;
+        let nh = cfg.n_heads as u64;
+        let old_words = (b * nh * cap as u64).max(max_prefill as u64 * max_prefill as u64 * nh);
+        let old_bytes = old_words * 2 * 4;
+        assert_eq!(old_bytes, 134_217_728, "sanity: the old formula's own value at this shape");
+
+        let new_fp32 = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, true);
+        assert_eq!(new_fp32, 33_554_432, "fused prefill available: decode's own worst case only");
+        assert!(new_fp32 < old_bytes, "the shrunk size must be smaller than the old unconditional formula");
+        assert_eq!(old_bytes / new_fp32, 4, "exactly 4x at this shape (matches max_prefill^2/(max_batch*cap))");
+
+        let new_unavailable = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, false);
+        assert_eq!(new_unavailable, old_bytes, "fused prefill unavailable (int8 KV, or no workgroup_reductions): no reduction");
+    }
+
+    /// [`paged_attn_scratch_bytes`] (pure arithmetic) must match what
+    /// [`Engine::paged_attn_scratch_bytes`] recorded at construction, the same
+    /// identity `kv_pool_bytes_identity_holds_at_the_real_shape` pins for the
+    /// KV pool. `fused_prefill_available` is derived through the SAME
+    /// `Op::PagedAttentionFused` selector call `Engine::from_map_with_gpu`
+    /// itself makes, not assumed from `kv_int8` alone - on a device without
+    /// `caps.workgroup_reductions` this would need to stay `false` even at
+    /// fp32 KV, which `paged_attn_scratch_shrinks_only_when_fused_prefill_is_
+    /// actually_reachable` below pins directly.
+    #[test]
+    fn engine_paged_attn_scratch_bytes_matches_the_free_function() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        for kv_int8 in [false, true] {
+            let (bs, num_blocks, max_batch, mbt, max_prefill) = (4u32, 64u32, 4u32, 8u32, 16u32);
+            let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, bs, num_blocks, max_batch, mbt, max_prefill, kv_int8, false);
+            let cap = mbt * bs;
+            let dtype = if kv_int8 { Dtype::I8 } else { Dtype::F32 };
+            let fused_prefill_available = DefaultSelector.select(Op::PagedAttentionFused, OpShape { m: 0, n: 0, k: 1, dtype }, &eng.gpu().caps()) == KernelVariant::FusedFlash;
+            assert_eq!(
+                eng.paged_attn_scratch_bytes(),
+                paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, fused_prefill_available),
+                "kv_int8={kv_int8}"
+            );
+        }
+    }
+
+    /// The capability gate itself (M2.4's own correctness fix, caught before
+    /// this was ever wired to a real device): a device WITHOUT `caps.
+    /// workgroup_reductions` (the CPU JIT's own caps - `FusedFlash` requires
+    /// it, same as `WorkgroupPerOutput`) must NOT shrink the scratch even at
+    /// fp32 KV, because `run_batched_steps`'s own dispatch falls back to the
+    /// triad there and the triad needs the full, unshrunk size. Pure
+    /// arithmetic against a hand-built `DeviceCaps` - no CPU backend needed.
+    #[test]
+    fn paged_attn_scratch_shrinks_only_when_fused_prefill_is_actually_reachable() {
+        let cfg = QwenConfig::tiny();
+        let (max_batch, max_prefill, cap) = (4u32, 16u32, 32u32);
+        let mut cpu_like = gpu_core::DeviceCaps::portable_baseline(gpu_core::DeviceClass::Cpu);
+        cpu_like.workgroup_reductions = false;
+
+        let available = DefaultSelector.select(Op::PagedAttentionFused, OpShape { m: 0, n: 0, k: 1, dtype: Dtype::F32 }, &cpu_like) == KernelVariant::FusedFlash;
+        assert!(!available, "sanity: a device without workgroup_reductions never gets FusedFlash");
+
+        let unshrunk = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, available);
+        let old_formula = {
+            let nh = cfg.n_heads as u64;
+            let b = max_batch.max(max_prefill) as u64;
+            (b * nh * cap as u64).max(max_prefill as u64 * max_prefill as u64 * nh) * 2 * 4
+        };
+        assert_eq!(unshrunk, old_formula, "fp32 KV on a device without workgroup_reductions must keep the full size");
     }
 
     /// Single-sequence paged/batched serving must match the reference contiguous
@@ -3317,5 +3535,91 @@ mod tests {
             total_tokens / batch_s,
             seq_s / batch_s,
         );
+    }
+
+    /// M2.4: `run_batched_steps`'s own attention dispatch, inspected via
+    /// `Step::meta().kernel` rather than any output value - the fused
+    /// kernel's own numerical agreement with the triad is already gated at
+    /// the kernel level (`model::paged::flash_tests::
+    /// paged_flash_prefill_matches_batched_triad`); this test's whole job is
+    /// proving `run_batched_steps` actually PICKS one path or the other,
+    /// matching `Op::PagedAttentionFused`'s own candidates (see
+    /// `gpu_core::select`'s own `paged_attention_fused_only_offers_the_
+    /// fused_kernel_at_causal_chunk_f32`): causal-chunk (prefill) at fp32 KV
+    /// gets the ONE fused dispatch and none of the triad's three; every
+    /// other regime (decode, or causal-chunk under int8 KV, which
+    /// `paged_flash_prefill` has no tier for yet) keeps the triad and never
+    /// dispatches the fused kernel at all.
+    #[allow(clippy::type_complexity)]
+    fn causal_chunk_metadata(cc: u32) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+        let bs = 4u32;
+        let mut alloc = BlockAllocator::new(64, bs);
+        let mut table = BlockTable::new();
+        table.reserve(cc, &mut alloc).expect("KV pool exhausted");
+        let mbt = 8usize;
+        let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut bt = vec![0u32; cc as usize * mbt];
+        for i in 0..cc {
+            let (bl, off) = table.locate(i, bs);
+            positions.push(i);
+            seqlens.push(i + 1); // causal: query i attends 0..=i
+            blocks.push(bl);
+            offsets.push(off);
+            for (lb, &phys) in table.blocks().iter().enumerate() {
+                bt[i as usize * mbt + lb] = phys;
+            }
+        }
+        (positions, seqlens, blocks, offsets, bt)
+    }
+
+    #[test]
+    fn causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_triad() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, false, false);
+        let cc = 6u32;
+        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
+        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
+        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, true);
+        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        let fused = kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count();
+        let triad = kinds.iter().filter(|&&k| k == SCORES_B || k == SCORES_B_WG || k == SOFTMAX_B || k == APPLY_B).count();
+        assert_eq!(fused, cfg.n_layers as usize, "one fused dispatch per layer, causal-chunk fp32 KV");
+        assert_eq!(triad, 0, "the triad must not run when the fused kernel does");
+    }
+
+    #[test]
+    fn decode_regime_never_dispatches_the_fused_kernel() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, false, false);
+        // Decode shape: independent single-token rows, NOT a causal chunk -
+        // `causal_chunk_metadata`'s own construction happens to build valid
+        // decode metadata too (one row per position, its own block), which is
+        // exactly the point: only the CALL SITE's own `causal_chunk` flag
+        // decides the regime, not anything inferable from the shape alone
+        // (M2.1's own finding: the fused decode kernel never wins here).
+        let cc = 3u32;
+        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
+        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
+        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
+        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "decode must never pick the fused kernel");
+        let triad = kinds.iter().filter(|&&k| k == SCORES_B || k == SCORES_B_WG || k == SOFTMAX_B || k == APPLY_B).count();
+        assert!(triad > 0, "decode must still run the triad");
+    }
+
+    #[test]
+    fn causal_chunk_int8_kv_still_uses_the_triad() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, true, false);
+        let cc = 6u32;
+        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
+        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
+        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, true);
+        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "paged_flash_prefill has no int8-KV tier yet");
+        assert!(kinds.contains(&SCORES_I8), "causal-chunk int8 KV must still run the int8 triad");
     }
 }
