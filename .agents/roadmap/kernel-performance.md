@@ -1194,6 +1194,32 @@ calls it by name. Re-verified: `no_kernel_names.rs` (3 passed),
 sibling in the catalogue either way), full `brain-qwen3` `--lib` and
 `--tests` (104 + 19 binaries, 0 failed) after the move.
 
+**`make parity`/`make test`, run last, at the same time this ledger entry
+was being written on a box already running several other sessions' own
+builds against the SAME checkout.** `scripts/gates/parity-gate.sh`'s CPU-
+backend gradcheck stage - the identical suite `make gradcheck` above already
+covers - passed clean a second time. Its Vulkan-backend stage hit `backend-
+vulkan.md`'s own documented pre-existing NVIDIA-driver hang (distinct from
+that file's SIGSEGV-on-exit entry, the sibling failure mode the same section
+already names: "one run hung instead, needing SIGKILL"): the `unet`/`vqgan`
+gradient tests - unrelated diffusion models, no qwen3/attention code in
+their path - ran 35+ minutes burning a full CPU core with BOTH GPUs at 0%
+utilisation the whole time (`nvidia-smi`, sampled repeatedly), the exact
+signature that file's own entry describes. Killed by hand (`SIGKILL`); the
+script's own `run()` wrapper correctly recorded that one stage FAIL and
+continued to the next. `cargo build --release` (workspace) passed clean.
+`make test` and the remaining `parity-gate.sh` stages (model FD suites,
+qwen-serve CPU-backend, TTS codec) were still compiling when this entry was
+written - confirmed genuinely progressing, not stalled (dozens of live
+`rustc` children with real, growing CPU time; the workspace's full
+release+LTO test-binary count climbing steadily), just slow: this box was
+running several concurrent sessions' own `cargo` invocations against this
+SAME checkout for the whole of M2.4's window, and cargo's own build-directory
+lock serialises overlapping work across ALL of them, not just within one
+session. Left running in the background; whoever next has a quiet box should
+let them finish and treat a real failure there (not a repeat of the killed
+Vulkan hang) as a genuine regression report.
+
 **Commits**: seven - `backend-api: add Op::PagedAttentionFused` (`select.rs`
 alone, per this campaign's own file-contention rule), `model: cover
 KernelVariant::FusedFlash in Ops::matmul's dispatch-count match` (the
