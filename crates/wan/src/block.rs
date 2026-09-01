@@ -41,7 +41,7 @@
 //! which is what lets one parity test prove both paths agree.
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::block::{chunked_bidir_fwd, flash_bidir_fwd, CrossIds, FlashIds, GemmVariants, LayerNormIds};
+use model::block::{chunked_bidir_fwd, flash_bidir_fwd, flash_gate, CrossIds, FlashIds, GemmVariants, LayerNormIds};
 
 // Kernel-table indices (order matches KERNELS).
 pub(crate) const K_LAYERNORM: usize = 0;
@@ -166,14 +166,17 @@ pub enum AttnMode {
 /// form that fits at Wan's real token counts - the materialised slab is 51 GB
 /// at 32,760 tokens and 12 heads, against a 2047 MiB per-binding ceiling. The
 /// chunked trio exists for the CPU JIT (no workgroup barriers) and as the A/B
-/// partner a parity test can force.
+/// partner a parity test can force. The device check itself is
+/// [`model::block::flash_gate`] - the shared outer gate every flash-family
+/// caller in the workspace goes through - with no extra condition of this
+/// crate's own, hence `true`.
 pub fn attn_mode(gpu: &Gpu) -> AttnMode {
     match std::env::var("BRAIN_WAN_ATTN").ok().as_deref() {
         Some("flash") => return AttnMode::Flash,
         Some("chunked") => return AttnMode::Chunked,
         _ => {}
     }
-    if gpu.caps().workgroup_reductions {
+    if flash_gate(&gpu.caps(), true) {
         AttnMode::Flash
     } else {
         AttnMode::Chunked

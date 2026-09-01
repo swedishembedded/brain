@@ -782,17 +782,19 @@ impl Lfm {
         }
     }
 
-    /// Whether the fused flash path is worth taking on THIS device: only when
-    /// `block::flash_bidir_variant` resolves to something better than the
-    /// BASELINE kernel. That kernel measured SLOWER than `gemm_bidir_fwd` at
-    /// lfm's shape (see the `FLASH_BIDIR` comment), so "cooperative device" is
-    /// not the gate - "the selector found a lane-split variant" is, and the
-    /// test is written against `FLASH_BIDIR` rather than against whichever
-    /// variant is currently top of the ladder so a new one cannot silently
-    /// turn this off.
+    /// Whether the fused flash path is worth taking on THIS device: capable
+    /// (`block::flash_gate`, the shared outer gate every flash-family caller
+    /// in the workspace goes through) AND `block::flash_bidir_variant`
+    /// resolves to something better than the BASELINE kernel - this crate's
+    /// own `extra` condition. That kernel measured SLOWER than
+    /// `gemm_bidir_fwd` at lfm's shape (see the `FLASH_BIDIR` comment), so
+    /// "cooperative device" alone is not enough - "the selector found a
+    /// lane-split variant" is also required, and the test is written against
+    /// `FLASH_BIDIR` rather than against whichever variant is currently top of
+    /// the ladder so a new one cannot silently turn this off.
     fn flash_selectable(gpu: &Gpu) -> bool {
         let caps = gpu.caps();
-        caps.workgroup_reductions && block::flash_bidir_variant(Self::flash_ids(), &caps).0 != FLASH_BIDIR
+        block::flash_gate(&caps, block::flash_bidir_variant(Self::flash_ids(), &caps).0 != FLASH_BIDIR)
     }
 
     fn bidir_ids() -> BidirIds {

@@ -913,6 +913,45 @@ pub fn chunked_bidir_fwd(
     }
 }
 
+/// The workspace-wide OUTER gate for asking any flash-attention family for a
+/// dispatch at all - the check every caller must make BEFORE it may even call
+/// [`flash_bidir_variant`] or [`flash_cross_supported`], both of which pick a
+/// *rung* by shape/shared-memory fit and do not themselves read
+/// `workgroup_reductions`. That field is a CORRECTNESS gate, not a tuning
+/// input: false means the Cranelift CPU JIT's split-at-one-barrier execution
+/// model cannot run these multi-barrier kernels at all (see the field's own
+/// doc on [`gpu_core::DeviceCaps`]).
+///
+/// Before this function existed, four sites each reimplemented a different
+/// subset of the same `workgroup_reductions` check: `wan::block::attn_mode`
+/// (the check alone), `lfm2::Model::flash_selectable` (plus "the ladder
+/// actually beat the materialised baseline rung"), `sdxlunet::Rec`'s
+/// self-attention (plus "not a training/gradient-recording pass"), and
+/// `ltxv::block::flash_self_attn`/`flash_cross_attn` (plus `head_dim <=
+/// 128`) - lesson #78's exact shape ("a selection seam only reaches callers
+/// that opt in"), just for a gate instead of a kernel: a future change to the
+/// base check (say, a driver quirk that also needs excluding) would have had
+/// to be hunted down and reapplied in four places, and silently missed in
+/// whichever one nobody remembered.
+///
+/// `extra` is that call site's OWN additional requirement, kept an explicit
+/// argument rather than folded into a config enum here: it is genuinely
+/// different per site (train-mode exclusion, a measured "beats the baseline"
+/// check, a `head_dim` ceiling) and forcing it into one shared type would
+/// only move the duplication into deciding which variant of the enum each
+/// site needs. A site with no extra condition of its own (`wan`) passes
+/// `true`. The cross-attention family additionally requires the stricter,
+/// already-centralised [`flash_cross_supported`] (shared memory + workgroup
+/// size, on top of the same `workgroup_reductions` bit this function reads),
+/// so a caller ANDs this with that rather than this function trying to guess
+/// which ladder it is gating.
+///
+/// Pure in its inputs: `caps` comes from `DeviceCaps`, so no backend name is
+/// consulted.
+pub fn flash_gate(caps: &gpu_core::DeviceCaps, extra: bool) -> bool {
+    caps.workgroup_reductions && extra
+}
+
 /// The interchangeable bidirectional flash-attention kernels, as a model's own
 /// pipeline indices. Every field past `bidir` is optional (`None` = the model
 /// has not registered that kernel), which keeps adoption additive.
@@ -2187,7 +2226,27 @@ mod kv_cache_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{gemm_variant, pick_gemm, tiles_with_budget, GemmVariants, TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS};
+    use super::{flash_gate, gemm_variant, pick_gemm, tiles_with_budget, GemmVariants, TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS};
+    use gpu_core::{DeviceCaps, DeviceClass};
+
+    /// The shared outer gate is exactly `workgroup_reductions AND extra` - no
+    /// more, no less - at all four truth-table points. This is what makes it
+    /// safe for `wan`/`lfm2`/`sdxlunet`/`ltxv` to each hand it their own
+    /// `extra` condition and trust the device half is applied identically:
+    /// `caps.workgroup_reductions == false` must refuse a dispatch regardless
+    /// of `extra` (the Cranelift CPU JIT correctness gate, not a preference),
+    /// and a capable device must still refuse when the caller's own extra
+    /// condition (train-mode, "beats the baseline", `head_dim <= 128`) fails.
+    #[test]
+    fn flash_gate_is_workgroup_reductions_and_the_callers_extra_condition() {
+        let coop = DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu);
+        let non_coop = DeviceCaps { workgroup_reductions: false, ..DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu) };
+
+        assert!(flash_gate(&coop, true), "capable device, no extra condition: must dispatch");
+        assert!(!flash_gate(&coop, false), "capable device but the caller's extra condition failed: must not dispatch");
+        assert!(!flash_gate(&non_coop, true), "CPU-JIT-shaped device: must never dispatch regardless of extra");
+        assert!(!flash_gate(&non_coop, false), "neither half holds");
+    }
 
     /// Pins `pick_gemm`'s measured crossover (now delegated to
     /// `backend_api::select::candidates` - see that module's

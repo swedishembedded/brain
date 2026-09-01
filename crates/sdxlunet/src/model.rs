@@ -159,8 +159,6 @@ pub fn attn_slab_words(cfg: &UNetConfig, h: u32, w: u32, with_up: bool) -> u64 {
 pub struct Rec<'a> {
     b: Builder<'a>,
     flash: block::FlashIds,
-    /// The device runs workgroup-cooperative kernels (flash attention).
-    coop: bool,
     t_enc: u32,
     /// An optional extra term added into every cross-attention context, before
     /// the block's shared `to_out` — the consumer half of
@@ -222,7 +220,6 @@ impl<'a> Rec<'a> {
     }
 
     fn new_maybe_train(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool, train: bool) -> Rec<'a> {
-        let coop = gpu.caps().workgroup_reductions;
         let mut b = Builder::new(gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps);
         // Must precede the first recorded block.
         b.set_train(train);
@@ -250,7 +247,6 @@ impl<'a> Rec<'a> {
         Rec {
             b,
             flash,
-            coop,
             t_enc,
             inject: None,
             site: 0,
@@ -641,7 +637,10 @@ impl<'a> Rec<'a> {
         // materialised path however cooperative the device is. Outside train
         // mode the choice is the old one: flash where the device supports it,
         // because the score slab is `heads·T²` (671 MB at SDXL's native 1024²).
-        if self.coop && !self.b.is_train() {
+        // `block::flash_gate` is the shared outer gate every flash-family
+        // caller in the workspace goes through; "not a training pass" is this
+        // crate's own extra condition.
+        if block::flash_gate(&self.b.gpu().caps(), !self.b.is_train()) {
             let g = self.b.gpu();
             let mut steps: Vec<Step> = Vec::new();
             block::flash_bidir_fwd(g, self.flash, heads, hd, c, qkv, 3 * c, 0, c, 2 * c, ctx, &[(0, t)], &mut steps);
