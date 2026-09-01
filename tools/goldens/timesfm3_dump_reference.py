@@ -43,15 +43,18 @@ softmax path (deterministic; PyTorch's SDPA kernel selection is not, across
 backends - `porting.md` §1's "everything f32, fixed seeds" applies to the
 attention implementation too, not only the inputs).
 
-Outputs (into <out_dir>):
-  - manifest.json     (committed): shapes, sampled subset + RMS per tap, and
-                       golden_source.py's `source` block (both parts).
-  - tiny_*.npy         (gitignored): part A's full tensors.
-  - real_*.npy         (gitignored): part B's full tensors.
+Outputs (into <out_dir>, normally `testdata/golden/timesfm3/` - gitignored,
+regenerated on demand, never committed: it is large numeric data, not source):
+  - manifest.json     shapes, per-tap RMS, the full numeric arrays this
+                       ladder's rungs assert against, and golden_source.py's
+                       `source` block (both parts).
+  - tiny_*.npy         part A's full tensors, for ad-hoc inspection outside Rust.
+  - real_*.npy         part B's full tensors, for ad-hoc inspection outside Rust.
 
 Usage:
   BRAIN_TIMESFM3_REF=<google-research/timesfm checkout> \\
-    python3 tools/goldens/timesfm3_dump_reference.py <checkpoint_dir> <out_dir>
+    python3 tools/goldens/timesfm3_dump_reference.py <checkpoint_dir> \\
+    testdata/golden/timesfm3
 
 <checkpoint_dir> is a local `google/timesfm-3.0-pytorch` checkout (what
 `brain pull google/timesfm-3.0-pytorch` fetches) - not committed, not baked in

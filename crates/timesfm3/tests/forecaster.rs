@@ -7,17 +7,27 @@
 //! `postprocess` directly with the equivalent raw arrays - this is a
 //! composition/wiring check (the math itself is parity-gated in
 //! `tests/parity.rs`), reusing the checkpoint-free tiny-config golden so it
-//! needs no download.
+//! needs no download. The golden is regenerable numeric data, not checked
+//! in; these tests skip (rather than fail) when it hasn't been generated -
+//! see `read_golden`.
 
 use std::collections::HashMap;
 use forecast::{Capabilities, CovariateSupport, ForecastModel, ForecastSpec, Item, Panel, Representation, Role, Variate};
 use timesfm3::preprocess::{self, DecodeShape};
 use timesfm3::{Timesfm3, Timesfm3Config, Timesfm3Forecaster};
 
-fn read_golden() -> serde_json::Value {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/manifest.json");
-    let bytes = std::fs::read(path).expect("read manifest.json");
-    serde_json::from_slice(&bytes).unwrap()
+fn read_golden() -> Option<serde_json::Value> {
+    let path = brain_testutil::testdata_path("golden/timesfm3/manifest.json");
+    if !path.exists() {
+        brain_testutil::skip(&format!(
+            "{} not found - regenerate with: BRAIN_TIMESFM3_REF=<google-research/timesfm checkout> python3 tools/goldens/timesfm3_dump_reference.py <fetched checkpoint dir> {}",
+            path.display(),
+            path.parent().unwrap().display()
+        ));
+        return None;
+    }
+    let bytes = std::fs::read(&path).expect("read manifest.json");
+    Some(serde_json::from_slice(&bytes).unwrap())
 }
 
 fn farr(v: &serde_json::Value) -> Vec<f32> {
@@ -33,7 +43,7 @@ fn load_tiny_model(g: &serde_json::Value) -> (Timesfm3Config, Timesfm3) {
 
 #[test]
 fn capabilities_advertise_native_multivariate_full_covariates() {
-    let g = read_golden();
+    let Some(g) = read_golden() else { return; };
     let (_, model) = load_tiny_model(&g);
     let f = Timesfm3Forecaster::new(model);
     let caps: Capabilities = f.capabilities();
@@ -46,7 +56,7 @@ fn capabilities_advertise_native_multivariate_full_covariates() {
 
 #[test]
 fn forecast_over_a_panel_matches_the_equivalent_direct_decode_call() {
-    let g = read_golden();
+    let Some(g) = read_golden() else { return; };
     let (cfg, model) = load_tiny_model(&g);
     let target = farr(&g["tiny.input.target"]["full"]); // [2,2,16]: 2 batches, 2 targets, context 16
     let past_only = farr(&g["tiny.input.past_only"]["full"]); // [2,1,16]

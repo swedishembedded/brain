@@ -3,23 +3,33 @@
 
 //! `core_forward` parity vs the real `google-research/timesfm` reference.
 //!
-//! Two rungs, per the parity ladder: a checkpoint-free tiny-config rung that
-//! runs in CI with no download (weights, input and expected output are all
-//! embedded in the committed `tests/golden/manifest.json`), and a
-//! real-checkpoint rung gated on `BRAIN_TIMESFM3` (skips, does not fail, when
-//! unset). Both gate **cosine AND relative L2** - cosine alone cannot see a
-//! dropped or doubled scale factor, which is exactly the class of bug this
-//! model's attention-scale fold (see `model.rs`'s module docs) is most at
-//! risk of.
+//! Two rungs, per the parity ladder: a checkpoint-free tiny-config rung and a
+//! real-checkpoint rung (additionally gated on `BRAIN_TIMESFM3`). Both need
+//! `testdata/golden/timesfm3/manifest.json` - a regenerable dump
+//! (`tools/goldens/timesfm3_dump_reference.py`), never committed (a golden
+//! dump is exactly as regenerable as the checkpoint it was dumped from, and
+//! this one is 800+ KB), so both rungs skip cleanly (do not fail) when it is
+//! absent rather than only the real-checkpoint one. Both gate **cosine AND
+//! relative L2** - cosine alone cannot see a dropped or doubled scale factor,
+//! which is exactly the class of bug this model's attention-scale fold (see
+//! `model.rs`'s module docs) is most at risk of.
 
 use std::collections::HashMap;
 use timesfm3::preprocess::{self, DecodeShape};
 use timesfm3::{Timesfm3, Timesfm3Config};
 
-fn read_golden() -> serde_json::Value {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/manifest.json");
-    let bytes = std::fs::read(path).expect("read manifest.json");
-    serde_json::from_slice(&bytes).unwrap()
+fn read_golden() -> Option<serde_json::Value> {
+    let path = brain_testutil::testdata_path("golden/timesfm3/manifest.json");
+    if !path.exists() {
+        brain_testutil::skip(&format!(
+            "{} not found - regenerate with: BRAIN_TIMESFM3_REF=<google-research/timesfm checkout> python3 tools/goldens/timesfm3_dump_reference.py <fetched checkpoint dir> {}",
+            path.display(),
+            path.parent().unwrap().display()
+        ));
+        return None;
+    }
+    let bytes = std::fs::read(&path).expect("read manifest.json");
+    Some(serde_json::from_slice(&bytes).unwrap())
 }
 
 fn farr(v: &serde_json::Value) -> Vec<f32> {
@@ -50,7 +60,7 @@ fn cos_and_rel_l2(got: &[f32], want: &[f32]) -> (f32, f32) {
 
 #[test]
 fn tiny_config_core_forward_matches_the_reference_end_to_end() {
-    let g = read_golden();
+    let Some(g) = read_golden() else { return; };
     let cfg = Timesfm3Config::from_hf_config_json(&g["tiny_config"]).unwrap();
     // `max_context` is not part of the upstream config.json schema at all (a
     // forecaster-level constant, not a checkpoint hyperparameter - see
@@ -84,7 +94,7 @@ fn real_checkpoint_core_forward_matches_the_reference_end_to_end() {
         brain_testutil::skip("BRAIN_TIMESFM3 unset");
         return;
     };
-    let g = read_golden();
+    let Some(g) = read_golden() else { return; };
     let cfg = timesfm3::import::load_config(&path).unwrap();
     assert_eq!(cfg, Timesfm3Config::default());
 
@@ -140,7 +150,7 @@ fn decode_end_to_end(g: &serde_json::Value, prefix: &str, cfg: Timesfm3Config, m
 
 #[test]
 fn tiny_config_decode_end_to_end_from_raw_inputs_matches_the_reference() {
-    let g = read_golden();
+    let Some(g) = read_golden() else { return; };
     let cfg = Timesfm3Config::from_hf_config_json(&g["tiny_config"]).unwrap();
     let weights: HashMap<String, Vec<f32>> =
         g["tiny_weights"].as_object().unwrap().iter().map(|(k, v)| (k.clone(), farr(v))).collect();
@@ -156,7 +166,7 @@ fn real_checkpoint_decode_end_to_end_from_raw_inputs_matches_the_reference() {
         brain_testutil::skip("BRAIN_TIMESFM3 unset");
         return;
     };
-    let g = read_golden();
+    let Some(g) = read_golden() else { return; };
     let cfg = timesfm3::import::load_config(&path).unwrap();
     let weights = timesfm3::import::load_hf(&cfg, &path).unwrap();
     let model = Timesfm3::from_weights_on(gpu_core::testgpu::dev(timesfm3::model::PIPELINES), cfg.clone(), &weights).unwrap();
@@ -174,7 +184,7 @@ fn real_checkpoint_decode_end_to_end_from_raw_inputs_matches_the_reference() {
 /// CPM ones - see `cpm_iterative_revin_refine`'s doc comment).
 #[test]
 fn cpm_refine_alone_matches_the_golden_exactly() {
-    let g = read_golden();
+    let Some(g) = read_golden() else { return; };
     let want_mu = farr(&g["tiny.cpm_refined_mu"]["full"]);
     let want_sigma = farr(&g["tiny.cpm_refined_sigma"]["full"]);
     let raw_logits = farr(&g["tiny.raw_logits"]["full"]);
