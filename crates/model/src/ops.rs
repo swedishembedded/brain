@@ -815,6 +815,9 @@ impl Ops {
             KernelVariant::SplitReduction => {
                 unreachable!("Op::MatMul's candidates() never returns SplitReduction")
             }
+            KernelVariant::FusedFlash => {
+                unreachable!("Op::MatMul's candidates() never returns FusedFlash")
+            }
         }
     }
 
