@@ -44,6 +44,10 @@ impl Timesfm3Forecaster {
         Ok(Timesfm3Forecaster::new(Timesfm3::load(path)?))
     }
 
+    pub fn config(&self) -> &crate::Timesfm3Config {
+        self.model.config()
+    }
+
     /// Interpolate the requested `levels` from the native quantile matrix
     /// `native` (`[horizon, native_levels.len()]`, step-major - `postprocess`'s
     /// own output layout), against THIS model's actual quantile levels

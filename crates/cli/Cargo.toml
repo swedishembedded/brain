@@ -117,6 +117,7 @@ brain-fcbench.workspace = true
 brain-chronos2.workspace = true
 brain-kronos.workspace = true
 brain-fincast.workspace = true
+brain-timesfm3.workspace = true
 brain-server.workspace = true
 brain-onnx.workspace = true
 brain-npu.workspace = true

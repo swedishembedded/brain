@@ -64,6 +64,7 @@ fn predict(args: &[String]) {
     let temperature = a.f32_or("--temperature", 0.0);
     let kronos_tok = a.take_str("--kronos-tokenizer");
     let kronos_dec = a.take_str("--kronos-decoder");
+    let timesfm3_weights = a.take_str("--timesfm3");
     a.finish();
 
     // The two sampling knobs that set how WIDE the predicted band is. Left
@@ -81,6 +82,7 @@ fn predict(args: &[String]) {
         eprintln!("         [--origins 1] [--seed 7] [--season 24] [--gnuplot chart.png]");
         eprintln!("         [--top-p 0.9] [--temperature 1.0]");
         eprintln!("         [--kronos-tokenizer D --kronos-decoder D]");
+        eprintln!("         [--timesfm3 <weights>]  (uses this model instead of kronos when given)");
         eprintln!();
         eprintln!("The CSV is timestamp,open,high,low,close,volume. The last --horizon rows are held out");
         eprintln!("as ground truth; everything before them is the model's context. --origins N repeats");
@@ -113,46 +115,70 @@ fn predict(args: &[String]) {
         }
     };
 
-    // Weights: explicit flags win, else the env pair, else the default Kronos
-    // refs fill the pair in -- fetching only when opted in
-    // ([`crate::supply::auto_fetch_enabled`]).
-    if kronos_tok.is_none() || kronos_dec.is_none() {
-        crate::supply::ensure_env_weights("kronos");
-    }
-    let env = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty());
-    let (Some(tok), Some(dec)) = (kronos_tok.or_else(|| env("BRAIN_KRONOS_TOKENIZER")), kronos_dec.or_else(|| env("BRAIN_KRONOS_DECODER"))) else {
-        eprintln!("brain forecast predict: no kronos checkpoint resolved, and neither");
-        eprintln!("  --kronos-tokenizer/--kronos-decoder nor BRAIN_KRONOS_TOKENIZER/BRAIN_KRONOS_DECODER are set");
-        std::process::exit(1);
-    };
-    let model = match kronos::KronosForecaster::load(&tok, &dec) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("brain forecast predict: load kronos from {tok} + {dec}: {e}");
-            std::process::exit(1);
+    // `model_name` drives every printed label below (and the chart title), so
+    // adding a model here never means hunting down a second "kronos" literal.
+    let (model, model_name, context): (Box<dyn forecast::ForecastModel>, &str, usize) = if let Some(path) = timesfm3_weights {
+        let m = match timesfm3::Timesfm3Forecaster::load(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("brain forecast predict: load timesfm3 from {path}: {e}");
+                std::process::exit(1);
+            }
+        };
+        // Single-pass, non-autoregressive: no KV-cache window to slide, unlike
+        // kronos - but the context must still be a multiple of the model's
+        // patch length, so round down rather than error on an arbitrary CSV
+        // length.
+        let patch = m.config().input_patch_len;
+        let max_context = forecast::ForecastModel::capabilities(&m).max_context;
+        let want = if context == 0 { max_context.min(512) } else { context };
+        let context = (want / patch).max(1) * patch;
+        (Box::new(m), "timesfm3", context)
+    } else {
+        // Weights: explicit flags win, else the env pair, else the default
+        // Kronos refs fill the pair in -- fetching only when opted in
+        // ([`crate::supply::auto_fetch_enabled`]).
+        if kronos_tok.is_none() || kronos_dec.is_none() {
+            crate::supply::ensure_env_weights("kronos");
         }
+        let env = |v: &str| std::env::var(v).ok().filter(|s| !s.is_empty());
+        let (Some(tok), Some(dec)) = (kronos_tok.or_else(|| env("BRAIN_KRONOS_TOKENIZER")), kronos_dec.or_else(|| env("BRAIN_KRONOS_DECODER"))) else {
+            eprintln!("brain forecast predict: no kronos checkpoint resolved, and neither");
+            eprintln!("  --kronos-tokenizer/--kronos-decoder nor BRAIN_KRONOS_TOKENIZER/BRAIN_KRONOS_DECODER are set (or pass --timesfm3 <weights>)");
+            std::process::exit(1);
+        };
+        let m = match kronos::KronosForecaster::load(&tok, &dec) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("brain forecast predict: load kronos from {tok} + {dec}: {e}");
+                std::process::exit(1);
+            }
+        };
+        // Default context: as much history as the checkpoint's window allows
+        // while leaving room for the horizon INSIDE it. Past `max_context -
+        // horizon` the rollout's attention window slides, and the KV-cached
+        // rollout stops being equal to the reference's re-run-the-whole-window
+        // one. That is not a rounding difference: on this checkpoint the
+        // sampled cloud drifts measurably away from the reference's once the
+        // window moves, while inside this regime the two agree sample for
+        // sample. A default that is silently an approximation is the wrong
+        // default; ask for the longer window explicitly with `--context` if
+        // you want it.
+        let max_context = forecast::ForecastModel::capabilities(&m).max_context;
+        let exact_context = max_context.saturating_sub(horizon).max(1);
+        let context = if context == 0 { exact_context } else { context.min(max_context) };
+        if context > exact_context {
+            eprintln!("brain forecast predict: --context {context} + --horizon {horizon} exceeds the model's {max_context}-bar window,");
+            eprintln!("  so the cached rollout slides it and is an approximation of the reference (use --context {exact_context} or less for exactness)");
+        }
+        (Box::new(m), "kronos", context)
     };
-    // Default context: as much history as the checkpoint's window allows while
-    // leaving room for the horizon INSIDE it. Past `max_context - horizon` the
-    // rollout's attention window slides, and the KV-cached rollout stops being
-    // equal to the reference's re-run-the-whole-window one. That is not a
-    // rounding difference: on this checkpoint the sampled cloud drifts
-    // measurably away from the reference's once the window moves, while inside
-    // this regime the two agree sample for sample. A default that is silently
-    // an approximation is the wrong default; ask for the longer window
-    // explicitly with `--context` if you want it.
-    let max_context = forecast::ForecastModel::capabilities(&model).max_context;
-    let exact_context = max_context.saturating_sub(horizon).max(1);
-    let context = if context == 0 { exact_context } else { context.min(max_context) };
-    if context > exact_context {
-        eprintln!("brain forecast predict: --context {context} + --horizon {horizon} exceeds the model's {max_context}-bar window,");
-        eprintln!("  so the cached rollout slides it and is an approximation of the reference (use --context {exact_context} or less for exactness)");
-    }
 
     // `samples == 1` means the deterministic modal rollout: one stable path,
     // reproducible run to run, and N times cheaper than drawing a cloud. More
     // than one draws real trajectories, the point path becomes the median, and
-    // the chart gains a p10-p90 band.
+    // the chart gains a p10-p90 band. TimesFM-3 is not stochastic, so this only
+    // affects kronos.
     let spec = forecast::ForecastSpec {
         horizon,
         representations: vec![forecast::Representation::Quantiles, forecast::Representation::Point],
@@ -181,7 +207,7 @@ fn predict(args: &[String]) {
             }
         };
         let panel = forecast::csv::panel(&split, &item, &freq);
-        let out = match forecast::ForecastModel::forecast(&model, &panel, &spec) {
+        let out = match model.forecast(&panel, &spec) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("brain forecast predict: forecast failed: {} ({})", e.message, e.code);
@@ -205,7 +231,7 @@ fn predict(args: &[String]) {
         let actual: Vec<f32> = split.actual.iter().map(|b| b.ohlcv[forecast::csv::CLOSE]).collect();
         let last = *ctx_close.last().expect("split guarantees a non-empty context");
         let mut row: Vec<(String, Score)> = vec![
-            ("kronos".into(), Score::probabilistic(&pred, &tf, &actual)),
+            (model_name.to_string(), Score::probabilistic(&pred, &tf, &actual)),
             ("persistence (last close)".into(), Score::point(&vec![last; horizon], &actual)),
             ("drift (context mean return)".into(), Score::point(&drift_path(&ctx_close, horizon), &actual)),
         ];
@@ -229,7 +255,7 @@ fn predict(args: &[String]) {
     let n = origins.max(1);
 
     println!(
-        "kronos forecast: {context} bars of context -> {horizon} held-out bars x {n} rolling origin{}  ({:.1}s, {} sample{})",
+        "{model_name} forecast: {context} bars of context -> {horizon} held-out bars x {n} rolling origin{}  ({:.1}s, {} sample{})",
         if n == 1 { "" } else { "s" },
         elapsed.as_secs_f64(),
         spec.num_samples,
@@ -263,7 +289,7 @@ fn predict(args: &[String]) {
     }
 
     if let (Some(path), Some((split, pred, tf))) = (gnuplot, &first) {
-        match render_chart(&path, split, pred, tf, &item, horizon) {
+        match render_chart(&path, split, pred, tf, &item, model_name, horizon) {
             Ok(p) => println!("  chart: {}", p.display()),
             Err(e) => {
                 eprintln!("brain forecast predict: {e}");
@@ -402,6 +428,7 @@ fn render_chart(
     pred: &[f32],
     tf: &forecast::TargetForecast,
     item: &str,
+    model_name: &str,
     horizon: usize,
 ) -> Result<std::path::PathBuf, String> {
     // Four horizons of history, and never less than two days of hourly bars:
@@ -411,7 +438,8 @@ fn render_chart(
     // judgement into the right-hand margin.
     let show = (horizon * 4).max(48).min(split.context.len());
     let first = split.context.len() - show;
-    let mut chart = forecast::chart::ForecastChart::new(format!("{item}: kronos {horizon}-bar forecast vs held-out actual"));
+    let mut chart = forecast::chart::ForecastChart::new(format!("{item}: {model_name} {horizon}-bar forecast vs held-out actual"));
+    chart.forecast_label = format!("{model_name} forecast");
     chart.y_label = "close".to_string();
     chart.history = split.context[first..].iter().enumerate().map(|(i, b)| (i as f64, b.ohlcv[forecast::csv::CLOSE] as f64)).collect();
     let origin = show as f64 - 1.0;
@@ -437,6 +465,7 @@ struct FmPaths {
     kronos_tokenizer: Option<String>,
     kronos_decoder: Option<String>,
     fincast: Option<String>,
+    timesfm3: Option<String>,
 }
 
 /// Build a registry with the statistical baselines registered by name, plus any
@@ -474,6 +503,15 @@ fn build_registry(fm: &FmPaths) -> runtime::Registry {
             Err(e) => eprintln!("brain forecast: failed to load fincast from {path}: {e}"),
         }
     }
+    if let Some(path) = &fm.timesfm3 {
+        match timesfm3::Timesfm3Forecaster::load(path) {
+            Ok(m) => {
+                reg.register_forecast(Arc::new(m));
+                eprintln!("brain forecast: loaded timesfm3 from {path}");
+            }
+            Err(e) => eprintln!("brain forecast: failed to load timesfm3 from {path}: {e}"),
+        }
+    }
     reg
 }
 
@@ -483,6 +521,7 @@ fn import(args: &[String]) {
     let mut a = Args::new(args);
     let hf = a.str_or("--hf", "");
     let fincast_ckpt = a.take_str("--fincast");
+    let timesfm3_ckpt = a.take_str("--timesfm3");
     let out = a.str_or("--out", "chronos2.safetensors");
     a.finish();
     if let Some(ckpt) = fincast_ckpt {
@@ -493,9 +532,18 @@ fn import(args: &[String]) {
         }
         return;
     }
+    if let Some(ckpt) = timesfm3_ckpt {
+        let out = if out == "chronos2.safetensors" { "timesfm3.safetensors".to_string() } else { out };
+        match timesfm3::import::import(&ckpt, &out) {
+            Ok(()) => println!("ok: wrote {out}"),
+            Err(e) => eprintln!("import failed: {e}"),
+        }
+        return;
+    }
     if hf.is_empty() {
         eprintln!("usage: brain forecast import --hf <amazon/chronos-2 dir> --out chronos2.safetensors");
         eprintln!("   or: brain forecast import --fincast <FinCast safetensors> --out fincast.safetensors");
+        eprintln!("   or: brain forecast import --timesfm3 <google/timesfm-3.0-pytorch dir> --out timesfm3.safetensors");
         return;
     }
     match chronos2::import::import(&hf, &out) {
@@ -513,6 +561,7 @@ fn compare(args: &[String]) {
     let kronos_tok = a.take_str("--kronos-tokenizer");
     let kronos_dec = a.take_str("--kronos-decoder");
     let fincast_weights = a.take_str("--fincast");
+    let timesfm3_weights = a.take_str("--timesfm3");
     a.finish();
 
     let mut models = fcbench::baselines::default_set();
@@ -546,6 +595,16 @@ fn compare(args: &[String]) {
             Err(e) => eprintln!("comparison: failed to load fincast from {path}: {e}"),
         }
     }
+    // optionally add the natively multivariate TimesFM-3 model.
+    if let Some(path) = &timesfm3_weights {
+        match timesfm3::Timesfm3Forecaster::load(path) {
+            Ok(m) => {
+                eprintln!("comparison: loaded timesfm3 from {path}");
+                models.push(Box::new(m));
+            }
+            Err(e) => eprintln!("comparison: failed to load timesfm3 from {path}: {e}"),
+        }
+    }
     let scenarios = fcbench::scenarios::default_battery();
     let cmp = fcbench::harness::run(&models, &scenarios, windows, seed);
 
@@ -576,6 +635,7 @@ fn serve(args: &[String]) {
     let kronos_tok = a.take_str("--kronos-tokenizer");
     let kronos_dec = a.take_str("--kronos-decoder");
     let fincast = a.take_str("--fincast");
+    let timesfm3 = a.take_str("--timesfm3");
     let max_conn = a.usize_or("--max-connections", 64);
     a.finish();
 
@@ -584,6 +644,7 @@ fn serve(args: &[String]) {
         kronos_tokenizer: kronos_tok,
         kronos_decoder: kronos_dec,
         fincast,
+        timesfm3,
     };
 
     let opts = server::ServeOpts { max_connections: max_conn };

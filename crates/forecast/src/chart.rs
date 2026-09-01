@@ -40,6 +40,10 @@ pub struct ForecastChart {
     pub actual: Vec<(f64, f64)>,
     /// Optional per-step `(x, lo, hi)` uncertainty band under the forecast.
     pub band: Vec<(f64, f64, f64)>,
+    /// The forecast line's own legend entry - callers name their model
+    /// (`"kronos forecast"`, `"timesfm3 forecast"`); this chart type has no
+    /// model of its own, so nothing here may hardcode one.
+    pub forecast_label: String,
     pub y_label: String,
     /// Pixel size of the PNG. Kept small on purpose: this is committed
     /// documentation, not a poster.
@@ -55,6 +59,7 @@ impl ForecastChart {
             forecast: Vec::new(),
             actual: Vec::new(),
             band: Vec::new(),
+            forecast_label: "forecast".to_string(),
             y_label: "value".to_string(),
             // 800 px is the cap the Quick start's committed chart is held to;
             // at 400 px tall the whole PNG lands around 50 KB, below every
@@ -157,7 +162,7 @@ fn gnuplot_script(chart: &ForecastChart, out: &Path, hist: &Path, fcst: &Path, a
         plots.push(format!("{} using 1:2 with lines lw 2 lc rgb '#2e8b57' title 'actual (held out)'", quote(act)));
     }
     if !chart.forecast.is_empty() {
-        plots.push(format!("{} using 1:2 with lines lw 2 dt 1 lc rgb '#d1495b' title 'kronos forecast'", quote(fcst)));
+        plots.push(format!("{} using 1:2 with lines lw 2 dt 1 lc rgb '#d1495b' title {}", quote(fcst), quote_str(&chart.forecast_label)));
     }
     s.push_str("plot ");
     s.push_str(&plots.join(", \\\n     "));

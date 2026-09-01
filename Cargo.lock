@@ -711,6 +711,7 @@ dependencies = [
  "brain-supir",
  "brain-t5encoder",
  "brain-testutil",
+ "brain-timesfm3",
  "brain-toymoe",
  "brain-toypid",
  "brain-trace",
