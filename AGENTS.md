@@ -1499,6 +1499,26 @@ a metric that isn't there was simply forgotten.
   crash (`silu_mul` → cosine 0.504). Before optimizing, profile per kernel-kind
   and publish the table: every confident hypothesis on this engine has been
   wrong, and the profile has been right.
+- **A finding from an audit, review, or exhaustive call-site sweep is a
+  hypothesis until it is checked against the actual source, never a fact to
+  implement directly.** A broad sweep across dozens of call sites correctly
+  optimizes for coverage, and a plausible pattern match ("flag B looks like
+  flag A's ungated twin, and A is gated on a real capability") reads as a
+  confirmed bug - but it is only a hypothesis about what a specific kernel's
+  body actually does. Measured cost of skipping this step: a kernel-selection
+  campaign's own call-site map flagged `qwen3::serve`'s `kv_int8` as an
+  ungated twin of the correctly-gated `weights_int8`/`w8_on` (both request
+  "packed int8", one checks `caps.numeric.int8_dot`, the other doesn't) - a
+  first pass gated it to match, and that was a real regression: the flagged
+  kernels (`paged_decode_scores_i8_batched` and its siblings) dequantize with
+  plain scalar WGSL bit-unpacking, never call `dot4I8Packed`, and need no
+  capability at all, unlike the genuinely DP4A-bound GEMMs `w8_on` protects.
+  The fix was caught only by re-reading the kernel source per the very next
+  bullet's own rule, not by trusting the report. When briefing a fix from a
+  report (yours or another agent's), phrase the claim as "the report says
+  X - verify against the kernel/function source before fixing" rather than
+  as settled; an implementer that verifies, reverts a wrong first attempt,
+  and documents the correction is doing the job right, not failing it.
 - **New model ports follow `.agents/rules/porting.md`** - reference goldens
   dumped FIRST (transformer I/O captured via forward hooks, replayed in the
   parity test), two-way import coverage, kernel Params read before dispatch,
