@@ -920,18 +920,80 @@ shape) - flagged here so that work is not repeated blind.
 `qwen_bench flash-decode` lands in the same commit since it is this
 milestone's own published reproducer, not a separate change.
 
+### M2.2 - `paged_flash_decode` int8-KV twin and bf16-storage tier
+
+Two siblings of M2.1's fused kernel, gated on correctness only (the
+milestone's own gate is "cosine/rel_l2 vs the fp32 fused kernel", not a perf
+target) - **occupancy was not re-measured at either shape**, so M2.1's own
+caution ("this kernel's tiling strategy loses to the triad's parallelism at
+this hardware/shape") is inherited unchanged by both new siblings, not
+independently confirmed or refuted; M2.4 must weigh all three the same way.
+
+`paged_flash_decode_i8.wgsl`: a genuinely new physical kernel, not a
+`dtype_variant` of the fp32 one - `pool_k`/`pool_v` become 4-int8-per-`u32`
+packed pools plus per-`(token, kv-head)` `scales_k`/`scales_v`, dequantized
+once while staging a tile into shared memory (everything downstream is the
+unmodified fp32 body). Same scale/round-clamp scheme
+`paged_decode_scores_i8_batched`/`paged_decode_apply_i8_batched` already use.
+8 storage buffers - exactly the WebGPU guaranteed floor. This is the worst
+case to fuse against: the int8 path has no `_wg` cooperative sibling at all
+today, so the replaced reference is three dispatches, each re-reading or
+re-writing the `[batch, n_heads, cap]` scores/probs slab.
+
+`paged_flash_decode`'s bf16 tier needed no new kernel source at all: `pool_k`/
+`pool_v` already index with the bare identifier `kernels::template::
+dtype_variant` requires, so two CHAINED `dtype_variant` calls (`pool_k` first,
+then `pool_v` over that call's own output) produce the templated source - the
+same mechanism `paged_decode_scores_batched#pool_k=bf16`/
+`paged_decode_apply_batched#pool_v=bf16` already use for the split pair,
+applied twice here because this kernel reads both pools in one dispatch.
+`@dtype` updated to `f32|bf16` with a `@tpl` block documenting the chain.
+
+**Gate, both variants**: `crates/model/src/paged.rs::flash_tests` compares
+each variant against the plain fp32 FUSED kernel (not the three-stage triad),
+at `rel_l2 < 0.01` / `cosine > 0.99` - the same bound `qwen3::serve`'s own
+`int8_kv_scale_and_bytes_match_a_host_oracle` gates `kv_int8`'s serving
+tolerance at. Measured on this box (wgpu, Tesla P40, GQA shape with a
+scrambled shared block-table pool, `seq_lens` straddling the kernel's `BC=8`
+tile size): int8 `rel_l2 = 0.0036`, `cosine = 0.999993`; bf16
+`rel_l2 = 0.0022`, `cosine = 0.999998` - both comfortably inside the gate,
+and bf16's smaller error than int8's is exactly the expected ordering given
+bf16 keeps 7 explicit mantissa bits against int8's 7-bit symmetric range.
+
+**Verified via a throwaway harness, documented rather than hidden.**
+`crates/qwen3/src/serve.rs` was mid-edit by a concurrent session for this
+milestone's entire duration (real compile errors - `CachedSelector` vs
+`Arc<dyn KernelSelector>`, a `tuned_i8` field removed from `Engine` mid-edit -
+not just slow contention), which blocks `brain-model`'s own test target
+(`brain-gradcheck`, a hard dev-dependency, itself hard-depends on
+`brain-qwen3` with no feature gate to route around). The measurements above
+came from running the identical dispatch code through a throwaway
+`brain-gpu-core` integration test (no dependency on the blocked crate,
+deleted after use) - the exact same workaround M2.1's own entry already
+recorded for the same reason. `crates/model/src/paged.rs`'s real tests were
+written, reviewed against the actual kernel/template source, and left in
+place as the durable gate; they were not run through `cargo test -p
+brain-model` itself before this entry was written, because that build was not
+possible during this milestone's window. Whoever next builds `brain-model`
+clean should treat a red result here as a real regression report, not
+assume it away.
+
+**Commit**: two (`paged_flash_decode_i8` + its test; then the bf16 `@tpl`
+header change + its test), per the milestone's own "one per variant" split.
+
 ---
 
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
-Phase 2's M2.1 is done, with a measured regression recorded rather than
-assumed fixed - M2.2 (int8-KV/bf16-storage variants) and M2.3
-(`paged_flash_prefill`) should re-measure occupancy at their own shapes
-before repeating this kernel's tiling strategy, and M2.4 (wiring `Op::
-PagedAttention` to the fused path) must not do so unconditionally given M2.1's
-own number. Phases 3-8 remain, as structured in the plan. Track sub-milestone
-status against the approved plan; update this section as each phase closes,
-recording the measurement that proved it - a number nothing checks is a
-number that silently goes stale (`AGENTS.md`'s own rule, restated here
-because a multi-phase campaign is exactly where it erodes).
+Phase 2's M2.1 and M2.2 are done, both with correctness gated but perf
+un-re-measured (M2.1's own regression finding stands, inherited by M2.2's
+siblings without independent confirmation) - M2.3 (`paged_flash_prefill`)
+should re-measure occupancy at its own shape before repeating this family's
+tiling strategy again, and M2.4 (wiring `Op::PagedAttention` to the fused
+path) must not do so unconditionally for any of the three siblings given
+M2.1's own number. Phases 3-8 remain, as structured in the plan. Track
+sub-milestone status against the approved plan; update this section as each
+phase closes, recording the measurement that proved it - a number nothing
+checks is a number that silently goes stale (`AGENTS.md`'s own rule, restated
+here because a multi-phase campaign is exactly where it erodes).
