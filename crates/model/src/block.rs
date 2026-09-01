@@ -1684,6 +1684,47 @@ pub fn softmax_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32
     }
 }
 
+/// Scores one `paged_decode_scores_wg` workgroup computes - `64 / LPS` in
+/// that kernel's own header. A kernel-contract constant, not a model choice:
+/// [`paged_scores_variant`] is the only caller and must match the WGSL
+/// exactly, or the dispatch covers the wrong number of scores.
+pub const PAGED_SCORES_PER_WORKGROUP: u32 = 16;
+
+/// Which paged-attention decode SCORES kernel to dispatch
+/// (`paged_decode_scores_wg` vs a caller-supplied reference -
+/// `paged_decode_scores_batched`) and the resulting thread count. `coop` is
+/// `None` when the caller never registered `paged_decode_scores_wg` at all
+/// (walks straight to `reference`), same convention as
+/// [`rms_variant`]/[`ln_variant`]/[`softmax_variant`] - but the thread-count
+/// formula differs from those three: the cooperative kernel does not own
+/// one row per workgroup, it owns [`PAGED_SCORES_PER_WORKGROUP`] scores per
+/// workgroup, so this takes the TOTAL score count (`batch * n_heads`) and
+/// the key axis (`cap`) rather than a plain row count, and computes the
+/// dispatch accordingly. The policy itself lives in `backend_api::select`
+/// (`Op::PagedAttention`), keyed on `DeviceCaps`, never a hand-rolled
+/// `caps.workgroup_reductions` check at the call site -
+/// `qwen3::serve::Engine::run_batched`'s own scores dispatch had
+/// independently reimplemented exactly this rule before this seam existed.
+///
+/// Only the F32 tier is expressed here (this Op's `Dtype::I8` arm has no
+/// cooperative sibling at all - see `Op::PagedAttention`'s doc); a caller
+/// dispatching the packed-int8 KV trio makes that choice on its own
+/// capability gate, matching `weights_int8`/`w8_on`'s shape, not this one.
+pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batch_heads: u32, cap: u32) -> (usize, u32) {
+    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+    let shape = OpShape { m: batch_heads, n: cap, k: 0, dtype: Dtype::F32 };
+    let total = batch_heads.saturating_mul(cap);
+    match coop {
+        Some(i)
+            if gpu_core::select::DefaultSelector.select(Op::PagedAttention, shape, &g.caps())
+                == KernelVariant::WorkgroupPerOutput =>
+        {
+            (i, total.div_ceil(PAGED_SCORES_PER_WORKGROUP) * 64)
+        }
+        _ => (reference, total),
+    }
+}
+
 /// LayerNorm forward: `y = (x-mean)/sqrt(var+eps) * gamma + beta` over `rows`
 /// rows of `d` elements. Same math and Params either variant.
 pub fn layernorm_fwd(

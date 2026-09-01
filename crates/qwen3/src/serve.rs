@@ -79,9 +79,6 @@ const MATMUL_REG3: usize = 26;
 // reduction. Same Params and same output as SCORES_B; selected on the queried
 // `workgroup_reductions`, since it carries a barrier the CPU JIT gates on.
 const SCORES_B_WG: usize = 27;
-/// Scores one `paged_decode_scores_wg` workgroup owns - `64 / LPS` in the
-/// kernel. Must match, or the dispatch covers the wrong number of scores.
-const SCORES_WG_PER_GROUP: u32 = 16;
 // Split-K forward GEMM + its fold, for the skinny-M shapes a served step is made
 // of. `matmul_reg3`'s tile grid is ceil(m/128)*ceil(n/128) and does not grow
 // with k, so at m=128 it launches 16 workgroups on a 30-SM card: barely half
@@ -1245,11 +1242,11 @@ impl Engine {
                 // floats apart (4 KB at 0.6B), so a fetched sector serves one
                 // useful float in eight: measured at a small fraction of the
                 // bandwidth roof while taking about half of a served step.
-                let (sk, st) = if self.caps.workgroup_reductions {
-                    (SCORES_B_WG, b.saturating_mul(nh).saturating_mul(cap).div_ceil(SCORES_WG_PER_GROUP) * 64)
-                } else {
-                    (SCORES_B, b * nh * cap)
-                };
+                // Gated via `model::block::paged_scores_variant`
+                // (`Op::PagedAttention`), not a hand-rolled
+                // `caps.workgroup_reductions` check - this engine registers
+                // both kernels unconditionally, so `coop` is always `Some`.
+                let (sk, st) = model::block::paged_scores_variant(g, SCORES_B, Some(SCORES_B_WG), b * nh, cap);
                 s.push(g.step(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
