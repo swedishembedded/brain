@@ -2797,23 +2797,6 @@ fn denoise(
     Ok(latent)
 }
 
-/// Encode one still through the real video VAE at `width`x`height`, as the
-/// `[lh*lw, channels]` token block a conditioning item takes.
-///
-/// A free function rather than [`generate`]'s old inline closure because a
-/// two-stage generation encodes the SAME still twice, once per stage, at that
-/// stage's own resolution - which is what
-/// `ltx_pipelines.distilled.DistilledPipeline.__call__` does (it calls
-/// `combined_image_conditionings` separately for stage 1 and stage 2, with
-/// `stage_1_h/stage_1_w` and then `height/width`).
-///
-/// This is also the right content for the mid anchor's PIN, which sits in an
-/// interior latent slot whose decoder normally aggregates 8 pixel frames:
-/// fed the same still repeated across its span instead, the encoder produced
-/// a bit-identical trajectory end to end (a constant signal's temporal
-/// aggregation IS its one-frame latent), so the pin keeps the cheap
-/// image-path encode.
-
 /// Load and resize one conditioning still to the VAE's `[-1, 1]` input
 /// range, `[3, height, width]` row-major - the part of the conditioning
 /// encodes that does not care how many frames the VAE will be fed.
@@ -2834,6 +2817,22 @@ fn load_still_chw(path: &str, width: usize, height: usize) -> Result<Vec<f32>, S
     Ok(img_chw)
 }
 
+/// Encode one still through the real video VAE at `width`x`height`, as the
+/// `[lh*lw, channels]` token block a conditioning item takes.
+///
+/// A free function rather than [`generate`]'s old inline closure because a
+/// two-stage generation encodes the SAME still twice, once per stage, at that
+/// stage's own resolution - which is what
+/// `ltx_pipelines.distilled.DistilledPipeline.__call__` does (it calls
+/// `combined_image_conditionings` separately for stage 1 and stage 2, with
+/// `stage_1_h/stage_1_w` and then `height/width`).
+///
+/// This is also the right content for the mid anchor's PIN, which sits in an
+/// interior latent slot whose decoder normally aggregates 8 pixel frames:
+/// fed the same still repeated across its span instead, the encoder produced
+/// a bit-identical trajectory end to end (a constant signal's temporal
+/// aggregation IS its one-frame latent), so the pin keeps the cheap
+/// image-path encode.
 fn encode_still(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, path: &str, width: usize, height: usize, channels: usize, device: Option<&str>) -> Result<Vec<f32>, String> {
     let (lh, lw) = (height / 32, width / 32);
     let img_t = Instant::now();
@@ -4690,7 +4689,7 @@ pub fn window_gen_opts(
         }
     }
     if let Some(ref path) = base.end_frame {
-        if wi != plan.len() - 1 && base.frames - 1 >= decoded_end {
+        if wi != plan.len() - 1 && base.frames > decoded_end {
             future_anchors.push((base.frames - 1 - w.source_first_frame(), path.clone()));
         }
     }
@@ -4919,7 +4918,7 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     // "the stage-2 plan splits" - and dispatching on the wrong one made every
     // such request die in run_stage_major's own refusal instead of generating.
     if stage_major_enabled
-        && two_stage_long_plan(o.base.frames, lh / 2, lw / 2, lh, lw, o.context_latent_frames, o.max_window_tokens, o.max_refine_tokens, align as usize)
+        && two_stage_long_plan(o.base.frames, lh / 2, lw / 2, lh, lw, o.context_latent_frames, o.max_window_tokens, o.max_refine_tokens, align)
             .map(|t| t.stage2.len() >= 2)
             .unwrap_or(false)
     {

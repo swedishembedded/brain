@@ -2199,8 +2199,8 @@ mod tests {
     /// zeros would pass. This pins the *content*: the tail of what the DiT
     /// attends to is the encoding of the reference at the resolution the
     /// dial names - the reference's own size at the default, a resized copy
-    /// at an explicit downscale. Under the old behaviour that tail was empty
-    /// - which is exactly the defect: at `--strength 0.95` the DiT never saw
+    /// at an explicit downscale. Under the old behaviour that tail was empty,
+    /// which is exactly the defect: at `--strength 0.95` the DiT never saw
     /// the user's photograph at all, and only the leftover signal in a
     /// partially-noised init latent stood between the result and a fresh
     /// generation.
