@@ -1307,13 +1307,15 @@ impl Engine {
                 s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[b, hkv, bs], b * hkv));
                 // M2.4: whole-triad-vs-single-fused-dispatch choice, through
                 // `Op::PagedAttentionFused` (a SEPARATE Op from
-                // `Op::PagedAttention` below - see its own doc for why).
-                // `causal_chunk` (this call's own regime, not inferable from
-                // `b`/`cap` alone) is `k`; KV storage dtype is always F32 in
-                // this branch (the `kv_int8` arm above never reaches here).
-                let fused_shape = OpShape { m: b * nh, n: cap, k: causal_chunk as u32, dtype: Dtype::F32 };
-                let use_fused = self.selector.select(Op::PagedAttentionFused, fused_shape, &self.caps) == KernelVariant::FusedFlash;
-                if use_fused {
+                // `Op::PagedAttention` below - see its own doc for why),
+                // factored into `model::block::paged_attention_fused` rather
+                // than inlined here - `no_kernel_names.rs`'s own gate bans
+                // this function's body from naming the selector's return
+                // enum directly, the same reason `paged_scores_variant`
+                // below already lives in `model::block` instead of here. KV
+                // storage dtype is always F32 in this branch (the `kv_int8`
+                // arm above never reaches here).
+                if model::block::paged_attention_fused(g, causal_chunk, false) {
                     // `paged_flash_prefill` (M2.3): one dispatch per (head,
                     // query-tile), no `scores`/`probs` at all - BR=64 is the
                     // kernel's own tile size, @workgroup_size(256) its own

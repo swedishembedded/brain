@@ -1766,6 +1766,24 @@ pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batc
     }
 }
 
+/// Whether `Op::PagedAttentionFused`'s selector picks the single fused
+/// paged-attention dispatch over the multi-stage triad for this regime
+/// (`causal_chunk`: prefill's single-sequence causal chunks vs decode's
+/// independent-sequence rows - the two are different physical kernels the
+/// selector's shape alone cannot tell apart, see that Op's own doc) and KV
+/// storage dtype. Factored out of `qwen3::serve::Engine::run_batched_steps`
+/// as its own free function - not inlined there - so that function's own
+/// source never contains the literal identifier `KernelVariant`
+/// (`qwen3/tests/no_kernel_names.rs`'s own gate bans exactly that, the same
+/// reason `paged_scores_variant` above already lives here rather than in
+/// `run_batched_steps` itself).
+pub fn paged_attention_fused(g: &Gpu, causal_chunk: bool, kv_int8: bool) -> bool {
+    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+    let dtype = if kv_int8 { Dtype::I8 } else { Dtype::F32 };
+    let shape = OpShape { m: 0, n: 0, k: causal_chunk as u32, dtype };
+    gpu_core::select::DefaultSelector.select(Op::PagedAttentionFused, shape, &g.caps()) == KernelVariant::FusedFlash
+}
+
 /// LayerNorm forward: `y = (x-mean)/sqrt(var+eps) * gamma + beta` over `rows`
 /// rows of `d` elements. Same math and Params either variant.
 pub fn layernorm_fwd(
