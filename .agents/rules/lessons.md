@@ -3162,3 +3162,39 @@ internal capacity limit, either lift the limit (chunk, as here) or make the
 overflow LOUD (a warning naming the actual count and the cap) - never let
 it degrade into silence, which is `lessons.md` §1's "a gate that never
 runs is worse than no gate" restated for measurement instead of correctness.
+
+## 82. A capability gate copied to one sibling flag is not copied to the next - the SAME file can have the pattern right next to the bug
+
+`qwen3::serve::Engine`'s `weights_int8` request has always been gated as
+`w8_on = weights_int8 && caps.numeric.int8_dot` before anything dispatches
+a packed-int8 GEMM, with a printed fallback to fp32 when the device lacks
+DP4A. `kv_int8` - the SAME file, the SAME constructor, requesting the
+SAME physical capability for a structurally parallel decision (packed-int8
+KV instead of packed-int8 weights) - was never checked against
+`caps.numeric.int8_dot` at all: it flowed straight from the constructor
+argument into buffer sizing and into `paged_decode_scores_i8_batched`/
+`paged_decode_apply_i8_batched`'s dispatch, both of which need
+`dot4I8Packed` exactly like the gated GEMMs do. A device without DP4A
+would have gotten wrong results (or a driver crash) from the KV path while
+its WEIGHT path correctly and silently fell back to fp32 - two flags with
+the identical hardware requirement, one gated and one not, in the same
+`impl` block.
+
+Nothing about this was subtle once looked for: `grep 'caps.numeric.int8_dot'`
+in the file finds exactly one hit, on `w8_on`. The bug survived because
+the two flags are named differently, own different call sites forty-odd
+lines apart, and nobody had reason to diff one gated flag's construction
+logic against a same-shaped, ungated sibling's - the campaign's own
+call-site map (`.agents/roadmap/kernel-performance.md`'s M1.1 recalibration)
+is what surfaced it, not a review of `serve.rs` in isolation.
+
+**Rule going forward**: when a device-capability gate is added for one flag,
+grep the same struct/module for every OTHER flag that requests the same
+physical capability (`int8_dot`, `workgroup_reductions`, `f16`/`bf16`, …) and
+confirm each one is gated the same way - a correct pattern sitting a few
+lines from an identical, ungated one is not evidence the ungated one is
+fine, it is the shape of exactly the bug this entry describes. This is
+`kernels.md` §A's "the most expensive mistake is not a slow kernel, it is a
+fast kernel nobody knew about" restated for a GATE instead of a kernel: the
+correct rule already existed in the same file, and the fix was applying it,
+not inventing it.

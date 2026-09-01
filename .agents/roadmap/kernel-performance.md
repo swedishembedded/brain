@@ -338,6 +338,78 @@ suite green (22 real tests, including `kv_step_matches_full_recompute`,
 warnings on `cargo build`/`cargo clippy -p brain-gpt2 --all-targets`. Does not
 touch `crates/backend-api/src/select.rs`.
 
+### M1.1's paged-attention milestone - `Op::PagedAttention`, the `kv_int8` gate fix, and a second recalibration
+
+`Op::PagedAttention` lands with exactly the shape the table below predicted:
+`WorkgroupPerOutput` (`paged_decode_scores_wg`) vs `Reference`
+(`paged_decode_scores_batched`), capability-only, no row/col gate - `Op::
+MaxAbsRow`'s shape verbatim. The one addition the table did not anticipate:
+the INT8 KV tier (`paged_decode_scores_i8_batched`) is a THIRD physical
+kernel with no int8-cooperative sibling at all, so it needed its own
+`candidates()` arm (`Dtype::I8 | Dtype::Q4 => vec![PackedInt8]`) rather than
+inheriting `Op::MaxAbsRow`'s arm - reusing that arm verbatim would have let
+an I8-tagged shape fall through to `Reference`'s physical kernel
+(`paged_decode_scores_batched`, which cannot read a packed pool) the moment
+`WorkgroupPerOutput` got filtered out for lacking `int8_dot`. TDD: the new
+test (`paged_attention_scores_is_cooperative_at_every_shape_and_i8_requires_
+the_capability`) was written first and failed to compile before the variant
+existed. Commit `343a1019`.
+
+**The first bug the table named was real and is fixed.** `qwen3::serve`'s
+`kv_int8` field was set from `from_map_with_gpu`'s raw constructor argument
+and never checked against `caps.numeric.int8_dot` before dispatching
+`paged_decode_scores_i8_batched`/`paged_decode_apply_i8_batched` (both need
+`dot4I8Packed`) - unlike the same file's `weights_int8`/`w8_on`, which
+already gated correctly. Fixed at the assignment site: `kv8_on = kv_int8 &&
+caps.numeric.int8_dot`, computed beside `w8_on`, with the same printed
+fallback and the same "stored field reflects the gated decision"
+contract `weights_int8()` already had. The shape assert (`head_dim % 4 ==
+0`) stays keyed on the raw request, not `kv8_on` - an explicit request
+against an unsupported checkpoint shape must still hard-fail regardless of
+device capability, only a missing CAPABILITY should degrade quietly. Full
+`brain-qwen3` suite green (98 tests), zero clippy warnings. Commit `7e76a29f`.
+
+`qwen3::serve` was also the ONLY real caller of this kernel family in the
+tree (`Ops::decode_scores_batched`'s dtype-axis façade in `crates/model/src/
+ops.rs` is documented as a separate, unwired bf16 tier - "NOT wired into
+qwen3::serve::Engine by this phase"), and it already implemented `Op::
+PagedAttention`'s exact rule by hand. `model::block::paged_scores_variant`
+was added mirroring `rms_variant`/`ln_variant`/`softmax_variant`'s shape
+(the thread-count formula differs from those three: the cooperative kernel
+owns `PAGED_SCORES_PER_WORKGROUP` scores per workgroup, not one row, so the
+helper takes `batch_heads`/`cap` rather than a row count), and `qwen3::
+serve`'s hand-rolled check was migrated onto it - the same shape as `Op::
+Softmax`'s wan/ltxv migration. Pure refactor, verified via three repeated
+full `brain-qwen3` runs (98 passed each; an intermittent SIGSEGV-on-exit
+seen once during iteration reproduced with BOTH the old and new dispatch
+code and is a pre-existing GPU-driver-teardown flake per `gpu_core::
+testgpu`'s own doc, not caused by this change) and `brain-model`'s full
+suite (152 passed). Commit `eb36160a`.
+
+**The second bug the table named does not exist as stated - recalibrated
+the same way the embed/conv2d/MoE verdicts above already were.** The table
+said "`qwen35`/`qwen35moe` never register or reach the `workgroup_
+reductions`-gated cooperative scores kernel `qwen3::serve` gets." Re-derived
+from the tree: both crates register `paged_decode_scores_batched` in
+`model.rs`, but ONLY to satisfy `Ops::REQUIRED_KERNELS` - their own comment
+says "Compiled, never dispatched" - and a full grep of both crates confirms
+neither ever calls `Ops::decode_scores_batched` or dispatches the
+`paged_decode_scores*` family at all. Their real decode-attention primitive
+is `model::block::gqa_decode_step` (dispatching `attn_decode_scores`), used
+by `qwen35::serve`/`qwen35moe::serve` - a structurally different, simpler
+kernel family by explicit design: `qwen35::serve`'s own module doc states
+`block_size == max_seq_len` so "one physical block backs one sequence's
+whole KV history", chosen specifically to avoid "needing block-indirect
+(scatter/gather) attention kernels" like `paged_decode_scores_wg`'s
+block-table contract requires. `attn_decode_scores` has no cooperative
+sibling anywhere in `docs/reference/kernels.md` (only a windowed variant,
+same `@opt 2/5`, same one-thread-per-output shape) - there is nothing to
+wire these two crates onto without writing a new kernel, which is Phase 5
+territory (`kernels.md` §A: "does a good kernel already exist" - here the
+honest answer is no), not this milestone's. Not touched; recorded here per
+decision 3 rather than force-fitting a selector call that would name a
+kernel family these crates do not use.
+
 ---
 
 ## M1.1's scope, recalibrated against an exhaustive call-site map
