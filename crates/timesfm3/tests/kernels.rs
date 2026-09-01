@@ -73,3 +73,40 @@ fn non_causal_attends_every_key_and_still_applies_kmask() {
     assert_eq!(s[7], 2.0);
     assert!(s[8] < -1.0e8);
 }
+
+/// `[b=1,v=2,n=3,d=2] -> [b=1,n=3,v=2,d=2]` - the exact shape
+/// `model::core_forward` needs to move between sequence attention (V-major)
+/// and variate attention (N-major). Values are `100*v_idx + 10*n_idx + d_idx`
+/// so every output position's expected source is unambiguous.
+#[test]
+fn swap_axes12_vec_moves_the_variate_axis_next_to_batch() {
+    if skip() {
+        return;
+    }
+    let gpu = Gpu::new_cpu(&[("swap_axes12_vec", kernels::SWAP_AXES12_VEC)]);
+    let (v, n, d) = (2usize, 3usize, 2usize);
+    let mut src = vec![0.0f32; v * n * d];
+    for vi in 0..v {
+        for ni in 0..n {
+            for di in 0..d {
+                src[(vi * n + ni) * d + di] = (100 * vi + 10 * ni + di) as f32;
+            }
+        }
+    }
+    let x = gpu.storage_init("x", &src);
+    let y = gpu.storage(src.len() as u64);
+    // Params: a0, a1, a2, d.
+    let step = gpu.step(0, &[&x, &y], &[1, v as u32, n as u32, d as u32], src.len() as u32);
+    gpu.submit(&[], &[step]);
+    let out = gpu.read(&y, src.len());
+
+    for ni in 0..n {
+        for vi in 0..v {
+            for di in 0..d {
+                let got = out[(ni * v + vi) * d + di];
+                let want = (100 * vi + 10 * ni + di) as f32;
+                assert_eq!(got, want, "n={ni} v={vi} d={di}");
+            }
+        }
+    }
+}

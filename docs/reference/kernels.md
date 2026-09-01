@@ -470,6 +470,7 @@ load of it must already be bare-identifier-indexed.
 | [`splice_add_offset_src`](../../crates/kernels/wgsl/splice_add_offset_src.wgsl) | Residual DeepStack add with an independent SOURCE offset: dst[dst_base+i] += src[src_base+i] | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`splice_bwd`](../../crates/kernels/wgsl/splice_bwd.wgsl) | Residual splice (backward) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`sub`](../../crates/kernels/wgsl/sub.wgsl) | Elementwise subtract, with an independent flat offset into each input | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`swap_axes12_vec`](../../crates/kernels/wgsl/swap_axes12_vec.wgsl) | Swap axes 1 and 2 of a rank-4 [A0,A1,A2,D] tensor (a batched transpose of D-wide vectors) - model::timesfm3's sequence<->variate axis swap | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`tanh_act`](../../crates/kernels/wgsl/tanh_act.wgsl) | Tanh forward:  y = tanh(x) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`tanh_act_bwd`](../../crates/kernels/wgsl/tanh_act_bwd.wgsl) | Tanh backward: dx = dy * (1 - tanh(x)^2) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`tau_scale`](../../crates/kernels/wgsl/tau_scale.wgsl) | Moondream per-(head, token) attention-temperature scale, broadcast over head_dim | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |

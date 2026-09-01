@@ -880,6 +880,8 @@ pub const SPLICE_ADD_OFFSET_SRC: &str = include_str!("../wgsl/splice_add_offset_
 pub const SPLICE_BWD: &str = include_str!("../wgsl/splice_bwd.wgsl");
 /// `wgsl/sub.wgsl`
 pub const SUB: &str = include_str!("../wgsl/sub.wgsl");
+/// `wgsl/swap_axes12_vec.wgsl`
+pub const SWAP_AXES12_VEC: &str = include_str!("../wgsl/swap_axes12_vec.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 /// `wgsl/tanh_act_bwd.wgsl`
@@ -1331,6 +1333,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splice_add_offset_src", SPLICE_ADD_OFFSET_SRC),
     ("splice_bwd", SPLICE_BWD),
     ("sub", SUB),
+    ("swap_axes12_vec", SWAP_AXES12_VEC),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("tau_scale", TAU_SCALE),

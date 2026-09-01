@@ -24,5 +24,7 @@
 
 pub mod config;
 pub mod import;
+pub mod model;
 
 pub use config::{Timesfm3Config, Param, QUANTILES};
+pub use model::Timesfm3;

@@ -107,16 +107,25 @@ def sample(arr, k=64, seed=0):
     return {"indices": idx.tolist(), "values": flat[idx].tolist()}
 
 
-def tap(store, taps_manifest, name, t):
-    """Record one tensor: full array into `store` (written as .npy, gitignored),
-    shape/sampled-subset/rms into `taps_manifest` (committed)."""
+def tap(store, taps_manifest, name, t, full=False):
+    """Record one tensor: full array into `store` (written as .npy, gitignored -
+    for interactive local comparison against a much larger real forward) and
+    shape/rms always into `taps_manifest` (committed, small, drives the CI
+    parity gate). `full=True` additionally embeds the COMPLETE array in
+    `taps_manifest` itself (still committed - only used for tensors small
+    enough that this stays a small file, the boundary taps a checkpoint-free
+    CI gate needs data for); otherwise a 64-value sample is embedded instead."""
     arr = t.detach().to(torch.float32).cpu().numpy()
     store[name] = arr
-    taps_manifest[name] = {
+    entry = {
         "shape": list(arr.shape),
         "rms": float(np.sqrt(np.mean(arr.astype(np.float64) ** 2))),
-        "sample": sample(arr, seed=hash(name) & 0xFFFFFFFF),
     }
+    if full:
+        entry["full"] = arr.reshape(-1).astype(np.float64).tolist()
+    else:
+        entry["sample"] = sample(arr, seed=hash(name) & 0xFFFFFFFF)
+    taps_manifest[name] = entry
 
 
 def wrap_cpm_refine(captured):
@@ -137,9 +146,14 @@ def wrap_cpm_refine(captured):
     return original
 
 
-def run_case(model, prefix, store, taps_manifest, *, target, past_only, past_future, horizon):
+def run_case(model, prefix, store, taps_manifest, *, target, past_only, past_future, horizon, full=False):
     """Register hooks, run one `decode(..., return_aux_outputs=True)`, tap
-    every stage, and return the final horizon logits."""
+    every stage, and return the final horizon logits. `full=True` embeds
+    COMPLETE arrays for every tap in the committed manifest (only used for the
+    checkpoint-free tiny config, small enough that this stays a small file);
+    the real-checkpoint case embeds full arrays for only its two `core_forward`
+    boundary taps (resblock_input, raw_logits) plus horizon_logits, all three
+    small regardless of model size, and samples for the rest."""
     hooks = []
     layer_outs = {}
 
@@ -176,19 +190,19 @@ def run_case(model, prefix, store, taps_manifest, *, target, past_only, past_fut
         for h in hooks:
             h.remove()
 
-    tap(store, taps_manifest, f"{prefix}.resblock_input", forward_out["__call__:resblock_input"])
-    tap(store, taps_manifest, f"{prefix}.transformer_input", forward_out["__call__:transformer_input"])
-    tap(store, taps_manifest, f"{prefix}.transformer_output", forward_out["__call__:transformer_output"])
+    tap(store, taps_manifest, f"{prefix}.resblock_input", forward_out["__call__:resblock_input"], full=True)
+    tap(store, taps_manifest, f"{prefix}.transformer_input", forward_out["__call__:transformer_input"], full=full)
+    tap(store, taps_manifest, f"{prefix}.transformer_output", forward_out["__call__:transformer_output"], full=full)
     for idx in watch_layers:
-        tap(store, taps_manifest, f"{prefix}.layer{idx}_output", layer_outs[idx])
-    tap(store, taps_manifest, f"{prefix}.raw_logits", raw_logits_box["raw_logits"])
+        tap(store, taps_manifest, f"{prefix}.layer{idx}_output", layer_outs[idx], full=full)
+    tap(store, taps_manifest, f"{prefix}.raw_logits", raw_logits_box["raw_logits"], full=True)
     running_mean, running_std = forward_out["revin_stats"]
-    tap(store, taps_manifest, f"{prefix}.revin_running_mean", running_mean)
-    tap(store, taps_manifest, f"{prefix}.revin_running_std", running_std)
+    tap(store, taps_manifest, f"{prefix}.revin_running_mean", running_mean, full=full)
+    tap(store, taps_manifest, f"{prefix}.revin_running_std", running_std, full=full)
     if "refined_mu" in refined:
-        tap(store, taps_manifest, f"{prefix}.cpm_refined_mu", refined["refined_mu"])
-        tap(store, taps_manifest, f"{prefix}.cpm_refined_sigma", refined["refined_sigma"])
-    tap(store, taps_manifest, f"{prefix}.horizon_logits", horizon_logits)
+        tap(store, taps_manifest, f"{prefix}.cpm_refined_mu", refined["refined_mu"], full=full)
+        tap(store, taps_manifest, f"{prefix}.cpm_refined_sigma", refined["refined_sigma"], full=full)
+    tap(store, taps_manifest, f"{prefix}.horizon_logits", horizon_logits, full=True)
     return horizon_logits
 
 
@@ -257,13 +271,18 @@ def dump_tiny(store, manifest):
         store[store_key] = arr
 
     with torch.no_grad():
-        run_case(model, "tiny", store, manifest, target=target, past_only=past_only, past_future=past_future, horizon=horizon)
-    tap(store, manifest, "tiny.input.target", target)
-    tap(store, manifest, "tiny.input.past_only", past_only)
-    tap(store, manifest, "tiny.input.past_future", past_future)
+        run_case(model, "tiny", store, manifest, target=target, past_only=past_only, past_future=past_future, horizon=horizon, full=True)
+    tap(store, manifest, "tiny.input.target", target, full=True)
+    tap(store, manifest, "tiny.input.past_only", past_only, full=True)
+    tap(store, manifest, "tiny.input.past_future", past_future, full=True)
 
     manifest["tiny_config"] = model.to_dict()
     manifest["tiny_weight_names"] = sorted(weights.keys())
+    # Embedded fully (not just names) - the tiny model's total param count is
+    # small enough that this is the one thing that lets a checkpoint-free CI
+    # gate actually LOAD a model and run `core_forward`, rather than only
+    # checking shapes against `tiny_weight_names`.
+    manifest["tiny_weights"] = {name: arr.reshape(-1).astype(np.float64).tolist() for name, arr in weights.items()}
     return {
         "input_patch_len": 4, "output_patch_len": 8, "num_quantiles": 5,
         "num_layers": 3, "num_heads": 2, "model_dims": 12, "hidden_dims": 14,
@@ -286,10 +305,10 @@ def dump_real(checkpoint_dir, store, manifest):
     past_future = torch.randn(batch, 1, context + horizon, generator=gen)
 
     with torch.no_grad():
-        run_case(model, "real", store, manifest, target=target, past_only=past_only, past_future=past_future, horizon=horizon)
-    tap(store, manifest, "real.input.target", target)
-    tap(store, manifest, "real.input.past_only", past_only)
-    tap(store, manifest, "real.input.past_future", past_future)
+        run_case(model, "real", store, manifest, target=target, past_only=past_only, past_future=past_future, horizon=horizon, full=False)
+    tap(store, manifest, "real.input.target", target, full=True)
+    tap(store, manifest, "real.input.past_only", past_only, full=True)
+    tap(store, manifest, "real.input.past_future", past_future, full=True)
     manifest["real_config"] = model.to_dict()
     return {
         "input_patch_len": model.input_patch_len, "output_patch_len": model.output_patch_len,
