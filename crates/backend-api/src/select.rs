@@ -62,6 +62,15 @@ pub enum Op {
     /// `m` = rows (heads × query positions), `n` = the key axis being
     /// softmaxed over; `k` unused.
     Softmax,
+    /// Paged-attention decode SCORES (`paged_decode_scores_wg` vs
+    /// `paged_decode_scores_batched`, plus the INT8 KV tier
+    /// `paged_decode_scores_i8_batched`) - the SCORES half only. The
+    /// softmax/apply halves have no cooperative sibling at all today, so
+    /// this Op is deliberately scoped narrower than the whole paged-decode
+    /// triad - see [`candidates`] for the I8 tier's own shape. `m` is
+    /// `batch` times `n_heads`, `n` = `cap` (the key axis each score
+    /// reduces over); `k` unused.
+    PagedAttention,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -492,6 +501,32 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // capability check at all, which this Op also lets those sites
         // adopt.
         Op::Softmax => vec![WorkgroupPerOutput, Reference],
+        // Paged-attention decode SCORES. At F32 (and the storage tiers)
+        // this is `Op::MaxAbsRow`'s exact shape - a per-(batch,head)
+        // reduction over `cap` keys, no row/col gate,
+        // `workgroup_reductions` the only gate (`paged_decode_scores_wg` vs
+        // `paged_decode_scores_batched`).
+        //
+        // INT8 KV is NOT a variant of those two: `paged_decode_scores_i8_
+        // batched` reads a packed int8 pool through its own dedicated
+        // dtype-storage contract, and there is no int8-COOPERATIVE scores
+        // kernel at all (unlike `Op::MatMul`'s I8 tier, which at least has
+        // both a GEMV and a tiled option - here the packed kernel is the
+        // ONLY physical implementation). Reusing `Op::MaxAbsRow`'s arm
+        // verbatim would let an I8-tagged shape fall through to
+        // `Reference` the moment `WorkgroupPerOutput` gets filtered out for
+        // lacking `int8_dot` - and `Reference` here is physically
+        // `paged_decode_scores_batched`, a kernel that cannot read a
+        // packed pool at all. So I8/Q4 gets its OWN arm, `PackedInt8`
+        // only, mirroring `Op::MatMul`'s I8/Q4 arm's structure: the
+        // uniform filter below still turns "no int8_dot" into the safe
+        // `[Reference]` fallback (never a wrong-contract kernel), it just
+        // does so AFTER this dtype match rather than by leaking a
+        // float-only variant into an int8-tagged shape.
+        Op::PagedAttention => match shape.dtype {
+            Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![WorkgroupPerOutput, Reference],
+            Dtype::I8 | Dtype::Q4 => vec![PackedInt8],
+        },
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
         // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
         // kernel, not a slow one": profiled in the MiniMax-Music-3 vocoder,
@@ -926,6 +961,42 @@ mod tests {
         }
     }
 
+    /// Paged-attention decode SCORES (`paged_decode_scores_wg` vs
+    /// `paged_decode_scores_batched`) has the same F32 shape as
+    /// `Op::MaxAbsRow`: a per-(batch,head) reduction over `cap` keys, no
+    /// row/col gate. The INT8 KV tier is a THIRD physical kernel
+    /// (`paged_decode_scores_i8_batched`), not a variant of the other two -
+    /// there is no int8-cooperative scores kernel at all - so this test also
+    /// pins that an I8-tagged shape selects `PackedInt8` (gated on
+    /// `int8_dot`) and NEVER `Reference`'s physical kernel
+    /// (`paged_decode_scores_batched`, which cannot read a packed pool) just
+    /// because `WorkgroupPerOutput` got filtered out for lacking `int8_dot`.
+    #[test]
+    fn paged_attention_scores_is_cooperative_at_every_shape_and_i8_requires_the_capability() {
+        let s = DefaultSelector;
+        for m in [1u32, 8, 32, 512, 4096] {
+            for n in [16u32, 128, 1024, 8192] {
+                let sh = shape(m, n, 0, Dtype::F32);
+                assert_eq!(
+                    s.select(Op::PagedAttention, sh, &gpu_caps()),
+                    KernelVariant::WorkgroupPerOutput,
+                    "m={m} n={n}"
+                );
+                // The CPU JIT cannot execute the barrier - a correctness gate.
+                assert_eq!(
+                    s.select(Op::PagedAttention, sh, &cpu_caps()),
+                    KernelVariant::Reference,
+                    "m={m} n={n}"
+                );
+            }
+        }
+        // The int8 KV tier: PackedInt8 only where int8_dot executes, and
+        // Reference (never a lucky-but-wrong WorkgroupPerOutput) otherwise.
+        let i8_shape = shape(8, 512, 0, Dtype::I8);
+        assert_eq!(s.select(Op::PagedAttention, i8_shape, &gpu_caps()), KernelVariant::PackedInt8);
+        assert_eq!(s.select(Op::PagedAttention, i8_shape, &cpu_caps()), KernelVariant::Reference);
+    }
+
     /// The candidate list is never empty and its head IS the default policy —
     /// one list, so the static choice and the tuner's probe set cannot drift.
     #[test]
@@ -940,6 +1011,7 @@ mod tests {
                 Op::GradNorm,
                 Op::MaxAbsRow,
                 Op::Softmax,
+                Op::PagedAttention,
             ] {
                 for m in [1u32, 8, 9, 33, 4096] {
                     for dtype in [Dtype::F32, Dtype::I8] {
@@ -1039,8 +1111,15 @@ mod tests {
     /// trust from reading scattered `if caps.numeric.X` conditions.
     #[test]
     fn no_candidate_ever_requires_an_unsupported_capability() {
-        let ops =
-            [Op::MatMul, Op::RmsNorm, Op::LayerNorm, Op::ArgMaxRow, Op::GradNorm, Op::MaxAbsRow];
+        let ops = [
+            Op::MatMul,
+            Op::RmsNorm,
+            Op::LayerNorm,
+            Op::ArgMaxRow,
+            Op::GradNorm,
+            Op::MaxAbsRow,
+            Op::PagedAttention,
+        ];
         let dtypes = [Dtype::F32, Dtype::F16, Dtype::BF16, Dtype::I8, Dtype::Q4];
         // 6 independent bools -> 64 combinations (f32 is always true, not
         // varied) crossed with workgroup_reductions (2), covering baseline
