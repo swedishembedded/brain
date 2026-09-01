@@ -283,6 +283,27 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         files: &["config.json", "model.safetensors"],
         roles: &[("tokenizer", ".")],
     },
+    // TimesFM-3: one repo (`google/timesfm-3.0-pytorch`, listing
+    // `.gitattributes`, `LICENSE`, `README.md`, `config.json`,
+    // `model.safetensors`), so unlike Kronos there is no ambiguity to resolve
+    // with a second recipe -- but the SAME reason Kronos needs `repos` rather
+    // than `signature` alone applies here: `config.json` + `model.safetensors`
+    // is the generic shape `TransformersRecipe` itself targets (every plain
+    // HF text model with one safetensors file has it), and this table is
+    // walked BEFORE that catch-all, so a signature-only match here would
+    // swallow unrelated repos. `repos` keys on the one exact name instead.
+    // The config also has no `architectures`/`model_type` key at all (not a
+    // `transformers`-family repo), so falling through to `TransformersRecipe`
+    // would fail with "config.json has no architecture" rather than fetch
+    // anything, same failure Kronos's two repos would hit uncaught.
+    FilesRecipe {
+        id: "timesfm3",
+        family: "timesfm3",
+        signature: &["config.json", "model.safetensors"],
+        repos: &["google/timesfm-3.0-pytorch"],
+        files: &["config.json", "model.safetensors"],
+        roles: &[("weights", ".")],
+    },
 ];
 
 /// The `(family, roles)` a [`FilesRecipe::id`] carries, for the finish-side
@@ -1035,6 +1056,40 @@ mod tests {
             let files: Vec<String> = recipe.artifacts(&r, &kronos_listing(), &hub).unwrap().into_iter().map(|a| a.file).collect();
             assert_eq!(files, ["config.json", "model.safetensors"], "{repo}");
         }
+    }
+
+    /// `google/timesfm-3.0-pytorch`'s listing: a `LICENSE` file alongside the
+    /// usual `config.json` + `model.safetensors` pair, and no
+    /// `architectures`/`model_type` key in its config at all - so unlike an
+    /// ordinary transformers repo, falling
+    /// through to `TransformersRecipe` would fail outright rather than fetch
+    /// anything, same failure mode Kronos's two repos would hit uncaught.
+    fn timesfm3_listing() -> Vec<String> {
+        [".gitattributes", "LICENSE", "README.md", "config.json", "model.safetensors"].into_iter().map(String::from).collect()
+    }
+
+    #[test]
+    fn timesfm3_recipe_claims_its_one_named_repo_and_none_other() {
+        let listing = timesfm3_listing();
+        let matched = recipes().into_iter().find(|x| x.matches(&ModelRef::new("google", "timesfm-3.0-pytorch", None), &listing)).unwrap();
+        assert_eq!(matched.id(), "timesfm3");
+        assert_eq!(files_recipe_roles("timesfm3").unwrap(), ("timesfm3", &[("weights", ".")][..]));
+
+        // A different repo, even from the same vendor or with the same
+        // config.json + model.safetensors shape, must NOT be claimed - the
+        // exact hazard `a_repo_pinned_recipe_never_claims_a_repo_it_does_not_name`
+        // already gates for Kronos.
+        let other = recipes().into_iter().find(|x| x.matches(&ModelRef::new("google", "timesfm-2.5-pytorch", None), &listing)).unwrap();
+        assert_eq!(other.id(), "transformers");
+    }
+
+    #[test]
+    fn timesfm3_recipe_fetches_config_and_weights_and_none_of_the_documentation() {
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("google", "timesfm-3.0-pytorch", None);
+        let recipe = recipes().into_iter().find(|x| x.id() == "timesfm3").unwrap();
+        let files: Vec<String> = recipe.artifacts(&r, &timesfm3_listing(), &hub).unwrap().into_iter().map(|a| a.file).collect();
+        assert_eq!(files, ["config.json", "model.safetensors"]);
     }
 
     #[test]

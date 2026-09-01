@@ -521,9 +521,10 @@ pub const ARCHS: &[Arch] = &[
     // sequence AND cross-variate attention, CPM iterative RevIN, linear
     // detrending and forecast stitching, natively multivariate with past-only
     // and past-and-future covariates. Config carries no `architectures` key
-    // (not a transformers-family repo) so `hf` is empty; the checkpoint's own
-    // `model_type`-less `config.json` is what `TimesfmRecipe` sniffs instead.
-    // No GGUF anywhere, like `chronos2`/`kronos` above. The 3.0 pretrained
+    // (not a transformers-family repo) so `hf` is empty; `modelstore::recipe`
+    // routes the fetch by repo name instead, the same way it does for
+    // Kronos's two repos. No GGUF anywhere, like `chronos2`/`kronos` above.
+    // The 3.0 pretrained
     // weights are `timesfm-non-commercial-license-v1.0` (source is
     // Apache-2.0) - `weights_env` still fetches them for free; the loader
     // gates real use behind an explicit acknowledgement, not this table.

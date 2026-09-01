@@ -4,8 +4,10 @@
 //! The remote side of the resolution ladder: listing and downloading files
 //! from a model host. [`Hub`] is the seam [`crate::plan`] is tested against -
 //! every test in this crate uses [`FakeHub`], never the network. [`HfHub`] is
-//! the one real implementation, restricted to a fixed host allowlist so a
-//! redirect can never be used to exfiltrate a fetch to an arbitrary origin.
+//! the one real implementation, restricted to a host allowlist so a redirect
+//! can never be used to exfiltrate a fetch to an arbitrary origin - a mirror
+//! ([`hub_endpoint_override`]) is reachable only by naming it explicitly, via
+//! the same env var that redirects the base URL there.
 
 use std::io::Read;
 use std::path::Path;
@@ -25,12 +27,55 @@ use crate::fetch::stream_to_file;
 /// `xethub.hf.co`/`huggingface.co`, confirming common ownership). A per-
 /// region subdomain list would need updating every time HF adds a region;
 /// the suffix check is what makes that not this crate's problem, while still
-/// refusing anything NOT under HF's own domains.
+/// refusing anything NOT under HF's own domains BY DEFAULT -- see
+/// [`hub_endpoint_override`] for the one explicit escape hatch.
 const ALLOWED_HOST_SUFFIXES: &[&str] = &["huggingface.co", "hf.co"];
 
-/// Is `host` exactly one of [`ALLOWED_HOST_SUFFIXES`], or a subdomain of one?
+/// An explicit, opt-in mirror endpoint: `BRAIN_HUB_ENDPOINT` first, else the
+/// ecosystem-standard `HF_ENDPOINT` (the same var `huggingface_hub`/`hf` honor
+/// for e.g. `hf-mirror.com`), else `None` meaning "just huggingface.co". A
+/// full `scheme://host` URL, same shape both those tools expect
+/// (`https://hf-mirror.com`, no trailing slash requirement -- trimmed here).
+///
+/// This is the one place [`HfHub`]'s "which host" question is answered, and
+/// [`host_is_allowed`] reads it too (not a second, drifting copy) so setting
+/// it does exactly one thing: this ONE additional host becomes reachable, as
+/// a base URL AND as a redirect target -- never a blanket "trust any host a
+/// redirect names," which is what the allowlist exists to prevent. Read fresh
+/// on every call rather than cached once, same discipline as [`hf_token`]: a
+/// fetch can span the lifetime of a long-running process, and a var exported
+/// after start should still take effect on the next request.
+fn hub_endpoint_override() -> Option<String> {
+    for var in ["BRAIN_HUB_ENDPOINT", "HF_ENDPOINT"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim().trim_end_matches('/');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The host [`hub_endpoint_override`] names, if it is set AND parses as an
+/// `http(s)://` URL. A set-but-unparseable override yields no extra allowed
+/// host (never a wildcard) - the subsequent request against that same
+/// malformed URL fails loudly on its own, which is preferable to silently
+/// widening the allowlist for a value nothing could ever have connected to.
+fn override_host() -> Option<String> {
+    hub_endpoint_override().and_then(|url| url_host(&url).ok())
+}
+
+/// Is `host` exactly one of [`ALLOWED_HOST_SUFFIXES`] (or a subdomain of one),
+/// OR exactly the [`override_host`] (or a subdomain of it)?
 fn host_is_allowed(host: &str) -> bool {
-    ALLOWED_HOST_SUFFIXES.iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    if ALLOWED_HOST_SUFFIXES.iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}"))) {
+        return true;
+    }
+    match override_host() {
+        Some(extra) => host == extra || host.ends_with(&format!(".{extra}")),
+        None => false,
+    }
 }
 
 /// The caller's HF auth token, if any: `HF_TOKEN` env var first (the
@@ -116,8 +161,12 @@ pub struct HfHub {
 }
 
 impl HfHub {
+    /// Talks to `huggingface.co` by default, or to [`hub_endpoint_override`]
+    /// when one is set - the same var also widens [`host_is_allowed`], so a
+    /// mirror's own redirects (e.g. to ITS cdn subdomain) keep working rather
+    /// than tripping the allowlist the moment the base URL moves.
     pub fn new() -> HfHub {
-        HfHub { base_url: "https://huggingface.co".to_string() }
+        HfHub { base_url: hub_endpoint_override().unwrap_or_else(|| "https://huggingface.co".to_string()) }
     }
 
     fn api_url(&self, vendor: &str, repo: &str, revision: &str) -> String {
@@ -424,6 +473,54 @@ mod tests {
             match orig {
                 Some(v) => std::env::set_var("HF_TOKEN", v),
                 None => std::env::remove_var("HF_TOKEN"),
+            }
+        }
+    }
+
+    /// The override is off by default (this crate's other host tests rely on
+    /// exactly that), takes `BRAIN_HUB_ENDPOINT` over `HF_ENDPOINT` when both
+    /// are set, ignores a blank value, and widens [`host_is_allowed`] to
+    /// exactly the one host it names - a subdomain of it, never a substring.
+    #[test]
+    fn hub_endpoint_override_prefers_brain_var_over_hf_endpoint_and_widens_the_allowlist() {
+        let orig_brain = std::env::var_os("BRAIN_HUB_ENDPOINT");
+        let orig_hf = std::env::var_os("HF_ENDPOINT");
+        unsafe {
+            std::env::remove_var("BRAIN_HUB_ENDPOINT");
+            std::env::remove_var("HF_ENDPOINT");
+        }
+
+        assert_eq!(hub_endpoint_override(), None);
+        assert!(!host_is_allowed("hf-mirror.com"));
+        assert_eq!(HfHub::new().base_url, "https://huggingface.co");
+
+        unsafe {
+            std::env::set_var("HF_ENDPOINT", "https://hf-mirror.com/");
+        }
+        assert_eq!(hub_endpoint_override().as_deref(), Some("https://hf-mirror.com"));
+        assert!(host_is_allowed("hf-mirror.com"));
+        assert!(host_is_allowed("cdn.hf-mirror.com"));
+        assert!(!host_is_allowed("evilhf-mirror.com"));
+        assert_eq!(HfHub::new().base_url, "https://hf-mirror.com");
+
+        unsafe {
+            std::env::set_var("BRAIN_HUB_ENDPOINT", "https://internal-mirror.example");
+        }
+        assert_eq!(hub_endpoint_override().as_deref(), Some("https://internal-mirror.example"), "BRAIN_HUB_ENDPOINT must win over HF_ENDPOINT");
+
+        unsafe {
+            std::env::set_var("BRAIN_HUB_ENDPOINT", "   ");
+        }
+        assert_eq!(hub_endpoint_override().as_deref(), Some("https://hf-mirror.com"), "a blank override must fall through to HF_ENDPOINT, not be treated as set");
+
+        unsafe {
+            match orig_brain {
+                Some(v) => std::env::set_var("BRAIN_HUB_ENDPOINT", v),
+                None => std::env::remove_var("BRAIN_HUB_ENDPOINT"),
+            }
+            match orig_hf {
+                Some(v) => std::env::set_var("HF_ENDPOINT", v),
+                None => std::env::remove_var("HF_ENDPOINT"),
             }
         }
     }
