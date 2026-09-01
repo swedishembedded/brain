@@ -1,0 +1,1546 @@
+{
+  "count": 445,
+  "note": "all 445 tensors are learnable; no non-persistent buffers in this checkpoint (RoPE/PerDimScale are computed, not registered)",
+  "source": "google/timesfm-3.0-pytorch model.safetensors (brain pull google/timesfm-3.0-pytorch)",
+  "tensors": {
+    "output_head.bias": [
+      576
+    ],
+    "output_head.weight": [
+      576,
+      1280
+    ],
+    "pre_transformer_resblock.hidden_layer.weight": [
+      1280,
+      192
+    ],
+    "pre_transformer_resblock.output_layer.weight": [
+      1280,
+      1280
+    ],
+    "pre_transformer_resblock.residual_layer.weight": [
+      1280,
+      192
+    ],
+    "transformer_stack.layers.0.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.0.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.0.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.0.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.0.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.0.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.0.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.0.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.0.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.0.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.0.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.0.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.0.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.0.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.1.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.1.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.1.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.1.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.1.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.1.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.1.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.1.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.1.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.1.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.1.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.1.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.1.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.10.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.10.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.10.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.10.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.10.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.10.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.10.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.10.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.10.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.10.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.10.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.10.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.10.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.11.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.11.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.11.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.11.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.11.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.11.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.11.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.11.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.11.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.11.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.11.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.11.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.11.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.12.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.12.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.12.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.12.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.12.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.12.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.12.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.12.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.12.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.12.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.12.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.12.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.12.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.13.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.13.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.13.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.13.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.13.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.13.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.13.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.13.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.13.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.13.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.13.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.13.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.13.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.14.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.14.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.14.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.14.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.14.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.14.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.14.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.14.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.14.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.14.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.14.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.14.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.14.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.15.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.15.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.15.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.15.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.15.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.15.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.15.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.15.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.15.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.15.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.15.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.15.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.15.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.16.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.16.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.16.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.16.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.16.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.16.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.16.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.16.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.16.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.16.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.16.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.16.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.16.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.17.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.17.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.17.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.17.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.17.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.17.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.17.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.17.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.17.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.17.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.17.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.17.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.17.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.18.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.18.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.18.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.18.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.18.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.18.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.18.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.18.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.18.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.18.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.18.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.18.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.18.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.19.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.19.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.19.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.19.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.19.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.19.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.19.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.19.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.19.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.19.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.19.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.19.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.19.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.2.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.2.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.2.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.2.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.2.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.2.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.2.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.2.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.2.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.2.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.2.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.2.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.2.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.3.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.3.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.3.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.3.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.3.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.3.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.3.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.3.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.3.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.3.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.3.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.3.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.3.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.4.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.4.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.4.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.4.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.4.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.4.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.4.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.4.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.4.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.4.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.4.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.4.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.4.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.5.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.5.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.5.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.5.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.5.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.5.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.5.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.5.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.5.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.5.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.5.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.5.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.5.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.6.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.6.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.6.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.6.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.6.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.6.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.6.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.6.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.6.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.6.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.6.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.6.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.6.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.7.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.7.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.7.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.7.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.7.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.7.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.7.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.7.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.7.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.7.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.7.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.7.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.7.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.8.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.8.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.8.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.8.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.8.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.8.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.8.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.8.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.8.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.8.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.8.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.8.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.8.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.ff0.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.ff1.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.post_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.9.post_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.9.post_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.9.pre_ff_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.9.pre_seq_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.9.pre_var_attn_ln.weight": [
+      1280
+    ],
+    "transformer_stack.layers.9.seq_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.9.seq_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.seq_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.seq_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.9.seq_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.9.seq_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.seq_attn.value_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.var_attn.key_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.9.var_attn.key_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.var_attn.out_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.var_attn.per_dim_scale.per_dim_scale": [
+      80
+    ],
+    "transformer_stack.layers.9.var_attn.query_ln.weight": [
+      80
+    ],
+    "transformer_stack.layers.9.var_attn.query_proj.weight": [
+      1280,
+      1280
+    ],
+    "transformer_stack.layers.9.var_attn.value_proj.weight": [
+      1280,
+      1280
+    ]
+  }
+}

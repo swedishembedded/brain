@@ -1,0 +1,24 @@
+[package]
+name = "brain-timesfm3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Google TimesFM-3 (google/timesfm-3.0-pytorch) from scratch: a stacked mixing transformer with sequence AND cross-variate attention, CPM iterative RevIN, linear detrending and forecast stitching, natively multivariate with past-only and past-and-future covariates. Apache-2.0 source; the 3.0 pretrained weights are timesfm-non-commercial-license-v1.0 (non-commercial/non-production use only, never redistributed)."
+
+[lib]
+name = "timesfm3"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-kernels.workspace = true
+brain-forecast.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

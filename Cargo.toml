@@ -56,6 +56,7 @@ default-members = [
     "crates/chronos2",
     "crates/kronos",
     "crates/fincast",
+    "crates/timesfm3",
     "crates/timeseries",
     "crates/mimi",
     "crates/ecapatdnn",
@@ -254,6 +255,7 @@ brain-fcbench = { path = "crates/fcbench" }
 brain-chronos2 = { path = "crates/chronos2" }
 brain-kronos = { path = "crates/kronos" }
 brain-fincast = { path = "crates/fincast" }
+brain-timesfm3 = { path = "crates/timesfm3" }
 brain-runtime = { path = "crates/runtime" }
 brain-server = { path = "crates/server" }
 brain-vulkan = { path = "crates/vulkan" }
