@@ -178,12 +178,20 @@ struct OpCounters {
     uniform_allocs: AtomicU64,
 }
 
-/// The largest batch this backend can timestamp in one flush. Timestamps
-/// bracket every dispatch (`n+1` marks), so this is the query-pool size.
-/// A flush with more steps than this simply skips timing for that batch
-/// (`kernel_times` stays honest about what it did and did not see) rather
-/// than crashing or silently truncating — real model forwards are dozens to
-/// low hundreds of dispatches, far under this.
+/// The largest sub-batch `flush` will bracket with ONE timestamp query pool.
+/// Timestamps bracket every dispatch (`n+1` marks per sub-batch), so this is
+/// the query-pool size. There is no Vulkan device limit on timestamp query
+/// count (`VkPhysicalDeviceLimits` has no such field - the cost is host/device
+/// memory only), so this is purely an implementation choice, not a hardware
+/// ceiling: a flush larger than this is split into `ceil(n /
+/// MAX_TIMED_DISPATCHES)` sub-batches (see [`VulkanBackend::flush_chunk`]),
+/// each its own submit+fence-bounded timestamp bracket, folded into the same
+/// per-kernel accumulator - rather than the query pool simply not being used
+/// (and every kernel kind in the batch going unattributed) for any batch at
+/// or above this size. Real model forwards are dozens to low hundreds of
+/// dispatches, far under this; the split path exists for MoE-scale batches
+/// (a 48-layer/128-expert forward routinely emits tens of thousands of
+/// dispatches), which is exactly what used to get zero attribution.
 const MAX_TIMED_DISPATCHES: usize = 8192;
 
 /// Per-kernel-kind device timing, mirroring `backend-wgpu`'s `GpuProfile`
@@ -949,59 +957,79 @@ impl VulkanBackend {
             self.recycle_transients(&steps);
             return;
         }
-        // Only time a batch this backend can actually bracket in one query
-        // pool — an oversized batch silently skips timing rather than
-        // truncating or panicking (`kernel_times` stays honest: it reports
-        // what it measured, not a guess for what it didn't).
-        let time_this_batch = self.timing_active() && steps.len() < MAX_TIMED_DISPATCHES;
-        let query_pool = time_this_batch.then(|| unsafe { self.timestamp_pool() });
+        // Time every dispatch in the batch, even one bigger than a single
+        // query pool's capacity: split into bounded sub-batches of at most
+        // `MAX_TIMED_DISPATCHES` steps, each recorded, submitted and
+        // fence-waited independently (`flush_chunk`), with every sub-batch's
+        // timestamps folded into the same per-kernel accumulator. A
+        // submit+fence boundary already stands in for the inter-dispatch
+        // memory barrier on this backend - see the Intel-ANV serialize
+        // branch above, which relies on exactly that guarantee - so a chunk
+        // boundary here needs no extra synchronisation beyond the fence wait
+        // `flush_chunk` already does. When timing is off, `chunk_size` is the
+        // whole batch, so this is one sub-batch = the previous single-submit
+        // behaviour, unchanged.
+        let time_this = self.timing_active();
+        let chunk_size = if time_this { MAX_TIMED_DISPATCHES } else { steps.len() };
         unsafe {
-            let (cmd, guard) = self.begin_cmd();
-            if let Some(qp) = query_pool {
-                dev.cmd_reset_query_pool(cmd, qp, 0, (steps.len() + 1) as u32);
-                dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, qp, 0);
+            for chunk in steps.chunks(chunk_size) {
+                self.flush_chunk(chunk, time_this);
             }
-            // Conservative full memory barrier between dependent dispatches: every
-            // prior shader write is made available/visible to subsequent shader
-            // reads/writes. (A finer per-buffer barrier is a later optimisation.)
-            let barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-                .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE);
-            for (i, s) in steps.iter().enumerate() {
-                if i > 0 {
-                    dev.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[barrier],
-                        &[],
-                        &[],
-                    );
-                }
-                let kp = &self.pipelines.pipelines[s.kind];
-                dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
-                dev.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    kp.layout,
-                    0,
-                    &[s.set],
-                    &[],
-                );
-                dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
-                if let Some(qp) = query_pool {
-                    dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, qp, (i + 1) as u32);
-                }
-            }
-            self.end_and_wait(cmd, guard);
-        }
-        if let Some(qp) = query_pool {
-            let ts = unsafe { self.read_timestamps(qp, (steps.len() + 1) as u32) };
-            let kinds: Vec<usize> = steps.iter().map(|s| s.kind).collect();
-            self.record_timing(&kinds, &ts);
         }
         self.recycle_transients(&steps);
+    }
+
+    /// Record, submit and fence-wait ONE bounded sub-batch of `flush`'s
+    /// pending steps into its own command buffer - the unit `flush` splits an
+    /// oversized batch into so every sub-batch still fits the timestamp query
+    /// pool (see [`MAX_TIMED_DISPATCHES`]'s doc). `chunk.len()` must be `<=
+    /// MAX_TIMED_DISPATCHES` when `time_this` is set, so `chunk.len() + 1`
+    /// timestamp marks always fit the pool's `MAX_TIMED_DISPATCHES + 1`
+    /// capacity - `flush` guarantees this via its `chunk_size`.
+    ///
+    /// # Safety
+    /// Same preconditions as the other `unsafe fn`s on this type: a live
+    /// device/queue and `chunk`'s descriptor sets/pipelines valid for it.
+    unsafe fn flush_chunk(&self, chunk: &[VkStep], time_this: bool) {
+        let dev = &self.ctx.device;
+        let query_pool = time_this.then(|| self.timestamp_pool());
+        let (cmd, guard) = self.begin_cmd();
+        if let Some(qp) = query_pool {
+            dev.cmd_reset_query_pool(cmd, qp, 0, (chunk.len() + 1) as u32);
+            dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, qp, 0);
+        }
+        // Conservative full memory barrier between dependent dispatches: every
+        // prior shader write is made available/visible to subsequent shader
+        // reads/writes. (A finer per-buffer barrier is a later optimisation.)
+        let barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE);
+        for (i, s) in chunk.iter().enumerate() {
+            if i > 0 {
+                dev.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[barrier],
+                    &[],
+                    &[],
+                );
+            }
+            let kp = &self.pipelines.pipelines[s.kind];
+            dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
+            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, kp.layout, 0, &[s.set], &[]);
+            dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
+            if let Some(qp) = query_pool {
+                dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, qp, (i + 1) as u32);
+            }
+        }
+        self.end_and_wait(cmd, guard);
+        if let Some(qp) = query_pool {
+            let ts = self.read_timestamps(qp, (chunk.len() + 1) as u32);
+            let kinds: Vec<usize> = chunk.iter().map(|s| s.kind).collect();
+            self.record_timing(&kinds, &ts);
+        }
     }
 
     /// Bytes currently buried (dropped, not yet `vkFreeMemory`'d) on this
@@ -1060,8 +1088,10 @@ impl VulkanBackend {
     }
 
     /// The reusable timestamp query pool, created on first use, sized for
-    /// `MAX_TIMED_DISPATCHES + 1` marks (enough to bracket the largest batch
-    /// this backend will time).
+    /// `MAX_TIMED_DISPATCHES + 1` marks (enough to bracket the largest
+    /// SUB-BATCH `flush_chunk` will ever be handed in one call - `flush`
+    /// never hands it more than `MAX_TIMED_DISPATCHES` steps at a time, no
+    /// matter how large the overall batch is).
     unsafe fn timestamp_pool(&self) -> vk::QueryPool {
         let mut slot = self.profile.pool.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = *slot {

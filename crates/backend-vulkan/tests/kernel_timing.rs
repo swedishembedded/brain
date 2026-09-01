@@ -105,6 +105,64 @@ fn kernel_times_also_works_on_the_serialized_intel_workaround_path() {
     assert!(*device_ms >= 0.0);
 }
 
+/// A batch larger than the query-pool's own capacity (`MAX_TIMED_DISPATCHES`
+/// == 8192 in `backend-vulkan/src/lib.rs`, not exported - this test pins the
+/// externally observable contract, not the private constant) used to skip
+/// timing for the WHOLE flush: `flush()` gated the query pool on
+/// `steps.len() < MAX_TIMED_DISPATCHES`, so a 48-layer/128-expert MoE forward
+/// (which routinely exceeds it) got zero per-kernel attribution, silently.
+/// `kernel_times` must instead attribute every kernel kind dispatched in an
+/// oversized batch, by bracketing bounded sub-batches within the flush
+/// (each its own submit+fence-bounded timestamp pair) rather than dropping
+/// timing for the batch outright.
+#[test]
+fn kernel_times_attributes_every_kind_above_the_query_pool_capacity() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let be = match VulkanBackend::try_new(&[("axpy", kernels::AXPY), ("add", kernels::ADD)]) {
+        Ok(b) => b,
+        Err(e) => {
+            brain_testutil::skip_unavailable(&format!("no Vulkan device: {e}"));
+            return;
+        }
+    };
+    if !be.set_kernel_timing(true) {
+        brain_testutil::skip_unavailable("this queue cannot write timestamps (timestamp_valid_bits == 0)");
+        return;
+    }
+
+    let out = be.storage(64);
+    let inp = be.storage_init("inp", &vec![1.0f32; 64]);
+    let src2 = be.storage_init("src2", &vec![1.0f32; 64]);
+    let dst2 = be.storage(64);
+
+    // Comfortably above the 8192-dispatch query-pool capacity, and mixed
+    // between two kernel kinds so a dropped/misattributed sub-batch at a
+    // chunk boundary would show up as one kind's `calls` undercounting.
+    const N: usize = 8300;
+    let steps: Vec<_> = (0..N)
+        .map(|i| {
+            if i % 2 == 0 {
+                be.step(0, &[&out, &inp], &[64u32, backend_api::f(1.0)], 64)
+            } else {
+                be.step(1, &[&src2, &dst2], &[64u32], 64)
+            }
+        })
+        .collect();
+
+    be.submit(&[], &steps);
+    be.poll_wait();
+
+    let times = be.kernel_times().expect("timing was enabled and timestamps are supported");
+    let axpy_calls = times.iter().find(|(n, _, _)| n == "axpy").map(|(_, _, c)| *c).unwrap_or(0);
+    let add_calls = times.iter().find(|(n, _, _)| n == "add").map(|(_, _, c)| *c).unwrap_or(0);
+    let total_ms: f64 = times.iter().map(|(_, ms, _)| ms).sum();
+
+    assert!(axpy_calls > 0, "axpy was dispatched {} times above the query-pool cap but got zero attribution", N.div_ceil(2));
+    assert!(add_calls > 0, "add was dispatched {} times above the query-pool cap but got zero attribution", N / 2);
+    assert_eq!(axpy_calls + add_calls, N as u64, "every dispatch in the oversized batch must be accounted for exactly once");
+    assert!(total_ms > 0.0, "an 8300-dispatch batch must report nonzero device time, not a silently empty profile");
+}
+
 #[test]
 fn timing_is_off_by_default_and_disabling_reports_zero_calls() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
