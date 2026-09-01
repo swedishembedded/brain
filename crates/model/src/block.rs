@@ -1653,6 +1653,37 @@ pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: 
     }
 }
 
+/// Which softmax kernel to dispatch (`softmax_rows` vs a caller-supplied
+/// reference - `attn_softmax`/`decode_softmax`/`attn_softmax_{cross,bidir}`,
+/// whichever shape the caller needs) and the resulting thread count. Same
+/// shape as [`rms_variant`]/[`ln_variant`]: `coop` is `None` when the caller
+/// never registered `softmax_rows` at all (walks straight to `reference`,
+/// same as a model with no GEMV kernel falling through `Op::MatMul`'s head),
+/// and the policy itself lives in `backend_api::select` (`Op::Softmax`),
+/// keyed on `DeviceCaps`, never a backend name or a hand-rolled
+/// `caps.workgroup_reductions` check at the call site - two of which
+/// (`wan::block::Sel::new`, `ltxv::block::attn_softmax`) had independently
+/// reimplemented this exact rule before this seam existed.
+///
+/// `rows` is the caller's own row count (`n_heads * query_positions`, or
+/// `batch * n_heads` for a decode step - whatever the reference kernel's
+/// own `Params` already uses), `cols` is the key axis being softmaxed over.
+/// `softmax_rows.wgsl` is `@workgroup_size(64)`, at or below the WebGPU
+/// floor, so no `max_workgroup_size` gate is needed on top of the seam.
+pub fn softmax_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, cols: u32) -> (usize, u32) {
+    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+    let shape = OpShape { m: rows, n: cols, k: 0, dtype: Dtype::F32 };
+    match coop {
+        Some(i)
+            if gpu_core::select::DefaultSelector.select(Op::Softmax, shape, &g.caps())
+                == KernelVariant::WorkgroupPerOutput =>
+        {
+            (i, rows * 64)
+        }
+        _ => (reference, rows),
+    }
+}
+
 /// LayerNorm forward: `y = (x-mean)/sqrt(var+eps) * gamma + beta` over `rows`
 /// rows of `d` elements. Same math and Params either variant.
 pub fn layernorm_fwd(

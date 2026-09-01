@@ -56,6 +56,12 @@ pub enum Op {
     /// (`N*L` - the transposed lowering does `L` rows, not `Lo`), `n` =
     /// `Cout`, `k` = `Cin`.
     ConvTranspose1d,
+    /// Standalone attention-probability softmax (`softmax_rows` vs
+    /// `attn_softmax`/`decode_softmax`/`attn_softmax_{cross,bidir}`).
+    /// Selected by the same rule as [`Op::MaxAbsRow`] - see [`candidates`].
+    /// `m` = rows (heads × query positions), `n` = the key axis being
+    /// softmaxed over; `k` unused.
+    Softmax,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -474,6 +480,18 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // trade either. `workgroup_reductions` is the correctness gate: the CPU
         // JIT mis-executes the barrier.
         Op::MaxAbsRow => vec![WorkgroupPerOutput, Reference],
+        // Standalone attention softmax has NO shape gate either, for the
+        // same reason `Op::MaxAbsRow` does not: it is a per-row reduction
+        // (max, then exp-sum, then normalise), so the loss from one thread
+        // walking the whole row is per-access efficiency, not something more
+        // rows fixes. `wan::block::Sel::new` and `ltxv::block::attn_softmax`
+        // each independently reimplemented exactly this rule (capability
+        // only, `caps.workgroup_reductions`) before this Op existed; every
+        // other attention family (causal GQA, bidir, cross, paged decode)
+        // dispatches a fixed reference-only softmax kernel with no
+        // capability check at all, which this Op also lets those sites
+        // adopt.
+        Op::Softmax => vec![WorkgroupPerOutput, Reference],
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
         // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
         // kernel, not a slow one": profiled in the MiniMax-Music-3 vocoder,
@@ -879,15 +897,50 @@ mod tests {
         }
     }
 
+    /// Standalone attention-probability softmax (`softmax_rows` vs
+    /// `attn_softmax`/`decode_softmax`/`attn_softmax_{cross,bidir}`) has the
+    /// same shape as `Op::MaxAbsRow`: a per-row reduction with NO shape gate
+    /// (rows/cols only size the dispatch, never the choice - both existing
+    /// call sites this migrates, `wan::block::Sel::new` and
+    /// `ltxv::block::attn_softmax`, already independently converged on
+    /// exactly this "capability only" rule; this test exists so a row/col
+    /// threshold cannot creep in later the way it did on `Op::RmsNorm`).
+    #[test]
+    fn softmax_is_cooperative_at_every_shape() {
+        let s = DefaultSelector;
+        for m in [1u32, 8, 32, 512, 4096] {
+            for n in [16u32, 128, 1024, 8192] {
+                let sh = shape(m, n, 0, Dtype::F32);
+                assert_eq!(
+                    s.select(Op::Softmax, sh, &gpu_caps()),
+                    KernelVariant::WorkgroupPerOutput,
+                    "m={m} n={n}"
+                );
+                // The CPU JIT cannot execute the barrier - a correctness gate.
+                assert_eq!(
+                    s.select(Op::Softmax, sh, &cpu_caps()),
+                    KernelVariant::Reference,
+                    "m={m} n={n}"
+                );
+            }
+        }
+    }
+
     /// The candidate list is never empty and its head IS the default policy —
     /// one list, so the static choice and the tuner's probe set cannot drift.
     #[test]
     fn candidates_head_is_the_default_policy() {
         let s = DefaultSelector;
         for caps in [gpu_caps(), cpu_caps()] {
-            for op in
-                [Op::MatMul, Op::RmsNorm, Op::LayerNorm, Op::ArgMaxRow, Op::GradNorm, Op::MaxAbsRow]
-            {
+            for op in [
+                Op::MatMul,
+                Op::RmsNorm,
+                Op::LayerNorm,
+                Op::ArgMaxRow,
+                Op::GradNorm,
+                Op::MaxAbsRow,
+                Op::Softmax,
+            ] {
                 for m in [1u32, 8, 9, 33, 4096] {
                     for dtype in [Dtype::F32, Dtype::I8] {
                         let sh = shape(m, 8192, 512, dtype);
