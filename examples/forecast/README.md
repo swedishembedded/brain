@@ -4,18 +4,19 @@ Send a context series to `brain serve --dbus`, get a probabilistic forecast back
 end to end, over the generic `Run` method on `com.swedishembedded.Brain1`, using a
 file descriptor for the bulk numeric data (no per-model protocol).
 
-Three forecasting foundation models are served, each with one `forecast` action:
+Four forecasting foundation models are served, each with one `forecast` action:
 
 | model | env vars | input | output |
 |---|---|---|---|
 | `chronos2` | `BRAIN_CHRONOS2` | univariate series `[T]` | `[levels, horizon]` quantiles (21 levels) |
 | `fincast` | `BRAIN_FINCAST` | univariate series `[T]` (+`freq`) | `[horizon, 1+levels]` — col 0 mean, then 9 quantiles |
 | `kronos` | `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | OHLCV bars `[T, feat]` (or a univariate `[T]` close, expanded server-side) | `[horizon, feat]` sample bars |
+| `timesfm3` | `BRAIN_TIMESFM3` | univariate series `[T]` over this wire (natively multivariate via the library API - see below) | `[horizon, 9]` quantiles |
 
 `chronos2` and `fincast` advertise an NPU footprint, so with an Intel NPU budgeted
 the scheduler **places them on the NPU automatically** (`place::pick_device`); the
-returned `device` field says where it ran. `kronos` runs on CPU/GPU (its two-graph
-autoregressive NPU rollout is a follow-up).
+returned `device` field says where it ran. `kronos` and `timesfm3` run on CPU/GPU
+(their NPU paths are a follow-up).
 
 ## Run it
 
@@ -94,6 +95,44 @@ Feed a real series instead of the synthetic one:
 ```bash
 python3 examples/forecast/forecast_client.py --model chronos2 --series my_series.txt
 ```
+
+## The cooling-loop scenario - TimesFM-3's native multivariate forecasting
+
+`tools/forecast/make_cooling_loop.py` generates a different kind of series on
+purpose: a physical simulation, not a statistical one. A heat exchanger's
+conductance fouls between cleanings while an unmeasured, shift-schedule-driven
+heat load pushes the return coolant temperature toward a trip threshold - see
+the script's own docstring for the energy balance it integrates. The question
+is operational: **will the loop trip in the next 5 days, and when?**
+
+Three ways to run the same scenario, in increasing order of what they can show
+(the wire the D-Bus path uses today only carries one series, so only the
+library API and the CLI can hand the model its actual covariates):
+
+```bash
+# Rust, library API, full story: target + a past covariate (pump power) +
+# TWO known-future covariates (the ambient forecast, the shift schedule) all
+# attend to each other in ONE decode() call, plus a physics-observer baseline
+# that shows what a conventional observer gets wrong (it tracks the PRESENT
+# state fine and has no model of the SCHEDULE, so it forecasts the load
+# staying flat and misses the trip entirely).
+examples/forecast/cooling_loop.sh timesfm3.safetensors chart.png
+
+# Python, served path: the SAME scenario, target-only over the generic D-Bus
+# wire - a smaller number, and the gap between it and the Rust run's is the
+# covariates' own contribution, not noise.
+python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv
+dbus-run-session -- bash -c '
+  BRAIN_TIMESFM3=timesfm3.safetensors brain serve --dbus --device cpu &
+  sleep 2
+  python3 examples/forecast/cooling_loop.py cooling_loop.csv
+'
+```
+
+Get the weights with `brain pull google/timesfm-3.0-pytorch` then
+`brain forecast import --timesfm3 <fetched dir> --out timesfm3.safetensors` -
+they ship under `timesfm-non-commercial-license-v1.0` (non-commercial,
+non-production use; the checkpoint itself may never be redistributed).
 
 ## Dependencies
 

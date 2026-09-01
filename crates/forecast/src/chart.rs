@@ -44,6 +44,10 @@ pub struct ForecastChart {
     /// (`"kronos forecast"`, `"timesfm3 forecast"`); this chart type has no
     /// model of its own, so nothing here may hardcode one.
     pub forecast_label: String,
+    /// Additional named forecast lines, e.g. a baseline or a second model's
+    /// path drawn on the same axes for comparison (labels, then their own
+    /// distinct colours, in the order given).
+    pub extra_lines: Vec<(String, Vec<(f64, f64)>)>,
     pub y_label: String,
     /// Pixel size of the PNG. Kept small on purpose: this is committed
     /// documentation, not a poster.
@@ -60,6 +64,7 @@ impl ForecastChart {
             actual: Vec::new(),
             band: Vec::new(),
             forecast_label: "forecast".to_string(),
+            extra_lines: Vec::new(),
             y_label: "value".to_string(),
             // 800 px is the cap the Quick start's committed chart is held to;
             // at 400 px tall the whole PNG lands around 50 KB, below every
@@ -112,9 +117,15 @@ pub fn render_png(chart: &ForecastChart, path: &Path) -> Result<PathBuf, String>
     write_xy(&fcst, &chart.forecast)?;
     write_xy(&act, &chart.actual)?;
     write_xyy(&band, &chart.band)?;
+    let mut extra_paths = Vec::with_capacity(chart.extra_lines.len());
+    for (i, (_, pts)) in chart.extra_lines.iter().enumerate() {
+        let p = dir.join(format!("extra{i}.dat"));
+        write_xy(&p, pts)?;
+        extra_paths.push(p);
+    }
 
     let script_path = dir.join("plot.gp");
-    let script = gnuplot_script(chart, path, &hist, &fcst, &act, &band);
+    let script = gnuplot_script(chart, path, &hist, &fcst, &act, &band, &extra_paths);
     std::fs::write(&script_path, &script).map_err(|e| format!("forecast::chart: writing {}: {e}", script_path.display()))?;
 
     let out = Command::new("gnuplot").arg(&script_path).output().map_err(|e| format!("forecast::chart: spawning gnuplot: {e}"))?;
@@ -134,7 +145,7 @@ pub fn render_png(chart: &ForecastChart, path: &Path) -> Result<PathBuf, String>
 /// and 6 package seen in the wild. Colours are chosen to stay distinguishable
 /// in greyscale (dark history, mid-tone actual, saturated forecast) because a
 /// chart in a README is read on every kind of screen.
-fn gnuplot_script(chart: &ForecastChart, out: &Path, hist: &Path, fcst: &Path, act: &Path, band: &Path) -> String {
+fn gnuplot_script(chart: &ForecastChart, out: &Path, hist: &Path, fcst: &Path, act: &Path, band: &Path, extra_paths: &[PathBuf]) -> String {
     let mut s = String::new();
     s.push_str(&format!("set terminal pngcairo size {},{} enhanced font 'sans,10'\n", chart.width, chart.height));
     s.push_str(&format!("set output {}\n", quote(out)));
@@ -163,6 +174,14 @@ fn gnuplot_script(chart: &ForecastChart, out: &Path, hist: &Path, fcst: &Path, a
     }
     if !chart.forecast.is_empty() {
         plots.push(format!("{} using 1:2 with lines lw 2 dt 1 lc rgb '#d1495b' title {}", quote(fcst), quote_str(&chart.forecast_label)));
+    }
+    // A small cycling palette, distinct from history/actual/forecast's own
+    // colours above - enough to tell a couple of extra comparison lines
+    // apart without needing gnuplot's own (less legible) default cycle.
+    const EXTRA_COLORS: &[&str] = &["#7b52ab", "#e8a33d", "#3d8fe8", "#5c5c5c"];
+    for (i, (label, _)) in chart.extra_lines.iter().enumerate() {
+        let color = EXTRA_COLORS[i % EXTRA_COLORS.len()];
+        plots.push(format!("{} using 1:2 with lines lw 2 dt 3 lc rgb '{color}' title {}", quote(&extra_paths[i]), quote_str(label)));
     }
     s.push_str("plot ");
     s.push_str(&plots.join(", \\\n     "));
@@ -219,7 +238,7 @@ mod tests {
     #[test]
     fn the_script_names_every_dataset_it_was_given_and_only_those() {
         let c = demo();
-        let s = gnuplot_script(&c, Path::new("/out/x.png"), Path::new("/d/h.dat"), Path::new("/d/f.dat"), Path::new("/d/a.dat"), Path::new("/d/b.dat"));
+        let s = gnuplot_script(&c, Path::new("/out/x.png"), Path::new("/d/h.dat"), Path::new("/d/f.dat"), Path::new("/d/a.dat"), Path::new("/d/b.dat"), &[]);
         assert!(s.contains("set terminal pngcairo size 800,400"), "{s}");
         assert!(s.contains("'/out/x.png'") && s.contains("'/d/h.dat'") && s.contains("'/d/f.dat'") && s.contains("'/d/a.dat'") && s.contains("'/d/b.dat'"));
         // The forecast origin is marked, so a reader can see where prediction
@@ -230,8 +249,23 @@ mod tests {
         // gnuplot would error on an empty filledcurves dataset.
         let mut c2 = demo();
         c2.band.clear();
-        let s2 = gnuplot_script(&c2, Path::new("/o.png"), Path::new("/h"), Path::new("/f"), Path::new("/a"), Path::new("/b"));
+        let s2 = gnuplot_script(&c2, Path::new("/o.png"), Path::new("/h"), Path::new("/f"), Path::new("/a"), Path::new("/b"), &[]);
         assert!(!s2.contains("filledcurves"), "{s2}");
+    }
+
+    #[test]
+    fn extra_lines_get_their_own_labeled_dataset_and_distinct_colours() {
+        let mut c = demo();
+        c.extra_lines.push(("baseline a".to_string(), vec![(0.0, 1.0)]));
+        c.extra_lines.push(("baseline b".to_string(), vec![(0.0, 2.0)]));
+        let extra_paths = vec![Path::new("/d/extra0.dat").to_path_buf(), Path::new("/d/extra1.dat").to_path_buf()];
+        let s = gnuplot_script(&c, Path::new("/out/x.png"), Path::new("/d/h.dat"), Path::new("/d/f.dat"), Path::new("/d/a.dat"), Path::new("/d/b.dat"), &extra_paths);
+        assert!(s.contains("'/d/extra0.dat'") && s.contains("title 'baseline a'"), "{s}");
+        assert!(s.contains("'/d/extra1.dat'") && s.contains("title 'baseline b'"), "{s}");
+        // Two distinct colours, neither reused from history/actual/forecast.
+        let (i0, i1) = (s.find("extra0.dat").unwrap(), s.find("extra1.dat").unwrap());
+        let line0 = &s[i0..i1];
+        assert!(line0.contains("#7b52ab") && !line0.contains("#e8a33d"));
     }
 
     #[test]
