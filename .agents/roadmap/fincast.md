@@ -15,3 +15,7 @@ place; forward parity is verified against the reference implementation.
       yet calibrated)
 - [ ] LoRA fine-tune entry point (the underlying host trainer + gradcheck
       exist, reused from Kronos, but are not wired up for FinCast)
+- [ ] Register the coalesced `rmsnorm_rows` via `block::rms_variant` instead
+      of dispatching the naive per-element norm by hardcoded index (lessons
+      §76 - named alongside chronos2/kronos/12 other crates; measured 8.7x-
+      23.5x left on the table for norms alone elsewhere in the tree)

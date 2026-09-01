@@ -369,6 +369,7 @@ including those.
 | [`brain/chronos2`](docs/models/chronos2.md) | Forecasting | probabilistic time-series forecasting |
 | [`brain/fincast`](docs/models/fincast.md) | Forecasting | patched decoder + sparse MoE forecasting |
 | [`brain/kronos`](docs/models/kronos.md) | Forecasting | OHLCV candlestick forecasting |
+| [`brain/timesfm3`](docs/models/timesfm3.md) | Forecasting | natively multivariate probabilistic forecasting |
 | [`diamond`](docs/models/diamond.md) | World models | playable, action-conditioned Atari-100k simulation |
 | [`brain/imgpipe`](docs/models/imgpipe.md) | Vision | composable image-processing pipeline (no HTTP endpoint) |
 

@@ -22,6 +22,10 @@ significant speedup over the naive autoregressive loop.
 - [ ] GPU-accelerated prefill for the KV-cached rollout
 - [ ] Sample-batching in the stochastic forecast adapter — the kernels
       already support batch size > 1, but the sampling loop doesn't use it
+- [ ] Register the coalesced `rmsnorm_rows` via `block::rms_variant` instead
+      of dispatching the naive per-element norm by hardcoded index (lessons
+      §76 - named alongside chronos2/fincast/12 other crates; measured 8.7x-
+      23.5x left on the table for norms alone elsewhere in the tree)
 
 The BSQ tokenizer and token sampling stay host-side rather than being
 exported to the NPU graph: they're cheap per bar and depend on stateful

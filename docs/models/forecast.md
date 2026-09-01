@@ -1,7 +1,7 @@
 # Time-series forecasting
 
-Three foundation models - Chronos-2, FinCast, and Kronos - share one
-contract: a numeric time-series context goes in, a probabilistic forecast
+Four foundation models - Chronos-2, FinCast, Kronos, and TimesFM-3 - share
+one contract: a numeric time-series context goes in, a probabilistic forecast
 comes out. They all sit behind the same `brain forecast` CLI verb and the
 same `forecast` D-Bus action; this page covers that shared surface. Each
 model's own page has its exact model id, environment variable(s), and any
@@ -10,6 +10,9 @@ model-specific behavior:
 - [Chronos-2](chronos2.md) - general-purpose probabilistic forecaster
 - [FinCast](fincast.md) - financial forecaster, research/educational use only
 - [Kronos](kronos.md) - OHLCV bar forecaster, the only one with CLI-reachable fine-tuning
+- [TimesFM-3](timesfm3.md) - natively multivariate forecaster (target +
+  covariates in one call); the shared wire above only carries one series, so
+  its multivariate forecasting needs the library API, not this page's surface
 
 ## Support
 
@@ -29,20 +32,23 @@ exact per-model breakdown.
 
 ## Getting the weights
 
-Each model has its own id and weight variable - none of the three are
-auto-fetched, so weights always have to be provided explicitly:
+Each model has its own id and weight variable. Chronos-2, FinCast and Kronos
+are not auto-fetched; TimesFM-3 is (`brain pull google/timesfm-3.0-pytorch`),
+since its weights are ungated - see its own page for the licensing note that
+still applies before using them:
 
 | Model | Model id | Weights |
 |---|---|---|
 | Chronos-2 | `brain/chronos2` | `BRAIN_CHRONOS2` |
 | FinCast | `brain/fincast` | `BRAIN_FINCAST` |
 | Kronos | `brain/kronos` | `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` |
+| TimesFM-3 | `brain/timesfm3` | `BRAIN_TIMESFM3` |
 
 See each model's page for its exact import command.
 
 ## Running it
 
-`brain forecast` has four subcommands, shared across all three models:
+`brain forecast` has four subcommands, shared across all four models:
 
 - **`compare`** - run a backtest scenario battery against statistical
   baselines (and against any foundation models you point it at). This is
@@ -50,7 +56,7 @@ See each model's page for its exact import command.
   fails if a model doesn't even beat a random-walk baseline.
   ```bash
   brain forecast compare --windows 24 --seed 1337 --html report.html \
-    [--chronos2 <weights>] [--fincast <weights>] \
+    [--chronos2 <weights>] [--fincast <weights>] [--timesfm3 <weights>] \
     [--kronos-tokenizer <dir> --kronos-decoder <dir>]
   ```
 - **`serve`** - start a resident forecast server (stdio by default, or a
@@ -58,12 +64,12 @@ See each model's page for its exact import command.
   you pass:
   ```bash
   brain forecast serve --socket /tmp/forecast.sock --max-connections 64 \
-    [--chronos2 <weights>] [--fincast <weights>] \
+    [--chronos2 <weights>] [--fincast <weights>] [--timesfm3 <weights>] \
     [--kronos-tokenizer <dir> --kronos-decoder <dir>]
   ```
 - **`import`** - convert an upstream checkpoint into the brain
-  `.safetensors` format Chronos-2 and FinCast serve from (see their pages
-  for the exact form).
+  `.safetensors` format Chronos-2, FinCast and TimesFM-3 serve from (see
+  their pages for the exact form).
 - **`finetune`** - Kronos-only; see [its page](kronos.md) and
   [Fine-tuning a forecaster](../training/forecast-finetune.md).
 
@@ -71,10 +77,10 @@ Every resident exposes one `forecast` D-Bus action: input blob `context`
 (a raw f32 series with its shape given in the request metadata), parameter
 `horizon`, output blob `forecast` (shape and kind described in the response
 metadata). It is gated on the corresponding model's weight variable(s)
-being set. A shared reference client covers all three:
+being set. A shared reference client covers all four:
 
 ```bash
-python3 examples/forecast/forecast_client.py --model brain/chronos2|brain/fincast|brain/kronos
+python3 examples/forecast/forecast_client.py --model brain/chronos2|brain/fincast|brain/kronos|brain/timesfm3
 ```
 
 See [`examples/forecast/README.md`](../../examples/forecast/README.md) for
@@ -91,10 +97,14 @@ full runnable invocations per model.
 
 ## Hardware and limits
 
-- None of the three models have an HTTP route today - only the `brain
+- None of the four models have an HTTP route today - only the `brain
   forecast` CLI and the `forecast` D-Bus action.
 - Serving handles requests sequentially; there is no batched forward pass
   across multiple in-flight forecast requests yet.
 - Chronos-2 and FinCast are placed on an NPU automatically when one is
   available and budgeted; Kronos runs its autoregressive rollout on CPU/GPU
-  by default and is NPU-eligible via a cached rollout path.
+  by default and is NPU-eligible via a cached rollout path; TimesFM-3 runs on
+  CPU/GPU only.
+- TimesFM-3's D-Bus/CLI-`predict` surface carries one series only - its
+  native multivariate/covariate forecasting needs the library API (see its
+  own page).

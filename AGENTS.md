@@ -682,7 +682,13 @@ fast and scalable kernel - not a naive one.
 16. **FinCast** (`crates/fincast`) - TimesFM-style patched decoder with a sparse
     top-2 MoE and a probabilistic-quantile head. Imported exactly, parity-gated.
     *(Reference is research/educational use only.)*
-    All three sit behind the model-agnostic `forecast::ForecastModel` seam;
+17. **TimesFM-3** (`crates/timesfm3`) - stacked mixing transformer with BOTH
+    sequence (causal) and cross-variate (non-causal) attention, CPM iterative
+    RevIN, linear detrending, forecast stitching. Natively multivariate:
+    target + past-only + known-future covariates all attend to each other in
+    one forward pass. Imported exactly, parity-gated against the real
+    checkpoint. *(Weights are non-commercial-licensed; see its own page.)*
+    All four sit behind the model-agnostic `forecast::ForecastModel` seam;
     `crates/fcbench` holds baselines + the rolling-origin backtester.
     `brain forecast {compare,serve,import,finetune}`.
 
@@ -819,7 +825,7 @@ front-end to depend on.
 | `qwen3asr` | Whisper-style + Nemotron 3.5 FastConformer streaming ASR |
 | `qwen3omnimoe` / `qwen3vl` / `fastvlm` / `moondream3` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 - see `docs/models/vlm.md` for the latter three |
 | `deepseek2ocr` / `deepseek2` / `sam1` | DeepSeek-OCR: the composite (DeepEncoder + splice + decoder, `import`/`caps` incl. the served `generate`); its DeepSeek-V2-family MoE decoder; the SAM-1 ViT-B tower the DeepEncoder is built on |
-| `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` | forecasting seam, backtester, three imported models |
+| `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` / `timesfm3` | forecasting seam, backtester, four imported models |
 | `wm-core` / `diamond` / `genieredux` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |
 
 ### Deployment / IO
@@ -909,7 +915,7 @@ front-end to depend on.
 | Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,clip_bpe,qwen_tokenizer,loader,binio,rng}.rs` |
 | TTS: guide / acceleration | `docs/models/qwen3tts/{readme,acceleration}.md`; `crates/{qwen3tts,mimi,ecapatdnn,audio}`, `crates/cli/src/{tts_cli,tts_serve}.rs` |
 | **ASR (speech-to-text)**: status / serving / perf | `.agents/roadmap/asr.md`; `crates/{nemotronasr,qwen3asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `examples/asr/` |
-| Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast}/status.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast}`, `crates/cli/src/forecast_cli.rs` |
+| Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast,timesfm3}.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast,timesfm3}`, `crates/cli/src/forecast_cli.rs` |
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/{wm-core,wm-display,diamond,genieredux}`, `crates/cli/src/wm_cli.rs` |
 | Z-Image / diffusion stack | `docs/models/s3dit/{readme,status}.md`; `crates/{s3dit,dit,diffusion,vae}` |
 | FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/goldens/flux2_dump_reference.py` |

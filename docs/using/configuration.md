@@ -101,6 +101,7 @@ served, with no error.
 | `BRAIN_DEEPSEEK_OCR_DIR` | DeepSeek-OCR document image → text/markdown (CPU-resident, ~22 GiB) | dir holding `mmproj-DeepSeek-OCR-Q8_0.gguf` + `DeepSeek-OCR-Q8_0.gguf` |
 | `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
 | `BRAIN_FINCAST` | FinCast forecasting | weights |
+| `BRAIN_TIMESFM3` | TimesFM-3 forecasting (natively multivariate; target-only over this served path). `brain pull google/timesfm-3.0-pytorch` fetches the checkpoint, but no caller sets this variable for you yet - point it at the fetched directory (or an imported `.safetensors`) yourself | weights |
 | `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting. Auto-fetched from `NeoQuasar/Kronos-Tokenizer-base` + `NeoQuasar/Kronos-base` - one model, two upstream repos - so both are normally unset | the two checkpoint dirs (the decoder also accepts a `.safetensors` fine-tune file) |
 | `BRAIN_KRONOS_ARGMAX` | force Kronos's deterministic modal rollout (argmax over the token distribution) instead of nucleus sampling: one reproducible path, N times cheaper. Set by `brain forecast predict --samples 1` | `0` (sample) |
 | `BRAIN_QWEN3TTS_WEIGHTS` (+ `BRAIN_QWEN3TTS_CKPT`) | Qwen3-TTS `speak` | brain-format weights dir (+ HF checkpoint dir for config/tokenizer) |

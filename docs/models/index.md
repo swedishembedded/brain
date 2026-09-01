@@ -95,6 +95,7 @@ named on the model's own page (see
 | [`chronos2`](chronos2.md) | probabilistic time-series forecasting | [x] | | |
 | [`fincast`](fincast.md) | probabilistic time-series forecasting | [x] | | |
 | [`kronos`](kronos.md) | OHLCV bar forecasting | [x] | [x] | [x] |
+| [`timesfm3`](timesfm3.md) | natively multivariate probabilistic forecasting | [x] | | |
 
 ## World models and control
 
