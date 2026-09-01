@@ -305,12 +305,42 @@ clippy, all green. Commit `ca4b6c00`.
 
 ---
 
+## M1.1's scope, recalibrated against an exhaustive call-site map
+
+Before touching `select.rs`, every call site making a capability/shape-gated
+kernel choice for the six planned families (attention, paged attention,
+softmax, conv2d, embed, MoE expert linear) was mapped exhaustively. The
+finding: **not all six fit `select.rs`'s pure `candidates(op, shape, caps) ->
+Vec<KernelVariant>` signature equally well**, and forcing a family that
+doesn't fit produces a wrong abstraction - exactly what this campaign's own
+goal ("minimize even the chance of using the wrong kernel") argues against.
+Per-family verdict:
+
+| Family | Verdict | Why |
+|---|---|---|
+| **Softmax** | Full fit, do first | Structurally identical to `Op::MaxAbsRow` (`WorkgroupPerOutput`/`Reference`, capability-only, no shape gate). Only two sites (`wan`, `ltxv`) duplicate the same rule; every other attention family dispatches an ungated fixed kernel - a missed win, not a bug, and the easiest, lowest-risk migration. |
+| **Paged attention** | Full fit, high value | The scores half is exactly `Op::MaxAbsRow`'s shape too. Real bugs found along the way: `qwen3::serve`'s `kv_int8` branch never checks `caps.numeric.int8_dot` (unlike its own `weights_int8`/`w8_on` sibling, which does); `qwen35`/`qwen35moe` never register or reach the `workgroup_reductions`-gated cooperative scores kernel `qwen3::serve` gets, with no marker of the absence (the `Option<usize>` pattern MatMul/Conv1d use for "caller didn't register this" is missing here). |
+| **Conv2d** | Partial fit | Two independent, structurally different decision trees exist (`vision::blocks::Conv` - env-var/shape/registration-driven, no `DeviceCaps` read anywhere; `vae::blocks::Builder::conv_s` - capability + shape gated, a genuine Conv1d analogue). Scope `Op::Conv2d` to the `vae::blocks` tree only; record `vision::blocks`' tree as explicitly out of scope rather than force-fitting it. |
+| **MoE expert linear** | Partial fit | The dtype/quant tier (F32/BF16/F16 vs I8 vs Q4) matches `Op::MatMul`'s `Dtype` arm exactly, including the same missing-gate bug: `qwen35`/`qwen35moe`'s int8-expert path never checks `caps.numeric.int8_dot`. The dense-loop-vs-compact-vs-decode-sparse policy does NOT fit - it is host-synchronizing (a mid-layer `g.read` of routed rows) and data-dependent, not a static device-capability decision, and its policy already differs by design between models (glmdsa always compacts; qwen35moe only at `n==1`). Scope `Op::MoeExpertLinear` to the dtype/capability axis; leave the compaction policy as an explicit model-level decision, unmigrated. |
+| **Attention** (dense/GQA flash) | Real debt, highest risk | The actual ladder (`flash_bidir_variant`/`flash_cross_supported`/`gqa_attn_sublayer_fwd`) is already centralized in `model::block`. The bug is the OUTER gate deciding whether to even ask the ladder: `wan::block::attn_mode`, `lfm2::Model::flash_selectable`, `sdxlunet`'s `self.coop`, and `ltxv::block::flash_self_attn`/`flash_cross_attn` each reimplement a *different* subset of the same check (`workgroup_reductions` alone; plus "ladder beat baseline"; plus "not training"; plus "head_dim <= 128") - lesson #78's exact shape ("a selection seam only reaches callers that opt in"), just for a gate instead of a kernel. Needs its own careful design pass, done last and separately, not folded into this milestone's commit. |
+| **Embed** | Out of scope | Barely a selection problem - mostly dtype-only, and the one real device-capability input (`gpu.max_storage_binding_bytes()`, a byte *limit*, not a boolean/threshold) doesn't map onto `OpShape` cleanly. The one real bug found (`gpt2` dispatches a bare `EMBED` with no vocab tiling at all, unlike every other model, "safe" only because its vocab is small enough not to hit the binding-size failure `qwen3::model.rs` already documents fixing) is a one-line fix unrelated to a new `Op` variant - tracked separately, not as part of the selector-widening work. |
+
+So M1.1 lands as: **Softmax → Paged attention → Conv2d (`vae::blocks` only) →
+MoE (dtype axis only) →** the gpt2 embed-tiling fix (unrelated one-liner, but
+found in the same audit) **→** the Attention outer-gate consolidation last,
+as its own carefully-scoped piece of work. This is more commits than the
+original plan's "one per op family" implied, because two of the six
+"families" turned out to be two decisions each (fit vs no-fit).
+
+---
+
 ## Not yet done
 
-Phase 0 is closed. Phases 1-8 remain, as structured above - Phase 2 (fused
-paged attention) is next by measured priority per M0.2's real numbers, not
-merely the audit's architectural inference. Track sub-milestone status
-against the approved plan; update this section as each phase closes,
-recording the measurement that proved it - a number nothing checks is a
-number that silently goes stale (`AGENTS.md`'s own rule, restated here
-because a multi-phase campaign is exactly where it erodes).
+Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
+Phases 2-8 remain, as structured in the plan - Phase 2 (fused paged
+attention) is next by measured priority per M0.2's real numbers, not merely
+the audit's architectural inference. Track sub-milestone status against the
+approved plan; update this section as each phase closes, recording the
+measurement that proved it - a number nothing checks is a number that
+silently goes stale (`AGENTS.md`'s own rule, restated here because a
+multi-phase campaign is exactly where it erodes).
