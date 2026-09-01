@@ -338,7 +338,7 @@ suite green (22 real tests, including `kv_step_matches_full_recompute`,
 warnings on `cargo build`/`cargo clippy -p brain-gpt2 --all-targets`. Does not
 touch `crates/backend-api/src/select.rs`.
 
-### M1.1's paged-attention milestone - `Op::PagedAttention`, the `kv_int8` gate fix, and a second recalibration
+### M1.1's paged-attention milestone - `Op::PagedAttention`, a killed `kv_int8` "fix", and a second recalibration
 
 `Op::PagedAttention` lands with exactly the shape the table below predicted:
 `WorkgroupPerOutput` (`paged_decode_scores_wg`) vs `Reference`
@@ -346,28 +346,52 @@ touch `crates/backend-api/src/select.rs`.
 MaxAbsRow`'s shape verbatim. The one addition the table did not anticipate:
 the INT8 KV tier (`paged_decode_scores_i8_batched`) is a THIRD physical
 kernel with no int8-cooperative sibling at all, so it needed its own
-`candidates()` arm (`Dtype::I8 | Dtype::Q4 => vec![PackedInt8]`) rather than
-inheriting `Op::MaxAbsRow`'s arm - reusing that arm verbatim would have let
-an I8-tagged shape fall through to `Reference`'s physical kernel
-(`paged_decode_scores_batched`, which cannot read a packed pool) the moment
-`WorkgroupPerOutput` got filtered out for lacking `int8_dot`. TDD: the new
-test (`paged_attention_scores_is_cooperative_at_every_shape_and_i8_requires_
-the_capability`) was written first and failed to compile before the variant
-existed. Commit `343a1019`.
+`candidates()` arm rather than inheriting `Op::MaxAbsRow`'s - reusing that
+arm verbatim would have let an I8-tagged shape fall through to
+`Reference`'s F32 physical kernel (which cannot read a packed pool) the
+moment `WorkgroupPerOutput` got filtered out for lacking `int8_dot`. The
+first pass at that arm mapped I8/Q4 to `KernelVariant::PackedInt8` (which
+`requires()` unconditionally demands `int8_dot` for) - wrong, caught by
+re-reading the actual kernel source per `kernels.md` B rather than trusting
+the arm's own first draft: `paged_decode_scores_i8_batched` dequantizes its
+pool with plain scalar WGSL bit-unpacking, no `dot4I8Packed` call anywhere,
+and its header says `@cpu yes, @gpu yes` - exactly as portable as the
+float `Reference` kernel beside it, unlike `Op::MatMul`'s genuinely
+DP4A-bound `matmul_i8*` family that `PackedInt8` actually models. Fixed to
+`Dtype::I8 | Dtype::Q4 => vec![Reference]` (its own physical kernel, no
+capability gate at all). TDD: the new test (renamed twice along the way to
+`paged_attention_scores_is_cooperative_at_every_shape_and_i8_never_gates_
+on_int8_dot`) was written first and failed to compile before the variant
+existed. Commits `343a1019` (the variant, with the wrong I8 arm) and
+`b5adece5` (the correction).
 
-**The first bug the table named was real and is fixed.** `qwen3::serve`'s
-`kv_int8` field was set from `from_map_with_gpu`'s raw constructor argument
-and never checked against `caps.numeric.int8_dot` before dispatching
-`paged_decode_scores_i8_batched`/`paged_decode_apply_i8_batched` (both need
-`dot4I8Packed`) - unlike the same file's `weights_int8`/`w8_on`, which
-already gated correctly. Fixed at the assignment site: `kv8_on = kv_int8 &&
-caps.numeric.int8_dot`, computed beside `w8_on`, with the same printed
-fallback and the same "stored field reflects the gated decision"
-contract `weights_int8()` already had. The shape assert (`head_dim % 4 ==
-0`) stays keyed on the raw request, not `kv8_on` - an explicit request
-against an unsupported checkpoint shape must still hard-fail regardless of
-device capability, only a missing CAPABILITY should degrade quietly. Full
-`brain-qwen3` suite green (98 tests), zero clippy warnings. Commit `7e76a29f`.
+**The first bug the table named does not exist as stated - caught only by
+checking the actual kernel source, not by trusting the claim.** The table
+said `qwen3::serve`'s `kv_int8` branch "never checks `caps.numeric.int8_dot`
+… unlike its own `weights_int8`/`w8_on` sibling, which does" and implied
+this was a live correctness bug because the int8 KV kernels "need
+`dot4I8Packed`" the way the packed GEMMs do. A first pass gated `kv_int8`
+exactly that way (commit `7e76a29f`) and it was WRONG: none of
+`paged_decode_scores_i8_batched`, `paged_decode_apply_i8_batched`, or
+`paged_kv_append_i8_clipped_batched` call `dot4I8Packed` anywhere - all
+three dequantize/pack with plain scalar WGSL bit manipulation and are
+`@cpu yes, @gpu yes` in the catalogue, exactly as portable as the fp32 KV
+path. `weights_int8`/`w8_on` gates because `matmul_i8_dyn`/`matmul_i8_gemv*`
+genuinely do call `dot4I8Packed`; `kv_int8` has no such kernel anywhere in
+its path, so there was never a capability precondition to check, and the
+original ungated code was correct. Gating it anyway was a real regression:
+on `backend-cpu` (`int8_dot: false`), a `kv_int8: true` request would
+silently degrade to fp32 KV even though the int8 KV kernels work correctly
+there - caught by 5 failing `BRAIN_DEVICE=cpu cargo test -p brain-qwen3
+--lib serve::` tests (exactly the run `make parity` exercises). Reverted
+in commit `3c690652`, restoring the original doc comment's claim ("int8 KV
+has no capability gate to fall back from") which was correct all along,
+with a note on why so the next reader does not re-derive the same false
+assumption. Full `brain-qwen3` suite green on both `BRAIN_DEVICE=cpu` (35
+`serve::` tests) and `BRAIN_DEVICE=gpu` (98 tests) after the revert. This
+is exactly decision 3's discipline turned on the campaign's OWN claim
+rather than an inherited one: re-derive from the tree, even when the
+claim is this milestone's own prompt, not a stale doc.
 
 `qwen3::serve` was also the ONLY real caller of this kernel family in the
 tree (`Ops::decode_scores_batched`'s dtype-axis façade in `crates/model/src/

@@ -3163,38 +3163,41 @@ overflow LOUD (a warning naming the actual count and the cap) - never let
 it degrade into silence, which is `lessons.md` §1's "a gate that never
 runs is worse than no gate" restated for measurement instead of correctness.
 
-## 82. A capability gate copied to one sibling flag is not copied to the next - the SAME file can have the pattern right next to the bug
+## 82. "Two flags request the same capability" is a claim about KERNELS, and it is only true if BOTH kernels actually call the intrinsic
 
-`qwen3::serve::Engine`'s `weights_int8` request has always been gated as
-`w8_on = weights_int8 && caps.numeric.int8_dot` before anything dispatches
-a packed-int8 GEMM, with a printed fallback to fp32 when the device lacks
-DP4A. `kv_int8` - the SAME file, the SAME constructor, requesting the
-SAME physical capability for a structurally parallel decision (packed-int8
-KV instead of packed-int8 weights) - was never checked against
-`caps.numeric.int8_dot` at all: it flowed straight from the constructor
-argument into buffer sizing and into `paged_decode_scores_i8_batched`/
-`paged_decode_apply_i8_batched`'s dispatch, both of which need
-`dot4I8Packed` exactly like the gated GEMMs do. A device without DP4A
-would have gotten wrong results (or a driver crash) from the KV path while
-its WEIGHT path correctly and silently fell back to fp32 - two flags with
-the identical hardware requirement, one gated and one not, in the same
-`impl` block.
+A call-site map claimed `qwen3::serve::Engine`'s `kv_int8` was `weights_
+int8`/`w8_on`'s ungated twin: both flags pick a packed-int8 tier, `w8_on`
+correctly gates on `caps.numeric.int8_dot` before dispatching a packed
+GEMM, `kv_int8` gated on nothing before dispatching `paged_decode_scores_
+i8_batched`/`paged_decode_apply_i8_batched` - so, by the pattern, it looked
+ungated and wrong. It was implemented that way (`kv8_on = kv_int8 &&
+caps.numeric.int8_dot`) before anyone opened the three kernels' actual
+WGSL source. None of them - `paged_decode_scores_i8_batched`,
+`paged_decode_apply_i8_batched`, `paged_kv_append_i8_clipped_batched` -
+call `dot4I8Packed` anywhere; all three dequantize/pack a byte with plain
+scalar shift-and-mask WGSL and are `@cpu yes, @gpu yes` in the catalogue,
+exactly as portable as an ordinary fp32 kernel. `weights_int8`/`w8_on`
+gates because `matmul_i8_dyn`/`matmul_i8_gemv*` genuinely DO call
+`dot4I8Packed`. The two flags share a name ("packed int8") and a shape
+("one gated, one not"), but not the physical requirement the shape implies
+- `kv_int8`'s original, ungated code was already correct.
 
-Nothing about this was subtle once looked for: `grep 'caps.numeric.int8_dot'`
-in the file finds exactly one hit, on `w8_on`. The bug survived because
-the two flags are named differently, own different call sites forty-odd
-lines apart, and nobody had reason to diff one gated flag's construction
-logic against a same-shaped, ungated sibling's - the campaign's own
-call-site map (`.agents/roadmap/kernel-performance.md`'s M1.1 recalibration)
-is what surfaced it, not a review of `serve.rs` in isolation.
+The "fix" was a real regression, not a no-op: on `backend-cpu` (`int8_dot:
+false`), a `kv_int8: true` request now silently degraded to fp32 KV even
+though the int8 KV kernels run correctly there. It was caught immediately
+by re-running the existing `BRAIN_DEVICE=cpu … --lib serve::` suite - 5
+tests failed - which is exactly the gate this class of change should
+always be checked against BEFORE trusting a pattern-matched diagnosis, not
+after.
 
-**Rule going forward**: when a device-capability gate is added for one flag,
-grep the same struct/module for every OTHER flag that requests the same
-physical capability (`int8_dot`, `workgroup_reductions`, `f16`/`bf16`, …) and
-confirm each one is gated the same way - a correct pattern sitting a few
-lines from an identical, ungated one is not evidence the ungated one is
-fine, it is the shape of exactly the bug this entry describes. This is
-`kernels.md` §A's "the most expensive mistake is not a slow kernel, it is a
-fast kernel nobody knew about" restated for a GATE instead of a kernel: the
-correct rule already existed in the same file, and the fix was applying it,
-not inventing it.
+**Rule going forward**: "flag A is gated on capability X, flag B looks
+structurally identical and requests the same tier, therefore B needs the
+same gate" is a hypothesis, not a finding - `kernels.md` §B's "read the
+contract before dispatching" applies just as much to READING an existing,
+working dispatch as to writing a new one. Before gating (or ungating) a
+flag to match a sibling, grep the KERNELS each one actually dispatches for
+the specific intrinsic/feature in question (`dot4I8Packed`, a subgroup op,
+an atomic) and check their `@cpu`/`@gpu` header - two kernels performing
+"the same operation" on "the same dtype" can still have completely
+different physical requirements, and only the kernel source settles which
+one a given flag actually needs.
