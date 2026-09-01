@@ -36,6 +36,7 @@ use serde_json::json;
 pub(crate) const CHRONOS2_MODEL: &str = "brain/chronos2";
 pub(crate) const FINCAST_MODEL: &str = "brain/fincast";
 pub(crate) const KRONOS_MODEL: &str = "brain/kronos";
+pub(crate) const TIMESFM3_MODEL: &str = "brain/timesfm3";
 
 // ============================ shared wire codec ============================
 
@@ -963,6 +964,99 @@ impl kronos::generate::CachedCores for KronosCachedNpu {
     }
 }
 
+// ================================= timesfm3 =================================
+
+/// TimesFM-3 behind the scheduler. `BRAIN_TIMESFM3` = the brain-format
+/// weights. Served over the SAME single-series wire contract every foundation
+/// model here uses (`context` blob, no covariates) - the model's native
+/// multivariate/covariate forecasting is reachable through the library API
+/// (`timesfm3::Timesfm3Forecaster::forecast` over a `forecast::Panel`) and the
+/// `brain forecast predict --timesfm3` CLI path, but the shared `Run` wire
+/// protocol here has no way to carry more than one named series, so a served
+/// request is always target-only. CPU/GPU only, like kronos above - no NPU
+/// export for this model yet.
+pub struct Timesfm3Resident {
+    path: String,
+}
+
+impl Timesfm3Resident {
+    pub fn from_env() -> Option<Timesfm3Resident> {
+        std::env::var("BRAIN_TIMESFM3").ok().filter(|p| !p.is_empty()).map(|path| Timesfm3Resident { path })
+    }
+    /// Explicit `.safetensors` path (the `brain perf` target and non-env callers).
+    pub fn new(path: &str) -> Timesfm3Resident {
+        Timesfm3Resident { path: path.to_string() }
+    }
+    fn spec() -> ActionSpec {
+        base_forecast_spec("univariate forecast (TimesFM-3, target-only over this wire); forecast blob is [horizon, 9] (9 native quantiles)")
+    }
+}
+
+/// The static (weights-free) TimesFM-3 manifest - see [`chronos2_manifest`].
+pub(crate) fn timesfm3_manifest() -> Manifest {
+    Manifest::new(TIMESFM3_MODEL, "time-series forecasting (TimesFM-3); 9 native quantiles, univariate over this wire", vec![Timesfm3Resident::spec()])
+}
+
+impl ResidentModel for Timesfm3Resident {
+    fn manifest(&self) -> Manifest {
+        timesfm3_manifest()
+    }
+    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(TIMESFM3_MODEL, format!("h{}", horizon_of(inv, 64)))
+    }
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        let r = file_ram(&self.path);
+        MemCost::new(r, r)
+    }
+    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        if let Device::Gpu(i) = device {
+            std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
+        }
+        let forecaster = timesfm3::Timesfm3Forecaster::load(&self.path)?;
+        Ok(Box::new(Timesfm3Instance { forecaster }))
+    }
+}
+
+struct Timesfm3Instance {
+    forecaster: timesfm3::Timesfm3Forecaster,
+}
+
+impl Instance for Timesfm3Instance {
+    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let (context, _shape) = decode_f32(inv, "context")?;
+        let horizon = horizon_of(inv, 64);
+        let cfg = self.forecaster.config();
+        // The context must be a multiple of the patch length; a served request
+        // over an arbitrary-length series is truncated to its most recent
+        // patch-aligned tail rather than rejected (left-padding to a boundary
+        // is a ledgered gap, same as the CLI predict path).
+        let patch = cfg.input_patch_len;
+        let n = (context.len() / patch).max(1) * patch;
+        let ctx = context[context.len().saturating_sub(n)..].to_vec();
+        let levels = cfg.quantile_levels.clone();
+
+        let item = forecast::Item::new("series", vec![forecast::Variate::target("target", ctx)]);
+        let panel = forecast::Panel::single("", "series", item.variates);
+        let spec = forecast::ForecastSpec { horizon, quantile_levels: levels.clone(), ..forecast::ForecastSpec::default() };
+        let out = forecast::ForecastModel::forecast(&self.forecaster, &panel, &spec).map_err(|e| format!("timesfm3: {}", e.message))?;
+        let tf = out.targets.into_iter().next().ok_or_else(|| "timesfm3: no forecast produced".to_string())?;
+        let q = tf.quantiles.ok_or_else(|| "timesfm3: model returned no quantiles".to_string())?;
+        Ok(Outcome::new()
+            .set("model", json!(TIMESFM3_MODEL))
+            .set("horizon", json!(horizon))
+            .set("device", json!("gpu_core"))
+            // "quantiles_hq" (horizon-major, [horizon, levels]), deliberately
+            // distinct from chronos2's "quantiles" kind - that one is the raw
+            // NATIVE [levels, horizon] (quantile-major) array from the
+            // low-level model, bypassing forecast::Block entirely, while this
+            // goes through the generic ForecastModel adapter and inherits
+            // Block's own [horizon, n_levels] convention. Same string, two
+            // shapes, would silently transpose a reader expecting one for
+            // the other.
+            .blob("forecast", encode_forecast(&q.data, q.shape, "quantiles_hq", &levels)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1068,7 @@ mod tests {
             Chronos2Resident { path: String::new() }.manifest(),
             FincastResident { path: String::new() }.manifest(),
             KronosResident { tokenizer: String::new(), decoder: String::new() }.manifest(),
+            Timesfm3Resident { path: String::new() }.manifest(),
         ];
         for m in &specs {
             let a = m.actions.iter().find(|a| a.name == "forecast").expect("has a forecast action");

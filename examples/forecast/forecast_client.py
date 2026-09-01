@@ -6,23 +6,28 @@
 
 Sends a context series to `brain serve --dbus` as a sealed memfd and reads the
 forecast distribution back as a file descriptor — the same generic `Run` + fd
-path every brain model uses. Works for all three
+path every brain model uses. Works for all four
 forecasting foundation models:
 
   chronos2  probabilistic universal forecaster  -> [levels, horizon] quantiles
   fincast   financial forecaster                 -> [horizon, 1+levels] (col 0 mean)
   kronos    autoregressive OHLCV forecaster      -> [horizon, feat] sample bars
+  timesfm3  natively multivariate forecaster     -> [horizon, 9] quantiles (target-only
+            over this wire - the model's own past/known-future covariates need the
+            library API or `brain forecast predict`, not this generic single-series path)
 
 The wire format is raw little-endian float32 with an explicit `shape` in the
 blob meta — no per-model protocol.
 
 Examples:
   # chronos2 (needs `BRAIN_CHRONOS2=... brain serve --dbus` running):
-  python3 examples/forecast/forecast_client.py --model chronos2 --horizon 64
+  python3 examples/forecast/forecast_client.py --model brain/chronos2 --horizon 64
   # fincast on the daily bucket:
-  python3 examples/forecast/forecast_client.py --model fincast --freq 0
+  python3 examples/forecast/forecast_client.py --model brain/fincast --freq 0
   # kronos on synthetic OHLCV:
-  python3 examples/forecast/forecast_client.py --model kronos --horizon 32
+  python3 examples/forecast/forecast_client.py --model brain/kronos --horizon 32
+  # timesfm3 (needs `BRAIN_TIMESFM3=... brain serve --dbus` running):
+  python3 examples/forecast/forecast_client.py --model brain/timesfm3 --horizon 64
 """
 from __future__ import annotations
 
@@ -55,7 +60,7 @@ def synth_series(n: int) -> list[float]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="brain/chronos2", choices=["brain/chronos2", "brain/fincast", "brain/kronos", "brain/mock"],
+    ap.add_argument("--model", default="brain/chronos2", choices=["brain/chronos2", "brain/fincast", "brain/kronos", "brain/timesfm3", "brain/mock"],
                      help="a forecast-capable model (brain/mock needs no weights — a quick, deterministic check)")
     ap.add_argument("--horizon", type=int, default=64, help="steps to forecast")
     ap.add_argument("--context", type=int, default=256, help="synthetic context length (ignored with --series)")
@@ -86,6 +91,7 @@ def main() -> None:
         if args.model not in served:
             env = {"brain/chronos2": "BRAIN_CHRONOS2=<weights>", "brain/fincast": "BRAIN_FINCAST=<weights>",
                    "brain/kronos": "BRAIN_KRONOS_TOKENIZER=<dir> BRAIN_KRONOS_DECODER=<dir>",
+                   "brain/timesfm3": "BRAIN_TIMESFM3=<weights>",
                    "brain/mock": "BRAIN_MOCK=1"}[args.model]
             skip(f"model {args.model!r} is not served (served: {served}); start it with: {env} brain serve --dbus")
         out = brain.run(
@@ -111,6 +117,11 @@ def main() -> None:
         h, no = fshape
         path = [data[t * no + 0] for t in range(h)]
         label = "mean"
+    elif kind == "quantiles_hq" and levels:  # timesfm3: [horizon, Q] horizon-major -> median column
+        h, q = fshape
+        j = min(range(len(levels)), key=lambda k: abs(levels[k] - 0.5))
+        path = [data[t * q + j] for t in range(h)]
+        label = "median"
     else:  # kronos samples: [horizon, feat] -> close column (index 3)
         h, f = fshape
         col = min(3, f - 1)

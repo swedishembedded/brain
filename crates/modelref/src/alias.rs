@@ -39,6 +39,7 @@ const ROWS: &[Row] = &[
     Row { legacy: "chronos2", canonical: "brain/chronos2" },
     Row { legacy: "fincast", canonical: "brain/fincast" },
     Row { legacy: "kronos", canonical: "brain/kronos" },
+    Row { legacy: "timesfm3", canonical: "brain/timesfm3" },
     Row { legacy: "gpt", canonical: "brain/gpt" },
     Row { legacy: "glm", canonical: "brain/glm" },
     // The imaging stack. These shipped on the p40 branch under bare names

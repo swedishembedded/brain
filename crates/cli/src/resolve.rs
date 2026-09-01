@@ -119,6 +119,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("chronos2", "brain/chronos2"),
     ("fincast", "brain/fincast"),
     ("kronos", "brain/kronos"),
+    ("timesfm3", "brain/timesfm3"),
     ("minimaxmusic3", "brain/minimaxmusic3"),
     ("cosyvoice", "brain/cosyvoice"),
     // `sdxlunet`/`controlnet` chose no CLI shortcut at all (only `brain do

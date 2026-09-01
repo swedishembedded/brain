@@ -154,6 +154,11 @@ pub fn models() -> Vec<ModelEntry> {
         provider: || Err("kronos has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set".to_string()),
         resident: catalog::resident!(crate::resident_forecast::KronosResident::from_env),
     });
+    entries.push(ModelEntry {
+        manifest: crate::resident_forecast::timesfm3_manifest,
+        provider: || Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set".to_string()),
+        resident: catalog::resident!(crate::resident_forecast::Timesfm3Resident::from_env),
+    });
     // No-weights utility models, listed by `brain caps` but served (over
     // D-Bus/HTTP) directly from `resident.rs::build_executor`, which pushes
     // them as stateless residents itself rather than through this list - 

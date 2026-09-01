@@ -141,6 +141,7 @@ targets (--target):
                                      samples from BRAIN_FORECAST_HORIZON/BRAIN_FORECAST_SAMPLES)
   chronos2:<weights>                 Chronos-2 universal forecaster (unit: forecast)
   fincast:<weights>                  FinCast financial forecaster (unit: forecast)
+  timesfm3:<weights>                  TimesFM-3 forecaster (unit: forecast)
   flux2[:<W>x<H>x<steps>[:<prec>]]   FLUX.2 Klein via the residency executor (unit: denoise_step;
                                      weights from BRAIN_FLUX2_* env; default 512x512x4:fp32;
                                      prec = fp32|int8; batches concurrent same-key requests)
@@ -635,6 +636,9 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(rest) = spec.strip_prefix("fincast:") {
         return build_fincast(rest);
     }
+    if let Some(rest) = spec.strip_prefix("timesfm3:") {
+        return build_timesfm3(rest);
+    }
     if spec == "flux2" {
         return build_flux2("");
     }
@@ -709,7 +713,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
          (expected 'qwen-synth:<L>x<D>x<H>[xV][:i8w][:kvf32]', 'qwen:<weights>[:i8w][:kvf32]', \
          'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
-         'chronos2:<weights>', 'fincast:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
+         'chronos2:<weights>', 'fincast:<weights>', 'timesfm3:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
          'wan[:<frames>x<W>x<H>x<steps>]', 'ltxv[:<frames>x<W>x<H>x<steps>]', \
          'gpt:<weights>', 'glm:<weights>', 'qwen35-stream:<checkpoint-dir>:<tokenizer.json>', \
          'yolo:<weights>', 'depth:<weights>', \
@@ -979,6 +983,22 @@ fn build_fincast(path: &str) -> Result<Box<dyn PerfTarget>, String> {
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::FINCAST_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
+}
+
+/// `timesfm3:<weights>` - TimesFM-3 behind the residency executor (same
+/// measurement path as `fincast:`; `input_artifacts` = context length).
+fn build_timesfm3(path: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(path).exists() {
+        return Err(format!("timesfm3 weights not found: {path}"));
+    }
+    let (horizon, _samples) = forecast_env();
+    let exec = forecast_executor(crate::resident_forecast::Timesfm3Resident::new(path));
+    let info = vec![
+        ("weights".to_string(), serde_json::json!(path)),
+        ("horizon".to_string(), serde_json::json!(horizon)),
+        ("engine".to_string(), serde_json::json!("residency-executor")),
+    ];
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::TIMESFM3_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
 }
 
 /// `flux2[:<W>x<H>x<steps>[:<precision>]]` - FLUX.2 Klein (klein-4b, weights from the
