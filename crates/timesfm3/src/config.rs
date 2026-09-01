@@ -159,6 +159,54 @@ impl Timesfm3Config {
         (2 * self.input_patch_len).min(self.output_patch_len)
     }
 
+    /// Parse from the CHECKPOINT'S OWN `config.json` (the upstream nested
+    /// schema HF `from_pretrained` reads), not brain's flat container schema
+    /// - see [`Self::from_json`] for that one. Upstream's shape:
+    /// `{input_patch_len, output_patch_len, quantiles: [...], value_clip,
+    /// use_variate_attention, use_stitching, use_linear_detrending,
+    /// linear_detrending_threshold, use_iterative_cpm_revin,
+    /// use_frozen_running_stats, transformer_config: {num_layers,
+    /// transformer: {model_dims, hidden_dims, num_heads, max_variates}}}`.
+    /// `head_dim` is derived (`model_dims / num_heads`) - the upstream schema
+    /// has no such field. `max_context` (15360) is likewise absent from
+    /// upstream's config.json entirely (it is a forecaster-level constant in
+    /// the reference Python, not a checkpoint hyperparameter), so it is not
+    /// read here - callers needing a non-default max_context set it after.
+    pub fn from_hf_config_json(v: &serde_json::Value) -> Result<Timesfm3Config, String> {
+        let tc = &v["transformer_config"];
+        let t = &tc["transformer"];
+        let u = |val: &serde_json::Value, k: &str| -> Result<usize, String> {
+            val[k].as_u64().map(|n| n as usize).ok_or_else(|| format!("config.json: missing/invalid {k}"))
+        };
+        let num_heads = u(t, "num_heads")?;
+        let model_dims = u(t, "model_dims")?;
+        if num_heads == 0 || model_dims % num_heads != 0 {
+            return Err(format!("config.json: model_dims {model_dims} not divisible by num_heads {num_heads}"));
+        }
+        let num_quantiles = v["quantiles"].as_array().map(|a| a.len()).ok_or("config.json: missing quantiles array")?;
+        Ok(Timesfm3Config {
+            num_layers: u(tc, "num_layers")?,
+            model_dims,
+            hidden_dims: u(t, "hidden_dims")?,
+            num_heads,
+            head_dim: model_dims / num_heads,
+            rms_norm_eps: RMS_NORM_EPS,
+            input_patch_len: u(v, "input_patch_len")?,
+            output_patch_len: u(v, "output_patch_len")?,
+            num_quantiles,
+            max_variates: u(t, "max_variates").unwrap_or(32),
+            max_context: Timesfm3Config::default().max_context,
+            use_variate_attention: v["use_variate_attention"].as_bool().unwrap_or(true),
+            use_stitching: v["use_stitching"].as_bool().unwrap_or(true),
+            use_linear_detrending: v["use_linear_detrending"].as_bool().unwrap_or(true),
+            linear_detrending_threshold: v["linear_detrending_threshold"].as_f64().unwrap_or(0.5) as f32,
+            use_iterative_cpm_revin: v["use_iterative_cpm_revin"].as_bool().unwrap_or(true),
+            use_frozen_running_stats: v["use_frozen_running_stats"].as_bool().unwrap_or(false),
+            value_clip: v["value_clip"].as_f64().unwrap_or(1e20) as f32,
+        })
+    }
+
+    /// Parse from a brain container header (produced by [`Self::to_json`]).
     pub fn from_json(v: &serde_json::Value) -> Result<Timesfm3Config, String> {
         let u = |k: &str| -> Result<usize, String> {
             v[k].as_u64().map(|n| n as usize).ok_or_else(|| format!("missing/invalid {k}"))
@@ -318,6 +366,18 @@ mod tests {
         assert_eq!(c, back);
         let t = Timesfm3Config::tiny();
         assert_eq!(t, Timesfm3Config::from_json(&t.to_json()).unwrap());
+    }
+
+    /// The real checkpoint's own `config.json` (committed as a golden fixture
+    /// - a small, stable file, unlike the 1.3 GB checkpoint it describes)
+    /// parses to exactly `Timesfm3Config::default()`, proving the upstream
+    /// nested schema is read correctly and not just assumed.
+    #[test]
+    fn from_hf_config_json_matches_the_real_checkpoints_config() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/hf_config.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let c = Timesfm3Config::from_hf_config_json(&v).unwrap();
+        assert_eq!(c, Timesfm3Config::default());
     }
 
     #[test]

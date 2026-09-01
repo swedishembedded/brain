@@ -23,5 +23,6 @@
 //! architecture. The checkpoint is never committed to this repository.
 
 pub mod config;
+pub mod import;
 
 pub use config::{Timesfm3Config, Param, QUANTILES};
