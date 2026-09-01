@@ -49,9 +49,14 @@
 //!
 //! **Selection.** `Ops::matmul` is the one place a shape turns into a kernel
 //! choice: it builds a `select::OpShape` from the weight's own `(n, k)` and
-//! the call's `m`, asks `self.selector` (a `CachedSelector<DefaultSelector>`
-//! by default - the same static policy every other selector consumer in this
-//! workspace starts from), and `Self::bind` maps `(KernelVariant, Dtype)` to
+//! the call's `m`, asks `self.selector` (an `Arc<dyn KernelSelector>` -
+//! `CachedSelector<DefaultSelector>` by default, the same static policy every
+//! other selector consumer in this workspace starts from, but injectable via
+//! [`Ops::with_selector`] - see that constructor's doc comment for why a
+//! caller with a real per-device MEASURED policy, e.g. `qwen3::serve::
+//! Engine`'s tuned int8 GEMV/tile choice, needs this seam instead of building
+//! its own dispatch outside `Ops` entirely), and `Self::bind` maps
+//! `(KernelVariant, Dtype)` to
 //! the ONE kernel-name spelling this façade recognizes for that pair - the
 //! only place a kernel-name string literal appears outside `kname`'s own
 //! const definitions. Unlike `model::block::gemm_variant` (which lets each
@@ -93,6 +98,7 @@
 //! phase deliberately leaves for whoever needs it.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use gpu_core::select::{self, Dtype, KernelSelector, KernelVariant, Op, OpShape};
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
@@ -642,15 +648,38 @@ pub struct Ops {
     gpu: Gpu,
     caps: DeviceCaps,
     idx: HashMap<&'static str, usize>,
-    selector: Box<dyn KernelSelector>,
+    selector: Arc<dyn KernelSelector>,
 }
 
 impl Ops {
+    /// [`Ops::with_selector`] with the default policy
+    /// (`CachedSelector<DefaultSelector>`) - what every model crate except
+    /// `qwen3::serve` uses today.
+    ///
     /// Resolves every kernel name in [`REQUIRED_KERNELS`] via
     /// `Gpu::kernel_index` ONCE, here - never at dispatch time. A missing
     /// name is an `Err` immediately, not a panic three linears deep into a
     /// forward pass.
     pub fn new(gpu: Gpu) -> Result<Ops, String> {
+        Self::with_selector(gpu, Arc::new(select::CachedSelector::new(select::DefaultSelector)))
+    }
+
+    /// [`Ops::new`], but the kernel selector is the CALLER's, not a fixed
+    /// internal default.
+    ///
+    /// **Why this exists.** Before this constructor, `Ops::matmul` always
+    /// resolved through a hard-wired `CachedSelector<DefaultSelector>` with
+    /// no injection point - which is exactly why `qwen3::serve::Engine` kept
+    /// its own hand-rolled int8 GEMM dispatch (`Self::mm8`/`Self::tune_i8`)
+    /// entirely OUTSIDE this façade instead of calling `Ops::matmul`: its
+    /// `tuned_i8` selector is a REAL, per-device MEASURED policy
+    /// (`AutoTuner`+`FileTuneStore`), and routing through the old fixed
+    /// `Ops::new` would have silently discarded it in favour of the static
+    /// default. A caller with such a policy now hands it to `Ops` directly
+    /// (`Arc<dyn KernelSelector>` - `Arc`, not `Box`, so the same instance
+    /// can also be kept by the caller and reused for its own dispatch, the
+    /// way `qwen3::serve::Engine` does).
+    pub fn with_selector(gpu: Gpu, selector: Arc<dyn KernelSelector>) -> Result<Ops, String> {
         let caps = gpu.caps();
         let mut idx = HashMap::with_capacity(kname::ALL.len());
         for &name in kname::ALL {
@@ -664,7 +693,6 @@ impl Ops {
             })?;
             idx.insert(name, i);
         }
-        let selector: Box<dyn KernelSelector> = Box::new(select::CachedSelector::new(select::DefaultSelector));
         Ok(Ops { gpu, caps, idx, selector })
     }
 
@@ -1238,6 +1266,55 @@ impl Ops {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`Ops::with_selector`]'s whole reason to exist: `Ops::matmul` must
+    /// consult the INJECTED selector, not the fixed internal
+    /// `CachedSelector<DefaultSelector>` [`Ops::new`] builds. `Flip` is
+    /// constructed to disagree with `DefaultSelector` at this exact
+    /// `(op, shape, caps)` WHATEVER `testgpu::dev`'s real capabilities are
+    /// (deliberately not hard-coding a shape assumed to cross some
+    /// capability threshold - that would make the test's own correctness
+    /// depend on facts about the test backend it never asserts), so a kernel
+    /// index difference between the two `Ops` here can only come from the
+    /// selector actually being asked. Compares `Step::meta().kernel`
+    /// (queued, never submitted) rather than executing the dispatch - this
+    /// only needs to prove which kernel was CHOSEN, not that every
+    /// `KernelVariant` runs correctly on this backend.
+    #[test]
+    fn matmul_dispatches_via_the_injected_selector_not_the_fixed_default() {
+        struct Flip;
+        impl KernelSelector for Flip {
+            fn select(&self, op: Op, shape: OpShape, caps: &DeviceCaps) -> KernelVariant {
+                match select::DefaultSelector.select(op, shape, caps) {
+                    KernelVariant::Reference => KernelVariant::WorkgroupPerOutput,
+                    _ => KernelVariant::Reference,
+                }
+            }
+        }
+
+        let (m, n, k) = (4u32, 8u32, 8u32);
+        let w_h = vec![0f32; (n * k) as usize];
+
+        let dispatch = |ops: &Ops| -> usize {
+            let x = ops.gpu().storage((m * k) as u64);
+            let weight = Weight::upload(ops, &w_h, n as usize, k as usize, Dtype::F32);
+            let act = ops.act_f32(&x, 0, m, k);
+            let y = ops.gpu().storage((m * n) as u64);
+            let mut steps = Vec::new();
+            ops.matmul(&mut steps, &weight, &act, &y, 0);
+            steps[0].meta().expect("Ops::matmul's step carries facade meta").kernel
+        };
+
+        let ops_default = Ops::new(gpu_core::testgpu::dev(kernel_list())).expect("Ops::new");
+        let ops_flip = Ops::with_selector(gpu_core::testgpu::dev(kernel_list()), Arc::new(Flip)).expect("Ops::with_selector");
+
+        assert_ne!(
+            dispatch(&ops_default),
+            dispatch(&ops_flip),
+            "Ops::with_selector's injected selector must be consulted by Ops::matmul, not ignored \
+             in favour of Ops::new's fixed CachedSelector<DefaultSelector>"
+        );
+    }
 
     #[test]
     fn required_kernels_matches_kname_all() {
