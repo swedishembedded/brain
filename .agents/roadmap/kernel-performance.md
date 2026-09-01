@@ -303,6 +303,41 @@ numerics. Verified via `check_qwen35moe`/`check_qwen35moe_lora` gradcheck,
 `deepseek2`'s 8 finite-difference tests, and both crates' full suites +
 clippy, all green. Commit `ca4b6c00`.
 
+### M1.1's embed finding - `gpt2`'s untiled `EMBED` dispatch, tiled
+
+The bug M1.1's per-family verdict table named and scoped out as "a one-line
+fix unrelated to a new `Op` variant": `crates/gpt2/src/model.rs` dispatched a
+bare `EMBED` kernel against the whole `[vocab, d_model]` `tok.weight` table in
+one untiled, uncapability-checked dispatch, in both the batched
+`forward_steps` embed stage and the per-token `decode_at` incremental-decode
+embed. Every other decoder-LM in this repo (`qwen3`, `lfm2`, `t5encoder`)
+tiles this lookup via `model::block::vocab_tiles_on` + `EMBED_TILE`
+specifically because a large enough vocab table exceeds
+`max_storage_buffer_binding_size` and fails `create_bind_group` outright -
+`qwen3::model`'s own `embed_tiled` doc names the exact failure. `gpt2` was
+"safe" only because its vocab (`calculator`/`reverser`/`shakespeare_char`,
+all well under 100 tokens) has never been large enough to hit that limit, not
+because it was tiled.
+
+Ported `qwen3::model`'s `embed_tiled` pattern into `gpt2::model::Gpt`: a new
+`vocab_tiles`/`embed_tiled` helper pair binds `tok.weight` as vocab-tile
+sub-ranges via `step_sliced` + the already-shared `EMBED_TILE` kernel
+(registered in `gpt2`'s own `PIPELINES`), and both call sites (`forward_steps`
+and `decode_at`) now go through it. `pos.weight`'s embed (position table, not
+vocab-scale) is untouched. `vocab_tiles_on` degenerates to one `(0, vocab)`
+tile at every vocab size this crate ships, so the change is a no-op at
+current scale by construction - confirmed by an explicit before/after A/B (a
+throwaway example dumping an FNV-1a hash of a batched forward's full logits
+and of a 10-step incremental-decode's reconstructed logits over a fixed
+seed/config, run once against the pre-change tree via `git stash` and once
+against the post-change tree): both hashes matched bit-for-bit
+(`939e84c7ba51b31f` logits, `40c911b3e32d11e6` decode). Full `brain-gpt2` test
+suite green (22 real tests, including `kv_step_matches_full_recompute`,
+`cpu_register_equals_cpu_naive`, `dp_grad_parity_gpt`,
+`shard_forward_and_grad_parity_gpt`, and the `convergence` suite), zero
+warnings on `cargo build`/`cargo clippy -p brain-gpt2 --all-targets`. Does not
+touch `crates/backend-api/src/select.rs`.
+
 ---
 
 ## M1.1's scope, recalibrated against an exhaustive call-site map

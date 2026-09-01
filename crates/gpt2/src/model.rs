@@ -104,6 +104,12 @@ const KV_APPEND: usize = 40;
 const LAYERNORM_ROWS: usize = 41;
 const LN_STATS_ROWS: usize = 42;
 const LN_DX_ROWS: usize = 43;
+// Vocab-tiled embedding gather (`model::block::vocab_tiles_on` + this kernel):
+// each dispatch binds only a slice of `tok.weight`, so a `[vocab, d_model]`
+// table larger than the device's max storage-binding size can still be
+// gathered, the same pattern `qwen3::model`'s `embed_tiled` uses. Appended, so
+// every index above is unchanged.
+const EMBED_TILE: usize = 46;
 
 /// The LayerNorm family this model dispatches through `model::block`, which
 /// picks the coalesced variant per device (`backend_api::select`).
@@ -166,6 +172,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    ("embed_tile", kernels::EMBED_TILE),
 ];
 
 /// Pick the forward-linear GEMM kernel + its dispatch thread count for an
@@ -580,6 +587,46 @@ impl Gpt {
         self.ps.w(name)
     }
 
+    /// Vocab tiles for the token embedding (shared `model::block::vocab_tiles_on`,
+    /// the same helper `qwen3`/`lfm2`/`t5encoder` use for their own embed/head
+    /// tiling). Degenerates to a single `(0, vocab)` tile whenever `[vocab,
+    /// d_model]` already fits one storage binding, which is every vocab size
+    /// this crate currently ships (`calculator`/`reverser`/`shakespeare_char`).
+    fn vocab_tiles(&self) -> Vec<(u32, u32)> {
+        model::block::vocab_tiles_on(&self.gpu, self.cfg.vocab as u64, self.cfg.d_model as u64)
+    }
+
+    /// The token-embedding gather for `n` token rows (`tokens` -> `out[n,
+    /// d_model]`), as tiled steps.
+    ///
+    /// `tok.weight` is bound as SUB-RANGES (`step_sliced`), one dispatch per
+    /// vocab tile, because a single storage binding is capped at
+    /// `max_storage_buffer_binding_size` - a `[vocab, d_model]` table large
+    /// enough exceeds that on every backend, exactly the failure
+    /// `qwen3::model`'s `embed_tiled` documents fixing for its own decode
+    /// path. `EMBED_TILE` writes an output element only when its token falls
+    /// in the bound tile, and every token belongs to exactly one, so across
+    /// the tiles each element is written exactly once. This replaces the
+    /// previous unconditional single-dispatch `EMBED` call, which was "safe"
+    /// for gpt2 only because its vocab has so far stayed small enough not to
+    /// hit that limit, not because it was tiled.
+    fn embed_tiled(&self, tokens: &gpu_core::DeviceBuffer, out: &gpu_core::DeviceBuffer, n: u32) -> Vec<Step> {
+        let d = self.cfg.d_model;
+        let dw = d as u64;
+        self.vocab_tiles()
+            .into_iter()
+            .map(|(v0, cnt)| {
+                self.gpu.step_sliced(
+                    EMBED_TILE,
+                    &[tokens, self.w("tok.weight"), out],
+                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
+                    &[d, n, v0, cnt],
+                    n * d,
+                )
+            })
+            .collect()
+    }
+
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
         let c = &self.cfg;
         let n = b_use * t_use;
@@ -592,7 +639,7 @@ impl Gpt {
         // Token+positional embedding: only the embed stage; other stages receive
         // res[start] from the previous stage.
         if self.shard.embed {
-            s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
+            s.extend(self.embed_tiled(&self.tokens, &self.res[0], n));
             s.push(self.gpu.step(POS_ADD, &[&self.res[0], self.w("pos.weight")], &[n * d, d, t_use], n * d));
         }
 
@@ -920,7 +967,7 @@ impl Gpt {
         g.write(&dec.tok_id, &[token_id]);
         g.write(&dec.pos_id, &[pos]);
         let mut s: Vec<Step> = Vec::new();
-        s.push(g.step(EMBED, &[&dec.tok_id, w("tok.weight"), &dec.tok_e], &[d, 1], d));
+        s.extend(self.embed_tiled(&dec.tok_id, &dec.tok_e, 1));
         s.push(g.step(EMBED, &[&dec.pos_id, w("pos.weight"), &dec.pos_e], &[d, 1], d));
         s.push(g.step(ADD2, &[&dec.tok_e, &dec.pos_e, &dec.res[0]], &[d], d));
 
