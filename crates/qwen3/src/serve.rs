@@ -100,6 +100,11 @@ const CONCAT_SPLIT: usize = 31;
 // folds the fp32 paged KV append into the same pass.
 const QKNORM_ROPE_FUSED: usize = 32;
 const QKNORM_ROPE_APPEND_FUSED: usize = 33;
+// M4.3: RMSNorm fused with its own immediately-following int8 activation
+// quant (see `rmsnorm_quant_fused.wgsl`'s own header) - one dispatch instead
+// of `rms` -> `max_abs_row` -> `quant_pack`, never materialising the fp32
+// intermediate at all on an all-int8-weight engine.
+const RMSNORM_QUANT_FUSED: usize = 34;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -136,6 +141,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("concat_split", kernels::CONCAT_SPLIT),
     ("qknorm_rope_fused", kernels::QKNORM_ROPE_FUSED),
     ("qknorm_rope_append_fused", kernels::QKNORM_ROPE_APPEND_FUSED),
+    ("rmsnorm_quant_fused", kernels::RMSNORM_QUANT_FUSED),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -1301,6 +1307,44 @@ impl Engine {
     }
     // qwen3-serve-manual-gemm-dispatch END
 
+    /// M4.3: `Self::rms` immediately followed by `Self::quant_once` over its
+    /// OWN output (`ln1`->`xn1`, `ln2`->`xn2`) collapsed into one dispatch on
+    /// an all-int8-weight engine: `Self::linear`'s `Weight::I8` arm never
+    /// reads the `x` parameter it is handed (it reads only the pre-quantized
+    /// `i8_scratch`), and `w8_on` is a single engine-wide tier (`Engine::
+    /// from_map_with_gpu`'s `want`/`w8_on`), so whenever `self.i8_scratch` is
+    /// `Some` the fp32 value `rms` would have written to `out` has NO reader
+    /// at all - `max_abs_row` then `quant_pack` re-read it twice more purely
+    /// to throw it away. `rmsnorm_quant_fused.wgsl` folds the abs-max
+    /// reduction into the same cooperative pass `rmsnorm_rows` already runs
+    /// and never writes the fp32 row - see its own header for the bit-
+    /// identity argument (same expression, same operand order, recomputed
+    /// rather than cached in a runtime-sized register array).
+    ///
+    /// Falls back to the unfused `Self::rms` + `Self::quant_once` pair - `out`
+    /// IS written there, matching every existing reader's contract - on an
+    /// all-fp32 engine (`self.i8_scratch` is `None`, so `quant_once` is
+    /// already a no-op and `out` is the only real result) or a device without
+    /// `workgroup_reductions` (the fused kernel carries 3 barriers, gated
+    /// exactly like `Self::rms`'s own cooperative arm and `Self::
+    /// qk_norm_rope`'s fused pair).
+    fn rms_quant(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32) {
+        match &self.i8_scratch {
+            Some(scratch) if self.caps.workgroup_reductions => {
+                s.push(self.gpu.step(
+                    RMSNORM_QUANT_FUSED,
+                    &[x, w, &scratch.sx, scratch.xq_for(d)],
+                    &[d, rows, gpu_core::f(1e-6)],
+                    rows * 64,
+                ));
+            }
+            _ => {
+                s.push(self.rms(x, w, out, d, rows));
+                self.quant_once(s, out, d, rows);
+            }
+        }
+    }
+
     /// M4.2: fused QK-norm + RoPE, one dispatch over `x`'s `rows = b * heads`
     /// per-head rows (`heads` is `nh` for Q, `nkv` for K - the SAME
     /// flattening `Self::rms`'s own `b * nh` / `b * nkv` row counts already
@@ -1411,11 +1455,13 @@ impl Engine {
         }
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
-            s.push(self.rms(&sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b));
-            // One activation quant per distinct input (B7: `Self::
-            // quant_once`, a no-op on an all-fp32 engine), shared by every
-            // linear reading it (xn1 -> q/k/v).
-            self.quant_once(&mut s, &sc.xn1, d, b);
+            // M4.3: RMSNorm fused with its own activation quant on an
+            // all-int8-weight engine (`Self::rms_quant`) - `sc.xn1`'s fp32
+            // value has no reader once `Self::linear`'s `I8` arm ignores it,
+            // shared by every linear reading the quantized result (xn1 ->
+            // q/k/v). Falls back to the unfused `rms` + `Self::quant_once`
+            // pair (a no-op on an all-fp32 engine) otherwise.
+            self.rms_quant(&mut s, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b);
             // M4.1: one fused GEMM (`wq;wk;wv` concatenated at weight-load
             // time - see `from_map_with_gpu`) instead of three, then
             // `concat_split` narrows the wide `[b, hq+2*hkv]` output back
@@ -1503,8 +1549,8 @@ impl Engine {
             self.quant_once(&mut s, &sc.ctx, hq, b);
             self.linear(&mut s, &self.lin_weights[&p("attn.wo.weight")], &sc.ctx, &sc.proj, b);
             s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
-            s.push(self.rms(&sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b));
-            self.quant_once(&mut s, &sc.xn2, d, b);
+            // M4.3: same fusion as ln1 above, for `sc.xn2` -> gate/up.
+            self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b);
             // M4.1: one fused GEMM (`gate;up` concatenated at weight-load
             // time) instead of two, `concat_split` narrowing its `[b, 2*ff]`
             // output back into the compact `gate_pre`/`up` buffers
@@ -3193,6 +3239,78 @@ mod tests {
         assert_eq!(fused_q, unfused(&eng.sc.q_pre, "attn.q_norm.weight", nh), "M4.2 (kv_int8): fused Q must be bit-identical to the unfused pair");
         let fused_k = g.read(&eng.sc.k, (rows * hkv) as usize);
         assert_eq!(fused_k, unfused(&eng.sc.k_pre, "attn.k_norm.weight", nkv), "M4.2 (kv_int8): fused K must be bit-identical to the unfused pair");
+    }
+
+    /// M4.3: on an all-int8-weight engine, `Self::rms_quant`'s fused dispatch
+    /// (`RMSNORM_QUANT_FUSED`) must produce EXACTLY the `(sx, xq)` pair the
+    /// unfused `rms` -> `max_abs_row` -> `quant_pack` triad would have - not
+    /// a tolerance check, since `v = x*inv*w[c]` is recomputed with the
+    /// identical expression and operand order every time, which IEEE754
+    /// guarantees reproduces the same bits.
+    ///
+    /// Dispatches `Self::rms_quant` directly (rather than reading `i8_scratch`
+    /// back after a full `prefill`) because `I8Scratch::sx` is ONE buffer
+    /// SHARED across every distinct K-width a layer quantizes (`xn1`'s `d`,
+    /// `ctx`'s `hq`, `xn2`'s `d` again, `h`'s `ff` - `Self::quant_once`'s own
+    /// call sites) - a real forward pass overwrites it several times per
+    /// layer, so its state after `prefill` returns reflects whichever call
+    /// happened LAST in program order (`h`'s `ff`-width quant), not `xn2`'s.
+    /// Reading it back immediately after one isolated dispatch sidesteps that
+    /// entirely and tests the kernel itself, on synthetic but non-degenerate
+    /// (non-uniform, sign-mixed) input.
+    #[test]
+    fn rms_quant_fused_is_bit_identical_to_the_unfused_triad() {
+        let cfg = QwenConfig::tiny_i8();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 8, 8, 32, false, true);
+        if !eng.weights_int8() {
+            // Capability-gated fallback (CPU JIT/no packed-int8 device): the
+            // fused kernel is never dispatched there (`Self::rms_quant`'s own
+            // gate), so there is nothing this test can compare.
+            assert!(!eng.gpu().caps().numeric.int8_dot, "device reports int8_dot but the engine fell back to fp32");
+            brain_testutil::skip_unavailable("rms+quant fusion: device has no packed-int8 path");
+            return;
+        }
+        let d = cfg.d_model;
+        let rows = 5u32;
+        let g = &eng.gpu;
+
+        let xs: Vec<f32> = (0..rows * d).map(|i| (i as f32 * 0.037).sin() * 3.0 - 0.5).collect();
+        let ws: Vec<f32> = (0..d).map(|i| 0.5 + (i as f32 * 0.011).cos() * 0.3).collect();
+        let x = g.storage_init("t_rq_x", &xs);
+        let w = g.storage_init("t_rq_w", &ws);
+        let out = g.storage((rows * d) as u64); // unread by the fused branch; kept to match `rms_quant`'s signature.
+
+        let mut fused_steps: Vec<Step> = Vec::new();
+        eng.rms_quant(&mut fused_steps, &x, &w, &out, d, rows);
+        g.submit(&[], &fused_steps);
+        g.poll_wait();
+        let scratch = eng.i8_scratch.as_ref().expect("weights_int8() true implies i8_scratch is Some");
+        let got_sx = g.read(&scratch.sx, rows as usize);
+        let got_xq = g.read(scratch.xq_for(d), (rows * d / 4) as usize);
+
+        // Reference: the ORIGINAL three-dispatch sequence over the SAME `x`/`w`,
+        // into fresh buffers untouched by the fused dispatch above.
+        let xn_ref = g.storage((rows * d) as u64);
+        let rms_step = eng.rms(&x, &w, &xn_ref, d, rows);
+        g.submit(&[], &[rms_step]);
+        g.poll_wait();
+        let sx_ref = g.storage(rows as u64);
+        let xq_ref = g.storage((rows * d / 4) as u64);
+        let quant_steps = model::int8::quant_rows_steps(
+            g,
+            model::int8::QuantRows { kernels: [MAX_ABS_ROW, QUANT_PACK], x: &xn_ref, sx: &sx_ref, xq: &xq_ref },
+            0,
+            rows,
+            d,
+        );
+        g.submit(&[], &quant_steps);
+        g.poll_wait();
+        let want_sx = g.read(&sx_ref, rows as usize);
+        let want_xq = g.read(&xq_ref, (rows * d / 4) as usize);
+
+        assert_eq!(got_sx, want_sx, "M4.3: fused per-row scale must be bit-identical to the unfused triad");
+        assert_eq!(got_xq, want_xq, "M4.3: fused packed int8 activation must be bit-identical to the unfused triad");
     }
 
     /// The on-device iterative top-K extraction (`topk_extract_step` composed

@@ -1549,6 +1549,106 @@ whole-pass win larger than what was actually measured.
 the `run_batched_steps` call-site rewrite, and the two bit-identity tests),
 this ledger entry.
 
+### M4.3 - Fuse RMSNorm with activation quantization in `qwen3::serve`
+
+Checked against source first, per this campaign's own rule: the plan's
+"three reads, four on the int8 path" is a description of the WHOLE per-layer
+shape (`quant_once` fires four times per layer - `xn1`, `ctx`, `xn2`, `h` -
+each a `max_abs_row` -> `quant_pack` pair), not a claim that every one of
+those four is preceded by an `rms` write. Only two are: `ln1` -> `xn1` and
+`ln2` -> `xn2`; `ctx` (attention output) and `h` (SwiGLU output) are
+quantized activations that were never RMSNorm's output, so they are out of
+this milestone's own title and untouched. For the two that ARE, `Engine::
+linear`'s `Weight::I8` arm never reads the `x` parameter it is handed (it
+reads only the pre-quantized `i8_scratch`) and `w8_on` is a single
+engine-wide tier (`Engine::from_map_with_gpu`), so whenever `self.i8_scratch`
+is `Some` the fp32 value `rms` wrote to `xn1`/`xn2` had NO reader at all -
+`max_abs_row` then `quant_pack` re-read it twice more purely to throw it
+away. Confirmed by grep across `serve.rs`: `xn1`/`xn2` have exactly three
+uses each (the `rms` write, `quant_once`'s read, and `Self::linear`'s call,
+whose `I8` arm ignores the buffer it's handed) and the one test that DOES
+read `xn1`/`xn2`'s real fp32 content (`fused_qkv_and_gateup_are_bit_identical_
+to_split`) builds an all-fp32 engine, never exercising this tier.
+
+New kernel `rmsnorm_quant_fused.wgsl` (one workgroup per row, 3 barriers,
+`@cpu no` like `softmax_rows.wgsl`'s own multi-barrier cooperative shape)
+folds `rmsnorm_rows` + `max_abs_row` + `quant_pack` into ONE dispatch that
+never writes the fp32 intermediate at all: stage 1 is `rmsnorm_rows`'s own
+sum-of-squares reduction verbatim; stage 2 recomputes `v = x[c]*inv*w[c]`
+(the exact expression `rmsnorm_rows` would have written) to fold a row-wide
+abs-max into `sx[row]`, never touching a `d`-wide buffer; stage 3 recomputes
+`v` once more to pack `xq[row, :]`, `quant_pack`'s own arithmetic. No
+`var<function>` array sized off the runtime `d` (the anti-pattern `qknorm_
+rope_fused.wgsl` already names) - recomputing `v` from `x`/`inv`/`w` a second
+and third time trades cheap, cache-warm ALU for never allocating a
+runtime-sized register array and never touching a `d`-wide buffer more than
+`rmsnorm_rows` itself already does. `Engine::rms_quant` dispatches it when
+`self.i8_scratch.is_some() && self.caps.workgroup_reductions`, else falls
+back to the unfused `Self::rms` + `Self::quant_once` pair unchanged (an
+all-fp32 engine, or a device without cooperative reductions, where `xn1`/
+`xn2`'s fp32 value IS still the real result).
+
+**Gate**: `rms_quant_fused_is_bit_identical_to_the_unfused_triad` (new, RED
+before the kernel/dispatch existed, GREEN after) proves exact bit-identity -
+not a tolerance check, since `v` is recomputed with the identical expression
+and operand order every time, which IEEE754 guarantees reproduces the same
+bits. Dispatches `Engine::rms_quant` directly on synthetic non-degenerate
+input rather than reading `i8_scratch` back after a full `prefill`, because
+`I8Scratch::sx` is ONE buffer SHARED across every K-width a layer quantizes
+(`xn1`'s `d`, `ctx`'s `hq`, `xn2`'s `d` again, `h`'s `ff`) - a real forward
+overwrites it several times per layer, so its state after `prefill` reflects
+whichever call happened LAST in program order (`h`'s `ff`-width quant), not
+`xn2`'s; an earlier draft of this test read `sx` back after `prefill` and
+failed for exactly that reason - a test bug, not an implementation bug,
+caught by the mismatch being two orders of magnitude off from anything the
+kernel could plausibly produce. `cargo test -p brain-qwen3 --lib`: 111
+passed (110 before this milestone + 1 new), GPU/default backend, including
+every pre-existing forward/decode/int8 parity test
+(`int8_weights_track_fp32`, `int8_kv_close_to_fp32`, both `qk_norm_rope_
+fused_is_bit_identical_to_the_unfused_pair{,_kv_int8}`, `fused_qkv_and_
+gateup_are_bit_identical_to_split`). `cargo clippy -p brain-qwen3
+--all-targets`: zero warnings. `make kernels-table/check`: green (439
+kernels, the new one's `@cpu`/`@gpu`/`@opt`/`@quant` fields cross-checked
+against its own barrier count and shared-memory use).
+
+CPU backend (`BRAIN_DEVICE=cpu`): 108 passed, the SAME two pre-existing
+failures M4.1's and M4.2's own ledger entries already recorded and traced to
+unrelated concurrent WIP (`causal_chunk_fp32_kv_dispatches_the_fused_
+kernel_not_the_triad`, `decode_step_submits_are_not_one_per_metadata_write`)
+- this milestone's own `rms_quant` gate never fires on this backend at all
+(`workgroup_reductions` is false there), so it cannot be their cause.
+
+**Measured per-kernel table delta** (`qwen_bench serve ... i8w`, Qwen3-0.6B
+shape, 2x Tesla P40, isolated build - `git stash` held this milestone's own
+diff aside, baseline measured, popped, rebuilt, re-measured, so the only
+delta between the two runs is this milestone's own commit): dispatch count
+drops from 786 to 674 (-14.2%) at BOTH regimes identically (28 layers x
+4 collapsed dispatches per layer: `rmsnorm_rows`+`max_abs_row`+`quant_pack`
+x2 occurrences -> `rmsnorm_quant_fused` x2, independent of row count - same
+"mechanism is dispatch-count, not per-row work" shape M4.2 already measured).
+Decode (`serve 1 20 512 i8w`) went 13.41 -> 13.31 ms (-0.7%, 75 rows/s either
+way - inside this box's own run-to-run noise band at this precision), total
+device-busy time 15.3 -> 14.5 ms (-5.2%). Prefill (`serve 128 20 512 i8w`)
+went 119.46 -> 118.21 ms (-1.0%, 1071 -> 1083 rows/s). Per this campaign's
+own §E requirement: the fused region's OWN device time is the real
+mechanism, not the whole-pass number - at prefill, `rmsnorm_rows` + `max_
+abs_row` + `quant_pack`'s combined share of the ln1/ln2 occurrences was
+~1.98 ms before fusion; `rmsnorm_quant_fused` alone is 0.9 ms after, a ~54%
+cut in the fused region's own device time from never writing the fp32
+intermediate and only ever having ONE dispatch's worth of launch/uniform/
+bind-group overhead instead of three. That region is only ~1.6% of the whole
+118-119 ms prefill pass (attention - `paged_decode_apply_batched` +
+`paged_decode_scores_wg` - and `matmul_i8_dyn` are ~89% of it), so the
+whole-pass number moves by a correspondingly small amount - the same shape
+M4.1's and M4.2's own entries already found and the same honest framing:
+kept, not killed, a real and reproducible dispatch-count and per-kernel-time
+win that this milestone does not overstate as more than what was measured.
+
+**Commits**: one - `qwen3: fuse RMSNorm with int8 activation quantization in
+qwen3::serve (M4.3)` (the new kernel, `Engine::rms_quant`, the two
+`run_batched_steps` call-site rewrites, and the bit-identity test), this
+ledger entry.
+
 ---
 
 ## Not yet done
@@ -1570,7 +1670,11 @@ largest serving scratch buffer - shrinks 4x at a representative shape
 whenever it is live. `brain-qwen3`/`brain-model` build and test clean (M2.4
 also closed the concurrent-migration compile break that had blocked
 M2.1/M2.2/M2.3's own `cargo test -p brain-model` runs for their entire
-duration). Phases 3-8 remain, as structured in the plan. Track sub-milestone
+duration). **Phase 4 (M4.1-M4.3) is closed** - fused QKV/gate-up, fused
+QK-norm+RoPE+KV-append, and fused RMSNorm+int8 activation quant, each a
+kept (not killed) real dispatch-count and per-kernel device-time reduction
+with a correspondingly modest whole-pass effect at this hardware/shape,
+per §E. Phases 3, 5-8 remain, as structured in the plan. Track sub-milestone
 status against the approved plan; update this section as each phase closes,
 recording the measurement that proved it - a number nothing checks is a
 number that silently goes stale (`AGENTS.md`'s own rule, restated here

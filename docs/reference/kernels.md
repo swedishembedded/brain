@@ -405,6 +405,7 @@ load of it must already be bare-identifier-indexed.
 | [`rmsnorm_dx`](../../crates/kernels/wgsl/rmsnorm_dx.wgsl) | RMSNorm backward w.r.t. the input x | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`rmsnorm_dx_eps`](../../crates/kernels/wgsl/rmsnorm_dx_eps.wgsl) | RMSNorm backward w.r.t. x, with a RUNTIME epsilon (eps-parameterized twin of rmsnorm_dx, which hardcodes 1e-6) | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`rmsnorm_eps`](../../crates/kernels/wgsl/rmsnorm_eps.wgsl) | RMSNorm with a RUNTIME epsilon | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`rmsnorm_quant_fused`](../../crates/kernels/wgsl/rmsnorm_quant_fused.wgsl) | RMSNorm fused with dynamic per-row int8 activation quantization - | 64-thread workgroup tile, 3 barriers | 4/5 | ✗ | ✓ | - | int8 | f32 |
 | [`rmsnorm_rows`](../../crates/kernels/wgsl/rmsnorm_rows.wgsl) | RMSNorm, one WORKGROUP per row - the decode-regime variant | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`roof_dp4a`](../../crates/kernels/wgsl/roof_dp4a.wgsl) | Peak packed-int8 (DP4A) rate probe - the INT8 half of the device roofline | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | int8 | f32 |
 | [`roof_fma`](../../crates/kernels/wgsl/roof_fma.wgsl) | Peak fp32 FMA-rate probe - the COMPUTE half of the device roofline | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
