@@ -60,9 +60,36 @@ pub trait PagedDecoder {
     /// (from which the caller samples the first token).
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32>;
 
-    /// `logits = hidden @ head^T` — the admission-time host head that turns
-    /// [`prefill`](Self::prefill)'s hidden state into a token distribution.
+    /// `logits = hidden @ head^T` for [`prefill`](Self::prefill)'s hidden
+    /// state - a full `[vocab]` vector. [`admit_greedy`](Self::admit_greedy)/
+    /// [`admit_topk`](Self::admit_topk) are what admission actually calls;
+    /// this method is their host-side fallback (and whatever else a decoder
+    /// needs a raw logits vector for) so it stays required rather than
+    /// folded into the two admission methods.
     fn logits(&self, hidden: &[f32]) -> Vec<f32>;
+
+    /// Admission's greedy pick for [`prefill`](Self::prefill)'s hidden state.
+    /// The default is a plain host argmax over [`logits`](Self::logits)'s
+    /// full vocabulary vector; a decoder with an on-device head
+    /// (`qwen3::serve::Engine`) overrides this to never ship that vector to
+    /// the host at all.
+    fn admit_greedy(&self, hidden: &[f32]) -> u32 {
+        argmax(&self.logits(hidden))
+    }
+
+    /// Admission's non-greedy candidates (token id, logit) for
+    /// [`prefill`](Self::prefill)'s hidden state, best first, clamped to
+    /// [`Self::topk_capacity`]. The default sorts [`logits`](Self::logits)'s
+    /// full vocabulary vector on the host; a decoder with on-device top-k
+    /// (`qwen3::serve::Engine`) overrides this to never ship that vector to
+    /// the host at all.
+    fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
+        let mut candidates: Vec<(u32, f32)> =
+            self.logits(hidden).into_iter().enumerate().map(|(i, v)| (i as u32, v)).collect();
+        candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        candidates.truncate(k.max(1));
+        candidates
+    }
 
     /// One batched greedy decode step over every active sequence's current
     /// input, returning each sequence's next token.
@@ -637,19 +664,15 @@ impl<D: PagedDecoder> Scheduler<D> {
             let mut table = BlockTable::new();
             let hidden = self.dec.prefill(&mut table, &req.prompt);
             let mut rng = data::rng::Rng::new(seed);
-            // The admission-time head (`PagedDecoder::logits`) is already a
-            // full HOST vector (a naive host matvec, not a device dispatch —
-            // see `qwen3::serve::Engine::logits`'s doc), so real sampling here
-            // costs nothing extra to reach: no on-device top-K extraction is
-            // needed for this ONE-TIME-per-request first token, only for the
-            // steady-state per-token decode loop below.
+            // `admit_greedy`/`admit_topk` are on-device for a decoder that has
+            // one (`qwen3::serve::Engine`): neither ships a `[vocab]` block to
+            // the host for this one-time-per-request first token, matching
+            // the steady-state per-token decode loop below.
             let first = if sample.is_greedy() {
-                argmax(&self.dec.logits(&hidden))
+                self.dec.admit_greedy(&hidden)
             } else {
-                let logits = self.dec.logits(&hidden);
-                let mut candidates: Vec<(u32, f32)> = logits.iter().enumerate().map(|(i, &v)| (i as u32, v)).collect();
-                candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                candidates.truncate(self.dec.topk_capacity().max(1));
+                let k = self.dec.topk_capacity().max(1);
+                let candidates = self.dec.admit_topk(&hidden, k);
                 sample_from_topk(&candidates, sample, &mut rng)
             };
             let mut r = Running { id, table, generated: Vec::new(), max_new: req.max_new, eos: req.eos, next_input: first, done: false, sample, rng };
