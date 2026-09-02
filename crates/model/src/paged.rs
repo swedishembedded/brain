@@ -183,6 +183,22 @@ impl BlockTable {
         Some((last, fresh))
     }
 
+    /// Rebuild a table over blocks the caller ALREADY owns one reference on
+    /// each of - the swap-in half of host-RAM KV offload
+    /// ([`crate::kv_offload`]): [`crate::kv_offload::KvOffload::promote_kv`]
+    /// allocates fresh blocks, restores their bytes, and hands the ownership
+    /// of those references to the table it builds here.
+    ///
+    /// Deliberately NOT [`Self::adopt_prefix`], which increfs (it *shares*
+    /// blocks that stay owned by the prefix cache) and forces the length to a
+    /// whole number of blocks. A restored sequence owns its blocks outright
+    /// and its length is whatever it was when it was demoted - usually a
+    /// partially-filled tail block.
+    pub fn restore(blocks: Vec<u32>, len: u32) -> BlockTable {
+        assert!(!blocks.is_empty() || len == 0, "restore: {len} tokens cannot live in zero blocks");
+        BlockTable { blocks, len }
+    }
+
     /// Start a FRESH table from shared full prefix blocks (incref each): the
     /// prefix-cache hit path. The table's length becomes `blocks * block_size`
     /// — adopted blocks are always full — and the next append/reserve writes
