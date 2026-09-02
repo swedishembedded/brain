@@ -1649,6 +1649,152 @@ qwen3::serve (M4.3)` (the new kernel, `Engine::rms_quant`, the two
 `run_batched_steps` call-site rewrites, and the bit-identity test), this
 ledger entry.
 
+### M5.7 - Reductions/losses/router family: two real defects fixed (`ce_grad` in `arcface`, `router_gate_sigmoid`'s expert-count cap), one occupancy fix (`bias_grad`), the rest checked
+
+The table's "19 + 5 @opt-2" count for this family does not resolve against
+the tree. `ce_*`/`gradnorm_sq`/`bias_grad`/`router_*`/`argmax_row` total
+5 @opt-1 (`router_bwd`, `router_gate`, `router_gate_sigmoid`,
+`router_gate_train`, `router_topk_compact`) + 10 @opt-2 (`argmax_row`,
+`bias_grad`, `bias_grad_ncl`, `ce_grad`, `ce_grad_masked`, `ce_stats`,
+`ce_value`, `ce_value_masked`, `gradnorm_sq`, `router_bwd_sigmoid`) = 15,
+not 24 - corrected here per decision 3 rather than force-fit to the
+original count.
+
+**`bias_grad`: a real occupancy defect, fixed with a two-stage cooperative
+split.** `bias_grad.wgsl` dispatches exactly `n` threads (one per output
+feature), each walking all `m` rows serially - at `m` in the tens of
+thousands (a real conv layer's spatial extent x batch) that is a couple of
+workgroups against a card with dozens of SMs, measured at 19.1% of a VQGAN
+training step's backward and only 1.3% of the memory roof (M0.2), the same
+occupancy pathology `kernels.md` C.3 names for grad-norm. Added
+`bias_grad_part.wgsl`/`bias_grad_final.wgsl`, a barrier-free two-stage
+split (`n * P` partial column sums, folded), mirroring `gn_dsum_part`/
+`gn_dgb_part`'s already-established pattern for the identical class of fix
+- no capability gate needed. `Rev::bias_grad` replaces both call sites in
+`vae::blocks::grad` (conv2d and Linear bias gradients). Verified: full
+`brain-vae`/`brain-vqgan` suites green, and `check_vqgan`'s own
+finite-difference gradcheck confirms every bias gradient in a real
+backward pass still matches analytically after the rewrite. Commit
+`0f99f1a0`.
+
+**`ce_grad`: a real O(rows*classes^2) defect, but only in `arcface`.**
+`ce_grad.wgsl` recomputes the entire row softmax on every single output
+element instead of once per row - its own doc excuses this with "vocab is
+small", true for `arcface`'s tiny gradcheck config (5 classes) but false
+for the real InsightFace-scale training the crate is named for (classes is
+a live constructor parameter; real face-recognition datasets run tens of
+thousands of identity classes through exactly this kernel). `gpt2`/`lfm2`/
+`qwen3` had already migrated their own (much larger) vocab off this exact
+pattern onto `ce_stats` (per-row max/sum, once) + `ce_grad_stats` (O(1) per
+element reuse) - `arcface` and `codeformer` were the two remaining
+`ce_grad` callers, and `codeformer`'s codebook is a genuinely fixed 1024
+(left untouched, decision 3's "verify before fixing" rather than
+force-migrated for uniformity). Measured (standalone microbench, Tesla
+P40, rows=128 classes=20000): `ce_grad` 217.4ms vs the stats pair 4.7ms -
+46x; `count`/`ignore` make `ce_grad_stats` a strict superset of `ce_grad`'s
+contract, so this is a correctness-neutral, always-faster substitution at
+every scale, not a threshold decision. Verified: full `brain-arcface`
+suite (19 tests) and `cargo clippy -p brain-arcface --all-targets` both
+green. Commit `f0071d2b`.
+
+**`router_gate_sigmoid`: a real out-of-bounds defect, already known and
+deliberately parked behind an `assert!`.** `router_gate_sigmoid.wgsl`
+(GLM/DeepSeek-V3's "noaux_tc" MoE router forward) hard-capped at
+`n_experts <= 64` via fixed-size array locals (`s`/`choice`/`used`) -
+silent out-of-bounds writes above that, the exact failure shape
+`router_gate.wgsl`/`router_bwd.wgsl` already document fixing for
+themselves. A prior audit pass had already found this and named it the one
+instance deliberately left behind its `assert!` rather than bumped, since
+the fix needs the group-limited top-k pass structure, not a bound swap.
+`crates/glmdsa`'s own `GlmConfig::glm5_2()` - the crate's real, published
+256-routed-expert config, used by the checkpoint importer as its default -
+hit this directly and could not be built at all. Fixed the same way
+`router_gate.wgsl` was: `s[e]` and `choice[e]` are never cached (`probs`,
+an output buffer the kernel already owns, serves as the `s[e]` scratch;
+`choice[e]` is recomputed inline with the group mask as a `continue`
+guard), and `used[e]` becomes `sel_idx: array<u32, MAX_TOP_K>`, bounded by
+`top_k` (single digits at every real config) rather than `n_experts`.
+`group_keep`/`gscore`/`gused` stay `n_group`-sized (`MAX_GROUP = 64`, a
+genuinely different and much smaller bound), renamed from the kernel's old
+overloaded `MAX_E`. Removed the now-dead `n_experts <= 64` assert in both
+`crates/glmdsa/src/model.rs` and `crates/model/src/moe.rs::router_fwd_kind`
+(two independent call sites - `glmdsa` never routes through `model::moe`'s
+abstraction); the one bound that remains, `n_group <= 64`, is now asserted
+in `router_fwd_kind` itself (moved from `router_bwd` alone, so an
+inference-only caller still fails loudly) and in `glmdsa`'s own guard. New
+`crates/model/tests/router_gate_sigmoid_expert_cap.rs` mirrors
+`router_bwd_expert_cap.rs`/`router_gate_expert_cap.rs`'s own shape: a real
+host oracle at 8/65/256 experts (65 is the exact boundary the former array
+corrupts at, 256 is GLM-5.2's real scale with `n_group=4`/`topk_group=2`
+grouped masking also exercised). Verified against real Tesla P40 hardware
+via a temporary standalone harness (`brain-gradcheck`'s full dependency
+graph was transiently broken by an unrelated, actively in-progress
+`model::block::KernelIds` field addition this milestone does not touch) -
+matched the host oracle within float epsilon (max_abs ~1.2e-7) at all
+three expert counts, with exactly `top_k` nonzero gates per row in every
+case; `cargo check -p brain-glmdsa --lib` and `cargo clippy -p brain-model
+--lib -p brain-glmdsa --lib` both clean. Commit `cad544bc`.
+
+**The rest, checked and correctly rated or already fixed - no further
+action:**
+
+- `gradnorm_sq` - already selector-wired (`Op::GradNorm` in
+  `backend_api::select`, landed before this campaign's Phase 5): the
+  cooperative `gradnorm_part`+`clip_coef_wg` pair is used whenever
+  `caps.workgroup_reductions` holds, with a `BRAIN_NO_COOP_GRADNORM` A/B
+  switch; `gradnorm_sq` itself is the correct CPU-JIT fallback, not a live
+  bug. `kernels.md` §E already killed "fusing the grad-norm dispatch
+  group" as a hypothesis on this engine (a couple of percent of a training
+  step, fusing buys well under half a percent more) - re-derived from the
+  tree rather than re-measured from scratch, since the fused-dispatch
+  question is orthogonal to which single-tensor kernel runs and nothing in
+  this family's checked kernels changed that shape.
+- `argmax_row` - already selector-wired (`Op::ArgMaxRow`, `SplitReduction`
+  vs `Reference` gated on `ARGMAX_SPLIT_MIN_VOCAB = 4096`). `qwen3::serve`
+  hand-dispatches the cooperative `argmax_part`/`argmax_final` pair
+  directly (a decode-critical path, not itself broken); `codeformer`
+  hand-dispatches plain `argmax_row` for its 1024-entry codebook, which is
+  genuinely below the split threshold - checked, not a bug.
+- `ce_grad_masked` - same O(rows*bins^2) shape as `ce_grad`, but every real
+  caller (`gpt2`'s non-LM toy tasks, `toyseq2seq`, `toypid`) genuinely has
+  a small `u_bins` (its own doc's claim holds here, unlike `ce_grad`'s).
+  Not migrated - decision 3's discipline cuts both ways, a claim that
+  turns out true does not need "fixing" to match its neighbour's history.
+- `ce_value`/`ce_value_masked` - one thread per ROW (not per output
+  element), O(rows*bins) already - the correct granularity for a
+  single-scalar-per-row reduction. No cooperative-reduction opportunity
+  exists here that would not need a capability gate for a small win at
+  best; not pursued in this pass.
+- `router_bwd`, `router_bwd_sigmoid`, `router_gate`, `router_gate_train`,
+  `router_topk_compact` - already array-free (verified by reading every
+  kernel's body, not trusting the header): `router_bwd`/`router_gate`/
+  `router_gate_train` carry a prior pass's own fix-story in their headers,
+  `router_bwd_sigmoid` was never capped, `router_topk_compact` caches
+  nothing sized by `n_experts` by construction. No further action.
+
+**Deferred, out of this milestone's named scope:** `bias_grad_ncl`
+(per-channel NCL bias gradient, `minimaxmusic3`'s conv1d family) has the
+same one-lane-per-output-feature occupancy shape as `bias_grad`, but its
+NCL memory layout (channel-major, not row-major) needs a DIFFERENT
+coalescing-preserving split than `bias_grad_part`'s `col = gidx % n` -
+porting the fix without re-deriving the right indexing for that layout
+risks the exact "reused a pattern that coalesces for a different reason
+there" mistake `bias_grad_part`'s own header warns against for
+`gn_dsum_part`. Not attempted here; the family's own name (`bias_grad`,
+not `bias_grad_ncl`) scopes it out, and no profile in this pass measured
+it as a real pass's bottleneck.
+
+**Gate**: TDD where behavior changed (arcface's `ce_stats`/`ce_grad_stats`
+migration verified against `brain-arcface`'s existing kernel-registration
+gates; `router_gate_sigmoid`'s host-oracle test written to fail against the
+pre-fix kernel at `n_experts > 64` by construction, since that kernel could
+not even run correctly there before). `cargo clippy --all-targets` zero
+warnings on every touched crate. `make kernels-table` regenerated for the
+two new kernels and `router_gate_sigmoid`'s updated `@how`.
+**Commits**: four (`0f99f1a0` bias_grad, `f0071d2b` arcface ce_grad,
+`cad544bc` router_gate_sigmoid, `b2c9b1ed` this table regen), plus this
+ledger entry.
+
 ### M5.6 - MLA/DSA/GDN family: one real defect fixed (`topk_mask`), ten kernels checked against real config dims and correctly rated
 
 The table's "5 + 6 @opt-2" count for this family resolves to exactly 11
