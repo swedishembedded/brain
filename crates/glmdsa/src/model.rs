@@ -439,21 +439,23 @@ impl Glm {
     }
 
     fn new_impl_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> Glm {
-        // `router_gate_sigmoid.wgsl`'s forward router (this model's
-        // `RouterKind::SigmoidNoAuxTc` path) hard-caps at `MAX_E = 64u` via
-        // fixed-size `array<f32,64>` locals -- silently out-of-bounds above
-        // that, a familiar failure shape.
-        // `GlmConfig::glm5_2()` declares 256 routed experts, so without this
-        // assert that config would corrupt silently rather than fail loudly.
-        // A proper fix (an array-free top-k, mirroring `router_bwd.wgsl`'s
-        // rewrite) is real kernel work, not a literal bump -- tracked
-        // separately; bumping the constant again would just recreate the same bug.
+        // `router_gate_sigmoid.wgsl`'s forward router used to hard-cap at
+        // `n_experts <= 64` via fixed-size `array<f32,64>` locals -- silently
+        // out-of-bounds above that, which `GlmConfig::glm5_2()` (256 routed
+        // experts) hit directly. Fixed by an array-free top-k rewrite
+        // (kernel-performance.md M5.7, lessons.md #35c);
+        // `n_experts` no longer bounds any local array in that kernel. The
+        // ONE bound that remains is `n_group` (`MAX_GROUP = 64u` there), a
+        // genuinely different and much smaller quantity - every real config
+        // uses a single-digit group count, but assert it rather than let a
+        // misconfiguration corrupt silently, the same discipline this guard
+        // always had.
         assert!(
-            cfg.n_routed_experts <= 64,
-            "GLM config has {} routed experts, but router_gate_sigmoid.wgsl's \
-             forward router hard-caps at 64 (fixed-size array scratch) -- \
-             running this would silently write out of bounds, not error.",
-            cfg.n_routed_experts
+            cfg.n_group <= 64,
+            "GLM config has {} router groups, but router_gate_sigmoid.wgsl's \
+             group-limited masking hard-caps n_group at 64 (fixed-size array \
+             scratch) -- running this would silently write out of bounds, not error.",
+            cfg.n_group
         );
         // Roles: inference => all Frozen; training => all Trainable EXCEPT the
         // router selection bias (`e_score_correction_bias`), which is never
@@ -1846,5 +1848,23 @@ mod rmsnorm_variant_agreement {
             silu_db: model::block::UNREGISTERED,
         };
         model::block::assert_rmsnorm_variant_agrees(&gpu, &ids, &shapes);
+    }
+}
+
+/// `router_gate_sigmoid.wgsl`'s array-free rewrite (kernel-performance.md
+/// M5.7, lessons.md #35c) is gated at the kernel level in
+/// `crates/model/tests/router_gate_sigmoid_expert_cap.rs` (host-oracle
+/// correctness at 8/65/256 experts, grouped and ungrouped). This is the
+/// model-level half: the config the old `assert!` forbade outright must now
+/// actually build.
+#[cfg(test)]
+mod glm5_2_no_longer_asserts_on_construction {
+    use super::*;
+
+    #[test]
+    fn config_declares_256_routed_experts_within_the_one_remaining_bound() {
+        let cfg = GlmConfig::glm5_2();
+        assert_eq!(cfg.n_routed_experts, 256);
+        assert!(cfg.n_group <= 64, "the ONE bound left after this fix - see new_impl_on");
     }
 }

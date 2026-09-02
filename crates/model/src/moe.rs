@@ -160,11 +160,17 @@ pub fn router_fwd_kind(
     match kind {
         RouterKind::Softmax { norm_topk_prob, routed_scaling, .. } => router_fwd(g, ids, shape, logits, gate, norm_topk_prob, routed_scaling),
         RouterKind::SigmoidNoAuxTc { n_group, topk_group, norm_topk_prob, routed_scaling } => {
+            // `router_gate_sigmoid.wgsl` is array-free in `n_experts` since
+            // its M5.7 rewrite (lessons.md #35c) - the ONE
+            // bound left is `n_group` (`MAX_GROUP = 64u` there, a genuinely
+            // different and much smaller quantity), asserted here rather
+            // than in `router_bwd` alone so an inference-only caller (no
+            // backward ever dispatched) still fails loudly instead of
+            // silently corrupting the forward's group-masking scratch.
             assert!(
-                shape.n_experts <= 64,
-                "RouterKind::SigmoidNoAuxTc: router_gate_sigmoid.wgsl hard-caps at 64 experts \
-                 (fixed-size array scratch), got {} -- see this variant's own doc",
-                shape.n_experts
+                n_group <= 64,
+                "RouterKind::SigmoidNoAuxTc: router_gate_sigmoid.wgsl's group-limited \
+                 masking hard-caps n_group at 64 (fixed-size array scratch), got {n_group}"
             );
             let bias = bias.expect("RouterKind::SigmoidNoAuxTc requires a selection-bias buffer (router_gate_sigmoid.wgsl's 3rd binding)");
             let probs = probs.expect("RouterKind::SigmoidNoAuxTc requires a probs scratch buffer (router_gate_sigmoid.wgsl's mandatory 5th binding, unread by backward)");
