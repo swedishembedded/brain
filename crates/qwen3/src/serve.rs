@@ -28,6 +28,11 @@ use paramstore::ParamStore;
 
 use crate::config::QwenConfig;
 
+// The untiled whole-table gather `Self::embed_tiled`/`EMBED_TILE` replaced in
+// `Self::batched_tape` - kept registered (and named) only as the oracle
+// `embed_tiled_matches_the_plain_embed_kernel` dispatches directly, at a
+// vocab safely under any real binding cap.
+#[allow(dead_code)]
 const EMBED: usize = 0;
 const MATMUL: usize = 1;
 const RMSNORM: usize = 2;
@@ -113,6 +118,13 @@ const RMSNORM_QUANT_FUSED: usize = 34;
 // preempts or resumes a whole sequence.
 const KV_GATHER: usize = 35;
 const KV_SCATTER: usize = 36;
+// Vocab-tiled embedding gather (mirrors `qwen3::model::Qwen::embed_tiled`):
+// `emb` is bound to a vocab SUB-RANGE per dispatch, so a `tok.weight` table
+// larger than one storage binding (`max_storage_buffer_binding_size`, which
+// wgpu clamps to `i32::MAX` = 2047 MiB on every backend) is still gathered
+// correctly, in several passes each within the limit. See `Engine::
+// embed_tiled`.
+const EMBED_TILE: usize = 37;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -152,6 +164,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("rmsnorm_quant_fused", kernels::RMSNORM_QUANT_FUSED),
     ("kv_block_gather", kernels::KV_BLOCK_GATHER),
     ("kv_block_scatter", kernels::KV_BLOCK_SCATTER),
+    ("embed_tile", kernels::EMBED_TILE),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -1258,6 +1271,48 @@ impl Engine {
         }
     }
 
+    /// Vocab tiles for `tok.weight`'s gather - `block::vocab_tiles_on`, sized
+    /// to THIS device's queried storage-binding limit (never the portable
+    /// floor: see that function's own doc for why a P40's real, larger limit
+    /// matters for tile count).
+    fn vocab_tiles(&self) -> Vec<(u32, u32)> {
+        block::vocab_tiles_on(&self.gpu, self.cfg.vocab as u64, self.cfg.d_model as u64)
+    }
+
+    /// The token-embedding gather for `n` token rows, as tiled steps -
+    /// mirrors `qwen3::model::Qwen::embed_tiled` exactly (same kernel, same
+    /// tiling rule, same reason).
+    ///
+    /// `tok.weight` stays ONE buffer in `self.ps` (`ParamStore::new_with_roles`
+    /// allocates and streams it in bounded chunks regardless of size - see
+    /// `paramstore::UPLOAD_CHUNK_WORDS` - so allocation was never the
+    /// problem). The problem is BINDING it: a plain `Gpu::step` binds a
+    /// buffer's ENTIRE range, and `max_storage_buffer_binding_size` is
+    /// clamped to `i32::MAX` (2047 MiB) on every `wgpu` backend regardless of
+    /// how much VRAM the card has - Qwen3-8B's real `[151936, 4096]` fp32
+    /// table is ~2.32 GiB, over that cap on a card with 24 GB to spare. This
+    /// dispatches `EMBED_TILE` once per vocab tile instead, each a
+    /// `step_sliced` binding of only that tile's rows
+    /// (`[v0*d_model, (v0+cnt)*d_model)`), which the tiling rule sizes to
+    /// stay under the limit; every token belongs to exactly one tile, so
+    /// across all tiles every output element is written exactly once.
+    fn embed_tiled(&self, g: &Gpu, out: &DeviceBuffer, n: u32) -> Vec<Step> {
+        let d = self.cfg.d_model;
+        let dw = d as u64;
+        self.vocab_tiles()
+            .into_iter()
+            .map(|(v0, cnt)| {
+                g.step_sliced(
+                    EMBED_TILE,
+                    &[&self.sc.tok_buf, self.ps.w("tok.weight"), out],
+                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
+                    &[d, n, v0, cnt],
+                    n * d,
+                )
+            })
+            .collect()
+    }
+
     /// Dispatch one linear `out = x @ Wᵀ` by `w`'s own tag (B7) - `self.
     /// lin_weights`'s tier, never a separate on/off flag inspected here.
     /// `x` must already be quantized (`Self::quant_once`) when `w` is `I8`.
@@ -1549,7 +1604,13 @@ impl Engine {
         let b = bsz;
         let mut s: Vec<Step> = Vec::new();
         if !matches!(input, Input::Embeds(_)) {
-            s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, b], d * b));
+            // Vocab-tiled (`Self::embed_tiled`), not a single `EMBED` dispatch
+            // against the whole `tok.weight` table: that table exceeds one
+            // storage binding at real vocab sizes (Qwen3-8B's is ~2.32 GiB,
+            // over wgpu's 2047 MiB `max_storage_buffer_binding_size` clamp)
+            // regardless of `weights_int8` - the embedding gather is always
+            // fp32, so this is the ONE place that limit bites unconditionally.
+            s.extend(self.embed_tiled(g, &sc.res[0], b));
         }
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
@@ -4715,5 +4776,182 @@ mod tests {
         let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
         assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "paged_flash_prefill has no int8-KV tier yet");
         assert!(kinds.contains(&SCORES_I8), "causal-chunk int8 KV must still run the int8 triad");
+    }
+
+    /// A config whose `tok.weight` is deliberately sized past `wgpu`'s
+    /// `max_storage_buffer_binding_size` clamp (`i32::MAX` = 2047 MiB, on
+    /// every `wgpu` backend regardless of the card's actual VRAM) - the exact
+    /// shape of the real bug: Qwen3-8B's real `[151936, 4096]` embedding
+    /// table is ~2.32 GiB. `140000 * 4096 * 4 B` = 2,293,760,000 B (~2.14
+    /// GiB) safely exceeds the ~2,147,483,644 B cap with margin, at the
+    /// smallest vocab/d_model split that still does (the byte count is fixed
+    /// by the product, not by how it is split - shrinking either dimension
+    /// only grows the other). Per-layer dims stay tiny so everything else
+    /// this config allocates is cheap.
+    fn oversized_vocab_cfg() -> QwenConfig {
+        QwenConfig {
+            vocab: 140_000,
+            block_size: 64,
+            n_layers: 1,
+            d_model: 4096,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 64,
+            d_ff: 256,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 64,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        }
+    }
+
+    /// [`tiny_weights`], but with a cheap deterministic fill instead of
+    /// per-element `Rng::next_gaussian` draws for every param - at
+    /// `oversized_vocab_cfg`'s real scale (`tok.weight` alone is ~573M
+    /// elements), the RNG cost would dwarf the dispatch this test actually
+    /// exercises. The fill is still non-constant (so a tiling bug that reads
+    /// the wrong rows would show up as a mismatch), just cheap to compute.
+    fn oversized_vocab_weights(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
+        let mut map = HashMap::new();
+        for (name, count) in cfg.param_list() {
+            let v = if name.contains("norm") {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|i| (i % 997) as f32 * 1e-3 - 0.5).collect()
+            };
+            map.insert(name, v);
+        }
+        map
+    }
+
+    /// RED before the fix (`Engine::embed_tiled`, wired into `Self::
+    /// batched_tape` in place of a plain `EMBED` dispatch against the whole
+    /// `tok.weight` buffer): `wgpu::Device::create_bind_group` panics with
+    /// "Buffer binding ... exceeds `max_*_buffer_binding_size` limit" the
+    /// moment a forward tries to bind a table this large as one storage
+    /// binding - exactly the crash `brain qwen3 serve` hit on Qwen3-8B's real
+    /// vocab. GREEN after: the SAME dispatch, now several `step_sliced`
+    /// bindings each within the limit.
+    ///
+    /// Deliberately calls `Self::batched_tape` directly and submits/reads
+    /// only `sc.res[0]` (the post-embed residual) - never `Self::head_steps`
+    /// - to isolate the embedding gather under test here from the SEPARATE,
+    /// pre-existing fp32 head/logits binding-size limit `Self::head_steps`
+    /// has never tiled (out of scope for this fix - see this crate's own
+    /// `serve.rs` module doc / the task that introduced this test for the
+    /// scope line).
+    ///
+    /// wgpu-only: the 2047 MiB clamp is a `wgpu` backend fact (present on
+    /// every `wgpu` target, including this one on Vulkan), not a property of
+    /// the CPU JIT backend, which has no such binding cap to reproduce.
+    #[test]
+    fn embed_step_survives_a_vocab_table_that_exceeds_one_storage_binding() {
+        // `Gpu::new`, not the shared `testgpu::dev` pool: this test's buffers
+        // run into the GiB range and its dispatches take real wall time, and
+        // `cargo test` runs the suite in parallel threads - sharing the same
+        // pooled device's command-encoder state with a concurrently-running
+        // test raced (measured: intermittent, unrelated `min_storage_buffer_
+        // offset_alignment` failures in OTHER tests appeared only when this
+        // one ran alongside them, never alone and never on baseline code). An
+        // independent device sidesteps that without touching the pool.
+        let gpu = Gpu::new(PIPELINES);
+        if gpu.kind() != "wgpu" {
+            brain_testutil::skip_unavailable(&format!(
+                "embed binding-size tiling: needs a real wgpu 2047 MiB storage-binding clamp, current backend is {}",
+                gpu.kind()
+            ));
+            return;
+        }
+        let cfg = oversized_vocab_cfg();
+        let table_bytes = cfg.vocab as u64 * cfg.d_model as u64 * 4;
+        assert!(table_bytes > 2_147_483_644, "test setup: tok.weight ({table_bytes} B) must exceed wgpu's binding cap");
+        let map = oversized_vocab_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu, cfg.clone(), &map, 4, 8, 1, 4, 8, false, false);
+
+        let tokens = [0u32, 55_555, cfg.vocab - 1];
+        eng.gpu.write(&eng.sc.tok_buf, &tokens);
+        let steps = eng.batched_tape(tokens.len() as u32, Input::Tokens(&tokens), false);
+        eng.gpu.submit(&[], &steps);
+
+        let d = cfg.d_model as usize;
+        let got = eng.gpu.read(&eng.sc.res[0], tokens.len() * d);
+        for (row, &tok) in tokens.iter().enumerate() {
+            let want: Vec<f32> = (0..d as u32).map(|c| ((tok * cfg.d_model + c) % 997) as f32 * 1e-3 - 0.5).collect();
+            assert_eq!(&got[row * d..(row + 1) * d], want.as_slice(), "embedding row for token {tok}");
+        }
+    }
+
+    /// The tiled embedding gather (the same `EMBED_TILE` kernel and
+    /// `step_sliced` offset convention `Engine::embed_tiled` dispatches) is
+    /// bit-identical to the plain, untiled `EMBED` kernel it replaces, at a
+    /// vocab safely under any real binding cap - so the untiled dispatch is a
+    /// valid oracle here (unlike the test above, whose whole point is that
+    /// the untiled dispatch panics at real scale).
+    ///
+    /// Deliberately does NOT force tiling via `BRAIN_TILE_BUDGET_WORDS`
+    /// (`block::tile_budget_words_for`'s override, already exercised by
+    /// `block::tests::a_small_budget_still_forces_the_tiled_path` and
+    /// `crates/t5/tests/smoke.rs`): that env var is process-global, and after
+    /// this fix `Engine::vocab_tiles` reads it on EVERY forward pass, not
+    /// just tiling-focused tests - `cargo test`'s parallel runner mutating it
+    /// here would race every OTHER concurrently-running test in this module
+    /// that builds an `Engine` and embeds a token, not just ones that opted
+    /// into the convention via `brain_testutil::env_lock`. Three tile
+    /// boundaries are chosen directly instead (this is a kernel/dispatch
+    /// correctness check, not a re-test of the budget MATH - `block::
+    /// vocab_tiles_on`'s own tests already cover that, including the exact
+    /// real Qwen3-8B shape).
+    #[test]
+    fn embed_tiled_matches_the_plain_embed_kernel() {
+        // Vocab safely under any real binding cap (40 * 8 * 4 B = 1280 B) -
+        // the untiled `EMBED` dispatch below is a valid oracle only because
+        // of that.
+        let cfg = QwenConfig { vocab: 40, d_model: 8, ..QwenConfig::tiny() };
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 8, 8, 4, 8, false, false);
+
+        let d = cfg.d_model;
+        let dw = d as u64;
+        // Three uneven tiles over the 40-row vocab, boundaries at 8 and 24 -
+        // multiples of 8 rows, so `v0*d_model` (words) is a multiple of 64
+        // (`min_storage_buffer_offset_alignment` is 256 B = 64 f32 words on
+        // every adapter this repo has met, same constant `HEAD_TILE_ALIGN`
+        // hardcodes). Real callers get this for free (`Self::embed_tiled`'s
+        // own doc: `v0*d_model` is already a large multiple of 64 for any
+        // real `d_model`); a toy `d_model=8` test has to pick boundaries
+        // that keep it true rather than inherit it.
+        let manual_tiles: [(u32, u32); 3] = [(0, 8), (8, 16), (24, 16)];
+
+        // token 0, tile0's last id, tile1's first/last id, tile2's first id,
+        // vocab-1.
+        let ids = [0u32, 7, 8, 23, 24, 39];
+        let n = ids.len() as u32;
+        eng.gpu.write(&eng.sc.tok_buf, &ids);
+
+        let out_tiled = eng.gpu.storage(n as u64 * dw);
+        let tiled_steps: Vec<Step> = manual_tiles
+            .iter()
+            .map(|&(v0, cnt)| {
+                eng.gpu.step_sliced(
+                    EMBED_TILE,
+                    &[&eng.sc.tok_buf, eng.ps.w("tok.weight"), &out_tiled],
+                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
+                    &[d, n, v0, cnt],
+                    n * d,
+                )
+            })
+            .collect();
+        eng.gpu.submit(&[], &tiled_steps);
+        let tiled = eng.gpu.read(&out_tiled, (n * d) as usize);
+
+        let out_plain = eng.gpu.storage(n as u64 * dw);
+        let plain_step = eng.gpu.step(EMBED, &[&eng.sc.tok_buf, eng.ps.w("tok.weight"), &out_plain], &[d, n], d * n);
+        eng.gpu.submit(&[], &[plain_step]);
+        let plain = eng.gpu.read(&out_plain, (n * d) as usize);
+
+        assert_eq!(tiled, plain, "tiled embed must be bit-identical to the untiled EMBED kernel");
     }
 }
