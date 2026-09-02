@@ -81,11 +81,23 @@ review of this codebase assumed:
       (`qwen35`), `srccheck::tests::{agreeing_paths_pass,
       a_disagreeing_raw_words_is_caught, a_real_gguf_source_agrees_on_every_
       path}`. `make test -p brain-checkpoint -p brain-qwen35`: green.
+- [x] M2: `gguf::int8_direct::try_i8_rect` takes `&dyn TensorSource` instead
+      of `&MmapGguf`, reading through `raw_blocks` (M1) instead of
+      `MmapGguf::raw_tensor_bytes` directly - now reachable through
+      `RemapSource` and any future name-translating shim, not only a bare
+      `MmapGguf`. The only call site (`flux2::weights::DitWeights::
+      try_i8_rect`) needed one change, a `*gguf` deref: matching
+      `DitWeights::Gguf { gguf, .. }` through `&self` binds `gguf` as
+      `&&'a MmapGguf` (match ergonomics through the outer reference), and
+      `&dyn TensorSource` coercion needs exactly one layer of reference, not
+      two - caught by the compiler, not assumed. Behavior and the
+      `assert_eq!`-gated bit-exactness proof in
+      `flux2/tests/gguf_direct_int8.rs` are unchanged; that test file needed
+      no edits at all, which is the point of routing through the trait.
+      `make test -p brain-flux2`: green (24 test-result groups, 0 failed).
 
 ## Not yet done
 
-- [ ] M2: `try_i8_rect` takes `&dyn TensorSource` (currently `&MmapGguf`,
-      unreachable through `RemapSource` or the per-model shims).
 - [ ] M3: `model::int8::{upload_quantized, upload_rect, quantize_from}` - the
       one quantize-and-upload helper every model should route through.
 - [ ] M4: migrate the no-policy f32-roundtrip sites (qwen3, qwen35moe, wan);

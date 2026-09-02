@@ -222,6 +222,6 @@ impl<'a> DitWeights<'a> {
         if lora.is_some_and(|l| l.touches(name)) {
             return None;
         }
-        gguf::try_i8_rect(gguf, name, stride, r0, n_out, c0, k)
+        gguf::try_i8_rect(*gguf, name, stride, r0, n_out, c0, k)
     }
 }
