@@ -45,6 +45,182 @@ pub(crate) const T_BF16: u32 = 30;
 
 pub(crate) const QK_K: usize = 256;
 
+/// A ggml tensor storage type, as declared per-tensor in a GGUF file.
+///
+/// This is the ONE vocabulary the reader dispatches on. `ggml_type_name`,
+/// `block_geometry`, `tensor_nbytes` and `dequantize` used to be four
+/// independent `match ty: u32` tables that could drift from each other; they
+/// are now thin wrappers over this enum's methods, so a `match` over a
+/// [`GgmlType`] gets a compiler error for an unhandled variant instead of a
+/// silent `_ =>` arm - exactly where a newly-added format would otherwise
+/// land silently instead of failing to compile. K-quant variants drop the
+/// `_` before `K` (`Q4K`, not `Q4_K`) solely to satisfy
+/// `non_camel_case_types`; [`GgmlType::name`] still spells them the
+/// conventional way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GgmlType {
+    F32,
+    F16,
+    BF16,
+    Q4_0,
+    Q4_1,
+    Q5_0,
+    Q5_1,
+    Q8_0,
+    Q2K,
+    Q3K,
+    Q4K,
+    Q5K,
+    Q6K,
+    Q8K,
+}
+
+impl GgmlType {
+    /// Resolve a GGUF `ggml_type` id to the type this reader can decode.
+    /// `None` for an id with no block-format entry here (an IQ/TQ/MXFP4
+    /// codebook, a scalar-array id, or a genuinely unknown id) - never a
+    /// guess.
+    pub fn from_id(id: u32) -> Option<GgmlType> {
+        Some(match id {
+            T_F32 => GgmlType::F32,
+            T_F16 => GgmlType::F16,
+            T_BF16 => GgmlType::BF16,
+            T_Q4_0 => GgmlType::Q4_0,
+            T_Q4_1 => GgmlType::Q4_1,
+            T_Q5_0 => GgmlType::Q5_0,
+            T_Q5_1 => GgmlType::Q5_1,
+            T_Q8_0 => GgmlType::Q8_0,
+            T_Q2_K => GgmlType::Q2K,
+            T_Q3_K => GgmlType::Q3K,
+            T_Q4_K => GgmlType::Q4K,
+            T_Q5_K => GgmlType::Q5K,
+            T_Q6_K => GgmlType::Q6K,
+            T_Q8_K => GgmlType::Q8K,
+            _ => return None,
+        })
+    }
+
+    /// The GGUF `ggml_type` id this type is written as.
+    pub fn id(self) -> u32 {
+        match self {
+            GgmlType::F32 => T_F32,
+            GgmlType::F16 => T_F16,
+            GgmlType::BF16 => T_BF16,
+            GgmlType::Q4_0 => T_Q4_0,
+            GgmlType::Q4_1 => T_Q4_1,
+            GgmlType::Q5_0 => T_Q5_0,
+            GgmlType::Q5_1 => T_Q5_1,
+            GgmlType::Q8_0 => T_Q8_0,
+            GgmlType::Q2K => T_Q2_K,
+            GgmlType::Q3K => T_Q3_K,
+            GgmlType::Q4K => T_Q4_K,
+            GgmlType::Q5K => T_Q5_K,
+            GgmlType::Q6K => T_Q6_K,
+            GgmlType::Q8K => T_Q8_K,
+        }
+    }
+
+    /// This type's conventional spelling (`"Q4_K"`, `"BF16"`, ...).
+    pub fn name(self) -> &'static str {
+        match self {
+            GgmlType::F32 => "F32",
+            GgmlType::F16 => "F16",
+            GgmlType::BF16 => "BF16",
+            GgmlType::Q4_0 => "Q4_0",
+            GgmlType::Q4_1 => "Q4_1",
+            GgmlType::Q5_0 => "Q5_0",
+            GgmlType::Q5_1 => "Q5_1",
+            GgmlType::Q8_0 => "Q8_0",
+            GgmlType::Q2K => "Q2_K",
+            GgmlType::Q3K => "Q3_K",
+            GgmlType::Q4K => "Q4_K",
+            GgmlType::Q5K => "Q5_K",
+            GgmlType::Q6K => "Q6_K",
+            GgmlType::Q8K => "Q8_K",
+        }
+    }
+
+    /// Elements per block.
+    pub fn block_elems(self) -> usize {
+        match self {
+            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => 1,
+            GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 => 32,
+            GgmlType::Q2K | GgmlType::Q3K | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K | GgmlType::Q8K => QK_K,
+        }
+    }
+
+    /// On-disk bytes per block.
+    pub fn block_bytes(self) -> usize {
+        match self {
+            GgmlType::F32 => 4,
+            GgmlType::F16 | GgmlType::BF16 => 2,
+            GgmlType::Q4_0 => 18,
+            GgmlType::Q4_1 => 20,
+            GgmlType::Q5_0 => 22,
+            GgmlType::Q5_1 => 24,
+            GgmlType::Q8_0 => 34,
+            GgmlType::Q2K => 84,
+            GgmlType::Q3K => 110,
+            GgmlType::Q4K => 144,
+            GgmlType::Q5K => 176,
+            GgmlType::Q6K => 210,
+            GgmlType::Q8K => 292,
+        }
+    }
+
+    /// Whether this type's affine decode needs a per-sub-block minimum
+    /// (`w = d*sc*q - dmin*m`), not just a scale (`w = d*sc*q`). Q4_K/Q5_K are
+    /// affine; every other type this reader decodes is symmetric. Exists so a
+    /// device-side K-quant kernel selector (a later milestone) can ask one
+    /// place rather than re-deriving it from the type name.
+    pub fn is_affine(self) -> bool {
+        matches!(self, GgmlType::Q4K | GgmlType::Q5K)
+    }
+
+    /// This type's per-block decoder, for a caller expanding an arbitrary
+    /// block range ([`block_expand`]). `None` for F32/F16/BF16: those are not
+    /// "one block, one shared scale" formats in the sense [`block_expand`]
+    /// serves - a caller wanting a range of them slices `dequantize`'s output
+    /// directly, since there is no smaller independently-decodable unit.
+    fn block_decoder(self) -> Option<fn(&[u8], &mut Vec<f32>)> {
+        Some(match self {
+            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => return None,
+            GgmlType::Q4_0 => deq_q4_0,
+            GgmlType::Q4_1 => deq_q4_1,
+            GgmlType::Q5_0 => deq_q5_0,
+            GgmlType::Q5_1 => deq_q5_1,
+            GgmlType::Q8_0 => deq_q8_0,
+            GgmlType::Q2K => deq_q2_k,
+            GgmlType::Q3K => deq_q3_k,
+            GgmlType::Q4K => deq_q4_k,
+            GgmlType::Q5K => deq_q5_k,
+            GgmlType::Q6K => deq_q6_k,
+            GgmlType::Q8K => deq_q8_k,
+        })
+    }
+}
+
+/// A lend of one tensor's ALREADY-QUANTIZED on-disk bytes, plus the block
+/// format that decodes them - the payload of
+/// [`crate::TensorSource::raw_blocks`]. `numel` is the tensor's element
+/// count (not `bytes.len()`, which is `numel`'s ceiling to a whole number of
+/// blocks): a caller reconstructing values needs to know where the real data
+/// ends and any block-padding begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockLayout {
+    pub ty: GgmlType,
+    pub numel: usize,
+}
+
+impl BlockLayout {
+    pub fn block_elems(&self) -> usize {
+        self.ty.block_elems()
+    }
+    pub fn block_bytes(&self) -> usize {
+        self.ty.block_bytes()
+    }
+}
+
 /// A single GGUF metadata value. Mirrors the 13 `gguf_metadata_value_type`s;
 /// arrays (including nested ones) are held as a `Vec<GgufValue>`.
 #[derive(Debug, Clone, PartialEq)]
@@ -211,17 +387,33 @@ fn card_from_kv(kv: &BTreeMap<String, GgufValue>, param_count: u64) -> ModelCard
 }
 
 /// A human label for the file's quantization, from `general.file_type` if
-/// present, else `general.quantization_version`.
+/// present AND recognized, else `general.quantization_version`, else `None`.
+///
+/// A `general.file_type` id this reader does not recognize must NOT stop
+/// here and report "unknown" - that actively defeats the
+/// `quantization_version` fallback for exactly the files most likely to need
+/// it (a release quantized with a `llama_ftype` newer than this table).
 fn quant_label(kv: &BTreeMap<String, GgufValue>) -> Option<String> {
     if let Some(ft) = kv.get("general.file_type").and_then(|v| v.as_u64()) {
-        return Some(file_type_name(ft as u32).to_string());
+        if let Some(name) = file_type_name(ft as u32) {
+            return Some(name.to_string());
+        }
     }
     kv.get("general.quantization_version").and_then(|v| v.as_u64()).map(|v| format!("qver{v}"))
 }
 
-/// Map a `general.file_type` enum value to its conventional name.
-fn file_type_name(ft: u32) -> &'static str {
-    match ft {
+/// Map a `general.file_type` (llama.cpp's `enum llama_ftype`, the whole-file
+/// "mostly X" label) to its conventional name. `None` for an id this table
+/// does not carry - never a fabricated "unknown" string that shadows the
+/// `quantization_version` fallback in [`quant_label`].
+///
+/// This is `llama_ftype`, NOT [`GgmlType`]/`ggml_type` - a separate llama.cpp
+/// enum with its own numbering (file_type `Q8_0` is 7; the per-tensor
+/// `ggml_type` `T_Q8_0` is 8). Hand-maintained, like [`GgmlType`], with no
+/// upstream checkout in this repo to pin it against; ids past 37 (MXFP4 and
+/// newer) are deliberately omitted rather than guessed.
+fn file_type_name(ft: u32) -> Option<&'static str> {
+    Some(match ft {
         0 => "F32",
         1 => "F16",
         2 => "Q4_0",
@@ -238,8 +430,24 @@ fn file_type_name(ft: u32) -> &'static str {
         16 => "Q5_K_S",
         17 => "Q5_K_M",
         18 => "Q6_K",
-        _ => "unknown",
-    }
+        19 => "IQ2_XXS",
+        20 => "IQ2_XS",
+        21 => "Q2_K_S",
+        22 => "IQ3_XS",
+        23 => "IQ3_XXS",
+        24 => "IQ1_S",
+        25 => "IQ4_NL",
+        26 => "IQ3_S",
+        27 => "IQ3_M",
+        28 => "IQ2_S",
+        29 => "IQ2_M",
+        30 => "IQ4_XS",
+        31 => "IQ1_M",
+        32 => "BF16",
+        36 => "TQ1_0",
+        37 => "TQ2_0",
+        _ => return None,
+    })
 }
 
 /// Forward-only cursor over a byte slice; every read is bounds-checked.
@@ -463,49 +671,19 @@ pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
 }
 
 /// A ggml type id's spelling, for the per-tensor dtype a cost model reads.
-/// The same id table [`block_geometry`] dispatches on, so a type this reader
-/// can decode always has a name and one it cannot never gets an invented one.
+/// Thin wrapper over [`GgmlType::name`] - see its doc for why there is only
+/// one table now. A type this reader can decode always has a name and one it
+/// cannot never gets an invented one.
 pub(crate) fn ggml_type_name(ty: u32) -> Option<&'static str> {
-    Some(match ty {
-        T_F32 => "F32",
-        T_F16 => "F16",
-        T_BF16 => "BF16",
-        T_Q4_0 => "Q4_0",
-        T_Q4_1 => "Q4_1",
-        T_Q5_0 => "Q5_0",
-        T_Q5_1 => "Q5_1",
-        T_Q8_0 => "Q8_0",
-        T_Q2_K => "Q2_K",
-        T_Q3_K => "Q3_K",
-        T_Q4_K => "Q4_K",
-        T_Q5_K => "Q5_K",
-        T_Q6_K => "Q6_K",
-        T_Q8_K => "Q8_K",
-        _ => return None,
-    })
+    GgmlType::from_id(ty).map(GgmlType::name)
 }
 
 /// Block geometry `(elements_per_block, bytes_per_block)` for a ggml type.
-/// Elements per block and on-disk bytes per block for ggml type `ty`. `None`
-/// for a type id this reader has no block-format entry for (an IQ/TQ/MXFP4
-/// codebook, or an unknown id) - never a guessed geometry.
+/// Thin wrapper over [`GgmlType::block_elems`]/[`GgmlType::block_bytes`].
+/// `None` for a type id this reader has no block-format entry for (an
+/// IQ/TQ/MXFP4 codebook, or an unknown id) - never a guessed geometry.
 pub fn block_geometry(ty: u32) -> Option<(usize, usize)> {
-    Some(match ty {
-        T_F32 => (1, 4),
-        T_F16 | T_BF16 => (1, 2),
-        T_Q4_0 => (32, 18),
-        T_Q4_1 => (32, 20),
-        T_Q5_0 => (32, 22),
-        T_Q5_1 => (32, 24),
-        T_Q8_0 => (32, 34),
-        T_Q2_K => (256, 84),
-        T_Q3_K => (256, 110),
-        T_Q4_K => (256, 144),
-        T_Q5_K => (256, 176),
-        T_Q6_K => (256, 210),
-        T_Q8_K => (256, 292),
-        _ => return None,
-    })
+    GgmlType::from_id(ty).map(|t| (t.block_elems(), t.block_bytes()))
 }
 
 /// Total on-disk byte count for `numel` elements of `ty`.
@@ -522,36 +700,50 @@ pub const TYPE_Q8_0: u32 = T_Q8_0;
 /// scale followed by 32 int8 values).
 pub const Q8_0_BLOCK_ELEMS: usize = 32;
 
-/// Expand elements `[e0, e1)` of a Q8_0 tensor's raw bytes into `out`, which
-/// is CLEARED first. Both bounds must be multiples of
-/// [`Q8_0_BLOCK_ELEMS`], because a Q8_0 block is the smallest independently
-/// decodable unit - a caller wanting an unaligned range must expand the
-/// enclosing blocks and slice.
+/// Expand elements `[e0, e1)` of a block-quantized tensor's raw bytes into
+/// `out`, which is CLEARED first. Both bounds must be multiples of `ty`'s
+/// [`GgmlType::block_elems`], because a quant block is the smallest
+/// independently decodable unit - a caller wanting an unaligned range must
+/// expand the enclosing blocks and slice.
 ///
 /// This exists so that a caller reading a sub-range of a large quantized
 /// tensor (one weight matrix's rows, or one column block of a fused matrix)
 /// does not have to expand the whole tensor to reach it, and does not have to
 /// reimplement the block layout to avoid that. It decodes through the SAME
-/// `deq_q8_0` every other read path uses, so the values are identical to
-/// what [`dequantize`] would have produced for those positions.
-pub fn q8_0_expand(raw: &[u8], e0: usize, e1: usize, out: &mut Vec<f32>) -> Result<(), String> {
-    const BB: usize = 34;
-    if !e0.is_multiple_of(Q8_0_BLOCK_ELEMS) || !e1.is_multiple_of(Q8_0_BLOCK_ELEMS) {
-        return Err(format!("gguf: q8_0_expand range [{e0}, {e1}) is not block-aligned ({Q8_0_BLOCK_ELEMS})"));
+/// per-block decoder every other read path uses (`GgmlType`'s internal
+/// decoder lookup is private precisely so there is only one place that
+/// mapping is made), so the values are identical to what [`dequantize`] would
+/// have produced for those positions. `Err` for F32/F16/BF16 (no per-block
+/// decoder - those are not "one block, one shared scale" formats) as well as
+/// for a misaligned or inverted range or a range past the end of `raw`.
+pub fn block_expand(ty: GgmlType, raw: &[u8], e0: usize, e1: usize, out: &mut Vec<f32>) -> Result<(), String> {
+    let f = ty.block_decoder().ok_or_else(|| format!("gguf: block_expand: {} has no per-block decoder", ty.name()))?;
+    let be = ty.block_elems();
+    let bb = ty.block_bytes();
+    if !e0.is_multiple_of(be) || !e1.is_multiple_of(be) {
+        return Err(format!("gguf: block_expand range [{e0}, {e1}) is not block-aligned ({be})"));
     }
     if e1 < e0 {
-        return Err(format!("gguf: q8_0_expand range [{e0}, {e1}) is inverted"));
+        return Err(format!("gguf: block_expand range [{e0}, {e1}) is inverted"));
     }
-    let (b0, b1) = (e0 / Q8_0_BLOCK_ELEMS, e1 / Q8_0_BLOCK_ELEMS);
-    if b1 * BB > raw.len() {
-        return Err(format!("gguf: q8_0_expand needs {} bytes, tensor has {}", b1 * BB, raw.len()));
+    let (b0, b1) = (e0 / be, e1 / be);
+    if b1 * bb > raw.len() {
+        return Err(format!("gguf: block_expand needs {} bytes, tensor has {}", b1 * bb, raw.len()));
     }
     out.clear();
     out.reserve(e1 - e0);
     for b in b0..b1 {
-        deq_q8_0(&raw[b * BB..(b + 1) * BB], out);
+        f(&raw[b * bb..(b + 1) * bb], out);
     }
     Ok(())
+}
+
+/// [`block_expand`] pinned to Q8_0 - kept as a thin, differently-named
+/// wrapper because every existing caller (`gguf::int8_direct::try_i8_rect`)
+/// already spells this name and there is no reason to touch call sites that
+/// are not otherwise changing in this milestone.
+pub fn q8_0_expand(raw: &[u8], e0: usize, e1: usize, out: &mut Vec<f32>) -> Result<(), String> {
+    block_expand(GgmlType::Q8_0, raw, e0, e1, out)
 }
 
 /// f16 (ggml_half) at byte offset `i` in `b` → f32.
@@ -559,28 +751,34 @@ fn f16(b: &[u8], i: usize) -> f32 {
     half::f16::from_le_bytes([b[i], b[i + 1]]).to_f32()
 }
 
-/// Dequantize a tensor's raw bytes to `numel` fp32 values.
+/// Dequantize a tensor's raw bytes to `numel` fp32 values. Dispatches through
+/// [`GgmlType`] - the one type table - so this can never decode a type with a
+/// geometry [`block_geometry`]/[`tensor_nbytes`] disagree about.
 pub(crate) fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, String> {
-    match ty {
-        T_F32 => Ok(raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()),
-        T_F16 => Ok(raw.chunks_exact(2).map(|b| crate::safetensors::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect()),
-        T_BF16 => Ok(raw.chunks_exact(2).map(|b| crate::safetensors::bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect()),
-        T_Q4_0 => Ok(deq_blocks(raw, numel, 18, deq_q4_0)),
-        T_Q4_1 => Ok(deq_blocks(raw, numel, 20, deq_q4_1)),
-        T_Q5_0 => Ok(deq_blocks(raw, numel, 22, deq_q5_0)),
-        T_Q5_1 => Ok(deq_blocks(raw, numel, 24, deq_q5_1)),
-        T_Q8_0 => Ok(deq_blocks(raw, numel, 34, deq_q8_0)),
-        T_Q2_K => Ok(deq_blocks(raw, numel, 84, deq_q2_k)),
-        T_Q3_K => Ok(deq_blocks(raw, numel, 110, deq_q3_k)),
-        T_Q4_K => Ok(deq_blocks(raw, numel, 144, deq_q4_k)),
-        T_Q5_K => Ok(deq_blocks(raw, numel, 176, deq_q5_k)),
-        T_Q6_K => Ok(deq_blocks(raw, numel, 210, deq_q6_k)),
-        T_Q8_K => Ok(deq_blocks(raw, numel, 292, deq_q8_k)),
-        16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 29 | 34 | 35 | 39 => {
-            Err(format!("gguf: type {ty} (IQ/TQ/MXFP4 codebook) dequant not yet implemented"))
-        }
-        other => Err(format!("gguf: unsupported type {other}")),
-    }
+    let Some(t) = GgmlType::from_id(ty) else {
+        return match ty {
+            16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 29 | 34 | 35 | 39 => {
+                Err(format!("gguf: type {ty} (IQ/TQ/MXFP4 codebook) dequant not yet implemented"))
+            }
+            other => Err(format!("gguf: unsupported type {other}")),
+        };
+    };
+    Ok(match t {
+        GgmlType::F32 => raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
+        GgmlType::F16 => raw.chunks_exact(2).map(|b| crate::safetensors::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
+        GgmlType::BF16 => raw.chunks_exact(2).map(|b| crate::safetensors::bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
+        GgmlType::Q4_0 => deq_blocks(raw, numel, 18, deq_q4_0),
+        GgmlType::Q4_1 => deq_blocks(raw, numel, 20, deq_q4_1),
+        GgmlType::Q5_0 => deq_blocks(raw, numel, 22, deq_q5_0),
+        GgmlType::Q5_1 => deq_blocks(raw, numel, 24, deq_q5_1),
+        GgmlType::Q8_0 => deq_blocks(raw, numel, 34, deq_q8_0),
+        GgmlType::Q2K => deq_blocks(raw, numel, 84, deq_q2_k),
+        GgmlType::Q3K => deq_blocks(raw, numel, 110, deq_q3_k),
+        GgmlType::Q4K => deq_blocks(raw, numel, 144, deq_q4_k),
+        GgmlType::Q5K => deq_blocks(raw, numel, 176, deq_q5_k),
+        GgmlType::Q6K => deq_blocks(raw, numel, 210, deq_q6_k),
+        GgmlType::Q8K => deq_blocks(raw, numel, 292, deq_q8_k),
+    })
 }
 
 /// Walk `raw` block by block, appending each block's dequantized values, then
@@ -1059,6 +1257,15 @@ impl MmapGguf {
     /// through [`dequantize`] unchanged - this is purely an additional read
     /// path, not a replacement for the decoded one.
     pub fn raw_tensor_bytes(&self, name: &str) -> Option<(&[u8], u32)> {
+        // Deliberately NOT reimplemented on `raw_blocks` (below), even though
+        // both read the same `self.index` entry: this accessor's contract is
+        // "the bytes and the RAW type id, whatever it is" (its own doc: a
+        // parity test needs this for a type the reader cannot even
+        // dequantize), while `raw_blocks` declines for a type `GgmlType`
+        // does not recognize - `raw_blocks`' contract is "block format that
+        // DECODES them". `weightio::WeightReader::nbytes` depends on this
+        // one working for an unsupported quant type too; narrowing it would
+        // silently break that guarantee.
         let &(ty, start, nbytes, _numel) = self.index.get(name)?;
         Some((&self.mmap[start..start + nbytes], ty))
     }
@@ -1155,6 +1362,19 @@ impl crate::TensorSource for MmapGguf {
             .inspect(|_| {
                 self.meter.note(nbytes as u64);
             })
+    }
+
+    /// `name`'s already-quantized bytes, borrowed from the mapping, plus the
+    /// block format that decodes them. `None` when the name is unknown OR
+    /// when its ggml type has no [`GgmlType`] entry (an IQ/TQ/MXFP4
+    /// codebook) - a caller wanting the raw bytes of an unrecognized type
+    /// regardless wants [`Self::raw_tensor_bytes`], which has a wider
+    /// contract on purpose (see its doc).
+    fn raw_blocks(&self, name: &str) -> Option<(BlockLayout, &[u8])> {
+        let &(ty, start, nbytes, numel) = self.index.get(name)?;
+        let ty = GgmlType::from_id(ty)?;
+        self.meter.note(nbytes as u64);
+        Some((BlockLayout { ty, numel }, &self.mmap[start..start + nbytes]))
     }
 
     /// Element count of `name`, without decoding - known from the header for
@@ -2093,5 +2313,108 @@ mod tests {
         // "w" is F32, 6 elements = 24 bytes on disk, and every read is of the
         // whole tensor, so each one adds 24 to the cumulative counter.
         assert_eq!(mine, vec![(24, 24), (48, 24), (72, 24)]);
+    }
+
+    /// `GgmlType::from_id`/`id`/`name` must round-trip for every type this
+    /// reader decodes, and must agree EXACTLY with the standalone
+    /// `ggml_type_name`/`block_geometry` wrappers - those are now thin
+    /// wrappers over this enum, so a disagreement here would mean the "one
+    /// vocabulary" claim in `GgmlType`'s own doc is false.
+    #[test]
+    fn ggml_type_round_trips_and_agrees_with_the_wrapper_fns() {
+        let all = [
+            (T_F32, GgmlType::F32),
+            (T_F16, GgmlType::F16),
+            (T_BF16, GgmlType::BF16),
+            (T_Q4_0, GgmlType::Q4_0),
+            (T_Q4_1, GgmlType::Q4_1),
+            (T_Q5_0, GgmlType::Q5_0),
+            (T_Q5_1, GgmlType::Q5_1),
+            (T_Q8_0, GgmlType::Q8_0),
+            (T_Q2_K, GgmlType::Q2K),
+            (T_Q3_K, GgmlType::Q3K),
+            (T_Q4_K, GgmlType::Q4K),
+            (T_Q5_K, GgmlType::Q5K),
+            (T_Q6_K, GgmlType::Q6K),
+            (T_Q8_K, GgmlType::Q8K),
+        ];
+        for (id, ty) in all {
+            assert_eq!(GgmlType::from_id(id), Some(ty), "id {id}");
+            assert_eq!(ty.id(), id, "{ty:?} round trip");
+            assert_eq!(Some(ty.name()), ggml_type_name(id), "{ty:?} vs ggml_type_name");
+            assert_eq!(Some((ty.block_elems(), ty.block_bytes())), block_geometry(id), "{ty:?} vs block_geometry");
+        }
+        // Unknown ids (a codebook type, a scalar-array id, a genuinely
+        // invalid one) must decline, never guess.
+        for unknown in [9u32, 16, 24, 39, 999] {
+            assert_eq!(GgmlType::from_id(unknown), None, "id {unknown} must be unrecognized");
+            assert_eq!(block_geometry(unknown), None);
+            assert_eq!(ggml_type_name(unknown), None);
+        }
+    }
+
+    /// `block_expand` (Q4_K, whose sub-block scales are ALSO exercised here
+    /// since a naive generalization could silently drop the affine `dmin`
+    /// term) must be bit-identical to the whole-tensor `dequantize` for the
+    /// same range - the property the old `q8_0_expand`-only test suite never
+    /// checked for any type but Q8_0.
+    #[test]
+    fn block_expand_matches_whole_tensor_dequantize_for_q4_k() {
+        // Two super-blocks (512 elements), built with a real per-sub-block
+        // scale AND min spread so a hoisted scale/min would be visible -
+        // reuses the same encoder path `quantize.rs`'s round-trip test gates.
+        let vals: Vec<f32> = (0..512).map(|i| ((i as i64 * 7 - 250) % 97) as f32 * 0.25).collect();
+        let raw = crate::quant::quantize_par(T_Q4_K, &vals).unwrap();
+        let whole = dequantize(T_Q4_K, &raw, 512).unwrap();
+        assert_eq!(whole.len(), 512);
+
+        // A sub-range starting mid-tensor (not block 0 - lesson: a relayout
+        // that only gets block 0 right is exactly the bug this must catch).
+        let mut got = Vec::new();
+        block_expand(GgmlType::Q4K, &raw, 256, 512, &mut got).unwrap();
+        assert_eq!(got, whole[256..512], "block_expand must match the whole-tensor decode bit-for-bit");
+
+        // Misaligned/inverted/F32 refusals, never a silently-wrong geometry.
+        let mut scratch = Vec::new();
+        assert!(block_expand(GgmlType::Q4K, &raw, 0, 100, &mut scratch).is_err(), "100 is not a multiple of 256");
+        assert!(block_expand(GgmlType::Q4K, &raw, 256, 0, &mut scratch).is_err(), "inverted range");
+        assert!(block_expand(GgmlType::F32, &[0u8; 4], 0, 1, &mut scratch).is_err(), "F32 has no per-block decoder");
+
+        // `q8_0_expand` is `block_expand` pinned to Q8_0 - prove it stayed a
+        // real wrapper, not a copy that can drift.
+        let q8_raw = crate::quant::quantize_par(T_Q8_0, &vals[..64]).unwrap();
+        let q8_whole = dequantize(T_Q8_0, &q8_raw, 64).unwrap();
+        let mut q8_got = Vec::new();
+        q8_0_expand(&q8_raw, 0, 64, &mut q8_got).unwrap();
+        assert_eq!(q8_got, q8_whole);
+    }
+
+    /// `quant_label`'s fallback bug: a `general.file_type` id this reader's
+    /// table does not recognize must fall through to
+    /// `general.quantization_version`, not report a fabricated "unknown"
+    /// string that shadows the fallback.
+    #[test]
+    fn quant_label_falls_back_past_an_unrecognized_file_type() {
+        // Recognized: reports the name, ignores quantization_version.
+        let mut kv = BTreeMap::new();
+        kv.insert("general.file_type".to_string(), GgufValue::U32(7)); // Q8_0
+        kv.insert("general.quantization_version".to_string(), GgufValue::U32(2));
+        assert_eq!(quant_label(&kv), Some("Q8_0".to_string()));
+
+        // Unrecognized file_type id (e.g. a future MXFP4 ftype): falls back,
+        // rather than the old behavior of returning "unknown" outright.
+        let mut kv2 = BTreeMap::new();
+        kv2.insert("general.file_type".to_string(), GgufValue::U32(9999));
+        kv2.insert("general.quantization_version".to_string(), GgufValue::U32(2));
+        assert_eq!(quant_label(&kv2), Some("qver2".to_string()));
+
+        // Neither key present: None, not a fabricated label.
+        assert_eq!(quant_label(&BTreeMap::new()), None);
+
+        // file_type absent, quantization_version present: the pre-existing
+        // fallback path, unchanged.
+        let mut kv3 = BTreeMap::new();
+        kv3.insert("general.quantization_version".to_string(), GgufValue::U32(3));
+        assert_eq!(quant_label(&kv3), Some("qver3".to_string()));
     }
 }

@@ -329,6 +329,16 @@ impl crate::TensorSource for WeightReader {
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].numel(name),
         }
     }
+
+    /// Zero-fp32 path for GGUF - `None` for safetensors (nothing there is
+    /// "already quantized" in the sense this method serves; `raw_words`
+    /// already covers the case where safetensors bytes bind as-is).
+    fn raw_blocks(&self, name: &str) -> Option<(crate::gguf::BlockLayout, &[u8])> {
+        match &self.inner {
+            Inner::St(_) | Inner::StSharded(..) => None,
+            Inner::Gguf(m) => m.raw_blocks(name),
+        }
+    }
 }
 
 fn usize_to_u64(s: &[usize]) -> Vec<u64> {

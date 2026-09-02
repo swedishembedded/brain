@@ -504,6 +504,21 @@ impl checkpoint::TensorSource for SsmALogFix<'_> {
         self.inner.raw_words(name)
     }
 
+    /// Same rule as [`Self::raw_words`], written explicitly rather than
+    /// inherited from `RemapSource`'s forwarding: a zero-fp32 quantized-block
+    /// lend for a transformed leaf would hand a caller llama.cpp's
+    /// untransformed bytes, bypassing whichever fix that leaf needs exactly
+    /// as an inherited `raw_words` would have. Written out even though the
+    /// current default (declining) would happen to be correct here too - so
+    /// this rule survives a future change to what "declining" means, rather
+    /// than depending on it staying accidentally right.
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, &[u8])> {
+        if Self::needs_fix(name) {
+            return None;
+        }
+        self.inner.raw_blocks(name)
+    }
+
     /// Same rule as [`Self::raw_words`]: a transformed leaf is served whole,
     /// never streamed past the transform (every one of the eight fits well
     /// inside a single chunk at the real 27B shape - the largest,
@@ -1488,6 +1503,46 @@ mod tests {
         assert_eq!(other, untouched, "only A_log and dt_bias are transformed");
         assert!(src.raw_words("blocks.0.linear_attn.norm.weight").is_some(), "an untransformed leaf keeps its zero-copy path");
         assert_eq!(src.numel("blocks.0.linear_attn.A_log"), Some(6));
+    }
+
+    /// [`SsmALogFix::raw_blocks`]'s explicit refusal, over a REAL quantized
+    /// GGUF source so the bypass it prevents is reachable rather than
+    /// hypothetical - the same design note `the_streaming_loader_untransforms_
+    /// a_log_and_only_a_log` makes about `raw_words`, extended to the
+    /// zero-fp32 block path `raw_blocks` opens.
+    #[test]
+    fn raw_blocks_never_lends_the_untransformed_a_log_blocks() {
+        use checkpoint::gguf_write::{write, TensorOut};
+        use checkpoint::TensorSource;
+
+        // One Q8_0 block (32 elements) each, built through the real encoder
+        // rather than hand-assembled bytes.
+        let a_log_block = checkpoint::quant::quantize_par(checkpoint::gguf::TYPE_Q8_0, &[1.0f32; 32]).unwrap();
+        let dt_bias_block = checkpoint::quant::quantize_par(checkpoint::gguf::TYPE_Q8_0, &[2.0f32; 32]).unwrap();
+        let path = std::env::temp_dir().join(format!("brain-qwen35-ssmalogfix-rawblocks-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        write(
+            &path,
+            &[],
+            &[
+                TensorOut { name: "blocks.0.linear_attn.A_log".to_string(), shape: vec![32], ty: checkpoint::gguf::TYPE_Q8_0, data: a_log_block },
+                TensorOut { name: "blocks.0.linear_attn.dt_bias".to_string(), shape: vec![32], ty: checkpoint::gguf::TYPE_Q8_0, data: dt_bias_block },
+            ],
+            32,
+        )
+        .unwrap();
+        let mg = MmapGguf::open(&path).unwrap();
+        let names = vec!["blocks.0.linear_attn.A_log".to_string(), "blocks.0.linear_attn.dt_bias".to_string()];
+        let plan: HashMap<String, Fetch> = names.iter().map(|n| (n.clone(), Fetch::Whole(n.clone()))).collect();
+        let src = SsmALogFix { inner: RemapSource::new(&mg, plan) };
+
+        assert!(
+            src.raw_blocks("blocks.0.linear_attn.A_log").is_none(),
+            "a zero-fp32 block lend for the transformed leaf would bypass ElemOp::LnNeg entirely"
+        );
+        assert!(src.raw_blocks("blocks.0.linear_attn.dt_bias").is_some(), "an untransformed leaf keeps its zero-fp32 block path");
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// The endpoints are charged for what this resident ACTUALLY places, and

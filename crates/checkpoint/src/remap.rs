@@ -158,6 +158,31 @@ impl TensorSource for RemapSource<'_> {
         }
     }
 
+    /// Same shape as [`Self::raw_words`], for the already-quantized case: a
+    /// `Slice` must land on whole blocks (a quant block is the smallest
+    /// independently decodable unit - a cut through the middle of one has no
+    /// byte range that means anything on its own), and `Concat` declines for
+    /// the identical structural reason `raw_words` does.
+    fn raw_blocks(&self, name: &str) -> Option<(crate::gguf::BlockLayout, &[u8])> {
+        match self.plan.get(name)? {
+            Fetch::Whole(src) => self.inner.raw_blocks(src),
+            Fetch::Slice { name: src, start, len } => {
+                let (layout, bytes) = self.inner.raw_blocks(src)?;
+                let (be, bb) = (layout.block_elems(), layout.block_bytes());
+                if !start.is_multiple_of(be) || !len.is_multiple_of(be) {
+                    return None;
+                }
+                let end = start.checked_add(*len)?;
+                if end > layout.numel {
+                    return None;
+                }
+                let byte_range = (start / be * bb)..(end / be * bb);
+                Some((crate::gguf::BlockLayout { ty: layout.ty, numel: *len }, bytes.get(byte_range)?))
+            }
+            Fetch::Concat(_) => None,
+        }
+    }
+
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
         let Some(fetch) = self.plan.get(name) else { return false };
         match fetch {
@@ -364,5 +389,64 @@ mod tests {
         plan.insert("k".to_string(), Fetch::Slice { name: "a".to_string(), start: 2, len: 2 });
         let r = RemapSource::new(&inner, plan);
         assert!(r.validate(&[("q".to_string(), 2), ("k".to_string(), 2)]).is_ok());
+    }
+
+    /// `raw_blocks` forwarding: `Whole` passes through unchanged, a
+    /// block-aligned `Slice` returns exactly the right byte range with `len`
+    /// as its `numel` (not the source's), a non-block-aligned `Slice`
+    /// declines rather than widening, and `Concat` always declines - the
+    /// same shape `raw_words` already has, extended to the quantized case.
+    ///
+    /// Native-only: needs `MmapGguf`/`gguf_write`, which do not build on
+    /// wasm (`remap.rs` itself is portable and has no such gate).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn raw_blocks_forwards_whole_slices_block_aligned_and_declines_concat() {
+        use crate::gguf::{GgmlType, MmapGguf};
+        use crate::gguf_write::{write, TensorOut};
+
+        // Two Q8_0 blocks (64 elements): block 0 all d=1.0/q=5, block 1 all
+        // d=2.0/q=-3 - distinct enough that "which block did I get" is
+        // unambiguous from the decoded values, not just byte equality.
+        let mut data = Vec::new();
+        data.extend(half::f16::from_f32(1.0).to_le_bytes());
+        data.extend([5u8; 32]);
+        data.extend(half::f16::from_f32(2.0).to_le_bytes());
+        data.extend([(-3i8) as u8; 32]);
+        let path = std::env::temp_dir().join(format!("brain-remap-rawblocks-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        write(&path, &[], &[TensorOut { name: "w".to_string(), shape: vec![64], ty: crate::gguf::T_Q8_0, data }], 32).unwrap();
+        let mg = MmapGguf::open(&path).unwrap();
+
+        let mut plan = HashMap::new();
+        plan.insert("whole".to_string(), Fetch::Whole("w".to_string()));
+        plan.insert("blk1".to_string(), Fetch::Slice { name: "w".to_string(), start: 32, len: 32 });
+        plan.insert("unaligned".to_string(), Fetch::Slice { name: "w".to_string(), start: 10, len: 32 });
+        plan.insert("cat".to_string(), Fetch::Concat(vec![Fetch::Whole("w".to_string())]));
+        let r = RemapSource::new(&mg, plan);
+
+        // Whole: identical to asking the inner source directly.
+        let (whole_layout, whole_bytes) = r.raw_blocks("whole").expect("whole must forward");
+        let (mg_layout, mg_bytes) = crate::TensorSource::raw_blocks(&mg, "w").unwrap();
+        assert_eq!(whole_layout, mg_layout);
+        assert_eq!(whole_bytes, mg_bytes);
+
+        // Slice on a block boundary: exactly the second block's 34 bytes,
+        // decoding to the block-1 values, not block 0's.
+        let (blk1_layout, blk1_bytes) = r.raw_blocks("blk1").expect("block-aligned slice must forward");
+        assert_eq!(blk1_layout.ty, GgmlType::Q8_0);
+        assert_eq!(blk1_layout.numel, 32);
+        assert_eq!(blk1_bytes.len(), 34, "one Q8_0 block");
+        let mut decoded = Vec::new();
+        crate::gguf::block_expand(GgmlType::Q8_0, blk1_bytes, 0, 32, &mut decoded).unwrap();
+        assert!(decoded.iter().all(|&v| v == -6.0), "block 1 is d=2.0, q=-3 -> -6.0 everywhere, not block 0's 5.0: {decoded:?}");
+
+        // Non-block-aligned slice: declines, never widens to a wrong range.
+        assert!(r.raw_blocks("unaligned").is_none());
+
+        // Concat: no single contiguous byte range, same rule as raw_words.
+        assert!(r.raw_blocks("cat").is_none());
+
+        std::fs::remove_file(&path).ok();
     }
 }

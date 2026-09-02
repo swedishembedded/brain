@@ -71,15 +71,31 @@ use crate::gguf_write::{TensorPlan, Writer};
 
 /// The on-disk tier a conversion targets.
 ///
-/// Only the tier that has a consumer is here. Adding one is a variant plus
-/// its two accessors - the planner, the encoder and the writer are already
-/// generic over block geometry - but a tier nothing reads back is a tier
-/// nothing gates, so they land with their consumer rather than ahead of it.
+/// The planner, the encoder (`crate::quant::quantize`/`quantize_par`) and the
+/// writer are generic over block geometry, so a variant here is a row in each
+/// accessor, not new machinery. `Q4K`/`Q5K`/`Q6K` drop the `_` before `K`
+/// solely to satisfy `non_camel_case_types`, matching `GgmlType`'s naming
+/// (see its doc); [`Tier::name`] still spells them the conventional way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     /// 32 elements per block, one f16 scale + 32 signed bytes (34 B/block,
     /// 1.0625 B/weight). The tier brain's own int8 GEMM path is fed from.
     Q8_0,
+    /// 32 elements per block, one f16 scale + 16 packed nibbles (18 B/block,
+    /// 4.5 bits/weight). Legacy symmetric-with-bias-fold format.
+    Q4_0,
+    /// 32 elements per block, one f16 scale + 32 packed 5-bit codes
+    /// (22 B/block, 5.5 bits/weight).
+    Q5_0,
+    /// 256-element super-block, affine (`d*q - dmin*m`) with 8 sub-blocks of
+    /// 32 sharing packed 6-bit scale/min pairs (144 B/block, 4.5 bits/weight).
+    Q4K,
+    /// 256-element super-block, affine, 8 sub-blocks of 32
+    /// (176 B/block, 5.5 bits/weight).
+    Q5K,
+    /// 256-element super-block, symmetric, 16 sub-blocks of 16
+    /// (210 B/block, 6.5625 bits/weight).
+    Q6K,
 }
 
 impl Tier {
@@ -87,6 +103,11 @@ impl Tier {
     pub fn ggml_type(self) -> u32 {
         match self {
             Tier::Q8_0 => crate::gguf::T_Q8_0,
+            Tier::Q4_0 => crate::gguf::T_Q4_0,
+            Tier::Q5_0 => crate::gguf::T_Q5_0,
+            Tier::Q4K => crate::gguf::T_Q4_K,
+            Tier::Q5K => crate::gguf::T_Q5_K,
+            Tier::Q6K => crate::gguf::T_Q6_K,
         }
     }
 
@@ -94,7 +115,8 @@ impl Tier {
     /// must satisfy.
     pub fn block_elems(self) -> usize {
         match self {
-            Tier::Q8_0 => 32,
+            Tier::Q8_0 | Tier::Q4_0 | Tier::Q5_0 => 32,
+            Tier::Q4K | Tier::Q5K | Tier::Q6K => crate::gguf::QK_K,
         }
     }
 
@@ -102,6 +124,11 @@ impl Tier {
     pub fn name(self) -> &'static str {
         match self {
             Tier::Q8_0 => "Q8_0",
+            Tier::Q4_0 => "Q4_0",
+            Tier::Q5_0 => "Q5_0",
+            Tier::Q4K => "Q4_K",
+            Tier::Q5K => "Q5_K",
+            Tier::Q6K => "Q6_K",
         }
     }
 }
@@ -389,5 +416,66 @@ mod tests {
         );
         let small = Policy::new().min_elems(1024);
         assert_eq!(small.decide("tiny.weight", &[2, 32], Tier::Q8_0), Decision::Keep(Kept::TooSmall { numel: 64, min: 1024 }));
+    }
+
+    /// Every K-quant/legacy tier this milestone adds has geometry consistent
+    /// with `GgmlType`'s own table, and Q4_K in particular actually runs
+    /// end-to-end through `plan`/`convert`/`MmapGguf` unchanged - the
+    /// planner, encoder (`crate::quant::quantize_par`) and writer are
+    /// GENERIC over block geometry, so a new `Tier` variant is a row in each
+    /// accessor, not new machinery, and this is the proof of that rather than
+    /// an assumption of it.
+    #[test]
+    fn every_new_tier_has_consistent_geometry_and_q4k_round_trips() {
+        use std::collections::HashMap;
+
+        for (tier, want_id, want_name, want_elems) in [
+            (Tier::Q4_0, crate::gguf::T_Q4_0, "Q4_0", 32),
+            (Tier::Q5_0, crate::gguf::T_Q5_0, "Q5_0", 32),
+            (Tier::Q4K, crate::gguf::T_Q4_K, "Q4_K", 256),
+            (Tier::Q5K, crate::gguf::T_Q5_K, "Q5_K", 256),
+            (Tier::Q6K, crate::gguf::T_Q6_K, "Q6_K", 256),
+        ] {
+            assert_eq!(tier.ggml_type(), want_id, "{want_name} ggml_type");
+            assert_eq!(tier.name(), want_name);
+            assert_eq!(tier.block_elems(), want_elems, "{want_name} block_elems");
+        }
+
+        // k = 512 = two 256-element super-blocks, so a real k-loop with two
+        // independently-scaled super-blocks runs, not a degenerate single one.
+        let (n_rows, k) = (2usize, 512usize);
+        let data: Vec<f32> = (0..n_rows * k)
+            .map(|i| ((i as i64).wrapping_mul(2_654_435_761) % 2003 - 1001) as f32 / 97.0)
+            .collect();
+        let mut src: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+        src.insert("w".to_string(), (vec![n_rows, k], data.clone()));
+
+        let path = std::env::temp_dir().join(format!("brain-quantize-tier-q4k-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        let report = convert(&src, Tier::Q4K, &Policy::new(), &[], &path, &mut |_, _| {}).unwrap();
+        assert_eq!(report.quantized(), 1);
+        assert_eq!(report.rows[0].ty, crate::gguf::T_Q4_K);
+
+        let mg = crate::gguf::MmapGguf::open(&path).unwrap();
+        assert_eq!(mg.dtype("w"), Some("Q4_K"));
+        let got = mg.tensor("w").unwrap().unwrap();
+        assert_eq!(got.len(), data.len());
+
+        // Cosine AND rel_l2 - lesson #2: cosine alone cannot see a dropped
+        // scale factor, so a quantized-quality gate must assert both.
+        let dot: f64 = data.iter().zip(&got).map(|(&a, &b)| a as f64 * b as f64).sum();
+        let na: f64 = data.iter().map(|&a| (a as f64).powi(2)).sum::<f64>().sqrt();
+        let nb: f64 = got.iter().map(|&b| (b as f64).powi(2)).sum::<f64>().sqrt();
+        let cosine = dot / (na * nb);
+        let err: f64 = data.iter().zip(&got).map(|(&a, &b)| (a as f64 - b as f64).powi(2)).sum::<f64>().sqrt();
+        let rel_l2 = err / na;
+        // A loose floor - this proves the PIPELINE wires a K-quant tier
+        // through correctly, not a claim about Q4_K's numeric quality (that
+        // is `crate::quant`'s own `every_type_meets_its_quality_floor`, and
+        // the M8 relayout gate's job, not this one's).
+        assert!(cosine > 0.99, "cosine {cosine} too low for a working Q4_K round trip");
+        assert!(rel_l2 < 0.15, "rel_l2 {rel_l2} too high for a working Q4_K round trip");
+
+        std::fs::remove_file(&path).ok();
     }
 }

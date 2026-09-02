@@ -26,6 +26,7 @@ pub mod weightio;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod load_progress;
 pub mod remap;
+pub mod srccheck;
 pub mod torchpt;
 pub mod zipread;
 #[cfg(test)]
@@ -100,6 +101,40 @@ pub trait TensorSource {
     /// Element count of `name`, if cheaply known without decoding. Default:
     /// unknown (`None`) — callers that need it fall back to `with_tensor`.
     fn numel(&self, _name: &str) -> Option<usize> {
+        None
+    }
+
+    /// [`raw_words`](Self::raw_words)'s sibling for storage that is NOT what
+    /// the device binds but IS something a caller can consume without an fp32
+    /// round trip - `name`'s bytes exactly as the source holds them, plus the
+    /// block format that decodes them. The zero-fp32 path a Q8_0 tensor takes
+    /// on its way to brain's packed-int8 layout
+    /// (`gguf::int8_direct::try_i8_rect`), or a K-quant tensor uploaded
+    /// verbatim to a kernel that decodes blocks in WGSL, both go through
+    /// this.
+    ///
+    /// The lend is the WHOLE tensor; a caller wanting a sub-rectangle slices
+    /// it itself using `layout.block_elems()`/`block_bytes()` to find the cut
+    /// points - a quant block is the smallest independently decodable unit,
+    /// so there is no meaningful finer-grained lend. Borrowed from the
+    /// source's own storage: no allocation, valid for the lifetime of `&self`.
+    ///
+    /// Unlike [`raw_words`](Self::raw_words) there is no alignment
+    /// precondition - `&[u8]` has nothing to align - so a correct
+    /// implementation reports `Some` for every tensor whose on-disk
+    /// representation is a known quantized block format, not selectively.
+    ///
+    /// Default: `None`, "this source has no quantized representation to
+    /// lend". Correct for every f32-backed source (a plain `HashMap`,
+    /// safetensors) and - the case that matters - for ANY wrapper that
+    /// transforms tensor VALUES on read. A transform applied on
+    /// [`with_tensor`](Self::with_tensor) but skipped here would hand the
+    /// caller PRE-transform bytes, silently, and it is weights: see
+    /// `qwen35::int8_gguf_resident::SsmALogFix`'s explicit refusal for the
+    /// worked example, and `remap::RemapSource`'s `Fetch::Concat` arm for the
+    /// structural case (a destination assembled from several source pieces
+    /// has no single contiguous block range to lend).
+    fn raw_blocks(&self, _name: &str) -> Option<(gguf::BlockLayout, &[u8])> {
         None
     }
 }
