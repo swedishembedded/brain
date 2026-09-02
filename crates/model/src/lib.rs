@@ -62,6 +62,7 @@ pub mod shard;
 pub mod train;
 pub mod vit;
 pub mod vlm;
+pub mod yarn;
 
 pub use collective::{Collective, HostCollective};
 #[cfg(not(target_arch = "wasm32"))]
