@@ -1900,6 +1900,80 @@ Full `brain-glmdsa` suite green (26 tests). `cargo clippy -p brain-model
 warnings. **Commits**: two (`crates/model` fix + tests, then the
 `crates/glmdsa` call-site migration).
 
+### M5.5 - Q4/W4A8: `matmul_q4_dyn_reg` is a clean win, `matmul_q4_gemv_reg` is a killed hypothesis
+
+Two kernels, matching the table's own count for this family. Both close
+this ledger's own "Q4 uses zero `dot4I8Packed` - 8 scalar MACs per weight
+word" finding by unpacking a weight word's 8 nibbles into two DP4A-packed
+int8 words and feeding two `dot4I8Packed` calls instead of 8 scalar
+sign-extend-multiply-adds; `matmul_q4_gemv_reg` additionally moves its
+row accumulators from an `array<f32, 2048>` workgroup array sized for the
+`m = 32` worst case into per-thread registers (the same occupancy fix
+`matmul_i8_gemv_reg` already proved for int8).
+
+**`matmul_q4_dyn_reg` (128x128 register-tiled, mirroring `matmul_i8_dyn`'s
+shape): a clean win at every measured shape, closed and wired nowhere yet
+by design.** Measured against the naive `matmul_q4_dyn` at k=n=2048, m
+swept 32..2048: 2.02x at m=32, rising to 12.56x at m=2048 - growing with
+`m` exactly as expected for a register-tiled GEMM replacing one thread
+per output element. Bit-identical to `matmul_q4_dyn` (the per-word integer
+product sum is exact under any reassociation, and both kernels fold groups
+in the same ascending order), verified in `crates/model/tests/
+matmul_q4_gemm.rs` across a guard-clamped small shape, a multi-tile shape,
+and a shape with a ragged `m`/`n` tail. Unlike its int8 sibling
+`matmul_i8_dyn`, it keeps the simpler k-major scalar-shared-load tile style
+(`matmul_reg3`/`matmul_i8.wgsl`'s shape) rather than the vec4/k-group-minor
+throughput optimisation - a deliberate, documented deferral (no production
+model dispatches q4 tiled GEMMs yet to profile against), not an oversight.
+Not wired into any selector or model dispatch path in this milestone -
+`model::dispatch::mm4_rows_off`/`model::block::gemm_variant` (the actual
+production q4 dispatch path for `wan`/`ltxv`/`qwen35`/`qwen35moe`) is the
+"bespoke selector" Phase 1's own M1.2 is scoped to migrate away from, and
+migrating any of those four models' `GemmVariants::Fast.tiled` registration
+onto this kernel is left as that phase's follow-up rather than force-fit
+into a kernel-family milestone - matching the B3-B10 façade precedent this
+tree already follows ("build it, prove it, migrate later").
+
+**`matmul_q4_gemv_reg`: measured, found NOT to win at every shape, and
+NOT wired in - a killed hypothesis, not a silent drop.** The kernel was
+first wired into `gpu_core::upgrade`'s zero-edit seam exactly like its
+`matmul_gemv_reg`/`matmul_i8_gemv_reg` siblings (same `MREG` bucket ladder,
+same knob index), and its own correctness test
+(`crates/gpu-core/tests/q4_gemv_reg_upgrade.rs`, bit-identical to
+`matmul_q4_gemv` across m=1..32 at four shapes) passed cleanly on real
+Tesla P40 hardware. The SPEED measurement did not: dispatched against
+`matmul_q4_gemv` at k=n=2048, the un-templated `MREG = 32` build measured
+15-29% SLOWER at m=1..16 and a statistical wash (1.01x) at m=32 - repeating,
+on this box's own first pass, exactly the "a single worst-case
+specialisation is a regression at small parameters" mistake this module's
+own header already documents for the fp32 sibling, since the raw
+`matmul_q4_gemv_reg` name (not the per-`m`-bucket template variant) is what
+got measured. A corrected per-bucket re-measurement
+(`crates/model/tests/matmul_q4_speed_bench.rs`, dispatching the exact
+`kernels::template::interned` variant the real bucket ladder would pick per
+`m`) was built and queued but could not complete before this milestone's
+time closed, on a box saturated by concurrent campaign work (sustained
+load average above 70). Given the module's own bar #3 requires a win "at
+every shape... no regime the caller would have wanted to opt out of", and
+the only completed hardware measurement shows a real, consistent loss
+across most of the decode regime, the `gpu_core::upgrade` wiring and its
+test were reverted rather than shipped unverified. The kernel itself, and
+its own bit-identical-to-`matmul_q4_gemv` correctness test in
+`crates/model/tests/matmul_q4_gemm.rs`, stay - it is available by name for
+a caller with a verified shape, just not silently substituted everywhere.
+**Follow-up**: re-run `matmul_q4_speed_bench.rs`'s `gemv_vs_gemv_reg_
+across_decode_rows` test (per-bucket, not the plain registered name) once
+this box is quiet, and re-wire the `gpu_core::upgrade` row only if it wins
+at every `m` in the bucket ladder.
+
+`kernels-table/check`, `cargo clippy -p brain-kernels -p brain-gpu-core -p
+brain-model --all-targets`, and the full `brain-kernels`/`brain-gpu-core`/
+`brain-model` suites all green on real Tesla P40 hardware
+(`BRAIN_DEVICE=gpu`). **Commits**: four (`brain-kernels`: both new WGSL
+kernels; `brain-gpu-core`: the `matmul_q4_gemv_reg` upgrade wiring;
+`brain-model`: correctness + speed A/B tests for both kernels; the
+`gpu-core` upgrade-wiring revert once the speed regression was measured).
+
 ---
 
 ## Not yet done
