@@ -1742,6 +1742,99 @@ before - only its thread-to-output mapping changed). **Commits**: one
 backward-GEMM follow-ups above are unbuilt, recorded for a future pass to
 pick up rather than left undocumented).
 
+### M5.3 - Conv family: two "fast kernel nobody wired" fixes (`Op::Conv3d`, `Op::Conv2dBackward`), the rest checked and scoped out
+
+Per `kernels.md` §A ("does a good kernel already exist") every existing
+`_reg`/im2col-GEMM lowering for the conv family (`conv2d{,_dw,_dx}`,
+`conv3d*`, `convtr*`, `dwconv3d*` - 17 `@opt-1` + 16 `@opt-2` in the
+3+-nested-serial-reduction class) was checked against source before writing
+anything new. Two already-shipped, already-measured GEMM lowerings turned
+up sitting on a LOCAL hand-rolled threshold instead of the shared
+selector - exactly the pattern §A warns about, and the same asymmetry
+`Op::Conv2d`'s own forward migration (M1.1) already closed for conv2d's
+forward half:
+
+* `vae::blocks3d::Builder3d::conv_step` (conv3d forward: `im2col3d_at` +
+  `matmul_reg3` + `nlc_bias_nchw` vs the naive `conv3d`) - and unlike
+  `Op::Conv2d`'s own `conv_s`, this one had NO capability check at all
+  before choosing the lowering, an asymmetry now closed by inheriting
+  `RegisterTiled`'s established `workgroup_reductions` requirement rather
+  than re-deriving a bespoke rule.
+* `vae::blocks::grad`'s `Op::Conv` adjoint (conv2d backward, both dW and
+  dX: `im2col_at` + `matmul_dw_reg`{,`_splitk`} + `dw_splitk_reduce` and
+  `matmul_dx_reg` + `col2im` vs the naive `conv2d_dw`/`conv2d_dx`) -
+  already correctly capability-gated; migrated behaviour-preservingly.
+
+Landed as `Op::Conv3d`/`Op::Conv2dBackward` in `backend_api::select`
+(commit `09d0f0df`, its own tight first commit per this campaign's
+contention rule for that file), mirroring `Op::Conv2d`'s exact shape and
+thresholds (`GEMM_CONV3D_MIN_COUT`/`_MIN_POS` = the same 32/128
+`vae::blocks3d` already carried; `GEMM_CONV_BWD_MIN_COUT` = the same 32
+`vae::blocks::grad` already carried - `Op::Conv2d`'s own doc had already
+flagged this constant as landing at the identical crossover without being
+migrated). TDD: `conv3d_is_gated_on_both_pos_and_cout_and_on_workgroup_
+reductions` and `conv2d_backward_is_gated_on_cout_and_on_workgroup_
+reductions` referenced the new Op variants and failed to compile before
+the arms existed. Wired both call sites (commit `aa2db967`).
+
+Verified: full `brain-backend-api` (43 tests) and `brain-vae` suites
+green, `cargo clippy --all-targets` clean on both; `brain-wan`/`brain-ltxv`
+(`blocks3d.rs`'s real consumers) build and clippy clean; `check_vqgan_
+lowered`'s dedicated FD gate for the GEMM-lowered conv2d backward
+(`vqgan_lowered_conv_backward_matches_finite_differences`, already
+existing from the audit finding that motivated the original un-migrated
+threshold) stays green (`vqgan_gradients_match_finite_differences` too).
+
+**Landed against an actively-interleaved file.** A concurrent session's
+M5.7 (`bias_grad` -> `bias_grad_part`/`bias_grad_final`) work was mid-edit
+in the SAME functions of `vae::blocks.rs`/`vae::blocks/grad.rs` this
+milestone touches. Isolated per lesson #83's procedure: diffed the live
+(mine+theirs) content against `HEAD`, reconstructed a mine-only version,
+verified it builds/tests clean, committed that, then restored the live
+combined content on top untouched. A plain `git commit` with no pathspec
+on the first attempt still swept up two OTHER sessions' unrelated
+already-staged files (`kernels/src/lib.rs`'s Q4 registrations, `gpu-core/
+src/cost.rs`'s cost-model additions), caught immediately from the
+commit's own stat output and corrected with two narrow revert-and-restore
+commits (`ced13423`, `4b144f8b`) using the pathspec form of `git commit` -
+written up as lesson #84.
+
+**Rest of the family, checked and explicitly out of scope:**
+
+* `conv2d_gd`/`conv2d_gd_dw`/`conv2d_gd_dx` (grouped/dilated) - forward
+  already has a register-tiled sibling (`conv2d_gd_reg`), but reached
+  through `vision::blocks::Conv`'s own registration-driven tree (no
+  `DeviceCaps` read anywhere), already recorded as its own out-of-scope
+  decision by M1.1's Conv2d verdict table. Backward has no fast sibling
+  anywhere in the tree - new-kernel work.
+* `conv3d_dw`/`conv3d_dx` - `vae::blocks3d`'s own doc: "Inference only ...
+  nothing trains this graph yet." No caller dispatches these at all today,
+  so there is no selection bug to fix.
+* `convtr2d{,_dw,_dx}` - no GEMM lowering exists anywhere (bare dispatch
+  only, in `sam2`). A transposed-2D conv's GEMM lowering is the harder
+  TN-form case `kernels.md` §D already flags (no chunkable axis) -
+  new-kernel design work.
+* `dwconv3d{,_dw,_dx}` - depthwise convs do not lower to a GEMM in this
+  codebase's convention (`vae::blocks3d`'s own comment: "depthwise has its
+  own kernel"); no cooperative/register-tiled sibling exists anywhere -
+  new-kernel work.
+* `conv1d`/`convtr1d` forward are already correctly migrated
+  (`Op::Conv1d`/`Op::ConvTranspose1d`, pre-dating this campaign); their
+  backward halves (`conv1d_dw`/`_dx`, `convtr1d_dw`/`_dx`) have no GEMM
+  lowering anywhere either - new-kernel work, same class as the two
+  bullets above.
+* `conv_act`/`conv_bias` (fused epilogues) - already reached through the
+  SAME `Op::Conv2d`/`Op::Conv2dBackward` decisions as their un-fused
+  siblings (`conv_bias_reg` IS `Op::Conv2d`'s `Reference` kernel) - no
+  separate action needed.
+
+This closes the two real "already exists, not wired" findings the family
+sweep turned up; the remaining kernels across `conv2d_gd` backward,
+`conv3d` backward, `convtr2d*`, `dwconv3d*`, and `conv1d`/`convtr1d`
+backward genuinely have no faster kernel anywhere in the tree to select -
+each needs new WGSL authored, gated, and swept per §F end to end, which is
+real Phase 5 backlog, not this pass's scope.
+
 ---
 
 ## Not yet done
