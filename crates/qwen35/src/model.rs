@@ -1102,7 +1102,17 @@ impl Qwen35 {
         // Text-only: every axis of the M-RoPE table carries the same plain
         // sequential position, reset per sequence (row = batch*t + pos).
         let positions: Vec<[u32; 3]> = (0..b).flat_map(|_| (0..t).map(|ti| [ti, ti, ti])).collect();
-        let (cos, sin) = qwen3vl::mrope::mrope_tables(&positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta);
+        // `yarn_scaling()` is `None` unless `cfg.rope_scaling` is set, which
+        // makes this call bit-for-bit today's plain `mrope_tables` output -
+        // see `Qwen35Config::yarn_scaling`'s own doc.
+        let yarn = cfg.yarn_scaling();
+        let (cos, sin) = qwen3vl::mrope::mrope_tables_scaled(
+            &positions,
+            cfg.mrope_section,
+            cfg.rotary_dim(),
+            cfg.rope_theta,
+            yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)),
+        );
         let cos = gpu.storage_init("qwen35.rope_cos", &cos);
         let sin = gpu.storage_init("qwen35.rope_sin", &sin);
 
@@ -2605,7 +2615,14 @@ impl Qwen35 {
         let half = c.rotary_dim() / 2;
         // Once per POSITION, not once per GQA layer - see `dec_rope_pos`.
         if self.dec_rope_pos.get() != Some(pos) {
-            let (cos_row, sin_row) = qwen3vl::mrope::mrope_tables(&[[pos, pos, pos]], c.mrope_section, c.rotary_dim(), c.rope_theta);
+            let yarn = c.yarn_scaling();
+            let (cos_row, sin_row) = qwen3vl::mrope::mrope_tables_scaled(
+                &[[pos, pos, pos]],
+                c.mrope_section,
+                c.rotary_dim(),
+                c.rope_theta,
+                yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)),
+            );
             g.write_f32(&self.dec_cos, &cos_row);
             g.write_f32(&self.dec_sin, &sin_row);
             self.dec_rope_pos.set(Some(pos));

@@ -163,6 +163,13 @@ pub fn config_from_gguf(mg: &MmapGguf) -> Result<Qwen35Config, String> {
 
         intermediate_size: kv.req_u32("feed_forward_length")?,
 
+        // GGUF YaRN KV (llama.cpp's `qwen35.rope.scaling.*` convention) is
+        // not read here - out of this task's scope, which wires YaRN through
+        // the HF-style `config.json` `rope_scaling` path only (see
+        // `Qwen35Config::from_json`). A GGUF checkpoint imports as unscaled
+        // RoPE until that KV is wired too.
+        rope_scaling: None,
+
         lora: None,
         mtp: true,
     })
