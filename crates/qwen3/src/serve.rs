@@ -125,6 +125,19 @@ const KV_SCATTER: usize = 36;
 // correctly, in several passes each within the limit. See `Engine::
 // embed_tiled`.
 const EMBED_TILE: usize = 37;
+// Column-tiled fp32 GEMM: `out[:, n_off..n_off+n_tile] = x @ Wᵀ`, `W` bound as
+// a vocab/output-row SUB-RANGE while `out` stays a whole (unsliced) binding -
+// `matmul_tile.wgsl`'s own `n_off`/`n_full` params place each tile's columns
+// at the right STRIDED offset of a `[m, n_full]` row-major buffer, which no
+// `step_sliced` byte-range alone could express. `Self::mm_into` reaches for
+// this only when a `[n, k]` weight cannot be bound whole at all
+// (`Self::fits_one_binding`) - the LM head at a real vocab is the one weight
+// this engine holds that can cross `max_storage_buffer_binding_size`.
+// `qwen3::model::Qwen::forward`'s own lm_head epilogue already uses exactly
+// this kernel and tiling rule (`model::block::vocab_tiles_on`) for the same
+// reason; this ports it here, generalised to `m > 1` rows (a batched decode
+// step's `bsz`, not just a single decode row).
+const MATMUL_TILE: usize = 38;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -165,6 +178,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("kv_block_gather", kernels::KV_BLOCK_GATHER),
     ("kv_block_scatter", kernels::KV_BLOCK_SCATTER),
     ("embed_tile", kernels::EMBED_TILE),
+    ("matmul_tile", kernels::MATMUL_TILE),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -1182,6 +1196,43 @@ impl Engine {
         self.gpu.step(kind, &[x, w, out], &[m, k, n], threads)
     }
 
+    /// Whether a `[n, k]` fp32 weight fits ONE storage binding on this device.
+    /// `wgpu` clamps `max_storage_buffer_binding_size` to `i32::MAX` (2047
+    /// MiB) on every backend regardless of a card's actual VRAM, so this is a
+    /// real ceiling any `[n, k]` table can cross at large enough `n` (the
+    /// per-layer projections never approach it - bounded by `d_model`/`d_ff`
+    /// - but the LM head's `n = vocab` does at a real vocabulary size, e.g.
+    /// Qwen3-8B's 151936 x 4096 = ~2.32 GiB). `Self::mm_into` is this check's
+    /// only caller.
+    fn fits_one_binding(&self, k: u32, n: u32) -> bool {
+        (n as u64) * (k as u64) * 4 <= self.gpu.max_storage_binding_bytes()
+    }
+
+    /// [`Self::mm`], but for a `[n, k]` weight [`Self::fits_one_binding`]
+    /// says cannot be bound whole at all: `w` is bound as vocab/output-row
+    /// SUB-RANGES (`step_sliced`), one [`MATMUL_TILE`] dispatch per tile,
+    /// each tile's weight rows sized under the device's queried binding
+    /// limit ([`block::vocab_tiles_on`] - the SAME rule and the SAME kernel
+    /// `qwen3::model::Qwen::forward`'s own lm_head epilogue already uses for
+    /// this exact gap, ported here and generalised to `m > 1` rows). `out`
+    /// stays a WHOLE (unsliced) binding: a tile's columns are a STRIDED
+    /// slice of the `[m, n]` row-major output (`out[row*n + n_off + col]`),
+    /// which no `step_sliced` byte-range could express - `matmul_tile.wgsl`'s
+    /// own `n_off`/`n_full` params place each tile at the right absolute
+    /// column instead.
+    fn mm_tiled_into(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
+        let kw = k as u64;
+        for (n_off, n_tile) in block::vocab_tiles_on(&self.gpu, n as u64, kw) {
+            s.push(self.gpu.step_sliced(
+                MATMUL_TILE,
+                &[x, w, out],
+                &[(0, 0), (n_off as u64 * kw, n_tile as u64 * kw), (0, 0)],
+                &[m, k, n, n_off, n_tile],
+                m * n_tile,
+            ));
+        }
+    }
+
     /// [`Self::mm`], but free to emit MORE than one dispatch: the split-K GEMM
     /// needs a fold after it.
     ///
@@ -1190,7 +1241,17 @@ impl Engine {
     /// `matmul_dw_reg_splitk`, which is the identical defect on the backward.
     /// `slices = 1` means the plain kernel, so a shape that already fills the
     /// card is untouched.
+    ///
+    /// Checked ahead of split-K, not after: a weight too large for one
+    /// binding at all is a correctness gap, not a performance choice, and
+    /// `Self::mm_tiled_into`'s only real caller (the LM head) dispatches at
+    /// decode row counts anyway, where `Self::splitk_slices` already declines
+    /// (`m <= DECODE_REGIME_MAX_ROWS`).
     fn mm_into(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
+        if !self.fits_one_binding(k, n) {
+            self.mm_tiled_into(s, x, w, out, m, k, n);
+            return;
+        }
         match self.splitk_slices(m, k, n) {
             Some(slices) => {
                 let tiles = m.div_ceil(128) * n.div_ceil(128);
@@ -3573,6 +3634,139 @@ mod tests {
         let fused_up = g.read(&eng.sc.up, (rows * ff) as usize);
         assert_eq!(fused_gate, split_matmul(&eng.sc.xn2, "mlp.gate.weight", ff), "fused gate must be bit-identical to a split mlp.gate GEMM");
         assert_eq!(fused_up, split_matmul(&eng.sc.xn2, "mlp.up.weight", ff), "fused up must be bit-identical to a split mlp.up GEMM");
+    }
+
+    /// RED before `Self::fits_one_binding`/`Self::mm_tiled_into` existed:
+    /// `Self::mm_into` dispatched EVERY fp32 GEMM (including the LM head,
+    /// `Self::head_steps`'s `n = vocab`) through `Self::mm`, which binds `w`
+    /// WHOLE - a plain `gpu.step`, no `step_sliced`. wgpu clamps
+    /// `max_storage_buffer_binding_size` to `i32::MAX` (2047 MiB) on every
+    /// backend regardless of a card's actual VRAM, so a `[n, k]` weight past
+    /// that panics in `Device::create_bind_group` before a single logit is
+    /// computed - independent of `--weights-int8` (which quantizes the head
+    /// down to ~1/4 size and usually sidesteps this, but the fp32 tier this
+    /// device falls back to without that flag, or on a device with no
+    /// packed-int8 path, does not).
+    ///
+    /// This is deliberately NOT routed through `Engine::prefill`/a real
+    /// vocab: this tree's `Self::batched_tape` still dispatches the
+    /// token-embedding gather (`tok.weight`) as one untiled binding too (a
+    /// separate, already-landed fix elsewhere), so a vocab past the cap would
+    /// panic THERE first and never reach the head at all. Calling
+    /// `Self::mm_into` directly - exactly [`fused_qkv_and_gateup_are_bit_
+    /// identical_to_split`]'s own pattern of dispatching `Self::mm`/`Self::
+    /// mm_into` against a hand-built weight buffer - isolates the head/logits
+    /// binding-size gap from that unrelated one.
+    #[test]
+    fn head_matmul_over_binding_cap_does_not_panic() {
+        // `head_matmul_tiled_matches_untiled_within_tolerance` holds this same
+        // lock while it mutates the process-global `BRAIN_TILE_BUDGET_WORDS`
+        // env var. Cargo runs `#[test]`s on parallel threads in one process,
+        // and without this guard the two can race: if this test's dispatch
+        // happens to run while the other has forced the tile budget down to
+        // 128 words, `block::vocab_tiles_on` would slice THIS test's ~8.4M-row
+        // synthetic weight into millions of separate `MATMUL_TILE` dispatches
+        // instead of the handful the real (unmodified) budget produces -
+        // measured: minutes of 99% CPU and tens of GB RSS building `Step`s,
+        // not a correctness failure, but indistinguishable from a hang.
+        let _guard = brain_testutil::env_lock();
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 12, 8, false, false);
+        let g = &eng.gpu;
+
+        // A synthetic [n, k] fp32 weight sized to exceed THIS device's real
+        // queried binding cap - the same class of shape Qwen3-8B's real
+        // untied lm_head (151936 x 4096, ~2.32 GiB) presents on a P40 (2047
+        // MiB). Zero-initialized (`gpu.storage`, no host upload): the values
+        // are irrelevant to whether the dispatch panics.
+        let k = 64u32;
+        let budget = g.max_storage_binding_bytes();
+        let n = (budget / (k as u64 * 4)) as u32 + 4096;
+        let bytes = n as u64 * k as u64 * 4;
+        assert!(bytes > budget, "test shape must itself exceed the binding cap ({bytes} vs {budget})");
+
+        let x = g.storage_init("t_head_x", &vec![0.01f32; k as usize]);
+        let w = g.storage(n as u64 * k as u64);
+        let out = g.storage(n as u64);
+
+        let mut steps = Vec::new();
+        eng.mm_into(&mut steps, &x, &w, &out, 1, k, n);
+        g.submit(&[], &steps);
+        g.poll_wait();
+    }
+
+    /// Correctness gate: `Self::mm_tiled_into` (several `MATMUL_TILE`
+    /// dispatches, each binding a weight-row SUB-RANGE, writing the OUTPUT'S
+    /// strided column slice via `n_off`/`n_full`) must agree with `Self::mm`
+    /// (the single-dispatch production kernel `Self::mm_into` used for every
+    /// GEMM before this weight's `[n, k]` size could exceed the binding cap)
+    /// within GPU reduction-order tolerance - not bitwise, since the two
+    /// dispatch different physical kernels (`Self::mm` may pick the
+    /// register-tiled/GEMV fast kernel; `Self::mm_tiled_into` always uses the
+    /// naive per-element `matmul_tile`), and floating-point addition is not
+    /// associative across different summation orders. Same tolerance
+    /// [`admission_head_matches_a_true_host_matvec_within_tolerance`] already
+    /// uses for exactly this reason.
+    ///
+    /// `n`/`k` stay tiny (well under the real binding cap) so the fast path
+    /// would ordinarily never tile at all; `BRAIN_TILE_BUDGET_WORDS` forces
+    /// [`Self::mm_tiled_into`]'s own tile split (via `block::vocab_tiles_on`)
+    /// down to a few rows per tile, so this exercises MULTIPLE dispatches and
+    /// checks output columns at tile boundaries, not just the trivial
+    /// one-tile case.
+    #[test]
+    fn head_matmul_tiled_matches_untiled_within_tolerance() {
+        let _guard = brain_testutil::env_lock();
+        let prev = std::env::var("BRAIN_TILE_BUDGET_WORDS").ok();
+        // k=8 words/row -> a 128-word budget is 16 rows/tile; n=40 columns
+        // splits into tiles [0,16) [16,32) [32,40) - two full boundaries and
+        // a ragged last tile, all inside one small dispatch.
+        std::env::set_var("BRAIN_TILE_BUDGET_WORDS", "128");
+
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 12, 8, false, false);
+        let g = &eng.gpu;
+
+        let (m, k, n) = (3u32, 8u32, 40u32);
+        let mut rng = Rng::new(7);
+        let x: Vec<f32> = (0..(m * k) as usize).map(|_| rng.next_gaussian() as f32 * 0.3).collect();
+        let w: Vec<f32> = (0..(n * k) as usize).map(|_| rng.next_gaussian() as f32 * 0.3).collect();
+        let xb = g.storage_init("t_mmtile_x", &x);
+        let wb = g.storage_init("t_mmtile_w", &w);
+
+        let out_ref = g.storage((m * n) as u64);
+        let step = eng.mm(&xb, &wb, &out_ref, m, k, n);
+        g.submit(&[], &[step]);
+        g.poll_wait();
+        let reference = g.read(&out_ref, (m * n) as usize);
+
+        let out_tiled = g.storage((m * n) as u64);
+        let mut steps = Vec::new();
+        eng.mm_tiled_into(&mut steps, &xb, &wb, &out_tiled, m, k, n);
+        assert!(steps.len() > 1, "BRAIN_TILE_BUDGET_WORDS=128 at k=8 must force more than one tile, got {}", steps.len());
+        g.submit(&[], &steps);
+        g.poll_wait();
+        let tiled = g.read(&out_tiled, (m * n) as usize);
+
+        let tol = |x: f32| 1e-3 * x.abs().max(1.0) + 1e-4;
+        for row in 0..m as usize {
+            for col in 0..n as usize {
+                let i = row * n as usize + col;
+                assert!(
+                    (tiled[i] - reference[i]).abs() <= tol(reference[i]),
+                    "row {row} col {col} (tile boundaries at 16/32): tiled={} untiled={}",
+                    tiled[i],
+                    reference[i]
+                );
+            }
+        }
+
+        match prev {
+            Some(v) => std::env::set_var("BRAIN_TILE_BUDGET_WORDS", v),
+            None => std::env::remove_var("BRAIN_TILE_BUDGET_WORDS"),
+        }
     }
 
     /// M4.2, fp32-KV branch: `Self::qk_norm_rope`/`Self::qk_norm_rope_append`
