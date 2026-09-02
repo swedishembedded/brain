@@ -1649,6 +1649,99 @@ qwen3::serve (M4.3)` (the new kernel, `Engine::rms_quant`, the two
 `run_batched_steps` call-site rewrites, and the bit-identity test), this
 ledger entry.
 
+### M5.6 - MLA/DSA/GDN family: one real defect fixed (`topk_mask`), ten kernels checked against real config dims and correctly rated
+
+The table's "5 + 6 @opt-2" count for this family resolves to exactly 11
+kernels in `docs/reference/kernels.md`: `mla_scores`, `mla_index_scores`,
+`mla_bwd_dk_pass`, `mla_bwd_dk_rope`, `topk_mask` (glmdsa's GLM-5.2
+MLA/DSA indexer) and `gdn_decay_mask_bwd`, `gdn_decay_scale_bwd_last`,
+`gdn_state_decay_bwd_dscale`, `gdn_ut_bwd_dattn0`, `gdn_ut_bwd_dtmat`,
+`gdn_ut_step` (`model::gdn`'s Gated-DeltaNet backward, used by
+qwen35/qwen35moe training only). Per this campaign's own discipline
+("a finding is a hypothesis until checked against source"), each kernel's
+actual Params-bounded reduction axis was checked against the real shapes
+this repo ships (`GlmConfig::glm5_2()`: `n_heads=64`, `qk_nope_head_dim=192`,
+`qk_rope_head_dim=64`, `index_n_heads=32`, `index_head_dim=128`,
+`block_size=4096`; `Qwen35Config::qwen38_27b()`:
+`linear_num_value_heads=48`, `linear_key_head_dim=linear_value_head_dim=128`;
+`model::gdn::gdn_chunk_size` caps the chunk length at 64 for any `T`)
+rather than assumed from the `@opt 2` label alone.
+
+**`topk_mask`: a real defect, fixed.** Its dispatch gave one THREAD the
+entire causal row (`b,s`): an outer serial loop over every key `t` in
+`0..T`, each iteration paying its own `O(s)` causal-rank count - genuinely
+`O(T^2)` on a single thread, with the row's worst case (`s=T-1`) alone
+setting the whole dispatch's wall time while every other invocation sat
+idle. Every `t` in a row is independent of every other `t`, so that outer
+loop was serialising work that was already embarrassingly parallel.
+Rewired to one thread per `(b,s,t)` cell (dispatch `bsz*T*T`, the same
+`(b,h,i,j)`-style decomposition `mla_scores.wgsl` already uses) - bit-
+identical output, verified against an independently-written host oracle
+and the existing `indexer.rs` suite (all-pass-equals-dense, sparse-
+restricts-attention, distillation, training) staying green unchanged on
+both backends. Commit `8edd5ca9`.
+
+**The other ten: checked, not force-fixed, per §F.4/F.6's discipline that a
+correctly-rated kernel is a legitimate finding too.**
+
+- `gdn_decay_mask_bwd`, `gdn_ut_step`, `gdn_ut_bwd_dattn0`,
+  `gdn_ut_bwd_dtmat` all loop over `c_len` (or `i<=c_len-1`), capped at 64
+  at every real config this repo ships, WHILE already dispatching
+  `bhc*c_len` (or `bhc*i`) independent threads - tens of thousands of
+  threads at real GDN scale, each doing a serial reduction of at most 64
+  steps. Their own kernel-header doc already argues this is the correct
+  tier for that shape; re-checking the real numbers confirms it: going
+  cooperative here would add a `workgroupBarrier()` to shrink an
+  already-tiny 64-step serial tail while the independent-thread count
+  (already in the tens of thousands) is nowhere near the bottleneck. No fix
+  applied.
+- `gdn_decay_scale_bwd_last` has the same small `c_len<=64` reduction but a
+  genuinely SMALL thread count (`threads=bh`, 48 at real scale) - real
+  under-parallelisation, but the total work is `bh*c_len <= 48*64 = 3072`
+  multiply-adds, trivial regardless of how it is scheduled; a dispatch this
+  small is dominated by fixed per-dispatch overhead, not by how its handful
+  of FLOPs are spread across threads. No fix applied.
+- `gdn_state_decay_bwd_dscale` is the one GDN kernel whose own header
+  comment ("`dk`/`dv` are tens to low hundreds ... matching every other GDN
+  reduction's tier") does not hold at real scale: its loop is over
+  `dk*dv = 128*128 = 16384` at `qwen38_27b()`'s real dims, while its thread
+  count is only `bh = 48`. This is a genuine remaining defect of the same
+  shape M5.1's norm-backward cooperative rewrites target (few, large,
+  independent reductions) - identified but NOT fixed in this pass; filed as
+  a follow-up rather than force-fit in the time this milestone had, per
+  this campaign's "record it, do not force it" rule.
+- `mla_scores`/`mla_index_scores` loop over `nope+rope` (256) /
+  `index_head_dim` (128) respectively - small, bounded reductions - while
+  already dispatching `bsz*H*T*T` (`mla_scores`) or `bsz*T*T`
+  (`mla_index_scores`) independent threads, tens of millions at
+  `block_size=4096`. Correctly rated; going cooperative would multiply an
+  already-enormous independent-output count by a workgroup for no latency
+  win, the same reasoning that rules out `mla_bwd_dk_pass` below.
+- `mla_bwd_dk_pass`/`mla_bwd_dk_rope` loop over `T-j` (up to 4096) and
+  `H*(T-j)` (up to 262144) respectively - genuinely large, AND the number of
+  independent outputs is already enormous (`bsz*H*T*nope` /
+  `bsz*T*rope`, tens of millions). A "cooperative one-workgroup-per-output"
+  rewrite (the pattern that fixes a FEW large reductions) would multiply an
+  already-saturating output count by a workgroup and make dispatch overhead
+  worse, not better - this is the same shape that rules out `mla_scores`
+  above, confirmed by the arithmetic, not assumed. The real fix is
+  algorithmic: `d_k_pass[j,dn] = sum_i>=j d_scores[i,j]*q_pass[i,dn]` is a
+  masked GEMM in disguise (`bmm`/`bmm_acc` already exist and `model::gdn`
+  already uses them for an analogous batched contraction), and MLA has no
+  flash-style backward the way GQA does (M5.2's family). Wiring MLA's
+  backward onto a tiled GEMM or a flash-style algorithm is bigger than this
+  pass's kernel-tiling scope - filed as a follow-up, not attempted here.
+
+**Gate**: TDD (RED confirmed against two distinct plausible mistakes in the
+`topk_mask` rewrite - a missing per-thread stride, then an off-by-one on
+the causal boundary - before GREEN), `cargo clippy -p brain-glmdsa
+--all-targets` zero warnings, `docs/reference/kernels.md` needed no
+regeneration (the shipped kernel's `@what`/`@how`/`@opt` are unchanged from
+before - only its thread-to-output mapping changed). **Commits**: one
+(`8edd5ca9`, `topk_mask` only - the `gdn_state_decay_bwd_dscale` and MLA
+backward-GEMM follow-ups above are unbuilt, recorded for a future pass to
+pick up rather than left undocumented).
+
 ---
 
 ## Not yet done
