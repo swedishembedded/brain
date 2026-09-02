@@ -35,7 +35,9 @@ const KERNELS: &[(&str, &str)] = &[
     ("max_abs_row", kernels::MAX_ABS_ROW),
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+    ("matmul_q4_dyn_reg", kernels::MATMUL_Q4_DYN_REG),
     ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
+    ("matmul_q4_gemv_reg", kernels::MATMUL_Q4_GEMV_REG),
     ("moe_linear_gated_q4", kernels::MOE_LINEAR_GATED_Q4),
 ];
 
@@ -163,6 +165,110 @@ fn matmul_q4_gemv_matches_fp32_oracle_and_matches_dyn() {
     // oracle: any drift here is a kernel bug, not a quantization artifact.
     for (i, (&a, &b)) in got_gemv.iter().zip(&got_dyn).enumerate() {
         assert!((a - b).abs() < 1e-3, "gemv vs dyn disagree at {i}: gemv={a} dyn={b}");
+    }
+}
+
+/// `matmul_q4_gemv_reg` (M5.5: register accumulators, `dot4I8Packed` after
+/// nibble unpack) must be BYTE-identical to `matmul_q4_gemv` - see that
+/// kernel's own header for why this is exact rather than a tolerance: the
+/// eight per-word integer products are the same regardless of whether they
+/// are summed via two `dot4I8Packed` calls or eight scalar MACs, and the f32
+/// fold across words is unchanged in order. Swept across the whole `MREG`
+/// bucket ladder (m = 1..=32), not just one shape.
+#[test]
+fn matmul_q4_gemv_reg_is_byte_identical_to_gemv_across_the_mreg_ladder() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    if !g.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("matmul_q4_gemv_reg needs a packed int8 dot");
+        return;
+    }
+    let (k_maxr, k_qp, k_gemv, k_reg) =
+        (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "matmul_q4_gemv"), idx(&g, "matmul_q4_gemv_reg"));
+
+    // k=64 (two scale groups, mismatched x/w word densities), n=7 (not a
+    // multiple of the 64-thread tile).
+    let (k, n) = (64usize, 7usize);
+    for m in [1usize, 2, 3, 4, 5, 8, 9, 16, 17, 32] {
+        let mut rng = Lcg::new(7100 + m as u64);
+        let x_h = rng.vec_scaled(m * k, 1.0);
+        let w_h = rng.vec_scaled(n * k, 1.0);
+
+        let x = g.storage_init("x", &x_h);
+        let (xq, sx) = quant_x(&g, k_maxr, k_qp, &x, m as u32, k as u32);
+        let (wq, sw) = quantize_weight_q4(&w_h, n, k);
+        let wqb = g.storage(wq.len() as u64);
+        g.write(&wqb, &wq);
+        let swb = g.storage_init("sw", &sw);
+
+        let out_gemv = g.storage((m * n) as u64);
+        let out_reg = g.storage((m * n) as u64);
+        let steps = [
+            g.step(k_gemv, &[&xq, &wqb, &sx, &swb, &out_gemv], &[m as u32, k as u32, n as u32], n as u32 * 64),
+            g.step(k_reg, &[&xq, &wqb, &sx, &swb, &out_reg], &[m as u32, k as u32, n as u32], n as u32 * 64),
+        ];
+        g.submit(&[], &steps);
+        let got_gemv = g.read(&out_gemv, m * n);
+        let got_reg = g.read(&out_reg, m * n);
+        let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&got_gemv), bits(&got_reg), "m={m}: matmul_q4_gemv_reg must be byte-identical to matmul_q4_gemv");
+    }
+}
+
+/// `matmul_q4_dyn_reg` (M5.5: 128x128 register-tiled, `dot4I8Packed` after
+/// nibble unpack) against the fp32 host oracle, and cross-checked against
+/// `matmul_q4_dyn` - the two compute the SAME 32-nibble-product sum per
+/// weight-scale group (integer, exact under any grouping) and fold groups in
+/// the same ascending order, so they are bit-identical, not merely close.
+#[test]
+fn matmul_q4_dyn_reg_matches_fp32_oracle_and_is_bit_identical_to_dyn() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    if !g.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("matmul_q4_dyn_reg needs a packed int8 dot");
+        return;
+    }
+    let (k_maxr, k_qp, k_dyn, k_reg) =
+        (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "matmul_q4_dyn"), idx(&g, "matmul_q4_dyn_reg"));
+
+    // Shapes: one well under a single 128x128 tile (heavily guard-clamped),
+    // one that spans several tiles in both m and n, one with a ragged tail in
+    // both dimensions. k=192 is six 32-element scale groups, so the chunk
+    // loop actually loops.
+    for (m, k, n) in [(4usize, 64usize, 5usize), (192, 192, 200), (137, 192, 259)] {
+        let mut rng = Lcg::new(7200 + (m * 7 + n) as u64);
+        let x_h = rng.vec_scaled(m * k, 1.0);
+        let w_h = rng.vec_scaled(n * k, 1.0);
+
+        let x = g.storage_init("x", &x_h);
+        let (xq, sx) = quant_x(&g, k_maxr, k_qp, &x, m as u32, k as u32);
+        let (wq, sw) = quantize_weight_q4(&w_h, n, k);
+        let wqb = g.storage(wq.len() as u64);
+        g.write(&wqb, &wq);
+        let swb = g.storage_init("sw", &sw);
+
+        let out_dyn = g.storage((m * n) as u64);
+        let out_reg = g.storage((m * n) as u64);
+        let tile_threads = (m as u32).div_ceil(128) * (n as u32).div_ceil(128) * 256;
+        let steps = [
+            g.step(k_dyn, &[&xq, &wqb, &sx, &swb, &out_dyn], &[m as u32, k as u32, n as u32], (m * n) as u32),
+            g.step(k_reg, &[&xq, &wqb, &sx, &swb, &out_reg], &[m as u32, k as u32, n as u32], tile_threads),
+        ];
+        g.submit(&[], &steps);
+        let got_dyn = g.read(&out_dyn, m * n);
+        let got_reg = g.read(&out_reg, m * n);
+
+        let want = host_matmul(&x_h, &w_h, m, k, n);
+        let cos = cosine(&got_reg, &want);
+        let rel = rel_l2(&got_reg, &want);
+        eprintln!("matmul_q4_dyn_reg ({m}x{k}->{n}): cosine={cos:.6} rel_l2={rel:.4}");
+        assert!(cos >= 0.99, "matmul_q4_dyn_reg cosine {cos:.6} < 0.99 at m={m} k={k} n={n}");
+        assert!(rel < 0.15, "matmul_q4_dyn_reg rel_l2 {rel:.4} >= 0.15 at m={m} k={k} n={n}");
+
+        let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        assert_eq!(
+            bits(&got_dyn),
+            bits(&got_reg),
+            "m={m} k={k} n={n}: matmul_q4_dyn_reg must be byte-identical to matmul_q4_dyn"
+        );
     }
 }
 
