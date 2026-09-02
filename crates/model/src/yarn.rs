@@ -174,11 +174,11 @@ mod tests {
         let (inv_freq, attention_factor) = scaled_inv_freq(128, 1_000_000.0, &cfg);
         assert_eq!(inv_freq.len(), 64);
         assert!(
-            (attention_factor - 1.1386294361).abs() < 1e-5,
+            (attention_factor - 1.1386294).abs() < 1e-5,
             "attention_factor {attention_factor} != oracle 1.1386294361"
         );
-        let want_head = [1.0000000000e+00f32, 8.0584218776e-01, 6.4938163158e-01, 5.2329911468e-01, 4.2169650343e-01];
-        let want_tail = [7.3568179405e-07f32, 5.9284342642e-07, 4.7773824374e-07, 3.8498163151e-07, 3.1023444019e-07];
+        let want_head = [1.0f32, 8.058422e-1, 6.493816e-1, 5.232991e-1, 4.216965e-1];
+        let want_tail = [7.356818e-7f32, 5.928434e-7, 4.777382e-7, 3.849816e-7, 3.102344e-7];
         assert_close(&inv_freq[..5], &want_head, "qwen_style_128 head");
         assert_close(&inv_freq[59..], &want_tail, "qwen_style_128 tail");
     }
@@ -195,11 +195,11 @@ mod tests {
         let (inv_freq, attention_factor) = scaled_inv_freq(64, 10_000.0, &cfg);
         assert_eq!(inv_freq.len(), 32);
         assert!(
-            (attention_factor - 1.0693147181).abs() < 1e-5,
+            (attention_factor - 1.0693147).abs() < 1e-5,
             "attention_factor {attention_factor} != oracle 1.0693147181"
         );
-        let want_head = [1.0000000000e+00f32, 7.4989420933e-01, 5.6234132519e-01, 4.2169650343e-01, 3.1622776602e-01];
-        let want_tail = [2.1084825171e-04f32, 1.5811388301e-04, 1.1856868528e-04, 8.8913970502e-05, 6.6676071608e-05];
+        let want_head = [1.0f32, 7.498942e-1, 5.623413e-1, 4.216965e-1, 3.162278e-1];
+        let want_tail = [2.108483e-4f32, 1.581139e-4, 1.185687e-4, 8.891397e-5, 6.667607e-5];
         assert_close(&inv_freq[..5], &want_head, "small_64_factor2 head");
         assert_close(&inv_freq[27..], &want_tail, "small_64_factor2 tail");
     }
@@ -215,9 +215,9 @@ mod tests {
         let cfg = YarnConfig::new(1.0, 32768);
         let (inv_freq, attention_factor) = scaled_inv_freq(dim, theta, &cfg);
         assert_eq!(attention_factor, 1.0);
-        for d in 0..(dim / 2) as usize {
+        for (d, &got) in inv_freq.iter().enumerate() {
             let plain = theta.powf(-2.0 * d as f32 / dim as f32);
-            assert_eq!(inv_freq[d], plain, "channel {d}: yarn {} != plain {plain} (must be bit-identical)", inv_freq[d]);
+            assert_eq!(got, plain, "channel {d}: yarn {got} != plain {plain} (must be bit-identical)");
         }
     }
 
@@ -231,8 +231,8 @@ mod tests {
         let cfg = YarnConfig::new(0.5, 4096);
         let (inv_freq, attention_factor) = scaled_inv_freq(dim, theta, &cfg);
         assert_eq!(attention_factor, 1.0);
-        for d in 0..(dim / 2) as usize {
-            assert_eq!(inv_freq[d], theta.powf(-2.0 * d as f32 / dim as f32));
+        for (d, &got) in inv_freq.iter().enumerate() {
+            assert_eq!(got, theta.powf(-2.0 * d as f32 / dim as f32));
         }
     }
 
