@@ -786,11 +786,11 @@ pub trait Backend: Send + Sync {
     /// honestly report "timed out, nothing was disturbed" (see
     /// `backend-wgpu`, which uses `wgpu::PollType::Wait`'s native timeout).
     /// `backend-vulkan` does NOT override this: its resource recycling is
-    /// only sound once a fence wait has *actually* proven the work idle
-    /// (`crates/backend-vulkan/src/lib.rs`'s `recycle_transients` doc), and a
-    /// timed-out `vkWaitForFences` leaves that unproven - threading a bound
-    /// through it safely needs a real design pass, filed as a follow-up
-    /// rather than risked here.
+    /// only sound once a fence wait OR a confirmed timeline-semaphore value
+    /// has *actually* proven the work idle (`crates/backend-vulkan/src/lib.rs`'s
+    /// `retire_batch` doc), and a timed-out `vkWaitForFences`/`vkWaitSemaphores`
+    /// leaves that unproven - threading a bound through it safely needs a
+    /// real design pass, filed as a follow-up rather than risked here.
     fn poll_wait_timeout(&self, _timeout: std::time::Duration) -> bool {
         self.poll_wait();
         true

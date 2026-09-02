@@ -14,13 +14,21 @@
 //! tiling ([`backend_api::grid`]) — so every existing model runs unmodified.
 //!
 //! Execution model mirrors the wgpu backend: `submit` lazily accumulates
-//! dispatches; the batch is flushed (recorded into one command buffer with a
-//! minimal per-buffer `VkBufferMemoryBarrier` before each dispatch that
-//! actually depends on an earlier one's write in the same batch, submitted,
-//! fence-waited) on the next `read`/`write`/`poll_wait`. Transient per-dispatch uniform buffers
-//! and descriptor sets are reclaimed after each flush; model storage buffers are
-//! host-visible and live until the process exits (a one-shot CLI never frees them
-//! mid-run — see the note on `VkOwnedBuffer`).
+//! dispatches; the batch is flushed (recorded, with a minimal per-buffer
+//! `VkBufferMemoryBarrier` before each dispatch that actually depends on an
+//! earlier one's write in the same batch, then submitted) on the next
+//! `read`/`write`/`poll_wait`/`Backend::flush`. Since M6.2, the fast path is
+//! genuinely asynchronous: a flush is recorded into a reused slot of a
+//! persistent command-buffer ring and submitted signalling a shared timeline
+//! semaphore, with **no host wait** unless the caller actually needs the
+//! result (`read`/`write`/`poll_wait` call `drain`) - up to `RING_SIZE`
+//! submissions can be outstanding on the device at once per handle. The
+//! Intel-ANV sliced-binding workaround and `BRAIN_PROFILE` device timing
+//! still fence-wait synchronously (see `flush`'s own doc for why). Transient
+//! per-dispatch uniform buffers and descriptor sets are reclaimed once a
+//! batch is confirmed complete, not merely submitted; model storage buffers
+//! are host-visible and live until the process exits (a one-shot CLI never
+//! frees them mid-run - see the note on `VkOwnedBuffer`).
 //!
 //! Buffers are host-visible+coherent (no DEVICE_LOCAL/staging split yet), which is
 //! correct and simple; a perf pass can add a staged device-local path later.
@@ -97,6 +105,43 @@ pub struct VkStep {
     /// dispatch.
     accesses: [VkAccess; MAX_STORAGE_BINDINGS],
     n_access: u8,
+}
+
+/// Submissions in flight per handle's asynchronous ring (M6.2) - see
+/// [`CmdSlot`]. A `flush()` only ever waits for the slot it is about to
+/// REUSE, so this many flushes can be outstanding, unwaited, at once before
+/// the `(N+1)`th wraps around and blocks on the 1st.
+const RING_SIZE: usize = 3;
+
+/// One completed-but-not-yet-retired asynchronous submission's bookkeeping:
+/// everything [`VulkanBackend::retire_batch`] needs once the device has
+/// actually reached `value` on the shared timeline semaphore. Kept separate
+/// from [`CmdSlot`] itself so a fresh slot (never submitted) can be told
+/// apart from one whose submission simply has not been retired yet.
+struct Outstanding {
+    /// The timeline value this submission signals on completion.
+    value: u64,
+    /// The dispatches this submission ran - needed to release their
+    /// descriptor sets and decrement `ctx.pending_steps`.
+    steps: Vec<VkStep>,
+    /// This submission's transient uniform buffers - safe to recycle into
+    /// `free_uniforms` only once `value` is confirmed reached (a live
+    /// dispatch may still be reading one).
+    uniforms: Vec<VkBuffer>,
+}
+
+/// One persistent, reused command buffer in [`VulkanBackend::ring`]. Reset
+/// and re-recorded in place (`vkResetCommandBuffer`) rather than allocated
+/// and freed per flush - the "persistent/reused command buffers" half of
+/// M6.2, replacing the allocate-then-free-per-submit pattern
+/// [`VulkanBackend::flush_chunk`] still uses for the serial/timed fallback
+/// paths (via `begin_cmd`/`end_and_wait`).
+struct CmdSlot {
+    cmd: vk::CommandBuffer,
+    /// `None` for a slot never submitted, or one already retired. A slot
+    /// must never be reset/re-recorded while this is `Some` and its `value`
+    /// has not yet been reached on the device - see [`VulkanBackend::flush_async`].
+    outstanding: Option<Outstanding>,
 }
 
 /// A device buffer handle. Memory is freed when the owning [`VulkanBackend`] is
@@ -311,6 +356,13 @@ pub struct VulkanBackend {
     /// Kernel names, parallel to `pipelines`/`wgsizes` — `kernel_times()`
     /// reports by name, matching the wgpu backend's contract.
     names: Vec<String>,
+    /// This handle's persistent command-buffer ring for asynchronous
+    /// submission (M6.2) - see [`CmdSlot`]/[`RING_SIZE`]. Allocated once in
+    /// [`VulkanBackend::from_shared`]; never shared with a `share()`/
+    /// `new_like()` sibling, matching `pending`/`uniforms` above.
+    ring: Mutex<Vec<CmdSlot>>,
+    /// Round-robin cursor into `ring`, advanced once per asynchronous flush.
+    ring_cursor: AtomicU64,
 }
 
 // ash handles are Send+Sync; all interior mutation goes through the Mutexes above.
@@ -625,6 +677,24 @@ impl VulkanBackend {
         let pool = unsafe { new_pool(&ctx.device)? };
         let profile = VkProfile::new(pipelines.pipelines.len());
         let names = pipelines.names.clone();
+        // Persistent command buffers for this handle's own async ring -
+        // allocated once, reset and re-recorded per flush from here on
+        // (never freed until this handle drops). Allocation touches the
+        // shared `command_pool`, so it needs the same external
+        // synchronisation every other pool touch in this file takes.
+        let ring: Vec<CmdSlot> = unsafe {
+            let _guard = ctx.queue_guard();
+            let alloc = vk::CommandBufferAllocateInfo::default()
+                .command_pool(ctx.command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(RING_SIZE as u32);
+            ctx.device
+                .allocate_command_buffers(&alloc)
+                .map_err(|e| format!("allocate async command-buffer ring: {e}"))?
+                .into_iter()
+                .map(|cmd| CmdSlot { cmd, outstanding: None })
+                .collect()
+        };
         Ok(VulkanBackend {
             ctx,
             caps,
@@ -639,6 +709,8 @@ impl VulkanBackend {
             free_sets: Mutex::new(std::collections::HashMap::new()),
             profile,
             names,
+            ring: Mutex::new(ring),
+            ring_cursor: AtomicU64::new(0),
         })
     }
 
@@ -751,27 +823,35 @@ impl VulkanBackend {
     }
 
     pub fn write(&self, buf: &VkOwnedBuffer, data: &[u32]) {
-        // Ensure prior recorded compute completes before a host write, matching
-        // the wgpu backend's flush-before-write ordering.
+        // Ensure prior recorded compute ACTUALLY completes (not merely
+        // reaches the device) before a host write: `flush()` alone only
+        // guarantees the latter on the asynchronous path (M6.2) - a direct
+        // host map into a buffer a still-executing dispatch might read or
+        // write is a real data race, not just a missed optimisation. `drain`
+        // is the "data is actually needed" case `flush`'s own doc names.
         self.flush();
+        self.drain();
         self.ctx.upload(&buf.inner, bytemuck::cast_slice(data));
     }
 
     /// [`Self::write`] at a word offset — see `Backend::write_at`.
     pub fn write_at(&self, buf: &VkOwnedBuffer, offset_words: u64, data: &[u32]) {
         self.flush();
+        self.drain();
         self.ctx.upload_at(&buf.inner, bytemuck::cast_slice(data), offset_words * 4);
     }
 
     pub fn read(&self, buf: &VkOwnedBuffer, n: usize) -> Vec<f32> {
         self.stats.readbacks.fetch_add(1, Ordering::Relaxed);
         self.flush();
+        self.drain();
         let bytes = self.ctx.download(&buf.inner, n * 4);
         bytemuck::cast_slice::<u8, f32>(&bytes).to_vec()
     }
 
     pub fn poll_wait(&self) {
         self.flush();
+        self.drain();
     }
 
     // ---- dispatch ----
@@ -805,10 +885,44 @@ impl VulkanBackend {
         step
     }
 
-    /// Total queue submissions (each a blocking submit + fence wait) since
-    /// construction. Perf observability for `tests/perf_contract.rs`.
+    /// Total `vkQueueSubmit` calls since construction. Perf observability for
+    /// `tests/perf_contract.rs`. Since M6.2, a submit counted here is NOT
+    /// necessarily a blocking submit+fence wait: the fast path
+    /// (`flush_async`) submits signalling a timeline semaphore and returns
+    /// immediately - see [`Self::async_inflight_count`] for how many of
+    /// this handle's own counted submits are still outstanding right now.
     pub fn queue_submits(&self) -> u64 {
         self.ctx.submits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many of this handle's own asynchronous (M6.2) submissions are
+    /// currently outstanding - recorded and submitted to the device, but not
+    /// yet confirmed complete (no `drain`/`read`/`poll_wait` has retired
+    /// them). Bounded by `RING_SIZE`: a caller that keeps flushing without
+    /// ever reading back cannot grow this past the ring's own size, because
+    /// the `(RING_SIZE + 1)`th flush must wait for and retire the oldest slot
+    /// before it can reuse it. Test observability for
+    /// `tests/async_submit.rs`; always `0` on a device without a timeline
+    /// semaphore (the ring is allocated but never used on that fallback).
+    pub fn async_inflight_count(&self) -> usize {
+        self.ring.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|s| s.outstanding.is_some()).count()
+    }
+
+    /// The async ring's fixed capacity ([`RING_SIZE`]). Test observability
+    /// for `tests/async_submit.rs`, so its "N submissions in flight"
+    /// assertions read the real constant instead of a copy that could drift.
+    pub fn async_ring_capacity(&self) -> usize {
+        RING_SIZE
+    }
+
+    /// Whether this device is using the asynchronous submission path at all
+    /// (`self.ctx.timeline_supported()`) - false only on the defensive
+    /// fallback for a device without a timeline semaphore, which no driver
+    /// this workspace has run on actually hits. Test observability so
+    /// `tests/async_submit.rs` can skip its pipelining-specific assertions
+    /// (loudly) rather than fail on such a device.
+    pub fn async_capable(&self) -> bool {
+        self.ctx.timeline_supported()
     }
 
     /// Total `VkBufferMemoryBarrier`s emitted by `flush_chunk`'s per-buffer
@@ -938,8 +1052,14 @@ impl VulkanBackend {
         self.stats.dispatches.fetch_add(steps.len() as u64, Ordering::Relaxed);
         if !clears.is_empty() {
             // Match wgpu: complete prior work, then zero the buffers, before the
-            // new steps (which may read them) are queued.
+            // new steps (which may read them) are queued. `drain` (not just
+            // `flush`) because `run_clears` submits through its own
+            // fence-based, timeline-independent path (`begin_cmd`/
+            // `end_and_wait`) - its fence proves nothing about an earlier
+            // asynchronous (M6.2) batch this handle has outstanding, so that
+            // batch must be confirmed complete first, not merely submitted.
             self.flush();
+            self.drain();
             self.run_clears(clears);
         }
         // Recorded but not yet submitted: until these run, the buffers they
@@ -948,9 +1068,9 @@ impl VulkanBackend {
         self.ctx.steps_recorded(steps.len() as u64);
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(steps);
         // These steps' transient uniforms are now in flight: eligible for
-        // recycling once the flush that runs them has fence-waited. Uniforms of
-        // steps NOT yet submitted stay in `uniforms`, untouched by a flush that
-        // races between their creation and their own submit.
+        // recycling once the flush that runs them has been confirmed complete.
+        // Uniforms of steps NOT yet submitted stay in `uniforms`, untouched by
+        // a flush that races between their creation and their own submit.
         self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()).append(&mut self.uniforms.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
@@ -965,11 +1085,26 @@ impl VulkanBackend {
         }
     }
 
-    /// Record all pending dispatches into one command buffer (with a minimal
-    /// per-buffer `VkBufferMemoryBarrier` before each dispatch that actually
-    /// depends on an earlier one's write - see `flush_chunk`), submit,
-    /// fence-wait, then reclaim the batch's descriptor sets + transient
-    /// uniform buffers.
+    /// Send every pending dispatch to the device. On the fast path (no Intel-
+    /// ANV workaround, no `BRAIN_PROFILE` timing) this is asynchronous, per
+    /// `Backend::flush`'s own contract ("WITHOUT waiting for completion"):
+    /// the batch is recorded into a reused ring slot ([`CmdSlot`]) and
+    /// submitted signalling the shared timeline semaphore, with NO host wait
+    /// here - see [`Self::flush_async`]. A caller that actually needs the
+    /// result calls [`Self::drain`] (via `read`/`poll_wait`/`write`), which is
+    /// the "no host wait unless data is actually needed" half of M6.2.
+    ///
+    /// The Intel-ANV serialize workaround and `BRAIN_PROFILE` device-timing
+    /// paths are unchanged from before M6.2: both already need a host wait
+    /// for reasons unrelated to pipelining (a real driver barrier bug; timestamp
+    /// query results must be read back before they can be recorded), so
+    /// making them asynchronous would buy nothing while adding risk to two
+    /// paths a real driver-hazard hunt on this exact hardware has already
+    /// shown are where GPU synchronisation bugs hide. Both call
+    /// [`Self::drain`] first, so an asynchronous batch this
+    /// handle already has outstanding is confirmed complete before either
+    /// runs - required because their own fence proves nothing about a
+    /// DIFFERENT, timeline-signalled submission.
     fn flush(&self) {
         let steps: Vec<VkStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         if steps.is_empty() {
@@ -979,6 +1114,13 @@ impl VulkanBackend {
             self.ctx.reclaim_dead();
             return;
         }
+        // Taken together with `steps` above so the uniforms this specific
+        // batch owns are scoped correctly regardless of how many later
+        // `submit()`/`flush()` calls happen before this batch is actually
+        // retired (the asynchronous path defers retirement past this call
+        // returning) - see [`Self::retire_batch`].
+        let uniforms: Vec<VkBuffer> =
+            std::mem::take(&mut *self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()));
         let dev = &self.ctx.device;
         // Serialize (submit+fence per dispatch) when the batch contains a sliced
         // (sub-range) binding: **Intel ANV's** compute-compute pipeline barrier
@@ -998,6 +1140,7 @@ impl VulkanBackend {
         let no_serial = vk_serial_disabled();
         let vendor_needs_serial = self.ctx.vendor_id == VENDOR_INTEL;
         if !no_serial && (force_serial || (vendor_needs_serial && steps.iter().any(|s| s.sliced))) {
+            self.drain();
             let time_this = self.timing_active();
             unsafe {
                 for s in &steps {
@@ -1025,29 +1168,118 @@ impl VulkanBackend {
                     }
                 }
             }
-            self.recycle_transients(&steps);
+            self.retire_batch(&steps, uniforms);
             return;
         }
-        // Time every dispatch in the batch, even one bigger than a single
-        // query pool's capacity: split into bounded sub-batches of at most
-        // `MAX_TIMED_DISPATCHES` steps, each recorded, submitted and
-        // fence-waited independently (`flush_chunk`), with every sub-batch's
-        // timestamps folded into the same per-kernel accumulator. A
-        // submit+fence boundary already stands in for the inter-dispatch
-        // memory barrier on this backend - see the Intel-ANV serialize
-        // branch above, which relies on exactly that guarantee - so a chunk
-        // boundary here needs no extra synchronisation beyond the fence wait
-        // `flush_chunk` already does. When timing is off, `chunk_size` is the
-        // whole batch, so this is one sub-batch = the previous single-submit
-        // behaviour, unchanged.
         let time_this = self.timing_active();
-        let chunk_size = if time_this { MAX_TIMED_DISPATCHES } else { steps.len() };
-        unsafe {
-            for chunk in steps.chunks(chunk_size) {
-                self.flush_chunk(chunk, time_this);
+        if time_this {
+            // Time every dispatch in the batch, even one bigger than a single
+            // query pool's capacity: split into bounded sub-batches of at most
+            // `MAX_TIMED_DISPATCHES` steps, each recorded, submitted and
+            // fence-waited independently (`flush_chunk`), with every
+            // sub-batch's timestamps folded into the same per-kernel
+            // accumulator. Reading a timestamp query's results requires the
+            // submission that wrote them to have already completed, so this
+            // path needs its own host wait regardless of the async path
+            // below - there is nothing to pipeline here.
+            self.drain();
+            unsafe {
+                for chunk in steps.chunks(MAX_TIMED_DISPATCHES) {
+                    self.flush_chunk(chunk, true);
+                }
+            }
+            self.retire_batch(&steps, uniforms);
+            return;
+        }
+        // The fast path: no Intel workaround, no profiling. Asynchronous when
+        // the device has a timeline semaphore (every driver this workspace
+        // has run on); a fence-based single submission otherwise, matching
+        // this backend's behaviour before M6.2 exactly.
+        if self.ctx.timeline_supported() {
+            unsafe { self.flush_async(steps, uniforms) };
+        } else {
+            unsafe { self.flush_chunk(&steps, false) };
+            self.retire_batch(&steps, uniforms);
+        }
+    }
+
+    /// Record `steps` into the next slot of this handle's persistent command-
+    /// buffer ring and submit it signalling the shared timeline semaphore -
+    /// **no host wait**. A slot is only ever waited on when the ring wraps
+    /// back around to REUSE it (`RING_SIZE` submissions later), which is the
+    /// actual "N submissions in flight" this milestone asks for: up to
+    /// `RING_SIZE - 1` prior batches may still be executing on the device
+    /// when this one is submitted.
+    ///
+    /// # Safety
+    /// Requires `self.ctx.timeline_supported()` and a live device/queue.
+    unsafe fn flush_async(&self, steps: Vec<VkStep>, uniforms: Vec<VkBuffer>) {
+        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+        let n = ring.len();
+        let idx = (self.ring_cursor.fetch_add(1, Ordering::Relaxed) as usize) % n;
+        // This slot's command buffer must not be reset/re-recorded while its
+        // previous submission might still be executing on the device
+        // (`vkResetCommandBuffer` on a buffer in the pending state is
+        // invalid). Waiting HERE - not at submit time - is what bounds the
+        // number of submissions in flight to `RING_SIZE` without ever
+        // waiting on every flush.
+        if let Some(prev) = ring[idx].outstanding.take() {
+            self.ctx.timeline_wait(prev.value);
+            self.retire_batch(&prev.steps, prev.uniforms);
+        }
+        let cmd = ring[idx].cmd;
+        let value = self.ctx.timeline_next();
+        let dev = &self.ctx.device;
+        {
+            let _guard = self.ctx.queue_guard();
+            dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .expect("reset async ring command buffer");
+            dev.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .expect("begin async ring command buffer");
+            self.record_dispatches(cmd, &steps, |_| {});
+            dev.end_command_buffer(cmd).expect("end async ring command buffer");
+            let signal_sems = [self.ctx.timeline_semaphore().expect("flush_async requires a timeline semaphore")];
+            let signal_values = [value];
+            let mut tinfo = vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&signal_values);
+            let cmds = [cmd];
+            let submit = vk::SubmitInfo::default()
+                .command_buffers(&cmds)
+                .signal_semaphores(&signal_sems)
+                .push_next(&mut tinfo);
+            dev.queue_submit(self.ctx.queue, &[submit], vk::Fence::null()).expect("queue_submit (async)");
+            self.ctx.submits.fetch_add(1, Ordering::Relaxed);
+        }
+        ring[idx].outstanding = Some(Outstanding { value, steps, uniforms });
+    }
+
+    /// Wait for every one of THIS handle's own outstanding asynchronous
+    /// submissions to actually complete, and retire each one (release its
+    /// descriptor sets/uniforms, decrement `ctx.pending_steps`). The "data is
+    /// actually needed" synchronisation point M6.2's contract calls for -
+    /// `read`/`poll_wait`/`write` call this after `flush()`; a caller that
+    /// only ever `submit()`s and `flush()`es never pays a host wait at all.
+    ///
+    /// A no-op (cheap) when nothing is outstanding, so calling it
+    /// unconditionally is always safe, including on a device with no
+    /// timeline semaphore (the ring then never has an outstanding entry).
+    fn drain(&self) {
+        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+        // Timeline values are strictly increasing on this ONE semaphore, so
+        // waiting once for the highest value any slot is holding implies
+        // every earlier value already passed too - one `vkWaitSemaphores`
+        // call retires the whole ring, not `RING_SIZE` of them.
+        let target = ring.iter().filter_map(|s| s.outstanding.as_ref().map(|o| o.value)).max();
+        if let Some(value) = target {
+            unsafe { self.ctx.timeline_wait(value) };
+        }
+        for slot in ring.iter_mut() {
+            if let Some(o) = slot.outstanding.take() {
+                self.retire_batch(&o.steps, o.uniforms);
             }
         }
-        self.recycle_transients(&steps);
     }
 
     /// Record, submit and fence-wait ONE bounded sub-batch of `flush`'s
@@ -1069,23 +1301,34 @@ impl VulkanBackend {
             dev.cmd_reset_query_pool(cmd, qp, 0, (chunk.len() + 1) as u32);
             dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, qp, 0);
         }
-        // Per-buffer hazard analysis, replacing the blanket `VkMemoryBarrier`
-        // this used to insert unconditionally before every dispatch but the
-        // first: `dirty` names every buffer written by a dispatch already
-        // recorded into `cmd` whose write is not yet guaranteed visible to a
-        // later one (no barrier covering it has been emitted yet). Before
-        // each dispatch, a `VkBufferMemoryBarrier` is emitted for exactly the
-        // buffers THIS dispatch's read/write set overlaps that are still
-        // dirty - not for the buffers it does not touch. Resolving a hazard
-        // clears it: a barrier makes the write it covers visible to
-        // EVERYTHING after it in command-buffer order, not only to the
-        // dispatch that triggered it, so a buffer stays clean for every
-        // subsequent dispatch in the chunk until a NEW write dirties it
-        // again. Two dispatch chains that share no buffer at all - the common
-        // shape for independent per-expert/per-branch work - therefore cost
-        // ZERO barriers between them, where the blanket barrier always paid
-        // one regardless of whether the two dispatches touched the same
-        // memory.
+        self.record_dispatches(cmd, chunk, |i| {
+            if let Some(qp) = query_pool {
+                dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, qp, (i + 1) as u32);
+            }
+        });
+        self.end_and_wait(cmd, guard);
+        if let Some(qp) = query_pool {
+            let ts = self.read_timestamps(qp, (chunk.len() + 1) as u32);
+            let kinds: Vec<usize> = chunk.iter().map(|s| s.kind).collect();
+            self.record_timing(&kinds, &ts);
+        }
+    }
+
+    /// Emit the per-buffer hazard analysis (see [`Self::flush_chunk`]'s doc,
+    /// unchanged by M6.2) plus the bind+dispatch pair for every step in
+    /// `chunk`, into an already-begun `cmd`. Shared by the synchronous
+    /// (`flush_chunk`: serial-workaround and `BRAIN_PROFILE` timing paths)
+    /// and asynchronous (`flush_async`, M6.2) recording paths so this hazard
+    /// analysis has exactly one implementation rather than two copies that
+    /// could drift. `on_dispatch(i)` runs immediately after dispatch `i` is
+    /// recorded, letting a caller interleave a timestamp write without this
+    /// function knowing anything about profiling.
+    ///
+    /// # Safety
+    /// Same preconditions as [`Self::flush_chunk`]: a live device/queue and
+    /// `chunk`'s descriptor sets/pipelines valid for it, `cmd` already begun.
+    unsafe fn record_dispatches(&self, cmd: vk::CommandBuffer, chunk: &[VkStep], mut on_dispatch: impl FnMut(usize)) {
+        let dev = &self.ctx.device;
         let mut dirty: std::collections::HashSet<vk::Buffer> = std::collections::HashSet::new();
         let mut needed: Vec<vk::Buffer> = Vec::new();
         for (i, s) in chunk.iter().enumerate() {
@@ -1125,20 +1368,12 @@ impl VulkanBackend {
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
             dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, kp.layout, 0, &[s.set], &[]);
             dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
-            if let Some(qp) = query_pool {
-                dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, qp, (i + 1) as u32);
-            }
+            on_dispatch(i);
             for acc in accesses {
                 if acc.write {
                     dirty.insert(acc.buffer);
                 }
             }
-        }
-        self.end_and_wait(cmd, guard);
-        if let Some(qp) = query_pool {
-            let ts = self.read_timestamps(qp, (chunk.len() + 1) as u32);
-            let kinds: Vec<usize> = chunk.iter().map(|s| s.kind).collect();
-            self.record_timing(&kinds, &ts);
         }
     }
 
@@ -1154,19 +1389,28 @@ impl VulkanBackend {
         self.ctx.reclaim_event_count()
     }
 
-    /// Recycle the flushed batch's TRANSIENT resources — the fence wait in
-    /// `end_and_wait` has just proven them idle. Uniforms go back to the
-    /// size-keyed pool, descriptor sets to the per-pipeline pool (deduped: the
-    /// same step submitted twice in one batch must not donate its set twice).
-    /// `step_buf` steps (transient = false) are caller-owned and left alone, so
-    /// the `uniform_dynamic` reuse pattern keeps working across flushes.
-    fn recycle_transients(&self, steps: &[VkStep]) {
-        // These dispatches have now run to completion (the caller's
-        // `end_and_wait` fence-waited), so they no longer name anything. The
-        // count is dropped HERE rather than when the batch left the pending
-        // list, so it never reads zero while this batch's buffers are in use.
+    /// Release a completed batch's TRANSIENT resources - the caller has
+    /// already proven the batch idle, either by a real fence wait
+    /// (`end_and_wait`, the serial/timed paths) or by a confirmed timeline
+    /// value (`flush_async`/`drain`, M6.2's asynchronous path). Uniforms go
+    /// back to the size-keyed pool, descriptor sets to the per-pipeline pool
+    /// (deduped: the same step submitted twice in one batch must not donate
+    /// its set twice). `step_buf` steps (transient = false) are caller-owned
+    /// and left alone, so the `uniform_dynamic` reuse pattern keeps working
+    /// across flushes.
+    ///
+    /// `uniforms` is passed in rather than drained from `inflight_uniforms`
+    /// here (the pre-M6.2 shape) because the asynchronous path must snapshot
+    /// exactly the uniforms THIS batch owns at `flush()` time, before any
+    /// later `submit()` call can add a DIFFERENT, still-in-flight batch's
+    /// uniforms into that shared list - see `flush`'s own doc.
+    fn retire_batch(&self, steps: &[VkStep], uniforms: Vec<VkBuffer>) {
+        // This batch has now run to completion, so it no longer names
+        // anything. The count is dropped HERE rather than when the batch
+        // left the pending list, so it never reads zero while this batch's
+        // buffers are in use.
         self.ctx.steps_submitted(steps.len() as u64);
-        for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
+        for u in uniforms {
             self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).entry(u.size).or_default().push(u);
         }
         {
@@ -1295,6 +1539,29 @@ impl Drop for VulkanBackend {
         let dev = &self.ctx.device;
         unsafe {
             let _ = dev.device_wait_idle();
+            // Every asynchronous (M6.2) submission this handle still has
+            // outstanding is now provably complete (`device_wait_idle` just
+            // proved it, a strictly stronger guarantee than any one
+            // timeline value), so it is safe to retire them immediately
+            // rather than waiting on the semaphore again. Retiring pushes
+            // their uniforms into `free_uniforms`, which the loop below
+            // already drains and destroys; this must run BEFORE that loop.
+            // The ring's command buffers are freed here too - they were
+            // allocated once in `from_shared` and reused in place ever
+            // since, unlike the serial/timed paths' per-flush
+            // allocate/free via `begin_cmd`/`end_and_wait`.
+            let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+            let cmds: Vec<vk::CommandBuffer> = ring.iter().map(|s| s.cmd).collect();
+            for slot in ring.iter_mut() {
+                if let Some(o) = slot.outstanding.take() {
+                    self.retire_batch(&o.steps, o.uniforms);
+                }
+            }
+            drop(ring);
+            if !cmds.is_empty() {
+                let _guard = self.ctx.queue_guard();
+                dev.free_command_buffers(self.ctx.command_pool, &cmds);
+            }
             for u in std::mem::take(&mut *self.uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
                 self.ctx.destroy_buffer(u);
             }
@@ -1525,9 +1792,11 @@ impl Backend for VulkanBackend {
         VulkanBackend::poll_wait(self)
     }
     fn flush(&self) {
-        // This backend's flush fence-waits (its batch submission is
-        // synchronous by design), so there is no overlap win here — but the
-        // semantics ("all recorded work reaches the device") hold.
+        // Since M6.2 this genuinely overlaps: the fast path submits
+        // signalling a timeline semaphore and returns without waiting - see
+        // `VulkanBackend::flush`'s own doc. The trait's "WITHOUT waiting for
+        // completion" contract is now actually true on this backend, not
+        // just semantically claimed.
         VulkanBackend::flush(self);
     }
     fn buried_bytes(&self) -> u64 {
