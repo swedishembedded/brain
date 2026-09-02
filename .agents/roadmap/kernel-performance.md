@@ -2478,6 +2478,101 @@ semaphore primitives; the `VulkanBackend` ring/async-flush/drain
 implementation, its test, and this entry; the two unrelated test-race
 fixes).
 
+### M6.3 - Graph capture/replay: decode tape cached and REUSED per `bsz` bucket, kept (not killed)
+
+Checked the milestone's premise against source first, and this one held
+better than the note bounding it expected: `qwen3::serve::Engine::
+run_batched_steps` (`crates/qwen3/src/serve.rs`) did rebuild its whole
+`Vec<Step>` - a fresh uniform buffer AND a fresh bind group per dispatch,
+`Gpu::step`'s own doc names exactly this cost - on every single call, decode
+included, and its own doc said so ("the tape is rebuilt per step rather than
+recorded once"). Reading every dispatch in the decode loop confirmed the
+tape's STRUCTURE (kernel choice, buffer identity, every uniform PARAMETER,
+every thread count) is a pure function of `bsz` alone once `causal_chunk` is
+`false` and the input is `Tokens`/`Resident`: nothing in it reads a position,
+seqlen, block or token VALUE - those live only in buffer CONTENTS
+(`pos_buf`/`seqlen_buf`/`blk_buf`/`off_buf`/`bt_buf`/`tok_buf`), written
+separately before dispatch. That purity is exactly what M2.4's own kernel-
+selection tests already relied on implicitly and is what makes caching the
+recorded `Vec<Step>` and replaying it unchanged, rather than mutating a
+`uniform_dynamic` per step, both sufficient and simplest for this specific
+tape - no per-dispatch value actually varies at fixed `bsz`, so there was
+nothing left to mutate.
+
+**Measured BEFORE committing to the change**, per this milestone's own
+instruction and decision 4's discipline (M22 bounded the qwen35 *resident*
+path's host time at ~2%, which said nothing about `qwen3::serve`'s very
+different tape-per-step construction): a same-process, same-box A/B at
+Qwen3-0.6B's real shape (`BRAIN_DEVICE=gpu`, buckets 1/2/4/8/16/32, 30 reps
+each after a warm-up) comparing the pre-change `run_batched_steps` rebuild
+path against the SAME decode step through `forward_batched` post-change:
+
+| bsz | always-rebuild | cached | delta |
+|---|---|---|---|
+| 1 | 20.83 ms/step | 11.91 ms/step | -42.8% |
+| 2 | 22.33 ms/step | 11.02 ms/step | -50.7% |
+| 4 | 22.91 ms/step | 12.86 ms/step | -43.9% |
+| 8 | 29.29 ms/step | 18.51 ms/step | -36.8% |
+| 16 | 42.31 ms/step | 29.26 ms/step | -30.8% |
+| 32 | 59.47 ms/step | 48.48 ms/step | -18.5% |
+
+A real, large, measured win at every bucket - shrinking with `bsz` exactly as
+predicted (device time grows with `bsz`, the fixed per-step host-build cost
+this change removes does not), never crossing into "cannot move the pass"
+territory the way the qwen35 resident path's ~2% did. **Kept, not killed.**
+
+Implementation: `run_batched_steps` (still `&self`, unchanged contract -
+`qwen_bench serve`'s profiler and this file's own `causal_chunk`/decode-
+regime kernel-selection tests keep calling it directly, at shapes the cache
+does not key on) was split into `write_batch_meta`/`write_batch_input` (the
+per-step buffer-content writes, factored out unchanged) and a new
+`batched_tape` (the pure dispatch-list builder - the actual per-layer
+projection loop, moved verbatim). `Engine` gained `tape_cache: HashMap<u32,
+Vec<Step>>`; `run_batched_submit` (now `&mut self`, along with `run_batched`/
+`run_batched_greedy` which call it) writes the real per-step buffer contents
+every call as before, then for decode's shape (`causal_chunk = false`, `bsz
+<= DECODE_REGIME_MAX_ROWS`, not `Input::Embeds`) looks up `tape_cache[bsz]`:
+absent, it builds via `batched_tape` and inserts once; present, it replays
+the SAME `Vec<Step>` (a cheap `Arc` clone-free lookup, `Step` itself being
+`Arc`-backed) with zero new uniform buffers or bind groups. Prefill's chunked
+rows (`causal_chunk = true`, unbucketed) and `Input::Embeds` (a structurally
+different tape at the same `bsz` - no embed step at all) keep rebuilding
+every call, byte-identical to before this change. Bounded memory: at most
+`DECODE_REGIME_MAX_ROWS` (32) cached tapes ever exist per engine, each a
+few hundred cheap `Arc`-backed handles.
+
+TDD: `decode_step_at_a_stable_bucket_reuses_the_cached_tapes_bind_groups`
+(new) asserts the mechanism directly via each backend's own `bind_groups`
+stat (`crates/backend-{wgpu,vulkan,cpu}`) - RED against the pre-change code
+(a second decode step at the same `bsz` always added the tape's full
+dispatch count in fresh bind groups: 164 for cpu-JIT's own run, confirmed
+before the fix), GREEN after (zero added). Correctness: BOTH backends'
+full `brain-qwen3` suites stay green unchanged (110 tests on
+`BRAIN_DEVICE=gpu`, 46 non-pre-existing-failure tests on `BRAIN_DEVICE=cpu`
+- `causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_triad`'s CPU-JIT
+failure is confirmed pre-existing via `git stash`, unrelated to this change,
+already the subject of a standing note in the repo before this milestone),
+including `batched_serving_matches_reference`/`warm_prefill_is_identical_to_
+cold` - both decode several steps at a stable `bsz` against an INDEPENDENT
+host reference (`crate::sample::generate_kv`) untouched by this change, so
+both already exercise a cache HIT, not just the first miss. `crates/qwen3/
+tests/no_kernel_names.rs`'s structural gate (B7) retargeted from
+`run_batched_steps` to `batched_tape` - the function that now actually owns
+the per-layer linear dispatch the gate polices - since the split moved that
+logic, not the policy. `cargo clippy -p brain-qwen3 --all-targets` clean.
+
+**Verification scope**: `cargo test --release -p brain-qwen3 --lib --tests
+--bins` (both `BRAIN_DEVICE=gpu` and `BRAIN_DEVICE=cpu`) green end to end.
+The workspace-wide `make build/release`/`make test`/`make parity` could not
+be run to completion: `crates/minimaxmusic3/src/dit.rs` has an unclosed
+delimiter from an in-progress rewrite in another concurrent session (446
+lines mid-removal at time of writing) - the identical blocker the M5.1/M6.1/
+M6.2 entries above already hit and documented, confirmed via `git status`
+to be untouched by this change and via `cargo build --release --workspace
+--exclude brain-minimaxmusic3` that the exclusion does not route around it
+(several crates, including `brain-gradcheck`, depend on it directly).
+**Commit**: one.
+
 ---
 
 ## Not yet done
@@ -2492,8 +2587,10 @@ dtype, so `Op::PagedAttentionFused` never offers them; a future design that
 wins occupancy (M2.1's own "split-key-then-combine" suggestion) would need
 its own fresh measurement, not a resurrection of these two. Causal-chunk
 prefill's fused kernel (M2.3, `paged_flash_prefill`) IS live: wired behind
-`Op::PagedAttentionFused` in `qwen3::serve::run_batched_steps` (M2.4),
-measured a real, growing speedup as cached-prefix length grows (M2.4's own
+`Op::PagedAttentionFused` in `qwen3::serve::Engine`'s per-layer dispatch
+(M2.4; that logic moved from `run_batched_steps` into `batched_tape` at
+M6.3, unchanged behavior - see that entry), measured a real, growing
+speedup as cached-prefix length grows (M2.4's own
 table), and `Scratch::{scores,probs}` - the campaign's own audit-named
 largest serving scratch buffer - shrinks 4x at a representative shape
 whenever it is live. `brain-qwen3`/`brain-model` build and test clean (M2.4
