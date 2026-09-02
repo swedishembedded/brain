@@ -1382,6 +1382,89 @@ device-head machinery` (registers the three already-cataloged kernels in
 yet), `qwen35: port qwen3's device head onto serve::Engine, fix prefill's
 per-token read` (Engine + tests).
 
+### M4.1 - Fused QKV and gate/up projections in `qwen3::serve`
+
+Concatenated `attn.{wq,wk,wv}` (`[hq+2*hkv, d]`) and `mlp.{gate,up}`
+(`[2*ff, d]`) at engine WEIGHT-LOAD time (`Engine::from_map_with_gpu`), not
+at the on-disk checkpoint importer: `W:[out,in]` is row-major, so
+concatenating along `out` is exactly concatenating the flat row-major
+arrays end to end, read straight from the same host weight map the split
+leaves were already read from. `import.rs`/`gguf_import.rs`/
+`decoder_param_list` are untouched - a checkpoint on disk still has five
+split tensors, and the fused `attn.wqkv.weight`/`mlp.gateup.weight` names
+exist only in `Engine::lin_weights`, at runtime. One GEMM now replaces
+three (Q/K/V), one replaces two (gate/up); `run_batched_steps` narrows the
+wide fused output back into the compact `q_pre`/`k_pre`/`v`/`gate_pre`/`up`
+buffers QK-norm/RoPE/KV-append/`swiglu_fwd` already require via
+`concat_split.wgsl` - the existing kernel, per `qwen35moe::model`'s own
+kernel-reuse note that `region_copy` cannot do this job (it requires
+src/dst to share one `row_stride`/`off`; `concat_split` gathers a wide
+strided row into a fresh compact buffer). No new kernel, as the milestone
+required.
+
+**Gate**: `fused_qkv_and_gateup_are_bit_identical_to_split` (new) proves
+this exactly, no tolerance - not against a host reference (a tiled device
+GEMM and a scalar host loop genuinely reduce in a different order, per
+`admission_head_matches_a_true_host_matvec_within_tolerance`'s own doc,
+so that comparison would prove nothing about bit-identity here), but
+against the split path run through the SAME device kernel (`Engine::mm`)
+this engine dispatched before this milestone, over the three/two original
+unconcatenated weight matrices and the fused dispatch's own real prefill
+activations. Passed on first write against the implementation (built
+alongside the test, not strictly red-then-green, given how much of the
+milestone was investigating which existing kernel could do the narrowing
+step at all - see below). `cargo test -p brain-qwen3 --lib`: 106 passed on
+the GPU/default backend (includes every pre-existing forward/decode parity
+test: `batched_serving_matches_reference`, `chunked_prefill_matches_whole`,
+`decode_window_path_matches_the_single_step_reference`,
+`warm_prefill_is_identical_to_cold`, `spec_decode_matches_greedy`, both
+int8-weight and int8-KV variants). `cargo clippy -p brain-qwen3
+--all-targets`: zero warnings.
+
+CPU backend (`BRAIN_DEVICE=cpu`) surfaces two failures in `serve::tests`
+that do NOT belong to this milestone: checked by isolating this change's
+own diff from unrelated uncommitted work sitting in the same working tree
+(another in-flight milestone's decode/prefill submit-batching WIP) and
+building/testing the isolated result standalone, both
+`causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_triad` and
+`decode_step_submits_are_not_one_per_metadata_write` reproduce identically
+against a clean, unmodified `git HEAD` checkout with none of this
+milestone's changes present. The first is paged-attention-fused kernel
+selection (this milestone never touches `Op::PagedAttentionFused` or its
+selector); the second is `run_batched_submit`/`submit_greedy_head` issuing
+two separate `gpu.submit()` calls per decode step (this milestone adds
+steps to the vector each already submits, never an extra `submit()` call
+of its own) - pre-existing, unrelated, left alone.
+
+**Measured per-kernel table delta** (`qwen_bench serve`, Qwen3-0.6B shape,
+2x Tesla P40, against the M0.2 baseline): decode (`serve 1 20 512`) went
+590 -> 646 dispatches, 18.14 -> 17.77 ms (-2.0%, 55 -> 56 rows/s); prefill
+(`serve 128 20 512`) went 786 -> 758 dispatches, 132.18 -> 125.73 ms
+(-4.9%, 968 -> 1018 rows/s). Per this campaign's own §E requirement, the
+mechanism is NOT reduced memory traffic - `concat_split` reads and writes
+the full fused-output width (at this shape, `2*b*(hq+2*hkv)` extra words
+at decode/QKV, more than the `2*b*d` words the fused GEMM saves by
+reading its input activation once instead of three times), so it shows up
+as a genuinely new, non-trivial line (decode: 140 calls, 1.03 ms, 5.6% of
+the pass, only 0.8% of its own memory roof; prefill: 140 calls, 2.03 ms,
+1.6% of the pass, 50.6% of roof). The actual win is dispatch count and
+per-call roofline efficiency on the DOMINANT, weight-bandwidth-bound
+GEMM/GEMV itself: at decode `matmul_gemv` drops 196 -> 112 calls
+(7.72 -> 7.09 ms) at 80.1% -> 87.1% of roof; at prefill
+`matmul_reg3_splitk` drops 196 -> 112 calls (34.42 -> 29.53 ms) at
+31.8% -> 37.1% of roof and its `dw_splitk_reduce` fold drops
+196 -> 112 calls (13.73 -> 9.78 ms) in lockstep. A wider `N` per dispatch
+streams the identical total weight bytes more efficiently and the engine
+pays for `concat_split` out of dispatches saved elsewhere, not out of a
+smaller memory footprint - both regimes net a real, if modest (prefill)
+to small (decode), whole-pass improvement, so this is a kept win, not a
+killed hypothesis.
+
+**Commits**: two - `qwen3: fuse Q/K/V and gate/up projections into two
+GEMMs (M4.1)` (`Engine::from_map_with_gpu` fused-weight construction,
+`concat_split_step`/`WQKV`/`WGATEUP`, the two dispatch-site rewrites, and
+the bit-identity test), this ledger entry.
+
 ---
 
 ## Not yet done
