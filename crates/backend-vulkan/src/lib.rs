@@ -15,8 +15,9 @@
 //!
 //! Execution model mirrors the wgpu backend: `submit` lazily accumulates
 //! dispatches; the batch is flushed (recorded into one command buffer with a
-//! storage memory barrier between dependent dispatches, submitted, fence-waited)
-//! on the next `read`/`write`/`poll_wait`. Transient per-dispatch uniform buffers
+//! minimal per-buffer `VkBufferMemoryBarrier` before each dispatch that
+//! actually depends on an earlier one's write in the same batch, submitted,
+//! fence-waited) on the next `read`/`write`/`poll_wait`. Transient per-dispatch uniform buffers
 //! and descriptor sets are reclaimed after each flush; model storage buffers are
 //! host-visible and live until the process exits (a one-shot CLI never frees them
 //! mid-run — see the note on `VkOwnedBuffer`).
@@ -46,8 +47,25 @@ fn gpu_wait_timeout_ns() -> u64 {
     backend_api::hardware::wait_timeout_ns()
 }
 
-/// A recorded dispatch: (pipeline index, descriptor set, grid_x, grid_y). All
-/// fields are `Copy`, so `VkStep` is `Clone` like the wgpu backend's.
+/// One storage-buffer binding's identity and access mode on a recorded
+/// dispatch, captured at `record` time from the kernel's reflected WGSL
+/// bindings (`shader::WgslBinding::is_write`). Feeds `flush_chunk`'s
+/// per-buffer hazard analysis - see [`VkStep::accesses`].
+#[derive(Clone, Copy)]
+struct VkAccess {
+    buffer: vk::Buffer,
+    write: bool,
+}
+
+/// Fixed capacity for [`VkStep::accesses`] - the engine-wide invariant caps a
+/// kernel at 8 storage buffers (`AGENTS.md`'s WebGPU-guarantee bullet: "single
+/// bind group, <=8 storage buffers/kernel"), so a fixed array holds every
+/// real kernel's binding set with no allocation and keeps `VkStep` `Copy`.
+const MAX_STORAGE_BINDINGS: usize = 8;
+
+/// A recorded dispatch: (pipeline index, descriptor set, grid_x, grid_y), plus
+/// its storage-buffer read/write set for hazard analysis. All fields are
+/// `Copy`, so `VkStep` is `Clone` like the wgpu backend's.
 #[derive(Clone, Copy)]
 pub struct VkStep {
     kind: usize,
@@ -69,6 +87,16 @@ pub struct VkStep {
     /// in-repo model builds its transient steps and submits them immediately;
     /// hold-and-resubmit code must use `uniform_dynamic` + `step_buf`.
     transient: bool,
+    /// This dispatch's storage-buffer bindings (uniforms excluded - they are
+    /// shader-read-only and any host rewrite already flushes first, so they
+    /// carry no cross-dispatch hazard). Only `accesses[..n_access]` is valid;
+    /// the rest is filler. `flush_chunk` reads this to emit a
+    /// `VkBufferMemoryBarrier` only for a buffer a later dispatch in the same
+    /// batch actually depends on, replacing the blanket `VkMemoryBarrier` this
+    /// backend used to insert unconditionally between every consecutive
+    /// dispatch.
+    accesses: [VkAccess; MAX_STORAGE_BINDINGS],
+    n_access: u8,
 }
 
 /// A device buffer handle. Memory is freed when the owning [`VulkanBackend`] is
@@ -119,13 +147,15 @@ impl Drop for VkOwnedBuffer {
 }
 
 /// A compiled kernel: its SPIR-V module, descriptor-set/pipeline layout, the
-/// compute pipeline, and the reflected `(binding, is_uniform)` list.
+/// compute pipeline, and the reflected binding list (binding index, uniform
+/// vs. storage, and - for storage - whether the shader writes it; see
+/// [`shader::WgslBinding`]).
 struct KernelPipeline {
     module: vk::ShaderModule,
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
-    bindings: Vec<(u32, bool)>,
+    bindings: Vec<shader::WgslBinding>,
 }
 
 /// One kernel set's compiled pipelines, plus the `Arc<VkContext>` that keeps
@@ -176,6 +206,12 @@ struct OpCounters {
     readbacks: AtomicU64,
     bind_groups: AtomicU64,
     uniform_allocs: AtomicU64,
+    /// Individual `VkBufferMemoryBarrier`s emitted by `flush_chunk`'s
+    /// per-buffer hazard analysis (one per buffer a dispatch actually depends
+    /// on from an earlier, not-yet-synchronised write in the same batch) -
+    /// perf observability for `tests/perf_contract.rs`, mirroring
+    /// `queue_submits()`'s existing contract.
+    barriers: AtomicU64,
 }
 
 /// The largest sub-batch `flush` will bracket with ONE timestamp query pool.
@@ -530,10 +566,10 @@ impl VulkanBackend {
                 let module = shader::make_shader_module(dev, &spirv).map_err(|e| format!("{name}: {e}"))?;
                 let layout_bindings: Vec<vk::DescriptorSetLayoutBinding> = bindings
                     .iter()
-                    .map(|&(b, is_uniform)| {
+                    .map(|b| {
                         vk::DescriptorSetLayoutBinding::default()
-                            .binding(b)
-                            .descriptor_type(if is_uniform {
+                            .binding(b.binding)
+                            .descriptor_type(if b.is_uniform {
                                 vk::DescriptorType::UNIFORM_BUFFER
                             } else {
                                 vk::DescriptorType::STORAGE_BUFFER
@@ -775,6 +811,16 @@ impl VulkanBackend {
         self.ctx.submits.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Total `VkBufferMemoryBarrier`s emitted by `flush_chunk`'s per-buffer
+    /// hazard analysis since construction - one per buffer a dispatch actually
+    /// depended on from an earlier not-yet-synchronised write in the same
+    /// batch. Perf observability for `tests/perf_contract.rs`: a batch of `n`
+    /// dispatches that share no buffers at all costs 0, not the `n-1` the
+    /// blanket `VkMemoryBarrier` this replaced always paid.
+    pub fn barrier_count(&self) -> u64 {
+        self.stats.barriers.load(Ordering::Relaxed)
+    }
+
     /// Transient uniform buffers currently alive (unsubmitted + in-flight +
     /// recycled). Bounded by the largest single frame, not by frame count.
     pub fn transient_uniform_count(&self) -> usize {
@@ -836,20 +882,24 @@ impl VulkanBackend {
         // addresses (no further pushes after this point).
         let mut meta: Vec<(u32, vk::DescriptorType, vk::DescriptorBufferInfo)> =
             Vec::with_capacity(kp.bindings.len());
+        let mut accesses = [VkAccess { buffer: vk::Buffer::null(), write: false }; MAX_STORAGE_BINDINGS];
+        let mut n_access = 0usize;
         let mut storage_i = 0usize;
-        for &(binding, is_uniform) in &kp.bindings {
-            let (vkbuf, off_b, range_b, ty) = if is_uniform {
+        for b in &kp.bindings {
+            let (vkbuf, off_b, range_b, ty) = if b.is_uniform {
                 (ubuf.buffer, 0u64, ubuf.size, vk::DescriptorType::UNIFORM_BUFFER)
             } else {
-                let b = bufs[storage_i];
+                let buf = bufs[storage_i];
                 let (off_w, len_w) = offsets.get(storage_i).copied().unwrap_or((0, 0));
                 let off = off_w * 4;
-                let range = if len_w == 0 { b.bytes() - off } else { len_w * 4 };
+                let range = if len_w == 0 { buf.bytes() - off } else { len_w * 4 };
                 storage_i += 1;
-                (b.inner.buffer, off, range, vk::DescriptorType::STORAGE_BUFFER)
+                accesses[n_access] = VkAccess { buffer: buf.inner.buffer, write: b.is_write };
+                n_access += 1;
+                (buf.inner.buffer, off, range, vk::DescriptorType::STORAGE_BUFFER)
             };
             meta.push((
-                binding,
+                b.binding,
                 ty,
                 vk::DescriptorBufferInfo::default().buffer(vkbuf).offset(off_b).range(range_b),
             ));
@@ -880,7 +930,7 @@ impl VulkanBackend {
         self.ctx.set_names(set, &named);
         let (gx, gy) = backend_api::grid_ws(threads, self.pipelines.wgsizes[kind]);
         let sliced = offsets.iter().any(|&(off, _)| off > 0);
-        VkStep { kind, set, gx, gy, sliced, transient }
+        VkStep { kind, set, gx, gy, sliced, transient, accesses, n_access: n_access as u8 }
     }
 
     pub fn submit(&self, clears: &[&VkOwnedBuffer], steps: &[VkStep]) {
@@ -915,9 +965,11 @@ impl VulkanBackend {
         }
     }
 
-    /// Record all pending dispatches into one command buffer (with a storage
-    /// memory barrier between consecutive dispatches), submit, fence-wait, then
-    /// reclaim the batch's descriptor sets + transient uniform buffers.
+    /// Record all pending dispatches into one command buffer (with a minimal
+    /// per-buffer `VkBufferMemoryBarrier` before each dispatch that actually
+    /// depends on an earlier one's write - see `flush_chunk`), submit,
+    /// fence-wait, then reclaim the batch's descriptor sets + transient
+    /// uniform buffers.
     fn flush(&self) {
         let steps: Vec<VkStep> = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         if steps.is_empty() {
@@ -1017,23 +1069,57 @@ impl VulkanBackend {
             dev.cmd_reset_query_pool(cmd, qp, 0, (chunk.len() + 1) as u32);
             dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, qp, 0);
         }
-        // Conservative full memory barrier between dependent dispatches: every
-        // prior shader write is made available/visible to subsequent shader
-        // reads/writes. (A finer per-buffer barrier is a later optimisation.)
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE);
+        // Per-buffer hazard analysis, replacing the blanket `VkMemoryBarrier`
+        // this used to insert unconditionally before every dispatch but the
+        // first: `dirty` names every buffer written by a dispatch already
+        // recorded into `cmd` whose write is not yet guaranteed visible to a
+        // later one (no barrier covering it has been emitted yet). Before
+        // each dispatch, a `VkBufferMemoryBarrier` is emitted for exactly the
+        // buffers THIS dispatch's read/write set overlaps that are still
+        // dirty - not for the buffers it does not touch. Resolving a hazard
+        // clears it: a barrier makes the write it covers visible to
+        // EVERYTHING after it in command-buffer order, not only to the
+        // dispatch that triggered it, so a buffer stays clean for every
+        // subsequent dispatch in the chunk until a NEW write dirties it
+        // again. Two dispatch chains that share no buffer at all - the common
+        // shape for independent per-expert/per-branch work - therefore cost
+        // ZERO barriers between them, where the blanket barrier always paid
+        // one regardless of whether the two dispatches touched the same
+        // memory.
+        let mut dirty: std::collections::HashSet<vk::Buffer> = std::collections::HashSet::new();
+        let mut needed: Vec<vk::Buffer> = Vec::new();
         for (i, s) in chunk.iter().enumerate() {
+            let accesses = &s.accesses[..s.n_access as usize];
             if i > 0 {
-                dev.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[barrier],
-                    &[],
-                    &[],
-                );
+                needed.clear();
+                for acc in accesses {
+                    if dirty.remove(&acc.buffer) {
+                        needed.push(acc.buffer);
+                    }
+                }
+                if !needed.is_empty() {
+                    let barriers: Vec<vk::BufferMemoryBarrier> = needed
+                        .iter()
+                        .map(|&buffer| {
+                            vk::BufferMemoryBarrier::default()
+                                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                                .buffer(buffer)
+                                .offset(0)
+                                .size(vk::WHOLE_SIZE)
+                        })
+                        .collect();
+                    dev.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &barriers,
+                        &[],
+                    );
+                    self.stats.barriers.fetch_add(barriers.len() as u64, Ordering::Relaxed);
+                }
             }
             let kp = &self.pipelines.pipelines[s.kind];
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
@@ -1041,6 +1127,11 @@ impl VulkanBackend {
             dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
             if let Some(qp) = query_pool {
                 dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, qp, (i + 1) as u32);
+            }
+            for acc in accesses {
+                if acc.write {
+                    dirty.insert(acc.buffer);
+                }
             }
         }
         self.end_and_wait(cmd, guard);

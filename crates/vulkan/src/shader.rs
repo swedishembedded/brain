@@ -83,12 +83,29 @@ pub fn wgsl_to_spirv(src: &str) -> Result<Vec<u32>, String> {
     Ok(words)
 }
 
-/// Reflect a WGSL kernel's `@group(0)` resource bindings as `(binding, is_uniform)`
-/// pairs, sorted by binding index. naga maps `@group(0) @binding(N)` to descriptor
-/// set 0 binding N, so this is exactly the descriptor-set-layout a generic backend
-/// must build to match the SPIR-V (uniform at binding 0, storage at 1..). Bindings
-/// in groups other than 0 are ignored (brain kernels use a single bind group).
-pub fn wgsl_bindings(src: &str) -> Result<Vec<(u32, bool)>, String> {
+/// One `@group(0)` resource binding's shape, as reflected from a kernel's WGSL:
+/// its binding index, whether it is the uniform (params) binding, and - for a
+/// storage binding - whether the shader may write it.
+///
+/// The write flag is what a backend's per-dispatch hazard analysis needs to
+/// build each dispatch's write set: naga maps WGSL's `var<storage, read>` to
+/// `StorageAccess::LOAD` alone and
+/// `var<storage, read_write>` to `LOAD | STORE`, so `STORE` presence is exactly
+/// "this binding is a write". WGSL has no write-only storage class, so this is
+/// never true for a uniform binding (uniforms are read-only by construction).
+#[derive(Clone, Copy, Debug)]
+pub struct WgslBinding {
+    pub binding: u32,
+    pub is_uniform: bool,
+    pub is_write: bool,
+}
+
+/// Reflect a WGSL kernel's `@group(0)` resource bindings, sorted by binding
+/// index. naga maps `@group(0) @binding(N)` to descriptor set 0 binding N, so
+/// this is exactly the descriptor-set-layout a generic backend must build to
+/// match the SPIR-V (uniform at binding 0, storage at 1..). Bindings in groups
+/// other than 0 are ignored (brain kernels use a single bind group).
+pub fn wgsl_bindings(src: &str) -> Result<Vec<WgslBinding>, String> {
     let module = naga::front::wgsl::parse_str(src)
         .map_err(|e| format!("WGSL parse error: {e:?}"))?;
     let mut out = Vec::new();
@@ -98,10 +115,14 @@ pub fn wgsl_bindings(src: &str) -> Result<Vec<(u32, bool)>, String> {
                 continue;
             }
             let is_uniform = matches!(gv.space, naga::AddressSpace::Uniform);
-            out.push((rb.binding, is_uniform));
+            let is_write = matches!(
+                gv.space,
+                naga::AddressSpace::Storage { access } if access.contains(naga::StorageAccess::STORE)
+            );
+            out.push(WgslBinding { binding: rb.binding, is_uniform, is_write });
         }
     }
-    out.sort_by_key(|(b, _)| *b);
+    out.sort_by_key(|b| b.binding);
     Ok(out)
 }
 

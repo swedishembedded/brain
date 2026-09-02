@@ -164,3 +164,48 @@ fn storage_buffers_skip_staging_on_a_unified_memory_device() {
          is unsafe on this driver), not vary submits by host_visible"
     );
 }
+
+/// `flush_chunk` used to insert a blanket `VkMemoryBarrier` before every
+/// dispatch but the first in a batch, regardless of whether it touched any
+/// buffer an earlier dispatch in the batch had written - an `n`-dispatch
+/// batch always paid `n-1` barriers. It now runs a per-buffer read/write-set
+/// hazard analysis and emits a `VkBufferMemoryBarrier` only for a buffer a
+/// later dispatch actually depends on.
+///
+/// This batch is 3 dispatches: `out1 = a + b`, then `out2 = out1 + c` (a real
+/// dependency - reads `out1`), then `out3 = d + e` (fully independent - shares
+/// no buffer with either of the first two). The blanket barrier would cost 2;
+/// the hazard analysis must cost exactly 1 (before the `out1` read), with
+/// zero inserted before the independent third dispatch.
+#[test]
+fn independent_dispatches_in_a_batch_cost_no_barrier() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(be) = backend() else { return };
+    let a = be.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
+    let b = be.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
+    let c = be.storage_init("c", &[100.0, 200.0, 300.0, 400.0]);
+    let d = be.storage_init("d", &[1000.0, 2000.0, 3000.0, 4000.0]);
+    let e = be.storage_init("e", &[1.0, 1.0, 1.0, 1.0]);
+    let out1 = be.storage(4);
+    let out2 = be.storage(4);
+    let out3 = be.storage(4);
+
+    let base = be.barrier_count();
+    let steps = vec![
+        be.step(0, &[&a, &b, &out1], &[4], 4),   // out1 = a + b
+        be.step(0, &[&out1, &c, &out2], &[4], 4), // out2 = out1 + c  (depends on out1)
+        be.step(0, &[&d, &e, &out3], &[4], 4),   // out3 = d + e     (independent)
+    ];
+    be.submit(&[], &steps);
+    assert_eq!(be.read(&out2, 4), vec![111.0, 222.0, 333.0, 444.0]);
+    assert_eq!(be.read(&out3, 4), vec![1001.0, 2001.0, 3001.0, 4001.0]);
+
+    let barriers = be.barrier_count() - base;
+    assert_eq!(
+        barriers, 1,
+        "expected exactly 1 buffer barrier (the real out1 dependency) out of \
+         3 dispatches - got {barriers}; either a real dependency was missed \
+         (correctness) or an independent dispatch was barriered anyway \
+         (not minimal)"
+    );
+}
