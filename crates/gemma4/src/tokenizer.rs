@@ -79,7 +79,6 @@ pub fn load_tokenizer(tensors: &[StTensor]) -> Result<QwenBpe, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::Tokenizer as _;
 
     /// A tiny but structurally real `tokenizer.json` (BPE model, one merge,
     /// one added special token) encoded the same way `checkpoint::
