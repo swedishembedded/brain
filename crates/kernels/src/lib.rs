@@ -188,8 +188,12 @@ pub const BCE_LOGITS_GRAD: &str = include_str!("../wgsl/bce_logits_grad.wgsl");
 pub const BIAS_ADD: &str = include_str!("../wgsl/bias_add.wgsl");
 /// `wgsl/bias_grad.wgsl`
 pub const BIAS_GRAD: &str = include_str!("../wgsl/bias_grad.wgsl");
+/// `wgsl/bias_grad_final.wgsl`
+pub const BIAS_GRAD_FINAL: &str = include_str!("../wgsl/bias_grad_final.wgsl");
 /// `wgsl/bias_grad_ncl.wgsl`
 pub const BIAS_GRAD_NCL: &str = include_str!("../wgsl/bias_grad_ncl.wgsl");
+/// `wgsl/bias_grad_part.wgsl`
+pub const BIAS_GRAD_PART: &str = include_str!("../wgsl/bias_grad_part.wgsl");
 /// `wgsl/blend_accumulate.wgsl`
 pub const BLEND_ACCUMULATE: &str = include_str!("../wgsl/blend_accumulate.wgsl");
 /// `wgsl/bmm.wgsl`
@@ -596,8 +600,12 @@ pub const MATMUL_I8_GEMV: &str = include_str!("../wgsl/matmul_i8_gemv.wgsl");
 pub const MATMUL_I8_GEMV_REG: &str = include_str!("../wgsl/matmul_i8_gemv_reg.wgsl");
 /// `wgsl/matmul_q4_dyn.wgsl`
 pub const MATMUL_Q4_DYN: &str = include_str!("../wgsl/matmul_q4_dyn.wgsl");
+/// `wgsl/matmul_q4_dyn_reg.wgsl`
+pub const MATMUL_Q4_DYN_REG: &str = include_str!("../wgsl/matmul_q4_dyn_reg.wgsl");
 /// `wgsl/matmul_q4_gemv.wgsl`
 pub const MATMUL_Q4_GEMV: &str = include_str!("../wgsl/matmul_q4_gemv.wgsl");
+/// `wgsl/matmul_q4_gemv_reg.wgsl`
+pub const MATMUL_Q4_GEMV_REG: &str = include_str!("../wgsl/matmul_q4_gemv_reg.wgsl");
 /// `wgsl/matmul_reg.wgsl`
 pub const MATMUL_REG: &str = include_str!("../wgsl/matmul_reg.wgsl");
 /// `wgsl/matmul_reg2.wgsl`
@@ -1009,7 +1017,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("bce_logits_grad", BCE_LOGITS_GRAD),
     ("bias_add", BIAS_ADD),
     ("bias_grad", BIAS_GRAD),
+    ("bias_grad_final", BIAS_GRAD_FINAL),
     ("bias_grad_ncl", BIAS_GRAD_NCL),
+    ("bias_grad_part", BIAS_GRAD_PART),
     ("blend_accumulate", BLEND_ACCUMULATE),
     ("bmm", BMM),
     ("bmm_acc", BMM_ACC),
@@ -1213,7 +1223,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_i8_gemv", MATMUL_I8_GEMV),
     ("matmul_i8_gemv_reg", MATMUL_I8_GEMV_REG),
     ("matmul_q4_dyn", MATMUL_Q4_DYN),
+    ("matmul_q4_dyn_reg", MATMUL_Q4_DYN_REG),
     ("matmul_q4_gemv", MATMUL_Q4_GEMV),
+    ("matmul_q4_gemv_reg", MATMUL_Q4_GEMV_REG),
     ("matmul_reg", MATMUL_REG),
     ("matmul_reg2", MATMUL_REG2),
     ("matmul_reg3", MATMUL_REG3),
