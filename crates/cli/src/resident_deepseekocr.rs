@@ -168,7 +168,13 @@ impl DeepseekOcrResident {
 
 impl ResidentModel for DeepseekOcrResident {
     fn manifest(&self) -> Manifest {
-        deepseek2ocr::caps::manifest()
+        // The stripped, weights-free spec: this resident's checkpoint
+        // directory is already resolved at construction (`self.dir`), so a
+        // served caller must never be told a `weights` param exists to set -
+        // see `deepseek2ocr::caps::manifest_resident`'s doc. `Session::generate`
+        // (what `DeepseekOcrInstance::run` actually calls) never reads
+        // `weights` from `inv` either.
+        deepseek2ocr::caps::manifest_resident()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {

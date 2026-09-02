@@ -112,6 +112,21 @@ pub fn manifest() -> Manifest {
     .with_max_context_tokens(SEQ_LEN as u64)
 }
 
+/// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
+/// the checkpoint directory is service-side configuration ([`DIR_VAR`]), so
+/// the served action carries only real per-request parameters - see
+/// `glmdsa::caps::manifest_resident`'s doc for why a static, CLI-facing
+/// manifest and a stripped resident one are two different things, not one
+/// hidden behind deployment state. `crate::resident_moondream3::
+/// Moondream3Resident::manifest` calls this rather than [`manifest`].
+pub fn manifest_resident() -> Manifest {
+    let mut m = manifest();
+    for a in &mut m.actions {
+        a.params.retain(|p| p.name != "weights");
+    }
+    m
+}
+
 /// Parse the `precision` parameter. `Err` names the accepted values rather than
 /// defaulting - silently building a 43 GiB fp32 model because of a typo is a
 /// long wait followed by an allocation failure, not a useful error.

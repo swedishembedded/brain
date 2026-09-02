@@ -175,12 +175,22 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // FastVLM captioning: the provider manages its own weight residency
     // (lazy per checkpoint dir, resident thereafter), so it serves as a
     // stateless resident — invoking it with no checkpoint on disk is a clean
-    // per-call error, not a registration failure.
-    models.push(Arc::new(ProviderResident::stateless(Arc::new(fastvlm::caps::FastVlmProvider::new()))));
+    // per-call error, not a registration failure. Served (and validated)
+    // under `manifest_resident`, not the raw `manifest`: the raw spec's
+    // `weights` param is CLI-only convenience (`brain fastvlm caption
+    // --weights ...`) that a scheduled caller must never see or be able to
+    // set - see `fastvlm::caps::manifest_resident`'s doc.
+    models.push(Arc::new(ProviderResident::stateless_with_manifest(
+        Arc::new(fastvlm::caps::FastVlmProvider::new()),
+        fastvlm::caps::manifest_resident(),
+    )));
     // LLaVA-1.5-13B captioning: same stateless-resident shape as FastVLM
     // above - the provider manages its own weight residency lazily, per
-    // checkpoint dir.
-    models.push(Arc::new(ProviderResident::stateless(Arc::new(llava::caps::LlavaProvider::new()))));
+    // checkpoint dir. Same `manifest_resident` reasoning as FastVLM.
+    models.push(Arc::new(ProviderResident::stateless_with_manifest(
+        Arc::new(llava::caps::LlavaProvider::new()),
+        llava::caps::manifest_resident(),
+    )));
     // brain/imgpipe: the pipeline holds no weights of its own (each stage
     // resolves its own via BRAIN_* env vars, same as when called through
     // `brain do`), so it is stateless from the scheduler's point of view too.

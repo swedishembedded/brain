@@ -134,6 +134,21 @@ pub fn manifest() -> Manifest {
     .with_max_context_tokens(SEQ_LEN as u64)
 }
 
+/// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
+/// the checkpoint directory is service-side configuration ([`DIR_VAR`]), so
+/// the served action carries only real per-request parameters - see
+/// `glmdsa::caps::manifest_resident`'s doc for why a static, CLI-facing
+/// manifest and a stripped resident one are two different things, not one
+/// hidden behind deployment state. `crate::resident_deepseekocr::
+/// DeepseekOcrResident::manifest` calls this rather than [`manifest`].
+pub fn manifest_resident() -> Manifest {
+    let mut m = manifest();
+    for a in &mut m.actions {
+        a.params.retain(|p| p.name != "weights");
+    }
+    m
+}
+
 /// A built composite plus everything one request needs around it.
 ///
 /// Public so `crates/cli/src/resident_deepseekocr.rs` can own one directly:

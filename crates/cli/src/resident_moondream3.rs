@@ -111,7 +111,12 @@ impl Moondream3Resident {
 
 impl ResidentModel for Moondream3Resident {
     fn manifest(&self) -> Manifest {
-        moondream3::caps::manifest()
+        // The stripped, weights-free spec: this resident's checkpoint
+        // directory is already resolved (`self.dir`, from `from_env`/
+        // `from_dir`), so a served caller must never be told a `weights`
+        // param exists to set - see `moondream3::caps::manifest_resident`'s
+        // doc. `run` below never reads `weights` from `inv` either.
+        moondream3::caps::manifest_resident()
     }
 
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {

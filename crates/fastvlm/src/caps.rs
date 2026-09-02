@@ -59,6 +59,24 @@ pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "FastVLM image captioning — fully in brain, parity-gated against HF.", vec![caption])
 }
 
+/// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
+/// the checkpoint directory is service-side configuration
+/// (`BRAIN_FASTVLM_WEIGHTS`), so the served action carries only real
+/// per-request parameters - see `glmdsa::caps::manifest_resident`'s doc for
+/// why a static, CLI-facing manifest and a stripped resident one are two
+/// different things, not one hidden behind deployment state. Used by
+/// `residency::bridge::ProviderResident::stateless_with_manifest`, which
+/// validates every served invocation against exactly this spec - so a caller
+/// crafting a raw `weights` param cannot reach [`CaptionAction::run`]'s own
+/// per-request override either, not just "not see it in the UI".
+pub fn manifest_resident() -> Manifest {
+    let mut m = manifest();
+    for a in &mut m.actions {
+        a.params.retain(|p| p.name != "weights");
+    }
+    m
+}
+
 /// The two pipeline stages are compartmentalized exactly as two Active
 /// Objects would be: each owns its resource (the CPU vision device; the GPU
 /// decoder) behind ITS OWN lock, held only while that stage runs, and the
