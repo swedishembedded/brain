@@ -144,6 +144,40 @@ pub enum Op {
     /// int8-KV tier yet (its own `@dtype f32` header), so `FusedFlash` is
     /// offered only at `Dtype::F32`.
     PagedAttentionFused,
+    /// Forward 3D convolution, NCTHW (`conv3d` direct vs the `im2col3d_at` +
+    /// `matmul_reg3` + `nlc_bias_nchw` GEMM lowering) - the exact
+    /// [`Op::Conv2d`] shape one dimension up, migrated from
+    /// `vae::blocks3d::Builder3d::conv_step`'s own hand-rolled
+    /// `cout < GEMM_CONV3D_MIN_COUT || pos_n < GEMM_CONV3D_MIN_POS` check
+    /// (Phase 5, M5.3 - found by the same "does a good kernel already exist"
+    /// question `Op::Conv2d` itself was found by, still unmigrated a phase
+    /// later). `RegisterTiled` again names the whole lowering, so it
+    /// inherits `workgroup_reductions` from [`KernelVariant::requires`].
+    /// Shape is the lowered GEMM's: `m` = output positions (`To·Ho·Wo`), `n`
+    /// = `Cout`, `k` = the contraction (`Cin·Kt·Kh·Kw`). Grouped 3D convs
+    /// (depthwise's own `dwconv3d` family) never reach this Op - the single
+    /// GEMM this lowering builds contracts over all of `Cin`, correct only
+    /// at `groups == 1`, exactly as `Op::Conv2d`'s doc already notes for its
+    /// own grouped/dilated sibling.
+    Conv3d,
+    /// Backward 2D convolution - the weight gradient (`conv2d_dw` direct vs
+    /// `im2col_at` + `matmul_dw_reg`/`matmul_dw_reg_splitk` + `dw_splitk_
+    /// reduce`) and the input gradient (`conv2d_dx` direct vs `matmul_dx_
+    /// reg` + `col2im`), migrated together because `vae::blocks::grad`'s own
+    /// `Op::Conv` adjoint makes BOTH decisions from the identical boolean
+    /// (`caps.workgroup_reductions && cout >= GEMM_CONV_BWD_MIN_COUT`) -
+    /// splitting them into two Ops would just make two callers of one
+    /// selector arm compute the same shape twice. Scoped to `vae::blocks::
+    /// grad`'s tree, the same scope [`Op::Conv2d`]'s own doc already gives
+    /// its forward sibling (Phase 5, M5.3: found unmigrated, same as
+    /// [`Op::Conv3d`] above - `Op::Conv2d`'s own [`GEMM_CONV2D_MIN_COUT`] doc
+    /// already named `GEMM_CONV_BWD_MIN_COUT` as landing at the identical
+    /// crossover without migrating it). Unlike the forward Op, only `n`
+    /// (`Cout`) gates it - `vae::blocks::grad` never re-derived an `hw`
+    /// threshold for the backward GEMMs, so none is invented here. Shape:
+    /// `m` = output positions (`Ho·Wo`), `n` = `Cout`, `k` = the contraction
+    /// (`Cin·K·K`).
+    Conv2dBackward,
 }
 
 /// Element type an op runs over - an alias for the engine's ONE dtype enum
@@ -445,6 +479,39 @@ pub const GEMM_CONV2D_MIN_COUT: u32 = 32;
 /// unchanged, not invented here.
 pub const GEMM_CONV2D_MIN_HW: u32 = 128;
 
+/// Minimum output channels for the GEMM-lowered 3D convolution
+/// ([`Op::Conv3d`]). `matmul_reg3` computes the same 128-wide column tile
+/// [`GEMM_CONV2D_MIN_COUT`] guards, contracted over a longer axis
+/// (`Cin·Kt·Kh·Kw` rather than `Cin·Kh·Kw`) - a longer contraction only moves
+/// a fixed-tile-overhead crossover DOWN, never up, so `vae::blocks3d`'s own
+/// doc carries the 2D value over rather than re-deriving it: "this is the
+/// same kernel at a longer contraction... which only moves the crossover
+/// down, so 32 carries over." Migrated verbatim from `vae::blocks3d`'s own
+/// `GEMM_CONV3D_MIN_COUT` constant of the same value.
+pub const GEMM_CONV3D_MIN_COUT: u32 = 32;
+
+/// Minimum output positions (`To·Ho·Wo`) for the GEMM-lowered 3D convolution
+/// ([`Op::Conv3d`]) - the row-tile companion to [`GEMM_CONV3D_MIN_COUT`],
+/// same role as [`GEMM_CONV2D_MIN_HW`] for the 2D op. Migrated verbatim from
+/// `vae::blocks3d`'s own `GEMM_CONV3D_MIN_POS` constant; carried over
+/// unchanged from the 2D threshold for the same reason, not independently
+/// re-swept.
+pub const GEMM_CONV3D_MIN_POS: u32 = 128;
+
+/// Minimum output channels for the GEMM-lowered 2D convolution BACKWARD
+/// ([`Op::Conv2dBackward`]) - both the weight gradient and the input
+/// gradient, which `vae::blocks::grad` gates identically. `matmul_dw_reg`/
+/// `matmul_dx_reg` compute the same 128-wide tile [`GEMM_CONV2D_MIN_COUT`]
+/// guards on the forward side; `Op::Conv2d`'s own doc already records that
+/// the backward re-derivation on `vqgan_bench convbwd` (Cin 128, 256x256,
+/// 3x3) landed at the SAME crossover (16..32) independently, which is why
+/// this is one constant rather than a new sweep. No `hw` companion exists
+/// here - `vae::blocks::grad` never gated the backward lowering on output
+/// position count, only on `Cout` and `caps.workgroup_reductions`, so none
+/// is invented for this migration. Migrated verbatim from `vae::blocks`'s
+/// own `GEMM_CONV_BWD_MIN_COUT` constant of the same value.
+pub const GEMM_CONV_BWD_MIN_COUT: u32 = 32;
+
 /// `BRAIN_NO_COOP_LN=1` pins LayerNorm to the per-element kernels — the A/B
 /// switch the end-to-end speedup was measured with, and the fallback if a
 /// driver ever mishandles the cooperative variant. Read once (the policy must
@@ -740,6 +807,28 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
                 vec![Reference]
             }
         }
+        // The 3D convolution, scoped to `vae::blocks3d::Builder3d::conv_step`'s
+        // tree - the exact `Op::Conv2d` shape one dimension up, both axes
+        // gating for the same reason (a longer contraction does not change
+        // which axis a mostly-idle tile comes from).
+        Op::Conv3d => {
+            if shape.n >= GEMM_CONV3D_MIN_COUT && shape.m >= GEMM_CONV3D_MIN_POS {
+                vec![RegisterTiled, Reference]
+            } else {
+                vec![Reference]
+            }
+        }
+        // The 2D convolution's backward (weight AND input gradient alike -
+        // see this Op's own doc for why they share one arm). Only `n` (Cout)
+        // gates it - `vae::blocks::grad` never derived an `hw` threshold for
+        // these GEMMs, so none is added here.
+        Op::Conv2dBackward => {
+            if shape.n >= GEMM_CONV_BWD_MIN_COUT {
+                vec![RegisterTiled, Reference]
+            } else {
+                vec![Reference]
+            }
+        }
         // Device-independent: the split kernels have no barrier, so the
         // boundary is purely the row length.
         Op::ArgMaxRow => {
@@ -988,6 +1077,38 @@ mod tests {
         assert_eq!(s.select(Op::Conv2d, narrow_cout, &gpu_caps()), KernelVariant::Reference);
         assert_eq!(s.select(Op::Conv2d, narrow_hw, &gpu_caps()), KernelVariant::Reference);
         assert_eq!(s.select(Op::Conv2d, wide, &cpu_caps()), KernelVariant::Reference);
+    }
+
+    /// The 3D convolution, scoped to `vae::blocks3d::Builder3d::conv_step`'s
+    /// tree (`Op::Conv3d`'s doc) - the exact `Op::Conv2d` shape one dimension
+    /// up, both axes gating, direct on any device without workgroup
+    /// reductions.
+    #[test]
+    fn conv3d_is_gated_on_both_pos_and_cout_and_on_workgroup_reductions() {
+        let s = DefaultSelector;
+        let wide = shape(GEMM_CONV3D_MIN_POS, GEMM_CONV3D_MIN_COUT, 864, Dtype::F32);
+        let narrow_cout = shape(GEMM_CONV3D_MIN_POS, GEMM_CONV3D_MIN_COUT - 1, 864, Dtype::F32);
+        let narrow_pos = shape(GEMM_CONV3D_MIN_POS - 1, GEMM_CONV3D_MIN_COUT, 864, Dtype::F32);
+        assert_eq!(s.select(Op::Conv3d, wide, &gpu_caps()), KernelVariant::RegisterTiled);
+        assert_eq!(s.select(Op::Conv3d, narrow_cout, &gpu_caps()), KernelVariant::Reference);
+        assert_eq!(s.select(Op::Conv3d, narrow_pos, &gpu_caps()), KernelVariant::Reference);
+        assert_eq!(s.select(Op::Conv3d, wide, &cpu_caps()), KernelVariant::Reference);
+    }
+
+    /// The 2D convolution's BACKWARD (`Op::Conv2dBackward`'s doc): only
+    /// `Cout` gates it (no `hw` companion - `vae::blocks::grad` never
+    /// derived one), direct on any device without workgroup reductions.
+    #[test]
+    fn conv2d_backward_is_gated_on_cout_and_on_workgroup_reductions() {
+        let s = DefaultSelector;
+        let wide = shape(1024, GEMM_CONV_BWD_MIN_COUT, 288, Dtype::F32);
+        let narrow_cout = shape(1024, GEMM_CONV_BWD_MIN_COUT - 1, 288, Dtype::F32);
+        // Few output positions, wide Cout: still lowered - no `hw` gate here.
+        let few_pos = shape(1, GEMM_CONV_BWD_MIN_COUT, 288, Dtype::F32);
+        assert_eq!(s.select(Op::Conv2dBackward, wide, &gpu_caps()), KernelVariant::RegisterTiled);
+        assert_eq!(s.select(Op::Conv2dBackward, narrow_cout, &gpu_caps()), KernelVariant::Reference);
+        assert_eq!(s.select(Op::Conv2dBackward, few_pos, &gpu_caps()), KernelVariant::RegisterTiled);
+        assert_eq!(s.select(Op::Conv2dBackward, wide, &cpu_caps()), KernelVariant::Reference);
     }
 
     /// The decode regime picks the cooperative kernels on a GPU and must NOT
