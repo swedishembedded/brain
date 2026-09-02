@@ -1833,6 +1833,7 @@ mod rmsnorm_variant_agreement {
             rmsnorm_rows: RMSNORM_ROWS,
             rms_inv: model::block::UNREGISTERED,
             rmsnorm_dx: model::block::UNREGISTERED,
+            rmsnorm_dx_rows: model::block::UNREGISTERED,
             rmsnorm_dw: model::block::UNREGISTERED,
             rope: model::block::UNREGISTERED,
             rope_bwd: model::block::UNREGISTERED,
