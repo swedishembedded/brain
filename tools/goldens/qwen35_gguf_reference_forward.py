@@ -262,7 +262,73 @@ class Cfg:
 
 def gdn_layer(m, c, l, x, st):
     p = f"blk.{l}."
+    group = c.nvh // c.nkh
+    # EVERY GDN leaf indexed by VALUE HEAD is stored GROUP-MAJOR on disk
+    # (index = group*nkh + key_head, i.e. every value head repeating the
+    # SAME key head sits `nkh` apart, strided), not in the repeat_interleave
+    # (SUB-MAJOR: index = key_head*group + repeat) order this function's own
+    # `kh = j // group` pairing (below) assumes for q/k. Found by direct
+    # comparison against the FP8 checkpoint's own weights on real data: this
+    # degroup gives cosine >= 0.9996 (`ssm_a`/`ssm_dt.bias`/`ssm_conv1d`
+    # exactly 1.0000000 - unquantized, no Q8_0 rounding noise) at EVERY leaf
+    # a GDN layer owns that carries this structure - `ssm_a`, `ssm_dt.bias`,
+    # `ssm_conv1d.weight`'s v-channels, `attn_qkv.weight`'s v-rows,
+    # `ssm_alpha.weight`/`ssm_beta.weight`'s rows, `attn_gate.weight`'s rows,
+    # `ssm_out.weight`'s columns - a genuine reordering, not a value
+    # transform. Without it this script shared brain's own pre-fix bug (both
+    # independently read the raw, un-degrouped order and paired it with
+    # `j // group`), which is why an early version of this oracle agreed
+    # bit-for-bit with a broken loader - two independent implementations
+    # making the SAME wrong assumption are not independent evidence.
+    def degroup(v):
+        """[nvh]-length vector, group-major -> sub-major."""
+        out = [0.0] * len(v)
+        for gi in range(group):
+            for k in range(c.nkh):
+                out[k * group + gi] = v[gi * c.nkh + k]
+        return out
+
+    def degroup_blocks(v, offset, head_dim):
+        """v-portion block permutation: `head_dim` consecutive elements per
+        value head, starting at `offset` (0 for a pure-v vector like `z`;
+        `2*c.key_dim` for `qkv`'s v-slice, which follows a q|k prefix that
+        is untouched). Same direction as `degroup` (group-major source read
+        into a sub-major destination), applied per head-block instead of
+        per scalar - the vector-level twin of a weight-matrix ROW
+        permutation (a matvec's output element only depends on its own
+        weight row, so permuting rows before the multiply and permuting the
+        corresponding output elements after it are the same operation)."""
+        out = list(v)
+        for h in range(c.nvh):
+            kh, gi = h // group, h % group
+            src_h = gi * c.nkh + kh
+            out[offset + h * head_dim:offset + (h + 1) * head_dim] = v[offset + src_h * head_dim:offset + (src_h + 1) * head_dim]
+        return out
+
+    def regroup_blocks(v, head_dim):
+        """The INVERSE of `degroup_blocks` (offset=0): sub-major -> group-
+        major, `head_dim` elements per head. Needed once, for `ssm_out.
+        weight`'s INPUT (`gated`, now sub-major after the fixes above) fed
+        against that weight's UNMODIFIED, still group-major-COLUMN raw
+        bytes - permuting a matvec's input vector before the multiply is
+        the same operation as permuting the weight's columns before it."""
+        out = [0.0] * len(v)
+        for h in range(c.nvh):
+            kh, gi = h // group, h % group
+            src_h = gi * c.nkh + kh
+            out[src_h * head_dim:(src_h + 1) * head_dim] = v[h * head_dim:(h + 1) * head_dim]
+        return out
+
     xn1 = rmsnorm(x, m.w32(p + "attn_norm.weight"), c.eps)
+    # `qkv`, `cw` (conv1d.weight) and `hist` are ALL left in llama.cpp's raw,
+    # mutually-consistent GROUP-MAJOR channel order through the whole conv -
+    # `ssm_conv1d.weight` is itself one of the six leaves needing this fix,
+    # but conv1d is DEPTHWISE (channel `ch`'s output depends only on channel
+    # `ch`'s own input/weight/history, no cross-channel mixing), so
+    # degrouping the INPUT+WEIGHT together and degrouping the OUTPUT alone
+    # are the same operation. Doing it once, after, avoids needing `hist`
+    # (which persists ACROSS calls) to stay correct under two different
+    # channel orderings.
     qkv = m.matvec(p + "attn_qkv.weight", xn1)
     cw = m.w32(p + "ssm_conv1d.weight")  # [channel][tap], tap fastest
     K = c.kw
@@ -278,15 +344,14 @@ def gdn_layer(m, c, l, x, st):
     act = silu(conv)
     q = l2norm_heads(act[0:c.key_dim], c.nkh, c.khd)
     k = l2norm_heads(act[c.key_dim:2 * c.key_dim], c.nkh, c.khd)
-    v = act[2 * c.key_dim:]
-    beta = [sigmoid(t) for t in m.matvec(p + "ssm_beta.weight", xn1)]
-    a = m.matvec(p + "ssm_alpha.weight", xn1)
-    A = [-t for t in m.w32(p + "ssm_a")]  # llama.cpp stores -exp(A_log)
-    dtb = m.w32(p + "ssm_dt.bias")
+    v = degroup_blocks(act, 2 * c.key_dim, c.vhd)[2 * c.key_dim:]
+    beta = [sigmoid(t) for t in degroup(m.matvec(p + "ssm_beta.weight", xn1))]
+    a = degroup(m.matvec(p + "ssm_alpha.weight", xn1))
+    A = [-t for t in degroup(m.w32(p + "ssm_a"))]  # llama.cpp stores -exp(A_log)
+    dtb = degroup(m.w32(p + "ssm_dt.bias"))
     g = [-A[i] * softplus(a[i] + dtb[i]) for i in range(c.nvh)]
     scale = 1.0 / math.sqrt(c.khd)
     S = st.setdefault("S", [[0.0] * (c.khd * c.vhd) for _ in range(c.nvh)])
-    group = c.nvh // c.nkh
     out = [0.0] * c.value_dim
     for j in range(c.nvh):
         kh = j // group  # repeat_interleave, not tile
@@ -314,13 +379,16 @@ def gdn_layer(m, c, l, x, st):
                 Sj[base + dv] += kk * delta[dv]
                 o[dv] += Sj[base + dv] * qq
         out[j * c.vhd:(j + 1) * c.vhd] = o
-    z = silu(m.matvec(p + "attn_gate.weight", xn1))
+    z = silu(degroup_blocks(m.matvec(p + "attn_gate.weight", xn1), 0, c.vhd))
     nw = m.w32(p + "ssm_norm.weight")  # gated norm: NOT (1+w)-folded
     gated = []
     for j in range(c.nvh):
         normed = rmsnorm(out[j * c.vhd:(j + 1) * c.vhd], nw, c.eps)
         gated.extend(normed[i] * z[j * c.vhd + i] for i in range(c.vhd))
-    y = m.matvec(p + "ssm_out.weight", gated)
+    # `ssm_out.weight`'s COLUMNS are group-major-native (unlike every OUTPUT
+    # vector fixed above); `gated` is sub-major, so regroup it back before
+    # feeding the unmodified weight - see `regroup_blocks`'s own doc.
+    y = m.matvec(p + "ssm_out.weight", regroup_blocks(gated, c.vhd))
     return [x[i] + y[i] for i in range(c.d)]
 
 

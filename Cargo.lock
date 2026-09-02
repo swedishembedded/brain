@@ -1523,6 +1523,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
+ "brain-model",
  "brain-qwen3",
  "brain-qwen35",
  "brain-residency",

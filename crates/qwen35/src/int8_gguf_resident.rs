@@ -99,7 +99,9 @@ use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use data::rng::Rng;
 use gguf::import::{ElemOp, Mapped};
+use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
+use model::ops::TierPolicy;
 use model::shard::{LayerBytes, Shard};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
@@ -159,9 +161,9 @@ fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
 /// The byte-exact per-stage cost model this resident hands to
 /// `model::shard::plan_fewest_devices`, at `cap` decode positions.
 ///
-/// * `per_layer` - the layer's INT8 weights (`Qwen35Config::layer_i8_bytes`,
-///   itself gated against what `model::ops::Weight::upload` really places)
-///   plus that layer's own decode state.
+/// * `per_layer` - the layer's weights at `tier` (`Qwen35Config::
+///   layer_weight_bytes`, itself gated against what `model::ops::Weight::
+///   upload` really places) plus that layer's own decode state.
 /// * `embed` - **zero**. The `[vocab, d_model]` embedding is never uploaded:
 ///   decode only ever needs one ROW per token, so [`Qwen35GgufInstance`] reads
 ///   it straight out of the mapping ([`MmapGguf::tensor_range`], which decodes
@@ -174,11 +176,11 @@ fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
 /// Charging the endpoints truthfully matters more here than anywhere else: at
 /// this vocab a mis-charged endpoint is several GB, i.e. the difference
 /// between a plan that fits and a card that OOMs mid-load.
-pub fn layer_cost(cfg: &Qwen35Config, cap: u32) -> LayerBytes {
+pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy) -> LayerBytes {
     let per_layer = cfg
         .layer_types()
         .into_iter()
-        .map(|ty| cfg.layer_i8_bytes(ty) + layer_decode_state_bytes(cfg, ty, cap))
+        .map(|ty| cfg.layer_weight_bytes(ty, tier) + layer_decode_state_bytes(cfg, ty, cap))
         .collect();
     LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 }
 }
@@ -265,40 +267,217 @@ pub fn shard_fetch_plan(mg: &MmapGguf, cfg: &Qwen35Config, shard: &Shard) -> Res
     Ok(plan)
 }
 
-/// The brain-canonical leaf whose VALUES llama.cpp stores transformed - see
-/// [`ElemOp::LnNeg`]. Named once, so [`SsmALogFix`] and
+/// The brain-canonical leaves whose VALUES and/or ORDER llama.cpp stores
+/// differently from brain's own convention - see [`ElemOp::LnNeg`] and
+/// [`GdnHeadOrder`]. Named once, so [`SsmALogFix`] and
 /// [`crate::gguf_import::classify`] (the offline converter's own arm for the
-/// same tensor) cannot disagree about which leaf it is.
+/// same tensors) cannot disagree about which leaves these are. EVERY leaf a
+/// GDN layer owns that is indexed by VALUE head needs the fix - found by
+/// direct comparison against the FP8 checkpoint's own weights on real data:
+/// each of these EIGHT gave cosine >= 0.9996 (`A_log`/`dt_bias`/
+/// `conv1d.weight` exactly 1.0000000 - they are unquantized, so no Q8_0
+/// rounding noise sits on top) under the SAME single transform, none under
+/// any other candidate tried.
 const A_LOG_LEAF: &str = "linear_attn.A_log";
+const DT_BIAS_LEAF: &str = "linear_attn.dt_bias";
+const CONV1D_LEAF: &str = "linear_attn.conv1d.weight";
+const IN_PROJ_QKV_LEAF: &str = "linear_attn.in_proj_qkv.weight";
+const IN_PROJ_A_LEAF: &str = "linear_attn.in_proj_a.weight";
+const IN_PROJ_B_LEAF: &str = "linear_attn.in_proj_b.weight";
+const IN_PROJ_Z_LEAF: &str = "linear_attn.in_proj_z.weight";
+const OUT_PROJ_LEAF: &str = "linear_attn.out_proj.weight";
 
-/// A [`RemapSource`] with the ONE non-rename this checkpoint needs applied on
-/// read: `ssm_a` holds `-exp(A_log)`, brain's `gdn_decay_gate.wgsl` wants
-/// `A_log`. [`crate::gguf_import::classify`] expresses the same fix as a
-/// `Mapped::Transformed` for the offline converter; this is the streaming
-/// counterpart, and both call the SAME [`ElemOp::LnNeg`].
+/// The value-head geometry [`GdnHeadOrder`]'s methods need, read once from
+/// [`Qwen35Config`] rather than re-derived at every `with_tensor` call.
+#[derive(Clone, Copy)]
+struct GdnHeadOrder {
+    num_k_heads: usize,
+    group: usize,
+    /// `linear_value_head_dim` - rows/columns per value head in the
+    /// row/column-block leaves.
+    head_dim: usize,
+    /// `linear_key_dim` (`= num_k_heads * linear_key_head_dim`) - the q|k
+    /// prefix width `conv1d.weight`/`in_proj_qkv.weight` carry before their
+    /// v-portion begins. `2 * key_dim` is that prefix (q then k, each
+    /// `key_dim` wide).
+    key_dim: usize,
+    /// `d_model` - the row width of `in_proj_qkv.weight`/`in_proj_z.weight`
+    /// (and, doubling as `conv1d.weight`'s kernel width when swapped in by
+    /// the caller for that leaf specifically).
+    d_model: usize,
+}
+
+impl GdnHeadOrder {
+    fn from_cfg(cfg: &Qwen35Config) -> GdnHeadOrder {
+        GdnHeadOrder {
+            num_k_heads: cfg.linear_num_key_heads as usize,
+            group: cfg.linear_group() as usize,
+            head_dim: cfg.linear_value_head_dim as usize,
+            key_dim: cfg.linear_key_dim() as usize,
+            d_model: cfg.d_model as usize,
+        }
+    }
+
+    /// `src_head` = the GROUP-MAJOR position holding SUB-MAJOR value head
+    /// `h`'s data (`h = s*group+g`, `s` outer/slow, `g` inner/fast; stored
+    /// at `g*num_k_heads+s`). The ONE formula every leaf-shaped method below
+    /// applies at its own granularity (per-element, per-row, or per-column).
+    fn src_head(&self, h: usize) -> usize {
+        let (s, g) = (h / self.group, h % self.group);
+        g * self.num_k_heads + s
+    }
+
+    /// `[num_v_heads]` flat vector - `A_log`, `dt_bias`.
+    fn degroup_heads(&self, v: &[f32]) -> Vec<f32> {
+        let nvh = self.num_k_heads * self.group;
+        assert_eq!(v.len(), nvh, "GdnHeadOrder::degroup_heads: length must be num_k_heads * group");
+        let mut out = vec![0f32; nvh];
+        for h in 0..nvh {
+            out[h] = v[self.src_head(h)];
+        }
+        out
+    }
+
+    /// Row-major `[n_rows, row_width]`, value heads occupying `head_dim`
+    /// CONSECUTIVE rows each, starting at `row_offset` - `conv1d.weight`
+    /// (`row_offset = 2*key_dim`, `row_width = kernel`, `head_dim =
+    /// self.head_dim`), `in_proj_qkv.weight` (`row_offset = 2*key_dim`,
+    /// `row_width = d_model`, `head_dim = self.head_dim`),
+    /// `in_proj_z.weight` (`row_offset = 0`, `row_width = d_model`,
+    /// `head_dim = self.head_dim`), `in_proj_a.weight`/`in_proj_b.weight`
+    /// (`row_offset = 0`, `row_width = d_model`, `head_dim = 1` - these
+    /// project to ONE scalar per head, not a `linear_value_head_dim`-wide
+    /// block, so `head_dim` is a caller-supplied PARAMETER rather than
+    /// always `self.head_dim`). Rows outside the v-portion (q/k, for the
+    /// leaves that have one) pass through untouched.
+    fn degroup_rows(&self, v: &[f32], row_offset: usize, row_width: usize, head_dim: usize) -> Vec<f32> {
+        let nvh = self.num_k_heads * self.group;
+        let mut out = v.to_vec();
+        for h in 0..nvh {
+            let src_head = self.src_head(h);
+            for r in 0..head_dim {
+                let dst_row = row_offset + h * head_dim + r;
+                let src_row = row_offset + src_head * head_dim + r;
+                out[dst_row * row_width..(dst_row + 1) * row_width].copy_from_slice(&v[src_row * row_width..(src_row + 1) * row_width]);
+            }
+        }
+        out
+    }
+
+    /// Row-major `[n_rows, total_cols]`, value heads occupying `head_dim`
+    /// CONSECUTIVE columns each - `out_proj.weight` (`total_cols =
+    /// value_dim`, value heads span the WHOLE width, no q/k prefix since
+    /// this leaf's input dimension - the axis being reordered - is
+    /// `value_dim` alone).
+    fn degroup_cols(&self, v: &[f32], n_rows: usize, total_cols: usize) -> Vec<f32> {
+        let nvh = self.num_k_heads * self.group;
+        let mut out = v.to_vec();
+        for row in 0..n_rows {
+            for h in 0..nvh {
+                let src_head = self.src_head(h);
+                for c in 0..self.head_dim {
+                    let dst_col = h * self.head_dim + c;
+                    let src_col = src_head * self.head_dim + c;
+                    out[row * total_cols + dst_col] = v[row * total_cols + src_col];
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A [`RemapSource`] with the non-renames this checkpoint needs applied on
+/// read: `ssm_a` holds `-exp(A_log)` ([`ElemOp::LnNeg`] undoes it, applied to
+/// `A_log` only), and EVERY GDN leaf indexed by value head is stored in
+/// llama.cpp's GROUP-MAJOR order rather than brain's SUB-MAJOR one
+/// ([`GdnHeadOrder`] undoes it, applied to all eight - order relative to
+/// `LnNeg` does not matter, both act on `A_log`). [`crate::gguf_import::
+/// classify`] expresses the same fixes for the offline converter, calling
+/// the SAME [`ElemOp::LnNeg`] and [`GdnHeadOrder`].
 ///
-/// Getting this wrong is not a crash and not obviously wrong output - it is a
-/// decay gate up to 260x too strong, i.e. a model that quietly stops
-/// integrating context. `ElemOp::LnNeg`'s own doc records the measurement.
+/// Getting the LnNeg fix wrong is not a crash and not obviously wrong
+/// output, it is a decay gate up to 260x too strong (`ElemOp::LnNeg`'s own
+/// doc). Getting the head-order fix wrong is worse to notice: every head's
+/// own decay/bias/projection is individually plausible, just applied to
+/// the WRONG head's key/value state - grammatically fluent, factually
+/// wrong output that degrades with context length, exactly the M21 symptom
+/// this fix targets.
 pub struct SsmALogFix<'a> {
     inner: RemapSource<'a>,
+    order: GdnHeadOrder,
 }
 
 impl SsmALogFix<'_> {
     fn is_a_log(name: &str) -> bool {
         name.ends_with(A_LOG_LEAF)
     }
+    fn is_dt_bias(name: &str) -> bool {
+        name.ends_with(DT_BIAS_LEAF)
+    }
+    fn is_conv1d(name: &str) -> bool {
+        name.ends_with(CONV1D_LEAF)
+    }
+    fn is_in_proj_qkv(name: &str) -> bool {
+        name.ends_with(IN_PROJ_QKV_LEAF)
+    }
+    fn is_in_proj_a(name: &str) -> bool {
+        name.ends_with(IN_PROJ_A_LEAF)
+    }
+    fn is_in_proj_b(name: &str) -> bool {
+        name.ends_with(IN_PROJ_B_LEAF)
+    }
+    fn is_in_proj_z(name: &str) -> bool {
+        name.ends_with(IN_PROJ_Z_LEAF)
+    }
+    fn is_out_proj(name: &str) -> bool {
+        name.ends_with(OUT_PROJ_LEAF)
+    }
+    fn needs_fix(name: &str) -> bool {
+        Self::is_a_log(name)
+            || Self::is_dt_bias(name)
+            || Self::is_conv1d(name)
+            || Self::is_in_proj_qkv(name)
+            || Self::is_in_proj_a(name)
+            || Self::is_in_proj_b(name)
+            || Self::is_in_proj_z(name)
+            || Self::is_out_proj(name)
+    }
+
+    /// The one place every leaf's fix is dispatched by shape - kept apart
+    /// from `with_tensor` so `with_tensor_chunks`'s whole-leaf fallback calls
+    /// exactly the same code, never a second copy that could drift.
+    fn fix(&self, name: &str, d: &[f32]) -> Vec<f32> {
+        const KERNEL: usize = 4; // linear_conv_kernel_dim at the real shape; conv1d.weight's own row width
+        if Self::is_a_log(name) {
+            ElemOp::LnNeg.applied(name, &self.order.degroup_heads(d)).unwrap_or_else(|e| panic!("{MODEL}: {e}"))
+        } else if Self::is_dt_bias(name) {
+            self.order.degroup_heads(d)
+        } else if Self::is_conv1d(name) {
+            self.order.degroup_rows(d, 2 * self.order.key_dim, KERNEL, self.order.head_dim)
+        } else if Self::is_in_proj_qkv(name) {
+            self.order.degroup_rows(d, 2 * self.order.key_dim, self.order.d_model, self.order.head_dim)
+        } else if Self::is_in_proj_a(name) || Self::is_in_proj_b(name) {
+            // ONE scalar per head (alpha/beta), not a `head_dim`-wide block.
+            self.order.degroup_rows(d, 0, self.order.d_model, 1)
+        } else if Self::is_in_proj_z(name) {
+            self.order.degroup_rows(d, 0, self.order.d_model, self.order.head_dim)
+        } else if Self::is_out_proj(name) {
+            let value_dim = self.order.num_k_heads * self.order.group * self.order.head_dim;
+            let n_rows = d.len() / value_dim;
+            self.order.degroup_cols(d, n_rows, value_dim)
+        } else {
+            unreachable!("SsmALogFix::fix called for a leaf needs_fix did not select: {name}")
+        }
+    }
 }
 
 impl checkpoint::TensorSource for SsmALogFix<'_> {
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
-        if !Self::is_a_log(name) {
+        if !Self::needs_fix(name) {
             return self.inner.with_tensor(name, f);
         }
         let mut fixed = None;
-        let found = self.inner.with_tensor(name, &mut |d| {
-            fixed = Some(ElemOp::LnNeg.applied(name, d).unwrap_or_else(|e| panic!("{MODEL}: {e}")));
-        });
+        let found = self.inner.with_tensor(name, &mut |d| fixed = Some(self.fix(name, d)));
         match (found, fixed) {
             (true, Some(v)) => {
                 f(&v);
@@ -308,22 +487,23 @@ impl checkpoint::TensorSource for SsmALogFix<'_> {
         }
     }
 
-    /// Never lend raw words for the transformed leaf - a zero-copy borrow
-    /// would hand the caller llama.cpp's untransformed bytes and bypass
-    /// [`ElemOp::LnNeg`] entirely, which is exactly the silent-wrong-weights
-    /// failure this type exists to prevent.
+    /// Never lend raw words for a transformed leaf - a zero-copy borrow
+    /// would hand the caller llama.cpp's untransformed bytes and bypass the
+    /// fix entirely, which is exactly the silent-wrong-weights failure this
+    /// type exists to prevent.
     fn raw_words(&self, name: &str) -> Option<&[u32]> {
-        if Self::is_a_log(name) {
+        if Self::needs_fix(name) {
             return None;
         }
         self.inner.raw_words(name)
     }
 
-    /// Same rule as [`Self::raw_words`]: the transformed leaf is served whole
-    /// (it is `[num_v_heads]`, 48 floats at the real shape), never streamed
-    /// past the transform.
+    /// Same rule as [`Self::raw_words`]: a transformed leaf is served whole,
+    /// never streamed past the transform (every one of the eight fits well
+    /// inside a single chunk at the real 27B shape - the largest,
+    /// `in_proj_qkv.weight`'s v-portion, is 6144*5120 f32 = 126 MB).
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
-        if Self::is_a_log(name) {
+        if Self::needs_fix(name) {
             return self.with_tensor(name, &mut |d| f(0, d));
         }
         self.inner.with_tensor_chunks(name, max_elems, f)
@@ -345,7 +525,7 @@ pub fn shard_source<'a>(mg: &'a MmapGguf, cfg: &Qwen35Config, shard: &Shard) -> 
     let plan = shard_fetch_plan(mg, cfg, shard)?;
     let src = RemapSource::new(mg, plan);
     src.validate(&crate::model::shard_param_list(cfg, shard))?;
-    Ok(SsmALogFix { inner: src })
+    Ok(SsmALogFix { inner: src, order: GdnHeadOrder::from_cfg(cfg) })
 }
 
 /// [`crate::gguf_import::config_from_gguf`] with the two adjustments a
@@ -861,12 +1041,20 @@ pub struct Qwen35GgufResident {
     /// `model::shard::plan_by_capacity`).
     devices: Vec<(Device, u64)>,
     cap: u32,
+    /// The per-leaf storage tier the decoder body uploads at (M24) - the
+    /// `lm_head`/embedding endpoints are unaffected (INT8 and row-mmap-read
+    /// respectively, always, regardless of `tier` - see [`head_i8_bytes`]).
+    /// Feeds both [`layer_cost`] (so a placement is honest about what a
+    /// narrower tier actually saves) and [`Self::activate_owned`]'s
+    /// [`Qwen35::new_shard_dt`] call (so the plan and the load agree on what
+    /// was budgeted).
+    tier: TierPolicy,
     plan: OnceLock<Plan>,
 }
 
 impl Qwen35GgufResident {
-    pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), plan: OnceLock::new() }
+    pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, plan: OnceLock::new() }
     }
 
     /// Per-sequence `prompt + max_new` ceiling, from `BRAIN_QWEN35_GGUF_CTX`
@@ -876,6 +1064,19 @@ impl Qwen35GgufResident {
     /// rather than silently overrunning one.
     pub fn ctx_from_env() -> u32 {
         std::env::var("BRAIN_QWEN35_GGUF_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_CTX).max(1)
+    }
+
+    /// The per-leaf tier policy, from `BRAIN_QWEN35_GGUF_TIER`
+    /// (`TierPolicy::parse`'s grammar - `"i8"`, `"q4"`, or
+    /// `"q4,in_proj_a.weight=f32,in_proj_b.weight=f32"`), default uniform
+    /// INT8 (unchanged behaviour). A parse failure panics rather than
+    /// silently serving the wrong precision - the same rule
+    /// `TierPolicy::parse` documents for itself.
+    pub fn tier_from_env() -> TierPolicy {
+        match std::env::var("BRAIN_QWEN35_GGUF_TIER") {
+            Ok(s) => TierPolicy::parse(&s).unwrap_or_else(|e| panic!("BRAIN_QWEN35_GGUF_TIER={s:?}: {e}")),
+            Err(_) => TierPolicy::uniform(Dtype::I8),
+        }
     }
 
     /// The placement, computed once. Returns a plan naming ZERO devices -
@@ -913,7 +1114,7 @@ impl Qwen35GgufResident {
                 return Plan::default();
             }
         };
-        let cost = layer_cost(&cfg, self.cap);
+        let cost = layer_cost(&cfg, self.cap, &self.tier);
         // `plan_fewest_devices` wants `(index into self.devices, capacity)`;
         // mapping back afterwards is what makes a non-GPU device in the list
         // (which this model cannot use) rejected rather than mis-indexed.
@@ -957,7 +1158,7 @@ impl Qwen35GgufResident {
     pub fn total_device_bytes(&self) -> Result<u64, String> {
         let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
         let cfg = resident_config(&mg, self.cap)?;
-        Ok(layer_cost(&cfg, self.cap).total())
+        Ok(layer_cost(&cfg, self.cap, &self.tier).total())
     }
 
     /// Which layer range and how many bytes each device holds, as planned -
@@ -1002,6 +1203,7 @@ impl ResidentModel for Qwen35GgufResident {
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)))
+        .param(ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level: xhigh (default, detailed deliberation), medium (no instruction), or low (brief thinking)").default(json!("xhigh")))
         .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (takes effect on the Qwen3.8-flavor render, this model's default)").default(json!(true)))
         .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor: qwen3.8 (default; XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)").default(json!("qwen3.8")))
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
@@ -1104,7 +1306,7 @@ impl Qwen35GgufResident {
             // every config). The real per-sequence cache is `ShardCaches`
             // below, at `self.cap` - the same split `crate::serve::Engine`
             // makes for the same reason.
-            let qwen35 = Qwen35::new_i8_shard(cfg.clone(), 1, 1, &src, shard.clone());
+            let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, &src, shard.clone(), &self.tier);
             let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap);
             shards.push(DeviceShard { qwen35, caches });
         }
@@ -1150,36 +1352,136 @@ mod tests {
     /// Driven over a plain `HashMap` source (which really does lend zero-copy
     /// words), so the bypass is a reachable state in this test rather than a
     /// hypothetical.
+    /// `GdnHeadOrder::degroup_heads` in isolation: `nkh=2, group=3` (`nvh=6`,
+    /// `Qwen35Config::tiny()`'s own dims), hand-computed. Group-major
+    /// `v[g*nkh+k]` -> sub-major `out[k*group+g]`. `head_dim`/`key_dim`/
+    /// `d_model` are unused by this method - dummy values.
     #[test]
-    fn the_streaming_loader_untransforms_a_log_and_only_a_log() {
+    fn degroup_heads_matches_the_hand_computed_transpose() {
+        let order = GdnHeadOrder { num_k_heads: 2, group: 3, head_dim: 0, key_dim: 0, d_model: 0 };
+        let v = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0]; // group-major: g0=[10,20] g1=[30,40] g2=[50,60]
+        let got = order.degroup_heads(&v);
+        assert_eq!(got, vec![10.0, 30.0, 50.0, 20.0, 40.0, 60.0], "k=0's 3 repeats first (10,30,50), then k=1's (20,40,60)");
+    }
+
+    /// `GdnHeadOrder::degroup_rows` at `row_offset=0` (the `in_proj_z.weight`
+    /// shape): `nkh=2, group=2` (`nvh=4`), `head_dim=2` rows/head,
+    /// `row_width=1` (one column, so each "row" is a single number - keeps
+    /// the hand computation legible). Group-major head order is
+    /// `[0,2,1,3]` (`src_head(h)`: h=0->0, h=1->2, h=2->1, h=3->3), so head
+    /// h's 2-row block should read from `src_head(h)`'s 2-row block.
+    #[test]
+    fn degroup_rows_at_zero_offset_matches_the_hand_computed_block_permutation() {
+        let order = GdnHeadOrder { num_k_heads: 2, group: 2, head_dim: 2, key_dim: 0, d_model: 0 };
+        assert_eq!([order.src_head(0), order.src_head(1), order.src_head(2), order.src_head(3)], [0, 2, 1, 3]);
+        // 4 heads x 2 rows/head x 1 col: row r holds value 10*r.
+        let v: Vec<f32> = (0..8).map(|r| 10.0 * r as f32).collect();
+        let got = order.degroup_rows(&v, 0, 1, order.head_dim);
+        // head 0 (rows 0,1) <- src_head 0 (rows 0,1): [0,10]
+        // head 1 (rows 2,3) <- src_head 2 (rows 4,5): [40,50]
+        // head 2 (rows 4,5) <- src_head 1 (rows 2,3): [20,30]
+        // head 3 (rows 6,7) <- src_head 3 (rows 6,7): [60,70]
+        assert_eq!(got, vec![0.0, 10.0, 40.0, 50.0, 20.0, 30.0, 60.0, 70.0]);
+    }
+
+    /// `GdnHeadOrder::degroup_rows` with a NON-ZERO `row_offset` (the
+    /// `conv1d.weight`/`in_proj_qkv.weight` shape): rows before the offset
+    /// (a q/k prefix) must pass through completely untouched.
+    #[test]
+    fn degroup_rows_leaves_the_prefix_before_row_offset_untouched() {
+        let order = GdnHeadOrder { num_k_heads: 2, group: 2, head_dim: 2, key_dim: 0, d_model: 0 };
+        // 3 prefix rows + 4 heads x 2 rows/head, 1 col.
+        let v: Vec<f32> = (0..11).map(|r| 10.0 * r as f32).collect();
+        let got = order.degroup_rows(&v, 3, 1, order.head_dim);
+        assert_eq!(&got[0..3], &v[0..3], "the prefix must be untouched");
+        assert_eq!(&got[3..], &[30.0, 40.0, 70.0, 80.0, 50.0, 60.0, 90.0, 100.0][..], "the v-portion must be block-permuted the same way as the zero-offset case");
+    }
+
+    /// `GdnHeadOrder::degroup_rows` at `head_dim=1` (the `in_proj_a.weight`/
+    /// `in_proj_b.weight` shape - ONE scalar per head, not a `self.head_dim`
+    /// -wide block): `nkh=2, group=2` (`nvh=4`), same group-major head order
+    /// `[0,2,1,3]` as the block-shaped tests above, but each head is exactly
+    /// one row.
+    #[test]
+    fn degroup_rows_at_head_dim_one_matches_the_hand_computed_row_permutation() {
+        let order = GdnHeadOrder { num_k_heads: 2, group: 2, head_dim: 128, key_dim: 0, d_model: 0 };
+        // 4 heads x 1 row/head, 1 col: row r holds value 10*r.
+        let v: Vec<f32> = (0..4).map(|r| 10.0 * r as f32).collect();
+        let got = order.degroup_rows(&v, 0, 1, 1);
+        // head 0 <- src_head 0: 0; head 1 <- src_head 2: 20; head 2 <- src_head 1: 10; head 3 <- src_head 3: 30.
+        assert_eq!(got, vec![0.0, 20.0, 10.0, 30.0], "head_dim=1 must ignore self.head_dim (128 here) entirely and use the caller-supplied value");
+    }
+
+    /// `GdnHeadOrder::degroup_cols` (the `out_proj.weight` shape): the SAME
+    /// permutation, applied per COLUMN block instead of per row, repeated
+    /// identically for every row of a multi-row matrix.
+    #[test]
+    fn degroup_cols_matches_the_hand_computed_block_permutation_per_row() {
+        let order = GdnHeadOrder { num_k_heads: 2, group: 2, head_dim: 2, key_dim: 0, d_model: 0 };
+        // 2 rows x 8 cols (4 heads x 2 cols/head).
+        let v: Vec<f32> = vec![
+            0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, // row 0
+            100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, // row 1
+        ];
+        let got = order.degroup_cols(&v, 2, 8);
+        assert_eq!(&got[0..8], &[0.0, 10.0, 40.0, 50.0, 20.0, 30.0, 60.0, 70.0][..], "row 0: same block permutation as the row-shaped case");
+        assert_eq!(&got[8..16], &[100.0, 110.0, 140.0, 150.0, 120.0, 130.0, 160.0, 170.0][..], "row 1: identical permutation, independently applied");
+    }
+
+    #[test]
+    fn the_streaming_loader_fixes_a_log_and_dt_bias_and_only_those() {
         use checkpoint::TensorSource;
-        let stored: Vec<f32> = [-5.5f32, -3.2, -1.1].iter().map(|x: &f32| -x.exp()).collect();
+        let (nkh, group) = (2usize, 3usize);
+        // Sub-major TARGET order (what brain/FP8 want): A_log[p], dt_bias[p].
+        let a_log_target = [-5.5f32, -3.2, -1.1, -2.0, -4.0, -0.5];
+        let dt_bias_target = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0];
+        // The group-major ON-DISK layout llama.cpp stores: q = g*nkh+k for
+        // sub-major position p = k*group+g. `ssm_a` additionally holds
+        // -exp(A_log).
+        let regroup = |target: &[f32; 6], transform: fn(f32) -> f32| {
+            let mut stored = vec![0f32; 6];
+            for (p, &t) in target.iter().enumerate() {
+                let (k, g) = (p / group, p % group);
+                stored[g * nkh + k] = transform(t);
+            }
+            stored
+        };
+        let a_log_stored = regroup(&a_log_target, |x| -x.exp());
+        let dt_bias_stored = regroup(&dt_bias_target, |x| x);
         let untouched = vec![0.25f32, -0.5, 2.0];
+
         let inner: HashMap<String, Vec<f32>> = [
-            ("blocks.0.linear_attn.A_log".to_string(), stored.clone()),
-            ("blocks.0.linear_attn.dt_bias".to_string(), untouched.clone()),
+            ("blocks.0.linear_attn.A_log".to_string(), a_log_stored),
+            ("blocks.0.linear_attn.dt_bias".to_string(), dt_bias_stored),
+            ("blocks.0.linear_attn.norm.weight".to_string(), untouched.clone()),
         ]
         .into_iter()
         .collect();
         let plan: HashMap<String, Fetch> = inner.keys().map(|k| (k.clone(), Fetch::Whole(k.clone()))).collect();
-        let src = SsmALogFix { inner: RemapSource::new(&inner, plan) };
+        let order = GdnHeadOrder { num_k_heads: nkh, group, head_dim: 0, key_dim: 0, d_model: 0 };
+        let src = SsmALogFix { inner: RemapSource::new(&inner, plan), order };
 
-        let mut got = Vec::new();
-        assert!(src.with_tensor("blocks.0.linear_attn.A_log", &mut |d| got = d.to_vec()));
-        for (g, want) in got.iter().zip([-5.5f32, -3.2, -1.1]) {
-            assert!((g - want).abs() < 1e-5, "A_log must be ln(-ssm_a): got {g}, want {want}");
+        let mut got_a_log = Vec::new();
+        assert!(src.with_tensor("blocks.0.linear_attn.A_log", &mut |d| got_a_log = d.to_vec()));
+        for (g, want) in got_a_log.iter().zip(a_log_target) {
+            assert!((g - want).abs() < 1e-5, "A_log must be ln(-ssm_a) AND degrouped: got {g}, want {want}");
         }
-        assert!(src.raw_words("blocks.0.linear_attn.A_log").is_none(), "the transformed leaf must never be lent zero-copy");
+        assert!(src.raw_words("blocks.0.linear_attn.A_log").is_none(), "a transformed leaf must never be lent zero-copy");
         let mut chunked = Vec::new();
         assert!(src.with_tensor_chunks("blocks.0.linear_attn.A_log", 1, &mut |_, d| chunked.extend_from_slice(d)));
-        assert_eq!(chunked, got, "the chunked path must deliver the transformed values too");
+        assert_eq!(chunked, got_a_log, "the chunked path must deliver the transformed values too");
+
+        let mut got_dt_bias = Vec::new();
+        assert!(src.with_tensor("blocks.0.linear_attn.dt_bias", &mut |d| got_dt_bias = d.to_vec()));
+        assert_eq!(got_dt_bias, dt_bias_target, "dt_bias must be degrouped (no LnNeg - only A_log has that value transform)");
+        assert!(src.raw_words("blocks.0.linear_attn.dt_bias").is_none(), "dt_bias is now also transformed -- must never be lent zero-copy");
 
         // Everything else passes through untouched, zero-copy included.
         let mut other = Vec::new();
-        assert!(src.with_tensor("blocks.0.linear_attn.dt_bias", &mut |d| other = d.to_vec()));
-        assert_eq!(other, untouched, "only A_log is transformed");
-        assert!(src.raw_words("blocks.0.linear_attn.dt_bias").is_some(), "an untransformed leaf keeps its zero-copy path");
-        assert_eq!(src.numel("blocks.0.linear_attn.A_log"), Some(3));
+        assert!(src.with_tensor("blocks.0.linear_attn.norm.weight", &mut |d| other = d.to_vec()));
+        assert_eq!(other, untouched, "only A_log and dt_bias are transformed");
+        assert!(src.raw_words("blocks.0.linear_attn.norm.weight").is_some(), "an untransformed leaf keeps its zero-copy path");
+        assert_eq!(src.numel("blocks.0.linear_attn.A_log"), Some(6));
     }
 
     /// The endpoints are charged for what this resident ACTUALLY places, and
@@ -1195,7 +1497,7 @@ mod tests {
     #[test]
     fn the_endpoints_are_charged_for_what_is_really_placed() {
         let cfg = Qwen35Config::qwen38_27b();
-        let cost = layer_cost(&cfg, 2048);
+        let cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8));
         let fp32_table = cfg.vocab as u64 * cfg.d_model as u64 * 4;
         assert_eq!(fp32_table, 5_085_593_600, "the fp32 table this resident refuses to place");
         assert_eq!(cost.embed, 0, "the embedding is read from the mapping a row at a time, never uploaded");
@@ -1212,13 +1514,14 @@ mod tests {
     #[test]
     fn per_layer_cost_includes_this_sequences_decode_state() {
         let cfg = Qwen35Config::qwen38_27b();
-        let small = layer_cost(&cfg, 128);
-        let large = layer_cost(&cfg, 8192);
+        let i8 = TierPolicy::uniform(Dtype::I8);
+        let small = layer_cost(&cfg, 128, &i8);
+        let large = layer_cost(&cfg, 8192, &i8);
         let types = cfg.layer_types();
         let gqa = types.iter().position(|t| *t == LayerType::Full).unwrap();
         let gdn = types.iter().position(|t| *t == LayerType::Linear).unwrap();
-        assert!(small.per_layer[gqa] > cfg.layer_i8_bytes(LayerType::Full), "a GQA layer must be charged its KV cache");
-        assert!(small.per_layer[gdn] > cfg.layer_i8_bytes(LayerType::Linear), "a GDN layer must be charged its recurrent state");
+        assert!(small.per_layer[gqa] > cfg.layer_weight_bytes(LayerType::Full, &i8), "a GQA layer must be charged its KV cache");
+        assert!(small.per_layer[gdn] > cfg.layer_weight_bytes(LayerType::Linear, &i8), "a GDN layer must be charged its recurrent state");
         assert!(large.per_layer[gqa] > small.per_layer[gqa], "GQA cache scales with context");
         assert_eq!(large.per_layer[gdn], small.per_layer[gdn], "GDN state is O(1) in context, not O(T)");
     }
@@ -1229,7 +1532,7 @@ mod tests {
     #[test]
     fn the_real_model_needs_two_24gb_cards_and_fits_them() {
         let cfg = Qwen35Config::qwen38_27b();
-        let cost = layer_cost(&cfg, 2048);
+        let cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8));
         let p40 = 24 * GB; // 24 GiB usable, i.e. a card with no reserve at all
         assert!(cost.total() > p40, "if it fitted one card this resident would be pointless: {} bytes", cost.total());
         assert!(model::shard::plan_by_capacity(&cost, &[(0, p40)]).is_none(), "one card must be reported infeasible, not planned");
@@ -1245,13 +1548,76 @@ mod tests {
         }
     }
 
+    /// M24's headline capacity claim, as a standing gate rather than a
+    /// one-off calculation: a per-leaf tier that puts the bulk MLP
+    /// projections at Q4 while holding the two GDN state-sensitive gates
+    /// (`in_proj_a`/`in_proj_b`, the decay/beta projections - ~94 MB total
+    /// across 48 GDN layers, essentially free to keep at full precision)
+    /// FITS ONE 24 GB P40, unlike the uniform-INT8 tier above which needs
+    /// two. Pure arithmetic, no GPU and no checkpoint - if this regresses,
+    /// the single-card cascade the M24 plan is built on (no cross-card
+    /// residual handoff, MTP legal again since a whole shard fits one card,
+    /// a second card free for a concurrent sequence) silently stops being
+    /// true.
+    #[test]
+    fn a_q4_mlp_tier_with_gdn_gates_held_at_f32_fits_one_24gb_card() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let policy_c = TierPolicy::uniform(Dtype::Q4).with(&["in_proj_a.weight", "in_proj_b.weight"], Dtype::F32);
+        let cost = layer_cost(&cfg, 2048, &policy_c);
+        let i8_cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8));
+        assert!(
+            cost.total() < i8_cost.total(),
+            "a narrower tier must cost fewer bytes than uniform I8: q4 {} >= i8 {}",
+            cost.total(),
+            i8_cost.total()
+        );
+        let p40 = 24 * GB;
+        let one = model::shard::plan_by_capacity(&cost, &[(0, p40)]);
+        assert!(
+            one.is_some(),
+            "policy C ({} bytes) must fit one {p40}-byte card - it is the whole point of narrowing the tier; \
+             uniform I8 needs {} bytes and correctly does not fit",
+            cost.total(),
+            i8_cost.total()
+        );
+        let one = one.unwrap();
+        assert_eq!(one.len(), 1, "a single-card plan must be exactly one stage");
+        assert!(one[0].shard.embed && one[0].shard.head, "the lone stage must own both endpoints");
+        assert_eq!(one[0].shard.start, 0);
+        assert_eq!(one[0].shard.end, cfg.n_layers as usize);
+        assert!(one[0].bytes <= p40);
+    }
+
+    /// A [`TierPolicy`] that is uniform Q4 with NO exception also fits one
+    /// card, with more headroom than policy C - the reference point that
+    /// isolates what holding the GDN gates at F32 costs (a few MB, per
+    /// [`Qwen35Config::layer_weight_bytes`]'s own ground-truth test) against
+    /// what it buys (see M24's roadmap entry for the position-sweep quality
+    /// comparison this arithmetic alone cannot make).
+    #[test]
+    fn uniform_q4_fits_one_24gb_card_with_more_headroom_than_policy_c() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let uniform_q4 = TierPolicy::uniform(Dtype::Q4);
+        let policy_c = TierPolicy::uniform(Dtype::Q4).with(&["in_proj_a.weight", "in_proj_b.weight"], Dtype::F32);
+        let cost_uniform = layer_cost(&cfg, 2048, &uniform_q4);
+        let cost_c = layer_cost(&cfg, 2048, &policy_c);
+        assert!(
+            cost_uniform.total() < cost_c.total(),
+            "uniform Q4 must cost fewer bytes than policy C's F32 exception: {} >= {}",
+            cost_uniform.total(),
+            cost_c.total()
+        );
+        let p40 = 24 * GB;
+        assert!(model::shard::plan_by_capacity(&cost_uniform, &[(0, p40)]).is_some(), "uniform Q4 must fit one card");
+    }
+
     /// `estimate_multi` must never panic and must report ZERO devices for an
     /// unreadable checkpoint - the documented "unavailable" signal. It runs
     /// on the `Executor` dispatcher thread, where a panic takes every other
     /// model on the server down with it.
     #[test]
     fn an_unreadable_gguf_reports_zero_devices_rather_than_panicking() {
-        let r = Qwen35GgufResident::new("/nonexistent/qwen35.gguf".to_string(), vec![(Device::Gpu(0), 24 * GB)], 2048);
+        let r = Qwen35GgufResident::new("/nonexistent/qwen35.gguf".to_string(), vec![(Device::Gpu(0), 24 * GB)], 2048, TierPolicy::uniform(Dtype::I8));
         let cost = r.estimate_multi(&InstanceKey::new(MODEL, "default"));
         assert_eq!(cost.devices().count(), 0);
         assert!(r.placement().is_empty());
@@ -1265,8 +1631,26 @@ mod tests {
     /// fallback (there is no CPU path - the weights are int8 device buffers).
     #[test]
     fn no_gpu_reports_zero_devices() {
-        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048);
+        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048, TierPolicy::uniform(Dtype::I8));
         assert_eq!(r.estimate_multi(&InstanceKey::new(MODEL, "default")).devices().count(), 0);
+    }
+
+    /// `reasoning_effort` is declared in `caps.rs`'s manifest but was missing
+    /// from this resident's own - `qwen3::chat::parse_request` still defaulted
+    /// it to `xhigh` either way, but a caller passing it EXPLICITLY through
+    /// this path was rejected by param validation before it ever reached the
+    /// parser. `Qwen35GgufResident::new` needs no real file (`manifest()`
+    /// touches only `self.cap`, never the checkpoint), so this needs no GPU.
+    #[test]
+    fn manifest_declares_reasoning_effort() {
+        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048, TierPolicy::uniform(Dtype::I8));
+        let m = r.manifest();
+        assert_eq!(m.actions.len(), 1);
+        let g = &m.actions[0];
+        assert!(
+            g.params.iter().any(|p| p.name == "reasoning_effort" && !p.required),
+            "reasoning_effort must be declared (and optional, defaulting to xhigh) so a caller passing it is not rejected"
+        );
     }
 
     /// Single-device activation is refused, loudly - registering this model
@@ -1274,7 +1658,7 @@ mod tests {
     /// it actually occupies.
     #[test]
     fn single_device_activation_is_refused() {
-        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![(Device::Gpu(0), 24 * GB)], 2048);
+        let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![(Device::Gpu(0), 24 * GB)], 2048, TierPolicy::uniform(Dtype::I8));
         let key = InstanceKey::new(MODEL, "default");
         assert_eq!(r.estimate(&key).vram, 0);
         let err = match r.activate(&key, Device::Gpu(0)) {

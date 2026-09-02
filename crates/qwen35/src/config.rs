@@ -277,46 +277,81 @@ impl Qwen35Config {
         self.linear_num_value_heads / self.linear_num_key_heads
     }
 
-    /// Real on-device byte cost of ONE streamed layer's quantized (int8 DP4A)
-    /// weights at this config's dims - the same leaves `crate::stream::
-    /// StreamState::build_layer` uploads via `Weight::upload(..., Dtype::I8)`:
-    /// the 5 GDN or 4 GQA mixer-adjacent leaves for `ty`, plus the 3 dense-MLP
-    /// leaves every layer type owns. Each leaf costs `n*k` packed bytes plus
-    /// its `[n, k/`[`model::int8::GROUP`]`]` f32 scale block
-    /// (`model::ops::Weight::I8`'s layout - GROUP-wise along the contraction
-    /// axis, NOT one scale per output row, so the scales are `n*k/8` bytes,
-    /// an eighth of the packed weight rather than a rounding error) -
-    /// mirrored here rather than read off a live `Weight`, since this exists
-    /// for a host-side perf model (`crates/perf`'s `weights` scenario) that
-    /// has no GPU and must never build one just to learn a byte count. Gated
-    /// against the real `model::int8::quantize_weight` output by
-    /// `layer_i8_bytes_equals_what_weight_upload_really_places_on_the_card`,
-    /// so the mirror cannot silently drift from the thing it mirrors again.
+    /// The `(suffix, n, k)` triple for every quantizable per-layer leaf of
+    /// `ty`: the 5 GDN or 4 GQA mixer-adjacent leaves, plus the 3 dense-MLP
+    /// leaves every layer type owns (`n`, `k` in `Weight::upload`'s `[n, k]`
+    /// row-major sense). `suffix` is what follows `blocks.{l}.` in the
+    /// checkpoint's own naming.
+    ///
+    /// The ONE table both `Self::layer_weight_bytes` (the byte-cost formula)
+    /// and `Qwen35::new_impl_on`'s upload loop (the actual dispatch) read -
+    /// replacing a formula that once drifted from what `Weight::upload`
+    /// really placed on the card by 12.5% (lesson #68). A hand-transcribed
+    /// SECOND copy is exactly the failure mode this table exists to remove,
+    /// not merely re-gate.
+    pub fn layer_leaves(&self, ty: LayerType) -> Vec<(&'static str, u32, u32)> {
+        let d = self.d_model;
+        let ff = self.intermediate_size;
+        let mut leaves = match ty {
+            LayerType::Linear => {
+                let conv_dim = self.linear_conv_dim();
+                let value_dim = self.linear_value_dim();
+                let nvh = self.linear_num_value_heads;
+                vec![
+                    ("linear_attn.in_proj_qkv.weight", conv_dim, d),
+                    ("linear_attn.in_proj_z.weight", value_dim, d),
+                    ("linear_attn.in_proj_b.weight", nvh, d),
+                    ("linear_attn.in_proj_a.weight", nvh, d),
+                    ("linear_attn.out_proj.weight", d, value_dim),
+                ]
+            }
+            LayerType::Full => {
+                let hqp = self.q_proj_dim();
+                let hkv = self.kv_dim();
+                let hq = self.q_dim();
+                vec![
+                    ("self_attn.q_proj.weight", hqp, d),
+                    ("self_attn.k_proj.weight", hkv, d),
+                    ("self_attn.v_proj.weight", hkv, d),
+                    ("self_attn.o_proj.weight", d, hq),
+                ]
+            }
+        };
+        leaves.push(("mlp.gate.weight", ff, d));
+        leaves.push(("mlp.up.weight", ff, d));
+        leaves.push(("mlp.down.weight", d, ff));
+        leaves
+    }
+
+    /// Real on-device byte cost of ONE streamed layer's weights at this
+    /// config's dims, under `tier` - folds [`Self::layer_leaves`] through
+    /// each leaf's own [`TierPolicy::want`] tier. Mirrored here (rather than
+    /// read off a live `Weight`) for a host-side perf model (`crates/perf`'s
+    /// `weights` scenario, `crate::int8_gguf_resident`'s cross-GPU placement)
+    /// that has no GPU and must never build one just to learn a byte count.
+    /// Gated against the real `model::int8::quantize_weight`/
+    /// `model::int4::quantize_weight_q4` output by
+    /// `layer_weight_bytes_equals_what_weight_upload_really_places_on_the_card`,
+    /// so this cannot silently drift from what it mirrors (lesson #68).
     /// Excludes the handful of small fp32 aux tensors (norms, GDN's
     /// `A_log`/`dt_bias`, GQA's `q_norm`/`k_norm`) - negligible next to the
     /// quantized leaves at this config's real dims (well under 0.1% of a
-    /// layer's own footprint).
-    pub fn layer_i8_bytes(&self, ty: LayerType) -> u64 {
-        let d = self.d_model as u64;
-        let ff = self.intermediate_size as u64;
+    /// layer's own footprint) and never selected by a `TierPolicy` rule
+    /// (they are not in [`Self::layer_leaves`]'s table).
+    pub fn layer_weight_bytes(&self, ty: LayerType, tier: &model::ops::TierPolicy) -> u64 {
         let group = model::int8::GROUP as u64;
-        let i8_leaf = |n: u64, k: u64| n * k + n * k.div_ceil(group) * 4;
-        let mlp = i8_leaf(ff, d) * 2 + i8_leaf(d, ff); // gate, up, down
-        let mixer = match ty {
-            LayerType::Linear => {
-                let conv_dim = self.linear_conv_dim() as u64;
-                let value_dim = self.linear_value_dim() as u64;
-                let nvh = self.linear_num_value_heads as u64;
-                i8_leaf(conv_dim, d) + i8_leaf(value_dim, d) + i8_leaf(nvh, d) + i8_leaf(nvh, d) + i8_leaf(d, value_dim)
-            }
-            LayerType::Full => {
-                let hqp = self.q_proj_dim() as u64;
-                let hkv = self.kv_dim() as u64;
-                let hq = self.q_dim() as u64;
-                i8_leaf(hqp, d) + i8_leaf(hkv, d) + i8_leaf(hkv, d) + i8_leaf(d, hq)
-            }
-        };
-        mixer + mlp
+        self.layer_leaves(ty)
+            .into_iter()
+            .map(|(suffix, n, k)| {
+                let (n, k) = (u64::from(n), u64::from(k));
+                match tier.want(suffix) {
+                    gpu_core::select::Dtype::F32 => n * k * 4,
+                    gpu_core::select::Dtype::BF16 | gpu_core::select::Dtype::F16 => n * k * 2,
+                    gpu_core::select::Dtype::I8 => n * k + n * k.div_ceil(group) * 4,
+                    gpu_core::select::Dtype::Q4 => n * k / 2 + n * k.div_ceil(group) * 4,
+                }
+            })
+            .sum()
     }
 
     pub fn head_weight(&self) -> &'static str {
@@ -759,65 +794,115 @@ mod tests {
         assert!(names.iter().any(|n| n == "blocks.0.mlp.down.weight.lora_a"));
     }
 
-    /// Pins [`Qwen35Config::layer_i8_bytes`]'s real numbers at the real
-    /// `qwen38_27b` scale: `crates/perf`'s `weights` scenario and
-    /// `crate::int8_gguf_resident`'s cross-GPU placement both depend on these
-    /// being accurate, not merely plausible - a silent drift here would make
-    /// that scenario's "real per-layer byte profile" claim false and would
-    /// let the resident under-budget a card. GDN (`Linear`) is the larger of
-    /// the two layer types at this config's dims (more/wider mixer-adjacent
-    /// leaves than GQA's 4), both in the ~419-431 MB range.
+    /// Pins [`Qwen35Config::layer_weight_bytes`]'s real numbers at the real
+    /// `qwen38_27b` scale, uniform INT8 - `crates/perf`'s `weights` scenario
+    /// and `crate::int8_gguf_resident`'s cross-GPU placement both depend on
+    /// these being accurate, not merely plausible - a silent drift here would
+    /// make that scenario's "real per-layer byte profile" claim false and
+    /// would let the resident under-budget a card. GDN (`Linear`) is the
+    /// larger of the two layer types at this config's dims (more/wider
+    /// mixer-adjacent leaves than GQA's 4), both in the ~419-431 MB range.
     #[test]
-    fn layer_i8_bytes_matches_the_real_measured_qwen38_27b_range() {
+    fn layer_weight_bytes_matches_the_real_measured_qwen38_27b_range_at_i8() {
         let cfg = Qwen35Config::qwen38_27b();
-        let gdn = cfg.layer_i8_bytes(LayerType::Linear);
-        let gqa = cfg.layer_i8_bytes(LayerType::Full);
+        let i8 = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+        let gdn = cfg.layer_weight_bytes(LayerType::Linear, &i8);
+        let gqa = cfg.layer_weight_bytes(LayerType::Full, &i8);
         assert_eq!(gdn, 431_124_480, "GDN (Linear) layer int8 byte cost drifted: {gdn}");
         assert_eq!(gqa, 418_775_040, "GQA (Full) layer int8 byte cost drifted: {gqa}");
         assert!(gdn > gqa, "GDN must be the larger layer type at this config's real dims");
         for b in [gdn, gqa] {
             let mb = b as f64 / 1e6;
-            assert!((418.0..=432.0).contains(&mb), "layer_i8_bytes {mb:.1} MB outside the documented 419-431 MB range");
+            assert!((418.0..=432.0).contains(&mb), "layer_weight_bytes {mb:.1} MB outside the documented 419-431 MB range");
         }
     }
 
-    /// GROUND TRUTH for [`Qwen35Config::layer_i8_bytes`]: the number it
-    /// returns must be what `model::ops::Weight::upload(.., Dtype::I8)`
-    /// ACTUALLY places on the card for that layer's quantized leaves, not a
-    /// hand-transcribed formula that once matched. Measured here by running
-    /// the real `model::int8::quantize_weight` (the same call `Weight::upload`
-    /// makes) over each leaf's real shape and summing the two buffers it
-    /// returns - `[n, k/4]` packed u32 words plus a `[n, k/GROUP]` f32 scale
-    /// per row-group, both 4 bytes per element.
+    /// GROUND TRUTH for [`Qwen35Config::layer_weight_bytes`]: the number it
+    /// returns must be what `model::ops::Weight::upload` ACTUALLY places on
+    /// the card for that layer's leaves, at every tier this policy can name -
+    /// not a hand-transcribed formula that once matched. Measured here by
+    /// running the real `model::int8::quantize_weight` /
+    /// `model::int4::quantize_weight_q4` (the same calls `Weight::upload`
+    /// makes) over each leaf's real shape and summing the buffers they
+    /// return.
     ///
-    /// Uses [`Qwen35Config::tiny_i8`] (the int8-legal tiny fixture) so the
+    /// Uses [`Qwen35Config::tiny_i8`] (the int8/q4-legal tiny fixture) so the
     /// quantization is real and cheap; the formula is dimension-generic, so
     /// agreeing here is agreeing at every scale, and the sibling test above
-    /// pins the real 27B numbers that follow from it.
+    /// pins the real 27B numbers the I8 tier follows from.
     ///
-    /// This is the check that was missing: the scale used to be `[n]`
-    /// (one per output row) and the formula still charged `n * 4` long after
-    /// `model::int8::GROUP`-wise scales made the real cost `n * (k/32) * 4`,
-    /// i.e. 12.5% of the packed weight rather than a rounding error.
+    /// The I8 arm is the check that was missing before M24: the scale used to
+    /// be `[n]` (one per output row) and the formula still charged `n * 4`
+    /// long after `model::int8::GROUP`-wise scales made the real cost
+    /// `n * (k/32) * 4`, i.e. 12.5% of the packed weight rather than a
+    /// rounding error (lesson #68). The Q4 arm is new coverage: Q4 packs
+    /// 8 nibbles/`u32` (half I8's bytes) but shares I8's group-wise scale
+    /// layout exactly, so a formula that got the packed-weight halving right
+    /// but reused I8's scale count (or vice versa) would still drift
+    /// silently without this arm.
     #[test]
-    fn layer_i8_bytes_equals_what_weight_upload_really_places_on_the_card() {
+    fn layer_weight_bytes_equals_what_weight_upload_really_places_on_the_card() {
         let cfg = Qwen35Config::tiny_i8();
         let (d, ff) = (cfg.d_model as usize, cfg.intermediate_size as usize);
-        // The real device cost of one `[n, k]` leaf, measured, not derived.
-        let measured = |n: usize, k: usize| -> u64 {
-            let w = vec![0.5f32; n * k];
-            let (packed, scales) = model::int8::quantize_weight(&w, n, k);
-            (packed.len() + scales.len()) as u64 * 4
-        };
-        let mlp = measured(ff, d) * 2 + measured(d, ff);
-        let gdn = measured(cfg.linear_conv_dim() as usize, d)
-            + measured(cfg.linear_value_dim() as usize, d)
-            + measured(cfg.linear_num_value_heads as usize, d) * 2
-            + measured(d, cfg.linear_value_dim() as usize);
-        let gqa = measured(cfg.q_proj_dim() as usize, d)
-            + measured(cfg.kv_dim() as usize, d) * 2
-            + measured(d, cfg.q_dim() as usize);
-        assert_eq!(cfg.layer_i8_bytes(LayerType::Linear), gdn + mlp, "GDN layer cost disagrees with the real quantized footprint");
-        assert_eq!(cfg.layer_i8_bytes(LayerType::Full), gqa + mlp, "GQA layer cost disagrees with the real quantized footprint");
+        for (tier, measured_leaf) in [
+            (
+                model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8),
+                (|n: usize, k: usize| -> u64 {
+                    let w = vec![0.5f32; n * k];
+                    let (packed, scales) = model::int8::quantize_weight(&w, n, k);
+                    (packed.len() + scales.len()) as u64 * 4
+                }) as fn(usize, usize) -> u64,
+            ),
+            (
+                model::ops::TierPolicy::uniform(gpu_core::select::Dtype::Q4),
+                (|n: usize, k: usize| -> u64 {
+                    let w = vec![0.5f32; n * k];
+                    let (packed, scales) = model::int4::quantize_weight_q4(&w, n, k);
+                    (packed.len() + scales.len()) as u64 * 4
+                }) as fn(usize, usize) -> u64,
+            ),
+        ] {
+            let mlp = measured_leaf(ff, d) * 2 + measured_leaf(d, ff);
+            let gdn = measured_leaf(cfg.linear_conv_dim() as usize, d)
+                + measured_leaf(cfg.linear_value_dim() as usize, d)
+                + measured_leaf(cfg.linear_num_value_heads as usize, d) * 2
+                + measured_leaf(d, cfg.linear_value_dim() as usize);
+            let gqa = measured_leaf(cfg.q_proj_dim() as usize, d)
+                + measured_leaf(cfg.kv_dim() as usize, d) * 2
+                + measured_leaf(d, cfg.q_dim() as usize);
+            assert_eq!(
+                cfg.layer_weight_bytes(LayerType::Linear, &tier),
+                gdn + mlp,
+                "GDN layer cost disagrees with the real quantized footprint at {tier:?}"
+            );
+            assert_eq!(
+                cfg.layer_weight_bytes(LayerType::Full, &tier),
+                gqa + mlp,
+                "GQA layer cost disagrees with the real quantized footprint at {tier:?}"
+            );
+        }
+    }
+
+    /// Two-way coverage between [`Qwen35Config::layer_leaves`] and
+    /// `crate::model::is_quantizable_linear`: every leaf the table names must
+    /// be recognised as quantizable by the model's own upload-time filter,
+    /// and every suffix that filter recognises must appear in the table for
+    /// SOME layer type - so the byte-cost table and the actual upload
+    /// decision cannot silently diverge (the second copy of exactly the
+    /// drift lesson #68 already caught once).
+    #[test]
+    fn layer_leaves_and_is_quantizable_linear_agree_on_every_leaf() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let mut named: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+        for ty in [LayerType::Linear, LayerType::Full] {
+            for (suffix, _, _) in cfg.layer_leaves(ty) {
+                assert!(
+                    crate::model::is_quantizable_linear(&format!("blocks.0.{suffix}")),
+                    "layer_leaves names {suffix:?} but is_quantizable_linear does not recognise it"
+                );
+                named.insert(suffix);
+            }
+        }
+        assert_eq!(named.len(), 12, "GDN's 5 + GQA's 4 + MLP's 3, counted once each (MLP is shared, not duplicated)");
     }
 }

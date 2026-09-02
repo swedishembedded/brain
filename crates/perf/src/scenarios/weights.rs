@@ -115,7 +115,7 @@ pub fn render(runs: &[Run]) -> String {
 // every block as equal-cost), a real per-group BYTE cost: `full_attention_
 // interval=4` means 3 of every 4 layers are Gated DeltaNet (`LayerType::
 // Linear`) and 1 of every 4 is GQA (`LayerType::Full`), and the two differ in
-// real int8 footprint (`qwen35::config::Qwen35Config::layer_i8_bytes`,
+// real int8 footprint (`qwen35::config::Qwen35Config::layer_weight_bytes`,
 // ~419-431 MB depending on type - verified against the real checkpoint's own
 // dims by that function's own pinned test). [`ByteRun`] is additive, not a
 // replacement for [`Run`]: Z-Image's block sizes were never claimed uniform
@@ -130,7 +130,8 @@ pub fn render(runs: &[Run]) -> String {
 /// above.
 fn qwen35_layer_bytes() -> Vec<u64> {
     let cfg = qwen35::config::Qwen35Config::qwen38_27b();
-    cfg.layer_types().iter().map(|&ty| cfg.layer_i8_bytes(ty)).collect()
+    let i8 = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+    cfg.layer_types().iter().map(|&ty| cfg.layer_weight_bytes(ty, &i8)).collect()
 }
 
 /// One policy's outcome, weighted by qwen35's real per-layer byte cost -

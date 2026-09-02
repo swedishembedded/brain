@@ -23,7 +23,9 @@
 //! decode-path bug that only shows up across a chunk boundary has a chance
 //! to surface here. Runs on both the CPU JIT and the default GPU backend.
 
+use gpu_core::select::Dtype;
 use gpu_core::Gpu;
+use model::ops::TierPolicy;
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
 
@@ -156,4 +158,56 @@ fn int8_decode_step_matches_int8_full_prefill_cpu() {
 #[test]
 fn int8_decode_step_matches_int8_full_prefill_default_backend() {
     run_i8(Gpu::new(pipelines()));
+}
+
+/// The Q4 (W4A8) twin of [`run_i8`], for the exact same reason: without it,
+/// the Q4 DECODE tape (M24) is ungated - `model_q4_smoke.rs` only exercises
+/// Q4 PREFILL. Same tolerance rationale as `run_i8`'s own doc: identical
+/// quantized kernels on both tapes, differing only in row count per
+/// dispatch, so a systematic tape bug shows up as a wrong ARGMAX, not a
+/// third-decimal wobble.
+fn run_q4(gpu: Gpu) {
+    let cfg = Qwen35Config::tiny_i8();
+    let t = cfg.block_size;
+    let d = cfg.d_model as usize;
+    let v = cfg.vocab as usize;
+    let init = qwen35::init::init_weights(&cfg, 7);
+
+    let m = Qwen35::new_on_dt(gpu, cfg.clone(), 1, t, &init, &TierPolicy::uniform(Dtype::Q4));
+    let tokens: Vec<u32> = (0..t).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+
+    let full_logits = m.logits_all(&tokens);
+    assert_eq!(full_logits.len(), t as usize * v);
+    assert!(full_logits.iter().all(|x| x.is_finite()), "q4 logits_all produced a non-finite value");
+
+    let head_w = m.read_weight(cfg.head_weight()); // [v, d] -- lm_head stays fp32 on a q4 build too
+    m.reset_decode_cache();
+
+    let mut worst = 0.0f32;
+    let mut argmax_mismatches = 0;
+    for (i, &tok) in tokens.iter().enumerate() {
+        let hidden = m.step(tok);
+        assert!(hidden.iter().all(|x| x.is_finite()), "position {i}: q4 step() produced a non-finite hidden state");
+        let logits_i: Vec<f32> =
+            (0..v).map(|row| { let wr = &head_w[row * d..(row + 1) * d]; wr.iter().zip(&hidden).map(|(a, b)| a * b).sum::<f32>() }).collect();
+        let want = &full_logits[i * v..(i + 1) * v];
+        worst = worst.max(maxabs(&logits_i, want));
+        let am = |s: &[f32]| s.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(j, _)| j).unwrap();
+        if am(&logits_i) != am(want) {
+            argmax_mismatches += 1;
+        }
+    }
+    println!("q4 decode vs q4 prefill over {t} positions: worst maxabs = {worst:e}, argmax mismatches = {argmax_mismatches}");
+    assert_eq!(argmax_mismatches, 0, "q4 decode picks a different token than q4 prefill at {argmax_mismatches} position(s)");
+    assert!(worst < 2e-2, "q4 decode vs q4 prefill maxabs={worst}");
+}
+
+#[test]
+fn q4_decode_step_matches_q4_full_prefill_cpu() {
+    run_q4(Gpu::new_cpu(pipelines()));
+}
+
+#[test]
+fn q4_decode_step_matches_q4_full_prefill_default_backend() {
+    run_q4(Gpu::new(pipelines()));
 }

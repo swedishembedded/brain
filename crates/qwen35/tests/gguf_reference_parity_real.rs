@@ -58,11 +58,52 @@ const TOKENS: [u32; 4] = [760, 6511, 3177, 314];
 /// catches a permutation or a sign convention (it is a projection onto the
 /// all-ones vector, which no reordering preserves by accident at 5120
 /// elements), and the leading elements catch a shift.
+///
+/// Updated for M23's GDN value-head degroup fix
+/// (`int8_gguf_resident::GdnHeadOrder`) - EVERY leaf a GDN layer owns that
+/// is indexed by value head (`ssm_a`/`ssm_dt.bias`/`ssm_conv1d.weight`'s
+/// v-channels/`attn_qkv.weight`'s v-rows/`ssm_alpha.weight`/
+/// `ssm_beta.weight`/`attn_gate.weight`/`ssm_out.weight`'s columns) was
+/// group-major on disk, not brain's sub-major (repeat_interleave)
+/// convention. Every position's digest changed, including position 0 -
+/// unlike an EARLIER, PARTIAL pass of this fix (`A_log`/`dt_bias` only),
+/// where position 0 was bit-identical because the recurrent state starts at
+/// zero and only the decay/state terms are position-0-inert; `beta`/`a`/`v`/
+/// `z`/the `ssm_out` projection all affect position 0 too. The oracle script
+/// itself carried the SAME shared assumption this fix corrects (its own
+/// `kh = j // group` line paired repeat_interleave-ordered K/Q with
+/// group-major-ordered per-head leaves), so the pre-fix agreement here was
+/// two independent implementations making the same wrong assumption, not
+/// evidence of correctness. This fix
+/// is what turns `gguf_resident_real.rs`'s
+/// `the_two_card_stack_continues_a_factual_prompt_correctly` from RED to
+/// GREEN on the real checkpoint.
+///
+/// **This gate itself is RED, honestly, while the fix above is not.** The
+/// production Rust fix (`GdnHeadOrder`) is independently verified TWO other
+/// ways: (1) `the_two_card_stack_continues_a_factual_prompt_correctly` now
+/// generates the grammatically AND factually correct continuation
+/// (`" Paris. Paris is the largest city in"`) on the real two-card resident;
+/// (2) a direct per-tensor diff against the FP8 checkpoint's own weights
+/// (`gguf_vs_fp8_permutation_search.rs`, not committed as a standing gate -
+/// an exploratory tool) measured cosine >= 0.9996 (three of the eight leaves
+/// exactly 1.0000000) for the SAME `GdnHeadOrder` transform applied to every
+/// GDN leaf this fix touches. This Python re-derivation is a THIRD,
+/// independent check on top of those two, and it currently disagrees with
+/// Rust by a still-shrinking but real margin (pos 0: rms 0.6951659 in Rust
+/// vs the `EXPECT` above from the Python side, down from an initial ~orthogonal
+/// mismatch through several rounds of fixing missed call sites -
+/// `attn_gate.weight`'s output and `ssm_out.weight`'s input were the last
+/// two found). The remaining gap is very likely one more missed or
+/// mis-ordered call site in this script, not a defect in the two
+/// independently-verified checks above - left open rather than silently
+/// pinned to whatever the script currently prints, which would certify
+/// nothing. Tracked as an explicit open follow-up, not silently resolved.
 const EXPECT: [(f32, f32, [f32; 4]); 4] = [
-    (0.482109, 36.76675, [0.016073, 0.191651, -0.057166, 0.022543]),
-    (0.670052, 70.08702, [0.278427, -0.359220, 0.298822, -0.447562]),
-    (0.493551, 52.64273, [-0.068036, 0.196922, 0.108049, 0.047525]),
-    (0.313636, 22.752_7, [0.043700, -0.065035, -0.013408, 0.010530]),
+    (0.752278, 48.51814, [0.007308, 0.012496, -0.208136, -0.062281]),
+    (0.448872, 24.83384, [0.200683, -0.083840, 0.140620, -0.209841]),
+    (0.428177, 45.77309, [0.031644, 0.025004, 0.042506, -0.055694]),
+    (0.328236, 19.58607, [0.043467, 0.023507, 0.039335, 0.013733]),
 ];
 
 /// Achieved in practice on 2x Tesla P40: every digit above, i.e. |rel| <=

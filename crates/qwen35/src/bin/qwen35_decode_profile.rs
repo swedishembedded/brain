@@ -62,13 +62,16 @@ fn main() {
         std::process::exit(2);
     }
 
+    let tier = Qwen35GgufResident::tier_from_env();
+    println!("weight tier: {}", tier.describe());
+
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
-    let cost = layer_cost(&cfg, CAP);
+    let cost = layer_cost(&cfg, CAP, &tier);
     let weight_bytes = cost.total();
     drop(mg);
 
-    let r = Qwen35GgufResident::new(path, devices.clone(), CAP);
+    let r = Qwen35GgufResident::new(path, devices.clone(), CAP, tier.clone());
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
     println!("qwen35 decode profile: {} layers, {} stage(s) over {:?}", cfg.n_layers, placed.len(), placed);
 
@@ -112,7 +115,7 @@ fn main() {
     }
 
     if let Some(out) = json_out {
-        let doc = baseline_json(&p, weight_bytes, prompt.len() as u32, &placed);
+        let doc = baseline_json(&p, weight_bytes, prompt.len() as u32, &placed, &tier);
         std::fs::write(&out, serde_json::to_string_pretty(&doc).expect("serialize")).unwrap_or_else(|e| panic!("write {out}: {e}"));
         println!("\nwrote baseline artifact: {out}");
     }
@@ -122,12 +125,21 @@ fn main() {
 /// sections `crates/perf`'s own runs emit, with every field this target cannot
 /// honestly fill left `null` rather than zeroed. A zero in a perf artifact is a
 /// measurement; a null is "not measured here", and `brain perf compare`
-/// distinguishes them.
-fn baseline_json(p: &qwen35::int8_gguf_resident::DecodeProfile, weight_bytes: u64, prompt_tokens: u32, placed: &[Device]) -> serde_json::Value {
+/// distinguishes them. `target` carries the tier so `qwen35:i8-gguf-resident`
+/// and `qwen35:q4-gguf-resident` artifacts never get compared as if they
+/// measured the same thing.
+fn baseline_json(
+    p: &qwen35::int8_gguf_resident::DecodeProfile,
+    weight_bytes: u64,
+    prompt_tokens: u32,
+    placed: &[Device],
+    tier: &model::ops::TierPolicy,
+) -> serde_json::Value {
     let ms_per_token = 1e3 * p.wall_s / p.steps as f64;
     serde_json::json!({
         "scenario": "latency",
-        "target": "qwen35:int8-gguf-resident",
+        "target": format!("qwen35:{}-gguf-resident", tier.describe()),
+        "notes": format!("weight tier: {}", tier.describe()),
         "workload": "decode",
         "best_of_n": 1,
         "env": {

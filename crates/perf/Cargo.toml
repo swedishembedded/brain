@@ -15,6 +15,7 @@ brain-residency.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
 brain-gpu-core.workspace = true
+brain-model.workspace = true
 brain-qwen3.workspace = true
 brain-qwen35.workspace = true
 brain-weightset.workspace = true

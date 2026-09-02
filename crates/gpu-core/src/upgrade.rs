@@ -126,6 +126,13 @@ const DECODE_SHAPE: select::OpShape =
 const DECODE_SHAPE_I8: select::OpShape =
     select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::I8 };
 
+/// [`DECODE_SHAPE`]'s q4 twin, for the same reason [`DECODE_SHAPE_I8`] is
+/// separate from it: `select::candidates` reaches `WorkgroupPerOutput`
+/// through the `Dtype::I8 | Dtype::Q4` arm, which the plain f32 shape would
+/// never probe.
+const DECODE_SHAPE_Q4: select::OpShape =
+    select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::Q4 };
+
 /// The `MREG` ladder for `matmul_gemv_reg`. Powers of two, so "the smallest
 /// bucket covering `m`" carries at most twice the rows actually needed, and the
 /// ladder is complete by construction for `matmul_gemv`'s own `m <= 32`
@@ -195,20 +202,32 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         buckets: GEMV_MREG_BUCKETS,
         gpu_only: true,
     },
-    // NOT a fourth row here: `matmul_q4_gemv_reg` (M5.5) was measured against
-    // `matmul_q4_gemv` at k=n=2048 across the whole decode regime and does
-    // NOT win at every shape the way the two rows above do - m=1..16 measured
-    // 15-29% SLOWER (the un-templated MREG=32 build; the per-bucket-templated
-    // builds this table would actually dispatch were not re-measured before
-    // this milestone's time closed), m=32 a statistical wash (1.01x). This
-    // module's own bar #3 ("wins at every shape... no regime the caller would
-    // have wanted to opt out of") is not met by the evidence in hand, so the
-    // kernel is NOT wired into this transparent seam - it stays available by
-    // name for a caller that wants it at a specific, verified shape, and
-    // `crates/model/tests/matmul_q4_speed_bench.rs` is the harness to re-run
-    // (per-m MREG bucket, not the plain registered name) before reconsidering
-    // this decision. Recorded as a killed hypothesis in the kernel-
-    // performance campaign's own roadmap ledger, not silently dropped.
+    Upgrade {
+        // The q4 twin of the row above (`matmul_i8_gemv` -> `_reg`), added
+        // once the shape that mattered was actually measured. An earlier
+        // pass benchmarked ONLY the un-templated, worst-case MREG=32 build
+        // at one generic k=n=2048 shape and found it 15-29% SLOWER at
+        // m=1..16 - the same "compiled for 32 rows, asked for 1" pathology
+        // `matmul_gemv_reg`'s own bucket ladder exists to avoid, and exactly
+        // what running the WORST-CASE build at every m would produce. Re-run
+        // with the per-m bucket the production dispatch actually picks
+        // (`crates/model/tests/matmul_q4_speed_bench.rs::
+        // gemv_vs_gemv_reg_at_qwen35_decode_shapes`), at qwen35's own real
+        // decode shapes (not a generic stand-in), `_reg` won at every one:
+        // 1.55-1.88x, m=1. Bit-identity is `tests/q4_gemv_reg_upgrade.rs`
+        // (this crate) - a fresh gate, mirroring `i8_gemv_reg_upgrade.rs`,
+        // because the earlier decision to leave this row out meant no such
+        // gate existed to inherit.
+        slow: "matmul_q4_gemv",
+        fast: "matmul_q4_gemv_reg",
+        src: kernels::MATMUL_Q4_GEMV_REG,
+        thread_mul: 1,
+        op: select::Op::MatMul,
+        probe: DECODE_SHAPE_Q4,
+        knob: Some(("MREG", 0)), // Params { m, k, n } -> m
+        buckets: GEMV_MREG_BUCKETS,
+        gpu_only: true,
+    },
 ];
 
 /// `BRAIN_NO_KERNEL_UPGRADE=1` pins every model to the kernel it registered —

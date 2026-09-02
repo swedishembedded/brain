@@ -109,6 +109,82 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
     }
 }
 
+/// GEMV-shaped, at qwen35's own real decode leaf shapes rather than a
+/// generic `d_model` stand-in - `gemv_vs_gemv_reg_across_decode_rows` above
+/// answers "does `_reg` win at all", this answers "does it win at the exact
+/// shapes the qwen35 Q4 tier (M24) would actually dispatch". `m=1` only:
+/// `qwen35::serve::Engine`'s `DECODE_WINDOW_CAPACITY` is pinned to 1 (GDN
+/// state has no snapshot/restore), so decode never batches rows.
+#[test]
+#[ignore]
+fn gemv_vs_gemv_reg_at_qwen35_decode_shapes() {
+    const SHAPES: &[(&str, u32, u32)] = &[
+        ("mlp.gate/up", 5120, 17408),
+        ("mlp.down", 17408, 5120),
+        ("gdn.in_proj_qkv", 5120, 10240),
+        ("gqa.q_proj", 5120, 12288),
+        ("gqa.o_proj/gdn.out_proj", 6144, 5120),
+    ];
+    let m: u32 = 1;
+    let bucket = smallest_bucket_covering(m);
+    let variant = kernels::template::interned("matmul_q4_gemv_reg", kernels::MATMUL_Q4_GEMV_REG, &[("MREG", bucket)]).unwrap();
+    let mut kernels_with_bucket = KERNELS.to_vec();
+    kernels_with_bucket.push(variant);
+    let g = gpu_core::Gpu::new(&kernels_with_bucket);
+    if !g.caps().numeric.int8_dot {
+        eprintln!("skipping: no packed int8 dot on this device");
+        return;
+    }
+    let (k_maxr, k_qp, k_gemv) = (idx(&g, "max_abs_row"), idx(&g, "quant_pack"), idx(&g, "matmul_q4_gemv"));
+    let k_reg = idx(&g, variant.0);
+    println!("\nmatmul_q4_gemv vs matmul_q4_gemv_reg#MREG={bucket} at qwen35 decode shapes, m=1:\n");
+    let mut any_reg_loses = false;
+    for &(label, k, n) in SHAPES {
+        let mut rng = Lcg::new(9200 + u64::from(k) + u64::from(n));
+        let x_h = rng.vec_scaled((m * k) as usize, 1.0);
+        let w_h = rng.vec_scaled((n * k) as usize, 1.0);
+        let x = g.storage_init("x", &x_h);
+        let (xq, sx) = quant_x(&g, k_maxr, k_qp, &x, m, k);
+        let (wq, sw) = quantize_weight_q4(&w_h, n as usize, k as usize);
+        let wqb = g.storage(wq.len() as u64);
+        g.write(&wqb, &wq);
+        let swb = g.storage_init("sw", &sw);
+        let out = g.storage((m * n) as u64);
+
+        let st_gemv = vec![g.step(k_gemv, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], n * 64)];
+        let st_reg = vec![g.step(k_reg, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], n * 64)];
+        let t_gemv = gpu_core::profile::best_of(&g, &st_gemv, REPS);
+        let t_reg = gpu_core::profile::best_of(&g, &st_reg, REPS);
+        let bytes = u64::from(n) * u64::from(k) / 8 + u64::from(n) * u64::from(k) / 32 * 4;
+        let gbs_gemv = bytes as f64 / t_gemv / 1e9;
+        let gbs_reg = bytes as f64 / t_reg / 1e9;
+        let speedup = t_gemv / t_reg;
+        if speedup < 1.0 {
+            any_reg_loses = true;
+        }
+        println!(
+            "{label:<26} k={k:>6} n={n:>6}  gemv {:>8.4} ms ({:>7.2} GB/s)   gemv_reg {:>8.4} ms ({:>7.2} GB/s)   speedup {speedup:.2}x{}",
+            t_gemv * 1e3,
+            gbs_gemv,
+            t_reg * 1e3,
+            gbs_reg,
+            if speedup < 1.0 { "  <-- reg LOSES" } else { "" }
+        );
+    }
+    if any_reg_loses {
+        println!(
+            "\nRESULT: matmul_q4_gemv_reg does NOT win at every qwen35 decode shape - \
+             do not add it to gpu_core::upgrade's UPGRADES table blindly; measure the \
+             plain matmul_q4_gemv path for M24's tok/s claim instead."
+        );
+    } else {
+        println!(
+            "\nRESULT: matmul_q4_gemv_reg wins at every qwen35 decode shape - safe to add \
+             the UPGRADES row (gpu_core::upgrade.rs) gating qwen35's Q4 tier onto it."
+        );
+    }
+}
+
 /// Tiled/prefill-shaped: `matmul_q4_dyn` vs `matmul_q4_dyn_reg` across a
 /// sweep of row counts at a fixed `k, n` close to a real model's
 /// `d_model`/`intermediate` shape.

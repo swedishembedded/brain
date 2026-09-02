@@ -16,8 +16,8 @@
 //! reads (the `train_acts` field's own doc has the exact "one forward, one
 //! backward, then the cache is gone" contract). [`Qwen35::new_i8`]/
 //! [`Qwen35::new_on_i8`] build the same forward-only shape as `new_on`, but
-//! with the 12 per-layer mixer/MLP linears [`is_i8_linear`] names quantized
-//! to int8 (DP4A) wherever the device's capabilities support it - see
+//! with the 12 per-layer mixer/MLP linears [`is_quantizable_linear`] names
+//! quantized to int8 (DP4A) wherever the device's capabilities support it - see
 //! [`Qwen35::ops_linear`]'s own doc. [`Qwen35::new_shard`] builds a single
 //! pipeline stage (`crate::shard`'s `model::Shardable` impl). Also present:
 //! an MTP head (`cfg.mtp`, one extra full-attention decoder layer sharing the
@@ -58,7 +58,7 @@ use audio::conv::ConvKernels;
 use model::block::{self, gqa_decode_step, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_fwd, swiglu_bwd, GqaDecodeIds, KernelIds};
 use model::gdn::{gdn_causal_conv1d_step, gdn_recurrent_step, GdnBwdIds, GdnConvIds, GdnConvShape, GdnIds, GdnRecurrentScratch, GdnShape};
 pub use model::gdn::gdn_chunk_size;
-use model::ops::{Act, Ops, Weight};
+use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::Shard;
 use optim::Optim;
 
@@ -154,7 +154,7 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("attn_decode_scores", kernels::ATTN_DECODE_SCORES), // 78
     ("decode_softmax", kernels::DECODE_SOFTMAX), // 79
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY), // 80
-    // -- int8 (DP4A) inference tier -- see `crate::model::is_i8_linear`.
+    // -- int8/q4 inference tiers -- see `crate::model::is_quantizable_linear`.
     ("max_abs_row", kernels::MAX_ABS_ROW), // 81
     ("quant_pack", kernels::QUANT_PACK), // 82
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN), // 83
@@ -650,10 +650,10 @@ pub struct Qwen35 {
     /// The `model::ops` façade driving every per-layer mixer/MLP linear's
     /// dispatch - see [`Self::ops_linear`]'s own doc.
     ops: Ops,
-    /// Every per-layer mixer/MLP linear [`is_i8_linear`] names, as a
-    /// `model::ops::Weight` - `F32` unless this instance was built int8 AND
-    /// the device caps support the DP4A path, in which case `Weight::upload`
-    /// promotes it to `Weight::I8` (see [`Self::ops_linear`]).
+    /// Every per-layer mixer/MLP linear [`is_quantizable_linear`] names, as a
+    /// `model::ops::Weight` - `F32` unless a `TierPolicy` asked for a
+    /// narrower tier AND the device caps support it, in which case
+    /// `Weight::upload` promotes it to that tier (see [`Self::ops_linear`]).
     weights: HashMap<String, Weight>,
 
     // ---- LoRA scratch (persistent, reused across every targeted linear) ----
@@ -833,7 +833,7 @@ pub(crate) fn shard_param_list(cfg: &Qwen35Config, shard: &Shard) -> Vec<(String
 /// up a name `Self::new_impl_on` never uploaded). Embeddings, norms, the LM
 /// head, and (on a LoRA build) `.lora_a`/`.lora_b` adapters always stay fp32
 /// - none of their leaf names appear here.
-fn is_i8_linear(name: &str) -> bool {
+pub(crate) fn is_quantizable_linear(name: &str) -> bool {
     const LEAVES: &[&str] = &[
         "in_proj_qkv.weight",
         "in_proj_z.weight",
@@ -854,23 +854,37 @@ fn is_i8_linear(name: &str) -> bool {
 impl Qwen35 {
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), false, shard)
     }
 
     /// [`Self::new_on`] with the int8 (DP4A) inference tier: the 12
-    /// per-layer mixer/MLP linears [`is_i8_linear`] names are quantized
-    /// (see that function's own doc); embeddings, norms and the LM head stay
-    /// fp32. Inference-only, same as the fp32 path (`Qwen35::backward` panics
-    /// regardless).
+    /// per-layer mixer/MLP linears [`is_quantizable_linear`] names are
+    /// quantized (see that function's own doc); embeddings, norms and the LM
+    /// head stay fp32. Inference-only, same as the fp32 path
+    /// (`Qwen35::backward` panics regardless). A thin alias over
+    /// [`Self::new_shard_dt`] - see that function's own doc for the general
+    /// per-leaf case this specializes.
     pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, true, false, shard)
+        Qwen35::new_shard_dt(cfg, b, t, init, shard, &TierPolicy::uniform(Dtype::I8))
     }
 
     /// [`Self::new_i8`] on an existing device handle - see [`Self::new_on`].
+    /// A thin alias over [`Self::new_on_dt`].
     pub fn new_on_i8(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
+        Qwen35::new_on_dt(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::I8))
+    }
+
+    /// [`Self::new_on`] at a per-leaf [`TierPolicy`] on an EXISTING device
+    /// handle - [`Self::new_shard_dt`]'s direct-`Gpu` sibling. Exists because
+    /// `new_shard_dt` always derives its own device from the shard
+    /// (`shard_gpu`'s ambient selection), which cannot express "force this
+    /// backend" the way a test comparing CPU-JIT vs GPU behaviour at the
+    /// same tier needs (`Qwen35::new_on`/`new_on_i8` already had this
+    /// property; a bare `Dtype`-parameterised tier deserves the same one).
+    pub fn new_on_dt(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, tier: &TierPolicy) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, true, false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, tier, false, shard)
     }
 
     /// Build a fully trainable instance (every weight `Role::Trainable`,
@@ -878,7 +892,7 @@ impl Qwen35 {
     /// trainable LoRA adapters). See the struct's own `is_train` doc.
     pub fn new_train_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint
@@ -891,7 +905,25 @@ impl Qwen35 {
     /// meant for outside tests). `cfg.mtp` requires a whole shard - see this
     /// function's own assert.
     pub fn new_shard(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen35 {
-        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, init, false, true, shard)
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
+    }
+
+    /// Build a single pipeline **stage** at a per-leaf [`TierPolicy`] rather
+    /// than one uniform [`Dtype`] - the general case [`Self::new_i8_shard`]
+    /// and [`Self::new_fp32_shard_src`] both specialize (M24: a `TierPolicy`
+    /// generalizes the `i8: bool` this crate used to take, so "Q4 on the MLP,
+    /// F32 on the GDN decay/beta gates" is expressible without a third
+    /// constructor per combination). Inference-only when `tier.
+    /// quantizes_anything()` - see [`Self::new_impl_on`]'s own assert.
+    pub fn new_shard_dt(
+        cfg: Qwen35Config,
+        b: u32,
+        t: u32,
+        src: &dyn checkpoint::TensorSource,
+        shard: Shard,
+        tier: &TierPolicy,
+    ) -> Qwen35 {
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, tier, false, shard)
     }
 
     /// [`Self::new_shard`]'s int8-INFERENCE sibling (`i8 = true`, `train =
@@ -911,7 +943,7 @@ impl Qwen35 {
     /// `cfg.mtp` requires a whole shard, asserted in `new_impl_on` - shared
     /// with every other constructor, so it covers this one unchanged.
     pub fn new_i8_shard(cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen35 {
-        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, true, false, shard)
+        Qwen35::new_shard_dt(cfg, b, t, src, shard, &TierPolicy::uniform(Dtype::I8))
     }
 
     /// [`Self::new_i8_shard`]'s **fp32** sibling: the same stage, the same
@@ -930,11 +962,23 @@ impl Qwen35 {
     /// It is not a serving path: at the real depth the fp32 weights are
     /// ~108 GB.
     pub fn new_fp32_shard_src(cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen35 {
-        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, false, false, shard)
+        Qwen35::new_shard_dt(cfg, b, t, src, shard, &TierPolicy::uniform(Dtype::F32))
     }
 
-    fn new_impl_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, i8: bool, train: bool, shard: Shard) -> Qwen35 {
-        assert!(!(i8 && train), "qwen35: int8 path is inference-only (Qwen35::new_train_on is fp32-only)");
+    fn new_impl_on(
+        gpu: Gpu,
+        cfg: Qwen35Config,
+        b: u32,
+        t: u32,
+        src: &dyn checkpoint::TensorSource,
+        tier: &TierPolicy,
+        train: bool,
+        shard: Shard,
+    ) -> Qwen35 {
+        assert!(
+            !(tier.quantizes_anything() && train),
+            "qwen35: a quantized tier is inference-only (Qwen35::new_train_on is fp32-only)"
+        );
         let chunk = gdn_chunk_size(t);
         assert_eq!(
             t % chunk,
@@ -961,14 +1005,14 @@ impl Qwen35 {
         //    filter exactly.
         //  - full training (`train && cfg.lora.is_none()`): every weight
         //    Role::Trainable (full-parameter backward).
-        // In int8 mode the 12 per-layer mixer/MLP linears `is_i8_linear`
-        // names live in `weights` (below), NOT the fp32 store - filter them
-        // out here so no redundant fp32 copy is ever uploaded. int8 and
-        // LoRA/training are mutually exclusive (the `assert!` above), so
-        // `i8` and `cfg.lora.is_some()` never both hold here.
+        // A leaf `tier.want`s at any non-F32 dtype lives in `weights`
+        // (below), NOT the fp32 store - filter it out here so no redundant
+        // fp32 copy is ever uploaded. A quantized tier and LoRA/training are
+        // mutually exclusive (the `assert!` above), so this filter and
+        // `cfg.lora.is_some()` never both fire here.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(n, _)| !(i8 && is_i8_linear(n)))
+            .filter(|(n, _)| !(is_quantizable_linear(n) && tier.want(n) != Dtype::F32))
             .map(|(n, c)| {
                 let role = if !train {
                     Role::Frozen
@@ -984,38 +1028,34 @@ impl Qwen35 {
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         // Per-layer mixer/MLP linears: every layer this shard owns gets its
-        // own 12 leaves (GDN: in_proj_{qkv,z,b,a}/out_proj; GQA:
-        // {q,k,v,o}_proj; MLP: gate/up/down) as a `model::ops::Weight`, built
-        // ONCE here. `i8` asks `Weight::upload` for `Dtype::I8`, streaming
-        // straight from `src` (these names are excluded from `ps` above);
-        // the `else` (fp32) arm wraps a `.clone()` of the buffer `ps`
-        // already holds (a cheap `Arc` bump), so the common non-i8 case
-        // costs no extra VRAM or re-upload. Mirrors `qwen35moe::model::
-        // Qwen35::new_impl_on`'s own `weights` construction exactly.
+        // own leaves (GDN: in_proj_{qkv,z,b,a}/out_proj; GQA: {q,k,v,o}_proj;
+        // MLP: gate/up/down - `Qwen35Config::layer_leaves`, the SAME table
+        // `layer_weight_bytes` folds for its byte-cost estimate, so the two
+        // cannot drift the way a hand-transcribed formula once did - lesson
+        // #68) as a `model::ops::Weight`, built ONCE here. `tier.want(name)`
+        // asks `Weight::upload` for that leaf's own dtype, streaming straight
+        // from `src` for anything non-F32 (these names are excluded from
+        // `ps` above); the F32 arm wraps a `.clone()` of the buffer `ps`
+        // already holds (a cheap `Arc` bump), so an all-F32 policy costs no
+        // extra VRAM or re-upload - unchanged from the old `i8: bool`'s
+        // `false` arm. Mirrors `qwen35moe::model::Qwen35::new_impl_on`'s own
+        // `weights` construction exactly (that crate has no per-leaf policy
+        // yet - a separate milestone, see `TierPolicy`'s own doc).
         let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen35: Ops::new: {e}"));
-        let (d_u, ff_u, vdim_u, nvh_u, hqp_u, hkv_u, hq_u) = (
-            cfg.d_model as usize,
-            cfg.intermediate_size as usize,
-            cfg.linear_value_dim() as usize,
-            cfg.linear_num_value_heads as usize,
-            cfg.q_proj_dim() as usize,
-            cfg.kv_dim() as usize,
-            cfg.q_dim() as usize,
-        );
-        let conv_dim_u = cfg.linear_conv_dim() as usize;
         let mut weights: HashMap<String, Weight> = HashMap::new();
-        let mut upload = |name: String, wn: usize, wk: usize| {
-            let w = if i8 {
+        let mut upload = |name: String, wn: u32, wk: u32| {
+            let want = tier.want(&name);
+            let w = if want == Dtype::F32 {
+                Weight::F32 { w: ps.w(&name).clone(), n: wn, k: wk }
+            } else {
                 let mut built: Option<Weight> = None;
                 let found = src.with_tensor(&name, &mut |raw| {
-                    built = Some(Weight::upload(&ops, raw, wn, wk, Dtype::I8));
+                    built = Some(Weight::upload(&ops, raw, wn as usize, wk as usize, want));
                 });
                 if !found {
                     panic!("qwen35: missing init weight {name}");
                 }
                 built.unwrap()
-            } else {
-                Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
             };
             weights.insert(name, w);
         };
@@ -1023,38 +1063,19 @@ impl Qwen35 {
             if !shard.owns(l) {
                 continue;
             }
-            match ty {
-                LayerType::Linear => {
-                    let p = |s: &str| format!("blocks.{l}.linear_attn.{s}");
-                    upload(p("in_proj_qkv.weight"), conv_dim_u, d_u);
-                    upload(p("in_proj_z.weight"), vdim_u, d_u);
-                    upload(p("in_proj_b.weight"), nvh_u, d_u);
-                    upload(p("in_proj_a.weight"), nvh_u, d_u);
-                    upload(p("out_proj.weight"), d_u, vdim_u);
-                }
-                LayerType::Full => {
-                    let p = |s: &str| format!("blocks.{l}.self_attn.{s}");
-                    upload(p("q_proj.weight"), hqp_u, d_u);
-                    upload(p("k_proj.weight"), hkv_u, d_u);
-                    upload(p("v_proj.weight"), hkv_u, d_u);
-                    upload(p("o_proj.weight"), d_u, hq_u);
-                }
+            for (suffix, n, k) in cfg.layer_leaves(*ty) {
+                upload(format!("blocks.{l}.{suffix}"), n, k);
             }
-            let pm = |s: &str| format!("blocks.{l}.mlp.{s}");
-            upload(pm("gate.weight"), ff_u, d_u);
-            upload(pm("up.weight"), ff_u, d_u);
-            upload(pm("down.weight"), d_u, ff_u);
         }
         if cfg.mtp && shard.head {
-            let p = |s: &str| format!("mtp.layers.0.self_attn.{s}");
-            upload(p("q_proj.weight"), hqp_u, d_u);
-            upload(p("k_proj.weight"), hkv_u, d_u);
-            upload(p("v_proj.weight"), hkv_u, d_u);
-            upload(p("o_proj.weight"), d_u, hq_u);
-            let pm = |s: &str| format!("mtp.layers.0.mlp.{s}");
-            upload(pm("gate.weight"), ff_u, d_u);
-            upload(pm("up.weight"), ff_u, d_u);
-            upload(pm("down.weight"), d_u, ff_u);
+            // MTP's single extra layer is architecturally a GQA layer + MLP
+            // (`Self::run_mtp_forward` reuses `layer_gqa_fwd`/`mlp_fwd`
+            // unchanged) - `layer_leaves(LayerType::Full)` names the exact
+            // same 7 leaves, just under `mtp.layers.0.` instead of
+            // `blocks.{l}.`.
+            for (suffix, n, k) in cfg.layer_leaves(LayerType::Full) {
+                upload(format!("mtp.layers.0.{suffix}"), n, k);
+            }
         }
 
         // LoRA scratch (rank `r`; max projection output across all 12
@@ -1251,6 +1272,16 @@ impl Qwen35 {
         let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen35: no Ops weight for {wname}"));
         self.ops.matmul(s, w, act, out, 0);
         matches!(w, Weight::F32 { .. })
+    }
+
+    /// The dtype leaf `name` actually landed at after
+    /// `want.promote(caps)` - what a test asserts to confirm a per-leaf
+    /// [`TierPolicy`] was really PLACED, not silently collapsed to uniform
+    /// (`Weight::dtype()`'s own doc). `None` for a name this instance never
+    /// uploaded as an `Ops` weight (norms, embeddings, the LM head, and any
+    /// leaf `tier` left at F32 - see [`Self::w`] for those).
+    pub fn linear_dtype(&self, name: &str) -> Option<Dtype> {
+        self.weights.get(name).map(Weight::dtype)
     }
 
     /// The activation an [`Self::ops_linear`] dispatch reads, packed for int8
@@ -2383,7 +2414,7 @@ impl Qwen35 {
         // 1. mixed_qkv = in_proj_qkv(xn1). Every projection in this function
         // goes through `self.ops`/`self.weights` (`ops_linear`) rather than
         // the fp32 ParamStore, exactly as prefill's `layer_gdn_fwd` does: on
-        // an int8 build the 12 `is_i8_linear` leaves are NOT in the
+        // a quantized-tier build the 12 `is_quantizable_linear` leaves are NOT in the
         // ParamStore at all, so a direct `self.w` lookup here would panic -
         // and on an fp32 build `Ops` holds a clone of the very same buffer.
         // `act1` is `xn1` prepared once and reused by in_proj_b/a/z in step 5
@@ -2963,6 +2994,56 @@ mod tests {
             // rather than using `input_override`, this step would diverge.
             let got = decode_stage(&stage1, (tok + 1) % cfg.vocab, pos, Some(&boundary));
             assert_eq!(got, want, "pos {pos}: two-shard decode diverged from the whole-shard model");
+        }
+    }
+
+    /// The Q4 (W4A8) twin of the test above, same reasoning: a shard split
+    /// must be bit-exact regardless of tier, and this crosses M24's
+    /// `TierPolicy` seam with the shard seam - two places a byte could
+    /// silently diverge (a policy applied inconsistently across shard
+    /// boundaries, or the seam itself losing precision) collapsed into one
+    /// gate.
+    #[test]
+    fn two_shard_q4_decode_matches_the_whole_shard_model() {
+        let cfg = Qwen35Config::tiny_i8();
+        let n_layers = cfg.n_layers as usize;
+        let cut = 2usize;
+        assert_eq!(cfg.layer_types()[cut - 1], LayerType::Linear, "cut must leave a GDN layer upstream");
+        assert_eq!(cfg.layer_types()[n_layers - 1], LayerType::Full, "the GQA layer must sit downstream of the cut");
+
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+        let q4 = TierPolicy::uniform(Dtype::Q4);
+
+        let whole = Qwen35::new_shard_dt(cfg.clone(), 1, t, &init, Shard::whole(n_layers), &q4);
+        let stage0 =
+            Qwen35::new_shard_dt(cfg.clone(), 1, t, &init, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: Shard::ANY_GPU }, &q4);
+        let stage1 = Qwen35::new_shard_dt(
+            cfg.clone(),
+            1,
+            t,
+            &init,
+            Shard { start: cut, end: n_layers, embed: false, head: true, gpu_index: Shard::ANY_GPU },
+            &q4,
+        );
+
+        whole.reset_decode_cache();
+        stage0.reset_decode_cache();
+        stage1.reset_decode_cache();
+
+        let tokens: Vec<u32> = (0..6).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        for (i, &tok) in tokens.iter().enumerate() {
+            let pos = i as u32;
+            let want = whole.step(tok);
+
+            let boundary = decode_stage(&stage0, tok, pos, None);
+            assert_eq!(boundary.len(), d);
+            assert!(boundary.iter().all(|x| x.is_finite()), "pos {pos}: stage 0 emitted a non-finite boundary residual");
+            assert!(boundary.iter().any(|x| x.abs() > 1e-6), "pos {pos}: stage 0's boundary residual is all ~0 - the seam would carry no information and this test would be vacuous");
+
+            let got = decode_stage(&stage1, (tok + 1) % cfg.vocab, pos, Some(&boundary));
+            assert_eq!(got, want, "pos {pos}: two-shard q4 decode diverged from the whole-shard q4 model");
         }
     }
 }

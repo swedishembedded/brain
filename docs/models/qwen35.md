@@ -56,16 +56,16 @@ Model id: `unsloth/Qwen3.8-27B-Q8_0`
 `brain/qwen35` above, not a mode of it - the two coexist and are registered
 independently.
 
-> **Status: the loading/placement/decode path works and is gated; the
-> GENERATED TEXT is not yet correct.** The model plans across two 24 GiB
-> P40s, loads with no fp32 intermediate, decodes at ~3.9 tok/s and is
-> bit-stable under greedy sampling - but a factual greedy continuation still
-> comes out wrong, which means a tensor this GGUF route loads still differs
-> from what the safetensors route loads. The two questions have two separate
-> tests in `crates/qwen35/tests/gguf_resident_real.rs`; the correctness one
-> (`the_two_card_stack_continues_a_factual_prompt_correctly`) is deliberately
-> left RED. `.agents/roadmap/qwen35.md` (M21) records exactly what has been
-> ruled out and how. Do not enable this resident expecting usable output yet.
+> **Status: correct.** The model plans across two 24 GiB P40s, loads with no
+> fp32 intermediate, decodes at 7.44-7.57 tok/s (M22) and is bit-stable
+> under greedy sampling; a factual greedy continuation of `"The capital city
+> of France is"` produces `" Paris. Paris is the largest city in"`. M21 left
+> this RED - the GGUF conversion stores every GDN leaf indexed by value head
+> in a different head-order convention than brain (and the reference HF
+> model) expect; M23 found and fixed it
+> (`crates/qwen35/src/int8_gguf_resident.rs`'s `GdnHeadOrder`). See
+> `.agents/roadmap/qwen35.md` (M23) for the full investigation and what it
+> ruled out on the way there.
 
 ```bash
 BRAIN_QWEN35_GGUF=/path/to/Qwen3.8-27B-Q8_0.gguf brain serve

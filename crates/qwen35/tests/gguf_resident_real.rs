@@ -28,6 +28,8 @@ use std::time::Instant;
 
 use checkpoint::TensorSource;
 use checkpoint::gguf::MmapGguf;
+use gpu_core::select::Dtype;
+use model::ops::TierPolicy;
 use model::shard::Shard;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::int8_gguf_resident::{endpoint_names, layer_cost, resident_config, shard_fetch_plan, shard_source, Qwen35GgufResident};
@@ -186,7 +188,7 @@ fn the_real_checkpoint_plans_across_the_real_cards() {
     }
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
-    let cost = layer_cost(&cfg, CAP);
+    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8));
     println!("qwen35 gguf resident: cap={CAP}");
     println!("  total device bytes : {} ({:.2} GiB)", cost.total(), cost.total() as f64 / (1u64 << 30) as f64);
     println!("  embed              : {:.2} GiB", cost.embed as f64 / (1u64 << 30) as f64);
@@ -195,7 +197,7 @@ fn the_real_checkpoint_plans_across_the_real_cards() {
         println!("  candidate {d:?}: {:.2} GiB usable (total minus {} GiB reserve)", *usable as f64 / (1u64 << 30) as f64, RESERVE >> 30);
     }
 
-    let r = Qwen35GgufResident::new(path, devices.clone(), CAP);
+    let r = Qwen35GgufResident::new(path, devices.clone(), CAP, TierPolicy::uniform(Dtype::I8));
     let placement = r.placement();
     assert!(!placement.is_empty(), "the real checkpoint must be placeable across {} card(s)", devices.len());
     for (d, start, end, bytes) in &placement {
@@ -249,7 +251,7 @@ fn a_real_two_card_load_runs_end_to_end() {
     let total: u64 = devices.iter().map(|&(_, c)| c).sum();
     println!("qwen35 gguf resident e2e: {} card(s), {:.1} GiB usable total", devices.len(), total as f64 / (1u64 << 30) as f64);
 
-    let r = Qwen35GgufResident::new(path, devices, CAP);
+    let r = Qwen35GgufResident::new(path, devices, CAP, TierPolicy::uniform(Dtype::I8));
     let key = r.instance_key("generate", &capability::Invocation::new());
     let cost = r.estimate_multi(&key);
     let placed: Vec<Device> = cost.devices().collect();
@@ -317,35 +319,36 @@ fn a_real_two_card_load_runs_end_to_end() {
 
 }
 
-/// **This gate is RED, on purpose, and it is the honest state of this path.**
-///
-/// A greedy RAW continuation (`chat: false`, no template at all) of a prompt
-/// whose answer the model cannot plausibly get wrong. It depends on no
-/// template convention, no sampling parameter and no chat markup, so a
-/// failure here is arithmetic: the weights this path loads do not compute
-/// what Qwen3.8-27B computes.
+/// **M23: GREEN.** Was RED for several milestones before this fix landed.
+/// The root cause: llama.cpp's GGUF conversion stores EVERY GDN leaf indexed by
+/// VALUE HEAD (`ssm_a`/`ssm_dt.bias`/`ssm_conv1d.weight`'s v-channels/
+/// `attn_qkv.weight`'s v-rows/`ssm_alpha.weight`/`ssm_beta.weight`/
+/// `attn_gate.weight`'s rows/`ssm_out.weight`'s columns) in GROUP-MAJOR
+/// order, not brain's (and the reference HF model's) SUB-MAJOR
+/// (repeat_interleave) order - so every head's own decay/gate/projection
+/// was individually plausible but applied to the WRONG head's key/value
+/// state. Fixed by `int8_gguf_resident::GdnHeadOrder`
+/// (`crate::int8_gguf_resident::SsmALogFix`), found by a direct per-tensor
+/// diff against the FP8 checkpoint's own weights (M23.1): three of the eight
+/// affected leaves are unquantized and matched the FP8 side at cosine
+/// EXACTLY 1.0000000 once degrouped, the strongest possible signal that
+/// this was a pure reordering, not a value or precision difference.
 ///
 /// It is separate from [`a_real_two_card_load_runs_end_to_end`] because the
-/// two answer different questions and only one of them is settled. The
-/// plumbing works: the model plans across two P40s, loads 29 GB of Q8_0
-/// straight into INT8 device weights with no fp32 intermediate, decodes at a
-/// measured ~3.9 tok/s, and is bit-stable across requests. The OUTPUT is
-/// still wrong - measured `"The capital city of France is"` ->
-/// `"..\n\n\n\n..."`, with the debug dump
-/// (`BRAIN_QWEN35_GGUF_DEBUG=1`) showing a model that predicts sensibly at
-/// short range and degrades with context length.
+/// two answer different questions. The plumbing has always worked: the
+/// model plans across two P40s, loads 29 GB of Q8_0 straight into INT8
+/// device weights with no fp32 intermediate, decodes at a measured
+/// 7.44-7.57 tok/s (M22), and is bit-stable across requests. What was wrong
+/// was the OUTPUT: `"The capital city of France is"` used to continue
+/// `"..\n\n\n\n.."` (an earlier, already-fixed `ssm_a` bug - lesson #70),
+/// then `" is is is is is is is is"` (this bug, before the full fix landed),
+/// now correctly `" Paris. Paris is the largest city in"`.
 ///
-/// What has been ruled out, and how: it is not the
-/// sharding (bit-exact at tiny scale), not the int8 decode tape (bit-exact
-/// against int8 prefill), not `ssm_a` (found and fixed - lesson #70), not
-/// the norm folds, and not an `ssm_alpha`/`ssm_beta` swap (tried; strictly
-/// worse). It IS a difference between what this GGUF route loads and what
-/// the safetensors route loads, because the SAME engine at the SAME INT8
-/// tier over 64 real layers already produced `" Paris."` from the FP8
-/// checkpoint (roadmap M16).
-///
-/// Deleting or weakening this assertion would turn a known-broken path into
-/// a green one. It stays as it is until the difference is found.
+/// What was ruled out on the way here, and how: not the sharding (bit-exact
+/// at tiny scale), not the int8 decode tape (bit-exact against int8
+/// prefill), not the norm folds, not an `ssm_alpha`/`ssm_beta` SWAP (tried;
+/// strictly worse - the real bug was a HEAD reordering, not a two-tensor
+/// swap).
 #[test]
 fn the_two_card_stack_continues_a_factual_prompt_correctly() {
     let Some(path) = gguf_path() else { return };
@@ -354,7 +357,7 @@ fn the_two_card_stack_continues_a_factual_prompt_correctly() {
         brain_testutil::skip_unavailable(&format!("this gate wants a MULTI-card load; this box has {} usable GPU(s)", devices.len()));
         return;
     }
-    let r = Qwen35GgufResident::new(path, devices, CAP);
+    let r = Qwen35GgufResident::new(path, devices, CAP, TierPolicy::uniform(Dtype::I8));
     let key = r.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
     let mut inst = r.activate_multi(&key, &placed).expect("activate the real checkpoint across the real cards");
@@ -377,6 +380,55 @@ fn the_two_card_stack_continues_a_factual_prompt_correctly() {
     );
 }
 
+/// M24: the SAME factual-continuation check as
+/// [`the_two_card_stack_continues_a_factual_prompt_correctly`], at the Q4
+/// (W4A8) tier instead of I8 - and, unlike that gate, on ONE card (Q4's
+/// ~15.7-15.8 GiB footprint fits a single 24 GiB P40, where I8's ~27 GiB
+/// needs two - `int8_gguf_resident::tests::
+/// a_q4_mlp_tier_with_gdn_gates_held_at_f32_fits_one_24gb_card` is the
+/// standing arithmetic gate this real-weight run confirms in practice).
+/// Reports BOTH candidate policies since neither has an a-priori quality
+/// guarantee (Q4 halves the weight levels I8 already has): uniform Q4, and
+/// policy C (Q4 on the MLP, F32 on the two GDN state-sensitive gates -
+/// `in_proj_a`/`in_proj_b`, ~94 MB total, essentially free).
+#[test]
+fn the_q4_tier_continues_the_same_factual_prompt_on_one_card() {
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    for (label, tier) in [
+        ("uniform Q4", TierPolicy::uniform(Dtype::Q4)),
+        ("policy C (Q4 MLP, F32 GDN gates)", TierPolicy::uniform(Dtype::Q4).with(&["in_proj_a.weight", "in_proj_b.weight"], Dtype::F32)),
+    ] {
+        let r = Qwen35GgufResident::new(path.clone(), devices.clone(), CAP, tier);
+        let key = r.instance_key("generate", &capability::Invocation::new());
+        let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+        println!("  {label}: placed on {} device(s): {placed:?}", placed.len());
+        let mut inst = r.activate_multi(&key, &placed).expect("activate the real checkpoint at the q4 tier");
+
+        let raw = capability::Invocation::new()
+            .set("prompt", serde_json::json!("The capital city of France is"))
+            .set("chat", serde_json::json!(false))
+            .set("max_new", serde_json::json!(8))
+            .set("temp", serde_json::json!(0.0));
+        let cont = inst.run("generate", &raw, &mut |_| {}).expect("raw greedy continuation at the q4 tier");
+        let text = cont.outputs["text"].as_str().unwrap_or_default().to_string();
+        println!("  {label}: raw greedy continuation: {text:?}");
+        for (k, v) in inst.metrics() {
+            println!("    metric {k:<20} {v}");
+        }
+        assert!(
+            text.contains("Paris"),
+            "the q4 tier ({label}) must continue \"The capital city of France is\" with Paris, got {text:?} - \
+             if this fails, Q4 is not usable for this model even though the wiring and placement are correct; \
+             report which policy failed and its actual output"
+        );
+    }
+}
+
 /// The cost model at the tested capacity, printed alongside the config the
 /// real file declares - cheap, header-only, and the arithmetic the placement
 /// above is built on. Runs without a GPU.
@@ -385,7 +437,7 @@ fn the_real_checkpoints_cost_model_is_reported() {
     let Some(path) = gguf_path() else { return };
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
-    let cost = layer_cost(&cfg, CAP);
+    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8));
     let gdn = cfg.layer_types().iter().position(|t| *t == LayerType::Linear).unwrap();
     let gqa = cfg.layer_types().iter().position(|t| *t == LayerType::Full).unwrap();
     println!("  per-layer GDN: {} bytes, GQA: {} bytes", cost.per_layer[gdn], cost.per_layer[gqa]);
@@ -396,6 +448,6 @@ fn the_real_checkpoints_cost_model_is_reported() {
     assert_eq!(cfg.d_model, reference.d_model);
     assert_eq!(cfg.vocab, reference.vocab);
     assert_eq!(cfg.intermediate_size, reference.intermediate_size);
-    assert_eq!(cost.per_layer[gdn], reference.layer_i8_bytes(LayerType::Linear) + 4 * (48 * 128 * 128 + 10240 * 3));
-    assert_eq!(cost.per_layer[gqa], reference.layer_i8_bytes(LayerType::Full) + 2 * CAP as u64 * reference.kv_dim() as u64 * 4);
+    assert_eq!(cost.per_layer[gdn], reference.layer_weight_bytes(LayerType::Linear, &TierPolicy::uniform(Dtype::I8)) + 4 * (48 * 128 * 128 + 10240 * 3));
+    assert_eq!(cost.per_layer[gqa], reference.layer_weight_bytes(LayerType::Full, &TierPolicy::uniform(Dtype::I8)) + 2 * CAP as u64 * reference.kv_dim() as u64 * 4);
 }
