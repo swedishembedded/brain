@@ -78,9 +78,9 @@ fn the_shared_rmsnorm_dx_builder_matches_the_host_reference_at_every_builder_sha
 
 /// The CPU JIT cannot run `rmsnorm_dx_rows`'s workgroup barrier, so a model
 /// that registers the slot on a device reporting `workgroup_reductions:
-/// false` must still land on the per-element reference and still be correct
-/// - the same reference-kernel-with-the-cooperative-slot-registered case
-/// `rmsnorm_variant_agreement.rs` pins for the forward half.
+/// false` must still land on the per-element reference and still be
+/// correct, the same reference-kernel-with-the-cooperative-slot-registered
+/// case `rmsnorm_variant_agreement.rs` pins for the forward half.
 #[test]
 fn the_reference_kernel_still_computes_dx_when_the_cooperative_slot_is_registered_on_the_cpu_jit() {
     let gpu = gpu_core::Gpu::new_cpu(PIPELINES);
