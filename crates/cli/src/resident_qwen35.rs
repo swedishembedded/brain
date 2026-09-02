@@ -46,6 +46,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use qwen3::chat::{parse_request, SeqState};
+use qwen35::caps::with_template_flavor_default;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::serve::{Engine, Scheduler};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
@@ -201,7 +202,11 @@ fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, eos: Option<u32>, i
     let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
 
     for (bi, inv) in invs.iter().enumerate() {
-        match parse_request(tok, inv) {
+        // This IS Qwen3.8-27B, so it renders the 3.8 template by default -
+        // `parse_request` alone defaults to the Qwen3-era flavor, which
+        // would silently mis-render this model's prompt (the GGUF resident
+        // and `caps.rs` both already apply this; this engine did not).
+        match parse_request(tok, &with_template_flavor_default(inv)) {
             Ok(req) => {
                 let sample = model::serve::SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
                 let seed = req.seed;
@@ -295,7 +300,8 @@ pub fn multi_gpu_gguf_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwe
     }
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
     let cap = qwen35::int8_gguf_resident::Qwen35GgufResident::ctx_from_env();
-    Some(qwen35::int8_gguf_resident::Qwen35GgufResident::new(path, devices, cap))
+    let tier = qwen35::int8_gguf_resident::Qwen35GgufResident::tier_from_env();
+    Some(qwen35::int8_gguf_resident::Qwen35GgufResident::new(path, devices, cap, tier))
 }
 
 /// [`multi_gpu_gguf_from_env`]'s file resolution: the env var, else the model
@@ -352,6 +358,26 @@ mod tests {
         // SAFETY: no other test in this process reads/writes this exact var.
         unsafe { std::env::remove_var("BRAIN_QWEN35_WEIGHTS") };
         assert!(Qwen35Resident::from_env().is_none());
+    }
+
+    /// REGRESSION: this engine used to call `parse_request` directly, so it
+    /// rendered the Qwen3-era chat template by default while `caps.rs` and
+    /// the GGUF resident both correctly default to Qwen3.8's own template
+    /// (`with_template_flavor_default`'s own doc). Mirrors `qwen35::caps`'s
+    /// own `tokenizer_present_renders_the_qwen38_flavor_without_asking` test
+    /// exactly - same env-gated real tokenizer, same assertion - because
+    /// this engine must render identically to every other entry point into
+    /// this model, not merely "some" template.
+    #[test]
+    fn parse_request_renders_the_qwen38_flavor_without_asking() {
+        let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
+            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+            return;
+        };
+        let tok = QwenBpe::from_file(&tok_path).expect("load Qwen3 tokenizer");
+        let inv = Invocation::new().set("prompt", serde_json::json!("what's the weather in Paris?")).set("chat", serde_json::json!(true));
+        let req = parse_request(&tok, &with_template_flavor_default(&inv)).unwrap();
+        assert_eq!(req.flavor, data::qwen_chat::TemplateFlavor::Qwen38, "this engine must default to the Qwen3.8 flavor, same as caps.rs and the GGUF resident");
     }
 
     /// REGRESSION for the whole point of this file: registering

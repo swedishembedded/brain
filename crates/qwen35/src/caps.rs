@@ -60,7 +60,14 @@ pub const MODEL: &str = "brain/qwen35";
 /// the shared `qwen3::chat` request parser defaults to the Qwen3-era flavor,
 /// which would silently mis-render this model's prompt. An explicitly
 /// requested `template_flavor` wins.
-pub(crate) fn with_template_flavor_default(inv: &Invocation) -> Invocation {
+///
+/// `pub`, not `pub(crate)`: every entry point into this model's chat parsing
+/// must apply this exactly once before calling `qwen3::chat::parse_request`.
+/// `int8_gguf_resident.rs` does (same crate), and so must
+/// `crates/cli/src/resident_qwen35.rs` (the plain fp32 paged HTTP/D-Bus
+/// resident, a different crate), which used to call `parse_request` directly
+/// and silently render the Qwen3-era template instead of this model's own.
+pub fn with_template_flavor_default(inv: &Invocation) -> Invocation {
     if inv.get_str("template_flavor").is_some() {
         inv.clone()
     } else {
@@ -108,8 +115,11 @@ pub fn manifest() -> Manifest {
             "streaming",
             ParamType::Bool,
             "stream all 64 real decoder layers from disk a few at a time (crate::stream::generate) instead of building a full resident model; \
-             `weights` must then be the CHECKPOINT DIRECTORY (layers-N.safetensors + outside.safetensors), a tokenizer is required, `messages`/`chat`/ \
-             `tools`/`stop` are not supported yet, and generation is extremely slow (~75 min/decode step on real hardware) - keep `max_new` small (2-4)",
+             `weights` must then be the CHECKPOINT DIRECTORY (layers-N.safetensors + outside.safetensors), a tokenizer is required, and generation is \
+             extremely slow (~75 min/decode step on real hardware) - keep `max_new` small (2-4). `messages`/`system`/`stop`/`tools`/`tool_choice`/`eos` \
+             are REJECTED (crate::stream::generate has no chat rendering, EOS override or tool-call path); `chat`/`precision`/`enable_thinking`/ \
+             `reasoning_effort`/`preserve_thinking`/`template_flavor` are silently ignored rather than rejected (a manifest-default param cannot be told \
+             apart from a caller-supplied one once validated, so an explicit non-default value here has no effect and no error)",
         )
         .default(json!(false)))
         .output(BlobSpec::new("text", Media::Text, "the generated text (space-separated token ids when no tokenizer is given)"));
@@ -327,6 +337,31 @@ impl GenerateAction {
         if !dir.is_dir() {
             return Err(format!("qwen35 generate: streaming=true requires 'weights' to be a checkpoint DIRECTORY (layers-N.safetensors + outside.safetensors), got a non-directory path '{weights}'"));
         }
+        // These six params have NO manifest default, so `ActionSpec::validate`
+        // never fills them in - `get_str`/`get_i64` returning `Some` here can
+        // only mean the CALLER explicitly set it, not that a default landed.
+        // `crate::stream::generate` has no chat-rendering, EOS-override or
+        // tool-call path at all (it takes a raw prompt string and its own
+        // fixed stop convention), so silently accepting one of these used to
+        // let a caller believe it took effect when it never reached the
+        // generation call below. Reject explicitly rather than accept
+        // silently - the same rule already applied to `tool_choice` on the
+        // non-streaming path.
+        for (name, set) in [
+            ("messages", inv.get_str("messages").is_some()),
+            ("system", inv.get_str("system").is_some()),
+            ("stop", inv.get_str("stop").is_some()),
+            ("tools", inv.get_str("tools").is_some()),
+            ("tool_choice", inv.get_str("tool_choice").is_some()),
+            ("eos", inv.get_i64("eos").is_some()),
+        ] {
+            if set {
+                return Err(format!(
+                    "qwen35 generate: streaming=true does not support '{name}' (crate::stream::generate takes a raw prompt string with no chat rendering, EOS override or tool-call path) - drop '{name}' or set streaming=false"
+                ));
+            }
+        }
+
         let tokenizer = inv.get_str("tokenizer").filter(|p| !p.is_empty()).ok_or("qwen35 generate: streaming=true requires 'tokenizer'")?;
         let prompt = inv.get_str("prompt").unwrap_or_default();
         if prompt.is_empty() {
@@ -388,6 +423,47 @@ mod tests {
         assert!(g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1")).set("bogus", json!(1))).is_err());
         // the manifest round-trips to JSON for discovery.
         assert_eq!(manifest().to_json()["actions"][0]["name"], "generate");
+    }
+
+    /// REGRESSION: streaming mode used to silently ignore `messages`/
+    /// `system`/`stop`/`tools`/`tool_choice`/`eos` rather than reject them -
+    /// `crate::stream::generate` has no chat-rendering, EOS-override or
+    /// tool-call path at all, so a caller setting one of these believed it
+    /// took effect when it never reached the generation call. Any real
+    /// directory satisfies the `dir.is_dir()` check this rejection sits
+    /// behind - no checkpoint files need exist inside it, since the
+    /// rejection fires before anything is read from disk.
+    #[test]
+    fn streaming_rejects_params_it_cannot_honor() {
+        let reg = {
+            let mut r = Registry::new();
+            r.register(Arc::new(Qwen35Provider::new()));
+            r
+        };
+        let dir = std::env::temp_dir();
+        let base = || {
+            Invocation::new()
+                .set("weights", json!(dir.to_str().unwrap()))
+                .set("streaming", json!(true))
+                .set("tokenizer", json!("/nonexistent/tokenizer.json"))
+                .set("prompt", json!("1 2"))
+        };
+        for (name, value) in [
+            ("messages", json!("[]")),
+            ("system", json!("be terse")),
+            ("stop", json!("[]")),
+            ("tools", json!("[]")),
+            ("tool_choice", json!("auto")),
+            ("eos", json!(0)),
+        ] {
+            let err = reg.run(MODEL, "generate", base().set(name, value), &mut |_| {}).unwrap_err();
+            assert!(err.contains(name) && err.contains("streaming=true does not support"), "setting {name:?} in streaming mode must be rejected by name, got: {err}");
+        }
+        // The baseline (none of the six set) must clear this check and fail
+        // LATER, on the nonexistent tokenizer - proving the rejection is
+        // scoped to the six params, not an over-broad refusal.
+        let err = reg.run(MODEL, "generate", base(), &mut |_| {}).unwrap_err();
+        assert!(!err.contains("does not support"), "the baseline request must not be rejected for a param it never set: {err}");
     }
 
     #[test]
