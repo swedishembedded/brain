@@ -103,6 +103,121 @@ pub struct GqaMixerActs {
 /// activations [`gqa_mixer_bwd`] needs are saved.
 pub fn gqa_mixer_fwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, n: u32, is_train: bool) -> (DeviceBuffer, Option<GqaMixerActs>) {
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
+    let qd = shape.qd();
+
+    let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
+
+    let scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
+    let probs = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
+    let ctx = g.storage((n * qd) as u64);
+    let ga = Gqa { b: shape.b, t: shape.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+    g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx));
+
+    let (gate, ctx_gated) = gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd);
+
+    let acts = is_train.then(|| GqaMixerActs {
+        q_normed: prep.q_normed,
+        k_normed: prep.k_normed,
+        v: v.clone(),
+        q_value: prep.q_value,
+        k: k.clone(),
+        q_gate: prep.q_gate,
+        probs,
+        ctx,
+        gate,
+    });
+    (ctx_gated, acts)
+}
+
+/// [`gqa_mixer_fwd`] for ONE CHUNK of a multi-round prefill: identical
+/// projections-to-`ctx_gated` pipeline, but the attention runs against a
+/// persistent per-layer KV cache ([`crate::block::gqa_chunk_step`]) instead of
+/// recomputing an isolated `[T,T]` causal block over the chunk alone. Query
+/// row `i` sits at absolute position `start+i` and attends everything the
+/// earlier rounds already cached plus its own chunk's keys up to itself.
+///
+/// `w.cos`/`w.sin` must be the CHUNK's own `[n, rotary_half]` M-RoPE table
+/// (rows for absolute positions `start..start+n`), not the model-level
+/// whole-sequence table: `rope2d_partial_fwd`'s table lookup is `row % rows`,
+/// so a chunk's row `i` always reads table row `i`.
+///
+/// Inference only (no `is_train` arm): the chunked-prefill path exists to
+/// serve, and `gqa_mixer_bwd` reconstructs its gradient from a whole-sequence
+/// `[T,T]` `probs` slab that this path deliberately never materialises.
+/// `shape.b`/`shape.t` are unused here - a chunk is always one sequence's `n`
+/// rows.
+// Same reason `crate::block` allows this crate-wide: the arity IS the
+// primitive's own contract (the mixer's ids/shape/weights, plus the four
+// caller-owned cache buffers and the two chunk coordinates), and bundling it
+// into a struct would put a second, drifting description of that contract
+// next to this one.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixer_chunk_fwd(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    chunk_ids: &crate::block::GqaChunkIds,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    q_full: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    n: u32,
+    start: u32,
+    cap: u32,
+    kcache: &DeviceBuffer,
+    vcache: &DeviceBuffer,
+    block_ids: &DeviceBuffer,
+    seq_lens: &DeviceBuffer,
+) -> DeviceBuffer {
+    let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
+    let qd = shape.qd();
+
+    let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
+
+    let t_max = start + n;
+    let scores = g.storage(n as u64 * nh as u64 * t_max as u64);
+    let probs = g.storage(n as u64 * nh as u64 * t_max as u64);
+    let ctx = g.storage((n * qd) as u64);
+    g.submit(
+        &[],
+        &crate::block::gqa_chunk_step(
+            g,
+            chunk_ids,
+            nh,
+            nkv,
+            hd,
+            start,
+            n,
+            cap,
+            &prep.q_normed,
+            &prep.k_normed,
+            v,
+            kcache,
+            vcache,
+            block_ids,
+            seq_lens,
+            &scores,
+            &probs,
+            &ctx,
+        ),
+    );
+
+    gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd).1
+}
+
+/// The mixer's projections-to-attention-inputs half, shared byte-for-byte by
+/// [`gqa_mixer_fwd`] and [`gqa_mixer_chunk_fwd`]: the per-head `[value|gate]`
+/// de-interleave, QK-norm, and partial M-RoPE. Only what happens BETWEEN
+/// these outputs and the output gate differs between the two entry points.
+struct QkvPrepared {
+    q_normed: DeviceBuffer,
+    k_normed: DeviceBuffer,
+    q_value: DeviceBuffer,
+    q_gate: DeviceBuffer,
+}
+
+fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, n: u32) -> QkvPrepared {
+    let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let (qd, kvd) = (shape.qd(), shape.kvd());
 
     // Per-head de-interleaved split of q_full's [query|gate] halves - NOT a
@@ -137,24 +252,22 @@ pub fn gqa_mixer_fwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
         ],
     );
 
-    let scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
-    let probs = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
-    let ctx = g.storage((n * qd) as u64);
-    let ga = Gqa { b: shape.b, t: shape.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-    g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &q_normed, &k_normed, v, &scores, &probs, &ctx));
+    QkvPrepared { q_normed, k_normed, q_value, q_gate }
+}
 
+/// The mixer's sigmoid output gate, shared by both forward entry points:
+/// `(gate, ctx_gated) = (sigmoid(q_gate), ctx * gate)`.
+fn gate_ctx(g: &Gpu, ids: &GqaMixerIds, ctx: &DeviceBuffer, q_gate: &DeviceBuffer, n: u32, qd: u32) -> (DeviceBuffer, DeviceBuffer) {
     let gate = g.storage((n * qd) as u64);
     let ctx_gated = g.storage((n * qd) as u64);
     g.submit(
         &[],
         &[
-            g.step(ids.sigmoid, &[&q_gate, &gate], &[n * qd], n * qd),
-            g.step(ids.mul, &[&ctx, &gate, &ctx_gated], &[n * qd], n * qd),
+            g.step(ids.sigmoid, &[q_gate, &gate], &[n * qd], n * qd),
+            g.step(ids.mul, &[ctx, &gate, &ctx_gated], &[n * qd], n * qd),
         ],
     );
-
-    let acts = is_train.then(|| GqaMixerActs { q_normed, k_normed, v: v.clone(), q_value, k: k.clone(), q_gate, probs, ctx, gate });
-    (ctx_gated, acts)
+    (gate, ctx_gated)
 }
 
 /// Reverse of [`gqa_mixer_fwd`]: `d_ctx_gated` (the caller's own `o_proj`

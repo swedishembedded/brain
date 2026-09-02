@@ -155,10 +155,39 @@ pub struct GdnMixerActs {
     pub z_silu: DeviceBuffer,
 }
 
+/// One sequence's PERSISTENT Gated-DeltaNet stream state, threaded across
+/// successive [`gdn_mixer_stream_fwd`] calls so a prompt can be consumed in
+/// several bounded rounds instead of one whole-sequence forward.
+///
+/// Both buffers are read as this round's INPUT state and overwritten in place
+/// with its OUTPUT state, the same convention
+/// [`crate::gdn::gdn_recurrent_step`]'s `state` and
+/// [`crate::gdn::gdn_causal_conv1d_step`]'s `hist` already use at `n = 1` -
+/// and they are bit-for-bit the SAME two buffers those decode primitives
+/// thread, so a chunked prefill and a per-token decode can be interleaved on
+/// one sequence.
+pub struct GdnStream<'a> {
+    /// `[bh, dk, dv]` recurrent state: [`crate::gdn::gdn_chunk_fwd`]'s
+    /// `initial_state` on the way in, its `final_state` on the way out. Zero
+    /// for a fresh sequence.
+    pub state: &'a DeviceBuffer,
+    /// `[conv_dim, conv_kernel-1]` causal-conv history, channel-major, oldest
+    /// tap first - `gdn_causal_conv1d_step`'s own `hist` layout. Zero for a
+    /// fresh sequence; after a round it holds the LAST `conv_kernel-1` rows of
+    /// that round's `mixed_qkv` (the conv's own input, NOT its output), which
+    /// is exactly the window the next round's first token needs.
+    pub hist: &'a DeviceBuffer,
+}
+
 /// `mixed_qkv = in_proj_qkv(xn1)`, `bproj = in_proj_b(xn1)`, `aproj =
 /// in_proj_a(xn1)`, `z = in_proj_z(xn1)` -> `gated`, ready for the caller's
 /// own `out_proj`. `n` is the row count (`b*t`); `is_train` gates whether the
 /// activations [`gdn_mixer_bwd`] needs are saved.
+///
+/// Always starts from a FRESH sequence: a zero recurrent state and a zero
+/// conv history (`conv1d_fwd`'s own left `pad = K-1`). That is what a training
+/// forward wants; a serving prefill that consumes a long prompt in rounds
+/// wants [`gdn_mixer_stream_fwd`] instead.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_mixer_fwd(
     g: &Gpu,
@@ -172,19 +201,95 @@ pub fn gdn_mixer_fwd(
     n: u32,
     is_train: bool,
 ) -> (DeviceBuffer, Option<GdnMixerActs>) {
+    gdn_mixer_stream_fwd(g, ids, shape, w, mixed_qkv, bproj, aproj, z, n, is_train, None)
+}
+
+/// [`gdn_mixer_fwd`] with an optional persistent [`GdnStream`] - the seam a
+/// CHUNKED prefill needs, where round `r > 0` must continue from round
+/// `r-1`'s recurrent state and conv tail rather than from zero.
+///
+/// `None` is [`gdn_mixer_fwd`] exactly (same dispatches, same buffers, same
+/// numbers). `Some` changes exactly two things and nothing else:
+///
+/// 1. **The conv.** `conv1d_fwd`'s left `pad = K-1` IS the zero history, so it
+///    cannot express "continue from these `K-1` real values". Instead this
+///    prepends the history rows to the round's own `mixed_qkv` and convolves
+///    the `K-1+t` extended input with `pad = 0`, which yields exactly `t`
+///    outputs whose first `K-1` now see real left context. The new history is
+///    the extended input's own last `K-1` rows.
+/// 2. **The recurrence.** `gdn_chunk_fwd` already takes `initial_state` and
+///    writes `final_state` explicitly; this binds the caller's persistent
+///    buffer to the first and copies the result back into it, instead of
+///    letting both default to a fresh (zeroed) allocation.
+///
+/// Requires `shape.gdn.b == 1` (the stream state is per sequence) and
+/// `!is_train` (a chunked forward saves no whole-sequence backward history).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_mixer_stream_fwd(
+    g: &Gpu,
+    ids: &GdnMixerIds,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed_qkv: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    n: u32,
+    is_train: bool,
+    cont: Option<GdnStream>,
+) -> (DeviceBuffer, Option<GdnMixerActs>) {
     let gdn = shape.gdn;
     let (conv_dim, key_dim, value_dim, group) = (shape.conv_dim(), shape.key_dim(), shape.value_dim(), shape.group());
     let (nkh, nvh, khd, vhd, kw) = (shape.nkh, gdn.h, gdn.dk, gdn.dv, shape.conv_kernel);
     let (b, t, chunk) = (gdn.b, gdn.t, gdn.chunk);
     let n_chunks = t / chunk;
+    if cont.is_some() {
+        assert_eq!(b, 1, "gdn_mixer_stream_fwd: a persistent GdnStream is per SEQUENCE, so b must be 1 (got {b})");
+        assert!(!is_train, "gdn_mixer_stream_fwd: a streaming (chunked) forward saves no backward history");
+    }
 
     // Depthwise causal conv1d + SiLU (activation AFTER the conv).
     // conv1d.wgsl is NCL ([N,Cin,L]); mixed_qkv is token-major ([B,T,C]).
-    let ncl_in = g.storage((n * conv_dim) as u64);
-    g.submit(&[], &[g.step(ids.nlc_nchw, &[mixed_qkv, &ncl_in], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
-    let conv_shape = Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t };
     let ncl_out = g.storage((n * conv_dim) as u64);
-    g.submit(&[], &[conv1d_fwd(g, &ids.conv, &conv_shape, &ncl_in, w.conv1d_weight, &ncl_out)]);
+    let ncl_in = match &cont {
+        None => {
+            let ncl_in = g.storage((n * conv_dim) as u64);
+            g.submit(&[], &[g.step(ids.nlc_nchw, &[mixed_qkv, &ncl_in], &[n * conv_dim, conv_dim, t], n * conv_dim)]);
+            let conv_shape = Conv1d { n: b, cin: conv_dim, l: t, cout: conv_dim, k: kw, stride: 1, pad: kw - 1, dilation: 1, groups: conv_dim, lo: t };
+            g.submit(&[], &[conv1d_fwd(g, &ids.conv, &conv_shape, &ncl_in, w.conv1d_weight, &ncl_out)]);
+            ncl_in
+        }
+        Some(st) => {
+            // The K-1 history rows, channel-major -> token-major, so they can
+            // be prepended to this round's own token-major rows.
+            let kw1 = kw - 1;
+            let ext_rows = kw1 + t;
+            let hist_tok = g.storage((kw1 * conv_dim) as u64);
+            g.submit(&[], &[g.step(ids.nchw_nlc, &[st.hist, &hist_tok], &[kw1 * conv_dim, conv_dim, kw1], kw1 * conv_dim)]);
+            // [history | this round], a flat row concatenation (N=H=W=1).
+            let ext_tok = g.storage((ext_rows * conv_dim) as u64);
+            g.submit(&[], &[g.step(ids.concat2, &[&hist_tok, mixed_qkv, &ext_tok], &[1, kw1 * conv_dim, t * conv_dim, 1, 1], ext_rows * conv_dim)]);
+            // The NEXT round's history: the extended input's own last K-1
+            // rows (correct even when t < K-1, where some of them are still
+            // this round's inherited history). Read before `st.hist` is
+            // overwritten below - separate dispatches, submitted in order.
+            let tail_tok = g.storage((kw1 * conv_dim) as u64);
+            g.submit(
+                &[],
+                &[
+                    g.step(ids.concat_split, &[&ext_tok, &tail_tok], &[1, ext_rows * conv_dim, kw1 * conv_dim, t * conv_dim, 1, 1], kw1 * conv_dim),
+                    g.step(ids.nlc_nchw, &[&tail_tok, st.hist], &[kw1 * conv_dim, conv_dim, kw1], kw1 * conv_dim),
+                ],
+            );
+            // pad = 0 over K-1+t inputs gives exactly t outputs, the causal
+            // window of each already filled by real left context.
+            let ncl_in = g.storage((ext_rows * conv_dim) as u64);
+            g.submit(&[], &[g.step(ids.nlc_nchw, &[&ext_tok, &ncl_in], &[ext_rows * conv_dim, conv_dim, ext_rows], ext_rows * conv_dim)]);
+            let conv_shape = Conv1d { n: 1, cin: conv_dim, l: ext_rows, cout: conv_dim, k: kw, stride: 1, pad: 0, dilation: 1, groups: conv_dim, lo: t };
+            g.submit(&[], &[conv1d_fwd(g, &ids.conv, &conv_shape, &ncl_in, w.conv1d_weight, &ncl_out)]);
+            ncl_in
+        }
+    };
     let ncl_act = g.storage((n * conv_dim) as u64);
     g.submit(&[], &[g.step(ids.silu, &[&ncl_out, &ncl_act], &[n * conv_dim], n * conv_dim)]);
     let mixed_act = g.storage((n * conv_dim) as u64);
@@ -255,8 +360,19 @@ pub fn gdn_mixer_fwd(
     // use gdn_chunk_fwd_train instead: bit-identical out/final_state but
     // additionally saves the per-chunk history gdn_chunk_bwd needs.
     let bh = gdn.bh() as u64;
-    let initial_state = g.storage(bh * khd as u64 * vhd as u64);
-    let final_state = g.storage(bh * khd as u64 * vhd as u64);
+    let state_len = bh * khd as u64 * vhd as u64;
+    // Fresh sequence -> a zero `initial_state` (every `Gpu::storage` here is
+    // zero-fresh); a continued one -> the caller's own persistent buffer.
+    // `gdn_chunk_fwd` reads `initial_state` exactly once (its first step
+    // copies it into `final_state`) and never writes it, so binding the
+    // caller's buffer directly is safe.
+    let owned_initial = cont.is_none().then(|| g.storage(state_len));
+    let initial_state = match (&cont, &owned_initial) {
+        (Some(st), _) => st.state,
+        (None, Some(zeroed)) => zeroed,
+        (None, None) => unreachable!("owned_initial is Some whenever cont is None"),
+    };
+    let final_state = g.storage(state_len);
     let out_cm = g.storage(gdn.bhc() as u64 * chunk as u64 * vhd as u64);
     let scratch_train = if is_train { Some(GdnScratchTrainBufs::new(g, &gdn)) } else { None };
     if let Some(strain) = &scratch_train {
@@ -270,7 +386,7 @@ pub fn gdn_mixer_fwd(
             &value_cm,
             &g_cm,
             &beta_cm,
-            &initial_state,
+            initial_state,
             &strain.as_ref(),
             &out_cm,
             &final_state,
@@ -278,8 +394,16 @@ pub fn gdn_mixer_fwd(
         g.submit(&strain.clears(), &steps);
     } else {
         let scratch = GdnScratchBufs::new(g, &gdn);
-        let steps = gdn_chunk_fwd(g, &ids.chunk, &gdn, &query_cm, &key_cm, &value_cm, &g_cm, &beta_cm, &initial_state, &scratch.as_ref(), &out_cm, &final_state);
+        let steps = gdn_chunk_fwd(g, &ids.chunk, &gdn, &query_cm, &key_cm, &value_cm, &g_cm, &beta_cm, initial_state, &scratch.as_ref(), &out_cm, &final_state);
         g.submit(&scratch.clears(), &steps);
+    }
+    // Persist this round's end state for the next one. Done after the loop
+    // rather than by aliasing `final_state` to the caller's buffer, so
+    // `gdn_chunk_fwd`'s own seeding copy never has the same buffer on both
+    // sides of a dispatch.
+    if let Some(st) = &cont {
+        let len = state_len as u32;
+        g.submit(&[], &[g.step(ids.chunk.region_copy, &[&final_state, st.state], &[1, len, len, 0], len)]);
     }
 
     // Permute back to token-major.

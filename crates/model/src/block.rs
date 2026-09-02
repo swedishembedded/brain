@@ -443,9 +443,114 @@ pub fn gqa_decode_step(
 /// `k`/`v` output - see [`gqa_decode_step`]'s doc for why one `kv_append`
 /// dispatch suffices (a flat prefix copy, since the cache and the batched
 /// buffer share the same per-row `n_kv_heads*head_dim` stride).
+///
+/// Rows `0..n` only: `kv_append.wgsl` writes at `row*width`, so widening
+/// `width` to the whole chunk pins the destination to a multiple of the chunk
+/// length. A prefill that consumes a prompt in SEVERAL rounds needs rows
+/// `start..start+n` for an arbitrary `start` - use [`kv_cache_fill_at`].
 pub fn kv_cache_fill(g: &Gpu, kv_append: usize, src: &DeviceBuffer, cache: &DeviceBuffer, n: u32, n_kv_heads: u32, head_dim: u32) -> Step {
     let width = n * n_kv_heads * head_dim;
     g.step(kv_append, &[src, cache], &[width, 0], width)
+}
+
+/// [`kv_cache_fill`] at an ARBITRARY row offset: fill a KV cache's rows
+/// `start..start+n` from a chunk's contiguous `[n, n_kv_heads*head_dim]`
+/// `k`/`v` output. The round-`>=2` primitive of a chunked prefill, where the
+/// destination offset is the number of prompt tokens already consumed and has
+/// no relation to the chunk length.
+///
+/// Dispatches `splice.wgsl` (`dst[base+i] = src[i]`, an independent compact
+/// source and destination offset) rather than `kv_append.wgsl`, whose
+/// destination is always `row*width` - see [`kv_cache_fill`]'s own doc for why
+/// that cannot express this. Overwrites (never accumulates), so a cache row
+/// pool reused across sequences carries no stale contribution.
+pub fn kv_cache_fill_at(g: &Gpu, splice: usize, src: &DeviceBuffer, cache: &DeviceBuffer, start: u32, n: u32, n_kv_heads: u32, head_dim: u32) -> Step {
+    let row = n_kv_heads * head_dim;
+    g.step(splice, &[src, cache], &[n * row, start * row], n * row)
+}
+
+/// Kernel-pipeline indices [`gqa_chunk_step`] dispatches - the chunked
+/// (multi-token-per-dispatch) sibling of [`GqaDecodeIds`].
+#[derive(Clone, Copy)]
+pub struct GqaChunkIds {
+    /// `splice.wgsl` - [`kv_cache_fill_at`]'s own kernel.
+    pub splice: usize,
+    /// `paged_decode_scores_batched.wgsl`.
+    pub scores_batched: usize,
+    /// `decode_softmax_batched.wgsl`.
+    pub softmax_batched: usize,
+    /// `paged_decode_apply_batched.wgsl`.
+    pub apply_batched: usize,
+}
+
+/// One CHUNK of a prefill's GQA attention: append `n` already-QK-normed +
+/// RoPE'd `k`/`v` rows into the persistent per-layer cache at rows
+/// `start..start+n`, then attend all `n` new queries against cache rows
+/// `0..=start+i` - causal WITHIN the chunk and fully attentive to everything
+/// the earlier rounds already cached.
+///
+/// The `n = 1`, `start = pos` case is exactly [`gqa_decode_step`]; this is
+/// that primitive generalised to many query rows so a prompt costs one
+/// dispatch triad per layer per CHUNK instead of one per layer per TOKEN.
+/// Causality is carried by `seq_lens` (one live-key count per query row)
+/// rather than by a `j <= i` index comparison, since a chunk's query row `i`
+/// sits at absolute position `start+i`, not `i`.
+///
+/// Buffer contracts:
+/// * `q` is `[n, n_heads*head_dim]`, `k_new`/`v_new` are
+///   `[n, n_kv_heads*head_dim]` - the chunk's own dense rows.
+/// * `kcache`/`vcache` are the FLAT `[cap, n_kv_heads*head_dim]` per-layer
+///   caches [`gqa_decode_step`] already takes, unchanged. The two batched
+///   attention kernels are block-table-indexed (they were written for a paged
+///   pool), so this builder binds the degenerate table a flat cache is:
+///   `block_size = cap` and one block per sequence, which makes their slot
+///   arithmetic `(0*cap + j)*kv_stride` - plain flat addressing, no
+///   indirection. `block_ids` must therefore be `[n]` u32 ZEROS.
+/// * `seq_lens` must be `[n]` u32 with `seq_lens[i] == start+i+1`, and
+///   `t_max == start+n` must be `<= cap`.
+/// * `scores`/`probs` are `[n, n_heads, t_max]`-strided scratch. This is the
+///   one cost a chunk pays that a decode step does not: the materialised
+///   score slab grows with BOTH the chunk length and the context so far.
+///   Callers bound it by bounding the chunk length.
+/// * `ctx` is `[n, n_heads*head_dim]`, this chunk's attention output.
+///
+/// `block_ids`/`seq_lens` are caller-owned because one chunk's pair is shared
+/// unchanged by every GQA layer in that chunk - building them per layer would
+/// be `n_full` identical host writes per round.
+pub fn gqa_chunk_step(
+    g: &Gpu,
+    k: &GqaChunkIds,
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    start: u32,
+    n: u32,
+    cap: u32,
+    q: &DeviceBuffer,
+    k_new: &DeviceBuffer,
+    v_new: &DeviceBuffer,
+    kcache: &DeviceBuffer,
+    vcache: &DeviceBuffer,
+    block_ids: &DeviceBuffer,
+    seq_lens: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    let group = n_heads / n_kv_heads;
+    let hkv = n_kv_heads * head_dim;
+    let t_max = start + n;
+    assert!(t_max <= cap, "gqa_chunk_step: chunk end {t_max} exceeds the cache capacity {cap}");
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    // `max_bt = 1`: one physical block backs the whole sequence (see this
+    // function's own doc), so a row's block table is a single zero.
+    vec![
+        kv_cache_fill_at(g, k.splice, k_new, kcache, start, n, n_kv_heads, head_dim),
+        kv_cache_fill_at(g, k.splice, v_new, vcache, start, n, n_kv_heads, head_dim),
+        g.step(k.scores_batched, &[q, kcache, block_ids, seq_lens, scores], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1, f(scale)], n * n_heads * t_max),
+        g.step(k.softmax_batched, &[scores, seq_lens, probs], &[n, n_heads, t_max], n * n_heads),
+        g.step(k.apply_batched, &[probs, vcache, block_ids, seq_lens, ctx], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1], n * n_heads * head_dim),
+    ]
 }
 
 // ---- the full GQA attention SUBLAYER (norm -> QKV -> QK-norm -> RoPE ->
