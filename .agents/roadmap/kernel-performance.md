@@ -2311,6 +2311,68 @@ before committing (a shared, concurrently-edited generated file - see
 model; the selector/host-oracle seam + the workspace-wide field addition
 + its gate; this ledger entry + the kernel-catalogue row).
 
+### M6.1 - Vulkan per-buffer dependency tracking, replacing the blanket dispatch barrier
+
+Checked the milestone's premise against source first: `flush_chunk`
+(`crates/backend-vulkan/src/lib.rs`) did insert an unconditional
+`vk::MemoryBarrier` (`MEMORY_WRITE -> MEMORY_READ|MEMORY_WRITE`, whole-device
+scope) before every dispatch but the first in a batch, and the code's own
+comment already named the fix ("a finer per-buffer barrier is a later
+optimisation") - the premise held, no correction needed here.
+
+Reflected each WGSL storage binding's write access from naga
+(`AddressSpace::Storage { access }`'s `StorageAccess::STORE` bit, i.e.
+`read_write` vs. `read`) into a new `vulkan::shader::WgslBinding`, and
+recorded each `VkStep`'s storage-buffer read/write set at `record()` time
+into a fixed 8-slot array (`VkAccess`) - matching the engine-wide `<=8
+storage buffers/kernel` invariant exactly, so `VkStep` stays `Copy` and no
+allocation is added to the hot per-dispatch path. `flush_chunk` now tracks
+which buffers carry an unsynchronised write ("dirty") across the chunk and,
+before each dispatch, emits a `VkBufferMemoryBarrier` only for the buffers
+that dispatch's own access set overlaps and finds dirty - resolving (and
+clearing) exactly those, since a barrier makes the write it covers visible
+to everything after it in command-buffer order, not only to the dispatch
+that triggered it. Two dispatch chains sharing no buffer at all -
+independent per-expert/per-branch work, MoE's dominant shape - now cost
+zero barriers between them, where the blanket barrier always paid one
+regardless of whether the two dispatches touched the same memory.
+
+Added `VulkanBackend::barrier_count()` (mirrors the existing
+`queue_submits()` contract) and a new `perf_contract.rs` test: a
+3-dispatch batch with one real dependency (a dispatch reading a prior
+dispatch's output) and one fully independent dispatch must cost exactly 1
+buffer barrier, not the 2 the blanket barrier always paid.
+
+**Verified**: `brain-backend-vulkan`'s and `brain-vulkan`'s full test
+suites green on real Tesla P40 Vulkan devices - `perf_contract` (5 tests
+incl. the new one), `kernel_timing` (4, including the
+`>MAX_TIMED_DISPATCHES` chunk-split path and the Intel-ANV serialize
+workaround path - both untouched by this change, confirmed still correct),
+`deferred_reclaim`. `brain-gpu-core`'s full suite (roofline, GEMV/GEMM
+register-kernel upgrade ladders, device sharing/stats, scratch arena,
+kernel-catalogue validation) is also green, exercising real multi-dispatch
+chains through this backend end to end. Both touched crates build and
+`cargo clippy --all-targets` clean with zero warnings.
+
+`make parity`'s cross-backend gradcheck run was blocked by an unrelated,
+concurrently-edited syntax error in `crates/minimaxmusic3/src/dit.rs` (a
+large in-progress rewrite in another session - the same defect the M5.1
+entry above already recorded hitting). Confirmed via `git stash` that both
+that compile break and a separate, pre-existing failure in
+`qwen3::serve::tests::causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_triad`
+(CPU backend, unrelated to Vulkan barriers) reproduce identically on clean
+HEAD with this milestone's changes stashed out - neither is caused by this
+milestone.
+
+**Gate**: `barrier_count()` is new API introduced with this fix (the old
+code had no per-buffer concept to count), so the spec-first check here is a
+discriminating assertion rather than a literal revert-and-rerun: the new
+test's expected count (1) is exactly what the hazard analysis produces and
+exactly what the blanket barrier it replaced could never produce for this
+batch shape (it would always cost `n-1` = 2, unconditionally, for every
+dispatch after the first regardless of dependency). Confirmed against real
+hardware. **Commit**: one.
+
 ---
 
 ## Not yet done
