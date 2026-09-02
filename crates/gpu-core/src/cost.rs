@@ -722,11 +722,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let kvh = if gqa { p(2)? } else { h };
             f(2 * b * h * hd * tri(t), 4 * (b * h * t * t + b * t * hd * (h + kvh)))
         }
-        // `_rows` is the cooperative one-workgroup-per-row twin (M5.2):
-        // same math, same total MAC/byte count - the 64 threads split the
-        // SAME causal reduction, they do not add work.
-        "gqa_bwd_dscores" | "attn_bwd_dscores" | "gqa_bwd_dscores_rows" | "attn_bwd_dscores_rows" => {
-            let gqa = base.starts_with("gqa_bwd_dscores");
+        "gqa_bwd_dscores" | "attn_bwd_dscores" => {
+            let gqa = base == "gqa_bwd_dscores";
             let (b, h) = (p(0)?, p(1)?);
             let (t, hd) = if gqa { (p(3)?, p(4)?) } else { (p(2)?, p(3)?) };
             let kvh = if gqa { p(2)? } else { h };
@@ -767,7 +764,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (b, h, t, hd) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(2 * b * h * hd * t * t, 4 * (b * h * t * t + 2 * b * t * h * hd))
         }
-        "attn_bwd_dscores_bidir" | "attn_bwd_dscores_bidir_rows" => {
+        "attn_bwd_dscores_bidir" => {
             let (b, h, t, hd) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(b * h * t * t * (2 * hd + 4), 4 * (2 * b * h * t * t + 2 * b * t * h * hd))
         }
@@ -863,7 +860,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (b, h, td, te, hd) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?);
             f(2 * b * h * hd * td * te, 4 * (b * h * td * te + b * hd * h * (td + te)))
         }
-        "attn_bwd_dscores_cross" | "attn_bwd_dscores_cross_rows" => {
+        "attn_bwd_dscores_cross" => {
             let (b, h, td, te, hd) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?);
             f(b * h * td * te * (2 * hd + 4), 4 * (2 * b * h * td * te + b * hd * h * (td + te)))
         }
@@ -1551,21 +1548,6 @@ mod tests {
         assert_eq!(cost("attn_softmax", &[1, 2, 4], 8).flops, 2 * (6 * 10 + 4));
         // cross: t_dec × t_enc rectangle.
         assert_eq!(cost("attn_scores_cross", &[1, 2, 3, 5, 8, 96, 64, 0, 0], 30).flops, 2 * 15 * 17);
-        // M5.2: the `_rows` cooperative twins cost identically to their
-        // per-element references - the 64 threads split the same reduction,
-        // they do not add work.
-        let dref = cost("attn_bwd_dscores", &[1, 2, 4, 8, 96, 0, 32], 8);
-        let drows = cost("attn_bwd_dscores_rows", &[1, 2, 4, 8, 96, 0, 32], 8 * 64);
-        assert_eq!((dref.flops, dref.bytes), (drows.flops, drows.bytes));
-        let gref = cost("gqa_bwd_dscores", &[1, 2, 1, 4, 8, 2], 8);
-        let grows = cost("gqa_bwd_dscores_rows", &[1, 2, 1, 4, 8, 2], 8 * 64);
-        assert_eq!((gref.flops, gref.bytes), (grows.flops, grows.bytes));
-        let bref = cost("attn_bwd_dscores_bidir", &[1, 2, 4, 8, 96, 0, 32], 8);
-        let brows = cost("attn_bwd_dscores_bidir_rows", &[1, 2, 4, 8, 96, 0, 32], 8 * 64);
-        assert_eq!((bref.flops, bref.bytes), (brows.flops, brows.bytes));
-        let cref = cost("attn_bwd_dscores_cross", &[1, 2, 3, 5, 8, 96, 64, 0, 0], 6);
-        let crows = cost("attn_bwd_dscores_cross_rows", &[1, 2, 3, 5, 8, 96, 64, 0, 0], 6 * 64);
-        assert_eq!((cref.flops, cref.bytes), (crows.flops, crows.bytes));
     }
 
     #[test]
