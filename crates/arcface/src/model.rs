@@ -79,7 +79,17 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("arcface_margin", kernels::ARCFACE_MARGIN),
     ("arcface_margin_bwd", kernels::ARCFACE_MARGIN_BWD),
     ("ce_value", kernels::CE_VALUE),
+    // `ce_grad` recomputes the row softmax on EVERY output element -
+    // O(rows*classes^2). `ce_stats`+`ce_grad_stats` precompute the per-row
+    // max/sum once and reuse it - O(rows*classes) - the same migration
+    // `gpt2`/`lfm2`/`qwen3` already made for their (much larger) vocab. Kept
+    // alongside `ce_grad` rather than removing it: `ce_grad`'s contract
+    // (unconditional division by `n_rows`, no ignore mask) is still the
+    // simplest correct kernel for a caller with no masking need, and other
+    // crates still dispatch it directly by name.
     ("ce_grad", kernels::CE_GRAD),
+    ("ce_stats", kernels::CE_STATS),
+    ("ce_grad_stats", kernels::CE_GRAD_STATS),
     // preprocessing: brain's one per-channel affine, dispatched via `imaging::Ctx`.
     ("film_chan", kernels::FILM_CHAN),
 ];

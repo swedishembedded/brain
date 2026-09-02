@@ -74,6 +74,12 @@ use crate::model::{folded, ids, kernel, ResBlock};
 /// large enough that a hypothetical all-zero row is finite rather than NaN.
 const L2_EPS: f32 = 1e-8;
 
+/// `ce_stats`/`ce_grad_stats`' ignore-index sentinel. ArcFace has no masking
+/// concept (every row is a real sample), so this never matches a real label -
+/// it exists only to satisfy the shared kernels' contract, the same way
+/// `lfm2`/`gpt2` use it for real padding.
+const CE_IGNORE: u32 = 0xFFFF_FFFF;
+
 /// The trainable head + optimisation shape around [`ArcFaceConfig`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArcFaceTrainConfig {
@@ -239,6 +245,7 @@ pub struct ArcFaceTrainer {
     cosv: DeviceBuffer,    // [B, K] cosine table
     logits: DeviceBuffer,  // [B, K] scaled, margin-applied
     ce_rows: DeviceBuffer, // [B] per-sample CE
+    ce_stats: DeviceBuffer, // [B, 2] per-row (max, sum-exp) for `ce_grad_stats`
 
     d_logits: DeviceBuffer,
     d_cos: DeviceBuffer,
@@ -360,6 +367,7 @@ impl ArcFaceTrainer {
             cosv: gpu.storage(bk as u64),
             logits: gpu.storage(bk as u64),
             ce_rows: gpu.storage(b as u64),
+            ce_stats: gpu.storage(b as u64 * 2),
             d_logits: gpu.storage(bk as u64),
             d_cos: gpu.storage(bk as u64),
             d_emb_n: gpu.storage(be as u64),
@@ -502,8 +510,20 @@ impl ArcFaceTrainer {
         let eps = f(L2_EPS);
 
         // --- loss head -----------------------------------------------------
-        // `ce_grad` writes d(mean CE)/d(logit) directly (it divides by n_rows).
-        let s_ceg = ctx.step(kernel("ce_grad"), &[&self.logits, &self.labels, &self.d_logits], &[b, k], b * k);
+        // Two-pass CE gradient (see gpt2/lfm2/qwen3): `ce_stats` computes each
+        // row's (max, sum-exp) ONCE, then `ce_grad_stats` reuses it per
+        // element - O(rows*classes) instead of `ce_grad`'s O(rows*classes^2)
+        // per-element softmax recompute. Measured 46x at rows=128,
+        // classes=20000 on a Tesla P40 (kernel-performance.md M5.7).
+        // `count = b` reproduces `ce_grad`'s own unconditional `/ n_rows`;
+        // `CE_IGNORE` never matches a real label, so no row is masked.
+        let s_ces = ctx.step(kernel("ce_stats"), &[&self.logits, &self.labels, &self.ce_stats], &[b, k, CE_IGNORE], b);
+        let s_ceg = ctx.step(
+            kernel("ce_grad_stats"),
+            &[&self.logits, &self.labels, &self.ce_stats, &self.d_logits],
+            &[b, k, CE_IGNORE, f(b as f32)],
+            b * k,
+        );
         let s_mb = ctx.step(
             kernel("arcface_margin_bwd"),
             &[&self.cosv, &self.labels, &self.d_logits, &self.d_cos],
@@ -521,7 +541,7 @@ impl ArcFaceTrainer {
         // across steps, so it goes in this submit's clear list. (A ParamStore
         // grad never does - `zero_grads` owns that, once per step.)
         let s_dw = ctx.step(kernel("matmul_dw"), &[&self.d_cos, &self.emb_n, &self.d_w_n], &[b, e, k], k * e);
-        ctx.gpu.submit(&[&self.d_w_n], &[s_ceg, s_mb, s_dx, s_dw]);
+        ctx.gpu.submit(&[&self.d_w_n], &[s_ces, s_ceg, s_mb, s_dx, s_dw]);
 
         // Through the two row-normalisations. `l2norm_scale_dx` ASSIGNS, so the
         // head-weight grad lands in scratch and is then ACCUMULATED into the
