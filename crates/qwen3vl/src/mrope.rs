@@ -38,18 +38,53 @@ pub fn axis_map(mrope_section: [u32; 3], half: usize) -> Vec<usize> {
 /// position ids. `positions[t] = [t_pos, h_pos, w_pos]`; returns row-major
 /// `[seq, half]` cos and sin (`half = head_dim/2`) ready to upload as the two
 /// `rope2d` table buffers. `inv_freq[d] = theta^(-2d/head_dim)`, matching HF.
+///
+/// A thin wrapper over [`mrope_tables_scaled`] with `scaling = None` - see
+/// that function for the YaRN-scaled long-context variant. Kept as its own
+/// function (rather than folding callers onto the `Option` form) so every
+/// existing call site's signature is untouched.
 pub fn mrope_tables(positions: &[[u32; 3]], mrope_section: [u32; 3], head_dim: u32, theta: f32) -> (Vec<f32>, Vec<f32>) {
+    mrope_tables_scaled(positions, mrope_section, head_dim, theta, None)
+}
+
+/// [`mrope_tables`] generalized with an optional per-channel frequency /
+/// attention-magnitude override - the hook long-context RoPE scaling (YaRN,
+/// `model::yarn::scaled_inv_freq`) needs, since it requires a non-uniform
+/// per-channel correction that a single scalar `theta` cannot express.
+///
+/// `scaling = Some((inv_freq, attention_factor))` replaces the inline
+/// `theta.powf(-2d/head_dim)` derivation with `inv_freq[d]` (must have
+/// `inv_freq.len() == head_dim as usize / 2`) and multiplies every `cos`/
+/// `sin` table entry by `attention_factor` (YaRN's `mscale`, the paper's
+/// attention-magnitude correction for the resulting longer effective
+/// context). `scaling = None` reproduces [`mrope_tables`]'s exact
+/// computation - `attention_factor` folds in as a literal `* 1.0`, which
+/// IEEE-754 guarantees is bit-exact, so `mrope_tables` itself is provably
+/// unaffected by this function existing.
+pub fn mrope_tables_scaled(
+    positions: &[[u32; 3]],
+    mrope_section: [u32; 3],
+    head_dim: u32,
+    theta: f32,
+    scaling: Option<(&[f32], f32)>,
+) -> (Vec<f32>, Vec<f32>) {
     let half = (head_dim / 2) as usize;
+    if let Some((inv_freq, _)) = scaling {
+        assert_eq!(inv_freq.len(), half, "scaled inv_freq must have head_dim/2 entries");
+    }
     let amap = axis_map(mrope_section, half);
     let seq = positions.len();
     let mut cos = vec![0f32; seq * half];
     let mut sin = vec![0f32; seq * half];
     for (t, p) in positions.iter().enumerate() {
         for d in 0..half {
-            let inv_freq = theta.powf(-2.0 * d as f32 / head_dim as f32);
+            let (inv_freq, attention_factor) = match scaling {
+                Some((table, af)) => (table[d], af),
+                None => (theta.powf(-2.0 * d as f32 / head_dim as f32), 1.0),
+            };
             let angle = p[amap[d]] as f32 * inv_freq;
-            cos[t * half + d] = angle.cos();
-            sin[t * half + d] = angle.sin();
+            cos[t * half + d] = angle.cos() * attention_factor;
+            sin[t * half + d] = angle.sin() * attention_factor;
         }
     }
     (cos, sin)
@@ -174,6 +209,59 @@ pub fn get_rope_index_multi(tokens: &[u32], placeholders: &[PlaceholderGrids<'_>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression gate: `mrope_tables_scaled(.., None)` must be
+    /// byte-for-byte what [`mrope_tables`] itself produces (and, since
+    /// `mrope_tables` is now a thin wrapper over the scaled form, this also
+    /// pins that the refactor introduced no behavior change for any of
+    /// [`mrope_tables`]'s existing callers).
+    #[test]
+    fn scaled_none_matches_plain_mrope_tables_bit_for_bit() {
+        let positions = [[0, 0, 0], [1, 2, 3], [4, 5, 6], [100, 50, 25]];
+        let (hd, theta) = (128u32, 5_000_000.0f32);
+        let (cos_a, sin_a) = mrope_tables(&positions, [24, 20, 20], hd, theta);
+        let (cos_b, sin_b) = mrope_tables_scaled(&positions, [24, 20, 20], hd, theta, None);
+        assert_eq!(cos_a, cos_b);
+        assert_eq!(sin_a, sin_b);
+    }
+
+    /// A YaRN-scaled `inv_freq`/`attention_factor` override changes the
+    /// resulting table: the scaled cos/sin must equal
+    /// `cos(angle) * attention_factor` / `sin(angle) * attention_factor`
+    /// using the OVERRIDE frequency, not the plain `theta.powf(-2d/head_dim)`
+    /// schedule - proving the override is actually threaded through, not
+    /// silently ignored.
+    #[test]
+    fn scaled_some_uses_the_override_frequency_and_attention_factor() {
+        let (hd, theta) = (8u32, 5_000_000.0f32);
+        let half = (hd / 2) as usize;
+        let inv_freq = [0.5f32, 0.25, 0.125, 0.0625]; // deliberately NOT theta.powf(...)
+        let attention_factor = 1.25f32;
+        let positions = [[3u32, 3, 3]];
+        let (cos, sin) = mrope_tables_scaled(&positions, [1, 1, 1], hd, theta, Some((&inv_freq, attention_factor)));
+        assert_eq!(cos.len(), half);
+        for d in 0..half {
+            let angle = 3.0f32 * inv_freq[d];
+            assert!((cos[d] - angle.cos() * attention_factor).abs() < 1e-6);
+            assert!((sin[d] - angle.sin() * attention_factor).abs() < 1e-6);
+        }
+    }
+
+    /// End-to-end wiring check: `model::yarn::scaled_inv_freq`'s output,
+    /// fed straight into `mrope_tables_scaled`, must differ from the plain
+    /// (unscaled) table at a position beyond the pretrained context - this
+    /// is the exact composition `qwen35` uses once it opts into
+    /// `rope_scaling`.
+    #[test]
+    fn yarn_scaled_table_differs_from_plain_table_beyond_original_context() {
+        let (hd, theta) = (128u32, 1_000_000.0f32);
+        let cfg = model::yarn::YarnConfig::new(4.0, 32768);
+        let (inv_freq, attention_factor) = model::yarn::scaled_inv_freq(hd, theta, &cfg);
+        let positions = [[40000u32, 40000, 40000]]; // beyond original_max_position_embeddings
+        let (cos_plain, _) = mrope_tables(&positions, [24, 20, 20], hd, theta);
+        let (cos_yarn, _) = mrope_tables_scaled(&positions, [24, 20, 20], hd, theta, Some((&inv_freq, attention_factor)));
+        assert_ne!(cos_plain, cos_yarn, "YaRN-scaled table must differ from the plain table once scaling is active");
+    }
 
     #[test]
     fn axis_map_interleaved_4b() {
