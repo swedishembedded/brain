@@ -279,6 +279,12 @@ pub mod fault {
 /// A batched-forward input: token ids (embedded via `tok.weight`) or ready-made
 /// per-row embeddings written straight into the residual stream (the tts Talker
 /// feeds codec/text-conditioned embeddings rather than ids).
+///
+/// `Copy` (every variant holds only a `Copy` slice reference or nothing) so
+/// M6.3's tape cache can pass one value to `write_batch_meta`/
+/// `write_batch_input`/`batched_tape` without fighting the borrow checker
+/// over a shared reference.
+#[derive(Clone, Copy)]
 pub enum Input<'a> {
     Tokens(&'a [u32]),
     Embeds(&'a [f32]),
@@ -572,6 +578,21 @@ pub struct Engine {
     /// `submit_topk_head` iterating the argmax pair + `topk_extract_step`.
     topk_vals_dev: DeviceBuffer,
     topk_idx_dev: DeviceBuffer,
+    /// M6.3: the decode tape (uniform buffers + bind groups `batched_tape`
+    /// records), keyed by `bsz` - a pure function of `bsz` alone once
+    /// `causal_chunk` is `false` and the input is `Tokens`/`Resident` (every
+    /// kernel choice, buffer identity and uniform PARAMETER in that tape
+    /// comes from this engine's own fixed config; the only thing that varies
+    /// step to step is buffer CONTENTS, written separately by
+    /// `write_batch_meta`/`write_batch_input` before a cached tape is
+    /// replayed) - so it is recorded once per bucket and reused unchanged,
+    /// instead of a fresh uniform + bind group per dispatch every step. Never
+    /// populated above `DECODE_REGIME_MAX_ROWS` (prefill's row count is not
+    /// bucketed) or for `Input::Embeds` (its tape has no embed step at all,
+    /// a structurally different shape at the same `bsz`) - both keep
+    /// rebuilding via `Self::run_batched_steps`, unchanged from before this
+    /// cache existed.
+    tape_cache: HashMap<u32, Vec<Step>>,
 }
 
 impl Engine {
@@ -893,6 +914,7 @@ impl Engine {
             argmax_part_dev,
             topk_vals_dev,
             topk_idx_dev,
+            tape_cache: HashMap::new(),
         }
     }
 
@@ -1065,7 +1087,7 @@ impl Engine {
     /// tells the two apart for `Op::PagedAttentionFused` (M2.4; see
     /// `run_batched_steps`'s own doc).
     #[allow(clippy::too_many_arguments)]
-    fn run_batched(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<f32> {
+    fn run_batched(&mut self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<f32> {
         let b = self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt, causal_chunk);
         self.gpu.read(&self.sc.xn_final, (b * self.cfg.d_model) as usize)
     }
@@ -1401,6 +1423,39 @@ impl Engine {
         }
     }
 
+    /// Write the paged batch metadata (`positions`/`seqlens`/`blocks`/
+    /// `offsets`/`bt`) a forward's dispatches read out of `self.sc`'s buffers -
+    /// factored out of `Self::run_batched_steps` (M6.3) so the tape-cache path
+    /// in `Self::run_batched_submit` can perform exactly this write, and
+    /// nothing else, ahead of REPLAYING an already-recorded tape.
+    ///
+    /// Resident mode (A4): every input - token ids AND paged metadata - was
+    /// produced on the device by `decode_feed`/`decode_advance`, so writing
+    /// host copies here would both be wrong (stale) and force a flush.
+    fn write_batch_meta(&self, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) {
+        if !matches!(input, Input::Resident) {
+            let g = &self.gpu;
+            g.write(&self.sc.pos_buf, positions);
+            g.write(&self.sc.seqlen_buf, seqlens);
+            g.write(&self.sc.blk_buf, blocks);
+            g.write(&self.sc.off_buf, offsets);
+            g.write(&self.sc.bt_buf, bt);
+        }
+    }
+
+    /// Write this step's actual input values - `Input::Tokens`' ids into
+    /// `sc.tok_buf` (embedded by the tape's own `EMBED` step), `Input::
+    /// Embeds`' vectors straight into the residual stream, or nothing for
+    /// `Input::Resident` (already on-device). Split out of `Self::
+    /// run_batched_steps` for the same reason as `Self::write_batch_meta`.
+    fn write_batch_input(&self, input: Input) {
+        match input {
+            Input::Tokens(t) => self.gpu.write(&self.sc.tok_buf, t),
+            Input::Resident => {}
+            Input::Embeds(e) => self.gpu.write(&self.sc.res[0], bytemuck::cast_slice(e)),
+        }
+    }
+
     /// `causal_chunk` distinguishes the two regimes `Op::PagedAttentionFused`
     /// itself cannot infer from `bsz`/`cap` alone (M2.4): `true` for a
     /// prefill/spec-decode-verify chunk of ONE sequence's causally-increasing
@@ -1410,12 +1465,17 @@ impl Engine {
     /// two are different physical kernels answering the same shape
     /// signature in different call-site semantics, not points on one shape
     /// gradient - see `Op::PagedAttentionFused`'s own doc.
-    #[allow(clippy::too_many_arguments)]
-    fn run_batched_steps(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> (Vec<Step>, u32) {
-        #[cfg(feature = "fault-injection")]
-        if fault::take_kernel_failure() {
-            panic!("injected fault: kernel dispatch failure");
-        }
+    ///
+    /// The dispatch list itself (kernel, buffers, uniform PARAMETERS, thread
+    /// counts): a pure function of `(bsz, matches!(input, Embeds), causal_chunk)`
+    /// and this engine's own fixed config - nothing here reads a position,
+    /// seqlen, block or token VALUE (those live in buffer contents `Self::
+    /// write_batch_meta`/`Self::write_batch_input` wrote separately, above).
+    /// That purity is what makes M6.3's tape cache (`Self::run_batched_submit`)
+    /// safe: caching this method's OUTPUT and replaying it unchanged for a
+    /// later call at the same key reuses the same kernels/buffers/uniform
+    /// values a fresh call would have produced, byte for byte.
+    fn batched_tape(&self, bsz: u32, input: Input, causal_chunk: bool) -> Vec<Step> {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
@@ -1427,32 +1487,13 @@ impl Engine {
         let scale = 1.0f32 / (hd as f32).sqrt();
         let theta = c.rope_theta;
         let g = &self.gpu;
-        // Resident mode (A4): every input - token ids AND paged metadata - was
-        // produced on the device by `decode_feed`/`decode_advance`, so writing
-        // host copies here would both be wrong (stale) and force a flush.
-        if !matches!(input, Input::Resident) {
-            g.write(&self.sc.pos_buf, positions);
-            g.write(&self.sc.seqlen_buf, seqlens);
-            g.write(&self.sc.blk_buf, blocks);
-            g.write(&self.sc.off_buf, offsets);
-            g.write(&self.sc.bt_buf, bt);
-        }
         let kids = ids();
         let sc = &self.sc;
         let w = |name: &str| self.ps.w(name);
         let b = bsz;
         let mut s: Vec<Step> = Vec::new();
-        match input {
-            Input::Tokens(t) => {
-                g.write(&sc.tok_buf, t);
-                s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, b], d * b));
-            }
-            Input::Resident => {
-                s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, b], d * b));
-            }
-            Input::Embeds(e) => {
-                g.write(&sc.res[0], bytemuck::cast_slice(e));
-            }
+        if !matches!(input, Input::Embeds(_)) {
+            s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, b], d * b));
         }
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
@@ -1566,18 +1607,58 @@ impl Engine {
         }
         let last = c.n_layers as usize;
         s.push(self.rms(&sc.res[last], w("norm.weight"), &sc.xn_final, d, b));
-        (s, b)
+        s
     }
 
-    /// [`Self::run_batched_steps`] plus the submit. Split so a profiler can
-    /// time the served tape per kernel kind without driving a whole request -
-    /// the tape is rebuilt per step rather than recorded once, so there was
-    /// nothing to hand `gpu_core::profile`.
+    /// [`Self::write_batch_meta`] + [`Self::write_batch_input`] +
+    /// [`Self::batched_tape`], for callers that want the dispatch list
+    /// itself rather than a submitted step - `qwen_bench serve`'s profiler
+    /// (`Self::steps_for_profile`) and this file's own `causal_chunk`/
+    /// decode-regime kernel-selection tests, neither of which goes through
+    /// M6.3's tape cache: a profiler needs a step list `gpu_core::profile`
+    /// can resubmit standalone, and these tests assert on the FRESHLY BUILT
+    /// tape's own kernel choices, at shapes the cache does not even key on
+    /// (`causal_chunk = true`, or `bsz` above `DECODE_REGIME_MAX_ROWS`).
     #[allow(clippy::too_many_arguments)]
-    fn run_batched_submit(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> u32 {
-        let (s, b) = self.run_batched_steps(bsz, input, positions, seqlens, blocks, offsets, bt, causal_chunk);
+    fn run_batched_steps(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> (Vec<Step>, u32) {
+        #[cfg(feature = "fault-injection")]
+        if fault::take_kernel_failure() {
+            panic!("injected fault: kernel dispatch failure");
+        }
+        self.write_batch_meta(input, positions, seqlens, blocks, offsets, bt);
+        self.write_batch_input(input);
+        (self.batched_tape(bsz, input, causal_chunk), bsz)
+    }
+
+    /// [`Self::run_batched_steps`] plus the submit - decode's hot path
+    /// (`causal_chunk = false`, `bsz <= DECODE_REGIME_MAX_ROWS`,
+    /// `Input::Tokens`/`Input::Resident`) goes through M6.3's tape cache
+    /// instead: `Self::batched_tape` is a pure function of `(bsz, causal_chunk,
+    /// matches!(input, Embeds))` (see its own doc), so the FIRST call at a
+    /// given `bsz` records the tape into `self.tape_cache` and every later
+    /// call at that same `bsz` replays it unchanged - `write_batch_meta`/
+    /// `write_batch_input` still run every call (real per-step values, not
+    /// cacheable), only the uniform-buffer/bind-group churn `batched_tape`
+    /// itself costs is skipped on a hit. Prefill's chunked rows
+    /// (`causal_chunk = true`, an unbucketed row count) and `Input::Embeds`
+    /// (a structurally different tape at the same `bsz` - no embed step at
+    /// all) keep rebuilding every call, exactly as before this cache existed.
+    #[allow(clippy::too_many_arguments)]
+    fn run_batched_submit(&mut self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> u32 {
+        self.write_batch_meta(input, positions, seqlens, blocks, offsets, bt);
+        self.write_batch_input(input);
+        if !causal_chunk && bsz <= DECODE_REGIME_MAX_ROWS && !matches!(input, Input::Embeds(_)) {
+            if !self.tape_cache.contains_key(&bsz) {
+                let s = self.batched_tape(bsz, input, causal_chunk);
+                self.tape_cache.insert(bsz, s);
+            }
+            let cached = self.tape_cache.get(&bsz).expect("just inserted or already present");
+            self.gpu.submit(&[], cached);
+            return bsz;
+        }
+        let s = self.batched_tape(bsz, input, causal_chunk);
         self.gpu.submit(&[], &s);
-        b
+        bsz
     }
 
     /// One batched decode step that returns the **greedy next token per row**,
@@ -1595,7 +1676,7 @@ impl Engine {
     /// `argmax_row` reduces each row, so only `bsz` indices are read back
     /// instead of a `[bsz, vocab]` block.
     #[allow(clippy::too_many_arguments)]
-    fn run_batched_greedy(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<u32> {
+    fn run_batched_greedy(&mut self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32], causal_chunk: bool) -> Vec<u32> {
         assert!(
             bsz <= self.max_batch,
             "greedy decode is sized for max_batch={} rows, got {bsz}",
@@ -2697,6 +2778,60 @@ mod tests {
             assert_eq!(out[0], ref0, "kv_int8={kv_int8}: seq0 batched paged != reference");
             assert_eq!(out[1], ref1, "kv_int8={kv_int8}: seq1 batched paged != reference");
         }
+    }
+
+    /// M6.3: the served decode tape (uniform buffers + bind groups
+    /// `run_batched_steps` records per dispatch) is built once per `bsz`
+    /// bucket and REUSED for every later decode step at that same bucket,
+    /// instead of a fresh uniform + bind group per dispatch every step.
+    /// `crates/backend-{wgpu,vulkan,cpu}`'s `bind_groups` stat is exactly the
+    /// per-dispatch churn this targets - RED before the cache existed (a
+    /// second decode step at the same `bsz` always added the tape's full
+    /// dispatch count in fresh bind groups); GREEN after (it adds zero).
+    ///
+    /// Byte-identical decode correctness against an INDEPENDENT reference
+    /// (`crate::sample::generate_kv`, untouched by this change) is already
+    /// pinned by `batched_serving_matches_reference`/`warm_prefill_is_
+    /// identical_to_cold` just above/below - both decode several steps at a
+    /// stable `bsz`, so both already exercise a cache HIT, not just the
+    /// first MISS. This test pins the MECHANISM directly.
+    #[test]
+    fn decode_step_at_a_stable_bucket_reuses_the_cached_tapes_bind_groups() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 16, false, false);
+
+        let mut t0 = BlockTable::new();
+        let mut t1 = BlockTable::new();
+        let h0 = eng.prefill(&mut t0, &[1u32, 5, 3]);
+        let h1 = eng.prefill(&mut t1, &[7u32, 2, 4]);
+        let tok0 = Engine::argmax(&eng.logits(&h0));
+        let tok1 = Engine::argmax(&eng.logits(&h1));
+
+        // Step 1 at bsz=2: cache miss - builds and records the tape.
+        let bg_before = eng.device_stats().expect("every backend this crate targets reports bind_groups").bind_groups;
+        let out1 = eng.forward_batched(&mut [&mut t0, &mut t1], &[tok0, tok1]);
+        let bg_after_miss = eng.device_stats().unwrap().bind_groups;
+        assert!(bg_after_miss > bg_before, "the first decode step at a new bucket must still build (and record) a tape");
+
+        // `Self::logits` is a SEPARATE, uncached host-argmax dispatch (not
+        // this milestone's decode tape) - computing next-step tokens through
+        // it between the two decode steps must not count against the tape
+        // cache, so the cache assertion below is taken immediately before/
+        // after ONLY the second `forward_batched` call.
+        let d = cfg.d_model as usize;
+        let tok0b = Engine::argmax(&eng.logits(&out1[..d]));
+        let tok1b = Engine::argmax(&eng.logits(&out1[d..2 * d]));
+
+        // Step 2 at the SAME bsz=2 with DIFFERENT token/position inputs
+        // (positions advanced, new tokens): cache hit.
+        let bg_before_hit = eng.device_stats().unwrap().bind_groups;
+        let _out2 = eng.forward_batched(&mut [&mut t0, &mut t1], &[tok0b, tok1b]);
+        let bg_after_hit = eng.device_stats().unwrap().bind_groups;
+        assert_eq!(
+            bg_after_hit, bg_before_hit,
+            "a decode step at an already-cached bucket must create ZERO new bind groups"
+        );
     }
 
     /// THE prefix-cache invariant: a warm prefill (served from cached blocks)

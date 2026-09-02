@@ -31,10 +31,18 @@
 //! 2. **Hand-picked GEMM kernel names/`KernelVariant` matches are banned
 //!    inside the migrated forward-inference FUNCTION BODIES specifically**:
 //!    `qwen3::model::Qwen::{forward_steps,decode_steps}` and
-//!    `qwen3::serve::Engine::{run_batched_steps,head_steps}`. These four
+//!    `qwen3::serve::Engine::{batched_tape,head_steps}`. These four
 //!    functions are where the fp32-vs-int8 fork used to live; after B7 they
 //!    call `Ops::act`/`Ops::matmul` (model.rs) or `Self::quant_once`/
 //!    `Self::linear` (serve.rs) exclusively for the 7 per-layer linears.
+//!    (M6.3 split `serve.rs`'s per-layer dispatch out of the old
+//!    `run_batched_steps` into `batched_tape` - a pure tape builder the new
+//!    decode tape cache in `run_batched_submit` can record once per `bsz`
+//!    bucket and replay - so this check now targets `batched_tape`, the
+//!    function that actually owns the per-layer linear dispatch;
+//!    `run_batched_steps` itself is now a thin `write_batch_meta`/
+//!    `write_batch_input`/`batched_tape` wrapper with no kernel choice of
+//!    its own.)
 //!    Attention/RoPE/RMSNorm/paged-KV-cache/embedding kernel names
 //!    (`EMBED`, `ROPE_PAGED`, `ROPE_AT`, `KV_APPEND*`, `SCORES_*`,
 //!    `APPLY_*`, `ADD2`, `BIAS_*`, `SPLICE*`, ...) still appear directly in
@@ -204,9 +212,9 @@ fn migrated_forward_paths_never_hand_pick_a_gemm_kernel() {
     );
 
     let serve_src = read(SERVE_RS);
-    check(function_body(&serve_src, "run_batched_steps"), "qwen3::serve::Engine::run_batched_steps");
+    check(function_body(&serve_src, "batched_tape"), "qwen3::serve::Engine::batched_tape");
     check(function_body(&serve_src, "head_steps"), "qwen3::serve::Engine::head_steps");
-    for name in ["run_batched_steps", "head_steps"] {
+    for name in ["batched_tape", "head_steps"] {
         let body = function_body(&serve_src, name);
         assert!(body.contains("self.quant_once("), "no_kernel_names: {name} never calls `Self::quant_once` - did the migration get reverted?");
         assert!(body.contains("self.linear("), "no_kernel_names: {name} never calls `Self::linear`");
