@@ -233,8 +233,46 @@ review of this codebase assumed:
       brain-s3dit`: green, 0 failed. ltxv and gemma4 still need their own
       `&Tensors` → `&dyn TensorSource` migration (plus this same `quantize_
       from` wiring once migrated) - M7 stays open until those land.
-- [ ] M7: ltxv/gemma4 `&Tensors` → `&dyn TensorSource` (s3dit's slice is done
-      - see the M7 entry above).
+- [x] M7 (ltxv slice): `crates/ltxv/src/block.rs`'s `QLinear::quantize_host`
+      took `t: &Tensors` - the eager, wholly-materialized checkpoint map -
+      even for the int8 tier, so a GGUF-backed `Q8_0` tensor had to be
+      decoded to fp32 in full before this function ever saw it. Changed the
+      signature to `t: &dyn checkpoint::TensorSource`; `Tensors` already
+      implements `TensorSource` via `checkpoint::lib`'s blanket impl for
+      `HashMap<String, (Vec<usize>, Vec<f32>)>`, so every existing caller
+      (`QAttnWeights::quantize_host`, `QFfWeights::quantize_host`,
+      `QBlockWeights::quantize_host`/`quantize_host_stream`, all still typed
+      `&Tensors`) kept compiling unchanged - Rust unsize-coerces `&Tensors`
+      to `&dyn TensorSource` at the call site, no caller edits needed. Inside
+      the function, the `QTier::Int8` arm's hand-rolled `tget` (Tensors-only)
+      + `model::int8::quantize_weight(data, out_dim, in_dim)` pair became one
+      call to `model::int8::quantize_from(t, &weight_name, out_dim, in_dim)`,
+      which tries the zero-fp32 `Q8_0` byte repack first and only falls back
+      to the bounded fp32 route when the source can't serve one directly -
+      the same choice M4 wired into `qwen3`/`qwen35moe`/`wan` and the s3dit
+      slice above wired into `s3dit`, now reaching this crate too; a `None`
+      return panics with a clear message, matching `tget`'s own
+      panic-on-missing convention. `QTier::Int4` has no such shared fast
+      path (`model::int4` has nothing analogous to `quantize_from`), so it
+      keeps reading via `t.with_tensor(&weight_name, |data| model::int4::
+      quantize_weight_q4(data, out_dim, in_dim))` - the same choice M4 left
+      `wan::block::QLinear::upload`'s Int4 arm making. The bias read also
+      moved off `tget` (Tensors-only) to `t.with_tensor`, panicking if
+      `has_bias` is true but the tensor is absent (a static flag mismatching
+      the checkpoint is a real bug, not a normal absence). Grepped
+      `crates/ltxv/src/dit.rs` and `crates/ltxv/src/na_decoder.rs` (each
+      defines its own local `tget` over the same `Tensors` type) for the same
+      hand-rolled `with_tensor` + `quantize_weight`-by-hand shape and found
+      none - every `tget` call in both files is a plain fp32 norm/bias read,
+      no quantization involved. `make test -p brain-ltxv`: green, 0 failed
+      (47 test binaries; the quantization-relevant suites - `gguf_quant_real`,
+      `int8_compute` (including `real_q8_0_block0_int8_compute_matches_fp32`),
+      `int8_storage`, `dit_parity` (including `real_weight::
+      ltxv_real_dit_tiny_layers_matches_reference`), `na_decoder_parity` -
+      all pass). gemma4 still needs its own `&Tensors` → `&dyn TensorSource`
+      migration - M7 stays open until that lands too.
+- [ ] M7: gemma4 `&Tensors` → `&dyn TensorSource` (s3dit's and ltxv's slices
+      are done - see the M7 entries above).
 - [ ] M8: host relayout (`crates/gguf/src/kquant.rs`) for Q4_K/Q5_K/Q6_K/
       Q4_0/Q5_0/Q8_0 into brain's device K-quant layout. Gate: `assert_eq!`
       round trip against `deq_*`, no tolerance.

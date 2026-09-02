@@ -1582,14 +1582,27 @@ impl QLinear {
     /// GGUF-decoded fp32 in, packed int8/int4 bytes + scale out, no device
     /// touched - the CPU-only half of what one `QLinear` construction used to
     /// do in a single step. Split out so a caller that already has this
-    /// result cached can skip straight to [`Self::from_cached`].
-    fn quantize_host(t: &Tensors, prefix: &str, tier: QTier, out_dim: usize, in_dim: usize, has_bias: bool) -> CachedQLinear {
-        let data = tget(t, &format!("{prefix}.weight"));
+    /// result cached can skip straight to [`Self::from_cached`]. Takes any
+    /// `TensorSource`, not just an eager `Tensors` map, so a GGUF-backed
+    /// source can serve the int8 tier through `model::int8::quantize_from`'s
+    /// zero-fp32 `Q8_0` byte repack instead of first materializing the whole
+    /// checkpoint as fp32.
+    fn quantize_host(t: &dyn checkpoint::TensorSource, prefix: &str, tier: QTier, out_dim: usize, in_dim: usize, has_bias: bool) -> CachedQLinear {
+        let weight_name = format!("{prefix}.weight");
         let (packed, sw) = match tier {
-            QTier::Int8 => model::int8::quantize_weight(data, out_dim, in_dim),
-            QTier::Int4 => model::int4::quantize_weight_q4(data, out_dim, in_dim),
+            QTier::Int8 => model::int8::quantize_from(t, &weight_name, out_dim, in_dim).unwrap_or_else(|| panic!("ltxv dit: missing weight {weight_name}")),
+            QTier::Int4 => {
+                let mut out = None;
+                t.with_tensor(&weight_name, &mut |data| out = Some(model::int4::quantize_weight_q4(data, out_dim, in_dim)));
+                out.unwrap_or_else(|| panic!("ltxv dit: missing weight {weight_name}"))
+            }
         };
-        let b = has_bias.then(|| tget(t, &format!("{prefix}.bias")).to_vec());
+        let bias_name = format!("{prefix}.bias");
+        let b = has_bias.then(|| {
+            let mut out = None;
+            t.with_tensor(&bias_name, &mut |data| out = Some(data.to_vec()));
+            out.unwrap_or_else(|| panic!("ltxv dit: missing weight {bias_name}"))
+        });
         CachedQLinear { packed, sw, b }
     }
 
