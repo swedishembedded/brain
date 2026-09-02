@@ -65,6 +65,7 @@ const ATTN_SCORES_QK_KMASK: usize = 8;
 const ATTN_SOFTMAX_FULL: usize = 9;
 const ATTN_APPLY_FULL: usize = 10;
 const SWAP_AXES12_VEC: usize = 11;
+const SOFTMAX_ROWS: usize = 12;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -79,6 +80,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_softmax_full", kernels::ATTN_SOFTMAX_FULL),
     ("attn_apply_full", kernels::ATTN_APPLY_FULL),
     ("swap_axes12_vec", kernels::SWAP_AXES12_VEC),
+    ("softmax_rows", kernels::SOFTMAX_ROWS),
 ];
 
 /// RoPE base (theta) the reference hardcodes for sequence-attention rotation.
@@ -136,7 +138,7 @@ impl Timesfm3 {
     /// Load a model from EITHER a brain `.safetensors` container (see
     /// [`crate::import::import`]) or a raw fetched checkpoint directory
     /// (`brain pull google/timesfm-3.0-pytorch`'s own output - `config.json`
-    /// + `model.safetensors`, never converted). A directory is always the
+    /// plus `model.safetensors`, never converted). A directory is always the
     /// raw form and a brain container is always a single file - `import`'s
     /// own output convention - so that alone tells the two apart, the same
     /// way `kronos::import::load_decoder` accepts both without the caller
@@ -221,11 +223,21 @@ impl Timesfm3 {
 
     /// One attention sublayer's scores->softmax->apply, separate q/k/v
     /// buffers throughout (see module docs), `scale=1.0` always (folded into
-    /// `q` ahead of this call).
+    /// `q` ahead of this call). Softmax goes through `backend_api::select`'s
+    /// `Op::Softmax` (`block::softmax_variant`, the same seam `wan`/`ltxv`
+    /// adopted) instead of a fixed `attn_softmax_full` dispatch, so this
+    /// model gets the cooperative `softmax_rows` kernel wherever the device
+    /// supports workgroup reductions.
     fn attention(&self, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, kmask: &DeviceBuffer, ctx: &DeviceBuffer, bsz: usize, tcols: usize, causal: bool) -> Vec<gpu_core::Step> {
         let (h, hd, d) = (self.cfg.num_heads, self.cfg.head_dim, self.cfg.model_dims);
         let scores = self.gpu.storage((bsz * h * tcols * tcols) as u64);
         let probs = self.gpu.storage((bsz * h * tcols * tcols) as u64);
+        let (sk, st) = block::softmax_variant(&self.gpu, ATTN_SOFTMAX_FULL, Some(SOFTMAX_ROWS), (bsz * h * tcols) as u32, tcols as u32);
+        let softmax_step = if sk == SOFTMAX_ROWS {
+            self.gpu.step(sk, &[&scores, &probs], &[(bsz * h * tcols) as u32, tcols as u32], st)
+        } else {
+            self.gpu.step(sk, &[&scores, &probs], &[bsz as u32, h as u32, tcols as u32], st)
+        };
         vec![
             self.gpu.step(
                 ATTN_SCORES_QK_KMASK,
@@ -233,7 +245,7 @@ impl Timesfm3 {
                 &[bsz as u32, h as u32, tcols as u32, hd as u32, d as u32, causal as u32, f(1.0)],
                 (bsz * h * tcols * tcols) as u32,
             ),
-            self.gpu.step(ATTN_SOFTMAX_FULL, &[&scores, &probs], &[bsz as u32, h as u32, tcols as u32], (bsz * h * tcols) as u32),
+            softmax_step,
             self.gpu.step(ATTN_APPLY_FULL, &[&probs, v, ctx], &[bsz as u32, h as u32, tcols as u32, hd as u32, d as u32, d as u32], (bsz * h * tcols * hd) as u32),
         ]
     }
