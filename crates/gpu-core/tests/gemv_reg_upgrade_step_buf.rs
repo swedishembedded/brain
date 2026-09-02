@@ -16,6 +16,28 @@
 const KERNELS: &[(&str, &str)] = &[("matmul_gemv", kernels::MATMUL_GEMV)];
 const K_GEMV: usize = 0;
 
+/// The first three tests below all request the SAME `KERNELS` list, so
+/// `gpu_core::testgpu::dev` hands every one of them the identical pooled
+/// device/profile-accumulator - deliberately, to avoid recompiling the
+/// pipeline three times. But each one's own `reset_kernel_times` ->
+/// dispatch -> `kernel_times` bracket is device-WIDE mutable state with no
+/// synchronisation of its own, and `cargo test`'s default per-binary
+/// threading runs `#[test]` fns in this file concurrently - so one test's
+/// `reset_kernel_times` can wipe a SIBLING's not-yet-read accumulator, or a
+/// sibling's dispatch can land between this test's own reset and read.
+/// Found by direct reproduction (not theorised): this file's control test
+/// failed 100% of five back-to-back runs with EXACTLY the sibling's own
+/// kernel name showing up alongside the expected one
+/// (`["matmul_gemv", "matmul_gemv_reg#MREG=1"]` instead of
+/// `["matmul_gemv"]`), and reproduces identically on a clean tree with no
+/// other changes present - a pre-existing test-isolation gap, unconnected to
+/// whichever change happens to be under test when it is next hit. Same
+/// one-lock-per-file fix `device_churn.rs`/`device_sharing.rs`/
+/// `device_open.rs` already use for their own shared-device races, held for
+/// each test's whole reset-dispatch-read bracket rather than its whole body,
+/// since only that bracket touches the shared, order-sensitive state.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn fill(n: usize, seed: u64) -> Vec<f32> {
     let mut r = data::rng::Lcg::new(seed);
     r.vec_scaled(n, 1.0)
@@ -26,6 +48,7 @@ fn fill(n: usize, seed: u64) -> Vec<f32> {
 /// the bucket-ladder test below would not prove the NEW method did anything.
 #[test]
 fn step_buf_without_a_shape_hint_stays_on_the_registered_kernel() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !gpu.caps().workgroup_reductions {
         brain_testutil::skip_unavailable("matmul_gemv is not selectable without workgroup reductions");
@@ -56,6 +79,7 @@ fn step_buf_without_a_shape_hint_stays_on_the_registered_kernel() {
 /// as `step` already does (`gemv_reg_upgrade.rs`'s own ladder).
 #[test]
 fn step_buf_shaped_reaches_the_bucket_ladder() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !gpu.caps().workgroup_reductions {
         brain_testutil::skip_unavailable("matmul_gemv is not selectable without workgroup reductions");
@@ -88,6 +112,11 @@ fn step_buf_shaped_reaches_the_bucket_ladder() {
 /// `gemv_reg_upgrade.rs`.
 #[test]
 fn step_buf_shaped_result_is_byte_identical_to_step() {
+    // Doesn't read `kernel_times` itself, but shares the SAME pooled device
+    // (and therefore the same profile accumulator) as the two tests above -
+    // without this lock its own dispatches could land inside their
+    // reset-to-read window and contaminate it.
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !gpu.caps().workgroup_reductions {
         brain_testutil::skip_unavailable("matmul_gemv is not selectable without workgroup reductions");
