@@ -166,6 +166,16 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("argmax_part", kernels::ARGMAX_PART), // 85
     ("argmax_final", kernels::ARGMAX_FINAL), // 86
     ("topk_extract_step", kernels::TOPK_EXTRACT_STEP), // 87
+    // -- chunked (multi-token-per-dispatch) prefill tier -- see
+    // `Qwen35::run_prefill_chunk`. The two `paged_*_batched` kernels were
+    // already registered further down in `pipelines()` purely to satisfy
+    // `Ops::REQUIRED_KERNELS` ("compiled, never dispatched"); they are named
+    // here instead because this crate now genuinely dispatches them - a
+    // chunk's queries attending a flat per-sequence KV cache is exactly their
+    // degenerate one-block case (see `model::block::gqa_chunk_step`).
+    ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED), // 88
+    ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED), // 89
+    ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED), // 90
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -214,7 +224,10 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             )
             .unwrap(),
         );
-        v.push(("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED));
+        // The f32 `paged_decode_{scores,apply}_batched` themselves are in
+        // `STATIC_PIPELINES` (this crate dispatches them from its chunked
+        // prefill); only their bf16 storage-tier variants, which nothing here
+        // ever builds a `Weight` for, are appended by name only.
         v.push(
             kernels::template::dtype_variant(
                 "paged_decode_scores_batched",
@@ -224,7 +237,6 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             )
             .unwrap(),
         );
-        v.push(("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED));
         v.push(
             kernels::template::dtype_variant(
                 "paged_decode_apply_batched",
@@ -324,6 +336,9 @@ const RMSNORM_ROWS: usize = 84;
 const ARGMAX_PART: usize = 85;
 const ARGMAX_FINAL: usize = 86;
 const TOPK_EXTRACT_STEP: usize = 87;
+const DECODE_SOFTMAX_BATCHED: usize = 88;
+const PAGED_DECODE_SCORES_BATCHED: usize = 89;
+const PAGED_DECODE_APPLY_BATCHED: usize = 90;
 
 /// Two-stage argmax reduction width for [`Qwen35::head_argmax_dev`]/
 /// [`Qwen35::head_topk_dev`] - matches `qwen3::serve::Engine`'s own
@@ -497,6 +512,19 @@ fn gqa_decode_ids() -> GqaDecodeIds {
     GqaDecodeIds { kv_append: KV_APPEND, attn_decode_scores: ATTN_DECODE_SCORES, decode_softmax: DECODE_SOFTMAX, attn_decode_apply: ATTN_DECODE_APPLY }
 }
 
+/// [`model::block::gqa_chunk_step`]'s kernel ids - the CHUNKED sibling of
+/// [`gqa_decode_ids`], dispatched by [`Qwen35::layer_gqa_prefill_chunk`]:
+/// many query rows appended to and attended against the same flat per-layer
+/// KV cache in one dispatch triad.
+fn gqa_chunk_ids() -> model::block::GqaChunkIds {
+    model::block::GqaChunkIds {
+        splice: SPLICE,
+        scores_batched: PAGED_DECODE_SCORES_BATCHED,
+        softmax_batched: DECODE_SOFTMAX_BATCHED,
+        apply_batched: PAGED_DECODE_APPLY_BATCHED,
+    }
+}
+
 /// Everything [`Qwen35::layer_gdn_fwd`]'s training branch saves for
 /// [`Qwen35::backward`]'s GDN mixer arm. `internals` is the LoRA-agnostic
 /// mixer math's own saved state (`model::gdn_mixer`, shared with
@@ -506,6 +534,29 @@ fn gqa_decode_ids() -> GqaDecodeIds {
 struct GdnLayerActs {
     internals: model::gdn_mixer::GdnMixerActs,
     gated: DeviceBuffer,
+}
+
+/// What one CHUNKED-prefill round hands [`Qwen35::layer_gqa_fwd`] so its GQA
+/// layers attend the sequence's persistent KV cache instead of an isolated
+/// `[T,T]` causal block over the round alone. Every field is built ONCE per
+/// round by [`Qwen35::run_prefill_chunk`] and shared unchanged by every GQA
+/// layer in it (`kcache`/`vcache` excepted - those are per layer).
+struct GqaChunkCtx<'a> {
+    /// Absolute position of this round's FIRST token (`0` on round 1).
+    start: u32,
+    /// The per-sequence KV cache row capacity (`DecodeCaches::gqa_cap`).
+    cap: u32,
+    kcache: &'a DeviceBuffer,
+    vcache: &'a DeviceBuffer,
+    /// `[n]` u32 zeros - the degenerate block table a flat per-sequence cache
+    /// is, see `model::block::gqa_chunk_step`.
+    block_ids: DeviceBuffer,
+    /// `[n]` u32 with `seq_lens[i] == start+i+1`: this round's causal mask.
+    seq_lens: DeviceBuffer,
+    /// This round's own `[n, rotary_dim/2]` M-RoPE tables, for absolute
+    /// positions `start..start+n`.
+    cos: &'a DeviceBuffer,
+    sin: &'a DeviceBuffer,
 }
 
 /// Everything [`Qwen35::layer_gqa_fwd`]'s training branch saves for
@@ -1440,7 +1491,13 @@ impl Qwen35 {
 
     // ---- one Gated DeltaNet (Linear) layer --------------------------------
 
-    fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GdnLayerActs>) {
+    /// One Gated DeltaNet layer over `n` rows. `cont` is `None` for the
+    /// whole-sequence (training / `logits_all`) forward, where the sequence
+    /// starts fresh and `self.b`/`self.t`/`self.chunk` describe it; `Some` for
+    /// one round of a CHUNKED prefill ([`Self::run_prefill_chunk`]), where the
+    /// rows are one sequence's `n` next tokens continuing from a persistent
+    /// recurrent state and conv history - see `model::gdn_mixer::GdnStream`.
+    fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, cont: Option<model::gdn_mixer::GdnStream>) -> (DeviceBuffer, Option<GdnLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1484,11 +1541,14 @@ impl Qwen35 {
 
         // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA/dtype-
         // agnostic, shared with `crates/qwen35moe` (`model::gdn_mixer`).
-        let shape = model::gdn_mixer::GdnMixerShape {
-            gdn: GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
-            nkh: c.linear_num_key_heads,
-            conv_kernel: c.linear_conv_kernel_dim,
+        // A chunked round is ONE sequence's `n` rows, with its own chunk size
+        // (`n` is a round's length, unrelated to this instance's construction
+        // -time `t`); the whole-sequence forward keeps this instance's shape.
+        let gdn_shape = match cont {
+            None => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
+            Some(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
         };
+        let shape = model::gdn_mixer::GdnMixerShape { gdn: gdn_shape, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim };
         let weights = model::gdn_mixer::GdnMixerWeights {
             conv1d_weight: self.w(&p("conv1d.weight")),
             a_log: self.w(&p("A_log")),
@@ -1496,7 +1556,7 @@ impl Qwen35 {
             norm_weight: self.w(&p("norm.weight")),
             ones_khd: &self.ones_khd,
         };
-        let (gated, internals) = model::gdn_mixer::gdn_mixer_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train);
+        let (gated, internals) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, cont);
 
         // out_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
         // `gated` is a different activation from `xn1` above.
@@ -1520,7 +1580,7 @@ impl Qwen35 {
     /// name - `"blocks.{l}.self_attn"` for a normal layer, `"mtp.layers.0.
     /// self_attn"` for the MTP head's own full-attention sublayer -
     /// reusing this function unchanged, since the mechanism is identical.
-    fn layer_gqa_fwd(&self, prefix: &str, xn1: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<GqaLayerActs>) {
+    fn layer_gqa_fwd(&self, prefix: &str, xn1: &DeviceBuffer, n: u32, chunk: Option<&GqaChunkCtx>) -> (DeviceBuffer, Option<GqaLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1547,10 +1607,40 @@ impl Qwen35 {
         g.submit(&[], &s1);
 
         // split+qknorm+rope+attention+gating - LoRA/dtype-agnostic, shared
-        // with `crates/qwen35moe` (`model::gqa_mixer`).
+        // with `crates/qwen35moe` (`model::gqa_mixer`). A chunked-prefill
+        // round supplies its OWN M-RoPE table (its absolute positions, not
+        // `0..t`) and attends the persistent KV cache instead of an isolated
+        // `[T,T]` causal block - see `GqaChunkCtx`.
         let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2 };
-        let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos: &self.cos, sin: &self.sin };
-        let (ctx_gated, internals) = model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train);
+        let weights = model::gqa_mixer::GqaMixerWeights {
+            q_norm: self.w(&p("q_norm.weight")),
+            k_norm: self.w(&p("k_norm.weight")),
+            cos: chunk.map_or(&self.cos, |ch| ch.cos),
+            sin: chunk.map_or(&self.sin, |ch| ch.sin),
+        };
+        let (ctx_gated, internals) = match chunk {
+            None => model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
+            Some(ch) => (
+                model::gqa_mixer::gqa_mixer_chunk_fwd(
+                    g,
+                    &gqa_mixer_ids(),
+                    &gqa_chunk_ids(),
+                    &shape,
+                    &weights,
+                    &q_full,
+                    &k,
+                    &v,
+                    n,
+                    ch.start,
+                    ch.cap,
+                    ch.kcache,
+                    ch.vcache,
+                    &ch.block_ids,
+                    &ch.seq_lens,
+                ),
+                None,
+            ),
+        };
 
         // o_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
         // `ctx_gated` is a different activation from `xn1` above.
@@ -1658,7 +1748,7 @@ impl Qwen35 {
 
         let xn1 = g.storage((n * d) as u64);
         g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &ehp, self.w("mtp.layers.0.ln1.weight"), &xn1, d, n)]);
-        let (mixer_out, mixer_acts) = self.layer_gqa_fwd("mtp.layers.0.self_attn", &xn1, n);
+        let (mixer_out, mixer_acts) = self.layer_gqa_fwd("mtp.layers.0.self_attn", &xn1, n, None);
 
         let xmid = g.storage((n * d) as u64);
         g.submit(&[], &[g.step(ADD2, &[&ehp, &mixer_out, &xmid], &[n * d], n * d)]);
@@ -1810,11 +1900,11 @@ impl Qwen35 {
 
             let (mixer_out, mixer_acts) = match ty {
                 LayerType::Linear => {
-                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n);
+                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n, None);
                     (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
                 }
                 LayerType::Full => {
-                    let (o, a) = self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n);
+                    let (o, a) = self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n, None);
                     (o, a.map(MixerActs::Gqa))
                 }
             };
@@ -2296,6 +2386,181 @@ impl Qwen35 {
         } else {
             res
         }
+    }
+
+    /// **One ROUND of a chunked prefill**: `tokens.len()` consecutive prompt
+    /// tokens starting at absolute position `pos_start`, pushed through the
+    /// whole layer stack with ONE dispatch shape per layer instead of
+    /// [`Self::run_decode_step`]'s one-per-token. Returns the round's LAST
+    /// token's final-norm hidden state (`[d_model]`, unread) - the only row a
+    /// prefill's caller wants, and the row a following round or
+    /// [`Self::run_decode_step`] call continues from.
+    ///
+    /// **State contract - this is the whole point of the function.** `caches`
+    /// is left in EXACTLY the state a token-by-token replay of the same
+    /// `tokens` would have left it in:
+    /// * GQA layers: rows `pos_start..pos_start+n` of `gqa_kcache`/
+    ///   `gqa_vcache` hold this round's QK-normed, RoPE'd K/V, written by
+    ///   `model::block::gqa_chunk_step`'s bulk fill, and the round's queries
+    ///   attended rows `0..=pos_start+i` (everything earlier rounds cached,
+    ///   plus this round's own keys up to each query - the same causal set the
+    ///   per-token path sees).
+    /// * GDN layers: `gdn_state` holds `gdn_chunk_fwd`'s `final_state` for the
+    ///   round (seeded with the state the PREVIOUS round left, not zero), and
+    ///   `gdn_hist` the last `conv_kernel-1` rows of the round's own
+    ///   `in_proj_qkv` output - `gdn_causal_conv1d_step`'s own window, so the
+    ///   next single-token decode step continues seamlessly.
+    ///
+    /// so a caller may freely mix rounds and single-token steps on one
+    /// sequence. Gated by `tests/chunked_prefill.rs`.
+    ///
+    /// Whole-model only (`shard.embed && shard.head`): the cross-stage
+    /// `input_override` seam `run_decode_step` carries is `[d_model]`-shaped
+    /// (one row), which cannot express a round's `[n, d_model]` boundary. A
+    /// pipeline-parallel chunked prefill needs a widened seam first - see this
+    /// crate's `int8_gguf_resident`, which still replays per token.
+    pub(crate) fn run_prefill_chunk(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches) -> DeviceBuffer {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let n = tokens.len() as u32;
+        assert!(n > 0, "qwen35::run_prefill_chunk: empty chunk (no token to produce a hidden state from)");
+        assert!(
+            self.shard.embed && self.shard.head,
+            "qwen35::run_prefill_chunk is whole-model only (this shard has embed={}, head={}) - see this function's own doc",
+            self.shard.embed,
+            self.shard.head
+        );
+        assert!(
+            pos_start + n <= caches.gqa_cap,
+            "qwen35::run_prefill_chunk: chunk ends at position {} but the KV cache holds {} rows",
+            pos_start + n,
+            caches.gqa_cap
+        );
+        // `lora_fwd`'s scratch (`self.lora_a`/`lora_out`) is sized `b*t` rows
+        // at construction; a chunk wider than that would write past it.
+        assert!(
+            self.cfg.lora.is_none() || n <= self.b * self.t,
+            "qwen35::run_prefill_chunk: a LoRA build's adapter scratch holds {} rows, chunk is {n}",
+            self.b * self.t
+        );
+
+        let tok_buf = g.storage(n as u64);
+        g.write(&tok_buf, tokens);
+        let mut res = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, n], n * d)]);
+
+        // Built ONCE per round, shared by every GQA layer in it: the round's
+        // own M-RoPE table (absolute positions), its causal `seq_lens`, and
+        // the single-block table a flat per-sequence KV cache degenerates to.
+        let positions: Vec<[u32; 3]> = (0..n).map(|i| [pos_start + i, pos_start + i, pos_start + i]).collect();
+        let (cos, sin) = qwen3vl::mrope::mrope_tables(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta);
+        let cos = g.storage_init("qwen35.prefill_chunk.cos", &cos);
+        let sin = g.storage_init("qwen35.prefill_chunk.sin", &sin);
+        let block_ids = g.storage(n as u64);
+        let seq_lens = g.storage(n as u64);
+        g.write(&block_ids, &vec![0u32; n as usize]);
+        g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
+
+        let types = self.cfg.layer_types();
+        #[allow(clippy::needless_range_loop)]
+        for l in self.shard.start..self.shard.end {
+            let ty = types[l];
+            let xn1 = g.storage((n * d) as u64);
+            g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
+
+            let mixer_out = match ty {
+                LayerType::Linear => {
+                    let cont = model::gdn_mixer::GdnStream { state: &caches.gdn_state[l], hist: &caches.gdn_hist[l] };
+                    self.layer_gdn_fwd(l, &xn1, n, Some(cont)).0
+                }
+                LayerType::Full => {
+                    let ctx = GqaChunkCtx {
+                        start: pos_start,
+                        cap: caches.gqa_cap,
+                        kcache: &caches.gqa_kcache[l],
+                        vcache: &caches.gqa_vcache[l],
+                        block_ids: block_ids.clone(),
+                        seq_lens: seq_lens.clone(),
+                        cos: &cos,
+                        sin: &sin,
+                    };
+                    self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n, Some(&ctx)).0
+                }
+            };
+
+            let xmid = g.storage((n * d) as u64);
+            g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[n * d], n * d)]);
+
+            let xn2 = g.storage((n * d) as u64);
+            g.submit(&[], &[rms_step(g, &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n)]);
+
+            let (mlp_out, _) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, n);
+            let res_next = g.storage((n * d) as u64);
+            g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[n * d], n * d)]);
+            res = res_next;
+
+            // Per-layer flush, for the same measured reason `run_decode_step`
+            // flushes: `Gpu::submit` only appends to a pending list here, so
+            // without this the host records the whole round before the card
+            // starts any of it.
+            g.flush();
+        }
+
+        let xn_final = g.storage((n * d) as u64);
+        g.submit(&[], &[rms_step(g, &res, self.w("norm.weight"), &xn_final, d, n)]);
+        // Only the LAST row is ever wanted (this round's next-token
+        // prediction, or the seam into the next round).
+        let last = g.storage(d as u64);
+        g.submit(&[], &[g.step(CONCAT_SPLIT, &[&xn_final, &last], &[1, n * d, d, (n - 1) * d, 1, 1], d)]);
+        last
+    }
+
+    /// **Chunked prefill** of a whole prompt against THIS instance's own
+    /// per-sequence decode state - the multi-token-per-dispatch sibling of
+    /// calling [`Self::step`] once per prompt token, and the exact analogue of
+    /// how [`Self::step`] wraps [`Self::run_decode_step`].
+    ///
+    /// Consumes `tokens` in rounds of at most `max_chunk`, each round
+    /// continuing from the state the previous one left
+    /// ([`Self::run_prefill_chunk`]'s own contract), advances `decode_pos` by
+    /// the whole prompt length, and returns the LAST token's final-norm hidden
+    /// state. A following [`Self::step`] continues exactly as if the prompt
+    /// had been replayed one token at a time.
+    ///
+    /// `max_chunk` bounds the round length because attention scratch grows as
+    /// `chunk * n_heads * (pos + chunk)` - the one cost that does not shrink
+    /// with the dispatch count, and the reason this is CHUNKED rather than one
+    /// whole-prompt forward.
+    pub fn prefill_chunked(&self, tokens: &[u32], max_chunk: u32) -> Vec<f32> {
+        assert_eq!(self.b, 1, "qwen35::prefill_chunked requires b==1 (single sequence)");
+        assert!(!tokens.is_empty(), "qwen35::prefill_chunked: empty prompt");
+        assert!(max_chunk > 0, "qwen35::prefill_chunked: max_chunk must be > 0");
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+            panic!("qwen35::prefill_chunked: token {bad} exceeds vocab {}", self.cfg.vocab);
+        }
+        let mut pos = self.dec_pos.get();
+        assert!(
+            pos + tokens.len() as u32 <= self.dec_cap,
+            "qwen35::prefill_chunked: prompt ends at position {} but this instance's decode capacity is {}",
+            pos + tokens.len() as u32,
+            self.dec_cap
+        );
+        let caches = DecodeCaches {
+            gqa_kcache: &self.gqa_kcache,
+            gqa_vcache: &self.gqa_vcache,
+            gqa_cap: self.dec_cap,
+            gdn_state: &self.gdn_state,
+            gdn_hist: &self.gdn_hist,
+        };
+        let mut hidden = None;
+        for round in tokens.chunks(max_chunk as usize) {
+            hidden = Some(self.run_prefill_chunk(round, pos, &caches));
+            pos += round.len() as u32;
+        }
+        self.dec_pos.set(pos);
+        let hidden = hidden.expect("prefill_chunked: prompt is non-empty (asserted above)");
+        self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
 
     /// [`Self::run_decode_step`] staged to the HOST - the one call a
