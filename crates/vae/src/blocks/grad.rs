@@ -41,7 +41,10 @@ use std::collections::HashMap;
 // Offsets within `super::BWD_KERNELS`.
 const B_CONV_DX: usize = 0;
 const B_CONV_DW: usize = 1;
-const B_BIAS_GRAD: usize = 2;
+// Offset 2 ("bias_grad") stays REGISTERED in `super::BWD_KERNELS` - removing
+// an entry would shift every later `B_*` offset - but this file no longer
+// dispatches it: both call sites use `Rev::bias_grad`'s two-stage
+// `bias_grad_part`/`bias_grad_final` pair instead (M5.7).
 const B_SILU_BWD: usize = 3;
 const B_SCALE_CHAN: usize = 4;
 const B_GN_DX: usize = 5;
@@ -75,6 +78,8 @@ const B_XDQ: usize = 30;
 const B_XDK_ACC: usize = 31;
 const B_XDV_ACC: usize = 32;
 const B_LN_STATS: usize = 33;
+const B_BIAS_GRAD_PART: usize = 34;
+const B_BIAS_GRAD_FINAL: usize = 35;
 
 /// Where the caller placed [`super::BWD_KERNELS`] in its kernel set.
 #[derive(Clone, Copy)]
@@ -283,7 +288,7 @@ impl Trace {
                 // but `dy` is NCHW = feature-major. One `nchw_nlc` puts the
                 // channels last; the alternative would be a new NCHW bias
                 // reduction kernel, and this composition needs neither.
-                r.push(r.gpu.step(r.ids.k(B_BIAS_GRAD), &[&t, grads.g(b)], &[hw, *cout], *cout));
+                r.bias_grad(&t, grads.g(b), hw, *cout);
 
                 // dX (assigns) -> accumulate. Two paths:
                 //
@@ -451,8 +456,8 @@ impl Trace {
                 // `matmul_dw` Params: [m, k, n]; bufs [dy, x, dw] - ACCUMULATES.
                 r.push(r.gpu.step(r.ids.k(B_MATMUL_DW), &[&dy, x, grads.g(w)], &[*m, *k, *n], n * k));
                 if let Some(bn) = b {
-                    // `bias_grad` Params: [rows, n]; bufs [dy, db] - ACCUMULATES.
-                    r.push(r.gpu.step(r.ids.k(B_BIAS_GRAD), &[&dy, grads.g(bn)], &[*m, *n], *n));
+                    // Two-stage `bias_grad_part`/`bias_grad_final` - ACCUMULATES.
+                    r.bias_grad(&dy, grads.g(bn), *m, *n);
                 }
                 let dx = r.tmp((*m as u64) * (*k as u64));
                 // `matmul_dx` Params: [m, k, n, accumulate]; bufs [dy, w, dx].
@@ -674,5 +679,18 @@ impl Rev<'_> {
             }
         };
         self.steps.push(self.gpu.step(self.ids.k(B_AXPY), &[&dst, src], &[len as u32, f(s)], len as u32));
+    }
+    /// Bias gradient `dbias[n] += sum_m dy[m,n]`, via the two-stage
+    /// `bias_grad_part`/`bias_grad_final` pair (kernel-performance.md M5.7)
+    /// rather than `bias_grad`'s single-thread-per-column walk: `dy` MUST
+    /// already be `[m, n]` (feature-fastest) - the conv call site transposes
+    /// NCHW into this layout via `nchw_nlc` before calling here, exactly as it
+    /// did for the `bias_grad` dispatch this replaces.
+    fn bias_grad(&mut self, dy: &DeviceBuffer, dbias: &DeviceBuffer, m: u32, n: u32) {
+        let pp = [m, n, super::BIAS_GRAD_P];
+        let part = self.tmp((n * super::BIAS_GRAD_P) as u64);
+        self.steps.push(self.gpu.step(self.ids.k(B_BIAS_GRAD_PART), &[dy, &part], &pp, n * super::BIAS_GRAD_P));
+        self.steps.push(self.gpu.step(self.ids.k(B_BIAS_GRAD_FINAL), &[&part, dbias], &pp, n));
+        self.give((n * super::BIAS_GRAD_P) as u64, part);
     }
 }

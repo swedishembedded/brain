@@ -131,7 +131,7 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// cooperative twin anywhere in the tree — that is a documented perf gap,
 /// NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
-pub const BWD_KERNELS: [(&str, &str); 34] = [
+pub const BWD_KERNELS: [(&str, &str); 36] = [
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("bias_grad", kernels::BIAS_GRAD),
@@ -193,7 +193,22 @@ pub const BWD_KERNELS: [(&str, &str); 34] = [
     // name is what the CPU JIT rejects outright (`DuplicateDefinition`), so the
     // reverse reaches it through the caller-supplied [`XformerIds::mul`] slot -
     // the same arrangement `im2col_at` already uses via `super::K_IM2COL_AT`.
+    // The two-stage replacement for `bias_grad`, which is one lane per output
+    // feature walking every row serially - measured at 1.3% of the memory
+    // roof on a VQGAN training step (kernel-performance.md M5.7), the same
+    // occupancy pathology `gn_dsum_part`/`gn_dgb_part` above already fixed for
+    // GroupNorm's own per-channel reductions. APPENDED, so every existing
+    // `BwdIds::at(base)` offset stays valid.
+    ("bias_grad_part", kernels::BIAS_GRAD_PART),
+    ("bias_grad_final", kernels::BIAS_GRAD_FINAL),
 ];
+
+/// Row-chunks per column for the two-stage `bias_grad_part`/`bias_grad_final`
+/// pair - the same fixed, ungated split `GN_P` already uses for the identical
+/// barrier-free partial-reduction shape (`gn_dsum_part`/`gn_dgb_part`). No
+/// capability gate: neither stage uses `workgroupBarrier`, so `backend-cpu`
+/// runs the split unconditionally too.
+pub(crate) const BIAS_GRAD_P: u32 = 64;
 
 /// Workgroups the split-K weight gradient aims to launch.
 ///
