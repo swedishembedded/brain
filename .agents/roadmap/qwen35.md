@@ -1901,6 +1901,144 @@ stays INT8 in every measurement above); `qwen35moe` adoption of
 let it share this work without a third copy is itself still open); the
 offline `gguf_import.rs` converter path.
 
+### M25 - chunked prefill: 41 -> 873 prefill tok/s, and the end of the per-token replay
+
+**Status: done.** `crates/qwen35/src/serve.rs::Engine::prefill` replayed a
+prompt ONE TOKEN AT A TIME - a full `Qwen35::run_decode_step` (its ~40
+dispatches per layer, its `m = 1` GEMV against every weight in the model) per
+prompt token. That module's own doc named it as deliberately deferred. It is
+no longer deferred: the prompt is now consumed in bounded rounds of
+`MAX_PREFILL_TOKENS = 256`, one dispatch shape per layer per round.
+
+**The three seams, and what each of them actually needed.**
+
+1. **GDN recurrent state - already threadable, never threaded.**
+   `model::gdn::gdn_chunk_fwd` has taken explicit `initial_state`/`final_state`
+   parameters all along; `gdn_mixer_fwd` simply allocated both fresh, so every
+   whole-sequence forward started from zero. That is right for training and
+   wrong for round 2 of a prefill. `gdn_mixer_stream_fwd` (new, and
+   `gdn_mixer_fwd` is now a `cont: None` wrapper around it, so no existing
+   call site moved) binds the caller's persistent buffer as `initial_state` -
+   safe, because `gdn_chunk_fwd` reads it exactly once, in its own seeding
+   copy - and copies `final_state` back after the loop rather than aliasing
+   the two across a dispatch.
+2. **GDN conv history - NOT something `gdn_chunk_fwd` returns.** This was the
+   part worth tracing carefully. The whole-sequence path expresses causality
+   as `conv1d_fwd`'s left `pad = K-1`, which IS the zero history and cannot
+   express "continue from these K-1 real values". And the tail is not in any
+   of the mixer's outputs: it is the last `K-1` rows of the round's own
+   `mixed_qkv`, the conv's INPUT, before the conv or the SiLU. So the streaming
+   arm prepends the history rows to the round's rows (`concat2` on a flat
+   token-major concatenation), convolves the `K-1+t` extended input with
+   `pad = 0` (exactly `t` outputs, each with real left context), and writes the
+   extended input's own last `K-1` rows back as the next round's history -
+   which is correct even when `t < K-1`, where some of those rows are still
+   the inherited history. The layout conversion is two `nchw_nlc`/`nlc_nchw`
+   dispatches: `gdn_causal_conv1d_step`'s `hist` is channel-major `[C, K-1]`,
+   oldest tap first, and the round's rows are token-major.
+3. **GQA attention against a growing cache - no new kernel needed.**
+   `model::block::gqa_chunk_step` (new) is `gqa_decode_step` generalised from
+   one query row to `n`: bulk-fill rows `start..start+n` of the flat per-layer
+   cache, then attend each row against `0..=start+i`. Two findings made this
+   cheap. First, `kv_cache_fill`'s single `kv_append` dispatch only reaches
+   rows `0..n` (that kernel writes at `row*width`, so widening `width` to the
+   chunk pins the destination to a multiple of the chunk length) - the general
+   form is `splice.wgsl`, `dst[base+i] = src[i]`, which is exactly a bulk fill
+   at an arbitrary row offset (`kv_cache_fill_at`). Second, causality here is
+   per-row (`seq_lens[i] = start+i+1`), not a `j <= i` index comparison, which
+   is precisely the contract `paged_decode_scores_batched` /
+   `decode_softmax_batched` / `paged_decode_apply_batched` already implement -
+   and two of those three were ALREADY compiled into this crate's pipeline
+   list to satisfy `Ops::REQUIRED_KERNELS` ("compiled, never dispatched"). A
+   flat `[cap, kv_dim]` cache is the degenerate one-block case of a paged pool
+   (`block_size = cap`, one block, `max_bt = 1`), so their slot arithmetic
+   reduces to plain flat addressing with no indirection. qwen3's block-table
+   machinery was deliberately NOT ported - this engine has one physical block
+   per sequence and needs none of it.
+
+**What did NOT fit: the fused flash prefill.** `paged_flash_prefill.wgsl` is
+the right long-term kernel (no materialised score slab at all) and its host
+tape is the same one built here, but its shared-memory tiles hardcode
+`HD = 128` and this model's `head_dim` is 256. So the triad stays, and with it
+a `[chunk, n_heads, pos+chunk]` scores/probs scratch - about 100 MB at a
+4096-token context and about 1.2 GB at 48K with `chunk = 256`. That is the
+remaining barrier to a genuinely 48K-token prefill, and it is a kernel-side
+fix (a 256-wide tile variant, or a `LANES`/`CH` retune), not a host-side one.
+
+**Measured, on synthetic weights at the real PER-LAYER shape.** The real 27B
+cannot be measured through `serve::Engine` on this box at all: that engine
+builds a plain FP32 `Qwen35`, and the real 64-layer FP32 model is ~108 GB
+against two 24 GB P40s (this is also why the fp32 `lm_head` alone, 5.09 GB,
+is past `max_buffer_size` - the reason the REAL-weight path is
+`int8_gguf_resident`, which is not this milestone's target). So
+`crates/qwen35/src/bin/qwen35_prefill_profile.rs` prices both replay shapes on
+the same instance at the real per-layer dims (`d_model 5120`, `ff 17408`, 24
+query / 4 KV heads of 256, 48 GDN value heads of 128, `full_attention_interval
+4` so the layer-type mix is exact) with the layer count and vocabulary scaled
+to fit. Single P40, fp32, 512-token prompt, chunk 256:
+
+| layers | per-token replay | chunked prefill | speedup |
+|---|---|---|---|
+| 4 | 41.2 tok/s (24.3 ms/tok) | **873.3 tok/s** (1.15 ms/tok) | **21.2x** |
+| 8 | 21.2 tok/s (47.2 ms/tok) | **433.4 tok/s** (2.31 ms/tok) | **20.5x** |
+
+Both paths halve with depth, so the ratio is depth-independent across the
+range measured. At 2048 prompt tokens (4 layers) it is 40.2 -> 759.5 tok/s,
+18.9x - the chunked path loses a little as the attention it must recompute per
+round grows, which is the `MAX_PREFILL_TOKENS` scratch story above showing up
+in time as well as in bytes.
+
+`MAX_PREFILL_TOKENS = 256` is measured, not guessed (512-token prompt, 4
+layers): chunk 64 -> 501 tok/s, 128 -> 838, 256 -> 873, 512 -> 847. The curve
+is flat past 256 and the scratch keeps growing, so 256 is where it stops
+paying.
+
+**Correctness.** Two new gates, both spec-level, and the bounds in both are
+measured against deliberately broken implementations rather than picked:
+
+* `crates/qwen35/tests/chunked_prefill.rs` -
+  `chunked_prefill_matches_token_by_token_replay_{cpu,default_backend}` and
+  `whole_prompt_single_chunk_matches_token_by_token_replay`. A 14-token prompt
+  at chunk 4/8/16, then three further single-token `step` calls on each path:
+  the chunked prefill must leave EXACTLY the decode state the per-token replay
+  leaves, so the continuation matches. Correct: 0 (CPU JIT) / 3.7e-9 (wgpu).
+  Broken: KV rows filled at offset 0 -> 6.2e-3; the per-query causal mask
+  flattened -> 3.1e-3; chunk-RELATIVE instead of absolute M-RoPE positions ->
+  1.4e-3. The bound is 1e-5. Note the third one: `decode_step.rs`'s own 2e-3
+  logits bound would have PASSED a wrong-RoPE-position prefill, which is why
+  this file does not reuse that number.
+* `crates/model/tests/gdn_mixer_stream.rs` -
+  `threading_the_stream_state_across_rounds_matches_the_whole_sequence_forward`.
+  Rounds of 3+5 (with different internal chunk sizes) against one 8-row
+  forward, comparing the mixer's own output. Correct: 2.0e-7. Dropped
+  recurrent state: 0.34. Dropped conv history: 0.64. Bound 1e-5.
+
+  This second gate exists because the first one CANNOT carry the GDN state
+  claim. Measured: on random weights, a chunked prefill that carried no
+  recurrent state at all between rounds moved `qwen35`'s final hidden state by
+  5e-7 - the residual stream and the final RMSNorm dilute the mixer's
+  contribution that far - and passed a 2e-3 end-to-end bound comfortably. Two
+  further fixture facts came out of chasing that: the shipped
+  `init::init_weights` (reference init: `dt_bias = 1`, `A ~ U(0,16)`) gives a
+  per-token state decay of about `e^-10`, i.e. no memory to test at all, so
+  the fixture retunes the gate to a ~0.98/token decay; and a config with a
+  SINGLE GQA layer cannot see a round's internal masking at all (a round's
+  non-final rows feed nothing that outlives the round), so the fixture widens
+  `tiny()` to eight layers to get a second one.
+
+Every pre-existing qwen35 and model gate stays green, including
+`decode_step.rs` (the per-token tape is untouched) and `serve.rs`.
+
+**Not done here, deliberately.** `int8_gguf_resident.rs` still replays per
+token. It is the REAL-weight path, so it is where this speedup is ultimately
+worth the most, but it is multi-stage (pipeline-parallel across two cards) and
+its cross-stage seam - `run_decode_step`'s `input_override` - is `[d_model]`,
+one row. A chunked resident needs that seam widened to `[n, d_model]` (host
+staging of a whole round's boundary residual, or a device-to-device copy), plus
+its own per-stage `DecodeCaches` rounds. `run_prefill_chunk` asserts
+`shard.embed && shard.head` today precisely so that gap is loud rather than
+silent.
+
 ### M27 (DONE): YaRN long-context RoPE scaling (`max_position_embeddings: 262144` was a dead config field, now wired)
 
 `Qwen35Config::max_position_embeddings` was read nowhere at runtime before
