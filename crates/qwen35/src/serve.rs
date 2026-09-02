@@ -76,35 +76,49 @@
 //! `Qwen35::run_decode_step` per token against this sequence's own
 //! `DecodeCaches` (the pool slice for its physical block id, and its
 //! `GdnSlot`). This is NOT `qwen3::serve::Engine`'s chunked, multi-token-per-
-//! dispatch prefill - a per-token loop is the explicitly-sanctioned
-//! correctness-first shape for this pass. The performance gap (one
-//! submit+readback per PROMPT token, instead of one batched whole-prompt
-//! forward) is real and is intentionally left for later work, exactly the
-//! way `crate::sample::generate_kv`'s own doc already names its identical
-//! per-token-prefill gap.
+//! dispatch prefill - a per-token DISPATCH loop is the explicitly-sanctioned
+//! correctness-first shape for this pass, and that performance gap (one
+//! submit per prompt token instead of one batched whole-prompt forward) is
+//! real and is intentionally left for later work, exactly the way
+//! `crate::sample::generate_kv`'s own doc already names its identical
+//! per-token-prefill gap. What M3.4 DID fix: every token used to also pay a
+//! full host `gpu.read` of the hidden state, discarded on every iteration but
+//! the last - that per-token READ is gone (the device buffer is chained
+//! token-to-token; the loop reads back exactly once, after it ends).
 //!
 //! # `forward_batched_greedy`/`_window`/`forward_batched_topk`
 //!
 //! Given the "one truly-active sequence at a time" scope, these are thin
 //! loops over the (in practice length-1, but handled generally)
 //! `tables`/`inputs` slices, each iteration calling the same per-token decode
-//! step and sampling greedily/top-k ON THE HOST from the returned logits. No
-//! real multi-sequence GPU-batched dispatch is built - if the `Scheduler`
-//! has several requests running concurrently, each iteration still serves
-//! them with N independent sequential dispatches, not one batched one.
+//! step. No real multi-sequence GPU-batched dispatch is built - if the
+//! `Scheduler` has several requests running concurrently, each iteration
+//! still serves them with N independent sequential dispatches, not one
+//! batched one. What M3.4 DID fix: each iteration's own head projection +
+//! sampling pick stays entirely on the device (`Qwen35::head_argmax_dev`/
+//! `head_topk_dev`) - the `[d_model]` hidden state and the `[vocab]` logits
+//! block are never shipped to the host, only the final token id / top-k
+//! pairs are.
 //!
 //! # Deliberately deferred (not built in this pass)
 //!
 //! - **Prefix-cache reuse**: none. [`Engine::reclaim_prefix`] is a no-op
 //!   returning 0, [`Engine::prefix_stats`] always reports `(0, 0, 0)`.
-//! - **Chunked / batched prefill**: prompts are replayed one token at a time.
-//! - **Multi-sequence GPU batching**: `forward_batched_*` loop sequentially.
+//! - **Chunked / batched prefill**: prompts are replayed one token at a time
+//!   (one dispatch per token - see "`prefill`" above for what M3.4 did and
+//!   did not change here).
+//! - **Multi-sequence GPU batching**: `forward_batched_*` loop sequentially,
+//!   one sequence's dispatch at a time.
 //! - **int8/int4 paged KV, weight quantization, speculative decode**: not
 //!   implemented; this `Engine` only ever builds a plain fp32 `Qwen35`.
 //! - **Multi-GPU layer sharding**: single GPU only.
 //! - **Vision / MTP**: text-only, matching `Qwen35::step`'s own scope.
-//! - **On-device decode window / top-K extraction**: [`Engine::decode_window_capacity`]
-//!   and [`Engine::topk_capacity`] are small fixed host-side constants.
+//! - **On-device decode WINDOW**: [`Engine::decode_window_capacity`] is a
+//!   small fixed host-side constant (`DECODE_WINDOW_CAPACITY == 1`) - each
+//!   window step is still its own host round trip, unlike `qwen3::serve::
+//!   Engine`'s multi-step device schedule. Top-K EXTRACTION itself (picking
+//!   the best `k` of one step's own logits) IS on-device as of M3.4 - see
+//!   above.
 
 use std::collections::HashMap;
 
@@ -199,10 +213,6 @@ pub struct Engine {
     /// parameter; populated in `Engine::prefill`, removed in
     /// `Engine::release_table`.
     gdn_slots: HashMap<u32, GdnSlot>,
-    /// `[vocab, d_model]` host head weight - reused for EVERY decode step,
-    /// not just admission, since this pass never builds an on-device
-    /// greedy/top-K head at all.
-    head: Vec<f32>,
 }
 
 impl Engine {
@@ -253,11 +263,7 @@ impl Engine {
             gqa_k.push(kl);
             gqa_v.push(vl);
         }
-        let head = weights
-            .get(cfg.head_weight())
-            .cloned()
-            .unwrap_or_else(|| weights.get("tok.weight").cloned().expect("head weight"));
-        Engine { model, alloc: BlockAllocator::new(max_concurrent, max_seq_len), block_size: max_seq_len, gqa_k, gqa_v, gdn_slots: HashMap::new(), head }
+        Engine { model, alloc: BlockAllocator::new(max_concurrent, max_seq_len), block_size: max_seq_len, gqa_k, gqa_v, gdn_slots: HashMap::new() }
     }
 
     /// This sequence's `DecodeCaches` view: the GQA pool slice for its
@@ -278,21 +284,60 @@ impl Engine {
     /// `DecodeCaches`. `offset == pos`: since `block_size == max_seq_len`
     /// there is exactly one block per sequence, so the position WITHIN that
     /// block already IS the absolute decode position.
-    fn decode_one(&mut self, table: &mut BlockTable, input: u32) -> Vec<f32> {
+    ///
+    /// Returns the DEVICE buffer, unread: [`Engine::forward_batched_greedy`]/
+    /// [`Engine::forward_batched_topk`] chain it straight into
+    /// `Qwen35::head_argmax_dev`/`head_topk_dev` without ever shipping the
+    /// `[d_model]` hidden state to the host, matching qwen3's own device-head
+    /// contract (M3.2/M3.4).
+    fn decode_one(&mut self, table: &mut BlockTable, input: u32) -> DeviceBuffer {
         let (_block, offset) = table.append(&mut self.alloc).expect("qwen35::serve::Engine: KV pool exhausted mid-decode");
         let phys = table.blocks()[0];
-        let hidden = {
-            let caches = self.caches_for(phys);
-            self.model.run_decode_step(input, offset, &caches, None)
-        };
-        self.model.gpu.read(&hidden, self.model.cfg.d_model as usize)
+        let caches = self.caches_for(phys);
+        self.model.run_decode_step(input, offset, &caches, None)
     }
 
-    /// `logits = hidden @ head^T` on the host - see [`Engine::head`]'s doc
-    /// for why this is the SAME path used for both admission and steady-state
-    /// decode in this pass (no on-device head at all).
+    /// `logits = hidden @ head^T`, projected on the DEVICE via
+    /// `Qwen35::head_logits_dev` (the same resident head weight
+    /// `run_forward`'s own head epilogue uses - no separate host copy) - only
+    /// the `[vocab]` result comes back to the host. Required by
+    /// `PagedDecoder::logits`'s trait contract (a caller that genuinely wants
+    /// the raw vector); admission and steady-state decode never call this -
+    /// see [`Engine::admit_greedy`]/[`Engine::admit_topk`] and
+    /// [`Engine::forward_batched_greedy`]/[`Engine::forward_batched_topk`],
+    /// which stay on the device end to end instead.
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
-        model::hostmath::matvec_par(&self.head, hidden, self.model.cfg.vocab as usize, self.model.cfg.d_model as usize)
+        let d = self.model.cfg.d_model as usize;
+        assert_eq!(hidden.len(), d, "qwen35::serve::Engine::logits: hidden must be exactly one row of {d} floats, got {}", hidden.len());
+        let x = self.model.gpu.storage_init("qwen35.serve.logits.hidden", hidden);
+        let logits = self.model.head_logits_dev(&x);
+        self.model.gpu.read(&logits, self.model.cfg.vocab as usize)
+    }
+
+    /// Admission's greedy pick, entirely on the device: uploads `hidden`
+    /// (ONE row) and reuses [`crate::model::Qwen35::head_argmax_dev`] - the
+    /// same head matmul + argmax reduction [`Engine::forward_batched_greedy`]
+    /// dispatches - so admission never ships a `[vocab]` block to the host
+    /// either. Mirrors `qwen3::serve::Engine::admit_greedy` (M3.2).
+    fn admit_greedy(&self, hidden: &[f32]) -> u32 {
+        let d = self.model.cfg.d_model as usize;
+        assert_eq!(hidden.len(), d, "admit_greedy: hidden must be exactly one row of {d} floats, got {}", hidden.len());
+        let x = self.model.gpu.storage_init("qwen35.serve.admit.hidden", hidden);
+        self.model.head_argmax_dev(&x)
+    }
+
+    /// Admission's non-greedy candidates, entirely on the device: uploads
+    /// `hidden` (ONE row) and reuses
+    /// [`crate::model::Qwen35::head_topk_dev`] - the same top-k extraction
+    /// [`Engine::forward_batched_topk`] uses - so admission never sorts a
+    /// `[vocab]` vector on the host either. Mirrors `qwen3::serve::Engine::
+    /// admit_topk` (M3.2).
+    fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
+        let d = self.model.cfg.d_model as usize;
+        assert_eq!(hidden.len(), d, "admit_topk: hidden must be exactly one row of {d} floats, got {}", hidden.len());
+        let k = k.clamp(1, self.topk_capacity()) as u32;
+        let x = self.model.gpu.storage_init("qwen35.serve.admit.hidden", hidden);
+        self.model.head_topk_dev(&x, k)
     }
 
     pub fn free_blocks(&self) -> u32 {
@@ -379,8 +424,19 @@ impl Engine {
     }
 
     /// Prefill a fresh prompt into `table`, one token at a time - see module
-    /// doc "`prefill`" for why this is a per-token loop rather than a
-    /// batched/chunked forward.
+    /// doc "`prefill`" for why this is a per-token DISPATCH loop rather than
+    /// a batched/chunked forward (that part is still deliberately deferred).
+    ///
+    /// M3.4: every token but the last used to pay a full `gpu.read(&h, d)` -
+    /// a host-synchronising readback the caller immediately overwrote on the
+    /// next iteration, since only the FINAL token's hidden state is ever
+    /// wanted. `run_decode_step` is now chained token-to-token as a device
+    /// buffer with no readback in the loop at all; the one real readback
+    /// happens exactly once, after the loop, off the last token's hidden
+    /// state - the same "submit every step, read back once" shape `qwen3::
+    /// serve::Engine::prefill`'s own chunk loop uses (M3.1), ported here at
+    /// token granularity instead of chunk granularity since this engine has
+    /// no multi-token batched dispatch to chunk over.
     pub fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         assert!(table.is_empty(), "prefill expects a fresh sequence");
         assert!(!prompt.is_empty(), "qwen35::serve::Engine::prefill: empty prompt (no token to produce a hidden state from)");
@@ -402,26 +458,27 @@ impl Engine {
         self.gdn_slots.entry(phys).or_insert_with(|| GdnSlot::new(&self.model.gpu, &self.model.cfg));
 
         let d = self.model.cfg.d_model as usize;
-        let mut hidden = vec![0.0f32; d];
+        let mut h: Option<DeviceBuffer> = None;
         for (i, &tok) in prompt.iter().enumerate() {
             let pos = i as u32;
-            let h = {
-                let caches = self.caches_for(phys);
-                self.model.run_decode_step(tok, pos, &caches, None)
-            };
-            hidden = self.model.gpu.read(&h, d);
+            let caches = self.caches_for(phys);
+            h = Some(self.model.run_decode_step(tok, pos, &caches, None));
         }
-        hidden
+        let h = h.expect("prefill: prompt is non-empty (asserted above), so the loop ran at least once");
+        self.model.gpu.read(&h, d)
     }
 
-    /// One greedy decode step per (table, input) pair, sequentially - see
-    /// module doc for why this is a loop, not a batched GPU dispatch.
+    /// One greedy decode step per (table, input) pair, sequentially (see
+    /// module doc for why this is a loop, not a batched GPU dispatch) - but
+    /// each step's head projection + argmax stays entirely on the device
+    /// (M3.4): `decode_one`'s hidden state is never read back to the host,
+    /// and `Qwen35::head_argmax_dev` reads back only the winning index.
     pub fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         assert_eq!(tables.len(), inputs.len(), "forward_batched_greedy: tables/inputs length mismatch");
         let mut out = Vec::with_capacity(tables.len());
         for (t, &inp) in tables.iter_mut().zip(inputs) {
             let hidden = self.decode_one(t, inp);
-            out.push(argmax(&self.logits(&hidden)));
+            out.push(self.model.head_argmax_dev(&hidden));
         }
         out
     }
@@ -445,36 +502,20 @@ impl Engine {
     }
 
     /// One decode step per (table, input) pair, returning each row's
-    /// top-`k` (token id, logit) candidates - sorted host-side from the
-    /// FULL logits vector (no on-device top-K extraction in this pass), `k`
-    /// clamped to this engine's own capacity.
+    /// top-`k` (token id, logit) candidates - extracted entirely on the
+    /// device via `Qwen35::head_topk_dev` (M3.4: no `[vocab]` logits vector
+    /// is ever shipped to the host to sort), `k` clamped to this engine's own
+    /// capacity.
     pub fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
-        let k = k.clamp(1, self.topk_capacity());
+        let k = k.clamp(1, self.topk_capacity()) as u32;
         assert_eq!(tables.len(), inputs.len(), "forward_batched_topk: tables/inputs length mismatch");
         let mut out = Vec::with_capacity(tables.len());
         for (t, &inp) in tables.iter_mut().zip(inputs) {
             let hidden = self.decode_one(t, inp);
-            let logits = self.logits(&hidden);
-            let mut cand: Vec<(u32, f32)> = logits.iter().enumerate().map(|(i, &v)| (i as u32, v)).collect();
-            cand.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            cand.truncate(k);
-            out.push(cand);
+            out.push(self.model.head_topk_dev(&hidden, k));
         }
         out
     }
-}
-
-/// Greedy argmax - pure host math, no `Engine` dependency.
-fn argmax(s: &[f32]) -> u32 {
-    let mut bi = 0usize;
-    let mut bv = f32::NEG_INFINITY;
-    for (i, &v) in s.iter().enumerate() {
-        if v > bv {
-            bv = v;
-            bi = i;
-        }
-    }
-    bi as u32
 }
 
 impl PagedDecoder for Engine {
@@ -507,6 +548,12 @@ impl PagedDecoder for Engine {
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         Engine::logits(self, hidden)
+    }
+    fn admit_greedy(&self, hidden: &[f32]) -> u32 {
+        Engine::admit_greedy(self, hidden)
+    }
+    fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
+        Engine::admit_topk(self, hidden, k)
     }
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         Engine::forward_batched_greedy(self, tables, inputs)
