@@ -134,6 +134,52 @@ pub trait PagedDecoder {
     /// The largest `k` [`forward_batched_topk`](Self::forward_batched_topk) will
     /// honor — the decoder's on-device top-K extraction scratch capacity.
     fn topk_capacity(&self) -> usize;
+
+    // ---- host-RAM KV offload (optional; see `crate::kv_offload`) ----
+    //
+    // Every method below has a default that reports "this decoder cannot
+    // offload", so an existing `PagedDecoder` implementation keeps compiling
+    // and behaving exactly as it did. A decoder that CAN offload implements
+    // `crate::kv_offload::KvOffload` over its own pool buffers and forwards
+    // these to it - see `qwen3::serve::Engine`.
+
+    /// Host bytes available to hold demoted sequences' KV. `0` (the default)
+    /// disables preemption-by-swap in [`Scheduler`] entirely.
+    fn kv_offload_bytes(&self) -> u64 {
+        0
+    }
+
+    /// Copy this sequence's whole KV to host RAM and free its device blocks,
+    /// returning how many blocks the pool got back.
+    fn demote_sequence(&mut self, key: u64, table: &mut BlockTable) -> Result<u32, crate::kv_offload::KvOffloadError> {
+        let _ = (key, table);
+        Err(crate::kv_offload::KvOffloadError::Unsupported)
+    }
+
+    /// Bring a demoted sequence back onto the device, exact bytes, resuming at
+    /// the length it was demoted at.
+    fn promote_sequence(&mut self, key: u64) -> Result<BlockTable, crate::kv_offload::KvOffloadError> {
+        let _ = key;
+        Err(crate::kv_offload::KvOffloadError::Unsupported)
+    }
+
+    /// Device blocks a demoted sequence needs to come back, `None` if it is not
+    /// demoted - what the scheduler checks before attempting a promote.
+    fn offloaded_blocks(&self, key: u64) -> Option<u32> {
+        let _ = key;
+        None
+    }
+
+    /// Drop a demoted sequence's host KV without restoring it (cancellation).
+    fn discard_offloaded(&mut self, key: u64) -> bool {
+        let _ = key;
+        false
+    }
+
+    /// Swap accounting, for a server or benchmark to report.
+    fn offload_stats(&self) -> crate::kv_offload::OffloadStats {
+        crate::kv_offload::OffloadStats::default()
+    }
 }
 
 /// Temperature / top-k / top-p sampling parameters for one sequence.
@@ -351,6 +397,11 @@ pub struct StepReport {
     pub rejected: Vec<(u64, RejectReason)>,
     /// The same `(id, tokens)` pairs [`Scheduler::step`] returns.
     pub completed: Vec<(u64, Vec<u32>)>,
+    /// Requests preempted this iteration: their KV went to host RAM and their
+    /// device blocks back to the pool (see [`crate::kv_offload`]).
+    pub demoted: Vec<u64>,
+    /// Requests whose KV came back from host RAM this iteration.
+    pub promoted: Vec<u64>,
 }
 
 /// A sequence the scheduler is actively decoding.
@@ -422,6 +473,16 @@ pub struct Scheduler<D: PagedDecoder> {
     /// a burst across several; the budget always admits at least one waiting
     /// request per iteration, so nothing can starve.
     prefill_budget: u32,
+    /// Admitted sequences whose KV currently lives in host RAM
+    /// ([`crate::kv_offload`]), waiting for device blocks to come back. FIFO:
+    /// the sequence demoted longest ago resumes first.
+    ///
+    /// These are NOT waiting requests - they have been prefilled, they have
+    /// produced tokens, and their whole cache exists; only their device blocks
+    /// were taken away. That is why admission stops while any of them is
+    /// outstanding: preferring new work over work already in flight would let
+    /// a busy queue starve a preempted sequence for as long as it stays busy.
+    swapped: VecDeque<Running>,
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
@@ -441,6 +502,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             started: HashMap::new(),
             pending_rejects: Vec::new(),
             prefill_budget,
+            swapped: VecDeque::new(),
         }
     }
 
@@ -503,6 +565,13 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.waiting.remove(pos);
             return Some(Vec::new()); // never admitted, so nothing was produced
         }
+        if let Some(pos) = self.swapped.iter().position(|r| r.id == id) {
+            // Demoted: its blocks are already back in the pool, its bytes are
+            // in host RAM. Dropping the host record is the whole reclaim.
+            let r = self.swapped.remove(pos).expect("position just found it");
+            self.dec.discard_offloaded(id);
+            return Some(r.generated);
+        }
         let pos = self.running.iter().position(|r| r.id == id)?;
         let mut r = self.running.remove(pos);
         self.dec.release_table(&mut r.table);
@@ -514,13 +583,49 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.running.len()
     }
 
+    /// Requests admitted but currently preempted, their KV held in host RAM
+    /// (see [`crate::kv_offload`]). They resume - exact bytes, same length -
+    /// as soon as device blocks are available.
+    pub fn swapped_len(&self) -> usize {
+        self.swapped.len()
+    }
+
+    /// Swap accounting - see [`PagedDecoder::offload_stats`].
+    pub fn offload_stats(&self) -> crate::kv_offload::OffloadStats {
+        self.dec.offload_stats()
+    }
+
+    /// Consume the scheduler and hand the decoder back, releasing every
+    /// sequence it still holds (running blocks to the pool, preempted KV out
+    /// of host RAM) so the decoder comes back with nothing leaked.
+    ///
+    /// The seam a caller needs to reconfigure a live engine between workloads
+    /// - `Scheduler` owns its decoder, and rebuilding one to change a policy
+    /// knob would mean reloading the weights.
+    pub fn into_decoder(mut self) -> D {
+        for r in &mut self.running {
+            self.dec.release_table(&mut r.table);
+        }
+        for r in &self.swapped {
+            self.dec.discard_offloaded(r.id);
+        }
+        self.dec
+    }
+
     /// All tokens generated so far for a still-running sequence (`None` if
     /// `id` is unknown, queued, or already reaped) — the seam a streaming
     /// caller uses to emit the NEW suffix each iteration without waiting for
     /// the sequence to finish (`step`/`step_report` only return a completed
     /// sequence's full token list, not a running one's partial progress).
     pub fn tokens_of(&self, id: u64) -> Option<&[u32]> {
-        self.running.iter().find(|r| r.id == id).map(|r| r.generated.as_slice())
+        // Demoted sequences are included: preemption is invisible to a caller
+        // streaming a response, so its progress must stay readable while its
+        // KV sits in host RAM.
+        self.running
+            .iter()
+            .chain(self.swapped.iter())
+            .find(|r| r.id == id)
+            .map(|r| r.generated.as_slice())
     }
 
     /// Requests admitted but not yet started.
@@ -528,9 +633,9 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.waiting.len()
     }
 
-    /// True while any request is waiting or running.
+    /// True while any request is waiting, running, or preempted to host RAM.
     pub fn pending(&self) -> bool {
-        !self.waiting.is_empty() || !self.running.is_empty()
+        !self.waiting.is_empty() || !self.running.is_empty() || !self.swapped.is_empty()
     }
 
 
@@ -609,13 +714,123 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.step_inner(&mut sink)
     }
 
+    /// Bring preempted sequences back onto the device, oldest demotion first,
+    /// while the pool can hold them and the batch has room. A promote that
+    /// cannot fit yet leaves the sequence demoted and stops the loop - the
+    /// queue is in demotion order, so letting a later (smaller) sequence jump
+    /// ahead of a stuck one is how a long sequence gets starved.
+    fn resume_swapped(&mut self, report: &mut StepReport) {
+        while !self.swapped.is_empty() && self.running.len() < self.max_running {
+            let id = self.swapped.front().expect("non-empty").id;
+            // Its own blocks back, PLUS what the sequences already decoding
+            // need to append this iteration, plus one for its own next token.
+            // Promoting on the bare restore cost alone would hand the pool
+            // straight back to `ensure_decode_room`, which would preempt
+            // something (possibly this very sequence) again - two transfers
+            // for no token.
+            //
+            // With NOTHING running there is no such trade to make, and the
+            // slack is dropped: a sequence whose KV nearly fills the pool must
+            // still come back, or a queue that emptied around it would spin
+            // forever refusing to restore the one thing left to do.
+            let slack = if self.running.is_empty() { 0 } else { self.blocks_for_next_token() + 1 };
+            let need = self.dec.offloaded_blocks(id).unwrap_or(0) + slack;
+            if self.dec.free_blocks() < need {
+                // Cached prefix blocks are reclaimable capacity; a sequence
+                // that already exists outranks the prefix cache exactly as
+                // admission does.
+                self.dec.reclaim_prefix(need - self.dec.free_blocks());
+                if self.dec.free_blocks() < need {
+                    break;
+                }
+            }
+            let mut r = self.swapped.pop_front().expect("non-empty");
+            match self.dec.promote_sequence(r.id) {
+                Ok(table) => {
+                    r.table = table;
+                    report.promoted.push(r.id);
+                    self.running.push(r);
+                }
+                Err(crate::kv_offload::KvOffloadError::DevicePoolExhausted { .. }) => {
+                    // Still no room (the estimate above raced the pool): put it
+                    // back at the head and try again next iteration.
+                    self.swapped.push_front(r);
+                    break;
+                }
+                Err(_) => {
+                    // The host record is gone or the decoder cannot offload at
+                    // all: neither is retryable, and looping on it would hang
+                    // the scheduler. Finish the sequence with what it produced.
+                    r.done = true;
+                    self.running.push(r);
+                }
+            }
+        }
+    }
+
+    /// Device blocks the running batch needs to append one more token each.
+    fn blocks_for_next_token(&self) -> u32 {
+        self.running
+            .iter()
+            .filter(|r| !r.done)
+            .map(|r| self.dec.blocks_for(r.table.len() + 1).saturating_sub(r.table.blocks().len() as u32))
+            .sum()
+    }
+
+    /// Preempt until the pool can back one more token for every active
+    /// sequence, or until nothing more can be preempted.
+    ///
+    /// The last active sequence is never demoted: it has nothing to yield to,
+    /// and swapping it out could only be undone by swapping it back in.
+    /// Without host offload (`kv_offload_bytes() == 0`, every decoder that has
+    /// not adopted it) this reduces to the prefix reclaim that was already
+    /// here, so behaviour is unchanged.
+    fn ensure_decode_room(&mut self, report: &mut StepReport) {
+        let mut need = self.blocks_for_next_token();
+        if self.dec.free_blocks() >= need {
+            return;
+        }
+        self.dec.reclaim_prefix(need - self.dec.free_blocks());
+        while self.dec.free_blocks() < need {
+            if self.running.iter().filter(|r| !r.done).count() <= 1 {
+                return;
+            }
+            // Never re-demote a sequence promoted in THIS iteration: it is
+            // the newest entry in `running`, so the plain "newest first"
+            // choice would pick it, pay both transfers and produce no token -
+            // pure thrash. Anything else, newest first.
+            let Some(pos) = self.running.iter().rposition(|r| !r.done && !report.promoted.contains(&r.id)) else { return };
+            let mut r = self.running.remove(pos);
+            match self.dec.demote_sequence(r.id, &mut r.table) {
+                Ok(_) => {
+                    report.demoted.push(r.id);
+                    self.swapped.push_back(r);
+                }
+                Err(_) => {
+                    // No offload, or no host budget left: put it back and stop.
+                    // The decode below runs exactly as it did before this
+                    // existed.
+                    self.running.insert(pos, r);
+                    return;
+                }
+            }
+            need = self.blocks_for_next_token();
+        }
+    }
+
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
+        // 0. Resume preempted sequences before anything else touches the pool:
+        //    work already in flight outranks work still queued.
+        self.resume_swapped(report);
+
         // 1. Admit while there's batch room, enough free blocks for the prompt,
         //    and prefill budget left this iteration (head-of-line guard: decode
-        //    must run between bursts of admissions).
+        //    must run between bursts of admissions). Nothing new is admitted
+        //    while a preempted sequence is still waiting for its blocks - see
+        //    `Scheduler::swapped`.
         let mut budget_left = self.prefill_budget;
         let mut admitted_this_iter = 0u32;
-        while self.running.len() < self.max_running {
+        while self.swapped.is_empty() && self.running.len() < self.max_running {
             // Drop anything that can never fit, whatever the pool does — it
             // would otherwise block the queue forever (or, before the capacity
             // check, corrupt the block table).
@@ -681,7 +896,17 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.running.push(r);
         }
 
-        // 2. Batched decode over every running (not-done) sequence. When
+        // 2. Make room for this iteration's decode. Admission only checks that
+        //    a PROMPT fits; a sequence that has been decoding for a while can
+        //    still walk the pool dry mid-batch, and `BlockTable::append` has
+        //    nowhere to go when it does. Preempt (swap out) the most recently
+        //    admitted sequences until every remaining one can append its next
+        //    token - the classic "newest first" victim choice, so the sequences
+        //    closest to finishing (and to releasing their blocks) are the ones
+        //    that keep running.
+        self.ensure_decode_room(report);
+
+        // 3. Batched decode over every running (not-done) sequence. When
         //    nothing is waiting to be admitted, decode a WINDOW of tokens per
         //    host round-trip (A4): the readback-per-token becomes a readback
         //    per window, at the cost of up to window-1 wasted decode steps for
@@ -771,7 +996,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
         }
 
-        // 3. Reap completed sequences, returning their blocks to the pool.
+        // 4. Reap completed sequences, returning their blocks to the pool.
         let mut completed = Vec::new();
         let mut i = 0;
         while i < self.running.len() {

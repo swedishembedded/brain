@@ -74,6 +74,11 @@ pub enum KvOffloadError {
     /// The device pool has no room to bring this sequence back yet. The
     /// record is left in the host pool; the caller retries when blocks free.
     DevicePoolExhausted { need_blocks: u32, free_blocks: u32 },
+    /// This decoder does not implement host-RAM offload at all - the default
+    /// answer from [`crate::serve::PagedDecoder`]'s optional offload hooks, so
+    /// a scheduler can tell "cannot" from "could not right now" and stop
+    /// asking.
+    Unsupported,
 }
 
 impl std::fmt::Display for KvOffloadError {
@@ -86,6 +91,7 @@ impl std::fmt::Display for KvOffloadError {
             KvOffloadError::DevicePoolExhausted { need_blocks, free_blocks } => {
                 write!(f, "device KV pool exhausted: needs {need_blocks} blocks, {free_blocks} free")
             }
+            KvOffloadError::Unsupported => write!(f, "this decoder has no host-RAM KV offload"),
         }
     }
 }
@@ -154,6 +160,13 @@ impl HostKvPool {
     }
     pub fn capacity_bytes(&self) -> u64 {
         self.capacity_bytes
+    }
+    /// Resize the budget. Lowering it below what is already resident does not
+    /// evict anything (a demoted sequence's bytes are the only copy there is):
+    /// it simply refuses further demotes until enough sequences have been
+    /// promoted back.
+    pub fn set_capacity_bytes(&mut self, bytes: u64) {
+        self.capacity_bytes = bytes;
     }
     pub fn bytes_resident(&self) -> u64 {
         self.bytes
