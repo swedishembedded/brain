@@ -1719,6 +1719,188 @@ A legitimate 1e-6 reduction-order change flipped it, so it was removed with a
 comment pointing at the reference-comparing gates that catch broken plumbing
 properly, and at the condition for restoring it.
 
+### M23 (DONE): the root cause of the RED output gate, found and fixed - GGUF-stored GDN value heads are GROUP-MAJOR, brain wants SUB-MAJOR
+
+**Status: `the_two_card_stack_continues_a_factual_prompt_correctly` is GREEN.**
+`"The capital city of France is"` -> `" Paris. Paris is the largest city in"`
+on the real two-card INT8 resident, at 7.57 tok/s (M22's throughput, unaffected).
+
+M21 left this RED with the candidate space narrowed to two conventions the
+file's own statistics could not distinguish: "the GDN value-head grouping
+(`repeat_interleave` vs tile) and an `ssm_alpha`/`ssm_beta` swap". This
+milestone ran the decisive experiment M21 named but could not: a direct,
+per-tensor diff against the Qwen3.8-27B **FP8 safetensors** checkpoint - the
+KNOWN-GOOD side, since the same INT8 tier over 64 real layers already
+produced `" Paris."` from FP8 (M16) - refetched once disk space and a working
+HF login made that possible (`crates/qwen35/tests/gguf_vs_fp8_weights_real.rs`,
+a permanent diagnostic; `crates/qwen35/tests/gguf_vs_fp8_permutation_search.rs`,
+the exploratory harness that found and confirmed the exact transform).
+
+**The finding.** llama.cpp's GGUF conversion stores EVERY GDN leaf indexed by
+VALUE HEAD - `ssm_a` (`A_log`), `ssm_dt.bias` (`dt_bias`),
+`ssm_conv1d.weight`'s v-channels, `attn_qkv.weight`'s v-rows,
+`ssm_alpha.weight`/`ssm_beta.weight`'s rows, `attn_gate.weight`'s rows,
+`ssm_out.weight`'s columns - in GROUP-MAJOR order (`index = group*num_k_heads
++ key_head`, i.e. a key head's `group` repeats sit `num_k_heads` apart,
+strided), not brain's (and the reference HF model's) SUB-MAJOR order
+(`index = key_head*group + repeat`, i.e. a key head's repeats are adjacent).
+Every head's own decay/bias/projection was individually plausible - finite,
+in-range, nothing an output-shape or NaN check could catch - just applied to
+the WRONG head's key/value state: grammatically fluent, factually wrong
+output that degrades with context length, exactly the M21 symptom.
+
+**Why the earlier oracle comparison could not see this.** `gguf_reference_
+parity_real.rs`'s independent CPython reader (`tools/goldens/
+qwen35_gguf_reference_forward.py`) agreed bit-for-bit with brain's own
+(pre-fix) reading - M21 read that agreement as "the loader is proven
+correct". It wasn't: the oracle's own `kh = j // group` line paired
+repeat_interleave-ordered K/Q with the SAME un-degrouped, group-major A/dt_bias
+brain read - two independent implementations sharing the identical wrong
+assumption, not independent evidence. Two SEPARATE, real bugs compounded
+into one symptom, and both had to be found and fixed to close it (see below).
+
+**The decisive signal.** Three of the EIGHT affected leaves - `A_log`,
+`dt_bias`, `ssm_conv1d.weight` - are small enough that llama.cpp stores them
+unquantized (no Q8_0 rounding noise on top), so the comparison against FP8
+was exact: cosine **1.0000000**, not merely close, for the single group-major
+-> sub-major transpose tried. The other five (`in_proj_qkv`/`in_proj_a`/
+`in_proj_b`/`in_proj_z`/`out_proj` - Q8_0-quantized, real rounding noise on
+top) resolved to cosine 0.9996-1.0000 under the exact same transform - the
+first attempt at these landed on a backwards divmod and looked unresolved,
+corrected once the small leaves' exact match proved the transform itself was
+right and the bug was in the harness, not the hypothesis.
+
+**The fix, and a fix to the fix.** `crate::int8_gguf_resident::GdnHeadOrder`
+(wrapped by the existing `SsmALogFix` streaming source - name kept, scope
+widened): one `src_head(h)` formula, applied at three granularities -
+`degroup_heads` for the two flat `[num_v_heads]` vectors, `degroup_rows` for
+row-block leaves (an optional q/k prefix `conv1d.weight`/`in_proj_qkv.weight`
+carry, `in_proj_z.weight` does not, and `in_proj_a.weight`/`in_proj_b.weight`
+are one-scalar-per-head - `head_dim=1` - not `linear_value_head_dim`-wide
+blocks), `degroup_cols` for `out_proj.weight`'s column-block axis. The FIRST
+version of this fix shipped with `in_proj_a`/`in_proj_b` never wired into the
+dispatcher at all - `degroup_rows` hardcoded `self.head_dim` (128) with no way
+to express these two leaves' `head_dim=1` shape, so they were silently left
+group-major. The real end-to-end gate passed anyway (this specific 8-token
+greedy continuation was not sensitive enough to catch it), but a re-run of
+the M23.1 diff at MORE layers (0/1/3/31/32, as more of the FP8 checkpoint
+downloaded) caught it directly: `in_proj_a`/`in_proj_b` still showed low
+cosine at layer 1 where every other leaf was clean. `degroup_rows` gained a
+`head_dim` parameter instead of always reading `self.head_dim`, both leaves
+were wired in, and the diff re-run now shows cosine 1.0000 for both at every
+tested layer. All four permutation methods are gated by hand-computed
+synthetic unit tests (`degroup_heads_matches_the_hand_computed_transpose`,
+`degroup_rows_at_zero_offset_matches_the_hand_computed_block_permutation`,
+`degroup_rows_leaves_the_prefix_before_row_offset_untouched`,
+`degroup_rows_at_head_dim_one_matches_the_hand_computed_row_permutation`,
+`degroup_cols_matches_the_hand_computed_block_permutation_per_row`), not only
+against real weights - the lesson: a real-weight gate that happens to pass is
+not proof every affected leaf was found; the synthetic tests and the
+per-tensor diff are what actually enumerate them. `crate::gguf_import::
+classify` (the offline converter) is **not yet updated** - the resident's
+streaming path was the priority since it is what actually serves the real
+checkpoint; the offline path is deprecated (`brain import-gguf` forwards to
+it) and cannot even run a full conversion of the real file on this box
+(~108 GB, M20's own note) - tracked as open work, not silently skipped.
+
+**Confirms M21's own "along-the-sequence" finding was partly this bug.**
+`gguf_i8_vs_fp32_real.rs` (int8 vs fp32, both from the SAME now-fixed GGUF
+bytes) now holds a stable cosine 0.997-0.999 across all 8 positions at 8 real
+layers - no degradation trend at all, where M21 measured a real collapse
+(0.9888 at position 0 dropping to 0.7988 by position 2, at 32 layers). The
+32-layer re-run to confirm the same holds at that depth hit an unrelated
+VRAM ceiling on this box (fp32 + int8 built simultaneously at 32 layers
+does not fit one 24 GiB P40) - open, not contradicted.
+
+**Open follow-up, honestly RED.** `gguf_reference_parity_real.rs`'s pinned
+digest was regenerated against the fixed CPython oracle, but the oracle
+still disagrees with brain's Rust computation by a shrinking-but-real margin
+(pos 0: rms 0.6952 in Rust, the pinned `EXPECT` differs) - very likely one
+more missed or misordered call site in the ~450-line reference script, not a
+defect in the two independently-passing checks (real correct generation;
+the direct per-tensor diff above). Left honestly failing rather than pinned
+to whatever the script currently prints. See that test file's own doc for
+the full accounting.
+
+Verified real-time on this box (2x P40, 48 cores, 184 GiB RAM):
+`the_two_card_stack_continues_a_factual_prompt_correctly` completed in 69.6 s
+warm-cache (cold load ~260 s the first run after this fix landed, consistent
+with M21's own cold-load figures - the fix changes correctness, not load
+time or throughput).
+
+### M24 (DONE): the Q4 (W4A8) weight tier, wired into dense qwen35 - one card, correct output, ~1.4-1.7x M22's throughput
+
+M22 left decode device-bound at 81% of the P40 DRAM roof with one lever
+left: stream fewer weight bytes. Brain already had a parity-gated INT4
+(W4A8) tier (`model::ops::Weight::Q4`, `model::int4::quantize_weight_q4`,
+four q4 kernels) that qwen35 registered but could never select - `Qwen35::
+new_impl_on` took `i8: bool`, which cannot express a third tier.
+
+**Phase 0 (blocking measurement, done first).** An earlier, un-templated
+benchmark found `matmul_q4_gemv_reg` losing to the plain `matmul_q4_gemv` at
+m=1..16 - the same occupancy pathology `matmul_i8_gemv_reg` was built to
+fix, appearing to recur for Q4. Re-measured at qwen35's OWN real decode
+shapes with the correct per-`m` `MREG`-bucketed build
+(`crates/model/tests/matmul_q4_speed_bench.rs::
+gemv_vs_gemv_reg_at_qwen35_decode_shapes`): `_reg` won at every one of the
+five shapes, 1.55-1.88x. Wired into `gpu_core::upgrade`'s transparent seam,
+gated by a fresh bit-identity + integer-oracle test
+(`crates/gpu-core/tests/q4_gemv_reg_upgrade.rs`) mirroring the I8 row's own.
+
+**The wiring.** `TierPolicy` (`model::ops`) - a per-leaf substring-matched
+`Dtype`, generalizing the single `Dtype` `qwen3::Qwen::new_shard_dt` takes -
+replaces the `i8: bool`. `Qwen35::new_impl_on`'s signature widened; every
+existing public constructor (`new_i8`, `new_i8_shard`, `new_on_i8`, ...)
+kept as a one-line alias over the new `new_shard_dt`/`new_on_dt` - zero
+external call-site breakage, confirmed by the full existing suite staying
+green throughout. The per-layer upload loop now runs off
+`Qwen35Config::layer_leaves`, the SAME table `layer_weight_bytes` folds for
+its cost estimate - the byte formula and the uploader can no longer drift
+the way `layer_i8_bytes` once did (lesson #68). `int8_gguf_resident.rs`
+threads the policy through placement and a new `BRAIN_QWEN35_GGUF_TIER` env
+var; `qwen35_decode_profile` reads it and stamps it into the baseline
+artifact's `target` field.
+
+**Real numbers, this box, this checkpoint (2x P40, cap 512, real prompt):**
+
+| Tier | Cards | Resident bytes | tok/s (decode) | vs M22 I8 baseline |
+|---|---|---|---|---|
+| I8 (M22 baseline) | 2 | 27.05 GiB | 7.44-7.57 | 1.00x |
+| Uniform Q4 | **1** | 15.71 GiB | 10.96 (`qwen35_decode_profile`, 16 steps) / 12.46 (real `generate` call, 8 steps) | **1.47-1.65x** |
+| Policy C (Q4 MLP, F32 GDN gates) | **1** | 15.79 GiB | 10.89 / 12.44 | **1.46-1.65x** |
+
+Both real-`generate` numbers come from
+`crates/qwen35/tests/gguf_resident_real.rs::
+the_q4_tier_continues_the_same_factual_prompt_on_one_card`, which ALSO
+checks output correctness: both policies produce the byte-identical
+`" Paris. Paris is the largest city in"` the I8 tier does. Policy C - the
+recommended default, holding the two GDN state-sensitive gate projections
+(`in_proj_a`/`in_proj_b`, ~94 MB total) at F32 - costs 0.6% of uniform Q4's
+speed for a real quality hedge; both were measured rather than assumed
+necessary, and both currently produce identical text at `max_new=8`, greedy.
+
+The single-card fit is a standing arithmetic gate, not a one-off measurement:
+`int8_gguf_resident::tests::a_q4_mlp_tier_with_gdn_gates_held_at_f32_fits_
+one_24gb_card` and its uniform-Q4 sibling both assert `plan_by_capacity`
+returns exactly one stage, the same way `the_real_model_needs_two_24gb_
+cards_and_fits_them` pins I8's two-card requirement.
+
+**What this unlocks, not yet built:** MTP self-speculative decode (asserted
+whole-shard-only today - `cfg.mtp` requires `shard.is_whole`, which a 2-card
+split can never satisfy but a 1-card Q4 build now could; M17 measured a
+1.333x pass-count reduction on top, which would compose multiplicatively),
+and a second concurrent sequence on the freed card (bandwidth-bound decode
+makes a second sequence nearly free per-token). Both real milestones, not
+attempted here - see `.agents/roadmap/qwen35.md`'s own "Not yet done" for
+the four concrete prerequisites MTP-on-this-path needs.
+
+**Not yet done from the original M24 plan:** a Q4 `lm_head` (saves ~0.6 GB,
+needs a `quantize_q4_rows` sibling to `stream::quantize_i8_rows` - the head
+stays INT8 in every measurement above); `qwen35moe` adoption of
+`TierPolicy` (the GdnSlot/DecodeCaches hoist into `crates/model` that would
+let it share this work without a third copy is itself still open); the
+offline `gguf_import.rs` converter path.
+
 ## Not yet done
 
 
@@ -1741,13 +1923,17 @@ properly, and at the condition for restoring it.
   validated against weights that are not here, so the test is left as-is and
   the gap recorded instead.
 
-Otherwise nothing - all milestones (M0-M20) are complete. Remaining scope is
-the recorded gaps below, none of which are achievable on the ORIGINAL
-development machine (no discrete GPU, 18 GiB usable RAM) this ledger was
-written against, plus M14's/M15's/M16's/M17's/M18's/M19's own "not done"
-items just above. M20 was validated on a different box (2x Tesla P40, 48 AVX2
-cores, 184 GiB RAM) - see its own section for what that box could and could
-not do.
+M0-M20 are complete; M21's real-checkpoint output-correctness gate was RED
+from M21 through the start of M23 and is now GREEN - see M23's own section
+above for the fix and M24's for the Q4 (W4A8) tier work that followed it.
+`gguf_reference_parity_real.rs`'s CPython oracle re-derivation is still
+honestly RED, tracked as M23 follow-up (see that test file's own doc).
+Otherwise, remaining scope is the recorded gaps below, none of which are
+achievable on the ORIGINAL development machine (no discrete GPU, 18 GiB
+usable RAM) this ledger was written against, plus M14's/M15's/M16's/M17's/
+M18's/M19's own "not done" items just above. M20 was validated on a
+different box (2x Tesla P40, 48 AVX2 cores, 184 GiB RAM) - see its own
+section for what that box could and could not do.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 
