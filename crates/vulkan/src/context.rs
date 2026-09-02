@@ -179,15 +179,41 @@ pub struct VkContext {
     /// exactly this shape — several live handles onto one `ctx`, each with its
     /// own command-stream STATE but the SAME underlying queue/pool — so every
     /// call site that touches `queue` or `command_pool` must hold this lock
-    /// for its whole allocate-record-submit-wait-free sequence. Confirmed load-
+    /// for its whole allocate/reset-record-submit sequence. Confirmed load-
     /// bearing, not theoretical: omitting it reproduced a real
     /// `ERROR_DEVICE_LOST` on P40 hardware within seconds of 8 threads sharing
     /// one device (`crates/gpu-core/tests/device_sharing.rs`'s
-    /// `concurrent_shared_handles_do_not_deadlock`). GPU *execution* stays
-    /// exactly as serial as before this lock existed (every submit here is
-    /// already synchronous submit+fence-wait, never pipelined), so this only
-    /// serializes the HOST-side race, not real device throughput.
+    /// `concurrent_shared_handles_do_not_deadlock`).
+    ///
+    /// **No longer implies a synchronous fence wait.** This lock used to be
+    /// held across the WHOLE submit+fence-wait+free sequence, which is what
+    /// made every submit here synchronous and un-pipelined regardless of this
+    /// lock's own purpose (host-race prevention). `backend-vulkan`'s
+    /// `VulkanBackend::flush_async` (M6.2) now releases this lock immediately
+    /// after `vkQueueSubmit` returns, signals [`Self::timeline`] instead of a
+    /// one-shot `VkFence`, and only calls [`Self::timeline_wait`] - outside
+    /// this lock, since a semaphore wait touches neither `queue` nor
+    /// `command_pool` - when a caller actually needs the result (`read`) or
+    /// when a reused command-buffer slot must be proven idle before it is
+    /// re-recorded. GPU execution order was always strictly FIFO per queue
+    /// (Vulkan's own submission-order guarantee, unrelated to this lock); what
+    /// changes is that the HOST no longer blocks between back-to-back
+    /// `submit()`+`flush()` cycles that never read the result in between.
     pub queue_lock: std::sync::Mutex<()>,
+    /// Timeline semaphore backing asynchronous submission (`backend-vulkan`'s
+    /// N-submissions-in-flight scheme, M6.2). `None` when the device does not
+    /// report the `timelineSemaphore` feature (defensive fallback only - every
+    /// driver this workspace has actually run on, including this box's P40 at
+    /// Vulkan 1.3, reports it; Vulkan 1.2's own conformance requirements
+    /// mandate it). Monotonically increasing: a submission signals
+    /// [`Self::timeline_next`]'s returned value, and [`Self::timeline_wait`]
+    /// blocks until the semaphore's counter reaches a given value.
+    timeline: Option<vk::Semaphore>,
+    /// Next value a submission through [`Self::timeline`] should signal.
+    /// Starts at 1 - the semaphore's own initial value is 0, and a value of 0
+    /// would be indistinguishable from "never submitted" in a fresh command-
+    /// buffer-ring slot.
+    timeline_counter: std::sync::atomic::AtomicU64,
 }
 
 /// Non-fp32 arithmetic the device exposes and this context enabled. fp32 is
@@ -454,9 +480,11 @@ impl VkContext {
         // create_device (enabling an unsupported feature makes creation fail).
         let mut sf16i8 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
         let mut sdot = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
+        let mut timeline_feat = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
         let mut core_feats2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut sf16i8)
-            .push_next(&mut sdot);
+            .push_next(&mut sdot)
+            .push_next(&mut timeline_feat);
         instance.get_physical_device_features2(physical_device, &mut core_feats2);
         // The `4x8BitPacked` signed-accelerated property confirms DP4A is a fast
         // path (not emulated); pair it with the dot-product feature bit.
@@ -469,6 +497,7 @@ impl VkContext {
             dp4a: sdot.shader_integer_dot_product != 0
                 && dot_props.integer_dot_product4x8_bit_packed_signed_accelerated != 0,
         };
+        let timeline_supported = timeline_feat.timeline_semaphore != 0;
 
         // Enable the coopmat extension (if present) plus the promoted-core
         // extensions that back f16/int8 and the integer dot product. Both were
@@ -502,6 +531,8 @@ impl VkContext {
             .shader_float16(prec.f16);
         let mut en_dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
             .shader_integer_dot_product(prec.dp4a);
+        let mut en_timeline =
+            vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(timeline_supported);
         let mut device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&device_ext_names)
@@ -514,6 +545,9 @@ impl VkContext {
         }
         if prec.dp4a {
             device_info = device_info.push_next(&mut en_dot);
+        }
+        if timeline_supported {
+            device_info = device_info.push_next(&mut en_timeline);
         }
 
         // `vkCreateDevice` racing another THREAD in this same process,
@@ -544,6 +578,24 @@ impl VkContext {
 
         let mem_props = instance.get_physical_device_memory_properties(physical_device);
 
+        // A `SEMAPHORE_TYPE_TIMELINE` semaphore, initial counter 0. Only
+        // created when the device actually enabled the feature above - a
+        // semaphore of this type used against a device that never enabled
+        // `timelineSemaphore` is invalid, not merely slow.
+        let timeline = if timeline_supported {
+            let mut type_info = vk::SemaphoreTypeCreateInfo::default()
+                .semaphore_type(vk::SemaphoreType::TIMELINE)
+                .initial_value(0);
+            let info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
+            Some(
+                device
+                    .create_semaphore(&info, None)
+                    .map_err(|e| format!("create_semaphore (timeline): {e}"))?,
+            )
+        } else {
+            None
+        };
+
         Ok(VkContext {
             entry,
             instance,
@@ -566,6 +618,8 @@ impl VkContext {
             set_refs: std::sync::Mutex::new(std::collections::HashMap::new()),
             submits: std::sync::atomic::AtomicU64::new(0),
             queue_lock: std::sync::Mutex::new(()),
+            timeline,
+            timeline_counter: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -573,6 +627,69 @@ impl VkContext {
     /// allocate-record-submit-wait-free sequence — see [`VkContext::queue_lock`].
     pub fn queue_guard(&self) -> std::sync::MutexGuard<'_, ()> {
         self.queue_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether this device has a live timeline semaphore for asynchronous
+    /// submission - false on the (defensive-only) fallback where the device
+    /// did not report `timelineSemaphore`.
+    pub fn timeline_supported(&self) -> bool {
+        self.timeline.is_some()
+    }
+
+    /// Claim the next value an asynchronous submission should signal on the
+    /// semaphore returned by [`Self::timeline_semaphore`] (chained onto the
+    /// caller's own `vk::SubmitInfo` via `.signal_semaphores(&[sem])` plus a
+    /// `push_next`ed `vk::TimelineSemaphoreSubmitInfo`). Monotonically
+    /// increasing across every caller sharing this `ctx` (siblings via
+    /// `share`/`new_like` included), so two handles' submissions never
+    /// collide on the same value.
+    pub fn timeline_next(&self) -> u64 {
+        self.timeline_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The shared timeline semaphore a caller's submission signals - `None`
+    /// when this device has no timeline semaphore, in which case the caller
+    /// must fall back to a `VkFence`.
+    pub fn timeline_semaphore(&self) -> Option<vk::Semaphore> {
+        self.timeline
+    }
+
+    /// Non-blocking peek at the timeline's current counter value
+    /// (`vkGetSemaphoreCounterValue`) - never waits, so this is the check a
+    /// caller uses to skip a wait it can already tell is unnecessary.
+    ///
+    /// # Safety
+    /// Requires [`Self::timeline_supported`].
+    pub unsafe fn timeline_peek(&self) -> u64 {
+        self.device
+            .get_semaphore_counter_value(self.timeline.expect("timeline_peek without a timeline semaphore"))
+            .expect("get_semaphore_counter_value")
+    }
+
+    /// Block the calling host thread until the timeline's counter reaches
+    /// `value` (`vkWaitSemaphores`) - bounded, never `u64::MAX`, matching
+    /// every other device wait in this file (`BRAIN_GPU_WAIT_S`). Touches
+    /// neither `queue` nor `command_pool`, so - unlike `wait_for_fences` in
+    /// `run_cmd`/`dispatch` above - this deliberately does NOT require
+    /// [`Self::queue_guard`]: a semaphore wait does not race a concurrent
+    /// `vkQueueSubmit`/command-buffer allocation on another handle sharing
+    /// this device the way touching the queue or pool would.
+    ///
+    /// # Safety
+    /// Requires [`Self::timeline_supported`].
+    pub unsafe fn timeline_wait(&self, value: u64) {
+        let sem = self.timeline.expect("timeline_wait without a timeline semaphore");
+        let semaphores = [sem];
+        let values = [value];
+        let wait_info = vk::SemaphoreWaitInfo::default().semaphores(&semaphores).values(&values);
+        match self.device.wait_semaphores(&wait_info, backend_api::hardware::wait_timeout_ns()) {
+            Ok(()) => {}
+            Err(vk::Result::TIMEOUT) => panic!(
+                "GPU timeline wait did not reach value {value} within (BRAIN_GPU_WAIT_S) -- device likely wedged"
+            ),
+            Err(vk::Result::ERROR_DEVICE_LOST) => panic!("GPU device lost while waiting on the timeline semaphore"),
+            Err(e) => panic!("wait_semaphores: {e:?}"),
+        }
     }
 
     /// Enumerate cooperative-matrix shapes + read the feature bit.
@@ -1094,6 +1211,9 @@ impl Drop for VkContext {
             for b in std::mem::take(&mut *self.dead.lock().unwrap_or_else(|e| e.into_inner())) {
                 self.device.destroy_buffer(b.buffer, None);
                 self.device.free_memory(b.memory, None);
+            }
+            if let Some(sem) = self.timeline.take() {
+                self.device.destroy_semaphore(sem, None);
             }
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
