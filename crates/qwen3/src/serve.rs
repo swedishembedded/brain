@@ -88,6 +88,13 @@ const SCORES_B_WG: usize = 27;
 const MATMUL_REG3_SPLITK: usize = 28;
 const SPLITK_REDUCE: usize = 29;
 const PAGED_FLASH_PREFILL: usize = 30;
+// M4.1: splits the fused QKV / gate-up GEMM's wide output into the compact,
+// densely-packed buffers QK-norm/RoPE/KV-append and SwiGLU still need -
+// `qwen35moe`'s own kernel-reuse note names this the correct existing tool
+// for exactly this job (a wide strided row gathered into a fresh compact
+// buffer), not `region_copy` (which requires src/dst to share one
+// row_stride/off - it copies a sub-region, it cannot narrow one).
+const CONCAT_SPLIT: usize = 31;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -121,6 +128,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("matmul_reg3_splitk", kernels::MATMUL_REG3_SPLITK),
     ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
     ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
+    ("concat_split", kernels::CONCAT_SPLIT),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -226,6 +234,15 @@ fn fb(x: f32) -> u32 {
     x.to_bits()
 }
 
+/// M4.1: gather the `width`-wide column range starting at `off` out of a
+/// `[rows, ctot]` fused GEMM output into a fresh compact `[rows, width]`
+/// buffer - `concat_split.wgsl` with `H=W=1` (`Params: [N, Ctot, Csrc, c_off,
+/// H, W]`), the existing kernel `qwen35moe::model`'s own kernel-reuse note
+/// names for exactly this "narrow a wide strided row" job.
+fn concat_split_step(g: &Gpu, src: &DeviceBuffer, dst: &DeviceBuffer, rows: u32, ctot: u32, width: u32, off: u32) -> Step {
+    g.step(CONCAT_SPLIT, &[src, dst], &[rows, ctot, width, off, 1, 1], rows * width)
+}
+
 /// Fault injection (G): `brain perf faults` arms a fault, the next pass
 /// through its check point fires it. Feature-gated - a build without
 /// `fault-injection` compiles the sink to nothing, so there is no release
@@ -256,6 +273,32 @@ pub enum Input<'a> {
     /// argmax, and `decode_advance` already advanced the paged metadata, so
     /// the forward performs NO host writes at all.
     Resident,
+}
+
+/// M4.1: the fused-QKV leaf name (`attn.wqkv.weight`, `[hq+2*hkv, d]`
+/// row-major - `wq`'s rows, then `wk`'s, then `wv`'s), never written to a
+/// checkpoint - it exists only in `Engine::lin_weights`, built at weight-load
+/// time from the split leaves `decoder_param_list`/`import.rs` still name.
+const WQKV: &str = "attn.wqkv.weight";
+/// M4.1: the fused gate/up leaf name (`mlp.gateup.weight`, `[2*ff, d]`
+/// row-major - `gate`'s rows, then `up`'s), same non-checkpoint status as
+/// [`WQKV`].
+const WGATEUP: &str = "mlp.gateup.weight";
+
+/// Is `name` one of the five split projections M4.1 folds into [`WQKV`] /
+/// [`WGATEUP`] - the loop over `crate::q8::Q8::LINEARS` skips these (built as
+/// fused weights instead), and `ParamStore` never holds them either (see
+/// `from_map_with_gpu`'s `roles` filter): unlike `wo`/`down`, nothing reads
+/// them by their split name once the engine is built.
+///
+/// A suffix match, not an exact one - `crate::q8::Q8::is_i8_linear`'s own
+/// idiom - so this accepts both a bare leaf (`"attn.wq.weight"`, from the
+/// `Q8::LINEARS` loop) and a full per-layer name (`"blocks.5.attn.wq.weight"`,
+/// from the `ParamStore` `roles` filter) with one function.
+fn is_fused_source_leaf(name: &str) -> bool {
+    ["attn.wq.weight", "attn.wk.weight", "attn.wv.weight", "mlp.gate.weight", "mlp.up.weight"]
+        .iter()
+        .any(|leaf| name.ends_with(leaf))
 }
 
 /// One decoder-param leaf name → element count (mirrors the decode weight set).
@@ -369,6 +412,9 @@ struct Seq {
 struct Scratch {
     res: Vec<DeviceBuffer>, // n_layers+1, each [B*d]
     xn1: DeviceBuffer,
+    /// M4.1: the fused QKV GEMM's raw `[b, hq+2*hkv]` output, before
+    /// `concat_split` narrows it into `q_pre`/`k_pre`/`v` below.
+    qkv_pre: DeviceBuffer,
     q_pre: DeviceBuffer,
     q: DeviceBuffer,
     k_pre: DeviceBuffer,
@@ -377,6 +423,9 @@ struct Scratch {
     ctx: DeviceBuffer,
     xmid: DeviceBuffer,
     xn2: DeviceBuffer,
+    /// M4.1: the fused gate/up GEMM's raw `[b, 2*ff]` output, before
+    /// `concat_split` narrows it into `gate_pre`/`up` below.
+    gateup_pre: DeviceBuffer,
     gate_pre: DeviceBuffer,
     up: DeviceBuffer,
     h: DeviceBuffer,
@@ -548,9 +597,16 @@ impl Engine {
         // The 7 per-layer linears live in the int8 bank when it is on - loading
         // them into the fp32 ParamStore as well would keep both copies resident
         // and forfeit the memory the quantisation buys.
+        //
+        // M4.1: `attn.{wq,wk,wv}` and `mlp.{gate,up}` are ALSO excluded here,
+        // unconditionally (not just when `w8_on`) - `lin_weights` below builds
+        // them as two fused weights (`attn.wqkv.weight`, `mlp.gateup.weight`)
+        // read straight from the host `weights` map, so a `ps` copy of the
+        // split leaves would sit unused (nothing reads them by their split
+        // names any more) and cost real resident memory for nothing.
         let roles = decoder_param_list(&cfg)
             .into_iter()
-            .filter(|(n, _)| !(w8_on && crate::q8::Q8::is_i8_linear(n)))
+            .filter(|(n, _)| !(is_fused_source_leaf(n) || (w8_on && crate::q8::Q8::is_i8_linear(n))))
             .map(|(n, c)| (n, c, paramstore::Role::Frozen))
             .collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, weights);
@@ -639,6 +695,7 @@ impl Engine {
         let sc = Scratch {
             res,
             xn1: st(b * d),
+            qkv_pre: st(b * (hq + 2 * hkv)),
             q_pre: st(b * hq),
             q: st(b * hq),
             k_pre: st(b * hkv),
@@ -647,6 +704,7 @@ impl Engine {
             ctx: st(b * hq),
             xmid: st(b * d),
             xn2: st(b * d),
+            gateup_pre: st(b * 2 * ff),
             gate_pre: st(b * ff),
             up: st(b * ff),
             h: st(b * ff),
@@ -714,6 +772,9 @@ impl Engine {
         let mut lin_weights: HashMap<String, Weight> = HashMap::new();
         for l in 0..cfg.n_layers as usize {
             for leaf in crate::q8::Q8::LINEARS {
+                if is_fused_source_leaf(leaf) {
+                    continue; // folded into the fused weights built below
+                }
                 let name = format!("blocks.{l}.{leaf}");
                 let (wn, wk) = dims(leaf);
                 let w = if w8_on {
@@ -724,6 +785,31 @@ impl Engine {
                 };
                 lin_weights.insert(name, w);
             }
+            // M4.1: fused Q/K/V and gate/up projections - one GEMM replaces
+            // three (Q/K/V) and one replaces two (gate/up). The concat is
+            // done HERE, at engine weight-load time, by row-concatenating the
+            // split tensors' own host data straight out of `weights` (the
+            // same host map the split leaves above are read from, and the
+            // same one `import.rs` writes unmodified to the on-disk
+            // checkpoint - `W:[out,in]` is row-major, so concatenating along
+            // `out` is exactly concatenating the flat row-major arrays end to
+            // end). Bit-identical to the split path: `Weight::upload`
+            // quantizes group-wise PER OUTPUT ROW (`model::int8::
+            // quantize_weight`), so concatenating rows first and quantizing
+            // once produces exactly the same packed bytes and scales as
+            // quantizing each split matrix and concatenating the packed rows
+            // - see `fused_qkv_and_gateup_are_bit_identical_to_split` for
+            // both dtypes.
+            let fused_weight = |leaves: &[&str], n_total: usize| -> Weight {
+                let mut raw = Vec::with_capacity(n_total * dm);
+                for leaf in leaves {
+                    let name = format!("blocks.{l}.{leaf}");
+                    raw.extend_from_slice(weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}")));
+                }
+                Weight::upload(&ops, &raw, n_total, dm, want)
+            };
+            lin_weights.insert(format!("blocks.{l}.{WQKV}"), fused_weight(&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"], hqm + 2 * hkvm));
+            lin_weights.insert(format!("blocks.{l}.{WGATEUP}"), fused_weight(&["mlp.gate.weight", "mlp.up.weight"], 2 * ffm));
         }
         let head_name = cfg.head_weight().to_string();
         // The head never lived in `ps` (untied models have no `lm_head.
@@ -1269,9 +1355,16 @@ impl Engine {
             // quant_once`, a no-op on an all-fp32 engine), shared by every
             // linear reading it (xn1 -> q/k/v).
             self.quant_once(&mut s, &sc.xn1, d, b);
-            self.linear(&mut s, &self.lin_weights[&p("attn.wq.weight")], &sc.xn1, &sc.q_pre, b);
-            self.linear(&mut s, &self.lin_weights[&p("attn.wk.weight")], &sc.xn1, &sc.k_pre, b);
-            self.linear(&mut s, &self.lin_weights[&p("attn.wv.weight")], &sc.xn1, &sc.v, b);
+            // M4.1: one fused GEMM (`wq;wk;wv` concatenated at weight-load
+            // time - see `from_map_with_gpu`) instead of three, then
+            // `concat_split` narrows the wide `[b, hq+2*hkv]` output back
+            // into the same compact `q_pre`/`k_pre`/`v` buffers QK-norm/
+            // RoPE/KV-append already require.
+            self.linear(&mut s, &self.lin_weights[&p(WQKV)], &sc.xn1, &sc.qkv_pre, b);
+            let qkv_width = hq + 2 * hkv;
+            s.push(concat_split_step(g, &sc.qkv_pre, &sc.q_pre, b, qkv_width, hq, 0));
+            s.push(concat_split_step(g, &sc.qkv_pre, &sc.k_pre, b, qkv_width, hkv, hq));
+            s.push(concat_split_step(g, &sc.qkv_pre, &sc.v, b, qkv_width, hkv, hq + hkv));
             // QK-norm goes through `self.rms` like every other norm in this
             // tape. It used to call `block::rmsnorm_fwd` directly - the
             // per-element kernel, one thread per row - which is the coalescing
@@ -1344,8 +1437,13 @@ impl Engine {
             s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
             s.push(self.rms(&sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b));
             self.quant_once(&mut s, &sc.xn2, d, b);
-            self.linear(&mut s, &self.lin_weights[&p("mlp.gate.weight")], &sc.xn2, &sc.gate_pre, b);
-            self.linear(&mut s, &self.lin_weights[&p("mlp.up.weight")], &sc.xn2, &sc.up, b);
+            // M4.1: one fused GEMM (`gate;up` concatenated at weight-load
+            // time) instead of two, `concat_split` narrowing its `[b, 2*ff]`
+            // output back into the compact `gate_pre`/`up` buffers
+            // `swiglu_fwd` requires.
+            self.linear(&mut s, &self.lin_weights[&p(WGATEUP)], &sc.xn2, &sc.gateup_pre, b);
+            s.push(concat_split_step(g, &sc.gateup_pre, &sc.gate_pre, b, 2 * ff, ff, 0));
+            s.push(concat_split_step(g, &sc.gateup_pre, &sc.up, b, 2 * ff, ff, ff));
             s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
             self.quant_once(&mut s, &sc.h, ff, b);
             self.linear(&mut s, &self.lin_weights[&p("mlp.down.weight")], &sc.h, &sc.mlp_out, b);
@@ -2877,6 +2975,59 @@ mod tests {
             (greedy_dev_val - greedy_host_val).abs() <= tol(greedy_host_val),
             "admit_greedy token {greedy}: device {greedy_dev_val} vs true host matvec {greedy_host_val}"
         );
+    }
+
+    /// M4.1: the fused `attn.wqkv.weight`/`mlp.gateup.weight` GEMMs
+    /// (`run_batched_steps`) must be BIT-IDENTICAL to the split path they
+    /// replace - not merely close. Comparing against a HOST matmul would
+    /// prove nothing here (`admission_head_matches_a_true_host_matvec_within_
+    /// tolerance`'s own doc: a tiled device GEMM and a scalar host loop
+    /// genuinely reduce in different orders), so the reference is the split
+    /// path itself, run through the SAME device kernel (`Engine::mm`) this
+    /// engine would have dispatched before M4.1 - three/two independent
+    /// GEMMs against the three/two ORIGINAL (unconcatenated) weight
+    /// matrices, over the exact `xn1`/`xn2` activations the fused dispatch
+    /// itself produced for a real prefill. Per-output-column GEMV is
+    /// independent of how many other columns share the dispatch, so this
+    /// must hold exactly, no tolerance.
+    #[test]
+    fn fused_qkv_and_gateup_are_bit_identical_to_split() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 12, 8, false, false);
+
+        let mut table = BlockTable::new();
+        let prompt = [1u32, 5, 3];
+        let _ = eng.prefill(&mut table, &prompt);
+        let rows = prompt.len() as u32;
+
+        // `sc.xn1`/`sc.xn2` etc. are reused every layer, so after `prefill`
+        // they hold the LAST layer's activations - reference the fused
+        // weights of that same layer.
+        let l = cfg.n_layers as usize - 1;
+        let (d, hq, hkv, ff) = (cfg.d_model, cfg.q_dim(), cfg.kv_dim(), cfg.d_ff);
+        let g = &eng.gpu;
+
+        let split_matmul = |x: &DeviceBuffer, weight_name: &str, n: u32| -> Vec<f32> {
+            let w = g.storage_init("t_split_w", &map[&format!("blocks.{l}.{weight_name}")]);
+            let out = g.storage((rows * n) as u64);
+            let step = eng.mm(x, &w, &out, rows, d, n);
+            g.submit(&[], &[step]);
+            g.poll_wait();
+            g.read(&out, (rows * n) as usize)
+        };
+
+        let fused_q = g.read(&eng.sc.q_pre, (rows * hq) as usize);
+        let fused_k = g.read(&eng.sc.k_pre, (rows * hkv) as usize);
+        let fused_v = g.read(&eng.sc.v, (rows * hkv) as usize);
+        assert_eq!(fused_q, split_matmul(&eng.sc.xn1, "attn.wq.weight", hq), "fused Q must be bit-identical to a split wq GEMM");
+        assert_eq!(fused_k, split_matmul(&eng.sc.xn1, "attn.wk.weight", hkv), "fused K must be bit-identical to a split wk GEMM");
+        assert_eq!(fused_v, split_matmul(&eng.sc.xn1, "attn.wv.weight", hkv), "fused V must be bit-identical to a split wv GEMM");
+
+        let fused_gate = g.read(&eng.sc.gate_pre, (rows * ff) as usize);
+        let fused_up = g.read(&eng.sc.up, (rows * ff) as usize);
+        assert_eq!(fused_gate, split_matmul(&eng.sc.xn2, "mlp.gate.weight", ff), "fused gate must be bit-identical to a split mlp.gate GEMM");
+        assert_eq!(fused_up, split_matmul(&eng.sc.xn2, "mlp.up.weight", ff), "fused up must be bit-identical to a split mlp.up GEMM");
     }
 
     /// The on-device iterative top-K extraction (`topk_extract_step` composed
