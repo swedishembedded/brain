@@ -117,6 +117,41 @@ incrementally continues a previous run.
   `BRAIN_QWEN_KV_INT8=0` opts out.
 - `BRAIN_QWEN_KV_CALIB` - per-head KV clip ranges produced by `brain qwen3
   calib` (unset by default).
+- `BRAIN_QWEN_KV_OFFLOAD_GB` - host RAM the serving engine may use to park
+  preempted sessions' KV cache (default `0`, off). See below.
+
+## Serving more sessions than the KV pool holds
+
+The KV pool is sized for a couple of full-length contexts, while the batch
+has `BRAIN_QWEN_MAX_BATCH` slots, so a busy server can admit more sessions
+than the pool can keep cached at once. Without host offload that ends badly:
+the pool runs dry mid-decode and the serving lane fails with
+`KV pool exhausted`.
+
+Give the engine host RAM and it preempts instead. A session the scheduler is
+not advancing this round has its whole KV copied to host memory and its GPU
+blocks handed to the sessions that are decoding; when its turn comes round
+again the bytes are copied back and it continues **exactly** where it left
+off - the restored cache is byte-identical, so the tokens it goes on to
+produce are identical to the ones it would have produced had it never been
+preempted. That is a tested property, not an aspiration.
+
+```bash
+BRAIN_QWEN_KV_OFFLOAD_GB=16 brain serve --openai 8080
+```
+
+What this buys is **concurrency**, not a longer single context. A session
+that is actively decoding still needs its whole KV in VRAM, because causal
+attention reads all of it on every token - there is no cache tier that helps
+there, and a design that streamed blocks in per token would be far slower
+than not extending the context at all (the host bus is one to two orders of
+magnitude slower than the card's own memory; `crates/gpu-core/tests/pcie_handoff.rs`
+measures both on your hardware). What offload removes is the requirement that
+every ADMITTED session be resident simultaneously.
+
+It is off by default because it spends host memory, and a box with none to
+spare should not have it taken silently. Budget roughly the same bytes per
+cached token that the GPU pool spends - a swap is a verbatim copy.
 
 ## Hardware and limits
 

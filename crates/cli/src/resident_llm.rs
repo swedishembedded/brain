@@ -336,6 +336,23 @@ impl QwenResident {
         std::env::var("BRAIN_QWEN_MAX_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(16u32).max(1)
     }
 
+    /// Host RAM the serving engine may hold preempted sessions' KV in,
+    /// from `BRAIN_QWEN_KV_OFFLOAD_GB` (fractional values allowed). `0` (the
+    /// default) keeps offload off entirely.
+    ///
+    /// Not defaulted to some fraction of system RAM: a resident model shares
+    /// this box with everything else on it, and silently taking gigabytes of
+    /// host memory because a serving pool happened to fill is exactly the
+    /// kind of default an operator should have to ask for.
+    fn kv_offload_bytes() -> u64 {
+        let gb = std::env::var("BRAIN_QWEN_KV_OFFLOAD_GB")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0);
+        (gb * (1u64 << 30) as f64) as u64
+    }
+
     /// Whether the paged engine's KV pool is packed int8 (online per-token
     /// absmax, close to four times smaller a pool at Qwen3's head_dim) rather
     /// than fp32. Default ON: measured on the real Qwen3-0.6B checkpoint
@@ -588,6 +605,16 @@ impl ResidentModel for QwenResident {
                     eng.set_kv_calib(calib);
                 }
             }
+            // Host-RAM KV offload (`model::kv_offload`): with a pool sized for
+            // about two full contexts (see `pool_sizing`) but a batch of
+            // `BRAIN_QWEN_MAX_BATCH` slots, a busy server can admit far more
+            // sessions than the pool can hold cached at once -- today that ends
+            // as a hard "KV pool exhausted" mid-decode. Given host RAM, the
+            // scheduler instead parks the sessions it is not advancing and
+            // brings them back byte-identical. Off by default (0): it spends
+            // host memory, and a box that has none to spare must not be made
+            // to.
+            eng.set_kv_offload_bytes(QwenResident::kv_offload_bytes());
             Ok(QwenEngineKind::Batched(Box::new(model::serve::Scheduler::new(eng, max_batch as usize))))
         })??;
         Ok(Box::new(QwenInstance { tok, eos, engine }))

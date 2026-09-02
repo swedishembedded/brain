@@ -83,10 +83,60 @@ finetune line (LoRA is demonstrated via `qwen3tts finetune` instead, at
 TTS-Talker scale). Re-verify with a real run before relying on this being
 fully closed.
 
+## Fixed: a batch bigger than the KV pool killed the serving lane
+
+`Scheduler` admits a request when its PROMPT fits, and `pool_sizing` gives the
+pool room for roughly two full contexts while the batch has
+`BRAIN_QWEN_MAX_BATCH` (16) slots. So a busy server admits sessions it cannot
+keep cached, and the first decode step that needed a block it did not have
+reached `serve.rs`'s `append(...).expect("KV pool exhausted")`. Reproduced
+before fixing: four sessions against an 8-block pool panic there.
+
+Sequences are now preempted to host RAM instead (`model::kv_offload`,
+`BRAIN_QWEN_KV_OFFLOAD_GB`, off by default). Whole sequences, between
+scheduler turns - never blocks inside the decode loop, which for standard
+causal attention would mean streaming a sequence's entire cache across the
+bus once per token.
+
+Measured on this box (2x Tesla P40, `cargo test --release -p brain-qwen3
+--test kv_offload_real -- --ignored`), at Qwen3-8B's exact KV geometry
+(36 layers, 8 KV heads, `head_dim` 128, int8 KV + scales):
+
+| | measured |
+|---|---|
+| KV per cached token | 74.2 KiB (confirmed against the real 8B checkpoint's own config) |
+| park a 1024-token session (74.2 MiB) | 140 ms, 0.55 GB/s |
+| revive it | 17.9 ms, 4.35 GB/s |
+| park a 4096-token session (297 MiB) | 452 ms, 0.69 GB/s |
+| revive it | 56.6 ms, 5.50 GB/s |
+
+Context for those rates: the raw host bus on this box measures 4.26 GB/s up
+and 1.24 GB/s down (`gpu-core/tests/pcie_handoff.rs`, 216 MiB), against
+287 GB/s of device DRAM (`gpu_core::roof`). Swap-IN is at the bus; swap-OUT
+runs at roughly half of it, the gap being the `2 * n_layers` (int8:
+`4 * n_layers`) gather dispatches and the per-chunk readback - real headroom
+if it ever matters, and not on any hot path today.
+
+Those same numbers are why per-block swapping during decode is not
+implemented: a decoding sequence re-reads its whole KV every step, so a
+block-level tier would fetch 74.2 KiB/token across a bus 67x slower than the
+memory the attention would otherwise read it from.
+
+The end-to-end arm of that test - the real 8B checkpoint, eight sessions
+against a pool sized for four, with and without offload - is written and
+committed but **has not run to completion**: `Engine`'s fp32 embedding table
+at Qwen3-8B's vocabulary is 2.49 GB, over this card's 2 GiB storage-binding
+limit, so the run dies in `create_bind_group` before it reaches the workload
+(a separate, unrelated defect being fixed elsewhere). Everything above comes
+from the geometry fixture in the same file, which needs no embedding table
+that size. Re-run it once that lands.
+
 ## Not yet done
 
 - [ ] Prefix caching across requests (the underlying infrastructure exists
       but is not wired into the serving engine)
+- [ ] Faster KV swap-out: the gather side runs at about half the measured
+      host-bus rate (see above), dispatch-bound rather than bandwidth-bound
 - [ ] An FP8 / E4M3 weight path (INT8 is the only quantized weight format
       today)
 - [ ] Mixture-of-Experts serving - only dense configurations are supported
