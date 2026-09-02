@@ -616,19 +616,15 @@ impl Int8Weights {
 
 /// Quantize one block's seven linears from `t` plus read its two f32 norm
 /// weights — the checkpoint-read + compute half, shared by [`Int8Weights::
-/// upload`]/[`Int8Weights::upload_with_cache`]. `quantize_weight` needs a
-/// whole row before it can pack it, so this pulls one tensor at a time
-/// (never the whole model) but cannot itself be chunk-bounded further
-/// without a row-block quantizer — that refinement belongs to the windowed-
-/// execution phase, which needs it anyway for the fp32 stress case.
+/// upload`]/[`Int8Weights::upload_with_cache`]. Each linear goes through
+/// `model::int8::quantize_from`, which takes the zero-fp32 Q8_0 byte repack
+/// whenever `t` can serve one and falls back to the bounded fp32 route
+/// (never the whole model at once) only when it can't.
 fn quantize_block(t: &dyn checkpoint::TensorSource, prefix: &str, d: BlockDims) -> HostInt8Block {
     let (dim, hid) = (d.dim as usize, d.hidden as usize);
     let q = |n: &str, no: usize, k: usize| {
         let name = format!("{prefix}.{n}");
-        let mut result: Option<(Vec<u32>, Vec<f32>)> = None;
-        let found = t.with_tensor(&name, &mut |data| result = Some(crate::int8::quantize_weight(data, no, k)));
-        assert!(found, "zimage: missing {name}");
-        result.expect("with_tensor found the tensor, so it must have set result")
+        model::int8::quantize_from(t, &name, no, k).unwrap_or_else(|| panic!("zimage: missing {name}"))
     };
     HostInt8Block {
         wq: q("attention.to_q.weight", dim, dim),

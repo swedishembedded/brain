@@ -214,7 +214,27 @@ review of this codebase assumed:
       `model::lora::ExternalPair` fields rather than a file-based fixture).
       `make test -p brain-flux2`: green (exit 0; every pre-existing test,
       including the `gguf_direct_int8.rs` bit-exactness suite, unaffected).
-- [ ] M7: ltxv/gemma4/s3dit `&Tensors` → `&dyn TensorSource`.
+- [x] M7 (s3dit slice): `crates/s3dit/src/block.rs`'s `quantize_block` was
+      already the most migrated of the three `&Tensors` → `&dyn TensorSource`
+      targets - its signature already took `t: &dyn checkpoint::TensorSource`
+      - but its inner `q` closure still forced every linear through the fp32
+      route unconditionally (`t.with_tensor(&name, &mut |data| .. quantize_
+      weight(data, no, k))`), never trying the zero-fp32 Q8_0 byte repack even
+      when `t` could serve one directly. Swapped that hand-rolled `with_tensor`
+      + `quantize_weight` dance for a single call to `model::int8::quantize_
+      from(t, &name, no, k)`, which tries the byte repack first and only falls
+      back to the bounded fp32 route when the source can't serve one - the
+      same choice M4 already wired into `qwen3`/`qwen35moe`/`wan`, now reaching
+      this crate too. `crate::int8::quantize_weight`'s re-export
+      (`crates/s3dit/src/int8.rs`) stays - `tests/int8_matmul.rs` calls it
+      directly and nothing else in the crate needed touching; grepped for any
+      other hand-rolled `with_tensor` + `quantize_weight`/`quantize_weight_q4`
+      pattern outside `quantize_block` and found none. `make test -p
+      brain-s3dit`: green, 0 failed. ltxv and gemma4 still need their own
+      `&Tensors` → `&dyn TensorSource` migration (plus this same `quantize_
+      from` wiring once migrated) - M7 stays open until those land.
+- [ ] M7: ltxv/gemma4 `&Tensors` → `&dyn TensorSource` (s3dit's slice is done
+      - see the M7 entry above).
 - [ ] M8: host relayout (`crates/gguf/src/kquant.rs`) for Q4_K/Q5_K/Q6_K/
       Q4_0/Q5_0/Q8_0 into brain's device K-quant layout. Gate: `assert_eq!`
       round trip against `deq_*`, no tolerance.
