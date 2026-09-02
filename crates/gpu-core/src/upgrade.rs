@@ -126,14 +126,6 @@ const DECODE_SHAPE: select::OpShape =
 const DECODE_SHAPE_I8: select::OpShape =
     select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::I8 };
 
-/// [`DECODE_SHAPE`]'s q4 twin, for the same reason [`DECODE_SHAPE_I8`] is not
-/// shared with it: a separate constant per dtype so a future divergence
-/// between the I8 and Q4 arms of `select::candidates` cannot silently misgate
-/// one dtype's row through the other's probe, even though both arms are
-/// identical today (`Dtype::I8 | Dtype::Q4 =>` is one match arm).
-const DECODE_SHAPE_Q4: select::OpShape =
-    select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::Q4 };
-
 /// The `MREG` ladder for `matmul_gemv_reg`. Powers of two, so "the smallest
 /// bucket covering `m`" carries at most twice the rows actually needed, and the
 /// ladder is complete by construction for `matmul_gemv`'s own `m <= 32`
@@ -203,34 +195,20 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         buckets: GEMV_MREG_BUCKETS,
         gpu_only: true,
     },
-    Upgrade {
-        // The q4 (W4A8) twin of the row above - `matmul_q4_gemv` carries the
-        // SAME two costs `matmul_i8_gemv`'s did: an `array<f32, 2048>`
-        // workgroup accumulator sized for `m = 32` whatever `m` actually is,
-        // and a read-modify-write into it per `(k, m)`. `matmul_q4_gemv_reg`
-        // fixes both exactly as its int8 sibling does, PLUS folds each weight
-        // word's 8 nibbles into two `dot4I8Packed` calls instead of 8 scalar
-        // MACs (see that kernel's own header) - `kernel-performance.md`
-        // M5.5's "Q4 uses zero `dot4I8Packed`" finding, closed for the
-        // decode-regime kernel.
-        //
-        // Same `Params { m, k, n }` (the RAW logical k, not a packed word
-        // count - `matmul_q4_gemv.wgsl`'s own contract), same bindings, same
-        // `n * 64` thread count, bit-identical results (that kernel's header
-        // walks through why: the eight per-word integer products are the
-        // same regardless of whether they are summed via `dot4I8Packed` or
-        // scalar MACs, and the f32 accumulation order across words is
-        // unchanged).
-        slow: "matmul_q4_gemv",
-        fast: "matmul_q4_gemv_reg",
-        src: kernels::MATMUL_Q4_GEMV_REG,
-        thread_mul: 1,
-        op: select::Op::MatMul,
-        probe: DECODE_SHAPE_Q4,
-        knob: Some(("MREG", 0)), // Params { m, k, n } -> m
-        buckets: GEMV_MREG_BUCKETS,
-        gpu_only: true,
-    },
+    // NOT a fourth row here: `matmul_q4_gemv_reg` (M5.5) was measured against
+    // `matmul_q4_gemv` at k=n=2048 across the whole decode regime and does
+    // NOT win at every shape the way the two rows above do - m=1..16 measured
+    // 15-29% SLOWER (the un-templated MREG=32 build; the per-bucket-templated
+    // builds this table would actually dispatch were not re-measured before
+    // this milestone's time closed), m=32 a statistical wash (1.01x). This
+    // module's own bar #3 ("wins at every shape... no regime the caller would
+    // have wanted to opt out of") is not met by the evidence in hand, so the
+    // kernel is NOT wired into this transparent seam - it stays available by
+    // name for a caller that wants it at a specific, verified shape, and
+    // `crates/model/tests/matmul_q4_speed_bench.rs` is the harness to re-run
+    // (per-m MREG bucket, not the plain registered name) before reconsidering
+    // this decision. Recorded as a killed hypothesis in the kernel-
+    // performance campaign's own roadmap ledger, not silently dropped.
 ];
 
 /// `BRAIN_NO_KERNEL_UPGRADE=1` pins every model to the kernel it registered —
