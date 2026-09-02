@@ -538,8 +538,9 @@ confirmed by `grep -n int8_dot crates/qwen35moe/src/model.rs` returning zero
 hits and `git log --all -S i8_on -- crates/qwen35moe` finding no commit,
 right before actually doing this work. The prose below was re-verified
 against source and is otherwise accurate to what was implemented and
-tested just now; only the test count and the closing commit hash are
-corrected to match reality.
+tested just now; the closing commit hash is corrected to match reality,
+and the stale test-count figure is dropped rather than re-counted (a
+number like that only drifts further out of date from here).
 
 The MoE milestone above scoped `Op::MoeExpertLinear` to `select.rs` only and
 left `crates/qwen35moe/src/model.rs`/`crates/qwen35/src/model.rs`'s own
@@ -611,12 +612,13 @@ end (`int8_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion`:
 `Weight::upload`'s shared `promote` call, not that it is missing. Left
 untouched; no changes landed in `crates/qwen35/src/model.rs` or its tests.
 
-Full `brain-qwen35moe` suite (54 tests across `lib` + 10 integration files,
-including the 8-test `model_i8_smoke` file) green on BOTH the default
-backend and `BRAIN_DEVICE=cpu`; `cargo clippy -p brain-qwen35moe
---all-targets` zero warnings; downstream consumers (`cli`, `catalog`,
-`modelcost`, `gradcheck`, `deepseek2`, `qwen35`, `npu`) build clean. Does not
-touch `crates/backend-api/src/select.rs`. Commit `657ce61c`.
+Full `brain-qwen35moe` suite green on BOTH the default backend and
+`BRAIN_DEVICE=cpu` (`model_i8_smoke`'s two new capability-gate tests and its
+renamed/relocated CPU-demotion and param-store-exclusion tests included);
+`cargo clippy -p brain-qwen35moe --all-targets` zero warnings; downstream
+consumers (`cli`, `catalog`, `modelcost`, `gradcheck`, `deepseek2`, `qwen35`,
+`npu`) build clean. Does not touch `crates/backend-api/src/select.rs`.
+Commit `657ce61c`.
 
 ### M1.1-attn-gate - `model::block::flash_gate`, the attention outer-gate consolidation deferred to the end
 
