@@ -126,6 +126,14 @@ const DECODE_SHAPE: select::OpShape =
 const DECODE_SHAPE_I8: select::OpShape =
     select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::I8 };
 
+/// [`DECODE_SHAPE`]'s q4 twin, for the same reason [`DECODE_SHAPE_I8`] is not
+/// shared with it: a separate constant per dtype so a future divergence
+/// between the I8 and Q4 arms of `select::candidates` cannot silently misgate
+/// one dtype's row through the other's probe, even though both arms are
+/// identical today (`Dtype::I8 | Dtype::Q4 =>` is one match arm).
+const DECODE_SHAPE_Q4: select::OpShape =
+    select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::Q4 };
+
 /// The `MREG` ladder for `matmul_gemv_reg`. Powers of two, so "the smallest
 /// bucket covering `m`" carries at most twice the rows actually needed, and the
 /// ladder is complete by construction for `matmul_gemv`'s own `m <= 32`
@@ -192,6 +200,34 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         op: select::Op::MatMul,
         probe: DECODE_SHAPE_I8,
         knob: Some(("MREG", 0)), // Params { m, kg, n } -> m
+        buckets: GEMV_MREG_BUCKETS,
+        gpu_only: true,
+    },
+    Upgrade {
+        // The q4 (W4A8) twin of the row above - `matmul_q4_gemv` carries the
+        // SAME two costs `matmul_i8_gemv`'s did: an `array<f32, 2048>`
+        // workgroup accumulator sized for `m = 32` whatever `m` actually is,
+        // and a read-modify-write into it per `(k, m)`. `matmul_q4_gemv_reg`
+        // fixes both exactly as its int8 sibling does, PLUS folds each weight
+        // word's 8 nibbles into two `dot4I8Packed` calls instead of 8 scalar
+        // MACs (see that kernel's own header) - `kernel-performance.md`
+        // M5.5's "Q4 uses zero `dot4I8Packed`" finding, closed for the
+        // decode-regime kernel.
+        //
+        // Same `Params { m, k, n }` (the RAW logical k, not a packed word
+        // count - `matmul_q4_gemv.wgsl`'s own contract), same bindings, same
+        // `n * 64` thread count, bit-identical results (that kernel's header
+        // walks through why: the eight per-word integer products are the
+        // same regardless of whether they are summed via `dot4I8Packed` or
+        // scalar MACs, and the f32 accumulation order across words is
+        // unchanged).
+        slow: "matmul_q4_gemv",
+        fast: "matmul_q4_gemv_reg",
+        src: kernels::MATMUL_Q4_GEMV_REG,
+        thread_mul: 1,
+        op: select::Op::MatMul,
+        probe: DECODE_SHAPE_Q4,
+        knob: Some(("MREG", 0)), // Params { m, k, n } -> m
         buckets: GEMV_MREG_BUCKETS,
         gpu_only: true,
     },
