@@ -1835,6 +1835,71 @@ backward genuinely have no faster kernel anywhere in the tree to select -
 each needs new WGSL authored, gated, and swept per §F end to end, which is
 real Phase 5 backlog, not this pass's scope.
 
+### M5.4 - MoE family: layer-level submit batching for the row-compacted expert forward
+
+`moe.rs`'s own module comment already named the exact remainder: `expert_
+fwd_compact` does one host scan over `host_gate`, one index upload, and one
+`Gpu::submit` PER EXPERT - at GLM-5.2 scale (~128 experts x ~48 MoE layers)
+that is ~6100 submits/forward. Added `expert_fwd_compact_layer`: one host
+pass buckets every row's routed experts for the WHOLE layer from the SAME
+`host_gate` readback the per-expert path already required, one `Gpu::write`
+uploads a combined index buffer with per-expert regions, and the function
+returns ONE `Vec<Step>` (gather/GEMM/GEMM/silu/GEMM/scatter per routed
+expert, the SAME `model::block::pick_gemm`-selected GEMM the per-expert path
+already dispatches) for the caller's existing per-layer submit to carry - no
+new kernel. `expert_fwd_compact` itself is unchanged and stays as the
+simpler per-expert primitive the layer version is built from, still
+exercised directly by this crate's own parity tests.
+
+**A real bug caught along the way, not a theoretical concern**: packing
+every expert's routed-row indices back to back in the shared `idx` buffer
+and addressing each expert's region with `Gpu::step_sliced` failed a real
+wgpu validation check the first time this ran against `crates/glmdsa`'s own
+integration test (`Buffer offset 4 does not respect device's requested
+min_storage_buffer_offset_alignment limit 256`). Fixed by padding each
+region's start offset to `model::block::pad64`'s existing 64-word (256B)
+grain - the SAME helper `gemm_bidir_fwd` already uses for its own per-head
+stride offsets - and sizing `CompactExpertScratch::new`'s `idx` buffer to
+the corresponding upper bound (`rows*top_k + n_experts*64`).
+
+**The milestone brief's "device-side token permutation + grouped GEMM"
+framing did not survive contact with source, per this campaign's own
+audit-is-a-hypothesis rule**: no indirect-dispatch primitive exists
+anywhere in this engine (unchanged from the M0.2 baseline finding), so a
+literal single "grouped GEMM" call across every expert is not buildable
+without one, and the token routing decision was already host-side (a
+necessary consequence of that same constraint) before this milestone
+touched anything. The real, deliverable fix - and the one this module's own
+pre-existing comment had already scoped correctly - is layer-level SUBMIT
+batching: the host still decides each expert's row count, but once per
+LAYER instead of once per expert.
+
+**The one real caller, corrected against source rather than the module
+comment's stale claim**: `expert_fwd_compact`'s own header previously named
+the call-site migration target as "crates/glm, crates/omni" - neither
+directory exists in this tree (checked, not assumed). The actual, only
+caller is `crates/glmdsa::model::Glm::forward_compact`'s MoE arm, migrated
+onto `expert_fwd_compact_layer` in a separate commit; the stale comment is
+corrected in the same change that added the new function.
+
+TDD: `compact_layer_matches_per_expert_compact_bit_for_bit` (the new
+function does not exist on the pre-change tree, so every new test below
+fails to compile until it lands) proves bit-identical output against the
+existing per-expert path; `compact_layer_submit_count_does_not_scale_with_
+expert_count` swept at `n_experts=4` and `32` (via `Gpu::stats().submits`)
+proves the fix's actual point - a small constant submit count, not one per
+expert; `compact_layer_handles_an_unrouted_expert` and `compact_layer_
+undersized_scratch_panics_loudly` mirror the existing per-expert edge-
+case/mutation-verify tests for the new entry point. Full `crates/model/
+tests/moe_compact_parity.rs` suite green on both the default (wgpu) and
+`BRAIN_DEVICE=cpu` backends (8/8 each); `crates/glmdsa`'s own `logits_all_
+compact_matches_logits_all` gate (row-compacted MoE vs the dense oracle)
+stays green - bit-identical, worst maxabs=0.000e0 - after the migration.
+Full `brain-glmdsa` suite green (26 tests). `cargo clippy -p brain-model
+--all-targets` and `cargo clippy -p brain-glmdsa --all-targets`: zero
+warnings. **Commits**: two (`crates/model` fix + tests, then the
+`crates/glmdsa` call-site migration).
+
 ---
 
 ## Not yet done
