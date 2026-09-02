@@ -1901,6 +1901,57 @@ stays INT8 in every measurement above); `qwen35moe` adoption of
 let it share this work without a third copy is itself still open); the
 offline `gguf_import.rs` converter path.
 
+### M27 (DONE): YaRN long-context RoPE scaling (`max_position_embeddings: 262144` was a dead config field, now wired)
+
+`Qwen35Config::max_position_embeddings` was read nowhere at runtime before
+this milestone - RoPE always used the plain, unscaled
+`theta.powf(-2d/head_dim)` frequency regardless of position, so real usable
+context was capped by whatever `BRAIN_QWEN35_CTX`/`BRAIN_QWEN35_GGUF_CTX`
+happened to be set to (a serving-side VRAM/KV-cache budget), never by the
+checkpoint's actual 262144-token training window.
+
+YaRN (arXiv 2309.00071) landed as a **generic, model-agnostic** module,
+`model::yarn` (`crates/model/src/yarn.rs`) - not folded into
+`qwen3vl::mrope` despite that being the crate that already builds this
+model's M-RoPE tables, because "any model can reuse it" is the whole point
+and `crates/model` is this workspace's actual architecture-agnostic seam.
+`model::yarn::scaled_inv_freq(dim, theta, &YarnConfig)` returns the
+per-channel scaled `inv_freq` plus the attention-magnitude correction
+(`attention_factor`, YaRN's `mscale`); `qwen3vl::mrope::mrope_tables` became
+a thin wrapper over a new `mrope_tables_scaled`, which takes that pair as an
+optional `(inv_freq, attention_factor)` override instead of always deriving
+`inv_freq` inline from `theta` - every other `mrope_tables` caller in the
+tree (qwen3vl itself, qwen3omnimoe) is unaffected, both by construction (the
+`None` path is the exact original arithmetic, `attention_factor` folds in as
+a literal `* 1.0`) and by a dedicated regression test pinning
+`mrope_tables_scaled(.., None)` byte-identical to `mrope_tables`.
+
+qwen35 opts in through a new `Qwen35Config::rope_scaling: Option<model::yarn
+::YarnConfig>`, parsed from a checkpoint's `config.json` exactly like
+`mrope_section` already is - a `rope_scaling: {"type": "yarn", "factor":
+..., "original_max_position_embeddings": ...}` key (optional `beta_fast`/
+`beta_slow`/`attention_factor` overrides too); absent or any other `type`
+value means `None`, i.e. today's plain unscaled RoPE. Both `mrope_tables`
+call sites (whole-sequence prefill and single-step decode) now go through
+`mrope_tables_scaled` via a `Qwen35Config::yarn_scaling()` helper. GGUF
+import (`gguf_import.rs`) sets `rope_scaling: None` unconditionally -
+llama.cpp's own rope-scaling KV convention is not read yet, so a GGUF
+checkpoint stays unscaled until that is wired too; the HF-style
+`config.json` path was this milestone's scope.
+
+Regression proof that an unconfigured checkpoint (every checkpoint that
+exists today) is untouched: `golden_parity.rs`'s real-`transformers`
+reference comparison still passes at the same tolerance, and the new
+`crates/qwen35/tests/yarn_rope_scaling.rs` adds a config with
+`rope_scaling: Some(YarnConfig::new(1.0, ..))` - the YaRN code path is
+genuinely exercised, just requesting no real extension - and asserts its
+`logits_all` output is bit-for-bit identical to `rope_scaling: None`. The
+same file proves the scaling actually does something: a `factor = 3.0`,
+`original_max_position_embeddings = 6` config decoded across `tiny()`'s
+24-token `block_size` measurably diverges from the unscaled baseline once
+past position 6, and a full decode run under real scaling never panics or
+produces a non-finite hidden state.
+
 ## Not yet done
 
 
