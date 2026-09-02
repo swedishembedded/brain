@@ -33,9 +33,10 @@
 //! names an `import_gemma4` map would have given it. Nothing downstream
 //! needs to know which of the two loaders it is talking to.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use checkpoint::gguf::MmapGguf;
+use checkpoint::gguf_src::GgufSource;
 
 use crate::config::Gemma4Config;
 use crate::import::gemma4_tensor_manifest;
@@ -49,7 +50,7 @@ pub const GGUF_ARCHITECTURE: &str = "gemma4";
 /// A memory-mapped Gemma-4 GGUF, presented in this crate's canonical tensor
 /// name space.
 pub struct Gemma4GgufSource {
-    mg: MmapGguf,
+    src: GgufSource,
 }
 
 /// This crate's canonical name -> the checkpoint name a GGUF stores it under.
@@ -118,25 +119,29 @@ impl Gemma4GgufSource {
             return Err(format!("gemma4 gguf: {path} carries unrecognized tensors: {unknown:?}"));
         }
 
-        Ok(Gemma4GgufSource { mg })
+        let plan: HashMap<String, String> = manifest.into_iter().map(|(name, _)| { let src = source_name(&name); (name, src) }).collect();
+        Ok(Gemma4GgufSource { src: GgufSource::renaming(mg, plan) })
     }
 
     /// The underlying reader, for metadata a caller wants directly.
     pub fn gguf(&self) -> &MmapGguf {
-        &self.mg
+        self.src.gguf()
     }
 
     /// How each tensor is stored, at this crate's canonical name - `"Q8_0"`,
     /// `"F32"`, etc. Used by the quantized loader to tell an
     /// already-quantized weight from one it must quantize itself.
     pub fn dtype(&self, canonical: &str) -> Option<&'static str> {
-        self.mg.dtype(&source_name(canonical))
+        self.src.gguf().dtype(self.src.source_name(canonical)?)
     }
 
-    /// The checkpoint-embedded `tokenizer.json` bytes.
+    /// The checkpoint-embedded `tokenizer.json` bytes. Read straight off the
+    /// mapping under its OWN on-disk name - not part of the canonical
+    /// rename plan, which covers only the text tower's weights.
     pub fn tokenizer_json(&self) -> Result<Vec<u8>, String> {
         let data = self
-            .mg
+            .src
+            .gguf()
             .tensor("tokenizer_json")
             .ok_or("gemma4 gguf: missing tokenizer_json tensor")?
             .map_err(|e| format!("gemma4 gguf: decoding tokenizer_json: {e}"))?;
@@ -152,22 +157,23 @@ impl Gemma4GgufSource {
 
 impl checkpoint::TensorSource for Gemma4GgufSource {
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
-        match self.mg.tensor(&source_name(name)) {
-            // A decode failure on a tensor the file claims to have is a
-            // corrupt file, and a caller that silently proceeded without it
-            // would build a model with one layer missing. `MmapGguf`'s own
-            // `TensorSource` impl panics here for the same reason.
-            Some(r) => {
-                let data = r.unwrap_or_else(|e| panic!("gemma4 gguf: decoding {name}: {e}"));
-                f(&data);
-                true
-            }
-            None => false,
-        }
+        self.src.with_tensor(name, f)
+    }
+
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        self.src.raw_words(name)
+    }
+
+    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        self.src.with_tensor_chunks(name, max_elems, f)
+    }
+
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, &[u8])> {
+        self.src.raw_blocks(name)
     }
 
     fn numel(&self, name: &str) -> Option<usize> {
-        self.mg.shape(&source_name(name)).map(|s| s.iter().product())
+        self.src.numel(name)
     }
 }
 

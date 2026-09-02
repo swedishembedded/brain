@@ -23,6 +23,9 @@ pub mod quantize;
 pub mod mmap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod weightio;
+/// Native only: it wraps `gguf::MmapGguf`, which needs `std::fs`/mmap.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gguf_src;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod load_progress;
 pub mod remap;

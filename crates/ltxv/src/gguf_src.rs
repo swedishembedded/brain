@@ -5,15 +5,13 @@
 //! over a [`checkpoint::gguf::MmapGguf`] that never materializes a converted
 //! safetensors file on disk.
 //!
-//! Modelled on `crates/wan/src/gguf_src.rs`'s `WanGgufSource` (the only other
-//! model in this repo that already does GGUF-direct-to-device loading), with
-//! ONE structural simplification: Wan needs a reference<->source NAME table
-//! because a Wan GGUF may carry either the native or the diffusers tensor
-//! spelling. LTX-2.5's real checkpoint carries only ONE spelling - its own,
-//! which IS `crate::block::LtxBlock`/`LtxAvBlock`'s `tget` names verbatim
-//! (confirmed by range-reading the real 4349-tensor header) - so there is no
-//! renaming step here at all: every [`checkpoint::TensorSource`] method just
-//! forwards the caller's name straight to the mmap.
+//! Built on `checkpoint::gguf_src::GgufSource` - shared with `wan` and
+//! `gemma4`'s equivalents rather than a hand-rolled copy - via its
+//! [`GgufSource::identity`] constructor: LTX-2.5's real checkpoint carries
+//! only ONE tensor-name spelling, its own, which IS
+//! `crate::block::LtxBlock`/`LtxAvBlock`'s `tget` names verbatim (confirmed
+//! by range-reading the real 4349-tensor header), so there is no renaming
+//! step here at all.
 //!
 //! What still has to agree, and does: [`LtxvGgufSource::from_mmap`] and
 //! [`crate::import::import_gguf`] both validate two-way coverage through
@@ -25,6 +23,7 @@
 //! weight), never the whole 22B model.
 
 use checkpoint::gguf::MmapGguf;
+use checkpoint::gguf_src::GgufSource;
 
 use crate::config::LtxAvDitConfig;
 use crate::import::{av_dit_config_from_kv, validate_av_dit_gguf_shapes};
@@ -32,7 +31,7 @@ use crate::import::{av_dit_config_from_kv, validate_av_dit_gguf_shapes};
 /// An LTX-2.5 AV DiT GGUF, opened for direct streaming access - no
 /// ahead-of-time conversion, no whole-model host materialization.
 pub struct LtxvGgufSource {
-    mg: MmapGguf,
+    src: GgufSource,
     cfg: LtxAvDitConfig,
 }
 
@@ -53,7 +52,7 @@ impl LtxvGgufSource {
     pub fn from_mmap(mg: MmapGguf) -> Result<LtxvGgufSource, String> {
         let cfg = av_dit_config_from_kv(&mg)?;
         validate_av_dit_gguf_shapes(&mg, &cfg)?;
-        Ok(LtxvGgufSource { mg, cfg })
+        Ok(LtxvGgufSource { src: GgufSource::identity(mg), cfg })
     }
 
     /// The AV DiT config this checkpoint's own `config` KV names.
@@ -64,19 +63,23 @@ impl LtxvGgufSource {
 
 impl checkpoint::TensorSource for LtxvGgufSource {
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
-        self.mg.with_tensor(name, f)
+        self.src.with_tensor(name, f)
     }
 
     fn raw_words(&self, name: &str) -> Option<&[u32]> {
-        self.mg.raw_words(name)
+        self.src.raw_words(name)
     }
 
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
-        self.mg.with_tensor_chunks(name, max_elems, f)
+        self.src.with_tensor_chunks(name, max_elems, f)
+    }
+
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, &[u8])> {
+        self.src.raw_blocks(name)
     }
 
     fn numel(&self, name: &str) -> Option<usize> {
-        self.mg.numel(name)
+        self.src.numel(name)
     }
 }
 

@@ -156,9 +156,34 @@ review of this codebase assumed:
       integration + real-weight parity tests - together exceeded it even
       though none of them hung; that is an orchestration constraint on how
       this ledger's own verification is run, not a property of the code.)
-- [ ] M5: `checkpoint::gguf_src::GgufSource` absorbing wan/ltxv/gemma4's
-      near-duplicate `gguf_src.rs` (gemma4's currently ships without
-      `raw_words` or `with_tensor_chunks` - every tensor materializes whole).
+- [x] M5: `checkpoint::gguf_src::GgufSource` (new `crates/checkpoint/src/
+      gguf_src.rs`) absorbing wan/ltxv/gemma4's three near-duplicate
+      `gguf_src.rs` files, which differed in exactly one expression (the
+      name translation) and were otherwise five verbatim forwarding methods
+      each. Two constructors cover both shapes found: `renaming(mg, plan:
+      HashMap<String,String>)` (wan's lookup table, gemma4's `model.`-prefix
+      rewrite, both reduced to building a plan up front) and
+      `identity(mg)` (ltxv, no rename step at all). Each model crate keeps
+      only its own knowledge - wan's `dit_config_from_shapes`/`source_map`,
+      ltxv's `av_dit_config_from_kv`/`validate_av_dit_gguf_shapes`,
+      gemma4's architecture check, two-way manifest validation,
+      `dtype`/`tokenizer_json`/`tokenizer` - behind a thin wrapper struct
+      that forwards `TensorSource` to the shared type; none of the three
+      public APIs (`open`/`from_mmap`/`config`) changed shape, so no
+      downstream caller needed touching. gemma4 gains `raw_words`,
+      `with_tensor_chunks` AND `raw_blocks` it did not have before -
+      every GGUF tensor it reads was materializing whole on every read
+      path, unnoticed because the boilerplate that would have caught it
+      was written three separate times. Gated: three new tests on
+      `GgufSource` itself (`renaming_translates_every_read_path_including_
+      raw_blocks`, `identity_needs_no_plan_entries_written_by_hand`,
+      `raw_blocks_is_reachable_through_a_rename` - the last one is the
+      capability none of the three original wrappers had), plus every
+      pre-existing wan/ltxv/gemma4 `gguf_src` test unchanged and still
+      green. `make test -p brain-checkpoint -p brain-wan -p brain-ltxv
+      -p brain-gemma4`: green, 0 failed (run as one combined invocation at
+      39m3s - close to the 2400s/40min deadlock-guard budget; the next
+      milestone should go back to separate per-crate runs).
 - [ ] M6: flux2 `DitWeights: TensorSource`, LoRA decline as a `raw_blocks →
       None` refusal - proves the seam.
 - [ ] M7: ltxv/gemma4/s3dit `&Tensors` → `&dyn TensorSource`.

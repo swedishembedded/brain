@@ -8,16 +8,15 @@
 //! Wraps the mmap plus the reference-name -> source-name table
 //! [`crate::import::source_map`] already extracted from [`crate::import::
 //! import_gguf`], so this loader and the ahead-of-time converter share one
-//! naming table and cannot silently drift apart. Every read - `with_tensor`,
-//! `raw_words`, `numel` - just translates the caller's native name through
-//! that table and delegates to `MmapGguf`, which is what makes an F32 tensor
-//! in the file (city96's release leaves every 1-D tensor plain F32) zero-copy
-//! all the way to a device upload, and a quantized one (Q3_K, …) dequantize
-//! on demand, one tensor at a time.
-
-use std::collections::HashMap;
+//! naming table and cannot silently drift apart. The actual `TensorSource`
+//! forwarding is `checkpoint::gguf_src::GgufSource` - shared with `ltxv` and
+//! `gemma4`'s equivalents rather than a fourth hand-rolled copy - which is
+//! what makes an F32 tensor in the file (city96's release leaves every 1-D
+//! tensor plain F32) zero-copy all the way to a device upload, and a
+//! quantized one (Q3_K, …) dequantize on demand, one tensor at a time.
 
 use checkpoint::gguf::MmapGguf;
+use checkpoint::gguf_src::GgufSource;
 
 use crate::config::WanConfig;
 use crate::import::{dit_config_from_shapes, source_map};
@@ -25,9 +24,7 @@ use crate::import::{dit_config_from_shapes, source_map};
 /// A Wan DiT GGUF, opened for direct streaming access - no ahead-of-time
 /// conversion, no whole-model host materialization.
 pub struct WanGgufSource {
-    mg: MmapGguf,
-    /// Reference (native) tensor name -> the GGUF's own name carrying it.
-    source_of: HashMap<String, String>,
+    src: GgufSource,
     cfg: WanConfig,
 }
 
@@ -49,40 +46,34 @@ impl WanGgufSource {
             mg.names().iter().map(|n| (n.clone(), mg.shape(n).map(<[usize]>::to_vec).unwrap_or_default())).collect();
         let cfg = dit_config_from_shapes(&shapes)?;
         let source_of = source_map(&mg)?;
-        Ok(WanGgufSource { mg, source_of, cfg })
+        Ok(WanGgufSource { src: GgufSource::renaming(mg, source_of), cfg })
     }
 
     /// The DiT variant this checkpoint's tensor shapes name.
     pub fn config(&self) -> &WanConfig {
         &self.cfg
     }
-
-    fn resolve<'a>(&'a self, native: &str) -> Option<&'a str> {
-        self.source_of.get(native).map(String::as_str)
-    }
 }
 
 impl checkpoint::TensorSource for WanGgufSource {
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
-        match self.resolve(name) {
-            Some(src) => self.mg.with_tensor(src, f),
-            None => false,
-        }
+        self.src.with_tensor(name, f)
     }
 
     fn raw_words(&self, name: &str) -> Option<&[u32]> {
-        self.mg.raw_words(self.resolve(name)?)
+        self.src.raw_words(name)
     }
 
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
-        match self.resolve(name) {
-            Some(src) => self.mg.with_tensor_chunks(src, max_elems, f),
-            None => false,
-        }
+        self.src.with_tensor_chunks(name, max_elems, f)
+    }
+
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, &[u8])> {
+        self.src.raw_blocks(name)
     }
 
     fn numel(&self, name: &str) -> Option<usize> {
-        self.mg.numel(self.resolve(name)?)
+        self.src.numel(name)
     }
 }
 
