@@ -503,6 +503,88 @@ impl Weight {
     }
 }
 
+/// Which storage tier each quantizable leaf uploads at - a per-leaf
+/// generalization of the single [`Dtype`] `qwen3::Qwen::new_shard_dt` takes.
+/// `Qwen35::new_impl_on`'s old `i8: bool` could not express "Q4 on the MLP,
+/// F32 on the GDN decay/beta gates"; this is the value that replaces it
+/// (M24). Deliberately NOT a fourth `QTier` - `wan::block::QTier` and
+/// `ltxv::block::QTier` are two private re-spellings of the same
+/// two-variant subset of [`Dtype`] this type is built on; [`Dtype`] is
+/// already the currency.
+///
+/// Matching is by SUBSTRING of the leaf's full name, not anchored to a path
+/// segment - a rule `"up"` also matches a hypothetical `"group.weight"`.
+/// Bounded in practice by the small, fixed set of leaf names a caller ever
+/// consults this against, but real: document it at the call site, do not
+/// assume it away.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TierPolicy {
+    default: Dtype,
+    rules: Vec<(String, Dtype)>,
+}
+
+impl TierPolicy {
+    /// Every leaf at the same tier - what a bare `Dtype` used to mean.
+    pub fn uniform(default: Dtype) -> TierPolicy {
+        TierPolicy { default, rules: Vec::new() }
+    }
+
+    /// Add a rule: any leaf name containing one of `patterns` wants `dt`.
+    /// Declaration order matters - [`Self::want`] scans rules in REVERSE, so
+    /// a later `with` call narrows an earlier, broader one for a name both
+    /// match, without needing to reorder the earlier call.
+    pub fn with(mut self, patterns: &[&str], dt: Dtype) -> TierPolicy {
+        for p in patterns {
+            self.rules.push(((*p).to_string(), dt));
+        }
+        self
+    }
+
+    /// The tier leaf `name` should upload at: the LAST rule whose pattern is
+    /// a substring of `name`, or [`Self::uniform`]'s default if none match.
+    pub fn want(&self, name: &str) -> Dtype {
+        self.rules.iter().rev().find(|(pat, _)| name.contains(pat.as_str())).map(|(_, dt)| dt).copied().unwrap_or(self.default)
+    }
+
+    /// `true` if any leaf can land at a non-F32 tier - the train/quantize
+    /// mutual-exclusion assert the old `i8: bool` gated reads this instead.
+    pub fn quantizes_anything(&self) -> bool {
+        self.default != Dtype::F32 || self.rules.iter().any(|(_, dt)| *dt != Dtype::F32)
+    }
+
+    /// Round-trippable string form: `"q4"` (uniform), or
+    /// `"q4,in_proj_a.weight=f32,in_proj_b.weight=f32"` (default, then
+    /// `pattern=tier` rules in declaration order) - what
+    /// `BRAIN_QWEN35_GGUF_TIER` parses.
+    pub fn describe(&self) -> String {
+        let mut s = self.default.name().to_string();
+        for (pat, dt) in &self.rules {
+            s.push(',');
+            s.push_str(pat);
+            s.push('=');
+            s.push_str(dt.name());
+        }
+        s
+    }
+
+    /// [`Self::describe`]'s inverse. Rejects an unknown tier name loudly -
+    /// never silently defaults to F32 - so a typo in an env var fails fast
+    /// instead of quietly serving the wrong precision.
+    pub fn parse(s: &str) -> Result<TierPolicy, String> {
+        let mut parts = s.split(',');
+        let default_s = parts.next().unwrap_or("");
+        let default = Dtype::from_name(default_s).ok_or_else(|| format!("TierPolicy::parse: unknown tier {default_s:?}"))?;
+        let mut policy = TierPolicy::uniform(default);
+        for part in parts {
+            let (pat, dt_s) =
+                part.split_once('=').ok_or_else(|| format!("TierPolicy::parse: rule {part:?} is not `pattern=tier`"))?;
+            let dt = Dtype::from_name(dt_s).ok_or_else(|| format!("TierPolicy::parse: unknown tier {dt_s:?} in rule {part:?}"))?;
+            policy = policy.with(&[pat], dt);
+        }
+        Ok(policy)
+    }
+}
+
 /// One paged-KV-cache pool buffer (B9) - `Weight`'s sibling for CACHE PAGES,
 /// deliberately NOT a `Weight` variant. A KV page has no `(n, k)` GEMM shape
 /// and no "load once from a checkpoint" story: `Weight::upload` packs a value

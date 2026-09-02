@@ -331,6 +331,36 @@ impl DType {
             }
         }
     }
+
+    /// The lowercase name every parser/report in the engine already spells
+    /// this tier as (`"f32"`, `"bf16"`, `"f16"`, `"i8"`, `"q4"`) - the
+    /// canonical string form, so a per-model `--dtype`/env-var parser and a
+    /// per-leaf tier policy report both read the same table instead of each
+    /// re-inventing one (`wan::dev::WanDtype::parse`/`name` is the copy this
+    /// replaces).
+    pub const fn name(self) -> &'static str {
+        match self {
+            DType::F32 => "f32",
+            DType::F16 => "f16",
+            DType::BF16 => "bf16",
+            DType::I8 => "i8",
+            DType::Q4 => "q4",
+        }
+    }
+
+    /// [`Self::name`]'s inverse. `None` on anything else - never a silent
+    /// default, since a caller mistyping a tier name wants a loud rejection,
+    /// not a quiet fp32 fallback.
+    pub fn from_name(s: &str) -> Option<DType> {
+        match s {
+            "f32" => Some(DType::F32),
+            "f16" => Some(DType::F16),
+            "bf16" => Some(DType::BF16),
+            "i8" => Some(DType::I8),
+            "q4" => Some(DType::Q4),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -468,6 +498,20 @@ mod dtype_tests {
         assert_eq!(DType::I8.per_word(), 4);
         assert_eq!(DType::Q4.bits(), 4);
         assert_eq!(DType::Q4.per_word(), 8);
+    }
+
+    #[test]
+    fn name_and_from_name_round_trip_every_variant() {
+        for dt in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
+            assert_eq!(DType::from_name(dt.name()), Some(dt), "{dt:?} did not round-trip through its own name");
+        }
+    }
+
+    #[test]
+    fn from_name_rejects_an_unknown_string_rather_than_defaulting() {
+        assert_eq!(DType::from_name("fp32"), None, "must not silently accept a near-miss");
+        assert_eq!(DType::from_name(""), None);
+        assert_eq!(DType::from_name("Q4"), None, "case must match exactly, not fold");
     }
 }
 
