@@ -106,8 +106,14 @@ pub const ATTN_BWD_DQ_CROSS: &str = include_str!("../wgsl/attn_bwd_dq_cross.wgsl
 pub const ATTN_BWD_DSCORES: &str = include_str!("../wgsl/attn_bwd_dscores.wgsl");
 /// `wgsl/attn_bwd_dscores_bidir.wgsl`
 pub const ATTN_BWD_DSCORES_BIDIR: &str = include_str!("../wgsl/attn_bwd_dscores_bidir.wgsl");
+/// `wgsl/attn_bwd_dscores_bidir_rows.wgsl`
+pub const ATTN_BWD_DSCORES_BIDIR_ROWS: &str = include_str!("../wgsl/attn_bwd_dscores_bidir_rows.wgsl");
 /// `wgsl/attn_bwd_dscores_cross.wgsl`
 pub const ATTN_BWD_DSCORES_CROSS: &str = include_str!("../wgsl/attn_bwd_dscores_cross.wgsl");
+/// `wgsl/attn_bwd_dscores_cross_rows.wgsl`
+pub const ATTN_BWD_DSCORES_CROSS_ROWS: &str = include_str!("../wgsl/attn_bwd_dscores_cross_rows.wgsl");
+/// `wgsl/attn_bwd_dscores_rows.wgsl`
+pub const ATTN_BWD_DSCORES_ROWS: &str = include_str!("../wgsl/attn_bwd_dscores_rows.wgsl");
 /// `wgsl/attn_bwd_dv.wgsl`
 pub const ATTN_BWD_DV: &str = include_str!("../wgsl/attn_bwd_dv.wgsl");
 /// `wgsl/attn_bwd_dv_bidir.wgsl`
@@ -472,6 +478,8 @@ pub const GQA_BWD_DK: &str = include_str!("../wgsl/gqa_bwd_dk.wgsl");
 pub const GQA_BWD_DQ: &str = include_str!("../wgsl/gqa_bwd_dq.wgsl");
 /// `wgsl/gqa_bwd_dscores.wgsl`
 pub const GQA_BWD_DSCORES: &str = include_str!("../wgsl/gqa_bwd_dscores.wgsl");
+/// `wgsl/gqa_bwd_dscores_rows.wgsl`
+pub const GQA_BWD_DSCORES_ROWS: &str = include_str!("../wgsl/gqa_bwd_dscores_rows.wgsl");
 /// `wgsl/gqa_bwd_dv.wgsl`
 pub const GQA_BWD_DV: &str = include_str!("../wgsl/gqa_bwd_dv.wgsl");
 /// `wgsl/gqa_scores.wgsl`
@@ -960,7 +968,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dq_cross", ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dscores", ATTN_BWD_DSCORES),
     ("attn_bwd_dscores_bidir", ATTN_BWD_DSCORES_BIDIR),
+    ("attn_bwd_dscores_bidir_rows", ATTN_BWD_DSCORES_BIDIR_ROWS),
     ("attn_bwd_dscores_cross", ATTN_BWD_DSCORES_CROSS),
+    ("attn_bwd_dscores_cross_rows", ATTN_BWD_DSCORES_CROSS_ROWS),
+    ("attn_bwd_dscores_rows", ATTN_BWD_DSCORES_ROWS),
     ("attn_bwd_dv", ATTN_BWD_DV),
     ("attn_bwd_dv_bidir", ATTN_BWD_DV_BIDIR),
     ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
@@ -1143,6 +1154,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gqa_bwd_dk", GQA_BWD_DK),
     ("gqa_bwd_dq", GQA_BWD_DQ),
     ("gqa_bwd_dscores", GQA_BWD_DSCORES),
+    ("gqa_bwd_dscores_rows", GQA_BWD_DSCORES_ROWS),
     ("gqa_bwd_dv", GQA_BWD_DV),
     ("gqa_scores", GQA_SCORES),
     ("gqa_scores_kmask", GQA_SCORES_KMASK),
