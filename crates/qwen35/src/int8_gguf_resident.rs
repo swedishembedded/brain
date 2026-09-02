@@ -79,11 +79,17 @@
 //!   `lm_head`), which a multi-card split is not by construction.
 //!   Self-speculative decode stays a single-GPU concern.
 //! * **Per-token prefill.** The prompt is replayed one token at a time
-//!   through the same decode path, exactly as [`crate::serve::Engine::prefill`]
-//!   does and for the same reason (`model::gdn`'s chunked prefill would need
-//!   a `t`-sized build per stage, i.e. a `[t, vocab]` logits buffer plus
-//!   `n_layers` `[t, d_model]` residual slabs on EVERY card, for a path that
-//!   is already correct one token at a time).
+//!   through the same decode path. [`crate::serve::Engine::prefill`] no
+//!   longer is (M25: it consumes the prompt in chunks via
+//!   `Qwen35::run_prefill_chunk`), but that primitive is whole-model only and
+//!   asserts so: this resident is PIPELINE-PARALLEL, and the cross-stage seam
+//!   it hands one stage's output to the next through
+//!   (`run_decode_step`'s `input_override`) is `[d_model]` - one row. A
+//!   chunked resident needs that seam widened to a whole round's
+//!   `[n, d_model]` boundary residual, plus the `t`-sized per-stage buffers
+//!   that implies on EVERY card. Worth doing (this is the REAL-weight path,
+//!   so it is where a 20x prefill speedup is worth the most) and not done
+//!   here.
 //! * **One sequence per dispatch.** Every stage is built at `b = t = 1`, so
 //!   `run_batch` is the serial default - see its own doc.
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.

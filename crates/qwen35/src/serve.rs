@@ -9,13 +9,16 @@
 //! which `Qwen35::run_decode_step` already handles via the row-count-
 //! agnostic `mlp_fwd`, with no serving-layer consequence at all).
 //!
-//! Builds on `Qwen35::step`/`reset_decode_cache`/`decode_pos`
-//! (`crates/qwen35/src/model.rs`) - the single-sequence incremental decode
-//! primitive this whole module is a thin multi-request wrapper around.
-//! Scope, deliberately: **one truly-active sequence at a time** on the GPU
-//! (every dispatch here processes exactly one sequence's one token; several
-//! sequences can be RESIDENT and interleaved by the [`model::serve::Scheduler`]
-//! across iterations, but never batched together into one GPU dispatch).
+//! Builds on `Qwen35::run_decode_step` (one token) and
+//! `Qwen35::run_prefill_chunk` (one prompt round, M25)
+//! (`crates/qwen35/src/model.rs`) - the single-sequence primitives this whole
+//! module is a thin multi-request wrapper around.
+//! Scope, deliberately: **one truly-active sequence at a time** on the GPU.
+//! A dispatch here carries one sequence's rows and no other's - one token in
+//! steady-state decode, up to `MAX_PREFILL_TOKENS` of its own prompt during
+//! prefill; several sequences can be RESIDENT and interleaved by the
+//! [`model::serve::Scheduler`] across iterations, but two DIFFERENT sequences
+//! are never batched together into one GPU dispatch.
 //! This is explicitly NOT `qwen3::serve::Engine`'s production feature set -
 //! see "Deliberately deferred" at the end of this doc for the exact list.
 //!
@@ -70,21 +73,34 @@
 //! separate same-shape allocations rather than one large buffer sliced per
 //! sequence.
 //!
-//! # `prefill`
+//! # `prefill` (chunked as of M25)
 //!
-//! Loops over the prompt ONE TOKEN AT A TIME, calling
-//! `Qwen35::run_decode_step` per token against this sequence's own
+//! Consumes the prompt in bounded ROUNDS of `MAX_PREFILL_TOKENS`, calling
+//! `Qwen35::run_prefill_chunk` per round against this sequence's own
 //! `DecodeCaches` (the pool slice for its physical block id, and its
-//! `GdnSlot`). This is NOT `qwen3::serve::Engine`'s chunked, multi-token-per-
-//! dispatch prefill - a per-token DISPATCH loop is the explicitly-sanctioned
-//! correctness-first shape for this pass, and that performance gap (one
-//! submit per prompt token instead of one batched whole-prompt forward) is
-//! real and is intentionally left for later work, exactly the way
-//! `crate::sample::generate_kv`'s own doc already names its identical
-//! per-token-prefill gap. What M3.4 DID fix: every token used to also pay a
-//! full host `gpu.read` of the hidden state, discarded on every iteration but
-//! the last - that per-token READ is gone (the device buffer is chained
-//! token-to-token; the loop reads back exactly once, after it ends).
+//! `GdnSlot`). A round runs the whole layer stack once at `n = chunk` rows
+//! instead of `chunk` times at one row: the per-layer projections become
+//! `[chunk, d] x [d, *]` GEMMs, and the ~40 dispatches a layer costs are paid
+//! once per round rather than once per token.
+//!
+//! The round-to-round state threading is the substance of it, and it is not
+//! free: a GQA layer's chunk appends its `n` K/V rows at cache offset
+//! `pos_start` and attends `0..=pos_start+i` per row (a per-row `seq_lens`
+//! causal mask, `model::block::gqa_chunk_step`), and a GDN layer continues
+//! from the previous round's `gdn_chunk_fwd` `final_state` AND its
+//! causal-conv input tail (`model::gdn_mixer::GdnStream`). The invariant that
+//! matters to this engine is that a completed prefill leaves EXACTLY the
+//! state a per-token replay would have: `decode_one` then continues with no
+//! special case at all. `crates/qwen35/tests/chunked_prefill.rs` gates that
+//! against the per-token path directly.
+//!
+//! What is still deferred here is the ATTENTION MEMORY at very long context -
+//! see `MAX_PREFILL_TOKENS`'s own doc for the `[chunk, n_heads, pos+chunk]`
+//! scratch this shape materialises and why the fused flash-prefill kernel
+//! that would remove it does not fit this model's `head_dim = 256` yet.
+//!
+//! (M3.4, still true: no host readback inside the loop - each round chains as
+//! a device buffer and the one real `gpu.read` happens after it ends.)
 //!
 //! # `forward_batched_greedy`/`_window`/`forward_batched_topk`
 //!
@@ -104,9 +120,6 @@
 //!
 //! - **Prefix-cache reuse**: none. [`Engine::reclaim_prefix`] is a no-op
 //!   returning 0, [`Engine::prefix_stats`] always reports `(0, 0, 0)`.
-//! - **Chunked / batched prefill**: prompts are replayed one token at a time
-//!   (one dispatch per token - see "`prefill`" above for what M3.4 did and
-//!   did not change here).
 //! - **Multi-sequence GPU batching**: `forward_batched_*` loop sequentially,
 //!   one sequence's dispatch at a time.
 //! - **int8/int4 paged KV, weight quantization, speculative decode**: not
@@ -139,6 +152,21 @@ const DECODE_WINDOW_CAPACITY: usize = 1;
 /// (non-greedy) sampling still works fully correctly at this width - it
 /// only bounds how far into the vocabulary top-p's nucleus can reach.
 const TOPK_CAPACITY: usize = 32;
+
+/// How many prompt tokens [`Engine::prefill`] pushes through the model per
+/// dispatch round (M25). Bigger rounds amortise the per-layer dispatch
+/// overhead over more rows, which is the whole speedup - but the round's
+/// attention scratch is `[chunk, n_heads, pos+chunk]` twice over
+/// (`model::block::gqa_chunk_step`'s materialised scores/probs), so it also
+/// grows with BOTH the chunk length and the context already cached. At this
+/// model's real shape (`n_heads = 24`) 256 costs about 100 MB of transient
+/// scratch at a 4096-token context and about 1.2 GB at 48K - which is why
+/// this is a bounded chunk size and not "the whole prompt in one dispatch",
+/// and why closing the long-context case properly needs a flash-attention
+/// prefill kernel rather than a bigger number here (`paged_flash_prefill.wgsl`
+/// is that kernel, but its tiles cap `head_dim` at 128 and this model's is
+/// 256 - see the M25 roadmap entry).
+const MAX_PREFILL_TOKENS: u32 = 256;
 
 /// One admitted sequence's persistent Gated-DeltaNet resources: recurrent
 /// `state` + causal-conv `hist`, one pair per layer (a size-1 dummy at
@@ -358,12 +386,13 @@ impl Engine {
         tokens.div_ceil(self.block_size)
     }
 
-    /// Prefill is un-chunked (one per-token loop over the WHOLE prompt every
-    /// admission, see module doc) - there is no internal chunk size to
-    /// report, so this returns the engine's own hard per-sequence capacity,
-    /// the same size a single whole-prompt "chunk" would be.
+    /// [`MAX_PREFILL_TOKENS`] - the real chunk size [`Engine::prefill`] runs
+    /// at (M25), and so the honest unit for the scheduler's own per-iteration
+    /// prefill budget. Before M25 this reported the engine's whole
+    /// per-sequence capacity, because prefill was un-chunked and had no
+    /// internal round size to report.
     pub fn max_prefill_tokens(&self) -> u32 {
-        self.block_size
+        MAX_PREFILL_TOKENS
     }
 
     /// No prefix cache in this pass (see module doc) - always 0 blocks
@@ -423,20 +452,23 @@ impl Engine {
         t.release(&mut self.alloc);
     }
 
-    /// Prefill a fresh prompt into `table`, one token at a time - see module
-    /// doc "`prefill`" for why this is a per-token DISPATCH loop rather than
-    /// a batched/chunked forward (that part is still deliberately deferred).
+    /// Prefill a fresh prompt into `table` in bounded CHUNKS - see module doc
+    /// "`prefill`" for the shape and [`Qwen35::run_prefill_chunk`] for the
+    /// per-round state contract this relies on.
     ///
-    /// M3.4: every token but the last used to pay a full `gpu.read(&h, d)` -
-    /// a host-synchronising readback the caller immediately overwrote on the
-    /// next iteration, since only the FINAL token's hidden state is ever
-    /// wanted. `run_decode_step` is now chained token-to-token as a device
-    /// buffer with no readback in the loop at all; the one real readback
-    /// happens exactly once, after the loop, off the last token's hidden
-    /// state - the same "submit every step, read back once" shape `qwen3::
-    /// serve::Engine::prefill`'s own chunk loop uses (M3.1), ported here at
-    /// token granularity instead of chunk granularity since this engine has
-    /// no multi-token batched dispatch to chunk over.
+    /// M25: this used to be a per-TOKEN dispatch loop (one full
+    /// `run_decode_step` per prompt token). It now consumes the prompt
+    /// [`MAX_PREFILL_TOKENS`] at a time, so the per-layer projections that
+    /// dominate a prefill run as `[chunk, d] x [d, *]` GEMMs instead of
+    /// `chunk` separate `m = 1` GEMVs against the same weights. The external
+    /// contract is unchanged: same asserts, same single physical block, same
+    /// `[d_model]` return, and the sequence is left in exactly the state the
+    /// per-token loop left it in (gated by `tests/chunked_prefill.rs`), so
+    /// every following `decode_one` continues seamlessly.
+    ///
+    /// M3.4's readback discipline is kept: no host readback inside the loop
+    /// at all. Each round chains as a device buffer, and the one real
+    /// `gpu.read` happens after the loop, off the final round's last row.
     pub fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         assert!(table.is_empty(), "prefill expects a fresh sequence");
         assert!(!prompt.is_empty(), "qwen35::serve::Engine::prefill: empty prompt (no token to produce a hidden state from)");
@@ -459,10 +491,11 @@ impl Engine {
 
         let d = self.model.cfg.d_model as usize;
         let mut h: Option<DeviceBuffer> = None;
-        for (i, &tok) in prompt.iter().enumerate() {
-            let pos = i as u32;
+        let mut pos = 0u32;
+        for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
             let caches = self.caches_for(phys);
-            h = Some(self.model.run_decode_step(tok, pos, &caches, None));
+            h = Some(self.model.run_prefill_chunk(round, pos, &caches));
+            pos += round.len() as u32;
         }
         let h = h.expect("prefill: prompt is non-empty (asserted above), so the loop ran at least once");
         self.model.gpu.read(&h, d)

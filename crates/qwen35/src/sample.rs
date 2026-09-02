@@ -10,11 +10,13 @@
 //! this repo owns its own tiny sampling tail, not a cross-model dependency
 //! for ~60 lines of elementwise math).
 //!
-//! Feeds the WHOLE prompt through [`Qwen35::step`] one token at a time
-//! (rather than a fast batched prefill-into-cache path): correctness-first
-//! for this pass, matching every other qwen35 decode primitive landed so
-//! far - a batched prefill fast path is deferred performance work, same as
-//! `qwen35moe::serve::Engine`'s own per-token prefill loop names.
+//! Feeds the WHOLE prompt through [`Qwen35::step`] one token at a time.
+//! The batched alternative now exists - [`Qwen35::prefill_chunked`] (M25),
+//! which leaves byte-for-byte the same decode state and is what
+//! `crate::serve::Engine::prefill` runs - so this is a straightforward swap
+//! whenever this helper's own callers are worth re-baselining; it is left on
+//! the simple path here only because nothing that uses it is throughput-
+//! sensitive.
 
 use data::rng::Rng;
 
