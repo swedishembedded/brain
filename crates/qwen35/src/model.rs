@@ -158,9 +158,14 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("max_abs_row", kernels::MAX_ABS_ROW), // 81
     ("quant_pack", kernels::QUANT_PACK), // 82
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN), // 83
-    // -- coalesced RMSNorm -- see `rms_step`. Registered LAST so every
-    // hand-numbered const above keeps its position.
+    // -- coalesced RMSNorm -- see `rms_step`.
     ("rmsnorm_rows", kernels::RMSNORM_ROWS), // 84
+    // -- device head (greedy argmax / top-k), see `Qwen35::head_argmax_dev`/
+    // `Qwen35::head_topk_dev`. Registered LAST so every hand-numbered const
+    // above keeps its position.
+    ("argmax_part", kernels::ARGMAX_PART), // 85
+    ("argmax_final", kernels::ARGMAX_FINAL), // 86
+    ("topk_extract_step", kernels::TOPK_EXTRACT_STEP), // 87
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -316,6 +321,17 @@ const ATTN_DECODE_SCORES: usize = 78;
 const DECODE_SOFTMAX: usize = 79;
 const ATTN_DECODE_APPLY: usize = 80;
 const RMSNORM_ROWS: usize = 84;
+const ARGMAX_PART: usize = 85;
+const ARGMAX_FINAL: usize = 86;
+const TOPK_EXTRACT_STEP: usize = 87;
+
+/// Two-stage argmax reduction width for [`Qwen35::head_argmax_dev`]/
+/// [`Qwen35::head_topk_dev`] - matches `qwen3::serve::Engine`'s own
+/// `ARGMAX_CHUNKS`. `Op::ArgMaxRow`'s `SplitReduction` shape is
+/// capability-free (no `caps` gate anywhere in that arm - see
+/// `backend_api::select`'s own doc), so dispatching it unconditionally here
+/// is safe even though this crate carries no `KernelSelector` of its own.
+const HEAD_ARGMAX_CHUNKS: u32 = 256;
 
 /// This model's RMSNorm epsilon. Exactly what `rmsnorm.wgsl` hardcodes, but it
 /// has to be passed explicitly here - see [`rms_step`].
@@ -2256,6 +2272,82 @@ impl Qwen35 {
     pub(crate) fn decode_step_stage(&self, token_id: u32, pos: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> Vec<f32> {
         let hidden = self.run_decode_step(token_id, pos, caches, input_override);
         self.gpu.read(&hidden, self.cfg.d_model as usize)
+    }
+
+    /// Device-side head epilogue: `logits[vocab] = hidden[d_model] @
+    /// head[vocab, d_model]^T` - the SAME `MATMUL` dispatch [`Self::
+    /// run_forward`]'s head epilogue and [`Self::logits_all`] already issue,
+    /// at `n = 1`. `hidden` must already be through the final `norm.weight`
+    /// RMSNorm - exactly what [`Self::run_decode_step`]'s head-stage branch
+    /// returns. Unlike [`Self::decode_step_stage`]'s doc (which explains why
+    /// a STREAMED/SHARDED head must stay int8 and off-shard), a whole
+    /// unsharded `Qwen35` - this method's only caller
+    /// (`crate::serve::Engine`) - already holds the fp32 head resident via
+    /// `Self::w` regardless, so projecting through it costs no extra device
+    /// memory over what the model already carries.
+    pub(crate) fn head_logits_dev(&self, hidden: &DeviceBuffer) -> DeviceBuffer {
+        let g = &self.gpu;
+        let d = self.cfg.d_model;
+        let v = self.cfg.vocab;
+        let logits = g.storage(v as u64);
+        g.submit(&[], &[g.step(MATMUL, &[hidden, self.w(self.cfg.head_weight()), &logits], &[1, d, v], v)]);
+        logits
+    }
+
+    /// [`Self::head_logits_dev`] reduced to ONE greedy index, entirely on the
+    /// device (`argmax_part` + `argmax_final` - `Op::ArgMaxRow`'s
+    /// `SplitReduction` shape, `backend_api::select`) - only the winning
+    /// index is read back, never the `[vocab]` logits block. The serving
+    /// path's device head: see `crate::serve::Engine::forward_batched_greedy`/
+    /// `admit_greedy`.
+    pub(crate) fn head_argmax_dev(&self, hidden: &DeviceBuffer) -> u32 {
+        let g = &self.gpu;
+        let v = self.cfg.vocab;
+        let logits = self.head_logits_dev(hidden);
+        let chunk = v.div_ceil(HEAD_ARGMAX_CHUNKS);
+        let part = g.storage(HEAD_ARGMAX_CHUNKS as u64 * 2);
+        let out = g.storage(1);
+        g.submit(
+            &[],
+            &[
+                g.step(ARGMAX_PART, &[&logits, &part], &[1, v, HEAD_ARGMAX_CHUNKS, chunk], HEAD_ARGMAX_CHUNKS),
+                g.step(ARGMAX_FINAL, &[&part, &out], &[1, HEAD_ARGMAX_CHUNKS], 1),
+            ],
+        );
+        g.read(&out, 1)[0] as u32
+    }
+
+    /// [`Self::head_logits_dev`] reduced to the top-`cap` (token id, logit)
+    /// candidates, best first, entirely on the device: `cap` iterations of
+    /// (`argmax_part`+`argmax_final`, `topk_extract_step`), each masking the
+    /// current winner out of `logits` before the next iteration finds the
+    /// row's next-best value - only `cap` pairs are read back, never the
+    /// `[vocab]` logits block. Mirrors `qwen3::serve::Engine::
+    /// submit_topk_head`/`topk_from_hidden` exactly, at `bsz = 1` and with a
+    /// freshly-sized scratch per call rather than a persistent
+    /// `[max_batch, TOPK_CAPACITY]` buffer - this engine's own "one truly
+    /// active sequence at a time" scope (see `crate::serve`'s module doc)
+    /// never needs the batched form.
+    pub(crate) fn head_topk_dev(&self, hidden: &DeviceBuffer, cap: u32) -> Vec<(u32, f32)> {
+        assert!(cap > 0, "head_topk_dev: cap must be > 0");
+        let g = &self.gpu;
+        let v = self.cfg.vocab;
+        let logits = self.head_logits_dev(hidden);
+        let chunk = v.div_ceil(HEAD_ARGMAX_CHUNKS);
+        let part = g.storage(HEAD_ARGMAX_CHUNKS as u64 * 2);
+        let arg = g.storage(1);
+        let vals = g.storage(cap as u64);
+        let idx = g.storage(cap as u64);
+        let mut steps: Vec<Step> = Vec::new();
+        for col in 0..cap {
+            steps.push(g.step(ARGMAX_PART, &[&logits, &part], &[1, v, HEAD_ARGMAX_CHUNKS, chunk], HEAD_ARGMAX_CHUNKS));
+            steps.push(g.step(ARGMAX_FINAL, &[&part, &arg], &[1, HEAD_ARGMAX_CHUNKS], 1));
+            steps.push(g.step(TOPK_EXTRACT_STEP, &[&arg, &logits, &vals, &idx], &[1, v, cap, col], 1));
+        }
+        g.submit(&[], &steps);
+        let vals = g.read(&vals, cap as usize);
+        let idx = g.read(&idx, cap as usize);
+        idx.into_iter().map(|x| x as u32).zip(vals).collect()
     }
 
     /// One Gated DeltaNet layer's decode step - the single-token sibling of
