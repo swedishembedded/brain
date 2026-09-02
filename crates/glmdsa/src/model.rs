@@ -784,7 +784,7 @@ impl Glm {
         s.push(self.gpu.step(ROPE_SUB, &[&self.k_idx], &[n, 1, idh, rope, idh, t_use], n * (rope / 2)));
         self.mm(s, &lb.xn1, &p("idx.weights_proj.weight"), &self.idx_weights, n, d, nih);
         s.push(self.gpu.step(MLA_INDEX_SCORES, &[&self.q_idx, &self.k_idx, &self.idx_weights, &self.index_scores], &[b_use, nih, t_use, idh], b_use * t_use * t_use));
-        s.push(self.gpu.step(TOPK_MASK, &[&self.index_scores, &self.idx_mask], &[b_use, t_use, c.index_topk], b_use * t_use));
+        s.push(self.gpu.step(TOPK_MASK, &[&self.index_scores, &self.idx_mask], &[b_use, t_use, c.index_topk], b_use * t_use * t_use));
     }
 
     /// Add the current DSA sparse mask into the MLA scores (shared across heads).
