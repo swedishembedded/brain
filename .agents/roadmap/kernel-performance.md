@@ -670,6 +670,73 @@ drop-in swap the way the four named sites were - it needs the two concerns
 split first. Left unmigrated; a future pass can fold them onto `flash_gate`
 once that split is done.
 
+### M1.2 - `Ops::with_selector` lands; `qwen3::serve`'s manual GEMM dispatch region stays, for two real reasons the brief did not anticipate
+
+This milestone's brief (written before Phase 1's other work landed) asked
+for two things: (1) an injectable `Arc<dyn KernelSelector>` on `Ops`, and (2)
+migrating `qwen3::serve::Engine::{mm,mm_into,gemm_tier,linear,mm8,tune_i8,
+measure_i8}` onto that seam and deleting the `qwen3-serve-manual-gemm-
+dispatch` marker region plus its allow-list in `no_kernel_names.rs`. A first
+attempt at this milestone failed mid-edit on a transient infrastructure
+error, leaving `crates/qwen3/src/serve.rs` uncompilable (a `selector` field
+whose type had been changed to `Arc<dyn KernelSelector>` with `tuned_i8`
+already deleted, no replacement finished) for M2.1-M2.3's entire duration -
+those three entries above each record hitting the same compile break and
+working around it with a throwaway harness. M2.4 restored the build by
+finishing exactly what that in-flight edit's own doc comments already
+specified (restoring `tuned_i8` as a plain field, wrapping `DefaultSelector`
+in `Arc`), closing item (1): `Ops::with_selector` (commit `d81d19b0`) is a
+real, tested injection point, `Ops::new`'s own behaviour unchanged, proved by
+a regression test dispatching two `Ops` with deliberately disagreeing
+selectors to different kernels.
+
+**Item (2), re-checked against source rather than carried forward as
+written, does not hold as stated.** `serve.rs`'s own doc comment on the
+marker region (added by the M2.4 fix, not this milestone) already gives the
+reason: the region survives `Ops::with_selector` NOT because the selector is
+unreachable there any more, but because of two independent facts about
+`model::ops::Ops::matmul` that a selector injection point does not touch.
+(a) `Self::mm_into`'s split-K fold (`MATMUL_REG3_SPLITK` + `SPLITK_REDUCE`,
+a second dispatch folding per-slice partials) has no `Ops::matmul`
+equivalent at all - `KernelVariant` has no split-K member, because splitting
+is a dispatch-COUNT decision orthogonal to which kernel variant runs, not a
+policy `KernelSelector::select(op, shape, caps) -> KernelVariant` can
+express. (b) `Self::mm8`'s measured choice comes from `AutoTuner::resolve`,
+whose signature takes a `measure: &mut dyn FnMut(KernelVariant) -> Option
+<f64>` closure that actually dispatches and times each candidate on the
+engine's own persistent `I8Scratch` (reused, requantized in place every
+layer) - `KernelSelector::select` takes no such closure and `Ops::act`
+allocates a fresh `I8Scratch` per call, so wrapping `AutoTuner` as a
+`KernelSelector` would either drop the empirical measurement or force a
+per-decode-step allocation regression. Neither gap is a missing injection
+point; both are missing `Ops::matmul` capabilities (a split-K dispatch mode,
+a persistent-scratch-aware measured-selection API) that this milestone's
+scope - "give `Ops` an injectable selector" - never asked for and that
+inventing here would be unauthorized scope growth, not a migration.
+
+The REACHABLE part of item (2) was already done as part of the M2.4 fix:
+`Self::mm8`'s fallback (a shape `tuned_i8` has no measurement for) and
+`Self::rms` both call `self.selector.select(...)`, the same injected
+`Arc<dyn KernelSelector>` `Ops::matmul` consults - the measured `tuned_i8`
+table is consulted directly, never wrapped into that selector, exactly as
+its own field doc says. The marker region and its `no_kernel_names.rs`
+allow-list stay, verified still consistent by that test's own
+`serve_manual_gemm_dispatch_region_is_still_marked_and_contains_every_
+remaining_gemm_kernel_variant_reference` check.
+
+**No code change made this pass** - this is decision 4's "killed, not
+forced" outcome applied to a migration target instead of a kernel
+candidate: the brief's premise was checked against the actual `Ops::matmul`
+surface, found false, and the already-landed M2.4 fix already represents
+the maximal correct migration (the parts that fit the seam moved onto it;
+the parts that need seam capabilities beyond an injectable selector stayed
+manual, documented as such). Re-verified clean this pass:
+`cargo test -p brain-qwen3 --test no_kernel_names` (3/3), `cargo clippy -p
+brain-qwen3 --lib` and `cargo clippy -p brain-model --lib` (zero warnings).
+Follow-up, if ever wanted: a split-K `KernelVariant` and a measured-selection
+API that threads a real measurement closure through `Ops` would need their
+own milestone, not a rename of this one.
+
 ### M1.3 - `check-kernel-selection.sh`, a workspace-wide gate, and the inventory it produced
 
 Checked the brief's premise against source rather than following it literally:
