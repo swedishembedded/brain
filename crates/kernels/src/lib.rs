@@ -706,6 +706,10 @@ pub const PRELU: &str = include_str!("../wgsl/prelu.wgsl");
 pub const PRELU_BWD: &str = include_str!("../wgsl/prelu_bwd.wgsl");
 /// `wgsl/prelu_bwd_wg.wgsl`
 pub const PRELU_BWD_WG: &str = include_str!("../wgsl/prelu_bwd_wg.wgsl");
+/// `wgsl/qknorm_rope_append_fused.wgsl`
+pub const QKNORM_ROPE_APPEND_FUSED: &str = include_str!("../wgsl/qknorm_rope_append_fused.wgsl");
+/// `wgsl/qknorm_rope_fused.wgsl`
+pub const QKNORM_ROPE_FUSED: &str = include_str!("../wgsl/qknorm_rope_fused.wgsl");
 /// `wgsl/quant_pack.wgsl`
 pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
 /// `wgsl/quick_gelu.wgsl`
@@ -1252,6 +1256,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("prelu", PRELU),
     ("prelu_bwd", PRELU_BWD),
     ("prelu_bwd_wg", PRELU_BWD_WG),
+    ("qknorm_rope_append_fused", QKNORM_ROPE_APPEND_FUSED),
+    ("qknorm_rope_fused", QKNORM_ROPE_FUSED),
     ("quant_pack", QUANT_PACK),
     ("quick_gelu", QUICK_GELU),
     ("quick_gelu_bwd", QUICK_GELU_BWD),

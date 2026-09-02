@@ -1465,6 +1465,90 @@ GEMMs (M4.1)` (`Engine::from_map_with_gpu` fused-weight construction,
 `concat_split_step`/`WQKV`/`WGATEUP`, the two dispatch-site rewrites, and
 the bit-identity test), this ledger entry.
 
+### M4.2 - Fused QK-norm + RoPE + KV-append in `qwen3::serve`
+
+Checked against source first, per this campaign's own rule: the plan's literal
+"KV_APPEND x2" reads as both K's and V's append dispatch, but V never goes
+through RMSNorm or RoPE - only K does. So the real fusable region is the FIVE
+dispatches that actually share the same per-head row end to end (`rms(q)`,
+`rms(k)`, `ROPE_PAGED(q)`, `ROPE_PAGED(k)`, and K's own `KV_APPEND_B`), not six;
+V's append is a separate row and stays a separate dispatch. Two new kernels
+(`qknorm_rope_fused.wgsl`, `qknorm_rope_append_fused.wgsl`) collapse that into
+ONE dispatch for Q (norm+RoPE) and ONE for K (norm+RoPE+fp32 paged append):
+one workgroup per `(batch, head)` row, the SAME single-`workgroupBarrier()`
+reduction shape as `rmsnorm_rows` - RoPE's `(m, m+half)` pair is drawn from the
+SAME row RMSNorm just normalized, so after the one reduction barrier every
+thread re-reads its own pair from global memory (not a `var<function>` array
+sized off a runtime `head_dim` - the exact anti-pattern named in
+`docs/performance/overview.md`), applies norm-scale and rotation together, and
+- for K - writes the rotated value to BOTH `sc.k` (still needed by
+`Engine::calibrate_kv` and test fixtures) and its paged-pool slot in the same
+store. Gated on the queried `caps.workgroup_reductions` exactly like
+`Engine::rms`'s own cooperative arm - a device without it (`backend-cpu`'s own
+doc: "the split-at-barrier JIT mis-executes the workgroup-cooperative
+reduction kernels") keeps the original unfused `rms`/`ROPE_PAGED`/`KV_APPEND_B`
+sequence, so nothing regresses there. The int8-KV branch fuses only norm+RoPE
+for K (2 dispatches to 1): its own append (`APPEND_I8_CLIPPED`) does a
+whole-row absmax reduction into a packed `u32` pool, a different shape that is
+NOT folded in this milestone.
+
+**Gate**: `qk_norm_rope_fused_is_bit_identical_to_the_unfused_pair{,_kv_int8}`
+(new) prove exact bit-identity against the unfused `rms` -> `ROPE_PAGED` (->
+`KV_APPEND_B` for K, fp32-KV variant only) pair, run against the SAME
+`q_pre`/`k_pre` inputs `prefill`'s last layer actually fused - not a
+tolerance check, since normalizing then rotating the same values in the same
+order is not a reassociation. The fp32-KV test also reads back the paged pool
+at each row's real `(block, offset)` slot and checks it against the same
+reference, so the new append address arithmetic is checked, not just the
+norm+RoPE math `sc.k` alone would cover. `cargo test -p brain-qwen3 --lib`:
+109 passed (108 before this milestone's two new tests + 1 ignored,
+unchanged), on the GPU/default backend, including every pre-existing
+forward/decode/calibration parity test. `cargo clippy -p brain-qwen3
+--all-targets`: zero warnings.
+
+CPU backend (`BRAIN_DEVICE=cpu`), isolated from unrelated concurrent WIP
+sitting in the same working tree the same way M4.1's own ledger entry
+describes: 44 passed, 1 pre-existing failure
+(`causal_chunk_fp32_kv_dispatches_the_fused_kernel_not_the_triad`, confirmed
+identical against a clean HEAD checkout with none of this milestone's changes
+present - `Op::PagedAttentionFused` kernel selection, untouched by this
+milestone) - `decode_step_submits_are_not_one_per_metadata_write`, the SECOND
+pre-existing failure M4.1 recorded, does not even exist on this isolated
+checkout, confirming it belongs entirely to that unrelated concurrent WIP, not
+to M4.1 or M4.2.
+
+**Measured per-kernel table delta** (`qwen_bench serve`, Qwen3-0.6B shape,
+2x Tesla P40, isolated build - this milestone's own diff on top of the M4.1
+commit, with no unrelated concurrent WIP mixed in - mean of 5 runs each):
+decode (`serve 1 20 512`) went 646 -> 562 dispatches (-13.0%), 17.39 -> 17.28 ms
+mean (-0.6%, ~58 rows/s either way - flat, inside this box's own ~8% run-to-run
+noise band); prefill (`serve 128 20 512`) went 758 -> 674 dispatches (-11.1%),
+126.32 -> 125.25 ms mean (-0.8%, 1013 -> 1022 rows/s). Both regimes drop
+EXACTLY 84 dispatches (28 layers x 3 collapsed dispatches per layer,
+independent of row count - the mechanism is dispatch-count, not per-row work,
+so it shows up identically in both regimes). Per this campaign's own §E
+requirement: the fused region's OWN device time drops hard (prefill:
+`rmsnorm_rows` + `rope_paged` + K's share of `paged_kv_append_batched` was
+~1.72 ms pre-fusion; `qknorm_rope_fused` + `qknorm_rope_append_fused` +
+the QK-norm-free `rmsnorm_rows` remainder is ~1.33 ms post-fusion, a ~23%
+cut in the region's own device time from no longer writing the normalized
+value out and reading it back for RoPE, then writing THAT out and reading it
+back again for the append) - but that region is only ~1.4% of the whole
+124-127 ms prefill pass, so the whole-pass number moves by a similar small
+amount, not by the region's own percentage. This is the same shape M4.1's own
+entry found: a real, measured, non-fabricated win in dispatch count and
+per-kernel device time, translating to a modest (prefill) to flat (decode,
+inside noise) whole-pass effect because QK-norm/RoPE/KV-append were never the
+dominant cost here - `matmul_gemv`/`matmul_reg3_splitk` and the paged-attention
+kernels are. Kept, not killed: the dispatch-count and per-kernel-time deltas
+are real and reproducible: not fabricated, but also not overstated as a
+whole-pass win larger than what was actually measured.
+
+**Commits**: one - `qwen3: fuse QK-norm + RoPE + KV-append in qwen3::serve
+(M4.2)` (the two new kernels, `Engine::qk_norm_rope`/`qk_norm_rope_append`,
+the `run_batched_steps` call-site rewrite, and the two bit-identity tests),
+this ledger entry.
+
 ---
 
 ## Not yet done

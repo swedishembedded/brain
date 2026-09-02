@@ -95,6 +95,11 @@ const PAGED_FLASH_PREFILL: usize = 30;
 // buffer), not `region_copy` (which requires src/dst to share one
 // row_stride/off - it copies a sub-region, it cannot narrow one).
 const CONCAT_SPLIT: usize = 31;
+// M4.2: QK-norm + RoPE fused into one dispatch per q/k row (see
+// `qknorm_rope_fused.wgsl`'s own header); the K-only sibling additionally
+// folds the fp32 paged KV append into the same pass.
+const QKNORM_ROPE_FUSED: usize = 32;
+const QKNORM_ROPE_APPEND_FUSED: usize = 33;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -129,6 +134,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
     ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
     ("concat_split", kernels::CONCAT_SPLIT),
+    ("qknorm_rope_fused", kernels::QKNORM_ROPE_FUSED),
+    ("qknorm_rope_append_fused", kernels::QKNORM_ROPE_APPEND_FUSED),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -1294,6 +1301,61 @@ impl Engine {
     }
     // qwen3-serve-manual-gemm-dispatch END
 
+    /// M4.2: fused QK-norm + RoPE, one dispatch over `x`'s `rows = b * heads`
+    /// per-head rows (`heads` is `nh` for Q, `nkv` for K - the SAME
+    /// flattening `Self::rms`'s own `b * nh` / `b * nkv` row counts already
+    /// assume) instead of `Self::rms` followed by a separate `ROPE_PAGED`.
+    /// See `qknorm_rope_fused.wgsl`'s own header for the derivation and the
+    /// bit-identity argument.
+    ///
+    /// Gated on `caps.workgroup_reductions` exactly like `Self::rms`'s own
+    /// cooperative arm: the fused kernel carries the same single
+    /// `workgroupBarrier()` the split-at-barrier CPU JIT mis-executes for
+    /// `rmsnorm_rows` (`backend-cpu`'s own doc), so a device without that
+    /// capability keeps the original two-dispatch pair rather than an
+    /// unconditional fused dispatch reproducing that defect.
+    #[allow(clippy::too_many_arguments)]
+    fn qk_norm_rope(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32) {
+        let g = &self.gpu;
+        if self.caps.workgroup_reductions {
+            s.push(g.step(
+                QKNORM_ROPE_FUSED,
+                &[x, w, &self.sc.pos_buf, out],
+                &[rows, heads, hd, gpu_core::f(1e-6), fb(theta)],
+                rows * 64,
+            ));
+        } else {
+            s.push(self.rms(x, w, out, hd, rows));
+            let b = rows / heads;
+            s.push(g.step(ROPE_PAGED, &[out, &self.sc.pos_buf], &[b, heads, hd, heads * hd, fb(theta)], rows * (hd / 2)));
+        }
+    }
+
+    /// M4.2: `Self::qk_norm_rope`'s K-only sibling, additionally folding the
+    /// fp32 paged KV append into the same fused dispatch - `out` still
+    /// receives the normalized+rotated K (mirroring `Self::rms` + `ROPE_PAGED`'s
+    /// old contract on `sc.k`, which `Engine::calibrate_kv` and test fixtures
+    /// read directly), and `pool` receives the SAME values at their paged
+    /// slot in one write instead of a separate `KV_APPEND_B` re-reading what
+    /// RoPE just wrote. Same `workgroup_reductions` gate as `Self::qk_norm_rope`.
+    #[allow(clippy::too_many_arguments)]
+    fn qk_norm_rope_append(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, pool: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32, block_size: u32) {
+        let g = &self.gpu;
+        if self.caps.workgroup_reductions {
+            s.push(g.step(
+                QKNORM_ROPE_APPEND_FUSED,
+                &[x, w, &self.sc.pos_buf, &self.sc.blk_buf, &self.sc.off_buf, out, pool],
+                &[rows, heads, hd, gpu_core::f(1e-6), fb(theta), block_size],
+                rows * 64,
+            ));
+        } else {
+            s.push(self.rms(x, w, out, hd, rows));
+            let b = rows / heads;
+            s.push(g.step(ROPE_PAGED, &[out, &self.sc.pos_buf], &[b, heads, hd, heads * hd, fb(theta)], rows * (hd / 2)));
+            s.push(g.step(KV_APPEND_B, &[out, &self.sc.blk_buf, &self.sc.off_buf, pool], &[b, heads * hd, block_size], rows * hd));
+        }
+    }
+
     /// `causal_chunk` distinguishes the two regimes `Op::PagedAttentionFused`
     /// itself cannot infer from `bsz`/`cap` alone (M2.4): `true` for a
     /// prefill/spec-decode-verify chunk of ONE sequence's causally-increasing
@@ -1314,7 +1376,6 @@ impl Engine {
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
         let (nh, nkv) = (c.n_heads, c.n_kv_heads);
         let group = nh / nkv;
-        let half = hd / 2;
         let bs = self.block_size;
         let cap = self.cap;
         let mbt = self.max_blocks_per_seq;
@@ -1365,17 +1426,19 @@ impl Engine {
             s.push(concat_split_step(g, &sc.qkv_pre, &sc.q_pre, b, qkv_width, hq, 0));
             s.push(concat_split_step(g, &sc.qkv_pre, &sc.k_pre, b, qkv_width, hkv, hq));
             s.push(concat_split_step(g, &sc.qkv_pre, &sc.v, b, qkv_width, hkv, hq + hkv));
-            // QK-norm goes through `self.rms` like every other norm in this
-            // tape. It used to call `block::rmsnorm_fwd` directly - the
-            // per-element kernel, one thread per row - which is the coalescing
-            // bug the cooperative kernel exists to fix, and this op's narrow
-            // rows are where that bug measured worst. It was also the only
-            // norm here bypassing the selector.
-            s.push(self.rms(&sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, b * nh));
-            s.push(self.rms(&sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, b * nkv));
-            s.push(g.step(ROPE_PAGED, &[&sc.q, &sc.pos_buf], &[b, nh, hd, hq, fb(theta)], b * nh * half));
-            s.push(g.step(ROPE_PAGED, &[&sc.k, &sc.pos_buf], &[b, nkv, hd, hkv, fb(theta)], b * nkv * half));
+            // M4.2: QK-norm + RoPE fused into one dispatch each for Q and K
+            // (`Self::qk_norm_rope`) instead of the four separate `self.rms`/
+            // `ROPE_PAGED` dispatches this used to be - see that method's own
+            // doc for the derivation and the `workgroup_reductions` gate.
+            self.qk_norm_rope(&mut s, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, b * nh, theta);
             if self.kv_int8 {
+                // K's fused pass stops at norm+RoPE here - the int8 append
+                // below needs the whole per-head row for its own absmax
+                // reduction and quantizes into a packed `u32` pool, a
+                // different shape than the fp32 append `Self::
+                // qk_norm_rope_append` folds in, so it is NOT merged into
+                // this milestone.
+                self.qk_norm_rope(&mut s, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, b * nkv, theta);
                 // ONE append kernel for both paths (audit F42): the clip
                 // buffers hold either the calibrated ceilings or the
                 // f32::MAX sentinel, which the kernel's contract documents
@@ -1392,7 +1455,12 @@ impl Engine {
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
             } else {
-                s.push(g.step(KV_APPEND_B, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.pool_k[l]], &[b, hkv, bs], b * hkv));
+                // K's norm+RoPE+append collapse into ONE dispatch here (the
+                // fp32-KV branch has no quantization reduction blocking the
+                // merge, unlike the int8 branch above) - `sc.k` still comes
+                // out normalized+rotated for `Engine::calibrate_kv`/tests,
+                // `self.pool_k[l]` gets the same values at their paged slot.
+                self.qk_norm_rope_append(&mut s, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, &self.pool_k[l], hd, nkv, b * nkv, theta, bs);
                 s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[b, hkv, bs], b * hkv));
                 // M2.4: whole-triad-vs-single-fused-dispatch choice, through
                 // `Op::PagedAttentionFused` (a SEPARATE Op from
@@ -3028,6 +3096,103 @@ mod tests {
         let fused_up = g.read(&eng.sc.up, (rows * ff) as usize);
         assert_eq!(fused_gate, split_matmul(&eng.sc.xn2, "mlp.gate.weight", ff), "fused gate must be bit-identical to a split mlp.gate GEMM");
         assert_eq!(fused_up, split_matmul(&eng.sc.xn2, "mlp.up.weight", ff), "fused up must be bit-identical to a split mlp.up GEMM");
+    }
+
+    /// M4.2, fp32-KV branch: `Self::qk_norm_rope`/`Self::qk_norm_rope_append`
+    /// must be bit-identical to the unfused `rms` -> `ROPE_PAGED` (-> `KV_APPEND_B`
+    /// for K) triple this milestone collapsed - not merely close, since normalizing
+    /// then rotating the same values in the same order is not a reassociation.
+    /// Runs against the SAME `q_pre`/`k_pre` inputs `prefill`'s last layer already
+    /// fused, so this is a real A/B on real activations, not a synthetic input.
+    #[test]
+    fn qk_norm_rope_fused_is_bit_identical_to_the_unfused_pair() {
+        let block_size = 4u64;
+        let num_blocks = 32u64;
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, block_size as u32, num_blocks as u32, 1, 12, 8, false, false);
+        let mut table = BlockTable::new();
+        let prompt = [1u32, 5, 3];
+        let _ = eng.prefill(&mut table, &prompt);
+        let rows = prompt.len() as u32;
+
+        // `sc.q_pre`/`sc.k_pre`/`sc.pos_buf`/`sc.blk_buf`/`sc.off_buf` are reused
+        // every layer (the last two are per-CHUNK, not per-layer, and this prompt
+        // fits one chunk), so after `prefill` they still hold exactly the inputs
+        // the LAST layer's fused dispatch consumed.
+        let l = cfg.n_layers as usize - 1;
+        let (hd, nh, nkv, hkv) = (cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, cfg.kv_dim());
+        let g = &eng.gpu;
+
+        let unfused = |x: &DeviceBuffer, weight_name: &str, heads: u32| -> Vec<f32> {
+            let w = g.storage_init("t_unfused_w", &map[&format!("blocks.{l}.{weight_name}")]);
+            let out = g.storage((rows * heads * hd) as u64);
+            let rms_step = eng.rms(x, &w, &out, hd, rows * heads);
+            g.submit(&[], &[rms_step]);
+            g.poll_wait();
+            let rope_step = g.step(ROPE_PAGED, &[&out, &eng.sc.pos_buf], &[rows, heads, hd, heads * hd, fb(cfg.rope_theta)], rows * heads * (hd / 2));
+            g.submit(&[], &[rope_step]);
+            g.poll_wait();
+            g.read(&out, (rows * heads * hd) as usize)
+        };
+
+        let fused_q = g.read(&eng.sc.q, (rows * cfg.q_dim()) as usize);
+        let ref_q = unfused(&eng.sc.q_pre, "attn.q_norm.weight", nh);
+        assert_eq!(fused_q, ref_q, "M4.2: fused Q (norm+RoPE) must be bit-identical to the unfused pair");
+
+        let ref_k = unfused(&eng.sc.k_pre, "attn.k_norm.weight", nkv);
+        let fused_k = g.read(&eng.sc.k, (rows * hkv) as usize);
+        assert_eq!(fused_k, ref_k, "M4.2: fused K (norm+RoPE) must be bit-identical to the unfused pair");
+
+        // The K-only append fusion must ALSO land the same values in the
+        // paged pool, at the SAME (block, offset) slot `KV_APPEND_B` would
+        // have written to - the address arithmetic is new code this milestone
+        // added, not shared with `qk_norm_rope`'s Q path.
+        let blocks: Vec<u32> = g.read(&eng.sc.blk_buf, rows as usize).iter().map(|f| f.to_bits()).collect();
+        let offsets: Vec<u32> = g.read(&eng.sc.off_buf, rows as usize).iter().map(|f| f.to_bits()).collect();
+        let pool = g.read(&eng.pool_k[l], (num_blocks * block_size * hkv as u64) as usize);
+        for r in 0..rows as usize {
+            let slot = blocks[r] as usize * block_size as usize + offsets[r] as usize;
+            let want = &ref_k[r * hkv as usize..(r + 1) * hkv as usize];
+            let got = &pool[slot * hkv as usize..(slot + 1) * hkv as usize];
+            assert_eq!(got, want, "M4.2: pool_k row {r} (slot {slot}) must match the unfused reference");
+        }
+    }
+
+    /// M4.2, int8-KV branch: the fused Q/K norm+RoPE pass must stay
+    /// bit-identical when `kv_int8` is set too - this branch does NOT fuse
+    /// the append (see `Self::qk_norm_rope`'s call site doc for why), so only
+    /// the norm+RoPE stage is checked here; `int8_kv_close_to_fp32` already
+    /// covers the append+scores+apply chain end to end.
+    #[test]
+    fn qk_norm_rope_fused_is_bit_identical_to_the_unfused_pair_kv_int8() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 12, 8, true, false);
+        let mut table = BlockTable::new();
+        let prompt = [1u32, 5, 3];
+        let _ = eng.prefill(&mut table, &prompt);
+        let rows = prompt.len() as u32;
+        let l = cfg.n_layers as usize - 1;
+        let (hd, nh, nkv, hkv) = (cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, cfg.kv_dim());
+        let g = &eng.gpu;
+
+        let unfused = |x: &DeviceBuffer, weight_name: &str, heads: u32| -> Vec<f32> {
+            let w = g.storage_init("t_unfused_w", &map[&format!("blocks.{l}.{weight_name}")]);
+            let out = g.storage((rows * heads * hd) as u64);
+            let rms_step = eng.rms(x, &w, &out, hd, rows * heads);
+            g.submit(&[], &[rms_step]);
+            g.poll_wait();
+            let rope_step = g.step(ROPE_PAGED, &[&out, &eng.sc.pos_buf], &[rows, heads, hd, heads * hd, fb(cfg.rope_theta)], rows * heads * (hd / 2));
+            g.submit(&[], &[rope_step]);
+            g.poll_wait();
+            g.read(&out, (rows * heads * hd) as usize)
+        };
+
+        let fused_q = g.read(&eng.sc.q, (rows * cfg.q_dim()) as usize);
+        assert_eq!(fused_q, unfused(&eng.sc.q_pre, "attn.q_norm.weight", nh), "M4.2 (kv_int8): fused Q must be bit-identical to the unfused pair");
+        let fused_k = g.read(&eng.sc.k, (rows * hkv) as usize);
+        assert_eq!(fused_k, unfused(&eng.sc.k_pre, "attn.k_norm.weight", nkv), "M4.2 (kv_int8): fused K must be bit-identical to the unfused pair");
     }
 
     /// The on-device iterative top-K extraction (`topk_extract_step` composed
