@@ -56,6 +56,7 @@
 //! `(3,3,3)` residual convs dominate. Correctness first: this module exists to
 //! be parity-gated, and a lowering is a later, separately-measured change.
 
+use gpu_core::select::{DefaultSelector, KernelSelector, KernelVariant, Op as SelectOp, OpShape};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
 
@@ -332,20 +333,6 @@ pub struct Builder3d<'a> {
 /// caller tuning device memory means all of them. See [`gpu_core::lower`].
 const COL_BUDGET_MIB: u64 = 512;
 
-/// Minimum output channels for the lowered conv3d.
-///
-/// `matmul_reg3` computes a 128-wide column tile, so a conv with few output
-/// channels pays for a full tile and wins nothing - the decoder's `conv_out`
-/// (Cout = 3) would be 42x wasted. The 2D builder swept this crossover on the
-/// same GEMM and the same card and landed between 16 and 32; this is the same
-/// kernel at a longer contraction (`Cin*KT*KH*KW` rather than `Cin*KH*KW`),
-/// which only moves the crossover down, so 32 carries over.
-const GEMM_CONV3D_MIN_COUT: u32 = 32;
-
-/// Minimum output positions for the lowered conv3d: below one 128-row GEMM tile
-/// the lowering is all overhead and no reuse.
-const GEMM_CONV3D_MIN_POS: u32 = 128;
-
 impl<'a> Builder3d<'a> {
     /// New builder over `gpu` (built with a kernel set whose first
     /// [`KERNELS`]`.len()` slots are [`KERNELS`]) and the host `tensors`.
@@ -500,11 +487,13 @@ impl<'a> Builder3d<'a> {
     ///   reductions and no operand reuse. Measured at a FLAT low-single-digit
     ///   percent of fp32 peak across every Wan-VAE decode shape, and it was
     ///   essentially all of the decode's device time.
-    /// * **lowered** - `im2col3d_at` + `matmul_reg3` + `nlc_bias_nchw`, i.e.
-    ///   `y[To·Ho·Wo, Cout] = col · Wᵀ` at the GEMM's own far higher share of
-    ///   peak. A rate
-    ///   that does not move with shape is structural, so this is the
-    ///   algorithmic change that ceiling calls for, not a tuning knob.
+    /// * **lowered** (`backend_api::select::Op::Conv3d` picks
+    ///   `KernelVariant::RegisterTiled` - capability + shape gated, the exact
+    ///   `Op::Conv2d` decision one dimension up) - `im2col3d_at` +
+    ///   `matmul_reg3` + `nlc_bias_nchw`, i.e. `y[To·Ho·Wo, Cout] = col · Wᵀ`
+    ///   at the GEMM's own far higher share of peak. A rate that does not
+    ///   move with shape is structural, so this is the algorithmic change
+    ///   that ceiling calls for, not a tuning knob.
     ///
     /// Grouped convs stay direct: the lowering's single GEMM contracts over all
     /// of `Cin`, which is only the right answer at `groups == 1`. Nothing in the
@@ -515,7 +504,9 @@ impl<'a> Builder3d<'a> {
         let (to, ho, wo) = (y.t, y.h, y.w);
         let pos_n = to * ho * wo;
         let cinkkk = x.c * spec.kt * spec.kh * spec.kw;
-        if cout < GEMM_CONV3D_MIN_COUT || pos_n < GEMM_CONV3D_MIN_POS {
+        let shape = OpShape { m: pos_n, n: cout, k: cinkkk, dtype: gpu_core::select::Dtype::F32 };
+        let lowered = DefaultSelector.select(SelectOp::Conv3d, shape, &self.gpu.caps()) == KernelVariant::RegisterTiled;
+        if !lowered {
             self.steps.push(self.gpu.step(
                 K_CONV3D,
                 &[&x.buf, wgt, bias, &y.buf],

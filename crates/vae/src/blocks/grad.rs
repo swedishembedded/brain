@@ -34,6 +34,7 @@
 //!    cache.
 
 use super::{Op, K_IM2COL_AT, K_NCHW_NLC, K_NLC_NCHW};
+use gpu_core::select::KernelSelector;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
 
@@ -197,7 +198,22 @@ impl Trace {
                 let p = [1, *cin, *h, *w_in, *cout, *k, *stride, *pad, *ho, *wo];
                 let (hw, n_in) = (ho * wo, cin * h * w_in);
                 let cinkk = cin * k * k;
-                let lowered = r.gpu.caps().workgroup_reductions && *cout >= super::GEMM_CONV_BWD_MIN_COUT;
+                // `backend_api::select::Op::Conv2dBackward` picks
+                // `KernelVariant::RegisterTiled` for BOTH dW's and dX's
+                // lowering below - one decision, since `vae::blocks::grad`
+                // has always made it from the identical boolean (see that
+                // Op's own doc for why it is not split in two).
+                let shape = gpu_core::select::OpShape {
+                    m: hw,
+                    n: *cout,
+                    k: cinkk,
+                    dtype: gpu_core::select::Dtype::F32,
+                };
+                let lowered = gpu_core::select::DefaultSelector.select(
+                    gpu_core::select::Op::Conv2dBackward,
+                    shape,
+                    &r.gpu.caps(),
+                ) == gpu_core::select::KernelVariant::RegisterTiled;
 
                 // dW (accumulates) then db, both from the conv's own input.
                 //

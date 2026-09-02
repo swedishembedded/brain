@@ -203,23 +203,6 @@ pub const BWD_KERNELS: [(&str, &str); 34] = [
 /// slice count is not a constant to guess but `ceil(TARGET / tiles)`.
 pub const DW_SPLITK_TARGET_WGS: u32 = 288;
 
-/// Minimum output channels for the LOWERED conv input gradient.
-///
-/// The lowering materialises `dcol[HW, Cin*K*K]`, whose cost does not shrink
-/// with `Cout`, while `conv2d_dx` costs `Cout*K*K` per input pixel — so there is
-/// a `Cout` below which direct wins. Swept by `vqgan_bench convbwd` (Cin 128,
-/// 256x256, 3x3), which is what to re-run on another card. The shape of the
-/// answer is what the threshold rests on: the direct kernel's time grows in
-/// proportion to `Cout` while the lowering's is nearly flat, so direct wins
-/// through `Cout = 16` and the lowering's lead widens from 32 upward.
-///
-/// The crossover sits between 16 and 32, so 32 is the threshold. This is NOT
-/// the forward's `backend_api::select::GEMM_CONV2D_MIN_COUT` (128) -
-/// different kernels, separately measured, and assuming they share a
-/// threshold would leave a growing win unclaimed for every 32..128-channel
-/// conv.
-pub const GEMM_CONV_BWD_MIN_COUT: u32 = 32;
-
 /// Copy [`KERNELS`] into the front of a fixed-size kernel set whose remaining
 /// slots the caller fills, so a crate that needs the shared blocks **and** its
 /// own kernels never restates the shared list (a restated list that drifts by
