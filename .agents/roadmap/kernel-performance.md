@@ -2373,6 +2373,111 @@ batch shape (it would always cost `n-1` = 2, unconditionally, for every
 dispatch after the first regardless of dependency). Confirmed against real
 hardware. **Commit**: one.
 
+### M6.2 - Vulkan asynchronous submission: timeline semaphores, a reused command-buffer ring, no host wait unless data is needed
+
+Checked the milestone's premise against source first: `VulkanBackend::flush`
+(`crates/backend-vulkan/src/lib.rs`) did allocate a fresh command buffer and
+`VkFence` per flush, submit, block on `wait_for_fences`, then free both -
+every flush, unconditionally - and `VkContext::queue_lock`'s own doc said so
+explicitly ("every submit here is already synchronous submit+fence-wait,
+never pipelined"). The premise held.
+
+Added a `SEMAPHORE_TYPE_TIMELINE` semaphore to `VkContext` (queried and
+enabled via `PhysicalDeviceTimelineSemaphoreFeatures`, falling back to the
+old fully-synchronous path on the - untested-on-any-driver-this-workspace-
+has-run-on - device that lacks it), plus `timeline_next`/`timeline_wait`/
+`timeline_peek`, all bounded by the same `BRAIN_GPU_WAIT_S` ceiling every
+other device wait in the file uses. `VulkanBackend` gained a per-handle ring
+of `RING_SIZE` (3) persistent command buffers, allocated once and
+reset-and-re-recorded in place instead of allocated and freed per flush.
+`flush`'s fast path (no Intel-ANV sliced-binding workaround, no
+`BRAIN_PROFILE` timing - both unchanged, and both still fully synchronous
+for reasons specific to each) now records into the next ring slot and
+submits signalling the timeline semaphore, returning **without waiting**;
+a slot is only ever waited on when the ring wraps around to reuse it, which
+is the actual "N submissions in flight" bound. Reclaiming a batch's
+descriptor sets, transient uniforms and `VkContext::pending_steps` count -
+previously safe because the sole fence wait had already proven the batch
+idle - is now deferred to whichever point actually proves it idle: ring-slot
+reuse, or a new `drain()` that `read`/`write`/`poll_wait` call (the "no host
+wait unless data is actually needed" half of the milestone, and the reason
+`Backend::flush`'s own trait doc - "WITHOUT waiting for completion... the
+frame-pipelining hook" - was aspirational on this backend before this
+change and is now actually true). `submit`'s clears path and the two
+still-synchronous fallbacks call `drain()` first, so a stale asynchronous
+batch is always confirmed complete before anything that assumes ordering
+against it runs - relying on the Vulkan host-wait-on-a-semaphore visibility
+guarantee, not on same-queue submission order alone, matching the
+correctness discipline `VkContext::download`'s own doc already established
+for this file's other driver-adjacent decisions.
+
+**Gate**: `crates/backend-vulkan/tests/async_submit.rs` (new) pins the
+contract directly rather than by proxy: `Backend::flush()` alone leaves the
+batch outstanding (`async_inflight_count() == 1`, not 0, which would mean it
+drained); exactly `RING_SIZE` flushes with no intervening read stay
+outstanding and a `(RING_SIZE+1)`th never exceeds that bound; and a chain of
+`cap * 3 + 1` cross-submission dependent dispatches (each reading the
+PREVIOUS submission's own command buffer's output, no read/poll_wait in
+between) computes the exact right sum across several full ring
+wraparounds - the correctness gate for reusing a slot's command buffer and
+for trusting the timeline wait rather than a full drain between dependent
+batches. `perf_contract.rs`'s existing `submits stays O(1) per frame`
+assertion is unchanged and still green (one `vkQueueSubmit` per flush
+either way). Measured, not assumed: a raw submit+flush micro-benchmark (one
+tiny dispatch per cycle, 500 cycles, no reads in between, best of one run
+each on an idle box) went from **351.1 µs/cycle before to 57.3 µs/cycle
+after** - a 6.1x reduction in the per-flush HOST cost this milestone
+targets (fence/command-buffer churn), on the P40's single compute queue
+where GPU-side execution was already saturating a tiny dispatch regardless.
+
+Found and fixed two **pre-existing, unrelated** test races while verifying
+this milestone against the full `brain-gpu-core` suite (per this campaign's
+own rule: an audit/report finding - here, a hang encountered while testing -
+is a hypothesis until checked against source, so both were confirmed to
+reproduce identically on a clean tree with this milestone's own changes
+stashed out before being called pre-existing):
+`crates/gpu-core/tests/device_open.rs` built several real Vulkan/wgpu
+devices across its 4 tests with no serialisation against `cargo test`'s
+default concurrent-within-a-binary execution, reproducing the same "one
+thread pinned near 100% CPU, GPUs idle" hang signature
+`.agents/roadmap/backend-vulkan.md` already documents for this hazard
+class - fixed with the same one-`Mutex`-per-file pattern `device_churn.rs`/
+`device_sharing.rs` already use. `crates/gpu-core/tests/
+gemv_reg_upgrade_step_buf.rs` shared one pooled device across three tests
+that each bracket a dispatch with `reset_kernel_times`/`kernel_times` and no
+lock of their own, so a sibling test's concurrent dispatch could land inside
+another's reset-to-read window - reproduced deterministically (5/5 runs) in
+isolation, root-caused, and fixed with the same lock pattern, held per test.
+
+**Verified**: `cargo test -p brain-backend-vulkan -p brain-vulkan --tests`
+(serial, real Tesla P40 hardware) green, including the new file and the
+existing `kernel_timing`/`deferred_reclaim`/`perf_contract` suites this
+milestone's own instructions named as the hang/segfault-adjacent history to
+keep green. `cargo test -p brain-gpu-core --lib --tests` green end to end
+(25 test-result blocks, zero failures), including `device_sharing.rs`'s
+`concurrent_shared_handles_do_not_deadlock` - the regression test
+`queue_lock`'s own doc names for the exact lock this milestone changed the
+semantics of. `cargo clippy --all-targets` clean on every touched crate.
+`make parity`'s Vulkan gradcheck arm could not be run to completion: `brain-
+gradcheck`'s dependency graph transitively pulls in `brain-minimaxmusic3`,
+mid-edit in another session with an unclosed delimiter at commit time - the
+same concurrent-edit blocker the M5.1 and M6.1 entries above both already
+hit and is not this milestone's code (confirmed: `crates/minimaxmusic3` is
+untouched by this change). In its place, correctness across `.share()`d
+handles (the architecture-wide pattern this change's cross-batch visibility
+guarantee has to hold for) was checked directly against source: every
+GPU-resident multi-block model traced (`qwen3::serve`'s `Ops`, `ltxv`'s
+`LtxBlockQ::forward_prod_dev`) funnels its actual dispatch/submit/read
+stream through ONE canonical `Gpu`/`Backend` handle per forward pass -
+`share()`'d handles are used only to build pipeline-index-compatible `Step`s
+for kernel-name-portability reasons already documented in `qwen3::model`'s
+own doc comment, never to submit independently - so the async path's
+per-handle ring never has two live handles racing the same buffer without a
+`drain()` between them. **Commits**: three (the `VkContext` timeline-
+semaphore primitives; the `VulkanBackend` ring/async-flush/drain
+implementation, its test, and this entry; the two unrelated test-race
+fixes).
+
 ---
 
 ## Not yet done
