@@ -202,11 +202,13 @@ fn qwen35_q8_build_resident_shape_matches_the_designed_coverage() {
 }
 
 /// Runs both an fp32 and an int8 `Qwen35` forward at [`tiny_i8_cfg`] from the
-/// SAME fresh init weights, and checks the int8 path's logits track the fp32
-/// path's within a generous quantization tolerance. Shared by the CPU and
-/// default-backend variants below (a barrier-crossing kernel can silently
-/// misbehave on exactly one backend, so both matter).
-fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
+/// SAME fresh init weights and returns `(cosine, rel_l2)` between the two
+/// logit vectors. Shared by the CPU and default-backend variants below (a
+/// barrier-crossing kernel can silently misbehave on exactly one backend, so
+/// both matter) -- each caller applies its own tolerance, since the CPU
+/// build (no `int8_dot`) is a full fp32 demotion and the default-backend
+/// build is genuinely quantized, two very different expected error bands.
+fn run_parity_report(gpu_fp32: Gpu, gpu_i8: Gpu) -> (f64, f64) {
     let cfg = tiny_i8_cfg();
     let b = 1;
     let t = cfg.block_size;
@@ -223,17 +225,25 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
     assert_eq!(logits_fp32.len(), (t * cfg.vocab) as usize);
     assert!(logits_fp32.iter().all(|v| v.is_finite()), "fp32 reference produced a non-finite logit");
     assert!(logits_i8.iter().all(|v| v.is_finite()), "int8 path produced a non-finite logit");
+    assert!(logits_fp32.iter().any(|&v| v.abs() > 1e-6), "fp32 reference is degenerate (all ~0) -- test shape/init is uninformative");
 
-    let cos = cosine(&logits_i8, &logits_fp32);
-    let rel = rel_l2(&logits_i8, &logits_fp32);
-    eprintln!(
-        "qwen35 int8 vs fp32 (tiny_i8_cfg, {} layers, {} experts/layer): cosine={cos:.9} rel_l2={rel:.9} \
-         i8[..4]={:?} fp32[..4]={:?}",
-        cfg.n_layers,
-        cfg.n_experts,
-        &logits_i8[..4],
-        &logits_fp32[..4]
-    );
+    (cosine(&logits_i8, &logits_fp32), rel_l2(&logits_i8, &logits_fp32))
+}
+
+/// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
+/// backend otherwise -- this is the forward-EXECUTION parity gate on
+/// whichever backend that resolves to (on this box: a real GPU whose Vulkan
+/// backend genuinely supports int8 DP4A, confirmed by
+/// [`int8_moe_dispatch_is_active_when_int8_dot_is_available`] below, so both
+/// the mixer AND the MoE-expert linears are REAL quantized dispatches here,
+/// not a silent fp32 demotion). See
+/// [`int8_forward_matches_fp32_exactly_on_cpu_backend_lacking_int8_dot`]
+/// below for the CPU-backend (no `int8_dot`) counterpart, where BOTH halves
+/// demote to fp32 instead.
+#[test]
+fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
+    let (cos, rel) = run_parity_report(Gpu::new(pipelines()), Gpu::new(pipelines()));
+    eprintln!("qwen35moe int8 vs fp32 (tiny_i8_cfg, default backend): cosine={cos:.9} rel_l2={rel:.9}");
     // 8 chained layers (each with a quantized mixer AND a quantized 6-expert
     // MoE) is a much deeper quantization stack than `model::moe`'s own
     // single-layer `moe_sparse_i8_parity` test (measured rel_l2=0.0084,
@@ -245,49 +255,72 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) {
     // BRANCH output is quantization-approximated before being added back),
     // so per-layer noise does not compound as fast as a bare chained-GEMM
     // estimate would suggest. Gated at `matmul_q4_gemm`'s own cosine/rel_l2
-    // shape (this task's suggested model) rather than the measured value
-    // directly, for real headroom against seed/shape/backend drift; a
-    // mutation check (scaling one quantized weight's group scale by
-    // a third) moved rel_l2 from 6.6e-6 to 6.9e-4, and a far larger scaling
-    // moved cosine to 0.40 -- confirming this comparison is sensitive to a real int8-path
-    // regression, not vacuously passing.
-    assert!(cos > 0.99, "qwen35 int8 path diverged too far from fp32: cosine={cos:.6} (want > 0.99)");
-    assert!(rel < 0.1, "qwen35 int8 path diverged too far from fp32: rel_l2={rel:.4} (want < 0.1)");
-    assert!(logits_fp32.iter().any(|&v| v.abs() > 1e-6), "fp32 reference is degenerate (all ~0) -- test shape/init is uninformative");
+    // shape rather than the measured value directly, for real headroom
+    // against seed/shape/backend drift.
+    assert!(cos > 0.99, "qwen35moe int8 path diverged too far from fp32: cosine={cos:.6} (want > 0.99)");
+    assert!(rel < 0.1, "qwen35moe int8 path diverged too far from fp32: rel_l2={rel:.4} (want < 0.1)");
 }
 
-/// `Gpu::new` honours `BRAIN_DEVICE` when set and defaults to the wgpu
-/// backend otherwise -- this is the forward-EXECUTION parity gate on
-/// whichever backend that resolves to. No CPU skip needed: see
-/// [`int8_forward_completes_on_cpu_backend_with_mixer_weights_demoted_to_fp32`]
-/// below for why the CPU backend runs this same check too (just with a
-/// tighter parity margin, since the mixer half of the model is not
-/// separately quantization-approximated there).
+/// `caps.numeric.int8_dot` gates the WHOLE int8 tier at construction, not
+/// just the mixer: `Qwen35::new_impl_on` computes `i8_on = i8 &&
+/// caps.numeric.int8_dot` once and uses it for the `q8` (MoE-expert) build,
+/// the mixer-linear upload closure, and the `ParamStore` role-exclusion
+/// filter alike, mirroring `qwen3::serve::Engine::from_map_with_gpu`'s own
+/// `weights_int8`/`w8_on` pattern. On the CPU JIT (`int8_dot: false`) that
+/// means `q8` is `None` and the model falls back to the SAME fp32 MoE
+/// forward path a plain `Qwen35::new_on` build takes (`moe_sublayer`'s
+/// `else` arms), not a demoted-but-still-dispatched int8 kernel -- so an
+/// "int8" CPU build is a COMPLETE fp32 demotion (mixer AND MoE-experts
+/// alike), the same shape `qwen35`'s (dense) own CPU test already
+/// documents, not the previous "only the mixer demotes, the MoE experts
+/// stay genuinely int8-quantized because their kernel happens to be
+/// CPU-JIT'able" behaviour -- that behaviour let a `caps.numeric.int8_dot ==
+/// false` device still dispatch `moe_linear_gated_i8.wgsl`'s
+/// `dot4I8Packed`-calling inner loop, exactly the correctness gap
+/// `Op::MoeExpertLinear`'s own selector policy (`f9a66961`) already assumes
+/// closed. Tolerance is therefore tight (cosine ~= 1.0), not the
+/// quantization-noise tolerance the default-backend test above uses.
 #[test]
-fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
-    run_parity(Gpu::new(pipelines()), Gpu::new(pipelines()));
+fn int8_forward_matches_fp32_exactly_on_cpu_backend_lacking_int8_dot() {
+    let (cos, rel) = run_parity_report(Gpu::new_cpu(pipelines()), Gpu::new_cpu(pipelines()));
+    eprintln!("qwen35moe int8 vs fp32 (tiny_i8_cfg, CPU backend, full fp32 demotion): cosine={cos:.9} rel_l2={rel:.9}");
+    assert!(cos > 0.999999, "qwen35moe CPU int8 build should be an almost-exact fp32 demotion: cosine={cos:.9} (want > 0.999999)");
+    assert!(rel < 1e-4, "qwen35moe CPU int8 build should be an almost-exact fp32 demotion: rel_l2={rel:.9} (want < 1e-4)");
 }
 
-/// The mixer's 9 quantized linears go through `model::ops::Weight::upload`,
-/// whose contract narrows the REQUESTED dtype down to whatever the device
-/// can actually execute (`want.promote(&ops.caps.numeric)`): on a backend
-/// whose caps don't support the DP4A path (like this engine's CPU JIT), it
-/// silently builds `Weight::F32` instead of `Weight::I8` -- the same
-/// contract `qwen3::model::Qwen` already relies on for its own per-layer
-/// linears. So the mixer half of an "int8" CPU build is actually fp32; only
-/// the MoE-expert half (`crate::q8::Qwen35Q8`, built via
-/// `model::int8::quantize_weight` unconditionally and dispatched through
-/// `moe_linear_gated_i8`) is genuinely quantized on every backend -- and
-/// that kernel, unlike the mixer's `matmul_i8_dyn` (multi-barrier,
-/// workgroup-shared-memory tiled -- see `matmul_i8_dyn.wgsl`'s own doc: "Not
-/// CPU-JIT'able"), IS CPU-JIT'able (this test's own success is the proof;
-/// nothing here special-cases the CPU backend). So the forward completes on
-/// CPU, tracking the fp32 reference even MORE tightly than the
-/// default-backend parity test above (only the MoE experts are
-/// quantization-approximated).
+/// The dedicated capability-gate test: on a device lacking `int8_dot`
+/// (the CPU JIT), the int8 MoE dispatch (`Qwen35Q8`/`moe_linear_gated_i8`)
+/// must be UNREACHABLE, not merely "produces a result close enough to fp32
+/// to pass a tolerance check" -- `moe_int8_active()` observes the actual
+/// `self.q8.is_some()` gate directly, so this test fails loudly (rather than
+/// marginally) if a future change re-widens the gate.
 #[test]
-fn int8_forward_completes_on_cpu_backend_with_mixer_weights_demoted_to_fp32() {
-    run_parity(Gpu::new_cpu(pipelines()), Gpu::new_cpu(pipelines()));
+fn int8_moe_dispatch_is_unreachable_without_int8_dot() {
+    let cfg = tiny_i8_cfg();
+    let init = qwen35moe::init::init_weights(&cfg, 7);
+    let model = Qwen35::new_on_i8(Gpu::new_cpu(pipelines()), cfg.clone(), 1, cfg.block_size, &init);
+    assert!(!model.moe_int8_active(), "int8 MoE dispatch must be unreachable on a device without int8_dot (CPU JIT)");
+}
+
+/// Positive control for the test above: on a device that DOES report
+/// `int8_dot` (this repo's default `wgpu` backend, real hardware in this
+/// sandbox), an int8-requested build must actually activate the int8 MoE
+/// dispatch -- otherwise the negative check above could pass vacuously (e.g.
+/// if `moe_int8_active()` always returned `false` regardless of caps). Skips
+/// cleanly (rather than failing) if the ambient device turns out not to
+/// declare `int8_dot` (e.g. `BRAIN_DEVICE=cpu`) -- this test's OWN premise,
+/// checked, not assumed, mirroring `qwen3::flops`'s own
+/// `i8_model_reports_int_ops_on_an_int8_dot_capable_device` precedent.
+#[test]
+fn int8_moe_dispatch_is_active_when_int8_dot_is_available() {
+    let cfg = tiny_i8_cfg();
+    let init = qwen35moe::init::init_weights(&cfg, 7);
+    let model = Qwen35::new_on_i8(Gpu::new(pipelines()), cfg.clone(), 1, cfg.block_size, &init);
+    if !model.gpu.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("ambient device has no int8_dot capability");
+        return;
+    }
+    assert!(model.moe_int8_active(), "int8 MoE dispatch should be active on a device that reports int8_dot");
 }
 
 /// The int8 build must exclude every `is_i8_linear` name from the fp32
@@ -295,6 +328,13 @@ fn int8_forward_completes_on_cpu_backend_with_mixer_weights_demoted_to_fp32() {
 /// only lists the fp32 store's own contents, so a quantized model's list
 /// must be strictly SHORTER than the fp32 model's, by exactly the count
 /// `is_i8_linear_selects_exactly_the_designed_quantization_set` established.
+/// Runs on the ambient default backend, not `Gpu::new_cpu` directly: the
+/// exclusion now only happens when `caps.numeric.int8_dot` is available (see
+/// [`int8_moe_dispatch_is_unreachable_without_int8_dot`] above) -- on the CPU
+/// JIT an "int8" build keeps every quantizable name in the fp32 store, same
+/// length as the fp32 build, so this check would be meaningless there. Skips
+/// cleanly if the ambient device has no `int8_dot`, same as the positive
+/// control above.
 #[test]
 fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
     let cfg = tiny_i8_cfg();
@@ -302,8 +342,12 @@ fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
     let t = cfg.block_size;
     let init = qwen35moe::init::init_weights(&cfg, 7);
 
-    let fp32 = Qwen35::new_on(Gpu::new_cpu(pipelines()), cfg.clone(), b, t, &init);
-    let i8 = Qwen35::new_on_i8(Gpu::new_cpu(pipelines()), cfg.clone(), b, t, &init);
+    let fp32 = Qwen35::new_on(Gpu::new(pipelines()), cfg.clone(), b, t, &init);
+    let i8 = Qwen35::new_on_i8(Gpu::new(pipelines()), cfg.clone(), b, t, &init);
+    if !i8.gpu.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("ambient device has no int8_dot capability");
+        return;
+    }
 
     let fp32_names = fp32.param_names();
     let i8_names = i8.param_names();

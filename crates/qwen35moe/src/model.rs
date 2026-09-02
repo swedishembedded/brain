@@ -687,7 +687,10 @@ pub struct Qwen35 {
     ps: ParamStore,
     /// `Some` selects the int8 (DP4A) inference tier for the MoE experts'
     /// linears (`ps` excludes those names entirely - see [`Qwen35::
-    /// new_impl_on`]'s role filter); `None` is the plain fp32 path. The 9
+    /// new_impl_on`]'s role filter); `None` is the plain fp32 path, which is
+    /// what an int8-requested build ALSO gets when the device lacks
+    /// `caps.numeric.int8_dot` (`new_impl_on`'s `i8_on` gate) - see
+    /// [`Qwen35::moe_int8_active`]. The 9
     /// GDN/GQA mixer linears `Qwen35Q8::is_i8_linear` ALSO names live on
     /// `self.ops`/`self.weights` below instead - `model::ops::Ops::moe_linear`
     /// has a documented, different buffer/param shape for I8/Q4 than
@@ -937,7 +940,11 @@ impl Qwen35 {
     /// mixer projections and every routed expert's gate/up/down are
     /// quantized (`crate::q8::Qwen35Q8::is_i8_linear`); the router, shared
     /// expert, embeddings and norms stay fp32. See `crate::q8`'s module doc
-    /// for the full rationale. Inference-only, same as the fp32 path
+    /// for the full rationale. Capability-gated, not assumed: on a device
+    /// whose caps report no `int8_dot` (e.g. the CPU JIT), this silently
+    /// falls back to the fp32 path instead (a message is printed, never a
+    /// silent wrong-result dispatch) - see [`Self::moe_int8_active`].
+    /// Inference-only, same as the fp32 path
     /// (`Qwen35::backward` panics regardless).
     pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
@@ -994,6 +1001,20 @@ impl Qwen35 {
         shard: Shard,
     ) -> Qwen35 {
         assert!(!(i8 && train), "qwen35: int8 path is inference-only (Qwen35::new_train is fp32-only)");
+        // Int8 weights are capability-driven, never assumed: the request only
+        // takes effect where the packed-dot GEMM executes (the `Op::
+        // MoeExpertLinear`/`Op::MatMul` selector's `PackedInt8` gate).
+        // Elsewhere - the CPU JIT - fp32 weights stay, and the fallback is
+        // said out loud rather than silently absorbed. Mirrors `qwen3::
+        // serve::Engine::from_map_with_gpu`'s `weights_int8`/`w8_on` pattern
+        // exactly; gates the `q8` (MoE-expert) build, the mixer-linear
+        // upload closure below, and the `ParamStore` role-exclusion filter
+        // alike, so all three agree on whether the int8 tier is actually
+        // reachable on this device.
+        let i8_on = i8 && gpu.caps().numeric.int8_dot;
+        if i8 && !i8_on {
+            eprintln!("qwen35moe: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
+        }
         let chunk = gdn_chunk_size(t);
         assert_eq!(
             t % chunk,
@@ -1025,7 +1046,7 @@ impl Qwen35 {
         // `cfg.lora.is_some()` never both hold here.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(n, _)| !(i8 && Qwen35Q8::is_i8_linear(n)))
+            .filter(|(n, _)| !(i8_on && Qwen35Q8::is_i8_linear(n)))
             .map(|(n, c)| {
                 let role = if !train {
                     Role::Frozen
@@ -1060,7 +1081,7 @@ impl Qwen35 {
         // Quantize+upload the int8 MoE-expert linears from the SAME source,
         // streaming one tensor at a time (see `Qwen35Q8::build`'s own doc -
         // MoE experts only; the mixer linears build `weights` below instead).
-        let q8 = if i8 { Some(Qwen35Q8::build(&gpu, src, &cfg, b * t, MAX_ABS_ROW, QUANT_PACK)) } else { None };
+        let q8 = if i8_on { Some(Qwen35Q8::build(&gpu, src, &cfg, b * t, MAX_ABS_ROW, QUANT_PACK)) } else { None };
 
         // Per-layer GDN/GQA mixer linears: every layer this shard owns
         // gets its own leaves (GDN: in_proj_{qkv,z,b,a}/out_proj; GQA:
@@ -1083,7 +1104,7 @@ impl Qwen35 {
         );
         let mut weights: HashMap<String, Weight> = HashMap::new();
         let mut upload = |name: String, wn: usize, wk: usize| {
-            let w = if i8 {
+            let w = if i8_on {
                 let mut built: Option<Weight> = None;
                 let found = src.with_tensor(&name, &mut |raw| {
                     built = Some(Weight::upload(&ops, raw, wn, wk, Dtype::I8));
@@ -2732,6 +2753,18 @@ impl Qwen35 {
         } else {
             self.ps.params.iter().map(|(n, _)| n.clone()).collect()
         }
+    }
+
+    /// Whether the int8 MoE-expert dispatch (`crate::q8::Qwen35Q8`,
+    /// `model::moe::expert_fwd_i8`/`moe_linear_gated_i8.wgsl`) is actually
+    /// reachable on this instance: `true` only for an int8-requested build
+    /// (`new_i8`/`new_on_i8`) on a device whose caps report
+    /// `numeric.int8_dot` (see [`Self::new_impl_on`]'s `i8_on` gate). `false`
+    /// for a plain fp32 build AND for an int8-requested build that fell back
+    /// to fp32 because the device lacks the packed-dot path - lets a test
+    /// observe the gate without reaching into the private `q8` field.
+    pub fn moe_int8_active(&self) -> bool {
+        self.q8.is_some()
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
