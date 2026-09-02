@@ -961,18 +961,25 @@ pub fn shared_expert_fwd_i8(
 // `model::block::pick_gemm`-selected tiled GEMM the dense path already uses
 // (unchanged, no new GEMM kernel), scatter the scaled result back.
 //
-// KNOWN COST (audit F9, deliberate remainder): the per-expert call shape
-// below does one host scan over `host_gate`, one index upload, and one
-// `submit` PER EXPERT - at GLM-5.2 scale (~128 experts x ~48 MoE layers)
-// that is ~6100 submits and small uploads per forward. Every per-expert
-// count is knowable host-side from ONE pass over `host_gate`, and dispatch
-// ordering within a submit already guarantees the shared scratch is safe to
-// reuse across experts in a single batched submission - so a layer-level
-// entry point (bucket rows for ALL experts in one pass, per-expert index
-// regions, one submit per layer) removes the storm with no new kernel. That
-// API change lands WITH its call-site migration (crates/glm, crates/omni) so
-// the faster sibling is never an unconsumed second path; this crate alone
-// cannot do it without stranding the current callers.
+// FIXED (was "audit F9, deliberate remainder"): [`expert_fwd_compact`] below
+// does one host scan over `host_gate`, one index upload, and one `submit`
+// PER EXPERT - at GLM-5.2 scale (~128 experts x ~48 MoE layers) that is
+// ~6100 submits and small uploads per forward. Every per-expert count is
+// knowable host-side from ONE pass over `host_gate`, and dispatch ordering
+// within a submit already guarantees the shared scratch is safe to reuse
+// across experts in a single batched submission, so [`expert_fwd_compact_layer`]
+// below buckets rows for ALL experts in one pass, uploads one combined index
+// list, and returns one `Vec<Step>` for the caller's existing per-layer
+// submit to carry - no new kernel, no per-expert host round trip.
+//
+// This module's own comment previously named the call-site migration target
+// as "crates/glm, crates/omni" - neither directory exists in this tree
+// (checked, not assumed): the one real caller of [`expert_fwd_compact`] is
+// `crates/glmdsa::model::Glm::forward_compact`, migrated onto
+// [`expert_fwd_compact_layer`] in the same change that added it.
+// [`expert_fwd_compact`] itself stays - `crates/model/tests/moe_compact_parity.rs`
+// still exercises it directly as the simpler, still-correct per-expert
+// primitive the layer version is built from.
 
 /// Kernel indices [`expert_fwd_compact`] dispatches, resolved by the calling
 /// model against its own registered pipeline list.
@@ -996,13 +1003,25 @@ pub struct CompactExpertFwdIds {
     pub scatter: usize,
 }
 
-/// Per-expert scratch for [`expert_fwd_compact`], sized ONCE by the caller
-/// for `capacity` rows and reused across every expert in a layer (fully
-/// overwritten each call - the tail past this call's `count` is simply
-/// unused, never read, so leftover data from a larger previous expert is
-/// harmless). `capacity_for` returns the only value that makes
-/// [`expert_fwd_compact`]'s capacity panic unreachable: every row could in
-/// principle route to one expert.
+/// Per-expert scratch for [`expert_fwd_compact`]/[`expert_fwd_compact_layer`],
+/// sized ONCE by the caller for `capacity` rows and reused across every
+/// expert in a layer (fully overwritten each call - the tail past this
+/// call's `count` is simply unused, never read, so leftover data from a
+/// larger previous expert is harmless). Pass `shape.rows` for the
+/// unconditionally-safe `capacity` bound: every row could in principle route
+/// to one expert.
+///
+/// `idx` alone is sized larger than `capacity`: [`expert_fwd_compact_layer`]
+/// holds every expert's routed-row list in it SIMULTANEOUSLY (one shared
+/// buffer, per-expert offset regions, one upload for the whole layer), so it
+/// needs room for `shape.rows * shape.top_k` entries (the exact total across
+/// all experts - every row selects exactly `top_k` of them) PLUS up to 63
+/// wasted words per expert region (`model::block::pad64`'s padding: each
+/// region's `step_sliced` offset must satisfy wgpu's
+/// `min_storage_buffer_offset_alignment`, 256B = 64 words on the near-
+/// universal case - a real validation failure caught by
+/// `logits_all_compact_matches_logits_all`, not a theoretical concern), not
+/// just one expert's worst case.
 pub struct CompactExpertScratch {
     capacity: u32,
     idx: DeviceBuffer,
@@ -1020,9 +1039,10 @@ impl CompactExpertScratch {
     pub fn new(g: &Gpu, shape: &MoeShape, capacity: u32) -> CompactExpertScratch {
         let (d, ff) = (shape.d_model as u64, shape.moe_ff as u64);
         let cap = capacity as u64;
+        let idx_cap = cap.max(shape.rows as u64 * shape.top_k as u64 + shape.n_experts as u64 * 64);
         CompactExpertScratch {
             capacity,
-            idx: g.storage(cap),
+            idx: g.storage(idx_cap),
             x_compact: g.storage(cap * d),
             gate_pre: g.storage(cap * ff),
             up: g.storage(cap * ff),
@@ -1128,4 +1148,144 @@ pub fn expert_fwd_compact(
     ];
     g.submit(&[], &steps);
     count as usize
+}
+
+/// One MoE layer's ENTIRE row-compacted sparse expert forward, as a SINGLE
+/// `Vec<Step>` for the caller to fold into its own per-layer (or per-forward)
+/// submit - the real fix this section's header comment names. Unlike
+/// [`expert_fwd_compact`] (one host-driven `submit` PER expert), this
+/// function does the routing decision for every expert up front from the
+/// SAME `host_gate` readback, uploads every expert's routed-row list into
+/// `scratch`'s shared `idx` buffer ONCE (per-expert regions, addressed via
+/// [`Gpu::step_sliced`] offsets - never overlapping, since each row appears
+/// in exactly `top_k` experts' regions and every region is a disjoint slice
+/// of the same upload), and returns every expert's gather/GEMM/GEMM/
+/// silu/GEMM/scatter steps as one list. Building these steps performs no
+/// device submission at all (`Gpu::step`'s own doc: "RECORDED... only sent
+/// to GPU on next read/write/poll"), so the ONLY new work this function adds
+/// relative to zero is the one `Gpu::write` that uploads the combined index
+/// list - not one `submit` per expert.
+///
+/// `acc` MUST already be zeroed by the caller (e.g. via `g.submit(&[acc], &[])`,
+/// the same explicit pre-zero `crates/glmdsa::model::Glm::forward_compact`
+/// already performs before its expert loop) - every expert here always
+/// ACCUMULATES (`scale_add`'s `accumulate=true`), mirroring that caller's own
+/// convention exactly. This is a narrower contract than
+/// [`expert_fwd_compact`]'s per-call `accumulate` flag (which can also
+/// perform the initial "set" itself): the narrower form is sufficient because
+/// zeroing `acc` once per layer, before ANY expert's dispatch, is strictly
+/// simpler than picking which per-expert call gets to zero it - the exact
+/// bug class the [`expert_fwd_compact`] caller's own comment describes
+/// avoiding ("a row whose top-k experts happen to exclude expert 0 would
+/// never get `moe_acc` zeroed").
+///
+/// `host_gate` MUST be the CURRENT contents of `gate` (`[shape.rows,
+/// shape.n_experts]`), already read back by the caller - see
+/// [`expert_fwd_compact`]'s own doc for why this function cannot do that
+/// readback itself. `expert_weights[e]` is expert `e`'s own
+/// `(gate_w, up_w, down_w)`.
+///
+/// Panics if any expert routes more rows than `scratch`'s (per-expert, NOT
+/// layer-total) capacity - same precondition as [`expert_fwd_compact`], see
+/// [`CompactExpertScratch::new`]'s doc for the safe bound and the SEPARATE,
+/// larger bound its shared `idx` buffer needs for this function specifically.
+///
+/// Returns `(steps, counts)`: `counts[e]` is how many rows expert `e`
+/// routed, for the caller's own diagnostics - the same value
+/// [`expert_fwd_compact`] already returns per call, gathered here for every
+/// expert at once.
+#[allow(clippy::too_many_arguments)]
+pub fn expert_fwd_compact_layer(
+    g: &Gpu,
+    ids: &CompactExpertFwdIds,
+    shape: &MoeShape,
+    host_gate: &[f32],
+    x: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    expert_weights: &[(DeviceBuffer, DeviceBuffer, DeviceBuffer)],
+    scratch: &CompactExpertScratch,
+    acc: &DeviceBuffer,
+) -> (Vec<Step>, Vec<usize>) {
+    let (d, ff, e) = (shape.d_model, shape.moe_ff, shape.n_experts);
+    assert_eq!(
+        host_gate.len(),
+        (shape.rows * e) as usize,
+        "expert_fwd_compact_layer: host_gate has {} elements, want rows*n_experts = {}x{} -- \
+         pass the CURRENT full readback of `gate`",
+        host_gate.len(),
+        shape.rows,
+        e
+    );
+    assert_eq!(
+        expert_weights.len(),
+        e as usize,
+        "expert_fwd_compact_layer: expert_weights.len() ({}) must equal shape.n_experts ({e})",
+        expert_weights.len()
+    );
+
+    // One host pass buckets every row's routed experts; `combined` is the
+    // WHOLE layer's index upload (every expert's region back to back) and
+    // `regions[e]` is expert e's own `(start, count)` slice of it. Each
+    // region's `start` is padded up to `model::block::pad64`'s 64-word
+    // (256B) grain - `step_sliced`'s storage-buffer offsets must satisfy
+    // wgpu's `min_storage_buffer_offset_alignment`, exactly the same
+    // constraint `gemm_bidir_fwd` already pads its own per-head strides for.
+    // The padding words themselves are never bound by any step (every
+    // region's own `(start, count)` slice stops at its real row count), so
+    // their content is irrelevant - `resize` fills them with 0 only because
+    // `Vec` cannot have gaps.
+    let mut per_expert_rows: Vec<Vec<u32>> = vec![Vec::new(); e as usize];
+    for r in 0..shape.rows {
+        for ei in 0..e {
+            if host_gate[(r * e + ei) as usize] > 0.0 {
+                per_expert_rows[ei as usize].push(r);
+            }
+        }
+    }
+    let mut combined: Vec<u32> = Vec::with_capacity((shape.rows * shape.top_k) as usize);
+    let regions: Vec<(u32, u32)> = per_expert_rows
+        .iter()
+        .map(|rows| {
+            let start = crate::block::pad64(combined.len() as u64) as u32;
+            combined.resize(start as usize, 0);
+            combined.extend_from_slice(rows);
+            (start, rows.len() as u32)
+        })
+        .collect();
+    g.write(&scratch.idx, &combined);
+
+    let full = (0u64, 0u64);
+    let mut steps = Vec::new();
+    let mut counts = Vec::with_capacity(e as usize);
+    for (ei, &(start, count)) in regions.iter().enumerate() {
+        counts.push(count as usize);
+        if count == 0 {
+            continue;
+        }
+        assert!(
+            count <= scratch.capacity,
+            "expert_fwd_compact_layer: expert {ei} routed {count} rows, exceeding scratch capacity {} -- \
+             size CompactExpertScratch::new with shape.rows to make this impossible",
+            scratch.capacity
+        );
+        let idx_slice = (start as u64, count as u64);
+        let (gate_w, up_w, down_w) = &expert_weights[ei];
+        steps.push(g.step_sliced(ids.gather, &[&scratch.idx, x, &scratch.x_compact], &[idx_slice, full, full], &[d, count], count * d));
+        let lin = |x_in: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32, steps: &mut Vec<Step>| {
+            let (kid, threads) = crate::block::pick_gemm(count as usize, n as usize, ids.gemm_naive, ids.gemm_tiled, false);
+            steps.push(g.step(kid, &[x_in, w, out], &[count, k, n], threads));
+        };
+        lin(&scratch.x_compact, gate_w, &scratch.gate_pre, d, ff, &mut steps);
+        lin(&scratch.x_compact, up_w, &scratch.up, d, ff, &mut steps);
+        steps.push(g.step(ids.silu_mul, &[&scratch.gate_pre, &scratch.up, &scratch.h], &[count * ff], count * ff));
+        lin(&scratch.h, down_w, &scratch.expert_out, ff, d, &mut steps);
+        steps.push(g.step_sliced(
+            ids.scatter,
+            &[&scratch.idx, gate, &scratch.expert_out, acc],
+            &[idx_slice, full, full, full],
+            &[count, d, e, ei as u32, 1],
+            count * d,
+        ));
+    }
+    (steps, counts)
 }

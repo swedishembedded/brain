@@ -7,13 +7,21 @@
 //! the naive sparse path against, reused here for the compacted path.
 //!
 //! Also checks it agrees with `expert_fwd` (the already-gradcheck-validated
-//! naive sparse path) directly, and that `capacity_for`'s panic is real
-//! (mutation-verify: deliberately undersize the scratch and confirm it
-//! actually panics, not just "would panic in theory").
+//! naive sparse path) directly, and that `CompactExpertScratch`'s capacity
+//! guard panic is real (mutation-verify: deliberately undersize the scratch
+//! and confirm it actually panics, not just "would panic in theory").
+//!
+//! `expert_fwd_compact_layer` (M5.4: the layer-batched entry point that
+//! replaces `expert_fwd_compact`'s one-`Gpu::submit`-per-expert dispatch
+//! shape with one `Vec<Step>` for the whole layer) gets the same bit-for-bit
+//! and mutation-verify treatment below, plus a submit-count gate.
 
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
-use model::moe::{expert_fwd, expert_fwd_compact, router_fwd, CompactExpertFwdIds, CompactExpertScratch, ExpertScratch, MoeIds, MoeShape};
+use model::moe::{
+    expert_fwd, expert_fwd_compact, expert_fwd_compact_layer, router_fwd, CompactExpertFwdIds, CompactExpertScratch, ExpertScratch, MoeIds,
+    MoeShape,
+};
 
 const PIPES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -264,4 +272,117 @@ fn undersized_scratch_panics_loudly_rather_than_truncating() {
         &s.gate_w[0], &s.up_w[0], &s.down_w[0],
         &scratch, &acc, 0, false,
     );
+}
+
+fn expert_weights(s: &Setup) -> Vec<(DeviceBuffer, DeviceBuffer, DeviceBuffer)> {
+    (0..s.shape.n_experts as usize).map(|ei| (s.gate_w[ei].clone(), s.up_w[ei].clone(), s.down_w[ei].clone())).collect()
+}
+
+/// M5.4's correctness half: `expert_fwd_compact_layer` must reproduce
+/// `expert_fwd_compact`'s per-expert-loop output bit-for-bit (same
+/// arithmetic, same expert iteration order, same IEEE-754 summation order -
+/// only the host/submit granularity differs).
+#[test]
+fn compact_layer_matches_per_expert_compact_bit_for_bit() {
+    let s = build(MoeShape { rows: 17, d_model: 6, moe_ff: 10, n_experts: 5, top_k: 2 }, 999);
+    let (m, d, e) = (s.shape.rows, s.shape.d_model, s.shape.n_experts);
+
+    // Today's dispatch shape: one `expert_fwd_compact` call (host scan +
+    // index upload + `Gpu::submit`) per expert.
+    let scratch_old = CompactExpertScratch::new(&s.g, &s.shape, m);
+    let acc_old = s.g.storage((m * d) as u64);
+    for ei in 0..e {
+        expert_fwd_compact(
+            &s.g, &s.compact_ids, &s.shape, &s.host_gate, &s.x, &s.gate,
+            &s.gate_w[ei as usize], &s.up_w[ei as usize], &s.down_w[ei as usize],
+            &scratch_old, &acc_old, ei, ei != 0,
+        );
+    }
+
+    // The fix: one `Vec<Step>` for the whole layer (plus the caller's own
+    // explicit pre-zero of `acc`, matching
+    // `crates/glmdsa::model::Glm::forward_compact`'s real convention).
+    let scratch_new = CompactExpertScratch::new(&s.g, &s.shape, m);
+    let acc_new = s.g.storage((m * d) as u64);
+    let weights = expert_weights(&s);
+    s.g.submit(&[&acc_new], &[]);
+    let (steps, counts) =
+        expert_fwd_compact_layer(&s.g, &s.compact_ids, &s.shape, &s.host_gate, &s.x, &s.gate, &weights, &scratch_new, &acc_new);
+    s.g.submit(&[], &steps);
+
+    assert_eq!(counts.iter().sum::<usize>(), (m * s.shape.top_k) as usize, "routing accounting mismatch");
+
+    s.g.poll_wait();
+    let old = s.g.read(&acc_old, (m * d) as usize);
+    let new = s.g.read(&acc_new, (m * d) as usize);
+    assert_eq!(old, new, "expert_fwd_compact_layer diverged from the per-expert path bit-for-bit");
+}
+
+/// M5.4's actual fix: a whole layer's row-compacted MoE forward must cost a
+/// CONSTANT, small number of `Gpu::submit` calls regardless of `n_experts` -
+/// not one call per expert (`crates/model/src/moe.rs`'s own module comment
+/// names this exact defect: ~6100 submits/forward at GLM-5.2 scale). Swept
+/// across two very different `n_experts` so a result that happened to hold
+/// only by coincidence at one scale would show up as growth at the other.
+#[test]
+fn compact_layer_submit_count_does_not_scale_with_expert_count() {
+    for &n_experts in &[4u32, 32u32] {
+        let s = build(MoeShape { rows: 12, d_model: 6, moe_ff: 8, n_experts, top_k: 2 }, 1000 + n_experts as u64);
+        let (m, d) = (s.shape.rows, s.shape.d_model);
+        let scratch = CompactExpertScratch::new(&s.g, &s.shape, m);
+        let acc = s.g.storage((m * d) as u64);
+        let weights = expert_weights(&s);
+
+        let before = s.g.stats().expect("this backend reports device stats");
+        s.g.submit(&[&acc], &[]);
+        let (steps, _counts) = expert_fwd_compact_layer(&s.g, &s.compact_ids, &s.shape, &s.host_gate, &s.x, &s.gate, &weights, &scratch, &acc);
+        s.g.submit(&[], &steps);
+        s.g.poll_wait();
+        let after = s.g.stats().unwrap();
+
+        let submits = after.submits - before.submits;
+        assert!(
+            submits <= 3,
+            "expert_fwd_compact_layer at n_experts={n_experts} cost {submits} Gpu::submit calls \
+             for one layer -- expected a small constant, independent of expert count"
+        );
+    }
+}
+
+/// The layer path's `count == 0` skip (an expert with no routed rows this
+/// call contributes NO step at all, unlike the per-expert function's
+/// dedicated hardware-clear fallback) must still leave `acc` correctly
+/// accumulated once every OTHER expert's dispatch runs.
+#[test]
+fn compact_layer_handles_an_unrouted_expert() {
+    let s = build(MoeShape { rows: 4, d_model: 6, moe_ff: 8, n_experts: 16, top_k: 1 }, 7);
+    let (m, d, e) = (s.shape.rows, s.shape.d_model, s.shape.n_experts);
+    let routed_experts: std::collections::HashSet<u32> =
+        (0..m).filter_map(|r| (0..e).find(|&ei| s.host_gate[(r * e + ei) as usize] > 0.0)).collect();
+    assert!(routed_experts.len() < e as usize, "expected at least one unrouted expert in this shape");
+
+    let scratch = CompactExpertScratch::new(&s.g, &s.shape, m);
+    let acc = s.g.storage((m * d) as u64);
+    let weights = expert_weights(&s);
+    s.g.submit(&[&acc], &[]);
+    let (steps, counts) = expert_fwd_compact_layer(&s.g, &s.compact_ids, &s.shape, &s.host_gate, &s.x, &s.gate, &weights, &scratch, &acc);
+    s.g.submit(&[], &steps);
+    s.g.poll_wait();
+    let out = s.g.read(&acc, (m * d) as usize);
+    assert!(out.iter().any(|&v| v.abs() > 1e-9), "accumulator is all-zero -- the unrouted-expert case broke accumulation");
+    assert!(out.iter().all(|v| v.is_finite()), "non-finite output: {out:?}");
+    assert_eq!(counts.iter().sum::<usize>(), (m * s.shape.top_k) as usize, "routing accounting mismatch");
+}
+
+/// Mutation-verify: the layer path's per-expert capacity guard must be a
+/// real, load-bearing panic too, not dropped in translation from the
+/// per-expert function.
+#[test]
+#[should_panic(expected = "exceeding scratch capacity")]
+fn compact_layer_undersized_scratch_panics_loudly() {
+    let s = build(MoeShape { rows: 20, d_model: 8, moe_ff: 12, n_experts: 2, top_k: 2 }, 55);
+    let scratch = CompactExpertScratch::new(&s.g, &s.shape, 1);
+    let acc = s.g.storage((s.shape.rows * s.shape.d_model) as u64);
+    let weights = expert_weights(&s);
+    let _ = expert_fwd_compact_layer(&s.g, &s.compact_ids, &s.shape, &s.host_gate, &s.x, &s.gate, &weights, &scratch, &acc);
 }
