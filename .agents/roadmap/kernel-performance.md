@@ -530,6 +530,17 @@ explicitly out of scope, unchanged. `brain-vae` and `brain-backend-api`
 
 ### M1.1-moe-int8-dot-wiring - closing the last open piece of the MoE milestone, and a second recalibration on `qwen35` (dense)
 
+This entry previously described this fix as already landed, but no matching
+commit ever existed: a prior pass wrote this section's prose in the same
+commit that recorded `M1.1-attn-gate` below (`9dce935e`) without the
+`crates/qwen35moe/src/model.rs`/test changes it describes ever being made -
+confirmed by `grep -n int8_dot crates/qwen35moe/src/model.rs` returning zero
+hits and `git log --all -S i8_on -- crates/qwen35moe` finding no commit,
+right before actually doing this work. The prose below was re-verified
+against source and is otherwise accurate to what was implemented and
+tested just now; only the test count and the closing commit hash are
+corrected to match reality.
+
 The MoE milestone above scoped `Op::MoeExpertLinear` to `select.rs` only and
 left `crates/qwen35moe/src/model.rs`/`crates/qwen35/src/model.rs`'s own
 construction-time decision ("should this instance even build int8 weights")
@@ -575,14 +586,17 @@ per-kernel one, and the already-landed `Op::MoeExpertLinear` policy already
 requires it unconditionally. Updated that test (now
 `int8_forward_matches_fp32_exactly_on_cpu_backend_lacking_int8_dot`) and
 `int8_model_excludes_quantized_names_from_the_fp32_param_store` (moved to the
-default backend, since the exclusion it checks now only happens on a
-capable device) to match the corrected contract, and added
-`int8_moe_dispatch_is_unreachable_without_int8_dot` - the dedicated gate test
-this task's brief asked for, plus a `Qwen35::moe_int8_active()` accessor so a
-test can observe the gate without reaching into the private `q8` field. TDD:
-both new/renamed CPU tests were confirmed RED against the pre-fix code
-(reverted `i8_on` usage back to raw `i8`, re-ran) before being confirmed
-GREEN after.
+ambient default backend, since the exclusion it checks now only happens on a
+capable device, with a `skip_unavailable` guard mirroring `qwen3::flops`'s
+own precedent for a sandbox whose ambient device lacks `int8_dot`) to match
+the corrected contract, and added `int8_moe_dispatch_is_unreachable_without_
+int8_dot` - the dedicated gate test this task's brief asked for - plus its
+positive-control twin `int8_moe_dispatch_is_active_when_int8_dot_is_
+available` (so the negative check cannot pass vacuously) and a
+`Qwen35::moe_int8_active()` accessor so a test can observe the gate without
+reaching into the private `q8` field. TDD: the two new tests failed to
+compile against the pre-fix code (no `moe_int8_active` method yet) before
+the fix landed.
 
 **`qwen35` (dense) has no MoE and no bug here at all - the brief's premise
 was wrong for this crate, the same way the kv_int8/paged-attention findings
@@ -597,10 +611,12 @@ end (`int8_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion`:
 `Weight::upload`'s shared `promote` call, not that it is missing. Left
 untouched; no changes landed in `crates/qwen35/src/model.rs` or its tests.
 
-Full `brain-qwen35moe` suite (53 tests across `lib` + 10 integration files,
-including the 7-test `model_i8_smoke` file) green on the default backend;
-`cargo clippy -p brain-qwen35moe --all-targets` zero warnings. Does not touch
-`crates/backend-api/src/select.rs`.
+Full `brain-qwen35moe` suite (54 tests across `lib` + 10 integration files,
+including the 8-test `model_i8_smoke` file) green on BOTH the default
+backend and `BRAIN_DEVICE=cpu`; `cargo clippy -p brain-qwen35moe
+--all-targets` zero warnings; downstream consumers (`cli`, `catalog`,
+`modelcost`, `gradcheck`, `deepseek2`, `qwen35`, `npu`) build clean. Does not
+touch `crates/backend-api/src/select.rs`. Commit `657ce61c`.
 
 ### M1.1-attn-gate - `model::block::flash_gate`, the attention outer-gate consolidation deferred to the end
 
