@@ -1974,6 +1974,84 @@ kernels; `brain-gpu-core`: the `matmul_q4_gemv_reg` upgrade wiring;
 `brain-model`: correctness + speed A/B tests for both kernels; the
 `gpu-core` upgrade-wiring revert once the speed regression was measured).
 
+### M5.2 - Attention backward dscores family: `Op::AttnBwdDScores`, cooperative kernels, one real model wired
+
+`attn_bwd_dscores{,_bidir,_cross}` and `gqa_bwd_dscores` give thread `t`
+the whole query row `t`: the causal/bidir/cross reduction over `j` is
+walked serially by one lane, and its per-iteration read of `d_out`/`d_ctx`
+is indexed by that thread-varying row, so a warp's 32 lanes read addresses
+`d_model` floats apart - `Op::MaxAbsRow`'s coalescing bug, confirmed live
+via `BRAIN_PROFILE` on a real training pass (`brain gpt2 train`,
+`BRAIN_DEVICE=gpu`, T=512): `attn_bwd_dscores` alone was 8.0% of total GPU
+time, ahead of both forward GEMM families in that profile.
+
+**`attn_bwd_d{q,k,v}` were re-checked against source and excluded from
+this Op, correcting the milestone's own `@1`/`@2` label-based scope.** The
+metadata generator's `@opt` rating comes from counting `for` loops whose
+bound textually matches a uniform param or a local alias of one; `attn_
+bwd_dq`'s causal loop bound is `j <= i` (`i` a per-thread value derived
+from the dispatch index, not a uniform), so it is NOT counted and the
+kernel lands at `@opt 3` despite doing the identical O(T) causal walk its
+`_bidir`/`_cross` siblings do at `@opt 2` with a bound that happens to
+match the pattern (`j < T`). Read against actual memory access rather
+than the label: `attn_bwd_d{q,k,v}`'s thread-varying index is `d` (head-
+dim element) - already coalesced - and their loop-scalar reads (`probs`/
+`d_scores`/`q`/`k`) are workgroup-uniform broadcasts at each iteration,
+not a per-row serialisation. They are real, fully-parallel, already-
+coalesced kernels whose only "inefficiency" is a non-tree scalar
+reduction already spread across every output element - not the pattern-2
+defect this milestone targets - so they stay out of scope rather than
+being force-fit into a fix that would not address a real memory-access
+problem.
+
+Added 4 cooperative one-workgroup-per-row kernels (`attn_bwd_dscores_rows`,
+`attn_bwd_dscores_bidir_rows`, `attn_bwd_dscores_cross_rows`,
+`gqa_bwd_dscores_rows`): 64 threads split the row's causal/bidir/cross
+reduction with a strided partial sum, one barrier folds the 64 partials
+(the CPU JIT supports exactly one top-level barrier, so these stay `@cpu
+yes`, portable, not GPU-only siblings, unlike the register-tiled GEMM
+family), then every thread recomputes its own strided term and writes
+directly - no second synchronisation needed since each output index is
+owned by exactly one thread. Same math as the reference kernels; the `dot`
+reduction folds in a different order, so the two agree to floating-point
+rounding, not to the bit, the same contract `rmsnorm_rows.wgsl` documents
+for its own reduction-order change. New `Op::AttnBwdDScores` in
+`backend_api::select` follows `Op::MaxAbsRow`/`Op::Softmax`'s rule exactly
+(no shape gate, `WorkgroupPerOutput` first, `Reference` on the CPU JIT).
+`gpu_core::cost`'s existing `attn_bwd_dscores{,_bidir,_cross}`/`gqa_bwd_
+dscores` match arms extended to their `_rows` twins (identical FLOP/byte
+count - the 64 threads split the same reduction, they do not add work),
+with a cost-agreement test per family.
+
+A gpu-core kernel-level A/B harness (`bench_attn_bwd_dscores`) covers
+causal, bidir and GQA at several `(b, h, T, hd)` shapes and cross at
+several `(b, h, t_dec, t_enc, hd)` shapes, comparing reference and `_rows`
+outputs directly with a `2e-5` relative-agreement gate (`bench_layernorm.
+rs`'s own tolerance) alongside achieved-bandwidth reporting.
+
+**One real model wired**: `gpt2`'s causal backward now asks `Op::
+AttnBwdDScores` via a `dscores_kernel` picker instead of dispatching the
+reference kernel unconditionally, gated by the crate's own existing suite
+on real Tesla P40 hardware (`BRAIN_DEVICE=gpu`, release) - `dp_grad_parity_
+gpt`, `cpu_register_equals_cpu_naive`, `shard_forward_and_grad_parity_gpt`
+and the `convergence` suite all green, every one of them exercising the
+new dispatch path since they all train through the real backward tape.
+Migrating the remaining callers (the shared `model::vit::cross_q_bwd`
+helper used by `clip`/`sam1`/`sam2`/`qwen3vl`/`fastvlm`/`moondream3` for
+both self- and cross-attention, and the GQA family's own callers such as
+`glmdsa`) is left as follow-up scoped work for the same reason M1.1's
+`Op::PagedAttention` migrated only `qwen3::serve` first: the selector and
+the cooperative kernels are the seam the next model inherits, and each
+further caller still owes its own numerical-agreement gate before
+adopting a non-bit-identical kernel swap.
+
+`cargo clippy -p brain-backend-api -p brain-gpu-core -p brain-kernels -p
+brain-gpt2 --all-targets` clean; `kernels-regen`/`kernels-table` run.
+**Commits**: four (`Op::AttnBwdDScores`; the four cooperative kernels +
+cost-model wiring; a same-turn fix restoring a concurrent session's
+`rmsnorm_dx_rows` cost-model arm this milestone's own file reconstruction
+had accidentally clobbered; the `gpt2` wiring + the A/B harness).
+
 ---
 
 ## Not yet done
