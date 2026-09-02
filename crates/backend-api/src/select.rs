@@ -62,6 +62,26 @@ pub enum Op {
     /// `m` = rows (heads × query positions), `n` = the key axis being
     /// softmaxed over; `k` unused.
     Softmax,
+    /// Attention backward, step 1 (`attn_bwd_dscores{,_bidir,_cross}` /
+    /// `gqa_bwd_dscores` vs their `_rows` cooperative twins) - gradient
+    /// through `probs @ v` and the softmax jacobian. The per-element kernel
+    /// gives thread `t` query row `t`; the per-iteration read of `d_out`
+    /// therefore steps by `d_model` across a warp (`d_out[(b*T+i)*d_model +
+    /// h*hd + d]`, `i` the thread-varying index) - `Op::MaxAbsRow`'s
+    /// coalescing bug, not merely a slow reduction. Measured live in a real
+    /// training pass (`brain gpt2 train`, `BRAIN_PROFILE=1`): `attn_bwd_
+    /// dscores` alone was 8.0% of total GPU time at `T=512`, ahead of both
+    /// forward GEMM families in that profile.
+    /// `attn_bwd_d{q,k,v}` are a DIFFERENT shape (thread-varying index is
+    /// `d`, coalesced; the loop-scalar reads are workgroup-uniform
+    /// broadcasts) and are deliberately NOT part of this Op - re-checked
+    /// against source rather than the `@opt` label, which rates several of
+    /// them 2 anyway (the label's loop-counting heuristic does not look at
+    /// which axis varies across threads). No shape gate, for the same reason
+    /// `Op::MaxAbsRow`/`Op::Softmax` have none: the loss is per-access
+    /// efficiency, which more rows never fixes. `m` = `bsz * n_heads *
+    /// tcols` (one row per query position); `n`/`k` unused.
+    AttnBwdDScores,
     /// Paged-attention decode SCORES (`paged_decode_scores_wg` vs
     /// `paged_decode_scores_batched`, plus the INT8 KV tier
     /// `paged_decode_scores_i8_batched`) - the SCORES half only. The
@@ -699,6 +719,10 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // capability check at all, which this Op also lets those sites
         // adopt.
         Op::Softmax => vec![WorkgroupPerOutput, Reference],
+        // Attention backward dscores: `Op::MaxAbsRow`'s exact rule, for the
+        // exact reason (see this Op's own doc) - one thread per query row,
+        // no row/col gate.
+        Op::AttnBwdDScores => vec![WorkgroupPerOutput, Reference],
         // Paged-attention decode SCORES. At F32 (and the storage tiers)
         // this is `Op::MaxAbsRow`'s exact shape - a per-(batch,head)
         // reduction over `cap` keys, no row/col gate,
@@ -1290,6 +1314,22 @@ mod tests {
         }
     }
 
+    /// Attention backward dscores (`attn_bwd_dscores{,_bidir,_cross}_rows` /
+    /// `gqa_bwd_dscores_rows` vs their per-element references) has the same
+    /// shape as `Op::MaxAbsRow`: one thread per query row, no row/col gate -
+    /// this test exists so a threshold cannot creep in later the way it did
+    /// on `Op::RmsNorm`.
+    #[test]
+    fn attn_bwd_dscores_is_cooperative_at_every_shape() {
+        let s = DefaultSelector;
+        for m in [1u32, 8, 32, 512, 4096] {
+            let sh = shape(m, 0, 0, Dtype::F32);
+            assert_eq!(s.select(Op::AttnBwdDScores, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
+            // The CPU JIT cannot execute the barrier - a correctness gate.
+            assert_eq!(s.select(Op::AttnBwdDScores, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+        }
+    }
+
     /// Paged-attention decode SCORES (`paged_decode_scores_wg` vs
     /// `paged_decode_scores_batched`) has the same F32 shape as
     /// `Op::MaxAbsRow`: a per-(batch,head) reduction over `cap` keys, no
@@ -1442,6 +1482,7 @@ mod tests {
                 Op::GradNorm,
                 Op::MaxAbsRow,
                 Op::Softmax,
+                Op::AttnBwdDScores,
                 Op::PagedAttention,
                 Op::MoeExpertLinear,
             ] {
