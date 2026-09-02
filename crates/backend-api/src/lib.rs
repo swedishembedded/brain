@@ -964,6 +964,11 @@ pub struct DeviceStats {
     pub readbacks: u64,
     pub bind_groups: u64,
     pub uniform_allocs: u64,
+    /// `write`/`write_at` calls - the host->device upload count a hot loop
+    /// pays per iteration. Added for M6.4 (`kernel-performance.md`): the
+    /// multi-tensor optimizer's whole point is collapsing this from O(P)
+    /// (one write per tensor per step) to O(1).
+    pub writes: u64,
 }
 
 /// wasm variant: no `Send + Sync` (WebGPU is single-threaded) and no blocking

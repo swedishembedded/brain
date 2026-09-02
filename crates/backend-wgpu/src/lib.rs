@@ -867,6 +867,7 @@ pub struct WgpuBackend {
     stats_submit: std::sync::atomic::AtomicU64,
     stats_dispatch: std::sync::atomic::AtomicU64,
     stats_read: std::sync::atomic::AtomicU64,
+    stats_write: std::sync::atomic::AtomicU64,
 }
 
 impl WgpuBackend {
@@ -968,12 +969,13 @@ impl WgpuBackend {
         use std::sync::atomic::Ordering::Relaxed;
         if self.profile {
             eprintln!(
-                "=== GPU op counts (BRAIN_PROFILE) === uniforms={} bind_groups={} submits={} dispatches={} readbacks={}",
+                "=== GPU op counts (BRAIN_PROFILE) === uniforms={} bind_groups={} submits={} dispatches={} readbacks={} writes={}",
                 self.stats_uniform.load(Relaxed),
                 self.stats_bg.load(Relaxed),
                 self.stats_submit.load(Relaxed),
                 self.stats_dispatch.load(Relaxed),
                 self.stats_read.load(Relaxed),
+                self.stats_write.load(Relaxed),
             );
         }
         if let Some(p) = &self.shared.gpu_profile {
@@ -1528,6 +1530,7 @@ impl WgpuBackend {
             stats_submit: AtomicU64::new(0),
             stats_dispatch: AtomicU64::new(0),
             stats_read: AtomicU64::new(0),
+            stats_write: AtomicU64::new(0),
         }
     }
 
@@ -2125,6 +2128,7 @@ impl WgpuBackend {
         self.flush_inner();
         self.queue().write_buffer(buf, 0, bytemuck::cast_slice(data));
         self.shared.writes_pending.store(true, std::sync::atomic::Ordering::Release);
+        self.stats_write.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// [`Self::write`] at a byte offset of `offset_words * 4` - see the
@@ -2135,6 +2139,7 @@ impl WgpuBackend {
         self.flush_inner();
         self.queue().write_buffer(buf, offset_words * 4, bytemuck::cast_slice(data));
         self.shared.writes_pending.store(true, std::sync::atomic::Ordering::Release);
+        self.stats_write.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Block until all submitted GPU work has completed, letting wgpu reclaim the
@@ -2426,6 +2431,7 @@ impl Backend for WgpuBackend {
             readbacks: self.stats_read.load(Relaxed),
             bind_groups: self.stats_bg.load(Relaxed),
             uniform_allocs: self.stats_uniform.load(Relaxed),
+            writes: self.stats_write.load(Relaxed),
         })
     }
     // Forward the device's real limit; without this override the trait default

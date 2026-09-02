@@ -251,6 +251,7 @@ struct OpCounters {
     readbacks: AtomicU64,
     bind_groups: AtomicU64,
     uniform_allocs: AtomicU64,
+    writes: AtomicU64,
     /// Individual `VkBufferMemoryBarrier`s emitted by `flush_chunk`'s
     /// per-buffer hazard analysis (one per buffer a dispatch actually depends
     /// on from an earlier, not-yet-synchronised write in the same batch) -
@@ -832,6 +833,7 @@ impl VulkanBackend {
         self.flush();
         self.drain();
         self.ctx.upload(&buf.inner, bytemuck::cast_slice(data));
+        self.stats.writes.fetch_add(1, Ordering::Relaxed);
     }
 
     /// [`Self::write`] at a word offset — see `Backend::write_at`.
@@ -839,6 +841,7 @@ impl VulkanBackend {
         self.flush();
         self.drain();
         self.ctx.upload_at(&buf.inner, bytemuck::cast_slice(data), offset_words * 4);
+        self.stats.writes.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn read(&self, buf: &VkOwnedBuffer, n: usize) -> Vec<f32> {
@@ -1693,6 +1696,7 @@ impl Backend for VulkanBackend {
             readbacks: self.stats.readbacks.load(Ordering::Relaxed),
             bind_groups: self.stats.bind_groups.load(Ordering::Relaxed),
             uniform_allocs: self.stats.uniform_allocs.load(Ordering::Relaxed),
+            writes: self.stats.writes.load(Ordering::Relaxed),
         })
     }
 

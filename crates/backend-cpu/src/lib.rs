@@ -101,6 +101,7 @@ struct OpCounters {
     readbacks: AtomicU64,
     bind_groups: AtomicU64,
     uniform_allocs: AtomicU64,
+    writes: AtomicU64,
 }
 
 pub struct CpuBackend {
@@ -298,6 +299,7 @@ impl CpuBackend {
             w.resize(data.len(), 0);
         }
         w[..data.len()].copy_from_slice(data);
+        self.stats.writes.fetch_add(1, Ordering::Relaxed);
     }
 
     /// [`Self::write`] at a word offset - the CPU backend has no staging
@@ -310,6 +312,7 @@ impl CpuBackend {
             w.resize(off + data.len(), 0);
         }
         w[off..off + data.len()].copy_from_slice(data);
+        self.stats.writes.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn read(&self, buf: &CpuBuffer, n: usize) -> Vec<f32> {
@@ -987,6 +990,7 @@ impl Backend for CpuBackend {
             readbacks: c.readbacks.load(Ordering::Relaxed),
             bind_groups: c.bind_groups.load(Ordering::Relaxed),
             uniform_allocs: c.uniform_allocs.load(Ordering::Relaxed),
+            writes: c.writes.load(Ordering::Relaxed),
         })
     }
 

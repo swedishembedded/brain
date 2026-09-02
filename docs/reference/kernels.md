@@ -51,7 +51,7 @@ load of it must already be bare-identifier-indexed.
 | kernel | what it does | how | opt | cpu | gpu | npu | quant | dtype |
 |---|---|---|---|---|---|---|---|---|
 | [`adaln_row`](../../crates/kernels/wgsl/adaln_row.wgsl) | Extract one row of a per-token adaLN table and add a per-block table row | one thread per output element, gathering the token's own table row | 3/5 | ✓ | ✓ | - | - | f32 |
-| [`adamw`](../../crates/kernels/wgsl/adamw.wgsl) | AdamW update (decoupled weight decay), matching torch.optim.AdamW | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`adamw`](../../crates/kernels/wgsl/adamw.wgsl) | AdamW update (decoupled weight decay) fused with grad unscale/clip, matching torch.optim.AdamW + clip_grad_norm_ | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`adaptive_avgpool2d`](../../crates/kernels/wgsl/adaptive_avgpool2d.wgsl) | torch adaptive_avg_pool2d (forward) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`adaptive_avgpool2d_dx`](../../crates/kernels/wgsl/adaptive_avgpool2d_dx.wgsl) | adaptive_avg_pool2d backward | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`add`](../../crates/kernels/wgsl/add.wgsl) | Residual add:  dst[i] += src[i] | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |

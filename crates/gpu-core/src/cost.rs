@@ -1013,7 +1013,12 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
 
         // ---- optimizer / grad plumbing --------------------------------------
-        // params [numel, pad, lr, b1, b2, eps, wd, bc1, bc2].
+        // `optim::Optim` dispatches this via `step_buf` (a caller-owned,
+        // persistent uniform), so `params` is always `None` here per
+        // `StepMeta`'s own doc - this arm never actually fires today, same as
+        // before M6.4 folded the grad-scale into this kernel's uniform
+        // (`[lr, b1, b2, eps, wd, bc1, bc2, scale]`) and moved `numel` into a
+        // per-tensor descriptor buffer `cost_of` has no params-based view of.
         "adamw" => f(12 * p(0)?, 28 * p(0)?),
         // params [numel, slot].
         "gradnorm_sq" => f(2 * p(0)?, 4 * p(0)?),
