@@ -1291,6 +1291,97 @@ PagedDecoder` (trait + scheduler, a pure refactor via default trait methods -
 no behaviour change for any decoder), `qwen3: delete the host admission
 head, reuse the device head for it too` (Engine + tests).
 
+### M3.4 - `qwen35::serve` gets a device head, and `prefill`'s per-token read is gone
+
+`qwen35::serve::Engine` is architecturally NOT `qwen3::serve::Engine` - it is
+the deliberately single-sequence, per-token-dispatch, correctness-first
+engine its own module doc names (`Qwen35::run_decode_step` has no batch
+dimension at all: GDN's recurrent state and the flat per-block GQA cache are
+both `n = 1` shaped), so "batched prefill" and "batched greedy" in the
+audit's literal sense - one dispatch across many prompt tokens, or across
+many sequences - are NOT buildable without rearchitecting the model's own
+decode primitive, which is out of this milestone's scope and is exactly the
+"Deliberately deferred" list the module doc already carries (chunked prefill,
+multi-sequence GPU batching). What the audit's finding actually named as
+concrete defects, and what this milestone fixed instead, checked against
+source per this campaign's own rule:
+
+- **No device head at all** (confirmed: `Engine::head: Vec<f32>` +
+  `hostmath::matvec_par`, used for BOTH admission and every decode step) -
+  even though the SAME head weight was already resident on the device via
+  the model's own `ParamStore` (`run_forward`'s training-path head epilogue
+  already dispatches `MATMUL` against `self.w(cfg.head_weight())` at full
+  model scale), so the host copy was a pure duplicate, exactly `qwen3`'s
+  M3.2 shape. Added `Qwen35::head_logits_dev`/`head_argmax_dev`/
+  `head_topk_dev` (device `MATMUL` + the shared `argmax_part`/`argmax_final`
+  split-reduction + `topk_extract_step` - all three already-cataloged
+  kernels, newly REGISTERED in `qwen35::model::pipelines()`, never
+  hand-written); `Engine::forward_batched_greedy`/`forward_batched_topk` now
+  chain `decode_one`'s returned `DeviceBuffer` straight into them without an
+  intermediate host readback, and the `PagedDecoder::admit_greedy`/
+  `admit_topk` overrides (added per M3.2's own trait seam) upload the
+  admission hidden row and reuse the same two methods, so admission never
+  ships a `[vocab]` block to the host either. `Op::ArgMaxRow`'s
+  `SplitReduction` kernels are capability-free (no `caps` gate in that arm -
+  `backend_api::select`'s own doc), so dispatching them unconditionally
+  (this crate carries no `KernelSelector` of its own) is correct at every
+  vocab size, including the 29-token tiny test config (`argmax_part.wgsl`'s
+  own `end = min(start + chunk, n)` bounds a chunk index past `n` to an
+  empty range, so the excess chunks contribute `-inf` and never win).
+- **A per-token `read` in `prefill`** (confirmed: `gpu.read(&h, d)` on every
+  loop iteration, discarding every result but the last). Fixed by chaining
+  `run_decode_step`'s device buffer across the loop and reading back exactly
+  once, after it ends - `qwen3::serve::Engine::prefill`'s own M3.1 shape
+  ("submit every step, read back once"), ported at token granularity instead
+  of chunk granularity since this engine has no multi-token batched dispatch
+  to chunk over.
+- **A sequential host loop for `forward_batched_greedy`**: still a host loop
+  (multi-sequence GPU batching is the out-of-scope item above), but each
+  iteration's OWN head projection + sampling pick is no longer a host round
+  trip - see the device-head bullet.
+
+TDD: `prefill_reads_back_exactly_once_regardless_of_prompt_length` (new,
+mirrors `qwen3`'s `prefill_submits_scale_with_chunks_not_with_token_count`)
+confirmed RED against the pre-fix code (`got 3` readbacks for a 3-token
+prompt) before the fix and GREEN after, on the default backend.
+`forward_batched_topk_matches_an_independent_host_matvec_within_tolerance`
+(new) replays the same steps through a SEPARATE `Qwen35::step`-driven
+instance and an independent host `matvec_par` + sort, never reusing any
+device kernel this milestone added, and matched both value (1e-3 tolerance)
+and id at every one of `k=5` candidates. The two pre-existing
+`scheduler_decode_matches_step_{cpu,default_backend}` tests (bit-exact
+greedy decode vs `qwen35::sample::generate_kv`, which computes logits via
+the SAME independent host `matvec_par`) stayed green through the whole
+change on both the CPU JIT and the default (wgpu) backend, which is the
+strongest existing evidence the new device head's reduction order agrees
+with the host reference. Full `brain-qwen35` `--lib` (49 passed, 1 ignored)
+and `--test serve` (4 passed) green; `cargo clippy -p brain-qwen35
+--all-targets` zero warnings; `scripts/gates/check-kernel-selection.sh`
+exits clean (the new `argmax_part`/`argmax_final`/`topk_extract_step`
+dispatches are the CATALOGUE's fast siblings, not the slow `argmax_row` the
+gate polices, so no allow-list row was needed; `matmul` in
+`crates/qwen35/src/model.rs` was already an allow-listed M1.4/Phase-5
+backlog row before this milestone and covers the new head dispatch too).
+
+`scripts/gates/qwen35-perf-baselines/qwen35-resident-int8-cpu48-gpu2.json`
+exists locally on this box, but it is NOT a `qwen35::serve::Engine` baseline
+- its own `notes` field says "qwen35 int8 GGUF two-card resident", i.e. it
+measures `crates/qwen35/src/int8_gguf_resident.rs` (a completely different,
+disk-streamed, dual-GPU, int8-quantized code path this milestone never
+touches), not the single-GPU fp32 `Engine` this milestone changed. No
+benchmark binary in the tree drives `qwen35::serve::Engine`'s decode tok/s at
+all (`qwen35_bench`/`qwen35_decode_profile` both drive `int8_gguf_resident`/
+`stream` instead), so there is no baseline this milestone's change could be
+measured against, and the numeric comparison this milestone's gate asked for
+is skipped rather than fabricated against a mismatched artifact - a future
+`Engine`-specific decode-throughput benchmark is the real prerequisite.
+
+**Commits**: two - `qwen35: add Qwen35::head_{logits,argmax,topk}_dev, the
+device-head machinery` (registers the three already-cataloged kernels in
+`pipelines()` and adds the methods, self-contained and unused by anything
+yet), `qwen35: port qwen3's device head onto serve::Engine, fix prefill's
+per-token read` (Engine + tests).
+
 ---
 
 ## Not yet done
