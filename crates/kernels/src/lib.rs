@@ -748,6 +748,8 @@ pub const RMSNORM_DW: &str = include_str!("../wgsl/rmsnorm_dw.wgsl");
 pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
 /// `wgsl/rmsnorm_dx_eps.wgsl`
 pub const RMSNORM_DX_EPS: &str = include_str!("../wgsl/rmsnorm_dx_eps.wgsl");
+/// `wgsl/rmsnorm_dx_rows.wgsl`
+pub const RMSNORM_DX_ROWS: &str = include_str!("../wgsl/rmsnorm_dx_rows.wgsl");
 /// `wgsl/rmsnorm_eps.wgsl`
 pub const RMSNORM_EPS: &str = include_str!("../wgsl/rmsnorm_eps.wgsl");
 /// `wgsl/rmsnorm_quant_fused.wgsl`
@@ -1279,6 +1281,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm_dw", RMSNORM_DW),
     ("rmsnorm_dx", RMSNORM_DX),
     ("rmsnorm_dx_eps", RMSNORM_DX_EPS),
+    ("rmsnorm_dx_rows", RMSNORM_DX_ROWS),
     ("rmsnorm_eps", RMSNORM_EPS),
     ("rmsnorm_quant_fused", RMSNORM_QUANT_FUSED),
     ("rmsnorm_rows", RMSNORM_ROWS),
