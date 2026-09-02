@@ -498,9 +498,6 @@ pub struct Engine {
     /// shape this table has no measurement for, not a wrapper around it.
     tuned_i8: HashMap<(u32, u32, u32), KernelVariant>,
     sc: Scratch,
-    /// `[vocab, d]` tied/untied head, kept on the host for the prefill path
-    /// (applied once per request) and for callers that need full logits.
-    head: Vec<f32>,
     /// `[max_batch, vocab]` decode logits, and `[max_batch]` argmax indices.
     logits_dev: DeviceBuffer,
     argmax_dev: DeviceBuffer,
@@ -791,7 +788,6 @@ impl Engine {
             i8_scratch,
             tuned_i8,
             sc,
-            head,
             logits_dev,
             argmax_dev,
             argmax_part_dev,
@@ -1752,17 +1748,48 @@ impl Engine {
         self.gpu.stats()
     }
 
-    /// Admission's one-time first-token logits (before the batched decode
-    /// loop, which never reaches this - see `submit_greedy_head`/
-    /// `forward_batched_topk`). `matvec_par` (rayon over `vocab` rows +
-    /// AVX2/FMA per row) replaces a single-threaded scalar loop that measured
-    /// hundreds of ms at the real 151936×1024 LM-head shape (see
-    /// `hostmath::matvec`'s doc comment) - a real per-request stall this
-    /// device-side-everything-else engine had left unfixed at exactly the one
-    /// remaining host head.
+    /// `logits = hidden @ head^T` for ONE row - what a host-side caller doing
+    /// its own argmax/sampling over the full vocabulary needs
+    /// ([`Self::generate_greedy`], [`Self::spec_decode`], `qwen3::eval`).
+    /// Writes `hidden` into `sc.xn_final` and reuses [`Self::head_steps`] -
+    /// the SAME device dispatch [`Self::submit_greedy_head`]/
+    /// [`Self::submit_topk_head`] build on - so this head matmul takes the
+    /// identical path decode's does rather than a separate host GEMV.
+    /// [`Self::admit_greedy`]/[`Self::admit_topk`] are what admission itself
+    /// calls; they skip this method entirely so admission never reads back a
+    /// full `[vocab]` block.
     pub(crate) fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let (d, v) = (self.cfg.d_model as usize, self.cfg.vocab as usize);
-        model::hostmath::matvec_par(&self.head, hidden, v, d)
+        assert_eq!(hidden.len(), d, "logits: hidden must be exactly one row of {d} floats, got {}", hidden.len());
+        self.gpu.write_f32(&self.sc.xn_final, hidden);
+        let mut steps: Vec<Step> = Vec::new();
+        self.head_steps(&mut steps, 1);
+        self.gpu.submit(&[], &steps);
+        self.gpu.read(&self.logits_dev, v)
+    }
+
+    /// Admission's greedy pick, entirely on the device: writes `hidden` (ONE
+    /// row) into `sc.xn_final` and reuses [`Self::submit_greedy_head`] - the
+    /// same head matmul + argmax reduction the batched decode loop
+    /// dispatches - so admission never ships a `[vocab]` block to the host to
+    /// pick one token.
+    fn admit_greedy(&self, hidden: &[f32]) -> u32 {
+        let d = self.cfg.d_model as usize;
+        assert_eq!(hidden.len(), d, "admit_greedy: hidden must be exactly one row of {d} floats, got {}", hidden.len());
+        self.gpu.write_f32(&self.sc.xn_final, hidden);
+        self.greedy_from_hidden(1)[0]
+    }
+
+    /// Admission's non-greedy candidates, entirely on the device: writes
+    /// `hidden` (ONE row) into `sc.xn_final` and reuses
+    /// [`Self::topk_from_hidden`] - the same top-k extraction the non-greedy
+    /// decode path uses - so admission never sorts a `[vocab]` vector on the
+    /// host either.
+    fn admit_topk(&self, hidden: &[f32], k: u32) -> Vec<(u32, f32)> {
+        let d = self.cfg.d_model as usize;
+        assert_eq!(hidden.len(), d, "admit_topk: hidden must be exactly one row of {d} floats, got {}", hidden.len());
+        self.gpu.write_f32(&self.sc.xn_final, hidden);
+        self.topk_from_hidden(1, k).pop().unwrap_or_default()
     }
 
     /// Blocks free in the pool - the capacity figure `brain perf kvcache` sizes
@@ -2078,6 +2105,12 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         self.logits(hidden)
+    }
+    fn admit_greedy(&self, hidden: &[f32]) -> u32 {
+        Engine::admit_greedy(self, hidden)
+    }
+    fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
+        Engine::admit_topk(self, hidden, k as u32)
     }
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         Engine::forward_batched_greedy(self, tables, inputs)
@@ -2752,10 +2785,18 @@ mod tests {
         assert_eq!(sched.waiting_len(), 0);
     }
 
-    /// The device-side greedy head must select exactly the token the host head
-    /// would. This is the invariant that lets decode skip shipping a
-    /// `[batch, vocab]` logit block back to the host - if it ever drifted, the
-    /// engine would silently generate different text at speed.
+    /// The batched split/two-stage argmax reduction (`greedy_from_hidden`,
+    /// reading the whole batch's rows from `sc.xn_final` at once) must select
+    /// exactly the token a plain host linear-scan argmax over the SAME
+    /// per-row device head matmul (`logits`, one row at a time) would. This
+    /// is the invariant that lets decode skip shipping a `[batch, vocab]`
+    /// logit block back to the host - if it ever drifted, the engine would
+    /// silently generate different text at speed.
+    ///
+    /// `dev` is read BEFORE the per-row `logits` calls: both share the
+    /// `sc.xn_final` scratch buffer, and `logits` overwrites its row 0 with
+    /// one hidden row at a time - reading `dev` first (over the batch
+    /// `forward_batched` just left resident) avoids that aliasing entirely.
     #[test]
     fn device_head_argmax_matches_the_host_head() {
         let cfg = QwenConfig::tiny();
@@ -2771,19 +2812,71 @@ mod tests {
             inputs.push(Engine::argmax(&eng.logits(&h)));
         }
         for _ in 0..4 {
-            // Host reference: hidden -> host matmul -> argmax, per row.
             let hidden = {
                 let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
                 eng.forward_batched(&mut refs, &inputs)
             };
+            // Device: same hidden still resident in sc.xn_final, head + split
+            // argmax applied on device, read BEFORE the per-row calls below.
+            let dev = eng.greedy_from_hidden(inputs.len() as u32);
+            // Host reference: per row, the SAME device head matmul (`logits`),
+            // reduced by a plain host linear-scan argmax instead.
             let d = eng.cfg.d_model as usize;
             let host: Vec<u32> =
                 (0..inputs.len()).map(|i| Engine::argmax(&eng.logits(&hidden[i * d..(i + 1) * d]))).collect();
-            // Device: same hidden already in sc.xn_final, head applied on device.
-            let dev = eng.greedy_from_hidden(inputs.len() as u32);
             assert_eq!(dev, host, "device head picked a different token than the host head");
             inputs = host;
         }
+    }
+
+    /// M3.2: `admit_greedy`/`admit_topk` (what `PagedDecoder::admit_greedy`/
+    /// `admit_topk` call for the SCHEDULER's admission path) must agree with
+    /// a TRUE, independent host matvec against the same head weight - not
+    /// merely with another device computation, since a real defect (a
+    /// transposed head, a swapped `d_model`/`vocab`) would agree with itself
+    /// perfectly. The device path is a tiled GEMM and the reference here is
+    /// a scalar host dot product, so their reduction orders genuinely
+    /// differ; comparing the value AT each returned candidate's own index
+    /// (rather than requiring the two to rank a near-tie the same way) is
+    /// what "within reduction-order tolerance" means for this gate.
+    #[test]
+    fn admission_head_matches_a_true_host_matvec_within_tolerance() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 96, 4, 12, 8, false, false);
+
+        let head = map.get(cfg.head_weight()).cloned().unwrap_or_else(|| map.get("tok.weight").cloned().unwrap());
+        let (d, v) = (cfg.d_model as usize, cfg.vocab as usize);
+
+        let mut table = BlockTable::new();
+        let hidden = eng.prefill(&mut table, &[1u32, 5, 3]);
+        assert_eq!(hidden.len(), d);
+
+        // Never routed through `Engine::logits` (device-backed since M3.2) -
+        // a plain scalar dot product against the raw weight this engine
+        // separately uploaded to the device at construction.
+        let host_logits = model::hostmath::matvec(&head, &hidden, v, d);
+        let tol = |x: f32| 1e-3 * x.abs().max(1.0) + 1e-4;
+
+        let k = 16u32;
+        let candidates = eng.admit_topk(&hidden, k);
+        assert_eq!(candidates.len(), k as usize);
+        for &(idx, dev_val) in &candidates {
+            let host_val = host_logits[idx as usize];
+            assert!(
+                (dev_val - host_val).abs() <= tol(host_val),
+                "admit_topk candidate {idx}: device {dev_val} vs true host matvec {host_val}"
+            );
+        }
+
+        let greedy = eng.admit_greedy(&hidden);
+        let greedy_dev_val = candidates[0].1;
+        let greedy_host_val = host_logits[greedy as usize];
+        assert_eq!(greedy, candidates[0].0, "admit_greedy must pick admit_topk's own best candidate");
+        assert!(
+            (greedy_dev_val - greedy_host_val).abs() <= tol(greedy_host_val),
+            "admit_greedy token {greedy}: device {greedy_dev_val} vs true host matvec {greedy_host_val}"
+        );
     }
 
     /// The on-device iterative top-K extraction (`topk_extract_step` composed
@@ -2904,10 +2997,14 @@ mod tests {
                 let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
                 eng.forward_batched(&mut refs, &inputs)
             };
+            // `dev` first: it reads the batch still resident in `sc.xn_final`;
+            // the per-row `logits` calls below overwrite that same scratch
+            // buffer's row 0 one row at a time (see
+            // `device_head_argmax_matches_the_host_head`'s own doc).
+            let dev = eng.greedy_from_hidden(inputs.len() as u32);
             let d = eng.cfg.d_model as usize;
             let host: Vec<u32> =
                 (0..inputs.len()).map(|i| Engine::argmax(&eng.logits(&hidden[i * d..(i + 1) * d]))).collect();
-            let dev = eng.greedy_from_hidden(inputs.len() as u32);
             assert_eq!(dev, host, "split argmax diverged from the host head");
             inputs = host;
         }
