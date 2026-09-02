@@ -64,7 +64,7 @@
 //!   `input_override` seam, the same seam that carries the residual between
 //!   cards, so no new path exists for it.
 //! * the **head** is quantized to INT8 (1.42 GB, inside both limits) by
-//!   `crate::stream::quantize_i8_rows` straight from the mapping, and lives on
+//!   `model::int8::upload_quantized` straight from the mapping, and lives on
 //!   the last stage's card.
 //!
 //! Both choices follow `crate::stream`'s real-weight path rather than
@@ -1337,11 +1337,13 @@ impl Qwen35GgufResident {
         let last = shards.last().ok_or_else(|| format!("{MODEL}: plan has zero stages"))?;
         let gpu = &last.qwen35.gpu;
         let (v, d) = (cfg.vocab as usize, cfg.d_model as usize);
-        // ROWS_PER_CHUNK: `crate::stream::generate`'s own figure, bounding the
-        // host scratch this quantization needs to `rows * d_model` f32 (~84 MB
-        // here) instead of the whole 5.09 GB table.
-        const ROWS_PER_CHUNK: usize = 4096;
-        let head_w = crate::stream::quantize_i8_rows(gpu, &mg, &head_name, v, d, ROWS_PER_CHUNK);
+        // model::int8::upload_quantized takes the fastest route `mg` can
+        // serve (a Q8_0 GGUF byte repack straight from blocks, no fp32
+        // anywhere, when it applies) and otherwise bounds host scratch to
+        // its own row-chunked fp32 fallback - never the whole 5.09 GB table.
+        let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(gpu), &mg, &head_name, v, d)
+            .map_err(|e| format!("{MODEL}: {e}"))?;
+        let head_w = model::ops::Weight::I8 { w, s, n: v as u32, k: d as u32 };
         let norm = match mg.tensor(&norm_name) {
             Some(Ok(w)) if w.len() == d => gpu.storage_init("qwen35.gguf.final_norm", &w),
             Some(Ok(w)) => return Err(format!("{MODEL}: '{norm_name}' has {} elements, expected {d}", w.len())),

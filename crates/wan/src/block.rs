@@ -667,19 +667,31 @@ pub(crate) struct QLinear {
 impl QLinear {
     fn upload(gpu: &Gpu, t: &dyn checkpoint::TensorSource, prefix: &str, tier: QTier, out_dim: usize, in_dim: usize) -> QLinear {
         let wname = format!("{prefix}.weight");
-        let mut packed: Option<(Vec<u32>, Vec<f32>)> = None;
-        let found = t.with_tensor(&wname, &mut |data| {
-            packed = Some(match tier {
-                QTier::Int8 => model::int8::quantize_weight(data, out_dim, in_dim),
-                QTier::Int4 => model::int4::quantize_weight_q4(data, out_dim, in_dim),
-            });
-        });
-        assert!(found, "wan: missing {wname}");
-        let (packed, sw) = packed.expect("with_tensor found the tensor, so it must have set packed");
-        let wb = gpu.storage(packed.len() as u64);
-        gpu.write(&wb, &packed);
-        let swb = gpu.storage(sw.len() as u64);
-        wf(gpu, &swb, &sw);
+        let (wb, swb) = match tier {
+            // model::int8::upload_quantized takes the fastest route the
+            // source can serve (a Q8_0 GGUF byte repack, no fp32 anywhere,
+            // when it offers one).
+            QTier::Int8 => {
+                let mut up = paramstore::upload::Uploader::new(gpu);
+                model::int8::upload_quantized(&mut up, t, &wname, out_dim, in_dim).unwrap_or_else(|e| panic!("wan: {e}"))
+            }
+            // int4 has no analogous zero-fp32 GGUF fast path (no legacy
+            // ggml block matches brain's int4 packing the way Q8_0 matches
+            // GROUP=32 int8), so this tier keeps its own fp32 route.
+            QTier::Int4 => {
+                let mut packed: Option<(Vec<u32>, Vec<f32>)> = None;
+                let found = t.with_tensor(&wname, &mut |data| {
+                    packed = Some(model::int4::quantize_weight_q4(data, out_dim, in_dim));
+                });
+                assert!(found, "wan: missing {wname}");
+                let (packed, sw) = packed.expect("with_tensor found the tensor, so it must have set packed");
+                let wb = gpu.storage(packed.len() as u64);
+                gpu.write(&wb, &packed);
+                let swb = gpu.storage(sw.len() as u64);
+                wf(gpu, &swb, &sw);
+                (wb, swb)
+            }
+        };
         QLinear { w: wb, sw: swb, b: upload_named(gpu, t, &format!("{prefix}.bias")) }
     }
 }

@@ -356,10 +356,16 @@ pub fn quantize_from(source: &dyn checkpoint::TensorSource, name: &str, n: usize
     let mut packed = vec![0u32; n * kg];
     let mut sw = vec![0f32; n * gs];
     let mut any = false;
-    // A row-sized chunk keeps every callback holding whole rows, so its
-    // destination offset (`row0 * kg` / `row0 * gs`) is exact without
-    // tracking a running remainder across calls.
-    let found = source.with_tensor_chunks(name, k, &mut |off, chunk| {
+    // Cut on ROW boundaries (a multiple of k, never a bare k) so every
+    // callback holds whole rows - its destination offset (`row0 * kg` /
+    // `row0 * gs`) is exact without tracking a running remainder - while
+    // still batching `UPLOAD_CHUNK_WORDS`-ish elements per call rather than
+    // one row at a time. `qwen35::stream::quantize_i8_rows` (the code this
+    // replaces) let each caller tune its own rows-per-chunk; this picks one
+    // constant for every caller instead, matching `paramstore::upload::
+    // Uploader`'s own chunk sizing rather than adding a second tunable.
+    let rows_per_chunk = (paramstore::UPLOAD_CHUNK_WORDS / k).max(1);
+    let found = source.with_tensor_chunks(name, rows_per_chunk * k, &mut |off, chunk| {
         any = true;
         assert_eq!(off as usize % k, 0, "quantize_from '{name}': chunk offset {off} is not row-aligned (k={k})");
         assert_eq!(chunk.len() % k, 0, "quantize_from '{name}': chunk length {} is not a whole number of rows (k={k})", chunk.len());

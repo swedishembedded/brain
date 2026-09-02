@@ -967,54 +967,6 @@ pub(crate) fn embed_rows(reader: &MmapSafetensors, name: &str, ids: &[u32], d: u
     Ok(out)
 }
 
-/// Quantize `name` (`[n, k]` - `lm_head.weight`/
-/// `model.language_model.embed_tokens.weight` when tied) to int8 (DP4A)
-/// straight from `reader`, WITHOUT ever holding the whole dequantized
-/// `[n, k]` f32 array in host RAM at once (design decision 4). `model::
-/// int8::quantize_weight`'s scales never cross a ROW, so quantizing
-/// `rows_per_chunk`
-/// rows at a time via [`MmapSafetensors::with_tensor_chunks`] (chunk size a
-/// multiple of `k`, so every chunk boundary lands on a row boundary) and
-/// writing each chunk's packed int8 words / group scales straight into a
-/// pre-sized device buffer via [`Gpu::write_at`]/[`Gpu::write_f32_at`] is
-/// byte-identical to `Weight::upload(ops, whole_tensor, n, k, Dtype::I8)`,
-/// bounding peak EXTRA host allocation to `O(rows_per_chunk * k)` (tens of
-/// MB) instead of `O(n * k)` (~4.74 GiB for the real `lm_head` shape,
-/// `248320 * 5120 * 4` bytes). Chosen over the one-shot dequant-then-quantize
-/// after checking `free -h` on this (shared) machine at the time this was
-/// written: available RAM was too close to that 4.74 GiB peak for comfort.
-/// The resulting `Weight::I8` (~1.18 GiB packed) is what [`generate`] keeps
-/// resident on device for the whole call - built ONCE, never re-quantized
-/// per decode step.
-///
-/// Takes a `checkpoint::TensorSource` rather than a concrete reader, so the
-/// SAME bounded quantizer serves this module's safetensors checkpoint
-/// directory and `crate::int8_gguf_resident`'s Q8_0 GGUF - a
-/// `[vocab, d_model]` head is over `max_buffer_size` as fp32 on a 24 GB P40,
-/// so there is no non-int8 alternative for EITHER path and there must not be
-/// two implementations of it.
-pub(crate) fn quantize_i8_rows(gpu: &Gpu, reader: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize, rows_per_chunk: usize) -> Weight {
-    assert!(k.is_multiple_of(model::int8::GROUP), "quantize_i8_rows: k must be a multiple of {} (got {k})", model::int8::GROUP);
-    assert!(rows_per_chunk > 0, "quantize_i8_rows: rows_per_chunk must be > 0");
-    let kg = k / 4;
-    let gs = k / model::int8::GROUP;
-    let w = gpu.storage((n * kg) as u64);
-    let s = gpu.storage(model::int8::scale_len(n, k) as u64);
-    let mut any = false;
-    let found = reader.with_tensor_chunks(name, rows_per_chunk * k, &mut |off, chunk| {
-        any = true;
-        assert_eq!(off as usize % k, 0, "quantize_i8_rows: chunk offset {off} is not row-aligned (k={k})");
-        assert_eq!(chunk.len() % k, 0, "quantize_i8_rows: chunk length {} is not a whole number of rows (k={k})", chunk.len());
-        let rows = chunk.len() / k;
-        let row0 = off as usize / k;
-        let (packed, scales) = model::int8::quantize_weight(chunk, rows, k);
-        gpu.write_at(&w, (row0 * kg) as u64, &packed);
-        gpu.write_f32_at(&s, (row0 * gs) as u64, &scales);
-    });
-    assert!(found && any, "quantize_i8_rows: {name} not found or empty");
-    Weight::I8 { w, s, n: n as u32, k: k as u32 }
-}
-
 /// The model's final `norm.weight` (`model.language_model.norm.weight` in
 /// `outside.safetensors`), folded by [`crate::import::fold_plain_rmsnorm_weights`]
 /// exactly like every other plain-RMSNorm weight this crate imports (the
@@ -1181,7 +1133,9 @@ pub fn generate_with_stats(
     let gpu = Gpu::new(crate::model::pipelines());
     // The int8 lm_head: quantized ONCE here, kept resident on device for the
     // whole call (design decision 4) - never re-quantized per decode step.
-    let head = quantize_i8_rows(&gpu, &outside, head_name, cfg.vocab as usize, d, 4096);
+    let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(&gpu), &outside, head_name, cfg.vocab as usize, d)
+        .map_err(|e| format!("stream::generate: {e}"))?;
+    let head = Weight::I8 { w, s, n: cfg.vocab, k: d as u32 };
     let final_norm = read_final_norm(&outside, d)?;
     let final_norm_buf = gpu.storage_init("stream.generate.final_norm", &final_norm);
 

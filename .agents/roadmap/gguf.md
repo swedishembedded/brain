@@ -131,8 +131,31 @@ review of this codebase assumed:
 
 ## Not yet done
 
-- [ ] M4: migrate the no-policy f32-roundtrip sites (qwen3, qwen35moe, wan);
-      delete `qwen35::stream::quantize_i8_rows`.
+- [x] M4: migrated `qwen3::q8::Q8::build`, `qwen35moe::q8::Qwen35Q8::build`
+      and `wan::block::QLinear::upload` (its Int8 arm only - Int4 has no
+      analogous zero-fp32 GGUF fast path, so it keeps its own route) onto
+      `model::int8::upload_quantized`. Deleted `qwen35::stream::
+      quantize_i8_rows` outright (its body WAS route 2, now generalized);
+      both its call sites (`stream::generate_with_stats`'s lm_head,
+      `int8_gguf_resident::activate_owned`'s lm_head) now build a
+      `paramstore::upload::Uploader` and call `model::int8::
+      upload_quantized` directly, reconstructing `Weight::I8` from its
+      `(DeviceBuffer, DeviceBuffer)` return. Found and fixed one real gap
+      while migrating: `quantize_from`'s bounded fp32 fallback (M3) cut
+      chunks at exactly one row (`max_elems = k`), while the code it
+      replaces let each caller tune `rows_per_chunk` (4096 at both real call
+      sites) - fixed to derive a chunk size from `paramstore::
+      UPLOAD_CHUNK_WORDS` instead of hardcoding to one row, matching
+      `Uploader`'s own chunk sizing precedent rather than either the
+      one-row-at-a-time default or a per-caller tunable. Gated: each of the
+      five touched crates individually (`make test -p brain-qwen3`,
+      `-p brain-qwen35moe`, `-p brain-wan`, `-p brain-qwen35`, plus M3's own
+      `-p brain-model` pass) - all green, 0 failed. (Run individually, not
+      batched: `make test`'s 2400s deadlock-guard timeout is a wall-clock
+      budget per invocation, and five crates' full suites - unit +
+      integration + real-weight parity tests - together exceeded it even
+      though none of them hung; that is an orchestration constraint on how
+      this ledger's own verification is run, not a property of the code.)
 - [ ] M5: `checkpoint::gguf_src::GgufSource` absorbing wan/ltxv/gemma4's
       near-duplicate `gguf_src.rs` (gemma4's currently ships without
       `raw_words` or `with_tensor_chunks` - every tensor materializes whole).

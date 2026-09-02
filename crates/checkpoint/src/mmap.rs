@@ -350,7 +350,7 @@ impl MmapSafetensors {
 /// both do), which meant a caller generic over `TensorSource` could not be
 /// handed a `MmapSafetensors` even though every method it needs is already
 /// here, verbatim. Declaring it is what lets ONE bounded loader serve both a
-/// safetensors checkpoint and a GGUF (see `qwen35::stream::quantize_i8_rows`).
+/// safetensors checkpoint and a GGUF (see `model::int8::upload_quantized`).
 impl crate::TensorSource for MmapSafetensors {
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
         match self.tensor_f32(name) {

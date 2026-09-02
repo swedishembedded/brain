@@ -175,22 +175,10 @@ impl Qwen35Q8 {
         k_max_abs_row: usize,
         k_quant_pack: usize,
     ) -> Qwen35Q8 {
-        let mk = |name: &str, n: usize, k: usize| -> Lin8 {
-            let mut lin: Option<Lin8> = None;
-            let found = source.with_tensor(name, &mut |raw| {
-                let (packed, sw) = quantize_weight(raw, n, k);
-                let pb = gpu.storage(packed.len() as u64);
-                gpu.write(&pb, &packed);
-                gpu.poll_wait(); // reclaim staging before the next weight (see paramstore)
-                let sb = gpu.storage(sw.len() as u64);
-                gpu.write(&sb, &sw.iter().map(|v| v.to_bits()).collect::<Vec<u32>>());
-                gpu.poll_wait();
-                lin = Some(Lin8 { packed: pb, scale: sb, k: k as u32, n: n as u32 });
-            });
-            if !found {
-                panic!("qwen35 q8: missing init weight {name}");
-            }
-            lin.unwrap()
+        let mut up = paramstore::upload::Uploader::new(gpu);
+        let mut mk = |name: &str, n: usize, k: usize| -> Lin8 {
+            let (pb, sb) = model::int8::upload_quantized(&mut up, source, name, n, k).unwrap_or_else(|e| panic!("qwen35 q8: {e}"));
+            Lin8 { packed: pb, scale: sb, k: k as u32, n: n as u32 }
         };
 
         let d = cfg.d_model as usize;
