@@ -2200,6 +2200,119 @@ had accidentally clobbered; the `gpt2` wiring + the A/B harness).
 
 ---
 
+### M5.1 - Norm fwd/bwd family: one real defect fixed (`rmsnorm_dx`), the rest already covered by an existing selector rule
+
+Checked the milestone's premise against source rather than building blind
+across the whole family (16 @opt-1 + 19 @opt-2 norm kernels), per this
+campaign's own discipline. The finding: most of the family already has the
+cooperative-kernel fix this milestone was scoped to build.
+
+**`layernorm_dx`/`ln_stats` (LayerNorm) already have a wired cooperative
+sibling.** `model::block::ln_variant` (`Op::LayerNorm`) already selects
+`layernorm_dx_rows`/`ln_stats_rows` over the per-element reference on any
+device reporting `workgroup_reductions`, and nine model crates
+(`gpt2`, `toypid`, `toyseq2seq`, `wan`, `flux2`, `sam1`, `sam2`, `clip`,
+`codeformer`) already register the `_rows` pipeline. No defect here - the
+milestone brief's inclusion of `layernorm_dx`/`ln_head_dx` in one list
+conflated two different kernels; `layernorm_dx` was already fixed by an
+earlier pass this ledger already records, `ln_head_dx` (below) was not.
+
+**GroupNorm forward stats (`gn_stats`) already has TWO cooperative paths**
+(`gn_stats_wg` one-workgroup-per-group, or the `gn_part`+`gn_stats2`
+two-stage reduction), both already wired per-model (`vae::blocks`,
+`ltxv::upsampler`, `diamond`, `wm-core`). No defect here either.
+
+**`rmsnorm_dx`: a real, uncontested defect - fixed.** Unlike the forward
+`rmsnorm`/`rmsnorm_rows` pair, `rmsnorm_dx.wgsl` (`@opt 1`) had NO
+cooperative sibling at all: one thread walks its whole row TWICE (once for
+`sum(x^2)`, once for `sum(dy*w*x)`), each a `d`-strided uncoalesced read -
+the same access pattern `rmsnorm_rows.wgsl`'s own header already measured a
+win at every row width for. It is also the single most widely dispatched
+kernel in this family: `model::block::rmsnorm_bwd` is the shared backward
+builder for every RMSNorm-based model that trains
+(`qwen3`, `qwen35`, `qwen35moe`, `deepseek2`, `glmdsa`, `kronos`, `toymoe`).
+
+Added `rmsnorm_dx_rows.wgsl`: one workgroup per row, both independent
+reductions (`sum(x^2)` and `sum(dy*w*x)` do NOT depend on each other -
+unlike LayerNorm's variance, RMSNorm's own statistic has nothing to shift
+for cancellation) folded into ONE pass behind ONE barrier, matching the CPU
+JIT's single-top-level-barrier limit, same shape as
+`layernorm_dx_rows.wgsl`'s four-partial fold with two. Same `Params`/
+bindings as the reference kernel, so `rmsnorm_bwd` selects between them
+through the SAME `Op::RmsNorm` policy `rms_variant`/`rmsnorm_fwd` already
+use for the forward half - no new `select::Op` variant needed.
+
+**Measured** (`bench_rmsnorm_dx`, 2x Tesla P40, real device): the
+cooperative kernel wins at every swept shape (`rows` 1-2048, `d` 896-5120),
+1.7x-8.5x in the prefill/training-width regime and up to 23.9x at the
+decode-shaped `rows=1` end (matching `rmsnorm_rows`'s own documented
+pattern: widest win where rows are narrow and the per-element kernel's
+reads are most scattered). Agreement with the host oracle
+(`hostmath::rmsnorm_dx_rows`) is 5e-7 to 3e-6 relative, well inside the
+2e-5 gate - the two kernels differ only in reduction order, not in math.
+
+TDD: `rmsnorm_dx_variant_agreement.rs` (new) pins
+`model::block::assert_rmsnorm_dx_variant_agrees` against the host oracle at
+five shapes including a row count that does not divide 64 (37, tail
+handling) and the CPU-JIT-with-slot-registered case. Mutation-verified:
+flipping the `dx` formula's sign on `coef*x` (a real, plausible backward-math
+mistake) reproduced a RED failure (relative error 8e-4 against the 2e-5
+tolerance) before being reverted; the CPU-JIT arm of the same test stayed
+green throughout, confirming it exercises the reference kernel, not the
+mutated one - the gate is watching the code path it claims to.
+
+`KernelIds::rmsnorm_dx_rows` is a new required slot (mirrors
+`rmsnorm_rows`'s own `UNREGISTERED`-sentinel convention); every existing
+construction site across the workspace was updated to `UNREGISTERED` (no
+behaviour change) except where noted. Adopting the fast kernel in each
+RMSNorm-training model's own `PIPELINES` list is left as follow-up work
+(the same two-step "seam, then per-model adoption" split `rmsnorm_rows`
+itself went through) - the seam is what the next model inherits by
+construction, per `kernels.md` §F.7.
+
+**Deferred, not killed - insufficient time in this pass to profile them
+honestly rather than build blind:** the BatchNorm/GroupNorm gradient
+family (`bn_dbeta`/`bn_dgamma`/`bn_dstats`/`bn_stats`,
+`gn_dbeta`/`gn_dgamma`/`gn_dsum`/`gn_dsum_part`/`gn_dsum2`/`gn_dgb_part`/
+`gn_dgb2`) and the per-head LayerNorm family (`ln_head`/`ln_head_dgb`/
+`ln_head_dx`). The one real measurement available (`vqgan-train-step-gpu`,
+M0.2's baseline) shows the GroupNorm gradient kernels at a modest 0.2-2.5%
+of that pass each (`gn_dsum_part` the largest at 2.5%, 16.1% of its memory
+roof - a real `@opt`-shaped finding, but not measured against the
+per-head-LayerNorm or BatchNorm callers, which have no baseline at all
+yet - `arcface`/`fastvlm`/`vision` train BatchNorm and no `*_bench` profile
+covers them). Building a cooperative kernel for a channel-count reduction
+(BatchNorm's `dbeta`/`dgamma` reduce over `N*H*W`, GroupNorm's per-group
+sums over `channels_per_group*H*W`) without first checking the real ranges
+those reductions run over would repeat exactly the mistake `kernels.md`
+§F.2/§F.6 warns against (a threshold or a shape assumption is a
+measurement, never a guess) - filed as follow-up, per this campaign's own
+"record it, do not force it" rule (M5.6's precedent), not attempted in the
+time this pass had.
+
+**Gate**: TDD (RED confirmed via a real mutation before GREEN),
+`cargo clippy -p brain-model -p brain-kernels -p brain-gpu-core
+--all-targets` zero warnings, `brain-model`'s full `--lib` suite (158
+tests) and the new `rmsnorm_dx_variant_agreement` integration test green.
+Every model crate whose `KernelIds` literal gained the new slot rebuilt
+clean at the library level (`brain-deepseek2`, `brain-kronos`,
+`brain-mimi`, `brain-minimaxmusic3`, `brain-qwen3`, `brain-qwen35`,
+`brain-qwen35moe`, `brain-qwen3omnimoe`, `brain-qwen3tts`); two of those
+crates' `--tests` targets (`deepseek2`, `qwen3tts`) could not be
+synchronously verified past the library level in this pass because their
+`brain-gradcheck` dev-dependency transitively pulls in
+`brain-minimaxmusic3`, which had an unrelated, concurrently-edited syntax
+error in `dit.rs` (a large in-progress rewrite in another session) at
+commit time - not this milestone's code. `docs/reference/kernels.md`/
+`crates/kernels/src/lib.rs` regenerated via `make kernels-regen`/
+`make kernels-table`, each change isolated to this milestone's own row
+before committing (a shared, concurrently-edited generated file - see
+`lessons.md` #83/#84). **Commits**: four (kernel + registration; cost
+model; the selector/host-oracle seam + the workspace-wide field addition
++ its gate; this ledger entry + the kernel-catalogue row).
+
+---
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
