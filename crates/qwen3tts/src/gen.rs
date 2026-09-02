@@ -133,6 +133,7 @@ fn only_fwd_ids() -> KernelIds {
         // No backward graph is built here, so every backward slot is
         // UNREGISTERED rather than a stand-in index for another live kernel.
         rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dx_rows: block::UNREGISTERED,
         rmsnorm_dw: block::UNREGISTERED,
         rope: ROPE,
         rope_bwd: block::UNREGISTERED,

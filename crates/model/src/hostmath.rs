@@ -65,6 +65,35 @@ pub fn rmsnorm(x: &[f32], g: &[f32], eps: f32) -> Vec<f32> {
     rmsnorm_rows(x, g, 1, x.len(), eps)
 }
 
+/// RMSNorm backward w.r.t. `x`, row-wise over `rows x d`:
+/// `dX_i = r*w_i*dY_i - (r^3*x_i/d) * sum_c(dY_c*w_c*x_c)`,
+/// `r = rsqrt(mean(x^2) + eps)`.
+///
+/// Matches `crates/kernels/wgsl/rmsnorm_dx.wgsl` exactly (same reduction
+/// order within a row, same epsilon placement) - the host oracle for
+/// checking both `rmsnorm_dx` and its coalesced twin `rmsnorm_dx_rows`
+/// against, per this module's own rule: comparing device kernels to each
+/// other proves nothing if both are wrong the same way.
+pub fn rmsnorm_dx_rows(x: &[f32], w: &[f32], dy: &[f32], rows: usize, d: usize, eps: f32) -> Vec<f32> {
+    assert!(x.len() >= rows * d, "rmsnorm_dx: x is {}, need {}", x.len(), rows * d);
+    assert!(w.len() >= d, "rmsnorm_dx: weight is {}, need {d}", w.len());
+    assert!(dy.len() >= rows * d, "rmsnorm_dx: dy is {}, need {}", dy.len(), rows * d);
+    let mut dx = vec![0.0f32; rows * d];
+    for r in 0..rows {
+        let base = r * d;
+        let row = &x[base..base + d];
+        let dyr = &dy[base..base + d];
+        let ss = row.iter().map(|v| v * v).sum::<f32>();
+        let rr = 1.0 / (ss / d as f32 + eps).sqrt();
+        let a: f32 = (0..d).map(|c| dyr[c] * w[c] * row[c]).sum();
+        let coef = rr * rr * rr * a / d as f32;
+        for c in 0..d {
+            dx[base + c] = rr * w[c] * dyr[c] - coef * row[c];
+        }
+    }
+    dx
+}
+
 /// `y = (x - mean) * rsqrt(var + eps) * g + b`, row-wise over `rows × c`.
 pub fn layernorm_rows(
     x: &[f32],

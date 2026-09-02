@@ -133,7 +133,7 @@ fn decode_matches_hand_chained_layer_fwd_plus_final_norm() {
         let (out, ..) = layer_fwd(&gpu, &cfg, lw, &h, &cos, &sin, n, None, None);
         h = out;
     }
-    let ids = KernelIds { rmsnorm: 0, rms_inv: 0, rmsnorm_dx: 0, rmsnorm_dw: 0, rope: 0, rope_bwd: 0, gqa_scores: 0, gqa_apply: 0, attn_softmax: 0, gqa_dscores: 0, gqa_dv: 0, gqa_dq: 0, gqa_dk: 0, silu_mul: 0, silu_da: 0, silu_db: 0, rmsnorm_rows: rmsnorm_rows_slot() };
+    let ids = KernelIds { rmsnorm: 0, rms_inv: 0, rmsnorm_dx: 0, rmsnorm_dw: 0, rope: 0, rope_bwd: 0, gqa_scores: 0, gqa_apply: 0, attn_softmax: 0, gqa_dscores: 0, gqa_dv: 0, gqa_dq: 0, gqa_dk: 0, silu_mul: 0, silu_da: 0, silu_db: 0, rmsnorm_rows: rmsnorm_rows_slot(), rmsnorm_dx_rows: 0 };
     let normed = gpu.storage((n * cfg.hidden) as u64);
     gpu.submit(&[], &[rmsnorm_fwd(&gpu, &ids, &h, &final_norm, &normed, cfg.hidden, n)]);
     let want_host = gpu.read(&normed, (n * cfg.hidden) as usize);

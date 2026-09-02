@@ -922,6 +922,7 @@ fn ids() -> KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: block::UNREGISTERED,
         rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dx_rows: block::UNREGISTERED,
         rmsnorm_dw: block::UNREGISTERED,
         rope: ROPE,
         rope_bwd: block::UNREGISTERED,

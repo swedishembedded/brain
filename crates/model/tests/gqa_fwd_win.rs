@@ -40,6 +40,7 @@ fn ids(g: &Gpu) -> KernelIds {
         rmsnorm: usize::MAX,
         rms_inv: usize::MAX,
         rmsnorm_dx: usize::MAX,
+        rmsnorm_dx_rows: usize::MAX,
         rmsnorm_dw: usize::MAX,
         rope: usize::MAX,
         rope_bwd: usize::MAX,

@@ -78,19 +78,29 @@ pub struct KernelIds {
     /// filling one slot switches every RMSNorm a model composes, including
     /// the ones inside those builders.
     pub rmsnorm_rows: usize,
+    /// The COALESCED RMSNorm backward-x twin (`rmsnorm_dx_rows`), or
+    /// [`UNREGISTERED`] when the model has not registered that pipeline -
+    /// same convention as [`KernelIds::rmsnorm_rows`], for the backward half:
+    /// [`rmsnorm_bwd`] selects between it and `rmsnorm_dx` through
+    /// [`rms_variant`]. Unlike the forward kernel, `rmsnorm_dx.wgsl` has no
+    /// cooperative sibling at all today (one thread walks the whole row
+    /// TWICE, once per independent reduction) - this is the training-side
+    /// half of that fix.
+    pub rmsnorm_dx_rows: usize,
 }
 
 impl KernelIds {
     /// Every slot, paired with its field name - the enumeration a model's own
     /// "no unused slot is dispatchable" gate walks. It lives here, next to the
-    /// struct, so adding a field cannot leave a gate silently checking 16 of 17
+    /// struct, so adding a field cannot leave a gate silently checking 17 of 18
     /// slots.
-    pub fn slots(&self) -> [(&'static str, usize); 17] {
+    pub fn slots(&self) -> [(&'static str, usize); 18] {
         [
             ("rmsnorm", self.rmsnorm),
             ("rmsnorm_rows", self.rmsnorm_rows),
             ("rms_inv", self.rms_inv),
             ("rmsnorm_dx", self.rmsnorm_dx),
+            ("rmsnorm_dx_rows", self.rmsnorm_dx_rows),
             ("rmsnorm_dw", self.rmsnorm_dw),
             ("rope", self.rope),
             ("rope_bwd", self.rope_bwd),
@@ -163,6 +173,12 @@ pub fn rmsnorm_fwd(g: &Gpu, k: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, o
 
 /// RMSNorm backward: always the input grad (`dx`); the gain grad (`gw`, needing
 /// the per-row inverse `inv`) only when `gw` is `Some` (trainable gain).
+///
+/// `dx` dispatches the coalesced `rmsnorm_dx_rows` when the model registered
+/// it ([`KernelIds::rmsnorm_dx_rows`]) and the device can run a workgroup
+/// reduction, the per-element `rmsnorm_dx` otherwise - [`rms_variant`]'s
+/// choice, same seam [`rmsnorm_fwd`] uses for the forward half (both are
+/// `Op::RmsNorm`: same row mapping, same one-barrier cooperative constraint).
 pub fn rmsnorm_bwd(
     g: &Gpu,
     k: &KernelIds,
@@ -180,7 +196,9 @@ pub fn rmsnorm_bwd(
         s.push(g.step(k.rms_inv, &[x, inv], &[dim, rows], rows));
         s.push(g.step(k.rmsnorm_dw, &[dy, x, inv, gw], &[dim, rows], dim));
     }
-    s.push(g.step(k.rmsnorm_dx, &[x, w, dy, dx], &[dim, rows], rows));
+    let coop = (k.rmsnorm_dx_rows != UNREGISTERED).then_some(k.rmsnorm_dx_rows);
+    let (kind, threads) = rms_variant(g, k.rmsnorm_dx, coop, rows, dim);
+    s.push(g.step(kind, &[x, w, dy, dx], &[dim, rows], threads));
     s
 }
 
@@ -1578,6 +1596,48 @@ pub fn assert_rmsnorm_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32, u
     }
 }
 
+/// [`rmsnorm_bwd`]'s backward-x twin of [`assert_rmsnorm_variant_agrees`]:
+/// assert the seam computes the reference `dx` at every `(rows, dim)` its own
+/// tapes dispatch one at, whichever kernel it selects.
+///
+/// Same reasons as the forward gate: `rmsnorm_dx_rows` folds its two row
+/// reductions in a different order than `rmsnorm_dx`'s single-threaded loop,
+/// so the two agree to floating-point rounding, not to the bit, and the
+/// reference is a HOST one - [`crate::hostmath::rmsnorm_dx_rows`] - never the
+/// two device kernels compared to each other.
+///
+/// `shapes` are `(rows, dim, what)`; `what` names the dispatch site so a
+/// failure says which tape broke, not just which number.
+pub fn assert_rmsnorm_dx_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32, u32, &str)]) {
+    // Same tolerance and reasoning as `assert_rmsnorm_variant_agrees`: the
+    // error is O(sqrt(dim) * eps) on a sum whose scale is `dim`, so this stays
+    // tight enough that a real defect (wrong eps, a missed tail element, a
+    // mis-strided row) moves the answer by orders of magnitude more.
+    const TOL: f32 = 2e-5;
+    assert!(!shapes.is_empty(), "no shapes given, so this gate would pass vacuously");
+
+    for &(rows, dim, what) in shapes {
+        let (rows_u, dim_u) = (rows as usize, dim as usize);
+        let x: Vec<f32> = (0..rows_u * dim_u).map(|i| 3.0 * (i as f32 * 0.7 + 0.1).sin()).collect();
+        let w: Vec<f32> = (0..dim_u).map(|i| 0.5 * (i as f32 * 0.31 + 0.2).cos()).collect();
+        let dy: Vec<f32> = (0..rows_u * dim_u).map(|i| 0.4 * (i as f32 * 1.1 + 0.5).sin()).collect();
+        let want = crate::hostmath::rmsnorm_dx_rows(&x, &w, &dy, rows_u, dim_u, RMSNORM_EPS);
+
+        let xb = g.storage_init("rms_dx_agree_x", &x);
+        let wb = g.storage_init("rms_dx_agree_w", &w);
+        let dyb = g.storage_init("rms_dx_agree_dy", &dy);
+        let dxb = g.storage((rows_u * dim_u) as u64);
+        let inv = g.storage(rows_u as u64);
+        g.submit(&[], &rmsnorm_bwd(g, ids, &xb, &wb, &dyb, &dxb, &inv, None, dim, rows));
+        let got = g.read(&dxb, rows_u * dim_u);
+
+        assert!(got.iter().all(|v| v.is_finite()), "{what} ({rows}x{dim}): produced a non-finite value");
+        let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+        let e = got.iter().zip(&want).fold(0.0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+        assert!(e <= TOL, "{what} ({rows}x{dim}): relative error {e:e} exceeds {TOL:e}");
+    }
+}
+
 /// RMSNorm backward with runtime epsilon: input grad always (`rmsnorm_dx_eps`),
 /// gain grad only when `gw` is `Some` (`rms_inv_eps` + `rmsnorm_dw`; the dw
 /// kernel is eps-free - eps enters through the per-row inverse).
@@ -2095,6 +2155,7 @@ mod kv_cache_tests {
             silu_da: 0,
             silu_db: 0,
             rmsnorm_rows: UNREGISTERED,
+            rmsnorm_dx_rows: UNREGISTERED,
         };
         let decode_ids = GqaDecodeIds { kv_append: 3, attn_decode_scores: 4, decode_softmax: 5, attn_decode_apply: 6 };
 
@@ -2211,6 +2272,7 @@ mod kv_cache_tests {
             silu_da: 0,
             silu_db: 0,
             rmsnorm_rows: UNREGISTERED,
+            rmsnorm_dx_rows: UNREGISTERED,
         };
 
         // Deterministic pseudo-random q/k/v -- same fixed-formula convention

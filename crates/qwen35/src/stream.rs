@@ -247,6 +247,7 @@ pub(crate) fn kernel_ids(g: &Gpu) -> KernelIds {
         rmsnorm: idx(g, "rmsnorm"),
         rms_inv: idx(g, "rms_inv"),
         rmsnorm_dx: idx(g, "rmsnorm_dx"),
+        rmsnorm_dx_rows: model::block::UNREGISTERED,
         rmsnorm_dw: idx(g, "rmsnorm_dw"),
         // M-RoPE (`rope2d`) is what rotates here, never `block::rope_fwd` -
         // so UNREGISTERED, not a stand-in `rmsnorm` index (see

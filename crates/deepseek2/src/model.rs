@@ -214,6 +214,7 @@ fn kernel_ids() -> KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: RMS_INV,
         rmsnorm_dx: RMSNORM_DX,
+        rmsnorm_dx_rows: block::UNREGISTERED,
         rmsnorm_dw: RMSNORM_DW,
         rope: ROPE,
         rope_bwd: ROPE_BWD,

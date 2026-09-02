@@ -206,6 +206,7 @@ fn ids() -> KernelIds {
         // kernel's bindings and uniform. `UNREGISTERED` is out of range of
         // PIPELINES, so the same mistake is a panic instead.
         rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dx_rows: block::UNREGISTERED,
         rmsnorm_dw: block::UNREGISTERED,
         rope: block::UNREGISTERED,
         rope_bwd: block::UNREGISTERED,

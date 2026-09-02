@@ -374,6 +374,7 @@ pub(crate) fn kernel_ids() -> KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: RMS_INV,
         rmsnorm_dx: RMSNORM_DX,
+        rmsnorm_dx_rows: block::UNREGISTERED,
         rmsnorm_dw: RMSNORM_DW,
         // Rotation here is table-driven M-RoPE (`rope2d`, via the mixer id
         // sets), never `block::rope_fwd`/`rope_bwd` - so these two slots are

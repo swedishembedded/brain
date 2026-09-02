@@ -101,6 +101,7 @@ fn kernel_ids() -> KernelIds {
         rmsnorm: 0,
         rms_inv: block::UNREGISTERED,
         rmsnorm_dx: block::UNREGISTERED,
+        rmsnorm_dx_rows: block::UNREGISTERED,
         rmsnorm_dw: block::UNREGISTERED,
         // This model rotates through `rope2d` (`GqaAttnIds::rope2d`), not
         // `block::rope_fwd`, and has no backward here. `0` is `rmsnorm` - a

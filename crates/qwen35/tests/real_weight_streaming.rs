@@ -126,6 +126,7 @@ fn kernel_ids(g: &Gpu) -> KernelIds {
         rmsnorm: idx(g, "rmsnorm"),
         rms_inv: idx(g, "rms_inv"),
         rmsnorm_dx: idx(g, "rmsnorm_dx"),
+        rmsnorm_dx_rows: model::block::UNREGISTERED,
         rmsnorm_dw: idx(g, "rmsnorm_dw"),
         rope: idx(g, "rmsnorm"),
         rope_bwd: idx(g, "rmsnorm"),

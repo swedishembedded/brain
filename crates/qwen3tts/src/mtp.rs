@@ -100,6 +100,7 @@ impl MtpModel {
             rmsnorm: RMSNORM,
             rms_inv: RMS_INV,
             rmsnorm_dx: block::UNREGISTERED,
+            rmsnorm_dx_rows: block::UNREGISTERED,
             rmsnorm_dw: block::UNREGISTERED,
             rope: ROPE,
             rope_bwd: block::UNREGISTERED,
