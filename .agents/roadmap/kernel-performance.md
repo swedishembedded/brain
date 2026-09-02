@@ -1231,6 +1231,66 @@ prerequisite compile fix), `docs: record the selector/scratch-sizing rule
 M2.4 caught` (F.7b), `model, qwen3: move the M2.4 fused-attention selector
 call out of run_batched_steps` (the `no_kernel_names.rs` fix above).
 
+### M3.2 - Device admission head, and `PagedDecoder::admit_greedy`/`admit_topk`
+
+`qwen3::serve::Engine` kept a SECOND, host-only copy of the LM head
+(`head: Vec<f32>`) purely to run `model::hostmath::matvec_par` against it at
+admission - the one-time first-token pick after `prefill` - even though the
+same head weight was already uploaded to the device (`lin_weights`) and
+already dispatched every decode step via `head_steps`/`submit_greedy_head`/
+`submit_topk_head`. Deleted the field and `Engine::logits`'s host matvec;
+`logits` now writes its one hidden row into `sc.xn_final` and reuses
+`head_steps` for the device matmul instead. Admission itself no longer calls
+`logits` at all: added `Engine::admit_greedy` (writes the row, reuses
+`submit_greedy_head`, reads back one index) and `Engine::admit_topk` (reuses
+`topk_from_hidden`, reads back at most `TOPK_CAPACITY` candidates) so
+admission never ships a `[vocab]` block to the host either for the pick or
+for the values.
+
+`PagedDecoder::logits` stays in the trait (`qwen3::eval`, `generate_greedy`
+and `spec_decode` still want a raw per-row logits vector), but the scheduler
+no longer calls it for admission - it calls two new trait methods,
+`admit_greedy`/`admit_topk`, that DEFAULT to a plain host argmax / host sort
+over `logits`'s vector (byte-for-byte the code this replaced, just moved out
+of `Scheduler::step_inner` and into the trait), so `qwen35`/`qwen35moe` -
+which still have no device head at all (M3.4) - keep their exact prior
+behaviour with no changes to either crate. `qwen3::serve::Engine` overrides
+both to the device paths above; this is what actually closes the milestone's
+"sorts a whole `[vocab]` vector on the host" finding at `model/src/serve.rs`
+for the one decoder that has a device top-k to move it to.
+
+Two pre-existing unit tests (`device_head_argmax_matches_the_host_head`,
+`split_argmax_matches_the_host_head_at_large_vocab`) called the per-row
+`logits` in a loop immediately before `greedy_from_hidden` read the SAME
+batch back out of `sc.xn_final` - safe under the old host-only `logits`, but
+`logits` now writes row 0 of that same scratch buffer, so the batched read
+had to move before the per-row loop; reordered rather than left racing.
+Added `admission_head_matches_a_true_host_matvec_within_tolerance`: unlike
+the two tests above (which compare two device computations sharing the same
+`logits_dev` values and so can assert exact equality), this one compares
+`admit_greedy`/`admit_topk` against an INDEPENDENT host matvec built straight
+from the checkpoint map in the test, never through `Engine::logits` - a
+tiled-GEMM-vs-scalar-dot-product reduction-order difference is real here, so
+the assertion is a per-index value tolerance, not index equality, per this
+campaign's own gate wording. Re-verified: full `brain-qwen3` `--lib`
+(105 passed, 1 ignored) and `brain-model`/`brain-qwen35`/`brain-qwen35moe`
+`--lib`, zero clippy warnings across all four crates.
+
+`crates/qwen3/src/serve.rs` carried unrelated uncommitted M3.1 work (the
+`prefill` chunk-readback consolidation and its test) in the working tree
+throughout this milestone - a different concurrent session's in-progress
+change to the same file, not this milestone's own. Split by hunk
+(`git apply --cached` against a hand-trimmed patch) so this milestone's two
+commits touch only what M3.2 actually changed, leaving M3.1's hunks
+untouched and unstaged for that session to commit itself; re-verified both
+in combination (build/clippy/`--lib`) and with M3.1's hunks stashed out
+(build/clippy/`serve::` tests) to confirm neither depends on the other.
+
+**Commits**: two - `model: move admission's greedy/top-k pick onto
+PagedDecoder` (trait + scheduler, a pure refactor via default trait methods -
+no behaviour change for any decoder), `qwen3: delete the host admission
+head, reuse the device head for it too` (Engine + tests).
+
 ---
 
 ## Not yet done
