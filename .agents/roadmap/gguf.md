@@ -271,11 +271,59 @@ review of this codebase assumed:
       ltxv_real_dit_tiny_layers_matches_reference`), `na_decoder_parity` -
       all pass). gemma4 still needs its own `&Tensors` → `&dyn TensorSource`
       migration - M7 stays open until that lands too.
+- [x] M8: `gguf::kquant` (new `crates/gguf/src/kquant.rs`) - the host-side
+      lossless relayout for all six GGUF block formats the device K-quant
+      layout targets (Q4_K, Q5_K, Q6_K, Q5_0, Q4_0, Q8_0) into ONE canonical
+      shape: `wq: [n, k*bits/32] u32` (codes, K-contiguous, `32/bits` codes
+      per word, low bits first) plus `wsz: [n, 2*k/G] f32` (interleaved
+      `(scale, min)` pairs per group, `min == 0` for a symmetric type).
+      `try_kq_rect(source, name, stride, r0, n_out, c0, k)` mirrors
+      `int8_direct::try_i8_rect`'s rectangle-slice contract exactly (`None`
+      always means "take the fp32 route", never a partial or approximate
+      answer) and returns a new `KqLayout` (`ty`/`bits`/`group`/`affine`/`n`/
+      `k`, plus `words_per_row`/`groups_per_row` helpers) alongside the
+      packed buffers, so a later GPU-upload milestone knows the packing
+      without re-deriving it from the GGUF type. Declines when: `raw_blocks`
+      has nothing for `name`; the type is not one of the six; or `stride`/
+      `c0`/`k` are not each a multiple of the type's block size (32 for the
+      three legacy formats, 256 for the three K-quant super-block formats -
+      a super-block cannot be split, so a `k` that is 256-unaligned is a
+      refusal even where it would be a valid legacy boundary). Every
+      per-block bit layout (`scale_min_k4`'s 6-bit packed scale/min
+      extraction, Q5_K's `qh`/`ql` high-bit combination, Q6_K's `ql`/`qh`/
+      `sc` 16-group indexing, the legacy formats' lo/hi-nibble and
+      high-bit-of-5 layouts) is transcribed from `checkpoint::gguf`'s
+      private `deq_q4_k`/`deq_q5_k`/`deq_q6_k`/`deq_q4_0`/`deq_q5_0`/
+      `deq_q8_0` with the SAME expressions in the SAME operand order for
+      `ds`/`dm` (`ds = d*sc`, `dm = dmin*m` for the affine pair; `ds = d`
+      symmetric), reorganized from each decoder's interleaved emission order
+      into a flat per-group loop but proven equivalent by construction
+      (documented inline per format) rather than by re-deriving the bit
+      layout from scratch - this module performs NO arithmetic on weight
+      values, only computes `ds`/`dm` and moves codes. Affine codes
+      (Q4_K/Q5_K) stay the format's own raw unsigned value; symmetric codes
+      (Q6_K/Q5_0/Q4_0/Q8_0) are bias-folded to a signed value in low-bits
+      two's complement (`pack_codes`/`unpack_row_codes` need no per-type
+      branch beyond masking and an `affine`-gated sign extension) - the
+      symmetric fold needs no rounding because it is an exact integer
+      operation, unlike an affine fold would be. Legacy scales are routinely
+      negative (Q4_0's especially) and Q6_K's per-16-group sub-scale is
+      signed (`i8`); neither is special-cased because nothing here assumes a
+      sign. Gated (`crates/gguf/tests/kquant.rs`, new): one round-trip test
+      per format building a real temp GGUF via `checkpoint::quantize::
+      convert(&src, Tier::*, ..)` (not hand-assembled bytes) and asserting
+      `assert_eq!` (never a tolerance) that reconstructing `(wq, wsz)` with
+      `ds*code - dm`/`ds*code` reproduces `MmapGguf::tensor`'s decode
+      exactly, both for the whole tensor and for a genuine sub-rectangle
+      (`r0 != 0` AND `c0 != 0` at once - block 0 alone cannot catch a
+      mis-indexed row or column offset); `k` not a multiple of 256 declines
+      for a K-quant type; unaligned `stride`/`c0`/`k` declines for a legacy
+      type; an F32-typed tensor (a real `GgmlType` `raw_blocks` reports, just
+      not one of the six) declines; a source with no `raw_blocks` at all
+      declines. `make test -p brain-gguf -p brain-checkpoint`: 111 + 10 + 19
+      + 5 gguf-crate test-groups and every brain-checkpoint test, 0 failed.
 - [ ] M7: gemma4 `&Tensors` → `&dyn TensorSource` (s3dit's and ltxv's slices
       are done - see the M7 entries above).
-- [ ] M8: host relayout (`crates/gguf/src/kquant.rs`) for Q4_K/Q5_K/Q6_K/
-      Q4_0/Q5_0/Q8_0 into brain's device K-quant layout. Gate: `assert_eq!`
-      round trip against `deq_*`, no tolerance.
 - [ ] M9: `quant_group_sum.wgsl` int8-activation prepass (`xgs`) - the affine
       correction term's `Σ xq` piece, computed once, not per column tile.
 - [ ] M10: group-16 (Q6_K) + legacy types through EXISTING kernels via

@@ -21,6 +21,10 @@
 //! - [`int8_direct`] - a Q8_0 tensor straight into brain's packed-int8
 //!   layout as a byte repack (no dequantize-then-requantize), now that
 //!   `model::int8::GROUP` matches Q8_0's own block size.
+//! - [`kquant`] - the six-format generalization of [`int8_direct`]:
+//!   Q4_K/Q5_K/Q6_K/Q5_0/Q4_0/Q8_0 straight into brain's canonical device
+//!   K-quant layout (packed codes plus interleaved per-group scale/min),
+//!   with no dequantize-then-requantize detour for any of them.
 //! - [`route`] - "which model is this file", answered once for every consumer:
 //!   `general.architecture` resolved against the canonical architecture
 //!   registry, plus the secondary `clip.projector_type` discriminator that a
@@ -39,12 +43,14 @@ pub mod deepseek_ocr;
 pub mod deepseek_ocr_vision;
 pub mod import;
 pub mod int8_direct;
+pub mod kquant;
 pub mod kv;
 pub mod leaf;
 pub mod route;
 
 pub use import::{ImportStats, Mapped};
 pub use int8_direct::try_i8_rect;
+pub use kquant::{try_kq_rect, KqLayout};
 pub use kv::{architecture, ArchKv};
 pub use leaf::{role, Role};
 pub use route::{route, route_path, Route};

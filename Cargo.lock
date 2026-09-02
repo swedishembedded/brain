@@ -1091,6 +1091,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-model",
  "brain-testutil",
+ "half",
  "serde_json",
 ]
 
