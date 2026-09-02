@@ -278,6 +278,188 @@ pub fn upload_dequantized(
     Ok(buf)
 }
 
+/// Requantize the rectangle `rows [r0, r0+n_out) x cols [c0, c0+k)` of a
+/// tensor stored as `[_, stride]` straight from Q8_0 blocks to
+/// `(packed, scales)` - a byte repack, not a dequantize-then-requantize, now
+/// that [`GROUP`] (32) matches Q8_0's own block size exactly: a Q8_0 block
+/// stores `d = max|x|/127`, `q = round(x/d)`, so `max|q| = 127`, the group's
+/// own absmax is `127*d`, and `group_scales` reproduces `d` bit-exactly -
+/// every `q` requantizes to itself. `deq_q8_0`-shaped decode needs at most 18
+/// significand bits (7 for `q`, 11 for the fp16 scale) against fp32's 24, so
+/// the f32 the round trip would have quantized is reproduced exactly.
+///
+/// `None` means "use the fp32 route": `source` has no quantized blocks for
+/// `name` (declines from [`checkpoint::TensorSource::raw_blocks`] - not a
+/// GGUF source, not Q8_0, or a wrapper with a value transform in the way,
+/// see `qwen35::int8_gguf_resident::SsmALogFix`), or the rectangle's bounds
+/// are not Q8_0-block-aligned (`stride`/`c0`/`k` each a multiple of 32).
+/// Returning `None` is always safe - the caller's fp32 fallback produces the
+/// same bytes by the longer route. A caller that must exclude a tensor for a
+/// reason of its own (a LoRA fold needing a float domain) checks that BEFORE
+/// calling this, by having its own `TensorSource` decline first - not this
+/// function's concern.
+///
+/// The one canonical implementation: `gguf::int8_direct::try_i8_rect` is a
+/// thin wrapper over this (that crate depends on `model`, not the reverse,
+/// so the algorithm has to live here to be shared).
+pub fn q8_0_rect(
+    source: &dyn checkpoint::TensorSource,
+    name: &str,
+    stride: usize,
+    r0: usize,
+    n_out: usize,
+    c0: usize,
+    k: usize,
+) -> Option<(Vec<u32>, Vec<f32>)> {
+    use checkpoint::gguf::{block_expand, GgmlType, Q8_0_BLOCK_ELEMS};
+    if !stride.is_multiple_of(Q8_0_BLOCK_ELEMS) || !c0.is_multiple_of(Q8_0_BLOCK_ELEMS) || !k.is_multiple_of(Q8_0_BLOCK_ELEMS) {
+        return None;
+    }
+    let (layout, raw) = source.raw_blocks(name)?;
+    if layout.ty != GgmlType::Q8_0 {
+        return None;
+    }
+    let kg = k / 4;
+    let gs = k / GROUP;
+    let mut packed = vec![0u32; n_out * kg];
+    let mut sw = vec![0f32; n_out * gs];
+    // One output row per task: each reads only its own block range and
+    // writes only its own words and scales, so this is bit-identical to the
+    // serial form and to the fp32 round trip alike.
+    backend_cpu::par::chunks2_mut(&mut packed, kg, &mut sw, gs, |i, prow, srow| {
+        let mut row = Vec::with_capacity(k);
+        let e0 = (r0 + i) * stride + c0;
+        block_expand(GgmlType::Q8_0, raw, e0, e0 + k, &mut row).expect("block-aligned above");
+        group_scales(&row, srow);
+        pack_row(&row, srow, prow);
+    });
+    Some((packed, sw))
+}
+
+/// Host-only quantization of a WHOLE `[n, k]` linear from `source`, choosing
+/// the cheapest route it can serve: [`q8_0_rect`]'s byte repack (no fp32
+/// anywhere) when the source offers Q8_0 blocks, else a bounded fp32 route -
+/// `with_tensor_chunks` cut on ROW boundaries so peak host allocation is one
+/// row block, never `n*k` - through [`quantize_weight`]. `None` if `name` is
+/// not present in `source` at all.
+///
+/// For a caller that stops before the device (a host cache the model
+/// re-uploads from later, e.g. a checkpoint-quantized weight kept resident
+/// as bytes rather than re-read every build).
+pub fn quantize_from(source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize) -> Option<(Vec<u32>, Vec<f32>)> {
+    if let Some(direct) = q8_0_rect(source, name, k, 0, n, 0, k) {
+        return Some(direct);
+    }
+    assert!(k.is_multiple_of(GROUP), "quantize_from '{name}': k must be a multiple of {GROUP} (got {k})");
+    let kg = k / 4;
+    let gs = k / GROUP;
+    let mut packed = vec![0u32; n * kg];
+    let mut sw = vec![0f32; n * gs];
+    let mut any = false;
+    // A row-sized chunk keeps every callback holding whole rows, so its
+    // destination offset (`row0 * kg` / `row0 * gs`) is exact without
+    // tracking a running remainder across calls.
+    let found = source.with_tensor_chunks(name, k, &mut |off, chunk| {
+        any = true;
+        assert_eq!(off as usize % k, 0, "quantize_from '{name}': chunk offset {off} is not row-aligned (k={k})");
+        assert_eq!(chunk.len() % k, 0, "quantize_from '{name}': chunk length {} is not a whole number of rows (k={k})", chunk.len());
+        let rows = chunk.len() / k;
+        let row0 = off as usize / k;
+        let (rpacked, rsw) = quantize_weight(chunk, rows, k);
+        packed[row0 * kg..(row0 + rows) * kg].copy_from_slice(&rpacked);
+        sw[row0 * gs..(row0 + rows) * gs].copy_from_slice(&rsw);
+    });
+    if !found || !any {
+        return None;
+    }
+    Some((packed, sw))
+}
+
+/// [`quantize_from`]'s generalization to a rectangle - the shape
+/// [`upload_rect`] needs for a fused `qkv`/`linear1` split. Delegates to
+/// [`quantize_from`] for the "whole tensor" rectangle (`stride == k`,
+/// `r0 == 0`, `c0 == 0`) so that common case keeps the bounded fp32
+/// fallback; a genuine sub-rectangle (a row slice, a column block of a fused
+/// matrix) still tries [`q8_0_rect`] first, then falls back to materializing
+/// the whole tensor as fp32 and slicing the rectangle out of it - the same
+/// cost `flux2::weights::DitWeights::with_f32` already pays for a rect
+/// fallback, not a new one this introduces.
+pub fn quantize_rect_from(
+    source: &dyn checkpoint::TensorSource,
+    name: &str,
+    stride: usize,
+    r0: usize,
+    n_out: usize,
+    c0: usize,
+    k: usize,
+) -> Option<(Vec<u32>, Vec<f32>)> {
+    if stride == k && r0 == 0 && c0 == 0 {
+        return quantize_from(source, name, n_out, k);
+    }
+    if let Some(direct) = q8_0_rect(source, name, stride, r0, n_out, c0, k) {
+        return Some(direct);
+    }
+    let mut whole: Vec<f32> = Vec::new();
+    if !source.with_tensor(name, &mut |d| whole = d.to_vec()) {
+        return None;
+    }
+    let mut rect = Vec::with_capacity(n_out * k);
+    for r in 0..n_out {
+        let row_start = (r0 + r) * stride + c0;
+        rect.extend_from_slice(&whole[row_start..row_start + k]);
+    }
+    Some(quantize_weight(&rect, n_out, k))
+}
+
+/// Upload `name`'s `[n, k]` linear onto the device as packed int8 + group
+/// scales, via [`quantize_from`]'s cheapest-route choice.
+pub fn upload_quantized(
+    up: &mut paramstore::upload::Uploader,
+    source: &dyn checkpoint::TensorSource,
+    name: &str,
+    n: usize,
+    k: usize,
+) -> Result<(gpu_core::DeviceBuffer, gpu_core::DeviceBuffer), String> {
+    let (packed, sw) = quantize_from(source, name, n, k).ok_or_else(|| format!("upload_quantized '{name}': not present in this source"))?;
+    upload_packed_scales(up, packed, sw)
+}
+
+/// [`upload_quantized`] over a rectangle - see [`quantize_rect_from`].
+#[allow(clippy::too_many_arguments)]
+pub fn upload_rect(
+    up: &mut paramstore::upload::Uploader,
+    source: &dyn checkpoint::TensorSource,
+    name: &str,
+    stride: usize,
+    r0: usize,
+    n_out: usize,
+    c0: usize,
+    k: usize,
+) -> Result<(gpu_core::DeviceBuffer, gpu_core::DeviceBuffer), String> {
+    let (packed, sw) =
+        quantize_rect_from(source, name, stride, r0, n_out, c0, k).ok_or_else(|| format!("upload_rect '{name}': not present in this source"))?;
+    upload_packed_scales(up, packed, sw)
+}
+
+/// Shared tail of [`upload_quantized`]/[`upload_rect`]: land already-computed
+/// packed words + group scales on the device, under the uploader's staging
+/// discipline (`account`/`maybe_drain` - see `paramstore::upload::Uploader`'s
+/// own doc on why a caller writing through `Gpu::write*_at` directly still
+/// needs this).
+fn upload_packed_scales(
+    up: &mut paramstore::upload::Uploader,
+    packed: Vec<u32>,
+    sw: Vec<f32>,
+) -> Result<(gpu_core::DeviceBuffer, gpu_core::DeviceBuffer), String> {
+    let wbuf = up.gpu().storage(packed.len() as u64);
+    up.gpu().write_at(&wbuf, 0, &packed);
+    let sbuf = up.gpu().storage(sw.len() as u64);
+    up.gpu().write_f32_at(&sbuf, 0, &sw);
+    up.account(4 * (packed.len() + sw.len()) as u64);
+    up.maybe_drain(&wbuf);
+    Ok((wbuf, sbuf))
+}
+
 /// The buffers and kernel slots one dynamic activation quantization needs —
 /// the same "bundle the ids so the call stays readable" shape as
 /// [`crate::block::FlashIds`].
@@ -497,5 +679,164 @@ mod tests {
             }
         }
         assert!(any_diverged, "unsigned-vs-signed byte reinterpretation should diverge for at least one negative-quantized element");
+    }
+
+    /// A GGUF-backed source with one Q8_0 tensor, built through
+    /// `checkpoint::quant`'s real encoder - not hand-assembled bytes.
+    fn q8_0_source(name: &str, vals: &[f32]) -> (checkpoint::gguf::MmapGguf, String) {
+        // A process-wide counter, not just the pid: several tests in this
+        // file build a fixture named "w" and run concurrently under cargo's
+        // default multi-threaded test runner, so pid+name alone collided
+        // (one test's write raced another's cleanup unlink on the identical
+        // path).
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let block = checkpoint::quant::quantize_par(checkpoint::gguf::TYPE_Q8_0, vals).unwrap();
+        let path = std::env::temp_dir().join(format!("brain-model-int8-{}-{}-{id}.gguf", name.replace('.', "_"), std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        checkpoint::gguf_write::write(
+            &path,
+            &[],
+            &[checkpoint::gguf_write::TensorOut { name: name.to_string(), shape: vec![vals.len()], ty: checkpoint::gguf::TYPE_Q8_0, data: block }],
+            32,
+        )
+        .unwrap();
+        (checkpoint::gguf::MmapGguf::open(&path).unwrap(), path)
+    }
+
+    /// [`q8_0_rect`] must be bit-identical to the fp32 round trip
+    /// (`quantize_weight` over the dequantized values), the same claim
+    /// `flux2/tests/gguf_direct_int8.rs` proves for the crate this shares its
+    /// algorithm with - checked here so `model::int8` owning the
+    /// implementation doesn't lose the property.
+    #[test]
+    fn q8_0_rect_is_bit_identical_to_the_fp32_round_trip() {
+        let (n, k) = (3usize, 64usize);
+        let vals: Vec<f32> = (0..n * k).map(|i| ((i as i64 * 37 - 511) % 251) as f32 * 0.5).collect();
+        let (mg, path) = q8_0_source("w", &vals);
+
+        let direct = q8_0_rect(&mg, "w", k, 0, n, 0, k).expect("Q8_0 source, block-aligned rect must take the direct path");
+        let deq = mg.tensor("w").unwrap().unwrap();
+        let want = quantize_weight(&deq, n, k);
+        assert_eq!(direct, want, "byte repack must match the fp32 round trip bit-for-bit");
+
+        // Row offset r0 != 0: the case a naive implementation gets wrong.
+        let row1 = q8_0_rect(&mg, "w", k, 1, 1, 0, k).unwrap();
+        let want_row1 = quantize_weight(&deq[k..2 * k], 1, k);
+        assert_eq!(row1, want_row1, "a nonzero row offset must land on the right block range");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Alignment refusals decline rather than silently widen or misalign.
+    #[test]
+    fn q8_0_rect_declines_unaligned_bounds() {
+        let (n, k) = (2usize, 64usize);
+        let vals: Vec<f32> = (0..n * k).map(|i| i as f32).collect();
+        let (mg, path) = q8_0_source("w", &vals);
+        assert!(q8_0_rect(&mg, "w", 64, 0, 2, 0, 20).is_none(), "k=20 is not block-aligned");
+        assert!(q8_0_rect(&mg, "w", 64, 0, 2, 20, 32).is_none(), "c0=20 is not block-aligned");
+        assert!(q8_0_rect(&mg, "w", 50, 0, 2, 0, 50).is_none(), "stride=50 is not block-aligned");
+        // A non-Q8_0-typed name (a plain HashMap source) declines too.
+        let mut m: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+        m.insert("w".to_string(), vals);
+        assert!(q8_0_rect(&m, "w", 64, 0, 2, 0, 64).is_none(), "a source with no raw_blocks must decline, not panic");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// [`quantize_from`] takes the direct route when the source offers Q8_0
+    /// blocks and the bounded fp32 route otherwise, and both land on the
+    /// SAME values for the same logical weight - proven by comparing a
+    /// Q8_0-backed source against a plain f32 `HashMap` holding the
+    /// tensor's OWN dequantized values (the honest oracle: Q8_0 quantization
+    /// is lossy, so the two inputs are not bit-identical, but re-quantizing
+    /// the dequantized f32 through the SAME group-wise math must reproduce
+    /// exactly what the direct byte repack already proved above).
+    #[test]
+    fn quantize_from_matches_across_both_routes() {
+        let (n, k) = (4usize, 96usize);
+        let vals: Vec<f32> = (0..n * k).map(|i| ((i as i64 * 13 - 777) % 401) as f32 * 0.25).collect();
+        let (mg, path) = q8_0_source("blk.0.weight", &vals);
+        let via_gguf = quantize_from(&mg, "blk.0.weight", n, k).expect("present via the direct route");
+
+        let deq = mg.tensor("blk.0.weight").unwrap().unwrap();
+        let mut m: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+        m.insert("blk.0.weight".to_string(), deq.clone());
+        let via_fallback = quantize_from(&m, "blk.0.weight", n, k).expect("present via the fp32 fallback route");
+
+        assert_eq!(via_gguf, via_fallback, "both routes must land on the identical packed weight for the same logical tensor");
+        assert_eq!(via_gguf, quantize_weight(&deq, n, k), "and both must agree with quantize_weight itself");
+
+        assert!(quantize_from(&mg, "does.not.exist", n, k).is_none());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// [`quantize_rect_from`] on a genuine sub-rectangle (mid-tensor row
+    /// range AND a column offset, so neither bound is 0) must match slicing
+    /// the rectangle out of the fully dequantized tensor and quantizing that
+    /// - exercised over an f32 `HashMap` source (no Q8_0 blocks to align
+    /// against), which forces the whole-tensor-materialize-and-slice
+    /// fallback rather than the direct route.
+    #[test]
+    fn quantize_rect_from_a_genuine_subrectangle_matches_manual_slicing() {
+        let (rows, cols) = (6usize, 96usize);
+        let whole: Vec<f32> = (0..rows * cols).map(|i| (i as f32).sin() * 10.0).collect();
+        let mut m: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+        m.insert("fused".to_string(), whole.clone());
+
+        // k and cols must each be multiples of GROUP (32) - quantize_weight's
+        // own requirement, which the fp32 fallback this test exercises
+        // inherits unchanged.
+        let (r0, n_out, c0, k) = (2usize, 3usize, 32usize, 32usize);
+        let got = quantize_rect_from(&m, "fused", cols, r0, n_out, c0, k).expect("present");
+
+        let mut manual = Vec::with_capacity(n_out * k);
+        for r in 0..n_out {
+            let start = (r0 + r) * cols + c0;
+            manual.extend_from_slice(&whole[start..start + k]);
+        }
+        let want = quantize_weight(&manual, n_out, k);
+        assert_eq!(got, want);
+
+        // The whole-tensor rectangle (stride==k, r0=c0=0) must delegate to
+        // quantize_from and therefore match it exactly.
+        let mut whole_m: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+        whole_m.insert("w".to_string(), whole[..cols * 2].to_vec());
+        let rect_whole = quantize_rect_from(&whole_m, "w", cols, 0, 2, 0, cols).unwrap();
+        let from_whole = quantize_from(&whole_m, "w", 2, cols).unwrap();
+        assert_eq!(rect_whole, from_whole);
+    }
+
+    /// [`upload_quantized`]/[`upload_rect`] must actually land the SAME
+    /// bytes [`quantize_from`]/[`quantize_rect_from`] compute, read back
+    /// from the device - not just call them and trust the upload.
+    #[test]
+    fn upload_quantized_and_upload_rect_read_back_correctly() {
+        let g = gpu_core::testgpu::dev(&[]);
+        let mut up = paramstore::upload::Uploader::new(&g);
+
+        let (n, k) = (2usize, 64usize);
+        let vals: Vec<f32> = (0..n * k).map(|i| ((i as i64 * 29 - 300) % 199) as f32 * 0.3).collect();
+        let (mg, path) = q8_0_source("w", &vals);
+
+        // `Gpu::read` only ever reads back f32; a packed-u32 buffer's words
+        // were written bit-for-bit via `write_at` -> `write_f32_at`'s cast
+        // sibling, so reading it back as f32 and taking `to_bits()` recovers
+        // the original u32 words exactly (the same trick `write_f32_at`
+        // itself uses in reverse).
+        let read_u32 = |buf: &gpu_core::DeviceBuffer, n: usize| -> Vec<u32> { g.read(buf, n).into_iter().map(f32::to_bits).collect() };
+
+        let (want_packed, want_sw) = quantize_from(&mg, "w", n, k).unwrap();
+        let (wbuf, sbuf) = upload_quantized(&mut up, &mg, "w", n, k).unwrap();
+        assert_eq!(read_u32(&wbuf, want_packed.len()), want_packed, "upload_quantized must write exactly what quantize_from computed");
+        assert_eq!(g.read(&sbuf, want_sw.len()), want_sw);
+
+        let (r0, n_out, c0, kk) = (1usize, 1usize, 0usize, k);
+        let (want_rpacked, want_rsw) = quantize_rect_from(&mg, "w", k, r0, n_out, c0, kk).unwrap();
+        let (rwbuf, rsbuf) = upload_rect(&mut up, &mg, "w", k, r0, n_out, c0, kk).unwrap();
+        assert_eq!(read_u32(&rwbuf, want_rpacked.len()), want_rpacked);
+        assert_eq!(g.read(&rsbuf, want_rsw.len()), want_rsw);
+
+        std::fs::remove_file(&path).ok();
     }
 }

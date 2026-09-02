@@ -95,11 +95,42 @@ review of this codebase assumed:
       `flux2/tests/gguf_direct_int8.rs` are unchanged; that test file needed
       no edits at all, which is the point of routing through the trait.
       `make test -p brain-flux2`: green (24 test-result groups, 0 failed).
+- [x] M3: `model::int8::{q8_0_rect, quantize_from, quantize_rect_from,
+      upload_quantized, upload_rect}` - the one quantize-and-upload helper.
+      `q8_0_rect` is the ONE canonical implementation of the Q8_0 byte
+      repack; `gguf::int8_direct::try_i8_rect` cannot be it because
+      `crates/gguf` depends on `model`, not the reverse, so the algorithm
+      has to live in `model` to be shared (a follow-up can turn
+      `try_i8_rect` into a thin wrapper over this - not done in this
+      milestone, to keep the diff to "add a helper", not "also touch a
+      previously-landed, still-correct call site"). `quantize_from` (whole
+      tensor) tries the byte repack first, else a row-bounded fp32 route
+      (`with_tensor_chunks` cut on row boundaries) - peak host allocation
+      one row block, not `n*k`. `quantize_rect_from` generalizes to a
+      rectangle: delegates to `quantize_from` for the whole-tensor case,
+      else tries the byte repack, else falls back to a whole-tensor fp32
+      materialize-and-slice - the same cost `flux2::weights::DitWeights::
+      with_f32` already pays for a rect fallback, not a new one this
+      introduces. `upload_quantized`/`upload_rect` land the result on the
+      device through `paramstore::upload::Uploader`'s `account`/
+      `maybe_drain` staging discipline (closing the gap `Weight::upload`
+      bypasses by writing through `Gpu::write*_at` directly with no
+      accounting). Gated: `q8_0_rect_is_bit_identical_to_the_fp32_round_
+      trip` (whole tensor + a nonzero row offset), `q8_0_rect_declines_
+      unaligned_bounds`, `quantize_from_matches_across_both_routes` (a
+      Q8_0-backed source and a `HashMap` holding the SAME tensor's own
+      dequantized values land on identical packed bytes), `quantize_rect_
+      from_a_genuine_subrectangle_matches_manual_slicing`, `upload_
+      quantized_and_upload_rect_read_back_correctly` (actual device
+      read-back, not just "the call returned Ok"). `make test -p
+      brain-model`: 163 lib tests passed, 0 failed (one unrelated,
+      pre-existing integration-test failure in `moe_compact_parity` - a
+      `Gpu::submit` count assertion in `model::moe`, code this milestone
+      never touches; almost certainly backend/device-dependent on this
+      box, not a regression from this work).
 
 ## Not yet done
 
-- [ ] M3: `model::int8::{upload_quantized, upload_rect, quantize_from}` - the
-      one quantize-and-upload helper every model should route through.
 - [ ] M4: migrate the no-policy f32-roundtrip sites (qwen3, qwen35moe, wan);
       delete `qwen35::stream::quantize_i8_rows`.
 - [ ] M5: `checkpoint::gguf_src::GgufSource` absorbing wan/ltxv/gemma4's
