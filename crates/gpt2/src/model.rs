@@ -110,6 +110,10 @@ const LN_DX_ROWS: usize = 43;
 // gathered, the same pattern `qwen3::model`'s `embed_tiled` uses. Appended, so
 // every index above is unchanged.
 const EMBED_TILE: usize = 46;
+// Cooperative one-workgroup-per-row attn_bwd_dscores (M5.2): thread t no
+// longer owns the whole query row t (Op::AttnBwdDScores, see
+// `dscores_kernel`). Appended, so every index above is unchanged.
+const ATTN_BWD_DSCORES_ROWS: usize = 47;
 
 /// The LayerNorm family this model dispatches through `model::block`, which
 /// picks the coalesced variant per device (`backend_api::select`).
@@ -173,6 +177,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
     ("embed_tile", kernels::EMBED_TILE),
+    ("attn_bwd_dscores_rows", kernels::ATTN_BWD_DSCORES_ROWS),
 ];
 
 /// Pick the forward-linear GEMM kernel + its dispatch thread count for an
@@ -219,6 +224,24 @@ fn dw_kernel(nrows: usize, k: usize) -> (usize, u32) {
     let naive = std::env::var("BRAIN_GPT2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     if naive || nrows < 128 || k < 128 { (MATMUL_DW, (nrows * k) as u32) }
     else { (MATMUL_DW_REG, (nrows.div_ceil(128) * k.div_ceil(128) * 256) as u32) }
+}
+
+/// Pick the attn_bwd_dscores kernel + its dispatch thread count
+/// (`backend_api::select::Op::AttnBwdDScores`, M5.2): the cooperative
+/// one-workgroup-per-row `attn_bwd_dscores_rows` wherever the device can run
+/// a workgroup reduction (unconditionally on a GPU backend; never on the CPU
+/// JIT, which cannot execute the barrier), else the per-element reference.
+/// Same math either way - the row's `dot` reduction folds in a different
+/// order, so the two agree to floating-point rounding, not to the bit (see
+/// `attn_bwd_dscores_rows.wgsl`'s own doc), gated by
+/// `dp_grad_parity_gpt`/`cpu_register_equals_cpu_naive`.
+fn dscores_kernel(gpu: &Gpu, rows: u32) -> (usize, u32) {
+    use gpu_core::select::{DefaultSelector, KernelSelector, KernelVariant, Op, OpShape};
+    let shape = OpShape { m: rows, n: 0, k: 0, dtype: gpu_core::select::Dtype::F32 };
+    match DefaultSelector.select(Op::AttnBwdDScores, shape, &gpu.caps()) {
+        KernelVariant::WorkgroupPerOutput => (ATTN_BWD_DSCORES_ROWS, rows * 64),
+        _ => (ATTN_DSCORES, rows),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -786,7 +809,8 @@ impl Gpt {
             s.push(self.gpu.step(bk, &[&self.dxmid, &lb.attn_ctx, g(&p(l, "attn.out.weight"))], &[n, d, d], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
             s.push(self.gpu.step(bk, &[&self.dxmid, self.w(&p(l, "attn.out.weight")), &self.d_attn_ctx], &[n, d, d, 0], bt));
-            s.push(self.gpu.step(ATTN_DSCORES, &[&self.d_attn_ctx, &lb.qkv, &lb.probs, &self.d_scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t));
+            let (dk, dt) = dscores_kernel(&self.gpu, self.b * c.n_heads * self.t);
+            s.push(self.gpu.step(dk, &[&self.d_attn_ctx, &lb.qkv, &lb.probs, &self.d_scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], dt));
             s.push(self.gpu.step(ATTN_DV, &[&lb.probs, &self.d_attn_ctx, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(ATTN_DQ, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(ATTN_DK, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
