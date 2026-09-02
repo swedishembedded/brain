@@ -1199,10 +1199,10 @@ impl Engine {
     /// Whether a `[n, k]` fp32 weight fits ONE storage binding on this device.
     /// `wgpu` clamps `max_storage_buffer_binding_size` to `i32::MAX` (2047
     /// MiB) on every backend regardless of a card's actual VRAM, so this is a
-    /// real ceiling any `[n, k]` table can cross at large enough `n` (the
-    /// per-layer projections never approach it - bounded by `d_model`/`d_ff`
-    /// - but the LM head's `n = vocab` does at a real vocabulary size, e.g.
-    /// Qwen3-8B's 151936 x 4096 = ~2.32 GiB). `Self::mm_into` is this check's
+    /// real ceiling any `[n, k]` table can cross at large enough `n`. The
+    /// per-layer projections never approach it, bounded by `d_model`/`d_ff`,
+    /// but the LM head's `n = vocab` does at a real vocabulary size, e.g.
+    /// Qwen3-8B's 151936 x 4096 = ~2.32 GiB. `Self::mm_into` is this check's
     /// only caller.
     fn fits_one_binding(&self, k: u32, n: u32) -> bool {
         (n as u64) * (k as u64) * 4 <= self.gpu.max_storage_binding_bytes()

@@ -599,8 +599,8 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// sequence it still holds (running blocks to the pool, preempted KV out
     /// of host RAM) so the decoder comes back with nothing leaked.
     ///
-    /// The seam a caller needs to reconfigure a live engine between workloads
-    /// - `Scheduler` owns its decoder, and rebuilding one to change a policy
+    /// The seam a caller needs to reconfigure a live engine between workloads:
+    /// `Scheduler` owns its decoder, and rebuilding one to change a policy
     /// knob would mean reloading the weights.
     pub fn into_decoder(mut self) -> D {
         for r in &mut self.running {
