@@ -124,7 +124,9 @@ load of it must already be bare-identifier-indexed.
 | [`bce_logits_grad`](../../crates/kernels/wgsl/bce_logits_grad.wgsl) | Gradient of bce_logits w.r.t | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`bias_add`](../../crates/kernels/wgsl/bias_add.wgsl) | Add a per-output-feature bias in place | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`bias_grad`](../../crates/kernels/wgsl/bias_grad.wgsl) | Bias gradient:  dbias[n] += sum_m dy[m,n] | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`bias_grad_final`](../../crates/kernels/wgsl/bias_grad_final.wgsl) | Bias gradient, STAGE 2 of 2 - fold the partials and ACCUMULATE | one thread per output element, serial fold over P partials | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`bias_grad_ncl`](../../crates/kernels/wgsl/bias_grad_ncl.wgsl) | Per-channel bias gradient over NCL | one thread per channel, serial reduction over rows*inner | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`bias_grad_part`](../../crates/kernels/wgsl/bias_grad_part.wgsl) | Bias gradient, STAGE 1 of 2 - partial column sums over row chunks | one thread per partial, strided serial reduction (no barrier) | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`blend_accumulate`](../../crates/kernels/wgsl/blend_accumulate.wgsl) | Per-pixel weighted accumulate: acc[c,h,w] += x[c,h,w] * weight[h,w] | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`bmm`](../../crates/kernels/wgsl/bmm.wgsl) | Batched matmul: out[b,m,n] = alpha * sum_k A[b,·]·B[b,·], both operands vary per batch | one thread per output element, serial inner reduction over k | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`bmm_acc`](../../crates/kernels/wgsl/bmm_acc.wgsl) | Batched matmul, accumulating: out[b,m,n] += alpha * sum_k A[b,·]·B[b,·] | one thread per output element, serial inner reduction over k | 2/5 | ✓ | ✓ | - | - | f32 |
@@ -433,7 +435,7 @@ load of it must already be bare-identifier-indexed.
 | [`router_bwd`](../../crates/kernels/wgsl/router_bwd.wgsl) | Router backward: gradient w.r.t | one thread per output element, 5 nested serial reductions, array-free | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`router_bwd_sigmoid`](../../crates/kernels/wgsl/router_bwd_sigmoid.wgsl) | GLM/DeepSeek-V3 "noaux_tc" MoE router (backward) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`router_gate`](../../crates/kernels/wgsl/router_gate.wgsl) | Router gating: softmax over experts -> keep top_k -> optional renorm + scale | one thread per token, array-free (no expert-count cap) | 1/5 | ✓ | ✓ | - | - | f32 |
-| [`router_gate_sigmoid`](../../crates/kernels/wgsl/router_gate_sigmoid.wgsl) | GLM/DeepSeek-V3 "noaux_tc" MoE router (forward) | one thread per output element, 6 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`router_gate_sigmoid`](../../crates/kernels/wgsl/router_gate_sigmoid.wgsl) | GLM/DeepSeek-V3 "noaux_tc" MoE router (forward) | one thread per output element, array-free (no expert-count cap) | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`router_gate_train`](../../crates/kernels/wgsl/router_gate_train.wgsl) | Router gating (training variant): softmax + full probs + top_k gate (optional renorm + scale) | one thread per token, array-free (no expert-count cap) | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`router_topk_compact`](../../crates/kernels/wgsl/router_topk_compact.wgsl) | Compact a dense MoE gate matrix into the top_k expert ids each row selected | one thread per row, single scan (no local array, no barrier) | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`row_dot`](../../crates/kernels/wgsl/row_dot.wgsl) | Generic per-row dot product: out[row] = alpha * sum_d a[row,d]*b[row,d] | one thread per output row, serial reduction over a Params-bounded axis | 2/5 | ✓ | ✓ | - | - | f32 |
