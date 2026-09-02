@@ -184,8 +184,36 @@ review of this codebase assumed:
       -p brain-gemma4`: green, 0 failed (run as one combined invocation at
       39m3s - close to the 2400s/40min deadlock-guard budget; the next
       milestone should go back to separate per-crate runs).
-- [ ] M6: flux2 `DitWeights: TensorSource`, LoRA decline as a `raw_blocks →
-      None` refusal - proves the seam.
+- [x] M6: `flux2::weights::DitWeights` implements `checkpoint::TensorSource`
+      directly. `with_f32` (the panic-on-missing inherent method) is now
+      built ON `with_tensor` (the bool-returning trait method) rather than
+      duplicating its decode-and-LoRA-fold-and-cache body - the two used to
+      be two independent copies of the same logic with different failure
+      contracts. `try_i8_rect`'s LoRA-touched decline moved into `raw_blocks`
+      (the ONE place it is now checked - `try_i8_rect` itself just calls
+      `gguf::try_i8_rect(self, ..)` and inherits the decline for free,
+      instead of re-checking `lora.touches(..)` a second time). Deviated
+      from the plan's literal "`lin_rect` -> `upload_rect`" for
+      `crates/flux2/src/model.rs`'s actual per-linear upload closure: it
+      carries real, consumed profiling instrumentation (`quant_ns`/
+      `write_ns`/`split_ns`/`flush_ns`, printed as a load-time perf
+      breakdown at the end of the build) that `model::int8::upload_rect`
+      has no equivalent for, and swapping it in would delete that
+      observability for a real, expensive, already-tuned hot path with no
+      correctness upside - `lin_rect` is not a "no-policy" site the way
+      M4's targets were. Left it as-is; `try_i8_rect` was already the
+      generalized primitive, and `DitWeights` implementing `TensorSource`
+      is what "proves the seam" - any future generic caller
+      (`model::int8::upload_rect` included) now works against a
+      `DitWeights` directly. Gated: two new tests in `weights.rs`'s own
+      `mod tests` (none existed before) - `dit_weights_is_usable_as_a_
+      trait_object` and `a_lora_touched_tensor_declines_the_direct_path_
+      but_still_folds_via_with_f32`, the latter closing a real, previously
+      untested gap (no test anywhere exercised the LoRA-touched decline
+      path before this, via a `PendingLora` built directly with public
+      `model::lora::ExternalPair` fields rather than a file-based fixture).
+      `make test -p brain-flux2`: green (exit 0; every pre-existing test,
+      including the `gguf_direct_int8.rs` bit-exactness suite, unaffected).
 - [ ] M7: ltxv/gemma4/s3dit `&Tensors` → `&dyn TensorSource`.
 - [ ] M8: host relayout (`crates/gguf/src/kquant.rs`) for Q4_K/Q5_K/Q6_K/
       Q4_0/Q5_0/Q8_0 into brain's device K-quant layout. Gate: `assert_eq!`

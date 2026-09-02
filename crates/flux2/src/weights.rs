@@ -173,35 +173,22 @@ impl<'a> DitWeights<'a> {
     /// Lend `name`'s full fp32 contents to `f`, decoding and LoRA-folding on
     /// demand for a GGUF source. Panics naming the tensor if it is absent -
     /// the manifest was validated before the build started, so a miss here is
-    /// a bug, not user error.
+    /// a bug, not user error. Built on [`TensorSource::with_tensor`] (below)
+    /// rather than duplicating its decode-and-cache body: that method has to
+    /// follow the trait's "report not-found as `false`" contract, and this
+    /// one turns that into the panic this crate's own callers rely on.
     pub fn with_f32<R>(&self, name: &str, f: impl FnOnce(&[f32]) -> R) -> R {
-        match self {
-            DitWeights::Map(ts) => {
-                let (_, d) = ts.get(name).unwrap_or_else(|| panic!("flux2: missing tensor {name}"));
-                f(d)
+        let mut f = Some(f);
+        let mut result = None;
+        let found = checkpoint::TensorSource::with_tensor(self, name, &mut |d| {
+            if let Some(f) = f.take() {
+                result = Some(f(d));
             }
-            DitWeights::Gguf { gguf, lora, cache } => {
-                {
-                    let c = cache.borrow();
-                    if let Some((n, d)) = c.as_ref() {
-                        if n == name {
-                            return f(d);
-                        }
-                    }
-                }
-                let mut d = match gguf.tensor(name) {
-                    Some(Ok(v)) => v,
-                    Some(Err(e)) => panic!("flux2: {name}: {e}"),
-                    None => panic!("flux2: missing tensor {name}"),
-                };
-                if let Some(l) = lora {
-                    l.apply(name, &mut d);
-                }
-                let r = f(&d);
-                *cache.borrow_mut() = Some((name.to_string(), d));
-                r
-            }
+        });
+        if !found {
+            panic!("flux2: missing tensor {name}");
         }
+        result.expect("with_tensor called the callback exactly once when it reports found")
     }
 
     /// Requantize the rectangle `rows [r0, r0+n_out) x cols [c0, c0+k)` of a
@@ -209,19 +196,173 @@ impl<'a> DitWeights<'a> {
     /// `(packed, scales)` - `gguf::try_i8_rect`, the shared implementation
     /// (this crate's own module was where the byte-repack fact was first
     /// proven; it now lives in `crates/gguf` so a second GGUF-sourced model
-    /// does not re-derive it).
+    /// does not re-derive it). Reads through `self` as a `TensorSource`, so
+    /// the LoRA-touched decline lives in ONE place -
+    /// [`TensorSource::raw_blocks`] below - rather than being checked again
+    /// here: `gguf::try_i8_rect` declines whenever `raw_blocks` does.
     ///
     /// `None` - meaning "use the fp32 route" - whenever the direct path does
     /// not apply: an fp32 map source, a non-Q8_0 tensor, a tensor the LoRA
-    /// touches (the fold needs a float domain, checked here since it is
-    /// this crate's own concern), or a rectangle whose bounds are not
-    /// Q8_0-block-aligned. Returning `None` is always safe; the caller's
-    /// fallback produces the same bytes by the longer route.
+    /// touches, or a rectangle whose bounds are not Q8_0-block-aligned.
+    /// Returning `None` is always safe; the caller's fallback produces the
+    /// same bytes by the longer route.
     pub fn try_i8_rect(&self, name: &str, stride: usize, r0: usize, n_out: usize, c0: usize, k: usize) -> Option<(Vec<u32>, Vec<f32>)> {
-        let DitWeights::Gguf { gguf, lora, .. } = self else { return None };
-        if lora.is_some_and(|l| l.touches(name)) {
-            return None;
+        gguf::try_i8_rect(self, name, stride, r0, n_out, c0, k)
+    }
+}
+
+impl checkpoint::TensorSource for DitWeights<'_> {
+    /// The trait's own contract: report a miss as `false`, never a panic -
+    /// [`Self::with_f32`] above is the version of this that panics instead,
+    /// built on top of this one rather than the other way around.
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self {
+            DitWeights::Map(ts) => ts.with_tensor(name, f),
+            DitWeights::Gguf { gguf, lora, cache } => {
+                {
+                    let c = cache.borrow();
+                    if let Some((n, d)) = c.as_ref() {
+                        if n == name {
+                            f(d);
+                            return true;
+                        }
+                    }
+                }
+                let mut d = match gguf.tensor(name) {
+                    Some(Ok(v)) => v,
+                    Some(Err(e)) => panic!("flux2: {name}: {e}"),
+                    None => return false,
+                };
+                if let Some(l) = lora {
+                    l.apply(name, &mut d);
+                }
+                f(&d);
+                *cache.borrow_mut() = Some((name.to_string(), d));
+                true
+            }
         }
-        gguf::try_i8_rect(*gguf, name, stride, r0, n_out, c0, k)
+    }
+
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        match self {
+            DitWeights::Map(ts) => ts.raw_words(name),
+            // A GGUF source never lends zero-copy words: even with no LoRA,
+            // the cache above stores the DECODED f32, not the file's own
+            // bytes, and with a LoRA present the values are folded - neither
+            // is "the bytes exactly as stored" `raw_words` promises.
+            DitWeights::Gguf { .. } => None,
+        }
+    }
+
+    /// The zero-fp32 path [`Self::try_i8_rect`] reads through:
+    /// [`gguf::int8_direct::try_i8_rect`] calls this via the generic
+    /// `TensorSource` seam (M2), so the LoRA-touched decline checked here is
+    /// the ONLY place it is checked - `try_i8_rect`'s own body no longer
+    /// repeats it.
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, &[u8])> {
+        match self {
+            DitWeights::Map(ts) => ts.raw_blocks(name),
+            DitWeights::Gguf { gguf, lora, .. } => {
+                if lora.is_some_and(|l| l.touches(name)) {
+                    // The fold needs a float domain: a zero-copy block lend
+                    // would hand the caller the UN-adapted weight, silently
+                    // skipping the LoRA for this tensor.
+                    return None;
+                }
+                gguf.raw_blocks(name)
+            }
+        }
+    }
+
+    fn numel(&self, name: &str) -> Option<usize> {
+        match self {
+            DitWeights::Map(ts) => ts.numel(name),
+            DitWeights::Gguf { gguf, .. } => gguf.numel(name),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use checkpoint::TensorSource;
+
+    fn q8_gguf(name: &str, n: usize, k: usize, tag: &str) -> (MmapGguf, String) {
+        let vals: Vec<f32> = (0..n * k).map(|i| ((i as i64 * 37 - 511) % 251) as f32 * 0.25).collect();
+        let mut src: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+        src.insert(name.to_string(), (vec![n, k], vals));
+        let path = std::env::temp_dir().join(format!("brain-flux2-weights-{tag}-{}.gguf", std::process::id())).to_string_lossy().into_owned();
+        checkpoint::quantize::convert(&src, checkpoint::quantize::Tier::Q8_0, &checkpoint::quantize::Policy::new(), &[], &path, &mut |_, _| {}).unwrap();
+        (MmapGguf::open(&path).unwrap(), path)
+    }
+
+    fn rank1_pair(base_key: &str, out: usize, inn: usize) -> model::lora::ExternalPair {
+        model::lora::ExternalPair {
+            base_key: base_key.to_string(),
+            stem: "test".to_string(),
+            out,
+            inn,
+            r: 1,
+            a: (0..inn).map(|i| 0.1 + i as f32 * 0.01).collect(),
+            b: (0..out).map(|i| 0.2 + i as f32 * 0.02).collect(),
+            alpha_mult: 1.0,
+        }
+    }
+
+    /// `DitWeights` genuinely satisfies `TensorSource` - callable through a
+    /// `&dyn TensorSource`-taking function, not just through its own inherent
+    /// methods. This is the seam this milestone adds: a generic GGUF-source
+    /// consumer (`model::int8::upload_rect`, `gguf::try_i8_rect`) can now
+    /// take a `DitWeights` directly.
+    fn touches_via_trait_object(src: &dyn TensorSource, name: &str) -> Option<usize> {
+        src.numel(name)
+    }
+
+    #[test]
+    fn dit_weights_is_usable_as_a_trait_object() {
+        let (g, path) = q8_gguf("w", 2, 32, "trait-object");
+        let src = DitWeights::gguf(&g);
+        assert_eq!(touches_via_trait_object(&src, "w"), Some(64));
+        assert_eq!(touches_via_trait_object(&src, "missing"), None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The LoRA-touched decline lives in ONE place now (`raw_blocks`), and
+    /// `try_i8_rect` inherits it by reading through `self` as a
+    /// `TensorSource` rather than re-checking `lora.touches(..)` itself.
+    /// Proven end to end: a LoRA-touched tensor takes the fp32 route (and
+    /// comes back genuinely folded, not silently un-adapted), while an
+    /// untouched tensor in the SAME checkpoint still takes the direct
+    /// zero-fp32 path.
+    #[test]
+    fn a_lora_touched_tensor_declines_the_direct_path_but_still_folds_via_with_f32() {
+        let (n, k) = (4usize, 32usize);
+        let (g, path) = q8_gguf("w", n, k, "lora-decline");
+        let pending = PendingLora { pairs: vec![rank1_pair("w", n, k)], scale: 1.0 };
+        let src = DitWeights::gguf_adapted(&g, Some(&pending));
+
+        assert!(src.try_i8_rect("w", k, 0, n, 0, k).is_none(), "a LoRA-touched tensor must decline the byte-repack path");
+        assert!(src.raw_blocks("w").is_none(), "raw_blocks is where the decline actually lives");
+
+        // A sibling tensor the LoRA does NOT touch, in the same checkpoint,
+        // must still take the direct path - the decline is per-tensor, not
+        // "any LoRA present disables the fast path for everything".
+        let (g2, path2) = q8_gguf("untouched", n, k, "lora-sibling");
+        let src2 = DitWeights::gguf_adapted(&g2, Some(&pending));
+        assert!(src2.try_i8_rect("untouched", k, 0, n, 0, k).is_some(), "a tensor the LoRA does not touch must still take the direct path");
+
+        // And the declined tensor's fp32 route is genuinely folded, not
+        // silently serving the un-adapted weight.
+        let unadapted = DitWeights::gguf(&g);
+        let mut folded = None;
+        let mut plain = None;
+        src.with_f32("w", |d| folded = Some(d.to_vec()));
+        unadapted.with_f32("w", |d| plain = Some(d.to_vec()));
+        assert_ne!(folded, plain, "with_f32 must actually apply the LoRA fold, not skip it");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&path2).ok();
     }
 }
