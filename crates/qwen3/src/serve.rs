@@ -22,6 +22,7 @@ use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 use model::block::{self, KernelIds};
 use model::dispatch::I8Scratch;
 use model::ops::{Ops, Weight};
+use model::kv_offload::{HostKvPool, KvOffload, KvOffloadError, OffloadStats};
 use model::paged::{BlockAllocator, BlockTable, PrefixCache};
 use paramstore::ParamStore;
 
@@ -105,6 +106,13 @@ const QKNORM_ROPE_APPEND_FUSED: usize = 33;
 // of `rms` -> `max_abs_row` -> `quant_pack`, never materialising the fp32
 // intermediate at all on an all-int8-weight engine.
 const RMSNORM_QUANT_FUSED: usize = 34;
+// Host-RAM KV offload (`model::kv_offload`): gather a set of physical KV
+// blocks out of the pools into one staging buffer (swap out), and scatter
+// staged blocks back into whatever physical slots the allocator handed out
+// (swap in). Never dispatched on the decode path - only when the scheduler
+// preempts or resumes a whole sequence.
+const KV_GATHER: usize = 35;
+const KV_SCATTER: usize = 36;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -142,6 +150,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("qknorm_rope_fused", kernels::QKNORM_ROPE_FUSED),
     ("qknorm_rope_append_fused", kernels::QKNORM_ROPE_APPEND_FUSED),
     ("rmsnorm_quant_fused", kernels::RMSNORM_QUANT_FUSED),
+    ("kv_block_gather", kernels::KV_BLOCK_GATHER),
+    ("kv_block_scatter", kernels::KV_BLOCK_SCATTER),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -358,6 +368,17 @@ fn kv_pool_words(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bo
     let pool_words = if kv_int8 { slots * hkv / 4 } else { slots * hkv };
     let scale_words = if kv_int8 { slots * n_kv } else { 0 };
     (pool_words, scale_words)
+}
+
+/// Device words ONE physical KV block costs across the whole model - every
+/// layer's K and V pool words plus, on an int8 pool, their per-`(slot,
+/// kv-head)` dequant scales. This is the width
+/// `model::kv_offload::HostKvPool` holds per block and the stride one block's
+/// staging record spans, so it is derived from [`kv_pool_words`] (the one
+/// place the pool layout lives) at `num_blocks = 1` rather than restated.
+pub fn kv_block_words(cfg: &QwenConfig, block_size: u32, kv_int8: bool) -> usize {
+    let (pool_words, scale_words) = kv_pool_words(cfg, block_size, 1, kv_int8);
+    cfg.n_layers as usize * 2 * (pool_words + scale_words) as usize
 }
 
 /// Device bytes the paged KV pool costs at this sizing: K + V pools (packed
@@ -593,7 +614,38 @@ pub struct Engine {
     /// rebuilding via `Self::run_batched_steps`, unchanged from before this
     /// cache existed.
     tape_cache: HashMap<u32, Vec<Step>>,
+    /// Host-RAM KV offload (`model::kv_offload`): the host pool demoted
+    /// sequences' KV lives in. Zero-capacity (offload off) until
+    /// [`Engine::set_kv_offload_bytes`] is called, so an engine nobody asked
+    /// to offload allocates and copies nothing.
+    host_kv: HostKvPool,
+    /// Words one physical block occupies across all layers - `host_kv`'s block
+    /// width and the swap staging stride. See [`kv_block_words`].
+    kv_block_words: usize,
+    /// Staging buffers the swap moves through, built on first use (an engine
+    /// that never swaps never pays for them).
+    swap: Option<SwapBufs>,
 }
+
+/// Device buffers one swap chunk moves through. A whole sequence is
+/// transferred `blocks` at a time so the staging cost is bounded no matter how
+/// long the sequence is: one `write`/`read` per chunk, `2 * n_layers` (fp32) or
+/// `4 * n_layers` (int8) gather/scatter dispatches inside it.
+struct SwapBufs {
+    /// `[blocks]` physical block ids for the chunk being moved.
+    ids: DeviceBuffer,
+    /// `[blocks * kv_block_words]`, block-major.
+    staging: DeviceBuffer,
+    /// Blocks one chunk carries.
+    blocks: u32,
+}
+
+/// Staging budget for one KV swap chunk. Large enough that a swap is a handful
+/// of PCIe transfers rather than one per block (the measured device->host rate
+/// on this class of card is ~1.2 GB/s, so a 64 MiB chunk is ~50 ms of real
+/// transfer - far past the per-submit overhead it amortises), small enough to
+/// be irrelevant next to the pool itself.
+const KV_SWAP_STAGING_BYTES: u64 = 64 << 20;
 
 impl Engine {
     /// Build from an in-memory decoder weight map (tests / embedded weights).
@@ -727,6 +779,7 @@ impl Engine {
             }
         }
         let kv_pool_bytes_val = cfg.n_layers as u64 * 2 * (pool_words + scale_words) * 4;
+        let block_words = kv_block_words(&cfg, block_size, kv_int8);
         let sc = Scratch {
             res,
             xn1: st(b * d),
@@ -915,6 +968,9 @@ impl Engine {
             topk_vals_dev,
             topk_idx_dev,
             tape_cache: HashMap::new(),
+            host_kv: HostKvPool::new(block_words, 0),
+            kv_block_words: block_words,
+            swap: None,
         }
     }
 
@@ -2147,6 +2203,128 @@ impl Engine {
         t.release(&mut self.alloc);
     }
 
+    // ---- host-RAM KV offload (`model::kv_offload`) ----------------------
+
+    /// Give this engine `capacity_bytes` of host RAM to hold preempted
+    /// sequences' KV in, enabling [`model::serve::Scheduler`]'s swap-based
+    /// preemption. `0` (the default) turns it off.
+    ///
+    /// What it buys is CONCURRENCY, not a longer single sequence: an admitted
+    /// sequence the scheduler is not advancing this round costs the device
+    /// nothing while its bytes sit here, so the pool backs the sequences that
+    /// are actually decoding. Per-sequence context is unchanged - a sequence
+    /// being decoded still needs all of its KV resident, because causal
+    /// attention reads all of it every step (see `model::kv_offload`'s header
+    /// for the measured bus numbers behind that).
+    pub fn set_kv_offload_bytes(&mut self, capacity_bytes: u64) {
+        self.host_kv.set_capacity_bytes(capacity_bytes);
+    }
+
+    /// Host bytes this engine may hold demoted KV in.
+    pub fn kv_offload_bytes(&self) -> u64 {
+        self.host_kv.capacity_bytes()
+    }
+
+    /// Swap accounting - demotions, promotions, blocks moved, host bytes held.
+    pub fn kv_offload_stats(&self) -> OffloadStats {
+        self.host_kv.stats()
+    }
+
+    /// Host bytes one cached token costs if its sequence is demoted -
+    /// identical to what it costs on the device, since a swap is verbatim.
+    pub fn kv_offload_bytes_per_token(&self) -> f64 {
+        self.kv_block_words as f64 * 4.0 / self.block_size as f64
+    }
+
+    /// Build the swap staging buffers on first use. Sized to
+    /// [`KV_SWAP_STAGING_BYTES`], clamped to the pool's own block count (never
+    /// stage more blocks than can exist) and to what one storage binding on
+    /// this device allows.
+    fn ensure_swap_bufs(&mut self) {
+        if self.swap.is_some() {
+            return;
+        }
+        let per_block = self.kv_block_words as u64 * 4;
+        let cap_bytes = KV_SWAP_STAGING_BYTES.min(self.gpu.max_storage_binding_bytes());
+        let mut blocks = (cap_bytes / per_block).clamp(1, self.alloc.num_blocks() as u64) as u32;
+        // Halve on a memory-ceiling refusal rather than panicking: this
+        // allocation happens the first time a sequence is preempted, which is
+        // exactly when the device is under pressure, and a smaller chunk costs
+        // transfers, not correctness. One block always fits - it is a fraction
+        // of a pool that is already resident.
+        let (ids, staging) = loop {
+            let want = blocks as u64 * self.kv_block_words as u64;
+            match (self.gpu.try_storage(blocks as u64), self.gpu.try_storage(want)) {
+                (Ok(ids), Ok(staging)) => break (ids, staging),
+                _ if blocks > 1 => blocks /= 2,
+                (ids, staging) => panic!("qwen3 serve: KV swap staging for a single block was refused: {:?}", ids.err().or(staging.err())),
+            }
+        };
+        self.swap = Some(SwapBufs { ids, staging, blocks });
+    }
+
+    /// Every `(pool buffer, words per block)` a swap has to move, in the order
+    /// that defines one block's staging record: per layer, K pool, V pool,
+    /// then (int8 only) K scales, V scales. Returned as offsets so the gather
+    /// and the scatter cannot drift apart - both walk this one list.
+    fn kv_swap_plan(&self) -> Vec<(&DeviceBuffer, u32, u32)> {
+        let (pool_words, scale_words) = kv_pool_words(&self.cfg, self.block_size, 1, self.kv_int8);
+        let (pw, sw) = (pool_words as u32, scale_words as u32);
+        let mut plan = Vec::new();
+        let mut off = 0u32;
+        for l in 0..self.cfg.n_layers as usize {
+            for buf in [&self.pool_k[l], &self.pool_v[l]] {
+                plan.push((buf, pw, off));
+                off += pw;
+            }
+            if self.kv_int8 {
+                for buf in [&self.scales_k[l], &self.scales_v[l]] {
+                    plan.push((buf, sw, off));
+                    off += sw;
+                }
+            }
+        }
+        debug_assert_eq!(off as usize, self.kv_block_words, "the swap plan must cover exactly one block's words");
+        plan
+    }
+
+    /// Gather one chunk of blocks into the staging buffer and read it back.
+    fn swap_out_chunk(&mut self, chunk: &[u32], out: &mut Vec<u32>) {
+        self.ensure_swap_bufs();
+        let sw = self.swap.as_ref().expect("just built");
+        let n = chunk.len() as u32;
+        let stride = self.kv_block_words as u32;
+        self.gpu.write(&sw.ids, chunk);
+        let steps: Vec<Step> = self
+            .kv_swap_plan()
+            .into_iter()
+            .map(|(buf, wpb, off)| self.gpu.step(KV_GATHER, &[&sw.ids, buf, &sw.staging], &[n, wpb, off, stride], n * wpb))
+            .collect();
+        self.gpu.submit(&[], &steps);
+        // `read` hands back `f32`, but the bytes are whatever the pool holds
+        // (packed int8, a scale, an fp32 K) - `to_bits` recovers the words
+        // exactly, with no float ever computed on them.
+        let got = self.gpu.read(&sw.staging, (n * stride) as usize);
+        out.extend(got.iter().map(|v| v.to_bits()));
+    }
+
+    /// Upload one chunk of staged blocks and scatter it back into the pool.
+    fn swap_in_chunk(&mut self, chunk: &[u32], words: &[u32]) {
+        self.ensure_swap_bufs();
+        let sw = self.swap.as_ref().expect("just built");
+        let n = chunk.len() as u32;
+        let stride = self.kv_block_words as u32;
+        debug_assert_eq!(words.len(), (n * stride) as usize);
+        self.gpu.write(&sw.ids, chunk);
+        self.gpu.write(&sw.staging, words);
+        let steps: Vec<Step> = self
+            .kv_swap_plan()
+            .into_iter()
+            .map(|(buf, wpb, off)| self.gpu.step(KV_SCATTER, &[&sw.ids, &sw.staging, buf], &[n, wpb, off, stride], n * wpb))
+            .collect();
+        self.gpu.submit(&[], &steps);
+    }
+
     fn argmax(s: &[f32]) -> u32 {
         let mut bi = 0;
         for i in 1..s.len() {
@@ -2369,6 +2547,44 @@ impl Engine {
 pub use model::serve::{AdmissionPolicy, DeadlineAware, MaxQueueDepth, QueueState, RejectReason, Request, SampleParams, StepReport, UnboundedQueue};
 pub type Scheduler = model::serve::Scheduler<Engine>;
 
+/// The device half of host-RAM KV offload for this engine: how a set of
+/// physical blocks moves between the paged pools and host memory. The swap
+/// PROTOCOL itself (budgets, refcounts, rollback) is
+/// `model::kv_offload::KvOffload`'s provided methods, shared with every future
+/// adopter - only these four are Qwen-specific, and even they are written
+/// against `kv_pool_words`, this engine's own single source of pool layout.
+impl KvOffload for Engine {
+    fn kv_block_words(&self) -> usize {
+        self.kv_block_words
+    }
+    fn kv_alloc_mut(&mut self) -> &mut BlockAllocator {
+        &mut self.alloc
+    }
+    fn host_kv_mut(&mut self) -> &mut HostKvPool {
+        &mut self.host_kv
+    }
+    fn read_kv_blocks(&mut self, blocks: &[u32], out: &mut Vec<u32>) {
+        let per_chunk = {
+            self.ensure_swap_bufs();
+            self.swap.as_ref().expect("just built").blocks as usize
+        };
+        for chunk in blocks.chunks(per_chunk) {
+            self.swap_out_chunk(chunk, out);
+        }
+    }
+    fn write_kv_blocks(&mut self, blocks: &[u32], words: &[u32]) {
+        let per_chunk = {
+            self.ensure_swap_bufs();
+            self.swap.as_ref().expect("just built").blocks as usize
+        };
+        let stride = self.kv_block_words;
+        for (i, chunk) in blocks.chunks(per_chunk).enumerate() {
+            let at = i * per_chunk * stride;
+            self.swap_in_chunk(chunk, &words[at..at + chunk.len() * stride]);
+        }
+    }
+}
+
 impl model::serve::PagedDecoder for Engine {
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc
@@ -2432,6 +2648,24 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY as usize
+    }
+    fn kv_offload_bytes(&self) -> u64 {
+        Engine::kv_offload_bytes(self)
+    }
+    fn demote_sequence(&mut self, key: u64, table: &mut BlockTable) -> Result<u32, KvOffloadError> {
+        self.demote_kv(key, table)
+    }
+    fn promote_sequence(&mut self, key: u64) -> Result<BlockTable, KvOffloadError> {
+        self.promote_kv(key)
+    }
+    fn offloaded_blocks(&self, key: u64) -> Option<u32> {
+        self.host_kv.blocks_of(key)
+    }
+    fn discard_offloaded(&mut self, key: u64) -> bool {
+        self.discard_kv(key)
+    }
+    fn offload_stats(&self) -> OffloadStats {
+        self.host_kv.stats()
     }
 }
 
@@ -3578,6 +3812,197 @@ mod tests {
             assert_eq!(dev, host, "split argmax diverged from the host head");
             inputs = host;
         }
+    }
+
+    /// Every KV word `blocks` occupies, read straight off the engine's pool
+    /// buffers - an independent oracle for the swap tests below.
+    ///
+    /// Deliberately NOT `Engine::read_kv_blocks` (the swap's own gather): a
+    /// swap that forgot a tensor - the int8 dequant scales are the obvious
+    /// candidate, being a second buffer addressed by the same slot - would
+    /// forget it identically on both sides of a self-comparison and pass. This
+    /// restates the pool layout from the config, so the two have to agree.
+    fn pool_bytes_of_blocks(eng: &Engine, blocks: &[u32]) -> Vec<u32> {
+        let words = |buf: &DeviceBuffer, n: usize| -> Vec<u32> { eng.gpu.read(buf, n).iter().map(|v| v.to_bits()).collect() };
+        let nb = eng.alloc.num_blocks() as usize;
+        let (pw, sw) = kv_pool_words(&eng.cfg, eng.block_size, 1, eng.kv_int8);
+        let (pw, sw) = (pw as usize, sw as usize);
+        let mut out = Vec::new();
+        let pools: Vec<(Vec<u32>, usize)> = (0..eng.cfg.n_layers as usize)
+            .flat_map(|l| {
+                let mut v = vec![(words(&eng.pool_k[l], nb * pw), pw), (words(&eng.pool_v[l], nb * pw), pw)];
+                if eng.kv_int8 {
+                    v.push((words(&eng.scales_k[l], nb * sw), sw));
+                    v.push((words(&eng.scales_v[l], nb * sw), sw));
+                }
+                v
+            })
+            .collect();
+        for &b in blocks {
+            for (buf, width) in &pools {
+                let at = b as usize * width;
+                out.extend_from_slice(&buf[at..at + width]);
+            }
+        }
+        out
+    }
+
+    /// **The host-RAM KV offload gate, at the model level.** A sequence whose
+    /// whole KV is demoted to host RAM mid-generation and promoted back must
+    /// then decode BIT-IDENTICALLY to one that was never demoted: same engine,
+    /// same weights, same prompt, same tokens out.
+    ///
+    /// Run on ONE engine (never two, per this module's own precedent: two
+    /// independently-built engines can select different autotuned kernel
+    /// variants for the same shape and differ by float noise well under a real
+    /// bug), and deliberately with a DECOY sequence occupying the pool while
+    /// the demoted one is away, so the promote lands on different physical
+    /// blocks than it left on and any assumption of slot identity fails here.
+    ///
+    /// Both KV dtypes: the fp32 pool moves one word per element, the int8 pool
+    /// moves packed bytes PLUS a separate per-`(slot, kv-head)` scale array,
+    /// and a swap that forgot the scales would still round-trip plausible
+    /// numbers - just wrong ones.
+    #[test]
+    fn a_demoted_and_restored_sequence_decodes_identically() {
+        for kv_int8 in [false, true] {
+            let cfg = kv_probe_cfg();
+            let map = tiny_weights(&cfg);
+            let prompt = vec![1u32, 5, 3, 9, 2, 7, 11, 4, 6];
+            let (bs, num_blocks, max_batch, mbt, max_prefill) = (4u32, 48u32, 2u32, 12u32, 16u32);
+            let mut eng =
+                Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, bs, num_blocks, max_batch, mbt, max_prefill, kv_int8, false);
+            eng.set_kv_offload_bytes(4 << 20);
+            let steps = 12usize;
+            let swap_at = 5usize;
+
+            // Reference: prefill, then `steps` greedy decodes, straight through.
+            let mut t = BlockTable::new();
+            let hidden = eng.prefill(&mut t, &prompt);
+            let mut next = eng.admit_greedy(&hidden);
+            let mut want = vec![next];
+            for _ in 0..steps {
+                next = eng.forward_batched_greedy(&mut [&mut t], &[next])[0];
+                want.push(next);
+            }
+            eng.release_table(&mut t);
+
+            // The same generation, interrupted by a full demote/promote cycle.
+            let mut t = BlockTable::new();
+            let hidden = eng.prefill(&mut t, &prompt);
+            let mut next = eng.admit_greedy(&hidden);
+            let mut got = vec![next];
+            for i in 0..steps {
+                if i == swap_at {
+                    let free_before = eng.free_blocks();
+                    let held = t.blocks().len() as u32;
+                    let t_blocks = t.blocks().to_vec();
+                    // The device-level byte gate. Read through an ORACLE
+                    // that walks the pool buffers itself (see
+                    // `pool_bytes_of_blocks`), never through the engine's own
+                    // gather: a swap that silently skipped a tensor would
+                    // skip it on both sides of a self-comparison and pass.
+                    let want_words = pool_bytes_of_blocks(&eng, &t_blocks);
+                    let reclaimed = eng.demote_kv(77, &mut t).expect("demote");
+                    // Not necessarily every block: the prefix cache holds its
+                    // own reference on this prompt's full blocks, so those stay
+                    // live (and are copied all the same - that is exactly the
+                    // sharing case the round-trip has to survive).
+                    assert!(reclaimed > 0 && reclaimed <= held, "demote freed {reclaimed} of {held} blocks");
+                    assert_eq!(eng.free_blocks(), free_before + reclaimed);
+                    assert!(eng.kv_offload_stats().bytes_resident > 0, "the KV must actually be in host RAM");
+
+                    // A decoy takes the freed blocks and scribbles its own
+                    // K/V (and, on the int8 pool, its own dequant scales) over
+                    // them, and HOLDS them across the promote so the restore
+                    // must land somewhere else entirely. Its prompt differs
+                    // from ours deliberately: an identical one would hit the
+                    // prefix cache, adopt the very blocks it is supposed to be
+                    // trampling, and quietly make this decoy a no-op.
+                    let mut decoy = BlockTable::new();
+                    let other: Vec<u32> = prompt.iter().map(|t| (t + 13) % 29).collect();
+                    let dh = eng.prefill(&mut decoy, &other);
+                    let _ = eng.admit_greedy(&dh);
+
+                    let before = t_blocks.clone();
+                    t = eng.promote_kv(77).expect("promote");
+                    assert_ne!(t.blocks(), before.as_slice(), "the decoy must have forced a restore onto different physical blocks");
+                    let got_words = pool_bytes_of_blocks(&eng, t.blocks());
+                    // Reported as the first differing word rather than two
+                    // 1000-element vectors: the failure is a layout/plan bug,
+                    // and WHERE it first diverges names the tensor.
+                    let diff = got_words.iter().zip(&want_words).position(|(a, b)| a != b);
+                    assert_eq!(got_words.len(), want_words.len());
+                    assert_eq!(diff, None, "kv_int8={kv_int8}: restored blocks must hold byte-identical KV (first differing word of {})", want_words.len());
+                    eng.release_table(&mut decoy);
+                    assert_eq!(eng.kv_offload_stats().bytes_resident, 0);
+                }
+                next = eng.forward_batched_greedy(&mut [&mut t], &[next])[0];
+                got.push(next);
+            }
+            assert_eq!(got, want, "kv_int8={kv_int8}: a demoted-and-restored sequence must decode identically");
+        }
+    }
+
+    /// The same gate one level up, through the real scheduler: a KV pool far
+    /// too small for the admitted set must produce EXACTLY the outputs a pool
+    /// with room to spare does, by preempting sequences to host RAM and
+    /// resuming them - not by truncating, reordering or dropping anything.
+    ///
+    /// The small pool is sized so preemption is unavoidable, and the test
+    /// asserts swaps actually happened: without that it would pass trivially
+    /// on an engine that never swapped at all.
+    #[test]
+    fn a_pool_too_small_for_the_batch_still_produces_identical_outputs() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let reqs = || {
+            (0..4u32)
+                .map(|i| Request { prompt: vec![1 + i, 5, 3, 7, 2], max_new: 8, eos: None })
+                .collect::<Vec<_>>()
+        };
+        // Everything but `num_blocks` is identical between the two engines, so
+        // no kernel choice (all of which key off `cap`/`mbt`/`max_batch`, never
+        // the pool's block count) can differ between them.
+        let (bs, max_batch, mbt, max_prefill) = (4u32, 4u32, 12u32, 8u32);
+
+        let roomy = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, bs, 96, max_batch, mbt, max_prefill, false, false);
+        let mut a = Scheduler::new(roomy, 4);
+        for r in reqs() {
+            a.submit(r);
+        }
+        let want = a.run();
+        assert_eq!(a.offload_stats().demotions, 0, "the roomy baseline must never have needed to swap");
+
+        // 8 blocks of 4 tokens = 32 cached tokens for four sequences that need
+        // 13 each: the batch cannot be resident all at once.
+        let mut tight = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, bs, 8, max_batch, mbt, max_prefill, false, false);
+        tight.set_kv_offload_bytes(8 << 20);
+        let mut b = Scheduler::new(tight, 4);
+        for r in reqs() {
+            b.submit(r);
+        }
+        let mut got = HashMap::new();
+        let mut demoted = 0usize;
+        let mut promoted = 0usize;
+        let mut iters = 0usize;
+        while b.pending() {
+            let rep = b.step_report();
+            demoted += rep.demoted.len();
+            promoted += rep.promoted.len();
+            for (id, toks) in rep.completed {
+                got.insert(id, toks);
+            }
+            iters += 1;
+            assert!(iters < 10_000, "the scheduler must make progress, not thrash: {demoted} demotions so far");
+        }
+        assert!(demoted > 0, "the tight pool must have forced at least one preemption");
+        assert_eq!(promoted, demoted, "every preempted sequence must come back exactly once");
+        assert_eq!(got, want, "swapping through host RAM must not change a single token");
+
+        let s = b.offload_stats();
+        assert_eq!(s.bytes_resident, 0, "nothing may be left in host RAM once every sequence has finished");
+        assert_eq!(s.blocks_in, s.blocks_out, "every block copied out must be copied back");
     }
 
     /// `step_report` must account for **every** token exactly once and admit each

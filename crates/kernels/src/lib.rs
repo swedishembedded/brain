@@ -522,6 +522,10 @@ pub const IM2COL3D_AT: &str = include_str!("../wgsl/im2col3d_at.wgsl");
 pub const IM2COL_AT: &str = include_str!("../wgsl/im2col_at.wgsl");
 /// `wgsl/kv_append.wgsl`
 pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
+/// `wgsl/kv_block_gather.wgsl`
+pub const KV_BLOCK_GATHER: &str = include_str!("../wgsl/kv_block_gather.wgsl");
+/// `wgsl/kv_block_scatter.wgsl`
+pub const KV_BLOCK_SCATTER: &str = include_str!("../wgsl/kv_block_scatter.wgsl");
 /// `wgsl/kv_expand.wgsl`
 pub const KV_EXPAND: &str = include_str!("../wgsl/kv_expand.wgsl");
 /// `wgsl/kv_expand_bwd.wgsl`
@@ -1184,6 +1188,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("im2col3d_at", IM2COL3D_AT),
     ("im2col_at", IM2COL_AT),
     ("kv_append", KV_APPEND),
+    ("kv_block_gather", KV_BLOCK_GATHER),
+    ("kv_block_scatter", KV_BLOCK_SCATTER),
     ("kv_expand", KV_EXPAND),
     ("kv_expand_bwd", KV_EXPAND_BWD),
     ("kv_k_headt", KV_K_HEADT),
