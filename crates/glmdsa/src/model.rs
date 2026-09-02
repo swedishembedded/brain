@@ -1255,44 +1255,52 @@ impl Glm {
                         &[n, e, c.num_experts_per_tok, c.n_group, c.topk_group, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
                         n,
                     ));
-                    // `expert_fwd_compact` needs `gate` on the HOST (each
-                    // expert's routed row count is data-dependent) -- flush
-                    // everything built so far (through the router) and block.
+                    // `expert_fwd_compact_layer` needs `gate` on the HOST
+                    // (each expert's routed row count is data-dependent) --
+                    // flush everything built so far (through the router) and
+                    // block.
                     self.gpu.submit(&[], &s);
                     s = Vec::new();
                     self.gpu.poll_wait();
                     let host_gate = self.gpu.read(gate, (n * e) as usize);
 
-                    // `expert_fwd_compact`'s scatter only writes the rows IT
-                    // routes -- unlike the dense `SCALE_ADD` path, which is a
-                    // dense per-element kernel that overwrites EVERY row
-                    // (including gate-zero ones) on `ei == 0`, so it always
-                    // starts every row from a clean slate. A row whose top-k
-                    // experts happen to exclude expert 0 would never get
-                    // `moe_acc` zeroed here and would accumulate onto
-                    // whatever this persistent buffer held from the PREVIOUS
-                    // call -- so every expert must accumulate (`+=`) onto an
-                    // explicitly pre-zeroed buffer instead of relying on
-                    // expert 0's call to double as the zero-init.
+                    // `expert_fwd_compact_layer`'s scatter only writes the
+                    // rows IT routes -- unlike the dense `SCALE_ADD` path,
+                    // which is a dense per-element kernel that overwrites
+                    // EVERY row (including gate-zero ones) on `ei == 0`, so
+                    // it always starts every row from a clean slate. A row
+                    // whose top-k experts happen to exclude expert 0 would
+                    // never get `moe_acc` zeroed here and would accumulate
+                    // onto whatever this persistent buffer held from the
+                    // PREVIOUS call -- so every expert must accumulate (`+=`)
+                    // onto an explicitly pre-zeroed buffer instead of relying
+                    // on expert 0's call to double as the zero-init.
                     self.gpu.submit(&[&self.moe_acc], &[]);
-                    for ei in 0..e as usize {
-                        let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
-                        model::moe::expert_fwd_compact(
-                            &self.gpu,
-                            &compact_ids,
-                            &shape,
-                            &host_gate,
-                            &lb.xn2,
-                            gate,
-                            self.w(&ep("gate.weight")),
-                            self.w(&ep("up.weight")),
-                            self.w(&ep("down.weight")),
-                            scratch,
-                            &self.moe_acc,
-                            ei as u32,
-                            true,
-                        );
-                    }
+                    // M5.4: one `Vec<Step>` for every expert in this layer,
+                    // built from the single `host_gate` readback above and
+                    // folded into `s` for the SAME submit the rest of this
+                    // layer's (and, until the next forced flush, every
+                    // subsequent layer's) steps already go through -- not one
+                    // `Gpu::submit` per expert (`model::moe`'s own module doc
+                    // names this exact fix).
+                    let expert_weights: Vec<(DeviceBuffer, DeviceBuffer, DeviceBuffer)> = (0..e as usize)
+                        .map(|ei| {
+                            let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
+                            (self.w(&ep("gate.weight")).clone(), self.w(&ep("up.weight")).clone(), self.w(&ep("down.weight")).clone())
+                        })
+                        .collect();
+                    let (expert_steps, _routed_counts) = model::moe::expert_fwd_compact_layer(
+                        &self.gpu,
+                        &compact_ids,
+                        &shape,
+                        &host_gate,
+                        &lb.xn2,
+                        gate,
+                        &expert_weights,
+                        scratch,
+                        &self.moe_acc,
+                    );
+                    s.extend(expert_steps);
 
                     self.mm(&mut s, &lb.xn2, &p("moe.shared.gate.weight"), sh_gate, n, d, shared_ff);
                     self.mm(&mut s, &lb.xn2, &p("moe.shared.up.weight"), sh_up, n, d, shared_ff);
