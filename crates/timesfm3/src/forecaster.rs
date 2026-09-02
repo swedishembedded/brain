@@ -132,7 +132,7 @@ impl ForecastModel for Timesfm3Forecaster {
                 continue;
             }
             let context = targets[0].data.len();
-            if context % cfg.input_patch_len != 0 {
+            if !context.is_multiple_of(cfg.input_patch_len) {
                 return Err(ForecastError::bad_request(format!(
                     "timesfm3: context length {context} is not a multiple of input_patch_len {} (left-padding to a patch boundary is not implemented yet)",
                     cfg.input_patch_len

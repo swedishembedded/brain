@@ -169,8 +169,8 @@ impl Timesfm3Config {
     }
 
     /// Parse from the CHECKPOINT'S OWN `config.json` (the upstream nested
-    /// schema HF `from_pretrained` reads), not brain's flat container schema
-    /// - see [`Self::from_json`] for that one. Upstream's shape:
+    /// schema HF `from_pretrained` reads), not brain's flat container schema,
+    /// see [`Self::from_json`] for that one. Upstream's shape:
     /// `{input_patch_len, output_patch_len, quantiles: [...], value_clip,
     /// use_variate_attention, use_stitching, use_linear_detrending,
     /// linear_detrending_threshold, use_iterative_cpm_revin,
@@ -386,10 +386,10 @@ mod tests {
         assert_eq!(t, Timesfm3Config::from_json(&t.to_json()).unwrap());
     }
 
-    /// The real checkpoint's own `config.json` (committed as a golden fixture
-    /// - a small, stable file, unlike the 1.3 GB checkpoint it describes)
-    /// parses to exactly `Timesfm3Config::default()`, proving the upstream
-    /// nested schema is read correctly and not just assumed.
+    /// The real checkpoint's own `config.json` (committed as a golden
+    /// fixture, a small, stable file, unlike the 1.3 GB checkpoint it
+    /// describes) parses to exactly `Timesfm3Config::default()`, proving the
+    /// upstream nested schema is read correctly and not just assumed.
     #[test]
     fn from_hf_config_json_matches_the_real_checkpoints_config() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/hf_config.json");

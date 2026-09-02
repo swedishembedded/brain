@@ -218,9 +218,9 @@ pub fn fit_and_apply_detrend(ctx: &mut [f32], ctx_mask: &[bool], future: Option<
     if !applied {
         return Trend { m, c, applied };
     }
-    for i in 0..context {
+    for (i, x) in ctx.iter_mut().enumerate().take(context) {
         let t = (i as f32 - (context - 1) as f32) / context as f32;
-        ctx[i] -= m * t + c;
+        *x -= m * t + c;
     }
     if let (Some(future), Some(future_mask)) = (future, future_mask) {
         for (i, fv) in future.iter_mut().enumerate() {
@@ -349,9 +349,8 @@ pub fn cpm_iterative_revin_refine(raw_logits: &[f32], running_n: &[f32], running
             // exact failure a resblock_input-only parity gate cannot see.
             let mut anchor = vec![vec![0f32; patch_len]; rolls];
             let mut block_offset = 0usize;
-            for p in 0..n_patches {
+            for (p, &is_cpm) in patch_cpm_mask.iter().enumerate().take(n_patches) {
                 let idx = (bi * v + vi) * n_patches + p;
-                let is_cpm = patch_cpm_mask[p];
 
                 let pred = &anchor[block_offset];
                 let (inc_n, inc_mu, inc_sigma) = masked_patch_stats(pred, &vec![false; patch_len]);
@@ -367,11 +366,11 @@ pub fn cpm_iterative_revin_refine(raw_logits: &[f32], running_n: &[f32], running
                     // median-quantile logits with THIS step's stats -
                     // becomes the anchor's next full replacement grid.
                     let base = ((bi * v + vi) * n_patches + p) * output_patch_len * num_quantiles;
-                    for r in 0..rolls {
-                        for i in 0..patch_len {
+                    for (r, row) in anchor.iter_mut().enumerate().take(rolls) {
+                        for (i, cell) in row.iter_mut().enumerate().take(patch_len) {
                             let o = r * patch_len + i;
                             let logit = raw_logits[base + o * num_quantiles + median_q];
-                            anchor[r][i] = revin(logit, this_mu, this_sigma, true).clamp(-value_clip, value_clip);
+                            *cell = revin(logit, this_mu, this_sigma, true).clamp(-value_clip, value_clip);
                         }
                     }
                 }
@@ -599,9 +598,7 @@ pub fn postprocess(cfg: &Timesfm3Config, shape: DecodeShape, built: &BuiltInput,
     let v = shape.num_variates();
     let n_patches = built.num_context_patches + built.num_horizon_patches;
     let mut patch_cpm_mask = vec![false; n_patches];
-    for p in built.num_context_patches..n_patches {
-        patch_cpm_mask[p] = true;
-    }
+    patch_cpm_mask[built.num_context_patches..n_patches].fill(true);
 
     let (mu, sigma) = if cfg.use_iterative_cpm_revin {
         cpm_iterative_revin_refine(raw_logits, &built.running_n, &built.running_mu, &built.running_sigma, &patch_cpm_mask, b, v, n_patches, cfg.output_patch_len, cfg.num_quantiles, cfg.rolls(), cfg.value_clip)

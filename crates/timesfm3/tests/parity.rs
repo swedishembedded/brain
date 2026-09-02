@@ -196,9 +196,7 @@ fn cpm_refine_alone_matches_the_golden_exactly() {
     let built = preprocess::build_input(&cfg, shape, &target, &past_only, &past_future);
     let (b, v, n) = (2usize, 4usize, 6usize);
     let mut patch_cpm_mask = vec![false; n];
-    for p in built.num_context_patches..n {
-        patch_cpm_mask[p] = true;
-    }
+    patch_cpm_mask[built.num_context_patches..n].fill(true);
     let (mu, sigma) = preprocess::cpm_iterative_revin_refine(&raw_logits, &built.running_n, &built.running_mu, &built.running_sigma, &patch_cpm_mask, b, v, n, cfg.output_patch_len, cfg.num_quantiles, cfg.rolls(), cfg.value_clip);
     for i in 0..mu.len() {
         assert!((mu[i] - want_mu[i]).abs() < 1e-4, "mu[{i}]: got {} want {}", mu[i], want_mu[i]);

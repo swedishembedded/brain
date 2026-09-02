@@ -916,7 +916,7 @@ impl ChatScanner {
                 self.pending.clear();
                 self.close_call(out);
             }
-            St::XmlBetween | St::XmlKey { .. } => {
+            St::XmlBetween | St::XmlKey => {
                 // The call header already streamed as a ToolCallStart, so the
                 // whole-call re-labeling the JSON header does here is
                 // unavailable: discard whatever partial marker text is left
