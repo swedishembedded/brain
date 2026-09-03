@@ -107,14 +107,18 @@
 //!   What it DID need, and that note did not predict, was bounding how many
 //!   layers' worth of those per-call buffers can be in flight at once - see
 //!   `Qwen35::run_prefill_chunk_stage`'s `DRAIN_EVERY_N_LAYERS`.
-//! * **Per-token prefill at the Q4 tier, and only there.** A round is only
-//!   worth issuing if the tier's `m > 1` kernel is a real tiled GEMM. `Q4`'s
-//!   is not (`matmul_q4_dyn.wgsl`, naive by its own header), and on real
-//!   weights that makes a chunked replay 7.3x SLOWER than the per-token one,
-//!   so [`Qwen35GgufInstance::replay_prompt`] picks the tape by tier. Both
-//!   leave identical state, so this is a cost choice and never a behavioural
-//!   one. See [`MAX_PREFILL_TOKENS`] for the numbers and for the already-built
-//!   kernel that would close it.
+//!   This bullet used to also carry its own sub-note, "Per-token prefill at
+//!   the Q4 tier, and only there": a round was only worth issuing if the
+//!   tier's `m > 1` kernel was a real tiled GEMM, `Q4`'s was not
+//!   (`matmul_q4_dyn.wgsl`, naive by its own header), and on real weights
+//!   that made a chunked replay 7.3x SLOWER than the per-token one, so
+//!   [`Qwen35GgufInstance::replay_prompt`] picked the tape by tier. Fixed by
+//!   wiring `matmul_q4_dyn_reg` (already proven bit-identical, kernel-
+//!   performance ledger M5.5) into `model::ops::Ops::bind` - `Qwen35::
+//!   chunked_prefill_is_profitable` no longer excludes Q4, and the real
+//!   1555-token measurement moved from 152.1 s (10.2 tok/s) per-token /
+//!   1108.3 s (1.4 tok/s) chunked to 22.9 s (68.0 tok/s) chunked, a ~6.6x
+//!   win. See [`MAX_PREFILL_TOKENS`] for the full before/after.
 //! * **One sequence per dispatch.** Every stage is built at `b = t = 1`, so
 //!   `run_batch` is the serial default - see its own doc.
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
@@ -207,25 +211,26 @@ const DEFAULT_CTX: u32 = 2048;
 /// (`Qwen35::run_prefill_chunk_stage` sizes every one of them), so a stage
 /// built at `b = t = 1` carries no FIXED cost for this at all.
 ///
-/// **This constant does not apply to a Q4 build at all** - see
+/// **This constant now applies to a Q4 build too** - see
 /// [`Qwen35GgufInstance::replay_prompt`] and
-/// `Qwen35::chunked_prefill_is_profitable`. The Q4 tier's `m > 1` GEMM
-/// (`matmul_q4_dyn.wgsl`) is the naive one-thread-per-output kernel its own
-/// header says it is, and a round through it costs far MORE than the same
-/// tokens through `matmul_q4_gemv`'s coalesced `m = 1` path. Measured on the
-/// real checkpoint, uniform Q4 on ONE P40, 1555-token prompt: **152.1 s
-/// (10.2 tok/s) per token, 1108.3 s (1.4 tok/s) in rounds of 256** - a 7.3x
-/// REGRESSION, where the same change on the INT8 two-card stack is a 9.9x
-/// win. Same host code, same round size; the only difference is which GEMM
-/// the weight tier binds.
+/// `Qwen35::chunked_prefill_is_profitable`. It did not always: the Q4 tier's
+/// `m > 1` GEMM (`matmul_q4_dyn.wgsl`) used to resolve to the naive
+/// one-thread-per-output kernel its own header describes, and a round
+/// through it cost far MORE than the same tokens through `matmul_q4_gemv`'s
+/// coalesced `m = 1` path - measured on the real checkpoint, uniform Q4 on
+/// ONE P40, 1555-token prompt: 152.1 s (10.2 tok/s) per token, 1108.3 s
+/// (1.4 tok/s) in rounds of 256, a 7.3x REGRESSION, where the same change on
+/// the INT8 two-card stack was a 9.9x win. Same host code, same round size;
+/// the only difference was which GEMM the weight tier bound.
 ///
-/// So a Q4 build keeps the per-token replay until a tiled q4 GEMM is wired
-/// into `model::ops::Ops`. `matmul_q4_dyn_reg` (128x128 register-tiled)
-/// already exists and is already proven bit-identical to `matmul_q4_dyn`
-/// (kernel-performance ledger, M5.5: 2.02x at `m = 32` rising to 12.56x at
-/// `m = 2048`); it is simply not bound by `Ops::bind`, which is that
-/// ledger's own scoped follow-up and not this module's to force. Binding it
-/// is what would let this constant apply to Q4 too.
+/// Fixed by wiring `matmul_q4_dyn_reg` (128x128 register-tiled, already
+/// proven bit-identical to `matmul_q4_dyn`, kernel-performance ledger M5.5:
+/// 2.02x at `m = 32` rising to 12.56x at `m = 2048`) into `model::ops::
+/// Ops::bind`. Re-measured on the same real checkpoint, same one P40, the
+/// same 1555-token prompt, same round size: **22.9 s (68.0 tok/s)** - a
+/// ~6.6x win over the per-token baseline, and slightly FASTER than the
+/// INT8 stack's own chunked result (64.6-65.4 tok/s) despite streaming
+/// fewer bytes per round, not more.
 const MAX_PREFILL_TOKENS: u32 = 256;
 
 // ------------------------------------------------------------ byte accounting

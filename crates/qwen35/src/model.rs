@@ -2643,18 +2643,20 @@ impl Qwen35 {
     ///
     /// A round's whole premise is that one `[n, d] x [d, *]` GEMM beats `n`
     /// GEMVs. That holds when the tier's `m > 1` kernel is a real tiled GEMM,
-    /// which `matmul` / `matmul_reg2` / `matmul_i8_dyn` all are. It does NOT
-    /// hold at the **Q4** tier: `matmul_q4_dyn.wgsl` is, by its own header,
-    /// "the correct-first, non-tiled q4 GEMM ... one thread per output
-    /// element", and a register-tiled sibling is named there as the follow-on
-    /// work. Against `matmul_q4_gemv`'s coalesced, workgroup-reducing `m = 1`
-    /// path it loses by more than the round saves in dispatch count, so a Q4
-    /// build is better off on the decode tape until that kernel is tiled.
-    ///
-    /// Measured on the real 27B, uniform Q4 on one P40, ~1500-token prompt:
-    /// see `crate::int8_gguf_resident::MAX_PREFILL_TOKENS`'s own doc.
+    /// which `matmul` / `matmul_reg2` / `matmul_i8_dyn` all are - and, as of
+    /// `model::ops::Ops::bind` wiring in `matmul_q4_dyn_reg` (kernel-
+    /// performance ledger M5.5), `matmul_q4_dyn` now resolves to a real
+    /// 128x128 register-tiled GEMM too, not the one-thread-per-output naive
+    /// kernel this function used to exclude Q4 for. Measured on the real
+    /// 27B, uniform Q4 on one P40, the real 1555-token prompt this crate's
+    /// own long-context gate uses: chunked prefill through the now-tiled
+    /// kernel is 22.9 s (68.0 tok/s), against 152.1 s (10.2 tok/s) per
+    /// token - a ~6.6x win, not a regression, and slightly FASTER than the
+    /// INT8 two-card stack's own chunked result (64.6-65.4 tok/s). See
+    /// `crate::int8_gguf_resident::MAX_PREFILL_TOKENS`'s own doc for the
+    /// full before/after.
     pub(crate) fn chunked_prefill_is_profitable(&self) -> bool {
-        !self.weights.values().any(|w| w.dtype() == Dtype::Q4)
+        true
     }
 
     /// [`Self::run_prefill_chunk_stage`] staged to the HOST - the one call a
