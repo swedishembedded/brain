@@ -260,7 +260,7 @@ class Cfg:
         return (l + 1) % self.interval == 0
 
 
-def gdn_layer(m, c, l, x, st):
+def gdn_layer(m, c, l, x, st, trace=None):
     p = f"blk.{l}."
     group = c.nvh // c.nkh
     # EVERY GDN leaf indexed by VALUE HEAD is stored GROUP-MAJOR on disk
@@ -320,6 +320,8 @@ def gdn_layer(m, c, l, x, st):
         return out
 
     xn1 = rmsnorm(x, m.w32(p + "attn_norm.weight"), c.eps)
+    if trace is not None:
+        trace["xn1"] = xn1
     # `qkv`, `cw` (conv1d.weight) and `hist` are ALL left in llama.cpp's raw,
     # mutually-consistent GROUP-MAJOR channel order through the whole conv -
     # `ssm_conv1d.weight` is itself one of the six leaves needing this fix,
@@ -330,6 +332,12 @@ def gdn_layer(m, c, l, x, st):
     # (which persists ACROSS calls) to stay correct under two different
     # channel orderings.
     qkv = m.matvec(p + "attn_qkv.weight", xn1)
+    if trace is not None:
+        # brain's own `ncl_in`/`ncl_out` are ALREADY sub-major (its loader
+        # degroups `attn_qkv.weight`'s v-rows and `ssm_conv1d.weight` on
+        # read) - degroup the v-portion here too so this comparison is
+        # apples-to-apples, same convention on both sides.
+        trace["ncl_in"] = degroup_blocks(qkv, 2 * c.key_dim, c.vhd)
     cw = m.w32(p + "ssm_conv1d.weight")  # [channel][tap], tap fastest
     K = c.kw
     hist = st.setdefault("hist", [[0.0] * (K - 1) for _ in range(c.conv_dim)])
@@ -341,15 +349,32 @@ def gdn_layer(m, c, l, x, st):
             acc += h[j] * cw[ch * K + j]
         conv.append(acc)
         h[:] = h[1:] + [qkv[ch]]
+    if trace is not None:
+        trace["ncl_out"] = degroup_blocks(conv, 2 * c.key_dim, c.vhd)  # PRE-SiLU, like brain's own field.
     act = silu(conv)
     q = l2norm_heads(act[0:c.key_dim], c.nkh, c.khd)
     k = l2norm_heads(act[c.key_dim:2 * c.key_dim], c.nkh, c.khd)
     v = degroup_blocks(act, 2 * c.key_dim, c.vhd)[2 * c.key_dim:]
-    beta = [sigmoid(t) for t in degroup(m.matvec(p + "ssm_beta.weight", xn1))]
-    a = degroup(m.matvec(p + "ssm_alpha.weight", xn1))
+    if trace is not None:
+        # Q/K carry no group structure (key-head-indexed, not value-head-
+        # indexed - see this function's own module-level doc), so the raw
+        # pre-L2-norm split compares directly against brain's own
+        # `query_pre_l2norm`/`key_pre_l2norm`.
+        trace["query_pre_l2norm"] = act[0:c.key_dim]
+        trace["key_pre_l2norm"] = act[c.key_dim:2 * c.key_dim]
+        trace["value"] = v
+    beta_raw = degroup(m.matvec(p + "ssm_beta.weight", xn1))
+    alpha_raw = degroup(m.matvec(p + "ssm_alpha.weight", xn1))
+    if trace is not None:
+        trace["bproj"] = beta_raw
+        trace["aproj"] = alpha_raw
+    beta = [sigmoid(t) for t in beta_raw]
+    a = alpha_raw
     A = [-t for t in degroup(m.w32(p + "ssm_a"))]  # llama.cpp stores -exp(A_log)
     dtb = degroup(m.w32(p + "ssm_dt.bias"))
     g = [-A[i] * softplus(a[i] + dtb[i]) for i in range(c.nvh)]
+    if trace is not None:
+        trace["g_decay"] = g
     scale = 1.0 / math.sqrt(c.khd)
     S = st.setdefault("S", [[0.0] * (c.khd * c.vhd) for _ in range(c.nvh)])
     out = [0.0] * c.value_dim
@@ -379,16 +404,29 @@ def gdn_layer(m, c, l, x, st):
                 Sj[base + dv] += kk * delta[dv]
                 o[dv] += Sj[base + dv] * qq
         out[j * c.vhd:(j + 1) * c.vhd] = o
-    z = silu(degroup_blocks(m.matvec(p + "attn_gate.weight", xn1), 0, c.vhd))
+    if trace is not None:
+        trace["out_tok"] = out
+    z_raw = degroup_blocks(m.matvec(p + "attn_gate.weight", xn1), 0, c.vhd)
+    z = silu(z_raw)
+    if trace is not None:
+        trace["z"] = z_raw
+        trace["z_silu"] = z
     nw = m.w32(p + "ssm_norm.weight")  # gated norm: NOT (1+w)-folded
     gated = []
+    normed_all = []
     for j in range(c.nvh):
         normed = rmsnorm(out[j * c.vhd:(j + 1) * c.vhd], nw, c.eps)
+        normed_all.extend(normed)
         gated.extend(normed[i] * z[j * c.vhd + i] for i in range(c.vhd))
+    if trace is not None:
+        trace["normed"] = normed_all
+        trace["gated"] = gated
     # `ssm_out.weight`'s COLUMNS are group-major-native (unlike every OUTPUT
     # vector fixed above); `gated` is sub-major, so regroup it back before
     # feeding the unmodified weight - see `regroup_blocks`'s own doc.
     y = m.matvec(p + "ssm_out.weight", regroup_blocks(gated, c.vhd))
+    if trace is not None:
+        trace["y"] = y
     return [x[i] + y[i] for i in range(c.d)]
 
 
@@ -469,6 +507,13 @@ def main():
     ap.add_argument("--digest", action="store_true", help="print rms/sum/first values per position")
     ap.add_argument("--head", action="store_true", help="also run the final norm + output.weight, print top-10")
     ap.add_argument("--save", default="", help="directory to write the residual after every layer into")
+    ap.add_argument(
+        "--trace",
+        action="store_true",
+        help="dump layer 0's own GDN intermediates (xn1..y, in forward order) for the FIRST token only, "
+        "instead of running the full --layers stack - the companion of "
+        "crates/qwen35/tests/gdn_intermediate_trace.rs, for localizing a divergence to one step",
+    )
     args = ap.parse_args()
 
     g = Gguf(args.gguf)
@@ -478,6 +523,18 @@ def main():
         _init(args.gguf)
     m = Model(g, pool)
     toks = [int(t) for t in args.tokens.split(",")]
+
+    if args.trace:
+        assert not c.is_full(0), "blk.0 must be a GDN (Linear) layer for --trace"
+        x = g.row("token_embd.weight", toks[0])
+        trace = {}
+        gdn_layer(m, c, 0, x, {}, trace=trace)
+        print(f"=== reference GDN layer 0, position 0 (tok {toks[0]}) ===")
+        for name, v in trace.items():
+            head = " ".join("%.7f" % t for t in v[:8])
+            print(f"{name}: len={len(v)} sum={sum(v):.7f} {head}")
+        return
+
     nl = min(args.layers, c.n_layers)
     print(f"{args.gguf}: {c.n_layers} layers ({nl} requested), d_model {c.d}, "
           f"{c.n_heads}/{c.n_kv} heads x {c.head_dim}, rot {c.rot} theta {c.theta:g}, "
