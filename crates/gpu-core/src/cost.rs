@@ -467,7 +467,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // multiply-add costs the same logical MAC as a byte one in this
         // roofline accounting); bytes reflect x's [m, k/4] u32 footprint and
         // w's HALF-that [n, k/8] u32 footprint.
-        "matmul_q4_dyn" | "matmul_q4_gemv" => {
+        "matmul_q4_dyn" | "matmul_q4_dyn_reg" | "matmul_q4_gemv" => {
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
             c(2 * m * n, 2 * m * k * n, 4 * (m * (k / 4) + n * (k / 8) + m * n + m + n * (k / 32)))
         }
