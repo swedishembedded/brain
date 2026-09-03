@@ -2029,15 +2029,97 @@ measured against deliberately broken implementations rather than picked:
 Every pre-existing qwen35 and model gate stays green, including
 `decode_step.rs` (the per-token tape is untouched) and `serve.rs`.
 
-**Not done here, deliberately.** `int8_gguf_resident.rs` still replays per
-token. It is the REAL-weight path, so it is where this speedup is ultimately
-worth the most, but it is multi-stage (pipeline-parallel across two cards) and
-its cross-stage seam - `run_decode_step`'s `input_override` - is `[d_model]`,
-one row. A chunked resident needs that seam widened to `[n, d_model]` (host
-staging of a whole round's boundary residual, or a device-to-device copy), plus
-its own per-stage `DecodeCaches` rounds. `run_prefill_chunk` asserts
-`shard.embed && shard.head` today precisely so that gap is loud rather than
-silent.
+**Not done here, deliberately - closed by M26 below.** `int8_gguf_resident.rs`
+still replayed per token after this milestone. It is the REAL-weight path, so
+it is where this speedup is ultimately worth the most, but it is multi-stage
+(pipeline-parallel across two cards) and its cross-stage seam -
+`run_decode_step`'s `input_override` - is `[d_model]`, one row. A chunked
+resident needs that seam widened to `[n, d_model]`. `run_prefill_chunk`
+asserted `shard.embed && shard.head` precisely so that gap was loud rather
+than silent; it still does, but it is now a thin wrapper over the sharded
+primitive M26 added rather than the only chunked primitive there is.
+
+### M26 (DONE): chunked prefill on the REAL path - 262.8 s -> 26.6 s of prompt replay on the two-card 27B resident
+
+M25 built the chunked primitive and measured it at 21x, but only ever ran it
+on synthetic weights: `serve::Engine` builds a plain FP32 `Qwen35`, and the
+real 64-layer FP32 model is ~108 GB against two 24 GB P40s. The checkpoint
+this box actually serves goes through `int8_gguf_resident`, and that path was
+still replaying the prompt one token at a time. Measured, real, before this
+milestone: a 1731-token prompt took **262.8 s to prefill (6.6 tok/s)**. After:
+**26.6 s (65.0 tok/s), 9.9x**, with the same greedy continuation.
+
+**What the seam actually needed.** M25's `run_prefill_chunk` asserts
+whole-model, and its `input_override`-equivalent is not exposed for a chunk at
+all in a sharded configuration. The generalization is exactly the one
+`run_decode_step` already makes over shards, one row at a time, lifted to `n`:
+
+* `Qwen35::run_prefill_chunk_stage` is M25's body with two branches instead of
+  two asserts - gather through `tok.weight` only when `shard.embed` (otherwise
+  the input is an `[n, d_model]` `input_override`), and through the final
+  `norm.weight` only when `shard.head` (otherwise the raw last-layer residual
+  block is what the next stage wants). The per-layer GDN/GQA chunk math is
+  untouched and unmoved; the `DecodeCaches` state contract is M25's, verbatim.
+* `run_prefill_chunk` is now a wrapper: assert whole-model, call the stage
+  form, split off the last row. `serve::Engine` and
+  `tests/chunked_prefill.rs` are behaviourally unchanged, and that file's
+  three gates still print the same 0 / 3.7e-9 they did.
+* `prefill_chunk_stage` host-stages the result, the exact counterpart of
+  `decode_step_stage` - one host round trip per stage per ROUND where the old
+  path paid one per stage per TOKEN. At two stages and 1731 tokens that is
+  3462 round trips replaced by 28.
+* On the resident: `embed_rows` gathers a whole round's embedding rows
+  straight from the GGUF mapping (one `MmapGguf::tensor_range` per row - an
+  arbitrary token set names non-contiguous rows of a `[vocab, d_model]` table,
+  so there is no wider range to ask for; the saving is downstream, not here),
+  and `stack_prefill_chunk` threads the `[n, d_model]` carry through every
+  stage, projecting only the round's last row through the head.
+
+**`MAX_PREFILL_TOKENS` is 128 here, not `serve::Engine`'s 256** - and that is
+the one number that did NOT transfer. A round's intermediates all stay alive
+until something drains the queue, and a round drains only at its terminal
+readback, so a stage holds ~32 layers' worth at once at the real 27B widths
+(`d_model` 5120, `ff` 17408, `conv_dim` 10240). Swept on the real checkpoint,
+2x P40, 1731-token prompt, peak card occupancy from `nvidia-smi`:
+
+| chunk | prefill | tok/s | peak VRAM |
+|---|---|---|---|
+| (per token) | 262.8 s | 6.6 | - |
+| 64 | 36.5 s | 47.4 | 16.2 GiB |
+| **128** | **26.6 s** | **65.0** | **17.8 GiB** |
+| 192 | 26.4 s | 65.4 | 20.3 GiB |
+| 256 | out of memory | - | >24 GiB |
+
+The curve is flat by 128 (192 buys 0.6% for 2.5 GiB) and 256 does not run at
+all on a 24 GiB card, so this is a real optimum rather than a safety margin.
+Note also what the M25 scope note got wrong: it predicted this would need
+`t`-sized per-stage buffers on every card. It did not - every buffer a round
+touches is allocated per call from `n`, so the stages stay built at
+`b = t = 1`.
+
+**Correctness.** Two gates, one synthetic and one on the real 27B:
+
+* `qwen35::model::tests::two_shard_chunked_prefill_matches_token_by_token_replay`
+  \- RED before the primitive existed. Two stages (cut at layer 5, so a GQA
+  layer and GDN layers sit on BOTH sides), a 14-token prompt in rounds of 4
+  (4+4+4+2, ragged last round), then three further single-token steps through
+  the same two stages, against the same prompt replayed one token at a time.
+  Worst maxabs 3.7e-9 against a 1e-5 bound; a stage-1 seam deliberately broken
+  to seed itself with zeros instead of `input_override` measures 1.86. Stage 1
+  is fed a deliberately WRONG `token_id` throughout, so "it used the seam and
+  not the token" is a checked fact rather than an assumption.
+* `crates/qwen35/tests/gguf_resident_real.rs::prefill_throughput_at_a_real_long_context`
+  \- the measurement above, and a real-weight correctness gate in the same
+  run: the 1731-token prompt ends on M23's factual cue, and the answer must
+  still be Paris after 14 rounds of chunked prefill. It is (`" Paris. It
+  is"`). All seven real-checkpoint gates in that file stay green.
+
+**Still not done, and still deliberately.** The flash-attention prefill kernel
+M25 named (`paged_flash_prefill.wgsl`, tiles capped at `head_dim` 128 against
+this model's 256) is what would let the round size stop being bounded by a
+materialised score slab, and it is what a genuinely long-context prefill on
+this resident needs. MTP and multi-sequence batching remain out of scope for
+this resident for the reasons its own module doc gives.
 
 ### M27 (DONE): YaRN long-context RoPE scaling (`max_position_embeddings: 262144` was a dead config field, now wired)
 
