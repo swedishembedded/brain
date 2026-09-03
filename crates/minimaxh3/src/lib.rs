@@ -48,4 +48,5 @@
 
 pub mod caps;
 pub mod import;
+pub mod schedule;
 pub mod vocoder;

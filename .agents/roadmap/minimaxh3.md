@@ -128,6 +128,10 @@ prose - settle each from the Apache-2.0 diffusers source once installed
 - [ ] Whether `text_encoder`/`audio_vae`/`video_vae` are identical across
       the FL2VA/Ref2VA partitions (share loading) or partition-specific,
       once `Ref2VA/model_index.json` is available.
+- [ ] The dual schedule's base (pre-shift) sigma spacing, `num_train_timesteps`
+      and `invert_sigmas` (`crate::schedule::DualSchedule` currently assumes
+      the Z-Image/FLUX.2 defaults - `linspace(1,1/n,n)`, 1000, false - as a
+      documented placeholder, not a verified fact).
 - [ ] video_vae's exact causal-3D-encoder / non-causal-ViT-decoder
       conventions (chunking, cross-chunk cache, padding, norm axis) - per
       the wan/ltxv precedent, these two "causal 3D VAEs" differ from each
@@ -151,7 +155,11 @@ prose - settle each from the Apache-2.0 diffusers source once installed
       real-checkpoint-validated, numeric parity still open (see below)
 - [ ] Phase 5 - H3 DiT core, tiny-config -> real-weight parity ladder
 - [ ] Phase 6 - video VAE (gated on `video_vae/` download)
-- [ ] Phase 7 - dual rectified-flow schedulers
+- [x] Phase 7 - dual rectified-flow schedulers (`DualSchedule` over two
+      `diffusion::scheduler::FlowMatchEulerScheduler`s, reused not
+      reimplemented; base sigma spacing/`num_train_timesteps`/
+      `invert_sigmas` still assumed from the Z-Image/FLUX.2 precedent,
+      recorded as open convention questions below and in the module doc)
 - [ ] Phase 8 - AdaLN precompute checkpoint transform
 - [ ] Phase 9 - t2va / fl2va / ref2va pipelines
 - [ ] Phase 10 - training: gradcheck -> LoRA -> device trainer
