@@ -1178,6 +1178,145 @@ pub fn check_ltxv_av_conditioning(seed: u64) -> Report {
     Report { checks }
 }
 
+/// One fixed tiny-MiniMax-H3 gradcheck problem: weights, batch, and the two
+/// closures the FD loops need - the H3 DiT core's twin of [`LtxvAvFixture`].
+/// Shared by [`check_minimaxh3`] and [`check_minimaxh3_conditioning`] so the
+/// two can never end up checking different models.
+struct Minimaxh3Fixture {
+    cfg: minimaxh3::grad::Cfg,
+    w0: minimaxh3::grad::ModelW<f64>,
+    b: minimaxh3::grad::Batch<f64>,
+}
+
+impl Minimaxh3Fixture {
+    fn new(seed: u64) -> Minimaxh3Fixture {
+        let cfg = minimaxh3::grad::Cfg::tiny();
+        let w0 = minimaxh3::grad::init_model::<f64>(&cfg, seed);
+        let mut rng = Rng::new(seed ^ 0x43B8u64);
+        let mut rf = || rng.next_f64() - 0.5;
+        let video_x0: Vec<f64> = (0..cfg.num_video * cfg.video_patch_dim()).map(|_| rf()).collect();
+        let audio_x0: Vec<f64> = (0..cfg.num_audio * cfg.audio_in_channels()).map(|_| rf()).collect();
+        let text_ctx: Vec<f64> = (0..cfg.num_text * cfg.text_dim()).map(|_| rf()).collect();
+        let video_noise: Vec<f64> = (0..video_x0.len()).map(|_| rf()).collect();
+        let audio_noise: Vec<f64> = (0..audio_x0.len()).map(|_| rf()).collect();
+        let b = minimaxh3::grad::make_flow_batch(&cfg, &video_x0, &audio_x0, &text_ctx, &video_noise, &audio_noise);
+        Minimaxh3Fixture { cfg, w0, b }
+    }
+
+    fn loss_of(&self, w: &minimaxh3::grad::ModelW<f64>) -> f64 {
+        let (video_pred, audio_pred, _) = minimaxh3::grad::forward(&self.cfg, w, &self.b);
+        minimaxh3::grad::loss(&video_pred, &self.b.video_target, &audio_pred, &self.b.audio_target).0
+    }
+
+    /// Analytic grads, in [`minimaxh3::grad::params_mut`] order.
+    fn analytic(&self) -> Vec<(String, Vec<f64>)> {
+        let (_l, g) = minimaxh3::grad::grads(&self.cfg, &self.w0, &self.b);
+        minimaxh3::grad::grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect()
+    }
+}
+
+/// Gradient-check the MiniMax-H3 DiT core's **host** training reference at
+/// tiny dims: the f64 instantiation of `minimaxh3::grad` (the input
+/// projections + token refiner, the `num_layers` main block stack - RoPE'd,
+/// PER-ROW AdaLN-Zero modulated self-attention + SwiGLU FFN, `norm_out`,
+/// and the two output heads) under the flow-matching velocity-MSE loss,
+/// combined across the video and audio predictions.
+///
+/// Same shape as [`check_ltxv_av`]: pure host f64, so no GPU and no
+/// `MOE_SKIP_GPU_TESTS` gate, one random ±1 direction per parameter tensor
+/// compared against a central difference of the SAME forward the backward
+/// was derived from. Unlike ltxv's two-STREAM model, H3's own AdaLN
+/// addressing is genuinely per-ROW (true diffusion-forcing - see
+/// `minimaxh3::grad`'s own module doc), and [`Minimaxh3Fixture`]'s batch
+/// exercises that directly: video/audio rows alternate between BOTH of the
+/// batch's distinct timesteps, each row mixed at ITS OWN sigma. Use
+/// [`check_minimaxh3_conditioning`] alongside it: H3's own fold sites
+/// (`temb_silu` read by every block's `adaln_proj` AND by `norm_out`, each
+/// block's own AdaLN table read by every packed-sequence row that shares
+/// its `(modality,timestep)`) are exactly the shape a per-tensor
+/// directional contraction can under-cover, per the porting playbook's own
+/// T5 precedent.
+pub fn check_minimaxh3(seed: u64) -> Report {
+    let f = Minimaxh3Fixture::new(seed);
+    let analytic = f.analytic();
+    let mut rng = Rng::new(seed ^ 0x43483u64);
+
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for (pi, (name, ga)) in analytic.iter().enumerate() {
+        let v: Vec<f64> = (0..ga.len()).map(|_| if rng.next_f64() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let an: f64 = ga.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
+        let mut wp = f.w0.clone();
+        for (p, &vi) in minimaxh3::grad::params_mut(&mut wp)[pi].1.iter_mut().zip(&v) {
+            *p += eps * vi;
+        }
+        let mut wm = f.w0.clone();
+        for (p, &vi) in minimaxh3::grad::params_mut(&mut wm)[pi].1.iter_mut().zip(&v) {
+            *p -= eps * vi;
+        }
+        let numeric = (f.loss_of(&wp) - f.loss_of(&wm)) / (2.0 * eps);
+        let abs_err = (an - numeric).abs();
+        let denom = an.abs().max(numeric.abs()).max(1e-3);
+        checks.push(Check { param: name.clone(), analytic: an as f32, numeric: numeric as f32, abs_err: abs_err as f32, rel_err: (abs_err / denom) as f32 });
+    }
+    Report { checks }
+}
+
+/// Per-**entry** finite differences on the MiniMax-H3 tensors that sit at a
+/// FOLDED or SHARED conditioning site - [`check_minimaxh3`]'s per-tensor
+/// contraction is structurally weakest exactly here (the same T5/Wan/LTX
+/// precedent `check_wan_conditioning`'s own doc explains).
+///
+/// The sites, and what dropping each would do:
+///
+/// * `time_embedder.linear_2.bias` - its gradient IS `d(temb_silu)` summed
+///   over the ENTIRE block stack AND `norm_out` (the three-consumer fold
+///   `minimaxh3::grad`'s own doc names). Folding only one consumer's
+///   contribution is the exact T5 failure shape.
+/// * `norm_out.linear.bias` - reads `temb_silu` directly, one of the three
+///   consumers above; a correct `time_embedder` gradient with a wrong
+///   `norm_out` contribution would still partially pass a directional
+///   check.
+/// * `transformer_blocks.{l}.adaln_proj.linear.bias` - its gradient is a
+///   scatter-ADD over every packed-sequence row that reads a given
+///   `(modality,timestep)` row (`minimaxh3::grad::gather_rows_bwd`) -
+///   dropping the accumulation (keeping only the last row's contribution)
+///   is the same fold-across-many-readers shape as LTX's own
+///   `adaln_single.linear.bias`, at THIS model's own per-row (not
+///   per-token-only) addressing.
+pub fn check_minimaxh3_conditioning(seed: u64) -> Report {
+    let f = Minimaxh3Fixture::new(seed);
+    let analytic = f.analytic();
+    let mut targets: Vec<String> = vec!["time_embedder.linear_2.bias".into(), "norm_out.linear.bias".into()];
+    for l in 0..f.cfg.tcfg.num_layers {
+        targets.push(format!("transformer_blocks.{l}.adaln_proj.linear.bias"));
+    }
+
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for name in &targets {
+        let pi = analytic.iter().position(|(n, _)| n == name).unwrap_or_else(|| panic!("check_minimaxh3_conditioning: no parameter {name}"));
+        let ga = &analytic[pi].1;
+        for (i, &gi) in ga.iter().enumerate() {
+            let mut wp = f.w0.clone();
+            minimaxh3::grad::params_mut(&mut wp)[pi].1[i] += eps;
+            let mut wm = f.w0.clone();
+            minimaxh3::grad::params_mut(&mut wm)[pi].1[i] -= eps;
+            let numeric = (f.loss_of(&wp) - f.loss_of(&wm)) / (2.0 * eps);
+            let abs_err = (gi - numeric).abs();
+            let denom = gi.abs().max(numeric.abs()).max(1e-6);
+            checks.push(Check {
+                param: format!("{name}[{i}]"),
+                analytic: gi as f32,
+                numeric: numeric as f32,
+                abs_err: abs_err as f32,
+                rel_err: (abs_err / denom) as f32,
+            });
+        }
+    }
+    Report { checks }
+}
+
 /// Build a tiny hybrid Qwen3.5-35B-A3B decoder (Gated DeltaNet + GQA + sparse
 /// MoE with a sigmoid-gated shared expert) and gradient-check it. This is the
 /// correctness gate for wiring `model::gdn::gdn_chunk_bwd` (full reverse-mode
@@ -1985,6 +2124,36 @@ mod tests {
         assert!(
             fails.is_empty(),
             "ltxv AV conditioning elementwise check failed for {:?}",
+            fails.iter().take(8).map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn minimaxh3_analytic_grads_match_finite_differences() {
+        // Pure host f64 - no GPU, so no MOE_SKIP_GPU_TESTS gate (same
+        // reasoning as check_ltxv_av's own doc).
+        let report = check_minimaxh3(7);
+        report.print();
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "minimaxh3 gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+        assert!(report.dead_gradients().is_empty(), "dead gradients: {:?}", report.dead_gradients());
+    }
+
+    #[test]
+    fn minimaxh3_conditioning_grads_match_elementwise_finite_differences() {
+        let report = check_minimaxh3_conditioning(7);
+        let worst = report.checks.iter().max_by(|a, b| a.abs_err.total_cmp(&b.abs_err)).expect("non-empty");
+        println!("minimaxh3 conditioning: {} entries, worst {} abs={:.2e} rel={:.2e}", report.checks.len(), worst.param, worst.abs_err, worst.rel_err);
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "minimaxh3 conditioning elementwise check failed for {:?}",
             fails.iter().take(8).map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

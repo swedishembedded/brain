@@ -31,6 +31,9 @@ brain-wan.workspace = true
 # `check_ltxv` / `check_ltxv_conditioning` (src/lib.rs) - the LTX-2.5
 # video-only DiT's host training reference.
 brain-ltxv.workspace = true
+# `check_minimaxh3` / `check_minimaxh3_conditioning` (src/lib.rs) - the
+# MiniMax-H3 joint video+audio DiT core's host training reference.
+brain-minimaxh3.workspace = true
 brain-sam2.workspace = true
 brain-vqgan.workspace = true
 brain-vae.workspace = true
