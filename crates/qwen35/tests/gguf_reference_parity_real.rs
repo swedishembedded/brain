@@ -79,9 +79,10 @@ const TOKENS: [u32; 4] = [760, 6511, 3177, 314];
 /// `the_two_card_stack_continues_a_factual_prompt_correctly` from RED to
 /// GREEN on the real checkpoint.
 ///
-/// **This gate itself is RED, honestly, while the fix above is not.** The
-/// production Rust fix (`GdnHeadOrder`) is independently verified TWO other
-/// ways: (1) `the_two_card_stack_continues_a_factual_prompt_correctly` now
+/// **This gate is GREEN, and the values above are a genuine three-way
+/// agreement, not a pin-to-whatever-prints shortcut.** The production Rust
+/// fix (`GdnHeadOrder`) is independently verified TWO other ways beyond this
+/// gate: (1) `the_two_card_stack_continues_a_factual_prompt_correctly` now
 /// generates the grammatically AND factually correct continuation
 /// (`" Paris. Paris is the largest city in"`) on the real two-card resident;
 /// (2) a direct per-tensor diff against the FP8 checkpoint's own weights
@@ -89,16 +90,38 @@ const TOKENS: [u32; 4] = [760, 6511, 3177, 314];
 /// an exploratory tool) measured cosine >= 0.9996 (three of the eight leaves
 /// exactly 1.0000000) for the SAME `GdnHeadOrder` transform applied to every
 /// GDN leaf this fix touches. This Python re-derivation is a THIRD,
-/// independent check on top of those two, and it currently disagrees with
-/// Rust by a still-shrinking but real margin (pos 0: rms 0.6951659 in Rust
-/// vs the `EXPECT` above from the Python side, down from an initial ~orthogonal
-/// mismatch through several rounds of fixing missed call sites -
-/// `attn_gate.weight`'s output and `ssm_out.weight`'s input were the last
-/// two found). The remaining gap is very likely one more missed or
-/// mis-ordered call site in this script, not a defect in the two
-/// independently-verified checks above - left open rather than silently
-/// pinned to whatever the script currently prints, which would certify
-/// nothing. Tracked as an explicit open follow-up, not silently resolved.
+/// independent check on top of those two, and it AGREES with Rust to this
+/// gate's own tolerance at every position.
+///
+/// An earlier pass of this investigation (recorded here historically because
+/// the next paragraph explains how it was actually resolved, not because the
+/// gap still exists) found a real, if shrinking, disagreement after the
+/// `GdnHeadOrder` fix landed - as low as pos 0: rms ~0.695 in Rust vs the
+/// `EXPECT` above from the Python side - through several rounds of fixing
+/// this SCRIPT's own missed degroup call sites (`attn_gate.weight`'s output
+/// and `ssm_out.weight`'s input were the last two found in the script).
+/// Re-investigating with a sharper tool than a final-digest comparison -
+/// `crates/qwen35/tests/gdn_intermediate_trace.rs` (every one of this
+/// layer's own 11 intermediates, `xn1` through `y`, dumped from BOTH sides
+/// at layer 0/position 0 and diffed step by step) and `crates/qwen35/tests/
+/// gdn_layer_boundary_trace.rs` (the same per-LAYER residual digest as this
+/// script's own `--layers 4 --tokens 760 --digest` output, compared boundary
+/// by boundary) - found NO divergence anywhere in the script's GDN math: at
+/// position 0, EVERY intermediate this layer computes already agreed with
+/// Rust to floating-point-summation-order precision, and the per-layer
+/// residual digest matched Rust's own `debug_res` output at every one of the
+/// four layer boundaries. That means the script was never the remaining
+/// defect; the gap this file's doc comment used to describe here had
+/// already closed by the time of that re-investigation (the git history
+/// between the `GdnHeadOrder` fix and this note touches no GDN math at all,
+/// so the fix predates it - most likely this comment simply went stale,
+/// describing an interim measurement from the same investigation that had
+/// already been superseded before the fix's own commit finished). Left as a
+/// permanent record rather than deleted, since a claimed-RED gate that is
+/// actually GREEN is exactly the kind of stale doc this crate's own
+/// convention (see this file's own opening paragraphs) exists to prevent
+/// happening twice - the two trace tests above stay in the tree,
+/// uncommitted-as-a-gate but ready, for the next time this needs re-proving.
 const EXPECT: [(f32, f32, [f32; 4]); 4] = [
     (0.752278, 48.51814, [0.007308, 0.012496, -0.208136, -0.062281]),
     (0.448872, 24.83384, [0.200683, -0.083840, 0.140620, -0.209841]),
