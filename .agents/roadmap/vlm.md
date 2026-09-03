@@ -949,3 +949,54 @@ this key any more, per the finding above.
   reference to check real Qwen3-VL video generation against in this
   workspace, matching this crate's existing image-path caveat (see
   `docs/models/qwen3vl.md`).
+
+## qwen3vl - tool-calling request/response contract, reused from qwen3::chat
+
+`qwen3vl::caps::generate_spec()` gained `tools`/`tool_choice` (same names and
+help text as `qwen3::caps`'s own params) so a client driving both models
+never has to special-case VLM tool-calling. Nothing about tool-choice
+parsing, enforcement or tool-call scanning was reimplemented:
+`qwen3::chat::{parse_tools, parse_tool_choice, ToolChoice}` parse and
+validate the request exactly like the text-only path (a `Named` choice
+naming a function absent from `tools` is rejected before any weights are
+touched - proven with a nonexistent weights path in
+`caps::tests::tool_choice_named_function_must_exist_in_tools_before_touching_weights`),
+and `qwen3::chat::SeqState` now drives the whole per-token decode loop that
+used to be hand-rolled here (`stream_delta` inlined by hand, no tool-call
+scanning at all). `SeqState::finish` is what resolves
+`prompt_tokens`/`completion_tokens`/`finish_reason`/`reasoning_content`/
+`tool_calls` - the identical `Outcome` shape `qwen3::caps`'s `GenerateAction`
+returns.
+
+One seam genuinely could not be reused: `qwen3::chat::parse_request` renders
+one whole `messages`+`tools` prompt as a single string via
+`data::qwen_chat::render_for_generation`, and this crate needs to splice a
+mid-prompt run of image-placeholder tokens (`<|vision_start|>[IMG]*n
+<|vision_end|>`) into token-id space, which a string renderer has no seam
+for. The tools *preamble* (the `<tools>...</tools>` system block) is instead
+rendered standalone - `data::qwen_chat::render(&[], tools, TemplateOpts {
+add_generation_prompt: false, .. })` - the SAME renderer the shared path
+calls, on an empty message list. This is NOT byte-for-byte what `qwen3::caps
+generate` renders by default, though: `qwen3::chat::parse_request` resolves
+`reasoning_effort` to `Some("xhigh")` whenever `enable_thinking` is true (its
+own default), and that injects an extra directive paragraph into the
+preamble. This action has no `enable_thinking`/`reasoning_effort` param, so
+that paragraph is always omitted here - the `<tools>` block and surrounding
+structure match, that one paragraph does not. `tool_schema_names`
+(named-tool validation) moved from
+private to `pub` in `qwen3::chat` for exactly this cross-crate reuse - it was
+the one piece of `parse_request`'s internal enforcement not already exposed.
+
+**Scope boundary, stated plainly**: this is the request/response CONTRACT
+only - declare tools, enforce `tool_choice`, parse the model's
+`<tool_call>` output into a structured `tool_calls` field. Real tool
+EXECUTION (running the named function, feeding its result back as a `tool`
+turn, looping) is not implemented for either `qwen3vl` or `qwen3` and is a
+separate, larger piece of work. Also unverified: whether a real Qwen3-VL
+checkpoint actually EMITS a well-formed `<tool_call>` for a given image/tool
+pair - the real-weight test
+(`caps::tests::served_generate_with_tools_enforces_tool_choice_on_real_weights`)
+asserts the contract fires (a `finish_reason` is always resolved, `tools:
+"none"` never demands a call) without asserting which `finish_reason` a
+specific image/tools/max_new combination produces, since that is a property
+of the checkpoint's own weights, not of this plumbing.

@@ -163,7 +163,13 @@ pub fn parse_tool_choice(raw: Option<&str>) -> Result<ToolChoice, String> {
 
 /// Extract each tool schema's `function.name` (best-effort: a schema without a
 /// name contributes nothing and is never matchable by [`ToolChoice::Named`]).
-fn tool_schema_names(tools: &[String]) -> Vec<String> {
+///
+/// `pub`: the `ToolChoice::Named` validation this drives ([`parse_request`]'s
+/// own use below) is exactly what any OTHER caller assembling its own prompt
+/// around [`parse_tools`]/[`parse_tool_choice`] needs too (`qwen3vl::caps`,
+/// which splices tool schemas around an image-token run `parse_request`
+/// itself cannot render) - reused rather than re-derived.
+pub fn tool_schema_names(tools: &[String]) -> Vec<String> {
     tools
         .iter()
         .filter_map(|t| serde_json::from_str::<serde_json::Value>(t).ok())

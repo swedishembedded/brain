@@ -220,7 +220,8 @@ impl Instance for Qwen3VlInstance {
             return Err(format!("qwen3vl: unknown action '{action}'"));
         }
         let video_frames = qwen3vl::caps::decode_media(inv)?;
-        self.resident.generate(inv, video_frames, progress)
+        let (tool_choice, tools) = qwen3vl::caps::parse_tool_request(inv)?;
+        self.resident.generate(inv, video_frames, tool_choice, &tools, progress)
     }
 }
 

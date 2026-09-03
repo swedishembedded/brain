@@ -99,6 +99,20 @@ checkpoint has been run through this resident on this machine)
 - `weights` - per-call override of the checkpoint (in place of
   `BRAIN_QWEN3VL_WEIGHTS`): a safetensors directory, a GGUF language half, or
   the directory holding a GGUF pair.
+- `tools` / `tool_choice` - the same tool-calling request/response contract
+  `brain qwen3 generate` has, over image+text input: `tools` is a JSON array
+  of OpenAI-shaped function schemas; `tool_choice` is `"auto"` (default),
+  `"none"` (withholds the tool schemas from the prompt entirely), `"required"`
+  (the response must contain a call), or `{"type":"function","function":
+  {"name":...}}` (must call that specific function). `required`/named are
+  enforced post-generation: an unmet demand reports `finish_reason:
+  "tool_choice_unmet"` rather than silently returning prose, and a call the
+  model does emit comes back as a `tool_calls` output field, mirroring
+  `qwen3::caps`'s own shape byte-for-byte. **This is the request/response
+  contract only** - declaring tools, enforcing `tool_choice`, and parsing a
+  generated `<tool_call>` back into structured `tool_calls` - not a tool
+  execution loop: nothing in brain runs a named function and feeds its
+  result back for a second turn.
 
 ## Multiple images in one request
 

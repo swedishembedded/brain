@@ -63,13 +63,28 @@
 //!   `crate::model::Qwen3Vl::generate_timed`'s doc), so a capacity sized for
 //!   only the largest single image would silently corrupt (or panic on) the
 //!   second image of any two-image request that individually fits.
+//! - **Tool calling is the same request/response CONTRACT `qwen3::caps`'s own
+//!   `generate` has** - `tools`/`tool_choice` params with identical names and
+//!   semantics, prompt-level enforcement (`none` withholds the schemas,
+//!   `named` must name an offered function) and post-generation enforcement
+//!   (`required`/`named` unmet -> `finish_reason: "tool_choice_unmet"`) -
+//!   reused directly from `qwen3::chat` (`parse_tools`, `parse_tool_choice`,
+//!   `ToolChoice`, `tool_schema_names`, and `SeqState` itself for the
+//!   streaming scan + post-hoc enforcement), not reimplemented. Only the
+//!   tools *preamble text* is rendered locally (`data::qwen_chat::render`
+//!   with no messages, just tools), because `qwen3::chat::parse_request`
+//!   renders a full chat prompt as one string and has no seam to splice an
+//!   image-token run into the middle of it the way this crate's manual
+//!   token assembly needs. **Out of scope**: actually EXECUTING a tool and
+//!   feeding its result back in another turn - that is a separate, larger
+//!   piece of work (a real agent loop), not part of this contract.
 
 use std::sync::Mutex;
 
-use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider,
-};
+use capability::{Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress, Provider};
+use data::qwen_chat::{self, TemplateFlavor, TemplateOpts};
 use data::tokenizer::Tokenizer;
+use qwen3::chat::{parse_tool_choice, parse_tools, tool_schema_names, ParsedRequest, SeqState, ToolChoice};
 use serde_json::json;
 
 use crate::config::Qwen3VlConfig;
@@ -77,6 +92,17 @@ use crate::model::Qwen3Vl;
 use crate::preprocess::{normalize_unit, pack_patches, pack_patches_temporal, pad_frames_to_temporal_multiple, patch_grid, smart_resize};
 
 pub const MODEL: &str = "brain/qwen3vl";
+
+/// One decoded RGB frame/image: raw HWC f32 pixels in `[0,1]` + `(w,h)` -
+/// [`capability::blob::decode_image`]/[`capability::blob::decode_video`]'s
+/// own element shape, named here so [`decode_media`]'s and
+/// [`Resident::generate`]'s signatures read as intent rather than a bare
+/// nested tuple (clippy's `type_complexity`, and genuinely clearer either way).
+type DecodedFrame = (Vec<f32>, u32, u32);
+/// A video request's decoded frames + real fps, or `None` for an image
+/// request - [`decode_media`]'s return type and [`Resident::generate`]'s
+/// `video_frames` parameter.
+pub type VideoFrames = Option<(Vec<DecodedFrame>, f32)>;
 
 /// The largest frame count a video request may carry. A real, bounded scope
 /// decision (AGENTS.md: no hours-long/streaming video for this change) -
@@ -237,6 +263,8 @@ pub fn generate_spec() -> ActionSpec {
              (crate::mrope::get_rope_index_video's T axis) rather than by frame count -- see that function's doc \
              for what is verified vs assumed about the formula",
         ))
+        .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema; needs a tokenizer)"))
+        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .input(BlobSpec::new("image", Media::Image, "a still image: raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention) -- exactly one of 'image'/'video' is required"));
     for i in 1..MAX_IMAGES {
         spec = spec.input(BlobSpec::new(
@@ -337,16 +365,26 @@ impl Resident {
     }
 
     /// Run one `generate` invocation against this already-built resident:
-    /// image + prompt in, streamed text out. The body [`GenerateAction::run`]
-    /// used to hold directly, extracted so a residency-scheduled instance and
-    /// the direct provider execute byte-for-byte the same code.
-    /// `video_frames` is already validated and decoded by [`GenerateAction::run`]
-    /// (or `None` for an image request) - see that function's doc for why the
-    /// "exactly one of image/video", frame-cap and fps checks live THERE and
-    /// not here: they must fail before this resident is even built, and
-    /// re-deriving them here (after `with_resident` has already run) would be
-    /// too late for that contract, not just a duplicate.
-    pub fn generate(&self, inv: &Invocation, video_frames: Option<(Vec<(Vec<f32>, u32, u32)>, f32)>, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    /// image(s)/video + prompt in, streamed text out. The body
+    /// [`GenerateAction::run`] used to hold directly, extracted so a
+    /// residency-scheduled instance and the direct provider execute
+    /// byte-for-byte the same code.
+    ///
+    /// `video_frames` and `tool_choice`/`tools` are already validated by
+    /// [`GenerateAction::run`] (`video_frames` is `None` for an image
+    /// request) - see that function's doc for why the "exactly one of
+    /// image/video", frame-cap/fps and named-tool-choice checks live THERE
+    /// and not here: they must fail before this resident is even built, and
+    /// re-deriving them here (after `with_resident` has already run) would
+    /// be too late for that contract, not just a duplicate.
+    pub fn generate(
+        &self,
+        inv: &Invocation,
+        video_frames: VideoFrames,
+        tool_choice: ToolChoice,
+        tools: &[String],
+        progress: &mut dyn FnMut(Progress),
+    ) -> ActionResult {
         let prompt = last_user_text(inv);
         if prompt.trim().is_empty() {
             return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
@@ -360,12 +398,31 @@ impl Resident {
         let sample = crate::model::SampleParams { temperature, top_k, top_p };
         let mut rng = data::rng::Rng::new(seed);
 
-        let (text, ntok) = if let Some((frames, fps)) = video_frames {
-            let p = PreparedVideo::build(self, &frames, fps, &prompt, max_new)?;
-            progress(Progress::step(0, max_new, "generating"));
+        // Shared chat-serving state (`qwen3::chat::SeqState`): scans the
+        // decode stream for `<tool_call>` markup and resolves the SAME
+        // `tool_choice` enforcement + `Outcome` shape
+        // (`prompt_tokens`/`completion_tokens`/`finish_reason`/
+        // `reasoning_content`[/`tool_calls`]) `qwen3::caps`'s own
+        // `GenerateAction` returns on `finish` - shared by both the video and
+        // image branches below, not a second copy per media kind.
+        let build_request = |ids: Vec<u32>| ParsedRequest {
+            ids,
+            max_new: max_new as usize,
+            temp: temperature,
+            top_k,
+            top_p,
+            seed,
+            stops: Vec::new(),
+            tool_choice: tool_choice.clone(),
+            flavor: TemplateFlavor::Qwen3,
+            thinking_open: false,
+        };
+        if let Some((frames, fps)) = video_frames {
+            let p = PreparedVideo::build(self, &frames, fps, &prompt, max_new, tools)?;
+            let req = build_request(p.tokens.clone());
+            let mut seq = SeqState::new(&req, inv.cancel.clone());
             let mut ids: Vec<u32> = Vec::new();
-            let mut printed = String::new();
-            let mut step = 0u32;
+            progress(Progress::step(0, max_new, "generating"));
             let out_ids = self.model.generate_video_cb(
                 &p.tokens,
                 p.grid,
@@ -380,43 +437,23 @@ impl Resident {
                 &mut rng,
                 |tok_id| {
                     ids.push(tok_id);
-                    step += 1;
-                    let full = self.tok.decode(&ids);
-                    let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
-                    printed = np;
-                    if !delta.is_empty() {
-                        progress(Progress::token(step, max_new, delta));
-                    }
+                    seq.advance(&self.tok, &ids, progress);
                 },
             );
-            (self.tok.decode(&out_ids), out_ids.len())
+            Ok(seq.finish(&self.tok, &out_ids, progress))
         } else {
             let images = decode_images(inv)?;
-            let p = Prepared::build_multi(self, &images, &prompt, max_new)?;
-            progress(Progress::step(0, max_new, "generating"));
-            // Real per-token streaming deltas (the spec declares `.streaming()`):
-            // re-decode the running id list each token and emit the UTF-8-safe
-            // suffix, exactly like qwen3::chat's streaming path.
+            let p = Prepared::build_multi(self, &images, &prompt, max_new, tools)?;
+            let req = build_request(p.tokens.clone());
+            let mut seq = SeqState::new(&req, inv.cancel.clone());
             let mut ids: Vec<u32> = Vec::new();
-            let mut printed = String::new();
-            let mut step = 0u32;
+            progress(Progress::step(0, max_new, "generating"));
             let out_ids = self.model.generate_cb(&p.tokens, &p.image_inputs(), max_new, &p.eos, sample, &mut rng, |tok_id| {
                 ids.push(tok_id);
-                step += 1;
-                let full = self.tok.decode(&ids);
-                let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
-                printed = np;
-                if !delta.is_empty() {
-                    progress(Progress::token(step, max_new, delta));
-                }
+                seq.advance(&self.tok, &ids, progress);
             });
-            (self.tok.decode(&out_ids), out_ids.len())
-        };
-        progress(Progress::step(max_new, max_new, text.clone()));
-        Ok(Outcome::new()
-            .set("text", json!(text.clone()))
-            .set("tokens", json!(ntok))
-            .blob("text", Blob::new(Media::Text, text.into_bytes())))
+            Ok(seq.finish(&self.tok, &out_ids, progress))
+        }
     }
 }
 
@@ -451,7 +488,7 @@ impl Provider for QwenVlProvider {
 /// is already built by residency's own `activate`, but the media shape still
 /// needs validating and decoding exactly once, the same way, rather than a
 /// second copy of this logic per call site).
-pub fn decode_media(inv: &Invocation) -> Result<Option<(Vec<(Vec<f32>, u32, u32)>, f32)>, String> {
+pub fn decode_media(inv: &Invocation) -> Result<VideoFrames, String> {
     let has_video = inv.get_blob("video").is_some();
     let has_image = inv.get_blob("image").is_some();
     if has_video == has_image {
@@ -469,6 +506,30 @@ pub fn decode_media(inv: &Invocation) -> Result<Option<(Vec<(Vec<f32>, u32, u32)
         .filter(|f| *f > 0.0)
         .ok_or("qwenvl generate: a 'video' input needs a positive 'fps' to place its frames in real time")? as f32;
     Ok(Some((frames, fps)))
+}
+
+/// The tool-calling request contract - reused directly from `qwen3::chat`
+/// (see this module's doc): `none` withholds the tool schemas from the
+/// rendered prompt entirely, `named` must name a function the `tools` array
+/// actually offers. Validated before any weights are touched, the same
+/// precedence `qwen3::chat::parse_request` gives this check (a typo'd name
+/// would otherwise degrade into a guaranteed-unmet post-hoc demand). Called
+/// by both [`GenerateAction::run`] and `resident_qwen3vl.rs`'s
+/// `Instance::run` for the same reason [`decode_media`] is - one
+/// implementation, not a copy per call site.
+pub fn parse_tool_request(inv: &Invocation) -> Result<(ToolChoice, Vec<String>), String> {
+    let tool_choice = parse_tool_choice(inv.get_str("tool_choice").as_deref())?;
+    let mut tools = parse_tools(inv.get_str("tools").as_deref())?;
+    match &tool_choice {
+        ToolChoice::None => tools.clear(),
+        ToolChoice::Named(name) => {
+            if !tool_schema_names(&tools).iter().any(|n| n == name) {
+                return Err(format!("qwenvl generate: tool_choice names function '{name}' which is not present in tools"));
+            }
+        }
+        _ => {}
+    }
+    Ok((tool_choice, tools))
 }
 
 // One process-wide resident, keyed by (checkpoint dir, max_pixels) so
@@ -489,13 +550,15 @@ impl Action for GenerateAction {
             return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
         let video_frames = decode_media(inv)?;
+        let (tool_choice, tools) = parse_tool_request(inv)?;
+
         let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
         if dir.is_empty() {
             return Err("qwenvl generate: no checkpoint directory (set 'weights' or $BRAIN_QWEN3VL_WEIGHTS)".to_string());
         }
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
-        with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, video_frames, progress))
+        with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, video_frames, tool_choice, &tools, progress))
     }
 }
 
@@ -548,8 +611,8 @@ impl Prepared {
     /// byte-for-byte, which it does by definition: it is a zero-length loop
     /// away from `build_multi` itself, not a second copy of the prompt/patch
     /// assembly.
-    fn build(hot: &Resident, hwc: &[f32], w: u32, h: u32, prompt: &str, max_new: u32) -> Result<Prepared, String> {
-        Self::build_multi(hot, std::slice::from_ref(&(hwc.to_vec(), w, h)), prompt, max_new)
+    fn build(hot: &Resident, hwc: &[f32], w: u32, h: u32, prompt: &str, max_new: u32, tools: &[String]) -> Result<Prepared, String> {
+        Self::build_multi(hot, std::slice::from_ref(&(hwc.to_vec(), w, h)), prompt, max_new, tools)
     }
 
     /// Assemble ONE prompt from N images (in request order): each image gets
@@ -559,14 +622,40 @@ impl Prepared {
     /// vision-start/`[IMG]*`/vision-end run, back-to-back with no text
     /// between runs, ahead of the user's prompt text - see this module's doc
     /// for the request shape this backs.
-    fn build_multi(hot: &Resident, images: &[(Vec<f32>, u32, u32)], prompt: &str, max_new: u32) -> Result<Prepared, String> {
+    fn build_multi(hot: &Resident, images: &[(Vec<f32>, u32, u32)], prompt: &str, max_new: u32, tools: &[String]) -> Result<Prepared, String> {
         let t0 = std::time::Instant::now();
         if images.is_empty() {
             return Err("qwenvl generate: at least one image is required".to_string());
         }
         let factor = hot.cfg.vision.patch_size * hot.cfg.vision.spatial_merge_size;
 
-        let mut tokens = hot.tok.encode("<|im_start|>user\n");
+        // Tools preamble (a system turn carrying the `<tools>` JSON block),
+        // rendered from the SAME `data::qwen_chat::render` the shared
+        // `qwen3::chat` path itself calls on an empty message list. This is
+        // the one piece of `parse_request`'s rendering this crate cannot
+        // call directly: `render` returns one whole messages+tools prompt as
+        // a single string, with no seam to splice an image-token run into
+        // the middle of it the way Qwen3-VL needs.
+        //
+        // NOT byte-for-byte identical to what `qwen3::caps generate` renders
+        // for the same tools: `qwen3::chat::parse_request` resolves
+        // `reasoning_effort` to `Some("xhigh")` whenever `enable_thinking` is
+        // true (its own default), and `qwen_chat::render` then injects an
+        // extra "Reasoning effort is set to..." directive paragraph into the
+        // preamble for both template flavors. This action has no
+        // `enable_thinking`/`reasoning_effort` param, so `TemplateOpts`
+        // resolves that to `None` here and the directive paragraph is always
+        // omitted. The `<tools>` JSON block and surrounding structure match;
+        // this one paragraph does not - pinned by
+        // `caps::tests::tools_preamble_matches_qwen3_except_the_reasoning_effort_directive_it_cannot_opt_into`
+        // rather than left as an unverified comment.
+        let mut tokens = if tools.is_empty() {
+            Vec::new()
+        } else {
+            let preamble = qwen_chat::render(&[], tools, TemplateOpts { add_generation_prompt: false, ..Default::default() })?;
+            hot.tok.encode(&preamble)
+        };
+        tokens.extend(hot.tok.encode("<|im_start|>user\n"));
         let mut prepared = Vec::with_capacity(images.len());
         let mut n_visual = 0u32;
         for (hwc, w, h) in images {
@@ -648,7 +737,7 @@ impl PreparedVideo {
     /// multiple of `temporal_patch_size` by repeating the last frame
     /// ([`pad_frames_to_temporal_multiple`]), then packed with
     /// [`pack_patches_temporal`].
-    fn build(hot: &Resident, frames: &[(Vec<f32>, u32, u32)], fps: f32, prompt: &str, max_new: u32) -> Result<PreparedVideo, String> {
+    fn build(hot: &Resident, frames: &[(Vec<f32>, u32, u32)], fps: f32, prompt: &str, max_new: u32, tools: &[String]) -> Result<PreparedVideo, String> {
         let (_, w0, h0) = *frames.first().ok_or("qwenvl generate: an empty video has no frames to caption")?;
         let factor = hot.cfg.vision.patch_size * hot.cfg.vision.spatial_merge_size;
         let (h_bar, w_bar) = smart_resize(h0, w0, factor, preprocess_min_pixels(), hot.max_pixels);
@@ -687,8 +776,32 @@ impl PreparedVideo {
         }
         let frame_timestamps_s: Vec<f32> = (0..n_frames).map(|g| padded_ts[(g * temporal) as usize]).collect();
 
+        // Tools preamble (a system turn carrying the `<tools>` JSON block),
+        // rendered from the SAME `data::qwen_chat::render` the shared
+        // `qwen3::chat` path itself calls on an empty message list. This is
+        // the one piece of `parse_request`'s rendering this crate cannot
+        // call directly: `render` returns one whole messages+tools prompt as
+        // a single string, with no seam to splice an image-token run into
+        // the middle of it the way Qwen3-VL needs.
+        //
+        // NOT byte-for-byte identical to what `qwen3::caps generate` renders
+        // for the same tools: `qwen3::chat::parse_request` resolves
+        // `reasoning_effort` to `Some("xhigh")` whenever `enable_thinking` is
+        // true (its own default), and `qwen_chat::render` then injects an
+        // extra "Reasoning effort is set to..." directive paragraph into the
+        // preamble for both template flavors. This action has no
+        // `enable_thinking`/`reasoning_effort` param, so `TemplateOpts`
+        // resolves that to `None` here and the directive paragraph is always
+        // omitted. The `<tools>` JSON block and surrounding structure match;
+        // this one paragraph does not.
+        let mut tokens = if tools.is_empty() {
+            Vec::new()
+        } else {
+            let preamble = qwen_chat::render(&[], tools, TemplateOpts { add_generation_prompt: false, ..Default::default() })?;
+            hot.tok.encode(&preamble)
+        };
         // Prompt: <|im_start|>user\n <|vision_start|> [VIDEO]*n_visual <|vision_end|> {prompt}<|im_end|>\n<|im_start|>assistant\n
-        let mut tokens = hot.tok.encode("<|im_start|>user\n");
+        tokens.extend(hot.tok.encode("<|im_start|>user\n"));
         tokens.push(hot.cfg.vision_start_token_id);
         tokens.extend(std::iter::repeat_n(hot.cfg.video_token_id, n_visual as usize));
         tokens.push(hot.cfg.vision_end_token_id);
@@ -728,7 +841,7 @@ pub fn generate_profiled(
     max_new: u32,
 ) -> Result<(String, crate::model::StageTimes, f64), String> {
     with_resident(dir, max_pixels, precision, |hot| {
-        let p = Prepared::build(hot, hwc, w, h, prompt, max_new)?;
+        let p = Prepared::build(hot, hwc, w, h, prompt, max_new, &[])?;
         // Greedy: a bench measures cost, and a deterministic decode keeps
         // `qwen3vl_bench compare`'s tier-divergence numbers reproducible run
         // to run rather than confounded by sampling noise.
@@ -983,6 +1096,7 @@ fn hwc_to_chw_resized(hwc: &[f32], w: u32, h: u32, w_bar: u32, h_bar: u32) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capability::Blob;
 
     #[test]
     fn manifest_validates_without_weights() {
@@ -1111,6 +1225,63 @@ mod tests {
         assert!(err.contains("at most"), "{err}");
     }
 
+    /// `tools`/`tool_choice` match `qwen3::caps::generate_spec()`'s own
+    /// params byte-for-byte (name + help text) so a client driving both
+    /// models' `generate` never has to special-case VLM tool-calling vs
+    /// text-only tool-calling.
+    #[test]
+    fn manifest_declares_tools_and_tool_choice_matching_qwen3() {
+        let qwenvl = &manifest().actions[0];
+        let qwen3 = &qwen3::caps::manifest().actions[0];
+        for name in ["tools", "tool_choice"] {
+            let a = qwenvl.params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("qwen3vl generate missing param {name:?}"));
+            let b = qwen3.params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("qwen3 generate missing param {name:?}"));
+            assert_eq!(a.help, b.help, "param {name:?} help text must match qwen3's");
+            assert!(!a.required, "param {name:?} must be optional");
+        }
+    }
+
+    /// The tools preamble this action renders (`Prepared::build`'s
+    /// `qwen_chat::render(&[], tools, TemplateOpts { add_generation_prompt:
+    /// false, .. })` call, with `reasoning_effort: None` since this action has
+    /// no `enable_thinking`/`reasoning_effort` param) is NOT byte-for-byte what
+    /// `qwen3::caps generate` renders under ITS OWN default
+    /// (`enable_thinking: true` resolves `reasoning_effort` to `Some("xhigh")`,
+    /// per `qwen3::chat::parse_request`) - the two differ by exactly one
+    /// injected "reasoning effort" directive paragraph. This test pins that
+    /// real, narrower relationship rather than leaving the comment's claim
+    /// unverified.
+    #[test]
+    fn tools_preamble_matches_qwen3_except_the_reasoning_effort_directive_it_cannot_opt_into() {
+        let tools = vec![r#"{"type":"function","function":{"name":"get_weather","parameters":{}}}"#.to_string()];
+        let this_crate_render = qwen_chat::render(&[], &tools, TemplateOpts { add_generation_prompt: false, ..Default::default() }).unwrap();
+        let qwen3_default_render =
+            qwen_chat::render(&[], &tools, TemplateOpts { add_generation_prompt: false, reasoning_effort: Some("xhigh".into()), ..Default::default() })
+                .unwrap();
+        assert_ne!(this_crate_render, qwen3_default_render, "the two must actually differ, or the documented gap is imaginary");
+        assert!(!this_crate_render.to_lowercase().contains("reasoning effort"), "this crate's preamble has no enable_thinking param, so it must omit the directive");
+        assert!(qwen3_default_render.to_lowercase().contains("reasoning effort"), "qwen3's own thinking-enabled default must inject the directive");
+    }
+
+    /// Server-side named-function validation runs BEFORE any weights are
+    /// touched - the same precedence `qwen3::chat::parse_request` gives it
+    /// (a typo'd name would otherwise degrade into a guaranteed-unmet
+    /// post-hoc demand). Proven with a nonexistent weights path: if this
+    /// validation ran after resident load, the error would instead name the
+    /// missing checkpoint.
+    #[test]
+    fn tool_choice_named_function_must_exist_in_tools_before_touching_weights() {
+        let inv = Invocation::new()
+            .set("weights", json!("/nonexistent/qwenvl"))
+            .set("prompt", json!("weather?"))
+            .set("tools", json!(r#"[{"type":"function","function":{"name":"get_weather"}}]"#))
+            .set("tool_choice", json!(r#"{"type":"function","function":{"name":"no_such_tool"}}"#))
+            .blob("image", Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w": 1, "h": 1})));
+        let err = GenerateAction.run(&inv, &mut |_| {}).unwrap_err();
+        assert!(err.contains("no_such_tool"), "got: {err}");
+        assert!(!err.contains("nonexistent"), "must fail on tool_choice before ever touching weights: {err}");
+    }
+
     /// Served-path smoke on the real checkpoint (skip-if-absent, like the
     /// fastvlm caption parity tests): exercises the FULL `GenerateAction`
     /// path - smart-resize preprocessing, image splice, and
@@ -1134,6 +1305,51 @@ mod tests {
             .blob("image", Blob::new(Media::Image, bytes).with_meta(json!({"w": w, "h": h})));
         let out = GenerateAction.run(&inv, &mut |_| {}).expect("served generate path failed on real weights");
         assert!(out.blobs.contains_key("text"), "generate must emit its declared text blob");
+    }
+
+    /// The tools/tool_choice CONTRACT on the real checkpoint, mirroring
+    /// `qwen3::caps`'s own `tokenizer_present_runs_the_shared_chat_parse_with_tools`
+    /// shape: a `messages`+`tools` request must go through the SAME
+    /// `qwen3::chat::{parse_tools, parse_tool_choice, SeqState}` machinery the
+    /// text-only path runs, and resolve a real `finish_reason` (`tool_calls`,
+    /// `tool_choice_unmet` or `length`/`stop` - which one is not asserted,
+    /// since a real model's actual output on an arbitrary image is not this
+    /// test's business; the CONTRACT is that `tool_choice: "required"` is
+    /// enforced post-generation at all).
+    #[test]
+    fn served_generate_with_tools_enforces_tool_choice_on_real_weights() {
+        let dir = default_weights();
+        if dir.is_empty() || !std::path::Path::new(&dir).join("config.json").exists() {
+            brain_testutil::skip("BRAIN_QWEN3VL_WEIGHTS not set / checkpoint absent");
+            return;
+        }
+        let (w, h) = (64u32, 64u32);
+        let hwc: Vec<f32> = (0..w * h * 3).map(|i| (i % 251) as f32 / 250.0).collect();
+        let bytes: Vec<u8> = hwc.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let tools = json!([{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]).to_string();
+        let inv = Invocation::new()
+            .set("prompt", json!("Describe this image."))
+            .set("max_new", json!(4))
+            .set("tools", json!(tools))
+            .set("tool_choice", json!("required"))
+            .blob("image", Blob::new(Media::Image, bytes.clone()).with_meta(json!({"w": w, "h": h})));
+        let mut events = 0u32;
+        let out = GenerateAction.run(&inv, &mut |_p| events += 1).expect("served generate path failed on real weights");
+        assert!(out.outputs.get("finish_reason").is_some(), "shared SeqState::finish must report a finish_reason");
+        assert!(out.outputs.get("prompt_tokens").is_some());
+        assert!(out.outputs.get("completion_tokens").is_some());
+        assert!(events > 0, "must stream at least the final 'done' Progress");
+
+        // `none` withholds the tool schemas entirely - a request otherwise
+        // identical must still succeed (the model simply cannot call tools).
+        let inv_none = Invocation::new()
+            .set("prompt", json!("Describe this image."))
+            .set("max_new", json!(4))
+            .set("tools", json!(tools))
+            .set("tool_choice", json!("none"))
+            .blob("image", Blob::new(Media::Image, bytes.clone()).with_meta(json!({"w": w, "h": h})));
+        let out_none = GenerateAction.run(&inv_none, &mut |_| {}).expect("served generate path failed on real weights (tool_choice none)");
+        assert_ne!(out_none.outputs.get("finish_reason"), Some(&json!("tool_choice_unmet")), "none must never demand a tool call");
     }
 
     #[test]
