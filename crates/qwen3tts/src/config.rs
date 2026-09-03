@@ -215,6 +215,13 @@ impl MtpConfig {
         }
     }
 
+    /// Same as [`Self::tiny`], but with `embedding_dim != d_model` -- exercises
+    /// the `small_to_mtp_projection` path the 1.7B family needs (0.6B has
+    /// `embedding_dim == d_model` and never hits it).
+    pub fn tiny_projected() -> MtpConfig {
+        MtpConfig { embedding_dim: 24, ..Self::tiny() }
+    }
+
     /// Serialise to a brain checkpoint config object (consumed by
     /// [`MtpModel::load_inference`]).
     pub fn to_json(&self) -> Value {

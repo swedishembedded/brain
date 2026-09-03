@@ -86,8 +86,15 @@ pub struct MtpModel {
     xn_final: DeviceBuffer,
     fwd_steps: Vec<Step>,
     // CPU input-embedding tables (residual codebooks) and output heads.
-    codec_embedding: Vec<Vec<f32>>, // [n_residual][vocab*d]
-    lm_head: Vec<Vec<f32>>,         // [n_residual][vocab*d]
+    codec_embedding: Vec<Vec<f32>>, // [n_residual][vocab*embedding_dim]
+    lm_head: Vec<Vec<f32>>,         // [n_residual][vocab*d_model]
+    // `Some((weight[d_model*embedding_dim], bias[d_model]))` when the Talker
+    // hidden width (`embedding_dim`) differs from this MTP's own internal
+    // width (`d_model`) -- the 1.7B family (embedding_dim 2048, d_model
+    // 1024); `None` when they're equal (the 0.6B family), where the HF
+    // checkpoint carries no such tensor at all and the projection really is
+    // Identity. See `MtpConfig::embedding_dim`'s doc comment.
+    small_to_mtp_projection: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 /// Temperature/top-k/top-p sampling over one residual codebook's logit row.
@@ -225,6 +232,25 @@ impl MtpModel {
         codec_embedding: Vec<Vec<f32>>,
         lm_head: Vec<Vec<f32>>,
     ) -> MtpModel {
+        Self::build_on_with_projection(gpu, cfg, decoder, codec_embedding, lm_head, None)
+    }
+
+    /// Same as [`Self::build_on`], with an explicit `small_to_mtp_projection`
+    /// (see the field doc on [`MtpModel`]).
+    pub fn build_on_with_projection(
+        gpu: Gpu,
+        cfg: MtpConfig,
+        decoder: std::collections::HashMap<String, Vec<f32>>,
+        codec_embedding: Vec<Vec<f32>>,
+        lm_head: Vec<Vec<f32>>,
+        small_to_mtp_projection: Option<(Vec<f32>, Vec<f32>)>,
+    ) -> MtpModel {
+        assert!(
+            small_to_mtp_projection.is_some() || cfg.embedding_dim == cfg.d_model,
+            "embedding_dim ({}) != d_model ({}) requires a small_to_mtp_projection",
+            cfg.embedding_dim,
+            cfg.d_model
+        );
         let t = cfg.num_code_groups;
         let roles = Self::decoder_param_list(&cfg)
             .into_iter()
@@ -275,10 +301,37 @@ impl MtpModel {
             fwd_steps: Vec::new(),
             codec_embedding,
             lm_head,
+            small_to_mtp_projection,
             gpu,
         };
         m.fwd_steps = m.forward_steps();
         m
+    }
+
+    /// Project an `embedding_dim`-wide row (a Talker hidden state, a
+    /// codebook-0 embedding, or a raw residual-codebook embedding) down to
+    /// this MTP's own `d_model` width, via `small_to_mtp_projection` when the
+    /// two widths differ, or a straight copy when they're equal (the 0.6B
+    /// family, where the reference itself has no such tensor).
+    fn project_to_hidden(&self, x: &[f32]) -> Vec<f32> {
+        let e = self.cfg.embedding_dim as usize;
+        assert_eq!(x.len(), e, "expected an embedding_dim-wide row");
+        match &self.small_to_mtp_projection {
+            Some((w, b)) => {
+                let d = self.cfg.d_model as usize;
+                let mut out = b.clone();
+                for o in 0..d {
+                    let wr = &w[o * e..(o + 1) * e];
+                    let mut acc = 0.0f32;
+                    for i in 0..e {
+                        acc += wr[i] * x[i];
+                    }
+                    out[o] += acc;
+                }
+                out
+            }
+            None => x.to_vec(),
+        }
     }
 
     fn forward_steps(&self) -> Vec<Step> {
@@ -474,18 +527,20 @@ impl MtpModel {
         residual_codes: &[u32],
     ) -> Vec<f32> {
         let d = self.cfg.d_model as usize;
+        let e = self.cfg.embedding_dim as usize;
         let t = self.t as usize;
-        assert_eq!(talker_hidden.len(), d);
-        assert_eq!(cb0_embed.len(), d);
+        assert_eq!(talker_hidden.len(), e);
+        assert_eq!(cb0_embed.len(), e);
         assert_eq!(residual_codes.len(), t.saturating_sub(2));
         let mut out = vec![0.0f32; t * d];
-        out[0..d].copy_from_slice(talker_hidden);
-        out[d..2 * d].copy_from_slice(cb0_embed);
+        out[0..d].copy_from_slice(&self.project_to_hidden(talker_hidden));
+        out[d..2 * d].copy_from_slice(&self.project_to_hidden(cb0_embed));
         for (i, &code) in residual_codes.iter().enumerate() {
             // position 2+i embeds codebook (i+1) via codec_embedding[i].
             let tbl = &self.codec_embedding[i];
-            let src = code as usize * d;
-            out[(2 + i) * d..(3 + i) * d].copy_from_slice(&tbl[src..src + d]);
+            let src = code as usize * e;
+            let row = self.project_to_hidden(&tbl[src..src + e]);
+            out[(2 + i) * d..(3 + i) * d].copy_from_slice(&row);
         }
         out
     }
@@ -528,18 +583,24 @@ impl MtpModel {
         rng: &mut data::rng::Rng,
     ) -> (Vec<u32>, Vec<f32>) {
         let d = self.cfg.d_model as usize;
+        let e = self.cfg.embedding_dim as usize;
         let v = self.cfg.vocab as usize;
         let t = self.t as usize; // num_code_groups (16)
         let nres = t - 1; // 15
-        assert_eq!(talker_hidden.len(), d);
-        assert_eq!(cb0_embed.len(), d);
+        assert_eq!(talker_hidden.len(), e);
+        assert_eq!(cb0_embed.len(), e);
 
         let mut emb = vec![0.0f32; t * d];
-        emb[0..d].copy_from_slice(talker_hidden);
-        emb[d..2 * d].copy_from_slice(cb0_embed);
+        emb[0..d].copy_from_slice(&self.project_to_hidden(talker_hidden));
+        emb[d..2 * d].copy_from_slice(&self.project_to_hidden(cb0_embed));
 
         let mut codes = vec![0u32; nres];
-        let mut res_sum = vec![0.0f32; d];
+        // `res_sum` feeds back into the TALKER's own embedding stream
+        // (`pipeline::generate_codes`'s `feed`), which is `embedding_dim`
+        // wide -- NOT this MTP's internal `d_model`. Accumulate the RAW
+        // (unprojected) codec_embedding rows, matching `codec_embed`'s own
+        // contract above.
+        let mut res_sum = vec![0.0f32; e];
         // k = codebook index being predicted (1..=15); head index = k-1; read pos = k.
         for k in 1..=nres {
             let logits = self.logits(&emb); // [(t-1)*v]
@@ -559,26 +620,32 @@ impl MtpModel {
             codes[k - 1] = best as u32;
             // codec_embedding[k-1] embeds codebook k.
             let tbl = &self.codec_embedding[k - 1];
-            let r = &tbl[best * d..(best + 1) * d];
-            for j in 0..d {
+            let r = &tbl[best * e..(best + 1) * e];
+            for j in 0..e {
                 res_sum[j] += r[j];
             }
             if k < nres {
                 // position k+1 carries the embedding of codebook k for the next step.
-                emb[(k + 1) * d..(k + 2) * d].copy_from_slice(r);
+                let projected = self.project_to_hidden(r);
+                emb[(k + 1) * d..(k + 2) * d].copy_from_slice(&projected);
             }
         }
         (codes, res_sum)
     }
 
     /// Residual codebook embedding row: `codec_embedding[residual_idx][code]`
-    /// (`[d_model]`). `residual_idx` is `0..=14` (codebook `residual_idx + 1`).
-    /// Used to build the reference-audio codec embedding in ICL voice-clone
-    /// prompts.
+    /// (`[embedding_dim]` -- the Talker's own hidden width, NOT `d_model`;
+    /// they coincide on the 0.6B family but not the 1.7B). `residual_idx` is
+    /// `0..=14` (codebook `residual_idx + 1`). Used to build the
+    /// reference-audio codec embedding in ICL voice-clone prompts, which are
+    /// added directly into the Talker's own embedding stream -- so this
+    /// deliberately returns the UNPROJECTED row, not `project_to_hidden`'s
+    /// `d_model`-wide output (that projection is this MTP's own internal
+    /// concern, not part of the Talker-side contract this method serves).
     pub fn codec_embed(&self, residual_idx: usize, code: u32) -> &[f32] {
-        let d = self.cfg.d_model as usize;
-        let s = code as usize * d;
-        &self.codec_embedding[residual_idx][s..s + d]
+        let e = self.cfg.embedding_dim as usize;
+        let s = code as usize * e;
+        &self.codec_embedding[residual_idx][s..s + e]
     }
 
     /// Load an inference-only MTP from a brain checkpoint written by
@@ -608,7 +675,13 @@ impl MtpModel {
         let lm_head = (0..nres)
             .map(|i| take(&format!("lm_head.{i}.weight")))
             .collect();
-        MtpModel::build_on(gpu, cfg, decoder, codec_embedding, lm_head)
+        // Present only when `embedding_dim != d_model` (the 1.7B family);
+        // `import::import_mtp` writes it exactly then, per the HF checkpoint.
+        let projection = c
+            .find("small_to_mtp_projection.weight", "")
+            .cloned()
+            .map(|w| (w, take("small_to_mtp_projection.bias")));
+        MtpModel::build_on_with_projection(gpu, cfg, decoder, codec_embedding, lm_head, projection)
     }
 
     /// Build a randomly-initialised MTP for tests.
@@ -639,10 +712,15 @@ impl MtpModel {
         }
         let nres = cfg.n_residual() as usize;
         let d = cfg.d_model as usize;
+        let e = cfg.embedding_dim as usize;
         let v = cfg.vocab as usize;
-        let codec_embedding = (0..nres).map(|_| normal(v * d, 0.02)).collect();
+        // Embedding tables are `embedding_dim`-wide (the Talker's own hidden
+        // width); only `lm_head` (reading the internal `d_model`-wide hidden
+        // state) stays at `d_model`.
+        let codec_embedding = (0..nres).map(|_| normal(v * e, 0.02)).collect();
         let lm_head = (0..nres).map(|_| normal(v * d, 0.02)).collect();
-        MtpModel::build_on(gpu, cfg, decoder, codec_embedding, lm_head)
+        let projection = if e != d { Some((normal(d * e, 0.02), normal(d, 0.0))) } else { None };
+        MtpModel::build_on_with_projection(gpu, cfg, decoder, codec_embedding, lm_head, projection)
     }
 }
 
@@ -692,6 +770,39 @@ mod tests {
         assert_eq!(&embeds[d..2 * d], &cb0[..]);
         let logits = m.logits(&embeds);
         assert!(logits.iter().all(|x| x.is_finite()));
+    }
+
+    /// Regression for the 1.7B-family bug found running `brain qwen3tts
+    /// design` against a real `Qwen3-TTS-12Hz-1.7B-VoiceDesign` checkpoint:
+    /// it panicked in `assert_eq!(cb0_embed.len(), d)` because that build
+    /// assumed `small_to_mtp_projection` was always Identity (true only when
+    /// `embedding_dim == d_model`, the 0.6B case). `tiny_projected` sets
+    /// `embedding_dim=24 != d_model=16`, matching the real 1.7B checkpoint's
+    /// `hidden_size=2048 != code_predictor.hidden_size=1024` shape mismatch.
+    #[test]
+    fn assemble_projects_embedding_dim_rows_down_to_d_model() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = MtpConfig::tiny_projected();
+        let (d, e) = (cfg.d_model as usize, cfg.embedding_dim as usize);
+        assert_ne!(d, e, "test config must actually exercise the projection");
+        let m = MtpModel::new_synthetic_on(gpu_core::testgpu::dev(PIPELINES), cfg, 1);
+        let th = vec![0.5f32; e];
+        let cb0 = vec![-0.5f32; e];
+        // Would panic before the fix (assert_eq! on mismatched widths); now
+        // produces a properly `d_model`-wide sequence.
+        let embeds = m.assemble(&th, &cb0, &[1, 2]);
+        assert_eq!(embeds.len(), 4 * d);
+        assert!(embeds.iter().all(|x| x.is_finite()));
+        // The projection must actually run (not silently truncate/passthrough):
+        // pos 0's d_model-wide row is NOT simply th's first d entries.
+        assert_ne!(&embeds[0..d], &th[0..d]);
+
+        let (codes, res_sum) = m.generate_residuals_with(&th, &cb0, None, &mut data::rng::Rng::new(1));
+        assert_eq!(codes.len(), 3); // num_code_groups(4) - 1
+        assert_eq!(res_sum.len(), e, "feedback embedding must stay Talker-width (e), not d_model");
+        assert!(res_sum.iter().all(|x| x.is_finite()));
     }
 }
 
