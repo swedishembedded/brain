@@ -21,7 +21,20 @@ use data::rng::Rng;
 
 use crate::config::VisionConfig;
 use crate::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
-use crate::mrope::{get_rope_index, mrope_tables};
+use crate::mrope::{get_rope_index, get_rope_index_multi, mrope_tables};
+
+/// One image's host-packed input to [`Qwen3Vl::generate`]/[`Qwen3Vl::generate_cb`]/
+/// [`Qwen3Vl::generate_timed`]: its pre-merge patch grid `(grid_h, grid_w)` and its
+/// `[grid_h·grid_w, patch_vec]` packed pixel tensor, in the same units and layout
+/// [`VisionEncoder::encode_with_taps`] takes for one image. A request supplies one
+/// of these per image, in the order its vision-start/`[IMG]*`/vision-end run
+/// appears in `tokens` (see `crate::caps`'s module doc for the served request
+/// shape this backs).
+#[derive(Clone, Copy)]
+pub struct ImageInput<'a> {
+    pub grid: (u32, u32),
+    pub pixels: &'a [f32],
+}
 
 /// The decoding policy for [`Qwen3Vl::generate_timed`]'s per-token pick.
 /// `temperature <= 0.0` is greedy argmax; otherwise `top_k`/`top_p` gate a
@@ -330,20 +343,27 @@ impl Qwen3Vl {
         self.decoder.forward()
     }
 
-    /// Greedy KV-cache generation for one image + text prompt: real
-    /// `qwen3::Qwen` `step`/`step_embed` machinery (via this session's new
-    /// `step_mrope`/`step_embed_mrope`, Phase 7a), not [`Self::forward`]'s
+    /// Greedy KV-cache generation for zero-or-more images + a text prompt:
+    /// real `qwen3::Qwen` `step`/`step_embed` machinery (via this session's
+    /// new `step_mrope`/`step_embed_mrope`, Phase 7a), not [`Self::forward`]'s
     /// training-loss-shaped batched path -- the gap noted as
     /// ("`Qwen3Vl::forward()` returns `f32`...
     /// there is no sampling loop").
     ///
-    /// Prefill splices the image at its token run the same way
+    /// `images` supplies one [`ImageInput`] per image, in the order its
+    /// vision-start/`[IMG]*`/vision-end run appears in `tokens` -- a single
+    /// image is `&[image]`, matching every caller before multi-image support
+    /// existed byte-for-byte (see `crates/qwen3vl/src/caps.rs`'s regression
+    /// test). Prefill splices each image at its own token run the same way
     /// [`Self::forward`] does (image-placeholder token ids → step_embed_mrope
-    /// with the matching merged visual row; every other token → step_mrope),
-    /// so the KV cache never knows the difference (mirrors `qwen3::Qwen::
-    /// prefill`'s own doc). Decode continues the position sequence past the
-    /// prompt as plain text (T=H=W, +1 per token — the same "media block
-    /// then plain text" case `qwen3vl::mrope::get_rope_index_multi` documents).
+    /// with the matching merged visual row, walking a SINGLE row counter
+    /// across every image in the request in order; every other token →
+    /// step_mrope), so the KV cache never knows the difference, and never
+    /// knows how many images contributed the rows it is walking (mirrors
+    /// `qwen3::Qwen::prefill`'s own doc). Decode continues the position
+    /// sequence past the prompt as plain text (T=H=W, +1 per token -- the same
+    /// "media block then plain text" case `qwen3vl::mrope::get_rope_index_multi`
+    /// documents).
     ///
     /// `sample` selects the decoding policy: [`SampleParams::greedy`] is
     /// argmax (deterministic, matching this function's original behaviour);
@@ -362,8 +382,8 @@ impl Qwen3Vl {
     /// `deepstack_row` parameter; see also
     /// `crates/qwen3/tests/deepstack_decode_parity.rs`).
     #[allow(clippy::too_many_arguments)]
-    pub fn generate(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32], sample: SampleParams, rng: &mut Rng) -> Vec<u32> {
-        self.generate_cb(tokens, grid, pixels, max_new, eos_ids, sample, rng, |_| {})
+    pub fn generate(&self, tokens: &[u32], images: &[ImageInput<'_>], max_new: u32, eos_ids: &[u32], sample: SampleParams, rng: &mut Rng) -> Vec<u32> {
+        self.generate_cb(tokens, images, max_new, eos_ids, sample, rng, |_| {})
     }
 
     /// [`Self::generate`] with a per-token callback — the seam the served
@@ -374,15 +394,14 @@ impl Qwen3Vl {
     pub fn generate_cb(
         &self,
         tokens: &[u32],
-        grid: (u32, u32),
-        pixels: &[f32],
+        images: &[ImageInput<'_>],
         max_new: u32,
         eos_ids: &[u32],
         sample: SampleParams,
         rng: &mut Rng,
         on_token: impl FnMut(u32),
     ) -> Vec<u32> {
-        self.generate_timed(tokens, grid, pixels, max_new, eos_ids, sample, rng, on_token).0
+        self.generate_timed(tokens, images, max_new, eos_ids, sample, rng, on_token).0
     }
 
     /// The storage tier the decoder's per-layer linears ACTUALLY landed on,
@@ -413,8 +432,7 @@ impl Qwen3Vl {
     pub fn generate_timed(
         &self,
         tokens: &[u32],
-        grid: (u32, u32),
-        pixels: &[f32],
+        images: &[ImageInput<'_>],
         max_new: u32,
         eos_ids: &[u32],
         sample: SampleParams,
@@ -422,29 +440,51 @@ impl Qwen3Vl {
         mut on_token: impl FnMut(u32),
     ) -> (Vec<u32>, StageTimes) {
         let mut st = StageTimes { prompt_tokens: tokens.len() as u32, ..StageTimes::default() };
-        let (gh, gw) = grid;
-        let n = gh * gw;
-        let m2 = self.merge * self.merge;
-        let n_visual = n / m2;
         let d_model = self.decoder.cfg.d_model as usize;
 
-        // Vision tower -> visual tokens (+ DeepStack taps), same as forward().
-        let t_vision = Instant::now();
-        let (feats, tap_feats) = self.encoder.encode_with_taps(&self.vgpu, gh, gw, pixels, &self.vcfg.deepstack_indexes);
-        st.vision_s = t_vision.elapsed().as_secs_f64();
+        // Vision tower -> visual tokens (+ DeepStack taps), once per image (the
+        // tower has no batch axis -- see `crate::caps`'s module doc). Each
+        // image's merged rows and each DeepStack level's merged rows are
+        // concatenated in image order into ONE flat buffer per level, because
+        // that is the shape the decoder's splice/DeepStack buffers were sized
+        // for: `qwen3::Qwen::enable_deepstack`'s `n_rows` is a construction-time
+        // CAPACITY that must bound the SUM of every image's visual tokens in one
+        // request (not any single image's own count), since `decode_steps`
+        // addresses that buffer by a `deepstack_row` that walks the WHOLE
+        // request's image rows, not a per-image index.
+        let mut visual: Vec<f32> = Vec::new();
+        let mut ds_levels: Vec<Vec<f32>> = vec![Vec::new(); self.ds_mergers.len()];
+        let mut grids_llm: Vec<(u32, u32, u32)> = Vec::with_capacity(images.len());
+        for img in images {
+            let (gh, gw) = img.grid;
+            let n = gh * gw;
+            let t_vision = Instant::now();
+            let (feats, tap_feats) = self.encoder.encode_with_taps(&self.vgpu, gh, gw, img.pixels, &self.vcfg.deepstack_indexes);
+            st.vision_s += t_vision.elapsed().as_secs_f64();
 
-        let t_merge = Instant::now();
-        let visual = self.merger.merge(&self.vgpu, &feats, n);
-        assert_eq!(visual.len(), (n_visual as usize) * d_model);
-        for (level, (tap, ds)) in tap_feats.iter().zip(&self.ds_mergers).enumerate() {
-            self.decoder.write_deepstack(level, &ds.merge(&self.vgpu, tap, n));
+            let t_merge = Instant::now();
+            visual.extend(self.merger.merge(&self.vgpu, &feats, n));
+            for (level, (tap, ds)) in tap_feats.iter().zip(&self.ds_mergers).enumerate() {
+                ds_levels[level].extend(ds.merge(&self.vgpu, tap, n));
+            }
+            st.merge_s += t_merge.elapsed().as_secs_f64();
+
+            grids_llm.push((1, gh / self.merge, gw / self.merge));
         }
-        st.merge_s = t_merge.elapsed().as_secs_f64();
+        let n_visual = (visual.len() / d_model) as u32;
+        assert_eq!(visual.len(), (n_visual as usize) * d_model);
+        for (level, data) in ds_levels.iter().enumerate() {
+            self.decoder.write_deepstack(level, data);
+        }
         st.visual_tokens = n_visual;
 
-        // M-RoPE positions for the KNOWN prompt (whole-sequence, once).
-        let grids_llm = [(1, gh / self.merge, gw / self.merge)];
-        let prompt_positions = get_rope_index(tokens, self.image_token_id, &grids_llm);
+        // M-RoPE positions for the KNOWN prompt (whole-sequence, once):
+        // `get_rope_index_multi` with ONE placeholder kind (image) whose
+        // `grids_llm` lists every image's merged `(t,h,w)` extent in the
+        // order it appears in `tokens` -- the same multi-occurrence walk
+        // `mrope::rope_index_two_adjacent_images` already gates, generalized
+        // here from "always exactly one grid" to N.
+        let prompt_positions = get_rope_index_multi(tokens, &[(self.image_token_id, &grids_llm)]);
         assert_eq!(prompt_positions.len(), tokens.len());
 
         // Prefill: image rows via step_embed_mrope, text rows via
@@ -758,8 +798,9 @@ mod tests {
         let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
 
         let max_new = 5u32;
+        let images = [ImageInput { grid: (4, 4), pixels: &pixels }];
         let mut gen_rng = Rng::new(99);
-        let out1 = model.generate(&tokens, (4, 4), &pixels, max_new, &[], SampleParams::greedy(), &mut gen_rng);
+        let out1 = model.generate(&tokens, &images, max_new, &[], SampleParams::greedy(), &mut gen_rng);
         assert!(!out1.is_empty(), "generate produced no tokens");
         assert!(out1.len() as u32 <= max_new, "generate exceeded max_new");
         for &t in &out1 {
@@ -842,13 +883,13 @@ mod tests {
             DecoderBuild::Decode(Dtype::F32),
         );
         let mut gen_rng2 = Rng::new(1);
-        let out2 = model2.generate(&tokens, (4, 4), &pixels, max_new, &[], SampleParams::greedy(), &mut gen_rng2);
+        let out2 = model2.generate(&tokens, &images, max_new, &[], SampleParams::greedy(), &mut gen_rng2);
         assert_eq!(out1, out2, "greedy generation must be deterministic across independently-constructed identical models, regardless of the RNG state");
 
         // eos_ids actually stops generation early: the first token out1[0]
         // treated as an immediate stop id must yield an empty sequence.
         let mut gen_rng3 = Rng::new(2);
-        let out3 = model.generate(&tokens, (4, 4), &pixels, max_new, &[out1[0]], SampleParams::greedy(), &mut gen_rng3);
+        let out3 = model.generate(&tokens, &images, max_new, &[out1[0]], SampleParams::greedy(), &mut gen_rng3);
         assert!(out3.is_empty(), "an eos id matching the very first generated token must stop before emitting it, got {out3:?}");
 
         // A real sampling request (temperature > 0) must actually consult the
@@ -859,13 +900,177 @@ mod tests {
         for seed in 0..16u64 {
             let mut rng_a = Rng::new(seed);
             let mut rng_b = Rng::new(seed + 1000);
-            let a = model.generate(&tokens, (4, 4), &pixels, max_new, &[], sample, &mut rng_a);
-            let b = model.generate(&tokens, (4, 4), &pixels, max_new, &[], sample, &mut rng_b);
+            let a = model.generate(&tokens, &images, max_new, &[], sample, &mut rng_a);
+            let b = model.generate(&tokens, &images, max_new, &[], sample, &mut rng_b);
             if a != b {
                 disagreed = true;
                 break;
             }
         }
         assert!(disagreed, "temperature=1.0 sampling must vary across RNG seeds on at least one of 16 trials");
+
+        // Regression: this exact tiny-config single-image scenario produced
+        // [3, 3, 3, 3, 3] before multi-image support existed (captured from
+        // this same test prior to `Qwen3Vl::generate`'s signature changing
+        // from `(grid, pixels)` to `images: &[ImageInput]`). A single-image
+        // request (`&[image]`) must still reach that exact sequence --
+        // multi-image wiring must be additive, not a behavior change for the
+        // request shape every existing caller already used.
+        assert_eq!(out1, vec![3, 3, 3, 3, 3], "single-image generate output changed -- multi-image wiring must be byte-for-byte for one image");
+    }
+
+    /// Two images in one request: proves (a) it runs end to end without
+    /// panic/assert with a real multi-image token stream and a combined
+    /// DeepStack buffer wider than either image alone needs, and (b) the
+    /// SECOND image actually influences the generated sequence (not merely
+    /// decorative token-count padding) -- changing only its pixels, with the
+    /// first image and the text prompt held fixed, must change the output.
+    #[test]
+    fn two_image_generate_runs_and_second_image_changes_output() {
+        let vcfg = VisionConfig {
+            depth: 2,
+            hidden: 32,
+            num_heads: 2,
+            intermediate: 64,
+            patch_size: 2,
+            temporal_patch_size: 1,
+            spatial_merge_size: 2,
+            num_position_embeddings: 16,
+            out_hidden_size: 40,
+            in_channels: 2,
+            deepstack_indexes: vec![0, 1],
+        };
+        let dcfg = QwenConfig {
+            vocab: 23,
+            block_size: 24,
+            n_layers: 2,
+            d_model: 40,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 8,
+            d_ff: 64,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 24,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        };
+
+        let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
+        let mut vspecs: Vec<(&str, usize, bool)> = vec![
+            ("patch_embed.weight", c * pv, false),
+            ("patch_embed.bias", c, false),
+            ("pos_embed", vcfg.num_position_embeddings as usize * c, false),
+        ];
+        let block_leaf_dims: Vec<(String, usize, bool)> = (0..vcfg.depth)
+            .flat_map(|b| {
+                [
+                    (format!("blocks.{b}.norm1.weight"), c, true),
+                    (format!("blocks.{b}.norm1.bias"), c, false),
+                    (format!("blocks.{b}.qkv.weight"), 3 * c * c, false),
+                    (format!("blocks.{b}.qkv.bias"), 3 * c, false),
+                    (format!("blocks.{b}.proj.weight"), c * c, false),
+                    (format!("blocks.{b}.proj.bias"), c, false),
+                    (format!("blocks.{b}.norm2.weight"), c, true),
+                    (format!("blocks.{b}.norm2.bias"), c, false),
+                    (format!("blocks.{b}.fc1.weight"), mlp * c, false),
+                    (format!("blocks.{b}.fc1.bias"), mlp, false),
+                    (format!("blocks.{b}.fc2.weight"), c * mlp, false),
+                    (format!("blocks.{b}.fc2.bias"), c, false),
+                ]
+            })
+            .collect();
+        for (n, s, o) in &block_leaf_dims {
+            vspecs.push((n.as_str(), *s, *o));
+        }
+        let vweights = rand_map(Rng::new(21), &vspecs);
+
+        let merged = c * 4;
+        let mweights = rand_map(
+            Rng::new(22),
+            &[
+                ("ln.weight", c, true),
+                ("ln.bias", c, false),
+                ("fc1.weight", merged * merged, false),
+                ("fc1.bias", merged, false),
+                ("fc2.weight", 40 * merged, false),
+                ("fc2.bias", 40, false),
+            ],
+        );
+        let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len() as u64)
+            .map(|i| {
+                rand_map(
+                    Rng::new(40 + i),
+                    &[
+                        ("ln.weight", merged, true),
+                        ("ln.bias", merged, false),
+                        ("fc1.weight", merged * merged, false),
+                        ("fc1.bias", merged, false),
+                        ("fc2.weight", 40 * merged, false),
+                        ("fc2.bias", 40, false),
+                    ],
+                )
+            })
+            .collect();
+
+        let dweights = qwen3::init_weights(&dcfg, 23);
+
+        // Prompt: 2 text, then TWO back-to-back 2x2-merged (4-token) image
+        // runs (8 image tokens total, capacity 8 -- exactly the SUM two
+        // images need, wider than either alone). No trailing text token: an
+        // untrained tiny transformer's near-identity residual stream tends to
+        // echo whatever token immediately precedes the generated position
+        // (attention barely perturbs it at this scale/init), so ending the
+        // prompt on a real vocab id would let that echo dominate the argmax
+        // regardless of image content and make this test measure the echo,
+        // not the image -- ending on an image row (a continuous embedding,
+        // not any one vocab id's own row) removes that confound.
+        let tokens: Vec<u32> = vec![1, 2, IMG, IMG, IMG, IMG, IMG, IMG, IMG, IMG];
+        let seq_len = 24u32;
+        let max_new = 5u32;
+
+        let build_model = || {
+            Qwen3Vl::new(
+                vcfg.clone(),
+                dcfg.clone(),
+                vweights.clone(),
+                mweights.clone(),
+                ds_mweights.clone(),
+                &dweights,
+                seq_len,
+                IMG,
+                2,
+                8, // capacity = sum of both images' 4 visual tokens each
+                [2, 1, 1],
+                DecoderBuild::Decode(Dtype::F32),
+            )
+        };
+
+        let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
+        let image0: Vec<f32> = { let mut r = Rng::new(24); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image1_a: Vec<f32> = { let mut r = Rng::new(25); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image1_b: Vec<f32> = { let mut r = Rng::new(26); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+
+        let model = build_model();
+        let images_a = [ImageInput { grid: (4, 4), pixels: &image0 }, ImageInput { grid: (4, 4), pixels: &image1_a }];
+        let mut rng_a = Rng::new(50);
+        let out_a = model.generate(&tokens, &images_a, max_new, &[], SampleParams::greedy(), &mut rng_a);
+        assert!(!out_a.is_empty(), "two-image generate produced no tokens");
+        assert!(out_a.len() as u32 <= max_new);
+        for &t in &out_a {
+            assert!((t as usize) < 23, "generated token {t} outside vocab 23");
+        }
+
+        // Same first image, DIFFERENT second image, same model weights and
+        // prompt: the sequence must change if the second image's rows are
+        // really reaching the decoder (not dropped, zeroed, or only the
+        // first image's rows ever read).
+        let model2 = build_model();
+        let images_b = [ImageInput { grid: (4, 4), pixels: &image0 }, ImageInput { grid: (4, 4), pixels: &image1_b }];
+        let mut rng_b = Rng::new(51);
+        let out_b = model2.generate(&tokens, &images_b, max_new, &[], SampleParams::greedy(), &mut rng_b);
+        assert_ne!(out_a, out_b, "changing only the SECOND image did not change the generated sequence -- it is not actually influencing output");
     }
 }

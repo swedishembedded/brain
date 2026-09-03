@@ -96,6 +96,27 @@ checkpoint has been run through this resident on this machine)
   `BRAIN_QWEN3VL_WEIGHTS`): a safetensors directory, a GGUF language half, or
   the directory holding a GGUF pair.
 
+## Multiple images in one request
+
+`generate` takes up to 8 images: `image` (required) plus `image1`..`image7`
+(optional), each the same wire shape as `image`. They must be supplied
+**contiguous from `image`** - `image` and `image1` set with `image2` absent
+is a 2-image request, and a later `image3` is never read. Each image gets its
+own smart-resize (they need not share a resolution or aspect ratio) and its
+own run of visual tokens in the prompt, in key order, ahead of your question
+text.
+
+```bash
+BRAIN_QWEN3VL_WEIGHTS=/path/to/qwen3-vl \
+  brain qwen3vl generate --prompt "What changed between these two photos?" \
+    --in image=before.ppm --in image1=after.ppm --out text=answer.txt
+```
+
+`max_pixels` still bounds each image's own resize budget; the resident's
+total visual-token capacity is sized for 8 images at that budget each, so a
+request combining many large images can still be refused (naming how many
+tokens it needed) rather than silently corrupted or truncated.
+
 ## How long a caption takes, and the one knob that changes it
 
 Both halves of the model run on the placed device: the ViT tower is a second

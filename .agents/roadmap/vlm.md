@@ -775,3 +775,65 @@ run through `resident_qwen3vl.rs` itself. True continuous batching
 (`model::serve::{Scheduler, PagedDecoder}`, the pattern `serving-contract.md`
 names for autoregressive decoder LMs) is out of scope here, same as it is
 for every other single-request VLM resident in this repo.
+
+## qwen3vl - `generate` takes N images, not exactly one
+
+The served `generate` action required exactly one `image` blob:
+`generate_spec()` declared one required image input, `Prepared::build`
+assembled a prompt with exactly one vision-start/`[IMG]*`/vision-end run, and
+`Qwen3Vl::generate_timed`'s prefill loop assumed one contiguous image-token
+run against one merged `visual` buffer. `mrope::get_rope_index_multi`
+(already gated by `rope_index_two_adjacent_images` and
+`multi_image_and_audio_interleave_independently`) already computed correct
+3-axis M-RoPE positions for several interleaved image blocks in one stream -
+the position math was never the gap, only the wiring above it.
+
+Wire shape chosen: `crates/capability`'s `Invocation`/`Outcome` blob API is
+keyed by one string name per call, with no array-blob convention anywhere in
+the repo (an array blob would ripple into the D-Bus fd-map and every HTTP
+transport, the same tradeoff `capability::blob::decode_video`'s own doc
+weighs for a different input kind). Rather than invent that, `generate_spec`
+now declares 8 numbered blob inputs - `image` (required) plus `image1`..
+`image7` (optional) - read contiguous from `image` by a new
+`caps::decode_images`; a request using only `image` is unchanged, byte for
+byte, from before this session (regression-tested in `crate::model`'s
+`generate_is_deterministic_and_respects_eos`, which now also pins the exact
+pre-change output `[3, 3, 3, 3, 3]` for that tiny-config scenario).
+
+Wiring: `Prepared::build_multi` resizes/packs each image independently and
+concatenates N vision-start/`[IMG]*`/vision-end runs into one prompt, in
+key order. `Qwen3Vl::generate_timed` now takes `images: &[ImageInput]` and
+runs the vision tower once per image (`VisionEncoder::encode_with_taps` has
+no batch axis), concatenating each image's merged visual rows - and each
+DeepStack level's merged rows - into ONE flat buffer per level, in image
+order. The prefill loop's existing `visual_row` counter already walked every
+image-placeholder token in the stream regardless of which image it belonged
+to, so it needed no change: the fix was upstream of it (assembling the right
+buffers), not in it. `generate_timed` now calls `get_rope_index_multi`
+directly (`get_rope_index` was always a wrapper around it, so this is a
+naming change more than a math one) with the per-image `grids_llm` list built
+in the same loop.
+
+Capacity: `n_visual_capacity` (`caps::visual_capacity`) now bounds the SUM of
+one request's images, not the largest single image - `8 x
+per_image_visual_capacity(max_pixels)`. This is required, not merely safer:
+`qwen3::Qwen::enable_deepstack` allocates one flat `[n_rows, d_model]` buffer
+per level, and `decode_steps`'s `deepstack_row` addresses a row in it that
+walks every image in the request in sequence, never a per-image sub-range. A
+capacity sized for only the largest single image would let a second image's
+rows land past the buffer's end.
+
+Found while writing the "second image changes the sequence" test: an
+untrained tiny-config decoder's near-identity residual stream echoes
+whatever token immediately precedes the generated position almost
+regardless of context, so a token stream ending on a real vocab id (as
+`generate_is_deterministic_and_respects_eos`'s prompt does) makes greedy
+argmax insensitive to the image by construction, at EVERY decoder-weight
+seed tried (1..20) - not a wiring bug, a property of that specific tiny
+random init. Ending the test prompt on an image row (a continuous embedding,
+not any one vocab id's own row) removes the confound; with that fixed, every
+seed sweep showed the second image changing the output, confirming the
+wiring is real. Left open: no multi-image real-checkpoint smoke exists yet
+(the real-weight test in `caps.rs` still exercises exactly one image) -
+worth doing once a real Qwen3-VL checkpoint with genuinely distinguishable
+photos is on hand.

@@ -38,6 +38,31 @@
 //!   into the incremental decode path), so real Qwen3-VL-4B checkpoints
 //!   (`deepstack_indexes: [5, 11, 17]`) work here, not just DeepStack-free
 //!   configs.
+//! - **Multi-image is real, via numbered blob keys.** `crates/capability`'s
+//!   `Invocation`/`Outcome` blob API (`grep 'fn blob'` there) is keyed by ONE
+//!   string name per call -- there is no array-blob wire convention anywhere
+//!   in this repo, and adding one (a repeated/dynamic blob) would ripple into
+//!   the D-Bus fd-map and every HTTP transport for one input kind (the same
+//!   tradeoff `capability::blob::decode_video`'s own doc weighs, for a
+//!   different reason). The convention here is instead the simplest thing
+//!   consistent with the existing single-blob shape: numbered keys `image`,
+//!   `image1`, `image2`, … contiguous from `image`, up to [`MAX_IMAGES`]. A
+//!   request with only `image` set is unchanged from before multi-image
+//!   support existed -- byte-for-byte, see `crate::model::tests::
+//!   generate_is_deterministic_and_respects_eos`'s hardcoded pre-change-output
+//!   assertion, and this module's own `decode_images_single_image_backward_
+//!   compatible` test. Each image gets its own smart-resize + patch/
+//!   token count (`Prepared::build`) and its own vision-start/`[IMG]*`/
+//!   vision-end run in the assembled prompt, in key order (`image`, `image1`,
+//!   …) -- N runs back-to-back, no text between them, ahead of the user's
+//!   prompt text. The resident's `n_visual_capacity` (see [`Resident`]) bounds
+//!   the SUM of every image's visual tokens in ONE request, not any single
+//!   image's own count -- `qwen3::Qwen::enable_deepstack`'s per-level buffer
+//!   is one flat `[n_rows, d_model]` block addressed by a `deepstack_row` that
+//!   walks every image's rows in the request in order (see
+//!   `crate::model::Qwen3Vl::generate_timed`'s doc), so a capacity sized for
+//!   only the largest single image would silently corrupt (or panic on) the
+//!   second image of any two-image request that individually fits.
 
 use std::sync::Mutex;
 
@@ -141,8 +166,39 @@ fn default_ctx_len() -> u32 {
     std::env::var("BRAIN_QWEN3VL_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(24576u32).max(1)
 }
 
+/// Cap on the number of images one request may supply -- see this module's
+/// doc for the numbered-blob-key convention this bounds. A cap exists so
+/// `generate_spec()` can declare a fixed, self-describing set of optional
+/// inputs (`image1`..`image{MAX_IMAGES-1}`) rather than an open-ended one;
+/// 8 is a practical ceiling for a single chat turn, not a checkpoint limit.
+pub const MAX_IMAGES: usize = 8;
+
+/// The wire name of image `i` (0-based): `image`, `image1`, `image2`, … --
+/// the ONE place this numbering is spelled, so `generate_spec()` and
+/// [`decode_images`] cannot drift about what key holds image 2.
+fn image_key(i: usize) -> String {
+    if i == 0 { "image".to_string() } else { format!("image{i}") }
+}
+
+/// Decode every image blob present, contiguous from `image` (required) up to
+/// [`MAX_IMAGES`] -- stops at the first missing numbered key, so `image`,
+/// `image1` present but `image2` absent is 2 images, never a request to skip
+/// index 2 and check `image3`. Mirrors [`capability::blob::decode_image`]'s
+/// own per-blob error shape (names the key, not just "an image").
+fn decode_images(inv: &Invocation) -> Result<Vec<(Vec<f32>, u32, u32)>, String> {
+    let mut out = Vec::new();
+    for i in 0..MAX_IMAGES {
+        let key = image_key(i);
+        if i > 0 && inv.get_blob(&key).is_none() {
+            break;
+        }
+        out.push(capability::blob::decode_image(inv, &key)?);
+    }
+    Ok(out)
+}
+
 pub fn generate_spec() -> ActionSpec {
-    ActionSpec::new("generate", "Qwen3-VL: image + text in, greedy text completion (validation-tier -- see this module's doc)")
+    let mut spec = ActionSpec::new("generate", "Qwen3-VL: 1-8 images + text in, greedy text completion (validation-tier -- see this module's doc)")
         .streaming()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
@@ -156,15 +212,26 @@ pub fn generate_spec() -> ActionSpec {
                 .default(json!(default_weights())),
         )
         .param(
-            ParamSpec::new("max_pixels", ParamType::Int, "resident capacity: max input image area in pixels (larger requests error, never silently truncate)")
-                .default(json!(DEFAULT_SERVE_MAX_PIXELS)),
+            ParamSpec::new(
+                "max_pixels",
+                ParamType::Int,
+                "resident capacity: max input image area in pixels, applied to EACH image independently (up to 8 images/request; a larger single image, or a request whose combined visual tokens exceed this resident's total capacity, errors -- never silently truncates)",
+            )
+            .default(json!(DEFAULT_SERVE_MAX_PIXELS)),
         )
         .param(
             ParamSpec::new("precision", ParamType::Str, "decoder storage tier: fp32 (default, exact) or int8 (LOSSY, ~4x less weight traffic per token)")
                 .default(json!("fp32")),
         )
-        .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required())
-        .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
+        .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required());
+    for i in 1..MAX_IMAGES {
+        spec = spec.input(BlobSpec::new(
+            &image_key(i),
+            Media::Image,
+            "optional additional image (same wire shape as 'image'); present contiguous from 'image', i.e. 'image2' is only read if 'image1' is also set",
+        ));
+    }
+    spec.output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
 pub fn manifest() -> Manifest {
@@ -214,7 +281,11 @@ pub struct Resident {
     /// How many visual tokens this resident's DeepStack/splice buffers were
     /// allocated for (computed once at construction from `max_pixels`) - see
     /// this module's own doc on why construction-time capacity, not one
-    /// request's exact size.
+    /// request's exact size. Sized for up to [`MAX_IMAGES`] images each at
+    /// `max_pixels` (`visual_capacity(cfg, max_pixels) * MAX_IMAGES`) -
+    /// bounding the SUM of one request's images, not any single image's own
+    /// count, because the decoder's DeepStack buffer is one flat block a
+    /// request's images all share (see this module's own doc).
     n_visual_capacity: u32,
     /// The KV-cache capacity this resident's decoder was actually BUILT for -
     /// `min(default_ctx_len(), cfg.text.max_position_embeddings)`, see
@@ -255,8 +326,8 @@ impl Resident {
             return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
         let max_new = inv.get_i64("max_new").unwrap_or(64).clamp(1, 2048) as u32;
-        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
-        let p = Prepared::build(self, &hwc, w, h, &prompt, max_new)?;
+        let images = decode_images(inv)?;
+        let p = Prepared::build_multi(self, &images, &prompt, max_new)?;
         progress(Progress::step(0, max_new, "generating"));
 
         let temperature = inv.get_f64("temp").unwrap_or(0.0).max(0.0) as f32;
@@ -272,7 +343,7 @@ impl Resident {
         let mut ids: Vec<u32> = Vec::new();
         let mut printed = String::new();
         let mut step = 0u32;
-        let out_ids = self.model.generate_cb(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, sample, &mut rng, |tok_id| {
+        let out_ids = self.model.generate_cb(&p.tokens, &p.image_inputs(), max_new, &p.eos, sample, &mut rng, |tok_id| {
             ids.push(tok_id);
             step += 1;
             let full = self.tok.decode(&ids);
@@ -358,9 +429,17 @@ fn with_resident<T>(dir: &str, max_pixels: u32, precision: Precision, f: impl Fn
     f(guard.as_ref().unwrap())
 }
 
-/// Everything one request needs from its image and prompt, before any model
-/// weight is touched: the packed patch tensor, its grid, the token stream with
-/// the image run spliced in, and the stop set.
+/// One image's preprocessed input, ready for [`crate::model::ImageInput`] to
+/// borrow from (pre-merge patch grid + packed `[N, patch_vec]` pixels).
+struct PreparedImage {
+    grid: (u32, u32),
+    pixels: Vec<f32>,
+}
+
+/// Everything one request needs from its images and prompt, before any model
+/// weight is touched: each image's packed patch tensor and grid, the token
+/// stream with every image's vision run spliced in (in image order), and the
+/// stop set.
 ///
 /// Extracted so the served action and the profiler share it byte-for-byte -
 /// two copies of the prompt assembly would be free to disagree about the chat
@@ -369,53 +448,90 @@ fn with_resident<T>(dir: &str, max_pixels: u32, precision: Precision, f: impl Fn
 struct Prepared {
     tokens: Vec<u32>,
     eos: Vec<u32>,
-    grid: (u32, u32),
-    pixels: Vec<f32>,
+    images: Vec<PreparedImage>,
     n_visual: u32,
     /// Host-side preprocessing wall time (smart resize, resample, normalize,
-    /// pack) - a stage in its own right at real image sizes.
+    /// pack, over every image) - a stage in its own right at real image sizes.
     preprocess_s: f64,
 }
 
 impl Prepared {
+    /// [`Self::build_multi`] for exactly one image -- every caller before
+    /// multi-image support existed (`generate_profiled`, this module's own
+    /// single-image tests) reaches this, so it must reproduce their output
+    /// byte-for-byte, which it does by definition: it is a zero-length loop
+    /// away from `build_multi` itself, not a second copy of the prompt/patch
+    /// assembly.
     fn build(hot: &Resident, hwc: &[f32], w: u32, h: u32, prompt: &str, max_new: u32) -> Result<Prepared, String> {
-        let t0 = std::time::Instant::now();
-        // Smart-resize to a patch-aligned target, bilinear resample, pack
-        // patches -- the same three real preprocessing steps the checkpoint's
-        // HF processor runs, no "caller must pre-align" shortcut.
-        let factor = hot.cfg.vision.patch_size * hot.cfg.vision.spatial_merge_size;
-        let (h_bar, w_bar) = smart_resize(h, w, factor, preprocess_min_pixels(), hot.max_pixels);
-        let n_visual = crate::preprocess::image_token_count(h_bar, w_bar, hot.cfg.vision.patch_size, hot.cfg.vision.spatial_merge_size);
-        if n_visual > hot.n_visual_capacity {
-            return Err(format!(
-                "qwenvl generate: image needs {n_visual} visual tokens, exceeding this resident's capacity {} \
-                 (raise 'max_pixels' -- current cap {} px)",
-                hot.n_visual_capacity, hot.max_pixels
-            ));
-        }
-        let mut chw = hwc_to_chw_resized(hwc, w, h, w_bar, h_bar);
-        normalize_unit(&mut chw);
-        let pixels = pack_patches(&chw, hot.cfg.vision.in_channels, h_bar, w_bar, hot.cfg.vision.patch_size, hot.cfg.vision.spatial_merge_size, hot.cfg.vision.temporal_patch_size);
+        Self::build_multi(hot, std::slice::from_ref(&(hwc.to_vec(), w, h)), prompt, max_new)
+    }
 
-        // Prompt: <|im_start|>user\n <|vision_start|> [IMG]*n_visual <|vision_end|> {prompt}<|im_end|>\n<|im_start|>assistant\n
+    /// Assemble ONE prompt from N images (in request order): each image gets
+    /// its own smart-resize + patch/token count, computed independently (a
+    /// wide image and a tall one in the same request are each resized to
+    /// their own patch-aligned target, not forced to share one), and its own
+    /// vision-start/`[IMG]*`/vision-end run, back-to-back with no text
+    /// between runs, ahead of the user's prompt text - see this module's doc
+    /// for the request shape this backs.
+    fn build_multi(hot: &Resident, images: &[(Vec<f32>, u32, u32)], prompt: &str, max_new: u32) -> Result<Prepared, String> {
+        let t0 = std::time::Instant::now();
+        if images.is_empty() {
+            return Err("qwenvl generate: at least one image is required".to_string());
+        }
+        let factor = hot.cfg.vision.patch_size * hot.cfg.vision.spatial_merge_size;
+
         let mut tokens = hot.tok.encode("<|im_start|>user\n");
-        tokens.push(hot.cfg.vision_start_token_id);
-        tokens.extend(std::iter::repeat_n(hot.cfg.image_token_id, n_visual as usize));
-        tokens.push(hot.cfg.vision_end_token_id);
+        let mut prepared = Vec::with_capacity(images.len());
+        let mut n_visual = 0u32;
+        for (hwc, w, h) in images {
+            // Smart-resize to a patch-aligned target, bilinear resample, pack
+            // patches -- the same three real preprocessing steps the
+            // checkpoint's HF processor runs, no "caller must pre-align"
+            // shortcut. Independent per image: a request's images need not
+            // share a resolution or aspect ratio.
+            let (h_bar, w_bar) = smart_resize(*h, *w, factor, preprocess_min_pixels(), hot.max_pixels);
+            let n_visual_i = crate::preprocess::image_token_count(h_bar, w_bar, hot.cfg.vision.patch_size, hot.cfg.vision.spatial_merge_size);
+            n_visual += n_visual_i;
+            if n_visual > hot.n_visual_capacity {
+                return Err(format!(
+                    "qwenvl generate: this request's {} image(s) need {n_visual} visual tokens combined, exceeding \
+                     this resident's capacity {} (raise 'max_pixels', or send fewer/smaller images -- current cap {} px/image)",
+                    images.len(),
+                    hot.n_visual_capacity,
+                    hot.max_pixels
+                ));
+            }
+            let mut chw = hwc_to_chw_resized(hwc, *w, *h, w_bar, h_bar);
+            normalize_unit(&mut chw);
+            let pixels =
+                pack_patches(&chw, hot.cfg.vision.in_channels, h_bar, w_bar, hot.cfg.vision.patch_size, hot.cfg.vision.spatial_merge_size, hot.cfg.vision.temporal_patch_size);
+            let grid = patch_grid(h_bar, w_bar, hot.cfg.vision.patch_size);
+
+            tokens.push(hot.cfg.vision_start_token_id);
+            tokens.extend(std::iter::repeat_n(hot.cfg.image_token_id, n_visual_i as usize));
+            tokens.push(hot.cfg.vision_end_token_id);
+            prepared.push(PreparedImage { grid, pixels });
+        }
         tokens.extend(hot.tok.encode(&format!("{prompt}<|im_end|>\n<|im_start|>assistant\n")));
         let eos = hot.tok.encode("<|im_end|>");
 
         if tokens.len() as u32 + max_new > hot.seq_len {
             return Err(format!(
-                "qwenvl generate: prompt ({} tokens incl. {n_visual} image tokens) + max_new ({max_new}) \
+                "qwenvl generate: prompt ({} tokens incl. {n_visual} image tokens across {} image(s)) + max_new ({max_new}) \
                  exceeds this resident's context {} (set $BRAIN_QWEN3VL_CTX to raise it, up to this checkpoint's own {} max_position_embeddings)",
                 tokens.len(),
+                images.len(),
                 hot.seq_len,
                 hot.cfg.text.max_position_embeddings
             ));
         }
-        let grid = patch_grid(h_bar, w_bar, hot.cfg.vision.patch_size);
-        Ok(Prepared { tokens, eos, grid, pixels, n_visual, preprocess_s: t0.elapsed().as_secs_f64() })
+        Ok(Prepared { tokens, eos, images: prepared, n_visual, preprocess_s: t0.elapsed().as_secs_f64() })
+    }
+
+    /// Borrowed [`crate::model::ImageInput`] view over [`Self::images`], the
+    /// shape `Qwen3Vl::generate_cb`/`generate_timed` take.
+    fn image_inputs(&self) -> Vec<crate::model::ImageInput<'_>> {
+        self.images.iter().map(|im| crate::model::ImageInput { grid: im.grid, pixels: &im.pixels }).collect()
     }
 }
 
@@ -443,7 +559,7 @@ pub fn generate_profiled(
         // `qwen3vl_bench compare`'s tier-divergence numbers reproducible run
         // to run rather than confounded by sampling noise.
         let mut rng = data::rng::Rng::new(0);
-        let (ids, st) = hot.model.generate_timed(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, crate::model::SampleParams::greedy(), &mut rng, |_| {});
+        let (ids, st) = hot.model.generate_timed(&p.tokens, &p.image_inputs(), max_new, &p.eos, crate::model::SampleParams::greedy(), &mut rng, |_| {});
         debug_assert_eq!(st.visual_tokens, p.n_visual);
         Ok((hot.tok.decode(&ids), st, p.preprocess_s))
     })
@@ -625,20 +741,40 @@ fn resolved_ctx_len(cfg: &Qwen3VlConfig) -> u32 {
     default_ctx_len().min(cfg.text.max_position_embeddings.max(1))
 }
 
+/// The largest visual-token count ONE image can produce at `max_pixels`.
+///
+/// A square at the pixel budget is the largest-area, most token-hungry shape
+/// smart_resize can produce for that budget (any other aspect ratio at the same
+/// area yields <= tokens after patch-grid rounding), so it is the right
+/// per-image upper bound to allocate for.
+fn per_image_visual_capacity(cfg: &Qwen3VlConfig, max_pixels: u32) -> u32 {
+    let factor = cfg.vision.patch_size * cfg.vision.spatial_merge_size;
+    let side = (max_pixels as f64).sqrt() as u32;
+    let (h_cap, w_cap) = smart_resize(side, side, factor, preprocess_min_pixels(), max_pixels);
+    crate::preprocess::image_token_count(h_cap, w_cap, cfg.vision.patch_size, cfg.vision.spatial_merge_size)
+}
+
 /// Capacity placement: image_row0 is arbitrary (Qwen3Vl::generate's
 /// incremental decode derives real placement from the token stream -- see this
 /// module's own doc); this is the CAPACITY this resident's DeepStack/splice
 /// buffers are sized for, not any one request's actual visual-token count.
 ///
-/// A square at the pixel budget is the largest-area, most token-hungry shape
-/// smart_resize can produce for that budget (any other aspect ratio at the same
-/// area yields <= tokens after patch-grid rounding), so it is the right
-/// capacity upper bound to allocate for.
+/// Bounds the SUM of one request's images, not one image's own count:
+/// [`MAX_IMAGES`] images at [`per_image_visual_capacity`] each. This is the
+/// right answer, not merely a safe one -- `qwen3::Qwen::enable_deepstack`
+/// allocates ONE flat `[n_rows, d_model]` buffer per level, and
+/// `decode_steps`'s `deepstack_row` addresses a row within it that walks
+/// every image in the request in sequence (`generate_timed`'s single running
+/// `visual_row` counter, see that function's doc), never a per-image
+/// sub-range. A capacity sized for only the largest single image would let a
+/// second, even tiny, image's rows land past the buffer's end -- exactly the
+/// out-of-bounds write `checkpoint::upload_at`'s own `assert!` this module's
+/// doc already relies on to make an oversized SINGLE image loud would, for a
+/// multi-image overflow, either panic on a request that "looks" well within
+/// budget per image, or (worse, on a backend without that assert) silently
+/// corrupt neighbouring DeepStack rows.
 fn visual_capacity(cfg: &Qwen3VlConfig, max_pixels: u32) -> u32 {
-    let factor = cfg.vision.patch_size * cfg.vision.spatial_merge_size;
-    let side = (max_pixels as f64).sqrt() as u32;
-    let (h_cap, w_cap) = smart_resize(side, side, factor, preprocess_min_pixels(), max_pixels);
-    crate::preprocess::image_token_count(h_cap, w_cap, cfg.vision.patch_size, cfg.vision.spatial_merge_size)
+    per_image_visual_capacity(cfg, max_pixels) * MAX_IMAGES as u32
 }
 
 fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
@@ -693,6 +829,13 @@ mod tests {
         assert!(a.params.iter().any(|p| p.name == "top_k"));
         assert!(a.params.iter().any(|p| p.name == "top_p"));
         assert!(a.params.iter().any(|p| p.name == "seed"));
+        // Numbered multi-image keys: 'image' required, 'image1'..'image{MAX_IMAGES-1}'
+        // present and optional -- see this module's doc for the convention.
+        for i in 1..MAX_IMAGES {
+            let key = image_key(i);
+            let b = a.inputs.iter().find(|b| b.name == key).unwrap_or_else(|| panic!("generate_spec missing '{key}'"));
+            assert!(!b.required, "'{key}' must be optional (only 'image' is required)");
+        }
     }
 
     /// [`resolved_ctx_len`] must never allocate a KV cache bigger than what
@@ -707,6 +850,38 @@ mod tests {
 
         cfg.text.max_position_embeddings = 262144; // the real released config's declared ceiling
         assert_eq!(resolved_ctx_len(&cfg), default_ctx_len(), "a checkpoint with real headroom gets the operator's configured default, not a fixed 4096");
+    }
+
+    /// [`decode_images`] reads contiguous from `image`: `image`+`image1` present
+    /// with `image2` ABSENT is 2 images, and a later `image3` (present but past
+    /// the gap) is never read -- this is the "contiguous from image1" rule this
+    /// module's doc promises, not "any numbered key present".
+    #[test]
+    fn decode_images_stops_at_the_first_gap() {
+        let px = |v: f32| {
+            let hwc = [v, v, v];
+            let bytes: Vec<u8> = hwc.iter().flat_map(|f| f.to_le_bytes()).collect();
+            Blob::new(Media::Image, bytes).with_meta(json!({"w": 1, "h": 1}))
+        };
+        let inv = Invocation::new().blob("image", px(0.0)).blob("image1", px(1.0)).blob("image3", px(3.0));
+        let imgs = decode_images(&inv).expect("decode_images");
+        assert_eq!(imgs.len(), 2, "must stop at the gap ('image2' absent), never skip to 'image3'");
+        assert_eq!(imgs[0].0, vec![0.0, 0.0, 0.0]);
+        assert_eq!(imgs[1].0, vec![1.0, 1.0, 1.0]);
+    }
+
+    /// A request with only `image` set (every caller before multi-image
+    /// support existed) must decode to exactly one image -- backward
+    /// compatibility for [`decode_images`] itself, independent of the
+    /// `Prepared::build`-level regression test in `crate::model`.
+    #[test]
+    fn decode_images_single_image_backward_compatible() {
+        let hwc = [0.25f32, 0.5, 0.75];
+        let bytes: Vec<u8> = hwc.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let inv = Invocation::new().blob("image", Blob::new(Media::Image, bytes).with_meta(json!({"w": 1, "h": 1})));
+        let imgs = decode_images(&inv).expect("decode_images");
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].0, vec![0.25, 0.5, 0.75]);
     }
 
     /// Served-path smoke on the real checkpoint (skip-if-absent, like the
