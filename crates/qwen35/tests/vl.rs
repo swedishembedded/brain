@@ -53,6 +53,7 @@ fn tiny_vcfg() -> VisionConfig {
         out_hidden_size: 96, // == Qwen35Config::tiny().d_model
         in_channels: 2,
         deepstack_indexes: vec![], // this model has none - see `vl.rs`'s module doc
+        tokens_per_second: 2,
     }
 }
 
