@@ -309,13 +309,37 @@ discovers capabilities generically.
 - [ ] The MTP code predictor has NO equivalent parity or gradcheck test at
       all (`tests/mtp.rs` is a forward smoke test only, checkpoint-gated, no
       golden comparison). Add one, mirroring the Talker's.
-- [ ] A cheap end-to-end quality signal that doesn't need a PyTorch reference:
-      round-trip synth/clone output through brain's own ASR
-      (`nemotronasr`/`qwen3asr`, already in-tree) and assert the transcribed
-      text matches the input text above a WER threshold. Catches gross
-      regressions (garbled audio, wrong language, silence) that a
-      per-tensor logit diff can miss and a human isn't watching for on every
-      CI run.
+- [x] A cheap end-to-end quality signal that doesn't need a PyTorch reference:
+      `crates/qwen3tts/tests/asr_roundtrip.rs` round-trips `pipeline::synth`
+      output through `nemotronasr` (real checkpoint,
+      `nvidia/nemotron-3.5-asr-streaming-0.6b`, ~2.4 GB, fetched for this
+      audit) and asserts word error rate against the input text is below
+      0.5. Gated on `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT`/
+      `BRAIN_NEMOTRONASR` all being set and present, same convention as
+      every other real-checkpoint test here.
+
+      **It found a real bug on its first real run.** `synth("The quick
+      brown fox jumps over the lazy dog.", seed=0, temperature=0.9,
+      top_k=50, max_frames=200)` against the real `0.6B-Base` checkpoint
+      produced 200 frames of genuinely near-total silence (confirmed by
+      direct sample inspection at `--max-frames 30`: max |sample| ≈
+      3.05e-5, RMS ≈ 1.27e-7, silent from frame 0, not a late decay or an
+      early-EOS-then-padding artifact) - despite sampling being active,
+      which the existing `GenOpts::default()` doc comment already
+      identifies as the fix for the OTHER known collapse mode (greedy,
+      `temperature=0`). This is a DIFFERENT, previously undocumented
+      failure mode: sampled decode can still collapse to near-silence for
+      some (text, seed) pairs. Reproduces reliably at `seed=0`; whether
+      it's seed-specific or text-specific is NOT yet determined (a
+      `seed=1` repro attempt was started but not completed before this
+      audit ended - a real open item, not a claim either way). Not
+      root-caused or fixed this session - flagged here as a genuine,
+      reproducible gap the test now exists specifically to catch, exactly
+      the kind of thing this test was written for. **Priority**: this
+      likely deserves attention before the residual-codebook/repetition-
+      penalty knobs added in Phase 1 above get real-world use, since a
+      silent-collapse failure mode undermines confidence in ANY sampling
+      configuration, not just the default one.
 
 ### Carried over, unchanged priority
 

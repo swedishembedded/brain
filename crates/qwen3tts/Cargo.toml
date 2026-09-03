@@ -30,4 +30,5 @@ bytemuck.workspace = true
 [dev-dependencies]
 brain-testutil.workspace = true
 brain-data.workspace = true
+brain-nemotronasr.workspace = true
 brain-gradcheck.workspace = true

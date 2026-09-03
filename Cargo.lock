@@ -1683,6 +1683,7 @@ dependencies = [
  "brain-kernels",
  "brain-mimi",
  "brain-model",
+ "brain-nemotronasr",
  "brain-npu",
  "brain-optim",
  "brain-paramstore",
