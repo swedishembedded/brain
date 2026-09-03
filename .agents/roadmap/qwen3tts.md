@@ -256,10 +256,18 @@ discovers capabilities generically.
 
 ### Phase 5 - Official-style full fine-tune
 
-- [ ] A full (non-LoRA) single-speaker SFT path -- unfreeze the base Talker,
-      matching Qwen's own documented single-speaker fine-tuning workflow -- alongside (not replacing) the existing LoRA path, which stays the
-      lighter-weight option. Reuse `qwen3`'s full-finetune plumbing rather
-      than writing new training-loop code.
+- [x] A full (non-LoRA) single-speaker SFT path -- `qwen3tts::sft::finetune_full`,
+      alongside (not replacing) the existing LoRA path. Both share one
+      `run_finetune` training loop (extracted from the old `finetune_lora`
+      body verbatim) -- the two modes only differ in how `cfg`/`init` are
+      built (LoRA-extended config with the base frozen, vs. the base config
+      with every tensor trainable, `BRAIN_OFFLOAD_ADAM` set for the call
+      matching `qwen3::finetune::Mode::FullOffload`'s convention). `brain
+      qwen3tts finetune --full` selects it (default stays LoRA). Tested with
+      a synthetic checkpoint + dataset (no real Qwen3-TTS weights needed):
+      full fine-tuning measurably moves a base attention weight tensor,
+      LoRA leaves the same tensor bit-for-bit identical -- the actual
+      contract the two modes exist to provide.
 - [ ] From-scratch codec/speaker-encoder training: `mimi::recon` ("Track C")
       exists but isn't wired to a CLI/spec path -- lowest priority, largest
       scope, only pursue if a concrete need shows up.

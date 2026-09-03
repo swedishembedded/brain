@@ -22,11 +22,14 @@
 //!       Speaker-free text-to-speech.
 //!
 //!   brain qwen3tts finetune --base out/tts/talker.safetensors --data data/tts
-//!                      --out out/tts/talker_lora.safetensors
+//!                      [--full] [--out out/tts/talker_lora.safetensors]
 //!                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
-//!       LoRA fine-tune (single-speaker SFT) the Talker on a `text->codes`
-//!       dataset (e.g. `make data/tts`). Freezes the base; trains the attention
-//!       adapters only. See `qwen3tts::sft` for the aligned multi-codebook loss.
+//!       Single-speaker SFT the Talker on a `text->codes` dataset (e.g.
+//!       `make data/tts`). Default: LoRA - freezes the base, trains the
+//!       attention adapters only. `--full`: every Talker weight trains,
+//!       matching Qwen's own documented single-speaker fine-tuning workflow
+//!       (`--out` then defaults to `talker_full.safetensors`). See
+//!       `qwen3tts::sft` for the aligned multi-codebook loss both modes share.
 
 use qwen3tts::{GenOpts, ResidualOpts, TtsPaths};
 
@@ -61,7 +64,8 @@ pub fn run_tts(args: &[String]) {
 fn finetune(args: &[String]) {
     let mut base = "out/tts/talker.safetensors".to_string();
     let mut data_dir = "data/tts".to_string();
-    let mut out = "out/tts/talker_lora.safetensors".to_string();
+    let mut out = String::new();
+    let mut full = false;
     let mut o = qwen3tts::FinetuneOpts::default();
     let mut i = 0;
     while i < args.len() {
@@ -69,6 +73,10 @@ fn finetune(args: &[String]) {
             "--base" => base = val(args, &mut i, "--base"),
             "--data" => data_dir = val(args, &mut i, "--data"),
             "--out" => out = val(args, &mut i, "--out"),
+            // Every Talker weight trains (matches Qwen's own documented
+            // single-speaker SFT workflow), instead of the default LoRA
+            // adapters-only path that keeps the base frozen.
+            "--full" => full = true,
             "--steps" => o.steps = val(args, &mut i, "--steps").parse().unwrap_or(o.steps),
             "--lr" => o.lr = val(args, &mut i, "--lr").parse().unwrap_or(o.lr),
             "--rank" => o.rank = val(args, &mut i, "--rank").parse().unwrap_or(o.rank),
@@ -80,11 +88,17 @@ fn finetune(args: &[String]) {
         }
         i += 1;
     }
-    eprintln!(
-        "tts finetune [LoRA r={} α={}]: base={base} data={data_dir} steps={} lr={} -> {out}",
-        o.rank, o.alpha, o.steps, o.lr
-    );
-    match qwen3tts::sft::finetune_lora(&base, std::path::Path::new(&data_dir), &out, &o) {
+    if out.is_empty() {
+        out = if full { "out/tts/talker_full.safetensors".to_string() } else { "out/tts/talker_lora.safetensors".to_string() };
+    }
+    let mode = if full { "full".to_string() } else { format!("LoRA r={} α={}", o.rank, o.alpha) };
+    eprintln!("tts finetune [{mode}]: base={base} data={data_dir} steps={} lr={} -> {out}", o.steps, o.lr);
+    let result = if full {
+        qwen3tts::sft::finetune_full(&base, std::path::Path::new(&data_dir), &out, &o)
+    } else {
+        qwen3tts::sft::finetune_lora(&base, std::path::Path::new(&data_dir), &out, &o)
+    };
+    match result {
         Ok((i0, i1)) => println!("finetune done: loss {i0:.4} -> {i1:.4}  saved -> {out}"),
         Err(e) => {
             eprintln!("finetune failed: {e}");

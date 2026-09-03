@@ -157,12 +157,10 @@ impl Default for FinetuneOpts {
 /// Native-only (reads `.bin` datasets, writes a checkpoint).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> std::io::Result<(f32, f32)> {
-    use data::loader::{BatchConfig, TokenDataset};
-    use data::rng::Rng;
-    use qwen3::{LoraCfg, Qwen, QwenConfig};
+    use qwen3::{LoraCfg, QwenConfig};
 
-    // 1. Load the base config + weights, then re-key under a LoRA config so the
-    //    parameter list gains `*.lora_a`/`*.lora_b` (base stays frozen).
+    // Load the base config + weights, then re-key under a LoRA config so the
+    // parameter list gains `*.lora_a`/`*.lora_b` (base stays frozen).
     let ckpt = checkpoint::load(base);
     let mut cfg = QwenConfig::from_json(&ckpt.header["config"]);
     cfg.block_size = opts.block;
@@ -174,10 +172,66 @@ pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
     for (k, v) in base_weights {
         init.insert(k, v);
     }
+    run_finetune(cfg, init, dir, out, opts)
+}
 
-    let model = Qwen::new(cfg.clone(), opts.batch, opts.block, &init);
+/// Full (non-LoRA) single-speaker SFT: every Talker weight trains, matching
+/// Qwen's own documented single-speaker fine-tuning workflow (encode target
+/// speech to codes, fine-tune the base model on them, serve the result
+/// through the CustomVoice interface) rather than the lighter-weight adapter
+/// path [`finetune_lora`] offers alongside it. AdamW moments offload to
+/// system RAM for the duration of the call (`BRAIN_OFFLOAD_ADAM`, the same
+/// convention `qwen3::finetune::Mode::FullOffload` uses) - full fine-tuning
+/// triples the optimizer state over the frozen-base LoRA path, and this is
+/// the one knob that keeps that affordable. Writes the fine-tuned checkpoint
+/// to `out` and returns `(initial_loss, final_loss)`.
+///
+/// Native-only (reads `.bin` datasets, writes a checkpoint).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> std::io::Result<(f32, f32)> {
+    use qwen3::QwenConfig;
 
-    // 2. Data.
+    let ckpt = checkpoint::load(base);
+    let mut cfg = QwenConfig::from_json(&ckpt.header["config"]);
+    cfg.block_size = opts.block;
+    cfg.lora = None;
+    let base_weights = ckpt.by_role("");
+    // Matches finetune_lora's own pattern (and qwen3::finetune::Mode::FullOffload's):
+    // a fresh init first, then overwritten by the checkpoint's real values, rather
+    // than trusting the checkpoint alone to carry every key `Qwen::new` expects.
+    let mut init = qwen3::init_weights(&cfg, opts.seed);
+    for (k, v) in base_weights {
+        init.insert(k, v);
+    }
+
+    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
+    std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
+    let result = run_finetune(cfg, init, dir, out, opts);
+    match prev_off {
+        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
+        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
+    }
+    result
+}
+
+/// The training loop shared by [`finetune_lora`]/[`finetune_full`]: the only
+/// difference between the two modes is how `cfg`/`init` are built above (a
+/// LoRA-extended config with the base frozen vs. the base config with every
+/// tensor trainable) - the loop over the dataset is identical either way.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_finetune(
+    cfg: qwen3::QwenConfig,
+    init: std::collections::HashMap<String, Vec<f32>>,
+    dir: &Path,
+    out: &str,
+    opts: &FinetuneOpts,
+) -> std::io::Result<(f32, f32)> {
+    use data::loader::{BatchConfig, TokenDataset};
+    use data::rng::Rng;
+    use qwen3::Qwen;
+
+    let model = Qwen::new(cfg, opts.batch, opts.block, &init);
+
     let train = data::binio::read_tokens_u32(&dir.join("train"))?;
     let val = data::binio::read_tokens_u32(&dir.join("val"))?;
     let bcfg = BatchConfig {
@@ -318,5 +372,54 @@ mod tests {
     fn build_rejects_ragged() {
         let r = std::panic::catch_unwind(|| MultiCodebookLabels::build(&[0, 1, 2], 16));
         assert!(r.is_err(), "ragged codes must panic, not silently misalign");
+    }
+
+    fn write_u32_bin(path: &std::path::Path, toks: &[u32]) {
+        let bytes: Vec<u8> = toks.iter().flat_map(|t| t.to_le_bytes()).collect();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// The whole point of having two fine-tune modes: `finetune_full` must
+    /// actually move the base decoder weights (that's what "full" means),
+    /// while `finetune_lora` must leave them bit-for-bit untouched (the base
+    /// stays frozen; only the adapters train). A tiny synthetic checkpoint +
+    /// dataset, no real Qwen3-TTS weights needed - this is a contract test on
+    /// the two training modes, not a quality test on real speech.
+    #[test]
+    fn full_finetune_moves_base_weights_lora_does_not() {
+        use qwen3::{Qwen, QwenConfig};
+
+        let cfg = QwenConfig::tiny();
+        let init = qwen3::init_weights(&cfg, 7);
+        let base_model = Qwen::new(cfg.clone(), 1, cfg.block_size, &init);
+
+        let dir = std::env::temp_dir().join(format!("qwen3tts-sft-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base_path = dir.join("base.safetensors").to_str().unwrap().to_string();
+        base_model.save(&base_path);
+
+        // Enough tokens for a couple of batches at batch=2/block=4 (needs
+        // >= batch*block+1), values kept inside the tiny 23-word vocab.
+        let toks: Vec<u32> = (0..64).map(|i| (i * 7 + 3) % cfg.vocab).collect();
+        write_u32_bin(&dir.join("train.u32.bin"), &toks);
+        write_u32_bin(&dir.join("val.u32.bin"), &toks);
+
+        let opts = FinetuneOpts { steps: 2, batch: 2, block: 4, lr: 1e-2, rank: 2, alpha: 4.0, seed: 11 };
+        let key = "blocks.0.attn.wq.weight";
+        let original = init[key].clone();
+
+        let full_out = dir.join("full.safetensors").to_str().unwrap().to_string();
+        finetune_full(&base_path, &dir, &full_out, &opts).expect("full finetune");
+        let full_w = checkpoint::load(&full_out).by_role("");
+        let full_diff: f32 = full_w[key].iter().zip(&original).map(|(a, b)| (a - b).abs()).sum();
+        assert!(full_diff > 1e-6, "full finetune must move base weights (diff={full_diff})");
+
+        let lora_out = dir.join("lora.safetensors").to_str().unwrap().to_string();
+        finetune_lora(&base_path, &dir, &lora_out, &opts).expect("lora finetune");
+        let lora_w = checkpoint::load(&lora_out).by_role("");
+        let lora_diff: f32 = lora_w[key].iter().zip(&original).map(|(a, b)| (a - b).abs()).sum();
+        assert_eq!(lora_diff, 0.0, "LoRA finetune must leave base weights untouched (diff={lora_diff})");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
