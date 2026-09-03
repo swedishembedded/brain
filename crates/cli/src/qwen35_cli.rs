@@ -4,7 +4,7 @@
 //! `brain qwen35 ...` - run the Qwen3.8-27B dense hybrid decoder.
 //!
 //!   brain qwen35 infer  --weights F [--tokenizer tokenizer.json] --prompt "..."
-//!                     [--max-new N --temp X --top-k K --chat]
+//!                     [--adapter adapter.safetensors] [--max-new N --temp X --top-k K --chat]
 //!   brain qwen35 finetune <data_dir> --base F --out F [--mode lora|full]
 //!                     [--rank R --alpha A] [--steps N --lr X ...]
 //!
@@ -60,17 +60,31 @@ fn import(args: &[String]) {
     crate::gguf_import::run_import_gguf(args);
 }
 
-/// `brain qwen35 infer --weights F [--tokenizer T | --gguf G] --prompt "..."`:
-/// single-sequence greedy/sampled generation via `Qwen35::step`, through
-/// `qwen35::sample::generate_kv` (its own decode path). Not the paged
-/// `PagedDecoder`/`Scheduler` serving path (`qwen35::serve`) - this is the
-/// same "simple, direct, one request" tier `qwen3::sample::generate_kv`
-/// occupies alongside `qwen3::serve::Engine`.
+/// `brain qwen35 infer --weights F [--tokenizer T | --gguf G] --prompt "..."
+/// [--adapter FILE]`: single-sequence greedy/sampled generation via
+/// `Qwen35::step`, through `qwen35::sample::generate_kv` (its own decode
+/// path). Not the paged `PagedDecoder`/`Scheduler` serving path
+/// (`qwen35::serve`) - this is the same "simple, direct, one request" tier
+/// `qwen3::sample::generate_kv` occupies alongside `qwen3::serve::Engine`.
+///
+/// `--adapter FILE` names a LoRA adapter saved by `qwen35::lora::
+/// save_adapter` (an adapter-only `.safetensors`, NOT a full checkpoint):
+/// its `.lora_a`/`.lora_b` deltas are folded into the loaded base tensors
+/// once, before `Qwen35::new_on` ever runs (`qwen35::lora::
+/// fold_adapter_into`, gated exact against the live unfolded forward by
+/// `crates/qwen35/tests/lora_adapter_file.rs`) - so every downstream stage
+/// (KV cache, sampling) sees a plain adapted model at zero extra per-token
+/// cost, with no other code path in this function aware an adapter was even
+/// involved. A plain local file path (unlike `qwen_cli::finetune_lora`'s
+/// `OWNER/NAME[:TAG]` model-store refs) - this crate has no `ModelStore`/
+/// `ModelRef` integration yet, so wiring that here would be new scope well
+/// beyond making the fold reachable.
 fn infer(args: &[String]) {
     let mut weights = String::new();
     let mut tokenizer = String::new();
     let mut gguf_for_tok = String::new();
     let mut prompt = String::new();
+    let mut adapter = String::new();
     let mut max_new = 32usize;
     let mut temp = 0.0f32;
     let mut top_k = 0usize;
@@ -84,6 +98,7 @@ fn infer(args: &[String]) {
             "--tokenizer" => tokenizer = val(args, &mut i, "--tokenizer"),
             "--gguf" => gguf_for_tok = val(args, &mut i, "--gguf"),
             "--prompt" => prompt = val(args, &mut i, "--prompt"),
+            "--adapter" => adapter = val(args, &mut i, "--adapter"),
             "--max-new" => max_new = val(args, &mut i, "--max-new").parse().unwrap_or(max_new),
             "--temp" => temp = val(args, &mut i, "--temp").parse().unwrap_or(temp),
             "--top-k" => top_k = val(args, &mut i, "--top-k").parse().unwrap_or(top_k),
@@ -97,7 +112,7 @@ fn infer(args: &[String]) {
     if weights.is_empty() || (tokenizer.is_empty() && gguf_for_tok.is_empty()) {
         eprintln!(
             "usage: brain qwen35 infer --weights F (--tokenizer tokenizer.json | --gguf original.gguf) --prompt \"...\" \
-             [--max-new N --temp X --top-k K --top-p P --seed S --chat]"
+             [--adapter adapter.safetensors] [--max-new N --temp X --top-k K --top-p P --seed S --chat]"
         );
         return;
     }
@@ -127,7 +142,13 @@ fn infer(args: &[String]) {
 
     let container = checkpoint::load(&weights);
     let cfg = Qwen35Config::from_json(&container.header["config"]);
-    let init = container.by_role("");
+    let mut init = container.by_role("");
+    if !adapter.is_empty() {
+        if let Err(e) = qwen35::lora::fold_adapter_into(&mut init, &adapter) {
+            eprintln!("--adapter {adapter:?}: {e}");
+            return;
+        }
+    }
     let cap = (ids.len() + max_new) as u32;
 
     let t_load = std::time::Instant::now();
