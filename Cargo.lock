@@ -1345,6 +1345,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-minimaxh3"
+version = "1.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-diffusion",
+ "brain-dit",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-qwen3vl",
+ "brain-testutil",
+ "brain-vae",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "brain-minimaxmusic3"
 version = "1.1.0"
 dependencies = [

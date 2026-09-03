@@ -515,6 +515,26 @@ pub const ARCHS: &[Arch] = &[
                          ("BRAIN_LTXV_AUDIO_VAE", "audio_vae"),
                          ("BRAIN_LTXV_TEXT_ENCODER", "text_encoder"),
                          ("BRAIN_LTXV_TOKENIZER", "tokenizer")]),
+    // MiniMax-H3: unlike `ltxv` (two streams + A/V cross-attention), H3 is
+    // ONE packed self-attention stack over video+audio+condition rows - the
+    // real shard header carries no A/V cross-attention weights at all, only
+    // per-modality patch-in/patch-out projections and shared blocks. `hf` is
+    // empty: `model_index.json` names `MiniMaxH3DiTModel`/`MiniMaxH3VideoVAE`/
+    // `MiniMaxH3AudioVAE` as `diffusers` custom-code classes, not a
+    // `transformers` `config.json` `architectures[0]` this table's exact-match
+    // convention can key on. Deliberately no `default_ref`/no auto-fetch: the
+    // MiniMax H3 Community License carries a territorial carve-out (excludes
+    // EU/UK/South Korea/US from the ordinary grant) and a revenue-cap/
+    // attribution clause - same reasoning as the `supir` row above, and
+    // enforced at runtime by `minimaxh3::caps::check_license`
+    // (`BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1`), not just by omission here. One
+    // `dir` role (the qwen35/`BRAIN_QWEN35_DIR` pattern, not ltxv's per-role
+    // granularity): the real repo is a two-level `{FL2VA,Ref2VA}/<role>/`
+    // layout with no auto-fetch story to drive per-role resolution anyway -
+    // `minimaxh3::import` resolves both partitions' five roles itself from
+    // one directory.
+    arch!("minimaxh3", "MiniMax-H3 joint video+audio diffusion transformer (33B, AdaLN-precomputable)", Video, Brain, "brain-minimaxh3",
+          weights_env: &[("BRAIN_MINIMAXH3_DIR", "dir")]),
     // -- 3D -----------------------------------------------------------
     arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-worldmirror2"),
     arch!("splat", "3D Gaussian Splatting rasterizer", ThreeD, Brain, "brain-splat"),

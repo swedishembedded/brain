@@ -149,6 +149,8 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_FLUX2_NO_STREAM` | `1` forces a non-GGUF FLUX.2 DiT to build from a whole fp32 tensor map. It is rejected for a `.gguf` DiT: decoding a quantized GGUF into a whole fp32 map is not an allowed implicit conversion | off |
 | `BRAIN_FLUX2_TE_NO_STREAM` | `1` forces the FLUX.2 text encoder to be imported as one whole fp32 map instead of streamed per tensor from a mapping. Same character as `BRAIN_FLUX2_NO_STREAM`: identical weights either way, kept as an A/B instrument and a fallback | off (streamed) |
 | `BRAIN_FLUX2_ALLOW_NC` | `1` opts in to the FLUX Non-Commercial-licensed 9B variants | required, not set |
+| `BRAIN_MINIMAXH3_DIR` | MiniMax-H3 checkpoint directory (contains `FL2VA/`, `Ref2VA/`) | not set, no auto-fetch |
+| `BRAIN_MINIMAXH3_ALLOW_COMMUNITY` | `1` confirms you are authorized under the MiniMax H3 Community License Agreement (territorial/revenue-cap/attribution terms apply) | required, not set |
 | `BRAIN_FLUX1_I8_KEEP_F32` / `BRAIN_FLUX2_I8_KEEP_F32` | keeps a specific sub-layer at fp32 under INT8 inference, trading a little memory for accuracy | off |
 | `BRAIN_LTXV_TEXT_CACHE` | reuse of a previously encoded LTX-2.5 text context for the same prompt and text encoder (`0` opts out) | on |
 | `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES` | disk budget for that cache, in bytes; after each write the least-recently-used entries are deleted until the directory fits (a non-positive or unparseable value is ignored with a warning, and the single most recently used entry is never evicted). One entry is tens of MB at the real checkpoint's dimensions, and a distinct prompt is a distinct entry | 2 GiB (`2147483648`) |
