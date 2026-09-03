@@ -407,6 +407,37 @@ impl GgufArchitectureImporter for Qwen3VlVisionImporter {
     }
 }
 
+/// Qwen3-VL-30B-A3B (`general.architecture = "qwen3vlmoe"`) - the sparse-MoE
+/// sibling of [`Qwen3VlImporter`]'s dense decoder, over a top-k-of-128 MoE
+/// FFN with no shared expert (`crates/qwen3vlmoe`).
+///
+/// A REGISTRATION, not a working conversion, and the [`SupirImporter`]
+/// pattern is followed deliberately: no `Qwen3-VL-30B-A3B` GGUF release was
+/// available to inspect in this workspace, so there is no real tensor-name
+/// mapping to derive or verify (a GGUF MoE decoder packs routed experts as 3D
+/// `blk.N.ffn_*_exps.weight` tensors, llama.cpp's `LLM_TENSOR_FFN_*_EXPS`
+/// convention - genuinely different from the dense per-layer 2D linears
+/// `qwen3vl::gguf_import` already maps, so nothing there could be reused
+/// blind). Registering the architecture NAME still matters on its own: before
+/// this row existed, a `qwen3vlmoe` GGUF fell through to `by_gguf`'s `None`
+/// and was refused with no name to act on at all (this model's own
+/// user-facing documentation already described exactly that "refused by
+/// name" behavior, which predates this crate). See `qwen3vlmoe::import`'s
+/// own doc for the full account.
+struct Qwen3VlMoeImporter;
+
+impl GgufArchitectureImporter for Qwen3VlMoeImporter {
+    fn architecture(&self) -> &'static str {
+        qwen3vlmoe::import::GGUF_ARCHITECTURE
+    }
+    fn summary(&self) -> &'static str {
+        "Qwen3-VL-30B-A3B decoder (sparse-MoE, top-8-of-128, no shared expert) - registered, not yet importable; no real GGUF release observed"
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        qwen3vlmoe::import::import_gguf(gguf, out_path, id_override)
+    }
+}
+
 /// The error for an architecture that is registered, and loads its GGUF
 /// directly, but has no conversion to a brain-native checkpoint.
 ///
@@ -430,6 +461,7 @@ const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[
     &DeepseekOcrVisionImporter,
     &Qwen3VlImporter,
     &Qwen3VlVisionImporter,
+    &Qwen3VlMoeImporter,
 ];
 
 /// The entry claiming `mg`, by the one architecture resolution

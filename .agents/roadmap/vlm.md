@@ -603,3 +603,88 @@ checkpoint-derived (rather than hardcoded) context ceiling were the two
 items that needed no new architecture, only wiring already-tested math
 (`mrope::get_rope_index_multi`'s multi-image/video math is already ahead of
 `caps.rs`'s single-image action surface, for the same reason).
+
+## qwen3vlmoe - name recognition + shape-only splice, real import deliberately not attempted
+
+Scope was to take Qwen3-VL-30B-A3B (the MoE sibling `docs/models/qwen3vl.md`
+already named as refused-by-name) exactly as far as could be verified without
+a real checkpoint, and stop there rather than guess. Landed:
+`crates/arch`'s `qwen3vlmoe` row (its own real HF class,
+`Qwen3VLMoeForConditionalGeneration` - a real, checked finding: it is a
+DIFFERENT class from dense `qwen3vl`'s `Qwen3VLForConditionalGeneration`, so
+the two were never going to resolve to the same importer even before this
+row existed), `crates/qwen3vlmoe::import::GGUF_ARCHITECTURE` +
+`crates/cli/src/gguf_import.rs`'s `Qwen3VlMoeImporter` (the `SupirImporter`
+pattern - registered so a real file auto-dispatches the day one exists, `Err`
+otherwise), and `crates/qwen3vlmoe::{config, model}` - a config type and a
+composite `Qwen3VlMoe` struct proven to compose (vision tower -> merger ->
+DeepStack -> MoE decoder -> M-RoPE) on synthetic tiny configs only.
+
+**What was actually verified, and how - not assumed.** `curl`'d the real
+`Qwen/Qwen3-VL-30B-A3B-Instruct/config.json` directly (raw file, not a
+paraphrase - see `crates/qwen3vlmoe/src/config.rs`'s module doc for the exact
+byte content quoted). Two things that finding settled: `vision_config` is
+byte-identical to `qwen3vl::config::VisionConfig::qwen3_omni()` (depth 27,
+hidden 1152, `deepstack_visual_indexes` [8,16,24], all of it) - no new vision
+tower needed, reused as-is. And `text_config` is `mlp_only_layers: []` /
+`decoder_sparse_step: 1` (every layer routed, no dense-then-MoE schedule) /
+128 experts / top-8 / `norm_topk_prob: true` / no
+`shared_expert_intermediate_size` key at all - i.e. a plain GQA+QK-norm+RoPE
+decoder with a top-k sparse MoE FFN and NO shared expert, which is
+byte-for-byte the shape `qwen3omnimoe::config::MoeTextConfig::
+thinker_defaults` already models for Qwen3-Omni's Thinker (different
+`hidden`/`vocab`/`rope_theta` numbers, identical structure). That match is
+the real, checked reason `crates/qwen3vlmoe::model` reuses
+`qwen3omnimoe::thinker`'s `layer_fwd`/`final_norm`/`lm_head_fwd` directly
+rather than writing a second GQA+MoE decoder - and the real reason NOT to
+copy `qwen35moe`'s decoder despite `qwen35moe::vl` being the closest splice
+PATTERN in the repo: `qwen35moe` is Qwen3.5-35B-A3B, a hybrid
+Gated-DeltaNet/GQA architecture, a different checkpoint family with a
+different real shape from Qwen3-VL-30B-A3B - confirmed by the same fetch, not
+inferred from the similar model name.
+
+**What was inferred by convention, not confirmed from the fetch, and is
+named as such in `config.rs`'s doc**: `use_qk_norm`. The real `text_config`
+carries no such key (every Qwen3-family decoder in this workspace applies
+per-head QK-norm unconditionally with no config flag naming it, and
+`MoeTextConfig::thinker_defaults`'s own doc records the identical situation
+for Qwen3-Omni's real checkpoint), so the default follows that established
+convention rather than a byte this fetch could check.
+
+**DeepStack had to be added back**, because `qwen3omnimoe::thinker` does not
+carry it - Qwen3-Omni's own real served path skips DeepStack entirely
+(`qwen3omnimoe::mm`'s own doc: "not needed for a plain (non-DeepStack) splice
+path"). `crates/qwen3vlmoe::model` adds ONE extra kernel dispatch
+(`kernels::SPLICE_ADD`, the exact WGSL kernel `qwen3::Qwen`'s own DeepStack
+residual add already uses - reused, not reimplemented) after each of the
+first `deepstack_indexes.len()` decoder layers, appended to
+`thinker_pipelines()`'s table so every hard-coded kernel index
+`qwen3omnimoe::thinker`'s functions dispatch by stays valid.
+
+**Where this stopped, deliberately.** No real `Qwen3-VL-30B-A3B` checkpoint -
+safetensors or GGUF - was available to import against in this sandboxed
+environment. A GGUF MoE decoder packs its routed experts as 3D
+`blk.N.ffn_*_exps.weight` tensors (llama.cpp's `LLM_TENSOR_FFN_*_EXPS`
+convention), a genuinely different leaf vocabulary from the dense
+`qwen3vl::gguf_import`'s flat 2D per-layer linears, so there was nothing to
+verify a mapping against and guessing at expert-tensor names or a
+safetensors leaf convention was refused rather than attempted - exactly the
+"a finding is a hypothesis until checked" line this repo holds itself to.
+`crates/qwen3vlmoe::model::Qwen3VlMoe::forward` is exercised ONLY on
+synthetic tiny configs (`model.rs`'s own tests): finite output, correct
+`[n, vocab]` shape, a `should_panic` on a token stream missing the image
+run. This is wiring proof, not real-weight parity, and neither this file nor
+`docs/models/qwen3vl.md` claims otherwise anywhere.
+
+**Open, for whoever picks this up next**: (1) a real checkpoint (HF
+safetensors or GGUF) to import against - without one, the tensor-name mapping
+in either `crates/qwen3vlmoe::import` (GGUF) or a new safetensors importer is
+unwritable without guessing; (2) `use_qk_norm`'s convention-based default,
+worth a second confirmation once a real checkpoint's tensor names are in
+hand (a real `q_norm`/`k_norm` weight per layer would settle it the way it
+settled Thinker's); (3) no capability/`caps.rs`, no CLI verb, no residency
+adapter - this architecture is not reachable through `brain` at all yet, by
+design (nothing to serve without real weights); (4) no backward/gradcheck
+entry point - forward-only, and unlike this repo's other forward-only
+exceptions this one has no real-weight run to prioritize reaching yet, so it
+is simply not attempted rather than deferred with a reason.

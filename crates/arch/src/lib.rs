@@ -280,14 +280,34 @@ pub const ARCHS: &[Arch] = &[
     arch!("gemma4", "Gemma-4 unified text tower (LTX-2.5's text encoder)", Text, Brain, "brain-gemma4", hf: &["Gemma4UnifiedForConditionalGeneration"]),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
+    // DENSE Qwen3-VL only - the 30B-A3B release is a DIFFERENT real HF class
+    // (`Qwen3VLMoeForConditionalGeneration`, `model_type: "qwen3_vl_moe"`) over
+    // a top-k sparse-MoE decoder, not this dense one; it used to be listed as a
+    // `Variant` here, which was wrong (this arch cannot load it) - see the
+    // `qwen3vlmoe` row below, confirmed against the real released config.json.
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"), weights_env: &[("BRAIN_QWEN3VL_WEIGHTS", "weights")],
         variants: &[
             Variant { reference: "Qwen/Qwen3-VL-2B-Instruct", params: 2_127_532_032, quants: &["Q4_K_M", "Q8_0"] },
             Variant { reference: "Qwen/Qwen3-VL-4B-Instruct", params: 4_400_000_000, quants: &["Q4_K_M", "Q8_0"] },
             Variant { reference: "Qwen/Qwen3-VL-8B-Instruct", params: 8_767_123_696, quants: &["Q4_K_M", "Q8_0"] },
-            // MoE: ~3B active of 31B total.
-            Variant { reference: "Qwen/Qwen3-VL-30B-A3B-Instruct", params: 31_070_000_000, quants: &["Q4_K_M", "Q8_0"] },
             Variant { reference: "Qwen/Qwen3-VL-32B-Instruct", params: 33_357_390_064, quants: &["Q4_K_M", "Q8_0"] },
+        ]),
+    // Qwen3-VL-30B-A3B: `qwen3vl`'s ViT+PatchMerger+DeepStack vision tower
+    // spliced onto a top-k-of-128 sparse-MoE Qwen3 decoder (no shared expert) -
+    // see `crates/qwen3vlmoe`. `hf` names the real, distinct HF class this
+    // release actually carries (confirmed against the real config.json - NOT
+    // `qwen3vl`'s `Qwen3VLForConditionalGeneration`, so a config-driven fetch
+    // routes correctly rather than falling through to the dense importer).
+    // `gguf: None` - the id IS the expected GGUF spelling per the
+    // `Source::LlamaCpp` naming rule (`LLM_ARCH_QWEN3VLMOE` lowercased), the
+    // same spelling this model's own user-facing documentation already named
+    // before this row existed. No `default_ref`/`weights_env` yet: no real
+    // checkpoint (HF or GGUF) was available to import against in this pass -
+    // see `crates/qwen3vlmoe/src/import.rs`'s own doc.
+    arch!("qwen3vlmoe", "Qwen3-VL-30B-A3B (ViT+PatchMerger+DeepStack + top-k sparse-MoE decoder)", Multimodal, LlamaCpp, "brain-qwen3vlmoe", hf: &["Qwen3VLMoeForConditionalGeneration"],
+        variants: &[
+            // ~3B active of 31B total.
+            Variant { reference: "Qwen/Qwen3-VL-30B-A3B-Instruct", params: 31_070_000_000, quants: &["Q4_K_M", "Q8_0"] },
         ]),
     arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B"), weights_env: &[("BRAIN_FASTVLM_WEIGHTS", "weights")]),
     arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3", hf: &["Moondream3ForConditionalGeneration"], default_ref: Some("moondream/moondream3-preview"), weights_env: &[("BRAIN_MOONDREAM3_WEIGHTS", "dir")]),

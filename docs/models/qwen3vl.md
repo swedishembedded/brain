@@ -54,10 +54,15 @@ brain pull https://huggingface.co/unsloth/Qwen3-VL-4B-Instruct-GGUF/blob/main/Qw
 brain pull https://huggingface.co/unsloth/Qwen3-VL-4B-Instruct-GGUF/blob/main/mmproj-F16.gguf
 ```
 
-Only the **dense** Qwen3-VL configuration is built. A GGUF whose
-`general.architecture` names an architecture brain has no row for (the
-30B-A3B release declares the MoE `qwen3vlmoe`) is refused by that name rather
-than loaded as the adjacent dense model.
+Only the **dense** Qwen3-VL configuration is servable. The 30B-A3B release
+(`general.architecture = "qwen3vlmoe"`, a top-k sparse-MoE decoder - a
+different HF class from this page's dense model, `Qwen3VLMoeForConditionalGeneration`)
+is now a **named, recognized architecture** (`crates/qwen3vlmoe`) rather than
+an unknown one, so a GGUF carrying that tag gets a specific "not yet
+importable, no real release available to verify a tensor mapping against"
+error instead of "brain has never heard of this architecture." It is **not**
+loadable, servable, or reachable through any `brain` command yet - no import
+path, no CLI verb, no capability wiring exist for it.
 
 ## Running it
 

@@ -55,6 +55,41 @@ impl VisionConfig {
         self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
     }
 
+    /// Parse a `vision_config` object in the released `config.json` shape
+    /// (`depth`, `hidden_size`, `num_heads`, `intermediate_size`,
+    /// `patch_size`, `temporal_patch_size`, `spatial_merge_size`,
+    /// `num_position_embeddings`, `out_hidden_size`, `in_channels`,
+    /// `deepstack_visual_indexes`) - factored out of [`Qwen3VlConfig::from_hf`]
+    /// so a sibling decoder that splices this SAME vision tower (e.g.
+    /// `qwen3vlmoe`, whose real `Qwen/Qwen3-VL-30B-A3B-Instruct` config.json
+    /// carries a byte-identical `vision_config` object) parses it once, the
+    /// same way, rather than re-deriving this field list. Panics with a clear
+    /// message on a missing/mistyped field, same as `Qwen3VlConfig::from_hf`.
+    pub fn from_hf(vc: &Value) -> VisionConfig {
+        let u = |v: &Value, k: &str| -> u32 {
+            v[k].as_u64().unwrap_or_else(|| panic!("qwen3-vl vision_config: missing/!u64 field {k}")) as u32
+        };
+        let deepstack_indexes = vc["deepstack_visual_indexes"]
+            .as_array()
+            .expect("vision_config.deepstack_visual_indexes")
+            .iter()
+            .map(|x| x.as_u64().expect("deepstack index") as u32)
+            .collect();
+        VisionConfig {
+            depth: u(vc, "depth"),
+            hidden: u(vc, "hidden_size"),
+            num_heads: u(vc, "num_heads"),
+            intermediate: u(vc, "intermediate_size"),
+            patch_size: u(vc, "patch_size"),
+            temporal_patch_size: u(vc, "temporal_patch_size"),
+            spatial_merge_size: u(vc, "spatial_merge_size"),
+            num_position_embeddings: u(vc, "num_position_embeddings"),
+            out_hidden_size: u(vc, "out_hidden_size"),
+            in_channels: u(vc, "in_channels"),
+            deepstack_indexes,
+        }
+    }
+
     /// Qwen3-Omni's Thinker vision tower (`thinker_config.vision_config`) —
     /// the SAME ViT + PatchMerger + DeepStack shape [`Qwen3VlConfig::qwen3_vl_4b`]
     /// already models (`gelu_pytorch_tanh` — this crate's `vision_pipelines`
@@ -148,30 +183,12 @@ impl Qwen3VlConfig {
         let u = |v: &Value, k: &str| -> u32 {
             v[k].as_u64().unwrap_or_else(|| panic!("qwen3-vl config: missing/!u64 field {k}")) as u32
         };
-        let deepstack_indexes = vc["deepstack_visual_indexes"]
-            .as_array()
-            .expect("vision_config.deepstack_visual_indexes")
-            .iter()
-            .map(|x| x.as_u64().expect("deepstack index") as u32)
-            .collect();
         let ms = tc["rope_scaling"]["mrope_section"]
             .as_array()
             .expect("text_config.rope_scaling.mrope_section");
         let mrope_section = [ms[0].as_u64().unwrap() as u32, ms[1].as_u64().unwrap() as u32, ms[2].as_u64().unwrap() as u32];
         Qwen3VlConfig {
-            vision: VisionConfig {
-                depth: u(vc, "depth"),
-                hidden: u(vc, "hidden_size"),
-                num_heads: u(vc, "num_heads"),
-                intermediate: u(vc, "intermediate_size"),
-                patch_size: u(vc, "patch_size"),
-                temporal_patch_size: u(vc, "temporal_patch_size"),
-                spatial_merge_size: u(vc, "spatial_merge_size"),
-                num_position_embeddings: u(vc, "num_position_embeddings"),
-                out_hidden_size: u(vc, "out_hidden_size"),
-                in_channels: u(vc, "in_channels"),
-                deepstack_indexes,
-            },
+            vision: VisionConfig::from_hf(vc),
             text: QwenConfig {
                 vocab: u(tc, "vocab_size"),
                 block_size: 4096,

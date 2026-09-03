@@ -43,6 +43,7 @@ brain-rl.workspace = true
 brain-qwen35moe.workspace = true
 brain-qwen35.workspace = true
 brain-qwen3vl.workspace = true
+brain-qwen3vlmoe.workspace = true
 # `brain label` - the model-agnostic captioning seam plus its folder labeler.
 brain-captioner.workspace = true
 brain-fastvlm.workspace = true

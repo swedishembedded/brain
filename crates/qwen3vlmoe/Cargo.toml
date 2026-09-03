@@ -1,0 +1,32 @@
+[package]
+name = "brain-qwen3vlmoe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qwen3-VL-30B-A3B (qwen3vlmoe): qwen3vl's ViT + PatchMerger + DeepStack vision tower spliced onto a Qwen3-MoE (top-k sparse, no shared expert) decoder."
+
+[lib]
+name = "qwen3vlmoe"
+path = "src/lib.rs"
+
+[dependencies]
+# The vision tower this splices, reused as-is (ViT + PatchMerger + DeepStack
+# + M-RoPE index math) - same reuse qwen35moe::vl and qwen35::vl already make.
+brain-qwen3vl.workspace = true
+# The MoE text-decoder shape this model actually needs: GQA + QK-norm + RoPE
+# + a plain-softmax top-k sparse MoE FFN per layer, no shared expert -
+# exactly `qwen3omnimoe`'s Thinker decoder shape (`config::MoeTextConfig`,
+# `thinker::{layer_fwd, decode, final_norm, lm_head_fwd}`), confirmed against
+# the REAL `Qwen/Qwen3-VL-30B-A3B-Instruct` config.json (see
+# `src/config.rs`'s module doc) rather than assumed. Reused, not
+# reimplemented - see this crate's own module doc for why qwen35moe's hybrid
+# Gated-DeltaNet/GQA decoder is the WRONG shape to copy here.
+brain-qwen3omnimoe.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

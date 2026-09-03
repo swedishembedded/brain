@@ -697,6 +697,7 @@ dependencies = [
  "brain-qwen3omnimoe",
  "brain-qwen3tts",
  "brain-qwen3vl",
+ "brain-qwen3vlmoe",
  "brain-residency",
  "brain-rl",
  "brain-rrdbnet",
@@ -1705,6 +1706,20 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-qwen3",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-qwen3vlmoe"
+version = "1.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-qwen3omnimoe",
+ "brain-qwen3vl",
  "brain-testutil",
  "serde_json",
 ]

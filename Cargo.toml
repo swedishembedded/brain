@@ -39,6 +39,7 @@ default-members = [
     "crates/qwen3vl",
     "crates/qwen3asr",
     "crates/qwen3omnimoe",
+    "crates/qwen3vlmoe",
     "crates/nemotronasr",
     "crates/fastvlm",
     "crates/moondream3",
@@ -173,6 +174,7 @@ brain-nemotronasr = { path = "crates/nemotronasr" }
 brain-qwen3asr = { path = "crates/qwen3asr" }
 brain-qwen3vl = { path = "crates/qwen3vl" }
 brain-qwen3omnimoe = { path = "crates/qwen3omnimoe" }
+brain-qwen3vlmoe = { path = "crates/qwen3vlmoe" }
 brain-fastvlm = { path = "crates/fastvlm" }
 brain-moondream3 = { path = "crates/moondream3" }
 brain-glmdsa = { path = "crates/glmdsa" }
