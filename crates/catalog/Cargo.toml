@@ -16,6 +16,7 @@ brain-s3dit.workspace = true
 brain-flux2.workspace = true
 brain-wan.workspace = true
 brain-ltxv.workspace = true
+brain-minimaxh3.workspace = true
 brain-qwen3.workspace = true
 brain-glmdsa.workspace = true
 brain-qwen35moe.workspace = true

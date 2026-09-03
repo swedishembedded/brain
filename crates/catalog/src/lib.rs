@@ -276,6 +276,15 @@ pub fn models() -> Vec<ModelEntry> {
             provider: always!(ltxv::caps::LtxvProvider::new()),
             resident: None,
         },
+        // MiniMax-H3 t2va/fl2va: a 33B joint video+audio DiT (see
+        // `minimaxh3::caps`'s own module doc). `BRAIN_MINIMAXH3_*` lives in
+        // the provider, same shape as `wan`/`ltxv` above; the residency
+        // adapter is registered from `resident.rs`, not from here.
+        ModelEntry {
+            manifest: minimaxh3::caps::manifest,
+            provider: always!(minimaxh3::caps::MiniMaxH3Provider::new()),
+            resident: None,
+        },
         ModelEntry {
             manifest: qwen3::caps::manifest,
             provider: always!(qwen3::caps::QwenProvider::new()),

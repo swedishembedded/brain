@@ -124,6 +124,8 @@ brain-wan.workspace = true
 # `brain ltxv t2v`: the smoke-test video pipeline (tiny random-weight DiT +
 # real VAE) behind ltxv_cli.
 brain-ltxv.workspace = true
+# MiniMax-H3 t2va/fl2va behind the residency scheduler (resident_minimaxh3.rs).
+brain-minimaxh3.workspace = true
 brain-events.workspace = true
 brain-runtime.workspace = true
 brain-forecast.workspace = true
