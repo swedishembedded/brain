@@ -273,13 +273,37 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     std::process::exit(1);
 }
 
+/// A `(variable, real CLI flag)` override for the handful of `weights_env`
+/// variables whose flag genuinely doesn't follow the `BRAIN_<ARCH>_<ROLE>` ->
+/// `--<role>` naming rule [`flag_twin`] otherwise derives. The `weights_env`
+/// tuple's own second field ("role") is NOT a safe substitute here: it names
+/// a shared semantic role used elsewhere (`crate::supply`'s `FilesRecipe`
+/// layout) that several architectures deliberately spell differently on
+/// their own dedicated CLI -- e.g. `wan`'s `role="text_encoder"` is reached
+/// as `--t5`, not `--text_encoder`. Only list a variable here once its real
+/// flag is confirmed to actually diverge from the derived guess; anything
+/// absent keeps falling through to the derivation below.
+const FLAG_TWIN_OVERRIDES: &[(&str, &str)] = &[
+    // qwen3tts's dedicated CLI (`tts_cli.rs::parse_common`) reaches
+    // `BRAIN_QWEN3TTS_WEIGHTS` as `--weights-dir`; the derived guess
+    // (`--weights`, the variable's own suffix) never appears on a real
+    // command line, so `weights_already_named` could never see an explicit
+    // `--weights-dir --ckpt` pair and always fell through to the auto-fetch
+    // gate even when both paths were named.
+    ("BRAIN_QWEN3TTS_WEIGHTS", "--weights-dir"),
+];
+
 /// The flag twin of a `weights_env` variable, under the naming rule a
 /// multi-role architecture's own CLI follows: `BRAIN_<ARCH>_<ROLE>` is
-/// reachable as `--<role>`, so `BRAIN_WAN_DIT` is `--dit`. A variable that
-/// does not follow the pattern (`rrdbnet`'s `BRAIN_ESRGAN_WEIGHTS`) yields a
-/// name no command line will contain, which is the safe direction: it simply
-/// never suppresses the fetch.
+/// reachable as `--<role>`, so `BRAIN_WAN_DIT` is `--dit`. [`FLAG_TWIN_OVERRIDES`]
+/// wins first for the variables known to diverge from that rule. A variable
+/// that follows neither (`rrdbnet`'s `BRAIN_ESRGAN_WEIGHTS`) yields a name no
+/// command line will contain, which is the safe direction: it simply never
+/// suppresses the fetch.
 fn flag_twin(arch: &str, var: &str) -> String {
+    if let Some((_, flag)) = FLAG_TWIN_OVERRIDES.iter().find(|(v, _)| *v == var) {
+        return flag.to_string();
+    }
     let prefix = format!("BRAIN_{}_", arch.to_ascii_uppercase());
     format!("--{}", var.strip_prefix(&prefix).unwrap_or(var).to_ascii_lowercase())
 }
@@ -652,6 +676,11 @@ mod tests {
         // A variable that does not follow the pattern yields a flag nothing
         // will match, so it never suppresses the fetch by accident.
         assert_eq!(flag_twin("rrdbnet", "BRAIN_ESRGAN_WEIGHTS"), "--brain_esrgan_weights");
+        // qwen3tts's `BRAIN_QWEN3TTS_WEIGHTS` is a listed override: its real
+        // flag (`--weights-dir`) doesn't follow the derivation rule either,
+        // but unlike rrdbnet's case this one DOES have a real dedicated CLI
+        // flag that must be recognized, not silently missed.
+        assert_eq!(flag_twin("qwen3tts", "BRAIN_QWEN3TTS_WEIGHTS"), "--weights-dir");
 
         for (var, _) in brain_arch::by_id("wan").expect("wan row").weights_env {
             std::env::remove_var(var);
@@ -662,6 +691,25 @@ mod tests {
         assert!(!weights_already_named("wan", &three));
         // An architecture with no `weights_env` is unaffected either way.
         assert!(!weights_already_named("gpt2", &all));
+    }
+
+    /// Regression for the qwen3tts flag/variable-name mismatch: its dedicated
+    /// CLI's flag is `--weights-dir`, but `BRAIN_QWEN3TTS_WEIGHTS` (the
+    /// variable) does not literally end in `weights-dir`. Before `flag_twin`
+    /// consumed the declared role instead of re-deriving one from the
+    /// variable name, `brain qwen3tts synth --weights-dir D --ckpt C ...`
+    /// could never satisfy `weights_already_named` and always fell through
+    /// to `ensure_env_weights`'s auto-fetch gate despite naming both paths.
+    #[test]
+    fn qwen3tts_weights_dir_and_ckpt_flags_suppress_the_auto_fetch() {
+        let _serial = env_lock();
+        for (var, _) in brain_arch::by_id("qwen3tts").expect("qwen3tts row").weights_env {
+            std::env::remove_var(var);
+        }
+        let named = s(&["synth", "--weights-dir", "D", "--ckpt", "C", "--text", "hi"]);
+        assert!(weights_already_named("qwen3tts", &named));
+        let only_ckpt = s(&["synth", "--ckpt", "C", "--text", "hi"]);
+        assert!(!weights_already_named("qwen3tts", &only_ckpt));
     }
 
     #[test]

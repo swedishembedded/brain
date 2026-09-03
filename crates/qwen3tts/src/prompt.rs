@@ -14,9 +14,11 @@
 //!     the speaker-free "synth" prompt.
 //!   * **ICL** ([`build_icl_prompt`]) — in-context cloning that additionally
 //!     conditions on the reference transcript *and the reference audio's codec
-//!     codes* (`ref_code`, `[T_ref, 16]`).  brain's codec is decode-only, so the
-//!     `ref_code` must be supplied externally (there is no encoder in-tree); the
-//!     prompt assembly itself is fully implemented here.
+//!     codes* (`ref_code`, `[T_ref, 16]`). brain's codec has a real in-tree
+//!     encoder (`mimi::Codec::encode`, exact vs the reference tokenizer): when
+//!     a caller passes `--ref-text` without `--ref-codes`,
+//!     [`crate::pipeline::clone`] encodes the reference wav itself to produce
+//!     `ref_code`; an explicit `--ref-codes` file still overrides that.
 //!
 //! ### Text-conditioning path (resolved)
 //! The text embedding table lives **inside the Talker**:
