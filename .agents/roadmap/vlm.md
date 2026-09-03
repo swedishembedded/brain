@@ -688,3 +688,90 @@ design (nothing to serve without real weights); (4) no backward/gradcheck
 entry point - forward-only, and unlike this repo's other forward-only
 exceptions this one has no real-weight run to prioritize reaching yet, so it
 is simply not attempted rather than deferred with a reason.
+
+## qwen3vl - residency + D-Bus (serving-contract obligations 2 and 4)
+
+Qwen3-VL's `capability::Provider` (`QwenVlProvider`/`GenerateAction` in
+`crates/qwen3vl/src/caps.rs`) already satisfied obligation 1 - it had its own
+internal one-request-at-a-time `Mutex<Option<Resident>>` and the full
+`generate` action interface. What was missing was a real
+`residency::ResidentModel` adapter (obligation 2: build once, own the
+memory, get scheduled/budgeted) and the D-Bus reachability + example
+(obligation 4) that depends on one existing.
+
+**The split, mirroring `moondream3::caps::Session`.** `caps::Resident` (the
+struct the static mutex already built) is now `pub`, with two new public
+methods: `load_on(dir, max_pixels, precision, gpu: Option<u32>)` - a scoped
+`gpu_core::devices::with_gpu` placement, never an env write, matching every
+other server-lifetime resident in this repo - and `generate(inv, progress)`,
+which is the body `GenerateAction::run` used to hold directly. The direct
+provider's static-mutex path and `crates/cli/src/resident_qwen3vl.rs`'s
+scheduled instance now run the exact same `generate` code; nothing about
+preprocessing, prompt assembly or token accounting exists twice.
+`Qwen::new_shard_dt_decode` (which `Qwen3Vl::new` calls) already documented
+that it lands on "the ambient selection (`--device` / scoped `with_gpu`)",
+so no device parameter needed to thread into `crates/qwen3vl/src/model.rs`
+at all - scoping the call site in `caps.rs` was sufficient.
+
+**The footprint is derived, not measured** - no real checkpoint has been run
+through this resident on an accelerator on this machine. The arithmetic
+(`resident_qwen3vl.rs`'s `FP32_BYTES`/`INT8_BYTES` doc comments): decoder
+~4.02B params (36 layers x ~100.9M/layer + the tied 389M-param embedding) at
+4 bytes = ~14.98 GiB, vision tower ~374M params (always fp32 - a small
+fraction of the weights and none of the per-token bandwidth) at 4 bytes =
+~1.39 GiB. Weights alone land at ~16.37 GiB, which agrees with
+`Qwen3Vl::from_hf`'s own pre-existing doc comment ("the released 4B
+checkpoint is ~16 GB in f32") - independent confirmation the arithmetic is
+in the right ballpark. Add the KV cache at this resident's `SEQ_LEN` (4096)
+and DeepStack/splice scratch, rounded up: **19 GiB fp32, 8 GiB int8** (the
+decoder linears alone drop to one byte each; the vision tower and KV cache do
+not shrink).
+
+**D-Bus needed zero `crates/dbus` changes, verified by tracing the code, not
+assumed.** `Manager::run`/`subscribe` in `crates/dbus/src/service.rs` are
+already fully model-agnostic - they take a `model: String` and dispatch
+through `self.executor.submit(Job::new(model, action, inv)...)`, with no
+per-model branch. Registering `Qwen3VlResident` in
+`crates/cli/src/catalog.rs`'s `resident_ctor_for` (which `resident.rs::
+build_executor` folds into `Executor::start` via `catalog::residents()`) was
+the entire D-Bus wiring.
+
+**A side effect worth naming: HTTP came free too, and is now claimed.** The
+`generate` action's shape (streaming, a `prompt`/`messages` param, a `Text`
+output) was already documented in `caps.rs`'s own module doc as chosen
+SPECIFICALLY to satisfy `apiserve::catalog::api_caps`'s chat classification
+- but that classification reads from `Executor::manifests()`, which only
+ever lists REGISTERED residents. Before this change qwen3vl had none, so it
+was invisible to both `/v1/models` lists despite the manifest shape already
+being correct. `resident_qwen3vl.rs`'s
+`brain_qwen3vl_is_auto_exposed_on_openai_and_anthropic_model_lists` test
+drives a real `axum` router over a real `Executor` (weights path
+`/nonexistent`, no checkpoint needed - `GET /v1/models` never activates
+anything) and confirms `brain/qwen3vl` now appears on both. `docs/models/
+qwen3vl.md`'s support table is updated to match - HTTP API and D-Bus both
+[x] - because this is now verified, not aspirational.
+
+**Batching (obligation 3) stays the documented serial default,
+deliberately.** Moondream 3's vision tower batches across requests because
+`SiglipEncoder::encode` attends within each crop independently of every
+other request's crops. Qwen3-VL's vision tower does not have that property
+here: its output is spliced directly into the decoder's own incremental
+KV-cache decode (`Qwen3Vl::generate_cb`), so every request's image
+placement, prompt and KV cache are entangled with that one request from the
+first token. There is no stage that is both shared across requests and
+independent of per-request state, so `run_batch` is left at
+`residency::model::Instance`'s default sequential loop - the same call this
+repo's `sdxlunet`/`controlnet`/`flux1`/`pulid` residents make for their own
+serial multi-step samplers, and for the same reason.
+
+**What is still open.** No real Qwen3-VL-4B checkpoint has been run through
+this resident (activate/generate/estimate) on a GPU on this machine, so the
+footprint constants and the `gpu_core::devices::with_gpu` placement plumbing
+are verified by code-path tracing and by the existing `served_generate_path_
+runs_on_real_weights` skip-if-absent smoke in `qwen3vl::caps::tests` (which
+exercises `GenerateAction`/the static-mutex path, not the residency
+adapter's own `Resident::load_on` construction path) - not by a real-weight
+run through `resident_qwen3vl.rs` itself. True continuous batching
+(`model::serve::{Scheduler, PagedDecoder}`, the pattern `serving-contract.md`
+names for autoregressive decoder LMs) is out of scope here, same as it is
+for every other single-request VLM resident in this repo.

@@ -51,6 +51,7 @@ mod resident_asr;
 mod resident_cosyvoice;
 mod resident_deepseekocr;
 mod resident_moondream3;
+mod resident_qwen3vl;
 mod resident_depth;
 mod resident_flux2;
 mod resident_forecast;

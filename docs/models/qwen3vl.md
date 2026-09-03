@@ -14,9 +14,9 @@ captioning instead, see [FastVLM](fastvlm.md); both are compared on the
 | Sampling (temperature/top-k/top-p) | [x] |
 | LoRA fine-tune         | [ ] |
 | CLI                    | [x] |
-| HTTP API               | [ ] |
-| D-Bus                  | [ ] |
-| Batched/streaming serving | [ ] |
+| HTTP API               | [x] (OpenAI + Anthropic chat, auto-exposed - `generate`'s shape matches `apiserve::catalog::api_caps`'s chat classification) |
+| D-Bus                  | [x] (`Run`/`Subscribe`, `examples/vision/qwen3vl_caption.py`) |
+| Batched/streaming serving | [x] (streams tokens; does not batch concurrent requests - see "Hardware and limits" below) |
 
 ## Getting the weights
 
@@ -71,6 +71,21 @@ BRAIN_QWEN3VL_WEIGHTS=/path/to/qwen3-vl \
   brain qwen3vl generate --prompt "Describe this image." --max_new 64 \
     --in image=photo.ppm --out text=answer.txt
 ```
+
+It is also **served**: with `BRAIN_QWEN3VL_WEIGHTS` set, `brain serve --dbus`
+registers a residency adapter (`crates/cli/src/resident_qwen3vl.rs`) that
+builds the checkpoint ONCE (device-placed, GPU or CPU) and reuses it across
+requests, reachable over D-Bus (`Run`/`Subscribe` -
+`examples/vision/qwen3vl_caption.py`) and, because `generate` matches the
+chat-capable shape `apiserve::catalog::api_caps` looks for, automatically on
+the OpenAI/Anthropic `/v1/chat/completions` and `/v1/messages` surfaces too -
+no per-model HTTP or D-Bus code was added for this. `max_pixels` and
+`precision` are both part of the resident's identity, so a request that asks
+for a bigger capacity or a different precision tier builds (and budgets) a
+separate instance rather than silently reusing or evicting another one; see
+`resident_qwen3vl.rs`'s module doc for the derived (not measured - no real
+checkpoint has been run through this resident on this machine)
+`FP32_BYTES`/`INT8_BYTES` footprint arithmetic.
 
 ## Options
 
@@ -166,8 +181,15 @@ see `.agents/roadmap/vlm.md`.
 
 ## Hardware and limits
 
-No D-Bus/HTTP serving adapter yet - CLI only, one request at a time, fp32
-by default (int8 decoder opt-in). Does not batch concurrent requests. No
+Served (CLI, D-Bus, HTTP) one request at a time, fp32 by default (int8
+decoder opt-in), with real temperature/top-k/top-p sampling (greedy by
+default - see "Sampling" above). `run_batch` is the documented serial
+default: unlike Moondream 3 (whose vision tower attends within each crop
+independently and so batches across requests), Qwen3-VL's vision tower feeds
+directly into the decoder's own incremental KV-cache splice, so every
+request is its own multi-step decode with its own prompt, its own
+image-token placement and its own KV cache - there is no stage that is both
+shared across requests and independent of each one's state. No
 LoRA/fine-tuning command yet.
 
 Prefill runs one token at a time, so its cost is linear in the prompt and

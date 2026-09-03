@@ -104,6 +104,9 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
     if model_id == moondream3::caps::MODEL {
         return catalog::resident!(crate::resident_moondream3::Moondream3Resident::from_env);
     }
+    if model_id == qwen3vl::caps::MODEL {
+        return catalog::resident!(crate::resident_qwen3vl::Qwen3VlResident::from_env);
+    }
     if model_id == qwen3tts::caps::MODEL {
         return catalog::resident!(crate::resident_tts::TtsResident::from_env);
     }
@@ -345,6 +348,7 @@ mod tests {
             pulid::caps::MODEL,
             deepseek2ocr::caps::MODEL,
             moondream3::caps::MODEL,
+            qwen3vl::caps::MODEL,
             qwen3tts::caps::MODEL,
             minimaxmusic3::caps::MODEL,
             cosyvoice::caps::MODEL,

@@ -12,6 +12,7 @@ marshalled through D-Bus.
 | `scrfd` | `detect` → boxes/scores/landmarks | `BRAIN_SCRFD_DIR` (the antelopev2 directory) |
 | `arcface` | `embed` → a 512-d identity vector (detects + aligns first unless `align=false`) | `BRAIN_ARCFACE_DIR` (the antelopev2 directory) |
 | `brain/moondream3` | `caption` → generated text from an image + an instruction, streamed per token ([`moondream3_caption.py`](moondream3_caption.py)) | `BRAIN_MOONDREAM3_WEIGHTS` (the checkpoint directory) |
+| `brain/qwen3vl` | `generate` → generated text from an image + a prompt, streamed per token ([`qwen3vl_caption.py`](qwen3vl_caption.py)) | `BRAIN_QWEN3VL_WEIGHTS` (checkpoint directory or GGUF) |
 
 Moondream 3's example uses `Subscribe` rather than `Run`, for the same reason
 DeepSeek-OCR's does: neither decoder has a KV cache, so every generated token is
@@ -19,6 +20,13 @@ a full recompute and the stream is the only way to see progress. It also
 demonstrates the `precision` parameter - `int8` (the default) versus `fp32`,
 which the scheduler budgets as two separate instances, so an fp32 request on a
 machine without room fails placement instead of evicting a working int8 one.
+
+Qwen3-VL's example also uses `Subscribe`, but for the ordinary reason: its
+decode IS KV-cached (real M-RoPE + DeepStack carried through the incremental
+path), so streaming is about seeing partial output as it is produced, not
+about hiding an `O(T²)` recompute. `precision` is the same shape as
+Moondream 3's, inverted default - `fp32` (exact) is the default and `int8`
+(lossy) must be asked for by name.
 
 A third vision model lives in its own directory here, because its example is
 about a streaming decode rather than a one-shot image result:

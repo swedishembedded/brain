@@ -96,10 +96,16 @@ impl Precision {
     }
 }
 
+/// The env var naming the checkpoint directory (or a raw GGUF path) - read
+/// directly by [`default_weights`], and (via
+/// `crates/cli/src/resident_qwen3vl.rs::Qwen3VlResident::from_env`) the one
+/// place the residency adapter learns where its weights live.
+pub const DIR_VAR: &str = "BRAIN_QWEN3VL_WEIGHTS";
+
 /// Default checkpoint directory - `$BRAIN_QWEN3VL_WEIGHTS`, never a baked-in
 /// absolute path (AGENTS.md: no absolute paths in source).
 fn default_weights() -> String {
-    std::env::var("BRAIN_QWEN3VL_WEIGHTS").unwrap_or_default()
+    std::env::var(DIR_VAR).unwrap_or_default()
 }
 
 /// Pixel-area budget for the resident model's DeepStack/splice buffer
@@ -110,7 +116,7 @@ fn default_weights() -> String {
 /// multiple GB of DeepStack scratch per level for a capacity most requests
 /// never approach. Override via the `max_pixels` param for a
 /// checkpoint/workload that genuinely needs bigger images.
-const DEFAULT_SERVE_MAX_PIXELS: u32 = 1024 * 1024;
+pub const DEFAULT_SERVE_MAX_PIXELS: u32 = 1024 * 1024;
 
 /// The KV-cache capacity this resident's decoder is BUILT for, before
 /// clamping to the checkpoint's own declared ceiling (see
@@ -172,9 +178,33 @@ pub fn manifest() -> Manifest {
     )
 }
 
+/// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
+/// the checkpoint directory is service-side configuration ([`DIR_VAR`]), so
+/// the served action carries only real per-request parameters - see
+/// `moondream3::caps::manifest_resident`'s doc for why a static, CLI-facing
+/// manifest and a stripped resident one are two different things, not one
+/// hidden behind deployment state. `crate::resident_qwen3vl::Qwen3VlResident::
+/// manifest` (in `crates/cli`) calls this rather than [`manifest`].
+pub fn manifest_resident() -> Manifest {
+    let mut m = manifest();
+    for a in &mut m.actions {
+        a.params.retain(|p| p.name != "weights");
+    }
+    m
+}
+
 use capability::last_user_text;
 
-struct Resident {
+/// A built Qwen3-VL checkpoint: the model, its tokenizer and the config it
+/// was assembled from.
+///
+/// `pub` so `crates/cli/src/resident_qwen3vl.rs`'s residency adapter can own
+/// one directly ([`Resident::load_on`]/[`Resident::generate`]) - the
+/// residency adapter and this crate's own [`GenerateAction`] (behind the
+/// process-wide [`RESIDENT`] static below) then run the SAME code and cannot
+/// drift about preprocessing, prompt assembly or token accounting, matching
+/// `moondream3::caps::Session`'s split.
+pub struct Resident {
     weights: String,
     max_pixels: u32,
     /// The tier this resident was BUILT at, part of its key - see
@@ -195,6 +225,71 @@ struct Resident {
     cfg: Qwen3VlConfig,
     model: Qwen3Vl,
     tok: data::qwen_tokenizer::QwenBpe,
+}
+
+impl Resident {
+    /// [`load_resident`] on a chosen physical card (`gpu_core::devices`'
+    /// canonical index), or `None` for the CPU backend.
+    ///
+    /// Placement is a SCOPED registry selection (`gpu_core::devices::with_gpu`),
+    /// never an env mutation - a server-lifetime resident must not change the
+    /// backend every other model builds on afterwards. `Qwen::
+    /// new_shard_dt_decode` (which `Qwen3Vl::new` calls) already documents
+    /// that it lands on "the ambient selection (`--device` / scoped
+    /// `with_gpu`)", so scoping the call here is sufficient - no device
+    /// parameter needs to thread through `crate::model`.
+    pub fn load_on(dir: &str, max_pixels: u32, precision: Precision, gpu: Option<u32>) -> Result<Resident, String> {
+        match gpu {
+            None => load_resident(dir, max_pixels, precision),
+            Some(i) => gpu_core::devices::with_gpu(i, || load_resident(dir, max_pixels, precision))?,
+        }
+    }
+
+    /// Run one `generate` invocation against this already-built resident:
+    /// image + prompt in, streamed text out. The body [`GenerateAction::run`]
+    /// used to hold directly, extracted so a residency-scheduled instance and
+    /// the direct provider execute byte-for-byte the same code.
+    pub fn generate(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let prompt = last_user_text(inv);
+        if prompt.trim().is_empty() {
+            return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
+        }
+        let max_new = inv.get_i64("max_new").unwrap_or(64).clamp(1, 2048) as u32;
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
+        let p = Prepared::build(self, &hwc, w, h, &prompt, max_new)?;
+        progress(Progress::step(0, max_new, "generating"));
+
+        let temperature = inv.get_f64("temp").unwrap_or(0.0).max(0.0) as f32;
+        let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
+        let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
+        let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
+        let sample = crate::model::SampleParams { temperature, top_k, top_p };
+        let mut rng = data::rng::Rng::new(seed);
+
+        // Real per-token streaming deltas (the spec declares `.streaming()`):
+        // re-decode the running id list each token and emit the UTF-8-safe
+        // suffix, exactly like qwen3::chat's streaming path.
+        let mut ids: Vec<u32> = Vec::new();
+        let mut printed = String::new();
+        let mut step = 0u32;
+        let out_ids = self.model.generate_cb(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, sample, &mut rng, |tok_id| {
+            ids.push(tok_id);
+            step += 1;
+            let full = self.tok.decode(&ids);
+            let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
+            printed = np;
+            if !delta.is_empty() {
+                progress(Progress::token(step, max_new, delta));
+            }
+        });
+        let text = self.tok.decode(&out_ids);
+        let ntok = out_ids.len();
+        progress(Progress::step(max_new, max_new, text.clone()));
+        Ok(Outcome::new()
+            .set("text", json!(text.clone()))
+            .set("tokens", json!(ntok))
+            .blob("text", Blob::new(Media::Text, text.into_bytes())))
+    }
 }
 
 pub struct QwenVlProvider;
@@ -232,52 +327,18 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let prompt = last_user_text(inv);
-        if prompt.trim().is_empty() {
+        // Checked before ANY checkpoint I/O, per
+        // `empty_prompt_is_a_clean_error_before_touching_weights` below.
+        if last_user_text(inv).trim().is_empty() {
             return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
         let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
         if dir.is_empty() {
             return Err("qwenvl generate: no checkpoint directory (set 'weights' or $BRAIN_QWEN3VL_WEIGHTS)".to_string());
         }
-        let max_new = inv.get_i64("max_new").unwrap_or(64).clamp(1, 2048) as u32;
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
-        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
-
-        let temperature = inv.get_f64("temp").unwrap_or(0.0).max(0.0) as f32;
-        let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
-        let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-        let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
-        let sample = crate::model::SampleParams { temperature, top_k, top_p };
-        let mut rng = data::rng::Rng::new(seed);
-
         let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
-        let (text, ntok) = with_resident(&dir, max_pixels, precision, |hot| {
-            let p = Prepared::build(hot, &hwc, w, h, &prompt, max_new)?;
-            progress(Progress::step(0, max_new, "generating"));
-            // Real per-token streaming deltas (the spec declares `.streaming()`):
-            // re-decode the running id list each token and emit the UTF-8-safe
-            // suffix, exactly like qwen3::chat's streaming path.
-            let mut ids: Vec<u32> = Vec::new();
-            let mut printed = String::new();
-            let mut step = 0u32;
-            let out_ids = hot.model.generate_cb(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, sample, &mut rng, |tok_id| {
-                ids.push(tok_id);
-                step += 1;
-                let full = hot.tok.decode(&ids);
-                let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
-                printed = np;
-                if !delta.is_empty() {
-                    progress(Progress::token(step, max_new, delta));
-                }
-            });
-            Ok((hot.tok.decode(&out_ids), out_ids.len()))
-        })?;
-        progress(Progress::step(max_new, max_new, text.clone()));
-        Ok(Outcome::new()
-            .set("text", json!(text.clone()))
-            .set("tokens", json!(ntok))
-            .blob("text", Blob::new(Media::Text, text.into_bytes())))
+        with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, progress))
     }
 }
 
