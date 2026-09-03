@@ -606,6 +606,8 @@ pub const MATMUL_I8_GEMV_REG: &str = include_str!("../wgsl/matmul_i8_gemv_reg.wg
 pub const MATMUL_KQ_DYN: &str = include_str!("../wgsl/matmul_kq_dyn.wgsl");
 /// `wgsl/matmul_kq_gemv.wgsl`
 pub const MATMUL_KQ_GEMV: &str = include_str!("../wgsl/matmul_kq_gemv.wgsl");
+/// `wgsl/matmul_kq_gemv_reg.wgsl`
+pub const MATMUL_KQ_GEMV_REG: &str = include_str!("../wgsl/matmul_kq_gemv_reg.wgsl");
 /// `wgsl/matmul_q4_dyn.wgsl`
 pub const MATMUL_Q4_DYN: &str = include_str!("../wgsl/matmul_q4_dyn.wgsl");
 /// `wgsl/matmul_q4_dyn_reg.wgsl`
@@ -656,6 +658,8 @@ pub const MOE_LINEAR_GATED_DW: &str = include_str!("../wgsl/moe_linear_gated_dw.
 pub const MOE_LINEAR_GATED_DX: &str = include_str!("../wgsl/moe_linear_gated_dx.wgsl");
 /// `wgsl/moe_linear_gated_i8.wgsl`
 pub const MOE_LINEAR_GATED_I8: &str = include_str!("../wgsl/moe_linear_gated_i8.wgsl");
+/// `wgsl/moe_linear_gated_kq.wgsl`
+pub const MOE_LINEAR_GATED_KQ: &str = include_str!("../wgsl/moe_linear_gated_kq.wgsl");
 /// `wgsl/moe_linear_gated_q4.wgsl`
 pub const MOE_LINEAR_GATED_Q4: &str = include_str!("../wgsl/moe_linear_gated_q4.wgsl");
 /// `wgsl/moe_scatter_scaled_add.wgsl`
@@ -1236,6 +1240,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_i8_gemv_reg", MATMUL_I8_GEMV_REG),
     ("matmul_kq_dyn", MATMUL_KQ_DYN),
     ("matmul_kq_gemv", MATMUL_KQ_GEMV),
+    ("matmul_kq_gemv_reg", MATMUL_KQ_GEMV_REG),
     ("matmul_q4_dyn", MATMUL_Q4_DYN),
     ("matmul_q4_dyn_reg", MATMUL_Q4_DYN_REG),
     ("matmul_q4_gemv", MATMUL_Q4_GEMV),
@@ -1261,6 +1266,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("moe_linear_gated_dw", MOE_LINEAR_GATED_DW),
     ("moe_linear_gated_dx", MOE_LINEAR_GATED_DX),
     ("moe_linear_gated_i8", MOE_LINEAR_GATED_I8),
+    ("moe_linear_gated_kq", MOE_LINEAR_GATED_KQ),
     ("moe_linear_gated_q4", MOE_LINEAR_GATED_Q4),
     ("moe_scatter_scaled_add", MOE_SCATTER_SCALED_ADD),
     ("mse_grad", MSE_GRAD),

@@ -611,6 +611,108 @@ pub fn expert_fwd_i8(
     steps
 }
 
+/// Affine K-quant (Q4_K/Q5_K) kernel indices, parallel to [`MoeIds8`]. Needs
+/// one more prepass than the plain int8 tier: [`crate::int8::GROUP`]-wise
+/// activation group sums (`quant_group_sum.wgsl`, M9's `xgs` seam) for BOTH
+/// the shared input `x` (computed once by the caller, same as `MoeIds8`'s own
+/// `xq`/`sx`) AND the expert-specific `h` (computed fresh per expert by this
+/// module, the same way `hq`/`sh` already are) - every `moe_linear_gated_kq`
+/// dispatch needs its OWN activation's group sums, since the correction is a
+/// property of the activation being consumed, never the weight.
+#[derive(Clone, Copy)]
+pub struct MoeIdsKQ {
+    /// `moe_linear_gated_kq.wgsl`.
+    pub linear_gated_kq: usize,
+    pub silu_mul: usize,
+    pub scale_add: usize,
+    /// `crate::int8::quant_rows_steps`'s `[max_abs_row, quant_pack]` pair.
+    pub quant: [usize; 2],
+    /// `quant_group_sum.wgsl` - the third step `crate::int8::quant_rows_steps`'s
+    /// `xgs` seam appends.
+    pub quant_group_sum: usize,
+}
+
+/// One affine K-quant expert linear's weight, in `model::ops::Weight::KQuant`'s
+/// own device layout (that module's doc table): `wq` is `[n, k*CODE_BITS/32]`
+/// u32 unsigned codes, `sz` is `[n, 2*k/32]` f32 INTERLEAVED `(ds, dm)` pairs.
+/// Read directly rather than through the `Ops` façade - this module predates
+/// `Ops` and dispatches every kernel by hand, the same precedent [`Lin8`]
+/// already set for the plain int8 tier.
+#[derive(Clone, Copy)]
+pub struct LinKQ<'a> {
+    pub wq: &'a DeviceBuffer,
+    pub sz: &'a DeviceBuffer,
+}
+
+/// Scratch for one expert's affine K-quant FFN step - [`ExpertScratch8`] plus
+/// the `h` group-sum buffer the down-projection's affine correction needs
+/// (`hgs`): `h` is a different tensor for every expert, so it cannot be
+/// prepassed once per layer the way the shared input's `xgs` can, exactly the
+/// reasoning `hq`/`sh` themselves already carry in [`ExpertScratch8`].
+pub struct ExpertScratchKQ<'a> {
+    pub gate_pre: &'a DeviceBuffer,
+    pub up: &'a DeviceBuffer,
+    pub h: &'a DeviceBuffer,
+    pub hq: &'a DeviceBuffer,
+    pub sh: &'a DeviceBuffer,
+    pub hgs: &'a DeviceBuffer,
+    pub expert_out: &'a DeviceBuffer,
+}
+
+/// Affine K-quant counterpart of [`expert_fwd_i8`]. `xq`/`sx`/`xgs` are the
+/// shared input `x`, ALREADY quantized (and group-summed) once by the caller
+/// via `crate::int8::quant_rows_steps`'s `xgs` seam (`model::ops::Ops::act_kq`'s
+/// own recipe) - every expert reads the same prepass, so redoing it per
+/// expert would be pure waste, the identical reasoning `expert_fwd_i8`
+/// already established for `xq`/`sx` alone. `moe_linear_gated_kq.wgsl`'s own
+/// `k` param is the RAW LOGICAL reduction length (never a packed-word count -
+/// `xq` and `wq` have different word densities), so `lin` below passes `d`/
+/// `ff` directly, unlike `expert_fwd_i8`'s `lin` which divides by 4.
+#[allow(clippy::too_many_arguments)]
+pub fn expert_fwd_kq(
+    g: &Gpu,
+    ids: &MoeIdsKQ,
+    shape: &MoeShape,
+    xq: &DeviceBuffer,
+    sx: &DeviceBuffer,
+    xgs: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    gate_w: LinKQ,
+    up_w: LinKQ,
+    down_w: LinKQ,
+    scratch: &ExpertScratchKQ,
+    acc: &DeviceBuffer,
+    e_idx: u32,
+    accumulate: bool,
+) -> Vec<Step> {
+    let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
+    let lin = |xq: &DeviceBuffer, sx: &DeviceBuffer, xgs: &DeviceBuffer, w: LinKQ, out: &DeviceBuffer, k: u32, n: u32| {
+        g.step(ids.linear_gated_kq, &[xq, w.wq, sx, w.sz, xgs, gate, out], &[m, k, n, e, e_idx], m * n)
+    };
+    let quant_h = crate::int8::quant_rows_steps(
+        g,
+        crate::int8::QuantRows {
+            kernels: ids.quant,
+            x: scratch.h,
+            sx: scratch.sh,
+            xq: scratch.hq,
+            xgs: Some((ids.quant_group_sum, scratch.hgs)),
+        },
+        0,
+        m,
+        ff,
+    );
+    let mut steps = vec![
+        lin(xq, sx, xgs, gate_w, scratch.gate_pre, d, ff),
+        lin(xq, sx, xgs, up_w, scratch.up, d, ff),
+        g.step(ids.silu_mul, &[scratch.gate_pre, scratch.up, scratch.h], &[m * ff], m * ff),
+    ];
+    steps.extend(quant_h);
+    steps.push(lin(scratch.hq, scratch.sh, scratch.hgs, down_w, scratch.expert_out, ff, d));
+    steps.push(g.step(ids.scale_add, &[gate, scratch.expert_out, acc], &[m, d, e, e_idx, accumulate as u32], m * d));
+    steps
+}
+
 /// Kernel indices for [`shared_expert_fwd`] -- an always-active (non-gated)
 /// dense SwiGLU, so it dispatches the plain `matmul.wgsl` rather than
 /// [`MoeIds::linear_gated`]'s row-skipping variant.

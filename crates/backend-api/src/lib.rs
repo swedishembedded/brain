@@ -379,6 +379,8 @@ impl DType {
             DType::BF16 => "bf16",
             DType::I8 => "i8",
             DType::Q4 => "q4",
+            DType::Q4K => "q4k",
+            DType::Q8K => "q8k",
         }
     }
 
@@ -392,6 +394,8 @@ impl DType {
             "bf16" => Some(DType::BF16),
             "i8" => Some(DType::I8),
             "q4" => Some(DType::Q4),
+            "q4k" => Some(DType::Q4K),
+            "q8k" => Some(DType::Q8K),
             _ => None,
         }
     }

@@ -588,8 +588,123 @@ review of this codebase assumed:
       growth, but still run per the gating requirement), `-p brain-flux2`
       (full suite green, same "never builds an `Ops`" note), `-p
       brain-s3dit` (full suite green, same note).
-- [ ] M13: `moe_linear_gated_kq.wgsl` + `matmul_kq_gemv_reg.wgsl` +
-      `gpu_core::upgrade` row.
+- [x] M13: the two remaining kernels completing the affine K-quant
+      (Q4_K/Q5_K) family - `moe_linear_gated_kq.wgsl` (new) and
+      `matmul_kq_gemv_reg.wgsl` (new), plus their dispatch wiring.
+      `moe_linear_gated_kq.wgsl` is `moe_linear_gated_i8.wgsl`'s affine
+      sibling, in the SAME naive tier (one thread per output element, no
+      workgroup tiling) for the SAME reason that kernel's own header states:
+      `matmul_kq_dyn`/`matmul_kq_gemv` stage rows into WORKGROUP-SHARED
+      memory across a barrier, and a per-thread early return for a
+      non-routed row ahead of a `workgroupBarrier()` not every thread
+      reaches is undefined behaviour in WGSL, so the row-level skip needs the
+      naive tier's ordinary `return`. Its inner loop walks K IN ORDER, one
+      thread per output element, so a weight-scale group's 8 quads are
+      consecutive in the SAME thread's own loop - unlike `matmul_kq_gemv`'s
+      64-thread k-stride (where 8 different threads visit one group and only
+      the first may apply the min correction, guarded by `(g % WPGK) ==
+      0u`), no guard is needed here: the correction is read once and applied
+      once per (row, group) as the group completes, because no other thread
+      ever touches that pair. Wired into `model::moe` (NOT
+      `model::ops::Ops::moe_linear`, which explicitly refuses `I8`/`Q4`/
+      `KQuant` today - the real dispatch site for every quantized MoE tier is
+      `model::moe`'s own hand-written `expert_fwd_*` family, `MoeIds8`/
+      `expert_fwd_i8` being the precedent): `MoeIdsKQ` (kernel indices,
+      including the `quant_group_sum` prepass `h`'s own re-quantization
+      needs - `h` is a fresh tensor per expert, so it cannot share the
+      shared input's `xgs` prepass), `LinKQ` (one affine expert linear's
+      weight - `wq`/`sz` in `model::ops::Weight::KQuant`'s own device
+      layout), `ExpertScratchKQ` (adds `hgs` to `ExpertScratch8`'s fields),
+      and `expert_fwd_kq` (the three-linear SwiGLU FFN + gated combine,
+      structurally identical to `expert_fwd_i8` except its `lin` closure
+      passes the RAW logical `k`/`n`, never divided by 4 - `moe_linear_
+      gated_kq.wgsl`'s own param contract, matching `matmul_kq_{dyn,gemv}`'s
+      established reason: `xq`/`wq` have different word densities, so a
+      shared packed-word count would be ambiguous about which operand it
+      counts). `backend_api::select::candidates`'s `Op::MoeExpertLinear` arm
+      needed no CODE change (M12 already folded `Q4K`/`Q8K` into the SAME
+      `PackedInt8` arm `I8`/`Q4` use, since the naive per-group-`dot4I8Packed`
+      structure is genuinely DP4A-bound at every quantized tier this
+      workspace ships) - only its stale comment (which had said "no kernel
+      yet, nothing routes through these dtypes") was corrected to name the
+      kernel and dispatch function that now exist.
+      `matmul_kq_gemv_reg.wgsl` is `matmul_kq_gemv`'s register-accumulator
+      sibling, standing to it exactly as `matmul_i8_gemv_reg` stands to
+      `matmul_i8_gemv`: the same `MREG`-bucketed function-local accumulator
+      array (registers, not workgroup memory sized for the `m=32` worst
+      case) and the same one-write-at-the-end `partial` fold, with the two
+      deltas `matmul_kq_gemv` itself already carries over `matmul_i8_gemv` -
+      a staging-time `CODE_BITS`-wide unsigned-code unpack per quad, and the
+      affine `dm[n,g]*S[m,g]` correction folded in per quad with the
+      IDENTICAL one-thread-per-group guard (`(g % WPGK) == 0u`) in the
+      IDENTICAL position, so the two kernels perform the identical
+      operations in the identical order and bit-identity is a property of
+      that construction, not a coincidence. Wired into `gpu_core::upgrade`
+      as TWO new rows (one per `CODE_BITS`, since `matmul_kq_gemv` is only
+      ever registered as its two `#CODE_BITS={4,8}` specialisations - the
+      bare, unspecialised name is never registered by any model crate),
+      sharing a new `DECODE_SHAPE_KQ` capability probe (a separate constant
+      from `DECODE_SHAPE_I8` per this file's own "one probe per dtype
+      family" convention, even though `select::candidates` folds `Q4K`/
+      `Q8K` into I8's identical branch today). The `Upgrade` struct gained
+      one new field, `extra: &'static [(&'static str, u32)]` - additional
+      template constants FIXED for a row, applied alongside its bucket knob
+      - because this is the first upgrade row whose `fast` kernel is
+      ALREADY specialised along a second axis (`CODE_BITS`) before the
+      `MREG` bucket ladder ever runs; every pre-existing row keeps `extra:
+      &[]`. The table's own `table_entries_name_real_kernels` regression
+      test needed one adjustment for the same reason: `u.slow` for these two
+      rows is a `#CODE_BITS=N` specialised name that `kernels::src` (which
+      only knows BARE registered names) cannot resolve directly, so the
+      test now validates the Params/bindings CONTRACT against `u.slow`'s
+      base name (a `#K=V` specialisation never moves either) rather than the
+      specialised name itself. Gated: two new tests in `gpu_core::upgrade`'s
+      own module (`kq_gemv_reg_appends_one_bucket_ladder_per_code_bits`,
+      `kq_gemv_reg_resolves_independently_per_code_bits` - the two
+      `CODE_BITS` rows activate and pick buckets independently, never
+      conflating one's ladder with the other's); a new
+      `crates/gpu-core/tests/kq_gemv_reg_upgrade.rs` (device-level, both
+      `CODE_BITS`): the upgrade is active with the full 6-bucket `MREG`
+      ladder, and `matmul_kq_gemv`/`matmul_kq_gemv_reg` are `assert_eq!`
+      BIT-IDENTICAL across `m in {1,2,3,8,17,32}` at two `(k, n)` shapes -
+      real `assert_eq!` on the raw output bits, not a tolerance, since these
+      two are supposed to compute identically by construction; a new
+      `crates/model/tests/moe_linear_gated_kq.rs` (device-level): rung (b)
+      `moe_linear_gated_kq` with every row routed to one expert (out of
+      three, exercising `e_idx` addressing) matches BOTH `matmul_kq_dyn` and
+      `matmul_kq_gemv` at M11's own tolerance (`rel_l2 <= 1e-6`, `cosine >=
+      1 - 1e-9`, `max_rel <= 5e-4`), all three compared against the SAME f64
+      host oracle built directly from int8 codes, at both `CODE_BITS`; two
+      more device-level tests exercise `expert_fwd_kq`'s WIRING specifically
+      (not just the raw kernel): a non-routed row (gate column 0) writes
+      EXACTLY zero, and two experts both routed to every row combine by
+      plain f32 addition in the SAME order `scale_add.wgsl`'s own
+      `accumulate` branch performs - `assert_eq!` on the bits, catching a
+      swapped buffer or a mis-threaded `accumulate` flag a purely-finite
+      smoke test could not. `make test --release --offline -p brain-kernels
+      -p brain-model -p brain-gpu-core -p brain-backend-api`: every test in
+      scope green on a real device (Intel Arc iGPU, Meteor Lake, Vulkan).
+      **Measured speedup** (`crates/gpu-core/tests/kq_gemv_reg_speed_bench.rs`,
+      `#[ignore]`d, `gpu_core::profile::best_of` bracketed by `poll_wait()`,
+      preceded by a 3-second continuous-dispatch DVFS ramp per checklist
+      §E.0b): at `k=n=2048` across `m in {1,2,4,8,16,32}`, both `CODE_BITS`,
+      `matmul_kq_gemv_reg` measured `0.90x-1.09x` against plain
+      `matmul_kq_gemv` on this integrated Arc - essentially a WASH, not the
+      ~2x `matmul_i8_gemv_reg` measured on a discrete Tesla P40. This is a
+      real, measured number, not a regression (no shape measured below
+      0.90x, several measured a small win), and the row stays wired per
+      this milestone's own instruction - but the honest reading is that
+      this iGPU's shared-memory/register tradeoff at this shape does not
+      show the same win the symmetric int8 kernel showed on a discrete
+      card, which is worth re-measuring on a P40-class device before
+      treating the wiring as validated for a win rather than merely for
+      correctness. `.agents/rules/kernels.md`'s own bar #3 for
+      `gpu_core::upgrade` ("wins at every shape") is therefore NOT
+      cleanly met on this hardware the way the i8/f32 GEMV rows are -
+      recorded here as the honest evidence, matching this file's own
+      precedent for `matmul_q4_gemv_reg`'s measured regression, except this
+      row is a wash rather than a loss so it is left wired rather than
+      pulled.
 - [ ] M14: byte compression (packed `sc`/`m` + f16 `d`; Q4_K → 1.03× GGUF).
 - [ ] M15: split GGUF in `MmapGguf` (`mmaps: Vec<Mmap>`, part in the tensor
       index, one `LoadMeter` over summed bytes - all 17 method signatures

@@ -97,6 +97,16 @@ pub(crate) struct Upgrade {
     pub knob: Option<(&'static str, usize)>,
     /// Ascending bucket values for `knob`. `&[]` for a plain row.
     pub buckets: &'static [u32],
+    /// Additional template constants FIXED for this row (applied to every
+    /// bucket alongside `knob`), for a `fast` kernel that is ALREADY
+    /// specialised along a second axis before the bucket ladder ever runs -
+    /// the affine K-quant GEMV pair, whose `slow` kernel is only ever
+    /// registered as `matmul_kq_gemv#CODE_BITS={4,8}` (`kernels::template::
+    /// interned` names it can never be the bare, unspecialised stem name -
+    /// see `model::ops::kernel_list`, the only place that ever registers it).
+    /// `&[]` for every plain row - the `variants()` params list is simply
+    /// `extra` followed by `(knob, bucket)`.
+    pub extra: &'static [(&'static str, u32)],
     /// `true` when `fast` cannot be compiled by the CPU JIT, so it must not be
     /// appended to a kernel set destined for `backend-cpu`: `wgsl_cpu::Jit`
     /// only *skips* a kernel it cannot express, and every skipped kernel costs
@@ -133,6 +143,20 @@ const DECODE_SHAPE_I8: select::OpShape =
 const DECODE_SHAPE_Q4: select::OpShape =
     select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::Q4 };
 
+/// [`DECODE_SHAPE_I8`]'s affine K-quant (Q4_K/Q5_K) twin. A separate constant
+/// per this file's own convention (one probe per dtype family) even though
+/// `backend_api::select::candidates`'s `Op::MatMul` arm folds `Q4K`/`Q8K` into
+/// the IDENTICAL branch `I8` takes today (same `int8_dot` requirement, same
+/// regime split) - reusing `DECODE_SHAPE_I8` here would silently start
+/// reading the wrong dtype's future policy the day that arm ever splits, and
+/// costs nothing today since the two constants resolve to the same
+/// `candidates()` answer either way. `Dtype::Q4K` stands in for both `Q4K`
+/// and `Q8K`: the two GEMV rows below share this one probe because
+/// `select::candidates` does not distinguish them (`M12`'s own
+/// `affine_kquant_dtypes_select_exactly_like_i8` test is what pins that).
+const DECODE_SHAPE_KQ: select::OpShape =
+    select::OpShape { m: 1, n: 1024, k: 0, dtype: select::Dtype::Q4K };
+
 /// The `MREG` ladder for `matmul_gemv_reg`. Powers of two, so "the smallest
 /// bucket covering `m`" carries at most twice the rows actually needed, and the
 /// ladder is complete by construction for `matmul_gemv`'s own `m <= 32`
@@ -156,6 +180,7 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         probe: ANY_SHAPE,
         knob: None,
         buckets: &[],
+        extra: &[],
         gpu_only: false,
     },
     Upgrade {
@@ -175,6 +200,7 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         probe: DECODE_SHAPE,
         knob: Some(("MREG", 0)), // Params { m, k, n } -> m
         buckets: GEMV_MREG_BUCKETS,
+        extra: &[],
         gpu_only: true,
     },
     Upgrade {
@@ -200,6 +226,7 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         probe: DECODE_SHAPE_I8,
         knob: Some(("MREG", 0)), // Params { m, kg, n } -> m
         buckets: GEMV_MREG_BUCKETS,
+        extra: &[],
         gpu_only: true,
     },
     Upgrade {
@@ -226,6 +253,42 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         probe: DECODE_SHAPE_Q4,
         knob: Some(("MREG", 0)), // Params { m, k, n } -> m
         buckets: GEMV_MREG_BUCKETS,
+        extra: &[],
+        gpu_only: true,
+    },
+    Upgrade {
+        // M13: the affine K-quant (Q4_K) GEMV's register-accumulator sibling.
+        // `matmul_kq_gemv` carries exactly the same two costs
+        // `matmul_i8_gemv_reg`'s own row above was added to fix -
+        // worst-case-sized workgroup-memory accumulators and a per-`(k, m)`
+        // shared-memory read-modify-write - and `matmul_kq_gemv_reg.wgsl`'s
+        // own header derives the fix the identical way. `slow` is the
+        // `CODE_BITS=4` (Q4_K) specialisation `model::ops::kernel_list`
+        // registers; `extra` fixes the SAME axis on `fast` before the `MREG`
+        // bucket ladder runs, so the two vary together the way `CODE_BITS`
+        // and `MREG` are independent knobs on one source file.
+        slow: "matmul_kq_gemv#CODE_BITS=4",
+        fast: "matmul_kq_gemv_reg",
+        src: kernels::MATMUL_KQ_GEMV_REG,
+        thread_mul: 1,
+        op: select::Op::MatMul,
+        probe: DECODE_SHAPE_KQ,
+        knob: Some(("MREG", 0)), // Params { m, k, n } -> m
+        buckets: GEMV_MREG_BUCKETS,
+        extra: &[("CODE_BITS", 4)],
+        gpu_only: true,
+    },
+    Upgrade {
+        // Q5_K's twin of the row above - identical reasoning, `CODE_BITS=8`.
+        slow: "matmul_kq_gemv#CODE_BITS=8",
+        fast: "matmul_kq_gemv_reg",
+        src: kernels::MATMUL_KQ_GEMV_REG,
+        thread_mul: 1,
+        op: select::Op::MatMul,
+        probe: DECODE_SHAPE_KQ,
+        knob: Some(("MREG", 0)), // Params { m, k, n } -> m
+        buckets: GEMV_MREG_BUCKETS,
+        extra: &[("CODE_BITS", 8)],
         gpu_only: true,
     },
 ];
@@ -285,11 +348,13 @@ impl Upgrade {
         self.buckets
             .iter()
             .map(|&b| {
-                kernels::template::interned(self.fast, self.src, &[(knob, b)]).unwrap_or_else(|e| {
+                let mut params: Vec<(&str, u32)> = self.extra.to_vec();
+                params.push((knob, b));
+                kernels::template::interned(self.fast, self.src, &params).unwrap_or_else(|e| {
                     // A malformed row is a programming error in THIS table, not
                     // a runtime condition: failing here beats silently running
                     // the kernel the caller was trying to leave behind.
-                    panic!("upgrade: {} cannot be specialised {knob}={b}: {e}", self.fast)
+                    panic!("upgrade: {} cannot be specialised {params:?}: {e}", self.fast)
                 })
             })
             .collect()
@@ -495,6 +560,69 @@ mod tests {
         assert_eq!(apply(&active, 1, None, 64), (1, 64));
     }
 
+    // --- M13: the affine K-quant (Q4_K/Q5_K) GEMV register-accumulator rows
+
+    fn gpu_caps_int8() -> DeviceCaps {
+        let mut c = DeviceCaps::portable_baseline(backend_api::DeviceClass::DiscreteGpu);
+        c.numeric = backend_api::NumericSupport { int8_dot: true, ..backend_api::NumericSupport::BASELINE };
+        c
+    }
+
+    fn kq_names() -> Vec<String> {
+        expand(&[("add2", "a"), ("matmul_kq_gemv#CODE_BITS=4", "b"), ("matmul_kq_gemv#CODE_BITS=8", "c")], false)
+            .unwrap()
+            .iter()
+            .map(|(n, _)| (*n).to_string())
+            .collect()
+    }
+
+    /// Two independent bucket ladders, one per `CODE_BITS` - the row for
+    /// `CODE_BITS=4` never appends a `CODE_BITS=8` variant or vice versa, so
+    /// a Q4_K model's `Gpu` never carries dead Q5_K pipelines and vice versa.
+    #[test]
+    fn kq_gemv_reg_appends_one_bucket_ladder_per_code_bits() {
+        let out = expand(&[("matmul_kq_gemv#CODE_BITS=4", "b")], false).unwrap();
+        assert_eq!(out.len(), 1 + GEMV_MREG_BUCKETS.len());
+        assert_eq!(out[1].0, "matmul_kq_gemv_reg#CODE_BITS=4,MREG=1");
+        assert_eq!(out[out.len() - 1].0, "matmul_kq_gemv_reg#CODE_BITS=4,MREG=32");
+        // Both knobs are rewritten in the SOURCE, not just the name.
+        assert!(out[2].1.contains("const CODE_BITS: u32 = 4u;"), "{}", out[2].1);
+        assert!(out[2].1.contains("const MREG: u32 = 2u;"), "{}", out[2].1);
+
+        let out8 = expand(&[("matmul_kq_gemv#CODE_BITS=8", "b")], false).unwrap();
+        assert_eq!(out8[1].0, "matmul_kq_gemv_reg#CODE_BITS=8,MREG=1");
+        assert!(out8[2].1.contains("const CODE_BITS: u32 = 8u;"), "{}", out8[2].1);
+    }
+
+    /// Both `CODE_BITS` rows resolve independently and each picks its own
+    /// smallest-covering `MREG` bucket - the same dispatch-time behaviour
+    /// `matmul_gemv`'s own row already proves, duplicated across the two
+    /// affine specialisations a real Q4_K+Q5_K model can carry at once.
+    #[test]
+    fn kq_gemv_reg_resolves_independently_per_code_bits() {
+        let caps = gpu_caps_int8();
+        let n = kq_names();
+        let active = resolve(&n, &caps);
+        let kq4 = active.iter().find(|a| n[a.slow] == "matmul_kq_gemv#CODE_BITS=4").expect("CODE_BITS=4 row active");
+        let kq8 = active.iter().find(|a| n[a.slow] == "matmul_kq_gemv#CODE_BITS=8").expect("CODE_BITS=8 row active");
+        assert_eq!(kq4.shape_param, Some(0), "Params {{ m, k, n }} -> m");
+        assert_eq!(kq4.thread_mul, 1, "same n*64 dispatch as matmul_kq_gemv");
+
+        let name4 = |m: u32| n[apply(&active, kq4.slow, Some(&[m, 4096, 4096]), 4096 * 64).0].as_str();
+        assert_eq!(name4(1), "matmul_kq_gemv_reg#CODE_BITS=4,MREG=1");
+        assert_eq!(name4(3), "matmul_kq_gemv_reg#CODE_BITS=4,MREG=4", "smallest bucket that covers it");
+        assert_eq!(name4(32), "matmul_kq_gemv_reg#CODE_BITS=4,MREG=32");
+
+        let name8 = |m: u32| n[apply(&active, kq8.slow, Some(&[m, 4096, 4096]), 4096 * 64).0].as_str();
+        assert_eq!(name8(1), "matmul_kq_gemv_reg#CODE_BITS=8,MREG=1");
+        assert_eq!(name8(17), "matmul_kq_gemv_reg#CODE_BITS=8,MREG=32");
+
+        // Past the last bucket: `matmul_kq_gemv` itself requires m <= 32, so
+        // this is already a caller error - keep its kernel rather than
+        // truncate, exactly like the plain GEMV row.
+        assert_eq!(apply(&active, kq4.slow, Some(&[33, 4096, 4096]), 64).0, kq4.slow);
+    }
+
     /// The CPU JIT never receives a `gpu_only` row's variants: it cannot
     /// compile them and could not dispatch them if it could
     /// (`workgroup_reductions: false`).
@@ -511,8 +639,14 @@ mod tests {
     /// fast source must be the one the name resolves to in `kernels::src`.
     #[test]
     fn table_entries_name_real_kernels() {
+        // `u.slow` may be a `kernels::template` specialisation
+        // (`"matmul_kq_gemv#CODE_BITS=4"`, never registered under that exact
+        // string in `kernels::ALL` - only the bare stem is), so resolve the
+        // CONTRACT (Params/bindings never move under a `#K=V` specialisation
+        // - only a `const` literal's value does) against the base name.
+        let base_src = |n: &str| kernels::src(n.split('#').next().unwrap());
         for u in UPGRADES {
-            assert_eq!(kernels::src(u.slow), kernels::src(u.slow), "{} is not a kernel", u.slow);
+            assert_eq!(base_src(u.slow), base_src(u.slow), "{} is not a kernel", u.slow);
             assert_eq!(kernels::src(u.fast), u.src, "{} source mismatch", u.fast);
             assert!(u.thread_mul >= 1);
             assert_eq!(u.knob.is_some(), !u.buckets.is_empty(), "{}: knob and buckets pair up", u.fast);
@@ -523,7 +657,7 @@ mod tests {
                 s.lines().find(|l| l.contains("struct Params")).map(|l| l.trim().to_string())
             };
             assert_eq!(
-                params(kernels::src(u.slow)),
+                params(base_src(u.slow)),
                 params(u.src),
                 "{} and {} must take the same Params",
                 u.slow,
@@ -539,7 +673,7 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             assert_eq!(
-                bindings(kernels::src(u.slow)),
+                bindings(base_src(u.slow)),
                 bindings(u.src),
                 "{} and {} must take the same bindings",
                 u.slow,

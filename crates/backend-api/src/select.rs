@@ -790,11 +790,12 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // fixing that is Phase 5 (M5.5) territory, not re-litigated per Op
         // here, so Q4 mirrors I8's `int8_dot` requirement exactly as
         // `Op::MatMul` already does.
-        // `Q4K`/`Q8K` have no `moe_linear_gated_kq` kernel yet (that is
-        // M13's `moe_linear_gated_kq.wgsl`, not landed here) - folded into
-        // I8/Q4's arm for exhaustiveness only, matching `Op::PagedAttention`
-        // above; nothing routes an MoE expert linear through these two
-        // dtypes yet.
+        // `Q4K`/`Q8K` -> `PackedInt8` too (M13's `moe_linear_gated_kq.wgsl`,
+        // `model::moe::expert_fwd_kq`'s dispatch target): the affine kernel
+        // is in the identical naive per-group-DP4A tier as `_i8`/`_q4`
+        // (`moe_linear_gated_kq.wgsl`'s own header), so it mirrors I8's
+        // `int8_dot` requirement exactly as `Op::MatMul`'s `Q4K`/`Q8K` arm
+        // already does.
         Op::MoeExpertLinear => match shape.dtype {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![Reference],
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => vec![PackedInt8],
