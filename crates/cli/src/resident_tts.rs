@@ -132,18 +132,10 @@ struct TtsInstance {
     ref_text: String,
 }
 
-impl Instance for TtsInstance {
-    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        if action != "speak" {
-            return Err(format!("tts: unsupported action '{action}' (this resident declares: speak)"));
-        }
-        let text = inv.get_str("text").ok_or("tts speak: missing required param 'text'")?;
-        if text.trim().is_empty() {
-            return Err("tts speak: 'text' must be non-empty".to_string());
-        }
-        let lang = inv.get_str("lang").unwrap_or_else(|| self.lang.clone());
-
-        // Generation knobs → GenOpts (defaults from the reference sampling recipe).
+impl TtsInstance {
+    /// Generation knobs shared by every action → `GenOpts` (defaults from the
+    /// reference sampling recipe).
+    fn opts_from(inv: &Invocation) -> GenOpts {
         let mut opts = GenOpts::default();
         if let Some(t) = inv.get_f64("temp") {
             opts.temperature = t as f32;
@@ -151,22 +143,24 @@ impl Instance for TtsInstance {
         if let Some(k) = inv.get_i64("top_k") {
             opts.top_k = k.max(0) as usize;
         }
+        if let Some(p) = inv.get_f64("top_p") {
+            opts.top_p = p as f32;
+        }
+        if let Some(r) = inv.get_f64("repetition_penalty") {
+            opts.repetition_penalty = r as f32;
+        }
         if let Some(s) = inv.get_i64("seed") {
             opts.seed = s.max(0) as u64;
         }
         if let Some(f) = inv.get_i64("max_frames") {
             opts.max_frames = f.max(1) as usize;
         }
+        opts
+    }
 
-        // Speaker-free synth by default; voice-clone the configured reference when
-        // `BRAIN_QWEN3TTS_REF` is set (ICL when a transcript is also given).
-        let wav = match &self.ref_wav {
-            Some(refw) => qwen3tts::pipeline::clone(&self.paths, &opts, &text, refw, &self.ref_text, &lang, None)?,
-            None => qwen3tts::pipeline::synth(&self.paths, &opts, &text, &lang)?,
-        };
-
-        // Emit raw little-endian f32 PCM (mono, 24 kHz), as the tts_serve protocol
-        // streams it - no external WAV encoder dependency.
+    /// Emit raw little-endian f32 PCM (mono, 24 kHz), as the `tts serve` socket
+    /// protocol streams it - no external WAV encoder dependency.
+    fn pcm_outcome(wav: Vec<f32>) -> ActionResult {
         let bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
         Ok(Outcome::new()
             .set("samples", json!(wav.len()))
@@ -176,5 +170,72 @@ impl Instance for TtsInstance {
                 Blob::new(Media::Audio, bytes)
                     .with_meta(json!({"sample_rate": SAMPLE_RATE, "format": "pcm_f32", "channels": 1})),
             ))
+    }
+}
+
+impl Instance for TtsInstance {
+    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let text = inv.get_str("text").ok_or_else(|| format!("tts {action}: missing required param 'text'"))?;
+        if text.trim().is_empty() {
+            return Err(format!("tts {action}: 'text' must be non-empty"));
+        }
+        let lang = inv.get_str("lang").unwrap_or_else(|| self.lang.clone());
+        let opts = Self::opts_from(inv);
+
+        match action {
+            // Speaker-free synth by default; voice-clone the configured reference
+            // when `BRAIN_QWEN3TTS_REF` is set (ICL when a transcript is also given).
+            "speak" => {
+                let wav = match &self.ref_wav {
+                    Some(refw) => qwen3tts::pipeline::clone(&self.paths, &opts, &text, refw, &self.ref_text, &lang, None)?,
+                    None => qwen3tts::pipeline::synth(&self.paths, &opts, &text, &lang)?,
+                };
+                Self::pcm_outcome(wav)
+            }
+            // VoiceDesign/CustomVoice: instruct/speaker are per-call params, not
+            // fixed at instance configuration (unlike `speak`'s ref voice).
+            "design" => {
+                let instruct = inv.get_str("instruct").unwrap_or_default();
+                let speaker = inv.get_str("speaker").filter(|s| !s.is_empty());
+                let wav = qwen3tts::pipeline::design(&self.paths, &opts, &text, &lang, &instruct, speaker.as_deref())?;
+                Self::pcm_outcome(wav)
+            }
+            other => Err(format!("tts: unsupported action '{other}' (this resident declares: speak, design)")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instance(paths: TtsPaths) -> TtsInstance {
+        TtsInstance { paths, lang: "english".to_string(), ref_wav: None, ref_text: String::new() }
+    }
+
+    /// The resident used to hard-reject anything but `speak`; `design` must
+    /// now dispatch (and reach the pipeline, not the dispatcher's own
+    /// rejection) while a genuinely unknown action still gets a clean error.
+    #[test]
+    fn design_dispatches_and_unknown_actions_still_error() {
+        let paths =
+            TtsPaths { talker: "/nonexistent/talker.safetensors".into(), mtp: String::new(), codec: String::new(), speaker: String::new(), ckpt_dir: String::new() };
+        let mut inst = instance(paths);
+        let inv = Invocation::new().set("text", json!("hi")).set("instruct", json!("calm"));
+        let err = inst.run("design", &inv, &mut |_| {}).unwrap_err();
+        assert!(!err.contains("unsupported action"), "design should dispatch to the pipeline, got: {err}");
+
+        let err = inst.run("nonsense", &inv, &mut |_| {}).unwrap_err();
+        assert!(err.contains("unsupported action"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_text_is_rejected_for_every_action() {
+        let paths = TtsPaths { talker: String::new(), mtp: String::new(), codec: String::new(), speaker: String::new(), ckpt_dir: String::new() };
+        let mut inst = instance(paths);
+        for action in ["speak", "design"] {
+            let err = inst.run(action, &Invocation::new().set("text", json!("   ")), &mut |_| {}).unwrap_err();
+            assert!(err.contains("must be non-empty"), "{action} got: {err}");
+        }
     }
 }

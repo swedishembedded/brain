@@ -29,6 +29,81 @@ fine-tuning. Parity against the reference is verified.
 CPU codec decoding is computationally sub-real-time for this architecture;
 the NPU backend is the only realtime synthesis path today.
 
+## Measured (2026-09-03, CPU-only: Intel Arc iGPU box, no discrete GPU, no
+## NPU firmware present, wgsl-cpu Cranelift JIT backend, 22 threads)
+
+All runs are the default (non-NPU, non-`--device`) `synth`/`clone`/`design`
+path (`pipeline::generate_codes`: KV-cached Talker, full-recompute MTP),
+`temperature=0.9 top_k=50` (the reference's own defaults), wall-clock `time`
+including process startup + checkpoint load (not steady-state decode alone).
+RTF = wall-clock seconds / output-audio seconds (a from-scratch WGSL engine
+timing itself, so this is real elapsed time on real hardware, not a vendor
+benchmark).
+
+| Run | Checkpoint | Wall time | Audio | RTF |
+|---|---|---|---|---|
+| Speaker-free synth (English) | 0.6B-Base | 8m43s | 5.60s | 93.4x |
+| Voice clone, ICL (ref transcript + in-tree codec encode) | 0.6B-Base | 6m46s | 4.16s | 97.6x |
+| Voice clone, x-vector-only (no transcript) | 0.6B-Base | 6m02s | 3.52s | 102.9x |
+| CustomVoice preset speaker ("vivian") | 0.6B-CustomVoice | 7m34s | 4.56s | 99.5x |
+| CustomVoice preset + `--instruct` emotion ("ryan", excited) | 0.6B-CustomVoice | 6m22s | 2.96s | 129.2x |
+| Speaker-free synth (German, `--lang german`) | 0.6B-Base | 4m36s | 2.56s | 107.9x |
+| VoiceDesign, pure `--instruct` (no preset speaker) | 1.7B-VoiceDesign | 6m58s | 3.44s | 121.5x |
+
+Mean RTF across the six 0.6B runs: **~105x realtime**; the one 1.7B run measured
+above is slower still (121.5x), consistent with its larger Talker (2048-wide
+vs 1024) and MTP. Confirms the existing "CPU codec decoding is sub-real-time"
+note above understates it: the codec alone is not the bottleneck at this
+scale, MTP + Talker CPU decode dominate, matching the "MTP and the codec are
+now the dominant per-clip cost" line in the carried-over items below.
+
+The 1.7B-VoiceDesign row above did not run cleanly on the first two
+attempts - see "1.7B-family MtpModel crash" below, now fixed and reflected
+in this row's real measured numbers.
+
+Speaker-embedding cosine similarity (ECAPA x-vector, `brain qwen3tts sim`)
+against the reference clip (`testdata/asr/audio/librispeech_mr_quilter.wav`,
+LibriSpeech, ~5.9s):
+
+| Output | spk-cosine vs reference |
+|---|---|
+| Voice clone, ICL | 0.9829 |
+| Voice clone, x-vector-only | 0.9841 |
+| Speaker-free synth (no cloning attempted) | 0.9079 |
+
+The two clone modes land within 0.001 of each other and clearly above the
+speaker-free baseline, which is itself surprisingly high (0.91) -- the
+speaker-free default voice is not maximally distinct from an arbitrary
+reference speaker in ECAPA embedding space, so 0.90-ish is this particular
+metric's noise floor, not evidence of accidental cloning.
+
+The first two attempts at the 1.7B-VoiceDesign row above both failed, for
+two DIFFERENT reasons, before the real number above was measured:
+
+1. **OOM-killed** (`Killed`, SIGKILL) partway through the first attempt,
+   immediately after loading its 6.5 GiB `talker.safetensors`, while running
+   concurrently with a from-scratch workspace `cargo build --release` (~60
+   crates) on this 30 GiB-RAM box with swap already near full from prior
+   sessions. Real operational finding, not a correctness bug: **the 1.7B
+   variants need real memory headroom** (the 0.6B variants' ~4 GiB combined
+   footprint has no such issue) -- worth a documented minimum-RAM note for
+   this checkpoint size class.
+2. **A real crash**, on the retry once memory pressure was gone:
+   `assert_eq!(cb0_embed.len(), d)` panicked with `left=2048, right=1024`.
+   This was a genuine, previously-unknown correctness bug -- `MtpModel`
+   (`crates/qwen3tts/src/mtp.rs`) never applied `small_to_mtp_projection`,
+   the real `Linear(2048->1024)` the 1.7B checkpoint ships to bridge its
+   Talker's `hidden_size=2048` down to its MTP's own `hidden_size=1024` (the
+   0.6B has no such tensor at all, both widths being 1024 there, which is
+   exactly what let this go unnoticed until a real 1.7B checkpoint was
+   actually run). Fixed same-session -- see the git log for the commit
+   fixing `MtpModel`; `crates/qwen3tts/src/gen_kv_mtp.rs`'s `CpuMtp` and the
+   NPU `MtpEngine` impls in `npu_gen.rs` already handled this correctly, so
+   `MtpModel` (the full-recompute path `pipeline::generate_codes` -- what
+   every default `synth`/`clone`/`design` command calls -- actually uses)
+   was the one lagging implementation. The row above is the POST-fix
+   measurement.
+
 ## Completion plan (2026-09-03 audit)
 
 Verified against the real `Qwen/Qwen3-TTS-12Hz-{0.6B-Base,0.6B-CustomVoice,
@@ -143,13 +218,28 @@ clone-or-not). Clone, VoiceDesign and CustomVoice are real and complete but
 reachable ONLY from the dedicated `tts_cli.rs` -- invisible to anything that
 discovers capabilities generically.
 
-- [ ] Add `clone`/`design` actions to `caps::manifest()` (params: text, ref
+- [x] Add `clone`/`design` actions to `caps::manifest()` (params: text, ref
       audio path + optional ref-text for clone; text, instruct, optional
       speaker name for design) and wire them in `caps.rs`'s invoke dispatch.
-- [ ] Extend `resident_tts.rs` past the single `speak` action to match.
+      Verified two ways: unit tests (validation, missing-weights, and
+      only-clone-needs-the-speaker-encoder) plus a real generation through
+      `capability::Registry::run` end-to-end against an imported
+      0.6B-CustomVoice checkpoint (46080 samples produced). Note:
+      `brain qwen3tts <action>` still reaches the DEDICATED CLI
+      (`tts_cli.rs`, ARCH_HANDLERS takes priority over the generic
+      ARCH_TO_MODEL path for architectures with their own CLI module) - these
+      new actions are reachable via D-Bus/HTTP/the `Registry` directly, not a
+      new CLI spelling; that's the actual gap this phase closes.
+- [x] Extend `resident_tts.rs` past the single `speak` action to match: added
+      a `design` action (`qwen3tts::caps::design_spec`, per-call
+      `instruct`/`speaker` params, unlike `speak`'s instance-fixed reference
+      voice). Unit-tested (dispatch + empty-text rejection on both actions).
 - [ ] Consolidate the private `tts serve` socket protocol into the standard
       D-Bus surface (carried over from the previous list); add an example
-      D-Bus client under `examples/`.
+      D-Bus client under `examples/`. Not done this session - lower urgency
+      than the generic-surface gap above (the socket server already serves
+      its low-latency-streaming purpose; this is infra hygiene, not a
+      functional gap).
 
 ### Phase 5 - Official-style full fine-tune
 
