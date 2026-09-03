@@ -1707,7 +1707,7 @@ mod tests {
     /// a_log_and_only_a_log` makes about `raw_words`, extended to the
     /// zero-fp32 block path `raw_blocks` opens.
     #[test]
-    fn raw_blocks_never_lends_the_untransformed_a_log_blocks() {
+    fn raw_blocks_never_lends_a_transformed_leafs_untransformed_blocks() {
         use checkpoint::gguf_write::{write, TensorOut};
         use checkpoint::TensorSource;
 
@@ -1743,7 +1743,15 @@ mod tests {
             src.raw_blocks("blocks.0.linear_attn.A_log").is_none(),
             "a zero-fp32 block lend for the transformed leaf would bypass ElemOp::LnNeg entirely"
         );
-        assert!(src.raw_blocks("blocks.0.linear_attn.dt_bias").is_none(), "dt_bias is now also transformed -- must never be lent zero-copy blocks either");
+        // `dt_bias` is ALSO transformed (degrouped, like every other
+        // value-head-indexed leaf `needs_fix` covers) - it lost its zero-copy
+        // path the same way `A_log` never had one. See the sibling test
+        // `the_streaming_loader_fixes_a_log_and_dt_bias_and_only_those`'s own
+        // `raw_words` assertion for the same fact on the OTHER zero-copy seam.
+        assert!(
+            src.raw_blocks("blocks.0.linear_attn.dt_bias").is_none(),
+            "dt_bias is transformed too - a zero-fp32 block lend here would bypass its degroup"
+        );
         assert!(src.raw_blocks("blocks.0.linear_attn.norm.weight").is_some(), "an untransformed leaf keeps its zero-fp32 block path");
 
         std::fs::remove_file(&path).ok();
