@@ -61,10 +61,10 @@ independently.
 > GiB, 10.89-12.46 tok/s decode, M24), and is bit-stable under greedy
 > sampling; a factual greedy continuation of `"The capital city of France
 > is"` produces `" Paris. Paris is the largest city in"`. Prefill is chunked
-> at the INT8 tier (M26): a real 1731-token prompt went from 262.8 s
-> (6.6 tok/s) to 26.5-26.8 s (64.6-65.4 tok/s), ~9.9x - Q4 prefill is still
-> per-token pending a kernel-dispatch fix (`matmul_q4_dyn_reg` not yet wired
-> into `Ops::bind`). Decode throughput does fall off with real context, not
+> at both tiers (M26): a real 1731-token prompt at INT8 went from 262.8 s
+> (6.6 tok/s) to 26.5-26.8 s (64.6-65.4 tok/s), ~9.9x; a real 1555-token
+> prompt at Q4 went from 152.1 s (10.2 tok/s) to 22.9 s (68.0 tok/s), ~6.6x,
+> once `matmul_q4_dyn_reg` was wired into `Ops::bind`. Decode throughput does fall off with real context, not
 > just this smoke-test prompt: 9.58 tok/s measured at a genuine 1555-token
 > prompt vs 10.96-12.46 tok/s at this page's ~14-token one, consistent with
 > the 16 GQA layers' `O(context)` KV-read cost. M21 left this RED - the GGUF

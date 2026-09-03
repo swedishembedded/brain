@@ -2309,16 +2309,20 @@ of one-token-per-dispatch):
 | Tier | Cards | Prompt | Before (M22-era, per-token) | After (M26, chunked) | Speedup |
 |---|---|---|---|---|---|
 | INT8 | 2 | 1731 real tok | 262.8 s (6.6 tok/s) | 26.5-26.8 s (64.6-65.4 tok/s) | **~9.9x** |
-| Uniform Q4 | 1 | 1555 real tok | 152.1 s (10.2 tok/s) | *(gated off - see below)* | n/a |
+| Uniform Q4 | 1 | 1555 real tok | 152.1 s (10.2 tok/s) | **22.9 s (68.0 tok/s)** | **~6.6x** |
 
-Q4 chunked prefill measured **7.3x slower** than per-token replay (1108.3 s
-vs 152.1 s at 1555 tokens) - traced to `Ops::bind` routing `(PackedInt8,
-Q4)` to the naive `matmul_q4_dyn.wgsl` instead of the tiled
-`matmul_q4_dyn_reg` INT8 gets - so M26 keeps Q4 on the per-token path
-(`chunked_prefill_is_profitable`) rather than shipping a regression. Wiring
-`matmul_q4_dyn_reg` into `Ops::bind` (tracked separately, high blast radius
-- every model that builds an `Ops` facade is affected) should unlock a
-comparable ~10x for Q4 prefill; not yet done.
+Q4 chunked prefill was initially measured **7.3x slower** than per-token
+replay (1108.3 s vs 152.1 s at 1555 tokens) - traced to `Ops::bind` routing
+`(PackedInt8, Q4)` to the naive `matmul_q4_dyn.wgsl` instead of the tiled
+`matmul_q4_dyn_reg` INT8 already got, so M26 initially kept Q4 on the
+per-token path (`chunked_prefill_is_profitable`) rather than ship a
+regression. Fixed: `matmul_q4_dyn_reg` (already proven bit-identical,
+kernel-performance ledger M5.5) is now wired into `Ops::bind` for every
+model that builds that facade (`qwen3`/`qwen35`/`qwen35moe`). Re-measured
+on the same real checkpoint, same card, same prompt: chunked Q4 prefill is
+now 68.0 tok/s - a real win, not a regression, and slightly FASTER than the
+INT8 stack's own chunked result despite streaming fewer bytes per round.
+`chunked_prefill_is_profitable`'s Q4 exclusion is removed.
 
 **Qwen3-8B** (`qwen3::serve::Engine`, real checkpoint, int8 weights + int8
 KV, one card - M23's embedding/lm_head buffer-size fixes were the blocker
