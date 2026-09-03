@@ -363,7 +363,7 @@ including those.
 | [`brain/rrdbnet`](docs/models/rrdbnet.md) | Image | super-resolution |
 | [`brain/vqgan`](docs/models/vqgan.md) | Image | VQ autoencoder (CodeFormer's codebook) |
 | [`brain/wan`](docs/models/wan.md) | Video | text-to-video diffusion (3D-latent DiT + causal 3D VAE) |
-| [`brain/ltxv`](docs/models/ltxv.md) | Video | text-to-video+audio diffusion (two-stream A/V DiT) -- in progress, not yet runnable |
+| [`brain/ltxv`](docs/models/ltxv.md) | Video | text-to-video+audio diffusion (two-stream A/V DiT) -- runs end to end; DiT/text-encoder real-weight validation still pending |
 | [`worldmirror2`](docs/models/worldmirror2.md) | 3D | multi-view images -> 3D Gaussian Splatting scene |
 | [`splat`](docs/models/splat.md) | 3D | 3D Gaussian Splatting viewer/renderer |
 | [`brain/chronos2`](docs/models/chronos2.md) | Forecasting | probabilistic time-series forecasting |
