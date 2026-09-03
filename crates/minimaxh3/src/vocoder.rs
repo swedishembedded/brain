@@ -177,12 +177,12 @@ impl VocoderConfig {
     /// header (914 raw tensors incl. `weight_g`/`weight_v` pairs, 779 after
     /// folding each pair to one `.weight`).
     pub fn tensor_manifest(&self) -> Vec<(String, Vec<usize>)> {
-        let mut m: Vec<(String, Vec<usize>)> = Vec::new();
-        m.push(("dec_in_proj.weight".into(), vec![self.mel_channels as usize, self.vae_latent_channels as usize, 1]));
-        m.push(("dec_in_proj.bias".into(), vec![self.mel_channels as usize]));
-
-        m.push(("decoder.conv_pre.weight".into(), vec![self.upsample_initial_channel as usize, self.mel_channels as usize, 7]));
-        m.push(("decoder.conv_pre.bias".into(), vec![self.upsample_initial_channel as usize]));
+        let mut m: Vec<(String, Vec<usize>)> = vec![
+            ("dec_in_proj.weight".into(), vec![self.mel_channels as usize, self.vae_latent_channels as usize, 1]),
+            ("dec_in_proj.bias".into(), vec![self.mel_channels as usize]),
+            ("decoder.conv_pre.weight".into(), vec![self.upsample_initial_channel as usize, self.mel_channels as usize, 7]),
+            ("decoder.conv_pre.bias".into(), vec![self.upsample_initial_channel as usize]),
+        ];
 
         let act = |m: &mut Vec<(String, Vec<usize>)>, prefix: &str, ch: usize| {
             m.push((format!("{prefix}.act.alpha"), vec![ch]));
@@ -431,13 +431,38 @@ fn axpy_into(gpu: &Gpu, acc: &DeviceBuffer, s: f32, y: &DeviceBuffer, n: u32) {
 /// (`use_tanh_at_final=false` in this checkpoint's own BigVGAN config - the
 /// final activation is `clamp`, NOT `tanh`).
 pub fn decode(cfg: &VocoderConfig, tensors: &Tensors, z: &[f32], t: u32, device: Option<&str>) -> Vec<f32> {
+    decode_with_taps(cfg, tensors, z, t, device).0
+}
+
+/// Three real intermediate activations of one [`decode_with_taps`] call, for a
+/// real stage-parity check against the reference dumper's own taps (porting.md's
+/// parity ladder - never end-to-end only) rather than a bug hiding behind a
+/// coincidentally-passing final cosine.
+pub struct DecodeTaps {
+    /// `dec_in_proj(z)` - `[mel_channels, t]`, decode's first op.
+    pub dec_in_proj: Vec<f32>,
+    /// `decoder.conv_pre(dec_in_proj)` - `[upsample_initial_channel, t]`.
+    pub conv_pre: Vec<f32>,
+    /// The output of the first upsample+resblock-average stage (`h` after
+    /// loop iteration `i=0` below) - `[stage_cout(0), t * upsample_rates[0]]`.
+    pub stage0: Vec<f32>,
+}
+
+/// [`decode`], additionally reading back three intermediate activations for
+/// parity testing (see [`DecodeTaps`]). Same graph, same dispatches - the
+/// taps are extra host reads off buffers the forward pass already produces,
+/// not a second implementation.
+pub fn decode_with_taps(cfg: &VocoderConfig, tensors: &Tensors, z: &[f32], t: u32, device: Option<&str>) -> (Vec<f32>, DecodeTaps) {
     assert_eq!(z.len(), (cfg.vae_latent_channels * t) as usize, "decode: {} values, expected {}", z.len(), cfg.vae_latent_channels * t);
 
     let mut cx = Ctx::new(device, tensors);
     let x_in = cx.gpu.storage_init("vocoder.z_in", z);
     let proj = conv1d_kx(&mut cx, "dec_in_proj", cfg.vae_latent_channels, cfg.mel_channels, 1, t, true, &x_in);
+    let dec_in_proj_tap = cx.gpu.read(&proj, (cfg.mel_channels * t) as usize);
     let mut h = conv1d_kx(&mut cx, "decoder.conv_pre", cfg.mel_channels, cfg.upsample_initial_channel, 7, t, true, &proj);
+    let conv_pre_tap = cx.gpu.read(&h, (cfg.upsample_initial_channel * t) as usize);
     let mut l = t;
+    let mut stage0_tap = Vec::new();
 
     for i in 0..cfg.num_upsamples() {
         let (cin, cout) = (cfg.stage_cin(i), cfg.stage_cout(i));
@@ -451,6 +476,9 @@ pub fn decode(cfg: &VocoderConfig, tensors: &Tensors, z: &[f32], t: u32, device:
             axpy_into(&cx.gpu, &acc, 1.0 / 3.0, &y, cout * l);
         }
         h = acc;
+        if i == 0 {
+            stage0_tap = cx.gpu.read(&h, (cout * l) as usize);
+        }
     }
 
     let fin = cfg.final_channels();
@@ -461,7 +489,7 @@ pub fn decode(cfg: &VocoderConfig, tensors: &Tensors, z: &[f32], t: u32, device:
     for v in &mut wave {
         *v = v.clamp(-1.0, 1.0);
     }
-    wave
+    (wave, DecodeTaps { dec_in_proj: dec_in_proj_tap, conv_pre: conv_pre_tap, stage0: stage0_tap })
 }
 
 #[cfg(test)]

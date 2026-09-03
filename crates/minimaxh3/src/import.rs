@@ -178,4 +178,81 @@ mod tests {
         assert!(wave.iter().all(|&v| (-1.0..=1.0).contains(&v)), "real-weight decode output must be clamped to [-1,1]");
         assert!(wave.iter().any(|&v| v != 0.0), "real-weight decode output must not be trivially all-zero");
     }
+
+    /// Real NUMERIC parity against `tools/minimaxh3_audio_vae_dump_reference.py`'s
+    /// golden - the checkpoint's OWN shipped `minimax_h3_audio_vae.py`/
+    /// `dac_audio_vae.py` reference, run for real and dumped. Unlike
+    /// `decode_runs_at_real_scale_with_real_weights_and_stays_finite` above
+    /// (finite + shaped, no oracle), this is the actual parity ladder rung
+    /// this port's Phase 4 was still missing: three real intermediate taps
+    /// (`dec_in_proj`, `conv_pre`, the first upsample+resblock-average stage)
+    /// plus the end-to-end waveform, all against the SAME latent the golden
+    /// was dumped from, so a bug localizes to the first tap it breaks rather
+    /// than hiding behind a coincidentally-passing final cosine.
+    #[test]
+    fn decode_matches_the_real_reference_numerically() {
+        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
+            return;
+        };
+        let dir = format!("{root}/FL2VA/audio_vae");
+        if !std::path::Path::new(&dir).join("model.safetensors").is_file() {
+            brain_testutil::skip(&format!("{dir}/model.safetensors not found - checkpoint not (yet) downloaded"));
+            return;
+        }
+
+        let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/audio_vae");
+        let fixture_file = fixture_dir.join("minimaxh3_audio_vae.safetensors");
+        if !fixture_file.is_file() {
+            brain_testutil::skip(&format!(
+                "{} not found - run tools/minimaxh3_audio_vae_dump_reference.py --audio-vae-dir {dir} --out {}",
+                fixture_file.display(),
+                fixture_dir.display()
+            ));
+            return;
+        }
+
+        let cfg = VocoderConfig::h3_32khz();
+
+        // Golden/checkpoint pairing, proven rather than assumed - see
+        // brain_testutil::golden's own module doc for the failure this
+        // refuses (a golden dumped from a different tier of this
+        // architecture silently "passing" a comparison against the wrong
+        // reference).
+        let Some(src) = brain_testutil::golden::Source::open(&fixture_dir, "tools/minimaxh3_audio_vae_dump_reference.py") else {
+            return;
+        };
+        let ok = src.require(&[
+            ("vae_latent_channels", cfg.vae_latent_channels as i64),
+            ("mel_channels", cfg.mel_channels as i64),
+            ("upsample_initial_channel", cfg.upsample_initial_channel as i64),
+            ("num_upsamples", cfg.num_upsamples() as i64),
+            ("out_channels", cfg.out_channels as i64),
+        ]);
+        if !ok {
+            return;
+        }
+
+        let tensors = import_audio_vae_decoder(&dir, &cfg).unwrap_or_else(|e| panic!("import_audio_vae_decoder: {e}"));
+
+        let fx = checkpoint::safetensors::read(fixture_file.to_str().expect("fixture path is valid UTF-8")).expect("read golden fixture");
+        let get = |name: &str| -> &checkpoint::safetensors::StTensor {
+            fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing"))
+        };
+
+        let z = get("z");
+        let t = z.shape[1] as u32;
+        assert_eq!(z.shape[0], cfg.vae_latent_channels as usize, "golden z has {} channels, config expects {}", z.shape[0], cfg.vae_latent_channels);
+
+        let (wave, taps) = crate::vocoder::decode_with_taps(&cfg, &tensors, &z.data, t, Some("cpu"));
+
+        // porting.md's own floor: "cosine >= 0.9999 for networks" at the
+        // stage-parity rung.
+        let mut r = brain_testutil::parity::Report::new(0.9999);
+        r.check("tap_dec_in_proj", &taps.dec_in_proj, &get("tap_dec_in_proj").data);
+        r.check("tap_conv_pre", &taps.conv_pre, &get("tap_conv_pre").data);
+        r.check("tap_stage0", &taps.stage0, &get("tap_stage0").data);
+        r.check("waveform", &wave, &get("waveform").data);
+        r.finish("minimaxh3 audio vae decode vs real reference");
+    }
 }
