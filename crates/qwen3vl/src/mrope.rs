@@ -104,8 +104,11 @@ pub fn mrope_tables_scaled(
 ///   spatial extent (`max(h,w)`), so the next text token starts clear of it.
 ///
 /// This is what lets 2-D image layout survive into the 1-D decoder stream.
-/// (Video timestamp handling is deferred — images use `t = 1`; the temporal axis
-/// simply counts frames from the anchor.)
+/// (Images use `t = 1`, so this function's own temporal axis simply counts
+/// the one anchor position. A REAL video's temporal axis - driven by each
+/// frame's actual elapsed time, not frame count - is [`get_rope_index_video`]
+/// below, kept as its own function for the same reason [`get_rope_index_multi`]
+/// is: every existing image/audio call site's signature stays untouched.)
 ///
 /// A thin single-placeholder-type wrapper over [`get_rope_index_multi`] — see
 /// that function's doc for the generalization (multiple placeholder token
@@ -202,6 +205,96 @@ pub fn get_rope_index_multi(tokens: &[u32], placeholders: &[PlaceholderGrids<'_>
                 }
             }
         }
+    }
+    pos
+}
+
+/// [`get_rope_index`] specialized to a SINGLE video run embedded in a token
+/// stream, with the T axis driven by each merged temporal group's REAL
+/// elapsed time (seconds) instead of [`get_rope_index_multi`]'s plain
+/// `0,1,2,…` frame count.
+///
+/// `grid = (t, h, w)` is the video's merged `(LLM)` extent, exactly like
+/// [`get_rope_index`]'s own `grids` entries; `frame_timestamps_s` carries one
+/// REAL timestamp (seconds, any origin - only the gaps between entries
+/// matter) per merged temporal group, so `frame_timestamps_s.len() == t`.
+/// H/W follow the ordinary meshgrid when the clip has real spatial extent
+/// (`h > 1 || w > 1`), or the same "diagonal, like audio" special case
+/// [`get_rope_index_multi`] uses when it does not (`h == 1 && w == 1`) - the
+/// spatial-extent HANDLING is unchanged from that function; only the T VALUE
+/// fed into it differs.
+///
+/// **Formula, and what is verified vs assumed:**
+/// `t_pos[i] = anchor + round(tokens_per_second · (frame_timestamps_s[i] −
+/// frame_timestamps_s[0]))`. **Verified** against upstream: this is a direct
+/// generalization of Qwen2.5-VL's own T-RoPE, read from `transformers`'
+/// `modeling_qwen2_5_vl.py` (`Qwen2_5_VLModel.get_vision_position_ids`):
+/// `position_temporal[ti] = start_position + ti * time_interval`,
+/// `time_interval = tokens_per_second * second_per_grid_ts` - upstream only
+/// ever supports ONE constant seconds-per-grid-step scalar per video
+/// (uniformly spaced groups); this function is bit-identical to that formula
+/// whenever `frame_timestamps_s` happens to be evenly spaced, and generalizes
+/// it to real, possibly NON-uniform spacing when it is not (see
+/// `video_t_axis_handles_non_uniform_frame_spacing` below). **NOT verified /
+/// not implemented**: Qwen3-VL's own technical report (arXiv:2511.21631,
+/// §2.3 "Video Timestamp") states it REPLACED exactly this MRoPE-T-axis
+/// absolute-time tying with EXPLICIT TEXT-TOKEN timestamps (each temporal
+/// patch prefixed with a formatted string like `<3.0 seconds>` in the
+/// prompt), specifically because tying position ids to absolute time
+/// "produce[s] excessively large and sparse temporal position ids for long
+/// videos". So this function implements the MECHANISM Qwen3-VL evolved
+/// *from* (T-RoPE, generalized to real non-uniform per-frame timing) - a
+/// real, useful fix for this crate's previous "just count frames" bug - but
+/// it is NOT Qwen3-VL's own final video-timestamp design, which additionally
+/// requires interleaving literal timestamp text tokens into the prompt and
+/// is not implemented here.
+pub fn get_rope_index_video(tokens: &[u32], video_token_id: u32, grid: (u32, u32, u32), frame_timestamps_s: &[f32], tokens_per_second: f32) -> Vec<[u32; 3]> {
+    let (t, h, w) = grid;
+    assert_eq!(frame_timestamps_s.len(), t as usize, "one real timestamp per merged temporal group");
+    assert!(t > 0 && h > 0 && w > 0, "grid axes must be non-zero");
+    let t0 = frame_timestamps_s.first().copied().unwrap_or(0.0);
+    let t_delta = |ts: f32| (tokens_per_second * (ts - t0)).round().max(0.0) as u32;
+
+    let mut pos = Vec::with_capacity(tokens.len());
+    let mut cp = 0u32;
+    let mut i = 0usize;
+    let mut placed = false;
+    while i < tokens.len() {
+        if tokens[i] != video_token_id {
+            let start = i;
+            while i < tokens.len() && tokens[i] != video_token_id {
+                i += 1;
+            }
+            for k in 0..(i - start) as u32 {
+                pos.push([cp + k, cp + k, cp + k]);
+            }
+            cp += (i - start) as u32;
+            continue;
+        }
+        assert!(!placed, "get_rope_index_video handles exactly one video run per call");
+        placed = true;
+        let st = cp;
+        if h == 1 && w == 1 {
+            // No real spatial extent -- the same diagonal-run special case
+            // get_rope_index_multi uses for audio (see that function's doc):
+            // all three axes move together with the real T delta.
+            for &ts in frame_timestamps_s {
+                let p = st + t_delta(ts);
+                pos.push([p, p, p]);
+            }
+        } else {
+            for &ts in frame_timestamps_s {
+                let tp = st + t_delta(ts);
+                for hi in 0..h {
+                    for wi in 0..w {
+                        pos.push([tp, st + hi, st + wi]);
+                    }
+                }
+            }
+        }
+        let last_t_delta = t_delta(*frame_timestamps_s.last().unwrap());
+        cp = st + (last_t_delta + 1).max(h).max(w); // advance past whichever axis actually grew
+        i += (t * h * w) as usize;
     }
     pos
 }
@@ -409,6 +502,75 @@ mod tests {
         let tokens = [VIDEO, VIDEO];
         let pos = get_rope_index_multi(&tokens, &[(VIDEO, &[(2, 1, 1)])]);
         assert_eq!(pos, vec![[0, 0, 0], [1, 1, 1]]);
+    }
+
+    #[test]
+    fn video_t_axis_is_driven_by_real_timestamps_not_frame_count() {
+        // Two merged temporal groups, degenerate 1x1 spatial extent so T is
+        // the ONLY axis that can move -- isolates exactly what changed.
+        const VIDEO: u32 = 700;
+        let tokens = [VIDEO, VIDEO];
+
+        // Today's "just count frames" behaviour (get_rope_index_multi's
+        // existing (2,1,1) grid path, unchanged by this change) gives T
+        // deltas [0,1] regardless of real spacing.
+        let frame_count_pos = get_rope_index_multi(&tokens, &[(VIDEO, &[(2, 1, 1)])]);
+        assert_eq!(frame_count_pos, vec![[0, 0, 0], [1, 1, 1]]);
+
+        // Two REAL timestamps 2.0 seconds apart (not "1 frame apart") at
+        // tokens_per_second = 2.0 must produce a T delta of round(2.0*2.0) =
+        // 4, NOT the frame-count delta of 1.
+        let timed_pos = get_rope_index_video(&tokens, VIDEO, (2, 1, 1), &[0.0, 2.0], 2.0);
+        assert_eq!(timed_pos, vec![[0, 0, 0], [4, 4, 4]]);
+        assert_ne!(timed_pos[1][0], frame_count_pos[1][0], "real elapsed time must drive the T delta, not frame index");
+    }
+
+    #[test]
+    fn video_t_axis_handles_non_uniform_frame_spacing() {
+        // Three real, NON-uniformly-spaced timestamps (0.0, 0.5, 3.0s) -- a
+        // constant-fps assumption could only ever produce evenly spaced T
+        // deltas, so this proves the T axis follows the REAL per-group
+        // timestamps, not a derived constant step.
+        const VIDEO: u32 = 701;
+        let tokens = [VIDEO, VIDEO, VIDEO];
+        let pos = get_rope_index_video(&tokens, VIDEO, (3, 1, 1), &[0.0, 0.5, 3.0], 10.0);
+        assert_eq!(pos, vec![[0, 0, 0], [5, 5, 5], [30, 30, 30]]);
+    }
+
+    #[test]
+    fn video_positions_embed_in_surrounding_text_and_advance_past_the_clip() {
+        // 1 text, a 2x1x1 (degenerate spatial extent -> the same "diagonal,
+        // like audio" special case get_rope_index_multi uses) 2-frame video
+        // at tokens_per_second=1 / real gap 3.0s (T delta 3), then 1 text --
+        // the next text token must start clear of the LARGEST axis the
+        // video actually reached, exactly mirroring get_rope_index_multi's
+        // own advance rule.
+        const VIDEO: u32 = 702;
+        let tokens = [9u32, VIDEO, VIDEO, 9];
+        let pos = get_rope_index_video(&tokens, VIDEO, (2, 1, 1), &[0.0, 3.0], 1.0);
+        assert_eq!(
+            pos,
+            vec![
+                [0, 0, 0],
+                // anchored at cp=1: T deltas [0,3] -> [1,1,1], [4,4,4]
+                [1, 1, 1],
+                [4, 4, 4],
+                // next text starts past the T delta the video actually
+                // reached (3) past the anchor: cp = 1 + (3+1) = 5
+                [5, 5, 5],
+            ]
+        );
+    }
+
+    #[test]
+    fn video_positions_use_full_hw_meshgrid_when_spatial_extent_is_real() {
+        // 2 temporal groups x a REAL 1x2 merged spatial grid -- unlike the
+        // degenerate (1,1) cases above, H/W must follow the ordinary
+        // meshgrid (ANCHORED, not diagonal); only T comes from real time.
+        const VIDEO: u32 = 703;
+        let tokens = [VIDEO, VIDEO, VIDEO, VIDEO];
+        let pos = get_rope_index_video(&tokens, VIDEO, (2, 1, 2), &[0.0, 5.0], 1.0);
+        assert_eq!(pos, vec![[0, 0, 0], [0, 0, 1], [5, 0, 0], [5, 0, 1]]);
     }
 
     #[test]

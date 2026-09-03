@@ -629,6 +629,7 @@ mod tests {
             out_hidden_size: 40,
             in_channels: 2,
             deepstack_indexes: vec![],
+            tokens_per_second: 2,
         }
     }
 

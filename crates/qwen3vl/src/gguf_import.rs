@@ -281,6 +281,9 @@ fn vision_config(mmproj: &MmapGguf) -> Result<VisionConfig, String> {
         out_hidden_size: v.req_u32("projection_dim")?,
         in_channels: patch[1] as u32,
         deepstack_indexes: deepstack_indexes(mmproj, &v)?,
+        // Optional, same fallback and reasoning as `Qwen3VlConfig::from_hf`'s
+        // own `tokens_per_second` field -- see that field's doc.
+        tokens_per_second: v.u32_or("tokens_per_second", 2),
     })
 }
 

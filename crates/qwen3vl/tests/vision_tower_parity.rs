@@ -63,6 +63,7 @@ fn cfg() -> VisionConfig {
         out_hidden_size: 128,
         in_channels: 3,
         deepstack_indexes: vec![0],
+        tokens_per_second: 2,
     }
 }
 

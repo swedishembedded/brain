@@ -34,6 +34,15 @@ pub struct VisionConfig {
     /// Vision blocks whose outputs feed DeepStack (added to decoder layers
     /// 0,1,…). [5, 11, 17] for 4B.
     pub deepstack_indexes: Vec<u32>,
+    /// The real-timestamp-to-token-position scale
+    /// [`crate::mrope::get_rope_index_video`] uses (`tokens_per_second` in a
+    /// released `vision_config`). Default `2` mirrors
+    /// `qwen3omnimoe::config::VisionConfig::tokens_per_second`'s own
+    /// checkpoint-sourced field/default exactly (same Qwen-family
+    /// vision_config key) - not independently verified against a real
+    /// Qwen3-VL `config.json` (see [`Qwen3VlConfig::from_hf`]'s doc on this
+    /// field).
+    pub tokens_per_second: u32,
 }
 
 impl VisionConfig {
@@ -87,6 +96,14 @@ impl VisionConfig {
             out_hidden_size: u(vc, "out_hidden_size"),
             in_channels: u(vc, "in_channels"),
             deepstack_indexes,
+            // Optional: Qwen3-VL's own report says it replaced the
+            // MRoPE-T-axis mechanism this constant fed (see
+            // `get_rope_index_video`'s doc), so a real `config.json` may not
+            // carry this key at all. Falls back to
+            // `qwen3omnimoe::config::VisionConfig`'s own checkpoint default
+            // (2) for the same `vision_config.tokens_per_second` field,
+            // matching that crate's own missing-key fallback.
+            tokens_per_second: vc["tokens_per_second"].as_u64().map(|x| x as u32).unwrap_or(2),
         }
     }
 
@@ -113,6 +130,7 @@ impl VisionConfig {
             out_hidden_size: 2048,
             in_channels: 3,
             deepstack_indexes: vec![8, 16, 24],
+            tokens_per_second: 2,
         }
     }
 }
@@ -149,6 +167,7 @@ impl Qwen3VlConfig {
                 out_hidden_size: 2560,
                 in_channels: 3,
                 deepstack_indexes: vec![5, 11, 17],
+                tokens_per_second: 2,
             },
             text: QwenConfig {
                 vocab: 151936,

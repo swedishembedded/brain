@@ -173,6 +173,21 @@ pub fn pack_patches_temporal(frames_chw: &[&[f32]], channels: u32, h_bar: u32, w
     out
 }
 
+/// Repeat the LAST frame to pad `frames.len()` up to a multiple of
+/// `temporal` -- the caller-side policy [`pack_patches_temporal`]'s own doc
+/// says a pure repack function should not embed (mirrors the reference's
+/// `Qwen2VLVideoProcessor._preprocess`: `repeats = patches[:, -1:].expand(...)`,
+/// i.e. repeat the last frame, not the first or a zero pad).
+pub fn pad_frames_to_temporal_multiple<'a>(frames: &[&'a [f32]], temporal: u32) -> Vec<&'a [f32]> {
+    assert!(!frames.is_empty(), "frames must be non-empty");
+    let mut out: Vec<&'a [f32]> = frames.to_vec();
+    let last = *frames.last().unwrap();
+    while !out.len().is_multiple_of(temporal as usize) {
+        out.push(last);
+    }
+    out
+}
+
 /// Normalize `[0,1]` pixels to `[-1,1]` (Qwen3-VL uses mean=std=0.5 per channel):
 /// `x -> (x - 0.5) / 0.5`.
 pub fn normalize_unit(pixels: &mut [f32]) {
@@ -300,6 +315,22 @@ mod tests {
     fn pack_patches_temporal_rejects_a_frame_count_not_a_multiple_of_temporal() {
         let frame = vec![0.0f32; 4];
         pack_patches_temporal(&[&frame], 1, 2, 2, 2, 1, 2); // 1 frame, temporal=2
+    }
+
+    #[test]
+    fn pad_frames_to_temporal_multiple_repeats_the_last_frame() {
+        let (f0, f1, f2) = (vec![1.0f32], vec![2.0f32], vec![3.0f32]);
+        let refs: Vec<&[f32]> = vec![&f0, &f1, &f2]; // 3 frames, temporal=2 -> pad to 4
+        let out = pad_frames_to_temporal_multiple(&refs, 2);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out, vec![&f0[..], &f1[..], &f2[..], &f2[..]], "the pad must repeat the LAST frame, not the first or a zero");
+    }
+
+    #[test]
+    fn pad_frames_to_temporal_multiple_is_a_no_op_when_already_aligned() {
+        let (f0, f1) = (vec![1.0f32], vec![2.0f32]);
+        let refs: Vec<&[f32]> = vec![&f0, &f1];
+        assert_eq!(pad_frames_to_temporal_multiple(&refs, 2), refs);
     }
 
     #[test]

@@ -437,7 +437,7 @@ impl Qwen3Vl {
         eos_ids: &[u32],
         sample: SampleParams,
         rng: &mut Rng,
-        mut on_token: impl FnMut(u32),
+        on_token: impl FnMut(u32),
     ) -> (Vec<u32>, StageTimes) {
         let mut st = StageTimes { prompt_tokens: tokens.len() as u32, ..StageTimes::default() };
         let d_model = self.decoder.cfg.d_model as usize;
@@ -487,7 +487,165 @@ impl Qwen3Vl {
         let prompt_positions = get_rope_index_multi(tokens, &[(self.image_token_id, &grids_llm)]);
         assert_eq!(prompt_positions.len(), tokens.len());
 
-        // Prefill: image rows via step_embed_mrope, text rows via
+        let (out, prefill_s, decode_s, head_s) =
+            self.splice_prefill_and_decode(tokens, &prompt_positions, self.image_token_id, &visual, max_new, eos_ids, sample, rng, on_token);
+        st.prefill_s = prefill_s;
+        st.decode_s = decode_s;
+        st.head_s = head_s;
+        st.new_tokens = out.len() as u32;
+        (out, st)
+    }
+
+    /// [`Self::generate_timed`] generalized to a MULTI-FRAME video clip, with
+    /// the T axis driven by each frame group's REAL timestamp
+    /// ([`crate::mrope::get_rope_index_video`]) instead of `get_rope_index`'s
+    /// `t = 1` image case. See that function's doc for exactly what is
+    /// verified vs assumed about the real-timestamp formula.
+    ///
+    /// `grid` is the RAW per-frame patch grid `(gh, gw)` - identical for
+    /// EVERY frame group, since Qwen3-VL's own video preprocessor picks one
+    /// smart-resize target for the whole clip, not one per frame. `pixels`
+    /// is [`crate::preprocess::pack_patches_temporal`]'s `[n_frames·gh·gw,
+    /// patch_vec]` output, grid_t-major (group `g`'s rows are
+    /// `pixels[g·gh·gw·pv .. (g+1)·gh·gw·pv]`). `frame_timestamps_s` carries
+    /// one REAL timestamp (seconds) per merged temporal GROUP (i.e.
+    /// `frame_timestamps_s.len() == n_frames`, not the raw, pre-temporal-pack
+    /// frame count) and `video_token_id` is the placeholder id the prompt
+    /// spliced these rows under (`Qwen3VlConfig::video_token_id` - kept as a
+    /// call parameter rather than a constructor field so this method needs
+    /// no change to any existing `Qwen3Vl` constructor call site).
+    ///
+    /// **The vision tower has no native multi-frame attention path** - its
+    /// own `encode_with_taps` doc says "one image -> one whole-image span",
+    /// full self-attention scoped to exactly `gh·gw` patches. Rather than
+    /// change that (a real, unverified architectural claim about how
+    /// Qwen3-VL's own ViT actually treats a video clip), this method encodes
+    /// EACH FRAME GROUP SEPARATELY through the exact same, already-tested
+    /// single-frame call [`Self::generate_timed`] makes, then concatenates
+    /// the per-group merged visual rows (and per-level DeepStack taps)
+    /// T-major - matching `get_rope_index_video`'s own T-major meshgrid
+    /// order. No cross-frame attention inside the ViT is modeled; only the
+    /// M-RoPE splice into the decoder sees the whole clip at once. This is a
+    /// deliberately bounded scope, not a claim that Qwen3-VL's real video
+    /// ViT windowing is ported.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_video_timed(
+        &self,
+        tokens: &[u32],
+        grid: (u32, u32),
+        n_frames: u32,
+        pixels: &[f32],
+        video_token_id: u32,
+        frame_timestamps_s: &[f32],
+        tokens_per_second: f32,
+        max_new: u32,
+        eos_ids: &[u32],
+        sample: SampleParams,
+        rng: &mut Rng,
+        on_token: impl FnMut(u32),
+    ) -> (Vec<u32>, StageTimes) {
+        let mut st = StageTimes { prompt_tokens: tokens.len() as u32, ..StageTimes::default() };
+        let (gh, gw) = grid;
+        assert!(n_frames > 0, "a video needs at least one frame group");
+        assert_eq!(frame_timestamps_s.len(), n_frames as usize, "one real timestamp per frame group");
+        let n_per_frame = gh * gw;
+        let pv = self.vcfg.patch_vec_dim() as usize;
+        assert_eq!(
+            pixels.len(),
+            n_frames as usize * n_per_frame as usize * pv,
+            "pixels must be pack_patches_temporal's [n_frames*gh*gw, patch_vec]"
+        );
+        let m2 = self.merge * self.merge;
+        let n_visual_per_frame = n_per_frame / m2;
+        let d_model = self.decoder.cfg.d_model as usize;
+
+        // Vision tower -> visual tokens (+ DeepStack taps), one frame group
+        // at a time (see this method's own doc on why). Vision and merge are
+        // interleaved per group here, unlike generate_timed's split stages,
+        // so both fold into `vision_s`.
+        let t_vision = Instant::now();
+        let n_levels = self.vcfg.deepstack_indexes.len();
+        let mut visual = Vec::with_capacity(n_frames as usize * n_visual_per_frame as usize * d_model);
+        let mut ds_levels: Vec<Vec<f32>> = vec![Vec::new(); n_levels];
+        let group_len = n_per_frame as usize * pv;
+        for g in 0..n_frames as usize {
+            let group_pixels = &pixels[g * group_len..(g + 1) * group_len];
+            let (feats, tap_feats) = self.encoder.encode_with_taps(&self.vgpu, gh, gw, group_pixels, &self.vcfg.deepstack_indexes);
+            let group_visual = self.merger.merge(&self.vgpu, &feats, n_per_frame);
+            assert_eq!(group_visual.len(), (n_visual_per_frame as usize) * d_model);
+            visual.extend_from_slice(&group_visual);
+            for (level, (tap, ds)) in tap_feats.iter().zip(&self.ds_mergers).enumerate() {
+                ds_levels[level].extend(ds.merge(&self.vgpu, tap, n_per_frame));
+            }
+        }
+        for (level, data) in ds_levels.iter().enumerate() {
+            self.decoder.write_deepstack(level, data);
+        }
+        st.vision_s = t_vision.elapsed().as_secs_f64();
+        st.visual_tokens = n_frames * n_visual_per_frame;
+
+        let grid_llm = (n_frames, gh / self.merge, gw / self.merge);
+        let prompt_positions = crate::mrope::get_rope_index_video(tokens, video_token_id, grid_llm, frame_timestamps_s, tokens_per_second);
+        assert_eq!(prompt_positions.len(), tokens.len());
+
+        let (out, prefill_s, decode_s, head_s) =
+            self.splice_prefill_and_decode(tokens, &prompt_positions, video_token_id, &visual, max_new, eos_ids, sample, rng, on_token);
+        st.prefill_s = prefill_s;
+        st.decode_s = decode_s;
+        st.head_s = head_s;
+        st.new_tokens = out.len() as u32;
+        (out, st)
+    }
+
+    /// [`Self::generate_video_timed`] without the per-stage timing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_video_cb(
+        &self,
+        tokens: &[u32],
+        grid: (u32, u32),
+        n_frames: u32,
+        pixels: &[f32],
+        video_token_id: u32,
+        frame_timestamps_s: &[f32],
+        tokens_per_second: f32,
+        max_new: u32,
+        eos_ids: &[u32],
+        sample: SampleParams,
+        rng: &mut Rng,
+        on_token: impl FnMut(u32),
+    ) -> Vec<u32> {
+        self.generate_video_timed(tokens, grid, n_frames, pixels, video_token_id, frame_timestamps_s, tokens_per_second, max_new, eos_ids, sample, rng, on_token)
+            .0
+    }
+
+    /// Splice already-computed real M-RoPE `prompt_positions` (one `[t,h,w]`
+    /// per token) into the decoder's KV cache - text tokens verbatim,
+    /// `placeholder_token_id` rows replaced row-by-row from `visual` (in
+    /// order) - then run greedy KV-cache decode. Shared by
+    /// [`Self::generate_timed`] (single image) and
+    /// [`Self::generate_video_timed`] (multi-frame video): both differ ONLY
+    /// in how `prompt_positions`/`visual`/the placeholder id are produced,
+    /// never in how they are consumed, so this is the ONE place that
+    /// consumption happens (AGENTS.md: never duplicate an implementation -
+    /// this loop used to exist only inside `generate_timed`, and the video
+    /// path would otherwise have been a byte-identical second copy of it).
+    #[allow(clippy::too_many_arguments)]
+    fn splice_prefill_and_decode(
+        &self,
+        tokens: &[u32],
+        prompt_positions: &[[u32; 3]],
+        placeholder_token_id: u32,
+        visual: &[f32],
+        max_new: u32,
+        eos_ids: &[u32],
+        sample: SampleParams,
+        rng: &mut Rng,
+        mut on_token: impl FnMut(u32),
+    ) -> (Vec<u32>, f64, f64, f64) {
+        let d_model = self.decoder.cfg.d_model as usize;
+        let n_visual = if d_model == 0 { 0 } else { visual.len() / d_model };
+
+        // Prefill: placeholder rows via step_embed_mrope, text rows via
         // step_mrope, each with its own 1-row M-RoPE table (mrope_tables
         // called per-position -- the plan's own recommended shape, "a
         // single-element positions slice").
@@ -500,20 +658,18 @@ impl Qwen3Vl {
             // one matters, and the device head below takes that from
             // `xn_final` where the step left it. `prefill_mrope` therefore
             // submits without the `[d_model]` readback its `step_*` siblings
-            // promise, which at a VL prompt (mostly image rows) is one
+            // promise, which at a VL prompt (mostly placeholder rows) is one
             // submit+fence+map round trip per token removed.
-            let input = if tok == self.image_token_id {
+            if tok == placeholder_token_id {
                 let row = &visual[visual_row * d_model..(visual_row + 1) * d_model];
                 let ds_row = Some(visual_row as u32);
                 visual_row += 1;
                 self.decoder.prefill_mrope(qwen3::model::PrefillInput::Embed(row), &cos, &sin, ds_row);
                 continue;
-            } else {
-                qwen3::model::PrefillInput::Token(tok)
-            };
-            self.decoder.prefill_mrope(input, &cos, &sin, None);
+            }
+            self.decoder.prefill_mrope(qwen3::model::PrefillInput::Token(tok), &cos, &sin, None);
         }
-        assert_eq!(visual_row, n_visual as usize, "image token count in the prompt must match n_visual");
+        assert_eq!(visual_row, n_visual, "placeholder token count in the prompt must match the visual row count");
         // Prefill no longer reads anything back, so without this the host
         // clock would stop while the tape was still queued and the first head
         // dispatch below would inherit the whole backlog - a stage split that
@@ -521,7 +677,7 @@ impl Qwen3Vl {
         // free in wall-clock terms: the head's own readback would block on the
         // same work one statement later.
         self.decoder.gpu().poll_wait();
-        st.prefill_s = t_prefill.elapsed().as_secs_f64();
+        let prefill_s = t_prefill.elapsed().as_secs_f64();
 
         // Decode: sample (or, at SampleParams::greedy(), argmax) continuing
         // the position sequence past the prompt as plain text. The head is applied ON the device the weights
@@ -532,10 +688,11 @@ impl Qwen3Vl {
         // single-threaded, for every generated token.
         let mut next_pos = prompt_positions.last().map(|p| p[0] + 1).unwrap_or(0);
         let mut out = Vec::with_capacity(max_new as usize);
+        let (mut decode_s, mut head_s) = (0.0, 0.0);
         for _ in 0..max_new {
             let t_head = Instant::now();
             let next = crate::sample::sample_logits(&self.decoder.decode_logits(), sample.temperature, sample.top_k, sample.top_p, rng);
-            st.head_s += t_head.elapsed().as_secs_f64();
+            head_s += t_head.elapsed().as_secs_f64();
             if eos_ids.contains(&next) {
                 break;
             }
@@ -544,11 +701,10 @@ impl Qwen3Vl {
             let t_step = Instant::now();
             let (cos, sin) = mrope_tables(&[[next_pos; 3]], self.mrope_section, self.decoder.cfg.head_dim, self.decoder.cfg.rope_theta);
             self.decoder.prefill_mrope(qwen3::model::PrefillInput::Token(next), &cos, &sin, None);
-            st.decode_s += t_step.elapsed().as_secs_f64();
+            decode_s += t_step.elapsed().as_secs_f64();
             next_pos += 1;
         }
-        st.new_tokens = out.len() as u32;
-        (out, st)
+        (out, prefill_s, decode_s, head_s)
     }
 }
 
@@ -583,6 +739,7 @@ mod tests {
             out_hidden_size: 40,
             in_channels: 2,
             deepstack_indexes: vec![0, 1], // tap both blocks → decoder layers 0,1
+            tokens_per_second: 2,
         };
         let dcfg = QwenConfig {
             vocab: 23,
@@ -706,6 +863,7 @@ mod tests {
             out_hidden_size: 40,
             in_channels: 2,
             deepstack_indexes: vec![0, 1],
+            tokens_per_second: 2,
         };
         let dcfg = QwenConfig {
             vocab: 23,
@@ -939,6 +1097,7 @@ mod tests {
             out_hidden_size: 40,
             in_channels: 2,
             deepstack_indexes: vec![0, 1],
+            tokens_per_second: 2,
         };
         let dcfg = QwenConfig {
             vocab: 23,
@@ -1072,5 +1231,141 @@ mod tests {
         let mut rng_b = Rng::new(51);
         let out_b = model2.generate(&tokens, &images_b, max_new, &[], SampleParams::greedy(), &mut rng_b);
         assert_ne!(out_a, out_b, "changing only the SECOND image did not change the generated sequence -- it is not actually influencing output");
+    }
+
+    /// Same tiny synthetic shape as [`generate_is_deterministic_and_respects_eos`],
+    /// but a 2-frame VIDEO clip through [`Qwen3Vl::generate_video_cb`] instead
+    /// of a single image: proves the real plumbing this change added (per-group
+    /// vision encode -> concatenated splice via
+    /// `crate::mrope::get_rope_index_video`'s real-timestamp T axis -> greedy
+    /// decode) runs end to end, stays within vocab, and is deterministic.
+    #[test]
+    fn generate_video_is_deterministic_and_runs_end_to_end() {
+        const VIDEO: u32 = 8;
+        let vcfg = VisionConfig {
+            depth: 2,
+            hidden: 32,
+            num_heads: 2,
+            intermediate: 64,
+            patch_size: 2,
+            temporal_patch_size: 1,
+            spatial_merge_size: 2,
+            num_position_embeddings: 16,
+            out_hidden_size: 40,
+            in_channels: 2,
+            deepstack_indexes: vec![0, 1],
+            tokens_per_second: 2,
+        };
+        let dcfg = QwenConfig {
+            vocab: 23,
+            block_size: 16,
+            n_layers: 2,
+            d_model: 40,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 8,
+            d_ff: 64,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 16,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        };
+
+        let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
+        let mut vspecs: Vec<(&str, usize, bool)> =
+            vec![("patch_embed.weight", c * pv, false), ("patch_embed.bias", c, false), ("pos_embed", vcfg.num_position_embeddings as usize * c, false)];
+        let block_leaf_dims: Vec<(String, usize, bool)> = (0..vcfg.depth)
+            .flat_map(|b| {
+                [
+                    (format!("blocks.{b}.norm1.weight"), c, true),
+                    (format!("blocks.{b}.norm1.bias"), c, false),
+                    (format!("blocks.{b}.qkv.weight"), 3 * c * c, false),
+                    (format!("blocks.{b}.qkv.bias"), 3 * c, false),
+                    (format!("blocks.{b}.proj.weight"), c * c, false),
+                    (format!("blocks.{b}.proj.bias"), c, false),
+                    (format!("blocks.{b}.norm2.weight"), c, true),
+                    (format!("blocks.{b}.norm2.bias"), c, false),
+                    (format!("blocks.{b}.fc1.weight"), mlp * c, false),
+                    (format!("blocks.{b}.fc1.bias"), mlp, false),
+                    (format!("blocks.{b}.fc2.weight"), c * mlp, false),
+                    (format!("blocks.{b}.fc2.bias"), c, false),
+                ]
+            })
+            .collect();
+        for (n, s, o) in &block_leaf_dims {
+            vspecs.push((n.as_str(), *s, *o));
+        }
+        let vweights = rand_map(Rng::new(41), &vspecs);
+
+        let merged = c * 4;
+        let mweights = rand_map(
+            Rng::new(42),
+            &[
+                ("ln.weight", c, true),
+                ("ln.bias", c, false),
+                ("fc1.weight", merged * merged, false),
+                ("fc1.bias", merged, false),
+                ("fc2.weight", 40 * merged, false),
+                ("fc2.bias", 40, false),
+            ],
+        );
+        let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len() as u64)
+            .map(|i| {
+                rand_map(
+                    Rng::new(60 + i),
+                    &[
+                        ("ln.weight", merged, true),
+                        ("ln.bias", merged, false),
+                        ("fc1.weight", merged * merged, false),
+                        ("fc1.bias", merged, false),
+                        ("fc2.weight", 40 * merged, false),
+                        ("fc2.bias", 40, false),
+                    ],
+                )
+            })
+            .collect();
+        let dweights = qwen3::init_weights(&dcfg, 43);
+
+        // 2 text, 2 video placeholders (2 frame groups x a 2x2 raw grid,
+        // merge=2 -> 1 visual token per group), 1 text.
+        let tokens: Vec<u32> = vec![1, 2, VIDEO, VIDEO, 3];
+        let seq_len = 16u32;
+        let model = Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, seq_len, IMG, 2, 2, [2, 1, 1], DecoderBuild::Decode(Dtype::F32));
+
+        let n_frames = 2u32;
+        let pv_total = (n_frames * 4 * vcfg.patch_vec_dim()) as usize; // n_frames * (gh*gw) * patch_vec
+        let mut rng = Rng::new(44);
+        let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
+        // Two real, NON-uniformly-spaced timestamps -- exactly the case a
+        // constant-fps assumption cannot reproduce.
+        let frame_timestamps_s = [0.0f32, 2.0];
+
+        let max_new = 5u32;
+        let mut gen_rng1 = Rng::new(99);
+        let out1 = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng1, |_| {});
+        assert!(!out1.is_empty(), "generate_video_cb produced no tokens");
+        assert!(out1.len() as u32 <= max_new, "generate_video_cb exceeded max_new");
+        for &t in &out1 {
+            assert!((t as usize) < 23, "generated token {t} outside vocab 23");
+        }
+
+        // Greedy + no RNG: a second call must reproduce the same sequence.
+        let mut gen_rng2 = Rng::new(100);
+        let out2 = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng2, |_| {});
+        assert_eq!(out1, out2, "greedy video generation must be deterministic");
+
+        // Different real timestamp spacing changes the ACTUAL positions this
+        // path computes -- the property `crate::mrope::get_rope_index_video`'s
+        // own unit tests pin exactly (this is an integration smoke, not a
+        // second place to re-prove that formula: with tiny untrained random
+        // weights an argmax output is not reliably sensitive to a position
+        // perturbation, so asserting inequality here would be a flaky
+        // over-claim, not a real spec requirement).
+        let want_positions = crate::mrope::get_rope_index_video(&tokens, VIDEO, (2, 1, 1), &frame_timestamps_s, 1.0);
+        let other_positions = crate::mrope::get_rope_index_video(&tokens, VIDEO, (2, 1, 1), &[0.0, 9.0], 1.0);
+        assert_ne!(want_positions, other_positions, "sanity: the two timestamp spacings used above must actually produce different positions");
     }
 }

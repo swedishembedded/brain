@@ -219,7 +219,8 @@ impl Instance for Qwen3VlInstance {
         if action != "generate" {
             return Err(format!("qwen3vl: unknown action '{action}'"));
         }
-        self.resident.generate(inv, progress)
+        let video_frames = qwen3vl::caps::decode_media(inv)?;
+        self.resident.generate(inv, video_frames, progress)
     }
 }
 

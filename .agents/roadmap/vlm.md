@@ -837,3 +837,115 @@ wiring is real. Left open: no multi-image real-checkpoint smoke exists yet
 (the real-weight test in `caps.rs` still exercises exactly one image) -
 worth doing once a real Qwen3-VL checkpoint with genuinely distinguishable
 photos is on hand.
+
+## qwen3vl - a real video input path, and what "Text-Timestamp Alignment" actually turned out to mean
+
+`mrope.rs`'s own doc used to say plainly: "Video timestamp handling is
+deferred - images use `t = 1`; the temporal axis simply counts frames from
+the anchor." That was true, and `Qwen3VlCaptioner` hard-refused any clip with
+more than one frame (`max_frames: 1`), so there was no video input path at
+all, only a placeholder shape (`get_rope_index_multi` already accepted a
+`t > 1` grid and had a passing diagonal-case test for it -
+`multi_video_run_with_no_spatial_extent_is_diagonal_like_audio` - but nothing
+computed a real per-frame position from it).
+
+**First finding, and it changes the honest scope of "Text-Timestamp
+Alignment":** Qwen3-VL's own technical report (arXiv:2511.21631, "Video
+Timestamp", §2.3) says it **replaced** exactly the mechanism this task set
+out to build. Qwen2.5-VL ties the M-RoPE T-axis to absolute time
+(`position_temporal[ti] = start + ti * tokens_per_second * second_per_grid_t`
+- read directly from `transformers`' `modeling_qwen2_5_vl.py`,
+`Qwen2_5_VLModel.get_vision_position_ids`). Qwen3-VL's report states this
+produces "excessively large and sparse temporal position ids for long
+videos" and switches instead to **explicit text tokens** interleaved with
+the frames - each temporal patch prefixed with a formatted string like
+`<3.0 seconds>` in the PROMPT, not a position-id trick at all. So "Text-
+Timestamp Alignment" the architecture feature is a token-stream change, and
+what this crate's `mrope.rs` comment was missing (a real-time-driven T-axis)
+is the mechanism Qwen3-VL evolved *away from* (T-RoPE), not its final
+design.
+
+Given that, the scope actually built here is: **implement T-RoPE's real
+mechanism correctly, generalized to genuinely non-uniform per-frame timing**
+(`mrope::get_rope_index_video` - real elapsed seconds between frame groups
+drive the T-axis delta, `t_pos[i] = anchor + round(tokens_per_second *
+(frame_timestamps_s[i] - frame_timestamps_s[0]))`), which is a real, useful
+fix for the "just count frames" bug and is bit-identical to the verified
+upstream formula whenever the timestamps happen to be uniformly spaced. The
+literal text-token timestamp interleaving Qwen3-VL itself ships is **not**
+implemented - that is a prompt-assembly change (inserting formatted timecode
+strings between frame groups' visual tokens), independent of this one, and
+is left as an open item below.
+
+**`tokens_per_second`'s default is cross-checked against a source already in
+this repo, not guessed.** Multiple web sources disagreed (4, 25, 41, "2 in
+the models" from a GitHub issue), so rather than pick one, `crates/
+qwen3omnimoe/src/config.rs` already has a REAL, checkpoint-sourced
+`VisionConfig::tokens_per_second: u32` field for the exact same Qwen-family
+`vision_config.tokens_per_second` key, parsed from a real `config.json` with
+fallback default `2`. `qwen3vl::config::VisionConfig` now carries the same
+field with the same default, for consistency within this repo rather than an
+independently guessed number. It is optional in `from_hf`/the GGUF importer
+(falls back to `2`) since a real Qwen3-VL `config.json` may not even carry
+this key any more, per the finding above.
+
+**What was built**, TDD (mrope tests written and confirmed red before
+`get_rope_index_video` existed):
+- `mrope::get_rope_index_video` - the real-timestamp T-axis function, with
+  four new unit tests (uniform spacing differs from frame-count, non-uniform
+  spacing is honored, embedding in surrounding text, and the real-spatial-
+  extent meshgrid case).
+- `Qwen3Vl::generate_video_timed`/`generate_video_cb` - encodes each frame
+  GROUP separately through the existing, already-tested single-frame
+  `VisionEncoder::encode_with_taps` (the tower's own doc says "one image ->
+  one whole-image span"; there is no native multi-frame attention path to
+  wire into, and claiming one would be an unverified architectural change),
+  concatenates the per-group merged visual rows and DeepStack taps T-major,
+  then splices via a NEW shared `splice_prefill_and_decode` helper factored
+  out of `generate_timed` so the image and video paths consume real
+  positions/visual rows through exactly one code path, never two.
+- `caps.rs`'s `generate` action: `image` is no longer `.required()`; a new
+  optional `video` input (`capability::blob::decode_video`'s existing wire
+  format - no container/codec decoding was added, matching
+  `qwen3omnimoe::caps`'s own precedent for "optional image input, optional
+  video input, caller hands us decoded frames") plus a required-with-video
+  `fps` param drive `PreparedVideo::build`. Exactly one of image/video is
+  enforced, and a video's frame count / missing `fps` are refused by name
+  BEFORE the checkpoint directory is even read - mirrors the existing empty-
+  prompt-before-touching-weights contract.
+- `Qwen3VlCaptioner` no longer hard-refuses a multi-frame clip: `max_frames`
+  is now `caps::MAX_VIDEO_FRAMES` (32 - a chosen, bounded scope, not a
+  verified upstream limit), and `caption()` routes a non-still clip through
+  the video path, reusing `captioner::Clip::fps` (the only per-clip timing
+  that contract carries) as the single, uniform `fps` this task's scope
+  settled on (see below).
+
+**What is honestly still open:**
+- Text-token timestamp interleaving (Qwen3-VL's actual "Text-Timestamp
+  Alignment") - not implemented. The M-RoPE mechanism above is real and
+  fixes a real bug, but it is the superseded upstream design, not this
+  model's own.
+- `Clip`/the caps.rs `fps` param is ONE constant per clip, matching
+  upstream's own `second_per_grid_ts` (also one scalar per video) and
+  `captioner::Clip`'s existing shape - genuinely per-frame irregular
+  timestamps (e.g. a variable frame rate source) are NOT expressible at the
+  `caps.rs`/`Captioner` surface today, only at the lower `mrope::
+  get_rope_index_video`/`Qwen3Vl::generate_video_timed` level, which both
+  already accept an arbitrary `&[f32]`.
+- No container/codec (mp4 etc.) decoding anywhere in this crate or this
+  change - confirmed absent before scoping this task, per the task's own
+  instruction to check rather than assume. The video input surface is
+  pre-decoded frames + fps, the same shape `capability::blob::decode_video`
+  (already used by `qwen3omnimoe::caps`) and `sam2`'s video path both take.
+  MAX_VIDEO_FRAMES = 32 keeps this to short clips; no streaming, no
+  hours-long video.
+- No training-time (`forward`) video path - only `generate_*` (serving/
+  captioning). A `forward_video` for gradient-checked video training is not
+  built.
+- No real-checkpoint parity number for the video path is claimed anywhere -
+  only tiny-config synthetic-weight plumbing tests
+  (`generate_video_is_deterministic_and_runs_end_to_end`) prove the wiring
+  runs end to end, stays in vocab, and is deterministic. There is no HF
+  reference to check real Qwen3-VL video generation against in this
+  workspace, matching this crate's existing image-path caveat (see
+  `docs/models/qwen3vl.md`).

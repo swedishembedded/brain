@@ -287,6 +287,7 @@ mod tests {
             out_hidden_size: 12, // == tiny_text_config().hidden
             in_channels: 2,
             deepstack_indexes: vec![0, 1], // tap both ViT blocks -> decoder layers 0,1
+            tokens_per_second: 2,
         }
     }
 

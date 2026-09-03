@@ -1,9 +1,11 @@
-# Qwen3-VL (image + text -> text)
+# Qwen3-VL (image or short video + text -> text)
 
 A general image + text -> text model - ask it a question about an image, not
 just "describe this." ViT + PatchMerger + DeepStack vision tower spliced
-into a Qwen3 decoder (interleaved M-RoPE). For dedicated single-purpose
-captioning instead, see [FastVLM](fastvlm.md); both are compared on the
+into a Qwen3 decoder (interleaved M-RoPE). It also accepts a short,
+pre-decoded video clip (see [Video input](#video-input) below) instead of a
+single image. For dedicated single-purpose captioning instead, see
+[FastVLM](fastvlm.md); both are compared on the
 [vision-language overview](vlm.md).
 
 ## Support
@@ -91,7 +93,9 @@ checkpoint has been run through this resident on this machine)
 
 - `prompt` - the instruction/question.
 - `max_new` - max tokens to generate.
-- `image` input - raw HWC f32 pixels in `[0,1]`, with `{w,h}` metadata.
+- `image` input - a still image: raw HWC f32 pixels in `[0,1]`, with `{w,h}`
+  metadata. Exactly one of `image`/`video` is required.
+- `video` input + `fps` - a short clip; see [Video input](#video-input).
 - `weights` - per-call override of the checkpoint (in place of
   `BRAIN_QWEN3VL_WEIGHTS`): a safetensors directory, a GGUF language half, or
   the directory holding a GGUF pair.
@@ -116,6 +120,38 @@ BRAIN_QWEN3VL_WEIGHTS=/path/to/qwen3-vl \
 total visual-token capacity is sized for 8 images at that budget each, so a
 request combining many large images can still be refused (naming how many
 tokens it needed) rather than silently corrupted or truncated.
+
+## Video input
+
+`generate` also accepts a `video` input in place of `image`: N pre-decoded
+RGB frames (`capability::blob::decode_video`'s wire format), plus a required
+`fps` (the clip's real, constant frame rate). **brain does not decode video
+containers** (no mp4/mkv demuxing or codec support anywhere in this crate) -
+a caller hands over already-decoded frames, the same contract
+`qwen3omnimoe`'s omni provider and `sam2`'s video path already use.
+
+Each frame group's position on the decoder's temporal (T) axis is driven by
+its REAL elapsed time (`frame_index / fps`, scaled by the checkpoint's
+`tokens_per_second`), not by frame count - two clips with the same frame
+count but different real durations get different temporal positions. This
+generalizes Qwen2.5-VL's own T-RoPE formula to real per-frame timing; it is
+**not** Qwen3-VL's own newer text-token timestamp design (see
+`.agents/roadmap/vlm.md` for exactly what upstream mechanism this does and
+does not reproduce).
+
+Bounded, deliberately: at most 32 frames per request (a request over the
+limit is refused by name, before any checkpoint is touched), no container
+decoding, no streaming/hours-long video. A clip without a known `fps` is
+refused rather than guessed at, since there is no meaningful real-time
+position without one.
+
+Programmatic callers of the `captioner::Captioner` trait (`crates/
+captioner`) reach this automatically: a `captioner::Clip` with more than one
+frame routes through the video path, using the clip's own `fps`. There is no
+`brain label` CLI verb for a video folder yet - `brain label images` remains
+images-only (it writes `data::imageset`'s format; a video-folder labeler
+writing `data::videoset`'s format is a separate, unbuilt driver, not this
+change).
 
 ## How long a caption takes, and the one knob that changes it
 

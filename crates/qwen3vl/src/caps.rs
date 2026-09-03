@@ -74,9 +74,16 @@ use serde_json::json;
 
 use crate::config::Qwen3VlConfig;
 use crate::model::Qwen3Vl;
-use crate::preprocess::{normalize_unit, pack_patches, patch_grid, smart_resize};
+use crate::preprocess::{normalize_unit, pack_patches, pack_patches_temporal, pad_frames_to_temporal_multiple, patch_grid, smart_resize};
 
 pub const MODEL: &str = "brain/qwen3vl";
+
+/// The largest frame count a video request may carry. A real, bounded scope
+/// decision (AGENTS.md: no hours-long/streaming video for this change) -
+/// not a verified upstream limit. `Qwen3VlCaptioner::capabilities` reports
+/// the same number as `max_frames`, so the two cannot silently disagree
+/// about what "a video this model accepts" means.
+pub const MAX_VIDEO_FRAMES: u32 = 32;
 
 /// The storage tier this checkpoint's DECODER is built at. The vision tower
 /// is always fp32: it is a small fraction of the weights and none of the
@@ -223,15 +230,28 @@ pub fn generate_spec() -> ActionSpec {
             ParamSpec::new("precision", ParamType::Str, "decoder storage tier: fp32 (default, exact) or int8 (LOSSY, ~4x less weight traffic per token)")
                 .default(json!("fp32")),
         )
-        .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required());
+        .param(ParamSpec::new(
+            "fps",
+            ParamType::Float,
+            "REQUIRED with 'video': the clip's real frames-per-second, used to place each frame in real time \
+             (crate::mrope::get_rope_index_video's T axis) rather than by frame count -- see that function's doc \
+             for what is verified vs assumed about the formula",
+        ))
+        .input(BlobSpec::new("image", Media::Image, "a still image: raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention) -- exactly one of 'image'/'video' is required"));
     for i in 1..MAX_IMAGES {
         spec = spec.input(BlobSpec::new(
             &image_key(i),
             Media::Image,
-            "optional additional image (same wire shape as 'image'); present contiguous from 'image', i.e. 'image2' is only read if 'image1' is also set",
+            "optional additional image (same wire shape as 'image'); present contiguous from 'image', i.e. 'image2' is only read if 'image1' is also set. Not used with 'video'.",
         ));
     }
-    spec.output(BlobSpec::new("text", Media::Text, "the generated continuation"))
+    spec.input(BlobSpec::new(
+        "video",
+        Media::Video,
+        "a short video clip (at most MAX_VIDEO_FRAMES frames): N concatenated interleaved-HWC f32 RGB frames in [0,1], \
+         meta {frames,w,h,c=3} (capability::blob::decode_video's wire convention) -- exactly one of 'image'/'video' is required",
+    ))
+    .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
 pub fn manifest() -> Manifest {
@@ -320,15 +340,18 @@ impl Resident {
     /// image + prompt in, streamed text out. The body [`GenerateAction::run`]
     /// used to hold directly, extracted so a residency-scheduled instance and
     /// the direct provider execute byte-for-byte the same code.
-    pub fn generate(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    /// `video_frames` is already validated and decoded by [`GenerateAction::run`]
+    /// (or `None` for an image request) - see that function's doc for why the
+    /// "exactly one of image/video", frame-cap and fps checks live THERE and
+    /// not here: they must fail before this resident is even built, and
+    /// re-deriving them here (after `with_resident` has already run) would be
+    /// too late for that contract, not just a duplicate.
+    pub fn generate(&self, inv: &Invocation, video_frames: Option<(Vec<(Vec<f32>, u32, u32)>, f32)>, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let prompt = last_user_text(inv);
         if prompt.trim().is_empty() {
             return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
         let max_new = inv.get_i64("max_new").unwrap_or(64).clamp(1, 2048) as u32;
-        let images = decode_images(inv)?;
-        let p = Prepared::build_multi(self, &images, &prompt, max_new)?;
-        progress(Progress::step(0, max_new, "generating"));
 
         let temperature = inv.get_f64("temp").unwrap_or(0.0).max(0.0) as f32;
         let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
@@ -337,24 +360,58 @@ impl Resident {
         let sample = crate::model::SampleParams { temperature, top_k, top_p };
         let mut rng = data::rng::Rng::new(seed);
 
-        // Real per-token streaming deltas (the spec declares `.streaming()`):
-        // re-decode the running id list each token and emit the UTF-8-safe
-        // suffix, exactly like qwen3::chat's streaming path.
-        let mut ids: Vec<u32> = Vec::new();
-        let mut printed = String::new();
-        let mut step = 0u32;
-        let out_ids = self.model.generate_cb(&p.tokens, &p.image_inputs(), max_new, &p.eos, sample, &mut rng, |tok_id| {
-            ids.push(tok_id);
-            step += 1;
-            let full = self.tok.decode(&ids);
-            let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
-            printed = np;
-            if !delta.is_empty() {
-                progress(Progress::token(step, max_new, delta));
-            }
-        });
-        let text = self.tok.decode(&out_ids);
-        let ntok = out_ids.len();
+        let (text, ntok) = if let Some((frames, fps)) = video_frames {
+            let p = PreparedVideo::build(self, &frames, fps, &prompt, max_new)?;
+            progress(Progress::step(0, max_new, "generating"));
+            let mut ids: Vec<u32> = Vec::new();
+            let mut printed = String::new();
+            let mut step = 0u32;
+            let out_ids = self.model.generate_video_cb(
+                &p.tokens,
+                p.grid,
+                p.n_frames,
+                &p.pixels,
+                self.cfg.video_token_id,
+                &p.frame_timestamps_s,
+                self.cfg.vision.tokens_per_second as f32,
+                max_new,
+                &p.eos,
+                sample,
+                &mut rng,
+                |tok_id| {
+                    ids.push(tok_id);
+                    step += 1;
+                    let full = self.tok.decode(&ids);
+                    let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
+                    printed = np;
+                    if !delta.is_empty() {
+                        progress(Progress::token(step, max_new, delta));
+                    }
+                },
+            );
+            (self.tok.decode(&out_ids), out_ids.len())
+        } else {
+            let images = decode_images(inv)?;
+            let p = Prepared::build_multi(self, &images, &prompt, max_new)?;
+            progress(Progress::step(0, max_new, "generating"));
+            // Real per-token streaming deltas (the spec declares `.streaming()`):
+            // re-decode the running id list each token and emit the UTF-8-safe
+            // suffix, exactly like qwen3::chat's streaming path.
+            let mut ids: Vec<u32> = Vec::new();
+            let mut printed = String::new();
+            let mut step = 0u32;
+            let out_ids = self.model.generate_cb(&p.tokens, &p.image_inputs(), max_new, &p.eos, sample, &mut rng, |tok_id| {
+                ids.push(tok_id);
+                step += 1;
+                let full = self.tok.decode(&ids);
+                let (delta, np) = qwen3::chat::stream_delta(&printed, &full);
+                printed = np;
+                if !delta.is_empty() {
+                    progress(Progress::token(step, max_new, delta));
+                }
+            });
+            (self.tok.decode(&out_ids), out_ids.len())
+        };
         progress(Progress::step(max_new, max_new, text.clone()));
         Ok(Outcome::new()
             .set("text", json!(text.clone()))
@@ -386,6 +443,34 @@ impl Provider for QwenVlProvider {
     }
 }
 
+/// Which media a `generate` request carries -- exactly one of image(s)/video
+/// -- and, for a video, its decoded frames + fps. Called by both
+/// [`GenerateAction::run`] (BEFORE any checkpoint I/O, so a malformed request
+/// fails without building or touching a resident) and
+/// `crates/cli/src/resident_qwen3vl.rs`'s `Instance::run` (where the resident
+/// is already built by residency's own `activate`, but the media shape still
+/// needs validating and decoding exactly once, the same way, rather than a
+/// second copy of this logic per call site).
+pub fn decode_media(inv: &Invocation) -> Result<Option<(Vec<(Vec<f32>, u32, u32)>, f32)>, String> {
+    let has_video = inv.get_blob("video").is_some();
+    let has_image = inv.get_blob("image").is_some();
+    if has_video == has_image {
+        return Err(format!("qwenvl generate: exactly one of 'image'/'video' is required (got image={has_image}, video={has_video})"));
+    }
+    if !has_video {
+        return Ok(None);
+    }
+    let frames = capability::blob::decode_video(inv, "video")?;
+    if frames.len() as u32 > MAX_VIDEO_FRAMES {
+        return Err(format!("qwenvl generate: video has {} frames, this model accepts at most {MAX_VIDEO_FRAMES}", frames.len()));
+    }
+    let fps = inv
+        .get_f64("fps")
+        .filter(|f| *f > 0.0)
+        .ok_or("qwenvl generate: a 'video' input needs a positive 'fps' to place its frames in real time")? as f32;
+    Ok(Some((frames, fps)))
+}
+
 // One process-wide resident, keyed by (checkpoint dir, max_pixels) so
 // switching either swaps cleanly -- mirrors fastvlm::caps's DECODE static.
 static RESIDENT: Mutex<Option<Resident>> = Mutex::new(None);
@@ -403,13 +488,14 @@ impl Action for GenerateAction {
         if last_user_text(inv).trim().is_empty() {
             return Err("qwenvl generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
+        let video_frames = decode_media(inv)?;
         let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
         if dir.is_empty() {
             return Err("qwenvl generate: no checkpoint directory (set 'weights' or $BRAIN_QWEN3VL_WEIGHTS)".to_string());
         }
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
-        with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, progress))
+        with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, video_frames, progress))
     }
 }
 
@@ -532,6 +618,94 @@ impl Prepared {
     /// shape `Qwen3Vl::generate_cb`/`generate_timed` take.
     fn image_inputs(&self) -> Vec<crate::model::ImageInput<'_>> {
         self.images.iter().map(|im| crate::model::ImageInput { grid: im.grid, pixels: &im.pixels }).collect()
+    }
+}
+
+/// [`Prepared`]'s video counterpart: the packed multi-frame patch tensor, one
+/// REAL timestamp per merged temporal group, and the token stream with the
+/// video run spliced in under `video_token_id`.
+struct PreparedVideo {
+    tokens: Vec<u32>,
+    eos: Vec<u32>,
+    grid: (u32, u32),
+    n_frames: u32,
+    pixels: Vec<f32>,
+    /// One real timestamp (seconds) per merged temporal group -- see
+    /// [`crate::mrope::get_rope_index_video`]'s doc for how this drives the
+    /// T axis and exactly what is verified vs assumed about the formula.
+    frame_timestamps_s: Vec<f32>,
+}
+
+impl PreparedVideo {
+    /// `frames` is [`capability::blob::decode_video`]'s output (`(hwc, w,
+    /// h)` per RAW frame, in order); `fps` is the clip's real, constant
+    /// frame rate -- the ONLY per-clip timing this crate's `captioner::Clip`
+    /// contract carries (`Clip::fps: Option<f32>`), so it is also all a
+    /// served request can supply here: `frame[i]`'s real timestamp is
+    /// `i / fps`. Every frame is resized to ONE shared smart-resize target
+    /// (picked from the FIRST frame's dimensions, matching HF's own video
+    /// preprocessor, which assumes one resolution per clip), padded up to a
+    /// multiple of `temporal_patch_size` by repeating the last frame
+    /// ([`pad_frames_to_temporal_multiple`]), then packed with
+    /// [`pack_patches_temporal`].
+    fn build(hot: &Resident, frames: &[(Vec<f32>, u32, u32)], fps: f32, prompt: &str, max_new: u32) -> Result<PreparedVideo, String> {
+        let (_, w0, h0) = *frames.first().ok_or("qwenvl generate: an empty video has no frames to caption")?;
+        let factor = hot.cfg.vision.patch_size * hot.cfg.vision.spatial_merge_size;
+        let (h_bar, w_bar) = smart_resize(h0, w0, factor, preprocess_min_pixels(), hot.max_pixels);
+
+        let mut chw_frames: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
+        for (hwc, w, h) in frames {
+            let mut chw = hwc_to_chw_resized(hwc, *w, *h, w_bar, h_bar);
+            normalize_unit(&mut chw);
+            chw_frames.push(chw);
+        }
+        let temporal = hot.cfg.vision.temporal_patch_size;
+        let refs: Vec<&[f32]> = chw_frames.iter().map(|f| f.as_slice()).collect();
+        let padded = pad_frames_to_temporal_multiple(&refs, temporal);
+        let n_frames = padded.len() as u32 / temporal;
+
+        let pixels = pack_patches_temporal(&padded, hot.cfg.vision.in_channels, h_bar, w_bar, hot.cfg.vision.patch_size, hot.cfg.vision.spatial_merge_size, temporal);
+
+        let n_visual_per_frame = crate::preprocess::image_token_count(h_bar, w_bar, hot.cfg.vision.patch_size, hot.cfg.vision.spatial_merge_size);
+        let n_visual = n_frames * n_visual_per_frame;
+        if n_visual > hot.n_visual_capacity {
+            return Err(format!(
+                "qwenvl generate: video needs {n_visual} visual tokens across {n_frames} frame group(s), exceeding \
+                 this resident's capacity {} (raise 'max_pixels' -- current cap {} px)",
+                hot.n_visual_capacity, hot.max_pixels
+            ));
+        }
+
+        // One real timestamp per RAW frame, extended over the padding
+        // exactly the way the padding itself was built (repeat the last
+        // real timestamp for a repeated last frame -- it is the same
+        // moment, not a new one), then one per merged GROUP, anchored at
+        // that group's first raw frame.
+        let mut padded_ts: Vec<f32> = (0..frames.len() as u32).map(|i| i as f32 / fps).collect();
+        while (padded_ts.len() as u32) < padded.len() as u32 {
+            padded_ts.push(*padded_ts.last().unwrap());
+        }
+        let frame_timestamps_s: Vec<f32> = (0..n_frames).map(|g| padded_ts[(g * temporal) as usize]).collect();
+
+        // Prompt: <|im_start|>user\n <|vision_start|> [VIDEO]*n_visual <|vision_end|> {prompt}<|im_end|>\n<|im_start|>assistant\n
+        let mut tokens = hot.tok.encode("<|im_start|>user\n");
+        tokens.push(hot.cfg.vision_start_token_id);
+        tokens.extend(std::iter::repeat_n(hot.cfg.video_token_id, n_visual as usize));
+        tokens.push(hot.cfg.vision_end_token_id);
+        tokens.extend(hot.tok.encode(&format!("{prompt}<|im_end|>\n<|im_start|>assistant\n")));
+        let eos = hot.tok.encode("<|im_end|>");
+
+        if tokens.len() as u32 + max_new > hot.seq_len {
+            return Err(format!(
+                "qwenvl generate: prompt ({} tokens incl. {n_visual} video tokens) + max_new ({max_new}) \
+                 exceeds this resident's context {} (set $BRAIN_QWEN3VL_CTX to raise it, up to this checkpoint's own {} max_position_embeddings)",
+                tokens.len(),
+                hot.seq_len,
+                hot.cfg.text.max_position_embeddings
+            ));
+        }
+        let grid = patch_grid(h_bar, w_bar, hot.cfg.vision.patch_size);
+        Ok(PreparedVideo { tokens, eos, grid, n_frames, pixels, frame_timestamps_s })
     }
 }
 
@@ -819,7 +993,13 @@ mod tests {
         assert!(a.streaming, "streaming is required for api_caps' chat-capable classification");
         assert!(a.params.iter().any(|p| p.name == "messages"));
         assert!(a.params.iter().any(|p| p.name == "prompt"));
-        assert!(a.inputs.iter().any(|b| b.name == "image" && b.required));
+        assert!(a.params.iter().any(|p| p.name == "fps"));
+        // Neither is spec-required: GenerateAction::run enforces "exactly
+        // one of image/video" itself, at RUN time, so a request naming
+        // neither fails with a message pointing at the real cause instead
+        // of the framework's generic "missing required input".
+        assert!(a.inputs.iter().any(|b| b.name == "image" && b.media == Media::Image && !b.required));
+        assert!(a.inputs.iter().any(|b| b.name == "video" && b.media == Media::Video && !b.required));
         assert!(a.outputs.iter().any(|b| b.name == "text" && b.media == Media::Text));
         // Sampling is a real, first-class request shape now, not just an
         // internal decode-loop capability - the served surface must declare
@@ -829,8 +1009,9 @@ mod tests {
         assert!(a.params.iter().any(|p| p.name == "top_k"));
         assert!(a.params.iter().any(|p| p.name == "top_p"));
         assert!(a.params.iter().any(|p| p.name == "seed"));
-        // Numbered multi-image keys: 'image' required, 'image1'..'image{MAX_IMAGES-1}'
-        // present and optional -- see this module's doc for the convention.
+        // Numbered multi-image keys: 'image1'..'image{MAX_IMAGES-1}' present and
+        // optional -- see this module's doc for the convention. 'image' itself is
+        // also optional now (checked above), since a video-only request has none.
         for i in 1..MAX_IMAGES {
             let key = image_key(i);
             let b = a.inputs.iter().find(|b| b.name == key).unwrap_or_else(|| panic!("generate_spec missing '{key}'"));
@@ -882,6 +1063,52 @@ mod tests {
         let imgs = decode_images(&inv).expect("decode_images");
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].0, vec![0.25, 0.5, 0.75]);
+    }
+
+    /// The run-time "exactly one of image/video" rule, checked without
+    /// touching a checkpoint (both branches fail before `weights` is even
+    /// read) - this is the ONE place that rule lives, so a request with
+    /// neither or both gets a message naming the real cause.
+    #[test]
+    fn generate_requires_exactly_one_of_image_or_video() {
+        let base = || Invocation::new().set("prompt", json!("describe this"));
+        let neither = base();
+        let err = GenerateAction.run(&neither, &mut |_| {}).unwrap_err();
+        assert!(err.contains("exactly one of 'image'/'video'"), "{err}");
+
+        let both = base()
+            .blob("image", Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w": 1, "h": 1})))
+            .blob("video", Blob::new(Media::Video, vec![0u8; 12]).with_meta(json!({"frames": 1, "w": 1, "h": 1, "c": 3})));
+        let err = GenerateAction.run(&both, &mut |_| {}).unwrap_err();
+        assert!(err.contains("exactly one of 'image'/'video'"), "{err}");
+    }
+
+    /// A video request with no `fps` is refused BY NAME before any checkpoint
+    /// is touched - real-timestamp M-RoPE has no meaning without a real
+    /// frame rate, so this must never silently default to "1 fps" or "just
+    /// count frames" (the exact bug this whole change fixes).
+    #[test]
+    fn generate_video_without_fps_is_a_clean_error_before_touching_weights() {
+        let inv = Invocation::new()
+            .set("prompt", json!("describe this clip"))
+            .blob("video", Blob::new(Media::Video, vec![0u8; 24]).with_meta(json!({"frames": 2, "w": 1, "h": 1, "c": 3})));
+        let err = GenerateAction.run(&inv, &mut |_| {}).unwrap_err();
+        assert!(err.contains("'fps'"), "{err}");
+    }
+
+    /// Too many frames is refused BY NAME before any checkpoint is touched
+    /// (`MAX_VIDEO_FRAMES` - see this crate's honestly-scoped bound).
+    #[test]
+    fn generate_video_over_the_frame_cap_is_a_clean_error() {
+        let n = (MAX_VIDEO_FRAMES + 1) as usize;
+        let bytes = vec![0u8; n * 3 * 4]; // n frames * (w=1 * h=1 * c=3) pixels * 4 bytes/f32
+        let inv = Invocation::new()
+            .set("prompt", json!("describe this clip"))
+            .set("fps", json!(30.0))
+            .blob("video", Blob::new(Media::Video, bytes).with_meta(json!({"frames": n, "w": 1, "h": 1, "c": 3})));
+        let err = GenerateAction.run(&inv, &mut |_| {}).unwrap_err();
+        assert!(err.contains(&format!("{n} frames")), "{err}");
+        assert!(err.contains("at most"), "{err}");
     }
 
     /// Served-path smoke on the real checkpoint (skip-if-absent, like the

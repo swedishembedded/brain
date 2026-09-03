@@ -12,8 +12,15 @@
 //! drift about preprocessing, prompt assembly or decoding the way two parallel
 //! implementations would.
 //!
-//! Still images only, which is what this model does - [`Captioner::validate`]
-//! refuses a multi-frame clip by name via the `max_frames: 1` this reports.
+//! Still images AND short video clips: [`Captioner::validate`] refuses a clip
+//! longer than `max_frames` by name (`crate::caps::MAX_VIDEO_FRAMES` - a real,
+//! bounded scope decision, not hours-long/streaming video). A still image
+//! ([`captioner::Clip::is_still`]) takes the `image` input; a multi-frame
+//! clip takes `video` + `fps` (the ONLY per-clip timing `captioner::Clip`
+//! carries) so the served action can place each frame group in REAL time
+//! (`crate::mrope::get_rope_index_video`) rather than by frame count - a clip
+//! with more than one frame and no known `fps` is refused rather than
+//! guessed at.
 //!
 //! Swedish Embedded AB implements vision-language model integration for its
 //! clients. If your team needs expertise in deploying VLMs for captioning or
@@ -75,21 +82,33 @@ const MAX_NEW_LIMIT: u32 = 1024;
 
 impl Captioner for Qwen3VlCaptioner {
     fn capabilities(&self) -> Capabilities {
-        Capabilities { model: crate::caps::MODEL.to_string(), max_frames: 1, max_new_limit: MAX_NEW_LIMIT }
+        Capabilities { model: crate::caps::MODEL.to_string(), max_frames: crate::caps::MAX_VIDEO_FRAMES, max_new_limit: MAX_NEW_LIMIT }
     }
 
     fn caption(&mut self, req: &CaptionRequest<'_>, on_token: &mut dyn FnMut(&str)) -> Result<String, String> {
         self.validate(req)?;
-        let f = req.clip.first();
         let mut inv = Invocation::new()
             .set("prompt", json!(req.instruction))
             .set("max_new", json!(req.max_new.min(MAX_NEW_LIMIT)))
             .set("max_pixels", json!(self.max_pixels))
-            .set("precision", json!(self.precision.name()))
-            .blob("image", capability::blob::image_blob(&f.hwc, f.w, f.h, 3));
+            .set("precision", json!(self.precision.name()));
         if !self.dir.is_empty() {
             inv = inv.set("weights", json!(self.dir));
         }
+        inv = if req.clip.is_still() {
+            let f = req.clip.first();
+            inv.blob("image", capability::blob::image_blob(&f.hwc, f.w, f.h, 3))
+        } else {
+            // A multi-frame clip with no known fps cannot be placed in real
+            // time -- rather than duplicate that check here, leave 'fps'
+            // unset and let the SAME check `caps::GenerateAction::run` makes
+            // (before it ever touches a checkpoint) produce the error, so
+            // there is exactly one place this refusal is worded.
+            let frames: Vec<(Vec<f32>, u32, u32)> = req.clip.frames.iter().map(|f| (f.hwc.clone(), f.w, f.h)).collect();
+            let video_blob = capability::blob::video_blob(&frames)?;
+            let inv = if let Some(fps) = req.clip.fps { inv.set("fps", json!(fps)) } else { inv };
+            inv.blob("video", video_blob)
+        };
         // The action streams real per-token deltas; forward only those, not the
         // step messages, so a caller concatenating them reconstructs the caption
         // exactly.
@@ -119,26 +138,58 @@ mod tests {
     /// The capability self-description is what `label_dir` and
     /// `Captioner::validate` act on, so it has to be right without a checkpoint.
     #[test]
-    fn declares_a_still_image_captioner_under_its_canonical_model_id() {
+    fn declares_a_bounded_video_window_under_its_canonical_model_id() {
         let c = Qwen3VlCaptioner::new("");
         let caps = c.capabilities();
         assert_eq!(caps.model, "brain/qwen3vl");
-        assert_eq!(caps.max_frames, 1);
+        assert_eq!(caps.max_frames, crate::caps::MAX_VIDEO_FRAMES, "must match caps.rs's own bound exactly, not a second copy of the number");
+        assert!(caps.max_frames > 1, "the whole point of this change is that this is no longer a still-image-only captioner");
         assert!(caps.max_new_limit >= 256, "a detailed caption needs a real token budget");
     }
 
-    /// A multi-frame clip must be refused before any checkpoint is touched -
-    /// this test would need a 16 GB model to run otherwise, which is exactly
-    /// why the refusal belongs in `validate`.
+    /// A clip beyond this model's declared window must be refused before any
+    /// checkpoint is touched -- this test would need a multi-GB model to run
+    /// otherwise, which is exactly why the refusal belongs in `validate`.
     #[test]
-    fn refuses_a_video_clip_without_loading_anything() {
+    fn refuses_a_clip_over_the_frame_cap_without_loading_anything() {
         let c = Qwen3VlCaptioner::new("");
         let f = || Frame::new(vec![0.0; 4 * 4 * 3], 4, 4).unwrap();
-        let clip = Clip { frames: vec![f(), f()], fps: Some(24.0) };
+        let n = (crate::caps::MAX_VIDEO_FRAMES + 1) as usize;
+        let clip = Clip { frames: (0..n).map(|_| f()).collect(), fps: Some(24.0) };
         let req = CaptionRequest { clip: &clip, instruction: "describe", max_new: 16 };
         let err = c.validate(&req).unwrap_err();
         assert!(err.contains("brain/qwen3vl"), "{err}");
-        assert!(err.contains("still-image captioner"), "{err}");
+        assert!(err.contains(&format!("{n}-frame")), "{err}");
+    }
+
+    /// A multi-frame clip with NO known fps cannot be placed in real time
+    /// (the whole point of this change is that the T axis is driven by REAL
+    /// elapsed time, not a guessed frame rate), so it is refused BY NAME --
+    /// and, since the check happens before the checkpoint dir is even read,
+    /// without loading anything.
+    #[test]
+    fn refuses_a_multi_frame_clip_with_no_known_fps_without_loading_anything() {
+        let mut c = Qwen3VlCaptioner::new("");
+        let f = || Frame::new(vec![0.0; 4 * 4 * 3], 4, 4).unwrap();
+        let clip = Clip { frames: vec![f(), f()], fps: None };
+        let req = CaptionRequest { clip: &clip, instruction: "describe", max_new: 16 };
+        let err = c.caption(&req, &mut |_| {}).unwrap_err();
+        assert!(err.contains("fps"), "{err}");
+    }
+
+    /// A still image must keep working exactly as before -- the video path
+    /// added alongside it must not disturb the `is_still()` branch.
+    #[test]
+    fn a_still_image_still_uses_the_image_path_without_an_fps() {
+        // No checkpoint is set, so a real run isn't reachable here; this
+        // only proves a still image does NOT hit the "needs a known fps"
+        // refusal a multi-frame clip does -- it must fail (no checkpoint
+        // dir), but for a DIFFERENT, later reason.
+        let mut c = Qwen3VlCaptioner::new("");
+        let clip = Clip::still(Frame::new(vec![0.0; 4 * 4 * 3], 4, 4).unwrap());
+        let req = CaptionRequest { clip: &clip, instruction: "describe", max_new: 16 };
+        let err = c.caption(&req, &mut |_| {}).unwrap_err();
+        assert!(!err.contains("fps"), "a still image must not be routed through the fps-requiring video path: {err}");
     }
 
     /// The seam must reach the real model on a real checkpoint. Skips when
