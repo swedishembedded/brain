@@ -239,6 +239,27 @@ pub enum DType {
     /// weights narrow further). Shares `I8`'s capability requirement for
     /// exactly that reason.
     Q4,
+    /// GGUF Q4_K: affine 4-bit K-quant codes, int8 activations. Reconstructs
+    /// per weight-scale group as `ds*code - dm` (unsigned code, two scale
+    /// factors) rather than `I8`/`Q4`'s single-scale `ds*code` - see
+    /// `model::kquant`'s module doc for the device layout and
+    /// `matmul_kq_dyn.wgsl`/`matmul_kq_gemv.wgsl` for the kernels this tier
+    /// binds to. Activations stay int8-quantized exactly like `I8`/`Q4` (the
+    /// affine correction consumes the SAME packed `xq` plus a group-sum
+    /// prepass, never a separate activation format), so this shares `I8`'s
+    /// `int8_dot` capability requirement for the same reason `Q4` does.
+    Q4K,
+    /// GGUF Q5_K: affine 5-bit K-quant codes, stored one code per 8-bit slot
+    /// (the code's own value never exceeds 31, so the slot's top three bits
+    /// are always zero). Otherwise identical to `Q4K` - same affine
+    /// reconstruction, same kernel pair at `CODE_BITS=8`, same `int8_dot`
+    /// requirement. Named `Q8K` (not `Q5K`) because this tag is a DEVICE
+    /// slot-width key (`bits()` returns 8, matching the physical `wq` byte
+    /// layout), not a GGUF format name - `checkpoint::quantize::Tier::Q5K`
+    /// is the on-disk/host-side name for the same format, spelled
+    /// differently because it names a different thing (block geometry, not
+    /// device packing).
+    Q8K,
 }
 
 impl DType {
@@ -248,8 +269,8 @@ impl DType {
         match self {
             DType::F32 => 32,
             DType::F16 | DType::BF16 => 16,
-            DType::I8 => 8,
-            DType::Q4 => 4,
+            DType::I8 | DType::Q8K => 8,
+            DType::Q4 | DType::Q4K => 4,
         }
     }
 
@@ -269,8 +290,7 @@ impl DType {
         match self {
             DType::F32 => 4,
             DType::F16 | DType::BF16 => 2,
-            DType::I8 => 1,
-            DType::Q4 => 1,
+            DType::I8 | DType::Q4 | DType::Q4K | DType::Q8K => 1,
         }
     }
 
@@ -329,6 +349,20 @@ impl DType {
                     DType::F32
                 }
             }
+            DType::Q4K => {
+                if numeric.int8_dot {
+                    DType::Q4K
+                } else {
+                    DType::F32
+                }
+            }
+            DType::Q8K => {
+                if numeric.int8_dot {
+                    DType::Q8K
+                } else {
+                    DType::F32
+                }
+            }
         }
     }
 
@@ -379,7 +413,7 @@ mod dtype_tests {
             ..NumericSupport::BASELINE
         };
         for numeric in [none, full] {
-            for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
+            for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
                 let promoted = dtype.promote(&numeric);
                 assert!(
                     promoted.bytes() >= dtype.bytes(),
@@ -411,7 +445,7 @@ mod dtype_tests {
             int8_dot: true,
             ..NumericSupport::BASELINE
         };
-        for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
+        for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
             // Full support: promotes to itself.
             assert_eq!(dtype.promote(&full), dtype, "{dtype:?} with full support must promote to itself");
             // Zero support: promotes to F32 (F32 is already F32).
@@ -433,7 +467,7 @@ mod dtype_tests {
     /// changes.
     #[test]
     fn promote_still_yields_f32_for_the_zero_support_baseline() {
-        for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4] {
+        for dtype in [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
             assert_eq!(dtype.promote(&NumericSupport::BASELINE), DType::F32);
         }
     }

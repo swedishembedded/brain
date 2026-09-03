@@ -375,6 +375,12 @@ pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<
         Dtype::F16 => "f16",
         Dtype::BF16 => "bf16",
         Dtype::Q4 => "q4",
+        // M12's affine K-quant tiers - no `qwen3vl` resident ever builds a
+        // `Weight::KQuant` today (this crate has no GGUF K-quant loader),
+        // but the match must stay exhaustive per this function's own doc
+        // comment above.
+        Dtype::Q4K => "q4k",
+        Dtype::Q8K => "q8k",
     };
     with_resident(dir, max_pixels, precision, |hot| Ok(hot.model.linear_dtype().map(|dt| name(dt).to_string())))
 }

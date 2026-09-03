@@ -303,6 +303,22 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             .unwrap(),
         );
         v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap());
+        // M12: affine K-quant (Q4_K/Q5_K) kernels plus the group=16 (Q6_K)
+        // reuse of the existing symmetric kernels via template knobs -
+        // `Ops::REQUIRED_KERNELS` demands these too (see `model::ops::
+        // kernel_list`'s own doc comment for why these are `kernels::
+        // template::interned` specialisations, not separate `.wgsl` files).
+        // This crate never builds a `Weight::KQuant` (no GGUF K-quant loader
+        // here). Compiled, never dispatched - same "REQUIRED_KERNELS demands
+        // it, this crate never uses it" precedent as the bf16/f16 storage
+        // tiers above.
+        v.push(("quant_group_sum", kernels::QUANT_GROUP_SUM));
+        v.push(kernels::template::interned("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 4)]).unwrap());
+        v.push(kernels::template::interned("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 8)]).unwrap());
+        v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 4)]).unwrap());
+        v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
+        v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
+        v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
         v
     })
 }

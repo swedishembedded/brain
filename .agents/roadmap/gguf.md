@@ -445,6 +445,149 @@ review of this codebase assumed:
       recorded inline as the justification. `make test -p brain-kernels -p
       brain-model --test matmul_kq`: 11 passed, 0 failed on a real device
       (Intel Arc iGPU, Vulkan) after both fixes.
+- [x] M12: the shared dispatch seam every int8-tier model in the workspace
+      goes through - `backend_api::DType` gains `Q4K` (affine 4-bit,
+      `bits()=4`) and `Q8K` (affine 8-bit - Q5_K's 5-bit code sits in an
+      8-bit slot, so the tag names the device SLOT width, not the GGUF
+      format; `checkpoint::quantize::Tier::Q5K` is the on-disk name for the
+      same format, spelled differently because it names a different thing)
+      - both `bytes()=1`, `per_word()` `8`/`4`, and `promote()` on
+      `int8_dot` exactly like `I8`/`Q4`. `backend_api::select`'s
+      `dtype_storage_requirement` and `candidates`'s `Op::MatMul` arm fold
+      both new dtypes into the SAME arm `I8`/`Q4` already use (identical
+      regime split, identical `int8_dot` capability gate - only
+      `model::ops::Ops::bind` picks a different PHYSICAL kernel per dtype);
+      `Op::PagedAttention`/`Op::MoeExpertLinear`'s exhaustive matches fold
+      them in too, for compilation only (nothing constructs an `OpShape`
+      with these dtypes for either op yet). `model::ops::Weight` gains
+      `KQuant { w, sz, n, k, group, bits, affine }` - ONE variant for all
+      three device instantiations from the design doc's table (Q4_K:
+      bits=4, group=32, affine=true, reports `Dtype::Q4K`; Q5_K: bits=8,
+      group=32, affine=true, reports `Dtype::Q8K`; Q6_K: bits=8, group=16,
+      affine=false, reports `Dtype::I8` - reused, since from the
+      selector's perspective it IS exactly `I8` with a different
+      weight-scale group). `sz`'s layout is a property of `affine`, not of
+      where the bytes came from: INTERLEAVED `(ds,dm)` for the affine pair
+      (what `matmul_kq_{dyn,gemv}` bind directly), a PLAIN `ds`-only plane
+      for the non-affine Q6_K case (what M10's `#QPG=1`/`#WPG=4`
+      specializations of the EXISTING symmetric kernels actually bind - a
+      caller building this variant from `gguf::kquant`'s always-interleaved
+      host relayout output must extract just the `ds` half first for that
+      case). `Ops::bind` gains a THIRD parameter, `group: u32` (every
+      pre-M12 call site passes `32`, matching what was implicitly true
+      before): `(PackedInt8, I8, 32)` still binds the untouched
+      `matmul_i8_dyn`, `(PackedInt8, I8, 16)` binds a NEW registered name
+      (`matmul_i8_dyn#QPG=1`, an `interned` specialization built into
+      `kernel_list()` exactly like the bf16/f16 storage tiers already are -
+      zero new `.wgsl` files); `(_, Q4K/Q8K, 32)` binds
+      `matmul_kq_{dyn,gemv}#CODE_BITS={4,8}`, also `interned`
+      specializations. `Ops::threads`'s `PackedInt8` arm explicitly adds
+      `Dtype::Q4K | Dtype::Q8K` to the `tile()` branch (NOT the `_ => m*n`
+      fallback `Q4` uses) - `matmul_kq_dyn` is `matmul_i8_dyn`'s own
+      128×128 register-tiled sibling, so it needs the identical dispatch
+      geometry; landing in the `m*n` arm instead would silently
+      under-dispatch the tile grid and leave real output elements never
+      written (gated by
+      `kq_dtypes_dispatch_the_tiled_formula_not_m_times_n`, which asserts
+      the dispatched count against the SAME tile formula `Dtype::I8` uses,
+      not merely "some number"). `Ops::matmul`'s existing `I8`/`Q4` arm's
+      `param_k` fallback (`_ => k`) already does the right thing for the
+      new dtypes by the SAME reasoning `matmul_q4_*` established (`xq`/`wq`
+      have different word densities, so `k` must be the raw logical
+      length, never a packed word count) - confirmed explicitly with a
+      comment, not assumed; the new `Weight::KQuant` arm is otherwise
+      SEPARATE (six buffers - `xq`, `wq`, `sx`, `wsz`, `xgs`, `out` - not
+      the five the `I8`/`Q4` arm binds) since it needs the extra `xgs`
+      buffer no other tier reads. `Act` (the activation-quantization
+      struct) gains `xgs: Option<DeviceBuffer>`, `None` for every existing
+      constructor (`Ops::act`/`Ops::act_f32`); a new `Ops::act_kq`
+      constructor builds the SAME `I8Scratch` `Ops::act` does PLUS the
+      `quant_group_sum` prepass via `QuantRows`'s `xgs` seam (M9). A
+      `Weight::KQuant` matmul against an activation with no `xgs` panics
+      LOUDLY naming the problem (`"build it with Ops::act_kq, not Ops::act
+      or Ops::act_f32"`), never silently reading a missing buffer. Gated:
+      `affine_kquant_dtypes_select_exactly_like_i8` (pure `select.rs`
+      logic, no device - asserts `Q4K`/`Q8K` select IDENTICALLY to `I8` at
+      every shape/cap combination the existing `int8_requires_the_
+      capability` test covers, not just a hardcoded `KernelVariant`),
+      `bind_routes_the_m12_dtypes_to_the_right_physical_kernel`,
+      `kq_dtypes_dispatch_the_tiled_formula_not_m_times_n` (the specific
+      under-dispatch regression named above),
+      `m12_kname_literals_match_interned_naming` (pins the hand-spelled
+      `kname` string literals against `kernels::template::interned`'s real
+      output, same discipline the B4/B8/B9/B10 storage-tier literals
+      already have) - all in `crates/model/src/ops.rs`'s own test module;
+      plus a new `crates/model/tests/ops_kquant.rs`: a REAL device-level
+      test building `Weight::KQuant` directly (there is no
+      `Weight::upload` path for it - that function explicitly refuses
+      `Q4K`/`Q8K`, since K-quant's whole point is reaching the device
+      without ever materializing fp32) and dispatching through
+      `Ops::act_kq`/`Ops::matmul`, asserting the result is BIT-IDENTICAL to
+      a hand-dispatched call to the SAME M11 kernels on the SAME packed
+      buffers (both `Q4K`/`Q8K`, both the GEMV decode regime and the tiled
+      prefill regime), plus a `#[should_panic]` gate for the
+      no-`xgs`-activation refusal.
+      **What "gating: must not regress ANYTHING" actually caught.** M9-M11
+      landed in the working tree but were never run against a real device
+      before this milestone (see M9/M10/M11's own entries for the two real
+      test-fixture bugs that surfaced there); this milestone's own required
+      broad sweep (every crate that builds a `model::ops::Ops`, not just the
+      two this milestone edits) found two MORE real gaps, both caused by
+      `REQUIRED_KERNELS` growing by 7 names (`quant_group_sum`, both
+      `matmul_kq_{dyn,gemv}` `CODE_BITS` specialisations, both
+      `matmul_i8_{dyn,gemv}` group=16 specialisations):
+      (1) `qwen3::model::pipelines`, `qwen35moe::model::pipelines`, and
+      `qwen35::model::pipelines` each hand-maintain their OWN copy of the
+      façade kernel set (documented as deliberate - they override the
+      `matmul_reg2`/`matmul_reg3` name/source binding `model::ops::
+      kernel_list` cannot express - so none of the three delegates to the
+      canonical list the way `qwen3::serve`/`gradcheck::bf16_train` already
+      do), and all three were now missing the 7 new names:
+      `Ops::new` refused to build at all (`kernel 'quant_group_sum' is not
+      registered on this Gpu`), which took down every single test in
+      `qwen3`'s lib suite that constructs a `Qwen` (27 of them) the moment
+      it ran for real. Fixed by appending the same 7 entries (`kernels::
+      template::interned`, matching `model::ops::kernel_list`'s own recipe)
+      to each of the three `pipelines()` builders - "compiled, never
+      dispatched" for these three crates, the same precedent the bf16/f16
+      storage-tier entries already established there, since none of them
+      builds a `Weight::KQuant`. (2) `gpu_core::cost::kernel_cost` (the
+      per-kernel FLOP/byte accounting table `PassProfile::gflops` depends
+      on to report a rate at all) had no formula for `quant_group_sum` or
+      `matmul_kq_dyn`/`matmul_kq_gemv` - caught by `qwen3::model::tests::
+      pipelines_fully_costed`, a ratchet that refuses ANY kernel in a
+      model's own pipeline list without a cost formula. Fixed by adding
+      three formulas: `quant_group_sum` (int-ops only, `64 * m*(k/32)` -
+      one thread per `(row, group)` output, 8 `dot4I8Packed` calls each,
+      4 MACs = 8 int ops per call) and `matmul_kq_dyn`/`matmul_kq_gemv`
+      (the SAME DP4A structure `matmul_i8_dyn`'s own formula already
+      counts, keyed off this kernel's own RAW-`k` param contract instead of
+      `kg = K/4` - `bytes` approximates the weight-code buffer at
+      `CODE_BITS=8` density since `bits` is not itself a dispatch param
+      this function can see, the same "best-effort streaming estimate, not
+      a cache model" every other formula in this file already accepts).
+      `matmul_i8_dyn#QPG=1`/`matmul_i8_gemv#WPG=4` needed NO new formula -
+      `kernel_cost` already strips a `base#K=V` specialisation suffix
+      before matching, so they fall through to the EXISTING `matmul_i8_dyn`/
+      `matmul_i8_gemv` arms for free. `gpu_core`'s own coverage-floor
+      ratchet (`cost_coverage_over_the_kernel_tree_never_regresses`) rose
+      with these additions, so it needed no edit.
+      `make test`, run per crate on a real device (Intel Arc iGPU, Vulkan),
+      every one green after the fixes above: `-p brain-backend-api` (45
+      passed), `-p brain-model` (full suite green except ONE pre-existing,
+      unrelated failure - `moe_compact_parity`'s `compact_layer_submit_
+      count_does_not_scale_with_expert_count`, confirmed via `git diff` that
+      `expert_fwd_compact_layer` - the function under test - is untouched
+      by any commit in this whole M9-M12 workstream; this exact test/root
+      cause is already recorded as a known pre-existing gap in M3's own
+      entry above), `-p brain-kernels` (33 passed), `-p brain-qwen3` (full
+      suite green), `-p brain-qwen35moe` (full suite green), `-p
+      brain-qwen35` (full suite green), `-p brain-wan` (full suite green -
+      this crate never builds a `model::ops::Ops` at all, confirmed by
+      grep, so it was never at risk from this milestone's `REQUIRED_KERNELS`
+      growth, but still run per the gating requirement), `-p brain-flux2`
+      (full suite green, same "never builds an `Ops`" note), `-p
+      brain-s3dit` (full suite green, same note).
 - [ ] M13: `moe_linear_gated_kq.wgsl` + `matmul_kq_gemv_reg.wgsl` +
       `gpu_core::upgrade` row.
 - [ ] M14: byte compression (packed `sc`/`m` + f16 `d`; Q4_K → 1.03× GGUF).

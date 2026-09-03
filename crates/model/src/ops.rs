@@ -118,6 +118,30 @@ mod kname {
     pub const MATMUL_Q4_GEMV: &str = "matmul_q4_gemv";
     pub const MAX_ABS_ROW: &str = "max_abs_row";
     pub const QUANT_PACK: &str = "quant_pack";
+    /// M9's affine K-quant correction prepass (`S[m,g] = Σ_{k in g} xq[m,k]`,
+    /// `crate::kquant`'s module doc) - the third, OPTIONAL step
+    /// `crate::int8::quant_rows_steps`'s `xgs` field appends.
+    pub const QUANT_GROUP_SUM: &str = "quant_group_sum";
+    /// M11's affine K-quant (Q4_K/Q5_K) kernels, `CODE_BITS`-specialized via
+    /// `kernels::template::interned` - see [`Ops::bind`]'s doc comment for
+    /// why `Dtype::Q4K`/`Dtype::Q8K` each need their own physical kernel
+    /// name rather than a runtime template parameter. Spelled by hand to
+    /// match `kernels::template::variant_name`'s `"{base}#{k}={v}"`
+    /// convention - `required_kernels_matches_kname_all` (this module's own
+    /// test module) pins that these never drift from what `interned` really
+    /// produces, the same discipline `MATMUL_BF16`'s doc comment describes
+    /// for the B4/B5 storage tiers.
+    pub const MATMUL_KQ_DYN_4: &str = "matmul_kq_dyn#CODE_BITS=4";
+    pub const MATMUL_KQ_DYN_8: &str = "matmul_kq_dyn#CODE_BITS=8";
+    pub const MATMUL_KQ_GEMV_4: &str = "matmul_kq_gemv#CODE_BITS=4";
+    pub const MATMUL_KQ_GEMV_8: &str = "matmul_kq_gemv#CODE_BITS=8";
+    /// M10's group=16 (Q6_K) reuse of the EXISTING symmetric int8 kernels via
+    /// a template knob (`QPG`/`WPG`) - a DIFFERENT physical pipeline from the
+    /// plain [`MATMUL_I8_DYN`]/[`MATMUL_I8_GEMV`] names above (which stay at
+    /// their group=32 default), so it needs its own registered name; see
+    /// [`Ops::bind`]'s `group` parameter for how a caller picks between them.
+    pub const MATMUL_I8_DYN_G16: &str = "matmul_i8_dyn#QPG=1";
+    pub const MATMUL_I8_GEMV_G16: &str = "matmul_i8_gemv#WPG=4";
     /// bf16-storage kernel names (B4) - `kernels::template::dtype_variant`'s
     /// own `variant_name` convention (`"{base}#{binding}={tag}"`), spelled
     /// here as plain literals (not computed via a call to `dtype_variant`
@@ -206,6 +230,13 @@ mod kname {
         MATMUL_Q4_GEMV,
         MAX_ABS_ROW,
         QUANT_PACK,
+        QUANT_GROUP_SUM,
+        MATMUL_KQ_DYN_4,
+        MATMUL_KQ_DYN_8,
+        MATMUL_KQ_GEMV_4,
+        MATMUL_KQ_GEMV_8,
+        MATMUL_I8_DYN_G16,
+        MATMUL_I8_GEMV_G16,
         MATMUL_BF16,
         MATMUL_GEMV_BF16,
         MATMUL_REG3_BF16,
@@ -242,9 +273,10 @@ pub const REQUIRED_KERNELS: &[&str] = kname::ALL;
 ///
 /// # Why this could not simply be a `const`
 ///
-/// Nine of these entries (the bf16/f16 storage tiers, and B9's paged-KV
-/// bf16 write tier) exist only as values computed at runtime by
-/// [`kernels::template::dtype_variant`]/`dtype_variant_store` - a
+/// Fifteen of these entries (the bf16/f16 storage tiers, B9's paged-KV bf16
+/// write tier, and M12's `CODE_BITS`/`QPG`/`WPG`-specialised K-quant kernels)
+/// exist only as values computed at runtime by
+/// [`kernels::template::dtype_variant`]/`dtype_variant_store`/`interned` - a
 /// specialised variant's WGSL source is generated, not an `include_str!`.
 /// So the list is built once and leaked into a `OnceLock`, exactly the
 /// "tiny working set, leaking it is fine" tradeoff `dtype_variant`'s own
@@ -311,6 +343,21 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
         // has no bf16 variant at all (it never reads the weight - see
         // `kname::MATMUL_DW`'s own doc comment).
         let bf16_matmul_dx = var("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16);
+        // M12: affine K-quant (Q4_K/Q5_K) kernels at each `CODE_BITS`
+        // specialization, and the group=16 (Q6_K) reuse of the existing
+        // symmetric kernels via M10's `QPG`/`WPG` knobs - all four/two are
+        // `kernels::template::interned` specialisations, not separate
+        // `.wgsl` files, exactly like the bf16/f16 storage tiers above.
+        let spec = |base, src, params: &[(&str, u32)]| {
+            kernels::template::interned(base, src, params)
+                .unwrap_or_else(|e| panic!("brain-kernels: {base}{params:?} failed to specialize: {e}"))
+        };
+        let kq_dyn_4 = spec("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 4)]);
+        let kq_dyn_8 = spec("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 8)]);
+        let kq_gemv_4 = spec("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 4)]);
+        let kq_gemv_8 = spec("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]);
+        let i8_dyn_g16 = spec("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]);
+        let i8_gemv_g16 = spec("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]);
         vec![
             ("matmul", kernels::MATMUL),
             ("matmul_gemv", kernels::MATMUL_GEMV),
@@ -321,6 +368,13 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
             ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
             ("max_abs_row", kernels::MAX_ABS_ROW),
             ("quant_pack", kernels::QUANT_PACK),
+            ("quant_group_sum", kernels::QUANT_GROUP_SUM),
+            kq_dyn_4,
+            kq_dyn_8,
+            kq_gemv_4,
+            kq_gemv_8,
+            i8_dyn_g16,
+            i8_gemv_g16,
             bf16_matmul,
             bf16_gemv,
             bf16_reg3,
@@ -410,6 +464,36 @@ pub enum Weight {
     /// Activations stay int8 - see
     /// this module's doc comment on the offset-arithmetic rule this implies.
     Q4 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32 },
+    /// The canonical brain K-quant device layout (M8-M11; see
+    /// `crate::kquant`'s module doc for the full shape/correction-term
+    /// derivation) - ONE variant for all three device instantiations,
+    /// distinguished by `bits`/`group`/`affine`:
+    ///
+    /// | source   | bits | group | affine | [`Weight::dtype`] reports |
+    /// |----------|------|-------|--------|----------------------------|
+    /// | Q4_K     | 4    | 32    | true   | `Dtype::Q4K`               |
+    /// | Q5_K     | 8    | 32    | true   | `Dtype::Q8K`               |
+    /// | Q6_K     | 8    | 16    | false  | `Dtype::I8` (group=16)     |
+    ///
+    /// `w`: `[n, k*bits/32]` u32 - packed codes, K-contiguous, `32/bits`
+    /// codes per word, low bits first (unsigned raw value when `affine`,
+    /// signed low-bits-two's-complement bias-folded value otherwise -
+    /// `gguf::kquant`'s host relayout already did this fold).
+    ///
+    /// `sz`: the weight-scale plane. When `affine` is true this is the
+    /// INTERLEAVED `[n, 2*k/group]` `(ds, dm)` plane `matmul_kq_dyn`/
+    /// `matmul_kq_gemv` bind directly (`ds = d*sc`, `dm = dmin*m`, the same
+    /// fp32 expressions `checkpoint::gguf`'s private `deq_q4_k`/`deq_q5_k`
+    /// use). When `affine` is false (Q6_K, `dm` is always `0.0`) this is a
+    /// PLAIN `[n, k/group]` `ds`-only plane instead - the layout the
+    /// EXISTING `matmul_i8_dyn#QPG=1`/`matmul_i8_gemv#WPG=4` kernels
+    /// (M10's group=16 template knobs) actually bind, which does not have
+    /// room for an interleaved `dm` half a symmetric type never needs. A
+    /// caller building this variant from `gguf::kquant`'s interleaved
+    /// `KqLayout` output for a symmetric group=16 tensor must therefore
+    /// extract just the `ds` half before uploading here - `sz`'s layout is
+    /// a property of `affine`, not of where the bytes originally came from.
+    KQuant { w: DeviceBuffer, sz: DeviceBuffer, n: u32, k: u32, group: u32, bits: u32, affine: bool },
 }
 
 impl Weight {
@@ -420,6 +504,32 @@ impl Weight {
             Weight::F16 { .. } => Dtype::F16,
             Weight::I8 { .. } => Dtype::I8,
             Weight::Q4 { .. } => Dtype::Q4,
+            // `affine` picks Q4_K vs Q5_K by `bits` (both group=32); a
+            // non-affine (Q6_K) weight reuses `Dtype::I8` - it is, from the
+            // selector's perspective, exactly `I8` with a different
+            // weight-scale group (see `Weight::group`/`Ops::bind`'s own
+            // `group` parameter for how that distinction actually reaches a
+            // physical kernel name).
+            Weight::KQuant { affine: true, bits: 4, .. } => Dtype::Q4K,
+            Weight::KQuant { affine: true, bits: 8, .. } => Dtype::Q8K,
+            Weight::KQuant { affine: true, bits, .. } => {
+                unreachable!("Weight::KQuant: affine K-quant only ever has bits=4 (Q4_K) or bits=8 (Q5_K), got bits={bits}")
+            }
+            Weight::KQuant { affine: false, .. } => Dtype::I8,
+        }
+    }
+
+    /// The weight-scale group width along `k` this weight was packed with -
+    /// 32 for every tier except a non-affine (Q6_K) [`Weight::KQuant`],
+    /// which is 16. [`Ops::bind`]'s own `group` parameter exists ONLY to
+    /// carry this to the physical-kernel-name choice (see that method's doc
+    /// comment); every dtype this crate had before M12 was implicitly
+    /// group=32 everywhere, which is exactly why this returns a plain `u32`
+    /// rather than an `Option` - there is always a real answer.
+    pub fn group(&self) -> u32 {
+        match self {
+            Weight::KQuant { group, .. } => *group,
+            _ => 32,
         }
     }
 
@@ -429,7 +539,8 @@ impl Weight {
             | Weight::BF16 { n, .. }
             | Weight::F16 { n, .. }
             | Weight::I8 { n, .. }
-            | Weight::Q4 { n, .. } => *n,
+            | Weight::Q4 { n, .. }
+            | Weight::KQuant { n, .. } => *n,
         }
     }
 
@@ -439,7 +550,8 @@ impl Weight {
             | Weight::BF16 { k, .. }
             | Weight::F16 { k, .. }
             | Weight::I8 { k, .. }
-            | Weight::Q4 { k, .. } => *k,
+            | Weight::Q4 { k, .. }
+            | Weight::KQuant { k, .. } => *k,
         }
     }
 
@@ -494,11 +606,21 @@ impl Weight {
                 let s = ops.gpu.storage_init("weight_scale_q4", &scales);
                 Weight::Q4 { w, s, n: n as u32, k: k as u32 }
             }
-            // `Dtype` has exactly these five variants (`DType::promote` only
-            // ever returns the requested tier or `F32`, never invents a
-            // third dtype) - this match is now exhaustive, so there is no
-            // fallback arm left to write (a real sixth tier would be a
-            // compile error here, not a silent `unreachable!` at runtime).
+            // `Weight::KQuant` is deliberately NOT reachable through this
+            // generic path: it needs the codes' own affine/symmetric bit
+            // layout and a (ds, dm) or ds-only scale plane straight from
+            // `gguf::kquant`'s host relayout, not a re-quantization of a
+            // flat `[n, k]` f32 tensor this function could produce by
+            // calling some `quantize_weight_kq(raw, ..)` - K-quant's whole
+            // point is to reach the device WITHOUT ever materializing fp32.
+            // The `assert!` above already refuses `Q4K`/`Q8K` before this
+            // match runs, so this arm is unreachable in practice; it stays
+            // an explicit `unreachable!` (not a silent fallthrough) so a
+            // future loosening of that assert fails loudly here instead of
+            // constructing a bogus `Weight` from fp32 data.
+            Dtype::Q4K | Dtype::Q8K => {
+                unreachable!("Weight::upload: {want:?} is refused by the assert above -- build a Weight::KQuant directly from gguf::kquant's own packed output instead")
+            }
         }
     }
 }
@@ -721,6 +843,14 @@ pub struct Act {
     /// quantized - which is what makes the two packing dispatches skippable
     /// rather than merely unused.
     quant: Option<I8Scratch>,
+    /// `crate::kquant`'s `S[m,g] = Σ_{k in g} xq[m,k]` affine correction
+    /// prepass (M9's `quant_group_sum.wgsl`), `[xr0+rows, k/GROUP]` f32 -
+    /// `Some` only when built by [`Ops::act_kq`]. `None` for every other
+    /// constructor: an activation feeding only `F32`/`BF16`/`F16`/`I8`/`Q4`
+    /// weights never needs this term, and building it unconditionally would
+    /// pay for a third dispatch (`quant_group_sum`) no matmul call reads,
+    /// same reasoning as `quant`'s own `None` case in [`Ops::act_f32`].
+    xgs: Option<DeviceBuffer>,
 }
 
 /// A model-facing façade over `backend_api::select`'s kernel selector,
@@ -798,7 +928,43 @@ impl Ops {
         let total = (xr0 + rows) as u64;
         let quant = I8Scratch::new(&self.gpu, total, total, &[k]);
         quant.quant_rows(&self.gpu, [self.idx[kname::MAX_ABS_ROW], self.idx[kname::QUANT_PACK]], s, x, xr0, xr0 + rows, k);
-        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant) }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: None }
+    }
+
+    /// [`Ops::act`], plus the affine K-quant group-sum prepass
+    /// (`quant_group_sum.wgsl`, M9) every [`Weight::KQuant`] matmul needs.
+    /// Builds the SAME `I8Scratch` `act` does (identical `sx`/`xq`, so the
+    /// packed activation this produces is byte-identical to what `act` would
+    /// have produced for the same call), plus one more `[xr0+rows, k/GROUP]`
+    /// f32 buffer that `crate::int8::quant_rows_steps`'s `xgs` seam fills as
+    /// a THIRD dispatch alongside `max_abs_row`/`quant_pack` - see that
+    /// function's own doc comment for why this is a separate step rather
+    /// than folded into `quant_pack` itself (the group sum is read by every
+    /// linear pairing this activation with an affine weight; computing it
+    /// once here, rather than once per `n`-column inside the GEMM's k-loop,
+    /// is the entire point of `quant_group_sum` existing as a prepass).
+    ///
+    /// `k` must be a multiple of `crate::int8::GROUP` (32) - the same
+    /// contract `quant_rows_steps`'s own `xgs` branch asserts.
+    pub fn act_kq(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
+        assert!(rows > 0, "Ops::act_kq: rows must be > 0 (got 0)");
+        let total = (xr0 + rows) as u64;
+        let quant = I8Scratch::new(&self.gpu, total, total, &[k]);
+        let xgs = self.gpu.storage(total * (k as u64 / crate::int8::GROUP as u64));
+        s.extend(crate::int8::quant_rows_steps(
+            &self.gpu,
+            crate::int8::QuantRows {
+                kernels: [self.idx[kname::MAX_ABS_ROW], self.idx[kname::QUANT_PACK]],
+                x,
+                sx: &quant.sx,
+                xq: quant.xq_for(k),
+                xgs: Some((self.idx[kname::QUANT_GROUP_SUM], &xgs)),
+            },
+            xr0,
+            xr0 + rows,
+            k,
+        ));
+        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: Some(xgs) }
     }
 
     /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
@@ -817,20 +983,20 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: None }
+        Act { x: x.clone(), xr0, m: rows, k, quant: None, xgs: None }
     }
 
-    /// `(variant, dtype) -> kernel name`. The ONLY place in this crate a
-    /// kernel-name string literal is chosen by a match arm (`kname`'s own
+    /// `(variant, dtype, group) -> kernel name`. The ONLY place in this crate
+    /// a kernel-name string literal is chosen by a match arm (`kname`'s own
     /// consts are the only place one is spelled at all). Any pair not listed
     /// here is unreachable given [`select::candidates`]'s own contract
     /// (`F32`-family dtypes only ever offer `{Reference, WorkgroupPerOutput,
-    /// RegisterTiled}`; `I8`/`Q4` only ever offer `{WorkgroupPerOutput,
-    /// PackedInt8}` - see `backend_api::select::candidates`) crossed with
-    /// [`Weight::upload`]'s own `DType::promote` gate (an `I8`/`Q4`/`BF16`
-    /// `Weight` exists at all only on a device whose caps already promoted it
-    /// there), so a panic here means one of those two contracts broke, not a
-    /// normal runtime condition.
+    /// RegisterTiled}`; `I8`/`Q4`/`Q4K`/`Q8K` only ever offer
+    /// `{WorkgroupPerOutput, PackedInt8}` - see `backend_api::select::
+    /// candidates`) crossed with [`Weight::upload`]'s own `DType::promote`
+    /// gate (an `I8`/`Q4`/`BF16` `Weight` exists at all only on a device
+    /// whose caps already promoted it there), so a panic here means one of
+    /// those two contracts broke, not a normal runtime condition.
     ///
     /// `BF16` (B4) and `F16` (B5) each get their OWN kernel names, distinct
     /// from `F32`'s: a real `Weight::BF16`/`Weight::F16` buffer holds PACKED
@@ -841,26 +1007,52 @@ impl Ops {
     /// doc comment for why picking a different physical file per dtype for
     /// the same `KernelVariant` is already precedented (`PackedInt8`'s
     /// i8-vs-q4 split, see [`Ops::threads`]).
-    fn bind(v: KernelVariant, dt: Dtype) -> &'static str {
+    ///
+    /// # Why `group` (M12)
+    ///
+    /// `group` is the weight-scale group width [`Weight::group`] reports -
+    /// 32 for every tier that predates M12, always passed as a literal `32`
+    /// by every one of THOSE dtypes' arms below (never actually read for
+    /// them; `Weight::group()` already defaults to 32 for anything that
+    /// isn't a `Weight::KQuant`, so this parameter existing at all only
+    /// matters for `Dtype::I8` at `group == 16` - Q6_K, M10's group=16 reuse
+    /// of the existing symmetric kernels via a template knob). `Dtype::I8`
+    /// therefore branches on it (`32` -> the untouched default
+    /// `matmul_i8_{dyn,gemv}`, `16` -> `matmul_i8_{dyn,gemv}#{QPG=1,WPG=4}`,
+    /// M10's own specialised pair); `Dtype::Q4K`/`Dtype::Q8K` never branch on
+    /// it at all, because `matmul_kq_dyn`/`matmul_kq_gemv`'s own weight-scale
+    /// group is FIXED at 32 by construction (see those kernels' own header:
+    /// "this kernel serves only Q4_K/Q5_K, both group=32; Q6_K's group=16
+    /// reaches the device through the EXISTING symmetric kernels' own QPG
+    /// knob instead, not this one") - `CODE_BITS` (folded into `dt` itself:
+    /// `Q4K` vs `Q8K`), not `group`, is what selects between their two
+    /// specialisations.
+    fn bind(v: KernelVariant, dt: Dtype, group: u32) -> &'static str {
         use KernelVariant::*;
-        match (v, dt) {
-            (Reference, Dtype::F32) => kname::MATMUL,
-            (Reference, Dtype::BF16) => kname::MATMUL_BF16,
-            (Reference, Dtype::F16) => kname::MATMUL_F16,
-            (WorkgroupPerOutput, Dtype::F32) => kname::MATMUL_GEMV,
-            (WorkgroupPerOutput, Dtype::BF16) => kname::MATMUL_GEMV_BF16,
-            (WorkgroupPerOutput, Dtype::F16) => kname::MATMUL_GEMV_F16,
-            (RegisterTiled, Dtype::F32) => kname::MATMUL_REG2,
-            (RegisterTiled, Dtype::BF16) => kname::MATMUL_REG3_BF16,
-            (RegisterTiled, Dtype::F16) => kname::MATMUL_REG3_F16,
-            (WorkgroupPerOutput, Dtype::I8) => kname::MATMUL_I8_GEMV,
-            (PackedInt8, Dtype::I8) => kname::MATMUL_I8_DYN,
-            (WorkgroupPerOutput, Dtype::Q4) => kname::MATMUL_Q4_GEMV,
-            (PackedInt8, Dtype::Q4) => kname::MATMUL_Q4_DYN,
-            (v, dt) => panic!(
-                "Ops::matmul: select::candidates offered {v:?} for dtype {dt:?}, which this façade \
-                 has no kernel bound for -- see `Ops::bind`'s doc comment for why this should be \
-                 unreachable"
+        match (v, dt, group) {
+            (Reference, Dtype::F32, 32) => kname::MATMUL,
+            (Reference, Dtype::BF16, 32) => kname::MATMUL_BF16,
+            (Reference, Dtype::F16, 32) => kname::MATMUL_F16,
+            (WorkgroupPerOutput, Dtype::F32, 32) => kname::MATMUL_GEMV,
+            (WorkgroupPerOutput, Dtype::BF16, 32) => kname::MATMUL_GEMV_BF16,
+            (WorkgroupPerOutput, Dtype::F16, 32) => kname::MATMUL_GEMV_F16,
+            (RegisterTiled, Dtype::F32, 32) => kname::MATMUL_REG2,
+            (RegisterTiled, Dtype::BF16, 32) => kname::MATMUL_REG3_BF16,
+            (RegisterTiled, Dtype::F16, 32) => kname::MATMUL_REG3_F16,
+            (WorkgroupPerOutput, Dtype::I8, 32) => kname::MATMUL_I8_GEMV,
+            (PackedInt8, Dtype::I8, 32) => kname::MATMUL_I8_DYN,
+            (WorkgroupPerOutput, Dtype::I8, 16) => kname::MATMUL_I8_GEMV_G16,
+            (PackedInt8, Dtype::I8, 16) => kname::MATMUL_I8_DYN_G16,
+            (WorkgroupPerOutput, Dtype::Q4, 32) => kname::MATMUL_Q4_GEMV,
+            (PackedInt8, Dtype::Q4, 32) => kname::MATMUL_Q4_DYN,
+            (WorkgroupPerOutput, Dtype::Q4K, 32) => kname::MATMUL_KQ_GEMV_4,
+            (PackedInt8, Dtype::Q4K, 32) => kname::MATMUL_KQ_DYN_4,
+            (WorkgroupPerOutput, Dtype::Q8K, 32) => kname::MATMUL_KQ_GEMV_8,
+            (PackedInt8, Dtype::Q8K, 32) => kname::MATMUL_KQ_DYN_8,
+            (v, dt, group) => panic!(
+                "Ops::matmul: select::candidates offered {v:?} for dtype {dt:?} at group={group} \
+                 which this façade has no kernel bound for -- see `Ops::bind`'s doc comment for why \
+                 this should be unreachable"
             ),
         }
     }
@@ -884,6 +1076,18 @@ impl Ops {
     /// index falls outside the real grid are harmless) - caught in the
     /// direction that actually corrupts output by this façade's own parity
     /// test.
+    ///
+    /// `Dtype::Q4K`/`Dtype::Q8K` MUST land in the `tile()` arm alongside
+    /// `Dtype::I8`, not the `_ => m*n` fallback: `matmul_kq_dyn.wgsl` is
+    /// `matmul_i8_dyn`'s own 128×128 register-tiled sibling (see that
+    /// kernel's own header - "Register-block ownership, bank padding,
+    /// software pipelining and the epilogue are copied from `matmul_i8_dyn`
+    /// unchanged"), so it needs the SAME dispatch geometry `Dtype::I8`
+    /// already gets, not `Dtype::Q4`'s naive one-thread-per-output count -
+    /// getting this wrong under-dispatches the tile grid and leaves real
+    /// output elements never written (silent output corruption, not a
+    /// crash - see `kq_dtypes_dispatch_the_tiled_formula_not_m_times_n`
+    /// below, added specifically to catch a regression here).
     fn threads(v: KernelVariant, dt: Dtype, m: u32, n: u32) -> u32 {
         let tile = || m.div_ceil(128) * n.div_ceil(128) * 256;
         match v {
@@ -891,7 +1095,7 @@ impl Ops {
             KernelVariant::WorkgroupPerOutput => n * 64,
             KernelVariant::RegisterTiled => tile(),
             KernelVariant::PackedInt8 => match dt {
-                Dtype::I8 => tile(),
+                Dtype::I8 | Dtype::Q4K | Dtype::Q8K => tile(),
                 _ => m * n,
             },
             KernelVariant::SplitReduction => {
@@ -914,7 +1118,8 @@ impl Ops {
         let m = act.m;
         let shape = OpShape { m, n, k, dtype: w.dtype() };
         let variant = self.selector.select(Op::MatMul, shape, &self.caps);
-        let kind = self.idx[Self::bind(variant, w.dtype())];
+        let group = w.group();
+        let kind = self.idx[Self::bind(variant, w.dtype(), group)];
         let threads = Self::threads(variant, w.dtype(), m, n);
         match w {
             // `BF16`/`F16` read the SAME `act.x` (raw f32, never quantized -
@@ -956,6 +1161,20 @@ impl Ops {
                 // exactly the silently-wrong-arithmetic class this module's
                 // doc comment warns about - caught by this façade's own
                 // parity test before this comment was written.
+                //
+                // `Dtype::Q4K`/`Dtype::Q8K` never reach this arm (they have
+                // their own `Weight::KQuant` arm below), so the `_ => k`
+                // fallback here is exercised ONLY by `Dtype::Q4` today - but
+                // it IS the right answer for the affine kernels too, by the
+                // same reasoning `matmul_q4_{dyn,gemv}` already established:
+                // `matmul_kq_{dyn,gemv}.wgsl`'s own header states their `k`
+                // param is "the RAW LOGICAL reduction length, NOT a packed-
+                // word count" for the identical reason (`xq` and `wq` have
+                // DIFFERENT word densities - 4 codes/word for `xq` always,
+                // `32/CODE_BITS` for `wq`), so a real sixth dtype landing in
+                // this same `I8`/`Q4` arm by mistake would be the only way
+                // this fallback silently mis-derives `param_k` - it does not
+                // today.
                 let param_k = match w.dtype() {
                     Dtype::I8 => kg as u32,
                     _ => k,
@@ -969,6 +1188,60 @@ impl Ops {
                     &[quant.xq_for(k), wb, &quant.sx, sw, y],
                     &[xo, (0, 0), so, (0, 0), oo],
                     &[m, param_k, n],
+                    threads,
+                ));
+            }
+            // M12: affine K-quant (`Weight::KQuant { affine: true, .. }` -
+            // Q4_K/Q5_K, `matmul_kq_dyn`/`matmul_kq_gemv`). The non-affine
+            // (Q6_K, group=16) instantiation never constructs THIS variant's
+            // buffer shape - it is a `Weight::I8`-shaped weight (plain `s`,
+            // no `sz`/`xgs`) with `group() == 16`, so it already took the
+            // `Weight::I8 { .. }` arm above via `Self::bind`'s `group`
+            // parameter; only the affine pair needs the extra `wsz`/`xgs`
+            // buffers this arm binds.
+            Weight::KQuant { w: wb, sz, .. } => {
+                assert!(
+                    w.dtype() == Dtype::Q4K || w.dtype() == Dtype::Q8K,
+                    "Ops::matmul: Weight::KQuant reached the affine dispatch arm with dtype {:?} -- \
+                     a non-affine (Q6_K) KQuant weight must be built with a plain ds-only `sz` and \
+                     dispatched as Dtype::I8 at group=16, not through this arm",
+                    w.dtype()
+                );
+                // Same packed-word-per-int8-word offset rule the `I8`/`Q4`
+                // arm above uses (`xq` is always 4 int8/word, regardless of
+                // the WEIGHT's own code density) - `matmul_kq_{dyn,gemv}`
+                // read `xq` through the identical `model::int8` packing.
+                let per_word = Dtype::I8.per_word() as u64;
+                let kg = k as u64 / per_word;
+                let xo = (act.xr0 as u64 * kg, m as u64 * kg);
+                let so = (act.xr0 as u64, m as u64);
+                // `xgs` is `[.., k/GROUP]` f32 - one group sum per row, the
+                // SAME "own width" offset convention `so`/`xo` already
+                // follow (see `crate::int8::quant_rows_steps`'s own doc
+                // comment on `xgs`'s offset units).
+                let go = (act.xr0 as u64 * (k as u64 / crate::int8::GROUP as u64), m as u64 * (k as u64 / crate::int8::GROUP as u64));
+                let oo = (yoff, m as u64 * n as u64);
+                let quant = act.quant.as_ref().expect(
+                    "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
+                     quantized weight reads it - build it with Ops::act or Ops::act_kq instead",
+                );
+                let xgs = act.xgs.as_ref().unwrap_or_else(|| {
+                    panic!(
+                        "Ops::matmul: this Weight::KQuant weight (dtype {:?}) needs the activation's \
+                         xgs group-sum prepass (crate::kquant's affine correction term), but this \
+                         activation was built without one -- build it with Ops::act_kq, not Ops::act \
+                         or Ops::act_f32",
+                        w.dtype()
+                    )
+                });
+                // `k` (RAW LOGICAL K, not a packed word count) - see the
+                // long comment on the `I8`/`Q4` arm above for why this is
+                // the correct param here too.
+                s.push(self.gpu.step_sliced(
+                    kind,
+                    &[quant.xq_for(k), wb, &quant.sx, sz, xgs, y],
+                    &[xo, (0, 0), so, (0, 0), go, oo],
+                    &[m, k, n],
                     threads,
                 ));
             }
@@ -1022,7 +1295,7 @@ impl Ops {
             Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => {
                 s.push(self.gpu.step(kind, &[tokens, w, out], &[d_model, seq_len], threads));
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
                 unreachable!("Ops::embed: bind_embed already panicked for this dtype above")
             }
         }
@@ -1081,7 +1354,7 @@ impl Ops {
             Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } | Weight::F16 { w: wb, .. } => {
                 s.push(self.gpu.step(kind, &[x, wb, gate, out], &[m, k, n, n_experts, e_idx], threads));
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
                 unreachable!("Ops::moe_linear: bind_moe_linear already panicked for this dtype above")
             }
         }
@@ -1305,7 +1578,7 @@ impl Ops {
             Weight::F32 { w: wb, .. } | Weight::BF16 { w: wb, .. } => {
                 s.push(self.gpu.step(kind, &[dy, wb, dx], &[m, k, n, accumulate as u32], threads));
             }
-            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } => {
+            Weight::F16 { .. } | Weight::I8 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } => {
                 unreachable!("Ops::matmul_dx: bind_matmul_dx already panicked for this dtype above")
             }
         }
@@ -1344,7 +1617,7 @@ impl Ops {
     #[must_use]
     pub fn matmul_kernel(&self, w: &Weight, m: u32) -> &'static str {
         let shape = OpShape { m, n: w.n(), k: w.k(), dtype: w.dtype() };
-        Self::bind(self.selector.select(Op::MatMul, shape, &self.caps), w.dtype())
+        Self::bind(self.selector.select(Op::MatMul, shape, &self.caps), w.dtype(), w.group())
     }
 }
 
@@ -1525,6 +1798,79 @@ mod tests {
     fn b10_kname_literal_matches_dtype_variant_naming() {
         let (n, _) = kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap();
         assert_eq!(n, kname::MATMUL_DX_BF16);
+    }
+
+    /// The M12 kname literals (affine K-quant `CODE_BITS` specialisations,
+    /// group=16 `QPG`/`WPG` specialisations) - same contract as the B8/B9/B10
+    /// tests above, but pinned against `kernels::template::interned` (a
+    /// plain tunable-const specialisation) rather than `dtype_variant` (a
+    /// storage-tier decode rewrite): `interned`'s `variant_name` is `"{base}
+    /// #{k}={v}"`, the same `#k=v` convention `dtype_variant` also follows,
+    /// so the two naming schemes agree even though the underlying rewrite
+    /// differs.
+    #[test]
+    fn m12_kname_literals_match_interned_naming() {
+        let (n, _) = kernels::template::interned("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 4)]).unwrap();
+        assert_eq!(n, kname::MATMUL_KQ_DYN_4);
+        let (n, _) = kernels::template::interned("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 8)]).unwrap();
+        assert_eq!(n, kname::MATMUL_KQ_DYN_8);
+        let (n, _) = kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 4)]).unwrap();
+        assert_eq!(n, kname::MATMUL_KQ_GEMV_4);
+        let (n, _) = kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap();
+        assert_eq!(n, kname::MATMUL_KQ_GEMV_8);
+        let (n, _) = kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap();
+        assert_eq!(n, kname::MATMUL_I8_DYN_G16);
+        let (n, _) = kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap();
+        assert_eq!(n, kname::MATMUL_I8_GEMV_G16);
+    }
+
+    /// `Ops::bind`'s `(variant, dtype, group)` table, exercised directly
+    /// (pure function, no `Gpu` needed) - the M12 arms specifically, since
+    /// this is the ONE place a `Q4K`/`Q8K`/`I8`-at-group=16 request turns
+    /// into a physical kernel name.
+    #[test]
+    fn bind_routes_the_m12_dtypes_to_the_right_physical_kernel() {
+        use KernelVariant::*;
+        assert_eq!(Ops::bind(PackedInt8, Dtype::Q4K, 32), kname::MATMUL_KQ_DYN_4);
+        assert_eq!(Ops::bind(WorkgroupPerOutput, Dtype::Q4K, 32), kname::MATMUL_KQ_GEMV_4);
+        assert_eq!(Ops::bind(PackedInt8, Dtype::Q8K, 32), kname::MATMUL_KQ_DYN_8);
+        assert_eq!(Ops::bind(WorkgroupPerOutput, Dtype::Q8K, 32), kname::MATMUL_KQ_GEMV_8);
+        // Q6_K's group=16 stays tagged `Dtype::I8` but must resolve to the
+        // SEPARATE group=16-specialised physical kernel, not the plain
+        // group=32 default `matmul_i8_dyn`/`matmul_i8_gemv` names.
+        assert_eq!(Ops::bind(PackedInt8, Dtype::I8, 16), kname::MATMUL_I8_DYN_G16);
+        assert_eq!(Ops::bind(WorkgroupPerOutput, Dtype::I8, 16), kname::MATMUL_I8_GEMV_G16);
+        // group=32 (every dtype that predates M12) is untouched.
+        assert_eq!(Ops::bind(PackedInt8, Dtype::I8, 32), kname::MATMUL_I8_DYN);
+        assert_eq!(Ops::bind(WorkgroupPerOutput, Dtype::I8, 32), kname::MATMUL_I8_GEMV);
+    }
+
+    /// *** The specific bug `Ops::threads`'s own doc comment warns about ***:
+    /// `Weight::KQuant`'s affine dtypes MUST dispatch the TILED formula
+    /// (`matmul_kq_dyn` is a 128x128 register-tiled kernel, `matmul_i8_dyn`'s
+    /// own sibling), not `Dtype::Q4`'s naive `m*n` fallback. Getting this
+    /// wrong under-dispatches the tile grid and leaves real output elements
+    /// never written - silent output corruption a compile-time check cannot
+    /// catch, which is exactly why this is a runtime assertion against the
+    /// SAME tile formula `Dtype::I8`/`Dtype::RegisterTiled` already use,
+    /// not merely "some number".
+    #[test]
+    fn kq_dtypes_dispatch_the_tiled_formula_not_m_times_n() {
+        let (m, n) = (513u32, 257u32);
+        let expected_tile = m.div_ceil(128) * n.div_ceil(128) * 256;
+        assert_ne!(expected_tile, m * n, "test shape must distinguish tile() from m*n");
+        for dt in [Dtype::Q4K, Dtype::Q8K] {
+            assert_eq!(
+                Ops::threads(KernelVariant::PackedInt8, dt, m, n),
+                expected_tile,
+                "{dt:?} must dispatch matmul_kq_dyn's tile formula, not m*n -- under-dispatching \
+                 leaves real output elements never written (silent corruption, not a crash)"
+            );
+        }
+        // Q4 stays on the naive m*n formula (matmul_q4_dyn is deliberately
+        // NOT register-tiled) - unaffected by this change, asserted here so
+        // a future edit cannot accidentally widen the tile() arm to Q4 too.
+        assert_eq!(Ops::threads(KernelVariant::PackedInt8, Dtype::Q4, m, n), m * n);
     }
 
     /// [`KvPage::word_count`] - the actual allocation-size logic

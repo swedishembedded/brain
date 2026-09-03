@@ -58,10 +58,16 @@
 //! renders that as [`Outcome::Unsupported`] with the reason.
 //!
 //! There is no FP8 tier here because there is no FP8 tier in the engine:
-//! `gpu_core::select::Dtype` has five variants and `crate::fp8` is a
-//! host-side checkpoint-import dequantizer, not a device kernel. A caller
-//! asking "can this machine do f8" gets "brain has no device-side f8 tier",
-//! not a number.
+//! `crate::fp8` is a host-side checkpoint-import dequantizer, not a device
+//! kernel. A caller asking "can this machine do f8" gets "brain has no
+//! device-side f8 tier", not a number.
+//!
+//! [`TIERS`] does not include `Dtype::Q4K`/`Dtype::Q8K` (M12's affine
+//! K-quant tiers) - they share `I8`/`Q4`'s `int8_dot` capability and
+//! [`Tier`] impl below (so `arithmetic`/`describe`/`label` all cover them),
+//! but this probe's own GEMM sweep has not been extended to measure them
+//! yet; that is a follow-on, not a gap this milestone's dispatch wiring
+//! needed to close.
 
 use std::time::{Duration, Instant};
 
@@ -70,8 +76,9 @@ use gpu_core::select::Dtype;
 use crate::ops::{Ops, Weight};
 
 /// The dtype tiers this engine can really dispatch a GEMM at, in widening →
-/// narrowing order. Exactly `gpu_core::select::Dtype`'s variants - there is
-/// no sixth tier to forget, and no fp8 to invent.
+/// narrowing order. NOT `gpu_core::select::Dtype`'s full variant set as of
+/// M12 (`Q4K`/`Q8K`, the affine K-quant tiers, are dispatchable but not yet
+/// in this probe's own sweep - see this module's doc comment).
 pub const TIERS: &[Dtype] = &[Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::Q4];
 
 /// Whether a tier's inner product is floating-point or integer arithmetic.
@@ -105,7 +112,7 @@ impl Tier for Dtype {
     fn arithmetic(self) -> Arithmetic {
         match self {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => Arithmetic::Float32,
-            Dtype::I8 | Dtype::Q4 => Arithmetic::Int8Dot,
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => Arithmetic::Int8Dot,
         }
     }
 
@@ -116,6 +123,8 @@ impl Tier for Dtype {
             Dtype::F16 => "f16 weights (packed halves, decoded inline), fp32 math",
             Dtype::I8 => "int8 weights + int8 activations, i32 accumulate (DP4A)",
             Dtype::Q4 => "int4 weights + int8 activations, i32 accumulate (W4A8)",
+            Dtype::Q4K => "affine 4-bit K-quant weights (GGUF Q4_K) + int8 activations, i32 accumulate + fp32 min-correction",
+            Dtype::Q8K => "affine 5-bit K-quant weights (GGUF Q5_K, 8-bit slot) + int8 activations, i32 accumulate + fp32 min-correction",
         }
     }
 
@@ -126,6 +135,8 @@ impl Tier for Dtype {
             Dtype::F16 => "f16",
             Dtype::I8 => "i8",
             Dtype::Q4 => "q4",
+            Dtype::Q4K => "q4k",
+            Dtype::Q8K => "q8k",
         }
     }
 }

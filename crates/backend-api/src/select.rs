@@ -298,13 +298,19 @@ impl Requirement {
 /// carries it. `F32` needs nothing (the universal floor). `I8`/`Q4` key on
 /// `int8_dot`: `Q4` is W4A8 (see `model::int4`'s module doc - activations
 /// stay on the existing int8 dynamic-quant path, only weights narrow
-/// further), so it rides the exact same capability as `I8`.
+/// further), so it rides the exact same capability as `I8`. `Q4K`/`Q8K`
+/// (affine K-quant - GGUF Q4_K/Q5_K) ride the exact same `int8_dot`
+/// capability for the exact same reason: the activation side is the SAME
+/// packed int8 quantization every other tier here uses, only the weight
+/// side's reconstruction (`ds*code - dm` instead of `ds*code`) differs, and
+/// that difference is a kernel-selection detail (`model::ops::Ops::bind`),
+/// not a device-capability one.
 fn dtype_storage_requirement(dt: Dtype) -> Requirement {
     match dt {
         Dtype::F32 => Requirement::default(),
         Dtype::BF16 => Requirement { bf16_storage: true, ..Requirement::default() },
         Dtype::F16 => Requirement { f16_storage: true, ..Requirement::default() },
-        Dtype::I8 | Dtype::Q4 => Requirement { int8_dot: true, ..Requirement::default() },
+        Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => Requirement { int8_dot: true, ..Requirement::default() },
     }
 }
 
@@ -638,7 +644,16 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             // grows per-row - the measured P40 crossover is m≈8, and
             // refining it per device is exactly what the autotuner probes
             // this tail for.
-            Dtype::I8 | Dtype::Q4 => {
+            // `Q4K`/`Q8K` (affine K-quant, GGUF Q4_K/Q5_K) fold into this SAME
+            // arm: the regime split is about ACTIVATION shape (how many rows
+            // `xq`/`sx` cover), not the weight's own reconstruction formula,
+            // and both new tiers keep the identical int8-activation dynamic
+            // quant path I8/Q4 already use. `model::ops::Ops::bind` is what
+            // actually points a `KernelVariant` at the right PHYSICAL kernel
+            // per dtype (`matmul_kq_dyn`/`matmul_kq_gemv` for these two,
+            // `matmul_i8_dyn`/`matmul_i8_gemv` for I8) - this function only
+            // ever names the logical variant.
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => {
                 if shape.m > DECODE_REGIME_MAX_ROWS || !caps.workgroup_reductions {
                     vec![PackedInt8]
                 } else if shape.m <= I8_GEMV_MAX_ROWS {
@@ -745,9 +760,14 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // wrongly imply `paged_decode_scores_wg` can read a packed pool)
         // and never `PackedInt8` (which would wrongly impose the `int8_dot`
         // requirement this kernel does not have).
+        // `Q4K`/`Q8K` have no paged-attention kernel of their own (K-quant
+        // is a WEIGHT format - there is no quantized KV pool of this shape
+        // anywhere in this tree), so they mirror I8/Q4's `Reference` arm for
+        // exhaustiveness only; nothing in this codebase builds an `OpShape`
+        // with this dtype for `Op::PagedAttention` today.
         Op::PagedAttention => match shape.dtype {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![WorkgroupPerOutput, Reference],
-            Dtype::I8 | Dtype::Q4 => vec![Reference],
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => vec![Reference],
         },
         // Sparse-MoE expert linear - capability only, NO shape gate, unlike
         // `Op::MatMul`'s Dtype arm this mirrors: none of
@@ -770,9 +790,14 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // fixing that is Phase 5 (M5.5) territory, not re-litigated per Op
         // here, so Q4 mirrors I8's `int8_dot` requirement exactly as
         // `Op::MatMul` already does.
+        // `Q4K`/`Q8K` have no `moe_linear_gated_kq` kernel yet (that is
+        // M13's `moe_linear_gated_kq.wgsl`, not landed here) - folded into
+        // I8/Q4's arm for exhaustiveness only, matching `Op::PagedAttention`
+        // above; nothing routes an MoE expert linear through these two
+        // dtypes yet.
         Op::MoeExpertLinear => match shape.dtype {
             Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![Reference],
-            Dtype::I8 | Dtype::Q4 => vec![PackedInt8],
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => vec![PackedInt8],
         },
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
         // kernels with a serial `Cin*K` reduction, i.e. the classic "wrong
@@ -1218,6 +1243,42 @@ mod tests {
         assert_eq!(s.select(Op::MatMul, prefill, &gpu_caps()), KernelVariant::PackedInt8);
         assert_eq!(s.select(Op::MatMul, decode, &cpu_caps()), KernelVariant::Reference);
         assert_eq!(s.select(Op::MatMul, prefill, &cpu_caps()), KernelVariant::Reference);
+    }
+
+    /// M12: the two affine K-quant dtypes (`Q4K`/`Q8K` - GGUF Q4_K/Q5_K) must
+    /// select IDENTICALLY to `I8` at every shape/cap combination
+    /// `int8_requires_the_capability` above already covers - same regime
+    /// split, same `int8_dot` capability gate. This is the regression a
+    /// selector-side "forgot to fold the new dtypes into the existing arm"
+    /// mistake would break silently (the match would still compile if the
+    /// new dtypes fell through to SOME other arm, just dispatch the wrong
+    /// variant), so it is asserted directly against `Dtype::I8`'s own
+    /// result, not just against a hardcoded `KernelVariant`.
+    #[test]
+    fn affine_kquant_dtypes_select_exactly_like_i8() {
+        let s = DefaultSelector;
+        for dt in [Dtype::Q4K, Dtype::Q8K] {
+            let decode_i8 = shape(8, 512, 512, Dtype::I8);
+            let prefill_i8 = shape(512, 512, 512, Dtype::I8);
+            let decode = shape(8, 512, 512, dt);
+            let prefill = shape(512, 512, 512, dt);
+            for caps in [gpu_caps(), cpu_caps()] {
+                assert_eq!(
+                    s.select(Op::MatMul, decode, &caps),
+                    s.select(Op::MatMul, decode_i8, &caps),
+                    "{dt:?} decode diverged from I8"
+                );
+                assert_eq!(
+                    s.select(Op::MatMul, prefill, &caps),
+                    s.select(Op::MatMul, prefill_i8, &caps),
+                    "{dt:?} prefill diverged from I8"
+                );
+            }
+            // And the capability requirement itself: no int8_dot -> Reference
+            // only, matching Dtype::I8's own `int8_requires_the_capability`
+            // assertion above.
+            assert_eq!(s.select(Op::MatMul, prefill, &cpu_caps()), KernelVariant::Reference);
+        }
     }
 
     /// Argmax splits by row length alone — the split kernels are barrier-free,
@@ -1721,7 +1782,7 @@ mod tests {
     /// distinct keys, and so do every other pair.
     #[test]
     fn cache_key_distinguishes_every_dtype_tier() {
-        let dtypes = [Dtype::F32, Dtype::F16, Dtype::BF16, Dtype::I8, Dtype::Q4];
+        let dtypes = [Dtype::F32, Dtype::F16, Dtype::BF16, Dtype::I8, Dtype::Q4, Dtype::Q4K, Dtype::Q8K];
         let mut seen = std::collections::HashSet::new();
         for dtype in dtypes {
             let key = AutoTuner::key(Op::MatMul, shape(4, 512, 512, dtype));

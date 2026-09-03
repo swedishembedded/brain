@@ -435,6 +435,30 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             // 8 packed words), so the `sw` term is `n * kg/8`, not `n`.
             c(2 * m * n, 8 * m * kg * n, 4 * (m * kg + n * kg + m * n + m + n * kg / 8))
         }
+        // M11's affine K-quant (Q4_K/Q5_K) GEMM/GEMV - `matmul_i8_dyn`'s own
+        // family above, but this kernel's own param contract passes the RAW
+        // LOGICAL `k` (params[1]), NOT `kg = K/4` (`matmul_kq_dyn.wgsl`'s own
+        // header: x and w have different word densities for the same K, so a
+        // shared packed-word count would be ambiguous about which operand it
+        // counts). The DP4A integer-MAC count is identical to the symmetric
+        // family's (`k` int8 multiplies per output either way); `bytes`
+        // approximates the weight-code buffer at CODE_BITS=8 density (the
+        // wider of the two real widths this kernel serves - the actual
+        // packed size at CODE_BITS=4 is half that) since `bits` is not a
+        // dispatch param this function can see - a "best-effort streaming
+        // estimate" per this module's own doc comment, not a cache model.
+        // The affine `- dm*S` min-correction term's own extra per-group fold
+        // is folded into the flat epilogue `2*m*n` the same way
+        // `matmul_i8_dyn`'s own per-group `ds` fold already is above, rather
+        // than counted as a separate term.
+        "matmul_kq_dyn" | "matmul_kq_gemv" => {
+            let (m, k, n) = (p(0)?, p(1)?, p(2)?);
+            c(
+                2 * m * n,
+                2 * m * k * n,
+                4 * (m * (k / 4) + n * (k / 4) + m * n + m + 2 * n * (k / 32) + m * (k / 32)),
+            )
+        }
         // q4 W4A8 GEMMs (int8 activation, int4 weight): params [m, k, n] with
         // `k` the LOGICAL (un-divided) K, unlike the int8 family's `kg` --
         // x and w pack a different number of values per u32 for the same K
@@ -458,6 +482,17 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "max_abs_row" | "max_abs_rows" => {
             let (m, k) = (p(0)?, p(1)?);
             f(m * k, 4 * (m * k + m))
+        }
+        // M9's affine K-quant activation-only correction prepass: params
+        // [m, k]; one thread per (row, GROUP=32-element group) output,
+        // summing its group's 8 packed words via `dot4I8Packed` against an
+        // all-ones operand (4 int MACs = 8 int ops per call, 8 calls per
+        // output - `model::int8::WORDS_PER_GROUP`). Integer ops only (an
+        // exact lane sum, no fp32 anywhere in this kernel).
+        "quant_group_sum" => {
+            let (m, k) = (p(0)?, p(1)?);
+            let groups = m * (k / 32);
+            c(0, 64 * groups, 4 * (m * (k / 4)) + 4 * groups)
         }
 
         // ---- paged KV decode/prefill (the SERVING tape) ---------------------
