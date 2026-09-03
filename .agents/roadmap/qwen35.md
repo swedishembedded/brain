@@ -1993,6 +1993,12 @@ layers): chunk 64 -> 501 tok/s, 128 -> 838, 256 -> 873, 512 -> 847. The curve
 is flat past 256 and the scratch keeps growing, so 256 is where it stops
 paying.
 
+(Every figure in this section was measured before M26 bounded a round's
+in-flight transient memory with `DRAIN_EVERY_N_LAYERS`, which costs 1.4% at
+this shape and 3.5% at 2048 prompt tokens: 873.3 re-measures as 840.0, 433.4
+as 425.2, 759.5 as 732.8. The ratios and the conclusion are unchanged - see
+M26 for why the drain is worth that.)
+
 **Correctness.** Two new gates, both spec-level, and the bounds in both are
 measured against deliberately broken implementations rather than picked:
 
@@ -2039,7 +2045,7 @@ asserted `shard.embed && shard.head` precisely so that gap was loud rather
 than silent; it still does, but it is now a thin wrapper over the sharded
 primitive M26 added rather than the only chunked primitive there is.
 
-### M26 (DONE): chunked prefill on the REAL path - 262.8 s -> 26.6 s of prompt replay on the two-card 27B resident
+### M26 (DONE): chunked prefill on the REAL path - 262.8 s -> 26.5 s of prompt replay on the two-card 27B resident
 
 M25 built the chunked primitive and measured it at 21x, but only ever ran it
 on synthetic weights: `serve::Engine` builds a plain FP32 `Qwen35`, and the
@@ -2047,7 +2053,7 @@ real 64-layer FP32 model is ~108 GB against two 24 GB P40s. The checkpoint
 this box actually serves goes through `int8_gguf_resident`, and that path was
 still replaying the prompt one token at a time. Measured, real, before this
 milestone: a 1731-token prompt took **262.8 s to prefill (6.6 tok/s)**. After:
-**26.6 s (65.0 tok/s), 9.9x**, with the same greedy continuation.
+**26.5 s (65.4 tok/s), 9.9x**, with the same greedy continuation.
 
 **What the seam actually needed.** M25's `run_prefill_chunk` asserts
 whole-model, and its `input_override`-equivalent is not exposed for a chunk at
@@ -2075,27 +2081,54 @@ all in a sharded configuration. The generalization is exactly the one
   and `stack_prefill_chunk` threads the `[n, d_model]` carry through every
   stage, projecting only the round's last row through the head.
 
-**`MAX_PREFILL_TOKENS` is 128 here, not `serve::Engine`'s 256** - and that is
-the one number that did NOT transfer. A round's intermediates all stay alive
-until something drains the queue, and a round drains only at its terminal
-readback, so a stage holds ~32 layers' worth at once at the real 27B widths
-(`d_model` 5120, `ff` 17408, `conv_dim` 10240). Swept on the real checkpoint,
-2x P40, 1731-token prompt, peak card occupancy from `nvidia-smi`:
+**The one thing M25's numbers did not transfer: how much memory a round is
+allowed to have in flight.** Swept on the real checkpoint, 2x P40, 1731-token
+prompt, peak card occupancy sampled from `nvidia-smi`:
 
 | chunk | prefill | tok/s | peak VRAM |
 |---|---|---|---|
 | (per token) | 262.8 s | 6.6 | - |
 | 64 | 36.5 s | 47.4 | 16.2 GiB |
-| **128** | **26.6 s** | **65.0** | **17.8 GiB** |
+| 128 | 26.6 s | 65.0 | 17.8 GiB |
 | 192 | 26.4 s | 65.4 | 20.3 GiB |
 | 256 | out of memory | - | >24 GiB |
 
-The curve is flat by 128 (192 buys 0.6% for 2.5 GiB) and 256 does not run at
-all on a 24 GiB card, so this is a real optimum rather than a safety margin.
-Note also what the M25 scope note got wrong: it predicted this would need
-`t`-sized per-stage buffers on every card. It did not - every buffer a round
-touches is allocated per call from `n`, so the stages stay built at
-`b = t = 1`.
+`serve::Engine`'s own 256 did not run. The reason is not the GQA score slab
+M25 already accounted for: EVERY intermediate a layer allocates stays alive
+until something drains the queue, and a round drained only at its terminal
+readback, so a stage held all ~32 of its layers' worth at once at the real 27B
+widths (`d_model` 5120, `ff` 17408, `conv_dim` 10240) - about 5 GiB on top of
+13.5 GiB of resident INT8 weights.
+
+That is a DEPTH cost, not a chunk cost, and capping the chunk is the wrong
+lever for it - the Q4 tier fits ONE card, where a stage is 64 layers deep and
+overruns the same budget at half the chunk (which is exactly how this surfaced:
+the single-card `decode_throughput_at_a_real_long_context` gate went red while
+the two-card one was green). So the fix went where the defect was:
+`run_prefill_chunk_stage`'s layer loop now BLOCKS on the device every
+`DRAIN_EVERY_N_LAYERS = 4` layers instead of only flushing, which is what lets
+wgpu actually reclaim the layers already behind it. Live transients become
+`4 * per_layer` regardless of shard depth, and the table becomes:
+
+| chunk | prefill | tok/s | peak VRAM |
+|---|---|---|---|
+| **256** | **26.5 s** | **65.4** | **15.3 GiB** |
+| 512 | 27.6 s | 62.8 | 16.6 GiB |
+
+256 is now both the fastest measured round size and cheaper in memory than 64
+was without the drain, so the resident and `serve::Engine` agree on the
+constant after all. The drain costs host/device overlap, priced with
+`bin/qwen35_prefill_profile` (synthetic weights, real per-layer dims, single
+P40, 512-token prompt, chunk 256): 851.9 tok/s draining never, 840.0 every 4
+layers (-1.4%), 807.8 every layer (-5.2%); at 2048 prompt tokens the every-4
+cost is -3.5% (759.5 -> 732.8). M25's headline 873/433 figures shift by that
+much and no more, which is the price of a prefill whose memory no longer
+scales with model depth.
+
+Note also what the M25 scope note got wrong in the other direction: it
+predicted this would need `t`-sized per-stage buffers on every card. It did
+not - every buffer a round touches is allocated per call from `n`, so the
+stages stay built at `b = t = 1`.
 
 **Correctness.** Two gates, one synthetic and one on the real 27B:
 
@@ -2113,6 +2146,44 @@ touches is allocated per call from `n`, so the stages stay built at
   run: the 1731-token prompt ends on M23's factual cue, and the answer must
   still be Paris after 14 rounds of chunked prefill. It is (`" Paris. It
   is"`). All seven real-checkpoint gates in that file stay green.
+
+**A round is only worth issuing if the tier's GEMM is tiled - and Q4's is
+not.** This was found by measurement, not by reading: with the chunked path
+wired unconditionally, the single-card `decode_throughput_at_a_real_long_
+context` gate went from ~2.5 minutes to over 18, and its own metrics said why.
+Real checkpoint, uniform Q4, ONE P40, 1555-token prompt:
+
+| replay | prefill | tok/s |
+|---|---|---|
+| per token | 152.1 s | 10.2 |
+| rounds of 256 | 1108.3 s | 1.40 |
+
+A **7.3x regression** from the same host change that is a 9.9x win at INT8.
+The cause is one line of dispatch: `Ops::bind` maps `(PackedInt8, Q4)` to
+`matmul_q4_dyn.wgsl`, which is by its own header "the correct-first, non-tiled
+q4 GEMM ... one thread per output element", while `(PackedInt8, I8)` maps to
+the 128x128 register-tiled `matmul_i8_dyn`. At `m = 1` Q4 instead gets
+`matmul_q4_gemv`, which is coalesced and workgroup-reducing - so for Q4 the
+per-token tape is genuinely the faster one, and a round is pure loss.
+
+`Qwen35::chunked_prefill_is_profitable` (true unless any weight is `Q4`)
+therefore selects the tape in `Qwen35GgufInstance::replay_prompt`, which both
+`generate` and `profile_decode` go through so a profiler can never warm up on
+a tape production would not take. The two tapes leave IDENTICAL state, gated
+bit-for-bit at tiny scale, so this is a cost choice and never a behavioural
+one.
+
+**The fix for that is already built and one binding away.** `matmul_q4_dyn_reg`
+(128x128 register-tiled, `dot4I8Packed`-based) landed in the kernel-performance
+ledger's M5.5, measured 2.02x at `m = 32` rising to 12.56x at `m = 2048`
+against the naive kernel and proven bit-identical to it - and was deliberately
+left "wired nowhere yet ... once a real model dispatches this kernel enough to
+need it". This milestone is that model: binding it in `model::ops::Ops` (and
+adding it to `Ops::REQUIRED_KERNELS`, which every model's pipeline list must
+then register) would let the Q4 tier take the chunked path too. That is a
+cross-model change with its own gates, scoped to that ledger's Phase 1, and is
+deliberately NOT done here - the fallback keeps Q4 exactly as fast as it was
+while INT8 gets its 9.9x.
 
 **Still not done, and still deliberately.** The flash-attention prefill kernel
 M25 named (`paged_flash_prefill.wgsl`, tiles capped at `head_dim` 128 against

@@ -41,8 +41,8 @@
 //!   which proves the two-stage composition is bit-equal to the whole-shard
 //!   model.
 //! * **Prefill** - `Qwen35::prefill_chunk_stage` per stage per ROUND, the same
-//!   seam widened to a whole round's `[n, d_model]` boundary block (2.6 MB at
-//!   this resident's `n = 128`). Gated at tiny scale by `crate::model`'s own
+//!   seam widened to a whole round's `[n, d_model]` boundary block (5.2 MB at
+//!   this resident's `n = 256`). Gated at tiny scale by `crate::model`'s own
 //!   `two_shard_chunked_prefill_matches_token_by_token_replay`, which proves a
 //!   chunked replay leaves both stages in exactly the decode state the
 //!   per-token replay leaves.
@@ -100,10 +100,21 @@
 //!   whole-model M25 primitive `crate::serve::Engine` drives, is now a thin
 //!   wrapper over it), and [`Qwen35GgufInstance::stack_prefill_chunk`] drives
 //!   it round by round across every card. Measured on 2x Tesla P40 at a real
-//!   1731-token prompt: 262.8 s (6.6 tok/s) before, 26.6 s (65.0 tok/s)
+//!   1731-token prompt: 262.8 s (6.6 tok/s) before, 26.5 s (65.4 tok/s)
 //!   after - 9.9x. What it did NOT need, contrary to that note, was `t`-sized
 //!   per-stage buffers on every card: every buffer a round touches is
 //!   allocated per call from `n`, so the stages stay built at `b = t = 1`.
+//!   What it DID need, and that note did not predict, was bounding how many
+//!   layers' worth of those per-call buffers can be in flight at once - see
+//!   `Qwen35::run_prefill_chunk_stage`'s `DRAIN_EVERY_N_LAYERS`.
+//! * **Per-token prefill at the Q4 tier, and only there.** A round is only
+//!   worth issuing if the tier's `m > 1` kernel is a real tiled GEMM. `Q4`'s
+//!   is not (`matmul_q4_dyn.wgsl`, naive by its own header), and on real
+//!   weights that makes a chunked replay 7.3x SLOWER than the per-token one,
+//!   so [`Qwen35GgufInstance::replay_prompt`] picks the tape by tier. Both
+//!   leave identical state, so this is a cost choice and never a behavioural
+//!   one. See [`MAX_PREFILL_TOKENS`] for the numbers and for the already-built
+//!   kernel that would close it.
 //! * **One sequence per dispatch.** Every stage is built at `b = t = 1`, so
 //!   `run_batch` is the serial default - see its own doc.
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
@@ -156,31 +167,66 @@ const DEFAULT_CTX: u32 = 2048;
 /// its result back every call, and there are `n_stages` of those per token)
 /// with one.
 ///
-/// **HALF `crate::serve::Engine`'s 256, and measured on this model rather
-/// than inherited from it.** A round's transients are not just its GQA
-/// scratch: every intermediate a layer allocates lives until something drains
-/// the queue, and a round drains only at its terminal readback - so a stage
-/// holds ~32 layers' worth at once, at the real 27B widths (`d_model` 5120,
-/// `intermediate_size` 17408, `conv_dim` 10240). Measured on 2x Tesla P40,
-/// 1731-token prompt, `prefill_seconds` and peak card occupancy from
-/// `nvidia-smi`:
+/// The same 256 `crate::serve::Engine` uses - but RE-MEASURED on this model
+/// rather than inherited, because the first honest attempt at it did not run
+/// at all. Measured on 2x Tesla P40, real Q4_K_M checkpoint at the INT8 tier,
+/// 1731-token prompt; `prefill_seconds` from the instance's own metrics, peak
+/// card occupancy sampled from `nvidia-smi`:
 ///
 /// | chunk | prefill | tok/s | peak VRAM |
 /// |-------|---------|-------|-----------|
-/// |    64 |  36.5 s |  47.4 |  16.2 GiB |
-/// |   128 |  26.6 s |  65.0 |  17.8 GiB |
-/// |   192 |  26.4 s |  65.4 |  20.3 GiB |
-/// |   256 |     OOM |     - |  (>24 GiB)|
+/// | (per token) | 262.8 s | 6.6 | - |
+/// | 64 | 36.5 s | 47.4 | 16.2 GiB |
+/// | 128 | 26.6 s | 65.0 | 17.8 GiB |
+/// | 192 | 26.4 s | 65.4 | 20.3 GiB |
+/// | 256 | OOM | - | (> 24 GiB) |
 ///
-/// 128 is where the curve has already flattened - 192 buys 0.6% for 2.5 GiB -
-/// and 256 does not run at all on a 24 GiB card. Halving it again would cost
-/// a third of the speedup, so this is a real optimum and not a safety margin.
+/// A round's transients are not just its GQA scratch: EVERY intermediate a
+/// layer allocates stays alive until something drains the queue, and a round
+/// used to drain only at its terminal readback - so a stage held all ~32 of
+/// its layers' worth at once, at the real 27B widths (`d_model` 5120,
+/// `intermediate_size` 17408, `conv_dim` 10240). That is a DEPTH problem, not
+/// a chunk-size problem, and capping the chunk is the wrong lever for it: a
+/// single-card plan (the Q4 tier fits one) is 64 layers deep and overruns the
+/// same budget at half the chunk.
+///
+/// So the fix went where the defect was - `Qwen35::run_prefill_chunk_stage`'s
+/// `DRAIN_EVERY_N_LAYERS` - and the table became:
+///
+/// | chunk | prefill | tok/s | peak VRAM |
+/// |-------|---------|-------|-----------|
+/// | 256 | 26.5 s | 65.4 | 15.3 GiB |
+/// | 512 | 27.6 s | 62.8 | 16.6 GiB |
+///
+/// 256 is now both the fastest measured round size AND cheaper in memory than
+/// 64 was before the drain, and 512 is slower - so this is a real optimum
+/// rather than a memory-driven compromise.
 ///
 /// One thing that is NOT a consideration here and is in `crate::serve`: the
 /// per-stage buffers a round needs are all allocated per call from `n`
 /// (`Qwen35::run_prefill_chunk_stage` sizes every one of them), so a stage
 /// built at `b = t = 1` carries no FIXED cost for this at all.
-const MAX_PREFILL_TOKENS: u32 = 128;
+///
+/// **This constant does not apply to a Q4 build at all** - see
+/// [`Qwen35GgufInstance::replay_prompt`] and
+/// `Qwen35::chunked_prefill_is_profitable`. The Q4 tier's `m > 1` GEMM
+/// (`matmul_q4_dyn.wgsl`) is the naive one-thread-per-output kernel its own
+/// header says it is, and a round through it costs far MORE than the same
+/// tokens through `matmul_q4_gemv`'s coalesced `m = 1` path. Measured on the
+/// real checkpoint, uniform Q4 on ONE P40, 1555-token prompt: **152.1 s
+/// (10.2 tok/s) per token, 1108.3 s (1.4 tok/s) in rounds of 256** - a 7.3x
+/// REGRESSION, where the same change on the INT8 two-card stack is a 9.9x
+/// win. Same host code, same round size; the only difference is which GEMM
+/// the weight tier binds.
+///
+/// So a Q4 build keeps the per-token replay until a tiled q4 GEMM is wired
+/// into `model::ops::Ops`. `matmul_q4_dyn_reg` (128x128 register-tiled)
+/// already exists and is already proven bit-identical to `matmul_q4_dyn`
+/// (kernel-performance ledger, M5.5: 2.02x at `m = 32` rising to 12.56x at
+/// `m = 2048`); it is simply not bound by `Ops::bind`, which is that
+/// ledger's own scoped follow-up and not this module's to force. Binding it
+/// is what would let this constant apply to Q4 too.
+const MAX_PREFILL_TOKENS: u32 = 256;
 
 // ------------------------------------------------------------ byte accounting
 
@@ -853,6 +899,41 @@ impl Qwen35GgufInstance {
         Ok(logits)
     }
 
+    /// **Replay a whole prompt**, leaving every stage's GQA cache and GDN
+    /// state exactly where a following decode step expects them, and returning
+    /// the last prompt token's `[vocab]` logits.
+    ///
+    /// Rounds of [`MAX_PREFILL_TOKENS`] via [`Self::stack_prefill_chunk`] when
+    /// this build's weight tier makes a round profitable, one token at a time
+    /// via [`Self::stack_step`] when it does not
+    /// ([`Qwen35::chunked_prefill_is_profitable`] owns that judgement and its
+    /// reasons; `MAX_PREFILL_TOKENS`'s doc has the numbers). The two leave
+    /// IDENTICAL state either way - that equivalence is the whole contract of
+    /// `Qwen35::run_prefill_chunk_stage` and is gated bit-for-bit by
+    /// `crate::model`'s `two_shard_chunked_prefill_matches_token_by_token_replay`
+    /// - so this is purely a cost choice, never a behavioural one.
+    ///
+    /// One function rather than a loop at each call site, because
+    /// [`Self::generate`] and [`Self::profile_decode`] must replay a prompt
+    /// the SAME way: a profiler that warms up through a different tape than
+    /// the one production uses is measuring the wrong thing.
+    fn replay_prompt(&self, prompt: &[u32]) -> Result<(Vec<f32>, u32), String> {
+        let mut pos = 0u32;
+        let mut logits = Vec::new();
+        if self.shards.iter().all(|s| s.qwen35.chunked_prefill_is_profitable()) {
+            for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
+                logits = self.stack_prefill_chunk(round, pos)?;
+                pos += round.len() as u32;
+            }
+        } else {
+            for &t in prompt {
+                logits = self.stack_step(t, pos)?;
+                pos += 1;
+            }
+        }
+        Ok((logits, pos))
+    }
+
     fn reset(&self) {
         for s in &self.shards {
             s.caches.reset(&s.qwen35.gpu);
@@ -917,13 +998,8 @@ impl Qwen35GgufInstance {
         }
         self.reset();
         let mut rng = Rng::new(seed);
-        let mut pos = 0u32;
-        let mut logits = Vec::new();
         let t0 = std::time::Instant::now();
-        for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
-            logits = self.stack_prefill_chunk(round, pos)?;
-            pos += round.len() as u32;
-        }
+        let (mut logits, mut pos) = self.replay_prompt(prompt)?;
         let prefill_s = t0.elapsed().as_secs_f64();
         let t1 = std::time::Instant::now();
         let mut out = Vec::with_capacity(max_new as usize);
@@ -1006,18 +1082,16 @@ impl Qwen35GgufInstance {
         assert!(need <= self.cap as u64, "profile_decode: prompt ({}) + 2*{steps} profiled steps = {need} exceeds capacity {}", prompt.len(), self.cap);
         assert!(!prompt.is_empty(), "profile_decode: needs a non-empty prompt to establish decode state");
 
-        // Warm-up: real prompt replay, through the production CHUNKED prefill
-        // path. Establishes the GDN recurrent state and the GQA cache, compiles
-        // every pipeline, and leaves `pos` where a real decode step would find
-        // it. The decode tape's own pipelines are compiled by the first
-        // profiled step instead, which is why the production region below is
-        // measured over `steps` passes rather than one.
+        // Warm-up: real prompt replay, through whichever tape `generate` would
+        // have used (`replay_prompt`, so a profile can never warm up through a
+        // path production does not take). Establishes the GDN recurrent state
+        // and the GQA cache, compiles every pipeline, and leaves `pos` where a
+        // real decode step would find it. On a chunked replay the DECODE tape's
+        // own pipelines are compiled by the first profiled step instead, which
+        // is why the production region below is measured over `steps` passes
+        // rather than one.
         self.reset();
-        let mut pos = 0u32;
-        for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
-            self.stack_prefill_chunk(round, pos).expect("profile_decode warm-up");
-            pos += round.len() as u32;
-        }
+        let (_, mut pos) = self.replay_prompt(prompt).expect("profile_decode warm-up");
         let last = prompt[prompt.len() - 1];
         self.poll_wait();
 

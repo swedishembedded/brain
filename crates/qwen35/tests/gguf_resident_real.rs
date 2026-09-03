@@ -536,7 +536,7 @@ fn long_factual_prompt() -> String {
 ///
 /// Measured on this box (2x Tesla P40, INT8 tier, Q4_K_M source file, 1731
 /// prompt tokens): **262.8 s / 6.6 tok/s** with the old one-token-per-pass
-/// replay, **26.6 s / 65.0 tok/s** once the prompt is consumed in rounds -
+/// replay, **26.5 s / 65.4 tok/s** once the prompt is consumed in rounds -
 /// 9.9x. See `int8_gguf_resident::MAX_PREFILL_TOKENS` for the round-size
 /// sweep behind that second number.
 #[test]
@@ -575,9 +575,9 @@ fn prefill_throughput_at_a_real_long_context() {
     let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
     println!("  long-context greedy continuation: {text:?}");
 
-    // Several rounds of `int8_gguf_resident::MAX_PREFILL_TOKENS` (128), with
+    // Several rounds of `int8_gguf_resident::MAX_PREFILL_TOKENS` (256), with
     // a ragged last one - the case a single-round prompt cannot reach.
-    assert!(prompt_tokens > 3 * 128, "this gate needs a prompt spanning several prefill rounds, got {prompt_tokens} tokens");
+    assert!(prompt_tokens > 3 * 256, "this gate needs a prompt spanning several prefill rounds, got {prompt_tokens} tokens");
     assert!(
         text.contains("Paris"),
         "after {prompt_tokens} prompt tokens the stack must still continue \"The capital city of France is\" with Paris, got {text:?}"

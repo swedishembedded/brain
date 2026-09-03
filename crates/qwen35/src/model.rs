@@ -364,6 +364,30 @@ const PAGED_DECODE_APPLY_BATCHED: usize = 90;
 /// is safe even though this crate carries no `KernelSelector` of its own.
 const HEAD_ARGMAX_CHUNKS: u32 = 256;
 
+/// How often [`Qwen35::run_prefill_chunk_stage`]'s layer loop BLOCKS on the
+/// device instead of merely flushing, bounding a round's live transient memory
+/// to that many layers' worth instead of the whole shard's.
+///
+/// A prefill round allocates every one of a layer's intermediates fresh from
+/// `n` and drops them at the end of the iteration - but wgpu cannot actually
+/// reclaim a buffer that submitted work still references, and nothing forces
+/// that reclaim until the queue is drained. A round that only drains at its
+/// terminal readback therefore peaks at `n_layers * per_layer_transient`,
+/// which is a DEPTH cost, not a chunk cost: measured on the real 27B
+/// (`d_model` 5120, `ff` 17408, `conv_dim` 10240) it was ~5 GiB for a 32-layer
+/// stage at `n = 256`, enough to OOM a 24 GiB P40 that already holds 13.5 GiB
+/// of INT8 weights - and a single-card 64-layer plan overruns it at half that
+/// `n`. See `crate::int8_gguf_resident::MAX_PREFILL_TOKENS` for the sweep.
+///
+/// The price is the host/device overlap given up at each drain, and 4 is where
+/// that is nearly free while the memory is still bounded 16x below the
+/// undrained peak. Measured with `bin/qwen35_prefill_profile` (real per-layer
+/// dims, synthetic weights, single P40, 512-token prompt at chunk 256):
+/// 851.9 tok/s draining never, 840.0 draining every 4 layers (-1.4%), 807.8
+/// draining every layer (-5.2%). At 2048 prompt tokens the every-4 cost is
+/// -3.5% (759.5 -> 732.8).
+const DRAIN_EVERY_N_LAYERS: usize = 4;
+
 /// This model's RMSNorm epsilon. Exactly what `rmsnorm.wgsl` hardcodes, but it
 /// has to be passed explicitly here - see [`rms_step`].
 const RMS_EPS: f32 = 1e-6;
@@ -2586,8 +2610,14 @@ impl Qwen35 {
             // Per-layer flush, for the same measured reason `run_decode_step`
             // flushes: `Gpu::submit` only appends to a pending list here, so
             // without this the host records the whole round before the card
-            // starts any of it.
-            g.flush();
+            // starts any of it. Every `DRAIN_EVERY_N_LAYERS` layers the flush
+            // becomes a BLOCKING drain instead, which is what actually lets
+            // wgpu reclaim the layers already behind us - see that constant.
+            if (l + 1 - self.shard.start).is_multiple_of(DRAIN_EVERY_N_LAYERS) {
+                g.poll_wait();
+            } else {
+                g.flush();
+            }
         }
 
         // Head epilogue (final norm): head stage only - `run_decode_step`'s own
@@ -2600,6 +2630,26 @@ impl Qwen35 {
         } else {
             res
         }
+    }
+
+    /// Whether pushing a prompt through this build in multi-row ROUNDS
+    /// ([`Self::run_prefill_chunk_stage`]) actually beats replaying it one
+    /// token at a time - a property of the WEIGHT TIER, not of the prompt.
+    ///
+    /// A round's whole premise is that one `[n, d] x [d, *]` GEMM beats `n`
+    /// GEMVs. That holds when the tier's `m > 1` kernel is a real tiled GEMM,
+    /// which `matmul` / `matmul_reg2` / `matmul_i8_dyn` all are. It does NOT
+    /// hold at the **Q4** tier: `matmul_q4_dyn.wgsl` is, by its own header,
+    /// "the correct-first, non-tiled q4 GEMM ... one thread per output
+    /// element", and a register-tiled sibling is named there as the follow-on
+    /// work. Against `matmul_q4_gemv`'s coalesced, workgroup-reducing `m = 1`
+    /// path it loses by more than the round saves in dispatch count, so a Q4
+    /// build is better off on the decode tape until that kernel is tiled.
+    ///
+    /// Measured on the real 27B, uniform Q4 on one P40, ~1500-token prompt:
+    /// see `crate::int8_gguf_resident::MAX_PREFILL_TOKENS`'s own doc.
+    pub(crate) fn chunked_prefill_is_profitable(&self) -> bool {
+        !self.weights.values().any(|w| w.dtype() == Dtype::Q4)
     }
 
     /// [`Self::run_prefill_chunk_stage`] staged to the HOST - the one call a
