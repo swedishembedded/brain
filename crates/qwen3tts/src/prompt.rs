@@ -164,6 +164,7 @@ pub fn load_tokenizer(dir: &str) -> Result<data::qwen_tokenizer::QwenBpe, String
 }
 
 /// The assembled Talker generation prompt.
+#[derive(Clone)]
 pub struct Prompt {
     /// Prefix input embeddings, `[t_prefix, d_model]` row-major.
     pub embeds: Vec<f32>,

@@ -175,17 +175,40 @@ real perceptual-quality lever, not API decoration.
 
 ### Phase 2 - Batched serving
 
-- [ ] `run_batch` for the Talker+MTP KV-cache decode path. The hard part is
-      genuine: autoregressive decode with per-request finish times means a
-      ragged batch, not a fixed-shape one. Reuse the paged/continuous-batching
-      pattern already proven for `qwen3`/`qwen35` (`crates/model`'s KV-cache
-      scheduler) rather than inventing a second one -- see
-      [[brain-evolve-core-for-models]] convention: hoist, don't copy.
-      Write the batching invariance test FIRST (batched vs sequential output
-      must match bit-for-bit at temperature=0, same seed) before touching
-      `tts_serve.rs`'s executor.
-- [ ] Replace `tts_serve.rs`'s single FIFO executor thread with the batched
-      scheduler once `run_batch` exists.
+- [x] `run_batch` (`qwen3tts::batch::run_batch`) for the Talker+MTP KV-cache
+      decode path. **Scope, stated plainly**: this delivers interleaved
+      (round-robin, one frame per request per round) scheduling over the CPU
+      `CpuTalker`/`CpuMtp` engine, genuinely ragged (each request's own EOS/
+      `max_frames` ends its rotation independently, proven by a 1-frame
+      request finishing while a 6-frame one keeps going) - it is NOT a
+      single batched GPU matmul across requests (`b>1` in every `Gqa`/`Step`
+      this crate's GPU engine builds is a kernel-shape change, out of scope
+      here) and does NOT reuse `crates/model`'s qwen3/qwen35 paged-KV
+      scheduler (that scheduler is built around GPU-resident paged KV
+      blocks; this is a CPU host-side round-robin over independent
+      `CpuTalker`/`CpuMtp` instances - a smaller, different mechanism, not
+      the "reuse, don't invent a second one" the earlier draft of this plan
+      called for. Revisit if/when this needs to run on the GPU path). Each
+      request also still reloads its own weights from disk rather than
+      sharing one read-only set across the batch - a real, separate
+      optimization not attempted here either.
+      Tested (checkpoint-free, synthetic Talker+MTP): batched output for
+      each request matches that SAME request run alone through
+      `pipeline::generate_codes_cached`, bit-for-bit, at **sampling**
+      temperature (0.8, not greedy) - a stronger bar than the originally
+      planned "match at temperature=0" (greedy would not have caught
+      cross-session RNG contamination; sampling does, and there wasn't any).
+      A second test proves a 1-frame request drops out of rotation
+      immediately while a 6-frame request in the same batch keeps running.
+- [ ] Wire `run_batch` into an actual entry point. Not done this session:
+      `tts_serve.rs`'s executor is built around the NPU `serve::TtsEngine` /
+      `KvTalker` (OpenVINO), a DIFFERENT engine than the CPU
+      `CpuTalker`/`CpuMtp` `run_batch` drives - and OpenVINO itself is
+      absent on this box (see the Phase 3 streaming entry below), so
+      wiring this in and testing it live aren't both possible here. The
+      primitive is real and tested; production wiring (a CPU-side batched
+      server entry point, or porting the interleaving idea to the NPU
+      engine) is the next step.
 
 ### Phase 3 - Streaming (cheap half now, hard half later)
 

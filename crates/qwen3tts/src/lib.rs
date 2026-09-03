@@ -12,6 +12,7 @@
 //! `crates/model::block` builders; the new structure is multi-codebook +
 //! text-projection embeddings, a dual-track step graph, and a KV-cache seam.
 
+pub mod batch;
 pub mod caps;
 pub mod config;
 pub mod gen;
@@ -26,6 +27,7 @@ pub mod prompt;
 pub mod sft;
 pub mod talker;
 
+pub use batch::run_batch;
 pub use config::{MtpConfig, TalkerConfig};
 pub use sft::{ce, ce_batch, FinetuneOpts, MultiCodebookLabels};
 pub use gen::TalkerGen;
