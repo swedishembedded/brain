@@ -1521,6 +1521,7 @@ mod tests {
         // rather than hand-assembled bytes.
         let a_log_block = checkpoint::quant::quantize_par(checkpoint::gguf::TYPE_Q8_0, &[1.0f32; 32]).unwrap();
         let dt_bias_block = checkpoint::quant::quantize_par(checkpoint::gguf::TYPE_Q8_0, &[2.0f32; 32]).unwrap();
+        let norm_block = checkpoint::quant::quantize_par(checkpoint::gguf::TYPE_Q8_0, &[3.0f32; 32]).unwrap();
         let path = std::env::temp_dir().join(format!("brain-qwen35-ssmalogfix-rawblocks-{}.gguf", std::process::id()));
         let path = path.to_str().unwrap().to_string();
         write(
@@ -1529,20 +1530,27 @@ mod tests {
             &[
                 TensorOut { name: "blocks.0.linear_attn.A_log".to_string(), shape: vec![32], ty: checkpoint::gguf::TYPE_Q8_0, data: a_log_block },
                 TensorOut { name: "blocks.0.linear_attn.dt_bias".to_string(), shape: vec![32], ty: checkpoint::gguf::TYPE_Q8_0, data: dt_bias_block },
+                TensorOut { name: "blocks.0.linear_attn.norm.weight".to_string(), shape: vec![32], ty: checkpoint::gguf::TYPE_Q8_0, data: norm_block },
             ],
             32,
         )
         .unwrap();
         let mg = MmapGguf::open(&path).unwrap();
-        let names = vec!["blocks.0.linear_attn.A_log".to_string(), "blocks.0.linear_attn.dt_bias".to_string()];
+        let names = vec![
+            "blocks.0.linear_attn.A_log".to_string(),
+            "blocks.0.linear_attn.dt_bias".to_string(),
+            "blocks.0.linear_attn.norm.weight".to_string(),
+        ];
         let plan: HashMap<String, Fetch> = names.iter().map(|n| (n.clone(), Fetch::Whole(n.clone()))).collect();
-        let src = SsmALogFix { inner: RemapSource::new(&mg, plan) };
+        let order = GdnHeadOrder { num_k_heads: 2, group: 2, head_dim: 2, key_dim: 0, d_model: 0 };
+        let src = SsmALogFix { inner: RemapSource::new(&mg, plan), order };
 
         assert!(
             src.raw_blocks("blocks.0.linear_attn.A_log").is_none(),
             "a zero-fp32 block lend for the transformed leaf would bypass ElemOp::LnNeg entirely"
         );
-        assert!(src.raw_blocks("blocks.0.linear_attn.dt_bias").is_some(), "an untransformed leaf keeps its zero-fp32 block path");
+        assert!(src.raw_blocks("blocks.0.linear_attn.dt_bias").is_none(), "dt_bias is now also transformed -- must never be lent zero-copy blocks either");
+        assert!(src.raw_blocks("blocks.0.linear_attn.norm.weight").is_some(), "an untransformed leaf keeps its zero-fp32 block path");
 
         std::fs::remove_file(&path).ok();
     }

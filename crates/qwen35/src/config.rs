@@ -371,6 +371,15 @@ impl Qwen35Config {
                     gpu_core::select::Dtype::BF16 | gpu_core::select::Dtype::F16 => n * k * 2,
                     gpu_core::select::Dtype::I8 => n * k + n * k.div_ceil(group) * 4,
                     gpu_core::select::Dtype::Q4 => n * k / 2 + n * k.div_ceil(group) * 4,
+                    // `gguf::kquant`'s canonical device layout: `wq` codes
+                    // (`bits` per element) + `wsm` (one packed `(sc,m)` byte
+                    // pair per TWO 32-element groups) + `wd` (one packed f16
+                    // `(d,dmin)` pair per 256-element super-block). Q4K is
+                    // Q4_K's 4-bit codes, Q8K is Q5_K's 8-bit code slots -
+                    // both share `group=32`/`spb=256` (`KqLayout`'s own
+                    // table), only `bits` differs.
+                    gpu_core::select::Dtype::Q4K => n * (k / 2 + k.div_ceil(group).div_ceil(2) * 4 + k.div_ceil(256) * 4),
+                    gpu_core::select::Dtype::Q8K => n * (k + k.div_ceil(group).div_ceil(2) * 4 + k.div_ceil(256) * 4),
                 }
             })
             .sum()
