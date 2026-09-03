@@ -68,21 +68,6 @@ pub fn resolve(flag: Option<&str>) -> Option<PathBuf> {
     brain_modelstore::default_root()
 }
 
-/// If `fname` is an HF shard (`<base>-<NNNNN>-of-<MMMMM>.safetensors`), return
-/// `(base, index)`; else `None` (a plain `.safetensors` is its own model).
-fn shard_of(fname: &str) -> Option<(String, u32)> {
-    let stem = fname.strip_suffix(".safetensors")?;
-    let (left, total) = stem.rsplit_once("-of-")?;
-    if total.is_empty() || !total.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let (base, idx) = left.rsplit_once('-')?;
-    if idx.is_empty() || !idx.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    Some((base.to_string(), idx.parse().ok()?))
-}
-
 /// Scan `dir` and build one resident per discovered model-card id. Deduplicates
 /// by id (first wins, store layout before flat layout). See the module docs
 /// for the layout precedence and the skip/warn policy.
@@ -114,12 +99,17 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
     };
 
     // Enumerate weight files. Plain `*.safetensors` and `*.gguf` are single
-    // models; sharded `*-NNNNN-of-*.safetensors` group by base and register once
-    // (the lowest-index shard carries the card, the `.index.json` handle
-    // preferred when present). Everything else (incl. bare `.index.json`,
-    // `tokenizer.json`) is ignored as a model file.
+    // models; a sharded `*-NNNNN-of-MMMMM.safetensors` or split
+    // `*-NNNNN-of-MMMMM.gguf` set groups by base and registers once (the
+    // lowest-index part carries the card - for safetensors, the
+    // `.index.json` handle is preferred when present; for GGUF, part 1's
+    // path is what `MmapGguf::open` needs to find every sibling). Everything
+    // else (incl. bare `.index.json`, `tokenizer.json`) is ignored as a
+    // model file. `checkpoint::split::split_name` is the one parser for
+    // both extensions' identical `-NNNNN-of-MMMMM` convention.
     let mut singles: Vec<PathBuf> = Vec::new();
     let mut shards: BTreeMap<String, Vec<(u32, PathBuf)>> = BTreeMap::new();
+    let mut gguf_splits: BTreeMap<String, Vec<(u32, PathBuf)>> = BTreeMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let fname = match path.file_name().and_then(|s| s.to_str()) {
@@ -127,16 +117,19 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
             None => continue,
         };
         if fname.ends_with(".safetensors") {
-            match shard_of(&fname) {
-                Some((base, idx)) => shards.entry(base).or_default().push((idx, path)),
+            match checkpoint::split::split_name(&fname, "safetensors") {
+                Some((base, part, _count, _width)) => shards.entry(base.to_string()).or_default().push((part, path)),
                 None => singles.push(path),
             }
         } else if fname.ends_with(".gguf") {
-            singles.push(path);
+            match checkpoint::split::split_name(&fname, "gguf") {
+                Some((base, part, _count, _width)) => gguf_splits.entry(base.to_string()).or_default().push((part, path)),
+                None => singles.push(path),
+            }
         }
     }
 
-    if !singles.is_empty() || !shards.is_empty() {
+    if !singles.is_empty() || !shards.is_empty() || !gguf_splits.is_empty() {
         FLAT_LAYOUT_WARNING.call_once(|| {
             eprintln!(
                 "brain: {} holds models directly (the flat legacy layout); \
@@ -159,6 +152,11 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
         let index = dir.join(format!("{base}.safetensors.index.json"));
         let handle = if index.exists() { index } else { first.clone() };
         register(&handle, &card_of(first), dir, None, seen, out);
+    }
+    for (_base, mut group) in gguf_splits {
+        group.sort_by_key(|(part, _)| *part);
+        let part1 = &group[0].1; // MmapGguf::open finds every sibling from part 1's path
+        register(part1, &card_of(part1), dir, None, seen, out);
     }
 }
 
@@ -531,6 +529,58 @@ mod tests {
             h.extend(v.to_le_bytes());
         }
         std::fs::write(dir.join(file), &h).unwrap();
+    }
+
+    /// A 3-part split GGUF carrying the same "qwen" card shape
+    /// `write_gguf_qwen` writes as one file - so this test proves the split
+    /// path registers a real, chat-capable resident, not just that
+    /// `discover_flat`'s grouping runs without panicking. Each part gets its
+    /// own distinctly-named tensor (`MmapGguf::open`'s cross-part merge
+    /// refuses a repeated name), and only part 1 carries the KV a card is
+    /// synthesized from - split.no/split.count/split.tensors.count come
+    /// from `write_split` itself.
+    fn write_gguf_qwen_split(dir: &Path, base: &str, name: &str) -> String {
+        use checkpoint::gguf::GgufValue as V;
+        let kv = vec![
+            ("general.architecture".to_string(), V::String("qwen3".to_string())),
+            ("general.name".to_string(), V::String(name.to_string())),
+            ("tokenizer.ggml.model".to_string(), V::String("gpt2".to_string())),
+            (
+                "tokenizer.ggml.tokens".to_string(),
+                V::Array(["<|endoftext|>", "<|im_start|>", "<|im_end|>", "h", "i", "hi"].into_iter().map(|s| V::String(s.to_string())).collect()),
+            ),
+            ("tokenizer.ggml.merges".to_string(), V::Array(vec![V::String("h i".to_string())])),
+            ("tokenizer.ggml.token_type".to_string(), V::Array([3, 3, 3, 1, 1, 1].into_iter().map(V::I32).collect())),
+            ("tokenizer.ggml.bos_token_id".to_string(), V::U32(0)),
+            ("tokenizer.ggml.eos_token_id".to_string(), V::U32(2)),
+        ];
+        let tensor = |n: &str| checkpoint::gguf_write::TensorOut {
+            name: n.to_string(),
+            shape: vec![4],
+            ty: checkpoint::gguf::GgmlType::F32.id(),
+            data: [1.0f32, 2.0, 3.0, 4.0].iter().flat_map(|v| v.to_le_bytes()).collect(),
+        };
+        let parts = vec![vec![tensor("w0")], vec![tensor("w1")], vec![tensor("w2")]];
+        checkpoint::gguf_write::write_split(dir.to_str().unwrap(), base, &kv, &parts, 32).unwrap()
+    }
+
+    /// The split path must register exactly ONE resident from a 3-part
+    /// split, chat-capable exactly like `gguf_qwen_with_embedded_tokenizer_
+    /// registers_chat_capable`'s single-file case.
+    #[test]
+    fn a_split_gguf_registers_once_as_a_chat_capable_qwen_resident() {
+        let dir = tmp_dir("ggufqwensplit");
+        write_gguf_qwen_split(&dir, "qwen3-split", "toy-qwen-gguf-split");
+
+        let residents = discover(&dir);
+        let matching: Vec<&Arc<dyn ResidentModel>> = residents.iter().filter(|r| r.manifest().model == "toy-qwen-gguf-split").collect();
+        assert_eq!(matching.len(), 1, "the 3-part split must register exactly once, not once per part");
+
+        let m = matching[0].manifest();
+        let gen = m.actions.iter().find(|a| a.name == "generate").expect("generate action");
+        assert!(gen.streaming, "qwen generate must stream");
+        assert!(gen.params.iter().any(|p| p.name == "messages"), "qwen generate must accept chat messages");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn ids(residents: &[Arc<dyn ResidentModel>]) -> Vec<String> {

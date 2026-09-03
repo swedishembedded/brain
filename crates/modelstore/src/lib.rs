@@ -263,8 +263,26 @@ impl Store {
     }
 
     fn local_quant(&self, reference: &ModelRef, dir: &Path, quant: Quant) -> Option<LocalModel> {
-        let weights = dir.join(format!("{}.gguf", quant.as_str()));
+        let single = dir.join(format!("{}.gguf", quant.as_str()));
+        let weights = if single.is_file() { single } else { Self::split_quant_part1(dir, quant.as_str())? };
         open_local(reference.clone(), dir.to_path_buf(), weights, Format::Gguf)
+    }
+
+    /// `<QUANT>-00001-of-MMMMM.gguf` in `dir`, if one exists - the path a
+    /// locally downloaded SPLIT quant lands at ([`recipe::GgufRecipe::
+    /// artifacts`]'s split naming) and the one `MmapGguf::open` needs (it
+    /// locates every sibling part from part 1's path). `None` if `dir` holds
+    /// no such part, or holds more than one candidate set for the same
+    /// quant (a corrupt/hand-edited directory) - deterministic, not a guess.
+    fn split_quant_part1(dir: &Path, quant: &str) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(dir).ok()?;
+        let mut candidates: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|name| matches!(checkpoint::split::split_name(name, "gguf"), Some((base, 1, _, _)) if base == quant))
+            .collect();
+        candidates.sort();
+        candidates.into_iter().next().map(|name| dir.join(name))
     }
 
     /// `reference.adapter()` is `Some`: resolve the BASE weights the normal
@@ -343,20 +361,33 @@ impl Store {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return out;
         };
+        // Dedup by quant: a split quant contributes one file PER PART, and
+        // every part's name declares the same quant (`quant.as_str()` is
+        // both `<QUANT>.gguf`'s stem and a split part's `split_name` base),
+        // so without this a 3-part split would register the same
+        // `LocalModel` three times.
+        let mut seen: BTreeMap<Quant, ()> = BTreeMap::new();
         for e in entries.flatten() {
             let path = e.path();
             if !path.is_file() {
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) != Some("gguf") {
+            let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !fname.ends_with(".gguf") {
                 continue;
             }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            let quant = match checkpoint::split::split_name(fname, "gguf") {
+                Some((base, _part, _count, _width)) => Quant::parse(base),
+                None => path.file_stem().and_then(|s| s.to_str()).and_then(Quant::parse),
+            };
+            let Some(quant) = quant else {
                 continue;
             };
-            let Some(quant) = Quant::parse(stem) else {
+            if seen.insert(quant, ()).is_some() {
                 continue;
-            };
+            }
             let r = ModelRef::new(vendor, repo, Some(quant));
             if let Some(m) = self.local_quant(&r, dir, quant) {
                 out.push(m);
@@ -529,6 +560,55 @@ mod tests {
         assert!(refs.contains(&ModelRef::new("Qwen", "Qwen3-0.6B", None)));
         assert!(refs.contains(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None)));
         assert_eq!(found.len(), 2);
+    }
+
+    fn tiny_gguf_tensor(name: &str) -> checkpoint::gguf_write::TensorOut {
+        checkpoint::gguf_write::TensorOut {
+            name: name.to_string(),
+            shape: vec![4],
+            ty: checkpoint::gguf::GgmlType::F32.id(),
+            data: [1.0f32, 2.0, 3.0, 4.0].iter().flat_map(|v| v.to_le_bytes()).collect(),
+        }
+    }
+
+    /// One distinctly-named tensor per part - a real split never repeats a
+    /// tensor name across parts, and `MmapGguf::open`'s own merge refuses
+    /// one that does.
+    fn three_split_parts() -> Vec<Vec<checkpoint::gguf_write::TensorOut>> {
+        vec![vec![tiny_gguf_tensor("w0")], vec![tiny_gguf_tensor("w1")], vec![tiny_gguf_tensor("w2")]]
+    }
+
+    /// `local`/`scan` must find a SPLIT quant (`<QUANT>-NNNNN-of-MMMMM.gguf`,
+    /// what [`recipe::GgufRecipe::artifacts`] downloads a multi-part
+    /// quantization as) exactly like a plain `<QUANT>.gguf`, resolving to
+    /// part 1's path - the one `MmapGguf::open` needs to find every sibling.
+    #[test]
+    fn local_finds_a_split_quant_and_resolves_to_part_1() {
+        let store = scratch_store("modelstore-lib-test-split-quant-local");
+        let dir = store.repo_dir(&ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None));
+        std::fs::create_dir_all(&dir).unwrap();
+        checkpoint::gguf_write::write_split(dir.to_str().unwrap(), "Q4_K_M", &[], &three_split_parts(), 32).unwrap();
+
+        let r = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", Some(Quant::Q4KM));
+        let local = store.local(&r).expect("split quant should be found");
+        assert_eq!(local.format, Format::Gguf);
+        assert!(local.weights.ends_with("Q4_K_M-00001-of-00003.gguf"), "{}", local.weights.display());
+    }
+
+    /// A repo dir holding a 3-part split quant must appear exactly ONCE in
+    /// `scan()` - each part's filename declares the same quant, and without
+    /// dedup that would register the same `LocalModel` three times.
+    #[test]
+    fn scan_dedupes_a_split_quants_parts_into_one_local_model() {
+        let store = scratch_store("modelstore-lib-test-split-quant-scan");
+        let dir = store.repo_dir(&ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None));
+        std::fs::create_dir_all(&dir).unwrap();
+        checkpoint::gguf_write::write_split(dir.to_str().unwrap(), "Q4_K_M", &[], &three_split_parts(), 32).unwrap();
+
+        let found = store.scan();
+        let matching: Vec<&LocalModel> = found.iter().filter(|m| m.reference.vendor() == "unsloth").collect();
+        assert_eq!(matching.len(), 1, "expected exactly one LocalModel for the 3-part split, got {}", matching.len());
+        assert_eq!(matching[0].reference.quant(), Some(Quant::Q4KM));
     }
 
     #[test]

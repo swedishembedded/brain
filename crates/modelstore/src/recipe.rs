@@ -17,6 +17,8 @@
 //! here and lives in `crates/cli/src/supply.rs::convert`, keyed by
 //! [`ArtifactRecipe::id`] carried on the resulting `Step::Convert`.
 
+use std::collections::HashMap;
+
 use brain_modelref::{ModelRef, Quant};
 
 use crate::hub::Hub;
@@ -518,26 +520,33 @@ impl ArtifactRecipe for WanRecipe {
 /// store's own destination suffix.
 const GGUF_EXT: &str = ".gguf";
 
-/// One `.gguf` file in a repo listing, and the quantization its NAME
-/// declares.
+/// One candidate this repo offers for a quantization: either a single
+/// `.gguf` file, or every part of one COMPLETE split set, in part order.
 pub struct GgufPick {
-    pub file: String,
+    pub files: Vec<String>,
     pub quant: Quant,
 }
 
 /// The quantization a GGUF filename declares: an exact, case-sensitive
-/// `-<QUANT>.gguf` tail, `QUANT` from the closed [`Quant`] set.
+/// `-<QUANT>.gguf` tail, `QUANT` from the closed [`Quant`] set. A split
+/// part's `-NNNNN-of-MMMMM` tail (`checkpoint::split::split_name`) is
+/// stripped first, so `<base>-Q4_K_M-00001-of-00003.gguf` declares `Q4_K_M`
+/// exactly as `<base>-Q4_K_M.gguf` would - one split part alone is not a
+/// complete model, but the token it carries is still real and
+/// [`GgufRecipe::offered`] is what decides whether every part is present.
 ///
 /// A name that does not end that way declares NOTHING, and is therefore never
-/// auto-selected. That is deliberate on three real shapes: `-BF16.gguf` /
+/// auto-selected. That is deliberate on two real shapes: `-BF16.gguf` /
 /// `-F16.gguf` are unquantized dumps (bigger than the base checkpoint and
-/// outside the quant grammar on purpose), `-Q8_0-00001-of-00003.gguf` is one
-/// PART of a split model rather than a model, and `-q8_0.gguf` is a
-/// lowercase spelling the grammar refuses rather than guesses at. Any of
-/// them can still be pulled -- by its own file URL, which names the artifact
-/// outright and infers nothing.
+/// outside the quant grammar on purpose), and `-q8_0.gguf` is a lowercase
+/// spelling the grammar refuses rather than guesses at. Either can still be
+/// pulled -- by its own file URL, which names the artifact outright and
+/// infers nothing.
 pub fn quant_of_gguf(file: &str) -> Option<Quant> {
-    let stem = file.strip_suffix(GGUF_EXT)?;
+    let stem = match checkpoint::split::split_name(file, "gguf") {
+        Some((base, _part, _count, _width)) => base,
+        None => file.strip_suffix(GGUF_EXT)?,
+    };
     let (_, token) = stem.rsplit_once('-')?;
     Quant::parse(token)
 }
@@ -594,10 +603,42 @@ impl GgufRecipe {
     }
 
     /// Every quantization the listing declares, best-ranked first, each with
-    /// the file that declares it.
+    /// the file(s) that declare it - one file for a plain `.gguf`, every
+    /// part in order for a COMPLETE split set. A split set missing a part
+    /// (or one whose parts disagree on `count`) declares nothing: it is not
+    /// a candidate, and its files fall into the "unnamed" count
+    /// [`Self::refuse`] reports, same as a genuinely undeclared file.
     fn offered(listing: &[String]) -> Vec<GgufPick> {
-        let mut v: Vec<GgufPick> = Self::root_ggufs(listing).into_iter().filter_map(|f| quant_of_gguf(f).map(|q| GgufPick { file: f.clone(), quant: q })).collect();
-        v.sort_by(|a, b| a.quant.fidelity_rank().cmp(&b.quant.fidelity_rank()).then_with(|| a.file.cmp(&b.file)));
+        #[derive(PartialEq, Eq, Hash)]
+        enum Group<'a> {
+            Single(&'a str),
+            Split(&'a str, u32),
+        }
+        let mut groups: HashMap<Group, Vec<(u32, &String)>> = HashMap::new();
+        for f in Self::root_ggufs(listing) {
+            match checkpoint::split::split_name(f, "gguf") {
+                Some((base, part, count, _width)) => groups.entry(Group::Split(base, count)).or_default().push((part, f)),
+                None => groups.entry(Group::Single(f)).or_default().push((1, f)),
+            }
+        }
+
+        let mut v: Vec<GgufPick> = Vec::new();
+        for (group, mut parts) in groups {
+            parts.sort_by_key(|&(p, _)| p);
+            let complete = match group {
+                Group::Single(_) => true,
+                Group::Split(_, count) => parts.len() as u32 == count && parts.iter().enumerate().all(|(i, &(p, _))| p == i as u32 + 1),
+            };
+            if !complete {
+                continue;
+            }
+            // Any part's filename declares the same quant (split naming
+            // carries the token on every part, not just the first).
+            if let Some(quant) = quant_of_gguf(parts[0].1) {
+                v.push(GgufPick { files: parts.into_iter().map(|(_, f)| f.clone()).collect(), quant });
+            }
+        }
+        v.sort_by(|a, b| a.quant.fidelity_rank().cmp(&b.quant.fidelity_rank()).then_with(|| a.files[0].cmp(&b.files[0])));
         v
     }
 
@@ -606,7 +647,8 @@ impl GgufRecipe {
     fn refuse(reference: &ModelRef, listing: &[String], why: &str) -> Box<PlanError> {
         let offered = Self::offered(listing);
         let quants: Vec<&str> = offered.iter().map(|p| p.quant.as_str()).collect();
-        let unnamed = Self::root_ggufs(listing).len() - offered.len();
+        let named_files: usize = offered.iter().map(|p| p.files.len()).sum();
+        let unnamed = Self::root_ggufs(listing).len() - named_files;
         let base = reference.base();
         let mut msg = format!("{why}; this repo offers {}", if quants.is_empty() { "no named quantization".to_string() } else { quants.join(", ") });
         if let Some(best) = quants.first() {
@@ -651,11 +693,25 @@ impl ArtifactRecipe for GgufRecipe {
 
     fn artifacts(&self, reference: &ModelRef, listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
         let pick = Self::choose(reference, listing)?;
-        // The store's own quant destination (`<QUANT>.gguf`, what
-        // `Store::local` looks a quant reference up by), so pulling this repo
-        // by name and pulling one of its files by URL land the same bytes
-        // under the same path.
-        Ok(vec![artifact(pick.file, format!("{}{GGUF_EXT}", pick.quant.as_str()))])
+        if let [only] = pick.files.as_slice() {
+            // The store's own quant destination (`<QUANT>.gguf`, what
+            // `Store::local` looks a quant reference up by), so pulling this
+            // repo by name and pulling one of its files by URL land the same
+            // bytes under the same path.
+            return Ok(vec![artifact(only.clone(), format!("{}{GGUF_EXT}", pick.quant.as_str()))]);
+        }
+        // A split set: each part lands as `<QUANT>-NNNNN-of-MMMMM.gguf`, so
+        // `MmapGguf::open` on part 1's local path (what `Store::local_quant`
+        // hands it) finds every sibling by the same naming convention it
+        // reads from an upstream repo.
+        let count = pick.files.len() as u32;
+        let width = count.to_string().len().max(5);
+        Ok(pick
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| artifact(f.clone(), checkpoint::split::split_sibling(pick.quant.as_str(), i as u32 + 1, count, width, "gguf")))
+            .collect())
     }
 
     fn resolved_quant(&self, reference: &ModelRef, listing: &[String]) -> Option<Quant> {
@@ -1161,6 +1217,64 @@ mod tests {
     }
 
     #[test]
+    fn quant_of_gguf_reads_a_split_parts_quant_through_the_of_tail() {
+        assert_eq!(quant_of_gguf("flux-2-klein-9b-Q4_K_M-00001-of-00003.gguf"), Some(Quant::Q4KM));
+        assert_eq!(quant_of_gguf("flux-2-klein-9b-Q4_K_M-00003-of-00003.gguf"), Some(Quant::Q4KM));
+        // Unchanged: a plain file's own grammar still applies.
+        assert_eq!(quant_of_gguf("flux-2-klein-9b-Q8_0.gguf"), Some(Quant::Q8_0));
+        assert_eq!(quant_of_gguf("flux-2-klein-9b-BF16.gguf"), None);
+    }
+
+    /// A repo whose Q4_K_M is a COMPLETE 3-part split must still resolve as
+    /// ONE candidate - not the "more than one file declares Q4_K_M"
+    /// ambiguity error a naive per-file `offered()` would raise.
+    #[test]
+    fn gguf_recipe_treats_a_complete_split_quant_as_one_candidate() {
+        let mut listing = flux2_klein_9b_gguf_listing();
+        // Replace the fixture's plain Q4_K_M single file with a genuine
+        // 3-part split - keeping both would be a real ambiguity (two
+        // different candidates both declaring Q4_K_M), not the case this
+        // test is about.
+        listing.retain(|f| f != "flux-2-klein-9b-Q4_K_M.gguf");
+        for part in ["00001-of-00003", "00002-of-00003", "00003-of-00003"] {
+            listing.push(format!("flux-2-klein-9b-Q4_K_M-{part}.gguf"));
+        }
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", Some(Quant::Q4KM));
+        let artifacts = GgufRecipe.artifacts(&r, &listing, &hub).unwrap();
+        assert_eq!(artifacts.len(), 3, "every part, none dropped");
+        let files: Vec<&str> = artifacts.iter().map(|a| a.file.as_str()).collect();
+        assert_eq!(files, ["flux-2-klein-9b-Q4_K_M-00001-of-00003.gguf", "flux-2-klein-9b-Q4_K_M-00002-of-00003.gguf", "flux-2-klein-9b-Q4_K_M-00003-of-00003.gguf"]);
+        // Local destination carries the SAME split convention `MmapGguf::
+        // open` reads, keyed off the quant name rather than the upstream
+        // repo's own filename.
+        let dests: Vec<&str> = artifacts.iter().map(|a| a.dest_name.as_str()).collect();
+        assert_eq!(dests, ["Q4_K_M-00001-of-00003.gguf", "Q4_K_M-00002-of-00003.gguf", "Q4_K_M-00003-of-00003.gguf"]);
+    }
+
+    /// A split set missing a part declares NOTHING - the incomplete files
+    /// stay invisible to auto-selection (same policy as a file whose name
+    /// declares no quantization at all), not a silently truncated download.
+    #[test]
+    fn gguf_recipe_ignores_an_incomplete_split_set() {
+        let mut listing = flux2_klein_9b_gguf_listing();
+        // Only the plain single Q4_K_M.gguf declares nothing here - it is
+        // removed so the ONLY files claiming Q4_K_M are the 2 (of 3)
+        // incomplete split parts pushed below.
+        listing.retain(|f| f != "flux-2-klein-9b-Q4_K_M.gguf");
+        // Only 2 of 3 parts present.
+        listing.push("flux-2-klein-9b-Q4_K_M-00001-of-00003.gguf".to_string());
+        listing.push("flux-2-klein-9b-Q4_K_M-00002-of-00003.gguf".to_string());
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", Some(Quant::Q4KM));
+        let err = GgufRecipe.artifacts(&r, &listing, &hub).unwrap_err().to_string();
+        assert!(err.contains("no Q4_K_M quantization here"), "{err}");
+        // 2 stray split parts + the fixture's own BF16/F16 (which already
+        // declare no quantization even as plain single files) = 4.
+        assert!(err.contains("4 more .gguf file(s)"), "the 2 stray parts must be counted as unnamed: {err}");
+    }
+
+    #[test]
     fn gguf_recipe_names_every_quantization_the_repo_offers_when_the_asked_for_one_is_absent() {
         let listing = flux2_klein_9b_gguf_listing();
         let hub = crate::hub::FakeHub::new();
@@ -1214,7 +1328,12 @@ mod tests {
     fn only_an_exact_quant_tail_declares_a_quantization() {
         assert_eq!(quant_of_gguf("flux-2-klein-9b-Q8_0.gguf"), Some(Quant::Q8_0));
         assert_eq!(quant_of_gguf("flux-2-klein-9b-Q4_K_M.gguf"), Some(Quant::Q4KM));
-        for f in ["flux-2-klein-9b-BF16.gguf", "flux-2-klein-9b-F16.gguf", "flux-2-klein-9b-q8_0.gguf", "model-Q8_0-00001-of-00003.gguf", "model.gguf", "model-Q8_0.safetensors"] {
+        // A split PART's filename still carries its quant through the
+        // `-NNNNN-of-MMMMM` tail (see `quant_of_gguf_reads_a_split_parts_
+        // quant_through_the_of_tail`) - whether every part is actually
+        // PRESENT is `GgufRecipe::offered`'s job, not this function's.
+        assert_eq!(quant_of_gguf("model-Q8_0-00001-of-00003.gguf"), Some(Quant::Q8_0));
+        for f in ["flux-2-klein-9b-BF16.gguf", "flux-2-klein-9b-F16.gguf", "flux-2-klein-9b-q8_0.gguf", "model.gguf", "model-Q8_0.safetensors"] {
             assert_eq!(quant_of_gguf(f), None, "{f} must declare no quantization");
         }
     }

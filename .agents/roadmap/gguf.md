@@ -1008,10 +1008,67 @@ this box yet.
       `MmapGguf::open` call sites in the tree still compiles unchanged
       against the new internal layout.
 
+- [x] M16: split GGUF in `modelstore`/CLI. New `crates/checkpoint/src/split.rs`
+      generalized `cli::model_dir::shard_of`'s `.safetensors`-only parser to
+      `split_name(fname, ext)`/`split_sibling(...)`, shared by every layer
+      below rather than each keeping its own copy (M15 already used it for
+      `MmapGguf::open` itself; this milestone is the two remaining callers).
+      `recipe::quant_of_gguf` now strips a split part's `-NNNNN-of-MMMMM`
+      tail before applying the existing exact `-<QUANT>` grammar, so
+      `<base>-Q4_K_M-00001-of-00003.gguf` declares `Q4_K_M` exactly as
+      `<base>-Q4_K_M.gguf` would - a genuine behavior change from the
+      original doc's "one PART of a split model … declares NOTHING", made
+      deliberately (correction #6: policy change, not a bug fix).
+      `GgufPick` widened `file: String` to `files: Vec<String>`;
+      `GgufRecipe::offered` now groups root `.gguf` files by identity FIRST
+      (a plain file is its own group; a split part's group is its
+      `(base, count)`) and only calls a split group a real candidate when
+      every part `1..=count` is actually present - an incomplete split
+      contributes nothing (its files fall into `refuse()`'s "unnamed" count,
+      same policy as a file whose name declares no quantization). This is
+      what keeps `choose()` completely unchanged: with grouping done in
+      `offered()`, a complete 3-part Q4_K_M split is already exactly ONE
+      `GgufPick`, so the existing "more than one file declares X" ambiguity
+      check never fires on it. `artifacts()` emits one `Artifact` per part
+      for a split pick, destined locally as `<QUANT>-NNNNN-of-MMMMM.gguf`
+      (`split_sibling` keyed off the quant name, not the upstream repo's own
+      filename) - the same convention `MmapGguf::open` reads back.
+      `Store::local_quant` tries the plain `<QUANT>.gguf` first (unchanged
+      fast path) and falls back to a new `split_quant_part1` directory scan
+      for `<QUANT>-00001-of-MMMMM.gguf`, returning THAT path (never a part
+      other than 1) since that is what `MmapGguf::open` needs to find every
+      sibling. `Store::scan_repo_dir` gained a dedup set keyed by `Quant`:
+      without it a 3-part split would register the same `LocalModel` three
+      times, once per part file. `cli::model_dir::discover_flat`'s legacy
+      flat-layout scan gained the identical split-grouping shape the
+      pre-existing `.safetensors` shard grouping already had (both now go
+      through the one shared `split_name` parser instead of two separate
+      hand-rolled ones) - registers once, from part 1's path.
+      Gated: `crates/modelstore/src/recipe.rs` (3 new tests: a complete
+      3-part split resolves as one candidate with correct upstream/local
+      names; an incomplete 2-of-3 split declares nothing and its stray
+      files count as unnamed; `quant_of_gguf` reads a split part's quant
+      through the `-of-` tail) plus the pre-existing `only_an_exact_quant_
+      tail_declares_a_quantization` updated for the new (intentional)
+      behavior. `crates/modelstore/src/lib.rs` (2 new tests, using
+      `checkpoint::gguf_write::write_split` with a DISTINCTLY-named tensor
+      per part - `MmapGguf::open`'s own cross-part merge refuses a repeated
+      name, which the first draft of these tests tripped over and fixed):
+      `local()` resolves a split quant to part 1's real path; `scan()`
+      dedupes a 3-part split to exactly one `LocalModel`. `crates/cli/src/
+      model_dir.rs` (1 new test, using the same `write_split` shape plus the
+      embedded-tokenizer KV `gguf_qwen_with_embedded_tokenizer_registers_
+      chat_capable` already established): a 3-part split registers exactly
+      once, as a real chat-capable Qwen resident, not three separate (or
+      zero) entries. `make test -p brain-modelstore`: 86/86. `brain-cli` has
+      no `[lib]` target (`[[bin]]` only), so the Makefile's blanket `--lib
+      --bins --tests` fails on it for a reason unrelated to this change
+      (confirmed pre-existing); `cargo test --release --offline -p brain-cli
+      --bins`: 267/267, including all 10 `model_dir` tests. `cargo check
+      --release --workspace`: clean.
+
 ## Not yet done
 
-- [ ] M16: split GGUF in `modelstore`/CLI (hoisted `-NNNNN-of-NNNNN` parser;
-      `quant_of_gguf`/`pick_gguf`/`local_quant`/`scan_repo_dir`).
 - [ ] M17: ggml ids 9 (Q8_1) and 24-28 (I8/I16/I32/I64/F64) - these fail
       `MmapGguf::open` OUTRIGHT today via `tensor_nbytes` → `None`, a
       whole-file refusal for a type usually carried by a metadata tensor
