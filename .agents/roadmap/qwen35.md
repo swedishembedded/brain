@@ -2268,14 +2268,72 @@ produces a non-finite hidden state.
 M0-M20 are complete; M21's real-checkpoint output-correctness gate was RED
 from M21 through the start of M23 and is now GREEN - see M23's own section
 above for the fix and M24's for the Q4 (W4A8) tier work that followed it.
-`gguf_reference_parity_real.rs`'s CPython oracle re-derivation is still
-honestly RED, tracked as M23 follow-up (see that test file's own doc).
+`gguf_reference_parity_real.rs`'s CPython oracle re-derivation is also
+GREEN, re-confirmed independently on real hardware (rms/sum match to 5-6
+significant figures at all four positions against the real Q8_0 checkpoint)
+- the doc comment here previously said it was still RED, which had gone
+stale; see that test file's own doc for the full re-investigation.
 Otherwise, remaining scope is the recorded gaps below, none of which are
 achievable on the ORIGINAL development machine (no discrete GPU, 18 GiB
 usable RAM) this ledger was written against, plus M14's/M15's/M16's/M17's/
 M18's/M19's own "not done" items just above. M20 was validated on a
 different box (2x Tesla P40, 48 AVX2 cores, 184 GiB RAM) - see its own
 section for what that box could and could not do.
+
+## Final measurement summary (2x Tesla P40, 48 AVX2 cores, 184 GiB RAM)
+
+Every number below is a real measurement taken on this box during M22-M26,
+not a prediction; where a range is given it is run-to-run variance across
+repeated real invocations, not error bars on an estimate.
+
+**Qwen3.8-27B, decode, real checkpoint** (`gguf_resident_real.rs`):
+
+| Tier | Cards | Resident weights | Context | Decode tok/s |
+|---|---|---|---|---|
+| INT8 (M22 baseline) | 2 | 27.05 GiB | ~14 tok (short) | 7.44-8.57 |
+| Uniform Q4 (M24) | 1 | 15.71 GiB | ~14 tok (short) | 10.96-12.46 |
+| Policy C, Q4 MLP/F32 GDN gates (M24) | 1 | 15.79 GiB | ~14 tok (short) | 10.89-12.44 |
+| Uniform Q4 (M24) | 1 | 15.71 GiB | **1555 tok (real prompt)** | **9.58** |
+
+The long-context row is the honest answer to "does this hold up at real
+context, not just a smoke-test prompt": a real ~23% decode falloff going
+from ~14 to 1555 tokens, consistent with the 16 GQA layers' `O(context)`
+KV-read cost (the other 48 GDN layers carry an `O(1)` recurrent state and
+should not degrade this way) - not measured before this session, and not
+assumed to be flat.
+
+**Qwen3.8-27B, prefill, real checkpoint** - this is where the real win landed
+(M26, `int8_gguf_resident.rs`'s pipeline-parallel resident, chunked instead
+of one-token-per-dispatch):
+
+| Tier | Cards | Prompt | Before (M22-era, per-token) | After (M26, chunked) | Speedup |
+|---|---|---|---|---|---|
+| INT8 | 2 | 1731 real tok | 262.8 s (6.6 tok/s) | 26.5-26.8 s (64.6-65.4 tok/s) | **~9.9x** |
+| Uniform Q4 | 1 | 1555 real tok | 152.1 s (10.2 tok/s) | *(gated off - see below)* | n/a |
+
+Q4 chunked prefill measured **7.3x slower** than per-token replay (1108.3 s
+vs 152.1 s at 1555 tokens) - traced to `Ops::bind` routing `(PackedInt8,
+Q4)` to the naive `matmul_q4_dyn.wgsl` instead of the tiled
+`matmul_q4_dyn_reg` INT8 gets - so M26 keeps Q4 on the per-token path
+(`chunked_prefill_is_profitable`) rather than shipping a regression. Wiring
+`matmul_q4_dyn_reg` into `Ops::bind` (tracked separately, high blast radius
+- every model that builds an `Ops` facade is affected) should unlock a
+comparable ~10x for Q4 prefill; not yet done.
+
+**Qwen3-8B** (`qwen3::serve::Engine`, real checkpoint, int8 weights + int8
+KV, one card - M23's embedding/lm_head buffer-size fixes were the blocker
+that made any of this measurable at all):
+
+| Configuration | Throughput |
+|---|---|
+| Single sequence | 22.1 tok/s |
+| 8 concurrent sequences (real dispatch-level batching) | 76.1 tok/s aggregate (3.4x) |
+
+Qwen35 has **no equivalent batching number** - `qwen35::serve::Engine`
+deliberately does not implement multi-sequence GPU batching (M25's own
+scope note), so "max batched tok/s" for qwen35 today equals its
+single-sequence number; concurrent qwen35 sequences interleave, they do not
+share a dispatch.
 
 ## Recorded gaps (this development machine has no discrete GPU and 18 GiB usable RAM)
 

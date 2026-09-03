@@ -56,16 +56,24 @@ Model id: `unsloth/Qwen3.8-27B-Q8_0`
 `brain/qwen35` above, not a mode of it - the two coexist and are registered
 independently.
 
-> **Status: correct.** The model plans across two 24 GiB P40s, loads with no
-> fp32 intermediate, decodes at 7.44-7.57 tok/s (M22) and is bit-stable
-> under greedy sampling; a factual greedy continuation of `"The capital city
-> of France is"` produces `" Paris. Paris is the largest city in"`. M21 left
-> this RED - the GGUF conversion stores every GDN leaf indexed by value head
-> in a different head-order convention than brain (and the reference HF
-> model) expect; M23 found and fixed it
-> (`crates/qwen35/src/int8_gguf_resident.rs`'s `GdnHeadOrder`). See
-> `.agents/roadmap/qwen35.md` (M23) for the full investigation and what it
-> ruled out on the way there.
+> **Status: correct.** The model plans across two 24 GiB P40s at INT8
+> (27.05 GiB, 7.44-8.57 tok/s decode, M22) or one card at Q4 (15.71-15.79
+> GiB, 10.89-12.46 tok/s decode, M24), and is bit-stable under greedy
+> sampling; a factual greedy continuation of `"The capital city of France
+> is"` produces `" Paris. Paris is the largest city in"`. Prefill is chunked
+> at the INT8 tier (M26): a real 1731-token prompt went from 262.8 s
+> (6.6 tok/s) to 26.5-26.8 s (64.6-65.4 tok/s), ~9.9x - Q4 prefill is still
+> per-token pending a kernel-dispatch fix (`matmul_q4_dyn_reg` not yet wired
+> into `Ops::bind`). Decode throughput does fall off with real context, not
+> just this smoke-test prompt: 9.58 tok/s measured at a genuine 1555-token
+> prompt vs 10.96-12.46 tok/s at this page's ~14-token one, consistent with
+> the 16 GQA layers' `O(context)` KV-read cost. M21 left this RED - the GGUF
+> conversion stores every GDN leaf indexed by value head in a different
+> head-order convention than brain (and the reference HF model) expect;
+> M23 found and fixed it (`crates/qwen35/src/int8_gguf_resident.rs`'s
+> `GdnHeadOrder`). See `.agents/roadmap/qwen35.md`'s "Final measurement
+> summary" section for the full real-number table and M23/M24/M26 for the
+> investigations and fixes behind it.
 
 ```bash
 BRAIN_QWEN35_GGUF=/path/to/Qwen3.8-27B-Q8_0.gguf brain serve
