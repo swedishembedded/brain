@@ -33,7 +33,8 @@
 //   xq  : [M, k/4]              u32 - 4 int8 activations packed along K per u32 (model::int8)
 //   wq  : [N, k*CODE_BITS/32]   u32 - K-CONTIGUOUS unsigned codes, `32/CODE_BITS` codes per word, LOW BITS FIRST (code `b` of word `w` occupies bits `[CODE_BITS*b, CODE_BITS*b+CODE_BITS)` and covers element `w*(32/CODE_BITS)+b`)
 //   sx  : [M]                   f32 - per-token activation scale
-//   wsz : [N, 2*k/32]           f32 - INTERLEAVED (ds, dm) pairs, one pair per 32-element weight-scale group (`ds = d*sc`, `dm = dmin*m`, the identical fp32 expressions checkpoint::gguf's own Q4_K/Q5_K decoder uses)
+//   wsm : [N, ceil(k/32/2)]     u32 - (M14) PACKED per-32-element-group (sc, m) sub-scale byte pair, two groups per word: group `g`'s pair sits in bits `[0,16)` of word `g/2` (g even) or `[16,32)` (g odd); within a group's own 16-bit half, `sc` is the LOW byte, `m` the HIGH byte
+//   wd  : [N, ceil(k/32/GPS)]   u32 - (M14) PACKED per-super-block (d, dmin) f16 bit-pattern pair, one word per GPS=8 consecutive groups (the GGUF Q4_K/Q5_K super-block, 256 elements): `d`'s raw f16 bits in bits `[0,16)`, `dmin`'s in `[16,32)`. `ds = f16_to_f32(d_bits) * f32(sc)`, `dm = f16_to_f32(dmin_bits) * f32(m)` - the IDENTICAL `d*sc`/`dmin*m` fp32 expressions checkpoint::gguf's own Q4_K/Q5_K decoder uses, since `wd` stores the format's own raw f16 bit pattern unrounded (see gguf::kquant's own module doc comment)
 //   xgs : [M, k/32]             f32 - Σ_{j in group} xq[m,j], the activation-only prepass term (quant_group_sum.wgsl)
 //   out : [M, N]                f32 - out[m,n] = sx[m] * Σ_g( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
 //
@@ -125,6 +126,57 @@
 // only one operand side is hoisted into registers, and why the register
 // block is interleaved.
 //
+// ## M14: the packed `(wsm, wd)` scale plane and its in-shader f16 decode
+//
+// `wsm`/`wd` replace the old flat `wsz: [N, 2*k/32] f32` interleaved plane
+// (M8-M13) with the SAME two-piece product every one of Q4_K/Q5_K's own GGUF
+// blocks already carries: a per-group `(sc, m)` sub-scale byte (`wsm`) times
+// a per-super-block `(d, dmin)` f16 pair shared by `GPS=8` consecutive groups
+// (`wd`) - `256/32`, the GGUF Q4_K/Q5_K super-block's own element count over
+// this kernel's fixed 32-element group. `f16_to_f32` is the same magic-
+// multiply/FTZ-safe-subnormal/inf-nan construction `kernels::template::
+// f16_decode_expr` already generates for the bf16/f16 WEIGHT STORAGE tier
+// (`crates/kernels/src/template.rs`) - reused here verbatim (same magic
+// constants `0x77800000`/`0x38800000`/`0x7F800000`) rather than reinvented,
+// since this repo has no native f16 WGSL type and no `unpack2x16float`/
+// `extractBits` lowering on its CPU JIT. `kq_ds_dm` decodes once per (column,
+// group) fold - the SAME frequency the old flat `wsz` read already ran at,
+// so no additional hoisting is needed for correctness; a further hoist
+// across several folds sharing one `wd` word is a possible follow-up, not
+// attempted here (see the M14 ledger entry for why: this fold point is
+// already the natural "once per several elements" granularity, and a deeper
+// hoist would need restructuring this kernel's software-pipelined chunk loop
+// for a benefit this file's own gating did not require).
+fn f16_to_f32(h: u32) -> f32 {
+    let sign = (h & 0x8000u) << 16u;
+    let exp = (h >> 10u) & 0x1Fu;
+    // FTZ-safe subnormal (magic bias subtract) and normal (magic multiply)
+    // branches - see `kernels::template::f16_decode_expr`'s doc comment for
+    // the full derivation of both magic constants.
+    let subnormal = bitcast<f32>(0x38800000u | ((h & 0x3FFu) << 13u)) - bitcast<f32>(0x38800000u);
+    let normal = bitcast<f32>((h & 0x7FFFu) << 13u) * bitcast<f32>(0x77800000u);
+    let inf_or_nan = bitcast<f32>(0x7F800000u | ((h & 0x3FFu) << 13u));
+    let mag = select(select(subnormal, normal, exp != 0u), inf_or_nan, exp == 31u);
+    return bitcast<f32>(bitcast<u32>(mag) | sign);
+}
+
+// One weight-scale group `sg` of output column `col`'s `(ds, dm)` pair,
+// reading `wsm`/`wd` directly - `vec2(0,0)` for a column past `ncols` (the
+// same ragged-tile OOB guard the old flat-`wsz` read's `select(0.0, ..)`
+// performed). `GPS` groups share one `wd` word (`sblk = sg/GPS`).
+const GPS: u32 = 8u; // groups per wd super-block entry: 256 (Q4_K/Q5_K super-block) / 32 (this kernel's group)
+fn kq_ds_dm(col: u32, ncols: u32, sg: u32, wsm_per_row: u32, wd_per_row: u32) -> vec2<f32> {
+    if (col >= ncols) { return vec2<f32>(0.0, 0.0); }
+    let wword = wd[col * wd_per_row + sg / GPS];
+    let d = f16_to_f32(wword & 0xFFFFu);
+    let dmin = f16_to_f32(wword >> 16u);
+    let sword = wsm[col * wsm_per_row + sg / 2u];
+    let shift = select(0u, 16u, (sg % 2u) == 1u);
+    let scv = f32((sword >> shift) & 0xFFu);
+    let mv = f32((sword >> (shift + 8u)) & 0xFFu);
+    return vec2<f32>(d * scv, dmin * mv);
+}
+
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the CPU
 // int8 reference lives in the validation test, so parity is still gated.
 
@@ -134,9 +186,10 @@ struct Params { m: u32, k: u32, n: u32 };  // k = RAW LOGICAL K (see header)
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k*CODE_BITS/32] unsigned codes
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M] per-token activation scale
-@group(0) @binding(4) var<storage, read>       wsz: array<f32>;  // [N, 2*k/32] interleaved (ds, dm)
-@group(0) @binding(5) var<storage, read>       xgs: array<f32>;  // [M, k/32] activation group sums
-@group(0) @binding(6) var<storage, read_write> out: array<f32>;  // [M, N]
+@group(0) @binding(4) var<storage, read>       wsm: array<u32>;  // [N, ceil(k/32/2)] packed (sc, m) pairs
+@group(0) @binding(5) var<storage, read>       wd:  array<u32>;  // [N, ceil(k/32/GPS)] packed (d, dmin) f16 pairs
+@group(0) @binding(6) var<storage, read>       xgs: array<f32>;  // [M, k/32] activation group sums
+@group(0) @binding(7) var<storage, read_write> out: array<f32>;  // [M, N]
 
 const CODE_BITS: u32 = 8u;  // template knob: 4 (Q4_K) or 8 (Q5_K)
 
@@ -172,6 +225,8 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let wq_row_words = p.k * CODE_BITS / 32u; // wq words per row
     let qpwq = (32u / CODE_BITS) / 4u;        // quads packed per raw wq word
     let cmask = (1u << CODE_BITS) - 1u;       // low-CODE_BITS mask
+    let wsm_per_row = (ng + 1u) / 2u;         // wsm words per row (M14)
+    let wd_per_row = (ng + GPS - 1u) / GPS;   // wd words per row (M14)
 
     // Staging assignment: one vec4 of A and one of B per thread, same
     // row/quad split matmul_i8_dyn uses.
@@ -389,22 +444,22 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             if ((q + 1u) % QPG == 0u) {
                 let sgu = (c * BKQ + q) / QPG;
                 let sg = select(0u, sgu, sgu < ng);
-                let e0  = select(0.0, wsz[(cc +   0u) * 2u * ng + 2u * sg], cc +   0u < p.n);
-                let dm0 = select(0.0, wsz[(cc +   0u) * 2u * ng + 2u * sg + 1u], cc +   0u < p.n);
-                let e1  = select(0.0, wsz[(cc +  16u) * 2u * ng + 2u * sg], cc +  16u < p.n);
-                let dm1 = select(0.0, wsz[(cc +  16u) * 2u * ng + 2u * sg + 1u], cc +  16u < p.n);
-                let e2  = select(0.0, wsz[(cc +  32u) * 2u * ng + 2u * sg], cc +  32u < p.n);
-                let dm2 = select(0.0, wsz[(cc +  32u) * 2u * ng + 2u * sg + 1u], cc +  32u < p.n);
-                let e3  = select(0.0, wsz[(cc +  48u) * 2u * ng + 2u * sg], cc +  48u < p.n);
-                let dm3 = select(0.0, wsz[(cc +  48u) * 2u * ng + 2u * sg + 1u], cc +  48u < p.n);
-                let e4  = select(0.0, wsz[(cc +  64u) * 2u * ng + 2u * sg], cc +  64u < p.n);
-                let dm4 = select(0.0, wsz[(cc +  64u) * 2u * ng + 2u * sg + 1u], cc +  64u < p.n);
-                let e5  = select(0.0, wsz[(cc +  80u) * 2u * ng + 2u * sg], cc +  80u < p.n);
-                let dm5 = select(0.0, wsz[(cc +  80u) * 2u * ng + 2u * sg + 1u], cc +  80u < p.n);
-                let e6  = select(0.0, wsz[(cc +  96u) * 2u * ng + 2u * sg], cc +  96u < p.n);
-                let dm6 = select(0.0, wsz[(cc +  96u) * 2u * ng + 2u * sg + 1u], cc +  96u < p.n);
-                let e7  = select(0.0, wsz[(cc + 112u) * 2u * ng + 2u * sg], cc + 112u < p.n);
-                let dm7 = select(0.0, wsz[(cc + 112u) * 2u * ng + 2u * sg + 1u], cc + 112u < p.n);
+                let v0 = kq_ds_dm(cc +   0u, p.n, sg, wsm_per_row, wd_per_row);
+                let v1 = kq_ds_dm(cc +  16u, p.n, sg, wsm_per_row, wd_per_row);
+                let v2 = kq_ds_dm(cc +  32u, p.n, sg, wsm_per_row, wd_per_row);
+                let v3 = kq_ds_dm(cc +  48u, p.n, sg, wsm_per_row, wd_per_row);
+                let v4 = kq_ds_dm(cc +  64u, p.n, sg, wsm_per_row, wd_per_row);
+                let v5 = kq_ds_dm(cc +  80u, p.n, sg, wsm_per_row, wd_per_row);
+                let v6 = kq_ds_dm(cc +  96u, p.n, sg, wsm_per_row, wd_per_row);
+                let v7 = kq_ds_dm(cc + 112u, p.n, sg, wsm_per_row, wd_per_row);
+                let e0 = v0.x; let dm0 = v0.y;
+                let e1 = v1.x; let dm1 = v1.y;
+                let e2 = v2.x; let dm2 = v2.y;
+                let e3 = v3.x; let dm3 = v3.y;
+                let e4 = v4.x; let dm4 = v4.y;
+                let e5 = v5.x; let dm5 = v5.y;
+                let e6 = v6.x; let dm6 = v6.y;
+                let e7 = v7.x; let dm7 = v7.y;
                 let s0 = select(0.0, xgs[m0 * ng + sg], m0 < p.m);
                 let s1 = select(0.0, xgs[m1 * ng + sg], m1 < p.m);
                 let s2 = select(0.0, xgs[m2 * ng + sg], m2 < p.m);

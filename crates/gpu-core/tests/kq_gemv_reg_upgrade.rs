@@ -54,15 +54,48 @@ fn pack_affine_words(codes: &[i32], bits: u32) -> Vec<u32> {
         .collect()
 }
 
-fn build_wsz(ds: &[f32], dm: &[f32], n: usize, ng: usize) -> Vec<f32> {
-    let mut out = vec![0f32; n * 2 * ng];
+/// M14: groups per `wd` super-block entry - `matmul_kq_dyn.wgsl`'s own fixed
+/// `GPS=8` (256-element GGUF Q4_K/Q5_K super-block / 32-element group).
+/// `wd_words_per_row = ceil(ng/GPS)` generalises correctly even when `ng <
+/// GPS` (this file's `k=96` shape has `ng=3`), so no shape restriction is
+/// needed here beyond `matmul_kq_gemv`'s own `k` a multiple of 32.
+const GPS: usize = 8;
+
+fn pack_wsm(sc: &[u8], mn: &[u8], n: usize, ng: usize) -> Vec<u32> {
+    let words = ng.div_ceil(2);
+    let mut out = vec![0u32; n * words];
     for r in 0..n {
         for g in 0..ng {
-            out[r * 2 * ng + 2 * g] = ds[r * ng + g];
-            out[r * 2 * ng + 2 * g + 1] = dm[r * ng + g];
+            let (w, shift) = (g / 2, if g % 2 == 0 { 0u32 } else { 16u32 });
+            out[r * words + w] |= (sc[r * ng + g] as u32) << shift;
+            out[r * words + w] |= (mn[r * ng + g] as u32) << (shift + 8);
         }
     }
     out
+}
+
+fn pack_wd(d: &[f32], dmin: &[f32], n: usize, spb_per_row: usize) -> Vec<u32> {
+    let mut out = vec![0u32; n * spb_per_row];
+    for r in 0..n {
+        for s in 0..spb_per_row {
+            let db = half::f16::from_f32(d[r * spb_per_row + s]).to_bits() as u32;
+            let dmb = half::f16::from_f32(dmin[r * spb_per_row + s]).to_bits() as u32;
+            out[r * spb_per_row + s] = db | (dmb << 16);
+        }
+    }
+    out
+}
+
+/// Random `(sc, mn, d_super, dmin_super)` - `crates/model/tests/matmul_kq.
+/// rs`'s own `rand_kq_scale`, restated here (this crate has no dependency on
+/// `model`'s test-only helpers).
+fn rand_kq_scale(seed: u64, n: usize, ng: usize) -> (Vec<u8>, Vec<u8>, Vec<f32>, Vec<f32>) {
+    let spb = ng.div_ceil(GPS);
+    let sc: Vec<u8> = rand_pos_f32(seed ^ 0x54, n * ng, 1.0, 63.0).into_iter().map(|v| v as u8).collect();
+    let mn: Vec<u8> = rand_pos_f32(seed ^ 0x55, n * ng, 1.0, 63.0).into_iter().map(|v| v as u8).collect();
+    let d_super = rand_pos_f32(seed ^ 0x56, n * spb, 0.001, 0.02);
+    let dmin_super = rand_pos_f32(seed ^ 0x57, n * spb, 0.002, 0.04);
+    (sc, mn, d_super, dmin_super)
 }
 
 fn host_group_sums(codes_x: &[i8], m: usize, k: usize, group: usize) -> Vec<f32> {
@@ -88,8 +121,7 @@ fn run(g: &Gpu, name: &str, m: usize, k: usize, n: usize, bits: u32, seed: u64) 
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k);
     let sx = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
-    let ds = rand_pos_f32(seed ^ 0x54, n * ng, 0.01, 0.5);
-    let dm = rand_pos_f32(seed ^ 0x55, n * ng, 0.05, 1.5);
+    let (sc, mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng);
 
     let xq_words = pack_i8_words(&codes_x);
     let xq = g.storage(xq_words.len() as u64);
@@ -98,13 +130,18 @@ fn run(g: &Gpu, name: &str, m: usize, k: usize, n: usize, bits: u32, seed: u64) 
     let wq = g.storage(wq_words.len() as u64);
     g.write(&wq, &wq_words);
     let sxb = g.storage_init("sx", &sx);
-    let wsz = g.storage_init("wsz", &build_wsz(&ds, &dm, n, ng));
+    let wsm_words = pack_wsm(&sc, &mn, n, ng);
+    let wsm = g.storage(wsm_words.len() as u64);
+    g.write(&wsm, &wsm_words);
+    let wd_words = pack_wd(&d_super, &dmin_super, n, ng.div_ceil(GPS));
+    let wd = g.storage(wd_words.len() as u64);
+    g.write(&wd, &wd_words);
     let xgs = g.storage_init("xgs", &host_group_sums(&codes_x, m, k, GROUP));
     let out = g.storage((m * n) as u64);
 
     let idx = g.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"));
     let params = [m as u32, k as u32, n as u32];
-    g.submit(&[], &[g.step(idx, &[&xq, &wq, &sxb, &wsz, &xgs, &out], &params, n as u32 * 64)]);
+    g.submit(&[], &[g.step(idx, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &params, n as u32 * 64)]);
     g.poll_wait();
     g.read(&out, m * n)
 }

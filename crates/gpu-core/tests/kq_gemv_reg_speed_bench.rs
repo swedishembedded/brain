@@ -76,15 +76,50 @@ fn pack_affine_words(codes: &[i32], bits: u32) -> Vec<u32> {
         .collect()
 }
 
-fn build_wsz(ds: &[f32], dm: &[f32], n: usize, ng: usize) -> Vec<f32> {
-    let mut out = vec![0f32; n * 2 * ng];
+/// M14: groups per `wd` super-block entry - `matmul_kq_dyn.wgsl`'s own fixed
+/// `GPS=8`.
+const GPS: usize = 8;
+
+fn pack_wsm(sc: &[u8], mn: &[u8], n: usize, ng: usize) -> Vec<u32> {
+    let words = ng.div_ceil(2);
+    let mut out = vec![0u32; n * words];
     for r in 0..n {
         for g in 0..ng {
-            out[r * 2 * ng + 2 * g] = ds[r * ng + g];
-            out[r * 2 * ng + 2 * g + 1] = dm[r * ng + g];
+            let (w, shift) = (g / 2, if g % 2 == 0 { 0u32 } else { 16u32 });
+            out[r * words + w] |= (sc[r * ng + g] as u32) << shift;
+            out[r * words + w] |= (mn[r * ng + g] as u32) << (shift + 8);
         }
     }
     out
+}
+
+fn pack_wd(d: &[f32], dmin: &[f32], n: usize, spb_per_row: usize) -> Vec<u32> {
+    let mut out = vec![0u32; n * spb_per_row];
+    for r in 0..n {
+        for s in 0..spb_per_row {
+            let db = half::f16::from_f32(d[r * spb_per_row + s]).to_bits() as u32;
+            let dmb = half::f16::from_f32(dmin[r * spb_per_row + s]).to_bits() as u32;
+            out[r * spb_per_row + s] = db | (dmb << 16);
+        }
+    }
+    out
+}
+
+/// `Gpu::storage_init` is f32-only; `wsm`/`wd` are packed `u32` words, so
+/// upload them through `storage` + `write` instead.
+fn storage_u32(g: &Gpu, data: &[u32]) -> gpu_core::DeviceBuffer {
+    let b = g.storage(data.len() as u64);
+    g.write(&b, data);
+    b
+}
+
+fn rand_kq_scale(seed: u64, n: usize, ng: usize) -> (Vec<u8>, Vec<u8>, Vec<f32>, Vec<f32>) {
+    let spb = ng.div_ceil(GPS);
+    let sc: Vec<u8> = rand_pos_f32(seed ^ 0x54, n * ng, 1.0, 63.0).into_iter().map(|v| v as u8).collect();
+    let mn: Vec<u8> = rand_pos_f32(seed ^ 0x55, n * ng, 1.0, 63.0).into_iter().map(|v| v as u8).collect();
+    let d_super = rand_pos_f32(seed ^ 0x56, n * spb, 0.001, 0.02);
+    let dmin_super = rand_pos_f32(seed ^ 0x57, n * spb, 0.002, 0.04);
+    (sc, mn, d_super, dmin_super)
 }
 
 fn host_group_sums(codes_x: &[i8], m: usize, k: usize, group: usize) -> Vec<f32> {
@@ -134,8 +169,7 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
             let codes_x = rand_i8_codes(9999, (m * k) as usize);
             let codes_w = rand_unsigned_codes(9998, (n * k) as usize, bits);
             let sx = rand_pos_f32(9997, m as usize, 0.3, 1.7);
-            let ds = rand_pos_f32(9996, n as usize * ng, 0.01, 0.5);
-            let dm = rand_pos_f32(9995, n as usize * ng, 0.05, 1.5);
+            let (sc, mn, d_super, dmin_super) = rand_kq_scale(9996, n as usize, ng);
             let xq_words = pack_i8_words(&codes_x);
             let xq = g.storage(xq_words.len() as u64);
             g.write(&xq, &xq_words);
@@ -143,10 +177,11 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
             let wq = g.storage(wq_words.len() as u64);
             g.write(&wq, &wq_words);
             let sxb = g.storage_init("sx", &sx);
-            let wsz = g.storage_init("wsz", &build_wsz(&ds, &dm, n as usize, ng));
+            let wsm = storage_u32(&g, &pack_wsm(&sc, &mn, n as usize, ng));
+            let wd = storage_u32(&g, &pack_wd(&d_super, &dmin_super, n as usize, ng.div_ceil(GPS)));
             let xgs = g.storage_init("xgs", &host_group_sums(&codes_x, m as usize, k as usize, GROUP));
             let out = g.storage((m * n) as u64);
-            let ramp_steps = vec![g.step(k_gemv, &[&xq, &wq, &sxb, &wsz, &xgs, &out], &[m, k, n], n * 64)];
+            let ramp_steps = vec![g.step(k_gemv, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], n * 64)];
             ramp(&g, &ramp_steps, Duration::from_secs(3));
         }
 
@@ -165,8 +200,7 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
             let codes_x = rand_i8_codes(9200 + u64::from(m), (m * k) as usize);
             let codes_w = rand_unsigned_codes(9300 + u64::from(m), (n * k) as usize, bits);
             let sx = rand_pos_f32(9400 + u64::from(m), m as usize, 0.3, 1.7);
-            let ds = rand_pos_f32(9500 + u64::from(m), n as usize * ng, 0.01, 0.5);
-            let dm = rand_pos_f32(9600 + u64::from(m), n as usize * ng, 0.05, 1.5);
+            let (sc, mn, d_super, dmin_super) = rand_kq_scale(9500 + u64::from(m), n as usize, ng);
 
             let xq_words = pack_i8_words(&codes_x);
             let xq = g.storage(xq_words.len() as u64);
@@ -175,16 +209,22 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
             let wq = g.storage(wq_words.len() as u64);
             g.write(&wq, &wq_words);
             let sxb = g.storage_init("sx", &sx);
-            let wsz = g.storage_init("wsz", &build_wsz(&ds, &dm, n as usize, ng));
+            let wsm = storage_u32(&g, &pack_wsm(&sc, &mn, n as usize, ng));
+            let wd = storage_u32(&g, &pack_wd(&d_super, &dmin_super, n as usize, ng.div_ceil(GPS)));
             let xgs = g.storage_init("xgs", &host_group_sums(&codes_x, m as usize, k as usize, GROUP));
             let out = g.storage((m * n) as u64);
 
-            let st_gemv = vec![g.step(k_gemv, &[&xq, &wq, &sxb, &wsz, &xgs, &out], &[m, k, n], n * 64)];
-            let st_reg = vec![g.step(k_reg, &[&xq, &wq, &sxb, &wsz, &xgs, &out], &[m, k, n], n * 64)];
+            let st_gemv = vec![g.step(k_gemv, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], n * 64)];
+            let st_reg = vec![g.step(k_reg, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], n * 64)];
             let t_gemv = gpu_core::profile::best_of(&g, &st_gemv, REPS);
             let t_reg = gpu_core::profile::best_of(&g, &st_reg, REPS);
-            // Dominant traffic: packed weight codes + interleaved (ds,dm).
-            let bytes = u64::from(n) * u64::from(k) * u64::from(bits) / 8 + u64::from(n) * (ng as u64) * 2 * 4;
+            // Dominant traffic: packed weight codes + M14's packed (wsm,wd)
+            // scale plane (1 byte sc + 1 byte m per group, 4 bytes per
+            // GPS-group super-block, vs the old flat interleaved 8
+            // bytes/group this comment used to count).
+            let bytes = u64::from(n) * u64::from(k) * u64::from(bits) / 8
+                + u64::from(n) * (ng as u64).div_ceil(2) * 4
+                + u64::from(n) * (ng as u64).div_ceil(GPS as u64) * 4;
             let gbs_gemv = bytes as f64 / t_gemv / 1e9;
             let gbs_reg = bytes as f64 / t_reg / 1e9;
             println!(

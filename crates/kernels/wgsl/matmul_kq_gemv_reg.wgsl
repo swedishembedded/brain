@@ -28,7 +28,8 @@
 //   xq  : [M, k/4]              u32 - 4 int8 activations packed along K per u32
 //   wq  : [N, k*CODE_BITS/32]   u32 - K-CONTIGUOUS unsigned codes, `32/CODE_BITS` codes per word, low bits first
 //   sx  : [M]                   f32 - per-token activation scale
-//   wsz : [N, 2*k/32]           f32 - interleaved (ds, dm) pairs, one pair per 32-element weight-scale group
+//   wsm : [N, ceil(k/32/2)]     u32 - (M14) packed per-group (sc, m) sub-scale byte pairs - see matmul_kq_dyn.wgsl's own header for the exact bit layout
+//   wd  : [N, ceil(k/32/GPS)]   u32 - (M14) packed per-super-block (d, dmin) f16 bit-pattern pairs, GPS=8 groups/super-block
 //   xgs : [M, k/32]             f32 - activation group sums (quant_group_sum.wgsl)
 //   out : [M, N]                f32 - out[m,n] = sx[m] * Σ_g( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
 //   params: m, k (RAW LOGICAL K), n. REQUIRES m <= MREG and k a multiple of 32.
@@ -89,9 +90,10 @@ struct Params {
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k*CODE_BITS/32]
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
-@group(0) @binding(4) var<storage, read>       wsz: array<f32>;  // [N, 2*k/32] interleaved (ds, dm)
-@group(0) @binding(5) var<storage, read>       xgs: array<f32>;  // [M, k/32]
-@group(0) @binding(6) var<storage, read_write> out: array<f32>;  // [M, N]
+@group(0) @binding(4) var<storage, read>       wsm: array<u32>;  // [N, ceil(k/32/2)] packed (sc, m) pairs
+@group(0) @binding(5) var<storage, read>       wd:  array<u32>;  // [N, ceil(k/32/GPS)] packed (d, dmin) f16 pairs
+@group(0) @binding(6) var<storage, read>       xgs: array<f32>;  // [M, k/32]
+@group(0) @binding(7) var<storage, read_write> out: array<f32>;  // [M, N]
 
 const CODE_BITS: u32 = 8u;  // template knob: 4 (Q4_K) or 8 (Q5_K)
 
@@ -102,6 +104,24 @@ const MREG: u32 = 32u;
 
 /// Quads (4-element units) per weight-scale group (32 elements / 4).
 const WPGK: u32 = 8u;
+
+// Groups per `wd` super-block entry (M14) - see matmul_kq_dyn.wgsl's own
+// header for the full derivation.
+const GPS: u32 = 8u;
+
+// The same magic-multiply/FTZ-safe f16 decode `matmul_kq_dyn.wgsl`/
+// `matmul_kq_gemv.wgsl` carry - duplicated per this codebase's "every kernel
+// is self-contained WGSL text" convention; edited together with
+// `matmul_kq_gemv.wgsl`'s copy per this file's own header.
+fn f16_to_f32(h: u32) -> f32 {
+    let sign = (h & 0x8000u) << 16u;
+    let exp = (h >> 10u) & 0x1Fu;
+    let subnormal = bitcast<f32>(0x38800000u | ((h & 0x3FFu) << 13u)) - bitcast<f32>(0x38800000u);
+    let normal = bitcast<f32>((h & 0x7FFFu) << 13u) * bitcast<f32>(0x77800000u);
+    let inf_or_nan = bitcast<f32>(0x7F800000u | ((h & 0x3FFu) << 13u));
+    let mag = select(select(subnormal, normal, exp != 0u), inf_or_nan, exp == 31u);
+    return bitcast<f32>(bitcast<u32>(mag) | sign);
+}
 
 // Only the cross-thread FOLD needs shared memory now, so this is `MREG * 64`
 // f32s rather than the worst case - matching `matmul_i8_gemv_reg`'s own
@@ -121,6 +141,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     let wq_row_words = p.k * CODE_BITS / 32u; // wq words per row
     let qpwq = (32u / CODE_BITS) / 4u;        // quads packed per raw wq word
     let cmask = (1u << CODE_BITS) - 1u;       // low-CODE_BITS mask
+    let wsm_per_row = (ng + 1u) / 2u;         // wsm words per row (M14)
+    let wd_per_row = (ng + GPS - 1u) / GPS;   // wd words per row (M14)
 
     var acc: array<f32, MREG>;
     var xoff: array<u32, MREG>;
@@ -135,7 +157,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
 
     let wbase = col * wq_row_words;
-    let wszbase = col * 2u * ng;
+    let wsmbase = col * wsm_per_row;
+    let wdbase = col * wd_per_row;
 
     for (var g = t; g < kgx; g = g + 64u) {
         let word_idx = g / qpwq;
@@ -150,8 +173,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 
         let grp = g / WPGK;
         let is_lead = (g % WPGK) == 0u;
-        let ds = wsz[wszbase + 2u * grp];
-        let dmv = select(0.0, wsz[wszbase + 2u * grp + 1u], is_lead);
+        // Same redundant-`ds`/lead-gated-`dmv` reasoning as `matmul_kq_gemv.
+        // wgsl`'s own copy of this block (edited together, see this file's
+        // header) - kept BYTE-IDENTICAL to that kernel's arithmetic.
+        let wword = wd[wdbase + grp / GPS];
+        let sword = wsm[wsmbase + grp / 2u];
+        let shift = select(0u, 16u, (grp % 2u) == 1u);
+        let ds = f16_to_f32(wword & 0xFFFFu) * f32((sword >> shift) & 0xFFu);
+        let dmv = select(0.0, f16_to_f32(wword >> 16u) * f32((sword >> (shift + 8u)) & 0xFFu), is_lead);
 
         for (var m = 0u; m < MREG; m = m + 1u) {
             let xw = xq[xoff[m] + g];

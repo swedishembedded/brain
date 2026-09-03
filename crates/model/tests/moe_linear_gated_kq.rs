@@ -67,15 +67,76 @@ fn pack_affine_words(codes: &[i32], bits: u32) -> Vec<u32> {
         .collect()
 }
 
-fn build_wsz(ds: &[f32], dm: &[f32], n: usize, ng: usize) -> Vec<f32> {
-    let mut out = vec![0f32; n * 2 * ng];
+/// M14: groups per `wd` super-block entry - `matmul_kq_dyn.wgsl`'s own fixed
+/// `GPS=8` (256-element GGUF Q4_K/Q5_K super-block / 32-element group).
+const GPS: usize = 8;
+
+fn pack_wsm(sc: &[u8], mn: &[u8], n: usize, ng: usize) -> Vec<u32> {
+    let words = ng.div_ceil(2);
+    let mut out = vec![0u32; n * words];
     for r in 0..n {
         for g in 0..ng {
-            out[r * 2 * ng + 2 * g] = ds[r * ng + g];
-            out[r * 2 * ng + 2 * g + 1] = dm[r * ng + g];
+            let (w, shift) = (g / 2, if g % 2 == 0 { 0u32 } else { 16u32 });
+            out[r * words + w] |= (sc[r * ng + g] as u32) << shift;
+            out[r * words + w] |= (mn[r * ng + g] as u32) << (shift + 8);
         }
     }
     out
+}
+
+fn pack_wd(d: &[f32], dmin: &[f32], n: usize, spb_per_row: usize) -> Vec<u32> {
+    let mut out = vec![0u32; n * spb_per_row];
+    for r in 0..n {
+        for s in 0..spb_per_row {
+            let db = half::f16::from_f32(d[r * spb_per_row + s]).to_bits() as u32;
+            let dmb = half::f16::from_f32(dmin[r * spb_per_row + s]).to_bits() as u32;
+            out[r * spb_per_row + s] = db | (dmb << 16);
+        }
+    }
+    out
+}
+
+/// `Gpu::storage_init` is f32-only; `wsm`/`wd` are packed `u32` words, so
+/// upload them through `storage` + `write` instead.
+fn storage_u32(g: &Gpu, data: &[u32]) -> DeviceBuffer {
+    let b = g.storage(data.len() as u64);
+    g.write(&b, data);
+    b
+}
+
+/// The decomposed `(sc, mn, d_super, dmin_super)` -> effective `(ds, dm)`
+/// product `wsm`/`wd` reconstruct - restated from `crates/model/tests/
+/// matmul_kq.rs`'s own `effective_ds_dm` (integration test binaries share no
+/// code across files in this crate).
+fn effective_ds_dm(sc: &[u8], mn: &[u8], d_super: &[f32], dmin_super: &[f32], n: usize, ng: usize) -> (Vec<f32>, Vec<f32>) {
+    let spb_per_row = ng.div_ceil(GPS);
+    let mut ds = vec![0f32; n * ng];
+    let mut dm = vec![0f32; n * ng];
+    for r in 0..n {
+        for g in 0..ng {
+            let s = r * spb_per_row + g / GPS;
+            let dv = half::f16::from_f32(d_super[s]).to_f32();
+            let dmv = half::f16::from_f32(dmin_super[s]).to_f32();
+            ds[r * ng + g] = dv * sc[r * ng + g] as f32;
+            dm[r * ng + g] = dmv * mn[r * ng + g] as f32;
+        }
+    }
+    (ds, dm)
+}
+
+/// Random `(sc, mn, d_super, dmin_super)`, mirroring `matmul_kq.rs`'s own
+/// `rand_kq_scale`.
+fn rand_kq_scale(seed: u64, n: usize, ng: usize, dmin_nonzero: bool) -> (Vec<u8>, Vec<u8>, Vec<f32>, Vec<f32>) {
+    let spb = ng.div_ceil(GPS);
+    let sc: Vec<u8> = rand_pos_f32(seed ^ 0x54, n * ng, 1.0, 63.0).into_iter().map(|v| v as u8).collect();
+    let mn: Vec<u8> = if dmin_nonzero {
+        rand_pos_f32(seed ^ 0x55, n * ng, 1.0, 63.0).into_iter().map(|v| v as u8).collect()
+    } else {
+        vec![0u8; n * ng]
+    };
+    let d_super = rand_pos_f32(seed ^ 0x56, n * spb, 0.001, 0.02);
+    let dmin_super = if dmin_nonzero { rand_pos_f32(seed ^ 0x57, n * spb, 0.002, 0.04) } else { vec![0f32; n * spb] };
+    (sc, mn, d_super, dmin_super)
 }
 
 fn host_group_sums(codes_x: &[i8], m: usize, k: usize, group: usize) -> Vec<f32> {
@@ -185,8 +246,8 @@ fn moe_matches_dyn_and_gemv_when_fully_routed_both_code_bits() {
         let codes_x = rand_i8_codes(0xB0_0000 | bits as u64, m * k, -100, 100);
         let sx = rand_pos_f32(0xB0_0001 | bits as u64, m, 0.3, 1.7);
         let codes_w = rand_unsigned_codes(0xB0_0002 | bits as u64, n * k, bits);
-        let ds = rand_pos_f32(0xB0_0003 | bits as u64, n * ng, 0.01, 0.5);
-        let dm = rand_pos_f32(0xB0_0004 | bits as u64, n * ng, 0.05, 1.5);
+        let (sc_bytes, mn, d_super, dmin_super) = rand_kq_scale(0xB0_0003 | bits as u64, n, ng, true);
+        let (ds, dm) = effective_ds_dm(&sc_bytes, &mn, &d_super, &dmin_super, n, ng);
         let want = host_oracle_affine(&codes_x, &sx, &codes_w, &ds, &dm, m, k, n, group);
 
         let xq_words = pack_i8_words(&codes_x);
@@ -196,7 +257,8 @@ fn moe_matches_dyn_and_gemv_when_fully_routed_both_code_bits() {
         let wq = g.storage(wq_words.len() as u64);
         g.write(&wq, &wq_words);
         let sxb = g.storage_init("sx", &sx);
-        let wsz = g.storage_init("wsz", &build_wsz(&ds, &dm, n, ng));
+        let wsm = storage_u32(&g, &pack_wsm(&sc_bytes, &mn, n, ng));
+        let wd = storage_u32(&g, &pack_wd(&d_super, &dmin_super, n, ng.div_ceil(GPS)));
         let xgs = g.storage_init("xgs", &host_group_sums(&codes_x, m, k, group));
 
         // Every row routed to expert `e_idx` (n_experts columns, only the
@@ -210,16 +272,16 @@ fn moe_matches_dyn_and_gemv_when_fully_routed_both_code_bits() {
 
         let out_moe = g.storage((m * n) as u64);
         let params = [m as u32, k as u32, n as u32, n_experts, e_idx];
-        g.submit(&[], &[g.step(idx(&g, moe_name), &[&xq, &wq, &sxb, &wsz, &xgs, &gate, &out_moe], &params, (m * n) as u32)]);
+        g.submit(&[], &[g.step(idx(&g, moe_name), &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &gate, &out_moe], &params, (m * n) as u32)]);
         let got_moe = g.read(&out_moe, m * n);
 
         let tile_threads = (m as u32).div_ceil(128) * (n as u32).div_ceil(128) * 256;
         let out_dyn = g.storage((m * n) as u64);
-        g.submit(&[], &[g.step(idx(&g, dyn_name), &[&xq, &wq, &sxb, &wsz, &xgs, &out_dyn], &[m as u32, k as u32, n as u32], tile_threads)]);
+        g.submit(&[], &[g.step(idx(&g, dyn_name), &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out_dyn], &[m as u32, k as u32, n as u32], tile_threads)]);
         let got_dyn = g.read(&out_dyn, m * n);
 
         let out_gemv = g.storage((m * n) as u64);
-        g.submit(&[], &[g.step(idx(&g, gemv_name), &[&xq, &wq, &sxb, &wsz, &xgs, &out_gemv], &[m as u32, k as u32, n as u32], n as u32 * 64)]);
+        g.submit(&[], &[g.step(idx(&g, gemv_name), &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out_gemv], &[m as u32, k as u32, n as u32], n as u32 * 64)]);
         let got_gemv = g.read(&out_gemv, m * n);
 
         assert_matches_oracle(&format!("moe_linear_gated_kq vs oracle CODE_BITS={bits}"), &got_moe, &want);
@@ -243,19 +305,20 @@ const KERNELS_KQ: &[(&str, &str)] = &[
 
 struct KqExpert {
     wq: DeviceBuffer,
-    wsz: DeviceBuffer,
+    wsm: DeviceBuffer,
+    wd: DeviceBuffer,
 }
 
 fn upload_kq_expert(g: &Gpu, seed: u64, n: usize, k: usize, group: usize) -> KqExpert {
     let ng = k / group;
     let codes_w = rand_unsigned_codes(seed, n * k, 8);
-    let ds = rand_pos_f32(seed ^ 1, n * ng, 0.01, 0.5);
-    let dm = rand_pos_f32(seed ^ 2, n * ng, 0.05, 1.5);
+    let (sc, mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng, true);
     let wq_words = pack_affine_words(&codes_w, 8);
     let wq = g.storage(wq_words.len() as u64);
     g.write(&wq, &wq_words);
-    let wsz = g.storage_init("wsz", &build_wsz(&ds, &dm, n, ng));
-    KqExpert { wq, wsz }
+    let wsm = storage_u32(g, &pack_wsm(&sc, &mn, n, ng));
+    let wd = storage_u32(g, &pack_wd(&d_super, &dmin_super, n, ng.div_ceil(GPS)));
+    KqExpert { wq, wsm, wd }
 }
 
 fn run_expert(
@@ -290,9 +353,9 @@ fn run_expert(
         sx,
         xgs,
         gate,
-        LinKQ { wq: &gate_w.wq, sz: &gate_w.wsz },
-        LinKQ { wq: &up_w.wq, sz: &up_w.wsz },
-        LinKQ { wq: &down_w.wq, sz: &down_w.wsz },
+        LinKQ { wq: &gate_w.wq, wsm: &gate_w.wsm, wd: &gate_w.wd },
+        LinKQ { wq: &up_w.wq, wsm: &up_w.wsm, wd: &up_w.wd },
+        LinKQ { wq: &down_w.wq, wsm: &down_w.wsm, wd: &down_w.wd },
         &scratch,
         &acc,
         e_idx,
@@ -412,9 +475,9 @@ fn expert_fwd_kq_combines_two_experts_by_plain_addition() {
         &sx,
         &xgs,
         &gate,
-        LinKQ { wq: &e0_gate_w.wq, sz: &e0_gate_w.wsz },
-        LinKQ { wq: &e0_up_w.wq, sz: &e0_up_w.wsz },
-        LinKQ { wq: &e0_down_w.wq, sz: &e0_down_w.wsz },
+        LinKQ { wq: &e0_gate_w.wq, wsm: &e0_gate_w.wsm, wd: &e0_gate_w.wd },
+        LinKQ { wq: &e0_up_w.wq, wsm: &e0_up_w.wsm, wd: &e0_up_w.wd },
+        LinKQ { wq: &e0_down_w.wq, wsm: &e0_down_w.wsm, wd: &e0_down_w.wd },
         &as_scratch(&owned0),
         &acc,
         0,
@@ -428,9 +491,9 @@ fn expert_fwd_kq_combines_two_experts_by_plain_addition() {
         &sx,
         &xgs,
         &gate,
-        LinKQ { wq: &e1_gate_w.wq, sz: &e1_gate_w.wsz },
-        LinKQ { wq: &e1_up_w.wq, sz: &e1_up_w.wsz },
-        LinKQ { wq: &e1_down_w.wq, sz: &e1_down_w.wsz },
+        LinKQ { wq: &e1_gate_w.wq, wsm: &e1_gate_w.wsm, wd: &e1_gate_w.wd },
+        LinKQ { wq: &e1_up_w.wq, wsm: &e1_up_w.wsm, wd: &e1_up_w.wd },
+        LinKQ { wq: &e1_down_w.wq, wsm: &e1_down_w.wsm, wd: &e1_down_w.wd },
         &as_scratch(&owned1),
         &acc,
         1,

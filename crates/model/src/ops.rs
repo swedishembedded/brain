@@ -464,9 +464,9 @@ pub enum Weight {
     /// Activations stay int8 - see
     /// this module's doc comment on the offset-arithmetic rule this implies.
     Q4 { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32 },
-    /// The canonical brain K-quant device layout (M8-M11; see
-    /// `crate::kquant`'s module doc for the full shape/correction-term
-    /// derivation) - ONE variant for all three device instantiations,
+    /// The canonical brain K-quant device layout (M8-M11, byte-compressed in
+    /// M14; see `crate::kquant`'s module doc for the full shape/correction-
+    /// term derivation) - ONE variant for all three device instantiations,
     /// distinguished by `bits`/`group`/`affine`:
     ///
     /// | source   | bits | group | affine | [`Weight::dtype`] reports |
@@ -480,20 +480,39 @@ pub enum Weight {
     /// signed low-bits-two's-complement bias-folded value otherwise -
     /// `gguf::kquant`'s host relayout already did this fold).
     ///
-    /// `sz`: the weight-scale plane. When `affine` is true this is the
-    /// INTERLEAVED `[n, 2*k/group]` `(ds, dm)` plane `matmul_kq_dyn`/
-    /// `matmul_kq_gemv` bind directly (`ds = d*sc`, `dm = dmin*m`, the same
-    /// fp32 expressions `checkpoint::gguf`'s private `deq_q4_k`/`deq_q5_k`
-    /// use). When `affine` is false (Q6_K, `dm` is always `0.0`) this is a
-    /// PLAIN `[n, k/group]` `ds`-only plane instead - the layout the
-    /// EXISTING `matmul_i8_dyn#QPG=1`/`matmul_i8_gemv#WPG=4` kernels
-    /// (M10's group=16 template knobs) actually bind, which does not have
-    /// room for an interleaved `dm` half a symmetric type never needs. A
-    /// caller building this variant from `gguf::kquant`'s interleaved
-    /// `KqLayout` output for a symmetric group=16 tensor must therefore
-    /// extract just the `ds` half before uploading here - `sz`'s layout is
-    /// a property of `affine`, not of where the bytes originally came from.
-    KQuant { w: DeviceBuffer, sz: DeviceBuffer, n: u32, k: u32, group: u32, bits: u32, affine: bool },
+    /// `sz`: the weight-scale plane, `KqScale`-tagged (see that enum's own
+    /// doc comment for the affine-vs-non-affine shapes it holds and why).
+    KQuant { w: DeviceBuffer, sz: KqScale, n: u32, k: u32, group: u32, bits: u32, affine: bool },
+}
+
+/// [`Weight::KQuant`]'s weight-scale plane - the shape differs by `affine`,
+/// so this is an enum rather than one fixed buffer field.
+#[derive(Clone)]
+pub enum KqScale {
+    /// Non-affine (Q6_K, group=16): a PLAIN `[n, k/group]` `ds`-only f32
+    /// plane (`dm` is always `0.0` for a symmetric type, so there is
+    /// nothing to interleave) - the layout the EXISTING `matmul_i8_dyn#
+    /// QPG=1`/`matmul_i8_gemv#WPG=4` kernels (M10's group=16 template
+    /// knobs) bind directly. M14's byte compression (packed `(sc,m)` +
+    /// f16 `(d,dmin)`, see [`Packed`](KqScale::Packed)'s own doc comment)
+    /// is deliberately OUT of scope for this arm - those two kernels are
+    /// the EXISTING symmetric-family kernels every other int8 model already
+    /// depends on, not new kernels this milestone owns; see the M14 ledger
+    /// entry for the scoping reasoning.
+    PlainF32(DeviceBuffer),
+    /// Affine (Q4_K/Q5_K, group=32): M14's packed scale/min plane -
+    /// `wsm: [n, ceil(k/group/2)]` u32 (per-group `(sc, m)` sub-scale byte
+    /// pair, two groups/word) + `wd: [n, k/spb]` u32 (per-super-block
+    /// `(d, dmin)` f16 bit-pattern pair, `spb=256` = `GPS=8` groups) -
+    /// `matmul_kq_dyn`/`matmul_kq_gemv`/`matmul_kq_gemv_reg`/
+    /// `moe_linear_gated_kq` bind these two directly (replacing the old M8-
+    /// M13 flat `[n, 2*k/group]` f32 interleaved `(ds, dm)` plane those same
+    /// four kernels used to bind - a full replacement, not a parallel
+    /// variant, since nothing outside the `kernels`/`gguf`/`model` crates
+    /// depended on the old layout's exact bytes: `Weight::KQuant` has no
+    /// `Weight::upload` path at all, and the only two callers of this
+    /// struct in the whole workspace are this crate's own test files).
+    Packed { wsm: DeviceBuffer, wd: DeviceBuffer },
 }
 
 impl Weight {
@@ -1197,8 +1216,8 @@ impl Ops {
             // buffer shape - it is a `Weight::I8`-shaped weight (plain `s`,
             // no `sz`/`xgs`) with `group() == 16`, so it already took the
             // `Weight::I8 { .. }` arm above via `Self::bind`'s `group`
-            // parameter; only the affine pair needs the extra `wsz`/`xgs`
-            // buffers this arm binds.
+            // parameter; only the affine pair needs the extra `wsm`/`wd`/
+            // `xgs` buffers this arm binds.
             Weight::KQuant { w: wb, sz, .. } => {
                 assert!(
                     w.dtype() == Dtype::Q4K || w.dtype() == Dtype::Q8K,
@@ -1207,6 +1226,13 @@ impl Ops {
                      dispatched as Dtype::I8 at group=16, not through this arm",
                     w.dtype()
                 );
+                let KqScale::Packed { wsm, wd } = sz else {
+                    unreachable!(
+                        "Ops::matmul: an affine (Q4K/Q8K) Weight::KQuant must carry KqScale::Packed -- \
+                         the assert above already refused a non-affine dtype, so a KqScale::PlainF32 \
+                         reaching here is a construction bug, not a normal input"
+                    )
+                };
                 // Same packed-word-per-int8-word offset rule the `I8`/`Q4`
                 // arm above uses (`xq` is always 4 int8/word, regardless of
                 // the WEIGHT's own code density) - `matmul_kq_{dyn,gemv}`
@@ -1239,8 +1265,8 @@ impl Ops {
                 // the correct param here too.
                 s.push(self.gpu.step_sliced(
                     kind,
-                    &[quant.xq_for(k), wb, &quant.sx, sz, xgs, y],
-                    &[xo, (0, 0), so, (0, 0), go, oo],
+                    &[quant.xq_for(k), wb, &quant.sx, wsm, wd, xgs, y],
+                    &[xo, (0, 0), so, (0, 0), (0, 0), go, oo],
                     &[m, k, n],
                     threads,
                 ));

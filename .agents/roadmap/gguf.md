@@ -705,7 +705,207 @@ review of this codebase assumed:
       precedent for `matmul_q4_gemv_reg`'s measured regression, except this
       row is a wash rather than a loss so it is left wired rather than
       pulled.
-- [ ] M14: byte compression (packed `sc`/`m` + f16 `d`; Q4_K → 1.03× GGUF).
+- [x] M14: byte compression of the M8 device scale plane - the flat `wsz:
+      [n, 2*k/G] f32` interleaved `(scale, min)` array (M8-M13) replaced with
+      two packed planes: `wsm: [n, ceil(k/G/2)] u32` (per-group `(sc, m)`
+      sub-scale BYTE pair, two groups/word - `sc` low byte, `m` high byte of
+      each group's own 16-bit half) and `wd: [n, k/spb] u32` (per-super-block
+      `(d, dmin)` f16 BIT-PATTERN pair, one word per `spb`-element
+      super-block - 256 for the three K-quant formats, 32 for the three
+      legacy formats which have no coarser grouping than their own block).
+      `crates/gguf/src/kquant.rs` (host relayout), `crates/model/src/
+      kquant.rs` (`KqDeviceLayout`, restated for device dispatch call sites
+      that do not depend on the `gguf` crate) and `crates/model/src/ops.rs`
+      (`Weight::KQuant`'s `sz: KqScale` field, `Packed { wsm, wd }` for the
+      affine family) all carry the new shape; `matmul_kq_dyn`/
+      `matmul_kq_gemv`/`matmul_kq_gemv_reg`/`moe_linear_gated_kq` (M11/M13)
+      bind `wsm`/`wd` directly in place of the old flat `wsz`, decoding
+      in-shader with `ds = f16_to_f32(wd_low_half) * f32(sc)`, `dm =
+      f16_to_f32(wd_high_half) * f32(m)` - the identical `d*sc`/`dmin*m` fp32
+      expressions `checkpoint::gguf`'s own `deq_q4_k`/`deq_q5_k` use, so the
+      host round-trip gate stays a real `assert_eq!`, never a tolerance. The
+      in-shader `f16_to_f32` is the SAME magic-multiply/FTZ-safe-subnormal/
+      inf-nan construction `kernels::template::f16_decode_expr` already
+      generates for the bf16/f16 WEIGHT STORAGE tier - copied verbatim (same
+      magic constants `0x77800000`/`0x38800000`/`0x7F800000`), not
+      reinvented, and independently re-verified bit-exact against
+      `half::f16::from_bits(..).to_f32()` for all 65536 possible bit patterns
+      by hand during this milestone (a standalone Rust translation of the
+      WGSL expression, `worst diff = 0`) - ruling out decode precision as a
+      source of any measured discrepancy (see below). Decoding happens once
+      per `(column, group)` fold - the SAME frequency the old flat `wsz` read
+      already ran at - so no additional hoisting was needed for correctness;
+      hoisting the f16 decode across the `GPS=8` folds that share one `wd`
+      word (a further win the task description flagged as a possible
+      follow-up) was NOT attempted, since the fold-point frequency was
+      already the natural granularity and a deeper hoist would need
+      restructuring the software-pipelined chunk loop for a benefit no gate
+      in this milestone required.
+      **Design decision: full replacement, not a parallel variant.** Grepped
+      the whole workspace for any caller of `Weight::KQuant`/`KqLayout`
+      outside `crates/{kernels,gguf,model}` and found none - `Weight::KQuant`
+      has no `Weight::upload` path at all (that function explicitly refuses
+      `Q4K`/`Q8K`, per M12), and the only two call sites of the struct in the
+      whole tree are this crate's own test files (M9-M13 landed the kernels
+      and the dispatch seam but no model has wired a real GGUF checkpoint
+      through them yet - see the ledger's own "Recorded gaps" section). With
+      no external dependent on the exact old byte layout, this repo's stated
+      policy against parallel/legacy paths made a full, clean replacement the
+      only reasonable choice; the old flat-`wsz` code path was deleted
+      outright rather than kept behind a flag.
+      **Scope: the affine family only (Q4_K/Q5_K).** Q6_K stays on a PLAIN
+      `[n, k/16] f32` `ds`-only array (`KqScale::PlainF32`, `dm` is always
+      `0.0` for a symmetric type, nothing to pack) - it reaches the device
+      through the EXISTING `matmul_i8_dyn#QPG=1`/`matmul_i8_gemv#WPG=4`
+      kernels (M10), which know nothing about the packed `(sc,m)`/`(d,dmin)`
+      shape and are not this milestone's to rewrite; Q5_0/Q4_0/Q8_0 never
+      touched `KqLayout`/`wsz`/`wsm`/`wd` at the device dispatch level to
+      begin with (M12: they reach the device as plain `Weight::I8`/`Weight::
+      Q4`, unrelated to this struct) - `gguf::kquant`'s HOST relayout still
+      produces a `(wsm, wd)` pair for all six formats uniformly (for the
+      lossless-relayout/round-trip-test contract every format shares), but
+      only Q4_K/Q5_K's device kernels actually bind it.
+      **Gating.** (a) `crates/gguf/tests/kquant.rs`'s round-trip test is
+      still a real `assert_eq!` against the SAME oracle
+      (`checkpoint::gguf`'s private `deq_*` functions), re-derived for the
+      packed encoding rather than weakened - reconstructing `(wq, wsm, wd)`
+      with the in-shader-matching expressions above still reproduces
+      `MmapGguf::tensor`'s decode bit for bit, both whole-tensor and at a
+      genuine sub-rectangle. (b) `device_bytes_per_parameter_matches_the_
+      recomputed_layout` (new) computes the REAL device bytes/param from the
+      actual relaid-out buffer lengths for all six types and asserts it
+      against a recomputed-from-layout formula (`bits/8 + 2/group + 4/spb`),
+      not a guessed constant - measured/asserted numbers below. (c) every
+      M11/M13 device-vs-oracle and cross-kernel test in `crates/model/tests/
+      matmul_kq.rs`/`moe_linear_gated_kq.rs`/`ops_kquant.rs` still passes at
+      the SAME tolerances (`rel_l2 <= 1e-6`, `cosine >= 1 - 1e-9`, `max_rel
+      <= 5e-4`) - three of those (`case5_subrectangle_nonzero_origin_two_
+      superblocks`, `case6_ragged_tiles_dyn`, `case6_ragged_gemv`) initially
+      went red on a real device (`max_rel` measured `6e-4..1e-3`, i.e. 1.2x
+      to 2x over the calibrated ceiling) after the M8→M14 layout swap; root-
+      caused (not just "recalibrate and move on", per this ledger's own rule
+      against widening a band to make a test pass) by instrumenting `max_rel`
+      to report the failing element and finding each one had a genuinely
+      small true value (`|want|` in `0.07..1.7`) produced by real cancellation
+      between the two-reduction affine fold's `ds*A` and `dm*S` terms - NOT a
+      kernel bug (the f16 decode was independently verified bit-exact above,
+      and `ds = d*sc`/`dm = dmin*m` is one IEEE-754 multiply either computed
+      host-side or device-side, so identical operands give an identical
+      result on any conforming backend). The actual cause was the new
+      decomposed `(sc, d_super)`/`(mn, dmin_super)` test-data generator
+      (`rand_kq_scale`, needed because M14 replaced the old test's direct
+      `ds`/`dm` sampling with sampling the pieces the packed format actually
+      stores) drawing from a wider effective `ds`/`dm` envelope than the
+      pre-M14 test did (up to `1.24`/`2.48` vs the original `0.5`/`1.5`),
+      which fed larger-magnitude intermediate terms into the SAME
+      cancellation-prone fold and pushed the accumulated fp32 rounding noise
+      on an unlucky element past the `max(want,1)`-floored `max_rel` metric's
+      ceiling. Fixed by narrowing `rand_kq_scale`'s `d_super`/`dmin_super`
+      ranges so the effective `ds`/`dm` envelope matches what the ceiling was
+      originally calibrated against (`~0.5`/`~1.5`) - restoring the pre-M14
+      numerical risk profile is a legitimate "update the test for the new
+      layout" per this milestone's own gating instructions, not a loosened
+      tolerance; the ceiling itself (`5e-4`) is untouched. `make test
+      --release --offline -p brain-gguf -p brain-kernels -p brain-model`:
+      every test in scope green except the ONE pre-existing, unrelated
+      failure already recorded in M3's and M12's own entries above
+      (`moe_compact_parity::compact_layer_submit_count_does_not_scale_with_
+      expert_count` - confirmed via `git diff` that `expert_fwd_compact_
+      layer` is untouched by this milestone). `make kernels-regen && make
+      kernels-table`: both pass, no new kernel files (this milestone edits
+      four existing `.wgsl` files in place, adds none).
+      **Measured bytes/param** (`device_bytes_per_parameter_matches_the_
+      recomputed_layout`, `bits/8 + 2/group + 4/spb`) vs the source GGUF
+      block's own bytes/param (`block_bytes/block_elems`):
+      | type  | device B/param | GGUF B/param | ratio    |
+      |-------|-----------------|--------------|----------|
+      | Q4_K  | 0.578125        | 0.5625       | 1.0278x  |
+      | Q5_K  | 1.078125        | 0.6875       | 1.5682x  |
+      | Q6_K  | 1.140625        | 0.8203125    | 1.3905x  |
+      | Q5_0  | 1.187500        | 0.6875       | 1.7273x  |
+      | Q4_0  | 0.687500        | 0.5625       | 1.2222x  |
+      | Q8_0  | 1.187500        | 1.0625       | 1.1176x  |
+      Q4_K lands almost exactly at GGUF's own density (`1.03x`, matching this
+      ledger's own placeholder target before this milestone started) since
+      its 4-bit codes were already this compact pre-M14 - M14's whole
+      contribution for Q4_K is shrinking the scale plane. Q6_K/Q5_0/Q4_0/
+      Q8_0 carry real, permanent overhead (`1.12x-1.73x`) because their
+      groups are 16-32 elements with NO coarser super-block structure to
+      amortize `wsm`/`wd` against the way Q4_K/Q5_K's 256-element super-block
+      does - this is the canonical layout's known, accepted cost of giving
+      every format ONE shared shape rather than a per-format bespoke one
+      (Q8_0 in particular never pays it in practice, since production Q8_0
+      never reaches the device through this table at all - it uses the
+      separate, already-solved `gguf::int8_direct::try_i8_rect` path M8's own
+      "two facts worth keeping visible" section named). Q5_K is the clear
+      outlier at `1.57x` - it is the one format this milestone's SECOND
+      compression target (below) would fix.
+      **Second compression target (Q5_K nibble + high-bit plane):
+      investigated, NOT implemented - a real architectural blocker, reported
+      rather than forced.** The design: shrink Q5_K's `wq` from `bits=8`
+      (its raw 5-bit code sitting in a full unsigned byte slot, 4 codes/word)
+      to `bits=4` (a nibble plane, byte-IDENTICAL to Q4_K's own packing, 8
+      codes/word) plus a new `wh: [n, k/32] u32` plane holding the 5th
+      (high) bit, one bit per element, 32 elements packed per word - which
+      conveniently is exactly one weight-scale group per `wh` word, since
+      `group=32` for Q5_K. Reconstruction is a staging-time BIT-SCATTER
+      (spread one bit per element out of a packed `wh` word into bit 4 of
+      each unpacked nibble) - the same technique class this ledger's own
+      M8 entry already documents for legacy Q5_0's high-bit-of-5 nibble
+      combination (`relayout_q5_0`, `checkpoint::gguf`'s own `deq_q5_0`), so
+      the pattern is not new to this codebase, only new to the K-quant
+      device-kernel side. Verified this would be a real win before deciding
+      whether to build it: `bits/8 + 4/32(wh) + 2/32(wsm) + 4/256(wd) =
+      0.703125` B/param, `1.0227x` GGUF - almost exactly Q4_K's own ratio,
+      down from the uncompressed `1.5682x` measured above. Not implemented
+      this milestone because `moe_linear_gated_kq.wgsl` - one of the FOUR
+      kernels this compression would touch - is ALREADY at exactly 8 storage
+      bindings (`xq`, `wq`, `sx`, `wsm`, `wd`, `xgs`, `gate`, `out`; verified
+      by direct inspection of the kernel source, not assumed) before adding a
+      9th `wh` binding, which this engine's own `<=8 storage buffers per
+      kernel` hard constraint (`AGENTS.md`) makes impossible without either
+      (a) accepting a per-OP-TYPE layout divergence for the SAME dtype
+      (`Dtype::Q8K`) - the three tiled/GEMV matmul kernels binding a
+      compressed `bits=4 + wh` `Weight::KQuant` while `moe_linear_gated_kq`
+      keeps binding an uncompressed `bits=8` one for the SAME logical GGUF
+      format, which is buildable in principle (`Weight::KQuant` instances are
+      already independently constructed per destination tensor, so two
+      differently-shaped Q5_K instances coexisting is not itself a
+      contradiction) but was not attempted here, or (b) freeing a slot by
+      merging two of the eight existing bindings (e.g. folding `xgs` into
+      `wsm`'s buffer, or `gate` into `out`), which is a genuine kernel-layout
+      redesign this milestone's scope did not budget for. Per this
+      milestone's own instructions ("that is a real blocker - report it
+      clearly rather than silently exceeding the limit or silently skipping
+      the MoE kernel's compression"), this is reported here rather than
+      forced: Q5_K's nibble+high-bit compression is deferred to a future
+      milestone with the design above recorded so it does not need
+      re-deriving, and NOTHING in this milestone's own shipped code claims
+      it is done (`gguf::kquant`'s and `model::kquant`'s module doc tables
+      both still state `Q5_K | bits=8`, matching what is actually built).
+
+**K-quant workstream status (M8-M14).** The native K-quant execution path is
+complete and shipped: M8 built the lossless host relayout for all six GGUF
+block formats into one canonical device shape; M9-M13 built the affine
+Q4_K/Q5_K GEMM/GEMV/MoE kernels, the group-16 reuse of the existing symmetric
+kernels for Q6_K, and wired all of it into the shared `backend_api`/
+`model::ops` dispatch seam every int8-tier model in this workspace already
+goes through; M14 shrank the device scale plane from a flat f32 array to a
+packed `(sc,m)`-byte + `(d,dmin)`-f16 pair, landing Q4_K within 3% of GGUF's
+own on-disk density. This whole path builds on the loader-seam foundation
+M0-M7 laid earlier in this same ledger (the `GgmlType` vocabulary, the
+`TensorSource::raw_blocks` zero-fp32 read path, and the `model::int8`/
+`quantize_from` helpers every migrated model crate now shares) - K-quant
+specifically needed `raw_blocks` to reach raw GGUF block bytes without a
+whole-tensor fp32 detour, which is the seam M1 built for Q8_0 and this
+workstream generalized. One real gap remains open, not from a missing
+capability but from an unexploited one: Q5_K's own device footprint (`1.57x`
+GGUF, the worst of the six) has a fully-designed, verified-worthwhile fix
+(M14's own "second compression target" note above) blocked on a genuine
+8-storage-buffer budget conflict in `moe_linear_gated_kq.wgsl`, deferred
+rather than forced. Every gate through M14 remains synthetic (see "Recorded
+gaps" below) - no real K-quant checkpoint has been run through this path on
+this box yet.
 - [ ] M15: split GGUF in `MmapGguf` (`mmaps: Vec<Mmap>`, part in the tensor
       index, one `LoadMeter` over summed bytes - all 17 method signatures
       stay byte-identical, no `Inner::GgufSharded` arm needed).

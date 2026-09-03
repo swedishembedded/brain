@@ -634,14 +634,16 @@ pub struct MoeIdsKQ {
 
 /// One affine K-quant expert linear's weight, in `model::ops::Weight::KQuant`'s
 /// own device layout (that module's doc table): `wq` is `[n, k*CODE_BITS/32]`
-/// u32 unsigned codes, `sz` is `[n, 2*k/32]` f32 INTERLEAVED `(ds, dm)` pairs.
-/// Read directly rather than through the `Ops` façade - this module predates
-/// `Ops` and dispatches every kernel by hand, the same precedent [`Lin8`]
-/// already set for the plain int8 tier.
+/// u32 unsigned codes; `wsm`/`wd` (M14) are the packed scale/min plane -
+/// `wsm` the per-group `(sc,m)` u8 pair (two groups/word), `wd` the
+/// per-super-block `(d,dmin)` f16 pair. Read directly rather than through the
+/// `Ops` façade - this module predates `Ops` and dispatches every kernel by
+/// hand, the same precedent [`Lin8`] already set for the plain int8 tier.
 #[derive(Clone, Copy)]
 pub struct LinKQ<'a> {
     pub wq: &'a DeviceBuffer,
-    pub sz: &'a DeviceBuffer,
+    pub wsm: &'a DeviceBuffer,
+    pub wd: &'a DeviceBuffer,
 }
 
 /// Scratch for one expert's affine K-quant FFN step - [`ExpertScratch8`] plus
@@ -687,7 +689,7 @@ pub fn expert_fwd_kq(
 ) -> Vec<Step> {
     let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
     let lin = |xq: &DeviceBuffer, sx: &DeviceBuffer, xgs: &DeviceBuffer, w: LinKQ, out: &DeviceBuffer, k: u32, n: u32| {
-        g.step(ids.linear_gated_kq, &[xq, w.wq, sx, w.sz, xgs, gate, out], &[m, k, n, e, e_idx], m * n)
+        g.step(ids.linear_gated_kq, &[xq, w.wq, sx, w.wsm, w.wd, xgs, gate, out], &[m, k, n, e, e_idx], m * n)
     };
     let quant_h = crate::int8::quant_rows_steps(
         g,

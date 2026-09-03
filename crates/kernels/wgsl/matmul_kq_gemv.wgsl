@@ -29,7 +29,8 @@
 //   xq  : [M, k/4]              u32 - 4 int8 activations packed along K per u32
 //   wq  : [N, k*CODE_BITS/32]   u32 - K-CONTIGUOUS unsigned codes, `32/CODE_BITS` codes per word, low bits first
 //   sx  : [M]                   f32 - per-token activation scale
-//   wsz : [N, 2*k/32]           f32 - interleaved (ds, dm) pairs, one pair per 32-element weight-scale group
+//   wsm : [N, ceil(k/32/2)]     u32 - (M14) packed per-group (sc, m) sub-scale byte pairs - see matmul_kq_dyn.wgsl's own header for the exact bit layout
+//   wd  : [N, ceil(k/32/GPS)]   u32 - (M14) packed per-super-block (d, dmin) f16 bit-pattern pairs, GPS=8 groups/super-block
 //   xgs : [M, k/32]             f32 - activation group sums (quant_group_sum.wgsl)
 //   out : [M, N]                f32 - out[m,n] = sx[m] * Σ_g( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
 //   params: m, k (RAW LOGICAL K - see matmul_kq_dyn's header for why this
@@ -86,14 +87,32 @@ struct Params {
 @group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
 @group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k*CODE_BITS/32]
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M]
-@group(0) @binding(4) var<storage, read>       wsz: array<f32>;  // [N, 2*k/32] interleaved (ds, dm)
-@group(0) @binding(5) var<storage, read>       xgs: array<f32>;  // [M, k/32]
-@group(0) @binding(6) var<storage, read_write> out: array<f32>;  // [M, N]
+@group(0) @binding(4) var<storage, read>       wsm: array<u32>;  // [N, ceil(k/32/2)] packed (sc, m) pairs
+@group(0) @binding(5) var<storage, read>       wd:  array<u32>;  // [N, ceil(k/32/GPS)] packed (d, dmin) f16 pairs
+@group(0) @binding(6) var<storage, read>       xgs: array<f32>;  // [M, k/32]
+@group(0) @binding(7) var<storage, read_write> out: array<f32>;  // [M, N]
 
 const CODE_BITS: u32 = 8u;  // template knob: 4 (Q4_K) or 8 (Q5_K)
 
 // Quads (4-element units) per weight-scale group (32 elements / 4).
 const WPGK: u32 = 8u;
+
+// Groups per `wd` super-block entry (M14 - see matmul_kq_dyn.wgsl's own
+// header for the full derivation and why this is a fixed compile-time
+// constant, not a per-dispatch parameter).
+const GPS: u32 = 8u;
+
+// The same magic-multiply/FTZ-safe f16 decode `matmul_kq_dyn.wgsl` carries,
+// duplicated per this codebase's "every kernel is self-contained WGSL text"
+// convention - but INLINED as a `let` sequence rather than a callable `fn`
+// here (see the two `{X}h_*` blocks in `main` below): this kernel is `@cpu
+// yes` (the CPU JIT must compile it), and `wgsl_cpu::Jit` does not support
+// a `Call` statement to a user-defined function - only builtins - so a
+// separate `f16_to_f32` function (as `matmul_kq_dyn.wgsl`/`matmul_kq_gemv_
+// reg.wgsl` use, both `@cpu no`) fails CPU JIT compilation here with
+// "unsupported statement Call". Inlining is exactly how `kernels::template::
+// f16_decode_expr` already handles the identical constraint for the bf16/
+// f16 WEIGHT STORAGE tier.
 
 // f32 accumulators in workgroup memory (indexed [m*64 + t]) - same layout as
 // matmul_i8_gemv, same CPU-JIT-compatible single-barrier shape.
@@ -115,9 +134,12 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     let wq_row_words = p.k * CODE_BITS / 32u; // wq words per row
     let qpwq = (32u / CODE_BITS) / 4u;        // quads packed per raw wq word
     let cmask = (1u << CODE_BITS) - 1u;       // low-CODE_BITS mask
+    let wsm_per_row = (ng + 1u) / 2u;         // wsm words per row (M14)
+    let wd_per_row = (ng + GPS - 1u) / GPS;   // wd words per row (M14)
 
     let wbase = col * wq_row_words;
-    let wszbase = col * 2u * ng;
+    let wsmbase = col * wsm_per_row;
+    let wdbase = col * wd_per_row;
 
     for (var g = t; g < kgx; g = g + 64u) {
         let word_idx = g / qpwq;
@@ -132,8 +154,39 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
 
         let grp = g / WPGK;
         let is_lead = (g % WPGK) == 0u;
-        let ds = wsz[wszbase + 2u * grp];
-        let dmv = select(0.0, wsz[wszbase + 2u * grp + 1u], is_lead);
+        // `ds` is read (and re-decoded) by every one of the 8 threads that
+        // share this group - correctness-equivalent to the OLD flat-`wsz`
+        // read, which was already redundant across those 8 threads the same
+        // way (`ds` MULTIPLIES each quad's own contribution, so redundant
+        // reads are harmless; only `dmv`, an ADDITIVE per-group term, must
+        // fire exactly once - see this kernel's own header for the guard).
+        let wword = wd[wdbase + grp / GPS];
+        let sword = wsm[wsmbase + grp / 2u];
+        let shift = select(0u, 16u, (grp % 2u) == 1u);
+
+        // Inline f16 decode of `d` (low half of `wword`) - see this file's
+        // own note above `main` for why this is a `let` sequence, not a
+        // callable function.
+        let dh = wword & 0xFFFFu;
+        let dh_exp = (dh >> 10u) & 0x1Fu;
+        let dh_sub = bitcast<f32>(0x38800000u | ((dh & 0x3FFu) << 13u)) - bitcast<f32>(0x38800000u);
+        let dh_norm = bitcast<f32>((dh & 0x7FFFu) << 13u) * bitcast<f32>(0x77800000u);
+        let dh_infnan = bitcast<f32>(0x7F800000u | ((dh & 0x3FFu) << 13u));
+        let dh_mag = select(select(dh_sub, dh_norm, dh_exp != 0u), dh_infnan, dh_exp == 31u);
+        let dh_f32 = bitcast<f32>(bitcast<u32>(dh_mag) | ((dh & 0x8000u) << 16u));
+
+        // Inline f16 decode of `dmin` (high half of `wword`) - identical
+        // construction, high half.
+        let dmh = wword >> 16u;
+        let dmh_exp = (dmh >> 10u) & 0x1Fu;
+        let dmh_sub = bitcast<f32>(0x38800000u | ((dmh & 0x3FFu) << 13u)) - bitcast<f32>(0x38800000u);
+        let dmh_norm = bitcast<f32>((dmh & 0x7FFFu) << 13u) * bitcast<f32>(0x77800000u);
+        let dmh_infnan = bitcast<f32>(0x7F800000u | ((dmh & 0x3FFu) << 13u));
+        let dmh_mag = select(select(dmh_sub, dmh_norm, dmh_exp != 0u), dmh_infnan, dmh_exp == 31u);
+        let dmh_f32 = bitcast<f32>(bitcast<u32>(dmh_mag) | ((dmh & 0x8000u) << 16u));
+
+        let ds = dh_f32 * f32((sword >> shift) & 0xFFu);
+        let dmv = select(0.0, dmh_f32 * f32((sword >> (shift + 8u)) & 0xFFu), is_lead);
 
         for (var m = 0u; m < p.m; m = m + 1u) {
             let xw = xq[m * kgx + g];

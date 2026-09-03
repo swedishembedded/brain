@@ -53,3 +53,7 @@ brain-testutil.workspace = true
 # `brain-data` does not depend on `brain-gpu-core`, so this is dev-only and
 # acyclic.
 brain-data.workspace = true
+# M14: packing/unpacking the K-quant `wd` plane's f16 (d, dmin) pair in test
+# fixtures - the same crate `crates/gguf/src/kquant.rs` uses for the real
+# encode/decode, dev-only here since this crate's own kernels never touch f16.
+half.workspace = true

@@ -32,7 +32,81 @@ use gpu_core::{DeviceBuffer, Gpu};
 use kernels::template::interned;
 use model::dispatch::I8Scratch;
 use model::int8::{quant_rows_steps, QuantRows, GROUP};
-use model::ops::{kernel_list, Ops, Weight};
+use model::ops::{kernel_list, KqScale, Ops, Weight};
+
+/// M14: groups per `wd` super-block entry - `matmul_kq_dyn.wgsl`'s own fixed
+/// `GPS=8` (256-element GGUF Q4_K/Q5_K super-block / 32-element group).
+const GPS: usize = 8;
+
+/// Pack per-group `(sc, m)` sub-scale byte pairs into `wsm: [n, ceil(ng/2)]`
+/// - `gguf::kquant`'s own bit layout, restated here since this crate's tests
+/// do not depend on `gguf`.
+fn pack_wsm(sc: &[u8], mn: &[u8], n: usize, ng: usize) -> Vec<u32> {
+    let words = ng.div_ceil(2);
+    let mut out = vec![0u32; n * words];
+    for r in 0..n {
+        for g in 0..ng {
+            let (w, shift) = (g / 2, if g % 2 == 0 { 0u32 } else { 16u32 });
+            out[r * words + w] |= (sc[r * ng + g] as u32) << shift;
+            out[r * words + w] |= (mn[r * ng + g] as u32) << (shift + 8);
+        }
+    }
+    out
+}
+
+/// Pack per-super-block `(d, dmin)` f16 pairs into `wd: [n, ceil(ng/GPS)]`.
+fn pack_wd(d: &[f32], dmin: &[f32], n: usize, spb_per_row: usize) -> Vec<u32> {
+    let mut out = vec![0u32; n * spb_per_row];
+    for r in 0..n {
+        for s in 0..spb_per_row {
+            let db = half::f16::from_f32(d[r * spb_per_row + s]).to_bits() as u32;
+            let dmb = half::f16::from_f32(dmin[r * spb_per_row + s]).to_bits() as u32;
+            out[r * spb_per_row + s] = db | (dmb << 16);
+        }
+    }
+    out
+}
+
+/// One `(sc, m, d_super, dmin_super)` decomposition - the effective `(ds,
+/// dm)` product `wsm`/`wd` decode to is `ds = d*sc`, `dm = dmin*m`, but this
+/// file's own gate compares the façade against a HAND-DISPATCHED call to the
+/// SAME underlying kernels on the SAME packed buffers (not a host f64
+/// oracle), so only the packed pieces themselves are needed here - `sc`/`m`
+/// positive-but-small (mimicking the real 6-bit `0..63` sub-scale range),
+/// `d_super`/`dmin_super` a per-super-block f16-representable magnitude.
+struct KqScaleFixture {
+    sc: Vec<u8>,
+    mn: Vec<u8>,
+    d_super: Vec<f32>,
+    dmin_super: Vec<f32>,
+}
+
+fn build_kq_scale(rng: &mut Lcg, n: usize, ng: usize, dmin_nonzero: bool) -> KqScaleFixture {
+    let spb_per_row = ng.div_ceil(GPS);
+    let sc: Vec<u8> = (0..n * ng).map(|_| 1 + (rng.next_u32() % 62) as u8).collect();
+    let mn: Vec<u8> = if dmin_nonzero { (0..n * ng).map(|_| 1 + (rng.next_u32() % 62) as u8).collect() } else { vec![0u8; n * ng] };
+    let d_super: Vec<f32> = (0..n * spb_per_row).map(|_| 0.001 + rng.unit() * 0.01).collect();
+    let dmin_super: Vec<f32> =
+        if dmin_nonzero { (0..n * spb_per_row).map(|_| 0.002 + rng.unit() * 0.02).collect() } else { vec![0f32; n * spb_per_row] };
+    KqScaleFixture { sc, mn, d_super, dmin_super }
+}
+
+impl KqScaleFixture {
+    fn wsm(&self, n: usize, ng: usize) -> Vec<u32> {
+        pack_wsm(&self.sc, &self.mn, n, ng)
+    }
+    fn wd(&self, n: usize, ng: usize) -> Vec<u32> {
+        pack_wd(&self.d_super, &self.dmin_super, n, ng.div_ceil(GPS))
+    }
+}
+
+/// `Gpu::storage_init` is f32-only; `wsm`/`wd` are packed `u32` words, so
+/// upload them through `storage` + `write` instead.
+fn storage_u32(g: &Gpu, data: &[u32]) -> DeviceBuffer {
+    let b = g.storage(data.len() as u64);
+    g.write(&b, data);
+    b
+}
 
 fn idx(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"))
@@ -49,19 +123,6 @@ fn pack_affine_words(codes: &[i32], bits: u32) -> Vec<u32> {
         .chunks_exact(per_word)
         .map(|c| c.iter().enumerate().fold(0u32, |w, (b, &v)| w | ((v as u32 & mask) << (bits * b as u32))))
         .collect()
-}
-
-/// Interleave `(ds, dm)` into `wsz: [n, 2*ng]` - `Weight::KQuant`'s own
-/// affine `sz` layout.
-fn build_wsz(ds: &[f32], dm: &[f32], n: usize, ng: usize) -> Vec<f32> {
-    let mut out = vec![0f32; n * 2 * ng];
-    for r in 0..n {
-        for g in 0..ng {
-            out[r * 2 * ng + 2 * g] = ds[r * ng + g];
-            out[r * 2 * ng + 2 * g + 1] = dm[r * ng + g];
-        }
-    }
-    out
 }
 
 fn rand_unsigned_codes(rng: &mut Lcg, n: usize, bits: u32) -> Vec<i32> {
@@ -98,16 +159,16 @@ fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'
     let mut rng = Lcg::new(0xA0000000_u64 ^ (dtype_seed(dtype) << 32) ^ m as u64 ^ ((n as u64) << 16) ^ ((k as u64) << 32));
     let x_h = rand_pos_f32(&mut rng, m * k, -8.0, 8.0);
     let codes_w = rand_unsigned_codes(&mut rng, n * k, bits);
-    let ds = rand_pos_f32(&mut rng, n * ng, 0.01, 0.5);
-    let dm = if dmin_nonzero { rand_pos_f32(&mut rng, n * ng, 0.05, 1.5) } else { vec![0f32; n * ng] };
+    let sc = build_kq_scale(&mut rng, n, ng, dmin_nonzero);
 
     let x = g.storage_init("x", &x_h);
     let wq_words = pack_affine_words(&codes_w, bits);
     let wq = g.storage(wq_words.len() as u64);
     g.write(&wq, &wq_words);
-    let wsz = g.storage_init("wsz", &build_wsz(&ds, &dm, n, ng));
+    let wsm = storage_u32(g, &sc.wsm(n, ng));
+    let wd = storage_u32(g, &sc.wd(n, ng));
 
-    let weight = Weight::KQuant { w: wq, sz: wsz, n: n as u32, k: k as u32, group: GROUP as u32, bits, affine: true };
+    let weight = Weight::KQuant { w: wq, sz: KqScale::Packed { wsm, wd }, n: n as u32, k: k as u32, group: GROUP as u32, bits, affine: true };
     assert_eq!(weight.dtype(), dtype, "Weight::KQuant.dtype() must resolve bits={bits} to {dtype:?}");
 
     // ---- Path A: the façade ----
@@ -130,10 +191,10 @@ fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'
         m as u32,
         k as u32,
     ));
-    let Weight::KQuant { w: wq2, sz: wsz2, .. } = &weight else { unreachable!() };
+    let Weight::KQuant { w: wq2, sz: KqScale::Packed { wsm: wsm2, wd: wd2 }, .. } = &weight else { unreachable!() };
     let out_want = g.storage((m * n) as u64);
     let params = [m as u32, k as u32, n as u32];
-    let bufs: [&DeviceBuffer; 6] = [scr.xq_for(k as u32), wq2, &scr.sx, wsz2, &xgs, &out_want];
+    let bufs: [&DeviceBuffer; 7] = [scr.xq_for(k as u32), wq2, &scr.sx, wsm2, wd2, &xgs, &out_want];
     if m <= 32 {
         want_steps.push(g.step(idx(g, gemv_kname), &bufs, &params, n as u32 * 64));
     } else {
@@ -209,8 +270,10 @@ fn kquant_matmul_refuses_an_activation_built_without_xgs() {
     let wq_words = pack_affine_words(&codes_w, 4);
     let wq = g.storage(wq_words.len() as u64);
     g.write(&wq, &wq_words);
-    let wsz = g.storage_init("wsz", &vec![0.1f32; n * 2 * (k / GROUP)]);
-    let weight = Weight::KQuant { w: wq, sz: wsz, n: n as u32, k: k as u32, group: GROUP as u32, bits: 4, affine: true };
+    let ng = k / GROUP;
+    let wsm = storage_u32(g, &vec![0x0101_0101u32; n * ng.div_ceil(2)]);
+    let wd = storage_u32(g, &vec![0x3000_3000u32; n * ng.div_ceil(GPS)]);
+    let weight = Weight::KQuant { w: wq, sz: KqScale::Packed { wsm, wd }, n: n as u32, k: k as u32, group: GROUP as u32, bits: 4, affine: true };
 
     let mut s = Vec::new();
     // Built with `Ops::act` (no xgs), not `Ops::act_kq` - must panic.

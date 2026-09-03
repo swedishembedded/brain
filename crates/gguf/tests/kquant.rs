@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The spec for `gguf::kquant::try_kq_rect`: for each of the six GGUF block
-//! formats it targets, the relaid-out `(wq, wsz)` must reconstruct to
+//! formats it targets, the relaid-out `(wq, wsm, wd)` must reconstruct to
 //! EXACTLY the same bytes `checkpoint::gguf::MmapGguf::tensor` (the oracle
 //! every other read path decodes through) produces - not merely close ones.
 //!
@@ -13,15 +13,18 @@
 //!
 //! This works because `try_kq_rect` performs no arithmetic on weight values:
 //! it only re-derives `ds`/`dm` with the identical expressions the oracle's
-//! private `deq_*` functions already use, and moves codes. So these tests use
-//! `assert_eq!` on the reconstructed `f32` values - if one goes red, the fix
-//! is to find the actual bit that disagrees, not to soften the assertion.
+//! private `deq_*` functions already use (M14: now via a packed `(sc,m)` u8
+//! pair times a shared f16 `(d,dmin)` pair rather than one flat f32 product,
+//! see `gguf::kquant`'s own module doc comment), and moves codes. So these
+//! tests use `assert_eq!` on the reconstructed `f32` values - if one goes
+//! red, the fix is to find the actual bit that disagrees, not to soften the
+//! assertion.
 
 use std::collections::HashMap;
 
 use checkpoint::gguf::MmapGguf;
 use checkpoint::quantize::{convert, Policy, Tier};
-use gguf::kquant::{try_kq_rect, unpack_row_codes, KqLayout};
+use gguf::kquant::{try_kq_rect, unpack_row_codes, unpack_row_scales, KqLayout};
 
 /// Deterministic filler with both signs and a magnitude spread, so
 /// neighbouring groups genuinely differ and a dropped or mis-indexed scale
@@ -52,21 +55,21 @@ fn fixture(tier: Tier, rows: usize, cols: usize, seed: u64, file: &str) -> (Mmap
 
 /// Reconstruct every element of a relaid-out rectangle back to f32, using
 /// exactly the algebra `try_kq_rect`'s own doc promises: `ds*code - dm`
-/// (affine) or `ds*code` (symmetric, `dm` is always `0.0`).
-fn reconstruct(wq: &[u32], wsz: &[f32], layout: &KqLayout) -> Vec<f32> {
+/// (affine) or `ds*code` (symmetric, `dm` is always `0.0`), with `(ds, dm)`
+/// unpacked from `(wsm, wd)` via `unpack_row_scales`.
+fn reconstruct(wq: &[u32], wsm: &[u32], wd: &[u32], layout: &KqLayout) -> Vec<f32> {
     let wpr = layout.words_per_row();
-    let gs = layout.groups_per_row();
+    let wsm_wpr = layout.wsm_words_per_row();
+    let wd_wpr = layout.wd_words_per_row();
     let mut out = Vec::with_capacity(layout.n * layout.k);
     for r in 0..layout.n {
         let words = &wq[r * wpr..(r + 1) * wpr];
         let codes = unpack_row_codes(words, layout);
         assert_eq!(codes.len(), layout.k);
-        let srow = &wsz[r * 2 * gs..(r + 1) * 2 * gs];
+        let (ds, dm) = unpack_row_scales(&wsm[r * wsm_wpr..(r + 1) * wsm_wpr], &wd[r * wd_wpr..(r + 1) * wd_wpr], layout);
         for (l, &code) in codes.iter().enumerate() {
             let g = l / layout.group;
-            let ds = srow[2 * g];
-            let dm = srow[2 * g + 1];
-            out.push(if layout.affine { ds * code as f32 - dm } else { ds * code as f32 });
+            out.push(if layout.affine { ds[g] * code as f32 - dm[g] } else { ds[g] * code as f32 });
         }
     }
     out
@@ -90,10 +93,10 @@ fn round_trips(tier: Tier, rows: usize, cols: usize, block: usize, seed: u64, fi
     let (g, path) = fixture(tier, rows, cols, seed, file);
 
     // Whole tensor.
-    let (wq, wsz, layout) = try_kq_rect(&g, "w", cols, 0, rows, 0, cols).unwrap_or_else(|| panic!("{}: whole-tensor rect must be servable", tier.name()));
+    let (wq, wsm, wd, layout) = try_kq_rect(&g, "w", cols, 0, rows, 0, cols).unwrap_or_else(|| panic!("{}: whole-tensor rect must be servable", tier.name()));
     assert_eq!(layout.n, rows);
     assert_eq!(layout.k, cols);
-    let got = reconstruct(&wq, &wsz, &layout);
+    let got = reconstruct(&wq, &wsm, &wd, &layout);
     let want = oracle_rect(&g, "w", cols, 0, rows, 0, cols);
     assert_eq!(got, want, "{}: whole-tensor reconstruction", tier.name());
 
@@ -102,8 +105,8 @@ fn round_trips(tier: Tier, rows: usize, cols: usize, block: usize, seed: u64, fi
     let n_out = rows - 2;
     let c0 = block;
     let k = cols - 2 * block;
-    let (wq, wsz, layout) = try_kq_rect(&g, "w", cols, r0, n_out, c0, k).unwrap_or_else(|| panic!("{}: sub-rectangle must be servable", tier.name()));
-    let got = reconstruct(&wq, &wsz, &layout);
+    let (wq, wsm, wd, layout) = try_kq_rect(&g, "w", cols, r0, n_out, c0, k).unwrap_or_else(|| panic!("{}: sub-rectangle must be servable", tier.name()));
+    let got = reconstruct(&wq, &wsm, &wd, &layout);
     let want = oracle_rect(&g, "w", cols, r0, n_out, c0, k);
     assert_eq!(got, want, "{}: sub-rectangle [{r0},{}) x [{c0},{}) reconstruction", tier.name(), r0 + n_out, c0 + k);
 
@@ -186,4 +189,51 @@ fn a_source_with_no_raw_blocks_declines() {
     // `raw_blocks`, which always declines - there is no quantized block
     // format to relay out of an already-f32 in-memory map.
     assert!(try_kq_rect(&ts, "w", 128, 0, 4, 0, 128).is_none());
+}
+
+/// (M14 gating (b)) The real device bytes-per-parameter for each of the six
+/// types, recomputed from the ACTUAL layout rather than guessed: `wq` costs
+/// `bits/8` bytes/param (no padding - `32/bits` codes/word exactly), `wsm`
+/// costs `2/group` bytes/param (one packed `(sc,m)` byte pair per group,
+/// two groups/word, `groups_per_row = k/group`, `wsm_words_per_row =
+/// groups_per_row/2` at the even group counts every case below uses), `wd`
+/// costs `4/spb` bytes/param (one packed `(d,dmin)` f16 pair per
+/// super-block, `wd_words_per_row = k/spb`). Per this codebase's own lesson
+/// about byte-cost formulas going stale silently: if this test ever goes
+/// red, the fix is to recompute the ceiling from the layout, never to widen
+/// the assertion's band.
+#[test]
+fn device_bytes_per_parameter_matches_the_recomputed_layout() {
+    // (tier, rows, cols, seed, file, bits, group, spb)
+    let cases: &[(Tier, u32, usize, usize, &str)] = &[
+        (Tier::Q4K, 4, 32, 256, "kquant-bpp-q4k.gguf"),
+        (Tier::Q5K, 8, 32, 256, "kquant-bpp-q5k.gguf"),
+        (Tier::Q6K, 8, 16, 256, "kquant-bpp-q6k.gguf"),
+        (Tier::Q5_0, 8, 32, 32, "kquant-bpp-q5-0.gguf"),
+        (Tier::Q4_0, 4, 32, 32, "kquant-bpp-q4-0.gguf"),
+        (Tier::Q8_0, 8, 32, 32, "kquant-bpp-q8-0.gguf"),
+    ];
+    let (rows, cols) = (4usize, 1024usize); // 1024 = 4 K-quant super-blocks, 32 legacy blocks
+    for &(tier, bits, group, spb, file) in cases {
+        let (g, path) = fixture(tier, rows, cols, 42, file);
+        let (wq, wsm, wd, layout) = try_kq_rect(&g, "w", cols, 0, rows, 0, cols).unwrap_or_else(|| panic!("{}: rect must be servable", tier.name()));
+        assert_eq!(layout.bits, bits, "{}: bits", tier.name());
+        assert_eq!(layout.group, group, "{}: group", tier.name());
+        assert_eq!(layout.spb, spb, "{}: spb", tier.name());
+
+        let total_bytes = (wq.len() + wsm.len() + wd.len()) * 4;
+        let n_params = rows * cols;
+        let got_bpp = total_bytes as f64 / n_params as f64;
+        let want_bpp = bits as f64 / 8.0 + 2.0 / group as f64 + 4.0 / spb as f64;
+        assert!(
+            (got_bpp - want_bpp).abs() < 1e-9,
+            "{}: device bytes/param = {got_bpp} (wq={} + wsm={} + wd={} bytes over {n_params} params), \
+             recomputed-from-layout formula (bits/8 + 2/group + 4/spb) says {want_bpp}",
+            tier.name(),
+            wq.len() * 4,
+            wsm.len() * 4,
+            wd.len() * 4
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

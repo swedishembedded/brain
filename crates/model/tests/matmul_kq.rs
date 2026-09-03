@@ -114,16 +114,70 @@ fn pack_affine_words(codes: &[i32], bits: u32) -> Vec<u32> {
         .collect()
 }
 
-/// Interleave `(ds, dm)` into `wsz: [n, 2*ng]`.
-fn build_wsz(ds: &[f32], dm: &[f32], n: usize, ng: usize) -> Vec<f32> {
-    let mut out = vec![0f32; n * 2 * ng];
+/// M14: groups per `wd` super-block entry - `matmul_kq_dyn.wgsl`'s own fixed
+/// `GPS=8` (256-element GGUF Q4_K/Q5_K super-block / 32-element group).
+const GPS: usize = 8;
+
+/// Pack per-group `(sc, m)` sub-scale byte pairs into `wsm: [n, ceil(ng/2)]`
+/// - `gguf::kquant`'s own bit layout, restated here since this crate's tests
+/// do not depend on `gguf`.
+fn pack_wsm(sc: &[u8], mn: &[u8], n: usize, ng: usize) -> Vec<u32> {
+    let words = ng.div_ceil(2);
+    let mut out = vec![0u32; n * words];
     for r in 0..n {
         for g in 0..ng {
-            out[r * 2 * ng + 2 * g] = ds[r * ng + g];
-            out[r * 2 * ng + 2 * g + 1] = dm[r * ng + g];
+            let (w, shift) = (g / 2, if g % 2 == 0 { 0u32 } else { 16u32 });
+            out[r * words + w] |= (sc[r * ng + g] as u32) << shift;
+            out[r * words + w] |= (mn[r * ng + g] as u32) << (shift + 8);
         }
     }
     out
+}
+
+/// Pack per-super-block `(d, dmin)` f16 pairs into `wd: [n, ceil(ng/GPS)]`.
+fn pack_wd(d: &[f32], dmin: &[f32], n: usize, spb_per_row: usize) -> Vec<u32> {
+    let mut out = vec![0u32; n * spb_per_row];
+    for r in 0..n {
+        for s in 0..spb_per_row {
+            let db = half::f16::from_f32(d[r * spb_per_row + s]).to_bits() as u32;
+            let dmb = half::f16::from_f32(dmin[r * spb_per_row + s]).to_bits() as u32;
+            out[r * spb_per_row + s] = db | (dmb << 16);
+        }
+    }
+    out
+}
+
+/// `Gpu::storage_init` is f32-only; `wsm`/`wd` (and `wq`, `xq`) are packed
+/// `u32` words, so upload them through `storage` + `write` instead.
+fn storage_u32(g: &Gpu, data: &[u32]) -> DeviceBuffer {
+    let b = g.storage(data.len() as u64);
+    g.write(&b, data);
+    b
+}
+
+/// The effective per-group `(ds, dm)` device reconstruction from the
+/// decomposed `(sc, m, d_super, dmin_super)` pieces `wsm`/`wd` pack: `ds =
+/// f16(d).to_f32() * sc as f32`, `dm = f16(dmin).to_f32() * m as f32` - so
+/// the f64 host oracle consumes EXACTLY what the packed device buffers mean,
+/// not an independently-random value the compressed format could not
+/// actually represent (a real Q4_K/Q5_K super-block constrains 8 groups to
+/// share one `(d, dmin)` pair, so per-group values are not fully
+/// independent - the SOURCE of randomness for these tests is therefore the
+/// decomposed pieces, not `ds`/`dm` directly).
+fn effective_ds_dm(sc: &[u8], mn: &[u8], d_super: &[f32], dmin_super: &[f32], n: usize, ng: usize) -> (Vec<f32>, Vec<f32>) {
+    let spb_per_row = ng.div_ceil(GPS);
+    let mut ds = vec![0f32; n * ng];
+    let mut dm = vec![0f32; n * ng];
+    for r in 0..n {
+        for g in 0..ng {
+            let s = r * spb_per_row + g / GPS;
+            let dv = half::f16::from_f32(d_super[s]).to_f32();
+            let dmv = half::f16::from_f32(dmin_super[s]).to_f32();
+            ds[r * ng + g] = dv * sc[r * ng + g] as f32;
+            dm[r * ng + g] = dmv * mn[r * ng + g] as f32;
+        }
+    }
+    (ds, dm)
 }
 
 /// The activation-only prepass term computed directly from int8 codes
@@ -237,8 +291,14 @@ struct Scenario {
     codes_x: Vec<i8>,
     sx_h: Vec<f32>,
     codes_w: Vec<i32>,
-    ds: Vec<f32>,
-    dm: Vec<f32>,
+    /// Per-group sub-scale bytes (M14 decomposed source of `ds`/`dm` - see
+    /// `effective_ds_dm`'s own doc comment for why these, not `ds`/`dm`
+    /// directly, are the scenario's real randomness source).
+    sc: Vec<u8>,
+    mn: Vec<u8>,
+    /// Per-super-block (`GPS=8` groups) f16-packed shared scale.
+    d_super: Vec<f32>,
+    dmin_super: Vec<f32>,
 }
 
 impl Scenario {
@@ -248,9 +308,8 @@ impl Scenario {
         let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
         let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
         let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
-        let ds = rand_pos_f32(seed ^ 0x54, n * ng, 0.01, 0.5);
-        let dm = if dmin_nonzero { rand_pos_f32(seed ^ 0x55, n * ng, 0.05, 1.5) } else { vec![0f32; n * ng] };
-        Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, ds, dm }
+        let (sc, mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng, dmin_nonzero);
+        Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc, mn, d_super, dmin_super }
     }
 
     fn ng(&self) -> usize {
@@ -261,13 +320,18 @@ impl Scenario {
         host_group_sums(&self.codes_x, self.m, self.k, self.group)
     }
 
+    fn ds_dm(&self) -> (Vec<f32>, Vec<f32>) {
+        effective_ds_dm(&self.sc, &self.mn, &self.d_super, &self.dmin_super, self.n, self.ng())
+    }
+
     fn oracle(&self) -> Vec<f32> {
-        host_oracle_affine(&self.codes_x, &self.sx_h, &self.codes_w, &self.ds, &self.dm, self.m, self.k, self.n, self.group)
+        let (ds, dm) = self.ds_dm();
+        host_oracle_affine(&self.codes_x, &self.sx_h, &self.codes_w, &ds, &dm, self.m, self.k, self.n, self.group)
     }
 
     /// Upload every buffer this scenario needs, in the kernels' own binding
-    /// order: xq, wq, sx, wsz, xgs.
-    fn upload(&self, g: &Gpu) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+    /// order: xq, wq, sx, wsm, wd, xgs.
+    fn upload(&self, g: &Gpu) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
         let xq_words = pack_i8_words(&self.codes_x);
         let xq = g.storage(xq_words.len() as u64);
         g.write(&xq, &xq_words);
@@ -277,28 +341,62 @@ impl Scenario {
         g.write(&wq, &wq_words);
 
         let sx = g.storage_init("sx", &self.sx_h);
-        let wsz = g.storage_init("wsz", &build_wsz(&self.ds, &self.dm, self.n, self.ng()));
+        let wsm = storage_u32(g, &pack_wsm(&self.sc, &self.mn, self.n, self.ng()));
+        let wd = storage_u32(g, &pack_wd(&self.d_super, &self.dmin_super, self.n, self.ng().div_ceil(GPS)));
         let xgs = g.storage_init("xgs", &self.xgs());
-        (xq, wq, sx, wsz, xgs)
+        (xq, wq, sx, wsm, wd, xgs)
     }
 }
 
-fn run_dyn(g: &Gpu, name: &str, sc: &Scenario, bufs: &(DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer)) -> Vec<f32> {
-    let (xq, wq, sx, wsz, xgs) = bufs;
+type Bufs6 = (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer);
+
+fn run_dyn(g: &Gpu, name: &str, sc: &Scenario, bufs: &Bufs6) -> Vec<f32> {
+    let (xq, wq, sx, wsm, wd, xgs) = bufs;
     let threads = (sc.m as u32).div_ceil(128) * (sc.n as u32).div_ceil(128) * 256;
     let params = [sc.m as u32, sc.k as u32, sc.n as u32];
     let out = g.storage((sc.m * sc.n) as u64);
-    g.submit(&[], &[g.step(idx(g, name), &[xq, wq, sx, wsz, xgs, &out], &params, threads)]);
+    g.submit(&[], &[g.step(idx(g, name), &[xq, wq, sx, wsm, wd, xgs, &out], &params, threads)]);
     g.read(&out, sc.m * sc.n)
 }
 
-fn run_gemv(g: &Gpu, name: &str, sc: &Scenario, bufs: &(DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer)) -> Vec<f32> {
-    let (xq, wq, sx, wsz, xgs) = bufs;
+fn run_gemv(g: &Gpu, name: &str, sc: &Scenario, bufs: &Bufs6) -> Vec<f32> {
+    let (xq, wq, sx, wsm, wd, xgs) = bufs;
     assert!(sc.m <= 32, "matmul_kq_gemv requires m <= 32 (got {})", sc.m);
     let params = [sc.m as u32, sc.k as u32, sc.n as u32];
     let out = g.storage((sc.m * sc.n) as u64);
-    g.submit(&[], &[g.step(idx(g, name), &[xq, wq, sx, wsz, xgs, &out], &params, sc.n as u32 * 64)]);
+    g.submit(&[], &[g.step(idx(g, name), &[xq, wq, sx, wsm, wd, xgs, &out], &params, sc.n as u32 * 64)]);
     g.read(&out, sc.m * sc.n)
+}
+
+/// `Scenario::random`'s own `(sc, mn, d_super, dmin_super)` generation,
+/// factored out so a hand-built `Scenario` literal (case1/3/4/5 below) can
+/// reuse it instead of duplicating the decomposition logic.
+fn rand_kq_scale(seed: u64, n: usize, ng: usize, dmin_nonzero: bool) -> (Vec<u8>, Vec<u8>, Vec<f32>, Vec<f32>) {
+    let spb = ng.div_ceil(GPS);
+    let sc: Vec<u8> = rand_pos_f32(seed ^ 0x54, n * ng, 1.0, 63.0).into_iter().map(|v| v as u8).collect();
+    let mn: Vec<u8> = if dmin_nonzero {
+        rand_pos_f32(seed ^ 0x55, n * ng, 1.0, 63.0).into_iter().map(|v| v as u8).collect()
+    } else {
+        vec![0u8; n * ng]
+    };
+    // Ranges chosen so the EFFECTIVE product `ds = d_super*sc`/`dm =
+    // dmin_super*mn` reproduces this file's pre-M14 direct-`ds`/`dm` ranges
+    // (`[0.01, 0.5]`/`[0.05, 1.5]`, what the 5e-4 `max_rel` ceiling below was
+    // originally measured against) rather than a wider envelope the
+    // decomposed `(sc, d_super)` representation could otherwise reach: `sc`/
+    // `mn` top out at 62 (see above), so `d_super in [0.0003, 0.008]` caps
+    // `ds` at `~0.5`, and `dmin_super in [0.001, 0.024]` caps `dm` at `~1.5`.
+    // A wider `d_super`/`dmin_super` span was measured to push a genuine
+    // sub-rectangle/ragged-tile case's `max_rel` past the calibrated ceiling
+    // (`~1e-3` vs `5e-4`) purely through larger-magnitude fp32 accumulation
+    // noise on an output element with a small true value, not a kernel
+    // defect (`f16_to_f32`'s magic-multiply/FTZ decode was checked bit-exact
+    // against `half::f16` for all 65536 patterns before this range was
+    // narrowed) - restoring the pre-M14 magnitude envelope keeps the same
+    // numerical risk profile the ceiling was calibrated against.
+    let d_super = rand_pos_f32(seed ^ 0x56, n * spb, 0.0003, 0.008);
+    let dmin_super = if dmin_nonzero { rand_pos_f32(seed ^ 0x57, n * spb, 0.001, 0.024) } else { vec![0f32; n * spb] };
+    (sc, mn, d_super, dmin_super)
 }
 
 fn dyn_variant(g_kernels: &mut Vec<(&'static str, &'static str)>, bits: u32) -> &'static str {
@@ -378,16 +476,39 @@ fn case1_dmin_zero_vs_nonzero_are_genuinely_different() {
     // sizeable, so a missing `dm` term is a systematic shift, not noise.
     let mut state = seed ^ 0x53;
     let codes_w: Vec<i32> = (0..n * k).map(|_| 8 + ((lcg_next(&mut state) >> 33) as u32 % 8) as i32).collect();
-    let ds = rand_pos_f32(seed ^ 0x54, n * ng, 0.2, 0.5);
-    let dm_zero = vec![0f32; n * ng];
-    let dm_nonzero = rand_pos_f32(seed ^ 0x55, n * ng, 0.3, 1.2);
+    // `d_super = 0.01`, `sc in [20,50]` -> `ds = d_super*sc in [0.2, 0.5]`,
+    // matching this case's original range - see `effective_ds_dm`'s own doc
+    // comment for why the scenario's real randomness source is the
+    // decomposed `(sc, d_super)` pair, not `ds` directly.
+    let spb = ng.div_ceil(GPS);
+    let sc_bytes: Vec<u8> = rand_pos_f32(seed ^ 0x54, n * ng, 20.0, 50.0).into_iter().map(|v| v as u8).collect();
+    let d_super = vec![0.01f32; n * spb];
+    let mn_zero = vec![0u8; n * ng];
+    let dmin_super_zero = vec![0f32; n * spb];
+    // `dmin_super = 0.01`, `mn in [30,120]` -> `dm = dmin_super*mn in [0.3, 1.2]`.
+    let mn_nonzero: Vec<u8> = rand_pos_f32(seed ^ 0x55, n * ng, 30.0, 120.0).into_iter().map(|v| v as u8).collect();
+    let dmin_super_nonzero = vec![0.01f32; n * spb];
 
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
 
-    let sc_zero = Scenario { m, k, n, bits, group, codes_x: codes_x.clone(), sx_h: sx_h.clone(), codes_w: codes_w.clone(), ds: ds.clone(), dm: dm_zero };
-    let sc_nonzero = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, ds, dm: dm_nonzero };
+    let sc_zero = Scenario {
+        m,
+        k,
+        n,
+        bits,
+        group,
+        codes_x: codes_x.clone(),
+        sx_h: sx_h.clone(),
+        codes_w: codes_w.clone(),
+        sc: sc_bytes.clone(),
+        mn: mn_zero,
+        d_super: d_super.clone(),
+        dmin_super: dmin_super_zero,
+    };
+    let sc_nonzero =
+        Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn: mn_nonzero, d_super, dmin_super: dmin_super_nonzero };
 
     let got_zero = run_dyn(&g, dn, &sc_zero, &sc_zero.upload(&g));
     let got_nonzero = run_dyn(&g, dn, &sc_nonzero, &sc_nonzero.upload(&g));
@@ -419,19 +540,23 @@ fn case2_sub_block_scale_variation_across_groups() {
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
     let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
+    // `ng == GPS == 8` here (one whole super-block), so a single shared
+    // `d_super = base` with `sc[gi] = 2^gi` reproduces `ds[gi] = base*2^gi`
+    // EXACTLY (an integer power-of-two sub-scale, no rounding) - the group
+    // variation lives entirely in `sc`, which is exactly what a real Q4_K/
+    // Q5_K super-block's own per-group sub-scale byte represents.
+    assert_eq!(ng, GPS, "case2 setup: this case's sc=2^gi construction assumes exactly one super-block");
     let base = 0.01f32;
-    let mut ds = vec![0f32; n * ng];
-    for r in 0..n {
-        for gi in 0..ng {
-            ds[r * ng + gi] = base * (1u32 << gi) as f32;
-        }
-    }
-    let dm = vec![0f32; n * ng];
+    let spb = ng.div_ceil(GPS);
+    let sc_bytes: Vec<u8> = (0..n * ng).map(|i| 1u8 << (i % ng)).collect();
+    let d_super = vec![base; n * spb];
+    let mn = vec![0u8; n * ng];
+    let dmin_super = vec![0f32; n * spb];
 
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
-    let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, ds, dm };
+    let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     assert_matches_oracle("case2 sub-block scale variation", &got, &sc.oracle());
 }
@@ -465,13 +590,12 @@ fn case3_mixed_sign_activation_full_range_codes() {
     // would corrupt.
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
     let ng = k / group;
-    let ds = rand_pos_f32(seed ^ 0x54, n * ng, 0.01, 0.5);
-    let dm = rand_pos_f32(seed ^ 0x55, n * ng, 0.05, 1.5);
+    let (sc_bytes, mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng, true);
 
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
-    let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, ds, dm };
+    let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     assert_matches_oracle("case3 mixed-sign activation, full-range codes", &got, &sc.oracle());
 }
@@ -488,12 +612,14 @@ fn case4_all_zero_subblock_no_nan() {
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
     let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
     let mut codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
-    let mut ds = rand_pos_f32(seed ^ 0x54, n * ng, 0.01, 0.5);
-    let mut dm = rand_pos_f32(seed ^ 0x55, n * ng, 0.05, 1.5);
-    // Zero out group 3 entirely, for every output row.
+    let (mut sc_bytes, mut mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng, true);
+    // Zero out group 3 entirely, for every output row: `sc=0` makes
+    // `ds=d_super*0` exactly `0.0`, `mn=0` makes `dm` exactly `0.0` too - no
+    // separate "zero ds/dm directly" path needed, the decomposition already
+    // reaches zero exactly through an integer zero sub-scale.
     for r in 0..n {
-        ds[r * ng + 3] = 0.0;
-        dm[r * ng + 3] = 0.0;
+        sc_bytes[r * ng + 3] = 0;
+        mn[r * ng + 3] = 0;
         for j in 0..group {
             codes_w[r * k + 3 * group + j] = 0;
         }
@@ -502,7 +628,7 @@ fn case4_all_zero_subblock_no_nan() {
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
-    let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, ds, dm };
+    let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     assert_matches_oracle("case4 all-zero sub-block", &got, &sc.oracle());
 }
@@ -522,13 +648,15 @@ fn case5_subrectangle_nonzero_origin_two_superblocks() {
     let codes_x = rand_i8_codes(seed ^ 0x51, m * k, -100, 100);
     let sx_h = rand_pos_f32(seed ^ 0x52, m, 0.3, 1.7);
     let codes_w = rand_unsigned_codes(seed ^ 0x53, n * k, bits);
-    let ds = rand_pos_f32(seed ^ 0x54, n * ng, 0.01, 0.5);
-    let dm = rand_pos_f32(seed ^ 0x55, n * ng, 0.05, 1.5);
+    // `ng == 16 == 2*GPS` - two genuinely different super-blocks' worth of
+    // `d_super` (the "exercises two genuinely different d values" this
+    // case's own doc comment names), each with 8 independently-random `sc`.
+    let (sc_bytes, mn, d_super, dmin_super) = rand_kq_scale(seed, n, ng, true);
 
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
-    let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, ds, dm };
+    let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     let want = sc.oracle();
     assert_matches_oracle("case5 full grid", &got, &want);

@@ -25,9 +25,15 @@
 //! affine family; signed, bias-folded, low-bits two's complement for the
 //! symmetric family.
 //!
-//! `wsz: [n, 2*k/G] f32` - interleaved `(scale, min)` pairs, one pair per
-//! `G`-element group of the reduction axis `k`. `min == 0.0` whenever the
-//! type is symmetric (`affine == false`).
+//! (M14) The weight-scale plane is no longer one flat `wsz: [n, 2*k/G] f32`
+//! interleaved `(scale, min)` array. It is now TWO packed planes - `wsm: [n,
+//! ceil(k/G/2)] u32` (per-group `(sc, m)` sub-scale byte pair, two groups
+//! per word) and `wd: [n, k/spb] u32` (per-super-block `(d, dmin)` f16 bit-
+//! pattern pair, `spb` elements sharing one entry - 256 for Q4_K/Q5_K, `G`
+//! itself for a type with no coarser grouping) - see `gguf::kquant`'s own
+//! module doc comment (the crate this restates from) for the exact bit
+//! layout and the decode expressions `ds = f16_to_f32(d) * f32(sc)`, `dm =
+//! f16_to_f32(dmin) * f32(m)`.
 //!
 //! ## The three instantiations
 //!
@@ -85,6 +91,9 @@ pub struct KqDeviceLayout {
     /// Whether reconstruction needs `ds*code - dm` (true) or just `ds*code`
     /// (false, `dm` is always `0.0`).
     pub affine: bool,
+    /// Elements sharing one `wd` `(d, dmin)` f16 pair - `256` for Q4_K/Q5_K
+    /// (`matmul_kq_dyn.wgsl`'s own `GPS=8` groups/super-block, `8*32=256`).
+    pub spb: usize,
 }
 
 impl KqDeviceLayout {
@@ -92,10 +101,17 @@ impl KqDeviceLayout {
     pub fn words_per_row(&self) -> usize {
         self.k * self.bits as usize / 32
     }
-    /// `wsz` groups per output row: `k/group`. `wsz` itself holds `2*` this
-    /// many f32s per row (interleaved scale, min).
+    /// Weight-scale groups per output row: `k/group`.
     pub fn groups_per_row(&self) -> usize {
         self.k / self.group
+    }
+    /// `wsm` words per output row: two groups' `(sc, m)` pairs per word.
+    pub fn wsm_words_per_row(&self) -> usize {
+        self.groups_per_row().div_ceil(2)
+    }
+    /// `wd` words per output row: one `(d, dmin)` pair per super-block.
+    pub fn wd_words_per_row(&self) -> usize {
+        self.k / self.spb
     }
 }
 
@@ -108,13 +124,17 @@ mod tests {
     /// device buffer allocation actually needs.
     #[test]
     fn affine_32_group_shape() {
-        let q4k = KqDeviceLayout { n: 5, k: 256, bits: 4, group: 32, affine: true };
+        let q4k = KqDeviceLayout { n: 5, k: 256, bits: 4, group: 32, affine: true, spb: 256 };
         assert_eq!(q4k.words_per_row(), 32, "256*4/32");
         assert_eq!(q4k.groups_per_row(), 8, "256/32");
+        assert_eq!(q4k.wsm_words_per_row(), 4, "ceil(8/2)");
+        assert_eq!(q4k.wd_words_per_row(), 1, "256/256");
 
-        let q5k = KqDeviceLayout { n: 5, k: 256, bits: 8, group: 32, affine: true };
+        let q5k = KqDeviceLayout { n: 5, k: 256, bits: 8, group: 32, affine: true, spb: 256 };
         assert_eq!(q5k.words_per_row(), 64, "256*8/32");
         assert_eq!(q5k.groups_per_row(), 8, "256/32");
+        assert_eq!(q5k.wsm_words_per_row(), 4, "ceil(8/2)");
+        assert_eq!(q5k.wd_words_per_row(), 1, "256/256");
     }
 
     /// Q6_K's odd one out: an 8-bit code like Q5_K/Q8_0, but a 16-element
@@ -122,7 +142,7 @@ mod tests {
     /// (32 int8 = one group) every OTHER int8 kernel in this tree assumes.
     #[test]
     fn q6_k_group16_shape_does_not_match_bkg8() {
-        let q6k = KqDeviceLayout { n: 5, k: 256, bits: 8, group: 16, affine: false };
+        let q6k = KqDeviceLayout { n: 5, k: 256, bits: 8, group: 16, affine: false, spb: 256 };
         assert_eq!(q6k.words_per_row(), 64, "256*8/32");
         assert_eq!(q6k.groups_per_row(), 16, "256/16, NOT 256/32");
         assert_ne!(q6k.groups_per_row(), q6k.words_per_row() / 8, "one group is 4 words here, not 8");

@@ -1142,6 +1142,7 @@ dependencies = [
  "brain-memauth",
  "brain-testutil",
  "bytemuck",
+ "half",
  "libc",
  "tracing",
 ]
