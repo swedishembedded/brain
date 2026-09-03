@@ -1000,3 +1000,113 @@ asserts the contract fires (a `finish_reason` is always resolved, `tools:
 "none"` never demands a call) without asserting which `finish_reason` a
 specific image/tools/max_new combination produces, since that is a property
 of the checkpoint's own weights, not of this plumbing.
+
+## qwen3vl - LoRA fine-tuning wired: forward+backward+AdamW over a captioned-image dataset
+
+Before this session, `DecoderBuild::Batched` (`Qwen::new`, the full
+trainable-parameter graph) had exactly one caller -
+`model::tests::end_to_end_forward_is_finite` - which forwards once and checks
+the loss is finite. Nothing ever called `backward()`, nothing stepped an
+optimizer, and `Qwen3VlConfig`'s `text: QwenConfig` never set `lora`. This
+session closes that: `crate::finetune::run` builds the decoder via
+`Qwen3Vl::from_tensors_train` (`DecoderBuild::Batched` + `cfg.text.lora =
+Some(LoraCfg{..})`), loops `zero_grads -> forward -> backward -> adamw_step`
+over `data::imageset::load_dir`'s captioned-image folder format (the one
+`brain label` already writes), and saves an adapter-only checkpoint via
+`Qwen3Vl::save_lora_adapter` (a one-line wrapper over `qwen3::lora::save_adapter`
+- no new save/fold logic, reuses `model::lora::device_adapter` end to end).
+Exposed as the `lora_train` capability::Action on `qwen3vl::caps::QwenVlProvider`
+(catalog.rs already registers this provider with `resident: None`, matching
+`generate`'s own pre-existing state - see the "capability-action vs CLI-only"
+note below), returning the trained bytes as an output blob per
+`.agents/rules/serving-contract.md`'s "training actions return their artifact
+as a blob" rule (pattern: `zimage::caps`'s `lora_train`).
+
+**Only the decoder trains.** `Qwen3Vl::new`'s vision tower + PatchMerger(s)
+are built from plain weight maps with no gradient buffers regardless of
+`DecoderBuild` - `backward()` reaches only whatever the decoder's own
+`ParamStore` role assignment marks Trainable (LoRA: `.lora_a`/`.lora_b` only).
+Adapting the vision tower too would need `DecoderBuild` (or a sibling)
+extended with a trainable vision-encoder graph, which does not exist. This is
+the same scope `qwen3::finetune::Mode::Lora` has on the text-only model,
+carried over unchanged - not a new limitation introduced here.
+
+**Training images share one fixed size per run**, unlike `caps.rs`'s
+per-request `smart_resize`. The batched decoder graph is built once at a
+fixed `seq_len` and a fixed image-token placement (`image_row0`/`n_visual`),
+so every sample must produce the same visual-token count;
+`data::imageset::load_dir`'s own center-crop-then-resize-to-`size` already
+guarantees that geometry, so `crate::finetune` just derives the patch grid
+from the same `size` rather than adding a second restriction. A caption that
+overflows the fixed `seq_len` token budget is skipped and named in the
+progress stream, never silently truncated.
+
+**Capability-action, not a CLI-only verb - and why.** `qwen3vl::caps` already
+exposes `generate` as a `capability::Action`; adding `lora_train` the same
+way costs nothing new (the same `Provider`/`Invocation`/`Outcome` plumbing
+`catalog.rs` already wires to `brain do qwen3vl …` and `brain caps`) and
+gives it the D-Bus/HTTP path for free the moment this crate gets a residency
+adapter, whereas a bespoke `brain qwen3vl finetune` subcommand would be a
+second entry point to keep in sync and would need its own future migration
+off the CLI. No concrete reason was found for a CLI-only route on this crate
+specifically - `catalog.rs`'s existing `qwen3vl` entry already carries
+`resident: None` with the comment "no residency adapter yet - `brain
+caps`/`brain do` only, matching fastvlm's own state", a PRE-EXISTING,
+already-documented gap (AGENTS.md's model ledger, `13d.`/`13c-bis.`) that this
+change does not touch, worsen, or pretend to close. `lora_train` inherits
+exactly that state: reachable via `brain do qwen3vl lora_train …`/`brain
+caps`, not yet over D-Bus - honest, not new.
+
+**Gradcheck scope, stated precisely.** No new device kernel and no new
+differentiable math were added - the decoder's LoRA forward/backward is
+exactly the code `gradcheck::check_qwen_lora` already finite-difference-checks
+on a bare `qwen3::Qwen`, the M-RoPE table path is `check_qwen_mrope`'s, and the
+image-embedding splice gradient is `check_vlm_splice`'s. What is new is the
+COMPOSITION - wiring `cfg.text.lora` through `Qwen3Vl::new` and driving
+`Qwen3Vl::forward`/`backward` together for the first time - so
+`crate::model`'s new `lora_delta_gradient_matches_finite_difference` test
+hand-rolls an elementwise central-difference check (`gradcheck::
+elementwise_check`'s own recipe, on a handful of `lora_a` entries of one
+projection) through the FULL composite forward, not just the isolated
+decoder. A whole-model `gradcheck` entry point for `Qwen3Vl` itself (a
+`CheckModel` impl over the composite, added to `crates/gradcheck`) was NOT
+built - `Qwen3Vl::forward` takes `(tokens, targets, grid, pixels)`, not the
+`CheckModel::loss(&self)` no-argument shape the blanket `model::Model` impl
+needs, so wiring it in would mean either changing that trait's contract or a
+bespoke adapter, and the per-piece coverage above already exercises every
+math primitive this loop composes. This is a real, explicitly-scoped gap, not
+an oversight.
+
+**A real finding from building `crate::train_smoke`'s convergence test, worth
+recording because it cost real debugging time and would recur:** a
+FROM-SCRATCH random tiny transformer plus a FROM-SCRATCH random low-rank
+LoRA adapter, trained on arbitrary random targets, can converge to a real
+(gradient-confirmed, non-zero, shrinking-towards-zero) LOCAL MINIMUM within
+~100 steps that is nowhere near the achievable floor - repeatably, across
+rank 4/8/16, learning rates spanning 1e-2 to 1e-1, and with/without gradient
+clipping, all landing on materially the same plateau. This is NOT the same
+bug class as `check_qwen_lora`'s own doc note ("a few AdamW steps run first
+so the zero-initialised `B` adapter... is non-trivial before the FD
+comparison") - that note is about `A`'s gradient being exactly zero at
+`B = 0` (true here too, confirmed by direct grad-norm dumps), not about a
+stall AFTER `B` moves. The same architecture under FULL (non-LoRA) training
+collapses the identical single-example loss to ~0 within ~100 steps -
+confirmed directly while diagnosing this, not asserted by any checked-in
+test, since it is not what `crate::finetune` ships - which rules out a
+forward/backward wiring bug in `Qwen3Vl`/`crate::finetune` (the SAME composite
+forward is exercised both ways) and points at LoRA's own `dA ∝ B` coupling
+(state in `lora_fwd`/`proj_bwd`, `crates/qwen3/src/model.rs`) interacting
+badly with a from-scratch random init and a frozen, TIED (`tie_embeddings:
+true`) `d_model < vocab` embedding/head, which caps the reachable logit
+subspace at rank `d_model` regardless of how much the projections' LoRA
+adapts. `crate::train_smoke`'s convergence test therefore asserts a real but
+modest bound (loss must fall below 90% of its start, cycling three distinct
+image/caption pairs) rather than an overfit-to-near-zero claim like
+`fastvlm::train_smoke`'s single-example test makes - that stronger claim
+would be honest for a REAL pretrained checkpoint (where the base
+representations are already well-organized, unlike random init) but is not
+what this synthetic smoke test's own architecture can support, and asserting
+it here would make the test seed-lucky rather than meaningful. Anyone porting
+this convergence-smoke pattern to a different tiny synthetic LoRA test should
+budget for the same investigation rather than assuming a stuck loss is
+automatically a wiring bug.

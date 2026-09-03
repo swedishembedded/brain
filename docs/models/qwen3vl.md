@@ -14,7 +14,7 @@ single image. For dedicated single-purpose captioning instead, see
 |---|---|
 | Inference             | [x] |
 | Sampling (temperature/top-k/top-p) | [x] |
-| LoRA fine-tune         | [ ] |
+| LoRA fine-tune         | [x] |
 | CLI                    | [x] |
 | HTTP API               | [x] (OpenAI + Anthropic chat, auto-exposed - `generate`'s shape matches `apiserve::catalog::api_caps`'s chat classification) |
 | D-Bus                  | [x] (`Run`/`Subscribe`, `examples/vision/qwen3vl_caption.py`) |
@@ -250,6 +250,42 @@ here (rather than just raising the env default within what a card can hold)
 needs the same paged-KV/M-RoPE-aware serving `qwen3vl` does not have yet -
 see `.agents/roadmap/vlm.md`.
 
+## LoRA fine-tuning
+
+`lora_train` fine-tunes a LoRA adapter for the DECODER on a folder of
+captioned images (`data::imageset`'s `captions.yaml`/`captions.jsonl` - the
+same format `brain label` writes). Only the decoder's attention + MLP
+projections adapt; the vision tower and PatchMerger(s) stay frozen.
+
+```bash
+brain do qwen3vl lora_train \
+  --weights /path/to/qwen3-vl \
+  --data /path/to/captioned/images \
+  --save adapter.safetensors \
+  --rank 8 --steps 500
+```
+
+- `data` - folder with images + `captions.yaml`/`captions.jsonl` (required).
+- `save` - output path for the trained adapter (required). Also returned as
+  the `adapter` output blob - a remote client has no filesystem access to
+  `save` on the server.
+- `weights` - the base checkpoint to adapt (defaults to `BRAIN_QWEN3VL_WEIGHTS`).
+- `rank`/`alpha` - LoRA capacity/scale (defaults 8 / 16.0).
+- `steps`/`lr` - training steps and peak learning rate (cosine schedule).
+- `size` - training image square size, px; must be a multiple of
+  `patch_size * spatial_merge_size` (32 for the 4B config). Every image in a
+  run is center-cropped and resized to this ONE fixed size, so every sample
+  produces the same visual-token count - the trainable decoder graph is built
+  once, at a fixed image placement.
+- `seq_len` - fixed per-sample token budget (prompt + caption, padded). A
+  caption that overflows it is skipped (named in the progress stream), never
+  silently truncated.
+
+The vision tower has no trainable path in this composite - only the
+decoder's own `.lora_a`/`.lora_b` adapters are ever built with gradient
+buffers - and each training step forwards/backwards exactly one sample
+(no data-parallel accumulation across a batch).
+
 ## Hardware and limits
 
 Served (CLI, D-Bus, HTTP) one request at a time, fp32 by default (int8
@@ -260,8 +296,9 @@ independently and so batches across requests), Qwen3-VL's vision tower feeds
 directly into the decoder's own incremental KV-cache splice, so every
 request is its own multi-step decode with its own prompt, its own
 image-token placement and its own KV cache - there is no stage that is both
-shared across requests and independent of each one's state. No
-LoRA/fine-tuning command yet.
+shared across requests and independent of each one's state. `lora_train`
+(see "LoRA fine-tuning" above) is CLI/capability-only - not yet reachable
+over the D-Bus/HTTP resident surface `generate` uses.
 
 Prefill runs one token at a time, so its cost is linear in the prompt and
 close to the card's memory bandwidth. There is no batched prefill and no

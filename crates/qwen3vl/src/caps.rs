@@ -81,7 +81,7 @@
 
 use std::sync::Mutex;
 
-use capability::{Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress, Provider};
+use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use data::qwen_chat::{self, TemplateFlavor, TemplateOpts};
 use data::tokenizer::Tokenizer;
 use qwen3::chat::{parse_tool_choice, parse_tools, tool_schema_names, ParsedRequest, SeqState, ToolChoice};
@@ -282,14 +282,39 @@ pub fn generate_spec() -> ActionSpec {
     .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
+/// `lora_train` - fine-tune a LoRA adapter for the decoder on a folder of
+/// captioned images. The vision tower stays frozen (see
+/// `crate::finetune`'s own module doc: this composite's `DecoderBuild::Batched`
+/// only ever gives the DECODER gradient buffers) - only the decoder's
+/// attention+MLP projections adapt.
+pub fn lora_train_spec() -> ActionSpec {
+    ActionSpec::new("lora_train", "fine-tune a LoRA adapter for the decoder on a folder of captioned images (data::imageset's captions.yaml/.jsonl - the format `brain label` writes)")
+        .streaming()
+        .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required())
+        .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required())
+        .param(
+            ParamSpec::new("weights", ParamType::Str, "base Qwen3-VL checkpoint DIRECTORY to adapt (config.json + model.safetensors[.index.json] + tokenizer.json)")
+                .default(json!(default_weights())),
+        )
+        .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(8)))
+        .param(ParamSpec::new("alpha", ParamType::Float, "LoRA alpha (delta scale = alpha/rank)").default(json!(16.0)))
+        .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(200)))
+        .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (cosine schedule)").default(json!(1e-4)))
+        .param(ParamSpec::new("size", ParamType::Int, "training image square size, px (must be a multiple of patch_size*spatial_merge_size)").default(json!(224)))
+        .param(ParamSpec::new("seq_len", ParamType::Int, "fixed per-sample token budget (prompt + caption, padded); a caption that overflows it is skipped, not truncated").default(json!(256)))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
+        .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"))
+}
+
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
         "Qwen3-VL -- image + text in, text out. Validation-tier: fp32 weights by default \
          (int8 decoder opt-in), temperature/top-k/top-p sampling (greedy by default), \
          one request at a time (no batching), context capacity set by $BRAIN_QWEN3VL_CTX \
-         (clamped to the checkpoint's own declared max_position_embeddings).",
-        vec![generate_spec()],
+         (clamped to the checkpoint's own declared max_position_embeddings). \
+         `lora_train` fine-tunes a decoder-only LoRA adapter on a captioned-image folder.",
+        vec![generate_spec(), lora_train_spec()],
     )
 }
 
@@ -476,7 +501,11 @@ impl Provider for QwenVlProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<std::sync::Arc<dyn Action>> {
-        (name == "generate").then(|| std::sync::Arc::new(GenerateAction) as std::sync::Arc<dyn Action>)
+        match name {
+            "generate" => Some(std::sync::Arc::new(GenerateAction) as std::sync::Arc<dyn Action>),
+            "lora_train" => Some(std::sync::Arc::new(LoraTrainAction) as std::sync::Arc<dyn Action>),
+            _ => None,
+        }
     }
 }
 
@@ -559,6 +588,46 @@ impl Action for GenerateAction {
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
         with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, video_frames, tool_choice, &tools, progress))
+    }
+}
+
+struct LoraTrainAction;
+
+impl Action for LoraTrainAction {
+    fn spec(&self) -> ActionSpec {
+        lora_train_spec()
+    }
+
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
+        if dir.is_empty() {
+            return Err("qwenvl lora_train: no base checkpoint directory (set 'weights' or $BRAIN_QWEN3VL_WEIGHTS)".to_string());
+        }
+        let data = inv.get_str("data").ok_or("qwenvl lora_train: 'data' folder is required")?;
+        let save = inv.get_str("save").ok_or("qwenvl lora_train: 'save' path is required")?;
+        let opts = crate::finetune::TrainOpts {
+            rank: inv.get_i64("rank").unwrap_or(8).max(1) as u32,
+            alpha: inv.get_f64("alpha").unwrap_or(16.0) as f32,
+            steps: inv.get_i64("steps").unwrap_or(200).max(1) as u32,
+            lr: inv.get_f64("lr").unwrap_or(1e-4) as f32,
+            size: inv.get_i64("size").unwrap_or(224).max(1) as u32,
+            seq_len: inv.get_i64("seq_len").unwrap_or(256).max(1) as u32,
+            seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+            ..crate::finetune::TrainOpts::default()
+        };
+        let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
+        let (initial_loss, final_loss) = crate::finetune::run(&dir, std::path::Path::new(&data), &opts, &save, &inv.cancel, &mut prog)?;
+
+        // Return the trained artifact itself, not just its server-side path -
+        // a remote client has no filesystem access to `save` (serving-contract:
+        // "training actions return their artifact as a blob").
+        let bytes = std::fs::read(&save).map_err(|e| format!("qwenvl lora_train: read trained adapter '{save}': {e}"))?;
+        Ok(Outcome::new()
+            .set("adapter", json!(save))
+            .set("steps", json!(opts.steps))
+            .set("initial_loss", json!(initial_loss))
+            .set("final_loss", json!(final_loss))
+            .blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"path": save}))))
     }
 }
 

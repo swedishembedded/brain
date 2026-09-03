@@ -17,6 +17,7 @@ pub mod caps;
 pub mod captioner;
 pub mod config;
 pub mod encoder;
+pub mod finetune;
 pub mod gguf_import;
 pub mod import;
 pub mod model;
@@ -25,6 +26,8 @@ mod parity;
 pub mod mrope;
 pub mod preprocess;
 pub mod sample;
+#[cfg(test)]
+mod train_smoke;
 pub mod vision;
 
 pub use model::Qwen3Vl;

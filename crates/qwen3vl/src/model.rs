@@ -231,6 +231,65 @@ impl Qwen3Vl {
         Qwen3Vl { vgpu, vcfg, encoder, merger, ds_mergers, decoder, merge, image_token_id, mrope_section }
     }
 
+    /// Assemble a TRAINING build (`DecoderBuild::Batched`, decoder config
+    /// carrying `Some(LoraCfg)`) from already-loaded HF tensors.
+    ///
+    /// `ParamStore::new_with_roles_src` needs every trainable/frozen tensor
+    /// its role list names to be present in the source it reads from, and a
+    /// base checkpoint never contains `.lora_a`/`.lora_b` (nothing trained
+    /// them yet). So this mirrors `qwen3::finetune::finetune`'s own
+    /// init-then-overwrite: seed the WHOLE decoder param set fresh via
+    /// [`qwen3::init_weights`] (which gives every LoRA adapter its standard
+    /// `A ~ small random, B = 0` init - `B = 0` is what makes the freshly
+    /// LoRA-ed model start identical to the frozen base), then overwrite
+    /// every base tensor the checkpoint actually has with the checkpoint's
+    /// own value. The vision tower + mergers need no such merge - they carry
+    /// no LoRA and are frozen, so they load directly from the checkpoint.
+    ///
+    /// Panics if `dcfg.lora` is `None`: this constructor exists for LoRA
+    /// fine-tuning specifically (see [`crate::finetune`]), not general
+    /// training - a full-parameter batched build has no missing tensors to
+    /// merge and should use [`Self::new`] with [`DecoderBuild::Batched`] directly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_tensors_train(
+        tensors: Vec<checkpoint::safetensors::StTensor>,
+        vcfg: VisionConfig,
+        dcfg: QwenConfig,
+        seq_len: u32,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+        seed: u64,
+    ) -> Qwen3Vl {
+        assert!(dcfg.lora.is_some(), "from_tensors_train: dcfg.lora must be Some(..) - this constructor is for LoRA fine-tuning");
+        let map: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
+        let w = crate::import::partition(map, vcfg.deepstack_indexes.len());
+        let mut dweights = qwen3::init_weights(&dcfg, seed);
+        for (k, v) in w.decoder {
+            dweights.insert(k, v);
+        }
+        Qwen3Vl::new(vcfg, dcfg, w.vision, w.main_merger, w.deepstack, &dweights, seq_len, image_token_id, image_row0, n_visual, mrope_section, DecoderBuild::Batched)
+    }
+
+    /// [`Self::from_tensors_train`] reading straight from an HF checkpoint
+    /// directory (`config.json` + `model.safetensors[.index.json]`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_hf_train(
+        dir: &str,
+        vcfg: VisionConfig,
+        dcfg: QwenConfig,
+        seq_len: u32,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+        seed: u64,
+    ) -> Result<Qwen3Vl, String> {
+        let tensors = checkpoint::safetensors::read_model_dir(std::path::Path::new(dir))?;
+        Ok(Self::from_tensors_train(tensors, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section, seed))
+    }
+
     /// Assemble from already-loaded HF tensors (name → f32). Partitions them via
     /// [`crate::import`] and constructs the model for a fixed image placement.
     #[allow(clippy::too_many_arguments)]
@@ -341,6 +400,60 @@ impl Qwen3Vl {
         self.decoder.write_img_embeds(&visual);
         self.decoder.set_batch(tokens, targets);
         self.decoder.forward()
+    }
+
+    /// Zero the decoder's gradient buffers before a training step. The vision
+    /// tower + mergers are never trainable in this composite (see
+    /// [`DecoderBuild::Batched`]'s doc), so there is nothing else here to zero.
+    pub fn zero_grads(&self) {
+        self.decoder.zero_grads();
+    }
+
+    /// Backprop through the decoder from the loss [`Self::forward`] returned.
+    /// Reaches only whatever the decoder's own training mode marks trainable
+    /// (LoRA: `.lora_a`/`.lora_b` only) - the vision tower + mergers were
+    /// built as plain frozen weights ([`Self::new`]) and have no gradient
+    /// buffers, even though the loss depends on their output through the
+    /// spliced image embeddings.
+    pub fn backward(&self) {
+        self.decoder.backward();
+    }
+
+    /// One AdamW step over the decoder's trainable parameters.
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        self.decoder.adamw_step(t, lr, wd, clip, extra_scale);
+    }
+
+    /// Names of the decoder's trainable parameters (LoRA: `.lora_a`/`.lora_b`
+    /// only) - for inspection / finite-difference checks, never the hot
+    /// training path.
+    pub fn decoder_param_names(&self) -> Vec<String> {
+        use ::model::Model;
+        self.decoder.param_names()
+    }
+
+    /// Read back one decoder weight tensor by its `qwen3::Qwen` param-store
+    /// name (e.g. `"blocks.0.attn.wq.weight.lora_a"`).
+    pub fn read_decoder_weight(&self, name: &str) -> Vec<f32> {
+        self.decoder.read_weight(name)
+    }
+
+    /// Overwrite one decoder weight tensor in place - finite-difference checks only.
+    pub fn write_decoder_weight(&self, name: &str, data: &[f32]) {
+        self.decoder.write_weight(name, data);
+    }
+
+    /// Read back one decoder parameter's gradient (post-[`Self::backward`]).
+    pub fn read_decoder_grad(&self, name: &str) -> Vec<f32> {
+        self.decoder.read_grad(name)
+    }
+
+    /// Write only the decoder's `.lora_a`/`.lora_b` tensors - never the
+    /// frozen base, and never the vision tower (never trainable in this
+    /// composite) - to `path`. Panics if this model's decoder was not built
+    /// with a `LoraCfg`. See `qwen3::lora::save_adapter`.
+    pub fn save_lora_adapter(&self, path: &str, card_id: &str, base_id: &str, dataset_id: Option<&str>) -> std::io::Result<()> {
+        qwen3::lora::save_adapter(path, &self.decoder, card_id, base_id, dataset_id)
     }
 
     /// Greedy KV-cache generation for zero-or-more images + a text prompt:
@@ -1367,5 +1480,158 @@ mod tests {
         let want_positions = crate::mrope::get_rope_index_video(&tokens, VIDEO, (2, 1, 1), &frame_timestamps_s, 1.0);
         let other_positions = crate::mrope::get_rope_index_video(&tokens, VIDEO, (2, 1, 1), &[0.0, 9.0], 1.0);
         assert_ne!(want_positions, other_positions, "sanity: the two timestamp spacings used above must actually produce different positions");
+    }
+
+    /// Finite-difference check on the decoder's LoRA delta parameters
+    /// (`.lora_a`/`.lora_b`) through the FULL composite forward (vision tower
+    /// -> merger -> M-RoPE splice -> LoRA decoder), not just the bare
+    /// decoder `gradcheck::check_qwen_lora` already covers in isolation. This
+    /// test's job is the COMPOSITION added by [`crate::finetune`]: that
+    /// wiring `QwenConfig::lora` through [`Qwen3Vl::new`] and driving
+    /// [`Qwen3Vl::forward`]/[`Qwen3Vl::backward`] still backprops correctly
+    /// into the adapters once the vision splice and M-RoPE tables are also
+    /// in the graph.
+    ///
+    /// Elementwise central differences (`gradcheck::elementwise_check`'s own
+    /// recipe, hand-rolled here rather than pulling in the `gradcheck` crate:
+    /// `Qwen3Vl::forward` takes extra arguments `gradcheck::CheckModel::loss`
+    /// does not, so the fixed batch is closed over instead) on a HANDFUL of
+    /// entries of one targeted projection's `lora_a`, not every entry - the
+    /// composition either backprops correctly for every entry or for none,
+    /// so an exhaustive sweep would only cost more wall time for the same
+    /// answer. **Honest scope**: this is the smallest new trainable surface,
+    /// per-parameter; a whole-model `gradcheck` entry point for this
+    /// composite (a `CheckModel` impl over `Qwen3Vl` itself) is NOT added
+    /// here and remains open work.
+    #[test]
+    fn lora_delta_gradient_matches_finite_difference() {
+        let vcfg = VisionConfig {
+            depth: 2,
+            hidden: 32,
+            num_heads: 2,
+            intermediate: 64,
+            patch_size: 2,
+            temporal_patch_size: 1,
+            spatial_merge_size: 2,
+            num_position_embeddings: 16,
+            out_hidden_size: 40,
+            in_channels: 2,
+            deepstack_indexes: vec![], // no DeepStack needed for this check
+            tokens_per_second: 2,
+        };
+        let dcfg = QwenConfig {
+            vocab: 23,
+            block_size: 16,
+            n_layers: 2,
+            d_model: 40,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 8,
+            d_ff: 64,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 16,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: Some(qwen3::LoraCfg::attn(2, 4.0)),
+        };
+
+        let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
+        let mut vspecs: Vec<(&str, usize, bool)> = vec![
+            ("patch_embed.weight", c * pv, false),
+            ("patch_embed.bias", c, false),
+            ("pos_embed", vcfg.num_position_embeddings as usize * c, false),
+        ];
+        let block_leaf_dims: Vec<(String, usize, bool)> = (0..vcfg.depth)
+            .flat_map(|b| {
+                [
+                    (format!("blocks.{b}.norm1.weight"), c, true),
+                    (format!("blocks.{b}.norm1.bias"), c, false),
+                    (format!("blocks.{b}.qkv.weight"), 3 * c * c, false),
+                    (format!("blocks.{b}.qkv.bias"), 3 * c, false),
+                    (format!("blocks.{b}.proj.weight"), c * c, false),
+                    (format!("blocks.{b}.proj.bias"), c, false),
+                    (format!("blocks.{b}.norm2.weight"), c, true),
+                    (format!("blocks.{b}.norm2.bias"), c, false),
+                    (format!("blocks.{b}.fc1.weight"), mlp * c, false),
+                    (format!("blocks.{b}.fc1.bias"), mlp, false),
+                    (format!("blocks.{b}.fc2.weight"), c * mlp, false),
+                    (format!("blocks.{b}.fc2.bias"), c, false),
+                ]
+            })
+            .collect();
+        for (n, s, o) in &block_leaf_dims {
+            vspecs.push((n.as_str(), *s, *o));
+        }
+        let vweights = rand_map(Rng::new(41), &vspecs);
+
+        let merged = c * 4;
+        let mweights = rand_map(
+            Rng::new(42),
+            &[
+                ("ln.weight", c, true),
+                ("ln.bias", c, false),
+                ("fc1.weight", merged * merged, false),
+                ("fc1.bias", merged, false),
+                ("fc2.weight", 40 * merged, false),
+                ("fc2.bias", 40, false),
+            ],
+        );
+
+        let dweights = qwen3::init_weights(&dcfg, 43);
+
+        let tokens: Vec<u32> = vec![1, 2, IMG, IMG, IMG, IMG, 3];
+        let mut targets = vec![2u32, 3, 0, 0, 0, 0, 5];
+        for t in targets.iter_mut().take(6).skip(2) {
+            *t = qwen3::IGNORE;
+        }
+
+        let model =
+            Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, vec![], &dweights, tokens.len() as u32, IMG, 2, 4, [2, 1, 1], DecoderBuild::Batched);
+
+        let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
+        let mut rng = Rng::new(44);
+        let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
+
+        // Move B off its zero init first - an FD check at B=0 can't tell a
+        // correct dB from a wrong one, both start at exactly zero. Same
+        // recipe as `gradcheck::check_qwen_lora`.
+        for step in 1..=5u32 {
+            model.zero_grads();
+            model.forward(&tokens, &targets, (4, 4), &pixels);
+            model.backward();
+            model.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        }
+
+        let loss = |m: &Qwen3Vl| m.forward(&tokens, &targets, (4, 4), &pixels);
+        let (eps, name) = (5e-3f32, "blocks.0.attn.wq.weight.lora_a");
+        model.zero_grads();
+        let _ = loss(&model);
+        model.backward();
+        let w0 = model.read_decoder_weight(name);
+        let g = model.read_decoder_grad(name);
+        assert_eq!(g.len(), w0.len(), "{name}: grad/weight size mismatch");
+        assert!(!w0.is_empty());
+
+        let mut w = w0.clone();
+        let n_check = w0.len().min(6);
+        for i in 0..n_check {
+            w[i] = w0[i] + eps;
+            model.write_decoder_weight(name, &w);
+            let lp = loss(&model);
+            w[i] = w0[i] - eps;
+            model.write_decoder_weight(name, &w);
+            let lm = loss(&model);
+            w[i] = w0[i];
+
+            let numeric = (lp - lm) / (2.0 * eps);
+            let analytic = g[i];
+            let abs_err = (analytic - numeric).abs();
+            let denom = analytic.abs().max(numeric.abs()).max(1e-3);
+            let rel_err = abs_err / denom;
+            assert!(rel_err < 5e-2, "{name}[{i}]: analytic {analytic} vs numeric {numeric} (rel_err {rel_err})");
+        }
+        model.write_decoder_weight(name, &w0);
     }
 }
