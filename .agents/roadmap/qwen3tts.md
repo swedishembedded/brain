@@ -191,14 +191,27 @@ real perceptual-quality lever, not API decoration.
 
 Two genuinely different gaps, don't conflate them:
 
-- [ ] **Cheap**: the `windowed` codec-during-generation path
-      (`generate_codes_kv_streaming`, interleaves codec decode with Talker
-      generation) already exists but is opt-in
-      (`BRAIN_QWEN3TTS_CODEC=windowed`) -- the default `npu-stream`/`cpu-stream`
-      paths generate the ENTIRE code sequence before streaming the codec
-      decode. Measure `windowed`'s real time-to-first-audio vs default on
-      this box's hardware, then make it the default if it wins (or expose it
-      as a documented, tested `--stream-codec` flag either way).
+- [ ] **Cheap, but NOT measurable on this box**: the `windowed`
+      codec-during-generation path (`generate_codes_kv_streaming`,
+      interleaves codec decode with Talker generation) already exists but is
+      opt-in (`BRAIN_QWEN3TTS_CODEC=windowed`) -- the default
+      `npu-stream`/`cpu-stream` paths generate the ENTIRE code sequence
+      before streaming the codec decode. `brain qwen3tts serve` (the only
+      entry point that exercises any of `npu-stream`/`cpu-stream`/`windowed`
+      -- `synth`/`clone`/`design` don't run through `serve::TtsEngine` at
+      all) needs the OpenVINO runtime regardless of target device
+      (`NpuDevice::Cpu` still dlopens `libopenvino.so`, it just targets
+      OpenVINO's CPU plugin instead of NPU silicon). Checked on this box:
+      `libopenvino.so` itself is entirely absent (only two leftover
+      NPU-compiler-loader shim libraries are registered in `ldconfig`, no
+      Python `openvino` module either) -- `brain qwen3tts serve
+      --design-... ` hangs past 40s with zero output even with
+      `BRAIN_QWEN3TTS_NPU_DEVICE=cpu`. This isn't the NPU-firmware gap
+      tracked elsewhere ([[brain-npu-container-blocked]]) -- it's one level
+      more basic, the runtime library is missing outright. Measure
+      `windowed`'s real time-to-first-audio vs default on a box with a real
+      OpenVINO install, then make it the default if it wins (or expose it as
+      a documented, tested `--stream-codec` flag either way).
 - [ ] **Hard, lower priority**: true incremental TEXT streaming (extend the
       input token-by-token while acoustic decode is already running, the
       "dual-track" architecture Qwen's own README claims ~97ms TTFA for).
