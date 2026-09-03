@@ -24,6 +24,11 @@ brain-data.workspace = true
 # rather than reimplemented; `brain-model` does not depend on this crate, so
 # there is no cycle.
 brain-model.workspace = true
+# `paramstore::upload::Uploader` - the shared chunked-upload driver
+# `model::int8::upload_quantized` requires, so a quantized weight streams
+# through the same drain discipline every other int8 tier in this workspace
+# already uses instead of bypassing it.
+brain-paramstore.workspace = true
 # The `tracing` FACADE only, never a subscriber - `--trace-ltxv <0-5>` (the
 # family that covers this crate's caller) turns the per-layer events on; with
 # no subscriber installed each macro is a predictable-branch no-op, so

@@ -168,8 +168,17 @@ impl Precision {
     }
 }
 
-fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
-    &w.get(name).unwrap_or_else(|| panic!("gemma4: missing weight {name}")).1
+/// A `TensorSource` read for small per-layer vectors (norm gains, the layer
+/// scalar), never a projection matrix. `with_tensor`'s callback only lends
+/// the slice for the call, so this returns owned data; the extra copy is
+/// negligible at this size.
+fn tget_owned(w: &dyn checkpoint::TensorSource, name: &str) -> Vec<f32> {
+    let mut d = None;
+    let found = w.with_tensor(name, &mut |v| d = Some(v.to_vec()));
+    match (found, d) {
+        (true, Some(v)) => v,
+        _ => panic!("gemma4: missing weight {name}"),
+    }
 }
 
 fn upload(gpu: &Gpu, data: &[f32]) -> DeviceBuffer {
@@ -196,23 +205,33 @@ enum Proj {
 }
 
 impl Proj {
-    /// Upload `[n, k]` row-major fp32 weight data at `precision`.
-    fn upload(gpu: &Gpu, data: &[f32], n: usize, k: usize, precision: Precision) -> Proj {
+    /// Load `[n, k]` projection `name` straight from `source` (any
+    /// `TensorSource`, not just an eager map) at `precision`. `n`/`k` come
+    /// from the CALLER's own config-derived dims rather than the tensor's
+    /// stored shape - unlike the old `Tensors`-map-only version, a bare
+    /// `TensorSource` has no shape info to read shape from beyond `numel`.
+    /// The Int8 arm routes through `model::int8::upload_quantized`, which
+    /// tries a zero-fp32 Q8_0 byte repack (`TensorSource::raw_blocks`) before
+    /// falling back to a bounded fp32 decode - reachable now that `source`
+    /// need not already be a fully-materialized eager `Tensors` map.
+    fn load(gpu: &Gpu, source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize, precision: Precision) -> Proj {
         match precision {
-            Precision::Fp32 => Proj::F32(upload(gpu, data)),
+            Precision::Fp32 => {
+                let mut data = None;
+                let found = source.with_tensor(name, &mut |d| data = Some(d.to_vec()));
+                let data = match (found, data) {
+                    (true, Some(d)) => d,
+                    _ => panic!("gemma4: missing weight {name}"),
+                };
+                assert_eq!(data.len(), n * k, "gemma4: {name} has {} elements, expected {n}*{k}", data.len());
+                Proj::F32(upload(gpu, &data))
+            }
             Precision::Int8 => {
-                let (packed, sw) = ::model::int8::quantize_weight(data, n, k);
-                let wb = gpu.storage(packed.len() as u64);
-                gpu.write(&wb, &packed);
-                Proj::I8 { w: wb, sw: upload(gpu, &sw) }
+                let mut up = paramstore::upload::Uploader::new(gpu);
+                let (packed, sw) = model::int8::upload_quantized(&mut up, source, name, n, k).unwrap_or_else(|e| panic!("gemma4: {e}"));
+                Proj::I8 { w: packed, sw }
             }
         }
-    }
-
-    fn from_tensors(gpu: &Gpu, w: &Tensors, name: &str, precision: Precision) -> Proj {
-        let (shape, data) = w.get(name).unwrap_or_else(|| panic!("gemma4: missing weight {name}"));
-        assert_eq!(shape.len(), 2, "gemma4: {name} is a projection and must be rank 2, got {shape:?}");
-        Proj::upload(gpu, data, shape[0], shape[1], precision)
     }
 }
 
@@ -233,11 +252,25 @@ struct AttnWeights {
 }
 
 impl AttnWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, head_dim: u32, k_eq_v: bool, precision: Precision) -> AttnWeights {
-        let q_norm_raw = tget(w, &format!("{prefix}.q_norm.weight"));
+    /// `q_dim`/`kv_dim`/`hidden` are the caller's own config-derived
+    /// projection dims (a bare `TensorSource` has no shape to derive them
+    /// from - see [`Proj::load`]'s doc).
+    #[allow(clippy::too_many_arguments)]
+    fn upload(
+        gpu: &Gpu,
+        w: &dyn checkpoint::TensorSource,
+        prefix: &str,
+        head_dim: u32,
+        q_dim: usize,
+        kv_dim: usize,
+        hidden: usize,
+        k_eq_v: bool,
+        precision: Precision,
+    ) -> AttnWeights {
+        let q_norm_raw = tget_owned(w, &format!("{prefix}.q_norm.weight"));
         // Mismatch 1 (this module's doc): fold `sqrt(head_dim)` into q_norm's
-        // UPLOADED weight only - the host `Tensors` map (and hence anything
-        // else that might read `q_norm.weight` later) is untouched.
+        // UPLOADED weight only - the source is read-only either way, so
+        // nothing else that might read `q_norm.weight` later is affected.
         //
         // Note this fold survives the int8 tier untouched: `q_norm` is a
         // norm gain, never a projection, so it is fp32 in both tiers and the
@@ -245,13 +278,13 @@ impl AttnWeights {
         let scale = (head_dim as f32).sqrt();
         let q_norm_scaled: Vec<f32> = q_norm_raw.iter().map(|v| v * scale).collect();
         AttnWeights {
-            wq: Proj::from_tensors(gpu, w, &format!("{prefix}.q_proj.weight"), precision),
+            wq: Proj::load(gpu, w, &format!("{prefix}.q_proj.weight"), q_dim, hidden, precision),
             q_norm: upload(gpu, &q_norm_scaled),
-            wk: Proj::from_tensors(gpu, w, &format!("{prefix}.k_proj.weight"), precision),
-            k_norm: upload(gpu, tget(w, &format!("{prefix}.k_norm.weight"))),
-            wv: (!k_eq_v).then(|| Proj::from_tensors(gpu, w, &format!("{prefix}.v_proj.weight"), precision)),
+            wk: Proj::load(gpu, w, &format!("{prefix}.k_proj.weight"), kv_dim, hidden, precision),
+            k_norm: upload(gpu, &tget_owned(w, &format!("{prefix}.k_norm.weight"))),
+            wv: (!k_eq_v).then(|| Proj::load(gpu, w, &format!("{prefix}.v_proj.weight"), kv_dim, hidden, precision)),
             v_norm_ones: upload(gpu, &vec![1.0f32; head_dim as usize]),
-            wo: Proj::from_tensors(gpu, w, &format!("{prefix}.o_proj.weight"), precision),
+            wo: Proj::load(gpu, w, &format!("{prefix}.o_proj.weight"), hidden, q_dim, precision),
             k_eq_v,
         }
     }
@@ -264,11 +297,11 @@ struct MlpWeights {
 }
 
 impl MlpWeights {
-    fn upload(gpu: &Gpu, w: &Tensors, prefix: &str, precision: Precision) -> MlpWeights {
+    fn upload(gpu: &Gpu, w: &dyn checkpoint::TensorSource, prefix: &str, hidden: usize, intermediate: usize, precision: Precision) -> MlpWeights {
         MlpWeights {
-            gate: Proj::from_tensors(gpu, w, &format!("{prefix}.gate_proj.weight"), precision),
-            up: Proj::from_tensors(gpu, w, &format!("{prefix}.up_proj.weight"), precision),
-            down: Proj::from_tensors(gpu, w, &format!("{prefix}.down_proj.weight"), precision),
+            gate: Proj::load(gpu, w, &format!("{prefix}.gate_proj.weight"), intermediate, hidden, precision),
+            up: Proj::load(gpu, w, &format!("{prefix}.up_proj.weight"), intermediate, hidden, precision),
+            down: Proj::load(gpu, w, &format!("{prefix}.down_proj.weight"), hidden, intermediate, precision),
         }
     }
 }
@@ -399,24 +432,27 @@ impl Gemma4Layer {
     /// Build layer `layer_idx` with its projections resident at `precision`.
     /// `weights` needs only THIS layer's tensors, which is what lets a
     /// caller stream a checkpoint layer by layer.
-    pub fn on(gpu: Gpu, cfg: &Gemma4Config, weights: &Tensors, layer_idx: u32, precision: Precision) -> Gemma4Layer {
+    pub fn on(gpu: Gpu, cfg: &Gemma4Config, weights: &dyn checkpoint::TensorSource, layer_idx: u32, precision: Precision) -> Gemma4Layer {
         let lt = cfg.layer_type(layer_idx);
         let head_dim = cfg.head_dim_for(lt);
         let k_eq_v = cfg.k_eq_v_for(lt);
+        let hidden = cfg.hidden_size as usize;
+        let q_dim = (cfg.num_attention_heads * head_dim) as usize;
+        let kv_dim = (cfg.kv_heads_for(lt) * head_dim) as usize;
         let prefix = format!("layers.{layer_idx}");
-        let attn = AttnWeights::upload(&gpu, weights, &format!("{prefix}.self_attn"), head_dim, k_eq_v, precision);
-        let mlp = MlpWeights::upload(&gpu, weights, &format!("{prefix}.mlp"), precision);
-        let layer_scalar = tget(weights, &format!("{prefix}.layer_scalar"))[0];
+        let attn = AttnWeights::upload(&gpu, weights, &format!("{prefix}.self_attn"), head_dim, q_dim, kv_dim, hidden, k_eq_v, precision);
+        let mlp = MlpWeights::upload(&gpu, weights, &format!("{prefix}.mlp"), hidden, cfg.intermediate_size as usize, precision);
+        let layer_scalar = tget_owned(weights, &format!("{prefix}.layer_scalar"))[0];
         Gemma4Layer {
             gpu,
             cfg: *cfg,
             lt,
             attn,
             mlp,
-            input_ln: tget(weights, &format!("{prefix}.input_layernorm.weight")).to_vec(),
-            post_attn_ln: tget(weights, &format!("{prefix}.post_attention_layernorm.weight")).to_vec(),
-            pre_ff_ln: tget(weights, &format!("{prefix}.pre_feedforward_layernorm.weight")).to_vec(),
-            post_ff_ln: tget(weights, &format!("{prefix}.post_feedforward_layernorm.weight")).to_vec(),
+            input_ln: tget_owned(weights, &format!("{prefix}.input_layernorm.weight")),
+            post_attn_ln: tget_owned(weights, &format!("{prefix}.post_attention_layernorm.weight")),
+            pre_ff_ln: tget_owned(weights, &format!("{prefix}.pre_feedforward_layernorm.weight")),
+            post_ff_ln: tget_owned(weights, &format!("{prefix}.post_feedforward_layernorm.weight")),
             layer_scalar,
         }
     }

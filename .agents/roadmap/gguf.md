@@ -129,8 +129,6 @@ review of this codebase assumed:
       never touches; almost certainly backend/device-dependent on this
       box, not a regression from this work).
 
-## Not yet done
-
 - [x] M4: migrated `qwen3::q8::Q8::build`, `qwen35moe::q8::Qwen35Q8::build`
       and `wan::block::QLinear::upload` (its Int8 arm only - Int4 has no
       analogous zero-fp32 GGUF fast path, so it keeps its own route) onto
@@ -322,8 +320,45 @@ review of this codebase assumed:
       not one of the six) declines; a source with no `raw_blocks` at all
       declines. `make test -p brain-gguf -p brain-checkpoint`: 111 + 10 + 19
       + 5 gguf-crate test-groups and every brain-checkpoint test, 0 failed.
-- [ ] M7: gemma4 `&Tensors` → `&dyn TensorSource` (s3dit's and ltxv's slices
-      are done - see the M7 entries above).
+- [x] M7 (gemma4 slice, closing M7): `crates/gemma4/src/block.rs`'s whole
+      weight-loading chain took `&Tensors` end to end - `Proj::from_tensors`,
+      `AttnWeights::upload`, `MlpWeights::upload`, `Gemma4Layer::on` - so
+      `forward_streamed` (`crates/gemma4/src/model.rs`) had to call
+      `load_layer_tensors` first, which decodes EVERY tensor in a layer to
+      f32 via `with_tensor().to_vec()` before `Gemma4Layer::on` ever saw it -
+      the exact whole-layer fp32 materialization this workstream exists to
+      remove, and worse than the other two slices' problem (s3dit/ltxv only
+      forced fp32 on the int8 *quantize* path; gemma4 forced it on every
+      tensor, every precision). Renamed `Proj::from_tensors` to `Proj::load(
+      gpu, source: &dyn checkpoint::TensorSource, name, n, k, precision)` -
+      `n`/`k` now come from the caller's own config-derived dims rather than
+      the tensor's stored shape, since a bare `TensorSource` has no shape to
+      read beyond `numel`; its Int8 arm routes through `model::int8::
+      upload_quantized`, which tries a zero-fp32 `Q8_0` byte repack via
+      `TensorSource::raw_blocks` before falling back to a bounded fp32
+      decode. `AttnWeights::upload`/`MlpWeights::upload` widened to
+      `w: &dyn checkpoint::TensorSource` plus explicit `q_dim`/`kv_dim`/
+      `hidden`/`intermediate` parameters (replacing shape reads off an eager
+      map); `Gemma4Layer::on`'s `weights: &Tensors` became `&dyn
+      checkpoint::TensorSource`, computing `hidden`/`q_dim`/`kv_dim` from
+      `cfg` and passing them through. `forward_streamed`'s per-layer closure
+      now passes `src` straight into `Gemma4Layer::on`, with the
+      `load_layer_tensors` call and its error plumbing removed from this
+      path entirely - `load_layer_tensors` itself stays (public, still used
+      by `crates/gemma4/tests/int8_compute_real.rs`); the non-streamed
+      `Gemma4Model::new` path keeps passing `&self.w` (an owned `Tensors`),
+      which still satisfies the new `&dyn TensorSource` parameter via the
+      blanket impl with no behavior change. Added `brain-paramstore` as a
+      dependency (`upload_quantized` needs `paramstore::upload::Uploader`,
+      which this crate had never pulled in directly before). Removed the
+      now-dead `tget(w: &Tensors, name)` helper (every call site moved to
+      `tget_owned`, which reads through `TensorSource::with_tensor` instead).
+      `make test -p brain-gemma4`: green, 0 failed, 0 warnings (23 tests
+      across lib + `int8_compute_real`/`parity`/`real_weight_parity`,
+      including `real_q8_0_whole_encoder_int8_matches_fp32` - the suite that
+      exercises this exact call chain against real int8 weights).
+
+All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
 - [x] M9: `quant_group_sum.wgsl` (new `crates/kernels/wgsl/`) - the affine
       K-quant activation-only correction prepass, `S[m,g] = Σ_{k in g}
       xq[m,k]`, computed ONCE per activation via `dot4I8Packed(xq_word,
@@ -906,6 +941,8 @@ GGUF, the worst of the six) has a fully-designed, verified-worthwhile fix
 rather than forced. Every gate through M14 remains synthetic (see "Recorded
 gaps" below) - no real K-quant checkpoint has been run through this path on
 this box yet.
+## Not yet done
+
 - [ ] M15: split GGUF in `MmapGguf` (`mmaps: Vec<Mmap>`, part in the tensor
       index, one `LoadMeter` over summed bytes - all 17 method signatures
       stay byte-identical, no `Inner::GgufSharded` arm needed).

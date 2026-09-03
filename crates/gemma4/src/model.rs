@@ -274,7 +274,6 @@ pub fn forward_streamed(
     // creating a second one. `Cell` because `build_layer` is `FnMut` and
     // this is set on its first call.
     let resolved: std::cell::Cell<Option<Precision>> = std::cell::Cell::new(None);
-    let mut err: Option<String> = None;
     let out = forward_core(cfg, device, input_ids.len() as u32, embed_out, &norm_w, |gpu, l| {
         let precision = match resolved.get() {
             Some(p) => p,
@@ -285,16 +284,9 @@ pub fn forward_streamed(
                 p
             }
         };
-        let t = load_layer_tensors(src, cfg, l).unwrap_or_else(|e| {
-            err = Some(e);
-            Tensors::new()
-        });
-        Gemma4Layer::on(gpu.share(), cfg, &t, l, precision)
+        Gemma4Layer::on(gpu.share(), cfg, src, l, precision)
     });
-    match err {
-        Some(e) => Err(e),
-        None => Ok(out),
-    }
+    Ok(out)
 }
 
 /// LTX's own `text_embedding_projection.{video,audio}_aggregate_embed` -

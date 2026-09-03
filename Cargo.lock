@@ -1067,6 +1067,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-paramstore",
  "brain-testutil",
  "tracing",
 ]
