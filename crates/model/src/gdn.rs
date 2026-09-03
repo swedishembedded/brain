@@ -1603,3 +1603,93 @@ pub fn gdn_causal_conv1d_step(
 ) -> Step {
     g.step(ids.causal_conv1d_step, &[x, w, hist, y], &[shape.n, shape.c, shape.k], shape.n * shape.c)
 }
+
+// =============================================================================
+// Serving: one sequence's persistent per-layer state -- RecurrentSlot
+// =============================================================================
+//
+// A resident sequence's [`gdn_recurrent_step`] `state` and
+// [`gdn_causal_conv1d_step`] `hist` are not scratch (unlike every buffer
+// above this section) -- they are threaded across every decode call for as
+// long as the sequence is admitted, one pair per GDN layer, with a size-1
+// dummy pair at every non-GDN (full-attention) layer index so a caller can
+// index by plain layer number without a second lookup. [`RecurrentSlot`] is
+// that per-sequence bundle, hoisted here (rather than left duplicated) from
+// `qwen35::serve::GdnSlot`/`qwen35moe::serve::GdnSlot`, which built this
+// exact struct byte-for-byte identically -- confirmed by direct comparison,
+// not assumed, while doing that hoist. Both crates key a private
+// `HashMap<u32, RecurrentSlot>` by paged-KV physical block id (their own
+// engine's own serving concern, kept there, not here); this module only
+// owns the one slot's own allocation and cost accounting.
+//
+// A future `DECODE_WINDOW_CAPACITY > 1` (speculative decode) will need this
+// slot's `state`/`hist` to be snapshotted and restored, the same way
+// `model::paged::BlockTable::fork`/`unshare_tail` let the KV side branch --
+// that seam is NOT built here (a separate, larger milestone), just noted as
+// the natural extension point.
+
+/// Plain-data shape describing one sequence's persistent Gated-DeltaNet
+/// state -- exactly the handful of dims [`RecurrentSlot::new`]/
+/// [`RecurrentSlot::bytes`] need, deliberately NOT either model crate's own
+/// full `Qwen35Config`: this crate must not depend on `qwen35`/`qwen35moe`
+/// (the dependency would run the wrong way), so each adopts this shape from
+/// its own config instead.
+#[derive(Clone, Debug)]
+pub struct RecurrentSlotShape {
+    /// Recurrent-state element count for ONE GDN layer:
+    /// `linear_num_value_heads * linear_key_head_dim * linear_value_head_dim`
+    /// (`[bh, Dk, Dv]` flattened, matching [`GdnShape::bh`]'s own per-layer
+    /// state).
+    pub state_len: u64,
+    /// Causal-conv history element count for ONE GDN layer:
+    /// `linear_conv_dim * (linear_conv_kernel_dim - 1)` (matching
+    /// [`GdnConvShape::hist_len`]'s own formula).
+    pub hist_len: u64,
+    /// One entry per decoder layer, in layer order: `true` for a GDN
+    /// (linear-attention) layer, `false` for a full-attention layer. Plain
+    /// `bool` rather than either crate's own `LayerType` enum, for the same
+    /// reason `state_len`/`hist_len` are plain integers above.
+    pub is_recurrent: Vec<bool>,
+}
+
+/// One admitted sequence's persistent Gated-DeltaNet resources: recurrent
+/// `state` + causal-conv `hist`, one pair per layer (a size-1 dummy at
+/// full-attention layer indices). See this section's doc for why this lives
+/// here rather than in either adopting crate.
+pub struct RecurrentSlot {
+    pub state: Vec<DeviceBuffer>,
+    pub hist: Vec<DeviceBuffer>,
+}
+
+impl RecurrentSlot {
+    /// Allocate and explicitly ZERO every layer's buffers for a fresh
+    /// sequence. [`Gpu::storage`] does not guarantee zero-initialised
+    /// memory, and a fresh sequence's recurrent state / conv history MUST
+    /// start at zero ([`gdn_recurrent_step`]/[`gdn_causal_conv1d_step`]'s
+    /// own docs).
+    pub fn new(gpu: &Gpu, shape: &RecurrentSlotShape) -> RecurrentSlot {
+        let mut state = Vec::with_capacity(shape.is_recurrent.len());
+        let mut hist = Vec::with_capacity(shape.is_recurrent.len());
+        for &recurrent in &shape.is_recurrent {
+            if recurrent {
+                state.push(gpu.storage(shape.state_len));
+                hist.push(gpu.storage(shape.hist_len));
+            } else {
+                state.push(gpu.storage(1));
+                hist.push(gpu.storage(1));
+            }
+        }
+        let clears: Vec<&DeviceBuffer> = state.iter().chain(hist.iter()).collect();
+        gpu.submit(&clears, &[]);
+        RecurrentSlot { state, hist }
+    }
+
+    /// Device bytes one slot costs: every GDN layer's `state` + `hist`, fp32.
+    /// The one place this arithmetic lives -- [`RecurrentSlot::new`]'s
+    /// allocation loop and every caller's own pool-sizing estimate both
+    /// depend on agreeing with it.
+    pub fn bytes(shape: &RecurrentSlotShape) -> u64 {
+        let n_gdn = shape.is_recurrent.iter().filter(|&&r| r).count() as u64;
+        n_gdn * (shape.state_len + shape.hist_len) * 4
+    }
+}
