@@ -478,12 +478,18 @@ pub struct QuantRows<'a> {
     pub sx: &'a gpu_core::DeviceBuffer,
     /// `[.., k/4]` packed u32 activation (written).
     pub xq: &'a gpu_core::DeviceBuffer,
+    /// Third, OPTIONAL step: `(quant_group_sum kernel index, [.., k/32] f32
+    /// output buffer)`. `Some` only for a caller building an affine K-quant
+    /// activation (`crate::kquant`'s `S[m,g] = Σ_{k in g} xq[m,k]` correction
+    /// term) - `None` for every existing caller, whose dispatch stays the
+    /// existing two-step `[max_abs_row, quant_pack]` form byte-identically.
+    pub xgs: Option<(usize, &'a gpu_core::DeviceBuffer)>,
 }
 
 /// The DEVICE half of the same tier: dynamic per-token activation quantization
 /// of rows `r0..r1` of `q.x` — `max_abs_row` writes `q.sx[r0..r1]`,
-/// `quant_pack` writes the packed rows of `q.xq`. Returns the two steps in
-/// order; ONE call feeds every linear that reads that activation.
+/// `quant_pack` writes the packed rows of `q.xq`. Returns the steps in order;
+/// ONE call feeds every linear that reads that activation.
 ///
 /// This exists so the *offset units* live in one place. Every buffer is bound
 /// as a sub-range and the units differ per buffer — `x` and `xq` are offset in
@@ -498,7 +504,16 @@ pub struct QuantRows<'a> {
 /// by `r0` itself, so **`r0` must be a multiple of 64** — asserted here rather
 /// than left to each caller to remember (a violation is a wgpu validation
 /// error, not a wrong number, so it hides until someone changes a text length).
-pub fn quant_rows_steps(g: &gpu_core::Gpu, q: QuantRows, r0: u32, r1: u32, k: u32) -> [gpu_core::Step; 2] {
+///
+/// When `q.xgs` is `Some((kernel, xgs))`, a THIRD step (`quant_group_sum`,
+/// `crate::kquant`'s `S[m,g] = Σ_{k in g} xq[m,k]` correction term) is
+/// appended, reading the SAME `xq` rows the second step just wrote. `xgs` is
+/// offset in ROWS of `k/32` (its own width, one f32 per 32-element group) -
+/// the same "own width" convention `x`/`xq` already follow, just at group
+/// granularity instead of element or row-count granularity. `q.xgs` being
+/// `None` is byte-identical to this function's original two-step form - no
+/// existing caller's dispatch changes.
+pub fn quant_rows_steps(g: &gpu_core::Gpu, q: QuantRows, r0: u32, r1: u32, k: u32) -> Vec<gpu_core::Step> {
     assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
     assert!(
         r0.is_multiple_of(64),
@@ -508,10 +523,16 @@ pub fn quant_rows_steps(g: &gpu_core::Gpu, q: QuantRows, r0: u32, r1: u32, k: u3
     let xo = (r0 as u64 * k as u64, m as u64 * k as u64);
     let so = (r0 as u64, m as u64);
     let qo = (r0 as u64 * (k as u64 / 4), m as u64 * (k as u64 / 4));
-    [
+    let mut steps = vec![
         g.step_sliced(q.kernels[0], &[q.x, q.sx], &[xo, so], &[m, k], m),
         g.step_sliced(q.kernels[1], &[q.x, q.sx, q.xq], &[xo, so, qo], &[m, k], m * k / 4),
-    ]
+    ];
+    if let Some((kernel, xgs)) = q.xgs {
+        assert_eq!(k % GROUP as u32, 0, "int8 K-quant group sum: K must be a multiple of {GROUP} (got {k})");
+        let go = (r0 as u64 * (k as u64 / GROUP as u64), m as u64 * (k as u64 / GROUP as u64));
+        steps.push(g.step_sliced(kernel, &[q.xq, xgs], &[qo, go], &[m, k], m * k / GROUP as u32));
+    }
+    steps
 }
 
 #[cfg(test)]

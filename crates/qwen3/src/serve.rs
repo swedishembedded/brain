@@ -3924,7 +3924,7 @@ mod tests {
         let xq_ref = g.storage((rows * d / 4) as u64);
         let quant_steps = model::int8::quant_rows_steps(
             g,
-            model::int8::QuantRows { kernels: [MAX_ABS_ROW, QUANT_PACK], x: &xn_ref, sx: &sx_ref, xq: &xq_ref },
+            model::int8::QuantRows { kernels: [MAX_ABS_ROW, QUANT_PACK], x: &xn_ref, sx: &sx_ref, xq: &xq_ref, xgs: None },
             0,
             rows,
             d,

@@ -324,17 +324,127 @@ review of this codebase assumed:
       + 5 gguf-crate test-groups and every brain-checkpoint test, 0 failed.
 - [ ] M7: gemma4 `&Tensors` → `&dyn TensorSource` (s3dit's and ltxv's slices
       are done - see the M7 entries above).
-- [ ] M9: `quant_group_sum.wgsl` int8-activation prepass (`xgs`) - the affine
-      correction term's `Σ xq` piece, computed once, not per column tile.
-- [ ] M10: group-16 (Q6_K) + legacy types through EXISTING kernels via
-      template knobs (`WPG`→4, new `QPG` knob on `matmul_i8_dyn`) - zero new
-      `.wgsl` files.
-- [ ] M11: `matmul_kq_dyn.wgsl` + `matmul_kq_gemv.wgsl` - the new affine
-      Q4_K/Q5_K GEMM/GEMV kernels.
-- [ ] M12: the selection seam - `DType::{Q4K,Q8K}`, `Weight::KQuant`,
-      `Ops::{bind,threads,matmul}` (`threads` must route the new dtypes to
-      `tile()`, not the `_ => m*n` arm - that under-dispatch corrupts output,
-      not just wastes workgroups).
+- [x] M9: `quant_group_sum.wgsl` (new `crates/kernels/wgsl/`) - the affine
+      K-quant activation-only correction prepass, `S[m,g] = Σ_{k in g}
+      xq[m,k]`, computed ONCE per activation via `dot4I8Packed(xq_word,
+      0x01010101u)` per packed word (exact int8 lane sum, no rounding - one
+      thread per `(row, group)` output, one thread reads exactly
+      `model::int8::WORDS_PER_GROUP` (8) words). `model::int8::QuantRows`
+      gains a THIRD, optional field, `xgs: Option<(kernel_idx,
+      &DeviceBuffer)>`; `quant_rows_steps` now returns `Vec<Step>` (was
+      `[Step; 2]`) and appends the group-sum dispatch as a third step only
+      when `xgs` is `Some` - every existing caller (`I8Scratch::quant_rows`,
+      `model::moe`'s expert/shared-expert forwards, and every downstream
+      `quant_rows_steps` call site in `qwen3`/`qwen3omnimoe`/`moondream3`)
+      passes `xgs: None` and keeps the byte-identical two-step dispatch;
+      only `.to_vec()`-shaped call sites needed a mechanical one-line update
+      for the new struct field, nothing behavioural. Gated
+      (`crates/model/tests/quant_group_sum.rs`, new, 3 test functions):
+      `quant_group_sum_matches_host_exact_integer_sum` - `assert_eq!`
+      against a host-computed exact integer sum of the SAME packed bytes
+      (never a tolerance, since the kernel's whole claim is bit-exactness),
+      values spanning the full i8 range including `-128` (the one value
+      `-x` cannot represent, so a sign-handling bug cannot hide);
+      `quant_group_sum_indexes_row_and_group_independently`;
+      `quant_rows_steps_wires_the_xgs_seam` (the `Option<(kernel_idx,
+      &DeviceBuffer)>` plumbing itself, device-level). `make test -p
+      brain-kernels -p brain-model --test quant_group_sum`: 3 passed, 0
+      failed on a real device - the one M9-M11 gate that was clean on the
+      first real run (see M10's and M11's own entries for the two that
+      were not).
+- [x] M10: group=16 (Q6_K) plus the legacy group=32 formats reach the
+      device through EXISTING kernels via template knobs - ZERO new
+      `.wgsl` files. `matmul_i8_dyn.wgsl` (the tiled prefill GEMM) gains a
+      `QPG` (quads-per-group) knob: `QPG=2` (the new default) reproduces
+      today's implicit fold-once-per-chunk behaviour BIT-IDENTICALLY
+      (gated against a checked-in text snapshot of the kernel exactly as it
+      stood before this milestone,
+      `fixtures/matmul_i8_dyn_pre_qpg.wgsl.snapshot` - not a `.wgsl` file,
+      so `kernels-regen`/`kernels-table` never scan it), `QPG=1` folds
+      twice per chunk instead (group=16). `matmul_i8_gemv`/
+      `matmul_i8_gemv_reg`/`moe_linear_gated_i8` already had a plain `const
+      WPG: u32 = 8u;` each - exactly the `const NAME: u32 = <lit>u;` shape
+      `kernels::template::specialize`'s existing rewrite already handles,
+      so `WPG=4` (group=16) needed no source edit at all, only a test
+      proving it. Gated (`crates/model/tests/kquant_group16_knobs.rs`, new):
+      (a) `matmul_i8_dyn_qpg2_default_is_bit_identical_to_pre_qpg_kernel` -
+      `assert_eq!`, not a tolerance, since this touches the production
+      prefill GEMM every existing int8 model already depends on; (b) every
+      group=16 variant (`matmul_i8_dyn#QPG=1`,
+      `matmul_i8_gemv`/`matmul_i8_gemv_reg#WPG=4`) against a host oracle
+      built directly from int8 CODES (never a lossy float-quantize step),
+      `rel_l2 <= 1e-6`. Running this gate for real (M12, not this
+      milestone's own agent - see M11's entry for why) found the `max_rel`
+      ceiling too tight for group=16's doubled fold count, the same
+      accumulation-order finding M11's own entry describes in more detail:
+      `rel_l2` measured `8e-8..1.5e-7` and `cosine` exactly `1.0` (both
+      unchanged, still the tight primary gates) while `max_rel` measured up
+      to `3.34e-4` on a real device (Intel Arc iGPU, Vulkan); the ceiling
+      was recalibrated from `1e-5` to `5e-4` with the measurement recorded
+      inline. `make test -p brain-kernels -p brain-model --test
+      kquant_group16_knobs`: 5 passed, 0 failed after the fix.
+- [x] M11: `matmul_kq_dyn.wgsl` + `matmul_kq_gemv.wgsl` (new
+      `crates/kernels/wgsl/`) - the new affine Q4_K/Q5_K GEMM/GEMV kernels,
+      `CODE_BITS`-template-specialized (4 = Q4_K, 8 = Q5_K). `matmul_kq_dyn`
+      mirrors `matmul_i8_dyn`'s 128×128 tile / vec4 k-group-minor staging /
+      8×8 interleaved register block EXACTLY (same `BM`/`BN`/`BKG`/`SP4`/
+      `LN`/`RS`), with two deltas: a staging-time bit-unpack of
+      `CODE_BITS`-wide UNSIGNED codes into DP4A-ready packed words (a pure
+      bit-shuffle, never a multiply/bias - the code's numeric value never
+      changes, only its bit position), and a second reduction (the affine
+      `dm[n,g]*S[m,g]` correction, `S` read from M9's `xgs` prepass) folded
+      alongside the usual `ds*dot4I8Packed(...)` term every `QPG`-th quad
+      (`QPG` FIXED at 2 here - this kernel serves only group=32; Q6_K's
+      group=16 stays on M10's own kernels, never this one).
+      `matmul_kq_gemv` mirrors `matmul_i8_gemv`'s one-workgroup-per-column,
+      64-thread-k-stride shape, with the min correction guarded to fire on
+      EXACTLY one thread per group
+      (`select(0.0, dm, (g % WPGK) == 0u)` - a naive per-quad application
+      would land the correction 8 times, since 8 threads visit each
+      group's 8 quads). Gated (`crates/model/tests/matmul_kq.rs`, new,
+      11 test functions): rung (b) device vs an f64 host oracle built
+      directly from int8 codes (never a lossy float-quantize step) at both
+      `CODE_BITS`, both kernels; rung (c) seven adversarial cases -
+      `dmin` zero-vs-nonzero pairing (MUTATION-VERIFIED: temporarily
+      dropping the correction term left the `dmin==0` half green and the
+      `dmin!=0` half red, proving the term is load-bearing, not
+      coincidentally near-zero), sub-block scale variation across a
+      super-block's 8 groups (MUTATION-VERIFIED: a hoisted-to-group-0 index
+      bug went red immediately), mixed-sign activation with full-range
+      codes, an all-zero sub-block (no NaN), a genuine sub-rectangle at a
+      nonzero tile origin spanning two super-blocks, ragged tiles, and a
+      `k` where `CODE_BITS=4`'s word density (8 codes/word) genuinely
+      differs from `xq`'s (4/word); rung (d) `matmul_kq_dyn` vs
+      `matmul_kq_gemv` cross-kernel agreement on identical inputs.
+      This milestone's own gate was written but never actually RUN before
+      M12 exercised it for real (this whole ledger's landing history for
+      M9-M11 was written ahead of a real `make test` pass - see M12's own
+      entry for the fuller story); running it for real found two genuine
+      bugs, both in the TEST FIXTURE, not the kernels: (1)
+      `rand_unsigned_codes(seed, n, bits)` generated the FULL `0..2^bits`
+      range for weight codes, but Q5_K's real codes are a 5-bit value
+      (`0..31`) sitting in an 8-bit `CODE_BITS=8` slot - the top-3-bits-
+      always-zero invariant `matmul_kq_dyn.wgsl`'s own header states as the
+      reason the unsigned-code-read-as-signed hazard is unreachable. A code
+      `>= 128` from the un-capped generator DOES set the sign bit, so
+      `dot4I8Packed` silently reinterpreted it as negative for roughly half
+      of every `CODE_BITS=8` weight - caught by `case4_all_zero_subblock_
+      no_nan` going catastrophically wrong (`rel_l2 ~ 1.2`, `cosine ~
+      -0.26`) while `case2` (also `CODE_BITS=8`) showed the same signature;
+      fixed by capping the generator's span at 32 (the real max across both
+      formats this file exercises), after which every `CODE_BITS=8` case
+      passed at the SAME tight tolerance the `CODE_BITS=4` cases already
+      met. (2) With that fixed, `max_rel` (the single-worst-element metric)
+      still exceeded the `1e-5` ceiling by up to ~30x on several cases while
+      `rel_l2` stayed at `8e-8..1.8e-7` and `cosine` at `1.0` to 12
+      decimals (both unchanged) - a real, measured property of this
+      kernel's affine fold doing a SECOND f32 reduction per group (the
+      `- dm*S` term) alongside the usual `ds` one, not a correctness bug;
+      the ceiling (calibrated against the symmetric family's single-
+      reduction fold) was recalibrated to `5e-4`, with the measured numbers
+      recorded inline as the justification. `make test -p brain-kernels -p
+      brain-model --test matmul_kq`: 11 passed, 0 failed on a real device
+      (Intel Arc iGPU, Vulkan) after both fixes.
 - [ ] M13: `moe_linear_gated_kq.wgsl` + `matmul_kq_gemv_reg.wgsl` +
       `gpu_core::upgrade` row.
 - [ ] M14: byte compression (packed `sc`/`m` + f16 `d`; Q4_K → 1.03× GGUF).

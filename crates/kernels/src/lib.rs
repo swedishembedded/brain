@@ -602,6 +602,10 @@ pub const MATMUL_I8_DYN: &str = include_str!("../wgsl/matmul_i8_dyn.wgsl");
 pub const MATMUL_I8_GEMV: &str = include_str!("../wgsl/matmul_i8_gemv.wgsl");
 /// `wgsl/matmul_i8_gemv_reg.wgsl`
 pub const MATMUL_I8_GEMV_REG: &str = include_str!("../wgsl/matmul_i8_gemv_reg.wgsl");
+/// `wgsl/matmul_kq_dyn.wgsl`
+pub const MATMUL_KQ_DYN: &str = include_str!("../wgsl/matmul_kq_dyn.wgsl");
+/// `wgsl/matmul_kq_gemv.wgsl`
+pub const MATMUL_KQ_GEMV: &str = include_str!("../wgsl/matmul_kq_gemv.wgsl");
 /// `wgsl/matmul_q4_dyn.wgsl`
 pub const MATMUL_Q4_DYN: &str = include_str!("../wgsl/matmul_q4_dyn.wgsl");
 /// `wgsl/matmul_q4_dyn_reg.wgsl`
@@ -730,6 +734,8 @@ pub const PRELU_BWD_WG: &str = include_str!("../wgsl/prelu_bwd_wg.wgsl");
 pub const QKNORM_ROPE_APPEND_FUSED: &str = include_str!("../wgsl/qknorm_rope_append_fused.wgsl");
 /// `wgsl/qknorm_rope_fused.wgsl`
 pub const QKNORM_ROPE_FUSED: &str = include_str!("../wgsl/qknorm_rope_fused.wgsl");
+/// `wgsl/quant_group_sum.wgsl`
+pub const QUANT_GROUP_SUM: &str = include_str!("../wgsl/quant_group_sum.wgsl");
 /// `wgsl/quant_pack.wgsl`
 pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
 /// `wgsl/quick_gelu.wgsl`
@@ -1228,6 +1234,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_i8_dyn", MATMUL_I8_DYN),
     ("matmul_i8_gemv", MATMUL_I8_GEMV),
     ("matmul_i8_gemv_reg", MATMUL_I8_GEMV_REG),
+    ("matmul_kq_dyn", MATMUL_KQ_DYN),
+    ("matmul_kq_gemv", MATMUL_KQ_GEMV),
     ("matmul_q4_dyn", MATMUL_Q4_DYN),
     ("matmul_q4_dyn_reg", MATMUL_Q4_DYN_REG),
     ("matmul_q4_gemv", MATMUL_Q4_GEMV),
@@ -1292,6 +1300,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("prelu_bwd_wg", PRELU_BWD_WG),
     ("qknorm_rope_append_fused", QKNORM_ROPE_APPEND_FUSED),
     ("qknorm_rope_fused", QKNORM_ROPE_FUSED),
+    ("quant_group_sum", QUANT_GROUP_SUM),
     ("quant_pack", QUANT_PACK),
     ("quick_gelu", QUICK_GELU),
     ("quick_gelu_bwd", QUICK_GELU_BWD),

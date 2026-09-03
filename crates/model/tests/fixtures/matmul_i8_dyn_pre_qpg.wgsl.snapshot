@@ -71,28 +71,21 @@
 //
 // ## Where the group scale is applied, and what it costs
 //
-// `BKG` is 8 packed groups = 32 int8 along K, which is EXACTLY `QPG` (a
-// template knob, default 2) quads' worth of weight-scale groups. At the
-// default `QPG=2` one k-chunk is one quantization group (group=32 - Q8_0,
-// Q5_0, Q4_0), and the dequantize lands on the chunk boundary: the 64 integer
-// accumulators sum a chunk exactly as before, then fold into 64 f32 running
-// totals scaled by that chunk's `sw[n, sg]`. `QPG=1` folds twice per chunk
-// instead (group=16 - Q6_K), at the quad boundary rather than the chunk
-// boundary; every other tile/staging/barrier/bank-padding/register-block
-// detail is unaffected, since only WHERE inside the existing `q` loop the
-// fold runs changes, not the loop's own trip count or the staging it reads.
-// The integer sum inside a group is still exact and re-orderable; only the
-// cross-group folds are floating point.
+// `BKG` is 8 packed groups = 32 int8 along K, which is EXACTLY one weight-scale
+// group. So one k-chunk of this kernel is one quantization group, and the
+// dequantize lands on the chunk boundary: the 64 integer accumulators sum a
+// chunk exactly as before, then fold into 64 f32 running totals scaled by that
+// chunk's `sw[n, c]`. The integer sum inside a group is still exact and
+// re-orderable; only the 64 cross-group folds per chunk are floating point.
 //
-// That costs 64 FMAs per 512 DP4A - about 12% of the inner loop's issue slots
-// at `QPG=2` (double that at `QPG=1`) - and, more importantly, DOUBLES the
-// accumulator register block (64 i32 for the live group plus 64 f32 for the
-// running sum). On a GP102 that pushes the kernel from two resident
-// 256-thread workgroups per SM to one, so some of the latency hiding the
-// double-buffered staging was written for now has to come from the software
-// pipeline alone. That is the price of a weight scale that does not span
-// 17408 elements of K, and it is a price this repo has already decided to
-// pay - see `model::int8`'s module doc for the measurement.
+// That costs 64 FMAs per 512 DP4A - about 12% of the inner loop's issue slots -
+// and, more importantly, DOUBLES the accumulator register block (64 i32 for
+// the live group plus 64 f32 for the running sum). On a GP102 that pushes the
+// kernel from two resident 256-thread workgroups per SM to one, so some of the
+// latency hiding the double-buffered staging was written for now has to come
+// from the software pipeline alone. That is the price of a weight scale that
+// does not span 17408 elements of K, and it is a price this repo has already
+// decided to pay - see `model::int8`'s module doc for the measurement.
 //
 // The alternative that keeps 64 registers - convert and scale every individual
 // DP4A result - was rejected: it triples the inner loop's instruction count
@@ -100,8 +93,8 @@
 // header explains it is arithmetic-limited, not occupancy-limited.
 //
 // The accumulation WITHIN a group is INTEGER, so re-ordering the k-axis sum
-// inside a group is exact; the cross-group sum is f32 and runs in ascending
-// group order.
+// inside a chunk is exact; the cross-chunk sum is f32 and runs in ascending
+// chunk order.
 //
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the CPU
 // int8 reference lives in the validation test, so parity is still gated.
@@ -112,18 +105,13 @@ struct Params { m: u32, kg: u32, n: u32 };  // dynamic sx + group-wise sw, kg = 
 @group(0) @binding(1) var<storage, read>       x:   array<u32>;  // [M, kg]
 @group(0) @binding(2) var<storage, read>       w:   array<u32>;  // [N, kg]
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M] per-token activation scale
-@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, kg/(4*QPG)] group-wise weight scale
+@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, kg/BKG] group-wise weight scale
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
 const BM: u32 = 128u;
 const BN: u32 = 128u;
 const BKG: u32 = 8u;    // packed K-groups per chunk (= 32 int8 along K)
 const BKQ: u32 = 2u;    // BKG / 4 - vec4 quads of k-groups per row per chunk
-const QPG: u32 = 2u;    // quads per weight-scale group (one group = 4*QPG int8
-                         // along K). Default 2 => group=32 (Q8_0/Q5_0/Q4_0),
-                         // matching BKQ's implicit fold-once-per-chunk today
-                         // BIT-FOR-BIT (see the in-loop fold's own comment).
-                         // QPG=1 => group=16 (Q6_K), folding twice per chunk.
 const SP4: u32 = 3u;    // padded shared stride in vec4s (BKQ + 1), bank-spread
 const LN: u32 = 16u;    // lane grid: 16 x 16 threads, stride-16 interleave
 const RS: u32 = 48u;    // LN * SP4 - vec4 step between a thread's own rows
@@ -181,12 +169,11 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     var rB: vec4<u32>;
 
     let nchunks = (p.kg + BKG - 1u) / BKG;
-    // Weight-scale groups per row (`4*QPG` int8 per group). At QPG=2 this is
-    // `p.kg / BKG`, equal to `nchunks` under the contract (K a multiple of 32
-    // => kg a multiple of BKG); computed separately, and the group index
-    // clamped below, so a caller that broke the contract gets a wrong number
-    // rather than a read past the binding.
-    let ng = p.kg / (4u * QPG);
+    // Weight-scale groups per row. Equal to `nchunks` under the contract
+    // (K a multiple of 32 => kg a multiple of BKG); computed separately, and
+    // the group index clamped below, so a caller that broke the contract gets
+    // a wrong number rather than a read past the binding.
+    let ng = p.kg / BKG;
     // This thread's eight output columns, in the same stride-16 interleave the
     // epilogue stores with.
     let cc = col0 + tx;
@@ -338,43 +325,36 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
                 c67 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
                 c77 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
             }
-            // Every QPG-th quad completes one weight-scale group (4*QPG int8):
-            // fold this group's exact integer sums into the f32 running totals
-            // through the group's own scale, then clear them for the next
-            // group. At QPG=BKQ (2, the default) this fires only on the LAST
-            // q of each chunk, at the identical point in the instruction
-            // stream the unconditional post-loop fold used to sit - same
-            // `sg`, same expressions, same order, so QPG=2 output is
-            // bit-for-bit unchanged from before this knob existed. At QPG=1
-            // it fires every q, folding twice per chunk (group=16, Q6_K).
-            if ((q + 1u) % QPG == 0u) {
-                let sgu = (c * BKQ + q) / QPG;
-                let sg = select(0u, sgu, sgu < ng);
-                let e0 = select(0.0, sw[(cc +   0u) * ng + sg], cc +   0u < p.n);
-                let e1 = select(0.0, sw[(cc +  16u) * ng + sg], cc +  16u < p.n);
-                let e2 = select(0.0, sw[(cc +  32u) * ng + sg], cc +  32u < p.n);
-                let e3 = select(0.0, sw[(cc +  48u) * ng + sg], cc +  48u < p.n);
-                let e4 = select(0.0, sw[(cc +  64u) * ng + sg], cc +  64u < p.n);
-                let e5 = select(0.0, sw[(cc +  80u) * ng + sg], cc +  80u < p.n);
-                let e6 = select(0.0, sw[(cc +  96u) * ng + sg], cc +  96u < p.n);
-                let e7 = select(0.0, sw[(cc + 112u) * ng + sg], cc + 112u < p.n);
-                d00 += f32(c00) * e0; d01 += f32(c01) * e1; d02 += f32(c02) * e2; d03 += f32(c03) * e3; d04 += f32(c04) * e4; d05 += f32(c05) * e5; d06 += f32(c06) * e6; d07 += f32(c07) * e7;
-                d10 += f32(c10) * e0; d11 += f32(c11) * e1; d12 += f32(c12) * e2; d13 += f32(c13) * e3; d14 += f32(c14) * e4; d15 += f32(c15) * e5; d16 += f32(c16) * e6; d17 += f32(c17) * e7;
-                d20 += f32(c20) * e0; d21 += f32(c21) * e1; d22 += f32(c22) * e2; d23 += f32(c23) * e3; d24 += f32(c24) * e4; d25 += f32(c25) * e5; d26 += f32(c26) * e6; d27 += f32(c27) * e7;
-                d30 += f32(c30) * e0; d31 += f32(c31) * e1; d32 += f32(c32) * e2; d33 += f32(c33) * e3; d34 += f32(c34) * e4; d35 += f32(c35) * e5; d36 += f32(c36) * e6; d37 += f32(c37) * e7;
-                d40 += f32(c40) * e0; d41 += f32(c41) * e1; d42 += f32(c42) * e2; d43 += f32(c43) * e3; d44 += f32(c44) * e4; d45 += f32(c45) * e5; d46 += f32(c46) * e6; d47 += f32(c47) * e7;
-                d50 += f32(c50) * e0; d51 += f32(c51) * e1; d52 += f32(c52) * e2; d53 += f32(c53) * e3; d54 += f32(c54) * e4; d55 += f32(c55) * e5; d56 += f32(c56) * e6; d57 += f32(c57) * e7;
-                d60 += f32(c60) * e0; d61 += f32(c61) * e1; d62 += f32(c62) * e2; d63 += f32(c63) * e3; d64 += f32(c64) * e4; d65 += f32(c65) * e5; d66 += f32(c66) * e6; d67 += f32(c67) * e7;
-                d70 += f32(c70) * e0; d71 += f32(c71) * e1; d72 += f32(c72) * e2; d73 += f32(c73) * e3; d74 += f32(c74) * e4; d75 += f32(c75) * e5; d76 += f32(c76) * e6; d77 += f32(c77) * e7;
-                c00 = 0i; c01 = 0i; c02 = 0i; c03 = 0i; c04 = 0i; c05 = 0i; c06 = 0i; c07 = 0i;
-                c10 = 0i; c11 = 0i; c12 = 0i; c13 = 0i; c14 = 0i; c15 = 0i; c16 = 0i; c17 = 0i;
-                c20 = 0i; c21 = 0i; c22 = 0i; c23 = 0i; c24 = 0i; c25 = 0i; c26 = 0i; c27 = 0i;
-                c30 = 0i; c31 = 0i; c32 = 0i; c33 = 0i; c34 = 0i; c35 = 0i; c36 = 0i; c37 = 0i;
-                c40 = 0i; c41 = 0i; c42 = 0i; c43 = 0i; c44 = 0i; c45 = 0i; c46 = 0i; c47 = 0i;
-                c50 = 0i; c51 = 0i; c52 = 0i; c53 = 0i; c54 = 0i; c55 = 0i; c56 = 0i; c57 = 0i;
-                c60 = 0i; c61 = 0i; c62 = 0i; c63 = 0i; c64 = 0i; c65 = 0i; c66 = 0i; c67 = 0i;
-                c70 = 0i; c71 = 0i; c72 = 0i; c73 = 0i; c74 = 0i; c75 = 0i; c76 = 0i; c77 = 0i;
-            }
+        }
+        // One chunk == one weight-scale group: fold this group's exact integer
+        // sums into the f32 running totals through the group's own scale, then
+        // clear them for the next group.
+        {
+            let sg = select(0u, c, c < ng);
+            let e0 = select(0.0, sw[(cc +   0u) * ng + sg], cc +   0u < p.n);
+            let e1 = select(0.0, sw[(cc +  16u) * ng + sg], cc +  16u < p.n);
+            let e2 = select(0.0, sw[(cc +  32u) * ng + sg], cc +  32u < p.n);
+            let e3 = select(0.0, sw[(cc +  48u) * ng + sg], cc +  48u < p.n);
+            let e4 = select(0.0, sw[(cc +  64u) * ng + sg], cc +  64u < p.n);
+            let e5 = select(0.0, sw[(cc +  80u) * ng + sg], cc +  80u < p.n);
+            let e6 = select(0.0, sw[(cc +  96u) * ng + sg], cc +  96u < p.n);
+            let e7 = select(0.0, sw[(cc + 112u) * ng + sg], cc + 112u < p.n);
+            d00 += f32(c00) * e0; d01 += f32(c01) * e1; d02 += f32(c02) * e2; d03 += f32(c03) * e3; d04 += f32(c04) * e4; d05 += f32(c05) * e5; d06 += f32(c06) * e6; d07 += f32(c07) * e7;
+            d10 += f32(c10) * e0; d11 += f32(c11) * e1; d12 += f32(c12) * e2; d13 += f32(c13) * e3; d14 += f32(c14) * e4; d15 += f32(c15) * e5; d16 += f32(c16) * e6; d17 += f32(c17) * e7;
+            d20 += f32(c20) * e0; d21 += f32(c21) * e1; d22 += f32(c22) * e2; d23 += f32(c23) * e3; d24 += f32(c24) * e4; d25 += f32(c25) * e5; d26 += f32(c26) * e6; d27 += f32(c27) * e7;
+            d30 += f32(c30) * e0; d31 += f32(c31) * e1; d32 += f32(c32) * e2; d33 += f32(c33) * e3; d34 += f32(c34) * e4; d35 += f32(c35) * e5; d36 += f32(c36) * e6; d37 += f32(c37) * e7;
+            d40 += f32(c40) * e0; d41 += f32(c41) * e1; d42 += f32(c42) * e2; d43 += f32(c43) * e3; d44 += f32(c44) * e4; d45 += f32(c45) * e5; d46 += f32(c46) * e6; d47 += f32(c47) * e7;
+            d50 += f32(c50) * e0; d51 += f32(c51) * e1; d52 += f32(c52) * e2; d53 += f32(c53) * e3; d54 += f32(c54) * e4; d55 += f32(c55) * e5; d56 += f32(c56) * e6; d57 += f32(c57) * e7;
+            d60 += f32(c60) * e0; d61 += f32(c61) * e1; d62 += f32(c62) * e2; d63 += f32(c63) * e3; d64 += f32(c64) * e4; d65 += f32(c65) * e5; d66 += f32(c66) * e6; d67 += f32(c67) * e7;
+            d70 += f32(c70) * e0; d71 += f32(c71) * e1; d72 += f32(c72) * e2; d73 += f32(c73) * e3; d74 += f32(c74) * e4; d75 += f32(c75) * e5; d76 += f32(c76) * e6; d77 += f32(c77) * e7;
+            c00 = 0i; c01 = 0i; c02 = 0i; c03 = 0i; c04 = 0i; c05 = 0i; c06 = 0i; c07 = 0i;
+            c10 = 0i; c11 = 0i; c12 = 0i; c13 = 0i; c14 = 0i; c15 = 0i; c16 = 0i; c17 = 0i;
+            c20 = 0i; c21 = 0i; c22 = 0i; c23 = 0i; c24 = 0i; c25 = 0i; c26 = 0i; c27 = 0i;
+            c30 = 0i; c31 = 0i; c32 = 0i; c33 = 0i; c34 = 0i; c35 = 0i; c36 = 0i; c37 = 0i;
+            c40 = 0i; c41 = 0i; c42 = 0i; c43 = 0i; c44 = 0i; c45 = 0i; c46 = 0i; c47 = 0i;
+            c50 = 0i; c51 = 0i; c52 = 0i; c53 = 0i; c54 = 0i; c55 = 0i; c56 = 0i; c57 = 0i;
+            c60 = 0i; c61 = 0i; c62 = 0i; c63 = 0i; c64 = 0i; c65 = 0i; c66 = 0i; c67 = 0i;
+            c70 = 0i; c71 = 0i; c72 = 0i; c73 = 0i; c74 = 0i; c75 = 0i; c76 = 0i; c77 = 0i;
         }
         workgroupBarrier();
         if (has_next) {

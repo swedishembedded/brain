@@ -44,6 +44,7 @@ pub mod half;
 pub mod hostmath;
 pub mod int4;
 pub mod int8;
+pub mod kquant;
 pub mod lora;
 pub mod moe;
 pub mod ops;

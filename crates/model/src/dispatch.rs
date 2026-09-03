@@ -99,7 +99,7 @@ impl I8Scratch {
     /// scratch with fresh per-token scales (`max_abs_row` → `quant_pack`;
     /// `quant` is those two kernel indices).
     pub fn quant_rows(&self, g: &Gpu, quant: [usize; 2], s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
-        s.extend(quant_rows_steps(g, QuantRows { kernels: quant, x, sx: &self.sx, xq: self.xq_for(k) }, r0, r1, k));
+        s.extend(quant_rows_steps(g, QuantRows { kernels: quant, x, sx: &self.sx, xq: self.xq_for(k), xgs: None }, r0, r1, k));
     }
 }
 

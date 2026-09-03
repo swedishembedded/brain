@@ -275,7 +275,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
             // shared expert -- see this function's doc.
             let xq = g.storage((n * d / 4) as u64);
             let sx = g.storage(n as u64);
-            steps.extend(quant_rows_steps(g, QuantRows { kernels: mids8.quant, x: &xn2, sx: &sx, xq: &xq }, 0, n, d));
+            steps.extend(quant_rows_steps(g, QuantRows { kernels: mids8.quant, x: &xn2, sx: &sx, xq: &xq, xgs: None }, 0, n, d));
 
             let scratch8 = ExpertScratch8 {
                 gate_pre: &g.storage((n * moe_ff) as u64),

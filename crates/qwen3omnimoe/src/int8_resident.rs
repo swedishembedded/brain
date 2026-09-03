@@ -463,7 +463,7 @@ mod tests {
         // int8 path via the store.
         let xq = g.storage((m * d / 4) as u64);
         let sx = g.storage(m as u64);
-        g.submit(&[], &model::int8::quant_rows_steps(&g, model::int8::QuantRows { kernels: ids8.quant, x: &x, sx: &sx, xq: &xq }, 0, m, d));
+        g.submit(&[], &model::int8::quant_rows_steps(&g, model::int8::QuantRows { kernels: ids8.quant, x: &x, sx: &sx, xq: &xq, xgs: None }, 0, m, d));
         let scratch8 = ExpertScratch8 {
             gate_pre: &g.storage((m * ff) as u64),
             up: &g.storage((m * ff) as u64),

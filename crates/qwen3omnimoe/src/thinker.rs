@@ -290,7 +290,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
             // quantizing it 128 times would be pure waste."
             let xq = g.storage((n * d / 4) as u64);
             let sx = g.storage(n as u64);
-            steps.extend(quant_rows_steps(g, QuantRows { kernels: mids8.quant, x: &xn2, sx: &sx, xq: &xq }, 0, n, d));
+            steps.extend(quant_rows_steps(g, QuantRows { kernels: mids8.quant, x: &xn2, sx: &sx, xq: &xq, xgs: None }, 0, n, d));
             let scratch8 = ExpertScratch8 {
                 gate_pre: &g.storage((n * moe_ff) as u64),
                 up: &g.storage((n * moe_ff) as u64),
@@ -409,7 +409,7 @@ pub struct LmHeadIds8 {
 pub fn lm_head_fwd_i8(g: &Gpu, ids: &LmHeadIds8, lm_head_w: model::moe::Lin8, hidden: &DeviceBuffer, n: u32, d: u32, vocab: u32) -> DeviceBuffer {
     let xq = g.storage((n * d / 4) as u64);
     let sx = g.storage(n as u64);
-    let mut steps = quant_rows_steps(g, QuantRows { kernels: ids.quant, x: hidden, sx: &sx, xq: &xq }, 0, n, d).to_vec();
+    let mut steps = quant_rows_steps(g, QuantRows { kernels: ids.quant, x: hidden, sx: &sx, xq: &xq, xgs: None }, 0, n, d).to_vec();
     let out = g.storage((n * vocab) as u64);
     steps.push(g.step(ids.matmul_i8, &[&xq, lm_head_w.wq, &sx, lm_head_w.sw, &out], &[n, d / 4, vocab], n.div_ceil(128) * vocab.div_ceil(128) * 256));
     g.submit(&[], &steps);

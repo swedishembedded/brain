@@ -595,7 +595,7 @@ pub fn expert_fwd_i8(
     };
     let quant_h = crate::int8::quant_rows_steps(
         g,
-        crate::int8::QuantRows { kernels: ids.quant, x: scratch.h, sx: scratch.sh, xq: scratch.hq },
+        crate::int8::QuantRows { kernels: ids.quant, x: scratch.h, sx: scratch.sh, xq: scratch.hq, xgs: None },
         0,
         m,
         ff,
@@ -938,7 +938,7 @@ pub fn shared_expert_fwd_i8(
         mm8(xq, sx, up_w, scratch.up, d_model / 4, shared_ff),
         g.step(ids.silu_mul, &[scratch.gate_pre, scratch.up, scratch.h], &[rows * shared_ff], rows * shared_ff),
     ];
-    steps.extend(crate::int8::quant_rows_steps(g, crate::int8::QuantRows { kernels: ids.quant, x: scratch.h, sx: scratch.sh, xq: scratch.hq }, 0, rows, shared_ff));
+    steps.extend(crate::int8::quant_rows_steps(g, crate::int8::QuantRows { kernels: ids.quant, x: scratch.h, sx: scratch.sh, xq: scratch.hq, xgs: None }, 0, rows, shared_ff));
     steps.push(mm8(scratch.hq, scratch.sh, down_w, scratch.mlp_out, shared_ff / 4, d_model));
     match shared_gate_w {
         Some(shared_gate_w) => {

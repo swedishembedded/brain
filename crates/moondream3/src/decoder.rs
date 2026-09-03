@@ -1263,7 +1263,7 @@ impl MoeFfn8 {
         // the same `xq`/`sx`, so quantizing per expert would be 64x waste.
         for st in model::int8::quant_rows_steps(
             g,
-            model::int8::QuantRows { kernels: K_QUANT, x: xn, sx: &self.sx, xq: &self.xq },
+            model::int8::QuantRows { kernels: K_QUANT, x: xn, sx: &self.sx, xq: &self.xq, xgs: None },
             0,
             t,
             d,
@@ -1283,7 +1283,7 @@ impl MoeFfn8 {
             // `act` is this expert's own tensor, so it needs its own scale.
             for st in model::int8::quant_rows_steps(
                 g,
-                model::int8::QuantRows { kernels: K_QUANT, x: &self.act, sx: &self.sa, xq: &self.aq },
+                model::int8::QuantRows { kernels: K_QUANT, x: &self.act, sx: &self.sa, xq: &self.aq, xgs: None },
                 0,
                 t,
                 inner,

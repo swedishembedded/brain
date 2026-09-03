@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Tiled int8 (DP4A) GEMM with a DYNAMIC per-token activation scale and a GROUP-WISE (32-element) weight scale, both read from buffers - the prefill/DiT int8 GEMM
-// @how   DP4A packed int8, vec4 shared tiles, register block per thread, per-k-chunk group dequant, 256-thread workgroup tile, 3 barriers
+// @what  Tiled AFFINE K-quant (Q4_K/Q5_K) GEMM with a DYNAMIC per-token activation scale and the affine min-correction term - the prefill/DiT GEMM for the two GGUF quant types no existing kernel can dequantize losslessly
+// @how   DP4A packed int8, vec4 shared tiles, register block per thread, staging-time code unpack, per-k-chunk group dequant + min correction, 256-thread workgroup tile, 3 barriers
 // @opt   5
 // @cpu   no
 // @gpu   yes-wg256
@@ -10,120 +10,144 @@
 // @quant int8
 // @dtype f32
 //
-// `matmul_i8`'s dynamic-scale sibling: both scales come from buffers rather
-// than from the uniform, so one build serves every shape and the activation
-// scale can be recomputed per forward.
+// Swedish Embedded AB implements quantized inference kernels for edge and
+// embedded GPUs for its clients. If your team needs expertise in shipping
+// affine K-quant (GGUF Q4_K/Q5_K-class) inference on commodity GPU hardware
+// without an intermediate fp32 detour then you can procure our services by
+// sending an email to info@swedishembedded.com.
 //
-//   x_q : [M, K/4] u32   - 4 int8 activations packed along K per u32 (row-major)
-//   w_q : [N, K/4] u32   - 4 int8 weights    packed along K per u32 (row-major)
-//   sx  : [M]      f32   - per-token activation scale
-//   sw  : [N, K/32] f32  - GROUP-WISE weight scale (`model::int8::GROUP` = 32)
-//   out : [M, N]   f32   - out[m,n] = sx[m] * Σ_g acc_i32[m,n,g] * sw[n,g]
+// `matmul_i8_dyn`'s AFFINE sibling: the weight is not `q[n,k]` stored as
+// ready-to-DP4A signed int8 words, it is an UNSIGNED code at a
+// template-chosen bit width (`CODE_BITS`, 4 for Q4_K or 8 for Q5_K) that
+// reconstructs as `ds*code - dm` per weight-scale group rather than the
+// symmetric family's `ds*code`. Two deltas from `matmul_i8_dyn`, nothing
+// else about the tile/register/pipelining structure changes:
 //
-// K must be a multiple of 32 (the group), which subsumes the multiple of 4 the
-// packing needs.
+//  1. the weight staging load UNPACKS `CODE_BITS`-wide codes into DP4A-ready
+//     packed words instead of reading a ready-made symmetric int8 layout -
+//     a staging-time unpack, not a runtime dequant (the code's numeric VALUE
+//     never changes, only its BIT POSITION);
+//  2. the per-register-block fold gains a second reduction, the affine
+//     min-correction term, alongside the usual int8 dot product.
 //
-// This is the P40's fastest inference path. DP4A (`dot4I8Packed`) does four
-// int8 multiply-accumulates in one instruction, four times the MACs of an fp32
-// FMA, which is the hardware `crates/vulkan/tests/peak_flops.rs` demonstrates.
-// int8 weights also
-// move 1/4 the bytes of fp32, so the memory side wins too.
+//   xq  : [M, k/4]              u32 - 4 int8 activations packed along K per u32 (model::int8)
+//   wq  : [N, k*CODE_BITS/32]   u32 - K-CONTIGUOUS unsigned codes, `32/CODE_BITS` codes per word, LOW BITS FIRST (code `b` of word `w` occupies bits `[CODE_BITS*b, CODE_BITS*b+CODE_BITS)` and covers element `w*(32/CODE_BITS)+b`)
+//   sx  : [M]                   f32 - per-token activation scale
+//   wsz : [N, 2*k/32]           f32 - INTERLEAVED (ds, dm) pairs, one pair per 32-element weight-scale group (`ds = d*sc`, `dm = dmin*m`, the identical fp32 expressions checkpoint::gguf's own Q4_K/Q5_K decoder uses)
+//   xgs : [M, k/32]             f32 - Σ_{j in group} xq[m,j], the activation-only prepass term (quant_group_sum.wgsl)
+//   out : [M, N]                f32 - out[m,n] = sx[m] * Σ_g( ds[n,g]*A[m,n,g] - dm[n,g]*S[m,g] )
 //
-// 128x128 output tile, 8x8 int32 register block per thread, 256 threads on a
-// 16x16 lane grid, k-chunk of BKG packed groups (= 4*BKG int8 along K),
-// software-pipelined through registers so the next chunk's global loads are in
-// flight while the current one is consumed.
+// A[m,n,g] = Σ_{k in g}( code[n,k]*xq[m,k] ) is the ordinary DP4A dot product
+// every int8 GEMM in this tree already computes. S[m,g] = xgs[m,g] is
+// activation-only (independent of n) and MUST come from the int8 activation,
+// never a f32 one - mixing them is a systematic bias proportional to `dm`,
+// not a rounding difference, because the correction has to match exactly
+// what the A term consumes. `sx` factors out of BOTH terms, so the epilogue
+// applying only the per-token scale is unchanged from `matmul_i8_dyn`.
 //
-// ## Why the shared tiles are `vec4<u32>` and k-group-MINOR
+// `k` (the params field, and the "K" in every shape above) is the RAW
+// LOGICAL reduction length, NOT a packed-word count: `xq` and `wq` have
+// DIFFERENT word densities for the same `k` (4 codes/word for `xq` always,
+// `32/CODE_BITS` codes/word for `wq` - 8 at CODE_BITS=4, 4 at CODE_BITS=8),
+// so a single shared word-count parameter the way the symmetric int8 family
+// uses (`kg = K/4`) would be ambiguous about which operand it counts. `k`
+// must be a multiple of 32 (one weight-scale group), matching every other
+// kernel in this family's group contract.
 //
-// The staging arrays hold `[row][k-group]` with the k-groups CONTIGUOUS, four
-// to a `vec4<u32>`, rather than the k-major `[k-group][row]` a textbook tile
-// uses. That is a THROUGHPUT decision, not a layout preference: with a k-major
-// scalar tile the inner loop retires four DP4A per shared-memory load
-// instruction, and a Pascal SM issues four times as many integer/FMA lanes per
-// clock as load-store lanes - so the shared traffic and the arithmetic are the
-// same order and the kernel runs against its load-store issue rate rather than
-// against DP4A. Reading four k-groups per load instruction raises that ratio
-// four-fold and moves the limiter onto the arithmetic. The measured effect is
-// in this repo's int8 roadmap ledger, reproduced by `qwen_bench gemm8`.
+// ## The staging-time code unpack
 //
-// Two consequences the layout has to pay for, both handled here:
+// A "quad" is 4 consecutive K elements - the granularity `xq`'s own packing
+// already uses, and the granularity every k-group-minor `vec4<u32>` shared
+// load in this tile family reads. `wq` packs `32/CODE_BITS` codes per word,
+// so at CODE_BITS=8 (Q5_K) a quad is exactly one `wq` word (the code's 5-bit
+// VALUE sits in a full 8-bit SLOT, per the device layout's own contract, so
+// no bits above the value are ever set and the word is already a valid DP4A
+// operand - the unpack below reduces to reading `wq[word_idx]` unchanged).
+// At CODE_BITS=4 (Q4_K) two quads share one `wq` word (8 nibbles), so the
+// unpack extracts 4 `CODE_BITS`-wide fields starting at bit
+// `(quad_offset_within_word * 4 * CODE_BITS)` and repacks them one per BYTE
+// (`u0 | u1<<8 | u2<<16 | u3<<24`) - a pure bit-shuffle, never a multiply or
+// an added/subtracted bias, which is exactly why this is a staging-time
+// unpack and not a "runtime dequant": the affine codes stay their raw
+// unsigned value all the way into the DP4A operand, and `ds`/`dm` are only
+// ever applied once, in the group fold below, never per-element.
 //
-//  1. The staging LOAD becomes four consecutive `x`/`w` words per thread -
-//     the same 32-byte-per-eight-threads global pattern the k-major form had,
-//     since the k-group axis is already the fastest-varying axis of both
-//     operands. Nothing is transposed on the way in.
-//  2. The shared STRIDE is padded to `SP4` vec4s per row (one more than the
-//     `BKG/4` actually used), so the 16 lanes of a tx-group read 16 addresses
-//     whose bank indices are distinct. An unpadded stride puts them on a
-//     quarter of the banks and costs a four-way conflict on every B read.
+// Every code value is `< 2^CODE_BITS <= 256` and always packed at the LOW
+// end of its byte slot (top bits zero), so its signed-int8 reinterpretation
+// (what `dot4I8Packed` performs) is IDENTICAL to its unsigned value for
+// every code this format can produce (max 31, Q5_K) - the sign bit (bit 7)
+// is never set, so there is no unsigned-code-read-as-signed hazard to guard
+// against on the weight side. This is a real, gated case (adversarial case
+// 3 pairs a mixed-sign ACTIVATION with these always-nonnegative weight
+// codes) - the hazard `dot4I8Packed` exists to catch is on the activation
+// operand, not this one.
 //
-// The A operands for a whole k-group quad are hoisted into registers once and
-// reused across the eight B columns, so only ONE B vec4 is live at a time;
-// hoisting both sides would push the register block past the point where two
-// workgroups still fit on an SM, which is the occupancy the double-buffered
-// staging depends on.
+// ## Where the affine correction is applied, and what it costs
 //
-// Register-block ownership is INTERLEAVED: thread ty/tx owns rows/cols
-// {ty, ty+16, ty+32, …} instead of {8*ty … 8*ty+7}, so the 16 threads of a
-// tx-group read 16 consecutive shared rows and the epilogue's global stores
-// become 16 consecutive elements per instruction instead of a stride-8 scatter.
+// Same fold point as `matmul_i8_dyn`'s weight-scale dequant: every `QPG`-th
+// quad (`QPG=2`, fixed - this kernel's weight-scale group is always 32
+// elements, unlike the symmetric family's Q6_K special case), the live
+// 64-accumulator integer block folds into the running f32 totals through
+// `ds`, MINUS `dm[n,g]*S[m,g]`. `dm` varies per COLUMN (one value shared by
+// all 8 rows of a fold), `S` varies per ROW (one value shared by all 8
+// columns) - an 8+8 read per fold instead of `matmul_i8_dyn`'s 8, and the
+// two combine as an outer product across the 8x8 register block, exactly
+// mirroring how the existing `ds` term already broadcasts one per-column
+// value across 8 rows.
 //
-// ## Where the group scale is applied, and what it costs
+// ## Adversarial cases this kernel is gated against
 //
-// `BKG` is 8 packed groups = 32 int8 along K, which is EXACTLY `QPG` (a
-// template knob, default 2) quads' worth of weight-scale groups. At the
-// default `QPG=2` one k-chunk is one quantization group (group=32 - Q8_0,
-// Q5_0, Q4_0), and the dequantize lands on the chunk boundary: the 64 integer
-// accumulators sum a chunk exactly as before, then fold into 64 f32 running
-// totals scaled by that chunk's `sw[n, sg]`. `QPG=1` folds twice per chunk
-// instead (group=16 - Q6_K), at the quad boundary rather than the chunk
-// boundary; every other tile/staging/barrier/bank-padding/register-block
-// detail is unaffected, since only WHERE inside the existing `q` loop the
-// fold runs changes, not the loop's own trip count or the staging it reads.
-// The integer sum inside a group is still exact and re-orderable; only the
-// cross-group folds are floating point.
+// Mutation-verified (the specific term was temporarily zeroed/broken in this
+// file, the corresponding test confirmed red, then the break was reverted):
+// dropping the min-correction term entirely is invisible when `dmin == 0`
+// (a real, common case) but produces a large, systematic error once `dmin`
+// is nonzero and every value in a group sits far from zero - so the gate
+// pairs a `dmin == 0` case against a `dmin != 0` case and asserts the two
+// disagree, proving the correction term is load-bearing rather than
+// coincidentally near-zero on the test data. Sub-block scale variation
+// across a super-block's 8 groups catches a hoisted-out-of-the-k-loop
+// scale/offset read. Mixed positive/negative ACTIVATION values catch a
+// sign-extension bug on the `xq` side and, independently, would catch an
+// unsigned weight code accidentally read as signed (structurally impossible
+// here per the note above, gated anyway). An all-zero sub-block catches a
+// div-by-zero/NaN from the host relayout or an uninitialized-scale read
+// reaching the output. A genuine sub-rectangle (`r0 != 0` AND `c0 != 0`) at
+// two super-blocks' worth of `k` catches a hoisted row/column offset AND
+// exercises two genuinely different `d` values in one dispatch. Ragged
+// tiles (M/N not multiples of 128) exercise the guarded-store epilogue. A
+// `k` where CODE_BITS=4's word density (8 codes/word) genuinely differs from
+// `xq`'s (4/word) catches a stride mix-up between the two operands that a
+// coincidentally-equal word count could hide.
 //
-// That costs 64 FMAs per 512 DP4A - about 12% of the inner loop's issue slots
-// at `QPG=2` (double that at `QPG=1`) - and, more importantly, DOUBLES the
-// accumulator register block (64 i32 for the live group plus 64 f32 for the
-// running sum). On a GP102 that pushes the kernel from two resident
-// 256-thread workgroups per SM to one, so some of the latency hiding the
-// double-buffered staging was written for now has to come from the software
-// pipeline alone. That is the price of a weight scale that does not span
-// 17408 elements of K, and it is a price this repo has already decided to
-// pay - see `model::int8`'s module doc for the measurement.
-//
-// The alternative that keeps 64 registers - convert and scale every individual
-// DP4A result - was rejected: it triples the inner loop's instruction count
-// (convert + FMA per dot4 instead of one integer add) in a kernel whose own
-// header explains it is arithmetic-limited, not occupancy-limited.
-//
-// The accumulation WITHIN a group is INTEGER, so re-ordering the k-axis sum
-// inside a group is exact; the cross-group sum is f32 and runs in ascending
-// group order.
+// Register-block ownership, bank padding, software pipelining and the
+// epilogue are copied from `matmul_i8_dyn` unchanged - see that kernel's own
+// header for why the shared tiles are `vec4<u32>` and k-group-minor, why
+// only one operand side is hoisted into registers, and why the register
+// block is interleaved.
 //
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the CPU
 // int8 reference lives in the validation test, so parity is still gated.
 
-struct Params { m: u32, kg: u32, n: u32 };  // dynamic sx + group-wise sw, kg = K/4
+struct Params { m: u32, k: u32, n: u32 };  // k = RAW LOGICAL K (see header)
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read>       x:   array<u32>;  // [M, kg]
-@group(0) @binding(2) var<storage, read>       w:   array<u32>;  // [N, kg]
+@group(0) @binding(1) var<storage, read>       xq:  array<u32>;  // [M, k/4]
+@group(0) @binding(2) var<storage, read>       wq:  array<u32>;  // [N, k*CODE_BITS/32] unsigned codes
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [M] per-token activation scale
-@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N, kg/(4*QPG)] group-wise weight scale
-@group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
+@group(0) @binding(4) var<storage, read>       wsz: array<f32>;  // [N, 2*k/32] interleaved (ds, dm)
+@group(0) @binding(5) var<storage, read>       xgs: array<f32>;  // [M, k/32] activation group sums
+@group(0) @binding(6) var<storage, read_write> out: array<f32>;  // [M, N]
+
+const CODE_BITS: u32 = 8u;  // template knob: 4 (Q4_K) or 8 (Q5_K)
 
 const BM: u32 = 128u;
 const BN: u32 = 128u;
-const BKG: u32 = 8u;    // packed K-groups per chunk (= 32 int8 along K)
-const BKQ: u32 = 2u;    // BKG / 4 - vec4 quads of k-groups per row per chunk
-const QPG: u32 = 2u;    // quads per weight-scale group (one group = 4*QPG int8
-                         // along K). Default 2 => group=32 (Q8_0/Q5_0/Q4_0),
-                         // matching BKQ's implicit fold-once-per-chunk today
-                         // BIT-FOR-BIT (see the in-loop fold's own comment).
-                         // QPG=1 => group=16 (Q6_K), folding twice per chunk.
+const BKG: u32 = 8u;    // quads (4-element units, matching xq's word density) per chunk = one weight-scale group (32 elements)
+const BKQ: u32 = 2u;    // BKG / 4 - vec4-of-quads loads per row per chunk
+const QPG: u32 = 2u;    // quads per weight-scale group. FIXED at 2 (group=32) - this
+                         // kernel serves only Q4_K/Q5_K, both group=32; Q6_K's group=16
+                         // reaches the device through the EXISTING symmetric kernels'
+                         // own QPG knob instead, not this one.
 const SP4: u32 = 3u;    // padded shared stride in vec4s (BKQ + 1), bank-spread
 const LN: u32 = 16u;    // lane grid: 16 x 16 threads, stride-16 interleave
 const RS: u32 = 48u;    // LN * SP4 - vec4 step between a thread's own rows
@@ -143,17 +167,22 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let row0 = (wg / tiles_n) * BM;
     let col0 = (wg % tiles_n) * BN;
 
-    // Staging assignment: one vec4 of A and one of B per thread. Threads
-    // 2r and 2r+1 cover row r's two quads, i.e. eight consecutive words of
-    // that row - the same global access pattern the scalar form produced.
-    let sr = tid / BKQ;      // staged row within the tile
-    let sq = tid % BKQ;      // which k-group quad of it
+    let kgx = p.k / 4u;                       // quads per row (xq's own word density)
+    let ng = p.k / 32u;                       // weight-scale groups per row
+    let wq_row_words = p.k * CODE_BITS / 32u; // wq words per row
+    let qpwq = (32u / CODE_BITS) / 4u;        // quads packed per raw wq word
+    let cmask = (1u << CODE_BITS) - 1u;       // low-CODE_BITS mask
+
+    // Staging assignment: one vec4 of A and one of B per thread, same
+    // row/quad split matmul_i8_dyn uses.
+    let sr = tid / BKQ;
+    let sq = tid % BKQ;
     let arow = row0 + sr;
     let brow = col0 + sr;
     let a_ok = arow < p.m;
     let b_ok = brow < p.n;
-    let a_base = arow * p.kg;
-    let b_base = brow * p.kg;
+    let a_base = arow * kgx;
+    let w_base = brow * wq_row_words;
     let sh_idx = sr * SP4 + sq;
 
     // 64 int32 accumulators.
@@ -166,8 +195,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     var c60 = 0i; var c61 = 0i; var c62 = 0i; var c63 = 0i; var c64 = 0i; var c65 = 0i; var c66 = 0i; var c67 = 0i;
     var c70 = 0i; var c71 = 0i; var c72 = 0i; var c73 = 0i; var c74 = 0i; var c75 = 0i; var c76 = 0i; var c77 = 0i;
 
-    // 64 f32 running totals: the integer block above holds ONE weight-scale
-    // group (one k-chunk); these carry the dequantized sum across groups.
+    // 64 f32 running totals.
     var d00 = 0.0; var d01 = 0.0; var d02 = 0.0; var d03 = 0.0; var d04 = 0.0; var d05 = 0.0; var d06 = 0.0; var d07 = 0.0;
     var d10 = 0.0; var d11 = 0.0; var d12 = 0.0; var d13 = 0.0; var d14 = 0.0; var d15 = 0.0; var d16 = 0.0; var d17 = 0.0;
     var d20 = 0.0; var d21 = 0.0; var d22 = 0.0; var d23 = 0.0; var d24 = 0.0; var d25 = 0.0; var d26 = 0.0; var d27 = 0.0;
@@ -180,38 +208,40 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     var rA: vec4<u32>;
     var rB: vec4<u32>;
 
-    let nchunks = (p.kg + BKG - 1u) / BKG;
-    // Weight-scale groups per row (`4*QPG` int8 per group). At QPG=2 this is
-    // `p.kg / BKG`, equal to `nchunks` under the contract (K a multiple of 32
-    // => kg a multiple of BKG); computed separately, and the group index
-    // clamped below, so a caller that broke the contract gets a wrong number
-    // rather than a read past the binding.
-    let ng = p.kg / (4u * QPG);
-    // This thread's eight output columns, in the same stride-16 interleave the
-    // epilogue stores with.
+    let nchunks = (kgx + BKG - 1u) / BKG;
+    // This thread's eight output rows/columns, in the stride-16 interleave
+    // the epilogue AND the correction-term fold both read.
     let cc = col0 + tx;
+    let m0 = row0 + ty + 0u;   let m1 = row0 + ty + 16u;  let m2 = row0 + ty + 32u;  let m3 = row0 + ty + 48u;
+    let m4 = row0 + ty + 64u;  let m5 = row0 + ty + 80u;  let m6 = row0 + ty + 96u;  let m7 = row0 + ty + 112u;
 
-    // Prime chunk 0. The whole-quad case is one uniform branch and four
-    // consecutive loads; the ragged tail (`kg` not a multiple of BKG, or a
-    // partial row block) falls into the per-lane guards, so no lane ever
-    // forms an out-of-range index.
+    // Prime chunk 0.
     {
         let g0 = sq * 4u;
         var av = vec4<u32>(0u, 0u, 0u, 0u);
-        if (a_ok && g0 + 3u < p.kg) {
-            av = vec4<u32>(x[a_base + g0], x[a_base + g0 + 1u], x[a_base + g0 + 2u], x[a_base + g0 + 3u]);
+        if (a_ok && g0 + 3u < kgx) {
+            av = vec4<u32>(xq[a_base + g0], xq[a_base + g0 + 1u], xq[a_base + g0 + 2u], xq[a_base + g0 + 3u]);
         } else if (a_ok) {
-            if (g0 + 0u < p.kg) { av.x = x[a_base + g0]; }
-            if (g0 + 1u < p.kg) { av.y = x[a_base + g0 + 1u]; }
-            if (g0 + 2u < p.kg) { av.z = x[a_base + g0 + 2u]; }
+            if (g0 + 0u < kgx) { av.x = xq[a_base + g0]; }
+            if (g0 + 1u < kgx) { av.y = xq[a_base + g0 + 1u]; }
+            if (g0 + 2u < kgx) { av.z = xq[a_base + g0 + 2u]; }
         }
         var bv = vec4<u32>(0u, 0u, 0u, 0u);
-        if (b_ok && g0 + 3u < p.kg) {
-            bv = vec4<u32>(w[b_base + g0], w[b_base + g0 + 1u], w[b_base + g0 + 2u], w[b_base + g0 + 3u]);
-        } else if (b_ok) {
-            if (g0 + 0u < p.kg) { bv.x = w[b_base + g0]; }
-            if (g0 + 1u < p.kg) { bv.y = w[b_base + g0 + 1u]; }
-            if (g0 + 2u < p.kg) { bv.z = w[b_base + g0 + 2u]; }
+        if (b_ok) {
+            for (var li: u32 = 0u; li < 4u; li = li + 1u) {
+                let gq = g0 + li;
+                if (gq < kgx) {
+                    let word_idx = gq / qpwq;
+                    let qoff = gq % qpwq;
+                    let src = wq[w_base + word_idx];
+                    let base_bit = qoff * 4u * CODE_BITS;
+                    let u0 = (src >> (base_bit + 0u * CODE_BITS)) & cmask;
+                    let u1 = (src >> (base_bit + 1u * CODE_BITS)) & cmask;
+                    let u2 = (src >> (base_bit + 2u * CODE_BITS)) & cmask;
+                    let u3 = (src >> (base_bit + 3u * CODE_BITS)) & cmask;
+                    bv[li] = u0 | (u1 << 8u) | (u2 << 16u) | (u3 << 24u);
+                }
+            }
         }
         As[sh_idx] = av;
         Bs[sh_idx] = bv;
@@ -223,20 +253,29 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         if (has_next) {
             let g1 = (c + 1u) * BKG + sq * 4u;
             rA = vec4<u32>(0u, 0u, 0u, 0u);
-            if (a_ok && g1 + 3u < p.kg) {
-                rA = vec4<u32>(x[a_base + g1], x[a_base + g1 + 1u], x[a_base + g1 + 2u], x[a_base + g1 + 3u]);
+            if (a_ok && g1 + 3u < kgx) {
+                rA = vec4<u32>(xq[a_base + g1], xq[a_base + g1 + 1u], xq[a_base + g1 + 2u], xq[a_base + g1 + 3u]);
             } else if (a_ok) {
-                if (g1 + 0u < p.kg) { rA.x = x[a_base + g1]; }
-                if (g1 + 1u < p.kg) { rA.y = x[a_base + g1 + 1u]; }
-                if (g1 + 2u < p.kg) { rA.z = x[a_base + g1 + 2u]; }
+                if (g1 + 0u < kgx) { rA.x = xq[a_base + g1]; }
+                if (g1 + 1u < kgx) { rA.y = xq[a_base + g1 + 1u]; }
+                if (g1 + 2u < kgx) { rA.z = xq[a_base + g1 + 2u]; }
             }
             rB = vec4<u32>(0u, 0u, 0u, 0u);
-            if (b_ok && g1 + 3u < p.kg) {
-                rB = vec4<u32>(w[b_base + g1], w[b_base + g1 + 1u], w[b_base + g1 + 2u], w[b_base + g1 + 3u]);
-            } else if (b_ok) {
-                if (g1 + 0u < p.kg) { rB.x = w[b_base + g1]; }
-                if (g1 + 1u < p.kg) { rB.y = w[b_base + g1 + 1u]; }
-                if (g1 + 2u < p.kg) { rB.z = w[b_base + g1 + 2u]; }
+            if (b_ok) {
+                for (var li: u32 = 0u; li < 4u; li = li + 1u) {
+                    let gq = g1 + li;
+                    if (gq < kgx) {
+                        let word_idx = gq / qpwq;
+                        let qoff = gq % qpwq;
+                        let src = wq[w_base + word_idx];
+                        let base_bit = qoff * 4u * CODE_BITS;
+                        let u0 = (src >> (base_bit + 0u * CODE_BITS)) & cmask;
+                        let u1 = (src >> (base_bit + 1u * CODE_BITS)) & cmask;
+                        let u2 = (src >> (base_bit + 2u * CODE_BITS)) & cmask;
+                        let u3 = (src >> (base_bit + 3u * CODE_BITS)) & cmask;
+                        rB[li] = u0 | (u1 << 8u) | (u2 << 16u) | (u3 << 24u);
+                    }
+                }
             }
         }
         for (var q = 0u; q < BKQ; q = q + 1u) {
@@ -338,34 +377,50 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
                 c67 += dot4I8Packed(a6.x, b.x) + dot4I8Packed(a6.y, b.y) + dot4I8Packed(a6.z, b.z) + dot4I8Packed(a6.w, b.w);
                 c77 += dot4I8Packed(a7.x, b.x) + dot4I8Packed(a7.y, b.y) + dot4I8Packed(a7.z, b.z) + dot4I8Packed(a7.w, b.w);
             }
-            // Every QPG-th quad completes one weight-scale group (4*QPG int8):
-            // fold this group's exact integer sums into the f32 running totals
-            // through the group's own scale, then clear them for the next
-            // group. At QPG=BKQ (2, the default) this fires only on the LAST
-            // q of each chunk, at the identical point in the instruction
-            // stream the unconditional post-loop fold used to sit - same
-            // `sg`, same expressions, same order, so QPG=2 output is
-            // bit-for-bit unchanged from before this knob existed. At QPG=1
-            // it fires every q, folding twice per chunk (group=16, Q6_K).
+            // Every QPG-th quad completes one weight-scale group: fold the
+            // live integer sums into the f32 running totals through `ds`,
+            // MINUS the affine `dm[n,g]*S[m,g]` correction, then clear for
+            // the next group. `dm`/`e` vary per COLUMN (one read per fold,
+            // broadcast across all 8 rows); `s` (the activation group sum)
+            // varies per ROW (one read per fold, broadcast across all 8
+            // columns) - the two combine as an outer product over the 8x8
+            // block, exactly the affine correction's own `Σ_g(... - dm*S)`
+            // structure.
             if ((q + 1u) % QPG == 0u) {
                 let sgu = (c * BKQ + q) / QPG;
                 let sg = select(0u, sgu, sgu < ng);
-                let e0 = select(0.0, sw[(cc +   0u) * ng + sg], cc +   0u < p.n);
-                let e1 = select(0.0, sw[(cc +  16u) * ng + sg], cc +  16u < p.n);
-                let e2 = select(0.0, sw[(cc +  32u) * ng + sg], cc +  32u < p.n);
-                let e3 = select(0.0, sw[(cc +  48u) * ng + sg], cc +  48u < p.n);
-                let e4 = select(0.0, sw[(cc +  64u) * ng + sg], cc +  64u < p.n);
-                let e5 = select(0.0, sw[(cc +  80u) * ng + sg], cc +  80u < p.n);
-                let e6 = select(0.0, sw[(cc +  96u) * ng + sg], cc +  96u < p.n);
-                let e7 = select(0.0, sw[(cc + 112u) * ng + sg], cc + 112u < p.n);
-                d00 += f32(c00) * e0; d01 += f32(c01) * e1; d02 += f32(c02) * e2; d03 += f32(c03) * e3; d04 += f32(c04) * e4; d05 += f32(c05) * e5; d06 += f32(c06) * e6; d07 += f32(c07) * e7;
-                d10 += f32(c10) * e0; d11 += f32(c11) * e1; d12 += f32(c12) * e2; d13 += f32(c13) * e3; d14 += f32(c14) * e4; d15 += f32(c15) * e5; d16 += f32(c16) * e6; d17 += f32(c17) * e7;
-                d20 += f32(c20) * e0; d21 += f32(c21) * e1; d22 += f32(c22) * e2; d23 += f32(c23) * e3; d24 += f32(c24) * e4; d25 += f32(c25) * e5; d26 += f32(c26) * e6; d27 += f32(c27) * e7;
-                d30 += f32(c30) * e0; d31 += f32(c31) * e1; d32 += f32(c32) * e2; d33 += f32(c33) * e3; d34 += f32(c34) * e4; d35 += f32(c35) * e5; d36 += f32(c36) * e6; d37 += f32(c37) * e7;
-                d40 += f32(c40) * e0; d41 += f32(c41) * e1; d42 += f32(c42) * e2; d43 += f32(c43) * e3; d44 += f32(c44) * e4; d45 += f32(c45) * e5; d46 += f32(c46) * e6; d47 += f32(c47) * e7;
-                d50 += f32(c50) * e0; d51 += f32(c51) * e1; d52 += f32(c52) * e2; d53 += f32(c53) * e3; d54 += f32(c54) * e4; d55 += f32(c55) * e5; d56 += f32(c56) * e6; d57 += f32(c57) * e7;
-                d60 += f32(c60) * e0; d61 += f32(c61) * e1; d62 += f32(c62) * e2; d63 += f32(c63) * e3; d64 += f32(c64) * e4; d65 += f32(c65) * e5; d66 += f32(c66) * e6; d67 += f32(c67) * e7;
-                d70 += f32(c70) * e0; d71 += f32(c71) * e1; d72 += f32(c72) * e2; d73 += f32(c73) * e3; d74 += f32(c74) * e4; d75 += f32(c75) * e5; d76 += f32(c76) * e6; d77 += f32(c77) * e7;
+                let e0  = select(0.0, wsz[(cc +   0u) * 2u * ng + 2u * sg], cc +   0u < p.n);
+                let dm0 = select(0.0, wsz[(cc +   0u) * 2u * ng + 2u * sg + 1u], cc +   0u < p.n);
+                let e1  = select(0.0, wsz[(cc +  16u) * 2u * ng + 2u * sg], cc +  16u < p.n);
+                let dm1 = select(0.0, wsz[(cc +  16u) * 2u * ng + 2u * sg + 1u], cc +  16u < p.n);
+                let e2  = select(0.0, wsz[(cc +  32u) * 2u * ng + 2u * sg], cc +  32u < p.n);
+                let dm2 = select(0.0, wsz[(cc +  32u) * 2u * ng + 2u * sg + 1u], cc +  32u < p.n);
+                let e3  = select(0.0, wsz[(cc +  48u) * 2u * ng + 2u * sg], cc +  48u < p.n);
+                let dm3 = select(0.0, wsz[(cc +  48u) * 2u * ng + 2u * sg + 1u], cc +  48u < p.n);
+                let e4  = select(0.0, wsz[(cc +  64u) * 2u * ng + 2u * sg], cc +  64u < p.n);
+                let dm4 = select(0.0, wsz[(cc +  64u) * 2u * ng + 2u * sg + 1u], cc +  64u < p.n);
+                let e5  = select(0.0, wsz[(cc +  80u) * 2u * ng + 2u * sg], cc +  80u < p.n);
+                let dm5 = select(0.0, wsz[(cc +  80u) * 2u * ng + 2u * sg + 1u], cc +  80u < p.n);
+                let e6  = select(0.0, wsz[(cc +  96u) * 2u * ng + 2u * sg], cc +  96u < p.n);
+                let dm6 = select(0.0, wsz[(cc +  96u) * 2u * ng + 2u * sg + 1u], cc +  96u < p.n);
+                let e7  = select(0.0, wsz[(cc + 112u) * 2u * ng + 2u * sg], cc + 112u < p.n);
+                let dm7 = select(0.0, wsz[(cc + 112u) * 2u * ng + 2u * sg + 1u], cc + 112u < p.n);
+                let s0 = select(0.0, xgs[m0 * ng + sg], m0 < p.m);
+                let s1 = select(0.0, xgs[m1 * ng + sg], m1 < p.m);
+                let s2 = select(0.0, xgs[m2 * ng + sg], m2 < p.m);
+                let s3 = select(0.0, xgs[m3 * ng + sg], m3 < p.m);
+                let s4 = select(0.0, xgs[m4 * ng + sg], m4 < p.m);
+                let s5 = select(0.0, xgs[m5 * ng + sg], m5 < p.m);
+                let s6 = select(0.0, xgs[m6 * ng + sg], m6 < p.m);
+                let s7 = select(0.0, xgs[m7 * ng + sg], m7 < p.m);
+                d00 += f32(c00) * e0 - dm0 * s0; d01 += f32(c01) * e1 - dm1 * s0; d02 += f32(c02) * e2 - dm2 * s0; d03 += f32(c03) * e3 - dm3 * s0; d04 += f32(c04) * e4 - dm4 * s0; d05 += f32(c05) * e5 - dm5 * s0; d06 += f32(c06) * e6 - dm6 * s0; d07 += f32(c07) * e7 - dm7 * s0;
+                d10 += f32(c10) * e0 - dm0 * s1; d11 += f32(c11) * e1 - dm1 * s1; d12 += f32(c12) * e2 - dm2 * s1; d13 += f32(c13) * e3 - dm3 * s1; d14 += f32(c14) * e4 - dm4 * s1; d15 += f32(c15) * e5 - dm5 * s1; d16 += f32(c16) * e6 - dm6 * s1; d17 += f32(c17) * e7 - dm7 * s1;
+                d20 += f32(c20) * e0 - dm0 * s2; d21 += f32(c21) * e1 - dm1 * s2; d22 += f32(c22) * e2 - dm2 * s2; d23 += f32(c23) * e3 - dm3 * s2; d24 += f32(c24) * e4 - dm4 * s2; d25 += f32(c25) * e5 - dm5 * s2; d26 += f32(c26) * e6 - dm6 * s2; d27 += f32(c27) * e7 - dm7 * s2;
+                d30 += f32(c30) * e0 - dm0 * s3; d31 += f32(c31) * e1 - dm1 * s3; d32 += f32(c32) * e2 - dm2 * s3; d33 += f32(c33) * e3 - dm3 * s3; d34 += f32(c34) * e4 - dm4 * s3; d35 += f32(c35) * e5 - dm5 * s3; d36 += f32(c36) * e6 - dm6 * s3; d37 += f32(c37) * e7 - dm7 * s3;
+                d40 += f32(c40) * e0 - dm0 * s4; d41 += f32(c41) * e1 - dm1 * s4; d42 += f32(c42) * e2 - dm2 * s4; d43 += f32(c43) * e3 - dm3 * s4; d44 += f32(c44) * e4 - dm4 * s4; d45 += f32(c45) * e5 - dm5 * s4; d46 += f32(c46) * e6 - dm6 * s4; d47 += f32(c47) * e7 - dm7 * s4;
+                d50 += f32(c50) * e0 - dm0 * s5; d51 += f32(c51) * e1 - dm1 * s5; d52 += f32(c52) * e2 - dm2 * s5; d53 += f32(c53) * e3 - dm3 * s5; d54 += f32(c54) * e4 - dm4 * s5; d55 += f32(c55) * e5 - dm5 * s5; d56 += f32(c56) * e6 - dm6 * s5; d57 += f32(c57) * e7 - dm7 * s5;
+                d60 += f32(c60) * e0 - dm0 * s6; d61 += f32(c61) * e1 - dm1 * s6; d62 += f32(c62) * e2 - dm2 * s6; d63 += f32(c63) * e3 - dm3 * s6; d64 += f32(c64) * e4 - dm4 * s6; d65 += f32(c65) * e5 - dm5 * s6; d66 += f32(c66) * e6 - dm6 * s6; d67 += f32(c67) * e7 - dm7 * s6;
+                d70 += f32(c70) * e0 - dm0 * s7; d71 += f32(c71) * e1 - dm1 * s7; d72 += f32(c72) * e2 - dm2 * s7; d73 += f32(c73) * e3 - dm3 * s7; d74 += f32(c74) * e4 - dm4 * s7; d75 += f32(c75) * e5 - dm5 * s7; d76 += f32(c76) * e6 - dm6 * s7; d77 += f32(c77) * e7 - dm7 * s7;
                 c00 = 0i; c01 = 0i; c02 = 0i; c03 = 0i; c04 = 0i; c05 = 0i; c06 = 0i; c07 = 0i;
                 c10 = 0i; c11 = 0i; c12 = 0i; c13 = 0i; c14 = 0i; c15 = 0i; c16 = 0i; c17 = 0i;
                 c20 = 0i; c21 = 0i; c22 = 0i; c23 = 0i; c24 = 0i; c25 = 0i; c26 = 0i; c27 = 0i;
@@ -385,16 +440,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     }
 
     // Guarded stores: thread (ty,tx) owns rows ty+16i and columns tx+16j. The
-    // weight scale is already inside `dXY` (applied per k-chunk above), so the
-    // epilogue only has the per-token activation scale left to apply.
-    let m0 = row0 + ty + 0u;
-    let m1 = row0 + ty + 16u;
-    let m2 = row0 + ty + 32u;
-    let m3 = row0 + ty + 48u;
-    let m4 = row0 + ty + 64u;
-    let m5 = row0 + ty + 80u;
-    let m6 = row0 + ty + 96u;
-    let m7 = row0 + ty + 112u;
+    // weight scale AND the min correction are already inside `dXY` (applied
+    // per k-chunk above), so the epilogue only has the per-token activation
+    // scale left to apply.
     let sv0 = select(0.0, sx[m0], m0 < p.m); let sv1 = select(0.0, sx[m1], m1 < p.m);
     let sv2 = select(0.0, sx[m2], m2 < p.m); let sv3 = select(0.0, sx[m3], m3 < p.m);
     let sv4 = select(0.0, sx[m4], m4 < p.m); let sv5 = select(0.0, sx[m5], m5 < p.m);
