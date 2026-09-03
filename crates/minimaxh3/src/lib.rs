@@ -15,10 +15,10 @@
 //! prediction per forward, denoised under **two independent shifted-sigma
 //! Euler schedules** (`shift=12` video, `shift=3` audio) - never two
 //! separate `denoise()` loops. Text conditioning comes from a Qwen3-VL text
-//! encoder truncated to an intermediate hidden layer (the exact depth is
-//! not yet pinned - it has to be read from the reference implementation,
-//! not assumed), refined by 2 token-refiner blocks before packing. The
-//! model is guidance-distilled: no CFG pass, no `guidance_scale`.
+//! encoder truncated to decoder layer 50 (confirmed from the real
+//! `diffusers` reference), refined by 2 token-refiner blocks (plain
+//! pre-norm, no AdaLN, no RoPE) before packing. The model is
+//! guidance-distilled: no CFG pass, no `guidance_scale`.
 //!
 //! ## Reference material
 //!
@@ -36,17 +36,29 @@
 //!
 //! `adaln_proj` is 260M params/block x 50 blocks = 13.0B of the 33B total
 //! (confirmed from the real shard-0 safetensors header). Folding it into
-//! small precomputed per-(step,modality) modulation tables (a checkpoint
-//! transform planned but not yet built) turns the DiT into a ~19.3B backbone
-//! that fits resident at int8 across two 24GB cards.
+//! small precomputed per-(step,modality) modulation tables
+//! ([`precompute_adaln`]) turns the DiT into a ~20.2B backbone (measured at
+//! the tiny-config scale and extrapolated to the real config's dimensions -
+//! see that module) that fits resident at int8 across two 24GB cards.
 //!
 //! ## Status
 //!
-//! This crate is a fresh port in progress. Nothing here is claimed working
-//! until its own real-weight parity gate is green - an entry existing in
-//! this module does not mean the capability it names is implemented yet.
+//! This crate is a fresh port in progress. Every module through the DiT
+//! core, both VAEs, the vocoder and the dual schedule has a real numeric
+//! parity gate against the actual installed `diffusers==0.40.0` reference at
+//! tiny config, green; the audio VAE additionally has real-checkpoint
+//! numeric parity. `t2va`/`fl2va` run end to end at tiny config, weight-free.
+//! `ref2va` is not implemented. Real-checkpoint import for the DiT itself
+//! (splitting the checkpoint's fused `qkv_proj`) and a real Qwen3-VL text
+//! encoder wired into serving (a deterministic stub stands in today) are
+//! both open - an entry existing in this module does not by itself mean the
+//! capability it names is real-weight-complete.
 
+pub mod block;
 pub mod caps;
+pub mod config;
 pub mod import;
+pub mod model;
+pub mod rope;
 pub mod schedule;
 pub mod vocoder;
