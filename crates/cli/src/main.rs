@@ -24,6 +24,7 @@ mod flux2_cli;
 mod forecast_cli;
 mod label_cli;
 mod glm_cli;
+mod gguf_cli;
 mod gguf_import;
 mod gpt_cli;
 mod image_io;
@@ -469,6 +470,12 @@ ROOFLINE (measured, cross-accelerator hardware compute capacity)
       above) and `brain perf` (empirical serving load, see PERFORMANCE
       BENCHMARKING above). Plain rows are self-contained
       (`brain roofline | grep gpu0`); --json emits the same rows as an array.
+
+GGUF INSPECT (look at a downloaded .gguf FILE before importing/pulling it)
+  brain gguf inspect PATH [--json]
+      PATH is a real filesystem path, opened directly - never a model-store
+      reference. Prints the KV metadata plus a name/dtype/shape/size tensor
+      tree; --json emits the same information as data instead.
 
 GGUF IMPORT (one-time conversion; dispatches on general.architecture)
   brain import FILE [--out PATH] [--id VENDOR/REPO]
@@ -1103,6 +1110,7 @@ fn main() {
         // reader to run, and honouring it costs one arm.
         Some("pull") | Some("fetch") => std::process::exit(pull_cli::run_pull(&argv[2..])),
         Some("models") => std::process::exit(models_cli::run_models(&argv[2..])),
+        Some("gguf") => std::process::exit(gguf_cli::run_gguf(&argv[2..])),
         Some("roofline") => std::process::exit(roofline_cli::run_roofline(&argv[2..])),
         Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),

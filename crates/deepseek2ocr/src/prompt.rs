@@ -240,6 +240,7 @@ mod tests {
             eos: Some(1),
             unk: None,
             pad: None,
+            ..Default::default()
         };
         QwenBpe::from_gguf(&gt).expect("toy tokenizer")
     }
@@ -271,6 +272,7 @@ mod tests {
             eos: Some(0),
             unk: None,
             pad: None,
+            ..Default::default()
         };
         let t = QwenBpe::from_gguf(&gt).unwrap();
         let e = ImageTokens::resolve(&t).unwrap_err();

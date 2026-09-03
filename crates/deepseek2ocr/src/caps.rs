@@ -459,6 +459,7 @@ mod tests {
             eos: Some(1),
             unk: None,
             pad: None,
+            ..Default::default()
         };
         let tok = QwenBpe::from_gguf(&gt).expect("toy tokenizer");
         let cfg = DeepseekOcrConfig::deepseek_ocr(1);

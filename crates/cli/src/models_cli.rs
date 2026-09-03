@@ -429,7 +429,7 @@ fn leaf_for_local(arch: &'static brain_arch::Arch, l: &LocalModel, quant_label: 
 /// `list-adapters` has nothing further to drill into.
 fn render(roots: Vec<Node>, plain: bool, force_tui: bool, json: bool, on_enter: Option<&tree::DetailFn>) -> i32 {
     if json {
-        println!("{}", serde_json::to_string_pretty(&node_to_json(&roots)).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&tree::node_to_json(&roots)).unwrap_or_default());
         return 0;
     }
     let interactive = force_tui || (!plain && tree::stdout_is_terminal());
@@ -444,10 +444,6 @@ fn render(roots: Vec<Node>, plain: bool, force_tui: bool, json: bool, on_enter: 
         }
     }
     0
-}
-
-fn node_to_json(nodes: &[Node]) -> Value {
-    Value::Array(nodes.iter().map(|n| serde_json::json!({"line": n.line, "children": node_to_json(&n.children)})).collect())
 }
 
 // -------------------------------------------------------- list-adapters --
@@ -543,7 +539,7 @@ fn run_info(args: &[String]) -> i32 {
         }
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&node_to_json(&nodes)).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&tree::node_to_json(&nodes)).unwrap_or_default());
         return 0;
     }
     for line in tree::render_plain(&nodes) {

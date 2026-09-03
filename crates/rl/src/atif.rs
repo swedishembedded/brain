@@ -210,6 +210,7 @@ mod tests {
             eos: Some(2),
             unk: None,
             pad: None,
+            ..Default::default()
         };
         QwenBpe::from_gguf(&gt).unwrap()
     }

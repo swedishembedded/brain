@@ -31,28 +31,44 @@ brain qwen3 import --hf /path/to/Qwen3-0.6B --out qwen.safetensors
 ```
 
 A **GGUF** works too -- llama.cpp's `qwen3` architecture, e.g.
-`Qwen/Qwen3-8B-GGUF` -- through the generic importer, which picks the right
-converter from the file's own `general.architecture`:
+`Qwen/Qwen3-8B-GGUF` -- and needs **no conversion step**: `qwen3` is one of
+the architectures brain's model-dir scan and every `qwen3` CLI verb load
+**directly**. `checkpoint::weightio::WeightReader::open` sniffs the file's
+`GGUF` magic (falling back to the `.gguf` extension) and dispatches straight
+to the GGUF reader, with no intermediate `.safetensors` in between. Point
+`--weights` straight at the file:
 
 ```bash
-brain import /path/to/Qwen3-8B-Q8_0.gguf --out qwen3-8b.safetensors
+brain qwen3 infer --weights /path/to/Qwen3-8B-Q8_0.gguf \
+    --tokenizer tokenizer.json --prompt "Hello"
 ```
 
-Both routes produce the same brain parameters. The tensor-name map is
-transcribed from llama.cpp's own `gguf-py/gguf/tensor_mapping.py` and
-`constants.py`, and a test asserts the two routes agree *bit for bit* on the
-same logical checkpoint -- not to a tolerance, because the mistake worth
-catching (a swapped `k`/`v` projection) is shape-compatible on every GQA layer
-and only an exact comparison sees it.
+and the same goes for `brain serve`'s resident (below) -- `BRAIN_QWEN_WEIGHTS`
+also accepts a `.gguf` path directly.
 
-Note the disk trade: brain's own checkpoint format is fp32, so importing a
-quantized GGUF *expands* it: a Q8_0 file is a much smaller download than the
-bf16 safetensors, and the fp32 conversion is larger than either. Where a
-component reads a GGUF directly -- FLUX.2's text encoder, below -- no
-conversion happens and the download saving is the whole story.
+The generic converter is still there if you want it -- `brain import
+/path/to/Qwen3-8B-Q8_0.gguf --out qwen3-8b.safetensors`, which picks the
+right converter from the file's own `general.architecture` -- but for `qwen3`
+it is now **optional**, not a prerequisite: reach for it when you actually
+need a brain-native `.safetensors` checkpoint, e.g. as the base for
+`finetune`/`train` (a GGUF has no training path) or to pin one canonical
+on-disk format for the model store. Both routes produce the same brain
+parameters when you do convert. The tensor-name map is transcribed from
+llama.cpp's own `gguf-py/gguf/tensor_mapping.py` and `constants.py`, and a
+test asserts the two routes agree *bit for bit* on the same logical
+checkpoint -- not to a tolerance, because the mistake worth catching (a
+swapped `k`/`v` projection) is shape-compatible on every GQA layer and only an
+exact comparison sees it.
+
+Converting still pays the same disk trade, if you choose to: brain's own
+checkpoint format is fp32, so converting a quantized GGUF *expands* it -- a
+Q8_0 file is a much smaller download than the bf16 safetensors, and the fp32
+conversion is larger than either. Running the GGUF directly, as above, never
+pays that expansion at all -- the download saving is the whole story, the
+same as FLUX.2's text encoder, below.
 
 To make a checkpoint a `brain serve` resident, point `BRAIN_QWEN_WEIGHTS`
-(and `BRAIN_QWEN_TOKENIZER`) at it.
+(and `BRAIN_QWEN_TOKENIZER`) at it -- a `.gguf` file works here too.
 
 ### As FLUX.2's text encoder
 

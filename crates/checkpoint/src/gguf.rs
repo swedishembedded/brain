@@ -349,7 +349,18 @@ impl GgufValue {
 /// `token_types[id]` is the ggml token-type enum (1 NORMAL, 2 UNKNOWN, 3
 /// CONTROL, 4 USER_DEFINED, 5 BYTE, 6 UNUSED). The special-token ids are the
 /// declared `*_token_id` scalars (absent → `None`).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Every field below is independently optional: a real GGUF may carry any
+/// subset of these keys (a base model has no chat template; a non-SentencePiece
+/// tokenizer has no `scores`/`precompiled_charsmap`; FIM ids are a code-model
+/// convention only), so absence is `None`/an empty `Vec`, never a hard error -
+/// matching this struct's pre-existing fields.
+///
+/// `Default` is derived purely so callers that build a `GgufTokenizer` by hand
+/// (test fixtures elsewhere in this workspace, predating this struct's newest
+/// fields) can spread `..Default::default()` over the fields they don't care
+/// about rather than enumerate all of them.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct GgufTokenizer {
     /// `tokenizer.ggml.model` — the tokenizer scheme (e.g. `"gpt2"`, `"llama"`).
     pub model: String,
@@ -369,6 +380,53 @@ pub struct GgufTokenizer {
     pub unk: Option<u32>,
     /// `tokenizer.ggml.padding_token_id`.
     pub pad: Option<u32>,
+    /// `tokenizer.chat_template` - the default Jinja chat template, if the
+    /// file embeds one (mirrors `chat_template.json`'s field for a
+    /// `tokenizer_config.json`-based checkpoint; see [`crate` sibling
+    /// `data::chat_template::ChatTemplate::from_gguf`]).
+    pub chat_template: Option<String>,
+    /// Named template variants, `(name, template)`. llama.cpp's own writer
+    /// (`gguf_writer.py::add_chat_template`) stores each non-default variant
+    /// under its own `tokenizer.chat_template.<name>` string key and lists
+    /// only the NAMES in `tokenizer.chat_templates` (an array of strings, not
+    /// of template bodies) - confirmed by fetching that writer's source
+    /// rather than guessing, per this milestone's instructions. This field is
+    /// therefore built by scanning the KV map for the `tokenizer.chat_template.`
+    /// prefix directly, which needs no separate `tokenizer.chat_templates`
+    /// lookup at all and cannot desync from what the writer actually named.
+    pub chat_templates: Vec<(String, String)>,
+    /// `tokenizer.ggml.add_bos_token`.
+    pub add_bos_token: Option<bool>,
+    /// `tokenizer.ggml.add_eos_token`.
+    pub add_eos_token: Option<bool>,
+    /// `tokenizer.ggml.eot_token_id` (end-of-turn, distinct from `eos`).
+    pub eot: Option<u32>,
+    /// `tokenizer.ggml.eom_token_id` (end-of-message, e.g. Llama 3.1 tool calls).
+    pub eom: Option<u32>,
+    /// `tokenizer.ggml.scores` - per-id SentencePiece log-probability, parallel
+    /// to `tokens` (empty when the file's scheme doesn't carry scores).
+    pub scores: Vec<f32>,
+    /// `tokenizer.ggml.add_space_prefix`.
+    pub add_space_prefix: Option<bool>,
+    /// `tokenizer.ggml.precompiled_charsmap` - the raw SentencePiece normalizer
+    /// blob, if present. Written by llama.cpp's own `add_precompiled_charsmap`
+    /// as an `Array` of `UINT8` (confirmed against `gguf_writer.py` - GGUF has
+    /// no dedicated byte-blob value type, so a raw blob is always an array of
+    /// bytes, never `GgufValue::String`, which this reader's `Cursor::string`
+    /// additionally requires to be valid UTF-8 and this blob is not).
+    pub precompiled_charsmap: Vec<u8>,
+    /// `tokenizer.ggml.fim_pad_token_id`.
+    pub fim_pad: Option<u32>,
+    /// `tokenizer.ggml.fim_rep_token_id`.
+    pub fim_rep: Option<u32>,
+    /// `tokenizer.ggml.fim_sep_token_id`.
+    pub fim_sep: Option<u32>,
+    /// `tokenizer.ggml.fim_pre_token_id`.
+    pub fim_pre: Option<u32>,
+    /// `tokenizer.ggml.fim_suf_token_id`.
+    pub fim_suf: Option<u32>,
+    /// `tokenizer.ggml.fim_mid_token_id`.
+    pub fim_mid: Option<u32>,
 }
 
 /// Pull a `GgufTokenizer` out of a KV map: `None` unless `tokenizer.ggml.model`
@@ -395,7 +453,51 @@ fn tokenizer_from_kv(kv: &BTreeMap<String, GgufValue>) -> Option<GgufTokenizer> 
             .collect(),
         _ => Vec::new(),
     };
+    let f32_arr = |k: &str| match kv.get(k) {
+        Some(GgufValue::Array(a)) => a
+            .iter()
+            .map(|v| match *v {
+                GgufValue::F32(x) => x,
+                GgufValue::F64(x) => x as f32,
+                GgufValue::I8(x) => x as f32,
+                GgufValue::I16(x) => x as f32,
+                GgufValue::I32(x) => x as f32,
+                GgufValue::U8(x) => x as f32,
+                GgufValue::U16(x) => x as f32,
+                GgufValue::U32(x) => x as f32,
+                _ => 0.0,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let u8_arr = |k: &str| match kv.get(k) {
+        Some(GgufValue::Array(a)) => a
+            .iter()
+            .map(|v| match *v {
+                GgufValue::U8(x) => x,
+                GgufValue::I8(x) => x as u8,
+                _ => v.as_u64().map(|u| u as u8).unwrap_or(0),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let id = |k: &str| kv.get(k).and_then(|v| v.as_u64()).map(|v| v as u32);
+    let bool_val = |k: &str| match kv.get(k) {
+        Some(GgufValue::Bool(b)) => Some(*b),
+        _ => None,
+    };
+    // Named chat-template variants: llama.cpp's writer stores each one under
+    // its own `tokenizer.chat_template.<name>` string key (see the field's
+    // doc comment on `GgufTokenizer` for why this is scanned by prefix rather
+    // than read out of the `tokenizer.chat_templates` names array). `range`
+    // over a `BTreeMap<String, _>` walks matching keys contiguously, so the
+    // `take_while` below stops the instant the prefix ends.
+    let chat_template_prefix = "tokenizer.chat_template.";
+    let chat_templates: Vec<(String, String)> = kv
+        .range(chat_template_prefix.to_string()..)
+        .take_while(|(k, _)| k.starts_with(chat_template_prefix))
+        .filter_map(|(k, v)| v.as_str().map(|t| (k[chat_template_prefix.len()..].to_string(), t.to_string())))
+        .collect();
     Some(GgufTokenizer {
         model,
         pre: kv.get("tokenizer.ggml.pre").and_then(|v| v.as_str()).map(|s| s.to_string()),
@@ -406,6 +508,21 @@ fn tokenizer_from_kv(kv: &BTreeMap<String, GgufValue>) -> Option<GgufTokenizer> 
         eos: id("tokenizer.ggml.eos_token_id"),
         unk: id("tokenizer.ggml.unknown_token_id"),
         pad: id("tokenizer.ggml.padding_token_id"),
+        chat_template: kv.get("tokenizer.chat_template").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        chat_templates,
+        add_bos_token: bool_val("tokenizer.ggml.add_bos_token"),
+        add_eos_token: bool_val("tokenizer.ggml.add_eos_token"),
+        eot: id("tokenizer.ggml.eot_token_id"),
+        eom: id("tokenizer.ggml.eom_token_id"),
+        scores: f32_arr("tokenizer.ggml.scores"),
+        add_space_prefix: bool_val("tokenizer.ggml.add_space_prefix"),
+        precompiled_charsmap: u8_arr("tokenizer.ggml.precompiled_charsmap"),
+        fim_pad: id("tokenizer.ggml.fim_pad_token_id"),
+        fim_rep: id("tokenizer.ggml.fim_rep_token_id"),
+        fim_sep: id("tokenizer.ggml.fim_sep_token_id"),
+        fim_pre: id("tokenizer.ggml.fim_pre_token_id"),
+        fim_suf: id("tokenizer.ggml.fim_suf_token_id"),
+        fim_mid: id("tokenizer.ggml.fim_mid_token_id"),
     })
 }
 
@@ -2338,6 +2455,103 @@ mod tests {
         // A file without tokenizer.ggml.model exposes no tokenizer.
         let plain = parse_gguf(&build_gguf(&[], 0, &[1.0])).unwrap();
         assert!(plain.tokenizer().is_none());
+    }
+
+    /// M20: every new `GgufTokenizer` field, round-tripped through a REAL
+    /// GGUF (`gguf_write::write` + `MmapGguf::open`), not a hand-built struct
+    /// - this is what actually proves `tokenizer_from_kv`'s parsing, not just
+    /// that a struct literal satisfies its own field list. Two files: one
+    /// carrying every new key (asserting each is read back exactly), one
+    /// carrying none of them (asserting every new field lands on its
+    /// documented default: `None` for scalars, empty for `Vec`s).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tokenizer_from_kv_reads_every_m20_field() {
+        let path = std::env::temp_dir().join(format!("brain-gguf-tok-m20-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        let kv = vec![
+            ("tokenizer.ggml.model".to_string(), GgufValue::String("gpt2".to_string())),
+            (
+                "tokenizer.ggml.tokens".to_string(),
+                GgufValue::Array(vec![GgufValue::String("a".to_string()), GgufValue::String("b".to_string())]),
+            ),
+            ("tokenizer.chat_template".to_string(), GgufValue::String("{{ messages }}".to_string())),
+            // Named variants: llama.cpp's own writer shape - one string key
+            // per name under the `tokenizer.chat_template.` prefix (see the
+            // `chat_templates` field doc for why `tokenizer.chat_templates`
+            // itself, a names-only array, is not what this reads).
+            ("tokenizer.chat_template.tool_use".to_string(), GgufValue::String("{{ tools }}".to_string())),
+            ("tokenizer.chat_template.rag".to_string(), GgufValue::String("{{ docs }}".to_string())),
+            ("tokenizer.ggml.add_bos_token".to_string(), GgufValue::Bool(true)),
+            ("tokenizer.ggml.add_eos_token".to_string(), GgufValue::Bool(false)),
+            ("tokenizer.ggml.eot_token_id".to_string(), GgufValue::U32(10)),
+            ("tokenizer.ggml.eom_token_id".to_string(), GgufValue::U32(11)),
+            ("tokenizer.ggml.scores".to_string(), GgufValue::Array(vec![GgufValue::F32(-0.5), GgufValue::F32(-1.25)])),
+            ("tokenizer.ggml.add_space_prefix".to_string(), GgufValue::Bool(true)),
+            (
+                "tokenizer.ggml.precompiled_charsmap".to_string(),
+                GgufValue::Array(vec![GgufValue::U8(0xDE), GgufValue::U8(0xAD), GgufValue::U8(0xBE), GgufValue::U8(0xEF)]),
+            ),
+            ("tokenizer.ggml.fim_pad_token_id".to_string(), GgufValue::U32(20)),
+            ("tokenizer.ggml.fim_rep_token_id".to_string(), GgufValue::U32(21)),
+            ("tokenizer.ggml.fim_sep_token_id".to_string(), GgufValue::U32(22)),
+            ("tokenizer.ggml.fim_pre_token_id".to_string(), GgufValue::U32(23)),
+            ("tokenizer.ggml.fim_suf_token_id".to_string(), GgufValue::U32(24)),
+            ("tokenizer.ggml.fim_mid_token_id".to_string(), GgufValue::U32(25)),
+        ];
+        crate::gguf_write::write(&path, &kv, &[crate::gguf_write::TensorOut { name: "w".to_string(), shape: vec![1], ty: T_F32, data: 1.0f32.to_le_bytes().to_vec() }], 32).unwrap();
+        let mg = MmapGguf::open(&path).unwrap();
+        let t = mg.tokenizer().expect("tokenizer present");
+
+        assert_eq!(t.chat_template.as_deref(), Some("{{ messages }}"));
+        let mut variants = t.chat_templates.clone();
+        variants.sort();
+        assert_eq!(variants, vec![("rag".to_string(), "{{ docs }}".to_string()), ("tool_use".to_string(), "{{ tools }}".to_string())]);
+        assert_eq!(t.add_bos_token, Some(true));
+        assert_eq!(t.add_eos_token, Some(false));
+        assert_eq!(t.eot, Some(10));
+        assert_eq!(t.eom, Some(11));
+        assert_eq!(t.scores, vec![-0.5, -1.25]);
+        assert_eq!(t.add_space_prefix, Some(true));
+        assert_eq!(t.precompiled_charsmap, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(t.fim_pad, Some(20));
+        assert_eq!(t.fim_rep, Some(21));
+        assert_eq!(t.fim_sep, Some(22));
+        assert_eq!(t.fim_pre, Some(23));
+        assert_eq!(t.fim_suf, Some(24));
+        assert_eq!(t.fim_mid, Some(25));
+
+        std::fs::remove_file(&path).ok();
+
+        // None of the new keys present: every new field defaults.
+        let bare_path = std::env::temp_dir().join(format!("brain-gguf-tok-m20-bare-{}.gguf", std::process::id()));
+        let bare_path = bare_path.to_str().unwrap().to_string();
+        crate::gguf_write::write(
+            &bare_path,
+            &[("tokenizer.ggml.model".to_string(), GgufValue::String("gpt2".to_string()))],
+            &[crate::gguf_write::TensorOut { name: "w".to_string(), shape: vec![1], ty: T_F32, data: 1.0f32.to_le_bytes().to_vec() }],
+            32,
+        )
+        .unwrap();
+        let bare = MmapGguf::open(&bare_path).unwrap();
+        let bt = bare.tokenizer().expect("tokenizer present");
+        assert_eq!(bt.chat_template, None);
+        assert!(bt.chat_templates.is_empty());
+        assert_eq!(bt.add_bos_token, None);
+        assert_eq!(bt.add_eos_token, None);
+        assert_eq!(bt.eot, None);
+        assert_eq!(bt.eom, None);
+        assert!(bt.scores.is_empty());
+        assert_eq!(bt.add_space_prefix, None);
+        assert!(bt.precompiled_charsmap.is_empty());
+        assert_eq!(bt.fim_pad, None);
+        assert_eq!(bt.fim_rep, None);
+        assert_eq!(bt.fim_sep, None);
+        assert_eq!(bt.fim_pre, None);
+        assert_eq!(bt.fim_suf, None);
+        assert_eq!(bt.fim_mid, None);
+
+        std::fs::remove_file(&bare_path).ok();
     }
 
     #[test]

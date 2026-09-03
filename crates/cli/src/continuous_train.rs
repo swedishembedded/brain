@@ -111,6 +111,7 @@ mod tests {
             eos: Some(2),
             unk: None,
             pad: None,
+            ..Default::default()
         };
         data::qwen_tokenizer::QwenBpe::from_gguf(&gt).unwrap()
     }

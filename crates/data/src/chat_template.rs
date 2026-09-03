@@ -265,6 +265,37 @@ impl ChatTemplate {
         Ok(t)
     }
 
+    /// Compile the `tokenizer.chat_template` field out of a GGUF's embedded
+    /// tokenizer KV - the sibling of [`Self::from_model_dir`] for a `.gguf`
+    /// checkpoint that carries no `tokenizer_config.json` at all (a `.gguf`
+    /// file is commonly the ONLY artifact on disk; see `brain-data`'s own
+    /// `checkpoint::gguf::GgufTokenizer::chat_template` doc for the KV key).
+    ///
+    /// Errors the same shape as `from_model_dir` when no template is present
+    /// (a base, non-instruction-tuned GGUF is a real, expected case, not a
+    /// bug). `from_model_dir` sources its `bos_token`/`eos_token` render
+    /// defaults from `tokenizer_config.json`'s own string fields; a GGUF has
+    /// no such sibling file, so the equivalent here is `gt`'s own `bos`/`eos`
+    /// token IDS mapped through `gt.tokens` to their literal text - the same
+    /// information, read from the one place a GGUF actually carries it.
+    /// Best-effort exactly like `from_model_dir`: an out-of-range or absent
+    /// id simply leaves that default unset rather than erroring.
+    pub fn from_gguf(gt: &checkpoint::gguf::GgufTokenizer) -> Result<ChatTemplate, TemplateError> {
+        let src = gt.chat_template.as_ref().ok_or_else(|| {
+            TemplateError(format!(
+                "no chat template found: GgufTokenizer has no \"tokenizer.chat_template\" key (model = {:?})",
+                gt.model
+            ))
+        })?;
+        let mut t = Self::compile(src)?;
+        for (key, id) in [("bos_token", gt.bos), ("eos_token", gt.eos)] {
+            if let Some(text) = id.and_then(|i| gt.tokens.get(i as usize)) {
+                t.defaults.insert(key.to_string(), Value::from(text.clone()));
+            }
+        }
+        Ok(t)
+    }
+
     /// Render `messages` (a JSON array of `{role, content, tool_calls?,
     /// tool_call_id?, ...}` objects — build via [`parse_json_ordered`] or
     /// `Value::from_serialize`) through the template. `tools` is the JSON
@@ -629,6 +660,78 @@ mod tests {
         let mut extra = BTreeMap::new();
         extra.insert("bos_token".to_string(), Value::from("<B>"));
         assert_eq!(t.render(messages, None, false, &extra).unwrap(), "<B>hi</s>");
+    }
+
+    /// Build a real, minimal GGUF carrying a `tokenizer.chat_template` (plus
+    /// bos/eos ids and a tiny vocab) via `checkpoint::gguf_write::write`, then
+    /// read it back through `MmapGguf::open` - real KV parsing end to end,
+    /// not a hand-built `GgufTokenizer`, mirroring `from_model_dir`'s own
+    /// tests building real fixture files rather than mocking `ChatTemplate`.
+    fn gguf_with_chat_template(path: &str, template: &str) {
+        use checkpoint::gguf::GgufValue;
+        let kv = vec![
+            ("tokenizer.ggml.model".to_string(), GgufValue::String("gpt2".to_string())),
+            (
+                "tokenizer.ggml.tokens".to_string(),
+                GgufValue::Array(vec![GgufValue::String("<s>".to_string()), GgufValue::String("hi".to_string()), GgufValue::String("</s>".to_string())]),
+            ),
+            ("tokenizer.ggml.bos_token_id".to_string(), GgufValue::U32(0)),
+            ("tokenizer.ggml.eos_token_id".to_string(), GgufValue::U32(2)),
+            ("tokenizer.chat_template".to_string(), GgufValue::String(template.to_string())),
+        ];
+        checkpoint::gguf_write::write(
+            path,
+            &kv,
+            &[checkpoint::gguf_write::TensorOut { name: "w".to_string(), shape: vec![1], ty: 0, data: 1.0f32.to_le_bytes().to_vec() }],
+            32,
+        )
+        .unwrap();
+    }
+
+    /// SPEC: `ChatTemplate::from_gguf` compiles the real `tokenizer.chat_template`
+    /// KV string and injects `bos_token`/`eos_token` render defaults sourced
+    /// from `gt.tokens[gt.bos]`/`gt.tokens[gt.eos]` - the GGUF-native
+    /// equivalent of `from_model_dir_injects_bos_and_eos_tokens`.
+    #[test]
+    fn from_gguf_compiles_template_and_injects_bos_eos_from_the_vocab() {
+        let path = std::env::temp_dir().join(format!("brain-chat-template-gguf-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        gguf_with_chat_template(&path, "{{ bos_token }}{{ messages[0].content }}{{ eos_token }}");
+
+        let mg = checkpoint::gguf::MmapGguf::open(&path).unwrap();
+        let gt = mg.tokenizer().expect("tokenizer present");
+        let t = ChatTemplate::from_gguf(&gt).expect("load");
+        let messages = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
+        assert_eq!(t.render(messages.clone(), None, false, &BTreeMap::new()).unwrap(), "<s>hi</s>");
+        // extra overrides a default, exactly as it does for from_model_dir.
+        let mut extra = BTreeMap::new();
+        extra.insert("bos_token".to_string(), Value::from("<B>"));
+        assert_eq!(t.render(messages, None, false, &extra).unwrap(), "<B>hi</s>");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// SPEC: a GGUF with no `tokenizer.chat_template` key errors clearly
+    /// (mirrors `from_model_dir_errors_clearly_when_chat_template_is_absent`)
+    /// rather than panicking or silently compiling an empty template.
+    #[test]
+    fn from_gguf_errors_clearly_when_chat_template_is_absent() {
+        let path = std::env::temp_dir().join(format!("brain-chat-template-gguf-absent-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        checkpoint::gguf_write::write(
+            &path,
+            &[("tokenizer.ggml.model".to_string(), checkpoint::gguf::GgufValue::String("gpt2".to_string()))],
+            &[checkpoint::gguf_write::TensorOut { name: "w".to_string(), shape: vec![1], ty: 0, data: 1.0f32.to_le_bytes().to_vec() }],
+            32,
+        )
+        .unwrap();
+
+        let mg = checkpoint::gguf::MmapGguf::open(&path).unwrap();
+        let gt = mg.tokenizer().expect("tokenizer present");
+        let Err(err) = ChatTemplate::from_gguf(&gt) else { panic!("expected an error") };
+        assert!(err.to_string().contains("chat_template"), "got: {err}");
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

@@ -38,9 +38,12 @@
 //!   * `BRAIN_QWEN35MOE_WEIGHTS` — a brain-format Qwen3.5-35B-A3B checkpoint
 //!     (`.safetensors`, `checkpoint::load`-compatible - what `brain
 //!     import-gguf` writes). The primary gate; unset ⇒ not served.
-//!   * `BRAIN_QWEN35MOE_TOKENIZER` — the sibling `tokenizer.json`. Required at
-//!     `activate()` (there is no GGUF-embedded-tokenizer fallback here, unlike
-//!     `QwenResident` — `Engine` never touches a `.gguf` file at all).
+//!   * `BRAIN_QWEN35MOE_TOKENIZER` - the sibling `tokenizer.json`. If unset,
+//!     `activate()` falls back to a GGUF checkpoint's own embedded
+//!     `tokenizer.ggml.*` KV (see `crate::resident_llm::QwenResident::
+//!     activate`, the sibling this mirrors) before giving up - `Engine`
+//!     itself still never touches a `.gguf` file at all, so a GGUF
+//!     checkpoint gets a real tokenizer but no further than that today.
 //!   * `BRAIN_QWEN35MOE_CTX` — the hard `prompt + max_new` cap for any ONE
 //!     sequence (`Engine::from_map`'s `max_seq_len`, which this engine also
 //!     uses as its per-sequence block size — see `qwen35moe::serve`'s module
@@ -159,10 +162,21 @@ impl ResidentModel for Qwen35Resident {
         MemCost::new(cost.vram + gqa_bytes, cost.ram)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if self.tokenizer.is_empty() {
-            return Err("qwen35moe: no tokenizer (set BRAIN_QWEN35MOE_TOKENIZER)".to_string());
-        }
-        let tok = QwenBpe::from_file(&self.tokenizer)?;
+        // Open first so a GGUF can supply its own embedded tokenizer, exactly
+        // like crate::resident_llm::QwenResident::activate. `Engine` itself
+        // still only loads brain-native safetensors below (see this module's
+        // own doc), so this reader exists purely for the tokenizer fallback.
+        let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen35moe: {e}"))?;
+        // Tokenizer precedence: an explicit sibling tokenizer.json (or an
+        // env override) wins; else a .gguf builds from its embedded
+        // tokenizer.ggml.* KV; else there is nothing to tokenize with.
+        let tok = if !self.tokenizer.is_empty() {
+            QwenBpe::from_file(&self.tokenizer)?
+        } else if let Some(gt) = reader.tokenizer() {
+            QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen35moe: {e}"))?
+        } else {
+            return Err("qwen35moe: no tokenizer (set BRAIN_QWEN35MOE_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
+        };
         let eos = tok.encode("<|im_end|>").first().copied();
         let ctx = Self::ctx();
         let max_concurrent = Self::max_concurrent();

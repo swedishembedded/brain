@@ -781,6 +781,7 @@ mod tests {
             eos: Some(2),
             unk: None,
             pad: None,
+            ..Default::default()
         };
         let t = QwenBpe::from_gguf(&gt).unwrap();
 
@@ -853,6 +854,7 @@ mod tests {
             eos: None,
             unk: None,
             pad: None,
+            ..Default::default()
         };
         assert_eq!(QwenBpe::from_gguf(&gt).unwrap().encode("123"), vec![4]);
         let qwen = GgufTokenizer { pre: Some("qwen2".into()), ..gt };

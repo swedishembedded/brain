@@ -244,6 +244,51 @@ from GGUF (e.g. `qwen3`) are picked up by the model-dir scan as they are; the
 import path is for architectures whose tensor layout has to be translated
 first. `brain import --list` shows which those are.
 
+### Native K-quant GPU execution
+
+Even a GGUF architecture that loads directly used to pay a hidden cost on
+every run: `checkpoint::gguf` dequantized every block format to fp32 the
+moment a tensor was read, so a quantized tier's only advantage was a smaller
+download, never a smaller device footprint. The engine (`crates/gguf`,
+`crates/model`, `crates/kernels`) now has a lossless, on-device execution
+path for six GGML block formats instead - Q4_K and Q5_K through two new
+affine K-quant kernels, and Q6_K/Q5_0/Q4_0/Q8_0 by reusing the existing
+symmetric int8 GEMM kernels through template knobs (group size and code
+width are compile-time constants those kernels already took; no new kernel
+files). None of the six needs a host-side fp32 dequantize to be usable on
+the device this way - each block's raw codes and per-group scale/min are
+relaid out once, on the host, into one shared device-native layout, and
+reconstructing them from that layout reproduces the fp32 dequantize path bit
+for bit (checked by an `assert_eq!`, never a tolerance).
+
+That shared layout has a real, measured byte cost, because giving all six
+formats one shape means the three legacy formats - which have no
+super-block grouping coarser than their own 32-element block - can't
+amortize the packed scale plane the way the K-quant formats' 256-element
+super-block can:
+
+| type | device bytes/param | GGUF bytes/param | ratio |
+|---|---|---|---|
+| Q4_K | 0.578125 | 0.5625     | 1.0278x |
+| Q5_K | 1.078125 | 0.6875     | 1.5682x |
+| Q6_K | 1.140625 | 0.8203125  | 1.3905x |
+| Q5_0 | 1.187500 | 0.6875     | 1.7273x |
+| Q4_0 | 0.687500 | 0.5625     | 1.2222x |
+| Q8_0 | 1.187500 | 1.0625     | 1.1176x |
+
+Q8_0's row is this shared path's theoretical cost; production Q8_0 weights
+never actually take it - they reach the device through the older, separate,
+already-shipped `gguf::int8_direct` byte-exact path this engine has used for
+a while (`flux2`, `s3dit`, `ltxv`, `gemma4`, `wan`, and `qwen3`'s own int8
+tier all go through it today).
+
+This is engine-level capability, not yet a served model's default. Every
+model crate that reads a K-quant GGUF today still dequantizes those tensors
+to fp32 on load, same as before this landed - none has wired its own loader
+onto the new device path yet. The kernels, the host relayout, and the device
+dispatch are implemented and gated by real device-level tests; a model crate
+actually reaching for a K-quant tier this way is the remaining step.
+
 ### Quantizing a checkpoint
 
 The opposite direction - a full-precision checkpoint to a quantized GGUF -

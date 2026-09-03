@@ -1214,22 +1214,140 @@ this box yet.
       the rebase itself needed hand-resolving (see those commits' own
       messages).
 
+- [x] M20: `GgufTokenizer` completeness. 16 new fields: `chat_template`
+      (`tokenizer.chat_template`), `chat_templates` (named variants -
+      llama.cpp's writer stores each one under its own `tokenizer.chat_
+      template.<name>` string key and lists only NAMES in `tokenizer.chat_
+      templates`, confirmed by fetching `gguf_writer.py` rather than
+      guessing, per M18's precedent; read by scanning the KV `BTreeMap` for
+      the `tokenizer.chat_template.` prefix via `.range().take_while()`,
+      which needs no separate names-array lookup and cannot desync from
+      what the writer actually named), `add_bos_token`/`add_eos_token`,
+      `eot`/`eom`, `scores` (parallel f32 array to `tokens`), `add_space_
+      prefix`, `precompiled_charsmap` (confirmed as `Array` of `U8` via the
+      same writer fetch - not `String`, which this reader's `Cursor::
+      string` UTF-8-validates and a real charsmap blob is not guaranteed to
+      satisfy, a real correctness hazard this could have hit if guessed
+      wrong), and the six `fim_*_token_id`s. `GgufTokenizer` gained
+      `#[derive(Default)]` so every field beyond the pre-M20 nine can be
+      `..Default::default()`-spread at existing hand-built call sites
+      instead of requiring every one of them to enumerate 16 new fields.
+      `data::chat_template::ChatTemplate::from_gguf(gt: &GgufTokenizer)`
+      is `from_model_dir`'s sibling for a `.gguf` with no sibling
+      `tokenizer_config.json`: same `compile()` call, same bos/eos
+      default-injection, sourced from `gt.tokens[gt.bos]`/`gt.tokens[gt.eos]`
+      (a GGUF's own vocab) instead of `tokenizer_config.json`'s string
+      fields, and the same absent-template error shape.
+      `#[derive(Default)]` is a breaking change for every hand-built
+      `GgufTokenizer {..}` literal elsewhere in the workspace (Rust does not
+      let a struct grow fields without a way to default them). Six sites
+      found (`crates/data/src/qwen_tokenizer.rs`'s own two test fixtures,
+      `crates/cli/src/continuous_train.rs`, `crates/rl/src/atif.rs`,
+      `crates/rl/tests/continuous_cycle.rs`, `crates/deepseek2ocr/src/
+      caps.rs`, `crates/deepseek2ocr/src/prompt.rs` - two literals there),
+      every one fixed with `..Default::default()` in the same commit as the
+      struct change, since M20 alone would leave the tree non-compiling.
+      Gated (`crates/checkpoint/src/gguf.rs`, `crates/data/src/chat_
+      template.rs`): both new tests build a REAL GGUF via `gguf_write::
+      write` + `MmapGguf::open`/`ChatTemplate::from_gguf` (never a
+      hand-built `GgufTokenizer`, which would only prove the struct
+      satisfies its own field list, not that `tokenizer_from_kv` parses
+      correctly) - one carrying every new key (asserts each decodes
+      exactly, including two named template variants), one carrying none
+      (asserts every new field lands on its documented default).
+      `make test -p brain-checkpoint -p brain-data -p brain-cli -p
+      brain-rl -p brain-deepseek2ocr`: green throughout. `cargo check
+      --release --workspace`: clean.
+- [x] M21: wired the GGUF-embedded-tokenizer fallback (`reader.tokenizer()`
+      -> `QwenBpe::from_gguf`, the pattern `crate::resident_llm::
+      QwenResident::activate` already used) into `crates/cli/src/
+      resident_qwen35.rs` and `resident_qwen35moe.rs`'s own `activate()`:
+      an explicit sibling `tokenizer.json`/env override still wins, but an
+      unset one now falls back to the checkpoint's own embedded `tokenizer.
+      ggml.*` KV before giving up, instead of erroring immediately. `Engine`
+      itself still has no GGUF arm (`checkpoint::load` is safetensors-only),
+      so a `.gguf` checkpoint still cannot fully activate on either resident
+      - that gap is pre-existing and stays open, documented in both
+      module docs; the fallback only closes the "tokenizer construction
+      fails before the real, already-documented limitation is even
+      reached" gap. Gated: `resident_qwen35.rs`'s new test builds a real
+      GGUF with an embedded gpt2-scheme tokenizer (same shape `cli::
+      model_dir.rs`'s own `write_gguf_qwen` test helper uses), calls
+      `activate()` with no explicit tokenizer set, and asserts the failure
+      it eventually hits is `checkpoint::load`'s safetensors-parse panic
+      (proving the tokenizer fallback ran and succeeded) rather than the
+      tokenizer-missing error path. `make test -p brain-cli --bins`: green
+      (277 tests, 2 new).
+- [x] M22: `brain gguf inspect PATH [--json]`, in a new `crates/cli/src/
+      gguf_cli.rs` (`mod gguf_cli;` in `main.rs`, dispatched under a new
+      `"gguf"` verb next to `"models"`). `PATH` is a real filesystem path
+      opened directly via `checkpoint::gguf::MmapGguf::open` - deliberately
+      NOT a model-store reference (`brain models info` already covers
+      that); the whole point is inspecting a file before it is ever pulled
+      or imported. Plain-mode output is a `crate::tree` node tree (KV
+      metadata + a per-tensor name/dtype/shape/size listing grouped by
+      `.`-segment, the same grouping shape `models_cli`'s own tensor tree
+      uses); `--json` emits the same data via `MmapGguf::config()` plus the
+      tensor tree. A KV array over 8 entries is elided to its length plus
+      the first 3 (the real motivator: `tokenizer.ggml.tokens` on a genuine
+      vocabulary is 100k+ entries - printing it all would bury every other
+      KV key). While implementing this, found `models_cli.rs` had its own
+      private `node_to_json` doing exactly what this command also needed -
+      hoisted it into `crate::tree::node_to_json` as a shared public
+      helper (both of `models_cli.rs`'s own call sites updated to the
+      hoisted version) instead of adding a second copy. Only `inspect` is
+      implemented; `kv`/`tensors` sub-verbs from earlier planning notes
+      were left unimplemented since `inspect` alone already covers both
+      (metadata tree + tensor tree) in one command. Gated: usage-parsing
+      tests (missing path, `--json` recognized in either argument order,
+      unknown sub-verb, missing file), plus an end-to-end test against a
+      real synthetic GGUF asserting both render modes run without
+      panicking, the tensor tree names a real tensor, and a large KV array
+      is genuinely elided (and does NOT print every entry). `make test -p
+      brain-cli --bins`: green (277 tests, 5 new for this file alone).
+- [x] Doc fixes: `docs/models/qwen3.md`'s GGUF section demonstrated
+      converting a Qwen3 GGUF to safetensors as the way to run one, despite
+      qwen3 being direct-load (`gguf_import.rs`'s `Qwen3Importer::
+      loads_directly` returns `true`, and `resident_llm.rs`'s Qwen resident
+      already opens a `.gguf` straight via `WeightReader` with zero
+      conversion) - rewritten to show `brain qwen3 infer --weights
+      *.gguf` directly, with the converter kept as an explicit "still
+      available, now optional" path for callers who actually want a
+      brain-native checkpoint (training, or pinning one on-disk format).
+      `docs/using/models-and-weights.md` gained a "Native K-quant GPU
+      execution" section describing the M8-M18 kernel/dispatch work
+      (Q4_K/Q5_K via new affine kernels, Q6_K/Q5_0/Q4_0/Q8_0 through
+      existing kernels via template knobs, all bit-exact host relayout) and
+      its real, measured device-bytes-per-param table, citing the exact
+      figures already worked out in this ledger's own M8/M14 entries
+      rather than inventing new ones - explicitly noting this is
+      engine-level capability only: no served model crate has wired its
+      own GGUF loader onto the K-quant device path yet (every one still
+      dequantizes to fp32 on load, unchanged by this workstream).
+
 ## Not yet done
 
-- [ ] M20: `GgufTokenizer` completeness (`chat_template` + named variants,
-      `add_bos_token`/`add_eos_token`, eot/eom, `scores`,
-      `precompiled_charsmap`, `fim_*`); `ChatTemplate::from_gguf` as
-      `from_model_dir`'s sibling.
-- [ ] M21: wire the GGUF tokenizer fallback into `resident_qwen35.rs`/
-      `resident_qwen35moe.rs` (`resident_llm.rs` already has it for qwen3).
-- [ ] M22: `brain gguf inspect PATH [--json]` - no `kv()` is reachable from
-      the CLI today (`brain models info` goes through `WeightReader`, which
-      exposes no KV accessor).
-
-Docs to fix alongside the relevant milestones: `docs/models/qwen3.md:33-52`
-still demonstrates converting Qwen3 GGUF → safetensors even though the
-registry declares qwen3 `[direct]`; `docs/using/models-and-weights.md`
-needs the native K-quant tier documented once M12 lands.
+- [ ] The 7 remaining IQ grid codebooks deferred out of M18
+      (`IQ1_S`/`IQ1_M`/`IQ2_XXS`/`IQ2_XS`/`IQ2_S`/`IQ3_XXS`/`IQ3_S`), each
+      needing a large NGRID lookup table ported from ggml with the same
+      fetch-real-source-before-writing discipline M18 established. Not
+      attempted for lack of time, not lack of a ground-truth source (the
+      same `ggml-common.h`/`ggml-quants.c` fetch M18 already did has them).
+- [ ] No served model crate (`qwen3`/`qwen35`/`qwen35moe`/`qwen3vl`) has
+      wired its own GGUF loader onto the M8-M18 native K-quant device path
+      yet - every one still dequantizes a K-quant tensor to fp32 on load.
+      The kernels, host relayout, and dispatch seam are implemented and
+      gated by real device-level tests (see M8-M14); reaching for them from
+      an actual model's loader is the remaining step, and needs a real
+      Q4_K_M/Q5_K_M checkpoint on this box to validate against end to end
+      (see "Recorded gaps" below - none is available here today).
+- [ ] `Engine`-based serving (`qwen35`'s and `qwen35moe`'s CLI residents,
+      `crates/qwen35::serve`/`qwen35moe::serve`) is safetensors-only
+      (`checkpoint::load`) - M21 gave both residents a working GGUF
+      tokenizer fallback, but activation on a `.gguf` checkpoint still
+      cannot get past that point (a pre-existing, documented limitation,
+      unchanged by M21). Wiring `Engine` itself onto a GGUF source is a
+      separate, larger piece of work outside this ledger's own scope.
 
 ## Recorded gaps (this development machine has no MXFP4/IQ fixture and only
 one small Q8_0 in the model store)

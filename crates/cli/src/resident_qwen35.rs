@@ -21,9 +21,12 @@
 //!   * `BRAIN_QWEN35_WEIGHTS` - a brain-format Qwen3.8-27B checkpoint
 //!     (`.safetensors`, `checkpoint::load`-compatible). The primary gate;
 //!     unset means not served.
-//!   * `BRAIN_QWEN35_TOKENIZER` - the sibling `tokenizer.json`. Required at
-//!     `activate()` (there is no GGUF-embedded-tokenizer fallback here -
-//!     `Engine` never touches a `.gguf` file at all).
+//!   * `BRAIN_QWEN35_TOKENIZER` - the sibling `tokenizer.json`. If unset,
+//!     `activate()` falls back to a GGUF checkpoint's own embedded
+//!     `tokenizer.ggml.*` KV (see `crate::resident_llm::QwenResident::
+//!     activate`, the sibling this mirrors) before giving up - `Engine`
+//!     itself still never touches a `.gguf` file at all, so a GGUF
+//!     checkpoint gets a real tokenizer but no further than that today.
 //!   * `BRAIN_QWEN35_CTX` - the hard `prompt + max_new` cap for any ONE
 //!     sequence (`Engine::from_map`'s `max_seq_len`, which this engine also
 //!     uses as its per-sequence block size). Default 4096.
@@ -139,10 +142,21 @@ impl ResidentModel for Qwen35Resident {
         MemCost::new(cost.vram + gqa_bytes, cost.ram)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if self.tokenizer.is_empty() {
-            return Err("qwen35: no tokenizer (set BRAIN_QWEN35_TOKENIZER)".to_string());
-        }
-        let tok = QwenBpe::from_file(&self.tokenizer)?;
+        // Open first so a GGUF can supply its own embedded tokenizer, exactly
+        // like crate::resident_llm::QwenResident::activate. `Engine` itself
+        // still only loads brain-native safetensors below (see this module's
+        // own doc), so this reader exists purely for the tokenizer fallback.
+        let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen35: {e}"))?;
+        // Tokenizer precedence: an explicit sibling tokenizer.json (or an
+        // env override) wins; else a .gguf builds from its embedded
+        // tokenizer.ggml.* KV; else there is nothing to tokenize with.
+        let tok = if !self.tokenizer.is_empty() {
+            QwenBpe::from_file(&self.tokenizer)?
+        } else if let Some(gt) = reader.tokenizer() {
+            QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen35: {e}"))?
+        } else {
+            return Err("qwen35: no tokenizer (set BRAIN_QWEN35_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
+        };
         let eos = tok.encode("<|im_end|>").first().copied();
         let ctx = Self::ctx();
         let max_concurrent = Self::max_concurrent();
@@ -421,5 +435,63 @@ mod tests {
             let ids: Vec<&str> = body["data"].as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
             assert!(ids.contains(&MODEL), "{provider:?}: expected {MODEL:?} in /v1/models, got {ids:?}");
         }
+    }
+
+    /// A minimal single-file GGUF carrying a real gpt2-scheme
+    /// `tokenizer.ggml.*` KV block, same shape `model_dir.rs`'s own
+    /// `write_gguf_qwen` test helper builds, written through the real
+    /// `checkpoint::gguf_write::write` encoder rather than hand-assembled
+    /// bytes.
+    fn write_gguf_with_gpt2_tokenizer(path: &std::path::Path) {
+        use checkpoint::gguf::GgufValue as V;
+        let kv = vec![
+            ("general.architecture".to_string(), V::String("qwen3.8".to_string())),
+            ("tokenizer.ggml.model".to_string(), V::String("gpt2".to_string())),
+            (
+                "tokenizer.ggml.tokens".to_string(),
+                V::Array(["<|endoftext|>", "<|im_start|>", "<|im_end|>", "h", "i", "hi"].into_iter().map(|s| V::String(s.to_string())).collect()),
+            ),
+            ("tokenizer.ggml.merges".to_string(), V::Array(vec![V::String("h i".to_string())])),
+            ("tokenizer.ggml.token_type".to_string(), V::Array([3, 3, 3, 1, 1, 1].into_iter().map(V::I32).collect())),
+            ("tokenizer.ggml.bos_token_id".to_string(), V::U32(0)),
+            ("tokenizer.ggml.eos_token_id".to_string(), V::U32(2)),
+        ];
+        let tensor = checkpoint::gguf_write::TensorOut { name: "w".to_string(), shape: vec![4], ty: checkpoint::gguf::GgmlType::F32.id(), data: [1.0f32, 2.0, 3.0, 4.0].iter().flat_map(|v| v.to_le_bytes()).collect() };
+        checkpoint::gguf_write::write(path.to_str().unwrap(), &kv, std::slice::from_ref(&tensor), 32).unwrap();
+    }
+
+    /// M21: with no explicit `BRAIN_QWEN35_TOKENIZER`/sibling file, `activate()`
+    /// must fall back to the GGUF's own embedded `tokenizer.ggml.*` KV
+    /// (`crate::resident_llm::QwenResident::activate`'s already-working
+    /// pattern) instead of immediately returning the "no tokenizer" error.
+    /// `Engine` itself has no GGUF arm (this module's own doc), so activation
+    /// still cannot fully succeed on a `.gguf` checkpoint -- it panics inside
+    /// `checkpoint::load` (a pre-existing, documented limitation, not
+    /// introduced here) once it gets past tokenizer construction. Catching
+    /// that panic and asserting it is the safetensors-parse failure (not the
+    /// tokenizer error) proves the fallback ran and reached the real next
+    /// step.
+    #[test]
+    fn activate_falls_back_to_the_gguf_embedded_tokenizer() {
+        let dir = std::env::temp_dir().join(format!("brain-qwen35-gguf-tok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("qwen35.gguf");
+        write_gguf_with_gpt2_tokenizer(&path);
+
+        let resident = Qwen35Resident { id: MODEL.to_string(), path: path.to_str().unwrap().to_string(), tokenizer: String::new() };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resident.activate(&InstanceKey::new(MODEL, "default"), Device::Cpu)));
+        match result {
+            // Getting a clean Err this early would mean the tokenizer step
+            // itself rejected something; the fallback must at least get
+            // past it.
+            Ok(Err(e)) => panic!("expected the GGUF tokenizer fallback to succeed and activation to fail later inside checkpoint::load, got an early Err instead: {e}"),
+            Ok(Ok(_)) => panic!("activate() unexpectedly succeeded fully on a .gguf checkpoint -- Engine has no GGUF arm (see this module's own doc); if that changed, update this test"),
+            Err(payload) => {
+                let msg = payload.downcast_ref::<String>().cloned().or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                assert!(msg.contains("cannot read"), "expected the checkpoint::load safetensors-parse panic (proving tokenizer construction succeeded first), got: {msg:?}");
+                assert!(!msg.to_ascii_lowercase().contains("no tokenizer"), "the panic must not be the tokenizer-missing path: {msg:?}");
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
