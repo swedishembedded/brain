@@ -305,10 +305,26 @@ discovers capabilities generically.
       today (unlike e.g. deepseek-ocr's `tools/goldens/*` convention). Write
       one (needs a `transformers`-based Qwen3-TTS reference run) so
       `make fetch/testdata` can produce it and the gate stops silently
-      skipping.
+      skipping. Not attempted this session: no PyTorch/`transformers`
+      environment with Qwen3-TTS support is set up on this box, and standing
+      one up (verifying it reproduces the model correctly, matching
+      `tools/goldens/deepseek_ocr_convert_llamacpp_dump.py`'s own bar for a
+      reproducible, documented recipe) is a real side-project, not a quick
+      addition.
 - [ ] The MTP code predictor has NO equivalent parity or gradcheck test at
       all (`tests/mtp.rs` is a forward smoke test only, checkpoint-gated, no
-      golden comparison). Add one, mirroring the Talker's.
+      golden comparison). **Checked this session and found the real reason
+      it's missing, not just an oversight**: `MtpModel` has no backward pass
+      at all (`mtp.rs`'s own module doc: "an inference forward (no
+      backward) -- the Talker decoder carries the gradient-checked block
+      coverage"). The Talker's gradcheck test (`tests/talker.rs`) works
+      because `TalkerModel::new_trainable` exists with a full
+      forward+backward+`gradcheck::CheckModel` implementation; mirroring it
+      for MTP needs an equivalent `MtpModel::new_trainable` FIRST (a real,
+      separate prerequisite - implementing MTP backward through
+      `model::block`'s shared builders - not just writing the test file
+      once that exists). Left open, correctly scoped as "add MTP backward,
+      then the gradcheck test" rather than attempted as a quick mirror.
 - [x] A cheap end-to-end quality signal that doesn't need a PyTorch reference:
       `crates/qwen3tts/tests/asr_roundtrip.rs` round-trips `pipeline::synth`
       output through `nemotronasr` (real checkpoint,
