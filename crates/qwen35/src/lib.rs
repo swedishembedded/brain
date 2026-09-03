@@ -21,6 +21,7 @@ pub mod gguf_import;
 pub mod import;
 pub mod int8_gguf_resident;
 pub mod init;
+pub mod lora;
 pub mod model;
 pub mod sample;
 pub mod serve;
