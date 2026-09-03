@@ -555,3 +555,51 @@ PatchMerger's `[in_dim]` LayerNorm handed to a DeepStack merger reads
 from the dispatch `Params` and not from the buffer; the result is NaN or
 finite-looking garbage with nothing to say which weight was wrong.
 `PatchMerger::new` now checks the four shapes that decide its dispatch.
+
+## qwen3vl - real sampling, and context as a real (checkpoint-derived) number instead of a fixed 4096
+
+`Qwen3Vl::generate_timed`'s decode loop was hardwired to `argmax` and
+`crates/qwen3vl/src/caps.rs` had a `const SEQ_LEN: u32 = 4096` gating every
+request regardless of what the checkpoint actually declares - `1.56%` of a
+real Qwen3-VL-4B-Instruct release's `262144`-token
+`max_position_embeddings`, and both facts were stated in the served
+manifest as permanent limitations rather than validation-tier defaults.
+
+Fixed the two together, since both are "the served surface undersells what
+the architecture can do":
+
+- **Sampling**: `crates/qwen3vl/src/sample.rs` is this crate's own
+  temperature/top-k/nucleus `sample_logits` (a small, deliberate duplicate
+  of `qwen3::sample`'s algorithm, per this repo's existing per-model
+  sampling-tail convention - see `qwen35moe::sample`'s own doc for the same
+  reasoning). `Qwen3Vl::generate`/`generate_cb`/`generate_timed` take a new
+  `SampleParams { temperature, top_k, top_p }` + `&mut Rng`;
+  `SampleParams::greedy()` (temperature 0.0) reproduces the exact original
+  argmax behaviour, and is still the served default. `caps::generate_spec`
+  gained `temp`/`top_k`/`top_p`/`seed` params, same names/defaults/bounds as
+  `qwen3::caps`, so the two served surfaces are consistent.
+- **Context**: `SEQ_LEN` is gone. `caps::default_ctx_len()` reads
+  `$BRAIN_QWEN3VL_CTX` (default 24576, mirroring `qwen3`'s own
+  `BRAIN_QWEN_CTX`), and `resolved_ctx_len(cfg)` clamps it DOWN to the
+  checkpoint's own `max_position_embeddings` (already parsed by
+  `Qwen3VlConfig::from_hf`, previously unused) - never up, so a smaller
+  checkpoint variant cannot over-allocate past what it was trained for. The
+  resolved value is what the resident's decoder is actually built with
+  (`Resident.seq_len`), and a request that overflows it is refused BY NAME,
+  naming both the built capacity and the checkpoint's real ceiling.
+
+**What this is not**: native-262144 or paged-KV serving. This decode path
+still allocates a plain linear fp32 KV cache
+(`Qwen::new_shard_dt_decode`) - at the 4B config's shape that is ~288 KiB
+per token, so the real 262144-token ceiling would be ~77 GiB for one
+request. Reaching that natively needs the same paged-KV engine
+`qwen3::serve::Engine` already has, extended with an M-RoPE-aware
+`rope_paged` (today scalar-position only) and DeepStack wired into
+`run_batched_steps` (today only `forward_steps`/`decode_steps`) - real,
+separately-scoped follow-on work, not attempted here. Multi-image, video,
+resident D-Bus/HTTP serving, the MoE family variants, agent/tool calling and
+LoRA fine-tuning are all likewise still open; sampling and a
+checkpoint-derived (rather than hardcoded) context ceiling were the two
+items that needed no new architecture, only wiring already-tested math
+(`mrope::get_rope_index_multi`'s multi-image/video math is already ahead of
+`caps.rs`'s single-image action surface, for the same reason).

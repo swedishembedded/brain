@@ -24,6 +24,7 @@ pub mod model;
 mod parity;
 pub mod mrope;
 pub mod preprocess;
+pub mod sample;
 pub mod vision;
 
 pub use model::Qwen3Vl;

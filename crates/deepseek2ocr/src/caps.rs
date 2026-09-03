@@ -90,10 +90,13 @@ pub const DIR_VAR: &str = "BRAIN_DEEPSEEK_OCR_DIR";
 pub const DEFAULT_INSTRUCTION: &str = "<|grounding|>Convert the document to markdown.";
 
 /// Built context length: the 273-row image block plus BOS plus a real
-/// instruction plus room to generate. A fixed, documented budget (the same
-/// sizing philosophy `qwen3vl::caps::SEQ_LEN` uses), not the checkpoint's 8192
-/// architectural ceiling - every extra row costs a `[seq, 129280]` logit slab,
-/// and this model has no KV cache to amortise it.
+/// instruction plus room to generate. A fixed, documented budget - not the
+/// checkpoint's 8192 architectural ceiling - every extra row costs a
+/// `[seq, 129280]` logit slab, and this model has no KV cache to amortise it.
+/// (`qwen3vl::caps` used a fixed budget here too until it moved to
+/// `$BRAIN_QWEN3VL_CTX` clamped to the checkpoint's declared
+/// `max_position_embeddings`, viable there because that decode path DOES
+/// have a KV cache to amortise the extra rows against.)
 pub const SEQ_LEN: u32 = 512;
 
 /// Default generated-token budget. Deliberately small: each token is one FULL

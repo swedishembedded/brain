@@ -11,6 +11,7 @@ captioning instead, see [FastVLM](fastvlm.md); both are compared on the
 | Capability | Supported |
 |---|---|
 | Inference             | [x] |
+| Sampling (temperature/top-k/top-p) | [x] |
 | LoRA fine-tune         | [ ] |
 | CLI                    | [x] |
 | HTTP API               | [ ] |
@@ -130,11 +131,39 @@ Every load states the tier that ACTUALLY ran. A device that cannot serve a
 packed int8 dot has the request promoted back to fp32, and that is reported
 as a warning rather than passing silently.
 
+## Sampling
+
+`temp`/`top_k`/`top_p`/`seed` action parameters (same names, defaults and
+bounds as `qwen3::caps`) select the decode policy; `temp <= 0` (the default)
+is deterministic greedy argmax, matching this action's original behaviour.
+A real `temp` samples via the same temperature/top-k/nucleus algorithm
+`qwen3::sample` uses.
+
+## Context
+
+Decoder context is a resident-build-time capacity, not a per-request
+parameter (the same philosophy `max_pixels` already uses): `$BRAIN_QWEN3VL_CTX`
+(default 24576, mirroring `qwen3`'s own `BRAIN_QWEN_CTX`) sizes the KV cache
+this resident's decoder is built with, clamped DOWN to the checkpoint's own
+declared `max_position_embeddings` so a request never allocates past what the
+checkpoint was actually trained for. A request whose prompt + `max_new`
+exceeds that resident's built context is refused BY NAME, naming both the
+built capacity and the checkpoint's real ceiling - never silently truncated.
+
+This decode path allocates a plain linear fp32 KV cache
+(`Qwen::new_shard_dt_decode`), not the paged/int8 cache `qwen3::serve::Engine`
+uses to reach a real checkpoint's native (typically 262144-token) length
+affordably - at the 4B config's shape, the full native length would be tens
+of gigabytes of KV cache alone for one request. Reaching that native length
+here (rather than just raising the env default within what a card can hold)
+needs the same paged-KV/M-RoPE-aware serving `qwen3vl` does not have yet -
+see `.agents/roadmap/vlm.md`.
+
 ## Hardware and limits
 
-No D-Bus/HTTP serving adapter yet - CLI only, one request at a time, fp32,
-greedy decoding. Does not batch concurrent requests. No LoRA/fine-tuning
-command yet.
+No D-Bus/HTTP serving adapter yet - CLI only, one request at a time, fp32
+by default (int8 decoder opt-in). Does not batch concurrent requests. No
+LoRA/fine-tuning command yet.
 
 Prefill runs one token at a time, so its cost is linear in the prompt and
 close to the card's memory bandwidth. There is no batched prefill and no

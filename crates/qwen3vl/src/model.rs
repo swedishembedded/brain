@@ -17,9 +17,38 @@ use std::time::Instant;
 use gpu_core::Gpu;
 use qwen3::{Dtype, Qwen, QwenConfig, Shard};
 
+use data::rng::Rng;
+
 use crate::config::VisionConfig;
 use crate::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
 use crate::mrope::{get_rope_index, mrope_tables};
+
+/// The decoding policy for [`Qwen3Vl::generate_timed`]'s per-token pick.
+/// `temperature <= 0.0` is greedy argmax; otherwise `top_k`/`top_p` gate a
+/// temperature-scaled softmax draw - identical contract to
+/// `qwen3::sample::sample_logits` (`crate::sample::sample_logits` is this
+/// crate's own copy of that algorithm).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SampleParams {
+    pub temperature: f32,
+    pub top_k: usize,
+    pub top_p: f32,
+}
+
+impl SampleParams {
+    /// Deterministic argmax decoding - this module's original (and still
+    /// default) behaviour, and what every caller that does not care about
+    /// sampling should pass.
+    pub fn greedy() -> SampleParams {
+        SampleParams { temperature: 0.0, top_k: 0, top_p: 1.0 }
+    }
+}
+
+impl Default for SampleParams {
+    fn default() -> Self {
+        SampleParams::greedy()
+    }
+}
 
 /// An assembled Qwen3-VL model (forward path). Image tokens occupy a contiguous
 /// run of `image_token_id` in the text stream starting at `image_row0`.
@@ -316,11 +345,13 @@ impl Qwen3Vl {
     /// prompt as plain text (T=H=W, +1 per token — the same "media block
     /// then plain text" case `qwen3vl::mrope::get_rope_index_multi` documents).
     ///
-    /// Validation-tier: greedy argmax only (no temperature/top-k/top-p),
-    /// matching every other validation-tier `generate` in this repo (e.g.
-    /// `qwen3omnimoe::generate::generate_greedy`) - a real sampling policy is a
-    /// separate, later concern. Returns the generated token ids (prompt not
-    /// included), stopping early at any id in `eos_ids`.
+    /// `sample` selects the decoding policy: [`SampleParams::greedy`] is
+    /// argmax (deterministic, matching this function's original behaviour);
+    /// a real `temperature`/`top_k`/`top_p` request samples via
+    /// `crate::sample::sample_logits` (`qwen3::sample`'s algorithm, this
+    /// crate's own small copy per this repo's per-model sampling-tail
+    /// convention). Returns the generated token ids (prompt not included),
+    /// stopping early at any id in `eos_ids`.
     ///
     /// **DeepStack IS applied here**: `qwen3::Qwen::decode_steps`'s
     /// `deepstack_row` parameter adds each level's per-row residual
@@ -330,16 +361,28 @@ impl Qwen3Vl {
     /// graph, now also threaded into incremental decode via `decode_steps`'s
     /// `deepstack_row` parameter; see also
     /// `crates/qwen3/tests/deepstack_decode_parity.rs`).
-    pub fn generate(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32]) -> Vec<u32> {
-        self.generate_cb(tokens, grid, pixels, max_new, eos_ids, |_| {})
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32], sample: SampleParams, rng: &mut Rng) -> Vec<u32> {
+        self.generate_cb(tokens, grid, pixels, max_new, eos_ids, sample, rng, |_| {})
     }
 
     /// [`Self::generate`] with a per-token callback — the seam the served
     /// caps path uses to emit REAL streaming deltas (its ActionSpec declares
     /// `.streaming()`, which used to be satisfied by exactly two Progress
     /// emissions around the whole decode; audit F11).
-    pub fn generate_cb(&self, tokens: &[u32], grid: (u32, u32), pixels: &[f32], max_new: u32, eos_ids: &[u32], on_token: impl FnMut(u32)) -> Vec<u32> {
-        self.generate_timed(tokens, grid, pixels, max_new, eos_ids, on_token).0
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_cb(
+        &self,
+        tokens: &[u32],
+        grid: (u32, u32),
+        pixels: &[f32],
+        max_new: u32,
+        eos_ids: &[u32],
+        sample: SampleParams,
+        rng: &mut Rng,
+        on_token: impl FnMut(u32),
+    ) -> Vec<u32> {
+        self.generate_timed(tokens, grid, pixels, max_new, eos_ids, sample, rng, on_token).0
     }
 
     /// The storage tier the decoder's per-layer linears ACTUALLY landed on,
@@ -366,6 +409,7 @@ impl Qwen3Vl {
     /// timed, one not) would be free to drift about which stage owns what.
     /// Timing is a few `Instant::now()` calls around work measured in seconds,
     /// so the untimed entry point above is exactly this one.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_timed(
         &self,
         tokens: &[u32],
@@ -373,6 +417,8 @@ impl Qwen3Vl {
         pixels: &[f32],
         max_new: u32,
         eos_ids: &[u32],
+        sample: SampleParams,
+        rng: &mut Rng,
         mut on_token: impl FnMut(u32),
     ) -> (Vec<u32>, StageTimes) {
         let mut st = StageTimes { prompt_tokens: tokens.len() as u32, ..StageTimes::default() };
@@ -437,8 +483,8 @@ impl Qwen3Vl {
         self.decoder.gpu().poll_wait();
         st.prefill_s = t_prefill.elapsed().as_secs_f64();
 
-        // Decode: greedy argmax, continuing the position sequence past the
-        // prompt as plain text. The head is applied ON the device the weights
+        // Decode: sample (or, at SampleParams::greedy(), argmax) continuing
+        // the position sequence past the prompt as plain text. The head is applied ON the device the weights
         // already sit on (`Qwen::decode_logits`, vocab-tiled so each binding
         // stays inside the limit) and only a `[vocab]` row crosses back. The
         // host path this replaces read the WHOLE tied head table once per
@@ -448,7 +494,7 @@ impl Qwen3Vl {
         let mut out = Vec::with_capacity(max_new as usize);
         for _ in 0..max_new {
             let t_head = Instant::now();
-            let next = argmax(&self.decoder.decode_logits());
+            let next = crate::sample::sample_logits(&self.decoder.decode_logits(), sample.temperature, sample.top_k, sample.top_p, rng);
             st.head_s += t_head.elapsed().as_secs_f64();
             if eos_ids.contains(&next) {
                 break;
@@ -466,25 +512,9 @@ impl Qwen3Vl {
     }
 }
 
-/// Greedy pick over one `[vocab]` logit row; ties go to the LOWEST index -
-/// the rule `argmax_row.wgsl` states, so moving this reduction onto the device
-/// later cannot change which token is chosen.
-fn argmax(logits: &[f32]) -> u32 {
-    let mut best = 0usize;
-    let mut best_v = f32::NEG_INFINITY;
-    for (i, &v) in logits.iter().enumerate() {
-        if v > best_v {
-            best_v = v;
-            best = i;
-        }
-    }
-    best as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data::rng::Rng;
 
     const IMG: u32 = 7;
 
@@ -728,7 +758,8 @@ mod tests {
         let pixels: Vec<f32> = (0..pv_total).map(|_| rng.next_f32() - 0.5).collect();
 
         let max_new = 5u32;
-        let out1 = model.generate(&tokens, (4, 4), &pixels, max_new, &[]);
+        let mut gen_rng = Rng::new(99);
+        let out1 = model.generate(&tokens, (4, 4), &pixels, max_new, &[], SampleParams::greedy(), &mut gen_rng);
         assert!(!out1.is_empty(), "generate produced no tokens");
         assert!(out1.len() as u32 <= max_new, "generate exceeded max_new");
         for &t in &out1 {
@@ -810,12 +841,31 @@ mod tests {
             [2, 1, 1],
             DecoderBuild::Decode(Dtype::F32),
         );
-        let out2 = model2.generate(&tokens, (4, 4), &pixels, max_new, &[]);
-        assert_eq!(out1, out2, "greedy generation must be deterministic across independently-constructed identical models");
+        let mut gen_rng2 = Rng::new(1);
+        let out2 = model2.generate(&tokens, (4, 4), &pixels, max_new, &[], SampleParams::greedy(), &mut gen_rng2);
+        assert_eq!(out1, out2, "greedy generation must be deterministic across independently-constructed identical models, regardless of the RNG state");
 
         // eos_ids actually stops generation early: the first token out1[0]
         // treated as an immediate stop id must yield an empty sequence.
-        let out3 = model.generate(&tokens, (4, 4), &pixels, max_new, &[out1[0]]);
+        let mut gen_rng3 = Rng::new(2);
+        let out3 = model.generate(&tokens, (4, 4), &pixels, max_new, &[out1[0]], SampleParams::greedy(), &mut gen_rng3);
         assert!(out3.is_empty(), "an eos id matching the very first generated token must stop before emitting it, got {out3:?}");
+
+        // A real sampling request (temperature > 0) must actually consult the
+        // RNG: two different seeds decoding the same prompt at temperature=1
+        // must not always agree, or "sampling" would be greedy in disguise.
+        let sample = SampleParams { temperature: 1.0, top_k: 0, top_p: 1.0 };
+        let mut disagreed = false;
+        for seed in 0..16u64 {
+            let mut rng_a = Rng::new(seed);
+            let mut rng_b = Rng::new(seed + 1000);
+            let a = model.generate(&tokens, (4, 4), &pixels, max_new, &[], sample, &mut rng_a);
+            let b = model.generate(&tokens, (4, 4), &pixels, max_new, &[], sample, &mut rng_b);
+            if a != b {
+                disagreed = true;
+                break;
+            }
+        }
+        assert!(disagreed, "temperature=1.0 sampling must vary across RNG seeds on at least one of 16 trials");
     }
 }

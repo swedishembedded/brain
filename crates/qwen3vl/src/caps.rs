@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `capability::Provider` for Qwen3-VL: image + text in, greedy text out.
+//! `capability::Provider` for Qwen3-VL: image + text in, text out (greedy by
+//! default; `temp`/`top_k`/`top_p`/`seed` request real sampling).
 //!
 //! One action, `generate`, in the SAME chat-capable shape
 //! `crates/omni/src/caps.rs::generate_spec()` uses (`messages`/`prompt`,
@@ -110,10 +111,29 @@ fn default_weights() -> String {
 /// never approach. Override via the `max_pixels` param for a
 /// checkpoint/workload that genuinely needs bigger images.
 const DEFAULT_SERVE_MAX_PIXELS: u32 = 1024 * 1024;
-/// Decoder context: enough for a real prompt + the max image + a real
-/// response. Matches `fastvlm::caps`'s `t_max` sizing philosophy (a fixed,
-/// documented budget, not derived from the checkpoint).
-const SEQ_LEN: u32 = 4096;
+
+/// The KV-cache capacity this resident's decoder is BUILT for, before
+/// clamping to the checkpoint's own declared ceiling (see
+/// [`load_hf_resident`]/[`load_gguf_resident`]).
+///
+/// `$BRAIN_QWEN3VL_CTX`, mirroring `qwen3`'s own `BRAIN_QWEN_CTX`
+/// (`crates/cli/src/resident_llm.rs`) - an env-level operator knob, not a
+/// per-request parameter, because it sizes a real device allocation the
+/// resident is built with once, not something a caller picks per call.
+/// 24576 matches that sibling's own default: real Qwen3-VL-4B-Instruct
+/// checkpoints declare a 262144-token `max_position_embeddings`, but this
+/// decode path allocates a PLAIN LINEAR fp32 KV cache (`Qwen::
+/// new_shard_dt_decode`), not the paged/int8 cache `qwen3::serve::Engine`
+/// uses to reach that native length affordably - at the 4B config's
+/// `n_layers=36, n_kv_heads=8, head_dim=128`, one token costs
+/// `36*8*128*2*4 = 294912` bytes, so the full 262144 would be ~77 GiB of KV
+/// alone. 24576 (~7.1 GiB) is a real, working default for a single request;
+/// raising it is an explicit operator choice, not a silent truncation - and
+/// a request that overflows it is refused BY NAME (see [`Prepared::build`]),
+/// never silently cropped.
+fn default_ctx_len() -> u32 {
+    std::env::var("BRAIN_QWEN3VL_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(24576u32).max(1)
+}
 
 pub fn generate_spec() -> ActionSpec {
     ActionSpec::new("generate", "Qwen3-VL: image + text in, greedy text completion (validation-tier -- see this module's doc)")
@@ -121,6 +141,10 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(64)))
+        .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
+        .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
         .param(
             ParamSpec::new("weights", ParamType::Str, "Qwen3-VL checkpoint DIRECTORY (config.json + model.safetensors[.index.json] + tokenizer.json)")
                 .default(json!(default_weights())),
@@ -140,8 +164,10 @@ pub fn generate_spec() -> ActionSpec {
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "Qwen3-VL -- image + text in, greedy text out. Validation-tier: fp32 weights, greedy \
-         argmax only (no temperature/top-k/top-p), one request at a time (no batching).",
+        "Qwen3-VL -- image + text in, text out. Validation-tier: fp32 weights by default \
+         (int8 decoder opt-in), temperature/top-k/top-p sampling (greedy by default), \
+         one request at a time (no batching), context capacity set by $BRAIN_QWEN3VL_CTX \
+         (clamped to the checkpoint's own declared max_position_embeddings).",
         vec![generate_spec()],
     )
 }
@@ -160,6 +186,12 @@ struct Resident {
     /// this module's own doc on why construction-time capacity, not one
     /// request's exact size.
     n_visual_capacity: u32,
+    /// The KV-cache capacity this resident's decoder was actually BUILT for -
+    /// `min(default_ctx_len(), cfg.text.max_position_embeddings)`, see
+    /// [`load_hf_resident`]. Read by [`Prepared::build`] instead of a
+    /// compile-time constant, so a request's context error names the real
+    /// number this checkpoint and this box actually support.
+    seq_len: u32,
     cfg: Qwen3VlConfig,
     model: Qwen3Vl,
     tok: data::qwen_tokenizer::QwenBpe,
@@ -212,6 +244,13 @@ impl Action for GenerateAction {
         let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
+        let temperature = inv.get_f64("temp").unwrap_or(0.0).max(0.0) as f32;
+        let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
+        let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
+        let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
+        let sample = crate::model::SampleParams { temperature, top_k, top_p };
+        let mut rng = data::rng::Rng::new(seed);
+
         let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
         let (text, ntok) = with_resident(&dir, max_pixels, precision, |hot| {
             let p = Prepared::build(hot, &hwc, w, h, &prompt, max_new)?;
@@ -222,7 +261,7 @@ impl Action for GenerateAction {
             let mut ids: Vec<u32> = Vec::new();
             let mut printed = String::new();
             let mut step = 0u32;
-            let out_ids = hot.model.generate_cb(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, |tok_id| {
+            let out_ids = hot.model.generate_cb(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, sample, &mut rng, |tok_id| {
                 ids.push(tok_id);
                 step += 1;
                 let full = hot.tok.decode(&ids);
@@ -305,11 +344,13 @@ impl Prepared {
         tokens.extend(hot.tok.encode(&format!("{prompt}<|im_end|>\n<|im_start|>assistant\n")));
         let eos = hot.tok.encode("<|im_end|>");
 
-        if tokens.len() as u32 + max_new > SEQ_LEN {
+        if tokens.len() as u32 + max_new > hot.seq_len {
             return Err(format!(
                 "qwenvl generate: prompt ({} tokens incl. {n_visual} image tokens) + max_new ({max_new}) \
-                 exceeds this resident's context {SEQ_LEN}",
-                tokens.len()
+                 exceeds this resident's context {} (set $BRAIN_QWEN3VL_CTX to raise it, up to this checkpoint's own {} max_position_embeddings)",
+                tokens.len(),
+                hot.seq_len,
+                hot.cfg.text.max_position_embeddings
             ));
         }
         let grid = patch_grid(h_bar, w_bar, hot.cfg.vision.patch_size);
@@ -337,7 +378,11 @@ pub fn generate_profiled(
 ) -> Result<(String, crate::model::StageTimes, f64), String> {
     with_resident(dir, max_pixels, precision, |hot| {
         let p = Prepared::build(hot, hwc, w, h, prompt, max_new)?;
-        let (ids, st) = hot.model.generate_timed(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, |_| {});
+        // Greedy: a bench measures cost, and a deterministic decode keeps
+        // `qwen3vl_bench compare`'s tier-divergence numbers reproducible run
+        // to run rather than confounded by sampling noise.
+        let mut rng = data::rng::Rng::new(0);
+        let (ids, st) = hot.model.generate_timed(&p.tokens, p.grid, &p.pixels, max_new, &p.eos, crate::model::SampleParams::greedy(), &mut rng, |_| {});
         debug_assert_eq!(st.visual_tokens, p.n_visual);
         Ok((hot.tok.decode(&ids), st, p.preprocess_s))
     })
@@ -489,12 +534,13 @@ fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_p
     drop(lm);
     drop(mmproj);
     let n_visual_capacity = visual_capacity(&cfg, max_pixels);
+    let seq_len = resolved_ctx_len(&cfg);
     let w = crate::gguf_import::weights(&files, &cfg)?;
     let model = Qwen3Vl::from_imported(
         w,
         cfg.vision.clone(),
         cfg.text.clone(),
-        SEQ_LEN,
+        seq_len,
         cfg.image_token_id,
         0,
         n_visual_capacity,
@@ -502,7 +548,20 @@ fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_p
         precision.dtype(),
     );
     report_tier(&model, precision);
-    Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, cfg, model, tok })
+    Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, seq_len, cfg, model, tok })
+}
+
+/// The KV-cache capacity to actually build a resident's decoder with:
+/// [`default_ctx_len`] clamped DOWN to this checkpoint's own declared
+/// `max_position_embeddings` - "derive context from the checkpoint config"
+/// means the ceiling is real (read off `config.json`/GGUF metadata, never a
+/// number this crate made up), while the allocated default stays the
+/// documented, VRAM-bounded budget an operator can raise. Never clamps UP:
+/// a checkpoint declaring less than the default (e.g. a smaller variant)
+/// must not have this resident silently over-allocate past what training
+/// ever taught it to use.
+fn resolved_ctx_len(cfg: &Qwen3VlConfig) -> u32 {
+    default_ctx_len().min(cfg.text.max_position_embeddings.max(1))
 }
 
 /// Capacity placement: image_row0 is arbitrary (Qwen3Vl::generate's
@@ -529,11 +588,12 @@ fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32, precision: Precis
     let tok = data::qwen_tokenizer::QwenBpe::from_dir(dir).map_err(|e| format!("qwenvl: tokenizer: {e}"))?;
 
     let n_visual_capacity = visual_capacity(&cfg, max_pixels);
+    let seq_len = resolved_ctx_len(&cfg);
     let model =
-        Qwen3Vl::from_hf(dir, cfg.vision.clone(), cfg.text.clone(), SEQ_LEN, cfg.image_token_id, 0, n_visual_capacity, cfg.mrope_section, precision.dtype())?;
+        Qwen3Vl::from_hf(dir, cfg.vision.clone(), cfg.text.clone(), seq_len, cfg.image_token_id, 0, n_visual_capacity, cfg.mrope_section, precision.dtype())?;
     report_tier(&model, precision);
 
-    Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, cfg, model, tok })
+    Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, seq_len, cfg, model, tok })
 }
 
 /// Bilinear-resample interleaved-HWC `[0,1]` pixels from `(w,h)` to
@@ -564,6 +624,28 @@ mod tests {
         assert!(a.params.iter().any(|p| p.name == "prompt"));
         assert!(a.inputs.iter().any(|b| b.name == "image" && b.required));
         assert!(a.outputs.iter().any(|b| b.name == "text" && b.media == Media::Text));
+        // Sampling is a real, first-class request shape now, not just an
+        // internal decode-loop capability - the served surface must declare
+        // it the same way `qwen3::caps::manifest` does.
+        let p = |name: &str| a.params.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("missing param {name}"));
+        assert_eq!(p("temp").default, Some(json!(0.0)), "default must stay greedy for backward compatibility");
+        assert!(a.params.iter().any(|p| p.name == "top_k"));
+        assert!(a.params.iter().any(|p| p.name == "top_p"));
+        assert!(a.params.iter().any(|p| p.name == "seed"));
+    }
+
+    /// [`resolved_ctx_len`] must never allocate a KV cache bigger than what
+    /// the checkpoint itself declares as trained/valid - "derive context from
+    /// the checkpoint config" is a claim about the CEILING, not about what
+    /// gets allocated by default.
+    #[test]
+    fn resolved_ctx_len_never_exceeds_the_checkpoints_own_ceiling() {
+        let mut cfg = Qwen3VlConfig::qwen3_vl_4b();
+        cfg.text.max_position_embeddings = 2048; // smaller than the 24576 default
+        assert_eq!(resolved_ctx_len(&cfg), 2048, "must clamp DOWN to the checkpoint's declared max, never allocate past it");
+
+        cfg.text.max_position_embeddings = 262144; // the real released config's declared ceiling
+        assert_eq!(resolved_ctx_len(&cfg), default_ctx_len(), "a checkpoint with real headroom gets the operator's configured default, not a fixed 4096");
     }
 
     /// Served-path smoke on the real checkpoint (skip-if-absent, like the
