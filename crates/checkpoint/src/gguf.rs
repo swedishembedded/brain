@@ -48,6 +48,11 @@ pub(crate) const T_I16: u32 = 25;
 pub(crate) const T_I32: u32 = 26;
 pub(crate) const T_I64: u32 = 27;
 pub(crate) const T_F64: u32 = 28;
+pub(crate) const T_IQ4_NL: u32 = 20;
+pub(crate) const T_IQ4_XS: u32 = 23;
+pub(crate) const T_TQ1_0: u32 = 34;
+pub(crate) const T_TQ2_0: u32 = 35;
+pub(crate) const T_MXFP4: u32 = 39;
 
 pub(crate) const QK_K: usize = 256;
 
@@ -85,13 +90,17 @@ pub enum GgmlType {
     Q5K,
     Q6K,
     Q8K,
+    MXFP4,
+    IQ4NL,
+    IQ4XS,
+    TQ1_0,
+    TQ2_0,
 }
 
 impl GgmlType {
     /// Resolve a GGUF `ggml_type` id to the type this reader can decode.
-    /// `None` for an id with no block-format entry here (an IQ/TQ/MXFP4
-    /// codebook, a scalar-array id, or a genuinely unknown id) - never a
-    /// guess.
+    /// `None` for an id with no block-format entry here (a still-unsupported
+    /// IQ grid codebook, or a genuinely unknown id) - never a guess.
     pub fn from_id(id: u32) -> Option<GgmlType> {
         Some(match id {
             T_F32 => GgmlType::F32,
@@ -114,6 +123,11 @@ impl GgmlType {
             T_Q5_K => GgmlType::Q5K,
             T_Q6_K => GgmlType::Q6K,
             T_Q8_K => GgmlType::Q8K,
+            T_MXFP4 => GgmlType::MXFP4,
+            T_IQ4_NL => GgmlType::IQ4NL,
+            T_IQ4_XS => GgmlType::IQ4XS,
+            T_TQ1_0 => GgmlType::TQ1_0,
+            T_TQ2_0 => GgmlType::TQ2_0,
             _ => return None,
         })
     }
@@ -141,6 +155,11 @@ impl GgmlType {
             GgmlType::Q5K => T_Q5_K,
             GgmlType::Q6K => T_Q6_K,
             GgmlType::Q8K => T_Q8_K,
+            GgmlType::MXFP4 => T_MXFP4,
+            GgmlType::IQ4NL => T_IQ4_NL,
+            GgmlType::IQ4XS => T_IQ4_XS,
+            GgmlType::TQ1_0 => T_TQ1_0,
+            GgmlType::TQ2_0 => T_TQ2_0,
         }
     }
 
@@ -167,6 +186,11 @@ impl GgmlType {
             GgmlType::Q5K => "Q5_K",
             GgmlType::Q6K => "Q6_K",
             GgmlType::Q8K => "Q8_K",
+            GgmlType::MXFP4 => "MXFP4",
+            GgmlType::IQ4NL => "IQ4_NL",
+            GgmlType::IQ4XS => "IQ4_XS",
+            GgmlType::TQ1_0 => "TQ1_0",
+            GgmlType::TQ2_0 => "TQ2_0",
         }
     }
 
@@ -174,8 +198,8 @@ impl GgmlType {
     pub fn block_elems(self) -> usize {
         match self {
             GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 | GgmlType::F64 | GgmlType::I8 | GgmlType::I16 | GgmlType::I32 | GgmlType::I64 => 1,
-            GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 | GgmlType::Q8_1 => 32,
-            GgmlType::Q2K | GgmlType::Q3K | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K | GgmlType::Q8K => QK_K,
+            GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 | GgmlType::Q8_1 | GgmlType::MXFP4 | GgmlType::IQ4NL => 32,
+            GgmlType::Q2K | GgmlType::Q3K | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K | GgmlType::Q8K | GgmlType::IQ4XS | GgmlType::TQ1_0 | GgmlType::TQ2_0 => QK_K,
         }
     }
 
@@ -201,6 +225,16 @@ impl GgmlType {
             GgmlType::Q5K => 176,
             GgmlType::Q6K => 210,
             GgmlType::Q8K => 292,
+            // `block_mxfp4`: 1 (e8m0 scale) + QK_MXFP4/2 (16) = 17.
+            GgmlType::MXFP4 => 17,
+            // `block_iq4_nl`: sizeof(ggml_half) (2) + QK4_NL/2 (16) = 18.
+            GgmlType::IQ4NL => 18,
+            // `block_iq4_xs`: 2 (d) + 2 (scales_h) + QK_K/64 (4, scales_l) + QK_K/2 (128, qs) = 136.
+            GgmlType::IQ4XS => 136,
+            // `block_tq1_0`: QK_K/64 (4, qh) + (QK_K - 4*QK_K/64)/5 (48, qs) + 2 (d) = 54.
+            GgmlType::TQ1_0 => 54,
+            // `block_tq2_0`: QK_K/4 (64, qs) + 2 (d) = 66.
+            GgmlType::TQ2_0 => 66,
         }
     }
 
@@ -233,6 +267,11 @@ impl GgmlType {
             GgmlType::Q5K => deq_q5_k,
             GgmlType::Q6K => deq_q6_k,
             GgmlType::Q8K => deq_q8_k,
+            GgmlType::MXFP4 => deq_mxfp4,
+            GgmlType::IQ4NL => deq_iq4_nl,
+            GgmlType::IQ4XS => deq_iq4_xs,
+            GgmlType::TQ1_0 => deq_tq1_0,
+            GgmlType::TQ2_0 => deq_tq2_0,
         })
     }
 }
@@ -857,9 +896,10 @@ fn f16(b: &[u8], i: usize) -> f32 {
 pub(crate) fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, String> {
     let Some(t) = GgmlType::from_id(ty) else {
         return match ty {
-            16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 29 | 34 | 35 | 39 => {
-                Err(format!("gguf: type {ty} (IQ/TQ/MXFP4 codebook) dequant not yet implemented"))
-            }
+            // The remaining IQ grid codebooks (M18 covered MXFP4/IQ4_NL/
+            // IQ4_XS/TQ1_0/TQ2_0; IQ1_S/IQ1_M/IQ2_XXS/IQ2_XS/IQ2_S/IQ3_XXS/
+            // IQ3_S need a large NGRID lookup table each, deferred).
+            16 | 17 | 18 | 19 | 21 | 22 | 29 => Err(format!("gguf: type {ty} (IQ grid codebook) dequant not yet implemented")),
             other => Err(format!("gguf: unsupported type {other}")),
         };
     };
@@ -890,6 +930,11 @@ pub(crate) fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, 
         GgmlType::Q5K => deq_blocks(raw, numel, 176, deq_q5_k),
         GgmlType::Q6K => deq_blocks(raw, numel, 210, deq_q6_k),
         GgmlType::Q8K => deq_blocks(raw, numel, 292, deq_q8_k),
+        GgmlType::MXFP4 => deq_blocks(raw, numel, 17, deq_mxfp4),
+        GgmlType::IQ4NL => deq_blocks(raw, numel, 18, deq_iq4_nl),
+        GgmlType::IQ4XS => deq_blocks(raw, numel, 136, deq_iq4_xs),
+        GgmlType::TQ1_0 => deq_blocks(raw, numel, 54, deq_tq1_0),
+        GgmlType::TQ2_0 => deq_blocks(raw, numel, 66, deq_tq2_0),
     })
 }
 
@@ -1217,6 +1262,152 @@ fn deq_q8_k(b: &[u8], out: &mut Vec<f32>) {
     let d = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     for j in 0..QK_K {
         out.push(b[4 + j] as i8 as f32 * d);
+    }
+}
+
+// ---- codebook families (MXFP4, IQ4_NL, IQ4_XS, TQ1_0, TQ2_0) ----
+//
+// Every struct layout, table and loop nesting below is transcribed from
+// ggml's own `ggml-common.h` (block structs + `kvalues_*` tables) and
+// `ggml-quants.c` (`dequantize_row_*`), fetched from
+// `github.com/ggml-org/llama.cpp` at M18 time - this repo has no real
+// MXFP4/IQ/TQ checkpoint to derive the byte layout from by inspection the
+// way M8's K-quant work did, so the reference source is the ground truth
+// instead. The loop NESTING in `deq_tq1_0`/`deq_tq2_0` is preserved exactly
+// as ggml writes it (two byte-range chunks, each with the full inner
+// digit/shift loop) rather than "simplified" into one pass over every byte
+// - flattening it changes the OUTPUT ORDER, not just the code shape (caught
+// while transcribing: a single merged loop over all 48 tq1_0 `qs` bytes
+// produces a different permutation than ggml's own two-chunk split).
+
+/// The E2M1 magnitude/sign table MXFP4 shares with NVFP4 (`kvalues_fp4` /
+/// `kvalues_mxfp4` in `ggml-common.h`), values already 2x the true E2M1
+/// magnitude (`[0, 0.5, 1, 1.5, 2, 3, 4, 6]` and their negatives) - ggml's
+/// own comment says so, and [`e8m0_to_fp32_half`]'s scale is likewise
+/// halved so the doubling cancels exactly.
+const KVALUES_MXFP4: [i8; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
+
+/// ggml's non-linear 4-bit codebook (`kvalues_iq4nl` in `ggml-common.h`),
+/// shared verbatim by IQ4_NL and IQ4_XS.
+const KVALUES_IQ4NL: [i8; 16] = [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113];
+
+/// `ggml_e8m0_to_fp32_half` (`ggml-impl.h`): E8M0 (unsigned 8-bit exponent,
+/// bias 127) decoded to HALF its true value (`2^(e-127)/2` = `2^(e-128)`) -
+/// [`KVALUES_MXFP4`] is the true E2M1 magnitude DOUBLED, so halving the
+/// scale here is what makes `scale * code` land on the real value. Ported
+/// bit-for-bit via the same fp32-exponent-field placement ggml uses rather
+/// than computed as `2f32.powi(e as i32 - 128)`: `e` in `{0, 1}` lands in
+/// fp32's subnormal range, where a computed power is not guaranteed to
+/// round identically to the direct bit pattern.
+fn e8m0_to_fp32_half(e: u8) -> f32 {
+    let bits: u32 = if e < 2 { 0x0020_0000u32 << e } else { (e as u32 - 1) << 23 };
+    f32::from_bits(bits)
+}
+
+/// `block_mxfp4 { uint8_t e; uint8_t qs[16]; }`, `dequantize_row_mxfp4`.
+fn deq_mxfp4(b: &[u8], out: &mut Vec<f32>) {
+    let d = e8m0_to_fp32_half(b[0]);
+    let qs = &b[1..17];
+    let mut lo = [0.0f32; 16];
+    let mut hi = [0.0f32; 16];
+    for j in 0..16 {
+        lo[j] = KVALUES_MXFP4[(qs[j] & 0x0F) as usize] as f32 * d;
+        hi[j] = KVALUES_MXFP4[(qs[j] >> 4) as usize] as f32 * d;
+    }
+    out.extend_from_slice(&lo);
+    out.extend_from_slice(&hi);
+}
+
+/// `block_iq4_nl { ggml_half d; uint8_t qs[16]; }`, `dequantize_row_iq4_nl`.
+fn deq_iq4_nl(b: &[u8], out: &mut Vec<f32>) {
+    let d = f16(b, 0);
+    let qs = &b[2..18];
+    let mut lo = [0.0f32; 16];
+    let mut hi = [0.0f32; 16];
+    for j in 0..16 {
+        lo[j] = KVALUES_IQ4NL[(qs[j] & 0x0F) as usize] as f32 * d;
+        hi[j] = KVALUES_IQ4NL[(qs[j] >> 4) as usize] as f32 * d;
+    }
+    out.extend_from_slice(&lo);
+    out.extend_from_slice(&hi);
+}
+
+/// `block_iq4_xs { ggml_half d; uint16_t scales_h; uint8_t scales_l[4];
+/// uint8_t qs[128]; }`, `dequantize_row_iq4_xs` - 8 sub-blocks of 32
+/// elements, each with its own 6-bit signed scale (a 4-bit `scales_l`
+/// nibble plus a 2-bit `scales_h` field, offset by -32) applied to
+/// [`KVALUES_IQ4NL`], the same codebook IQ4_NL uses.
+fn deq_iq4_xs(b: &[u8], out: &mut Vec<f32>) {
+    let d = f16(b, 0);
+    let scales_h = u16::from_le_bytes([b[2], b[3]]);
+    let scales_l = &b[4..8];
+    let qs = &b[8..136];
+    for ib in 0..(QK_K / 32) {
+        let ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F) as i32 | ((((scales_h >> (2 * ib)) & 3) as i32) << 4);
+        let dl = d * (ls - 32) as f32;
+        let qblk = &qs[ib * 16..ib * 16 + 16];
+        let mut lo = [0.0f32; 16];
+        let mut hi = [0.0f32; 16];
+        for j in 0..16 {
+            lo[j] = KVALUES_IQ4NL[(qblk[j] & 0x0F) as usize] as f32 * dl;
+            hi[j] = KVALUES_IQ4NL[(qblk[j] >> 4) as usize] as f32 * dl;
+        }
+        out.extend_from_slice(&lo);
+        out.extend_from_slice(&hi);
+    }
+}
+
+/// One base-3 ternary digit from a `pow3`-multiplied byte
+/// (`(uint16_t)(byte*pow3[n])*3 >> 8` in ggml, extracting digit `n` of a
+/// byte packing 5 trits) minus 1, giving `{-1, 0, 1}`. `wrapping_mul`
+/// reproduces C's implicit `uint8_t` truncation on overflow exactly - this
+/// is not a defensive choice, the algorithm DEPENDS on the wraparound.
+fn tq_trit(byte: u8, pow3: u16) -> f32 {
+    let q = (byte as u16).wrapping_mul(pow3);
+    let xi = (q as u32 * 3) >> 8;
+    xi as f32 - 1.0
+}
+
+/// `block_tq1_0 { uint8_t qs[48]; uint8_t qh[4]; ggml_half d; }`,
+/// `dequantize_row_tq1_0`. `qs` decodes in TWO chunks (`[0..32]` then
+/// `[32..48]`), each running the full 5-digit loop before the next chunk
+/// starts - not one pass over all 48 bytes per digit, which would emit a
+/// different element order (48 is not a multiple of 32, which is why ggml's
+/// own C source has two loops here instead of one).
+fn deq_tq1_0(b: &[u8], out: &mut Vec<f32>) {
+    const POW3: [u16; 6] = [1, 3, 9, 27, 81, 243];
+    let qs = &b[0..48];
+    let qh = &b[48..52];
+    let d = f16(b, 52);
+    for &chunk in &[&qs[0..32], &qs[32..48]] {
+        for &p in &POW3[0..5] {
+            for &byte in chunk {
+                out.push(tq_trit(byte, p) * d);
+            }
+        }
+    }
+    for &p in &POW3[0..4] {
+        for &byte in qh {
+            out.push(tq_trit(byte, p) * d);
+        }
+    }
+}
+
+/// `block_tq2_0 { uint8_t qs[64]; ggml_half d; }`, `dequantize_row_tq2_0`.
+/// `qs` decodes in two 32-byte chunks, each running all four 2-bit shift
+/// positions before the next chunk - same "chunk outside, digit/shift loop
+/// inside" shape as `deq_tq1_0`, for the same reason (preserving ggml's own
+/// element order).
+fn deq_tq2_0(b: &[u8], out: &mut Vec<f32>) {
+    let qs = &b[0..64];
+    let d = f16(b, 64);
+    for chunk in qs.chunks_exact(32) {
+        for l in 0..4 {
+            for &byte in chunk {
+                let q = ((byte >> (l * 2)) & 3) as f32;
+                out.push((q - 1.0) * d);
+            }
+        }
     }
 }
 
@@ -1903,7 +2094,9 @@ mod tests {
 
     #[test]
     fn iq_types_error_clearly() {
-        let err = dequantize(20, &[0u8; 64], 32).unwrap_err();
+        // id 20 (IQ4_NL) moved OUT of "not yet implemented" in M18 - use a
+        // still-genuinely-unimplemented IQ grid codebook id instead.
+        let err = dequantize(16, &[0u8; 64], 32).unwrap_err();
         assert!(err.contains("not yet implemented"), "{err}");
     }
 
@@ -2524,6 +2717,11 @@ mod tests {
             (T_Q5_K, GgmlType::Q5K),
             (T_Q6_K, GgmlType::Q6K),
             (T_Q8_K, GgmlType::Q8K),
+            (T_MXFP4, GgmlType::MXFP4),
+            (T_IQ4_NL, GgmlType::IQ4NL),
+            (T_IQ4_XS, GgmlType::IQ4XS),
+            (T_TQ1_0, GgmlType::TQ1_0),
+            (T_TQ2_0, GgmlType::TQ2_0),
         ];
         for (id, ty) in all {
             assert_eq!(GgmlType::from_id(id), Some(ty), "id {id}");
@@ -2531,10 +2729,11 @@ mod tests {
             assert_eq!(Some(ty.name()), ggml_type_name(id), "{ty:?} vs ggml_type_name");
             assert_eq!(Some((ty.block_elems(), ty.block_bytes())), block_geometry(id), "{ty:?} vs block_geometry");
         }
-        // Unknown ids (a codebook type, a genuinely invalid one) must
-        // decline, never guess. 9 and 24-28 (Q8_1, I8/I16/I32/I64/F64) moved
-        // OUT of this set in M17 - they are real, recognized types now.
-        for unknown in [16u32, 39, 999] {
+        // Unknown ids (a still-unimplemented IQ grid codebook, a genuinely
+        // invalid one) must decline, never guess. 9 and 24-28 moved out in
+        // M17; 20, 23, 34, 35, 39 moved out in M18 - all real, recognized
+        // types now.
+        for unknown in [16u32, 29, 999] {
             assert_eq!(GgmlType::from_id(unknown), None, "id {unknown} must be unrecognized");
             assert_eq!(block_geometry(unknown), None);
             assert_eq!(ggml_type_name(unknown), None);
@@ -2690,5 +2889,183 @@ mod tests {
         assert_eq!(block_geometry(T_F64), Some((1, 8)));
         assert_eq!(tensor_nbytes(T_Q8_1, 32), Some(36));
         assert_eq!(tensor_nbytes(T_I32, 10), Some(40));
+    }
+
+    /// MXFP4's E2M1 LUT and E8M0-half scale, both pinned exactly. `e=128`
+    /// makes the scale exactly `1.0` (`e8m0_to_fp32_half`'s own doc works
+    /// this out: `2^(128-128)`), so the decoded values equal
+    /// [`KVALUES_MXFP4`] verbatim - packing code `j` into BOTH nibbles of
+    /// byte `j` (`j | (j<<4)`) exercises every one of the 16 codes in a
+    /// single block, in both the low-nibble (first 16 output elements) and
+    /// high-nibble (last 16) position.
+    #[test]
+    fn mxfp4_dequantizes_using_the_e2m1_lut_and_e8m0_half_scale() {
+        let mut raw = vec![128u8]; // e: scale = 1.0
+        raw.extend((0u8..16).map(|j| j | (j << 4)));
+        assert_eq!(raw.len(), 17);
+        let got = dequantize(T_MXFP4, &raw, 32).unwrap();
+        let want: Vec<f32> = KVALUES_MXFP4.iter().chain(KVALUES_MXFP4.iter()).map(|&v| v as f32).collect();
+        assert_eq!(got, want);
+
+        // Scale is genuinely applied, not just along for the ride: e=127
+        // halves everything.
+        let mut raw2 = vec![127u8];
+        raw2.extend((0u8..16).map(|j| j | (j << 4)));
+        let got2 = dequantize(T_MXFP4, &raw2, 32).unwrap();
+        let want2: Vec<f32> = want.iter().map(|&v| v * 0.5).collect();
+        assert_eq!(got2, want2);
+    }
+
+    /// IQ4_NL's own 16-entry non-linear codebook, same LUT-coverage
+    /// construction as the MXFP4 test above; `d=1.0` (fp16) makes the
+    /// decoded values equal [`KVALUES_IQ4NL`] verbatim.
+    #[test]
+    fn iq4_nl_dequantizes_using_its_own_codebook() {
+        let mut raw = half::f16::from_f32(1.0).to_le_bytes().to_vec();
+        raw.extend((0u8..16).map(|j| j | (j << 4)));
+        assert_eq!(raw.len(), 18);
+        let got = dequantize(T_IQ4_NL, &raw, 32).unwrap();
+        let want: Vec<f32> = KVALUES_IQ4NL.iter().chain(KVALUES_IQ4NL.iter()).map(|&v| v as f32).collect();
+        assert_eq!(got, want);
+    }
+
+    /// IQ4_XS's 8 sub-block scales - `ls = scales_l nibble | (scales_h
+    /// 2-bit field << 4)`, `dl = d*(ls-32)` - checked against values
+    /// independently hand-computed from the bit layout (not from this
+    /// decoder's own output): sub-block 0 (nibble=5, hbits=2) -> ls=37 ->
+    /// dl_factor=5; sub-block 3 (nibble=0xB, hbits=3, the HIGH nibble of
+    /// `scales_l[1]`) -> ls=59 -> dl_factor=27; every other sub-block's
+    /// scale bits are left zero -> ls=0 -> dl_factor=-32.
+    #[test]
+    fn iq4_xs_scale_extraction_matches_independently_computed_bits() {
+        let d = 1.0f32;
+        let mut scales_l = [0u8; 4];
+        let mut scales_h: u16 = 0;
+        scales_l[0] = 0x05; // sub-block 0's nibble (low nibble of scales_l[0])
+        scales_h |= 2 << (2 * 0); // sub-block 0's 2-bit high field
+        scales_l[1] = 0x0B << 4; // sub-block 3's nibble (HIGH nibble of scales_l[1])
+        scales_h |= 3 << (2 * 3); // sub-block 3's 2-bit high field
+
+        let mut raw = half::f16::from_f32(d).to_le_bytes().to_vec();
+        raw.extend(scales_h.to_le_bytes());
+        raw.extend(scales_l);
+        // qs: code 1 in every low nibble, code 2 in every high nibble - so
+        // each sub-block's 32 elements are exactly [KVALUES_IQ4NL[1]*dl;
+        // 16] then [KVALUES_IQ4NL[2]*dl; 16], letting one assert per
+        // sub-block cover both its scale AND its codebook lookup.
+        raw.extend([0x21u8; 16].repeat(8)); // (2<<4)|1 = 0x21, 16 bytes per sub-block x 8
+        assert_eq!(raw.len(), 136);
+
+        let got = dequantize(T_IQ4_XS, &raw, QK_K).unwrap();
+        let dl_factors = [5.0f32, -32.0, -32.0, 27.0, -32.0, -32.0, -32.0, -32.0];
+        for (ib, &factor) in dl_factors.iter().enumerate() {
+            let dl = d * factor;
+            let base = ib * 32;
+            for k in 0..16 {
+                assert_eq!(got[base + k], KVALUES_IQ4NL[1] as f32 * dl, "sub-block {ib} low nibble, elem {k}");
+                assert_eq!(got[base + 16 + k], KVALUES_IQ4NL[2] as f32 * dl, "sub-block {ib} high nibble, elem {k}");
+            }
+        }
+    }
+
+    /// TQ1_0 against values computed by an INDEPENDENT Python transcription
+    /// of `dequantize_row_tq1_0` (not this Rust decoder, and not hand
+    /// arithmetic) - the two-chunk `qs` split (`[0..32]` then `[32..48]`,
+    /// each running the full 5-digit loop) is exactly the shape a
+    /// naive single-pass "simplification" gets wrong (caught while writing
+    /// [`deq_tq1_0`] the first time), so this pins real, non-trivial byte
+    /// values at both chunk boundaries and in `qh`, not an all-zero
+    /// degenerate case.
+    #[test]
+    fn tq1_0_matches_an_independently_computed_reference() {
+        let mut qs = [0u8; 48];
+        qs[0] = 5;
+        qs[1] = 200;
+        qs[31] = 77; // last byte of the FIRST chunk
+        qs[32] = 9; // first byte of the SECOND chunk
+        qs[47] = 250; // last byte of the second chunk
+        let mut qh = [0u8; 4];
+        qh[0] = 42;
+        qh[3] = 123;
+        let d = 2.0f32;
+
+        let mut raw = Vec::new();
+        raw.extend(qs);
+        raw.extend(qh);
+        raw.extend(half::f16::from_f32(d).to_le_bytes());
+        assert_eq!(raw.len(), 54);
+
+        let got = dequantize(T_TQ1_0, &raw, QK_K).unwrap();
+        // index = n*32+m for the first chunk (n in 0..5, m in 0..32).
+        assert_eq!(got[0 * 32 + 0], -2.0, "qs[0]=5, n=0");
+        assert_eq!(got[0 * 32 + 1], 2.0, "qs[1]=200, n=0");
+        assert_eq!(got[4 * 32 + 31], 144.0, "qs[31]=77, n=4");
+        // index = 160 + n*16+m for the second chunk (n in 0..5, m in 0..16).
+        assert_eq!(got[160 + 0 * 16 + 0], -2.0, "qs[32]=9, n=0");
+        assert_eq!(got[160 + 4 * 16 + 15], 472.0, "qs[47]=250, n=4");
+        // index = 240 + n*4+m for qh (n in 0..4, m in 0..4).
+        assert_eq!(got[240], -2.0, "qh[0]=42, n=0");
+        assert_eq!(got[240 + 3 * 4 + 3], 74.0, "qh[3]=123, n=3");
+        // A zero byte's digit is -1 for every n, at every position -
+        // pinned once for an untouched byte (qs[3]) as a baseline.
+        assert_eq!(got[3], -2.0, "qs[3]=0 (untouched)");
+    }
+
+    /// TQ2_0 against the same independent-Python-reference discipline as
+    /// TQ1_0 above; the two 32-byte chunks (`l` shift loop nested INSIDE
+    /// each chunk, not the chunk nested inside `l`) is the analogous
+    /// ordering trap.
+    #[test]
+    fn tq2_0_matches_an_independently_computed_reference() {
+        let mut qs = [0u8; 64];
+        qs[0] = 0b11100100; // l0=00(-1) l1=01(0) l2=10(1) l3=11(2)
+        qs[31] = 0b01_10_11_00; // last byte of chunk 0
+        qs[32] = 0b00_01_10_11; // first byte of chunk 1
+        qs[63] = 0b10101010;
+        let d = 3.0f32;
+
+        let mut raw = Vec::new();
+        raw.extend(qs);
+        raw.extend(half::f16::from_f32(d).to_le_bytes());
+        assert_eq!(raw.len(), 66);
+
+        let got = dequantize(T_TQ2_0, &raw, QK_K).unwrap();
+        // index = l*32+m within chunk 0 (m in 0..32).
+        assert_eq!(got[0 * 32], -3.0, "qs[0] l=0");
+        assert_eq!(got[1 * 32], 0.0, "qs[0] l=1");
+        assert_eq!(got[2 * 32], 3.0, "qs[0] l=2");
+        assert_eq!(got[3 * 32], 6.0, "qs[0] l=3");
+        assert_eq!(got[0 * 32 + 31], -3.0, "qs[31] l=0");
+        assert_eq!(got[3 * 32 + 31], 0.0, "qs[31] l=3");
+        // index = 128 + l*32+m within chunk 1.
+        assert_eq!(got[128], 6.0, "qs[32] l=0");
+        assert_eq!(got[128 + 3 * 32], -3.0, "qs[32] l=3");
+        assert_eq!(got[128 + 31], 3.0, "qs[63] l=0");
+        assert_eq!(got[128 + 3 * 32 + 31], 3.0, "qs[63] l=3");
+    }
+
+    /// A GGUF carrying any of the five M18 types must open and dequantize
+    /// through the real container path, not just the bare `dequantize`
+    /// function - `raw_blocks`/`MmapGguf::open` are the paths a caller
+    /// actually uses.
+    #[test]
+    fn m18_types_open_through_mmapgguf_and_dequantize() {
+        for (ty, block_bytes, numel) in [
+            (T_MXFP4, 17usize, 32usize),
+            (T_IQ4_NL, 18, 32),
+            (T_IQ4_XS, 136, QK_K),
+            (T_TQ1_0, 54, QK_K),
+            (T_TQ2_0, 66, QK_K),
+        ] {
+            let data = vec![0u8; block_bytes];
+            let path = std::env::temp_dir().join(format!("brain-gguf-m18-{ty}-{}.gguf", std::process::id()));
+            let path = path.to_str().unwrap().to_string();
+            crate::gguf_write::write(&path, &[], &[crate::gguf_write::TensorOut { name: "w".to_string(), shape: vec![numel], ty, data }], 32).unwrap();
+            let mg = MmapGguf::open(&path).unwrap();
+            let got = mg.tensor("w").unwrap();
+            assert!(got.is_ok(), "type {ty} must dequantize, not error: {got:?}");
+            assert_eq!(got.unwrap().len(), numel);
+            std::fs::remove_file(&path).ok();
+        }
     }
 }

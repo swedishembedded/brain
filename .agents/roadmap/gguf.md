@@ -1110,10 +1110,77 @@ this box yet.
       (3 new + the updated one) + every integration suite, 0 failed. `cargo
       check --release --workspace`: clean.
 
+- [x] M18: codebook families - MXFP4, IQ4_NL, IQ4_XS, TQ1_0, TQ2_0. This box
+      has no real MXFP4/IQ/TQ checkpoint (see "Recorded gaps"), and unlike
+      the K-quant work (M8), there was no EXISTING decoder anywhere in this
+      tree to read the byte layout from by inspection - so ggml's own
+      `ggml-common.h` (block structs, `kvalues_*` tables) and
+      `ggml-quants.c` (`dequantize_row_*`) were fetched from
+      `github.com/ggml-org/llama.cpp` (outside this repo, into the
+      workspace's shared resources tree) as the ground truth, cross-checked
+      against `diffusers`' own installed `IQ4_NL`/`IQ4_XS` Python
+      reference (`quantizers/gguf/utils.py`, a real-world port other people
+      run against real checkpoints) before a line of Rust was written.
+      Transcribing the C loops caught two real ordering bugs BEFORE they
+      shipped: a first draft of `deq_tq1_0`/`deq_tq2_0` "simplified" ggml's
+      two-chunk `qs` split (`[0..32]` then `[32..48]`/`[32..64]`, each
+      running its full inner digit/shift loop) into one pass over every
+      byte per digit - which changes the OUTPUT ORDER, not just the code
+      shape, since 48 (TQ1_0's `qs` length) is not a multiple of 32. Caught
+      by hand-tracing the real C loop bounds against the simplified version
+      before either was gated, not by a failing test.
+      `GgmlType` gained 5 variants. MXFP4 (`block_mxfp4{e:u8; qs:[u8;16]}`,
+      17 bytes/32 elements): `e` is E8M0 (unsigned exponent, bias 127);
+      `KVALUES_MXFP4` is ggml's `kvalues_fp4` table, the E2M1 magnitude
+      DOUBLED (confirmed independently against Triton's own OCP-MX-spec
+      `MXFP4Tensor`/`MXScaleTensor` reference, `triton/tools/mxfp.py`), and
+      `e8m0_to_fp32_half` returns HALF the true E8M0 value (`2^(e-128)`,
+      ported as ggml's own bit-placement trick rather than
+      `2f32.powi(e-128)` - `e` in `{0,1}` lands in fp32 subnormal range,
+      where a computed power is not guaranteed to round identically to a
+      direct bit pattern) so the doubling cancels exactly. IQ4_NL
+      (`block_iq4_nl{d:f16; qs:[u8;16]}`, 18 bytes/32 elements): ggml's own
+      non-linear `kvalues_iq4nl` 16-entry codebook, byte-packing identical
+      to Q4_0's own lo/hi-nibble-half split already in this file. IQ4_XS
+      (`block_iq4_xs{d:f16; scales_h:u16; scales_l:[u8;4]; qs:[u8;128]}`,
+      136 bytes/256 elements): 8 sub-blocks of 32, each scale a 6-bit signed
+      value (`scales_l` nibble | `scales_h` 2-bit field, offset -32) applied
+      to the same `kvalues_iq4nl` codebook. TQ1_0/TQ2_0 (54 and 66
+      bytes/256 elements): base-3 (TQ1_0, `pow3`-multiply-then-shift digit
+      extraction, `wrapping_mul` reproducing C's implicit `uint8_t`
+      truncation - the algorithm DEPENDS on the wraparound, not just
+      tolerates it) and base-4 (TQ2_0, plain 2-bit shifts) ternary packing.
+      Every wrapper (`ggml_type_name`/`block_geometry`/`tensor_nbytes`/
+      `dequantize`) picked the 5 up for free via `GgmlType` (M0 again).
+      Gated (`crates/checkpoint/src/gguf.rs`'s own test module, all against
+      INDEPENDENTLY computed expected values, never the decoder's own
+      output): MXFP4/IQ4_NL construct a block covering all 16 codebook
+      entries at unit scale and assert the decode equals the LUT verbatim
+      (plus a second MXFP4 case at half scale, proving the scale is
+      genuinely applied); IQ4_XS hand-derives the 6-bit scale bit layout for
+      2 of 8 sub-blocks and asserts both the scale AND the codebook lookup
+      per sub-block; TQ1_0/TQ2_0 are checked against values from a SEPARATE
+      Python transcription of the same ggml C source (not hand arithmetic,
+      not this Rust code) at real, non-trivial byte values spanning both
+      chunk boundaries and `qh` - exactly the shape that would have caught
+      the two ordering bugs above had they shipped; a final test opens a
+      real GGUF via `MmapGguf::open`/`gguf_write::write` for all 5 types,
+      proving the container-level path (not just the bare `dequantize`
+      function) no longer refuses them. Also fixed two pre-existing tests
+      whose fixtures happened to use ids this milestone newly recognizes
+      (`iq_types_error_clearly` used id 20 = IQ4_NL; the `ggml_type_round_
+      trips` "still unknown" set included 39 = MXFP4). `make test -p
+      brain-checkpoint`: 126 lib tests (7 new/updated) + every integration
+      suite, 0 failed. `cargo check --release --workspace`: clean.
+      Deferred, NOT part of this milestone: IQ1_S/IQ1_M/IQ2_XXS/IQ2_XS/
+      IQ2_S/IQ3_XXS/IQ3_S ("the rest" of the IQ family) - each needs a large
+      NGRID lookup table (up to 2048+ entries) ported from ggml with the
+      same verify-before-write discipline as above; not attempted here for
+      lack of time, not lack of a ground-truth source (the same
+      `ggml-common.h` fetch has them).
+
 ## Not yet done
 
-- [ ] M18: codebook families - MXFP4 first (gpt-oss's native release format,
-      simplest of the set), then IQ4_XS/IQ4_NL, then the rest, then TQ.
 - [ ] M19: write side - `Tier` gains the 10 variants
       `crate::quant::quantize`/`quantize_par` already encode;
       `quantize_cli.rs` accepts them by name; `general.file_type` derived from
@@ -1138,7 +1205,12 @@ one small Q8_0 in the model store)
 
 - The store holds only `Qwen/Qwen3-0.6B/Q8_0.gguf` (610 MB). There is a
   17 GB Q4_K_M under `~/Downloads/MiniMax-H3/` but it is not in the store, and
-  there is no MXFP4 or IQ*-quantized file anywhere on this box.
+  there is no MXFP4 or IQ*-quantized file anywhere on this box. M18's
+  MXFP4/IQ4_NL/IQ4_XS/TQ1_0/TQ2_0 decoders are therefore gated against
+  ggml's own C source (`github.com/ggml-org/llama.cpp`, fetched outside
+  this repo) and an independent Python transcription of it, not a real
+  file - still no substitute for running a real gpt-oss (MXFP4) or
+  IQ-quantized checkpoint through this path end to end.
 - Every gate through M14 is synthetic and exactly-known by construction (per
   the user's explicit instruction - validate the math, do not fetch real
   checkpoints for this workstream). The end-to-end forward-parity rung (rung F
