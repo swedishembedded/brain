@@ -743,11 +743,52 @@ pub fn quantize(ty: u32, data: &[f32]) -> Result<Vec<u8>, String> {
 /// whole blocks. Shared by [`quantize`] and [`quantize_par`] so the two
 /// cannot disagree about what they accept.
 fn geometry_for(ty: u32, numel: usize) -> Result<(usize, usize), String> {
-    let (block_elems, block_bytes) = crate::gguf::block_geometry(ty).ok_or_else(|| format!("quant: unsupported type {ty}"))?;
+    let (block_elems, block_bytes) = encodable_geometry(ty).ok_or_else(|| format!("quant: unsupported type {ty}"))?;
     if !numel.is_multiple_of(block_elems) {
         return Err(format!("quant: {numel} elements is not a multiple of the block size {block_elems}"));
     }
     Ok((block_elems, block_bytes))
+}
+
+/// `(block_elems, block_bytes)` for a type this module can ENCODE - a
+/// strictly smaller set than [`crate::gguf::block_geometry`] (which reports
+/// geometry for every type the reader can DECODE, including MXFP4/IQ4_NL/
+/// IQ4_XS/TQ1_0/TQ2_0/Q8_1 as of M17/M18 - none of which `quantize_block`
+/// has an encoder for). Kept as its own table, deliberately not delegating
+/// to `block_geometry`: that reader-side table growing must never silently
+/// widen what this module claims to be able to WRITE - `quantize_block`'s
+/// own `unreachable!()` depends on this function rejecting everything it
+/// does not have a matching arm for, and did briefly stop holding when M17
+/// extended `block_geometry` without a corresponding change here (caught
+/// before it shipped: `quantize(GgmlType::MXFP4.id(), ..)` panicked instead
+/// of returning `Err`).
+fn encodable_geometry(ty: u32) -> Option<(usize, usize)> {
+    match ty {
+        T_Q4_0 | T_Q4_1 | T_Q5_0 | T_Q5_1 | T_Q8_0 => Some((32, block_bytes_of(ty))),
+        T_Q2_K | T_Q3_K | T_Q4_K | T_Q5_K | T_Q6_K | T_Q8_K => Some((QK_K, block_bytes_of(ty))),
+        _ => None,
+    }
+}
+
+/// On-disk block byte size for one of [`encodable_geometry`]'s types -
+/// `crate::gguf::GgmlType::from_id(ty).unwrap().block_bytes()` would answer
+/// the same question, but going through the reader's own type for a
+/// write-side-only concern is the coupling this function exists to avoid.
+fn block_bytes_of(ty: u32) -> usize {
+    match ty {
+        T_Q4_0 => 18,
+        T_Q4_1 => 20,
+        T_Q5_0 => 22,
+        T_Q5_1 => 24,
+        T_Q8_0 => 34,
+        T_Q2_K => 84,
+        T_Q3_K => 110,
+        T_Q4_K => 144,
+        T_Q5_K => 176,
+        T_Q6_K => 210,
+        T_Q8_K => 292,
+        other => unreachable!("quant: {other} is not in encodable_geometry's match"),
+    }
 }
 
 /// One block's on-disk bytes. Every quantizer is a pure function of its own
@@ -998,6 +1039,25 @@ mod tests {
     fn quantize_rejects_an_unsupported_type() {
         let x = vec![0.0f32; 32];
         assert!(quantize(999, &x).is_err());
+    }
+
+    /// A type the READER (M17/M18) can decode but this module has no
+    /// encoder for must return a clean `Err`, never panic. Regression test
+    /// for a real gap: `geometry_for` used to delegate straight to
+    /// `crate::gguf::block_geometry`, so once that started reporting
+    /// geometry for Q8_1/I8/I16/I32/I64/F64/MXFP4/IQ4_NL/IQ4_XS/TQ1_0/TQ2_0,
+    /// `quantize_block`'s `unreachable!()` became reachable for every one of
+    /// them.
+    #[test]
+    fn quantize_rejects_a_decode_only_type_cleanly_rather_than_panicking() {
+        use crate::gguf::GgmlType;
+        for ty in [GgmlType::Q8_1, GgmlType::I8, GgmlType::I16, GgmlType::I32, GgmlType::I64, GgmlType::F64, GgmlType::MXFP4, GgmlType::IQ4NL, GgmlType::IQ4XS, GgmlType::TQ1_0, GgmlType::TQ2_0] {
+            let x = vec![0.0f32; 256];
+            let err = quantize(ty.id(), &x).unwrap_err();
+            assert!(err.contains("unsupported"), "{ty:?}: {err}");
+            let err_par = quantize_par(ty.id(), &x).unwrap_err();
+            assert!(err_par.contains("unsupported"), "{ty:?} (quantize_par): {err_par}");
+        }
     }
 
     #[test]
