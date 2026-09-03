@@ -130,9 +130,17 @@ pub struct GdnMixerActs {
     // conv1d: `x` (dw needs it) and pre-SiLU output (silu_bwd needs it).
     pub ncl_in: DeviceBuffer,
     pub ncl_out: DeviceBuffer,
-    // pre-L2-norm query/key.
+    // pre-L2-norm query/key, and the (post-SiLU, post-split, un-permuted)
+    // value - `gdn_chunk_bwd` never needs `value` token-major (only
+    // `value_cm`, below), so this is diagnostic-only: parity-debugging
+    // introspection against `tools/goldens/qwen35_gguf_reference_forward.py`
+    // (see `qwen35::model::Qwen35::debug_gdn_trace`) needs a token-major `v`
+    // it can compare 1:1 against the script's own `v`, and re-deriving it
+    // from `value_cm`'s chunk-major layout at the call site is needless
+    // work when the un-permuted buffer already exists here for free.
     pub query: DeviceBuffer,
     pub key: DeviceBuffer,
+    pub value: DeviceBuffer,
     // bproj (pre-sigmoid), aproj (for gdn_decay_gate_bwd), g_decay
     // (gdn_decay_gate's own output - needed for d_A_log = bias_grad(d_g_decay
     // * g_decay), see that gradient's own derivation in
@@ -430,6 +438,7 @@ pub fn gdn_mixer_stream_fwd(
         ncl_out,
         query,
         key,
+        value: value.clone(),
         bproj: bproj.clone(),
         aproj: aproj.clone(),
         g_decay,

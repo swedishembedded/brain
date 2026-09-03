@@ -1016,6 +1016,19 @@ impl Qwen35 {
         Qwen35::new_shard_dt(cfg, b, t, src, shard, &TierPolicy::uniform(Dtype::F32))
     }
 
+    /// [`Self::new_fp32_shard_src`]'s TRAIN-mode sibling: identical weights,
+    /// shape and real-checkpoint source, but `is_train: true` so
+    /// `run_forward` actually saves `GdnMixerActs`/`GqaMixerActs` per layer
+    /// instead of discarding them. Never used to actually train (nothing
+    /// here calls `backward()` or touches the Adam buffers this allocates) -
+    /// it exists purely so [`Self::debug_gdn_trace`] can read back a GDN
+    /// layer's own internal per-step activations on a real checkpoint, the
+    /// same "expose it for parity debugging" reason [`Self::debug_res`]
+    /// exists for the residual stream.
+    pub fn new_fp32_shard_src_train(cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Qwen35 {
+        Qwen35::new_impl_on(shard_gpu(&shard), cfg, b, t, src, &TierPolicy::uniform(Dtype::F32), true, shard)
+    }
+
     fn new_impl_on(
         gpu: Gpu,
         cfg: Qwen35Config,
@@ -3017,6 +3030,66 @@ impl Qwen35 {
         let n = (self.b * self.t) as usize;
         let d = self.cfg.d_model as usize;
         self.gpu.read(&self.res.borrow()[l], n * d)
+    }
+
+    /// Runs the forward graph (same graph [`Self::forward`] runs, minus the
+    /// loss) and returns GDN layer `l`'s own 11-step math's intermediates,
+    /// named, in the order the layer itself computes them - a sharper tool
+    /// than [`Self::debug_res`] for localizing exactly where
+    /// `tools/goldens/qwen35_gguf_reference_forward.py`'s independent
+    /// CPython re-implementation diverges from this one on real weights
+    /// (see `crates/qwen35/tests/gguf_reference_parity_real.rs`'s doc
+    /// comment for why that comparison exists and what it has already
+    /// ruled out).
+    ///
+    /// Every entry is `[n, width]` row-major token-major EXCEPT `ncl_in`/
+    /// `ncl_out` (`[C, T]` channel-major - `conv1d_fwd`'s own NCL layout,
+    /// `b` folded away since every real caller here has `b == 1`) and
+    /// `value_cm`/`beta_cm` (`model::gdn_mixer::gdn_mixer_stream_fwd`'s own
+    /// chunk-major permute, `[nvh, n_chunks, chunk, dim]`). `ncl_out` is
+    /// PRE-SiLU (apply `silu` before comparing to the reference script's
+    /// own post-conv `act`); `z` is likewise pre-SiLU (`z_silu` is the
+    /// post-SiLU one the reference script's own `z` variable already is).
+    ///
+    /// Requires a [`Self::new_fp32_shard_src_train`] instance (`is_train`,
+    /// so `run_forward` actually populates `train_acts`) with
+    /// `res[shard.start]` already fed via [`Self::write_in_res`] - mirrors
+    /// [`Self::forward`]'s own contract, minus the loss/logits it also
+    /// computes, which a truncated non-head shard cannot provide anyway.
+    pub fn debug_gdn_trace(&self, l: usize) -> Vec<(&'static str, Vec<f32>)> {
+        self.run_forward();
+        let n = (self.b * self.t) as usize;
+        let c = &self.cfg;
+        let d = c.d_model as usize;
+        let conv_dim = c.linear_conv_dim() as usize;
+        let key_dim = (c.linear_num_key_heads * c.linear_key_head_dim) as usize;
+        let value_dim = c.linear_value_dim() as usize;
+        let nvh = c.linear_num_value_heads as usize;
+        let vhd = c.linear_value_head_dim as usize;
+        let g = &self.gpu;
+        let ta = self.train_acts.borrow();
+        let ta = ta.as_ref().expect("qwen35: debug_gdn_trace requires an is_train instance (Self::new_fp32_shard_src_train)");
+        let la = &ta.layers[l - self.shard.start];
+        let MixerActs::Gdn(gdn) = &la.mixer else { panic!("qwen35: debug_gdn_trace: layer {l} is not a GDN (Linear) layer") };
+        let ia = &gdn.internals;
+        vec![
+            ("xn1", g.read(&la.xn1, n * d)),
+            ("ncl_in", g.read(&ia.ncl_in, n * conv_dim)),
+            ("ncl_out", g.read(&ia.ncl_out, n * conv_dim)),
+            ("query_pre_l2norm", g.read(&ia.query, n * key_dim)),
+            ("key_pre_l2norm", g.read(&ia.key, n * key_dim)),
+            ("value", g.read(&ia.value, n * value_dim)),
+            ("bproj", g.read(&ia.bproj, n * nvh)),
+            ("aproj", g.read(&ia.aproj, n * nvh)),
+            ("g_decay", g.read(&ia.g_decay, n * nvh)),
+            ("value_cm", g.read(&ia.value_cm, n * nvh * vhd)),
+            ("beta_cm", g.read(&ia.beta_cm, n * nvh)),
+            ("out_tok", g.read(&ia.out_tok, n * value_dim)),
+            ("normed", g.read(&ia.normed, n * value_dim)),
+            ("z", g.read(&ia.z, n * value_dim)),
+            ("z_silu", g.read(&ia.z_silu, n * value_dim)),
+            ("gated", g.read(&gdn.gated, n * value_dim)),
+        ]
     }
 
     pub fn logits_all(&self, tokens: &[u32]) -> Vec<f32> {
