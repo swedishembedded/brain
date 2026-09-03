@@ -35,6 +35,7 @@ pub(crate) const T_Q4_1: u32 = 3;
 pub(crate) const T_Q5_0: u32 = 6;
 pub(crate) const T_Q5_1: u32 = 7;
 pub(crate) const T_Q8_0: u32 = 8;
+pub(crate) const T_Q8_1: u32 = 9;
 pub(crate) const T_Q2_K: u32 = 10;
 pub(crate) const T_Q3_K: u32 = 11;
 pub(crate) const T_Q4_K: u32 = 12;
@@ -42,6 +43,11 @@ pub(crate) const T_Q5_K: u32 = 13;
 pub(crate) const T_Q6_K: u32 = 14;
 pub(crate) const T_Q8_K: u32 = 15;
 pub(crate) const T_BF16: u32 = 30;
+pub(crate) const T_I8: u32 = 24;
+pub(crate) const T_I16: u32 = 25;
+pub(crate) const T_I32: u32 = 26;
+pub(crate) const T_I64: u32 = 27;
+pub(crate) const T_F64: u32 = 28;
 
 pub(crate) const QK_K: usize = 256;
 
@@ -62,11 +68,17 @@ pub enum GgmlType {
     F32,
     F16,
     BF16,
+    F64,
+    I8,
+    I16,
+    I32,
+    I64,
     Q4_0,
     Q4_1,
     Q5_0,
     Q5_1,
     Q8_0,
+    Q8_1,
     Q2K,
     Q3K,
     Q4K,
@@ -85,11 +97,17 @@ impl GgmlType {
             T_F32 => GgmlType::F32,
             T_F16 => GgmlType::F16,
             T_BF16 => GgmlType::BF16,
+            T_F64 => GgmlType::F64,
+            T_I8 => GgmlType::I8,
+            T_I16 => GgmlType::I16,
+            T_I32 => GgmlType::I32,
+            T_I64 => GgmlType::I64,
             T_Q4_0 => GgmlType::Q4_0,
             T_Q4_1 => GgmlType::Q4_1,
             T_Q5_0 => GgmlType::Q5_0,
             T_Q5_1 => GgmlType::Q5_1,
             T_Q8_0 => GgmlType::Q8_0,
+            T_Q8_1 => GgmlType::Q8_1,
             T_Q2_K => GgmlType::Q2K,
             T_Q3_K => GgmlType::Q3K,
             T_Q4_K => GgmlType::Q4K,
@@ -106,11 +124,17 @@ impl GgmlType {
             GgmlType::F32 => T_F32,
             GgmlType::F16 => T_F16,
             GgmlType::BF16 => T_BF16,
+            GgmlType::F64 => T_F64,
+            GgmlType::I8 => T_I8,
+            GgmlType::I16 => T_I16,
+            GgmlType::I32 => T_I32,
+            GgmlType::I64 => T_I64,
             GgmlType::Q4_0 => T_Q4_0,
             GgmlType::Q4_1 => T_Q4_1,
             GgmlType::Q5_0 => T_Q5_0,
             GgmlType::Q5_1 => T_Q5_1,
             GgmlType::Q8_0 => T_Q8_0,
+            GgmlType::Q8_1 => T_Q8_1,
             GgmlType::Q2K => T_Q2_K,
             GgmlType::Q3K => T_Q3_K,
             GgmlType::Q4K => T_Q4_K,
@@ -126,11 +150,17 @@ impl GgmlType {
             GgmlType::F32 => "F32",
             GgmlType::F16 => "F16",
             GgmlType::BF16 => "BF16",
+            GgmlType::F64 => "F64",
+            GgmlType::I8 => "I8",
+            GgmlType::I16 => "I16",
+            GgmlType::I32 => "I32",
+            GgmlType::I64 => "I64",
             GgmlType::Q4_0 => "Q4_0",
             GgmlType::Q4_1 => "Q4_1",
             GgmlType::Q5_0 => "Q5_0",
             GgmlType::Q5_1 => "Q5_1",
             GgmlType::Q8_0 => "Q8_0",
+            GgmlType::Q8_1 => "Q8_1",
             GgmlType::Q2K => "Q2_K",
             GgmlType::Q3K => "Q3_K",
             GgmlType::Q4K => "Q4_K",
@@ -143,8 +173,8 @@ impl GgmlType {
     /// Elements per block.
     pub fn block_elems(self) -> usize {
         match self {
-            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => 1,
-            GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 => 32,
+            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 | GgmlType::F64 | GgmlType::I8 | GgmlType::I16 | GgmlType::I32 | GgmlType::I64 => 1,
+            GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 | GgmlType::Q8_1 => 32,
             GgmlType::Q2K | GgmlType::Q3K | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K | GgmlType::Q8K => QK_K,
         }
     }
@@ -154,11 +184,17 @@ impl GgmlType {
         match self {
             GgmlType::F32 => 4,
             GgmlType::F16 | GgmlType::BF16 => 2,
+            GgmlType::F64 => 8,
+            GgmlType::I8 => 1,
+            GgmlType::I16 => 2,
+            GgmlType::I32 => 4,
+            GgmlType::I64 => 8,
             GgmlType::Q4_0 => 18,
             GgmlType::Q4_1 => 20,
             GgmlType::Q5_0 => 22,
             GgmlType::Q5_1 => 24,
             GgmlType::Q8_0 => 34,
+            GgmlType::Q8_1 => 36,
             GgmlType::Q2K => 84,
             GgmlType::Q3K => 110,
             GgmlType::Q4K => 144,
@@ -184,12 +220,13 @@ impl GgmlType {
     /// directly, since there is no smaller independently-decodable unit.
     fn block_decoder(self) -> Option<fn(&[u8], &mut Vec<f32>)> {
         Some(match self {
-            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => return None,
+            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 | GgmlType::F64 | GgmlType::I8 | GgmlType::I16 | GgmlType::I32 | GgmlType::I64 => return None,
             GgmlType::Q4_0 => deq_q4_0,
             GgmlType::Q4_1 => deq_q4_1,
             GgmlType::Q5_0 => deq_q5_0,
             GgmlType::Q5_1 => deq_q5_1,
             GgmlType::Q8_0 => deq_q8_0,
+            GgmlType::Q8_1 => deq_q8_1,
             GgmlType::Q2K => deq_q2_k,
             GgmlType::Q3K => deq_q3_k,
             GgmlType::Q4K => deq_q4_k,
@@ -830,11 +867,23 @@ pub(crate) fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, 
         GgmlType::F32 => raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
         GgmlType::F16 => raw.chunks_exact(2).map(|b| crate::safetensors::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
         GgmlType::BF16 => raw.chunks_exact(2).map(|b| crate::safetensors::bf16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
+        // A plain scalar array, not a quantized block format - `numel`
+        // elements read straight off the mapping with no scale to apply.
+        // `as f32` is a lossy narrowing for I64/F64 outside f32's exact
+        // integer/mantissa range, the same tradeoff this engine already
+        // accepts everywhere else by being fp32-only; these ids almost never
+        // carry model weights (auxiliary/index tensors, if present at all).
+        GgmlType::F64 => raw.chunks_exact(8).map(|b| f64::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
+        GgmlType::I8 => raw.iter().map(|&b| b as i8 as f32).collect(),
+        GgmlType::I16 => raw.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32).collect(),
+        GgmlType::I32 => raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32).collect(),
+        GgmlType::I64 => raw.chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
         GgmlType::Q4_0 => deq_blocks(raw, numel, 18, deq_q4_0),
         GgmlType::Q4_1 => deq_blocks(raw, numel, 20, deq_q4_1),
         GgmlType::Q5_0 => deq_blocks(raw, numel, 22, deq_q5_0),
         GgmlType::Q5_1 => deq_blocks(raw, numel, 24, deq_q5_1),
         GgmlType::Q8_0 => deq_blocks(raw, numel, 34, deq_q8_0),
+        GgmlType::Q8_1 => deq_blocks(raw, numel, 36, deq_q8_1),
         GgmlType::Q2K => deq_blocks(raw, numel, 84, deq_q2_k),
         GgmlType::Q3K => deq_blocks(raw, numel, 110, deq_q3_k),
         GgmlType::Q4K => deq_blocks(raw, numel, 144, deq_q4_k),
@@ -970,6 +1019,20 @@ fn deq_q8_0(b: &[u8], out: &mut Vec<f32>) {
     let d = f16(b, 0);
     for j in 0..32 {
         out.push(b[2 + j] as i8 as f32 * d);
+    }
+}
+
+/// Q8_1: `Q8_0`'s block plus a second fp16 field (`s = d * sum(qs)`), a
+/// cached quantity ggml's fused matmul uses to skip a reduction - irrelevant
+/// to plain dequant, which is `w = d*q[i]`, identical to Q8_0. Practically
+/// never a STORED tensor type (it exists in ggml as an activation-quantize
+/// target, not a checkpoint format), but a GGUF file is free to declare one,
+/// and refusing to open the whole file over a tensor type nothing reads is
+/// the worse failure.
+fn deq_q8_1(b: &[u8], out: &mut Vec<f32>) {
+    let d = f16(b, 0);
+    for j in 0..32 {
+        out.push(b[4 + j] as i8 as f32 * d);
     }
 }
 
@@ -2444,11 +2507,17 @@ mod tests {
             (T_F32, GgmlType::F32),
             (T_F16, GgmlType::F16),
             (T_BF16, GgmlType::BF16),
+            (T_F64, GgmlType::F64),
+            (T_I8, GgmlType::I8),
+            (T_I16, GgmlType::I16),
+            (T_I32, GgmlType::I32),
+            (T_I64, GgmlType::I64),
             (T_Q4_0, GgmlType::Q4_0),
             (T_Q4_1, GgmlType::Q4_1),
             (T_Q5_0, GgmlType::Q5_0),
             (T_Q5_1, GgmlType::Q5_1),
             (T_Q8_0, GgmlType::Q8_0),
+            (T_Q8_1, GgmlType::Q8_1),
             (T_Q2_K, GgmlType::Q2K),
             (T_Q3_K, GgmlType::Q3K),
             (T_Q4_K, GgmlType::Q4K),
@@ -2462,9 +2531,10 @@ mod tests {
             assert_eq!(Some(ty.name()), ggml_type_name(id), "{ty:?} vs ggml_type_name");
             assert_eq!(Some((ty.block_elems(), ty.block_bytes())), block_geometry(id), "{ty:?} vs block_geometry");
         }
-        // Unknown ids (a codebook type, a scalar-array id, a genuinely
-        // invalid one) must decline, never guess.
-        for unknown in [9u32, 16, 24, 39, 999] {
+        // Unknown ids (a codebook type, a genuinely invalid one) must
+        // decline, never guess. 9 and 24-28 (Q8_1, I8/I16/I32/I64/F64) moved
+        // OUT of this set in M17 - they are real, recognized types now.
+        for unknown in [16u32, 39, 999] {
             assert_eq!(GgmlType::from_id(unknown), None, "id {unknown} must be unrecognized");
             assert_eq!(block_geometry(unknown), None);
             assert_eq!(ggml_type_name(unknown), None);
@@ -2534,5 +2604,91 @@ mod tests {
         let mut kv3 = BTreeMap::new();
         kv3.insert("general.quantization_version".to_string(), GgufValue::U32(3));
         assert_eq!(quant_label(&kv3), Some("qver3".to_string()));
+    }
+
+    /// M17: ggml ids 9 (Q8_1) and 24-28 (I8/I16/I32/I64/F64) used to fail
+    /// `MmapGguf::open` OUTRIGHT (`tensor_nbytes` returned `None` for the
+    /// whole file, not just that one tensor). `GgmlType::from_id` now
+    /// recognizes all six, so a file carrying one opens and that tensor
+    /// dequantizes - checked here with an oracle value chosen to exercise
+    /// each type's full range, not just small/positive numbers.
+    #[test]
+    fn scalar_array_types_open_and_dequantize_to_their_exact_value() {
+        fn open_one(ty: u32, data: Vec<u8>, numel: usize) -> Vec<f32> {
+            let path = std::env::temp_dir().join(format!("brain-gguf-scalar-{ty}-{}.gguf", std::process::id()));
+            let path = path.to_str().unwrap().to_string();
+            crate::gguf_write::write(&path, &[], &[crate::gguf_write::TensorOut { name: "w".to_string(), shape: vec![numel], ty, data }], 32).unwrap();
+            let mg = MmapGguf::open(&path).unwrap();
+            let got = mg.tensor("w").unwrap().unwrap();
+            std::fs::remove_file(&path).ok();
+            got
+        }
+
+        // I8: full signed range, not just small values.
+        let i8_vals: [i8; 4] = [-128, -1, 0, 127];
+        let got = open_one(T_I8, i8_vals.iter().map(|&v| v as u8).collect(), 4);
+        assert_eq!(got, vec![-128.0, -1.0, 0.0, 127.0]);
+
+        // I16.
+        let i16_vals: [i16; 3] = [-32768, 0, 32767];
+        let got = open_one(T_I16, i16_vals.iter().flat_map(|v| v.to_le_bytes()).collect(), 3);
+        assert_eq!(got, vec![-32768.0, 0.0, 32767.0]);
+
+        // I32.
+        let i32_vals: [i32; 3] = [i32::MIN, 0, i32::MAX];
+        let got = open_one(T_I32, i32_vals.iter().flat_map(|v| v.to_le_bytes()).collect(), 3);
+        assert_eq!(got, vec![i32::MIN as f32, 0.0, i32::MAX as f32]);
+
+        // I64: a value OUTSIDE f32's exact-integer range, so the lossy `as
+        // f32` narrowing this format accepts is exercised, not just an
+        // in-range value that would pass even with a truncating bug.
+        let i64_vals: [i64; 2] = [0, 1_000_000_000_000_000_000];
+        let got = open_one(T_I64, i64_vals.iter().flat_map(|v| v.to_le_bytes()).collect(), 2);
+        assert_eq!(got, vec![0.0, 1_000_000_000_000_000_000i64 as f32]);
+
+        // F64: same lossy-narrowing point, with a fraction.
+        let f64_vals: [f64; 2] = [0.1, -123456.789];
+        let got = open_one(T_F64, f64_vals.iter().flat_map(|v| v.to_le_bytes()).collect(), 2);
+        assert_eq!(got, vec![0.1f64 as f32, -123456.789f64 as f32]);
+    }
+
+    /// Q8_1's dequant is IDENTICAL to Q8_0's (`w = d*q[i]`) - the extra `s`
+    /// field is a cached `d*sum(qs)` ggml's fused matmul uses, never read
+    /// here. Proven by constructing two blocks with the SAME `d`/`qs` but a
+    /// deliberately WRONG `s` (`0xFFFF`, not `d*sum(qs)`) and asserting the
+    /// dequant still matches Q8_0's - if `s` were mistakenly folded into the
+    /// decode, this would be the case that shows it.
+    #[test]
+    fn q8_1_dequantizes_identically_to_q8_0_ignoring_the_cached_sum_field() {
+        let d = half::f16::from_f32(0.25);
+        let qs: [i8; 32] = std::array::from_fn(|i| (i as i32 - 16) as i8);
+
+        let mut q8_0_raw = Vec::new();
+        q8_0_raw.extend(d.to_le_bytes());
+        q8_0_raw.extend(qs.iter().map(|&v| v as u8));
+
+        let mut q8_1_raw = Vec::new();
+        q8_1_raw.extend(d.to_le_bytes());
+        q8_1_raw.extend(0xFFFFu16.to_le_bytes()); // deliberately wrong `s`
+        q8_1_raw.extend(qs.iter().map(|&v| v as u8));
+
+        let want = dequantize(T_Q8_0, &q8_0_raw, 32).unwrap();
+        let got = dequantize(T_Q8_1, &q8_1_raw, 32).unwrap();
+        assert_eq!(got, want, "Q8_1 must decode exactly like Q8_0, ignoring the cached sum field");
+    }
+
+    /// Block geometry for the six M17 types, checked directly rather than
+    /// only through a round trip - `tensor_nbytes`/`block_geometry` are
+    /// `GgmlType`-derived, so this also pins them.
+    #[test]
+    fn m17_types_report_correct_block_geometry() {
+        assert_eq!(block_geometry(T_Q8_1), Some((32, 36)));
+        assert_eq!(block_geometry(T_I8), Some((1, 1)));
+        assert_eq!(block_geometry(T_I16), Some((1, 2)));
+        assert_eq!(block_geometry(T_I32), Some((1, 4)));
+        assert_eq!(block_geometry(T_I64), Some((1, 8)));
+        assert_eq!(block_geometry(T_F64), Some((1, 8)));
+        assert_eq!(tensor_nbytes(T_Q8_1, 32), Some(36));
+        assert_eq!(tensor_nbytes(T_I32, 10), Some(40));
     }
 }

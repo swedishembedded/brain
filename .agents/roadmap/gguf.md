@@ -1067,12 +1067,51 @@ this box yet.
       --bins`: 267/267, including all 10 `model_dir` tests. `cargo check
       --release --workspace`: clean.
 
+- [x] M17: ggml ids 9 (Q8_1) and 24-28 (I8/I16/I32/I64/F64), which used to
+      fail `MmapGguf::open` OUTRIGHT (`tensor_nbytes` → `None` for the
+      unrecognized type, refusing the WHOLE file over one tensor usually
+      carried for metadata nobody reads). `GgmlType` gained 6 variants:
+      `Q8_1` (Q8_0's block plus a second fp16 field ggml's fused matmul
+      caches - `s = d*sum(qs)` - and never reads for plain dequant, so
+      `deq_q8_1` is `deq_q8_0`'s math verbatim over a 36-byte block instead
+      of 34; practically never a STORED tensor type, but refusing a file
+      over a type nothing in it actually reads is the worse failure) and the
+      five plain scalar-array types `F64`/`I8`/`I16`/`I32`/`I64`
+      (`block_elems=1`, no block header, decoded with a straight `as f32`
+      cast - lossy outside f32's exact range for I64/F64, the same tradeoff
+      this fp32-only engine already accepts everywhere else). Every wrapper
+      this reader has (`ggml_type_name`/`block_geometry`/`tensor_nbytes`/
+      `dequantize`) is `GgmlType`-derived (M0), so adding the six variants
+      to `from_id`/`id`/`name`/`block_elems`/`block_bytes`/`block_decoder`
+      is the whole change - no second table anywhere to keep in sync, and
+      the compiler's exhaustiveness check on every `match self { .. }` over
+      `GgmlType` (none of which have a wildcard arm) is what proves no other
+      file needed touching, not a grep.
+      Gated (`crates/checkpoint/src/gguf.rs`'s own test module):
+      `scalar_array_types_open_and_dequantize_to_their_exact_value` opens a
+      real GGUF (via `gguf_write::write`, not hand-assembled bytes) for each
+      of the five scalar types and asserts EXACT decoded values, chosen at
+      each type's extremes (`i8::MIN/MAX`, `i32::MIN/MAX`, and for I64/F64 a
+      value OUTSIDE f32's exact range, so the lossy cast is actually
+      exercised rather than passing by coincidence on an in-range fixture);
+      `q8_1_dequantizes_identically_to_q8_0_ignoring_the_cached_sum_field`
+      builds a Q8_1 block with the SAME `d`/`qs` as a Q8_0 block but a
+      DELIBERATELY WRONG `s` field (`0xFFFF`, not the real `d*sum(qs)`) and
+      asserts the dequant still matches Q8_0's exactly - if `s` were
+      mistakenly folded into the decode this is the case that would show it;
+      `m17_types_report_correct_block_geometry` pins `block_geometry`/
+      `tensor_nbytes` for all six directly. Also fixed the pre-existing
+      `ggml_type_round_trips_and_agrees_with_the_wrapper_fns`, which
+      asserted id 9 (among others) "must be unrecognized" - true before this
+      milestone, the exact thing it changes now, so the test's own
+      "must-still-be-unknown" set was narrowed to the ids that remain
+      genuinely unrecognized (16, 39, 999) and its "known" table extended
+      with the six new ones. `make test -p brain-checkpoint`: 120 lib tests
+      (3 new + the updated one) + every integration suite, 0 failed. `cargo
+      check --release --workspace`: clean.
+
 ## Not yet done
 
-- [ ] M17: ggml ids 9 (Q8_1) and 24-28 (I8/I16/I32/I64/F64) - these fail
-      `MmapGguf::open` OUTRIGHT today via `tensor_nbytes` → `None`, a
-      whole-file refusal for a type usually carried by a metadata tensor
-      nobody reads. Worst failure shape in the set.
 - [ ] M18: codebook families - MXFP4 first (gpt-oss's native release format,
       simplest of the set), then IQ4_XS/IQ4_NL, then the rest, then TQ.
 - [ ] M19: write side - `Tier` gains the 10 variants
