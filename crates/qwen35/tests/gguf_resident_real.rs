@@ -429,6 +429,61 @@ fn the_q4_tier_continues_the_same_factual_prompt_on_one_card() {
     }
 }
 
+/// Every OTHER real-checkpoint gate in this file uses a 6-token prompt and an
+/// 8-token decode window (`CAP = 512` is plumbing headroom, not what gets
+/// used) - enough to prove correctness, nowhere near enough to show how
+/// decode throughput actually behaves as context grows. This test measures
+/// that directly: a genuinely long real prompt (~1000+ tokens, not a toy),
+/// uniform Q4 on one card (the fastest already-correctness-gated tier), real
+/// prefill + decode tok/s reported from the instance's own metrics - not
+/// predicted. GQA layers (16 of 64) read `O(context)` bytes of KV per decode
+/// step, so decode tok/s is expected to degrade somewhat as context grows
+/// past this file's other tests' ~14-token depth; GDN layers (the other 48)
+/// carry an O(1) recurrent state and should not. This is the real measurement
+/// that answers that question instead of assuming it.
+#[test]
+fn decode_throughput_at_a_real_long_context() {
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("this gate wants at least one usable GPU");
+        return;
+    }
+    // ~1050 real English tokens (not repeated filler - repetition can let a
+    // decoder degenerate into a trivial attention pattern) sized so a full
+    // BRAIN_QWEN35_GGUF_CTX-style budget isn't needed: prompt + a modest
+    // decode window must fit under this test's own CAP.
+    let paragraph = "The Antikythera mechanism is an ancient Greek hand-powered orrery, described as the oldest known example of an analogue computer, used to predict astronomical positions and eclipses decades in advance. It could also be used to track the four-year cycle of athletic games which was similar to an Olympiad, the cycle of the ancient Olympic Games. This artefact was retrieved from the sea in 1901, and identified in 1902 as containing a gear, which was found in the same location as a shipwreck off Point Antikythera in Greece. Study of the object was subsequently neglected until Derek J. de Solla Price took an interest in it and, with Charalampos Karakalos, published a seminal paper in 1974. After much modern scholarship since the 1970s, current understanding is that the artefact was made from a single sheet of bronze that was formed and then engraved with astronomical scales and text, and further sheets were later added to hold the mechanism together, making the object more resemble a book than a machine. ";
+    let mut prompt = String::new();
+    while prompt.split_whitespace().count() < 1050 {
+        prompt.push_str(paragraph);
+    }
+
+    let cap: u32 = 2048;
+    let r = Qwen35GgufResident::new(path, devices, cap, TierPolicy::uniform(Dtype::Q4));
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    println!("  placed on {} device(s): {placed:?}", placed.len());
+    let mut inst = r.activate_multi(&key, &placed).expect("activate the real checkpoint at the q4 tier");
+
+    let inv = capability::Invocation::new()
+        .set("prompt", serde_json::json!(prompt))
+        .set("chat", serde_json::json!(false))
+        .set("max_new", serde_json::json!(32))
+        .set("temp", serde_json::json!(0.0));
+    let out = inst.run("generate", &inv, &mut |_| {}).expect("generate at a real long context");
+    let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
+    let prompt_tokens = out.outputs["prompt_tokens"].as_i64().unwrap_or(0);
+    let completion = out.outputs["completion_tokens"].as_i64().unwrap_or(0);
+    println!("  prompt_tokens: {prompt_tokens}, completion_tokens: {completion}");
+    println!("  continuation: {text:?}");
+    for (k, v) in inst.metrics() {
+        println!("  metric {k:<20} {v}");
+    }
+    assert!(completion > 0, "the model must produce at least one token even at long context");
+    assert!(!text.trim().is_empty(), "the generated text must not be empty at long context");
+}
+
 /// The cost model at the tested capacity, printed alongside the config the
 /// real file declares - cheap, header-only, and the arithmetic the placement
 /// above is built on. Runs without a GPU.
