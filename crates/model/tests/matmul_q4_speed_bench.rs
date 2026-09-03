@@ -10,8 +10,10 @@
 //! `gpu_core::profile::best_of` so this times the device, not the host.
 
 use data::rng::Lcg;
+use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::int4::quantize_weight_q4;
+use model::ops::{Ops, Weight};
 
 const KERNELS: &[(&str, &str)] = &[
     ("max_abs_row", kernels::MAX_ABS_ROW),
@@ -26,6 +28,10 @@ fn idx(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"))
 }
 
+/// Quantize activations on-device via the existing int8 path (`max_abs_row` +
+/// `quant_pack`) - the same helper `crates/model/tests/matmul_q4_gemm.rs`
+/// uses, duplicated here rather than shared across `tests/` binaries (each
+/// integration test file is its own crate).
 fn quant_x(g: &Gpu, k_maxr: usize, k_qp: usize, x: &gpu_core::DeviceBuffer, m: u32, k: u32) -> (gpu_core::DeviceBuffer, gpu_core::DeviceBuffer) {
     let sx = g.storage(m as u64);
     let xq = g.storage((m * k / 4) as u64);
@@ -227,6 +233,93 @@ fn dyn_vs_dyn_reg_across_prefill_rows() {
             t_reg * 1e3,
             gops_reg,
             t_dyn / t_reg
+        );
+    }
+}
+
+/// The FACADE measurement `dyn_vs_dyn_reg_across_prefill_rows` above does not
+/// take: that test dispatches the raw `matmul_q4_dyn`/`matmul_q4_dyn_reg`
+/// kernel names directly, never through `model::ops::Ops::matmul`. This
+/// builds a real `Ops`, uploads a real `Weight::Q4`, and times `Ops::matmul`
+/// itself (activation already quantized outside the timed region, exactly
+/// like the raw-kernel bench above isolates matmul-only cost) at qwen35's own
+/// prefill-relevant shapes and `m=128` - M26's own `MAX_PREFILL_TOKENS`
+/// chunk size on the real two-card 27B resident. `Ops::matmul_kernel` also
+/// asserts which physical kernel the facade actually chose, so a future
+/// regression in `Ops::bind`'s `(PackedInt8, Q4)` arm shows up here as a
+/// changed kernel name, not just a changed number.
+#[test]
+#[ignore]
+fn ops_facade_confirms_the_dyn_reg_speedup_at_qwen35_prefill_shapes() {
+    let g = gpu_core::testgpu::dev(model::ops::kernel_list());
+    if !g.caps().numeric.int8_dot {
+        eprintln!("skipping: no packed int8 dot on this device");
+        return;
+    }
+    let ops = Ops::new(g).expect("Ops::new: canonical kernel_list() must satisfy REQUIRED_KERNELS");
+    let gpu = ops.gpu();
+    let (k_maxr, k_qp, k_dyn) = (idx(gpu, "max_abs_row"), idx(gpu, "quant_pack"), idx(gpu, "matmul_q4_dyn"));
+
+    const SHAPES: &[(&str, u32, u32)] = &[
+        ("mlp.gate/up", 5120, 17408),
+        ("mlp.down", 17408, 5120),
+        ("gdn.in_proj_qkv", 5120, 10240),
+        ("gqa.q_proj", 5120, 12288),
+        ("gqa.o_proj/gdn.out_proj", 6144, 5120),
+    ];
+    let m: u32 = 128; // M26's MAX_PREFILL_TOKENS chunk size on the real resident.
+    println!("\nOps::matmul (Q4) at qwen35 prefill shapes, m={m}, chunk-sized like M26's real resident:\n");
+    for &(label, k, n) in SHAPES {
+        let mut rng = Lcg::new(9300 + u64::from(k) + u64::from(n));
+        let x_h = rng.vec_scaled((m * k) as usize, 1.0);
+        let w_h = rng.vec_scaled((n * k) as usize, 1.0);
+        let x = gpu.storage_init("x", &x_h);
+        let weight = Weight::upload(&ops, &w_h, n as usize, k as usize, Dtype::Q4);
+        assert_eq!(weight.dtype(), Dtype::Q4, "this device must support int8_dot for this bench to mean anything");
+
+        let chosen = ops.matmul_kernel(&weight, m);
+        assert_eq!(
+            chosen,
+            "matmul_q4_dyn_reg",
+            "Ops::matmul_kernel chose {chosen:?} at m={m} -- the facade must dispatch matmul_q4_dyn_reg, \
+             not the naive matmul_q4_dyn, for this to be the speedup this bench measures"
+        );
+
+        // Quantize the activation ONCE, outside the timed region - the same
+        // isolation the raw-kernel bench above applies. `ops.act` builds its
+        // OWN xq/sx internally (private to `Act`), so the raw-kernel
+        // baseline below quantizes independently via the same
+        // `max_abs_row`/`quant_pack` pair on the identical `x` buffer -
+        // deterministic, so both sides see the same quantized activation.
+        let mut setup_steps = Vec::new();
+        let act = ops.act(&mut setup_steps, &x, 0, m, k);
+        gpu.submit(&[], &setup_steps);
+
+        let mut facade_steps = Vec::new();
+        let out = gpu.storage((m * n) as u64);
+        ops.matmul(&mut facade_steps, &weight, &act, &out, 0);
+        let t_facade = gpu_core::profile::best_of(gpu, &facade_steps, REPS);
+
+        // Raw-kernel baseline: the naive `matmul_q4_dyn` at its own m*n
+        // dispatch geometry, driven by hand on an independently-quantized
+        // copy of the SAME `x`/weight bytes - the exact comparison
+        // `dyn_vs_dyn_reg_across_prefill_rows` makes, repeated here at
+        // qwen35's real shapes so the facade's win is checked against real
+        // data, not assumed to transfer from a separate run.
+        let (xq, sx) = quant_x(gpu, k_maxr, k_qp, &x, m, k);
+        let (wq, sw) = quantize_weight_q4(&w_h, n as usize, k as usize);
+        let wqb = gpu.storage(wq.len() as u64);
+        gpu.write(&wqb, &wq);
+        let swb = gpu.storage_init("sw_naive", &sw);
+        let out_naive = gpu.storage((m * n) as u64);
+        let st_naive = vec![gpu.step(k_dyn, &[&xq, &wqb, &sx, &swb, &out_naive], &[m, k, n], m * n)];
+        let t_naive = gpu_core::profile::best_of(gpu, &st_naive, REPS);
+
+        let speedup = t_naive / t_facade;
+        println!(
+            "{label:<26} k={k:>6} n={n:>6}  Ops::matmul(reg) {:>9.4} ms   raw matmul_q4_dyn {:>9.4} ms   speedup {speedup:.2}x",
+            t_facade * 1e3,
+            t_naive * 1e3,
         );
     }
 }
