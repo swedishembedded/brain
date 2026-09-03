@@ -37,8 +37,11 @@ brain quantize SRC --out PATH [options]
                    checkpoint::TensorSource with a manifest.
 
   --out PATH       destination .gguf (written via a .tmp + rename).
-  --tier T         target tier. Q8_0 (default) is the only tier with a
-                   consumer in this tree today.
+  --tier T         target tier: Q8_0 (default), Q4_0, Q4_1, Q5_0, Q5_1,
+                   Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K. brain's own GPU
+                   kernels natively execute Q8_0 and the affine K-quant
+                   pair Q4_K/Q5_K; the rest round-trip through this reader
+                   like any other GGUF quantization.
   --arch NAME      value for the output's `general.architecture` KV. Defaults
                    to the source's own when the source is a GGUF, else the
                    destination file's stem.
@@ -93,7 +96,17 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 let t = need(&mut i, "--tier")?;
                 a.tier = match t.to_ascii_uppercase().as_str() {
                     "Q8_0" => Tier::Q8_0,
-                    other => return Err(format!("brain quantize: unknown tier '{other}' (supported: Q8_0)")),
+                    "Q4_0" => Tier::Q4_0,
+                    "Q4_1" => Tier::Q4_1,
+                    "Q5_0" => Tier::Q5_0,
+                    "Q5_1" => Tier::Q5_1,
+                    "Q2_K" => Tier::Q2K,
+                    "Q3_K" => Tier::Q3K,
+                    "Q4_K" => Tier::Q4K,
+                    "Q5_K" => Tier::Q5K,
+                    "Q6_K" => Tier::Q6K,
+                    "Q8_K" => Tier::Q8K,
+                    other => return Err(format!("brain quantize: unknown tier '{other}' (supported: Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K)")),
                 };
             }
             "--arch" => a.arch = Some(need(&mut i, "--arch")?),
@@ -263,15 +276,20 @@ pub fn run_quantize(argv: &[String]) -> ! {
 
     let arch = args.arch.clone().or_else(|| src.architecture()).unwrap_or_else(|| stem(&out));
     let name = args.name.clone().unwrap_or_else(|| stem(&args.src));
-    let kv = vec![
+    let mut kv = vec![
         ("general.architecture".to_string(), GgufValue::String(arch.clone())),
         ("general.name".to_string(), GgufValue::String(name)),
-        // ggml's file-type tag for an all-Q8_0 file. Informational: every
-        // tensor also carries its own type, which is what the reader uses.
-        ("general.file_type".to_string(), GgufValue::U32(7)),
         ("general.quantization_version".to_string(), GgufValue::U32(2)),
         ("general.source.name".to_string(), GgufValue::String(stem(&args.src))),
     ];
+    // ggml's file-type tag for a uniformly-quantized file. Informational:
+    // every tensor also carries its own type, which is what the reader
+    // uses. Omitted (not a fabricated 0) when the tier has no real
+    // `general.file_type` id (`Tier::file_type_id`'s own doc - Q8_K is
+    // never a real release format).
+    if let Some(ft) = args.tier.file_type_id() {
+        kv.push(("general.file_type".to_string(), GgufValue::U32(ft)));
+    }
 
     println!("brain quantize: {} -> {out} ({}, architecture '{arch}')", args.src, args.tier.name());
     let started = Instant::now();
@@ -332,6 +350,49 @@ mod tests {
     fn an_unknown_tier_is_refused_by_name_rather_than_silently_defaulted() {
         let err = parse(&s(&["src", "--tier", "Q4_K_M"])).unwrap_err();
         assert!(err.contains("Q4_K_M"), "the error must name the tier asked for: {err}");
+    }
+
+    /// M19: every tier `crate::quant::encodable_geometry` can encode must be
+    /// reachable by name here, case-insensitively (the parser upper-cases
+    /// before matching), not just `Q8_0`.
+    #[test]
+    fn every_encodable_tier_is_accepted_by_name() {
+        for (flag, want) in [
+            ("Q8_0", Tier::Q8_0),
+            ("q4_0", Tier::Q4_0),
+            ("Q4_1", Tier::Q4_1),
+            ("q5_0", Tier::Q5_0),
+            ("Q5_1", Tier::Q5_1),
+            ("q2_k", Tier::Q2K),
+            ("Q3_K", Tier::Q3K),
+            ("q4_k", Tier::Q4K),
+            ("Q5_K", Tier::Q5K),
+            ("q6_k", Tier::Q6K),
+            ("Q8_K", Tier::Q8K),
+        ] {
+            let a = parse(&s(&["src", "--tier", flag])).unwrap_or_else(|e| panic!("--tier {flag}: {e}"));
+            assert_eq!(a.tier, want, "--tier {flag}");
+        }
+    }
+
+    /// [`Tier::file_type_id`]'s own documented contract: the three
+    /// uniformly-quantized K-quant tiers approximate to llama.cpp's `_M`
+    /// recipe id (never a fabricated bare-`"Q4_K"` id that does not exist in
+    /// its `file_type` enum), the legacy/Q6_K tiers use their own exact id,
+    /// and Q8_K (never a real release format) has none at all.
+    #[test]
+    fn tier_file_type_id_matches_its_documented_llama_cpp_mapping() {
+        assert_eq!(Tier::Q8_0.file_type_id(), Some(7));
+        assert_eq!(Tier::Q4_0.file_type_id(), Some(2));
+        assert_eq!(Tier::Q4_1.file_type_id(), Some(3));
+        assert_eq!(Tier::Q5_0.file_type_id(), Some(8));
+        assert_eq!(Tier::Q5_1.file_type_id(), Some(9));
+        assert_eq!(Tier::Q2K.file_type_id(), Some(10));
+        assert_eq!(Tier::Q3K.file_type_id(), Some(12), "Q3_K approximates to the _M recipe id");
+        assert_eq!(Tier::Q4K.file_type_id(), Some(15), "Q4_K approximates to the _M recipe id");
+        assert_eq!(Tier::Q5K.file_type_id(), Some(17), "Q5_K approximates to the _M recipe id");
+        assert_eq!(Tier::Q6K.file_type_id(), Some(18));
+        assert_eq!(Tier::Q8K.file_type_id(), None, "Q8_K is never a real release format");
     }
 
     #[test]

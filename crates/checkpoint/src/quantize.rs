@@ -73,8 +73,12 @@ use crate::gguf_write::{TensorPlan, Writer};
 ///
 /// The planner, the encoder (`crate::quant::quantize`/`quantize_par`) and the
 /// writer are generic over block geometry, so a variant here is a row in each
-/// accessor, not new machinery. `Q4K`/`Q5K`/`Q6K` drop the `_` before `K`
-/// solely to satisfy `non_camel_case_types`, matching `GgmlType`'s naming
+/// accessor, not new machinery - every variant here is one `crate::quant::
+/// encodable_geometry` already has a real encoder for (that function is the
+/// write side's own closed set; a `Tier` variant with no matching arm there
+/// would panic the moment `convert` tried to encode a block, so the two must
+/// stay in lockstep). `Q2K`/`Q3K`/`Q4K`/`Q5K`/`Q6K`/`Q8K` drop the `_` before
+/// `K` solely to satisfy `non_camel_case_types`, matching `GgmlType`'s naming
 /// (see its doc); [`Tier::name`] still spells them the conventional way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
@@ -84,9 +88,24 @@ pub enum Tier {
     /// 32 elements per block, one f16 scale + 16 packed nibbles (18 B/block,
     /// 4.5 bits/weight). Legacy symmetric-with-bias-fold format.
     Q4_0,
+    /// 32 elements per block, one f16 scale + one f16 min + 16 packed
+    /// nibbles (20 B/block, 5 bits/weight). Legacy affine (`d*q + m`)
+    /// sibling of [`Tier::Q4_0`] - no bias fold, so `m` is stored directly.
+    Q4_1,
     /// 32 elements per block, one f16 scale + 32 packed 5-bit codes
     /// (22 B/block, 5.5 bits/weight).
     Q5_0,
+    /// 32 elements per block, one f16 scale + one f16 min + 32 packed 5-bit
+    /// codes (24 B/block, 6 bits/weight). Affine sibling of [`Tier::Q5_0`],
+    /// same relationship [`Tier::Q4_1`] has to [`Tier::Q4_0`].
+    Q5_1,
+    /// 256-element super-block, affine, 16 sub-blocks of 16 sharing packed
+    /// 2-bit codes and 4-bit scale/min pairs (84 B/block, 2.625 bits/weight)
+    /// - the smallest tier this module can encode.
+    Q2K,
+    /// 256-element super-block, affine 3-bit codes, 16 sub-blocks of 16
+    /// (110 B/block, 3.4375 bits/weight).
+    Q3K,
     /// 256-element super-block, affine (`d*q - dmin*m`) with 8 sub-blocks of
     /// 32 sharing packed 6-bit scale/min pairs (144 B/block, 4.5 bits/weight).
     Q4K,
@@ -96,6 +115,14 @@ pub enum Tier {
     /// 256-element super-block, symmetric, 16 sub-blocks of 16
     /// (210 B/block, 6.5625 bits/weight).
     Q6K,
+    /// 256-element super-block, symmetric 8-bit codes, one f32 scale plus a
+    /// packed per-16-group `i16` sum table (292 B/block, 9.125 bits/weight)
+    /// - ggml's own highest-fidelity K-quant tier, and the widest this
+    /// module writes; genuinely never used as a real release's storage
+    /// format in practice (it exists for accurate intermediate accumulation
+    /// in llama.cpp's own K-quant matmul), but this module can encode it,
+    /// so it is not withheld here either.
+    Q8K,
 }
 
 impl Tier {
@@ -104,10 +131,15 @@ impl Tier {
         match self {
             Tier::Q8_0 => crate::gguf::T_Q8_0,
             Tier::Q4_0 => crate::gguf::T_Q4_0,
+            Tier::Q4_1 => crate::gguf::T_Q4_1,
             Tier::Q5_0 => crate::gguf::T_Q5_0,
+            Tier::Q5_1 => crate::gguf::T_Q5_1,
+            Tier::Q2K => crate::gguf::T_Q2_K,
+            Tier::Q3K => crate::gguf::T_Q3_K,
             Tier::Q4K => crate::gguf::T_Q4_K,
             Tier::Q5K => crate::gguf::T_Q5_K,
             Tier::Q6K => crate::gguf::T_Q6_K,
+            Tier::Q8K => crate::gguf::T_Q8_K,
         }
     }
 
@@ -115,8 +147,8 @@ impl Tier {
     /// must satisfy.
     pub fn block_elems(self) -> usize {
         match self {
-            Tier::Q8_0 | Tier::Q4_0 | Tier::Q5_0 => 32,
-            Tier::Q4K | Tier::Q5K | Tier::Q6K => crate::gguf::QK_K,
+            Tier::Q8_0 | Tier::Q4_0 | Tier::Q4_1 | Tier::Q5_0 | Tier::Q5_1 => 32,
+            Tier::Q2K | Tier::Q3K | Tier::Q4K | Tier::Q5K | Tier::Q6K | Tier::Q8K => crate::gguf::QK_K,
         }
     }
 
@@ -125,11 +157,39 @@ impl Tier {
         match self {
             Tier::Q8_0 => "Q8_0",
             Tier::Q4_0 => "Q4_0",
+            Tier::Q4_1 => "Q4_1",
             Tier::Q5_0 => "Q5_0",
+            Tier::Q5_1 => "Q5_1",
+            Tier::Q2K => "Q2_K",
+            Tier::Q3K => "Q3_K",
             Tier::Q4K => "Q4_K",
             Tier::Q5K => "Q5_K",
             Tier::Q6K => "Q6_K",
+            Tier::Q8K => "Q8_K",
         }
+    }
+
+    /// The `general.file_type` id (llama.cpp's whole-file "mostly X" label)
+    /// for a checkpoint quantized uniformly to this tier - derived from
+    /// [`crate::gguf`]'s own id<->name table (`gguf::file_type_id`), not a
+    /// second hand-maintained mapping. The three K-quant tiers this module
+    /// quantizes UNIFORMLY (every eligible tensor, not llama.cpp's own mixed
+    /// per-layer "S/M/L" recipes) have no bare `"Q3_K"`/`"Q4_K"`/`"Q5_K"`
+    /// entry in that table - real GGUF files only ever declare the mixed
+    /// recipe's own label - so this picks each tier's `"_M"` spelling
+    /// (llama.cpp's own default/most-common recipe name) as the closest
+    /// real id, an approximation worth documenting rather than hiding.
+    /// [`Tier::Q8K`] has no `general.file_type` id at all in llama.cpp's own
+    /// enum (never a real release format) and returns `None`.
+    pub fn file_type_id(self) -> Option<u32> {
+        let name = match self {
+            Tier::Q3K => "Q3_K_M",
+            Tier::Q4K => "Q4_K_M",
+            Tier::Q5K => "Q5_K_M",
+            Tier::Q8K => return None,
+            other => other.name(),
+        };
+        crate::gguf::file_type_id(name)
     }
 }
 

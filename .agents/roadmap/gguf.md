@@ -1179,12 +1179,43 @@ this box yet.
       lack of time, not lack of a ground-truth source (the same
       `ggml-common.h` fetch has them).
 
+- [x] M19: write side - `Tier` gained the 5 remaining variants `crate::
+      quant::encodable_geometry` (the panic-fix commit right before this
+      one) already has a real encoder for: `Q4_1`, `Q5_1`, `Q2K`, `Q3K`,
+      `Q8K` - all 11 encodable types now have a `Tier` row, and the doc
+      comment says so explicitly (a `Tier` variant with no matching
+      `encodable_geometry` arm would panic the moment `convert` tried to
+      encode a block, so the two enums are documented as required to stay
+      in lockstep). `quantize_cli.rs`'s `--tier` parser accepts all 11 names
+      case-insensitively (was `Q8_0`-only); `USAGE` lists them.
+      `general.file_type` is now derived from the tier via a new `Tier::
+      file_type_id() -> Option<u32>`, instead of the hardcoded `7` written
+      regardless of the actual `--tier` chosen - `checkpoint::gguf` gained
+      the write-side inverse of its own `file_type_name` (`file_type_id`,
+      `pub(crate)`), both now searching ONE `FILE_TYPES: &[(u32, &str)]`
+      table (refactored from `file_type_name`'s own `match`) so the two
+      directions cannot drift from each other. The three K-quant tiers this
+      module quantizes UNIFORMLY (`Q3K`/`Q4K`/`Q5K`) have no bare
+      `"Q3_K"`/`"Q4_K"`/`"Q5_K"` entry in llama.cpp's own `file_type`
+      enum - real GGUF files only ever declare a MIXED per-layer "S/M/L"
+      recipe under that id - so `file_type_id` picks each tier's `"_M"`
+      spelling (llama.cpp's own default/most-common recipe name) as the
+      closest real id, documented as an approximation rather than hidden.
+      `Q8K` has no `general.file_type` id at all in llama.cpp's own enum
+      (never a real release format - it exists for K-quant matmul's own
+      intermediate accumulation) and returns `None`; `quantize_cli.rs`
+      omits the KV entirely rather than writing a fabricated id.
+      `make test -p brain-checkpoint`: green (127+ lib tests, `Tier`'s own
+      round-trip and `encodable_geometry` regression coverage from the
+      panic-fix commit unaffected). This milestone landed in the middle of
+      rebasing this whole workstream onto `origin/main`'s newer qwen35/GDN
+      work (33 commits, none of which touch `checkpoint::quantize` or
+      `quantize_cli.rs`) - no conflict here, unlike the M13/M12-era files
+      the rebase itself needed hand-resolving (see those commits' own
+      messages).
+
 ## Not yet done
 
-- [ ] M19: write side - `Tier` gains the 10 variants
-      `crate::quant::quantize`/`quantize_par` already encode;
-      `quantize_cli.rs` accepts them by name; `general.file_type` derived from
-      the tier via M0's table instead of the hardcoded `7`.
 - [ ] M20: `GgufTokenizer` completeness (`chat_template` + named variants,
       `add_bos_token`/`add_eos_token`, eot/eom, `scores`,
       `precompiled_charsmap`, `fim_*`); `ChatTemplate::from_gguf` as

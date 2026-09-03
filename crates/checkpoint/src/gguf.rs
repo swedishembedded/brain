@@ -478,52 +478,66 @@ fn quant_label(kv: &BTreeMap<String, GgufValue>) -> Option<String> {
     kv.get("general.quantization_version").and_then(|v| v.as_u64()).map(|v| format!("qver{v}"))
 }
 
-/// Map a `general.file_type` (llama.cpp's `enum llama_ftype`, the whole-file
-/// "mostly X" label) to its conventional name. `None` for an id this table
-/// does not carry - never a fabricated "unknown" string that shadows the
-/// `quantization_version` fallback in [`quant_label`].
+/// `(id, name)` for every `general.file_type` (llama.cpp's `enum
+/// llama_ftype`, the whole-file "mostly X" label) this reader recognizes -
+/// the ONE table both [`file_type_name`] (read: id -> name) and
+/// [`file_type_id`] (write: name -> id, `crate::quantize::Tier`'s own
+/// `general.file_type` derivation) search, so the two directions cannot
+/// drift from each other.
 ///
 /// This is `llama_ftype`, NOT [`GgmlType`]/`ggml_type` - a separate llama.cpp
 /// enum with its own numbering (file_type `Q8_0` is 7; the per-tensor
 /// `ggml_type` `T_Q8_0` is 8). Hand-maintained, like [`GgmlType`], with no
 /// upstream checkout in this repo to pin it against; ids past 37 (MXFP4 and
 /// newer) are deliberately omitted rather than guessed.
+const FILE_TYPES: &[(u32, &str)] = &[
+    (0, "F32"),
+    (1, "F16"),
+    (2, "Q4_0"),
+    (3, "Q4_1"),
+    (7, "Q8_0"),
+    (8, "Q5_0"),
+    (9, "Q5_1"),
+    (10, "Q2_K"),
+    (11, "Q3_K_S"),
+    (12, "Q3_K_M"),
+    (13, "Q3_K_L"),
+    (14, "Q4_K_S"),
+    (15, "Q4_K_M"),
+    (16, "Q5_K_S"),
+    (17, "Q5_K_M"),
+    (18, "Q6_K"),
+    (19, "IQ2_XXS"),
+    (20, "IQ2_XS"),
+    (21, "Q2_K_S"),
+    (22, "IQ3_XS"),
+    (23, "IQ3_XXS"),
+    (24, "IQ1_S"),
+    (25, "IQ4_NL"),
+    (26, "IQ3_S"),
+    (27, "IQ3_M"),
+    (28, "IQ2_S"),
+    (29, "IQ2_M"),
+    (30, "IQ4_XS"),
+    (31, "IQ1_M"),
+    (32, "BF16"),
+    (36, "TQ1_0"),
+    (37, "TQ2_0"),
+];
+
+/// Map a `general.file_type` id to its conventional name. `None` for an id
+/// [`FILE_TYPES`] does not carry - never a fabricated "unknown" string that
+/// shadows the `quantization_version` fallback in [`quant_label`].
 fn file_type_name(ft: u32) -> Option<&'static str> {
-    Some(match ft {
-        0 => "F32",
-        1 => "F16",
-        2 => "Q4_0",
-        3 => "Q4_1",
-        7 => "Q8_0",
-        8 => "Q5_0",
-        9 => "Q5_1",
-        10 => "Q2_K",
-        11 => "Q3_K_S",
-        12 => "Q3_K_M",
-        13 => "Q3_K_L",
-        14 => "Q4_K_S",
-        15 => "Q4_K_M",
-        16 => "Q5_K_S",
-        17 => "Q5_K_M",
-        18 => "Q6_K",
-        19 => "IQ2_XXS",
-        20 => "IQ2_XS",
-        21 => "Q2_K_S",
-        22 => "IQ3_XS",
-        23 => "IQ3_XXS",
-        24 => "IQ1_S",
-        25 => "IQ4_NL",
-        26 => "IQ3_S",
-        27 => "IQ3_M",
-        28 => "IQ2_S",
-        29 => "IQ2_M",
-        30 => "IQ4_XS",
-        31 => "IQ1_M",
-        32 => "BF16",
-        36 => "TQ1_0",
-        37 => "TQ2_0",
-        _ => return None,
-    })
+    FILE_TYPES.iter().find(|&&(id, _)| id == ft).map(|&(_, name)| name)
+}
+
+/// The write-side inverse of [`file_type_name`]: the `general.file_type` id
+/// for a name [`FILE_TYPES`] carries. `pub(crate)` for `crate::quantize::
+/// Tier::file_type_id`, the only caller - deciding what to WRITE from the
+/// same table this reads, rather than a second hand-maintained copy.
+pub(crate) fn file_type_id(name: &str) -> Option<u32> {
+    FILE_TYPES.iter().find(|&&(_, n)| n == name).map(|&(id, _)| id)
 }
 
 /// Forward-only cursor over a byte slice; every read is bounds-checked.
