@@ -147,7 +147,8 @@ prose - settle each from the Apache-2.0 diffusers source once installed
       the way - `enable_mm_splice`'s row range is positional and
       unconditional per forward once baked in at construction, so the
       text-only path is only safe on an `n_visual=0` instance)
-- [ ] Phase 4 - audio VAE port + real-weight parity (first real milestone)
+- [~] Phase 4 - audio VAE **decoder** port: structurally complete and
+      real-checkpoint-validated, numeric parity still open (see below)
 - [ ] Phase 5 - H3 DiT core, tiny-config -> real-weight parity ladder
 - [ ] Phase 6 - video VAE (gated on `video_vae/` download)
 - [ ] Phase 7 - dual rectified-flow schedulers
@@ -156,6 +157,55 @@ prose - settle each from the Apache-2.0 diffusers source once installed
 - [ ] Phase 10 - training: gradcheck -> LoRA -> device trainer
 - [ ] Phase 11 - capability / residency / D-Bus serving contract
 - [ ] Phase 12 - streaming-overlap engine (separate, measured perf phase)
+
+## Phase 4 detail: audio VAE decoder
+
+`crates/minimaxh3/src/vocoder.rs` + `import.rs` - the BigVGAN-topology
+decoder half of the audio VAE only (`DacAudioVAE.decode`: `dec_in_proj` then
+the BigVGAN stack). **Encode is out of scope** for this milestone - the
+checkpoint's own shipped `dac_audio_vae.py` only implements `.decode()` at
+all; `encoder`/`mean_proj`/`logs_proj`/`pre_block` (173 of the checkpoint's
+1087 tensors) are present for training-time compatibility but dead in the
+shipped inference-only forward, and neither reads them.
+
+This reparameterizes an existing in-workspace BigVGAN v2 / AMP1 / anti-
+aliased-SnakeBeta vocoder port (same topology, different config numbers) -
+genuinely new work was the H3-specific config/manifest and three real,
+checked naming differences from that precedent: `decoder.ups.{i}.0.*` (not
+flat `ups.{i}.*` - `BigVGAN.__init__` wraps each stage's transposed conv in
+its own one-element `ModuleList`), `decoder.resblocks.{idx}.activations.{0..5}`
+flat (not split `acts1.{d}`/`acts2.{d}` - `AMPBlock1` stores one 6-element
+list and slices it in its own forward), and a top-level `dec_in_proj` that
+is a PLAIN (non-weight-normalized) 1x1 conv, unlike every other conv in the
+file.
+
+**Verified without any Python oracle** (real checkpoint, no torch needed for
+any of this):
+- `tensor_manifest()`'s 779 post-fold tensor count matches an independent
+  Python count from the real safetensors header exactly (914 raw tensors
+  under `decoder.*`+`dec_in_proj.*`, folding each `weight_g`/`weight_v` pair
+  to one `.weight`).
+- `import_audio_vae_decoder` achieves real two-way coverage against the
+  actual 578MB checkpoint: every claimed tensor present and correctly
+  shaped, the 173 unclaimed tensors are exactly the expected out-of-scope
+  `encoder`/`mean_proj`/`logs_proj`/`pre_block` prefixes (asserted, not
+  assumed).
+- `decode()` runs the FULL real-scale graph (1024-wide, 7 stages, 21
+  resblocks) against the real imported weights end to end on this
+  hardware's CPU backend: finite, correctly `[-1,1]`-clamped, non-trivial
+  output, ~6s including import.
+- A weight-free tiny-config smoke test also exercises the same graph
+  end-to-end; its first version had a real bug (channel width `24` right-
+  shifted to 0 after 7 halvings, `24 >> 7 == 0`), caught by its own
+  "output must not be trivially all-zero" assertion - fixed by widening to
+  `128`. Worth recording: the assertion did its job.
+
+**Still open, explicitly not claimed:** numeric parity against the real
+reference implementation. No torch/diffusers oracle is installed yet (Phase
+1), so "runs and stays finite at real scale" is the honest ceiling on what
+is verified so far - it proves the graph is wired and the checkpoint loads
+correctly, not that the waveform is right. This gate is what closes Phase 4
+for real.
 
 ## Recorded gaps (kept current)
 

@@ -47,3 +47,5 @@
 //! this module does not mean the capability it names is implemented yet.
 
 pub mod caps;
+pub mod import;
+pub mod vocoder;
