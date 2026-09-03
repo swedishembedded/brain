@@ -136,9 +136,12 @@ prose - settle each from the Apache-2.0 diffusers source once installed
 
 ## Phases (see the approved plan for full detail)
 
-- [ ] Phase 0 - ledger, arch registration, crate skeleton, license gate
+- [x] Phase 0 - ledger, arch registration, crate skeleton, license gate
 - [ ] Phase 1 - reference oracle (torch+diffusers) + golden dumper
-- [ ] Phase 2 - fetch recipe for the two-level partitioned checkpoint
+- [x] Phase 2 - fetch recipe for the two-level partitioned checkpoint (`brain
+      pull` only - `default_ref: None` still blocks auto-fetch; the
+      `crates/cli/src/supply.rs::convert`-side manifest write for this
+      recipe id is a recorded gap below)
 - [ ] Phase 3 - Qwen3-VL `encode_hidden`/`encode_hiddens` extension
 - [ ] Phase 4 - audio VAE port + real-weight parity (first real milestone)
 - [ ] Phase 5 - H3 DiT core, tiny-config -> real-weight parity ladder
@@ -152,6 +155,13 @@ prose - settle each from the Apache-2.0 diffusers source once installed
 
 ## Recorded gaps (kept current)
 
+- `H3Recipe` (in `modelstore::recipe`) makes `brain pull MiniMaxAI/MiniMax-H3`
+  fetch the right nested per-partition files, but `crates/cli/src/
+  supply.rs::convert` has no case for recipe id `"minimaxh3"` yet, so a
+  completed pull is not yet turned into a servable manifest this way -
+  `minimaxh3::import` reading `BRAIN_MINIMAXH3_DIR` directly (a plain local
+  checkout, exactly what this session's own download already is) is the
+  supported path until that finish-side wiring lands.
 - `video_vae/` has not finished downloading; Phase 6 real-weight parity is
   blocked on it.
 - `Ref2VA/` partition has not started downloading; Phase 9's `ref2va` task

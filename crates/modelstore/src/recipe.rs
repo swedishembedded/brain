@@ -84,7 +84,7 @@ pub trait ArtifactRecipe: Send + Sync {
 /// and always matches (the historical, still-default family) -- more
 /// specific recipes get first refusal, ahead of it.
 pub fn recipes() -> Vec<Box<dyn ArtifactRecipe>> {
-    let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(ZimageRecipe), Box::new(WanRecipe), Box::new(YoloRecipe)];
+    let mut v: Vec<Box<dyn ArtifactRecipe>> = vec![Box::new(ZimageRecipe), Box::new(H3Recipe), Box::new(WanRecipe), Box::new(YoloRecipe)];
     v.extend(FILES_RECIPES.iter().map(|r| Box::new(*r) as Box<dyn ArtifactRecipe>));
     // After the named rows (a repo whose GGUFs are a fixed SET, like
     // `deepseek2ocr-gguf`'s model+mmproj pair, must be claimed by its own row
@@ -416,6 +416,66 @@ impl ArtifactRecipe for ZimageRecipe {
         for f in listing {
             if Self::ROLE_DIRS.iter().any(|prefix| f.starts_with(prefix)) {
                 artifacts.push(artifact(f.clone(), f.clone()));
+            }
+        }
+        Ok(artifacts)
+    }
+}
+
+/// A TWO-LEVEL diffusers pipeline repo: unlike every other shape this store
+/// knows, MiniMax-H3's `model_index.json` does not sit at the repo root --
+/// it sits one level down, under a TASK-PARTITION directory (`FL2VA/`,
+/// `Ref2VA/`), each itself a complete diffusers pipeline with its own
+/// `transformer/`/`text_encoder/`/`audio_vae/`/`video_vae/`/`processor/`/
+/// `tokenizer/` roles. [`ZimageRecipe`]'s `matches`/`artifacts` assume the
+/// role dirs sit at the repo root, so they cannot claim this shape (there is
+/// no bare `model_index.json` in the listing at all) -- this recipe is that
+/// same shape one level deeper, matched and downloaded per partition.
+///
+/// This recipe only gets `brain pull` (and `brain models list`/`profile`)
+/// to fetch the right nested files -- `minimaxh3`'s `arch::ARCHS` row has no
+/// `default_ref`, so nothing in this crate ever calls it unprompted (the
+/// MiniMax H3 Community License's territorial and revenue-cap terms mean
+/// auto-fetch must never happen for this architecture). Turning a completed
+/// download into a servable `CompoundManifest` (`crates/cli/src/
+/// supply.rs::convert`) is separate, later work: this recipe's single `dir`
+/// role (matching the `arch::ARCHS` row's `weights_env`) is resolved by the
+/// model crate's own import code reading both partitions from one
+/// directory, not by a per-role manifest this crate would have to know how
+/// to build.
+pub struct H3Recipe;
+
+impl H3Recipe {
+    /// The task-partition directories this repo's two-level layout uses.
+    pub const PARTITIONS: &'static [&'static str] = &["FL2VA", "Ref2VA"];
+    /// Role subdirectory names WITHIN one partition (`<partition>/<role>/`).
+    const ROLE_DIRS: &'static [&'static str] = &["transformer/", "text_encoder/", "audio_vae/", "video_vae/", "processor/", "tokenizer/"];
+}
+
+impl ArtifactRecipe for H3Recipe {
+    fn id(&self) -> &'static str {
+        "minimaxh3"
+    }
+
+    fn matches(&self, _reference: &ModelRef, listing: &[String]) -> bool {
+        Self::PARTITIONS.iter().any(|p| {
+            let idx = format!("{p}/model_index.json");
+            listing.iter().any(|f| f == &idx) && Self::ROLE_DIRS.iter().all(|d| listing.iter().any(|f| f.starts_with(&format!("{p}/{d}"))))
+        })
+    }
+
+    fn artifacts(&self, _reference: &ModelRef, listing: &[String], _hub: &dyn Hub) -> Result<Vec<Artifact>, Box<PlanError>> {
+        let mut artifacts = Vec::new();
+        for p in Self::PARTITIONS {
+            let idx = format!("{p}/model_index.json");
+            if !listing.iter().any(|f| f == &idx) {
+                continue;
+            }
+            artifacts.push(artifact(idx.clone(), idx));
+            for f in listing {
+                if Self::ROLE_DIRS.iter().any(|d| f.starts_with(&format!("{p}/{d}"))) {
+                    artifacts.push(artifact(f.clone(), f.clone()));
+                }
             }
         }
         Ok(artifacts)
@@ -863,6 +923,71 @@ mod tests {
         // skipped, not an oversight (z-image reimplements its own flow-match
         // scheduler; it doesn't read the diffusers scheduler config).
         assert!(!dest.contains(&"scheduler/scheduler_config.json"));
+    }
+
+    /// A representative `MiniMaxAI/MiniMax-H3` `FL2VA/` partition listing,
+    /// built from this session's real local download (audio_vae and
+    /// text_encoder are complete locally; transformer/video_vae are
+    /// extrapolated from the real per-shard naming convention already
+    /// observed for the shards that HAVE landed) -- NOT confirmed against
+    /// the live HF API listing, unlike `wan_t2v_1_3b_listing` above. Good
+    /// enough to test this recipe's shape-matching logic; not a claim about
+    /// the exact remote file count.
+    fn h3_fl2va_listing() -> Vec<String> {
+        let mut v = vec![
+            "FL2VA/model_index.json".to_string(),
+            "FL2VA/transformer/config.json".to_string(),
+            "FL2VA/text_encoder/config.json".to_string(),
+            "FL2VA/text_encoder/model.safetensors.index.json".to_string(),
+            "FL2VA/audio_vae/config.json".to_string(),
+            "FL2VA/audio_vae/model.safetensors".to_string(),
+            "FL2VA/audio_vae/minimax_h3_audio_vae.py".to_string(),
+            "FL2VA/video_vae/config.json".to_string(),
+            "FL2VA/video_vae/model.safetensors".to_string(),
+            "FL2VA/processor/tokenizer_config.json".to_string(),
+            "FL2VA/tokenizer/tokenizer_config.json".to_string(),
+        ];
+        for i in 1..=13 {
+            v.push(format!("FL2VA/transformer/model-{i:05}-of-00013.safetensors"));
+        }
+        for i in 1..=14 {
+            v.push(format!("FL2VA/text_encoder/model-{i:05}-of-00014.safetensors"));
+        }
+        v
+    }
+
+    #[test]
+    fn h3_recipe_matches_the_two_level_partitioned_repo_ahead_of_transformers() {
+        let listing = h3_fl2va_listing();
+        let r = ModelRef::new("MiniMaxAI", "MiniMax-H3", None);
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
+        assert_eq!(matched.id(), "minimaxh3", "a two-level partitioned diffusers repo must not fall through to the transformers catch-all");
+    }
+
+    #[test]
+    fn h3_recipe_does_not_match_a_root_level_diffusers_repo_or_a_transformers_repo() {
+        let r = ModelRef::new("MiniMaxAI", "MiniMax-H3", None);
+        assert!(!H3Recipe.matches(&r, &zimage_turbo_listing()), "H3's role dirs sit under a partition prefix, not the repo root");
+        let flat = vec!["config.json".to_string(), "model.safetensors".to_string()];
+        assert!(!H3Recipe.matches(&r, &flat));
+    }
+
+    #[test]
+    fn h3_recipe_downloads_every_file_under_the_present_partitions_role_dirs() {
+        let listing = h3_fl2va_listing();
+        let hub = crate::hub::FakeHub::new();
+        let r = ModelRef::new("MiniMaxAI", "MiniMax-H3", None);
+        let artifacts = H3Recipe.artifacts(&r, &listing, &hub).unwrap();
+        let dest: Vec<&str> = artifacts.iter().map(|a| a.dest_name.as_str()).collect();
+
+        for f in listing.iter().filter(|f| f.as_str() != "FL2VA/model_index.json") {
+            let under_a_role_dir = H3Recipe::ROLE_DIRS.iter().any(|d| f.starts_with(&format!("FL2VA/{d}")));
+            assert_eq!(dest.contains(&f.as_str()), under_a_role_dir, "{f} inclusion disagrees with whether it's under a FL2VA role dir");
+        }
+        assert!(dest.contains(&"FL2VA/model_index.json"));
+        // No Ref2VA/ entry anywhere in the listing -> nothing Ref2VA-prefixed
+        // is even attempted, and no phantom Ref2VA/model_index.json either.
+        assert!(!dest.iter().any(|d| d.starts_with("Ref2VA/")));
     }
 
     #[test]
