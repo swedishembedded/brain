@@ -73,18 +73,30 @@ codebooks (1..15) are hardcoded greedy argmax (`gen_kv_mtp.rs`,
 Since the residual codebooks carry most of the acoustic detail, this is a
 real perceptual-quality lever, not API decoration.
 
-- [ ] Write the spec test first: extend `GenOpts` with `top_p`,
-      `repetition_penalty`, and an optional `residual: Option<GenOpts>` (or
-      equivalent) for independent MTP-codebook sampling; a test asserting two
-      generations with different `residual` settings diverge in their
-      residual codes while codebook-0 stays identical (fixed seed).
-- [ ] Implement top-p (nucleus) and repetition-penalty on the existing
-      codebook-0 `sample_cb0` path.
-- [ ] Implement optional sampling (temperature/top-k/top-p) on the MTP
-      residual-codebook decode, defaulting to today's greedy behavior so
-      nothing regresses silently.
-- [ ] Wire `--top-p --repetition-penalty` (and the residual equivalents) into
-      `tts_cli.rs`'s `parse_common`.
+- [x] Write the spec test first: extend `GenOpts` with `top_p`,
+      `repetition_penalty`, and an optional `residual: Option<ResidualOpts>`;
+      tests asserting top_p/repetition_penalty actually filter (unit-level, on
+      `sample_cb0` directly) and that residual sampling diverges from greedy
+      across seeds (`pipeline::sampling_tests`, no checkpoint needed --
+      `MtpModel::new_synthetic_on` weights).
+- [x] Implement top-p (nucleus) and repetition-penalty on the existing
+      codebook-0 `sample_cb0` path (`apply_top_p`/`apply_repetition_penalty` in
+      `pipeline.rs`).
+- [x] Implement optional sampling (temperature/top-k/top-p) on the MTP
+      residual-codebook decode (`MtpModel::generate_residuals_with` +
+      `sample_residual` in `mtp.rs`), defaulting to today's greedy behavior so
+      nothing regresses silently. **Scope note**: this covers the
+      full-recompute `MtpModel` path, which is what `pipeline::generate_codes`
+      (the default `synth`/`clone`/`design` path) actually calls. The
+      KV-cached `gen_kv_mtp::CpuMtp` mirror and the NPU `MtpEngine` impls in
+      `npu_gen.rs` stay greedy-only for now (documented inline at each call
+      site) -- giving them the same independent sampling is follow-up, not
+      silently dropped.
+- [x] Wire `--top-p --repetition-penalty --residual-temp --residual-top-k
+      --residual-top-p` into `tts_cli.rs`'s `parse_common`. Verified live:
+      `brain qwen3tts synth --top-p 0.9 --repetition-penalty 1.3
+      --residual-temp 0.7 --residual-top-k 20 ...` runs end-to-end and writes
+      finite audio.
 
 ### Phase 2 - Batched serving
 

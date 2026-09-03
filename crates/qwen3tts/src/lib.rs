@@ -32,6 +32,6 @@ pub use gen::TalkerGen;
 pub use gen_kv::CpuTalker;
 pub use gen_kv_mtp::CpuMtp;
 pub use mtp::MtpModel;
-pub use pipeline::{GenOpts, TtsPaths};
+pub use pipeline::{GenOpts, ResidualOpts, TtsPaths};
 pub use prompt::{Prompt, TtsSpecials};
 pub use talker::{TalkerModel, TextProjection};

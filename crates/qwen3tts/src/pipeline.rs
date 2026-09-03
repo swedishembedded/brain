@@ -37,8 +37,35 @@ pub struct GenOpts {
     pub max_frames: usize,
     pub temperature: f32,
     pub top_k: usize,
+    /// Nucleus (top-p) cutoff on codebook-0's sampling distribution, applied
+    /// after `top_k` (if any). `0.0` (the default) disables it -- matches the
+    /// reference's `top_k`-only default (`generate_config.json` does not set
+    /// `top_p` for the Base checkpoint either).
+    pub top_p: f32,
+    /// Repetition penalty on codebook-0, applied over the FULL history of
+    /// already-generated codebook-0 ids before sampling (HF's standard
+    /// formulation: a previously-seen logit is divided by this value if
+    /// positive, multiplied if negative). `1.0` (the default) disables it.
+    pub repetition_penalty: f32,
     pub seed: u64,
     pub min_new: usize,
+    /// Independent sampling for the MTP's residual codebooks (1..15). `None`
+    /// (the default) keeps the reference's greedy `code_predictor.generate`
+    /// behavior; `Some` opts into temperature/top-k/top-p sampling there too --
+    /// the residual codebooks carry most of the acoustic detail, so this is a
+    /// real quality/expressiveness lever, not just parity with codebook-0's
+    /// knobs. See [`ResidualOpts`].
+    pub residual: Option<ResidualOpts>,
+}
+
+/// Sampling controls for the MTP's residual codebooks (1..15), independent of
+/// codebook-0's [`GenOpts`] knobs -- mirrors the reference's separate
+/// `subtalker_temperature`/`subtalker_top_k`/`subtalker_top_p` config keys.
+#[derive(Clone, Debug)]
+pub struct ResidualOpts {
+    pub temperature: f32,
+    pub top_k: usize,
+    pub top_p: f32,
 }
 
 impl Default for GenOpts {
@@ -55,8 +82,11 @@ impl Default for GenOpts {
             max_frames: 256,
             temperature: 0.9,
             top_k: 50,
+            top_p: 0.0,
+            repetition_penalty: 1.0,
             seed: 0,
             min_new: 2,
+            residual: None,
         }
     }
 }
@@ -77,15 +107,70 @@ fn argmax(s: &[f32]) -> usize {
     bi
 }
 
+/// Apply HF's standard repetition penalty in place: a previously-seen logit is
+/// divided by `penalty` if positive, multiplied if negative (so either way it
+/// moves toward zero, discouraging but never fully forbidding a repeat).
+/// `penalty <= 1.0` is a no-op (matches the reference's `1.0` = disabled).
+fn apply_repetition_penalty(logits: &mut [f32], history: &[u32], penalty: f32) {
+    if penalty <= 1.0 {
+        return;
+    }
+    for &t in history {
+        let idx = t as usize;
+        if idx < logits.len() && logits[idx].is_finite() {
+            logits[idx] = if logits[idx] > 0.0 { logits[idx] / penalty } else { logits[idx] * penalty };
+        }
+    }
+}
+
+/// Nucleus (top-p) filter in place: keep the smallest prefix of `scaled`
+/// (already temperature-scaled and, if requested, top-k-masked) whose softmax
+/// probability mass is `>= top_p`, mask everything else to `-inf`. Always
+/// keeps at least one token. `top_p <= 0.0` or `>= 1.0` is a no-op.
+fn apply_top_p(scaled: &mut [f32], top_p: f32) {
+    if top_p <= 0.0 || top_p >= 1.0 {
+        return;
+    }
+    let max0 = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut ranked: Vec<(usize, f32)> =
+        scaled.iter().enumerate().filter(|&(_, &x)| x.is_finite()).map(|(i, &x)| (i, (x - max0).exp())).collect();
+    let z: f32 = ranked.iter().map(|&(_, p)| p).sum();
+    if z <= 0.0 {
+        return;
+    }
+    ranked.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let mut cum = 0.0f32;
+    let mut cutoff = ranked.len();
+    for (rank, &(_, p)) in ranked.iter().enumerate() {
+        cum += p / z;
+        if cum >= top_p {
+            cutoff = rank + 1;
+            break;
+        }
+    }
+    let keep: std::collections::HashSet<usize> = ranked[..cutoff].iter().map(|&(i, _)| i).collect();
+    for (i, x) in scaled.iter_mut().enumerate() {
+        if !keep.contains(&i) {
+            *x = f32::NEG_INFINITY;
+        }
+    }
+}
+
 /// Sample codebook-0 from `logits` with the reference's `suppress_tokens`: the
 /// top-1024 vocab entries `[v-1024, v)` are masked except the codec EOS, which is
-/// itself masked unless `allow_eos` (the `min_new_tokens` guard).
+/// itself masked unless `allow_eos` (the `min_new_tokens` guard). `history` is
+/// the sequence of already-generated codebook-0 ids this clip, consulted only
+/// when `opts.repetition_penalty > 1.0`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sample_cb0(
     mut logits: Vec<f32>,
     eos: u32,
     allow_eos: bool,
     temperature: f32,
     top_k: usize,
+    top_p: f32,
+    repetition_penalty: f32,
+    history: &[u32],
     rng: &mut Rng,
 ) -> u32 {
     let v = logits.len();
@@ -97,6 +182,7 @@ pub(crate) fn sample_cb0(
     if allow_eos {
         logits[eos as usize] = eos_logit;
     }
+    apply_repetition_penalty(&mut logits, history, repetition_penalty);
     if temperature <= 0.0 {
         return argmax(&logits) as u32;
     }
@@ -111,6 +197,7 @@ pub(crate) fn sample_cb0(
             }
         }
     }
+    apply_top_p(&mut scaled, top_p);
     let max = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0f32;
     for x in scaled.iter_mut() {
@@ -151,12 +238,16 @@ pub fn generate_codes(
     for i in 0..n_prefix {
         past_hidden = gen.step(&prompt.embeds[i * d..(i + 1) * d]);
     }
+    let mut cb0_history: Vec<u32> = Vec::new();
     let mut cb0 = sample_cb0(
         gen.codec_head_logits(&past_hidden),
         sp.codec_eos,
         opts.min_new == 0,
         opts.temperature,
         opts.top_k,
+        opts.top_p,
+        opts.repetition_penalty,
+        &cb0_history,
         &mut rng,
     );
 
@@ -166,8 +257,9 @@ pub fn generate_codes(
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
         }
+        cb0_history.push(cb0);
         let cb0_embed = gen.codec_embed(cb0).to_vec();
-        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        let (residuals, res_sum) = mtp.generate_residuals_with(&past_hidden, &cb0_embed, opts.residual.as_ref(), &mut rng);
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
 
@@ -192,6 +284,9 @@ pub fn generate_codes(
             s >= opts.min_new,
             opts.temperature,
             opts.top_k,
+            opts.top_p,
+            opts.repetition_penalty,
+            &cb0_history,
             &mut rng,
         );
     }
@@ -233,12 +328,16 @@ pub fn generate_codes_cached(
         past_hidden = cpu.step(&prompt.embeds[i * d..(i + 1) * d]);
     }
     let t_prefix = t_prefix0.elapsed().as_secs_f64() * 1e3;
+    let mut cb0_history: Vec<u32> = Vec::new();
     let mut cb0 = sample_cb0(
         cpu.codec_head_logits(&past_hidden),
         sp.codec_eos,
         opts.min_new == 0,
         opts.temperature,
         opts.top_k,
+        opts.top_p,
+        opts.repetition_penalty,
+        &cb0_history,
         &mut rng,
     );
 
@@ -248,8 +347,13 @@ pub fn generate_codes_cached(
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
         }
+        cb0_history.push(cb0);
         let cb0_embed = cpu.codec_embed(cb0).to_vec();
         let tm = Instant::now();
+        // `CpuMtp::generate_residuals` has no sampling variant yet, so it stays
+        // greedy-only here regardless of `opts.residual` -- that option only
+        // takes effect on the full-recompute `MtpModel` path this cached
+        // mirror does not use.
         let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
         t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
@@ -276,6 +380,9 @@ pub fn generate_codes_cached(
             s >= opts.min_new,
             opts.temperature,
             opts.top_k,
+            opts.top_p,
+            opts.repetition_penalty,
+            &cb0_history,
             &mut rng,
         );
     }
@@ -790,4 +897,104 @@ pub fn decode_codes(codec_path: &str, codes: &[u32]) -> Result<Vec<f32>, String>
         return Ok(wav);
     }
     Ok(codec.decode(codes))
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+
+    fn gpu_disabled() -> bool {
+        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    fn logits_two_hot(v: usize, a: usize, b: usize) -> Vec<f32> {
+        // Two clear favorites (a, b) that dominate the softmax mass over a low
+        // floor (a flat 0.0 floor across ~3000 other entries would itself
+        // outweigh two logits of 4-5 by sheer count) -- keeps the test about
+        // top_p/repetition_penalty, not the EOS-suppression window.
+        let mut l = vec![-20.0f32; v];
+        l[a] = 5.0;
+        l[b] = 4.0;
+        l
+    }
+
+    #[test]
+    fn top_p_excludes_the_long_tail_once_the_top_candidates_cover_it() {
+        let v = 3072usize;
+        let eos = (v - 2000) as u32; // well clear of both the [v-1024,v) mask and a/b below
+        let (a, b) = (100usize, 200usize);
+        let mut rng = Rng::new(7);
+        // top_p=0.9 with two dominant logits (softmax mass concentrated on a/b)
+        // must never sample anything outside {a, b} across many draws.
+        for _ in 0..200 {
+            let got = sample_cb0(logits_two_hot(v, a, b), eos, false, 1.0, 0, 0.9, 1.0, &[], &mut rng);
+            assert!(got as usize == a || got as usize == b, "top_p leaked outside the nucleus: {got}");
+        }
+    }
+
+    #[test]
+    fn top_p_disabled_can_sample_outside_the_top_two() {
+        let v = 3072usize;
+        let eos = (v - 2000) as u32;
+        let (a, b) = (100usize, 200usize);
+        let mut rng = Rng::new(7);
+        // Same distribution, top_p off (0.0): high temperature must eventually
+        // sample something other than {a, b} -- proves top_p above was doing
+        // real filtering, not an artifact of the distribution itself.
+        let mut saw_other = false;
+        for _ in 0..200 {
+            let got = sample_cb0(logits_two_hot(v, a, b), eos, false, 4.0, 0, 0.0, 1.0, &[], &mut rng);
+            if got as usize != a && got as usize != b {
+                saw_other = true;
+                break;
+            }
+        }
+        assert!(saw_other, "expected top_p=0 (disabled) + high temperature to escape the top two");
+    }
+
+    #[test]
+    fn repetition_penalty_demotes_a_token_dominating_greedy_history() {
+        let v = 3072usize;
+        let eos = (v - 2000) as u32;
+        let (a, b) = (100usize, 200usize);
+        let mut rng = Rng::new(1);
+        let history = vec![a as u32; 50]; // codebook-0 has repeated `a` for 50 frames
+        // Greedy (temperature<=0) with a real penalty must stop returning `a`
+        // once its logit has been pushed below `b`'s.
+        let got = sample_cb0(logits_two_hot(v, a, b), eos, false, 0.0, 0, 0.0, 3.0, &history, &mut rng);
+        assert_eq!(got as usize, b, "repetition penalty should have demoted the repeated token");
+        // No penalty (1.0): greedy still returns the true favorite `a`.
+        let got_unpenalized = sample_cb0(logits_two_hot(v, a, b), eos, false, 0.0, 0, 0.0, 1.0, &history, &mut rng);
+        assert_eq!(got_unpenalized as usize, a);
+    }
+
+    #[test]
+    fn residual_sampling_can_diverge_from_greedy_while_cb0_logic_is_untouched() {
+        // MtpModel's own greedy generate_residuals vs generate_residuals_with at
+        // high temperature: same synthetic weights, same inputs -- greedy is
+        // deterministic, sampling is seed-dependent, so pushing the seed far
+        // enough must eventually produce a different residual codebook stream.
+        // Skips cleanly (like every other GPU test here) when no GPU is set up.
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = crate::config::MtpConfig::tiny();
+        let d = cfg.d_model as usize;
+        let m = crate::mtp::MtpModel::new_synthetic_on(gpu_core::testgpu::dev(crate::mtp::PIPELINES), cfg, 3);
+        let th = vec![0.3f32; d];
+        let cb0 = vec![-0.2f32; d];
+        let (greedy_codes, _) = m.generate_residuals(&th, &cb0);
+        let ro = ResidualOpts { temperature: 2.0, top_k: 0, top_p: 0.0 };
+        let mut found_divergent = false;
+        for seed in 0..20u64 {
+            let mut rng = Rng::new(seed);
+            let (sampled_codes, _) = m.generate_residuals_with(&th, &cb0, Some(&ro), &mut rng);
+            assert_eq!(sampled_codes.len(), greedy_codes.len());
+            if sampled_codes != greedy_codes {
+                found_divergent = true;
+                break;
+            }
+        }
+        assert!(found_divergent, "residual sampling never diverged from greedy across 20 seeds");
+    }
 }

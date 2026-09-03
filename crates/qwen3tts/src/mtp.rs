@@ -90,6 +90,72 @@ pub struct MtpModel {
     lm_head: Vec<Vec<f32>>,         // [n_residual][vocab*d]
 }
 
+/// Temperature/top-k/top-p sampling over one residual codebook's logit row.
+/// No EOS masking or repetition penalty -- the residual codebooks have no EOS
+/// token and the reference's `subtalker_*` config carries no repetition
+/// penalty for them either, only the three sampling knobs this mirrors.
+fn sample_residual(row: &[f32], opts: &crate::pipeline::ResidualOpts, rng: &mut data::rng::Rng) -> usize {
+    if opts.temperature <= 0.0 {
+        let mut best = 0usize;
+        for j in 1..row.len() {
+            if row[j] > row[best] {
+                best = j;
+            }
+        }
+        return best;
+    }
+    let mut scaled: Vec<f32> = row.iter().map(|&l| l / opts.temperature).collect();
+    if opts.top_k > 0 && opts.top_k < scaled.len() {
+        let mut idx: Vec<usize> = (0..scaled.len()).collect();
+        idx.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap());
+        let threshold = scaled[idx[opts.top_k - 1]];
+        for x in scaled.iter_mut() {
+            if *x < threshold {
+                *x = f32::NEG_INFINITY;
+            }
+        }
+    }
+    if opts.top_p > 0.0 && opts.top_p < 1.0 {
+        let max0 = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut ranked: Vec<(usize, f32)> =
+            scaled.iter().enumerate().filter(|&(_, &x)| x.is_finite()).map(|(i, &x)| (i, (x - max0).exp())).collect();
+        let z: f32 = ranked.iter().map(|&(_, p)| p).sum();
+        if z > 0.0 {
+            ranked.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let mut cum = 0.0f32;
+            let mut cutoff = ranked.len();
+            for (rank, &(_, p)) in ranked.iter().enumerate() {
+                cum += p / z;
+                if cum >= opts.top_p {
+                    cutoff = rank + 1;
+                    break;
+                }
+            }
+            let keep: std::collections::HashSet<usize> = ranked[..cutoff].iter().map(|&(i, _)| i).collect();
+            for (i, x) in scaled.iter_mut().enumerate() {
+                if !keep.contains(&i) {
+                    *x = f32::NEG_INFINITY;
+                }
+            }
+        }
+    }
+    let max = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f32;
+    for x in scaled.iter_mut() {
+        *x = (*x - max).exp();
+        sum += *x;
+    }
+    let r = rng.next_f32() * sum;
+    let mut acc = 0.0f32;
+    for (i, &p) in scaled.iter().enumerate() {
+        acc += p;
+        if acc >= r {
+            return i;
+        }
+    }
+    scaled.len() - 1
+}
+
 impl MtpModel {
     fn only_fwd_ids() -> KernelIds {
         // Forward needs rmsnorm/rms_inv, rope, gqa scores/apply/softmax, silu_mul.
@@ -444,6 +510,23 @@ impl MtpModel {
         talker_hidden: &[f32],
         cb0_embed: &[f32],
     ) -> (Vec<u32>, Vec<f32>) {
+        let mut rng = data::rng::Rng::new(0);
+        self.generate_residuals_with(talker_hidden, cb0_embed, None, &mut rng)
+    }
+
+    /// Same as [`Self::generate_residuals`], with optional independent sampling
+    /// on the residual codebooks (`residual = None` is byte-for-byte the old
+    /// greedy behavior; `rng` is only consulted when `residual.is_some()`).
+    /// See `crate::pipeline::ResidualOpts` / `GenOpts::residual` for why this
+    /// exists: the reference's own `subtalker_*` config keys sample these
+    /// codebooks too, and they carry most of the acoustic detail.
+    pub fn generate_residuals_with(
+        &self,
+        talker_hidden: &[f32],
+        cb0_embed: &[f32],
+        residual: Option<&crate::pipeline::ResidualOpts>,
+        rng: &mut data::rng::Rng,
+    ) -> (Vec<u32>, Vec<f32>) {
         let d = self.cfg.d_model as usize;
         let v = self.cfg.vocab as usize;
         let t = self.t as usize; // num_code_groups (16)
@@ -461,12 +544,18 @@ impl MtpModel {
         for k in 1..=nres {
             let logits = self.logits(&emb); // [(t-1)*v]
             let row = &logits[(k - 1) * v..k * v];
-            let mut best = 0usize;
-            for j in 1..v {
-                if row[j] > row[best] {
-                    best = j;
+            let best = match residual {
+                Some(ro) => sample_residual(row, ro, rng),
+                None => {
+                    let mut best = 0usize;
+                    for j in 1..v {
+                        if row[j] > row[best] {
+                            best = j;
+                        }
+                    }
+                    best
                 }
-            }
+            };
             codes[k - 1] = best as u32;
             // codec_embedding[k-1] embeds codebook k.
             let tbl = &self.codec_embedding[k - 1];

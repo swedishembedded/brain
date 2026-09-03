@@ -279,12 +279,16 @@ pub fn generate_codes_npu(
     let t_pref0 = Instant::now();
     let mut past_hidden = talker.feed(&prompt.embeds)?;
     let t_prefix = t_pref0.elapsed().as_secs_f64() * 1e3;
+    let mut cb0_history: Vec<u32> = Vec::new();
     let mut cb0 = sample_cb0(
         tables.codec_head_logits(&past_hidden),
         sp.codec_eos,
         opts.min_new == 0,
         opts.temperature,
         opts.top_k,
+        opts.top_p,
+        opts.repetition_penalty,
+        &cb0_history,
         &mut rng,
     );
 
@@ -294,8 +298,13 @@ pub fn generate_codes_npu(
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
         }
+        cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
         let tm = Instant::now();
+        // `MtpEngine::generate_residuals` has no sampling variant yet, so it
+        // stays greedy-only here regardless of `opts.residual` -- that option
+        // only takes effect on the full-recompute `MtpModel` path this
+        // NPU/KV mirror does not use.
         let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
         t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
@@ -322,6 +331,9 @@ pub fn generate_codes_npu(
             s >= opts.min_new,
             opts.temperature,
             opts.top_k,
+            opts.top_p,
+            opts.repetition_penalty,
+            &cb0_history,
             &mut rng,
         );
     }
@@ -1039,12 +1051,16 @@ pub fn generate_codes_kv(
     // Seed the cache for the whole prefix in one prefill inference.
     let mut past_hidden = kv.prefill_prompt(&prompt.embeds)?;
     let t_prefix = tp0.elapsed().as_secs_f64() * 1e3;
+    let mut cb0_history: Vec<u32> = Vec::new();
     let mut cb0 = sample_cb0(
         tables.codec_head_logits(&past_hidden),
         sp.codec_eos,
         opts.min_new == 0,
         opts.temperature,
         opts.top_k,
+        opts.top_p,
+        opts.repetition_penalty,
+        &cb0_history,
         &mut rng,
     );
 
@@ -1055,6 +1071,7 @@ pub fn generate_codes_kv(
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
         }
+        cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
         let tm = Instant::now();
         let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
@@ -1082,6 +1099,9 @@ pub fn generate_codes_kv(
             s >= opts.min_new,
             opts.temperature,
             opts.top_k,
+            opts.top_p,
+            opts.repetition_penalty,
+            &cb0_history,
             &mut rng,
         );
     }
@@ -1118,12 +1138,16 @@ pub fn generate_codes_kv_streaming(
 
     kv.reset();
     let mut past_hidden = kv.prefill_prompt(&prompt.embeds)?;
+    let mut cb0_history: Vec<u32> = Vec::new();
     let mut cb0 = sample_cb0(
         tables.codec_head_logits(&past_hidden),
         sp.codec_eos,
         opts.min_new == 0,
         opts.temperature,
         opts.top_k,
+        opts.top_p,
+        opts.repetition_penalty,
+        &cb0_history,
         &mut rng,
     );
 
@@ -1134,6 +1158,7 @@ pub fn generate_codes_kv_streaming(
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
         }
+        cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
         let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
         frames.push(cb0);
@@ -1160,6 +1185,9 @@ pub fn generate_codes_kv_streaming(
             s >= opts.min_new,
             opts.temperature,
             opts.top_k,
+            opts.top_p,
+            opts.repetition_penalty,
+            &cb0_history,
             &mut rng,
         );
     }

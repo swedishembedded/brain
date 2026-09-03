@@ -28,7 +28,7 @@
 //!       dataset (e.g. `make data/tts`). Freezes the base; trains the attention
 //!       adapters only. See `qwen3tts::sft` for the aligned multi-codebook loss.
 
-use qwen3tts::{GenOpts, TtsPaths};
+use qwen3tts::{GenOpts, ResidualOpts, TtsPaths};
 
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     *i += 1;
@@ -222,7 +222,29 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             }
             "--temp" => opts.temperature = val(args, &mut i, "--temp").parse().unwrap_or(opts.temperature),
             "--top-k" => opts.top_k = val(args, &mut i, "--top-k").parse().unwrap_or(opts.top_k),
+            "--top-p" => opts.top_p = val(args, &mut i, "--top-p").parse().unwrap_or(opts.top_p),
+            "--repetition-penalty" => {
+                opts.repetition_penalty = val(args, &mut i, "--repetition-penalty").parse().unwrap_or(opts.repetition_penalty)
+            }
             "--seed" => opts.seed = val(args, &mut i, "--seed").parse().unwrap_or(opts.seed),
+            // Any `--residual-*` flag opts into independent MTP residual-codebook
+            // sampling (default: greedy, matching the reference's own default);
+            // unset residual knobs fall back to codebook-0's own temp/top-k/top-p.
+            "--residual-temp" => {
+                let (t, k, p) = (opts.temperature, opts.top_k, opts.top_p);
+                let ro = opts.residual.get_or_insert_with(|| ResidualOpts { temperature: t, top_k: k, top_p: p });
+                ro.temperature = val(args, &mut i, "--residual-temp").parse().unwrap_or(ro.temperature);
+            }
+            "--residual-top-k" => {
+                let (t, k, p) = (opts.temperature, opts.top_k, opts.top_p);
+                let ro = opts.residual.get_or_insert_with(|| ResidualOpts { temperature: t, top_k: k, top_p: p });
+                ro.top_k = val(args, &mut i, "--residual-top-k").parse().unwrap_or(ro.top_k);
+            }
+            "--residual-top-p" => {
+                let (t, k, p) = (opts.temperature, opts.top_k, opts.top_p);
+                let ro = opts.residual.get_or_insert_with(|| ResidualOpts { temperature: t, top_k: k, top_p: p });
+                ro.top_p = val(args, &mut i, "--residual-top-p").parse().unwrap_or(ro.top_p);
+            }
             // (`--no-cache` removed: the Talker now always uses the device-agnostic
             // KV-cache step(); select CPU vs GPU with `--device`.)
             "--text" => {

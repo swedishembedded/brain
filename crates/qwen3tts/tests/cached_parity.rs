@@ -93,6 +93,9 @@ fn cached_matches_cachefree() {
         top_k: 0,
         seed: 0,
         min_new: 2,
+        top_p: 0.0,
+        repetition_penalty: 1.0,
+        residual: None,
     };
 
     let gen = TalkerGen::load_on(gpu_core::testgpu::dev(qwen3tts::gen::PIPELINES), &TALKER, 16 + 32);
@@ -192,7 +195,8 @@ fn rms(x: &[f32]) -> f32 {
 
 /// End-to-end audio quality of the cached path: a short (24-frame) x-vector clone
 /// must produce real voice (rms ~0.09) close to the reference speaker (sim ~0.95).
-/// Writes /tmp/verify.wav. Gated as above. Set `TTS_PROFILE=1` for stage timers.
+/// Writes a verification wav to the OS temp directory. Gated as above. Set
+/// `TTS_PROFILE=1` for stage timers.
 #[test]
 fn cached_clone_audio_quality() {
         let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
@@ -218,6 +222,9 @@ fn cached_clone_audio_quality() {
         top_k: 0,
         seed: 0,
         min_new: 2,
+        top_p: 0.0,
+        repetition_penalty: 1.0,
+        residual: None,
     };
     // --- codec sanity: decode the PyTorch golden codes with our codec.safetensors ---
     if std::path::Path::new(&GOLD).exists() {
@@ -271,7 +278,7 @@ fn cached_clone_audio_quality() {
     let xv_gen = spk.embed_wav(&wav, 24000);
     let sim = cosine(&xvec, &xv_gen);
     eprintln!(
-        "VERIFY(greedy) /tmp/verify.wav: samples={}, rms={r:.4}, speaker-sim={sim:.4}",
+        "VERIFY(greedy) verify.wav: samples={}, rms={r:.4}, speaker-sim={sim:.4}",
         wav.len()
     );
 
@@ -283,6 +290,9 @@ fn cached_clone_audio_quality() {
         top_k: 50,
         seed: 0,
         min_new: 2,
+        top_p: 0.0,
+        repetition_penalty: 1.0,
+        residual: None,
     };
     let mut cpu_s = CpuTalker::load(&TALKER);
     let mut cpu_mtp_s = CpuMtp::load(&MTP);
