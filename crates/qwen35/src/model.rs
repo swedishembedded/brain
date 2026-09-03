@@ -2443,26 +2443,68 @@ impl Qwen35 {
     /// so a caller may freely mix rounds and single-token steps on one
     /// sequence. Gated by `tests/chunked_prefill.rs`.
     ///
-    /// Whole-model only (`shard.embed && shard.head`): the cross-stage
-    /// `input_override` seam `run_decode_step` carries is `[d_model]`-shaped
-    /// (one row), which cannot express a round's `[n, d_model]` boundary. A
-    /// pipeline-parallel chunked prefill needs a widened seam first - see this
-    /// crate's `int8_gguf_resident`, which still replays per token.
+    /// Whole-model only (`shard.embed && shard.head`), because that is the only
+    /// shape whose "the round's last row" return value means anything. A
+    /// PIPELINE-PARALLEL caller wants the same round through one stage, with
+    /// the `[n, d_model]` boundary block on both ends: that is
+    /// [`Self::prefill_chunk_stage`], and both funnel into the same
+    /// [`Self::run_prefill_chunk_stage`] body.
     pub(crate) fn run_prefill_chunk(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches) -> DeviceBuffer {
         let g = &self.gpu;
-        let c = &self.cfg;
-        let d = c.d_model;
+        let d = self.cfg.d_model;
         let n = tokens.len() as u32;
-        assert!(n > 0, "qwen35::run_prefill_chunk: empty chunk (no token to produce a hidden state from)");
         assert!(
             self.shard.embed && self.shard.head,
             "qwen35::run_prefill_chunk is whole-model only (this shard has embed={}, head={}) - see this function's own doc",
             self.shard.embed,
             self.shard.head
         );
+        let xn_final = self.run_prefill_chunk_stage(tokens, pos_start, caches, None);
+        // Only the LAST row is ever wanted (this round's next-token
+        // prediction, or the seam into the next round).
+        let last = g.storage(d as u64);
+        g.submit(&[], &[g.step(CONCAT_SPLIT, &[&xn_final, &last], &[1, n * d, d, (n - 1) * d, 1, 1], d)]);
+        last
+    }
+
+    /// [`Self::run_prefill_chunk`] for ONE PIPELINE STAGE - the chunked
+    /// sibling of [`Self::run_decode_step`], standing to it exactly as
+    /// `run_prefill_chunk` stands to a whole-model decode step. Same per-layer
+    /// GDN/GQA chunk math, same [`DecodeCaches`] state contract (see
+    /// `run_prefill_chunk`'s doc, which owns that contract for both), and the
+    /// same shard-awareness `run_decode_step` already has - only `self.shard`'s
+    /// layers run, the embedding gather happens on the embed stage only, the
+    /// final norm on the head stage only.
+    ///
+    /// What is new here is the SEAM WIDTH. `run_decode_step`'s cross-stage
+    /// `input_override` is `[d_model]`, one row, which cannot express a round's
+    /// boundary; this one is a whole `[n, d_model]` block on both ends:
+    /// * embed stage - `input_override` must be `None`; `tokens` are gathered
+    ///   through `tok.weight` as usual.
+    /// * non-embed stage - `input_override` must be `Some(x)` with
+    ///   `x.len() == n * d_model`, the previous stage's returned block in token
+    ///   order. `tokens` is then used only for its LENGTH and for the round's
+    ///   absolute positions; the ids themselves are unread.
+    ///
+    /// Returns `[n, d_model]`: the head stage's final-normed hidden states, or
+    /// a non-head stage's raw last-layer residual block (the next stage's
+    /// `input_override`, not a finished hidden state) - the same distinction
+    /// `run_decode_step` makes at `n = 1`.
+    pub(crate) fn run_prefill_chunk_stage(
+        &self,
+        tokens: &[u32],
+        pos_start: u32,
+        caches: &DecodeCaches,
+        input_override: Option<&[f32]>,
+    ) -> DeviceBuffer {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let n = tokens.len() as u32;
+        assert!(n > 0, "qwen35::run_prefill_chunk_stage: empty chunk (no token to produce a hidden state from)");
         assert!(
             pos_start + n <= caches.gqa_cap,
-            "qwen35::run_prefill_chunk: chunk ends at position {} but the KV cache holds {} rows",
+            "qwen35::run_prefill_chunk_stage: chunk ends at position {} but the KV cache holds {} rows",
             pos_start + n,
             caches.gqa_cap
         );
@@ -2470,14 +2512,26 @@ impl Qwen35 {
         // at construction; a chunk wider than that would write past it.
         assert!(
             self.cfg.lora.is_none() || n <= self.b * self.t,
-            "qwen35::run_prefill_chunk: a LoRA build's adapter scratch holds {} rows, chunk is {n}",
+            "qwen35::run_prefill_chunk_stage: a LoRA build's adapter scratch holds {} rows, chunk is {n}",
             self.b * self.t
         );
 
-        let tok_buf = g.storage(n as u64);
-        g.write(&tok_buf, tokens);
-        let mut res = g.storage((n * d) as u64);
-        g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, n], n * d)]);
+        let mut res = if self.shard.embed {
+            assert!(
+                input_override.is_none(),
+                "qwen35: run_prefill_chunk_stage got an input_override on the EMBED stage - it gathers `tokens` itself, so a caller supplying both is a wiring error"
+            );
+            let tok_buf = g.storage(n as u64);
+            g.write(&tok_buf, tokens);
+            let res = g.storage((n * d) as u64);
+            g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, n], n * d)]);
+            res
+        } else {
+            let x = input_override
+                .expect("qwen35: run_prefill_chunk_stage on a NON-EMBED stage needs the previous stage's residual block as `input_override` (this stage holds no `tok.weight`)");
+            assert_eq!(x.len(), (n * d) as usize, "qwen35: run_prefill_chunk_stage input_override must be the round's whole [n, d_model] block");
+            g.storage_init("qwen35.prefill.res_in", x)
+        };
 
         // Built ONCE per round, shared by every GQA layer in it: the round's
         // own M-RoPE table (absolute positions), its causal `seq_lens`, and
@@ -2536,13 +2590,36 @@ impl Qwen35 {
             g.flush();
         }
 
-        let xn_final = g.storage((n * d) as u64);
-        g.submit(&[], &[rms_step(g, &res, self.w("norm.weight"), &xn_final, d, n)]);
-        // Only the LAST row is ever wanted (this round's next-token
-        // prediction, or the seam into the next round).
-        let last = g.storage(d as u64);
-        g.submit(&[], &[g.step(CONCAT_SPLIT, &[&xn_final, &last], &[1, n * d, d, (n - 1) * d, 1, 1], d)]);
-        last
+        // Head epilogue (final norm): head stage only - `run_decode_step`'s own
+        // `shard.head` branch, at `n` rows. A non-head stage hands back its raw
+        // residual block for the next stage to pick up as `input_override`.
+        if self.shard.head {
+            let xn_final = g.storage((n * d) as u64);
+            g.submit(&[], &[rms_step(g, &res, self.w("norm.weight"), &xn_final, d, n)]);
+            xn_final
+        } else {
+            res
+        }
+    }
+
+    /// [`Self::run_prefill_chunk_stage`] staged to the HOST - the one call a
+    /// multi-stage CHUNKED prefill driver (`crate::int8_gguf_resident`) needs
+    /// per stage per round, and the exact counterpart of what
+    /// [`Self::decode_step_stage`] is for a single-token pass.
+    ///
+    /// Returns `[n * d_model]` in token order: this stage's boundary residual
+    /// block, ready to be handed to the next stage as its `input_override` (or,
+    /// on a head stage, already through the final `norm.weight`). The same
+    /// "no `lm_head` here, ever" rule [`Self::decode_step_stage`]'s doc
+    /// explains applies - at the real shape an fp32 head cannot be a device
+    /// buffer, so every sharded caller projects with
+    /// `crate::stream::head_logits_on` instead.
+    ///
+    /// One host round trip per stage per ROUND, where the per-token path pays
+    /// one per stage per TOKEN: that ratio is the point of the function.
+    pub(crate) fn prefill_chunk_stage(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> Vec<f32> {
+        let out = self.run_prefill_chunk_stage(tokens, pos_start, caches, input_override);
+        self.gpu.read(&out, tokens.len() * self.cfg.d_model as usize)
     }
 
     /// **Chunked prefill** of a whole prompt against THIS instance's own
@@ -3327,6 +3404,152 @@ mod tests {
         let shard = Shard { start: 16, end: 17, embed: false, head: false, gpu_index: Shard::ANY_GPU };
         let m = Qwen35::new_i8_shard(cfg.clone(), 1, cfg.block_size, &init, shard);
         println!("CHARGED={}", m.gpu.charged_bytes());
+    }
+
+    /// One PREFILL ROUND of ONE pipeline stage, driven by hand - the chunked
+    /// sibling of [`decode_stage`], with the widened `[n, d_model]` seam
+    /// exposed. Returns the whole `[n, d_model]` boundary block.
+    fn prefill_stage(m: &Qwen35, tokens: &[u32], pos: u32, input: Option<&[f32]>) -> Vec<f32> {
+        let caches = DecodeCaches {
+            gqa_kcache: &m.gqa_kcache,
+            gqa_vcache: &m.gqa_vcache,
+            gqa_cap: m.dec_cap,
+            gdn_state: &m.gdn_state,
+            gdn_hist: &m.gdn_hist,
+        };
+        m.prefill_chunk_stage(tokens, pos, &caches, input)
+    }
+
+    /// Retune the Gated-DeltaNet decay gate so the recurrent state actually
+    /// SURVIVES from token to token - `tests/chunked_prefill.rs`'s own
+    /// `slow_decay`, and see that file's doc for the measurement behind the
+    /// numbers: at `init_weights`' fresh-model values the per-token decay is
+    /// `~exp(-10)` and "did round 2 continue from round 1's state?" has no
+    /// observable answer.
+    fn slow_decay(cfg: &Qwen35Config, mut w: HashMap<String, Vec<f32>>) -> HashMap<String, Vec<f32>> {
+        for (name, numel) in cfg.param_list() {
+            if name.ends_with(".A_log") {
+                w.insert(name, vec![0.05f32.ln(); numel]);
+            } else if name.ends_with(".dt_bias") {
+                w.insert(name, vec![-1.0f32; numel]);
+            }
+        }
+        w
+    }
+
+    /// **The pipeline-parallel chunked prefill gate.** Two stages, a prompt
+    /// consumed in bounded ROUNDS through [`Qwen35::prefill_chunk_stage`],
+    /// must leave both stages in EXACTLY the decode state the one-token-at-a-
+    /// time replay of the same prompt through [`Qwen35::run_decode_step`]
+    /// leaves - proven the only way it can be, by CONTINUITY: several further
+    /// single-token steps after the prompt must produce the same hidden
+    /// states either way.
+    ///
+    /// This is the sharded counterpart of `tests/chunked_prefill.rs` (which
+    /// gates the same claim for a WHOLE-model `Qwen35`), and it exists
+    /// because the whole-model gate cannot reach any of what is new here: the
+    /// `[n, d_model]` cross-stage seam (a stage that must take its input from
+    /// `input_override` instead of embedding, and hand back its whole
+    /// last-layer residual block instead of one row or a final-normed one),
+    /// and a round whose GDN/GQA state must continue across BOTH a round
+    /// boundary and a card boundary. `crate::int8_gguf_resident` drives
+    /// exactly this seam on the real 27B checkpoint.
+    ///
+    /// The cut at layer 5 puts a GQA layer on BOTH sides (layers 3 and 7 at
+    /// `full_attention_interval = 4`) as well as GDN layers on both, so
+    /// neither stage is a degenerate single-layer-type case, and stage 1
+    /// carries the round's interior causal masking into a cache that every
+    /// later token reads.
+    ///
+    /// Tolerance: `1e-5`, for `tests/chunked_prefill.rs`' reasons exactly -
+    /// same kernels and weights, different dispatch shapes (an `n`-row chunk
+    /// selects different matmul/RMSNorm variants than the `n = 1` decode tape,
+    /// and the GDN recurrence runs `gdn_chunk_fwd`'s chunked-parallel form
+    /// rather than `gdn_recurrent_step`'s sequential one). Measured, not
+    /// guessed: 3.7e-9 for the correct implementation, and a stage-1 seam
+    /// deliberately broken to seed itself with zeros instead of
+    /// `input_override` moves the prompt's last hidden state by 1.86 - eight
+    /// orders of magnitude clear of the bound on both sides.
+    #[test]
+    fn two_shard_chunked_prefill_matches_token_by_token_replay() {
+        let cfg = Qwen35Config { n_layers: 8, ..Qwen35Config::tiny() };
+        let n_layers = cfg.n_layers as usize;
+        let cut = 5usize;
+        let types = cfg.layer_types();
+        assert_eq!(types[3], LayerType::Full, "the cut must leave a GQA layer UPSTREAM");
+        assert_eq!(types[7], LayerType::Full, "and another one DOWNSTREAM");
+        assert_eq!(types[cut - 1], LayerType::Linear, "and a GDN layer immediately upstream of the seam");
+
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = slow_decay(&cfg, crate::init::init_weights(&cfg, 7));
+        // `new_fp32_shard_src`, not `new_shard`: the latter builds a TRAINABLE
+        // stage, and a streaming/chunked GDN forward is inference-only
+        // (`model::gdn_mixer::gdn_mixer_stream_fwd` asserts it saves no
+        // backward history). Every real caller of this seam is inference too.
+        let stage0 =
+            Qwen35::new_fp32_shard_src(cfg.clone(), 1, t, &init, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: Shard::ANY_GPU });
+        let stage1 = Qwen35::new_fp32_shard_src(
+            cfg.clone(),
+            1,
+            t,
+            &init,
+            Shard { start: cut, end: n_layers, embed: false, head: true, gpu_index: Shard::ANY_GPU },
+        );
+
+        // 14 prompt tokens at chunk 4 is 4+4+4+2 - several rounds with a
+        // ragged last one, so every round after the first must continue from
+        // the state the previous one left rather than from zero.
+        let prompt: Vec<u32> = (0..14).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        let tail: Vec<u32> = (0..3).map(|i| (i * 7 + 1) % cfg.vocab).collect();
+        let chunk = 4usize;
+        assert!(prompt.len() as u32 + tail.len() as u32 <= t, "the whole run must fit one instance's decode capacity");
+
+        // Reference: the existing one-token-per-pass, stage-by-stage replay -
+        // exactly what `int8_gguf_resident::stack_step` drives.
+        let step_both = |tok: u32, pos: u32| {
+            let boundary = decode_stage(&stage0, tok, pos, None);
+            assert_eq!(boundary.len(), d);
+            // `token_id` is unused on a non-embed stage. Feeding stage 1 a
+            // DELIBERATELY WRONG token makes that a checked fact.
+            decode_stage(&stage1, (tok + 1) % cfg.vocab, pos, Some(&boundary))
+        };
+        stage0.reset_decode_cache();
+        stage1.reset_decode_cache();
+        let mut want_last = Vec::new();
+        for (i, &tok) in prompt.iter().enumerate() {
+            want_last = step_both(tok, i as u32);
+        }
+        let want_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| step_both(tok, (prompt.len() + i) as u32)).collect();
+
+        // Under test: the same prompt in ROUNDS, then the SAME per-token
+        // continuation.
+        stage0.reset_decode_cache();
+        stage1.reset_decode_cache();
+        let mut got_last = Vec::new();
+        let mut pos = 0u32;
+        for round in prompt.chunks(chunk) {
+            let n = round.len();
+            let boundary = prefill_stage(&stage0, round, pos, None);
+            assert_eq!(boundary.len(), n * d, "a non-head stage must hand back its whole [n, d_model] residual block");
+            assert!(boundary.iter().all(|x| x.is_finite()), "stage 0 emitted a non-finite boundary residual");
+            assert!(boundary.iter().any(|x| x.abs() > 1e-6), "stage 0's boundary residual is all ~0 - the seam would carry no information");
+            let out = prefill_stage(&stage1, round, pos, Some(&boundary));
+            assert_eq!(out.len(), n * d);
+            got_last = out[(n - 1) * d..].to_vec();
+            pos += n as u32;
+        }
+        let got_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| step_both(tok, (prompt.len() + i) as u32)).collect();
+
+        let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        let mut worst = maxabs(&got_last, &want_last);
+        assert!(worst < 1e-5, "sharded chunked prefill: prompt's last hidden state maxabs={worst}");
+        for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
+            let err = maxabs(got, want);
+            worst = worst.max(err);
+            assert!(err < 1e-5, "continuation token {i} maxabs={err} (the chunked prefill left the two stages' decode state wrong)");
+        }
+        println!("two_shard_chunked_prefill: worst maxabs over prompt-last + {} continuation steps = {worst:e}", tail.len());
     }
 
     #[test]

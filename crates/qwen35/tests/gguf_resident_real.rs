@@ -41,6 +41,12 @@ use residency::{Device, ResidentModel};
 /// the smoke test only generates a handful of tokens.
 const CAP: u32 = 512;
 
+/// `prompt + max_new` capacity for the long-context prefill measurement
+/// ([`prefill_throughput_at_a_real_long_context`]), which needs room for a
+/// ~1550-token prompt. Charged into the placement exactly like [`CAP`], so it
+/// is kept as small as that measurement allows.
+const LONG_CAP: u32 = 2048;
+
 /// Bytes kept free per card - `brain serve`'s own default `--reserve-gb 2`,
 /// so what these tests plan against is what a real deployment plans against.
 const RESERVE: u64 = 2 << 30;
@@ -482,6 +488,100 @@ fn decode_throughput_at_a_real_long_context() {
     }
     assert!(completion > 0, "the model must produce at least one token even at long context");
     assert!(!text.trim().is_empty(), "the generated text must not be empty at long context");
+}
+
+/// A ~1550-token raw prompt that ENDS on the same factual cue
+/// [`the_two_card_stack_continues_a_factual_prompt_correctly`] uses, so the
+/// same "did it answer Paris?" question can be asked at a length that takes
+/// SEVERAL prefill rounds instead of one.
+///
+/// The filler is deliberately on-topic (a repeated paragraph about France)
+/// rather than lorem ipsum: this is a real checkpoint, and a gate that
+/// demands a specific continuation after 1500 tokens of unrelated noise would
+/// be testing the model's temperament, not this crate's prefill.
+fn long_factual_prompt() -> String {
+    let para = "France is a country in Western Europe. Its territory stretches from the Rhine to the Atlantic \
+                Ocean, and its people speak French. The country is known for its cuisine, its literature and \
+                its long history. Many travellers visit each year to see its museums, its cathedrals and its \
+                countryside. The Seine flows through the north of the country and past its largest urban area. ";
+    let mut s = String::new();
+    // ~66 tokens per paragraph on this tokenizer; 23 repeats lands near 1550.
+    for _ in 0..23 {
+        s.push_str(para);
+    }
+    s.push_str("The capital city of France is");
+    s
+}
+
+/// **The prefill measurement the chunked-prefill work is judged by**, and a
+/// real-weight correctness gate for it in the same run.
+///
+/// A REAL ~1550-token prompt (see [`long_factual_prompt`]) through the REAL
+/// pipeline-parallel INT8 stack, with `max_new = 4` so nearly the whole wall
+/// clock is prompt replay, and the instance's own `prefill_seconds`/
+/// `prefill_tok_per_s` metrics reported. It PRINTS rather than asserts a
+/// rate: what a P40 pair does per second is not this repo's to control, and a
+/// hard floor here would go red on a busier box for reasons that have nothing
+/// to do with the code.
+///
+/// What it DOES assert is what the code is responsible for. The prompt is
+/// long enough to need several rounds of `MAX_PREFILL_TOKENS`, and it still
+/// has to be answered correctly: a chunked replay that drops the ragged last
+/// round, mis-masks a round's interior, writes KV rows at the wrong offset or
+/// loses the GDN recurrent state across a round boundary all produce a
+/// continuation that is not "Paris". At tiny scale the same claim is gated
+/// bit-for-bit by `qwen35::model`'s own
+/// `two_shard_chunked_prefill_matches_token_by_token_replay`; this is that
+/// claim on 27B of real weights.
+///
+/// Measured on this box (2x Tesla P40, INT8 tier, Q4_K_M source file, 1731
+/// prompt tokens): **262.8 s / 6.6 tok/s** with the old one-token-per-pass
+/// replay, **26.6 s / 65.0 tok/s** once the prompt is consumed in rounds -
+/// 9.9x. See `int8_gguf_resident::MAX_PREFILL_TOKENS` for the round-size
+/// sweep behind that second number.
+#[test]
+fn prefill_throughput_at_a_real_long_context() {
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.len() < 2 {
+        brain_testutil::skip_unavailable(&format!(
+            "this gate measures the PIPELINE-PARALLEL prefill path; this box has {} usable GPU(s)",
+            devices.len()
+        ));
+        return;
+    }
+    let r = Qwen35GgufResident::new(path, devices, LONG_CAP, TierPolicy::uniform(Dtype::I8));
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    assert!(placed.len() >= 2, "the INT8 27B stack must span more than one card - this gate exists to measure the seam");
+
+    let t0 = Instant::now();
+    let mut inst = r.activate_multi(&key, &placed).expect("activate the real checkpoint across the real cards");
+    println!("  cold load ({} stage(s)): {:.1} s", placed.len(), t0.elapsed().as_secs_f64());
+
+    let inv = capability::Invocation::new()
+        .set("prompt", serde_json::json!(long_factual_prompt()))
+        .set("chat", serde_json::json!(false))
+        .set("max_new", serde_json::json!(4))
+        .set("temp", serde_json::json!(0.0));
+
+    let t1 = Instant::now();
+    let out = inst.run("generate", &inv, &mut |_| {}).expect("generate on the real long prompt");
+    println!("  whole call: {:.1} s", t1.elapsed().as_secs_f64());
+    let prompt_tokens = out.outputs["prompt_tokens"].as_i64().unwrap_or(0);
+    for (k, v) in inst.metrics() {
+        println!("  metric {k:<20} {v}");
+    }
+    let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
+    println!("  long-context greedy continuation: {text:?}");
+
+    // Several rounds of `int8_gguf_resident::MAX_PREFILL_TOKENS` (128), with
+    // a ragged last one - the case a single-round prompt cannot reach.
+    assert!(prompt_tokens > 3 * 128, "this gate needs a prompt spanning several prefill rounds, got {prompt_tokens} tokens");
+    assert!(
+        text.contains("Paris"),
+        "after {prompt_tokens} prompt tokens the stack must still continue \"The capital city of France is\" with Paris, got {text:?}"
+    );
 }
 
 /// The cost model at the tested capacity, printed alongside the config the

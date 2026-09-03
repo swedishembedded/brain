@@ -40,6 +40,12 @@
 //!   `crate::model`'s own `two_shard_int8_decode_matches_the_whole_shard_model`,
 //!   which proves the two-stage composition is bit-equal to the whole-shard
 //!   model.
+//! * **Prefill** - `Qwen35::prefill_chunk_stage` per stage per ROUND, the same
+//!   seam widened to a whole round's `[n, d_model]` boundary block (2.6 MB at
+//!   this resident's `n = 128`). Gated at tiny scale by `crate::model`'s own
+//!   `two_shard_chunked_prefill_matches_token_by_token_replay`, which proves a
+//!   chunked replay leaves both stages in exactly the decode state the
+//!   per-token replay leaves.
 //! * **Head epilogue** - `crate::stream::head_logits_on`, the same final-norm
 //!   + int8-`lm_head` projection the streaming real-weight path already uses.
 //!
@@ -78,18 +84,26 @@
 //!   implies a whole shard (the head needs `res[n_layers]` and the shared
 //!   `lm_head`), which a multi-card split is not by construction.
 //!   Self-speculative decode stays a single-GPU concern.
-//! * **Per-token prefill.** The prompt is replayed one token at a time
-//!   through the same decode path. [`crate::serve::Engine::prefill`] no
-//!   longer is (M25: it consumes the prompt in chunks via
-//!   `Qwen35::run_prefill_chunk`), but that primitive is whole-model only and
-//!   asserts so: this resident is PIPELINE-PARALLEL, and the cross-stage seam
-//!   it hands one stage's output to the next through
-//!   (`run_decode_step`'s `input_override`) is `[d_model]` - one row. A
-//!   chunked resident needs that seam widened to a whole round's
-//!   `[n, d_model]` boundary residual, plus the `t`-sized per-stage buffers
-//!   that implies on EVERY card. Worth doing (this is the REAL-weight path,
-//!   so it is where a 20x prefill speedup is worth the most) and not done
-//!   here.
+//! * **No flash-attention prefill.** A prefill round's GQA scratch is
+//!   `[chunk, n_heads, pos+chunk]` twice over, the one cost that does not
+//!   shrink with the dispatch count, and it is why [`MAX_PREFILL_TOKENS`] is a
+//!   bounded round size rather than "the whole prompt at once". Growing this
+//!   resident into genuinely long contexts needs a flash-attention prefill
+//!   kernel, not a bigger constant - `paged_flash_prefill.wgsl` is that
+//!   kernel, but its tiles cap `head_dim` at 128 and this model's is 256.
+//!
+//!   This bullet used to read "**Per-token prefill.** The prompt is replayed
+//!   one token at a time through the same decode path... [that] needs the
+//!   seam widened to a whole round's `[n, d_model]` boundary residual...
+//!   Worth doing and not done here." It is done: `Qwen35::
+//!   run_prefill_chunk_stage` is that widened seam (`run_prefill_chunk`, the
+//!   whole-model M25 primitive `crate::serve::Engine` drives, is now a thin
+//!   wrapper over it), and [`Qwen35GgufInstance::stack_prefill_chunk`] drives
+//!   it round by round across every card. Measured on 2x Tesla P40 at a real
+//!   1731-token prompt: 262.8 s (6.6 tok/s) before, 26.6 s (65.0 tok/s)
+//!   after - 9.9x. What it did NOT need, contrary to that note, was `t`-sized
+//!   per-stage buffers on every card: every buffer a round touches is
+//!   allocated per call from `n`, so the stages stay built at `b = t = 1`.
 //! * **One sequence per dispatch.** Every stage is built at `b = t = 1`, so
 //!   `run_batch` is the serial default - see its own doc.
 //! * **Text only.** `crate::vl`'s vision front-end is not spliced in here.
@@ -132,6 +146,41 @@ pub const GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
 /// Default per-sequence `prompt + max_new` cap (also this resident's KV/GDN
 /// cache capacity, since every sequence gets the whole cache).
 const DEFAULT_CTX: u32 = 2048;
+
+/// How many prompt tokens [`Qwen35GgufInstance::generate`] pushes through the
+/// whole pipeline per round.
+///
+/// The upside is `crate::serve`'s and applies here twice over: a round
+/// amortises each stage's per-layer dispatch overhead over `n` rows AND
+/// replaces `n` host round trips per stage (`Qwen35::decode_step_stage` reads
+/// its result back every call, and there are `n_stages` of those per token)
+/// with one.
+///
+/// **HALF `crate::serve::Engine`'s 256, and measured on this model rather
+/// than inherited from it.** A round's transients are not just its GQA
+/// scratch: every intermediate a layer allocates lives until something drains
+/// the queue, and a round drains only at its terminal readback - so a stage
+/// holds ~32 layers' worth at once, at the real 27B widths (`d_model` 5120,
+/// `intermediate_size` 17408, `conv_dim` 10240). Measured on 2x Tesla P40,
+/// 1731-token prompt, `prefill_seconds` and peak card occupancy from
+/// `nvidia-smi`:
+///
+/// | chunk | prefill | tok/s | peak VRAM |
+/// |-------|---------|-------|-----------|
+/// |    64 |  36.5 s |  47.4 |  16.2 GiB |
+/// |   128 |  26.6 s |  65.0 |  17.8 GiB |
+/// |   192 |  26.4 s |  65.4 |  20.3 GiB |
+/// |   256 |     OOM |     - |  (>24 GiB)|
+///
+/// 128 is where the curve has already flattened - 192 buys 0.6% for 2.5 GiB -
+/// and 256 does not run at all on a 24 GiB card. Halving it again would cost
+/// a third of the speedup, so this is a real optimum and not a safety margin.
+///
+/// One thing that is NOT a consideration here and is in `crate::serve`: the
+/// per-stage buffers a round needs are all allocated per call from `n`
+/// (`Qwen35::run_prefill_chunk_stage` sizes every one of them), so a stage
+/// built at `b = t = 1` carries no FIXED cost for this at all.
+const MAX_PREFILL_TOKENS: u32 = 128;
 
 // ------------------------------------------------------------ byte accounting
 
@@ -685,19 +734,20 @@ pub struct Qwen35GgufInstance {
     /// stage was built with).
     cap: u32,
     /// The last [`Self::generate`] call's real timings, surfaced through
-    /// [`Instance::metrics`]. Prefill and decode are the same primitive here
-    /// (one token per pass), so the ONLY way to tell how much of a request's
-    /// wall clock was prompt replay versus new tokens is to time them
-    /// separately - and that ratio is exactly what decides whether a batched
-    /// prefill is worth building next. `Cell`, because `metrics` takes
-    /// `&self`; an `Instance` is owned by one worker thread at a time.
+    /// [`Instance::metrics`]. Prefill and decode are now genuinely different
+    /// primitives (a bounded ROUND of tokens per pipeline pass versus one
+    /// token per pass), and timing them separately is the only way to see
+    /// either: a single tok/s figure over a whole request averages two rates
+    /// that differ by more than an order of magnitude, and it was exactly this
+    /// split that made the per-token prompt replay's real cost visible.
+    /// `Cell`, because `metrics` takes `&self`; an `Instance` is owned by one
+    /// worker thread at a time.
     last: Cell<Timings>,
     /// Why the last [`Self::generate`] loop ended - `"eos"`, `"length"` or
     /// `"caller"` (a stop string / cancellation seen by the streamer). Also
-    /// reported through [`Instance::metrics`]: with one primitive serving both
-    /// prefill and decode, "it produced 4 tokens" is ambiguous between a model
-    /// that chose to stop and a loop that gave up, and those need different
-    /// investigations.
+    /// reported through [`Instance::metrics`]: "it produced 4 tokens" is
+    /// ambiguous between a model that chose to stop and a loop that gave up,
+    /// and those need different investigations.
     stop: Cell<&'static str>,
 }
 
@@ -716,6 +766,25 @@ impl Qwen35GgufInstance {
         self.mg
             .tensor_range(&self.embed.name, t as usize * self.embed.d, self.embed.d)
             .ok_or_else(|| format!("{MODEL}: token id {t} is outside '{}'", self.embed.name))?
+    }
+
+    /// A whole prefill round's embeddings, `[n, d_model]` in token order -
+    /// [`Self::embed_row`]'s chunked form, and stage 0's `input_override` for
+    /// [`Qwen35::prefill_chunk_stage`].
+    ///
+    /// One [`MmapGguf::tensor_range`] call per row and no more: an arbitrary
+    /// set of token ids names an arbitrary set of ROWS, which are not
+    /// contiguous in the `[vocab, d_model]` table, so there is no wider range
+    /// to ask for. What the chunk actually saves is downstream - one host
+    /// round trip per stage per ROUND rather than per token - and the gather
+    /// itself stays at `embed_row`'s cost, one row's quant blocks at a time,
+    /// never the 5.09 GB table.
+    fn embed_rows(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        let mut out = Vec::with_capacity(tokens.len() * self.embed.d);
+        for &t in tokens {
+            out.extend_from_slice(&self.embed_row(t)?);
+        }
+        Ok(out)
     }
 
     /// One token through EVERY stage in order, then the head - returning
@@ -741,6 +810,46 @@ impl Qwen35GgufInstance {
         let last = self.shards.last().expect("a plan always has at least one stage");
         let logits = crate::stream::head_logits_on(&last.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &carry);
         self.debug_step(pos, &per_stage_rms, &logits);
+        Ok(logits)
+    }
+
+    /// **One PREFILL ROUND through every stage in order**, then the head -
+    /// [`Self::stack_step`]'s multi-token sibling, and the reason a real
+    /// prompt no longer costs one whole pipeline pass per token.
+    ///
+    /// `tokens` are `n` consecutive prompt tokens starting at absolute
+    /// position `pos_start`. The boundary residual crosses each card boundary
+    /// host-staged exactly as in `stack_step`, but as the round's whole
+    /// `[n, d_model]` block rather than one `[d_model]` row - so the host
+    /// round trips per round are `n_stages`, not `n_stages * n`, and each
+    /// stage issues one dispatch shape per layer instead of `n` of them.
+    ///
+    /// Only the LAST row is projected to logits: the rest of the block exists
+    /// to have been computed (its K/V is in the cache, its GDN state is
+    /// threaded), not to be sampled from. Returns that last token's `[vocab]`
+    /// logits, so a caller can treat a round exactly like the last
+    /// `stack_step` of the tokens it consumed.
+    fn stack_prefill_chunk(&self, tokens: &[u32], pos_start: u32) -> Result<Vec<f32>, String> {
+        let d = self.cfg.d_model as usize;
+        let n = tokens.len();
+        assert!(n > 0, "{MODEL}: stack_prefill_chunk on an empty round");
+        let mut carry = self.embed_rows(tokens)?;
+        let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
+        let mut per_stage_rms = Vec::new();
+        for s in &self.shards {
+            let caches = s.caches.view();
+            carry = s.qwen35.prefill_chunk_stage(tokens, pos_start, &caches, Some(&carry));
+            if debug {
+                // The round's LAST row, so the dump is directly comparable to
+                // the per-token one `stack_step` prints.
+                let last = &carry[(n - 1) * d..];
+                per_stage_rms.push((last.iter().map(|v| v * v).sum::<f32>() / last.len() as f32).sqrt());
+            }
+        }
+        let last = self.shards.last().expect("a plan always has at least one stage");
+        let logits =
+            crate::stream::head_logits_on(&last.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &carry[(n - 1) * d..]);
+        self.debug_step(pos_start + n as u32 - 1, &per_stage_rms, &logits);
         Ok(logits)
     }
 
@@ -770,10 +879,19 @@ impl Qwen35GgufInstance {
         eprintln!("{MODEL}: pos {pos}: stage residual rms {per_stage_rms:?} | top5 {}", shown.join(" "));
     }
 
-    /// Real generation: per-token prefill of `prompt`, then greedy/sampled
-    /// decode until `max_new` tokens or a stop id. `on_token` sees every
-    /// generated id as it is produced (streaming), and returning `true` from
-    /// it stops early.
+    /// Real generation: CHUNKED prefill of `prompt` (bounded rounds of
+    /// [`MAX_PREFILL_TOKENS`] through [`Self::stack_prefill_chunk`], each
+    /// continuing from the state the previous one left), then greedy/sampled
+    /// per-token decode until `max_new` tokens or a stop id. `on_token` sees
+    /// every generated id as it is produced (streaming), and returning `true`
+    /// from it stops early.
+    ///
+    /// The two phases are deliberately different primitives: prefill knows all
+    /// its tokens up front and so can fill a round, decode does not and cannot.
+    /// The state each leaves is the same either way - `Qwen35::
+    /// run_prefill_chunk_stage`'s own contract - so the first decode step
+    /// continues from a chunked prefill exactly as it would from a
+    /// token-by-token one.
     ///
     /// Returns the GENERATED ids only (prompt excluded) - the same contract
     /// `crate::sample::generate_kv` has.
@@ -802,9 +920,9 @@ impl Qwen35GgufInstance {
         let mut pos = 0u32;
         let mut logits = Vec::new();
         let t0 = std::time::Instant::now();
-        for &t in prompt {
-            logits = self.stack_step(t, pos)?;
-            pos += 1;
+        for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
+            logits = self.stack_prefill_chunk(round, pos)?;
+            pos += round.len() as u32;
         }
         let prefill_s = t0.elapsed().as_secs_f64();
         let t1 = std::time::Instant::now();
@@ -888,17 +1006,19 @@ impl Qwen35GgufInstance {
         assert!(need <= self.cap as u64, "profile_decode: prompt ({}) + 2*{steps} profiled steps = {need} exceeds capacity {}", prompt.len(), self.cap);
         assert!(!prompt.is_empty(), "profile_decode: needs a non-empty prompt to establish decode state");
 
-        // Warm-up: real prompt replay. Establishes the GDN recurrent state and
-        // the GQA cache, compiles every pipeline, and leaves `pos` where a real
-        // decode step would find it.
+        // Warm-up: real prompt replay, through the production CHUNKED prefill
+        // path. Establishes the GDN recurrent state and the GQA cache, compiles
+        // every pipeline, and leaves `pos` where a real decode step would find
+        // it. The decode tape's own pipelines are compiled by the first
+        // profiled step instead, which is why the production region below is
+        // measured over `steps` passes rather than one.
         self.reset();
         let mut pos = 0u32;
-        let mut last = prompt[0];
-        for &t in prompt {
-            self.stack_step(t, pos).expect("profile_decode warm-up");
-            last = t;
-            pos += 1;
+        for round in prompt.chunks(MAX_PREFILL_TOKENS as usize) {
+            self.stack_prefill_chunk(round, pos).expect("profile_decode warm-up");
+            pos += round.len() as u32;
         }
+        let last = prompt[prompt.len() - 1];
         self.poll_wait();
 
         // Region 1: the production path. The token fed back is `last` rather
