@@ -115,6 +115,13 @@ mod kname {
     pub const MATMUL_I8_DYN: &str = "matmul_i8_dyn";
     pub const MATMUL_I8_GEMV: &str = "matmul_i8_gemv";
     pub const MATMUL_Q4_DYN: &str = "matmul_q4_dyn";
+    /// M5.5's 128x128 register-tiled Q4 GEMM (`matmul_q4_dyn.wgsl`'s naive
+    /// one-thread-per-output sibling, mirroring `matmul_i8_dyn`'s own tiled
+    /// shape) - bound by [`Ops::bind`]'s `(PackedInt8, Dtype::Q4)` arm in
+    /// place of [`MATMUL_Q4_DYN`] since the kernel-performance ledger's M5.5
+    /// entry closed it as "a clean win at every measured shape" (2.02x at
+    /// m=32, rising to 12.56x at m=2048) and bit-identical to it.
+    pub const MATMUL_Q4_DYN_REG: &str = "matmul_q4_dyn_reg";
     pub const MATMUL_Q4_GEMV: &str = "matmul_q4_gemv";
     pub const MAX_ABS_ROW: &str = "max_abs_row";
     pub const QUANT_PACK: &str = "quant_pack";
@@ -227,6 +234,7 @@ mod kname {
         MATMUL_I8_DYN,
         MATMUL_I8_GEMV,
         MATMUL_Q4_DYN,
+        MATMUL_Q4_DYN_REG,
         MATMUL_Q4_GEMV,
         MAX_ABS_ROW,
         QUANT_PACK,
@@ -365,6 +373,7 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
             ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
             ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
             ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
+            ("matmul_q4_dyn_reg", kernels::MATMUL_Q4_DYN_REG),
             ("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV),
             ("max_abs_row", kernels::MAX_ABS_ROW),
             ("quant_pack", kernels::QUANT_PACK),
@@ -1063,7 +1072,12 @@ impl Ops {
             (WorkgroupPerOutput, Dtype::I8, 16) => kname::MATMUL_I8_GEMV_G16,
             (PackedInt8, Dtype::I8, 16) => kname::MATMUL_I8_DYN_G16,
             (WorkgroupPerOutput, Dtype::Q4, 32) => kname::MATMUL_Q4_GEMV,
-            (PackedInt8, Dtype::Q4, 32) => kname::MATMUL_Q4_DYN,
+            // M5.5's register-tiled `matmul_q4_dyn_reg` (128x128 tile,
+            // mirroring `matmul_i8_dyn`'s own shape) replaces the naive
+            // `matmul_q4_dyn` here - see `kname::MATMUL_Q4_DYN_REG`'s own
+            // doc comment and `Ops::threads`'s doc comment for the dispatch-
+            // geometry consequence of this switch.
+            (PackedInt8, Dtype::Q4, 32) => kname::MATMUL_Q4_DYN_REG,
             (WorkgroupPerOutput, Dtype::Q4K, 32) => kname::MATMUL_KQ_GEMV_4,
             (PackedInt8, Dtype::Q4K, 32) => kname::MATMUL_KQ_DYN_4,
             (WorkgroupPerOutput, Dtype::Q8K, 32) => kname::MATMUL_KQ_GEMV_8,
@@ -1080,32 +1094,30 @@ impl Ops {
     /// formulas `model::dispatch::mm_rows_off`/`mm8_rows_off` and
     /// `model::block::pick_gemm`/`gemm_variant` already use per variant
     /// family, EXCEPT `PackedInt8`, which - unlike every other variant here -
-    /// is not one fixed dispatch geometry: `matmul_i8_dyn.wgsl` is
+    /// is not one fixed dispatch geometry: `matmul_i8_dyn.wgsl` and (since
+    /// M5.5 was wired into [`Ops::bind`]) `matmul_q4_dyn_reg.wgsl` are BOTH
     /// register-tiled (128×128 tile, 256-thread workgroup, `workgroup_id`-
-    /// indexed - its own header: "Layout mirrors matmul_reg3"), but
-    /// `matmul_q4_dyn.wgsl` is deliberately the NAIVE one-thread-per-output
-    /// tier (its own header: "the correct-first, non-tiled q4 GEMM... A
-    /// register-tiled `matmul_q4_dyn` ... is the documented follow-on
-    /// optimization... not attempted here"). Same `KernelVariant`, two
-    /// physically different kernels - the dispatch count has to follow the
-    /// REAL kernel [`Ops::bind`] chose, not the logical variant name alone.
-    /// Using the tile formula for `matmul_q4_dyn` under-dispatches it
-    /// (leaves real output elements never written); using `m*n` for
-    /// `matmul_i8_dyn` merely over-dispatches (extra workgroups whose tile
-    /// index falls outside the real grid are harmless) - caught in the
-    /// direction that actually corrupts output by this façade's own parity
-    /// test.
+    /// indexed - `matmul_q4_dyn_reg.wgsl`'s own header: "mirroring
+    /// `matmul_i8_dyn`'s shape"), and need the SAME tile dispatch count; only
+    /// `matmul_q4_gemv`'s `WorkgroupPerOutput` sibling and the two K-quant
+    /// `WorkgroupPerOutput` kernels stay outside this arm. The dispatch count
+    /// has to follow the REAL kernel [`Ops::bind`] chose, not the logical
+    /// variant name alone - using `m*n` for a register-tiled kernel
+    /// under-dispatches it (leaves real output elements never written);
+    /// using the tile formula for a one-thread-per-output kernel merely
+    /// over-dispatches (extra threads whose output index falls outside the
+    /// real grid are harmless) - caught in the direction that actually
+    /// corrupts output by this façade's own parity test.
     ///
     /// `Dtype::Q4K`/`Dtype::Q8K` MUST land in the `tile()` arm alongside
-    /// `Dtype::I8`, not the `_ => m*n` fallback: `matmul_kq_dyn.wgsl` is
+    /// `Dtype::I8`/`Dtype::Q4`, not a `m*n` fallback: `matmul_kq_dyn.wgsl` is
     /// `matmul_i8_dyn`'s own 128×128 register-tiled sibling (see that
     /// kernel's own header - "Register-block ownership, bank padding,
     /// software pipelining and the epilogue are copied from `matmul_i8_dyn`
     /// unchanged"), so it needs the SAME dispatch geometry `Dtype::I8`
-    /// already gets, not `Dtype::Q4`'s naive one-thread-per-output count -
-    /// getting this wrong under-dispatches the tile grid and leaves real
-    /// output elements never written (silent output corruption, not a
-    /// crash - see `kq_dtypes_dispatch_the_tiled_formula_not_m_times_n`
+    /// already gets - getting this wrong under-dispatches the tile grid and
+    /// leaves real output elements never written (silent output corruption,
+    /// not a crash - see `kq_dtypes_dispatch_the_tiled_formula_not_m_times_n`
     /// below, added specifically to catch a regression here).
     fn threads(v: KernelVariant, dt: Dtype, m: u32, n: u32) -> u32 {
         let tile = || m.div_ceil(128) * n.div_ceil(128) * 256;
@@ -1114,8 +1126,15 @@ impl Ops {
             KernelVariant::WorkgroupPerOutput => n * 64,
             KernelVariant::RegisterTiled => tile(),
             KernelVariant::PackedInt8 => match dt {
-                Dtype::I8 | Dtype::Q4K | Dtype::Q8K => tile(),
-                _ => m * n,
+                Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K => tile(),
+                // `select::candidates` never offers `PackedInt8` for an
+                // F32-family dtype (see this method's own doc comment) -
+                // this arm is unreachable in practice, kept only so the
+                // match stays exhaustive over `Dtype` without silently
+                // absorbing a real future `PackedInt8` dtype into the wrong
+                // formula the way the pre-M5.5 blanket `_ => m*n` did for
+                // `Dtype::Q4`.
+                Dtype::F32 | Dtype::BF16 | Dtype::F16 => m * n,
             },
             KernelVariant::SplitReduction => {
                 unreachable!("Op::MatMul's candidates() never returns SplitReduction")
@@ -1638,8 +1657,10 @@ impl Ops {
     /// a `--explain` flag) reads it off the one selection path instead of
     /// re-deriving the policy and drifting from it. Returning the kernel name
     /// rather than the [`KernelVariant`] is deliberate: the variant alone is
-    /// ambiguous (`PackedInt8` is `matmul_i8_dyn` for `I8` but the naive
-    /// `matmul_q4_dyn` for `Q4`), and the name is what a reader can grep for.
+    /// ambiguous (`PackedInt8` is `matmul_i8_dyn` for `I8` but
+    /// `matmul_q4_dyn_reg` for `Q4` - two different physical kernel files
+    /// behind the same variant, see [`Ops::threads`]'s doc comment), and the
+    /// name is what a reader can grep for.
     #[must_use]
     pub fn matmul_kernel(&self, w: &Weight, m: u32) -> &'static str {
         let shape = OpShape { m, n: w.n(), k: w.k(), dtype: w.dtype() };
@@ -1650,6 +1671,26 @@ impl Ops {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Ops::bind`'s `(PackedInt8, Dtype::Q4)` arm must resolve to the M5.5
+    /// register-tiled kernel, `matmul_q4_dyn_reg` - NOT the naive
+    /// one-thread-per-output `matmul_q4_dyn` this arm used to bind (see this
+    /// module's own kernel-performance ledger entry: 2.02x faster at m=32,
+    /// rising to 12.56x at m=2048, and bit-identical to `matmul_q4_dyn`,
+    /// `crates/model/tests/matmul_q4_gemm.rs::
+    /// matmul_q4_dyn_reg_matches_fp32_oracle_and_is_bit_identical_to_dyn`).
+    /// The sibling `(PackedInt8, Dtype::I8)` arm already binds its own tiled
+    /// kernel (`matmul_i8_dyn`); this pins that `Q4` now gets the same
+    /// treatment instead of staying the one dtype still on the naive tier.
+    #[test]
+    fn bind_packed_int8_q4_dispatches_the_register_tiled_kernel_not_the_naive_one() {
+        assert_eq!(
+            Ops::bind(KernelVariant::PackedInt8, Dtype::Q4, 32),
+            kname::MATMUL_Q4_DYN_REG,
+            "Ops::bind(PackedInt8, Q4) must dispatch matmul_q4_dyn_reg (M5.5's register-tiled kernel), \
+             not the naive matmul_q4_dyn"
+        );
+    }
 
     /// [`Ops::with_selector`]'s whole reason to exist: `Ops::matmul` must
     /// consult the INJECTED selector, not the fixed internal
@@ -1872,31 +1913,29 @@ mod tests {
     }
 
     /// *** The specific bug `Ops::threads`'s own doc comment warns about ***:
-    /// `Weight::KQuant`'s affine dtypes MUST dispatch the TILED formula
-    /// (`matmul_kq_dyn` is a 128x128 register-tiled kernel, `matmul_i8_dyn`'s
-    /// own sibling), not `Dtype::Q4`'s naive `m*n` fallback. Getting this
-    /// wrong under-dispatches the tile grid and leaves real output elements
-    /// never written - silent output corruption a compile-time check cannot
-    /// catch, which is exactly why this is a runtime assertion against the
-    /// SAME tile formula `Dtype::I8`/`Dtype::RegisterTiled` already use,
-    /// not merely "some number".
+    /// `Weight::KQuant`'s affine dtypes, and (since M5.5's `matmul_q4_dyn_reg`
+    /// was wired into `Ops::bind`) `Dtype::Q4` too, MUST dispatch the TILED
+    /// formula (`matmul_kq_dyn`/`matmul_q4_dyn_reg` are 128x128 register-tiled
+    /// kernels, `matmul_i8_dyn`'s own siblings), not a naive `m*n` count.
+    /// Getting this wrong under-dispatches the tile grid and leaves real
+    /// output elements never written - silent output corruption a
+    /// compile-time check cannot catch, which is exactly why this is a
+    /// runtime assertion against the SAME tile formula
+    /// `Dtype::I8`/`Dtype::RegisterTiled` already use, not merely "some
+    /// number".
     #[test]
     fn kq_dtypes_dispatch_the_tiled_formula_not_m_times_n() {
         let (m, n) = (513u32, 257u32);
         let expected_tile = m.div_ceil(128) * n.div_ceil(128) * 256;
         assert_ne!(expected_tile, m * n, "test shape must distinguish tile() from m*n");
-        for dt in [Dtype::Q4K, Dtype::Q8K] {
+        for dt in [Dtype::Q4, Dtype::Q4K, Dtype::Q8K] {
             assert_eq!(
                 Ops::threads(KernelVariant::PackedInt8, dt, m, n),
                 expected_tile,
-                "{dt:?} must dispatch matmul_kq_dyn's tile formula, not m*n -- under-dispatching \
-                 leaves real output elements never written (silent corruption, not a crash)"
+                "{dt:?} must dispatch the tile formula, not m*n -- under-dispatching leaves real \
+                 output elements never written (silent corruption, not a crash)"
             );
         }
-        // Q4 stays on the naive m*n formula (matmul_q4_dyn is deliberately
-        // NOT register-tiled) - unaffected by this change, asserted here so
-        // a future edit cannot accidentally widen the tile() arm to Q4 too.
-        assert_eq!(Ops::threads(KernelVariant::PackedInt8, Dtype::Q4, m, n), m * n);
     }
 
     /// [`KvPage::word_count`] - the actual allocation-size logic

@@ -243,6 +243,11 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(("matmul_i8_dyn", kernels::MATMUL_I8_DYN));
         v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
         v.push(("matmul_q4_dyn", kernels::MATMUL_Q4_DYN));
+        // M5.5's register-tiled Q4 GEMM - `Ops::bind`'s `(PackedInt8, Q4)`
+        // arm now resolves to this name instead of the naive `matmul_q4_dyn`
+        // above (which stays registered for `model::dispatch`'s own bespoke
+        // selector, unaffected by this facade-only change).
+        v.push(("matmul_q4_dyn_reg", kernels::MATMUL_Q4_DYN_REG));
         v.push(("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV));
         v.push(("max_abs_row", kernels::MAX_ABS_ROW));
         v.push(("quant_pack", kernels::QUANT_PACK));

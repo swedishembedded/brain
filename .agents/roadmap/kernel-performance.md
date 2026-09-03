@@ -2165,6 +2165,37 @@ onto this kernel is left as that phase's follow-up rather than force-fit
 into a kernel-family milestone - matching the B3-B10 façade precedent this
 tree already follows ("build it, prove it, migrate later").
 
+**Follow-up (wired): `matmul_q4_dyn_reg` is now `Ops::bind`'s `(PackedInt8,
+Dtype::Q4)` kernel.** `model::ops::Ops` - the FAÇADE path, not the bespoke
+selector this entry scoped out above - dispatched Q4 through the naive
+`matmul_q4_dyn` until now; `Ops::bind`'s `(PackedInt8, Q4)` arm now resolves
+`matmul_q4_dyn_reg` instead, `Ops::threads` dispatches its tile geometry for
+`Q4` the same way it already did for `I8`/`Q4K`/`Q8K`, and every façade
+kernel list (`model::ops::kernel_list`, and the hand-maintained
+`qwen3`/`qwen35`/`qwen35moe::model::pipelines`) registers the new name.
+`model::dispatch::mm4_rows_off`/`model::block::gemm_variant` - the bespoke
+selector `wan`/`ltxv`/`qwen35`/`qwen35moe`'s own decode-step dispatch uses -
+is UNCHANGED, exactly as scoped above; migrating it is still Phase 1/M1.2's
+job. Re-measured on this box's own Tesla P40 (not the box the numbers above
+were recorded on): `matmul_q4_dyn_reg` vs `matmul_q4_dyn` at k=n=2048, m
+32..2048, 1.59x rising to 14.05x (`crates/model/tests/
+matmul_q4_speed_bench.rs::dyn_vs_dyn_reg_across_prefill_rows`) - same growth
+shape as the original measurement, real hardware variance in the exact
+numbers. Through the `Ops` facade itself, at qwen35's real prefill leaf
+shapes (`m=128`, M26's `MAX_PREFILL_TOKENS`):
+`ops_facade_confirms_the_dyn_reg_speedup_at_qwen35_prefill_shapes` measured
+a much larger facade-level win, but that run shared the box's two P40s with
+a concurrent, independent process (confirmed via `ps aux` mid-run) - the
+DIRECTION (facade now dispatches the fast kernel, and it wins) is solid; the
+exact multiple is not, and is not repeated here for that reason. `Ops::bind`'s
+new arm and `Ops::matmul_kernel`'s resolved name are covered by
+`crates/model/src/ops.rs`'s own
+`bind_packed_int8_q4_dispatches_the_register_tiled_kernel_not_the_naive_one`
+and `crates/model/tests/ops_facade_parity.rs`'s existing `check_q4` (bit-
+identical to the `dispatch.rs`-driven oracle at m ∈ {1, 8, 64, 512}, already
+GREEN before this follow-up and unchanged by it since `matmul_q4_dyn_reg` is
+bit-identical to `matmul_q4_dyn`).
+
 **`matmul_q4_gemv_reg`: measured, found NOT to win at every shape, and
 NOT wired in - a killed hypothesis, not a silent drop.** The kernel was
 first wired into `gpu_core::upgrade`'s zero-edit seam exactly like its
