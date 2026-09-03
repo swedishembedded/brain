@@ -136,6 +136,7 @@
 use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu};
+use model::gdn::{RecurrentSlot, RecurrentSlotShape};
 use model::paged::{BlockAllocator, BlockTable};
 use model::serve::PagedDecoder;
 
@@ -172,48 +173,22 @@ const MAX_PREFILL_TOKENS: u32 = 256;
 /// `state` + causal-conv `hist`, one pair per layer (a size-1 dummy at
 /// GQA-layer indices). See this module's doc for why this lives in a
 /// private `HashMap` keyed by `BlockTable::blocks()[0]` rather than a
-/// `PagedDecoder`-carried parameter.
-struct GdnSlot {
-    state: Vec<DeviceBuffer>,
-    hist: Vec<DeviceBuffer>,
-}
+/// `PagedDecoder`-carried parameter. The struct itself (allocation, zero-init,
+/// byte-cost accounting) is [`model::gdn::RecurrentSlot`] - hoisted there
+/// because `qwen35moe::serve::GdnSlot` built the identical struct
+/// byte-for-byte; this alias is the only trace of the old per-crate type
+/// left at call sites below.
+type GdnSlot = RecurrentSlot;
 
-impl GdnSlot {
-    /// Allocate and explicitly ZERO every layer's buffers for a fresh
-    /// sequence. `Gpu::storage` does not guarantee zero-initialised memory,
-    /// and a fresh sequence's recurrent state / conv history MUST start at
-    /// zero.
-    fn new(gpu: &Gpu, cfg: &Qwen35Config) -> GdnSlot {
-        let bh = cfg.linear_num_value_heads as u64;
-        let state_len = bh * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
-        let hist_len = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
-        let mut state = Vec::with_capacity(cfg.n_layers as usize);
-        let mut hist = Vec::with_capacity(cfg.n_layers as usize);
-        for ty in cfg.layer_types() {
-            match ty {
-                LayerType::Linear => {
-                    state.push(gpu.storage(state_len));
-                    hist.push(gpu.storage(hist_len));
-                }
-                LayerType::Full => {
-                    state.push(gpu.storage(1));
-                    hist.push(gpu.storage(1));
-                }
-            }
-        }
-        let clears: Vec<&DeviceBuffer> = state.iter().chain(hist.iter()).collect();
-        gpu.submit(&clears, &[]);
-        GdnSlot { state, hist }
-    }
-
-    /// Device bytes one slot costs: every GDN layer's `state` + `hist`, fp32.
-    fn bytes(cfg: &Qwen35Config) -> u64 {
-        let bh = cfg.linear_num_value_heads as u64;
-        let state_len = bh * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
-        let hist_len = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
-        let n_gdn = cfg.layer_types().iter().filter(|t| **t == LayerType::Linear).count() as u64;
-        n_gdn * (state_len + hist_len) * 4
-    }
+/// [`GdnSlot::new`]/[`GdnSlot::bytes`]'s shape, read off this crate's own
+/// [`Qwen35Config`] - see [`RecurrentSlotShape`]'s own doc for why
+/// `crates/model` takes plain dims instead of this config type directly.
+fn gdn_slot_shape(cfg: &Qwen35Config) -> RecurrentSlotShape {
+    let bh = cfg.linear_num_value_heads as u64;
+    let state_len = bh * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
+    let hist_len = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
+    let is_recurrent = cfg.layer_types().iter().map(|t| *t == LayerType::Linear).collect();
+    RecurrentSlotShape { state_len, hist_len, is_recurrent }
 }
 
 /// Single-GPU, correctness-first `PagedDecoder` for Qwen3.8-27B. See this
@@ -421,7 +396,7 @@ impl Engine {
         let n_full = self.model.cfg.layer_types().iter().filter(|t| **t == LayerType::Full).count() as u64;
         let num_blocks = self.alloc.num_blocks() as u64;
         let gqa_bytes = n_full * num_blocks * 2 * self.block_size as u64 * self.model.cfg.kv_dim() as u64 * 4;
-        let gdn_ceiling = num_blocks * GdnSlot::bytes(&self.model.cfg);
+        let gdn_ceiling = num_blocks * GdnSlot::bytes(&gdn_slot_shape(&self.model.cfg));
         gqa_bytes + gdn_ceiling
     }
 
@@ -487,7 +462,7 @@ impl Engine {
         // reuses it.
         table.reserve(prompt.len() as u32, &mut self.alloc).expect("qwen35::serve::Engine: KV pool exhausted");
         let phys = table.blocks()[0];
-        self.gdn_slots.entry(phys).or_insert_with(|| GdnSlot::new(&self.model.gpu, &self.model.cfg));
+        self.gdn_slots.entry(phys).or_insert_with(|| GdnSlot::new(&self.model.gpu, &gdn_slot_shape(&self.model.cfg)));
 
         let d = self.model.cfg.d_model as usize;
         let mut h: Option<DeviceBuffer> = None;
