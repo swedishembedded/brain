@@ -59,6 +59,7 @@ pub mod caps;
 pub mod config;
 pub mod import;
 pub mod model;
+pub mod precompute_adaln;
 pub mod rope;
 pub mod schedule;
 pub mod vocoder;
