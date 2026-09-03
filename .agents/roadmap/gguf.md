@@ -941,11 +941,75 @@ GGUF, the worst of the six) has a fully-designed, verified-worthwhile fix
 rather than forced. Every gate through M14 remains synthetic (see "Recorded
 gaps" below) - no real K-quant checkpoint has been run through this path on
 this box yet.
+- [x] M15: split GGUF in `MmapGguf`. `mmap: Mmap` became `mmaps: Vec<Mmap>`
+      (`mmaps[0]` is always part 1) and `index`'s value tuple gained a part
+      index as its first field (`(usize, u32, usize, usize, usize)` -
+      part/ty/start/nbytes/numel); all 17 public method signatures stay
+      byte-identical, only the six `self.mmap[..]` slice sites inside
+      `tensor`/`tensor_range`/`raw_tensor_bytes`/`with_tensor_chunks`/
+      `raw_words`/`raw_blocks`/`dtype`/`numel` became `self.mmaps[part][..]`
+      - no `Inner::GgufSharded` arm anywhere else in the tree, exactly the
+      "entry point stays `MmapGguf::open(path)`" design goal, so
+      `WeightReader`, every existing `MmapGguf::open` call site (grepped:
+      over 90 across the workspace), and `brain models info` gain split
+      support with zero edits of their own.
+      New `crates/checkpoint/src/split.rs`: `split_name(fname, ext) ->
+      Option<(base, part_1_based, count, digit_width)>` and its inverse
+      `split_sibling`, the `<base>-NNNNN-of-MMMMM.<ext>` parser generalized
+      from `cli::model_dir::shard_of`'s `.safetensors`-only original (that
+      hoist is what M16 will point its own callers at) - refuses part `0`
+      or a part exceeding `count`, matching a real writer's own invariant
+      rather than guessing at a malformed one. `MmapGguf::open` parses
+      `path`'s filename once: a non-split name takes the untouched
+      single-file path (`vec![path.to_string()]`); a split name builds
+      every sibling's path from `dir.join(split_sibling(...))` for
+      `1..=count` and opens all of them eagerly, in part order, BEFORE
+      returning - a missing part therefore fails at `std::fs::File::open`
+      with that exact filename in the error, never as a "tensor not found"
+      once decoding starts. New `validate_split` (only called when more
+      than one part was found) checks, per part: `split.no` equals the
+      part's own 0-based index (llama.cpp writes it 0-based against
+      1-based filenames - the exact off-by-one relationship a dedicated
+      test pins rather than re-deriving from a spec each time);
+      `split.count` equals the number of files THIS OPEN actually located
+      (derived from the filename's own encoded count, not trusted from any
+      part's KV alone); `general.architecture` agrees with part 1's. Once,
+      across all parts: if any part carries `split.tensors.count`, every
+      part that carries it agrees, and the summed real tensor count across
+      every part's own tensor-info list matches it exactly. The merge step
+      that follows also refuses a tensor NAME appearing in more than one
+      part (a corrupt or hand-edited split could otherwise silently let a
+      later part's tensor shadow an earlier one's). `general.file_type` and
+      every other model-config key are read from part 1's KV, same as a
+      single file's own convention.
+      New `gguf_write::write_split(dir, base, kv, tensors: &[Vec<TensorOut>],
+      alignment) -> io::Result<String>` (returns part 1's path) - the
+      fixture generator this milestone needed, since this box has no real
+      split checkpoint (see "Recorded gaps"): writes one real, independent
+      GGUF file per element of `tensors` via the existing eager `write`,
+      injecting `split.no`/`split.count`/`split.tensors.count` into every
+      part's KV itself so a test never hand-assembles split metadata bytes.
+      Gated (`crates/checkpoint/tests/gguf_split.rs`, new, 7 tests): a
+      3-part split opens correctly from EITHER part 1's path or a
+      non-first part's path and reads one real tensor from each of the
+      three parts by value (not just checking names - proves cross-part
+      byte indexing, not just cross-part name merging); a part deleted
+      from disk after writing is refused by its own exact filename; a
+      `split.tensors.count` that disagrees with the real summed total is
+      refused, naming both numbers; a `split.no` written 1-based (the
+      off-by-one this design exists to catch) is refused; a part missing
+      `split.no` entirely is refused; mismatched `general.architecture`
+      across parts is refused; a plain unsplit file still opens exactly as
+      before (the single-file path is provably untouched, not just
+      unlikely to be touched). `make test -p brain-checkpoint`: 117 lib
+      tests + this file's 7 + every other integration suite in the crate,
+      0 failed. `cargo check --release --workspace`: clean - confirms the
+      "zero downstream edits" claim, since every one of the ~90 external
+      `MmapGguf::open` call sites in the tree still compiles unchanged
+      against the new internal layout.
+
 ## Not yet done
 
-- [ ] M15: split GGUF in `MmapGguf` (`mmaps: Vec<Mmap>`, part in the tensor
-      index, one `LoadMeter` over summed bytes - all 17 method signatures
-      stay byte-identical, no `Inner::GgufSharded` arm needed).
 - [ ] M16: split GGUF in `modelstore`/CLI (hoisted `-NNNNN-of-NNNNN` parser;
       `quant_of_gguf`/`pick_gguf`/`local_quant`/`scan_repo_dir`).
 - [ ] M17: ggml ids 9 (Q8_1) and 24-28 (I8/I16/I32/I64/F64) - these fail

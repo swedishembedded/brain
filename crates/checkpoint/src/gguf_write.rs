@@ -220,6 +220,34 @@ pub fn write(path: &str, kv: &[(String, GgufValue)], tensors: &[TensorOut], alig
     w.finish()
 }
 
+/// Write a split GGUF: one file per entry of `tensors`, at
+/// `<dir>/<base>-NNNNN-of-MMMMM.gguf` (part 1 first) - [`crate::gguf::
+/// MmapGguf::open`]'s split path reads this same convention back. `kv` is
+/// written to every part unchanged; each part additionally gets the three
+/// keys that path validates: `split.no` (0-based), `split.count`, and
+/// `split.tensors.count` (the sum of every part's tensor count, identical
+/// on every part - real split writers duplicate it rather than reserving it
+/// for part 1 alone, so this does too). Returns part 1's path, the one
+/// `MmapGguf::open` should be given - it locates every sibling from it.
+pub fn write_split(dir: &str, base: &str, kv: &[(String, GgufValue)], tensors: &[Vec<TensorOut>], alignment: usize) -> io::Result<String> {
+    let count = tensors.len() as u32;
+    let width = count.to_string().len().max(5);
+    let total_tensors: u64 = tensors.iter().map(|t| t.len() as u64).sum();
+    let mut first_path = None;
+    for (i, part_tensors) in tensors.iter().enumerate() {
+        let part = i as u32 + 1;
+        let fname = crate::split::split_sibling(base, part, count, width, "gguf");
+        let path = format!("{dir}/{fname}");
+        let mut part_kv = kv.to_vec();
+        part_kv.push(("split.no".to_string(), GgufValue::U32(i as u32)));
+        part_kv.push(("split.count".to_string(), GgufValue::U32(count)));
+        part_kv.push(("split.tensors.count".to_string(), GgufValue::U64(total_tensors)));
+        write(&path, &part_kv, part_tensors, alignment)?;
+        first_path.get_or_insert(path);
+    }
+    Ok(first_path.expect("write_split: at least one part"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

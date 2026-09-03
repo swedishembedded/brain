@@ -581,6 +581,69 @@ fn parse_header(bytes: &[u8]) -> Result<Header, String> {
     Ok((kv, infos, data_start))
 }
 
+/// Validate a split GGUF's parts agree with each other and with the file set
+/// [`MmapGguf::open`] actually found on disk, before a single tensor byte is
+/// read. `part_paths`/`part_kv`/`part_infos` are one entry per part, in
+/// filename order (`part_paths[i]` is 1-based part `i+1`).
+///
+/// Checked, per part: `split.no` equals the part's own 0-based index
+/// (llama.cpp writes `split.no` 0-based against 1-based filenames - a
+/// deliberate off-by-one this pins with a dedicated test rather than
+/// re-deriving it from a spec each time); `split.count` equals the number of
+/// files this open actually located (not just what any one part claims);
+/// `general.architecture` agrees with part 1's. Checked once, across all
+/// parts: if any part carries `split.tensors.count`, every part that
+/// carries it agrees, and the summed tensor count across all parts matches
+/// it exactly.
+///
+/// Every error names the offending part's path - the whole point of
+/// validating up front is that a missing or mismatched part is reported as
+/// itself, not discovered as "tensor X not found" after decoding has
+/// already started.
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_split(part_paths: &[String], part_kv: &[BTreeMap<String, GgufValue>], part_infos: &[Vec<Info>]) -> Result<(), String> {
+    let arch0 = part_kv[0].get("general.architecture").and_then(|v| v.as_str());
+    let mut declared_tensor_count: Option<u64> = None;
+    let mut total_tensors = 0usize;
+    for (i, kv) in part_kv.iter().enumerate() {
+        let path = &part_paths[i];
+        match kv.get("split.no").and_then(|v| v.as_u64()) {
+            Some(no) if no as usize == i => {}
+            Some(no) => return Err(format!("gguf: {path}: split.no={no} but this file is part {} of the split (0-based index should be {i})", i + 1)),
+            None => return Err(format!("gguf: {path}: split file is missing split.no")),
+        }
+        match kv.get("split.count").and_then(|v| v.as_u64()) {
+            Some(count) if count as usize == part_paths.len() => {}
+            Some(count) => {
+                return Err(format!("gguf: {path}: split.count={count} but {} part files were found for this split", part_paths.len()))
+            }
+            None => return Err(format!("gguf: {path}: split file is missing split.count")),
+        }
+        let arch = kv.get("general.architecture").and_then(|v| v.as_str());
+        if arch != arch0 {
+            return Err(format!("gguf: {path}: general.architecture {arch:?} disagrees with part 1's {arch0:?}"));
+        }
+        if let Some(declared) = kv.get("split.tensors.count").and_then(|v| v.as_u64()) {
+            match declared_tensor_count {
+                None => declared_tensor_count = Some(declared),
+                Some(d) if d == declared => {}
+                Some(d) => return Err(format!("gguf: {path}: split.tensors.count={declared} disagrees with an earlier part's {d}")),
+            }
+        }
+        total_tensors += part_infos[i].len();
+    }
+    if let Some(want) = declared_tensor_count {
+        if want as usize != total_tensors {
+            return Err(format!(
+                "gguf: {}: the {} part files together declare {total_tensors} tensors, but split.tensors.count={want}",
+                part_paths[0],
+                part_paths.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parse a GGUF byte buffer into fp32 tensors + full KV metadata. Portable core
 /// (no fs/Seek); native `load_gguf`/`read` read the file first.
 pub fn parse_gguf(bytes: &[u8]) -> Result<GgufModel, String> {
@@ -1094,19 +1157,28 @@ fn deq_q8_k(b: &[u8], out: &mut Vec<f32>) {
     }
 }
 
-/// A memory-mapped GGUF file with an on-demand, per-tensor dequant accessor.
+/// A memory-mapped GGUF file (or split file set) with an on-demand,
+/// per-tensor dequant accessor.
 ///
 /// [`open`](MmapGguf::open) mmaps the file and parses only the header (KV +
 /// tensor infos); no tensor data is read. [`tensor`](MmapGguf::tensor)
 /// dequantizes exactly one tensor's block range from the mmap, so peak host
 /// memory is bounded by a single tensor's fp32 expansion — never the whole
 /// model. Values are byte-identical to the eager [`parse_gguf`].
+///
+/// A split GGUF (`<base>-NNNNN-of-MMMMM.gguf`, one file per part, no tensor
+/// straddling a part boundary) opens exactly like a single file - pass any
+/// one part's path and every sibling is located and mapped alongside it.
+/// `mmaps` therefore holds one mapping per part (`mmaps[0]` is always part
+/// 1) instead of the single-file case's one-element vec, and `index` records
+/// which part each tensor's bytes live in.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct MmapGguf {
-    mmap: memmap2::Mmap,
+    mmaps: Vec<memmap2::Mmap>,
     kv: BTreeMap<String, GgufValue>,
-    /// name → (ggml type, absolute byte start, on-disk byte length, element count).
-    index: HashMap<String, (u32, usize, usize, usize)>,
+    /// name → (part index into `mmaps`, ggml type, absolute byte start
+    /// within that part, on-disk byte length, element count).
+    index: HashMap<String, (usize, u32, usize, usize, usize)>,
     shapes: BTreeMap<String, Vec<usize>>,
     order: Vec<String>,
     /// Load-progress accounting: cumulative on-disk bytes walked, reported
@@ -1116,32 +1188,78 @@ pub struct MmapGguf {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl MmapGguf {
-    /// Open + mmap `path` and parse only its header (no tensor bytes are read).
+    /// Open + mmap `path` (and, if it names one part of a split GGUF, every
+    /// sibling part) and parse only the header(s) (no tensor bytes are read).
     pub fn open(path: &str) -> Result<MmapGguf, String> {
-        let file = std::fs::File::open(path).map_err(|e| format!("gguf: open {path}: {e}"))?;
-        // SAFETY: weight files are treated as immutable for the mapping's lifetime.
-        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("gguf: mmap {path}: {e}"))?;
-        let (kv, infos, data_start) = parse_header(&mmap)?;
-        let mut index = HashMap::with_capacity(infos.len());
-        let mut shapes = BTreeMap::new();
-        let mut order = Vec::with_capacity(infos.len());
-        for info in infos {
-            let numel: usize = info.shape.iter().product();
-            let start = data_start
-                .checked_add(info.offset as usize)
-                .ok_or("gguf: tensor offset overflow")?;
-            let nbytes = tensor_nbytes(info.ty, numel)
-                .ok_or_else(|| format!("gguf: {} unknown type {}", info.name, info.ty))?;
-            if start + nbytes > mmap.len() {
-                return Err(format!("gguf: {} data out of range", info.name));
-            }
-            index.insert(info.name.clone(), (info.ty, start, nbytes, numel));
-            shapes.insert(info.name.clone(), info.shape);
-            order.push(info.name);
+        let dir = std::path::Path::new(path).parent();
+        let fname = std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("gguf: {path}: not a valid file name"))?;
+        let part_paths: Vec<String> = match crate::split::split_name(fname, "gguf") {
+            Some((base, _part, count, width)) => (1..=count)
+                .map(|p| {
+                    let name = crate::split::split_sibling(base, p, count, width, "gguf");
+                    match dir {
+                        Some(d) if !d.as_os_str().is_empty() => d.join(&name).to_string_lossy().into_owned(),
+                        _ => name,
+                    }
+                })
+                .collect(),
+            None => vec![path.to_string()],
+        };
+
+        let mut mmaps = Vec::with_capacity(part_paths.len());
+        let mut part_kv = Vec::with_capacity(part_paths.len());
+        let mut part_infos = Vec::with_capacity(part_paths.len());
+        let mut part_data_start = Vec::with_capacity(part_paths.len());
+        for p in &part_paths {
+            let file = std::fs::File::open(p).map_err(|e| format!("gguf: open {p}: {e}"))?;
+            // SAFETY: weight files are treated as immutable for the mapping's lifetime.
+            let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("gguf: mmap {p}: {e}"))?;
+            let (kv, infos, data_start) = parse_header(&mmap)?;
+            part_kv.push(kv);
+            part_infos.push(infos);
+            part_data_start.push(data_start);
+            mmaps.push(mmap);
         }
-        let tensor_bytes: u64 = index.values().map(|&(_, _, nbytes, _)| nbytes as u64).sum();
+
+        if part_paths.len() > 1 {
+            validate_split(&part_paths, &part_kv, &part_infos)?;
+        }
+
+        let mut index = HashMap::new();
+        let mut shapes = BTreeMap::new();
+        let mut order = Vec::new();
+        let mut tensor_bytes: u64 = 0;
+        for (part_idx, infos) in part_infos.into_iter().enumerate() {
+            let data_start = part_data_start[part_idx];
+            let part_len = mmaps[part_idx].len();
+            for info in infos {
+                let numel: usize = info.shape.iter().product();
+                let start = data_start
+                    .checked_add(info.offset as usize)
+                    .ok_or("gguf: tensor offset overflow")?;
+                let nbytes = tensor_nbytes(info.ty, numel)
+                    .ok_or_else(|| format!("gguf: {} unknown type {}", info.name, info.ty))?;
+                if start + nbytes > part_len {
+                    return Err(format!("gguf: {} data out of range", info.name));
+                }
+                if index.contains_key(&info.name) {
+                    return Err(format!("gguf: {path}: tensor {} appears in more than one split part", info.name));
+                }
+                tensor_bytes += nbytes as u64;
+                index.insert(info.name.clone(), (part_idx, info.ty, start, nbytes, numel));
+                shapes.insert(info.name.clone(), info.shape);
+                order.push(info.name);
+            }
+        }
+        // Part 1's KV represents the file: `validate_split` already checked
+        // every other part agrees on the keys that matter
+        // (`general.architecture`, `split.count`, `split.tensors.count`).
+        let kv = part_kv.into_iter().next().expect("at least one part");
         let meter = crate::load_progress::LoadMeter::new(path.to_string(), tensor_bytes);
-        Ok(MmapGguf { mmap, kv, index, shapes, order, meter })
+        Ok(MmapGguf { mmaps, kv, index, shapes, order, meter })
     }
 
     /// Tensor names, in the file's declared order.
@@ -1163,7 +1281,7 @@ impl MmapGguf {
     /// each tensor rather than the checkpoint. `None` for a type id this
     /// reader has no name for - never a guess.
     pub fn dtype(&self, name: &str) -> Option<&'static str> {
-        ggml_type_name(self.index.get(name)?.0)
+        ggml_type_name(self.index.get(name)?.1)
     }
 
     /// The full KV metadata map.
@@ -1201,9 +1319,9 @@ impl MmapGguf {
     /// quant type is unsupported (IQ/TQ/MXFP4 codebooks). Byte-identical to the
     /// eager [`parse_gguf`] for the same tensor.
     pub fn tensor(&self, name: &str) -> Option<Result<Vec<f32>, String>> {
-        let &(ty, start, nbytes, numel) = self.index.get(name)?;
+        let &(part, ty, start, nbytes, numel) = self.index.get(name)?;
         self.meter.note(nbytes as u64);
-        let raw = &self.mmap[start..start + nbytes];
+        let raw = &self.mmaps[part][start..start + nbytes];
         Some(dequantize(ty, raw, numel).map_err(|e| format!("gguf: {name}: {e}")))
     }
 
@@ -1229,7 +1347,7 @@ impl MmapGguf {
     /// [`dequantize`] cannot decode either, so it is "unsupported type", not a
     /// missing fast path.
     pub fn tensor_range(&self, name: &str, start_elem: usize, len_elem: usize) -> Option<Result<Vec<f32>, String>> {
-        let &(ty, start, nbytes, numel) = self.index.get(name)?;
+        let &(part, ty, start, nbytes, numel) = self.index.get(name)?;
         let end_elem = start_elem.checked_add(len_elem)?;
         if end_elem > numel {
             return None;
@@ -1237,7 +1355,7 @@ impl MmapGguf {
         let (block_elems, block_bytes) = block_geometry(ty)?;
         let b0 = start_elem / block_elems;
         let b1 = end_elem.div_ceil(block_elems);
-        let span = &self.mmap[start + b0 * block_bytes..(start + b1 * block_bytes).min(start + nbytes)];
+        let span = &self.mmaps[part][start + b0 * block_bytes..(start + b1 * block_bytes).min(start + nbytes)];
         // `dequantize` truncates its output to the requested count exactly as
         // the whole-tensor path does, so asking for everything from this
         // range's first block boundary up to `end_elem` and slicing the
@@ -1266,8 +1384,8 @@ impl MmapGguf {
         // DECODES them". `weightio::WeightReader::nbytes` depends on this
         // one working for an unsupported quant type too; narrowing it would
         // silently break that guarantee.
-        let &(ty, start, nbytes, _numel) = self.index.get(name)?;
-        Some((&self.mmap[start..start + nbytes], ty))
+        let &(part, ty, start, nbytes, _numel) = self.index.get(name)?;
+        Some((&self.mmaps[part][start..start + nbytes], ty))
     }
 }
 
@@ -1317,12 +1435,12 @@ impl crate::TensorSource for MmapGguf {
     /// practice and exists so an unsupported type fails in `dequantize`'s own
     /// error message rather than in a slicing panic here.
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
-        let Some(&(ty, start, nbytes, numel)) = self.index.get(name) else { return false };
+        let Some(&(part, ty, start, nbytes, numel)) = self.index.get(name) else { return false };
         let Some((block_elems, block_bytes)) = block_geometry(ty) else {
             return self.with_tensor(name, &mut |d| f(0, d));
         };
         let per = if max_elems == 0 { numel } else { (max_elems / block_elems).max(1) * block_elems };
-        let raw = &self.mmap[start..start + nbytes];
+        let raw = &self.mmaps[part][start..start + nbytes];
         let mut e0 = 0usize;
         while e0 < numel {
             let e1 = (e0 + per).min(numel);
@@ -1353,11 +1471,11 @@ impl crate::TensorSource for MmapGguf {
     /// biases) in plain F32 while quantizing the 2-D weights, so this fires
     /// selectively per tensor, not per file.
     fn raw_words(&self, name: &str) -> Option<&[u32]> {
-        let &(ty, start, nbytes, _numel) = self.index.get(name)?;
+        let &(part, ty, start, nbytes, _numel) = self.index.get(name)?;
         if ty != T_F32 {
             return None;
         }
-        bytemuck::try_cast_slice::<u8, u32>(&self.mmap[start..start + nbytes])
+        bytemuck::try_cast_slice::<u8, u32>(&self.mmaps[part][start..start + nbytes])
             .ok()
             .inspect(|_| {
                 self.meter.note(nbytes as u64);
@@ -1371,10 +1489,10 @@ impl crate::TensorSource for MmapGguf {
     /// regardless wants [`Self::raw_tensor_bytes`], which has a wider
     /// contract on purpose (see its doc).
     fn raw_blocks(&self, name: &str) -> Option<(BlockLayout, &[u8])> {
-        let &(ty, start, nbytes, numel) = self.index.get(name)?;
+        let &(part, ty, start, nbytes, numel) = self.index.get(name)?;
         let ty = GgmlType::from_id(ty)?;
         self.meter.note(nbytes as u64);
-        Some((BlockLayout { ty, numel }, &self.mmap[start..start + nbytes]))
+        Some((BlockLayout { ty, numel }, &self.mmaps[part][start..start + nbytes]))
     }
 
     /// Element count of `name`, without decoding - known from the header for
@@ -1382,7 +1500,7 @@ impl crate::TensorSource for MmapGguf {
     /// how many f32s a dequantized [`with_tensor`](Self::with_tensor) call
     /// will produce.
     fn numel(&self, name: &str) -> Option<usize> {
-        self.index.get(name).map(|&(_, _, _, numel)| numel)
+        self.index.get(name).map(|&(_, _, _, _, numel)| numel)
     }
 }
 
