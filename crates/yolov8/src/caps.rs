@@ -28,7 +28,7 @@ pub const MODEL: &str = "brain/yolov8";
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let detect = ActionSpec::new("detect", "detect objects in an image (letterbox → forward → DFL decode → NMS)")
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format YOLO checkpoint (.safetensors)").required())
+        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format YOLO checkpoint (.safetensors)").required().host_env("BRAIN_YOLOV8"))
         .param(ParamSpec::new("conf", ParamType::Float, "confidence threshold").default(json!(0.25)))
         .param(ParamSpec::new("iou", ParamType::Float, "NMS IoU threshold").default(json!(0.45)))
         .input(BlobSpec::new("image", Media::Image, "the image to run detection on").required())

@@ -592,6 +592,24 @@ pub fn manifests() -> Vec<Manifest> {
     models().into_iter().map(|e| (e.manifest)()).collect()
 }
 
+/// Every model's manifest as an **off-machine** consumer must see it:
+/// [`manifests`] with every host-resolved param projected out
+/// ([`capability::Manifest::for_serving`]).
+///
+/// [`manifests`] is the LOCAL surface - `brain caps`/`brain do`, run by
+/// somebody standing on the machine that holds the weights, who can legitimately
+/// pass `weights=/path/to/checkpoint.safetensors`. Anything that describes this
+/// catalog to a caller somewhere ELSE - a scheduler placing work on a machine it
+/// has never seen, a graph editor in a browser, any RPC surface - must use this
+/// one instead. There is no path a remote caller could name that would be valid
+/// on whichever host eventually runs the action, so it must never be asked; the
+/// host answers from its own `BRAIN_*` environment at
+/// [`capability::ActionSpec::validate`] time, exactly as `brain serve`'s
+/// resident models already do.
+pub fn serving_manifests() -> Vec<Manifest> {
+    manifests().into_iter().map(Manifest::for_serving).collect()
+}
+
 /// Build a runnable provider for `model`, or say why not.
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     for e in models() {
@@ -646,6 +664,126 @@ mod tests {
         assert_eq!(imgpipe::UPSCALE_MODEL, rrdbnet::caps::MODEL);
         assert_eq!(imgpipe::RESTORE_MODEL, codeformer::caps::MODEL);
         assert_eq!(imgpipe::SEGMENT_MODEL, sam2::caps::MODEL);
+    }
+
+    /// Param names that mean "a checkpoint's location on some filesystem".
+    /// A remote caller shares no filesystem with the machine that will run the
+    /// action, so none of these may ever appear on the served surface.
+    const WEIGHT_LOCATION_PARAMS: &[&str] =
+        &["weights", "weights_dir", "weights_path", "tokenizer", "ckpt", "checkpoint", "checkpoint_path", "model_path", "safetensors_path"];
+
+    /// THE REGRESSION THIS EXISTS FOR: brain's catalog manifest is what an
+    /// off-machine consumer -- a scheduler placing work, a graph editor
+    /// listing what a node can do -- builds its own node/action list from.
+    /// Every model that took its checkpoint as an ordinary
+    /// action param therefore published a REQUIRED "path to a .safetensors
+    /// checkpoint" field to a workflow author who has no idea which machine
+    /// will run the graph - a question with no correct answer, at the wrong
+    /// layer entirely. The location is the HOST's fact, resolved from that
+    /// machine's own `BRAIN_*` variable at activation time; [`serving_manifests`]
+    /// is where that guarantee is kept, so it is pinned here over the REAL
+    /// catalog rather than a hand-written sample.
+    #[test]
+    fn no_served_manifest_asks_a_remote_caller_where_the_weights_are() {
+        for m in serving_manifests() {
+            for a in &m.actions {
+                for p in &a.params {
+                    assert!(
+                        !WEIGHT_LOCATION_PARAMS.contains(&p.name.as_str()),
+                        "served manifest '{}' action '{}' still advertises '{}' - mark it \
+                         `.host_env(\"BRAIN_…\")` in that model's caps.rs so the host resolves it",
+                        m.model,
+                        a.name,
+                        p.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// The other side of the same coin, and what makes the test above mean
+    /// something: the LOCAL surface (`brain caps`/`brain do`, run by somebody
+    /// standing on the machine that holds the weights) still offers the
+    /// override. If this ever went empty, the test above would be passing
+    /// vacuously.
+    #[test]
+    fn the_local_surface_still_offers_an_explicit_checkpoint_override() {
+        let overridable: Vec<String> = manifests()
+            .iter()
+            .flat_map(|m| m.actions.iter().flat_map(|a| a.params.iter()).map(move |p| (m.model.clone(), p)))
+            .filter(|(_, p)| WEIGHT_LOCATION_PARAMS.contains(&p.name.as_str()))
+            .map(|(model, p)| format!("{model}:{}", p.name))
+            .collect();
+        assert!(overridable.len() > 5, "the local surface lost its checkpoint overrides: {overridable:?}");
+        for m in manifests() {
+            for a in &m.actions {
+                for p in &a.params {
+                    if WEIGHT_LOCATION_PARAMS.contains(&p.name.as_str()) {
+                        assert!(
+                            p.host_env.is_some(),
+                            "'{}':'{}' takes '{}' as a plain param - it will be published to every \
+                             remote caller until it declares `.host_env(\"BRAIN_…\")`",
+                            m.model,
+                            a.name,
+                            p.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The projection is total: nothing host-resolved survives on the served
+    /// surface, whatever it happens to be called.
+    #[test]
+    fn the_served_surface_carries_no_host_resolved_param_at_all() {
+        for m in serving_manifests() {
+            for a in &m.actions {
+                for p in &a.params {
+                    assert!(p.host_env.is_none(), "'{}':'{}' leaked host-resolved param '{}'", m.model, a.name, p.name);
+                }
+            }
+        }
+    }
+
+    /// ...and it removes ONLY that. A projection that quietly dropped a real
+    /// per-request knob would make every served model subtly less capable than
+    /// the same model run locally, which is exactly the drift `manifest_resident`
+    /// was written to prevent in the first place.
+    #[test]
+    fn the_served_surface_keeps_every_param_that_is_not_host_resolved() {
+        for (full, served) in manifests().into_iter().zip(serving_manifests()) {
+            assert_eq!(full.model, served.model);
+            assert_eq!(full.actions.len(), served.actions.len(), "'{}' lost an action", full.model);
+            for (fa, sa) in full.actions.iter().zip(&served.actions) {
+                let expect: Vec<&str> = fa.params.iter().filter(|p| p.host_env.is_none()).map(|p| p.name.as_str()).collect();
+                let got: Vec<&str> = sa.params.iter().map(|p| p.name.as_str()).collect();
+                assert_eq!(got, expect, "'{}':'{}' params changed beyond the host-resolved ones", full.model, fa.name);
+                assert_eq!(sa.inputs.len(), fa.inputs.len(), "'{}':'{}' lost an input", full.model, fa.name);
+                assert_eq!(sa.outputs.len(), fa.outputs.len(), "'{}':'{}' lost an output", full.model, fa.name);
+            }
+        }
+    }
+
+    /// A host-resolved param must name a real `BRAIN_*` variable: the whole
+    /// mechanism is "the host answers from its environment", and a param that
+    /// names nothing would silently become unanswerable the moment it stopped
+    /// being advertised.
+    #[test]
+    fn every_host_resolved_param_names_a_brain_environment_variable() {
+        for m in manifests() {
+            for a in &m.actions {
+                for p in &a.params {
+                    if let Some(var) = &p.host_env {
+                        assert!(var.starts_with("BRAIN_"), "'{}':'{}' param '{}' resolves from '{var}', which is not a BRAIN_* variable", m.model, a.name, p.name);
+                        // An environment variable is a string; filling a
+                        // non-`Str` param from one would hand the action a
+                        // value of the wrong JSON type.
+                        assert_eq!(p.ty, capability::ParamType::Str, "'{}':'{}' param '{}' is host-resolved but not a Str", m.model, a.name, p.name);
+                    }
+                }
+            }
+        }
     }
 
     /// An unknown name must still be an error, not a panic or a default.

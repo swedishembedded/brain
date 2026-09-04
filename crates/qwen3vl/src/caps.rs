@@ -242,7 +242,7 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
         .param(
             ParamSpec::new("weights", ParamType::Str, "Qwen3-VL checkpoint DIRECTORY (config.json + model.safetensors[.index.json] + tokenizer.json)")
-                .default(json!(default_weights())),
+                .host_env(DIR_VAR),
         )
         .param(
             ParamSpec::new(
@@ -294,7 +294,7 @@ pub fn lora_train_spec() -> ActionSpec {
         .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required())
         .param(
             ParamSpec::new("weights", ParamType::Str, "base Qwen3-VL checkpoint DIRECTORY to adapt (config.json + model.safetensors[.index.json] + tokenizer.json)")
-                .default(json!(default_weights())),
+                .host_env(DIR_VAR),
         )
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(8)))
         .param(ParamSpec::new("alpha", ParamType::Float, "LoRA alpha (delta scale = alpha/rank)").default(json!(16.0)))
@@ -326,11 +326,7 @@ pub fn manifest() -> Manifest {
 /// hidden behind deployment state. `crate::resident_qwen3vl::Qwen3VlResident::
 /// manifest` (in `crates/cli`) calls this rather than [`manifest`].
 pub fn manifest_resident() -> Manifest {
-    let mut m = manifest();
-    for a in &mut m.actions {
-        a.params.retain(|p| p.name != "weights");
-    }
-    m
+    manifest().for_serving()
 }
 
 use capability::last_user_text;

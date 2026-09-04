@@ -211,6 +211,13 @@ tuned from the environment instead of a recompile.
   reader smoke does not need this set on a box that has fetched one.
 - `BRAIN_INT8_TEST` - enables/points at an int8-specific test fixture.
 
+**Host-resolved-param mechanism** (`crates/capability`'s own unit tests for
+`ParamSpec::host_env` - stand-ins for a real `BRAIN_*_WEIGHTS`/`_DIR`, never
+read by anything that ships): `BRAIN_TEST_HOST_WEIGHTS`,
+`BRAIN_TEST_HOST_OVERRIDE`, `BRAIN_TEST_HOST_EMPTY`, `BRAIN_TEST_HOST_UNSET`
+(deliberately never set - it is what "this machine has not configured it"
+looks like).
+
 **Model-weights-required test gates** (each enables a parity/import/training test
 that needs a real checkpoint; unset means the test skips):
 `BRAIN_EVA_CLIP`, `BRAIN_CONTROLNET`, `BRAIN_PULID`, `BRAIN_INSTANTID`,

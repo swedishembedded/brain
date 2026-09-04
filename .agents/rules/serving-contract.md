@@ -35,6 +35,24 @@ Implement `capability::Action` for each action and advertise them in a
   — a remote client has no access to the server's filesystem, and the D-Bus layer
   already turns outcome blobs into result fds for free. Reference:
   `zimage::caps` `lora_train`.
+- **A checkpoint location is `.host_env("BRAIN_…")`, never a plain param.** If an
+  action needs to know where its weights/tokenizer live, that is a fact about the
+  MACHINE the action runs on, not a request the caller composes. Declare it
+  `ParamSpec::new("weights", …).host_env("BRAIN_<MODEL>_WEIGHTS")` and
+  `capability` does the rest for you: `ActionSpec::validate` fills it from that
+  variable (so `run` still reads `inv.get_str("weights")` unchanged, and an
+  unconfigured machine gets an error naming the VARIABLE), while
+  `Manifest::for_serving`/`catalog::serving_manifests()` project it out of every
+  off-machine surface - a scheduler, a remote client, a graph editor. Without
+  this, the param is published to callers who share no filesystem with this
+  machine and therefore cannot answer it; that is not cosmetic, it makes the
+  action unusable from anywhere but a local shell. Do NOT hand-roll the
+  projection with `params.retain(…)` and do NOT bake the env value into
+  `.default(…)` - a default is served to every caller, so it also leaks this
+  operator's directory layout. `manifest_resident()` is one line over
+  `for_serving()` in every model that has one. Reference: `glmdsa::caps`,
+  `qwen3::caps`, and `crates/catalog`'s own tests, which pin over the REAL
+  catalog that no served manifest carries a checkpoint path.
 - **Long-running actions must be cancellable.** Every [`Invocation`] carries a
   `capability::CancelToken` (`inv.cancel`; the `Default` token is unarmed and never
   fires, so short actions can ignore it). An action whose run is longer than a few

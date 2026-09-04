@@ -46,18 +46,14 @@ const PROBE_CAP: u32 = 64;
 /// checkpoint + tokenizer are service-side configuration (`BRAIN_LFM2*` env),
 /// so the actions carry only request parameters.
 pub fn manifest_resident() -> Manifest {
-    let mut m = manifest();
-    for a in &mut m.actions {
-        a.params.retain(|p| p.name != "weights" && p.name != "tokenizer");
-    }
-    m
+    manifest().for_serving()
 }
 
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let common = |a: ActionSpec| {
-        a.param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format LFM2.5-Encoder checkpoint (.safetensors)").required())
-            .param(ParamSpec::new("tokenizer", ParamType::Str, "path to the checkpoint's tokenizer.json").required())
+        a.param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format LFM2.5-Encoder checkpoint (.safetensors)").required().host_env("BRAIN_LFM2"))
+            .param(ParamSpec::new("tokenizer", ParamType::Str, "path to the checkpoint's tokenizer.json").required().host_env("BRAIN_LFM2_TOKENIZER"))
             .param(ParamSpec::new("text", ParamType::Str, "input text; falls back to the 'text' input blob for long documents"))
             .input(BlobSpec::new("text", Media::Text, "input document (used when the 'text' param is absent)"))
     };

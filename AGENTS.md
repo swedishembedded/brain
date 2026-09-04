@@ -1632,6 +1632,26 @@ a metric that isn't there was simply forgotten.
   direction). `flux1` and `pulid` are the newest of the eleven and the only
   two with no end-to-end fixture in this workspace to verify their pipeline
   glue against - see each one's module docs' honest scope note.
+- **A weights location is the HOST's fact, never an action param a caller
+  supplies - say so with `.host_env("BRAIN_…")`.** A model whose `caps.rs`
+  takes its checkpoint as an ordinary `ParamSpec` publishes that param on
+  every surface derived from its manifest, including the ones read by a
+  caller who is not standing on this machine and has no filesystem in common
+  with it. That is not a display bug: a scheduler placing work on a machine
+  it has never seen, or a graph editor in a browser, cannot answer "where is
+  the checkpoint" at all. Mark such a param
+  `.host_env("BRAIN_<MODEL>_WEIGHTS")` and two things follow, both in
+  `capability` and neither per-model: `ActionSpec::validate` fills it from
+  that variable when the caller did not supply one (so the action's own
+  `inv.get_str("weights")` is unchanged, and an unconfigured machine gets an
+  error naming the VARIABLE, not a param nobody was offered), and
+  `Manifest::for_serving`/`catalog::serving_manifests()` project it out of
+  every off-machine surface. A local caller that does share the filesystem
+  (`brain do … weights=…`) still wins by passing it explicitly.
+  `manifest_resident()` is now one line over that projection in every model
+  that has one - the resident surface and any off-machine surface cannot
+  drift, because they are the same projection of one definition.
+  `crates/catalog`'s own tests pin both directions over the REAL catalog.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,

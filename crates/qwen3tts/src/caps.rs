@@ -41,8 +41,8 @@ const SAMPLE_RATE: u32 = 24_000;
 /// The `weights_dir`/`ckpt`/`text` params + the common `GenOpts` sampling
 /// knobs, shared by every action's spec so the three can't silently drift.
 fn common_params(spec: ActionSpec) -> ActionSpec {
-    spec.param(ParamSpec::new("weights_dir", ParamType::Str, "dir holding talker.safetensors, mtp.safetensors, codec.safetensors (from `brain tts import`)").required())
-        .param(ParamSpec::new("ckpt", ParamType::Str, "HF checkpoint dir (config.json + tokenizer)").required())
+    spec.param(ParamSpec::new("weights_dir", ParamType::Str, "dir holding talker.safetensors, mtp.safetensors, codec.safetensors (from `brain tts import`)").required().host_env("BRAIN_QWEN3TTS_WEIGHTS"))
+        .param(ParamSpec::new("ckpt", ParamType::Str, "HF checkpoint dir (config.json + tokenizer)").required().host_env("BRAIN_QWEN3TTS_CKPT"))
         .param(ParamSpec::new("text", ParamType::Str, "the text to speak").required())
         .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
         .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))

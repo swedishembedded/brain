@@ -97,7 +97,7 @@ pub fn caption_spec() -> ActionSpec {
             ParamSpec::new("precision", ParamType::Str, "int8 (default, ~9 GiB) or fp32 (~43 GiB - needs a very large machine)")
                 .default(json!("int8")),
         )
-        .param(ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY").default(json!(default_dir())))
+        .param(ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY").host_env(DIR_VAR))
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required())
         .output(BlobSpec::new("text", Media::Text, "the generated text"))
 }
@@ -120,11 +120,7 @@ pub fn manifest() -> Manifest {
 /// hidden behind deployment state. `crate::resident_moondream3::
 /// Moondream3Resident::manifest` calls this rather than [`manifest`].
 pub fn manifest_resident() -> Manifest {
-    let mut m = manifest();
-    for a in &mut m.actions {
-        a.params.retain(|p| p.name != "weights");
-    }
-    m
+    manifest().for_serving()
 }
 
 /// Parse the `precision` parameter. `Err` names the accepted values rather than

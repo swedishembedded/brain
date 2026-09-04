@@ -31,13 +31,13 @@ pub const MODEL: &str = "brain/qwen3";
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (KV-cache decode, one Progress per token)")
         .streaming()
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen checkpoint (.safetensors)").required())
+        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen checkpoint (.safetensors)").required().host_env("BRAIN_QWEN_WEIGHTS"))
         .param(ParamSpec::new(
             "prompt",
             ParamType::Str,
             "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without); ignored when `messages` is set",
         ))
-        .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids"))
+        .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids").host_env("BRAIN_QWEN_TOKENIZER"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(32)).min(1.0).max(32768.0).step(1.0))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))

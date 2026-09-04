@@ -79,13 +79,13 @@ pub fn with_template_flavor_default(inv: &Invocation) -> Invocation {
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (Qwen3.8-27B dense hybrid GDN/GQA decoder, KV-cache decode, one Progress per token)")
         .streaming()
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen3.8-27B checkpoint (.safetensors)").required())
+        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen3.8-27B checkpoint (.safetensors)").required().host_env("BRAIN_QWEN35_WEIGHTS"))
         .param(ParamSpec::new(
             "prompt",
             ParamType::Str,
             "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without); ignored when `messages` is set",
         ))
-        .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids"))
+        .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids").host_env("BRAIN_QWEN35_TOKENIZER"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(32)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))

@@ -45,7 +45,7 @@ pub fn manifest() -> Manifest {
     let caption = ActionSpec::new("caption", "describe an image (MobileCLIP tower + Qwen2 decoder, greedy)")
         .param(
             ParamSpec::new("weights", ParamType::Str, "FastVLM checkpoint DIRECTORY (config.json + model.safetensors + tokenizer.json)")
-                .default(serde_json::json!(default_weights())),
+                .host_env("BRAIN_FASTVLM_WEIGHTS"),
         )
         .param(ParamSpec::new("prompt", ParamType::Str, "instruction for the model").default(serde_json::json!("Describe this image.")))
         .param(ParamSpec::new("max_new", ParamType::Int, "max caption tokens").default(serde_json::json!(48)))
@@ -70,11 +70,7 @@ pub fn manifest() -> Manifest {
 /// crafting a raw `weights` param cannot reach [`CaptionAction::run`]'s own
 /// per-request override either, not just "not see it in the UI".
 pub fn manifest_resident() -> Manifest {
-    let mut m = manifest();
-    for a in &mut m.actions {
-        a.params.retain(|p| p.name != "weights");
-    }
-    m
+    manifest().for_serving()
 }
 
 /// The two pipeline stages are compartmentalized exactly as two Active

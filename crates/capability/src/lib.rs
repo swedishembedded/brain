@@ -77,14 +77,46 @@ pub struct ParamSpec {
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub step: Option<f64>,
+    /// Set when this parameter names something that only exists on the machine
+    /// that RUNS the action - a checkpoint directory, a weights file, a
+    /// tokenizer - and is therefore host configuration, not a caller's choice.
+    /// The value is the environment variable that machine publishes it under
+    /// (`"BRAIN_SDXL_DIR"`, `"BRAIN_QWEN_WEIGHTS"`, …).
+    ///
+    /// Two things follow from it, both mechanical:
+    /// * [`ActionSpec::validate`] fills the param from that variable when the
+    ///   caller did not supply one, so an action reads `weights` exactly as it
+    ///   always did and no model needs its own env-fallback code.
+    /// * [`ActionSpec::for_serving`] / [`Manifest::for_serving`] DROP it, so a
+    ///   remote caller is never asked for a path it cannot know. A workflow
+    ///   author on another machine - or on no machine at all, in a browser -
+    ///   has no filesystem in common with whichever host ends up running the
+    ///   graph; advertising a path field to them is asking a question that has
+    ///   no correct answer. This is the one mechanism that keeps "where are the
+    ///   weights" a per-machine fact resolved at activation time, rather than a
+    ///   per-invocation parameter that leaks into every remote surface.
+    ///
+    /// A caller that DOES share the filesystem (the local CLI: `brain do …
+    /// weights=…`) may still pass one explicitly - an explicit value always
+    /// wins over the environment.
+    ///
+    /// Only meaningful on a [`ParamType::Str`] param: an environment variable
+    /// is a string. `crates/catalog`'s tests pin that over the real catalog.
+    pub host_env: Option<String>,
 }
 
 impl ParamSpec {
     pub fn new(name: &str, ty: ParamType, help: &str) -> ParamSpec {
-        ParamSpec { name: name.into(), ty, required: false, default: None, help: help.into(), min: None, max: None, step: None }
+        ParamSpec { name: name.into(), ty, required: false, default: None, help: help.into(), min: None, max: None, step: None, host_env: None }
     }
     pub fn required(mut self) -> ParamSpec {
         self.required = true;
+        self
+    }
+    /// Marks this param as host-resolved from environment variable `var` - see
+    /// [`ParamSpec::host_env`] for what that means and why it exists.
+    pub fn host_env(mut self, var: &str) -> ParamSpec {
+        self.host_env = Some(var.into());
         self
     }
     pub fn default(mut self, v: Value) -> ParamSpec {
@@ -110,6 +142,7 @@ impl ParamSpec {
             "help": self.help,
             "values": match &self.ty { ParamType::Enum(v) => json!(v), _ => Value::Null },
             "min": self.min, "max": self.max, "step": self.step,
+            "host_env": self.host_env,
         })
     }
 }
@@ -219,9 +252,27 @@ impl ActionSpec {
         })
     }
 
+    /// This action as a REMOTE caller sees it: every host-resolved param
+    /// ([`ParamSpec::host_env`]) dropped, because a caller that does not share
+    /// this machine's filesystem cannot answer it and must not be asked.
+    /// Everything else - every real per-request knob - survives untouched.
+    ///
+    /// This is the single definition every "served" manifest is derived from,
+    /// so a model's direct surface and its served surface cannot drift: they
+    /// are one [`ActionSpec`] and a projection of it.
+    pub fn for_serving(mut self) -> ActionSpec {
+        self.params.retain(|p| p.host_env.is_none());
+        self
+    }
+
     /// Validate + normalize an invocation against this spec: reject unknown or
     /// missing-required params/blobs and bad enum/type values, fill defaults.
     /// Returns the normalized [`Invocation`] ready for [`Action::run`].
+    ///
+    /// A [`ParamSpec::host_env`] param the caller did not supply is filled from
+    /// that environment variable first - the host answering "where are my
+    /// weights" once, at the boundary, so no action needs its own env fallback
+    /// and no remote caller ever has to name a path.
     pub fn validate(&self, inv: Invocation) -> Result<Invocation, String> {
         let mut params = inv.params.as_object().cloned().unwrap_or_default();
         // reject unknown params
@@ -230,15 +281,26 @@ impl ActionSpec {
                 return Err(format!("unknown param '{k}' for action '{}'", self.name));
             }
         }
-        // type-check + defaults + required
+        // type-check + host env + defaults + required
         for p in &self.params {
             match params.get(&p.name) {
                 Some(v) => check_type(&p.name, &p.ty, v)?,
                 None => {
-                    if let Some(d) = &p.default {
+                    if let Some(v) = host_env_value(p) {
+                        params.insert(p.name.clone(), Value::String(v));
+                    } else if let Some(d) = &p.default {
                         params.insert(p.name.clone(), d.clone());
                     } else if p.required {
-                        return Err(format!("missing required param '{}' for action '{}'", p.name, self.name));
+                        return Err(match &p.host_env {
+                            // Never "you forgot a param": on the serving path
+                            // there IS no param to forget, so the message has
+                            // to name the machine-side setting that is missing.
+                            Some(var) => format!(
+                                "action '{}' needs '{}', which this machine has not configured: set ${var} (or pass '{}' explicitly)",
+                                self.name, p.name, p.name
+                            ),
+                            None => format!("missing required param '{}' for action '{}'", p.name, self.name),
+                        });
                     }
                 }
             }
@@ -262,6 +324,15 @@ impl ActionSpec {
         }
         Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel })
     }
+}
+
+/// The host's answer for a [`ParamSpec::host_env`] param, when it has one: the
+/// named environment variable, empty treated as unset (an empty path is not a
+/// configured path - that distinction is what makes the "not configured" error
+/// above accurate rather than a downstream "file not found").
+fn host_env_value(p: &ParamSpec) -> Option<String> {
+    let var = p.host_env.as_ref()?;
+    std::env::var(var).ok().filter(|v| !v.is_empty())
 }
 
 fn check_type(name: &str, ty: &ParamType, v: &Value) -> Result<(), String> {
@@ -306,6 +377,15 @@ impl Manifest {
     /// `Manifest::new()` call sites across non-chat model kinds are untouched.
     pub fn with_max_context_tokens(mut self, tokens: u64) -> Manifest {
         self.max_context_tokens = Some(tokens);
+        self
+    }
+    /// This manifest as a REMOTE caller sees it - [`ActionSpec::for_serving`]
+    /// applied to every action. This is what a scheduler, a graph editor or any
+    /// other off-machine consumer must be shown: the model's real per-request
+    /// knobs, and none of the machine-local paths that are the HOST's job to
+    /// resolve at activation time.
+    pub fn for_serving(mut self) -> Manifest {
+        self.actions = self.actions.into_iter().map(ActionSpec::for_serving).collect();
         self
     }
     pub fn to_json(&self) -> Value {
@@ -668,6 +748,82 @@ mod tests {
         assert!(spec.validate(Invocation::new().set("text", json!("x")).set("mode", json!("weird"))).is_err());
         // wrong type
         assert!(spec.validate(Invocation::new().set("text", json!(5))).is_err());
+    }
+
+    // ===== host-resolved params: the weights location is the HOST's fact =====
+    //
+    // The bug these pin: a model that took its checkpoint path as an ordinary
+    // action param published that param on every remote surface derived from
+    // its manifest - so a graph author on another machine (or in a browser)
+    // was shown a REQUIRED "path to a .safetensors checkpoint" field with no
+    // answer that could possibly be right on whichever host later ran the
+    // graph. `host_env` makes the location what it always was - per-machine
+    // configuration - and `for_serving` stops advertising it off-machine.
+
+    /// The `weights`-shaped spec every affected model now declares.
+    fn host_env_spec(var: &str) -> ActionSpec {
+        ActionSpec::new("generate", "generate something")
+            .param(ParamSpec::new("weights", ParamType::Str, "checkpoint").required().host_env(var))
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").default(json!("")))
+    }
+
+    #[test]
+    fn for_serving_drops_host_resolved_params_and_keeps_every_real_knob() {
+        let served = host_env_spec("BRAIN_TEST_HOST_UNSET").for_serving();
+        let names: Vec<&str> = served.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["prompt"], "a remote caller must never be asked for a host path");
+    }
+
+    #[test]
+    fn manifest_for_serving_projects_every_action() {
+        let m = Manifest::new("brain/x", "x", vec![host_env_spec("BRAIN_TEST_HOST_UNSET"), host_env_spec("BRAIN_TEST_HOST_UNSET")]);
+        let served = m.for_serving();
+        assert_eq!(served.actions.len(), 2);
+        for a in &served.actions {
+            assert!(!a.params.iter().any(|p| p.name == "weights"));
+        }
+    }
+
+    /// The other half: dropping the param must not break execution. The host
+    /// answers from its own environment at validate time, so the action reads
+    /// `weights` exactly as it always did.
+    #[test]
+    fn validate_fills_a_host_resolved_param_from_the_environment() {
+        // SAFETY: a test-only variable no other test in this process reads.
+        unsafe { std::env::set_var("BRAIN_TEST_HOST_WEIGHTS", "/models/x.safetensors") };
+        let inv = host_env_spec("BRAIN_TEST_HOST_WEIGHTS").validate(Invocation::new()).unwrap();
+        assert_eq!(inv.get_str("weights").as_deref(), Some("/models/x.safetensors"));
+        unsafe { std::env::remove_var("BRAIN_TEST_HOST_WEIGHTS") };
+    }
+
+    /// A caller that DOES share the filesystem (the local CLI) still wins.
+    #[test]
+    fn an_explicit_value_beats_the_host_environment() {
+        // SAFETY: as above.
+        unsafe { std::env::set_var("BRAIN_TEST_HOST_OVERRIDE", "/models/env.safetensors") };
+        let inv = host_env_spec("BRAIN_TEST_HOST_OVERRIDE")
+            .validate(Invocation::new().set("weights", json!("/models/cli.safetensors")))
+            .unwrap();
+        assert_eq!(inv.get_str("weights").as_deref(), Some("/models/cli.safetensors"));
+        unsafe { std::env::remove_var("BRAIN_TEST_HOST_OVERRIDE") };
+    }
+
+    /// Unconfigured must fail loudly, naming the MACHINE-side setting - a
+    /// caller on the serving path has no param to have forgotten.
+    #[test]
+    fn an_unconfigured_host_param_names_the_environment_variable() {
+        let err = host_env_spec("BRAIN_TEST_HOST_UNSET").validate(Invocation::new()).unwrap_err();
+        assert!(err.contains("BRAIN_TEST_HOST_UNSET"), "{err}");
+    }
+
+    /// An empty variable is not a configured path.
+    #[test]
+    fn an_empty_host_variable_reads_as_unset() {
+        // SAFETY: as above.
+        unsafe { std::env::set_var("BRAIN_TEST_HOST_EMPTY", "") };
+        let err = host_env_spec("BRAIN_TEST_HOST_EMPTY").validate(Invocation::new()).unwrap_err();
+        assert!(err.contains("BRAIN_TEST_HOST_EMPTY"), "{err}");
+        unsafe { std::env::remove_var("BRAIN_TEST_HOST_EMPTY") };
     }
 
     /// A "long-running" action that polls the invocation's cancel token each step.

@@ -121,7 +121,7 @@ pub fn generate_spec() -> ActionSpec {
     .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(DEFAULT_MAX_NEW)))
     .param(
         ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY holding both DeepSeek-OCR GGUFs (mmproj + LM)")
-            .default(json!(default_dir())),
+            .host_env(DIR_VAR),
     )
     .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required())
     .output(BlobSpec::new("text", Media::Text, "the decoded document text"))
@@ -145,11 +145,7 @@ pub fn manifest() -> Manifest {
 /// hidden behind deployment state. `crate::resident_deepseekocr::
 /// DeepseekOcrResident::manifest` calls this rather than [`manifest`].
 pub fn manifest_resident() -> Manifest {
-    let mut m = manifest();
-    for a in &mut m.actions {
-        a.params.retain(|p| p.name != "weights");
-    }
-    m
+    manifest().for_serving()
 }
 
 /// A built composite plus everything one request needs around it.

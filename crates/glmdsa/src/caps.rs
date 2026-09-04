@@ -31,6 +31,12 @@
 //! building its own [`capability::ActionSpec`], so the two surfaces cannot
 //! drift apart: they are one definition.
 //!
+//! The dropping itself is no longer GLM's own code: `weights` declares
+//! [`capability::ParamSpec::host_env`] (`BRAIN_GLMDSA_WEIGHTS`), which both
+//! projects it out of every off-machine surface
+//! ([`capability::Manifest::for_serving`]) and fills it from that variable at
+//! validate time. Every model with a checkpoint path says it the same way.
+//!
 //! # Scope
 //!
 //! One action, `generate`. GLM in this repo is **char-level** (the checkpoint
@@ -67,7 +73,7 @@ pub const MODEL: &str = "brain/glm";
 /// The full, static capability manifest - safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate text continuing a prompt (GLM MLA + MoE decoder)")
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format GLM checkpoint (.safetensors)").required())
+        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format GLM checkpoint (.safetensors)").required().host_env("BRAIN_GLMDSA_WEIGHTS"))
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))
@@ -80,12 +86,14 @@ pub fn manifest() -> Manifest {
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP): the
 /// checkpoint is service-side configuration (`BRAIN_GLMDSA_WEIGHTS`), so the
 /// action carries only request parameters.
+///
+/// One line, because "drop the host's own paths" is not a GLM fact: `weights`
+/// carries [`capability::ParamSpec::host_env`], and
+/// [`capability::Manifest::for_serving`] projects every such param out for
+/// every model at once. This function stays as GLM's own name for that
+/// projection.
 pub fn manifest_resident() -> Manifest {
-    let mut m = manifest();
-    for a in &mut m.actions {
-        a.params.retain(|p| p.name != "weights");
-    }
-    m
+    manifest().for_serving()
 }
 
 /// Sampling parameters, read once so the served and CLI paths agree on
