@@ -392,44 +392,74 @@ pub fn av_outcome(av: &pipeline::GeneratedAv) -> capability::Outcome {
 
 // ===================== resident weight source =====================
 
-/// The two component directories plus the DiT weight FILE every generation
-/// needs. See this module's own doc for [`Paths::dit`]'s real, tracked gap
-/// (it names a file already in this crate's OWN tensor naming, not a raw HF
-/// checkpoint directory - a real-checkpoint DiT importer is a separate,
-/// not-yet-built phase).
+/// Every component directory one `BRAIN_MINIMAXH3_DIR` checkout needs,
+/// derived from that single root - matching `arch::ARCHS`'s own
+/// `weights_env: &[("BRAIN_MINIMAXH3_DIR", "dir")]` row (one `dir` role, not
+/// per-role env vars: this replaces an earlier draft that read three
+/// separate `BRAIN_MINIMAXH3_{DIT,VIDEO_VAE,VOCODER}` vars nothing in
+/// `arch::ARCHS` ever registered, so real serving could never actually reach
+/// it). See [`Paths::dit`]'s own doc for [`crate::model::H3Transformer::
+/// load`]'s real, tracked naming gap.
 #[derive(Clone, Debug)]
 pub struct Paths {
-    /// `safetensors` file, `H3Transformer::load`'s own naming (see this
-    /// module's doc).
+    /// The `transformer/` component directory - real-checkpoint tensor
+    /// names there are not yet confirmed to agree with
+    /// [`crate::model::H3Transformer::load`]'s own naming (`to_q.weight`
+    /// etc., diffusers' `MiniMaxH3Attention` module names); a real-checkpoint
+    /// DiT importer bridging the two, if a bridge turns out to be needed
+    /// at all, is separate, not-yet-built work.
     pub dit: String,
     /// The `vae/` component directory `crate::import::import_video_vae`
-    /// reads (`<dir>/model.safetensors`).
+    /// reads.
     pub video_vae: String,
-    /// The audio VAE decoder's component directory
-    /// `crate::import::import_audio_vae_decoder` reads
-    /// (`<dir>/model.safetensors`).
+    /// The `audio_vae/` component directory
+    /// `crate::import::import_audio_vae_decoder` reads.
     pub vocoder: String,
+    /// The `text_encoder/` component directory - `config.json` plus the
+    /// sharded Qwen3-VL weights [`build_text_encoder`] loads.
+    pub text_encoder: String,
+    /// The `tokenizer/` component directory - `tokenizer.json`/`vocab.json`/
+    /// `merges.txt`, separate from `text_encoder/` in the root layout.
+    pub tokenizer: String,
 }
 
 impl Paths {
-    /// `None` (not registered) unless all three `BRAIN_MINIMAXH3_*` vars are
-    /// set - `wan::Paths::from_env`'s own all-or-nothing gate.
+    /// `None` (not registered) unless `BRAIN_MINIMAXH3_DIR` is set - every
+    /// sub-path is a fixed, real-checkpoint-confirmed subdirectory name
+    /// under it (this crate's roadmap ledger's "Checkpoint layout" section),
+    /// not independently overridable per role the way `ltxv`'s recipe is
+    /// (H3's fetch side, `modelstore::recipe::H3Recipe`, has no per-role
+    /// granularity either - see that type's own doc for why).
     pub fn from_env() -> Result<Paths, String> {
-        let get = |name: &str| std::env::var(name).map_err(|_| format!("minimaxh3: ${name} not set"));
-        Ok(Paths { dit: get("BRAIN_MINIMAXH3_DIT")?, video_vae: get("BRAIN_MINIMAXH3_VIDEO_VAE")?, vocoder: get("BRAIN_MINIMAXH3_VOCODER")? })
+        let root = std::env::var("BRAIN_MINIMAXH3_DIR").map_err(|_| "minimaxh3: $BRAIN_MINIMAXH3_DIR not set".to_string())?;
+        Ok(Paths::resolve(&root))
+    }
+
+    /// [`Paths::from_env`]'s pure half - every sub-path `root` implies,
+    /// callable directly by tests without the env var.
+    pub fn resolve(root: &str) -> Paths {
+        Paths {
+            dit: format!("{root}/transformer"),
+            video_vae: format!("{root}/vae"),
+            vocoder: format!("{root}/audio_vae"),
+            text_encoder: format!("{root}/text_encoder"),
+            tokenizer: format!("{root}/tokenizer"),
+        }
     }
 }
 
-/// Read a bare `safetensors` file into a [`vae::blocks::Tensors`] map with NO
-/// name remapping - `checkpoint::safetensors::read` plus the same
+/// Read a bare file OR a sharded `<name>.safetensors.index.json` directory
+/// into a [`vae::blocks::Tensors`] map with NO name remapping -
+/// `checkpoint::safetensors::read_model_dir` plus the same
 /// `HashMap`-from-`Vec<StTensor>` collection every other import in this crate
-/// starts from, minus any fold/rename step (there is none to do for a file
-/// already in this crate's own naming - see [`Paths::dit`]'s doc). `pub`
-/// so `crates/cli/src/resident_minimaxh3.rs` can read the DiT tensors ONCE
-/// (into its own resident [`crate::model::H3Transformer`]) without going
-/// through [`LoadedWeights::load`], which would also re-read the VAEs.
+/// starts from, minus any fold/rename step (there is none to do here - see
+/// [`Paths::dit`]'s doc for whether the real checkpoint's own tensor names
+/// need one). `pub` so `crates/cli/src/resident_minimaxh3.rs` can read the
+/// DiT tensors ONCE (into its own resident [`crate::model::H3Transformer`])
+/// without going through [`LoadedWeights::load`], which would also re-read
+/// the VAEs.
 pub fn read_tensors(path: &str) -> Result<vae::blocks::Tensors, String> {
-    let raw = checkpoint::safetensors::read(path)?;
+    let raw = checkpoint::safetensors::read_model_dir(std::path::Path::new(path))?;
     Ok(raw.into_iter().map(|t| (t.name, (t.shape, t.data))).collect())
 }
 
@@ -843,21 +873,33 @@ mod tests {
     }
 
     /// `LoadedWeights::load` must fail cleanly (not panic) when the DiT path
-    /// does not exist - `Paths::from_env`'s own all-or-nothing gate paired
-    /// with a real, if trivial, error path.
+    /// does not exist - a real, if trivial, error path.
     #[test]
     fn loaded_weights_load_reports_a_missing_dit_file_cleanly() {
-        let paths = Paths { dit: "/nonexistent/minimaxh3-dit.safetensors".to_string(), video_vae: "/nonexistent/vae".to_string(), vocoder: "/nonexistent/vocoder".to_string() };
+        let paths = Paths::resolve("/nonexistent-minimaxh3-root");
         assert!(LoadedWeights::load(&paths).is_err());
     }
 
+    /// [`Paths::resolve`] derives every sub-path from one root, each a fixed,
+    /// real-checkpoint-confirmed subdirectory name - no field is ever empty
+    /// or shares another field's value.
     #[test]
-    fn paths_from_env_requires_all_three_vars() {
+    fn resolve_derives_every_role_from_one_root() {
+        let p = Paths::resolve("/some/root");
+        assert_eq!(p.dit, "/some/root/transformer");
+        assert_eq!(p.video_vae, "/some/root/vae");
+        assert_eq!(p.vocoder, "/some/root/audio_vae");
+        assert_eq!(p.text_encoder, "/some/root/text_encoder");
+        assert_eq!(p.tokenizer, "/some/root/tokenizer");
+    }
+
+    #[test]
+    fn paths_from_env_requires_brain_minimaxh3_dir() {
         // No assertion on the ambient environment (another test/process may
-        // have these set) - only that the function does not panic and that a
-        // `Paths` it returns carries all three fields non-empty.
+        // have it set) - only that the function does not panic and that a
+        // `Paths` it returns carries every field non-empty.
         if let Ok(p) = Paths::from_env() {
-            assert!(!p.dit.is_empty() && !p.video_vae.is_empty() && !p.vocoder.is_empty());
+            assert!(!p.dit.is_empty() && !p.video_vae.is_empty() && !p.vocoder.is_empty() && !p.text_encoder.is_empty() && !p.tokenizer.is_empty());
         }
     }
 }

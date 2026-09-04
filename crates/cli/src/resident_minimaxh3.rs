@@ -351,7 +351,7 @@ mod tests {
     fn resident() -> MiniMaxH3Resident {
         MiniMaxH3Resident {
             id: minimaxh3::caps::MODEL.to_string(),
-            paths: minimaxh3::caps::Paths { dit: "/dit".into(), video_vae: "/vae".into(), vocoder: "/vocoder".into() },
+            paths: minimaxh3::caps::Paths::resolve("/test-root"),
             hot: Arc::new(Mutex::new(None)),
         }
     }
