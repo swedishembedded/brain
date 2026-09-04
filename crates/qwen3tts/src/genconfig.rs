@@ -121,14 +121,18 @@ impl GenerationConfig {
     }
 }
 
-/// The MTP/subtalker half of a [`SamplingRequest`].
+/// The MTP/subtalker half of a [`SamplingRequest`]: the caller's explicit
+/// choices for the residual codebooks (1..15).
 ///
-/// Present and resolved so the follow-up that wires the MTP's residual
-/// codebooks through this same chain has the values waiting for it. **Nothing
-/// reads the resolved subtalker plan yet**: the residual codebooks still decode
-/// greedily via `GenOpts::residual`, because the reference's subtalker defaults
-/// change the acoustic texture of every existing clip and that deserves its own
-/// listening pass rather than riding in on a config-plumbing change.
+/// This is the ONLY caller-side override for residual sampling. There is no
+/// separate `ResidualOpts`/`GenOpts::residual` any more - it was a fourth
+/// hand-threaded knob a caller had to remember to set, defaulting to greedy,
+/// which is exactly the "one more source of truth in Rust" shape that shipped
+/// `repetition_penalty = 1.0`. Unset fields resolve from the checkpoint's
+/// `subtalker_*` keys and then from the reference, like every other knob here.
+///
+/// A `temperature` of `Some(0.0)` pins the residual codebooks to greedy, the
+/// same way an explicit `--temp 0` does for codebook 0.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SubtalkerRequest {
     pub do_sample: Option<bool>,
@@ -152,13 +156,17 @@ pub struct SamplingRequest {
 }
 
 impl SamplingRequest {
-    /// Pin every codebook-0 knob to a deterministic greedy draw.
+    /// Pin EVERY codebook - codebook 0 and the residual codebooks alike - to a
+    /// deterministic greedy draw.
     ///
     /// For the parity and determinism lanes, which need bit-identical codes
     /// across two engines and therefore must NOT inherit whatever a checkpoint
-    /// (or the reference) says about sampling. Pinning all five explicitly is
-    /// what makes such a test independent of the config chain rather than a
-    /// silent hostage to it.
+    /// (or the reference) says about sampling. Pinning explicitly is what makes
+    /// such a test independent of the config chain rather than a silent hostage
+    /// to it - and that now has to include the subtalker half, because the
+    /// residual codebooks sample by default. Leaving them unset here would let a
+    /// "greedy" parity run draw 15 random codebooks per frame off two different
+    /// engines' logits and diverge on the first near-tie.
     pub fn greedy() -> SamplingRequest {
         SamplingRequest {
             do_sample: Some(false),
@@ -166,7 +174,7 @@ impl SamplingRequest {
             top_k: Some(0),
             top_p: Some(0.0),
             repetition_penalty: Some(1.0),
-            subtalker: SubtalkerRequest::default(),
+            subtalker: SubtalkerRequest { do_sample: Some(false), temperature: Some(0.0), top_k: Some(0), top_p: Some(0.0) },
             max_new_tokens: None,
         }
     }
@@ -196,8 +204,12 @@ impl PlanSource {
 pub struct GenerationPlan {
     /// Codebook-0's filter chain - the Talker's own next-token draw.
     pub cb0: SamplerCfg,
-    /// The MTP/subtalker residual codebooks' chain. Resolved and reported;
-    /// see [`SubtalkerRequest`] for why nothing consumes it yet.
+    /// The MTP/subtalker residual codebooks' chain, consumed by every residual
+    /// fill in the crate (`MtpModel`, `CpuMtp`, the NPU `MtpEngine`s) through
+    /// [`crate::sampling::sample_residual`].
+    ///
+    /// Its `repetition_penalty` is always `1.0`: the reference configures none
+    /// for the subtalker, and `sample_residual` would ignore it anyway.
     pub subtalker: SamplerCfg,
     /// The reference's `max_new_tokens`, resolved and reported but **not
     /// applied**. `GenOpts::max_frames` remains the cap that stops a run.
@@ -306,7 +318,7 @@ impl GenerationPlan {
         format!(
             "qwen3tts: resolved plan: sample={} temp={} top_k={} top_p={} rep_penalty={} (source: {}) \
              | length: max_frames={max_frames} applied, max_new_tokens={} reported-only \
-             | subtalker (resolved, not yet wired): sample={} temp={} top_k={} top_p={}",
+             | subtalker (residual codebooks 1..15): sample={} temp={} top_k={} top_p={}",
             self.cb0.do_sample,
             self.cb0.temperature,
             self.cb0.top_k,
@@ -463,8 +475,49 @@ mod tests {
         assert!(GenerationPlan::resolve(&SamplingRequest::default(), Some(d2.path())).cb0.is_greedy());
     }
 
-    /// The subtalker half resolves through the same precedence, ready for the
-    /// follow-up that consumes it.
+    /// The reference samples the residual codebooks too, so an unconfigured
+    /// brain run must as well. This is the subtalker twin of
+    /// `the_reference_fallback_never_disables_the_repetition_penalty`: the
+    /// residual codebooks carry most of the acoustic detail, and decoding them
+    /// greedily was a parity gap, not a design choice.
+    #[test]
+    fn the_reference_fallback_samples_the_residual_codebooks() {
+        let p = GenerationPlan::reference();
+        assert!(p.subtalker.do_sample, "the reference's subtalker_dosample is true");
+        assert!(!p.subtalker.is_greedy());
+        assert_eq!(p.subtalker.temperature, 0.9);
+        assert_eq!(p.subtalker.top_k, 50);
+        assert_eq!(p.subtalker.repetition_penalty, 1.0, "the reference configures no subtalker repetition penalty");
+        // And the real checkpoint agrees, so this is not a fallback-only claim.
+        let d = Dir::new("subdefault", Some(REAL));
+        assert!(GenerationPlan::resolve(&SamplingRequest::default(), Some(d.path())).subtalker.do_sample);
+    }
+
+    /// A greedy request must pin BOTH halves. A parity lane that pinned only
+    /// codebook 0 would now silently sample 15 residual codebooks per frame off
+    /// two different engines' logits and diverge on the first near-tie.
+    #[test]
+    fn the_greedy_request_pins_the_residual_codebooks_too() {
+        let d = Dir::new("greedysub", Some(REAL));
+        let p = GenerationPlan::resolve(&SamplingRequest::greedy(), Some(d.path()));
+        assert!(p.cb0.is_greedy());
+        assert!(p.subtalker.is_greedy(), "a greedy request left the residual codebooks sampling");
+    }
+
+    /// An explicit zero residual temperature is the residual half's `--temp 0`.
+    #[test]
+    fn an_explicit_zero_residual_temperature_forces_greedy_residuals() {
+        let d = Dir::new("subzero", Some(REAL));
+        let req = SamplingRequest {
+            subtalker: SubtalkerRequest { temperature: Some(0.0), ..SubtalkerRequest::default() },
+            ..SamplingRequest::default()
+        };
+        let p = GenerationPlan::resolve(&req, Some(d.path()));
+        assert!(p.subtalker.is_greedy());
+        assert!(!p.cb0.is_greedy(), "pinning the residual half must not touch codebook 0");
+    }
+
+    /// The subtalker half resolves through the same precedence as codebook 0.
     #[test]
     fn the_subtalker_knobs_resolve_through_the_same_precedence() {
         let d = Dir::new("sub", Some(r#"{"subtalker_dosample": true, "subtalker_temperature": 0.7, "subtalker_top_k": 12}"#));

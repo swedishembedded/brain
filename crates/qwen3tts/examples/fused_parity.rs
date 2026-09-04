@@ -12,7 +12,7 @@
 use data::rng::Lcg;
 use npu::openvino::NpuDevice;
 use qwen3tts::npu_gen::{FusedMtp, MtpEngine};
-use qwen3tts::CpuMtp;
+use qwen3tts::{CpuMtp, SamplerCfg};
 
 
 
@@ -29,8 +29,13 @@ fn main() {
 
     let th = Lcg::new(1).vec_scaled(emb, 0.5);
     let cb0 = Lcg::new(2).vec_scaled(emb, 0.5);
+    // Pinned greedy on BOTH sides. The fused graph's argmax is baked in and
+    // cannot sample, and what this compares is the topology, so the CPU side
+    // must be held to the same argmax rather than to the resolved (sampled)
+    // subtalker plan a real decode would run.
+    let greedy = SamplerCfg::greedy();
     let (codes_c, res_c) = cpu.generate_residuals(&th, &cb0);
-    let (codes_f, res_f) = fused.generate_residuals(&th, &cb0);
+    let (codes_f, res_f) = fused.generate_residuals(&th, &cb0, &greedy, &mut data::rng::Rng::new(0));
 
     println!("codes_cpu  ={codes_c:?}");
     println!("codes_fused={codes_f:?}");

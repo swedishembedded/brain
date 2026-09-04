@@ -317,72 +317,6 @@ fn host_param(name: &str) -> Option<HostParam> {
     }
 }
 
-/// Temperature/top-k/top-p sampling over one residual codebook's logit row.
-/// No EOS masking or repetition penalty -- the residual codebooks have no EOS
-/// token and the reference's `subtalker_*` config carries no repetition
-/// penalty for them either, only the three sampling knobs this mirrors.
-fn sample_residual(row: &[f32], opts: &crate::pipeline::ResidualOpts, rng: &mut data::rng::Rng) -> usize {
-    if opts.temperature <= 0.0 {
-        let mut best = 0usize;
-        for j in 1..row.len() {
-            if row[j] > row[best] {
-                best = j;
-            }
-        }
-        return best;
-    }
-    let mut scaled: Vec<f32> = row.iter().map(|&l| l / opts.temperature).collect();
-    if opts.top_k > 0 && opts.top_k < scaled.len() {
-        let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap());
-        let threshold = scaled[idx[opts.top_k - 1]];
-        for x in scaled.iter_mut() {
-            if *x < threshold {
-                *x = f32::NEG_INFINITY;
-            }
-        }
-    }
-    if opts.top_p > 0.0 && opts.top_p < 1.0 {
-        let max0 = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let mut ranked: Vec<(usize, f32)> =
-            scaled.iter().enumerate().filter(|&(_, &x)| x.is_finite()).map(|(i, &x)| (i, (x - max0).exp())).collect();
-        let z: f32 = ranked.iter().map(|&(_, p)| p).sum();
-        if z > 0.0 {
-            ranked.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            let mut cum = 0.0f32;
-            let mut cutoff = ranked.len();
-            for (rank, &(_, p)) in ranked.iter().enumerate() {
-                cum += p / z;
-                if cum >= opts.top_p {
-                    cutoff = rank + 1;
-                    break;
-                }
-            }
-            let keep: std::collections::HashSet<usize> = ranked[..cutoff].iter().map(|&(i, _)| i).collect();
-            for (i, x) in scaled.iter_mut().enumerate() {
-                if !keep.contains(&i) {
-                    *x = f32::NEG_INFINITY;
-                }
-            }
-        }
-    }
-    let max = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    for x in scaled.iter_mut() {
-        *x = (*x - max).exp();
-        sum += *x;
-    }
-    let r = rng.next_f32() * sum;
-    let mut acc = 0.0f32;
-    for (i, &p) in scaled.iter().enumerate() {
-        acc += p;
-        if acc >= r {
-            return i;
-        }
-    }
-    scaled.len() - 1
-}
-
 impl MtpModel {
     /// The fp32 GEMM tier for this device - the same rule `qwen3::serve`,
     /// `flux1`/`flux2` and `model::rowemit` use. Both fast kernels cooperate
@@ -933,36 +867,48 @@ impl MtpModel {
         out
     }
 
-    /// Per-frame residual codebook generation (greedy). Given the Talker final
-    /// hidden state at this frame (`talker_hidden`, `[d_model]`) and the Talker
-    /// codebook-0 embedding (`cb0_embed`, `[d_model]`, from the Talker's own
-    /// table), autoregressively predict residual codebooks `1..=15` and return
-    /// `(codes, residual_embed_sum)`:
-    ///   * `codes` — the 15 residual codebook ids (codebooks 1..15),
-    ///   * `residual_embed_sum` — `Σ_{i=1}^{15} codec_embedding[i-1][code_i]`
-    ///     (`[d_model]`), the residual part of the frame's feedback embedding.
+    /// Per-frame residual codebook generation, pinned GREEDY.
     ///
-    /// Mirrors `code_predictor.generate` in `modeling_qwen3_tts.py`: position 0 is
-    /// the Talker hidden, position 1 the cb0 embed, position `i+1` (`i>=1`) the
-    /// embedding of codebook `i`; `lm_head[i-1]` reads hidden position `i+1` to
-    /// predict codebook `i+1`. Because attention is causal, predicting codebook
-    /// `k` only needs positions `0..=k` filled, so we grow the sequence in place
-    /// (future positions stay zero and never influence the read position).
+    /// **A convenience wrapper only.** A real decode calls
+    /// [`Self::generate_residuals_with`] with the run's resolved subtalker
+    /// plan, which the reference (and this checkpoint's
+    /// `generation_config.json`) says is SAMPLED. This exists for the parity,
+    /// determinism and shape tests that want an argmax they can compare
+    /// bit-for-bit, and it says so in a `SamplerCfg::greedy()` rather than in a
+    /// `None` that a caller could mistake for "the default".
     pub fn generate_residuals(
         &self,
         talker_hidden: &[f32],
         cb0_embed: &[f32],
     ) -> (Vec<u32>, Vec<f32>) {
         let mut rng = data::rng::Rng::new(0);
-        self.generate_residuals_with(talker_hidden, cb0_embed, None, &mut rng)
+        self.generate_residuals_with(talker_hidden, cb0_embed, &crate::sampling::SamplerCfg::greedy(), &mut rng)
     }
 
-    /// Same as [`Self::generate_residuals`], with optional independent sampling
-    /// on the residual codebooks (`residual = None` is the greedy argmax;
-    /// `rng` is only consulted when `residual.is_some()`).
-    /// See `crate::pipeline::ResidualOpts` / `GenOpts::residual` for why this
-    /// exists: the reference's own `subtalker_*` config keys sample these
-    /// codebooks too, and they carry most of the acoustic detail.
+    /// Per-frame residual codebook generation under an explicit filter chain -
+    /// the run's `GenerationPlan::subtalker`, resolved from the checkpoint's
+    /// `subtalker_*` keys.
+    ///
+    /// Given the Talker final hidden state at this frame (`talker_hidden`,
+    /// `[embedding_dim]`) and the Talker codebook-0 embedding (`cb0_embed`,
+    /// same width, from the Talker's own table), autoregressively predict
+    /// residual codebooks `1..=15` and return `(codes, residual_embed_sum)`:
+    ///   * `codes` - the 15 residual codebook ids (codebooks 1..15),
+    ///   * `residual_embed_sum` - `Σ_{i=1}^{15} codec_embedding[i-1][code_i]`,
+    ///     the residual part of the frame's feedback embedding.
+    ///
+    /// Mirrors `code_predictor.generate` in `modeling_qwen3_tts.py`: position 0
+    /// is the Talker hidden, position 1 the cb0 embed, position `i+1` (`i>=1`)
+    /// the embedding of codebook `i`; `lm_head[i-1]` reads hidden position `i+1`
+    /// to predict codebook `i+1`. Because attention is causal, predicting
+    /// codebook `k` only needs positions `0..=k` filled, so we grow the sequence
+    /// in place (future positions stay zero and never influence the read
+    /// position).
+    ///
+    /// Every draw goes through [`crate::sampling::sample_residual`], the same
+    /// module (and the same `draw_from_logits`) codebook 0 uses; a greedy `cfg`
+    /// is an argmax and consumes no `rng`. `rng` is shared with the caller's
+    /// codebook-0 stream on purpose: one seed reproduces one clip.
     ///
     /// **KV-cached**: one incremental decoder step per position, not one full
     /// re-forward of the growing `[num_code_groups, d_model]` sequence per
@@ -976,11 +922,10 @@ impl MtpModel {
         &self,
         talker_hidden: &[f32],
         cb0_embed: &[f32],
-        residual: Option<&crate::pipeline::ResidualOpts>,
+        cfg: &crate::sampling::SamplerCfg,
         rng: &mut data::rng::Rng,
     ) -> (Vec<u32>, Vec<f32>) {
         let e = self.cfg.embedding_dim as usize;
-        let v = self.cfg.vocab as usize;
         let nres = self.t as usize - 1; // 15
         assert_eq!(talker_hidden.len(), e);
         assert_eq!(cb0_embed.len(), e);
@@ -1002,18 +947,7 @@ impl MtpModel {
         for k in 1..=nres {
             let hidden = self.dec_step(&self.project_to_hidden(&input_raw), k as u32);
             let row = self.head_row(k - 1, &hidden);
-            let best = match residual {
-                Some(ro) => sample_residual(&row, ro, rng),
-                None => {
-                    let mut best = 0usize;
-                    for j in 1..v {
-                        if row[j] > row[best] {
-                            best = j;
-                        }
-                    }
-                    best
-                }
-            };
+            let best = crate::sampling::sample_residual(&row, cfg, rng).token as usize;
             codes[k - 1] = best as u32;
             // codec_embedding[k-1] embeds codebook k.
             let r = &self.codec_embedding[k - 1][best * e..(best + 1) * e];
@@ -1036,12 +970,11 @@ impl MtpModel {
         &self,
         talker_hidden: &[f32],
         cb0_embed: &[f32],
-        residual: Option<&crate::pipeline::ResidualOpts>,
+        cfg: &crate::sampling::SamplerCfg,
         rng: &mut data::rng::Rng,
     ) -> (Vec<u32>, Vec<f32>) {
         let d = self.cfg.d_model as usize;
         let e = self.cfg.embedding_dim as usize;
-        let v = self.cfg.vocab as usize;
         let t = self.t as usize; // num_code_groups (16)
         let nres = t - 1; // 15
         assert_eq!(talker_hidden.len(), e);
@@ -1058,18 +991,7 @@ impl MtpModel {
             // Only row `k-1` of the `[(t-1), vocab]` logit block is read here,
             // so only that row is computed.
             let row = &self.logits_at(&emb, k)[..];
-            let best = match residual {
-                Some(ro) => sample_residual(row, ro, rng),
-                None => {
-                    let mut best = 0usize;
-                    for j in 1..v {
-                        if row[j] > row[best] {
-                            best = j;
-                        }
-                    }
-                    best
-                }
-            };
+            let best = crate::sampling::sample_residual(row, cfg, rng).token as usize;
             codes[k - 1] = best as u32;
             // codec_embedding[k-1] embeds codebook k.
             let tbl = &self.codec_embedding[k - 1];
@@ -1732,7 +1654,8 @@ mod tests {
         // pos 0's d_model-wide row is NOT simply th's first d entries.
         assert_ne!(&embeds[0..d], &th[0..d]);
 
-        let (codes, res_sum) = m.generate_residuals_with(&th, &cb0, None, &mut data::rng::Rng::new(1));
+        let (codes, res_sum) =
+            m.generate_residuals_with(&th, &cb0, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(1));
         assert_eq!(codes.len(), 3); // num_code_groups(4) - 1
         assert_eq!(res_sum.len(), e, "feedback embedding must stay Talker-width (e), not d_model");
         assert!(res_sum.iter().all(|x| x.is_finite()));
@@ -1764,7 +1687,7 @@ mod tests {
 
             let (c_cached, r_cached) = m.generate_residuals(&th, &cb0);
             let (c_full, r_full) =
-                m.generate_residuals_recompute(&th, &cb0, None, &mut data::rng::Rng::new(0));
+                m.generate_residuals_recompute(&th, &cb0, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(0));
             assert_eq!(c_cached.len(), nres);
             assert_eq!(c_cached, c_full, "KV cache changed the residual codes");
             let err = r_cached

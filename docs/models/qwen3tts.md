@@ -139,6 +139,15 @@ This freezes the base Talker and trains attention adapters only.
   codebook-0 repeats a token its next-token top-1 probability climbs toward
   1.0, and a run that locks in decodes to silence for the rest of the clip.
   `1.0` disables the penalty and re-opens that failure mode.
+- `--residual-temp`, `--residual-top-k`, `--residual-top-p` - the same three
+  controls for the MTP's residual codebooks (1..15), the reference's separate
+  `subtalker_*` knobs. Like the codebook-0 flags they have no hardcoded
+  default and resolve from the checkpoint (`subtalker_dosample=true,
+  subtalker_temperature=0.9, subtalker_top_k=50, subtalker_top_p=1.0` on the
+  12 Hz Base checkpoint), so **the residual codebooks are sampled by
+  default**, matching the reference. `--residual-temp 0` pins them back to a
+  greedy argmax, which is quieter and flatter: these 15 codebooks carry most
+  of the acoustic detail.
 - `--ref-codes` - an external `[T,16]` codec-codes file (8-byte little-endian
   count header + u32 data) for the in-context (ICL) cloning path, used
   instead of the default x-vector-only cloning when you already have codes
@@ -152,8 +161,9 @@ Output is always mono 24 kHz f32 PCM WAV.
 
 ### Where the sampling defaults come from
 
-`--temp`, `--top-k`, `--top-p` and `--repetition-penalty` have no hardcoded
-default. A flag you do not pass is resolved, once per generation call, as:
+`--temp`, `--top-k`, `--top-p`, `--repetition-penalty` and the three
+`--residual-*` flags have no hardcoded default. A flag you do not pass is
+resolved, once per generation call, as:
 
 1. the value you passed (a CLI flag, a `brain do` / D-Bus param, a `GenOpts`
    field you set) - always wins, including a deliberate `--repetition-penalty

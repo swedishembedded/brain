@@ -293,6 +293,11 @@ real perceptual-quality lever, not API decoration.
       `npu_gen.rs` stay greedy-only for now (documented inline at each call
       site) -- giving them the same independent sampling is follow-up, not
       silently dropped.
+      **Superseded by the second silent-collapse follow-up below** ("the
+      subtalker half is wired"): the opt-in `ResidualOpts`/`GenOpts::residual`
+      is gone, `sample_residual` is `sampling.rs`'s not `mtp.rs`'s, every MTP
+      backend honours the resolved plan, and the DEFAULT is sampled because
+      the checkpoint says so.
 - [x] Wire `--top-p --repetition-penalty --residual-temp --residual-top-k
       --residual-top-p` into `tts_cli.rs`'s `parse_common`. Verified live:
       `brain qwen3tts synth --top-p 0.9 --repetition-penalty 1.3
@@ -1055,6 +1060,129 @@ discovers capabilities generically.
       that happens the failure should be legible from the run's own stderr
       instead of costing another multi-hour root-cause session. Thresholds are
       the same measured numbers the regression test uses.
+
+      **[x] Follow-up landed: the subtalker half is wired, and there is one
+      filter chain instead of two.** The bullet above left the resolved
+      `GenerationPlan::subtalker` computed, traced and consumed by nothing:
+      `GenOpts::residual` still defaulted to `None`, so brain filled 15 of
+      every 16 codebooks with a greedy argmax while this checkpoint's own
+      `generation_config.json` says `subtalker_dosample: true`. That is a
+      parity gap in the codebooks carrying most of the acoustic detail, and it
+      is now closed unconditionally, the same way `repetition_penalty = 1.05`
+      was - not behind a flag.
+
+      - **`pipeline::ResidualOpts` and `GenOpts::residual` are gone.** The
+        explicit-override layer for the residual codebooks is
+        `SamplingRequest::subtalker` (`SubtalkerRequest`), which already
+        existed and already resolved through the same
+        `caller > generation_config.json > reference` chain. Keeping a second,
+        separately-threaded `Option<ResidualOpts>` next to it would have been a
+        third pattern for one decision, and a `None`-defaults-to-greedy knob a
+        caller must remember to set is the same shape of second source of truth
+        that shipped the penalty at `1.0`. The CLI's `--residual-temp` /
+        `--residual-top-k` / `--residual-top-p` now fill
+        `opts.sampling.subtalker` and therefore no longer "opt into" sampling
+        at all - they override a half that is already on. `--residual-temp 0`
+        is the residual stream's `--temp 0`, i.e. back to greedy.
+      - **`mtp.rs::sample_residual` is deleted.** It was an independent
+        hand-rolled temperature/top-k/top-p/inverse-CDF, which is exactly the
+        duplication the `sampling.rs` extraction was supposed to prevent, and
+        it still carried the inverse-CDF boundary bug the cb0 walk was fixed
+        for (a masked index reachable at `r == 0.0` and on an `r == sum`
+        rounding). `sampling.rs` now factors the stream-INDEPENDENT half out as
+        `draw_from_logits(logits, &SamplerCfg, rng) -> Draw`; `sample_cb0` is
+        `suppress_specials` + `apply_repetition_penalty` + that, and
+        `sample_residual` is that. There is no second implementation to drift,
+        which is a stronger statement than any parity test between two.
+        `residual_draws_come_from_the_same_survivors_as_codebook_zero` asserts
+        it as a set equality anyway: the tokens each sampler can ever return,
+        over 4000 draws, equal the survivors of `apply_top_k` + `apply_top_p`
+        computed from the public stages.
+        Stages 1-2 stay codebook-0's alone, and that is a property of the
+        streams, not an omission: the residual codebooks have no EOS and no
+        reserved specials to suppress (blanking a band there would delete real
+        acoustic codes - `a_greedy_residual_config_is_the_argmax_of_the_whole_row`
+        pins that), and each of the 15 steps predicts a DIFFERENT codebook
+        through its own `lm_head`, so there is no shared token history for a
+        repetition penalty to read and no single stream that can lock into the
+        loop codebook 0's penalty exists to break. The reference configures none
+        for them either.
+      - **Every MTP backend honours the plan, not just the one the default path
+        uses.** `MtpModel::generate_residuals_with`, `CpuMtp` (new
+        `generate_residuals_with`) and the NPU `MtpEngine` trait all take
+        `&SamplerCfg` + `&mut Rng`; `generate_codes`, `generate_codes_cached`,
+        the batch scheduler's `Session` and all three NPU loops pass
+        `plan().subtalker` beside the `plan().cb0` they already passed. The
+        previous scope note ("the KV-cached mirror and the NPU engines stay
+        greedy-only") is retired: a backend that quietly decoded a greedier
+        clip for the same request is the divergence this seam exists to close.
+        `FusedMtp` is the one exception and cannot be fixed by threading a
+        config - its argmax is compiled into the ONNX graph - so it reports
+        once per process that it is ignoring a sampled plan rather than
+        differing in silence.
+      - `SamplingRequest::greedy()` now pins the subtalker half too. It could
+        not stay codebook-0-only once the residual default became sampled: the
+        parity lanes that use it (`cached_parity`) compare two engines
+        code-for-code, and 15 sampled draws per frame off two engines' logits
+        diverge on the first near-tie.
+
+      **Measured on the real 0.6B-Base checkpoint** (`out/tts-base06`, same
+      text/seed, greedy residuals vs the resolved sampled plan, `max_frames`
+      200). Both terminate on a natural codec EOS; the residual codebooks are
+      not what was keeping the clip healthy, and sampling them does not endanger
+      that:
+
+      | text/seed | mode | frames | rms | distinct per residual codebook (min-max) |
+      |---|---|---:|---:|---|
+      | fox / 0 | greedy | 38 | 0.058044 | 31-35 |
+      | fox / 0 | sampled | 31 | 0.089683 | 27-31 |
+      | weather / 3 | greedy | 107 | 0.035424 | 65-74 |
+      | weather / 3 | sampled | 84 | 0.016689 | 63-83 |
+      | numbers / 7 | greedy | 52 | 0.036939 | 44-52 |
+      | numbers / 7 | sampled | 55 | 0.047668 | 47-55 |
+
+      Two things worth recording because they contradict the obvious guesses:
+
+      - **Residual diversity does not separate greedy from sampled.** On a
+        healthy clip both sit at 0.6-1.0 of the frame count (fox: 31-35 of 38
+        greedy vs 27-31 of 31 sampled; weather: 65-74 of 107 vs 63-83 of 84;
+        numbers: 44-52 of 52 vs 47-55 of 55) - each frame's residuals are
+        conditioned on that frame's own hidden state, so an argmax over 38
+        different inputs is already 34 different answers. Sampling nudges the
+        band up, never by the order of magnitude that would make it a gate.
+        Diversity separates HEALTHY from
+        COLLAPSED (the locked clip carried 2-4 distinct values per residual
+        codebook over 200 frames), which is what the new gate in
+        `sampled_decode.rs` actually asserts, with a floor stated as a fraction
+        of the frame count and documented as a collapse gate rather than a
+        sampling one. What the residual codebooks were sampled with is asserted
+        where it can be asserted exactly: the resolved plan, off this
+        checkpoint's real config, plus a synthetic-weights frame-0 test.
+      - **Sampling the residuals DOES move codebook 0 and the EOS.** The frame
+        count changed 38 -> 31 and rms 0.058 -> 0.090 on the same text and seed.
+        That is not a bug and not an interaction with cb0's termination logic:
+        each frame's feedback embedding is `cb0_embed + Σ residual embeds +
+        text/pad`, so a different residual fill feeds the Talker a different
+        next input and the whole trajectory moves. Anything reasoning about
+        "the residual codebooks are decoded independently per frame" has to
+        stop at the frame boundary - across frames they are in the loop.
+        The level moved both ways across the three texts (fox 0.058 -> 0.090,
+        numbers 0.037 -> 0.048, weather 0.035 -> 0.017), all still comfortably
+        above the `0.01` speech floor, so "sampled is louder" is not a rule -
+        it is a different trajectory, and which one sounds better is what the
+        demo clips below are for. **Not yet listened to by a human.**
+
+      Demo clips for that listening pass, greedy vs sampled on three
+      texts/seeds, in `out/tts-demo/`:
+
+      | clip pair | seed | text |
+      |---|---:|---|
+      | `15-mtp-greedy-fox.wav` / `16-mtp-sampled-fox.wav` | 0 | "The quick brown fox jumps over the lazy dog." |
+      | `15-mtp-greedy-weather.wav` / `16-mtp-sampled-weather.wav` | 3 | "Good morning. The weather today is bright and clear, with a light breeze from the west." |
+      | `15-mtp-greedy-numbers.wav` / `16-mtp-sampled-numbers.wav` | 7 | "Please call me back at four one five, five five five, two seven three eight." |
+
+      The greedy half of each pair is produced with `--residual-temp 0`; the
+      sampled half is the new default, i.e. plain `brain qwen3tts synth`.
 
 ### Carried over, unchanged priority
 

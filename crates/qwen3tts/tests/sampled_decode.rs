@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Sampled-decode health gate: a default `pipeline::synth` must not collapse
-//! into a codebook-0 repetition loop and decode to silence.
+//! into a codebook-0 repetition loop and decode to silence, and must sample all
+//! sixteen codebooks the way the checkpoint's own config says to.
 //!
 //! This is the spec the "silent-collapse" bug violated: with sampling active
 //! (`GenOpts::default()` - `temperature=0.9, top_k=50`), `seed=0` on "The quick
@@ -62,6 +63,29 @@ const MIN_FRAMES: usize = 12;
 fn rms(wav: &[f32]) -> f32 {
     (wav.iter().map(|x| x * x).sum::<f32>() / wav.len().max(1) as f32).sqrt()
 }
+
+/// Floor on how many distinct values the LEAST varied residual codebook may
+/// take, as a fraction of the clip's frame count.
+///
+/// The collapse had a signature in the residual stream too, and it is a
+/// different one from codebook 0's: while codebook 0 locked into `706 x80`,
+/// residual codebooks 1..15 each carried only **2-4 distinct values** over 200
+/// frames - the MTP faithfully tracking a degenerate input. Measured on the
+/// healthy clip of the repro sentence (38 frames, seed 0), every residual
+/// codebook takes 31-35 distinct values, i.e. ~0.9 of the frame count, with
+/// sampled and greedy residuals both in that band.
+///
+/// So this is deliberately NOT a "were the residuals sampled" assertion -
+/// diversity does not separate those two on a healthy clip, and claiming it did
+/// would be a gate that passes for the wrong reason. It is the residual half of
+/// the collapse gate: `0.4` sits an order of magnitude above the collapsed
+/// measurement (2/200 = 0.01) and less than half the healthy one (~0.9), so it
+/// catches a degenerate decode that somehow satisfied every codebook-0 check.
+/// That the residual codebooks are sampled at all is asserted where it can be
+/// asserted exactly - `genconfig`'s resolution tests and
+/// `pipeline::sampling_tests::an_unconfigured_decode_samples_the_residual_codebooks`
+/// - plus the plan check below, which reads this checkpoint's real config.
+const MIN_RESIDUAL_DISTINCT_FRACTION: f32 = 0.4;
 
 /// Longest run of one repeated codebook-0 token, and the token it repeated.
 fn longest_cb0_run(cb0: &[u32]) -> (usize, u32) {
@@ -136,7 +160,36 @@ fn default_sampled_decode_does_not_collapse_to_silence() {
          that decodes to silence, even though the clip terminated"
     );
 
-    // (4) Only now the waveform, through the same decode `synth` performs.
+    // (4) The residual half of the same collapse gate. Measured per codebook
+    // rather than pooled: pooling would let a few varied codebooks hide a flat
+    // one, and "flat" is exactly the shape the collapse produced here.
+    let residual_distinct: Vec<usize> = (1..CODEBOOKS)
+        .map(|c| (0..frames).map(|f| codes[f * CODEBOOKS + c]).collect::<std::collections::HashSet<_>>().len())
+        .collect();
+    eprintln!("sampled decode: distinct per residual codebook 1..15 = {residual_distinct:?}");
+    let flattest = residual_distinct.iter().copied().min().unwrap_or(0);
+    let floor = (frames as f32 * MIN_RESIDUAL_DISTINCT_FRACTION).ceil() as usize;
+    assert!(
+        flattest >= floor,
+        "residual codebook diversity collapsed: the flattest of codebooks 1..15 took only {flattest} distinct values over \
+         {frames} frames (floor {floor}) - the MTP is tracking a degenerate codebook-0 stream. Per codebook: {residual_distinct:?}"
+    );
+
+    // (5) ...and the plan those codebooks ran under really is the checkpoint's.
+    // This is the direct assertion that `subtalker_dosample: true` reaches the
+    // decode, read off the same `generation_config.json` the run used: a
+    // regression that re-pinned the residual codebooks to greedy would still
+    // pass every property gate above, because a greedy residual fill off a
+    // healthy codebook-0 stream is just as varied and just as loud.
+    let resolved = opts.clone().resolved_for(&paths.ckpt_dir);
+    let sub = resolved.plan().subtalker;
+    assert!(
+        sub.do_sample && !sub.is_greedy(),
+        "the checkpoint says subtalker_dosample=true, but the resolved residual plan was {sub:?} - the residual codebooks \
+         decoded greedily, which is the parity gap this wiring closed"
+    );
+
+    // (6) Only now the waveform, through the same decode `synth` performs.
     let wav = qwen3tts::pipeline::decode_codes(&paths.codec, &codes).expect("decode_codes");
     assert!(wav.iter().all(|x| x.is_finite()), "synth produced a non-finite sample");
     let level = rms(&wav);

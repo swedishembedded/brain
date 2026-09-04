@@ -61,6 +61,9 @@ struct Session {
     /// This session's resolved codebook-0 filter chain, computed once at
     /// construction from `opts` - the scheduler must never re-resolve per frame.
     cfg: SamplerCfg,
+    /// The same plan's residual-codebook (subtalker) chain, which the reference
+    /// samples by default. Cached for the same reason `cfg` is.
+    sub: SamplerCfg,
     /// Diagnostic only: a per-session codebook-0 repetition-run watcher. It
     /// reports, it never steers the draw.
     watch: DegenerationWatch,
@@ -92,7 +95,8 @@ impl Session {
         }
         let mut rng = Rng::new(opts.seed);
         let cb0_history: Vec<u32> = Vec::new();
-        let cfg = opts.plan().cb0;
+        let plan = opts.plan();
+        let (cfg, sub) = (plan.cb0, plan.subtalker);
         let draw = sample_cb0(cpu.codec_head_logits(&past_hidden), sp.codec_eos, opts.min_new == 0, &cfg, &cb0_history, &mut rng);
         Session {
             cpu,
@@ -102,6 +106,7 @@ impl Session {
             cancel,
             rng,
             cfg,
+            sub,
             watch: DegenerationWatch::new(),
             draw,
             cb0: draw.token,
@@ -134,7 +139,7 @@ impl Session {
         }
         self.cb0_history.push(self.cb0);
         let cb0_embed = self.cpu.codec_embed(self.cb0).to_vec();
-        let (residuals, res_sum) = self.mtp.generate_residuals(&self.past_hidden, &cb0_embed);
+        let (residuals, res_sum) = self.mtp.generate_residuals_with(&self.past_hidden, &cb0_embed, &self.sub, &mut self.rng);
         self.frames.push(self.cb0);
         self.frames.extend_from_slice(&residuals);
 

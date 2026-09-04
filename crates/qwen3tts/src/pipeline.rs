@@ -38,8 +38,8 @@ pub struct TtsPaths {
 ///
 /// Split into two halves on purpose:
 ///
-/// - the length/determinism knobs (`max_frames`, `min_new`, `seed`) and the
-///   residual-codebook opt-in, which only ever come from the caller;
+/// - the length/determinism knobs (`max_frames`, `min_new`, `seed`), which only
+///   ever come from the caller;
 /// - [`GenOpts::sampling`], the caller's EXPLICIT codebook-0/subtalker choices,
 ///   every one an `Option` because "unspecified" and "explicitly 1.0" are
 ///   different requests. Whatever the caller left unset is answered by the
@@ -60,15 +60,18 @@ pub struct GenOpts {
     pub max_frames: usize,
     pub seed: u64,
     pub min_new: usize,
-    /// Independent sampling for the MTP's residual codebooks (1..15). `None`
-    /// (the default) keeps the reference's greedy `code_predictor.generate`
-    /// behavior; `Some` opts into temperature/top-k/top-p sampling there too --
-    /// the residual codebooks carry most of the acoustic detail, so this is a
-    /// real quality/expressiveness lever, not just parity with codebook-0's
-    /// knobs. See [`ResidualOpts`].
-    pub residual: Option<ResidualOpts>,
-    /// The caller's explicit sampling choices; unset fields resolve from the
-    /// checkpoint and then from the reference.
+    /// The caller's explicit sampling choices for BOTH streams - codebook 0 and,
+    /// through [`SamplingRequest::subtalker`], the MTP's residual codebooks
+    /// (1..15). Unset fields resolve from the checkpoint and then from the
+    /// reference.
+    ///
+    /// There is deliberately no separate residual/`ResidualOpts` field. There
+    /// used to be one, defaulting to `None` = greedy, which meant brain filled
+    /// 15 of every 16 codebooks - the ones carrying most of the acoustic detail
+    /// - with an argmax while the checkpoint's own `generation_config.json` said
+    /// `subtalker_dosample: true`. A knob a caller has to remember to set in
+    /// order to match the reference is not a lever, it is the same second source
+    /// of truth that shipped `repetition_penalty = 1.0`.
     pub sampling: SamplingRequest,
     /// The plan resolved for this run, once an entry point has called
     /// [`GenOpts::resolve`]. `None` means "not resolved against a checkpoint
@@ -122,16 +125,6 @@ impl GenOpts {
     }
 }
 
-/// Sampling controls for the MTP's residual codebooks (1..15), independent of
-/// codebook-0's [`GenOpts`] knobs -- mirrors the reference's separate
-/// `subtalker_temperature`/`subtalker_top_k`/`subtalker_top_p` config keys.
-#[derive(Clone, Debug)]
-pub struct ResidualOpts {
-    pub temperature: f32,
-    pub top_k: usize,
-    pub top_p: f32,
-}
-
 impl Default for GenOpts {
     fn default() -> GenOpts {
         // Every sampling knob is UNSET here on purpose. `GenOpts::default()`
@@ -155,14 +148,7 @@ impl Default for GenOpts {
         // `max_frames` is a caller knob, not a config-resolved one: it sizes the
         // Talker KV cache and the NPU graph bucket, so it does not inherit the
         // reference's 8192-token budget. See [`GenerationPlan::max_new_tokens`].
-        GenOpts {
-            max_frames: 256,
-            seed: 0,
-            min_new: 2,
-            residual: None,
-            sampling: SamplingRequest::default(),
-            resolved: None,
-        }
+        GenOpts { max_frames: 256, seed: 0, min_new: 2, sampling: SamplingRequest::default(), resolved: None }
     }
 }
 
@@ -246,8 +232,10 @@ pub fn generate_codes(
     let mut rng = Rng::new(opts.seed);
     // One resolution per generation call: caller override > the checkpoint's
     // generation_config.json > the reference's defaults. Already traced by
-    // `GenOpts::resolve` at the entry point that knew the checkpoint dir.
-    let cfg = opts.plan().cb0;
+    // `GenOpts::resolve` at the entry point that knew the checkpoint dir. `sub`
+    // is the same plan's residual-codebook chain, which the reference samples.
+    let plan = opts.plan();
+    let (cfg, sub) = (plan.cb0, plan.subtalker);
     let mut watch = DegenerationWatch::new();
 
     // Stream the prefix through the incremental KV cache, keeping the last hidden.
@@ -287,7 +275,7 @@ pub fn generate_codes(
         cb0_history.push(cb0);
         let cb0_embed = gen.codec_embed(cb0).to_vec();
         let tm = Instant::now();
-        let (residuals, res_sum) = mtp.generate_residuals_with(&past_hidden, &cb0_embed, opts.residual.as_ref(), &mut rng);
+        let (residuals, res_sum) = mtp.generate_residuals_with(&past_hidden, &cb0_embed, &sub, &mut rng);
         t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
@@ -363,7 +351,8 @@ pub fn generate_codes_cached(
     let d = cpu.d();
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
-    let cfg = opts.plan().cb0;
+    let plan = opts.plan();
+    let (cfg, sub) = (plan.cb0, plan.subtalker);
     let mut watch = DegenerationWatch::new();
 
     // Stream the whole prefix through the cache, keeping the last hidden state.
@@ -394,11 +383,7 @@ pub fn generate_codes_cached(
         cb0_history.push(cb0);
         let cb0_embed = cpu.codec_embed(cb0).to_vec();
         let tm = Instant::now();
-        // `CpuMtp::generate_residuals` has no sampling variant yet, so it stays
-        // greedy-only here regardless of `opts.residual` -- that option only
-        // takes effect on the full-recompute `MtpModel` path this cached
-        // mirror does not use.
-        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        let (residuals, res_sum) = mtp.generate_residuals_with(&past_hidden, &cb0_embed, &sub, &mut rng);
         t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
@@ -1063,11 +1048,11 @@ mod sampling_tests {
         let th = vec![0.3f32; d];
         let cb0 = vec![-0.2f32; d];
         let (greedy_codes, _) = m.generate_residuals(&th, &cb0);
-        let ro = ResidualOpts { temperature: 2.0, top_k: 0, top_p: 0.0 };
+        let ro = crate::sampling::SamplerCfg { do_sample: true, temperature: 2.0, top_k: 0, top_p: 0.0, repetition_penalty: 1.0 };
         let mut found_divergent = false;
         for seed in 0..20u64 {
             let mut rng = Rng::new(seed);
-            let (sampled_codes, _) = m.generate_residuals_with(&th, &cb0, Some(&ro), &mut rng);
+            let (sampled_codes, _) = m.generate_residuals_with(&th, &cb0, &ro, &mut rng);
             assert_eq!(sampled_codes.len(), greedy_codes.len());
             if sampled_codes != greedy_codes {
                 found_divergent = true;
@@ -1075,6 +1060,56 @@ mod sampling_tests {
             }
         }
         assert!(found_divergent, "residual sampling never diverged from greedy across 20 seeds");
+    }
+
+    /// **The spec this follow-up exists for**: an unconfigured decode must SAMPLE
+    /// the residual codebooks, because the reference does.
+    ///
+    /// Read at frame granularity so the claim is exact rather than "something
+    /// changed". Codebook 0 is pinned greedy, and frame 0's codebook-0 token is
+    /// drawn from the prefix alone - before any residual has been sampled - so it
+    /// must be seed-INDEPENDENT. Frame 0's residual codebooks are drawn
+    /// immediately after it from the same `talker_hidden`, so if they are sampled
+    /// they must be seed-DEPENDENT. Greedy residuals (the old default, and what
+    /// `GenOpts::residual = None` produced) make the second assertion fail while
+    /// leaving the first true.
+    #[test]
+    fn an_unconfigured_decode_samples_the_residual_codebooks() {
+        use crate::gen_kv::CpuTalker;
+        use crate::gen_kv_mtp::CpuMtp;
+        use crate::testsupport::{synthetic_checkpoints, talker_test_cfg, tiny_prompt, tiny_specials, Scratch};
+        if gpu_disabled() {
+            return;
+        }
+        let scratch = Scratch::new("pipeline-residual-default");
+        let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 21);
+        let sp = tiny_specials();
+        let d = talker_test_cfg().d_model as usize;
+        let prompt = tiny_prompt(d, 3, 2, 91);
+        let gw = crate::config::MtpConfig::tiny().num_code_groups as usize;
+
+        let frame0 = |seed: u64| {
+            // Codebook 0 pinned greedy; the subtalker half left UNSET, so it is
+            // whatever the resolution chain answers - which is the whole point.
+            let opts = GenOpts {
+                max_frames: 4,
+                min_new: 4,
+                seed,
+                sampling: SamplingRequest { temperature: Some(0.0), ..SamplingRequest::default() },
+                ..GenOpts::default()
+            };
+            let mut cpu = CpuTalker::load(&talker_path);
+            let mut mtp = CpuMtp::load(&mtp_path);
+            let codes = generate_codes_cached(&mut cpu, &mut mtp, &sp, &prompt, &opts, &CancelToken::default())
+                .expect("an unarmed cancel token never fires");
+            assert!(codes.len() >= gw, "the run produced no complete frame");
+            (codes[0], codes[1..gw].to_vec())
+        };
+
+        let (cb0_a, res_a) = frame0(0);
+        let (cb0_b, res_b) = frame0(7);
+        assert_eq!(cb0_a, cb0_b, "a greedy codebook-0 draw off the prefix must not depend on the seed");
+        assert_ne!(res_a, res_b, "the residual codebooks decoded identically under two seeds - they are still greedy");
     }
 }
 

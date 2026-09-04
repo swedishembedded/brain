@@ -31,7 +31,7 @@
 //!       (`--out` then defaults to `talker_full.safetensors`). See
 //!       `qwen3tts::sft` for the aligned multi-codebook loss both modes share.
 
-use qwen3tts::{GenOpts, ResidualOpts, TtsPaths};
+use qwen3tts::{GenOpts, TtsPaths};
 
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     *i += 1;
@@ -237,7 +237,6 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
     let mut lang = "english".to_string();
     let mut opts = GenOpts::default();
     let mut extra = std::collections::HashMap::new();
-    let (mut residual_temp, mut residual_top_k, mut residual_top_p) = (None, None, None);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -256,15 +255,21 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             "--top-p" => opts.sampling.top_p = val(args, &mut i, "--top-p").parse().ok().or(opts.sampling.top_p),
             "--repetition-penalty" => opts.sampling.repetition_penalty = val(args, &mut i, "--repetition-penalty").parse().ok().or(opts.sampling.repetition_penalty),
             "--seed" => opts.seed = val(args, &mut i, "--seed").parse().unwrap_or(opts.seed),
-            // Any `--residual-*` flag opts into independent MTP residual-codebook
-            // sampling (default: greedy, matching the reference's own default);
-            // unset residual knobs fall back to codebook-0's own resolved
-            // temp/top-k/top-p, filled in AFTER the whole command line is parsed
-            // so `--residual-temp 1.2 --temp 0.5` and `--temp 0.5
-            // --residual-temp 1.2` mean the same thing.
-            "--residual-temp" => residual_temp = val(args, &mut i, "--residual-temp").parse().ok(),
-            "--residual-top-k" => residual_top_k = val(args, &mut i, "--residual-top-k").parse().ok(),
-            "--residual-top-p" => residual_top_p = val(args, &mut i, "--residual-top-p").parse().ok(),
+            // The MTP residual codebooks (1..15) are SAMPLED by default, like
+            // every other knob resolving from the checkpoint's own
+            // `subtalker_*` keys - these flags are the explicit-override layer
+            // for that half, exactly as `--temp`/`--top-k`/`--top-p` are for
+            // codebook 0. `--residual-temp 0` pins them back to greedy.
+            "--residual-temp" => {
+                opts.sampling.subtalker.temperature =
+                    val(args, &mut i, "--residual-temp").parse().ok().or(opts.sampling.subtalker.temperature)
+            }
+            "--residual-top-k" => {
+                opts.sampling.subtalker.top_k = val(args, &mut i, "--residual-top-k").parse().ok().or(opts.sampling.subtalker.top_k)
+            }
+            "--residual-top-p" => {
+                opts.sampling.subtalker.top_p = val(args, &mut i, "--residual-top-p").parse().ok().or(opts.sampling.subtalker.top_p)
+            }
             // (`--no-cache` removed: the Talker now always uses the device-agnostic
             // KV-cache step(); select CPU vs GPU with `--device`.)
             "--text" => {
@@ -288,17 +293,6 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
-    }
-    if residual_temp.is_some() || residual_top_k.is_some() || residual_top_p.is_some() {
-        // The codebook-0 chain resolved from the flags alone (no checkpoint
-        // layer yet - the entry point applies that). It is only a seed for the
-        // residual knobs the user did not pin.
-        let cb0 = opts.plan().cb0;
-        opts.residual = Some(ResidualOpts {
-            temperature: residual_temp.unwrap_or(cb0.temperature),
-            top_k: residual_top_k.unwrap_or(cb0.top_k),
-            top_p: residual_top_p.unwrap_or(cb0.top_p),
-        });
     }
     (
         CommonArgs {

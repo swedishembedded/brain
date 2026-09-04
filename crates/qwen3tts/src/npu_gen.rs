@@ -27,7 +27,7 @@ use npu::openvino::{
 use crate::config::TalkerConfig;
 use crate::pipeline::{sample_cb0, GenOpts};
 use crate::prompt::{Prompt, TalkerHost, TtsSpecials};
-use crate::sampling::DegenerationWatch;
+use crate::sampling::{DegenerationWatch, SamplerCfg};
 use crate::talker::TextProjection;
 
 /// Human-readable summary of the resolved Talker hardware path, printed at startup
@@ -273,8 +273,10 @@ pub fn generate_codes_npu(
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
     // One resolution per generation call, made by the `pipeline` entry point
-    // that knew the checkpoint dir; the loop only reads it.
-    let cfg = opts.plan().cb0;
+    // that knew the checkpoint dir; the loop only reads it. `sub` is the same
+    // plan's residual-codebook half, which the reference samples by default.
+    let plan = opts.plan();
+    let (cfg, sub) = (plan.cb0, plan.subtalker);
     let mut watch = DegenerationWatch::new();
     let profile = std::env::var("TTS_PROFILE").is_ok();
     let (mut t_step, mut t_mtp) = (0.0f64, 0.0f64);
@@ -300,11 +302,7 @@ pub fn generate_codes_npu(
         cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
         let tm = Instant::now();
-        // `MtpEngine::generate_residuals` has no sampling variant yet, so it
-        // stays greedy-only here regardless of `opts.residual` -- that option
-        // only takes effect on the full-recompute `MtpModel` path this
-        // NPU/KV mirror does not use.
-        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed, &sub, &mut rng);
         t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
@@ -541,15 +539,22 @@ impl KvTalker {
 }
 
 /// The per-frame residual (MTP) code predictor — implemented on the CPU
-/// ([`crate::gen_kv_mtp::CpuMtp`]) or on the NPU ([`KvMtp`]). Lets the generation
-/// loop pick the MTP backend without being generic.
+/// ([`crate::gen_kv_mtp::CpuMtp`]) or on the NPU ([`KvMtp`], [`FusedMtp`]). Lets
+/// the generation loop pick the MTP backend without being generic.
+///
+/// `cfg` is the run's resolved `GenerationPlan::subtalker` and `rng` the clip's
+/// own generator - the residual codebooks are SAMPLED by default (the
+/// reference's `subtalker_dosample` is `true`), so an engine that takes neither
+/// would silently decode a different, greedier clip than the device path for
+/// the same request. That is why they are on the trait rather than threaded
+/// past it.
 pub trait MtpEngine {
-    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> (Vec<u32>, Vec<f32>);
+    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32], cfg: &SamplerCfg, rng: &mut Rng) -> (Vec<u32>, Vec<f32>);
 }
 
 impl MtpEngine for crate::gen_kv_mtp::CpuMtp {
-    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> (Vec<u32>, Vec<f32>) {
-        crate::gen_kv_mtp::CpuMtp::generate_residuals(self, talker_hidden, cb0_embed)
+    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32], cfg: &SamplerCfg, rng: &mut Rng) -> (Vec<u32>, Vec<f32>) {
+        crate::gen_kv_mtp::CpuMtp::generate_residuals_with(self, talker_hidden, cb0_embed, cfg, rng)
     }
 }
 
@@ -687,22 +692,14 @@ impl KvMtp {
         }
         self.pos = 0;
     }
-
-    fn argmax(row: &[f32]) -> usize {
-        let mut best = 0usize;
-        for j in 1..row.len() {
-            if row[j] > row[best] {
-                best = j;
-            }
-        }
-        best
-    }
 }
 
 impl MtpEngine for KvMtp {
-    /// Mirror of [`crate::gen_kv_mtp::CpuMtp::generate_residuals`] but the 5-layer
-    /// decoder runs on the NPU. Greedy over the 15 residual codebooks.
-    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> (Vec<u32>, Vec<f32>) {
+    /// Mirror of [`crate::gen_kv_mtp::CpuMtp::generate_residuals_with`] but the
+    /// 5-layer decoder runs on the NPU. The head and the draw stay on the fp32
+    /// host, through the shared [`crate::sampling::sample_residual`], so this
+    /// path honours the resolved subtalker plan exactly like the CPU one.
+    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32], cfg: &SamplerCfg, rng: &mut Rng) -> (Vec<u32>, Vec<f32>) {
         let (emb, d, vocab) = (self.emb, self.d, self.vocab);
         let nres = self.n_res;
         self.reset();
@@ -716,7 +713,7 @@ impl MtpEngine for KvMtp {
             let pin = self.project(&input_raw);
             let hidden = self.feed1(&pin).expect("KvMtp feed1");
             let logits = model::hostmath::matvec(&self.lm_head[k - 1], &hidden, vocab, d);
-            let best = Self::argmax(&logits);
+            let best = crate::sampling::sample_residual(&logits, cfg, rng).token as usize;
             codes[k - 1] = best as u32;
             let r = self.codec_embedding[k - 1][best * emb..(best + 1) * emb].to_vec();
             for j in 0..emb {
@@ -778,7 +775,26 @@ impl FusedMtp {
 }
 
 impl MtpEngine for FusedMtp {
-    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> (Vec<u32>, Vec<f32>) {
+    /// **The one engine that cannot honour a sampled subtalker plan.** The
+    /// argmax lives inside the compiled graph ([`build_mtp_fused_graph`]), so
+    /// there is no host-side logit row to filter and draw from; honouring the
+    /// plan here means exporting a different graph, not calling a different
+    /// function. Since the resolved default IS sampled, decoding greedily on
+    /// this opt-in path is a real difference from every other backend, and a
+    /// silent one would be exactly the drift this seam was consolidated to
+    /// prevent - so it is reported once per process instead.
+    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32], cfg: &SamplerCfg, _rng: &mut Rng) -> (Vec<u32>, Vec<f32>) {
+        if !cfg.is_greedy() {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "qwen3tts: the fused NPU MTP decodes the residual codebooks with an in-graph argmax and cannot \
+                     apply the resolved subtalker plan (sample=true temp={} top_k={} top_p={}); this clip's residual \
+                     codebooks are GREEDY. Use the KV MTP engine for the reference's sampled residuals.",
+                    cfg.temperature, cfg.top_k, cfg.top_p
+                );
+            });
+        }
         self.sess.run(talker_hidden, cb0_embed).expect("FusedMtp inference")
     }
 }
@@ -1035,8 +1051,10 @@ pub fn generate_codes_kv(
     let n_prefix = prompt.embeds.len() / d;
     let mut rng = Rng::new(opts.seed);
     // One resolution per generation call, made by the `pipeline` entry point
-    // that knew the checkpoint dir; the loop only reads it.
-    let cfg = opts.plan().cb0;
+    // that knew the checkpoint dir; the loop only reads it. `sub` is the same
+    // plan's residual-codebook half, which the reference samples by default.
+    let plan = opts.plan();
+    let (cfg, sub) = (plan.cb0, plan.subtalker);
     let mut watch = DegenerationWatch::new();
     let profile = std::env::var("TTS_PROFILE").is_ok();
 
@@ -1062,7 +1080,7 @@ pub fn generate_codes_kv(
         cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
         let tm = Instant::now();
-        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed, &sub, &mut rng);
         t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
@@ -1114,8 +1132,10 @@ pub fn generate_codes_kv_streaming(
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
     // One resolution per generation call, made by the `pipeline` entry point
-    // that knew the checkpoint dir; the loop only reads it.
-    let cfg = opts.plan().cb0;
+    // that knew the checkpoint dir; the loop only reads it. `sub` is the same
+    // plan's residual-codebook half, which the reference samples by default.
+    let plan = opts.plan();
+    let (cfg, sub) = (plan.cb0, plan.subtalker);
     let mut watch = DegenerationWatch::new();
     let chunk = chunk.max(1);
 
@@ -1137,7 +1157,7 @@ pub fn generate_codes_kv_streaming(
         }
         cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
-        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed, &sub, &mut rng);
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
         let mut feed = cb0_embed;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The codebook-0 logit filter chain, as one reusable unit.
+//! The codec logit filter chain, as one reusable unit.
 //!
 //! Every autoregressive decode loop in this crate - the device-agnostic
 //! [`crate::pipeline::generate_codes`], the CPU-cached mirror, the interleaved
@@ -21,8 +21,21 @@
 //! is how a defect in stage 2 (penalty applied once per OCCURRENCE, compounding
 //! to `penalty^count`) survived: there was nowhere to test the chain that was
 //! not "run the whole model". They are public here so the chain can be driven
-//! from synthetic logits in the unit lane, and so the MTP/subtalker sampler can
-//! reuse it rather than growing a second, drifting copy.
+//! from synthetic logits in the unit lane.
+//!
+//! **Two streams, one chain.** The MTP's residual codebooks (1..15) are sampled
+//! too - the reference's `subtalker_dosample` ships `true` - and they run
+//! [`sample_residual`], which is stages 3-6 with nothing removed and nothing
+//! reimplemented: it and [`sample_cb0`] both end in [`draw_from_logits`].
+//! Stages 1 and 2 are codebook-0's alone because the residual streams have
+//! neither an EOS nor reserved specials to suppress, and because each of the 15
+//! steps predicts a DIFFERENT codebook through its own head and its own
+//! vocabulary - there is no shared token history for a repetition penalty to
+//! read, and no single stream that can lock onto a repeat the way codebook 0
+//! did. The reference configures none for them either. The
+//! residual sampler USED to be a second, hand-rolled copy of temperature/top-k/
+//! top-p living in `mtp.rs`; that is the same shape of duplication that let
+//! `repetition_penalty` drift, so there is now exactly one implementation.
 //!
 //! The configuration this consumes is [`SamplerCfg`] - a FULLY resolved set of
 //! knobs, never an `Option`. Deciding what those values should be (caller
@@ -72,6 +85,14 @@ impl SamplerCfg {
     /// parity path, and dividing logits by zero is not a distribution).
     pub fn is_greedy(&self) -> bool {
         !self.do_sample || self.temperature <= 0.0
+    }
+
+    /// A chain pinned to a deterministic argmax, for the paths that must not
+    /// inherit any config layer's opinion about sampling: the greedy
+    /// convenience wrappers on the MTP models, and the parity/determinism lanes
+    /// that compare two engines code-for-code.
+    pub const fn greedy() -> SamplerCfg {
+        SamplerCfg { do_sample: false, temperature: 0.0, top_k: 0, top_p: 0.0, repetition_penalty: 1.0 }
     }
 }
 
@@ -195,15 +216,16 @@ pub fn apply_top_p(scaled: &mut [f32], top_p: f32) {
     }
 }
 
-/// Run the whole chain and draw one codebook-0 token.
+/// Stages 3-6 - temperature, top-k, top-p, categorical draw - on logits that
+/// have already had whatever per-stream masking they need (stages 1-2 for
+/// codebook 0; nothing for the residual codebooks).
 ///
-/// `history` is the sequence of already-generated codebook-0 ids for this clip,
-/// consulted only when `cfg.repetition_penalty > 1.0`.
-pub fn sample_cb0(mut logits: Vec<f32>, eos: u32, allow_eos: bool, cfg: &SamplerCfg, history: &[u32], rng: &mut Rng) -> Draw {
-    suppress_specials(&mut logits, eos, allow_eos);
-    apply_repetition_penalty(&mut logits, history, cfg.repetition_penalty);
+/// **This is the single implementation both streams draw through.** Every
+/// stream-specific difference lives in what its caller does BEFORE calling
+/// here, never in a second copy of the arithmetic.
+pub fn draw_from_logits(logits: &[f32], cfg: &SamplerCfg, rng: &mut Rng) -> Draw {
     if cfg.is_greedy() {
-        return Draw { token: argmax(&logits) as u32, prob: 1.0 };
+        return Draw { token: argmax(logits) as u32, prob: 1.0 };
     }
     let mut scaled: Vec<f32> = logits.iter().map(|&l| l / cfg.temperature).collect();
     apply_top_k(&mut scaled, cfg.top_k);
@@ -218,9 +240,9 @@ pub fn sample_cb0(mut logits: Vec<f32>, eos: u32, allow_eos: bool, cfg: &Sampler
     // `p > 0.0` skips every `-inf` entry (whose `exp` is exactly 0 and so never
     // advances `acc`), which matters at the two boundaries - `r == 0.0` would
     // otherwise return index 0, and a `r == sum` rounding would fall through to
-    // the last index, both of which are suppressed specials far more often than
-    // they are real codec tokens. `last` is the final surviving candidate, the
-    // only correct fall-through.
+    // the last index, both of which are masked entries far more often than they
+    // are live candidates. `last` is the final surviving candidate, the only
+    // correct fall-through.
     let r = rng.next_f32() * sum;
     let mut acc = 0.0f32;
     let mut last = 0usize;
@@ -235,6 +257,39 @@ pub fn sample_cb0(mut logits: Vec<f32>, eos: u32, allow_eos: bool, cfg: &Sampler
         }
     }
     Draw { token: last as u32, prob: if sum > 0.0 { scaled[last] / sum } else { 1.0 } }
+}
+
+/// Run the whole chain and draw one codebook-0 token.
+///
+/// `history` is the sequence of already-generated codebook-0 ids for this clip,
+/// consulted only when `cfg.repetition_penalty > 1.0`.
+pub fn sample_cb0(mut logits: Vec<f32>, eos: u32, allow_eos: bool, cfg: &SamplerCfg, history: &[u32], rng: &mut Rng) -> Draw {
+    suppress_specials(&mut logits, eos, allow_eos);
+    apply_repetition_penalty(&mut logits, history, cfg.repetition_penalty);
+    draw_from_logits(&logits, cfg, rng)
+}
+
+/// Draw one token for a residual (MTP / subtalker) codebook from its own logit
+/// row, under the resolved `subtalker_*` chain.
+///
+/// Stages 3-6 only, drawn through the SAME [`draw_from_logits`] codebook 0 ends
+/// in. The two stages it does not run are absent because the stream does not
+/// have them, not because they were forgotten:
+///
+/// - **no suppress mask** - the residual codebooks index a plain acoustic
+///   vocabulary with no reserved specials and no EOS. Only codebook 0 decides
+///   when the clip ends, so blanking a band here would delete real acoustic
+///   codes rather than specials;
+/// - **no repetition penalty** - the reference's subtalker config carries none,
+///   and there is nothing for one to read: each of the 15 steps predicts a
+///   different codebook through its own `lm_head`, so there is no shared token
+///   history and no single stream that can lock into the repetition loop
+///   codebook 0's penalty exists to break.
+///
+/// `cfg.repetition_penalty` is therefore ignored; a resolved subtalker plan
+/// carries `1.0` for it (see [`crate::genconfig::GenerationPlan::subtalker`]).
+pub fn sample_residual(row: &[f32], cfg: &SamplerCfg, rng: &mut Rng) -> Draw {
+    draw_from_logits(row, cfg, rng)
 }
 
 /// Run length at which a codebook-0 repeat starts to look like a locked loop
@@ -443,6 +498,64 @@ mod tests {
         let got = sample_cb0(l, 1500, false, &sampled(0.9, 50, 1.0, 1.0), &[], &mut Rng::new(2));
         assert_eq!(got.token, 10);
         assert!(got.prob > 0.99, "post-filter probability of a one-hot draw was {}", got.prob);
+    }
+
+    /// The residual codebooks must be filtered by the SAME top-k/top-p stages
+    /// codebook 0 is, not by a second hand-rolled copy.
+    ///
+    /// Asserted as a set equality on what each sampler can EVER return under one
+    /// shared config: the survivors of `apply_top_k` + `apply_top_p` computed
+    /// from the public stages, the tokens `sample_residual` actually draws over
+    /// thousands of tries, and - once the suppress window is accounted for - the
+    /// tokens `sample_cb0` draws. A divergent second implementation (a different
+    /// top-k tie rule, a top-p cutoff off by one, an inverse-CDF that can fall
+    /// through to a masked index) shows up here as a different set, which is
+    /// precisely the class of drift a shared implementation makes impossible.
+    #[test]
+    fn residual_draws_come_from_the_same_survivors_as_codebook_zero() {
+        use std::collections::HashSet;
+        let v = 2048usize;
+        let mut l = vec![-10.0f32; v];
+        for (i, x) in [(10usize, 5.0f32), (11, 4.6), (12, 4.2), (13, 3.0), (14, 2.0)] {
+            l[i] = x;
+        }
+        let cfg = sampled(0.9, 3, 1.0, 1.0);
+
+        // The survivor set, from the public stages alone.
+        let mut scaled: Vec<f32> = l.iter().map(|&x| x / cfg.temperature).collect();
+        apply_top_k(&mut scaled, cfg.top_k);
+        apply_top_p(&mut scaled, cfg.top_p);
+        let want: HashSet<u32> = scaled.iter().enumerate().filter(|(_, x)| x.is_finite()).map(|(i, _)| i as u32).collect();
+        assert_eq!(want.len(), 3, "the fixture must actually exercise top-k");
+
+        let mut got_res = HashSet::new();
+        let mut got_cb0 = HashSet::new();
+        let mut rng = Rng::new(11);
+        for _ in 0..4000 {
+            got_res.insert(sample_residual(&l, &cfg, &mut rng).token);
+            // Codebook 0's extra stages are inert on this fixture: every live
+            // candidate sits far below the suppress window and the history is
+            // empty, so the two chains must agree token for token.
+            got_cb0.insert(sample_cb0(l.clone(), 1500, false, &cfg, &[], &mut rng).token);
+        }
+        assert_eq!(got_res, want, "residual sampling drew outside the top-k/top-p survivors");
+        assert_eq!(got_cb0, want, "codebook-0 sampling drew outside the top-k/top-p survivors");
+    }
+
+    /// A greedy subtalker plan (`subtalker_dosample: false`, or `--residual-temp
+    /// 0`) must be a plain argmax over the whole row - the residual stream has
+    /// no suppress window, so nothing may be excluded from the search.
+    #[test]
+    fn a_greedy_residual_config_is_the_argmax_of_the_whole_row() {
+        let v = 2048usize;
+        let mut l = vec![-10.0f32; v];
+        l[10] = 5.0;
+        // Deliberately inside the band codebook 0 suppresses: the residual
+        // codebooks have no specials there, so it must remain reachable.
+        l[v - 3] = 9.0;
+        let got = sample_residual(&l, &SamplerCfg::greedy(), &mut Rng::new(1));
+        assert_eq!(got.token, (v - 3) as u32, "greedy residual decode must search the whole vocabulary");
+        assert_eq!(got.prob, 1.0);
     }
 
     #[test]

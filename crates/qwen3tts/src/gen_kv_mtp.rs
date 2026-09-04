@@ -180,30 +180,39 @@ impl CpuMtp {
         }
     }
 
-    /// Argmax over a logits row (ties to the lowest index), matching
-    /// [`crate::mtp::MtpModel::generate_residuals`].
-    fn argmax(row: &[f32]) -> usize {
-        let mut best = 0usize;
-        for j in 1..row.len() {
-            if row[j] > row[best] {
-                best = j;
-            }
-        }
-        best
+    /// **Greedy convenience wrapper only** - the argmax mirror of
+    /// [`crate::mtp::MtpModel::generate_residuals`], for the parity and shape
+    /// tests that compare two engines code-for-code. A real decode calls
+    /// [`Self::generate_residuals_with`] with the run's resolved subtalker
+    /// plan, which samples by default.
+    pub fn generate_residuals(
+        &mut self,
+        talker_hidden: &[f32],
+        cb0_embed: &[f32],
+    ) -> (Vec<u32>, Vec<f32>) {
+        let mut rng = data::rng::Rng::new(0);
+        self.generate_residuals_with(talker_hidden, cb0_embed, &crate::sampling::SamplerCfg::greedy(), &mut rng)
     }
 
-    /// Per-frame residual codebook generation (greedy), **KV-cached**: bit-exact
-    /// mirror of [`crate::mtp::MtpModel::generate_residuals`] but with one
+    /// Per-frame residual codebook generation, **KV-cached**: bit-exact mirror
+    /// of [`crate::mtp::MtpModel::generate_residuals_with`] but with one
     /// incremental decoder step per residual codebook instead of a full
     /// re-forward. Given the Talker final hidden state (`talker_hidden`, `[d]`)
     /// and the Talker codebook-0 embedding (`cb0_embed`, `[d]`), returns
     /// `(codes, residual_embed_sum)`:
     ///   * `codes` — the 15 residual codebook ids (codebooks 1..15),
     ///   * `residual_embed_sum` — `Σ_{i=1}^{15} codec_embedding[i-1][code_i]`.
-    pub fn generate_residuals(
+    ///
+    /// `cfg` is the run's `GenerationPlan::subtalker`, drawn through the shared
+    /// [`crate::sampling::sample_residual`] - the same chain the device
+    /// `MtpModel` and the NPU engines use, so which backend filled a frame's
+    /// residuals never changes HOW they were filtered.
+    pub fn generate_residuals_with(
         &mut self,
         talker_hidden: &[f32],
         cb0_embed: &[f32],
+        cfg: &crate::sampling::SamplerCfg,
+        rng: &mut data::rng::Rng,
     ) -> (Vec<u32>, Vec<f32>) {
         let e = self.cfg.embedding_dim as usize;
         let nres = (self.cfg.num_code_groups - 1) as usize; // 15
@@ -224,7 +233,7 @@ impl CpuMtp {
             let pin = self.project(&input_raw);
             let hidden = self.step(&pin); // final-norm hidden at position k
             let logits = self.head_logits(k - 1, &hidden);
-            let best = Self::argmax(&logits);
+            let best = crate::sampling::sample_residual(&logits, cfg, rng).token as usize;
             codes[k - 1] = best as u32;
             // codec_embedding[k-1] embeds codebook k (Talker-width row).
             let r = &self.codec_embedding[k - 1][best * e..(best + 1) * e];
@@ -278,7 +287,7 @@ impl CpuMtp {
         for k in 1..=nres {
             let logits = self.logits_full(&emb);
             let row = &logits[(k - 1) * v..k * v];
-            let best = Self::argmax(row);
+            let best = crate::sampling::sample_residual(row, &crate::sampling::SamplerCfg::greedy(), &mut data::rng::Rng::new(0)).token as usize;
             codes[k - 1] = best as u32;
             let r = self.codec_embedding[k - 1][best * d..(best + 1) * d].to_vec();
             for j in 0..d {
