@@ -94,6 +94,23 @@ The resident exposes one action, `speak` (text in, 24 kHz PCM out); set
 `BRAIN_QWEN3TTS_REF` (+ `BRAIN_QWEN3TTS_REF_TEXT`) to have every `speak` call clone that
 reference voice instead of running speaker-free.
 
+The event-driven stdio controller (`brain serve --stdio`, the JSONL protocol)
+can also synthesize, answering a `user_synth_request` with a stream of
+`audio_chunk` events. That path is **off in the default binary**: the TTS stack
+is far heavier than the rest of the controller's dependencies, so it lives
+behind a build feature.
+
+```bash
+cargo build --release -p brain-cli --features qwen3tts-synth
+BRAIN_QWEN3TTS_WEIGHTS=out/tts BRAIN_QWEN3TTS_CKPT=[path/to/Qwen3-TTS-12Hz-0.6B-Base] \
+  brain serve --stdio
+```
+
+It reads the same `BRAIN_QWEN3TTS_*` variables as the resident above (including
+`BRAIN_QWEN3TTS_REF`/`_REF_TEXT` for cloning). Without the feature, or with
+`BRAIN_QWEN3TTS_WEIGHTS` unset, a `user_synth_request` is still answered - with
+an empty terminal `audio_chunk`.
+
 There is also a dedicated low-latency server, `brain qwen3tts serve`, which keeps
 compiled NPU graphs resident and streams synthesized audio back over a
 line-delimited JSON protocol on a Unix socket - see `brain qwen3tts serve --help`

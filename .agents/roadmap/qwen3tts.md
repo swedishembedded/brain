@@ -545,5 +545,45 @@ discovers capabilities generically.
 - [ ] A windowed attention mask in the codec for long-form decode beyond the
       current fixed window
 - [ ] A fused single-inference MTP graph
-- [ ] Wire a real TTS model into the runtime event/state-machine flow
-      (currently only a stub model is wired there)
+- [x] **A real TTS model in the runtime event/state-machine flow.**
+      `runtime::tts::Qwen3TtsSynthModel` (`crates/runtime/src/tts.rs`)
+      implements the controller's `SynthModel` seam for real: it owns a
+      validated `TtsPaths` + `GenOpts` and dispatches per request to
+      `pipeline::synth` (no `ref_audio`) or `pipeline::clone` (with one -
+      x-vector, upgraded to the ICL path when a `ref_text` transcript comes
+      too), returning the 24 kHz waveform `AudioStreamPump` slices into
+      `audio_chunk` events. Only `FakeSynthModel` existed before, so
+      `Synthesizing` had never streamed a real waveform.
+
+      Gated behind an OPTIONAL `qwen3tts` feature on `brain-runtime`
+      (matching `brain-cli`'s existing `vulkan-coopmat = ["dep:brain-vulkan"]`
+      convention) because the dependency really is the whole stack:
+      `brain-qwen3tts` -> `brain-npu` -> `brain-perf` -> `brain-apiserve`
+      drags in the serving surface on top of codec/speaker/talker/MTP -
+      measured, not assumed: the default `-p brain-runtime` tree is 176
+      packages / 25 brain crates, byte-for-byte unchanged by this work; the
+      feature adds 83 packages (57 brain crates). `cargo test --release -p
+      brain-runtime --lib` (no feature) stays at 10 tests, 0.01s, untouched.
+
+      Selectable from `brain serve --stdio` (a build carrying `brain-cli`'s
+      `qwen3tts-synth` feature, forwarding to `brain-runtime/qwen3tts`),
+      registered from the SAME env vars the D-Bus resident already reads
+      (`BRAIN_QWEN3TTS_WEIGHTS`/`_CKPT`/`_LANG`) - one spelling across both
+      serving surfaces, no new `brain serve` flag. The seam's
+      `fn synth(&self, req) -> Vec<f32>` has no error channel; a failed
+      generation logs to stderr and returns an empty waveform, which the
+      controller already treats as "drained" (terminal `done:true`, back to
+      `Idle`) - checkpoint validation is eager in `Qwen3TtsSynthModel::load`
+      instead.
+
+      Verified against a real 0.6B-Base checkpoint, not just compiled: two
+      feature-gated tests in `crates/runtime/src/tts.rs` (24-frame cap,
+      `min_new` raised to 16 so an early EOS can't make the assertions
+      vacuous) - one asserts finite samples, the expected length, and
+      speech-level RMS rather than the near-silent degenerate decode; the
+      other drives it through `Controller::feed_event` and asserts the
+      `audio_chunk` stream shape. Both produced the same clip - 46080
+      samples, 1.92s, exactly the 24-frame budget - at `rms 0.0209 / peak
+      0.1274` (voice, not the `rms ~0.004` greedy-collapse silence), as 3
+      `audio_chunk` events (two 24000-sample chunks plus the terminal
+      `done`).
