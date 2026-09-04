@@ -243,7 +243,7 @@ fn cached_rollout_driver_matches_full_window() {
     let (d, s1v, s2v, nl) = (cfg.d_model, cfg.s1_vocab(), cfg.s2_vocab(), cfg.n_layers);
     let (heads, dep_heads) = (cfg.n_heads, cfg.dep_n_heads);
     let (hd, dhd) = (d / heads, d / dep_heads);
-    let (half, dhalf) = (hd / 2, dhd / 2);
+    let half = hd / 2;
     let (cap, t) = (8usize, 5usize);
     let x: Vec<f32> = (0..cap * d).map(|i| ((i as f32) * 0.017).sin() * 0.5).collect();
     let sibs: Vec<f32> = (0..cap * d).map(|i| ((i as f32) * 0.021 + 0.3).cos() * 0.5).collect();
@@ -323,16 +323,17 @@ fn cached_rollout_driver_matches_full_window() {
     let mut worst = 1.0f32;
 
     for k in 0..(cap - t) {
-        // dep_step at position s1_pos-1 using ctx_last.
+        // dep_step at position s1_pos-1 using ctx_last. The dep cross-attention
+        // is rotary-free (see `build_kronos_dep_decode_graph`'s doc comment: the
+        // reference builds its rotary table from the query length, which is 1 at
+        // inference, so the rotation is the identity) - `dpd` declares no
+        // `rope_cos`/`rope_sin` input ports, unlike the s1 decode graph below.
         let mdep = s1_pos - 1;
-        let (dc, ds) = rope(mdep, dhalf, dhd);
         let dmask: Vec<f32> = (0..cap).map(|j| if j < dep_valid { 0.0 } else { -1e9 }).collect();
         let dout = {
             let feeds: Vec<(&str, Feed)> = vec![
                 ("sib", Feed::F32(&sibs[mdep * d..(mdep + 1) * d], vec![1, 1, d as i64])),
                 ("ctx_last", Feed::F32(&ctx_last, vec![1, 1, d as i64])),
-                ("rope_cos", Feed::F32(&dc, vec![1, 1, 1, dhalf as i64])),
-                ("rope_sin", Feed::F32(&ds, vec![1, 1, 1, dhalf as i64])),
                 ("dep_mask", Feed::F32(&dmask, vec![1, 1, 1, cap as i64])),
                 ("past_dep_k", Feed::F32(&dk, vec![1, dep_heads as i64, cap as i64, dhd as i64])),
                 ("past_dep_v", Feed::F32(&dv, vec![1, dep_heads as i64, cap as i64, dhd as i64])),
