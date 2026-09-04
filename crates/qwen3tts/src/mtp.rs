@@ -20,8 +20,21 @@
 //! per-head QK-norm, half-split RoPE base 1e6, SwiGLU), so it is built from the
 //! shared `model::block` step-builders. The decoder runs on the GPU engine; the
 //! (tiny) input-embedding gather and the per-position output heads run on the
-//! CPU. This is an inference forward (no backward) — the Talker decoder carries
-//! the gradient-checked block coverage.
+//! CPU.
+//!
+//! ## Training
+//! [`MtpModel::new_trainable`] adds a real forward+backward over exactly that
+//! wiring - the hybrid one, not a second all-device reimplementation of it: the
+//! trainable forward calls the SAME [`MtpModel::assemble`] (hence the same
+//! `small_to_mtp_projection`), the SAME device decoder tape, and the SAME
+//! per-position `lm_head` host math a served run does, so what the gradient
+//! check gates is the production forward rather than a parallel copy of it. The
+//! decoder half's backward composes the shared `model::block` builders
+//! (`rmsnorm_bwd`, `rope_bwd`, `gqa_bwd`, `swiglu_bwd`) over the same
+//! activations the forward tape leaves resident; the host half (per-position
+//! heads, the projection, the codec-embedding scatter) is a hand-written
+//! adjoint. Gated by `mtp_analytic_grads_match_finite_differences` at both
+//! checkpoint shapes (`MtpConfig::tiny` and `tiny_projected`).
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
@@ -78,6 +91,64 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("rope_at", kernels::ROPE_AT),
     ("matmul_gemv", kernels::MATMUL_GEMV),
     ("matmul_reg3", kernels::MATMUL_REG3),
+];
+
+// ---- backward kernel table (present only in TRAIN_PIPELINES) ----
+// These slots sit PAST the end of `PIPELINES`, so an inference-built handle
+// cannot reach them: `only_fwd_ids` still names `block::UNREGISTERED` in every
+// backward slot, and a served MTP compiles exactly the kernels it dispatches.
+const RMSNORM_DX: usize = 17;
+const RMSNORM_DX_ROWS: usize = 18;
+const RMSNORM_DW: usize = 19;
+const ROPE_BWD: usize = 20;
+const GQA_DSCORES: usize = 21;
+const GQA_DV: usize = 22;
+const GQA_DQ: usize = 23;
+const GQA_DK: usize = 24;
+const SILU_DA: usize = 25;
+const SILU_DB: usize = 26;
+const MATMUL_DX: usize = 27;
+const MATMUL_DW: usize = 28;
+
+/// [`PIPELINES`] plus the backward half, for [`MtpModel::new_trainable`].
+///
+/// A separate table rather than a longer `PIPELINES` because a served MTP
+/// dispatches none of these and would otherwise pay their compilation on every
+/// load. The first `PIPELINES.len()` entries are `PIPELINES` verbatim and in
+/// order (gated by `train_pipelines_extends_the_inference_table`), so every
+/// forward-slot const above indexes both tables identically and a trainable
+/// model can replay the very same forward tape an inference one records.
+pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
+    ("matmul", kernels::MATMUL),
+    ("rmsnorm", kernels::RMSNORM),
+    ("rms_inv", kernels::RMS_INV),
+    ("rope_base", kernels::ROPE_BASE),
+    ("gqa_scores", kernels::GQA_SCORES),
+    ("attn_softmax", kernels::ATTN_SOFTMAX),
+    ("gqa_apply", kernels::GQA_APPLY),
+    ("silu_mul", kernels::SILU_MUL),
+    ("add2", kernels::ADD2),
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("kv_append", kernels::KV_APPEND),
+    ("rope_at", kernels::ROPE_AT),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    // ---- backward half ----
+    ("rmsnorm_dx", kernels::RMSNORM_DX),
+    ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
+    ("rmsnorm_dw", kernels::RMSNORM_DW),
+    ("rope_base_bwd", kernels::ROPE_BASE_BWD),
+    ("gqa_bwd_dscores", kernels::GQA_BWD_DSCORES),
+    ("gqa_bwd_dv", kernels::GQA_BWD_DV),
+    ("gqa_bwd_dq", kernels::GQA_BWD_DQ),
+    ("gqa_bwd_dk", kernels::GQA_BWD_DK),
+    ("silu_bwd_da", kernels::SILU_BWD_DA),
+    ("silu_bwd_db", kernels::SILU_BWD_DB),
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dw", kernels::MATMUL_DW),
 ];
 
 /// One-row scratch for the incremental (KV-cached) decode tape. The
@@ -153,6 +224,97 @@ pub struct MtpModel {
     // checkpoint carries no such tensor at all and the projection really is
     // Identity. See `MtpConfig::embedding_dim`'s doc comment.
     small_to_mtp_projection: Option<(Vec<f32>, Vec<f32>)>,
+    // `Some` only for a `new_trainable` build; the whole backward half.
+    train: Option<Train>,
+}
+
+/// One frame's training example, in the reference's own `forward_finetune`
+/// alignment: no time shift at all. `targets[k-1]` is the ground-truth code of
+/// residual codebook `k` (`1..num_code_groups`) of the SAME frame, and it is
+/// also the code fed in at sequence position `k + 1` - teacher forcing, exactly
+/// as `Qwen3TTSTalkerCodePredictorModel.forward_finetune` builds its own input
+/// embeddings. `crate::sft::MultiCodebookLabels::residual_targets` produces one
+/// such row per frame from a `[T, num_q]` codes tensor.
+struct Batch {
+    talker_hidden: Vec<f32>,
+    cb0_embed: Vec<f32>,
+    targets: Vec<u32>,
+}
+
+/// What one trainable forward hands its backward. Held rather than recomputed,
+/// because the backward's host half needs the exact rows the forward consumed
+/// and produced; re-deriving them would be a second chance to disagree.
+struct Fwd {
+    /// The `embedding_dim`-wide input row at each position, BEFORE
+    /// `small_to_mtp_projection` - the projection backward's `x`.
+    raw: Vec<Vec<f32>>,
+    /// Final-norm hidden states, `[num_code_groups, d_model]`.
+    hidden: Vec<f32>,
+    /// `[(num_code_groups - 1) * vocab]`, from `crate::sft::ce_batch` - already
+    /// averaged over the scored rows, so it differentiates exactly the scalar
+    /// `MtpModel::forward` returns.
+    d_logits: Vec<f32>,
+}
+
+/// The backward half of a [`MtpModel::new_trainable`] build: the device
+/// gradient buffers plus the prebuilt decoder backward tape, and the host-side
+/// gradients of the three parameter families that live off the device (the
+/// per-residual `codec_embedding` and `lm_head` tables, and
+/// `small_to_mtp_projection`).
+struct Train {
+    bwd_steps: Vec<Step>,
+    /// `d_res[l]` is the gradient w.r.t. layer `l`'s residual INPUT, so
+    /// `d_res[0]` is the gradient w.r.t. the assembled
+    /// `[num_code_groups, d_model]` input-embedding sequence - the seam where
+    /// the host half picks the chain back up.
+    d_res: Vec<DeviceBuffer>,
+    /// Gradient w.r.t. the final-norm OUTPUT, i.e. w.r.t. what the per-position
+    /// output heads read. Host-written at the start of every backward.
+    d_hidden: DeviceBuffer,
+    inv: DeviceBuffer,
+    d_xn: DeviceBuffer,
+    d_tmp: DeviceBuffer,
+    dxmid: DeviceBuffer,
+    d_ctx: DeviceBuffer,
+    d_scores: DeviceBuffer,
+    d_q: DeviceBuffer,
+    d_k: DeviceBuffer,
+    d_v: DeviceBuffer,
+    dq_pre: DeviceBuffer,
+    dk_pre: DeviceBuffer,
+    d_h: DeviceBuffer,
+    d_gate_pre: DeviceBuffer,
+    d_up: DeviceBuffer,
+    g_codec_embedding: Vec<Vec<f32>>,
+    g_lm_head: Vec<Vec<f32>>,
+    g_projection: Option<(Vec<f32>, Vec<f32>)>,
+    batch: Option<Batch>,
+    fwd: Option<Fwd>,
+}
+
+/// A parameter that lives on the HOST rather than in the `ParamStore` - one of
+/// the three families the served forward reads through `model::hostmath`
+/// instead of a device dispatch. Parsed from the checkpoint name so
+/// `read_weight` / `write_weight` / `read_grad` route by one rule.
+enum HostParam {
+    Codec(usize),
+    Head(usize),
+    ProjWeight,
+    ProjBias,
+}
+
+fn host_param(name: &str) -> Option<HostParam> {
+    if let Some(i) = name.strip_prefix("codec_embedding.").and_then(|r| r.strip_suffix(".weight")) {
+        return i.parse().ok().map(HostParam::Codec);
+    }
+    if let Some(i) = name.strip_prefix("lm_head.").and_then(|r| r.strip_suffix(".weight")) {
+        return i.parse().ok().map(HostParam::Head);
+    }
+    match name {
+        "small_to_mtp_projection.weight" => Some(HostParam::ProjWeight),
+        "small_to_mtp_projection.bias" => Some(HostParam::ProjBias),
+        _ => None,
+    }
 }
 
 /// Temperature/top-k/top-p sampling over one residual codebook's logit row.
@@ -323,6 +485,24 @@ impl MtpModel {
         lm_head: Vec<Vec<f32>>,
         small_to_mtp_projection: Option<(Vec<f32>, Vec<f32>)>,
     ) -> MtpModel {
+        Self::build(gpu, cfg, decoder, codec_embedding, lm_head, small_to_mtp_projection, false)
+    }
+
+    /// The one builder. `train` decides the `ParamStore` role of every decoder
+    /// weight (`Trainable` allocates the gradient/AdamW buffers, `Frozen`
+    /// allocates the weight only) and whether the backward tape and the
+    /// host-side gradient tables are built at all - so an inference build pays
+    /// nothing for the training half, and a training build shares the forward
+    /// tape rather than growing a second one.
+    fn build(
+        gpu: Gpu,
+        cfg: MtpConfig,
+        decoder: std::collections::HashMap<String, Vec<f32>>,
+        codec_embedding: Vec<Vec<f32>>,
+        lm_head: Vec<Vec<f32>>,
+        small_to_mtp_projection: Option<(Vec<f32>, Vec<f32>)>,
+        train: bool,
+    ) -> MtpModel {
         assert!(
             small_to_mtp_projection.is_some() || cfg.embedding_dim == cfg.d_model,
             "embedding_dim ({}) != d_model ({}) requires a small_to_mtp_projection",
@@ -330,9 +510,10 @@ impl MtpModel {
             cfg.d_model
         );
         let t = cfg.num_code_groups;
+        let role = if train { paramstore::Role::Trainable } else { paramstore::Role::Frozen };
         let roles = Self::decoder_param_list(&cfg)
             .into_iter()
-            .map(|(n, c)| (n, c, paramstore::Role::Frozen))
+            .map(|(n, c)| (n, c, role))
             .collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, &decoder);
 
@@ -410,9 +591,13 @@ impl MtpModel {
             codec_embedding,
             lm_head,
             small_to_mtp_projection,
+            train: None,
             gpu,
         };
         m.fwd_steps = m.forward_steps();
+        if train {
+            m.train = Some(m.build_train());
+        }
         m
     }
 
@@ -958,7 +1143,26 @@ impl MtpModel {
     }
 
     pub(crate) fn new_synthetic_on(gpu: Gpu, cfg: MtpConfig, seed: u64) -> MtpModel {
+        let (decoder, codec_embedding, lm_head, projection) = Self::synthetic_weights(&cfg, seed);
+        MtpModel::build(gpu, cfg, decoder, codec_embedding, lm_head, projection, false)
+    }
+
+    /// Randomly-initialised weights for every parameter family this model has:
+    /// the decoder block set, the per-residual `codec_embedding` / `lm_head`
+    /// tables, and `small_to_mtp_projection` when (and only when) the config
+    /// actually needs one.
+    #[allow(clippy::type_complexity)]
+    fn synthetic_weights(
+        cfg: &MtpConfig,
+        seed: u64,
+    ) -> (
+        std::collections::HashMap<String, Vec<f32>>,
+        Vec<Vec<f32>>,
+        Vec<Vec<f32>>,
+        Option<(Vec<f32>, Vec<f32>)>,
+    ) {
         use data::rng::Rng;
+        let cfg = cfg.clone();
         let mut rng = Rng::new(seed);
         let mut normal = |n: usize, s: f32| -> Vec<f32> {
             (0..n).map(|_| (rng.next_gaussian() as f32) * s).collect()
@@ -987,8 +1191,441 @@ impl MtpModel {
         // state) stays at `d_model`.
         let codec_embedding = (0..nres).map(|_| normal(v * e, 0.02)).collect();
         let lm_head = (0..nres).map(|_| normal(v * d, 0.02)).collect();
-        let projection = if e != d { Some((normal(d * e, 0.02), normal(d, 0.0))) } else { None };
-        MtpModel::build_on_with_projection(gpu, cfg, decoder, codec_embedding, lm_head, projection)
+        // `small_to_mtp_projection` has to PRESERVE the width of the row it
+        // rescales - it is the seam between the Talker's hidden state and this
+        // decoder's, not an attenuator - so its std is `1/sqrt(embedding_dim)`
+        // rather than the flat 0.02 every other tensor here gets. Those two
+        // coincide at the real 1.7B shape (`1/sqrt(2048) = 0.022`) and differ
+        // by 10x at a toy `embedding_dim` of 24, where a flat 0.02 would shrink
+        // the residual stream to an rms of ~0.05 and leave every downstream
+        // RMSNorm running at a ~20x gain - a miniature that does not behave
+        // like the model it stands in for.
+        let projection = if e != d {
+            Some((normal(d * e, 1.0 / (e as f32).sqrt()), normal(d, 0.0)))
+        } else {
+            None
+        };
+        (decoder, codec_embedding, lm_head, projection)
+    }
+
+    /// Build a randomly-initialised **trainable** MTP (for tests / gradient
+    /// checks), the twin of `TalkerModel::new_trainable`.
+    ///
+    /// The Talker's version delegates wholesale to `qwen3::Qwen`, which already
+    /// carries a gradient-checked backward; the MTP has no such inner model -
+    /// its decoder is assembled here out of `model::block`, its input
+    /// embeddings are gathered and projected on the host, and its output heads
+    /// are fifteen separate per-position linears, so this is the first backward
+    /// over any of that. `crate::sft`'s `finetune_lora`/`finetune_full` train
+    /// the Talker only.
+    pub fn new_trainable(cfg: MtpConfig, seed: u64) -> MtpModel {
+        Self::new_trainable_on(Gpu::new(TRAIN_PIPELINES), cfg, seed)
+    }
+
+    /// [`Self::new_trainable`] on an existing device handle, which MUST have
+    /// been built from [`TRAIN_PIPELINES`] - a `PIPELINES` handle has no
+    /// backward kernels at all, and a `Step`'s `kind` is an index into the
+    /// specific handle's own compiled pipeline vector, so the mismatch is
+    /// checked here by name rather than left to fail as an out-of-range
+    /// dispatch deep inside the backward tape.
+    pub fn new_trainable_on(gpu: Gpu, cfg: MtpConfig, seed: u64) -> MtpModel {
+        for (i, (name, _)) in TRAIN_PIPELINES.iter().enumerate() {
+            assert_eq!(
+                gpu.kernel_name(i),
+                Some(*name),
+                "MtpModel::new_trainable_on: slot {i} is {:?}, expected {name} - \
+                 the handle must be built from mtp::TRAIN_PIPELINES",
+                gpu.kernel_name(i)
+            );
+        }
+        let (decoder, codec_embedding, lm_head, projection) = Self::synthetic_weights(&cfg, seed);
+        MtpModel::build(gpu, cfg, decoder, codec_embedding, lm_head, projection, true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Training: forward loss + backward. Only a `new_trainable` build has any of
+// this; every entry point below panics with the same message on an inference
+// one rather than silently returning zeros.
+// ---------------------------------------------------------------------------
+
+impl MtpModel {
+    /// Full `KernelIds` - forward slots plus the backward half [`TRAIN_PIPELINES`]
+    /// adds. Deliberately distinct from [`Self::only_fwd_ids`], which the
+    /// forward and decode tapes keep using: those two must stay reachable from
+    /// an inference-only handle, and their `block::UNREGISTERED` backward slots
+    /// are what makes an accidental backward dispatch a panic there.
+    fn train_ids() -> KernelIds {
+        KernelIds {
+            rmsnorm: RMSNORM,
+            rms_inv: RMS_INV,
+            rmsnorm_dx: RMSNORM_DX,
+            rmsnorm_dx_rows: RMSNORM_DX_ROWS,
+            rmsnorm_dw: RMSNORM_DW,
+            rope: ROPE,
+            rope_bwd: ROPE_BWD,
+            gqa_scores: GQA_SCORES,
+            gqa_apply: GQA_APPLY,
+            attn_softmax: ATTN_SOFTMAX,
+            gqa_dscores: GQA_DSCORES,
+            gqa_dv: GQA_DV,
+            gqa_dq: GQA_DQ,
+            gqa_dk: GQA_DK,
+            silu_mul: SILU_MUL,
+            silu_da: SILU_DA,
+            silu_db: SILU_DB,
+            rmsnorm_rows: RMSNORM_ROWS,
+        }
+    }
+
+    /// `dW[n,k] += dYᵀ·X` for a linear `out[m,n] = x[m,k] · W[n,k]ᵀ`.
+    fn dw_step(&self, d_out: &DeviceBuffer, x: &DeviceBuffer, gw: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
+        self.gpu.step(MATMUL_DW, &[d_out, x, gw], &[m, k, n], n * k)
+    }
+
+    /// `dX[m,k] = dY·W` for the same linear; `acc = 1` adds instead of
+    /// overwriting, which is how the three q/k/v projections fold their input
+    /// gradients onto one `d_xn`.
+    #[allow(clippy::too_many_arguments)]
+    fn dx_step(&self, d_out: &DeviceBuffer, w: &DeviceBuffer, dx: &DeviceBuffer, m: u32, k: u32, n: u32, acc: u32) -> Step {
+        self.gpu.step(MATMUL_DX, &[d_out, w, dx], &[m, k, n, acc], m * k)
+    }
+
+    fn build_train(&self) -> Train {
+        let c = &self.cfg;
+        let n = self.t as u64;
+        let d = c.d_model as u64;
+        let ff = c.d_ff as u64;
+        let hq = c.q_dim() as u64;
+        let hkv = c.kv_dim() as u64;
+        let st = |x: u64| self.gpu.storage(x);
+        let nres = c.n_residual() as usize;
+        let (dm, em, v) = (c.d_model as usize, c.embedding_dim as usize, c.vocab as usize);
+        let mut tr = Train {
+            bwd_steps: Vec::new(),
+            d_res: (0..=c.n_layers).map(|_| st(n * d)).collect(),
+            d_hidden: st(n * d),
+            // Sized for the WIDEST row count any `rmsnorm_dw` on the tape asks
+            // for: the per-head q-norm, at `num_code_groups * n_heads` rows.
+            inv: st(n * c.n_heads as u64),
+            d_xn: st(n * d),
+            d_tmp: st(n * d),
+            dxmid: st(n * d),
+            d_ctx: st(n * hq),
+            d_scores: st((c.n_heads * self.t * self.t) as u64),
+            d_q: st(n * hq),
+            d_k: st(n * hkv),
+            d_v: st(n * hkv),
+            dq_pre: st(n * hq),
+            dk_pre: st(n * hkv),
+            d_h: st(n * ff),
+            d_gate_pre: st(n * ff),
+            d_up: st(n * ff),
+            g_codec_embedding: (0..nres).map(|_| vec![0.0f32; v * em]).collect(),
+            g_lm_head: (0..nres).map(|_| vec![0.0f32; v * dm]).collect(),
+            g_projection: self
+                .small_to_mtp_projection
+                .as_ref()
+                .map(|(w, b)| (vec![0.0f32; w.len()], vec![0.0f32; b.len()])),
+            batch: None,
+            fwd: None,
+        };
+        tr.bwd_steps = self.backward_steps(&tr);
+        tr
+    }
+
+    /// The decoder half's backward tape: the exact adjoint of
+    /// [`Self::forward_steps`], read bottom-up, composed from the same shared
+    /// `model::block` builders the forward uses. Input is `d_hidden` (the
+    /// gradient the host-side output heads produce); output is `d_res[0]`, the
+    /// gradient w.r.t. the assembled input-embedding sequence.
+    fn backward_steps(&self, tr: &Train) -> Vec<Step> {
+        let c = &self.cfg;
+        let n = self.t;
+        let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
+        let (hq, hkv) = (c.q_dim(), c.kv_dim());
+        let (nh, nkv) = (c.n_heads, c.n_kv_heads);
+        let theta = c.rope_theta;
+        let ids = Self::train_ids();
+        let ga = Gqa { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+        let g = &self.gpu;
+        let w = |name: &str| self.ps.w(name);
+        let gw = |name: &str| self.ps.g(name);
+        let mut s: Vec<Step> = Vec::new();
+
+        let last = c.n_layers as usize;
+        s.extend(block::rmsnorm_bwd(g, &ids, &self.res[last], w("norm.weight"), &tr.d_hidden, &tr.d_res[last], &tr.inv, Some(gw("norm.weight")), d, n));
+
+        for l in (0..c.n_layers as usize).rev() {
+            let lb = &self.layers[l];
+            let p = |name: &str| format!("blocks.{l}.{name}");
+
+            // ---- SwiGLU MLP backward (incoming grad = d_res[l+1]) ----
+            s.push(self.dw_step(&tr.d_res[l + 1], &lb.h, gw(&p("mlp.down.weight")), n, ff, d));
+            s.push(self.dx_step(&tr.d_res[l + 1], w(&p("mlp.down.weight")), &tr.d_h, n, ff, d, 0));
+            s.extend(block::swiglu_bwd(g, &ids, &lb.gate_pre, &lb.up, &tr.d_h, &tr.d_gate_pre, &tr.d_up, n * ff));
+            s.push(self.dw_step(&tr.d_up, &lb.xn2, gw(&p("mlp.up.weight")), n, d, ff));
+            s.push(self.dx_step(&tr.d_up, w(&p("mlp.up.weight")), &tr.d_xn, n, d, ff, 0));
+            s.push(self.dw_step(&tr.d_gate_pre, &lb.xn2, gw(&p("mlp.gate.weight")), n, d, ff));
+            s.push(self.dx_step(&tr.d_gate_pre, w(&p("mlp.gate.weight")), &tr.d_xn, n, d, ff, 1));
+            s.extend(block::rmsnorm_bwd(g, &ids, &lb.xmid, w(&p("ln2.weight")), &tr.d_xn, &tr.d_tmp, &tr.inv, Some(gw(&p("ln2.weight"))), d, n));
+            // The MLP residual: xmid feeds both the norm and the skip.
+            s.push(g.step(ADD2, &[&tr.d_res[l + 1], &tr.d_tmp, &tr.dxmid], &[n * d], n * d));
+
+            // ---- attention backward (incoming grad = dxmid) ----
+            s.push(self.dw_step(&tr.dxmid, &lb.ctx, gw(&p("attn.wo.weight")), n, hq, d));
+            s.push(self.dx_step(&tr.dxmid, w(&p("attn.wo.weight")), &tr.d_ctx, n, hq, d, 0));
+            // `lb.q`/`lb.k` hold the ROPED, QK-normed q/k the forward attended
+            // with (RoPE is applied in place), which is what `gqa_bwd` wants.
+            s.extend(block::gqa_bwd(g, &ids, &ga, &lb.q, &lb.k, &lb.v, &lb.probs, &tr.d_ctx, &tr.d_scores, &tr.d_q, &tr.d_k, &tr.d_v));
+            s.push(block::rope_bwd(g, &ids, &tr.d_q, n, nh, hd, hq, n, theta));
+            s.push(block::rope_bwd(g, &ids, &tr.d_k, n, nkv, hd, hkv, n, theta));
+            s.extend(block::rmsnorm_bwd(g, &ids, &lb.q_pre, w(&p("attn.q_norm.weight")), &tr.d_q, &tr.dq_pre, &tr.inv, Some(gw(&p("attn.q_norm.weight"))), hd, n * nh));
+            s.extend(block::rmsnorm_bwd(g, &ids, &lb.k_pre, w(&p("attn.k_norm.weight")), &tr.d_k, &tr.dk_pre, &tr.inv, Some(gw(&p("attn.k_norm.weight"))), hd, n * nkv));
+            s.push(self.dw_step(&tr.d_v, &lb.xn1, gw(&p("attn.wv.weight")), n, d, hkv));
+            s.push(self.dx_step(&tr.d_v, w(&p("attn.wv.weight")), &tr.d_xn, n, d, hkv, 0));
+            s.push(self.dw_step(&tr.dk_pre, &lb.xn1, gw(&p("attn.wk.weight")), n, d, hkv));
+            s.push(self.dx_step(&tr.dk_pre, w(&p("attn.wk.weight")), &tr.d_xn, n, d, hkv, 1));
+            s.push(self.dw_step(&tr.dq_pre, &lb.xn1, gw(&p("attn.wq.weight")), n, d, hq));
+            s.push(self.dx_step(&tr.dq_pre, w(&p("attn.wq.weight")), &tr.d_xn, n, d, hq, 1));
+            s.extend(block::rmsnorm_bwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &tr.d_xn, &tr.d_tmp, &tr.inv, Some(gw(&p("ln1.weight"))), d, n));
+            s.push(g.step(ADD2, &[&tr.dxmid, &tr.d_tmp, &tr.d_res[l]], &[n * d], n * d));
+        }
+        s
+    }
+
+    fn tr(&self) -> &Train {
+        self.train.as_ref().expect("MtpModel: not a new_trainable build")
+    }
+    fn tr_mut(&mut self) -> &mut Train {
+        self.train.as_mut().expect("MtpModel: not a new_trainable build")
+    }
+
+    /// Set the fixed one-frame training example [`Self::forward`] scores and
+    /// [`Self::backward`] differentiates. `talker_hidden` and `cb0_embed` are
+    /// `embedding_dim`-wide (Talker-side rows, projected on the way in);
+    /// `targets` are the ground-truth residual codebooks `1..num_code_groups`
+    /// of that frame - the same-frame, unshifted alignment
+    /// `crate::sft::MultiCodebookLabels` materialises.
+    ///
+    /// The inputs at positions `2..num_code_groups` are the ground-truth codes
+    /// themselves (teacher forcing), so `targets` doubles as the input code
+    /// sequence and no target may be `crate::sft::IGNORE`: a masked target
+    /// would still have to feed the next position, and there is no meaningful
+    /// embedding to feed it.
+    pub fn set_frame_batch(&mut self, talker_hidden: &[f32], cb0_embed: &[f32], targets: &[u32]) {
+        let e = self.cfg.embedding_dim as usize;
+        let nres = self.t as usize - 1;
+        assert_eq!(talker_hidden.len(), e, "talker_hidden must be [embedding_dim]");
+        assert_eq!(cb0_embed.len(), e, "cb0_embed must be [embedding_dim]");
+        assert_eq!(targets.len(), nres, "need one target per residual codebook");
+        assert!(targets.iter().all(|&c| c < self.cfg.vocab), "residual target outside the codebook vocab");
+        let batch = Batch {
+            talker_hidden: talker_hidden.to_vec(),
+            cb0_embed: cb0_embed.to_vec(),
+            targets: targets.to_vec(),
+        };
+        let tr = self.tr_mut();
+        tr.batch = Some(batch);
+        tr.fwd = None;
+    }
+
+    /// Every trainable parameter, device and host alike, in one list: the
+    /// decoder block set, then the per-residual `codec_embedding` / `lm_head`
+    /// tables, then `small_to_mtp_projection` when the config has one.
+    pub fn param_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Self::decoder_param_list(&self.cfg).into_iter().map(|(n, _)| n).collect();
+        for i in 0..self.cfg.n_residual() as usize {
+            names.push(format!("codec_embedding.{i}.weight"));
+            names.push(format!("lm_head.{i}.weight"));
+        }
+        if self.small_to_mtp_projection.is_some() {
+            names.push("small_to_mtp_projection.weight".to_string());
+            names.push("small_to_mtp_projection.bias".to_string());
+        }
+        names
+    }
+
+    pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        match host_param(name) {
+            Some(HostParam::Codec(i)) => self.codec_embedding[i].clone(),
+            Some(HostParam::Head(i)) => self.lm_head[i].clone(),
+            Some(HostParam::ProjWeight) => self.small_to_mtp_projection.as_ref().expect("no projection").0.clone(),
+            Some(HostParam::ProjBias) => self.small_to_mtp_projection.as_ref().expect("no projection").1.clone(),
+            None => self.ps.read_weight(&self.gpu, name),
+        }
+    }
+
+    /// `&mut self` because three of the four parameter families are host
+    /// `Vec<f32>`s the forward reads directly - the model owns them outright
+    /// rather than behind interior mutability, so a caller that needs the
+    /// `&self` shape the gradient checker's `CheckModel` asks for wraps the
+    /// model in a `RefCell` (see `tests/mtp.rs`).
+    pub fn write_weight(&mut self, name: &str, data: &[f32]) {
+        match host_param(name) {
+            Some(HostParam::Codec(i)) => self.codec_embedding[i].copy_from_slice(data),
+            Some(HostParam::Head(i)) => self.lm_head[i].copy_from_slice(data),
+            Some(HostParam::ProjWeight) => self.small_to_mtp_projection.as_mut().expect("no projection").0.copy_from_slice(data),
+            Some(HostParam::ProjBias) => self.small_to_mtp_projection.as_mut().expect("no projection").1.copy_from_slice(data),
+            None => self.gpu.write(self.ps.w(name), bytemuck::cast_slice(data)),
+        }
+    }
+
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        let tr = self.tr();
+        match host_param(name) {
+            Some(HostParam::Codec(i)) => tr.g_codec_embedding[i].clone(),
+            Some(HostParam::Head(i)) => tr.g_lm_head[i].clone(),
+            Some(HostParam::ProjWeight) => tr.g_projection.as_ref().expect("no projection").0.clone(),
+            Some(HostParam::ProjBias) => tr.g_projection.as_ref().expect("no projection").1.clone(),
+            None => self.ps.read_grad(&self.gpu, name),
+        }
+    }
+
+    pub fn zero_grads(&mut self) {
+        self.ps.zero_grads(&self.gpu);
+        let tr = self.tr_mut();
+        for g in tr.g_codec_embedding.iter_mut().chain(tr.g_lm_head.iter_mut()) {
+            g.fill(0.0);
+        }
+        if let Some((gw, gb)) = tr.g_projection.as_mut() {
+            gw.fill(0.0);
+            gb.fill(0.0);
+        }
+    }
+
+    pub fn poll_wait(&self) {
+        self.gpu.poll_wait();
+    }
+
+    /// Mean cross-entropy of the `num_code_groups - 1` residual codebooks of
+    /// the frame set by [`Self::set_frame_batch`].
+    ///
+    /// This is the PRODUCTION forward, not a training-only twin of it: the
+    /// input sequence comes from [`Self::assemble`] (so
+    /// `small_to_mtp_projection` is exercised exactly as a served run
+    /// exercises it), the decoder is the same `fwd_steps` tape
+    /// [`Self::logits`] submits, and each position's logits come from the same
+    /// [`Self::head_row`]. That is the whole point of gradient-checking it -
+    /// a second, parallel forward would only gate itself.
+    pub fn forward(&mut self) -> f32 {
+        let d = self.cfg.d_model as usize;
+        let e = self.cfg.embedding_dim as usize;
+        let v = self.cfg.vocab as usize;
+        let t = self.t as usize;
+        let (th, cb0, targets) = {
+            let b = self.tr().batch.as_ref().expect("MtpModel::forward: call set_frame_batch first");
+            (b.talker_hidden.clone(), b.cb0_embed.clone(), b.targets.clone())
+        };
+
+        // The unprojected rows the projection backward differentiates against.
+        // `assemble` gathers and projects them again on its own; keeping that
+        // path untouched is deliberate - it is the served one.
+        let mut raw: Vec<Vec<f32>> = Vec::with_capacity(t);
+        raw.push(th.clone());
+        raw.push(cb0.clone());
+        for (i, &code) in targets[..t - 2].iter().enumerate() {
+            let s = code as usize * e;
+            raw.push(self.codec_embedding[i][s..s + e].to_vec());
+        }
+
+        let emb = self.assemble(&th, &cb0, &targets[..t - 2]);
+        let hidden = self.hidden(&emb);
+        let mut logits = vec![0.0f32; (t - 1) * v];
+        for i in 1..t {
+            let row = self.head_row(i - 1, &hidden[i * d..(i + 1) * d]);
+            logits[(i - 1) * v..i * v].copy_from_slice(&row);
+        }
+        let (loss, d_logits) = crate::sft::ce_batch(&logits, &targets, v);
+        self.tr_mut().fwd = Some(Fwd { raw, hidden, d_logits });
+        loss
+    }
+
+    /// Accumulate the gradients of the loss [`Self::forward`] returned.
+    ///
+    /// Three stages, host / device / host: the per-position output heads, then
+    /// the decoder tape (which reads the activations the forward left resident
+    /// and hands back `d_res[0]`), then `small_to_mtp_projection` and the
+    /// codec-embedding scatter.
+    pub fn backward(&mut self) {
+        let (d, e, v, t) = (
+            self.cfg.d_model as usize,
+            self.cfg.embedding_dim as usize,
+            self.cfg.vocab as usize,
+            self.t as usize,
+        );
+        // Disjoint field borrows: the host parameter tables are read while the
+        // training state's gradient tables are written.
+        let MtpModel { gpu, lm_head, small_to_mtp_projection, train, .. } = self;
+        let tr = train.as_mut().expect("MtpModel: not a new_trainable build");
+        let fwd = tr.fwd.take().expect("MtpModel::backward: call forward first");
+        let targets = tr.batch.as_ref().expect("no batch").targets.clone();
+
+        // ---- 1. per-position output heads (host) ----
+        // `lm_head[i-1]` reads decoder position `i` only, so the head gradients
+        // never mix positions and `d_hidden`'s position 0 - the Talker hidden
+        // state, which no head reads - stays exactly zero.
+        let mut d_hidden = vec![0.0f32; t * d];
+        for i in 1..t {
+            let dl = &fwd.d_logits[(i - 1) * v..i * v];
+            let h = &fwd.hidden[i * d..(i + 1) * d];
+            let head = &lm_head[i - 1];
+            let ghead = &mut tr.g_lm_head[i - 1];
+            let dst = &mut d_hidden[i * d..(i + 1) * d];
+            for (o, &go) in dl.iter().enumerate() {
+                let wrow = &head[o * d..(o + 1) * d];
+                let grow = &mut ghead[o * d..(o + 1) * d];
+                for k in 0..d {
+                    dst[k] += go * wrow[k];
+                    grow[k] += go * h[k];
+                }
+            }
+        }
+
+        // ---- 2. decoder (device) ----
+        gpu.write(&tr.d_hidden, bytemuck::cast_slice(&d_hidden));
+        gpu.submit(&[], &tr.bwd_steps);
+        let d_emb = gpu.read(&tr.d_res[0], t * d);
+
+        // ---- 3. small_to_mtp_projection, then the codec-embedding scatter ----
+        // `d_raw[0]`/`d_raw[1]` are the gradients w.r.t. the Talker hidden
+        // state and the Talker's own codebook-0 embedding. Neither is an MTP
+        // parameter (both are inputs supplied by the Talker), so they are
+        // dropped here; a jointly-trained Talker+MTP stack is where they would
+        // be the seam this hands back.
+        let mut d_raw: Vec<Vec<f32>> = Vec::with_capacity(t);
+        match (small_to_mtp_projection.as_ref(), tr.g_projection.as_mut()) {
+            (Some((w, _)), Some((gw, gb))) => {
+                for (r, x) in fwd.raw.iter().enumerate() {
+                    let dy = &d_emb[r * d..(r + 1) * d];
+                    let mut dx = vec![0.0f32; e];
+                    for (o, &go) in dy.iter().enumerate() {
+                        gb[o] += go;
+                        let wrow = &w[o * e..(o + 1) * e];
+                        let grow = &mut gw[o * e..(o + 1) * e];
+                        for j in 0..e {
+                            grow[j] += go * x[j];
+                            dx[j] += go * wrow[j];
+                        }
+                    }
+                    d_raw.push(dx);
+                }
+            }
+            // Identity projection (the 0.6B family): `embedding_dim == d_model`
+            // and `assemble` copied the row straight through.
+            _ => {
+                for r in 0..t {
+                    d_raw.push(d_emb[r * d..(r + 1) * d].to_vec());
+                }
+            }
+        }
+        for (i, &code) in targets[..t - 2].iter().enumerate() {
+            let s = code as usize * e;
+            let dst = &mut tr.g_codec_embedding[i][s..s + e];
+            for (a, b) in dst.iter_mut().zip(&d_raw[2 + i]) {
+                *a += b;
+            }
+        }
     }
 }
 
@@ -1004,6 +1641,34 @@ mod tests {
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// Every forward-slot const in this module indexes BOTH tables, and the
+    /// trainable model replays the very forward tape an inference one records,
+    /// so `TRAIN_PIPELINES` must begin with `PIPELINES` verbatim and in order.
+    /// Appending a forward kernel to one table and not the other would
+    /// otherwise shift the backward slots under the training tape and dispatch
+    /// whichever kernel happened to land there.
+    #[test]
+    fn train_pipelines_extends_the_inference_table() {
+        assert_eq!(&TRAIN_PIPELINES[..PIPELINES.len()], PIPELINES);
+        assert_eq!(TRAIN_PIPELINES.len(), MATMUL_DW + 1);
+        for (slot, name) in [
+            (RMSNORM_DX, "rmsnorm_dx"),
+            (RMSNORM_DX_ROWS, "rmsnorm_dx_rows"),
+            (RMSNORM_DW, "rmsnorm_dw"),
+            (ROPE_BWD, "rope_base_bwd"),
+            (GQA_DSCORES, "gqa_bwd_dscores"),
+            (GQA_DV, "gqa_bwd_dv"),
+            (GQA_DQ, "gqa_bwd_dq"),
+            (GQA_DK, "gqa_bwd_dk"),
+            (SILU_DA, "silu_bwd_da"),
+            (SILU_DB, "silu_bwd_db"),
+            (MATMUL_DX, "matmul_dx"),
+            (MATMUL_DW, "matmul_dw"),
+        ] {
+            assert_eq!(TRAIN_PIPELINES[slot].0, name, "backward slot {slot}");
+        }
     }
 
     #[test]
