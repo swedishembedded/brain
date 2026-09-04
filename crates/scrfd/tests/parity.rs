@@ -194,8 +194,11 @@ fn scrfd_decode_and_nms_reproduce_the_reference_detections() {
     println!("scrfd decode:");
     // The dumper recorded these as f64; kept at full precision so the literal is
     // a verbatim copy of `per_photo.det_scale` rather than a re-rounded one.
+    // Must be re-copied from `manifest.json`'s `per_photo.*.det_scale` whenever
+    // the goldens are regenerated: the dumper's `--photos` order picks which
+    // index each `det_scale` belongs to, and this array does not derive it.
     #[allow(clippy::excessive_precision)]
-    let scales = [1.1786372007366483f32, 1.1636363636363636, 0.4383561643835616, 1.3882863340563991];
+    let scales = [1.1786372007366483f32, 0.8839779005524862, 1.1636363636363636, 1.3882863340563991];
     for p in 0..4usize {
         let t = m.forward(&g[&format!("photo{p}_det_blob")].1);
         let faces = scrfd::decode(&cfg, &t.out_score, &t.out_bbox, &t.out_kps, scales[p]);
