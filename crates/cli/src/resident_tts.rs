@@ -187,8 +187,10 @@ impl Instance for TtsInstance {
             // when `BRAIN_QWEN3TTS_REF` is set (ICL when a transcript is also given).
             "speak" => {
                 let wav = match &self.ref_wav {
-                    Some(refw) => qwen3tts::pipeline::clone(&self.paths, &opts, &text, refw, &self.ref_text, &lang, None)?,
-                    None => qwen3tts::pipeline::synth(&self.paths, &opts, &text, &lang)?,
+                    Some(refw) => {
+                        qwen3tts::pipeline::clone(&self.paths, &opts, &text, refw, &self.ref_text, &lang, None, &inv.cancel)?
+                    }
+                    None => qwen3tts::pipeline::synth(&self.paths, &opts, &text, &lang, &inv.cancel)?,
                 };
                 Self::pcm_outcome(wav)
             }
@@ -197,7 +199,8 @@ impl Instance for TtsInstance {
             "design" => {
                 let instruct = inv.get_str("instruct").unwrap_or_default();
                 let speaker = inv.get_str("speaker").filter(|s| !s.is_empty());
-                let wav = qwen3tts::pipeline::design(&self.paths, &opts, &text, &lang, &instruct, speaker.as_deref())?;
+                let wav =
+                    qwen3tts::pipeline::design(&self.paths, &opts, &text, &lang, &instruct, speaker.as_deref(), &inv.cancel)?;
                 Self::pcm_outcome(wav)
             }
             other => Err(format!("tts: unsupported action '{other}' (this resident declares: speak, design)")),

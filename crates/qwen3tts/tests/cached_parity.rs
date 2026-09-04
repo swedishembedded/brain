@@ -17,8 +17,13 @@ use qwen3tts::gen::TalkerGen;
 use qwen3tts::gen_kv::CpuTalker;
 use qwen3tts::gen_kv_mtp::CpuMtp;
 use qwen3tts::mtp::MtpModel;
+use capability::CancelToken;
 use qwen3tts::pipeline::{generate_codes, generate_codes_cached, GenOpts};
 use qwen3tts::prompt::{self, TtsSpecials};
+
+/// These parity runs pass an unarmed `CancelToken`, which by construction never
+/// fires - so the cancelled branch is unreachable here, not merely unlikely.
+const NEVER: &str = "an unarmed cancel token never fires";
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
@@ -148,10 +153,10 @@ fn cached_matches_cachefree() {
     );
 
     // ---- (D) full generation: cache-free vs cached, frame-by-frame ----
-    let codes_free = generate_codes(&gen, &mtp, &sp, &prompt, &opts);
+    let codes_free = generate_codes(&gen, &mtp, &sp, &prompt, &opts, &CancelToken::default()).expect(NEVER);
     let mut cpu2 = CpuTalker::load(&TALKER);
     let mut cpu_mtp2 = CpuMtp::load(&MTP);
-    let codes_cached = generate_codes_cached(&mut cpu2, &mut cpu_mtp2, &sp, &prompt, &opts);
+    let codes_cached = generate_codes_cached(&mut cpu2, &mut cpu_mtp2, &sp, &prompt, &opts, &CancelToken::default()).expect(NEVER);
     let tf = codes_free.len() / 16;
     let tc = codes_cached.len() / 16;
     eprintln!("(D) cache-free frames={tf}, cached frames={tc}");
@@ -264,7 +269,7 @@ fn cached_clone_audio_quality() {
     let t0 = std::time::Instant::now();
     let mut cpu = CpuTalker::load(&TALKER);
     let mut cpu_mtp = CpuMtp::load(&MTP);
-    let codes = generate_codes_cached(&mut cpu, &mut cpu_mtp, &sp, &promptx, &opts);
+    let codes = generate_codes_cached(&mut cpu, &mut cpu_mtp, &sp, &promptx, &opts, &CancelToken::default()).expect(NEVER);
     eprintln!("cached gen (24 frames) wall = {:.1}s", t0.elapsed().as_secs_f64());
     let cb0: Vec<u32> = (0..codes.len() / 16).map(|f| codes[f * 16]).collect();
     eprintln!("cb0 per frame = {cb0:?}");
@@ -296,7 +301,7 @@ fn cached_clone_audio_quality() {
     };
     let mut cpu_s = CpuTalker::load(&TALKER);
     let mut cpu_mtp_s = CpuMtp::load(&MTP);
-    let codes_s = generate_codes_cached(&mut cpu_s, &mut cpu_mtp_s, &sp, &promptx, &opts_s);
+    let codes_s = generate_codes_cached(&mut cpu_s, &mut cpu_mtp_s, &sp, &promptx, &opts_s, &CancelToken::default()).expect(NEVER);
     let cb0_s: Vec<u32> = (0..codes_s.len() / 16).map(|f| codes_s[f * 16]).collect();
     eprintln!("sampled cb0 per frame = {cb0_s:?}");
     let wav_s = qwen3tts::pipeline::decode_codes(&paths.codec, &codes_s).unwrap();

@@ -11,9 +11,9 @@
 //! strictly FIFO today, so one long clip fully blocks every shorter request
 //! queued behind it. Interleaving fixes that at the SCHEDULING layer - every
 //! active request makes steady progress every round, and a request that
-//! hits its own EOS or `max_frames` drops out of rotation independently
-//! (autoregressive decode has per-request finish times, so the batch is
-//! genuinely ragged, never a fixed rectangular shape).
+//! hits its own EOS, its `max_frames`, or its own cancellation drops out of
+//! rotation independently (autoregressive decode has per-request finish times,
+//! so the batch is genuinely ragged, never a fixed rectangular shape).
 //!
 //! **Scope, stated plainly**: this is NOT a single batched GPU matmul across
 //! requests (that would need `b>1` in every `Gqa`/`Step` this crate's GPU
@@ -27,6 +27,8 @@
 //! under interleaving (no cross-request contamination) and genuinely ragged
 //! completion (a short request finishes and stops consuming rounds while a
 //! longer one continues).
+
+use capability::CancelToken;
 
 use crate::gen_kv::CpuTalker;
 use crate::gen_kv_mtp::CpuMtp;
@@ -49,6 +51,10 @@ struct Session {
     mtp: CpuMtp,
     prompt: Prompt,
     opts: GenOpts,
+    /// This request's own cancellation flag, polled once per round in
+    /// [`Self::is_done`] - per-request, never shared, so one caller hanging up
+    /// cannot end anybody else's clip.
+    cancel: CancelToken,
     rng: Rng,
     cb0: u32,
     cb0_history: Vec<u32>,
@@ -58,7 +64,14 @@ struct Session {
 }
 
 impl Session {
-    fn new(talker_path: &str, mtp_path: &str, sp: &TtsSpecials, prompt: Prompt, opts: GenOpts) -> Session {
+    fn new(
+        talker_path: &str,
+        mtp_path: &str,
+        sp: &TtsSpecials,
+        prompt: Prompt,
+        opts: GenOpts,
+        cancel: CancelToken,
+    ) -> Session {
         let mut cpu = CpuTalker::load(talker_path);
         let mtp = CpuMtp::load(mtp_path);
         cpu.reset();
@@ -81,11 +94,17 @@ impl Session {
             &cb0_history,
             &mut rng,
         );
-        Session { cpu, mtp, prompt, opts, rng, cb0, cb0_history, s: 0, past_hidden, frames: Vec::new() }
+        Session { cpu, mtp, prompt, opts, cancel, rng, cb0, cb0_history, s: 0, past_hidden, frames: Vec::new() }
     }
 
+    /// A session leaves rotation on EOS, on its frame cap, OR on its own
+    /// cancellation - all three are just "stop scheduling this one", so a
+    /// cancelled member needs no separate path through the scheduler and its
+    /// partial `frames` are returned exactly like a completed member's.
     fn is_done(&self, sp: &TtsSpecials) -> bool {
-        (self.cb0 == sp.codec_eos && self.s >= self.opts.min_new) || self.s >= self.opts.max_frames
+        (self.cb0 == sp.codec_eos && self.s >= self.opts.min_new)
+            || self.s >= self.opts.max_frames
+            || self.cancel.is_cancelled()
     }
 
     /// Generate exactly one frame's worth of codes and advance the KV cache
@@ -130,13 +149,27 @@ impl Session {
     }
 }
 
-/// Drive `reqs` (each a `(prompt, opts)` pair) to completion, interleaved
-/// round-robin one frame at a time, returning each request's codec codes in
-/// the SAME order as `reqs`. See the module doc for what this does and does
-/// not deliver.
-pub fn run_batch(talker_path: &str, mtp_path: &str, sp: &TtsSpecials, reqs: Vec<(Prompt, GenOpts)>) -> Vec<Vec<u32>> {
-    let mut sessions: Vec<Session> =
-        reqs.into_iter().map(|(prompt, opts)| Session::new(talker_path, mtp_path, sp, prompt, opts)).collect();
+/// Drive `reqs` (each a `(prompt, opts, cancel)` triple) to completion,
+/// interleaved round-robin one frame at a time, returning each request's codec
+/// codes in the SAME order as `reqs`. See the module doc for what this does and
+/// does not deliver.
+///
+/// Each request carries its OWN [`CancelToken`], polled once per round between
+/// frames. A cancelled request stops being scheduled immediately and its
+/// partial codes are returned in its slot - the caller already holds the token,
+/// so it can tell a cancelled clip from a completed one without a second return
+/// channel. Pass an unarmed `CancelToken::default()` for a request that must
+/// never be interrupted.
+pub fn run_batch(
+    talker_path: &str,
+    mtp_path: &str,
+    sp: &TtsSpecials,
+    reqs: Vec<(Prompt, GenOpts, CancelToken)>,
+) -> Vec<Vec<u32>> {
+    let mut sessions: Vec<Session> = reqs
+        .into_iter()
+        .map(|(prompt, opts, cancel)| Session::new(talker_path, mtp_path, sp, prompt, opts, cancel))
+        .collect();
     let mut active: Vec<usize> = (0..sessions.len()).filter(|&i| !sessions[i].is_done(sp)).collect();
     while !active.is_empty() {
         let mut next_active = Vec::with_capacity(active.len());
@@ -154,108 +187,10 @@ pub fn run_batch(talker_path: &str, mtp_path: &str, sp: &TtsSpecials, reqs: Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testsupport::{synthetic_checkpoints, talker_test_cfg, tiny_prompt, tiny_specials, Scratch};
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
-    }
-
-    /// `TalkerConfig::tiny()` with a real-scale vocab: `sample_cb0` always
-    /// suppresses the top-1024 vocab entries as the reference's
-    /// `suppress_tokens` window, so a genuinely tiny vocab (23) underflows
-    /// `vocab - 1024`. Every other dimension stays tiny for test speed.
-    fn talker_test_cfg() -> crate::config::TalkerConfig {
-        crate::config::TalkerConfig { vocab: 1100, ..crate::config::TalkerConfig::tiny() }
-    }
-
-    /// Build a real (tiny synthetic) Talker+MTP checkpoint pair on disk, the
-    /// same shape `run_batch` loads via `CpuTalker::load`/`CpuMtp::load`.
-    /// The Talker's base decoder blocks ARE a `qwen3::Qwen` on disk
-    /// (`TalkerConfig::to_qwen`, `qwen3::init_weights`; `CpuTalker::load`
-    /// reads them back via `TalkerConfig::from_qwen`), plus the
-    /// Talker-specific extras `qwen3::init_weights` knows nothing about
-    /// (`tok`/`lm_head`/`text_projection.*`/`text_embedding`, normally added
-    /// by `import::import_talker`) hand-added here with the right shapes -
-    /// values don't matter, `run_batch`'s own tests never exercise text
-    /// prompting (they build `Prompt` directly from random embeddings).
-    fn synthetic_checkpoints(dir: &std::path::Path, seed: u64) -> (String, String) {
-        let tcfg = talker_test_cfg();
-        let qcfg = tcfg.to_qwen(32);
-        let mut init = qwen3::init_weights(&qcfg, seed);
-
-        let mut rng = Rng::new(seed ^ 0x7A1E);
-        let mut normal = |n: usize| -> Vec<f32> { (0..n).map(|_| (rng.next_gaussian() as f32) * 0.02).collect() };
-        let (d, vocab, th) = (tcfg.d_model as usize, tcfg.vocab as usize, tcfg.text_hidden_size as usize);
-        let inter = th; // no config field for this; derived from the tensor shapes at load time
-        init.insert("tok.weight".to_string(), normal(vocab * d));
-        init.insert("lm_head.weight".to_string(), normal(vocab * d));
-        init.insert("text_projection.fc1.weight".to_string(), normal(inter * th));
-        init.insert("text_projection.fc1.bias".to_string(), normal(inter));
-        init.insert("text_projection.fc2.weight".to_string(), normal(d * inter));
-        init.insert("text_projection.fc2.bias".to_string(), normal(d));
-        init.insert("text_embedding.weight".to_string(), normal(tcfg.text_vocab_size as usize * th));
-
-        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = init.into_iter().map(|(k, v)| (k, vec![v.len() as u64], v)).collect();
-        let talker_path = dir.join("talker.safetensors").to_str().unwrap().to_string();
-        checkpoint::save(&talker_path, qcfg.to_json(), &tensors);
-
-        let mcfg = crate::config::MtpConfig::tiny();
-        let mtp_path = dir.join("mtp.safetensors").to_str().unwrap().to_string();
-        save_synthetic_mtp(&mcfg, &mtp_path, seed ^ 0x5A5A);
-
-        (talker_path, mtp_path)
-    }
-
-    /// `MtpModel` has no `save`; hand-write the checkpoint `MtpModel::
-    /// load_inference` expects (the same tensor set `new_synthetic_on`
-    /// fills in-memory, here written to disk instead).
-    fn save_synthetic_mtp(cfg: &crate::config::MtpConfig, path: &str, seed: u64) {
-        let mut rng = Rng::new(seed);
-        let mut normal = |n: usize| -> Vec<f32> { (0..n).map(|_| (rng.next_gaussian() as f32) * 0.02).collect() };
-        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
-        for (name, numel) in crate::mtp::MtpModel::decoder_param_list(cfg) {
-            tensors.push((name, vec![numel as u64], normal(numel)));
-        }
-        let (nres, e, d, v) = (cfg.n_residual() as usize, cfg.embedding_dim as usize, cfg.d_model as usize, cfg.vocab as usize);
-        for i in 0..nres {
-            tensors.push((format!("codec_embedding.{i}.weight"), vec![(v * e) as u64], normal(v * e)));
-            tensors.push((format!("lm_head.{i}.weight"), vec![(v * d) as u64], normal(v * d)));
-        }
-        checkpoint::save(path, cfg.to_json(), &tensors);
-    }
-
-    fn tiny_prompt(d: usize, n_prefix: usize, n_trail: usize, rng_seed: u64) -> Prompt {
-        let mut rng = Rng::new(rng_seed);
-        let mut g = |n: usize| (0..n).map(|_| (rng.next_gaussian() as f32) * 0.1).collect::<Vec<f32>>();
-        Prompt { embeds: g(n_prefix * d), trailing: g(n_trail * d), tts_pad: g(d) }
-    }
-
-    fn tiny_specials() -> TtsSpecials {
-        TtsSpecials {
-            tts_bos: 0,
-            tts_eos: 1,
-            tts_pad: 2,
-            codec_nothink: 3,
-            codec_think: 4,
-            codec_think_bos: 5,
-            codec_think_eos: 6,
-            codec_pad: 7,
-            codec_bos: 8,
-            // `MtpConfig::tiny()`'s vocab is 23; keep EOS comfortably inside it
-            // and outside `sample_cb0`'s suppressed top-1024 window is moot at
-            // this vocab size (the window is wider than the whole vocab), so
-            // it never gets masked back off - fine for these tests, which
-            // never rely on hitting EOS to end a session.
-            // Inside `sample_cb0`'s suppressed top-1024 window ([vocab-1024,
-            // vocab) = [76, 1100) at this test's vocab=1100) - mirrors the
-            // real model, where EOS lives inside that window and `min_new`
-            // genuinely gates whether it's reachable. An id outside the
-            // window (e.g. a small one, as this used to be) is NEVER
-            // suppressed regardless of `min_new`, which isn't what these
-            // tests are meant to exercise.
-            codec_eos: 1050,
-            lang: std::collections::HashMap::new(),
-            spk_id: std::collections::HashMap::new(),
-        }
     }
 
     /// The core correctness bar: interleaving must be invisible to each
@@ -269,9 +204,8 @@ mod tests {
         if gpu_disabled() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("qwen3tts-batch-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (talker_path, mtp_path) = synthetic_checkpoints(&dir, 3);
+        let scratch = Scratch::new("batch-test");
+        let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 3);
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;
 
@@ -280,24 +214,35 @@ mod tests {
         let prompt_a = tiny_prompt(d, 3, 2, 101);
         let prompt_b = tiny_prompt(d, 4, 1, 202);
 
-        let batched = run_batch(&talker_path, &mtp_path, &sp, vec![(prompt_a.clone(), opts_a.clone()), (prompt_b.clone(), opts_b.clone())]);
+        let batched = run_batch(
+            &talker_path,
+            &mtp_path,
+            &sp,
+            vec![
+                (prompt_a.clone(), opts_a.clone(), CancelToken::default()),
+                (prompt_b.clone(), opts_b.clone(), CancelToken::default()),
+            ],
+        );
         assert_eq!(batched.len(), 2);
 
+        let uncancellable = CancelToken::default();
         let mut cpu_a = CpuTalker::load(&talker_path);
         let mut mtp_a = CpuMtp::load(&mtp_path);
-        let alone_a = crate::pipeline::generate_codes_cached(&mut cpu_a, &mut mtp_a, &sp, &prompt_a, &opts_a);
+        let alone_a =
+            crate::pipeline::generate_codes_cached(&mut cpu_a, &mut mtp_a, &sp, &prompt_a, &opts_a, &uncancellable)
+                .expect("an unarmed token never cancels");
 
         let mut cpu_b = CpuTalker::load(&talker_path);
         let mut mtp_b = CpuMtp::load(&mtp_path);
-        let alone_b = crate::pipeline::generate_codes_cached(&mut cpu_b, &mut mtp_b, &sp, &prompt_b, &opts_b);
+        let alone_b =
+            crate::pipeline::generate_codes_cached(&mut cpu_b, &mut mtp_b, &sp, &prompt_b, &opts_b, &uncancellable)
+                .expect("an unarmed token never cancels");
 
         assert_eq!(batched[0], alone_a, "interleaving must not change request A's own codes");
         assert_eq!(batched[1], alone_b, "interleaving must not change request B's own codes");
         // The two requests have different max_frames (5 vs 8) - a genuinely
         // ragged batch, not a coincidentally-equal-length one.
         assert_ne!(batched[0].len(), batched[1].len(), "test setup must actually exercise raggedness");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A short request must actually stop consuming rounds once it finishes,
@@ -307,9 +252,8 @@ mod tests {
         if gpu_disabled() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("qwen3tts-batch-test2-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (talker_path, mtp_path) = synthetic_checkpoints(&dir, 5);
+        let scratch = Scratch::new("batch-test2");
+        let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 5);
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;
 
@@ -323,14 +267,67 @@ mod tests {
             &talker_path,
             &mtp_path,
             &sp,
-            vec![(tiny_prompt(d, 2, 1, 1), short), (tiny_prompt(d, 2, 1, 2), long)],
+            vec![
+                (tiny_prompt(d, 2, 1, 1), short, CancelToken::default()),
+                (tiny_prompt(d, 2, 1, 2), long, CancelToken::default()),
+            ],
         );
         // `MtpConfig::tiny()`'s num_code_groups (4: cb0 + 3 residuals), not the
         // real model's 16 - a per-frame width, not a fixed constant.
         let group_width = crate::config::MtpConfig::tiny().num_code_groups as usize;
         assert_eq!(out[0].len() / group_width, 1, "the 1-frame request must stop at exactly 1 frame");
         assert_eq!(out[1].len() / group_width, 6, "the 6-frame request must still complete in full");
+    }
 
-        std::fs::remove_dir_all(&dir).ok();
+    /// A cancelled batch member must leave rotation exactly like a naturally
+    /// finished one: its own partial codes come back, capped at where the
+    /// cancel landed, while every OTHER member of the same batch runs to its
+    /// full length. This is the property that makes per-request cancellation
+    /// safe in a shared scheduler - one caller hanging up must not truncate
+    /// anybody else's clip.
+    #[test]
+    fn a_cancelled_batch_member_drops_out_without_truncating_the_others() {
+        if gpu_disabled() {
+            return;
+        }
+        let scratch = Scratch::new("batch-cancel");
+        let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 9);
+        let sp = tiny_specials();
+        let d = talker_test_cfg().d_model as usize;
+        let group_width = crate::config::MtpConfig::tiny().num_code_groups as usize;
+
+        // Member 0's token is armed AND already cancelled before the batch
+        // starts, so it drops out on round one with zero frames - fully
+        // deterministic, no timing involved. Member 1 is untouched.
+        let cancelled = CancelToken::armed();
+        cancelled.cancel();
+        let a = GenOpts { max_frames: 6, min_new: 6, seed: 1, ..GenOpts::default() };
+        let b = GenOpts { max_frames: 6, min_new: 6, seed: 2, ..GenOpts::default() };
+        let out = run_batch(
+            &talker_path,
+            &mtp_path,
+            &sp,
+            vec![
+                (tiny_prompt(d, 2, 1, 1), a, cancelled),
+                (tiny_prompt(d, 2, 1, 2), b.clone(), CancelToken::default()),
+            ],
+        );
+        assert_eq!(out[0].len(), 0, "a pre-cancelled member must produce no frames at all");
+        assert_eq!(out[1].len() / group_width, 6, "the live member must still complete in full");
+
+        // And the live member's codes are bit-identical to running it alone -
+        // a neighbour's cancellation must not perturb its sampling stream.
+        let mut cpu = CpuTalker::load(&talker_path);
+        let mut mtp = CpuMtp::load(&mtp_path);
+        let alone = crate::pipeline::generate_codes_cached(
+            &mut cpu,
+            &mut mtp,
+            &sp,
+            &tiny_prompt(d, 2, 1, 2),
+            &b,
+            &CancelToken::default(),
+        )
+        .expect("an unarmed token never cancels");
+        assert_eq!(out[1], alone, "a neighbour's cancellation must not change this request's codes");
     }
 }

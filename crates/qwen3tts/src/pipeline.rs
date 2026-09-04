@@ -15,6 +15,7 @@
 //! Speaker x-vectors come from [`ecapatdnn::SpeakerEncoder`]; audio I/O from
 //! [`audio`].
 
+use capability::CancelToken;
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
 
@@ -215,15 +216,54 @@ pub(crate) fn sample_cb0(
     (scaled.len() - 1) as u32
 }
 
+/// A generation loop that stopped early because its [`CancelToken`] fired,
+/// carrying the frames produced before the check that tripped.
+///
+/// Cancellation is NOT an error in the usual sense - the work done so far is
+/// real, in-order codec codes, so this is the return value that keeps it rather
+/// than a bare `Err(String)` that throws it away. A caller that wants the
+/// partial clip hands `partial` straight to [`decode_codes`]; one that does not
+/// simply drops it. The higher-level entry points ([`synth`]/[`clone`]/
+/// [`design`]) do the latter and report `Err("cancelled")`, matching how every
+/// other cancellable action in this workspace reports an aborted run.
+#[derive(Clone, Debug)]
+pub struct Cancelled {
+    /// Codec codes generated before the cancel was observed, in the same
+    /// `[frames*16]` row-major layout a completed run returns. May be empty
+    /// (the token was already cancelled when the loop started).
+    pub partial: Vec<u32>,
+}
+
+impl Cancelled {
+    /// Number of complete frames in [`Self::partial`], given the model's
+    /// per-frame code-group width (16 for the real checkpoints).
+    pub fn frames(&self, group_width: usize) -> usize {
+        if group_width == 0 {
+            0
+        } else {
+            self.partial.len() / group_width
+        }
+    }
+}
+
 /// Autoregressively generate codec codes `[n_frames*16]` (row-major, codebooks
 /// 0..15 per frame) for an assembled [`Prompt`].
+///
+/// `cancel` is polled once per frame, between the frames rather than inside
+/// one: a frame is a Talker step plus an MTP residual fill, and that boundary
+/// is this architecture's natural interruption point - a real 0.6B frame is
+/// hundreds of milliseconds, so a finer-grained check would buy no measurable
+/// latency and would have to thread a token through the kernel dispatch code.
+/// Returns [`Cancelled`] (with the frames already produced) when the token
+/// fires; pass an unarmed `CancelToken::default()` to run uninterrupted.
 pub fn generate_codes(
     gen: &TalkerGen,
     mtp: &MtpModel,
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,
-) -> Vec<u32> {
+    cancel: &CancelToken,
+) -> Result<Vec<u32>, Cancelled> {
     use std::time::Instant;
     // Coarse per-stage profiling, gated on `TTS_PROFILE`, matching
     // `generate_codes_cached`'s. This is the path every default
@@ -232,6 +272,12 @@ pub fn generate_codes(
     // so it needs the same instrument the CPU-only mirror already had.
     let profile = std::env::var("TTS_PROFILE").is_ok();
     let (mut t_step, mut t_mtp, mut t_head) = (0.0f64, 0.0f64, 0.0f64);
+
+    // Cancelled before we started: skip the prefix stream too (it is the one
+    // unbounded-ish chunk of work outside the frame loop).
+    if cancel.is_cancelled() {
+        return Err(Cancelled { partial: Vec::new() });
+    }
 
     let d = gen.d();
     let n_trailing = prompt.trailing.len() / d;
@@ -270,6 +316,9 @@ pub fn generate_codes(
     loop {
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
+        }
+        if cancel.is_cancelled() {
+            return Err(Cancelled { partial: frames });
         }
         cb0_history.push(cb0);
         let cb0_embed = gen.codec_embed(cb0).to_vec();
@@ -323,7 +372,7 @@ pub fn generate_codes(
             t_head / nf,
         );
     }
-    frames
+    Ok(frames)
 }
 
 /// CPU-only KV-cache Talker generation for the **NPU path's `Mode::Cpu`** (Talker
@@ -336,17 +385,25 @@ pub fn generate_codes(
 /// are the same (the cache is algebraically exact); only the decoder cost
 /// differs. The MTP residual fill is unchanged (it is bounded at
 /// `num_code_groups` and re-runs cheaply).
+///
+/// `cancel` behaves exactly as in [`generate_codes`]: polled once per frame,
+/// returning [`Cancelled`] with the frames produced so far.
 pub fn generate_codes_cached(
     cpu: &mut crate::gen_kv::CpuTalker,
     mtp: &mut crate::gen_kv_mtp::CpuMtp,
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,
-) -> Vec<u32> {
+    cancel: &CancelToken,
+) -> Result<Vec<u32>, Cancelled> {
     use std::time::Instant;
     // Coarse per-stage profiling, gated on `TTS_PROFILE` so normal runs are silent.
     let profile = std::env::var("TTS_PROFILE").is_ok();
     let (mut t_step, mut t_mtp) = (0.0f64, 0.0f64);
+
+    if cancel.is_cancelled() {
+        return Err(Cancelled { partial: Vec::new() });
+    }
 
     let d = cpu.d();
     let n_trailing = prompt.trailing.len() / d;
@@ -379,6 +436,9 @@ pub fn generate_codes_cached(
     loop {
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
+        }
+        if cancel.is_cancelled() {
+            return Err(Cancelled { partial: frames });
         }
         cb0_history.push(cb0);
         let cb0_embed = cpu.codec_embed(cb0).to_vec();
@@ -429,7 +489,7 @@ pub fn generate_codes_cached(
             t_mtp / nf,
         );
     }
-    frames
+    Ok(frames)
 }
 
 /// Split the assistant chat-template ids into the 3-token role header and the
@@ -527,6 +587,10 @@ pub(crate) fn ref_codes_cached(codec_path: &str, wav: &audio::wav::Wav, ref_wav_
 /// x-vector). An explicit `ref_code` (e.g. an external dump) still overrides the
 /// auto-encode. With an empty `ref_text` and no `ref_code`, the **x-vector-only**
 /// path is used (speaker timbre only). Both paths run entirely within brain.
+///
+/// `cancel` is polled between generated frames; an aborted clone returns
+/// `Err("cancelled")` without decoding a wav. Pass an unarmed
+/// `CancelToken::default()` to run uninterrupted.
 #[allow(clippy::too_many_arguments)]
 pub fn clone(
     paths: &TtsPaths,
@@ -536,7 +600,12 @@ pub fn clone(
     ref_text: &str,
     language: &str,
     ref_code: Option<Vec<u32>>,
+    cancel: &CancelToken,
 ) -> Result<Vec<f32>, String> {
+    // Refuse an already-cancelled call before touching any weights.
+    if cancel.is_cancelled() {
+        return Err("cancelled".to_string());
+    }
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
@@ -580,7 +649,7 @@ pub fn clone(
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
     };
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts, cancel)?;
     decode_codes(&paths.codec, &codes)
 }
 
@@ -588,17 +657,37 @@ pub fn clone(
 /// [`TalkerGen::step`] Talker + the [`MtpModel`] residual fill, both running on
 /// whatever backend `Gpu` selected (GPU or the wgsl-cpu JIT). Replaces the former
 /// `opts.cached` split between a CPU-only `CpuTalker` and the O(T²) GPU recompute.
-fn generate(gen: &TalkerGen, mtp: &MtpModel, sp: &TtsSpecials, prompt: &Prompt, opts: &GenOpts) -> Vec<u32> {
-    generate_codes(gen, mtp, sp, prompt, opts)
+///
+/// Cancellation collapses to `Err("cancelled")` here: the wav-level entry points
+/// return a finished clip or nothing, so the partial codes are dropped. A caller
+/// that wants the partial audio calls [`generate_codes`] directly and decodes
+/// [`Cancelled::partial`] itself.
+fn generate(
+    gen: &TalkerGen,
+    mtp: &MtpModel,
+    sp: &TtsSpecials,
+    prompt: &Prompt,
+    opts: &GenOpts,
+    cancel: &CancelToken,
+) -> Result<Vec<u32>, String> {
+    generate_codes(gen, mtp, sp, prompt, opts, cancel).map_err(|_| "cancelled".to_string())
 }
 
 /// **Synth** — speaker-free text-to-speech (no reference voice).
+///
+/// `cancel` is polled between generated frames; an aborted synth returns
+/// `Err("cancelled")`. Pass an unarmed `CancelToken::default()` to run
+/// uninterrupted.
 pub fn synth(
     paths: &TtsPaths,
     opts: &GenOpts,
     target_text: &str,
     language: &str,
+    cancel: &CancelToken,
 ) -> Result<Vec<f32>, String> {
+    if cancel.is_cancelled() {
+        return Err("cancelled".to_string());
+    }
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
@@ -610,7 +699,7 @@ pub fn synth(
     let mtp = MtpModel::load_inference(&paths.mtp);
     let prompt = prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, None, language_id);
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts, cancel)?;
     decode_codes(&paths.codec, &codes)
 }
 
@@ -693,6 +782,14 @@ pub fn synth_npu(
 /// Shared NPU path: run the Talker generation loop on the NPU, then decode the
 /// codes on the NPU codec graph. Falls back to CPU/GPU within OpenVINO if the NPU
 /// is unavailable (so the same command works on any OpenVINO host).
+///
+/// **Not cancellable yet**, which is why `synth_npu`/`clone_npu`/`design_npu`
+/// take no [`CancelToken`] while their CPU/GPU siblings do: the frame loops here
+/// live in `crate::npu_gen` (`generate_codes_npu`/`generate_codes_kv`/
+/// `generate_codes_kv_streaming`), each driving a compiled OpenVINO graph this
+/// host cannot build or exercise. Offering a token those loops silently ignore
+/// would be a lying API; the honest shape is no token until the NPU loops
+/// actually poll one.
 fn run_npu(
     paths: &TtsPaths,
     tables: &crate::npu_gen::TalkerTables,
@@ -780,7 +877,10 @@ fn run_npu(
         Mode::Cpu => {
             eprintln!("tts npu: Talker on CPU KV-cache (d_model={}); codec on NPU", tables.cfg.d_model);
             let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
-            generate_codes_cached(&mut cpu, mtp, sp, prompt, opts)
+            // Unarmed: this path has no token to honor (see `run_npu`'s doc),
+            // and an unarmed token never cancels, so the loop runs to EOS.
+            generate_codes_cached(&mut cpu, mtp, sp, prompt, opts, &CancelToken::default())
+                .expect("an unarmed cancel token never fires")
         }
         Mode::NpuKvI8 | Mode::NpuKvF32 | Mode::NpuKvI4 => {
             let int4 = mode == Mode::NpuKvI4;
@@ -848,6 +948,10 @@ fn run_npu(
 /// `speaker`). The 0.6B Base model has no instruct control; use a 1.7B
 /// CustomVoice/VoiceDesign checkpoint. Runs on the selected `gpu_core` backend
 /// (CPU/GPU); see [`design_npu`] for the NPU path.
+///
+/// `cancel` is polled between generated frames; an aborted design returns
+/// `Err("cancelled")`. Pass an unarmed `CancelToken::default()` to run
+/// uninterrupted.
 pub fn design(
     paths: &TtsPaths,
     opts: &GenOpts,
@@ -855,7 +959,11 @@ pub fn design(
     language: &str,
     instruct: &str,
     speaker: Option<&str>,
+    cancel: &CancelToken,
 ) -> Result<Vec<f32>, String> {
+    if cancel.is_cancelled() {
+        return Err("cancelled".to_string());
+    }
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
@@ -876,7 +984,7 @@ pub fn design(
     let prompt =
         prompt::build_instruct_prompt(&gen, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts, cancel)?;
     decode_codes(&paths.codec, &codes)
 }
 
@@ -1036,5 +1144,149 @@ mod sampling_tests {
             }
         }
         assert!(found_divergent, "residual sampling never diverged from greedy across 20 seeds");
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use crate::gen_kv::CpuTalker;
+    use crate::gen_kv_mtp::CpuMtp;
+    use crate::testsupport::{synthetic_checkpoints, talker_test_cfg, tiny_prompt, tiny_specials, Scratch};
+    use std::time::{Duration, Instant};
+
+    fn gpu_disabled() -> bool {
+        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    fn group_width() -> usize {
+        // `MtpConfig::tiny()`'s num_code_groups (4: cb0 + 3 residuals), not the
+        // real model's 16 - a per-frame width, not a fixed constant.
+        crate::config::MtpConfig::tiny().num_code_groups as usize
+    }
+
+    /// THE test this whole feature exists for: a generation already in flight
+    /// on another thread must stop within roughly one frame of the cancel, and
+    /// must NOT have run to `max_frames`.
+    ///
+    /// Sizing is calibrated on the machine running the test rather than
+    /// hardcoded: a short uncancelled run measures the per-frame cost, then
+    /// `max_frames` is chosen so an uncancelled run would take seconds of
+    /// wall time, and the cancel is fired a couple hundred frames in. "It stopped early" is therefore a
+    /// difference of roughly two orders of magnitude, not a coin flip on a
+    /// loaded CI box. (The CPU Talker's attention is `O(T)` per frame, so a
+    /// per-frame cost calibrated at `T=32` UNDER-estimates the full run - the
+    /// bounds below are conservative in the safe direction.)
+    #[test]
+    fn a_mid_flight_cancel_stops_generation_early_with_partial_codes() {
+        if gpu_disabled() {
+            return;
+        }
+        let scratch = Scratch::new("pipeline-cancel");
+        let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 7);
+        let sp = tiny_specials();
+        let d = talker_test_cfg().d_model as usize;
+        let prompt = tiny_prompt(d, 3, 2, 77);
+        let gw = group_width();
+
+        let mut cpu = CpuTalker::load(&talker_path);
+        let mut mtp = CpuMtp::load(&mtp_path);
+
+        // Calibration: weights are already loaded, so this times the frame loop
+        // alone (both `generate_codes_cached` and `CpuMtp::generate_residuals`
+        // reset their own state per call, so reusing these two is exact). The
+        // first run is discarded - a cold-cache measurement would OVER-estimate
+        // the per-frame cost, which would size the run below too small and let
+        // it finish before the cancel ever lands.
+        const CAL: usize = 32;
+        let cal_opts = GenOpts { max_frames: CAL, min_new: CAL, seed: 5, ..GenOpts::default() };
+        let never = CancelToken::default();
+        let warm = generate_codes_cached(&mut cpu, &mut mtp, &sp, &prompt, &cal_opts, &never)
+            .expect("an unarmed token never cancels");
+        assert_eq!(warm.len() / gw, CAL, "calibration run must produce exactly max_frames frames");
+        let t_cal = Instant::now();
+        generate_codes_cached(&mut cpu, &mut mtp, &sp, &prompt, &cal_opts, &never)
+            .expect("an unarmed token never cancels");
+        let per_frame = t_cal.elapsed().div_f64(CAL as f64).max(Duration::from_nanos(1));
+
+        // Enough frames that an uncancelled run needs seconds of wall time,
+        // capped so a
+        // pathologically fast machine cannot ask for an absurd cache. The
+        // cancel lands after a couple hundred frames' worth of work, so
+        // "stopped early" is a wide ratio, not a photo finish.
+        let max_frames = ((3.0 / per_frame.as_secs_f64()) as usize).clamp(2_000, 20_000);
+        let opts = GenOpts { max_frames, min_new: max_frames, seed: 5, ..GenOpts::default() };
+        let wait = (per_frame * 200).clamp(Duration::from_millis(20), Duration::from_millis(500));
+
+        let cancel = CancelToken::armed();
+        let (c2, sp2, p2, o2) = (cancel.clone(), sp.clone(), prompt.clone(), opts.clone());
+        let worker = std::thread::spawn(move || {
+            let t = Instant::now();
+            let r = generate_codes_cached(&mut cpu, &mut mtp, &sp2, &p2, &o2, &c2);
+            (r, t.elapsed())
+        });
+
+        std::thread::sleep(wait);
+        cancel.cancel();
+        let (result, elapsed) = worker.join().expect("generation thread must not panic");
+
+        let stopped = result.expect_err("an armed, cancelled token must abort the run");
+        let n = stopped.frames(gw);
+        assert!(n > 0, "cancel landed before any frame was produced - the test never reached mid-flight");
+        assert!(
+            n < max_frames / 2,
+            "cancelled run produced {n} of {max_frames} frames - that is not an early stop"
+        );
+        // Promptly: the uncancelled run needs seconds by construction; this
+        // one must come back within a small multiple of the cancel point.
+        assert!(
+            elapsed < wait * 4,
+            "cancel took {elapsed:?} to be observed (cancelled at {wait:?}); \
+             it must be seen between frames, not after max_frames"
+        );
+
+        // The partial codes are REAL output, not a truncated buffer: running the
+        // same request uncancelled but capped at `n` frames yields them exactly.
+        let mut cpu2 = CpuTalker::load(&talker_path);
+        let mut mtp2 = CpuMtp::load(&mtp_path);
+        let prefix_opts = GenOpts { max_frames: n, min_new: max_frames, seed: 5, ..GenOpts::default() };
+        let prefix = generate_codes_cached(&mut cpu2, &mut mtp2, &sp, &prompt, &prefix_opts, &CancelToken::default())
+            .expect("an unarmed token never cancels");
+        assert_eq!(stopped.partial, prefix, "partial codes must be the genuine prefix of the full generation");
+
+        eprintln!(
+            "[cancel-test] per_frame={per_frame:?} max_frames={max_frames} cancelled at {wait:?}, \
+             returned after {elapsed:?} with {n} frames"
+        );
+    }
+
+    /// An already-cancelled token is refused before the prefix is streamed:
+    /// zero frames, no Talker work at all.
+    #[test]
+    fn an_already_cancelled_token_produces_no_frames() {
+        if gpu_disabled() {
+            return;
+        }
+        let scratch = Scratch::new("pipeline-cancel-pre");
+        let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 11);
+        let sp = tiny_specials();
+        let d = talker_test_cfg().d_model as usize;
+        let prompt = tiny_prompt(d, 3, 2, 12);
+
+        let mut cpu = CpuTalker::load(&talker_path);
+        let mut mtp = CpuMtp::load(&mtp_path);
+        let cancel = CancelToken::armed();
+        cancel.cancel();
+        let opts = GenOpts { max_frames: 64, min_new: 64, seed: 3, ..GenOpts::default() };
+        let stopped = generate_codes_cached(&mut cpu, &mut mtp, &sp, &prompt, &opts, &cancel)
+            .expect_err("a pre-cancelled token must abort immediately");
+        assert!(stopped.partial.is_empty(), "nothing should have been generated");
+        assert_eq!(stopped.frames(group_width()), 0);
+
+        // And the unarmed default still runs to completion - the check must not
+        // have become an unconditional early return.
+        let full = generate_codes_cached(&mut cpu, &mut mtp, &sp, &prompt, &opts, &CancelToken::default())
+            .expect("an unarmed token never cancels");
+        assert_eq!(full.len() / group_width(), 64);
     }
 }

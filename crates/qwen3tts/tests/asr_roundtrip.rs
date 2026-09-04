@@ -88,7 +88,7 @@ fn synth_then_transcribe_recovers_the_text() {
         ckpt_dir: ckpt,
     };
     let opts = GenOpts { max_frames: 200, ..GenOpts::default() };
-    let wav24 = qwen3tts::pipeline::synth(&paths, &opts, text, "english").expect("synth");
+    let wav24 = qwen3tts::pipeline::synth(&paths, &opts, text, "english", &capability::CancelToken::default()).expect("synth");
     assert!(wav24.iter().all(|x| x.is_finite()), "synth produced a non-finite sample");
     let rms = (wav24.iter().map(|x| x * x).sum::<f32>() / wav24.len().max(1) as f32).sqrt();
     assert!(rms > 0.01, "synth produced near-silence (rms={rms:.4}) - the greedy-collapse failure mode this repo has hit before");

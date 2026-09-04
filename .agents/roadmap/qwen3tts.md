@@ -637,7 +637,87 @@ discovers capabilities generically.
 
 - [ ] RMSNorm backward: coalesce to `rmsnorm_rows` (measured 11.2x forward;
       backward still per-element)
-- [ ] Cancellation support for in-flight synth/clone requests
+- [x] Cancellation support for in-flight synth/clone requests. The frame loop
+      is the interruption point: `pipeline::generate_codes` (the path every
+      default `synth`/`clone`/`design` runs), `pipeline::generate_codes_cached`
+      (the KV-cached CPU-Talker mirror) and `batch::run_batch` now each poll a
+      `capability::CancelToken` once per frame, between the Talker step and the
+      next one. Per-frame, deliberately, not finer: a real 0.6B frame is
+      hundreds of milliseconds, so a check inside a single Talker step or MTP
+      residual fill would buy no measurable latency while threading a token
+      through kernel dispatch. The token type is the workspace's existing one
+      (`s3dit::finetune`, `s3dit::pipeline::generate`, `supir::pipeline::
+      restore` all poll the same `CancelToken` between steps) rather than a new
+      TTS-only flag.
+
+      **Partial output is kept, not thrown away.** The two code-level loops
+      return `Result<Vec<u32>, pipeline::Cancelled>`, where `Cancelled.partial`
+      holds the frames produced before the check tripped, in the same
+      `[frames*16]` layout a completed run returns - so a caller can hand it
+      straight to `decode_codes` and keep the partial clip, or drop it. The
+      wav-level entry points (`synth`/`clone`/`design`) do the latter and
+      report `Err("cancelled")`, matching how every other cancellable action in
+      the workspace reports an aborted run. `run_batch` takes a per-request
+      token (`Vec<(Prompt, GenOpts, CancelToken)>`); a cancelled member leaves
+      rotation exactly like one that hit EOS or its frame cap, returning its
+      partial codes in its own slot while the rest of the batch runs to full
+      length.
+
+      Wired where it actually buys something: `caps.rs`'s three actions and
+      `resident_tts.rs`'s `speak`/`design` now forward `inv.cancel`, so a
+      D-Bus/HTTP/`brain do` caller that hangs up stops the loop instead of
+      waiting out `max_frames`. `tts_cli.rs` passes an unarmed token on
+      purpose - it is a foreground one-shot command where Ctrl-C already ends
+      the process, so an in-process token would buy nothing there.
+
+      Evidence, `pipeline::cancel_tests` (unit lane, synthetic checkpoints, no
+      real weights needed): `a_mid_flight_cancel_stops_generation_early_with_
+      partial_codes` calibrates the per-frame cost on the running machine,
+      sizes `max_frames` so an uncancelled run would take seconds, starts the
+      generation on a second thread, fires the cancel a couple hundred frames
+      in, and asserts the run came back near the cancel point with far fewer
+      than `max_frames` frames - and that the partial codes are bit-identical
+      to the same request run uncancelled with `max_frames` set to exactly that
+      many frames (so the partial is a genuine prefix, not a truncated buffer).
+      Its own trace line on a heavily loaded box:
+
+          [cancel-test] per_frame=2.514608ms max_frames=2000
+                        cancelled at 500ms, returned after 501.9906ms
+                        with 266 frames
+
+      i.e. the cancel was observed ~2 ms after it was set (one frame), and 266
+      of 2000 frames were produced instead of all 2000 - the loop stopped at
+      the cancel, not at the frame cap. Sizing is calibrated rather than
+      hardcoded, after a discarded warm-up run, because a cold-cache
+      measurement over-estimates the per-frame cost and would size the run
+      small enough to finish before the cancel lands.
+      `an_already_cancelled_token_produces_no_frames` covers the pre-armed case
+      (refused before the prefix is even streamed) and re-runs the same
+      request with an unarmed token to prove the check did not become an
+      unconditional early return.
+      `batch::a_cancelled_batch_member_drops_out_without_truncating_the_others`
+      covers the scheduler: the cancelled member yields zero frames, its
+      neighbour still completes all 6 and its codes stay bit-identical to
+      running it alone. Full `cargo test --release --offline -p brain-qwen3tts
+      --lib`: 37 passed, 0 failed, 2 ignored.
+
+      **Known gap, stated rather than papered over**: the NPU paths
+      (`synth_npu`/`clone_npu`/`design_npu` -> `npu_gen::generate_codes_npu`/
+      `generate_codes_kv`/`generate_codes_kv_streaming`) are NOT cancellable
+      and deliberately take no token. Their frame loops drive compiled
+      OpenVINO graphs that this box cannot build or exercise (see the NPU
+      status above), and offering a token those loops silently ignore would be
+      a lying API. The `Mode::Cpu` NPU variant routes through
+      `generate_codes_cached` and passes an unarmed token for the same reason.
+
+      Supporting cleanup, done rather than duplicated: the synthetic
+      Talker+MTP checkpoint builders that `batch.rs`'s tests carried inline
+      moved to `crates/qwen3tts/src/testsupport.rs` (a `#[cfg(test)]` module),
+      so the new pipeline tests reuse them instead of adding a second copy of
+      the tensor-name/shape knowledge. The temp directories those tests write
+      are now owned by a `Scratch` guard that removes them on `Drop`, so a
+      failing assertion no longer leaks synthetic checkpoints into the temp
+      dir (the old code only cleaned up on the success path).
 - [ ] A windowed attention mask in the codec for long-form decode beyond the
       current fixed window
 - [ ] A fused single-inference MTP graph

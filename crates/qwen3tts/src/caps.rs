@@ -20,6 +20,11 @@
 //! invisible to anything (D-Bus/HTTP/`brain do`) that discovers capabilities
 //! generically - the dedicated CLI was always more capable than the manifest
 //! let on.
+//!
+//! Each action forwards the invocation's [`capability::CancelToken`] into the
+//! pipeline, which polls it between generated frames - so a D-Bus/HTTP/`brain
+//! do` caller that hangs up actually stops the autoregressive loop instead of
+//! waiting out `max_frames` (up to a minute of wall time on the real model).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -210,7 +215,7 @@ impl Action for SynthAction {
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let (paths, text, lang, opts) = common_run(inv, "synth", false)?;
-        let wav = crate::pipeline::synth(&paths, &opts, &text, &lang)?;
+        let wav = crate::pipeline::synth(&paths, &opts, &text, &lang, &inv.cancel)?;
         audio_outcome(wav)
     }
 }
@@ -229,7 +234,7 @@ impl Action for CloneAction {
             return Err(format!("tts clone: reference wav not found at '{refw}'"));
         }
         let ref_text = inv.get_str("ref_text").unwrap_or_default();
-        let wav = crate::pipeline::clone(&paths, &opts, &text, &refw, &ref_text, &lang, None)?;
+        let wav = crate::pipeline::clone(&paths, &opts, &text, &refw, &ref_text, &lang, None, &inv.cancel)?;
         audio_outcome(wav)
     }
 }
@@ -245,7 +250,7 @@ impl Action for DesignAction {
         let (paths, text, lang, opts) = common_run(inv, "design", false)?;
         let instruct = inv.get_str("instruct").unwrap_or_default();
         let speaker = inv.get_str("speaker").filter(|s| !s.is_empty());
-        let wav = crate::pipeline::design(&paths, &opts, &text, &lang, &instruct, speaker.as_deref())?;
+        let wav = crate::pipeline::design(&paths, &opts, &text, &lang, &instruct, speaker.as_deref(), &inv.cancel)?;
         audio_outcome(wav)
     }
 }

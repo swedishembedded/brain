@@ -26,6 +26,8 @@ pub mod serve;
 pub mod prompt;
 pub mod sft;
 pub mod talker;
+#[cfg(test)]
+mod testsupport;
 
 pub use batch::run_batch;
 pub use config::{MtpConfig, TalkerConfig};
@@ -34,6 +36,6 @@ pub use gen::TalkerGen;
 pub use gen_kv::CpuTalker;
 pub use gen_kv_mtp::CpuMtp;
 pub use mtp::MtpModel;
-pub use pipeline::{GenOpts, ResidualOpts, TtsPaths};
+pub use pipeline::{Cancelled, GenOpts, ResidualOpts, TtsPaths};
 pub use prompt::{Prompt, TtsSpecials};
 pub use talker::{TalkerModel, TextProjection};

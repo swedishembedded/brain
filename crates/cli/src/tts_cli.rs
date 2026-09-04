@@ -368,7 +368,12 @@ fn clone(args: &[String]) {
             &paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, Some(&cache),
         )
     } else {
-        qwen3tts::pipeline::clone(&paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code)
+        // Unarmed: this is a foreground one-shot command, so Ctrl-C ends the
+        // whole process. A live cancel token matters on the surfaces that must
+        // SURVIVE the abort (`caps.rs`/`resident_tts.rs`), which pass their
+        // invocation's own token instead.
+        let cancel = capability::CancelToken::default();
+        qwen3tts::pipeline::clone(&paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, &cancel)
     };
     let wav = match result {
         Ok(w) => w,
@@ -402,7 +407,8 @@ fn synth(args: &[String]) {
         let cache = format!("{}/npu-cache", c.weights_dir);
         qwen3tts::pipeline::synth_npu(&paths(&c), &c.opts, &text, &c.lang, Some(&cache))
     } else {
-        qwen3tts::pipeline::synth(&paths(&c), &c.opts, &text, &c.lang)
+        let cancel = capability::CancelToken::default(); // unarmed, as in `clone`
+        qwen3tts::pipeline::synth(&paths(&c), &c.opts, &text, &c.lang, &cancel)
     };
     let wav = match result {
         Ok(w) => w,
@@ -443,7 +449,8 @@ fn design(args: &[String]) {
         let cache = format!("{}/npu-cache", c.weights_dir);
         qwen3tts::pipeline::design_npu(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker, Some(&cache))
     } else {
-        qwen3tts::pipeline::design(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker)
+        let cancel = capability::CancelToken::default(); // unarmed, as in `clone`
+        qwen3tts::pipeline::design(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker, &cancel)
     };
     let wav = match result {
         Ok(w) => w,
