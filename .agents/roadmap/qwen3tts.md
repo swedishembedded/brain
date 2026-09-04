@@ -505,6 +505,102 @@ discovers capabilities generically.
       `model::block`'s shared builders - not just writing the test file
       once that exists). Left open, correctly scoped as "add MTP backward,
       then the gradcheck test" rather than attempted as a quick mirror.
+- [x] **The MTP code predictor is gradient-checked**, and the prerequisite the
+      previous version of this entry correctly identified - `MtpModel` had no
+      backward pass at all - is what had to be built to get there. Golden-logit
+      PARITY for the MTP is still open, blocked on the same missing PyTorch
+      reference dump as the Talker's above; it is not split out as a new item
+      because generating that dump answers both at once.
+
+      **The prerequisite, re-confirmed rather than assumed.** No MTP training
+      path existed anywhere in the workspace to reuse: `sft::finetune_lora` and
+      `sft::finetune_full` both build a `qwen3::Qwen` from a TALKER checkpoint
+      and never touch the code predictor, and `sft::MultiCodebookLabels`
+      materialises the same-frame residual targets but had no model-side
+      consumer. `TalkerModel::new_trainable` is a handful of lines only
+      because the Talker decoder IS a `qwen3::Qwen`, which already carries a
+      gradient-checked forward/backward; the MTP has no inner model, so this
+      is the first backward over any of its wiring.
+
+      **`MtpModel::new_trainable` / `new_trainable_on`** (`crates/qwen3tts/
+      src/mtp.rs`) now provide forward + backward + the
+      `param_names`/`read_weight`/`write_weight`/`read_grad`/`forward`/
+      `zero_grads`/`backward` surface `gradcheck::CheckModel` wants, over all
+      four parameter families: the decoder block set (device, `ParamStore`,
+      `Role::Trainable`) plus the per-residual `codec_embedding` and `lm_head`
+      tables and `small_to_mtp_projection` (host - that is where the served
+      forward keeps them, and `write_weight` therefore takes `&mut self`;
+      the `RefCell` the checker's `&self` surface wants lives in the test's
+      adapter, not in the model every served run pays for).
+
+      **What the backward composes.** The decoder half is the exact adjoint of
+      `forward_steps` read bottom-up, out of the same shared `model::block`
+      builders the forward uses: `rmsnorm_bwd` (trainable-gain arm, so all
+      four per-block norms and the final one get gradients), `gqa_bwd`,
+      `rope_bwd`, `swiglu_bwd`, plus a plain `matmul_dx`/`matmul_dw` pair for
+      the seven per-layer linears. Nothing there was hand-rolled. The
+      genuinely new code is the HOST half - exactly where the MTP differs from
+      every decoder already gated here: the `num_code_groups - 1` separate
+      per-position output heads (head `i-1` reads decoder position `i` and
+      nothing else, so position 0's head gradient is structurally zero), the
+      `small_to_mtp_projection` adjoint folded across every position, and the
+      codec-embedding row scatter. The loss is `sft::ce_batch` over
+      `MultiCodebookLabels`' unshifted same-frame residual targets - the
+      aligned multi-codebook CE that already existed for a different purpose,
+      now with its first model-side consumer.
+
+      **It gates the PRODUCTION forward, not a training twin.** The trainable
+      forward calls the very `assemble` (hence `project_to_hidden`), `hidden`
+      and `head_row` a served run calls. An all-device training forward would
+      have been easier to write and would have gated only itself - and the one
+      bug this area has actually produced (the 2026-09-04 `embedding_dim !=
+      d_model` width assertion) lived in `assemble`.
+
+      **A second kernel table, not a longer first one.** `mtp::TRAIN_PIPELINES`
+      is `PIPELINES` verbatim plus 12 backward kernels. `only_fwd_ids` keeps
+      naming `block::UNREGISTERED` in every backward slot, so an
+      inference-built handle still panics rather than dispatching a stand-in,
+      and a served MTP does not compile kernels it never runs.
+      `train_pipelines_extends_the_inference_table` pins the shared prefix,
+      because every forward-slot const indexes both tables and appending to
+      one only would silently shift the backward slots under the training tape.
+
+      **`crates/qwen3tts/tests/mtp.rs`** gained three tests alongside the
+      existing checkpoint-gated forward smoke:
+      `mtp_analytic_grads_match_finite_differences` (the Talker's mirror, run
+      at BOTH `MtpConfig::tiny` and `MtpConfig::tiny_projected`, so the 1.7B
+      family's projection path is gradient-checked and not just the 0.6B
+      identity one), `mtp_projection_grads_match_elementwise_finite_
+      differences` (`small_to_mtp_projection` is the one MTP parameter a
+      reverse pass folds across the whole sequence, which
+      `directional_check`'s own doc records it is measurably blind to a
+      *partial* error on), and `every_mtp_parameter_family_receives_gradient`
+      (a `zero_grad_params` structural check, exempting only
+      `codec_embedding.{i}` for `i >= num_code_groups - 2`, which at this
+      sequence length is never fed as an input and is legitimately dead).
+      Result: green at the workspace's own `(atol 4e-3, rtol 8e-2)` gate,
+      worst relative error **3.42e-2** (`tiny`, `blocks.1.attn.k_norm.weight`)
+      and **3.71e-2** (`tiny_projected`, `blocks.0.ln2.weight`).
+
+      **It did not pass first time, and what it caught was a fixture defect,
+      not a backward bug.** At the workspace's usual `eps = 5e-3` the
+      `tiny_projected` run failed on five tensors, worst
+      `small_to_mtp_projection.bias` at analytic -40.3 vs numeric -5.3. An
+      eps sweep settled it: entry by entry, the central difference walks
+      monotonically ONTO the analytic value (bias entry 14: -2.56 at 1e-2,
+      -6.70 at 3e-3, -7.970 at 1e-3, -7.974 at 3e-4, -7.968 at 1e-4, against
+      an analytic -7.9675) and stays there - a wrong gradient converges onto a
+      different number, so the backward was right and the step was too coarse.
+      The root cause was that `MtpConfig::tiny_projected`'s synthetic
+      `small_to_mtp_projection` was initialised at the same flat 0.02 std as
+      every other tensor. That is the correct scale at the REAL 1.7B shape
+      (`1/sqrt(2048) = 0.022`) and 10x too small at a toy `embedding_dim` of
+      24, so the toy projection ATTENUATED the residual stream to an rms of
+      ~0.05 and left every downstream RMSNorm running at a ~20x gain - a
+      miniature that does not behave like the model it stands in for. The
+      synthetic builder now scales that one tensor by `1/sqrt(embedding_dim)`;
+      the finite-difference step is 1e-3 rather than 5e-3, with the sweep
+      table recorded in the test so the choice is evidence, not tuning.
 - [x] A cheap end-to-end quality signal that doesn't need a PyTorch reference:
       `crates/qwen3tts/tests/asr_roundtrip.rs` round-trips `pipeline::synth`
       output through `nemotronasr` (real checkpoint,
