@@ -137,6 +137,7 @@ class BrainDBus(BrainBase):
         on_delta: Optional[Callable[[str], None]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
         on_job: Optional[Callable[[int], None]] = None,
+        on_chunk: Optional[Callable[[str, bytes, dict], None]] = None,
         timeout: float = 1800.0,
     ) -> Outcome:
         """Run a streaming action, invoking ``on_progress(step, total, message)`` as
@@ -146,6 +147,16 @@ class BrainDBus(BrainBase):
         each structured out-of-band payload (reasoning/tool-call chunks) -- a chat
         model's `progress` frame carries these alongside step/total/message; a
         Subscribe`r that only wants the step tick can leave both `None`.
+
+        ``on_chunk(name, data, meta)`` fires for each ``blob`` frame the MOMENT it
+        arrives, which is the only way to consume a genuinely progressive binary
+        stream: an action that vocodes incrementally (`capability::Progress::
+        chunk`, e.g. qwen3tts `speak` or qwen3omnimoe `speak`) sends one blob
+        frame per audio segment while it is still generating, and the collected
+        ``Outcome.blobs`` only ever shows the LAST frame under a given name --
+        which is deliberately the terminal, complete artifact. Mid-run chunks
+        carry an ``index`` in their ``meta`` by convention; the terminal blob does
+        not, so a caller that wants only the live segments can filter on that.
 
         ``on_job`` fires once, before the first frame is consumed, with the job id
         `Subscribe` returned -- the ONLY way to get a client-visible id: `Run`
@@ -173,8 +184,12 @@ class BrainDBus(BrainBase):
                     on_event(event)
             elif kind == "blob":
                 name = frame.get("name", "blob")
-                out_meta[name] = {"media": frame.get("media"), "meta": frame.get("meta")}
-                out_blobs[name] = read_fd(raw_fds[0]) if raw_fds else b""
+                blob_meta = {"media": frame.get("media"), "meta": frame.get("meta")}
+                data = read_fd(raw_fds[0]) if raw_fds else b""
+                out_meta[name] = blob_meta
+                out_blobs[name] = data
+                if on_chunk is not None:
+                    on_chunk(name, data, blob_meta)
             elif kind == "done":
                 outputs = frame.get("result") or {}
             elif kind == "error":
