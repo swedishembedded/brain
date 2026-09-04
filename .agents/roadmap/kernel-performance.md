@@ -2691,6 +2691,82 @@ to be untouched by this change and via `cargo build --release --workspace
 
 ---
 
+### Batched host writes on wgpu: a killed hypothesis, and a per-dispatch cost floor measured on an Intel iGPU
+
+Found while optimising `crates/qwen3tts`'s decode loop (that model's own
+ledger carries the full before/after; this entry records only what is
+engine-level and what did NOT work).
+
+**The finding this ledger already predicted, confirmed on a second
+model.** The findings table above records that the optimizer costs "`P`
+separate 9-word `gpu.write`s per step; on wgpu each write after the first
+costs an empty `queue.submit(None)`". `qwen3tts::gen::TalkerGen::
+decode_cached` has the identical shape and a much larger `P`: it refreshes
+7 position-dependent uniform buffers per layer over 28 layers, so **196
+`Gpu::write` calls per decoded token**, and `WgpuBackend::write` flushes
+before writing so that a host write can never land ahead of dispatches
+recorded before it. With nothing recorded between them, all 196 flushes
+are `queue.submit(None)` carrying no work. Confirmed directly by
+`DeviceStats`: **3094 submits for 13 decode steps** (238 per step) against
+7657 dispatches.
+
+**Killed.** A batched `Backend::write_many` (default impl = the existing
+per-item loop; overridden in `backend-wgpu` to flush once and then issue
+every `queue.write_buffer`) collapsed that to **546 submits** for the same
+13 steps, a 5.7x reduction in submissions, and moved the wall clock by
+nothing: talker-step 120.8 -> 122.5 ms/frame, inside run-to-run noise
+(the same stage measured 115.8-132.0 ms/frame across four later runs with
+no code change at all). The empty submissions are real and were really
+removed; they are simply not what a decode step costs on this device.
+Reverted rather than landed - a shared `Backend` trait method with no
+caller it measurably helps is surface area, not a win. The optimizer's own
+`P`-writes-per-step row above should be re-measured before it is assumed
+to be worth fixing either; on this evidence "n empty submits" is not
+automatically a cost.
+
+**What a dispatch actually costs there.** `BRAIN_PROFILE=1` on the Arc
+iGPU (Intel ANV via wgpu's Vulkan backend). Caveat first: this adapter's
+reported timestamp period is broken, so the absolute milliseconds it
+prints are nonsense (values around 1e17 ms); the SHARES and call counts
+are still usable, since every kernel is scaled by the same bogus period.
+One decode tape, one compute pass, 7657 dispatches:
+
+| kernel | share | calls | count share |
+|---|---|---|---|
+| `matmul_gemv_reg#MREG=1` | 40.6% | 2548 | 33.3% |
+| `kv_append` | 27.6% | 728 | 9.5% |
+| `rmsnorm_rows` | 18.6% | 1469 | 19.2% |
+| `add2` | 7.5% | 728 | 9.5% |
+| `rope_at` | 5.7% | 728 | 9.5% |
+| `silu_mul` / `decode_softmax` / `attn_decode_{apply,scores}` | ~0% each | 364 each | 4.75% each |
+
+and on the same model's MTP tape (a different tape, 5 layers, same
+device) every share tracked its own count to within 0.5 percentage
+points. A `matmul_gemv_reg` reading 8 MB of weights and an `add2` reading
+4 KB cost within a factor of the same thing. Dividing the measured
+wall clock by the dispatch count puts the floor at **~0.15-0.2 ms per
+dispatch inside a single compute pass**, which is 10-40x what a
+dispatch-to-dispatch transition ought to cost and is consistent with
+wgpu's hazard tracker requesting a pipeline barrier before every dispatch
+that touches a `STORAGE_READ_WRITE` buffer (`backend-wgpu`'s
+`flush_serialized` doc already documents that tracker behaviour, for a
+different reason).
+
+Two consequences worth recording, neither actioned here:
+
+1. **Phase 6's per-buffer dependency tracking (M6.1) is `backend-vulkan`
+   only.** `backend-wgpu` cannot get it - the tracker is wgpu's, not
+   ours. On a box whose only accelerator is reached through
+   `backend-wgpu`, that phase's win is unavailable by construction.
+2. **Phase 4's fusion work is the lever that transfers.** M4.1-M4.3
+   built fused QKV, fused gate/up and fused QK-norm+RoPE+KV-append, but
+   only inside `qwen3::serve`. Every other decoder in the tree - the
+   qwen3tts Talker and MTP among them - still dispatches the unfused
+   sequence, ~21 dispatches per layer. On a device with this
+   per-dispatch floor that is the difference, and it is a wiring gap
+   (lesson #78's shape: a fast path only reaches callers that opt in),
+   not new kernel work.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

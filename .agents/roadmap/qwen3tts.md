@@ -19,15 +19,24 @@ fine-tuning. Parity against the reference is verified.
 - [ ] An example D-Bus client for TTS
 - [ ] A windowed attention mask in the codec for long-form decode beyond the
       current fixed window
-- [ ] A fused single-inference MTP graph - MTP and the codec are now the
-      dominant per-clip cost after the Talker path was optimized
+- [ ] A fused single-inference MTP graph. The MTP is no longer the runaway
+      per-clip cost it was (KV-cached 2026-09-04, 19x on the GPU - see
+      "Measured"), but it is still the largest single term of the decode
+      loop, and for a structural reason fusion is the only remaining answer
+      to: per-dispatch overhead, not arithmetic, is what a frame costs now
+      (1680 dispatches per frame at ~0.15-0.2 ms each on this box). Fused
+      QKV / gate-up / RMSNorm+GEMV would cut that count directly, and are
+      `kernel-performance.md` Phase 4 work rather than this crate's.
 - [ ] From-scratch training for the codec and speaker encoder (only Talker
       LoRA fine-tuning exists today)
 - [ ] Wire a real TTS model into the runtime event/state-machine flow
       (currently only a stub model is wired there)
 
-CPU codec decoding is computationally sub-real-time for this architecture;
-the NPU backend is the only realtime synthesis path today.
+Codec decoding is sub-real-time on the CPU backend (48 s for 3.36 s of
+audio on this box). It is **not** CPU-pinned any more: as of 2026-09-04
+`qwen3tts::pipeline::decode_codes` builds it on the ambient `--device`,
+where the same decode takes 6.3 s. Still ~1.9x slower than real time
+there, so the NPU backend remains the only realtime synthesis path.
 
 ## Measured (2026-09-03/04, Intel Arc iGPU box, no discrete GPU; NPU status
 ## below)
@@ -69,21 +78,18 @@ benchmark).
 not faster - confirms the pre-existing "GPU (Vulkan) forward passes exist
 for correctness checks but are not the path used for practical synthesis
 speed" line in this document's own "Hardware and limits" section, now with
-a real number behind it instead of just an assertion. Root cause is
-architectural, not a bug: this is small-batch (batch=1), single-token
-autoregressive decode - one Talker step plus 15 MTP residual steps PER
-FRAME, each a small dispatch. On an integrated GPU, per-dispatch overhead
-(kernel launch, sync) dominates over any raw-FLOPs advantage GPU compute
-would otherwise have, while the CPU path's AVX2+FMA `dot`/`matvec` kernels
-across 22 threads have much lower per-op overhead for this shape.
-**Practical implication**: for THIS model on THIS class of hardware, the
-CPU path is not a fallback to route around - it is the faster option, and
-should probably be the DEFAULT rather than an integrated GPU whenever one
-is ambiently present (currently the ambient selection prefers GPU whenever
-one exists, which is the wrong default for this specific model's workload
-shape - worth revisiting `ambient_compute_set()`'s default heuristic, or
-giving qwen3tts its own default-CPU override the way `mimi::Codec` already
-has one).
+a real number behind it instead of just an assertion.
+
+**That table is the BEFORE state, and its stated root cause was wrong.**
+It attributed the loss to per-dispatch overhead being unavoidable for
+batch-1 decode, and drew the conclusion that the CPU should be this
+model's default device. Profiling it instead of reasoning about it found
+three ordinary defects in this crate plus one in `mimi`, all fixable, and
+the conclusion reverses: after them the GPU is **2.4-2.6x FASTER** than
+the same CPU path, end to end, on the identical command. See "CPU vs GPU,
+after the 2026-09-04 optimisation pass" below. The
+`ambient_compute_set()` / default-CPU-override idea floated above is
+therefore **dropped**, not deferred.
 
 Also note: the CPU run above (RTF 29.7x, `user`/`real` ratio 13.1x - good
 multi-core utilization) is dramatically faster than every CPU-driven number
@@ -96,6 +102,93 @@ understate this engine's real CPU throughput by roughly 3-4x** - they are
 real, honestly measured numbers for the conditions they were taken under,
 just not this box's best case. 29.7x is closer to this box's real CPU
 ceiling for this model.
+
+### CPU vs GPU, after the 2026-09-04 optimisation pass
+
+Same command, same text, same seed, same `--max-frames 60` (both stop at
+EOS after 42 frames = 3.36 s of audio), run back-to-back twice each on an
+otherwise-idle box with nothing compiling.
+
+| Device | Wall (run 1 / run 2) | RTF | codec.decode | decode loop |
+|---|---|---|---|---|
+| `--device cpu` | 1m17.9s / 1m15.6s | **22.5x** | 49.4s / 48.1s | 22.1s / 22.2s |
+| `--device gpu` (Arc iGPU) | **0m32.1s / 0m29.9s** | **8.9x** | 6.3s / 6.0s | 20.2s / 18.1s |
+
+**The GPU is now 2.4-2.6x faster than the CPU**, where it was 2.9x
+slower: a 7.4x swing on the identical command. Absolute GPU wall time is
+**10.0x** better than the baseline row above (299-305s -> 30-32s); the
+CPU path improved 1.34x over the same change set (101-102s -> 76-78s),
+since two of the four fixes are device-independent.
+
+The two runs' waveforms are the same waveform: cosine **0.9999999993**
+with a worst-case difference of 1 LSB of 16-bit PCM, which is fp
+reassociation inside the reductions, not a behavioural difference.
+
+Reproduce (checkpoints already imported):
+
+```
+BRAIN_QWEN3TTS_WEIGHTS=out/tts-base06 \
+BRAIN_QWEN3TTS_CKPT=<hf>/Qwen3-TTS-12Hz-0.6B-Base \
+TTS_PROFILE=1 time ./target/release/brain --device {cpu,gpu} qwen3tts \
+  synth --text "The quick brown fox jumps over the lazy dog." \
+  --max-frames 60 --seed 5 --out /tmp/out.wav
+```
+
+#### What was actually wrong, and what each fix returned
+
+`TTS_PROFILE=1` printed nothing at all for this path before (it only
+instrumented `generate_codes_cached`, the CPU-only NPU-adjacent mirror);
+instrumenting `generate_codes` is what found all of this. The baseline
+split, on the GPU, over 42 frames:
+
+```
+prefix-stream(9 pos)=1465.3ms | talker-step total=9825.1ms (233.9ms/frame)
+| mtp-residuals total=242406.8ms (5771.6ms/frame) | cb0-head total=100.8ms
+```
+
+so **95.6% of the GPU decode loop was the MTP residual fill**, not the
+28-layer Talker and not overhead spread evenly across the model.
+
+| # | Defect | Fix | Measured |
+|---|---|---|---|
+| 1 | `MtpModel::generate_residuals_with` called `logits()` (a full 16-position, 5-layer re-forward) once per residual codebook, 15x per audio frame | KV-cached incremental decode, one prebuilt tape per position (the MTP's sequence length is fixed, so no uniform is ever rewritten); mirrors the already-proven `gen_kv_mtp::CpuMtp` | with #2: mtp-residuals 5771.6 -> 300.5 ms/frame |
+| 2 | Every linear dispatched the naive `matmul` (one thread per output, 4 KB-strided weight read per thread, zero coalescing at m=1) | `block::gemm_variant` over `matmul_gemv` (upgraded to `matmul_gemv_reg` by `gpu_core::upgrade`) / `matmul_reg3`, gated on `caps.workgroup_reductions` exactly as `qwen3::serve` gates its own | talker-step 233.9 -> 120.8 ms/frame |
+| 3 | `logits()` evaluated all 15 `[2048,1024]` `lm_head` rows per residual step in a scalar loop; the caller read one. `codec_head_logits` was scalar too | `logits_at` (one row) + `hostmath::matvec` (AVX2+FMA, rayon) | cb0-head 2.4 -> 0.4 ms/frame |
+| 4 | `mimi::Codec::from_weights` hardcoded `Gpu::new_cpu`, with no override - the codec was the one stage of a `--device gpu` run that never touched the GPU, and after 1-3 it was 64% of the wall clock | `Codec::{load_inference,from_weights}_on`; `qwen3tts::pipeline::decode_codes` builds on the ambient device | codec.decode 46.5s -> 6.3s |
+
+Fixes 1 and 3 help the CPU path too (16x and 15x less arithmetic
+respectively, on any device); 2 and 4 are GPU-only by construction -
+`backend-cpu` reports `workgroup_reductions: false` and keeps the naive
+reference, which it routes to the same AVX2 GEMM it always did.
+
+#### Where the remaining time goes, and what would move it
+
+At 30 s: ~6 s codec, ~18 s decode loop, ~6 s process start + 4.0 GiB of
+checkpoint load. The decode loop is now the largest term and is within
+~20% of the CPU's, which is the honest ceiling for this shape on this
+box: batch-1 fp32 autoregressive decode is weight-bandwidth-bound, and
+an integrated GPU reads those weights over the SAME DDR5 controller the
+22-core CPU does, so there is no bandwidth advantage to win.
+
+Per-kernel timing (`BRAIN_PROFILE=1`; note the Intel ANV timestamp
+period is broken on this box, so the absolute ms are garbage and only
+the shares and call counts are usable) shows every kernel's share
+tracking its DISPATCH COUNT to within 0.5 percentage points - a
+`matmul_gemv_reg` moving 8 MB and an `add2` moving 4 KB cost the same.
+That puts the floor at roughly 0.15-0.2 ms per dispatch, ~588 dispatches
+per Talker token and 1680 per MTP frame. **The only lever left is fewer
+dispatches**, i.e. block fusion (fused QKV, fused gate/up, fused
+RMSNorm+GEMV) - `kernel-performance.md` Phase 4's territory, a
+kernel-shape change, and deliberately NOT attempted here.
+
+One hypothesis was tested and **killed**: `TalkerGen::decode_cached`
+issues 196 `Gpu::write` calls per token (7 position uniforms x 28
+layers) and `WgpuBackend::write` flushes first, so each was an empty
+`queue.submit(None)` - 197 submissions per token carrying no dispatches.
+A batched `write_many` collapsed that to 546 submits per 13 steps from
+3094 and changed the wall clock by **nothing** (talker-step 120.8 ->
+122.5 ms/frame, inside run-to-run noise). Reverted; see
+`kernel-performance.md`.
 
 | Run | Checkpoint | Wall time | Audio | RTF |
 |---|---|---|---|---|
