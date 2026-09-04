@@ -29,16 +29,73 @@ fine-tuning. Parity against the reference is verified.
 CPU codec decoding is computationally sub-real-time for this architecture;
 the NPU backend is the only realtime synthesis path today.
 
-## Measured (2026-09-03, CPU-only: Intel Arc iGPU box, no discrete GPU, no
-## NPU firmware present, wgsl-cpu Cranelift JIT backend, 22 threads)
+## Measured (2026-09-03/04, Intel Arc iGPU box, no discrete GPU; NPU status
+## below)
 
-All runs are the default (non-NPU, non-`--device`) `synth`/`clone`/`design`
-path (`pipeline::generate_codes`: KV-cached Talker, full-recompute MTP),
+**Correction to this section's own original heading**: it originally said
+"CPU-only." That was wrong. `mimi::Codec::load_inference`
+(`crates/mimi/src/model.rs:107`) hardcodes `Gpu::new_cpu(PIPELINES)` -
+codec decode is CPU-pinned unconditionally, no `--device` override - but
+the Talker/MTP decode loop (`TalkerGen::load`/`MtpModel::load_inference`,
+`crates/qwen3tts/src/{gen,mtp}.rs`) both call plain `Gpu::new(PIPELINES)`,
+which reads the ambient `--device`/`BRAIN_DEVICE` selection like every
+other model. On this box, with no `--device` flag given at all, that
+ambient default resolves to the Arc iGPU (wgpu/Vulkan) whenever one is
+present - so every run in the table below (all pre-dating an explicit
+`--device` test) already had its Talker+MTP compute on the GPU, with only
+the final codec-decode pass on CPU. Confirmed by directly comparing
+`--device cpu` (forces everything, including Talker/MTP, onto
+`brain-wgsl-cpu`) against `--device gpu` (Arc) on an identical request -
+see the new table below.
+
+All runs are the `synth`/`clone`/`design` path
+(`pipeline::generate_codes`: KV-cached Talker, full-recompute MTP),
 `temperature=0.9 top_k=50` (the reference's own defaults), wall-clock `time`
 including process startup + checkpoint load (not steady-state decode alone).
 RTF = wall-clock seconds / output-audio seconds (a from-scratch WGSL engine
 timing itself, so this is real elapsed time on real hardware, not a vendor
 benchmark).
+
+### CPU vs GPU, controlled (same text, same seed, same `--max-frames 60`,
+### run back-to-back on an otherwise-idle box - no concurrent build this
+### time, unlike the table below)
+
+| Device | Wall time | Audio | RTF | CPU utilization (`user`/`real`) |
+|---|---|---|---|---|
+| `--device cpu` (Talker+MTP+codec all CPU) | 1m40s | 3.36s | **29.7x** | 13.1x (heavy multi-core use) |
+| `--device gpu` (Talker+MTP on Arc iGPU, codec still CPU-pinned) | 4m52s | 3.36s | **86.9x** | 3.1x |
+
+**The Arc iGPU is ~2.9x SLOWER than the 22-core CPU path for this model**,
+not faster - confirms the pre-existing "GPU (Vulkan) forward passes exist
+for correctness checks but are not the path used for practical synthesis
+speed" line in this document's own "Hardware and limits" section, now with
+a real number behind it instead of just an assertion. Root cause is
+architectural, not a bug: this is small-batch (batch=1), single-token
+autoregressive decode - one Talker step plus 15 MTP residual steps PER
+FRAME, each a small dispatch. On an integrated GPU, per-dispatch overhead
+(kernel launch, sync) dominates over any raw-FLOPs advantage GPU compute
+would otherwise have, while the CPU path's AVX2+FMA `dot`/`matvec` kernels
+across 22 threads have much lower per-op overhead for this shape.
+**Practical implication**: for THIS model on THIS class of hardware, the
+CPU path is not a fallback to route around - it is the faster option, and
+should probably be the DEFAULT rather than an integrated GPU whenever one
+is ambiently present (currently the ambient selection prefers GPU whenever
+one exists, which is the wrong default for this specific model's workload
+shape - worth revisiting `ambient_compute_set()`'s default heuristic, or
+giving qwen3tts its own default-CPU override the way `mimi::Codec` already
+has one).
+
+Also note: the CPU run above (RTF 29.7x, `user`/`real` ratio 13.1x - good
+multi-core utilization) is dramatically faster than every CPU-driven number
+in the table further below (RTF 93-129x, `user`/`real` ratio only ~2.9x -
+poor utilization). Same engine, same hardware. The difference is system
+load: the table below's runs were taken while a from-scratch workspace
+`cargo build --release` (~60 crates) was running concurrently on the same
+22 cores; this comparison table's runs were not. **The 93-129x figures
+understate this engine's real CPU throughput by roughly 3-4x** - they are
+real, honestly measured numbers for the conditions they were taken under,
+just not this box's best case. 29.7x is closer to this box's real CPU
+ceiling for this model.
 
 | Run | Checkpoint | Wall time | Audio | RTF |
 |---|---|---|---|---|
@@ -235,6 +292,33 @@ Two genuinely different gaps, don't conflate them:
       `windowed`'s real time-to-first-audio vs default on a box with a real
       OpenVINO install, then make it the default if it wins (or expose it as
       a documented, tested `--stream-codec` flag either way).
+
+      **Update (2026-09-04)**: installed the OpenVINO runtime on this box
+      (`pip install openvino`, per `scripts/build/setup-npu-runtime.sh`,
+      plus the `libze_intel_vpu.so.1` compat symlink
+      [[brain-npu-container-blocked]] already root-caused). It now loads
+      cleanly and reports `['CPU', 'GPU']` -- `libopenvino.so` is no longer
+      the blocker. `NPU` is still absent from that list, which IS the
+      already-tracked firmware gap: confirmed by installing `linux-firmware`
+      in this container (does nothing - `request_firmware()` reads the
+      HOST's own init mount namespace, never a container's, so a
+      container-local firmware install cannot be seen by the already-running
+      host kernel) and by the user reloading the `intel_vpu` kernel module
+      **on the host itself** - `Core().available_devices` still reports only
+      `['CPU', 'GPU']` after that reload. This means either the host's own
+      `/lib/firmware/intel/vpu/` genuinely doesn't have the right file for
+      this specific NPU (Meteor Lake VPU, PCI `8086:7d1d` per
+      [[brain-npu-container-blocked]]), or the reload needs a full container
+      restart to pick up a fresh `/dev/accel/accel0` binding (the device
+      node's mtime did update at reload time, so the driver did rebind -
+      inconclusive either way from inside the container). Real forward-motion
+      on the underlying blocker, but the `windowed` TTFA measurement THIS
+      item wants is still not runnable here.
+
+      GPU numbers (a DIFFERENT, unrelated device) ARE now available for the
+      Talker/MTP decode path, though NOT for `brain qwen3tts serve`'s
+      NPU-only streaming engine this item is about - see the "Measured"
+      section's CPU vs GPU table above.
 - [ ] **Hard, lower priority**: true incremental TEXT streaming (extend the
       input token-by-token while acoustic decode is already running, the
       "dual-track" architecture Qwen's own README claims ~97ms TTFA for).
