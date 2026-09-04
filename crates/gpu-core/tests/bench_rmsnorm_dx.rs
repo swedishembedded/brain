@@ -20,6 +20,30 @@
 //! `PEAK_GBPS` is the Tesla P40's datasheet bandwidth; on another card set it
 //! to that card's own figure and read the achieved column, not the
 //! percentage.
+//!
+//! ## The cooperative kernel does NOT win at every width - read the sweep
+//!
+//! The first sweep of this file covered `d` 896-5120 only, and the cooperative
+//! kernel won at all of it. Extending it DOWN to the per-head QK-norm widths
+//! the Qwen3 family really dispatches (`head_dim` 64/128) REVERSES the result:
+//! at `d = 64` the `_rows` kernel is consistently slower than the reference at
+//! every row count swept, and at `d = 128` it is a loss at some row counts and
+//! a win at others. Read the `speedup` column of a real run - do not assume
+//! the sign from the wide shapes.
+//!
+//! The cause is arithmetic, not memory. `rmsnorm_dx_rows` avoids a second
+//! barrier (the CPU JIT permits exactly one) by having ALL 64 threads
+//! redundantly fold the 64 partials of BOTH reductions - a fixed cost per row,
+//! independent of `d`. At `d = 5120` each thread already did 80 elements of
+//! real work and that fold disappears into them; at `d = 64` each thread did
+//! ONE element, so the fold does orders of magnitude more arithmetic than the
+//! reduction it is folding. Widen the row and the fix pays for itself; narrow
+//! it below the workgroup and it cannot.
+//!
+//! So the crossover is a property of `d` (row WIDTH), not of `rows` - which is
+//! a different axis from the `m <= 32` row-COUNT gate that was once a real bug
+//! on this op, and must not be confused with it. Re-run this sweep on the card
+//! in question rather than trusting either figure.
 
 use gpu_core::Gpu;
 
@@ -52,6 +76,27 @@ const SHAPES: &[(u32, u32)] = &[
     (1, 1024),
     (1, 5120),
     (8, 2048),
+    // Per-head QK-norm rows: `head_dim` wide, `b*t*n_heads` of them. This is
+    // the NARROWEST row any RMSNorm backward in this repo dispatches (the
+    // Qwen3 family's `attn.q_norm`/`attn.k_norm`, which `qwen3tts`'s Talker
+    // inherits verbatim), and the per-element kernel's one-thread-per-row
+    // layout scatters its reads hardest exactly here.
+    // NARROW-ROW regime: `d` at or below the 64-thread workgroup width, which
+    // the original sweep (`d` 896-5120) never reached. This is where the
+    // Qwen3 family's per-head QK-norms live (`head_dim` 128, `b*t*n_heads`
+    // rows), and it is where the cooperative kernel STOPS winning - see this
+    // file's own header. Kept in the sweep precisely because it is the
+    // counter-example; a sweep that only covers the shapes a kernel wins at
+    // is not a measurement.
+    (1024, 128),
+    (2048, 128),
+    (4096, 128),
+    (16384, 128),
+    (2048, 64),
+    (8192, 64),
+    (2048, 256),
+    (2048, 512),
+    (8192, 512),
 ];
 
 fn fill(n: usize, s: usize) -> Vec<f32> {
