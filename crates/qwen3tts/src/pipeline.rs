@@ -46,7 +46,9 @@ pub struct GenOpts {
     /// Repetition penalty on codebook-0, applied over the FULL history of
     /// already-generated codebook-0 ids before sampling (HF's standard
     /// formulation: a previously-seen logit is divided by this value if
-    /// positive, multiplied if negative). `1.0` (the default) disables it.
+    /// positive, multiplied if negative). `1.0` disables it; the default is
+    /// the reference's `1.05`, which this model needs - see
+    /// [`GenOpts::default`].
     pub repetition_penalty: f32,
     pub seed: u64,
     pub min_new: usize,
@@ -73,18 +75,33 @@ impl Default for GenOpts {
     fn default() -> GenOpts {
         // The reference (`Qwen3TTSModel._merge_generate_kwargs`) decodes the Talker
         // codebook-0 stream with sampling — `do_sample=True, top_k=50,
-        // temperature=0.9` — never greedily. Greedy (`temperature=0`) is degenerate
-        // for this autoregressive acoustic model: codebook-0 collapses into a single
-        // repeating token after a few frames, decoding to near-silence (rms ~0.004
-        // vs ~0.07 sampled). Default to the reference's sampling so a plain
-        // `brain tts clone` yields voice; pass `--temp 0` for the deterministic
-        // (greedy) parity path. The fixed `seed` keeps a single run reproducible.
+        // temperature=0.9, repetition_penalty=1.05` - never greedily. Greedy
+        // (`temperature=0`) is degenerate for this autoregressive acoustic model:
+        // codebook-0 collapses into a single repeating token after a few frames,
+        // decoding to near-silence (rms ~0.004 vs ~0.07 sampled).
+        //
+        // **`repetition_penalty` is not optional here, and 1.0 is not a safe
+        // default.** Sampling alone does NOT prevent the collapse, it only makes
+        // it seed-dependent: codebook-0's next-token distribution self-reinforces
+        // once it repeats a token, with top-1 probability climbing 0.92 -> 0.97 ->
+        // 0.9998 over consecutive repeats, past the point where any
+        // temperature/top-k draw can escape. On the real 0.6B-Base checkpoint,
+        // "The quick brown fox jumps over the lazy dog." at seed 0 locked into
+        // that loop and ran the whole frame cap emitting 13 distinct tokens,
+        // decoding to rms 1.1e-5 - total silence. The same request at
+        // `repetition_penalty = 1.05` (the value this checkpoint's own
+        // `generation_config.json` ships, and the reference's hard default)
+        // reaches the codec EOS after 38 frames at rms 0.058. So this carries the
+        // reference's value, not a disabled penalty.
+        //
+        // Pass `--temp 0` for the deterministic (greedy) parity path. The fixed
+        // `seed` keeps a single run reproducible.
         GenOpts {
             max_frames: 256,
             temperature: 0.9,
             top_k: 50,
             top_p: 0.0,
-            repetition_penalty: 1.0,
+            repetition_penalty: 1.05,
             seed: 0,
             min_new: 2,
             residual: None,
@@ -111,13 +128,26 @@ fn argmax(s: &[f32]) -> usize {
 /// Apply HF's standard repetition penalty in place: a previously-seen logit is
 /// divided by `penalty` if positive, multiplied if negative (so either way it
 /// moves toward zero, discouraging but never fully forbidding a repeat).
-/// `penalty <= 1.0` is a no-op (matches the reference's `1.0` = disabled).
+/// `penalty <= 1.0` is a no-op (`1.0` = disabled).
+///
+/// **Once per distinct token, not once per occurrence.** HF's
+/// `RepetitionPenaltyLogitsProcessor` is a `gather`/`where`/`scatter` over
+/// `input_ids`, so a token that appears fifty times in the history is penalized
+/// exactly as hard as one that appears once. Applying it per occurrence instead
+/// would compound to `penalty^count` - at the reference's 1.05 that is a 131x
+/// logit shrink after a hundred repeats, which is a different (and, on a
+/// long-form clip, destructive) processor than the one the reference calibrated
+/// its value against.
 fn apply_repetition_penalty(logits: &mut [f32], history: &[u32], penalty: f32) {
     if penalty <= 1.0 {
         return;
     }
+    let mut seen = std::collections::HashSet::with_capacity(history.len());
     for &t in history {
         let idx = t as usize;
+        if !seen.insert(idx) {
+            continue;
+        }
         if idx < logits.len() && logits[idx].is_finite() {
             logits[idx] = if logits[idx] > 0.0 { logits[idx] / penalty } else { logits[idx] * penalty };
         }
@@ -205,15 +235,27 @@ pub(crate) fn sample_cb0(
         *x = (*x - max).exp();
         sum += *x;
     }
+    // Inverse-CDF draw. Only a token that survived the masks can be returned:
+    // `p > 0.0` skips every `-inf` entry (whose `exp` is exactly 0 and so never
+    // advances `acc`), which matters at the two boundaries - `r == 0.0` would
+    // otherwise return index 0, and a `r == sum` rounding would fall through to
+    // the last index, both of which are suppressed specials far more often than
+    // they are real codec tokens. `last` is the final surviving candidate, the
+    // only correct fall-through.
     let r = rng.next_f32() * sum;
     let mut acc = 0.0f32;
+    let mut last = 0usize;
     for (i, &p) in scaled.iter().enumerate() {
+        if p <= 0.0 {
+            continue;
+        }
         acc += p;
+        last = i;
         if acc >= r {
             return i as u32;
         }
     }
-    (scaled.len() - 1) as u32
+    last as u32
 }
 
 /// A generation loop that stopped early because its [`CancelToken`] fired,
@@ -1114,6 +1156,25 @@ mod sampling_tests {
         // No penalty (1.0): greedy still returns the true favorite `a`.
         let got_unpenalized = sample_cb0(logits_two_hot(v, a, b), eos, false, 0.0, 0, 0.0, 1.0, &history, &mut rng);
         assert_eq!(got_unpenalized as usize, a);
+    }
+
+    #[test]
+    fn repetition_penalty_counts_each_token_once_not_once_per_occurrence() {
+        // HF's `RepetitionPenaltyLogitsProcessor` is a gather/scatter: a token
+        // seen fifty times is penalized exactly as hard as one seen once.
+        // Compounding per occurrence turns the reference's 1.05 into 1.05^50
+        // (~11.5x), a processor whose value nobody calibrated. With `a` at 5.0
+        // and `b` at 4.0, one application leaves `a` at 4.76 and greedy still
+        // picks it; fifty compounded applications would drop it to 0.43 and
+        // hand the draw to `b`.
+        let v = 3072usize;
+        let eos = (v - 2000) as u32;
+        let (a, b) = (100usize, 200usize);
+        let mut rng = Rng::new(1);
+        let fifty = vec![a as u32; 50];
+        let got = sample_cb0(logits_two_hot(v, a, b), eos, false, 0.0, 0, 0.0, 1.05, &fifty, &mut rng);
+        assert_eq!(got as usize, a, "the penalty compounded over repeated occurrences");
+        assert_ne!(got as usize, b);
     }
 
     #[test]

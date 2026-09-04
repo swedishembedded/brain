@@ -800,6 +800,109 @@ discovers capabilities generically.
       sentence. Still not root-caused - whether it is ALSO text-sensitive
       (a seed that collapses on one text but not another) remains open.
 
+      **[x] ROOT-CAUSED AND FIXED. It is a codebook-0 repetition loop, and
+      the missing guard was `repetition_penalty`.** Instrumenting `sample_cb0`
+      to dump the post-filter distribution per frame (text A, seed 0,
+      `temperature=0.9, top_k=50`, real `0.6B-Base`) shows the mechanism
+      exactly. The sampler itself is healthy throughout - `nonzero` is 50 at
+      every step, i.e. top-k keeps precisely 50 live candidates, the mask is
+      not swallowing the vocabulary and the draw is not degenerating. What
+      degenerates is the MODEL's own distribution, and it does so as positive
+      feedback: the first frames are confident but varied (p_top1 0.74, 0.99,
+      0.99, 0.98, 0.92 for tokens 1995, 215, 212, 1181, 462), then codebook-0
+      repeats a token and each repeat makes the next one MORE certain -
+
+          1657 x10:  p_top1 0.923 0.924 0.958 0.968 0.974 0.977 0.978 0.980
+                            0.987 0.973, then a dip to 0.816
+          706  x20:  p_top1 0.964 0.978 0.989 0.990 0.994 0.996 ... 0.9998
+
+      Once p_top1 passes ~0.99 no temperature-0.9 / top-k-50 draw can escape,
+      and the clip is locked. The dip at the 1657 run's end (0.816) is the
+      only exit, and it is exactly where the healthy seeds left: seeds 0, 1
+      and 2 emit an IDENTICAL first 19 tokens (the distribution is near
+      one-hot until then), seeds 1/2 take the 0.18 branch at frame 19 and
+      recover, seed 0 takes the 0.82 branch, re-enters the loop and never
+      leaves. Whole-clip evidence at seed 0: 200 frames, 13 distinct
+      codebook-0 tokens (706 x80, 617 x52, 1318 x41), residual codebooks 1..15
+      carrying 2-4 distinct values each against 30-37 on a healthy clip -
+      the MTP is fine, it is faithfully following a degenerate codebook-0.
+      Nothing here is device- or numerics-specific; it is the model's own
+      next-token distribution.
+
+      **The fix is one line of parity, not a heuristic.** This checkpoint's
+      own `generation_config.json` ships `repetition_penalty: 1.05`, and the
+      reference's `_merge_generate_kwargs` carries 1.05 as its hard default
+      too - brain's `GenOpts::default()` was the only place that decided the
+      penalty should be off (`1.0`), which is precisely the guard that keeps
+      an autoregressive acoustic LM out of a repetition loop. Setting the
+      default to the reference's 1.05 (`pipeline::GenOpts::default`, plus the
+      matching `caps.rs` `ParamSpec` default so a D-Bus/HTTP caller inherits
+      it) turns text A / seed 0 from `rms 0.000011` (200 frames, no EOS) into
+      `rms 0.058044` (EOS at 38 frames, 34 distinct codebook-0 tokens) - i.e.
+      a normal clip. It is not a seed-0-shaped patch either: seeds 1 and 2,
+      which "passed" before, went from rms 0.0219/0.0198 to 0.0614/0.0540 and
+      lost their leading `1657 x10` stall, so the penalty was fixing partly
+      degraded clips as well as fully collapsed ones.
+
+      Two smaller defects found in the same seam and fixed with it:
+
+      - `apply_repetition_penalty` applied the penalty once **per occurrence**
+        in the history, so a token seen fifty times got `penalty^50`. HF's
+        `RepetitionPenaltyLogitsProcessor` is a `gather`/`where`/`scatter`,
+        which applies it exactly **once per distinct token** - at 1.05 the
+        difference is 1.05 vs 11.5x, a processor the reference never
+        calibrated against and one that would badly over-suppress a long-form
+        clip. Now once per distinct token, guarded by
+        `repetition_penalty_counts_each_token_once_not_once_per_occurrence`
+        (unit lane, synthetic logits, red against the old implementation).
+      - `sample_cb0`'s inverse-CDF draw could return a masked token at both
+        boundaries: `r == 0.0` returned index 0 unconditionally, and a
+        `r == sum` rounding fell through to `len-1`. Both are suppressed
+        specials far more often than real codec tokens. The walk now skips
+        zero-probability entries and falls through to the last surviving
+        candidate.
+
+      Evidence/regression: `crates/qwen3tts/tests/sampled_decode.rs`
+      (`default_sampled_decode_does_not_collapse_to_silence`) runs the exact
+      documented repro - `synth("The quick brown fox jumps over the lazy
+      dog.", seed=0, max_frames=200)` with `GenOpts::default()` - and asserts
+      `rms > 0.01`. Confirmed RED against the previous defaults
+      (`rms=0.000011`, 553 s) and GREEN after (`rms=0.058044`, 129 s - the
+      run is faster because it now reaches EOS instead of grinding out the
+      frame cap). Gated on `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT`
+      only, so it catches this without needing the ASR checkpoint that the
+      round-trip test above also requires. And the ASR round-trip that found
+      the bug in the first place now passes on the same request with
+      **WER = 0.000** - `nemotronasr` transcribes the clip back as "The quick
+      brown fox jumps over the lazy dog.", exactly - which is the end-to-end
+      confirmation that what comes out is speech, not merely something with a
+      non-zero rms.
+
+      **On the second repro (text B / seed 11): not re-verified, because its
+      text was never written down.** The bullet above records "a ~350-character
+      unrelated sentence" but not the sentence, and generation is exactly
+      text-conditioned, so there is no way to re-run that case byte-for-byte. A
+      fresh ~330-character sentence was run instead at seeds 5 and 11,
+      `max_frames=100`, at both `repetition_penalty=1.0` and `1.05`: all four
+      runs are healthy (rms 0.021-0.031, 83-86 distinct codebook-0 tokens over
+      100 frames), so that text simply does not have a collapsing seed in that
+      pair - it neither confirms nor refutes the original text B. What it does
+      show is that the new default is **inert on a trajectory that is not
+      repeating**: seed 11 produced a bit-identical first 20 codebook-0 tokens
+      at 1.0 and at 1.05. The penalty only bites where the loop it exists to
+      break is actually forming. **Lesson for future repro notes in this file:
+      record the exact input text, not a description of it.**
+
+      Still open, deliberately not changed here: the reference also defaults
+      `subtalker_dosample=True` (`subtalker_temperature=0.9`,
+      `subtalker_top_k=50`) while brain's `GenOpts::residual` defaults to
+      `None`, i.e. greedy residual codebooks. That is a real parity gap, but
+      an independent one - it is not what caused this collapse (the residual
+      stream was faithfully tracking a degenerate codebook-0, and the MTP
+      draws no RNG at all when `residual` is `None`) - and it changes every
+      existing clip's output, so it wants its own before/after listening
+      pass rather than being folded into a bug fix.
+
 ### Carried over, unchanged priority
 
 - [x] The RMSNorm backward now selects the coalesced `rmsnorm_dx_rows`

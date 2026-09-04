@@ -133,7 +133,13 @@ This freezes the base Talker and trains attention adapters only.
 - `--lang` / `--language` - synthesis language (default `english`).
 - `--max-frames` - max codec frames, i.e. an upper bound on clip length
   (default `256`).
-- `--temp`, `--top-k`, `--seed` - sampling controls for the Talker.
+- `--temp`, `--top-k`, `--top-p`, `--seed` - sampling controls for the Talker.
+- `--repetition-penalty` - codebook-0 repetition penalty (default `1.05`, the
+  value this checkpoint's own `generation_config.json` ships). Leave it on.
+  Sampling alone does not keep the Talker out of a repetition loop: once
+  codebook-0 repeats a token its next-token top-1 probability climbs toward
+  1.0, and a run that locks in decodes to silence for the rest of the clip.
+  `1.0` disables the penalty and re-opens that failure mode.
 - `--ref-codes` - an external `[T,16]` codec-codes file (8-byte little-endian
   count header + u32 data) for the in-context (ICL) cloning path, used
   instead of the default x-vector-only cloning when you already have codes

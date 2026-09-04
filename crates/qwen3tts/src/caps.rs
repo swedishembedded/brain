@@ -55,7 +55,7 @@ fn checkpoint_and_sampling_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (0 = greedy, degenerate for this model)").default(json!(0.9)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling cutoff (0 = disabled)").default(json!(0.0)))
-        .param(ParamSpec::new("repetition_penalty", ParamType::Float, "repetition penalty (1.0 = disabled)").default(json!(1.0)))
+        .param(ParamSpec::new("repetition_penalty", ParamType::Float, "repetition penalty (1.0 = disabled; the default matches the reference and is what keeps codebook-0 out of a silent repetition loop)").default(json!(1.05)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
 }
 
@@ -144,7 +144,7 @@ pub fn batch_spec() -> ActionSpec {
         ParamSpec::new(
             "requests",
             ParamType::Str,
-            "JSON array of request objects: [{\"text\":\"...\",\"lang\":\"english\",\"max_frames\":64,\"seed\":1,\"temp\":0.9,\"top_k\":50,\"top_p\":0.0,\"repetition_penalty\":1.0}, ...]; every key but 'text' is optional and falls back to this call's own value",
+            "JSON array of request objects: [{\"text\":\"...\",\"lang\":\"english\",\"max_frames\":64,\"seed\":1,\"temp\":0.9,\"top_k\":50,\"top_p\":0.0,\"repetition_penalty\":1.05}, ...]; every key but 'text' is optional and falls back to this call's own value",
         )
         .required(),
     )
