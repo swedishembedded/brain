@@ -728,8 +728,23 @@ discovers capabilities generically.
       are now owned by a `Scratch` guard that removes them on `Drop`, so a
       failing assertion no longer leaks synthetic checkpoints into the temp
       dir (the old code only cleaned up on the success path).
-- [ ] A windowed attention mask in the codec for long-form decode beyond the
-      current fixed window
+- [x] A windowed attention mask in the codec for long-form decode beyond the
+      current fixed window **(2026-09-04)**. See "The windowed codec mask,
+      and where it was actually missing" below for what the window is, which
+      of the two decode implementations was ignoring it, and the numbers.
+- [ ] The SAME gap, still open, on the ENCODE side: the Mimi encoder
+      transformer (`mimi::model::Codec::enc_transformer`) parses
+      `encoder_config.sliding_window` (250, confirmed in the released
+      `speech_tokenizer/config.json`) and dispatches plain `gqa_fwd`, so
+      encoding more than 250 encoder frames - 10 s of audio, at the
+      pre-downsample 25 Hz rate, well inside the length of a voice-cloning
+      reference clip - over-attends exactly the way decode used to. Left
+      unfixed deliberately rather than shipped alongside the decode fix:
+      the encode path's only correctness witness is the reference
+      code-match golden, whose clip is far shorter than 250 frames, so the
+      one-line change cannot be shown red-then-green and would land as an
+      unverified edit under an existing 100%-code-match parity claim.
+      Needs a >250-frame reference dump first; that dump is the work item.
 - [ ] A fused single-inference MTP graph
 - [x] **A real TTS model in the runtime event/state-machine flow.**
       `runtime::tts::Qwen3TtsSynthModel` (`crates/runtime/src/tts.rs`)
@@ -840,3 +855,112 @@ the five `brain-gradcheck` checks over the same `qwen3::Qwen` decoder
 of these needs a checkpoint - they build synthetic weights from a `tiny()`
 config, which is exactly what makes them usable as the gate for a kernel
 swap.
+
+## The windowed codec mask, and where it was actually missing (2026-09-04)
+
+**The window.** The codec's `pre_transformer` is Mimi-derived, so its
+attention is sliding-window causal, not plain causal: key `j` is masked out
+of query `i` once `i - j >= sliding_window`, on every forward call. The
+released checkpoint's `speech_tokenizer/config.json` sets
+`decoder_config.sliding_window = 72` frames, which at 12.5 Hz is **5.76 s of
+audio**. Nothing about this is a cache capacity or a buffer size: it is a
+property of the mask, and it applies to a one-shot decode of a 10-minute clip
+exactly as much as to a streamed one.
+
+**Where it was missing.** The surprise of this item: the codec's
+`pre_transformer` is written out THREE times in this repo, and only one of
+the three had the window.
+
+| Implementation | Called by | Mask before this change |
+|---|---|---|
+| `mimi::Codec::transformer` (WGSL, `block::gqa_fwd_win`) | `qwen3tts::pipeline::decode_codes` - the `synth`/`clone`/`design` CLI path | sliding-window, correct |
+| `mimi::decode_stream::front` (pure host loop) | `qwen3tts::serve` with `BRAIN_QWEN3TTS_CODEC=cpu-stream` | **plain causal - `sliding_window` parsed, never applied** |
+| `npu::codec_topology`'s `tf_mask` (ONNX initializer) | `qwen3tts::serve`'s **default** path, via `npu_gen::NpuStreamCodec` | **plain causal (`j > i` only)** |
+
+So both *streaming server* paths were wrong, including the default one - and
+those are precisely the paths that exist to emit long-form audio. Finding the
+third one also changed the shape of the fix: repairing only the host decoder
+would have made it disagree with the NPU front on any clip past 72 frames,
+turning a shared defect into a backend-dependent waveform. Both had to move
+together, which is what `npu_gen::stream_codec_tests::npu_stream_matches_cpu`
+(NPU stream vs the CPU reference) would otherwise have started failing on.
+
+Why it survived this long: `decode_stream`'s own real-weights parity test ran
+at `t = 16` with the comment *"small T (< sliding_window) so attention is
+plain causal"*. Below the window a sliding-window mask and a plain causal mask
+are the same object, so the only test that ever compared two of these
+implementations was pinned at a length where the defect is invisible by
+construction. The lesson is not "add a test" but "a parity test whose input
+sits inside the degenerate regime of the thing it is checking proves nothing
+about that thing".
+
+**What happened past the window.** Nothing loud. No panic, no assertion, no
+wraparound, no truncation, no length or shape change: `decode_streaming`
+returned exactly `T * 1920` samples as always. Frames past index 72 simply
+attended over context the reference never exposed to them, and the streamed
+waveform drifted further from the reference the longer the clip ran. A
+silent-divergence failure mode, not a crash.
+
+**Test that caught it** (`crates/mimi/tests/long_form_window.rs`, three
+tests, no external checkpoint needed - a structurally complete tiny codec at
+`sliding_window = 4`, decoded through both BRAIN implementations on the same
+synthetic weights, so the witness is independent rather than a self-check):
+
+| Case | Before | After |
+|---|---|---|
+| T=3 (inside one window), device vs host max-abs | 5.960e-6 | 5.960e-6 (unchanged) |
+| T=40 (ten windows), device vs host max-abs | **2.565e-3** | **7.495e-6** |
+| T=40, narrow vs wide window, device path | 2.566e-3 | 2.566e-3 |
+| T=40, narrow vs wide window, host path | **0.000e0** | 2.564e-3 |
+
+The last row is the direct statement of the bug: changing `sliding_window`
+had *literally no effect* on the host decoder's output. The third row is the
+guard against a future "fix" that drops the mask on both sides and passes
+the parity rows vacuously. After the change the two paths agree to 7.5e-6,
+the same fp noise floor as the in-window case (5.96e-6) - i.e. what is left
+is WGSL-vs-host reassociation, not a mask difference.
+
+The ONNX export has its own red-then-green test
+(`crates/npu/tests/codec_onnx.rs::codec_onnx_attention_mask_is_sliding_window_causal`):
+OpenVINO is absent in this environment so the graph cannot be RUN, but the
+mask is a materialized initializer, so the test builds the graph, decodes the
+serialized proto back, and asserts the real exported `tf_mask` bytes
+element-by-element plus a closed-form live-key count
+(`sum_i min(i+1, window)`), which a plain causal mask (`sum_i (i+1)`) cannot
+hit. Before the fix it failed at `mask[3,0] must be masked out, got 0`.
+
+On the real checkpoint (`out/tts-base06/codec.safetensors`, window 72),
+`mimi::decode_stream::tests::long_form_parity_vs_codec` decodes T=144 frames
+(11.5 s, a full window past the boundary) through both brain implementations
+and compares them directly. Opt-in (`--ignored`, needs `BRAIN_MIMI_WEIGHTS`)
+because it pushes ~276k samples through the whole SEANet stack twice.
+
+**Short sequences are bit-identical, not merely close.** For `window > i`
+the new loop iterates exactly the old key set in exactly the old order, so
+the arithmetic is unchanged; the test asserts this as `assert_eq!` on the
+whole waveform (decode at `sliding_window = 4` vs `sliding_window = 4096`
+for a T=3 clip), on both implementations, rather than as a tolerance.
+
+**Performance.** No regression, and a scaling improvement where the fix
+landed. The device path is untouched apart from one host-side `if` per
+layer (see below), so the 48 s CPU / 6.3 s GPU `codec.decode` figures in
+"Measured" stand. The host path got strictly cheaper: its attention was
+`O(T^2 * head_dim)` scored keys and is now `O(T * window * head_dim)`,
+capped at 72 keys per query instead of growing with the clip - so the
+longer the form, the more the fix saves rather than costs. No new
+allocation, no new dispatch, no new kernel, and **no change to
+`crates/model/src/block.rs`**: the shared windowed-attention builder
+(`block::gqa_fwd_win` over `kernels::GQA_SCORES_WIN`, with its own
+independent-oracle tests in `crates/model/tests/gqa_fwd_win.rs`) already
+existed and was already what the codec's device path dispatched. The fix
+was to make the other two implementations obey the same mask - so nothing
+changed in an engine module ~20 other models depend on.
+
+**One extra correctness fix, in all three.** `sliding_window == 0` (what a
+hand-built `CodecConfig::default()` carries; `from_json` always yields 72)
+was being passed straight to the kernel, where `i - j >= 0` masks *every*
+key and `attn_softmax` turns the all-masked row into a uniform distribution
+over the whole sequence, future positions included - a non-causal result out
+of a config that merely left the field unset. All three implementations now
+normalize `0` to "unbounded", so they agree on every config rather than only
+on parsed ones.
