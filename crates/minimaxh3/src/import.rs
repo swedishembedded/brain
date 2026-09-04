@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Import MiniMax-H3's audio VAE decoder weights (`audio_vae/model.safetensors`
-//! within a fetched checkpoint directory) into a [`vae::blocks::Tensors`] map
+//! Import MiniMax-H3's audio VAE decoder weights (the `audio_vae/` component
+//! directory's own weight file, within a fetched checkpoint directory) into
+//! a [`vae::blocks::Tensors`] map
 //! matching [`crate::vocoder::VocoderConfig::tensor_manifest`], folding every
 //! `weight_norm` pair (`{prefix}.weight_g`/`{prefix}.weight_v`, PyTorch's
 //! OLDER `nn.utils.weight_norm` API - confirmed against the real checkpoint
@@ -36,14 +37,18 @@ use crate::vocoder::VocoderConfig;
 /// forward (see [`crate::vocoder`]'s module doc for why).
 const OUT_OF_SCOPE_PREFIXES: [&str; 4] = ["encoder.", "mean_proj.", "logs_proj.", "pre_block."];
 
-/// Import `<dir>/model.safetensors` (the `audio_vae/` component directory)
-/// into a decode-ready [`Tensors`] map. `dir` is the component directory
-/// itself (containing `model.safetensors`, `config.json`, `metadata.json`,
-/// `config.yaml` and the checkpoint's own reference `.py` sources - only
-/// `model.safetensors` is read here).
+/// Import the `audio_vae/` component directory's weight file into a
+/// decode-ready [`Tensors`] map. `dir` is the component directory itself
+/// (containing its weight file, `config.json`, `metadata.json`,
+/// `config.yaml` and the checkpoint's own reference `.py` sources).
+/// `checkpoint::safetensors::read_model_dir` resolves the weight file's own
+/// name - `model.safetensors` under the legacy `FL2VA/`-partitioned layout,
+/// `diffusion_pytorch_model.safetensors` under the root
+/// `MiniMaxH3ModularPipeline` layout this port now targets (confirmed
+/// against both real directories; same tensor names either way) - rather
+/// than this function hardcoding either one.
 pub fn import_audio_vae_decoder(dir: &str, cfg: &VocoderConfig) -> Result<Tensors, String> {
-    let path = format!("{dir}/model.safetensors");
-    let raw = checkpoint::safetensors::read(&path)?;
+    let raw = checkpoint::safetensors::read_model_dir(std::path::Path::new(dir))?;
 
     let mut by_name: HashMap<String, (Vec<usize>, Vec<f32>)> = raw.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
 
@@ -99,23 +104,22 @@ pub fn import_audio_vae_decoder(dir: &str, cfg: &VocoderConfig) -> Result<Tensor
     Ok(out)
 }
 
-/// Import `<dir>/model.safetensors` (the video `vae/` component directory -
-/// the real checkpoint's ROOT flat layout: `transformer/`, `transformer_ref/`,
-/// a shared `text_encoder/`, `vae/` and `audio_vae/`, one copy of everything,
-/// the layout the current download targets; the audio VAE import above still
-/// reads the OLDER `FL2VA/audio_vae` nested layout from before that download
-/// strategy changed, updating it is deferred separately - this is new Phase 6
-/// code, so it targets the layout the pending download actually produces, not
-/// the deprecated one) into a decode/encode-ready [`Tensors`]
-/// map matching [`VideoVaeConfig::tensor_manifest`]. Two-way coverage: every
-/// manifest entry must be present at its manifest shape, and the checkpoint
-/// carries NOTHING beyond the manifest (unlike the audio VAE, this
-/// checkpoint's own shipped inference forward - `encoder`+`decoder`+
-/// `quant_conv`+`post_quant_conv` - uses every module the class defines, so
-/// there is no analogous "out of scope" prefix set to special-case here).
+/// Import the video `vae/` component directory's weight file (the real
+/// checkpoint's ROOT flat layout: `transformer/`, `transformer_ref/`, a
+/// shared `text_encoder/`, `vae/` and `audio_vae/`, one copy of everything -
+/// the layout `diffusers==0.40.0` actually loads and the one this port
+/// targets) into a decode/encode-ready [`Tensors`] map matching
+/// [`VideoVaeConfig::tensor_manifest`]. `checkpoint::safetensors::
+/// read_model_dir` resolves the weight file's own name
+/// (`diffusion_pytorch_model.safetensors`, diffusers' `ModelMixin` save
+/// convention). Two-way coverage: every manifest entry must be present at
+/// its manifest shape, and the checkpoint carries NOTHING beyond the
+/// manifest (unlike the audio VAE, this checkpoint's own shipped inference
+/// forward - `encoder`+`decoder`+`quant_conv`+`post_quant_conv` - uses every
+/// module the class defines, so there is no analogous "out of scope" prefix
+/// set to special-case here).
 pub fn import_video_vae(dir: &str, cfg: &VideoVaeConfig) -> Result<Tensors, String> {
-    let path = format!("{dir}/model.safetensors");
-    let raw = checkpoint::safetensors::read(&path)?;
+    let raw = checkpoint::safetensors::read_model_dir(std::path::Path::new(dir))?;
     let mut by_name: HashMap<String, (Vec<usize>, Vec<f32>)> = raw.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
 
     let mut out: Tensors = HashMap::new();
@@ -136,6 +140,15 @@ pub fn import_video_vae(dir: &str, cfg: &VideoVaeConfig) -> Result<Tensors, Stri
 mod tests {
     use super::*;
 
+    /// Whether `dir` has landed a weight file `checkpoint::safetensors::
+    /// read_model_dir` can resolve - either naming convention, so a test's
+    /// own "not downloaded yet" skip check agrees with what the import
+    /// function underneath it will actually accept.
+    fn has_weights(dir: &str) -> bool {
+        let d = std::path::Path::new(dir);
+        d.join("model.safetensors").is_file() || d.join("diffusion_pytorch_model.safetensors").is_file() || d.join("model.safetensors.index.json").is_file()
+    }
+
     /// `import_audio_vae_decoder` against the real checkpoint, when
     /// `BRAIN_MINIMAXH3_DIR` points at one - the two-way coverage check
     /// (every claimed tensor present, every present-and-claimed tensor
@@ -152,9 +165,9 @@ mod tests {
             brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to import from");
             return;
         };
-        let dir = format!("{root}/FL2VA/audio_vae");
-        if !std::path::Path::new(&dir).join("model.safetensors").is_file() {
-            brain_testutil::skip(&format!("{dir}/model.safetensors not found - checkpoint not (yet) downloaded"));
+        let dir = format!("{root}/audio_vae");
+        if !has_weights(&dir) {
+            brain_testutil::skip(&format!("{dir} has no importable weight file yet - checkpoint not (yet) downloaded"));
             return;
         }
 
@@ -190,9 +203,9 @@ mod tests {
             brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
             return;
         };
-        let dir = format!("{root}/FL2VA/audio_vae");
-        if !std::path::Path::new(&dir).join("model.safetensors").is_file() {
-            brain_testutil::skip(&format!("{dir}/model.safetensors not found - checkpoint not (yet) downloaded"));
+        let dir = format!("{root}/audio_vae");
+        if !has_weights(&dir) {
+            brain_testutil::skip(&format!("{dir} has no importable weight file yet - checkpoint not (yet) downloaded"));
             return;
         }
 
@@ -229,9 +242,9 @@ mod tests {
             brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to decode from");
             return;
         };
-        let dir = format!("{root}/FL2VA/audio_vae");
-        if !std::path::Path::new(&dir).join("model.safetensors").is_file() {
-            brain_testutil::skip(&format!("{dir}/model.safetensors not found - checkpoint not (yet) downloaded"));
+        let dir = format!("{root}/audio_vae");
+        if !has_weights(&dir) {
+            brain_testutil::skip(&format!("{dir} has no importable weight file yet - checkpoint not (yet) downloaded"));
             return;
         }
 
@@ -307,8 +320,8 @@ mod tests {
             return;
         };
         let dir = format!("{root}/vae");
-        if !std::path::Path::new(&dir).join("model.safetensors").is_file() {
-            brain_testutil::skip(&format!("{dir}/model.safetensors not found - video vae not (yet) downloaded"));
+        if !has_weights(&dir) {
+            brain_testutil::skip(&format!("{dir} has no importable weight file yet - video vae not (yet) downloaded"));
             return;
         }
 
@@ -332,8 +345,8 @@ mod tests {
             return;
         };
         let dir = format!("{root}/vae");
-        if !std::path::Path::new(&dir).join("model.safetensors").is_file() {
-            brain_testutil::skip(&format!("{dir}/model.safetensors not found - video vae not (yet) downloaded"));
+        if !has_weights(&dir) {
+            brain_testutil::skip(&format!("{dir} has no importable weight file yet - video vae not (yet) downloaded"));
             return;
         }
 
