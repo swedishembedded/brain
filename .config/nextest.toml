@@ -86,3 +86,17 @@ filter = '''
     + package(brain-worldmirror2) + package(brain-yolov8) + package(brain-zipdepth)
 '''
 test-group = 'gpu-exclusive'
+
+# brain-ltxv's real_weights::* tests are the one place the profile's blanket
+# 180s slow-timeout is itself wrong, not the tests: they run a real conv VAE
+# (tiny random-weight DiT, per their own doc comments - a wiring claim, not a
+# quality one) on the CPU JIT backend DELIBERATELY, so they run by default,
+# not behind #[ignore] like this repo's actual heavy real-DiT tests. Measured
+# directly, alone, with no other load on the box: longform's two-scene test
+# took 250s and upscale's multi-pass test took 517s - both comfortably over
+# the default 180s budget on their own merits, nothing to do with contention.
+# A longer override for exactly this filter, not a global loosening: every
+# other test in the suite still gets caught by the tight default if it wedges.
+[[profile.default.overrides]]
+filter = 'package(brain-ltxv) & test(real_weights::)'
+slow-timeout = { period = "180s", terminate-after = 6 }
