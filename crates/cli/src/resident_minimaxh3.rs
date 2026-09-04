@@ -279,7 +279,7 @@ impl Instance for MiniMaxH3Instance {
             "t2va" => self.with_hot_dit(|model| {
                 let empty = vae::blocks::Tensors::new();
                 let ckpt = vae.as_checkpoint(&empty, dit_cfg);
-                minimaxh3::caps::t2va_hot_on(&ckpt, inv, &p, model)
+                minimaxh3::caps::t2va_hot_on(&ckpt, inv, &p, &self.paths, model)
             }),
             "fl2va" => {
                 let specs = minimaxh3::caps::fl2va_keyframes_from(inv)?;
@@ -310,7 +310,7 @@ impl Instance for MiniMaxH3Instance {
                 self.with_hot_dit(|model| {
                     let empty = vae::blocks::Tensors::new();
                     let ckpt = vae.as_checkpoint(&empty, dit_cfg);
-                    minimaxh3::caps::fl2va_hot_on(&ckpt, inv, &p, &keyframes, model)
+                    minimaxh3::caps::fl2va_hot_on(&ckpt, inv, &p, &self.paths, &keyframes, model)
                 })
             }
             other => Err(format!("minimaxh3: unknown action '{other}'")),

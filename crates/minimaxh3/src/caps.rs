@@ -343,6 +343,72 @@ pub fn text_conditioning_stub(prompt: &str, text_dim: u32, seed: u64) -> pipelin
     pipeline::TextConditioning { embeds, token_tags: vec![crate::config::TAG_TEXT; num_tokens] }
 }
 
+/// Whether `paths` names a checkout with a real Qwen3-VL text encoder to
+/// load - both `text_encoder/config.json` and `tokenizer/tokenizer.json`
+/// present (the two files [`build_text_encoder`] reads first). A cheap,
+/// pre-load check so a caller can fall back to
+/// [`text_conditioning_stub`] without paying for (and failing on) a partial
+/// checkout.
+pub fn has_real_text_encoder(paths: &Paths) -> bool {
+    std::path::Path::new(&paths.text_encoder).join("config.json").is_file() && std::path::Path::new(&paths.tokenizer).join("tokenizer.json").is_file()
+}
+
+/// A short, fixed context length for one prompt - MiniMax-H3 prompts are a
+/// caption, not a long document, and this is far above any real one while
+/// staying well under the checkpoint's own 262144-token ceiling (no reason
+/// to size a resident buffer for headroom this crate never uses).
+const TEXT_ENCODER_SEQ_LEN: u32 = 512;
+
+/// Load a real [`qwen3vl::Qwen3Vl`] text-only conditioner (`n_visual=0` -
+/// see [`qwen3vl::Qwen3Vl::encode_hidden`]'s own doc for why that is only
+/// valid for a splice-free instance) plus its BPE tokenizer, from `paths`.
+/// Mirrors `qwen3vl::caps`'s own `load_hf_resident` (not reusable directly:
+/// private to that module) at fp32, no vision capacity - this crate never
+/// splices a keyframe into the SAME instance a plain `t2va` request uses,
+/// so there is no reason to pay for DeepStack/splice buffers here. A REAL
+/// load: the checkpoint is tens of GB, so this is deliberately not called
+/// on every request without [`has_real_text_encoder`] gating it first.
+pub fn build_text_encoder(paths: &Paths) -> Result<(qwen3vl::Qwen3Vl, data::qwen_tokenizer::QwenBpe), String> {
+    let cfg_path = format!("{}/config.json", paths.text_encoder);
+    let cfg_text = std::fs::read_to_string(&cfg_path).map_err(|e| format!("minimaxh3 text encoder: cannot read {cfg_path}: {e}"))?;
+    let cfg_json: serde_json::Value = serde_json::from_str(&cfg_text).map_err(|e| format!("minimaxh3 text encoder: cannot parse {cfg_path}: {e}"))?;
+    let cfg = qwen3vl::Qwen3VlConfig::from_hf(&cfg_json);
+    let tok = data::qwen_tokenizer::QwenBpe::from_dir(&paths.tokenizer).map_err(|e| format!("minimaxh3 text encoder: tokenizer: {e}"))?;
+    let qwen = qwen3vl::Qwen3Vl::from_hf(&paths.text_encoder, cfg.vision, cfg.text, TEXT_ENCODER_SEQ_LEN, cfg.image_token_id, 0, 0, cfg.mrope_section, gpu_core::select::Dtype::F32)?;
+    Ok((qwen, tok))
+}
+
+/// [`pipeline::encode_text`]'s `t2va` case (no keyframe image): tokenize
+/// `prompt` verbatim - `get_qwen3vl_prompt_embeds`'s own real caller
+/// (`encoders.py`'s `MiniMaxH3TextEncoderStep`) tokenizes with
+/// `add_special_tokens=False`, no chat template, and `data::Tokenizer::
+/// encode`'s own contract is exactly that (special tokens recognized WITHIN
+/// the text, none added around it) - so a plain `tok.encode(prompt)` already
+/// matches, no template step needed here unlike `flux2`'s own Qwen3 caption
+/// encoder.
+pub fn encode_text_real(qwen: &qwen3vl::Qwen3Vl, tok: &data::qwen_tokenizer::QwenBpe, prompt: &str) -> pipeline::TextConditioning {
+    use data::Tokenizer;
+    let tokens = tok.encode(prompt);
+    let token_tags = vec![crate::config::TAG_TEXT; tokens.len()];
+    pipeline::encode_text(qwen, &tokens, &token_tags, None)
+}
+
+/// [`text_conditioning_stub`] unless `paths` names a real, present Qwen3-VL
+/// checkout, in which case the real encoder is built and run instead - the
+/// one seam every `t2va`/`fl2va` entry point below shares, so real-weight
+/// availability decides real-vs-stub in exactly one place. Deliberately does
+/// NOT fall back to the stub when a checkout IS present but fails to load -
+/// that would silently swap a real bug for a fake-but-"successful"
+/// generation, exactly the failure mode this crate's own real-weight tests
+/// elsewhere refuse to hide.
+fn text_conditioning(paths: &Paths, prompt: &str, text_dim: u32, seed: u64) -> Result<pipeline::TextConditioning, String> {
+    if !has_real_text_encoder(paths) {
+        return Ok(text_conditioning_stub(prompt, text_dim, seed));
+    }
+    let (qwen, tok) = build_text_encoder(paths)?;
+    Ok(encode_text_real(&qwen, &tok, prompt))
+}
+
 // ===================== outcome shaping =====================
 
 /// Wrap one generated clip+soundtrack as an [`capability::Outcome`] - the
@@ -562,16 +628,20 @@ impl LoadedWeights {
 /// transformer serves every request shape) - the entry point BOTH
 /// [`t2va_on`] (cold: builds `model` fresh) and
 /// `crates/cli/src/resident_minimaxh3.rs` (hot: reuses one across calls)
-/// funnel through, so param decoding, the text-conditioning stub and outcome
-/// shaping cannot drift between the two. Neither cancellation nor per-step
+/// funnel through, so param decoding, text conditioning and outcome shaping
+/// cannot drift between the two. `paths` decides real-vs-stub text
+/// conditioning (see [`text_conditioning`]'s own doc) - the qwen3vl
+/// checkpoint is reloaded fresh per call when real, matching this crate's
+/// documented not-yet-residency-optimized state (the VAEs already do the
+/// same; see [`VaeWeights`]'s own doc). Neither cancellation nor per-step
 /// progress is threaded through `crate::pipeline`'s denoise loop yet, a
 /// real, tracked gap (`wan::pipeline`/`ltxv::pipeline` both poll
 /// `inv.cancel` and report progress per step; H3's loop does neither yet), so
 /// `inv.cancel` rides along unpolled and `ActionSpec::streaming()` above
 /// currently only means "long-running", not "reports intermediate progress".
-pub fn t2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, model: &crate::model::H3Transformer) -> capability::ActionResult {
+pub fn t2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, paths: &Paths, model: &crate::model::H3Transformer) -> capability::ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
-    let text = text_conditioning_stub(&prompt, ckpt.dit_cfg.text_dim, p.opts.seed);
+    let text = text_conditioning(paths, &prompt, ckpt.dit_cfg.text_dim, p.opts.seed)?;
     let av = pipeline::t2va_hot(ckpt, &text, &p.opts, model)?;
     Ok(av_outcome(&av))
 }
@@ -579,13 +649,17 @@ pub fn t2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, 
 /// [`t2va_hot_on`]'s `fl2va` analogue. `keyframes` are already-encoded
 /// (`crate::pipeline::encode_keyframe_condition`, run by the caller once the
 /// still images named by [`fl2va_keyframes_from`] have been loaded and
-/// resized onto the target canvas).
-pub fn fl2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, keyframes: &[pipeline::KeyframeCondition], model: &crate::model::H3Transformer) -> capability::ActionResult {
+/// resized onto the target canvas). Real text conditioning here is still
+/// `t2va`'s own no-image path (see [`text_conditioning`]'s doc and
+/// [`pipeline::TextConditioning`]'s own two-keyframe gap) - the keyframes'
+/// influence on the generation flows entirely through `keyframes` here, not
+/// through the text encoder.
+pub fn fl2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition], model: &crate::model::H3Transformer) -> capability::ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     if keyframes.is_empty() {
         return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
     }
-    let text = text_conditioning_stub(&prompt, ckpt.dit_cfg.text_dim, p.opts.seed);
+    let text = text_conditioning(paths, &prompt, ckpt.dit_cfg.text_dim, p.opts.seed)?;
     let av = pipeline::fl2va_hot(ckpt, &text, keyframes, &p.opts, model)?;
     Ok(av_outcome(&av))
 }
@@ -594,17 +668,17 @@ pub fn fl2va_hot_on(ckpt: &pipeline::H3Checkpoint, inv: &capability::Invocation,
 /// H3Transformer`] from `weights.dit_tensors` and run once. Used by the
 /// direct (non-resident) [`MiniMaxH3Provider`] below - real residency is
 /// `crates/cli/src/resident_minimaxh3.rs`'s job.
-pub fn t2va_on(weights: &LoadedWeights, inv: &capability::Invocation, p: &GenParams) -> capability::ActionResult {
+pub fn t2va_on(weights: &LoadedWeights, inv: &capability::Invocation, p: &GenParams, paths: &Paths) -> capability::ActionResult {
     let ckpt = weights.as_checkpoint();
     let model = crate::model::H3Transformer::load(&weights.dit_tensors, weights.dit_cfg, p.opts.device.as_deref());
-    t2va_hot_on(&ckpt, inv, p, &model)
+    t2va_hot_on(&ckpt, inv, p, paths, &model)
 }
 
 /// [`t2va_on`]'s `fl2va` analogue.
-pub fn fl2va_on(weights: &LoadedWeights, inv: &capability::Invocation, p: &GenParams, keyframes: &[pipeline::KeyframeCondition]) -> capability::ActionResult {
+pub fn fl2va_on(weights: &LoadedWeights, inv: &capability::Invocation, p: &GenParams, paths: &Paths, keyframes: &[pipeline::KeyframeCondition]) -> capability::ActionResult {
     let ckpt = weights.as_checkpoint();
     let model = crate::model::H3Transformer::load(&weights.dit_tensors, weights.dit_cfg, p.opts.device.as_deref());
-    fl2va_hot_on(&ckpt, inv, p, keyframes, &model)
+    fl2va_hot_on(&ckpt, inv, p, paths, keyframes, &model)
 }
 
 // ===================== execution (direct provider) =====================
@@ -662,7 +736,7 @@ impl Action for MiniMaxH3Action {
             "t2va" => {
                 let paths = Paths::from_env()?;
                 let weights = LoadedWeights::load(&paths)?;
-                t2va_on(&weights, inv, &p)
+                t2va_on(&weights, inv, &p, &paths)
             }
             "fl2va" => {
                 let _keyframe_specs = fl2va_keyframes_from(inv)?;
@@ -682,6 +756,25 @@ impl Action for MiniMaxH3Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn has_real_text_encoder_is_false_for_a_nonexistent_root() {
+        assert!(!has_real_text_encoder(&Paths::resolve("/nonexistent-minimaxh3-root")));
+    }
+
+    /// [`text_conditioning`] must fall back to the stub - not error, not
+    /// hang trying to load anything - when no real text encoder is present,
+    /// so every existing weight-free `t2va`/`fl2va` caller keeps working.
+    #[test]
+    fn text_conditioning_falls_back_to_the_stub_without_a_real_encoder() {
+        let paths = Paths::resolve("/nonexistent-minimaxh3-root");
+        let text = text_conditioning(&paths, "a red fox running through snow", 16, 7).expect("stub path must not error");
+        assert!(!text.embeds.is_empty());
+        assert_eq!(text.token_tags.len(), text.embeds.len() / 16);
+        // Reproducible at the same seed - `text_conditioning_stub`'s own contract.
+        let again = text_conditioning(&paths, "a red fox running through snow", 16, 7).unwrap();
+        assert_eq!(text.embeds, again.embeds);
+    }
 
     #[test]
     fn gated_unless_opted_in() {
