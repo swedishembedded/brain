@@ -233,7 +233,11 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest]) -> Result<Vec<Vec<f3
     // gives each session its own decoder copy - the weight-sharing limitation
     // its module doc already states - so this one is dropped before the batch
     // runs rather than held alongside them.
-    let sessions: Vec<(Prompt, GenOpts)> = {
+    // No per-request cancellation here: `synth_batch`'s `BatchRequest` carries
+    // no token (unlike `caps::synth`/`clone`/`design`), so every session gets
+    // an unarmed one, the same "must never be interrupted" convention
+    // `tts_cli.rs` uses for its own foreground one-shot calls.
+    let sessions: Vec<(Prompt, GenOpts, CancelToken)> = {
         let talker = CpuTalker::load(&paths.talker);
         let mut out = Vec::with_capacity(reqs.len());
         for (i, r) in reqs.iter().enumerate() {
@@ -243,7 +247,11 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest]) -> Result<Vec<Vec<f3
             let ids = tok.encode(&pipeline::assistant_text(&r.text));
             let (role_ids, text_ids) = pipeline::split_input_ids(&ids).map_err(|e| format!("tts batch: request {i}: {e}"))?;
             let language_id = sp.language_id(&r.lang);
-            out.push((prompt::build_xvector_prompt(&talker, &sp, &role_ids, &text_ids, None, language_id), r.opts.clone()));
+            out.push((
+                prompt::build_xvector_prompt(&talker, &sp, &role_ids, &text_ids, None, language_id),
+                r.opts.clone(),
+                CancelToken::default(),
+            ));
         }
         out
     };
