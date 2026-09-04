@@ -609,33 +609,39 @@ confirmed "adaln_proj ~13.0B of 33B" line - lands at ~33.05B, matching.
 
 ## Recorded gaps (kept current)
 
-- **`H3Recipe` (`modelstore::recipe`) and `crates/minimaxh3/src/import.rs`'s
-  real-checkpoint test paths both assume the old FL2VA/Ref2VA nested
-  layout** - the download strategy changed to the root flat
-  (`transformer/`+`transformer_ref/`+shared `text_encoder/`+`vae/`+
-  `audio_vae/`) layout mid-session once its ~290GB of redundancy was
-  discovered. Updating both is explicitly deferred until the current
-  download (handed to the user, not yet confirmed run) completes.
+- ~~`H3Recipe`/`import.rs` assume the old FL2VA/Ref2VA layout~~ - both
+  retargeted to the root flat layout; `H3Recipe` also had a real ordering
+  bug fixed alongside it (it would have lost to `ZimageRecipe`'s own
+  `matches`, since H3's real repo carries all four of Z-Image's role dirs as
+  a subset of its own nine).
 - `crates/cli/src/supply.rs::convert` has no case for recipe id
   `"minimaxh3"` - a completed `brain pull` is not yet turned into a servable
   manifest that way; `minimaxh3::import` reading `BRAIN_MINIMAXH3_DIR`
   directly remains the supported path.
-- **Real DiT weight import does not exist.** `H3Transformer::load` accepts a
-  `Tensors` source named after the reference module's own attribute paths
-  (`to_q`/`to_k`/`to_v` split); the real checkpoint's fused `qkv_proj` tensor
-  is not split into that shape anywhere yet (the same class of step
-  `mlp.fc1.weight`'s SwiGLU split already needed, not yet done for QKV). No
-  raw `MiniMaxAI/MiniMax-H3` `transformer/` directory satisfies
-  `H3Transformer::load` directly until this exists. `video_vae`'s and the
-  audio VAE's real-checkpoint import already work (Phase 4/6 above); the DiT
-  is the one real-weight import path still missing.
-- **No real Qwen3-VL text encoder is wired into serving.** `crate::caps::
-  text_conditioning_stub` stands in - deterministic, prompt/seed-sensitive,
-  not semantically real (the exact same class of gap `ltxv::pipeline::
-  context_stub` already ships with for its own still-missing real text
-  encoder path). Building a real one needs a resident `qwen3vl::Qwen3Vl` +
-  tokenizer; the loader that assembles one from a raw HF directory
-  (`load_hf_resident`) is private to `qwen3vl::caps` today.
+- ~~Real DiT weight import does not exist~~ - **settled from source, not
+  needed at all**: the original concern assumed the real checkpoint's QKV
+  was fused (`qkv_proj`, the OLD FL2VA legacy layout's own shape) and would
+  need splitting to match `H3Transformer::load`'s `to_q`/`to_k`/`to_v`
+  naming. Direct inspection of the real, downloaded root-layout
+  `transformer/diffusion_pytorch_model-00001-of-00014.safetensors` header
+  shows the checkpoint ALREADY stores split `to_q`/`to_k`/`to_v` (and every
+  other tensor `H3Transformer::load` names - `adaln_proj`, `ff.net.{0,2}`,
+  `proj_in`/`proj_out`, `token_refiner.refiner_blocks.{i}`, all confirmed
+  byte-for-byte against the real header) - zero conversion code needed, only
+  the sharded `read_model_dir` loader `crate::caps::read_tensors` already
+  uses. Not yet run end to end only because `transformer/` (3 of 14 shards
+  so far) has not finished downloading - once it does, `LoadedWeights::load`
+  should work directly, no new import function to write.
+- ~~No real Qwen3-VL text encoder is wired into serving~~ - `crate::caps::
+  build_text_encoder`/`encode_text_real`/`text_conditioning` wire a real
+  `qwen3vl::Qwen3Vl` + tokenizer into every `t2va`/`fl2va` entry point,
+  falling back to the stub only when no real checkout is present (never
+  silently on a real load failure). Validated structurally (fallback
+  behavior, error propagation); the real-encoder numeric path itself is
+  still gated on `text_encoder/`'s download, which HAS now completed
+  (`text_conditioning_uses_the_real_encoder_when_weights_are_present`
+  should now run for real rather than skip - re-check once this ledger
+  entry is next touched).
 - `t2va`/`fl2va`'s denoise loop threads neither cancellation nor per-step
   progress yet (`wan`/`ltxv` both poll `inv.cancel` per step; this one does
   neither) - `.streaming()` on the manifest currently means "long-running"
