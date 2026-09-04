@@ -56,18 +56,20 @@ final-status-level = "flaky"
 [test-groups.gpu-exclusive]
 max-threads = 1
 
-# brain-ecapatdnn's own real-weight tests share a SECOND scarce resource this
-# group also serialises against for free: `shared_weights()`
-# (crates/ecapatdnn/tests/encoder.rs) memoises one expensive checkpoint
+# brain-ecapatdnn and brain-mimi's own real-weight tests share a SECOND scarce
+# resource this group also serialises against for free: both crates'
+# `crates/*/tests/{encoder,encode,decode}.rs` memoise one expensive checkpoint
 # import behind a fixed, non-pid-suffixed temp path plus an in-process
 # `OnceLock`/`Mutex`, correct under `cargo test`'s one-process-per-binary
 # model but not under nextest's process-per-test model, where that lock
-# provides no cross-process exclusion at all. Confirmed directly: running
-# this binary's weight-sharing tests as separate concurrent processes against
-# the same fixed path reproduces the exact "No such file or directory" this
-# group's membership fixes, three separate ways, every time. Membership here
-# is the same fix in spirit as the GPU case above - one process touching that
-# path at a time - not a claim that ecapatdnn always opens real hardware.
+# provides no cross-process exclusion at all. Confirmed directly for both:
+# running a binary's weight-sharing tests as separate concurrent processes
+# against the same fixed path reproduces the exact "No such file or
+# directory" this group's membership fixes, every time. Membership here is
+# the same fix in spirit as the GPU case above - one process touching that
+# path at a time - not a claim either crate always opens real hardware.
+# `crates/wan/tests/gguf_direct_real.rs` has the identical shape but already
+# pid-suffixes its temp path, so it needs no entry here.
 
 [[profile.default.overrides]]
 filter = '''
@@ -76,11 +78,11 @@ filter = '''
     + package(brain-clip) + package(brain-codeformer) + package(brain-deepseek2ocr)
     + package(brain-ecapatdnn) + package(brain-flux2) + package(brain-genieredux)
     + package(brain-gpu-core) + package(brain-kronos) + package(brain-ltxv)
-    + package(brain-minimaxmusic3) + package(brain-model) + package(brain-npu)
-    + package(brain-optim) + package(brain-qwen35) + package(brain-qwen35moe)
-    + package(brain-qwen3omnimoe) + package(brain-qwen3vl) + package(brain-sam1)
-    + package(brain-splat) + package(brain-vqgan) + package(brain-vulkan)
-    + package(brain-wan) + package(brain-wm-core) + package(brain-worldmirror2)
-    + package(brain-yolov8) + package(brain-zipdepth)
+    + package(brain-mimi) + package(brain-minimaxmusic3) + package(brain-model)
+    + package(brain-npu) + package(brain-optim) + package(brain-qwen35)
+    + package(brain-qwen35moe) + package(brain-qwen3omnimoe) + package(brain-qwen3vl)
+    + package(brain-sam1) + package(brain-splat) + package(brain-vqgan)
+    + package(brain-vulkan) + package(brain-wan) + package(brain-wm-core)
+    + package(brain-worldmirror2) + package(brain-yolov8) + package(brain-zipdepth)
 '''
 test-group = 'gpu-exclusive'
