@@ -172,18 +172,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// An architecture brain has no row for is refused BY NAME. Qwen3-VL's
-    /// 30B-A3B release is the live example: llama.cpp registers the MoE
-    /// vision-language decoder as its own architecture, which brain does not
-    /// build, and the only safe outcome is to say so rather than load the
-    /// adjacent dense architecture.
+    /// An architecture brain has no row for is refused BY NAME, rather than
+    /// silently loading some adjacent architecture. The tag is deliberately
+    /// synthetic (never a real llama.cpp spelling) so this test cannot go
+    /// stale the way it once did: it originally used "qwen3vlmoe" as its
+    /// example of an unbuilt architecture, and broke the day that
+    /// architecture was actually registered.
     #[test]
     fn an_unknown_architecture_is_refused_by_name() {
         let dir = tmp("unknown");
         let p = dir.join("mystery.gguf");
-        write_gguf(&p, &[("general.architecture", "qwen3vlmoe")]);
+        write_gguf(&p, &[("general.architecture", "brain-test-nonexistent-architecture")]);
         let err = route_path(p.to_str().unwrap()).unwrap_err();
-        assert!(err.contains("qwen3vlmoe"), "must name the architecture: {err}");
+        assert!(err.contains("brain-test-nonexistent-architecture"), "must name the architecture: {err}");
         assert!(err.contains("unknown GGUF architecture"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
