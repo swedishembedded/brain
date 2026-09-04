@@ -7,30 +7,15 @@ fine-tuning. Parity against the reference is verified.
 
 ## Not yet done
 
-- [ ] The RMSNorm backward is still the per-element kernel; only the forward
-      selects the coalesced `rmsnorm_rows` (measured 11.2x on both the Talker's
-      per-token norms and the MTP's per-frame norms)
-- [ ] Cancellation support for in-flight synth/clone requests
-- [ ] Batched inference (`run_batch`) - only sequential single-request
-      inference exists; autoregressive decode makes a genuine batched
-      forward nontrivial
-- [ ] Consolidate the private socket-based serving side-channel into the
-      standard D-Bus serving surface
-- [ ] An example D-Bus client for TTS
-- [ ] A windowed attention mask in the codec for long-form decode beyond the
-      current fixed window
-- [ ] A fused single-inference MTP graph. The MTP is no longer the runaway
-      per-clip cost it was (KV-cached 2026-09-04, 19x on the GPU - see
-      "Measured"), but it is still the largest single term of the decode
-      loop, and for a structural reason fusion is the only remaining answer
-      to: per-dispatch overhead, not arithmetic, is what a frame costs now
-      (1680 dispatches per frame at ~0.15-0.2 ms each on this box). Fused
-      QKV / gate-up / RMSNorm+GEMV would cut that count directly, and are
-      `kernel-performance.md` Phase 4 work rather than this crate's.
-- [ ] From-scratch training for the codec and speaker encoder (only Talker
-      LoRA fine-tuning exists today)
-- [ ] Wire a real TTS model into the runtime event/state-machine flow
-      (currently only a stub model is wired there)
+This list used to duplicate its items against the "Completion plan"'s own
+phases and its "Carried over" section below, and the two copies drifted
+(one got checked off, the other didn't). Removed the duplication instead of
+trying to keep two lists in sync by hand: `run_batch`, D-Bus consolidation +
+example client, and codec/speaker training each now have exactly one entry,
+in their own phase below. **The generic engine/architecture items
+(RMSNorm backward, cancellation, windowed codec mask, MTP fusion, the
+runtime stub) live in "Carried over, unchanged priority" near the end of
+this file** - that section is the current, authoritative copy.
 
 Codec decoding is sub-real-time on the CPU backend (48 s for 3.36 s of
 audio on this box). It is **not** CPU-pinned any more: as of 2026-09-04
@@ -266,26 +251,17 @@ independently shippable.
 
 ### Phase 0 - Bugs found by actually running it (do first, near-zero cost)
 
-- [ ] `crates/arch/src/lib.rs`'s `qwen3tts` entry declares
+- [x] `crates/arch/src/lib.rs`'s `qwen3tts` entry declares
       `weights_env: &[("BRAIN_QWEN3TTS_WEIGHTS", "weights_dir"), ...]`, but
       `resolve::flag_twin` derives the CLI flag from the env var's suffix
       (`WEIGHTS` → `--weights`), not from the tuple's own second field. The
-      real flag is `--weights-dir`. Result: `weights_already_named` never
-      matches, so `brain qwen3tts synth/clone/design --weights-dir D --ckpt
-      C ...` ALWAYS falls through to `supply::ensure_env_weights` and either
-      hard-errors ("not pulled") or silently starts a multi-GB network fetch
-      of the default ref, even though the user named both paths explicitly.
-      Every invocation in this audit needed `BRAIN_QWEN3TTS_WEIGHTS`/
-      `BRAIN_QWEN3TTS_CKPT` set as env vars instead of the documented flags
-      to work around this. Fix `flag_twin` to use the tuple's own flag name
-      (fixes this for every future architecture with a flag that doesn't
-      match its env-var suffix, not just this one) or special-case
-      `weights_dir`. Add a resolver test asserting `--weights-dir X --ckpt Y`
-      alone satisfies `weights_already_named("qwen3tts", ...)`.
-- [ ] `prompt.rs`'s module doc still says "brain's codec is decode-only... no
-      encoder in-tree" -- false since the encoder landed (`mimi::Codec::encode`,
-      called from `pipeline.rs`'s `clone()`/`clone_npu()`). Fix the comment;
-      no behavior change.
+      real flag is `--weights-dir`. Fixed via a small, explicit
+      variable->flag override list in `resolve.rs`, plus a resolver test
+      asserting `--weights-dir X --ckpt Y` alone satisfies
+      `weights_already_named("qwen3tts", ...)`.
+- [x] `prompt.rs`'s module doc claimed the codec was decode-only with no
+      in-tree encoder - false since `mimi::Codec::encode` landed and is
+      called from `pipeline.rs`'s `clone()`/`clone_npu()`. Comment fixed.
 
 ### Phase 1 - Generation-control parity (spec exists in Qwen's own config)
 
