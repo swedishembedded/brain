@@ -2057,8 +2057,41 @@ pub fn vocab_tiles_on(gpu: &Gpu, vocab: u64, d_model: u64) -> Vec<(u32, u32)> {
     tiles_with_budget(vocab, d_model, tile_budget_words_for(gpu))
 }
 
+/// The row-count granularity that keeps every tile boundary's WORD offset
+/// (`v0 * d_model`) a multiple of [`pad64`]'s alignment grain (64 words =
+/// 256B, `min_storage_buffer_offset_alignment` on every adapter this repo has
+/// met) - the smallest `r > 0` with `r * d_model % 64 == 0`, i.e. `64 /
+/// gcd(64, d_model)`. `d_model` a multiple of 64 (every real model shape)
+/// yields `1` - no caller pays anything for this - but a `d_model` that is
+/// not still gets a real, provably-correct bound instead of the "real models
+/// happen to be aligned" assumption `embed_tiled`'s own doc used to lean on.
+fn tile_row_align(d_model: u64) -> u64 {
+    fn gcd(a: u64, b: u64) -> u64 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    64 / gcd(64, d_model.max(1))
+}
+
 fn tiles_with_budget(vocab: u64, d_model: u64, budget: u64) -> Vec<(u32, u32)> {
-    let rows = (budget / d_model.max(1)).max(1);
+    let raw_rows = (budget / d_model.max(1)).max(1);
+    // A tile boundary after the first is a `step_sliced` bind-group offset -
+    // see `tile_row_align`'s own doc. A single tile needs no alignment at
+    // all (its own offset is 0), so a vocab that already fits the raw budget
+    // is returned untouched; rounding DOWN to the alignment grain (floored at
+    // one grain, since a correct binding beats a budget no real device
+    // imposes - the same trade-off `qwen3::model::align_head_tiles` already
+    // makes for the lm_head's own tiling) keeps every tile inside the budget
+    // it was sized for.
+    let rows = if raw_rows < vocab {
+        let align = tile_row_align(d_model);
+        (raw_rows / align).max(1) * align
+    } else {
+        raw_rows
+    };
     let mut out = Vec::new();
     let mut v0 = 0u64;
     while v0 < vocab {
@@ -2539,5 +2572,46 @@ mod tests {
         // A budget smaller than one row still yields whole rows, never zero -
         // a zero-row tile would loop forever.
         assert_eq!(tiles_with_budget(3, 1024, 1).len(), 3);
+    }
+
+    /// Every tile boundary after the first becomes a `step_sliced`
+    /// `BufferBinding::offset` (`v0 * d_model` words) into the buffer it
+    /// slices, so it must clear `min_storage_buffer_offset_alignment` (256B =
+    /// 64 f32 words). `d_model` a multiple of 64 gets this for free (every
+    /// `v0` works), which is the only case a real model ever presents - but
+    /// nothing enforced it for a `d_model` that is NOT, and a caller whose
+    /// budget forces multiple tiles at such a shape (a toy test config under
+    /// `BRAIN_TILE_BUDGET_WORDS`, or a real one racing a concurrently-running
+    /// test that sets it) produced an unaligned offset and a
+    /// `wgpu::Device::create_bind_group` validation panic - `qwen3::serve`'s
+    /// `kv_probe_cfg` (`d_model: 20`) under a leaked `BRAIN_TILE_BUDGET_WORDS
+    /// = 128` is the exact case that reproduced it (`v0 = 6` -> byte offset
+    /// 480, not a multiple of 256).
+    #[test]
+    fn every_multi_tile_boundary_clears_the_storage_binding_alignment_at_any_d_model() {
+        for d_model in [1u64, 3, 5, 7, 8, 9, 20, 33, 64, 100, 129] {
+            for budget in [1u64, 8, 16, 32, 64, 100, 128, 512, 4096] {
+                let tiles = tiles_with_budget(4096, d_model, budget);
+                let mut next = 0u32;
+                for &(v0, cnt) in &tiles {
+                    assert_eq!(v0, next, "d_model={d_model} budget={budget}: tiles must cover the vocab with no gap/overlap");
+                    let offset_bytes = v0 as u64 * d_model * 4;
+                    assert_eq!(
+                        offset_bytes % 256,
+                        0,
+                        "d_model={d_model} budget={budget}: tile at v0={v0} has offset {offset_bytes}B, not 256B-aligned"
+                    );
+                    next += cnt;
+                }
+                assert_eq!(next, 4096, "d_model={d_model} budget={budget}: tiles must cover the whole vocab exactly");
+            }
+        }
+
+        // The exact regression: `kv_probe_cfg`'s d_model=20 under a leaked
+        // BRAIN_TILE_BUDGET_WORDS=128 must not reproduce the 480B offset.
+        let tiles = tiles_with_budget(29, 20, 128);
+        for &(v0, _) in &tiles {
+            assert_eq!((v0 as u64 * 20 * 4) % 256, 0, "kv_probe_cfg regression: v0={v0} must be 256B-aligned at d_model=20");
+        }
     }
 }
