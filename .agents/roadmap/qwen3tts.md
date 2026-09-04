@@ -5,40 +5,6 @@ speaker encoder): speaker-free synthesis, voice cloning (x-vector and
 in-context), instruct-style voice design, NPU/CPU/GPU backends, and LoRA
 fine-tuning. Parity against the reference is verified.
 
-## Done
-
-- [x] Talker golden-dump generation. `crates/qwen3tts/tests/parity.rs` has
-      compared `TalkerModel::logits_all` against a PyTorch dump at
-      `testdata/tts/dumps/talker_ref/` since it was written, but no script in
-      the tree could produce that dump, so the gate had only ever taken its
-      "talker golden dump not present" skip - and a skipped test is green.
-      `tools/goldens/qwen3tts_dump_talker_reference.py` closes that: it drives
-      the upstream `qwen-tts` 0.1.1 package's own `Qwen3TTSTalkerModel` (under
-      the `transformers==4.57.3` pin `qwen3tts_ref.bootstrap` installs into a
-      private directory; no `trust_remote_code`, the published checkpoint
-      carries no remote modelling code) against the real
-      `Qwen/Qwen3-TTS-12Hz-0.6B-Base` weights and reproduces exactly the
-      boundary the Rust side implements -
-      `codec_head(model(inputs_embeds=codec_embedding(ids)))`, no text
-      projection, no MTP, no codec, no prompt assembly. Weights are cast bf16
-      to fp32 and run fp32 on the CPU, matching what brain's importer does, so
-      the expected agreement is fp32-tight rather than a dtype allowance.
-      Evidence, `BRAIN_DEVICE=cpu cargo test --release -p brain-qwen3tts
-      --test parity`: `talker parity: max_abs=0.0005 top1=64/64`, `test
-      result: ok. 1 passed`. The dumper also re-derives, on every run, the
-      M-RoPE claim the port rests on - with all three mrope sections carrying
-      the same position index, `apply_multimodal_rotary_pos_emb` equals the
-      single-section half-split rotation brain applies, measured max abs 0.0
-      against the reference's own functions. The token sequence is
-      deterministic and synthetic (`codec_bos_id` then a seeded LCG over the
-      acoustic range) rather than codec output: isolating
-      `codec_embedding(cb0)` already puts the input rows off the production
-      distribution (production sums sixteen per-codebook embeddings per
-      frame), so what remains to measure is decoder and head numerics, and a
-      seeded sequence reproduces byte-identically with no clip and no network.
-      The dump itself is not committed - `testdata/` is gitignored, only the
-      generator is.
-
 ## Not yet done
 
 This list used to duplicate its items against the "Completion plan"'s own
@@ -484,20 +450,47 @@ discovers capabilities generically.
 
 ### Phase 6 - Parity/gradcheck completeness
 
-- [ ] `crates/qwen3tts/tests/parity.rs` (Talker golden-logit parity) and
-      `tests/talker.rs` (Talker gradcheck) both exist and are real, but the
-      parity test is gated on a PyTorch golden dump
-      (`testdata/tts/dumps/talker_ref/{tokens.u32,logits.f32}`) that has never
-      been generated on this box -- there is no dump-generation script in-tree
-      today (unlike e.g. deepseek-ocr's `tools/goldens/*` convention). Write
-      one (needs a `transformers`-based Qwen3-TTS reference run) so
-      `make fetch/testdata` can produce it and the gate stops silently
-      skipping. Not attempted this session: no PyTorch/`transformers`
-      environment with Qwen3-TTS support is set up on this box, and standing
-      one up (verifying it reproduces the model correctly, matching
-      `tools/goldens/deepseek_ocr_convert_llamacpp_dump.py`'s own bar for a
-      reproducible, documented recipe) is a real side-project, not a quick
-      addition.
+- [x] `crates/qwen3tts/tests/parity.rs` (Talker golden-logit parity) and
+      `tests/talker.rs` (Talker gradcheck) both exist and are real; the
+      parity test used to be gated on a PyTorch golden dump
+      (`testdata/tts/dumps/talker_ref/{tokens.u32,logits.f32}`) that had
+      never been generated on this box, with no dump-generation script
+      in-tree (unlike e.g. deepseek-ocr's `tools/goldens/*` convention) - so
+      the gate only ever took its "not present" skip, and a skipped test is
+      green. `tools/goldens/qwen3tts_dump_talker_reference.py` closes that:
+      it drives the upstream `qwen-tts` 0.1.1 package's own
+      `Qwen3TTSTalkerModel` (under the `transformers==4.57.3` pin
+      `qwen3tts_ref.bootstrap` installs into a private directory; no
+      `trust_remote_code`, the published checkpoint carries no remote
+      modelling code) against the real `Qwen/Qwen3-TTS-12Hz-0.6B-Base`
+      weights and reproduces exactly the boundary the Rust side implements -
+      `codec_head(model(inputs_embeds=codec_embedding(ids)))`, no text
+      projection, no MTP, no codec, no prompt assembly (`Qwen3TTSTalkerModel.
+      forward` has no `embed_tokens` - it's never set - so ids must be
+      resolved through `codec_embedding` and passed as `inputs_embeds`, the
+      same way the reference's own generation path does it). Weights are
+      cast bf16 to fp32 and run fp32 on the CPU, matching what brain's
+      importer does, so the expected agreement is fp32-tight, not a dtype
+      allowance. Evidence, `BRAIN_DEVICE=cpu cargo test --release -p
+      brain-qwen3tts --test parity`: `talker parity: max_abs=0.0005
+      top1=64/64`, `test result: ok. 1 passed`. The dumper also re-derives,
+      on every run, the M-RoPE claim `talker.rs` rests on - with all three
+      mrope sections carrying the same position index,
+      `apply_multimodal_rotary_pos_emb` equals the single-section
+      half-split rotation brain applies, measured max abs 0.0 against the
+      reference's own functions, so this is now proven per-run rather than
+      just asserted in a comment. The token sequence is deterministic and
+      synthetic (`codec_bos_id` then a seeded LCG over the acoustic range)
+      rather than codec output: isolating `codec_embedding(cb0)` already
+      puts the input rows off the production distribution (production sums
+      sixteen per-codebook embeddings per frame), so what remains to
+      measure is decoder and head numerics, and a seeded sequence
+      reproduces byte-identically with no clip and no network. The dump
+      itself is not committed - `testdata/` is gitignored, only the
+      generator is. `tests/talker.rs`'s own gradcheck was already real and
+      unaffected by this - the two tests check different things (golden
+      logits vs. analytic-vs-finite-difference gradients) and both now
+      genuinely run.
 - [ ] The MTP code predictor has NO equivalent parity or gradcheck test at
       all (`tests/mtp.rs` is a forward smoke test only, checkpoint-gated, no
       golden comparison). **Checked this session and found the real reason
