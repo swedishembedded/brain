@@ -731,7 +731,8 @@ discovers capabilities generically.
 - [x] A windowed attention mask in the codec for long-form decode beyond the
       current fixed window **(2026-09-04)**. See "The windowed codec mask,
       and where it was actually missing" below for what the window is, which
-      of the two decode implementations was ignoring it, and the numbers.
+      two of the codec's THREE copies of that transformer were ignoring it
+      (including the one behind the default serve path), and the numbers.
 - [ ] The SAME gap, still open, on the ENCODE side: the Mimi encoder
       transformer (`mimi::model::Codec::enc_transformer`) parses
       `encoder_config.sliding_window` (250, confirmed in the released
@@ -929,11 +930,53 @@ element-by-element plus a closed-form live-key count
 (`sum_i min(i+1, window)`), which a plain causal mask (`sum_i (i+1)`) cannot
 hit. Before the fix it failed at `mask[3,0] must be masked out, got 0`.
 
-On the real checkpoint (`out/tts-base06/codec.safetensors`, window 72),
-`mimi::decode_stream::tests::long_form_parity_vs_codec` decodes T=144 frames
-(11.5 s, a full window past the boundary) through both brain implementations
-and compares them directly. Opt-in (`--ignored`, needs `BRAIN_MIMI_WEIGHTS`)
-because it pushes ~276k samples through the whole SEANet stack twice.
+**On the real checkpoint, and a measurement worth keeping.** The obvious
+real-weights test - decode a clip longer than 72 frames through both brain
+implementations and compare - was written first and is the wrong test.
+`out/tts-base06/codec.safetensors` at T=144 gives a host-vs-device max-abs of
+**3.9e-2** over 276480 samples, against ~2.4e-3 at T=16. That gap is not the
+mask: it is ordinary fp divergence amplified by the SEANet stack, where
+SnakeBeta is `x + (1/(exp(beta)+eps)) * sin(exp(alpha) * x)^2` and the `sin`
+magnifies any input difference by `exp(alpha)` at each of twelve residual
+units, then the next upsample stage spreads it. It grows with length whether
+or not a mask is involved, so a bound on it measures the amplifier rather
+than the thing under test - and it is worth recording because it sets a real
+limit on how far a max-abs host-vs-device comparison can be pushed for THIS
+architecture, independent of this work item.
+
+`mimi::decode_stream::tests::windowed_parity_vs_codec_on_real_weights`
+(opt-in, `--ignored`, needs `BRAIN_MIMI_WEIGHTS`) shrinks the WINDOW instead
+of lengthening the clip: real weights and real architecture at
+`sliding_window = 4`, T=20, which puts four fifths of the queries under a
+truncated key set - a harder mask test than 72 would be at any clip length
+worth decoding - while staying inside the length regime where host-vs-device
+fp noise is already characterized. Measured:
+
+| T=20, real weights, 38400 samples | max-abs |
+|---|---|
+| host vs device, `sliding_window = 4` (five windows deep) | 8.110e-3 |
+| host vs device, unbounded window (plain causal) | 8.679e-3 |
+| effect of narrowing the window, **host** path | **6.819e-1** |
+| effect of narrowing the window, **device** path | **6.819e-1** |
+
+Two results matter here. The windowed case agrees very slightly BETTER than
+the plain-causal one, so whatever the ~8e-3 is, it is not the mask. And the
+window itself moves the waveform by 0.68 on `[-1,1]` audio - a change roughly
+80x larger than the two implementations' disagreement - by **the same amount
+on both, to four significant figures**. That is the sharpest available
+statement that they now implement the same mask: they do not merely agree,
+they respond identically to the field that used to move only one of them (and
+by 0.000e0 on the other).
+
+That also forced the assertion to be relative rather than absolute. The first
+version of this test pinned `< 5e-3`, borrowed from `e2e_parity_vs_codec`'s
+~2.4e-3 at a different T and a different code draw, and went red on a correct
+implementation - host-vs-device max-abs on this architecture is a property of
+the SEANet amplifier and the particular codes, so an absolute ceiling here is
+fitting to one draw. The test now asserts that windowing does not make the
+two agree any worse than plain causal does, plus a loose order-of-magnitude
+sanity cap, plus that a narrow window MOVES both waveforms - the last one
+being what neither implementation could satisfy while ignoring the field.
 
 **Short sequences are bit-identical, not merely close.** For `window > i`
 the new loop iterates exactly the old key set in exactly the old order, so

@@ -41,6 +41,11 @@ fn tiny_cfg() -> VisionConfig {
         out_hidden_size: 40,
         in_channels: 2,
         deepstack_indexes: vec![],
+        // Unused by the ViT export (it is a video-timestamp-to-position scale
+        // that only `qwen3vl::mrope::get_rope_index_video` reads), but the
+        // field is not optional, so it carries the same default every other
+        // constructor of this config uses.
+        tokens_per_second: 2,
     }
 }
 
