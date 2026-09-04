@@ -18,6 +18,11 @@
 //!     the YOLO detector (default 0.25). Lower it so a lightly-trained tiny model's
 //!     low-confidence boxes still surface. No effect on the fake detector.
 //!   * `--max-new N`, `--temp X`, `--top-k K`, `--seed S` - generation config.
+//!   * Text-to-speech has no flag: it is env-only (`BRAIN_QWEN3TTS_WEIGHTS` /
+//!     `BRAIN_QWEN3TTS_CKPT` / `BRAIN_QWEN3TTS_LANG`, the same variables the
+//!     D-Bus resident reads), and only in a build carrying the `qwen3tts-synth`
+//!     feature - the TTS stack is too heavy for the default binary. Without it,
+//!     a `user_synth_request` still answers, with the terminal empty chunk.
 //!   * `--models-dir <path>` (or env `BRAIN_MODELS_DIR`) - the global model
 //!     directory `brain serve --dbus` scans at startup to build the served-model
 //!     catalog (one entry per carded file, keyed by model-card id). Defaults to
@@ -187,6 +192,32 @@ fn parsed<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -> T
     })
 }
 
+/// Fill the controller's text-to-speech seam, when this build has one.
+///
+/// Configuration is env-only and reuses the SAME variables the D-Bus resident
+/// (`crate::resident_tts::TtsResident::from_env`) already reads - one spelling
+/// across both serving surfaces, and no new flag on `brain serve`. With
+/// `BRAIN_QWEN3TTS_WEIGHTS` unset there is no synth model, which is exactly the
+/// behaviour of every build before this: a `user_synth_request` answers with the
+/// terminal empty `audio_chunk`.
+#[cfg(feature = "qwen3tts-synth")]
+fn register_synth(registry: &mut Registry) {
+    match runtime::Qwen3TtsSynthModel::from_env() {
+        None => {}
+        Some(Ok(m)) => {
+            eprintln!("brain serve --stdio: Qwen3-TTS synth model registered");
+            registry.synth = Some(Box::new(m));
+        }
+        // The weights var was set but the checkpoint is unusable: say so rather
+        // than silently serving no audio from a path the operator meant to use.
+        Some(Err(e)) => eprintln!("brain serve --stdio: {e}; synthesis disabled"),
+    }
+}
+
+/// No-op twin for the default build, which does not link the TTS stack.
+#[cfg(not(feature = "qwen3tts-synth"))]
+fn register_synth(_registry: &mut Registry) {}
+
 pub fn run_serve(args: &[String]) {
     let mut gpt_path = std::env::var("BRAIN_GPT2").ok();
     let mut yolo_path = std::env::var("BRAIN_YOLOV8").ok();
@@ -340,7 +371,9 @@ pub fn run_serve(args: &[String]) {
         }
     };
 
-    let mut ctrl = Controller::with_config(Registry::with_models(infer, detect), cfg);
+    let mut registry = Registry::with_models(infer, detect);
+    register_synth(&mut registry);
+    let mut ctrl = Controller::with_config(registry, cfg);
 
     // Expose the generic capability providers over the event API (manifest_request
     // / action_request) - the same actions `brain do` runs, now network-reachable.

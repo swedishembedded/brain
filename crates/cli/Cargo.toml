@@ -15,6 +15,11 @@ path = "src/main.rs"
 vulkan-coopmat = ["dep:brain-vulkan"]
 # Enable the engine's fault-injection points for `brain perf faults` (G).
 fault-injection = ["brain-qwen3/fault-injection"]
+# Register the real Qwen3-TTS `SynthModel` in `brain serve --stdio`'s controller
+# registry, so a `user_synth_request` streams genuine audio instead of nothing.
+# Forwards to `brain-runtime/qwen3tts`; this crate already links brain-qwen3tts
+# for `brain tts`, so the only cost here is on the runtime crate's side.
+qwen3tts-synth = ["brain-runtime/qwen3tts"]
 
 [dependencies]
 # D-Bus control surface: compiled into the default build so `brain serve --dbus`
