@@ -1,7 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain tts serve` — resident-engine TTS server.
+//! `brain tts serve` - resident-engine TTS server for the **OpenVINO/NPU**
+//! Talker graphs.
+//!
+//! **Scope, after the consolidation**: the two capabilities this private
+//! protocol existed to provide - resident (load-once) weights and progressively
+//! streamed audio chunks - are now on the standard capability surface for the
+//! ordinary host path: `qwen3tts::engine::ResidentEngine` behind
+//! `crate::resident_tts::TtsResident`, reached generically over D-Bus/HTTP via
+//! `capability::Registry` (`speak`/`design` are `.streaming()`, and each
+//! decoded codec chunk goes out as a real `Progress::chunk` blob frame). A new
+//! client should use that, not this socket.
+//!
+//! What is still ONLY here is the NPU-specific engine configuration -
+//! `qwen3tts::serve::TtsEngine`'s compiled OpenVINO graphs, their int4/int8
+//! weight-compression choice and their on-disk compile cache - which the
+//! generic residency surface has no vocabulary for and which cannot be
+//! exercised on a box whose OpenVINO runtime reports no `NPU` device at all.
+//! Folding it in is a separate step, gated on that hardware.
 //!
 //! Loads the compiled NPU graphs ONCE and serves many requests over a Unix socket
 //! using a line-delimited JSON (JSONL) protocol, so back-to-back generations skip

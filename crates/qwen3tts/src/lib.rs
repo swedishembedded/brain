@@ -15,6 +15,7 @@
 pub mod batch;
 pub mod caps;
 pub mod config;
+pub mod engine;
 pub mod gen;
 pub mod gen_kv;
 pub mod gen_kv_mtp;
@@ -31,6 +32,7 @@ mod testsupport;
 
 pub use batch::run_batch;
 pub use config::{MtpConfig, TalkerConfig};
+pub use engine::ResidentEngine;
 pub use sft::{ce, ce_batch, FinetuneOpts, MultiCodebookLabels};
 pub use gen::TalkerGen;
 pub use gen_kv::CpuTalker;

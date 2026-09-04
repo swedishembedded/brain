@@ -500,6 +500,12 @@ impl CpuTalker {
         self.pos
     }
 
+    /// The text projection front-end read by [`CpuTalker::load`], or `None`
+    /// for a decoder-only test construction that never loaded one.
+    pub fn text_projection(&self) -> Option<&crate::talker::TextProjection> {
+        self.text.as_ref()
+    }
+
     /// Reset the incremental K/V cache (start a fresh sequence).
     pub fn reset(&mut self) {
         for kv in &mut self.cache {
@@ -533,6 +539,23 @@ impl CpuTalker {
     /// so it can serve as the `O(T²)` uncached baseline.
     pub fn forward_full(&self, inputs_embeds: &[f32]) -> Vec<f32> {
         decoder_forward_full(&self.layers, &self.norm, self.dims(), inputs_embeds)
+    }
+}
+
+/// Prompt assembly against the CPU Talker's own host tables, so a purely
+/// host-side pipeline (`crate::engine`, `crate::batch`) can build its prompts
+/// without also constructing the `gpu_core`-backed [`crate::gen::TalkerGen`]
+/// just to read three embedding tables. Same tensors, same tables - `load`
+/// reads exactly what `TalkerGen::load` does.
+impl crate::prompt::TalkerHost for CpuTalker {
+    fn d(&self) -> usize {
+        self.cfg.d_model as usize
+    }
+    fn text(&self) -> &TextProjection {
+        self.text.as_ref().expect("CpuTalker has no text_projection: built decoder-only, not loaded from a checkpoint")
+    }
+    fn codec_embed(&self, id: u32) -> &[f32] {
+        CpuTalker::codec_embed(self, id)
     }
 }
 
