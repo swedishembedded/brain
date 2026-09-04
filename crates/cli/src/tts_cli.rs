@@ -50,8 +50,21 @@ pub fn run_tts(args: &[String]) {
         Some("serve") => crate::tts_serve::run_serve(&args[1..]),
         Some("sim") => sim(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
+        // Any other verb is forwarded to the GENERIC capability dispatcher,
+        // the same way `sam2_cli::run_sam2` hands its non-`track` verbs back.
+        // Without this, an action that exists only on `qwen3tts::caps`'s
+        // manifest (`batch`) was advertised by `brain caps qwen3tts` and then
+        // rejected here as an unknown verb - the CLI contradicting the
+        // manifest it prints. `-h`/no verb still get this module's usage line,
+        // since those are about the dedicated commands.
+        Some(verb) if !verb.starts_with('-') => {
+            let mut do_args = vec![qwen3tts::caps::MODEL.to_string()];
+            do_args.extend_from_slice(args);
+            std::process::exit(crate::caps_cli::run_do(&do_args));
+        }
         other => {
             eprintln!("usage: brain qwen3tts <import|clone|synth|design|serve|finetune> ...  (got {other:?})");
+            eprintln!("       plus every action on the generic manifest (`brain caps qwen3tts`), e.g. `batch`.");
             std::process::exit(2);
         }
     }

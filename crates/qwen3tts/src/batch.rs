@@ -32,9 +32,10 @@ use capability::CancelToken;
 
 use crate::gen_kv::CpuTalker;
 use crate::gen_kv_mtp::CpuMtp;
-use crate::pipeline::{sample_cb0, GenOpts};
-use crate::prompt::{Prompt, TtsSpecials};
+use crate::pipeline::{self, sample_cb0, GenOpts, TtsPaths};
+use crate::prompt::{self, Prompt, TtsSpecials};
 use data::rng::Rng;
+use data::tokenizer::Tokenizer;
 
 fn add_into(a: &mut [f32], b: &[f32]) {
     for (x, y) in a.iter_mut().zip(b) {
@@ -184,6 +185,81 @@ pub fn run_batch(
     sessions.into_iter().map(|s| s.frames).collect()
 }
 
+/// One request in a [`synth_batch`] call: what to say, in which language, and
+/// with which sampling/length knobs. Every field is per-request on purpose -
+/// a ragged batch whose members all had to share one `max_frames` would not
+/// be ragged in the way that matters.
+#[derive(Clone, Debug)]
+pub struct BatchRequest {
+    pub text: String,
+    pub lang: String,
+    pub opts: GenOpts,
+}
+
+/// **The end-to-end batch entry point**: text in, waveforms out, interleaved.
+///
+/// [`run_batch`] is the scheduler and nothing else - it takes already-assembled
+/// [`Prompt`]s and returns codec codes. This wraps it into something a real
+/// caller (the `batch` action on [`crate::caps`], and through it `brain do
+/// qwen3tts batch` / `capability::Registry::run` / D-Bus) can invoke: tokenize
+/// and assemble each request's prompt, interleave the decode, then decode each
+/// request's codes to a 24 kHz waveform.
+///
+/// Speaker-free synthesis only (the same conditioning
+/// [`crate::pipeline::synth`] builds). Cloning and VoiceDesign would each need
+/// their own per-request conditioning inputs in the request shape, and the
+/// scheduling story - the thing this path exists to demonstrate - is identical
+/// for all three, so they are deliberately out of scope here rather than
+/// half-wired.
+///
+/// Entirely host-side: prompts are assembled off [`CpuTalker`]'s own tables,
+/// the decode is [`run_batch`]'s CPU Talker+MTP path, and the codec runs
+/// through the pure-CPU streaming decoder. That matches what [`run_batch`]
+/// itself can actually schedule (see the module doc: this is not a batched
+/// GPU matmul), rather than mixing in a device the scheduler cannot use.
+pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest]) -> Result<Vec<Vec<f32>>, String> {
+    if reqs.is_empty() {
+        return Err("tts batch: needs at least one request".to_string());
+    }
+    for p in [&paths.talker, &paths.mtp, &paths.codec] {
+        if !std::path::Path::new(p).exists() {
+            return Err(format!("tts batch: weights not found at '{p}' (run `brain tts import`)"));
+        }
+    }
+    let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
+
+    // One Talker load for prompt assembly (embedding tables only). `run_batch`
+    // gives each session its own decoder copy - the weight-sharing limitation
+    // its module doc already states - so this one is dropped before the batch
+    // runs rather than held alongside them.
+    let sessions: Vec<(Prompt, GenOpts)> = {
+        let talker = CpuTalker::load(&paths.talker);
+        let mut out = Vec::with_capacity(reqs.len());
+        for (i, r) in reqs.iter().enumerate() {
+            if r.text.trim().is_empty() {
+                return Err(format!("tts batch: request {i} has empty 'text'"));
+            }
+            let ids = tok.encode(&pipeline::assistant_text(&r.text));
+            let (role_ids, text_ids) = pipeline::split_input_ids(&ids).map_err(|e| format!("tts batch: request {i}: {e}"))?;
+            let language_id = sp.language_id(&r.lang);
+            out.push((prompt::build_xvector_prompt(&talker, &sp, &role_ids, &text_ids, None, language_id), r.opts.clone()));
+        }
+        out
+    };
+
+    let coded = run_batch(&paths.talker, &paths.mtp, &sp, sessions);
+    let codec = mimi::decode_stream::StreamingCodecDecoder::load(&paths.codec);
+    let mut wavs = Vec::with_capacity(coded.len());
+    for (i, codes) in coded.iter().enumerate() {
+        if codes.is_empty() {
+            return Err(format!("tts batch: request {i} generated no codec frames"));
+        }
+        wavs.push(codec.decode_streaming(codes, 0));
+    }
+    Ok(wavs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +319,68 @@ mod tests {
         // The two requests have different max_frames (5 vs 8) - a genuinely
         // ragged batch, not a coincidentally-equal-length one.
         assert_ne!(batched[0].len(), batched[1].len(), "test setup must actually exercise raggedness");
+    }
+
+    /// The end-to-end entry point against REAL weights: two requests with
+    /// different `max_frames` go in together, two independent, non-empty,
+    /// DIFFERENT-length waveforms come out - the scheduler's raggedness
+    /// surviving all the way through tokenization and the codec, which the
+    /// synthetic-checkpoint tests above cannot show (they never build a
+    /// prompt from text at all). Skips cleanly without real weights, like
+    /// every other real-checkpoint test in this crate.
+    ///
+    /// Request 0 deliberately reuses the text/seed/`max_frames`
+    /// `engine::tests`'s single-request test uses, and produces the same
+    /// 30720 samples (EOS at frame 16, well before the 40-frame cap) - so
+    /// this doubles as a cross-check that batching a request does not change
+    /// what that request alone would have produced, on real weights rather
+    /// than the synthetic ones the codes-level test above uses.
+    #[test]
+    fn synth_batch_returns_one_ragged_waveform_per_request() {
+        let (Ok(w), Ok(ckpt)) = (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT")) else {
+            brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
+            return;
+        };
+        let paths = TtsPaths {
+            talker: format!("{w}/talker.safetensors"),
+            mtp: format!("{w}/mtp.safetensors"),
+            codec: format!("{w}/codec.safetensors"),
+            speaker: format!("{w}/speaker.safetensors"),
+            ckpt_dir: ckpt,
+        };
+        if !std::path::Path::new(&paths.talker).exists() {
+            brain_testutil::skip("weights not found at BRAIN_QWEN3TTS_WEIGHTS");
+            return;
+        }
+        let req = |text: &str, max_frames: usize, seed: u64| BatchRequest {
+            text: text.to_string(),
+            lang: "english".to_string(),
+            opts: GenOpts { max_frames, seed, ..GenOpts::default() },
+        };
+        let t0 = std::time::Instant::now();
+        let wavs = synth_batch(&paths, &[req("Streaming the first request.", 40, 7), req("The second one runs quite a bit longer than the first one does.", 32, 2)])
+            .expect("batch synthesis");
+        assert_eq!(wavs.len(), 2);
+        for (i, wav) in wavs.iter().enumerate() {
+            assert!(!wav.is_empty(), "request {i} produced no audio");
+            let rms = (wav.iter().map(|s| s * s).sum::<f32>() / wav.len() as f32).sqrt();
+            assert!(rms > 1e-3, "request {i} decoded to near-silence (rms {rms:.3e})");
+        }
+        // Ragged: the two requests' own `max_frames` decide their own lengths.
+        assert!(wavs[1].len() > wavs[0].len(), "the longer request must yield the longer clip: {} vs {}", wavs[1].len(), wavs[0].len());
+        // Independent: different text and different seed must not converge on
+        // the same waveform (the failure mode interleaving could plausibly
+        // introduce is cross-request contamination).
+        let n = wavs[0].len();
+        assert_ne!(wavs[0][..n], wavs[1][..n], "the two requests produced identical audio - the batch is contaminated");
+        eprintln!("synth_batch: {} + {} samples in {:.1}s", wavs[0].len(), wavs[1].len(), t0.elapsed().as_secs_f64());
+    }
+
+    /// An empty batch is a caller error, not a silent empty result.
+    #[test]
+    fn an_empty_batch_is_rejected() {
+        let paths = TtsPaths { talker: String::new(), mtp: String::new(), codec: String::new(), speaker: String::new(), ckpt_dir: String::new() };
+        assert!(synth_batch(&paths, &[]).unwrap_err().contains("at least one"));
     }
 
     /// A short request must actually stop consuming rounds once it finishes,

@@ -328,8 +328,17 @@ fn weights_already_named(arch: &str, rest: &[String]) -> bool {
     // override. The resolver fetches its own when the name needs it.
     let model_names_primary = rest.iter().any(|t| t == "--model");
     a.weights_env.iter().enumerate().all(|(i, (var, _))| {
+        let twin = flag_twin(arch, var);
+        // Both spellings count. A dedicated CLI writes the flag with hyphens
+        // (`--weights-dir`); the GENERIC capability dispatcher derives its
+        // flags from param NAMES, which are underscored (`--weights_dir`) - so
+        // an architecture that has both entry points (qwen3tts) would
+        // otherwise have its generic invocations fall through to the
+        // auto-fetch gate while its dedicated ones suppress it, for the same
+        // path named the same way.
+        let underscored = format!("--{}", twin.trim_start_matches('-').replace('-', "_"));
         std::env::var_os(var).is_some_and(|v| !v.is_empty())
-            || rest.iter().any(|t| *t == flag_twin(arch, var))
+            || rest.iter().any(|t| *t == twin || *t == underscored)
             || (i == 0 && model_names_primary)
     })
 }
@@ -710,6 +719,13 @@ mod tests {
         assert!(weights_already_named("qwen3tts", &named));
         let only_ckpt = s(&["synth", "--ckpt", "C", "--text", "hi"]);
         assert!(!weights_already_named("qwen3tts", &only_ckpt));
+        // The GENERIC capability dispatcher spells the same flag with an
+        // underscore, because its flags come from the manifest's param names
+        // (`weights_dir`). `brain qwen3tts batch --weights_dir D --ckpt C ...`
+        // names both paths just as explicitly and must suppress the fetch too
+        // - before this, the generic path always tripped the gate.
+        let generic = s(&["batch", "--weights_dir", "D", "--ckpt", "C", "--requests", "[]"]);
+        assert!(weights_already_named("qwen3tts", &generic));
     }
 
     #[test]
