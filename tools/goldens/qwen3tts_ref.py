@@ -12,8 +12,8 @@ modelling code either. The reference lives only in the `qwen-tts` PyPI package
 install. So a golden for `crates/mimi` or `crates/ecapatdnn` can only come from
 that package - dumping from brain's own port would prove nothing.
 
-Two things make loading it awkward, and this module owns both so the dumpers
-stay readable:
+Three things make loading it awkward, and this module owns all of them so the
+dumpers stay readable:
 
 1. `qwen-tts` pins `transformers==4.57.3`, and the modelling code really does
    depend on that API (`check_model_inputs` changed from a decorator factory to
@@ -27,6 +27,10 @@ stay readable:
    `qwen_tts.core` as bare namespace packages skips those `__init__` bodies
    while leaving every module we actually import completely unmodified. The
    reference code is never patched; that is the whole point of using it.
+3. `modeling_qwen3_tts` imports `librosa` and `soundfile` at module scope, for
+   the mel front end and for reading clips off disk. A tensor-only dumper (the
+   Talker decoder) reaches neither, so `_stub_absent` publishes raising
+   placeholders when those libraries are not installed - see its docstring.
 
 The reference tree defaults to `resources/qwen3-tts/` (repo-relative; that
 directory is gitignored, like every other downloaded reference source in this
@@ -40,7 +44,7 @@ import sys
 import types
 import zipfile
 
-__all__ = ["bootstrap", "load_codec", "load_speaker"]
+__all__ = ["bootstrap", "load_codec", "load_speaker", "load_talker"]
 
 WHEEL = "qwen_tts-0.1.1-py3-none-any.whl"
 PACKAGE = "qwen-tts==0.1.1"
@@ -134,10 +138,54 @@ def load_codec():
     return cfg.Qwen3TTSTokenizerV2Config, mod.Qwen3TTSTokenizerV2Model
 
 
-def load_speaker():
-    """`(config_class, encoder_class, mel_spectrogram)` for the ECAPA-TDNN
-    speaker encoder and the exact mel front end the reference feeds it."""
+def _stub_absent(name, attrs=()):
+    """Register a placeholder for an audio-IO module that is NOT installed.
+
+    `qwen_tts.core.models.modeling_qwen3_tts` imports `librosa.filters.mel` at
+    module scope (for `mel_spectrogram`) and, through the inference-side
+    tokenizer wrapper, `soundfile` (for reading clips off disk). Neither is
+    reachable from a pure-tensor forward pass such as the Talker decoder, so a
+    dumper that only needs tensors would otherwise have to drag in librosa's
+    whole numba/soxr stack to satisfy two import statements.
+
+    The placeholder raises on every name it publishes, so nothing can silently
+    degrade: a dumper that really does need mel features fails at the call with
+    a `NotImplementedError` naming the module, instead of being handed wrong
+    data. It is installed only when the real module is genuinely absent, so an
+    environment that has librosa/soundfile behaves exactly as before. The
+    reference code itself is still never patched - same principle as the
+    namespace-package trick in `bootstrap`.
+
+    The stub publishes ONLY the listed attributes and leaves module dunders
+    alone; a catch-all `__getattr__` would break `transformers`' lazy-module
+    machinery, which probes attributes to decide what a submodule exports.
+    """
+    try:
+        importlib.import_module(name)
+        return
+    except ModuleNotFoundError:
+        pass
+    mod = types.ModuleType(name)
+    for attr in attrs:
+        def raiser(*_a, _who=f"{name}.{attr}", **_kw):
+            raise NotImplementedError(
+                f"{_who} is a placeholder: this environment has no {name.split('.')[0]}"
+            )
+        setattr(mod, attr, raiser)
+    sys.modules[name] = mod
+    if "." in name:
+        parent, leaf = name.rsplit(".", 1)
+        setattr(sys.modules[parent], leaf, mod)
+
+
+def _load_models_module():
+    """Import `qwen_tts.core.models.modeling_qwen3_tts`, wiring up the two
+    tokenizer names its import chain expects and standing in for absent audio
+    IO. Returns the `(configuration, modeling)` module pair."""
     bootstrap()
+    _stub_absent("librosa")
+    _stub_absent("librosa.filters", ("mel",))
+    _stub_absent("soundfile", ("read", "write"))
     # `qwen_tts.core.models.modeling_qwen3_tts` imports the inference-side
     # tokenizer wrapper, which in turn does `from ..core import <4 names>`.
     # Three of those belong to the 25 Hz tokenizer, which needs `sox` and
@@ -154,4 +202,24 @@ def load_speaker():
 
     cfg = importlib.import_module("qwen_tts.core.models.configuration_qwen3_tts")
     mod = importlib.import_module("qwen_tts.core.models.modeling_qwen3_tts")
+    return cfg, mod
+
+
+def load_speaker():
+    """`(config_class, encoder_class, mel_spectrogram)` for the ECAPA-TDNN
+    speaker encoder and the exact mel front end the reference feeds it."""
+    cfg, mod = _load_models_module()
     return cfg.Qwen3TTSSpeakerEncoderConfig, mod.Qwen3TTSSpeakerEncoder, mod.mel_spectrogram
+
+
+def load_talker():
+    """`(config_class, model_class, modeling_module)` for the Talker decoder.
+
+    `Qwen3TTSTalkerModel` is the 28-layer decoder stack plus the codec/text
+    embedding tables - deliberately NOT `Qwen3TTSTalkerForConditionalGeneration`,
+    which also builds the 5-layer MTP code predictor. The modelling module comes
+    back too so a dumper can reach `apply_multimodal_rotary_pos_emb` and
+    `rotate_half` to check the RoPE convention against the reference's own
+    functions rather than a re-implementation."""
+    cfg, mod = _load_models_module()
+    return cfg.Qwen3TTSTalkerConfig, mod.Qwen3TTSTalkerModel, mod
