@@ -40,7 +40,7 @@ const GPS: usize = 8;
 
 /// Pack per-group `(sc, m)` sub-scale byte pairs into `wsm: [n, ceil(ng/2)]`
 /// - `gguf::kquant`'s own bit layout, restated here since this crate's tests
-/// do not depend on `gguf`.
+///   do not depend on `gguf`.
 fn pack_wsm(sc: &[u8], mn: &[u8], n: usize, ng: usize) -> Vec<u32> {
     let words = ng.div_ceil(2);
     let mut out = vec![0u32; n * words];
@@ -138,7 +138,7 @@ fn rand_pos_f32(rng: &mut Lcg, n: usize, lo: f32, hi: f32) -> Vec<f32> {
 /// façade and a hand-dispatched call to the same underlying kernels.
 #[allow(clippy::too_many_arguments)]
 fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'static str, m: usize, n: usize, k: usize, dmin_nonzero: bool) {
-    assert!(k % GROUP == 0, "test shape must keep k a multiple of GROUP (32)");
+    assert!(k.is_multiple_of(GROUP), "test shape must keep k a multiple of GROUP (32)");
     let ng = k / GROUP;
 
     // `kernel_list()` (M12's own builder) already registers BOTH `CODE_BITS`

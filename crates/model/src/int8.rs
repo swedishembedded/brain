@@ -802,8 +802,8 @@ mod tests {
     /// range AND a column offset, so neither bound is 0) must match slicing
     /// the rectangle out of the fully dequantized tensor and quantizing that
     /// - exercised over an f32 `HashMap` source (no Q8_0 blocks to align
-    /// against), which forces the whole-tensor-materialize-and-slice
-    /// fallback rather than the direct route.
+    ///   against), which forces the whole-tensor-materialize-and-slice
+    ///   fallback rather than the direct route.
     #[test]
     fn quantize_rect_from_a_genuine_subrectangle_matches_manual_slicing() {
         let (rows, cols) = (6usize, 96usize);

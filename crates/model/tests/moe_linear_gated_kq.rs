@@ -398,8 +398,8 @@ fn expert_fwd_kq_zeroes_a_non_routed_row() {
     let down_w = upload_kq_expert(&g, 0x7774, d, shape.moe_ff as usize, 32);
 
     let out = run_expert(&g, &ids, &shape, &xq, &sx, &xgs, &gate, &gate_w, &up_w, &down_w, 0);
-    for c in 0..d {
-        assert_eq!(out[c], 0.0, "row 0 (gate=0) must write exactly zero at column {c}");
+    for (c, &v) in out.iter().enumerate().take(d) {
+        assert_eq!(v, 0.0, "row 0 (gate=0) must write exactly zero at column {c}");
     }
     assert!(out[d..].iter().any(|&v| v != 0.0), "the routed rows must not ALSO be all-zero (a trivial pass)");
 }
