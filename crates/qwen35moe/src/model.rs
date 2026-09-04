@@ -266,6 +266,11 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // `block::rms_variant` inside `block::rmsnorm_fwd`. Appended at the true
     // end, same convention as the tiers above, so every const stays put.
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),                     // 94
+    // -- coalesced RMSNorm BACKWARD-x -- the throughput twin of `rmsnorm_dx`,
+    // selected by the SAME `block::rms_variant` policy inside
+    // `block::rmsnorm_bwd`. Appended at the true end, same convention as the
+    // tiers above, so every const stays put.
+    ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),               // 95
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -357,6 +362,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
 
 const RMSNORM: usize = 0;
 const RMSNORM_ROWS: usize = 94;
+const RMSNORM_DX_ROWS: usize = 95;
 const MATMUL: usize = 1;
 const EMBED: usize = 2;
 const SIGMOID: usize = 3;
@@ -461,7 +467,7 @@ fn kernel_ids() -> KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: RMS_INV,
         rmsnorm_dx: RMSNORM_DX,
-        rmsnorm_dx_rows: block::UNREGISTERED,
+        rmsnorm_dx_rows: RMSNORM_DX_ROWS,
         rmsnorm_dw: RMSNORM_DW,
         // Rotation here is table-driven M-RoPE (`rope2d`, via the mixer id
         // sets), never `block::rope_fwd`/`rope_bwd` - so these two slots are
@@ -3194,5 +3200,50 @@ mod rmsnorm_variant_agreement {
         ];
         let gpu = gpu_core::testgpu::dev(pipelines());
         block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), &shapes);
+    }
+}
+
+/// The backward-half twin of the gate above: the coalesced `rmsnorm_dx_rows`
+/// this model now selects (via the SAME `block::rms_variant` policy, inside
+/// `block::rmsnorm_bwd`) folds the row's two reductions as 64 partials in a
+/// different order than `rmsnorm_dx`'s single-threaded double walk, so it
+/// agrees to fp32 rounding, not to the bit. Every gradient this model produces
+/// flows through it, so the swap is gated numerically against a HOST
+/// reference at the shapes this model's own backward tape dispatches.
+#[cfg(test)]
+mod rmsnorm_dx_variant_agreement {
+    use super::*;
+
+    /// The slot really names the coalesced kernel. A registration this model
+    /// gets wrong by one index does not fail - it silently dispatches a
+    /// DIFFERENT kernel through the RMSNorm-backward bindings.
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(STATIC_PIPELINES[kernel_ids().rmsnorm_dx_rows].0, "rmsnorm_dx_rows");
+    }
+
+    #[test]
+    fn the_backward_tape_norms_match_the_host_reference() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let c = crate::config::Qwen35Config::qwen35_35b_a3b();
+        let tiny = crate::config::Qwen35Config::tiny();
+        // Every `(rows, dim)` `build_backward_steps` dispatches an RMSNorm
+        // backward at, read off the config rather than written down, at a
+        // real training microbatch (b=2, t=128) plus the gradcheck fixture's
+        // own tiny shape (dims far below the 64-thread workgroup, so the
+        // cooperative kernel's idle-lane tail is gated too).
+        let n = 2 * 128u32;
+        let shapes = [
+            (n, c.d_model, "ln1/ln2/final norm at training width"),
+            (n * c.n_heads, c.head_dim, "GQA q_norm"),
+            (n * c.n_kv_heads, c.head_dim, "GQA k_norm"),
+            (n * c.linear_num_value_heads, c.linear_value_head_dim, "GDN gated norm"),
+            (12, tiny.d_model, "the gradcheck fixture's block norms"),
+            (12 * tiny.n_heads, tiny.head_dim, "the gradcheck fixture's QK-norms"),
+        ];
+        let gpu = gpu_core::testgpu::dev(pipelines());
+        block::assert_rmsnorm_dx_variant_agrees(&gpu, &kernel_ids(), &shapes);
     }
 }
