@@ -529,10 +529,12 @@ pub const ARCHS: &[Arch] = &[
     // enforced at runtime by `minimaxh3::caps::check_license`
     // (`BRAIN_MINIMAXH3_ALLOW_COMMUNITY=1`), not just by omission here. One
     // `dir` role (the qwen35/`BRAIN_QWEN35_DIR` pattern, not ltxv's per-role
-    // granularity): the real repo is a two-level `{FL2VA,Ref2VA}/<role>/`
-    // layout with no auto-fetch story to drive per-role resolution anyway -
-    // `minimaxh3::import` resolves both partitions' five roles itself from
-    // one directory.
+    // granularity): the real repo is a root-level `diffusers>=0.36.0.dev0`
+    // `MiniMaxH3ModularPipeline` layout (`transformer/`, `text_encoder/`,
+    // `vae/`, `audio_vae/`, ... - `transformer`/`transformer_ref` share
+    // every other role) with no auto-fetch story to drive per-role
+    // resolution anyway - `minimaxh3::import` resolves every role itself
+    // from one directory.
     arch!("minimaxh3", "MiniMax-H3 joint video+audio diffusion transformer (33B, AdaLN-precomputable)", Video, Brain, "brain-minimaxh3",
           weights_env: &[("BRAIN_MINIMAXH3_DIR", "dir")]),
     // -- 3D -----------------------------------------------------------
