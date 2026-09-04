@@ -24,6 +24,8 @@ from training through deployment. GPU kernels are implemented directly,
 backpropagation is verified independently with finite-difference gradient
 checking, and models are exposed uniformly through CLI, HTTP, and D-Bus.
 
+[![Watch the brain demo video](https://img.youtube.com/vi/6N3J8Xj0HkY/maxresdefault.jpg)](https://www.youtube.com/watch?v=6N3J8Xj0HkY)
+
 ## What brain solves today
 
 * **One runtime from training to serving** - train, fine-tune, evaluate, and serve without moving the model between unrelated frameworks.
