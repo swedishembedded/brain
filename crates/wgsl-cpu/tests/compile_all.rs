@@ -48,12 +48,20 @@ fn dtype_tiers_compile_or_fail_only_for_the_documented_barrier_reason() {
         if tiers.is_empty() {
             continue;
         }
-        let binding = tpl_binding(src).unwrap_or_else(|| {
+        let tpl = tpl_binding(src).unwrap_or_else(|| {
             panic!(
                 "{name}: @dtype declares a storage tier ({tiers:?}) but has no \
                  `@tpl <binding> -> ...` header line naming which binding to templatize"
             )
         });
+        // A comma-separated `@tpl` (only `paged_flash_decode` today: `pool_k,
+        // pool_v`) names MULTIPLE independent bindings, each needing its own
+        // `dtype_variant` call chained over the previous call's own output -
+        // exactly what that kernel's header documents ("chained twice...
+        // dtype_variant(.., "pool_k", BF16) then dtype_variant again over ITS
+        // OWN output with "pool_v""). Splitting unconditionally on `,` is a
+        // no-op for every other kernel's own single-binding `@tpl`.
+        let bindings: Vec<&str> = tpl.split(',').collect();
         // `dtype_variant` only rewrites a binding's declaration/loads, never
         // control flow (see its own doc comment), so a variant's barrier
         // count is always identical to its base kernel's - the ONE
@@ -64,10 +72,15 @@ fn dtype_tiers_compile_or_fail_only_for_the_documented_barrier_reason() {
 
         for dt in tiers {
             exercised += 1;
-            let (vname, vsrc) = kernels::template::dtype_variant(name, src, binding, dt)
-                .unwrap_or_else(|e| {
-                    panic!("{name}: dtype_variant({dt:?}, {binding:?}) build failed: {e}")
-                });
+            let (mut vname, mut vsrc): (&str, &'static str) = (*name, *src);
+            for binding in bindings.iter().copied() {
+                let variant = kernels::template::dtype_variant(vname, vsrc, binding, dt)
+                    .unwrap_or_else(|e| {
+                        panic!("{name}: dtype_variant({dt:?}, {binding:?}) build failed: {e}")
+                    });
+                vname = variant.0;
+                vsrc = variant.1;
+            }
             let jit = wgsl_cpu::Jit::new(&[(vname, vsrc)]).unwrap_or_else(|e| {
                 panic!("{vname}: Jit::new failed (not a barrier-structural issue): {e}")
             });
