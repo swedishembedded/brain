@@ -71,13 +71,30 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
     let bscr = BwdScratch::new(gpu, n, max_px, 0);
     let opts = RenderOpts { mode: Mode::Color, ..Default::default() };
 
-    let adamw_step = |bufs: [&DeviceBuffer; 4], numel: usize, t: i32| {
-        let bc1 = 1.0 - 0.9f32.powi(t);
-        let bc2 = 1.0 - 0.999f32.powi(t);
-        let s = gpu.step(
+    // `adamw.wgsl` (M6.4) binds param/grad/m/v PLUS a per-tensor `numel`
+    // descriptor and a device-resident grad-scale coefficient, and reads its
+    // hyperparameters from an 8-field uniform (lr, beta1, beta2, eps, wd,
+    // bc1, bc2, scale); see `crates/optim::Optim::build`/`::step`, the
+    // canonical caller this mirrors. `desc`/`coef` are write-once (numel is
+    // fixed for the run; no grad clipping here so coef is always 1.0);
+    // `hparams` is rewritten once per iteration (only bc1/bc2 move).
+    let unit_coef = gpu.storage(1);
+    gpu.write(&unit_coef, &[f(1.0)]);
+    let mk_desc = |numel: usize| {
+        let d = gpu.storage(1);
+        gpu.write(&d, &[numel as u32]);
+        d
+    };
+    let desc_geo = mk_desc(10 * n);
+    let desc_op = mk_desc(n);
+    let desc_col = mk_desc(3 * n);
+    let hparams = gpu.uniform_dynamic(8);
+
+    let adamw_step = |bufs: [&DeviceBuffer; 4], desc: &DeviceBuffer, numel: usize| {
+        let s = gpu.step_buf(
             ks.adamw,
-            &[bufs[0], bufs[1], bufs[2], bufs[3]],
-            &[numel as u32, 0, f(cfg.lr), f(0.9), f(0.999), f(1e-8), f(0.0), f(bc1), f(bc2)],
+            &hparams,
+            &[bufs[0], bufs[1], bufs[2], bufs[3], desc, &unit_coef],
             numel as u32,
         );
         gpu.submit(&[], &[s]);
@@ -124,9 +141,12 @@ pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &
             renderer.render_bwd(gpu, &gs, &t.cam, &opts, &dimg, &bscr, &grads);
         }
         let ts = it as i32 + 1;
-        adamw_step([&p_geo, &grads.d_gauss, &m_geo, &v_geo], 10 * n, ts);
-        adamw_step([&p_op, &grads.d_opac, &m_op, &v_op], n, ts);
-        adamw_step([&p_col, &grads.d_colors, &m_col, &v_col], 3 * n, ts);
+        let bc1 = 1.0 - 0.9f32.powi(ts);
+        let bc2 = 1.0 - 0.999f32.powi(ts);
+        gpu.write(&hparams, &[f(cfg.lr), f(0.9), f(0.999), f(1e-8), f(0.0), f(bc1), f(bc2), f(1.0)]);
+        adamw_step([&p_geo, &grads.d_gauss, &m_geo, &v_geo], &desc_geo, 10 * n);
+        adamw_step([&p_op, &grads.d_opac, &m_op, &v_op], &desc_op, n);
+        adamw_step([&p_col, &grads.d_colors, &m_col, &v_col], &desc_col, 3 * n);
         // projected-gradient clamps (host; N is fit-sized)
         let mut geo = gpu.read(&p_geo, 10 * n);
         for i in 0..n {
