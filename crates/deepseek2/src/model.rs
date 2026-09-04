@@ -142,6 +142,13 @@ const DECODE_SOFTMAX: usize = 44;
 const ATTN_DECODE_APPLY: usize = 45;
 const KV_APPEND: usize = 46;
 const RMSNORM_ROWS: usize = 47;
+// The coalesced RMSNorm BACKWARD-x twin of `rmsnorm_dx` above: `rmsnorm_dx`
+// gives thread `t` row `t` and walks that whole row TWICE (`sum(x^2)` and
+// `sum(dy*w*x)`), so a warp's 32 loads are `dim` floats apart and each 32-byte
+// sector fetched serves one useful float. `rmsnorm_dx_rows` splits both
+// reductions across 64 threads of one workgroup and is coalesced by
+// construction. Appended, so every index above is unchanged.
+const RMSNORM_DX_ROWS: usize = 48;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -207,6 +214,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // by `block::rms_variant` inside `block::rmsnorm_fwd`. Appended, so
     // every index above is unchanged.
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    // Coalesced RMSNorm backward-x -- the throughput twin of `rmsnorm_dx`
+    // above, selected by the SAME `block::rms_variant` policy inside
+    // `block::rmsnorm_bwd`. Appended, so every index above is unchanged.
+    ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -214,7 +225,7 @@ fn kernel_ids() -> KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: RMS_INV,
         rmsnorm_dx: RMSNORM_DX,
-        rmsnorm_dx_rows: block::UNREGISTERED,
+        rmsnorm_dx_rows: RMSNORM_DX_ROWS,
         rmsnorm_dw: RMSNORM_DW,
         rope: ROPE,
         rope_bwd: ROPE_BWD,
@@ -1897,5 +1908,42 @@ mod rmsnorm_variant_agreement {
         let shapes = [(1, d, "ln1/ln2/final norm at decode"), (64, d, "the same norms at prefill width")];
         let gpu = gpu_core::testgpu::dev(PIPELINES);
         block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), &shapes);
+    }
+}
+
+/// The backward-half twin of the gate above: the coalesced `rmsnorm_dx_rows`
+/// this model now selects (via the SAME `block::rms_variant` policy, inside
+/// `block::rmsnorm_bwd`) folds the row's two reductions as 64 partials in a
+/// different order than `rmsnorm_dx`'s single-threaded double walk, so it
+/// agrees to fp32 rounding, not to the bit. Every gradient this decoder
+/// produces flows through it, so the swap is gated numerically against a HOST
+/// reference at the shapes this model's own backward tape dispatches.
+#[cfg(test)]
+mod rmsnorm_dx_variant_agreement {
+    use super::*;
+
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(PIPELINES[kernel_ids().rmsnorm_dx_rows].0, "rmsnorm_dx_rows");
+    }
+
+    #[test]
+    fn the_backward_tape_norms_match_the_host_reference() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        // No QK-norm here, so every RMSNorm backward is `d_model` wide;
+        // `build_backward` runs three per layer at `rows = b*t`. The tiny
+        // config is the gradcheck fixture's own shape - a `d_model` far below
+        // the 64-thread workgroup, so the cooperative kernel's idle-lane tail
+        // is covered by the same gate the production width is.
+        let big = DeepseekV2Config::deepseek_ocr(2048);
+        let tiny = DeepseekV2Config::tiny();
+        let shapes = [
+            (64, big.d_model(), "ln1/ln2/final norm at training width"),
+            (12, tiny.d_model(), "the gradcheck fixture's block norms"),
+        ];
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        block::assert_rmsnorm_dx_variant_agrees(&gpu, &kernel_ids(), &shapes);
     }
 }
