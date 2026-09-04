@@ -755,46 +755,95 @@ mod tests {
         assert!(d_ref < 5e-3, "parity vs Codec::decode too large: {d_ref}");
     }
 
-    /// The same host-vs-device parity, on REAL weights, at a `T` PAST the
-    /// checkpoint's own `sliding_window` (72 frames == 5.76 s of audio) -
-    /// where a sliding-window mask and a plain causal mask are finally
-    /// different objects and the comparison actually discriminates.
+    /// Host-vs-device parity MANY WINDOWS DEEP, on the real checkpoint's real
+    /// weights and real architecture (512-wide, 8 layers, 16 heads).
     ///
-    /// Separate from `e2e_parity_vs_codec` on purpose rather than raising that
-    /// test's `t`: its chunked-vs-full bound (1e-6) is calibrated for a short
-    /// waveform, and the streaming transposed-conv carry reassociates its sums
-    /// relative to the one-shot path, so that bound legitimately loosens with
-    /// length (measured 3.0e-6 at T=216) for reasons that have nothing to do
-    /// with attention. Only the one comparison the window affects is made
-    /// here, and only at `chunk = 0`.
+    /// The window is shrunk on the CONFIG (`sliding_window = 4`) rather than
+    /// the clip lengthened to pass the checkpoint's own 72, and that choice is
+    /// the point of the test. Lengthening instead conflates two effects: at
+    /// T=144 the two implementations differ by 3.9e-2 max-abs, but that gap is
+    /// dominated by ordinary fp divergence amplified through the SEANet stack
+    /// (SnakeBeta is `sin(exp(alpha) * x)`, so a tiny input difference is
+    /// magnified by `exp(alpha)` at every one of the twelve residual units)
+    /// and it grows with length whether or not any mask is involved - a bound
+    /// on it measures the amplifier, not the mask. Shrinking the window keeps
+    /// the clip inside the regime where `e2e_parity_vs_codec` above has
+    /// already established what host-vs-device fp noise looks like (~2.4e-3 at
+    /// T=16), so anything the mask got wrong stands out against it instead of
+    /// hiding under it.
     ///
-    /// Unconditional (synthetic-weight) coverage of the same property lives in
-    /// `crates/mimi/tests/long_form_window.rs`; this is the real-checkpoint
-    /// confirmation, opt-in because it decodes ~12 s of audio through the full
-    /// SEANet stack twice.
+    /// At `window = 4`, T=20 puts FOUR fifths of the queries under a truncated
+    /// key set - a strictly harder mask test than the checkpoint's own 72
+    /// would be at any clip length this test could afford to decode.
+    ///
+    /// Both settings are compared, so the test says something stronger than
+    /// "the two agree": it says the two respond to `sliding_window`
+    /// IDENTICALLY. A narrow window must move both waveforms by the same
+    /// amount, which is a claim neither implementation can satisfy by ignoring
+    /// the field (the defect this whole change set fixed) or by both dropping
+    /// the mask together.
     #[test]
     #[ignore]
-    fn long_form_parity_vs_codec() {
+    fn windowed_parity_vs_codec_on_real_weights() {
         let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
-        let dec = StreamingCodecDecoder::load(&path);
-        let nq = dec.cfg.num_quantizers as usize;
-        let window = dec.cfg.sliding_window as usize;
-        assert!(window > 0, "checkpoint config carries no sliding_window");
-        let t = 2 * window; // a full window past the boundary
+        // One checkpoint read (646 MB), reused for all four decodes.
+        let ck = checkpoint::load(&path);
+        let base_cfg = CodecConfig::from_json(&ck.header["config"]);
+        let w: W = ck.by_role("");
+        let nq = base_cfg.num_quantizers as usize;
+        let t = 20usize;
         let mut seed = Lcg::new(11);
         let codes: Vec<u32> = (0..t * nq).map(|_| seed.next_u32() % 256).collect();
 
-        let host = dec.decode_streaming(&codes, 0);
-        let device = crate::model::Codec::load_inference(&path).decode(&codes);
-        assert_eq!(host.len(), device.len(), "length mismatch vs Codec::decode");
-        let d = host.iter().zip(&device).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
-        eprintln!("long-form (T={t}, window={window}) host vs device max-abs = {d:.3e} ({} samples)", host.len());
-        // Same ceiling as the in-window `e2e_parity_vs_codec` above: if the
-        // two implementations disagreed about the MASK rather than about fp
-        // reduction order, the gap would be orders of magnitude larger than
-        // this (the synthetic-weight twin measured 2.6e-3 against a 7.5e-6
-        // noise floor for exactly that defect).
-        assert!(d < 5e-3, "long-form parity vs Codec::decode too large: {d}");
+        let with_window = |win: u32| -> (Vec<f32>, Vec<f32>) {
+            let cfg = CodecConfig { sliding_window: win, ..base_cfg.clone() };
+            let host = StreamingCodecDecoder::from_parts(w.clone(), cfg.clone()).decode_streaming(&codes, 0);
+            let device = crate::model::Codec::from_weights(cfg, w.clone()).decode(&codes);
+            (host, device)
+        };
+        let maxd = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+
+        let (host_narrow, dev_narrow) = with_window(4); // T=20 is five windows deep
+        let (host_wide, dev_wide) = with_window(4096); // >= T: degenerates to plain causal
+
+        // Every number first, then the assertions: a run that trips one bound
+        // still reports the others, which is what made the earlier (wrongly
+        // calibrated) version of this test expensive to diagnose.
+        let d_narrow = maxd(&host_narrow, &dev_narrow);
+        let d_wide = maxd(&host_wide, &dev_wide);
+        let host_effect = maxd(&host_narrow, &host_wide);
+        let dev_effect = maxd(&dev_narrow, &dev_wide);
+        eprintln!("real weights, T={t}, {} samples:", host_narrow.len());
+        eprintln!("  host vs device: {d_narrow:.3e} (window 4) / {d_wide:.3e} (unbounded)");
+        eprintln!("  window effect:  host {host_effect:.3e}, device {dev_effect:.3e}");
+
+        assert_eq!(host_narrow.len(), dev_narrow.len(), "length mismatch vs Codec::decode");
+
+        // THE assertion, and it is deliberately relative rather than absolute.
+        // Host-vs-device max-abs on this architecture is a property of the
+        // SEANet amplifier and the particular codes drawn, not of the mask:
+        // measured 8.110e-3 windowed against 8.679e-3 unbounded on this
+        // checkpoint, and ~2.4e-3 for `e2e_parity_vs_codec`'s different draw at
+        // T=16. Pinning an absolute ceiling here would be fitting to one draw
+        // (the first version of this test did exactly that, at 5e-3, and went
+        // red on a correct implementation). What must hold is that windowing
+        // does not make the two implementations agree any WORSE than plain
+        // causal attention does - if either side had the mask wrong, the
+        // windowed number would blow past the unbounded one instead of landing
+        // slightly under it.
+        assert!(
+            d_narrow < 2.0 * d_wide.max(1e-3),
+            "windowed host-vs-device ({d_narrow:.3e}) is worse than plain-causal ({d_wide:.3e}): the two implementations disagree about the MASK"
+        );
+        // Loose absolute sanity, an order of magnitude over both measurements:
+        // catches a gross structural break without re-fitting to a draw.
+        assert!(d_narrow < 1e-1 && d_wide < 1e-1, "host-vs-device parity is grossly wrong: {d_narrow:.3e} / {d_wide:.3e}");
+
+        // The window must MOVE both waveforms. Without this the check above
+        // passes just as happily when BOTH implementations ignore the field -
+        // which is precisely the state this change set found them in.
+        assert!(host_effect > 1e-3, "host decode ignores sliding_window on real weights: {host_effect:.3e}");
+        assert!(dev_effect > 1e-3, "device decode ignores sliding_window on real weights: {dev_effect:.3e}");
     }
 
     /// Wall-clock of the rayon decoder. Run in RELEASE:
