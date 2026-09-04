@@ -788,6 +788,18 @@ discovers capabilities generically.
       silent-collapse failure mode undermines confidence in ANY sampling
       configuration, not just the default one.
 
+      **Second independent repro, seed-specific confirmed on a different
+      text.** Same `0.6B-Base` checkpoint, `--device gpu`, `max_frames=200`,
+      a ~350-character unrelated sentence: `seed=11` produced 16.00s of
+      near-total silence (RMS 0.00012 normalized, ~1/480th of a healthy
+      clip's level), `seed=5` on the byte-identical text/opts produced
+      healthy speech (RMS 0.058, in line with every other real demo clip in
+      `out/tts-demo/`). Two different texts now each show a collapsing and a
+      healthy seed, which answers half of the open question above: the
+      failure is (at least partly) seed-dependent, not tied to one specific
+      sentence. Still not root-caused - whether it is ALSO text-sensitive
+      (a seed that collapses on one text but not another) remains open.
+
 ### Carried over, unchanged priority
 
 - [x] The RMSNorm backward now selects the coalesced `rmsnorm_dx_rows`
