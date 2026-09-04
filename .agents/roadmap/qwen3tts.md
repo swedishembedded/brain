@@ -326,15 +326,69 @@ real perceptual-quality lever, not API decoration.
       cross-session RNG contamination; sampling does, and there wasn't any).
       A second test proves a 1-frame request drops out of rotation
       immediately while a 6-frame request in the same batch keeps running.
-- [ ] Wire `run_batch` into an actual entry point. Not done this session:
-      `tts_serve.rs`'s executor is built around the NPU `serve::TtsEngine` /
-      `KvTalker` (OpenVINO), a DIFFERENT engine than the CPU
-      `CpuTalker`/`CpuMtp` `run_batch` drives - and OpenVINO itself is
-      absent on this box (see the Phase 3 streaming entry below), so
-      wiring this in and testing it live aren't both possible here. The
-      primitive is real and tested; production wiring (a CPU-side batched
-      server entry point, or porting the interleaving idea to the NPU
-      engine) is the next step.
+- [x] Wire `run_batch` into an actual entry point. Done as a CPU-side entry
+      point rather than by wiring it into `tts_serve.rs`, for the reason the
+      earlier draft of this bullet already named: that server's executor is
+      built around the NPU `serve::TtsEngine`/`KvTalker` (OpenVINO), a
+      DIFFERENT engine than the CPU `CpuTalker`/`CpuMtp` `run_batch` drives,
+      and OpenVINO on this box still reports no `NPU` device (Phase 3 entry
+      below), so that wiring could not have been run even once.
+
+      Three pieces, each closing a real break in the chain from a command
+      line to the scheduler:
+        * `batch::synth_batch(paths, &[BatchRequest])` - text in, waveforms
+          out. `run_batch` itself takes already-assembled `Prompt`s and
+          returns codec codes, so no caller could reach it without
+          duplicating half of `pipeline::synth` first. This tokenizes and
+          assembles each request's prompt off ONE `CpuTalker` load,
+          interleaves through `run_batch`, then decodes each request's codes
+          with the pure-CPU streaming codec decoder. Speaker-free synth only
+          - clone and VoiceDesign each need their own per-request
+          conditioning inputs in the request shape, and the scheduling story
+          this path exists to demonstrate is identical for all three, so they
+          are out of scope here rather than half-wired.
+        * `caps::batch_spec`/`BatchAction` - a fourth action on the generic
+          manifest, so `capability::Registry::run` and D-Bus reach it. The
+          requests arrive as a JSON array in a `requests` STRING param
+          because `capability::ParamType` has no array kind - the same
+          JSON-in-a-string convention `messages` already uses repo-wide.
+          Each request produces its own `audio_<i>` WAV output blob, in
+          request order; per-request keys override the action-level sampling
+          knobs.
+        * `tts_cli::run_tts` now forwards any verb it does not own to the
+          generic capability dispatcher, the way `sam2_cli::run_sam2`
+          already does. Without it `brain caps qwen3tts` advertised `batch`
+          and `brain qwen3tts batch` then rejected it as an unknown verb -
+          the CLI contradicting the manifest it prints. This also finally
+          gives the Phase 4 `clone`/`design` caps actions a CLI spelling,
+          which the bullet below had recorded as absent.
+
+      One bug that fix surfaced and fixed: `resolve::weights_already_named`
+      only ever matched the DEDICATED CLI's flag spelling (`--weights-dir`),
+      while the generic dispatcher derives its flags from manifest param
+      NAMES, which are underscored (`--weights_dir`). A generic invocation
+      that named every checkpoint path explicitly still tripped the
+      auto-fetch gate and refused to run. Both spellings now count
+      (regression test extended in `resolve.rs`).
+
+      Verified end to end on the real 0.6B Base checkpoint, through the CLI
+      (so: clap parsing -> `capability::Registry::run` -> `synth_batch` ->
+      `run_batch`), two requests with 40- and 24-frame caps:
+      `count: 2  samples: [30720, 46080]  seconds: [1.28, 1.92]`, two
+      playable WAVs on disk, 49s wall. Plus a real-weights unit test
+      (`synth_batch_returns_one_ragged_waveform_per_request`) asserting one
+      non-silent waveform per request, ragged lengths, and no cross-request
+      contamination - whose request 0 deliberately reuses the text/seed the
+      resident-engine test synthesizes ALONE and produces the same 30720
+      samples (its own EOS at frame 16, well inside the 40-frame cap), so it
+      doubles as a real-weights check that batching a request does not change
+      what that request alone would have produced (the synthetic-checkpoint
+      test above proves the same thing at the codes level).
+
+      Still true, unchanged: each request loads its own Talker copy rather
+      than sharing one read-only weight set across the batch, and this is
+      still not a batched GPU matmul. Both remain the separate optimizations
+      the item above already scopes out.
 
 ### Phase 3 - Streaming (cheap half now, hard half later)
 
@@ -419,16 +473,117 @@ discovers capabilities generically.
       ARCH_TO_MODEL path for architectures with their own CLI module) - these
       new actions are reachable via D-Bus/HTTP/the `Registry` directly, not a
       new CLI spelling; that's the actual gap this phase closes.
+      **Superseded (2026-09-04)** by the `batch` item in Phase 2:
+      `tts_cli::run_tts` now forwards verbs it does not own to the generic
+      dispatcher, so every caps action DOES have a CLI spelling now. The
+      names `clone`/`synth`/`design` still hit the dedicated handlers first
+      (they are its own verbs, taking `--weights-dir`), which is why the
+      generic-only `batch` is what proves the forwarding works.
 - [x] Extend `resident_tts.rs` past the single `speak` action to match: added
       a `design` action (`qwen3tts::caps::design_spec`, per-call
       `instruct`/`speaker` params, unlike `speak`'s instance-fixed reference
       voice). Unit-tested (dispatch + empty-text rejection on both actions).
-- [ ] Consolidate the private `tts serve` socket protocol into the standard
-      D-Bus surface (carried over from the previous list); add an example
-      D-Bus client under `examples/`. Not done this session - lower urgency
-      than the generic-surface gap above (the socket server already serves
-      its low-latency-streaming purpose; this is infra hygiene, not a
-      functional gap).
+- [x] Consolidate the private `tts serve` socket protocol into the standard
+      D-Bus surface. Read against `resident_tts.rs`, the socket server was
+      providing exactly two things the standard surface did not, and the
+      question of whether they were CAPABILITY-layer gaps turned out to be
+      the whole crux:
+
+        1. **Resident weights.** `serve::TtsEngine::load` once, reused per
+           request. `TtsResident` called `pipeline::synth`/`clone`, which
+           re-read the Talker (2.8 GiB), MTP, codec and speaker encoder from
+           disk on EVERY call. (Its own module doc claimed it used the
+           `CpuTalker` path "by default"; that had gone stale - `pipeline::
+           synth` drives `TalkerGen` on the ambient device.)
+        2. **Progressive audio.** PCM streamed per decoded chunk instead of
+           one finished waveform at the end.
+
+      **Neither is a capability-layer gap.** `capability::Progress::chunk`
+      already carries a mid-stream named binary chunk, and
+      `dbus::service::submit_subscribed_job` already turns a `Some` there
+      into a real out-of-band memfd `blob` frame on the SAME `Subscribe`
+      SEQPACKET side-channel the terminal blob uses - `qwen3omnimoe`'s
+      `speak` was already streaming audio that way. What was missing was
+      entirely inside this crate: a load-once seam for the ORDINARY host
+      path. The only one that existed, `serve::TtsEngine`, is OpenVINO/NPU-
+      only, which is precisely WHY reaching it needed a private protocol.
+
+      So: `qwen3tts::engine::ResidentEngine` - `CpuTalker` + `CpuMtp` + the
+      streaming codec decoder + tokenizer + specials loaded once, with
+      `speak`/`design`/`clone_voice` on top, each emitting audio through an
+      `on_audio` callback as the codec decodes it, plus a reference-voice
+      cache so repeat clones of one timbre skip the ECAPA speaker encoder
+      AND the codec encode entirely (the expensive per-voice, not
+      per-request, work). `CpuTalker` grew a `prompt::TalkerHost` impl so
+      prompts assemble off its own tables - no `gpu_core`-backed `TalkerGen`
+      constructed just to read three embedding tables. Everything host-side,
+      which is what makes `TtsResident::estimate`'s zero-VRAM `MemCost`
+      honest; it was already claiming it.
+
+      `TtsResident::activate` now loads that engine (so activation IS the
+      load, and a bad checkpoint fails at activation rather than on the first
+      request) and `run` emits each decoded chunk as a `Progress::chunk`
+      named `audio` with an `index` in its meta - the convention the omni
+      resident set. `speak_spec`/`design_spec` are `.streaming()` so a client
+      DISCOVERS the shape from the manifest rather than from a Rust comment,
+      which is the substantive difference from the socket protocol. The
+      terminal `Outcome` still carries the whole waveform for a plain `Run`
+      caller.
+
+      Measured on the 0.6B Base checkpoint (`out/tts-base06`, 40-frame cap,
+      chunk size 4 frames), through `brain serve --dbus` +
+      `examples/tts/qwen3tts_speak.py` under `dbus-run-session`:
+      8 audio chunks, **time to first audio 11.5s of 23.6s total**, and the
+      streamed 59520 samples match the terminal blob byte-for-byte -> a
+      2.48s playable WAV. In-process (unit test, same engine): load 11.2s
+      warm / 145s cold, first request 33.4s, a repeated request 18.7s and
+      bit-identical.
+
+      **Not consolidated, deliberately**: `tts_serve.rs` stays, and its
+      module doc now says why and points a new client at the standard
+      surface. What is still only there is the OpenVINO engine
+      CONFIGURATION - compiled graphs, int4/int8 weight compression, the
+      on-disk compile cache - which the generic residency surface has no
+      vocabulary for (there is no per-instance "quantize the graph this way"
+      concept in `residency`) and which cannot be exercised at all on a box
+      whose OpenVINO runtime reports no `NPU` device. Folding that in is a
+      separate step gated on that hardware, not something to force
+      half-working here.
+
+      Two things found on the way, both fixed as their own commits:
+        * `mimi`'s `StreamingCodecDecoder` - the decoder this whole path now
+          depends on - had NO test against `Codec::decode`. `decode_stream`'s
+          own tests only compared the streaming back against ITSELF at a
+          different chunk size, which cannot catch a systematic difference in
+          the shared front/back math. It is correct:
+          `crates/mimi/tests/decode_stream_parity.rs` shows chunk sizes
+          0/2/3 producing byte-identical output (no drift with chunk count at
+          all) within 1.62% of peak and 0.03% RMS of the one-shot decode, the
+          residual being device backend vs host `hostmath`.
+        * A very short clip (8 codec frames = 0.64s) is legitimately almost
+          all leading silence - rms ~1.1e-5 - which is not a collapse bug and
+          is why the real-weights tests here use >= 16-frame clips before
+          asserting anything about loudness.
+- [x] An example D-Bus client for TTS: `examples/tts/qwen3tts_speak.py`,
+      matching `cosyvoice_synth.py`'s existing shape (argparse, `brain_py.
+      dbus.BrainDBus`, `skip()` when the model is not served, a README
+      section with the frame diagram). It subscribes to `speak`/`design`,
+      prints each audio segment as it lands with a real time-to-first-audio,
+      checks the streamed chunks concatenate byte-for-byte into the terminal
+      blob, and writes a WAV - this action's blob is RAW mono f32 PCM (as
+      `speak_spec` declares), unlike cosyvoice's complete-WAV blob, so the
+      container is the client's business, done with the stdlib `wave` module
+      and no new dependency. It reads `streaming` off the manifest rather
+      than assuming it.
+
+      This needed one real addition to the shared client:
+      `brain_py.dbus.subscribe` grew `on_chunk(name, data, meta)`, fired the
+      moment each `blob` frame arrives. Without it a progressive binary
+      stream reached the client and was silently overwritten - the collected
+      `Outcome.blobs` only ever holds the LAST frame under a given name
+      (deliberately: that is the complete terminal artifact). Mid-run chunks
+      carry an `index` in their meta and the terminal blob does not, so a
+      caller can tell them apart. Run for real; output quoted in the README.
 
 ### Phase 5 - Official-style full fine-tune
 
