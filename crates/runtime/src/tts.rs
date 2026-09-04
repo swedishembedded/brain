@@ -101,9 +101,14 @@ impl Qwen3TtsSynthModel {
         Some(Qwen3TtsSynthModel::load(&weights, &ckpt).map(|m| m.with_language(lang)))
     }
 
-    /// Override the sampling / length controls (default: the reference recipe -
-    /// `temperature 0.9`, `top_k 50`, `max_frames 256`). `max_frames` bounds the
-    /// clip: the codec runs at 12.5 Hz, so 256 frames is about twenty seconds.
+    /// Override the sampling / length controls.
+    ///
+    /// By default nothing here is pinned: the sampling knobs resolve per call
+    /// from the checkpoint's own `generation_config.json`, then the reference's
+    /// defaults (`qwen3tts::genconfig`). `max_frames` (256) is the one length
+    /// knob that always comes from the caller - it bounds the clip and sizes
+    /// the Talker cache, and the codec runs at 12.5 Hz, so 256 frames is about
+    /// twenty seconds.
     pub fn with_opts(mut self, opts: GenOpts) -> Qwen3TtsSynthModel {
         self.opts = opts;
         self

@@ -143,22 +143,18 @@ struct TtsInstance {
 }
 
 impl TtsInstance {
-    /// Generation knobs shared by every action → `GenOpts` (defaults from the
-    /// reference sampling recipe).
+    /// Generation knobs shared by every action → `GenOpts`.
+    ///
+    /// A sampling knob the invocation does not carry stays `None`: the
+    /// invocation is only the "explicit caller override" layer, and the
+    /// checkpoint's `generation_config.json` (then the reference's defaults)
+    /// answers for the rest - see `qwen3tts::genconfig`.
     fn opts_from(inv: &Invocation) -> GenOpts {
         let mut opts = GenOpts::default();
-        if let Some(t) = inv.get_f64("temp") {
-            opts.temperature = t as f32;
-        }
-        if let Some(k) = inv.get_i64("top_k") {
-            opts.top_k = k.max(0) as usize;
-        }
-        if let Some(p) = inv.get_f64("top_p") {
-            opts.top_p = p as f32;
-        }
-        if let Some(r) = inv.get_f64("repetition_penalty") {
-            opts.repetition_penalty = r as f32;
-        }
+        opts.sampling.temperature = inv.get_f64("temp").map(|t| t as f32);
+        opts.sampling.top_k = inv.get_i64("top_k").map(|k| k.max(0) as usize);
+        opts.sampling.top_p = inv.get_f64("top_p").map(|p| p as f32);
+        opts.sampling.repetition_penalty = inv.get_f64("repetition_penalty").map(|r| r as f32);
         if let Some(s) = inv.get_i64("seed") {
             opts.seed = s.max(0) as u64;
         }

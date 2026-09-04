@@ -27,6 +27,7 @@ use npu::openvino::{
 use crate::config::TalkerConfig;
 use crate::pipeline::{sample_cb0, GenOpts};
 use crate::prompt::{Prompt, TalkerHost, TtsSpecials};
+use crate::sampling::DegenerationWatch;
 use crate::talker::TextProjection;
 
 /// Human-readable summary of the resolved Talker hardware path, printed at startup
@@ -271,6 +272,10 @@ pub fn generate_codes_npu(
     let d = tables.d();
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
+    // One resolution per generation call, made by the `pipeline` entry point
+    // that knew the checkpoint dir; the loop only reads it.
+    let cfg = opts.plan().cb0;
+    let mut watch = DegenerationWatch::new();
     let profile = std::env::var("TTS_PROFILE").is_ok();
     let (mut t_step, mut t_mtp) = (0.0f64, 0.0f64);
     use std::time::Instant;
@@ -280,23 +285,17 @@ pub fn generate_codes_npu(
     let mut past_hidden = talker.feed(&prompt.embeds)?;
     let t_prefix = t_pref0.elapsed().as_secs_f64() * 1e3;
     let mut cb0_history: Vec<u32> = Vec::new();
-    let mut cb0 = sample_cb0(
-        tables.codec_head_logits(&past_hidden),
-        sp.codec_eos,
-        opts.min_new == 0,
-        opts.temperature,
-        opts.top_k,
-        opts.top_p,
-        opts.repetition_penalty,
-        &cb0_history,
-        &mut rng,
-    );
+    let mut draw = sample_cb0(tables.codec_head_logits(&past_hidden), sp.codec_eos, opts.min_new == 0, &cfg, &cb0_history, &mut rng);
+    let mut cb0 = draw.token;
 
     let mut frames: Vec<u32> = Vec::new();
     let mut s = 0usize;
     loop {
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
+        }
+        if let Some(report) = watch.observe(s, draw) {
+            eprintln!("{report}");
         }
         cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
@@ -325,17 +324,8 @@ pub fn generate_codes_npu(
         let ts = Instant::now();
         past_hidden = talker.feed(&feed)?;
         t_step += ts.elapsed().as_secs_f64() * 1e3;
-        cb0 = sample_cb0(
-            tables.codec_head_logits(&past_hidden),
-            sp.codec_eos,
-            s >= opts.min_new,
-            opts.temperature,
-            opts.top_k,
-            opts.top_p,
-            opts.repetition_penalty,
-            &cb0_history,
-            &mut rng,
-        );
+        draw = sample_cb0(tables.codec_head_logits(&past_hidden), sp.codec_eos, s >= opts.min_new, &cfg, &cb0_history, &mut rng);
+        cb0 = draw.token;
     }
     if profile {
         let nf = s.max(1) as f64;
@@ -1044,6 +1034,10 @@ pub fn generate_codes_kv(
     let n_trailing = prompt.trailing.len() / d;
     let n_prefix = prompt.embeds.len() / d;
     let mut rng = Rng::new(opts.seed);
+    // One resolution per generation call, made by the `pipeline` entry point
+    // that knew the checkpoint dir; the loop only reads it.
+    let cfg = opts.plan().cb0;
+    let mut watch = DegenerationWatch::new();
     let profile = std::env::var("TTS_PROFILE").is_ok();
 
     kv.reset();
@@ -1052,17 +1046,8 @@ pub fn generate_codes_kv(
     let mut past_hidden = kv.prefill_prompt(&prompt.embeds)?;
     let t_prefix = tp0.elapsed().as_secs_f64() * 1e3;
     let mut cb0_history: Vec<u32> = Vec::new();
-    let mut cb0 = sample_cb0(
-        tables.codec_head_logits(&past_hidden),
-        sp.codec_eos,
-        opts.min_new == 0,
-        opts.temperature,
-        opts.top_k,
-        opts.top_p,
-        opts.repetition_penalty,
-        &cb0_history,
-        &mut rng,
-    );
+    let mut draw = sample_cb0(tables.codec_head_logits(&past_hidden), sp.codec_eos, opts.min_new == 0, &cfg, &cb0_history, &mut rng);
+    let mut cb0 = draw.token;
 
     let mut frames: Vec<u32> = Vec::new();
     let mut s = 0usize;
@@ -1070,6 +1055,9 @@ pub fn generate_codes_kv(
     loop {
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
+        }
+        if let Some(report) = watch.observe(s, draw) {
+            eprintln!("{report}");
         }
         cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
@@ -1093,17 +1081,8 @@ pub fn generate_codes_kv(
         let ts = Instant::now();
         past_hidden = kv.feed1(&feed)?;
         t_step += ts.elapsed().as_secs_f64() * 1e3;
-        cb0 = sample_cb0(
-            tables.codec_head_logits(&past_hidden),
-            sp.codec_eos,
-            s >= opts.min_new,
-            opts.temperature,
-            opts.top_k,
-            opts.top_p,
-            opts.repetition_penalty,
-            &cb0_history,
-            &mut rng,
-        );
+        draw = sample_cb0(tables.codec_head_logits(&past_hidden), sp.codec_eos, s >= opts.min_new, &cfg, &cb0_history, &mut rng);
+        cb0 = draw.token;
     }
     if profile {
         let nf = s.max(1) as f64;
@@ -1134,22 +1113,17 @@ pub fn generate_codes_kv_streaming(
     let d = tables.d();
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
+    // One resolution per generation call, made by the `pipeline` entry point
+    // that knew the checkpoint dir; the loop only reads it.
+    let cfg = opts.plan().cb0;
+    let mut watch = DegenerationWatch::new();
     let chunk = chunk.max(1);
 
     kv.reset();
     let mut past_hidden = kv.prefill_prompt(&prompt.embeds)?;
     let mut cb0_history: Vec<u32> = Vec::new();
-    let mut cb0 = sample_cb0(
-        tables.codec_head_logits(&past_hidden),
-        sp.codec_eos,
-        opts.min_new == 0,
-        opts.temperature,
-        opts.top_k,
-        opts.top_p,
-        opts.repetition_penalty,
-        &cb0_history,
-        &mut rng,
-    );
+    let mut draw = sample_cb0(tables.codec_head_logits(&past_hidden), sp.codec_eos, opts.min_new == 0, &cfg, &cb0_history, &mut rng);
+    let mut cb0 = draw.token;
 
     let mut frames: Vec<u32> = Vec::new();
     let mut s = 0usize;
@@ -1157,6 +1131,9 @@ pub fn generate_codes_kv_streaming(
     loop {
         if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
             break;
+        }
+        if let Some(report) = watch.observe(s, draw) {
+            eprintln!("{report}");
         }
         cb0_history.push(cb0);
         let cb0_embed = tables.codec_embed(cb0).to_vec();
@@ -1179,17 +1156,8 @@ pub fn generate_codes_kv_streaming(
             break;
         }
         past_hidden = kv.feed1(&feed)?;
-        cb0 = sample_cb0(
-            tables.codec_head_logits(&past_hidden),
-            sp.codec_eos,
-            s >= opts.min_new,
-            opts.temperature,
-            opts.top_k,
-            opts.top_p,
-            opts.repetition_penalty,
-            &cb0_history,
-            &mut rng,
-        );
+        draw = sample_cb0(tables.codec_head_logits(&past_hidden), sp.codec_eos, s >= opts.min_new, &cfg, &cb0_history, &mut rng);
+        cb0 = draw.token;
     }
     if s > emitted {
         on_chunk(&frames);

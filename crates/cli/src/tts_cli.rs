@@ -237,6 +237,7 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
     let mut lang = "english".to_string();
     let mut opts = GenOpts::default();
     let mut extra = std::collections::HashMap::new();
+    let (mut residual_temp, mut residual_top_k, mut residual_top_p) = (None, None, None);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -247,31 +248,23 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             "--max-frames" => {
                 opts.max_frames = val(args, &mut i, "--max-frames").parse().unwrap_or(opts.max_frames)
             }
-            "--temp" => opts.temperature = val(args, &mut i, "--temp").parse().unwrap_or(opts.temperature),
-            "--top-k" => opts.top_k = val(args, &mut i, "--top-k").parse().unwrap_or(opts.top_k),
-            "--top-p" => opts.top_p = val(args, &mut i, "--top-p").parse().unwrap_or(opts.top_p),
-            "--repetition-penalty" => {
-                opts.repetition_penalty = val(args, &mut i, "--repetition-penalty").parse().unwrap_or(opts.repetition_penalty)
-            }
+            // A sampling flag the user did NOT pass stays `None`, so the
+            // checkpoint's own `generation_config.json` (then the reference's
+            // defaults) answers for it - see `qwen3tts::genconfig`.
+            "--temp" => opts.sampling.temperature = val(args, &mut i, "--temp").parse().ok().or(opts.sampling.temperature),
+            "--top-k" => opts.sampling.top_k = val(args, &mut i, "--top-k").parse().ok().or(opts.sampling.top_k),
+            "--top-p" => opts.sampling.top_p = val(args, &mut i, "--top-p").parse().ok().or(opts.sampling.top_p),
+            "--repetition-penalty" => opts.sampling.repetition_penalty = val(args, &mut i, "--repetition-penalty").parse().ok().or(opts.sampling.repetition_penalty),
             "--seed" => opts.seed = val(args, &mut i, "--seed").parse().unwrap_or(opts.seed),
             // Any `--residual-*` flag opts into independent MTP residual-codebook
             // sampling (default: greedy, matching the reference's own default);
-            // unset residual knobs fall back to codebook-0's own temp/top-k/top-p.
-            "--residual-temp" => {
-                let (t, k, p) = (opts.temperature, opts.top_k, opts.top_p);
-                let ro = opts.residual.get_or_insert_with(|| ResidualOpts { temperature: t, top_k: k, top_p: p });
-                ro.temperature = val(args, &mut i, "--residual-temp").parse().unwrap_or(ro.temperature);
-            }
-            "--residual-top-k" => {
-                let (t, k, p) = (opts.temperature, opts.top_k, opts.top_p);
-                let ro = opts.residual.get_or_insert_with(|| ResidualOpts { temperature: t, top_k: k, top_p: p });
-                ro.top_k = val(args, &mut i, "--residual-top-k").parse().unwrap_or(ro.top_k);
-            }
-            "--residual-top-p" => {
-                let (t, k, p) = (opts.temperature, opts.top_k, opts.top_p);
-                let ro = opts.residual.get_or_insert_with(|| ResidualOpts { temperature: t, top_k: k, top_p: p });
-                ro.top_p = val(args, &mut i, "--residual-top-p").parse().unwrap_or(ro.top_p);
-            }
+            // unset residual knobs fall back to codebook-0's own resolved
+            // temp/top-k/top-p, filled in AFTER the whole command line is parsed
+            // so `--residual-temp 1.2 --temp 0.5` and `--temp 0.5
+            // --residual-temp 1.2` mean the same thing.
+            "--residual-temp" => residual_temp = val(args, &mut i, "--residual-temp").parse().ok(),
+            "--residual-top-k" => residual_top_k = val(args, &mut i, "--residual-top-k").parse().ok(),
+            "--residual-top-p" => residual_top_p = val(args, &mut i, "--residual-top-p").parse().ok(),
             // (`--no-cache` removed: the Talker now always uses the device-agnostic
             // KV-cache step(); select CPU vs GPU with `--device`.)
             "--text" => {
@@ -295,6 +288,17 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
+    }
+    if residual_temp.is_some() || residual_top_k.is_some() || residual_top_p.is_some() {
+        // The codebook-0 chain resolved from the flags alone (no checkpoint
+        // layer yet - the entry point applies that). It is only a seed for the
+        // residual knobs the user did not pin.
+        let cb0 = opts.plan().cb0;
+        opts.residual = Some(ResidualOpts {
+            temperature: residual_temp.unwrap_or(cb0.temperature),
+            top_k: residual_top_k.unwrap_or(cb0.top_k),
+            top_p: residual_top_p.unwrap_or(cb0.top_p),
+        });
     }
     (
         CommonArgs {
@@ -372,7 +376,11 @@ fn clone(args: &[String]) {
         if npu { " on NPU (OpenVINO)" } else { "" },
         c.lang,
         c.opts.max_frames,
-        c.opts.temperature,
+        // Only what the CALLER pinned. The checkpoint's own
+        // `generation_config.json` has not been read at this point, so
+        // printing a number here would be a guess; `TTS_PLAN=1` prints the
+        // real resolved plan once the entry point has read it.
+        c.opts.sampling.temperature.map(|t| t.to_string()).unwrap_or_else(|| "auto".to_string()),
         c.out
     );
     let result = if npu {

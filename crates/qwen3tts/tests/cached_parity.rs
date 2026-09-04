@@ -19,6 +19,7 @@ use qwen3tts::gen_kv_mtp::CpuMtp;
 use qwen3tts::mtp::MtpModel;
 use capability::CancelToken;
 use qwen3tts::pipeline::{generate_codes, generate_codes_cached, GenOpts};
+use qwen3tts::SamplingRequest;
 use qwen3tts::prompt::{self, TtsSpecials};
 
 /// These parity runs pass an unarmed `CancelToken`, which by construction never
@@ -92,16 +93,9 @@ fn cached_matches_cachefree() {
     let role_ids = ids[..3].to_vec();
     let text_ids = ids[3..ids.len() - 5].to_vec();
 
-    let opts = GenOpts {
-        max_frames: 16,
-        temperature: 0.0,
-        top_k: 0,
-        seed: 0,
-        min_new: 2,
-        top_p: 0.0,
-        repetition_penalty: 1.0,
-        residual: None,
-    };
+    // Greedy, pinned explicitly: a parity run must not inherit the checkpoint's
+    // own `generation_config.json` sampling knobs.
+    let opts = GenOpts { max_frames: 16, seed: 0, min_new: 2, sampling: SamplingRequest::greedy(), ..GenOpts::default() };
 
     let gen = TalkerGen::load_on(gpu_core::testgpu::dev(qwen3tts::gen::PIPELINES), &TALKER, 16 + 32);
     let mtp = MtpModel::load_inference_on(gpu_core::testgpu::dev(qwen3tts::mtp::PIPELINES), &MTP);
@@ -221,16 +215,7 @@ fn cached_clone_audio_quality() {
         speaker: SPEAKER.to_string(),
         ckpt_dir: CKPT.to_string(),
     };
-    let opts = GenOpts {
-        max_frames: 24,
-        temperature: 0.0,
-        top_k: 0,
-        seed: 0,
-        min_new: 2,
-        top_p: 0.0,
-        repetition_penalty: 1.0,
-        residual: None,
-    };
+    let opts = GenOpts { max_frames: 24, seed: 0, min_new: 2, sampling: SamplingRequest::greedy(), ..GenOpts::default() };
     // --- codec sanity: decode the PyTorch golden codes with our codec.safetensors ---
     if std::path::Path::new(&GOLD).exists() {
         let b = std::fs::read(&GOLD).unwrap();
@@ -291,13 +276,19 @@ fn cached_clone_audio_quality() {
     //     no-voice is a greedy-collapse artifact rather than a pipeline bug ---
     let opts_s = GenOpts {
         max_frames: 24,
-        temperature: 0.9,
-        top_k: 50,
         seed: 0,
         min_new: 2,
-        top_p: 0.0,
-        repetition_penalty: 1.0,
-        residual: None,
+        sampling: SamplingRequest {
+            do_sample: Some(true),
+            temperature: Some(0.9),
+            top_k: Some(50),
+            top_p: Some(0.0),
+            // Pinned off: this probe asks whether SAMPLING alone escapes the
+            // greedy collapse, so the penalty must not confound the answer.
+            repetition_penalty: Some(1.0),
+            ..SamplingRequest::default()
+        },
+        ..GenOpts::default()
     };
     let mut cpu_s = CpuTalker::load(&TALKER);
     let mut cpu_mtp_s = CpuMtp::load(&MTP);

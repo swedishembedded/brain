@@ -34,6 +34,7 @@ use crate::gen_kv::CpuTalker;
 use crate::gen_kv_mtp::CpuMtp;
 use crate::pipeline::{self, sample_cb0, GenOpts, TtsPaths};
 use crate::prompt::{self, Prompt, TtsSpecials};
+use crate::sampling::{DegenerationWatch, Draw, SamplerCfg};
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
 
@@ -57,6 +58,13 @@ struct Session {
     /// cannot end anybody else's clip.
     cancel: CancelToken,
     rng: Rng,
+    /// This session's resolved codebook-0 filter chain, computed once at
+    /// construction from `opts` - the scheduler must never re-resolve per frame.
+    cfg: SamplerCfg,
+    /// Diagnostic only: a per-session codebook-0 repetition-run watcher. It
+    /// reports, it never steers the draw.
+    watch: DegenerationWatch,
+    draw: Draw,
     cb0: u32,
     cb0_history: Vec<u32>,
     s: usize,
@@ -84,18 +92,24 @@ impl Session {
         }
         let mut rng = Rng::new(opts.seed);
         let cb0_history: Vec<u32> = Vec::new();
-        let cb0 = sample_cb0(
-            cpu.codec_head_logits(&past_hidden),
-            sp.codec_eos,
-            opts.min_new == 0,
-            opts.temperature,
-            opts.top_k,
-            opts.top_p,
-            opts.repetition_penalty,
-            &cb0_history,
-            &mut rng,
-        );
-        Session { cpu, mtp, prompt, opts, cancel, rng, cb0, cb0_history, s: 0, past_hidden, frames: Vec::new() }
+        let cfg = opts.plan().cb0;
+        let draw = sample_cb0(cpu.codec_head_logits(&past_hidden), sp.codec_eos, opts.min_new == 0, &cfg, &cb0_history, &mut rng);
+        Session {
+            cpu,
+            mtp,
+            prompt,
+            opts,
+            cancel,
+            rng,
+            cfg,
+            watch: DegenerationWatch::new(),
+            draw,
+            cb0: draw.token,
+            cb0_history,
+            s: 0,
+            past_hidden,
+            frames: Vec::new(),
+        }
     }
 
     /// A session leaves rotation on EOS, on its frame cap, OR on its own
@@ -115,6 +129,9 @@ impl Session {
         let d = self.cpu.d();
         let n_trailing = self.prompt.trailing.len() / d;
 
+        if let Some(report) = self.watch.observe(self.s, self.draw) {
+            eprintln!("{report}");
+        }
         self.cb0_history.push(self.cb0);
         let cb0_embed = self.cpu.codec_embed(self.cb0).to_vec();
         let (residuals, res_sum) = self.mtp.generate_residuals(&self.past_hidden, &cb0_embed);
@@ -136,17 +153,9 @@ impl Session {
             return;
         }
         self.past_hidden = self.cpu.step(&feed);
-        self.cb0 = sample_cb0(
-            self.cpu.codec_head_logits(&self.past_hidden),
-            sp.codec_eos,
-            self.s >= self.opts.min_new,
-            self.opts.temperature,
-            self.opts.top_k,
-            self.opts.top_p,
-            self.opts.repetition_penalty,
-            &self.cb0_history,
-            &mut self.rng,
-        );
+        let logits = self.cpu.codec_head_logits(&self.past_hidden);
+        self.draw = sample_cb0(logits, sp.codec_eos, self.s >= self.opts.min_new, &self.cfg, &self.cb0_history, &mut self.rng);
+        self.cb0 = self.draw.token;
     }
 }
 
@@ -249,7 +258,10 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest]) -> Result<Vec<Vec<f3
             let language_id = sp.language_id(&r.lang);
             out.push((
                 prompt::build_xvector_prompt(&talker, &sp, &role_ids, &text_ids, None, language_id),
-                r.opts.clone(),
+                // Resolve each request's sampling plan HERE: this is the batch's
+                // outermost layer that knows the checkpoint dir, the same place
+                // `pipeline::synth` resolves for a single request.
+                r.opts.clone().resolved_for(&paths.ckpt_dir),
                 CancelToken::default(),
             ));
         }
@@ -293,8 +305,18 @@ mod tests {
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;
 
-        let opts_a = GenOpts { max_frames: 5, min_new: 1, seed: 11, temperature: 0.8, top_k: 0, ..GenOpts::default() };
-        let opts_b = GenOpts { max_frames: 8, min_new: 1, seed: 22, temperature: 0.8, top_k: 0, ..GenOpts::default() };
+        // Sampling knobs pinned explicitly: the interleaving must be identical
+        // to the serial loop under a KNOWN chain, not one a config file supplies.
+        let sampling = crate::genconfig::SamplingRequest {
+            do_sample: Some(true),
+            temperature: Some(0.8),
+            top_k: Some(0),
+            top_p: Some(0.0),
+            repetition_penalty: Some(1.0),
+            ..Default::default()
+        };
+        let opts_a = GenOpts { max_frames: 5, min_new: 1, seed: 11, sampling, ..GenOpts::default() };
+        let opts_b = GenOpts { max_frames: 8, min_new: 1, seed: 22, sampling, ..GenOpts::default() };
         let prompt_a = tiny_prompt(d, 3, 2, 101);
         let prompt_b = tiny_prompt(d, 4, 1, 202);
 

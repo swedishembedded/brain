@@ -20,8 +20,10 @@ use data::rng::Rng;
 use data::tokenizer::Tokenizer;
 
 use crate::gen::TalkerGen;
+use crate::genconfig::{GenerationConfig, GenerationPlan, SamplingRequest};
 use crate::mtp::MtpModel;
 use crate::prompt::{self, Prompt, TtsSpecials};
+use crate::sampling::DegenerationWatch;
 
 /// Brain checkpoint paths + the HF checkpoint dir (for `config.json`, tokenizer).
 pub struct TtsPaths {
@@ -33,23 +35,29 @@ pub struct TtsPaths {
 }
 
 /// Sampling / length controls for the Talker.
+///
+/// Split into two halves on purpose:
+///
+/// - the length/determinism knobs (`max_frames`, `min_new`, `seed`) and the
+///   residual-codebook opt-in, which only ever come from the caller;
+/// - [`GenOpts::sampling`], the caller's EXPLICIT codebook-0/subtalker choices,
+///   every one an `Option` because "unspecified" and "explicitly 1.0" are
+///   different requests. Whatever the caller left unset is answered by the
+///   checkpoint's `generation_config.json`, then by the reference's hard
+///   defaults - see [`crate::genconfig`].
+///
+/// Call [`GenOpts::resolve`] once, at an entry point that knows the checkpoint
+/// directory, to bake that resolution into [`GenOpts::resolved`]; the decode
+/// loops then read [`GenOpts::plan`]. A `GenOpts` that was never resolved is
+/// still correct - `plan()` falls back to the reference recipe - so a direct
+/// construction, a unit test or a synthetic-checkpoint loop all keep working.
 #[derive(Clone, Debug)]
 pub struct GenOpts {
+    /// Hard cap on generated codec frames.
+    ///
+    /// Not the same knob as the reference's `max_new_tokens` even though the
+    /// units match; see [`GenerationPlan::max_new_tokens`] for the reasoning.
     pub max_frames: usize,
-    pub temperature: f32,
-    pub top_k: usize,
-    /// Nucleus (top-p) cutoff on codebook-0's sampling distribution, applied
-    /// after `top_k` (if any). `0.0` (the default) disables it -- matches the
-    /// reference's `top_k`-only default (`generate_config.json` does not set
-    /// `top_p` for the Base checkpoint either).
-    pub top_p: f32,
-    /// Repetition penalty on codebook-0, applied over the FULL history of
-    /// already-generated codebook-0 ids before sampling (HF's standard
-    /// formulation: a previously-seen logit is divided by this value if
-    /// positive, multiplied if negative). `1.0` disables it; the default is
-    /// the reference's `1.05`, which this model needs - see
-    /// [`GenOpts::default`].
-    pub repetition_penalty: f32,
     pub seed: u64,
     pub min_new: usize,
     /// Independent sampling for the MTP's residual codebooks (1..15). `None`
@@ -59,6 +67,59 @@ pub struct GenOpts {
     /// real quality/expressiveness lever, not just parity with codebook-0's
     /// knobs. See [`ResidualOpts`].
     pub residual: Option<ResidualOpts>,
+    /// The caller's explicit sampling choices; unset fields resolve from the
+    /// checkpoint and then from the reference.
+    pub sampling: SamplingRequest,
+    /// The plan resolved for this run, once an entry point has called
+    /// [`GenOpts::resolve`]. `None` means "not resolved against a checkpoint
+    /// yet", which [`GenOpts::plan`] answers with the reference recipe.
+    ///
+    /// Set it through [`GenOpts::resolve`], never by hand: it is a CACHE of
+    /// resolving [`GenOpts::sampling`], and a hand-written value that disagrees
+    /// with `sampling` is exactly the second source of truth this whole module
+    /// exists to remove. It is `pub` only because struct-update syntax
+    /// (`..GenOpts::default()`) across crate boundaries requires every field to
+    /// be visible.
+    pub resolved: Option<GenerationPlan>,
+}
+
+impl GenOpts {
+    /// Resolve this request against `ckpt_dir`'s `generation_config.json` and
+    /// trace the result once. Idempotent: resolving twice re-resolves from the
+    /// same request, never from an already-resolved plan, so precedence cannot
+    /// silently collapse.
+    pub fn resolve(&mut self, ckpt_dir: &str) {
+        self.resolve_with(GenerationConfig::from_config_dir(ckpt_dir));
+    }
+
+    /// [`GenOpts::resolve`] against an ALREADY-PARSED checkpoint config, for a
+    /// resident server that read `generation_config.json` once at load rather
+    /// than once per request.
+    pub fn resolve_with(&mut self, file: GenerationConfig) {
+        let plan = GenerationPlan::resolve_with(&self.sampling, file);
+        plan.trace(self.max_frames);
+        self.resolved = Some(plan);
+    }
+
+    /// [`GenOpts::resolve`] as a value-consuming builder, for the entry points
+    /// that receive `&GenOpts` and need an owned, resolved copy.
+    pub fn resolved_for(mut self, ckpt_dir: &str) -> GenOpts {
+        self.resolve(ckpt_dir);
+        self
+    }
+
+    /// [`GenOpts::resolve_with`] as a value-consuming builder.
+    pub fn resolved_with(mut self, file: GenerationConfig) -> GenOpts {
+        self.resolve_with(file);
+        self
+    }
+
+    /// The plan the decode loop runs: the resolution an entry point baked in,
+    /// or - for an unresolved `GenOpts` - the caller's explicit choices over
+    /// the reference's defaults, with no checkpoint layer.
+    pub fn plan(&self) -> GenerationPlan {
+        self.resolved.unwrap_or_else(|| GenerationPlan::resolve(&self.sampling, None))
+    }
 }
 
 /// Sampling controls for the MTP's residual codebooks (1..15), independent of
@@ -73,38 +134,34 @@ pub struct ResidualOpts {
 
 impl Default for GenOpts {
     fn default() -> GenOpts {
-        // The reference (`Qwen3TTSModel._merge_generate_kwargs`) decodes the Talker
-        // codebook-0 stream with sampling — `do_sample=True, top_k=50,
-        // temperature=0.9, repetition_penalty=1.05` - never greedily. Greedy
-        // (`temperature=0`) is degenerate for this autoregressive acoustic model:
-        // codebook-0 collapses into a single repeating token after a few frames,
-        // decoding to near-silence (rms ~0.004 vs ~0.07 sampled).
+        // Every sampling knob is UNSET here on purpose. `GenOpts::default()`
+        // used to be the single source of truth for all of them, hardcoded in
+        // Rust, and that is precisely how `repetition_penalty` drifted to `1.0`
+        // (disabled) while the checkpoint's own `generation_config.json` and the
+        // reference (`Qwen3TTSModel._merge_generate_kwargs`) both said `1.05` -
+        // the exact guard that keeps codebook-0 out of a silent repetition loop.
+        // Sampling alone does not prevent that collapse, it only makes it
+        // seed-dependent: codebook-0's next-token distribution self-reinforces
+        // once it repeats a token, top-1 probability climbing 0.92 -> 0.97 ->
+        // 0.9998, past the point any temperature/top-k draw escapes.
         //
-        // **`repetition_penalty` is not optional here, and 1.0 is not a safe
-        // default.** Sampling alone does NOT prevent the collapse, it only makes
-        // it seed-dependent: codebook-0's next-token distribution self-reinforces
-        // once it repeats a token, with top-1 probability climbing 0.92 -> 0.97 ->
-        // 0.9998 over consecutive repeats, past the point where any
-        // temperature/top-k draw can escape. On the real 0.6B-Base checkpoint,
-        // "The quick brown fox jumps over the lazy dog." at seed 0 locked into
-        // that loop and ran the whole frame cap emitting 13 distinct tokens,
-        // decoding to rms 1.1e-5 - total silence. The same request at
-        // `repetition_penalty = 1.05` (the value this checkpoint's own
-        // `generation_config.json` ships, and the reference's hard default)
-        // reaches the codec EOS after 38 frames at rms 0.058. So this carries the
-        // reference's value, not a disabled penalty.
-        //
-        // Pass `--temp 0` for the deterministic (greedy) parity path. The fixed
+        // So the defaults now come from the checkpoint, with the reference's
+        // recipe (`do_sample=true, temperature=0.9, top_k=50, top_p=1.0,
+        // repetition_penalty=1.05`) as the fallback when there is no checkpoint
+        // to read. Pass an explicit `sampling.temperature = Some(0.0)` (the
+        // CLI's `--temp 0`) for the deterministic greedy parity path. The fixed
         // `seed` keeps a single run reproducible.
+        //
+        // `max_frames` is a caller knob, not a config-resolved one: it sizes the
+        // Talker KV cache and the NPU graph bucket, so it does not inherit the
+        // reference's 8192-token budget. See [`GenerationPlan::max_new_tokens`].
         GenOpts {
             max_frames: 256,
-            temperature: 0.9,
-            top_k: 50,
-            top_p: 0.0,
-            repetition_penalty: 1.05,
             seed: 0,
             min_new: 2,
             residual: None,
+            sampling: SamplingRequest::default(),
+            resolved: None,
         }
     }
 }
@@ -115,148 +172,11 @@ fn add_into(a: &mut [f32], b: &[f32]) {
     }
 }
 
-fn argmax(s: &[f32]) -> usize {
-    let mut bi = 0;
-    for i in 1..s.len() {
-        if s[i] > s[bi] {
-            bi = i;
-        }
-    }
-    bi
-}
-
-/// Apply HF's standard repetition penalty in place: a previously-seen logit is
-/// divided by `penalty` if positive, multiplied if negative (so either way it
-/// moves toward zero, discouraging but never fully forbidding a repeat).
-/// `penalty <= 1.0` is a no-op (`1.0` = disabled).
-///
-/// **Once per distinct token, not once per occurrence.** HF's
-/// `RepetitionPenaltyLogitsProcessor` is a `gather`/`where`/`scatter` over
-/// `input_ids`, so a token that appears fifty times in the history is penalized
-/// exactly as hard as one that appears once. Applying it per occurrence instead
-/// would compound to `penalty^count` - at the reference's 1.05 that is a 131x
-/// logit shrink after a hundred repeats, which is a different (and, on a
-/// long-form clip, destructive) processor than the one the reference calibrated
-/// its value against.
-fn apply_repetition_penalty(logits: &mut [f32], history: &[u32], penalty: f32) {
-    if penalty <= 1.0 {
-        return;
-    }
-    let mut seen = std::collections::HashSet::with_capacity(history.len());
-    for &t in history {
-        let idx = t as usize;
-        if !seen.insert(idx) {
-            continue;
-        }
-        if idx < logits.len() && logits[idx].is_finite() {
-            logits[idx] = if logits[idx] > 0.0 { logits[idx] / penalty } else { logits[idx] * penalty };
-        }
-    }
-}
-
-/// Nucleus (top-p) filter in place: keep the smallest prefix of `scaled`
-/// (already temperature-scaled and, if requested, top-k-masked) whose softmax
-/// probability mass is `>= top_p`, mask everything else to `-inf`. Always
-/// keeps at least one token. `top_p <= 0.0` or `>= 1.0` is a no-op.
-fn apply_top_p(scaled: &mut [f32], top_p: f32) {
-    if top_p <= 0.0 || top_p >= 1.0 {
-        return;
-    }
-    let max0 = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut ranked: Vec<(usize, f32)> =
-        scaled.iter().enumerate().filter(|&(_, &x)| x.is_finite()).map(|(i, &x)| (i, (x - max0).exp())).collect();
-    let z: f32 = ranked.iter().map(|&(_, p)| p).sum();
-    if z <= 0.0 {
-        return;
-    }
-    ranked.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    let mut cum = 0.0f32;
-    let mut cutoff = ranked.len();
-    for (rank, &(_, p)) in ranked.iter().enumerate() {
-        cum += p / z;
-        if cum >= top_p {
-            cutoff = rank + 1;
-            break;
-        }
-    }
-    let keep: std::collections::HashSet<usize> = ranked[..cutoff].iter().map(|&(i, _)| i).collect();
-    for (i, x) in scaled.iter_mut().enumerate() {
-        if !keep.contains(&i) {
-            *x = f32::NEG_INFINITY;
-        }
-    }
-}
-
-/// Sample codebook-0 from `logits` with the reference's `suppress_tokens`: the
-/// top-1024 vocab entries `[v-1024, v)` are masked except the codec EOS, which is
-/// itself masked unless `allow_eos` (the `min_new_tokens` guard). `history` is
-/// the sequence of already-generated codebook-0 ids this clip, consulted only
-/// when `opts.repetition_penalty > 1.0`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn sample_cb0(
-    mut logits: Vec<f32>,
-    eos: u32,
-    allow_eos: bool,
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    repetition_penalty: f32,
-    history: &[u32],
-    rng: &mut Rng,
-) -> u32 {
-    let v = logits.len();
-    let lo = v - 1024;
-    let eos_logit = logits[eos as usize];
-    for x in logits[lo..].iter_mut() {
-        *x = f32::NEG_INFINITY;
-    }
-    if allow_eos {
-        logits[eos as usize] = eos_logit;
-    }
-    apply_repetition_penalty(&mut logits, history, repetition_penalty);
-    if temperature <= 0.0 {
-        return argmax(&logits) as u32;
-    }
-    let mut scaled: Vec<f32> = logits.iter().map(|&l| l / temperature).collect();
-    if top_k > 0 && top_k < scaled.len() {
-        let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap());
-        let threshold = scaled[idx[top_k - 1]];
-        for x in scaled.iter_mut() {
-            if *x < threshold {
-                *x = f32::NEG_INFINITY;
-            }
-        }
-    }
-    apply_top_p(&mut scaled, top_p);
-    let max = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    for x in scaled.iter_mut() {
-        *x = (*x - max).exp();
-        sum += *x;
-    }
-    // Inverse-CDF draw. Only a token that survived the masks can be returned:
-    // `p > 0.0` skips every `-inf` entry (whose `exp` is exactly 0 and so never
-    // advances `acc`), which matters at the two boundaries - `r == 0.0` would
-    // otherwise return index 0, and a `r == sum` rounding would fall through to
-    // the last index, both of which are suppressed specials far more often than
-    // they are real codec tokens. `last` is the final surviving candidate, the
-    // only correct fall-through.
-    let r = rng.next_f32() * sum;
-    let mut acc = 0.0f32;
-    let mut last = 0usize;
-    for (i, &p) in scaled.iter().enumerate() {
-        if p <= 0.0 {
-            continue;
-        }
-        acc += p;
-        last = i;
-        if acc >= r {
-            return i as u32;
-        }
-    }
-    last as u32
-}
+/// The codebook-0 filter chain lives in [`crate::sampling`] - one testable unit
+/// shared by every decode loop in this crate (this one, the CPU-cached mirror,
+/// the batch scheduler and the three NPU loops) instead of a private helper
+/// inside whichever loop happened to define it first.
+pub(crate) use crate::sampling::sample_cb0;
 
 /// A generation loop that stopped early because its [`CancelToken`] fired,
 /// carrying the frames produced before the check that tripped.
@@ -324,6 +244,11 @@ pub fn generate_codes(
     let d = gen.d();
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
+    // One resolution per generation call: caller override > the checkpoint's
+    // generation_config.json > the reference's defaults. Already traced by
+    // `GenOpts::resolve` at the entry point that knew the checkpoint dir.
+    let cfg = opts.plan().cb0;
+    let mut watch = DegenerationWatch::new();
 
     // Stream the prefix through the incremental KV cache, keeping the last hidden.
     // This is the unified O(T)/frame Talker decode (`TalkerGen::step`) — it runs on
@@ -341,17 +266,8 @@ pub fn generate_codes(
     let th = Instant::now();
     let cb0_logits = gen.codec_head_logits(&past_hidden);
     t_head += th.elapsed().as_secs_f64() * 1e3;
-    let mut cb0 = sample_cb0(
-        cb0_logits,
-        sp.codec_eos,
-        opts.min_new == 0,
-        opts.temperature,
-        opts.top_k,
-        opts.top_p,
-        opts.repetition_penalty,
-        &cb0_history,
-        &mut rng,
-    );
+    let mut draw = sample_cb0(cb0_logits, sp.codec_eos, opts.min_new == 0, &cfg, &cb0_history, &mut rng);
+    let mut cb0 = draw.token;
 
     let mut frames: Vec<u32> = Vec::new();
     let mut s = 0usize;
@@ -361,6 +277,12 @@ pub fn generate_codes(
         }
         if cancel.is_cancelled() {
             return Err(Cancelled { partial: frames });
+        }
+        // Observe the token as it is COMMITTED to frame `s`, so frame 0 counts
+        // toward a run like every other frame. Diagnostic only - it never
+        // changes what is sampled.
+        if let Some(report) = watch.observe(s, draw) {
+            eprintln!("{report}");
         }
         cb0_history.push(cb0);
         let cb0_embed = gen.codec_embed(cb0).to_vec();
@@ -390,17 +312,8 @@ pub fn generate_codes(
         let th = Instant::now();
         let cb0_logits = gen.codec_head_logits(&past_hidden);
         t_head += th.elapsed().as_secs_f64() * 1e3;
-        cb0 = sample_cb0(
-            cb0_logits,
-            sp.codec_eos,
-            s >= opts.min_new,
-            opts.temperature,
-            opts.top_k,
-            opts.top_p,
-            opts.repetition_penalty,
-            &cb0_history,
-            &mut rng,
-        );
+        draw = sample_cb0(cb0_logits, sp.codec_eos, s >= opts.min_new, &cfg, &cb0_history, &mut rng);
+        cb0 = draw.token;
     }
     if profile {
         let nf = s.max(1) as f64;
@@ -450,6 +363,8 @@ pub fn generate_codes_cached(
     let d = cpu.d();
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
+    let cfg = opts.plan().cb0;
+    let mut watch = DegenerationWatch::new();
 
     // Stream the whole prefix through the cache, keeping the last hidden state.
     let t_prefix0 = Instant::now();
@@ -461,17 +376,8 @@ pub fn generate_codes_cached(
     }
     let t_prefix = t_prefix0.elapsed().as_secs_f64() * 1e3;
     let mut cb0_history: Vec<u32> = Vec::new();
-    let mut cb0 = sample_cb0(
-        cpu.codec_head_logits(&past_hidden),
-        sp.codec_eos,
-        opts.min_new == 0,
-        opts.temperature,
-        opts.top_k,
-        opts.top_p,
-        opts.repetition_penalty,
-        &cb0_history,
-        &mut rng,
-    );
+    let mut draw = sample_cb0(cpu.codec_head_logits(&past_hidden), sp.codec_eos, opts.min_new == 0, &cfg, &cb0_history, &mut rng);
+    let mut cb0 = draw.token;
 
     let mut frames: Vec<u32> = Vec::new();
     let mut s = 0usize;
@@ -481,6 +387,9 @@ pub fn generate_codes_cached(
         }
         if cancel.is_cancelled() {
             return Err(Cancelled { partial: frames });
+        }
+        if let Some(report) = watch.observe(s, draw) {
+            eprintln!("{report}");
         }
         cb0_history.push(cb0);
         let cb0_embed = cpu.codec_embed(cb0).to_vec();
@@ -509,17 +418,8 @@ pub fn generate_codes_cached(
         let ts = Instant::now();
         past_hidden = cpu.step(&feed);
         t_step += ts.elapsed().as_secs_f64() * 1e3;
-        cb0 = sample_cb0(
-            cpu.codec_head_logits(&past_hidden),
-            sp.codec_eos,
-            s >= opts.min_new,
-            opts.temperature,
-            opts.top_k,
-            opts.top_p,
-            opts.repetition_penalty,
-            &cb0_history,
-            &mut rng,
-        );
+        draw = sample_cb0(cpu.codec_head_logits(&past_hidden), sp.codec_eos, s >= opts.min_new, &cfg, &cb0_history, &mut rng);
+        cb0 = draw.token;
     }
     if profile {
         let nf = s.max(1) as f64;
@@ -649,6 +549,10 @@ pub fn clone(
         return Err("cancelled".to_string());
     }
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    // Resolve the sampling plan ONCE per generation call, here, because this is
+    // the outermost layer that knows the checkpoint directory. Everything below
+    // reads `opts.plan()` and never re-reads a config file.
+    let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
 
@@ -727,10 +631,35 @@ pub fn synth(
     language: &str,
     cancel: &CancelToken,
 ) -> Result<Vec<f32>, String> {
+    let codes = synth_codes(paths, opts, target_text, language, cancel)?;
+    decode_codes(&paths.codec, &codes)
+}
+
+/// [`synth`] stopping one stage short: the `[T,16]` codec codes, before the
+/// codec turns them into a waveform.
+///
+/// The seam exists because the waveform hides everything a health check needs.
+/// "Did this clip terminate on the codec EOS or on its frame cap?" and "did
+/// codebook-0 lock into a repetition run?" are both questions about the CODES,
+/// and answering them from RMS alone is guesswork - which is why the
+/// silent-collapse bug took a root-cause session rather than a failing
+/// assertion. [`synth`] is this plus [`decode_codes`], so nothing can drift
+/// between what the gate measures and what a user hears.
+pub fn synth_codes(
+    paths: &TtsPaths,
+    opts: &GenOpts,
+    target_text: &str,
+    language: &str,
+    cancel: &CancelToken,
+) -> Result<Vec<u32>, String> {
     if cancel.is_cancelled() {
         return Err("cancelled".to_string());
     }
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    // Resolve the sampling plan ONCE per generation call, here, because this is
+    // the outermost layer that knows the checkpoint directory. Everything below
+    // reads `opts.plan()` and never re-reads a config file.
+    let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
 
@@ -741,8 +670,7 @@ pub fn synth(
     let mtp = MtpModel::load_inference(&paths.mtp);
     let prompt = prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, None, language_id);
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts, cancel)?;
-    decode_codes(&paths.codec, &codes)
+    generate(&gen, &mtp, &sp, &prompt, opts, cancel)
 }
 
 /// **Voice clone on the Intel NPU** — same conditioning as [`clone`], but the
@@ -762,6 +690,10 @@ pub fn clone_npu(
     npu_cache: Option<&str>,
 ) -> Result<Vec<f32>, String> {
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    // Resolve the sampling plan ONCE per generation call, here, because this is
+    // the outermost layer that knows the checkpoint directory. Everything below
+    // reads `opts.plan()` and never re-reads a config file.
+    let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
 
@@ -808,6 +740,10 @@ pub fn synth_npu(
     npu_cache: Option<&str>,
 ) -> Result<Vec<f32>, String> {
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    // Resolve the sampling plan ONCE per generation call, here, because this is
+    // the outermost layer that knows the checkpoint directory. Everything below
+    // reads `opts.plan()` and never re-reads a config file.
+    let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
 
@@ -1007,6 +943,10 @@ pub fn design(
         return Err("cancelled".to_string());
     }
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    // Resolve the sampling plan ONCE per generation call, here, because this is
+    // the outermost layer that knows the checkpoint directory. Everything below
+    // reads `opts.plan()` and never re-reads a config file.
+    let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
     let speaker_id = resolve_speaker(&sp, speaker)?;
@@ -1042,6 +982,10 @@ pub fn design_npu(
     npu_cache: Option<&str>,
 ) -> Result<Vec<f32>, String> {
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    // Resolve the sampling plan ONCE per generation call, here, because this is
+    // the outermost layer that knows the checkpoint directory. Everything below
+    // reads `opts.plan()` and never re-reads a config file.
+    let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
     let speaker_id = resolve_speaker(&sp, speaker)?;
@@ -1097,85 +1041,11 @@ mod sampling_tests {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
     }
 
-    fn logits_two_hot(v: usize, a: usize, b: usize) -> Vec<f32> {
-        // Two clear favorites (a, b) that dominate the softmax mass over a low
-        // floor (a flat 0.0 floor across ~3000 other entries would itself
-        // outweigh two logits of 4-5 by sheer count) -- keeps the test about
-        // top_p/repetition_penalty, not the EOS-suppression window.
-        let mut l = vec![-20.0f32; v];
-        l[a] = 5.0;
-        l[b] = 4.0;
-        l
-    }
-
-    #[test]
-    fn top_p_excludes_the_long_tail_once_the_top_candidates_cover_it() {
-        let v = 3072usize;
-        let eos = (v - 2000) as u32; // well clear of both the [v-1024,v) mask and a/b below
-        let (a, b) = (100usize, 200usize);
-        let mut rng = Rng::new(7);
-        // top_p=0.9 with two dominant logits (softmax mass concentrated on a/b)
-        // must never sample anything outside {a, b} across many draws.
-        for _ in 0..200 {
-            let got = sample_cb0(logits_two_hot(v, a, b), eos, false, 1.0, 0, 0.9, 1.0, &[], &mut rng);
-            assert!(got as usize == a || got as usize == b, "top_p leaked outside the nucleus: {got}");
-        }
-    }
-
-    #[test]
-    fn top_p_disabled_can_sample_outside_the_top_two() {
-        let v = 3072usize;
-        let eos = (v - 2000) as u32;
-        let (a, b) = (100usize, 200usize);
-        let mut rng = Rng::new(7);
-        // Same distribution, top_p off (0.0): high temperature must eventually
-        // sample something other than {a, b} -- proves top_p above was doing
-        // real filtering, not an artifact of the distribution itself.
-        let mut saw_other = false;
-        for _ in 0..200 {
-            let got = sample_cb0(logits_two_hot(v, a, b), eos, false, 4.0, 0, 0.0, 1.0, &[], &mut rng);
-            if got as usize != a && got as usize != b {
-                saw_other = true;
-                break;
-            }
-        }
-        assert!(saw_other, "expected top_p=0 (disabled) + high temperature to escape the top two");
-    }
-
-    #[test]
-    fn repetition_penalty_demotes_a_token_dominating_greedy_history() {
-        let v = 3072usize;
-        let eos = (v - 2000) as u32;
-        let (a, b) = (100usize, 200usize);
-        let mut rng = Rng::new(1);
-        let history = vec![a as u32; 50]; // codebook-0 has repeated `a` for 50 frames
-        // Greedy (temperature<=0) with a real penalty must stop returning `a`
-        // once its logit has been pushed below `b`'s.
-        let got = sample_cb0(logits_two_hot(v, a, b), eos, false, 0.0, 0, 0.0, 3.0, &history, &mut rng);
-        assert_eq!(got as usize, b, "repetition penalty should have demoted the repeated token");
-        // No penalty (1.0): greedy still returns the true favorite `a`.
-        let got_unpenalized = sample_cb0(logits_two_hot(v, a, b), eos, false, 0.0, 0, 0.0, 1.0, &history, &mut rng);
-        assert_eq!(got_unpenalized as usize, a);
-    }
-
-    #[test]
-    fn repetition_penalty_counts_each_token_once_not_once_per_occurrence() {
-        // HF's `RepetitionPenaltyLogitsProcessor` is a gather/scatter: a token
-        // seen fifty times is penalized exactly as hard as one seen once.
-        // Compounding per occurrence turns the reference's 1.05 into 1.05^50
-        // (~11.5x), a processor whose value nobody calibrated. With `a` at 5.0
-        // and `b` at 4.0, one application leaves `a` at 4.76 and greedy still
-        // picks it; fifty compounded applications would drop it to 0.43 and
-        // hand the draw to `b`.
-        let v = 3072usize;
-        let eos = (v - 2000) as u32;
-        let (a, b) = (100usize, 200usize);
-        let mut rng = Rng::new(1);
-        let fifty = vec![a as u32; 50];
-        let got = sample_cb0(logits_two_hot(v, a, b), eos, false, 0.0, 0, 0.0, 1.05, &fifty, &mut rng);
-        assert_eq!(got as usize, a, "the penalty compounded over repeated occurrences");
-        assert_ne!(got as usize, b);
-    }
+    // The codebook-0 filter chain's own tests (suppress mask, repetition
+    // penalty, temperature, top-k, top-p, the categorical draw) live with the
+    // chain in `crate::sampling`, where they can be written against synthetic
+    // logits without a decode loop. What stays here is what needs THIS module:
+    // the MTP residual sampler's interaction with it.
 
     #[test]
     fn residual_sampling_can_diverge_from_greedy_while_cb0_logic_is_untouched() {

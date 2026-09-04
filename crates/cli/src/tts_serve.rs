@@ -357,12 +357,10 @@ fn parse_request(line: &str) -> Result<(String, Req), String> {
         return Err("request missing non-empty \"text\"".into());
     }
     let mut opts = GenOpts::default();
-    if let Some(x) = v["temp"].as_f64() {
-        opts.temperature = x as f32;
-    }
-    if let Some(x) = v["top_k"].as_u64() {
-        opts.top_k = x as usize;
-    }
+    // Absent keys stay `None` and resolve from the checkpoint's own
+    // `generation_config.json`, then the reference defaults.
+    opts.sampling.temperature = v["temp"].as_f64().map(|x| x as f32);
+    opts.sampling.top_k = v["top_k"].as_u64().map(|x| x as usize);
     if let Some(x) = v["seed"].as_u64() {
         opts.seed = x;
     }

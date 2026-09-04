@@ -47,15 +47,31 @@ const SAMPLE_RATE: u32 = 24_000;
 /// sampling knobs, shared by every action's spec so they can't silently
 /// drift. Split out from [`common_params`] because `batch` carries its texts
 /// inside its own `requests` array and must NOT declare a top-level `text`.
+///
+/// **The four sampling knobs deliberately declare no `default`.**
+/// [`capability::ActionSpec::validate`] fills a declared default INTO the
+/// invocation before an action ever sees it, so a `ParamSpec` default is
+/// indistinguishable from a caller who typed the value - it would shadow the
+/// checkpoint's own `generation_config.json` on every single call and make the
+/// precedence chain in [`crate::genconfig`] dead code on this surface. That is
+/// exactly the drift that shipped `repetition_penalty = 1.0` while the
+/// checkpoint said `1.05`. Unset here means unset, and the resolved value is
+/// reported in each run's `TTS_PLAN`/`TTS_PROFILE` trace line instead of being
+/// transcribed into a second place that can go stale.
 fn checkpoint_and_sampling_params(spec: ActionSpec) -> ActionSpec {
+    const RESOLVED: &str = "unset resolves from the checkpoint's generation_config.json, then the reference default";
     spec.param(ParamSpec::new("weights_dir", ParamType::Str, "dir holding talker.safetensors, mtp.safetensors, codec.safetensors (from `brain tts import`)").required().host_env("BRAIN_QWEN3TTS_WEIGHTS"))
         .param(ParamSpec::new("ckpt", ParamType::Str, "HF checkpoint dir (config.json + tokenizer)").required().host_env("BRAIN_QWEN3TTS_CKPT"))
         .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
         .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
-        .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (0 = greedy, degenerate for this model)").default(json!(0.9)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k sampling cutoff").default(json!(50)))
-        .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling cutoff (0 = disabled)").default(json!(0.0)))
-        .param(ParamSpec::new("repetition_penalty", ParamType::Float, "repetition penalty (1.0 = disabled; the default matches the reference and is what keeps codebook-0 out of a silent repetition loop)").default(json!(1.05)))
+        .param(ParamSpec::new("temp", ParamType::Float, &format!("sampling temperature (0 = greedy, degenerate for this model); {RESOLVED} 0.9")))
+        .param(ParamSpec::new("top_k", ParamType::Int, &format!("top-k sampling cutoff; {RESOLVED} 50")))
+        .param(ParamSpec::new("top_p", ParamType::Float, &format!("nucleus sampling cutoff (0 or 1 = disabled); {RESOLVED} 1.0")))
+        .param(ParamSpec::new(
+            "repetition_penalty",
+            ParamType::Float,
+            &format!("repetition penalty (1.0 = disabled; the resolved value is what keeps codebook-0 out of a silent repetition loop); {RESOLVED} 1.05"),
+        ))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run)").default(json!(0)))
 }
 
@@ -65,23 +81,20 @@ fn common_params(spec: ActionSpec) -> ActionSpec {
     checkpoint_and_sampling_params(spec).param(ParamSpec::new("text", ParamType::Str, "the text to speak").required())
 }
 
+/// Build a [`GenOpts`] from one invocation.
+///
+/// A param the caller did not pass stays `None` and is answered later by
+/// [`crate::genconfig`]'s chain - the invocation IS the "explicit caller
+/// override" layer, so anything absent from it must stay absent here.
 fn gen_opts_from(inv: &Invocation) -> GenOpts {
     let mut opts = GenOpts::default();
     if let Some(f) = inv.get_i64("max_frames") {
         opts.max_frames = f.max(1) as usize;
     }
-    if let Some(t) = inv.get_f64("temp") {
-        opts.temperature = t as f32;
-    }
-    if let Some(k) = inv.get_i64("top_k") {
-        opts.top_k = k.max(0) as usize;
-    }
-    if let Some(p) = inv.get_f64("top_p") {
-        opts.top_p = p as f32;
-    }
-    if let Some(r) = inv.get_f64("repetition_penalty") {
-        opts.repetition_penalty = r as f32;
-    }
+    opts.sampling.temperature = inv.get_f64("temp").map(|t| t as f32);
+    opts.sampling.top_k = inv.get_i64("top_k").map(|k| k.max(0) as usize);
+    opts.sampling.top_p = inv.get_f64("top_p").map(|p| p as f32);
+    opts.sampling.repetition_penalty = inv.get_f64("repetition_penalty").map(|r| r as f32);
     if let Some(s) = inv.get_i64("seed") {
         opts.seed = s.max(0) as u64;
     }
@@ -144,7 +157,7 @@ pub fn batch_spec() -> ActionSpec {
         ParamSpec::new(
             "requests",
             ParamType::Str,
-            "JSON array of request objects: [{\"text\":\"...\",\"lang\":\"english\",\"max_frames\":64,\"seed\":1,\"temp\":0.9,\"top_k\":50,\"top_p\":0.0,\"repetition_penalty\":1.05}, ...]; every key but 'text' is optional and falls back to this call's own value",
+            "JSON array of request objects: [{\"text\":\"...\",\"lang\":\"english\",\"max_frames\":64,\"seed\":1,\"temp\":0.9,\"top_k\":50,\"top_p\":1.0,\"repetition_penalty\":1.05}, ...]; every key but 'text' is optional and falls back to this call's own value, then to the checkpoint's generation_config.json",
         )
         .required(),
     )
@@ -330,17 +343,20 @@ impl Action for BatchAction {
             if let Some(v) = it["max_frames"].as_i64() {
                 opts.max_frames = v.max(1) as usize;
             }
+            // A per-request key present here is that request's own explicit
+            // choice; absent, it inherits the call-level one, which is itself
+            // `None` unless the caller passed it. Nothing here invents a value.
             if let Some(v) = it["temp"].as_f64() {
-                opts.temperature = v as f32;
+                opts.sampling.temperature = Some(v as f32);
             }
             if let Some(v) = it["top_k"].as_i64() {
-                opts.top_k = v.max(0) as usize;
+                opts.sampling.top_k = Some(v.max(0) as usize);
             }
             if let Some(v) = it["top_p"].as_f64() {
-                opts.top_p = v as f32;
+                opts.sampling.top_p = Some(v as f32);
             }
             if let Some(v) = it["repetition_penalty"].as_f64() {
-                opts.repetition_penalty = v as f32;
+                opts.sampling.repetition_penalty = Some(v as f32);
             }
             if let Some(v) = it["seed"].as_i64() {
                 opts.seed = v.max(0) as u64;
@@ -402,7 +418,32 @@ mod caps_tests {
         let inv = synth
             .validate(Invocation::new().set("weights_dir", json!("d")).set("ckpt", json!("c")).set("text", json!("hi")))
             .unwrap();
-        assert_eq!(inv.get_f64("temp"), Some(0.9));
+        // A sampling knob the caller did not pass must survive validation as
+        // ABSENT. `validate` fills declared defaults into the invocation, so a
+        // `ParamSpec::default` on these would be indistinguishable from a
+        // caller who typed the value and would shadow the checkpoint's own
+        // `generation_config.json` on every call - the precedence chain would
+        // be dead code and `repetition_penalty` would drift again.
+        for knob in ["temp", "top_k", "top_p", "repetition_penalty"] {
+            assert_eq!(inv.params.get(knob), None, "'{knob}' must not be defaulted into the invocation");
+            assert_eq!(
+                synth.params.iter().find(|p| p.name == knob).unwrap().default,
+                None,
+                "'{knob}' must declare no ParamSpec default - the checkpoint owns it"
+            );
+        }
+        // ...and an explicit one still arrives untouched, including a value
+        // that happens to equal a reference default.
+        let pinned = synth
+            .validate(
+                Invocation::new()
+                    .set("weights_dir", json!("d"))
+                    .set("ckpt", json!("c"))
+                    .set("text", json!("hi"))
+                    .set("repetition_penalty", json!(1.0)),
+            )
+            .unwrap();
+        assert_eq!(pinned.get_f64("repetition_penalty"), Some(1.0));
         assert!(synth.validate(Invocation::new().set("weights_dir", json!("d")).set("ckpt", json!("c"))).is_err());
         assert_eq!(manifest().to_json()["actions"][0]["name"], "synth");
 

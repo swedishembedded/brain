@@ -134,8 +134,7 @@ This freezes the base Talker and trains attention adapters only.
 - `--max-frames` - max codec frames, i.e. an upper bound on clip length
   (default `256`).
 - `--temp`, `--top-k`, `--top-p`, `--seed` - sampling controls for the Talker.
-- `--repetition-penalty` - codebook-0 repetition penalty (default `1.05`, the
-  value this checkpoint's own `generation_config.json` ships). Leave it on.
+- `--repetition-penalty` - codebook-0 repetition penalty. Leave it alone.
   Sampling alone does not keep the Talker out of a repetition loop: once
   codebook-0 repeats a token its next-token top-1 probability climbs toward
   1.0, and a run that locks in decodes to silence for the rest of the clip.
@@ -150,6 +149,46 @@ This freezes the base Talker and trains attention adapters only.
   defaults for language and voice-clone reference.
 
 Output is always mono 24 kHz f32 PCM WAV.
+
+### Where the sampling defaults come from
+
+`--temp`, `--top-k`, `--top-p` and `--repetition-penalty` have no hardcoded
+default. A flag you do not pass is resolved, once per generation call, as:
+
+1. the value you passed (a CLI flag, a `brain do` / D-Bus param, a `GenOpts`
+   field you set) - always wins, including a deliberate `--repetition-penalty
+   1.0`;
+2. the checkpoint's own `generation_config.json`, read from `--ckpt`. The
+   12 Hz 0.6B Base checkpoint ships `do_sample=true, temperature=0.9,
+   top_k=50, top_p=1.0, repetition_penalty=1.05`;
+3. the reference implementation's hard defaults, which for this model are the
+   same numbers. Used when the checkpoint has no `generation_config.json`, or
+   the file is unreadable or malformed - a bad config never fails a synth.
+
+This exists because a value transcribed into Rust is a value that can drift
+from the checkpoint that owns it, which is exactly how `repetition_penalty`
+shipped at `1.0` (disabled) while the checkpoint said `1.05`, and how a
+default `synth` could decode to silence.
+
+Set `TTS_PLAN=1` (or `TTS_PROFILE=1`) to print the resolved plan for a run:
+
+```
+qwen3tts: resolved plan: sample=true temp=0.9 top_k=50 top_p=1 rep_penalty=1.05
+  (source: generation_config.json) | length: max_frames=256 applied,
+  max_new_tokens=8192 reported-only | subtalker (resolved, not yet wired): ...
+```
+
+`max_new_tokens` from the checkpoint is reported but **not applied**:
+`--max-frames` stays the cap, because in brain it also sizes the Talker KV
+cache and the compiled NPU graph, so adopting the reference's 8192-frame
+ceiling would grow every run's allocation ~32x for a limit a healthy clip
+never reaches.
+
+The same run also prints a one-line warning if codebook-0 ever repeats a
+single token for more than 20 consecutive frames at a post-filter probability
+above 0.99 - the signature of the silent-collapse failure. It is a
+diagnostic: nothing is reseeded or retuned, so the clip you get is still
+exactly the clip the resolved plan produced.
 
 ## Hardware and limits
 

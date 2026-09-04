@@ -72,6 +72,11 @@ pub struct Req {
 pub struct TtsEngine {
     cfg: EngineCfg,
     sp: TtsSpecials,
+    /// The checkpoint's `generation_config.json`, parsed once at load: this
+    /// engine answers many requests off one checkpoint, so the sampling
+    /// defaults it owns are read here rather than per request. See
+    /// [`crate::genconfig`] for the precedence it feeds.
+    gencfg: crate::genconfig::GenerationConfig,
     tok: data::qwen_tokenizer::QwenBpe,
     tables: TalkerTables,
     mtp: CpuMtp,
@@ -96,6 +101,7 @@ impl TtsEngine {
     /// Load the model + compile the resident KV graphs (the slow one-time step).
     pub fn load(cfg: EngineCfg) -> Result<TtsEngine, String> {
         let sp = TtsSpecials::from_config_dir(&cfg.ckpt_dir)?;
+        let gencfg = crate::genconfig::GenerationConfig::from_config_dir(&cfg.ckpt_dir);
         let tok = prompt::load_tokenizer(&cfg.ckpt_dir)?;
         let talker = format!("{}/talker.safetensors", cfg.weights_dir);
         let mtp_path = format!("{}/mtp.safetensors", cfg.weights_dir);
@@ -182,6 +188,7 @@ impl TtsEngine {
         Ok(TtsEngine {
             cfg,
             sp,
+            gencfg,
             tok,
             tables,
             mtp,
@@ -248,6 +255,12 @@ impl TtsEngine {
         if opts.max_frames > fit {
             opts.max_frames = fit;
         }
+        // Resolve the sampling plan once per request - caller override > the
+        // checkpoint's generation_config.json > the reference - AFTER the
+        // capacity clamp, so the traced plan reports the `max_frames` that will
+        // actually run. Skipping this is how a resident caller would silently
+        // miss the checkpoint layer a one-shot `brain tts synth` honours.
+        opts.resolve_with(self.gencfg);
 
         // Codec backend `cpu-stream`: the pure-CPU *stateful* streaming decoder —
         // each chunk decodes ONLY its new frames (no warmup re-decode), emitting

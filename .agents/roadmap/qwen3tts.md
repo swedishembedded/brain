@@ -903,6 +903,159 @@ discovers capabilities generically.
       existing clip's output, so it wants its own before/after listening
       pass rather than being folded into a bug fix.
 
+      **[x] Follow-up landed: the one-field patch is now a general mechanism.**
+      `repetition_penalty` drifted because `GenOpts::default()` was the ONLY
+      source of truth for every sampling knob - a set of numbers transcribed
+      into Rust from a file the checkpoint already ships. Fixing one field left
+      four more (`do_sample`, `temperature`, `top_k`, `top_p`), the four
+      subtalker keys and `max_new_tokens` transcribed the same way. So the
+      transcription is gone:
+
+      - `crates/qwen3tts/src/genconfig.rs` implements the reference's actual
+        precedence, `explicit caller option > the checkpoint's
+        generation_config.json > the reference's hard fallback`, resolved once
+        per generation call into a `GenerationPlan`. `SamplingRequest` (all
+        fields `Option`) is the caller layer - the shape is forced by the
+        requirement, since a plain `f32` cannot distinguish "the caller said
+        nothing" from "the caller chose 1.0", and the second of those is
+        precisely the case a user disabling the penalty needs. `GenOpts` no
+        longer HAS `temperature`/`top_k`/`top_p`/`repetition_penalty` fields;
+        it carries `sampling: SamplingRequest` plus the resolution an entry
+        point baked in. The file is parsed exactly the way
+        `TtsSpecials::from_config_dir` parses the sibling `config.json`
+        (`serde_json::Value`, per-field defensive default): a missing,
+        unreadable or malformed `generation_config.json` supplies nothing and
+        the reference answers, never an error - a checkpoint with a corrupt
+        config still synthesizes.
+      - Resolution happens at every entry point that knows the checkpoint
+        directory, not just the one-shot ones: `pipeline::synth`/`clone`/
+        `design` and their three NPU twins, `batch::synth_batch` per request,
+        AND both resident servers (`engine::ResidentEngine::run_prompt`,
+        `serve::TtsEngine`). The resident pair parse `generation_config.json`
+        ONCE at load and resolve per request against the parsed value
+        (`GenerationPlan::resolve_with`), because a server answering many
+        requests off one checkpoint should not re-read the same file each time.
+        Missing that seam is how a resident caller would silently skip the
+        checkpoint layer a one-shot `brain tts synth` honours - the exact class
+        of divergence this work exists to close.
+      - The subtalker/MTP knobs resolve through the SAME struct and the same
+        chain (`GenerationPlan::subtalker`), but nothing consumes the result:
+        `GenOpts::residual` still defaults to `None` and every existing clip's
+        acoustic texture is byte-for-byte unchanged. The values are simply
+        waiting for the listening-pass follow-up above.
+      - **A `ParamSpec` default is not a neutral piece of documentation.**
+        `capability::ActionSpec::validate` fills declared defaults INTO the
+        invocation before an action ever runs, so `temp`/`top_k`/`top_p`/
+        `repetition_penalty` carrying `.default(...)` in `caps.rs` would be
+        indistinguishable from a caller who typed the value - it would shadow
+        the checkpoint on every single call and make the whole chain dead code
+        on the D-Bus/`brain do` surface. Those four now declare no default (the
+        help text names what they resolve to instead), and
+        `manifest_declares_synth_clone_design_and_batch` asserts both that they
+        stay absent after `validate` and that an explicitly-passed
+        `repetition_penalty: 1.0` survives it. `max_frames`/`seed`/`lang` keep
+        their defaults - they are caller knobs the checkpoint has no opinion
+        about.
+      - `max_new_tokens` (8192) is read, resolved and traced but deliberately
+        **not** wired to `max_frames`. The units genuinely match (one Talker
+        token is one codebook-0 frame, so 8192 is ~11 minutes at 12.5 Hz, well
+        inside the Talker's 32768-position context), but in brain `max_frames`
+        is not only a stop condition: `pipeline::max_ctx` sizes the Talker KV
+        cache from it, the NPU path rounds `n_prefix + max_frames + 2` into a
+        compiled graph bucket, and `design` sizes its own context from it.
+        Adopting 8192 would grow every run's allocation and NPU compile ~32x
+        for a ceiling a healthy clip never approaches (measured EOS: 38
+        frames). The reference pays nothing for a loose ceiling because its
+        cache grows on demand; brain's does not. `max_frames` therefore stays
+        authoritative and the trace line prints both, labelled - a line saying
+        only `max_new_tokens=8192` while the run actually stopped at 256 would
+        be worse than no line.
+      - The resolved plan is logged once per call under `TTS_PLAN` (and under
+        the crate's existing `TTS_PROFILE`, since anyone asking "what did this
+        run do" wants it beside the stage timings):
+
+            qwen3tts: resolved plan: sample=true temp=0.9 top_k=50 top_p=1
+            rep_penalty=1.05 (source: generation_config.json) | length:
+            max_frames=200 applied, max_new_tokens=8192 reported-only |
+            subtalker (resolved, not yet wired): sample=true temp=0.9
+            top_k=50 top_p=1
+
+      **The filter chain is now a module, not private helpers.**
+      `crates/qwen3tts/src/sampling.rs` owns the whole codebook-0 chain
+      (suppress mask -> repetition penalty -> temperature -> top-k -> top-p ->
+      categorical draw) behind `sample_cb0(logits, eos, allow_eos, &SamplerCfg,
+      history, rng) -> Draw`, with each stage also public on its own. All six
+      decode loops in this crate (`generate_codes`, `generate_codes_cached`,
+      the batch scheduler and the three NPU loops) call it, and the MTP
+      follow-up can reuse it instead of growing a second, drifting copy.
+      `SamplerCfg` is fully resolved by construction - deciding the values is
+      `genconfig`'s job, sampling them is this module's - and `Draw` carries
+      the drawn token's POST-FILTER probability, which is the number that made
+      the collapse legible in the first place and previously existed only
+      inside an ad-hoc instrumentation patch.
+
+      That relocation is what makes the real parity test possible.
+      `repetition_penalty_adjusts_a_repeated_logit_exactly_once_on_both_branches`
+      drives `apply_repetition_penalty` directly on a 16-entry synthetic logit
+      vector with history `[5, 5, 5, 8]` and asserts token 5 comes out at
+      exactly `2.0 / 1.05` (positive branch) and exactly `-2.0 * 1.05`
+      (negative branch) - not `1.05^3`, not `1.05^4` - with token 9, absent
+      from the history, untouched. The previous guard for this bug was
+      `repetition_penalty_counts_each_token_once_not_once_per_occurrence`,
+      which could only observe the defect INDIRECTLY, as an argmax flip after
+      fifty repeats at a hand-picked logit gap; it also needed the whole
+      `sample_cb0` call to say anything. The new one is a two-line assertion on
+      the arithmetic itself, covers both branches (HF divides a positive logit
+      and multiplies a negative one, so a half-fix would still have been
+      wrong), and would have failed the moment the per-occurrence loop was
+      written. Both are kept - the indirect one still proves the defect matters
+      to the draw.
+
+      **The seed-0 regression test now asserts properties, not PCM.**
+      `default_sampled_decode_does_not_collapse_to_silence` runs the same
+      documented repro but through the new `pipeline::synth_codes` seam
+      (`synth` = `synth_codes` + `decode_codes`), because the waveform hides
+      everything worth asserting. Four gates, each with a threshold read off
+      the measured collapse rather than guessed:
+
+      - `frames < max_frames / 2` - the decode loop only exits early on the
+        codec EOS and never emits the EOS frame, so finishing under the cap IS
+        "the model chose to stop". Collapsed: 200/200. Healthy: 38. Half the
+        cap keeps 2.6x headroom over the measurement while staying far from
+        "never terminated".
+      - `frames >= 12` - an instant EOS is the OTHER way to get silence, and
+        would otherwise pass everything else. ~2.5 s of this sentence is ~31
+        frames at 12.5 Hz.
+      - longest same-token codebook-0 run `<= sampling::DEGENERATE_RUN` (20),
+        the SAME constant the in-loop diagnostic trips on, so the gate and the
+        diagnostic cannot drift apart. Calibrated on the real data: the run
+        that still escaped was `1657 x10`; the ones that locked the clip were
+        `706 x20`, `1318 x41`, `617 x52`, `706 x80`.
+      - `rms > 0.01`, unchanged, and deliberately the same floor
+        `asr_roundtrip.rs` and `runtime::tts` already use, so "not collapsed"
+        means one thing across the repo.
+
+      Nothing bit-exact: sampled decode runs through wgsl kernels on whatever
+      device is ambient, so the low bits of a sample - and through a near-tied
+      draw, occasionally a whole token - are backend-dependent. A bit-exact
+      expectation would fail on a machine where nothing is wrong, which is the
+      fastest way to get a real gate deleted.
+
+      **A diagnostic, explicitly NOT a mitigation.**
+      `sampling::DegenerationWatch` tracks each frame's codebook-0 same-token
+      run length and post-filter probability and emits ONE trace line the first
+      time a contiguous run crosses both `run > 20` and `p > 0.99` (naming the
+      frame, token, run length and probability) - once per run, not per frame,
+      so a 200-frame collapse costs one line rather than 180. It never
+      reseeds, never adjusts the penalty or temperature, and never changes what
+      is drawn. The sanctioned countermeasure is the reference's
+      `repetition_penalty = 1.05`, which the resolved plan now carries by
+      default; this exists because the reference itself reports ~0.5% of
+      generations can still fail to find EOS with correct settings, and when
+      that happens the failure should be legible from the run's own stderr
+      instead of costing another multi-hour root-cause session. Thresholds are
+      the same measured numbers the regression test uses.
+
 ### Carried over, unchanged priority
 
 - [x] The RMSNorm backward now selects the coalesced `rmsnorm_dx_rows`

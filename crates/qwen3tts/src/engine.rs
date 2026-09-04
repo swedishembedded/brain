@@ -73,6 +73,12 @@ pub struct ResidentEngine {
     codec: StreamingCodecDecoder,
     tok: data::qwen_tokenizer::QwenBpe,
     sp: TtsSpecials,
+    /// The checkpoint's `generation_config.json`, parsed once at load. A
+    /// resident server answers many requests off one checkpoint, so the
+    /// sampling defaults it owns are read here rather than re-read from disk
+    /// on every synthesis - see [`crate::genconfig`] for the precedence this
+    /// feeds.
+    gencfg: crate::genconfig::GenerationConfig,
     codec_path: String,
     speaker_path: String,
     /// Lazily loaded ECAPA x-vector encoder (only the clone path needs it).
@@ -114,6 +120,7 @@ impl ResidentEngine {
             codec: StreamingCodecDecoder::load(&paths.codec),
             tok,
             sp,
+            gencfg: crate::genconfig::GenerationConfig::from_config_dir(&paths.ckpt_dir),
             codec_path: paths.codec.clone(),
             speaker_path: paths.speaker.clone(),
             speaker: None,
@@ -260,6 +267,12 @@ impl ResidentEngine {
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
+        // Resolve the sampling plan once per request, here, because this is the
+        // resident mirror of what `pipeline::synth` does at its entry point:
+        // caller override > the checkpoint's generation_config.json > the
+        // reference. Without it a resident caller would silently skip the
+        // checkpoint layer that a one-shot `brain tts synth` honours.
+        let opts = &opts.clone().resolved_with(self.gencfg);
         let codes = pipeline::generate_codes_cached(&mut self.talker, &mut self.mtp, &self.sp, prompt, opts, cancel)
             .map_err(|_| "cancelled".to_string())?;
         if codes.is_empty() {
