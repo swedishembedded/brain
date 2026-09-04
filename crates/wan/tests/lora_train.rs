@@ -203,7 +203,15 @@ fn mean_loss(tcfg: &Cfg, base: &ModelWeights<f32>, adapter: &LoraAdapter, sample
     total / samples.len() as f64
 }
 
+// `#[ignore]`, not just the BRAIN_WAN_* env gate: this imports an 11GB bf16
+// umT5-XXL checkpoint (22.72GB as the fp32 this crate trains in) on the CPU
+// backend, unlike its siblings in dev_lora_train.rs/finetune_ab.rs, which
+// require an EXTRA opt-in (BRAIN_DEV_GPU=1 or their own #[ignore]) beyond
+// just having the paths set. Without this, anyone with BRAIN_WAN_* exported
+// persistently (a real-weight validation session's shell, a CI profile) gets
+// this test running unattended under a bare `cargo test`/`make test`.
 #[test]
+#[ignore = "slow: real-weight G1 gate, 11GB umT5-XXL import on the CPU backend - run via 'make test/slow'"]
 fn a_concept_only_lora_lowers_held_out_concept_loss_more_than_distractor_loss() {
     let Some(paths) = real_paths() else { return };
     let cfg = WanConfig::t2v_1_3b();
