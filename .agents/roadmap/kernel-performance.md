@@ -2427,6 +2427,151 @@ before committing (a shared, concurrently-edited generated file - see
 model; the selector/host-oracle seam + the workspace-wide field addition
 + its gate; this ledger entry + the kernel-catalogue row).
 
+### M5.1a - `rmsnorm_dx_rows` adopted by its first three models, and the narrow-row regime M5.1's sweep never reached
+
+M5.1 built the cooperative RMSNorm backward and left per-model adoption as
+explicit follow-up ("the seam is what the next model inherits"). At the
+start of this pass adoption was still exactly zero: every `KernelIds`
+construction site in the workspace held `rmsnorm_dx_rows:
+block::UNREGISTERED`, so the fast kernel was compiled into the catalogue and
+dispatched by nothing. This closes that for three crates and, in doing so,
+corrects a claim M5.1 recorded from an incomplete sweep.
+
+**The correction, first, because it changes what the kernel is for.** M5.1
+swept `(rows 1-2048, d 896-5120)` and concluded the cooperative kernel
+"wins at every swept shape". It does - but the bottom of that sweep is an
+order of magnitude wider than the narrowest rows this repo actually
+dispatches an RMSNorm backward at. The Qwen3 family's per-head QK-norms
+(`attn.q_norm`/`attn.k_norm`, and `model::gqa_mixer`'s own two calls, which
+every GQA model composes) are `head_dim` wide: 128 on the Qwen3 dense
+family, 64 on narrower heads. Extending `bench_rmsnorm_dx` down there
+REVERSES the sign: at `d = 64` the cooperative kernel is consistently
+slower than the per-element reference at every row count swept (~0.5x), and
+at `d = 128` it ranges from 0.6x to 2.9x depending on the row count, while
+the `d >= 896` rows of the same sweep reproduce M5.1's own result (2.5x -
+6.7x at training widths, up to 36x at the single-row decode end) on this
+box.
+
+The cause is arithmetic, not memory, and it is inherent to the
+one-barrier design rather than a bug: `rmsnorm_dx_rows` avoids a second
+barrier (the CPU JIT permits exactly one) by having ALL 64 threads
+redundantly fold BOTH 64-entry partial arrays. That is a fixed cost per
+row, independent of `d`. At `d` 5120 each thread has already done 80
+elements of real work and the fold vanishes into them; at `d` 64 each
+thread did ONE element, so the fold does orders of magnitude more
+arithmetic than the reduction it is folding. **The crossover is a property
+of the row WIDTH.** That is a different axis from the `m <= 32` row-COUNT
+gate `Op::RmsNorm` once carried as a real bug (and which `select.rs` has
+standing tests against), and the two must not be conflated: the old gate
+was wrong because coalescing is per-access, not per-thread; this one is
+about a fold whose cost genuinely does not scale with the row.
+
+**Adopted anyway, deliberately, and judged by the whole-pass number as
+well as the kernel-level one.** Three of the five RMSNorm backwards a Qwen3 layer
+dispatches are `d_model` wide, where the win is large, and two are
+`head_dim` wide, where it is a wash. `crates/qwen3`'s own `bench_train_p40`
+train step (0.6B-shaped, 4 layers, GQA 16/8, `head_dim` 128, b=2 t=256)
+went from 483 ms to 457 ms best-of-runs with the registration flipped on
+and off in place - a real improvement, but small enough to sit inside this
+integrated GPU's run-to-run spread, which was wide: the box was shared with
+another workspace's compile during part of the sampling, and an integrated
+GPU shares its memory bandwidth with exactly that. The pass is dominated by
+its matmuls in any case. Recorded that way on purpose (§E's own discipline): the
+kernel-level A/B is what resolves this change, the whole-pass number is
+what proves it does not regress. **Per-kernel DEVICE attribution - lesson
+#31's requirement, and what would size the share exactly - was NOT
+available on this box**: `BRAIN_PROFILE=1`'s timestamp queries return
+uncalibrated values on this Mesa/Intel driver (totals in the 1e14 ms
+range, and two runs of the same pass disagreeing by an order of magnitude
+on the same kernel's share), so no share figure from that run is
+trustworthy and none is quoted here. The dispatch COUNTS from it are
+usable, and they confirm `rmsnorm_dx_rows` is live and `rmsnorm_dx` is
+never dispatched. A card with working timestamps should re-derive the
+share before anything is built on top of this.
+
+**Wired**: `qwen3` (which is also `qwen3tts`'s Talker verbatim - the Talker
+has no decoder of its own, and `qwen3tts::sft`'s LoRA fine-tune trains
+through `Qwen::backward`), `deepseek2` (plain MHA, no QK-norm, so every
+RMSNorm backward it dispatches is `d_model` wide - the pure-win case), and
+`qwen35moe` (`head_dim` 256 and `linear_value_head_dim` 128 alongside its
+`d_model` 2048 norms). Each registers `rmsnorm_dx_rows` in its own
+`STATIC_PIPELINES`/`PIPELINES` at the true end (every existing const stays
+put) and names the slot in its `KernelIds`; nothing else changes, because
+`block::rmsnorm_bwd` already routes through `rms_variant`.
+
+**Gate, per adopting crate**: a `rmsnorm_dx_variant_agreement` module next
+to the existing forward one - a slot-identity assert (a registration wrong
+by one index does not fail, it silently dispatches a different kernel
+through the same four bindings) plus `block::assert_rmsnorm_dx_variant_
+agrees` against the HOST oracle at that model's own backward-tape shapes,
+production widths AND the tiny gradcheck fixture's sub-workgroup widths.
+Mutation-verified RED before green: dropping one factor of `r` from
+`rmsnorm_dx_rows.wgsl`'s `coef` term (a plausible backward-math slip, not a
+syntactic break) produced 1.2e-2 relative error against the 2e-5 tolerance,
+and the reference-kernel arm stayed green throughout.
+
+**Gradient gates run end to end, on real hardware, through the new kernel**
+(none of these are checkpoint-gated - all three build synthetic weights
+from a `tiny()` config, which is exactly why they can gate a kernel swap on
+a box with no checkpoints):
+
+| crate | test | result |
+|---|---|---|
+| `qwen3tts` | `talker_analytic_grads_match_finite_differences` (plus the two forward tests in the same file) | green, 3/3 |
+| `deepseek2` | the whole `tests/gradcheck.rs` suite - 5 finite-difference checks over every trainable tensor (smooth, sparse-raw, sparse-renormalised, routed-scaling, LoRA) plus its router-policy liveness and forward-determinism gates | green, 8/8 |
+| `qwen3` | `brain-gradcheck`'s `check_qwen`, `check_qwen_lora`, `check_qwen2`, `check_qwen3_weighted` and the M-RoPE variant | green |
+| `qwen35moe` | `brain-gradcheck`'s `check_qwen35moe`, `check_qwen35moe_lora`, `check_qwen35moe_a_log_elementwise` | green |
+| (control) `qwen35` | its four `brain-gradcheck` checks - NOT an adopter, so these prove the seam left the un-registered path alone | green |
+| `qwen3` / `deepseek2` / `qwen35moe` | each crate's own `rmsnorm_dx_variant_agreement` module | green, 2/2 each |
+
+`cargo test -p brain-gradcheck --lib qwen` is 12/12 across those rows.
+
+The Talker one is the load-bearing one for this campaign's purposes: it is
+a full directional finite-difference check over a GQA + per-head QK-norm +
+RoPE + SwiGLU decoder, so it exercises BOTH the `d_model`-wide and the
+narrow per-head backward dispatches in one pass.
+
+**The gain half (`rmsnorm_dw`) was checked and is NOT the same defect.**
+Added `bench_rmsnorm_dw` rather than assuming symmetry with `dx`.
+`rmsnorm_dw` reduces ACROSS rows with one thread per CHANNEL
+(`dW[c] = sum_n dY[n,c]*x[n,c]*inv[n]`), so thread `c` and thread `c+1`
+read adjacent addresses at every step - it is already fully coalesced and
+the `_rows` treatment would buy it nothing. What it IS short of is
+occupancy: it launches exactly `d` threads however many rows they walk. The
+harness makes that visible by pricing it in achieved bytes/second next to
+`rmsnorm_dx_rows` on the identical shape. At `d` 5120 the two are within
+~1.4x of each other; at `d` 128 with 16k rows - only 128 threads for the
+whole grid - `dw` is an order of magnitude less efficient per byte than the
+`dx` half, and its cost grows linearly in `rows` at fixed `d`. That is the
+real defect in this kernel, and it is an occupancy one, on a different axis
+from `dx`'s coalescing one. Fixing that means a row-split two-stage reduction (`_part`/`_final`, the shape
+`gn_dsum_part`/`gn_dsum2` already uses) which needs a scratch buffer
+`block::rmsnorm_bwd`'s signature does not have - an API change across every
+RMSNorm-training model, not a drop-in sibling behind the existing selector.
+Filed as follow-up with the measurement attached, not attempted blind.
+
+**Follow-up this leaves open**: (a) a `d`-aware cooperative backward -
+fewer lanes per row and several rows per workgroup when `d` is at or below
+the workgroup width, which would make the QK-norm rows a win instead of a
+wash while keeping the single barrier; (b) the same narrow-row question for
+the FORWARD `rmsnorm_rows`, whose fold is half as expensive (one partial
+array, not two) but whose own sweep also started at `d = 128` - five models
+already select it at `head_dim` widths, so this is worth measuring before
+anything else adopts it; (c) `rmsnorm_dw`'s occupancy, above; (d) the
+remaining `rmsnorm_dx_rows` adopters (`qwen35`, `kronos`, `toymoe`,
+`glmdsa`'s own norm path), each of which still owes its own agreement gate.
+(d) is not merely nice-to-have: `check-kernel-selection.sh` already reports
+`glmdsa/src/model.rs` and three sites in `toymoe/src/train.rs` as unallowed
+`rmsnorm_dx` dispatches OUTSIDE any selection seam - they hand-dispatch the
+per-element kernel by index rather than going through `block::rmsnorm_bwd`
+at all, so registering a slot cannot reach them. That gate failure predates
+this milestone (verified against the tree before these commits, byte for
+byte the same six rows) and is left untouched here for the same reason the
+adopters were capped at three: each is its own numerical gate on shared
+training code, not a mechanical edit.
+None of these are blocked - they were out of the verification budget this
+pass could honestly spend on shared code ~20 models train through.
+
 ### M6.1 - Vulkan per-buffer dependency tracking, replacing the blanket dispatch barrier
 
 Checked the milestone's premise against source first: `flush_chunk`

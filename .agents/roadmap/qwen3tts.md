@@ -635,8 +635,18 @@ discovers capabilities generically.
 
 ### Carried over, unchanged priority
 
-- [ ] RMSNorm backward: coalesce to `rmsnorm_rows` (measured 11.2x forward;
-      backward still per-element)
+- [x] The RMSNorm backward now selects the coalesced `rmsnorm_dx_rows`
+      wherever the device runs workgroup reductions, through the SAME
+      `model::block::rms_variant` seam the forward already used for
+      `rmsnorm_rows` - see "Coalescing the RMSNorm backward" below for what
+      was measured, where it wins, and where it does not
+- [ ] The narrow-row half of that swap is still open: at the per-head
+      QK-norm widths (`head_dim` 64/128) the cooperative backward kernel is
+      a wash-to-loss, because its redundant 64-partial fold costs more than
+      the reduction it folds once a row is narrower than the workgroup. The
+      block norms carry the win today; a `d`-aware variant (fewer lanes per
+      row, several rows per workgroup) would close the rest - tracked in
+      `kernel-performance.md`
 - [x] Cancellation support for in-flight synth/clone requests. The frame loop
       is the interruption point: `pipeline::generate_codes` (the path every
       default `synth`/`clone`/`design` runs), `pipeline::generate_codes_cached`
@@ -763,3 +773,70 @@ discovers capabilities generically.
       0.1274` (voice, not the `rms ~0.004` greedy-collapse silence), as 3
       `audio_chunk` events (two 24000-sample chunks plus the terminal
       `done`).
+
+## Coalescing the RMSNorm backward
+
+**Where the change actually lives.** The Talker's decoder IS `qwen3::Qwen`
+verbatim (`talker.rs` builds one; `sft.rs`'s LoRA fine-tune calls
+`Qwen::backward` directly), so this crate has no RMSNorm backward of its
+own to fix - registering `rmsnorm_dx_rows` in `crates/qwen3`'s pipeline list
+and naming that slot in its `KernelIds` is the whole opt-in, and every
+Talker gradient inherits it by construction. The other half of the original
+bullet does not apply at all: `mtp.rs` builds NO backward graph (its
+`only_fwd_ids` leaves every backward slot `UNREGISTERED` on purpose), so the
+MTP's per-frame norms were only ever a forward measurement.
+
+**Where the win is.** Measured with `bench_rmsnorm_dx` (release, real
+device - an Intel Arc integrated GPU on Vulkan, min-of-8 per dispatch, four
+back-to-back dispatches per sample so launch overhead is amortised),
+`rmsnorm_dx_rows` against the per-element `rmsnorm_dx`:
+
+| shape family | what dispatches it | speedup |
+|---|---|---|
+| `rows` 512-2048, `d` 896-5120 | the `d_model`-wide block norms (`ln1`, `ln2`, final) at training width | 2.5x - 6.7x |
+| `rows` 1-8, `d` 1024-5120 | the same norms at decode width | 9.9x - 36.1x |
+| `rows` 1k-16k, `d` 128 | `attn.q_norm` / `attn.k_norm` | 0.6x - 2.9x |
+| `rows` 2k-8k, `d` 64 | a narrower `head_dim` | ~0.5x |
+
+Agreement with the host reference (`model::hostmath::rmsnorm_dx_rows`) is
+3e-7 to 2.7e-6 relative across the whole sweep, against the family's 2e-5
+gate - the two kernels differ in reduction ORDER, not in math.
+
+**Why the last two rows are not a win, and why that is a width question.**
+`rmsnorm_dx_rows` folds its two 64-partial arrays redundantly in all 64
+threads to stay inside the CPU JIT's single-top-level-barrier limit. That
+fold is a fixed cost per row regardless of `d`; at `d` 5120 each thread has
+already done 80 elements of real work and it disappears into them, at `d`
+64 each thread did one element and the fold dominates. This is a property
+of the row WIDTH, and must not be conflated with the row-COUNT threshold
+that was once a real selector bug on this op.
+
+**Whole-pass effect.** `crates/qwen3`'s own `bench_train_p40` train step
+(0.6B-shaped, 4 layers, GQA 16/8, `head_dim` 128, b=2 t=256) moved from 483
+ms to 457 ms best-of-runs with the registration flipped on and off in place
+- a real improvement, but small enough to sit inside this integrated GPU's
+run-to-run spread (which was wide here: the box was shared with another
+workspace's compile during part of the sampling, and an integrated GPU
+shares its memory bandwidth with exactly that). The pass is dominated by
+its matmuls in any case. Per-kernel
+DEVICE attribution, which would settle the size of the share exactly, is
+not available on this box: `BRAIN_PROFILE=1`'s timestamp queries return
+uncalibrated values on this Mesa/Intel driver, so only the dispatch COUNTS
+from that run are usable - and those do confirm the new kernel is live and
+the per-element one is never dispatched. Treat the kernel-level A/B as what
+resolves this change and the whole-pass number as what shows it does not
+regress.
+
+**What gates it.** `crates/qwen3`'s `rmsnorm_dx_variant_agreement` module
+pins the seam against the HOST reference at the exact `(rows, dim)` pairs
+this decoder's backward tape dispatches, including the tiny gradcheck
+fixture's own sub-workgroup widths. It was mutation-verified RED before
+green: dropping one factor of `r` from the `coef` term (a plausible
+backward-math slip) produced 1.2e-2 relative error against the 2e-5 gate.
+The Talker's own `talker_analytic_grads_match_finite_differences` runs the
+whole finite-difference check through the new kernel and is green, as are
+the five `brain-gradcheck` checks over the same `qwen3::Qwen` decoder
+(`check_qwen`, its LoRA/weighted/M-RoPE variants and `check_qwen2`). None
+of these needs a checkpoint - they build synthetic weights from a `tiny()`
+config, which is exactly what makes them usable as the gate for a kernel
+swap.
