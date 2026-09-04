@@ -224,6 +224,15 @@ pub fn generate_codes(
     prompt: &Prompt,
     opts: &GenOpts,
 ) -> Vec<u32> {
+    use std::time::Instant;
+    // Coarse per-stage profiling, gated on `TTS_PROFILE`, matching
+    // `generate_codes_cached`'s. This is the path every default
+    // `synth`/`clone`/`design` command runs, and it is the only one whose
+    // stage split answers "where does a `--device gpu` run spend its time",
+    // so it needs the same instrument the CPU-only mirror already had.
+    let profile = std::env::var("TTS_PROFILE").is_ok();
+    let (mut t_step, mut t_mtp, mut t_head) = (0.0f64, 0.0f64, 0.0f64);
+
     let d = gen.d();
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
@@ -232,15 +241,20 @@ pub fn generate_codes(
     // This is the unified O(T)/frame Talker decode (`TalkerGen::step`) — it runs on
     // whatever backend `Gpu` selected (GPU or the wgsl-cpu JIT), replacing both the
     // old O(T²) `forward` recompute and the CPU-only `CpuTalker` path.
+    let t_prefix0 = Instant::now();
     gen.reset_cache();
     let n_prefix = prompt.embeds.len() / d;
     let mut past_hidden = vec![0.0f32; d];
     for i in 0..n_prefix {
         past_hidden = gen.step(&prompt.embeds[i * d..(i + 1) * d]);
     }
+    let t_prefix = t_prefix0.elapsed().as_secs_f64() * 1e3;
     let mut cb0_history: Vec<u32> = Vec::new();
+    let th = Instant::now();
+    let cb0_logits = gen.codec_head_logits(&past_hidden);
+    t_head += th.elapsed().as_secs_f64() * 1e3;
     let mut cb0 = sample_cb0(
-        gen.codec_head_logits(&past_hidden),
+        cb0_logits,
         sp.codec_eos,
         opts.min_new == 0,
         opts.temperature,
@@ -259,7 +273,9 @@ pub fn generate_codes(
         }
         cb0_history.push(cb0);
         let cb0_embed = gen.codec_embed(cb0).to_vec();
+        let tm = Instant::now();
         let (residuals, res_sum) = mtp.generate_residuals_with(&past_hidden, &cb0_embed, opts.residual.as_ref(), &mut rng);
+        t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
 
@@ -277,9 +293,14 @@ pub fn generate_codes(
         }
 
         // one incremental decoder step for the new frame.
+        let ts = Instant::now();
         past_hidden = gen.step(&feed);
+        t_step += ts.elapsed().as_secs_f64() * 1e3;
+        let th = Instant::now();
+        let cb0_logits = gen.codec_head_logits(&past_hidden);
+        t_head += th.elapsed().as_secs_f64() * 1e3;
         cb0 = sample_cb0(
-            gen.codec_head_logits(&past_hidden),
+            cb0_logits,
             sp.codec_eos,
             s >= opts.min_new,
             opts.temperature,
@@ -288,6 +309,18 @@ pub fn generate_codes(
             opts.repetition_penalty,
             &cb0_history,
             &mut rng,
+        );
+    }
+    if profile {
+        let nf = s.max(1) as f64;
+        eprintln!(
+            "[tts-profile] prefix-stream({n_prefix} pos)={t_prefix:.1}ms | \
+             talker-step total={t_step:.1}ms ({:.1}ms/frame) | \
+             mtp-residuals total={t_mtp:.1}ms ({:.1}ms/frame) | \
+             cb0-head total={t_head:.1}ms ({:.1}ms/frame) | frames={s}",
+            t_step / nf,
+            t_mtp / nf,
+            t_head / nf,
         );
     }
     frames
