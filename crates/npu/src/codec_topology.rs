@@ -10,7 +10,8 @@
 //!   1. RVQ dequant: `Gather` each codebook's embedding, sum the acoustic group,
 //!      `MatMul` each group's `output_proj`, `Add` -> latent `[1,512,T]`.
 //!   2. `pre_conv` causal `Conv` 512->1024 (k3).
-//!   3. 8-layer causal transformer (RMSNorm, MHA, half-split RoPE θ=1e4, SwiGLU,
+//!   3. 8-layer SLIDING-WINDOW causal transformer (`sliding_window`, 72 frames
+//!      on the released checkpoint; RMSNorm, MHA, half-split RoPE θ=1e4, SwiGLU,
 //!      per-channel LayerScale) — reusing the same op vocabulary as the Qwen
 //!      topology.
 //!   4. `upsample.{0,1}`: causal `ConvTranspose` (×ratio) + ConvNeXt block
@@ -466,9 +467,10 @@ impl<'a> CodecTopo<'a> {
         o
     }
 
-    /// The 8-layer causal transformer over token-major `[1,T,hidden]`.
+    /// The 8-layer sliding-window causal transformer over token-major
+    /// `[1,T,hidden]`.
     fn transformer(&mut self, x0: &str, t: usize) -> String {
-        // RoPE cos/sin tables + causal mask, sized for T.
+        // RoPE cos/sin tables + sliding-window causal mask, sized for T.
         let hd = self.cfg.head_dim as usize;
         let d = self.cfg.hidden_size as usize;
         let nh = self.cfg.num_attention_heads as usize;
@@ -491,10 +493,29 @@ impl<'a> CodecTopo<'a> {
         }
         self.f32("tf_cos", &[1, ti, 1, hd as i64], cos);
         self.f32("tf_sin", &[1, ti, 1, hd as i64], sin);
+        // SLIDING-WINDOW causal, not plain causal. This pre_transformer is
+        // Mimi-derived: key `j` is masked out of query `i` once
+        // `i - j >= sliding_window` (72 frames == 5.76 s of audio at 12.5 Hz
+        // on the released checkpoint), on every forward call. Materializing
+        // only the `j > i` half used to make this graph agree with the brain
+        // decoders only while `t <= sliding_window`; past that it silently
+        // over-attended, with no shape or length symptom to notice.
+        //
+        // Safe against the right-zero-padding the streaming front feeds
+        // (`qwen3tts::npu_gen::NpuStreamCodec::decode` writes the real frames
+        // at columns `0..t` and leaves the rest zero): the window only ever
+        // extends BACKWARD from a query, so a real position still never reads
+        // a pad column.
+        //
+        // `0` means "unset" (a hand-built `CodecConfig::default()`, never a
+        // parsed one) and is taken as unbounded, matching what
+        // `mimi::Codec::transformer` and `mimi::decode_stream::front` do -
+        // a literal 0 would otherwise mask every key including the diagonal.
+        let window = if self.cfg.sliding_window == 0 { t } else { self.cfg.sliding_window as usize };
         let mut mask = vec![0f32; t * t];
         for i in 0..t {
             for j in 0..t {
-                if j > i {
+                if j > i || i - j >= window {
                     mask[i * t + j] = -1.0e9;
                 }
             }

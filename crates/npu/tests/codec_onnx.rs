@@ -210,3 +210,51 @@ fn codec_onnx_graph_is_well_formed_with_convtranspose() {
         .collect();
     assert_eq!(dims, vec![1, 1, l as i64], "waveform shape [1,1,T*upsample]");
 }
+
+/// The exported `pre_transformer` mask must be SLIDING-WINDOW causal, not
+/// plain causal. This graph is the front the default streaming serve path runs
+/// (`qwen3tts::serve` -> `npu_gen::NpuStreamCodec`), and it has to carry the
+/// same mask as the two brain-side implementations of the same transformer
+/// (`mimi::Codec::transformer`, `mimi::decode_stream::front`) or a long clip
+/// decodes to a different waveform depending only on which backend served it.
+///
+/// The mask is a materialized initializer, so its content is checkable here
+/// even though OpenVINO is absent and the graph cannot be RUN - the assertion
+/// is on the real exported bytes (decoded back out of the proto), not on a
+/// re-derivation of the builder's own logic.
+#[test]
+fn codec_onnx_attention_mask_is_sliding_window_causal() {
+    let mut cfg = tiny_cfg();
+    cfg.sliding_window = 3;
+    let w = synth_weights(&cfg);
+    let t = 10usize; // > sliding_window, so the window is not degenerate here
+    let window = cfg.sliding_window as usize;
+
+    let mut g = onnx::GraphBuilder::new("codec_mask_test");
+    npu::codec_topology::build_codec_graph(&cfg, &w, t, &mut g);
+    let model = onnx::decode_model(&g.finish()).expect("codec ONNX must decode");
+    let graph = model.graph.expect("graph");
+    let inits = onnx::initializers(&graph).expect("initializers must decode");
+    let mask = inits.get("tf_mask").expect("tf_mask initializer must exist");
+    assert_eq!(mask.shape, vec![1, 1, t, t], "mask shape");
+
+    let mut live = 0usize;
+    for i in 0..t {
+        for j in 0..t {
+            let v = mask.data[i * t + j];
+            let want_masked = j > i || i - j >= window;
+            if want_masked {
+                assert!(v < -1.0e8, "mask[{i},{j}] must be masked out, got {v}");
+            } else {
+                assert_eq!(v, 0.0, "mask[{i},{j}] must be live");
+                live += 1;
+            }
+        }
+    }
+    // Row `i` keeps min(i+1, window) keys, so the live count is a closed form:
+    // a per-row bound that a plain causal mask (i+1 keys per row) cannot hit.
+    let want_live: usize = (0..t).map(|i| (i + 1).min(window)).sum();
+    assert_eq!(live, want_live, "live-key count is not the sliding-window one");
+    let plain_causal: usize = (0..t).map(|i| i + 1).sum();
+    assert_ne!(want_live, plain_causal, "test config is degenerate: window >= t");
+}
