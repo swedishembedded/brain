@@ -54,7 +54,11 @@ const SCALE_CHAN: usize = 13;
 const AXPY: usize = 14;
 const GQA_SCORES_WIN: usize = 15;
 
-const PIPELINES: &[(&str, &str)] = &[
+/// The kernel set this decoder dispatches. `pub` so a caller building the
+/// codec on its own device handle (`Codec::load_inference_on`) can construct
+/// that handle with the right pipelines - the indices above are this module's
+/// contract with it.
+pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
     ("matmul", kernels::MATMUL),
     ("rmsnorm", kernels::RMSNORM),
@@ -95,16 +99,39 @@ pub struct Codec {
 impl Codec {
     /// Load an inference-only decoder from a brain checkpoint produced by
     /// [`crate::import::import`]. Every parameter is frozen (weights only).
+    ///
+    /// Builds on the **CPU backend**, which is this constructor's whole
+    /// contract, not an accident - see [`Self::from_weights`]. A caller that
+    /// wants the codec on the ambient `--device` selection asks for it
+    /// explicitly through [`Self::load_inference_on`].
     pub fn load_inference(weights_path: &str) -> Codec {
+        Self::load_inference_on(Gpu::new_cpu(PIPELINES), weights_path)
+    }
+
+    /// [`Self::load_inference`] on an existing device handle (see
+    /// `gpu_core::Gpu::share`), so a process holds ONE device however many
+    /// components it loads, and so a caller can put the codec on the same
+    /// device the rest of its pipeline runs on.
+    pub fn load_inference_on(gpu: Gpu, weights_path: &str) -> Codec {
         let c = checkpoint::load(weights_path);
         let cfg = CodecConfig::from_json(&c.header["config"]);
         let init = c.by_role("");
-        Codec::from_weights(cfg, init)
+        Codec::from_weights_on(gpu, cfg, init)
     }
 
-    /// Build from an in-memory weight map (used by tests and [`load_inference`]).
+    /// Build from an in-memory weight map (used by tests and
+    /// [`load_inference`](Self::load_inference)), **on the CPU backend**.
+    ///
+    /// This constructor is CPU-pinned deliberately and every existing caller
+    /// depends on that: it is the one every real-weight parity test in this
+    /// crate and in `qwen3omnimoe` is gated against. [`Self::from_weights_on`]
+    /// is the device-taking form.
     pub fn from_weights(cfg: CodecConfig, init: HashMap<String, Vec<f32>>) -> Codec {
-        let gpu = Gpu::new_cpu(PIPELINES);
+        Self::from_weights_on(Gpu::new_cpu(PIPELINES), cfg, init)
+    }
+
+    /// [`Self::from_weights`] on an existing device handle.
+    pub fn from_weights_on(gpu: Gpu, cfg: CodecConfig, init: HashMap<String, Vec<f32>>) -> Codec {
         // Mirror small tensors (biases, norms, scales, alphas/betas/gammas) on the
         // host: NCL conv-bias broadcasts and ConvNeXt's host LayerNorm read these.
         let host: HashMap<String, Vec<f32>> = init

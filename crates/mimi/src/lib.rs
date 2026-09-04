@@ -27,4 +27,4 @@ pub mod streaming;
 
 pub use config::CodecConfig;
 pub use import::import;
-pub use model::Codec;
+pub use model::{Codec, PIPELINES};

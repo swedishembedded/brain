@@ -30,6 +30,11 @@ fn fill(w: &mut HashMap<String, Vec<f32>>, name: &str, n: usize, seed: &mut Lcg)
 /// layer, 2x2 upsample/decoder rates, hidden 8. Every weight
 /// `Codec::transformer`/`Codec::decode_omni`/`decode_stream::Back` touches.
 fn tiny_omni_codec(seed_val: u64) -> Codec {
+    tiny_omni_codec_on(gpu_core::Gpu::new_cpu(mimi::PIPELINES), seed_val)
+}
+
+/// [`tiny_omni_codec`] on an explicit device handle.
+fn tiny_omni_codec_on(gpu: gpu_core::Gpu, seed_val: u64) -> Codec {
     let mut seed = Lcg::new(seed_val);
     let (hidden, inter, heads, head_dim, dec_dim, nq, cb) = (8u32, 16u32, 2u32, 4u32, 8u32, 2u32, 4u32);
     let cfg = CodecConfig {
@@ -115,7 +120,7 @@ fn tiny_omni_codec(seed_val: u64) -> Codec {
     fill(&mut w, "decoder.6.conv.weight", out_dim * 7, &mut seed);
     fill(&mut w, "decoder.6.conv.bias", 1, &mut seed);
 
-    Codec::from_weights(cfg, w)
+    Codec::from_weights_on(gpu, cfg, w)
 }
 
 fn random_codes(seed_val: u64, t: usize, nq: usize, cb: usize) -> Vec<u32> {
@@ -161,4 +166,34 @@ fn decode_omni_chunked_emits_more_than_one_chunk_for_small_chunk_frames() {
 fn decode_omni_chunked_rejects_empty_codes() {
     let codec = tiny_omni_codec(1);
     codec.decode_omni_chunked(&[], 1, |_| {});
+}
+
+/// `Codec::from_weights_on` must put the decode graph on the handed-in
+/// device and get the SAME waveform there.
+///
+/// This is the gate on the seam `qwen3tts::pipeline::decode_codes` uses to
+/// take the codec off the CPU pin: without it, "the codec now follows
+/// `--device`" would be an untested claim about the whole conv / windowed-
+/// attention / SnakeBeta-vocoder graph on a second backend, not just about
+/// one constructor argument. Skipped (not failed) when the ambient device IS
+/// the CPU backend, where the comparison is vacuous.
+#[test]
+fn decode_omni_agrees_between_the_cpu_backend_and_the_ambient_device() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    if gpu_core::backend_name() == "cpu" {
+        eprintln!("ambient device is the CPU backend; nothing to compare against");
+        return;
+    }
+    let ambient = gpu_core::Gpu::new(mimi::PIPELINES);
+    let codes = random_codes(0xD0D0, 12, 2, 4);
+    let want = tiny_omni_codec(0xABCD).decode_omni(&codes);
+    let got = tiny_omni_codec_on(ambient, 0xABCD).decode_omni(&codes);
+    assert_eq!(got.len(), want.len(), "device output length differs from the CPU backend's");
+    let maxd = got.iter().zip(&want).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+    eprintln!("codec decode_omni: ambient device vs CPU backend max abs diff = {maxd:.3e}");
+    // fp reassociation only: the two backends run the same WGSL with
+    // different reduction orders inside each kernel.
+    assert!(maxd < 1e-4, "codec decode diverges on the ambient device: max abs diff {maxd}");
 }

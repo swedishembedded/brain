@@ -913,11 +913,18 @@ pub fn design_npu(
 }
 
 /// Decode `[T,16]` codes to a 24 kHz waveform (empty -> error).
+///
+/// Built on the **ambient device** (`--device` / `BRAIN_DEVICE`), like the
+/// Talker and the MTP - `mimi::Codec::load_inference` is CPU-pinned by its own
+/// contract, which used to make the codec the one stage of a `--device gpu`
+/// synth that never reached the GPU. It is also the largest single stage of a
+/// short clip's wall time, so pinning it silently capped what `--device` could
+/// ever mean here.
 pub fn decode_codes(codec_path: &str, codes: &[u32]) -> Result<Vec<f32>, String> {
     if codes.is_empty() {
         return Err("no codec frames were generated".to_string());
     }
-    let codec = mimi::Codec::load_inference(codec_path);
+    let codec = mimi::Codec::load_inference_on(gpu_core::Gpu::new(mimi::PIPELINES), codec_path);
     if std::env::var("TTS_PROFILE").is_ok() {
         let t0 = std::time::Instant::now();
         let wav = codec.decode(codes);
