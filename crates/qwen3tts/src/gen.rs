@@ -46,6 +46,13 @@ const ROPE_AT: usize = 13;
 // Coalesced RMSNorm - the throughput twin of `RMSNORM`, selected by
 // `block::rms_variant` inside `block::rmsnorm_fwd`.
 const RMSNORM_ROWS: usize = 14;
+// The fp32 GEMM tier `block::gemm_variant` selects between: the
+// workgroup-per-output-column decode GEMV (`matmul_gemv`, which
+// `gpu_core::upgrade` transparently substitutes `matmul_gemv_reg` for on a
+// capable device) and the 128x128 register-tiled GEMM. Both are bit-identical
+// to the naive `MATMUL` they replace; only the thread mapping differs.
+const MATMUL_GEMV: usize = 15;
+const MATMUL_REG3: usize = 16;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -63,6 +70,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("kv_append", kernels::KV_APPEND),
     ("rope_at", kernels::ROPE_AT),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
+    ("matmul_reg3", kernels::MATMUL_REG3),
 ];
 
 /// Which position-dependent uniform a cached decode step needs refreshed each token.
@@ -152,6 +161,26 @@ fn only_fwd_ids() -> KernelIds {
 }
 
 impl TalkerGen {
+    /// The fp32 GEMM tier for this device - the same rule `qwen3::serve`,
+    /// `flux1`/`flux2` and `model::rowemit` use. Both fast kernels cooperate
+    /// across a workgroup, so a device without `workgroup_reductions`
+    /// (`backend-cpu`) keeps the naive reference, which that backend routes to
+    /// its AVX2 GEMM anyway. Every variant is bit-identical to that reference;
+    /// only the thread mapping differs.
+    fn gemm_tier(&self) -> block::GemmVariants {
+        if self.gpu.caps().workgroup_reductions {
+            block::GemmVariants::Fast { gemv: Some(MATMUL_GEMV), tiled: MATMUL_REG3 }
+        } else {
+            block::GemmVariants::Reference(MATMUL)
+        }
+    }
+
+    /// One `out[m,n] = x[m,k] @ w[n,k]^T` dispatch through [`Self::gemm_tier`].
+    fn mm(&self, tier: block::GemmVariants, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
+        let (kind, threads) = block::gemm_variant(tier, m, n);
+        self.gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+    }
+
     fn decoder_param_list(cfg: &TalkerConfig) -> Vec<(String, usize)> {
         let d = cfg.d_model as usize;
         let ff = cfg.d_ff as usize;
@@ -367,6 +396,7 @@ impl TalkerGen {
         let nh = c.n_heads;
         let nkv = c.n_kv_heads;
         let ids = only_fwd_ids();
+        let tier = self.gemm_tier();
         let ga = Gqa {
             b: 1,
             t: n,
@@ -383,21 +413,21 @@ impl TalkerGen {
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
             s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, n));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre], &[n, d, hq], n * hq));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre], &[n, d, hkv], n * hkv));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wv.weight")), &sc.v], &[n, d, hkv], n * hkv));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, n, d, hq));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, n, d, hkv));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, n, d, hkv));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, n * nh));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, n * nkv));
             s.push(block::rope_fwd(g, &ids, &sc.q, n, nh, hd, hq, n, theta));
             s.push(block::rope_fwd(g, &ids, &sc.k, n, nkv, hd, hkv, n, theta));
             s.extend(block::gqa_fwd(g, &ids, &ga, &sc.q, &sc.k, &sc.v, &sc.scores, &sc.probs, &sc.ctx));
-            s.push(g.step(MATMUL, &[&sc.ctx, w(&p("attn.wo.weight")), &sc.proj], &[n, hq, d], n * d));
+            s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, n, hq, d));
             s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[n * d], n * d));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, n));
-            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre], &[n, d, ff], n * ff));
-            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.up.weight")), &sc.up], &[n, d, ff], n * ff));
+            s.push(self.mm(tier, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, n, d, ff));
+            s.push(self.mm(tier, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, n, d, ff));
             s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, n * ff));
-            s.push(g.step(MATMUL, &[&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out], &[n, ff, d], n * d));
+            s.push(self.mm(tier, &sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, n, ff, d));
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         }
         let last = c.n_layers as usize;
@@ -477,6 +507,7 @@ impl TalkerGen {
         let g = &self.gpu;
         let sc = &self.sc;
         let ids = only_fwd_ids();
+        let tier = self.gemm_tier();
         let w = |name: &str| self.ps.w(name);
         let mut s: Vec<Step> = Vec::new();
         let mut pus: Vec<(DeviceBuffer, PosUniform)> = Vec::new();
@@ -494,9 +525,9 @@ impl TalkerGen {
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
             s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre], &[1, d, hq], hq));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre], &[1, d, hkv], hkv));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wv.weight")), &sc.v], &[1, d, hkv], hkv));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, 1, d, hq));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, 1, d, hkv));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, 1, d, hkv));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv));
             add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.q], nh * half), PosUniform::RopeQ);
@@ -506,13 +537,13 @@ impl TalkerGen {
             add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_SCORES, 7, &[&sc.q, &self.kcache[l], &sc.scores], nh * cap), PosUniform::Scores);
             add_pos(&mut s, &mut pus, posstep(DECODE_SOFTMAX, 3, &[&sc.scores, &sc.probs], nh), PosUniform::Softmax);
             add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_APPLY, 6, &[&sc.probs, &self.vcache[l], &sc.ctx], nh * hd), PosUniform::Apply);
-            s.push(g.step(MATMUL, &[&sc.ctx, w(&p("attn.wo.weight")), &sc.proj], &[1, hq, d], d));
+            s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, 1, hq, d));
             s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1));
-            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre], &[1, d, ff], ff));
-            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.up.weight")), &sc.up], &[1, d, ff], ff));
+            s.push(self.mm(tier, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, 1, d, ff));
+            s.push(self.mm(tier, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, 1, d, ff));
             s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, ff));
-            s.push(g.step(MATMUL, &[&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out], &[1, ff, d], d));
+            s.push(self.mm(tier, &sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, 1, ff, d));
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[d], d));
         }
         let last = c.n_layers as usize;
@@ -545,16 +576,11 @@ impl TalkerGen {
         let d = self.d();
         let v = self.cfg.vocab as usize;
         assert_eq!(hidden_row.len(), d);
-        let mut out = vec![0.0f32; v];
-        for (o, dst) in out.iter_mut().enumerate() {
-            let wrow = &self.codec_head[o * d..(o + 1) * d];
-            let mut acc = 0.0f32;
-            for k in 0..d {
-                acc += wrow[k] * hidden_row[k];
-            }
-            *dst = acc;
-        }
-        out
+        // `hostmath::matvec` is the AVX2+FMA, rayon-over-rows `matmul_abt`,
+        // not the scalar row loop this replaced - the same head shape
+        // (`[vocab, d_model]` against one hidden row) that call site's own doc
+        // records as hundreds of ms per token when left scalar.
+        model::hostmath::matvec(&self.codec_head, hidden_row, v, d)
     }
 }
 

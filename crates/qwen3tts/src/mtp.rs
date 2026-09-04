@@ -42,7 +42,24 @@ const ADD2: usize = 8;
 // Coalesced RMSNorm - the throughput twin of `RMSNORM`, selected by
 // `block::rms_variant` inside `block::rmsnorm_fwd`.
 const RMSNORM_ROWS: usize = 9;
+// Incremental KV-cache decode kernels (one new position vs the growing
+// per-frame cache) - the same five the Talker's own decode tape uses.
+const ATTN_DECODE_SCORES: usize = 10;
+const DECODE_SOFTMAX: usize = 11;
+const ATTN_DECODE_APPLY: usize = 12;
+const KV_APPEND: usize = 13;
+const ROPE_AT: usize = 14;
+// The fp32 GEMM tier `block::gemm_variant` selects between: the
+// workgroup-per-output-column decode GEMV (`matmul_gemv`, which
+// `gpu_core::upgrade` transparently substitutes `matmul_gemv_reg` for on a
+// capable device) and the 128x128 register-tiled GEMM. Both are bit-identical
+// to the naive `MATMUL` they replace; only the thread mapping differs.
+const MATMUL_GEMV: usize = 15;
+const MATMUL_REG3: usize = 16;
 
+// Appended, never reordered: `qwen3omnimoe` builds its own `Gpu` from this
+// exact table (`caps.rs`'s `new_like(qwen3tts::mtp::PIPELINES)`), so every
+// index above is part of this module's contract with that crate.
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("rmsnorm", kernels::RMSNORM),
@@ -54,7 +71,38 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("add2", kernels::ADD2),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("kv_append", kernels::KV_APPEND),
+    ("rope_at", kernels::ROPE_AT),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
+    ("matmul_reg3", kernels::MATMUL_REG3),
 ];
+
+/// One-row scratch for the incremental (KV-cached) decode tape. The
+/// full-recompute tape keeps a per-layer `Layer` because it holds all
+/// `num_code_groups` rows of every layer live in one submit; a decode step is
+/// strictly sequential over one row, so one shared set suffices.
+struct DecScratch {
+    xn1: DeviceBuffer,
+    q_pre: DeviceBuffer,
+    q: DeviceBuffer,
+    k_pre: DeviceBuffer,
+    k: DeviceBuffer,
+    v: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    xmid: DeviceBuffer,
+    xn2: DeviceBuffer,
+    gate_pre: DeviceBuffer,
+    up: DeviceBuffer,
+    h: DeviceBuffer,
+    proj: DeviceBuffer,
+    mlp_out: DeviceBuffer,
+    xn_final: DeviceBuffer,
+}
 
 struct Layer {
     xn1: DeviceBuffer,
@@ -85,6 +133,16 @@ pub struct MtpModel {
     scores: DeviceBuffer,
     xn_final: DeviceBuffer,
     fwd_steps: Vec<Step>,
+    // Incremental-decode state: a per-layer key/value cache holding this
+    // frame's `num_code_groups` positions, one-row scratch, and one PREBUILT
+    // tape per position. The MTP's sequence length is fixed at
+    // `num_code_groups`, so every position's uniforms are compile-time
+    // constants of the model - unlike the Talker, whose position runs to
+    // `max_t` and therefore rewrites dynamic uniform buffers per step.
+    kcache: Vec<DeviceBuffer>,
+    vcache: Vec<DeviceBuffer>,
+    dec: DecScratch,
+    dec_tapes: std::cell::RefCell<Option<Vec<Vec<Step>>>>,
     // CPU input-embedding tables (residual codebooks) and output heads.
     codec_embedding: Vec<Vec<f32>>, // [n_residual][vocab*embedding_dim]
     lm_head: Vec<Vec<f32>>,         // [n_residual][vocab*d_model]
@@ -164,6 +222,26 @@ fn sample_residual(row: &[f32], opts: &crate::pipeline::ResidualOpts, rng: &mut 
 }
 
 impl MtpModel {
+    /// The fp32 GEMM tier for this device - the same rule `qwen3::serve`,
+    /// `flux1`/`flux2` and `model::rowemit` use. Both fast kernels cooperate
+    /// across a workgroup, so a device without `workgroup_reductions`
+    /// (`backend-cpu`) keeps the naive reference, which that backend routes to
+    /// its AVX2 GEMM anyway. Every variant is bit-identical to that reference;
+    /// only the thread mapping differs.
+    fn gemm_tier(&self) -> block::GemmVariants {
+        if self.gpu.caps().workgroup_reductions {
+            block::GemmVariants::Fast { gemv: Some(MATMUL_GEMV), tiled: MATMUL_REG3 }
+        } else {
+            block::GemmVariants::Reference(MATMUL)
+        }
+    }
+
+    /// One `out[m,n] = x[m,k] @ w[n,k]^T` dispatch through [`Self::gemm_tier`].
+    fn mm(&self, tier: block::GemmVariants, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
+        let (kind, threads) = block::gemm_variant(tier, m, n);
+        self.gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+    }
+
     fn only_fwd_ids() -> KernelIds {
         // Forward needs rmsnorm/rms_inv, rope, gqa scores/apply/softmax, silu_mul.
         // No backward graph is built, so every backward slot is UNREGISTERED -
@@ -288,6 +366,32 @@ impl MtpModel {
                 h: st(n * ff),
             });
         }
+        let nht = (cfg.n_heads * t) as u64;
+        let dec = DecScratch {
+            xn1: st(d),
+            q_pre: st(hq),
+            q: st(hq),
+            k_pre: st(hkv),
+            k: st(hkv),
+            v: st(hkv),
+            scores: st(nht),
+            probs: st(nht),
+            ctx: st(hq),
+            xmid: st(d),
+            xn2: st(d),
+            gate_pre: st(ff),
+            up: st(ff),
+            h: st(ff),
+            proj: st(d),
+            mlp_out: st(d),
+            xn_final: st(d),
+        };
+        let mut kcache = Vec::new();
+        let mut vcache = Vec::new();
+        for _ in 0..cfg.n_layers {
+            kcache.push(st(n * hkv));
+            vcache.push(st(n * hkv));
+        }
         let mut m = MtpModel {
             cfg,
             t,
@@ -299,6 +403,10 @@ impl MtpModel {
             scores: st(bht2),
             xn_final: st(n * d),
             fwd_steps: Vec::new(),
+            kcache,
+            vcache,
+            dec,
+            dec_tapes: std::cell::RefCell::new(None),
             codec_embedding,
             lm_head,
             small_to_mtp_projection,
@@ -319,14 +427,9 @@ impl MtpModel {
         match &self.small_to_mtp_projection {
             Some((w, b)) => {
                 let d = self.cfg.d_model as usize;
-                let mut out = b.clone();
-                for o in 0..d {
-                    let wr = &w[o * e..(o + 1) * e];
-                    let mut acc = 0.0f32;
-                    for i in 0..e {
-                        acc += wr[i] * x[i];
-                    }
-                    out[o] += acc;
+                let mut out = model::hostmath::matvec(w, x, d, e);
+                for (o, bi) in out.iter_mut().zip(b) {
+                    *o += bi;
                 }
                 out
             }
@@ -345,6 +448,7 @@ impl MtpModel {
         let nh = c.n_heads;
         let nkv = c.n_kv_heads;
         let ids = Self::only_fwd_ids();
+        let tier = self.gemm_tier();
         let ga = Gqa {
             b: 1,
             t: n,
@@ -369,24 +473,9 @@ impl MtpModel {
                 d,
                 n,
             ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre],
-                &[n, d, hq],
-                n * hq,
-            ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre],
-                &[n, d, hkv],
-                n * hkv,
-            ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.xn1, w(&p("attn.wv.weight")), &lb.v],
-                &[n, d, hkv],
-                n * hkv,
-            ));
+            s.push(self.mm(tier, &lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre, n, d, hq));
+            s.push(self.mm(tier, &lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre, n, d, hkv));
+            s.push(self.mm(tier, &lb.xn1, w(&p("attn.wv.weight")), &lb.v, n, d, hkv));
             s.push(block::rmsnorm_fwd(
                 g,
                 &ids,
@@ -418,12 +507,7 @@ impl MtpModel {
                 &lb.probs,
                 &lb.ctx,
             ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.ctx, w(&p("attn.wo.weight")), &self.proj],
-                &[n, hq, d],
-                n * d,
-            ));
+            s.push(self.mm(tier, &lb.ctx, w(&p("attn.wo.weight")), &self.proj, n, hq, d));
             s.push(g.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             s.push(block::rmsnorm_fwd(
                 g,
@@ -434,18 +518,8 @@ impl MtpModel {
                 d,
                 n,
             ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre],
-                &[n, d, ff],
-                n * ff,
-            ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.xn2, w(&p("mlp.up.weight")), &lb.up],
-                &[n, d, ff],
-                n * ff,
-            ));
+            s.push(self.mm(tier, &lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre, n, d, ff));
+            s.push(self.mm(tier, &lb.xn2, w(&p("mlp.up.weight")), &lb.up, n, d, ff));
             s.push(block::swiglu_fwd(
                 g,
                 &ids,
@@ -454,12 +528,7 @@ impl MtpModel {
                 &lb.h,
                 n * ff,
             ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.h, w(&p("mlp.down.weight")), &self.mlp_out],
-                &[n, ff, d],
-                n * d,
-            ));
+            s.push(self.mm(tier, &lb.h, w(&p("mlp.down.weight")), &self.mlp_out, n, ff, d));
             s.push(g.step(
                 ADD2,
                 &[&lb.xmid, &self.mlp_out, &self.res[l + 1]],
@@ -480,13 +549,118 @@ impl MtpModel {
         s
     }
 
-    /// Run the decoder over an assembled `[num_code_groups, d_model]` input
-    /// embedding sequence and return the residual-codebook logits, shape
-    /// `[(num_code_groups - 1) * vocab]` (row `i` = logits for codebook `i+1`,
-    /// produced by `lm_head[i]` from decoder position `i+1`).
-    pub fn logits(&self, inputs_embeds: &[f32]) -> Vec<f32> {
+    /// One prebuilt incremental-decode tape per position `0..num_code_groups`.
+    ///
+    /// The same 5-layer block [`Self::forward_steps`] records, but for ONE new
+    /// row against a per-layer key/value cache: `O(1)` projections and
+    /// `O(pos)` attention instead of the whole `num_code_groups`-long sequence
+    /// re-projected from scratch. Every uniform is a constant of `(layer,
+    /// pos)`, so all `num_code_groups` tapes are recorded once and replayed -
+    /// no per-step tape rebuild and no per-step uniform rewrite.
+    ///
+    /// The cache needs no explicit reset between frames: position `pos`'s tape
+    /// always WRITES cache row `pos` before attending, and `attn_decode_*`
+    /// only ever read rows `0..=pos`, so the previous frame's rows above `pos`
+    /// are unreachable rather than stale.
+    fn build_dec_tapes(&self) -> Vec<Vec<Step>> {
+        let c = &self.cfg;
+        let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
+        let (hq, hkv) = (c.q_dim(), c.kv_dim());
+        let (nh, nkv) = (c.n_heads, c.n_kv_heads);
+        let half = hd / 2;
+        let cap = self.t;
+        let theta = c.rope_theta.to_bits();
+        let g = &self.gpu;
+        let sc = &self.dec;
+        let ids = Self::only_fwd_ids();
+        let tier = self.gemm_tier();
+        let gd = block::GqaDecodeIds {
+            kv_append: KV_APPEND,
+            attn_decode_scores: ATTN_DECODE_SCORES,
+            decode_softmax: DECODE_SOFTMAX,
+            attn_decode_apply: ATTN_DECODE_APPLY,
+        };
+        let w = |name: &str| self.ps.w(name);
+        (0..cap)
+            .map(|pos| {
+                let mut s: Vec<Step> = Vec::new();
+                for l in 0..c.n_layers as usize {
+                    let p = |name: &str| format!("blocks.{l}.{name}");
+                    s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1));
+                    s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, 1, d, hq));
+                    s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, 1, d, hkv));
+                    s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, 1, d, hkv));
+                    s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh));
+                    s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv));
+                    s.push(g.step(ROPE_AT, &[&sc.q], &[1, nh, hd, hq, 0, pos, theta], nh * half));
+                    s.push(g.step(ROPE_AT, &[&sc.k], &[1, nkv, hd, hkv, 0, pos, theta], nkv * half));
+                    s.extend(block::gqa_decode_step(
+                        g,
+                        &gd,
+                        nh,
+                        nkv,
+                        hd,
+                        pos,
+                        cap,
+                        &sc.q,
+                        &sc.k,
+                        &sc.v,
+                        &self.kcache[l],
+                        &self.vcache[l],
+                        &sc.scores,
+                        &sc.probs,
+                        &sc.ctx,
+                    ));
+                    s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, 1, hq, d));
+                    s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
+                    s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1));
+                    s.push(self.mm(tier, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, 1, d, ff));
+                    s.push(self.mm(tier, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, 1, d, ff));
+                    s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, ff));
+                    s.push(self.mm(tier, &sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, 1, ff, d));
+                    s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[d], d));
+                }
+                s.push(block::rmsnorm_fwd(g, &ids, &self.res[c.n_layers as usize], w("norm.weight"), &sc.xn_final, d, 1));
+                s
+            })
+            .collect()
+    }
+
+    /// Record (never read back) one incremental decode step: put `embed`'s
+    /// key/value into the cache at `pos`. Position 0 carries the Talker hidden
+    /// state, which no output head reads, so seeding the cache with it must
+    /// not cost a host round trip - `Gpu::read` is the only blocking call on
+    /// this path, and skipping it here keeps a frame at exactly one device
+    /// round trip per PREDICTED codebook.
+    fn dec_submit(&self, embed: &[f32], pos: u32) {
         let d = self.cfg.d_model as usize;
-        let v = self.cfg.vocab as usize;
+        assert_eq!(embed.len(), d, "dec_step embed must be [d_model]");
+        assert!(pos < self.t, "dec_step pos {pos} exceeds num_code_groups {}", self.t);
+        if self.dec_tapes.borrow().is_none() {
+            *self.dec_tapes.borrow_mut() = Some(self.build_dec_tapes());
+        }
+        let g = &self.gpu;
+        // `res[0]` is `[num_code_groups, d_model]`; a decode step uses row 0
+        // only, the same way the Talker's own cached step writes its `res[0]`.
+        // `Gpu::write` submits everything recorded before it first, so the
+        // previous position's tape can never read this row.
+        g.write(&self.res[0], bytemuck::cast_slice(embed));
+        let tapes = self.dec_tapes.borrow();
+        g.submit(&[], &tapes.as_ref().unwrap()[pos as usize]);
+    }
+
+    /// [`Self::dec_submit`] plus the readback: this position's final-norm
+    /// hidden state (`[d_model]`), which its output head then reads.
+    fn dec_step(&self, embed: &[f32], pos: u32) -> Vec<f32> {
+        self.dec_submit(embed, pos);
+        self.gpu.read(&self.dec.xn_final, self.cfg.d_model as usize)
+    }
+
+    /// Run the decoder over an assembled `[num_code_groups, d_model]` input
+    /// embedding sequence and return the final-norm hidden states,
+    /// `[num_code_groups, d_model]`.
+    fn hidden(&self, inputs_embeds: &[f32]) -> Vec<f32> {
+        let d = self.cfg.d_model as usize;
         let t = self.t as usize;
         assert_eq!(
             inputs_embeds.len(),
@@ -496,22 +670,51 @@ impl MtpModel {
         self.gpu
             .write(&self.res[0], bytemuck::cast_slice(inputs_embeds));
         self.gpu.submit(&[], &self.fwd_steps);
-        let hidden = self.gpu.read(&self.xn_final, t * d);
+        self.gpu.read(&self.xn_final, t * d)
+    }
+
+    /// `lm_head[idx]` applied to one final-norm hidden row -> `[vocab]`.
+    ///
+    /// `hostmath::matvec` is the AVX2+FMA, rayon-over-rows `matmul_abt`; the
+    /// scalar `for o { for k { } }` loop this replaced was the single largest
+    /// host term in a real synth run (`[2048, 1024]` per head, 15 heads per
+    /// residual step, 15 residual steps per audio frame).
+    fn head_row(&self, idx: usize, hidden_row: &[f32]) -> Vec<f32> {
+        let d = self.cfg.d_model as usize;
+        let v = self.cfg.vocab as usize;
+        model::hostmath::matvec(&self.lm_head[idx], hidden_row, v, d)
+    }
+
+    /// Run the decoder over an assembled `[num_code_groups, d_model]` input
+    /// embedding sequence and return the residual-codebook logits, shape
+    /// `[(num_code_groups - 1) * vocab]` (row `i` = logits for codebook `i+1`,
+    /// produced by `lm_head[i]` from decoder position `i+1`).
+    ///
+    /// Every head is evaluated here, which is what a caller wanting the whole
+    /// logit block (parity dumps, tests) asks for. The autoregressive
+    /// generation loop needs exactly ONE of those rows per step and must use
+    /// [`Self::logits_at`] instead.
+    pub fn logits(&self, inputs_embeds: &[f32]) -> Vec<f32> {
+        let d = self.cfg.d_model as usize;
+        let v = self.cfg.vocab as usize;
+        let t = self.t as usize;
+        let hidden = self.hidden(inputs_embeds);
         let mut out = vec![0.0f32; (t - 1) * v];
         for i in 1..t {
-            let h = &hidden[i * d..(i + 1) * d];
-            let head = &self.lm_head[i - 1];
-            let dst = &mut out[(i - 1) * v..i * v];
-            for (o, dv) in dst.iter_mut().enumerate() {
-                let wrow = &head[o * d..(o + 1) * d];
-                let mut acc = 0.0f32;
-                for k in 0..d {
-                    acc += wrow[k] * h[k];
-                }
-                *dv = acc;
-            }
+            let row = self.head_row(i - 1, &hidden[i * d..(i + 1) * d]);
+            out[(i - 1) * v..i * v].copy_from_slice(&row);
         }
         out
+    }
+
+    /// The single logit row [`Self::logits`] would place at `(k - 1) * vocab`:
+    /// decoder position `k`'s hidden state through `lm_head[k - 1]`.
+    /// Identical arithmetic, `num_code_groups - 1` times less of it - the
+    /// generation loop discards every other row.
+    fn logits_at(&self, inputs_embeds: &[f32], k: usize) -> Vec<f32> {
+        let d = self.cfg.d_model as usize;
+        let hidden = self.hidden(inputs_embeds);
+        self.head_row(k - 1, &hidden[k * d..(k + 1) * d])
     }
 
     /// Assemble the input-embedding sequence for one frame. `talker_hidden` is the
@@ -570,12 +773,81 @@ impl MtpModel {
     }
 
     /// Same as [`Self::generate_residuals`], with optional independent sampling
-    /// on the residual codebooks (`residual = None` is byte-for-byte the old
-    /// greedy behavior; `rng` is only consulted when `residual.is_some()`).
+    /// on the residual codebooks (`residual = None` is the greedy argmax;
+    /// `rng` is only consulted when `residual.is_some()`).
     /// See `crate::pipeline::ResidualOpts` / `GenOpts::residual` for why this
     /// exists: the reference's own `subtalker_*` config keys sample these
     /// codebooks too, and they carry most of the acoustic detail.
+    ///
+    /// **KV-cached**: one incremental decoder step per position, not one full
+    /// re-forward of the growing `[num_code_groups, d_model]` sequence per
+    /// residual codebook. Algebraically the same thing - attention is causal,
+    /// so position `k`'s hidden state only ever depended on positions `0..=k`,
+    /// which the cache holds exactly - but `num_code_groups` times less
+    /// decoder arithmetic per audio frame. Gated against the recompute it
+    /// replaces by `kv_cached_residuals_match_the_full_recompute`; the
+    /// recompute itself is kept as [`Self::generate_residuals_recompute`].
     pub fn generate_residuals_with(
+        &self,
+        talker_hidden: &[f32],
+        cb0_embed: &[f32],
+        residual: Option<&crate::pipeline::ResidualOpts>,
+        rng: &mut data::rng::Rng,
+    ) -> (Vec<u32>, Vec<f32>) {
+        let e = self.cfg.embedding_dim as usize;
+        let v = self.cfg.vocab as usize;
+        let nres = self.t as usize - 1; // 15
+        assert_eq!(talker_hidden.len(), e);
+        assert_eq!(cb0_embed.len(), e);
+
+        let mut codes = vec![0u32; nres];
+        // `res_sum` feeds back into the TALKER's own embedding stream
+        // (`pipeline::generate_codes`'s `feed`), which is `embedding_dim`
+        // wide -- NOT this MTP's internal `d_model`. Accumulate the RAW
+        // (unprojected) codec_embedding rows, matching `codec_embed`'s own
+        // contract above.
+        let mut res_sum = vec![0.0f32; e];
+
+        // pos 0: the Talker hidden state. No head reads it; it is decoded only
+        // to put its key/value into the cache.
+        let _ = self.dec_step(&self.project_to_hidden(talker_hidden), 0);
+        // pos k (1..=nres): input is codebook (k-1)'s embedding (pos 1 = cb0);
+        // `lm_head[k-1]` reads pos k to predict codebook k.
+        let mut input_raw = cb0_embed.to_vec();
+        for k in 1..=nres {
+            let hidden = self.dec_step(&self.project_to_hidden(&input_raw), k as u32);
+            let row = self.head_row(k - 1, &hidden);
+            let best = match residual {
+                Some(ro) => sample_residual(&row, ro, rng),
+                None => {
+                    let mut best = 0usize;
+                    for j in 1..v {
+                        if row[j] > row[best] {
+                            best = j;
+                        }
+                    }
+                    best
+                }
+            };
+            codes[k - 1] = best as u32;
+            // codec_embedding[k-1] embeds codebook k.
+            let r = &self.codec_embedding[k - 1][best * e..(best + 1) * e];
+            for j in 0..e {
+                res_sum[j] += r[j];
+            }
+            if k < nres {
+                input_raw = r.to_vec();
+            }
+        }
+        (codes, res_sum)
+    }
+
+    /// The `O(num_code_groups^2)` full-recompute residual generation
+    /// [`Self::generate_residuals_with`] replaced: one whole re-forward of the
+    /// growing input-embedding sequence per residual codebook. Kept as the
+    /// reference the cached path is gated against, and as the shape
+    /// `MtpModel::logits` still serves for parity dumps.
+    pub fn generate_residuals_recompute(
         &self,
         talker_hidden: &[f32],
         cb0_embed: &[f32],
@@ -595,16 +867,12 @@ impl MtpModel {
         emb[d..2 * d].copy_from_slice(&self.project_to_hidden(cb0_embed));
 
         let mut codes = vec![0u32; nres];
-        // `res_sum` feeds back into the TALKER's own embedding stream
-        // (`pipeline::generate_codes`'s `feed`), which is `embedding_dim`
-        // wide -- NOT this MTP's internal `d_model`. Accumulate the RAW
-        // (unprojected) codec_embedding rows, matching `codec_embed`'s own
-        // contract above.
         let mut res_sum = vec![0.0f32; e];
         // k = codebook index being predicted (1..=15); head index = k-1; read pos = k.
         for k in 1..=nres {
-            let logits = self.logits(&emb); // [(t-1)*v]
-            let row = &logits[(k - 1) * v..k * v];
+            // Only row `k-1` of the `[(t-1), vocab]` logit block is read here,
+            // so only that row is computed.
+            let row = &self.logits_at(&emb, k)[..];
             let best = match residual {
                 Some(ro) => sample_residual(row, ro, rng),
                 None => {
@@ -803,6 +1071,49 @@ mod tests {
         assert_eq!(codes.len(), 3); // num_code_groups(4) - 1
         assert_eq!(res_sum.len(), e, "feedback embedding must stay Talker-width (e), not d_model");
         assert!(res_sum.iter().all(|x| x.is_finite()));
+    }
+
+    /// The KV-cached residual generation must reproduce the full-recompute one
+    /// it replaced: the codes bit-for-bit (they are argmax/sample decisions,
+    /// and a single flipped code changes the audio), and the feedback
+    /// embedding to within fp reassociation. Attention is causal, so this is a
+    /// theorem about the cache, not a tolerance to tune - if it ever fails,
+    /// the cache is wrong, not imprecise.
+    ///
+    /// Run at BOTH MTP shapes the checkpoint family has: `tiny` (0.6B-like,
+    /// `embedding_dim == d_model`, projection Identity) and `tiny_projected`
+    /// (1.7B-like, `embedding_dim != d_model`, a real
+    /// `small_to_mtp_projection` on every position's input).
+    #[test]
+    fn kv_cached_residuals_match_the_full_recompute() {
+        if gpu_disabled() {
+            return;
+        }
+        for cfg in [MtpConfig::tiny(), MtpConfig::tiny_projected()] {
+            let e = cfg.embedding_dim as usize;
+            let nres = cfg.num_code_groups as usize - 1;
+            let m = MtpModel::new_synthetic_on(gpu_core::testgpu::dev(PIPELINES), cfg, 11);
+            let mut rng = data::rng::Rng::new(3);
+            let th: Vec<f32> = (0..e).map(|_| rng.next_gaussian() as f32 * 0.5).collect();
+            let cb0: Vec<f32> = (0..e).map(|_| rng.next_gaussian() as f32 * 0.5).collect();
+
+            let (c_cached, r_cached) = m.generate_residuals(&th, &cb0);
+            let (c_full, r_full) =
+                m.generate_residuals_recompute(&th, &cb0, None, &mut data::rng::Rng::new(0));
+            assert_eq!(c_cached.len(), nres);
+            assert_eq!(c_cached, c_full, "KV cache changed the residual codes");
+            let err = r_cached
+                .iter()
+                .zip(&r_full)
+                .fold(0.0f32, |mx, (a, b)| mx.max((a - b).abs()));
+            assert!(err < 1e-4, "cached res_sum diverges from the recompute: {err}");
+
+            // Run it a second time: the cache carries no state between frames
+            // (each position's tape overwrites its own cache row before
+            // attending), so a repeated call must give the identical answer.
+            let (c_again, _) = m.generate_residuals(&th, &cb0);
+            assert_eq!(c_again, c_cached, "a second frame saw stale KV-cache rows");
+        }
     }
 }
 
