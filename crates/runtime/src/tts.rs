@@ -31,6 +31,7 @@
 //! never wedges or faults the session. Fail-fast validation of the checkpoint
 //! itself happens once, in [`Qwen3TtsSynthModel::load`], not per request.
 
+use capability::CancelToken;
 use qwen3tts::{GenOpts, TtsPaths};
 
 use crate::{SynthModel, SynthRequest};
@@ -127,6 +128,11 @@ impl Qwen3TtsSynthModel {
             return Err("qwen3tts: empty synthesis text".to_string());
         }
         let language = req.language.clone().unwrap_or_else(|| self.language.clone());
+        // The `SynthModel` seam has no cancellation channel (see the module
+        // doc's note on the missing error channel), so every call runs to
+        // completion - the same unarmed-token convention `tts_cli.rs` uses
+        // for its own foreground one-shot calls.
+        let cancel = CancelToken::default();
         match &req.ref_audio {
             // Voice clone: x-vector timbre from the reference wav, and the ICL
             // path on top of it whenever a transcript came with it.
@@ -138,8 +144,9 @@ impl Qwen3TtsSynthModel {
                 req.ref_text.as_deref().unwrap_or(""),
                 &language,
                 None,
+                &cancel,
             ),
-            None => qwen3tts::pipeline::synth(&self.paths, &self.opts, &req.text, &language),
+            None => qwen3tts::pipeline::synth(&self.paths, &self.opts, &req.text, &language, &cancel),
         }
     }
 }
