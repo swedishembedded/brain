@@ -53,8 +53,14 @@ use std::sync::Arc;
 
 pub mod pump;
 pub mod sample;
+/// The real Qwen3-TTS [`SynthModel`] adapter. Behind the `qwen3tts` feature so the
+/// default build never links the voice stack - see the module's own doc.
+#[cfg(feature = "qwen3tts")]
+pub mod tts;
 
 pub use pump::{AudioStreamPump, StreamPump};
+#[cfg(feature = "qwen3tts")]
+pub use tts::Qwen3TtsSynthModel;
 
 /// How many PCM samples each streamed `audio_chunk` carries (24 kHz · 1 s). The
 /// whole waveform is produced up front, then sliced into chunks of this size.
@@ -100,13 +106,17 @@ pub struct SynthRequest {
 /// [`InferModel`]). The controller calls [`synth`](SynthModel::synth) once per
 /// request to produce the whole waveform, which is then streamed out in chunks.
 ///
-/// A real Qwen3-TTS model plugs in here by wrapping [`qwen3tts::pipeline`]: an adapter
-/// holds the loaded [`qwen3tts::TtsPaths`] + [`qwen3tts::GenOpts`] and, in `synth`, calls
+/// The real Qwen3-TTS implementation is `tts::Qwen3TtsSynthModel`: it holds a
+/// resolved `qwen3tts::TtsPaths` + `qwen3tts::GenOpts` and, in `synth`, calls
 /// `qwen3tts::pipeline::synth` (no reference) or `qwen3tts::pipeline::clone` (with
-/// `ref_audio`/`ref_text`), returning the 24 kHz waveform. It is intentionally
-/// NOT wired into `brain run` here to keep the runtime's build/deps light (the
-/// TTS stack pulls the whole codec+speaker+talker graph); the seam + a
-/// [`FakeSynthModel`] test is sufficient.
+/// `ref_audio`/`ref_text`), returning the 24 kHz waveform.
+///
+/// It lives behind the **`qwen3tts` Cargo feature**, because `brain-qwen3tts`
+/// pulls the whole codec+speaker+talker+MTP graph and this crate's default build
+/// is deliberately light. Without the feature the dependency is not linked at
+/// all and [`FakeSynthModel`] is the only implementation compiled in - exactly
+/// the state this seam shipped in. `brain serve --stdio` registers the real
+/// adapter when the feature is on and `BRAIN_QWEN3TTS_WEIGHTS` is set.
 pub trait SynthModel {
     /// Synthesize a waveform for `req`. The companion [`sample_rate`] gives its
     /// rate (Hz).

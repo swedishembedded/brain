@@ -1772,6 +1772,7 @@ dependencies = [
  "brain-forecast",
  "brain-gpt2",
  "brain-hfsm",
+ "brain-qwen3tts",
  "brain-yolov8",
  "serde_json",
 ]

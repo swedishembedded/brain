@@ -9,6 +9,16 @@ description = "Brain runtime: event-driven HSM controller wiring inference/detec
 name = "runtime"
 path = "src/lib.rs"
 
+[features]
+# The real Qwen3-TTS `SynthModel` adapter (`runtime::tts::Qwen3TtsSynthModel`).
+# OFF by default: `brain-qwen3tts` drags in the entire voice stack (the Mimi-style
+# codec, the ECAPA speaker encoder, the Talker/MTP decoders and their tokenizer),
+# and this crate's default build is deliberately the light one - the JSONL codec,
+# the HSM engine and the two small model adapters. Same shape as `brain-cli`'s
+# `vulkan-coopmat = ["dep:brain-vulkan"]`: one optional workspace dependency,
+# named by the feature that turns it on, nothing else changed by enabling it.
+qwen3tts = ["dep:brain-qwen3tts"]
+
 [dependencies]
 # Minimal deps: the JSONL codec, the generic HSM engine, the GPT model + its
 # checkpoint loader. A real YOLO `DetectModel` adapter (brain-yolo) wires in
@@ -22,6 +32,8 @@ brain-checkpoint.workspace = true
 brain-forecast.workspace = true
 brain-fcbench.workspace = true
 serde_json.workspace = true
+# Opt-in only (feature `qwen3tts`) - see the [features] note above.
+brain-qwen3tts = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Integration tests drive the controller with a real tiny GPT, a real tiny YOLO,
