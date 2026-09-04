@@ -649,12 +649,28 @@ impl Codec {
             // released checkpoints). `gqa_fwd_win` degenerates to `gqa_fwd`'s
             // plain causal mask exactly when `sliding_window >= t`, so this is
             // the correct dispatch unconditionally, not a `decode_omni`-only
-            // special case. NOTE: `enc_transformer` below has the identical
-            // gap (its own `EncoderConfig::sliding_window`, 250, is likewise
-            // parsed and never applied) -- left unfixed here, out of this
-            // change's scope (the encode path is not on Qwen3-Omni's call
-            // path at all).
-            self.gpu.submit(&[], &block::gqa_fwd_win(&self.gpu, GQA_SCORES_WIN, &ids, &ga, self.cfg.sliding_window, &q, &k, &v, &scores, &probs, &ctx));
+            // special case. NOTE: `enc_transformer` below still has the
+            // identical gap (its own `EncoderConfig::sliding_window`, 250, is
+            // likewise parsed and never applied, so an encode of more than
+            // 250 encoder frames -- 10 s of audio at the pre-downsample 25 Hz
+            // rate -- over-attends the same way this used to). Left unfixed
+            // deliberately: the encode path's only correctness witness is a
+            // reference code-match golden that is far shorter than 250 frames,
+            // so the fix cannot currently be shown red-then-green the way this
+            // one was, and shipping it blind would put an unverified change
+            // under an existing 100%-code-match parity claim.
+            //
+            // `0` means "unset" (a hand-built `CodecConfig::default()`, never
+            // a parsed one - `CodecConfig::from_json` defaults the field to
+            // 72) and is normalized to `t` (unbounded). Passing a literal 0
+            // to the kernel masks EVERY key (`i-j >= 0` always holds), which
+            // `attn_softmax` then turns into a uniform distribution over the
+            // whole row, future keys included - a non-causal result from a
+            // config that simply never set the field. `decode_stream::front`
+            // applies the same normalization, so the two implementations of
+            // this transformer agree on every config, not just parsed ones.
+            let window = if self.cfg.sliding_window == 0 { t } else { self.cfg.sliding_window };
+            self.gpu.submit(&[], &block::gqa_fwd_win(&self.gpu, GQA_SCORES_WIN, &ids, &ga, window, &q, &k, &v, &scores, &probs, &ctx));
             let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), t, hq, d);
             let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), t * d, d, 1);
             x = self.add2(&x, &attn, t * d);

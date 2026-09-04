@@ -7,7 +7,8 @@
 //! only its new audio (no warmup re-decode).
 //!
 //! Split:
-//!  * **front** (RVQ dequant -> `pre_conv` -> 8-layer causal transformer ->
+//!  * **front** (RVQ dequant -> `pre_conv` -> 8-layer sliding-window causal
+//!    transformer (`CodecConfig::sliding_window`) ->
 //!    `pre_transformer.output_proj`) is *causal*, so its output for frames
 //!    `[a,b)` is independent of future frames — computed once over all codes and
 //!    sliced. Cheap (runs over `T` frames, not the upsampled length).
@@ -368,6 +369,19 @@ fn front(w: &W, cfg: &CodecConfig, codes: &[i64], t: usize) -> Vec<f32> {
     let theta = cfg.rope_theta;
     let eps = cfg.rms_norm_eps;
     assert_eq!(nh, nkv, "decode_stream assumes no GQA in codec transformer");
+    // Sliding-window causal, NOT plain causal. The codec's pre_transformer is
+    // Mimi-derived: key `j` is masked out once `i - j >= sliding_window` on
+    // every forward call, which is what `crate::model::Codec::transformer`
+    // dispatches (`gqa_scores_win`). A plain causal loop agrees with that only
+    // while `t <= sliding_window` (72 frames == 5.76 s at 12.5 Hz on the
+    // released checkpoints), so anything longer used to attend to context the
+    // reference never exposed - silently, with no length or shape error, and
+    // worse the further past the first window a frame sat.
+    //
+    // `0` means "unset" (a hand-built `CodecConfig::default()`, never a parsed
+    // one - `CodecConfig::from_json` defaults this field to 72), and is taken
+    // as unbounded rather than as "mask everything".
+    let window = if cfg.sliding_window == 0 { t } else { cfg.sliding_window as usize };
 
     for layer in 0..cfg.num_hidden_layers as usize {
         let p = |leaf: &str| format!("pre_transformer.layers.{layer}.{leaf}");
@@ -377,13 +391,22 @@ fn front(w: &W, cfg: &CodecConfig, codes: &[i64], t: usize) -> Vec<f32> {
         let v = matmul(&xn, &w[&p("self_attn.v_proj.weight")], t, hidden, hkv);
         hostmath::rope_neox(&mut q, t, nh, hd, 0, theta);
         hostmath::rope_neox(&mut k, t, nkv, hd, 0, theta);
-        // attention per head (full causal).
+        // Attention per head, sliding-window causal: query `i` sees keys
+        // `lo..=i` with `lo = i+1-window` (clamped at 0), so the masked-out
+        // keys are simply never scored rather than scored and then set to
+        // -inf - the softmax below therefore normalizes over exactly the live
+        // keys, matching `gqa_scores_win` + `attn_softmax`. When
+        // `window > i` this is byte-for-byte the previous `0..=i` loop
+        // (same keys, same ascending order, same accumulation), which is why
+        // short clips are unchanged.
         let mut ctx = vec![0.0f32; t * hq];
         for h in 0..nh {
             for i in 0..t {
+                let lo = (i + 1).saturating_sub(window);
                 let qv = &q[(i * nh + h) * hd..(i * nh + h) * hd + hd];
-                let mut scores = vec![f32::NEG_INFINITY; i + 1];
-                for (j, sc) in scores.iter_mut().enumerate() {
+                let mut scores = vec![f32::NEG_INFINITY; i + 1 - lo];
+                for (off, sc) in scores.iter_mut().enumerate() {
+                    let j = lo + off;
                     let kv = &k[(j * nkv + h) * hd..(j * nkv + h) * hd + hd];
                     *sc = qv.iter().zip(kv).map(|(a, b)| a * b).sum::<f32>() * scale;
                 }
@@ -394,7 +417,8 @@ fn front(w: &W, cfg: &CodecConfig, codes: &[i64], t: usize) -> Vec<f32> {
                     sum += *s;
                 }
                 let dst = &mut ctx[(i * nh + h) * hd..(i * nh + h) * hd + hd];
-                for (j, &pj) in scores.iter().enumerate() {
+                for (off, &pj) in scores.iter().enumerate() {
+                    let j = lo + off;
                     let p = pj / sum;
                     let vv = &v[(j * nkv + h) * hd..(j * nkv + h) * hd + hd];
                     for d in 0..hd {
@@ -704,7 +728,12 @@ mod tests {
         let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
         let dec = StreamingCodecDecoder::load(&path);
         let nq = dec.cfg.num_quantizers as usize;
-        let t = 16usize; // small T (< sliding_window) so attention is plain causal
+        // Small T (< sliding_window) so the sliding-window and plain causal
+        // masks coincide: this test's job is the streaming carry's numerical
+        // exactness, and its 1e-6 bound is calibrated for a 24576-sample
+        // waveform. `long_form_parity_vs_codec` below is the one that puts a T
+        // past the window under test.
+        let t = 16usize;
         let mut seed = Lcg::new(3);
         let codes: Vec<u32> = (0..t * nq).map(|_| seed.next_u32() % 256).collect();
 
@@ -724,6 +753,48 @@ mod tests {
         // ~2.4e-3 max-abs on [-1,1] audio: fp reduction-order + erf-approx
         // differences vs the gpu_core path, not an algorithmic mismatch.
         assert!(d_ref < 5e-3, "parity vs Codec::decode too large: {d_ref}");
+    }
+
+    /// The same host-vs-device parity, on REAL weights, at a `T` PAST the
+    /// checkpoint's own `sliding_window` (72 frames == 5.76 s of audio) -
+    /// where a sliding-window mask and a plain causal mask are finally
+    /// different objects and the comparison actually discriminates.
+    ///
+    /// Separate from `e2e_parity_vs_codec` on purpose rather than raising that
+    /// test's `t`: its chunked-vs-full bound (1e-6) is calibrated for a short
+    /// waveform, and the streaming transposed-conv carry reassociates its sums
+    /// relative to the one-shot path, so that bound legitimately loosens with
+    /// length (measured 3.0e-6 at T=216) for reasons that have nothing to do
+    /// with attention. Only the one comparison the window affects is made
+    /// here, and only at `chunk = 0`.
+    ///
+    /// Unconditional (synthetic-weight) coverage of the same property lives in
+    /// `crates/mimi/tests/long_form_window.rs`; this is the real-checkpoint
+    /// confirmation, opt-in because it decodes ~12 s of audio through the full
+    /// SEANet stack twice.
+    #[test]
+    #[ignore]
+    fn long_form_parity_vs_codec() {
+        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
+        let dec = StreamingCodecDecoder::load(&path);
+        let nq = dec.cfg.num_quantizers as usize;
+        let window = dec.cfg.sliding_window as usize;
+        assert!(window > 0, "checkpoint config carries no sliding_window");
+        let t = 2 * window; // a full window past the boundary
+        let mut seed = Lcg::new(11);
+        let codes: Vec<u32> = (0..t * nq).map(|_| seed.next_u32() % 256).collect();
+
+        let host = dec.decode_streaming(&codes, 0);
+        let device = crate::model::Codec::load_inference(&path).decode(&codes);
+        assert_eq!(host.len(), device.len(), "length mismatch vs Codec::decode");
+        let d = host.iter().zip(&device).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        eprintln!("long-form (T={t}, window={window}) host vs device max-abs = {d:.3e} ({} samples)", host.len());
+        // Same ceiling as the in-window `e2e_parity_vs_codec` above: if the
+        // two implementations disagreed about the MASK rather than about fp
+        // reduction order, the gap would be orders of magnitude larger than
+        // this (the synthetic-weight twin measured 2.6e-3 against a 7.5e-6
+        // noise floor for exactly that defect).
+        assert!(d < 5e-3, "long-form parity vs Codec::decode too large: {d}");
     }
 
     /// Wall-clock of the rayon decoder. Run in RELEASE:
