@@ -127,6 +127,14 @@ const MATMUL_REG3: usize = 50;
 // `decode_steps`'s own call site.
 const SPLICE_ADD_OFFSET_SRC: usize = 53;
 const SCALE_ROW: usize = 54;
+// The coalesced RMSNorm BACKWARD-x twin of `rmsnorm_dx` (index 4), the
+// backward-half counterpart of `rmsnorm_rows` (index 47). `rmsnorm_dx.wgsl`
+// gives thread `t` row `t` and walks that whole row TWICE (once for
+// `sum(x^2)`, once for `sum(dy*w*x)`), so a warp's 32 loads are `dim` floats
+// apart; `rmsnorm_dx_rows` splits the same two reductions across 64 threads of
+// one workgroup and is coalesced by construction. Appended at the true end so
+// every const above stays put.
+const RMSNORM_DX_ROWS: usize = 55;
 
 const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -190,6 +198,11 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // `enable_weighted_loss`) - appended here (and only here) is the whole
     // opt-in, same convention as `gradnorm_part`/`clip_coef_wg` above.
     ("scale_row", kernels::SCALE_ROW),
+    // Coalesced RMSNorm backward-x - `block::rmsnorm_bwd` selects it over
+    // `rmsnorm_dx` through the same `block::rms_variant` policy the forward
+    // half uses for `rmsnorm_rows`. Registering it here is the whole opt-in;
+    // `rmsnorm_dx_variant_agreement` below is the numerical gate that buys it.
+    ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -1180,7 +1193,7 @@ impl Qwen {
             rmsnorm: RMSNORM,
             rms_inv: RMS_INV,
             rmsnorm_dx: RMSNORM_DX,
-            rmsnorm_dx_rows: block::UNREGISTERED,
+            rmsnorm_dx_rows: RMSNORM_DX_ROWS,
             rmsnorm_dw: RMSNORM_DW,
             rope: ROPE,
             rope_bwd: ROPE_BWD,
@@ -3952,5 +3965,59 @@ mod kv_tests {
         let wrong = model.step_embed_mrope(&row, &cos, &sin, Some(1));
         let diff = maxabs(&correct, &wrong);
         assert!(diff > 1e-6, "deepstack_row=0 vs deepstack_row=1 produced identical output (diff={diff:e}) -- the index is not load-bearing");
+    }
+}
+
+/// The coalesced RMSNorm BACKWARD-x this model now selects (`rmsnorm_dx_rows`,
+/// via `block::rms_variant` inside `block::rmsnorm_bwd`) is NOT bit-identical
+/// to the per-element `rmsnorm_dx` it replaced: the row's two reductions
+/// (`sum(x^2)` and `sum(dy*w*x)`) fold as 64 partials in a different order.
+/// It was adopted for throughput, so what it computes is gated here, against a
+/// HOST reference, at the `(rows, dim)` pairs THIS model's own backward tape
+/// really dispatches - including the narrow per-head QK-norm rows, which are
+/// both where the two reduction orders differ most and the whole reason the
+/// swap is worth making.
+///
+/// Every gradient this crate produces flows through that kernel, and so does
+/// every gradient of every model that embeds this decoder (`qwen3tts`'s
+/// Talker is `qwen3::Qwen` verbatim), which is why the gate is a numerical
+/// comparison and not merely "the pipeline compiled".
+#[cfg(test)]
+mod rmsnorm_dx_variant_agreement {
+    use super::*;
+
+    /// The slot really names the coalesced kernel. A registration this model
+    /// gets wrong by one index does not fail - it silently dispatches a
+    /// DIFFERENT kernel through the RMSNorm-backward bindings, and the four
+    /// buffers happen to line up for several neighbours in this list.
+    #[test]
+    fn the_registered_slot_names_the_coalesced_kernel() {
+        assert_eq!(STATIC_PIPELINES[Qwen::ids().rmsnorm_dx_rows].0, "rmsnorm_dx_rows");
+    }
+
+    #[test]
+    fn the_backward_tape_norms_match_the_host_reference() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        // Every `(rows, dim)` `build_backward_steps` dispatches an RMSNorm
+        // backward at, read off a real published config rather than written
+        // down: the three d_model-wide block norms at `rows = b*t`, and the
+        // two per-head QK-norms at `rows = b*t*n_heads` / `b*t*n_kv_heads`
+        // over a `head_dim`-wide row.
+        let c = QwenConfig::qwen3_0_6b();
+        let n = 8 * 128u32; // a real training microbatch: b=8, t=128
+        let shapes = [
+            (n, c.d_model, "ln1/ln2/final norm at training width"),
+            (n * c.n_heads, c.head_dim, "attn.q_norm"),
+            (n * c.n_kv_heads, c.head_dim, "attn.k_norm"),
+            // The gradcheck fixture's own shape: tiny rows AND a dim far
+            // below the 64-thread workgroup, so the cooperative kernel's
+            // idle-lane tail is covered by the same gate the big shapes are.
+            (12, QwenConfig::tiny().d_model, "the gradcheck fixture's block norms"),
+            (12 * 4, QwenConfig::tiny().head_dim, "the gradcheck fixture's QK-norms"),
+        ];
+        let gpu = gpu_core::testgpu::dev(pipelines());
+        block::assert_rmsnorm_dx_variant_agrees(&gpu, &Qwen::ids(), &shapes);
     }
 }
