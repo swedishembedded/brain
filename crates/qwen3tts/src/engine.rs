@@ -77,12 +77,23 @@ pub struct ResidentEngine {
     speaker_path: String,
     /// Lazily loaded ECAPA x-vector encoder (only the clone path needs it).
     speaker: Option<ecapatdnn::SpeakerEncoder>,
-    /// The reference voice conditioning computed for one wav, kept across
-    /// calls: `(wav path, ref_text, x-vector, ICL codes)`. Re-encoding a
-    /// reference clip is the single most expensive thing a clone does that
-    /// does not depend on the request, so a server must do it once.
-    ref_cache: Option<(String, String, Vec<f32>, Option<Vec<u32>>)>,
+    /// The reference-voice conditioning computed for one wav, kept across
+    /// calls. Re-encoding a reference clip is the single most expensive thing
+    /// a clone does that does not depend on the request, so a server must do
+    /// it once.
+    ref_cache: Option<RefVoice>,
     chunk_frames: usize,
+}
+
+/// One reference voice's conditioning: what it was computed FROM (so a
+/// different `(wav, transcript)` pair invalidates it) and the two expensive
+/// results - the ECAPA x-vector and, for the in-context path, the reference
+/// clip's own codec codes.
+struct RefVoice {
+    wav_path: String,
+    text: String,
+    xvec: Vec<f32>,
+    codes: Option<Vec<u32>>,
 }
 
 impl ResidentEngine {
@@ -192,9 +203,9 @@ impl ResidentEngine {
     ) -> Result<Vec<f32>, String> {
         let language_id = self.sp.language_id(lang);
         self.ensure_ref(ref_wav, ref_text)?;
-        let (_, _, xvec, ref_code) = self.ref_cache.as_ref().expect("ensure_ref populated the cache");
-        let xvec = xvec.clone();
-        let ref_code = ref_code.clone();
+        let cached = self.ref_cache.as_ref().expect("ensure_ref populated the cache");
+        let xvec = cached.xvec.clone();
+        let ref_code = cached.codes.clone();
         let (role_ids, text_ids) = self.text_ids(text)?;
 
         let prompt = match &ref_code {
@@ -214,7 +225,7 @@ impl ResidentEngine {
     /// Populate [`Self::ref_cache`] for `(ref_wav, ref_text)` if it does not
     /// already hold exactly that pair.
     fn ensure_ref(&mut self, ref_wav: &str, ref_text: &str) -> Result<(), String> {
-        if matches!(&self.ref_cache, Some((w, t, _, _)) if w == ref_wav && t == ref_text) {
+        if matches!(&self.ref_cache, Some(r) if r.wav_path == ref_wav && r.text == ref_text) {
             return Ok(());
         }
         if !std::path::Path::new(&self.speaker_path).exists() {
@@ -232,7 +243,7 @@ impl ResidentEngine {
             let sr = codec.cfg.input_sample_rate;
             Some(codec.encode(&audio::resample_linear(&wav.samples, wav.sample_rate, sr)))
         };
-        self.ref_cache = Some((ref_wav.to_string(), ref_text.to_string(), xvec, ref_code));
+        self.ref_cache = Some(RefVoice { wav_path: ref_wav.to_string(), text: ref_text.to_string(), xvec, codes: ref_code });
         Ok(())
     }
 
