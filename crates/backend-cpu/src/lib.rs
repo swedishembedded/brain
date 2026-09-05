@@ -995,7 +995,28 @@ impl Backend for CpuBackend {
     }
 
     fn caps(&self) -> backend_api::DeviceCaps {
-        use backend_api::{DeviceCaps, DeviceClass, NumericSupport};
+        use backend_api::arch::{ArchDesc, IsaFeatures, TierLevel, TierSupport};
+        use backend_api::{DType, DeviceCaps, DeviceClass};
+
+        // I8 stays `Absent`: the multi-barrier packed-int8 GEMMs are outside
+        // the JIT's single-barrier model, and there is no VNNI fast path
+        // yet (a real AVX2 int8 GEMM is a later milestone, not this one).
+        // F16/BF16 are `Storage`, never higher: host RAM holds any byte
+        // layout, but there is no fast f16/bf16 compute path here.
+        let mut arch = ArchDesc::default();
+        arch.set_tier(DType::F16, TierSupport { level: TierLevel::Storage, ..Default::default() });
+        arch.set_tier(DType::BF16, TierSupport { level: TierLevel::Storage, ..Default::default() });
+        // Reuses `fast_conv`'s own runtime CPUID probes - never reprobed
+        // here. `avx2_available`/`avx512_available` each already require FMA/
+        // VL/DQ alongside the base bit, so both ISA fields mirror the same
+        // call rather than inventing a separate FMA-only probe.
+        arch.isa = IsaFeatures {
+            avx2: fast_conv::avx2_available(),
+            fma: fast_conv::avx2_available(),
+            avx512f: fast_conv::avx512_available(),
+            ..IsaFeatures::default()
+        };
+
         DeviceCaps {
             class: DeviceClass::Cpu,
             compute_units: Some(self.shared.threads as u32),
@@ -1014,16 +1035,8 @@ impl Backend for CpuBackend {
             // a roofline too, and the JIT's kernels are graded against it.
             peak_bandwidth_gbs: None,
             peak_gflops: None,
-            numeric: NumericSupport {
-                // The multi-barrier packed-int8 GEMMs are outside the JIT's
-                // single-barrier model, and there is no VNNI fast path yet.
-                int8_dot: false,
-                // Host RAM holds any byte layout; storage is unconditional
-                // here even though there is no fast f16/bf16 compute path.
-                f16_storage: true,
-                bf16_storage: true,
-                ..NumericSupport::BASELINE
-            },
+            numeric: arch.numeric_view(),
+            arch,
         }
     }
     fn share(&self) -> Option<Box<dyn Backend>> {

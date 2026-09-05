@@ -3582,6 +3582,133 @@ checkout --` round-trip that it fails identically with none of this
 milestone's changes applied, so it predates and is unrelated to M8.0; left
 untouched as out of scope. **Commit**: one.
 
+### M8.1 - `ArchDesc`, the architecture descriptor replacing `NumericSupport`'s flattened bool semantics
+
+Re-confirmed the motivating conflation directly against source before
+touching anything: `backend-wgpu::query_caps` (`crates/backend-wgpu/src/
+lib.rs`) hardcoded `NumericSupport.int8_dot: true` unconditionally
+(`dot4I8Packed` is core WGSL - naga lowers it to hardware DP4A where the
+driver has it, else a polyfill, and the kernel executes either way), while
+`backend-vulkan::query_caps` set the SAME bool truthfully from a queried
+`shaderIntegerDotProduct` property (`ctx.prec.dp4a`) - one bool, two
+different claims, and a selector reading it could never tell a real DP4A
+card from a polyfilling one. Separately, `NumericSupport::coop_matrix` was
+already set truthfully by `backend-vulkan` (from its cooperative-matrix
+feature+shape query) but `select::Requirement` had no `coop_matrix` field at
+all, so no kernel variant could ever require it - a completely decorative
+flag, exactly as the brief predicted.
+
+New module `crates/backend-api/src/arch.rs`: `TierLevel` (`Absent < Storage
+< Emulated < Native < Matrix`, none of them a speed claim except
+implicitly), `TierSupport` (a level plus lazily-measured `rate_gops`/
+`speedup_vs_f32`, both `None` until something measures them), `IsaFeatures`
+(CPU SIMD bits, reusing `backend-cpu::fast_conv`'s existing
+`is_x86_feature_detected!`-backed `avx2_available`/`avx512_available`
+probes rather than reprobing CPUID), `MatShape`/`MatrixKind`/`MatrixEngine`
+(a matrix engine's enumerated `(a,b,accum)` dtype-triple shapes, mirroring
+`brain_vulkan::context::CoopMatShape`'s fields without duplicating its
+query), and `ArchDesc` itself - one `TierSupport` per `DType`, an optional
+`MatrixEngine`, and `IsaFeatures`. `ArchDesc::executes`/`holds`/`is_fast`
+are the three questions a selector should ask going forward (`level >=
+Emulated`, `level >= Storage`, `speedup_vs_f32 >= FAST_TIER_MIN_SPEEDUP`);
+`FAST_TIER_MIN_SPEEDUP = 1.2` moved here from `backend-wgpu::WgpuBackend::
+F16_COMPUTE_MIN_SPEEDUP`, which is now DEFINED from it (`as f64`) so the
+two margins can never independently drift. `ArchDesc::numeric_view()` is
+the one function that may ever produce a `NumericSupport`; `DeviceCaps`
+grows a `pub arch: ArchDesc` field alongside the existing `numeric`, and
+`backend-wgpu`/`backend-vulkan`/`backend-cpu` were all migrated to build an
+`ArchDesc` and derive `numeric: arch.numeric_view()` - none of the three
+constructs a `NumericSupport` literal by hand anymore.
+
+Per-backend population, read from each real `query_caps`/`caps` before
+writing the new one: `backend-wgpu` sets `I8`/`Q4`/`Q4K`/`Q8K` to
+`Emulated` (never `Native` - this is the conflation fix) and `F16`/`BF16`
+to `Storage`. `backend-vulkan` sets `I8` to `Native` iff `ctx.prec.dp4a`,
+else `Emulated` (the kernel still runs through the same naga-compiled path,
+just not on dedicated hardware - never `Absent`), `F16` to `Native` iff
+`ctx.prec.f16`, and builds `arch.matrix = Some(MatrixEngine{CoopMatrix,
+shapes})` from `ctx.caps`'s existing cooperative-matrix enumeration
+whenever the feature is supported and at least one shape is present
+(component types outside what `DType` can express, e.g. `SINT32`
+accumulators, are dropped from a shape via `filter_map` rather than
+represented lossily). `backend-cpu` sets `F16`/`BF16` to `Storage` (never
+higher - a real AVX2 int8 GEMM is a later milestone) and `I8` stays
+`Absent`; `IsaFeatures.avx2`/`fma`/`avx512f` are filled from
+`fast_conv::avx2_available()`/`avx512_available()`, the only real ISA
+detection this crate has (no VNNI/AMX/NEON probe exists yet, so those
+fields stay the honest default).
+
+`select::Requirement` gained `pub matrix: Option<MatShapeReq>` (an
+`(a,b,accum)` dtype triple), consulted by `satisfied_by` against
+`caps.arch.matrix`'s enumerated shapes - `coop_matrix` is no longer
+decorative, a `Requirement` can genuinely gate on it, proven by
+`matrix_requirement_is_checked_against_arch_matrix_shapes` (builds a real
+vulkan-shaped `MatrixEngine`, shows both the positive and negative match,
+and that an unset requirement still imposes no constraint). No
+`KernelVariant` sets this field in production yet - no coop-matrix kernel
+exists anywhere in the tree, and wiring one is Wave 2's job on top of
+Phase 8's `OperatorProvider` ABI, per this campaign's own decision 1 ("no
+vendor pack ships in this campaign") - so this milestone stops at making
+the field mechanically load-bearing (`satisfied_by` genuinely reads it)
+rather than inventing a production call site that would not be real.
+`min_tier: Option<(DType, TierLevel)>` was considered and deliberately NOT
+added: the brief's own condition for adding it was a genuine wired caller,
+and manufacturing one this milestone does not need would be exactly the
+speculative-abstraction shortcut the campaign's own rules forbid.
+
+TDD / backward compatibility: `crates/backend-api/tests/
+arch_view_agrees.rs` hand-builds the `ArchDesc` each backend's real,
+current `query_caps` produces across every query outcome that actually
+varies (wgpu and cpu each have exactly one; vulkan varies over DP4A x f16
+x coop-matrix-shape-count) and asserts `numeric_view()` reproduces the OLD
+formula transcribed by hand from each backend's pre-M8.1 source, bit for
+bit, for every field this milestone does not deliberately change - the
+whole file did not exist before this milestone (nothing to be red against
+except its own absence), so it is presented instead as a direct,
+by-hand-verified transcription of each backend's real prior formula, which
+is what makes it a meaningful backward-compatibility gate rather than a
+tautology. The one deliberate divergence - a Vulkan device with no DP4A
+hardware, where the OLD formula reported `int8_dot: false` despite the
+packed-int8 kernels genuinely executing there (naga's polyfill) - is
+pinned separately by `vulkan_no_dp4a_still_executes_i8_unlike_the_old_
+formula`, which asserts the NEW, honest `true` and names the old `false`
+explicitly as the bug this milestone fixes.
+`crates/backend-wgpu/tests/arch_desc_int8_not_a_speed_claim.rs`'s
+`int8_dot_is_not_a_speed_claim_on_wgpu` opens a real wgpu device and
+asserts `tier(I8).level == Emulated && !is_fast(I8)` directly.
+
+Real-hardware proof (this sandbox's only adapter is an Intel Arc iGPU
+(MTL), reached through both `backend-wgpu`'s Vulkan path and
+`backend-vulkan` directly - this campaign's own P40/Xeon numbers were
+measured on a different physical box than this agent's sandbox, so this
+entry's hardware differs from the rest of the ledger's by necessity, not
+by choice): `crates/gpu-core/tests/arch_desc_real_divergence.rs`'s
+`wgpu_and_vulkan_report_different_i8_tiers_on_the_same_real_card` opened
+both backends on this machine and printed:
+
+```
+wgpu:   I8 tier = Emulated, F16 tier = Storage, numeric.int8_dot = true
+vulkan: I8 tier = Native, F16 tier = Native, numeric.int8_dot = true
+```
+
+confirming the divergence this milestone exists to produce: on this real
+adapter, `backend-vulkan`'s real, queried `shaderIntegerDotProduct` bit is
+true, so its `I8` tier is `Native`, strictly above wgpu's structurally
+`Emulated` - the same physical card, two different tiers, where before
+M8.1 both backends could only ever report the same flattened `int8_dot:
+true` and a selector had no way to prefer the real hardware path.
+
+Verification: `cargo test -p brain-backend-api -p brain-backend-wgpu -p
+brain-backend-vulkan -p brain-backend-cpu` green end to end, plus
+`crates/model/tests/ops_facade_parity.rs` green - confirming no live
+selector decision moved for anything this milestone does not deliberately
+change. `cargo clippy -p brain-backend-api -p brain-backend-wgpu -p
+brain-backend-vulkan -p brain-backend-cpu --all-targets` clean.
+`make check/workspace` clean. **Commit**: one (the `ArchDesc` module, the
+`Requirement.matrix` fix, all three backends' migration off hand-built
+`NumericSupport`, the backward-compatibility and real-hardware tests, and
+this ledger entry, together as one self-contained unit).
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

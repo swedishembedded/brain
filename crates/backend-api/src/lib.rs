@@ -28,6 +28,12 @@
 use std::any::Any;
 use std::sync::Arc;
 
+/// The architecture descriptor: what a device's arithmetic actually is, per
+/// `DType` tier - replaces `NumericSupport`'s flattened bools as the seam a
+/// selector reads; `NumericSupport` itself stays as the backward-compatible
+/// derived view (see [`arch::ArchDesc::numeric_view`]).
+pub mod arch;
+
 /// Kernel selection: which implementation of an op runs, given shape + device.
 pub mod select;
 
@@ -179,7 +185,15 @@ pub enum DeviceClass {
 /// distinction [`DType::promote`] needs. A card can store bf16 without a fast
 /// bf16 compute path (e.g. a Pascal card widens on load and computes fp32);
 /// storage-only support is never sufficient to skip that promotion.
-#[derive(Clone, Copy, Debug)]
+///
+/// **M8.1: this is now a DERIVED view, never constructed by a backend
+/// directly.** [`crate::arch::ArchDesc`] is the real seam a backend fills in
+/// from device queries; [`crate::arch::ArchDesc::numeric_view`] is the one
+/// function that turns that into a value of this type, so this struct's
+/// fields can never independently drift from `ArchDesc`'s. See that module's
+/// doc comment for the exact conflation this replaces (`int8_dot` used to
+/// mean two different things depending on which backend set it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NumericSupport {
     /// Always true - the portable baseline and the numerical reference every
     /// other tier is parity-gated against.
@@ -591,7 +605,14 @@ pub struct DeviceCaps {
     /// as a `PEAK_TFLOPS` literal in each bench - is what makes a "% of peak"
     /// claim a statement about *the device that ran*, on any hardware.
     pub peak_gflops: Option<f32>,
+    /// The backward-compatible flattened view of [`Self::arch`] - see
+    /// [`crate::arch::ArchDesc::numeric_view`]. A backend must never
+    /// construct this by hand; it is always `arch.numeric_view()`.
     pub numeric: NumericSupport,
+    /// What this device's arithmetic actually is, per [`DType`] tier - the
+    /// seam a selector should read going forward. [`Self::numeric`] is
+    /// derived from this, once, by [`crate::arch::ArchDesc::numeric_view`].
+    pub arch: crate::arch::ArchDesc,
 }
 
 impl DeviceCaps {
@@ -630,6 +651,7 @@ impl DeviceCaps {
             peak_bandwidth_gbs: None,
             peak_gflops: None,
             numeric: NumericSupport::BASELINE,
+            arch: crate::arch::ArchDesc::default(),
         }
     }
 }

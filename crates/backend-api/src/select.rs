@@ -250,10 +250,24 @@ pub enum KernelVariant {
     FusedFlash,
 }
 
+/// The `(a, b, accum)` dtype triple a [`KernelVariant`] needs a matrix/tensor
+/// engine to accept - what [`Requirement::matrix`] carries. Deliberately
+/// just the dtype triple, not a full [`crate::arch::MatShape`]: a call site
+/// asking "can a matrix engine here multiply f16 by f16 into f32" does not
+/// yet know (or care about) the `m×k @ k×n` tile a specific enumerated shape
+/// was queried at - that is a tuning question for whichever provider
+/// actually dispatches onto the engine, not a capability gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatShapeReq {
+    pub a: Dtype,
+    pub b: Dtype,
+    pub accum: Dtype,
+}
+
 /// What a [`KernelVariant`] needs from the device to correctly execute a
 /// given [`Dtype`] - data, checked in ONE place ([`Requirement::satisfied_by`]),
 /// rather than scattered `if caps.numeric.int8_dot` conditions inline in
-/// [`candidates`]'s match arms. Every field defaults to `false` (no
+/// [`candidates`]'s match arms. Every field defaults to `false`/`None` (no
 /// constraint); [`KernelVariant::requires`] sets only the ones that matter
 /// for a given (variant, dtype) pair.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -275,6 +289,13 @@ pub struct Requirement {
     /// execution model mis-executes these, so this is a correctness gate,
     /// not a preference.
     pub workgroup_reductions: bool,
+    /// A matrix/tensor engine on `caps.arch.matrix` accepts this dtype
+    /// triple (`caps.arch.matrix`'s enumerated shapes, matched by `(a, b,
+    /// accum)` only - see [`MatShapeReq`]). `None` imposes no constraint.
+    /// Before M8.1 this capability (`NumericSupport::coop_matrix`) had no
+    /// `Requirement` field at all, so no variant could ever require it -
+    /// this is that fix.
+    pub matrix: Option<MatShapeReq>,
 }
 
 impl Requirement {
@@ -289,6 +310,11 @@ impl Requirement {
             && (!self.f16_storage || n.f16 || n.f16_storage)
             && (!self.bf16_storage || n.bf16 || n.bf16_storage)
             && (!self.workgroup_reductions || caps.workgroup_reductions)
+            && self.matrix.is_none_or(|req| {
+                caps.arch.matrix.as_ref().is_some_and(|m| {
+                    m.shapes.iter().any(|s| s.a == req.a && s.b == req.b && s.accum == req.accum)
+                })
+            })
     }
 }
 
@@ -1244,6 +1270,53 @@ mod tests {
         assert_eq!(s.select(Op::MatMul, prefill, &gpu_caps()), KernelVariant::PackedInt8);
         assert_eq!(s.select(Op::MatMul, decode, &cpu_caps()), KernelVariant::Reference);
         assert_eq!(s.select(Op::MatMul, prefill, &cpu_caps()), KernelVariant::Reference);
+    }
+
+    /// M8.1: `Requirement::matrix` is no longer decorative - it is actually
+    /// consulted by `satisfied_by`, against real `ArchDesc::matrix` shapes
+    /// (mirroring the exact `backend-vulkan` cooperative-matrix query this
+    /// milestone wires: an f16×f16->f32 shape present, an i8×i8->i32 shape
+    /// absent).
+    #[test]
+    fn matrix_requirement_is_checked_against_arch_matrix_shapes() {
+        use crate::arch::{MatShape, MatrixEngine, MatrixKind};
+
+        let mut caps = gpu_caps();
+        caps.arch.matrix = Some(MatrixEngine {
+            kind: MatrixKind::CoopMatrix,
+            shapes: vec![MatShape {
+                m: 16,
+                n: 16,
+                k: 16,
+                a: Dtype::F16,
+                b: Dtype::F16,
+                accum: Dtype::F32,
+                scope_width: None,
+            }],
+        });
+
+        let f16_req = Requirement {
+            matrix: Some(MatShapeReq { a: Dtype::F16, b: Dtype::F16, accum: Dtype::F32 }),
+            ..Requirement::default()
+        };
+        assert!(f16_req.satisfied_by(&caps), "the enumerated f16x f16->f32 shape must satisfy this request");
+
+        let i8_req = Requirement {
+            matrix: Some(MatShapeReq { a: Dtype::I8, b: Dtype::I8, accum: Dtype::F32 }),
+            ..Requirement::default()
+        };
+        assert!(!i8_req.satisfied_by(&caps), "no i8 shape was enumerated -- must not be satisfied");
+
+        let no_engine_caps = gpu_caps();
+        assert!(
+            !f16_req.satisfied_by(&no_engine_caps),
+            "a device with no matrix engine at all must never satisfy a matrix requirement"
+        );
+
+        assert!(
+            Requirement::default().satisfied_by(&no_engine_caps),
+            "an unset matrix requirement must impose no constraint"
+        );
     }
 
     /// M12: the two affine K-quant dtypes (`Q4K`/`Q8K` - GGUF Q4_K/Q5_K) must

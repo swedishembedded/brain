@@ -715,13 +715,35 @@ impl VulkanBackend {
         })
     }
 
+    /// Vulkan's [`ComponentTypeKHR`](vk::ComponentTypeKHR) restricted to the
+    /// component types [`backend_api::DType`] can actually express - `None`
+    /// for anything else (`SINT32` int8-accumulator shapes among them: this
+    /// engine's `DType` has no int32 accumulator tier). A cooperative-matrix
+    /// shape this cannot fully map (any of `a`/`b`/`accum` returning `None`)
+    /// is dropped rather than represented lossily - see
+    /// [`Self::query_caps`]'s matrix-shape loop.
+    fn coopmat_component_to_dtype(t: vk::ComponentTypeKHR) -> Option<backend_api::DType> {
+        match t {
+            vk::ComponentTypeKHR::FLOAT16 => Some(backend_api::DType::F16),
+            vk::ComponentTypeKHR::FLOAT32 => Some(backend_api::DType::F32),
+            vk::ComponentTypeKHR::SINT8 => Some(backend_api::DType::I8),
+            _ => None,
+        }
+    }
+
     /// Fill [`backend_api::DeviceCaps`] from the physical device. Everything
-    /// here is queried, never assumed: `int8_dot` comes from the measured
-    /// DP4A property the context established at device creation, and fast-f16
-    /// stays false until a measured rate says otherwise (Pascal exposes f16 at
-    /// 1/64 rate — availability is not speed).
+    /// here is queried, never assumed: `I8`'s tier comes from the measured
+    /// DP4A property the context established at device creation (`Native`
+    /// when present, `Emulated` - the kernel still runs, just not on
+    /// dedicated hardware - when absent, never `Absent`: `dot4I8Packed` is
+    /// core WGSL and this backend compiles it through the same naga path
+    /// `backend-wgpu` does), `F16`'s tier comes from the measured
+    /// `shaderFloat16` bit, and neither is a speed claim - Pascal reports
+    /// real, queried `Native` f16 at 1/64 rate; whether that is ever WORTH
+    /// using is a measured `is_fast` question, not this query's.
     fn query_caps(ctx: &VkContext) -> backend_api::DeviceCaps {
-        use backend_api::{DeviceCaps, DeviceClass, NumericSupport};
+        use backend_api::arch::{ArchDesc, MatShape, MatrixEngine, MatrixKind, TierLevel, TierSupport};
+        use backend_api::{DType, DeviceCaps, DeviceClass};
         let props = unsafe { ctx.instance.get_physical_device_properties(ctx.physical_device) };
         let class = match props.device_type {
             vk::PhysicalDeviceType::DISCRETE_GPU => DeviceClass::DiscreteGpu,
@@ -736,6 +758,42 @@ impl VulkanBackend {
         let mut sub = vk::PhysicalDeviceSubgroupProperties::default();
         let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut sub);
         unsafe { ctx.instance.get_physical_device_properties2(ctx.physical_device, &mut p2) };
+
+        let mut arch = ArchDesc::default();
+        arch.set_tier(
+            DType::I8,
+            TierSupport {
+                level: if ctx.prec.dp4a { TierLevel::Native } else { TierLevel::Emulated },
+                ..Default::default()
+            },
+        );
+        arch.set_tier(
+            DType::F16,
+            TierSupport {
+                level: if ctx.prec.f16 { TierLevel::Native } else { TierLevel::Absent },
+                ..Default::default()
+            },
+        );
+        if ctx.caps.feature_supported && !ctx.caps.shapes.is_empty() {
+            let shapes = ctx
+                .caps
+                .shapes
+                .iter()
+                .filter_map(|s| {
+                    Some(MatShape {
+                        m: s.m,
+                        n: s.n,
+                        k: s.k,
+                        a: Self::coopmat_component_to_dtype(s.a_type)?,
+                        b: Self::coopmat_component_to_dtype(s.b_type)?,
+                        accum: Self::coopmat_component_to_dtype(s.c_type)?,
+                        scope_width: None,
+                    })
+                })
+                .collect();
+            arch.matrix = Some(MatrixEngine { kind: MatrixKind::CoopMatrix, shapes });
+        }
+
         DeviceCaps {
             class,
             compute_units: None, // core Vulkan exposes no SM/CU count
@@ -750,11 +808,8 @@ impl VulkanBackend {
             // Measured by `gpu_core::roof`, never reported by Vulkan.
             peak_bandwidth_gbs: None,
             peak_gflops: None,
-            numeric: NumericSupport {
-                int8_dot: ctx.prec.dp4a,
-                coop_matrix: ctx.caps.feature_supported && !ctx.caps.shapes.is_empty(),
-                ..NumericSupport::BASELINE
-            },
+            numeric: arch.numeric_view(),
+            arch,
         }
     }
 

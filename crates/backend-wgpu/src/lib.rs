@@ -1393,7 +1393,17 @@ impl WgpuBackend {
     /// modest bar - a genuinely-fast native path should clear it easily; a
     /// device where f16 is merely "not worse" (decode-bound, or throttled to
     /// near fp32 rate) correctly stays on the fp32 default.
-    pub const F16_COMPUTE_MIN_SPEEDUP: f64 = 1.2;
+    ///
+    /// M8.1: the canonical value moved to
+    /// [`backend_api::arch::FAST_TIER_MIN_SPEEDUP`] (also `f64`, for exactly
+    /// this reason - see that constant's own doc comment for the `f32`-cast
+    /// precision trap a first version of this line fell into) - "measured,
+    /// not marketed" is a property of the tier system itself, not of this
+    /// one backend's f16 gate. This constant stays (same name, same public
+    /// API `native_f16.rs` already depends on) but is now defined FROM that
+    /// one with no cast at all, so the two margins can never independently
+    /// drift apart.
+    pub const F16_COMPUTE_MIN_SPEEDUP: f64 = backend_api::arch::FAST_TIER_MIN_SPEEDUP;
 
     /// The roofline gate (B11): `NumericSupport.f16` may become `true` ONLY
     /// if a REAL measurement shows native f16 compute beats fp32 by at least
@@ -1428,7 +1438,8 @@ impl WgpuBackend {
         info: &wgpu::AdapterInfo,
         device: &wgpu::Device,
     ) -> backend_api::DeviceCaps {
-        use backend_api::{DeviceCaps, DeviceClass, NumericSupport};
+        use backend_api::arch::{ArchDesc, TierLevel, TierSupport};
+        use backend_api::{DType, DeviceCaps, DeviceClass};
         #[cfg(target_arch = "wasm32")]
         let class = {
             let _ = info;
@@ -1461,6 +1472,51 @@ impl WgpuBackend {
         let subgroup_size = (adapter.features().contains(wgpu::Features::SUBGROUP)
             && info.subgroup_min_size > 0)
             .then_some(info.subgroup_min_size);
+
+        // M8.1: `I8`/`Q4`/`Q4K`/`Q8K` are `Emulated`, never `Native` - this
+        // is the fix for the conflation `NumericSupport::int8_dot` used to
+        // hide. `dot4I8Packed` is core WGSL: naga lowers it to hardware DP4A
+        // where the driver has it, else a polyfill - the packed-int8 kernels
+        // execute either way and the 4x weight-byte saving holds regardless,
+        // but "executes" is not "runs on dedicated hardware", and wgpu has
+        // no way to query which one actually happened (unlike
+        // `backend-vulkan`'s real `shaderIntegerDotProduct` query) - so
+        // every wgpu target reports the honest, weaker claim.
+        let mut arch = ArchDesc::default();
+        for dt in [DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
+            arch.set_tier(dt, TierSupport { level: TierLevel::Emulated, ..Default::default() });
+        }
+        // Storage-tier bf16/f16: the `#w=bf16`/`#w=f16` kernel variants
+        // (`kernels::template::dtype_variant`) decode packed bf16/f16 words
+        // to f32 with plain integer/bitcast WGSL - core WGSL, no device
+        // feature required, so both genuinely run on every wgpu target
+        // (this backend), not a measured-rate claim like `is_fast` below
+        // (that means FAST compute, which this is not - the decode still
+        // computes in fp32; f16's decode is a real magic-multiply exponent
+        // re-bias, still just integer/bitcast arithmetic, no device
+        // feature).
+        arch.set_tier(DType::BF16, TierSupport { level: TierLevel::Storage, ..Default::default() });
+        arch.set_tier(DType::F16, TierSupport { level: TierLevel::Storage, ..Default::default() });
+        // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). B11 built the
+        // actual measurement (`f16_worth_enabling`, the real
+        // native-f16-vs-f32 roofline comparison in
+        // `crates/backend-wgpu/tests/native_f16.rs`) but deliberately does
+        // NOT call it here: `query_caps` runs on every device construction,
+        // and a roofline-grade timing measurement (calibrated dispatches,
+        // `poll_wait`-bracketed, the same discipline `gpu_core::roof` uses)
+        // does not belong on that hot path - `gpu_core::roof` itself only
+        // measures lazily, on first `ensure()`, cached per adapter, for the
+        // exact same reason. So `speedup_vs_f32` stays `None` here (which
+        // `ArchDesc::is_fast` reads as "not fast", never as a guess); a
+        // caller that wants the real answer for THIS hardware calls
+        // `f16_worth_enabling` with a real measurement, same as the
+        // roofline probe's own "cheap to query, expensive to measure, so
+        // query the cache and measure lazily" split. On this sandbox's real
+        // adapter (Intel Arc iGPU, MTL) that measurement showed native f16
+        // beating fp32 across every repeated run, comfortably clearing the
+        // gate - so this stays the safe, structural default here, not a
+        // claim that f16 loses on this hardware.
+
         DeviceCaps {
             class,
             compute_units: None, // wgpu exposes no SM/CU count
@@ -1474,47 +1530,8 @@ impl WgpuBackend {
             // `None` so a consumer cannot mistake a guess for a measurement.
             peak_bandwidth_gbs: None,
             peak_gflops: None,
-            numeric: NumericSupport {
-                // dot4I8Packed is core WGSL: naga lowers it to hardware DP4A
-                // where the driver has it, else a polyfill - the packed-int8
-                // kernels execute either way and the 4x weight-byte saving
-                // holds regardless.
-                int8_dot: true,
-                // Storage-tier bf16 (B4) and f16 (B5): the `#w=bf16`/`#w=f16`
-                // kernel variants (`kernels::template::dtype_variant`) decode
-                // packed bf16/f16 words to f32 with plain integer/bitcast
-                // WGSL - core WGSL, no device feature required, so both
-                // genuinely run on every wgpu target (this backend), not a
-                // measured-rate claim like `f16`/`bf16` below (those mean
-                // FAST compute, which this is not - the decode still
-                // computes in fp32; f16's decode is a real magic-multiply
-                // exponent re-bias, still just integer/bitcast arithmetic,
-                // no device feature).
-                bf16_storage: true,
-                f16_storage: true,
-                // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). B11 built
-                // the actual measurement (`f16_worth_enabling`, the real
-                // native-f16-vs-f32 roofline comparison in
-                // `crates/backend-wgpu/tests/native_f16.rs`) but deliberately
-                // does NOT call it here: `query_caps` runs on every device
-                // construction, and a roofline-grade timing measurement
-                // (calibrated dispatches, `poll_wait`-bracketed, the same
-                // discipline `gpu_core::roof` uses) does not belong on that
-                // hot path - `gpu_core::roof` itself only measures lazily, on
-                // first `ensure()`, cached per adapter, for the exact same
-                // reason. So this flag stays the safe, structural default
-                // (`false`) here; a caller that wants the real answer for
-                // THIS hardware calls `f16_worth_enabling` with a real
-                // measurement, same as the roofline probe's own "cheap to
-                // query, expensive to measure, so query the cache and
-                // measure lazily" split. On this sandbox's real adapter
-                // (Intel Arc iGPU, MTL) that measurement showed native f16
-                // beating fp32 across every repeated run, comfortably clearing
-                // the gate - so this flag is a safe
-                // structural default here, not a claim that f16 loses on
-                // this hardware.
-                ..NumericSupport::BASELINE
-            },
+            numeric: arch.numeric_view(),
+            arch,
         }
     }
 
