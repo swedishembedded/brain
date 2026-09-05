@@ -3165,6 +3165,79 @@ per context) with no change to dispatch, barrier or submission logic, so no
 finite-difference/bit-identity claim applies here beyond "existing suites
 stay green," which they do. **Commit**: one.
 
+### M7.1 - Phase 7 opens: `DataParallel::adamw_step` bucketed into one transfer per replica per direction
+
+Phase 7 (distributed) had zero milestones before this one. Scoped to the
+smallest real win available without touching any public API:
+`crates/model/src/parallel.rs`'s `DataParallel::adamw_step` (data-parallel
+training, one full model replica per GPU) issued `P` separate
+device-to-host reads in phase 1 and `P` separate host-to-device writes in
+phase 5, every step, where `P` is the trainable-tensor count - for the
+0.6B Qwen shape this module's own header already quantified at ~2.4 GB of
+gradient per replica, so a 2-GPU step moved that much host-staged data as
+hundreds of individually-allocated `Vec<f32>`s rather than one buffer per
+side. `crates/model/src/distributed.rs`'s `DdpOptimizer` (a different,
+`Collective`-based, less-used training path) had already solved exactly
+this for itself - `flat.extend(model.read_grad(n))` into one contiguous
+buffer before its single `all_reduce` - and `DataParallel` is the actual
+production path that needed the same treatment.
+
+**What did NOT move**: `Model::read_grad`/`write_weight` are still exactly
+one call per named tensor, per replica, per direction - that floor is
+`paramstore::ParamStore`'s one-`DeviceBuffer`-per-tensor layout, not
+anything `adamw_step` controls, and is out of scope here (a real API
+change, not a bucketing one). What moved: phases 1 and 5 now flatten every
+replica's per-tensor reads/writes into ONE `Vec<f32>` as they arrive/before
+they're scattered back, instead of nesting `Vec<replica><tensor><f32>>`
+two deep; `FusedAdam` (the host-resident optimiser state) is now one flat
+`master`/`m`/`v` slab plus a `(name -> (offset,len))` table instead of a
+`Vec<(name, Vec<f32>, Vec<f32>, Vec<f32>)>`, so phases 2-4 (grad sum,
+grad-norm clip, the AdamW update itself) run over ONE contiguous slab
+instead of walking `P` separate allocations. A new `backend_cpu::par::
+zip3_mut` (three mutable slices + one shared read-only slice, in parallel)
+is the one new primitive this needed - the exact shape a flattened AdamW
+update has (master/m/v all mutated per-element from the same gradient
+element), with its own unit test including a length-mismatch panic check.
+
+The host grad-norm computation is UNCHANGED (still on the host, still
+over the full summed gradient) - the module's own existing comment already
+defends this on a real numerical ground (`||sum_r(g_r)|| != f(||g_r||)`,
+and the full summed gradient only exists in host RAM), not convenience,
+and this milestone does not touch that reasoning.
+
+**Bit-identical**: every element's AdamW update depends only on its own
+`(g, m, v, w)`, never a neighbour's, so flattening the storage layout
+does not reassociate any computation - concatenation order cannot change
+a single computed value. `crates/gpt2/tests/dp_parity.rs`,
+`crates/qwen3/tests/dp_parity.rs` and
+`crates/toyautoencoder/tests/dp_parity.rs` (the existing multi-GPU-vs-
+single-GPU gradient parity gates) all stay green, `BRAIN_DEVICE=gpu` and
+`BRAIN_DEVICE=cpu`. A new test,
+`adamw_step_flattens_replica_transfers_into_one_buffer_per_direction`
+(`crates/model/src/parallel.rs`'s own `#[cfg(test)]` module, via a
+`CountingModel` that counts every `read_grad`/`write_weight` call rather
+than just checking numeric output), pins BOTH properties directly: the
+per-tensor call count stays exactly `names.len()` (the floor that isn't
+moving) AND `FusedAdam`'s fields are the new flat shape (the floor that
+is) - and includes a hand-computed AdamW reference as an independent
+numeric check, not just a shape check. This test fails to COMPILE against
+the pre-bucketing tree (`FusedAdam` had no `offs`/`master`/`m`/`v` fields)
+- the RED state for a structural refactor with no numeric change of its
+own.
+
+**Deliberately out of scope** (Phase 7 proper, not this milestone): the
+`Collective` trait's signature (owned `Vec<f32>` in/out - still fully
+host-staged, no dtype parameter, no async handle, no error channel), any
+device-resident collective, tensor-parallel wiring (`crates/model/src/
+plan.rs`'s `TpPlan` still has zero consumers), expert parallelism,
+ZeRO/FSDP-style parameter sharding. This milestone only removes the
+easy, API-stable host-side inefficiency in the one training path that
+had it; the harder distributed-systems work Phase 7 is named for is
+still fully ahead of it.
+
+**Commits**: one - `model, backend-cpu: bucket DataParallel's gradient
+transfers into one buffer per replica per direction (M7.1)`.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

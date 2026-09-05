@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! **The** CPU-parallel primitives — the on-CPU scheduler's public face for
+//! **The** CPU-parallel primitives - the on-CPU scheduler's public face for
 //! host-side data-parallel work.
 //!
 //! rayon lives in exactly one crate: this one. `backend-cpu` *is* brain's CPU
-//! scheduler — it already fans every JIT-compiled kernel out across the cores —
+//! scheduler - it already fans every JIT-compiled kernel out across the cores -
 //! so host-side parallel loops (an `m=1` decode matvec, a grad-norm reduction,
 //! image-row post-processing) belong to the same pool under the same policy.
 //! Before this module, six crates depended on rayon directly and each ad-hoc
@@ -68,19 +68,19 @@ pub fn each_mut(buf: &mut [f32], f: impl Fn(usize, &mut f32) + Sync) {
     buf.par_iter_mut().enumerate().for_each(|(i, v)| f(i, v));
 }
 
-/// `(0..n).map(f)` in parallel, one `f32` per index — the shape of a matvec
+/// `(0..n).map(f)` in parallel, one `f32` per index - the shape of a matvec
 /// fanned out over output rows.
 pub fn map_f32(n: usize, f: impl Fn(usize) -> f32 + Sync + Send) -> Vec<f32> {
     (0..n).into_par_iter().map(f).collect()
 }
 
-/// `(0..n).flat_map(f)` in parallel, preserving index order — the shape of a
+/// `(0..n).flat_map(f)` in parallel, preserving index order - the shape of a
 /// per-head attention fan-out.
 pub fn flat_map_f32(n: usize, f: impl Fn(usize) -> Vec<f32> + Sync + Send) -> Vec<f32> {
     (0..n).into_par_iter().map(f).flatten().collect()
 }
 
-/// `(0..n).map(f)` in parallel, index-ordered, returning any `Send` value — the
+/// `(0..n).map(f)` in parallel, index-ordered, returning any `Send` value - the
 /// shape of a fan-out over independent work items (one forecast per name, one
 /// window per training row). Generalises [`map_f32`] to non-`f32` results so a
 /// caller never reaches for a direct `rayon` dependency (the whole point of this
@@ -91,18 +91,32 @@ pub fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
     (0..n).into_par_iter().map(f).collect()
 }
 
-/// Sum of squares over a set of tensors, accumulated in `f64` — the global
+/// Sum of squares over a set of tensors, accumulated in `f64` - the global
 /// grad-norm reduction. `f64` accumulation is part of the contract: summing
 /// millions of squares in `f32` loses the low bits the clip threshold needs.
 pub fn sum_sq_f64(tensors: &[Vec<f32>]) -> f64 {
     tensors.par_iter().map(|t| t.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()).sum()
 }
 
-/// Pairwise `f(a[i], b[i])` over two equal-length slices, in parallel — the
+/// Pairwise `f(a[i], b[i])` over two equal-length slices, in parallel - the
 /// shape of an optimizer step over (state, grad) tensor pairs.
 pub fn zip_each<T: Send, U: Sync>(a: &mut [T], b: &[U], f: impl Fn(&mut T, &U) + Sync) {
     assert_eq!(a.len(), b.len(), "zip_each: length mismatch {} vs {}", a.len(), b.len());
     a.par_iter_mut().zip(b.par_iter()).for_each(|(x, y)| f(x, y));
+}
+
+/// [`zip_each`] over three mutable state slices driven by one shared read-only
+/// slice, in parallel - the shape of a flattened AdamW update (master/m/v all
+/// mutated per-element from the same gradient element).
+pub fn zip3_mut(a: &mut [f32], b: &mut [f32], c: &mut [f32], d: &[f32], f: impl Fn(&mut f32, &mut f32, &mut f32, &f32) + Sync) {
+    assert_eq!(a.len(), b.len(), "zip3_mut: length mismatch {} vs {}", a.len(), b.len());
+    assert_eq!(a.len(), c.len(), "zip3_mut: length mismatch {} vs {}", a.len(), c.len());
+    assert_eq!(a.len(), d.len(), "zip3_mut: length mismatch {} vs {}", a.len(), d.len());
+    a.par_iter_mut()
+        .zip(b.par_iter_mut())
+        .zip(c.par_iter_mut())
+        .zip(d.par_iter())
+        .for_each(|(((x, y), z), w)| f(x, y, z, w));
 }
 
 #[cfg(test)]
@@ -174,5 +188,28 @@ mod tests {
         let mut v = vec![0.0f32; 5];
         each_mut(&mut v, |i, x| *x = i as f32);
         assert_eq!(v, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn zip3_mut_updates_all_three_from_the_shared_slice() {
+        let mut a = vec![1.0f32, 2.0, 3.0];
+        let mut b = vec![10.0f32, 20.0, 30.0];
+        let mut c = vec![100.0f32, 200.0, 300.0];
+        let d = vec![1.0f32, 1.0, 1.0];
+        zip3_mut(&mut a, &mut b, &mut c, &d, |x, y, z, w| {
+            *x += w;
+            *y += 2.0 * w;
+            *z += 3.0 * w;
+        });
+        assert_eq!(a, vec![2.0, 3.0, 4.0]);
+        assert_eq!(b, vec![12.0, 22.0, 32.0]);
+        assert_eq!(c, vec![103.0, 203.0, 303.0]);
+        let r = std::panic::catch_unwind(|| {
+            let mut a = vec![0.0f32; 2];
+            let mut b = vec![0.0f32; 2];
+            let mut c = vec![0.0f32; 2];
+            zip3_mut(&mut a, &mut b, &mut c, &[0.0f32; 3], |_, _, _, _| {});
+        });
+        assert!(r.is_err(), "length mismatch must fail loudly, not truncate");
     }
 }
