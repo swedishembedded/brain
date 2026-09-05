@@ -539,6 +539,12 @@ fn gdn_chunk_bwd_gradcheck() {
         &d_beta,
         &d_initial_state,
     );
+    // Pins item 19's reverse-cumsum dispatch count at ONE fused dispatch
+    // (was `c-1 = 3` separate per-row-index dispatches before M5.8's
+    // fusion) -- see `gdn_chunk_fwd.rs`'s matching assertion for the
+    // forward half (that fusion is shared: `gdn_chunk_fwd_train` above
+    // calls the same `gdn_chunk_fwd_prefix` `gdn_chunk_fwd` does).
+    assert_eq!(bwd_steps.len(), 77, "gdn_chunk_bwd dispatch count regressed -- see item 19's reverse-cumsum fusion");
     g.submit(&[&d_g_cs, &d_exp_g_cs, &d_u, &d_decay_mask, &d_query, &d_key, &d_beta], &bwd_steps);
 
     let got_d_query = g.read(&d_query, bhc * cn * dk);

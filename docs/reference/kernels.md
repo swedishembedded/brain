@@ -227,8 +227,8 @@ load of it must already be bare-identifier-indexed.
 | [`gate_row_dg`](../../crates/kernels/wgsl/gate_row_dg.wgsl) | adaLN gated residual, gate gradient - spec | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`gate_row_dh`](../../crates/kernels/wgsl/gate_row_dh.wgsl) | adaLN gated residual, branch gradient - spec | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`gdn_add_identity`](../../crates/kernels/wgsl/gdn_add_identity.wgsl) | Add the identity to Gated DeltaNet's UT-transform matrix | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
-| [`gdn_chunk_cumsum_step`](../../crates/kernels/wgsl/gdn_chunk_cumsum_step.wgsl) | One sequential step of Gated DeltaNet's per-chunk log-decay cumsum | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
-| [`gdn_chunk_reverse_cumsum_step`](../../crates/kernels/wgsl/gdn_chunk_reverse_cumsum_step.wgsl) | One sequential step of Gated DeltaNet's per-chunk cumsum BACKWARD (suffix sum) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`gdn_chunk_cumsum_step`](../../crates/kernels/wgsl/gdn_chunk_cumsum_step.wgsl) | Gated DeltaNet's per-chunk log-decay cumsum | one thread per row, serial loop over the chunk | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`gdn_chunk_reverse_cumsum_step`](../../crates/kernels/wgsl/gdn_chunk_reverse_cumsum_step.wgsl) | Gated DeltaNet's per-chunk cumsum BACKWARD (suffix sum) | one thread per row, serial loop over the chunk | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`gdn_decay_gate`](../../crates/kernels/wgsl/gdn_decay_gate.wgsl) | Gated DeltaNet's per-token decay gate: g = -exp(A_log) * softplus(a+dt_bias) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`gdn_decay_gate_bwd`](../../crates/kernels/wgsl/gdn_decay_gate_bwd.wgsl) | Backward of gdn_decay_gate.wgsl w.r.t. its a_proj input | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`gdn_decay_mask`](../../crates/kernels/wgsl/gdn_decay_mask.wgsl) | Gated DeltaNet's per-chunk causal decay mask | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |

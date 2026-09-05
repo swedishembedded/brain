@@ -1402,12 +1402,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // `sub`, whose extra offset params don't shift its position).
         "exp" => f(n0(), 8 * n0()),
         "sub" => f(n0(), 12 * n0()),
-        // One row of the per-chunk cumsum: params [bhc, c_len, i]; one add per
-        // row, dispatch width is `bhc` (params[0]), NOT threads (`i` grows
-        // per host-loop call so `threads` alone would undercount the row width).
+        // The WHOLE per-chunk cumsum in one fused dispatch: params [bhc,
+        // c_len]; each of the `bhc` threads runs `c_len - 1` serial adds
+        // (M5.8 collapsed the old one-dispatch-per-row-index host loop into
+        // this single dispatch, so the per-dispatch cost now needs the
+        // row-length factor the old per-row-index accounting didn't).
         "gdn_chunk_cumsum_step" => {
-            let bhc = p(0)?;
-            f(bhc, 12 * bhc)
+            let (bhc, c) = (p(0)?, p(1)?);
+            let n = bhc * c.saturating_sub(1);
+            f(n, 12 * n)
         }
         // Pure data movement, token-major <-> chunk-major (qwen35's GDN layer
         // boundary): params [b, h, n_chunks, c, d, to_chunk_major].
@@ -1477,11 +1480,12 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, d) = (p(0)?, p(1)?);
             f(2 * rows * d + rows, 4 * (2 * rows * d + rows))
         }
-        // Reverse of the per-chunk cumsum: identical shape to
-        // `gdn_chunk_cumsum_step` (one add per row, dispatch width `bhc`).
+        // Reverse of the per-chunk cumsum, same fused-dispatch shape as
+        // `gdn_chunk_cumsum_step` above (params [bhc, c_len]).
         "gdn_chunk_reverse_cumsum_step" => {
-            let bhc = p(0)?;
-            f(bhc, 12 * bhc)
+            let (bhc, c) = (p(0)?, p(1)?);
+            let n = bhc * c.saturating_sub(1);
+            f(n, 12 * n)
         }
         // UT-transform backward, both halves: params [bhc, c_len, i]; same
         // triangular dispatch shape as `gdn_ut_step` (threads = bhc*i, each

@@ -379,6 +379,14 @@ fn gdn_chunk_fwd_matches_host_oracle() {
     let final_state = g.storage((bh * dk * dv) as u64);
 
     let steps = gdn_chunk_fwd(&g, &ids, &shape, &query, &key, &value, &raw_g, &beta, &initial_state, &scratch, &out, &final_state);
+    // Pins step 4's cumsum at ONE fused dispatch (was `c-1 = 3` separate
+    // per-row-index dispatches before M5.8's fusion) so a future change
+    // silently re-introducing that host loop is caught here rather than only
+    // showing up as a latency regression in `qwen35_bench`. The UT-transform
+    // loop (step 7, still `c-1` dispatches -- W1b in the kernel-performance
+    // ledger, not part of this fusion) accounts for the rest of the
+    // difference from a naive "everything is O(1) now" expectation.
+    assert_eq!(steps.len(), 36, "gdn_chunk_fwd dispatch count regressed -- see step 4's cumsum fusion");
     // t_mat MUST be cleared before the UT-transform loop -- see gdn_chunk_fwd's doc.
     g.submit(&[&t_mat], &steps);
 

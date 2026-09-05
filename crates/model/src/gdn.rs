@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Gated DeltaNet (GDN) chunked-parallel linear-attention recurrence —
+//! Gated DeltaNet (GDN) chunked-parallel linear-attention recurrence -
 //! Qwen3.5-35B-A3B's "linear attention" layer. Transcribed step-for-step from
 //! HuggingFace's `torch_chunk_gated_delta_rule`
 //! (`transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py`) into a sequence
@@ -15,18 +15,18 @@
 //!
 //! Given per-`(batch,head)` `query,key: [T,Dk]`, `value: [T,Dv]`, a raw
 //! per-token log-decay `g: [T]` and a sigmoid gate `beta: [T]` (both already
-//! computed by the caller — this module does not compute them), chunked into
+//! computed by the caller - this module does not compute them), chunked into
 //! `n_chunks = T/C`:
 //!
 //! 1. `query *= 1/sqrt(Dk)` (folded into every kernel call that reads
-//!    `query`, via `bmm`'s `alpha` or `gdn_row_scale_off`'s `alpha` — `query`
+//!    `query`, via `bmm`'s `alpha` or `gdn_row_scale_off`'s `alpha` - `query`
 //!    itself is never mutated).
 //! 2. `v_beta = value*beta`, `k_beta = key*beta` (row-broadcast, whole
-//!    tensor — `scale_row.wgsl`, reused unmodified).
-//! 3. (chunking is just how the flat buffer is addressed — see "Layout"
+//!    tensor - `scale_row.wgsl`, reused unmodified).
+//! 3. (chunking is just how the flat buffer is addressed - see "Layout"
 //!    below; no kernel work.)
-//! 4. `g_cs = cumsum(g)` per chunk (`gdn_chunk_cumsum_step.wgsl`, one host
-//!    dispatch per row index).
+//! 4. `g_cs = cumsum(g)` per chunk (`gdn_chunk_cumsum_step.wgsl`, one fused
+//!    dispatch - a serial per-row loop, not one dispatch per row index).
 //! 5. `decay_mask[i,j] = exp(g_cs[i]-g_cs[j])` for `j<=i`, else 0
 //!    (`gdn_decay_mask.wgsl`).
 //! 6. `attn0 = -(k_beta @ key^T) * decay_mask`, masked to `j<i`
@@ -39,11 +39,11 @@
 //!    `bmm.wgsl`).
 //! 10. Sequential across-chunk loop (state carries chunk-to-chunk): per
 //!     chunk, `v_prime = w_c @ state`, `v_new = u_c - v_prime` (the
-//!     reference REASSIGNS its `value` variable to `u` in step 8 —
+//!     reference REASSIGNS its `value` variable to `u` in step 8 -
 //!     `torch_chunk_gated_delta_rule`'s `value = attn @ v_beta` shadows the
 //!     function's own `value` PARAMETER, so every later `value`/`v_c` in the
 //!     reference, including this one, means `u`'s chunk slice, never the
-//!     original raw `value` tensor — easy to miss, worth re-checking against
+//!     original raw `value` tensor - easy to miss, worth re-checking against
 //!     the actual reference source rather than trusting this paraphrase),
 //!     `attn_inter = (q_c*exp(g_cs_c)) @ state`,
 //!     `core_out_c = attn_inter + (q_c.k_c*decay_mask_c) @ v_new`,
@@ -55,12 +55,12 @@
 //! sequential loop starts (reusing `decay_mask` from step 5), not recomputed
 //! per chunk-iteration.
 //!
-//! ## Layout — CHUNK-MAJOR, a deliberate departure from `[B,H,T,D]`
+//! ## Layout - CHUNK-MAJOR, a deliberate departure from `[B,H,T,D]`
 //!
 //! The reference (and this doc, above) describes shapes in PyTorch's
 //! `[B,H,T,D]` axis order. This module instead requires every per-token
 //! buffer (`query`,`key`,`value`,`raw_g`,`beta`,`out`) to be laid out as if
-//! shaped `[n_chunks, B, H, C, D]` row-major — i.e. flat index
+//! shaped `[n_chunks, B, H, C, D]` row-major - i.e. flat index
 //! `bhc = chunk*(B*H) + b*H + h` is the OUTERMOST enumeration, not
 //! `(b*H+h)*n_chunks + chunk` as a literal `[B,H,T,D]` reshape would give.
 //!
@@ -72,14 +72,14 @@
 //! (`gdn_row_scale_off.wgsl`, `sub.wgsl`, `gdn_decay_scale.wgsl`,
 //! `gdn_state_decay.wgsl`). With chunk OUTERMOST, that range is the
 //! CONTIGUOUS slice `[chunk*(B*H), (chunk+1)*(B*H))` of the buffer's own
-//! flat batch axis — addressable with a plain `Params` element offset
+//! flat batch axis - addressable with a plain `Params` element offset
 //! (`off_of` below), never a bound byte-offset slice (which is required to
-//! be 256-byte aligned — this module's own gradcheck-style test at
+//! be 256-byte aligned - this module's own gradcheck-style test at
 //! deliberately tiny, non-aligned dims would fail under that scheme). With
 //! `(b,h)` outermost instead (a literal
 //! `[B,H,T,D]` reshape), the same per-chunk slice is STRIDED
 //! (`stride = n_chunks * C * D`), which `bmm`/`bmm_acc` do not support (by
-//! design — see `bmm.wgsl`'s own header for why offset-only was chosen).
+//! design - see `bmm.wgsl`'s own header for why offset-only was chosen).
 //!
 //! Consequently: **the caller (a future `qwen35` wiring, out of scope here)
 //! must produce `query`/`key`/`value`/`raw_g`/`beta` in this chunk-major
@@ -98,42 +98,42 @@
 //! (step 9) and `attn_inter`'s row-scale (step 10). The state update's decay
 //! terms (`gdn_decay_scale.wgsl`, `gdn_state_decay.wgsl`) instead recompute
 //! `exp` INLINE on raw `g_cs`, because they need `exp(a-b)` for two cumulative
-//! sums `a,b` that can each be very negative over a whole chunk — computing
+//! sums `a,b` that can each be very negative over a whole chunk - computing
 //! that as `exp(a)/exp(b)` from the materialised buffer risks dividing by an
 //! UNDERFLOWED near-zero denominator that the direct `exp(a-b)` form never
 //! hits. Recomputing costs one redundant transcendental per element in
 //! exchange for not needing a second scratch buffer AND not risking that
-//! numerical trap — a deliberate choice, not an oversight.
+//! numerical trap - a deliberate choice, not an oversight.
 //!
 //! ## What this module does NOT do
 //!
 //! Per the porting task this exists for: no GQA head-repeat (`H` here is
 //! already `num_v_heads`), no L2-norm, no gated RMSNorm, no
 //! decay-gate computation (`raw_g`/`beta` arrive ready-made), no T-padding
-//! (caller must pass `t` already a multiple of `chunk` — [`GdnShape::n_chunks`]
+//! (caller must pass `t` already a multiple of `chunk` - [`GdnShape::n_chunks`]
 //! asserts it). [`gdn_chunk_fwd`] ITSELF remains chunked/prefill (steps 1-11)
-//! only, unchanged — the single-token recurrence and the causal depthwise
+//! only, unchanged - the single-token recurrence and the causal depthwise
 //! conv decode step this paragraph used to say were out of scope are now
 //! provided as SEPARATE, decode-only entry points below: [`gdn_recurrent_step`]
 //! (the per-token state update, validated against this module's own
-//! [`gdn_chunk_fwd`] at `chunk=1` — see that function's doc) and
+//! [`gdn_chunk_fwd`] at `chunk=1` - see that function's doc) and
 //! [`gdn_causal_conv1d_step`] (the streaming ring-buffer sibling of
 //! `audio::conv::conv1d_fwd`'s whole-sequence causal conv, validated against
 //! it the same way).
 //!
 //! ## Backward
 //!
-//! **Implemented** — [`gdn_chunk_bwd`], gradient-checked at this module's own
+//! **Implemented** - [`gdn_chunk_bwd`], gradient-checked at this module's own
 //! tiny shape by `crates/model/tests/gdn_chunk_bwd.rs` (finite-difference,
 //! f64 host oracle, both backends). It needs every chunk's OWN version of the
 //! five small per-chunk buffers ([`GdnScratch::q_scaled`] and friends) that
 //! [`gdn_chunk_fwd`] overwrites each loop iteration, plus the full recurrent
-//! state history (one [`gdn_chunk_fwd`] only keeps the latest) — so a
+//! state history (one [`gdn_chunk_fwd`] only keeps the latest) - so a
 //! training run does NOT call [`gdn_chunk_fwd`] at all: it calls
 //! [`gdn_chunk_fwd_train`], the training-mode sibling that SAVES what
 //! backward needs (same math, same `out`/`final_state`, see that function's
 //! own doc for the exact promotion from `[bh,c,d]` overwritten-in-place to
-//! `[bhc,c,d]` saved-per-chunk). [`gdn_chunk_fwd`] itself is UNCHANGED —
+//! `[bhc,c,d]` saved-per-chunk). [`gdn_chunk_fwd`] itself is UNCHANGED -
 //! still the inference-only entry point, still what
 //! `crates/model/tests/gdn_chunk_fwd.rs` gates.
 //!
@@ -151,25 +151,25 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 /// [`crate::moe::MoeIds`]).
 #[derive(Clone, Copy)]
 pub struct GdnIds {
-    /// `bmm.wgsl` — batched matmul, overwrite.
+    /// `bmm.wgsl` - batched matmul, overwrite.
     pub bmm: usize,
-    /// `bmm_acc.wgsl` — batched matmul, accumulate.
+    /// `bmm_acc.wgsl` - batched matmul, accumulate.
     pub bmm_acc: usize,
     /// `gdn_chunk_cumsum_step.wgsl`.
     pub cumsum_step: usize,
     /// `gdn_decay_mask.wgsl`.
     pub decay_mask: usize,
-    /// `gdn_mask_strict_lower.wgsl` — finishes step 6's `attn0` from
+    /// `gdn_mask_strict_lower.wgsl` - finishes step 6's `attn0` from
     /// `bmm.wgsl`'s raw `-(k_beta @ key^T)`.
     pub mask_strict_lower: usize,
     /// `gdn_ut_step.wgsl`.
     pub ut_step: usize,
     /// `gdn_add_identity.wgsl`.
     pub add_identity: usize,
-    /// `scale_row.wgsl` (existing, unmodified) — every WHOLE-TENSOR row-scale
+    /// `scale_row.wgsl` (existing, unmodified) - every WHOLE-TENSOR row-scale
     /// (`v_beta`, `k_beta`, `k_cumdecay`'s `k_beta*exp(g_cs)`).
     pub row_scale: usize,
-    /// `gdn_row_scale_off.wgsl` (new) — the two per-chunk row-scales in the
+    /// `gdn_row_scale_off.wgsl` (new) - the two per-chunk row-scales in the
     /// step-10 loop (`q_c*exp(g_cs_c)`, `key_c*decay_scale`) that read a
     /// chunk's slice out of a larger buffer.
     pub row_scale_off: usize,
@@ -181,15 +181,15 @@ pub struct GdnIds {
     pub exp: usize,
     /// `sub.wgsl`.
     pub sub: usize,
-    /// `mul.wgsl` (existing, unmodified) — `intra_scores = raw_qk * decay_mask`.
+    /// `mul.wgsl` (existing, unmodified) - `intra_scores = raw_qk * decay_mask`.
     pub mul: usize,
-    /// `region_copy.wgsl` (existing, unmodified) — `g_cs = copy(raw_g)` and
+    /// `region_copy.wgsl` (existing, unmodified) - `g_cs = copy(raw_g)` and
     /// `final_state = copy(initial_state)` (the loop's working buffer).
     pub region_copy: usize,
 }
 
 /// The shape one call to [`gdn_chunk_fwd`] operates over. `b`/`h` are the
-/// ALREADY-repeated (`num_v_heads`) batch/head counts — see this module's
+/// ALREADY-repeated (`num_v_heads`) batch/head counts - see this module's
 /// doc for what is explicitly out of scope.
 #[derive(Clone, Copy)]
 pub struct GdnShape {
@@ -202,7 +202,7 @@ pub struct GdnShape {
 }
 
 impl GdnShape {
-    /// `t / chunk`. Panics if `t` is not an exact multiple of `chunk` —
+    /// `t / chunk`. Panics if `t` is not an exact multiple of `chunk` -
     /// padding `t` is the CALLER's job (this module's doc, "What this module
     /// does NOT do"), not something silently rounded here.
     pub fn n_chunks(&self) -> u32 {
@@ -216,12 +216,12 @@ impl GdnShape {
         self.t / self.chunk
     }
 
-    /// `B*H` — the recurrent state's own batch count (no chunk axis).
+    /// `B*H` - the recurrent state's own batch count (no chunk axis).
     pub fn bh(&self) -> u32 {
         self.b * self.h
     }
 
-    /// `B*H*n_chunks` — the batch count for every WHOLE-TENSOR (all chunks
+    /// `B*H*n_chunks` - the batch count for every WHOLE-TENSOR (all chunks
     /// at once) dispatch in steps 1-9.
     pub fn bhc(&self) -> u32 {
         self.bh() * self.n_chunks()
@@ -233,57 +233,57 @@ impl GdnShape {
 /// doc's "Layout" section) except where noted. `bhc = shape.bhc()`,
 /// `bh = shape.bh()`, `c = shape.chunk`.
 pub struct GdnScratch<'a> {
-    /// `[bhc, c]` — cumulative per-chunk log-decay (copy of `raw_g`, then
+    /// `[bhc, c]` - cumulative per-chunk log-decay (copy of `raw_g`, then
     /// cumsum'd in place).
     pub g_cs: &'a DeviceBuffer,
-    /// `[bhc, c]` — `exp(g_cs)`, materialised once (see module doc).
+    /// `[bhc, c]` - `exp(g_cs)`, materialised once (see module doc).
     pub exp_g_cs: &'a DeviceBuffer,
-    /// `[bhc, c, dk]` — `key * beta`.
+    /// `[bhc, c, dk]` - `key * beta`.
     pub k_beta: &'a DeviceBuffer,
-    /// `[bhc, c, dv]` — `value * beta`.
+    /// `[bhc, c, dv]` - `value * beta`.
     pub v_beta: &'a DeviceBuffer,
-    /// `[bhc, c, dk]` — `k_beta * exp(g_cs)` (step 9's `k_cumdecay` input).
+    /// `[bhc, c, dk]` - `k_beta * exp(g_cs)` (step 9's `k_cumdecay` input).
     pub k_beta_decay: &'a DeviceBuffer,
-    /// `[bhc, c, c]` — the causal decay mask (step 5), reused by step 6 AND
+    /// `[bhc, c, c]` - the causal decay mask (step 5), reused by step 6 AND
     /// by the step-10 `intra_scores` precompute.
     pub decay_mask: &'a DeviceBuffer,
-    /// `[bhc, c, c]` — `-(k_beta @ key^T)`, before masking.
+    /// `[bhc, c, c]` - `-(k_beta @ key^T)`, before masking.
     pub raw_attn0: &'a DeviceBuffer,
-    /// `[bhc, c, c]` — masked `attn0`, frozen after step 6 (read-only input
-    /// to every `gdn_ut_step.wgsl` dispatch — see that kernel's header for
+    /// `[bhc, c, c]` - masked `attn0`, frozen after step 6 (read-only input
+    /// to every `gdn_ut_step.wgsl` dispatch - see that kernel's header for
     /// why it must not alias the evolving `t_mat`).
     pub attn0: &'a DeviceBuffer,
-    /// `[bhc, c, c]` — the evolving `T_mat`. MUST be zeroed by the caller
+    /// `[bhc, c, c]` - the evolving `T_mat`. MUST be zeroed by the caller
     /// (pass it in `Gpu::submit`'s `clears` list) before submitting the
-    /// steps [`gdn_chunk_fwd`] returns — see that function's own doc.
+    /// steps [`gdn_chunk_fwd`] returns - see that function's own doc.
     pub t_mat: &'a DeviceBuffer,
-    /// `[bhc, c, dv]` — `T_mat @ v_beta`.
+    /// `[bhc, c, dv]` - `T_mat @ v_beta`.
     pub u: &'a DeviceBuffer,
-    /// `[bhc, c, dk]` — `T_mat @ k_cumdecay`.
+    /// `[bhc, c, dk]` - `T_mat @ k_cumdecay`.
     pub w: &'a DeviceBuffer,
-    /// `[bhc, c, c]` — `query @ key^T` (scaled by `1/sqrt(dk)`), before the
+    /// `[bhc, c, c]` - `query @ key^T` (scaled by `1/sqrt(dk)`), before the
     /// decay-mask multiply.
     pub raw_intra: &'a DeviceBuffer,
-    /// `[bhc, c, c]` — `raw_intra * decay_mask`, precomputed for every chunk
+    /// `[bhc, c, c]` - `raw_intra * decay_mask`, precomputed for every chunk
     /// before the sequential loop (chunk-independent, see module doc).
     pub intra_scores: &'a DeviceBuffer,
-    /// `[bh, c, dk]` — one chunk's `query * exp(g_cs) * scale`, recomputed
+    /// `[bh, c, dk]` - one chunk's `query * exp(g_cs) * scale`, recomputed
     /// (overwritten) every loop iteration.
     pub q_scaled: &'a DeviceBuffer,
-    /// `[bh, c]` — one chunk's `exp(g_cs_last - g_cs)`, recomputed every
+    /// `[bh, c]` - one chunk's `exp(g_cs_last - g_cs)`, recomputed every
     /// iteration.
     pub decay_scale: &'a DeviceBuffer,
-    /// `[bh, c, dk]` — one chunk's `key * decay_scale`, recomputed every
+    /// `[bh, c, dk]` - one chunk's `key * decay_scale`, recomputed every
     /// iteration.
     pub decayed_k: &'a DeviceBuffer,
-    /// `[bh, c, dv]` — one chunk's `w_c @ state`, recomputed every iteration.
+    /// `[bh, c, dv]` - one chunk's `w_c @ state`, recomputed every iteration.
     pub v_prime: &'a DeviceBuffer,
-    /// `[bh, c, dv]` — one chunk's `v_c - v_prime`, recomputed every
+    /// `[bh, c, dv]` - one chunk's `v_c - v_prime`, recomputed every
     /// iteration.
     pub v_new: &'a DeviceBuffer,
 }
 
-/// Every buffer [`gdn_chunk_fwd_train`] needs — the training-mode sibling of
+/// Every buffer [`gdn_chunk_fwd_train`] needs - the training-mode sibling of
 /// [`GdnScratch`] that additionally SAVES what [`gdn_chunk_bwd`] needs: every
 /// chunk's own version of the five small per-chunk buffers [`GdnScratch`]
 /// overwrites in place each loop iteration, and the FULL recurrent-state
@@ -293,9 +293,9 @@ pub struct GdnScratch<'a> {
 /// `n_chunks = shape.n_chunks()`.
 ///
 /// **The caller MUST zero every `*_hist` field and `state_history`** (pass
-/// them all in [`Gpu::submit`]'s `clears` list, alongside `t_mat` — see
+/// them all in [`Gpu::submit`]'s `clears` list, alongside `t_mat` - see
 /// [`GdnScratch::t_mat`]'s own doc for why this engine has no clear
-/// primitive at the `Step` level) — every one of them is populated via
+/// primitive at the `Step` level) - every one of them is populated via
 /// `splice_add.wgsl`'s `dst[base+i] += src[i]`, so a non-zero starting value
 /// would silently corrupt the saved history with garbage. The 5 small
 /// `q_scaled`/`decay_scale`/`decayed_k`/`v_prime`/`v_new` working buffers and
@@ -335,7 +335,7 @@ pub struct GdnScratchTrain<'a> {
     /// Saved for symmetry with its four siblings, but [`gdn_chunk_bwd`]'s own
     /// derivation never reads `v_prime`'s forward VALUE back (only
     /// `v_new = u - v_prime`'s gradient is needed, and that flows through
-    /// `d_v_new` alone — `v_prime` itself is subtracted out algebraically).
+    /// `d_v_new` alone - `v_prime` itself is subtracted out algebraically).
     /// Kept anyway rather than dropped: it costs nothing extra (forward
     /// already computes it every chunk) and a future consumer or debugging
     /// pass may want it.
@@ -668,7 +668,7 @@ impl GdnBwdScratchBufs {
 
 /// One `bmm.wgsl`/`bmm_acc.wgsl` dispatch. Public because a batched matmul
 /// with offset-addressable batch slices is a general primitive, not a
-/// GDN-only detail — a future caller assembling its own batched-matmul step
+/// GDN-only detail - a future caller assembling its own batched-matmul step
 /// sequence can use this instead of re-deriving the `Params` order.
 #[allow(clippy::too_many_arguments)]
 pub fn bmm_step(
@@ -697,13 +697,13 @@ pub fn bmm_step(
 }
 
 /// The 13 whole-tensor (chunk-independent-dispatch) scratch buffers steps 1-9
-/// and the pre-loop `intra_scores` precompute need — the fields [`GdnScratch`]
+/// and the pre-loop `intra_scores` precompute need - the fields [`GdnScratch`]
 /// and [`GdnScratchTrain`] have IN COMMON. Not part of either struct's public
 /// API (both expose these same 13 buffers under the same names at their own
 /// top level, matching this module's existing flat-field style rather than
 /// nesting); this is purely an internal parameter bundle so
 /// [`gdn_chunk_fwd_prefix`] can be written once and called from both
-/// [`gdn_chunk_fwd`] and [`gdn_chunk_fwd_train`] — see that function's doc.
+/// [`gdn_chunk_fwd`] and [`gdn_chunk_fwd_train`] - see that function's doc.
 struct GdnWholeScratch<'a> {
     g_cs: &'a DeviceBuffer,
     exp_g_cs: &'a DeviceBuffer,
@@ -721,11 +721,11 @@ struct GdnWholeScratch<'a> {
 }
 
 /// Steps 1-9 of this module's doc, plus the pre-loop `intra_scores`
-/// precompute — every WHOLE-TENSOR (state-independent) step, shared
+/// precompute - every WHOLE-TENSOR (state-independent) step, shared
 /// byte-for-byte between [`gdn_chunk_fwd`] (inference) and
 /// [`gdn_chunk_fwd_train`] (training, which additionally saves what
 /// [`gdn_chunk_bwd`] needs). Extracted so the two forward entry points cannot
-/// silently drift apart on this shared half — only step 10's per-chunk loop
+/// silently drift apart on this shared half - only step 10's per-chunk loop
 /// differs between them (overwrite-in-place vs. save-every-chunk).
 #[allow(clippy::too_many_arguments)]
 fn gdn_chunk_fwd_prefix(
@@ -753,11 +753,9 @@ fn gdn_chunk_fwd_prefix(
     steps.push(g.step(ids.row_scale, &[value, beta, s.v_beta], &[bhc * c * dv, dv], bhc * c * dv));
     steps.push(g.step(ids.row_scale, &[key, beta, s.k_beta], &[bhc * c * dk, dk], bhc * c * dk));
 
-    // ---- step 4: g_cs = copy(raw_g), then the sequential per-chunk cumsum ----
+    // ---- step 4: g_cs = copy(raw_g), then the per-chunk cumsum (one fused dispatch) ----
     steps.push(g.step(ids.region_copy, &[raw_g, s.g_cs], &[1, bhc * c, bhc * c, 0], bhc * c));
-    for i in 1..c {
-        steps.push(g.step(ids.cumsum_step, &[s.g_cs], &[bhc, c, i], bhc));
-    }
+    steps.push(g.step(ids.cumsum_step, &[s.g_cs], &[bhc, c], bhc));
 
     // ---- step 5: decay_mask ----
     steps.push(g.step(ids.decay_mask, &[s.g_cs, s.decay_mask], &[bhc, c], bhc * c * c));
@@ -787,18 +785,18 @@ fn gdn_chunk_fwd_prefix(
     steps
 }
 
-/// The full Gated DeltaNet chunked-parallel forward — steps 1-11 of this
-/// module's doc — as a step list. `initial_state`/`final_state` are
+/// The full Gated DeltaNet chunked-parallel forward - steps 1-11 of this
+/// module's doc - as a step list. `initial_state`/`final_state` are
 /// `[B,H,Dk,Dv]` (see module doc); `final_state` is both the OUTPUT recurrent
 /// state (for the caller to persist / feed a later incremental call) and,
 /// internally, the loop's own working buffer (initialised as a copy of
 /// `initial_state` by this function's first two steps, then updated in
-/// place per chunk) — pass a zeroed buffer as `initial_state` for "no prior
+/// place per chunk) - pass a zeroed buffer as `initial_state` for "no prior
 /// state".
 ///
 /// **Caller MUST zero `scratch.t_mat` at submit time**: this function
 /// returns a plain `Vec<Step>` (no clear primitive exists at the `Step`
-/// level in this engine — only `Backend::submit`'s own `clears` list does),
+/// level in this engine - only `Backend::submit`'s own `clears` list does),
 /// so `scratch.t_mat` needs `g.submit(&[scratch.t_mat], &steps)`, not
 /// `g.submit(&[], &steps)`. Every other scratch buffer is fully overwritten
 /// by the steps that use it and needs no clear.
@@ -850,7 +848,7 @@ pub fn gdn_chunk_fwd(
     for ci in 0..n_chunks {
         // Chunk `ci`'s flat element offset into a `[n_chunks, bh, C, D]`
         // (or `[n_chunks, bh, C]`/`[n_chunks, bh, C, C]`) chunk-major buffer
-        // — see this module's "Layout" doc for why this is a plain offset.
+        // - see this module's "Layout" doc for why this is a plain offset.
         let off_d = |d: u32| ci * bh * c * d;
         let off_g = ci * bh * c;
         let off_cc = ci * bh * c * c;
@@ -888,20 +886,20 @@ pub fn gdn_chunk_fwd(
 /// beyond [`GdnIds`]. Kept as a SEPARATE struct rather than new fields on
 /// `GdnIds` so that struct's existing field set (and
 /// `crates/model/tests/gdn_chunk_fwd.rs`'s own `GdnIds { ... }` literal)
-/// keeps compiling unmodified — the same "forward ids vs backward ids" split
+/// keeps compiling unmodified - the same "forward ids vs backward ids" split
 /// [`crate::moe`]'s `MoeIds`/`MoeIdsBwd` already established.
 #[derive(Clone, Copy)]
 pub struct GdnBwdIds {
-    /// `splice_add.wgsl` (existing, unmodified) — `dst[base+i] += src[i]`,
+    /// `splice_add.wgsl` (existing, unmodified) - `dst[base+i] += src[i]`,
     /// the commit primitive both [`gdn_chunk_fwd_train`]'s saves and
     /// [`gdn_chunk_bwd`]'s per-chunk gradient writes use to place a densely
     /// computed small result into its own slice of a bigger
     /// `[bhc,...]`/history buffer.
     pub splice_add: usize,
-    /// `row_dot.wgsl` — generic per-row dot product, every row-scale
+    /// `row_dot.wgsl` - generic per-row dot product, every row-scale
     /// gradient (`d_exp_g_cs`, `d_decay_scale`, `d_beta`).
     pub row_dot: usize,
-    /// `scale_add.wgsl` (existing, unmodified) — row-scale with an
+    /// `scale_add.wgsl` (existing, unmodified) - row-scale with an
     /// overwrite/accumulate flag (`n_experts=1,e_idx=0` degenerates it to a
     /// plain per-row scale), reused for `d_key`/`d_k_beta`/`d_value`'s
     /// whole-tensor row-scale-shaped contributions.
@@ -914,7 +912,7 @@ pub struct GdnBwdIds {
     pub ut_bwd_dtmat: usize,
     /// `gdn_mask_strict_lower_bwd.wgsl`.
     pub mask_strict_lower_bwd: usize,
-    /// `gdn_decay_mask_bwd.wgsl` (dispatched twice — `mode=0` then `mode=1`).
+    /// `gdn_decay_mask_bwd.wgsl` (dispatched twice - `mode=0` then `mode=1`).
     pub decay_mask_bwd: usize,
     /// `gdn_decay_scale_bwd.wgsl`.
     pub decay_scale_bwd: usize,
@@ -928,18 +926,18 @@ pub struct GdnBwdIds {
 /// math (same steps 1-9 via the shared [`gdn_chunk_fwd_prefix`], same
 /// per-chunk step-10 kernel calls, so this function's `out`/`final_state`
 /// outputs are IDENTICAL to what [`gdn_chunk_fwd`] would produce for the same
-/// inputs — a cheap cross-check worth running before trusting a backward
+/// inputs - a cheap cross-check worth running before trusting a backward
 /// gradcheck), but the per-chunk loop additionally SAVES what
 /// [`gdn_chunk_bwd`]'s reverse sweep needs: [`gdn_chunk_fwd`]'s own loop
 /// overwrites its five small per-chunk buffers every iteration and evolves
-/// ONE `final_state` in place, so backward — which runs the loop in REVERSE —
+/// ONE `final_state` in place, so backward - which runs the loop in REVERSE -
 /// needs every chunk's OWN version, not just the latest. Same precedent as
 /// `router_gate.wgsl` vs `router_gate_train.wgsl` (same forward math, the
 /// training variant additionally persists what backward needs).
 ///
 /// Every working buffer (`scratch.q_scaled` and its four siblings) is
 /// computed EXACTLY as [`gdn_chunk_fwd`] computes it (same kernel, same
-/// params) — the only addition is one extra `splice_add.wgsl` dispatch per
+/// params) - the only addition is one extra `splice_add.wgsl` dispatch per
 /// buffer per chunk, committing that iteration's value into its own slice of
 /// the corresponding `_hist` buffer before moving to the next chunk. The
 /// recurrent state gets the same treatment: `final_state` evolves in place
@@ -949,7 +947,7 @@ pub struct GdnBwdIds {
 /// starts.
 ///
 /// **Caller MUST zero every [`GdnScratchTrain`] `*_hist` field,
-/// `state_history`, and `t_mat`** — see [`GdnScratchTrain`]'s own doc.
+/// `state_history`, and `t_mat`** - see [`GdnScratchTrain`]'s own doc.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_fwd_train(
     g: &Gpu,
@@ -1032,7 +1030,7 @@ pub fn gdn_chunk_fwd_train(
 /// `c = shape.chunk`.
 ///
 /// **The caller MUST zero** `d_g_cs`, `d_exp_g_cs`, `d_u`, and `d_decay_mask`
-/// (pass them in [`Gpu::submit`]'s `clears` list) — every one of them is a
+/// (pass them in [`Gpu::submit`]'s `clears` list) - every one of them is a
 /// genuine multi-source accumulator or a `splice_add.wgsl` commit target
 /// starting from zero; see [`gdn_chunk_bwd`]'s own doc for exactly which
 /// steps write which field and why. Every other field here is a dedicated
@@ -1049,14 +1047,14 @@ pub struct GdnBwdScratch<'a> {
     /// committed into `d_query`'s own chunk slice via `splice_add.wgsl`
     /// right after being computed (`gdn_row_scale_off.wgsl` has no output
     /// offset, so it cannot write directly into a slice of the bigger
-    /// `[bhc,c,dk]` `d_query` buffer — see `row_dot.wgsl`'s own doc for why
+    /// `[bhc,c,dk]` `d_query` buffer - see `row_dot.wgsl`'s own doc for why
     /// this module composes existing kernels with `splice_add.wgsl` instead
     /// of adding an output-offset variant of every elementwise kernel).
     pub d_query_chunk: &'a DeviceBuffer,
     /// Same role as `d_query_chunk`, for `d_key`'s per-chunk contribution.
     pub d_key_chunk: &'a DeviceBuffer,
     /// Ping-pong `[bh,dk,dv]` pair for the running `d_state` gradient thread
-    /// through the reverse chunk sweep — `state_a`/`state_b` swap roles
+    /// through the reverse chunk sweep - `state_a`/`state_b` swap roles
     /// (`cur`/`nxt`) every chunk, chosen at STEP-LIST-BUILD time (the loop
     /// bound `n_chunks` is known to the Rust code emitting `Step`s, so the
     /// alternation costs nothing at dispatch time, unlike a real runtime
@@ -1072,33 +1070,33 @@ pub struct GdnBwdScratch<'a> {
     pub d_attn0: &'a DeviceBuffer,
 
     // ---- whole-tensor accumulators, `[bhc,...]`-shaped ----
-    /// `[bhc,c]` — 4 sources (state-decay's scalar, `decay_scale`'s two
+    /// `[bhc,c]` - 4 sources (state-decay's scalar, `decay_scale`'s two
     /// halves, `decay_mask`'s row/column sums, `exp_g_cs`'s backward). MUST
     /// be zeroed.
     pub d_g_cs: &'a DeviceBuffer,
-    /// `[bhc,c]` — 2 sources (`q_scaled`'s per-chunk row-scale,
+    /// `[bhc,c]` - 2 sources (`q_scaled`'s per-chunk row-scale,
     /// `k_cumdecay`'s whole-tensor row-scale). MUST be zeroed.
     pub d_exp_g_cs: &'a DeviceBuffer,
-    /// `[bhc,c,c]` — 3 sources: two direct linear uses of `t_mat` (`u`'s and
+    /// `[bhc,c,c]` - 3 sources: two direct linear uses of `t_mat` (`u`'s and
     /// `w`'s own backward, the first a plain `bmm` overwrite so no zero is
     /// needed before it) plus the UT-transform's own internal recurrence
     /// scatter (`gdn_ut_bwd_dtmat.wgsl`). Needs no explicit zero: the first
     /// producer (`w`'s backward, item 10) is a plain overwrite.
     pub d_t_mat: &'a DeviceBuffer,
-    /// `[bhc,c,dv]` — single producer (`v_new`'s identity pass-through,
+    /// `[bhc,c,dv]` - single producer (`v_new`'s identity pass-through,
     /// chunk-by-chunk via `splice_add.wgsl`). MUST be zeroed (a `splice_add`
     /// commit, not a native-offset overwrite).
     pub d_u: &'a DeviceBuffer,
-    /// `[bhc,c,dk]` — single producer (`v_prime`'s backward, a plain `bmm`
+    /// `[bhc,c,dk]` - single producer (`v_prime`'s backward, a plain `bmm`
     /// with a native chunk-offset write). Needs no zero.
     pub d_w: &'a DeviceBuffer,
-    /// `[bhc,c,c]` — single producer (`out`'s intra-chunk term backward, a
+    /// `[bhc,c,c]` - single producer (`out`'s intra-chunk term backward, a
     /// plain `bmm` with a native chunk-offset write). Needs no zero.
     pub d_intra_scores: &'a DeviceBuffer,
-    /// `[bhc,c,c]` — 2 sources (`intra_scores`'s and `attn0`'s own
+    /// `[bhc,c,c]` - 2 sources (`intra_scores`'s and `attn0`'s own
     /// backward). MUST be zeroed.
     pub d_decay_mask: &'a DeviceBuffer,
-    /// `[bhc,c,dk]` — 2 sources (`k_cumdecay`'s row-scale via `scale_add`
+    /// `[bhc,c,dk]` - 2 sources (`k_cumdecay`'s row-scale via `scale_add`
     /// overwrite, then `attn0`'s backward accumulate). Needs no zero: the
     /// first producer uses `scale_add.wgsl`'s own `accumulate=0` mode.
     pub d_k_beta: &'a DeviceBuffer,
@@ -1107,21 +1105,21 @@ pub struct GdnBwdScratch<'a> {
     // pattern -- reused across every call site whose lifetime does not
     // overlap (each result is consumed by the very next step, before the
     // next producer of the same scratch runs). Sized for the LARGEST use.
-    /// `[bhc*c]` — every `row_dot.wgsl` output.
+    /// `[bhc*c]` - every `row_dot.wgsl` output.
     pub dot_scratch: &'a DeviceBuffer,
-    /// `[bhc*c]` — `mul.wgsl`'s `exp_g_cs` backward output (item 13).
+    /// `[bhc*c]` - `mul.wgsl`'s `exp_g_cs` backward output (item 13).
     pub mul_scratch: &'a DeviceBuffer,
-    /// `[bhc*c*c]` — `mul.wgsl`'s `decay_mask` backward output (item 14).
+    /// `[bhc*c*c]` - `mul.wgsl`'s `decay_mask` backward output (item 14).
     pub mul_scratch_cc: &'a DeviceBuffer,
 }
 
-/// The full Gated DeltaNet chunked-parallel BACKWARD — reverse-mode gradients
+/// The full Gated DeltaNet chunked-parallel BACKWARD - reverse-mode gradients
 /// through all 11 forward steps, including the UT-transform's own reverse
 /// sequential sweep and the across-chunk recurrent-state gradient thread.
-/// Reads [`GdnScratchTrain`] (produced by [`gdn_chunk_fwd_train`] — NOT
+/// Reads [`GdnScratchTrain`] (produced by [`gdn_chunk_fwd_train`] - NOT
 /// [`gdn_chunk_fwd`], which does not save what this function needs) as its
 /// forward-saved activations, plus the ORIGINAL `query`/`key`/`value`/`beta`
-/// inputs (`raw_g`'s own VALUE is never read here — only its gradient,
+/// inputs (`raw_g`'s own VALUE is never read here - only its gradient,
 /// [`GdnScratchTrain::g_cs`] already carries everything backward needs from
 /// it). `d_out` is chunk-major, same shape as forward's own `out`;
 /// `d_final_state` is `[bh,dk,dv]` (zero if the caller does not use
@@ -1129,7 +1127,7 @@ pub struct GdnBwdScratch<'a> {
 ///
 /// ## Structure
 ///
-/// **Phase 1** — a REVERSE sweep over chunks (`ci` from `n_chunks-1` down to
+/// **Phase 1** - a REVERSE sweep over chunks (`ci` from `n_chunks-1` down to
 /// `0`), threading a running `d_state` gradient backward through the
 /// recurrence exactly as far as the forward loop threaded `state` forward
 /// (just in the opposite direction), and writing 9 forward-step
@@ -1146,7 +1144,7 @@ pub struct GdnBwdScratch<'a> {
 /// `d_state_in` (which becomes next iteration's `d_state`, or
 /// `d_initial_state` after `ci=0`).
 ///
-/// **Phase 2** — the rest, in REVERSE FORWARD-STEP order, over the
+/// **Phase 2** - the rest, in REVERSE FORWARD-STEP order, over the
 /// WHOLE TENSOR (no chunk loop: steps 8-9's `bmm`s and everything upstream
 /// of them ran once over every chunk at once, so their backward does too):
 /// `w`/`u`'s producing `bmm`s backward into `d_t_mat` (two contributions,
@@ -1155,7 +1153,7 @@ pub struct GdnBwdScratch<'a> {
 /// `d_k_beta`/`d_exp_g_cs`; `exp_g_cs`'s backward into `d_g_cs`; the
 /// `intra_scores` precompute's backward into `d_raw_intra`/`d_decay_mask`
 /// and (accumulating) `d_query`/`d_key`; the UT-transform's OWN reverse
-/// sweep (`i` from `c-1` down to `1`, two kernels per `i` — see
+/// sweep (`i` from `c-1` down to `1`, two kernels per `i` - see
 /// `gdn_ut_bwd_dattn0.wgsl`/`gdn_ut_bwd_dtmat.wgsl`'s own docs, this is the
 /// hardest part) completing `d_attn0`; `attn0`'s mask-multiply backward into
 /// `d_raw_attn0`/`d_decay_mask`; `raw_attn0`'s producing `bmm` backward
@@ -1169,7 +1167,7 @@ pub struct GdnBwdScratch<'a> {
 /// Every output with more than one contributing forward use is explicitly
 /// zeroed by the caller (see [`GdnBwdScratch`]'s own doc for the complete
 /// list) and every contribution below ACCUMULATES into it rather than
-/// overwriting — `d_query` (2 sources: this chunk-loop's row-scale, the
+/// overwriting - `d_query` (2 sources: this chunk-loop's row-scale, the
 /// `intra_scores` precompute's `bmm`), `d_key` (4 sources: the chunk-loop's
 /// row-scale, the `intra_scores` precompute, `raw_attn0`'s producing `bmm`,
 /// `k_beta`'s own row-scale), `d_beta` (2 sources: `v_beta`'s and `k_beta`'s
@@ -1349,11 +1347,9 @@ pub fn gdn_chunk_bwd(
     steps.push(g.step(bwd_ids.decay_mask_bwd, &[bwd.d_decay_mask, saved.decay_mask, bwd.d_g_cs], &[bhc, c, 0], bhc * c));
     steps.push(g.step(bwd_ids.decay_mask_bwd, &[bwd.d_decay_mask, saved.decay_mask, bwd.d_g_cs], &[bhc, c, 1], bhc * c));
 
-    // ---- item 19: g_cs = cumsum(raw_g) backward (reverse cumsum / suffix sum) ----
+    // ---- item 19: g_cs = cumsum(raw_g) backward (reverse cumsum / suffix sum, one fused dispatch) ----
     steps.push(g.step(ids.region_copy, &[bwd.d_g_cs, d_raw_g], &[1, bhc * c, bhc * c, 0], bhc * c));
-    for i in (0..c - 1).rev() {
-        steps.push(g.step(bwd_ids.reverse_cumsum_step, &[d_raw_g], &[bhc, c, i], bhc));
-    }
+    steps.push(g.step(bwd_ids.reverse_cumsum_step, &[d_raw_g], &[bhc, c], bhc));
 
     // ---- item 20: v_beta = value*beta, k_beta = key*beta backward ----
     steps.push(g.step(ids.row_scale, &[bwd.d_v_beta, beta, d_value], &[bhc * c * dv, dv], bhc * c * dv));

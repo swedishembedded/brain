@@ -2912,6 +2912,81 @@ Two consequences worth recording, neither actioned here:
    (lesson #78's shape: a fast path only reaches callers that opt in),
    not new kernel work.
 
+### M5.8 - GDN's chunk-internal cumsum scans collapsed from 63 dispatches to 1, forward and backward
+
+A re-derivation of the audit that opened this campaign found a real gap none
+of Phase 5's per-kernel-family sweeps (M5.1-M5.7) had covered: Gated
+DeltaNet's chunked-parallel forward/backward (`crates/model/src/gdn.rs`)
+issues two families of tiny sequential dispatches that are driven ONLY by
+chunk size `c` (a constant, 64 at every real shape this model family uses),
+not by sequence length `T` - so they cost the same whether `T=128` or
+`T=4096`. `qwen35_bench gdn` (already existing infra, unchanged) measured a
+GDN layer at Qwen3.8-27B's real dims (`T=128`) at 185 dispatches for LESS
+total FLOPs than a GQA layer's 15 dispatches - the ratio tracks dispatch
+latency, not compute. Of those 185, 126 (63+63) are exactly the two cumsum
+families this milestone closes; the remaining 63 (the UT triangular-solve
+loop) are a separate, larger rewrite - see the "not yet done" note below.
+
+`gdn_chunk_cumsum_step.wgsl` implemented ONE step of a row-wise cumulative
+sum (`g_cs[row,i] += g_cs[row,i-1]`), issued in a host `for i in 1..c` loop -
+63 dispatches, each only `bhc` threads (96 at this shape). The kernel's own
+header justified this by "the CPU JIT allows exactly one top-level
+`workgroupBarrier()` per kernel" - true, but that constraint only rules out
+a workgroup-COOPERATIVE scan; it says nothing about a single thread looping
+serially over the whole row with ZERO barriers, which is the exact idiom
+`scan_block.wgsl` already uses elsewhere in this tree. Rewritten to do the
+WHOLE row in one dispatch: `threads = bhc`, each thread runs the same
+`c_len`-long serial loop the host used to unroll across dispatches. Same fix
+applied to the backward suffix-sum sibling, `gdn_chunk_reverse_cumsum_step.wgsl`
+(`gdn_chunk_bwd`'s item 19).
+
+Both kernels keep their name, their registered kernel id, and their exact
+per-element arithmetic - only the host call site changed, from a `for i in
+1..c { g.step(...) }` loop to one `g.step(...)` call, and the `Params`
+struct dropped the now-unused per-call `i` index. `crates/gpu-core/src/
+cost.rs`'s per-kernel cost model for both kernel names is updated to account
+for the row-length factor the old per-row-index accounting didn't need (the
+per-DISPATCH cost is now `bhc*(c_len-1)` adds, not `bhc`).
+
+**Bit-identical, not just "close enough"**: the arithmetic is unchanged,
+only its dispatch granularity - `crates/model/tests/gdn_chunk_fwd.rs`
+(`gdn_chunk_fwd_matches_host_oracle`) and `gdn_chunk_bwd.rs`
+(`gdn_chunk_bwd_gradcheck`) both stay green on this exact assertion, on
+BOTH `BRAIN_DEVICE=gpu` and `BRAIN_DEVICE=cpu`. Each test also gained a
+dispatch-count regression pin (`assert_eq!(steps.len(), ...)`) so a future
+change silently re-introducing the host loop is caught here rather than
+only showing up as a latency regression in `qwen35_bench`.
+
+**Measured** (`qwen35_bench gdn 128 5`, Intel Arc iGPU/Vulkan, this box):
+dispatch count 185 -> 123 (-62, exactly the 63->1 fusion applied once), on
+both the pre- and post-change binary, confirming the mechanism. Wall-clock
+on this specific shared box is too noisy to report a clean before/after
+percentage right now - four repeated runs of the UNCHANGED pre-fix binary
+alone ranged 35.0-138.9 ms/rep for identical code (a symptom this
+campaign's own `probe.md` already documents on this box: package thermal
+state and concurrent-process contention can move a reading several-fold
+between runs seconds apart), and the post-fix binary's range (36.3-105.5
+ms/rep) overlaps it. Recorded honestly rather than cherry-picking a
+favourable pair per this ledger's own decision 4 - the dispatch-count
+reduction is the real, guaranteed, mechanism-level win; a clean wall-clock
+percentage wants a quiet box or the real 2xP40 hardware this campaign is
+otherwise measured against.
+
+**Not yet done, on purpose**: the UT-transform loop (`gdn_ut_step.wgsl`,
+forward substitution for `(I-A)^-1`, still 63 sequential dispatches) and
+its backward adjoint (126 dispatches) are a larger, numerically riskier
+rewrite - `A` (`attn0`) is strictly lower triangular and hence nilpotent
+(`A^c=0`), so `(I-A)^-1 = prod_{m=0}^{5}(I+A^(2^m))` at `c=64` is
+mathematically exact via ~10-12 batched GEMMs (`bmm.wgsl`, already used
+four times in this same prefix) - but that reassociates the floating-point
+summation order versus the current sequential forward-substitution, which
+may not stay bit-identical the way this milestone's fix does. Left as a
+named follow-up (not attempted this pass) rather than landed without full
+confidence in its numerical parity.
+
+**Commits**: one - `model, kernels: fuse GDN's chunk-internal cumsum scans,
+63 dispatches to 1, forward and backward (M5.8)`.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
