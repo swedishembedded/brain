@@ -295,6 +295,138 @@ unsafe fn row_abt_avx512(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize
     }
 }
 
+/// AVX2 packed-int8 GEMM/GEMV - `kernel-performance.md` M8.11, the first real
+/// int8 SIMD path this backend has ever had (`ArchDesc.tier(I8)` was `Absent`
+/// through M8.1: "no VNNI fast path yet"; this is that fast path, on plain
+/// AVX2 - `_mm256_maddubs_epi16`, not VNNI/AMX, since that is what this box's
+/// real Haswell-class core has).
+///
+/// Reproduces `matmul_i8_gemv.wgsl`/`matmul_i8_dyn.wgsl`'s shared math EXACTLY,
+/// not merely within tolerance:
+///
+///   out[m,n] = sx[m] * Σ_g  dot_g(m,n) * sw[n,g]
+///   dot_g(m,n) = Σ_{i=0}^{31} i8(xq[m, 32g+i]) * i8(wq[n, 32g+i])     (INTEGER)
+///
+/// `xq`/`wq` are `[rows, kg]` `u32` with `kg = K/4` (4 signed int8 lanes per
+/// word, `dot4I8Packed`'s own packing); `sw` is `[n, kg/8]` (one scale per
+/// 8-word = 32-int8 GROUP, `model::int8::GROUP`); `sx` is `[m]`.
+///
+/// **Why this is bit-identical to the WGSL reference, not "reassociation
+/// tolerance" like `fast_conv`'s conv2d/matmul_abt**: the per-group inner sum
+/// is INTEGER (associative/commutative exactly, no rounding whichever order
+/// the 32 lanes are summed in - scalar one-word-at-a-time here, one
+/// `_mm256_maddubs_epi16`+`_mm256_madd_epi16` reduction under AVX2), and the
+/// OUTER fold across groups runs in the identical ascending order both WGSL
+/// kernels use (`for g in 0..ng`, matching `matmul_i8_gemv.wgsl`'s `WPG=8`
+/// grouping and `matmul_i8_dyn.wgsl`'s `QPG=2` fold point - both fold every 8
+/// words, the identical `GROUP=32` int8 the model's own quantizer scales by).
+/// So the only thing that can legally differ between the scalar and AVX2
+/// paths here is HOW one group's 32-lane integer dot product is computed,
+/// never in what order groups are folded into the f32 total - which is why
+/// [`tests::avx2_int8_gemm_matches_scalar_reference`] asserts exact equality,
+/// not an epsilon.
+///
+/// **The sign trick** (why `_mm256_maddubs_epi16`, which wants one UNSIGNED
+/// and one SIGNED `i8` operand, can compute a SIGNED-times-SIGNED dot at all):
+/// `model::int8::quantize`'s own `.clamp(-127.0, 127.0)` (never emits `-128`)
+/// means every lane's absolute value fits in `u8`'s `0..=127`, so
+/// `dot(a,b) == dot(|a|, sign(a)*b)` never overflows either operand -
+/// `_mm256_abs_epi8`/`_mm256_sign_epi8` compute exactly that, the same trick
+/// ggml's own AVX2 int8 kernels use for the identical reason.
+pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [f32], m: usize, kg: usize, n: usize) {
+    // Packed u32 words per weight-scale group: GROUP(32 int8) / 4 lanes/word -
+    // the same `WPG`/implicit-`QPG=2`-fold-point both WGSL kernels use.
+    const WPG: usize = 8;
+    if m == 0 || n == 0 || kg == 0 {
+        return;
+    }
+    let ng = kg / WPG;
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = fast_conv_avx2();
+    let row = |mi: usize, orow: &mut [f32]| {
+        let xrow = &xq[mi * kg..mi * kg + kg];
+        for ni in 0..n {
+            let wrow = &wq[ni * kg..ni * kg + kg];
+            let swrow = &sw[ni * ng..ni * ng + ng];
+            let mut acc_f = 0.0f32;
+            for (g, &sw_g) in swrow.iter().enumerate().take(ng) {
+                let off = g * WPG;
+                let xg = &xrow[off..off + WPG];
+                let wg_ = &wrow[off..off + WPG];
+                #[cfg(target_arch = "x86_64")]
+                let acc_i = if use_avx2 { unsafe { dot32_i8_avx2(xg, wg_) } } else { dot_group_scalar(xg, wg_) };
+                #[cfg(not(target_arch = "x86_64"))]
+                let acc_i = dot_group_scalar(xg, wg_);
+                acc_f += acc_i as f32 * sw_g;
+            }
+            orow[ni] = acc_f * sx[mi];
+        }
+    };
+    if m * n * kg < 65_536 {
+        for mi in 0..m {
+            row(mi, &mut out[mi * n..mi * n + n]);
+        }
+        return;
+    }
+    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+    out.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, ochunk)| {
+        let row0 = ci * rows_per;
+        let nrows = ochunk.len() / n;
+        for r in 0..nrows {
+            row(row0 + r, &mut ochunk[r * n..r * n + n]);
+        }
+    });
+}
+
+/// `crate::fast_conv::avx2_available()`, renamed locally so this module's own
+/// doc/call sites read as "use AVX2" rather than repeating the crate path -
+/// `fast_conv` is a private module, this is the one place `fast_ops` reaches
+/// into its ISA probe outside the `matmul_abt`/`isa_tier` call sites above.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn fast_conv_avx2() -> bool {
+    crate::fast_conv::avx2_available()
+}
+
+/// One `dot4I8Packed`-per-word group sum, portable scalar - both the
+/// non-x86_64 fallback and [`tests::avx2_int8_gemm_matches_scalar_reference`]'s
+/// oracle.
+#[inline]
+fn dot_group_scalar(a: &[u32], b: &[u32]) -> i32 {
+    let mut acc = 0i32;
+    for (&aw, &bw) in a.iter().zip(b) {
+        for lane in 0..4 {
+            let ai = ((aw >> (lane * 8)) & 0xFF) as u8 as i8 as i32;
+            let bi = ((bw >> (lane * 8)) & 0xFF) as u8 as i8 as i32;
+            acc += ai * bi;
+        }
+    }
+    acc
+}
+
+/// AVX2 32-lane (8-word) signed-int8 dot product via the sign trick - see
+/// [`matmul_i8_dyn`]'s own doc comment for why this is exact, not
+/// approximate. `a`/`b` are exactly 8 `u32` words (32 packed `i8` lanes each).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn dot32_i8_avx2(a: &[u32], b: &[u32]) -> i32 {
+    use std::arch::x86_64::*;
+    debug_assert_eq!(a.len(), 8);
+    debug_assert_eq!(b.len(), 8);
+    let av = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+    let bv = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+    let abs_a = _mm256_abs_epi8(av);
+    let signed_b = _mm256_sign_epi8(bv, av);
+    let prod16 = _mm256_maddubs_epi16(abs_a, signed_b);
+    let prod32 = _mm256_madd_epi16(prod16, _mm256_set1_epi16(1));
+    let lo = _mm256_castsi256_si128(prod32);
+    let hi = _mm256_extracti128_si256(prod32, 1);
+    let s128 = _mm_add_epi32(lo, hi);
+    let s64 = _mm_add_epi32(s128, _mm_srli_si128(s128, 8));
+    let s32 = _mm_add_epi32(s64, _mm_srli_si128(s64, 4));
+    _mm_cvtsi128_si32(s32)
+}
+
 /// `out[i] = x[i] >= 0 ? x[i] : slope*x[i]` (`leaky_relu.wgsl`; slope 0 is ReLU,
 /// slope 1 is the aliasing copy some blocks use). Branch-free select
 /// auto-vectorizes; ~40 dispatches per ZipDepth frame ran as scalar JIT before.
@@ -2573,5 +2705,160 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The exact `matmul_i8_gemv.wgsl`/`matmul_i8_dyn.wgsl` math, one (m,n) at a
+    /// time, scalar - the correctness oracle [`matmul_i8_dyn`] (M8.11) is gated
+    /// against. Deliberately reimplemented from the WGSL doc's formula rather
+    /// than calling `dot_group_scalar`/`matmul_i8_dyn` itself, so a shared bug in
+    /// this module cannot cancel out in both places.
+    fn matmul_i8_ref(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], m: usize, kg: usize, n: usize) -> Vec<f32> {
+        const WPG: usize = 8;
+        let ng = kg / WPG;
+        let mut out = vec![0.0f32; m * n];
+        for mi in 0..m {
+            for ni in 0..n {
+                let mut acc_f = 0.0f32;
+                for g in 0..ng {
+                    let mut acc_i = 0i32;
+                    for w in 0..WPG {
+                        let k = g * WPG + w;
+                        let aw = xq[mi * kg + k];
+                        let bw = wq[ni * kg + k];
+                        for lane in 0..4 {
+                            let ai = ((aw >> (lane * 8)) & 0xFF) as u8 as i8 as i32;
+                            let bi = ((bw >> (lane * 8)) & 0xFF) as u8 as i8 as i32;
+                            acc_i += ai * bi;
+                        }
+                    }
+                    acc_f += acc_i as f32 * sw[ni * ng + g];
+                }
+                out[mi * n + ni] = acc_f * sx[mi];
+            }
+        }
+        out
+    }
+
+    /// Random signed int8 lanes packed 4/word, clamped to `[-127, 127]` -
+    /// `model::int8::quantize`'s own contract (never `-128`), which is what
+    /// makes the AVX2 sign-trick in `dot32_i8_avx2` legal - see
+    /// [`matmul_i8_dyn`]'s doc comment.
+    fn random_packed_i8(words: usize, s: &mut u32) -> Vec<u32> {
+        (0..words)
+            .map(|_| {
+                let mut w = 0u32;
+                for lane in 0..4 {
+                    let v = ((lcg(s) * 127.0).round().clamp(-127.0, 127.0)) as i8;
+                    w |= (v as u8 as u32) << (lane * 8);
+                }
+                w
+            })
+            .collect()
+    }
+
+    /// [`matmul_i8_dyn`] (whichever ISA path this host takes - AVX2 on every
+    /// box this test has run on) matches [`matmul_i8_ref`] EXACTLY (not an
+    /// epsilon) - see `matmul_i8_dyn`'s own doc comment for why exact equality
+    /// is the right bar here, not fp-reassociation tolerance.
+    #[test]
+    fn avx2_int8_gemm_matches_scalar_reference() {
+        let mut s = 4242u32;
+        // (m, n, kg): a decode-shaped GEMV (m=1), a small prefill GEMM, a
+        // multi-group-per-row shape (kg=24 => 3 groups of 8 words), and a
+        // shape that crosses the rayon-parallel threshold (m*n*kg >= 65536).
+        for &(m, n, kg) in &[(1usize, 5usize, 8usize), (7, 11, 24), (3, 4, 8), (64, 128, 64)] {
+            let xq = random_packed_i8(m * kg, &mut s);
+            let wq = random_packed_i8(n * kg, &mut s);
+            let ng = kg / 8;
+            let sx: Vec<f32> = (0..m).map(|_| lcg(&mut s).abs() + 0.01).collect();
+            let sw: Vec<f32> = (0..n * ng).map(|_| lcg(&mut s).abs() + 0.01).collect();
+
+            let want = matmul_i8_ref(&xq, &wq, &sx, &sw, m, kg, n);
+            let mut got = vec![0.0f32; m * n];
+            matmul_i8_dyn(&xq, &wq, &sx, &sw, &mut got, m, kg, n);
+
+            assert_eq!(got, want, "m={m} n={n} kg={kg}: AVX2 int8 GEMM diverged from the WGSL-matching scalar oracle");
+        }
+    }
+
+    /// [`dot32_i8_avx2`] alone, against [`dot_group_scalar`], across every
+    /// sign combination the clamp-to-127 contract allows (not just random
+    /// data) - `-127 * -127`/`127 * -127`/etc are the corners the sign trick's
+    /// `_mm256_abs_epi8`/`_mm256_sign_epi8` pairing must get exactly right.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn dot32_i8_avx2_matches_scalar_on_sign_corners() {
+        if !fast_conv_avx2() {
+            eprintln!("skip: dot32_i8_avx2_matches_scalar_on_sign_corners needs AVX2, absent on this host");
+            return;
+        }
+        let corners = [-127i8, -1, 0, 1, 127];
+        // 8 words = 32 lanes; cycle the corner set through all 32 lanes so
+        // every (a,b) sign pairing above appears somewhere in the vector.
+        let mut a = [0u32; 8];
+        let mut b = [0u32; 8];
+        for i in 0..32 {
+            let av = corners[i % corners.len()];
+            let bv = corners[(i / corners.len() + 1) % corners.len()];
+            a[i / 4] |= (av as u8 as u32) << ((i % 4) * 8);
+            b[i / 4] |= (bv as u8 as u32) << ((i % 4) * 8);
+        }
+        let want = dot_group_scalar(&a, &b);
+        let got = unsafe { dot32_i8_avx2(&a, &b) };
+        assert_eq!(got, want, "AVX2 sign-trick dot diverged from the scalar reference on the clamp corners");
+    }
+
+    /// Measured throughput, scalar vs AVX2, on this box's real core (M8.11's
+    /// own "fully measurable here" claim) - printed, not asserted, since CI
+    /// hardware speed is not a correctness property; run with
+    /// `--test fast_ops -- --nocapture --ignored` to see the numbers.
+    #[test]
+    #[ignore = "throughput measurement, not a correctness gate - run explicitly with --ignored --nocapture"]
+    fn avx2_int8_gemm_throughput_vs_scalar() {
+        let (m, n, kg) = (32usize, 4096usize, 1024usize); // a realistic prefill-tile shape
+        let mut s = 7u32;
+        let xq = random_packed_i8(m * kg, &mut s);
+        let wq = random_packed_i8(n * kg, &mut s);
+        let ng = kg / 8;
+        let sx: Vec<f32> = (0..m).map(|_| lcg(&mut s).abs() + 0.01).collect();
+        let sw: Vec<f32> = (0..n * ng).map(|_| lcg(&mut s).abs() + 0.01).collect();
+        let mut out = vec![0.0f32; m * n];
+
+        let iters = 20;
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            for mi in 0..m {
+                for ni in 0..n {
+                    let xrow = &xq[mi * kg..mi * kg + kg];
+                    let wrow = &wq[ni * kg..ni * kg + kg];
+                    let swrow = &sw[ni * ng..ni * ng + ng];
+                    let mut acc_f = 0.0f32;
+                    for (g, &sw_g) in swrow.iter().enumerate().take(ng) {
+                        let off = g * 8;
+                        acc_f += dot_group_scalar(&xrow[off..off + 8], &wrow[off..off + 8]) as f32 * sw_g;
+                    }
+                    out[mi * n + ni] = acc_f * sx[mi];
+                }
+            }
+        }
+        let scalar_secs = t0.elapsed().as_secs_f64() / iters as f64;
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..iters {
+            matmul_i8_dyn(&xq, &wq, &sx, &sw, &mut out, m, kg, n);
+        }
+        let avx2_secs = t1.elapsed().as_secs_f64() / iters as f64;
+
+        let macs = (m * n * kg * 4) as f64; // 4 int8 MACs per packed word
+        eprintln!(
+            "int8 GEMM {m}x{n}x{k}: scalar single-thread {:.2} ms ({:.2} GMAC/s), matmul_i8_dyn (AVX2 + rayon, {} threads) {:.2} ms ({:.2} GMAC/s), speedup {:.2}x",
+            scalar_secs * 1e3,
+            macs / scalar_secs / 1e9,
+            rayon::current_num_threads(),
+            avx2_secs * 1e3,
+            macs / avx2_secs / 1e9,
+            scalar_secs / avx2_secs,
+            k = kg,
+        );
     }
 }

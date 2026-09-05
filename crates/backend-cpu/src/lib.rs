@@ -443,6 +443,20 @@ impl CpuBackend {
                 let c = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, m * n);
                 fast_ops::matmul_abt(a, b, c, m, k, n);
             }),
+            // M8.11: the new AVX2 packed-int8 GEMM. `[m, kg, n]` + `[xq, wq,
+            // sx, sw, out]` - see `fast_ops::matmul_i8_dyn`'s own doc for the
+            // exact buffer shapes and the WGSL kernels this reproduces.
+            "cpu_matmul_i8_dyn" => Arc::new(|uniform: *const u32, bufs: &[*mut u8]| unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let (m, kg, n) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
+                let ng = kg / 8;
+                let xq = std::slice::from_raw_parts(bufs[0] as *const u32, m * kg);
+                let wq = std::slice::from_raw_parts(bufs[1] as *const u32, n * kg);
+                let sx = std::slice::from_raw_parts(bufs[2] as *const f32, m);
+                let sw = std::slice::from_raw_parts(bufs[3] as *const f32, n * ng);
+                let out = std::slice::from_raw_parts_mut(bufs[4] as *mut f32, m * n);
+                fast_ops::matmul_i8_dyn(xq, wq, sx, sw, out, m, kg, n);
+            }),
             _ => return None,
         };
         let mut natives = self.shared.natives.lock().unwrap_or_else(|e| e.into_inner());
@@ -1105,14 +1119,30 @@ impl Backend for CpuBackend {
         use backend_api::arch::{ArchDesc, IsaFeatures, TierLevel, TierSupport};
         use backend_api::{DType, DeviceCaps, DeviceClass};
 
-        // I8 stays `Absent`: the multi-barrier packed-int8 GEMMs are outside
-        // the JIT's single-barrier model, and there is no VNNI fast path
-        // yet (a real AVX2 int8 GEMM is a later milestone, not this one).
+        // I8 is `Native` iff AVX2 is available AND not disabled by
+        // `BRAIN_NO_FASTCONV` (`kernel-performance.md` M8.11:
+        // `fast_ops::matmul_i8_dyn`'s `_mm256_maddubs_epi16`-based GEMM,
+        // registered under `register_native("cpu_matmul_i8_dyn")` - see that
+        // function's own doc). `Native`, not `Emulated`: this is genuine
+        // dedicated int8 SIMD hardware (real AVX2 instructions), unlike
+        // `backend-wgpu`'s `dot4I8Packed` polyfill case M8.1 already
+        // distinguishes with `Emulated` - the exact fast/polyfill split
+        // `ArchDesc::TierLevel`'s own doc comment describes. `Absent`
+        // otherwise (`BRAIN_NO_FASTCONV=1` or a non-x86_64/pre-AVX2 host) -
+        // there is genuinely no int8 SIMD path to report then, not merely
+        // an unmeasured one.
         // F16/BF16 are `Storage`, never higher: host RAM holds any byte
         // layout, but there is no fast f16/bf16 compute path here.
         let mut arch = ArchDesc::default();
         arch.set_tier(DType::F16, TierSupport { level: TierLevel::Storage, ..Default::default() });
         arch.set_tier(DType::BF16, TierSupport { level: TierLevel::Storage, ..Default::default() });
+        arch.set_tier(
+            DType::I8,
+            TierSupport {
+                level: if self.shared.fast_native_enabled { TierLevel::Native } else { TierLevel::Absent },
+                ..Default::default()
+            },
+        );
         // Reuses `fast_conv`'s own runtime CPUID probes - never reprobed
         // here. `avx2_available`/`avx512_available` each already require FMA/
         // VL/DQ alongside the base bit, so both ISA fields mirror the same
@@ -1148,7 +1178,26 @@ impl Backend for CpuBackend {
             // f16/bf16 storage tiers `numeric_view()` already derives) - set
             // directly here rather than threading a new tier through
             // `ArchDesc` for one orthogonal flag.
-            numeric: NumericSupport { fp8_storage: true, ..arch.numeric_view() },
+            // `int8_dot` is forced `false` here EVEN THOUGH `arch.tier(I8) ==
+            // Native` above - a deliberate divergence from `arch.numeric_view()`,
+            // the same shape M8.1 already precedented in the opposite direction
+            // (`vulkan_no_dp4a_still_executes_i8_unlike_the_old_formula`: ArchDesc
+            // and the legacy flattened view are allowed to disagree when they are
+            // really answering different questions). Here they are: `arch.tier`
+            // answers "does M8.11's own native AVX2 `matmul_i8_dyn` GEMM work"
+            // (yes) - reached ONLY through `register_native`/`step_native`, never
+            // through `select::candidates`. `numeric.int8_dot` answers a
+            // DIFFERENT, older question this backend's `select::candidates` still
+            // asks directly: "can `KernelVariant::PackedInt8`'s WGSL kernel
+            // (`matmul_i8_dyn.wgsl` et al, each `@cpu no` in its own header - not
+            // CPU-JIT-compilable, multi-barrier work-group) run here". It cannot,
+            // on ANY shape: `candidates`'s `Dtype::I8 | Q4 | Q4K | Q8K | NF4 |
+            // F4E2M1` arm returns `vec![PackedInt8]` alone whenever
+            // `!caps.workgroup_reductions` (unconditionally true on this backend),
+            // so `int8_dot: true` here would make EVERY int8-family matmul on
+            // this backend select a kernel the JIT cannot correctly execute -
+            // confirmed by reading `candidates`'s real match arm, not assumed.
+            numeric: NumericSupport { int8_dot: false, fp8_storage: true, ..arch.numeric_view() },
             arch,
         }
     }

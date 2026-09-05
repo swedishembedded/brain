@@ -4369,6 +4369,90 @@ file this milestone touched. **Measured: N/A by design** - like M8.3 itself,
 nothing was meant to move, and the bit-identical assertion is exactly that
 claim, checked. **Commit**: one.
 
+### M8.11 - a real AVX2 packed-int8 GEMM (`backend-cpu` reports `I8` for the first time)
+
+Before this milestone `backend-cpu` had NO int8 SIMD path at all
+(`ArchDesc.tier(I8) == Absent`, M8.1's own honest floor: "no VNNI fast path
+yet"). `fast_ops::matmul_i8_dyn` (`crates/backend-cpu/src/fast_ops.rs`) is
+that fast path, on real AVX2 (`_mm256_maddubs_epi16`/`_mm256_madd_epi16`) -
+this box's actual ISA (Core Ultra 7 155H / Meteor Lake: `avx2`, `fma`,
+`avx_vnni` present; NO `avx512*` bits at all, confirmed against
+`/proc/cpuinfo` directly, matching `fast_conv::avx512_available`'s own
+honesty note).
+
+**The math, reproduced exactly, not approximately**: `matmul_i8_dyn`
+computes `out[m,n] = sx[m] * Σ_g dot_g(m,n) * sw[n,g]`, `dot_g` an INTEGER
+sum over one 32-int8 (8-packed-word) GROUP - the identical formula and fold
+point `matmul_i8_gemv.wgsl`/`matmul_i8_dyn.wgsl` both use (`WPG=8`/`QPG=2`
+respectively, both folding every 8 words). Because the per-group sum is
+INTEGER (associative regardless of SIMD-vs-scalar reduction order) and the
+outer fold across groups runs in the identical ascending order both WGSL
+kernels use, the AVX2 path is BIT-IDENTICAL to a hand-written scalar oracle
+reproducing the WGSL formula directly - not "fp-reassociation tolerance"
+like `fast_conv`'s conv2d/matmul_abt - proven by
+`avx2_int8_gemm_matches_scalar_reference` (exact `assert_eq!`, four shapes
+including one that crosses the rayon-parallel threshold).
+
+**The sign trick**: `_mm256_maddubs_epi16` wants one unsigned, one signed
+`i8` operand; `model::int8::quantize`'s own `.clamp(-127.0, 127.0)` (grepped
+directly, never emits `-128`) means every lane's magnitude fits `u8`'s
+`0..=127`, so `dot(a,b) == dot(|a|, sign(a)*b)` never overflows either
+operand - `_mm256_abs_epi8`/`_mm256_sign_epi8` compute exactly that (the same
+trick ggml's own AVX2 int8 kernels use). Pinned directly by
+`dot32_i8_avx2_matches_scalar_on_sign_corners`, which cycles every sign
+combination the clamp-to-127 contract allows (not just random data) through
+all 32 lanes.
+
+**Wired into `register_native`/`step_native`** (`"cpu_matmul_i8_dyn"`, added
+to the SAME fixed name table M8.10 built) and into `CpuIsaProvider` as a
+second arm (`lower_matmul_i8`, `Op::MatMul` at `Dtype::I8`, operand order
+`[Act(xq), Weight(wq), ActScale(sx), WeightScale(sw), Out]`) - proven reached
+end to end by `gpu-core`'s `cpu_isa_i8_matmul_reaches_the_native_avx2_gemm`
+(the numeric oracle itself is `fast_ops`'s own exact-match test; this one
+only proves the ABI plumbing/operand order).
+
+**`ArchDesc.tier(I8)` now reports `Native`** (not `Emulated`) when AVX2 is
+available - genuine dedicated SIMD hardware, unlike `backend-wgpu`'s
+`dot4I8Packed` polyfill case M8.1 already distinguishes with `Emulated`.
+
+**The SAME landmine M8.10 found, handled correctly this time**: `arch.tier`
+and `caps.numeric.int8_dot` are DELIBERATELY decoupled here -
+`numeric.int8_dot` stays `false` even though `arch.tier(I8) == Native`,
+because they answer different questions (see M8.10's own ledger entry for
+the full argument: `numeric.int8_dot` is read directly by `select::
+candidates`, which would select the CPU-JIT-uncompilable `matmul_i8_dyn.wgsl`
+for every int8-family matmul if it were `true`). This is the SAME shape M8.1
+already precedented in the opposite direction
+(`vulkan_no_dp4a_still_executes_i8_unlike_the_old_formula`: `ArchDesc` and
+the legacy flattened view are allowed to disagree when they are really
+answering different questions) - confirmed still green:
+`matmul_i8_dyn_has_no_cpu_native_fastpath_and_is_unreachable_by_the_selector`
+passes unchanged, because `numeric.int8_dot` never actually moved.
+
+**Measured on this box's real core** (`avx2_int8_gemm_throughput_vs_scalar`,
+`--release --ignored --nocapture`, m=32×n=4096×kg=1024, 20 iters):
+
+```
+int8 GEMM 32x4096x1024: scalar single-thread 1845.56 ms (0.29 GMAC/s),
+matmul_i8_dyn (AVX2 + rayon, 22 threads) 45.08 ms (11.91 GMAC/s),
+speedup 40.94x
+```
+
+(the 40.94x includes both the AVX2 vectorization and this box's 22-thread
+rayon fan-out - the real, whole path a caller would see, not an isolated
+micro-benchmark of the intrinsic alone).
+
+Verification: `cargo test -p brain-backend-cpu --lib fast_ops::` (22/22
+green, 5 ignored benches/attn tests unrelated to this milestone), `cargo test
+--release -p brain-backend-cpu --lib fast_ops::tests::
+avx2_int8_gemm_throughput_vs_scalar -- --ignored --nocapture` (measured
+above), `cargo test -p brain-backend-cpu --test
+matmul_family_native_fastpath` (3/3 green, unchanged), `cargo test -p
+brain-gpu-core --test cpu_isa_provider_zero_delta` (2/2 green), `cargo
+clippy -p brain-backend-cpu -p brain-gpu-core --all-targets` clean on every
+file this milestone touched. **Commit**: one.
+
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
