@@ -79,8 +79,16 @@ pub const DEFAULT_PROMPT: &str = "Describe this image.";
 /// a `[seq, vocab]` logit slab and this decoder has no KV cache to amortise it.
 pub const SEQ_LEN: u32 = 1 + 729 + 96;
 
-/// Default generated-token budget, deliberately small: each token is a full
-/// recompute of the sequence through 24 layers.
+/// Default generated-token budget, deliberately small.
+///
+/// The reason is the one this module's own "What is not" section states, NOT
+/// the one this comment used to give ("each token is a full recompute of the
+/// sequence through 24 layers"), which has been false since
+/// `MoondreamModel::generate_kv` - the decode IS KV-cached, and the two
+/// statements 50 lines apart contradicted each other. What is still true is
+/// that the cached steps are cheap but not free and the prefill over a
+/// 730-row image prefix is not, so a caption-sized budget stays the default
+/// and a caller that wants more asks for it.
 pub const DEFAULT_MAX_NEW: i64 = 32;
 
 fn default_dir() -> String {
