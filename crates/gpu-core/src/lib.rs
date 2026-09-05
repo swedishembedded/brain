@@ -1040,27 +1040,39 @@ mod native_facade {
                 .step_buf(k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(shape.to_vec()), threads })
         }
-        /// Register a provider's own compiled kernel on this handle's
-        /// backend. See `backend_api::Backend::register_native`'s doc for
-        /// the whole contract (Phase 8, M8.3/M8.9). `None` when this backend
-        /// has no native compilation path for `spec`, or declines it (e.g.
-        /// hardware without the capability the kernel needs) - never a panic.
+        /// [`backend_api::Backend::register_native`] - the enabling seam a
+        /// non-WGSL [`crate::provider::OperatorProvider`] (native f16,
+        /// cooperative-matrix, a CPU ISA pack) dispatches through, rather
+        /// than escaping `Backend` and losing async submission/tape capture/
+        /// cost accounting/profiling - see that method's own doc comment for
+        /// the full argument. `None` when this backend has no native
+        /// compilation path for `spec`, or declines it (e.g. hardware
+        /// without the capability the kernel needs) - never a panic.
         ///
-        /// Bypasses `crate::upgrade` and `StepMeta` deliberately: a native
-        /// kernel has no entry in `self.names` (the WGSL catalogue's own
-        /// name table) to redirect or attribute cost against - see
-        /// `gpu_core::provider::OpRequest::bind`'s doc for why a non-WGSL
-        /// provider never had string kernel names to begin with.
+        /// A thin forwarder, deliberately: `crate::upgrade`'s transparent-
+        /// redirect table is keyed by WGSL kernel INDEX (`self.names`, the
+        /// WGSL catalogue's own name table), which a native id never has one
+        /// of, so there is nothing here for it to consult or attribute cost
+        /// against.
         pub fn register_native(&self, spec: &backend_api::NativeSpec) -> Option<backend_api::NativeId> {
             self.inner.register_native(spec)
         }
-        /// Record a dispatch of a kernel registered via
-        /// [`Gpu::register_native`] - see `backend_api::Backend::step_native`'s
-        /// doc. `None` when this backend does not recognise `id`.
+
+        /// [`backend_api::Backend::step_native`] - the native-pipeline
+        /// analogue of [`Self::step`]. Unlike `step`/`step_sliced`/`step_buf`
+        /// above, this does NOT attach a [`StepMeta`]: a native id indexes a
+        /// per-backend table `self.names`/`crate::cost` know nothing about,
+        /// so there is no `kernel: usize` this facade could honestly report -
+        /// `crate::cost::tally` already treats a meta-less `Step` as
+        /// `"<no-meta>"`, exactly the right answer here (a real cost formula
+        /// for a native step is a real follow-up once one exists, not a
+        /// fabricated one now). `None` when this backend does not recognise
+        /// `id`.
         pub fn step_native(&self, id: backend_api::NativeId, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Option<Step> {
             crate::assert_no_output_alias(bufs);
             self.inner.step_native(id, bufs, params, threads)
         }
+
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
             // Only when armed (see `cost_enabled`): tallying is a mutex lock
             // plus a per-dispatch string match - measurement machinery, not a

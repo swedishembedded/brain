@@ -48,6 +48,10 @@ use crate::{DeviceBuffer, Gpu, Step};
 // (like every other Vulkan/ash path in this workspace) cannot target wasm.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod coopmat;
+/// CPU ISA-pack provider (AVX2 F32 GEMM hoist + AVX2 int8 GEMM) -
+/// `kernel-performance.md` M8.10/M8.11, this ABI's first non-reference
+/// provider.
+pub mod cpu_isa;
 pub mod parity;
 pub mod wgsl;
 

@@ -4282,6 +4282,93 @@ unaffected (no WGSL kernel added or renamed; the coopmat kernel is GLSL/
 SPIR-V, outside that catalogue by construction, same as before this
 milestone). **Commits**: two, as scoped (the structural move; the provider).
 
+### M8.10 - hoist the existing AVX2 fast-path dispatch into the `OperatorProvider` ABI (zero-delta)
+
+`backend-cpu`'s own `CpuBackend::dispatch` already intercepts the `matmul`/
+`matmul_tiled`/`matmul_reg{,2,3}` kernel NAMES with a hidden if-ladder and
+calls `fast_ops::matmul_abt` directly - correct, but reached only through a
+backend-internal name match, invisible to the `OperatorProvider` ABI M8.3
+landed. This milestone gives that same dispatch a second, ABI-native path
+without touching what it computes.
+
+**`register_native`/`step_native` land on `backend-cpu`** (`crates/backend-
+cpu/src/lib.rs`) - the first real implementation of the two `Backend` trait
+methods M8.3 added as pure stubs. A `NativeEntry { name, f }` table
+(`CpuShared::natives: Mutex<Vec<NativeEntry>>`) holds provider-registered
+closures; `register_native(&NativeSpec::HostFn(name))` matches `name` against
+a FIXED table this crate itself implements (today: `"cpu_matmul_abt"` only)
+and refuses (`None`) under the exact same condition (`fast_native_enabled` =
+AVX2 available AND not `BRAIN_NO_FASTCONV`-disabled) the existing hidden
+`FastIdx` if-ladder already refuses under - one gate, not two independently
+drifting ones. `step_native` records a `CpuStep` whose `kind` is biased by a
+new `NATIVE_BASE = 1 << 30` constant (no real kernel set gets anywhere near
+that many pipeline slots) so `dispatch` can tell a native id from a JIT/
+`FastIdx` kernel index at a glance; `dispatch` checks `kind >= NATIVE_BASE`
+FIRST, before the `total == 0` early-out, and calls the registered closure
+directly - the identical unsafe-slice-reconstruction shape every existing
+`FastIdx` arm already uses, just reached by id instead of name.
+
+**`gpu_core::Gpu` grows matching `register_native`/`step_native` thin
+forwarders** (`crates/gpu-core/src/lib.rs`, native-only impl) - `step_native`
+deliberately attaches no `StepMeta` (a native id indexes a per-backend table
+`crate::cost` knows nothing about, so there is no honest `kernel: usize` to
+report; `cost::tally` already treats a meta-less `Step` as `"<no-meta>"`,
+the right answer here, not a fabricated cost formula).
+
+**`gpu_core::provider::cpu_isa::CpuIsaProvider`** (new module) - this ABI's
+first non-reference `OperatorProvider`. `lower_matmul_f32` resolves
+`"cpu_matmul_abt"` once (cached in a `OnceLock<Option<NativeId>>`, since a
+provider instance is expected to pair with one `Gpu`/model the same way
+`WgslProvider` does) and calls `register_native`/`step_native` in place of a
+kernel-name bind. `requires`/`accepts` deliberately never touch
+`select::Requirement` or `caps` at all: `register_native` returning `None`
+IS the real gate (AVX2 unavailable -> `Err` -> `ProviderRegistry::dispatch`'s
+own documented fallback to the WGSL reference provider), so there is nothing
+left for a `Requirement` field to duplicate by hand.
+
+**The zero-delta proof** (`crates/gpu-core/tests/
+cpu_isa_provider_zero_delta.rs`, a DEDICATED integration-test file, not an
+inline unit test - see its own module doc for why: it needs the CPU backend
+specifically, and `gpu_core::set_default_backend` is process-global, safe to
+call only because each `tests/*.rs` file is its own process):
+`cpu_isa_f32_matmul_is_bit_identical_to_the_hidden_fastpath` dispatches the
+SAME `(m=37,n=53,k=71)` F32 matmul twice on the SAME real CPU device - once
+through an empty `ProviderRegistry` (today's unmodified path, which itself
+bottoms out in the hidden `f.matmul` if-ladder), once through
+`ProviderRegistry::reference(..).prefer(CpuIsaProvider::new())` (the new ABI
+path) - and asserts the two `Vec<f32>` outputs are `==` (bit-identical, not
+tolerance-close): PROVABLY zero-delta, since it is the same `fast_ops::
+matmul_abt` call either way. Also asserts each run actually chose the
+kernel/provider path it claims to (`lowered.kernels == ["matmul"]` vs
+`["cpu_matmul_abt"]`), so the test cannot pass by both runs silently taking
+the same path.
+
+**A discovered landmine, fixed before it could bite**: this milestone's own
+brief said nothing about `ArchDesc`/`select::candidates` - M8.10 is pure
+plumbing. Confirmed by reading `crates/backend-cpu/tests/
+matmul_family_native_fastpath.rs`'s own
+`matmul_i8_dyn_has_no_cpu_native_fastpath_and_is_unreachable_by_the_selector`,
+a PRE-EXISTING regression test pinning `caps.numeric.int8_dot == false` on
+this backend specifically because `select::candidates`'s `Dtype::I8 | Q4 |
+Q4K | Q8K | NF4 | F4E2M1` arm returns `vec![PackedInt8]` alone whenever
+`!caps.workgroup_reductions` (unconditionally true on the CPU backend) -
+meaning `int8_dot: true` would make EVERY int8-family matmul on this backend
+select `matmul_i8_dyn.wgsl`, a kernel its own header marks `@cpu no`
+(multi-barrier, not CPU-JIT-compilable) and that same test file's own
+`assert_jit_uncompilable` proves really does fail to compile. This test was
+already in the tree, evidently written defensively ahead of M8.11's own
+arrival - re-ran it here, unmodified, to confirm it stays green, since this
+milestone's own `caps()` is untouched (the ArchDesc/`int8_dot` question is
+M8.11's, not this one's).
+
+Verification: `cargo test -p brain-backend-cpu --test
+matmul_family_native_fastpath` (3/3 green, unchanged), `cargo test -p
+brain-gpu-core --test cpu_isa_provider_zero_delta` (1/1 green), `cargo
+clippy -p brain-backend-cpu -p brain-gpu-core --all-targets` clean on every
+file this milestone touched. **Measured: N/A by design** - like M8.3 itself,
+nothing was meant to move, and the bit-identical assertion is exactly that
+claim, checked. **Commit**: one.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

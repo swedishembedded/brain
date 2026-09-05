@@ -38,6 +38,31 @@ use wgsl_cpu::Jit;
 /// A recorded dispatch: (kernel index, bind group, grid_x, grid_y).
 pub type CpuStep = (usize, BindGroup, u32, u32);
 
+/// `kind` values at or above this are a [`backend_api::NativeId`] index into
+/// `CpuShared::natives`, not a JIT/`FastIdx` kernel index - `kernel-performance
+/// .md` M8.10. No real kernel set gets anywhere near 2^30 entries, so this
+/// never collides with a genuine JIT pipeline index; `dispatch` checks it
+/// FIRST, before the `total == 0` early-out (a native step's own function
+/// decides whether there is anything to do, not the grid math below, which a
+/// native dispatch's `threads` never really described in the first place).
+const NATIVE_BASE: usize = 1 << 30;
+
+/// One registered native function's signature: the raw uniform pointer and
+/// the bound buffer bases in bind order - exactly the shape `dispatch`'s own
+/// hidden `FastIdx` if-ladder below already reconstructs slices from. A
+/// native step is that SAME reconstruction, just reached by a registered id
+/// instead of a kernel-name-index match.
+type NativeHostFn = Arc<dyn Fn(*const u32, &[*mut u8]) + Send + Sync>;
+
+/// One provider-registered native function - `kernel-performance.md` M8.10's
+/// [`backend_api::Backend::register_native`]/`step_native` seam, the CPU
+/// ISA-pack half of it.
+struct NativeEntry {
+    #[allow(dead_code)] // read only via BRAIN_PROFILE-style diagnostics, not yet wired
+    name: &'static str,
+    f: NativeHostFn,
+}
+
 struct BufInner {
     data: UnsafeCell<Vec<u32>>,
 }
@@ -89,6 +114,17 @@ struct CpuShared {
     /// dispatcher needs it for two things: laying out the same grid the GPU
     /// backends do, and turning that grid back into an invocation count.
     wgsizes: Vec<u32>,
+    /// Whether AVX2 is available AND `BRAIN_NO_FASTCONV` did not disable it -
+    /// the identical gate `fast` above was built from, reused so
+    /// `register_native` refuses every `HostFn` name under the same
+    /// conditions the hidden `FastIdx` if-ladder already refuses under (M8.10:
+    /// "zero delta" means the ABI path and the backend-internal path agree on
+    /// when AVX2 is/isn't used, not just on what it computes when used).
+    fast_native_enabled: bool,
+    /// Provider-registered native (SPIR-V or host-fn) kernels - `kernel-
+    /// performance.md` M8.10/M8.11. Append-only; a [`backend_api::NativeId`]
+    /// is this `Vec`'s index at registration time.
+    natives: Mutex<Vec<NativeEntry>>,
 }
 
 /// Relaxed device-op counters. `submits`/`readbacks` are per call;
@@ -271,8 +307,18 @@ impl CpuBackend {
             }
         };
         let wgsizes = backend_api::workgroup_sizes(kernels);
+        let fast_native_enabled = !fast_off && fast_conv::avx2_available();
         CpuBackend {
-            shared: std::sync::Arc::new(CpuShared { jit, threads, names, profile, fast, wgsizes }),
+            shared: std::sync::Arc::new(CpuShared {
+                jit,
+                threads,
+                names,
+                profile,
+                fast,
+                wgsizes,
+                fast_native_enabled,
+                natives: Mutex::new(Vec::new()),
+            }),
             stats: OpCounters::default(),
         }
     }
@@ -367,6 +413,55 @@ impl CpuBackend {
         (kind, bg, gx, gy)
     }
 
+    /// [`backend_api::Backend::register_native`] - `kernel-performance.md`
+    /// M8.10. This backend only ever recognises `NativeSpec::HostFn(name)`
+    /// (no SPIR-V path exists on the CPU JIT); `name` is looked up against a
+    /// FIXED table of functions this crate itself implements - see
+    /// `backend_api::NativeSpec::HostFn`'s own doc for why the spec carries
+    /// only a name, never a closure ("the backend that accepts this decides
+    /// how it actually runs"). Refuses (returns `None`) under the exact same
+    /// condition the hidden `FastIdx` if-ladder already refuses under
+    /// (`fast_native_enabled`) -
+    /// see that field's own doc for why this must track it, not probe AVX2
+    /// separately.
+    pub fn register_native(&self, spec: &backend_api::NativeSpec) -> Option<backend_api::NativeId> {
+        let backend_api::NativeSpec::HostFn(name) = spec else {
+            return None; // no SPIR-V path on the CPU JIT
+        };
+        if !self.shared.fast_native_enabled {
+            return None;
+        }
+        let f: NativeHostFn = match *name {
+            // M8.10: the existing AVX2 F32 GEMM, reached through the ABI
+            // instead of `dispatch`'s hidden `f.matmul` if-ladder arm - same
+            // call, same params layout (`[m, k, n]` + `[A, B, out]`).
+            "cpu_matmul_abt" => Arc::new(|uniform: *const u32, bufs: &[*mut u8]| unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let (m, k, n) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
+                let a = std::slice::from_raw_parts(bufs[0] as *const f32, m * k);
+                let b = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
+                let c = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, m * n);
+                fast_ops::matmul_abt(a, b, c, m, k, n);
+            }),
+            _ => return None,
+        };
+        let mut natives = self.shared.natives.lock().unwrap_or_else(|e| e.into_inner());
+        natives.push(NativeEntry { name, f });
+        Some(backend_api::NativeId((natives.len() - 1) as u32))
+    }
+
+    /// [`backend_api::Backend::step_native`] - records a dispatch of an `id`
+    /// [`Self::register_native`] returned. Builds a [`CpuStep`] exactly like
+    /// [`Self::step`] does, except `kind` is biased by [`NATIVE_BASE`] so
+    /// `dispatch` routes it to the registered closure instead of the JIT/
+    /// `FastIdx` path - see [`NATIVE_BASE`]'s own doc.
+    pub fn step_native(&self, id: backend_api::NativeId, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> CpuStep {
+        let kind = NATIVE_BASE + id.0 as usize;
+        self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
+        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));
+        self.step_buf(kind, &ubuf, bufs, threads)
+    }
+
     /// Zero the `clears`, then run every step in order (the dependency-preserving
     /// equivalent of wgpu's single compute pass), parallelising invocations within
     /// each step across the rayon pool.
@@ -423,6 +518,18 @@ impl CpuBackend {
         uniform: *const u32,
         bufs: &[*mut u8],
     ) {
+        // Provider-registered native step (`kernel-performance.md` M8.10) -
+        // checked BEFORE `total == 0`: a native function decides its own work
+        // from the uniform it reads, not from `total`/`gx`/`gy` (those describe
+        // a JIT invocation grid a native step never has - see
+        // `CpuBackend::step_native`'s own doc).
+        if kind >= NATIVE_BASE {
+            let natives = self.shared.natives.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = natives.get(kind - NATIVE_BASE) {
+                (entry.f)(uniform, bufs);
+            }
+            return;
+        }
         if total == 0 {
             return;
         }
@@ -1094,6 +1201,13 @@ impl Backend for CpuBackend {
     }
     fn poll_wait(&self) {
         CpuBackend::poll_wait(self)
+    }
+    fn register_native(&self, spec: &backend_api::NativeSpec) -> Option<backend_api::NativeId> {
+        CpuBackend::register_native(self, spec)
+    }
+    fn step_native(&self, id: backend_api::NativeId, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Option<Step> {
+        let bs: Vec<&CpuBuffer> = bufs.iter().map(|b| b.downcast_ref::<CpuBuffer>()).collect();
+        Some(Step::new(CpuBackend::step_native(self, id, &bs, params, threads)))
     }
 }
 
