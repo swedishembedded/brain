@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use checkpoint::TensorSource;
 use gpu_core::Gpu;
 use qwen3::{Dtype, Qwen, QwenConfig, Shard};
 
@@ -92,7 +93,7 @@ pub struct Qwen3Vl {
 /// the graph wrong is a silent correctness hazard rather than an OOM (see
 /// [`Qwen3Vl::new`]), and the tier is lossy, so neither should be inferable
 /// from the other or default silently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecoderBuild {
     /// `Qwen::new`, the full BATCHED TRAINING constructor - every parameter
     /// trainable (weight+grad+adam_m+adam_v) plus the quadratic attention and
@@ -110,6 +111,19 @@ pub enum DecoderBuild {
     /// [`Qwen3Vl::linear_dtype`] forwards) for what actually landed, never
     /// this request.
     Decode(Dtype),
+    /// `Qwen::new_shard_dt`: a FROZEN (no grad/adam), batched-forward-capable
+    /// build (`forward_steps`, not the incremental KV-cache path - see
+    /// [`crate::model::Qwen::decode_steps`]'s own `is_whole` refusal) at the
+    /// given storage tier, over only `Shard.start..Shard.end` of the
+    /// decoder's layers. The shape [`crate::import::decoder_source`]'s
+    /// streaming source exists for: a caller whose only use is
+    /// `encode_hidden`/`encode_hiddens` up to some depth strictly less than
+    /// every layer the checkpoint has never even faults the pages for the
+    /// layers past `shard.end` into memory, let alone builds or uploads
+    /// them - the same truncated-tap-layer shape FLUX.2's own Qwen3 text
+    /// encoder already uses (`qwen3::pipeline::build_text_encoder_on`'s
+    /// `TAP_LAYERS`/`deepest` shard).
+    ShardedInference(Dtype, Shard),
 }
 
 /// Wall-clock attribution of one [`Qwen3Vl::generate_timed`] call, by the
@@ -201,12 +215,68 @@ impl Qwen3Vl {
         build: DecoderBuild,
     ) -> Qwen3Vl {
         assert_eq!(ds_merger_weights.len(), vcfg.deepstack_indexes.len(), "one merger per DeepStack tap");
-        let merge = vcfg.spatial_merge_size;
         let n_layers = dcfg.n_layers as usize;
-        let mut decoder = match build {
+        let decoder = match build {
             DecoderBuild::Decode(dt) => Qwen::new_shard_dt_decode(dcfg, seq_len, dweights, Shard::whole(n_layers), dt),
             DecoderBuild::Batched => Qwen::new(dcfg, 1, seq_len, dweights),
+            DecoderBuild::ShardedInference(dt, shard) => Qwen::new_shard_dt(dcfg, 1, seq_len, dweights, shard, dt),
         };
+        Self::assemble(vcfg, vweights, merger_weights, ds_merger_weights, decoder, image_token_id, image_row0, n_visual, mrope_section)
+    }
+
+    /// Like [`Self::new`] with [`DecoderBuild::Decode`] or
+    /// [`DecoderBuild::ShardedInference`] (never [`DecoderBuild::Batched`] -
+    /// a training build has no use for a streaming source, since its
+    /// trainable fp32 master copy is the checkpoint's whole size regardless
+    /// of how it got there), but the decoder reads from a streaming
+    /// `&dyn TensorSource` (a [`checkpoint::remap::RemapSource`] over a
+    /// [`checkpoint::weightio::WeightReader`], per
+    /// [`crate::import::decoder_source`]) instead of a fully-materialized
+    /// `HashMap` - see [`Self::from_hf`]'s doc for why this exists. The
+    /// vision/merger/deepstack weights are still small, already-materialized
+    /// maps: only the decoder (a Qwen3-VL checkpoint's dominant byte share)
+    /// needs the streaming path.
+    #[allow(clippy::too_many_arguments)]
+    fn from_streamed_decoder(
+        vcfg: VisionConfig,
+        dcfg: QwenConfig,
+        vweights: HashMap<String, Vec<f32>>,
+        merger_weights: HashMap<String, Vec<f32>>,
+        ds_merger_weights: Vec<HashMap<String, Vec<f32>>>,
+        dsource: &dyn checkpoint::TensorSource,
+        seq_len: u32,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+        build: DecoderBuild,
+    ) -> Qwen3Vl {
+        assert_eq!(ds_merger_weights.len(), vcfg.deepstack_indexes.len(), "one merger per DeepStack tap");
+        let n_layers = dcfg.n_layers as usize;
+        let decoder = match build {
+            DecoderBuild::Decode(dt) => Qwen::new_shard_dt_decode(dcfg, seq_len, dsource, Shard::whole(n_layers), dt),
+            DecoderBuild::ShardedInference(dt, shard) => Qwen::new_shard_dt(dcfg, 1, seq_len, dsource, shard, dt),
+            DecoderBuild::Batched => panic!("from_streamed_decoder: Batched has no use for a streaming source - see this fn's own doc"),
+        };
+        Self::assemble(vcfg, vweights, merger_weights, ds_merger_weights, decoder, image_token_id, image_row0, n_visual, mrope_section)
+    }
+
+    /// Shared tail of [`Self::new`]/[`Self::from_streamed_decoder`]: everything
+    /// that follows once `decoder` is already built (its weights loaded, by
+    /// whichever route).
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        vcfg: VisionConfig,
+        vweights: HashMap<String, Vec<f32>>,
+        merger_weights: HashMap<String, Vec<f32>>,
+        ds_merger_weights: Vec<HashMap<String, Vec<f32>>>,
+        mut decoder: Qwen,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+    ) -> Qwen3Vl {
+        let merge = vcfg.spatial_merge_size;
         decoder.enable_mm_splice(image_row0, n_visual);
         decoder.enable_mrope();
         if !ds_merger_weights.is_empty() {
@@ -353,6 +423,25 @@ impl Qwen3Vl {
     /// Load a Hugging Face Qwen3-VL checkpoint directory (`config.json` +
     /// `model.safetensors[.index.json]`, bf16 → f32) and assemble the model for a
     /// fixed image placement. Note the released 4B checkpoint is ~16 GB in f32.
+    ///
+    /// Streams the decoder's weights (`model.language_model.*` - the dominant
+    /// byte share of a Qwen3-VL checkpoint, and the whole of it for a
+    /// text-heavy encoder such as the 32B-class one MiniMax-H3 conditions
+    /// on) straight off a memory-mapped [`checkpoint::weightio::WeightReader`],
+    /// one tensor at a time, rather than through
+    /// [`checkpoint::safetensors::read_model_dir`]'s eager whole-checkpoint
+    /// bf16→f32 decode. That eager path holds the ENTIRE decoded checkpoint
+    /// (2x the file's bf16 bytes, since every tensor is promoted to f32
+    /// before `Qwen::new_shard_dt_decode` even starts building its own
+    /// destination buffers) alive for the whole construction - for a
+    /// 63GB-on-disk encoder that is ~126GB just for the source, regardless
+    /// of what destination `dt` the caller asked for (int8's smaller
+    /// destination buffer does not help: the source promotion already spent
+    /// the memory before the destination is ever allocated). Streaming caps
+    /// the decoder's transient cost at roughly one tensor's f32 expansion
+    /// (a few hundred MB) plus the destination buffers `dt` actually needs.
+    /// The vision tower/mergers stay eager - they are a small fraction of
+    /// the weights, so streaming them would not move the peak.
     #[allow(clippy::too_many_arguments)]
     pub fn from_hf(
         dir: &str,
@@ -365,8 +454,104 @@ impl Qwen3Vl {
         mrope_section: [u32; 3],
         dt: Dtype,
     ) -> Result<Qwen3Vl, String> {
-        let tensors = checkpoint::safetensors::read_model_dir(std::path::Path::new(dir))?;
-        Ok(Self::from_tensors(tensors, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section, dt))
+        Self::from_hf_build(dir, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section, DecoderBuild::Decode(dt))
+    }
+
+    /// [`Self::from_hf`], truncated to `shard.end` decoder layers - for a
+    /// caller whose only use of the returned model is
+    /// `encode_hidden`/`encode_hiddens` up to some depth strictly less than
+    /// the checkpoint's full layer count (`shard.end`), and which never
+    /// calls `generate`/`step`/`prefill` (the incremental KV-cache path
+    /// `Qwen::decode_steps` refuses outright on a non-whole shard).
+    ///
+    /// Layers past `shard.end` are never uploaded NOR EVEN READ from disk -
+    /// a shard file none of `shard`'s required tensors live in never has its
+    /// data pages faulted into memory at all (only its header, at `open_hf_dir`
+    /// time) - so this is strictly cheaper than [`Self::from_hf`] in both
+    /// memory and load time, not merely a smaller resident model afterward.
+    /// See [`DecoderBuild::ShardedInference`]'s own doc for the precedent
+    /// this mirrors (FLUX.2's own truncated Qwen3 text-encoder shard).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_hf_shard(
+        dir: &str,
+        vcfg: VisionConfig,
+        dcfg: QwenConfig,
+        seq_len: u32,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+        dt: Dtype,
+        shard: Shard,
+    ) -> Result<Qwen3Vl, String> {
+        Self::from_hf_build(
+            dir,
+            vcfg,
+            dcfg,
+            seq_len,
+            image_token_id,
+            image_row0,
+            n_visual,
+            mrope_section,
+            DecoderBuild::ShardedInference(dt, shard),
+        )
+    }
+
+    /// Shared streaming-load body of [`Self::from_hf`]/[`Self::from_hf_shard`]:
+    /// open the checkpoint, materialize the small vision/merger/deepstack
+    /// weight sets eagerly, and hand the decoder off to
+    /// [`Self::from_streamed_decoder`] under whichever `build` the caller
+    /// asked for.
+    #[allow(clippy::too_many_arguments)]
+    fn from_hf_build(
+        dir: &str,
+        vcfg: VisionConfig,
+        dcfg: QwenConfig,
+        seq_len: u32,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+        build: DecoderBuild,
+    ) -> Result<Qwen3Vl, String> {
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir))
+            .map_err(|e| format!("qwen3vl: open {dir}: {e}"))?;
+        let n_deepstack = vcfg.deepstack_indexes.len();
+        let mut vweights = HashMap::new();
+        let mut merger_weights = HashMap::new();
+        let mut ds_merger_weights: Vec<HashMap<String, Vec<f32>>> = (0..n_deepstack).map(|_| HashMap::new()).collect();
+        for name in reader.names().map(str::to_string).collect::<Vec<_>>() {
+            if let Some(m) = crate::import::map_vision(&name) {
+                let t = reader.tensor(&name).ok_or_else(|| format!("qwen3vl: '{name}' vanished mid-read"))?;
+                vweights.insert(m, t);
+                reader.advise_drop(&name);
+            } else if let Some(m) = crate::import::map_main_merger(&name) {
+                let t = reader.tensor(&name).ok_or_else(|| format!("qwen3vl: '{name}' vanished mid-read"))?;
+                merger_weights.insert(m, t);
+                reader.advise_drop(&name);
+            } else if let Some((k, m)) = crate::import::map_deepstack(&name) {
+                if k < ds_merger_weights.len() {
+                    let t = reader.tensor(&name).ok_or_else(|| format!("qwen3vl: '{name}' vanished mid-read"))?;
+                    ds_merger_weights[k].insert(m, t);
+                    reader.advise_drop(&name);
+                }
+            }
+        }
+        let dsource = crate::import::decoder_source(&reader);
+        Ok(Self::from_streamed_decoder(
+            vcfg,
+            dcfg,
+            vweights,
+            merger_weights,
+            ds_merger_weights,
+            &dsource,
+            seq_len,
+            image_token_id,
+            image_row0,
+            n_visual,
+            mrope_section,
+            build,
+        ))
     }
 
     /// Vision-splice prefix shared by [`Self::forward`] and the
@@ -547,7 +732,7 @@ impl Qwen3Vl {
     /// **DeepStack IS applied here**: `qwen3::Qwen::decode_steps`'s
     /// `deepstack_row` parameter adds each level's per-row residual
     /// contribution during the incremental step that embeds that row (was
-    /// missing before this session — `qwen3::Qwen::enable_deepstack`'s
+    /// missing before this session - `qwen3::Qwen::enable_deepstack`'s
     /// `SPLICE_ADD` used to be wired ONLY into the batched `forward_steps()`
     /// graph, now also threaded into incremental decode via `decode_steps`'s
     /// `deepstack_row` parameter; see also
@@ -557,7 +742,7 @@ impl Qwen3Vl {
         self.generate_cb(tokens, images, max_new, eos_ids, sample, rng, |_| {})
     }
 
-    /// [`Self::generate`] with a per-token callback — the seam the served
+    /// [`Self::generate`] with a per-token callback - the seam the served
     /// caps path uses to emit REAL streaming deltas (its ActionSpec declares
     /// `.streaming()`, which used to be satisfied by exactly two Progress
     /// emissions around the whole decode; audit F11).
@@ -1167,6 +1352,111 @@ mod tests {
         let img_taps = image_model.encode_hiddens_with_image(&tokens, image, &[0, last]);
         assert_eq!(img_taps.len(), 2);
         assert_eq!(img_taps[1], h_with_image, "encode_hiddens_with_image's last tap must agree with encode_hidden_with_image");
+    }
+
+    /// [`DecoderBuild::ShardedInference`] truncated to `shard.end` layers must
+    /// match a full [`DecoderBuild::Batched`] build's `encode_hidden` at any
+    /// layer within that truncated range - it is the SAME weights and the
+    /// SAME `forward_steps` batched-attention code path, only fewer of the
+    /// checkpoint's own layers built at all. This is the shape
+    /// `minimaxh3::caps::build_text_encoder` uses to avoid loading (or even
+    /// reading off disk) the 14 of Qwen3-VL-32B's 64 decoder layers past its
+    /// `TEXT_ENCODER_LAYER` tap.
+    #[test]
+    fn sharded_inference_truncated_to_n_layers_matches_the_batched_forward_up_to_n() {
+        let vcfg = VisionConfig {
+            depth: 2,
+            hidden: 32,
+            num_heads: 2,
+            intermediate: 64,
+            patch_size: 2,
+            temporal_patch_size: 1,
+            spatial_merge_size: 2,
+            num_position_embeddings: 16,
+            out_hidden_size: 40,
+            in_channels: 2,
+            deepstack_indexes: vec![],
+            tokens_per_second: 2,
+        };
+        let dcfg = QwenConfig {
+            vocab: 23,
+            block_size: 16,
+            n_layers: 3,
+            d_model: 40,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 8,
+            d_ff: 64,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 16,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        };
+
+        let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
+        let mut vspecs: Vec<(String, usize, bool)> = vec![
+            ("patch_embed.weight".into(), c * pv, false),
+            ("patch_embed.bias".into(), c, false),
+            ("pos_embed".into(), vcfg.num_position_embeddings as usize * c, false),
+        ];
+        for b in 0..vcfg.depth {
+            vspecs.extend([
+                (format!("blocks.{b}.norm1.weight"), c, true),
+                (format!("blocks.{b}.norm1.bias"), c, false),
+                (format!("blocks.{b}.qkv.weight"), 3 * c * c, false),
+                (format!("blocks.{b}.qkv.bias"), 3 * c, false),
+                (format!("blocks.{b}.proj.weight"), c * c, false),
+                (format!("blocks.{b}.proj.bias"), c, false),
+                (format!("blocks.{b}.norm2.weight"), c, true),
+                (format!("blocks.{b}.norm2.bias"), c, false),
+                (format!("blocks.{b}.fc1.weight"), mlp * c, false),
+                (format!("blocks.{b}.fc1.bias"), mlp, false),
+                (format!("blocks.{b}.fc2.weight"), c * mlp, false),
+                (format!("blocks.{b}.fc2.bias"), c, false),
+            ]);
+        }
+        let vspecs: Vec<(&str, usize, bool)> = vspecs.iter().map(|(n, s, o)| (n.as_str(), *s, *o)).collect();
+        let vweights = rand_map(Rng::new(31), &vspecs);
+        let merged = c * 4;
+        let mweights = rand_map(
+            Rng::new(32),
+            &[
+                ("ln.weight", c, true),
+                ("ln.bias", c, false),
+                ("fc1.weight", merged * merged, false),
+                ("fc1.bias", merged, false),
+                ("fc2.weight", 40 * merged, false),
+                ("fc2.bias", 40, false),
+            ],
+        );
+        let dweights = qwen3::init_weights(&dcfg, 33);
+        let tokens: Vec<u32> = vec![1, 5, 3, 9, 2];
+        let layer = 2usize; // res[2] = output of block 1 - present in a 2-of-3-layer shard too.
+
+        let full = Qwen3Vl::new(vcfg.clone(), dcfg.clone(), vweights.clone(), mweights.clone(), vec![], &dweights, 16, IMG, 2, 0, [2, 1, 1], DecoderBuild::Batched);
+        let want = full.encode_hidden(&tokens, layer);
+        assert!(want.iter().all(|v| v.is_finite()));
+
+        let shard = Shard { start: 0, end: 2, embed: true, head: false, gpu_index: Shard::ANY_GPU };
+        let truncated = Qwen3Vl::new(
+            vcfg,
+            dcfg,
+            vweights,
+            mweights,
+            vec![],
+            &dweights,
+            16,
+            IMG,
+            2,
+            0,
+            [2, 1, 1],
+            DecoderBuild::ShardedInference(Dtype::F32, shard),
+        );
+        let got = truncated.encode_hidden(&tokens, layer);
+        assert_eq!(got, want, "a shard truncated past `layer` must reproduce the full model's hidden state at `layer` bit-for-bit");
     }
 
     /// Same tiny synthetic shape as [`end_to_end_forward_is_finite`], but

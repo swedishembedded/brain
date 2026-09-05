@@ -1051,6 +1051,19 @@ impl Qwen {
                     if !found {
                         panic!("qwen: missing init weight {name}");
                     }
+                    // This tensor's f32 form was only ever needed transiently
+                    // to build `built` (`Weight::upload` already copied
+                    // whatever it needs into the device buffer) - an
+                    // mmap-backed source's pages behind it can go now. Unlike
+                    // `paramstore::new_with_roles_src`'s own per-tensor loop
+                    // (which drives EVERY quantized-off tensor, e.g. norms and
+                    // the embedding), this loop is the ONE place the 7
+                    // per-layer quantized linears - QKVO + MLP gate/up/down,
+                    // the overwhelming majority of a transformer's bytes -
+                    // are ever read, and it had no `advise_drop` call at all:
+                    // on a real int8 shard this was the dominant unreclaimed
+                    // page-cache source, not the (already-fixed) `ps` loop.
+                    src.advise_drop(&name);
                     built.unwrap()
                 } else {
                     Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
@@ -2129,15 +2142,56 @@ impl Qwen {
     /// Runs the full forward with `IGNORE` targets (as [`Self::logits_all`]
     /// does, so the masked CE is a safe no-op); the lm_head is computed but its
     /// result is unused. B must be 1 and `t >= len`.
+    ///
+    /// On a [`Self::new_shard_dt_decode`]-built (`decode_only`) model there is
+    /// no batched forward to run at all (activations are sized for a single
+    /// token, and `forward_steps` refuses outright) - see
+    /// [`Self::encode_hidden_via_steps`] for the incremental-decode path this
+    /// takes instead. Same external contract either way: row-major
+    /// `[len·d_model]` at `layer`, no observable difference to the caller.
     pub fn encode_hidden(&self, tokens: &[u32], layer: usize) -> Vec<f32> {
         let t_use = tokens.len() as u32;
         assert!(t_use <= self.t && self.b == 1, "qwen decoder sized too small");
         assert!(layer <= self.cfg.n_layers as usize, "layer {layer} > n_layers");
+        if self.decode_only {
+            return self.encode_hidden_via_steps(tokens, &[layer]).swap_remove(0);
+        }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
         let s = self.forward_steps(1, t_use);
         self.gpu.submit(&[], &s);
         self.gpu.read(&self.res[layer], (t_use * self.cfg.d_model) as usize)
+    }
+
+    /// [`Self::encode_hidden`]/[`Self::encode_hiddens`]'s path for a
+    /// `decode_only`-built model: walk `tokens` one position at a time
+    /// through the incremental KV-cache decode ([`Self::decode_submit`], the
+    /// same per-step dispatch [`Self::step`]/[`Self::prefill`] use) instead of
+    /// one batched `forward_steps` call, reading back `res[layer]` after each
+    /// step before the next overwrites it. Linear in `t` with no
+    /// quadratic-attention or logits scratch, exactly the point of building
+    /// a text encoder `decode_only` in the first place (a frozen, one-shot
+    /// feature extractor over a whole prompt has no use for `forward_steps`'s
+    /// batched/training shape).
+    ///
+    /// Resets the KV cache first, so this is stateless from the caller's
+    /// perspective like the batched path is - a caller layering image rows on
+    /// top (`encode_hidden_with_image`'s vision splice) still writes those
+    /// via `write_img_embeds`/`write_mrope_tables` BEFORE calling this, same
+    /// as the batched path's contract.
+    fn encode_hidden_via_steps(&self, tokens: &[u32], layers: &[usize]) -> Vec<Vec<f32>> {
+        self.reset_cache();
+        let d = self.cfg.d_model as usize;
+        let mut out: Vec<Vec<f32>> = layers.iter().map(|_| Vec::with_capacity(tokens.len() * d)).collect();
+        for &tok in tokens {
+            let pos = self.dec_pos.get();
+            self.decode_submit(Some(tok), pos, None, None);
+            self.dec_pos.set(pos + 1);
+            for (li, &layer) in layers.iter().enumerate() {
+                out[li].extend(self.gpu.read(&self.res[layer], d));
+            }
+        }
+        out
     }
 
     /// The **penultimate** hidden state (`res[n_layers-1]`, un-normed) - the
@@ -2208,6 +2262,9 @@ impl Qwen {
         assert!(t_use <= self.t && self.b == 1, "qwen decoder sized too small");
         for &l in layers {
             assert!(l <= self.cfg.n_layers as usize, "layer {l} > n_layers");
+        }
+        if self.decode_only {
+            return self.encode_hidden_via_steps(tokens, layers);
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
@@ -3224,6 +3281,53 @@ mod tests {
             via_embed = m2.step_embed(&emb[t as usize * d..(t as usize + 1) * d]);
         }
         assert_eq!(via_step, via_embed, "an embedding row must be a perfect stand-in for its token");
+    }
+
+    /// `encode_hidden`/`encode_hiddens` on a [`Qwen::new_shard_dt_decode`]
+    /// (`decode_only`) build must agree with the batched-forward path a
+    /// [`Qwen::new`] build takes for the SAME weights - the whole point of
+    /// [`Qwen::encode_hidden_via_steps`] is that a caller sees no difference,
+    /// only a smaller resident model. Caught for real: a `decode_only` Qwen3-VL
+    /// text encoder (MiniMax-H3's, built to fit host memory) panicked calling
+    /// `encode_hidden` at all, since the un-gated original always called
+    /// `forward_steps`, which refuses outright on a `decode_only` build.
+    ///
+    /// Relative-error tolerance, not bit-exact (matches this file's own
+    /// `new_shard_i8` parity tests' style): the incremental per-step
+    /// attention accumulates its softmax/weighted-sum in a different order
+    /// than the batched kernel's one-shot reduction over the whole sequence,
+    /// so the two are numerically equivalent, not bit-identical, even both
+    /// at fp32.
+    #[test]
+    fn encode_hidden_on_a_decode_only_build_matches_the_batched_forward() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let w = crate::init::init_weights(&cfg, 11);
+        let tokens = [1u32, 5, 3, 9, 2];
+        let layer = cfg.n_layers as usize - 1;
+        let rel_err = |a: &[f32], b: &[f32]| -> f32 {
+            let err: f32 = a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt();
+            let norm: f32 = a.iter().map(|v| v * v).sum::<f32>().sqrt();
+            err / norm.max(1e-12)
+        };
+
+        let batched = Qwen::new(cfg.clone(), 1, 16, &w);
+        let want = batched.encode_hidden(&tokens, layer);
+
+        let decode = Qwen::new_shard_dt_decode(cfg.clone(), 16, &w, Shard::whole(cfg.n_layers as usize), Dtype::F32);
+        let got = decode.encode_hidden(&tokens, layer);
+        assert!(rel_err(&got, &want) < 1e-4, "decode_only encode_hidden must match the batched forward: rel_err {}", rel_err(&got, &want));
+
+        // encode_hiddens (multi-layer) must agree too, and at every layer
+        // requested in one call, not just the last one.
+        let layers = [0usize, cfg.n_layers as usize / 2, cfg.n_layers as usize - 1];
+        let want_multi = batched.encode_hiddens(&tokens, &layers);
+        let got_multi = decode.encode_hiddens(&tokens, &layers);
+        for (l, (g, w)) in layers.iter().zip(got_multi.iter().zip(&want_multi)) {
+            assert!(rel_err(g, w) < 1e-4, "layer {l}: decode_only encode_hiddens must match the batched forward: rel_err {}", rel_err(g, w));
+        }
     }
 
     /// Batched-submission prefill must be BIT-IDENTICAL to step-by-step: it is

@@ -40,22 +40,22 @@ mod testalloc;
 /// Both the eager `HashMap<String, Vec<f32>>` (a whole-model host copy) and the
 /// mmap-backed [`weightio::WeightReader`] (one tensor decoded on demand)
 /// implement it, so a builder can pull each weight, upload it to the device, and
-/// drop it — peak host allocation ≈ one tensor of f32 — without ever holding the
+/// drop it - peak host allocation ≈ one tensor of f32 - without ever holding the
 /// entire model as a map (the second host copy the eager `by_role("")` load kept
 /// alongside the device weights).
 pub trait TensorSource {
     /// Invoke `f` with tensor `name`'s f32 data if present; returns whether it
-    /// was found. The slice is valid only for the call — a `WeightReader`
+    /// was found. The slice is valid only for the call - a `WeightReader`
     /// decodes into a temporary that is dropped on return (streaming), a
     /// `HashMap` lends its stored vec (no copy).
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool;
 
     /// Zero-copy path: `name`'s bytes AS ALREADY-STORED `u32` words, borrowed
-    /// straight from wherever the source keeps them — no allocation, no
+    /// straight from wherever the source keeps them - no allocation, no
     /// decode. Only `Some` when the on-disk (or in-memory) representation is
     /// already exactly what the device binds (`F32`/packed-int8 `U32`) and,
     /// for an mmap-backed source, the byte range is 4-byte aligned. `None`
-    /// means "not zero-copyable here" — the caller falls back to
+    /// means "not zero-copyable here" - the caller falls back to
     /// [`with_tensor_chunks`](Self::with_tensor_chunks) or
     /// [`with_tensor`](Self::with_tensor). Default: never zero-copyable (safe
     /// for any implementor that doesn't override it).
@@ -64,11 +64,11 @@ pub trait TensorSource {
     }
 
     /// Ordered chunks of at most `max_elems` f32, each decoded into a SINGLE
-    /// reused scratch buffer owned by this call — so peak *extra* host
+    /// reused scratch buffer owned by this call - so peak *extra* host
     /// allocation is `O(max_elems)`, never `O(tensor)`. Returns whether the
     /// tensor was found (`f` is never called if not). Default: materializes
     /// the whole tensor via [`with_tensor`](Self::with_tensor) and hands it
-    /// over as one chunk at offset 0 — i.e. reproduces exactly what every
+    /// over as one chunk at offset 0 - i.e. reproduces exactly what every
     /// implementor already does today. An mmap-backed source overrides this
     /// to decode incrementally instead.
     fn with_tensor_chunks(&self, name: &str, _max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
@@ -103,7 +103,7 @@ pub trait TensorSource {
     }
 
     /// Element count of `name`, if cheaply known without decoding. Default:
-    /// unknown (`None`) — callers that need it fall back to `with_tensor`.
+    /// unknown (`None`) - callers that need it fall back to `with_tensor`.
     fn numel(&self, _name: &str) -> Option<usize> {
         None
     }
@@ -141,6 +141,30 @@ pub trait TensorSource {
     fn raw_blocks(&self, _name: &str) -> Option<(gguf::BlockLayout, &[u8])> {
         None
     }
+
+    /// Best-effort hint that the caller is done with `name` and any
+    /// page-cache-backed pages behind it may be dropped now rather than
+    /// waiting for memory-pressure-triggered reclaim. Default: a no-op -
+    /// correct for a `HashMap` (nothing mmap-backed to advise) and for any
+    /// wrapper with no opinion of its own.
+    ///
+    /// Touched mmap pages stay resident until the kernel reclaims them,
+    /// which under cgroup v2 only happens once the cgroup is under real
+    /// pressure - a large checkpoint streamed sequentially through
+    /// `with_tensor_chunks` therefore still accrues its FULL on-disk size as
+    /// page cache by the time it has been fully read, even though the
+    /// caller (having already uploaded each tensor to its destination) has
+    /// no further use for any of it. Measured on MiniMax-H3's 63GB
+    /// `text_encoder/`: a streamed int8 decode-only load whose destination
+    /// buffers alone total ~33GB nonetheless climbed to within a few GB of a
+    /// 150GB cap before the kernel's own pressure-driven reclaim caught up.
+    /// An mmap-backed source overrides this to call `MADV_DONTNEED` on that
+    /// tensor's own byte range
+    /// (`mmap::MmapSafetensors::advise_dontneed_tensor`), so a caller that
+    /// calls this once per tensor right after consuming it keeps the
+    /// resident footprint close to the true working set throughout the
+    /// load, not just once memory pressure forces the issue.
+    fn advise_drop(&self, _name: &str) {}
 }
 
 impl TensorSource for HashMap<String, Vec<f32>> {
@@ -153,7 +177,7 @@ impl TensorSource for HashMap<String, Vec<f32>> {
             None => false,
         }
     }
-    /// Already f32 in host memory — a bit-cast view, not a new allocation.
+    /// Already f32 in host memory - a bit-cast view, not a new allocation.
     fn raw_words(&self, name: &str) -> Option<&[u32]> {
         self.get(name).map(|v| bytemuck::cast_slice::<f32, u32>(v))
     }
@@ -164,10 +188,10 @@ impl TensorSource for HashMap<String, Vec<f32>> {
 
 /// The shape-carrying eager map several model crates use for a small,
 /// wholly-materialized checkpoint (`s3dit::block::Tensors`, `vae`'s import
-/// map) — the same role as `HashMap<String, Vec<f32>>` above, plus a shape
+/// map) - the same role as `HashMap<String, Vec<f32>>` above, plus a shape
 /// alongside each tensor's data. Defined here, not in each of those crates,
 /// because the orphan rule blocks a foreign crate from implementing a
-/// foreign trait for `HashMap` regardless of its type parameters — this is
+/// foreign trait for `HashMap` regardless of its type parameters - this is
 /// the one place that can be done, for every crate that needs it.
 impl TensorSource for HashMap<String, (Vec<usize>, Vec<f32>)> {
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
@@ -179,7 +203,7 @@ impl TensorSource for HashMap<String, (Vec<usize>, Vec<f32>)> {
             None => false,
         }
     }
-    /// Already f32 in host memory — a bit-cast view, not a new allocation.
+    /// Already f32 in host memory - a bit-cast view, not a new allocation.
     fn raw_words(&self, name: &str) -> Option<&[u32]> {
         self.get(name).map(|(_, data)| bytemuck::cast_slice::<f32, u32>(data))
     }
@@ -278,7 +302,7 @@ pub fn save(path: &str, config: Value, tensors: &[(String, Vec<u64>, Vec<f32>)])
 }
 
 /// Same as [`save`], but attaches a [`st::ModelCard`] to the checkpoint's
-/// metadata — the family/id every servable model needs for
+/// metadata - the family/id every servable model needs for
 /// `crates/cli/src/model_dir.rs::discover()` to auto-register it. An
 /// additive sibling, not a `save` signature change: `save`'s ~30 existing
 /// call sites (training/research crates that were never meant to be

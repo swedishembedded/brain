@@ -12,7 +12,7 @@
 //! (a fused `qkv.weight` split into `to_q`/`to_k`/`to_v`), or the ordered
 //! concatenation of several. [`RemapSource::validate`] does the same
 //! "every destination produced, no source tensor unused" check
-//! `brain_init_from_hf` does today, but from shapes alone — no tensor data is
+//! `brain_init_from_hf` does today, but from shapes alone - no tensor data is
 //! read.
 
 use std::collections::HashMap;
@@ -24,13 +24,13 @@ use crate::TensorSource;
 pub enum Fetch {
     /// The whole of source tensor `.0`, unchanged.
     Whole(String),
-    /// Elements `[start, start+len)` of source tensor `name` — the shape a
+    /// Elements `[start, start+len)` of source tensor `name` - the shape a
     /// fused `qkv.weight` split into `to_q`/`to_k`/`to_v` needs.
     Slice { name: String, start: usize, len: usize },
     /// The ordered concatenation of several fetches. Unlike `Whole`/`Slice`
     /// (which can stream and zero-copy straight from the source), producing
     /// one contiguous destination tensor from several source pieces is a
-    /// real materialization — bounded by the concatenated tensor's own
+    /// real materialization - bounded by the concatenated tensor's own
     /// size, never by the whole model's.
     Concat(Vec<Fetch>),
 }
@@ -38,7 +38,7 @@ pub enum Fetch {
 /// A [`TensorSource`] that wraps an inner one with a rename/reslice [`Fetch`]
 /// plan. `Whole` and `Slice` fetches are zero-copy through
 /// [`TensorSource::raw_words`] when the inner source is, and stream through
-/// [`TensorSource::with_tensor_chunks`] otherwise — a `RemapSource` adds no
+/// [`TensorSource::with_tensor_chunks`] otherwise - a `RemapSource` adds no
 /// materialization of its own for either. `Concat` is the one case that must
 /// build a real (bounded, per-destination-tensor) output buffer.
 pub struct RemapSource<'a> {
@@ -60,7 +60,7 @@ impl<'a> RemapSource<'a> {
 
     /// Names-and-shapes-only coverage check, mirroring what
     /// `qwen3::import::brain_init_from_hf` validates today (every destination
-    /// name has a source, every size matches) but reading no tensor data —
+    /// name has a source, every size matches) but reading no tensor data -
     /// `numel` alone answers it. Fails loudly, naming every mismatch found
     /// (not just the first), so a broken plan is one error message, not one
     /// panic per parameter as the build proceeds.
@@ -86,13 +86,13 @@ impl<'a> RemapSource<'a> {
     }
 
     /// [`Fetch`]'s element count, resolving `Whole` (and `Concat` of `Whole`s)
-    /// against the inner source's `numel` — still no tensor data read.
+    /// against the inner source's `numel` - still no tensor data read.
     ///
     /// `None` for a missing source tensor AND for a `Slice` whose range does
     /// not fit inside its source. That single rule is what keeps every access
     /// path (`with_tensor`, `with_tensor_chunks`, `raw_words`, `numel`,
     /// `validate`) refusing an out-of-range slice the same way: a clean "not
-    /// available", never a panic and never silently truncated partial data —
+    /// available", never a panic and never silently truncated partial data -
     /// the worst possible failure for an import (a config-vs-checkpoint dim
     /// mismatch would otherwise yield silently-wrong tail weights).
     fn fetch_numel(&self, fetch: &Fetch) -> Option<usize> {
@@ -109,13 +109,30 @@ impl<'a> RemapSource<'a> {
 }
 
 impl TensorSource for RemapSource<'_> {
+    /// Forwards only for `Whole`: that is the one case where this
+    /// destination is the sole consumer of the whole of the named source
+    /// tensor, so dropping its pages once this destination is done with it
+    /// is safe. `Slice`/`Concat` stay a no-op (the default) - a fused
+    /// `qkv.weight` split into three destinations must not have its pages
+    /// dropped after only the first slice has been read, or the second and
+    /// third would re-fault into a mapping this call already told the
+    /// kernel it could discard the data behind (harmless for a read-only
+    /// mapping's correctness, since it would just re-fault from the file,
+    /// but defeats the point of advising at all if it happens before every
+    /// slice has actually been consumed).
+    fn advise_drop(&self, name: &str) {
+        if let Some(Fetch::Whole(src)) = self.plan.get(name) {
+            self.inner.advise_drop(src);
+        }
+    }
+
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
         let Some(fetch) = self.plan.get(name) else { return false };
         match fetch {
             Fetch::Whole(src) => self.inner.with_tensor(src, f),
             Fetch::Slice { name: src, start, len } => {
                 // An out-of-range slice is a refusal (`false`), exactly like
-                // `raw_words`/`with_tensor_chunks`/`numel` — see fetch_numel.
+                // `raw_words`/`with_tensor_chunks`/`numel` - see fetch_numel.
                 if self.fetch_numel(fetch).is_none() {
                     return false;
                 }
@@ -190,7 +207,7 @@ impl TensorSource for RemapSource<'_> {
             Fetch::Slice { name: src, start, len } => {
                 // Refuse an out-of-range slice up front. Without this check the
                 // overlap-clip below would deliver only the overlapping PREFIX
-                // and still return `true` — silently-wrong tail weights.
+                // and still return `true` - silently-wrong tail weights.
                 if self.fetch_numel(fetch).is_none() {
                     return false;
                 }
@@ -207,7 +224,7 @@ impl TensorSource for RemapSource<'_> {
                     }
                 })
             }
-            // Default (materialize once, hand over as one chunk) — bounded by
+            // Default (materialize once, hand over as one chunk) - bounded by
             // this destination tensor's own size, which is the same cost
             // `with_tensor` above already pays for Concat.
             Fetch::Concat(_) => self.with_tensor(name, &mut |d| f(0, d)),
@@ -228,7 +245,7 @@ impl RemapSource<'_> {
             Fetch::Whole(src) => {
                 // `out` was sized from fetch_numel == the source's numel; a
                 // length mismatch means the source's numel/with_tensor
-                // disagree — refuse rather than panic in copy_from_slice.
+                // disagree - refuse rather than panic in copy_from_slice.
                 let mut ok = false;
                 let found = self.inner.with_tensor(src, &mut |d| {
                     if d.len() == out.len() {

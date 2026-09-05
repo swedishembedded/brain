@@ -98,6 +98,27 @@ pub fn map_decoder(hf: &str) -> Option<String> {
     Some(format!("blocks.{n}.{mapped}"))
 }
 
+/// A streaming [`checkpoint::remap::RemapSource`] over `r`'s decoder tensors
+/// (`model.language_model.*`), for [`crate::model::Qwen3Vl::from_hf`]'s
+/// large-checkpoint path. Unlike [`partition`], this never decodes a decoder
+/// tensor until [`checkpoint::TensorSource::with_tensor`] asks for it by
+/// name, and drops it again once the caller's callback returns - the same
+/// peak-memory shape `qwen3::import::shard_source` already gives plain
+/// `qwen3::Qwen`, now extended to the VL decoder (whose text encoder is the
+/// dominant share of a Qwen3-VL checkpoint's bytes, so this is where
+/// streaming actually matters; the vision tower stays eager in
+/// [`crate::model::Qwen3Vl::from_hf`] - it is a small fraction of the
+/// weights and none of the per-token bandwidth).
+pub fn decoder_source(r: &checkpoint::weightio::WeightReader) -> checkpoint::remap::RemapSource<'_> {
+    let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
+    for name in r.names() {
+        if let Some(bn) = map_decoder(name) {
+            plan.insert(bn, checkpoint::remap::Fetch::Whole(name.to_string()));
+        }
+    }
+    checkpoint::remap::RemapSource::new(r, plan)
+}
+
 /// The four brain weight sets partitioned from an HF checkpoint.
 pub struct ImportedWeights {
     pub vision: HashMap<String, Vec<f32>>,
@@ -175,7 +196,7 @@ fn repo_path(rel: &str) -> String {
         assert_eq!(map_decoder("model.language_model.layers.35.mlp.down_proj.weight").unwrap(), "blocks.35.mlp.down.weight");
     }
 
-    /// Coverage against the REAL released index (names only — no 16 GB data load).
+    /// Coverage against the REAL released index (names only - no 16 GB data load).
     /// Skips if the checkpoint isn't present. Asserts every decoder parameter the
     /// config expects is imported and the vision/merger groups have the right counts.
     #[test]
@@ -205,6 +226,35 @@ fn repo_path(rel: &str) -> String {
         // Every real tensor should be accounted for (rotary tables aren't stored).
         let mapped = w.vision.len() + w.main_merger.len() + w.deepstack.iter().map(|m| m.len()).sum::<usize>() + w.decoder.len();
         assert_eq!(mapped, total, "every checkpoint tensor must map ({mapped}/{total})");
+    }
+
+    /// [`decoder_source`]'s plan must agree with [`partition`]'s eager route
+    /// for the decoder group on the SAME real checkpoint - same names in,
+    /// same brain param names out - since it exists purely as a
+    /// lower-peak-memory alternative path to the same weights, not a
+    /// different mapping. Names only (`Fetch::Whole` targets, never read).
+    #[test]
+    fn decoder_source_plan_matches_partitions_decoder_route() {
+        let path = format!("{}/model.safetensors.index.json", model_dir("Qwen/Qwen3-VL-4B-Instruct").unwrap_or_default());
+        let Ok(txt) = std::fs::read_to_string(path) else {
+            brain_testutil::skip("decoder_source_plan_matches_partitions_decoder_route: checkpoint not present");
+            return;
+        };
+        let idx: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        let names: Vec<String> = idx["weight_map"].as_object().unwrap().keys().cloned().collect();
+        let map: HashMap<String, Vec<f32>> = names.iter().map(|n| (n.clone(), vec![])).collect();
+        let w = partition(map, 3);
+
+        let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
+        for name in &names {
+            if let Some(bn) = map_decoder(name) {
+                plan.insert(bn, checkpoint::remap::Fetch::Whole(name.clone()));
+            }
+        }
+        assert_eq!(plan.len(), w.decoder.len(), "same number of decoder params routed");
+        for bn in w.decoder.keys() {
+            assert!(plan.contains_key(bn), "decoder_source plan missing '{bn}'");
+        }
     }
 
     #[test]

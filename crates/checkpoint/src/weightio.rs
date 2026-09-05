@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Streaming, memory-mapped weight I/O — the load/convert foundation.
+//! Streaming, memory-mapped weight I/O - the load/convert foundation.
 //!
 //! HARD invariant: loading **and** conversion mmap the file and stream one
-//! tensor at a time — decode/dequant a single tensor into a small buffer, hand
+//! tensor at a time - decode/dequant a single tensor into a small buffer, hand
 //! it to the caller, drop it. Peak host memory ≈ one tensor's fp32 expansion,
 //! never the whole model (a 4B model is ~16 GB as f32; a quantized GGUF blows
 //! up manyfold when dequantized in bulk).
@@ -74,7 +74,7 @@ impl WeightReader {
     /// Open a **foreign** (non-brain) HuggingFace checkpoint directory: a
     /// single `model.safetensors`, or a sharded set of
     /// `model.safetensors.index.json` plus `model-K-of-N.safetensors` files.
-    /// Each shard is mmapped (header only) — `tensor`/`for_each` still decode
+    /// Each shard is mmapped (header only) - `tensor`/`for_each` still decode
     /// exactly one tensor at a time, from whichever shard owns it, so an
     /// importer streaming through a sharded multi-GB checkpoint never holds
     /// more than one shard's mmap header plus one tensor's fp32 expansion.
@@ -322,6 +322,24 @@ impl crate::TensorSource for WeightReader {
         }
     }
 
+    /// `MADV_DONTNEED` on `name`'s own byte range (single-file safetensors)
+    /// or the owning shard's (sharded HF checkpoint) - see the trait doc for
+    /// why a streaming caller should call this once per tensor. A no-op for
+    /// GGUF: `MmapGguf` does not expose a per-tensor advise (its blocks are
+    /// packed too densely for a whole-tensor `DONTNEED` to be worth the
+    /// bookkeeping today), and for a name this reader does not have.
+    fn advise_drop(&self, name: &str) {
+        match &self.inner {
+            Inner::St(m) => m.advise_dontneed_tensor(name),
+            Inner::Gguf(_) => {}
+            Inner::StSharded(readers, owner) => {
+                if let Some(&si) = owner.get(name) {
+                    readers[si].advise_dontneed_tensor(name);
+                }
+            }
+        }
+    }
+
     fn numel(&self, name: &str) -> Option<usize> {
         match &self.inner {
             Inner::St(m) => m.numel(name),
@@ -402,10 +420,10 @@ pub const PACKED_INT8_LAYOUT: u32 = 2;
 pub const PACKED_INT8_LAYOUT_KEY: &str = "packed_int8_layout";
 
 /// A planned tensor's on-disk element type. Both variants are 4 bytes/element
-/// (so byte-range planning is dtype-agnostic — only the header's declared
+/// (so byte-range planning is dtype-agnostic - only the header's declared
 /// `dtype` string and which `write*` method may target the slot differ).
 /// `U32` is for int8-native storage: `model::int8::quantize_weight`'s packed
-/// layout (4 int8 packed per u32) stored as-is, no repacking at load time —
+/// layout (4 int8 packed per u32) stored as-is, no repacking at load time -
 /// see [`StWriter::create_mixed`] and [`PACKED_INT8_LAYOUT`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dtype {
@@ -433,9 +451,9 @@ struct Planned {
 }
 
 /// An incremental F32 safetensors writer. Offsets are planned up front from
-/// (name, shape) — sizes only, no data — the header is written immediately, and
+/// (name, shape) - sizes only, no data - the header is written immediately, and
 /// each tensor's little-endian f32 bytes are [`write`](Self::write)able **in
-/// any order** (each exactly once) by seeking to its planned offset — a
+/// any order** (each exactly once) by seeking to its planned offset - a
 /// converter that streams through its SOURCE in the source's own natural
 /// order (rather than the output plan's order) doesn't need to buffer/reorder
 /// anything to satisfy this writer. Never holds more than the caller's current
@@ -467,11 +485,11 @@ impl StWriter {
     }
 
     /// [`create`](StWriter::create), but each planned tensor declares its own
-    /// [`Dtype`] — the seam an int8-native checkpoint (packed weights stored
+    /// [`Dtype`] - the seam an int8-native checkpoint (packed weights stored
     /// as `Dtype::U32`, matching `model::int8::quantize_weight`'s layout
     /// exactly, plus an ordinary `Dtype::F32` `[n, k/32]` group-scale tensor
     /// alongside it - [`PACKED_INT8_LAYOUT`]) needs. `create` is unchanged and still produces
-    /// byte-identical output to before this existed — every current caller
+    /// byte-identical output to before this existed - every current caller
     /// (`qwen`/`glm`/`lfm`'s importers) is unaffected.
     pub fn create_mixed(
         path: &str,
@@ -547,7 +565,7 @@ impl StWriter {
     }
 
     /// Write one planned tensor's data. May be called in any order (each
-    /// planned name exactly once) — seeks to that tensor's pre-planned offset,
+    /// planned name exactly once) - seeks to that tensor's pre-planned offset,
     /// so a caller streaming through its source in the source's own order
     /// never needs to buffer or reorder its output.
     pub fn write(&mut self, name: &str, data: &[f32]) -> io::Result<()> {
@@ -561,7 +579,7 @@ impl StWriter {
         Ok(())
     }
 
-    /// [`write`](StWriter::write) for a `Dtype::U32`-planned tensor — the
+    /// [`write`](StWriter::write) for a `Dtype::U32`-planned tensor - the
     /// int8-native path: `data` is `model::int8::quantize_weight`'s packed
     /// output (4 int8 per u32), written as-is with no repacking.
     pub fn write_u32(&mut self, name: &str, data: &[u32]) -> io::Result<()> {
@@ -956,7 +974,7 @@ mod tests {
         let one_bytes = n * 4;
         let total_bytes = one_bytes * ntensors;
 
-        // Write via the streaming writer (itself bounded — one tensor at a time).
+        // Write via the streaming writer (itself bounded - one tensor at a time).
         let plan: Vec<(String, Vec<u64>)> =
             (0..ntensors).map(|i| (format!("t{i}"), vec![n as u64])).collect();
         let mut w = StWriter::create(&p, &plan, &Value::Null, None).unwrap();
@@ -1051,7 +1069,7 @@ mod tests {
 
     /// The streaming [`crate::TensorSource`] (a `WeightReader`) yields, for every
     /// tensor, byte-identical f32 data to the eager whole-model `by_role("")`
-    /// map — the numeric-parity guarantee the streaming model-load path relies on
+    /// map - the numeric-parity guarantee the streaming model-load path relies on
     /// (equal weights in ⇒ identical device weights ⇒ identical numerics). No GPU.
     #[test]
     fn tensor_source_streaming_matches_eager() {
@@ -1104,7 +1122,7 @@ mod tests {
         std::fs::write(&p, &file).unwrap();
         // Extend to the full declared size as a SPARSE file (no bytes written,
         // no disk used): open() now validates that every tensor's byte range
-        // fits the blob, so the file must genuinely be that long — but the
+        // fits the blob, so the file must genuinely be that long - but the
         // point of this test stands: open() must not READ (fault in) the blob.
         let blob_len = file.len() as u64 + huge * 4;
         std::fs::OpenOptions::new().write(true).open(&p).unwrap().set_len(blob_len).unwrap();

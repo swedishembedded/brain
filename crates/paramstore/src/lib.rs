@@ -156,6 +156,12 @@ impl ParamStore {
             if profile {
                 t_flush += t1.elapsed();
             }
+            // This tensor is now fully uploaded (and drained) into `wbuf` -
+            // an mmap-backed source can drop the page-cache pages behind it
+            // now instead of waiting for reclaim to happen under memory
+            // pressure. See `TensorSource::advise_drop`'s own doc for the
+            // measured 63GB-checkpoint case this exists for.
+            source.advise_drop(name);
             weight.insert(name.clone(), wbuf);
             match role {
                 Role::Trainable => {
