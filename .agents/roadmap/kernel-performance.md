@@ -4453,6 +4453,94 @@ clippy -p brain-backend-cpu -p brain-gpu-core --all-targets` clean on every
 file this milestone touched. **Commit**: one.
 
 
+### M8.12 - AVX-512-VNNI int8 GEMM pack (harness-gated, build-only; AMX deferred)
+
+**Scope check against real hardware, done first, honestly**: this box's own
+`/proc/cpuinfo` `flags` line has `avx2`/`fma`/`avx_vnni` but NO `avx512*` bit
+at all (Core Ultra 7 155H / Meteor Lake - Intel disabled AVX-512 on this
+generation's client parts, the same fact `fast_conv::avx512_available`'s own
+pre-existing honesty note already states). So this milestone is, by
+construction, build-and-shape-check only - no execution or measurement
+claim is possible here, and none is made.
+
+**`fast_conv::avx512_vnni_available()`** (new probe) - `avx512_available()`
+(F+VL+DQ) plus `avx512bw`/`avx512vnni`, a SEPARATE CPUID leaf from plain
+AVX-512F: a device can have one without the other, so this is not folded
+into the existing `avx512_available`. Always `false` on this box (confirmed
+directly, not assumed).
+
+**`fast_ops::dot32_i8_avx512vnni`** - the AVX-512-VNNI twin of M8.11's
+`dot32_i8_avx2`: same 32-lane group, same sign-trick legality argument
+(`model::int8::quantize`'s `.clamp(-127,127)` contract), `_mm512_dpbusd_epi32`
+(`VPDPBUSD`) in place of AVX2's `maddubs`+`madd` two-step - VNNI's whole
+point is that this dot-product-accumulate is ONE instruction at the wider
+width, not two. One real portability wrinkle found by trying to compile,
+not guessed: AVX-512 DROPPED `VPSIGNB` (no `_mm512_sign_epi8` intrinsic
+exists at all - confirmed by a real `E0425: cannot find function` compiler
+error, not assumed from documentation), so `sign(a)*b` is reconstructed via
+`_mm512_movepi8_mask` (a sign-bit compare mask) + `_mm512_mask_blend_epi8`
+instead of the AVX2 path's single intrinsic. Deliberately loads only the
+lower 256 bits of each 512-bit register (`_mm512_zextsi256_si512`, upper
+bits zero, correct but not exploiting the full width) - kept to the
+IDENTICAL 32-lane/8-word group `matmul_i8_dyn`'s scale-fold boundary already
+fixes, rather than inventing an unmeasurable 64-lane/two-group shape; a real
+width-doubling version is a documented follow-up once real hardware exists
+to measure it against, not attempted blind.
+
+**Wired as a THIRD `Int8IsaTier` (`Avx512Vnni > Avx2 > Scalar`)** inside
+`fast_ops::matmul_i8_dyn` itself, resolved once via `Int8IsaTier::current()`
+(a `OnceLock`, the same convention `fast_conv::isa_tier()` already uses) -
+NOT as a separate `CpuIsaProvider` variant/registered name: this milestone's
+own brief suggested "further `CpuIsaProvider` variants keyed on `ArchDesc.isa
+.avx512_vnni`", but `Avx512Vnni` vs `Avx2` vs `Scalar` here are three
+implementations of the SAME logical kernel (`matmul_i8_dyn`) picked by ISA
+tier, exactly the shape `matmul_abt`'s own `row_abt_avx512`/`row_abt_avx2`
+choice already takes for the f32 GEMM family - reusing that established
+pattern (one registered ABI name, tier chosen internally) is more consistent
+and lower-risk than inventing a second, parallel dispatch mechanism for the
+identical kind of choice. `ArchDesc.isa.avx512_vnni` is real and populated
+(`backend-cpu`'s `caps()`) for any FUTURE caller that wants to read it
+directly; nothing in this tree needs it to gate a `Requirement` yet, so
+`select::Requirement` is untouched (same reasoning M8.10's own ledger entry
+already gives for why `CpuIsaProvider` never touches it).
+
+**Correctness gate**: `avx512vnni_int8_dot_matches_scalar_on_sign_corners`
+pins the SAME sign-corner pattern (`[-127,-1,0,1,127]` cycled through all 32
+lanes) the already-hardware-validated AVX2 test
+(`dot32_i8_avx2_matches_scalar_on_sign_corners`) checks - factored into a
+shared `sign_corner_lanes()` helper so both tests exercise the identical
+cases, not two independently hand-picked sets that could miss the one
+combination that matters. Gated with `brain_testutil::
+skip_unvalidated_capability("avx512-vnni", ...)`, not a silent early
+`return` - prints loudly, records to the capability ledger, and would
+refuse to skip under `BRAIN_REQUIRE_CAPABILITIES=avx512-vnni`. On this box
+it always skips (confirmed: `avx512_vnni_available() == false`), so this
+kernel has NEVER been execution-verified anywhere in this campaign - stated
+plainly, not implied.
+
+**AMX (`amx_int8`/`amx_bf16`) - explicitly NOT attempted, a real follow-up,
+not a commit**: tried `is_x86_feature_detected!("amx-tile")` directly on
+this toolchain first, before writing anything - `error[E0658]: use of
+unstable library feature x86_amx_intrinsics`. Both AMX runtime-feature
+DETECTION and the AMX intrinsics themselves (`_mm_tile_loadconfig` et al)
+are gated behind `#![feature(x86_amx_intrinsics)]`, nightly-only, on the
+`rustc 1.94` stable toolchain this workspace builds with. Writing AMX
+kernels here would mean either switching this crate to nightly (a
+build-system-wide decision no single ISA-pack milestone should make
+unilaterally) or hand-rolling raw `core::arch::asm!` for tile config/load/
+matmul/store (`LDTILECFG`/`TILELOADD`/`TDPBUSD`/`TILESTORED`) with no
+compiler-checked operand safety at all - a correctness risk this milestone
+declines to take blind, on hardware that cannot even compile-check the
+result. `ArchDesc.isa.amx_int8`/`amx_bf16` stay the honest M8.1 default
+(`false`, never probed) until a future session either accepts nightly for
+this crate or writes the inline-asm form deliberately, with its own review.
+
+Verification: `cargo test -p brain-backend-cpu --lib fast_ops::` (23/23
+green, one newly `UNVALIDATED CAPABILITY`-logged skip), `cargo clippy -p
+brain-backend-cpu --all-targets` clean. **Measured: N/A, by hardware
+necessity, stated plainly** - this box cannot run AVX-512 of any kind.
+**Commit**: one.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

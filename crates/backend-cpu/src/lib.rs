@@ -1147,10 +1147,23 @@ impl Backend for CpuBackend {
         // here. `avx2_available`/`avx512_available` each already require FMA/
         // VL/DQ alongside the base bit, so both ISA fields mirror the same
         // call rather than inventing a separate FMA-only probe.
+        // `avx512_vnni` (M8.12): a real probe now exists
+        // (`fast_conv::avx512_vnni_available`), unlike M8.1's own "no VNNI/
+        // AMX/NEON probe exists yet" floor - `amx_bf16`/`amx_int8` stay the
+        // honest default (`false`, never probed): AMX detection AND
+        // intrinsics are both still `#![feature(x86_amx_intrinsics)]`-gated
+        // on this stable toolchain (confirmed by trying to compile
+        // `is_x86_feature_detected!("amx-tile")` directly - `error[E0658]:
+        // use of unstable library feature`), so there is no real probe to
+        // wire without switching this crate to nightly, which is out of
+        // scope for a single ISA-pack milestone. See `kernel-performance.md`
+        // M8.12's own ledger entry for this as a documented follow-up, not a
+        // silent omission.
         arch.isa = IsaFeatures {
             avx2: fast_conv::avx2_available(),
             fma: fast_conv::avx2_available(),
             avx512f: fast_conv::avx512_available(),
+            avx512_vnni: fast_conv::avx512_vnni_available(),
             ..IsaFeatures::default()
         };
 

@@ -341,8 +341,14 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
         return;
     }
     let ng = kg / WPG;
-    #[cfg(target_arch = "x86_64")]
-    let use_avx2 = fast_conv_avx2();
+    // Resolved once, before the per-(m,n) inner loop, not re-probed per
+    // group: `Avx512Vnni > Avx2 > Scalar`, mirroring `matmul_abt`'s own
+    // `IsaTier` priority one dtype family over. `Int8IsaTier::current()` is
+    // ALWAYS `Scalar` or `Avx2` on this repo's real hardware today (no box
+    // this campaign has run on has AVX-512 VNNI) - see that function's own
+    // doc for the M8.12 capability this wires but cannot execution-verify
+    // here.
+    let tier = Int8IsaTier::current();
     let row = |mi: usize, orow: &mut [f32]| {
         let xrow = &xq[mi * kg..mi * kg + kg];
         for ni in 0..n {
@@ -353,10 +359,13 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
                 let off = g * WPG;
                 let xg = &xrow[off..off + WPG];
                 let wg_ = &wrow[off..off + WPG];
-                #[cfg(target_arch = "x86_64")]
-                let acc_i = if use_avx2 { unsafe { dot32_i8_avx2(xg, wg_) } } else { dot_group_scalar(xg, wg_) };
-                #[cfg(not(target_arch = "x86_64"))]
-                let acc_i = dot_group_scalar(xg, wg_);
+                let acc_i = match tier {
+                    #[cfg(target_arch = "x86_64")]
+                    Int8IsaTier::Avx512Vnni => unsafe { dot32_i8_avx512vnni(xg, wg_) },
+                    #[cfg(target_arch = "x86_64")]
+                    Int8IsaTier::Avx2 => unsafe { dot32_i8_avx2(xg, wg_) },
+                    Int8IsaTier::Scalar => dot_group_scalar(xg, wg_),
+                };
                 acc_f += acc_i as f32 * sw_g;
             }
             orow[ni] = acc_f * sx[mi];
@@ -378,14 +387,47 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
     });
 }
 
-/// `crate::fast_conv::avx2_available()`, renamed locally so this module's own
-/// doc/call sites read as "use AVX2" rather than repeating the crate path -
-/// `fast_conv` is a private module, this is the one place `fast_ops` reaches
-/// into its ISA probe outside the `matmul_abt`/`isa_tier` call sites above.
-#[cfg(target_arch = "x86_64")]
-#[inline]
-fn fast_conv_avx2() -> bool {
-    crate::fast_conv::avx2_available()
+/// The ISA tier [`matmul_i8_dyn`] dispatches its per-group dot product at -
+/// `Avx512Vnni` (`kernel-performance.md` M8.12) beats `Avx2` (M8.11) beats
+/// `Scalar`, the identical priority shape `fast_conv::IsaTier`/`isa_tier()`
+/// already established for the f32 GEMM family, kept as its own enum rather
+/// than widening that one: this is a DIFFERENT function tree (the int8
+/// kernels), gated on a DIFFERENT CPUID bit (VNNI, orthogonal to plain
+/// AVX-512F/VL/DQ), and conflating the two would make a device with AVX-512F
+/// but no VNNI (or vice versa - both exist in the wild) impossible to
+/// express correctly through one shared tier.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Int8IsaTier {
+    Scalar,
+    #[allow(dead_code)] // constructed only under target_arch = "x86_64"
+    Avx2,
+    #[allow(dead_code)] // constructed only under target_arch = "x86_64"
+    Avx512Vnni,
+}
+
+impl Int8IsaTier {
+    /// Resolved once per process via a `OnceLock`, the same convention
+    /// `fast_conv::isa_tier()` uses - call ONCE per hot-loop function
+    /// (`matmul_i8_dyn` does), never per group.
+    fn current() -> Int8IsaTier {
+        static TIER: std::sync::OnceLock<Int8IsaTier> = std::sync::OnceLock::new();
+        *TIER.get_or_init(|| {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if crate::fast_conv::avx512_vnni_available() {
+                    Int8IsaTier::Avx512Vnni
+                } else if crate::fast_conv::avx2_available() {
+                    Int8IsaTier::Avx2
+                } else {
+                    Int8IsaTier::Scalar
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                Int8IsaTier::Scalar
+            }
+        })
+    }
 }
 
 /// One `dot4I8Packed`-per-word group sum, portable scalar - both the
@@ -425,6 +467,52 @@ unsafe fn dot32_i8_avx2(a: &[u32], b: &[u32]) -> i32 {
     let s64 = _mm_add_epi32(s128, _mm_srli_si128(s128, 8));
     let s32 = _mm_add_epi32(s64, _mm_srli_si128(s64, 4));
     _mm_cvtsi128_si32(s32)
+}
+
+/// AVX-512-VNNI twin of [`dot32_i8_avx2`] - `kernel-performance.md` M8.12.
+/// Same 32-lane group, same sign trick (see [`matmul_i8_dyn`]'s own doc for
+/// why it is legal), `_mm512_dpbusd_epi32` (`VPDPBUSD`) in place of the AVX2
+/// `maddubs`+`madd` two-step: VNNI's whole point is that this dot-product-
+/// accumulate is ONE instruction, not two, at the wider 512-bit width.
+///
+/// **Deliberately loads only the lower 256 bits of each 512-bit register**
+/// (`_mm256_zextsi256_si512` zero-extends; the upper 256 bits are zero and
+/// contribute nothing to the dot product, so this is CORRECT, just not
+/// exploiting the full width) - kept to the identical 32-lane/8-word group
+/// [`matmul_i8_dyn`]'s scale-fold boundary already fixes, matching
+/// [`dot32_i8_avx2`]'s own signature exactly rather than inventing a
+/// 64-lane/two-group variant this milestone has no hardware to validate
+/// either shape of. A genuine width-doubling version (batching two
+/// weight-scale groups' int8 lanes into one 512-bit dot, folding both
+/// separately afterward) is a real follow-up once real AVX-512-VNNI
+/// hardware exists to measure it against - see this function's own module
+/// doc / the `kernel-performance.md` M8.12 ledger entry for why that is not
+/// attempted blind.
+///
+/// UNVALIDATED ON THIS BOX - see `fast_conv::avx512_vnni_available`'s own
+/// honesty note and [`tests::avx512vnni_int8_dot_matches_scalar_reference`]'s
+/// `skip_unvalidated_capability` call. Compiled and shape-tested only.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+unsafe fn dot32_i8_avx512vnni(a: &[u32], b: &[u32]) -> i32 {
+    use std::arch::x86_64::*;
+    debug_assert_eq!(a.len(), 8);
+    debug_assert_eq!(b.len(), 8);
+    let av = _mm512_zextsi256_si512(_mm256_loadu_si256(a.as_ptr() as *const __m256i));
+    let bv = _mm512_zextsi256_si512(_mm256_loadu_si256(b.as_ptr() as *const __m256i));
+    let abs_a = _mm512_abs_epi8(av);
+    // AVX-512 dropped `VPSIGNB` (no `_mm512_sign_epi8`) - reconstruct
+    // `sign(a) * b` with a compare-mask + blend instead: `neg_mask` bit `i`
+    // set iff `a[i] < 0`, `neg_b = 0 - b` (byte-wise negation), then select
+    // per lane. `a[i] == 0` needs no special case: `abs_a[i]` is already 0
+    // there, so whatever `signed_b[i]` holds contributes `0 * x = 0` either
+    // way - the identical reasoning `dot32_i8_avx2`'s `_mm256_sign_epi8` doc
+    // note makes for the AVX2 path.
+    let neg_mask = _mm512_movepi8_mask(av);
+    let neg_b = _mm512_sub_epi8(_mm512_setzero_si512(), bv);
+    let signed_b = _mm512_mask_blend_epi8(neg_mask, bv, neg_b);
+    let acc = _mm512_dpbusd_epi32(_mm512_setzero_si512(), abs_a, signed_b);
+    _mm512_reduce_add_epi32(acc)
 }
 
 /// `out[i] = x[i] >= 0 ? x[i] : slope*x[i]` (`leaky_relu.wgsl`; slope 0 is ReLU,
@@ -2788,13 +2876,24 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn dot32_i8_avx2_matches_scalar_on_sign_corners() {
-        if !fast_conv_avx2() {
+        if !crate::fast_conv::avx2_available() {
             eprintln!("skip: dot32_i8_avx2_matches_scalar_on_sign_corners needs AVX2, absent on this host");
             return;
         }
+        let (a, b) = sign_corner_lanes();
+        let want = dot_group_scalar(&a, &b);
+        let got = unsafe { dot32_i8_avx2(&a, &b) };
+        assert_eq!(got, want, "AVX2 sign-trick dot diverged from the scalar reference on the clamp corners");
+    }
+
+    /// The `[-127, -1, 0, 1, 127]` sign-corner pattern
+    /// [`dot32_i8_avx2_matches_scalar_on_sign_corners`]/
+    /// [`avx512vnni_int8_dot_matches_scalar_on_sign_corners`] both check -
+    /// factored out so the AVX-512-VNNI test pins the EXACT same corner
+    /// cases the already-validated AVX2 one does, not a second hand-picked
+    /// set that could accidentally miss the one combination that matters.
+    fn sign_corner_lanes() -> ([u32; 8], [u32; 8]) {
         let corners = [-127i8, -1, 0, 1, 127];
-        // 8 words = 32 lanes; cycle the corner set through all 32 lanes so
-        // every (a,b) sign pairing above appears somewhere in the vector.
         let mut a = [0u32; 8];
         let mut b = [0u32; 8];
         for i in 0..32 {
@@ -2803,9 +2902,33 @@ mod tests {
             a[i / 4] |= (av as u8 as u32) << ((i % 4) * 8);
             b[i / 4] |= (bv as u8 as u32) << ((i % 4) * 8);
         }
+        (a, b)
+    }
+
+    /// M8.12: the AVX-512-VNNI 32-lane dot, against the SAME scalar oracle
+    /// and the SAME sign-corner pattern the already-hardware-validated AVX2
+    /// test above pins. UNVALIDATED ON THIS BOX (confirmed: this Meteor Lake
+    /// core has no AVX-512 of any kind, `avx512_vnni_available() ==
+    /// false`) - `brain_testutil::skip_unvalidated_capability` says so
+    /// loudly and records it to the capability ledger, rather than a silent
+    /// `return` a future reader could mistake for "not applicable here".
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx512vnni_int8_dot_matches_scalar_on_sign_corners() {
+        if !crate::fast_conv::avx512_vnni_available() {
+            brain_testutil::skip_unvalidated_capability(
+                "avx512-vnni",
+                "fast_ops::dot32_i8_avx512vnni (kernel-performance.md M8.12) needs AVX-512-VNNI \
+                 (VPDPBUSD); this box (Core Ultra 7 155H / Meteor Lake) has no AVX-512 of any kind, \
+                 confirmed against /proc/cpuinfo - compiled and shape-tested only, never run on real \
+                 VNNI hardware. MAY diverge from the scalar reference on hardware that actually has it.",
+            );
+            return;
+        }
+        let (a, b) = sign_corner_lanes();
         let want = dot_group_scalar(&a, &b);
-        let got = unsafe { dot32_i8_avx2(&a, &b) };
-        assert_eq!(got, want, "AVX2 sign-trick dot diverged from the scalar reference on the clamp corners");
+        let got = unsafe { dot32_i8_avx512vnni(&a, &b) };
+        assert_eq!(got, want, "AVX-512-VNNI sign-trick dot diverged from the scalar reference on the clamp corners");
     }
 
     /// Measured throughput, scalar vs AVX2, on this box's real core (M8.11's

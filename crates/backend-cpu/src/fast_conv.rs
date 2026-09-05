@@ -125,6 +125,36 @@ pub fn avx512_available() -> bool {
     }
 }
 
+/// True iff the host has AVX-512 VNNI (`VPDPBUSD` et al - a dedicated
+/// int8-dot-product-accumulate instruction, one cycle vs AVX2's
+/// maddubs+madd two-step) - `kernel-performance.md` M8.12. A SEPARATE probe
+/// from [`avx512_available`], not folded into [`IsaTier`]: VNNI is its own
+/// CPUID leaf, orthogonal to plain AVX-512F/VL/DQ (a device can have one
+/// without the other), and this engine's only int8 kernel family is a
+/// different function tree from the f32 GEMM `IsaTier` already dispatches -
+/// see `fast_ops::matmul_i8_dyn`'s own VNNI tier check.
+///
+/// UNVALIDATED ON THIS BOX, same honesty note as [`avx512_available`]: this
+/// machine (Core Ultra 7 155H / Meteor Lake) has no AVX-512 of any kind -
+/// confirmed directly against `/proc/cpuinfo`'s `flags` line, which lists
+/// `avx_vnni` (the VEX-encoded, non-AVX-512 VNNI extension - a DIFFERENT
+/// CPUID bit this function does not probe) but no `avx512*` bit at all. So
+/// this always returns `false` here; the AVX-512-VNNI microkernel it gates
+/// is compiled and shape-tested only, never execution-verified - see
+/// `fast_ops::matmul_i8_dyn`'s own test for the `skip_unvalidated_capability`
+/// call that says so at test time, not just here.
+#[inline]
+pub fn avx512_vnni_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        avx512_available() && std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512vnni")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// The ISA tier a hot loop should dispatch at: `avx512_available()` beats
 /// `avx2_available()` beats scalar, exactly the priority every avx512-then-avx2
 /// if-ladder in this crate already encoded. [`avx2_available`] and
