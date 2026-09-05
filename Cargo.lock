@@ -471,6 +471,7 @@ dependencies = [
  "brain-testutil",
  "brain-vulkan",
  "bytemuck",
+ "half",
  "tracing",
 ]
 
@@ -640,6 +641,7 @@ dependencies = [
  "brain-audio",
  "brain-backend-api",
  "brain-backend-cpu",
+ "brain-backend-vulkan",
  "brain-bench",
  "brain-capability",
  "brain-captioner",

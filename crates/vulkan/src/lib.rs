@@ -10,12 +10,15 @@
 //!     and the `VK_KHR_cooperative_matrix` capability query.
 //!   * `shader::wgsl_to_spirv` -- compile the existing WGSL kernels to SPIR-V
 //!     via `naga` (WGSL stays the source of truth for scalar kernels).
-//!   * `matmul` -- `out = x @ W^T` with a `MatmulBackend` that picks the NVIDIA
-//!     tensor-core kernel (GLSL `matmul_coopmat.comp`, compiled by build.rs)
-//!     when available, else the naga-compiled scalar `matmul.wgsl`.
+//!   * `matmul::coopmat_spv` -- the GLSL cooperative-matrix kernel
+//!     (`matmul_coopmat.comp`), compiled to SPIR-V by build.rs. The pipeline
+//!     that RUNS it lives in `crates/backend-vulkan/src/coopmat.rs` now (M8.9)
+//!     -- registered on the real Vulkan backend's own device via
+//!     `Backend::register_native`/`step_native`, not a second device this
+//!     crate used to open for its own demo. See `matmul`'s module doc.
 //!
-//! SCOPE: matmul + runtime + capability + fallback. Porting the full PID
-//! forward pass to this runtime is a documented follow-up (README_VULKAN.md).
+//! SCOPE: runtime + capability + fallback. Porting the full PID forward pass
+//! to this runtime is a documented follow-up (README_VULKAN.md).
 //!
 //! HARDWARE NOTE: developed against software Vulkan (llvmpipe), which lacks
 //! cooperative matrix, so only the scalar fallback executes here. The
@@ -34,7 +37,7 @@ pub mod shader;
 #[allow(unused_imports)]
 pub use context::{component_type_name, CoopMatCaps, CoopMatShape, VkContext};
 #[allow(unused_imports)]
-pub use matmul::{cooperative_matmul_demo, matmul, MatmulBackend};
+pub use matmul::coopmat_spv;
 
 /// Print the selected adapter and its cooperative-matrix capabilities. Backs
 /// the `moe pid vk-info` CLI entry.
@@ -49,7 +52,6 @@ pub fn print_vk_info() {
     println!("Vulkan adapter: {}", ctx.adapter_name);
     println!("VK_KHR_cooperative_matrix extension present: {}", ctx.caps.extension_present);
     println!("cooperativeMatrix feature enabled: {}", ctx.caps.feature_supported);
-    println!("selected matmul backend: {:?}", MatmulBackend::select(&ctx));
     println!(
         "coopmat SPIR-V baked in at build time: {}",
         matmul::coopmat_spv().is_some()

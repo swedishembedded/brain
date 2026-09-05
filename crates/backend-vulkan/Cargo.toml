@@ -15,6 +15,11 @@ brain-backend-api.workspace = true
 brain-vulkan.workspace = true
 ash.workspace = true
 bytemuck.workspace = true
+# M8.9: the coopmat host-side f32->f16 pack (`coopmat::pack_f16`), round-to-
+# nearest-even and subnormal-correct - already a workspace dependency
+# (backend-wgpu/model/gguf/checkpoint/ltxv/gpu-core all use it for the same
+# conversion), reused here rather than hand-rolling the bit-twiddling again.
+half.workspace = true
 # The `tracing` FACADE only - never a subscriber. `--trace-gpu <0-5>` (the
 # `brain` CLI installs the one subscriber) turns these events on; with none
 # installed every macro below is a predictable-branch no-op. Targets default

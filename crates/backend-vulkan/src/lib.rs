@@ -40,7 +40,13 @@ use ash::vk;
 use vulkan::context::{VkBuffer, VkContext};
 use vulkan::shader;
 
-use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
+use backend_api::{Backend, BufUsage, DeviceBuffer, NativeId, NativeSpec, Step};
+
+/// M8.9: the cooperative-matrix pipeline (creation from raw SPIR-V, and the
+/// `Backend::register_native`/`step_native` implementation) - moved here
+/// (from `crates/vulkan`, a separate device) so it shares this backend's OWN
+/// `VkContext`. See that module's doc comment for the whole argument.
+pub mod coopmat;
 
 /// Ceiling for one `wait_for_fences` call, nanoseconds. Generous — a legitimate
 /// prefill dispatch is slow — but finite: `u64::MAX` (the previous value) made a
@@ -201,6 +207,23 @@ struct KernelPipeline {
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     bindings: Vec<shader::WgslBinding>,
+}
+
+/// What [`VulkanBackend::record`] and the two dispatch sites need to run one
+/// `kind`, regardless of which space it came from - see
+/// [`VulkanBackend::resolve_kernel`]. An owned (cloned) view rather than a
+/// borrow: a native kernel's [`coopmat::NativeEntry`] lives behind
+/// [`VulkanBackend::native`]'s `Mutex`, so a borrow could not outlive the
+/// lock guard the way a catalogue kernel's borrow of `Arc<VkPipelineSet>`
+/// can. `bindings` is at most 8 entries (the engine-wide storage-binding
+/// cap), so cloning it is cheap - the exact cost `KernelPipeline::bindings`
+/// itself already pays every time `record` reads it today.
+struct ResolvedKernel {
+    set_layout: vk::DescriptorSetLayout,
+    layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+    bindings: Vec<shader::WgslBinding>,
+    wgsize: u32,
 }
 
 /// One kernel set's compiled pipelines, plus the `Arc<VkContext>` that keeps
@@ -364,6 +387,14 @@ pub struct VulkanBackend {
     ring: Mutex<Vec<CmdSlot>>,
     /// Round-robin cursor into `ring`, advanced once per asynchronous flush.
     ring_cursor: AtomicU64,
+    /// Kernels registered at runtime via [`Backend::register_native`] (M8.9) -
+    /// indexed by `kind - self.native_base()`, see [`Self::resolve_kernel`].
+    /// Per-HANDLE, like `pending`/`uniforms`/`free_sets` above (never
+    /// `Arc`-shared the way the WGSL catalogue's `pipelines` is with a
+    /// `share()` sibling): a kernel registered on one handle is not visible
+    /// on another, which matches every other piece of handle-local command-
+    /// stream state this struct already keeps separate per `from_shared` call.
+    native: Mutex<Vec<coopmat::NativeEntry>>,
 }
 
 // ash handles are Send+Sync; all interior mutation goes through the Mutexes above.
@@ -712,6 +743,7 @@ impl VulkanBackend {
             names,
             ring: Mutex::new(ring),
             ring_cursor: AtomicU64::new(0),
+            native: Mutex::new(Vec::new()),
         })
     }
 
@@ -811,6 +843,94 @@ impl VulkanBackend {
             numeric: arch.numeric_view(),
             arch,
         }
+    }
+
+    /// The first `kind` value that refers to a runtime-[`Self::register_native`]d
+    /// kernel rather than this handle's fixed WGSL catalogue
+    /// (`self.pipelines.pipelines`, sized once at construction and never
+    /// grown). A native kind can never collide with a catalogue one: the
+    /// catalogue's length is fixed before any `register_native` call could
+    /// possibly run, so `kind >= native_base()` is a stable, exact test - not
+    /// an arbitrary reserved sentinel that could theoretically collide with a
+    /// future larger kernel catalogue.
+    fn native_base(&self) -> usize {
+        self.pipelines.pipelines.len()
+    }
+
+    /// Resolve `kind` (from either space - see [`Self::native_base`]) to what
+    /// [`Self::record`] and the two dispatch sites ([`Self::flush`]'s serial
+    /// branch, [`Self::record_dispatches`]) need, so both spaces share the
+    /// EXACT SAME recording/dispatch/hazard-analysis/profiling code with no
+    /// per-call-site branch on which space `kind` came from.
+    fn resolve_kernel(&self, kind: usize) -> ResolvedKernel {
+        let base = self.native_base();
+        if kind < base {
+            let kp = &self.pipelines.pipelines[kind];
+            ResolvedKernel {
+                set_layout: kp.set_layout,
+                layout: kp.layout,
+                pipeline: kp.pipeline,
+                bindings: kp.bindings.clone(),
+                wgsize: self.pipelines.wgsizes[kind],
+            }
+        } else {
+            let native = self.native.lock().unwrap_or_else(|e| e.into_inner());
+            let e = native.get(kind - base).unwrap_or_else(|| panic!("VulkanBackend: kind {kind} names no registered kernel (native_base={base}, {} native kernels registered)", native.len()));
+            ResolvedKernel {
+                set_layout: e.set_layout,
+                layout: e.layout,
+                pipeline: e.pipeline,
+                bindings: e.bindings.clone(),
+                wgsize: e.wgsize,
+            }
+        }
+    }
+
+    /// [`Backend::register_native`]: build a real compute pipeline from `spec`
+    /// against THIS handle's own `ctx` (never a second device - see
+    /// `coopmat`'s module doc) and hand back a [`NativeId`] that
+    /// [`Self::step_native`] can dispatch. `None` when this device declines
+    /// `spec` - a real, expected outcome (e.g. cooperative-matrix SPIR-V on a
+    /// device that never enabled the feature), never a panic; see
+    /// [`coopmat::build_pipeline`]'s own doc for why a decline here is
+    /// correct, not a bug.
+    ///
+    /// Registered kernels are per-HANDLE (see [`Self::native`]'s doc) - a
+    /// `share()`/`new_like()` sibling does not see a kernel registered on a
+    /// different handle onto the same device.
+    pub fn register_native(&self, spec: &NativeSpec) -> Option<NativeId> {
+        let entry = match coopmat::build_pipeline(&self.ctx, spec) {
+            Ok(e) => e,
+            Err(msg) => {
+                tracing::info!(reason = %msg, "register_native: this device declined the kernel");
+                return None;
+            }
+        };
+        let base = self.native_base();
+        let mut native = self.native.lock().unwrap_or_else(|e| e.into_inner());
+        native.push(entry);
+        Some(NativeId((base + native.len() - 1) as u32))
+    }
+
+    /// [`Backend::step_native`]: record a dispatch of `id` exactly like
+    /// [`Self::step`] would for a catalogue kernel - same transient uniform,
+    /// same descriptor-set recycling, same per-buffer hazard analysis at
+    /// flush time, same profiling. `None` when `id` was not issued by THIS
+    /// handle's [`Self::register_native`] (a stale id from a dropped handle,
+    /// or one from a different backend entirely).
+    ///
+    /// `threads` for a native kernel means the WORKGROUP COUNT directly, not
+    /// a per-invocation thread count divided by a reflected `@workgroup_size`.
+    /// See [`coopmat::NativeEntry::wgsize`]'s doc for why a `NativeSpec`
+    /// kernel needs its own convention here.
+    pub fn step_native(&self, id: NativeId, bufs: &[&VkOwnedBuffer], params: &[u32], threads: u32) -> Option<VkStep> {
+        let kind = id.0 as usize;
+        let base = self.native_base();
+        let in_range = kind >= base && (kind - base) < self.native.lock().unwrap_or_else(|e| e.into_inner()).len();
+        if !in_range {
+            return None;
+        }
+        Some(self.step(kind, bufs, params, threads))
     }
 
     /// Allocate one descriptor set with `set_layout`, growing the pool list when
@@ -1035,7 +1155,7 @@ impl VulkanBackend {
         threads: u32,
         transient: bool,
     ) -> VkStep {
-        let kp = &self.pipelines.pipelines[kind];
+        let rk = self.resolve_kernel(kind);
         let dev = &self.ctx.device;
         // Transient sets recycle through `free_sets` (same pipeline => same
         // layout; the flush's fence wait made them idle, so rewriting below via
@@ -1046,18 +1166,18 @@ impl VulkanBackend {
         } else {
             None
         }
-        .unwrap_or_else(|| self.alloc_set(kp.set_layout));
+        .unwrap_or_else(|| self.alloc_set(rk.set_layout));
 
         // Build the binding metadata first (binding 0 = uniform; the storage
         // bindings consume `bufs` in order), then materialise the buffer-info
         // slices in a fixed Vec so the `WriteDescriptorSet`s can borrow stable
         // addresses (no further pushes after this point).
         let mut meta: Vec<(u32, vk::DescriptorType, vk::DescriptorBufferInfo)> =
-            Vec::with_capacity(kp.bindings.len());
+            Vec::with_capacity(rk.bindings.len());
         let mut accesses = [VkAccess { buffer: vk::Buffer::null(), write: false }; MAX_STORAGE_BINDINGS];
         let mut n_access = 0usize;
         let mut storage_i = 0usize;
-        for b in &kp.bindings {
+        for b in &rk.bindings {
             let (vkbuf, off_b, range_b, ty) = if b.is_uniform {
                 (ubuf.buffer, 0u64, ubuf.size, vk::DescriptorType::UNIFORM_BUFFER)
             } else {
@@ -1100,7 +1220,7 @@ impl VulkanBackend {
         let named: Vec<vk::Buffer> =
             std::iter::once(ubuf.buffer).chain(bufs.iter().map(|b| b.inner.buffer)).collect();
         self.ctx.set_names(set, &named);
-        let (gx, gy) = backend_api::grid_ws(threads, self.pipelines.wgsizes[kind]);
+        let (gx, gy) = backend_api::grid_ws(threads, rk.wgsize);
         let sliced = offsets.iter().any(|&(off, _)| off > 0);
         VkStep { kind, set, gx, gy, sliced, transient, accesses, n_access: n_access as u8 }
     }
@@ -1208,9 +1328,9 @@ impl VulkanBackend {
                         dev.cmd_reset_query_pool(cmd, qp, 0, 2);
                         dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, qp, 0);
                     }
-                    let kp = &self.pipelines.pipelines[s.kind];
-                    dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
-                    dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, kp.layout, 0, &[s.set], &[]);
+                    let rk = self.resolve_kernel(s.kind);
+                    dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, rk.pipeline);
+                    dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, rk.layout, 0, &[s.set], &[]);
                     dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
                     if let Some(qp) = qp {
                         dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, qp, 1);
@@ -1422,9 +1542,9 @@ impl VulkanBackend {
                     self.stats.barriers.fetch_add(barriers.len() as u64, Ordering::Relaxed);
                 }
             }
-            let kp = &self.pipelines.pipelines[s.kind];
-            dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
-            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, kp.layout, 0, &[s.set], &[]);
+            let rk = self.resolve_kernel(s.kind);
+            dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, rk.pipeline);
+            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, rk.layout, 0, &[s.set], &[]);
             dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
             on_dispatch(i);
             for acc in accesses {
@@ -1530,15 +1650,26 @@ impl VulkanBackend {
     }
 
     /// Fold `n+1` bracketing timestamps for `n` dispatches (`kinds[i]` ran
-    /// between `ts[i]` and `ts[i+1]`) into the per-kernel-kind accumulator.
+    /// between `ts[i]` and `ts[i+1]`) into the per-kernel-kind accumulator -
+    /// the catalogue-sized `profile.acc` for `kind < native_base()`, or the
+    /// registered [`coopmat::NativeEntry`] itself otherwise (see
+    /// [`Self::native`]'s doc for why a native kernel's timing lives THERE
+    /// rather than growing `profile.acc` in lockstep with a separate lock).
     fn record_timing(&self, kinds: &[usize], ts: &[u64]) {
         let period_ns = self.ctx.timestamp_period_ns;
+        let base = self.native_base();
         let mut acc = self.profile.acc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut native = self.native.lock().unwrap_or_else(|e| e.into_inner());
         for (i, &kind) in kinds.iter().enumerate() {
             let dt_ns = ts[i + 1].saturating_sub(ts[i]) as f64 * period_ns;
-            let entry = &mut acc[kind];
-            entry.0 += dt_ns / 1e6;
-            entry.1 += 1;
+            if kind < base {
+                let entry = &mut acc[kind];
+                entry.0 += dt_ns / 1e6;
+                entry.1 += 1;
+            } else if let Some(e) = native.get_mut(kind - base) {
+                e.ms += dt_ns / 1e6;
+                e.calls += 1;
+            }
         }
     }
 
@@ -1638,6 +1769,14 @@ impl Drop for VulkanBackend {
             // `Arc<VkPipelineSet>`, possibly shared with a `share()` sibling
             // still alive. `VkPipelineSet::drop` destroys them exactly once,
             // when the last handle referencing this kernel set drops.
+            //
+            // `self.native` (M8.9) IS destroyed here, unconditionally: unlike
+            // `pipelines`, native registrations are per-handle, never
+            // `Arc`-shared with a `share()` sibling - see `Self::native`'s
+            // own doc comment.
+            for e in std::mem::take(&mut *self.native.lock().unwrap_or_else(|e| e.into_inner())) {
+                e.destroy(dev);
+            }
             if let Some(qp) = self.profile.pool.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 dev.destroy_query_pool(qp, None);
             }
@@ -1773,12 +1912,14 @@ impl Backend for VulkanBackend {
             return None;
         }
         let acc = self.profile.acc.lock().unwrap_or_else(|e| e.into_inner());
+        let native = self.native.lock().unwrap_or_else(|e| e.into_inner());
         Some(
             self.names
                 .iter()
                 .zip(acc.iter())
                 .filter(|(_, (_, calls))| *calls > 0)
                 .map(|(name, (ms, calls))| (name.clone(), *ms, *calls))
+                .chain(native.iter().filter(|e| e.calls > 0).map(|e| (e.name.clone(), e.ms, e.calls)))
                 .collect(),
         )
     }
@@ -1786,6 +1927,10 @@ impl Backend for VulkanBackend {
     fn reset_kernel_times(&self) {
         for e in self.profile.acc.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
             *e = (0.0, 0);
+        }
+        for e in self.native.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
+            e.ms = 0.0;
+            e.calls = 0;
         }
     }
 
@@ -1866,6 +2011,13 @@ impl Backend for VulkanBackend {
     }
     fn reclaim_event_count(&self) -> u64 {
         VulkanBackend::reclaim_event_count(self)
+    }
+    fn register_native(&self, spec: &NativeSpec) -> Option<NativeId> {
+        VulkanBackend::register_native(self, spec)
+    }
+    fn step_native(&self, id: NativeId, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Option<Step> {
+        let bs: Vec<&VkOwnedBuffer> = bufs.iter().map(|b| b.downcast_ref::<VkOwnedBuffer>()).collect();
+        VulkanBackend::step_native(self, id, &bs, params, threads).map(Step::new)
     }
 }
 

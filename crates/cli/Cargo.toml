@@ -38,6 +38,10 @@ brain-memauth.workspace = true
 brain-backend-api.workspace = true
 brain-gpu-core.workspace = true
 brain-backend-cpu.workspace = true
+# `backend_vulkan::coopmat::demo` - the `vk-matmul` demo entry (M8.9). Already
+# an unconditional transitive dependency via `brain-gpu-core`; named directly
+# here because a transitive dependency's crate is not a usable `use` path.
+brain-backend-vulkan.workspace = true
 brain-wm-core.workspace = true
 brain-diamond.workspace = true
 brain-wm-display.workspace = true

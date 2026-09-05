@@ -51,17 +51,38 @@ layout(set = 0, binding = 2, std430) readonly  buffer WBuf { float16_t w[]; };
 layout(set = 0, binding = 3, std430) writeonly buffer OBuf { float     o[]; };
 
 void main() {
-    // Tile coordinates: workgroup (gx, gy) owns output rows [tileRow, +TILE_M)
-    // and cols [tileCol, +TILE_N).
-    uint tileRow = gl_WorkGroupID.x * TILE_M;
-    uint tileCol = gl_WorkGroupID.y * TILE_N;
+    // M8.9: the host dispatches through `backend_api::grid_ws(threads, 1)` now
+    // (one native-registered "thread" == one whole workgroup/tile - see
+    // `backend-vulkan/src/coopmat.rs`'s module doc), which is the SAME >65535
+    // two-dimensional group-count tiling every WGSL kernel's grid uses, not an
+    // independent (tileRow, tileCol) pair. So the workgroup's OWN tile index is
+    // the flattened `gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x`
+    // (mirrors `grid_ws`'s doc: "reconstruct its flat id as
+    // gid.y*(nwg.x*WG)+gid.x", generalised from per-thread to per-workgroup by
+    // WG=1), decomposed into (tileRowIdx, tileColIdx) by the real N-tile count.
+    // Guarded because `grid_ws`'s own tiling can dispatch a few more groups
+    // than tiles exist (its `MAX_GROUPS_PER_DIM` ceiling), exactly like every
+    // WGSL kernel's own `if (idx >= n) { return; }` bound.
+    uint nTilesN = p.n / TILE_N;
+    uint nTilesM = p.m / TILE_M;
+    uint tileLinear = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tileLinear >= nTilesM * nTilesN) {
+        return;
+    }
+    uint tileRowIdx = tileLinear / nTilesN;
+    uint tileColIdx = tileLinear % nTilesN;
+    // Tile (tileRowIdx, tileColIdx) owns output rows [tileRow, +TILE_M) and
+    // cols [tileCol, +TILE_N).
+    uint tileRow = tileRowIdx * TILE_M;
+    uint tileCol = tileColIdx * TILE_N;
 
     // Accumulator fragment (fp32), zero-initialised.
     coopmat<float, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator> acc =
         coopmat<float, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator>(0.0);
 
     // K is contracted in TILE_K chunks. We assume M,N,K are tile-multiples; the
-    // host pads buffers up to multiples of the tile (documented in vulkan/mod.rs).
+    // host pads buffers up to multiples of the tile (see
+    // `backend-vulkan/src/coopmat.rs`'s `round_up`/`pack_padded_f16`).
     for (uint k0 = 0; k0 < p.k; k0 += TILE_K) {
         // A = x tile  [TILE_M, TILE_K], row-major, stride = p.k.
         coopmat<float16_t, gl_ScopeSubgroup, TILE_M, TILE_K, gl_MatrixUseA> a;

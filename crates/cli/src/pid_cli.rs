@@ -16,8 +16,13 @@ pub fn run_pid(args: &[String]) {
         Some("profile") => profile(&args[1..]),
         #[cfg(feature = "vulkan-coopmat")]
         Some("vk-info") => vulkan::print_vk_info(),
+        // M8.9: the coopmat pipeline itself moved to `backend-vulkan` (the
+        // real, always-on Vulkan backend's own device) - see that crate's
+        // `coopmat` module doc. Still gated behind `vulkan-coopmat` for the
+        // same reason as `vk-info`: an opt-in demo, not part of any served
+        // model's default path.
         #[cfg(feature = "vulkan-coopmat")]
-        Some("vk-matmul") => vulkan::cooperative_matmul_demo(),
+        Some("vk-matmul") => backend_vulkan::coopmat::demo(),
         other => {
             eprintln!("usage: brain toypid <train|rollout|profile> ...  (got {other:?})");
         }

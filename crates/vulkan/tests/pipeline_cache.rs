@@ -15,9 +15,11 @@
 //! flaky wall-clock assertion this campaign's own ledger (decision 4) already
 //! rules out in favour of a deterministic check of the actual mechanism.
 
+use ash::vk;
+
 use vulkan::context::VkContext;
-use vulkan::matmul::{matmul, MatmulBackend};
 use vulkan::pipeline_cache;
+use vulkan::shader;
 
 #[test]
 fn second_context_loads_the_first_ones_persisted_pipeline_cache() {
@@ -38,9 +40,46 @@ fn second_context_loads_the_first_ones_persisted_pipeline_cache() {
         }
     };
 
-    // Exercise the exact call site this milestone changed
-    // (`matmul.rs::build_pipeline`), not a bespoke test-only pipeline.
-    let _ = matmul(&ctx, MatmulBackend::select(&ctx), &[0.0f32; 4], &[0.0f32; 4], 1, 4, 1);
+    // Exercise `ctx.pipeline_cache()` the same way every real dispatch does:
+    // compile an ordinary catalogue kernel (`add2` - the coopmat pipeline
+    // itself moved to `crates/backend-vulkan/src/coopmat.rs` at M8.9 and no
+    // longer builds a pipeline against THIS crate's `VkContext`) and create a
+    // compute pipeline against it, exactly like `backend-vulkan`'s own
+    // `compile_pipeline_set` does.
+    unsafe {
+        let src = kernels::ADD2;
+        let spirv = shader::wgsl_to_spirv(src).expect("naga compile add2.wgsl");
+        let bindings = shader::wgsl_bindings(src).expect("reflect add2.wgsl bindings");
+        let module = shader::make_shader_module(&ctx.device, &spirv).expect("shader module");
+        let layout_bindings: Vec<vk::DescriptorSetLayoutBinding> = bindings
+            .iter()
+            .map(|b| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(b.binding)
+                    .descriptor_type(if b.is_uniform { vk::DescriptorType::UNIFORM_BUFFER } else { vk::DescriptorType::STORAGE_BUFFER })
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            })
+            .collect();
+        let set_layout = ctx
+            .device
+            .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&layout_bindings), None)
+            .expect("set layout");
+        let pl_layout = ctx
+            .device
+            .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&[set_layout]), None)
+            .expect("pipeline layout");
+        let entry = std::ffi::CString::new("main").unwrap();
+        let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(module).name(&entry);
+        let pipeline = ctx
+            .device
+            .create_compute_pipelines(ctx.pipeline_cache(), &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(pl_layout)], None)
+            .expect("compute pipeline")[0];
+        ctx.device.destroy_pipeline(pipeline, None);
+        ctx.device.destroy_pipeline_layout(pl_layout, None);
+        ctx.device.destroy_descriptor_set_layout(set_layout, None);
+        ctx.device.destroy_shader_module(module, None);
+    }
     let first_data = unsafe { ctx.device.get_pipeline_cache_data(ctx.pipeline_cache()) }
         .expect("get_pipeline_cache_data must succeed on a real device");
     assert!(!first_data.is_empty(), "a real device must report a non-empty pipeline-cache blob");
