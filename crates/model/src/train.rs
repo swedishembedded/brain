@@ -9,6 +9,7 @@
 
 use data::rng::Rng;
 
+use crate::objective::Objective;
 use crate::{Model, ModelConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::Batch;
@@ -112,8 +113,22 @@ pub fn load_dataset(
     dir: &Path,
     opts: &FitOpts,
 ) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32)> {
+    let (train, val, batch_cfg, vocab, _itos) = load_dataset_with_itos(dir, opts)?;
+    Ok((train, val, batch_cfg, vocab))
+}
+
+/// Like [`load_dataset`] but additionally returns the char-tokenizer vocab
+/// (`itos`) when the dataset carries one - for callers (`crates/rl`'s
+/// `fit_weighted`) that must carry it into their own checkpoints, the way
+/// [`fit`] already does via [`Model::save_with_itos`].
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::type_complexity)]
+pub fn load_dataset_with_itos(
+    dir: &Path,
+    opts: &FitOpts,
+) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32, Option<Vec<char>>)> {
     let l = load(dir, opts)?;
-    Ok((l.train, l.val, l.batch_cfg, l.vocab))
+    Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -202,29 +217,14 @@ fn targets_to_u32(y: &[i32]) -> Vec<u32> {
     y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect()
 }
 
-/// Train any [`Model`] on the token dataset in `dir`, writing the final
-/// checkpoint to `out`. `cfg` carries the architecture; its `vocab`/`block_size`
-/// are overridden from the dataset and `opts`. Returns `(initial_loss,
-/// final_loss)`.
-///
-/// This is `gpt2::train::train` lifted to `M: Model` - same control flow, same
-/// resume/eval/checkpoint semantics, no GPT-specific code.
-///
-/// Native-only: it reads token `.bin` datasets and writes checkpoints, neither
-/// of which exists on the wasm32 inference build.
+/// Build a fresh model from `cfg` (finalized against `dataset_vocab`/
+/// `opts.block_size`), or resume from `out`'s existing checkpoint if one is
+/// already there - the resume-vs-fresh-init block shared by [`fit`] and
+/// `crates/rl`'s `fit_weighted`. On resume the checkpoint's own architecture
+/// wins (and must match `opts.block_size`/`dataset_vocab` - weights resume,
+/// AdamW moments restart); otherwise a fresh random init runs from `opts.seed`.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn fit<M: Model>(
-    dir: &Path,
-    cfg: M::Config,
-    opts: &FitOpts,
-    out: Option<&Path>,
-) -> std::io::Result<(f32, f32)> {
-    let loaded = load(dir, opts)?;
-
-    // Resume from the existing checkpoint if `out` already exists, so repeated
-    // runs continue rather than restart from scratch. The checkpoint's
-    // architecture wins (and must match the dataset/--block in use). Otherwise
-    // start from a fresh random init. (Weights resume; AdamW moments restart.)
+pub fn build_or_resume<M: Model>(cfg: M::Config, opts: &FitOpts, out: Option<&Path>, dataset_vocab: u32) -> M {
     let resume = out.map(|p| p.exists()).unwrap_or(false);
     let (cfg, init) = if resume {
         let p = out.unwrap();
@@ -234,33 +234,92 @@ pub fn fit<M: Model>(
         assert_eq!(
             rcfg.block_size(),
             opts.block_size,
-            "checkpoint block_size {} != --block {} — resume with the same --block",
+            "checkpoint block_size {} != --block {} - resume with the same --block",
             rcfg.block_size(),
             opts.block_size
         );
-        assert_eq!(rcfg.vocab(), loaded.vocab, "checkpoint vocab != dataset vocab — wrong dataset for this checkpoint");
+        assert_eq!(rcfg.vocab(), dataset_vocab, "checkpoint vocab != dataset vocab - wrong dataset for this checkpoint");
         let init = c.by_role("");
         (rcfg, init)
     } else {
-        let cfg = cfg.finalize_for_dataset(loaded.vocab, opts.block_size);
+        let cfg = cfg.finalize_for_dataset(dataset_vocab, opts.block_size);
         let init = M::init_weights(&cfg, opts.seed);
         (cfg, init)
     };
-    let model = M::new(cfg, opts.batch_size, opts.block_size, &init);
-    let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
+    M::new(cfg, opts.batch_size, opts.block_size, &init)
+}
 
-    let sample_loss = |model: &M, ds: &TokenDataset, rng: &mut Rng, batches: u32| -> f32 {
+/// Ordinary causal-LM SFT - [`fit`]'s [`Objective`]. One micro-step draws an
+/// unweighted `Batch::Lm` batch from the train split, forwards, and
+/// backwards; eval samples the held-out val split the same way, forward-only.
+/// This is exactly the step body `fit` used to run inline, unchanged, now
+/// behind the [`Objective`] seam so it is not the fourth copy-paste of it.
+#[cfg(not(target_arch = "wasm32"))]
+struct CausalLm {
+    train: TokenDataset,
+    val: TokenDataset,
+    batch_cfg: BatchConfig,
+    itos: Option<Vec<char>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<M: Model> Objective<M> for CausalLm {
+    fn regime(&self) -> &'static str {
+        "causal_lm"
+    }
+
+    fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
+        let targets = targets_to_u32(&y);
+        model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
+        let loss = model.forward();
+        model.backward();
+        loss
+    }
+
+    fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
         let mut total = 0.0;
         for _ in 0..batches.max(1) {
-            let (x, y) = ds.get_batch(&loaded.batch_cfg, rng);
+            let (x, y) = self.val.get_batch(&self.batch_cfg, rng);
             let targets = targets_to_u32(&y);
             model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
             total += model.forward();
         }
-        total / batches.max(1) as f32
-    };
+        Some(total / batches.max(1) as f32)
+    }
 
-    let initial = sample_loss(&model, &loaded.train, &mut rng.clone(), 5);
+    fn itos(&self) -> Option<&[char]> {
+        self.itos.as_deref()
+    }
+}
+
+/// The one training/eval/checkpoint loop, generic over any [`Objective`].
+/// Owns everything that must NOT vary per objective: cosine-with-warmup LR,
+/// grad accumulation and its averaging scale, global-norm clipping, AdamW,
+/// wall-clock checkpointing, eval cadence, and the final save. Always calls
+/// [`Model::save_with_itos`] (asking `obj` for its [`Objective::itos`]) -
+/// never [`Model::save`] - so no objective can silently drop the char vocab
+/// the way `rl::fit_weighted` used to.
+///
+/// The initial (pre-training) loss estimate runs 5 [`Objective::micro_step`]s
+/// on a throwaway clone of the rng stream, exactly mirroring the original
+/// inline loops' 5-batch train-split sample: it uses the same batches
+/// `micro_step`'s own accumulation loop draws (train split, whatever
+/// per-position weighting the objective applies), just discarded (via the
+/// following [`Model::zero_grads`]) before the first real optimizer step.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
+    obj.prepare(&mut model);
+    let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
+
+    let initial = {
+        let mut sample_rng = rng.clone();
+        let mut total = 0.0;
+        for _ in 0..5 {
+            total += obj.micro_step(&model, &mut sample_rng);
+        }
+        total / 5.0
+    };
     let mut last_train = initial;
     let mut last_save = std::time::Instant::now();
 
@@ -269,11 +328,7 @@ pub fn fit<M: Model>(
         model.zero_grads();
         let mut step_loss = 0.0;
         for _ in 0..opts.grad_accum.max(1) {
-            let (x, y) = loaded.train.get_batch(&loaded.batch_cfg, &mut rng);
-            let targets = targets_to_u32(&y);
-            model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
-            step_loss += model.forward();
-            model.backward();
+            step_loss += obj.micro_step(&model, &mut rng);
         }
         // average grads over accumulation steps
         let scale = 1.0 / opts.grad_accum.max(1) as f32;
@@ -283,8 +338,12 @@ pub fn fit<M: Model>(
         last_train = step_loss / opts.grad_accum.max(1) as f32;
 
         if opts.eval_interval > 0 && (step + 1) % opts.eval_interval == 0 {
-            let eval_loss = sample_loss(&model, &loaded.val, &mut rng.clone(), opts.eval_batches);
-            println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, last_train, eval_loss);
+            if let Some(eval_loss) = obj.eval(&model, &mut rng.clone(), opts.eval_batches) {
+                println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, last_train, eval_loss);
+            }
+            for (name, value) in obj.metrics() {
+                println!("  {name}: {value:.4}");
+            }
         }
 
         // Wall-clock checkpointing: once the timer has expired, the NEXT completed
@@ -293,7 +352,7 @@ pub fn fit<M: Model>(
         if let Some(p) = out {
             if opts.checkpoint_secs > 0 && last_save.elapsed().as_secs() >= opts.checkpoint_secs {
                 let ts = std::time::Instant::now();
-                model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
+                model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
                 println!(
                     "step {:>6}  saved checkpoint -> {} ({:.1} s)",
                     step + 1,
@@ -307,10 +366,30 @@ pub fn fit<M: Model>(
 
     if let Some(p) = out {
         let ts = std::time::Instant::now();
-        model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
+        model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
         println!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
     }
     Ok((initial, last_train))
+}
+
+/// Train any [`Model`] on the token dataset in `dir`, writing the final
+/// checkpoint to `out`. `cfg` carries the architecture; its `vocab`/`block_size`
+/// are overridden from the dataset and `opts`. Returns `(initial_loss,
+/// final_loss)`.
+///
+/// This is `gpt2::train::train` lifted to `M: Model` - same control flow, same
+/// resume/eval/checkpoint semantics, no GPT-specific code. Delegates to
+/// [`build_or_resume`] + [`fit_with`] over the [`CausalLm`] objective; the
+/// loop body itself lives once, in `fit_with`.
+///
+/// Native-only: it reads token `.bin` datasets and writes checkpoints, neither
+/// of which exists on the wasm32 inference build.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fit<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
+    let loaded = load(dir, opts)?;
+    let model = build_or_resume::<M>(cfg, opts, out, loaded.vocab);
+    let obj = CausalLm { train: loaded.train, val: loaded.val, batch_cfg: loaded.batch_cfg, itos: loaded.itos };
+    fit_with(model, obj, opts, out)
 }
 
 /// Generate `max_new` tokens continuing `prompt` for any token-head [`Model`].

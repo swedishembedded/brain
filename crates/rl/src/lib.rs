@@ -37,9 +37,9 @@ pub mod continuous;
 use std::path::Path;
 
 use data::binio;
-use data::loader::TokenDataset;
+use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
-use model::{cosine_lr, Batch, FitOpts, Model, ModelConfig, IGNORE};
+use model::{Batch, FitOpts, Model, Objective, IGNORE};
 
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
 /// `u32` IGNORE sentinel. Mirrors the one-line private helper of the same
@@ -49,12 +49,16 @@ fn targets_to_u32(y: &[i32]) -> Vec<u32> {
     y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect()
 }
 
-/// Load `dir`'s dataset the same way [`model::train::load_dataset`] does,
-/// then attach `train.weight.bin`/`val.weight.bin` (per-token `f32`,
+/// Load `dir`'s dataset the same way [`model::train::load_dataset_with_itos`]
+/// does, then attach `train.weight.bin`/`val.weight.bin` (per-token `f32`,
 /// [`data::binio::read_f32_bin`]) when present. Neither file existing is not
 /// an error - see this module's doc comment on the default-1.0 semantics.
-fn load_weighted(dir: &Path, opts: &FitOpts) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32)> {
-    let (train, val, batch_cfg, vocab) = model::load_dataset(dir, opts)?;
+/// Also threads through the dataset's char-tokenizer `itos` (when present) so
+/// [`fit_weighted`] can carry it into its own checkpoint, same as
+/// [`model::train::fit`] does.
+#[allow(clippy::type_complexity)]
+fn load_weighted(dir: &Path, opts: &FitOpts) -> std::io::Result<(TokenDataset, TokenDataset, BatchConfig, u32, Option<Vec<char>>)> {
+    let (train, val, batch_cfg, vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let attach = |ds: TokenDataset, weight_path: &Path, expected_len: usize| -> std::io::Result<TokenDataset> {
         match binio::read_f32_bin(weight_path) {
             Ok(w) if w.len() == expected_len => Ok(ds.with_weights(w)),
@@ -70,106 +74,79 @@ fn load_weighted(dir: &Path, opts: &FitOpts) -> std::io::Result<(TokenDataset, T
     let val_len = val.len();
     let train = attach(train, &dir.join("train.weight.bin"), train_len)?;
     let val = attach(val, &dir.join("val.weight.bin"), val_len)?;
-    Ok((train, val, batch_cfg, vocab))
+    Ok((train, val, batch_cfg, vocab, itos))
+}
+
+/// Weighted/reward-driven training - [`fit_weighted`]'s [`Objective`]. One
+/// micro-step draws a `Batch::LmWeighted` batch (per-token weight from the
+/// dataset's optional weight file, default `1.0`) from the train split,
+/// forwards, and backwards; eval samples the held-out val split the same way,
+/// forward-only. This is exactly the step body `fit_weighted` used to run
+/// inline, unchanged, now behind the [`Objective`] seam.
+struct WeightedLm {
+    train: TokenDataset,
+    val: TokenDataset,
+    batch_cfg: BatchConfig,
+    itos: Option<Vec<char>>,
+}
+
+impl<M: Model> Objective<M> for WeightedLm {
+    fn regime(&self) -> &'static str {
+        "weighted_lm"
+    }
+
+    fn prepare(&mut self, model: &mut M) {
+        model.enable_weighted_loss();
+    }
+
+    fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        let (x, y, w) = self.train.get_batch_weighted(&self.batch_cfg, rng);
+        let targets = targets_to_u32(&y);
+        model.set_batch(Batch::LmWeighted { tokens: &x, targets: &targets, weights: &w });
+        let loss = model.forward();
+        model.backward();
+        loss
+    }
+
+    fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
+        let mut total = 0.0;
+        for _ in 0..batches.max(1) {
+            let (x, y, w) = self.val.get_batch_weighted(&self.batch_cfg, rng);
+            let targets = targets_to_u32(&y);
+            model.set_batch(Batch::LmWeighted { tokens: &x, targets: &targets, weights: &w });
+            total += model.forward();
+        }
+        Some(total / batches.max(1) as f32)
+    }
+
+    fn itos(&self) -> Option<&[char]> {
+        self.itos.as_deref()
+    }
 }
 
 /// Train any weighted-loss-capable [`Model`] on the weighted dataset in
 /// `dir`, writing the final checkpoint to `out`. Same resume/eval/checkpoint
-/// semantics as [`model::train::fit`] (reused, not duplicated) - the only
-/// difference is every batch is [`Batch::LmWeighted`] instead of
-/// [`Batch::Lm`], and the model is switched into weighted-loss mode via
+/// semantics as [`model::train::fit`] (reused via [`model::build_or_resume`] +
+/// [`model::fit_with`], not duplicated) - the only difference is every batch
+/// is [`Batch::LmWeighted`] instead of [`Batch::Lm`], via the [`WeightedLm`]
+/// objective, which also opts the model into weighted-loss mode via
 /// [`Model::enable_weighted_loss`] right after construction. Returns
 /// `(initial_loss, final_loss)` - both are the WEIGHTED loss (see
 /// [`Model::forward`]'s contract on a weighted-loss-enabled model).
+///
+/// Always calls [`Model::save_with_itos`] (never `save`) with the dataset's
+/// `itos` when it has one - fixing a real bug this used to have: it called
+/// `save` where `model::train::fit` calls `save_with_itos`, so every
+/// weighted checkpoint silently lost its char vocab.
 ///
 /// Panics (via [`Model::enable_weighted_loss`]'s default) if `M` has not
 /// implemented weighted-loss support - a clear, immediate failure rather
 /// than silently training unweighted.
 pub fn fit_weighted<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
-    let (train, val, batch_cfg, vocab) = load_weighted(dir, opts)?;
-
-    let resume = out.map(|p| p.exists()).unwrap_or(false);
-    let (cfg, init) = if resume {
-        let p = out.unwrap();
-        println!("resuming from existing checkpoint {}", p.display());
-        let c = checkpoint::load(p.to_str().expect("utf-8 path"));
-        let rcfg = M::Config::from_json(&c.header["config"]);
-        assert_eq!(
-            rcfg.block_size(),
-            opts.block_size,
-            "checkpoint block_size {} != --block {} - resume with the same --block",
-            rcfg.block_size(),
-            opts.block_size
-        );
-        assert_eq!(rcfg.vocab(), vocab, "checkpoint vocab != dataset vocab - wrong dataset for this checkpoint");
-        (rcfg, c.by_role(""))
-    } else {
-        let cfg = cfg.finalize_for_dataset(vocab, opts.block_size);
-        let init = M::init_weights(&cfg, opts.seed);
-        (cfg, init)
-    };
-    let mut model = M::new(cfg, opts.batch_size, opts.block_size, &init);
-    model.enable_weighted_loss();
-    let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
-
-    let sample_loss = |model: &M, ds: &TokenDataset, rng: &mut Rng, batches: u32| -> f32 {
-        let mut total = 0.0;
-        for _ in 0..batches.max(1) {
-            let (x, y, w) = ds.get_batch_weighted(&batch_cfg, rng);
-            let targets = targets_to_u32(&y);
-            model.set_batch(Batch::LmWeighted { tokens: &x, targets: &targets, weights: &w });
-            total += model.forward();
-        }
-        total / batches.max(1) as f32
-    };
-
-    let initial = sample_loss(&model, &train, &mut rng.clone(), 5);
-    let mut last_train = initial;
-    let mut last_save = std::time::Instant::now();
-
-    for step in 0..opts.steps {
-        let lr = cosine_lr(step, opts);
-        model.zero_grads();
-        let mut step_loss = 0.0;
-        for _ in 0..opts.grad_accum.max(1) {
-            let (x, y, w) = train.get_batch_weighted(&batch_cfg, &mut rng);
-            let targets = targets_to_u32(&y);
-            model.set_batch(Batch::LmWeighted { tokens: &x, targets: &targets, weights: &w });
-            step_loss += model.forward();
-            model.backward();
-        }
-        let scale = 1.0 / opts.grad_accum.max(1) as f32;
-        let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
-        model.adamw_step(step + 1, lr, opts.weight_decay, clip, scale);
-        model.poll_wait();
-        last_train = step_loss / opts.grad_accum.max(1) as f32;
-
-        if opts.eval_interval > 0 && (step + 1) % opts.eval_interval == 0 {
-            let eval_loss = sample_loss(&model, &val, &mut rng.clone(), opts.eval_batches);
-            println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, last_train, eval_loss);
-        }
-
-        if let Some(p) = out {
-            if opts.checkpoint_secs > 0 && last_save.elapsed().as_secs() >= opts.checkpoint_secs {
-                let ts = std::time::Instant::now();
-                model.save(p.to_str().expect("utf-8 path"));
-                println!(
-                    "step {:>6}  saved checkpoint -> {} ({:.1} s)",
-                    step + 1,
-                    p.display(),
-                    ts.elapsed().as_secs_f64()
-                );
-                last_save = std::time::Instant::now();
-            }
-        }
-    }
-
-    if let Some(p) = out {
-        let ts = std::time::Instant::now();
-        model.save(p.to_str().expect("utf-8 path"));
-        println!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
-    }
-    Ok((initial, last_train))
+    let (train, val, batch_cfg, vocab, itos) = load_weighted(dir, opts)?;
+    let model = model::build_or_resume::<M>(cfg, opts, out, vocab);
+    let obj = WeightedLm { train, val, batch_cfg, itos };
+    model::fit_with(model, obj, opts, out)
 }
 
 #[cfg(test)]
@@ -197,7 +174,7 @@ mod tests {
         binio::write_f32_bin(&dir.join("train.weight.bin"), &weights).unwrap();
 
         let opts = FitOpts { block_size: 8, batch_size: 4, ..Default::default() };
-        let (train, _val, batch_cfg, _vocab) = load_weighted(&dir, &opts).expect("load_weighted");
+        let (train, _val, batch_cfg, _vocab, _itos) = load_weighted(&dir, &opts).expect("load_weighted");
         let mut rng = Rng::new(3);
         let (x, _y, w) = train.get_batch_weighted(&batch_cfg, &mut rng);
         // The weight at each gathered position must equal 0.5 * (token id at
@@ -216,7 +193,7 @@ mod tests {
         std::fs::write(dir.join("meta.json"), Meta::vocab_only(8)).unwrap();
 
         let opts = FitOpts { block_size: 8, batch_size: 4, ..Default::default() };
-        let (train, _val, batch_cfg, _vocab) = load_weighted(&dir, &opts).expect("load_weighted");
+        let (train, _val, batch_cfg, _vocab, _itos) = load_weighted(&dir, &opts).expect("load_weighted");
         let mut rng = Rng::new(3);
         let (_x, _y, w) = train.get_batch_weighted(&batch_cfg, &mut rng);
         assert!(w.iter().all(|&wi| wi == 1.0), "an ordinary model::train::fit dataset dir (no weight file) must train exactly as unweighted");

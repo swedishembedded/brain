@@ -49,6 +49,7 @@ pub mod logprobs;
 pub mod lora;
 pub mod lut4;
 pub mod moe;
+pub mod objective;
 pub mod ops;
 // wasm-gated like `distributed`/`parallel`/`shard`: a TCP transport has no
 // business compiling into the browser build, and its `pub use` below broke
@@ -80,9 +81,10 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 #[cfg(not(target_arch = "wasm32"))]
 pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable};
 
+pub use objective::Objective;
 pub use train::{cosine_lr, generate, FitOpts, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::{fit, load_dataset};
+pub use train::{build_or_resume, fit, fit_with, load_dataset, load_dataset_with_itos};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`

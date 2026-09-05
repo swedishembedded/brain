@@ -81,3 +81,54 @@ fn qwen3_learns_a_deterministic_bigram_through_fit_weighted() {
         "qwen3 failed to learn the bigram through fit_weighted: {initial:.4} -> {last:.4} (expected < 0.5, marginal floor ln(23) ~= 3.135)"
     );
 }
+
+/// The structural bug this phase (self-improve P8) fixes: `fit_weighted` used
+/// to call `Model::save` where `model::train::fit` calls
+/// `Model::save_with_itos`, so every weighted checkpoint silently lost the
+/// char vocab. A `fit_weighted` run over a char-level dataset (`meta.json`
+/// carrying a per-char `itos` table, not just `vocab_size`) must now embed
+/// that `itos` table in its output checkpoint, same as plain `fit` does.
+#[test]
+fn fit_weighted_embeds_itos_in_its_output_checkpoint() {
+    if skip() {
+        return;
+    }
+
+    let vocab: usize = 23;
+    let itos: Vec<char> = (0..vocab).map(|i| (b'a' + i as u8) as char).collect();
+    let n = 500usize;
+    let mut data = vec![0u32; n];
+    for i in 1..n {
+        data[i] = (data[i - 1] + 1) % vocab as u32;
+    }
+
+    let dir = tmp("itos");
+    data::binio::write_u32_bin(&dir.join("train.u32.bin"), &data).unwrap();
+    data::binio::write_u32_bin(&dir.join("val.u32.bin"), &data[..50]).unwrap();
+    let meta = data::binio::Meta { vocab_size: vocab, itos: itos.clone() };
+    std::fs::write(dir.join("meta.json"), meta.to_json()).unwrap();
+    // Deliberately no train.weight.bin - same no-file / implicit-1.0 path as
+    // the convergence test above; irrelevant to the itos bug being proven.
+
+    let cfg = QwenConfig::tiny();
+    let opts = model::FitOpts {
+        steps: 2,
+        batch_size: 4,
+        block_size: cfg.block_size,
+        eval_interval: 0,
+        seed: 3,
+        checkpoint_secs: 0,
+        ..Default::default()
+    };
+    let out = dir.join("ckpt.safetensors");
+    rl::fit_weighted::<Qwen>(&dir, cfg, &opts, Some(&out)).expect("fit_weighted");
+
+    let c = checkpoint::load(out.to_str().unwrap());
+    let saved: Vec<char> = c.header["config"]["itos"]
+        .as_array()
+        .expect("fit_weighted's output checkpoint must embed \"itos\" - it must call save_with_itos, not save")
+        .iter()
+        .map(|v| v.as_str().and_then(|s| s.chars().next()).expect("itos entry must be a single-char string"))
+        .collect();
+    assert_eq!(saved, itos, "fit_weighted must embed the dataset's exact char vocab in its checkpoint");
+}

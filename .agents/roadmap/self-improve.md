@@ -361,7 +361,7 @@ unrelated `qwen35`/`qwen35moe` `VisionConfig` test breakage, also confirmed
 pre-existing via `git stash`) and `cargo clippy -p brain-model -p
 brain-qwen3` clean on every touched file.
 
-## P8 - the `Objective` seam - kills 5 duplicated training loops - TODO
+## P8 - the `Objective` seam - DONE (fit/fit_weighted; qwen3/qwen35/qwen3vl finetune deferred to P17)
 
 The step loop is copy-pasted, not shared, in five places today:
 `model::train::fit`, `rl::fit_weighted`, `qwen3::finetune::finetune`,
@@ -403,10 +403,38 @@ checkpoint has silently been losing its char vocab. With the loop owning
 the save and asking the objective for `itos()`, no objective can forget to
 carry it.
 
+**Landed for `fit`/`fit_weighted` only.** `qwen3::finetune::finetune`,
+`qwen35::finetune::finetune`, and `qwen3vl::finetune` were deliberately left
+untouched in this pass - `qwen3`/`qwen35` finetune get their own resume fix
+in P17, which is a better place to also migrate them onto `fit_with`, and
+`qwen3vl::finetune` was out of this phase's scope. So the copy-paste count
+this phase actually reduced is 5 -> 3, not 5 -> 1; the other three remain
+open, tracked by P17 for two of them.
+
 Gate: `cargo test -p brain-rl` (including the existing `qwen3_fit_weighted`
 convergence test) and `-p brain-bench` green with **no behavior change**;
 new test asserting a `fit_weighted` run now embeds `itos` in its output
 checkpoint.
+
+**Verified**: `cargo test -p brain-rl --all-targets` - 6 lib tests, 2
+`continuous_cycle` integration tests, and both `qwen3_fit_weighted.rs`
+tests (the pre-existing bigram convergence test, and the new
+`fit_weighted_embeds_itos_in_its_output_checkpoint`, which fails against
+the pre-P8 code and passes against this commit - the itos bug is real and
+now fixed) all green. `cargo test -p brain-bench --all-targets` - every
+integration test green including `brain_qa.rs`'s real from-scratch-Qwen
+training run (96s) and the other GPU-bound gating tests (`qwen.rs`,
+`scaling.rs`, `toolcall.rs`, `mqar.rs`, `parity.rs`), none touched by this
+phase's changes. `cargo test -p brain-gpt2 --lib` - all 15 tests green,
+including `trains_calculator_and_reduces_loss`, which now runs through
+`fit_with`/`CausalLm`. `cargo check --workspace --all-targets` clean except
+the pre-existing, unrelated `qwen35`/`qwen35moe` `VisionConfig` test
+fixtures (fixed separately, see the top-level git history around this
+commit) - confirmed via `git stash` before this phase touched anything.
+`cargo clippy -p brain-model -p brain-rl --all-targets` clean on every
+touched file (two `#[allow(clippy::type_complexity)]` added on the new
+5-tuple-returning loader helpers, matching an existing repo convention for
+that lint).
 
 ## P9 - hoist `WeightedCe`, adopt a second model - TODO
 
