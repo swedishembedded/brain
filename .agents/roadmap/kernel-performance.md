@@ -4997,6 +4997,237 @@ to prove them against, and every one of those gaps is named, gated, and
 traceable rather than silently assumed away.
 
 **Commit**: one (this entry only - no code change).
+### GPU matmul: pushed further - `matmul_reg4`, and a wrong reason that measured right
+
+Asked to take the fp32 GEMM "close to 100% of the card's peak" on 2x Tesla
+P40 (GP102, Pascal SM 6.1, no tensor cores). 100% is not reachable and was
+not the point; the point was to find the actual reachable ceiling from the
+hardware documentation and the GEMM literature rather than by trial and
+error, and then get near it. **Result: 58.5% of the 11760 GFLOP/s datasheet
+fp32 peak** at the best-measured shape, via one new kernel, `matmul_reg4`,
+against the ~34% this campaign's `matmul_reg2` baseline was at when the work
+started and 48.3% for `matmul_reg3`, the kernel every model dispatches today.
+
+Final fenced numbers, wgpu / native Vulkan GFLOP/s, min-of-5 interleaved:
+
+| shape | reg2 | reg3 | reg4 | reg4 %peak |
+|---|---|---|---|---|
+| `square 2048` | 4143 | 4927 / 4749 | **5777 / 5856** | 49.8% |
+| `big qkv 1024x4096->6144` | 4564 | 5299 / 5137 | **5987 / 6296** | 53.5% |
+| `big ffn-up 1024x4096->14336` | 5046 | 5627 / 5680 | **6630 / 6876** | **58.5%** |
+| `big ffn-down 1024x14336->4096` | 3679 | 3952 / 4818 | 4253 / 4198 | 36.2% |
+| `glm mla-ish 512x6144->2048` | 3016 | 3430 / 3452 | **4083 / 4398** | 37.4% |
+| `qwen0.6b qkv 256x1024->3072` | 3025 | 3437 / 3193 | **3749 / 4345** | 36.9% |
+
+`matmul_reg4` is 1.05x-1.19x over `matmul_reg3` at every shape in
+`bench_matmul.rs` on wgpu, and every arm's output passes the existing
+parity gate against the CPU oracle. The one shape where it loses is
+`big ffn-down` under native Vulkan - see the K>=12288 regression below.
+
+All numbers below are fenced (`submit` only *records*; every timed region
+ends in `poll_wait`), min-of-N, with the arms **interleaved round-robin**
+rather than run in separate batches - `bench_matmul.rs`'s `time_arms` now
+enforces both, because this box has shown up to 4.6x run-to-run drift under
+another tenant and back-to-back batching attributes that drift to whichever
+kernel ran during it.
+
+**What `matmul_reg4` is.** `matmul_reg3`'s tiling exactly - 128x128
+workgroup tile, 8x8 per-thread register block, 256 threads, same `Params`,
+same register-level software pipelining - with two changes:
+
+1. **The shared tiles are `array<vec4<f32>>`**, laid out k-major with the
+   row axis in quads (`As[kk][r]` at quad `kk*SQ + r/4`, component `r%4`),
+   so each thread's 8 rows and 8 columns are gathered as 2+2 `vec4` reads
+   instead of 8+8 scalar reads. Padded quad stride `SQ = 33` (132 floats).
+2. **The BK=8 inner loop is hand-unrolled.**
+
+Bit-identical output to `matmul_reg3` at every shape measured (max-abs
+difference exactly `0.0e0`, not merely within tolerance) - the arithmetic
+and its order are untouched; only the memory layout and the loop structure
+changed.
+
+**The reason I gave first was wrong, and I am recording it because it
+predicted the right action for the wrong cause.** I reasoned that a Pascal
+processing block has 32 FP32 lanes but only 8 LD/ST units, so a warp-wide
+32-bit shared load costs 4 LSU clocks while moving only 128 B - a quarter of
+the 32 banks' 128 B/clk - and that `vec4` would therefore buy 4x the shared
+throughput. **That is false.** An SM has 8 LD/ST per processing block x 4
+blocks = **32 LSU/SM**, which issues one warp shared instruction per clock
+per SM = 128 B/clk = exactly the bank bandwidth. Issue rate and bank
+bandwidth are balanced by design. A warp `LDS.32` is 128 B = one wavefront =
+one clock; a warp `LDS.128` is 512 B = **four** wavefronts = four clocks.
+Identical bytes per clock. Vectorizing raises shared-memory throughput by
+zero.
+
+- 32 banks x 4 B: Pascal Tuning Guide §4.5.2, "Pascal follows Maxwell in
+  returning to fixed four-byte banks" -
+  https://docs.nvidia.com/cuda/pascal-tuning-guide/index.html (same guide:
+  "The GP102 architecture is similar to GP104", "the similar GP102 design
+  provides up to 30 SMs").
+- 8 LD/ST per processing block: GTX 1080 whitepaper Fig. 5, GP104 SM diagram
+  (32 cores, 8 LD/ST, 8 SFU, 1 scheduler, 2 dispatch units per block) -
+  https://international.download.nvidia.com/geforce-com/international/pdfs/GeForce_GTX_1080_Whitepaper_FINAL.pdf
+- Scalar 32-bit shared loads *already* saturate: GTX 1080 measured at
+  119.59 B/SM/clk = 93.4% of 128 B/clk, "excellent efficiency, despite using
+  scalar 32-bit accesses ... using 64-bit data types did not make a
+  significant difference"
+  (https://old.chipsandcheese.com/2024/01/01/a-new-year-and-new-tests-gpu-l1-cache-bandwidth/);
+  Tesla P4 (GP104) 90.7% on the same 32-bit benchmark, Jia et al. Table 3.1
+  (https://arxiv.org/pdf/1903.07486). On Fermi, 128-bit shared loads were
+  outright *slower* than 32-bit (gpumembench: 1482.81 / 1483.35 / 982.38
+  GB/s for 32/64/128-bit).
+
+**The real mechanism is issue slots, not bandwidth**: a `vec4` read costs 1
+issue slot instead of 4, with 4x fewer address IADDs and 4x fewer dependency
+barriers, so a larger fraction of the instruction stream is FFMA. Lai &
+Seznec (CGO'13) quantify exactly this for SGEMM: FFMA fraction 75% (scalar
+LDS) -> 85.7% (LDS.64) -> **92.3% (LDS.128)** -
+https://inria.hal.science/hal-00789958/document. Scott Gray's maxas SGEMM
+never justifies `LDS.128` by bandwidth either ("all memory operations are
+dual issued in our main loop and don't factor into the flops calculation at
+all"). **Measured here: +10.7%** (4023 -> 4455 GFLOP/s, m=n=k=2048, native
+Vulkan), which is the size the instruction-mix accounting predicts and
+nothing like the 4x the bandwidth story predicted. The action was right; the
+stated reason would have set a wrong expectation for the next kernel, so the
+kernel header now carries the corrected version.
+
+**The unroll is a naga-specific finding, and it is the larger of the two
+wins.** naga is a translation library with no optimization passes, and it
+lowers every WGSL `for` into a `while` with the induction variable and
+comparison as explicit body statements, so the driver's SPIR-V compiler
+cannot recognise a known-trip-count loop and will not unroll it
+(gfx-rs/wgpu#6521, open: "naga exclusively generates `while` loops ...
+causes suboptimal code generation on downstream compilers, again because
+loops cannot be unrolled"). WGSL has no `#pragma unroll` and no
+`__launch_bounds__` (W3C §12 attribute list), so hand-writing the 8 steps is
+the only way to express it. Confirmed directly against the emitted SPIR-V
+rather than assumed: a probe over `wgsl_to_spirv` output showed the rolled
+kernel's body present exactly once, with 4 `vec4<float>` loads and 16 fewer
+scalar float loads than `matmul_reg3` - i.e. the vectorization survives
+translation, and the unrolling genuinely does not happen. **Measured: 4455
+-> 5088 GFLOP/s** at m=n=k=2048, native Vulkan. Unroll factor is monotone:
+at that shape 1/2/4/8 gave 4455 / 4184 / 4529 / 5088.
+
+**Ceiling, and why it is where it is.** Two independent bounds:
+
+- *Shared-memory roofline fixes the register tile at 8x8, and it is already
+  there.* 128 B/clk/SM x 30 SM x 1.531 GHz = 5.88 TB/s against 11.76
+  TFLOP/s = **0.5 B/flop of budget**. A TxT register tile reads 2T floats
+  per k-step to do 2T^2 flops = 4/T B/flop, so 4/T <= 0.5 forces **T >= 8**.
+  A 4x4 tile needs 1.0 B/flop - twice the budget - and is capped near 50% of
+  peak however it is scheduled. 8x8 sits exactly on the bound with zero
+  slack, which is also why widening the tile further is the only remaining
+  algorithmic lever and why it is blocked: 16x16 would need 256 accumulator
+  registers against Pascal's 255/thread limit. Volkov makes the same
+  argument for Fermi (GTC 2010, slide 45); the register-block theory is Goto
+  & van de Geijn §6.2 (https://www.cs.utexas.edu/~flame/pubs/GotoTOMS.pdf),
+  with the explicit flops-per-load ratio in FLAWN #74 §4.2.3.
+- *Toolchain, not algorithm, sets the rest.* cuBLAS SGEMM reaches ~85% of
+  peak on Pascal GP100 (Tillet & Cox, https://arxiv.org/pdf/1802.05371) and
+  ~88.6% on GP104 (Jia et al. Table 4.3); maxas reaches 96-98% on Maxwell
+  but **only in hand-written SASS** - its author is explicit that it is "not
+  possible with ptxas", and Lavin states flatly that it is "not possible to
+  create a GPU kernel with greater than 80% computational efficiency using
+  the CUDA Toolkit" (https://arxiv.org/pdf/1501.06633). WGSL/naga sits a
+  further step below CUDA C: no instruction placement, no dual-issue control
+  (Pascal's dual issue is same-warp superscalar, expressed in SASS control
+  codes), no register-allocation control, no unroll pragma, no subgroup ops
+  in the portable dialect. **A defensible band for a hand-written WGSL SGEMM
+  on GP102 is 40-65% of peak, with 50-60% realistic and >70% out of reach.**
+  The 58.5% measured here sits at the top of that band, which says the
+  remaining headroom is small and structural rather than algorithmic.
+  (No published cuBLAS SGEMM %-of-peak exists for P40 or any GP102, and no
+  published WGSL SGEMM %-of-peak exists for Pascal at all - the band is a
+  derived synthesis, not a citation.)
+
+**Killed hypotheses**, all measured, none shipped:
+
+- **Double-buffered shared memory: killed.** Two shared tiles (16896 B
+  instead of 8448 B), iteration `c` reading buffer `c&1` and writing
+  `(c&1)^1`, so one `workgroupBarrier` per K-chunk suffices instead of two.
+  Consistently *slower* than the same kernel single-buffered: 4494 vs 4874
+  (square 2048), 5606 vs 6064 (big qkv), 6375 vs 6943 (big ffn-up), all
+  native Vulkan. The saved barrier does not pay for the doubled shared
+  footprint and the dynamic buffer offsets. Note the reg2/reg3/reg4 family
+  already prefetches the next chunk into *registers* across the barrier, so
+  the latency the second buffer would hide is largely hidden already. (For
+  the record, siboehm's walkthrough - often cited for this step - never
+  actually implemented or measured double buffering; it is an open "Work in
+  Progress: Kernel 11" item there, so there was no published positive result
+  to contradict.)
+- **The `vec4` bandwidth argument: killed** (see above) while the change
+  itself was kept.
+- **"Not enough workgroups" as the explanation for the wide-K regression:
+  killed.** See below.
+- **wgpu bounds checks: already fixed, not a new lever.** wgpu defaults to
+  `BoundsCheckPolicy::ReadZeroSkipWrite` plus `force_loop_bounding`, which
+  spends integer instructions in exactly the issue slots this work is
+  competing for. This tree already compiles both backends unchecked
+  (`create_shader_module_trusted` in `backend-wgpu`, naga `Unchecked` in
+  `vulkan::shader`, both behind the shared `BRAIN_GPU_CHECKED` switch), and
+  `vulkan::shader`'s own header already records that leaving them on cost
+  that backend half its arithmetic throughput on this card. Nothing to do.
+
+**One honest open regression: K >= ~12288.** `matmul_reg4` beats
+`matmul_reg3` by 4-18% up to K ~= 10k and *loses* beyond ~12k. Swept at
+m=1024, n=4096 (GFLOP/s, reg3 -> reg4):
+
+| K | 4096 | 6144 | 8192 | 10240 | 12288 | 14336 |
+|---|---|---|---|---|---|---|
+| reg3 | 4536 | 5111 | 5177 | 5136 | 4865 | 4867 |
+| reg4 | 5399 | 6029 | 6132 | 6126 | 4529 | 4488 |
+
+The crossover is sharp, not gradual, which points at a discrete threshold
+(occupancy or cache residency) rather than a bandwidth ramp. **The mechanism
+was not isolated, and the obvious confound was measured and ruled out**: it
+is not the workgroup count / available parallelism. At a fixed K=14336 the
+ordering is identical at 256, 512 and 1024 workgroups (reg3 ahead in all
+three), and at a fixed 256 workgroups the ordering flips with K alone. So K
+length is the discriminator. GP102 caches ordinary global loads in L2 only
+and has 3 MB of it, against a workgroup's `128*K*4` A-band - 2.1 MB at
+K=4096, 7.3 MB at K=14336 - which is the leading suspect but is not proven.
+`matmul_reg4`'s header carries this table and the guidance to select
+`matmul_reg3` for K >= 12288.
+
+**Scope and wiring.** `matmul_reg3` is unchanged and still registered;
+`matmul_reg4` is registered in the catalogue and given the same native CPU
+fast path as the rest of the family (`backend-cpu`'s `FastIdx` routes
+`matmul{,_tiled,_reg,_reg2,_reg3,_reg4}` to the one AVX2
+`fast_ops::matmul_abt` - the one-graph rule), with
+`matmul_family_native_fastpath.rs` extended to cover it. That test matters
+more for this kernel than for its siblings: it is the first of the family
+whose shared memory is `array<vec4<f32>>` written one dynamically-indexed
+component at a time, so "the JIT refuses it and the native path is what
+actually runs" is load-bearing and not eyeball-verifiable. **No selector or
+model dispatch path was changed** - nothing regresses, and a caller opts in
+when its shapes suit (the K>=12288 caveat above is the reason that is a
+deliberate decision rather than a swap).
+
+Also fixed in passing: **`matmul_reg3`'s staging store still had a 4-way
+bank conflict its own comment claimed was gone.** Its padded stride of 129
+floats gives bank `(kk + r) mod 32`; a warp covers `r = 0..3` x `kk = 0..7`,
+which maps 32 lanes onto 11 banks. reg3 removed reg2's 8-way conflict but
+not all of it. `matmul_reg4`'s stride of 132 floats (= 4 mod 32) gives bank
+`(4*kk + r) mod 32`, which is a bijection over the same warp - conflict-free.
+`matmul_reg3` was left alone rather than patched, since changing its stride
+changes its shared footprint and it is the kernel every model currently
+dispatches; the finding is recorded here and in `matmul_reg4`'s header.
+
+**Harness changes.** `crates/gpu-core/tests/bench_matmul.rs` now registers
+`matmul_reg3` and `matmul_reg4` (it stopped at `reg2` before, so the
+kernel every model actually dispatches was not in its own benchmark),
+interleaves all arms round-robin under one `time_arms`, parity-checks
+*every* arm against the CPU oracle instead of four of them, and adds three
+wide-K/wide-N prefill shapes (`1024x4096->6144`, `1024x4096->14336`,
+`1024x14336->4096`) - the square probes are a roofline instrument and say
+nothing about a tile schedule when N is 3.5x M.
+
+**wgpu vs native Vulkan, measured on the same kernel.** Native Vulkan is
+faster at every shape: +10% at square 2048 (5389 vs 4899) and +50% at the
+smallest shape measured (1999 vs 1330 GFLOP/s, `gpt-small qkv`), converging
+to ~+1% at the largest. Since both backends now compile unchecked, this is
+dispatch/submission overhead, not codegen - and it is the dominant term
+below ~1 GFLOP of work.
 
 ## Not yet done
 
