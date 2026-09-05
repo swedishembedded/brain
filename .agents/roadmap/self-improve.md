@@ -325,12 +325,12 @@ deliberately used synthetic fixtures small enough to run safely (tiny
 configs, no real checkpoints) rather than reaching for real weights or a
 live server before there was something real to justify the risk.
 
-## P7 - per-token logprobs - TODO
+## P7 - per-token logprobs - DONE
 
 `crates/model/src/logprobs.rs`: `row_logprob(row, idx)` (stable
 `log softmax(row)[idx]`) and `token_logprobs::<M>(m, tokens, targets)`, an
 always-correct oracle over `Model::logits_all` - O(T·V) host work and a full
-re-prefill, so it is the fallback/oracle, not the fast path. Migrates the
+re-prefill, so it is the fallback/oracle, not the fast path. Migrated the
 two hand-rolled log-softmax loops at `crates/qwen3/src/eval.rs:118,249` onto
 one implementation.
 
@@ -348,6 +348,18 @@ whatever batch a caller is mid-training-step on.
 Gate: on tiny qwen3, `batch_token_logprobs()` immediately after `forward()`
 must equal `logprobs::token_logprobs()` elementwise to 1e-5, on a batch that
 includes IGNORE positions.
+
+**Verified**: `qwen3::model::tests::batch_token_logprobs_matches_oracle_with_ignore`
+- b=1/t=8 tiny Qwen, two IGNORE positions, fast and oracle paths agree to
+1e-5 including exact `0.0` at both IGNORE positions. `cargo test -p
+brain-model --lib logprobs` (2 unit tests) and `cargo test -p brain-qwen3
+--lib` (124 passed; the only 3 failures are pre-existing wgpu
+buffer-size-limit issues in `serve::tests`, unrelated - confirmed via `git
+stash` against the same failures on the pre-change tree) both green.
+`cargo check --workspace --all-targets` (excluding the pre-existing,
+unrelated `qwen35`/`qwen35moe` `VisionConfig` test breakage, also confirmed
+pre-existing via `git stash`) and `cargo clippy -p brain-model -p
+brain-qwen3` clean on every touched file.
 
 ## P8 - the `Objective` seam - kills 5 duplicated training loops - TODO
 
