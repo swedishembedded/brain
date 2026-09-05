@@ -32,6 +32,7 @@
 
 use gpu_core::DeviceBuffer;
 use model::hostmath::{linear_rows, silu_slice, timestep_embedding};
+use paramstore::upload::Uploader;
 #[cfg(test)]
 use vae::blocks::Tensors;
 
@@ -175,34 +176,34 @@ impl H3Transformer {
     /// see the roadmap's own recorded gap for that follow-up).
     pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>) -> H3Transformer {
         let ctx = Ctx::new(device);
-        let dev = |name: &str| block::load_dev(tensors, &ctx, name);
+        let mut up = Uploader::new(&ctx.gpu);
         let host = |name: &str| block::load_host(tensors, name);
         let (hidden, ffn) = (cfg.hidden_size, cfg.ffn_dim);
 
-        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, &ctx, i, hidden, ffn)).collect();
-        let blocks: Vec<BlockWeights> = (0..cfg.num_layers as usize).map(|i| block::load_block(tensors, &ctx, i, hidden, ffn)).collect();
+        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, &mut up, i, hidden, ffn)).collect();
+        let blocks: Vec<BlockWeights> = (0..cfg.num_layers as usize).map(|i| block::load_block(tensors, &mut up, i, hidden, ffn)).collect();
 
         H3Transformer {
-            proj_in_w: dev("proj_in.weight"),
-            proj_in_b: dev("proj_in.bias"),
-            audio_proj_in_w: dev("audio_proj_in.weight"),
-            audio_proj_in_b: dev("audio_proj_in.bias"),
-            context_embedder_w: dev("context_embedder.weight"),
-            context_embedder_b: dev("context_embedder.bias"),
+            proj_in_w: block::load_dev(tensors, &mut up, "proj_in.weight"),
+            proj_in_b: block::load_dev(tensors, &mut up, "proj_in.bias"),
+            audio_proj_in_w: block::load_dev(tensors, &mut up, "audio_proj_in.weight"),
+            audio_proj_in_b: block::load_dev(tensors, &mut up, "audio_proj_in.bias"),
+            context_embedder_w: block::load_dev(tensors, &mut up, "context_embedder.weight"),
+            context_embedder_b: block::load_dev(tensors, &mut up, "context_embedder.bias"),
             time_w0: host("time_embedder.linear_1.weight"),
             time_b0: host("time_embedder.linear_1.bias"),
             time_w2: host("time_embedder.linear_2.weight"),
             time_b2: host("time_embedder.linear_2.bias"),
             refiner_blocks,
-            refiner_final_norm: dev("token_refiner.final_norm.weight"),
+            refiner_final_norm: block::load_dev(tensors, &mut up, "token_refiner.final_norm.weight"),
             blocks,
-            norm_out_norm: dev("norm_out.norm.weight"),
+            norm_out_norm: block::load_dev(tensors, &mut up, "norm_out.norm.weight"),
             norm_out_linear_w: host("norm_out.linear.weight"),
             norm_out_linear_b: host("norm_out.linear.bias"),
-            proj_out_w: dev("proj_out.weight"),
-            proj_out_b: dev("proj_out.bias"),
-            audio_proj_out_w: dev("audio_proj_out.weight"),
-            audio_proj_out_b: dev("audio_proj_out.bias"),
+            proj_out_w: block::load_dev(tensors, &mut up, "proj_out.weight"),
+            proj_out_b: block::load_dev(tensors, &mut up, "proj_out.bias"),
+            audio_proj_out_w: block::load_dev(tensors, &mut up, "audio_proj_out.weight"),
+            audio_proj_out_b: block::load_dev(tensors, &mut up, "audio_proj_out.bias"),
             cfg,
             ctx,
         }
@@ -254,11 +255,25 @@ impl H3Transformer {
     /// duplication costs - if `forward_full`'s math ever changes, this
     /// function's own doc (this comment) is the reminder to check whether
     /// the same change belongs here too.
+    /// [`Self::forward_streaming_with_taps`] without the taps - `pipeline::
+    /// generate`'s own real (non-"hot"/resident) denoise loop calls this once
+    /// per step, since nothing there consumes intermediate taps and there is
+    /// no resident model to call [`Self::forward`] on. This is what lets
+    /// `device` name a real GPU for a real generation at all: the eager
+    /// [`Self::load`] path this replaces needs every block's weights
+    /// resident at once (~132GB fp32), which fits in this host's RAM but no
+    /// single GPU's VRAM on this box; streaming caps the per-step footprint
+    /// at one block's weights (~2.6GB at real dimensions) regardless of
+    /// which device runs the compute.
+    pub fn forward_streaming(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, device: Option<&str>, inp: &PackedInputs) -> H3Output {
+        Self::forward_streaming_with_taps(tensors, cfg, device, inp).0
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn forward_streaming_with_taps(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, device: Option<&str>, inp: &PackedInputs) -> (H3Output, H3Taps) {
         let ctx = Ctx::new(device);
         let cx = &ctx;
-        let dev = |name: &str| block::load_dev(tensors, &ctx, name);
+        let mut up = Uploader::new(&ctx.gpu);
         let host = |name: &str| block::load_host(tensors, name);
         let hidden = cfg.hidden_size;
 
@@ -272,14 +287,14 @@ impl H3Transformer {
 
         // 1. Per-modality input projections (video/audio directly; text
         // through the token refiner) - small, always-resident weights.
-        let proj_in_w = dev("proj_in.weight");
-        let proj_in_b = dev("proj_in.bias");
-        let audio_proj_in_w = dev("audio_proj_in.weight");
-        let audio_proj_in_b = dev("audio_proj_in.bias");
-        let context_embedder_w = dev("context_embedder.weight");
-        let context_embedder_b = dev("context_embedder.bias");
-        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, &ctx, i, hidden, cfg.ffn_dim)).collect();
-        let refiner_final_norm = dev("token_refiner.final_norm.weight");
+        let proj_in_w = block::load_dev(tensors, &mut up, "proj_in.weight");
+        let proj_in_b = block::load_dev(tensors, &mut up, "proj_in.bias");
+        let audio_proj_in_w = block::load_dev(tensors, &mut up, "audio_proj_in.weight");
+        let audio_proj_in_b = block::load_dev(tensors, &mut up, "audio_proj_in.bias");
+        let context_embedder_w = block::load_dev(tensors, &mut up, "context_embedder.weight");
+        let context_embedder_b = block::load_dev(tensors, &mut up, "context_embedder.bias");
+        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, &mut up, i, hidden, cfg.ffn_dim)).collect();
+        let refiner_final_norm = block::load_dev(tensors, &mut up, "token_refiner.final_norm.weight");
 
         let video_in = cx.upload(inp.hidden_states);
         let video_embeds = block::linear(cx, &video_in, &proj_in_w, Some(&proj_in_b), num_video, cfg.video_patch_dim(), hidden);
@@ -330,7 +345,20 @@ impl H3Transformer {
         let mut tap_mid_block_out: Vec<f32> = Vec::new();
         let mut tap_last_block_out: Vec<f32> = Vec::new();
         for i in 0..n_layers {
-            let w = block::load_block(tensors, &ctx, i, hidden, cfg.ffn_dim);
+            // `block::load_block`'s uploads go through `up` (`Uploader::
+            // host_f32`), which polls after every tensor and forces a real
+            // drain roughly every GiB - see `block::load_dev`'s own doc for
+            // why a per-block streaming loop needs exactly this (on the wgpu
+            // backend, dropping `w` at the end of this iteration does not
+            // itself reclaim VRAM; wgpu only recycles a buffer once a poll
+            // proves the GPU is done with it, and this loop reads results
+            // back at only 3 of 50 iterations, never enough on its own to
+            // trigger that proof). Measured directly on a P40: without any
+            // polling, GPU memory climbed unboundedly (nvidia-smi showed a
+            // steady rise with no plateau) until the device OOM'd; `Uploader`
+            // fixes both that and the separate, larger cost `load_dev`'s doc
+            // describes (avoiding `Ctx::upload`/`storage_init` altogether).
+            let w = block::load_block(tensors, &mut up, i, hidden, cfg.ffn_dim);
             let (out, attn_out) = block::block_forward(cx, &w, &h, &adaln_idx_dev, &cos, &sin, &temb_silu, num_timesteps, cfg, seq_len);
             if i == 0 {
                 tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
@@ -343,20 +371,18 @@ impl H3Transformer {
                 tap_last_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
             }
             h = out;
-            // `w` drops here - its device buffers are freed before the next
-            // iteration's `load_block` call.
         }
 
         // 6. norm_out (per-TIMESTEP shift+scale only, no gate, no modality
         // axis) then the two output heads, run over every row, rows of each
         // modality selected after.
-        let norm_out_norm = dev("norm_out.norm.weight");
+        let norm_out_norm = block::load_dev(tensors, &mut up, "norm_out.norm.weight");
         let norm_out_linear_w = host("norm_out.linear.weight");
         let norm_out_linear_b = host("norm_out.linear.bias");
-        let proj_out_w = dev("proj_out.weight");
-        let proj_out_b = dev("proj_out.bias");
-        let audio_proj_out_w = dev("audio_proj_out.weight");
-        let audio_proj_out_b = dev("audio_proj_out.bias");
+        let proj_out_w = block::load_dev(tensors, &mut up, "proj_out.weight");
+        let proj_out_b = block::load_dev(tensors, &mut up, "proj_out.bias");
+        let audio_proj_out_w = block::load_dev(tensors, &mut up, "audio_proj_out.weight");
+        let audio_proj_out_b = block::load_dev(tensors, &mut up, "audio_proj_out.bias");
 
         let shift_w = &norm_out_linear_w[..(hidden * cfg.time_embed_dim) as usize];
         let scale_w = &norm_out_linear_w[(hidden * cfg.time_embed_dim) as usize..];
@@ -654,10 +680,16 @@ mod tests {
             text_indices: &text_indices,
         };
 
-        eprintln!("running real DiT one block at a time (never all 50 blocks resident - see H3Transformer::forward_streaming_with_taps's own doc) ...");
+        // Defaults to "cpu" (this crate's own CI-safe device) - overridable
+        // via `BRAIN_MINIMAXH3_TEST_DEVICE` (e.g. "vulkan") for a manual
+        // real-weight parity check on an actual GPU, since
+        // `forward_streaming` had never been run on real hardware other than
+        // CPU before `pipeline::generate` started calling it there too.
+        let device_str = std::env::var("BRAIN_MINIMAXH3_TEST_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+        eprintln!("running real DiT one block at a time on device={device_str:?} (never all 50 blocks resident - see H3Transformer::forward_streaming_with_taps's own doc) ...");
         let t0 = std::time::Instant::now();
         let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
-        let (out, taps) = H3Transformer::forward_streaming_with_taps(&reader, &cfg, Some("cpu"), &inp);
+        let (out, taps) = H3Transformer::forward_streaming_with_taps(&reader, &cfg, Some(&device_str), &inp);
         eprintln!("  done in {:.1}s", t0.elapsed().as_secs_f32());
 
         assert_eq!(taps.mid_block_index, 25, "golden was dumped at mid_block=25; H3TransformerConfig::real()'s own 50 layers must still land on 25");

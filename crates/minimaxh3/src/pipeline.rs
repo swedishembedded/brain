@@ -776,15 +776,15 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         compact_audio.push(rng.next_gaussian() as f32);
     }
 
-    // 4. Denoise, DiT resident, both VAEs still unopened.
-    let mut local_model: Option<H3Transformer> = None;
-    let model: &H3Transformer = match model {
-        Some(m) => m,
-        None => {
-            local_model = Some(H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device));
-            local_model.as_ref().expect("just assigned")
-        }
-    };
+    // 4. Denoise, both VAEs still unopened. A caller-supplied `model` (the
+    // "hot"/resident serving path, `t2va_hot`/`fl2va_hot`) stays fully
+    // resident and is reused across requests unchanged. Otherwise this
+    // streams each step's forward one block at a time
+    // (`H3Transformer::forward_streaming`) rather than eagerly loading every
+    // block's weights up front - see that function's own doc for why this is
+    // what actually lets `device` name a real GPU here at all, not only
+    // "cpu": the eager load's ~132GB fp32 resident footprint never fits in
+    // any single GPU's VRAM on this box, streaming's ~2.6GB/block does.
     let mut sched = DualSchedule::new();
     sched.set_timesteps(opts.num_inference_steps);
     let num_steps = sched.num_steps();
@@ -807,7 +807,10 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
             audio_indices: &packed.audio_indices,
             text_indices: &packed.text_indices,
         };
-        let out = model.forward(&inp);
+        let out = match model {
+            Some(m) => m.forward(&inp),
+            None => H3Transformer::forward_streaming(ckpt.dit_tensors, dit_cfg, device, &inp),
+        };
 
         let gen_video_pred = &out.video[num_condition_video_rows * video_patch_dim..];
         let gen_video_sample = &compact_video[num_condition_video_rows * video_patch_dim..];
@@ -815,11 +818,6 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeC
         compact_video[num_condition_video_rows * video_patch_dim..].copy_from_slice(&video_next);
         compact_audio.copy_from_slice(&audio_next);
     }
-    // Free the DiT's device buffers before opening either VAE - a no-op when
-    // `model` was caller-supplied (the hot/resident path, `local_model`
-    // stays `None`), matching the phase-sequential-residency discipline this
-    // module's own doc describes.
-    drop(local_model);
 
     // 5. Video decode (`MiniMaxH3AfterDenoiseStep` + `MiniMaxH3VideoDecodeStep`).
     let generated_video_rows = &compact_video[num_condition_video_rows * video_patch_dim..];
