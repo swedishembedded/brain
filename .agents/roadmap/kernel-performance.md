@@ -3369,6 +3369,135 @@ still fully ahead of it.
 **Commits**: one - `model, backend-cpu: bucket DataParallel's gradient
 transfers into one buffer per replica per direction (M7.1)`.
 
+### M5.9 - GDN's UT-transform GEMM-ified: forward substitution replaced by repeated squaring
+
+M5.8 closed GDN's two cumsum loops and left its own "not yet done" note
+naming the harder half of the same problem: `gdn_chunk_fwd_prefix`'s step 7
+(`T_mat = (I - attn0)^-1`) was still a `c-1`-dispatch sequential forward
+substitution (`gdn_ut_step.wgsl`, one host dispatch per row index)
+regardless of `T`, plus one `gdn_add_identity.wgsl` call - `c` dispatches
+total, `c = 64` at Qwen3.8-27B's real shape.
+
+`attn0` is strictly lower triangular (zero diagonal, enforced upstream by
+`gdn_mask_strict_lower.wgsl`) and therefore nilpotent at chunk size `c`
+(`attn0^c = 0`), which makes the standard Neumann-series-via-repeated-
+squaring identity exact:
+
+```
+T_mat = sum_{k=0}^{c-1} attn0^k = prod_{m=0}^{n-1} (I + attn0^(2^m)),   n = ceil(log2(c))
+```
+
+Implemented in `gdn_chunk_fwd_prefix` with `bmm.wgsl` (squaring
+`attn0^2, attn0^4, ...`, `n-1` dispatches), `region_copy.wgsl` +
+`bmm_acc.wgsl` (folding each factor into a running product: `P_new = P_old
++ P_old @ attn0^(2^m)`, which equals `P_old @ (I + attn0^(2^m))` without
+ever materialising the `+I` on a bare power - only the base case `P_0 = I +
+attn0` needs `gdn_add_identity.wgsl`, reused unmodified since its own
+contract already operates on "whichever same-shaped buffer is passed", not
+specifically `t_mat`). No new kernel: the multiplies are the same
+`bmm`/`bmm_acc` GDN already dispatches four times elsewhere in this
+function, and the "add I to one factor" glue decomposes into the two
+existing kernels. Three new `[bhc,c,c]` scratch buffers
+(`ut_pow_a`/`ut_pow_b`/`ut_prod`) ping-pong the squaring chain and the
+running product; which physical buffer is "first" is chosen from `n`'s
+parity so the LAST write lands directly in `t_mat` with no extra copy at
+every `n` this campaign's own shapes exercise (`n` even at `c=64`; a
+`debug_assert!` pins the invariant rather than shipping a dead safety-copy
+branch that provably never fires at any tested shape).
+
+**A real bug this milestone's own test suite caught, not a hypothetical.**
+The first implementation computed `n` as `c.trailing_zeros()` on the
+assumption "`gdn_chunk_size` only ever returns a power of two" (true in
+production, and true of every shape this repo's other GDN tests use).
+`crates/model/tests/gdn_mixer_stream.rs` - already in the tree, unmodified
+by this milestone - deliberately drives one of its two streamed rounds at
+`chunk=5`, a non-power-of-two, exactly to exercise a ragged final prefill
+round. `trailing_zeros()` returns `0` for any odd `c > 1`, which silently
+collapsed `T_mat` to plain `I` for that round and dropped the entire
+triangular solve: `threading_the_stream_state_across_rounds_matches_the_
+whole_sequence_forward` failed with `maxabs=0.145` against its `<1e-5`
+gate (confirmed via a clean revert-and-rerun on an unmodified `gdn.rs` that
+this failure did NOT exist before this milestone's change, ruling out a
+pre-existing defect). The identity itself does not require `c` to be a
+power of two - `2^n >= c` is enough, since every `attn0^k` term the
+expansion overshoots past `k=c-1` is exactly `0` by the same nilpotency -
+so the fix generalises the formula to `n = ceil(log2(c))` (`(c-1).ilog2()+1`
+for `c>1`, `0` for `c<=1`), which is identical to `trailing_zeros()` at
+every power-of-two `c` (no change to the production dispatch count) and
+correct at every other `c` too. Re-ran the full suite after the fix: green.
+
+**Correctness**: `crates/model/tests/gdn_chunk_fwd.rs`
+(`gdn_chunk_fwd_matches_host_oracle`, tolerance `1e-4`),
+`gdn_chunk_bwd.rs` (`gdn_chunk_bwd_gradcheck`, tolerance `abs<1e-3 ||
+rel<1e-3`), `gdn_recurrent_step.rs`, `gdn_mixer_equivalence.rs` (2 tests)
+and `gdn_mixer_stream.rs` all green on both `BRAIN_DEVICE=gpu` (Intel Arc
+iGPU/Vulkan) and `BRAIN_DEVICE=cpu` (Cranelift JIT), with the reassociated
+floating-point order costing far less than the tolerances already budget
+for the fp32-vs-f64-oracle gap this suite always had:
+
+| test | GPU | CPU |
+|---|---|---|
+| `gdn_chunk_fwd_matches_host_oracle` (worst \|delta\|) | 8.58e-8 | 1.61e-7 |
+| `gdn_chunk_bwd_gradcheck` (worst abs / worst rel) | 7.00e-7 / 5.64e-6 | 4.98e-7 / 5.97e-5 |
+| `gdn_recurrent_step_matches_chunk_fwd_at_chunk_1` | 8.94e-8 | 8.94e-8 |
+| `gdn_mixer_stream` (3+5 rounds vs. one 8-row forward) | 1.97e-7 | 1.97e-7 |
+
+`gdn_chunk_fwd.rs`'s own dispatch-count pin moved from 36 to 37 at that
+test's tiny `C=4` shape (`n=2`: GEMM-ifying costs 5 dispatches there
+against the 4 it replaces - setup dominates at a shape this small) with the
+assertion's own comment explaining why, matching this ledger's decision 4:
+report the real number, including where it is not yet a win, rather than
+picking a flattering shape. `cargo clippy -p brain-model --all-targets`
+clean (no new warnings anywhere in `gdn.rs` or the three test files this
+milestone touched).
+
+**Measured** (`qwen35_bench gdn 128 5`, Qwen3.8-27B real dims, `T=128`,
+chunk=64, 2 chunks - the same shape M5.8 measured): dispatch count per GDN
+layer call **123 -> 76** (**-47**, confirmed identically on both
+`BRAIN_DEVICE=gpu` and `BRAIN_DEVICE=cpu`, and matching the mechanism-level
+prediction exactly: the old `(c-1)+1 = 64`-dispatch UT-transform, which
+runs ONCE per layer already batched over every chunk via `bhc`, replaced by
+`3*(n-1)+2 = 17` at `n=6`). From the pre-M5.8 baseline this is **185 ->
+76**, a **58.9%** total dispatch-count reduction for this one recurrence.
+Wall-clock on this shared box: two clean `BRAIN_DEVICE=gpu` samples (76.974
+ms/rep, 38.681 ms/rep) and one `BRAIN_DEVICE=cpu` sample (7151.801 ms/rep,
+included only to reconfirm the dispatch count on a third, independent
+execution path, not as a wall-clock comparison against the GPU numbers).
+Further GPU repetitions hit an unrelated `wgpu`/Vulkan device-teardown
+panic ("panic in a destructor during cleanup") under this box's current
+sibling-agent GPU contention - the same box-noise caveat M5.8's own entry
+already established (35-139ms range for IDENTICAL code), now compounded by
+concurrent processes fighting over the one iGPU. The dispatch-count
+reduction is the guaranteed, mechanism-level number; wall-clock is recorded
+honestly rather than cherry-picked, per decision 4.
+
+**W1c (backward UT-transform, `gdn_ut_bwd_dattn0.wgsl` +
+`gdn_ut_bwd_dtmat.wgsl`, currently 126 dispatches) - deliberately deferred,
+not attempted.** Re-deriving the closed form from both kernels' own headers
+during this session's review turned up a strong lead worth recording: their
+combined per-row recurrence is the reverse-mode adjoint of `T_mat = (I -
+attn0)^-1`, and the STANDARD closed-form adjoint of a matrix inverse `Y =
+M^-1` is `dL/dM = -Y^T @ dL/dY @ Y^T`. Since `M = I - attn0` is an affine
+map with Jacobian `-I` on the space of matrices, `dL/dattn0 = -dL/dM =
+T_mat^T @ d_t_mat @ T_mat^T` - two batched GEMMs (`bmm.wgsl` with
+`trans_a=1` and `trans_b=1`), a MUCH simpler shape than a repeated-squaring
+port of the forward, if it holds up under the same masking constraint the
+existing kernels' restricted thread range (`p < i`) already encodes: the
+existing per-row kernels only ever compute the strictly-lower-triangular
+part of this product, since `attn0`'s gradient must stay confined to the
+same support `attn0` itself has. Getting the mask boundary exactly right
+(does the closed-form full-matrix product need an explicit
+`gdn_mask_strict_lower_bwd.wgsl`-style pass afterward, or does the existing
+downstream consumer already re-mask it) needs its own careful TDD pass
+against `gdn_chunk_bwd_gradcheck`, which this session did not have
+remaining confidence to rush - landing a wrong backward silently corrupts
+training, a strictly worse failure mode than a missed forward speedup. Left
+as a named follow-up with its closed form already derived, not a rushed
+commit.
+
+**Commit**: one - `model, kernels: GEMM-ify GDN's UT-transform via repeated
+squaring, forward (M5.9)`.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

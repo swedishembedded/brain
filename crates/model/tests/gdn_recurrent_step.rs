@@ -137,6 +137,9 @@ fn gdn_recurrent_step_matches_chunk_fwd_at_chunk_1() {
     let w = g.storage((bhc * cn * dk) as u64);
     let raw_intra = g.storage((bhc * cn * cn) as u64);
     let intra_scores = g.storage((bhc * cn * cn) as u64);
+    let ut_pow_a = g.storage((bhc * cn * cn) as u64);
+    let ut_pow_b = g.storage((bhc * cn * cn) as u64);
+    let ut_prod = g.storage((bhc * cn * cn) as u64);
     let q_scaled = g.storage((bh * cn * dk) as u64);
     let decay_scale = g.storage((bh * cn) as u64);
     let decayed_k = g.storage((bh * cn * dk) as u64);
@@ -157,6 +160,9 @@ fn gdn_recurrent_step_matches_chunk_fwd_at_chunk_1() {
         w: &w,
         raw_intra: &raw_intra,
         intra_scores: &intra_scores,
+        ut_pow_a: &ut_pow_a,
+        ut_pow_b: &ut_pow_b,
+        ut_prod: &ut_prod,
         q_scaled: &q_scaled,
         decay_scale: &decay_scale,
         decayed_k: &decayed_k,

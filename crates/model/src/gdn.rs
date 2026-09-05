@@ -31,9 +31,23 @@
 //!    (`gdn_decay_mask.wgsl`).
 //! 6. `attn0 = -(k_beta @ key^T) * decay_mask`, masked to `j<i`
 //!    (`bmm.wgsl` with `alpha=-1,trans_b=1` then `gdn_mask_strict_lower.wgsl`).
-//! 7. UT-transform: `T_mat = (I - attn0)^-1` computed by forward substitution
-//!    (`gdn_ut_step.wgsl`, one host dispatch per row) then `+= I`
-//!    (`gdn_add_identity.wgsl`).
+//! 7. UT-transform: `T_mat = (I - attn0)^-1`. `attn0` is strictly lower
+//!    triangular (zero diagonal), hence nilpotent at chunk size `c`
+//!    (`attn0^c = 0`), so `T_mat = sum_{k=0}^{c-1} attn0^k =
+//!    prod_{m=0}^{n-1} (I + attn0^(2^m))` for `n = ceil(log2(c))` - `n = 6`
+//!    at `c = 64`, the shape `gdn_chunk_size` always produces in production,
+//!    though the identity (and this implementation) holds for any `c >= 1`,
+//!    power of two or not (`2^n >= c` makes every `attn0^k` term the
+//!    expansion overshoots past `k = c-1` exactly `0`, by the same
+//!    nilpotency) - computed via `n-1` squarings (`bmm.wgsl`) building
+//!    `attn0^2, attn0^4, ...` and a running product folded in with
+//!    `region_copy.wgsl` + `bmm_acc.wgsl` (`P_new = P_old + P_old @
+//!    attn0^(2^m)`, which is `P_old @ (I + attn0^(2^m))` without ever
+//!    materialising the `+I` on a pure power - see `gdn_chunk_fwd_prefix`'s
+//!    own comment at this step for why that matters). Replaces a former
+//!    `c-1`-dispatch sequential forward substitution
+//!    (`gdn_ut_step.wgsl`, still registered/tested but no longer on this
+//!    call path - kernel-performance.md M5.9).
 //! 8. `u = T_mat @ v_beta` (`bmm.wgsl`).
 //! 9. `w = T_mat @ (k_beta * exp(g_cs))` (`exp.wgsl` + `scale_row.wgsl` +
 //!    `bmm.wgsl`).
@@ -250,8 +264,9 @@ pub struct GdnScratch<'a> {
     /// `[bhc, c, c]` - `-(k_beta @ key^T)`, before masking.
     pub raw_attn0: &'a DeviceBuffer,
     /// `[bhc, c, c]` - masked `attn0`, frozen after step 6 (read-only input
-    /// to every `gdn_ut_step.wgsl` dispatch - see that kernel's header for
-    /// why it must not alias the evolving `t_mat`).
+    /// to every step-7 UT-transform dispatch: the copy that seeds `P_0`, and
+    /// every squaring - it must never alias any of `t_mat`/`ut_prod`/
+    /// `ut_pow_a`/`ut_pow_b`, all of which step 7 writes).
     pub attn0: &'a DeviceBuffer,
     /// `[bhc, c, c]` - the evolving `T_mat`. MUST be zeroed by the caller
     /// (pass it in `Gpu::submit`'s `clears` list) before submitting the
@@ -267,6 +282,14 @@ pub struct GdnScratch<'a> {
     /// `[bhc, c, c]` - `raw_intra * decay_mask`, precomputed for every chunk
     /// before the sequential loop (chunk-independent, see module doc).
     pub intra_scores: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's squaring ping-pong (see module doc's step 7
+    /// and `gdn_chunk_fwd_prefix`'s comment there).
+    pub ut_pow_a: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's squaring ping-pong, other half.
+    pub ut_pow_b: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's running-product ping-pong (`t_mat` is the
+    /// other half).
+    pub ut_prod: &'a DeviceBuffer,
     /// `[bh, c, dk]` - one chunk's `query * exp(g_cs) * scale`, recomputed
     /// (overwritten) every loop iteration.
     pub q_scaled: &'a DeviceBuffer,
@@ -317,6 +340,13 @@ pub struct GdnScratchTrain<'a> {
     pub w: &'a DeviceBuffer,
     pub raw_intra: &'a DeviceBuffer,
     pub intra_scores: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's squaring ping-pong (see `GdnScratch::ut_pow_a`).
+    pub ut_pow_a: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's squaring ping-pong, other half.
+    pub ut_pow_b: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's running-product ping-pong (`t_mat` is the
+    /// other half).
+    pub ut_prod: &'a DeviceBuffer,
     // ---- the 5 small `[bh,c,d]` per-iteration working buffers, identical
     // role (and identical kernel calls) to `GdnScratch`'s own same-named
     // fields -- overwritten every chunk, NOT what backward reads back.
@@ -389,6 +419,9 @@ pub struct GdnScratchBufs {
     w: DeviceBuffer,
     raw_intra: DeviceBuffer,
     intra_scores: DeviceBuffer,
+    ut_pow_a: DeviceBuffer,
+    ut_pow_b: DeviceBuffer,
+    ut_prod: DeviceBuffer,
     q_scaled: DeviceBuffer,
     decay_scale: DeviceBuffer,
     decayed_k: DeviceBuffer,
@@ -417,6 +450,9 @@ impl GdnScratchBufs {
             w: g.storage(bhc * c * dk),
             raw_intra: g.storage(bhc * c * c),
             intra_scores: g.storage(bhc * c * c),
+            ut_pow_a: g.storage(bhc * c * c),
+            ut_pow_b: g.storage(bhc * c * c),
+            ut_prod: g.storage(bhc * c * c),
             q_scaled: g.storage(bh * c * dk),
             decay_scale: g.storage(bh * c),
             decayed_k: g.storage(bh * c * dk),
@@ -440,6 +476,9 @@ impl GdnScratchBufs {
             w: &self.w,
             raw_intra: &self.raw_intra,
             intra_scores: &self.intra_scores,
+            ut_pow_a: &self.ut_pow_a,
+            ut_pow_b: &self.ut_pow_b,
+            ut_prod: &self.ut_prod,
             q_scaled: &self.q_scaled,
             decay_scale: &self.decay_scale,
             decayed_k: &self.decayed_k,
@@ -476,6 +515,9 @@ pub struct GdnScratchTrainBufs {
     w: DeviceBuffer,
     raw_intra: DeviceBuffer,
     intra_scores: DeviceBuffer,
+    ut_pow_a: DeviceBuffer,
+    ut_pow_b: DeviceBuffer,
+    ut_prod: DeviceBuffer,
     q_scaled: DeviceBuffer,
     decay_scale: DeviceBuffer,
     decayed_k: DeviceBuffer,
@@ -511,6 +553,9 @@ impl GdnScratchTrainBufs {
             w: g.storage(bhc * c * dk),
             raw_intra: g.storage(bhc * c * c),
             intra_scores: g.storage(bhc * c * c),
+            ut_pow_a: g.storage(bhc * c * c),
+            ut_pow_b: g.storage(bhc * c * c),
+            ut_prod: g.storage(bhc * c * c),
             q_scaled: g.storage(bh * c * dk),
             decay_scale: g.storage(bh * c),
             decayed_k: g.storage(bh * c * dk),
@@ -540,6 +585,9 @@ impl GdnScratchTrainBufs {
             w: &self.w,
             raw_intra: &self.raw_intra,
             intra_scores: &self.intra_scores,
+            ut_pow_a: &self.ut_pow_a,
+            ut_pow_b: &self.ut_pow_b,
+            ut_prod: &self.ut_prod,
             q_scaled: &self.q_scaled,
             decay_scale: &self.decay_scale,
             decayed_k: &self.decayed_k,
@@ -718,6 +766,15 @@ struct GdnWholeScratch<'a> {
     w: &'a DeviceBuffer,
     raw_intra: &'a DeviceBuffer,
     intra_scores: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's squaring ping-pong, holding `attn0^(2^m)` for
+    /// the CURRENT `m` (see `gdn_chunk_fwd_prefix`'s step-7 comment).
+    ut_pow_a: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's squaring ping-pong, other half.
+    ut_pow_b: &'a DeviceBuffer,
+    /// `[bhc, c, c]` - step 7's running-product ping-pong (the other half is
+    /// `t_mat` itself - see that step's comment for why the product always
+    /// lands there without an extra copy).
+    ut_prod: &'a DeviceBuffer,
 }
 
 /// Steps 1-9 of this module's doc, plus the pre-loop `intra_scores`
@@ -761,11 +818,85 @@ fn gdn_chunk_fwd_prefix(
         g.step(ids.mask_strict_lower, &[s.raw_attn0, s.decay_mask, s.attn0], &[bhc, c], bhc * c * c),
     ];
 
-    // ---- step 7: UT-transform (forward substitution, then += I) ----
-    for i in 1..c {
-        steps.push(g.step(ids.ut_step, &[s.attn0, s.t_mat], &[bhc, c, i], bhc * i));
+    // ---- step 7: UT-transform, T_mat = (I - attn0)^-1, via repeated squaring ----
+    //
+    // `attn0` is strictly lower triangular (zero diagonal, enforced by
+    // `gdn_mask_strict_lower.wgsl` above), hence nilpotent at chunk size `c`:
+    // `attn0^c = 0`. So, for `n = ceil(log2(c))`:
+    //   T_mat = sum_{k=0}^{c-1} attn0^k = prod_{m=0}^{n-1} (I + attn0^(2^m))
+    // (the standard Neumann-series-via-repeated-squaring identity for a
+    // nilpotent matrix truncated at its own nilpotency order). This holds for
+    // ANY `c >= 1`, power of two or not: `2^n >= c` means the product's
+    // expansion sums `attn0^k` for `k` in `0..2^n`, and every `k >= c` term
+    // is exactly `0` too (`attn0^c = 0` by nilpotency, so `attn0^k =
+    // attn0^c @ attn0^(k-c) = 0` for `k >= c`) - those extra terms are free,
+    // not wrong, as long as `n` is large enough to reach `2^n >= c`. `n=0`
+    // (`c=1`) is the trivial case: T_mat = I, no factors, handled without
+    // touching any of the buffers below.
+    //
+    // For n>=1, the running product P is folded in WITHOUT ever
+    // materialising `I + attn0^(2^m)` as its own buffer: `P_new = P_old @
+    // (I + F) = P_old + P_old@F` is exactly `region_copy` (seed P_new =
+    // P_old) followed by `bmm_acc` (`P_new += P_old @ F`, alpha=1) using the
+    // PURE power `F = attn0^(2^m)` directly - so `F` never has `+I` added to
+    // it and stays valid as the input to the NEXT squaring. Only the base
+    // case `P_0 = I + attn0` needs an explicit `+I` (`gdn_add_identity`,
+    // whose own contract is "add I to whichever same-shaped buffer is
+    // passed" - it does not care that this is `P_0`, not `t_mat`, doing so
+    // for the first time here). This is the exact invariant
+    // `gdn_ut_step.wgsl`'s own header documents for the loop this replaces:
+    // the diagonal of every power of `attn0` must stay exactly 0 through the
+    // whole computation, which holds here because `+I` only ever lands on a
+    // running PRODUCT (already a sum of positive powers of `attn0`, whose
+    // diagonal is what soaks up the `+I`), never on a bare power that is
+    // about to be squared again.
+    //
+    // `P`'s two ping-pong slots are `t_mat` and `s.ut_prod`; which one is
+    // "first" is chosen so the LAST write - not a subsequent copy - lands in
+    // `t_mat`: `n` total writes (1 base + `n-1` fold-ins) alternate between
+    // the two slots starting at the first, so the last (`n`th) write hits
+    // the first slot when `n` is odd, the second when `n` is even.
+    //
+    // `n` is computed as `ceil(log2(c))`, NOT `c.trailing_zeros()`:
+    // `gdn_chunk_size` only ever hands this function a power of two in
+    // production, but callers that build a `GdnShape` directly (a ragged
+    // final prefill round, or a test exercising an arbitrary chunk -
+    // `gdn_mixer_stream.rs` does exactly this with `chunk=5`) may not, and
+    // `trailing_zeros()` silently returns `0` for any odd `c > 1`, which
+    // would collapse T_mat to plain `I` and drop the entire triangular
+    // solve. `(c-1).ilog2()+1` is identical to `trailing_zeros()` at every
+    // power-of-two `c` (so the production dispatch count is unchanged) and
+    // correct at every other `c` too.
+    let n_factors = if c <= 1 { 0 } else { (c - 1).ilog2() + 1 };
+    if n_factors == 0 {
+        // c == 1: attn0 is a 1x1 zero matrix, T_mat = I directly.
+        steps.push(g.step(ids.add_identity, &[s.t_mat], &[bhc, c], bhc * c));
+    } else {
+        let cc = bhc * c * c;
+        let copy_whole = |src: &DeviceBuffer, dst: &DeviceBuffer| g.step(ids.region_copy, &[src, dst], &[1, cc, cc, 0], cc);
+        let square = |a: &DeviceBuffer, o: &DeviceBuffer| bmm(ids.bmm, bhc, c, c, c, false, false, 1.0, a, 0, a, 0, o, 0);
+        let fold = |p_old: &DeviceBuffer, f: &DeviceBuffer, p_new: &DeviceBuffer| bmm(ids.bmm_acc, bhc, c, c, c, false, false, 1.0, p_old, 0, f, 0, p_new, 0);
+
+        let (first, second) = if n_factors % 2 == 1 { (s.t_mat, s.ut_prod) } else { (s.ut_prod, s.t_mat) };
+
+        steps.push(copy_whole(s.attn0, first));
+        steps.push(g.step(ids.add_identity, &[first], &[bhc, c], bhc * c));
+
+        let mut cur_prod = first;
+        let mut nxt_prod = second;
+        let mut cur_pow = s.attn0;
+        let pow_bufs = [s.ut_pow_a, s.ut_pow_b];
+
+        for m in 1..n_factors {
+            let new_pow = pow_bufs[(m as usize - 1) % 2];
+            steps.push(square(cur_pow, new_pow));
+            steps.push(copy_whole(cur_prod, nxt_prod));
+            steps.push(fold(cur_prod, new_pow, nxt_prod));
+            std::mem::swap(&mut cur_prod, &mut nxt_prod);
+            cur_pow = new_pow;
+        }
+        debug_assert!(std::ptr::eq(cur_prod, s.t_mat), "UT-transform product parity: final write must land in t_mat");
     }
-    steps.push(g.step(ids.add_identity, &[s.t_mat], &[bhc, c], bhc * c));
 
     // ---- step 8: u = T_mat @ v_beta ----
     steps.push(bmm(ids.bmm, bhc, c, c, dv, false, false, 1.0, s.t_mat, 0, s.v_beta, 0, s.u, 0));
@@ -835,6 +966,9 @@ pub fn gdn_chunk_fwd(
         w: scratch.w,
         raw_intra: scratch.raw_intra,
         intra_scores: scratch.intra_scores,
+        ut_pow_a: scratch.ut_pow_a,
+        ut_pow_b: scratch.ut_pow_b,
+        ut_prod: scratch.ut_prod,
     };
     let mut steps = gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole);
 
@@ -985,6 +1119,9 @@ pub fn gdn_chunk_fwd_train(
         w: scratch.w,
         raw_intra: scratch.raw_intra,
         intra_scores: scratch.intra_scores,
+        ut_pow_a: scratch.ut_pow_a,
+        ut_pow_b: scratch.ut_pow_b,
+        ut_prod: scratch.ut_prod,
     };
     let mut steps = gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole);
 

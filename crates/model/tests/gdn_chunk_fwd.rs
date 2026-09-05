@@ -348,6 +348,9 @@ fn gdn_chunk_fwd_matches_host_oracle() {
     let w = g.storage((bhc * cn * dk) as u64);
     let raw_intra = g.storage((bhc * cn * cn) as u64);
     let intra_scores = g.storage((bhc * cn * cn) as u64);
+    let ut_pow_a = g.storage((bhc * cn * cn) as u64);
+    let ut_pow_b = g.storage((bhc * cn * cn) as u64);
+    let ut_prod = g.storage((bhc * cn * cn) as u64);
     let q_scaled = g.storage((bh * cn * dk) as u64);
     let decay_scale = g.storage((bh * cn) as u64);
     let decayed_k = g.storage((bh * cn * dk) as u64);
@@ -368,6 +371,9 @@ fn gdn_chunk_fwd_matches_host_oracle() {
         w: &w,
         raw_intra: &raw_intra,
         intra_scores: &intra_scores,
+        ut_pow_a: &ut_pow_a,
+        ut_pow_b: &ut_pow_b,
+        ut_prod: &ut_prod,
         q_scaled: &q_scaled,
         decay_scale: &decay_scale,
         decayed_k: &decayed_k,
@@ -382,11 +388,17 @@ fn gdn_chunk_fwd_matches_host_oracle() {
     // Pins step 4's cumsum at ONE fused dispatch (was `c-1 = 3` separate
     // per-row-index dispatches before M5.8's fusion) so a future change
     // silently re-introducing that host loop is caught here rather than only
-    // showing up as a latency regression in `qwen35_bench`. The UT-transform
-    // loop (step 7, still `c-1` dispatches -- W1b in the kernel-performance
-    // ledger, not part of this fusion) accounts for the rest of the
-    // difference from a naive "everything is O(1) now" expectation.
-    assert_eq!(steps.len(), 36, "gdn_chunk_fwd dispatch count regressed -- see step 4's cumsum fusion");
+    // showing up as a latency regression in `qwen35_bench`. Step 7's
+    // UT-transform is now also GEMM-ified (M5.9): at `c=4` (`n_factors =
+    // log2(4) = 2`) that is 2 base dispatches (`region_copy` + `add_identity`
+    // seeding `P_0 = I+attn0`) plus `3*(n_factors-1) = 3` more (one squaring,
+    // one `region_copy`, one `bmm_acc` per remaining factor) = 5 dispatches,
+    // replacing the former `(c-1)+1 = 4` (`gdn_ut_step`*3 + `gdn_add_identity`)
+    // -- net +1 at this tiny test shape, where `n_factors` is small enough
+    // that GEMM-ifying barely pays for its own setup; the real win is at
+    // `c=64` (`n_factors=6`, giving 17 dispatches vs. 64) where FLOPs, not
+    // dispatch count, dominate. See kernel-performance.md M5.9.
+    assert_eq!(steps.len(), 37, "gdn_chunk_fwd dispatch count regressed -- see step 4's cumsum fusion and step 7's GEMM-ified UT-transform (M5.9)");
     // t_mat MUST be cleared before the UT-transform loop -- see gdn_chunk_fwd's doc.
     g.submit(&[&t_mat], &steps);
 
