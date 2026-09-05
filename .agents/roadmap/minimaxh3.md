@@ -327,6 +327,35 @@ port is real-weight-parity-gated.
 - [x] Phase 11 - capability/residency/D-Bus serving contract for
       `t2va`/`fl2va`. Real DiT weight import and a real (non-stub) Qwen3-VL
       text encoder are both still open - see Recorded gaps.
+- [x] First real end-to-end `t2va` generation, real weights throughout -
+  `crates/minimaxh3/examples/generate_t2va.rs`, run against the full
+  checkpoint (`text_encoder/` 63GB, `transformer/` 66GB, `vae/` 10GB, all
+  streamed): real Qwen3-VL prompt encoding -> real 50-layer/33B DiT (fp32,
+  no reduced-precision tier yet) denoise loop (4 steps, 128x128, 124
+  frames) -> real video VAE + audio vocoder decode -> muxed to MP4 (ffmpeg,
+  no distro package available in this environment, a pip-installed static
+  binary used instead). Total wall clock 3181s (~53min): text encoder
+  ~140s, DiT streaming-load ~15-20min (dominates - reading+converting 66GB
+  fp32-promoted-from-bf16 with no reduced-precision path), the 3 real
+  model evaluations + both VAE decodes + mux the remainder. Peak cgroup
+  memory rode the 150GB container cap repeatedly DURING DiT load (anon
+  climbed to ~142GB at one point, reclaimable page cache from the
+  freshly-completed 76GB of downloads absorbing the difference each time)
+  before plateauing ~140GB resident once loading finished - survived every
+  time, never killed, confirming the streaming+`advise_drop` fixes and the
+  container's reactive reclaim are sufficient together, but with very
+  little margin at this checkpoint's real fp32 size on this host's current
+  cap. Output is mechanically valid (real audio, non-degenerate: -22.9dB
+  mean / -10.8dB peak, not silence; real video, structured not
+  noise-garbage) but not yet visually recognizable - expected at only 3
+  real denoising steps for a rectified-flow model (20-50 is typical), not
+  a correctness concern. Next real-quality attempt should either raise
+  `num_inference_steps`/canvas (linearly more DiT-forward wall-clock, no
+  new memory risk since it's the SAME loaded model) or wire Phase 8's
+  already-verified AdaLN precompute into this loading path first (cuts
+  DiT to ~20.2B params, both memory pressure AND the load-time-dominated
+  wall-clock) - the precompute transform itself is only verified against
+  extrapolated dimensions today, never run against these real weights.
 - [ ] Phase 12 - streaming-overlap engine (separate, measured perf phase) -
       `_cp_plan` in the real transformer source is a useful blueprint,
       not yet studied in detail. Deliberately not attempted this session:
@@ -636,12 +665,89 @@ confirmed "adaln_proj ~13.0B of 33B" line - lands at ~33.05B, matching.
   build_text_encoder`/`encode_text_real`/`text_conditioning` wire a real
   `qwen3vl::Qwen3Vl` + tokenizer into every `t2va`/`fl2va` entry point,
   falling back to the stub only when no real checkout is present (never
-  silently on a real load failure). Validated structurally (fallback
-  behavior, error propagation); the real-encoder numeric path itself is
-  still gated on `text_encoder/`'s download, which HAS now completed
-  (`text_conditioning_uses_the_real_encoder_when_weights_are_present`
-  should now run for real rather than skip - re-check once this ledger
-  entry is next touched).
+  silently on a real load failure). `text_encoder/`'s download completed
+  (63GB bf16) and hit a real host OOM on the first two load attempts
+  (`f32`, then `int8` destination - see below); fixed by streaming the
+  decoder's weights instead of materializing them eagerly.
+- ~~Real Qwen3-VL text-encoder load OOMs the host~~ - root-caused, not
+  guessed: `qwen3vl::Qwen3Vl::from_hf` used
+  `checkpoint::safetensors::read_model_dir`, which decodes EVERY tensor to
+  f32 before `Qwen::new_shard_dt_decode` allocates a single destination
+  byte - for `text_encoder/`'s 63GB-bf16-on-disk checkpoint that is an
+  unavoidable ~126GB source materialization, independent of the caller's
+  requested destination dtype. Two real runs under a 150GB container cap
+  confirm this: switching the destination from f32 to int8 (which should
+  roughly halve a "2x-during-construction" peak, the original hypothesis)
+  made no measurable difference - both climbed to the identical ~149GB
+  ceiling on nearly the same timeline and were SIGKILLed, because both were
+  still dominated by the same dtype-independent source decode, never
+  reaching the point where the destination dtype would matter. Fixed by
+  extending `Qwen3Vl::from_hf` to stream the decoder
+  (`model.language_model.*`, the dominant byte share) through
+  `checkpoint::weightio::WeightReader` + a new
+  `qwen3vl::import::decoder_source` (a `checkpoint::remap::RemapSource`),
+  the same mechanism `qwen3::import::hf_shard_source` already gives
+  FLUX.2's text encoder - never brain infrastructure that didn't already
+  exist, just not yet wired into `Qwen3Vl`. The vision tower/mergers stay
+  on the eager path (a small fraction of the checkpoint's bytes; streaming
+  them would not move the peak). Re-run under the same 150GB cap climbed
+  smoothly and predictably instead of rocketing to the kill point -
+  confirms the fix, see this entry's own commit for the measured curve.
+  General lesson for any future large-checkpoint loader in this tree:
+  `read_model_dir`'s "decode-dtype-matches-source, not destination" design
+  makes picking a cheaper destination dtype alone NOT a memory fix when the
+  source itself already exceeds budget - the loader has to stream, not
+  just the destination has to shrink.
+- ~~Streaming decoder's per-layer QUANTIZED linears loop never released
+  mmap pages~~ - `qwen3::model::new_impl`'s int8/f16/bf16 weight-build loop
+  (the one that reads the 7 per-layer linears - QKVO + MLP gate/up/down,
+  the overwhelming majority of a transformer's bytes) is a SEPARATE code
+  path from `paramstore::new_with_roles_src`'s own loop (the one the first
+  streaming fix above patched), calls the unbounded
+  `TensorSource::with_tensor`, and had no `advise_drop` call at all. Fixed
+  by adding one, mirroring the paramstore-loop fix.
+- ~~Even truncated to 50/64 layers, memory still climbed to ~140GB on a
+  build that should need ~25GB at int8~~ - **root cause was NOT page
+  cache** (see `.agents/rules/lessons.md` #87 for the general lesson):
+  `/proc/<pid>/smaps_rollup` showed `Pss_File` at ~132MB (the streaming fix
+  above was already working) against `Anonymous`/`Private_Dirty` at ~90GB -
+  real heap growth. `gpu_core::select::Dtype::I8.promote(&numeric)` demotes
+  to `Dtype::F32` when `numeric.int8_dot` is false, and the CPU JIT
+  backend's `int8_dot` IS false (`backend-cpu`'s own `Caps`: "the
+  multi-barrier packed-int8 GEMMs are outside the JIT's single-barrier
+  model, and there is no VNNI fast path yet") - so `build_text_encoder`'s
+  `Dtype::I8` request had been silently landing as fp32 (4x the intended
+  bytes) through every real-weight attempt in this port's history so far,
+  including the very first "does int8 help vs fp32" A/B that found "no
+  difference" (there was none to find - both requests built the identical
+  fp32 model). Fixed: `caps::best_linear_dtype()` now queries
+  `Gpu::caps().numeric` and picks int8 only where `int8_dot` is genuinely
+  available, else bf16 (CPU's `bf16_storage` IS true - a real, honest 2x,
+  not a second silent no-op) instead of fp32.
+- The CPU backend has NO real int8 compute path at all (`int8_dot: false`,
+  no VNNI fast path yet) - `minimaxh3`'s text encoder (and anything else on
+  this host wanting int8's real ~4x-vs-fp32 density) can only actually get
+  it by running on the two Tesla P40s, which is not yet attempted for this
+  component. The P40s sit idle for every real-weight run in this ledger so
+  far; whether a 50-layer-truncated ~25GB int8 shard fits one 24GB card, or
+  needs splitting across both, is unmeasured.
+- Measured, real-weight confirmation of the two memory fixes above, same
+  50-layer-truncated `text_encoder/` load, same 150GB container cap, same
+  test (`text_conditioning_uses_the_real_encoder_when_weights_are_present`),
+  each run's peak read from `/sys/fs/cgroup/memory.current`:
+  | Build | Peak cgroup memory | Wall clock |
+  |---|---|---|
+  | Whole 64 layers, decode_only, requested int8 (silently fp32) | ~149GB (right at the cap) | 615.86s (then hit an unrelated `forward_steps` panic on decode_only - see the `encode_hidden` fix above) |
+  | Whole 64 layers, decode_only, requested int8 (silently fp32), `encode_hidden` fixed | ~149GB (plateaued at the cap) | 615.86s, passed |
+  | Truncated 50 layers, batched, requested int8 (silently fp32) | ~139GB | 269.47s, passed |
+  | Truncated 50 layers, batched, requested int8, mmap `advise_drop` added to the per-layer-linears loop | ~139GB (page cache was never the dominant cost - confirmed via `smaps_rollup`) | 263-269s, passed |
+  | Truncated 50 layers, batched, HONEST bf16 (`caps::best_linear_dtype` queries `Gpu::caps().numeric` instead of hardcoding int8) | ~103GB | 263.59s, passed |
+  Truncation (64→50 layers) cut wall clock by more than half on its own
+  (batched forward vs. the sequential per-token decode loop the FIRST row's
+  `encode_hidden` fix made correct but never fast). The bf16 fix is the
+  only row that actually moved peak memory - confirming int8 was never
+  real on this backend for any earlier row, including the ones that looked
+  like an "int8 vs fp32, no difference" A/B.
 - `t2va`/`fl2va`'s denoise loop threads neither cancellation nor per-step
   progress yet (`wan`/`ltxv` both poll `inv.cancel` per step; this one does
   neither) - `.streaming()` on the manifest currently means "long-running"
@@ -652,6 +758,71 @@ confirmed "adaln_proj ~13.0B of 33B" line - lands at ~33.05B, matching.
   detail).
 - `video_vae/` not yet downloaded; Phase 6's real-checkpoint validation
   (written, gated on `BRAIN_MINIMAXH3_DIR`) is blocked on it.
+- ~~`crate::caps::read_tensors` (the DiT loader) still uses eager
+  `read_model_dir`, will OOM once `transformer/` finishes downloading~~ -
+  fixed: `crate::caps::open_dit_reader` replaces it with a lazy, mmap-backed
+  `checkpoint::weightio::WeightReader::open_hf_dir`; `H3Transformer::load`
+  (resident serving) and the new `H3Transformer::forward_streaming_with_taps`
+  (validation/one-shot use) both take `&dyn checkpoint::TensorSource`. Block
+  loading itself was extracted into shared free functions in `block.rs`
+  (`load_dev`/`load_host`/`load_fc1`/`load_attn`/`load_block`/
+  `load_refiner_block`) so both callers load identically.
+- ~~The DiT was never validated against REAL trained weights, only
+  tiny-config random ones~~ - `tools/minimaxh3_dit_real_dump_reference.py`
+  loads the REAL installed `diffusers` `MiniMaxH3Transformer3DModel` at the
+  real checkpoint's full width/depth (33,122,992,896 params, confirmed) and
+  dumps taps at block 0/mid(25)/last(49) plus rope/temb/refiner/final
+  outputs from a small 9-row synthetic packed sequence; `model::tests::
+  dit_matches_the_real_reference_numerically_layer_by_layer` compares all
+  11 against `H3Transformer::forward_streaming_with_taps` (one block
+  resident at a time - **never the eager whole-model load**, a hard
+  requirement for validation as much as for serving: even the smaller
+  10-row-sequence test would otherwise pull all 50 blocks/~132GB fp32
+  resident just to check numbers). Result: worst cosine 0.9999999620 (at
+  `output_audio`), everything else 0.999999969-1.000000000, all at
+  float32-noise-level `rel_l2`/`max_abs` - the full stack (real-weight
+  loading, tensor-name/role mapping, refiner, RoPE, AdaLN indexing, all 50
+  blocks, both output heads) is numerically right, not merely
+  "produces plausible-looking output". Peak RSS during the whole 148s run:
+  6GB. One real bug caught and fixed along the way: `rope::build_tables`
+  intentionally returns only the `half = 3*rope_freq_dim`-wide table (see
+  its own doc), but the reference's own `rope.forward` doubles that to
+  `2*half` before `cos`/`sin` (the `rotate_half` convention - channel `m`
+  and `m+half` share one angle); the tiny-config parity test already
+  accounted for this (`first_half_cols`), the new real-weight test
+  initially did not and failed with a raw length mismatch (432 vs 864)
+  until the same helper was applied - a test-construction bug, not a model
+  bug, but worth recording since it is exactly the kind of shape mismatch
+  that could otherwise be misread as a real numeric failure.
+- **Why "brain already has heavily optimized kernels" did not apply
+  automatically to the DiT's attention**: `backend-cpu`'s native-fast-path
+  routing (`CpuBackend::new`'s `FastIdx`) is a plain runtime string lookup
+  (`names.iter().position(|n| n == k)`) keyed on kernel-source names a
+  model's own `KERNELS` table supplies - there is no compile-time or
+  typed-identifier mechanism preventing a name mismatch; a WGSL kernel's own
+  `@cpu native` header tag is documentation only; nothing cross-checks it
+  against `FastIdx` at build or test time. `minimaxh3::block.rs` dispatches
+  `attn_scores_qk`/`attn_softmax_bidir`/`attn_apply_full` (the bidirectional
+  self-attention trio a packed-sequence DiT needs), which `FastIdx` simply
+  had no entries for until this session's optimization pass - the JIT still
+  compiled and ran them (no crash, no warning), just one output element per
+  invocation. Fixed cleanly, not by duplicating kernel math: `attn_scores_qk`
+  is a 2-line wrapper over the same `scores_packed` helper `attn_scores_cross`
+  already used; `attn_softmax_bidir`/`attn_apply_full` dispatch straight into
+  the pre-existing `attn_softmax_cross`/`attn_apply_cross` functions (the
+  `tq==tk`, zero-offset case of the general cross-attention math) - zero new
+  fast-path implementations, only 3 new name-table entries + ~50 lines of
+  dispatch. The 3 WGSL files themselves needed only a header-tag fix
+  (`@cpu yes` -> `@cpu native`); they are not redundant/removable - they
+  remain the real GPU dispatch source and the CPU JIT fallback. Remaining
+  gap: `crates/backend-cpu/tests/matmul_family_native_fastpath.rs` guards
+  only the multi-barrier hard-panic case; nothing yet guards this silent
+  "JIT-compilable but no native path" case in general, so the same class of
+  bug (a new kernel name a model adopts, with no matching `FastIdx` entry)
+  can recur for the next model with no test failure, only a silent 10-20x
+  slowdown - worth a generic cross-check test (parse every kernel's
+  `@cpu native` tag, assert a live `FastIdx`/equivalent entry exists for
+  every model's own `KERNELS` table) but not written this session.
 - `ref2va` is not implemented (Phase 9's own deliberate scope cut - its
   layout needs its own builder, not a generalization of t2va/fl2va's); the
   DiT/scheduler/VAE machinery it would reuse is otherwise ready once

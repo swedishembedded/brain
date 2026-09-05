@@ -32,6 +32,7 @@
 
 use gpu_core::DeviceBuffer;
 use model::hostmath::{linear_rows, silu_slice, timestep_embedding};
+#[cfg(test)]
 use vae::blocks::Tensors;
 
 use crate::block::{self, BlockWeights, Ctx, RefinerBlockWeights};
@@ -150,64 +151,36 @@ pub struct H3Transformer {
 }
 
 impl H3Transformer {
-    /// Load every weight `forward` needs from a flat tensor map (a
-    /// `safetensors` dump loaded via `checkpoint::safetensors::read`, or any
-    /// other `Tensors` source), named after the reference module's own
-    /// attribute paths (`proj_in.weight`, `transformer_blocks.{i}.attn.
-    /// to_q.weight`, `token_refiner.refiner_blocks.{i}.norm1.weight`, ...) -
-    /// see `tools/minimaxh3_dit_dump_reference.py` for the dump that
-    /// produces exactly this naming.
-    pub fn load(tensors: &Tensors, cfg: H3TransformerConfig, device: Option<&str>) -> H3Transformer {
+    /// Load every weight `forward` needs from a [`checkpoint::TensorSource`]
+    /// (a streaming [`checkpoint::weightio::WeightReader`], or the eager
+    /// `Tensors` map every existing caller already had - it implements the
+    /// trait, so this widened signature is a strict superset, not a breaking
+    /// change), named after the reference module's own attribute paths
+    /// (`proj_in.weight`, `transformer_blocks.{i}.attn.to_q.weight`,
+    /// `token_refiner.refiner_blocks.{i}.norm1.weight`, ...) - see
+    /// `tools/minimaxh3_dit_dump_reference.py` for the dump that produces
+    /// exactly this naming.
+    ///
+    /// **Streams, does not materialize the whole checkpoint first**: this
+    /// model is ~33B params (bf16 on disk), the same eager-`read_model_dir`
+    /// mistake `qwen3vl::Qwen3Vl::from_hf` used to make would cost ~132GB
+    /// just for the source before this function uploads a single byte (that
+    /// exact mistake measurably OOMed a 150GB container cap on the
+    /// text encoder before it was fixed the same way). Each tensor is
+    /// fetched, uploaded,
+    /// and `advise_drop`-ped before the next is read - peak host cost from
+    /// THIS function is one tensor's transient plus whatever `ctx.upload`
+    /// leaves resident (currently always fp32 - `Ctx::upload` has no
+    /// reduced-precision tier yet, unlike `qwen3::model::Weight::upload`;
+    /// see the roadmap's own recorded gap for that follow-up).
+    pub fn load(tensors: &dyn checkpoint::TensorSource, cfg: H3TransformerConfig, device: Option<&str>) -> H3Transformer {
         let ctx = Ctx::new(device);
-        let get = |name: &str| -> &(Vec<usize>, Vec<f32>) { tensors.get(name).unwrap_or_else(|| panic!("minimaxh3 model: missing tensor {name:?}")) };
-        let dev = |name: &str| ctx.upload(&get(name).1);
-        let host = |name: &str| get(name).1.clone();
-
+        let dev = |name: &str| block::load_dev(tensors, &ctx, name);
+        let host = |name: &str| block::load_host(tensors, name);
         let (hidden, ffn) = (cfg.hidden_size, cfg.ffn_dim);
 
-        // Split the fused SwiGLU projection's two output-feature halves into
-        // separate contiguous buffers (see `block::BlockWeights`'s own doc).
-        let load_fc1 = |prefix: &str| -> (DeviceBuffer, DeviceBuffer) {
-            let (shape, data) = get(&format!("{prefix}.ff.net.0.proj.weight"));
-            assert_eq!(shape, &vec![2 * ffn as usize, hidden as usize], "{prefix}.ff.net.0.proj.weight");
-            let half = (ffn * hidden) as usize;
-            (ctx.upload(&data[..half]), ctx.upload(&data[half..2 * half]))
-        };
-        let load_attn = |prefix: &str| -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
-            (dev(&format!("{prefix}.to_q.weight")), dev(&format!("{prefix}.to_k.weight")), dev(&format!("{prefix}.to_v.weight")), dev(&format!("{prefix}.norm_q.weight")), dev(&format!("{prefix}.norm_k.weight")), dev(&format!("{prefix}.to_out.0.weight")))
-        };
-
-        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers)
-            .map(|i| {
-                let p = format!("token_refiner.refiner_blocks.{i}");
-                let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(&format!("{p}.attn"));
-                let (fc1_value, fc1_gate) = load_fc1(&p);
-                RefinerBlockWeights { wq, wk, wv, wo, norm_q, norm_k, norm1: dev(&format!("{p}.norm1.weight")), norm2: dev(&format!("{p}.norm2.weight")), fc1_value, fc1_gate, fc2: dev(&format!("{p}.ff.net.2.weight")) }
-            })
-            .collect();
-
-        let blocks: Vec<BlockWeights> = (0..cfg.num_layers)
-            .map(|i| {
-                let p = format!("transformer_blocks.{i}");
-                let (wq, wk, wv, norm_q, norm_k, wo) = load_attn(&format!("{p}.attn"));
-                let (fc1_value, fc1_gate) = load_fc1(&p);
-                BlockWeights {
-                    wq,
-                    wk,
-                    wv,
-                    wo,
-                    norm_q,
-                    norm_k,
-                    norm1: dev(&format!("{p}.norm1.weight")),
-                    norm2: dev(&format!("{p}.norm2.weight")),
-                    fc1_value,
-                    fc1_gate,
-                    fc2: dev(&format!("{p}.ff.net.2.weight")),
-                    adaln_w: host(&format!("{p}.adaln_proj.linear.weight")),
-                    adaln_b: host(&format!("{p}.adaln_proj.linear.bias")),
-                }
-            })
-            .collect();
+        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, &ctx, i, hidden, ffn)).collect();
+        let blocks: Vec<BlockWeights> = (0..cfg.num_layers as usize).map(|i| block::load_block(tensors, &ctx, i, hidden, ffn)).collect();
 
         H3Transformer {
             proj_in_w: dev("proj_in.weight"),
@@ -253,6 +226,172 @@ impl H3Transformer {
     /// rather than only showing up in the final output.
     pub fn forward_with_taps(&self, inp: &PackedInputs) -> (H3Output, H3Taps) {
         self.forward_full(inp)
+    }
+
+    /// [`Self::forward_with_taps`] WITHOUT ever building a resident
+    /// [`H3Transformer`] - no `Vec<BlockWeights>` for all `num_layers`
+    /// blocks is ever alive at once. Loads (via [`block::load_block`]) one
+    /// block's weights, runs it, drops it (end of the loop body - Rust
+    /// frees `w`'s device buffers there), then loads the next.
+    ///
+    /// This exists for exactly one reason: a real-weight VALIDATION run
+    /// that only checks a handful of tap points (block 0, a middle block,
+    /// the last block, the final output) has no business holding the whole
+    /// ~132GB fp32 model resident to reach them - peak host cost here is
+    /// ONE block's weights (~2.6GB at real dimensions) plus the small
+    /// always-resident pieces (input/output projections, refiner, time
+    /// embedder - hundreds of MB), not the whole model. See
+    /// `model::tests::dit_matches_the_real_reference_numerically_layer_by_layer`,
+    /// the caller this was built for.
+    ///
+    /// Deliberately a SEPARATE implementation from [`Self::forward_full`]
+    /// rather than a refactor of it into one shared code path: the two
+    /// differ only in where block weights come from (already-resident
+    /// `&self.blocks` vs. freshly streamed-and-dropped per index), but
+    /// unifying that behind one abstraction over "owned vs. borrowed
+    /// `BlockWeights`" was judged a bigger, riskier change to the
+    /// already-working resident-serving path than the two implementations'
+    /// duplication costs - if `forward_full`'s math ever changes, this
+    /// function's own doc (this comment) is the reminder to check whether
+    /// the same change belongs here too.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_streaming_with_taps(tensors: &dyn checkpoint::TensorSource, cfg: &H3TransformerConfig, device: Option<&str>, inp: &PackedInputs) -> (H3Output, H3Taps) {
+        let ctx = Ctx::new(device);
+        let cx = &ctx;
+        let dev = |name: &str| block::load_dev(tensors, &ctx, name);
+        let host = |name: &str| block::load_host(tensors, name);
+        let hidden = cfg.hidden_size;
+
+        let seq_len = (inp.position_ids.len() / 3) as u32;
+        assert_eq!(inp.token_tags.len(), seq_len as usize, "forward_streaming: token_tags must be [seq_len]");
+        assert_eq!(inp.timestep_indices.len(), seq_len as usize, "forward_streaming: timestep_indices must be [seq_len]");
+        let num_video = inp.video_indices.len() as u32;
+        let num_audio = inp.audio_indices.len() as u32;
+        let num_text = inp.text_indices.len() as u32;
+        let num_timesteps = inp.timestep.len();
+
+        // 1. Per-modality input projections (video/audio directly; text
+        // through the token refiner) - small, always-resident weights.
+        let proj_in_w = dev("proj_in.weight");
+        let proj_in_b = dev("proj_in.bias");
+        let audio_proj_in_w = dev("audio_proj_in.weight");
+        let audio_proj_in_b = dev("audio_proj_in.bias");
+        let context_embedder_w = dev("context_embedder.weight");
+        let context_embedder_b = dev("context_embedder.bias");
+        let refiner_blocks: Vec<RefinerBlockWeights> = (0..cfg.num_refiner_layers as usize).map(|i| block::load_refiner_block(tensors, &ctx, i, hidden, cfg.ffn_dim)).collect();
+        let refiner_final_norm = dev("token_refiner.final_norm.weight");
+
+        let video_in = cx.upload(inp.hidden_states);
+        let video_embeds = block::linear(cx, &video_in, &proj_in_w, Some(&proj_in_b), num_video, cfg.video_patch_dim(), hidden);
+        let audio_in = cx.upload(inp.audio_hidden_states);
+        let audio_embeds = block::linear(cx, &audio_in, &audio_proj_in_w, Some(&audio_proj_in_b), num_audio, cfg.audio_in_channels, hidden);
+        let text_in = cx.upload(inp.encoder_hidden_states);
+        let mut text_embeds = block::linear(cx, &text_in, &context_embedder_w, Some(&context_embedder_b), num_text, cfg.text_dim, hidden);
+        for w in &refiner_blocks {
+            text_embeds = block::refiner_block_forward(cx, w, &text_embeds, cfg, num_text);
+        }
+        let text_embeds = block::rmsnorm(cx, &text_embeds, &refiner_final_norm, num_text, hidden, cfg.final_norm_eps);
+        let tap_refiner_out = cx.gpu.read(&text_embeds, (num_text * hidden) as usize);
+
+        // 2. Scatter every modality's projected rows into the packed
+        // sequence buffer (`index_copy` in the reference).
+        let hidden_states = cx.gpu.storage((seq_len * hidden) as u64);
+        cx.gpu.write_f32(&hidden_states, &vec![0f32; (seq_len * hidden) as usize]);
+        let text_idx = cx.upload_u32(inp.text_indices);
+        let video_idx = cx.upload_u32(inp.video_indices);
+        let audio_idx = cx.upload_u32(inp.audio_indices);
+        block::row_scatter(cx, &text_idx, &text_embeds, &hidden_states, num_text, hidden, seq_len);
+        block::row_scatter(cx, &video_idx, &video_embeds, &hidden_states, num_video, hidden, seq_len);
+        block::row_scatter(cx, &audio_idx, &audio_embeds, &hidden_states, num_audio, hidden, seq_len);
+
+        // 3. RoPE tables and the shared timestep embedding.
+        let rope_tables = rope::build_tables(cfg, inp.position_ids);
+        let cos = cx.upload(&rope_tables.cos);
+        let sin = cx.upload(&rope_tables.sin);
+        let time_w0 = host("time_embedder.linear_1.weight");
+        let time_b0 = host("time_embedder.linear_1.bias");
+        let time_w2 = host("time_embedder.linear_2.weight");
+        let time_b2 = host("time_embedder.linear_2.bias");
+        let temb = build_temb(cfg, inp.timestep, &time_w0, &time_b0, &time_w2, &time_b2);
+        let temb_silu = silu_slice(&temb);
+
+        // 4. Row -> this port's own AdaLN table address.
+        let adaln_idx = adaln_indices(inp.token_tags, inp.timestep_indices, num_timesteps);
+        let adaln_idx_dev = cx.upload_u32(&adaln_idx);
+
+        // 5. The block stack - ONE block's weights resident at a time.
+        let tap_block0_input = cx.gpu.read(&hidden_states, (seq_len * hidden) as usize);
+        let n_layers = cfg.num_layers as usize;
+        let mid_block_index = n_layers / 2;
+        let last_block_index = n_layers - 1;
+        let mut h = hidden_states;
+        let mut tap_block0_attn_out: Vec<f32> = Vec::new();
+        let mut tap_block0_out: Vec<f32> = Vec::new();
+        let mut tap_mid_block_out: Vec<f32> = Vec::new();
+        let mut tap_last_block_out: Vec<f32> = Vec::new();
+        for i in 0..n_layers {
+            let w = block::load_block(tensors, &ctx, i, hidden, cfg.ffn_dim);
+            let (out, attn_out) = block::block_forward(cx, &w, &h, &adaln_idx_dev, &cos, &sin, &temb_silu, num_timesteps, cfg, seq_len);
+            if i == 0 {
+                tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
+                tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
+            }
+            if i == mid_block_index {
+                tap_mid_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
+            }
+            if i == last_block_index {
+                tap_last_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
+            }
+            h = out;
+            // `w` drops here - its device buffers are freed before the next
+            // iteration's `load_block` call.
+        }
+
+        // 6. norm_out (per-TIMESTEP shift+scale only, no gate, no modality
+        // axis) then the two output heads, run over every row, rows of each
+        // modality selected after.
+        let norm_out_norm = dev("norm_out.norm.weight");
+        let norm_out_linear_w = host("norm_out.linear.weight");
+        let norm_out_linear_b = host("norm_out.linear.bias");
+        let proj_out_w = dev("proj_out.weight");
+        let proj_out_b = dev("proj_out.bias");
+        let audio_proj_out_w = dev("audio_proj_out.weight");
+        let audio_proj_out_b = dev("audio_proj_out.bias");
+
+        let shift_w = &norm_out_linear_w[..(hidden * cfg.time_embed_dim) as usize];
+        let scale_w = &norm_out_linear_w[(hidden * cfg.time_embed_dim) as usize..];
+        let shift_b = &norm_out_linear_b[..hidden as usize];
+        let scale_b = &norm_out_linear_b[hidden as usize..];
+        let shift_tbl = linear1_rows(&temb_silu, shift_w, shift_b, num_timesteps, cfg.time_embed_dim as usize, hidden as usize);
+        let scale_tbl = linear1_rows(&temb_silu, scale_w, scale_b, num_timesteps, cfg.time_embed_dim as usize, hidden as usize);
+        let shift_dev = cx.upload(&shift_tbl);
+        let scale_dev = cx.upload(&scale_tbl);
+        let ts_idx_dev = cx.upload_u32(inp.timestep_indices);
+        let shift_g = block::gather_rows(cx, &ts_idx_dev, &shift_dev, seq_len, hidden);
+        let scale_g = block::gather_rows(cx, &ts_idx_dev, &scale_dev, seq_len, hidden);
+        let normed = block::rmsnorm(cx, &h, &norm_out_norm, seq_len, hidden, cfg.final_norm_eps);
+        let modulated = block::modulate(cx, &normed, &scale_g, &shift_g, seq_len * hidden);
+
+        let video_patch_dim = cfg.video_patch_dim();
+        let video_full = block::linear(cx, &modulated, &proj_out_w, Some(&proj_out_b), seq_len, hidden, video_patch_dim);
+        let audio_full = block::linear(cx, &modulated, &audio_proj_out_w, Some(&audio_proj_out_b), seq_len, hidden, cfg.audio_in_channels);
+        let video_out = block::gather_rows(cx, &video_idx, &video_full, num_video, video_patch_dim);
+        let audio_out = block::gather_rows(cx, &audio_idx, &audio_full, num_audio, cfg.audio_in_channels);
+
+        let output = H3Output { video: cx.gpu.read(&video_out, (num_video * video_patch_dim) as usize), audio: cx.gpu.read(&audio_out, (num_audio * cfg.audio_in_channels) as usize) };
+        let taps = H3Taps {
+            refiner_out: tap_refiner_out,
+            rope_cos: rope_tables.cos,
+            rope_sin: rope_tables.sin,
+            temb: temb.clone(),
+            block0_input: tap_block0_input,
+            block0_attn_out: tap_block0_attn_out,
+            block0_out: tap_block0_out,
+            mid_block_out: tap_mid_block_out,
+            mid_block_index,
+            last_block_out: tap_last_block_out,
+        };
+        (output, taps)
     }
 
     fn forward_full(&self, inp: &PackedInputs) -> (H3Output, H3Taps) {
@@ -306,14 +445,24 @@ impl H3Transformer {
 
         // 5. The block stack.
         let tap_block0_input = cx.gpu.read(&hidden_states, (seq_len * hidden) as usize);
+        let mid_block_index = self.blocks.len() / 2;
+        let last_block_index = self.blocks.len() - 1;
         let mut h = hidden_states;
         let mut tap_block0_attn_out: Vec<f32> = Vec::new();
         let mut tap_block0_out: Vec<f32> = Vec::new();
+        let mut tap_mid_block_out: Vec<f32> = Vec::new();
+        let mut tap_last_block_out: Vec<f32> = Vec::new();
         for (i, w) in self.blocks.iter().enumerate() {
             let (out, attn_out) = block::block_forward(cx, w, &h, &adaln_idx_dev, &cos, &sin, &temb_silu, num_timesteps, cfg, seq_len);
             if i == 0 {
                 tap_block0_attn_out = cx.gpu.read(&attn_out, (seq_len * hidden) as usize);
                 tap_block0_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
+            }
+            if i == mid_block_index {
+                tap_mid_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
+            }
+            if i == last_block_index {
+                tap_last_block_out = cx.gpu.read(&out, (seq_len * hidden) as usize);
             }
             h = out;
         }
@@ -342,7 +491,18 @@ impl H3Transformer {
         let audio_out = block::gather_rows(cx, &audio_idx, &audio_full, num_audio, cfg.audio_in_channels);
 
         let output = H3Output { video: cx.gpu.read(&video_out, (num_video * video_patch_dim) as usize), audio: cx.gpu.read(&audio_out, (num_audio * cfg.audio_in_channels) as usize) };
-        let taps = H3Taps { refiner_out: tap_refiner_out, rope_cos: rope_tables.cos, rope_sin: rope_tables.sin, block0_input: tap_block0_input, block0_attn_out: tap_block0_attn_out, block0_out: tap_block0_out };
+        let taps = H3Taps {
+            refiner_out: tap_refiner_out,
+            rope_cos: rope_tables.cos,
+            rope_sin: rope_tables.sin,
+            temb: temb.clone(),
+            block0_input: tap_block0_input,
+            block0_attn_out: tap_block0_attn_out,
+            block0_out: tap_block0_out,
+            mid_block_out: tap_mid_block_out,
+            mid_block_index,
+            last_block_out: tap_last_block_out,
+        };
         (output, taps)
     }
 }
@@ -356,6 +516,12 @@ pub struct H3Taps {
     /// `[seq_len, half]` each - `crate::rope::build_tables`'s output.
     pub rope_cos: Vec<f32>,
     pub rope_sin: Vec<f32>,
+    /// `[num_timesteps, time_embed_dim]` - `time_embedder`'s own raw output
+    /// (before the SiLU this module's own caller applies - matches the
+    /// reference's `register_forward_hook` on `model.time_embedder` itself,
+    /// which fires on that module's return value, not on whatever the
+    /// caller does with it afterward).
+    pub temb: Vec<f32>,
     /// `[seq_len, hidden]` - the packed sequence buffer block 0 reads (after
     /// every modality's projection, refiner and scatter).
     pub block0_input: Vec<f32>,
@@ -364,6 +530,14 @@ pub struct H3Taps {
     pub block0_attn_out: Vec<f32>,
     /// `[seq_len, hidden]` - block 0's full output.
     pub block0_out: Vec<f32>,
+    /// `[seq_len, hidden]` - output of block `mid_block_index` (0-indexed,
+    /// `num_layers/2`) - catches a bug that only manifests after several
+    /// blocks' worth of accumulated state (e.g. a per-block AdaLN indexing
+    /// bug), which a block-0-only tap cannot.
+    pub mid_block_out: Vec<f32>,
+    pub mid_block_index: usize,
+    /// `[seq_len, hidden]` - output of the LAST block (`num_layers - 1`).
+    pub last_block_out: Vec<f32>,
 }
 
 /// [`linear_rows`] over MULTIPLE rows, with a per-output-feature bias added -
@@ -383,6 +557,136 @@ fn linear1_rows(x: &[f32], w: &[f32], b: &[f32], rows: usize, inn: usize, out: u
 mod tests {
     use super::*;
     use crate::config::{TAG_AUDIO, TAG_TEXT, TAG_VIDEO};
+
+    /// The REAL checkpoint's DiT, real weights, against a live real-weight
+    /// `diffusers` reference run - `tools/minimaxh3_dit_real_dump_reference.py`,
+    /// NOT `minimaxh3_dit_dump_reference.py` (that one uses tiny dims and
+    /// small RANDOM weights, which validates the architecture code but
+    /// structurally cannot catch a bug that only shows up on real,
+    /// structured weights - a wrong transpose, a wrong axis order, a wrong
+    /// tensor-name-to-role mapping all look "fine" when every element is
+    /// equally arbitrary). Checked at block 0, a MIDDLE block, and the LAST
+    /// block (not just end-to-end) - exactly the audio VAE's own precedent
+    /// (`import::decode_matches_the_real_reference_numerically`) applied to
+    /// the DiT for the first time.
+    ///
+    /// Real DiT weight loading (~66GB bf16 -> ~132GB fp32, streamed) is the
+    /// expensive part here (~10-20 minutes) - the forward pass itself runs
+    /// over a 9-row synthetic sequence, seconds not minutes.
+    #[test]
+    fn dit_matches_the_real_reference_numerically_layer_by_layer() {
+        let Ok(root) = std::env::var("BRAIN_MINIMAXH3_DIR") else {
+            brain_testutil::skip("BRAIN_MINIMAXH3_DIR not set - no local MiniMax-H3 checkout to load from");
+            return;
+        };
+        let paths = crate::caps::Paths::resolve(&root);
+        if !checkpoint::safetensors::has_model_weights(std::path::Path::new(&paths.dit)) {
+            brain_testutil::skip(&format!("{} has no complete weight set yet - checkpoint not (yet) downloaded", paths.dit));
+            return;
+        }
+
+        let fixture_dir = brain_testutil::testdata_path("golden/minimaxh3/dit_real");
+        let fixture_file = fixture_dir.join("minimaxh3_dit_real.safetensors");
+        if !fixture_file.is_file() {
+            brain_testutil::skip(&format!(
+                "{} not found - run tools/minimaxh3_dit_real_dump_reference.py --checkpoint {} --out {}",
+                fixture_file.display(),
+                paths.dit,
+                fixture_dir.display()
+            ));
+            return;
+        }
+
+        let cfg = H3TransformerConfig::real();
+
+        // Golden/checkpoint pairing, proven rather than assumed - see
+        // brain_testutil::golden's own module doc.
+        let Some(src) = brain_testutil::golden::Source::open(&fixture_dir, "tools/minimaxh3_dit_real_dump_reference.py") else {
+            return;
+        };
+        let ok = src.require(&[
+            ("num_attention_heads", cfg.num_attention_heads as i64),
+            ("attention_head_dim", cfg.attention_head_dim as i64),
+            ("hidden_size", cfg.hidden_size as i64),
+            ("num_layers", cfg.num_layers as i64),
+            ("num_refiner_layers", cfg.num_refiner_layers as i64),
+            ("ffn_dim", cfg.ffn_dim as i64),
+            ("in_channels", cfg.in_channels as i64),
+            ("audio_in_channels", cfg.audio_in_channels as i64),
+            ("text_dim", cfg.text_dim as i64),
+            ("freq_dim", cfg.freq_dim as i64),
+            ("time_embed_hidden_dim", cfg.time_embed_hidden_dim as i64),
+            ("time_embed_dim", cfg.time_embed_dim as i64),
+            ("rope_freq_dim", cfg.rope_freq_dim as i64),
+            ("rope_theta_x1000", (cfg.rope_theta * 1000.0) as i64),
+        ]);
+        if !ok {
+            return;
+        }
+
+        let fx = checkpoint::safetensors::read(fixture_file.to_str().expect("fixture path is valid UTF-8")).expect("read golden fixture");
+        let get = |name: &str| -> &checkpoint::safetensors::StTensor {
+            fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing"))
+        };
+        let get_u32 = |name: &str| -> Vec<u32> { get(name).data.iter().map(|&f| f.round() as u32).collect() };
+
+        let hidden_states = get("input_hidden_states").data.clone();
+        let audio_hidden_states = get("input_audio_hidden_states").data.clone();
+        let encoder_hidden_states = get("input_encoder_hidden_states").data.clone();
+        let timestep = get("input_timestep").data.clone();
+        let timestep_indices = get_u32("input_timestep_indices");
+        let token_tags = get_u32("input_token_tags");
+        let position_ids = get("input_position_ids").data.clone();
+        let video_indices = get_u32("input_video_indices");
+        let audio_indices = get_u32("input_audio_indices");
+        let text_indices = get_u32("input_text_indices");
+
+        let inp = PackedInputs {
+            hidden_states: &hidden_states,
+            audio_hidden_states: &audio_hidden_states,
+            encoder_hidden_states: &encoder_hidden_states,
+            timestep: &timestep,
+            timestep_indices: &timestep_indices,
+            token_tags: &token_tags,
+            position_ids: &position_ids,
+            video_indices: &video_indices,
+            audio_indices: &audio_indices,
+            text_indices: &text_indices,
+        };
+
+        eprintln!("running real DiT one block at a time (never all 50 blocks resident - see H3Transformer::forward_streaming_with_taps's own doc) ...");
+        let t0 = std::time::Instant::now();
+        let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
+        let (out, taps) = H3Transformer::forward_streaming_with_taps(&reader, &cfg, Some("cpu"), &inp);
+        eprintln!("  done in {:.1}s", t0.elapsed().as_secs_f32());
+
+        assert_eq!(taps.mid_block_index, 25, "golden was dumped at mid_block=25; H3TransformerConfig::real()'s own 50 layers must still land on 25");
+
+        // porting.md's own floor: "cosine >= 0.9999 for networks" at the
+        // stage-parity rung. This is stage-by-stage AND real-weight, so it
+        // should land far tighter than that floor (float32-noise level, the
+        // audio VAE's own real-weight precedent landed at max_abs ~4e-6) -
+        // the floor is a refusal threshold, not a target.
+        // Same `2*half`-wide reference doubling as `tiny_config_matches_the_
+        // real_reference_numerically` below - see `crate::rope`'s own doc.
+        let seq_len = position_ids.len() / 3;
+        let half = taps.rope_cos.len() / seq_len;
+        let first_half_cols = |full: &[f32]| -> Vec<f32> { (0..seq_len).flat_map(|r| full[r * 2 * half..r * 2 * half + half].to_vec()).collect() };
+
+        let mut r = brain_testutil::parity::Report::new(0.9999);
+        r.check("refiner_out", &taps.refiner_out, &get("tap_refiner_out").data);
+        r.check("rope_cos", &taps.rope_cos, &first_half_cols(&get("tap_rope_cos").data));
+        r.check("rope_sin", &taps.rope_sin, &first_half_cols(&get("tap_rope_sin").data));
+        r.check("temb", &taps.temb, &get("tap_temb").data);
+        r.check("block0_input", &taps.block0_input, &get("tap_block0_input").data);
+        r.check("block0_attn_out", &taps.block0_attn_out, &get("tap_block0_attn_out").data);
+        r.check("block0_out", &taps.block0_out, &get("tap_block0_out").data);
+        r.check("block25_out (mid)", &taps.mid_block_out, &get("tap_block25_out").data);
+        r.check("block49_out (last)", &taps.last_block_out, &get("tap_block49_out").data);
+        r.check("output_video", &out.video, &get("output_video").data);
+        r.check("output_audio", &out.audio, &get("output_audio").data);
+        r.finish("minimaxh3 DiT forward vs REAL-WEIGHT reference, layer by layer");
+    }
 
     #[test]
     fn adaln_indices_are_modality_major() {
