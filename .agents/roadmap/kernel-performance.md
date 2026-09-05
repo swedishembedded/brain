@@ -4799,6 +4799,84 @@ with a number that has nothing to do with the actual deliverable.
 **Commit**: one (the restraint test, the `AGENTS.md` correction, this
 ledger entry, together as one self-contained unit).
 
+### M8.2 - `Roofs::f16_gflops` stops being permanently dead code (landed last in numbering order, not dependency order - it needed M8.1's `ArchDesc` merged first)
+
+`gpu_core::roof::measure`'s f16 probe was gated on `gpu.caps().numeric.f16` -
+which, per `ArchDesc::numeric_view`'s own formula (M8.1), IS `is_fast(F16)`:
+a value that can only ever become `true` by MEASURING f16 throughput and
+comparing it against fp32. Gating the measurement on its own conclusion is
+circular - `f16_gflops` was dead code on every device this engine has ever
+run on, confirmed by an existing test
+(`f16_roof_is_none_while_uncapped_and_never_slower_than_fp32_where_hardware_
+supports_it`) that PINNED the dead path as correct and bypassed it entirely
+to exercise the real mechanism (`measure_f16`/`measure_compute` called
+directly, mirroring `native_f16.rs`'s own workaround for the same flag).
+
+Fixed the gate to check `arch.executes(DType::F16)` instead - true wherever
+f16 arithmetic runs AT ALL (`Emulated`/`Native`/`Matrix`), long before
+anything has measured whether it is fast, exactly the same shape
+`int8_gops`'s existing gate (`numeric.int8_dot`, which IS `executes(I8)`
+already) already used correctly. `is_fast`/`numeric.f16` are UNCHANGED and
+still require a real measurement fed back into a device's capabilities,
+which nothing in this tree does yet - this milestone only removes the
+circularity in whether the MEASUREMENT ITSELF can run, not what counts as
+"fast."
+
+**A real, deeper gap found underneath, and fixed too**: `arch.executes(F16)`
+could never become `true` on `backend-wgpu` regardless of real hardware,
+because `query_caps` hardcoded `DType::F16 => TierLevel::Storage`
+unconditionally - never consulting `adapter.features().contains(wgpu::
+Features::SHADER_F16)`, the exact query `WgpuBackend::supports_shader_f16`
+already exposes and `native_f16.rs`'s own tests already gate on. Fixed to
+report `Native` when this adapter was actually granted the feature (a real
+f16 ALU exists - established by a device query, matching `backend-vulkan`'s
+own `Native`-for-DP4A precedent - not a speed claim: Pascal-class hardware
+can expose the extension at 1/64 rate, which is exactly why `is_fast` stays
+a separate, measured gate).
+
+**A second real bug surfaced by making that change, caught before it shipped
+wrong**: `f16_storage`/`bf16_storage` in `numeric_view()` check the tier is
+EXACTLY `Storage` (a DELIBERATE M8.1 design choice, pinned by its own test,
+`f16_storage_view_is_exact_match_not_at_least_storage` - preserving
+`backend-vulkan`'s legacy quirk of reporting `Native` while never having set
+`f16_storage`). A first pass "fixed" this to `holds()` (`>= Storage`)
+thinking it was a bug; it is not - reverted after reading `numeric_view`'s
+own doc comment, which explains the exact-match choice explicitly. The REAL
+fix belongs where the actual regression is: `backend-wgpu`'s storage-tier
+f16 decode (`dtype_variant`'s plain bitcast WGSL) has always run on EVERY
+wgpu target regardless of which tier F16 lands at - unlike Vulkan, it was
+never conditional on the compute tier - so once this milestone's own change
+lets F16 land at `Native` there, `query_caps` now overrides `f16_storage:
+true` directly on the `NumericSupport` it builds (the same pattern M8.6
+already used for `fp8_storage`), rather than narrowing the shared
+`numeric_view()` formula and breaking Vulkan's real, intentional legacy
+fidelity.
+
+**Gate**: the existing pinned test was inverted (same shape as M8.0's CPU-
+JIT test) to `f16_roof_runs_through_the_production_gate_and_is_never_
+slower_than_fp32_where_hardware_supports_it` - on this box's real adapter
+(Intel Arc iGPU, MTL, `SHADER_F16` granted), `arch.executes(F16)` is
+asserted `true`, `measure()`'s own production path (no bypass) returns
+`Some(f16_gflops)`, and `f16_gflops >= gflops` holds (a real f16 ALU is
+never slower than the same silicon's fp32 path). A new test,
+`storage_flags_stay_true_at_every_tier_at_or_above_storage`, was written,
+found to contradict the deliberate M8.1 design, and DELETED rather than
+kept wrong - recorded here so the same mistake is not repeated.
+`crates/backend-api/tests/arch_view_agrees.rs` (M8.1's own backward-compat
+table) stays green unchanged - it never exercised the `Native`-tier case for
+wgpu, so it needed no update. `qwen3::model`'s
+`f16_storage_tier_tracks_fp32_and_really_dispatches_f16_kernels`/
+`bf16_storage_tier_is_the_same_one_implementation` (real consumers gating
+kernel dispatch on this exact flag) both stay green. `cargo clippy -p
+brain-backend-api -p brain-backend-wgpu -p brain-gpu-core --lib` clean.
+
+**Measured here**: yes - on this box's real adapter, `f16_gflops` now
+reports a genuine number through the production path for the first time
+ever, and the invariant it exists to prove (`f16_gflops >= gflops`) holds.
+
+**Commit**: one (the `roof::measure` gate fix, the `backend-wgpu` F16 tier
+and `f16_storage` override, the inverted test, this ledger entry).
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

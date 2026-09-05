@@ -68,14 +68,17 @@ pub struct Roofs {
     /// that looks like a third of the machine may be a tenth of it.
     pub int8_gops: Option<f32>,
     /// Peak native-`f16` (`enable f16;`, real f16 registers - B11) FMA rate,
-    /// GFLOP/s. `None` where the device has not been *measured* to run f16
-    /// arithmetic fast (`caps().numeric.f16`, which per its own doc "stays
-    /// false until the autotuner measures it" - availability of the WGSL
-    /// extension alone is never enough, since e.g. Pascal exposes it at 1/64
-    /// rate). Never a guess: this is the same real, `poll_wait`-bracketed FMA
-    /// chain as `gflops`, just with every accumulator declared `f16`, so the
-    /// two rates are directly comparable and a device that claims fast f16
-    /// must measure `f16_gflops >= gflops`.
+    /// GFLOP/s. `None` where f16 arithmetic does not even EXECUTE on this
+    /// device (`caps().arch.executes(DType::F16)`, M8.2 - the non-circular
+    /// gate: this field's own measurement is what determines whether f16 is
+    /// FAST, so gating the measurement itself on "already proven fast" would
+    /// make it permanently dead code, which is exactly the bug this
+    /// milestone fixed). Availability of the WGSL extension is never treated
+    /// as a speed claim on its own, since e.g. Pascal exposes it at 1/64
+    /// rate - this is a real, `poll_wait`-bracketed FMA chain, the same
+    /// shape as `gflops` with every accumulator declared `f16`, so the two
+    /// rates are directly comparable and a device with a genuinely fast f16
+    /// ALU measures `f16_gflops >= gflops`.
     pub f16_gflops: Option<f32>,
 }
 
@@ -554,13 +557,18 @@ pub fn measure(gpu: &Gpu) -> Option<Roofs> {
     // `None` where the device has no int8 dot path - never a guess, and never
     // fp32's number standing in for it.
     let int8_gops = gpu.caps().numeric.int8_dot.then(|| measure_int8(&g)).flatten();
-    // Same rule as int8: `None` unless the device has already been VERIFIED
-    // to run native f16 fast (`caps().numeric.f16`) - this stays `false`
-    // (hence this probe stays unrun) on every backend until something wires
-    // up that verification; see `Roofs::f16_gflops`'s own doc. Built off `g`
+    // Same SHAPE as int8 (gate on EXECUTES, not the measured-fast flag), but
+    // int8's own gate (`numeric.int8_dot`) already means "executes" - this
+    // one (M8.2 fix) used to gate on `numeric.f16`, which means "measured
+    // fast" (`is_fast`), a value nothing can set without first running this
+    // very probe: `f16_gflops` was permanently dead code, circular by
+    // construction. `arch.executes(F16)` is the non-circular gate - true
+    // whenever f16 arithmetic runs at all (Emulated/Native/Matrix), long
+    // before anything has measured whether it's FAST - matching how
+    // `int8_gops` was never gated on a measured result either. Built off `g`
     // rather than `gpu` so the f16 kernel compiles onto the SAME already-warm
     // device the other probes just measured, not a fresh cold one.
-    let f16_gflops = gpu.caps().numeric.f16.then(|| measure_f16(&g)).flatten();
+    let f16_gflops = gpu.caps().arch.executes(backend_api::DType::F16).then(|| measure_f16(&g)).flatten();
     Some(Roofs { gflops, gbs, cache_gbs, int8_gops, f16_gflops })
 }
 
@@ -1068,86 +1076,81 @@ mod tests {
         std::env::var("MOE_SKIP_GPU_TESTS").map(|v| v != "0").unwrap_or(false)
     }
 
-    /// The f16 probe (B11-shaped, `enable f16;` real registers) has two
-    /// halves to prove:
+    /// The f16 probe (B11-shaped, `enable f16;` real registers) through the
+    /// PRODUCTION `measure()` gate (M8.2 - this used to require bypassing
+    /// the gate entirely, via `measure_f16`/`measure_compute` called
+    /// directly, because the old gate (`caps().numeric.f16`, "measured
+    /// fast") was circular: nothing could ever set it without first running
+    /// this very probe, so `f16_gflops` was permanently dead code on every
+    /// device that ever existed). Two halves:
     ///
-    /// 1. On every device and backend that exists TODAY, `caps().numeric.f16`
-    ///    is unconditionally `false` (its own doc: "stays false until the
-    ///    autotuner measures it" - nothing in this codebase sets it yet), so
-    ///    `measure()` must gate the probe off and report `f16_gflops: None` -
-    ///    checked here against a REAL device, not assumed.
+    /// 1. `caps().numeric.f16` (is_fast) stays `false` on every device
+    ///    (unchanged by this milestone - nothing populates a REAL measured
+    ///    verdict back into a device's capabilities yet); `caps().arch.
+    ///    executes(F16)` (the new, non-circular gate) is `true` wherever f16
+    ///    arithmetic runs at all, checked here against a REAL device, not
+    ///    assumed.
     /// 2. Where hardware genuinely DOES run native f16 (checked the honest
     ///    way `backend-wgpu`'s own `tests/native_f16.rs` does - the adapter's
-    ///    `wgpu::Features::SHADER_F16`, not the always-false caps flag), the
-    ///    measurement mechanism itself must be self-consistent: a real f16
-    ///    ALU is never slower than the same silicon's fp32 path, so
-    ///    `f16_gflops >= gflops` is asserted, not merely "is Some". This half
-    ///    calls `measure_f16`/`measure_compute` directly, bypassing the
-    ///    (currently permanently-closed) `caps().numeric.f16` gate - exactly
-    ///    as `native_f16.rs` measures the real mechanism directly rather than
-    ///    through a flag nothing sets.
+    ///    `wgpu::Features::SHADER_F16`), `measure()` itself - the production
+    ///    path, no bypass needed anymore - must report `f16_gflops: Some`,
+    ///    and the measurement must be self-consistent: a real f16 ALU is
+    ///    never slower than the same silicon's fp32 path, so `f16_gflops >=
+    ///    gflops` is asserted, not merely "is Some".
     ///
-    /// The two probes are independent calibration loops on separate device
-    /// handles seconds apart, so the comparison samples the machine at two
-    /// different moments - and the fast lane runs suites in parallel, so
-    /// concurrent load can independently depress either side by more than
-    /// the f16-vs-fp32 margin (observed once: f16 265 vs fp32 279 GFLOP/s
-    /// under a 4-thread lane, passing in isolation immediately after). The
-    /// halves are therefore interleaved for several rounds and compared
-    /// best-vs-best: both sides then sample the same clock/thermal window,
-    /// and one depressed sample cannot decide a hardware-invariant verdict.
+    /// The two rates come from ONE `measure()` call (both probes run on the
+    /// same warmed-up device in the same pass, unlike the old bypass version
+    /// which sampled fp32 and f16 seconds apart on separate handles), so a
+    /// single clock/thermal window decides the comparison - best-of-3 whole
+    /// `measure()` calls guards against a single depressed sample under
+    /// concurrent load.
     #[test]
-    fn f16_roof_is_none_while_uncapped_and_never_slower_than_fp32_where_hardware_supports_it() {
+    fn f16_roof_runs_through_the_production_gate_and_is_never_slower_than_fp32_where_hardware_supports_it() {
         if skip_gpu() {
             return;
         }
         let gpu = crate::testgpu::dev(PROBE_KERNELS);
 
-        // (1) The gated, production path, on a real device.
         assert!(
             !gpu.caps().numeric.f16,
-            "this test's premise (nothing sets NumericSupport.f16 yet) no longer holds - \
-             see Roofs::f16_gflops' own doc for what changes if it does"
+            "this test's premise (nothing measures a fast-f16 verdict back into caps yet) no \
+             longer holds - see Roofs::f16_gflops' own doc for what changes if it does"
         );
-        if let Some(r) = measure(&gpu) {
-            assert!(r.f16_gflops.is_none(), "f16_gflops must stay None while caps().numeric.f16 is false, got {:?}", r.f16_gflops);
-        }
 
-        // (2) The raw mechanism, on real f16-capable hardware only.
         if gpu.kind() != "wgpu" {
             return; // native f16 compute exists only on this backend
         }
         let probe = backend_wgpu::WgpuBackend::new(&[("axpy", kernels::AXPY)]);
         if !probe.supports_shader_f16() {
+            assert!(!gpu.caps().arch.executes(backend_api::DType::F16), "executes(F16) must be false without SHADER_F16");
             brain_testutil::skip_unavailable(
-                "f16_roof_is_none_while_uncapped_and_never_slower_than_fp32_where_hardware_supports_it: \
+                "f16_roof_runs_through_the_production_gate_and_is_never_slower_than_fp32_where_hardware_supports_it: \
                  this adapter does not report wgpu::Features::SHADER_F16",
             );
             return;
         }
-        let (mut best_fp32, mut best_fp16) = (None, None);
-        for _ in 0..5 {
-            if let Some(v) = measure_compute(&gpu) {
-                if best_fp32.is_none_or(|b| v > b) {
-                    best_fp32 = Some(v);
-                }
-            }
-            if let Some(v) = measure_f16(&gpu) {
-                if best_fp16.is_none_or(|b| v > b) {
-                    best_fp16 = Some(v);
+        assert!(gpu.caps().arch.executes(backend_api::DType::F16), "executes(F16) must be true - this adapter has SHADER_F16");
+
+        let mut best: Option<Roofs> = None;
+        for _ in 0..3 {
+            if let Some(r) = measure(&gpu) {
+                if best.as_ref().is_none_or(|b| r.gflops > b.gflops) {
+                    best = Some(r);
                 }
             }
         }
-        let (Some(fp32), Some(fp16)) = (best_fp32, best_fp16) else {
+        let Some(r) = best else {
             return; // unprobeable device - callers print `-`, never a guess
         };
+        let fp16 = r.f16_gflops.expect("f16_gflops must be Some through the production gate on SHADER_F16 hardware");
         assert!(fp16.is_finite() && fp16 > 0.0, "f16 roof {fp16}");
         assert!(
-            fp16 >= fp32,
-            "native f16 measured {fp16:.0} GFLOP/s, SLOWER than fp32's {fp32:.0} GFLOP/s on hardware \
-             that reports SHADER_F16 - a real f16 ALU cannot be slower than fp32 on the same silicon"
+            fp16 >= r.gflops,
+            "native f16 measured {fp16:.0} GFLOP/s, SLOWER than fp32's {:.0} GFLOP/s on hardware \
+             that reports SHADER_F16 - a real f16 ALU cannot be slower than fp32 on the same silicon",
+            r.gflops
         );
-        eprintln!("native f16 roof: {fp16:.0} GFLOP/s vs fp32 {fp32:.0} GFLOP/s ({:.2}x)", fp16 / fp32);
+        eprintln!("native f16 roof: {fp16:.0} GFLOP/s vs fp32 {:.0} GFLOP/s ({:.2}x)", r.gflops, fp16 / r.gflops);
     }
 
     /// Two distinct physical GPUs (synthetic identities here - this sandbox

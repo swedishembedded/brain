@@ -1496,7 +1496,19 @@ impl WgpuBackend {
         // re-bias, still just integer/bitcast arithmetic, no device
         // feature).
         arch.set_tier(DType::BF16, TierSupport { level: TierLevel::Storage, ..Default::default() });
-        arch.set_tier(DType::F16, TierSupport { level: TierLevel::Storage, ..Default::default() });
+        // F16 (M8.2): `Native` when this adapter was actually granted
+        // `wgpu::Features::SHADER_F16` (real narrow-register arithmetic on
+        // dedicated hardware - established by a real device query, matching
+        // `backend-vulkan`'s own `Native`-for-DP4A precedent), else the
+        // storage-only decode-to-f32 tier every wgpu target has regardless.
+        // `Native` here is deliberately NOT a speed claim - Pascal-class
+        // hardware can expose the extension at 1/64 rate - only that a real
+        // f16 ALU exists, so `arch.executes(F16)` can un-gate the roofline
+        // probe (`gpu_core::roof::measure`) from its old "never runs because
+        // nothing ever proves it fast enough to run it" circularity; `is_fast`
+        // still requires a real measurement, exactly as before.
+        let f16_level = if adapter.features().contains(wgpu::Features::SHADER_F16) { TierLevel::Native } else { TierLevel::Storage };
+        arch.set_tier(DType::F16, TierSupport { level: f16_level, ..Default::default() });
         // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). B11 built the
         // actual measurement (`f16_worth_enabling`, the real
         // native-f16-vs-f32 roofline comparison in
@@ -1540,7 +1552,21 @@ impl WgpuBackend {
             // fp8_storage`'s own doc). Set directly here rather than
             // threading a new tier through `ArchDesc` for one orthogonal
             // flag.
-            numeric: NumericSupport { fp8_storage: true, ..arch.numeric_view() },
+            //
+            // `f16_storage: true` (M8.2) overrides `numeric_view()`'s own
+            // narrower answer, deliberately: that view's `f16_storage` is an
+            // EXACT match on `TierLevel::Storage` (by design - see its own
+            // doc comment, preserving `backend-vulkan`'s legacy quirk of
+            // reporting `Native` there while never having set
+            // `f16_storage`), but wgpu's storage-tier decode
+            // (`dtype_variant`'s plain bitcast WGSL) runs on EVERY wgpu
+            // target regardless of which tier this adapter's F16 landed at
+            // (`Storage` without `SHADER_F16`, `Native` with it, as of this
+            // same milestone's fix a few lines above) - unlike Vulkan, wgpu's
+            // storage decode was never conditional on the compute tier, so
+            // narrowing it here would be a real regression, not fidelity to
+            // any legacy quirk this backend ever had.
+            numeric: NumericSupport { fp8_storage: true, f16_storage: true, ..arch.numeric_view() },
             arch,
         }
     }
