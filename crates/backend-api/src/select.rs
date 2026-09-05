@@ -1003,6 +1003,76 @@ impl KernelVariant {
     }
 }
 
+/// A SCHEDULE choice for an already-selected [`KernelVariant`] (M8.4) - which
+/// PHYSICAL dispatch of that implementation family runs, once tuning widens
+/// past "which variant" to "which schedule". Only the register-tiled GEMM
+/// family's split-K factor is populated today: `matmul_reg3`-shaped kernels
+/// hand-unroll their tile/register-block/staging-loop literals from BM/BN/BK/
+/// workgroup-thread-count (see `matmul_reg3.wgsl`'s own `As`/`Bs` shared
+/// arrays, sized as a fixed literal derived from those consts, and the
+/// staging loop's hardcoded `4`-element-per-thread trip count) rather than
+/// deriving them from `kernels::template`'s tunable consts at compile time -
+/// so genuinely retiling BM/BN/BK/vector-width/pipeline-depth needs new
+/// kernel engineering (deriving those literals from their consts, sizing the
+/// shared arrays to a safe upper bound across the grid) that is a real,
+/// documented follow-up, not attempted here. Split-K is different: `matmul_
+/// reg3_splitk.wgsl` already takes its slice count as a RUNTIME `Params`
+/// field (`p.slices`), so varying it needs no recompilation and carries none
+/// of that array-bound risk - genuinely orthogonal to correctness (any
+/// `slices >= 1` produces the same answer, only the dispatch shape and the
+/// fold's read amplification change), which is exactly what makes it safe to
+/// widen the search over.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Schedule {
+    /// How many workgroups the contraction (`k`) is split across before a
+    /// reduce pass folds the partials - `matmul_reg3_splitk` + a
+    /// `dw_splitk_reduce`-shaped fold at `slices > 1`, the plain unsplit
+    /// `matmul_reg3` at `slices == 1`.
+    pub split_k: u32,
+}
+
+impl Schedule {
+    /// The unsplit schedule - what every `RegisterTiled` GEMM dispatches
+    /// before this milestone, and what a device/shape with no schedule
+    /// tuning applied to it keeps dispatching.
+    pub const UNSPLIT: Schedule = Schedule { split_k: 1 };
+
+    /// Stable name for persistence (the tune cache stores these) - mirrors
+    /// [`KernelVariant::as_str`]'s convention.
+    pub fn as_str(self) -> String {
+        format!("split_k={}", self.split_k)
+    }
+
+    /// Inverse of [`Schedule::as_str`].
+    pub fn parse_str(s: &str) -> Option<Schedule> {
+        Some(Schedule { split_k: s.strip_prefix("split_k=")?.parse().ok()? })
+    }
+}
+
+/// The bounded, explicit split-K grid to measure for a register-tiled GEMM
+/// whose STATIC policy already picked `guess` slices (e.g. `qwen3::serve::
+/// Engine::splitk_slices`'s own occupancy-target heuristic, itself measured
+/// against real hardware per that function's own doc) - `guess` is ALWAYS
+/// first, so a device/shape where nothing measures faster keeps today's exact
+/// behaviour (the same "static default is the head" invariant [`candidates`]
+/// itself keeps). `guess/2` and `guess*2` (clamped to `[1, max_slices]` and
+/// deduplicated against `guess`) are offered alongside it: halving trades
+/// reduce cost for less occupancy pressure, doubling the reverse - the two
+/// directions a starved-occupancy heuristic can most plausibly have gotten
+/// wrong, not an exhaustive sweep of every slice count up to `max_slices`.
+/// At most 3 candidates, by construction.
+pub fn gemm_schedule_candidates(guess: u32, max_slices: u32) -> Vec<Schedule> {
+    let max_slices = max_slices.max(1);
+    let mut out = vec![Schedule { split_k: guess.clamp(1, max_slices) }];
+    for cand in [guess / 2, guess.saturating_mul(2)] {
+        let cand = cand.clamp(1, max_slices);
+        if !out.iter().any(|s| s.split_k == cand) {
+            out.push(Schedule { split_k: cand });
+        }
+    }
+    out
+}
+
 /// Persistence for measured kernel choices — a trait so this crate stays
 /// dependency-free; the file-backed implementation lives in `gpu-core`
 /// (`tune::FileTuneStore`), keyed per adapter.
@@ -1028,17 +1098,23 @@ pub struct AutoTuner {
     enabled: bool,
     store: Option<Box<dyn TuneStore>>,
     memo: std::sync::Mutex<std::collections::HashMap<(Op, OpShape), KernelVariant>>,
+    /// M8.4: the SAME measure-once-per-adapter-and-cache discipline as `memo`
+    /// above, widened from "which `KernelVariant`" to "which [`Schedule`]" - a
+    /// SEPARATE map (not folded into `memo`) so a schedule search for
+    /// `(op, shape)` can never collide with, or be mistaken for, that same
+    /// key's `KernelVariant` choice.
+    schedule_memo: std::sync::Mutex<std::collections::HashMap<(Op, OpShape), Schedule>>,
 }
 
 impl AutoTuner {
     pub fn new(store: Option<Box<dyn TuneStore>>) -> AutoTuner {
         let enabled = std::env::var("BRAIN_NO_AUTOTUNE").map(|v| v == "0").unwrap_or(true);
-        AutoTuner { enabled, store, memo: Default::default() }
+        AutoTuner { enabled, store, memo: Default::default(), schedule_memo: Default::default() }
     }
 
     /// A tuner that never measures — the static policy with the same API.
     pub fn disabled() -> AutoTuner {
-        AutoTuner { enabled: false, store: None, memo: Default::default() }
+        AutoTuner { enabled: false, store: None, memo: Default::default(), schedule_memo: Default::default() }
     }
 
     fn key(op: Op, shape: OpShape) -> String {
@@ -1082,6 +1158,53 @@ impl AutoTuner {
         self.memo.lock().unwrap().insert((op, shape), best);
         if let Some(s) = &self.store {
             s.save(&key, best.as_str());
+        }
+        best
+    }
+
+    /// [`AutoTuner::resolve`]'s exact discipline (memo -> persisted store ->
+    /// measure each candidate once -> remember and persist the winner),
+    /// widened from [`KernelVariant`] to [`Schedule`] (M8.4). `candidates` is
+    /// never empty by contract (see [`gemm_schedule_candidates`]); `measure`
+    /// returns the cost (lower is better) of dispatching one candidate, or
+    /// `None` if it could not be measured. A stored value that is not among
+    /// TODAY's candidates is ignored, same stale-cache rule as `resolve`.
+    pub fn resolve_schedule(
+        &self,
+        op: Op,
+        shape: OpShape,
+        candidates: &[Schedule],
+        measure: &mut dyn FnMut(Schedule) -> Option<f64>,
+    ) -> Schedule {
+        if !self.enabled || candidates.len() < 2 {
+            return candidates[0];
+        }
+        if let Some(&hit) = self.schedule_memo.lock().unwrap().get(&(op, shape)) {
+            return hit;
+        }
+        // A distinct key namespace from `resolve`'s (`/schedule` suffix) so
+        // the two searches can never read or overwrite each other's entry for
+        // the identical (op, shape), even in the SAME persisted file.
+        let key = format!("{}/schedule", Self::key(op, shape));
+        if let Some(stored) = self.store.as_ref().and_then(|s| s.load(&key)) {
+            if let Some(v) = Schedule::parse_str(&stored).filter(|v| candidates.contains(v)) {
+                self.schedule_memo.lock().unwrap().insert((op, shape), v);
+                return v;
+            }
+        }
+        let mut best = candidates[0];
+        let mut best_cost = f64::INFINITY;
+        for &c in candidates {
+            if let Some(cost) = measure(c) {
+                if cost < best_cost {
+                    best_cost = cost;
+                    best = c;
+                }
+            }
+        }
+        self.schedule_memo.lock().unwrap().insert((op, shape), best);
+        if let Some(s) = &self.store {
+            s.save(&key, &best.as_str());
         }
         best
     }
@@ -1689,7 +1812,12 @@ mod tests {
                 self.0.save(k, v)
             }
         }
-        let t = AutoTuner { enabled: true, store: Some(Box::new(Ref(store))), memo: Default::default() };
+        let t = AutoTuner {
+            enabled: true,
+            store: Some(Box::new(Ref(store))),
+            memo: Default::default(),
+            schedule_memo: Default::default(),
+        };
         let sh = shape(4, 512, 512, Dtype::I8); // static best: WorkgroupPerOutput
         let caps = gpu_caps();
         let mut calls = 0;
@@ -1703,7 +1831,12 @@ mod tests {
         assert_eq!(calls, 2, "both candidates measured once; the second resolve is a memo hit");
         // A fresh tuner sharing the store trusts the persisted winner without
         // measuring at all.
-        let t2 = AutoTuner { enabled: true, store: Some(Box::new(Ref(store))), memo: Default::default() };
+        let t2 = AutoTuner {
+            enabled: true,
+            store: Some(Box::new(Ref(store))),
+            memo: Default::default(),
+            schedule_memo: Default::default(),
+        };
         let mut no_measure = |_: KernelVariant| -> Option<f64> { panic!("stored winner must be reused") };
         assert_eq!(t2.resolve(Op::MatMul, sh, &caps, &mut no_measure), KernelVariant::PackedInt8);
         // Disabled tuner = the static policy, zero measurements.
@@ -1907,5 +2040,124 @@ mod tests {
             assert!(seen.insert(key.clone()), "duplicate cache key for {dtype:?}: {key}");
         }
         assert_eq!(seen.len(), dtypes.len());
+    }
+
+    /// M8.4: [`Schedule`] round-trips through persistence, same discipline
+    /// [`every_kernel_variant_round_trips_through_persistence`] already
+    /// requires of [`KernelVariant`] - a schedule that could not survive a
+    /// save/load cycle would silently lose a tuned split-K choice back to the
+    /// static guess on the next process start.
+    #[test]
+    fn schedule_round_trips_through_persistence() {
+        for split_k in [1u32, 2, 4, 8, 48] {
+            let s = Schedule { split_k };
+            assert_eq!(Schedule::parse_str(&s.as_str()), Some(s), "{s:?}");
+        }
+        assert_eq!(Schedule::parse_str("garbage"), None);
+        assert_eq!(Schedule::parse_str("split_k=nope"), None);
+    }
+
+    /// The split-K grid is bounded (at most 3 candidates, never exhaustive),
+    /// always contains the static `guess` FIRST (the same "static default is
+    /// the head" invariant `candidates_head_is_the_default_policy` already
+    /// requires of `KernelVariant`), stays clamped inside `[1, max_slices]`
+    /// even when `guess`'s neighbours would fall outside it, and never
+    /// duplicates a candidate (the `guess=1` case, where `guess/2` rounds
+    /// back down to the same `1` the clamp already produced).
+    #[test]
+    fn gemm_schedule_candidates_are_bounded_and_guess_first() {
+        let mid = gemm_schedule_candidates(8, 48);
+        assert_eq!(mid[0], Schedule { split_k: 8 }, "the static guess must be first");
+        assert_eq!(mid, vec![Schedule { split_k: 8 }, Schedule { split_k: 4 }, Schedule { split_k: 16 }]);
+        assert!(mid.len() <= 3, "the grid must never be exhaustive");
+
+        // guess=1: guess/2 == 0, clamped to 1 -- must not duplicate the head.
+        let low = gemm_schedule_candidates(1, 48);
+        assert_eq!(low, vec![Schedule { split_k: 1 }, Schedule { split_k: 2 }]);
+
+        // guess at the ceiling: guess*2 clamps back down to max_slices,
+        // which must not duplicate a candidate either.
+        let high = gemm_schedule_candidates(48, 48);
+        assert_eq!(high, vec![Schedule { split_k: 48 }, Schedule { split_k: 24 }]);
+
+        // A caller-supplied guess above max_slices is clamped, not trusted
+        // verbatim -- the tuner must never be asked to measure a slice count
+        // the scratch buffer was not sized for.
+        let over = gemm_schedule_candidates(96, 48);
+        assert_eq!(over[0], Schedule { split_k: 48 });
+    }
+
+    /// [`AutoTuner::resolve_schedule`]: the exact `resolve` proof
+    /// (`autotuner_measures_once_and_persists`) transcribed for [`Schedule`]
+    /// instead of [`KernelVariant`] - measures each candidate once, memoises,
+    /// persists the winner under a key namespace that cannot collide with
+    /// `resolve`'s own, trusts a persisted winner without re-measuring, and a
+    /// disabled tuner never measures at all.
+    #[test]
+    fn resolve_schedule_measures_once_and_persists() {
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct MapStore(Mutex<std::collections::HashMap<String, String>>);
+        impl TuneStore for MapStore {
+            fn load(&self, k: &str) -> Option<String> {
+                self.0.lock().unwrap().get(k).cloned()
+            }
+            fn save(&self, k: &str, v: &str) {
+                self.0.lock().unwrap().insert(k.into(), v.into());
+            }
+        }
+        let store = Box::leak(Box::new(MapStore::default()));
+        struct Ref(&'static MapStore);
+        impl TuneStore for Ref {
+            fn load(&self, k: &str) -> Option<String> {
+                self.0.load(k)
+            }
+            fn save(&self, k: &str, v: &str) {
+                self.0.save(k, v)
+            }
+        }
+        let t = AutoTuner {
+            enabled: true,
+            store: Some(Box::new(Ref(store))),
+            memo: Default::default(),
+            schedule_memo: Default::default(),
+        };
+        let sh = shape(128, 2048, 1024, Dtype::F32);
+        let cands = gemm_schedule_candidates(1, 8); // [1, 2]
+        let mut calls = 0;
+        // The split kernel measures FASTER here, overriding the unsplit guess.
+        let mut measure = |s: Schedule| {
+            calls += 1;
+            Some(if s.split_k == 2 { 1.0 } else { 2.0 })
+        };
+        assert_eq!(t.resolve_schedule(Op::MatMul, sh, &cands, &mut measure), Schedule { split_k: 2 });
+        assert_eq!(t.resolve_schedule(Op::MatMul, sh, &cands, &mut measure), Schedule { split_k: 2 });
+        assert_eq!(calls, 2, "both candidates measured once; the second resolve is a memo hit");
+
+        let t2 = AutoTuner {
+            enabled: true,
+            store: Some(Box::new(Ref(store))),
+            memo: Default::default(),
+            schedule_memo: Default::default(),
+        };
+        let mut no_measure = |_: Schedule| -> Option<f64> { panic!("stored winner must be reused") };
+        assert_eq!(t2.resolve_schedule(Op::MatMul, sh, &cands, &mut no_measure), Schedule { split_k: 2 });
+
+        // The persisted schedule key must not collide with `resolve`'s own
+        // KernelVariant key for the identical (op, shape) -- storing a
+        // Schedule string under the plain key would make a later
+        // `KernelVariant::parse_str` silently fail (a different, harmless-
+        // looking string), which this proves cannot happen by construction:
+        // `resolve`'s key has no `/schedule` suffix, so the two never share a
+        // slot in the same map.
+        assert!(store.0.lock().unwrap().contains_key(&format!("{}/schedule", AutoTuner::key(Op::MatMul, sh))));
+
+        let td = AutoTuner::disabled();
+        let mut no_measure2 = |_: Schedule| -> Option<f64> { panic!("disabled tuner must not measure") };
+        assert_eq!(
+            td.resolve_schedule(Op::MatMul, sh, &cands, &mut no_measure2),
+            Schedule { split_k: 1 },
+            "disabled = the static guess (candidates[0])"
+        );
     }
 }
