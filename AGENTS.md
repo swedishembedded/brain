@@ -1435,6 +1435,21 @@ a metric that isn't there was simply forgotten.
   as before. A provider for any of THOSE call sites needs its own migration
   onto the seam first; the seam existing for `Op::MatMul` is not license to
   bypass this section anywhere it has not been migrated.
+  **M8.9 landed the first real (non-reference) provider**:
+  `gpu_core::provider::coopmat::CoopMatProvider`, a `VK_KHR_cooperative_matrix`
+  f16xf16->f32 GEMM registered through `Backend::register_native`/
+  `step_native` on `backend-vulkan`'s own device (moved there from
+  `crates/vulkan`, a separate device, specifically so it shares M6.1/M6.2's
+  dependency-tracking/async-submission machinery instead of forfeiting it).
+  It correctly `requires()`-declines on every box this repo has run on
+  (cooperative matrix needs Turing sm_75+ or an equivalent matrix-engine
+  driver) - proving the gate works, not merely assuming it would. One real,
+  measured surprise from bringing it up: `vkCreateComputePipelines` can
+  ACCEPT this SPIR-V on a device with no matrix-engine feature enabled at all
+  (Intel ANV, no validation layer) - pipeline creation succeeding is not
+  proof of correct execution, which is why `Requirement.matrix` (checked
+  before `register_native` is ever reached) is the authoritative gate, not
+  whether registration happened to succeed.
 - **Never put a large `var<function>` array behind a runtime loop bound.** WGSL
   function-scope arrays only become registers if the compiler can unroll every
   index; bound the loop by a `Params` field and the array lands in *local*

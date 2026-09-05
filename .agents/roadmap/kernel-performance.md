@@ -4140,6 +4140,148 @@ rather than extrapolated to a bigger claim.
 **Commit**: one - `qwen3, backend-api: M8.4 - schedule-space autotuning,
 split-K for the register-tiled fp32 GEMM`.
 
+### M8.9 - The cooperative-matrix provider: moved onto `backend-vulkan`'s own
+device, registered through `Backend::register_native`/`step_native`, and
+proven to decline correctly on real hardware
+
+Phase 8's first non-WGSL `OperatorProvider`. Two commits, per the brief's own
+prediction.
+
+**Commit 1 - the structural move.** `crates/vulkan/src/matmul.rs`'s pipeline-
+creation/dispatch logic (`MatmulBackend`, `matmul`, `scalar_matmul`,
+`coopmat_matmul`, `build_pipeline`/`destroy_pipeline`, the standalone
+`cooperative_matmul_demo`) built its OWN `VkContext` - a SEPARATE Vulkan
+device from `backend-vulkan`'s, forfeiting M6.1's per-buffer dependency
+tracking and M6.2's asynchronous submission entirely (both live on
+`backend-vulkan`'s device, not a second one `crates/vulkan` opened for its own
+demo). That logic moved (not duplicated) into `crates/backend-vulkan/src/
+coopmat.rs`, built against `VulkanBackend`'s own `self.ctx`. `crates/vulkan`
+now keeps only `matmul::coopmat_spv()` (the build-time GLSL->SPIR-V compile,
+no device involved) and its own `print_vk_info` capability probe (a
+read-only query, still fine on its own throwaway context). The `moe pid
+vk-matmul` CLI demo (behind the pre-existing `vulkan-coopmat` feature) now
+calls `backend_vulkan::coopmat::demo()`, which opens a REAL `VulkanBackend`
+and runs the kernel through `register_native`/`step_native`/`submit`/`read`
+end to end (or reports exactly why the device declined) - proving the moved
+plumbing works, not just that it compiles.
+
+**The `f32_to_f16_bits` precision bug, fixed while touching this code.** The
+old hand-rolled conversion flushed every f32 value whose magnitude falls
+below f16's smallest NORMAL (`2^-14`) to a signed zero - discarding every f16
+SUBNORMAL (down to `2^-24`) as a silent, unflagged truncation. Replaced with
+`half::f16::from_f32` (round-to-nearest-even, correct for subnormals and
+infinities) - `half` was already a workspace dependency (`backend-wgpu`/
+`model`/`gguf`/`checkpoint`/`ltxv`/`gpu-core` all use it for the identical
+conversion), checked before adding the new `crates/backend-vulkan` dependency
+edge, per the milestone brief's own instruction. Pinned by
+`coopmat::tests::pack_f16_preserves_an_f16_subnormal_the_old_conversion_flushed_to_zero`/
+`..._preserves_the_smallest_f16_subnormal` (both RED against the old formula,
+by hand-verified construction; `2^-15` and `2^-24` are exactly representable
+f16 subnormals a correct conversion must round-trip exactly, not zero).
+
+**The dispatch-grid shape mismatch this move exposed.** `matmul_coopmat.comp`
+indexed its own output tile directly from `gl_WorkGroupID.x`/`.y` (one tile
+per independent (row, col) pair). `Backend::step_native`'s fixed signature
+(`threads: u32`, no separate x/y) only offers `backend_api::grid_ws(threads,
+wgsize)`'s flat, `MAX_GROUPS_PER_DIM`-tiled 2-D grid - the SAME convention
+every WGSL kernel already reconstructs via `gid.y*(nwg.x*WG)+gid.x`, generalised
+here from per-THREAD to per-WORKGROUP (a native kernel has no reflected
+`@workgroup_size` for the engine to divide by, so this crate defines the
+convention: `threads` for a `NativeSpec` kernel IS the workgroup count
+directly, `wgsize == 1` - see `coopmat::NativeEntry::wgsize`'s doc). Fixed the
+`.comp` to reconstruct its own tile index the same way
+(`gl_WorkGroupID.y*gl_NumWorkGroups.x+gl_WorkGroupID.x`, decomposed by the
+real N-tile count, with the same `if (idx >= n) return;` bound every WGSL
+kernel already uses for `grid_ws`'s own overshoot). Correct by construction
+and compiles (glslc is on `PATH` in this sandbox); **unvalidated against a
+real dispatch** - this box has no cooperative-matrix hardware to prove the
+tile math against (see below).
+
+**Commit 2 - the provider.** `VulkanBackend::register_native`/`step_native`
+implemented for real: `register_native` compiles `NativeSpec::SpirV` into an
+ordinary compute pipeline against `self.ctx` and returns a `NativeId`
+(`Err`/`None` on any real failure, never a panic); `step_native` is `self.
+step(kind, ...)` for `kind >= native_base()` - reusing `record`/`flush`/the
+per-buffer hazard analysis/the profiler UNCHANGED (`resolve_kernel` is the
+one new indirection: it resolves either the fixed WGSL catalogue or a
+runtime-registered native kernel to the same pipeline/layout/bindings/wgsize
+shape, so every existing per-`kind` bookkeeping - `free_sets`' pool key, the
+`BRAIN_PROFILE` accumulator - already works for a native `kind` unmodified).
+Native kernels are per-HANDLE, matching every other command-stream field this
+struct already keeps handle-local (`pending`/`uniforms`/`free_sets`); a
+`share()`/`new_like()` sibling does not inherit a registration, and
+`VulkanBackend::Drop` destroys them (they are never `Arc`-shared the way the
+WGSL catalogue's `VkPipelineSet` is).
+
+`gpu_core::provider::coopmat::CoopMatProvider` (native-only,
+`#[cfg(not(target_arch = "wasm32"))]`, matching `brain-backend-vulkan`'s own
+reach): `requires()` reports `Requirement.matrix = Some(MatShapeReq{F16, F16,
+F32})` (M8.1's real seam, no longer decorative); `accepts()` refuses
+`Pass::Backward` UNCONDITIONALLY (f16-multiply/f32-accumulate is not
+gradient-faithful - same structural rule the native-f16 provider, a sibling
+wave-2 milestone, applies) and refuses any non-tile-aligned shape or operand
+dtype outside `[F16, F16, F32-out]` (falls back to the WGSL reference
+provider, never forces a fake fit); `lower()` lazily registers the pipeline
+(cached per provider instance, matching `CachedSelector`'s own per-device
+caching assumption) and pushes exactly one `Step` via `Gpu::step_native`.
+Deliberately does NOT repack an arbitrary incoming shape/dtype into the
+packed-f16, tile-padded layout the kernel needs - per M8.1's own "no vendor
+pack ships in this campaign" scope, this proves the ABI wiring works, not a
+production migration; nothing in a real model call site produces
+already-packed-f16 tile-aligned operands today.
+
+**Gate - proven, not assumed, on THIS box's real Vulkan device (Intel Arc
+(MTL) iGPU, `crates/backend-vulkan`'s real `query_caps`, no mocks):**
+`crates/gpu-core/tests/coopmat_provider_declines_on_this_box.rs`'s
+`coopmat_provider_requires_is_unsatisfied_by_this_boxs_real_vulkan_caps`
+opens a real `VulkanBackend`, confirms `caps.arch.matrix` is `None` (no
+`VK_KHR_cooperative_matrix` shapes on this hardware), and asserts
+`CoopMatProvider::requires(&req).satisfied_by(&caps)` is `false` - the
+provider is PROVABLY unreachable here, not merely assumed to be. `cargo test
+-p brain-gpu-core --lib` (the inline unit tests: `accepts_refuses_backward_
+unconditionally`, `accepts_refuses_non_tile_aligned_shapes`, `requires_
+reports_the_f16_f16_f32_triple_and_a_baseline_caps_never_satisfies_it`) and
+`cargo test -p brain-backend-vulkan -p brain-vulkan --lib` (the `coopmat`
+module's own `pack_f16`/`pack_padded_f16`/`round_up`/`is_tile_aligned` unit
+tests) all green.
+
+**A real, measured surprise the gate test caught, recorded rather than
+silenced.** The test originally also asserted `VulkanBackend::register_native`
+returns `None` on this device. FALSE on real hardware: Mesa's Intel ANV
+driver (no `VK_LAYER_KHRONOS_validation` active) ACCEPTS
+`vkCreateComputePipelines` for the real coopmat SPIR-V even though
+`caps.arch.matrix` is `None` - pipeline creation succeeding is not proof the
+device can correctly EXECUTE `OpTypeCooperativeMatrixKHR`. This is exactly
+why `Requirement.matrix` (checked by `ProviderRegistry::resolve` BEFORE a
+real caller ever reaches `register_native`) is the one authoritative gate,
+not whether registration happened to succeed - the test now observes this
+outcome via `brain_testutil::skip_unvalidated_capability("coopmat-hardware",
+...)` and deliberately does NOT dispatch the resulting pipeline (no
+`step_native`/`submit`/`read`): whether it would execute correctly, produce
+garbage, or hang the device is unknown and not safe to probe without real
+matrix-engine hardware to compare against. `AGENTS.md`'s amended
+`OperatorProvider` bullet records the same finding.
+
+**Measured here: partial, as predicted by this milestone's own brief.** The
+structural move (Commit 1: shared-device pipeline creation, the
+`f32_to_f16_bits` fix, the dispatch-grid fix) and the `Backend::
+register_native`/`step_native` wiring (Commit 2) are provably correct by
+compile + code review + unit test, regardless of hardware - none of that is
+deferred. What genuinely cannot be measured here: an actual coopmat GEMM
+dispatch's numeric correctness, and the `CoopMatProvider`'s `lower()` path
+end to end (`register_native` "succeeding" on this box is not the same claim
+as the kernel executing correctly - see the surprise above). Needs Turing
+sm_75+ (NVIDIA) or an equivalent real matrix-engine driver to validate; until
+then this is built and gated, not measured, exactly per the hardware-harness
+contract (decision 2).
+
+`cargo check --workspace` clean. `cargo clippy -p brain-vulkan -p
+brain-backend-vulkan -p brain-gpu-core --all-targets` clean on every file
+this milestone touched. `python3 scripts/build/gen-kernel-table.py --check`
+unaffected (no WGSL kernel added or renamed; the coopmat kernel is GLSL/
+SPIR-V, outside that catalogue by construction, same as before this
+milestone). **Commits**: two, as scoped (the structural move; the provider).
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

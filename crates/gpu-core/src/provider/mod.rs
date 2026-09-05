@@ -43,6 +43,11 @@ use backend_api::DeviceCaps;
 
 use crate::{DeviceBuffer, Gpu, Step};
 
+// M8.9: the first non-WGSL provider (cooperative-matrix). Native-only - it
+// registers a real SPIR-V pipeline through `backend_vulkan::coopmat`, which
+// (like every other Vulkan/ash path in this workspace) cannot target wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod coopmat;
 pub mod parity;
 pub mod wgsl;
 
