@@ -48,6 +48,14 @@ const SHAPES: &[Shape] = &[
     Shape { label: "tts talker ffn-dn 256x3072->1024", m: 256, k: 3072, n: 1024 },
     Shape { label: "square 1024", m: 1024, k: 1024, n: 1024 },
     Shape { label: "square 2048", m: 2048, k: 2048, n: 2048 },
+    // Wide-K / wide-N prefill linears at the scale brain's larger decoders
+    // dispatch (d_model 4096, ffn 14336). The square probes above are a
+    // roofline instrument, not a workload: they say nothing about how a tile
+    // schedule behaves when N is 3.5x M, which is the common case for an
+    // up-projection and the case a 128x128 tile can most easily get wrong.
+    Shape { label: "big qkv       1024x4096->6144", m: 1024, k: 4096, n: 6144 },
+    Shape { label: "big ffn-up    1024x4096->14336", m: 1024, k: 4096, n: 14336 },
+    Shape { label: "big ffn-down  1024x14336->4096", m: 1024, k: 14336, n: 4096 },
 ];
 
 /// Kernel slots, in registration order.
@@ -55,6 +63,8 @@ const K_MATMUL: usize = 0;
 const K_TILED: usize = 1;
 const K_REG: usize = 2;
 const K_REG2: usize = 3;
+const K_REG3: usize = 4;
+const K_REG4: usize = 5;
 
 fn kernels() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -62,60 +72,85 @@ fn kernels() -> Vec<(&'static str, &'static str)> {
         ("matmul_tiled", kernels::MATMUL_TILED),
         ("matmul_reg", kernels::MATMUL_REG),
         ("matmul_reg2", kernels::MATMUL_REG2),
+        ("matmul_reg3", kernels::MATMUL_REG3),
+        ("matmul_reg4", kernels::MATMUL_REG4),
     ]
 }
 
 /// GFLOP/s as a percent of the P40's datasheet fp32 peak, below.
 const PEAK_GFLOPS: f64 = 11760.0;
 
-/// Deterministic, bounded inputs — small magnitudes keep the fp32 accumulation
+/// Deterministic, bounded inputs - small magnitudes keep the fp32 accumulation
 /// well-conditioned so a parity failure means a real bug, not cancellation.
 fn fill(n: usize, seed: usize) -> Vec<f32> {
     (0..n).map(|i| (((i * 37 + seed * 17) % 97) as f32 / 97.0) - 0.5).collect()
 }
 
-/// Threads for the 32×32-output-tile GEMM at `@workgroup_size(64)`.
+/// Threads for the 32x32-output-tile GEMM at `@workgroup_size(64)`.
 fn tiled_threads(m: usize, n: usize) -> u32 {
     (m.div_ceil(32) * n.div_ceil(32) * 64) as u32
 }
 
-/// Threads for the 128×128-output-tile GEMM at `@workgroup_size(256)`.
+/// Threads for the 128x128-output-tile GEMM at `@workgroup_size(256)`.
 fn reg_threads(m: usize, n: usize) -> u32 {
     (m.div_ceil(128) * n.div_ceil(128) * 256) as u32
 }
 
-/// Run one variant `reps` times, returning (output, best wall-clock seconds).
-///
-/// `poll_wait` after `submit` is what makes the timing real: `submit` only
-/// records, so without it the loop would time command-buffer construction.
-fn time_variant(
-    gpu: &Gpu,
+/// One kernel under test at one shape.
+struct Arm {
+    label: &'static str,
     kind: usize,
     threads: u32,
+}
+
+/// Run every arm `reps` times, **round-robin**, returning each arm's output and
+/// its best (minimum) wall-clock time.
+///
+/// Two disciplines are baked in here rather than left to the caller, because
+/// this repo has been burned by both:
+///
+/// * **Every timed region is fenced.** `submit` only *records*; without the
+///   `poll_wait` inside the timed span the loop would measure command-buffer
+///   construction. An earlier unfenced native-Vulkan run in this tree reported
+///   a physically impossible 57 TFLOP/s exactly that way.
+/// * **Arms are interleaved, not run back-to-back**, and reduced with min-of-N.
+///   Run-to-run variance on this box has been measured as high as 4.6x when
+///   another tenant is holding cores, so timing kernel A's whole batch and then
+///   kernel B's whole batch attributes that drift to the kernel. Round-robin
+///   (A, B, C, A, B, C, ...) spreads any drift across all arms equally, and the
+///   minimum is the sample least polluted by it.
+fn time_arms(
+    gpu: &Gpu,
+    arms: &[Arm],
     (m, k, n): (usize, usize, usize),
     x: &[f32],
     w: &[f32],
     reps: usize,
-) -> (Vec<f32>, f64) {
+) -> Vec<(Vec<f32>, f64)> {
     let xb = gpu.storage_init("x", x);
     let wb = gpu.storage_init("w", w);
-    let ob = gpu.storage((m * n) as u64);
     let params = [m as u32, k as u32, n as u32];
+    let obs: Vec<_> = arms.iter().map(|_| gpu.storage((m * n) as u64)).collect();
 
-    // one warm-up (pipeline/JIT warm, allocations resident)
-    let s = gpu.step(kind, &[&xb, &wb, &ob], &params, threads);
-    gpu.submit(&[], &[s]);
-    gpu.poll_wait();
-
-    let mut best = f64::INFINITY;
-    for _ in 0..reps {
-        let t0 = std::time::Instant::now();
-        let s = gpu.step(kind, &[&xb, &wb, &ob], &params, threads);
+    // Warm every arm first (pipeline/JIT compiled, allocations resident) so the
+    // first round-robin pass is not measuring one arm's shader compile.
+    for (a, ob) in arms.iter().zip(&obs) {
+        let s = gpu.step(a.kind, &[&xb, &wb, ob], &params, a.threads);
         gpu.submit(&[], &[s]);
         gpu.poll_wait();
-        best = best.min(t0.elapsed().as_secs_f64());
     }
-    (gpu.read(&ob, m * n), best)
+
+    let mut best = vec![f64::INFINITY; arms.len()];
+    for _ in 0..reps {
+        for (i, (a, ob)) in arms.iter().zip(&obs).enumerate() {
+            let t0 = std::time::Instant::now();
+            let s = gpu.step(a.kind, &[&xb, &wb, ob], &params, a.threads);
+            gpu.submit(&[], &[s]);
+            gpu.poll_wait();
+            best[i] = best[i].min(t0.elapsed().as_secs_f64());
+        }
+    }
+    arms.iter().zip(&obs).zip(best).map(|((_, ob), t)| (gpu.read(ob, m * n), t)).collect()
 }
 
 /// max-abs and relative difference of `got` against `want`.
@@ -135,14 +170,14 @@ fn bench_matmul() {
     let wgpu = Gpu::new_wgpu(&ks);
     let vk = Gpu::try_new_vulkan(&ks).ok();
     if vk.is_none() {
-        eprintln!("(no native Vulkan device — reporting cpu + wgpu only)");
+        eprintln!("(no native Vulkan device - reporting cpu + wgpu only)");
     }
 
     println!(
-        "\n{:<30} {:>8} {:>9} {:>9} {:>9} {:>9} {:>6} {:>8}",
-        "shape", "GFLOP", "cpu avx2", "gpu naive", "gpu reg", "gpu reg2", "%peak", "reg2/cpu"
+        "\n{:<32} {:>8} {:>8} {:>7} {:>7} {:>7} {:>7} {:>7} {:>6}",
+        "shape", "GFLOP", "cpu", "naive", "tiled", "reg2", "reg3", "reg4", "%peak"
     );
-    println!("{}", "-".repeat(104));
+    println!("{}", "-".repeat(110));
 
     for s in SHAPES {
         let (m, k, n) = (s.m, s.k, s.n);
@@ -150,90 +185,85 @@ fn bench_matmul() {
         let w = fill(n * k, 2);
         let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
 
-        // CPU backend's naive matmul is the correctness oracle (it is also what
+        // The CPU backend's matmul is the correctness oracle (it is also what
         // `--device cpu` actually runs, so the speedup below is the honest
         // like-for-like ratio, not a strawman).
-        let (want, t_cpu) = time_variant(&cpu, K_MATMUL, (m * n) as u32, (m, k, n), &x, &w, reps);
+        let cpu_arm = [Arm { label: "cpu", kind: K_MATMUL, threads: (m * n) as u32 }];
+        let mut r = time_arms(&cpu, &cpu_arm, (m, k, n), &x, &w, reps);
+        let (want, t_cpu) = r.pop().expect("one arm");
 
-        let (g_naive, t_gn) = time_variant(&wgpu, K_MATMUL, (m * n) as u32, (m, k, n), &x, &w, reps);
-        let (dn_abs, dn_rel) = diff(&want, &g_naive);
-
-        let (g_tiled, t_gt) =
-            time_variant(&wgpu, K_TILED, tiled_threads(m, n), (m, k, n), &x, &w, reps);
-        let (dt_abs, dt_rel) = diff(&want, &g_tiled);
-
-        let (g_reg, t_gr) = time_variant(&wgpu, K_REG, reg_threads(m, n), (m, k, n), &x, &w, reps);
-        let (dr_abs, dr_rel) = diff(&want, &g_reg);
-
-        let (g_reg2, t_gr2) = time_variant(&wgpu, K_REG2, reg_threads(m, n), (m, k, n), &x, &w, reps);
-        let (dr2_abs, dr2_rel) = diff(&want, &g_reg2);
-
+        let arms = [
+            Arm { label: "naive", kind: K_MATMUL, threads: (m * n) as u32 },
+            Arm { label: "tiled", kind: K_TILED, threads: tiled_threads(m, n) },
+            Arm { label: "reg", kind: K_REG, threads: reg_threads(m, n) },
+            Arm { label: "reg2", kind: K_REG2, threads: reg_threads(m, n) },
+            Arm { label: "reg3", kind: K_REG3, threads: reg_threads(m, n) },
+            Arm { label: "reg4", kind: K_REG4, threads: reg_threads(m, n) },
+        ];
+        let got = time_arms(&wgpu, &arms, (m, k, n), &x, &w, reps);
 
         let gfs = |t: f64| gflop / t;
+        let t = |i: usize| got[i].1;
+        let best = got.iter().map(|(_, t)| *t).fold(f64::INFINITY, f64::min);
         println!(
-            "{:<30} {:>8.2} {:>9.0} {:>9.0} {:>9.0} {:>9.0} {:>5.1}% {:>7.1}x",
+            "{:<32} {:>8.2} {:>8.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>5.1}%",
             s.label,
             gflop,
             gfs(t_cpu),
-            gfs(t_gn),
-            gfs(t_gr),
-            gfs(t_gr2),
-            100.0 * gfs(t_gr2) / PEAK_GFLOPS,
-            t_cpu / t_gr2
+            gfs(t(0)),
+            gfs(t(1)),
+            gfs(t(3)),
+            gfs(t(4)),
+            gfs(t(5)),
+            100.0 * gfs(best) / PEAK_GFLOPS,
         );
+
+        // Parity against the CPU oracle for EVERY arm - a speed number from a
+        // kernel that computes the wrong thing is not a speed number. fp32 GEMM
+        // accumulates K terms in whatever order the backend's loop nest
+        // produces, so the gate is relative, not bitwise: K=6144 lands at
+        // ~1.2e-5, which is float addition, not a bug.
+        let mut parity = String::new();
+        for (a, (out, _)) in arms.iter().zip(&got) {
+            let (dabs, drel) = diff(&want, out);
+            parity.push_str(&format!(" {} {:.0e}/{:.0e}", a.label, dabs, drel));
+            assert!(drel < TOL, "{}: gpu {} diverges from cpu (rel {drel:.3e})", s.label, a.label);
+        }
+        println!("{:<32} parity vs cpu (max-abs/rel):{parity}", "");
         println!(
-            "{:<30} gpu tiled {:>9.0} GFLOP/s | parity vs cpu (max-abs / rel): \
-             naive {:.1e}/{:.1e}  tiled {:.1e}/{:.1e}  reg {:.1e}/{:.1e}  reg2 {:.1e}/{:.1e}",
-            "",
-            gfs(t_gt),
-            dn_abs,
-            dn_rel,
-            dt_abs,
-            dt_rel,
-            dr_abs,
-            dr_rel,
-            dr2_abs,
-            dr2_rel
-        );
-        println!(
-            "{:<30} ms: cpu {:>8.3}  gpu naive {:>8.3}  gpu tiled {:>8.3}  gpu reg {:>8.3}  gpu reg2 {:>8.3}",
+            "{:<32} ms: cpu {:>8.3}  reg2 {:>7.3}  reg3 {:>7.3}  reg4 {:>7.3}  (reg4 vs reg3 {:>5.2}x, vs cpu {:>6.1}x)",
             "",
             t_cpu * 1e3,
-            t_gn * 1e3,
-            t_gt * 1e3,
-            t_gr * 1e3,
-            t_gr2 * 1e3
+            t(3) * 1e3,
+            t(4) * 1e3,
+            t(5) * 1e3,
+            t(4) / t(5),
+            t_cpu / t(5),
         );
-        assert!(dr_rel < TOL, "{}: gpu reg diverges from cpu (rel {dr_rel:.3e})", s.label);
-        assert!(dr2_rel < TOL, "{}: gpu reg2 diverges from cpu (rel {dr2_rel:.3e})", s.label);
-
-        // fp32 GEMM accumulates K terms in whatever order the backend's loop
-        // nest produces, so the gate is relative, not bitwise. K=6144 lands at
-        // ~1.2e-5 — that is float addition, not a bug.
-        assert!(dn_rel < TOL, "{}: gpu naive diverges from cpu (rel {dn_rel:.3e})", s.label);
-        assert!(dt_rel < TOL, "{}: gpu tiled diverges from cpu (rel {dt_rel:.3e})", s.label);
 
         if let Some(vk) = &vk {
-            // Both variants, so a native-Vulkan/wgpu gap can be attributed:
-            // a gap on BOTH points at the dispatch/memory path, a gap on the
-            // tiled one only points at naga's SPIR-V for workgroup memory.
-            let (v_naive, t_vn) = time_variant(vk, K_MATMUL, (m * n) as u32, (m, k, n), &x, &w, reps);
-            let (v_tiled, t_vt) =
-                time_variant(vk, K_TILED, tiled_threads(m, n), (m, k, n), &x, &w, reps);
-            let (_, dvn_rel) = diff(&want, &v_naive);
-            let (dv_abs, dv_rel) = diff(&want, &v_tiled);
+            // A trivial kernel and the two register-tiled ones, so a
+            // native-Vulkan/wgpu gap can be attributed: a gap on ALL of them
+            // points at the dispatch/memory path, a gap on the tiled ones only
+            // points at naga's SPIR-V for workgroup memory - and reg3-vs-reg4
+            // answers that question for the vec4 shared path specifically.
+            let varms = [
+                Arm { label: "naive", kind: K_MATMUL, threads: (m * n) as u32 },
+                Arm { label: "reg3", kind: K_REG3, threads: reg_threads(m, n) },
+                Arm { label: "reg4", kind: K_REG4, threads: reg_threads(m, n) },
+            ];
+            let vg = time_arms(vk, &varms, (m, k, n), &x, &w, reps);
             println!(
-                "{:<34} vulkan: naive {:.1} tiled {:.1} GFLOP/s ({:.3}/{:.3} ms), tiled max-abs {:.2e} rel {:.2e}",
+                "{:<32} vulkan: naive {:>7.0}  reg3 {:>7.0}  reg4 {:>7.0} GFLOP/s",
                 "",
-                gfs(t_vn),
-                gfs(t_vt),
-                t_vn * 1e3,
-                t_vt * 1e3,
-                dv_abs,
-                dv_rel
+                gfs(vg[0].1),
+                gfs(vg[1].1),
+                gfs(vg[2].1),
             );
-            assert!(dvn_rel < TOL, "{}: vulkan naive diverges from cpu (rel {dvn_rel:.3e})", s.label);
-            assert!(dv_rel < TOL, "{}: vulkan tiled diverges from cpu (rel {dv_rel:.3e})", s.label);
+            for (a, (out, _)) in varms.iter().zip(&vg) {
+                let (_, drel) = diff(&want, out);
+                assert!(drel < TOL, "{}: vulkan {} diverges from cpu (rel {drel:.3e})", s.label, a.label);
+            }
         }
     }
 }
