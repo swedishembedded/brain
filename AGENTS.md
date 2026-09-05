@@ -867,6 +867,7 @@ front-end to depend on.
 | **Which kernels already exist** (before writing a new one) | the catalogue in **`docs/reference/kernels.md`** - every kernel with what it does, how, its structural optimisation level, and per-backend support |
 | **Something is slow (model, kernel, training step)** | **`.agents/rules/kernels.md` §F** - the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `.agents/rules/porting.md` §10, case studies in `docs/performance/overview.md` |
 | MoE toy task / honest eval methodology | `README.md` |
+| **Self-improvement / training regimes** (DPO, GRPO, distillation, replay, lineage, promote/reject gate; the reward-weighted-SFT loop this all builds on) | **`.agents/roadmap/self-improve.md`** - the ledger; `.agents/roadmap/gauntlet.md` for the procedural capability-acquisition benchmark built on top of it |
 | Federated MoE pipeline (done vs remaining) | `docs/training/federated-experts.md`; `crates/federated/src/{shard,sha256}.rs` |
 | GPT model / training / sampling | `crates/gpt2/src/{model,train,sample,init}.rs` |
 | Qwen model / import / LoRA / INT8 / sharding | `crates/qwen3/src/{model,import,finetune,q8,shard,sample}.rs` |
@@ -1225,6 +1226,40 @@ improves as the model grows, and **`advise`** says what to tune.
 
 `make bench/scaling` runs the multi-size scaling-law sweep (`L(N)=E+A·N^-alpha`);
 `make bench/char` keeps the legacy GPT-on-char-datasets sweep.
+
+---
+
+## Self-improvement (`crates/rl`, planned `crates/gauntlet`)
+
+Closing the loop around a model - explore an environment, generate its own
+training data, update weights, objectively accept or reject the result - is
+a first-class requirement, not an experiment bolted onto `crates/rl`'s
+existing reward-weighted-SFT driver (`fit_weighted`, ATIF trajectory
+ingestion, the LoRA hot-swap cycle - all landed, see the roadmap for what's
+actually done vs. still TODO). **`.agents/roadmap/self-improve.md` is the
+ledger** - read it before touching training-loop code, the same way
+`.agents/rules/lessons.md` gates a new perf change.
+
+The keystone result that ties it together: DPO, GRPO (with clipping and a
+KL-to-reference term), and top-K distillation all reduce **exactly** to the
+already-existing `Batch::LmWeighted` contract with host-computed per-token
+weights - no new `Batch` variant, no new kernel. Any model that has adopted
+`Model::enable_weighted_loss` is therefore automatically capable of all
+three regimes once the objective layer lands.
+
+`.agents/roadmap/gauntlet.md` designs a separate crate (`crates/gauntlet`,
+not implemented yet) that asks a different question than `brain bench`:
+not "does this architecture learn task X" but "can this *system* detect a
+capability gap, close it through parameter updates, verify the weights
+(not some other state) did it, retain what it already knew, and reduce the
+cost of learning the next thing." Fully self-contained - procedurally
+generated environments with in-process oracles, no sven dependency, same
+standing invariant as everywhere else in this repo.
+
+**Standing invariant:** brain never depends on sven. `crates/atif` mirrors
+sven's trajectory format by hand-copying it, kept manually in sync - not a
+path/git dependency. Anything that needs an acting agent driving the loop
+is an example living in sven's own repo, talking to `brain serve --openai`.
 
 ---
 
