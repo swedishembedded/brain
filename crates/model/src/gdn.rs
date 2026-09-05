@@ -747,22 +747,19 @@ fn gdn_chunk_fwd_prefix(
         bmm_step(g, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
     };
 
-    let mut steps = Vec::new();
-
     // ---- steps 1-2: v_beta = value*beta, k_beta = key*beta (whole tensor) ----
-    steps.push(g.step(ids.row_scale, &[value, beta, s.v_beta], &[bhc * c * dv, dv], bhc * c * dv));
-    steps.push(g.step(ids.row_scale, &[key, beta, s.k_beta], &[bhc * c * dk, dk], bhc * c * dk));
-
     // ---- step 4: g_cs = copy(raw_g), then the per-chunk cumsum (one fused dispatch) ----
-    steps.push(g.step(ids.region_copy, &[raw_g, s.g_cs], &[1, bhc * c, bhc * c, 0], bhc * c));
-    steps.push(g.step(ids.cumsum_step, &[s.g_cs], &[bhc, c], bhc));
-
     // ---- step 5: decay_mask ----
-    steps.push(g.step(ids.decay_mask, &[s.g_cs, s.decay_mask], &[bhc, c], bhc * c * c));
-
     // ---- step 6: attn0 = -(k_beta @ key^T), strictly-lower masked by decay_mask ----
-    steps.push(bmm(ids.bmm, bhc, c, dk, c, false, true, -1.0, s.k_beta, 0, key, 0, s.raw_attn0, 0));
-    steps.push(g.step(ids.mask_strict_lower, &[s.raw_attn0, s.decay_mask, s.attn0], &[bhc, c], bhc * c * c));
+    let mut steps = vec![
+        g.step(ids.row_scale, &[value, beta, s.v_beta], &[bhc * c * dv, dv], bhc * c * dv),
+        g.step(ids.row_scale, &[key, beta, s.k_beta], &[bhc * c * dk, dk], bhc * c * dk),
+        g.step(ids.region_copy, &[raw_g, s.g_cs], &[1, bhc * c, bhc * c, 0], bhc * c),
+        g.step(ids.cumsum_step, &[s.g_cs], &[bhc, c], bhc),
+        g.step(ids.decay_mask, &[s.g_cs, s.decay_mask], &[bhc, c], bhc * c * c),
+        bmm(ids.bmm, bhc, c, dk, c, false, true, -1.0, s.k_beta, 0, key, 0, s.raw_attn0, 0),
+        g.step(ids.mask_strict_lower, &[s.raw_attn0, s.decay_mask, s.attn0], &[bhc, c], bhc * c * c),
+    ];
 
     // ---- step 7: UT-transform (forward substitution, then += I) ----
     for i in 1..c {
