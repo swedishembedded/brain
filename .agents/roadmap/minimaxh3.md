@@ -636,8 +636,144 @@ request shape never forces a 33B reload. D-Bus needed no surface extension:
 numbers alone, cross-checked against this roadmap's own independently-
 confirmed "adaln_proj ~13.0B of 33B" line - lands at ~33.05B, matching.
 
+## Phase 12 detail: DiT forward performance - measured, not guessed
+
+The first end-to-end real-weight run put ONE DiT forward at **~9.7 minutes**
+(50 blocks, `BRAIN_DEVICE=cpu`, 128x128 canvas / 124 frames, fp32, 48
+threads on 2x Xeon E5-2690 v3 - Haswell-EP, **AVX2+FMA, no AVX-512**). Where
+that time actually went was measured per kernel at the real per-layer shapes
+before anything was changed, with `crates/minimaxh3/examples/dit_roofline.rs`
+(one block's weights, caller-chosen sequence length, so the profiling loop is
+seconds rather than the ~50 minutes a real generation takes).
+
+**Two of the three attention kernels had no native CPU path at all.** Of the
+thirteen kernels `crate::block` dispatches, only `matmul` and `silu_mul`
+carried `@cpu native`; `attn_scores_qk`, `attn_softmax_bidir` and
+`attn_apply_full` ran as Cranelift-JIT **scalar** code, one output element per
+invocation. `attn_apply_full` measured **5.4 GFLOP/s** - a third of the whole
+forward in one kernel.
+
+**And the GEMM was bandwidth-bound, not compute-bound.** `fast_ops::matmul_abt`
+walked the whole of B once per row of A, so a thread holding `R` rows moved
+`R·n·k·4` bytes; at the FFN shape that is a 308 MB weight streamed 20x per
+thread. It measured ~130 GFLOP/s against a ~2 TFLOP/s AVX2 peak - i.e. at
+essentially 100% of memory bandwidth and ~7% of FLOPs, where neither more
+threads nor a wider vector could have helped.
+
+### What changed
+
+1. `crates/backend-cpu`: native CPU paths for the bidirectional self-attention
+   trio, routed into the EXISTING cross-attention fast ops (`attn_apply_full`
+   is the `tq==tk`, zero-offset case of `attn_apply_cross`; `attn_softmax_bidir`
+   of `attn_softmax_cross`), plus one new `fast_ops::attn_scores_qk` sharing
+   `attn_scores_cross`'s packing helper. `attn_scores_qk`'s `causal != 0` arm
+   deliberately stays on the JIT rather than being emulated.
+2. `fast_ops::matmul_abt`: a 3x4 register-blocked microkernel (12 accumulators
+   + 3 A vectors + 1 B temporary = exactly Haswell's 16 `ymm`, so the inner
+   loop spills nothing and the 12 independent FMA chains cover the 5-cycle FMA
+   latency) under a **column-outer** nest that holds a B tile resident and
+   sweeps a thread's A rows through it. Selected by shape, not unconditionally:
+   only when B is both the bigger operand and too big to stay cached
+   (`n >= rows.max(4) && n*k > 512Ki` floats). Every shape that fails that test
+   keeps the original kernel AND the original chunking, unchanged.
+
+### Measured, same-host confirmation
+
+Per-kernel, `dit_roofline 960 5`, `BRAIN_DEVICE=cpu`, machine otherwise idle
+(the numbers below are GFLOP/s; both columns measured back to back on the
+same build tree, only `crates/backend-cpu` differing):
+
+| op (real per-layer shape, seq 960)   | before | after | x    |
+|--------------------------------------|-------:|------:|-----:|
+| `matmul` q/k/v `[S,5376]x[7168,5376]T`  | 138.4 | 404.1 | 2.92 |
+| `matmul` to_out `[S,7168]x[5376,7168]T` | 151.0 | 362.3 | 2.40 |
+| `matmul` fc1 `[S,5376]x[14336,5376]T`   | 132.5 | 304.5 | 2.30 |
+| `matmul` fc2 `[S,14336]x[5376,14336]T`  | 136.3 | 195.1 | 1.43 |
+| `attn_scores_qk`                        |  13.7 | 132.6 | 9.68 |
+| `attn_apply_full`                       |   5.4 |  88.0 | 16.4 |
+| `attn_softmax_bidir`                    |   5.0 |   7.5 | 1.48 |
+| `adaln_proj` (host `linear_rows`)       |  35.0 |  36.5 | 1.04 |
+
+Summed over 50 blocks that is **453.0 s -> 147.8 s per forward, 3.07x**
+(against the ~9.7 min a real forward measured; the probe models the block
+stack, not `proj_in`/`proj_out`, the token refiner, or the scatter/gather).
+Correctness gate: `model::tests::tiny_config_matches_the_real_reference_
+numerically` stays at **worst cosine 1.0000000000** over all 8 taps, and
+`matmul_shape_bench` reports **max rel err 0.00e0** between the two nests at
+every shape.
+
+### `adaln_proj` precompute is a MEMORY lever, not a speed one
+
+Phase 8's claim stands exactly as written, but it is worth recording what it
+is and is not worth at inference. `adaln_proj` is 13.0B of the 33B params, yet
+at `num_timesteps = 2` its per-forward cost is a skinny `n=2` mat-vec, not a
+GEMM: **28.5 ms per block, 1.4 s per forward - 0.9% of the post-change
+forward**. Its value is the 52 GB of resident fp32 host memory it removes
+(1.04 GB/block x 50), which is what decides whether this model can be placed
+on a GPU at all - not the FLOPs.
+
+### GPU placement: measured, and blocked on the kernel, not the VRAM
+
+`dit_roofline` was run against a real Tesla P40 (`BRAIN_DEVICE=vulkan`). The
+first run reported 57 TFLOP/s for a 5376x7168 GEMM - roughly 5x the card's
+entire fp32 peak, because `submit` only queues work and the harness was
+timing submission. With a readback fencing each timed region, the honest
+numbers are:
+
+| op                | P40 (fenced) | CPU (after) |
+|-------------------|-------------:|------------:|
+| `matmul` q/k/v    |    18.2 GF/s |   404.1 GF/s |
+| `matmul` fc1      |    19.6 GF/s |   304.5 GF/s |
+| `attn_apply_full` |   456.1 GF/s |    88.0 GF/s |
+| `rope2d_partial`  |    40.6 GF/s |     3.9 GF/s |
+
+So the P40 is **~20x SLOWER than the optimized CPU on the GEMMs** and several
+times faster on everything else. The cause is kernel selection, not the
+hardware: `crate::block::linear` dispatches `matmul.wgsl`, which is one thread
+per output element with a serial k-loop and no tiling or workgroup memory -
+`m·n·k·2·4` bytes of global traffic (592 GB for one FFN GEMM). At 19.6 GFLOP/s
+it is running at ~0.2% of the card's ~11.8 TFLOP/s fp32 peak. This workspace
+already ships `matmul_tiled`/`matmul_reg`/`matmul_reg2`/`matmul_reg3` for
+exactly this, and `backend-cpu` already routes all of them to the same native
+path, so switching the DiT's dispatch is not a fork.
+
+**The order of work is therefore the opposite of the obvious one**: fixing GPU
+matmul kernel selection comes FIRST, before any VRAM/sharding effort, because
+until it lands a perfectly-sharded model would run slower than the CPU does
+today. The VRAM budget for when that is done (2x24 GB = 48 GB):
+
+| tier | resident params | bytes | fits? |
+|------|-----------------|-------|-------|
+| fp32, as-is                    | 33.05B | 132 GB | no |
+| fp32, AdaLN precomputed        | 20.2B  |  81 GB | no |
+| bf16/f16 storage, precomputed  | 20.2B  |  40 GB | only just - ~4 GB left for activations, and `scores`+`probs` alone are 2.8 GB at a 256px canvas |
+| int8, precomputed              | 20.2B  |  20 GB | comfortably, and the P40 has real DP4A |
+
+`Ctx::upload` is fp32-only today (no `Weight`-enum tier like `crates/qwen3`'s),
+`H3Transformer` implements no `model::shard::Shardable`, and Phase 8's
+precompute is a checkpoint transform not yet wired into `load` - all three are
+prerequisites, none of them started.
+
 ## Recorded gaps (kept current)
 
+- The DiT's GPU path dispatches the untiled `matmul.wgsl` and therefore
+  measures ~20x slower than the optimized CPU path on a P40 (18-20 GFLOP/s vs
+  ~0.2% of the card's fp32 peak) - see Phase 12 detail. Until a tiled variant
+  is dispatched, `BRAIN_DEVICE=vulkan` is a pessimization for this model, and
+  no amount of VRAM/sharding work can pay for itself.
+- Eight of the thirteen kernels `crate::block` dispatches still run as
+  Cranelift-JIT scalar code on CPU (`rmsnorm_eps`, `embed`, `row_scatter`,
+  `bias_add`, `rope2d_partial`, `mul`, `add2`, `gate_row`). Together they are
+  ~9 s of the 147.8 s post-change forward (~6%) - worth a native pass, but no
+  longer where the time is.
+- `matmul` fc2 (`k=14336`) reaches 195 GFLOP/s against fc1's 304: at that `k`
+  the 3x4 tile's working set (3 A rows + 4 B rows = 401 KB) exceeds the 256 KB
+  L2, so it wants a `k`-blocked accumulating variant. Not attempted - it needs
+  the microkernel to accumulate into C across k-chunks rather than write it.
+- `H3Transformer::forward` always computes the parity taps
+  (`forward_full` reads back block 0's output and the packed input
+  unconditionally, ~62 MB of device->host copies per forward). Free to skip on
+  CPU, but a real pipeline stall once a GPU path exists.
 - ~~`H3Recipe`/`import.rs` assume the old FL2VA/Ref2VA layout~~ - both
   retargeted to the root flat layout; `H3Recipe` also had a real ordering
   bug fixed alongside it (it would have lost to `ZimageRecipe`'s own
