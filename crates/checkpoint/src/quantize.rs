@@ -118,10 +118,10 @@ pub enum Tier {
     /// 256-element super-block, symmetric 8-bit codes, one f32 scale plus a
     /// packed per-16-group `i16` sum table (292 B/block, 9.125 bits/weight)
     /// - ggml's own highest-fidelity K-quant tier, and the widest this
-    /// module writes; genuinely never used as a real release's storage
-    /// format in practice (it exists for accurate intermediate accumulation
-    /// in llama.cpp's own K-quant matmul), but this module can encode it,
-    /// so it is not withheld here either.
+    ///   module writes; genuinely never used as a real release's storage
+    ///   format in practice (it exists for accurate intermediate accumulation
+    ///   in llama.cpp's own K-quant matmul), but this module can encode it,
+    ///   so it is not withheld here either.
     Q8K,
 }
 

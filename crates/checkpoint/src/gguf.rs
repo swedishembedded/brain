@@ -97,6 +97,9 @@ pub enum GgmlType {
     TQ2_0,
 }
 
+/// A [`GgmlType`]'s per-block decoder function ([`GgmlType::block_decoder`]).
+type BlockDecoder = fn(&[u8], &mut Vec<f32>);
+
 impl GgmlType {
     /// Resolve a GGUF `ggml_type` id to the type this reader can decode.
     /// `None` for an id with no block-format entry here (a still-unsupported
@@ -252,7 +255,7 @@ impl GgmlType {
     /// "one block, one shared scale" formats in the sense [`block_expand`]
     /// serves - a caller wanting a range of them slices `dequantize`'s output
     /// directly, since there is no smaller independently-decodable unit.
-    fn block_decoder(self) -> Option<fn(&[u8], &mut Vec<f32>)> {
+    fn block_decoder(self) -> Option<BlockDecoder> {
         Some(match self {
             GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 | GgmlType::F64 | GgmlType::I8 | GgmlType::I16 | GgmlType::I32 | GgmlType::I64 => return None,
             GgmlType::Q4_0 => deq_q4_0,
@@ -1554,9 +1557,9 @@ fn deq_tq2_0(b: &[u8], out: &mut Vec<f32>) {
 /// A split GGUF (`<base>-NNNNN-of-MMMMM.gguf`, one file per part, no tensor
 /// straddling a part boundary) opens exactly like a single file - pass any
 /// one part's path and every sibling is located and mapped alongside it.
-/// `mmaps` therefore holds one mapping per part (`mmaps[0]` is always part
-/// 1) instead of the single-file case's one-element vec, and `index` records
-/// which part each tensor's bytes live in.
+/// `mmaps` therefore holds one mapping per part (`mmaps[0]` is always
+/// part 1) instead of the single-file case's one-element vec, and
+/// `index` records which part each tensor's bytes live in.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct MmapGguf {
     mmaps: Vec<memmap2::Mmap>,
@@ -2460,10 +2463,10 @@ mod tests {
     /// M20: every new `GgufTokenizer` field, round-tripped through a REAL
     /// GGUF (`gguf_write::write` + `MmapGguf::open`), not a hand-built struct
     /// - this is what actually proves `tokenizer_from_kv`'s parsing, not just
-    /// that a struct literal satisfies its own field list. Two files: one
-    /// carrying every new key (asserting each is read back exactly), one
-    /// carrying none of them (asserting every new field lands on its
-    /// documented default: `None` for scalars, empty for `Vec`s).
+    ///   that a struct literal satisfies its own field list. Two files: one
+    ///   carrying every new key (asserting each is read back exactly), one
+    ///   carrying none of them (asserting every new field lands on its
+    ///   documented default: `None` for scalars, empty for `Vec`s).
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn tokenizer_from_kv_reads_every_m20_field() {
@@ -3165,6 +3168,9 @@ mod tests {
     /// `scales_l[1]`) -> ls=59 -> dl_factor=27; every other sub-block's
     /// scale bits are left zero -> ls=0 -> dl_factor=-32.
     #[test]
+    // The `2 * 0`/`2 * 3` shift amounts deliberately mirror the bit-layout
+    // formula (`2-bit field for sub-block ib` at shift `2*ib`), not a typo.
+    #[allow(clippy::identity_op, clippy::erasing_op)]
     fn iq4_xs_scale_extraction_matches_independently_computed_bits() {
         let d = 1.0f32;
         let mut scales_l = [0u8; 4];
@@ -3205,6 +3211,10 @@ mod tests {
     /// values at both chunk boundaries and in `qh`, not an all-zero
     /// degenerate case.
     #[test]
+    // `n*32+m`/`n*16+m` indices deliberately mirror the comments' own index
+    // formulas (including the `n=0` cases) so each assert is checkable
+    // against them at a glance - not a typo.
+    #[allow(clippy::identity_op, clippy::erasing_op)]
     fn tq1_0_matches_an_independently_computed_reference() {
         let mut qs = [0u8; 48];
         qs[0] = 5;
@@ -3244,6 +3254,9 @@ mod tests {
     /// each chunk, not the chunk nested inside `l`) is the analogous
     /// ordering trap.
     #[test]
+    // `l*32+m` indices deliberately mirror the comments' own index formula
+    // (including the `l=0` case) - not a typo.
+    #[allow(clippy::identity_op, clippy::erasing_op)]
     fn tq2_0_matches_an_independently_computed_reference() {
         let mut qs = [0u8; 64];
         qs[0] = 0b11100100; // l0=00(-1) l1=01(0) l2=10(1) l3=11(2)

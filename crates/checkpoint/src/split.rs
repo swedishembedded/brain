@@ -18,7 +18,7 @@
 /// leading dot). `None` for a plain, unsharded file, for a malformed index
 /// (non-digits, empty), or for a part number that is `0` or exceeds `count`
 /// - a real writer never emits either, so treating them as "not a split
-/// name" here is the same refuse-don't-guess choice `MmapGguf::open` needs.
+///   name" here is the same refuse-don't-guess choice `MmapGguf::open` needs.
 pub fn split_name<'a>(fname: &'a str, ext: &str) -> Option<(&'a str, u32, u32, usize)> {
     let stem = fname.strip_suffix(&format!(".{ext}"))?;
     let (left, total) = stem.rsplit_once("-of-")?;
