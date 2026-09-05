@@ -493,7 +493,7 @@ touched file (pre-existing `doc_lazy_continuation`/`needless_range_loop`
 warnings elsewhere in `brain-model`'s test fixtures and `qwen3::serve` left
 untouched).
 
-## P10 - generic rollout - TODO
+## P10 - generic rollout - DONE
 
 New `crates/model/src/rollout.rs`: `Rollout` trait, `Completion { tokens,
 logprobs, stop }` (the completion's own per-token logprobs under the
@@ -523,6 +523,60 @@ today's for a fixed `(seed, temp, top_k)`; `ModelRollout` and `PagedRollout`
 agree on greedy decoding for tiny qwen3; a `sample_n(n=8)` test asserting
 the scheduler's own prefix-sharing stats show the prompt KV was actually
 shared, not re-computed 8 times; EOS and top-p both honoured.
+
+**Landed as spec'd, with one implementation deviation from `BlockTable::
+fork`.** `sample_from_topk` grew a sibling, `sample_from_topk_with_logprob`
+(factored out of the same shared `sample_from_topk_impl` so the two can
+never drift on the actual math) - the one place a completion's per-token
+`π_old` is computed, at sample time, off whatever candidate list was
+already built to draw from. `PagedRollout::sample_n` prefills the SAME
+prompt once per sample rather than forking one template `BlockTable` `n`
+ways: `fork` shares a table's blocks byte-for-byte, including whatever
+partially-filled tail block the prompt's own last, still-appendable block
+is, and `BlockTable::append` only allocates a fresh block once the current
+one is exactly full - so the very next token appended by any two forked
+sequences would race to write the SAME physical slot. Privatizing that
+tail first (`BlockTable::unshare_tail`) needs a device-side byte copy of
+the block's live KV, which `PagedDecoder`'s trait surface has no operation
+for. `PrefixCache`'s block-boundary-only sharing (already exercised by
+`Engine::prefill`, unchanged) sidesteps the hazard entirely and is what
+`PagedRollout` builds on instead - the gate's own literal wording
+("prefix-sharing stats show the prompt KV was actually shared") points at
+exactly this primitive. `BlockTable::fork` stays unused today; adopting it
+safely later needs a `PagedDecoder::copy_block` (or similar) this phase did
+not need to add.
+
+The byte-identical gate is pinned at `temp = 0.0` (greedy), not a
+real-sampling `(temp, top_k)` pair: `sample_from_topk`'s inverse-CDF walks
+candidates in probability-SORTED order (required for its top-p nucleus
+truncation), while the deleted `sample_logits` walked the raw vocab in
+INDEX order - for the same `rng` draw those two summation orders pick
+different tokens whenever more than one candidate survives filtering. Only
+greedy decoding is order-independent (both the old `argmax` fold and the
+new sorted-candidates-take-first agree on the lowest-index maximum), so it
+is the one setting where "byte-identical" and "reuse `sample_from_topk`,
+don't reinvent sampling" are simultaneously satisfiable.
+
+**Verified**: `cargo test -p brain-model --lib` - 195 tests green (2 new in
+`rollout::tests` for the candidate-sort tie-break and the EOS/`max_new`
+accept helper, 2 new in `serve::tests` for `sample_from_topk_with_logprob`
+against a manual softmax oracle and its greedy zero-logprob case).
+`cargo test -p brain-qwen3 --lib` - 129 passed, 3 pre-existing failures
+(`embed_step_survives_a_vocab_table_that_exceeds_one_storage_binding`,
+`head_matmul_over_binding_cap_does_not_panic`,
+`head_matmul_tiled_matches_untiled_within_tolerance`, all this box's GPU
+`max_buffer_size` limit, exactly the 3 P7 already documented as unrelated -
+confirmed again here via `git stash`), including all 5 new P10 gate tests:
+`model::rollout_tests::generate_output_is_byte_identical_across_the_rollout_refactor`,
+`serve::rollout_tests::model_rollout_and_paged_rollout_agree_on_greedy_decoding`,
+`serve::rollout_tests::sample_n_shares_the_prompts_kv_through_the_prefix_cache`,
+`serve::rollout_tests::eos_stops_a_completion_immediately_without_emitting_it`,
+and `serve::rollout_tests::top_p_is_honoured_through_model_rollout`. `cargo
+check --workspace --all-targets --exclude brain-vulkan` clean. `cargo
+clippy -p brain-model -p brain-qwen3 --all-targets` clean on every touched
+file (pre-existing warnings elsewhere in both crates, e.g. `crates/model/
+tests/matmul_kq.rs`, `crates/model/src/int8.rs`, `crates/qwen3/src/
+serve.rs:5229`, are untouched by this phase).
 
 ## P11 - `Environment` / `Verifier` - TODO
 

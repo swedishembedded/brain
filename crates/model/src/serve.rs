@@ -225,9 +225,27 @@ impl SampleParams {
 /// bounds how wide the nucleus can ever be); this is a documented ceiling on
 /// `top_p`'s width, not a bug.
 pub fn sample_from_topk(candidates: &[(u32, f32)], params: SampleParams, rng: &mut data::rng::Rng) -> u32 {
+    sample_from_topk_impl(candidates, params, rng).0
+}
+
+/// Like [`sample_from_topk`], but also returns the sampled token's own
+/// log-probability under the exact truncated, temperature-scaled
+/// distribution it was drawn from - captured for free at the point of
+/// sampling instead of re-derived by a second softmax pass later (a
+/// rollout's GRPO-style `pi_old`; see `crate::rollout::Completion::logprobs`).
+/// Greedy decoding is deterministic, so its "probability" is `1.0`
+/// (`logprob = 0.0`).
+pub fn sample_from_topk_with_logprob(candidates: &[(u32, f32)], params: SampleParams, rng: &mut data::rng::Rng) -> (u32, f32) {
+    sample_from_topk_impl(candidates, params, rng)
+}
+
+/// Shared body for [`sample_from_topk`]/[`sample_from_topk_with_logprob`] -
+/// one sampling implementation, two return shapes, so the two callers can
+/// never drift apart on the actual math.
+fn sample_from_topk_impl(candidates: &[(u32, f32)], params: SampleParams, rng: &mut data::rng::Rng) -> (u32, f32) {
     assert!(!candidates.is_empty(), "sample_from_topk: no candidates");
     if params.is_greedy() {
-        return candidates[0].0;
+        return (candidates[0].0, 0.0);
     }
     let temp = params.temp.max(1e-6);
     let n = if params.top_k > 0 { params.top_k.min(candidates.len()) } else { candidates.len() };
@@ -257,10 +275,11 @@ pub fn sample_from_topk(candidates: &[(u32, f32)], params: SampleParams, rng: &m
     for (i, &p) in probs[..cut].iter().enumerate() {
         acc += p;
         if acc >= r {
-            return candidates[i].0;
+            return (candidates[i].0, p.ln() - kept_sum.ln());
         }
     }
-    candidates[cut - 1].0
+    let last = cut - 1;
+    (candidates[last].0, probs[last].ln() - kept_sum.ln())
 }
 
 /// Greedy argmax of a logits/score vector — pure host math, no decoder
@@ -1074,6 +1093,42 @@ mod tests {
         };
         assert_eq!(draw(1234), draw(1234));
         assert_ne!(draw(1234), draw(5678), "different seeds should not collide on 20 draws");
+    }
+
+    /// The logprob returned alongside the token must be exactly `ln(chosen
+    /// probability under the truncated, temperature-scaled distribution)` -
+    /// the value `sample_from_topk` (which discards it) computed internally
+    /// anyway, not a value re-derived by a second pass over `candidates`.
+    #[test]
+    fn sample_from_topk_with_logprob_matches_a_manual_softmax_over_the_kept_set() {
+        let candidates = [(5u32, 2.0f32), (1, 1.0), (9, 0.5), (3, -3.0)];
+        let params = SampleParams { temp: 0.7, top_k: 3, top_p: 1.0 };
+        for seed in 0..16u64 {
+            let mut rng = data::rng::Rng::new(seed);
+            let (tok, logprob) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
+            // Independent oracle: manual temperature-scaled softmax over the
+            // top-3 candidates (top_k=3 keeps everything but the last).
+            let kept = &candidates[..3];
+            let scaled: Vec<f32> = kept.iter().map(|&(_, v)| v / params.temp).collect();
+            let max = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = scaled.iter().map(|&s| (s - max).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            let rank = kept.iter().position(|&(id, _)| id == tok).expect("sampled token must be in the kept set");
+            let expected = exps[rank].ln() - sum.ln();
+            assert!((logprob - expected).abs() < 1e-5, "seed {seed}: logprob {logprob} != expected {expected}");
+        }
+    }
+
+    /// Greedy decoding is deterministic - the sampled token's "probability"
+    /// is exactly `1.0`, so its logprob must be exactly `0.0`.
+    #[test]
+    fn sample_from_topk_with_logprob_is_zero_at_greedy() {
+        let candidates = [(7u32, 3.0f32), (2, 5.0), (9, 1.0)];
+        let mut rng = data::rng::Rng::new(1);
+        let params = SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 };
+        let (tok, logprob) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
+        assert_eq!(tok, 7); // first entry, matching sample_from_topk's greedy contract
+        assert_eq!(logprob, 0.0);
     }
 
     #[test]

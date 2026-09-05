@@ -2931,7 +2931,7 @@ mod tests {
         model::ops::assert_kernel_list_complete(ops_kernel_list());
     }
 
-    fn tiny_weights(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
+    pub(super) fn tiny_weights(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
         let mut rng = Rng::new(1);
         let mut map = HashMap::new();
         for (name, count) in cfg.param_list() {
@@ -5339,5 +5339,140 @@ mod tests {
         let plain = eng.gpu.read(&out_plain, (n * d) as usize);
 
         assert_eq!(tiled, plain, "tiled embed must be bit-identical to the untiled EMBED kernel");
+    }
+}
+
+/// P10 (generic rollout) gate: `ModelRollout` (the always-correct oracle,
+/// over the dense `Qwen`) and `PagedRollout` (the fast path, over this
+/// module's `Engine`) built from the SAME weights, and `PagedRollout`'s
+/// N-way sampling shares the prompt's KV rather than recomputing it.
+#[cfg(test)]
+mod rollout_tests {
+    use super::*;
+    use super::tests::tiny_weights;
+    use crate::model::Qwen;
+    use data::rng::Rng;
+    use model::rollout::{ModelRollout, PagedRollout, Rollout, RolloutParams, StopReason};
+    use model::serve::SampleParams;
+
+    fn gpu_disabled() -> bool {
+        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// `ModelRollout` (dense `Qwen`) and `PagedRollout` (paged `Engine`),
+    /// built from IDENTICAL weights, must agree token-for-token on GREEDY
+    /// decoding - the P10 gate proving the fast path is not silently wrong,
+    /// independent of any real-sampling RNG-plumbing question.
+    #[test]
+    fn model_rollout_and_paged_rollout_agree_on_greedy_decoding() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let qwen = Qwen::new(cfg.clone(), 1, cfg.block_size, &map);
+        let engine = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 8, 8, false, false);
+
+        let prompt = vec![1u32, 5, 3];
+        let params = RolloutParams { max_new: 4, sample: SampleParams::greedy(), eos: None };
+
+        let mut model_roll = ModelRollout::new(&qwen);
+        let model_out = model_roll.sample_n(&prompt, 1, &params, &mut Rng::new(1)).pop().expect("sample_n(1)");
+
+        let mut paged_roll = PagedRollout::new(engine);
+        let paged_out = paged_roll.sample_n(&prompt, 1, &params, &mut Rng::new(1)).pop().expect("sample_n(1)");
+
+        assert_eq!(model_out.tokens, paged_out.tokens, "ModelRollout vs PagedRollout diverged on greedy decoding");
+        assert_eq!(model_out.stop, StopReason::MaxNew);
+        assert_eq!(paged_out.stop, StopReason::MaxNew);
+    }
+
+    /// `PagedRollout::sample_n(n=8)` on one prompt must prefill that prompt
+    /// through the engine's own prefix cache, not recompute it from scratch
+    /// on every one of the 8 samples: `prefix_stats()`'s `hit_tokens` (tokens
+    /// served from cache) must be nonzero and grow with `n`, and
+    /// `lookup_tokens` (tokens looked up) must be exactly `n * prompt.len()`
+    /// - one lookup per sample's `prefill` call, nothing more.
+    #[test]
+    fn sample_n_shares_the_prompts_kv_through_the_prefix_cache() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let engine = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 8, 8, 8, false, false);
+        let prompt = vec![1u32, 5, 3, 9, 2, 7, 4, 6, 8];
+        let params = RolloutParams { max_new: 3, sample: SampleParams::greedy(), eos: None };
+
+        let mut roll = PagedRollout::new(engine);
+        let n = 8usize;
+        let out = roll.sample_n(&prompt, n, &params, &mut Rng::new(7));
+        assert_eq!(out.len(), n);
+
+        let engine = roll.into_decoder();
+        let (hit_tokens, lookup_tokens, cached_blocks) = engine.prefix_stats();
+        assert_eq!(lookup_tokens, n as u64 * prompt.len() as u64, "one prefill lookup per sample, exactly");
+        assert!(hit_tokens > 0, "no prefix reuse observed across {n} samples of the identical prompt");
+        assert!(cached_blocks > 0, "the prompt's full blocks must be indexed for reuse");
+        // The first sample computes cold (nothing cached yet); every one of
+        // the remaining n-1 samples must hit the cache for at least one full
+        // block (block_size=4) of the shared prompt - "shared", not
+        // "recomputed 8 times".
+        assert!(hit_tokens >= (n as u64 - 1) * 4, "hit_tokens {hit_tokens} too low for {n} samples sharing one prompt's KV");
+    }
+
+    /// EOS must end a completion immediately (no tokens/logprobs emitted)
+    /// regardless of which token the underlying sampling policy would
+    /// otherwise have produced - derived from a real run so it holds for
+    /// whatever this tiny model's actual greedy continuation is, not a
+    /// guessed token id.
+    #[test]
+    fn eos_stops_a_completion_immediately_without_emitting_it() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let prompt = vec![1u32, 5, 3];
+        let no_eos = RolloutParams { max_new: 4, sample: SampleParams::greedy(), eos: None };
+
+        let engine = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 8, 8, false, false);
+        let mut roll = PagedRollout::new(engine);
+        let baseline = roll.sample_n(&prompt, 1, &no_eos, &mut Rng::new(3)).pop().expect("sample_n(1)");
+        assert!(!baseline.tokens.is_empty(), "fixture needs a real first token to use as EOS");
+        let eos_token = baseline.tokens[0];
+
+        let engine = roll.into_decoder();
+        let with_eos = RolloutParams { eos: Some(eos_token), ..no_eos };
+        let mut roll = PagedRollout::new(engine);
+        let stopped = roll.sample_n(&prompt, 1, &with_eos, &mut Rng::new(3)).pop().expect("sample_n(1)");
+
+        assert_eq!(stopped.stop, StopReason::Eos);
+        assert!(stopped.tokens.is_empty(), "EOS must not be appended to the completion");
+        assert!(stopped.logprobs.is_empty());
+    }
+
+    /// `RolloutParams::sample.top_p` must actually reach the sampling call:
+    /// a tight nucleus and a fully open one, same seed and temperature,
+    /// must diverge for at least one of several seeds - proving `top_p` is
+    /// plumbed through end to end, not silently dropped.
+    #[test]
+    fn top_p_is_honoured_through_model_rollout() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 3);
+        let qwen = Qwen::new(cfg.clone(), 1, cfg.block_size, &init);
+        let prompt = vec![1u32, 5, 3];
+
+        let run = |top_p: f32, seed: u64| {
+            let params = RolloutParams { max_new: 5, sample: SampleParams { temp: 2.0, top_k: 0, top_p }, eos: None };
+            let mut roll = ModelRollout::new(&qwen);
+            roll.sample_n(&prompt, 1, &params, &mut Rng::new(seed)).pop().expect("sample_n(1)").tokens
+        };
+
+        let diverged = (0..20u64).any(|seed| run(0.05, seed) != run(1.0, seed));
+        assert!(diverged, "top_p=0.05 vs top_p=1.0 never diverged across 20 seeds - top_p does not appear to be honoured");
     }
 }

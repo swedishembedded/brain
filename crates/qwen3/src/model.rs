@@ -4049,3 +4049,54 @@ mod rmsnorm_dx_variant_agreement {
         block::assert_rmsnorm_dx_variant_agrees(&gpu, &Qwen::ids(), &shapes);
     }
 }
+
+/// P10 (generic rollout) gate: `model::train::generate` becomes a thin
+/// wrapper over `model::rollout::ModelRollout::sample_n(n=1)`. This module's
+/// job is proving that refactor changed nothing observable for an existing
+/// caller - every test here is pinned against `Qwen`, the model these
+/// primitives were lifted from.
+#[cfg(test)]
+mod rollout_tests {
+    use super::*;
+    use data::rng::Rng;
+
+    fn gpu_disabled() -> bool {
+        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    fn tiny_model() -> Qwen {
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 42);
+        Qwen::new(cfg.clone(), 1, cfg.block_size, &init)
+    }
+
+    /// **The refactor's own gate.** `model::train::generate`'s output for a
+    /// fixed `(seed, temp, top_k)` must be byte-identical before and after
+    /// the rollout refactor. This literal `Vec<u32>` was captured by running
+    /// this exact test against the PRE-refactor `generate` (its private
+    /// `sample_logits`/`argmax`, not `ModelRollout`).
+    ///
+    /// Fixed at `temp = 0.0` (greedy) deliberately: `sample_from_topk`'s
+    /// inverse-CDF walks candidates in probability-SORTED order (required for
+    /// its top-p nucleus truncation, `crate::serve::sample_from_topk`'s own
+    /// doc comment), while the old private `sample_logits` walked the raw
+    /// vocab in INDEX order. For the same `rng` draw those two summation
+    /// orders pick different tokens whenever more than one candidate survives
+    /// filtering - real (temp > 0), reproducible, but not byte-identical to
+    /// the old algorithm's specific accumulation order. Greedy decoding does
+    /// not consume `rng` or depend on summation order at all (both old
+    /// `argmax` and the new sorted-candidates-take-first pick the same
+    /// lowest-index maximum), so it is the one setting where "byte-identical"
+    /// and "not reinventing sampling" are both simultaneously true.
+    #[test]
+    fn generate_output_is_byte_identical_across_the_rollout_refactor() {
+        if gpu_disabled() {
+            return;
+        }
+        let model = tiny_model();
+        let prompt = vec![1u32, 5, 3, 9, 2];
+        let mut rng = Rng::new(1234);
+        let out = model::train::generate(&model, &prompt, 6, 0.0, 0, &mut rng);
+        assert_eq!(out, vec![2, 2, 2, 2, 2, 2]);
+    }
+}

@@ -63,6 +63,7 @@ pub mod parallel;
 pub mod plan;
 /// Real per-device, per-dtype GEMM throughput measurement - see the module doc.
 pub mod probe;
+pub mod rollout;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
 pub mod train;

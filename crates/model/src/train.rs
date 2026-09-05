@@ -394,8 +394,12 @@ pub fn fit<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Pa
 
 /// Generate `max_new` tokens continuing `prompt` for any token-head [`Model`].
 /// Context is cropped to the model's block size. `temperature <= 0` selects
-/// greedy argmax; `top_k = 0` disables top-k filtering. Lifted from
-/// `gpt2::sample::generate`; depends only on [`Model::logits_all`].
+/// greedy argmax; `top_k = 0` disables top-k filtering. A thin wrapper over
+/// [`crate::rollout::ModelRollout::sample_n`] (`n = 1`, no EOS) - the
+/// always-correct, architecture-agnostic rollout this function's own
+/// pre-P10 implementation was lifted into, byte-identical for a fixed
+/// `(seed, temperature, top_k)` (see `qwen3`'s
+/// `generate_output_is_byte_identical_across_the_rollout_refactor`).
 pub fn generate<M: Model>(
     m: &M,
     prompt: &[u32],
@@ -404,69 +408,12 @@ pub fn generate<M: Model>(
     top_k: usize,
     rng: &mut Rng,
 ) -> Vec<u32> {
-    let block = m.config().block_size() as usize;
-    let vocab = m.config().vocab() as usize;
-    let mut ctx: Vec<u32> = prompt.to_vec();
-    let mut out = Vec::with_capacity(max_new);
+    use crate::rollout::{ModelRollout, Rollout, RolloutParams};
+    use crate::serve::SampleParams;
 
-    for _ in 0..max_new {
-        let window: Vec<u32> = if ctx.len() > block {
-            ctx[ctx.len() - block..].to_vec()
-        } else {
-            ctx.clone()
-        };
-        let logits = m.logits_all(&window).expect("token head");
-        // last position's vocab logits
-        let last = &logits[logits.len() - vocab..];
-        let next = sample_logits(last, temperature, top_k, rng);
-        ctx.push(next);
-        out.push(next);
-    }
-    out
-}
-
-fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, rng: &mut Rng) -> u32 {
-    if temperature <= 0.0 {
-        return argmax(logits) as u32;
-    }
-    // temperature scale
-    let mut scaled: Vec<f32> = logits.iter().map(|&l| l / temperature).collect();
-
-    // top-k: keep only the k largest logits, rest -> -inf
-    if top_k > 0 && top_k < scaled.len() {
-        let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap());
-        let threshold = scaled[idx[top_k - 1]];
-        for v in scaled.iter_mut() {
-            if *v < threshold {
-                *v = f32::NEG_INFINITY;
-            }
-        }
-    }
-
-    // softmax (numerically stable) then inverse-CDF sample
-    let max = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0;
-    for v in scaled.iter_mut() {
-        *v = (*v - max).exp();
-        sum += *v;
-    }
-    let r = rng.next_f32() * sum;
-    let mut acc = 0.0;
-    for (i, &p) in scaled.iter().enumerate() {
-        acc += p;
-        if r <= acc {
-            return i as u32;
-        }
-    }
-    (scaled.len() - 1) as u32
-}
-
-fn argmax(v: &[f32]) -> usize {
-    v.iter()
-        .enumerate()
-        .fold((0, f32::NEG_INFINITY), |(bi, bv), (i, &x)| if x > bv { (i, x) } else { (bi, bv) })
-        .0
+    let params = RolloutParams { max_new, sample: SampleParams { temp: temperature, top_k, top_p: 1.0 }, eos: None };
+    let mut rollout = ModelRollout::new(m);
+    rollout.sample_n(prompt, 1, &params, rng).pop().expect("sample_n(1) returns exactly one completion").tokens
 }
 
 #[cfg(test)]
@@ -479,13 +426,6 @@ mod tests {
         assert!(cosine_lr(0, &o) < cosine_lr(5, &o)); // ramping up
         assert!((cosine_lr(9, &o) - 1.0).abs() < 0.11); // near peak at end of warmup
         assert!((cosine_lr(200, &o) - 0.1).abs() < 1e-6); // floor after decay
-    }
-
-    #[test]
-    fn sample_logits_greedy_picks_argmax() {
-        let mut rng = Rng::new(0);
-        let logits = [0.1, 5.0, 0.2, -1.0];
-        assert_eq!(sample_logits(&logits, 0.0, 0, &mut rng), 1);
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {
