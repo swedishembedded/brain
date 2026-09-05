@@ -1717,6 +1717,19 @@ impl Qwen {
         }
     }
 
+    /// Per-position `log p_θ(target)` for the batch [`Self::forward`] most
+    /// recently ran: the negation of `ce_buf`, which [`Self::forward`]
+    /// already read back to host to sum into its scalar return. `0.0` at
+    /// IGNORE positions, since `ce_value_masked.wgsl` writes exactly `0.0`
+    /// there. See `model::Model::batch_token_logprobs`'s doc comment for the
+    /// validity window (immediately after `forward`, until the next
+    /// `set_batch`/`forward`).
+    pub fn batch_token_logprobs(&self) -> Vec<f32> {
+        assert!(!self.decode_only, "Qwen::batch_token_logprobs: batched forward called on a decode-only-built model");
+        let n = (self.b * self.t) as usize;
+        self.gpu.read(&self.ce_buf, n).iter().map(|&nll| -nll).collect()
+    }
+
     pub fn backward(&self) {
         assert!(!self.decode_only, "Qwen::backward: batched backward called on a decode-only-built model (no backward buffers were allocated)");
         let n = self.b * self.t;
@@ -2756,6 +2769,12 @@ impl model::Model for Qwen {
     fn enable_weighted_loss(&mut self) {
         Qwen::enable_weighted_loss(self)
     }
+    fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
+        Some(Qwen::batch_token_logprobs(self))
+    }
+    fn set_loss_weights(&self, weights: &[f32]) {
+        Qwen::write_weights(self, weights)
+    }
     fn forward(&self) -> f32 {
         Qwen::forward(self)
     }
@@ -3595,6 +3614,36 @@ mod tests {
         assert!(l1.is_finite() && l1 > 0.0, "loss {l1}");
         assert!((l1 - l2).abs() < 1e-6, "not deterministic");
         assert!(l1 < 2.0 * (23f32).ln(), "loss implausibly large: {l1}");
+    }
+
+    #[test]
+    fn batch_token_logprobs_matches_oracle_with_ignore() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 13);
+        // b=1: `logprobs::token_logprobs`'s oracle path goes through
+        // `Qwen::logits_all`, which requires a single-sequence instance.
+        let model = Qwen::new(cfg, 1, 8, &init);
+        let x: Vec<u32> = (0..8).map(|i| (i * 5 % 23) as u32).collect();
+        let mut y: Vec<u32> = (0..8).map(|i| ((i * 5 + 1) % 23) as u32).collect();
+        y[2] = model::IGNORE;
+        y[5] = model::IGNORE;
+        model.set_batch(&x, &y);
+        model.forward();
+        let fast = model::Model::batch_token_logprobs(&model).expect("qwen3 exposes batch_token_logprobs");
+        // `logits_all` resets the batch as a side effect (its own doc
+        // comment says so), so call the oracle AFTER capturing `fast`.
+        let oracle = model::logprobs::token_logprobs(&model, &x, &y).expect("qwen3 has a token head");
+        assert_eq!(fast.len(), oracle.len());
+        for (i, (&f, &o)) in fast.iter().zip(&oracle).enumerate() {
+            if y[i] == model::IGNORE {
+                assert_eq!(f, 0.0, "position {i}: fast path should read 0.0 at IGNORE");
+                assert_eq!(o, 0.0, "position {i}: oracle should read 0.0 at IGNORE");
+            }
+            assert!((f - o).abs() < 1e-5, "position {i}: fast={f} oracle={o} disagree");
+        }
     }
 
     #[test]

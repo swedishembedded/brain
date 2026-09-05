@@ -45,6 +45,7 @@ pub mod hostmath;
 pub mod int4;
 pub mod int8;
 pub mod kquant;
+pub mod logprobs;
 pub mod lora;
 pub mod lut4;
 pub mod moe;
@@ -207,6 +208,46 @@ pub trait Model {
     /// implementation this delegates to.
     fn enable_weighted_loss(&mut self) {
         unimplemented!("{}: does not implement Model::enable_weighted_loss (no weighted-loss/Batch::LmWeighted support yet)", std::any::type_name::<Self>());
+    }
+
+    /// Per-position `log p_θ(target_i)` for the batch most recently
+    /// [`Model::forward`]-ed, length `b·t`, `0.0` at IGNORE positions (they
+    /// contribute nothing to any objective built on this). This is the
+    /// negation of the per-position cross-entropy loss the model's own loss
+    /// kernel already wrote for that forward - most models read that buffer
+    /// back to host every step already (to sum it into the scalar
+    /// [`Model::forward`] returns) and simply discard it; this is a second,
+    /// cheap read of the same buffer, not new computation.
+    ///
+    /// Valid only immediately after a completed [`Model::forward`], for the
+    /// batch that forward ran on, until the next `set_batch`/`forward`.
+    ///
+    /// `None` (the default) means "not exposed by this model"; callers that
+    /// need it unconditionally should fall back to
+    /// [`logprobs::token_logprobs`], which is always correct (via
+    /// [`Model::logits_all`]) but far more expensive. Deliberately **not**
+    /// defaulted over `logits_all`: on models where `logits_all` re-sets the
+    /// current batch as a side effect (`qwen3::Qwen`), a default here would
+    /// silently clobber whatever batch the caller is mid-step on.
+    fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
+        None
+    }
+
+    /// Replace only the per-position CE-gradient weights for the batch
+    /// already set via [`Model::set_batch`], without disturbing the
+    /// activations a completed [`Model::forward`] left behind. This is what
+    /// lets a pairwise/grouped objective (DPO, GRPO) run on ONE forward and
+    /// ONE backward per micro-step: forward, read
+    /// [`Model::batch_token_logprobs`], compute the objective's per-token
+    /// coefficients on the host, call this, then backward.
+    ///
+    /// Default panics, for the same reason [`Model::enable_weighted_loss`]'s
+    /// does: a model must explicitly opt in (typically a one-line delegate to
+    /// whatever setter backs its `Batch::LmWeighted` support, e.g.
+    /// `qwen3::Qwen::write_weights`) and must have called
+    /// [`Model::enable_weighted_loss`] first.
+    fn set_loss_weights(&self, _weights: &[f32]) {
+        unimplemented!("{}: does not implement Model::set_loss_weights", std::any::type_name::<Self>());
     }
 
     /// Run forward; return the scalar objective loss that `backward` differentiates.

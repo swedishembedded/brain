@@ -113,9 +113,7 @@ pub fn score_chat(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &Ch
             }
             let target = ids[i + 1] as usize;
             let row = &logits[i * vocab..(i + 1) * vocab];
-            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let sum_exp: f32 = row.iter().map(|&v| (v - max).exp()).sum();
-            let log_prob = row[target] - max - sum_exp.ln();
+            let log_prob = model::logprobs::row_logprob(row, target);
             total_nll -= log_prob as f64;
             positions += 1;
             if argmax(row) as usize == target {
@@ -244,9 +242,7 @@ pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmp
             let target = ids[i + 1] as usize;
             let row = &hidden[i * d..(i + 1) * d];
             let logits = eng.logits(row);
-            let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let sum_exp: f32 = logits.iter().map(|&v| (v - max).exp()).sum();
-            let log_prob = logits[target] - max - sum_exp.ln();
+            let log_prob = model::logprobs::row_logprob(&logits, target);
             total_nll -= log_prob as f64;
             positions += 1;
             if argmax(&logits) as usize == target {
