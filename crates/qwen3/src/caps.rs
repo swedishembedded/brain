@@ -27,6 +27,23 @@ use crate::model::Qwen;
 /// The model id used on the CLI (`brain do qwen …`) and the event API.
 pub const MODEL: &str = "brain/qwen3";
 
+/// Default generated-token budget.
+///
+/// **This was a bare `32`, repeated as a literal in two places per crate,
+/// with no stated reason in any doc comment, `docs/models/*.md` or roadmap
+/// entry, and no measurement behind it.** Thirty-two tokens is half a
+/// sentence: it truncated essentially every real answer this decoder was
+/// asked for.
+///
+/// Nothing about this path argues for keeping it that low. The served
+/// `generate` action decodes through [`crate::sample`]'s KV-cached loop, so a
+/// token is one `O(1)` incremental step, not a recompute of the context; the
+/// resident is sized to `prompt + max_new` and grown on demand, so unlike
+/// `deepseek2ocr` there is no fixed context ceiling this could overrun; and
+/// 128 is already what brain's other KV-cached text actions default to
+/// (`llava::caps`, `glmdsa::caps`).
+pub const DEFAULT_MAX_NEW: i64 = 128;
+
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (KV-cache decode, one Progress per token)")
@@ -38,7 +55,7 @@ pub fn manifest() -> Manifest {
             "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without); ignored when `messages` is set",
         ))
         .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids").host_env("BRAIN_QWEN_TOKENIZER"))
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(32)).min(1.0).max(32768.0).step(1.0))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(DEFAULT_MAX_NEW)).min(1.0).max(32768.0).step(1.0))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
@@ -143,7 +160,7 @@ impl Action for GenerateAction {
             }
             None => {
                 let prompt = inv.get_str("prompt").unwrap_or_default();
-                let max_new = inv.get_i64("max_new").unwrap_or(32).max(0) as usize;
+                let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).max(0) as usize;
                 let temp = inv.get_f64("temp").unwrap_or(0.0) as f32;
                 let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
                 let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
@@ -254,11 +271,11 @@ mod tests {
         // can supply the request instead, matching `resident_llm`'s spec.
         assert!(g.params.iter().any(|p| p.name == "prompt" && !p.required));
         assert!(g.params.iter().any(|p| p.name == "messages"));
-        assert_eq!(g.params.iter().find(|p| p.name == "max_new").unwrap().default, Some(json!(32)));
+        assert_eq!(g.params.iter().find(|p| p.name == "max_new").unwrap().default, Some(json!(DEFAULT_MAX_NEW)));
         assert_eq!(g.outputs[0].media, Media::Text);
         // validation: defaults fill, missing required rejected, no weights loaded.
         let inv = g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1 2"))).unwrap();
-        assert_eq!(inv.get_i64("max_new"), Some(32));
+        assert_eq!(inv.get_i64("max_new"), Some(DEFAULT_MAX_NEW));
         assert!(g.validate(Invocation::new().set("prompt", json!("1"))).is_err());
         assert!(g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1")).set("bogus", json!(1))).is_err());
         // the manifest round-trips to JSON for discovery.
