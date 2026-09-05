@@ -515,6 +515,47 @@ unsafe fn dot32_i8_avx512vnni(a: &[u32], b: &[u32]) -> i32 {
     _mm512_reduce_add_epi32(acc)
 }
 
+/// NEON (`SDOT`) twin of [`dot32_i8_avx2`]/[`dot32_i8_avx512vnni`] -
+/// `kernel-performance.md` M8.13. Same 32-lane group. NEON's `vdotq_s32`
+/// (ARMv8.2-A dot-product) is a NATIVE signed-times-signed 4-lane
+/// dot-accumulate - unlike AVX2/AVX-512 (which need the abs/sign trick
+/// because `maddubs`/`dpbusd` want one unsigned operand), NEON needs no sign
+/// workaround at all here: `vdotq_s32(acc, a, b)` computes
+/// `acc[k] += sum_{i=0..3}(a[4k+i] * b[4k+i])` directly over SIGNED `i8`
+/// lanes, four output lanes (128 bits / 32 bits) per call, folded over 8
+/// groups-of-4 to cover all 32 lanes.
+///
+/// **UNVALIDATED ANYWHERE IN THIS CAMPAIGN, not merely on this box**: unlike
+/// M8.12's AVX-512-VNNI kernel (compiled and shape-checked on this real
+/// x86_64 host, just never execution-verified), this function has never
+/// been compiled AT ALL in this campaign - there is no aarch64 target
+/// installed in this sandbox and none could be added (see
+/// `fast_conv::neon_dotprod_available`'s own doc). `#[cfg(target_arch =
+/// "aarch64")]` means this entire function does not exist in the binary
+/// this campaign's own tests build and run.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn dot32_i8_neon(a: &[u32], b: &[u32]) -> i32 {
+    use std::arch::aarch64::*;
+    debug_assert_eq!(a.len(), 8);
+    debug_assert_eq!(b.len(), 8);
+    // Each `u32` word IS 4 packed `i8` lanes (`dot4I8Packed`'s own packing) -
+    // reinterpret the 8-word slices as 32 `i8` lanes directly, no bit-twiddling
+    // needed (unlike the AVX2/AVX-512 sign trick).
+    let ap = a.as_ptr() as *const i8;
+    let bp = b.as_ptr() as *const i8;
+    let mut acc = vdupq_n_s32(0);
+    // 32 lanes = two `int8x16_t` (16-lane) chunks, each folded via two
+    // `vdotq_s32` groups-of-4 internally (the intrinsic's own 4-lane stride).
+    let a0 = vld1q_s8(ap);
+    let b0 = vld1q_s8(bp);
+    acc = vdotq_s32(acc, a0, b0);
+    let a1 = vld1q_s8(ap.add(16));
+    let b1 = vld1q_s8(bp.add(16));
+    acc = vdotq_s32(acc, a1, b1);
+    vaddvq_s32(acc)
+}
+
 /// `out[i] = x[i] >= 0 ? x[i] : slope*x[i]` (`leaky_relu.wgsl`; slope 0 is ReLU,
 /// slope 1 is the aliasing copy some blocks use). Branch-free select
 /// auto-vectorizes; ~40 dispatches per ZipDepth frame ran as scalar JIT before.
@@ -2929,6 +2970,38 @@ mod tests {
         let want = dot_group_scalar(&a, &b);
         let got = unsafe { dot32_i8_avx512vnni(&a, &b) };
         assert_eq!(got, want, "AVX-512-VNNI sign-trick dot diverged from the scalar reference on the clamp corners");
+    }
+
+    /// M8.13: the NEON `SDOT` 32-lane dot, against the SAME scalar oracle and
+    /// SAME sign-corner pattern the AVX2/AVX-512-VNNI tests above pin.
+    /// `#[cfg(target_arch = "aarch64")]`-gated on the TEST ITSELF, not just
+    /// the kernel it calls - this test does not exist at all in the binary
+    /// this campaign's own `cargo test` builds (x86_64), which is the honest
+    /// reflection of "never compiled here", stronger than a runtime skip.
+    /// `skip_unvalidated_capability`'s own gate is kept anyway for the day a
+    /// real aarch64 CI leg compiles this file: even THERE, `neon_dotprod`
+    /// may be genuinely absent (armv8.0 cores predate the dotprod extension),
+    /// and the "unvalidated, may fail on hardware that has it" caveat still
+    /// applies until this exact function has run once on real dotprod
+    /// silicon - neither of which this campaign can confirm today.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_int8_dot_matches_scalar_on_sign_corners() {
+        if !crate::fast_conv::neon_dotprod_available() {
+            brain_testutil::skip_unvalidated_capability(
+                "neon-dotprod",
+                "fast_ops::dot32_i8_neon (kernel-performance.md M8.13) needs ARMv8.2-A NEON dot-product \
+                 (SDOT/vdotq_s32); this function has never been compiled OR run anywhere in this \
+                 campaign (no aarch64 toolchain target available in the sandbox that wrote it) - even \
+                 on real aarch64 hardware, dotprod may be genuinely absent (pre-ARMv8.2 cores). MAY FAIL \
+                 in ways a purely x86_64-tested campaign cannot catch.",
+            );
+            return;
+        }
+        let (a, b) = sign_corner_lanes();
+        let want = dot_group_scalar(&a, &b);
+        let got = unsafe { dot32_i8_neon(&a, &b) };
+        assert_eq!(got, want, "NEON SDOT dot diverged from the scalar reference on the clamp corners");
     }
 
     /// Measured throughput, scalar vs AVX2, on this box's real core (M8.11's

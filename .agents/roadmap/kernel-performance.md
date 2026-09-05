@@ -4541,6 +4541,61 @@ brain-backend-cpu --all-targets` clean. **Measured: N/A, by hardware
 necessity, stated plainly** - this box cannot run AVX-512 of any kind.
 **Commit**: one.
 
+### M8.13 - NEON/SVE ARM int8 pack (harness-gated, build-only; SVE deferred, no cross-target check possible)
+
+**This x86_64 sandbox cannot execute ARM SIMD at all**, and (checked, not
+assumed) cannot even CROSS-COMPILE-CHECK it either: `rustup target list
+--installed` shows no `aarch64-unknown-linux-gnu` (or any ARM) target
+installed, and `rustup target add aarch64-unknown-linux-gnu` fails outright
+in this sandbox (`error opening file for download: ... No such file or
+directory` - no network path to fetch the target's std lib). So unlike
+M8.12 (compiled and shape-checked, just not execution-verified), this
+milestone's NEON code has not been compiled ANYWHERE in this campaign - not
+even a cross-compile check was possible. Stated plainly rather than silently
+skipped.
+
+**Written anyway, gated so it costs nothing on this box**: `fast_ops`'s
+`#[cfg(target_arch = "aarch64")]`-gated `dot32_i8_neon` mirrors
+`dot32_i8_avx2`/`dot32_i8_avx512vnni`'s exact shape (32-lane group, same
+sign-trick argument) using `vdotq_s32` (`SDOT`, ARMv8.2-A dot-product - the
+NEON analogue of AVX2's maddubs+madd / VNNI's dpbusd, a genuine single
+instruction for a 4-lane signed int8 dot-accumulate) - see that function's
+own doc comment for the exact intrinsic sequence. `IsaFeatures.neon`/
+`neon_dotprod` gain a real probe path, `#[cfg(target_arch = "aarch64")]`-
+only (`std::arch::is_aarch64_feature_detected!("neon"/"dotprod")` - x86
+builds keep the M8.1 honest default `false`, never probed on the wrong
+architecture). Not wired into `matmul_i8_dyn`'s `Int8IsaTier` (that enum
+stays `#[cfg(target_arch = "x86_64")]`-shaped for its VNNI/AVX2 arms); a
+`#[cfg(target_arch = "aarch64")]` sibling tier is the natural follow-up once
+ARM compile-checking is possible at all here.
+
+**SVE - explicitly NOT attempted**: variable vector length (no fixed lane
+count to write a `[u32; N]`-shaped kernel against at all, unlike NEON's fixed
+128-bit width), a distinct ABI attribute surface (`#[target_feature(enable =
+"sve")]` plus the scalable-vector types), and this session has no way to
+even compile-check ARM code period - writing SVE blind, with no NEON
+baseline compiled here either to sanity-check the *tooling* against, was
+judged the wrong place to spend this milestone's remaining scope. Left as a
+documented follow-up, `IsaFeatures.sve_bits` stays `None`.
+
+**Correctness gate**: `neon_int8_dot_matches_scalar_on_sign_corners`,
+`#[cfg(target_arch = "aarch64")]`-only (so it does not exist in this
+binary's own test list on this x86_64 box - confirmed by grepping the actual
+`cargo test` output for `neon`: no such test name appears, which is the
+honest reflection of "not compiled here" rather than a test that silently
+reports skip), gated with `brain_testutil::skip_unvalidated_capability
+("neon-dotprod", ...)` for the day it IS compiled on real ARM hardware -
+even more strongly caveated than M8.12's VNNI gate, per this milestone's own
+brief ("even more strongly" than M8.12).
+
+Verification: N/A on this box by construction - `cargo check -p
+brain-backend-cpu --lib` (native x86_64 target) stays green because every
+new symbol here is `#[cfg(target_arch = "aarch64")]`-gated and therefore
+compiled out entirely, which is the one thing confirmable here (that this
+milestone's addition costs nothing and breaks nothing on the box that
+actually runs this campaign's tests). **Commit**: one.
+
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

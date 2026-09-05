@@ -188,6 +188,49 @@ pub fn isa_tier() -> IsaTier {
     })
 }
 
+/// True iff the host has plain NEON (`kernel-performance.md` M8.13) -
+/// baseline on every AArch64 core (NEON is mandatory in the AArch64 spec,
+/// unlike x86's optional AVX tiers), so this is really "is this an AArch64
+/// host at all", kept as its own probe for symmetry with
+/// [`neon_dotprod_available`] rather than a hardcoded `cfg!` check at every
+/// call site.
+#[inline]
+pub fn neon_available() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("neon")
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
+
+/// True iff the host has ARMv8.2-A NEON dot-product (`SDOT`/`UDOT`,
+/// `vdotq_s32` et al) - a dedicated 4-lane int8 dot-accumulate instruction,
+/// the NEON analogue of AVX2's maddubs+madd / AVX-512-VNNI's `dpbusd`. See
+/// `fast_ops::dot32_i8_neon`'s own doc for the kernel this gates.
+///
+/// UNVALIDATED ANYWHERE IN THIS CAMPAIGN: this probe (and the NEON kernel it
+/// gates) has never been compiled on any host, x86_64 or ARM - this
+/// sandbox's toolchain has no `aarch64` target installed and cannot install
+/// one (no network path to fetch the target's std lib, confirmed by trying
+/// `rustup target add aarch64-unknown-linux-gnu`), so `#[cfg(target_arch =
+/// "aarch64")]` compiles this whole function out on every box this campaign
+/// has actually built on. Do not read `false` here as "probed and absent" -
+/// it is "never compiled, therefore never probed".
+#[inline]
+pub fn neon_dotprod_available() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("dotprod")
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
+
 /// Compute the bias-free NCHW convolution, matching `conv2d.wgsl` exactly (up to
 /// fp reassociation). Uses the AVX2 GEMM path when available, else a portable
 /// scalar GEMM with the same tiling.
