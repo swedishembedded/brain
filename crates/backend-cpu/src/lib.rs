@@ -170,6 +170,7 @@ struct FastIdx {
     matmul_reg: Option<usize>,
     matmul_reg2: Option<usize>,
     matmul_reg3: Option<usize>,
+    matmul_reg4: Option<usize>,
     matmul_dx: Option<usize>,
     matmul_dx_reg: Option<usize>,
     matmul_dw: Option<usize>,
@@ -275,6 +276,7 @@ impl CpuBackend {
                 matmul_reg: find("matmul_reg"),
                 matmul_reg2: find("matmul_reg2"),
                 matmul_reg3: find("matmul_reg3"),
+                matmul_reg4: find("matmul_reg4"),
                 attn_scores_cross: find("attn_scores_cross"),
                 attn_scores_cross_kt: find("attn_scores_cross_kt"),
                 kv_k_headt: find("kv_k_headt"),
@@ -575,12 +577,15 @@ impl CpuBackend {
         // AVX2 gemm. That is the one-graph rule: a model may pick whichever
         // variant suits its shapes without forking its CPU path. `matmul_reg3`
         // (reg2 with the bank conflicts removed) is bit-identical to reg2 by
-        // construction, so it belongs to exactly the same equivalence class.
+        // construction, so it belongs to exactly the same equivalence class, and
+        // `matmul_reg4` (reg3 re-laid-out for vec4 shared reads) likewise changes
+        // only the shared-memory layout, never the arithmetic.
         if (Some(kind) == f.matmul
             || Some(kind) == f.matmul_tiled
             || Some(kind) == f.matmul_reg
             || Some(kind) == f.matmul_reg2
-            || Some(kind) == f.matmul_reg3)
+            || Some(kind) == f.matmul_reg3
+            || Some(kind) == f.matmul_reg4)
             && bufs.len() >= 3
         {
             unsafe {

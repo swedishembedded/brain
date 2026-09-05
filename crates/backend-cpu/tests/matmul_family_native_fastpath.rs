@@ -129,7 +129,12 @@ fn assert_jit_uncompilable(name: &'static str, src: &'static str) {
 /// reference every native routing choice is checked against) plus every
 /// tiled variant the JIT refuses (`matmul_tiled` 2 barriers, `matmul_reg` 2,
 /// `matmul_reg2` 3, `matmul_reg3` 3 - the exact kernel the incident's warning
-/// named). `backend-cpu::dispatch` special-cases all five BY KERNEL IDENTITY
+/// named - and `matmul_reg4` 3). `matmul_reg4` matters here for a reason of its
+/// own: it is the first of the family whose shared memory is declared as
+/// `array<vec4<f32>>` and written one dynamically-indexed component at a time,
+/// so "the native fast path is reached and the WGSL body is never interpreted"
+/// is load-bearing for it in a way a reviewer cannot verify by eye.
+/// `backend-cpu::dispatch` special-cases all six BY KERNEL IDENTITY
 /// to the same AVX2 `fast_ops::matmul_abt` ("the one-graph rule": a model may
 /// register whichever variant suits its shapes without forking its CPU
 /// path) - this proves that routing is real and correct, not merely
@@ -140,6 +145,7 @@ fn forward_matmul_family_native_fastpath_matches_scalar_reference() {
     assert_jit_uncompilable("matmul_reg", kernels::MATMUL_REG);
     assert_jit_uncompilable("matmul_reg2", kernels::MATMUL_REG2);
     assert_jit_uncompilable("matmul_reg3", kernels::MATMUL_REG3);
+    assert_jit_uncompilable("matmul_reg4", kernels::MATMUL_REG4);
 
     let ks: &[(&str, &str)] = &[
         ("matmul", kernels::MATMUL),
@@ -147,6 +153,7 @@ fn forward_matmul_family_native_fastpath_matches_scalar_reference() {
         ("matmul_reg", kernels::MATMUL_REG),
         ("matmul_reg2", kernels::MATMUL_REG2),
         ("matmul_reg3", kernels::MATMUL_REG3),
+        ("matmul_reg4", kernels::MATMUL_REG4),
     ];
     let gpu = Gpu::new_cpu(ks);
     let mut seed = Lcg::new(0x5EED);
@@ -159,7 +166,7 @@ fn forward_matmul_family_native_fastpath_matches_scalar_reference() {
         let b: Vec<f32> = (0..n * k).map(|_| seed.scaled(0.5)).collect();
         let want = matmul_abt(&a, &b, m, k, n);
 
-        for name in ["matmul", "matmul_tiled", "matmul_reg", "matmul_reg2", "matmul_reg3"] {
+        for name in ["matmul", "matmul_tiled", "matmul_reg", "matmul_reg2", "matmul_reg3", "matmul_reg4"] {
             let ab = gpu.storage_init("a", &a);
             let bb = gpu.storage_init("b", &b);
             let ob = gpu.storage((m * n) as u64);
