@@ -2226,6 +2226,137 @@ Full `brain-glmdsa` suite green (26 tests). `cargo clippy -p brain-model
 warnings. **Commits**: two (`crates/model` fix + tests, then the
 `crates/glmdsa` call-site migration).
 
+**Correction (M5.10, below): the "not buildable" inference was wrong, not
+the finding it was built on.** Re-checked on 2026-09-05: still nothing
+matching `dispatch_workgroups_indirect`/`vkCmdDispatchIndirect`/an indirect
+`BufUsage` flag anywhere in this tree, so "no indirect-dispatch primitive
+exists in this engine" remains true exactly as found above. What was wrong
+is treating that absence as blocking a grouped GEMM. Every row selects
+EXACTLY `top_k` experts, so `rows*top_k` is a HOST-KNOWN CONSTANT before any
+device work runs, and - since `ceil(count_e/BM) <= count_e/BM + 1` for every
+expert - so is a worst-case upper bound on the whole M-dimension tile grid a
+grouped GEMM needs: `n_experts + ceil(rows*top_k/BM)`, computable purely
+from `(rows, top_k, n_experts, BM)`, no readback required. A fixed,
+host-sized dispatch grid whose per-workgroup work is resolved from a
+device-computed table is not a new primitive this engine lacks -
+`splat_rasterize.wgsl` already ships exactly this pattern in production
+(dispatched at a fixed host tile grid, its inner loop bound read from a
+device-written `ranges` buffer), and it is even `@cpu yes`. M5.10 builds
+the MoE analogue.
+
+### M5.10 - MoE device-side routing + grouped GEMM (forward only): zero host readback, corrects M5.4's "not buildable" conclusion
+
+M5.4 above got MoE from ~6100 submits/forward down to one `Gpu::submit` PER
+LAYER - a real fix, but still a host round trip every layer, because each
+expert's routed-row count is data the HOST decides from a `Gpu::read` of
+`gate` before it can build that layer's steps. This milestone removes that
+round trip entirely for the FORWARD pass. `GroupedExpertFwdIds`/
+`expert_fwd_grouped` (`crates/model/src/moe.rs`) builds and returns a plain
+`Vec<Step>` - no `Gpu::submit`, no `Gpu::read`, anywhere inside it - for:
+router-topk-compaction (existing kernel, reused), per-expert row/tile
+counting, two device-side exclusive scans, permutation emission (plus its
+inverse), a row gather (existing kernel, reused), ONE grouped GEMM dispatch
+each for gate/up/down spanning every expert, SiLU (existing, reused), and a
+gate-scaled combine.
+
+Four new kernels: `moe_group_counts.wgsl` (per-expert row count AND tile
+count in one pass), `moe_group_perm_emit.wgsl` (row permutation + its
+inverse), `matmul_reg3_grouped.wgsl` (the grouped GEMM), `moe_group_combine
+.wgsl` (the gate-scaled combine). `scan_block.wgsl`/`scan_add.wgsl`'s
+existing recursive-scan pattern (`crates/splat/src/sort.rs::record_scan`'s
+own orchestration, reimplemented locally as `record_group_scan` rather than
+pulling a rendering crate into `crates/model` - ~30 lines) is reused
+unchanged, not reinvented.
+
+`matmul_reg3_grouped.wgsl` is `matmul_reg3.wgsl`'s K-accumulation loop
+copied VERBATIM - the only change is the tile-to-row mapping: a per-
+workgroup linear search over a device-scanned `group_tile_start` table
+replaces `(wg/tiles_n)*BM`. Every `workgroupBarrier()` still gates only on
+`p.k` (a Params uniform, identical across every expert's gate/up/down
+projection - only `M` varies per expert), never on anything storage-
+derived, so naga's uniformity analysis accepts it exactly like the
+original. The per-expert weight base offset is plain arithmetic against a
+CONCATENATED weight buffer (`e*k*n`, since every expert's weight matrix is
+the same `(k,n)` shape) - no lookup table, no `step_sliced` view, which
+also sidesteps the 256-byte `min_storage_buffer_offset_alignment` padding
+M5.4's compact path needed `model::block::pad64` for.
+
+The scatter-back cannot reuse `moe_scatter_scaled_add.wgsl` unchanged: that
+kernel is safe only because the HOST dispatches it once PER EXPERT (so its
+`idx` names rows distinct WITHIN one call); a single dispatch spanning every
+expert would need several threads to `+=` into the same output row with no
+atomics available. `moe_group_combine.wgsl` goes the other way: one thread
+per `(row, column)` output element GATHERS that row's (at most) `top_k`
+compacted contributions itself, via `moe_group_perm_emit.wgsl`'s inverse
+permutation (`pos_for_slot`) - the standard one-thread-per-output-element
+reduction shape, no cross-thread write ever shared.
+
+TDD: `crates/model/tests/moe_grouped_parity.rs` (4 tests, all red against
+the pre-change tree - `expert_fwd_grouped` did not exist, so nothing in the
+file compiled). `grouped_matches_dense_oracle_ragged_tail`/`_multi_tile_
+scale` compare against a dense-eval-then-mask oracle built through `model::
+block::pick_gemm` - the SAME selector `crates/glm`'s real dense arm and
+`expert_fwd_compact_layer` both already use - at `d_model = moe_ff = 128`
+(`backend_api::select::GEMM_TILE_MIN_COLS`) so the oracle's own linears
+ALSO select `matmul_reg3`, not the naive reference kernel whose different
+accumulation order would make the comparison merely close rather than
+exact. **Measured, not assumed**: the result is close but NOT bit-exact - a
+max_abs_diff of ~1.9e-6 at output magnitudes ~1-20 (a handful of ULP),
+traced to `moe_group_combine.wgsl` being a NEW kernel, not textually
+identical to `scale_add.wgsl`'s per-expert-dispatch accumulate chain, so a
+software renderer's legal floating-point contraction (fusing adjacent
+multiply+add into one rounded FMA - an opportunity `scale_add`'s memory-
+round-tripped, one-term-per-dispatch shape never offers the optimizer) is
+free to differ even though both encode the identical mathematical sum in
+the identical term order. This is the SAME category of tolerance `moe_
+compact_parity.rs`'s own naive-vs-tiled GEMM comparisons already accept, not
+a routing or indexing defect - confirmed by construction: `matmul_reg3_
+grouped.wgsl`'s K-reduction is a verbatim copy of `matmul_reg3.wgsl`'s, so
+that half of the pipeline reassociates nothing. Both tests use a `1e-4`
+bound (comfortable headroom over the measured ~2e-6). `expert_fwd_grouped_
+never_submits_internally` pins the actual point of this milestone via
+`Gpu::stats().submits`: building the steps must not move the submit counter
+at all. `undersized_grouped_scratch_panics_loudly` mirrors `CompactExpert
+Scratch`'s existing mutation-verify test for the new scratch type. Full
+suite green: 4/4. New kernel headers pass `make kernels-table/check` (461
+kernels, all fields declared, cross-checked against `scripts/build/
+kernelmeta.py`). `cargo clippy -p brain-model -p brain-kernels
+--all-targets`: zero warnings.
+
+**A pre-existing failure found, not caused, while re-running this crate's
+suite for regression coverage**: `moe_compact_parity.rs`'s own `compact_
+layer_submit_count_does_not_scale_with_expert_count` fails on this box
+(`n_experts=4` costs 24-25 `Gpu::submit` calls, not the asserted `<=3`),
+reproduced identically with this milestone's own diff `git stash`'d away
+(clean tree, isolated `--test-threads=1` run) - so it predates this session
+and is unrelated to anything touched here. Left as found, not investigated
+further (out of this milestone's scope); worth a fresh look before trusting
+M5.4's own submit-count claim on this box.
+
+**Deliberately deferred, not rushed**: (1) the backward (dX/dW) grouped
+GEMM - a natural follow-up once forward measures, not attempted this
+session (a reassociated backward without a fresh gradcheck run is exactly
+the numerically-risky change ground rule 9 exists for). (2) The real
+production call-site migration (`crates/glmdsa::model::Glm::forward_
+compact`'s MoE arm): unlike M5.4's migration, `expert_fwd_grouped` needs
+each projection's weights as ONE buffer with every expert's matrix
+concatenated back to back (`matmul_reg3_grouped.wgsl`'s own doc explains
+why), but `crates/glmdsa`'s real weight loading keeps per-expert
+`DeviceBuffer`s separate (the same shape `expert_fwd_compact_layer`'s
+`expert_weights: &[(DeviceBuffer, DeviceBuffer, DeviceBuffer)]` already
+takes) - concatenating them is a real weight-layout change to a production
+model's loader, a separate, larger migration this session does not attempt.
+(3) Whole-pass wall-clock measurement against this campaign's own hardware:
+this session's sandbox has no discrete GPU (`nvidia-smi`: not found; only a
+software Vulkan ICD) - per the "hardware-harness contract" above, the
+correctness gate is fully verified on this box, but the wall-clock delta
+decision 4 asks every phase-5 candidate to report is NOT claimed here and
+needs re-measurement on the campaign's real P40 hardware before this
+milestone can be called anything more than "builds, dispatches, and is
+correct." **Commits**: one (new kernels + `crates/model::moe::expert_fwd_
+grouped` + `GroupedExpertScratch` + tests, this ledger entry and M5.4's
+correction addendum above).
+
 ### M5.5 - Q4/W4A8: `matmul_q4_dyn_reg` is a clean win, `matmul_q4_gemv_reg` is a killed hypothesis
 
 Two kernels, matching the table's own count for this family. Both close

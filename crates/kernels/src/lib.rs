@@ -622,6 +622,8 @@ pub const MATMUL_REG: &str = include_str!("../wgsl/matmul_reg.wgsl");
 pub const MATMUL_REG2: &str = include_str!("../wgsl/matmul_reg2.wgsl");
 /// `wgsl/matmul_reg3.wgsl`
 pub const MATMUL_REG3: &str = include_str!("../wgsl/matmul_reg3.wgsl");
+/// `wgsl/matmul_reg3_grouped.wgsl`
+pub const MATMUL_REG3_GROUPED: &str = include_str!("../wgsl/matmul_reg3_grouped.wgsl");
 /// `wgsl/matmul_reg3_splitk.wgsl`
 pub const MATMUL_REG3_SPLITK: &str = include_str!("../wgsl/matmul_reg3_splitk.wgsl");
 /// `wgsl/matmul_rows.wgsl`
@@ -650,6 +652,12 @@ pub const MLA_BWD_DQ_ROPE: &str = include_str!("../wgsl/mla_bwd_dq_rope.wgsl");
 pub const MLA_INDEX_SCORES: &str = include_str!("../wgsl/mla_index_scores.wgsl");
 /// `wgsl/mla_scores.wgsl`
 pub const MLA_SCORES: &str = include_str!("../wgsl/mla_scores.wgsl");
+/// `wgsl/moe_group_combine.wgsl`
+pub const MOE_GROUP_COMBINE: &str = include_str!("../wgsl/moe_group_combine.wgsl");
+/// `wgsl/moe_group_counts.wgsl`
+pub const MOE_GROUP_COUNTS: &str = include_str!("../wgsl/moe_group_counts.wgsl");
+/// `wgsl/moe_group_perm_emit.wgsl`
+pub const MOE_GROUP_PERM_EMIT: &str = include_str!("../wgsl/moe_group_perm_emit.wgsl");
 /// `wgsl/moe_linear_gated.wgsl`
 pub const MOE_LINEAR_GATED: &str = include_str!("../wgsl/moe_linear_gated.wgsl");
 /// `wgsl/moe_linear_gated_dw.wgsl`
@@ -1250,6 +1258,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_reg", MATMUL_REG),
     ("matmul_reg2", MATMUL_REG2),
     ("matmul_reg3", MATMUL_REG3),
+    ("matmul_reg3_grouped", MATMUL_REG3_GROUPED),
     ("matmul_reg3_splitk", MATMUL_REG3_SPLITK),
     ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
@@ -1264,6 +1273,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("mla_bwd_dq_rope", MLA_BWD_DQ_ROPE),
     ("mla_index_scores", MLA_INDEX_SCORES),
     ("mla_scores", MLA_SCORES),
+    ("moe_group_combine", MOE_GROUP_COMBINE),
+    ("moe_group_counts", MOE_GROUP_COUNTS),
+    ("moe_group_perm_emit", MOE_GROUP_PERM_EMIT),
     ("moe_linear_gated", MOE_LINEAR_GATED),
     ("moe_linear_gated_dw", MOE_LINEAR_GATED_DW),
     ("moe_linear_gated_dx", MOE_LINEAR_GATED_DX),

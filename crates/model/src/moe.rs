@@ -1399,3 +1399,286 @@ pub fn expert_fwd_compact_layer(
     }
     (steps, counts)
 }
+
+// ---- device-side row-permuted grouped GEMM (M5.10) -------------------------
+//
+// [`expert_fwd_compact_layer`] above removed the PER-EXPERT `submit`
+// (M5.4), but its own comment records the reason it stopped there rather
+// than going further: "the milestone brief's 'device-side token permutation
+// + grouped GEMM' framing did not survive contact with source ... no
+// indirect-dispatch primitive exists anywhere in this engine". That
+// framing was correct about indirect dispatch's absence, but wrong about
+// what that absence implies: EVERY row selects exactly `top_k` experts, so
+// `rows * top_k` is a HOST-KNOWN CONSTANT before any device work runs, and
+// the worst-case M-dimension tile grid a grouped GEMM needs is bounded by
+// `n_experts + ceil(rows*top_k / BM)` - also entirely host-computable from
+// `(rows, top_k, n_experts)`. A fixed, host-sized dispatch grid whose
+// per-workgroup WORK is resolved from a device-computed table is not a new
+// primitive this engine lacks - `splat_rasterize.wgsl` (dispatched at a
+// fixed host tile grid, its inner loop bound read from a device-written
+// `ranges` buffer) already ships exactly this pattern in production, and
+// it is even `@cpu yes`.
+//
+// The pipeline below never reads anything back to the host: [`router_fwd`]
+// already produced `gate`; [`router_topk_compact`]'s existing kernel turns
+// it into per-row top-k expert ids; [`GroupedExpertFwdIds::group_counts`]
+// (new, `moe_group_counts.wgsl`) counts each expert's routed rows AND the
+// GEMM tiles that count needs in one pass; two device-side exclusive scans
+// (the SAME `scan_block.wgsl`/`scan_add.wgsl` recursive-scan pattern
+// `crates/splat/src/sort.rs::record_scan` already orchestrates for its own
+// radix sort, reimplemented here as [`record_group_scan`] rather than
+// pulling a rendering crate into this one) turn those counts into
+// exclusive per-expert row and tile offsets; [`GroupedExpertFwdIds::
+// perm_emit`] (new, `moe_group_perm_emit.wgsl`) emits BOTH the row
+// permutation (`embed.wgsl`'s existing gather consumes it unchanged) and
+// its inverse (which compacted row holds each of a row's own `top_k`
+// contributions); [`GroupedExpertFwdIds::gemm_grouped`] (new,
+// `matmul_reg3_grouped.wgsl`, a structural copy of `matmul_reg3.wgsl` - see
+// its own doc for exactly what changed and, just as importantly, what did
+// NOT: every barrier still gates only on `p.k`, never on anything storage-
+// derived) computes gate/up/down for every expert in ONE dispatch each;
+// [`GroupedExpertFwdIds::combine`] (new, `moe_group_combine.wgsl`) sums
+// each row's (at most) `top_k` compacted contributions back into a plain
+// `[rows, d_model]` output - a one-thread-per-output-element reduction, not
+// a scatter-add, because a single dispatch spanning every expert cannot
+// safely `+=` into the same output row from several threads without
+// atomics (unlike [`expert_fwd_compact_layer`]'s `moe_scatter_scaled_add`,
+// which is safe only because the HOST loop dispatches one expert at a
+// time).
+//
+// FORWARD ONLY this session: the backward (dX/dW) grouped GEMM is a natural
+// follow-up once this measures, not attempted here - a reassociated
+// backward needs its own gradient-check run before it can be trusted,
+// which is out of scope for this change.
+
+/// Kernel indices [`expert_fwd_grouped`] dispatches, resolved by the calling
+/// model against its own registered pipeline list.
+#[derive(Clone, Copy)]
+pub struct GroupedExpertFwdIds {
+    /// `router_topk_compact.wgsl` - EXISTING kernel, unchanged.
+    pub router_topk_compact: usize,
+    /// `moe_group_counts.wgsl` (new).
+    pub group_counts: usize,
+    /// `scan_block.wgsl` - EXISTING kernel, unchanged.
+    pub scan_block: usize,
+    /// `scan_add.wgsl` - EXISTING kernel, unchanged.
+    pub scan_add: usize,
+    /// `moe_group_perm_emit.wgsl` (new).
+    pub perm_emit: usize,
+    /// `embed.wgsl`, reused unchanged as the row-gather - see
+    /// [`CompactExpertFwdIds::gather`]'s own doc.
+    pub gather: usize,
+    /// `matmul_reg3_grouped.wgsl` (new).
+    pub gemm_grouped: usize,
+    /// `silu_mul.wgsl` - EXISTING kernel, unchanged.
+    pub silu_mul: usize,
+    /// `moe_group_combine.wgsl` (new).
+    pub combine: usize,
+}
+
+/// Elements per `scan_block` run - the same 256-per-block convention
+/// `crates/splat/src/sort.rs::SCAN_BLOCK_LEN` uses, kept private here since
+/// nothing outside this scan needs to know it.
+const GROUP_SCAN_BLOCK: u32 = 256;
+
+/// GEMM tile height `matmul_reg3_grouped.wgsl` hardcodes as `BM` - kept in
+/// sync by [`expert_fwd_grouped`]'s own doc, not re-derived from the WGSL.
+const GROUP_GEMM_BM: u32 = 128;
+
+/// Per-level block-sum scratch for an exclusive scan of up to `max_n`
+/// elements, mirroring `crates/splat/src/sort.rs::ScanScratch` (duplicated
+/// rather than imported: `crates/splat` is a rendering crate this one has
+/// no business depending on, and the pattern is ~15 lines).
+struct GroupScan {
+    levels: Vec<DeviceBuffer>,
+}
+
+impl GroupScan {
+    fn new(g: &Gpu, max_n: usize) -> GroupScan {
+        let mut levels = Vec::new();
+        let mut n = max_n.max(1);
+        loop {
+            let nb = n.div_ceil(GROUP_SCAN_BLOCK as usize);
+            levels.push(g.storage(nb as u64));
+            if nb <= 1 {
+                break;
+            }
+            n = nb;
+        }
+        GroupScan { levels }
+    }
+}
+
+/// Record an in-place exclusive prefix scan of `data[0..n]` (u32 payload),
+/// recursing into `scratch`'s block-sum levels exactly like
+/// `crates/splat/src/sort.rs::record_scan`. At every `n_experts` this
+/// engine runs today (<= a few hundred) `n <= GROUP_SCAN_BLOCK` so this is
+/// ONE dispatch, not a real recursion - the recursion exists so a future
+/// larger `n_experts` stays correct without another change here.
+fn record_group_scan(g: &Gpu, scan_block: usize, scan_add: usize, data: &DeviceBuffer, n: usize, scratch: &GroupScan, steps: &mut Vec<Step>) {
+    record_group_scan_level(g, scan_block, scan_add, data, n, scratch, 0, steps);
+}
+
+fn record_group_scan_level(
+    g: &Gpu,
+    scan_block: usize,
+    scan_add: usize,
+    data: &DeviceBuffer,
+    n: usize,
+    scratch: &GroupScan,
+    level: usize,
+    steps: &mut Vec<Step>,
+) {
+    let sums = &scratch.levels[level];
+    let nb = n.div_ceil(GROUP_SCAN_BLOCK as usize);
+    let params = [n as u32, GROUP_SCAN_BLOCK];
+    steps.push(g.step(scan_block, &[data, sums], &params, nb as u32));
+    if nb > 1 {
+        record_group_scan_level(g, scan_block, scan_add, sums, nb, scratch, level + 1, steps);
+        steps.push(g.step(scan_add, &[data, sums], &params, n as u32));
+    }
+}
+
+/// Scratch for [`expert_fwd_grouped`], sized for up to `shape.rows *
+/// shape.top_k` compacted rows (the exact total across every expert - every
+/// row selects exactly `top_k` of them, so this is tight, not a
+/// worst-case-per-expert bound like [`CompactExpertScratch`]'s).
+pub struct GroupedExpertScratch {
+    n_experts: u32,
+    cap: u32,
+    top_ids: DeviceBuffer,
+    row_count: DeviceBuffer,
+    row_start: DeviceBuffer,
+    tile_start: DeviceBuffer,
+    row_scan: GroupScan,
+    tile_scan: GroupScan,
+    perm: DeviceBuffer,
+    pos_for_slot: DeviceBuffer,
+    x_compact: DeviceBuffer,
+    gate_pre: DeviceBuffer,
+    up: DeviceBuffer,
+    h: DeviceBuffer,
+    expert_out: DeviceBuffer,
+}
+
+impl GroupedExpertScratch {
+    /// `shape.rows` is the caller's OWN upper bound on the batch this
+    /// scratch will ever be asked to serve - pass the largest `rows` any
+    /// call will use, matching [`CompactExpertScratch::new`]'s convention.
+    pub fn new(g: &Gpu, shape: &MoeShape) -> GroupedExpertScratch {
+        let (d, ff, e) = (shape.d_model as u64, shape.moe_ff as u64, shape.n_experts);
+        let cap = (shape.rows as u64 * shape.top_k as u64).max(1);
+        GroupedExpertScratch {
+            n_experts: e,
+            cap: cap as u32,
+            top_ids: g.storage(cap),
+            row_count: g.storage(e as u64),
+            row_start: g.storage(e as u64),
+            tile_start: g.storage(e as u64),
+            row_scan: GroupScan::new(g, e as usize),
+            tile_scan: GroupScan::new(g, e as usize),
+            perm: g.storage(cap),
+            pos_for_slot: g.storage(cap),
+            x_compact: g.storage(cap * d),
+            gate_pre: g.storage(cap * ff),
+            up: g.storage(cap * ff),
+            h: g.storage(cap * ff),
+            expert_out: g.storage(cap * d),
+        }
+    }
+}
+
+/// One MoE layer's ENTIRE device-side row-permuted grouped-GEMM forward, as
+/// a single `Vec<Step>` for the caller to fold into its own submit - like
+/// every other builder in this module except [`expert_fwd_compact`]/
+/// [`expert_fwd_compact_layer`], this performs NO device readback and NO
+/// `Gpu::submit` at all: every dispatch's thread count is either a plain
+/// function of `(rows, top_k, n_experts)` (all host-known) or of `p.k`/
+/// `p.n` (uniform, identical across experts) - see this section's header
+/// doc for why that host-computable worst-case grid is sufficient.
+///
+/// `gate_w_all`/`up_w_all`/`down_w_all` must be ONE buffer per projection
+/// with every expert's weight matrix concatenated back to back, identical
+/// `(k, n)` shape per expert (`matmul_reg3_grouped.wgsl`'s own doc explains
+/// why the per-expert offset is then plain arithmetic, not a lookup
+/// table) - NOT the per-expert `Vec<DeviceBuffer>` [`expert_fwd_compact_
+/// layer`] takes, which cannot be bound as one grouped-GEMM dispatch's
+/// weight operand.
+///
+/// WRITES `out` directly (does not accumulate) - the combine step already
+/// sums every selected expert's contribution for each row in this one call,
+/// so unlike [`expert_fwd_compact_layer`] there is no partial value for the
+/// caller to have pre-zeroed.
+///
+/// Panics if `shape.rows * shape.top_k` exceeds `scratch`'s capacity - size
+/// `scratch` via [`GroupedExpertScratch::new`] with the largest `rows` any
+/// call will use.
+#[allow(clippy::too_many_arguments)]
+pub fn expert_fwd_grouped(
+    g: &Gpu,
+    ids: &GroupedExpertFwdIds,
+    shape: &MoeShape,
+    x: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    gate_w_all: &DeviceBuffer,
+    up_w_all: &DeviceBuffer,
+    down_w_all: &DeviceBuffer,
+    scratch: &GroupedExpertScratch,
+    out: &DeviceBuffer,
+) -> Vec<Step> {
+    let (d, ff, e, rows, top_k) = (shape.d_model, shape.moe_ff, shape.n_experts, shape.rows, shape.top_k);
+    assert_eq!(scratch.n_experts, e, "expert_fwd_grouped: scratch was built for a different n_experts");
+    let compacted = rows * top_k;
+    assert!(
+        compacted <= scratch.cap,
+        "expert_fwd_grouped: rows*top_k ({compacted}) exceeding GroupedExpertScratch capacity {} -- \
+         size it via GroupedExpertScratch::new with the largest shape.rows any call will use",
+        scratch.cap
+    );
+
+    // Host-known upper bound on the M-dimension tile grid (matmul_reg3_
+    // grouped.wgsl's own doc derives it): ceil(count_e/BM) <= count_e/BM + 1
+    // for every expert, so the sum over experts is bounded without ever
+    // knowing any individual count_e.
+    let worst_case_tiles = e + compacted.div_ceil(GROUP_GEMM_BM);
+
+    let mut steps = Vec::new();
+    steps.push(g.step(ids.router_topk_compact, &[gate, &scratch.top_ids], &[rows, e, top_k], rows));
+    steps.push(g.step(
+        ids.group_counts,
+        &[gate, &scratch.row_count, &scratch.row_start, &scratch.tile_start],
+        &[rows, e, GROUP_GEMM_BM],
+        e,
+    ));
+    record_group_scan(g, ids.scan_block, ids.scan_add, &scratch.row_start, e as usize, &scratch.row_scan, &mut steps);
+    record_group_scan(g, ids.scan_block, ids.scan_add, &scratch.tile_start, e as usize, &scratch.tile_scan, &mut steps);
+    steps.push(g.step(
+        ids.perm_emit,
+        &[gate, &scratch.top_ids, &scratch.row_start, &scratch.perm, &scratch.pos_for_slot],
+        &[rows, e, top_k],
+        e,
+    ));
+    steps.push(g.step(ids.gather, &[&scratch.perm, x, &scratch.x_compact], &[d, compacted], compacted * d));
+
+    let gemm = |w: &DeviceBuffer, x_in: &DeviceBuffer, out_buf: &DeviceBuffer, k: u32, n: u32, steps: &mut Vec<Step>| {
+        let threads = worst_case_tiles * n.div_ceil(128) * 256;
+        steps.push(g.step(
+            ids.gemm_grouped,
+            &[x_in, w, out_buf, &scratch.row_start, &scratch.row_count, &scratch.tile_start],
+            &[k, n, e],
+            threads,
+        ));
+    };
+    gemm(gate_w_all, &scratch.x_compact, &scratch.gate_pre, d, ff, &mut steps);
+    gemm(up_w_all, &scratch.x_compact, &scratch.up, d, ff, &mut steps);
+    steps.push(g.step(ids.silu_mul, &[&scratch.gate_pre, &scratch.up, &scratch.h], &[compacted * ff], compacted * ff));
+    gemm(down_w_all, &scratch.h, &scratch.expert_out, ff, d, &mut steps);
+
+    steps.push(g.step(
+        ids.combine,
+        &[gate, &scratch.top_ids, &scratch.pos_for_slot, &scratch.expert_out, out],
+        &[rows, d, e, top_k],
+        rows * d,
+    ));
+    steps
+}
