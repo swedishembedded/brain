@@ -160,7 +160,7 @@ unsafe fn build_pipeline(
         .name(&entry);
     let pipeline = dev
         .create_compute_pipelines(
-            vk::PipelineCache::null(),
+            ctx.pipeline_cache(),
             &[vk::ComputePipelineCreateInfo::default()
                 .stage(stage)
                 .layout(layout)],

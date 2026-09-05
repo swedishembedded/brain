@@ -3082,6 +3082,89 @@ confidence in its numerical parity.
 **Commits**: one - `model, kernels: fuse GDN's chunk-internal cumsum scans,
 63 dispatches to 1, forward and backward (M5.8)`.
 
+### M6.5 - A real persisted `VkPipelineCache`, replacing `vk::PipelineCache::null()` everywhere it was hardcoded
+
+(Numbered M6.5, not M6.4: `crates/optim/src/lib.rs`'s own module doc and two
+of its inline comments already say "M6.4" - past tense, describing the
+already-landed `3P+1` -> `2P+1` grad-scale fold into `adamw.wgsl` - with no
+matching entry anywhere in this ledger's "Done" section. That is a real,
+pre-existing gap (a landed change whose own source comments name a ledger
+entry that was never written), distinct from this milestone and not
+something this session verified or is claiming credit for; see the Phase 6
+status note below. M6.4 is left assigned to that change in source rather
+than reused here, so whoever eventually backfills its ledger entry does not
+also have to rename three comments in `crates/optim`.)
+
+Checked the milestone's premise against source first: both
+`crates/backend-vulkan/src/lib.rs`'s `compile_pipeline_set` and
+`crates/vulkan/src/matmul.rs`'s `build_pipeline` did pass
+`vk::PipelineCache::null()` to every `vkCreateComputePipelines` call - zero
+cross-run reuse, every pipeline compiled from scratch on every process start
+- while `backend-wgpu`'s `PlCache` already persisted a driver pipeline cache
+per adapter (`BRAIN_PIPELINE_CACHE_DIR`/`XDG_CACHE_HOME`/`~/.cache/brain`,
+keyed by `wgpu::util::pipeline_cache_key`, atomic write-then-rename, "never
+trust a mismatched blob"). The premise held, and the wgpu file gave a real
+convention to mirror rather than invent one.
+
+Added `crates/vulkan/src/pipeline_cache.rs`: pure key/path/header/persist
+logic, no `ash` types, so it is unit-testable without a device. The on-disk
+key is `(vendorID, deviceID, pipelineCacheUUID)` rather than `deviceUUID` -
+the Vulkan spec guarantees `pipelineCacheUUID` rotates whenever compiled-
+pipeline compatibility changes (a driver update changes it on the *same*
+silicon), which is the exact granularity a cache file should invalidate at,
+and is a different UUID from the one `backend_api::GpuIdentity` already uses
+to name a physical card stably *across* driver updates - conflating the two
+would have kept serving a stale blob across a driver upgrade. Before ever
+handing bytes to `vkCreatePipelineCache`, `header_matches` parses the spec's
+own `VkPipelineCacheHeaderVersionOne` layout (32 bytes:
+`headerSize/headerVersion/vendorID/deviceID/pipelineCacheUUID`) and checks it
+against the CURRENT device's identity - `vkCreatePipelineCache` already
+discards a mismatched blob safely per spec, but this module does not trust
+that blindly, per the brief. `VkContext::new_inner` now loads a matching
+blob (if any), creates ONE `vk::PipelineCache` per context with it as
+`initial_data`, and exposes it via `pipeline_cache()`; both call sites
+(`compile_pipeline_set` and `build_pipeline`) pass that handle instead of
+`null()`. `Drop` calls `vkGetPipelineCacheData` (device already idle from the
+existing `device_wait_idle`) and persists it via the same atomic
+write-then-rename `backend-wgpu`'s `PlCache::persist` uses, then destroys the
+cache handle. No `vkMergePipelineCaches` call: that function combines
+SEPARATE cache objects (e.g. one built per thread), and this design
+deliberately funnels every `vkCreateComputePipelines` call against a context
+- initial construction and every `new_like` kernel set - through the ONE
+cache object the context owns, so every pipeline this run ever creates
+already accumulates into it; there is nothing to merge.
+
+**Gate**: chose byte-identity + load-without-error over a timing assertion.
+`crates/vulkan/src/pipeline_cache.rs`'s own `#[cfg(test)]` module covers the
+pure logic (header acceptance/rejection on vendor/device/uuid mismatch and
+truncation, a load/persist round-trip, path uniqueness). The new
+`crates/vulkan/tests/pipeline_cache.rs` is the end-to-end contract: a first
+`VkContext` builds the crate's one real pipeline (`matmul.rs`'s scalar
+kernel, the actual changed call site, not a bespoke test pipeline), asserts
+its own `vkGetPipelineCacheData` is non-empty, drops (persisting), then
+asserts the on-disk file is non-empty and its byte count matches EXACTLY
+what that call reported, and a second `VkContext` on the same physical
+device loads that file as `initial_data` without erroring. Not a timing
+assertion because this crate compiles exactly one pipeline - a warm-cache
+saving at that granularity is on the order of shared-box scheduling noise,
+not a distinguishable signal, and decision 4 already rules out exactly that
+kind of assertion.
+
+**Verified** on the real Intel Arc (MTL) iGPU this worktree's box actually
+has (ANV/Mesa, not the campaign's usual P40 - no discrete Vulkan device is
+present here): `cargo test --release -p brain-vulkan --lib --tests` and
+`-p brain-backend-vulkan --tests` green end to end, including the pre-
+existing `perf_contract`/`async_submit`/`kernel_timing`/`deferred_reclaim`
+suites this milestone's own instructions named as the barrier/async-
+submission history to keep green - all unaffected by this change (a
+pipeline-cache handle is orthogonal to barrier tracking and submission
+timing). `cargo clippy -p brain-vulkan -p brain-backend-vulkan --all-targets`
+clean. `make check/workspace` green (117 crates). This is a pure
+resource-lifecycle addition (a new handle, created once and destroyed once
+per context) with no change to dispatch, barrier or submission logic, so no
+finite-difference/bit-identity claim applies here beyond "existing suites
+stay green," which they do. **Commit**: one.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.
@@ -3125,3 +3208,37 @@ status against the approved plan; update this section as each phase closes,
 recording the measurement that proved it - a number nothing checks is a
 number that silently goes stale (`AGENTS.md`'s own rule, restated here
 because a multi-phase campaign is exactly where it erodes).
+
+**Phase 6 status.** Three of its four outline items are closed: per-buffer
+dependency tracking (M6.1, `backend-vulkan` only - the wgpu-killed-hypothesis
+entry above records why it does not transfer to `backend-wgpu`), asynchronous
+submission (M6.2), graph capture/replay (M6.3), plus a fourth close-out this
+session did not originally carry a number for but landed anyway - the
+persisted `VkPipelineCache` (M6.5 above; F2 warm-start parity with
+`backend-wgpu`'s already-existing `PlCache`). The outline's fourth item, **a
+multi-tensor optimizer, remains open** - the one Phase-6 item nothing has
+been built for. Not attempted this session, on purpose: `crates/optim/
+src/lib.rs`'s own module doc already gives the honest reason. The optimizer
+is currently `2P+1` dispatches per step (`P` = trainable tensor count) -
+already down from an older `3P+1` by folding grad-scale directly into
+`adamw.wgsl` (a real, already-landed win; see the parenthetical under M6.5
+above for the gap that this fold's own source comments name a `kernel-
+performance.md` entry, "M6.4", that was never actually written - worth
+someone backfilling, but not this session's work to verify after the fact).
+Reaching the true `O(1)`-dispatch endpoint needs physically flattening
+`weight`/`grad`/`m`/`v` into one contiguous slab per category and binding a
+sub-range of it per tensor - which means threading `step_sliced`'s existing
+offset/length binding (or a new "bind a baked-in sub-range of a shared
+buffer" primitive) through every one of the roughly 15 model crates that
+build a `ParamStore`. That is real, large, cross-cutting refactoring work,
+correctly out of scope for a single session, and explicitly not attempted
+here. Per this campaign's own decision 4 (ordering within a phase is set by
+a fresh profile, not by the audit's prose ranking), it should be picked up
+only after the GDN/MoE/attention work already underway in this wave has
+landed and been measured - the optimizer's dispatch count is a training-step
+cost, and this campaign's own measurements so far (M22's ~2% host-time
+bound, the wgpu killed-hypothesis entry's "n empty submits is not
+automatically a cost" finding) both suggest a real risk that flattening
+every model's parameter store buys a training step less than its refactor
+cost, which should be checked with a profile before, not after, fifteen
+crates change shape.

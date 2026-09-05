@@ -21,8 +21,11 @@
 //! `cargo check --features vulkan-coopmat`.
 
 use std::ffi::{CStr, CString};
+use std::path::PathBuf;
 
 use ash::vk;
+
+use crate::pipeline_cache;
 
 /// Debug-messenger callback for `BRAIN_VK_VALIDATE`: prints validation /
 /// synchronization-hazard messages to stderr.
@@ -214,6 +217,23 @@ pub struct VkContext {
     /// would be indistinguishable from "never submitted" in a fresh command-
     /// buffer-ring slot.
     timeline_counter: std::sync::atomic::AtomicU64,
+    /// Persisted driver pipeline cache (F2/M6.5): every `vkCreateComputePipelines`
+    /// call against this device - both `backend-vulkan`'s and this crate's own
+    /// `matmul.rs` - passes this ONE handle instead of `vk::PipelineCache::null()`,
+    /// so a later process's pipeline creation becomes a driver cache hit instead
+    /// of a full shader recompile. Seeded at construction from
+    /// [`pipeline_cache::load`] (a mismatched/foreign/corrupt blob is silently
+    /// treated as absent - see that function's own doc), and every pipeline
+    /// created against it accumulates into this SAME object, so there is
+    /// nothing for `vkMergePipelineCaches` to merge: that call exists in the
+    /// spec for combining SEPARATE cache objects (e.g. one per thread), and
+    /// this context deliberately only ever has one.
+    pipeline_cache: vk::PipelineCache,
+    /// Where [`Drop`] persists [`Self::pipeline_cache`]'s data - `None` when
+    /// [`pipeline_cache::path`] found nowhere to write (matches
+    /// `backend-wgpu`'s `PlCache`'s "nowhere to persist just disables the
+    /// warm start" contract).
+    pipeline_cache_path: Option<PathBuf>,
 }
 
 /// Non-fp32 arithmetic the device exposes and this context enabled. fp32 is
@@ -578,6 +598,26 @@ impl VkContext {
 
         let mem_props = instance.get_physical_device_memory_properties(physical_device);
 
+        // ---- persisted pipeline cache (F2/M6.4) ----
+        // Keyed by (vendorID, deviceID, pipelineCacheUUID) - the triple the
+        // Vulkan spec guarantees rotates whenever compiled-pipeline
+        // compatibility changes (a driver update changes `pipelineCacheUUID`
+        // even on the same silicon), so a stale file simply misses the key
+        // rather than being loaded and (only then) rejected by the driver.
+        let pipeline_cache_uuid = props.pipeline_cache_uuid;
+        let device_id = props.device_id;
+        let pipeline_cache_path = pipeline_cache::path(vendor_id, device_id, pipeline_cache_uuid);
+        let initial_cache_data = pipeline_cache_path
+            .as_deref()
+            .and_then(|p| pipeline_cache::load(p, vendor_id, device_id, pipeline_cache_uuid));
+        let mut pc_info = vk::PipelineCacheCreateInfo::default();
+        if let Some(data) = &initial_cache_data {
+            pc_info = pc_info.initial_data(data);
+        }
+        let pipeline_cache = device
+            .create_pipeline_cache(&pc_info, None)
+            .map_err(|e| format!("create_pipeline_cache: {e}"))?;
+
         // A `SEMAPHORE_TYPE_TIMELINE` semaphore, initial counter 0. Only
         // created when the device actually enabled the feature above - a
         // semaphore of this type used against a device that never enabled
@@ -620,6 +660,8 @@ impl VkContext {
             queue_lock: std::sync::Mutex::new(()),
             timeline,
             timeline_counter: std::sync::atomic::AtomicU64::new(1),
+            pipeline_cache,
+            pipeline_cache_path,
         })
     }
 
@@ -634,6 +676,15 @@ impl VkContext {
     /// did not report `timelineSemaphore`.
     pub fn timeline_supported(&self) -> bool {
         self.timeline.is_some()
+    }
+
+    /// The persisted driver pipeline cache (M6.5) - pass this to every
+    /// `vkCreateComputePipelines` call against this context instead of
+    /// `vk::PipelineCache::null()`. Loaded from a prior run's on-disk blob
+    /// when one matches this exact device/driver identity; written back to
+    /// disk on [`Drop`].
+    pub fn pipeline_cache(&self) -> vk::PipelineCache {
+        self.pipeline_cache
     }
 
     /// Claim the next value an asynchronous submission should signal on the
@@ -1215,6 +1266,18 @@ impl Drop for VkContext {
             if let Some(sem) = self.timeline.take() {
                 self.device.destroy_semaphore(sem, None);
             }
+            // Persist BEFORE destroying: `vkGetPipelineCacheData` needs the
+            // handle alive, and the device is already idle (waited above),
+            // so every pipeline this run ever created against it is already
+            // reflected. Best-effort, same contract as `backend-wgpu`'s
+            // `PlCache::persist` - a read-only filesystem just loses the
+            // warm start, never fails teardown.
+            if let Some(path) = &self.pipeline_cache_path {
+                if let Ok(data) = self.device.get_pipeline_cache_data(self.pipeline_cache) {
+                    pipeline_cache::persist(path, &data);
+                }
+            }
+            self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             // The INSTANCE is deliberately not destroyed: it is shared by

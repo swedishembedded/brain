@@ -25,6 +25,7 @@
 
 pub mod context;
 pub mod matmul;
+pub mod pipeline_cache;
 pub mod shader;
 
 // Re-exported as the module's public surface (used by the CLI entries below and
