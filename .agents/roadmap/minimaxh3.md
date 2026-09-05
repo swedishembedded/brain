@@ -740,7 +740,61 @@ path, so switching the DiT's dispatch is not a fork.
 **The order of work is therefore the opposite of the obvious one**: fixing GPU
 matmul kernel selection comes FIRST, before any VRAM/sharding effort, because
 until it lands a perfectly-sharded model would run slower than the CPU does
-today. The VRAM budget for when that is done (2x24 GB = 48 GB):
+today.
+
+### Fixed: `crate::block::linear` now routes through `model::block::pick_gemm`
+
+Root cause, confirmed by reading the kernel source rather than assumed from
+the "no tiling" framing above: `matmul.wgsl` indexes `col = idx % n`, so
+adjacent GPU threads in a warp read weight rows `k` floats apart - a fully
+uncoalesced access pattern, not merely an untiled one, which is why the
+measured throughput (~0.2% of the card's fp32 peak) is far below what
+"untiled but coalesced" would cost. This was never a hardware or kernel-
+authoring gap: `model::block::pick_gemm` (backed by `backend_api::select`'s
+`Op::MatMul` policy, which already answers `RegisterTiled` for exactly this
+crate's shapes - large `m`, wide `n`) is the SAME seam ~15 other model
+crates (`qwen3`, `wan`, `clip`, `t5encoder`, `vae`, `sam1`, `gpt2`, ...)
+already call with `matmul`/`matmul_reg3` as their naive/tiled pair.
+`minimaxh3` is the only DiT-family crate that never adopted it - `crate::
+block::linear` hardcoded `K_MATMUL` instead. Fixed by registering
+`matmul_reg3` (`matmul_reg2`'s tiling with its two Pascal shared-memory
+bank-conflict patterns removed - the P40-tuned variant, exactly this box's
+hardware) in the crate's own `KERNELS` table and routing `linear`'s kernel
+choice + dispatch geometry through `pick_gemm(m, n, K_MATMUL, K_MATMUL_REG3,
+false)`. On CPU this changes nothing observable (`backend-cpu`'s native
+fast path already treats `matmul`/`matmul_reg3` identically by kernel name -
+confirmed via a full real-weight layer-by-layer re-run, worst cosine
+unchanged at 0.9999999764). On a real GPU it is the actual fix: the
+existing, already-fenced, already parity-checked `crates/gpu-core/tests/
+bench_matmul.rs` (`--ignored`) measures the SAME naive-vs-tiled gap on this
+box's own P40 at comparable large shapes (naive ISN'T H3-exact but is the
+same kernel/pattern):
+
+| shape (closest proxy to H3's linears) | naive (Vulkan) | reg2 (wgpu, tiled) | CPU AVX2 (this box, post-optimization) |
+|---|---:|---:|---:|
+| square 2048                     | 36.6 GF/s |  3996 GF/s (34.0% of peak) | 717 GF/s |
+| glm mla-ish (k=6144, closest to fc2's k=14336) | 22 GF/s | 3026 GF/s (25.7% of peak) | 348 GF/s |
+
+So the tiled kernel is not merely "no longer 20x slower than CPU" - once
+dispatched correctly it is **4-12x FASTER than the already-optimized CPU
+path** at comparable shapes, which is the outcome the "P40 is 12 TFLOP/s
+fp32 / 47 TOP/s int8" datasheet numbers always implied was available.
+`dit_roofline`'s own per-kernel probe (which still hardcodes the naive
+`matmul` kernel independently of this fix, to keep measuring the "before"
+baseline) hit `BRAIN_GPU_WAIT_S`'s 30s default timeout at H3's real
+`seq_len=960` widths - not a device wedge, just the naive kernel legitimately
+taking that long per call at this scale, further confirming how severe the
+gap was. Re-measuring `dit_roofline` itself at the exact H3 shapes with the
+fix wired through it (not just `bench_matmul`'s proxy shapes) is not yet
+done - the roofline example's own kernel table would need widening to
+register `matmul_reg3` and call `pick_gemm`, mirroring `crate::block::linear`.
+
+None of this unlocks a real GPU generation on its own: the 33B fp32 DiT
+still does not fit in 48GB across the two P40s (see the VRAM table below) -
+that still needs Phase 8's AdaLN precompute wired into loading and a
+bf16/int8 storage tier on `Ctx::upload`, neither of which exist yet.
+
+The VRAM budget for when that is done (2x24 GB = 48 GB):
 
 | tier | resident params | bytes | fits? |
 |------|-----------------|-------|-------|
@@ -756,11 +810,15 @@ prerequisites, none of them started.
 
 ## Recorded gaps (kept current)
 
-- The DiT's GPU path dispatches the untiled `matmul.wgsl` and therefore
-  measures ~20x slower than the optimized CPU path on a P40 (18-20 GFLOP/s vs
-  ~0.2% of the card's fp32 peak) - see Phase 12 detail. Until a tiled variant
-  is dispatched, `BRAIN_DEVICE=vulkan` is a pessimization for this model, and
-  no amount of VRAM/sharding work can pay for itself.
+- ~~The DiT's GPU path dispatches the untiled `matmul.wgsl` and therefore
+  measures ~20x slower than the optimized CPU path on a P40~~ - fixed:
+  `crate::block::linear` now picks its kernel via `model::block::pick_gemm`
+  (the same seam ~15 other model crates already use), which selects
+  `matmul_reg3` for this crate's large/wide shapes - see the GPU-placement
+  detail above for the measured before/after. `BRAIN_DEVICE=vulkan` is no
+  longer a pessimization for the matmul family; `dit_roofline`'s own probe
+  still needs widening to exercise the fix at H3's exact shapes (it
+  currently measures only the pre-fix naive baseline).
 - Eight of the thirteen kernels `crate::block` dispatches still run as
   Cranelift-JIT scalar code on CPU (`rmsnorm_eps`, `embed`, `row_scatter`,
   `bias_add`, `rope2d_partial`, `mul`, `add2`, `gate_row`). Together they are

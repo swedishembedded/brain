@@ -75,8 +75,21 @@ const K_GATE_ROW: usize = 9;
 const K_MUL: usize = 10;
 const K_ADD2: usize = 11;
 const K_ROW_SCATTER: usize = 12;
+/// The 128x128 register-tiled GEMM `crate::block::linear` picks via
+/// `model::block::pick_gemm` once a shape clears the measured tile-fill
+/// crossover (`select::GEMM_TILE_MIN_ROWS`/`_COLS`) - the same kernel ~15
+/// other model crates (`qwen3`, `wan`, `clip`, `t5encoder`, `vae`, ...)
+/// already register alongside plain `matmul` for exactly this purpose. On
+/// CPU this and `matmul` are the SAME dispatched AVX2 fast path by kernel
+/// name (`backend_cpu::FastIdx` routes both to `fast_ops::matmul_abt`) - the
+/// choice only changes behavior on a real GPU, where `matmul` is a naive
+/// one-thread-per-output kernel with no operand reuse and (for this crate's
+/// wide, `col = idx % n`-indexed weight rows) a fully uncoalesced access
+/// pattern, while `matmul_reg3` stages both operands through workgroup
+/// memory.
+const K_MATMUL_REG3: usize = 13;
 
-pub const KERNELS: [(&str, &str); 13] = [
+pub const KERNELS: [(&str, &str); 14] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
@@ -90,6 +103,7 @@ pub const KERNELS: [(&str, &str); 13] = [
     ("mul", kernels::MUL),
     ("add2", kernels::ADD2),
     ("row_scatter", kernels::ROW_SCATTER),
+    ("matmul_reg3", kernels::MATMUL_REG3),
 ];
 
 /// One open device + the shared kernel table - every op below dispatches
@@ -119,9 +133,22 @@ impl Ctx {
 /// `y = x @ w^T (+ bias)`. `w` is `[n, k]` row-major (PyTorch `nn.Linear`
 /// convention); `bias` is `[n]` or `None` for the attention/FFN linears,
 /// which the reference builds with `bias=False` throughout.
+///
+/// Kernel choice goes through `model::block::pick_gemm` (the same seam
+/// `qwen3`/`wan`/`clip`/`t5encoder`/`vae` and a dozen other model crates
+/// already use), not a hardcoded `K_MATMUL` - every one of this crate's
+/// linears is a `[m,k]x[n,k]^T` GEMM at real transformer widths (`n` in the
+/// thousands for q/k/v/fc1/fc2), squarely the "large enough to fill a
+/// 128x128 tile" regime `pick_gemm` was measured against. `K_MATMUL_REG3`
+/// is a no-op on CPU (backend-cpu's native fast path treats it and `matmul`
+/// identically) and the fix for a real GPU, where plain `matmul` measured
+/// ~20x slower than the CPU path on this crate's own shapes precisely
+/// because it has neither operand reuse nor coalesced access (adjacent GPU
+/// threads read weight rows `k` floats apart).
 pub(crate) fn linear(cx: &Ctx, x: &DeviceBuffer, w: &DeviceBuffer, bias: Option<&DeviceBuffer>, m: u32, k: u32, n: u32) -> DeviceBuffer {
     let y = cx.gpu.storage((m * n) as u64);
-    cx.gpu.submit(&[], &[cx.gpu.step(K_MATMUL, &[x, w, &y], &[m, k, n], m * n)]);
+    let (mm, threads) = model::block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false);
+    cx.gpu.submit(&[], &[cx.gpu.step(mm, &[x, w, &y], &[m, k, n], threads)]);
     if let Some(b) = bias {
         cx.gpu.submit(&[], &[cx.gpu.step(K_BIAS_ADD, &[&y, b], &[m, n], m * n)]);
     }
