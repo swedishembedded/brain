@@ -39,6 +39,16 @@
 //! `text2image` mock uses, just extended to fold in the model/action identity
 //! so two different mock providers never coincidentally produce the same
 //! pixels.
+//!
+//! # A second, declarative mock: [`Mock`]
+//!
+//! [`MockProvider`] above answers "give me something shaped like this
+//! model's output, with no test-authored content" - it can never prove a
+//! downstream consumer handles a REAL record correctly, only that it
+//! rejects a placeholder. [`expect::Mock`] is the other half: a test scripts
+//! the exact content each call returns (or fails with), and
+//! [`expect::Mock::verify`] reports which scripted expectations were never
+//! met. See that module's own doc for the full API and an example.
 
 use std::sync::Arc;
 
@@ -46,8 +56,10 @@ use capability::blob::{image_blob, video_blob};
 use capability::{Action, ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress, Provider};
 use serde_json::json;
 
+mod expect;
 mod synth;
 
+pub use expect::{Mock, MockBlob, MockReport, RecordedCall};
 use synth::{counter_bytes, fold_seed, gradient_hwc, mock_text, run_steps, seed_param, sine_pcm, video_frame_hwc};
 
 /// The shape of synthetic content one mock action produces.
