@@ -592,6 +592,10 @@ pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 pub const MATMUL_DX_REG: &str = include_str!("../wgsl/matmul_dx_reg.wgsl");
 /// `wgsl/matmul_gemv.wgsl`
 pub const MATMUL_GEMV: &str = include_str!("../wgsl/matmul_gemv.wgsl");
+/// `wgsl/matmul_gemv_f8e4m3.wgsl` (M8.6)
+pub const MATMUL_GEMV_F8E4M3: &str = include_str!("../wgsl/matmul_gemv_f8e4m3.wgsl");
+/// `wgsl/matmul_gemv_f8e5m2.wgsl` (M8.6)
+pub const MATMUL_GEMV_F8E5M2: &str = include_str!("../wgsl/matmul_gemv_f8e5m2.wgsl");
 /// `wgsl/matmul_gemv_reg.wgsl`
 pub const MATMUL_GEMV_REG: &str = include_str!("../wgsl/matmul_gemv_reg.wgsl");
 /// `wgsl/matmul_i8.wgsl`
@@ -1247,6 +1251,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_dx", MATMUL_DX),
     ("matmul_dx_reg", MATMUL_DX_REG),
     ("matmul_gemv", MATMUL_GEMV),
+    ("matmul_gemv_f8e4m3", MATMUL_GEMV_F8E4M3),
+    ("matmul_gemv_f8e5m2", MATMUL_GEMV_F8E5M2),
     ("matmul_gemv_reg", MATMUL_GEMV_REG),
     ("matmul_i8", MATMUL_I8),
     ("matmul_i8_dyn", MATMUL_I8_DYN),

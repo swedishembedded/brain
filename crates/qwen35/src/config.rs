@@ -391,6 +391,15 @@ impl Qwen35Config {
                     gpu_core::select::Dtype::NF4 | gpu_core::select::Dtype::F4E2M1 => {
                         n * k / 2 + n * k.div_ceil(group) * 4
                     }
+                    // M8.6: 1 byte/weight plus one `f32` scale per 128x128
+                    // block (`model::fp8::scale_shape`'s own shape math,
+                    // reused rather than reimplemented). Same "no
+                    // `TierPolicy` selects this yet" caveat as `NF4`/
+                    // `F4E2M1` above.
+                    gpu_core::select::Dtype::F8E4M3 | gpu_core::select::Dtype::F8E5M2 => {
+                        let (rb, cb) = model::fp8::scale_shape(n as usize, k as usize, 128);
+                        n * k + (rb * cb) as u64 * 4
+                    }
                 }
             })
             .sum()

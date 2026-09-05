@@ -664,6 +664,18 @@ impl Weight {
             Dtype::NF4 | Dtype::F4E2M1 => {
                 unreachable!("Weight::upload: {want:?} is refused by the assert above -- model::lut4 provides the host quantize/dequantize pair and the device kernel exists, but no Weight::{want:?} façade arm has been built yet (M8.5 follow-up)")
             }
+            // M8.6 added `F8E4M3`/`F8E5M2` as `DType` tiers, `kernels::
+            // template::f8e4m3_decode_expr`/`f8e5m2_decode_expr`, and a
+            // hand-written blockwise-scale device kernel
+            // (`matmul_gemv_f8e4m3`/`matmul_gemv_f8e5m2`), but deliberately
+            // did NOT wire a `Weight::F8E4M3`/`Weight::F8E5M2` arm into this
+            // façade this session either - same clearly-scoped follow-up
+            // shape as `NF4`/`F4E2M1` just above, and for the same reason:
+            // the `assert!` above already refuses both before this match
+            // runs.
+            Dtype::F8E4M3 | Dtype::F8E5M2 => {
+                unreachable!("Weight::upload: {want:?} is refused by the assert above -- kernels::template provides the decode expression and the device kernel exists, but no Weight::{want:?} façade arm has been built yet (M8.6 follow-up)")
+            }
         }
     }
 }
@@ -1186,10 +1198,11 @@ impl Ops {
     /// to `gpu_core::provider::wgsl::WgslProvider::threads` - it has zero
     /// dependency on this crate's kernel-name table, so it now lives where
     /// [`Ops::matmul`] actually calls it (inside `WgslProvider::lower`), not
-    /// duplicated here as dead code. **M8.5** added `NF4`/`F4E2M1` to that
-    /// moved formula's `PackedInt8` tile arm directly (this doc comment's
-    /// home moved before M8.5 landed, so the integrating cherry-pick applied
-    /// M8.5's dtype addition there instead of reintroducing this function).
+    /// duplicated here as dead code. **M8.5** added `NF4`/`F4E2M1` and
+    /// **M8.6** added `F8E4M3`/`F8E5M2` to that moved formula directly (this
+    /// doc comment's home moved before either landed, so the integrating
+    /// cherry-picks applied both dtype additions there instead of
+    /// reintroducing this function).
     ///
     /// `y[yoff .. yoff + m*n)] = act[xr0..xr0+m, :] @ wᵀ`, where `m` is
     /// however many rows `act` was built for ([`Ops::act`]'s `rows`). The

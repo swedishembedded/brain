@@ -57,10 +57,14 @@
 //! [`ProbeError::Promoted`] when it is not the one asked for, and [`sweep`]
 //! renders that as [`Outcome::Unsupported`] with the reason.
 //!
-//! There is no FP8 tier here because there is no FP8 tier in the engine:
-//! `crate::fp8` is a host-side checkpoint-import dequantizer, not a device
-//! kernel. A caller asking "can this machine do f8" gets "brain has no
-//! device-side f8 tier", not a number.
+//! **Corrected by M8.6**: this module's own doc used to say "there is no
+//! FP8 tier here because there is no FP8 tier in the engine" - true when
+//! written, false now. `DType::F8E4M3`/`DType::F8E5M2` are a real
+//! DEVICE-side decode-to-f32 storage tier (`kernels::template::
+//! f8e4m3_decode_expr`/`f8e5m2_decode_expr`, a blockwise-scale-indexed
+//! kernel), not merely `crate::fp8`'s host-side checkpoint-import
+//! dequantizer. Neither reaches THIS probe's own sweep yet - see `TIERS`'s
+//! own doc just below for why, same shape as `Q4K`/`Q8K`.
 //!
 //! [`TIERS`] does not include `Dtype::Q4K`/`Dtype::Q8K` (M12's affine
 //! K-quant tiers) - they share `I8`/`Q4`'s `int8_dot` capability and
@@ -72,7 +76,11 @@
 //! `DType::NF4`'s own doc comment) and are covered by [`Tier`] below, but
 //! neither reaches this sweep - `crate::ops::Weight::upload` does not build
 //! a `Weight::NF4`/`Weight::F4E2M1` yet either (see that function's own doc),
-//! so there is no GEMM dispatch path for `gemm` to time.
+//! so there is no GEMM dispatch path for `gemm` to time. Same story again for
+//! `Dtype::F8E4M3`/`Dtype::F8E5M2` (M8.6): both are covered by [`Tier`] below
+//! and share a device kernel, but `Weight::upload` does not build a
+//! `Weight::F8E4M3`/`Weight::F8E5M2` either, so this sweep cannot dispatch
+//! them yet.
 
 use std::time::{Duration, Instant};
 
@@ -116,7 +124,7 @@ pub trait Tier {
 impl Tier for Dtype {
     fn arithmetic(self) -> Arithmetic {
         match self {
-            Dtype::F32 | Dtype::BF16 | Dtype::F16 => Arithmetic::Float32,
+            Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => Arithmetic::Float32,
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => Arithmetic::Int8Dot,
         }
     }
@@ -132,6 +140,8 @@ impl Tier for Dtype {
             Dtype::Q8K => "affine 5-bit K-quant weights (GGUF Q5_K, 8-bit slot) + int8 activations, i32 accumulate + fp32 min-correction",
             Dtype::NF4 => "non-uniform 4-bit (bitsandbytes NF4 codebook) weights + int8 activations, i32 accumulate (W4A8)",
             Dtype::F4E2M1 => "OCP MXFP4 (E2M1 codebook) weights + int8 activations, i32 accumulate (W4A8)",
+            Dtype::F8E4M3 => "portable fp8 e4m3 weights (packed bytes, decoded inline, blockwise 128x128 scale), fp32 math",
+            Dtype::F8E5M2 => "portable fp8 e5m2 weights (packed bytes, decoded inline, blockwise 128x128 scale), fp32 math",
         }
     }
 
@@ -146,6 +156,8 @@ impl Tier for Dtype {
             Dtype::Q8K => "q8k",
             Dtype::NF4 => "nf4",
             Dtype::F4E2M1 => "f4e2m1",
+            Dtype::F8E4M3 => "f8e4m3",
+            Dtype::F8E5M2 => "f8e5m2",
         }
     }
 }

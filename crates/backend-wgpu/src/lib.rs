@@ -10,7 +10,7 @@
 //! `impl Backend` downcasts the neutral [`DeviceBuffer`]/[`Step`] handles and
 //! delegates to them, so `brain-gpu-core` can treat this as a `dyn Backend`.
 
-use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
+use backend_api::{Backend, BufUsage, DeviceBuffer, NumericSupport, Step};
 use wgpu::util::DeviceExt;
 
 /// A recorded dispatch: (pipeline index, bind group, grid_x, grid_y, sliced). The
@@ -1530,7 +1530,17 @@ impl WgpuBackend {
             // `None` so a consumer cannot mistake a guess for a measurement.
             peak_bandwidth_gbs: None,
             peak_gflops: None,
-            numeric: arch.numeric_view(),
+            // `fp8_storage` (M8.6) is not one of `ArchDesc`'s modelled tiers:
+            // the portable FP8 decode kernels (`matmul_gemv_f8e4m3`/
+            // `matmul_gemv_f8e5m2`) are plain `select`/`bitcast` WGSL - core
+            // WGSL, no device feature, same reasoning `numeric_view()`
+            // already applies to `bf16_storage`/`f16_storage` (this is NOT
+            // the native tensor-core FP8 tier - that needs Hopper+/Blackwell
+            // hardware and is out of scope, see `NumericSupport::
+            // fp8_storage`'s own doc). Set directly here rather than
+            // threading a new tier through `ArchDesc` for one orthogonal
+            // flag.
+            numeric: NumericSupport { fp8_storage: true, ..arch.numeric_view() },
             arch,
         }
     }

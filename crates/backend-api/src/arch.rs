@@ -247,6 +247,9 @@ impl ArchDesc {
             bf16: self.is_fast(DType::BF16),
             f16_storage: self.tier(DType::F16).level == TierLevel::Storage,
             bf16_storage: self.tier(DType::BF16).level == TierLevel::Storage,
+            // Not one of this descriptor's modelled tiers (M8.6) - each
+            // backend overrides it directly on top of this view where true.
+            fp8_storage: false,
             coop_matrix: self.matrix.is_some(),
         }
     }

@@ -284,6 +284,12 @@ pub struct Requirement {
     pub f16_storage: bool,
     /// bf16 bytes merely storable (`caps.numeric.bf16_storage`), same rule.
     pub bf16_storage: bool,
+    /// Portable FP8 (E4M3/E5M2) bytes merely storable/decodable
+    /// (`caps.numeric.fp8_storage`, M8.6) - unlike `f16_storage`/
+    /// `bf16_storage` above there is no "fast native FP8 compute" flag this
+    /// could also be satisfied by (that tier does not exist yet, see
+    /// `NumericSupport::fp8_storage`'s own doc).
+    pub fp8_storage: bool,
     /// Workgroup-barrier reductions execute *correctly* on this device
     /// (`caps.workgroup_reductions`) - the CPU JIT's split-at-barrier
     /// execution model mis-executes these, so this is a correctness gate,
@@ -309,6 +315,7 @@ impl Requirement {
             && (!self.bf16_compute || n.bf16)
             && (!self.f16_storage || n.f16 || n.f16_storage)
             && (!self.bf16_storage || n.bf16 || n.bf16_storage)
+            && (!self.fp8_storage || n.fp8_storage)
             && (!self.workgroup_reductions || caps.workgroup_reductions)
             && self.matrix.is_none_or(|req| {
                 caps.arch.matrix.as_ref().is_some_and(|m| {
@@ -341,6 +348,11 @@ fn dtype_storage_requirement(dt: Dtype) -> Requirement {
         Dtype::BF16 => Requirement { bf16_storage: true, ..Requirement::default() },
         Dtype::F16 => Requirement { f16_storage: true, ..Requirement::default() },
         Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => Requirement { int8_dot: true, ..Requirement::default() },
+        // M8.6: a STORAGE tier exactly like `BF16`/`F16` above (decode packed
+        // bytes to f32 with plain integer/bitcast WGSL, activation stays
+        // f32), gated on `fp8_storage` - never `int8_dot`, these bytes are
+        // not int8 and no DP4A dot product is involved.
+        Dtype::F8E4M3 | Dtype::F8E5M2 => Requirement { fp8_storage: true, ..Requirement::default() },
     }
 }
 
@@ -651,7 +663,14 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             // consumer's head choice identical - only a caller that walks
             // past `WorkgroupPerOutput` (because it has no GEMV kernel) ever
             // reaches it.
-            Dtype::F32 | Dtype::BF16 | Dtype::F16 => {
+            // `F8E4M3`/`F8E5M2` (M8.6) fold into this SAME arm: like `BF16`/
+            // `F16`, both are decode-to-f32 STORAGE tiers with a plain f32
+            // activation, so the regime split is identical - only
+            // `model::ops::Ops::bind` (once a `Weight::F8E4M3`/`Weight::
+            // F8E5M2` façade arm exists - not built this session, see that
+            // function's own doc) would need to point either at a real
+            // blockwise-scale kernel instead of `matmul`/`matmul_gemv`.
+            Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => {
                 if shape.m <= DECODE_REGIME_MAX_ROWS {
                     if shape.m >= GEMM_TILE_MIN_ROWS && shape.n >= GEMM_TILE_MIN_COLS {
                         vec![WorkgroupPerOutput, RegisterTiled, Reference]
@@ -796,7 +815,10 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // exhaustiveness only; nothing in this codebase builds an `OpShape`
         // with this dtype for `Op::PagedAttention` today.
         Op::PagedAttention => match shape.dtype {
-            Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![WorkgroupPerOutput, Reference],
+            // `F8E4M3`/`F8E5M2` (M8.6) mirror `Q4K`/`Q8K`'s own reasoning
+            // just above for exhaustiveness only - no paged-attention KV pool
+            // of this dtype exists in this tree.
+            Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => vec![WorkgroupPerOutput, Reference],
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => vec![Reference],
         },
         // Sparse-MoE expert linear - capability only, NO shape gate, unlike
@@ -827,7 +849,10 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // `int8_dot` requirement exactly as `Op::MatMul`'s `Q4K`/`Q8K` arm
         // already does.
         Op::MoeExpertLinear => match shape.dtype {
-            Dtype::F32 | Dtype::BF16 | Dtype::F16 => vec![Reference],
+            // `F8E4M3`/`F8E5M2` (M8.6): no MoE expert this tree builds is
+            // FP8-quantized today, kept exhaustive only, same reasoning as
+            // `Q4K`/`Q8K` above.
+            Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => vec![Reference],
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => vec![PackedInt8],
         },
         // The 1D convolutions. `conv1d`/`convtr1d` are one-thread-per-output
@@ -1740,15 +1765,18 @@ mod tests {
             Dtype::Q4,
             Dtype::NF4,
             Dtype::F4E2M1,
+            Dtype::F8E4M3,
+            Dtype::F8E5M2,
         ];
-        // 6 independent bools -> 64 combinations (f32 is always true, not
+        // 7 independent bools -> 128 combinations (f32 is always true, not
         // varied) crossed with workgroup_reductions (2), covering baseline
         // (all false), int8_dot-only, full-everything, and every
-        // single-flag-true combination along the way. `Dtype::NF4`/`Dtype::
-        // F4E2M1` (M8.5) join the dtype list above - this test's whole point
-        // is exhaustive proof over the FULL input space, so a new dtype
-        // belongs in the same sweep, not a narrower one bolted on.
-        for bits in 0u8..64 {
+        // single-flag-true combination along the way. `fp8_storage` (M8.6)
+        // is the 7th bit, added alongside `Dtype::F8E4M3`/`Dtype::F8E5M2`
+        // above - this test's whole point is exhaustive proof over the FULL
+        // input space, so a new capability flag and a new dtype that keys on
+        // it both belong in the same sweep, not a narrower one bolted on.
+        for bits in 0u8..128 {
             let numeric = NumericSupport {
                 f32: true,
                 int8_dot: bits & 1 != 0,
@@ -1757,6 +1785,7 @@ mod tests {
                 f16_storage: bits & 8 != 0,
                 bf16_storage: bits & 16 != 0,
                 coop_matrix: bits & 32 != 0,
+                fp8_storage: bits & 64 != 0,
             };
             for workgroup_reductions in [false, true] {
                 let mut caps = DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu);

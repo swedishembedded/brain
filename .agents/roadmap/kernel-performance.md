@@ -3924,6 +3924,135 @@ either tier); a register-tiled/prefill-shaped sibling kernel
 (`matmul_q4_dyn_reg`'s own LUT variant) - only the decode-regime GEMV was
 built and gated this session.
 
+### M8.6 - Portable FP8 (E4M3/E5M2): device-resident bytes, decode-to-f32 storage tier
+
+`DType::F8E4M3`/`DType::F8E5M2` added as two new 8-bit STORAGE tiers -
+`BF16`/`F16`'s exact shape (decode-to-fp32-inline, activations stay plain
+unquantized fp32), NOT W4A8 like M8.5's `NF4`/`F4E2M1` above. What changes
+by landing this: a checkpoint that ships FP8 (DeepSeek-V3/Qwen3.5-FP8-style:
+raw E4M3 bytes plus a companion per-128x128-block scale,
+`model::fp8::scale_shape`'s own layout) no longer HAS to be dequantized to
+f32 at import to be usable on a device - the raw bytes plus the blockwise
+scale can now be resident on the device (1 byte/weight instead of 4) and
+decoded inline in the GEMM kernel, the same VRAM/checkpoint-size win
+`BF16`/`F16`'s own storage tiers already deliver for their formats.
+`crates/model/src/fp8.rs`'s own module doc (which said "there is no FP8
+tier in the engine... a native device-side FP8 GEMM is deferred") is
+corrected in this same commit, per this campaign's own "a stale claim is
+fixed in the change that proves it wrong" rule - that module (`crate::fp8`,
+host-side, import-time) stays exactly what it was and remains the PARITY
+ORACLE every device-side consumer is checked against; only the claim that
+no device tier exists was wrong.
+
+**Decode expressions**: `kernels::template::f8e4m3_decode_expr`/
+`f8e5m2_decode_expr` (new pure functions - `byte_expr: &str` in, a complete
+WGSL f32 expression out), the same magic-multiply/magic-bias `select`/
+`bitcast` shape `f16_decode_expr` already established, scaled to each
+format's own field widths. **E4M3** (OCP/PyTorch `float8_e4m3fn`: 1 sign, 4
+exponent (bias 7), 3 mantissa, NO infinities - only byte `0x7F`/`0xFF` is
+NaN, verified against `checkpoint::safetensors::e4m3fn_to_f32_scalar`'s
+existing field-reconstruction formula) needed a THIRD branch beyond
+`f16_decode_expr`'s two: a flat NaN override, since the magic-multiply
+formula alone computes an ordinary finite value (480.0) for `0x7F`, not
+NaN - this format has no exponent-all-ones-means-special convention, only
+one exact reserved bit pattern. **E5M2** (OCP FP8: 1 sign, 5 exponent (bias
+15, IDENTICAL to f16's own), 2 mantissa, HAS real infinities) is
+structurally `f16_decode_expr` narrowed to a 2-bit mantissa - same magic-
+bias/magic-multiply CONSTANTS (`0x38800000`/`0x77800000`), same three-branch
+shape, since both formats share f16's exact exponent width and bias.
+
+**TDD, exhaustive, host-only** (`crates/kernels/src/template.rs`): a "wgsl
+mirror" of each decode expression's bit-trick logic, checked byte-for-byte
+against an INDEPENDENT field-reconstruction reference over ALL 256 possible
+bytes of each format (`f8e4m3_decode_matches_an_independent_reference_
+for_every_possible_byte`/`f8e5m2_...` - zero mismatches, NaN pairs accepted
+as equal iff both sides are NaN), plus known-value spot checks (max finite
+448.0/57344.0, smallest normal/subnormal, `E4M3` has NO `+-inf` where E5M2
+does). Unlike B5's f16 tier, no GPU flush-to-zero surprise turned up in the
+dual-backend run (see below) - the exhaustive host check and the real-
+hardware run agreed from the first draft.
+
+**Device kernels** (hand-written, NOT templated through `dtype_variant` -
+that rewrite pipeline is hardcoded to 2-per-`u32` packing with no second
+binding, and FP8 here needs BOTH 4-per-`u32` packing AND an extra BLOCKWISE
+scale binding, neither of which fits): `matmul_gemv_f8e4m3.wgsl`/
+`matmul_gemv_f8e5m2.wgsl`, `matmul_gemv.wgsl`'s exact plain-f32 decode-regime
+`WorkgroupPerOutput` structure with the weight read as packed FP8 bytes,
+decoded inline via each format's decode expression PASTED VERBATIM (a
+`the_kernels_pasted_decode_expressions_match_the_generator_functions_
+exactly` test pins the pasted WGSL text is byte-identical to what
+`f8e4m3_decode_expr("byte")`/`f8e5m2_decode_expr("byte")` produce right now,
+so the hand-paste cannot silently drift from the function that generated
+it). The scale is genuinely 2-D indexed - unlike every other quantized tier
+in this tree (`matmul_kq_dyn.wgsl`'s own two scales are both 1-D group/
+super-block indexed): one workgroup owns exactly one weight ROW, so the row-
+block index (`rb = col/128`) is a per-workgroup constant, while the column-
+block index (`bc = k/128`) advances every 128 elements as the k-loop runs -
+`scale[rb*cb + bc]`, `cb` passed as a `Params` field. Headers validated by
+`make kernels-table` (`docs/reference/kernels.md` regenerated clean).
+
+**`DType` wiring**: `bits()=8, per_word()=4 (derived), bytes()=1`. A NEW
+`NumericSupport.fp8_storage`/`select::Requirement.fp8_storage` capability
+(genuinely separate from `int8_dot` - these bytes are not int8, no DP4A dot
+product is involved in decoding them, and separate from a hypothetical
+future NATIVE FP8 tensor-core flag the same way `f16_storage` is separate
+from `f16`) - `true` on `backend-wgpu`/`backend-cpu` (plain `select`/
+`bitcast` WGSL, no device feature, same reasoning as `bf16_storage`/
+`f16_storage`), untouched (`false`) on `backend-vulkan`, out of scope.
+`backend_api::select`'s three `Op::{MatMul,PagedAttention,MoeExpertLinear}`
+arms and `model::ops::Ops::threads`/`Weight::upload`/`model::probe`'s `Tier`
+impl/`qwen3vl::caps::linear_dtype`/`qwen35::config::layer_weight_bytes`
+updated for exhaustiveness, mirroring M8.5's own blast radius through the
+same files. `Weight::upload` deliberately does NOT build a `Weight::
+F8E4M3`/`Weight::F8E5M2` this session (same scope boundary as M8.5's `NF4`/
+`F4E2M1`) - refused loudly by its own `assert!`, a clearly-scoped follow-up.
+
+**Gate**: the exhaustive byte-pattern tests above, plus
+`crates/model/tests/matmul_fp8_gemm.rs` (5 tests, REAL wgpu hardware - Intel
+Arc iGPU, confirmed via the printed adapter string, not skipped): both
+formats at a 128x128-block-ALIGNED shape (`n=128,k=256`) AND a NON-aligned
+one (`n=200,k=192` - partial last row-block of 72 rows AND partial last
+col-block of 64 columns, the padding case where a blockwise-scale indexing
+bug hides) against `model::fp8::dequant_block128` - the REAL import-path
+oracle, not a reimplementation - fed by a test-only nearest-neighbour byte
+encoder (the same technique M8.5's `quantize_weight_lut4` already uses,
+searching each format's own 256-value codebook). Measured `rel_l2=0.000000`
+at every shape (weight side is EXACT - same decoded value on both sides,
+no activation-quant noise since this is a plain-f32-activation storage
+tier - only float summation order could differ, and did not, to the
+printed precision), plus a divergence sanity test proving byte `0x7C`
+decodes to a large finite value under E4M3 but `+inf` under E5M2 - same
+bits, different formats, not one decode with two names. `cargo test -p
+brain-kernels --lib` (36/36, includes the drift-guard test pinning the
+pasted kernel text against the generator functions), `cargo test -p
+brain-backend-api --lib` (48/48, capability sweep extended to 128
+combinations covering the new `fp8_storage` bit), `cargo test -p brain-model
+--lib fp8` (8/8, includes the new `e5m2_decode_known_values`), `cargo check
+--workspace` clean, `python3 scripts/build/gen-kernel-table.py --check`
+clean (461 kernels), `cargo clippy -p brain-backend-api -p brain-model -p
+brain-qwen3vl -p brain-kernels -p brain-backend-cpu -p brain-backend-wgpu
+--lib --tests` clean on every file this milestone touched (one real finding,
+`clippy::doc_lazy_continuation` on a doc comment whose wrapped line began
+with "- ", read as an unindented markdown list continuation - reworded, not
+suppressed; every other warning is pre-existing, in a file this milestone
+did not touch), `bash scripts/gates/check-no-doc-citations.sh` clean.
+**Commit**: one.
+
+**Deferred, explicitly out of scope, per M8.6's own scope boundary**: a
+NATIVE tensor-core FP8 GEMM (Hopper+/Blackwell hardware this box does not
+have) - not attempted, and per the hardware-harness contract
+(`brain_testutil::skip_unvalidated_capability`, M0.3) a FUTURE session
+building that tier would need it to declare `fp8` (fast native compute,
+separate from `fp8_storage`) the same way `f16`/`bf16` are separate from
+their own `*_storage` flags; no test in this milestone references that
+helper since the portable tier this milestone built needs no unvalidated
+hardware - it runs, and was measured, on this box's own real GPU.
+`model::ops::Weight::F8E4M3`/`Weight::F8E5M2` façade wiring and skipping the
+host `dequant_block128` step in a real model's import path (uploading FP8
+bytes + scales directly instead) - the kernel and its parity test are
+complete and correct, but not yet wired into any model's import path, per
+the milestone brief's own explicit fallback for exactly this situation.
+
 ## Not yet done
 
 Phase 0 is closed. Phase 1 is in progress per the recalibrated scope above.

@@ -214,6 +214,15 @@ pub struct NumericSupport {
     /// The device can hold bf16 bytes at all -- "exists" as opposed to
     /// `bf16`'s "fast".
     pub bf16_storage: bool,
+    /// The device can hold portable FP8 (E4M3/E5M2) bytes and decode them to
+    /// f32 with plain integer/bitcast WGSL (`kernels::template::
+    /// f8e4m3_decode_expr`/`f8e5m2_decode_expr`, M8.6) -- "exists" as opposed
+    /// to a *native* FP8 tensor-core compute path, which is a DIFFERENT,
+    /// not-yet-built tier (out of scope for M8.6 - needs Hopper+/Blackwell
+    /// hardware this repo's own boxes do not have) and would need its own
+    /// flag the same way `f16`/`bf16` are separate from `f16_storage`/
+    /// `bf16_storage`.
+    pub fp8_storage: bool,
     /// Cooperative-matrix / tensor-core matmul (the optional
     /// `VK_KHR_cooperative_matrix` path).
     pub coop_matrix: bool,
@@ -228,6 +237,7 @@ impl NumericSupport {
         bf16: false,
         f16_storage: false,
         bf16_storage: false,
+        fp8_storage: false,
         coop_matrix: false,
     };
 }
@@ -291,6 +301,24 @@ pub enum DType {
     /// magnitudes `{0, 0.5, 1, 1.5, 2, 3, 4, 6}` - see
     /// `model::lut4::F4E2M1_LUT`.
     F4E2M1,
+    /// Portable FP8 E4M3 (OCP/PyTorch `float8_e4m3fn`) - M8.6, a STORAGE tier
+    /// like `BF16`/`F16` (decode-to-fp32-inline, activations stay plain
+    /// fp32), NOT W4A8 like `Q4`/`NF4`/`F4E2M1` above. 8 bits, 4/`u32`, but
+    /// UNLIKE every other storage/quant tier here the scale is BLOCKWISE
+    /// (one `f32` per `128x128` block of the weight, `model::fp8::
+    /// scale_shape`'s shape - `checkpoint::safetensors`'s existing HOST-side
+    /// import-time decoder, `e4m3fn_to_f32`, is this format's byte-decode
+    /// oracle). Ported to a WGSL decode expression as
+    /// `kernels::template::f8e4m3_decode_expr` - see that function's own doc
+    /// for the exact bit derivation (no infinities; only `0x7F`/`0xFF` are
+    /// NaN).
+    F8E4M3,
+    /// Portable FP8 E5M2 (OCP FP8, has real infinities - unlike `F8E4M3`),
+    /// M8.6's other fixed 8-bit storage tier. Same blockwise-scale contract
+    /// as `F8E4M3`; decode is `kernels::template::f8e5m2_decode_expr`,
+    /// structurally `F16`'s own decode narrowed to a 2-bit mantissa (same
+    /// 5-bit exponent width/bias).
+    F8E5M2,
 }
 
 /// Opaque handle to a kernel registered via [`Backend::register_native`] -
@@ -331,7 +359,7 @@ impl DType {
         match self {
             DType::F32 => 32,
             DType::F16 | DType::BF16 => 16,
-            DType::I8 | DType::Q8K => 8,
+            DType::I8 | DType::Q8K | DType::F8E4M3 | DType::F8E5M2 => 8,
             DType::Q4 | DType::Q4K | DType::NF4 | DType::F4E2M1 => 4,
         }
     }
@@ -352,7 +380,7 @@ impl DType {
         match self {
             DType::F32 => 4,
             DType::F16 | DType::BF16 => 2,
-            DType::I8 | DType::Q4 | DType::Q4K | DType::Q8K | DType::NF4 | DType::F4E2M1 => 1,
+            DType::I8 | DType::Q4 | DType::Q4K | DType::Q8K | DType::NF4 | DType::F4E2M1 | DType::F8E4M3 | DType::F8E5M2 => 1,
         }
     }
 
@@ -443,6 +471,23 @@ impl DType {
                     DType::F32
                 }
             }
+            // M8.6: a STORAGE tier, exactly like `BF16`/`F16` above - gated
+            // on `fp8_storage`, never `int8_dot` (these bytes are not int8,
+            // and no DP4A dot product is involved in decoding them).
+            DType::F8E4M3 => {
+                if numeric.fp8_storage {
+                    DType::F8E4M3
+                } else {
+                    DType::F32
+                }
+            }
+            DType::F8E5M2 => {
+                if numeric.fp8_storage {
+                    DType::F8E5M2
+                } else {
+                    DType::F32
+                }
+            }
         }
     }
 
@@ -463,6 +508,8 @@ impl DType {
             DType::Q8K => "q8k",
             DType::NF4 => "nf4",
             DType::F4E2M1 => "f4e2m1",
+            DType::F8E4M3 => "f8e4m3",
+            DType::F8E5M2 => "f8e5m2",
         }
     }
 
@@ -480,6 +527,8 @@ impl DType {
             "q8k" => Some(DType::Q8K),
             "nf4" => Some(DType::NF4),
             "f4e2m1" => Some(DType::F4E2M1),
+            "f8e4m3" => Some(DType::F8E4M3),
+            "f8e5m2" => Some(DType::F8E5M2),
             _ => None,
         }
     }
@@ -497,6 +546,7 @@ mod dtype_tests {
             bf16: true,
             f16_storage: true,
             bf16_storage: true,
+            fp8_storage: true,
             int8_dot: true,
             ..NumericSupport::BASELINE
         };
@@ -511,6 +561,8 @@ mod dtype_tests {
                 DType::Q8K,
                 DType::NF4,
                 DType::F4E2M1,
+                DType::F8E4M3,
+                DType::F8E5M2,
             ] {
                 let promoted = dtype.promote(&numeric);
                 assert!(
@@ -540,6 +592,7 @@ mod dtype_tests {
             bf16: true,
             f16_storage: true,
             bf16_storage: true,
+            fp8_storage: true,
             int8_dot: true,
             ..NumericSupport::BASELINE
         };
@@ -553,6 +606,8 @@ mod dtype_tests {
             DType::Q8K,
             DType::NF4,
             DType::F4E2M1,
+            DType::F8E4M3,
+            DType::F8E5M2,
         ] {
             // Full support: promotes to itself.
             assert_eq!(dtype.promote(&full), dtype, "{dtype:?} with full support must promote to itself");
@@ -619,6 +674,29 @@ mod dtype_tests {
         );
     }
 
+    /// M8.6's own version of the B4 test above: `fp8_storage` (NOT
+    /// `int8_dot` - E4M3/E5M2 bytes are not int8, no DP4A dot product is
+    /// involved) gates `F8E4M3`/`F8E5M2` promotion, and flipping it alone
+    /// must not disturb any OTHER tier's promotion policy.
+    #[test]
+    fn promote_reflects_a_real_backends_fp8_storage_flag() {
+        let fp8_capable = NumericSupport { int8_dot: true, fp8_storage: true, ..NumericSupport::BASELINE };
+        assert_eq!(DType::F8E4M3.promote(&fp8_capable), DType::F8E4M3);
+        assert_eq!(DType::F8E5M2.promote(&fp8_capable), DType::F8E5M2);
+        // int8_dot alone (no fp8_storage) must NOT be enough - these are a
+        // storage tier, not an int8-activation one.
+        let int8_only = NumericSupport { int8_dot: true, ..NumericSupport::BASELINE };
+        assert_eq!(
+            DType::F8E4M3.promote(&int8_only),
+            DType::F32,
+            "int8_dot must not itself promote an FP8 storage tier -- that would conflate two unrelated capabilities"
+        );
+        assert_eq!(DType::F8E5M2.promote(&int8_only), DType::F32);
+        // Untouched by fp8_storage: I8/Q4 still promote on int8_dot alone.
+        assert_eq!(DType::I8.promote(&int8_only), DType::I8);
+        assert_eq!(DType::Q4.promote(&int8_only), DType::Q4);
+    }
+
     #[test]
     fn bytes_matches_element_width() {
         assert_eq!(DType::F32.bytes(), 4);
@@ -628,6 +706,8 @@ mod dtype_tests {
         assert_eq!(DType::Q4.bytes(), 1);
         assert_eq!(DType::NF4.bytes(), 1);
         assert_eq!(DType::F4E2M1.bytes(), 1);
+        assert_eq!(DType::F8E4M3.bytes(), 1);
+        assert_eq!(DType::F8E5M2.bytes(), 1);
     }
 
     #[test]
@@ -646,6 +726,10 @@ mod dtype_tests {
         assert_eq!(DType::NF4.per_word(), 8);
         assert_eq!(DType::F4E2M1.bits(), 4);
         assert_eq!(DType::F4E2M1.per_word(), 8);
+        assert_eq!(DType::F8E4M3.bits(), 8);
+        assert_eq!(DType::F8E4M3.per_word(), 4);
+        assert_eq!(DType::F8E5M2.bits(), 8);
+        assert_eq!(DType::F8E5M2.per_word(), 4);
     }
 
     #[test]
@@ -660,6 +744,8 @@ mod dtype_tests {
             DType::Q8K,
             DType::NF4,
             DType::F4E2M1,
+            DType::F8E4M3,
+            DType::F8E5M2,
         ] {
             assert_eq!(DType::from_name(dt.name()), Some(dt), "{dt:?} did not round-trip through its own name");
         }

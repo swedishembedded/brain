@@ -854,6 +854,82 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 "#;
 }
 
+/// M8.6: the E4M3/E5M2 portable FP8
+/// decode expressions - a DIFFERENT mechanism from [`dtype_variant`], not a
+/// third tier bolted onto it. `dtype_variant`'s declaration/load rewrite is
+/// hardcoded to 2-per-`u32` packing (bf16/f16) with no second (scale)
+/// binding; FP8 here packs 4 bytes/`u32` AND needs a blockwise scale binding
+/// indexed `(row/128, col/128)`, neither of which that generic rewrite
+/// supports. So the FP8 matmul kernels (`matmul_gemv_f8e4m3.wgsl`/
+/// `matmul_gemv_f8e5m2.wgsl`) are hand-written, not templated - these two
+/// functions exist so the decode EXPRESSION itself (the fiddly, easy-to-get-
+/// wrong part) has exactly one implementation, pasted verbatim into both the
+/// hand-written kernel and this module's own exhaustive test, instead of a
+/// second hand-copy that could silently drift. `byte_expr` must already
+/// evaluate to a `u32` holding the raw byte in bits `[0,8)` (upper bits
+/// zero). Unlike [`bf16_decode_expr`]/[`f16_decode_expr`] this does not
+/// extract the byte from a packed word itself: the extraction differs per
+/// kernel, since which word/lane a byte lives in is a property of the
+/// CALLER's own layout, not of the decode.
+///
+/// **E4M3 (OCP/PyTorch `float8_e4m3fn`): 1 sign, 4 exponent (bias 7), 3
+/// mantissa bits, NO infinities** - only byte `0x7F`/`0xFF` (exponent and
+/// mantissa both all-ones) is NaN; every OTHER `exponent==0b1111` byte is a
+/// regular (the largest, magnitude 448) finite value - see
+/// `checkpoint::safetensors::e4m3fn_to_f32_scalar` for the field-
+/// reconstruction reference this mirrors as a bit-trick (that function is
+/// this format's existing HOST-side decoder; this is the same math, ported
+/// to WGSL `select`/`bitcast`, not a new format).
+///
+/// Same magic-multiply/magic-bias shape [`f16_decode_expr`] uses (subnormal:
+/// FTZ-safe magic-bias subtract of two NORMAL f32s; normal: magic-multiply by
+/// `2^(127-7)`; the third branch here is a flat NaN override, not inf/NaN,
+/// since this format has no infinity), scaled to a 3-bit mantissa (shift by
+/// `23-3=20`, not f16's `23-10=13`) and a 4-bit exponent (bias 7, not 15).
+pub fn f8e4m3_decode_expr(byte_expr: &str) -> String {
+    let mag7 = format!("({byte_expr} & 0x7Fu)");
+    let sign = format!("(({byte_expr} & 0x80u) << 24u)");
+    // Subnormal (mag7 < 8, i.e. exponent field 0): magic-bias subtract of two
+    // NORMAL f32s (exponent field fixed at 121, i.e. 2^-6) - see
+    // `f16_decode_expr`'s doc for why this is FTZ-safe on every backend.
+    let subnormal = format!("(bitcast<f32>(0x3C800000u | (({mag7}) << 20u)) - bitcast<f32>(0x3C800000u))");
+    // Normal (mag7 >= 8): magic-multiply by 2^(127-7) = 2^120
+    // (`bitcast<f32>(0x7B800000u)`) - placing the raw 4-bit exponent value
+    // straight into f32's exponent field (bias 127) computes `(1+mant/8) *
+    // 2^(exp-127)`; this constant rebias it to `2^(exp-7)`.
+    let normal = format!("(bitcast<f32>(({mag7}) << 20u) * bitcast<f32>(0x7B800000u))");
+    // The ONE reserved NaN pattern (mag7 == 0x7F, both signs) - not an
+    // inf/NaN branch (this format has no infinity), a flat override: the
+    // magic-multiply formula above would otherwise compute a perfectly
+    // ordinary finite value (480.0) for this exact byte, which is wrong.
+    format!(
+        "bitcast<f32>(bitcast<u32>(select(select({subnormal}, {normal}, ({mag7}) >= 8u), \
+         bitcast<f32>(0x7FC00000u), ({mag7}) == 0x7Fu)) | {sign})"
+    )
+}
+
+/// **E5M2 (OCP FP8 E5M2): 1 sign, 5 exponent (bias 15), 2 mantissa bits, HAS
+/// infinities** - structurally a narrower [`f16_decode_expr`] (same
+/// exponent width AND bias as f16 - `65504`'s exponent range, just 10
+/// mantissa bits instead of 2), so this is the IDENTICAL three-branch shape
+/// (subnormal magic-bias / normal magic-multiply / inf-or-NaN), scaled to a
+/// 2-bit mantissa (shift by `23-2=21`) - even the magic-bias/magic-multiply
+/// CONSTANTS are byte-identical to f16's own (`0x38800000`/`0x77800000`),
+/// since both share exponent bias 15 and range.
+pub fn f8e5m2_decode_expr(byte_expr: &str) -> String {
+    let exp = format!("(({byte_expr} >> 2u) & 0x1Fu)");
+    let mag7 = format!("({byte_expr} & 0x7Fu)"); // exp(5) | mantissa(2), 7 bits
+    let mant2 = format!("({byte_expr} & 0x3u)");
+    let sign = format!("(({byte_expr} & 0x80u) << 24u)");
+    let subnormal = format!("(bitcast<f32>(0x38800000u | (({mant2}) << 21u)) - bitcast<f32>(0x38800000u))");
+    let normal = format!("(bitcast<f32>(({mag7}) << 21u) * bitcast<f32>(0x77800000u))");
+    let inf_or_nan = format!("bitcast<f32>(0x7F800000u | (({mant2}) << 21u))");
+    format!(
+        "bitcast<f32>(bitcast<u32>(select(select({subnormal}, {normal}, ({exp}) != 0u), \
+         {inf_or_nan}, ({exp}) == 31u)) | {sign})"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,6 +1261,218 @@ fn main() { let v = w[base + i]; }
         assert_eq!(dec(0xFC00), f32::NEG_INFINITY);
         assert!(dec(0x7E00).is_nan());
         assert!(dec(0xFE00).is_nan());
+    }
+
+    // --- M8.6: portable FP8 (E4M3/E5M2) decode expressions ------------------
+
+    /// Host-side mirror of [`f8e4m3_decode_expr`]'s WGSL text - the same
+    /// three-way branch (magic-bias subnormal / magic-multiply normal / a
+    /// flat NaN override), byte-for-byte, kept in sync by hand exactly like
+    /// [`f16_decode_bits_wgsl_mirror`].
+    fn f8e4m3_decode_bits_wgsl_mirror(b: u8) -> u32 {
+        let b = b as u32;
+        let mag7 = b & 0x7F;
+        let sign = (b & 0x80) << 24;
+        let subnormal = f32::from_bits(0x3C80_0000 | (mag7 << 20)) - f32::from_bits(0x3C80_0000);
+        let normal = f32::from_bits(mag7 << 20) * f32::from_bits(0x7B80_0000);
+        let nan = f32::from_bits(0x7FC0_0000);
+        let unsigned = if mag7 == 0x7F { nan } else if mag7 >= 8 { normal } else { subnormal };
+        unsigned.to_bits() | sign
+    }
+
+    /// An INDEPENDENT E4M3 reference - direct sign/exponent/mantissa field
+    /// reconstruction (not the magic-multiply/magic-bias bit tricks), scaled
+    /// by an exact power-of-two float multiply, mirroring
+    /// `checkpoint::safetensors::e4m3fn_to_f32_scalar`'s own formula (this
+    /// crate cannot depend on `brain-checkpoint` - the dependency runs the
+    /// other way - so this is re-derived independently, not imported).
+    fn f8e4m3_decode_bits_independent_reference(b: u8) -> u32 {
+        let sign = ((b >> 7) & 1) as u32;
+        let exp = (b >> 3) & 0xF;
+        let mant = (b & 0x7) as u32;
+        if exp == 0xF && mant == 0x7 {
+            return f32::NAN.to_bits() | (sign << 31);
+        }
+        let mag: f32 = if exp == 0 {
+            // Subnormal: mant/8 * 2^-6 == mant * 2^-9, exact (mant fits in 3
+            // bits, 2^-9 is an exact f32 power-of-two scale).
+            (mant as f32) * f32::from_bits(((-9i32 + 127) as u32) << 23)
+        } else {
+            // Normal: (1 + mant/8) * 2^(exp-7) == (8+mant) * 2^(exp-10),
+            // exact (8+mant fits in 4 bits, 2^(exp-10) exact for exp in [1,15]).
+            ((8 + mant) as f32) * f32::from_bits(((exp as i32 - 10 + 127) as u32) << 23)
+        };
+        mag.to_bits() | (sign << 31)
+    }
+
+    /// Exhaustive: all 256 possible E4M3 byte patterns (the format's entire
+    /// representable space), magic-multiply mirror vs independent reference.
+    /// NaN pairs accepted as equal iff BOTH sides are NaN (only `0x7F`/`0xFF`
+    /// should be, and the exhaustive sweep is what proves no OTHER byte
+    /// accidentally decodes to one).
+    #[test]
+    fn f8e4m3_decode_matches_an_independent_reference_for_every_possible_byte() {
+        let mut nan_count = 0;
+        for b in 0u8..=255 {
+            let got = f32::from_bits(f8e4m3_decode_bits_wgsl_mirror(b));
+            let want = f32::from_bits(f8e4m3_decode_bits_independent_reference(b));
+            if want.is_nan() {
+                nan_count += 1;
+                assert!(got.is_nan(), "b=0x{b:02x}: want NaN, got {got}");
+                continue;
+            }
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "b=0x{b:02x}: magic-multiply {got} (0x{:08x}) != independent reference {want} (0x{:08x})",
+                got.to_bits(),
+                want.to_bits()
+            );
+        }
+        // E4M3 has EXACTLY two NaN encodings (0x7F, 0xFF) - not "no
+        // infinities" alone (checked by the finite max-value assertion
+        // below), the actual reserved-pattern count.
+        assert_eq!(nan_count, 2, "E4M3 must have exactly 2 NaN byte patterns (0x7F, 0xFF)");
+    }
+
+    #[test]
+    fn f8e4m3_decode_matches_known_values() {
+        let dec = |b: u8| f32::from_bits(f8e4m3_decode_bits_wgsl_mirror(b));
+        assert_eq!(dec(0x00), 0.0);
+        assert!(dec(0x00).is_sign_positive());
+        assert_eq!(dec(0x80), -0.0);
+        assert!(dec(0x80).is_sign_negative());
+        assert_eq!(dec(0x38), 1.0);
+        assert_eq!(dec(0xB8), -1.0);
+        assert_eq!(dec(0x08), 2f32.powi(-6)); // smallest normal
+        assert_eq!(dec(0x01), 2f32.powi(-9)); // smallest subnormal
+        assert_eq!(dec(0x7E), 448.0); // largest finite (E4M3FN has NO infinity)
+        assert!(dec(0x7E).is_finite());
+        assert!(dec(0x7F).is_nan()); // the ONE reserved positive NaN pattern
+        assert!(dec(0xFF).is_nan()); // and its negative twin
+        assert!(dec(0x7D).is_finite()); // exp=1111 mant!=111 is finite, NOT nan
+    }
+
+    /// Host-side mirror of [`f8e5m2_decode_expr`]'s WGSL text - structurally
+    /// `f16_decode_bits_wgsl_mirror` narrowed to a 2-bit mantissa (same
+    /// exponent width/bias, so the magic-bias/magic-multiply CONSTANTS are
+    /// byte-identical to f16's own).
+    fn f8e5m2_decode_bits_wgsl_mirror(b: u8) -> u32 {
+        let b = b as u32;
+        let exp = (b >> 2) & 0x1F;
+        let mag7 = b & 0x7F;
+        let mant2 = b & 0x3;
+        let sign = (b & 0x80) << 24;
+        let subnormal = f32::from_bits(0x3880_0000 | (mant2 << 21)) - f32::from_bits(0x3880_0000);
+        let normal = f32::from_bits(mag7 << 21) * f32::from_bits(0x7780_0000);
+        let inf_or_nan = f32::from_bits(0x7F80_0000 | (mant2 << 21));
+        let unsigned = if exp == 31 { inf_or_nan } else if exp != 0 { normal } else { subnormal };
+        unsigned.to_bits() | sign
+    }
+
+    /// An INDEPENDENT E5M2 reference, same shape as
+    /// [`f16_decode_bits_independent_reference`] narrowed to 2 mantissa bits.
+    fn f8e5m2_decode_bits_independent_reference(b: u8) -> u32 {
+        let sign = ((b >> 7) & 1) as u32;
+        let exp = (b >> 2) & 0x1F;
+        let mant = (b & 0x3) as u32;
+        let mag: f32 = if exp == 0 {
+            // Subnormal: mant/4 * 2^-14 == mant * 2^-16, exact.
+            (mant as f32) * f32::from_bits(((-16i32 + 127) as u32) << 23)
+        } else if exp == 31 {
+            if mant == 0 {
+                f32::INFINITY
+            } else {
+                f32::NAN
+            }
+        } else {
+            // Normal: (1 + mant/4) * 2^(exp-15) == (4+mant) * 2^(exp-17), exact.
+            ((4 + mant) as f32) * f32::from_bits(((exp as i32 - 17 + 127) as u32) << 23)
+        };
+        mag.to_bits() | (sign << 31)
+    }
+
+    /// Exhaustive: all 256 possible E5M2 byte patterns.
+    #[test]
+    fn f8e5m2_decode_matches_an_independent_reference_for_every_possible_byte() {
+        let mut checked_inf = false;
+        let mut checked_subnormal = false;
+        for b in 0u8..=255 {
+            let got = f32::from_bits(f8e5m2_decode_bits_wgsl_mirror(b));
+            let want = f32::from_bits(f8e5m2_decode_bits_independent_reference(b));
+            if want.is_nan() {
+                assert!(got.is_nan(), "b=0x{b:02x}: want NaN, got {got}");
+                continue;
+            }
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "b=0x{b:02x}: magic-multiply {got} (0x{:08x}) != independent reference {want} (0x{:08x})",
+                got.to_bits(),
+                want.to_bits()
+            );
+            if want.is_infinite() {
+                checked_inf = true;
+            }
+            let exp = (b >> 2) & 0x1F;
+            if exp == 0 && (b & 0x3) != 0 {
+                checked_subnormal = true;
+            }
+        }
+        assert!(checked_inf, "the sweep must have covered E5M2's +-inf patterns (unlike E4M3, this format HAS infinities)");
+        assert!(checked_subnormal, "the sweep must have covered at least one subnormal byte");
+    }
+
+    #[test]
+    fn f8e5m2_decode_matches_known_values() {
+        let dec = |b: u8| f32::from_bits(f8e5m2_decode_bits_wgsl_mirror(b));
+        assert_eq!(dec(0x00), 0.0);
+        assert_eq!(dec(0x80), -0.0);
+        assert_eq!(dec(0x3C), 1.0);
+        assert_eq!(dec(0xBC), -1.0);
+        assert_eq!(dec(0x04), 2f32.powi(-14)); // smallest normal
+        assert_eq!(dec(0x01), 2f32.powi(-16)); // smallest subnormal
+        assert_eq!(dec(0x7B), 57344.0); // largest finite
+        assert_eq!(dec(0x7C), f32::INFINITY);
+        assert_eq!(dec(0xFC), f32::NEG_INFINITY);
+        assert!(dec(0x7D).is_nan());
+        assert!(dec(0x7F).is_nan());
+        assert!(dec(0xFF).is_nan());
+    }
+
+    /// The two formats must disagree at at least one shared byte pattern -
+    /// they are DIFFERENT layouts, not the same decode under two names. `0x7C`
+    /// is E4M3's largest-but-one finite value but E5M2's `+inf`.
+    #[test]
+    fn f8e4m3_and_f8e5m2_are_not_the_same_decode() {
+        let e4 = f32::from_bits(f8e4m3_decode_bits_wgsl_mirror(0x7C));
+        let e5 = f32::from_bits(f8e5m2_decode_bits_wgsl_mirror(0x7C));
+        assert!(e4.is_finite());
+        assert!(e5.is_infinite());
+        assert_ne!(e4.to_bits(), e5.to_bits());
+    }
+
+    /// `f8e4m3_decode_expr`/`f8e5m2_decode_expr` are hand-PASTED into
+    /// `matmul_gemv_f8e4m3.wgsl`/`matmul_gemv_f8e5m2.wgsl` (see those
+    /// kernels' own headers for why - the generic `dtype_variant` rewrite
+    /// pipeline does not fit FP8's 4-per-`u32` packing plus its extra
+    /// blockwise-scale binding). A hand-paste can silently drift from the
+    /// function that generated it the moment either side is edited alone -
+    /// this test is what makes that impossible: it asserts the exact
+    /// substring these functions produce for the identifier `byte` is
+    /// present, byte-for-byte, in each kernel's real source.
+    #[test]
+    fn the_kernels_pasted_decode_expressions_match_the_generator_functions_exactly() {
+        let e4_expr = f8e4m3_decode_expr("byte");
+        assert!(
+            crate::MATMUL_GEMV_F8E4M3.contains(&e4_expr),
+            "matmul_gemv_f8e4m3.wgsl's pasted decode expression has drifted from f8e4m3_decode_expr(\"byte\")"
+        );
+        let e5_expr = f8e5m2_decode_expr("byte");
+        assert!(
+            crate::MATMUL_GEMV_F8E5M2.contains(&e5_expr),
+            "matmul_gemv_f8e5m2.wgsl's pasted decode expression has drifted from f8e5m2_decode_expr(\"byte\")"
+        );
     }
 
     // --- B9: write-direction (pack) storage tier ----------------------------

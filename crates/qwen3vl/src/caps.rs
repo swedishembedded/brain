@@ -960,6 +960,10 @@ pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<
         // for exhaustiveness.
         Dtype::NF4 => "nf4",
         Dtype::F4E2M1 => "f4e2m1",
+        // M8.6's two portable FP8 storage tiers - same story, kept only for
+        // exhaustiveness.
+        Dtype::F8E4M3 => "f8e4m3",
+        Dtype::F8E5M2 => "f8e5m2",
     };
     with_resident(dir, max_pixels, precision, |hot| Ok(hot.model.linear_dtype().map(|dt| name(dt).to_string())))
 }

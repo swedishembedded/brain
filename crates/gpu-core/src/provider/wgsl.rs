@@ -67,8 +67,11 @@ impl WgslProvider {
                 // match stays exhaustive over `Dtype` without silently
                 // absorbing a real future `PackedInt8` dtype into the wrong
                 // formula the way the pre-M5.5 blanket `_ => m*n` did for
-                // `Dtype::Q4`.
-                Dtype::F32 | Dtype::BF16 | Dtype::F16 => m * n,
+                // `Dtype::Q4`. `F8E4M3`/`F8E5M2` (M8.6) join this arm, NOT
+                // the `tile()` one above - they are a decode-to-f32 STORAGE
+                // tier (same family as `BF16`/`F16`), never `PackedInt8` in
+                // practice, for the identical reason.
+                Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => m * n,
             },
             KernelVariant::SplitReduction => {
                 unreachable!("Op::MatMul's candidates() never returns SplitReduction")

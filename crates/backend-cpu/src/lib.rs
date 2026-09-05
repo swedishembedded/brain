@@ -26,7 +26,7 @@ pub mod fast_ops;
 pub mod host_gemm;
 pub mod roofline;
 
-use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
+use backend_api::{Backend, BufUsage, DeviceBuffer, NumericSupport, Step};
 pub mod par;
 
 use rayon::prelude::*;
@@ -1035,7 +1035,13 @@ impl Backend for CpuBackend {
             // a roofline too, and the JIT's kernels are graded against it.
             peak_bandwidth_gbs: None,
             peak_gflops: None,
-            numeric: arch.numeric_view(),
+            // `fp8_storage` (M8.6) is not one of `ArchDesc`'s modelled tiers
+            // (portable FP8 decode is a plain single-top-level-barrier
+            // select/bitcast kernel, same JIT-compatibility reasoning as the
+            // f16/bf16 storage tiers `numeric_view()` already derives) - set
+            // directly here rather than threading a new tier through
+            // `ArchDesc` for one orthogonal flag.
+            numeric: NumericSupport { fp8_storage: true, ..arch.numeric_view() },
             arch,
         }
     }

@@ -14,13 +14,25 @@
 //! is the second, and only remaining, step: `dequant[r,c] = raw[r,c] *
 //! scale_inv[r/128, c/128]`.
 //!
-//! Import-time-only, host-only, by design: every existing device inference
-//! path (fp32, [`crate::int8`]'s DP4A tier) reads plain f32/int8 - a
-//! checkpoint that ships FP8 is converted to f32 (or re-quantized to int8) at
-//! import, never carried compressed onto the device. A native device-side FP8
-//! GEMM is deferred to a performance milestone and only if profiling says
-//! arithmetic (not memory) is the limiter - a precision change is not
-//! automatically a speed change.
+//! **This module stays import-time-only, host-only** - [`dequant_block128`]
+//! is still the PARITY ORACLE every device-side consumer is checked against,
+//! not one of two competing implementations. What changed (M8.6): a
+//! checkpoint that ships FP8 no longer HAS to be converted to f32 at import
+//! to be usable on a device -
+//! `backend_api::DType::F8E4M3`/`F8E5M2` plus `kernels::template::
+//! f8e4m3_decode_expr`/`f8e5m2_decode_expr` are a real, portable (decode-to-
+//! f32-inline, plain integer/bitcast WGSL, no device feature) device tier
+//! that can hold the raw bytes plus this module's own `weight_scale_inv`
+//! layout resident on the device and decode inline, the same "storage tier"
+//! shape `BF16`/`F16` already have. See `matmul_gemv_f8e4m3.wgsl`/
+//! `matmul_gemv_f8e5m2.wgsl`'s own headers for the device kernel and
+//! `crates/model/tests/matmul_fp8_gemm.rs` for its parity test against THIS
+//! module's `dequant_block128`. Still out of scope, and still needing
+//! hardware this repo's own boxes do not have: a NATIVE tensor-core FP8 GEMM
+//! (Hopper+/Blackwell) - a precision change is not automatically a speed
+//! change, and that tier is deferred to whichever future session can measure
+//! it for real, per `brain_testutil::skip_unvalidated_capability`'s own
+//! hardware-harness contract.
 
 /// `(row_blocks, col_blocks)` for an `[rows, cols]` weight at the given
 /// (square) block size - `ceil(rows/block), ceil(cols/block)`, matching the
@@ -97,6 +109,38 @@ pub fn dequant_block128(raw: &[f32], scale_inv: &[f32], rows: usize, cols: usize
         }
     }
     out
+}
+
+/// Decode an `E5M2` (OCP FP8) byte to its OWN f32 value: 1 sign, 5 exponent
+/// (bias 15), 2 mantissa bits - unlike [`checkpoint::safetensors::e4m3fn_to_f32`]'s E4M3FN
+/// (this checkpoint format's usual raw byte, decoded by that function), E5M2
+/// HAS real infinities (`exponent==31, mantissa==0`), only `mantissa!=0` at
+/// `exponent==31` is NaN. No checkpoint import path in this tree reads E5M2
+/// today (`checkpoint::safetensors`'s own `F8_E5M2` arm is a loud `Err`) -
+/// this exists as the HOST-side parity oracle for `kernels::template::
+/// f8e5m2_decode_expr`'s device decode (M8.6), the same role
+/// [`checkpoint::safetensors::e4m3fn_to_f32`] already plays for E4M3.
+///
+/// Direct sign/exponent/mantissa field reconstruction (not a bit trick),
+/// same style as `checkpoint::safetensors::e4m3fn_to_f32_scalar` - this is
+/// the ORACLE the device decode is checked against, so it must be the most
+/// obviously-correct implementation available, not the fastest one.
+pub fn e5m2_to_f32(b: u8) -> f32 {
+    let sign = if b & 0x80 != 0 { -1.0f32 } else { 1.0f32 };
+    let exp = (b >> 2) & 0x1F;
+    let mant = (b & 0x03) as f32;
+    if exp == 0x1F {
+        if mant == 0.0 {
+            return sign * f32::INFINITY;
+        }
+        return f32::NAN;
+    }
+    if exp == 0 {
+        // subnormal: mant/4 * 2^(1-bias), bias=15 -> 2^-14
+        return sign * (mant / 4.0) * 2f32.powi(-14);
+    }
+    // normal: (1 + mant/4) * 2^(exp-bias)
+    sign * (1.0 + mant / 4.0) * 2f32.powi(exp as i32 - 15)
 }
 
 #[cfg(test)]
@@ -208,5 +252,29 @@ mod tests {
     #[should_panic(expected = "scale_inv len")]
     fn wrong_scale_length_panics_loudly() {
         dequant_block128(&[1.0, 2.0, 3.0, 4.0], &[1.0, 2.0], 2, 2, 1);
+    }
+
+    /// Spot-checks the same edge cases `checkpoint::safetensors`'s own
+    /// `e4m3fn_decode_known_values` test pins for E4M3, for E5M2's
+    /// (different) layout - the two formats disagree on all of these (E5M2
+    /// has real infinities, a different max finite value, a different
+    /// smallest-normal/subnormal), which is the whole point of them being
+    /// separate `DType` tiers, not one decode with two labels.
+    #[test]
+    fn e5m2_decode_known_values() {
+        assert_eq!(e5m2_to_f32(0x00), 0.0);
+        assert!(e5m2_to_f32(0x00).is_sign_positive());
+        assert_eq!(e5m2_to_f32(0x80), -0.0);
+        assert!(e5m2_to_f32(0x80).is_sign_negative());
+        assert_eq!(e5m2_to_f32(0x3C), 1.0); // exp=15(bias 0), mant=0
+        assert_eq!(e5m2_to_f32(0xBC), -1.0);
+        assert_eq!(e5m2_to_f32(0x04), 2f32.powi(-14)); // smallest normal
+        assert_eq!(e5m2_to_f32(0x01), 2f32.powi(-16)); // smallest subnormal
+        assert_eq!(e5m2_to_f32(0x7B), 57344.0); // largest finite (exp=30,mant=3 -> 1.75*2^15)
+        assert_eq!(e5m2_to_f32(0x7C), f32::INFINITY); // E5M2 HAS infinities, unlike E4M3FN
+        assert_eq!(e5m2_to_f32(0xFC), f32::NEG_INFINITY);
+        assert!(e5m2_to_f32(0x7D).is_nan());
+        assert!(e5m2_to_f32(0x7F).is_nan());
+        assert!(e5m2_to_f32(0xFF).is_nan());
     }
 }
