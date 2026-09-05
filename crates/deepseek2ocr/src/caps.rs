@@ -87,23 +87,54 @@ pub const DIR_VAR: &str = "BRAIN_DEEPSEEK_OCR_DIR";
 /// The instruction the reference model ships with, and the one
 /// `tests/prompt_real.rs` pinned against the real tokenizer. Used when a request
 /// carries neither `messages` nor `prompt`.
+///
+/// The leading [`crate::prompt::GROUNDING`] marker is **semantically
+/// load-bearing, not decoration**: it is what switches the model into
+/// grounding mode, where the decoded text carries `<|ref|>`/`<|det|>` spans
+/// pairing each piece of recognised text with its bounding box on the page.
+/// Dropping it does not merely tidy the string up - it turns that output off,
+/// which is why this default keeps it despite being a reserved token a person
+/// should never have to type. A request that wants plain markdown with no box
+/// spans passes its own `prompt` without the marker; see the `prompt` param's
+/// own help.
 pub const DEFAULT_INSTRUCTION: &str = "<|grounding|>Convert the document to markdown.";
 
 /// Built context length: the 273-row image block plus BOS plus a real
 /// instruction plus room to generate. A fixed, documented budget - not the
-/// checkpoint's 8192 architectural ceiling - every extra row costs a
-/// `[seq, 129280]` logit slab, and this model has no KV cache to amortise it.
+/// checkpoint's 8192 architectural ceiling - because every extra row costs a
+/// `[seq, 129280]` logit slab at build time. (This used to add "and this
+/// model has no KV cache to amortise it"; that has been false since Phase 8's
+/// [`deepseek2::DeepseekV2::generate_greedy_kv`] - the reason the budget is
+/// fixed is the per-row build cost, not a missing cache.)
 /// (`qwen3vl::caps` used a fixed budget here too until it moved to
 /// `$BRAIN_QWEN3VL_CTX` clamped to the checkpoint's declared
 /// `max_position_embeddings`, viable there because that decode path DOES
 /// have a KV cache to amortise the extra rows against.)
 pub const SEQ_LEN: u32 = 512;
 
-/// Default generated-token budget. Deliberately small: each token is one FULL
-/// recompute of the sequence through 12 MoE layers - **tens of seconds
-/// measured** on 22 CPU cores at the served context, so even this small default
-/// is minutes of generation.
-pub const DEFAULT_MAX_NEW: i64 = 32;
+/// Default generated-token budget.
+///
+/// **This was 32, for a reason that no longer holds.** That default came from
+/// the pre-KV-cache decoder, where every generated token was one FULL
+/// recompute of the grown sequence through 12 MoE layers - ~22 s per extra
+/// token measured, so `--max_new 32` was roughly twelve minutes of pure
+/// decode. Phase 8 replaced that loop with [`deepseek2::DeepseekV2::
+/// generate_greedy_kv`], a real KV cache: the prompt pays one batched
+/// forward and every token after it is one `O(1)` incremental step. Decode
+/// stopped being the dominant cost of a page at all (model construction and
+/// the vision encoder are), and a 32-token ceiling stopped buying anything
+/// while still truncating "convert the document to markdown" mid-sentence.
+///
+/// 128 is not a guess either: it is the budget a real 50-page document sweep
+/// ran at, calibrated by two real requests rather than picked. It produced
+/// real multi-sentence markdown (414 characters measured), and the served
+/// per-page decode measured 40.1-69.7 s (median 61.9 s) for prefill plus up
+/// to 128 KV-cached steps.
+///
+/// It is also comfortably under this model's hard ceiling: [`SEQ_LEN`] is 512
+/// and the 273-row image block plus BOS plus the instruction is ~283 rows, so
+/// `max_new` cannot exceed ~229 here whatever a caller asks for.
+pub const DEFAULT_MAX_NEW: i64 = 128;
 
 /// `$BRAIN_DEEPSEEK_OCR_DIR`, or empty.
 fn default_dir() -> String {
@@ -117,7 +148,16 @@ pub fn generate_spec() -> ActionSpec {
     )
     .streaming()
     .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
-    .param(ParamSpec::new("prompt", ParamType::Str, "a raw instruction (alternative to messages)").default(json!(DEFAULT_INSTRUCTION)))
+    .param(
+        ParamSpec::new(
+            "prompt",
+            ParamType::Str,
+            "what to do with the page, in plain English (alternative to messages). The default's leading <|grounding|> \
+             marker is not decoration: it turns on grounding mode, where the output pairs each piece of recognised text \
+             with its bounding box. Delete it for plain markdown with no boxes.",
+        )
+        .default(json!(DEFAULT_INSTRUCTION)),
+    )
     .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(DEFAULT_MAX_NEW)))
     .param(
         ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY holding both DeepSeek-OCR GGUFs (mmproj + LM)")
